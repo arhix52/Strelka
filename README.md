@@ -2,7 +2,6 @@
 
 ## Project Dependencies
 
-- Vulkan  - https://vulkan.lunarg.com/   *implicit*
 - glfw    - https://www.glfw.org/     *dll*
 - slang      - https://github.com/shader-slang/slang *dll*
 - cxxopts   - https://github.com/jarro2783/cxxopts  *header*
@@ -13,8 +12,6 @@
 - tinygltf    - https://github.com/syoyo/tinygltf *submodule*
 - tol - https://github.com/tinyobjloader/tinyobjloader *submodule*
 - doctest      - https://github.com/onqtam/doctest *submodule*
-
-## OSX Guide
 
 #### Installation
 Follow setup guide https://vulkan-tutorial.com/Development_environment
