@@ -1,0 +1,9 @@
+build/
+*.exe
+.vs
+.idea/s
+.DS_Store
+misc/
+external/mdl-sdk
+data/test_data
+shaders/newPT.hlsl
