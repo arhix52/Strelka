@@ -5,26 +5,12 @@
     "version": "0.2.0",
     "configurations": [ 
         {
-            "name": "CUDA C++: Launch",
-            "type": "cuda-gdb",
-            "request": "launch",
-            "program": "${command:cmake.launchTargetPath}",
-            "args": ["-s", "C:/work/strelka_test1.usda"],
-            "stopAtEntry": false,
-            // "cwd": "${fileDirname}",
-            "cwd": "${workspaceFolder}/build/",
-            "environment": [],
-            "console": "externalTerminal"
-        },
-        {
             "name": "(Windows) Launch",
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${command:cmake.launchTargetPath}",
             // "args": ["-s", "C:/work/basicCurves1.usda"],
             // "args": ["-s", "C:/work/blender_hair/einar_hair.usd"],
-            // "args": ["-s", "C:/work/samples/Collected_amanda_hair_curves_long/amanda_hair_curves_long.usd"],
-            // "args": ["-s", "C:/work/samples/Collected_gdaviet_amanda_lookdev_haircolor_and_sim_v01/gdaviet_amanda_lookdev_haircolor_and_sim_v01.usda"],
             // "args": ["-s", "C:/work/ball-in-grass.usda"],
             // "args": ["-s", "C:/work/senna2.usda"],
             // "args": ["-s", "C:/work/mustang2.usda"],
