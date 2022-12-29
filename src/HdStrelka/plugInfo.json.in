@@ -1,0 +1,30 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "HdStrelkaRendererPlugin": {
+                        "bases": [
+                            "HdRendererPlugin"
+                        ],
+                        "displayName": "Strelka",
+                        "priority": 99
+                    },
+                    "HdStrelkaMdlDiscoveryPlugin": {
+                        "bases": ["NdrDiscoveryPlugin"],
+                        "displayName": "MDL Discovery"
+                    },
+                    "HdStrelkaMdlParserPlugin": {
+                        "bases": ["NdrParserPlugin"],
+                        "displayName": "MDL Node Parser"
+                    }
+                }
+            },
+            "LibraryPath": "../$<TARGET_FILE_NAME:HdStrelka>",
+            "Name": "HdStrelka",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

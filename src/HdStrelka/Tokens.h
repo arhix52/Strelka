@@ -1,0 +1,37 @@
+#pragma once
+
+#include <pxr/base/tf/staticTokens.h>
+
+PXR_NAMESPACE_OPEN_SCOPE
+
+#define HD_STRELKA_SETTINGS_TOKENS \
+    ((spp, "spp"))((max_bounces, "max-bounces"))
+
+// mtlx node identifier is given by usdMtlx.
+#define HD_STRELKA_NODE_IDENTIFIER_TOKENS \
+    (mtlx)(mdl)
+
+#define HD_STRELKA_SOURCE_TYPE_TOKENS \
+    (mtlx)(mdl)
+
+#define HD_STRELKA_DISCOVERY_TYPE_TOKENS \
+    (mtlx)(mdl)
+
+#define HD_STRELKA_RENDER_CONTEXT_TOKENS \
+    (mtlx)(mdl)
+
+#define HD_STRELKA_NODE_CONTEXT_TOKENS \
+    (mtlx)(mdl)
+
+#define HD_STRELKA_NODE_METADATA_TOKENS \
+    (subIdentifier)
+
+TF_DECLARE_PUBLIC_TOKENS(HdStrelkaSettingsTokens, HD_STRELKA_SETTINGS_TOKENS);
+TF_DECLARE_PUBLIC_TOKENS(HdStrelkaNodeIdentifiers, HD_STRELKA_NODE_IDENTIFIER_TOKENS);
+TF_DECLARE_PUBLIC_TOKENS(HdStrelkaSourceTypes, HD_STRELKA_SOURCE_TYPE_TOKENS);
+TF_DECLARE_PUBLIC_TOKENS(HdStrelkaDiscoveryTypes, HD_STRELKA_DISCOVERY_TYPE_TOKENS);
+TF_DECLARE_PUBLIC_TOKENS(HdStrelkaRenderContexts, HD_STRELKA_RENDER_CONTEXT_TOKENS);
+TF_DECLARE_PUBLIC_TOKENS(HdStrelkaNodeContexts, HD_STRELKA_NODE_CONTEXT_TOKENS);
+TF_DECLARE_PUBLIC_TOKENS(HdStrelkaNodeMetadata, HD_STRELKA_NODE_METADATA_TOKENS);
+
+PXR_NAMESPACE_CLOSE_SCOPE
