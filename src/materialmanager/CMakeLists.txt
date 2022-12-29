@@ -64,6 +64,11 @@ add_custom_command(TARGET ${MATERIALLIB_NAME} PRE_BUILD
         "${OUTPUT_DIRECTORY}"
         )
 
+add_custom_command(TARGET ${MATERIALLIB_NAME} PRE_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${OUTPUT_DIRECTORY}/shaders"
+        )
+
 set(_CLANG_FLAGS ${_CLANG_FLAGS} --cuda-path=${CUDA_TOOLKIT_ROOT_DIR})
 
 # generate bytecode for closest hit radiance shader
@@ -90,25 +95,9 @@ add_custom_command(TARGET ${MATERIALLIB_NAME} PRE_BUILD
             -emit-llvm -c -O3 -ffast-math -fcuda-flush-denormals-to-zero -fno-vectorize
             --cuda-gpu-arch=sm_75
             --cuda-device-only ${ROOT_HOME}/src/render/OptixRender_radiance_closest_hit.cu
-            -o OptixRender_radiance_closest_hit.bc
-            -MD -MT OptixRender_radiance_closest_hit.bc
-            -MP -MF OptixRender_radiance_closest_hit.d
-        # COMMAND ${CMAKE_COMMAND} -E echo "Compile OptixRender_curve_radiance_closest_hit bytecode using clang..."
-        # COMMAND ${clang_PATH}
-        #     -I ${OPTIX7_DIR}/include 
-        #     -I ${ROOT_HOME}/external/mdl-sdk/include
-        #     -I ${ROOT_HOME}/src/render/
-        #     -I ${ROOT_HOME}/include/render
-        #     -I ${ROOT_HOME}/external/glm
-        #     -I ${ROOT_HOME}
-        #     ${_CLANG_FLAGS}
-        #     -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
-        #     -emit-llvm -c -O3 -ffast-math -fcuda-flush-denormals-to-zero -fno-vectorize
-        #     --cuda-gpu-arch=sm_75
-        #     --cuda-device-only ${ROOT_HOME}/src/render/OptixRender_curve_radiance_closest_hit.cu
-        #     -o OptixRender_radiance_closest_hit.bc
-        #     -MD -MT OptixRender_curve_radiance_closest_hit.bc
-        #     -MP -MF OptixRender_curve_radiance_closest_hit.d
+            -o ${OUTPUT_DIRECTORY}/shaders/OptixRender_radiance_closest_hit.bc
+            -MD -MT ${OUTPUT_DIRECTORY}/shaders/OptixRender_radiance_closest_hit.bc
+            -MP -MF ${OUTPUT_DIRECTORY}/shaders/OptixRender_radiance_closest_hit.d
         WORKING_DIRECTORY
             ${CMAKE_CFG_INTDIR}
         DEPENDS

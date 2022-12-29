@@ -21,6 +21,15 @@ set_target_properties(
     CXX_EXTENSIONS OFF
 )
 
+add_custom_command(TARGET ${HD_RUNNER_NAME} PRE_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${OUTPUT_DIRECTORY}/data/materials/mtlx"
+        )
+add_custom_command(TARGET ${HD_RUNNER_NAME} PRE_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${OUTPUT_DIRECTORY}/data/materials/mdl"
+        )
+
 # target_include_directories(${PROJECT_NAME} PUBLIC ${Vulkan_INCLUDE_DIR})
 target_include_directories(${HD_RUNNER_NAME} PUBLIC ${ROOT_HOME}/external/glfw/include)
 target_include_directories(${HD_RUNNER_NAME} PUBLIC ${ROOT_HOME}/external/cxxopts/include)

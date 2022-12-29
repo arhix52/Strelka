@@ -14,12 +14,14 @@
 #include <vector_types.h>
 #include <vector_functions.h>
 
+#include <filesystem>
 #include <array>
 #include <fstream>
 
 #include "Camera.h"
 
 using namespace oka;
+namespace fs = std::filesystem;
 
 template <typename T>
 struct SbtRecord
@@ -790,11 +792,12 @@ void OptiXRender::init()
         assert(0);
     }
     const std::string usdMdlLibPath = std::string(envUSDPath) + "\\libraries\\mdl\\";
+    const std::string cwdPath = fs::current_path().string();
+    const std::string mtlxPath = cwdPath + "\\data\\materials\\mtlx";
+    const std::string mdlPath = cwdPath + "\\data\\materials\\mdl";
 
-    const char* paths[] = { usdMdlLibPath.c_str(), "./data/materials/mtlx/",
-                            "C:\\work\\StrelkaOptix\\build\\data\\materials\\mtlx\\",
-                            "C:\\work\\Strelka\\misc\\test_data\\mdl" };
-    bool res = mMaterialManager.addMdlSearchPath(paths, 4);
+    const char* paths[] = { usdMdlLibPath.c_str(), mtlxPath.c_str(), mdlPath.c_str() };
+    bool res = mMaterialManager.addMdlSearchPath(paths, sizeof(paths) / sizeof(char*));
 
     if (!res)
     {

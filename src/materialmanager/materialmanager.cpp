@@ -217,9 +217,10 @@ public:
         mCodeGen->init(*mRuntime);
         std::vector<char> data;
         {
-            std::ifstream file(
-                "C:\\work\\StrelkaOptix\\build\\src\\materialmanager\\Debug\\OptixRender_radiance_closest_hit.bc",
-                std::ios::in | std::ios::binary);
+            const std::string cwdPath = fs::current_path().string();
+            const std::string precompiledPath = cwdPath + "\\shaders\\OptixRender_radiance_closest_hit.bc";
+
+            std::ifstream file(precompiledPath.c_str(), std::ios::in | std::ios::binary);
 
             if (!file.is_open())
             {
