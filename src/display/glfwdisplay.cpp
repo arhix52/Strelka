@@ -109,8 +109,6 @@ GLuint createGLProgram(const std::string& vert_source, const std::string& frag_s
 GLint getGLUniformLocation(GLuint program, const std::string& name)
 {
     GLint loc = glGetUniformLocation(program, name.c_str());
-    // SUTIL_ASSERT_MSG(loc != -1, "Failed to get uniform loc for '" + name +
-    // "'");
     return loc;
 }
 

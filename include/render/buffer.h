@@ -206,7 +206,7 @@ CUDAOutputBuffer<PIXEL_FORMAT>::CUDAOutputBuffer(CUDAOutputBufferType type, int3
 #if 0
 	if (width < 1 || height < 1)
 	{
-		throw sutil::Exception("CUDAOutputBuffer dimensions must be at least 1 in both x and y.");
+		// throw sutil::Exception("CUDAOutputBuffer dimensions must be at least 1 in both x and y.");
 	}
 #else
     ensureMinimumSize(width, height);
