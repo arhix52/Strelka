@@ -40,7 +40,7 @@ list(APPEND generated_files ${generated_files2})
 
 # set_source_files_properties(${RENDER_SOURCES} PROPERTIES LANGUAGE CUDA)
 
-add_library(${RENDERLIB_NAME} OBJECT 
+add_library(${RENDERLIB_NAME} STATIC 
     ${RENDER_SOURCES}
     ${generated_files}
 )
@@ -52,6 +52,16 @@ target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/external/glm)
 
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${OptiX_INCLUDE})
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${CUDA_INCLUDE_DIRS})
+
+add_custom_command(TARGET ${RENDERLIB_NAME} PRE_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${OUTPUT_DIRECTORY}/optix"
+        )
+add_custom_command(TARGET ${RENDERLIB_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+        ${generated_files}
+        "${OUTPUT_DIRECTORY}/optix"
+        )
 
 target_link_libraries(${RENDERLIB_NAME} PUBLIC 
     ${CUDA_LIBRARIES}

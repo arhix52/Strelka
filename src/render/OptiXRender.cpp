@@ -395,8 +395,10 @@ void OptiXRender::createModule()
 
         size_t inputSize = 0;
         std::string optixSource;
-        readSourceFile(
-            optixSource, "C:/work/StrelkaOptix/build/src/render/Debug/render_generated_OptixRender.cu.optixir");
+        const std::string cwdPath = fs::current_path().string();
+        const std::string precompiledOptixPath = cwdPath + "\\optix\\render_generated_OptixRender.cu.optixir";
+
+        readSourceFile(optixSource, precompiledOptixPath.c_str());
         const char* input = optixSource.c_str();
         inputSize = optixSource.size();
         char log[2048]; // For error reporting from OptiX creation functions
