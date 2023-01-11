@@ -46,6 +46,9 @@ struct Params
 
     OptixTraversableHandle handle;
     SceneData scene;
+
+    bool enableAccumulation;
+    uint32_t debug;
 };
 
 struct PerRayData

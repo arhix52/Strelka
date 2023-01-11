@@ -4,8 +4,19 @@ set(DISPLAY_SOURCES
     ${ROOT_HOME}/include/display/glfwdisplay.h
     ${ROOT_HOME}/src/display/glfwdisplay.cpp
     )
+
+set(IMGUI_SOURCES
+        # Imgui
+        ${ROOT_HOME}/external/imgui/src/imgui.cpp
+        ${ROOT_HOME}/external/imgui/src/imgui_impl_opengl3.cpp
+        ${ROOT_HOME}/external/imgui/src/imgui_impl_glfw.cpp
+        ${ROOT_HOME}/external/imgui/src/imgui_draw.cpp
+        ${ROOT_HOME}/external/imgui/src/imgui_widgets.cpp
+        ${ROOT_HOME}/external/imgui/src/imgui_tables.cpp
+        )
 set(DISPLAYLIB_NAME display)
-add_library(${DISPLAYLIB_NAME} STATIC ${DISPLAY_SOURCES})
+add_library(${DISPLAYLIB_NAME} STATIC ${DISPLAY_SOURCES} ${IMGUI_SOURCES})
+target_include_directories(${DISPLAYLIB_NAME} PUBLIC  ${ROOT_HOME}/external/imgui/include)
 target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/include/)
 target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/include/display)
 

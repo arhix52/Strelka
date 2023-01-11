@@ -760,7 +760,7 @@ void OptiXRender::launch(CUDAOutputBuffer<uchar4>& output_buffer)
     params.samples_per_launch = 1; // TODO: get from settings
     params.handle = mState.ias_handle;
     params.cam_eye = make_float3(cam.eye().x, cam.eye().y, cam.eye().z);
-    params.max_depth = 8;
+    params.max_depth = settings.getAs<uint32_t>("render/pt/depth");
 
     params.viewToWorld = glm::inverse(camera.matrices.view);
     params.clipToView = camera.matrices.invPerspective;
@@ -771,6 +771,9 @@ void OptiXRender::launch(CUDAOutputBuffer<uchar4>& output_buffer)
     params.cam_u = make_float3(cam_u.x, cam_u.y, cam_u.z);
     params.cam_v = make_float3(cam_v.x, cam_v.y, cam_v.z);
     params.cam_w = make_float3(cam_w.x, cam_w.y, cam_w.z);
+
+    params.enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
+    params.debug = settings.getAs<uint32_t>("render/pt/debug");
 
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(mState.d_params), &params, sizeof(params), cudaMemcpyHostToDevice));
 
