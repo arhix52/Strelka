@@ -1,5 +1,10 @@
 #include "glfwdisplay.h"
 
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
+#define GL_SILENCE_DEPRECATION
+
 using namespace oka;
 
 const std::string glfwdisplay::s_vert_source = R"(
