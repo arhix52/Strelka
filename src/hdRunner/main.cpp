@@ -493,8 +493,12 @@ int main(int argc, const char* argv[])
     // config. options
     cxxopts::Options options("Strelka -s <USD Scene path>", "commands");
 
-    options.add_options()("s, scene", "scene path", cxxopts::value<std::string>()->default_value(""))(
-        "i, iteration", "Iteration to capture", cxxopts::value<int32_t>()->default_value("-1"))("h, help", "Print usage");
+    options.add_options()
+        ("s, scene", "scene path", cxxopts::value<std::string>()->default_value(""))
+        ("i, iteration", "Iteration to capture", cxxopts::value<int32_t>()->default_value("-1"))
+         ("h, help", "Print usage")
+        ("t, spp_total", "spp total", cxxopts::value<int32_t>()->default_value("64"))
+        ("f, spp_subframe", "spp subframe", cxxopts::value<int32_t>()->default_value("1"));
 
     options.parse_positional({ "s" });
     auto result = options.parse(argc, argv);
@@ -540,7 +544,8 @@ int main(int argc, const char* argv[])
     ctx->mSettingsManager->setAs<uint32_t>("render/width", imageWidth);
     ctx->mSettingsManager->setAs<uint32_t>("render/height", imageHeight);
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/depth", 6);
-    ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", 1);
+    ctx->mSettingsManager->setAs<uint32_t>("render/pt/sppTotal", result["t"].as<int32_t>());
+    ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", result["f"].as<int32_t>());
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/iteration", 0);
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/stratifiedSamplingType", 0); // 0 - none, 1 - random, 2 -
                                                                                    // stratified sampling, 3 - optimized
@@ -660,9 +665,11 @@ int main(int argc, const char* argv[])
     display.setResizeHandler(&surfaceController);
 
     uint64_t frameCount = 0;
-
+    oka::ImageBuffer outputImageCopy;
+    uint32_t sppTotal = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
     bool needCopyBuffer = false;
     int32_t waitFramesForScreenshot = -1;
+    uint32_t iteration = 0;
 
     while (!display.windowShouldClose())
     {
@@ -690,12 +697,16 @@ int main(int argc, const char* argv[])
         static auto prevTime = std::chrono::high_resolution_clock::now();
         auto currentTime = std::chrono::high_resolution_clock::now();
         const double deltaTime = std::chrono::duration<double, std::milli>(currentTime - prevTime).count() / 1000.0;
+
+        auto tmpCam = cameraController.getCamera();
+        auto transform = tmpCam.GetTransform();
+
         cameraController.update(deltaTime);
         prevTime = currentTime;
 
         cam.SetFromCamera(cameraController.getCamera(), 0.0);
 
-        uint32_t iteration = ctx->mSettingsManager->getAs<uint32_t>("render/pt/iteration");
+       //  uint32_t iteration = ctx->mSettingsManager->getAs<uint32_t>("render/pt/iteration");
         if (iteration == iterationToCapture)
         {
             ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
@@ -739,17 +750,30 @@ int main(int argc, const char* argv[])
         //         }
 
         display.onBeginFrame();
-        engine.Execute(renderIndex, &tasks); // main path tracing rendering in fixed render resolution
-        oka::CUDAOutputBuffer<uchar4>* outputBuffer =
-            surfaceController.getRenderBuffer(versionId)->GetResource(false).UncheckedGet<oka::CUDAOutputBuffer<uchar4>*>();
-        oka::ImageBuffer outputImage;
-        outputImage.data = outputBuffer->getHostPointer();
-        outputImage.dataSize = outputBuffer->getHostDataSize();
-        outputImage.height = outputBuffer->height();
-        outputImage.width = outputBuffer->width();
-        outputImage.pixel_format = oka::BufferImageFormat::UNSIGNED_BYTE4;
+        if (cameraController.getCamera().GetTransform() != transform ||
+            sppTotal != ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal") )
+        {
+            std::cout << "here" << std::endl;
+            iteration = 0;
+            sppTotal = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
+        }
+        if (iteration < sppTotal)
+        {
+            engine.Execute(renderIndex, &tasks); // main path tracing rendering in fixed render resolution
+            oka::CUDAOutputBuffer<uchar4>* outputBuffer = surfaceController.getRenderBuffer(versionId)
+                                                              ->GetResource(false)
+                                                              .UncheckedGet<oka::CUDAOutputBuffer<uchar4>*>();
+            oka::ImageBuffer outputImage;
+            outputImage.data = outputBuffer->getHostPointer();
+            outputImage.dataSize = outputBuffer->getHostDataSize();
+            outputImage.height = outputBuffer->height();
+            outputImage.width = outputBuffer->width();
+            outputImage.pixel_format = oka::BufferImageFormat::UNSIGNED_BYTE4;
+            outputImageCopy = outputImage;
+            ++iteration;
+        }
 
-        display.drawFrame(outputImage); // blit rendered image to swapchain
+        display.drawFrame(outputImageCopy); // blit rendered image to swapchain
         display.drawUI(); // render ui to swapchain image in window resolution
         display.onEndFrame(); // submit command buffer and present
 
