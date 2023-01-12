@@ -139,21 +139,32 @@ extern "C" __global__ void __raygen__rg()
 
             ++depth;
             prd.depth = depth;
+
+            if (params.debug == 1)
+                break;
         }
         result = prd.radiance;
     }
 
     const unsigned int image_index = launch_index.y * params.image_width + launch_index.x;
-    float3 accum_color = result / static_cast<float>(params.samples_per_launch);
 
-    if (params.subframe_index > 0)
+    if (params.enableAccumulation && params.debug == 0)
     {
-        const float a = 1.0f / static_cast<float>(params.subframe_index + 1);
-        const float3 accum_color_prev = make_float3(params.accum[image_index]);
-        accum_color = lerp(accum_color_prev, accum_color, a);
+        float3 accum_color = result / static_cast<float>(params.samples_per_launch);
+
+        if (params.subframe_index > 0)
+        {
+            const float a = 1.0f / static_cast<float>(params.subframe_index + 1);
+            const float3 accum_color_prev = make_float3(params.accum[image_index]);
+            accum_color = lerp(accum_color_prev, accum_color, a);
+        }
+        params.accum[image_index] = make_float4(accum_color, 1.0f);
+        params.image[image_index] = make_color(accum_color);
     }
-    params.accum[image_index] = make_float4(accum_color, 1.0f);
-    params.image[image_index] = make_color(accum_color);
+    else
+    {
+        params.image[image_index] = make_color(result);
+    }
 }
 
 extern "C" __global__ void __miss__ms()

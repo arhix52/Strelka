@@ -1,12 +1,7 @@
-#include <glad/gl.h>
+#include <render/buffer.h>
+#include "render/common.h"
 
 #include <GLFW/glfw3.h>
-
-#include <render/buffer.h>
-
-#include <assert.h>
-#include <sstream>
-#include <iostream>
 
 namespace oka
 {
@@ -47,6 +42,8 @@ private:
     InputHandler* mInputHandler = nullptr;
     ResizeHandler* mResizeHandler = nullptr;
 
+    oka::SharedContext* mCtx = nullptr;
+
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
     static void keyCallback(
         GLFWwindow* window, int key, [[maybe_unused]] int scancode, int action, [[maybe_unused]] int mods);
@@ -59,7 +56,7 @@ public:
     virtual ~glfwdisplay();
 
 public:
-    void init(int width, int height);
+    void init(int width, int height, oka::SharedContext* ctx);
     void destroy();
 
     void setWindowTitle(const char* title);

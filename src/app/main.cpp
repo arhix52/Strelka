@@ -11,7 +11,7 @@ int main()
     uint32_t imageWidth = 800;
     uint32_t imageHeight = 600;
 
-    display.init(imageWidth, imageHeight);
+    display.init(imageWidth, imageHeight, nullptr);
 
     oka::CUDAOutputBuffer<uchar4> outputBuffer(oka::CUDAOutputBufferType::CUDA_DEVICE, imageWidth, imageHeight);
 

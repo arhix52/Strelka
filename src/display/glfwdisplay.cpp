@@ -1,5 +1,10 @@
 #include "glfwdisplay.h"
 
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
+#define GL_SILENCE_DEPRECATION
+
 using namespace oka;
 
 const std::string glfwdisplay::s_vert_source = R"(
@@ -121,12 +126,14 @@ glfwdisplay::~glfwdisplay()
 {
 }
 
-void glfwdisplay::init(int width, int height)
+void glfwdisplay::init(int width, int height, oka::SharedContext* ctx)
 {
     mWindowWidth = width;
     mWindowHeight = height;
+    mCtx = ctx;
 
     glfwInit();
+    const char* glsl_version = "#version 130";
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
@@ -174,6 +181,20 @@ void glfwdisplay::init(int width, int height)
     GL_CHECK(glBufferData(GL_ARRAY_BUFFER, sizeof(g_quad_vertex_buffer_data), g_quad_vertex_buffer_data, GL_STATIC_DRAW));
 
     // GL_CHECK_ERRORS();
+    // Setup Dear ImGui context
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    //io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+    //io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+
+    // Setup Dear ImGui style
+    ImGui::StyleColorsDark();
+    //ImGui::StyleColorsLight();
+
+    // Setup Platform/Renderer backends
+    ImGui_ImplGlfw_InitForOpenGL(mWindow, true);
+    ImGui_ImplOpenGL3_Init(glsl_version);
 }
 
 void glfwdisplay::setWindowTitle(const char* title)
@@ -449,7 +470,6 @@ void glfwdisplay::drawFrame(ImageBuffer& result)
     GL_CHECK(glBindBuffer(GL_ARRAY_BUFFER, 0));
 
     display(result.width, result.height, framebuf_res_x, framebuf_res_y, m_dislpayPbo);
-    glfwSwapBuffers(mWindow);
 }
 
 void glfwdisplay::destroy()
@@ -459,10 +479,137 @@ void glfwdisplay::destroy()
 void glfwdisplay::onBeginFrame()
 {
 }
+
 void glfwdisplay::onEndFrame()
 {
+    glfwSwapBuffers(mWindow);
 }
 
 void glfwdisplay::drawUI()
 {
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    ImGuiIO& io = ImGui::GetIO();
+
+    const char* debugItems[] = { "None", "Normals" };
+    static int currentDebugItemId = 0;
+
+        /*
+        bool openFD = false;
+        static uint32_t showPropertiesId = -1;
+        static uint32_t lightId = -1;
+        static bool isLight = false;
+        static bool openInspector = false;
+
+        const char* tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
+        static int currentTonemapItemId = 1;
+
+        const char* stratifiedSamplingItems[] = { "None", "Random", "Stratified", "Optimized" };
+        static int currentSamplingItemId = 1;
+        */
+
+    ImGui::Begin("Menu:"); // begin window
+
+    if (ImGui::BeginCombo("Debug view", debugItems[currentDebugItemId]))
+    {
+        for (int n = 0; n < IM_ARRAYSIZE(debugItems); n++)
+        {
+            bool is_selected = (currentDebugItemId == n);
+            if (ImGui::Selectable(debugItems[n], is_selected))
+            {
+                currentDebugItemId = n;
+            }
+            if (is_selected)
+            {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    mCtx->mSettingsManager->setAs<uint32_t>("render/pt/debug", currentDebugItemId);
+
+    if (ImGui::TreeNode("Path Tracer"))
+    {
+        uint32_t maxDepth = mCtx->mSettingsManager->getAs<uint32_t>("render/pt/depth");
+        ImGui::SliderInt("Max Depth", (int*)&maxDepth, 1, 16);
+        mCtx->mSettingsManager->setAs<uint32_t>("render/pt/depth", maxDepth);
+
+        bool enableAccumulation = mCtx->mSettingsManager->getAs<bool>("render/pt/enableAcc");
+        ImGui::Checkbox("Enable Path Tracer Acc", &enableAccumulation);
+        mCtx->mSettingsManager->setAs<bool>("render/pt/enableAcc", enableAccumulation);
+            /*
+            if (ImGui::BeginCombo("Stratified Sampling", stratifiedSamplingItems[currentSamplingItemId]))
+            {
+                for (int n = 0; n < IM_ARRAYSIZE(stratifiedSamplingItems); n++)
+                {
+                    bool is_selected = (currentSamplingItemId == n);
+                    if (ImGui::Selectable(stratifiedSamplingItems[n], is_selected))
+                    {
+                        currentSamplingItemId = n;
+                    }
+                    if (is_selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            mCtx->mSettingsManager->setAs<uint32_t>("render/pt/stratifiedSamplingType", currentSamplingItemId);
+             */
+            ImGui::TreePop();
+    }
+        /*
+        if (ImGui::BeginCombo("Tonemap", tonemapItems[currentTonemapItemId]))
+        {
+            for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
+            {
+                bool is_selected = (currentTonemapItemId == n);
+                if (ImGui::Selectable(tonemapItems[n], is_selected))
+                {
+                    currentTonemapItemId = n;
+                }
+                if (is_selected)
+                {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        mCtx->mSettingsManager->setAs<bool>("render/pt/enableTonemap", currentTonemapItemId != 0 ? true : false);
+        mCtx->mSettingsManager->setAs<uint32_t>("render/pt/tonemapperType", currentTonemapItemId - 1);
+
+        bool enableUpscale = mCtx->mSettingsManager->getAs<bool>("render/pt/enableUpscale");
+        ImGui::Checkbox("Enable Upscale", &enableUpscale);
+        mCtx->mSettingsManager->setAs<bool>("render/pt/enableUpscale", enableUpscale);
+
+        float upscaleFactor = 0.0f;
+        if (enableUpscale)
+        {
+            upscaleFactor = 0.5f;
+        }
+        else
+        {
+            upscaleFactor = 1.0f;
+        }
+        mCtx->mSettingsManager->setAs<float>("render/pt/upscaleFactor", upscaleFactor);
+
+        if (ImGui::Button("Capture Screen"))
+        {
+            mCtx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
+        }
+
+        // bool isRecreate = ImGui::Button("Recreate BVH");
+        // renderConfig.recreateBVH = isRecreate ? true : false;
+        */
+
+    ImGui::End(); // end window
+
+    // Rendering
+    ImGui::Render();
+    int display_w, display_h;
+    glfwGetFramebufferSize(mWindow, &display_w, &display_h);
+    glViewport(0, 0, display_w, display_h);
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }

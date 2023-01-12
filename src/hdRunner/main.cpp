@@ -532,8 +532,6 @@ int main(int argc, const char* argv[])
     // Set up rendering context.
     uint32_t imageWidth = 1024;
     uint32_t imageHeight = 768;
-    oka::glfwdisplay display;
-    display.init(imageWidth, imageHeight);
 
     oka::SharedContext* ctx = new oka::SharedContext(); // &display.getSharedContext();
 
@@ -554,6 +552,9 @@ int main(int argc, const char* argv[])
     ctx->mSettingsManager->setAs<bool>("render/pt/enableAcc", true);
     ctx->mSettingsManager->setAs<bool>("render/pt/enableTonemap", true);
     ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", false);
+
+    oka::glfwdisplay display;
+    display.init(imageWidth, imageHeight, ctx);
 
     HdDriver driver;
     driver.name = _AppTokens->HdStrelkaDriver;
