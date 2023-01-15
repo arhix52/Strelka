@@ -568,6 +568,11 @@ void glfwdisplay::drawUI()
              */
             ImGui::TreePop();
     }
+
+    if (ImGui::Button("Capture Screen"))
+    {
+        mCtx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
+    }
         /*
         if (ImGui::BeginCombo("Tonemap", tonemapItems[currentTonemapItemId]))
         {
@@ -602,11 +607,6 @@ void glfwdisplay::drawUI()
             upscaleFactor = 1.0f;
         }
         mCtx->mSettingsManager->setAs<float>("render/pt/upscaleFactor", upscaleFactor);
-
-        if (ImGui::Button("Capture Screen"))
-        {
-            mCtx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
-        }
 
         // bool isRecreate = ImGui::Button("Recreate BVH");
         // renderConfig.recreateBVH = isRecreate ? true : false;
