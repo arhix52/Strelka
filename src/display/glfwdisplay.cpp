@@ -537,11 +537,11 @@ void glfwdisplay::drawUI()
         mCtx->mSettingsManager->setAs<uint32_t>("render/pt/depth", maxDepth);
 
         uint32_t sppTotal = mCtx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
-        ImGui::SliderInt("SPP Total", (int*)&sppTotal, 1, 1000);
+        ImGui::SliderInt("SPP Total", (int*)&sppTotal, 1, 10000);
         mCtx->mSettingsManager->setAs<uint32_t>("render/pt/sppTotal", sppTotal);
-        
+
         uint32_t sppSubframe = mCtx->mSettingsManager->getAs<uint32_t>("render/pt/spp");
-        ImGui::SliderInt("SPP Subframe", (int*)&sppSubframe, 1, 1000);
+        ImGui::SliderInt("SPP Subframe", (int*)&sppSubframe, 1, 32);
         mCtx->mSettingsManager->setAs<uint32_t>("render/pt/spp", sppSubframe);
 
         bool enableAccumulation = mCtx->mSettingsManager->getAs<bool>("render/pt/enableAcc");

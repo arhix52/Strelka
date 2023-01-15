@@ -753,10 +753,10 @@ int main(int argc, const char* argv[])
         if (cameraController.getCamera().GetTransform() != transform ||
             sppTotal != ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal") )
         {
-            std::cout << "here" << std::endl;
             iteration = 0;
             sppTotal = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
         }
+        // This can be moved to render itself
         if (iteration < sppTotal)
         {
             engine.Execute(renderIndex, &tasks); // main path tracing rendering in fixed render resolution
