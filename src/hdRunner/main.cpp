@@ -666,7 +666,9 @@ int main(int argc, const char* argv[])
 
     uint64_t frameCount = 0;
     oka::ImageBuffer outputImageCopy;
+    uint32_t frameSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp");
     uint32_t sppTotal = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
+    uint32_t leftSpp = sppTotal;
     bool needCopyBuffer = false;
     int32_t waitFramesForScreenshot = -1;
     uint32_t iteration = 0;
@@ -751,14 +753,25 @@ int main(int argc, const char* argv[])
 
         display.onBeginFrame();
         if (cameraController.getCamera().GetTransform() != transform ||
-            sppTotal != ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal") )
+            sppTotal != ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal") ||
+            frameSpp != ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp"))
         {
-            iteration = 0;
+            frameSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp");
             sppTotal = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
+            leftSpp = sppTotal;
         }
+
         // This can be moved to render itself
-        if (iteration < sppTotal)
+        if (leftSpp > 0)
         {
+            uint32_t savedFSpp = -1;
+            if (frameSpp > leftSpp)
+            {
+                savedFSpp = frameSpp;
+                ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", leftSpp);
+                frameSpp = leftSpp;
+            }
+
             engine.Execute(renderIndex, &tasks); // main path tracing rendering in fixed render resolution
             oka::CUDAOutputBuffer<uchar4>* outputBuffer = surfaceController.getRenderBuffer(versionId)
                                                               ->GetResource(false)
@@ -770,7 +783,14 @@ int main(int argc, const char* argv[])
             outputImage.width = outputBuffer->width();
             outputImage.pixel_format = oka::BufferImageFormat::UNSIGNED_BYTE4;
             outputImageCopy = outputImage;
-            ++iteration;
+
+            leftSpp -= frameSpp;
+
+            if (savedFSpp != -1)
+            {
+                frameSpp = savedFSpp;
+                ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", frameSpp);
+            }
         }
 
         display.drawFrame(outputImageCopy); // blit rendered image to swapchain
