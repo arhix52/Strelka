@@ -1,9 +1,11 @@
 build/
+build_xcode/
 *.exe
 .vs
 .idea/s
 .DS_Store
 misc/
 external/mdl-sdk
+external/metal-cpp*
 data/test_data
 shaders/newPT.hlsl
