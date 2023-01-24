@@ -127,6 +127,12 @@ void MetalRender::render(Buffer* output)
 
     MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
 
+    pComputeEncoder->useResource(_instanceAccelerationStructure, MTL::ResourceUsageRead);
+    for (int i = 0; i < _primitiveAccelerationStructures.size(); ++i)
+    {
+        pComputeEncoder->useResource(_primitiveAccelerationStructures[i], MTL::ResourceUsageRead);
+    }
+
     pComputeEncoder->setComputePipelineState(mRayTracingPSO);
     pComputeEncoder->setBuffer(_pUniformBuffer[_frame], 0, 0);
     pComputeEncoder->setBuffer(_instanceBuffer, 0, 1);
