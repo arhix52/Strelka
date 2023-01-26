@@ -137,8 +137,9 @@ void MetalRender::render(Buffer* output)
     pComputeEncoder->setBuffer(_pUniformBuffer[_frame], 0, 0);
     pComputeEncoder->setBuffer(_instanceBuffer, 0, 1);
     pComputeEncoder->setAccelerationStructure(_instanceAccelerationStructure, 2);
-    pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 3);
-    // pComputeEncoder->setTexture(mFramebufferTexture, 0);
+    pComputeEncoder->setBuffer(_pVertexDataBuffer, 0, 3);
+    pComputeEncoder->setBuffer(_pIndexBuffer, 0, 4);
+    pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 5);
 
     MTL::Size gridSize = MTL::Size(width, height, 1);
 
@@ -232,6 +233,8 @@ void MetalRender::buildBuffers()
 
 MTL::AccelerationStructure* MetalRender::createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor)
 {
+    NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
+
     // Query for the sizes needed to store and build the acceleration structure.
     MTL::AccelerationStructureSizes accelSizes = mDevice->accelerationStructureSizes(descriptor);
     // Allocate an acceleration structure large enough for this descriptor. This doesn't actually
@@ -298,6 +301,11 @@ MTL::AccelerationStructure* MetalRender::createAccelerationStructure(MTL::Accele
 
     // commandEncoder->release();
     // commandBuffer->release();
+    accelerationStructure->release();
+    scratchBuffer->release();
+    compactedSizeBuffer->release();
+
+    pPool->release();
 
     return compactedAccelerationStructure->retain();
 }
@@ -314,7 +322,7 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
     MetalRender::Mesh* result = new MetalRender::Mesh();
 
     MTL::AccelerationStructureTriangleGeometryDescriptor* geomDescriptor =
-        MTL::AccelerationStructureTriangleGeometryDescriptor::descriptor();
+        MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
 
     geomDescriptor->setVertexBuffer(_pVertexDataBuffer);
     geomDescriptor->setVertexBufferOffset(mesh.mVbOffset * sizeof(oka::Scene::Vertex));
@@ -327,15 +335,20 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
     const NS::Array* geomDescriptors = NS::Array::array((const NS::Object* const*)&geomDescriptor, 1UL);
 
     MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
-        MTL::PrimitiveAccelerationStructureDescriptor::descriptor();
+        MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init();
     primDescriptor->setGeometryDescriptors(geomDescriptors);
 
     result->mGas = createAccelerationStructure(primDescriptor);
+
+    primDescriptor->release();
+    geomDescriptor->release();
     return result;
 }
 
 void MetalRender::createAccelerationStructures()
 {
+    NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
+
     const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
     const std::vector<oka::Curve>& curves = mScene->getCurves();
     const std::vector<oka::Instance>& instances = mScene->getInstances();
@@ -358,7 +371,7 @@ void MetalRender::createAccelerationStructures()
     for (int i = 0; i < instances.size(); ++i)
     {
         const oka::Instance& curr = instances[i];
-        instanceDescriptors[i].accelerationStructureIndex = instances[i].mMeshId;
+        instanceDescriptors[i].accelerationStructureIndex = curr.mMeshId;
         instanceDescriptors[i].options = MTL::AccelerationStructureInstanceOptionOpaque;
         instanceDescriptors[i].intersectionFunctionTableOffset = 0;
         instanceDescriptors[i].mask = 1;
@@ -385,4 +398,5 @@ void MetalRender::createAccelerationStructures()
     accelDescriptor->setInstanceDescriptorBuffer(_instanceBuffer);
 
     _instanceAccelerationStructure = createAccelerationStructure(accelDescriptor);
+    pPool->release();
 }

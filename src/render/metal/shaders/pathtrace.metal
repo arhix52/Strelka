@@ -111,11 +111,12 @@ void generateCameraRay(uint2 pixelIndex,
 // Main ray tracing kernel.
 kernel void raytracingKernel(
      uint2                                                  tid                       [[thread_position_in_grid]],
-     constant Uniforms &                                    uniforms                  [[buffer(0)]],
-     constant MTLAccelerationStructureInstanceDescriptor   *instances                 [[buffer(1)]],
+     constant Uniforms&                                     uniforms                  [[buffer(0)]],
+     constant MTLAccelerationStructureInstanceDescriptor*   instances                 [[buffer(1)]],
      instance_acceleration_structure                        accelerationStructure     [[buffer(2)]],
-     device float4* res                                                              [[buffer(3)]]
-    //  texture2d<float, access::write>                        dstTex                    [[texture(0)]]
+     device Vertex* vb                                                                [[buffer(3)]],
+     device uint32_t* ib                                                              [[buffer(4)]],
+     device float4* res                                                               [[buffer(5)]]
      )
 {
     // The sample aligns the thread count to the threadgroup size, which means the thread count
@@ -126,7 +127,7 @@ kernel void raytracingKernel(
         ray ray;
 
         // Pixel coordinates for this thread.
-        float2 pixel = (float2)tid;
+        // float2 pixel = (float2)tid;
 
         // // Apply a random offset to the random number index to decorrelate pixels.
         // unsigned int offset = randomTex.read(tid).x;
@@ -138,8 +139,8 @@ kernel void raytracingKernel(
         // pixel += r;
 
         // Map pixel coordinates to -1..1.
-        float2 uv = (float2)pixel / float2(uniforms.width, uniforms.height);
-        uv = uv * 2.0f - 1.0f;
+        // float2 uv = (float2)pixel / float2(uniforms.width, uniforms.height);
+        // uv = uv * 2.0f - 1.0f;
 
         // constant Camera & camera = uniforms.camera;
 
@@ -198,6 +199,7 @@ kernel void raytracingKernel(
             color = float3(1.0f - barycentric_coords.x - barycentric_coords.y, barycentric_coords.x, barycentric_coords.y);
         }
         res[tid.y * uniforms.width + tid.x] = float4(color, 1.0f);
+        // res[tid.y * uniforms.width + tid.x] = float4(1.0f);
         // dstTex.write(float4(color, 1.0f), tid);
     }
 }

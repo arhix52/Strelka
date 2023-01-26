@@ -25,6 +25,17 @@ struct packed_float3 {
 };
 #endif
 
+struct Vertex
+{
+    vector_float3 pos;
+    uint32_t tangent;
+
+    uint32_t normal;
+    uint32_t uv;
+    float pad0;
+    float pad1;
+};
+
 struct Camera {
     vector_float3 position;
     vector_float3 right;

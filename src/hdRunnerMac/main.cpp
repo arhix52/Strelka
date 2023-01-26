@@ -271,7 +271,7 @@ public:
     MyMTKViewDelegate(MTL::Device* pDevice,
                       HdEngine* eng,
                       HdRenderIndex* ri,
-                      HdRenderBuffer* rb,
+                      std::array<HdRenderBuffer*, 3>& rb,
                       HdRenderPassSharedPtr rp,
                       HdRenderPassStateSharedPtr rps);
     virtual ~MyMTKViewDelegate() override;
@@ -283,10 +283,11 @@ private:
     HdEngine* mHydraEngine;
     HdRenderIndex* renderIndex;
     oka::Render* mRender;
-    HdRenderBuffer* renderBuffer;
+    std::array<HdRenderBuffer*, 3> renderBuffers;
     HdRenderPassSharedPtr renderPass;
     HdRenderPassStateSharedPtr mRenderPassState;
     MetalDisplay* mDisplay;
+    uint32_t frameIndex;
 };
 
 class MyAppDelegate : public NS::ApplicationDelegate
@@ -315,9 +316,9 @@ public:
         mRenderPass = rp;
     }
 
-    void setRenderBuffer(HdRenderBuffer* rb)
+    void setRenderBuffers(std::array<HdRenderBuffer*, 3>& rb)
     {
-        mRenderBuffer = rb;
+        mRenderBuffers = rb;
     }
 
     void setRenderPassState(HdRenderPassStateSharedPtr rps)
@@ -331,7 +332,7 @@ private:
     MTL::Device* _pDevice;
     HdEngine* mEngine = nullptr;
     HdRenderIndex* mRenderIndex;
-    HdRenderBuffer* mRenderBuffer;
+    std::array<HdRenderBuffer*, 3> mRenderBuffers;
     MyMTKViewDelegate* _pViewDelegate = nullptr;
     HdRenderPassSharedPtr mRenderPass;
     HdRenderPassStateSharedPtr mRenderPassState;
@@ -449,10 +450,11 @@ int main(int argc, char* argv[])
     cam = UsdGeomCamera::Get(stage, cameraPath);
     // CameraController cameraController(cam);
 
-    HdRenderBuffer* renderBuffer;
+    std::array<HdRenderBuffer*, 3> renderBuffers;
+    for (int i = 0; i < 3; ++i)
     {
-        renderBuffer = (HdRenderBuffer*)renderDelegate->CreateFallbackBprim(HdPrimTypeTokens->renderBuffer);
-        renderBuffer->Allocate(GfVec3i(imageWidth, imageHeight, 1), HdFormatFloat32Vec4, false);
+        renderBuffers[i] = (HdRenderBuffer*)renderDelegate->CreateFallbackBprim(HdPrimTypeTokens->renderBuffer);
+        renderBuffers[i]->Allocate(GfVec3i(imageWidth, imageHeight, 1), HdFormatFloat32Vec4, false);
     }
 
     CameraUtilFraming framing;
@@ -469,7 +471,7 @@ int main(int argc, char* argv[])
     renderPassState->SetCameraAndFraming(camera, framing, overrideWindowPolicy);
     HdRenderPassAovBindingVector aovBindings(1);
     aovBindings[0].aovName = HdAovTokens->color;
-    aovBindings[0].renderBuffer = renderBuffer;
+    aovBindings[0].renderBuffer = renderBuffers[0];
     renderPassState->SetAovBindings(aovBindings);
 
     HdEngine engine;
@@ -480,7 +482,7 @@ int main(int argc, char* argv[])
     del.setHydraEngine(&engine);
     del.setRenderIndex(renderIndex);
     del.setRenderPass(renderPass);
-    del.setRenderBuffer(renderBuffer);
+    del.setRenderBuffers(renderBuffers);
     del.setRenderPassState(renderPassState);
 
     NS::Application* pSharedApplication = NS::Application::sharedApplication();
@@ -570,7 +572,8 @@ void MyAppDelegate::applicationDidFinishLaunching(NS::Notification* pNotificatio
     _pMtkView->setDepthStencilPixelFormat(MTL::PixelFormat::PixelFormatDepth16Unorm);
     _pMtkView->setClearDepth(1.0f);
 
-    _pViewDelegate = new MyMTKViewDelegate(_pDevice, mEngine, mRenderIndex, mRenderBuffer, mRenderPass, mRenderPassState);
+    _pViewDelegate =
+        new MyMTKViewDelegate(_pDevice, mEngine, mRenderIndex, mRenderBuffers, mRenderPass, mRenderPassState);
     _pMtkView->setDelegate(_pViewDelegate);
 
     _pWindow->setContentView(_pMtkView);
@@ -596,17 +599,18 @@ bool MyAppDelegate::applicationShouldTerminateAfterLastWindowClosed(NS::Applicat
 MyMTKViewDelegate::MyMTKViewDelegate(MTL::Device* pDevice,
                                      HdEngine* eng,
                                      HdRenderIndex* ri,
-                                     HdRenderBuffer* rb,
+                                     std::array<HdRenderBuffer*, 3>& rb,
                                      HdRenderPassSharedPtr rp,
                                      HdRenderPassStateSharedPtr rps)
 {
     mDevice = pDevice;
     mHydraEngine = eng;
     renderIndex = ri;
-    renderBuffer = rb;
+    renderBuffers = rb;
     renderPass = rp;
     mRenderPassState = rps;
     mDisplay = new MetalDisplay(mDevice);
+    frameIndex = 0;
 }
 
 MyMTKViewDelegate::~MyMTKViewDelegate()
@@ -619,11 +623,16 @@ void MyMTKViewDelegate::drawInMTKView(MTK::View* pView)
     HdTaskSharedPtrVector tasks;
     std::shared_ptr<SimpleRenderTask> renderTasks;
     TfTokenVector renderTags(1, HdRenderTagTokens->geometry);
+    HdRenderPassAovBindingVector aovBindings(1);
+    aovBindings[0].aovName = HdAovTokens->color;
+    aovBindings[0].renderBuffer = renderBuffers[frameIndex];
+    mRenderPassState->SetAovBindings(aovBindings);
     renderTasks = std::make_shared<SimpleRenderTask>(renderPass, mRenderPassState, renderTags);
     tasks.push_back(renderTasks);
     mHydraEngine->Execute(renderIndex, &tasks);
-    oka::Buffer* res = renderBuffer->GetResource(false).UncheckedGet<oka::Buffer*>();
+    oka::Buffer* res = renderBuffers[frameIndex]->GetResource(false).UncheckedGet<oka::Buffer*>();
     mDisplay->display(pView, res);
+    frameIndex = (frameIndex + 1) % kMaxFramesInFlight;
 }
 void MyMTKViewDelegate::drawableSizeWillChange(MTK::View* pView, CGSize size)
 {
