@@ -449,14 +449,14 @@ bool saveScreenshot(std::string& outputFilePath, unsigned char* mappedMem, uint3
     TF_VERIFY(mappedMem != nullptr);
 
     int pixelCount = imageWidth * imageHeight;
-/*
+
     for (int i = 0; i < pixelCount; i++)
     {
         mappedMem[i * 4 + 0] = GfConvertLinearToDisplay(mappedMem[i * 4 + 0]);
         mappedMem[i * 4 + 1] = GfConvertLinearToDisplay(mappedMem[i * 4 + 1]);
         mappedMem[i * 4 + 2] = GfConvertLinearToDisplay(mappedMem[i * 4 + 2]);
     }
-*/
+
 
     // Write image to file.
     TfStopwatch timerWrite;
@@ -475,7 +475,7 @@ bool saveScreenshot(std::string& outputFilePath, unsigned char* mappedMem, uint3
     storage.height = (int)imageHeight;
     storage.depth = (int)1;
     storage.format = HioFormat::HioFormatUNorm8Vec4;
-    storage.flipped = false;
+    storage.flipped = true;
     storage.data = mappedMem;
 
     VtDictionary metadata;
@@ -708,7 +708,6 @@ int main(int argc, const char* argv[])
 
         cam.SetFromCamera(cameraController.getCamera(), 0.0);
 
-        //
         display.onBeginFrame();
         if (cameraController.getCamera().GetTransform() != transform ||
             sppTotal != ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal") ||
@@ -754,7 +753,6 @@ int main(int argc, const char* argv[])
         }
 
         bool needScreenshot = ctx->mSettingsManager->getAs<bool>("render/pt/needScreenshot");
-
         if (needScreenshot)
         {
             std::size_t foundSlash = usdPath.find_last_of("/\\");
