@@ -1,5 +1,7 @@
 #include "OptiXRender.h"
 
+#include "OptixBuffer.h"
+
 #include <optix_function_table_definition.h>
 #include <optix_stubs.h>
 #include <optix_stack_size.h>
@@ -16,9 +18,88 @@
 
 #include <filesystem>
 #include <array>
+#include <string>
+#include <sstream>
 #include <fstream>
 
 #include "Camera.h"
+
+static void context_log_cb(unsigned int level, const char* tag, const char* message, void* /*cbdata */)
+{
+    std::cerr << "[" << std::setw(2) << level << "][" << std::setw(12) << tag << "]: " << message << "\n";
+}
+
+static inline void optixCheck(OptixResult res, const char* call, const char* file, unsigned int line)
+{
+    if (res != OPTIX_SUCCESS)
+    {
+        std::stringstream ss;
+        ss << "Optix call '" << call << "' failed: " << file << ':' << line << ")\n";
+        std::cerr << ss.str() << std::endl;
+        // throw Exception(res, ss.str().c_str());
+        assert(0);
+    }
+}
+
+static inline void optixCheckLog(OptixResult res,
+                                 const char* log,
+                                 size_t sizeof_log,
+                                 size_t sizeof_log_returned,
+                                 const char* call,
+                                 const char* file,
+                                 unsigned int line)
+{
+    if (res != OPTIX_SUCCESS)
+    {
+        std::stringstream ss;
+        ss << "Optix call '" << call << "' failed: " << file << ':' << line << ")\nLog:\n"
+           << log << (sizeof_log_returned > sizeof_log ? "<TRUNCATED>" : "") << '\n';
+        std::cerr << ss.str() << std::endl;
+        // throw Exception(res, ss.str().c_str());
+        assert(0);
+    }
+}
+
+inline void cudaCheck(cudaError_t error, const char* call, const char* file, unsigned int line)
+{
+    if (error != cudaSuccess)
+    {
+        std::stringstream ss;
+        ss << "CUDA call (" << call << " ) failed with error: '" << cudaGetErrorString(error) << "' (" << file << ":"
+           << line << ")\n";
+        std::cerr << ss.str() << std::endl;
+        assert(0);
+        // throw Exception(ss.str().c_str());
+    }
+}
+
+inline void cudaSyncCheck(const char* file, unsigned int line)
+{
+    cudaDeviceSynchronize();
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess)
+    {
+        std::stringstream ss;
+        ss << "CUDA error on synchronize with error '" << cudaGetErrorString(error) << "' (" << file << ":" << line
+           << ")\n";
+        std::cerr << ss.str() << std::endl;
+        // throw Exception(ss.str().c_str());
+        assert(0);
+    }
+}
+
+//------------------------------------------------------------------------------
+//
+// OptiX error-checking
+//
+//------------------------------------------------------------------------------
+#define OPTIX_CHECK(call) optixCheck(call, #call, __FILE__, __LINE__)
+
+#define OPTIX_CHECK_LOG(call) optixCheckLog(call, log, sizeof(log), sizeof_log, #call, __FILE__, __LINE__)
+
+#define CUDA_CHECK(call) cudaCheck(call, #call, __FILE__, __LINE__)
+
+#define CUDA_SYNC_CHECK() cudaSyncCheck(__FILE__, __LINE__)
 
 using namespace oka;
 namespace fs = std::filesystem;
@@ -141,7 +222,7 @@ OptiXRender::Curve* OptiXRender::createCurve(const oka::Curve& curve)
     curve_input.curveArray.numPrimitives = segmentIndices.size();
     curve_input.curveArray.vertexBuffers = &d_points;
     curve_input.curveArray.numVertices = pointsCount;
-    curve_input.curveArray.vertexStrideInBytes = sizeof(float3);
+    curve_input.curveArray.vertexStrideInBytes = sizeof(glm::float3);
     curve_input.curveArray.widthBuffers = &d_widths;
     curve_input.curveArray.widthStrideInBytes = sizeof(float);
     curve_input.curveArray.normalBuffers = 0;
@@ -707,7 +788,7 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
     }
 }
 
-void OptiXRender::launch(CUDAOutputBuffer<uchar4>& output_buffer)
+void OptiXRender::render(Buffer* output)
 {
     if (getSharedContext().mFrameNumber == 0)
     {
@@ -723,8 +804,8 @@ void OptiXRender::launch(CUDAOutputBuffer<uchar4>& output_buffer)
         createLightBuffer();
     }
 
-    const uint32_t width = output_buffer.width();
-    const uint32_t height = output_buffer.height();
+    const uint32_t width = output->width();
+    const uint32_t height = output->height();
 
     updatePathtracerParams(width, height);
 
@@ -755,7 +836,7 @@ void OptiXRender::launch(CUDAOutputBuffer<uchar4>& output_buffer)
     params.scene.lights = (UniformLight*)d_lights;
     params.scene.numLights = mScene->getLights().size();
 
-    params.image = output_buffer.map();
+    params.image = (uchar4 *) output->map();
     params.subframe_index = getSharedContext().mFrameNumber;
     params.samples_per_launch = 1; // TODO: get from settings
     params.handle = mState.ias_handle;
@@ -781,7 +862,7 @@ void OptiXRender::launch(CUDAOutputBuffer<uchar4>& output_buffer)
         mState.pipeline, mState.stream, mState.d_params, sizeof(Params), &mState.sbt, width, height, /*depth=*/1));
     CUDA_SYNC_CHECK();
 
-    output_buffer.unmap();
+    output->unmap();
 
     getSharedContext().mFrameNumber++;
 
@@ -827,6 +908,17 @@ void OptiXRender::init()
     createPipeline();
     createSbt();
 }
+
+Buffer* OptiXRender::createBuffer(const BufferDesc& desc)
+{
+    const size_t size = desc.height * desc.width * Buffer::getElementSize(desc.format);
+    assert(size != 0);
+    void* devicePtr = nullptr;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&devicePtr), size));
+    OptixBuffer* res = new OptixBuffer(devicePtr,  desc.format, desc.width, desc.height);
+    return res;
+}
+
 
 void OptiXRender::createPointsBuffer()
 {

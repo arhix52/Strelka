@@ -7,11 +7,7 @@ message(STATUS "clang_PATH: ${clang_PATH}")
 # Find at least a 5.0 version of CUDA. find_package(CUDA 5.0 REQUIRED)
 # message(STATUS "CUDA Toolkit Root: ${CUDA_TOOLKIT_ROOT_DIR}") message(STATUS
 # "CUDA Include DIR: ${CUDA_INCLUDE_DIRS}") Search for the OptiX libraries and
-# include files. set(OptiX_INSTALL_DIR $ENV{OPTIX_DIR}) message(STATUS "OptiX
-# SDK DIR: ${OptiX_INSTALL_DIR}") Search for the OptiX libraries and include
-# files. find_package(OptiX REQUIRED) message(STATUS "OptiX Include DIR:
-# ${OptiX_INCLUDE}") include_directories(${OptiX_INCLUDE})
-
+# include files. 
 set(MATERIALLIB_NAME materialmanager)
 
 # Material Manager
@@ -51,6 +47,13 @@ add_custom_command(
           "${OUTPUT_DIRECTORY}/optix/shaders")
 
 if(WIN32)
+
+set(OptiX_INSTALL_DIR $ENV{OPTIX_DIR}) 
+message(STATUS "OptiX SDK DIR: ${OptiX_INSTALL_DIR}") 
+find_package(OptiX REQUIRED) 
+message(STATUS "OptiX Include DIR: ${OptiX_INCLUDE}") 
+include_directories(${OptiX_INCLUDE})
+
   add_custom_command(
     TARGET ${MATERIALLIB_NAME}
     PRE_BUILD
@@ -80,7 +83,7 @@ if(WIN32)
     COMMAND ${CMAKE_COMMAND} -E echo
             "Compile OptixRender_radiance_closest_hit bytecode using clang..."
     COMMAND
-      ${clang_PATH} -I ${OPTIX7_DIR}/include -I
+      ${clang_PATH} -I ${OptiX_INCLUDE} -I
       ${ROOT_HOME}/external/mdl-sdk/include -I ${ROOT_HOME}/src/render/ -I
       ${ROOT_HOME}/include/render -I ${ROOT_HOME}/external/glm -I ${ROOT_HOME}
       ${_CLANG_FLAGS} -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -emit-llvm -c

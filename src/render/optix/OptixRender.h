@@ -1,5 +1,7 @@
 #pragma once
 
+#include "render.h"
+
 #include <optix.h>
 
 #include "OptixRenderParams.h"
@@ -17,64 +19,12 @@
 namespace oka
 {
 
-static void context_log_cb(unsigned int level, const char* tag, const char* message, void* /*cbdata */)
-{
-    std::cerr << "[" << std::setw(2) << level << "][" << std::setw(12) << tag << "]: " << message << "\n";
-}
-
-static inline void optixCheck(OptixResult res, const char* call, const char* file, unsigned int line)
-{
-    if (res != OPTIX_SUCCESS)
-    {
-        std::stringstream ss;
-        ss << "Optix call '" << call << "' failed: " << file << ':' << line << ")\n";
-        std::cerr << ss.str() << std::endl;
-        // throw Exception(res, ss.str().c_str());
-        assert(0);
-    }
-}
-
-static inline void optixCheckLog(OptixResult res,
-                                 const char* log,
-                                 size_t sizeof_log,
-                                 size_t sizeof_log_returned,
-                                 const char* call,
-                                 const char* file,
-                                 unsigned int line)
-{
-    if (res != OPTIX_SUCCESS)
-    {
-        std::stringstream ss;
-        ss << "Optix call '" << call << "' failed: " << file << ':' << line << ")\nLog:\n"
-           << log << (sizeof_log_returned > sizeof_log ? "<TRUNCATED>" : "") << '\n';
-        std::cerr << ss.str() << std::endl;
-        // throw Exception(res, ss.str().c_str());
-        assert(0);
-    }
-}
-
-//------------------------------------------------------------------------------
-//
-// OptiX error-checking
-//
-//------------------------------------------------------------------------------
-#define OPTIX_CHECK(call) optixCheck(call, #call, __FILE__, __LINE__)
-
-#define OPTIX_CHECK_LOG(call) optixCheckLog(call, log, sizeof(log), sizeof_log, #call, __FILE__, __LINE__)
 
 enum RayType
 {
     RAY_TYPE_RADIANCE = 0,
     RAY_TYPE_OCCLUSION = 1,
     RAY_TYPE_COUNT
-};
-
-struct ParallelogramLight
-{
-    float3 corner;
-    float3 v1, v2;
-    float3 normal;
-    float3 emission;
 };
 
 struct PathTracerState
@@ -108,7 +58,7 @@ struct PathTracerState
     OptixShaderBindingTable sbt = {};
 };
 
-class OptiXRender
+class OptiXRender : public Render
 {
 private:
     struct Mesh
@@ -188,7 +138,9 @@ public:
     OptiXRender(/* args */);
     ~OptiXRender();
 
-    void init();
+    void init() override;
+    void render(Buffer* output_buffer) override;
+    Buffer* createBuffer(const BufferDesc& desc) override;
 
     void createContext();
     void createAccelerationStructure();
@@ -201,7 +153,6 @@ public:
                                                            char const* module_code,
                                                            size_t module_size);
 
-    void launch(CUDAOutputBuffer<uchar4>& output_buffer);
 
     void setSharedContext(SharedContext* ctx)
     {

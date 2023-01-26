@@ -6,20 +6,6 @@
 namespace oka
 {
 
-// /**
-//  * Resource manager interface
-//  */
-// class ResourceManager
-// {
-// public:
-//     ResourceManager(/* args */);
-//     virtual ~ResourceManager();
-
-//     virtual Buffer* createBuffer(const BufferDesc& desc) = 0;
-//     // virtual Texture* createTexture(const TextureDesc& desc) = 0;
-
-// };
-
 /**
  * Render interface
  */

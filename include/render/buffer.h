@@ -65,6 +65,8 @@ public:
         default:
             break;
         }
+        assert(0);
+        return 0;
     }
 
     size_t getElementSize()

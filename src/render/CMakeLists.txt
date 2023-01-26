@@ -21,17 +21,18 @@ if(WIN32)
   include_directories(${OptiX_INCLUDE})
   set(RENDER_SOURCES
       ${RENDER_SOURCES_COMMON}
-      ${ROOT_HOME}/include/render/optix/buffer.h
-      ${ROOT_HOME}/include/render/optix/Camera.h
-      ${ROOT_HOME}/include/render/optix/OptiXRender.h
-      ${ROOT_HOME}/include/render/optix/materials.h
-      ${ROOT_HOME}/include/render/optix/Lights.h
-      ${ROOT_HOME}/src/render/optix/buffer.cpp
-      ${ROOT_HOME}/src/render/optix/Camera.cpp
+      ${ROOT_HOME}/include/render/Camera.h
+      ${ROOT_HOME}/include/render/materials.h
+      ${ROOT_HOME}/include/render/Lights.h
+      ${ROOT_HOME}/src/render/Camera.cpp
+      ${ROOT_HOME}/src/render/optix/OptixBuffer.h
+      ${ROOT_HOME}/src/render/optix/OptixBuffer.cpp
+      ${ROOT_HOME}/src/render/optix/OptiXRender.h
       ${ROOT_HOME}/src/render/optix/OptiXRender.cpp)
   set(RENDER_OPTIX_SOURCES ${ROOT_HOME}/include/render/optix/OptixRenderParams.h
                            ${ROOT_HOME}/src/render/optix/OptixRender.cu)
-  include_directories(${ROOT_HOME}/include/render/optix/)
+  include_directories(${ROOT_HOME}/include/render)
+  include_directories(${ROOT_HOME})
   # Create the rules to build the PTX and/or OPTIX files.
   cuda_wrap_srcs(
     ${RENDERLIB_NAME}
