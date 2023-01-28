@@ -1,6 +1,8 @@
 #include <metal_stdlib>
 #include <simd/simd.h>
 
+#include "random.h"
+#include "lights.h"
 #include "ShaderTypes.h"
 
 using namespace metal;
@@ -15,6 +17,7 @@ constant unsigned int primes[] = {
     59, 61, 67, 71,
     73, 79, 83, 89
 };
+
 
 // Returns the i'th element of the Halton sequence using the d'th prime number as a
 // base. The Halton sequence is a low discrepency sequence: the values appear
@@ -117,6 +120,11 @@ static __attribute__((always_inline)) float2 interpolateAttrib(thread const floa
     return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
 
+static __attribute__((always_inline)) bool all(thread const float3& v)
+{
+    return v.x != 0.0f && v.y != 0.0f && v.z != 0.0f;
+}
+
 void generateCameraRay(uint2 pixelIndex,
                         uint seed,
                         thread float3& origin,
@@ -139,21 +147,137 @@ void generateCameraRay(uint2 pixelIndex,
     direction = normalize(wdir.xyz);
 }
 
+struct MaterialState
+{
+    float3 position;
+    float3 normal;
+};
+
+bool traceOcclusion(
+    instance_acceleration_structure accelerationStructure,
+    thread intersector<triangle_data, instancing>& isect, 
+    thread float3 origin, 
+    thread float3 direction,
+    float tMin,
+    float tMax)
+{
+    struct ray shadowRay;
+    shadowRay.origin = origin;
+    shadowRay.direction = direction;
+    shadowRay.min_distance = tMin;
+    shadowRay.max_distance = tMax;
+    isect.accept_any_intersection(true);
+
+    bool res = true;
+    typename intersector<triangle_data, instancing>::result_type intersection;
+    intersection = isect.intersect(shadowRay, accelerationStructure, RAY_MASK_SHADOW);
+    if (intersection.type == intersection_type::none)
+    {
+        res = false;
+    }
+    isect.accept_any_intersection(false);
+    return res;
+}
+
+float3 sampleLight(
+    instance_acceleration_structure accelerationStructure,
+    thread intersector<triangle_data, instancing>& isect, 
+    thread uint32_t& rngState, 
+    device const UniformLight& light, 
+    thread MaterialState& state, 
+    thread float3& toLight, 
+    thread float& lightPdf)
+{
+    LightSampleData lightSampleData = {};
+    switch (light.type)
+    {
+    case 0:
+        lightSampleData = SampleRectLight(light, float2(rnd(rngState), rnd(rngState)), state.position);
+        break;
+        // case 1:
+        //     lightSampleData = SampleDiscLight(light, float2(rand(rngState), rand(rngState)), state.position);
+        //     break;
+        // case 2:
+        //     lightSampleData = SampleSphereLight(light, state.normal, state.position, float2(rand(rngState),
+        //     rand(rngState))); break;
+    }
+
+    toLight = lightSampleData.L;
+    float3 Li = float3(light.color);
+
+    if (dot(state.normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.0 && all(Li))
+    {
+        // Ray shadowRay;
+        // shadowRay.d = float4(lightSampleData.L, 0.0f);
+        // shadowRay.o = float4(offset_ray(state.position, state.geom_normal), lightSampleData.distToLight); // need to
+        // set
+        const bool occluded = traceOcclusion(accelerationStructure, isect, state.position, lightSampleData.L,
+                                             0.01f, // tmin
+                                             lightSampleData.distToLight // tmax
+        );
+        // bool occluded = false;
+        float visibility = occluded ? 0.0f : 1.0f;
+        // TODO: skip light hit
+
+        // if (visibility == 0.0f)
+        // {
+        //     // check if it was light hit?
+        //     InstanceConstants instConst = accel.instanceConstants[NonUniformResourceIndex(shadowHit.instId)];
+        //     if (instConst.lightId != -1)
+        //     {
+        //         // light hit => visible
+        //         visibility = 1.0f;
+        //     }
+        // }
+
+        lightPdf = lightSampleData.pdf;
+        return visibility * Li * saturate(dot(state.normal, lightSampleData.L));
+    }
+
+    return float3(0.0f);
+    // if (!all(Li))
+    // {
+    //     return float3(1.0);
+    // }
+    // return Li;
+}
+
+float3 estimateDirectLighting(
+    instance_acceleration_structure accelerationStructure,
+    thread intersector<triangle_data, instancing>& isect, 
+    const uint32_t numLights,
+    device UniformLight* lights,
+    thread uint32_t& rngSeed, 
+    thread MaterialState& state, 
+    thread float3& toLight, 
+    thread float& lightPdf)
+{
+    // const uint32_t lightId = (uint32_t)(numLights * rnd(rngSeed));
+    const uint32_t lightId = 0;
+    const float lightSelectionPdf = 1.0f / numLights;
+    device const UniformLight& currLight = lights[lightId];
+    const float3 r = sampleLight(accelerationStructure, isect, rngSeed, currLight, state, toLight, lightPdf);
+    lightPdf *= lightSelectionPdf;
+    return r;
+}
+
 // Main ray tracing kernel.
 kernel void raytracingKernel(
      uint2                                                  tid                       [[thread_position_in_grid]],
      constant Uniforms&                                     uniforms                  [[buffer(0)]],
      constant MTLAccelerationStructureInstanceDescriptor*   instances                 [[buffer(1)]],
      instance_acceleration_structure                        accelerationStructure     [[buffer(2)]],
-     device Vertex* vb                                                                [[buffer(3)]],
-     device uint32_t* ib                                                              [[buffer(4)]],
-     device float4* res                                                               [[buffer(5)]]
+     device UniformLight* lights                                                      [[buffer(3)]],
+     device float4* res                                                               [[buffer(4)]]
      )
 {
     // The sample aligns the thread count to the threadgroup size, which means the thread count
     // may be different than the bounds of the texture. Test to make sure this thread
     // is referencing a pixel within the bounds of the texture.
     if (tid.x < uniforms.width && tid.y < uniforms.height) {
+
+        uint32_t rndSeed = tea<4>(tid.y * uniforms.width + tid.x, uniforms.subframeIndex);
+
         // The ray to cast.
         ray ray;
 
@@ -166,22 +290,6 @@ kernel void raytracingKernel(
         // // Add a random offset to the pixel coordinates for antialiasing.
         // float2 r = float2(halton(offset + uniforms.frameIndex, 0),
         //                   halton(offset + uniforms.frameIndex, 1));
-
-        // pixel += r;
-
-        // Map pixel coordinates to -1..1.
-        // float2 uv = (float2)pixel / float2(uniforms.width, uniforms.height);
-        // uv = uv * 2.0f - 1.0f;
-
-        // constant Camera & camera = uniforms.camera;
-
-        // // Rays start at the camera position.
-        // ray.origin = camera.position;
-
-        // // Map normalized pixel coordinates into camera's coordinate system.
-        // ray.direction = normalize(uv.x * camera.right +
-        //                           uv.y * camera.up +
-        //                           camera.forward);
 
         generateCameraRay(tid, 0, ray.origin, ray.direction, uniforms);
         // Don't limit intersection distance.
@@ -228,7 +336,7 @@ kernel void raytracingKernel(
                     objectToWorldSpaceTransform[column][row] = instances[instanceIndex].transformationMatrix[column][row];
 
             // // Compute the intersection point in world space.
-            // float3 worldSpaceIntersectionPoint = ray.origin + ray.direction * intersection.distance;
+            float3 worldSpaceIntersectionPoint = ray.origin + ray.direction * intersection.distance;
 
             // unsigned primitiveIndex = intersection.primitive_id;
             // unsigned int geometryIndex = instances[instanceIndex].accelerationStructureIndex;
@@ -238,7 +346,20 @@ kernel void raytracingKernel(
             const float3 objectNormal = normalize(interpolateAttrib(n0, n1, n2, barycentrics));
             const float3 worldNormal = normalize(transformDirection(objectNormal, objectToWorldSpaceTransform));
 
-            color = worldNormal;
+            MaterialState matState;
+
+            matState.position = worldSpaceIntersectionPoint;
+            matState.normal = worldNormal;
+
+            float3 toLight; // return value for sampleLights()
+            float lightPdf = 0.0f; // return value for sampleLights()
+            const float3 radiance = estimateDirectLighting(accelerationStructure, i,
+                uniforms.numLights, lights, rndSeed, matState, toLight, lightPdf);
+
+
+            // device const UniformLight& currLight = lights[0];
+            // color = lights[0].color.xyz;
+            color = radiance;
             // color = float3(1.0f - barycentric_coords.x - barycentric_coords.y, barycentric_coords.x, barycentric_coords.y);
         }
         res[tid.y * uniforms.width + tid.x] = float4(color, 1.0f);

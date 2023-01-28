@@ -4,21 +4,24 @@
 #include <simd/simd.h>
 
 #define GEOMETRY_MASK_TRIANGLE 1
-#define GEOMETRY_MASK_SPHERE   2
-#define GEOMETRY_MASK_LIGHT    4
+#define GEOMETRY_MASK_SPHERE 2
+#define GEOMETRY_MASK_LIGHT 4
 
 #define GEOMETRY_MASK_GEOMETRY (GEOMETRY_MASK_TRIANGLE | GEOMETRY_MASK_SPHERE)
 
-#define RAY_MASK_PRIMARY   (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT)
-#define RAY_MASK_SHADOW    GEOMETRY_MASK_GEOMETRY
+#define RAY_MASK_PRIMARY (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT)
+#define RAY_MASK_SHADOW GEOMETRY_MASK_GEOMETRY
 #define RAY_MASK_SECONDARY GEOMETRY_MASK_GEOMETRY
 
 #ifndef __METAL_VERSION__
-struct packed_float3 {
-#ifdef __cplusplus
+struct packed_float3
+{
+#    ifdef __cplusplus
     packed_float3() = default;
-    packed_float3(vector_float3 v) : x(v.x), y(v.y), z(v.z) {}
-#endif
+    packed_float3(vector_float3 v) : x(v.x), y(v.y), z(v.z)
+    {
+    }
+#    endif
     float x;
     float y;
     float z;
@@ -36,19 +39,34 @@ struct Vertex
     float pad1;
 };
 
-struct Uniforms {
-    unsigned int width;
-    unsigned int height;
-    unsigned int frameIndex;
-    unsigned int lightCount;
+struct Uniforms
+{
+    uint32_t width;
+    uint32_t height;
+    uint32_t frameIndex;
+    uint32_t subframeIndex;
+    uint32_t numLights;
     simd::float4x4 viewToWorld;
     simd::float4x4 clipToView;
 };
 
-struct Triangle {
+struct Triangle
+{
     uint32_t normals[3];
     uint32_t tangent[3];
     uint32_t uv[3];
+};
+
+// GPU side structure
+struct UniformLight
+{
+    vector_float4 points[4];
+    vector_float4 color;
+    vector_float4 normal;
+    int type;
+    float pad0;
+    float pad2;
+    float pad3;
 };
 
 #endif

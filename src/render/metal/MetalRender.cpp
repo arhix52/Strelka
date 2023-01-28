@@ -99,8 +99,10 @@ void MetalRender::render(Buffer* output)
     MTL::Buffer* pUniformBuffer = _pUniformBuffer[_frame];
     Uniforms* pUniformData = reinterpret_cast<Uniforms*>(pUniformBuffer->contents());
     pUniformData->frameIndex = _frame;
+    pUniformData->subframeIndex = getSharedContext().mFrameNumber;
     pUniformData->height = height;
     pUniformData->width = width;
+    pUniformData->numLights = mScene->getLightsDesc().size();
 
     glm::float4x4 invView = glm::inverse(camera.matrices.view);
     for (int column = 0; column < 4; column++)
@@ -121,7 +123,7 @@ void MetalRender::render(Buffer* output)
     pUniformBuffer->didModifyRange(NS::Range::Make(0, sizeof(Uniforms)));
 
     MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
-
+    pComputeEncoder->useResource(mLightBuffer, MTL::ResourceUsageRead);
     pComputeEncoder->useResource(_instanceAccelerationStructure, MTL::ResourceUsageRead);
     for (int i = 0; i < _primitiveAccelerationStructures.size(); ++i)
     {
@@ -132,9 +134,9 @@ void MetalRender::render(Buffer* output)
     pComputeEncoder->setBuffer(_pUniformBuffer[_frame], 0, 0);
     pComputeEncoder->setBuffer(_instanceBuffer, 0, 1);
     pComputeEncoder->setAccelerationStructure(_instanceAccelerationStructure, 2);
-    pComputeEncoder->setBuffer(_pVertexDataBuffer, 0, 3);
-    pComputeEncoder->setBuffer(_pIndexBuffer, 0, 4);
-    pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 5);
+    pComputeEncoder->setBuffer(mLightBuffer, 0, 3);
+    // Output
+    pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 4);
 
     MTL::Size gridSize = MTL::Size(width, height, 1);
 
@@ -193,18 +195,26 @@ void MetalRender::buildBuffers()
 {
     const std::vector<oka::Scene::Vertex>& vertices = mScene->getVertices();
     const std::vector<uint32_t>& indices = mScene->getIndices();
+    const std::vector<Scene::Light>& lightDescs = mScene->getLights();
+
+    assert(sizeof(Scene::Light) == sizeof(UniformLight));
+    const size_t lightBufferSize = sizeof(Scene::Light) * lightDescs.size(); 
     const size_t vertexDataSize = sizeof(oka::Scene::Vertex) * vertices.size();
     const size_t indexDataSize = sizeof(uint32_t) * indices.size();
 
+    MTL::Buffer* pLightBuffer = mDevice->newBuffer(lightBufferSize, MTL::ResourceStorageModeManaged);
     MTL::Buffer* pVertexBuffer = mDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeManaged);
     MTL::Buffer* pIndexBuffer = mDevice->newBuffer(indexDataSize, MTL::ResourceStorageModeManaged);
 
+    mLightBuffer = pLightBuffer;
     _pVertexDataBuffer = pVertexBuffer;
     _pIndexBuffer = pIndexBuffer;
 
+    memcpy(mLightBuffer->contents(), lightDescs.data(), lightBufferSize);
     memcpy(_pVertexDataBuffer->contents(), vertices.data(), vertexDataSize);
     memcpy(_pIndexBuffer->contents(), indices.data(), indexDataSize);
 
+    mLightBuffer->didModifyRange(NS::Range::Make(0, mLightBuffer->length()));
     _pVertexDataBuffer->didModifyRange(NS::Range::Make(0, _pVertexDataBuffer->length()));
     _pIndexBuffer->didModifyRange(NS::Range::Make(0, _pIndexBuffer->length()));
 

@@ -38,6 +38,7 @@ private:
     MTL::RenderPipelineState* _pPSO;
     MTL::ComputePipelineState* mRayTracingPSO;
 
+    MTL::Buffer* mLightBuffer;
     MTL::Buffer* _pVertexDataBuffer;
     MTL::Buffer* _pInstanceDataBuffer;
     MTL::Buffer* _pUniformBuffer[kMaxFramesInFlight];
@@ -58,6 +59,7 @@ private:
     void buildComputePipeline();
     void buildBuffers();
     void buildTexture(uint32_t width, uint32_t heigth);
+    void createLightBuffer();
 
     MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);
     void createAccelerationStructures();
