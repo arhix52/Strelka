@@ -131,8 +131,7 @@ void generateCameraRay(uint2 pixelIndex,
                         thread float3& direction,
                         const constant Uniforms& params)
 {
-    // const float2 subpixel_jitter = make_float2(rnd(seed), rnd(seed));
-    const float2 subpixel_jitter {0.0f, 0.0f};
+    const float2 subpixel_jitter = float2(rnd(seed), rnd(seed));
     float2 pixelPos {pixelIndex.x + subpixel_jitter.x, pixelIndex.y + subpixel_jitter.y};
 
     float2 dimension {(float)params.width, (float)params.height};
@@ -192,8 +191,11 @@ float3 sampleLight(
     switch (light.type)
     {
     case 0:
-        lightSampleData = SampleRectLight(light, float2(rnd(rngState), rnd(rngState)), state.position);
+    {
+        float2 u = float2(rnd(rngState), rnd(rngState));
+        lightSampleData = SampleRectLight(light, u, state.position);
         break;
+    }
         // case 1:
         //     lightSampleData = SampleDiscLight(light, float2(rand(rngState), rand(rngState)), state.position);
         //     break;
@@ -235,11 +237,6 @@ float3 sampleLight(
     }
 
     return float3(0.0f);
-    // if (!all(Li))
-    // {
-    //     return float3(1.0);
-    // }
-    // return Li;
 }
 
 float3 estimateDirectLighting(
@@ -252,8 +249,7 @@ float3 estimateDirectLighting(
     thread float3& toLight, 
     thread float& lightPdf)
 {
-    // const uint32_t lightId = (uint32_t)(numLights * rnd(rngSeed));
-    const uint32_t lightId = 0;
+    const uint32_t lightId = (uint32_t)(numLights * rnd(rngSeed));
     const float lightSelectionPdf = 1.0f / numLights;
     device const UniformLight& currLight = lights[lightId];
     const float3 r = sampleLight(accelerationStructure, isect, rngSeed, currLight, state, toLight, lightPdf);
@@ -268,16 +264,17 @@ kernel void raytracingKernel(
      constant MTLAccelerationStructureInstanceDescriptor*   instances                 [[buffer(1)]],
      instance_acceleration_structure                        accelerationStructure     [[buffer(2)]],
      device UniformLight* lights                                                      [[buffer(3)]],
-     device float4* res                                                               [[buffer(4)]]
+     device float4* res                                                               [[buffer(4)]],
+     device float4* accum                                                             [[buffer(5)]]
      )
 {
     // The sample aligns the thread count to the threadgroup size, which means the thread count
     // may be different than the bounds of the texture. Test to make sure this thread
     // is referencing a pixel within the bounds of the texture.
     if (tid.x < uniforms.width && tid.y < uniforms.height) {
-
-        uint32_t rndSeed = tea<4>(tid.y * uniforms.width + tid.x, uniforms.subframeIndex);
-
+        const uint32_t linearPixelIndex = tid.y * uniforms.width + tid.x;
+        // uint32_t rndSeed = tea<4>(linearPixelIndex, uniforms.subframeIndex);
+        uint32_t rndSeed = initRNG(tid.xy, uint2(uniforms.width, uniforms.height), uniforms.subframeIndex * uniforms.randomFromHost);
         // The ray to cast.
         ray ray;
 
@@ -291,14 +288,14 @@ kernel void raytracingKernel(
         // float2 r = float2(halton(offset + uniforms.frameIndex, 0),
         //                   halton(offset + uniforms.frameIndex, 1));
 
-        generateCameraRay(tid, 0, ray.origin, ray.direction, uniforms);
+        generateCameraRay(tid, rndSeed, ray.origin, ray.direction, uniforms);
         // Don't limit intersection distance.
         ray.max_distance = INFINITY;
 
         // Start with a fully white color. The kernel scales the light each time the
         // ray bounces off of a surface, based on how much of each light component
         // the surface absorbs.
-        float3 color = float3(1.0f, 1.0f, 1.0f);
+        float3 result = float3(1.0f, 1.0f, 1.0f);
 
         // Create an intersector to test for intersection between the ray and the geometry in the scene.
         intersector<triangle_data, instancing> i;
@@ -313,7 +310,7 @@ kernel void raytracingKernel(
         // Stop if the ray didn't hit anything and has bounced out of the scene.
         if (intersection.type == intersection_type::none)
         {
-            color = float3(0.0f, 0.0f, 0.0f);
+            result = float3(0.0f, 0.0f, 0.0f);
         }
         else
         {
@@ -357,13 +354,25 @@ kernel void raytracingKernel(
                 uniforms.numLights, lights, rndSeed, matState, toLight, lightPdf);
 
 
-            // device const UniformLight& currLight = lights[0];
-            // color = lights[0].color.xyz;
-            color = radiance;
-            // color = float3(1.0f - barycentric_coords.x - barycentric_coords.y, barycentric_coords.x, barycentric_coords.y);
+            result = radiance;
         }
-        res[tid.y * uniforms.width + tid.x] = float4(color, 1.0f);
-        // res[tid.y * uniforms.width + tid.x] = float4(1.0f);
-        // dstTex.write(float4(color, 1.0f), tid);
+
+        if (uniforms.enableAccumulation)
+        {
+            float3 accum_color = result / static_cast<float>(uniforms.samples_per_launch);
+
+            if (uniforms.subframeIndex > 0)
+            {
+                const float a = 1.0f / static_cast<float>(uniforms.subframeIndex + 1);
+                const float3 accum_color_prev = float3(accum[linearPixelIndex]);
+                accum_color = mix(accum_color_prev, accum_color, a);
+            }
+            accum[linearPixelIndex] = float4(accum_color, 1.0f);
+            res[linearPixelIndex] = float4(accum_color, 1.0f);
+        }
+        else
+        {
+            res[linearPixelIndex] = float4(result, 1.0f);
+        }
     }
 }

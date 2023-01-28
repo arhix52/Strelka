@@ -38,9 +38,9 @@ private:
     MTL::RenderPipelineState* _pPSO;
     MTL::ComputePipelineState* mRayTracingPSO;
 
+    MTL::Buffer* mAccumulationBuffer;
     MTL::Buffer* mLightBuffer;
     MTL::Buffer* _pVertexDataBuffer;
-    MTL::Buffer* _pInstanceDataBuffer;
     MTL::Buffer* _pUniformBuffer[kMaxFramesInFlight];
     MTL::Buffer* _pIndexBuffer;
     uint32_t _triangleCount;

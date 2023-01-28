@@ -46,6 +46,10 @@ struct Uniforms
     uint32_t frameIndex;
     uint32_t subframeIndex;
     uint32_t numLights;
+    uint32_t enableAccumulation;
+    uint32_t samples_per_launch;
+
+    uint32_t randomFromHost;
     simd::float4x4 viewToWorld;
     simd::float4x4 clipToView;
 };

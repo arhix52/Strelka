@@ -1,5 +1,7 @@
 #pragma once
 
+using namespace metal;
+
 // Code from optix samples
 
 template<unsigned int N>
@@ -34,13 +36,51 @@ static  __inline__ unsigned int lcg2(thread unsigned int &prev)
   return prev;
 }
 
-// Generate random float in [0, 1)
-static  __inline__ float rnd(thread unsigned int &prev)
-{
-  return ((float) lcg(prev) / (float) 0x01000000);
-}
+// // Generate random float in [0, 1)
+// static __inline__ float rnd(thread unsigned int &prev)
+// {
+//   return ((float) lcg(prev) / (float) 0x01000000);
+// }
 
 static  __inline__ unsigned int rot_seed( unsigned int seed, unsigned int frame )
 {
     return seed ^ frame;
+}
+
+uint jenkinsHash(uint x) 
+{
+    x += x << 10;
+    x ^= x >> 6; 
+    x += x << 3; 
+    x ^= x >> 11; 
+    x += x << 15; 
+    return x;
+}
+
+// Implementetion from Ray Tracing gems
+// https://github.com/boksajak/referencePT/blob/master/shaders/PathTracer.hlsl
+uint initRNG(uint2 pixelCoords, uint2 resolution, uint frameNumber)
+{
+    uint t = dot(float2(pixelCoords), float2(1, resolution.x));
+    uint seed = t ^ jenkinsHash(frameNumber);
+    // uint seed = dot(pixelCoords, uint2(1, resolution.x)) ^ jenkinsHash(frameNumber);
+    return jenkinsHash(seed); 
+}
+
+float uintToFloat(uint x) 
+{
+    return as_type<float>(0x3f800000 | (x >> 9)) - 1.f;
+}
+
+uint xorshift(thread uint& rngState) 
+{
+    rngState ^= rngState << 13; 
+    rngState ^= rngState >> 17; 
+    rngState ^= rngState << 5; 
+    return rngState;
+}
+
+float rnd(thread uint& rngState) 
+{
+    return uintToFloat(xorshift(rngState));
 }

@@ -67,6 +67,8 @@ void MetalRender::render(Buffer* output)
     {
         buildBuffers();
         createAccelerationStructures();
+        // create accum buffer, we don't need cpu access, make it device only
+        mAccumulationBuffer = mDevice->newBuffer(output->width() * output->height() * output->getElementSize(), MTL::ResourceStorageModePrivate);
     }
 
     _frame = (_frame + 1) % oka::kMaxFramesInFlight;
@@ -103,6 +105,9 @@ void MetalRender::render(Buffer* output)
     pUniformData->height = height;
     pUniformData->width = width;
     pUniformData->numLights = mScene->getLightsDesc().size();
+    pUniformData->samples_per_launch = 1;
+    pUniformData->enableAccumulation = 1;
+    pUniformData->randomFromHost = rand();
 
     glm::float4x4 invView = glm::inverse(camera.matrices.view);
     for (int column = 0; column < 4; column++)
@@ -137,6 +142,7 @@ void MetalRender::render(Buffer* output)
     pComputeEncoder->setBuffer(mLightBuffer, 0, 3);
     // Output
     pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 4);
+    pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 5);
 
     MTL::Size gridSize = MTL::Size(width, height, 1);
 
@@ -217,18 +223,6 @@ void MetalRender::buildBuffers()
     mLightBuffer->didModifyRange(NS::Range::Make(0, mLightBuffer->length()));
     _pVertexDataBuffer->didModifyRange(NS::Range::Make(0, _pVertexDataBuffer->length()));
     _pIndexBuffer->didModifyRange(NS::Range::Make(0, _pIndexBuffer->length()));
-
-    struct InstanceData
-    {
-        simd::float4x4 instanceTransform;
-        simd::float3x3 instanceNormalTransform;
-        simd::float4 instanceColor;
-    };
-
-    const size_t instanceDataSize = kMaxFramesInFlight * 1 * sizeof(InstanceData);
-    {
-        _pInstanceDataBuffer = mDevice->newBuffer(instanceDataSize, MTL::ResourceStorageModeManaged);
-    }
 
     for (size_t i = 0; i < kMaxFramesInFlight; ++i)
     {
