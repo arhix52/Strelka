@@ -86,6 +86,37 @@ float3 transformDirection(float3 p, float4x4 transform) {
     return (transform * float4(p.x, p.y, p.z, 0.0f)).xyz;
 }
 
+//  valid range of coordinates [-1; 1]
+static float3 unpackNormal(uint32_t val)
+{
+    float3 normal;
+    normal.z = ((val & 0xfff00000) >> 20) / 511.99999f * 2.0f - 1.0f;
+    normal.y = ((val & 0x000ffc00) >> 10) / 511.99999f * 2.0f - 1.0f;
+    normal.x = (val & 0x000003ff) / 511.99999f * 2.0f - 1.0f;
+
+    return normal;
+}
+
+//  valid range of coordinates [-10; 10]
+static float2 unpackUV(uint32_t val)
+{
+    float2 uv;
+    uv.y = ((val & 0xffff0000) >> 16) / 16383.99999f * 20.0f - 10.0f;
+    uv.x = (val & 0x0000ffff) / 16383.99999f * 20.0f - 10.0f;
+
+    return uv;
+}
+
+static __attribute__((always_inline)) float3 interpolateAttrib(thread const float3& attr1, thread const float3& attr2, thread const float3& attr3, thread const float2& bary)
+{
+    return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
+}
+
+static __attribute__((always_inline)) float2 interpolateAttrib(thread const float2& attr1, thread const float2& attr2, thread const float2& attr3, thread const float2& bary)
+{
+    return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
+}
+
 void generateCameraRay(uint2 pixelIndex,
                         uint seed,
                         thread float3& origin,
@@ -178,25 +209,37 @@ kernel void raytracingKernel(
         }
         else
         {
-            // unsigned int instanceIndex = intersection.instance_id;
+            Triangle triangle = *(const device Triangle*)intersection.primitive_data;
+
+            const float3 n0 = unpackNormal(triangle.normals[0]);
+            const float3 n1 = unpackNormal(triangle.normals[1]);
+            const float3 n2 = unpackNormal(triangle.normals[2]);
+
+            unsigned int instanceIndex = intersection.instance_id;
 
             // // Look up the mask for this instance, which indicates what type of geometry the ray hit.
             // unsigned int mask = instances[instanceIndex].mask;
 
-            // // The ray hit something. Look up the transformation matrix for this instance.
-            // float4x4 objectToWorldSpaceTransform(1.0f);
+            // The ray hit something. Look up the transformation matrix for this instance.
+            float4x4 objectToWorldSpaceTransform(1.0f);
 
-            // for (int column = 0; column < 4; column++)
-            //     for (int row = 0; row < 3; row++)
-            //         objectToWorldSpaceTransform[column][row] = instances[instanceIndex].transformationMatrix[column][row];
+            for (int column = 0; column < 4; column++)
+                for (int row = 0; row < 3; row++)
+                    objectToWorldSpaceTransform[column][row] = instances[instanceIndex].transformationMatrix[column][row];
 
             // // Compute the intersection point in world space.
             // float3 worldSpaceIntersectionPoint = ray.origin + ray.direction * intersection.distance;
 
             // unsigned primitiveIndex = intersection.primitive_id;
             // unsigned int geometryIndex = instances[instanceIndex].accelerationStructureIndex;
-            float2 barycentric_coords = intersection.triangle_barycentric_coord;
-            color = float3(1.0f - barycentric_coords.x - barycentric_coords.y, barycentric_coords.x, barycentric_coords.y);
+            const float2 barycentrics = intersection.triangle_barycentric_coord;
+
+            // float3 objectSpaceSurfaceNormal = interpolateVertexAttribute(triangle.normals, barycentric_coords);
+            const float3 objectNormal = normalize(interpolateAttrib(n0, n1, n2, barycentrics));
+            const float3 worldNormal = normalize(transformDirection(objectNormal, objectToWorldSpaceTransform));
+
+            color = worldNormal;
+            // color = float3(1.0f - barycentric_coords.x - barycentric_coords.y, barycentric_coords.x, barycentric_coords.y);
         }
         res[tid.y * uniforms.width + tid.x] = float4(color, 1.0f);
         // res[tid.y * uniforms.width + tid.x] = float4(1.0f);

@@ -321,6 +321,38 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
 {
     MetalRender::Mesh* result = new MetalRender::Mesh();
 
+    const uint32_t triangleCount = mesh.mCount / 3;
+
+    const std::vector<oka::Scene::Vertex>& vertices = mScene->getVertices();
+    const std::vector<uint32_t>& indices = mScene->getIndices();
+
+    std::vector<Triangle> triangleData(triangleCount);
+    for (int i = 0; i < triangleCount; ++i)
+    {
+        Triangle& curr = triangleData[i];
+        const uint32_t i0 = indices[mesh.mIndex + i * 3 + 0];
+        const uint32_t i1 = indices[mesh.mIndex + i * 3 + 1];
+        const uint32_t i2 = indices[mesh.mIndex + i * 3 + 2];
+        // Normals
+        curr.normals[0] = vertices[mesh.mVbOffset + i0].normal;
+        curr.normals[1] = vertices[mesh.mVbOffset + i1].normal;
+        curr.normals[2] = vertices[mesh.mVbOffset + i2].normal;
+        // Tangents
+        curr.tangent[0] = vertices[mesh.mVbOffset + i0].tangent;
+        curr.tangent[1] = vertices[mesh.mVbOffset + i1].tangent;
+        curr.tangent[2] = vertices[mesh.mVbOffset + i2].tangent;
+        // UVs
+        curr.uv[0] = vertices[mesh.mVbOffset + i0].uv;
+        curr.uv[1] = vertices[mesh.mVbOffset + i1].uv;
+        curr.uv[2] = vertices[mesh.mVbOffset + i2].uv;
+    }
+
+    MTL::Buffer* perPrimitiveBuffer = mDevice->newBuffer(triangleData.size() * sizeof(Triangle), MTL::ResourceStorageModeManaged);
+
+    memcpy(perPrimitiveBuffer->contents(), triangleData.data(), sizeof(Triangle) * triangleData.size());
+
+    perPrimitiveBuffer->didModifyRange(NS::Range(0, perPrimitiveBuffer->length()));
+
     MTL::AccelerationStructureTriangleGeometryDescriptor* geomDescriptor =
         MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
 
@@ -330,7 +362,12 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
     geomDescriptor->setIndexBuffer(_pIndexBuffer);
     geomDescriptor->setIndexBufferOffset(mesh.mIndex * sizeof(uint32_t));
     geomDescriptor->setIndexType(MTL::IndexTypeUInt32);
-    geomDescriptor->setTriangleCount(mesh.mCount / 3);
+    geomDescriptor->setTriangleCount(triangleCount);
+    // Setup per primitive data
+    geomDescriptor->setPrimitiveDataBuffer(perPrimitiveBuffer);
+    geomDescriptor->setPrimitiveDataBufferOffset(0);
+    geomDescriptor->setPrimitiveDataElementSize(sizeof(Triangle));
+    geomDescriptor->setPrimitiveDataStride(sizeof(Triangle));
 
     const NS::Array* geomDescriptors = NS::Array::array((const NS::Object* const*)&geomDescriptor, 1UL);
 
@@ -342,6 +379,7 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
 
     primDescriptor->release();
     geomDescriptor->release();
+    perPrimitiveBuffer->release();
     return result;
 }
 

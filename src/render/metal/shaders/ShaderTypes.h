@@ -69,8 +69,9 @@ struct Sphere {
 };
 
 struct Triangle {
-    vector_float3 normals[3];
-    vector_float3 colors[3];
+    uint32_t normals[3];
+    uint32_t tangent[3];
+    uint32_t uv[3];
 };
 
 #endif
