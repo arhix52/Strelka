@@ -37,8 +37,10 @@ if(MSVC)
       "$(VC_IncludePath);$(WindowsSDK_IncludePath);${OptiX_INCLUDE}")
 endif()
 
-add_subdirectory(external/glad)
-set_target_properties(glad PROPERTIES LINKER_LANGUAGE CXX)
+if(WIN32)
+  add_subdirectory(external/glad)
+  set_target_properties(glad PROPERTIES LINKER_LANGUAGE CXX)
+endif()
 
 set(ROOT_HOME ${CMAKE_CURRENT_LIST_DIR})
 set(OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
