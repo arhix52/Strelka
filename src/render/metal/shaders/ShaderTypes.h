@@ -36,36 +36,13 @@ struct Vertex
     float pad1;
 };
 
-struct Camera {
-    vector_float3 position;
-    vector_float3 right;
-    vector_float3 up;
-    vector_float3 forward;
-};
-
-struct AreaLight {
-    vector_float3 position;
-    vector_float3 forward;
-    vector_float3 right;
-    vector_float3 up;
-    vector_float3 color;
-};
-
 struct Uniforms {
     unsigned int width;
     unsigned int height;
     unsigned int frameIndex;
     unsigned int lightCount;
-    Camera camera;
     simd::float4x4 viewToWorld;
     simd::float4x4 clipToView;
-};
-
-struct Sphere {
-    packed_float3 origin;
-    float radiusSquared;
-    packed_float3 color;
-    float radius;
 };
 
 struct Triangle {

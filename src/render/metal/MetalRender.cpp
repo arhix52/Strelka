@@ -101,11 +101,6 @@ void MetalRender::render(Buffer* output)
     pUniformData->frameIndex = _frame;
     pUniformData->height = height;
     pUniformData->width = width;
-    pUniformData->camera.position = (float3){ 0.0f, 0.0f, -5.0f };
-    pUniformData->camera.forward = (float3){ 0.0f, 0.0f, 1.0f };
-    pUniformData->camera.right = (float3){ 1.0f, 0.0f, 0.0f };
-    pUniformData->camera.up = (float3){ 0.0f, 1.0f, 0.0f };
-
 
     glm::float4x4 invView = glm::inverse(camera.matrices.view);
     for (int column = 0; column < 4; column++)
