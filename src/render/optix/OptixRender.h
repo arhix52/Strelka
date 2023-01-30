@@ -100,9 +100,6 @@ private:
     Mesh* createMesh(const oka::Mesh& mesh);
     Curve* createCurve(const oka::Curve& curve);
 
-    SharedContext* mSharedCtx;
-    oka::Scene* mScene = nullptr;
-
     std::vector<Mesh*> mOptixMeshes;
     std::vector<Curve*> mOptixCurves;
 
@@ -152,27 +149,6 @@ public:
     OptixProgramGroup createRadianceClosestHitProgramGroup(PathTracerState& state,
                                                            char const* module_code,
                                                            size_t module_size);
-
-
-    void setSharedContext(SharedContext* ctx)
-    {
-        mSharedCtx = ctx;
-    }
-
-    SharedContext& getSharedContext()
-    {
-        return *mSharedCtx;
-    }
-
-    void setScene(Scene* scene)
-    {
-        mScene = scene;
-    }
-
-    Scene* getScene()
-    {
-        return mScene;
-    }
 };
 
 } // namespace oka

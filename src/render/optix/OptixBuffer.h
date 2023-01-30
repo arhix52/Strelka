@@ -19,6 +19,11 @@ public:
     void* map() override;
     void unmap() override;
 
+    void* getNativePtr()
+    {
+        return mDeviceData;
+    }
+
 protected:
     void* mDeviceData = nullptr;
     uint32_t mDeviceIndex = 0;

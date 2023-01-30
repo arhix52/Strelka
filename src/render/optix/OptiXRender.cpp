@@ -836,7 +836,7 @@ void OptiXRender::render(Buffer* output)
     params.scene.lights = (UniformLight*)d_lights;
     params.scene.numLights = mScene->getLights().size();
 
-    params.image = (uchar4 *) output->map();
+    params.image = (float4*) ((OptixBuffer*) output)->getNativePtr();
     params.subframe_index = getSharedContext().mFrameNumber;
     params.samples_per_launch = 1; // TODO: get from settings
     params.handle = mState.ias_handle;
@@ -918,7 +918,6 @@ Buffer* OptiXRender::createBuffer(const BufferDesc& desc)
     OptixBuffer* res = new OptixBuffer(devicePtr,  desc.format, desc.width, desc.height);
     return res;
 }
-
 
 void OptiXRender::createPointsBuffer()
 {

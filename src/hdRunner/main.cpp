@@ -27,7 +27,7 @@
 #include <pxr/usdImaging/usdImaging/delegate.h>
 
 #include <render/common.h>
-// #include <render/glfwrender.h>
+#include <render/buffer.h>
 
 #include <display/glfwdisplay.h>
 
@@ -219,18 +219,14 @@ public:
         // GfRotation a(GfVec3d(1.0, 0.0, 0.0), upAngle * rotationSpeed);
         // GfRotation a(GfVec3d(1.0, 0.0, 0.0), pitch);
         GfRotation a(getRight(), upAngle * rotationSpeed);
-        GfRotation b(GfVec3d(0.0, 0.0, 1.0), rightAngle * rotationSpeed);
-        // GfRotation b(getUp(), rightAngle * rotationSpeed);
+        // GfRotation b(GfVec3d(0.0, 0.0, 1.0), rightAngle * rotationSpeed);
+        GfRotation b(getUp(), rightAngle * rotationSpeed);
         // GfRotation b(GfVec3d(0.0, 1.0, 0.0), yaw);
 
         // GfRotation b(getUp(), rightAngle * rotationSpeed);
 
-        GfRotation c = a * b;
-        // mOrientation = a.GetQuat() * mOrientation * b.GetQuat();
-        GfQuatd cq = c.GetQuat();
-        cq.Normalize();
-        mOrientation = cq * mOrientation;
-        mOrientation.Normalize();
+        //GfRotation c = a * b;
+        mOrientation = a.GetQuat() * mOrientation * b.GetQuat();
         updateViewMatrix();
         yaw *= .5;
         pitch *= .5;
@@ -740,14 +736,15 @@ int main(int argc, const char* argv[])
 
         display.onBeginFrame();
         engine.Execute(renderIndex, &tasks); // main path tracing rendering in fixed render resolution
-        oka::CUDAOutputBuffer<uchar4>* outputBuffer =
-            surfaceController.getRenderBuffer(versionId)->GetResource(false).UncheckedGet<oka::CUDAOutputBuffer<uchar4>*>();
+        oka::Buffer* outputBuffer = surfaceController.getRenderBuffer(versionId)->GetResource(false).UncheckedGet<oka::Buffer*>();
         oka::ImageBuffer outputImage;
+        // upload to host
+        outputBuffer->map();
         outputImage.data = outputBuffer->getHostPointer();
         outputImage.dataSize = outputBuffer->getHostDataSize();
         outputImage.height = outputBuffer->height();
         outputImage.width = outputBuffer->width();
-        outputImage.pixel_format = oka::BufferImageFormat::UNSIGNED_BYTE4;
+        outputImage.pixel_format = outputBuffer->getFormat();
 
         display.drawFrame(outputImage); // blit rendered image to swapchain
         display.drawUI(); // render ui to swapchain image in window resolution

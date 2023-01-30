@@ -60,6 +60,7 @@ void HdStrelkaRenderDelegate::SetDrivers(HdDriverVector const& drivers)
     {
         if (hdDriver->name == _Tokens->HdStrelkaDriver && hdDriver->driver.IsHolding<oka::SharedContext*>())
         {
+            assert(mRenderer);
             mSharedCtx = hdDriver->driver.UncheckedGet<oka::SharedContext*>();
             mRenderer->setSharedContext(mSharedCtx);
             mRenderer->init();

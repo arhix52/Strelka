@@ -159,11 +159,11 @@ extern "C" __global__ void __raygen__rg()
             accum_color = lerp(accum_color_prev, accum_color, a);
         }
         params.accum[image_index] = make_float4(accum_color, 1.0f);
-        params.image[image_index] = make_color(accum_color);
+        params.image[image_index] = make_float4(accum_color, 1.0f);
     }
     else
     {
-        params.image[image_index] = make_color(result);
+        params.image[image_index] = make_float4(result, 1.0f);
     }
 }
 

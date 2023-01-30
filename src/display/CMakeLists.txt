@@ -16,13 +16,13 @@ set(IMGUI_SOURCES
         )
 set(DISPLAYLIB_NAME display)
 add_library(${DISPLAYLIB_NAME} STATIC ${DISPLAY_SOURCES} ${IMGUI_SOURCES})
-target_include_directories(${DISPLAYLIB_NAME} PUBLIC  ${ROOT_HOME}/external/imgui/include)
 target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/include/)
 target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/include/display)
 
 target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/external/glm)
 target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/external/glfw/include)
 target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/external/glad/include)
+target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/external/imgui/include)
 
 target_link_libraries(${DISPLAYLIB_NAME} PUBLIC 
     "${ROOT_HOME}/external/glfw/glfw3.lib"

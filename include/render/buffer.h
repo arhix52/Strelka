@@ -46,7 +46,7 @@ public:
     }
     size_t getHostDataSize()
     {
-        return mHostData.size() * getElementSize();
+        return mHostData.size();
     }
 
     static size_t getElementSize(BufferFormat format)
@@ -69,9 +69,14 @@ public:
         return 0;
     }
 
-    size_t getElementSize()
+    size_t getElementSize() const
     {
         return Buffer::getElementSize(mFormat);
+    }
+
+    BufferFormat getFormat() const
+    {
+        return mFormat;
     }
 
 protected:

@@ -31,7 +31,7 @@ struct SceneData
 
 struct Params
 {
-    uchar4* image;
+    float4* image;
     float4* accum;
     unsigned int image_width;
     unsigned int image_height;
