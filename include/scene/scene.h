@@ -28,7 +28,7 @@ struct Mesh
 
 struct Curve
 {
-    enum class Type: uint8_t
+    enum class Type : uint8_t
     {
         eLinear,
         eCubic,
@@ -309,7 +309,7 @@ public:
         return mCurves;
     }
 
-    const std::vector<glm::float3>& getCurvesPoint() const 
+    const std::vector<glm::float3>& getCurvesPoint() const
     {
         return mCurvePoints;
     }
@@ -319,7 +319,7 @@ public:
         return mCurveWidths;
     }
 
-    const std::vector<uint32_t>& getCurvesVertexCounts() const 
+    const std::vector<uint32_t>& getCurvesVertexCounts() const
     {
         return mCurveVertexCounts;
     }
@@ -410,7 +410,10 @@ public:
 
     uint32_t addMaterial(const MaterialDescription& material);
 
-    uint32_t createCurve(const Curve::Type type, const std::vector<uint32_t>& vertexCounts, const std::vector<glm::float3>& points, const std::vector<float>& widths);
+    uint32_t createCurve(const Curve::Type type,
+                         const std::vector<uint32_t>& vertexCounts,
+                         const std::vector<glm::float3>& points,
+                         const std::vector<float>& widths);
 
     uint32_t createLight(const UniformLightDesc& desc);
     /// <summary>

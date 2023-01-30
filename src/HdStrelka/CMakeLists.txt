@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.24)
 
 find_package(USD REQUIRED HINTS ${USD_DIR} NAMES pxr)
 message(STATUS "USD LIBRARY: ${USD_DIR}")
@@ -37,7 +37,7 @@ set(HD_PLUGIN_SOURCES
     ${ROOT_HOME}/src/HdStrelka/MdlDiscoveryPlugin.h
     ${ROOT_HOME}/src/HdStrelka/MdlDiscoveryPlugin.cpp)
 set(HD_PLUGIN_NAME HdStrelka)
-set(Boost_USE_STATIC_LIBS OFF) 
+set(Boost_USE_STATIC_LIBS OFF)
 set(BUILD_SHARED_LIBS ON)
 
 add_library(${HD_PLUGIN_NAME} SHARED ${HD_PLUGIN_SOURCES})

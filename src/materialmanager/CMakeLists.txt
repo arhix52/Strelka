@@ -2,12 +2,6 @@ cmake_minimum_required(VERSION 3.20)
 
 find_package(MaterialX REQUIRED)
 
-find_program(clang_PATH clang)
-message(STATUS "clang_PATH: ${clang_PATH}")
-# Find at least a 5.0 version of CUDA. find_package(CUDA 5.0 REQUIRED)
-# message(STATUS "CUDA Toolkit Root: ${CUDA_TOOLKIT_ROOT_DIR}") message(STATUS
-# "CUDA Include DIR: ${CUDA_INCLUDE_DIRS}") Search for the OptiX libraries and
-# include files. 
 set(MATERIALLIB_NAME materialmanager)
 
 # Material Manager
@@ -36,9 +30,8 @@ target_include_directories(
   ${MATERIALLIB_NAME}
   PUBLIC ${ROOT_HOME}/include/materialmanager
   PRIVATE ${ROOT_HOME}/include/render/)
-target_link_libraries(
-  ${MATERIALLIB_NAME} PRIVATE # hdMtlx
-                              MaterialXCore MaterialXFormat MaterialXGenMdl)
+target_link_libraries(${MATERIALLIB_NAME} PRIVATE MaterialXCore MaterialXFormat
+                                                  MaterialXGenMdl)
 
 add_custom_command(
   TARGET ${MATERIALLIB_NAME}
@@ -47,12 +40,14 @@ add_custom_command(
           "${OUTPUT_DIRECTORY}/optix/shaders")
 
 if(WIN32)
+  find_program(clang_PATH clang)
+  message(STATUS "clang_PATH: ${clang_PATH}")
 
-set(OptiX_INSTALL_DIR $ENV{OPTIX_DIR}) 
-message(STATUS "OptiX SDK DIR: ${OptiX_INSTALL_DIR}") 
-find_package(OptiX REQUIRED) 
-message(STATUS "OptiX Include DIR: ${OptiX_INCLUDE}") 
-include_directories(${OptiX_INCLUDE})
+  set(OptiX_INSTALL_DIR $ENV{OPTIX_DIR})
+  message(STATUS "OptiX SDK DIR: ${OptiX_INSTALL_DIR}")
+  find_package(OptiX REQUIRED)
+  message(STATUS "OptiX Include DIR: ${OptiX_INCLUDE}")
+  include_directories(${OptiX_INCLUDE})
 
   add_custom_command(
     TARGET ${MATERIALLIB_NAME}
@@ -83,12 +78,12 @@ include_directories(${OptiX_INCLUDE})
     COMMAND ${CMAKE_COMMAND} -E echo
             "Compile OptixRender_radiance_closest_hit bytecode using clang..."
     COMMAND
-      ${clang_PATH} -I ${OptiX_INCLUDE} -I
-      ${ROOT_HOME}/external/mdl-sdk/include -I ${ROOT_HOME}/src/render/ -I
-      ${ROOT_HOME}/include/render -I ${ROOT_HOME}/external/glm -I ${ROOT_HOME}
-      ${_CLANG_FLAGS} -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -emit-llvm -c
-      -O3 -ffast-math -fcuda-flush-denormals-to-zero -fno-vectorize
-      --cuda-gpu-arch=sm_75 --cuda-device-only
+      ${clang_PATH} -I ${OptiX_INCLUDE} -I ${ROOT_HOME}/external/mdl-sdk/include
+      -I ${ROOT_HOME}/src/render/ -I ${ROOT_HOME}/include/render -I
+      ${ROOT_HOME}/external/glm -I ${ROOT_HOME} ${_CLANG_FLAGS}
+      -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -emit-llvm -c -O3 -ffast-math
+      -fcuda-flush-denormals-to-zero -fno-vectorize --cuda-gpu-arch=sm_75
+      --cuda-device-only
       ${ROOT_HOME}/src/render/optix/OptixRender_radiance_closest_hit.cu -o
       ${OUTPUT_DIRECTORY}/optix/shaders/OptixRender_radiance_closest_hit.bc -MD
       -MT ${OUTPUT_DIRECTORY}/optix/shaders/OptixRender_radiance_closest_hit.bc

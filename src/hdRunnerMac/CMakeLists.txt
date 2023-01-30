@@ -37,7 +37,6 @@ target_link_libraries(
   ${RUNNER_NAME}
   PUBLIC scene
          settings
-         # display
          render
          ar
          cameraUtil
@@ -53,8 +52,8 @@ target_link_libraries(
 add_custom_command(
   TARGET ${RUNNER_NAME}
   PRE_BUILD
-  COMMAND ${CMAKE_COMMAND} -E create_symlink "${ROOT_HOME}/src/render/metal/shaders"
-          "${OUTPUT_DIRECTORY}/shaders")
+  COMMAND ${CMAKE_COMMAND} -E create_symlink
+          "${ROOT_HOME}/src/render/metal/shaders" "${OUTPUT_DIRECTORY}/shaders")
 
 # install_name_tool -change @rpath/Python3.framework/Versions/3.9/Python3
 # @rpath/../Python3 ./work/Strelka/build/src/hdRunnerMac/HdRunner

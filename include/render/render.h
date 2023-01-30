@@ -6,6 +6,13 @@
 namespace oka
 {
 
+enum class RenderType : int
+{
+    eOptiX = 0,
+    eMetal,
+    eCompute,
+};
+
 /**
  * Render interface
  */
@@ -43,17 +50,10 @@ protected:
     oka::Scene* mScene = nullptr;
 };
 
-enum class RenderType: int
-{
-    eOptiX = 0,
-    eMetal,
-    eCompute,
-};
-
 class RenderFactory
 {
 public:
-    static Render* createRender(const RenderType type); 
+    static Render* createRender(const RenderType type);
 };
 
 } // namespace oka

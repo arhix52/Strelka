@@ -13,8 +13,6 @@ static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
 struct float3;
 struct float4;
 #else
-
-
 using Float3 = glm::float3;
 using Float4 = glm::float4;
 #endif

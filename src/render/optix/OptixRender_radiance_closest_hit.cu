@@ -262,7 +262,6 @@ __device__ float3 estimateDirectLighting(uint32_t& rngSeed, Mdl_state& state, fl
     return r;
 }
 
-
 // Get curve hit-point in world coordinates.
 static __forceinline__ __device__ float3 getHitPoint()
 {

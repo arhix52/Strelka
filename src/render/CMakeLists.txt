@@ -19,6 +19,13 @@ if(WIN32)
   find_package(OptiX REQUIRED)
   message(STATUS "OptiX Include DIR: ${OptiX_INCLUDE}")
   include_directories(${OptiX_INCLUDE})
+
+  # Hack to get intellisense working for CUDA includes
+  if(MSVC)
+    set(CMAKE_VS_SDK_INCLUDE_DIRECTORIES
+        "$(VC_IncludePath);$(WindowsSDK_IncludePath);${OptiX_INCLUDE}")
+  endif()
+
   set(RENDER_SOURCES
       ${RENDER_SOURCES_COMMON}
       ${ROOT_HOME}/include/render/Camera.h
