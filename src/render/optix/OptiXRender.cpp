@@ -838,7 +838,7 @@ void OptiXRender::render(Buffer* output)
 
     params.image = (float4*) ((OptixBuffer*) output)->getNativePtr();
     params.subframe_index = getSharedContext().mFrameNumber;
-    params.samples_per_launch = 1; // TODO: get from settings
+    params.samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
     params.handle = mState.ias_handle;
     params.cam_eye = make_float3(cam.eye().x, cam.eye().y, cam.eye().z);
     params.max_depth = settings.getAs<uint32_t>("render/pt/depth");

@@ -92,6 +92,8 @@ class CameraController : public oka::InputHandler
     GfCamera mGfCam;
     GfQuatd mOrientation;
     GfVec3d mPosition;
+    GfVec3d mWorldUp;
+    GfVec3d mWorldForward;
 
     float rotationSpeed = 0.025f;
     float movementSpeed = 5.0f;
@@ -121,18 +123,29 @@ public:
     GfVec2d mMousePos;
 
 public:
-    GfVec3d getFront()
+    // local cameras axis
+    GfVec3d getFront() const
     {
         return mOrientation.Transform(GfVec3d(0.0, 0.0, -1.0));
     }
-    GfVec3d getUp()
+    GfVec3d getUp() const
     {
         return mOrientation.Transform(GfVec3d(0.0, 1.0, 0.0));
     }
-    GfVec3d getRight()
+    GfVec3d getRight() const
     {
         return mOrientation.Transform(GfVec3d(1.0, 0.0, 0.0));
     }
+    // global camera axis depending on scene settings
+    GfVec3d getWorldUp() const
+    {
+        return mWorldUp;
+    }
+    GfVec3d getWorldForward() const
+    {
+        return mWorldForward;
+    }
+
     bool moving()
     {
         return keys.left || keys.right || keys.up || keys.down || keys.forward || keys.back || mouseButtons.right ||
@@ -144,9 +157,9 @@ public:
         {
             const float moveSpeed = deltaTime * movementSpeed;
             if (keys.up)
-                mPosition += getUp() * moveSpeed;
+                mPosition += getWorldUp() * moveSpeed;
             if (keys.down)
-                mPosition -= getUp() * moveSpeed;
+                mPosition -= getWorldUp() * moveSpeed;
             if (keys.left)
                 mPosition -= getRight() * moveSpeed;
             if (keys.right)
@@ -159,77 +172,17 @@ public:
         }
     }
 
-    void ChangePitch(float degrees)
-    {
-        // Check bounds with the max pitch rate so that we aren't moving too fast
-        if (degrees < -max_pitch_rate)
-        {
-            degrees = -max_pitch_rate;
-        }
-        else if (degrees > max_pitch_rate)
-        {
-            degrees = max_pitch_rate;
-        }
-        pitch += degrees;
-
-        // Check bounds for the camera pitch
-        if (pitch > 360.0f)
-        {
-            pitch -= 360.0f;
-        }
-        else if (pitch < -360.0f)
-        {
-            pitch += 360.0f;
-        }
-    }
-    void ChangeHeading(float degrees)
-    {
-        // Check bounds with the max heading rate so that we aren't moving too fast
-        if (degrees < -max_yaw_rate)
-        {
-            degrees = -max_yaw_rate;
-        }
-        else if (degrees > max_yaw_rate)
-        {
-            degrees = max_yaw_rate;
-        }
-        // This controls how the heading is changed if the camera is pointed straight up or down
-        // The heading delta direction changes
-        if (pitch > 90 && pitch < 270 || (pitch < -90 && pitch > -270))
-        {
-            yaw -= degrees;
-        }
-        else
-        {
-            yaw += degrees;
-        }
-        // Check bounds for the camera heading
-        if (yaw > 360.0f)
-        {
-            yaw -= 360.0f;
-        }
-        else if (yaw < -360.0f)
-        {
-            yaw += 360.0f;
-        }
-    }
-
     void rotate(double rightAngle, double upAngle)
     {
-        // GfRotation a(GfVec3d(1.0, 0.0, 0.0), upAngle * rotationSpeed);
-        // GfRotation a(GfVec3d(1.0, 0.0, 0.0), pitch);
         GfRotation a(getRight(), upAngle * rotationSpeed);
-        // GfRotation b(GfVec3d(0.0, 0.0, 1.0), rightAngle * rotationSpeed);
-        GfRotation b(getUp(), rightAngle * rotationSpeed);
-        // GfRotation b(GfVec3d(0.0, 1.0, 0.0), yaw);
+        GfRotation b(getWorldUp(), rightAngle * rotationSpeed);
 
-        // GfRotation b(getUp(), rightAngle * rotationSpeed);
-
-        //GfRotation c = a * b;
-        mOrientation = a.GetQuat() * mOrientation * b.GetQuat();
+        GfRotation c = a * b;
+        GfQuatd cq = c.GetQuat();
+        cq.Normalize();
+        mOrientation = cq * mOrientation;
+        mOrientation.Normalize();
         updateViewMatrix();
-        yaw *= .5;
-        pitch *= .5;
     }
 
     void translate(GfVec3d delta)
@@ -252,8 +205,18 @@ public:
         return mGfCam;
     }
 
-    CameraController(UsdGeomCamera& cam)
+    CameraController(UsdGeomCamera& cam, bool isYup)
     {
+        if (isYup)
+        {
+            mWorldUp = GfVec3d(0.0, 1.0, 0.0);
+            mWorldForward = GfVec3d(0.0, 0.0, -1.0);
+        }
+        else
+        {
+            mWorldUp = GfVec3d(0.0, 0.0, 1.0);
+            mWorldForward = GfVec3d(0.0, 1.0, 0.0);
+        }
         mGfCam = cam.GetCamera(0.0);
         GfMatrix4d xform = mGfCam.GetTransform();
         xform.Orthonormalize();
@@ -337,9 +300,6 @@ public:
 
         if (mouseButtons.right)
         {
-            // rotate(dx, dy);
-            ChangeHeading(rotationSpeed * dx);
-            ChangePitch(rotationSpeed * dy);
             rotate(dx, dy);
         }
         if (mouseButtons.left)
@@ -489,8 +449,12 @@ int main(int argc, const char* argv[])
     // config. options
     cxxopts::Options options("Strelka -s <USD Scene path>", "commands");
 
-    options.add_options()("s, scene", "scene path", cxxopts::value<std::string>()->default_value(""))(
-        "i, iteration", "Iteration to capture", cxxopts::value<int32_t>()->default_value("-1"))("h, help", "Print usage");
+    options.add_options()
+        ("s, scene", "scene path", cxxopts::value<std::string>()->default_value(""))
+        ("i, iteration", "Iteration to capture", cxxopts::value<int32_t>()->default_value("-1"))
+         ("h, help", "Print usage")
+        ("t, spp_total", "spp total", cxxopts::value<int32_t>()->default_value("64"))
+        ("f, spp_subframe", "spp subframe", cxxopts::value<int32_t>()->default_value("1"));
 
     options.parse_positional({ "s" });
     auto result = options.parse(argc, argv);
@@ -536,7 +500,8 @@ int main(int argc, const char* argv[])
     ctx->mSettingsManager->setAs<uint32_t>("render/width", imageWidth);
     ctx->mSettingsManager->setAs<uint32_t>("render/height", imageHeight);
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/depth", 6);
-    ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", 1);
+    ctx->mSettingsManager->setAs<uint32_t>("render/pt/sppTotal", result["t"].as<int32_t>());
+    ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", result["f"].as<int32_t>());
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/iteration", 0);
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/stratifiedSamplingType", 0); // 0 - none, 1 - random, 2 -
                                                                                    // stratified sampling, 3 - optimized
@@ -584,7 +549,8 @@ int main(int argc, const char* argv[])
     fflush(stdout);
 
     // Print the up-axis
-    std::cout << "Stage up-axis: " << UsdGeomGetStageUpAxis(stage) << std::endl;
+    TfToken upAxis = UsdGeomGetStageUpAxis(stage);
+    std::cout << "Stage up-axis: " << upAxis << std::endl;
 
     // Print the stage's linear units, or "meters per unit"
     std::cout << "Meters per unit: " << UsdGeomGetStageMetersPerUnit(stage) << std::endl;
@@ -608,7 +574,7 @@ int main(int argc, const char* argv[])
     cameraPath = SdfPath::EmptyPath();
     HdCamera* camera = FindCamera(stage, renderIndex, cameraPath);
     cam = UsdGeomCamera::Get(stage, cameraPath);
-    CameraController cameraController(cam);
+    CameraController cameraController(cam, upAxis == UsdGeomTokens->y);
 
     // std::vector<std::pair<HdCamera*, SdfPath>> cameras = FindAllCameras(stage, renderIndex);
 
@@ -656,9 +622,13 @@ int main(int argc, const char* argv[])
     display.setResizeHandler(&surfaceController);
 
     uint64_t frameCount = 0;
-
+    oka::ImageBuffer outputImageCopy;
+    uint32_t frameSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp");
+    uint32_t sppTotal = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
+    uint32_t leftSpp = sppTotal;
     bool needCopyBuffer = false;
     int32_t waitFramesForScreenshot = -1;
+    uint32_t iteration = 0;
 
     while (!display.windowShouldClose())
     {
@@ -686,12 +656,16 @@ int main(int argc, const char* argv[])
         static auto prevTime = std::chrono::high_resolution_clock::now();
         auto currentTime = std::chrono::high_resolution_clock::now();
         const double deltaTime = std::chrono::duration<double, std::milli>(currentTime - prevTime).count() / 1000.0;
+
+        auto tmpCam = cameraController.getCamera();
+        auto transform = tmpCam.GetTransform();
+
         cameraController.update(deltaTime);
         prevTime = currentTime;
 
         cam.SetFromCamera(cameraController.getCamera(), 0.0);
 
-        uint32_t iteration = ctx->mSettingsManager->getAs<uint32_t>("render/pt/iteration");
+        //  uint32_t iteration = ctx->mSettingsManager->getAs<uint32_t>("render/pt/iteration");
         if (iteration == iterationToCapture)
         {
             ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
@@ -735,18 +709,49 @@ int main(int argc, const char* argv[])
         //         }
 
         display.onBeginFrame();
-        engine.Execute(renderIndex, &tasks); // main path tracing rendering in fixed render resolution
-        oka::Buffer* outputBuffer = surfaceController.getRenderBuffer(versionId)->GetResource(false).UncheckedGet<oka::Buffer*>();
-        oka::ImageBuffer outputImage;
-        // upload to host
-        outputBuffer->map();
-        outputImage.data = outputBuffer->getHostPointer();
-        outputImage.dataSize = outputBuffer->getHostDataSize();
-        outputImage.height = outputBuffer->height();
-        outputImage.width = outputBuffer->width();
-        outputImage.pixel_format = outputBuffer->getFormat();
+        if (cameraController.getCamera().GetTransform() != transform ||
+            sppTotal != ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal") ||
+            frameSpp != ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp"))
+        {
+            frameSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp");
+            sppTotal = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
+            leftSpp = sppTotal;
+        }
 
-        display.drawFrame(outputImage); // blit rendered image to swapchain
+        // This can be moved to render itself
+        if (leftSpp > 0)
+        {
+            uint32_t savedFSpp = -1;
+            if (frameSpp > leftSpp)
+            {
+                savedFSpp = frameSpp;
+                ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", leftSpp);
+                frameSpp = leftSpp;
+            }
+
+            engine.Execute(renderIndex, &tasks); // main path tracing rendering in fixed render resolution
+            oka::Buffer* outputBuffer =
+                surfaceController.getRenderBuffer(versionId)->GetResource(false).UncheckedGet<oka::Buffer*>();
+            oka::ImageBuffer outputImage;
+            // upload to host
+            outputBuffer->map();
+            outputImage.data = outputBuffer->getHostPointer();
+            outputImage.dataSize = outputBuffer->getHostDataSize();
+            outputImage.height = outputBuffer->height();
+            outputImage.width = outputBuffer->width();
+            outputImage.pixel_format = outputBuffer->getFormat();
+            outputImageCopy = outputImage;
+
+            leftSpp -= frameSpp;
+
+            if (savedFSpp != -1)
+            {
+                frameSpp = savedFSpp;
+                ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", frameSpp);
+            }
+        }
+
+        display.drawFrame(outputImageCopy); // blit rendered image to swapchain
         display.drawUI(); // render ui to swapchain image in window resolution
         display.onEndFrame(); // submit command buffer and present
 
