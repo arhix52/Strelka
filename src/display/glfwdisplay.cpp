@@ -573,6 +573,10 @@ void glfwdisplay::drawUI()
     {
         mCtx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
     }
+
+    float cameraSpeed = mCtx->mSettingsManager->getAs<float>("render/cameraSpeed");
+    ImGui::InputFloat("Camera Speed", (float*)&cameraSpeed, 0.5);
+    mCtx->mSettingsManager->setAs<float>("render/cameraSpeed", cameraSpeed);
         /*
         if (ImGui::BeginCombo("Tonemap", tonemapItems[currentTonemapItemId]))
         {
@@ -607,6 +611,11 @@ void glfwdisplay::drawUI()
             upscaleFactor = 1.0f;
         }
         mCtx->mSettingsManager->setAs<float>("render/pt/upscaleFactor", upscaleFactor);
+
+        if (ImGui::Button("Capture Screen"))
+        {
+            mCtx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
+        }
 
         // bool isRecreate = ImGui::Button("Recreate BVH");
         // renderConfig.recreateBVH = isRecreate ? true : false;

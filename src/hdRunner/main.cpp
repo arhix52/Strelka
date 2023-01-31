@@ -96,7 +96,7 @@ class CameraController : public oka::InputHandler
     GfVec3d mWorldForward;
 
     float rotationSpeed = 0.025f;
-    float movementSpeed = 5.0f;
+    float movementSpeed = 1.0f;
 
     double pitch = 0.0;
     double yaw = 0.0;
@@ -151,8 +151,9 @@ public:
         return keys.left || keys.right || keys.up || keys.down || keys.forward || keys.back || mouseButtons.right ||
                mouseButtons.left || mouseButtons.middle;
     }
-    void update(double deltaTime)
+    void update(double deltaTime, float speed)
     {
+        movementSpeed = speed;
         if (moving())
         {
             const float moveSpeed = deltaTime * movementSpeed;
@@ -500,6 +501,7 @@ int main(int argc, const char* argv[])
                                                                                    // stratified sampling
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/tonemapperType", 0); // 0 - reinhard, 1 - aces, 2 - filmic
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/debug", 0); // 0 - none, 1 - normals
+    ctx->mSettingsManager->setAs<float>("render/cameraSpeed", 1.0f);
     ctx->mSettingsManager->setAs<float>("render/pt/upscaleFactor", 0.5f);
     ctx->mSettingsManager->setAs<bool>("render/pt/enableUpscale", true);
     ctx->mSettingsManager->setAs<bool>("render/pt/enableAcc", true);
@@ -622,7 +624,7 @@ int main(int argc, const char* argv[])
     uint32_t leftSpp = sppTotal;
     bool needCopyBuffer = false;
     int32_t waitFramesForScreenshot = -1;
-    uint32_t iteration = 0;
+    uint32_t iteration = sppTotal - leftSpp;
 
     while (!display.windowShouldClose())
     {
@@ -654,7 +656,8 @@ int main(int argc, const char* argv[])
         auto tmpCam = cameraController.getCamera();
         auto transform = tmpCam.GetTransform();
 
-        cameraController.update(deltaTime);
+        uint32_t cameraSpeed = ctx->mSettingsManager->getAs<uint32_t>("render/cameraSpeed");
+        cameraController.update(deltaTime, cameraSpeed);
         prevTime = currentTime;
 
         cam.SetFromCamera(cameraController.getCamera(), 0.0);
@@ -707,7 +710,7 @@ int main(int argc, const char* argv[])
                 ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
                 ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", false);
             }
-
+            iteration = sppTotal - leftSpp;
         }
 
         bool needScreenshot = ctx->mSettingsManager->getAs<bool>("render/pt/needScreenshot");
@@ -741,7 +744,7 @@ int main(int argc, const char* argv[])
         surfaceController.release(versionId);
 
         display.setWindowTitle((std::string("Strelka") + " [" + std::to_string(frameTime) + " ms]" + " [" +
-                                std::to_string(sppTotal - leftSpp) + " iteration]")
+                                std::to_string(iteration) + " iteration]")
                                    .c_str());
         ++frameCount;
     }
