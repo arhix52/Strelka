@@ -569,9 +569,9 @@ void glfwdisplay::drawUI()
             ImGui::TreePop();
     }
 
-    uint32_t cameraSpeed = mCtx->mSettingsManager->getAs<uint32_t>("render/cameraSpeed");
-    ImGui::SliderInt("Camera Speed", (int*)&cameraSpeed,1, 100);
-    mCtx->mSettingsManager->setAs<uint32_t>("render/cameraSpeed", cameraSpeed);
+    float cameraSpeed = mCtx->mSettingsManager->getAs<float>("render/cameraSpeed");
+    ImGui::InputFloat("Camera Speed", (float*)&cameraSpeed, 0.5);
+    mCtx->mSettingsManager->setAs<float>("render/cameraSpeed", cameraSpeed);
         /*
         if (ImGui::BeginCombo("Tonemap", tonemapItems[currentTonemapItemId]))
         {
