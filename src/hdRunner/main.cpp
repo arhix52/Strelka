@@ -450,14 +450,6 @@ bool saveScreenshot(std::string& outputFilePath, unsigned char* mappedMem, uint3
 
     int pixelCount = imageWidth * imageHeight;
 
-    for (int i = 0; i < pixelCount; i++)
-    {
-        mappedMem[i * 4 + 0] = GfConvertLinearToDisplay(mappedMem[i * 4 + 0]);
-        mappedMem[i * 4 + 1] = GfConvertLinearToDisplay(mappedMem[i * 4 + 1]);
-        mappedMem[i * 4 + 2] = GfConvertLinearToDisplay(mappedMem[i * 4 + 2]);
-    }
-
-
     // Write image to file.
     TfStopwatch timerWrite;
     timerWrite.Start();
@@ -497,7 +489,8 @@ int main(int argc, const char* argv[])
     options.add_options()("s, scene", "scene path", cxxopts::value<std::string>()->default_value(""))(
         "i, iteration", "Iteration to capture", cxxopts::value<int32_t>()->default_value("-1"))(
         "h, help", "Print usage")("t, spp_total", "spp total", cxxopts::value<int32_t>()->default_value("64"))(
-        "f, spp_subframe", "spp subframe", cxxopts::value<int32_t>()->default_value("1"));
+        "f, spp_subframe", "spp subframe", cxxopts::value<int32_t>()->default_value("1"))(
+        "c, need_screenshot", "Screenshot after spp total", cxxopts::value<bool>()->default_value("false"));
 
     options.parse_positional({ "s" });
     auto result = options.parse(argc, argv);
@@ -557,6 +550,7 @@ int main(int argc, const char* argv[])
     ctx->mSettingsManager->setAs<bool>("render/pt/enableTonemap", true);
     ctx->mSettingsManager->setAs<bool>("render/pt/isResized", false);
     ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", false);
+    ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", result["c"].as<bool>());
 
     oka::glfwdisplay display;
     display.init(imageWidth, imageHeight, ctx);
@@ -750,6 +744,13 @@ int main(int argc, const char* argv[])
                 frameSpp = savedFSpp;
                 ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", frameSpp);
             }
+
+            if (leftSpp == 0 && ctx->mSettingsManager->getAs<bool>("render/pt/screenshotSPP"))
+            {
+                ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
+                ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", false);
+            }
+
         }
 
         bool needScreenshot = ctx->mSettingsManager->getAs<bool>("render/pt/needScreenshot");
@@ -783,7 +784,7 @@ int main(int argc, const char* argv[])
         surfaceController.release(versionId);
 
         display.setWindowTitle((std::string("Strelka") + " [" + std::to_string(frameTime) + " ms]" + " [" +
-                                std::to_string(iteration) + " iteration]")
+                                std::to_string(sppTotal - leftSpp) + " iteration]")
                                    .c_str());
         ++frameCount;
     }
