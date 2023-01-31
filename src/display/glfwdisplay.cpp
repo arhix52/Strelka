@@ -569,6 +569,11 @@ void glfwdisplay::drawUI()
             ImGui::TreePop();
     }
 
+    if (ImGui::Button("Capture Screen"))
+    {
+        mCtx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
+    }
+
     float cameraSpeed = mCtx->mSettingsManager->getAs<float>("render/cameraSpeed");
     ImGui::InputFloat("Camera Speed", (float*)&cameraSpeed, 0.5);
     mCtx->mSettingsManager->setAs<float>("render/cameraSpeed", cameraSpeed);

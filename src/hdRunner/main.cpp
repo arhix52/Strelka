@@ -92,6 +92,8 @@ class CameraController : public oka::InputHandler
     GfCamera mGfCam;
     GfQuatd mOrientation;
     GfVec3d mPosition;
+    GfVec3d mWorldUp;
+    GfVec3d mWorldForward;
 
     float rotationSpeed = 0.025f;
     float movementSpeed = 1.0f;
@@ -121,18 +123,29 @@ public:
     GfVec2d mMousePos;
 
 public:
-    GfVec3d getFront()
+    // local cameras axis
+    GfVec3d getFront() const
     {
         return mOrientation.Transform(GfVec3d(0.0, 0.0, -1.0));
     }
-    GfVec3d getUp()
+    GfVec3d getUp() const
     {
         return mOrientation.Transform(GfVec3d(0.0, 1.0, 0.0));
     }
-    GfVec3d getRight()
+    GfVec3d getRight() const
     {
         return mOrientation.Transform(GfVec3d(1.0, 0.0, 0.0));
     }
+    // global camera axis depending on scene settings
+    GfVec3d getWorldUp() const 
+    {
+        return mWorldUp;
+    }
+    GfVec3d getWorldForward() const 
+    {
+        return mWorldForward;
+    }
+
     bool moving()
     {
         return keys.left || keys.right || keys.up || keys.down || keys.forward || keys.back || mouseButtons.right ||
@@ -145,9 +158,9 @@ public:
         {
             const float moveSpeed = deltaTime * movementSpeed;
             if (keys.up)
-                mPosition += getUp() * moveSpeed;
+                mPosition += getWorldUp() * moveSpeed;
             if (keys.down)
-                mPosition -= getUp() * moveSpeed;
+                mPosition -= getWorldUp() * moveSpeed;
             if (keys.left)
                 mPosition -= getRight() * moveSpeed;
             if (keys.right)
@@ -160,81 +173,17 @@ public:
         }
     }
 
-    void ChangePitch(float degrees)
-    {
-        // Check bounds with the max pitch rate so that we aren't moving too fast
-        if (degrees < -max_pitch_rate)
-        {
-            degrees = -max_pitch_rate;
-        }
-        else if (degrees > max_pitch_rate)
-        {
-            degrees = max_pitch_rate;
-        }
-        pitch += degrees;
-
-        // Check bounds for the camera pitch
-        if (pitch > 360.0f)
-        {
-            pitch -= 360.0f;
-        }
-        else if (pitch < -360.0f)
-        {
-            pitch += 360.0f;
-        }
-    }
-    void ChangeHeading(float degrees)
-    {
-        // Check bounds with the max heading rate so that we aren't moving too fast
-        if (degrees < -max_yaw_rate)
-        {
-            degrees = -max_yaw_rate;
-        }
-        else if (degrees > max_yaw_rate)
-        {
-            degrees = max_yaw_rate;
-        }
-        // This controls how the heading is changed if the camera is pointed straight up or down
-        // The heading delta direction changes
-        if (pitch > 90 && pitch < 270 || (pitch < -90 && pitch > -270))
-        {
-            yaw -= degrees;
-        }
-        else
-        {
-            yaw += degrees;
-        }
-        // Check bounds for the camera heading
-        if (yaw > 360.0f)
-        {
-            yaw -= 360.0f;
-        }
-        else if (yaw < -360.0f)
-        {
-            yaw += 360.0f;
-        }
-    }
-
     void rotate(double rightAngle, double upAngle)
     {
-        // GfRotation a(GfVec3d(1.0, 0.0, 0.0), upAngle * rotationSpeed);
-        // GfRotation a(GfVec3d(1.0, 0.0, 0.0), pitch);
         GfRotation a(getRight(), upAngle * rotationSpeed);
-        GfRotation b(GfVec3d(0.0, 0.0, 1.0), rightAngle * rotationSpeed);
-        // GfRotation b(getUp(), rightAngle * rotationSpeed);
-        // GfRotation b(GfVec3d(0.0, 1.0, 0.0), yaw);
-
-        // GfRotation b(getUp(), rightAngle * rotationSpeed);
+        GfRotation b(getWorldUp(), rightAngle * rotationSpeed);
 
         GfRotation c = a * b;
-        // mOrientation = a.GetQuat() * mOrientation * b.GetQuat();
         GfQuatd cq = c.GetQuat();
         cq.Normalize();
         mOrientation = cq * mOrientation;
         mOrientation.Normalize();
         updateViewMatrix();
-        yaw *= .5;
-        pitch *= .5;
     }
 
     void translate(GfVec3d delta)
@@ -257,8 +206,18 @@ public:
         return mGfCam;
     }
 
-    CameraController(UsdGeomCamera& cam)
+    CameraController(UsdGeomCamera& cam, bool isYup)
     {
+        if (isYup)
+        {
+            mWorldUp = GfVec3d(0.0, 1.0, 0.0);
+            mWorldForward = GfVec3d(0.0, 0.0, -1.0);
+        }
+        else
+        {
+            mWorldUp = GfVec3d(0.0, 0.0, 1.0);
+            mWorldForward = GfVec3d(0.0, 1.0, 0.0);
+        }
         mGfCam = cam.GetCamera(0.0);
         GfMatrix4d xform = mGfCam.GetTransform();
         xform.Orthonormalize();
@@ -342,9 +301,6 @@ public:
 
         if (mouseButtons.right)
         {
-            // rotate(dx, dy);
-            ChangeHeading(rotationSpeed * dx);
-            ChangePitch(rotationSpeed * dy);
             rotate(dx, dy);
         }
         if (mouseButtons.left)
@@ -445,18 +401,11 @@ void setDefaultCamera(UsdGeomCamera& cam)
     cam.SetFromCamera(mGfCam, 0.0);
 }
 
-bool saveScreenshot(std::string& outputFilePath, float* mappedMem, uint32_t imageWidth, uint32_t imageHeight)
+bool saveScreenshot(std::string& outputFilePath, unsigned char* mappedMem, uint32_t imageWidth, uint32_t imageHeight)
 {
     TF_VERIFY(mappedMem != nullptr);
 
     int pixelCount = imageWidth * imageHeight;
-
-    for (int i = 0; i < pixelCount; i++)
-    {
-        mappedMem[i * 4 + 0] = GfConvertLinearToDisplay(mappedMem[i * 4 + 0]);
-        mappedMem[i * 4 + 1] = GfConvertLinearToDisplay(mappedMem[i * 4 + 1]);
-        mappedMem[i * 4 + 2] = GfConvertLinearToDisplay(mappedMem[i * 4 + 2]);
-    }
 
     // Write image to file.
     TfStopwatch timerWrite;
@@ -474,8 +423,8 @@ bool saveScreenshot(std::string& outputFilePath, float* mappedMem, uint32_t imag
     storage.width = (int)imageWidth;
     storage.height = (int)imageHeight;
     storage.depth = (int)1;
-    storage.format = HioFormat::HioFormatFloat32Vec4;
-    storage.flipped = false;
+    storage.format = HioFormat::HioFormatUNorm8Vec4;
+    storage.flipped = true;
     storage.data = mappedMem;
 
     VtDictionary metadata;
@@ -494,12 +443,11 @@ int main(int argc, const char* argv[])
     // config. options
     cxxopts::Options options("Strelka -s <USD Scene path>", "commands");
 
-    options.add_options()
-        ("s, scene", "scene path", cxxopts::value<std::string>()->default_value(""))
-        ("i, iteration", "Iteration to capture", cxxopts::value<int32_t>()->default_value("-1"))
-         ("h, help", "Print usage")
-        ("t, spp_total", "spp total", cxxopts::value<int32_t>()->default_value("64"))
-        ("f, spp_subframe", "spp subframe", cxxopts::value<int32_t>()->default_value("1"));
+    options.add_options()("s, scene", "scene path", cxxopts::value<std::string>()->default_value(""))(
+        "i, iteration", "Iteration to capture", cxxopts::value<int32_t>()->default_value("-1"))(
+        "h, help", "Print usage")("t, spp_total", "spp total", cxxopts::value<int32_t>()->default_value("64"))(
+        "f, spp_subframe", "spp subframe", cxxopts::value<int32_t>()->default_value("1"))(
+        "c, need_screenshot", "Screenshot after spp total", cxxopts::value<bool>()->default_value("false"));
 
     options.parse_positional({ "s" });
     auto result = options.parse(argc, argv);
@@ -558,7 +506,9 @@ int main(int argc, const char* argv[])
     ctx->mSettingsManager->setAs<bool>("render/pt/enableUpscale", true);
     ctx->mSettingsManager->setAs<bool>("render/pt/enableAcc", true);
     ctx->mSettingsManager->setAs<bool>("render/pt/enableTonemap", true);
+    ctx->mSettingsManager->setAs<bool>("render/pt/isResized", false);
     ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", false);
+    ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", result["c"].as<bool>());
 
     oka::glfwdisplay display;
     display.init(imageWidth, imageHeight, ctx);
@@ -595,7 +545,8 @@ int main(int argc, const char* argv[])
     fflush(stdout);
 
     // Print the up-axis
-    std::cout << "Stage up-axis: " << UsdGeomGetStageUpAxis(stage) << std::endl;
+    TfToken upAxis =  UsdGeomGetStageUpAxis(stage);
+    std::cout << "Stage up-axis: " << upAxis << std::endl;
 
     // Print the stage's linear units, or "meters per unit"
     std::cout << "Meters per unit: " << UsdGeomGetStageMetersPerUnit(stage) << std::endl;
@@ -619,7 +570,7 @@ int main(int argc, const char* argv[])
     cameraPath = SdfPath::EmptyPath();
     HdCamera* camera = FindCamera(stage, renderIndex, cameraPath);
     cam = UsdGeomCamera::Get(stage, cameraPath);
-    CameraController cameraController(cam);
+    CameraController cameraController(cam, upAxis == UsdGeomTokens->y);
 
     // std::vector<std::pair<HdCamera*, SdfPath>> cameras = FindAllCameras(stage, renderIndex);
 
@@ -711,56 +662,15 @@ int main(int argc, const char* argv[])
 
         cam.SetFromCamera(cameraController.getCamera(), 0.0);
 
-       //  uint32_t iteration = ctx->mSettingsManager->getAs<uint32_t>("render/pt/iteration");
-        if (iteration == iterationToCapture)
-        {
-            ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
-        }
-        bool needScreenshot = ctx->mSettingsManager->getAs<bool>("render/pt/needScreenshot");
-
-        //         if (needScreenshot)
-        //         {
-        //             if (waitFramesForScreenshot == -1)
-        //             {
-        //                 waitFramesForScreenshot = oka::MAX_FRAMES_IN_FLIGHT;
-        //                 needCopyBuffer = true;
-        //             }
-        //             else if (waitFramesForScreenshot > 0)
-        //             {
-        //                 --waitFramesForScreenshot;
-        //             }
-        //             else if (waitFramesForScreenshot == 0)
-        //             {
-        // #ifdef WINDOWS
-        //                 std::size_t foundSlash = usdPath.find_last_of("/\\");
-        // #else
-        //                 std::size_t foundSlash = usdPath.find_last_of("/");
-        // #endif
-        //                 std::size_t foundDot = usdPath.find_last_of(".");
-        //                 std::string fileName = usdPath.substr(0, foundDot);
-        //                 fileName = fileName.substr(foundSlash + 1);
-
-        //                 std::string outputFilePath =
-        //                     fileName + "_" + std::to_string(iteration - oka::MAX_FRAMES_IN_FLIGHT - 1) + "i_" +
-        //                     std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/depth")) + "d_" +
-        //                     std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp")) + "spp" + ".png";
-        //                 float* mappedMem = (float*)ctx->mResManager->getMappedMemory(screenshotTransferBuffer);
-
-        //                 if (saveScreenshot(outputFilePath, mappedMem, imageWidth, imageHeight))
-        //                 {
-        //                     waitFramesForScreenshot = -1;
-        //                     ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", false);
-        //                 }
-        //             }
-        //         }
-
         display.onBeginFrame();
         if (cameraController.getCamera().GetTransform() != transform ||
             sppTotal != ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal") ||
-            frameSpp != ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp"))
+            frameSpp != ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp") ||
+            ctx->mSettingsManager->getAs<bool>("render/pt/isResized"))
         {
             frameSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp");
             sppTotal = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
+            ctx->mSettingsManager->setAs<bool>("render/pt/isResized", false);
             leftSpp = sppTotal;
         }
 
@@ -794,6 +704,34 @@ int main(int argc, const char* argv[])
                 frameSpp = savedFSpp;
                 ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", frameSpp);
             }
+
+            if (leftSpp == 0 && ctx->mSettingsManager->getAs<bool>("render/pt/screenshotSPP"))
+            {
+                ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
+                ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", false);
+            }
+
+        }
+
+        bool needScreenshot = ctx->mSettingsManager->getAs<bool>("render/pt/needScreenshot");
+        if (needScreenshot)
+        {
+            std::size_t foundSlash = usdPath.find_last_of("/\\");
+
+            std::size_t foundDot = usdPath.find_last_of(".");
+            std::string fileName = usdPath.substr(0, foundDot);
+            fileName = fileName.substr(foundSlash + 1);
+
+            std::string outputFilePath =
+                fileName + "_" + std::to_string(iteration) + "i_" +
+                std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/depth")) + "d_" +
+                std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp")) + "spp" + ".png";
+            unsigned char* mappedMem = (unsigned char*)outputImageCopy.data;
+
+            if (saveScreenshot(outputFilePath, mappedMem, outputImageCopy.width, outputImageCopy.height))
+            {
+                ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", false);
+            }
         }
 
         display.drawFrame(outputImageCopy); // blit rendered image to swapchain
@@ -806,7 +744,7 @@ int main(int argc, const char* argv[])
         surfaceController.release(versionId);
 
         display.setWindowTitle((std::string("Strelka") + " [" + std::to_string(frameTime) + " ms]" + " [" +
-                                std::to_string(iteration) + " iteration]")
+                                std::to_string(sppTotal - leftSpp) + " iteration]")
                                    .c_str());
         ++frameCount;
     }
