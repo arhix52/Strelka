@@ -400,18 +400,11 @@ void setDefaultCamera(UsdGeomCamera& cam)
     cam.SetFromCamera(mGfCam, 0.0);
 }
 
-bool saveScreenshot(std::string& outputFilePath, float* mappedMem, uint32_t imageWidth, uint32_t imageHeight)
+bool saveScreenshot(std::string& outputFilePath, unsigned char* mappedMem, uint32_t imageWidth, uint32_t imageHeight)
 {
     TF_VERIFY(mappedMem != nullptr);
 
     int pixelCount = imageWidth * imageHeight;
-
-    for (int i = 0; i < pixelCount; i++)
-    {
-        mappedMem[i * 4 + 0] = GfConvertLinearToDisplay(mappedMem[i * 4 + 0]);
-        mappedMem[i * 4 + 1] = GfConvertLinearToDisplay(mappedMem[i * 4 + 1]);
-        mappedMem[i * 4 + 2] = GfConvertLinearToDisplay(mappedMem[i * 4 + 2]);
-    }
 
     // Write image to file.
     TfStopwatch timerWrite;
@@ -429,8 +422,8 @@ bool saveScreenshot(std::string& outputFilePath, float* mappedMem, uint32_t imag
     storage.width = (int)imageWidth;
     storage.height = (int)imageHeight;
     storage.depth = (int)1;
-    storage.format = HioFormat::HioFormatFloat32Vec4;
-    storage.flipped = false;
+    storage.format = HioFormat::HioFormatUNorm8Vec4;
+    storage.flipped = true;
     storage.data = mappedMem;
 
     VtDictionary metadata;
@@ -449,12 +442,11 @@ int main(int argc, const char* argv[])
     // config. options
     cxxopts::Options options("Strelka -s <USD Scene path>", "commands");
 
-    options.add_options()
-        ("s, scene", "scene path", cxxopts::value<std::string>()->default_value(""))
-        ("i, iteration", "Iteration to capture", cxxopts::value<int32_t>()->default_value("-1"))
-         ("h, help", "Print usage")
-        ("t, spp_total", "spp total", cxxopts::value<int32_t>()->default_value("64"))
-        ("f, spp_subframe", "spp subframe", cxxopts::value<int32_t>()->default_value("1"));
+    options.add_options()("s, scene", "scene path", cxxopts::value<std::string>()->default_value(""))(
+        "i, iteration", "Iteration to capture", cxxopts::value<int32_t>()->default_value("-1"))(
+        "h, help", "Print usage")("t, spp_total", "spp total", cxxopts::value<int32_t>()->default_value("64"))(
+        "f, spp_subframe", "spp subframe", cxxopts::value<int32_t>()->default_value("1"))(
+        "c, need_screenshot", "Screenshot after spp total", cxxopts::value<bool>()->default_value("false"));
 
     options.parse_positional({ "s" });
     auto result = options.parse(argc, argv);
@@ -512,7 +504,9 @@ int main(int argc, const char* argv[])
     ctx->mSettingsManager->setAs<bool>("render/pt/enableUpscale", true);
     ctx->mSettingsManager->setAs<bool>("render/pt/enableAcc", true);
     ctx->mSettingsManager->setAs<bool>("render/pt/enableTonemap", true);
+    ctx->mSettingsManager->setAs<bool>("render/pt/isResized", false);
     ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", false);
+    ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", result["c"].as<bool>());
 
     oka::glfwdisplay display;
     display.init(imageWidth, imageHeight, ctx);
@@ -665,56 +659,15 @@ int main(int argc, const char* argv[])
 
         cam.SetFromCamera(cameraController.getCamera(), 0.0);
 
-       //  uint32_t iteration = ctx->mSettingsManager->getAs<uint32_t>("render/pt/iteration");
-        if (iteration == iterationToCapture)
-        {
-            ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
-        }
-        bool needScreenshot = ctx->mSettingsManager->getAs<bool>("render/pt/needScreenshot");
-
-        //         if (needScreenshot)
-        //         {
-        //             if (waitFramesForScreenshot == -1)
-        //             {
-        //                 waitFramesForScreenshot = oka::MAX_FRAMES_IN_FLIGHT;
-        //                 needCopyBuffer = true;
-        //             }
-        //             else if (waitFramesForScreenshot > 0)
-        //             {
-        //                 --waitFramesForScreenshot;
-        //             }
-        //             else if (waitFramesForScreenshot == 0)
-        //             {
-        // #ifdef WINDOWS
-        //                 std::size_t foundSlash = usdPath.find_last_of("/\\");
-        // #else
-        //                 std::size_t foundSlash = usdPath.find_last_of("/");
-        // #endif
-        //                 std::size_t foundDot = usdPath.find_last_of(".");
-        //                 std::string fileName = usdPath.substr(0, foundDot);
-        //                 fileName = fileName.substr(foundSlash + 1);
-
-        //                 std::string outputFilePath =
-        //                     fileName + "_" + std::to_string(iteration - oka::MAX_FRAMES_IN_FLIGHT - 1) + "i_" +
-        //                     std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/depth")) + "d_" +
-        //                     std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp")) + "spp" + ".png";
-        //                 float* mappedMem = (float*)ctx->mResManager->getMappedMemory(screenshotTransferBuffer);
-
-        //                 if (saveScreenshot(outputFilePath, mappedMem, imageWidth, imageHeight))
-        //                 {
-        //                     waitFramesForScreenshot = -1;
-        //                     ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", false);
-        //                 }
-        //             }
-        //         }
-
         display.onBeginFrame();
         if (cameraController.getCamera().GetTransform() != transform ||
             sppTotal != ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal") ||
-            frameSpp != ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp"))
+            frameSpp != ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp") ||
+            ctx->mSettingsManager->getAs<bool>("render/pt/isResized"))
         {
             frameSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp");
             sppTotal = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
+            ctx->mSettingsManager->setAs<bool>("render/pt/isResized", false);
             leftSpp = sppTotal;
         }
 
@@ -748,6 +701,34 @@ int main(int argc, const char* argv[])
                 frameSpp = savedFSpp;
                 ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", frameSpp);
             }
+
+            if (leftSpp == 0 && ctx->mSettingsManager->getAs<bool>("render/pt/screenshotSPP"))
+            {
+                ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
+                ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", false);
+            }
+
+        }
+
+        bool needScreenshot = ctx->mSettingsManager->getAs<bool>("render/pt/needScreenshot");
+        if (needScreenshot)
+        {
+            std::size_t foundSlash = usdPath.find_last_of("/\\");
+
+            std::size_t foundDot = usdPath.find_last_of(".");
+            std::string fileName = usdPath.substr(0, foundDot);
+            fileName = fileName.substr(foundSlash + 1);
+
+            std::string outputFilePath =
+                fileName + "_" + std::to_string(iteration) + "i_" +
+                std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/depth")) + "d_" +
+                std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp")) + "spp" + ".png";
+            unsigned char* mappedMem = (unsigned char*)outputImageCopy.data;
+
+            if (saveScreenshot(outputFilePath, mappedMem, outputImageCopy.width, outputImageCopy.height))
+            {
+                ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", false);
+            }
         }
 
         display.drawFrame(outputImageCopy); // blit rendered image to swapchain
@@ -760,7 +741,7 @@ int main(int argc, const char* argv[])
         surfaceController.release(versionId);
 
         display.setWindowTitle((std::string("Strelka") + " [" + std::to_string(frameTime) + " ms]" + " [" +
-                                std::to_string(iteration) + " iteration]")
+                                std::to_string(sppTotal - leftSpp) + " iteration]")
                                    .c_str());
         ++frameCount;
     }
