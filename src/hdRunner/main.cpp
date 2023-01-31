@@ -94,7 +94,7 @@ class CameraController : public oka::InputHandler
     GfVec3d mPosition;
 
     float rotationSpeed = 0.025f;
-    float movementSpeed = 5.0f;
+    float movementSpeed = 1.0f;
 
     double pitch = 0.0;
     double yaw = 0.0;
@@ -138,7 +138,7 @@ public:
         return keys.left || keys.right || keys.up || keys.down || keys.forward || keys.back || mouseButtons.right ||
                mouseButtons.left || mouseButtons.middle;
     }
-    void update(double deltaTime, uint32_t speed)
+    void update(double deltaTime, float speed)
     {
         movementSpeed = speed;
         if (moving())
@@ -553,7 +553,7 @@ int main(int argc, const char* argv[])
                                                                                    // stratified sampling
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/tonemapperType", 0); // 0 - reinhard, 1 - aces, 2 - filmic
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/debug", 0); // 0 - none, 1 - normals
-    ctx->mSettingsManager->setAs<float>("render/cameraSpeed", 1);
+    ctx->mSettingsManager->setAs<float>("render/cameraSpeed", 1.0f);
     ctx->mSettingsManager->setAs<float>("render/pt/upscaleFactor", 0.5f);
     ctx->mSettingsManager->setAs<bool>("render/pt/enableUpscale", true);
     ctx->mSettingsManager->setAs<bool>("render/pt/enableAcc", true);
