@@ -624,7 +624,7 @@ int main(int argc, const char* argv[])
     uint32_t leftSpp = sppTotal;
     bool needCopyBuffer = false;
     int32_t waitFramesForScreenshot = -1;
-    uint32_t iteration = 0;
+    uint32_t iteration = sppTotal - leftSpp;
 
     while (!display.windowShouldClose())
     {
@@ -710,7 +710,7 @@ int main(int argc, const char* argv[])
                 ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
                 ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", false);
             }
-
+            iteration = sppTotal - leftSpp;
         }
 
         bool needScreenshot = ctx->mSettingsManager->getAs<bool>("render/pt/needScreenshot");
@@ -744,7 +744,7 @@ int main(int argc, const char* argv[])
         surfaceController.release(versionId);
 
         display.setWindowTitle((std::string("Strelka") + " [" + std::to_string(frameTime) + " ms]" + " [" +
-                                std::to_string(sppTotal - leftSpp) + " iteration]")
+                                std::to_string(iteration) + " iteration]")
                                    .c_str());
         ++frameCount;
     }
