@@ -161,6 +161,7 @@ void materialEvaluate(thread MaterialEval& data, thread const MaterialState& sta
 
 void materialSample(thread MaterialSample& data, thread MaterialState& state)
 {
+    // Source: https://link.springer.com/content/pdf/10.1007/978-1-4842-4427-2_16.pdf
     {
         float a = 1.0f - 2.0f * data.xi.x;
         float b = sqrt(1.0f - a * a);
