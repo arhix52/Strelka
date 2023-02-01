@@ -9,38 +9,18 @@ using namespace metal;
 
 using namespace raytracing;
 
-constant unsigned int primes[] = {
-    2,   3,  5,  7,
-    11, 13, 17, 19,
-    23, 29, 31, 37,
-    41, 43, 47, 53,
-    59, 61, 67, 71,
-    73, 79, 83, 89
+struct PerRayData
+{
+    uint32_t rndSeed;
+    uint32_t depth;
+    float3 radiance;
+    float3 throughput;
+    float3 origin;
+    float3 direction;
+    bool inside;
+    bool specularBounce;
+    bool shouldTerninate;
 };
-
-
-// Returns the i'th element of the Halton sequence using the d'th prime number as a
-// base. The Halton sequence is a low discrepency sequence: the values appear
-// random, but are more evenly distributed than a purely random sequence. Each random
-// value used to render the image uses a different independent dimension, `d`,
-// and each sample (frame) uses a different index `i`. To decorrelate each pixel,
-// you can apply a random offset to `i`.
-float halton(unsigned int i, unsigned int d) {
-    unsigned int b = primes[d];
-
-    float f = 1.0f;
-    float invB = 1.0f / b;
-
-    float r = 0;
-
-    while (i > 0) {
-        f = f * invB;
-        r = r + f * (i % b);
-        i = i / b;
-    }
-
-    return r;
-}
 
 // Interpolates the vertex attribute of an arbitrary type across the surface of a triangle
 // given the barycentric coordinates and triangle index in an intersection structure.
@@ -72,13 +52,6 @@ inline T interpolateVertexAttribute(thread T *attributes, float2 uv) {
     return (1.0f - uv.x - uv.y) * T0 + uv.x * T1 + uv.y * T2;
 }
 
-// Resources for a piece of triangle geometry.
-struct TriangleResources {
-    device uint16_t *indices;
-    device float3 *vertexNormals;
-    device float3 *vertexColors;
-};
-
 __attribute__((always_inline))
 float3 transformPoint(float3 p, float4x4 transform) {
     return (transform * float4(p.x, p.y, p.z, 1.0f)).xyz;
@@ -96,7 +69,6 @@ static float3 unpackNormal(uint32_t val)
     normal.z = ((val & 0xfff00000) >> 20) / 511.99999f * 2.0f - 1.0f;
     normal.y = ((val & 0x000ffc00) >> 10) / 511.99999f * 2.0f - 1.0f;
     normal.x = (val & 0x000003ff) / 511.99999f * 2.0f - 1.0f;
-
     return normal;
 }
 
@@ -106,7 +78,6 @@ static float2 unpackUV(uint32_t val)
     float2 uv;
     uv.y = ((val & 0xffff0000) >> 16) / 16383.99999f * 20.0f - 10.0f;
     uv.x = (val & 0x0000ffff) / 16383.99999f * 20.0f - 10.0f;
-
     return uv;
 }
 
@@ -149,8 +120,59 @@ void generateCameraRay(uint2 pixelIndex,
 struct MaterialState
 {
     float3 position;
-    float3 normal;
+    float3 normal; // shading normal (normal mapping)
+    float3 geom_normal; // triangle normal
 };
+
+struct MaterialEval
+{
+    // in
+    float3 ior1;
+    float3 ior2;
+    float3 outDir; // MDL: k1
+    float3 inDir; // MDL: k2
+
+    // out
+    float3 bsdf_diffuse;
+    float3 bsdf_glossy;
+    float pdf;
+};
+
+struct MaterialSample
+{
+    // in
+    float3 ior1;
+    float3 ior2;
+    float3 k1; // MDL: k1
+    float4 xi; // rnd
+    // out
+    float3 k2;
+    float3 bsdf_over_pdf;
+    int event_type;
+};
+
+void materialEvaluate(thread MaterialEval& data, thread const MaterialState& state)
+{
+    // const float M_PIf = 3.1415926f;
+    data.bsdf_diffuse = float3(1.0f) * dot(state.normal, data.inDir) / M_PIf; 
+    data.bsdf_glossy = float3(0.0f);
+    data.pdf = dot(state.normal, data.inDir) / M_PIf;
+}
+
+void materialSample(thread MaterialSample& data, thread MaterialState& state)
+{
+    {
+        float a = 1.0f - 2.0f * data.xi.x;
+        float b = sqrt(1.0f - a * a);
+        float phi = data.xi.y * 2.0f * M_PIf;
+        data.k2.x = state.normal.x + b * cos(phi);
+        data.k2.y = state.normal.y + b * sin(phi);
+        data.k2.z = state.normal.z + a;
+        // data.pdf = a / M_PIf;
+    }
+
+    data.bsdf_over_pdf = float(1.0f);
+}
 
 bool traceOcclusion(
     instance_acceleration_structure accelerationStructure,
@@ -214,9 +236,10 @@ float3 sampleLight(
         // shadowRay.o = float4(offset_ray(state.position, state.geom_normal), lightSampleData.distToLight); // need to
         // set
         const bool occluded = traceOcclusion(accelerationStructure, isect, state.position, lightSampleData.L,
-                                             0.01f, // tmin
-                                             lightSampleData.distToLight // tmax
+                                             0.001f, // tmin
+                                             lightSampleData.distToLight - 1e-5f // tmax
         );
+
         // bool occluded = false;
         float visibility = occluded ? 0.0f : 1.0f;
         // TODO: skip light hit
@@ -231,12 +254,11 @@ float3 sampleLight(
         //         visibility = 1.0f;
         //     }
         // }
-
         lightPdf = lightSampleData.pdf;
         return visibility * Li * saturate(dot(state.normal, lightSampleData.L));
     }
 
-    return float3(0.0f);
+    return float3(0.0f, 0.0f, 0.0f);
 }
 
 float3 estimateDirectLighting(
@@ -257,6 +279,23 @@ float3 estimateDirectLighting(
     return r;
 }
 
+// static float3 offset_ray(thread const float3& p, thread const float3& n)
+// {
+//     static const float origin = 1.0f / 32.0f;
+//     static const float float_scale = 1.0f / 65536.0f;
+//     static const float int_scale = 256.0f;
+
+//     int3 of_i = int3(int_scale * n.x, int_scale * n.y, int_scale * n.z);
+
+//     float3 p_i = float3(__int_as_float(__float_as_int(p.x) + ((p.x < 0) ? -of_i.x : of_i.x)),
+//                              __int_as_float(__float_as_int(p.y) + ((p.y < 0) ? -of_i.y : of_i.y)),
+//                              __int_as_float(__float_as_int(p.z) + ((p.z < 0) ? -of_i.z : of_i.z)));
+
+//     return float3(abs(p.x) < origin ? p.x + float_scale * n.x : p_i.x,
+//                        abs(p.y) < origin ? p.y + float_scale * n.y : p_i.y,
+//                        abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
+// }
+
 // Main ray tracing kernel.
 kernel void raytracingKernel(
      uint2                                                  tid                       [[thread_position_in_grid]],
@@ -268,34 +307,31 @@ kernel void raytracingKernel(
      device float4* accum                                                             [[buffer(5)]]
      )
 {
-    // The sample aligns the thread count to the threadgroup size, which means the thread count
-    // may be different than the bounds of the texture. Test to make sure this thread
-    // is referencing a pixel within the bounds of the texture.
-    if (tid.x < uniforms.width && tid.y < uniforms.height) {
-        const uint32_t linearPixelIndex = tid.y * uniforms.width + tid.x;
-        // uint32_t rndSeed = tea<4>(linearPixelIndex, uniforms.subframeIndex);
-        uint32_t rndSeed = initRNG(tid.xy, uint2(uniforms.width, uniforms.height), uniforms.subframeIndex * uniforms.randomFromHost);
-        // The ray to cast.
+    if (tid.x >= uniforms.width || tid.y >= uniforms.height) 
+    {
+        return;
+    }
+    const uint32_t linearPixelIndex = tid.y * uniforms.width + tid.x;
+    // uint32_t rndSeed = tea<4>(linearPixelIndex, uniforms.subframeIndex);
+    uint32_t rndSeed = initRNG(tid.xy, uint2(uniforms.width, uniforms.height), uniforms.subframeIndex);
+
+    PerRayData prd;
+    prd.rndSeed = rndSeed;
+    prd.radiance = float3(0.0f);
+    prd.throughput = float3(1.0f);
+    prd.inside = false;
+    prd.depth = 0;
+    prd.specularBounce = false;
+
+    generateCameraRay(tid, prd.rndSeed, prd.origin, prd.direction, uniforms);
+
+    while (prd.depth < uniforms.maxDepth)
+    {
         ray ray;
-
-        // Pixel coordinates for this thread.
-        // float2 pixel = (float2)tid;
-
-        // // Apply a random offset to the random number index to decorrelate pixels.
-        // unsigned int offset = randomTex.read(tid).x;
-
-        // // Add a random offset to the pixel coordinates for antialiasing.
-        // float2 r = float2(halton(offset + uniforms.frameIndex, 0),
-        //                   halton(offset + uniforms.frameIndex, 1));
-
-        generateCameraRay(tid, rndSeed, ray.origin, ray.direction, uniforms);
-        // Don't limit intersection distance.
+        ray.min_distance = 0.0f;
         ray.max_distance = INFINITY;
-
-        // Start with a fully white color. The kernel scales the light each time the
-        // ray bounces off of a surface, based on how much of each light component
-        // the surface absorbs.
-        float3 result = float3(1.0f, 1.0f, 1.0f);
+        ray.origin = prd.origin;
+        ray.direction = prd.direction;
 
         // Create an intersector to test for intersection between the ray and the geometry in the scene.
         intersector<triangle_data, instancing> i;
@@ -310,20 +346,31 @@ kernel void raytracingKernel(
         // Stop if the ray didn't hit anything and has bounced out of the scene.
         if (intersection.type == intersection_type::none)
         {
-            result = float3(0.0f, 0.0f, 0.0f);
+            prd.radiance += prd.throughput * uniforms.missColor;
+            prd.throughput = float3(0.0f);
+            break;
         }
         else
         {
-            Triangle triangle = *(const device Triangle*)intersection.primitive_data;
+            const uint32_t instanceIndex = intersection.instance_id;
+            const uint32_t mask = instances[instanceIndex].mask;
+            if (mask == GEOMETRY_MASK_LIGHT)
+            {
+                // TODO: extract light colors
+                prd.radiance += prd.throughput * float3(1.0f);
+                prd.throughput = float3(0.0f);
+                // stop tracing
+                break;
+            }
+
+            const Triangle triangle = *(const device Triangle*)intersection.primitive_data;
+            const float3 p0 = triangle.positions[0];
+            const float3 p1 = triangle.positions[1];
+            const float3 p2 = triangle.positions[2];
 
             const float3 n0 = unpackNormal(triangle.normals[0]);
             const float3 n1 = unpackNormal(triangle.normals[1]);
             const float3 n2 = unpackNormal(triangle.normals[2]);
-
-            unsigned int instanceIndex = intersection.instance_id;
-
-            // // Look up the mask for this instance, which indicates what type of geometry the ray hit.
-            // unsigned int mask = instances[instanceIndex].mask;
 
             // The ray hit something. Look up the transformation matrix for this instance.
             float4x4 objectToWorldSpaceTransform(1.0f);
@@ -332,47 +379,104 @@ kernel void raytracingKernel(
                 for (int row = 0; row < 3; row++)
                     objectToWorldSpaceTransform[column][row] = instances[instanceIndex].transformationMatrix[column][row];
 
+            const float2 barycentrics = intersection.triangle_barycentric_coord;
             // // Compute the intersection point in world space.
-            float3 worldSpaceIntersectionPoint = ray.origin + ray.direction * intersection.distance;
+            // float3 worldPosition = ray.origin + ray.direction * intersection.distance;
+            float3 worldPosition = transformPoint(interpolateAttrib(p0, p1, p2, barycentrics), objectToWorldSpaceTransform);
 
             // unsigned primitiveIndex = intersection.primitive_id;
             // unsigned int geometryIndex = instances[instanceIndex].accelerationStructureIndex;
-            const float2 barycentrics = intersection.triangle_barycentric_coord;
 
-            // float3 objectSpaceSurfaceNormal = interpolateVertexAttribute(triangle.normals, barycentric_coords);
             const float3 objectNormal = normalize(interpolateAttrib(n0, n1, n2, barycentrics));
             const float3 worldNormal = normalize(transformDirection(objectNormal, objectToWorldSpaceTransform));
 
+            float3 geomNormal = normalize(cross(p1 - p0, p2 - p0));
+            geomNormal = transformDirection(geomNormal, objectToWorldSpaceTransform); 
+
             MaterialState matState;
 
-            matState.position = worldSpaceIntersectionPoint;
+            matState.position = worldPosition;
             matState.normal = worldNormal;
+            matState.geom_normal = geomNormal;
 
-            float3 toLight; // return value for sampleLights()
-            float lightPdf = 0.0f; // return value for sampleLights()
+            float3 toLight; // return value for estimateDirectLighting()
+            float lightPdf = 0.0f; // return value for estimateDirectLighting()
             const float3 radiance = estimateDirectLighting(accelerationStructure, i,
                 uniforms.numLights, lights, rndSeed, matState, toLight, lightPdf);
 
-
-            result = radiance;
-        }
-
-        if (uniforms.enableAccumulation)
-        {
-            float3 accum_color = result / static_cast<float>(uniforms.samples_per_launch);
-
-            if (uniforms.subframeIndex > 0)
+            const bool isNextEventValid = ((dot(toLight, matState.geom_normal) > 0.0f) != prd.inside) && lightPdf != 0.0f;
+            if (isNextEventValid)
             {
-                const float a = 1.0f / static_cast<float>(uniforms.subframeIndex + 1);
-                const float3 accum_color_prev = float3(accum[linearPixelIndex]);
-                accum_color = mix(accum_color_prev, accum_color, a);
+                const float3 radianceOverPdf = radiance / lightPdf;
+                
+                MaterialEval evalData {};
+                // evalData.ior1 = ior1;
+                // evalData.ior2 = ior2;
+                evalData.outDir = -prd.direction;
+                evalData.inDir = toLight;
+
+                materialEvaluate(evalData, matState);
+                if (evalData.pdf > 1e-6f)
+                {
+                    const float misWeight = (lightPdf == 0.0f) ? 1.0f : lightPdf / (lightPdf + evalData.pdf);
+                    const float3 w = prd.throughput * radianceOverPdf * misWeight;
+                    prd.radiance += w * evalData.bsdf_diffuse;
+                    prd.radiance += w * evalData.bsdf_glossy;
+                }
             }
-            accum[linearPixelIndex] = float4(accum_color, 1.0f);
-            res[linearPixelIndex] = float4(accum_color, 1.0f);
+
+            const float z1 = rnd(prd.rndSeed);
+            const float z2 = rnd(prd.rndSeed);
+            const float z3 = rnd(prd.rndSeed);
+            const float z4 = rnd(prd.rndSeed);
+
+            MaterialSample sampleData {};
+            // sampleData.ior1 = ior1;
+            // sampleData.ior2 = ior2;
+            sampleData.k1 = -prd.direction;
+            sampleData.xi = float4(z1, z2, z3, z4);
+
+            materialSample(sampleData, matState);
+
+            prd.origin = worldPosition;
+            prd.direction = sampleData.k2;
+            prd.throughput *= sampleData.bsdf_over_pdf;
+
+            if (dot(prd.throughput, prd.throughput) < 1e-4f)
+            {
+                break;
+            }
+
+            if (prd.depth > 3)
+            {
+                const float p = max(prd.throughput.x, max(prd.throughput.y, prd.throughput.z));
+                if (rnd(prd.rndSeed) > p)
+                {
+                    break;
+                }
+                prd.throughput *= 1.0 / (p + 1e-5f);
+            }
         }
-        else
+        ++prd.depth;
+    }
+
+    const float3 result = prd.radiance;
+
+    if (uniforms.enableAccumulation)
+    {
+        float3 accum_color = result / static_cast<float>(uniforms.samples_per_launch);
+
+        if (uniforms.subframeIndex > 0)
         {
-            res[linearPixelIndex] = float4(result, 1.0f);
+            const float a = 1.0f / static_cast<float>(uniforms.subframeIndex + 1);
+            const float3 accum_color_prev = float3(accum[linearPixelIndex]);
+            accum_color = mix(accum_color_prev, accum_color, a);
         }
+        accum[linearPixelIndex] = float4(accum_color, 1.0f);
+        res[linearPixelIndex] = float4(accum_color, 1.0f);
+    }
+    else
+    {
+        res[linearPixelIndex] = float4(result, 1.0f);
     }
 }

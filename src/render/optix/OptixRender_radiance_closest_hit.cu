@@ -376,7 +376,7 @@ extern "C" __global__ void __closesthit__radiance()
         float lightPdf = 0.0f; // return value for sampleLights()
         const float3 radiance = estimateDirectLighting(prd->rndSeed, state, toLight, lightPdf);
 
-       if (params.debug == 1)
+        if (params.debug == 1)
         {
             prd->radiance = worldNormal;
             return;
