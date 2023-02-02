@@ -56,6 +56,31 @@ void MetalRender::buildTexture(uint32_t width, uint32_t heigth)
     pTextureDesc->release();
 }
 
+void oka::MetalRender::createMetalMaterials()
+{
+    using simd::float3;
+    std::vector<Scene::MaterialDescription>& matDescs = mScene->getMaterials();
+    std::vector<Material> gpuMaterials;
+    for (uint32_t i = 0; i < matDescs.size(); ++i)
+    {
+        Material material;
+        oka::Scene::MaterialDescription& currMatDesc = matDescs[i];
+        for (const auto& param : matDescs[i].params)
+        {
+            if (param.name == "diffuse_color")
+            {
+                memcpy(&material.diffuse, param.value.data(), sizeof(float) * 3);
+            }
+        }
+        gpuMaterials.push_back(material);
+    }
+
+    const size_t materialsDataSize = sizeof(Material) * gpuMaterials.size();
+    mMaterialBuffer = mDevice->newBuffer(materialsDataSize, MTL::ResourceStorageModeManaged);
+    memcpy(mMaterialBuffer->contents(), gpuMaterials.data(), materialsDataSize);
+    mMaterialBuffer->didModifyRange(NS::Range::Make(0, mMaterialBuffer->length()));
+}
+
 void MetalRender::render(Buffer* output)
 {
     using simd::float3;
@@ -66,6 +91,7 @@ void MetalRender::render(Buffer* output)
     if (getSharedContext().mFrameNumber == 0)
     {
         buildBuffers();
+        createMetalMaterials();
         createAccelerationStructures();
         // create accum buffer, we don't need cpu access, make it device only
         mAccumulationBuffer = mDevice->newBuffer(
@@ -142,9 +168,10 @@ void MetalRender::render(Buffer* output)
     pComputeEncoder->setBuffer(_instanceBuffer, 0, 1);
     pComputeEncoder->setAccelerationStructure(_instanceAccelerationStructure, 2);
     pComputeEncoder->setBuffer(mLightBuffer, 0, 3);
+    pComputeEncoder->setBuffer(mMaterialBuffer, 0, 4);
     // Output
-    pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 4);
-    pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 5);
+    pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 5);
+    pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 6);
 
     MTL::Size gridSize = MTL::Size(width, height, 1);
 
@@ -414,15 +441,16 @@ void MetalRender::createAccelerationStructures()
     }
 
     _instanceBuffer = mDevice->newBuffer(
-        sizeof(MTL::AccelerationStructureInstanceDescriptor) * instances.size(), MTL::ResourceStorageModeManaged);
-    MTL::AccelerationStructureInstanceDescriptor* instanceDescriptors =
-        (MTL::AccelerationStructureInstanceDescriptor*)_instanceBuffer->contents();
+        sizeof(MTL::AccelerationStructureUserIDInstanceDescriptor) * instances.size(), MTL::ResourceStorageModeManaged);
+    MTL::AccelerationStructureUserIDInstanceDescriptor* instanceDescriptors =
+        (MTL::AccelerationStructureUserIDInstanceDescriptor*)_instanceBuffer->contents();
     for (int i = 0; i < instances.size(); ++i)
     {
         const oka::Instance& curr = instances[i];
         instanceDescriptors[i].accelerationStructureIndex = curr.mMeshId;
         instanceDescriptors[i].options = MTL::AccelerationStructureInstanceOptionOpaque;
         instanceDescriptors[i].intersectionFunctionTableOffset = 0;
+        instanceDescriptors[i].userID = curr.mMaterialId;
         instanceDescriptors[i].mask =
             curr.type == oka::Instance::Type::eLight ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_TRIANGLE;
 
@@ -446,6 +474,7 @@ void MetalRender::createAccelerationStructures()
     accelDescriptor->setInstancedAccelerationStructures(instancedAccelerationStructures);
     accelDescriptor->setInstanceCount(instances.size());
     accelDescriptor->setInstanceDescriptorBuffer(_instanceBuffer);
+    accelDescriptor->setInstanceDescriptorType(MTL::AccelerationStructureInstanceDescriptorTypeUserID);
 
     _instanceAccelerationStructure = createAccelerationStructure(accelDescriptor);
     pPool->release();

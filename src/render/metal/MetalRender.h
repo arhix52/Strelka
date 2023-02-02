@@ -49,6 +49,8 @@ private:
     MTL::AccelerationStructure* _instanceAccelerationStructure;
     MTL::Buffer* _instanceBuffer;
 
+    MTL::Buffer* mMaterialBuffer;
+
     MTL::Texture* mFramebufferTexture;
 
     int _frame;
@@ -59,7 +61,8 @@ private:
     void buildComputePipeline();
     void buildBuffers();
     void buildTexture(uint32_t width, uint32_t heigth);
-    void createLightBuffer();
+    
+    void createMetalMaterials();
 
     MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);
     void createAccelerationStructures();

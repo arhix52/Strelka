@@ -122,6 +122,7 @@ struct MaterialState
     float3 position;
     float3 normal; // shading normal (normal mapping)
     float3 geom_normal; // triangle normal
+    float3 diffuse;
 };
 
 struct MaterialEval
@@ -154,7 +155,7 @@ struct MaterialSample
 void materialEvaluate(thread MaterialEval& data, thread const MaterialState& state)
 {
     // const float M_PIf = 3.1415926f;
-    data.bsdf_diffuse = float3(1.0f) * dot(state.normal, data.inDir) / M_PIf; 
+    data.bsdf_diffuse = state.diffuse * dot(state.normal, data.inDir) / M_PIf; 
     data.bsdf_glossy = float3(0.0f);
     data.pdf = dot(state.normal, data.inDir) / M_PIf;
 }
@@ -172,7 +173,7 @@ void materialSample(thread MaterialSample& data, thread MaterialState& state)
         // data.pdf = a / M_PIf;
     }
 
-    data.bsdf_over_pdf = float(1.0f);
+    data.bsdf_over_pdf = state.diffuse;
 }
 
 bool traceOcclusion(
@@ -299,13 +300,14 @@ float3 estimateDirectLighting(
 
 // Main ray tracing kernel.
 kernel void raytracingKernel(
-     uint2                                                  tid                       [[thread_position_in_grid]],
-     constant Uniforms&                                     uniforms                  [[buffer(0)]],
-     constant MTLAccelerationStructureInstanceDescriptor*   instances                 [[buffer(1)]],
-     instance_acceleration_structure                        accelerationStructure     [[buffer(2)]],
-     device UniformLight* lights                                                      [[buffer(3)]],
-     device float4* res                                                               [[buffer(4)]],
-     device float4* accum                                                             [[buffer(5)]]
+    uint2                                                  tid                       [[thread_position_in_grid]],
+    constant Uniforms&                                     uniforms                  [[buffer(0)]],
+    constant MTLAccelerationStructureUserIDInstanceDescriptor*   instances           [[buffer(1)]],
+    instance_acceleration_structure                        accelerationStructure     [[buffer(2)]],
+    device UniformLight* lights                                                      [[buffer(3)]],
+    device Material* materials                                                       [[buffer(4)]],
+    device float4* res                                                               [[buffer(5)]],
+    device float4* accum                                                             [[buffer(6)]]
      )
 {
     if (tid.x >= uniforms.width || tid.y >= uniforms.height) 
@@ -399,6 +401,9 @@ kernel void raytracingKernel(
             matState.position = worldPosition;
             matState.normal = worldNormal;
             matState.geom_normal = geomNormal;
+
+            const uint32_t materialId = instances[instanceIndex].userID;
+            matState.diffuse = materials[materialId].diffuse;
 
             float3 toLight; // return value for estimateDirectLighting()
             float lightPdf = 0.0f; // return value for estimateDirectLighting()

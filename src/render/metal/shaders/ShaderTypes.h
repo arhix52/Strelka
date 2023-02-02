@@ -44,7 +44,7 @@ struct Uniforms
     simd::float4x4 viewToWorld;
     simd::float4x4 clipToView;
     vector_float3 missColor;
-    
+
     uint32_t width;
     uint32_t height;
     uint32_t frameIndex;
@@ -53,8 +53,6 @@ struct Uniforms
     uint32_t enableAccumulation;
     uint32_t samples_per_launch;
     uint32_t maxDepth;
-
-    
 };
 
 struct Triangle
@@ -75,6 +73,12 @@ struct UniformLight
     float pad0;
     float pad2;
     float pad3;
+};
+
+struct Material
+{
+    vector_float3 diffuse;
+
 };
 
 #endif
