@@ -281,22 +281,33 @@ float3 estimateDirectLighting(
     return r;
 }
 
-// static float3 offset_ray(thread const float3& p, thread const float3& n)
-// {
-//     static const float origin = 1.0f / 32.0f;
-//     static const float float_scale = 1.0f / 65536.0f;
-//     static const float int_scale = 256.0f;
+__attribute__((always_inline))
+int __float_as_int(float x) 
+{
+    return as_type<int>(x);
+}
+__attribute__((always_inline))
+float __int_as_float(int x) 
+{
+    return as_type<float>(x);
+}
 
-//     int3 of_i = int3(int_scale * n.x, int_scale * n.y, int_scale * n.z);
+static float3 offset_ray(thread const float3& p, thread const float3& n)
+{
+    const float origin = 1.0f / 32.0f;
+    const float float_scale = 1.0f / 65536.0f;
+    const float int_scale = 256.0f;
 
-//     float3 p_i = float3(__int_as_float(__float_as_int(p.x) + ((p.x < 0) ? -of_i.x : of_i.x)),
-//                              __int_as_float(__float_as_int(p.y) + ((p.y < 0) ? -of_i.y : of_i.y)),
-//                              __int_as_float(__float_as_int(p.z) + ((p.z < 0) ? -of_i.z : of_i.z)));
+    int3 of_i = int3(int_scale * n.x, int_scale * n.y, int_scale * n.z);
 
-//     return float3(abs(p.x) < origin ? p.x + float_scale * n.x : p_i.x,
-//                        abs(p.y) < origin ? p.y + float_scale * n.y : p_i.y,
-//                        abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
-// }
+    float3 p_i = float3(__int_as_float(__float_as_int(p.x) + ((p.x < 0) ? -of_i.x : of_i.x)),
+                             __int_as_float(__float_as_int(p.y) + ((p.y < 0) ? -of_i.y : of_i.y)),
+                             __int_as_float(__float_as_int(p.z) + ((p.z < 0) ? -of_i.z : of_i.z)));
+
+    return float3(abs(p.x) < origin ? p.x + float_scale * n.x : p_i.x,
+                       abs(p.y) < origin ? p.y + float_scale * n.y : p_i.y,
+                       abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
+}
 
 // Main ray tracing kernel.
 kernel void raytracingKernel(
@@ -444,7 +455,7 @@ kernel void raytracingKernel(
 
             materialSample(sampleData, matState);
 
-            prd.origin = worldPosition;
+            prd.origin = offset_ray(worldPosition, matState.geom_normal * (prd.inside ? -1.0 : 1.0));
             prd.direction = sampleData.k2;
             prd.throughput *= sampleData.bsdf_over_pdf;
 
