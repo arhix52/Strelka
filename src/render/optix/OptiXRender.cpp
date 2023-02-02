@@ -374,33 +374,6 @@ void OptiXRender::createAccelerationStructure()
         optixInstances.push_back(oi);
     }
 
-    // {
-    //     Curve* curve = createCurve();
-    //     OptixInstance oi = {};
-    //     glm::mat3x4 translated = glm::transpose(glm::translate(glm::mat4(1.0), glm::vec3(3.0f, 0.0f, 0.0f)));
-
-    //     int i = instances.size();
-    //     memcpy(oi.transform, glm::value_ptr(translated), sizeof(float) * 12);
-    //     oi.sbtOffset = static_cast<unsigned int>(i * RAY_TYPE_COUNT);
-    //     oi.visibilityMask = 255;
-    //     oi.traversableHandle = curve->gas_handle;
-    //     optixInstances.push_back(oi);
-    //     oka::Instance sceneInst = {};
-    //     sceneInst.mCurveId = 0;
-    //     sceneInst.type = oka::Instance::Type::eCurve;
-    //     sceneInst.mMaterialId = -1;
-    //     sceneInst.transform = glm::float4x4(1.0f);
-    //     mScene->mInstances.push_back(sceneInst);
-    // }
-
-    // glm::mat3x4 translated = glm::transpose(glm::translate(glm::mat4(1.0), glm::vec3(0.0f, 0.50f, 0.0f)));
-    // {
-    //     memcpy(instances[1].transform, glm::value_ptr(translated), sizeof(float) * 12);
-    //     instances[1].sbtOffset = static_cast<unsigned int>(0);
-    //     instances[1].visibilityMask = 255;
-    //     instances[1].traversableHandle = b->gas_handle;
-    // }
-
     size_t instances_size_in_bytes = sizeof(OptixInstance) * optixInstances.size();
     CUDA_CHECK(cudaMalloc((void**)&mState.d_instances, instances_size_in_bytes));
     CUDA_CHECK(
