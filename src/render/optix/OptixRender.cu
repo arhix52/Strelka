@@ -143,7 +143,7 @@ extern "C" __global__ void __raygen__rg()
             if (params.debug == 1)
                 break;
         }
-        result = prd.radiance;
+        result += prd.radiance;
     }
 
     const unsigned int image_index = launch_index.y * params.image_width + launch_index.x;

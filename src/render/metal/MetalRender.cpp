@@ -68,7 +68,8 @@ void MetalRender::render(Buffer* output)
         buildBuffers();
         createAccelerationStructures();
         // create accum buffer, we don't need cpu access, make it device only
-        mAccumulationBuffer = mDevice->newBuffer(output->width() * output->height() * output->getElementSize(), MTL::ResourceStorageModePrivate);
+        mAccumulationBuffer = mDevice->newBuffer(
+            output->width() * output->height() * output->getElementSize(), MTL::ResourceStorageModePrivate);
     }
 
     _frame = (_frame + 1) % oka::kMaxFramesInFlight;
@@ -107,7 +108,8 @@ void MetalRender::render(Buffer* output)
     pUniformData->numLights = mScene->getLightsDesc().size();
     pUniformData->samples_per_launch = 1;
     pUniformData->enableAccumulation = 1;
-    pUniformData->randomFromHost = rand();
+    pUniformData->missColor = float3(0.0f);
+    pUniformData->maxDepth = 4;
 
     glm::float4x4 invView = glm::inverse(camera.matrices.view);
     for (int column = 0; column < 4; column++)
@@ -204,7 +206,7 @@ void MetalRender::buildBuffers()
     const std::vector<Scene::Light>& lightDescs = mScene->getLights();
 
     assert(sizeof(Scene::Light) == sizeof(UniformLight));
-    const size_t lightBufferSize = sizeof(Scene::Light) * lightDescs.size(); 
+    const size_t lightBufferSize = sizeof(Scene::Light) * lightDescs.size();
     const size_t vertexDataSize = sizeof(oka::Scene::Vertex) * vertices.size();
     const size_t indexDataSize = sizeof(uint32_t) * indices.size();
 
@@ -332,6 +334,15 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
         const uint32_t i0 = indices[mesh.mIndex + i * 3 + 0];
         const uint32_t i1 = indices[mesh.mIndex + i * 3 + 1];
         const uint32_t i2 = indices[mesh.mIndex + i * 3 + 2];
+        // Positions
+        using simd::float3;
+
+        curr.positions[0] = { vertices[mesh.mVbOffset + i0].pos.x, vertices[mesh.mVbOffset + i0].pos.y,
+                              vertices[mesh.mVbOffset + i0].pos.z };
+        curr.positions[1] = { vertices[mesh.mVbOffset + i1].pos.x, vertices[mesh.mVbOffset + i1].pos.y,
+                              vertices[mesh.mVbOffset + i1].pos.z };
+        curr.positions[2] = { vertices[mesh.mVbOffset + i2].pos.x, vertices[mesh.mVbOffset + i2].pos.y,
+                              vertices[mesh.mVbOffset + i2].pos.z };
         // Normals
         curr.normals[0] = vertices[mesh.mVbOffset + i0].normal;
         curr.normals[1] = vertices[mesh.mVbOffset + i1].normal;
@@ -346,7 +357,8 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
         curr.uv[2] = vertices[mesh.mVbOffset + i2].uv;
     }
 
-    MTL::Buffer* perPrimitiveBuffer = mDevice->newBuffer(triangleData.size() * sizeof(Triangle), MTL::ResourceStorageModeManaged);
+    MTL::Buffer* perPrimitiveBuffer =
+        mDevice->newBuffer(triangleData.size() * sizeof(Triangle), MTL::ResourceStorageModeManaged);
 
     memcpy(perPrimitiveBuffer->contents(), triangleData.data(), sizeof(Triangle) * triangleData.size());
 
@@ -411,7 +423,8 @@ void MetalRender::createAccelerationStructures()
         instanceDescriptors[i].accelerationStructureIndex = curr.mMeshId;
         instanceDescriptors[i].options = MTL::AccelerationStructureInstanceOptionOpaque;
         instanceDescriptors[i].intersectionFunctionTableOffset = 0;
-        instanceDescriptors[i].mask = 1;
+        instanceDescriptors[i].mask =
+            curr.type == oka::Instance::Type::eLight ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_TRIANGLE;
 
         for (int column = 0; column < 4; column++)
         {

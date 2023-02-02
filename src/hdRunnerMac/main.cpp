@@ -265,16 +265,16 @@ private:
     uint32_t width = 0, height = 0;
 };
 
-class MyMTKViewDelegate : public MTK::ViewDelegate
+class StrelkaMTKViewDelegate : public MTK::ViewDelegate
 {
 public:
-    MyMTKViewDelegate(MTL::Device* pDevice,
+    StrelkaMTKViewDelegate(MTL::Device* pDevice,
                       HdEngine* eng,
                       HdRenderIndex* ri,
                       std::array<HdRenderBuffer*, 3>& rb,
                       HdRenderPassSharedPtr rp,
                       HdRenderPassStateSharedPtr rps);
-    virtual ~MyMTKViewDelegate() override;
+    virtual ~StrelkaMTKViewDelegate() override;
     virtual void drawInMTKView(MTK::View* pView) override;
     virtual void drawableSizeWillChange(MTK::View* pView, CGSize size) override;
 
@@ -333,7 +333,7 @@ private:
     HdEngine* mEngine = nullptr;
     HdRenderIndex* mRenderIndex;
     std::array<HdRenderBuffer*, 3> mRenderBuffers;
-    MyMTKViewDelegate* _pViewDelegate = nullptr;
+    StrelkaMTKViewDelegate* _pViewDelegate = nullptr;
     HdRenderPassSharedPtr mRenderPass;
     HdRenderPassStateSharedPtr mRenderPassState;
 };
@@ -573,7 +573,7 @@ void MyAppDelegate::applicationDidFinishLaunching(NS::Notification* pNotificatio
     _pMtkView->setClearDepth(1.0f);
 
     _pViewDelegate =
-        new MyMTKViewDelegate(_pDevice, mEngine, mRenderIndex, mRenderBuffers, mRenderPass, mRenderPassState);
+        new StrelkaMTKViewDelegate(_pDevice, mEngine, mRenderIndex, mRenderBuffers, mRenderPass, mRenderPassState);
     _pMtkView->setDelegate(_pViewDelegate);
 
     _pWindow->setContentView(_pMtkView);
@@ -596,7 +596,7 @@ bool MyAppDelegate::applicationShouldTerminateAfterLastWindowClosed(NS::Applicat
 #pragma mark - ViewDelegate
 #pragma region ViewDelegate {
 
-MyMTKViewDelegate::MyMTKViewDelegate(MTL::Device* pDevice,
+StrelkaMTKViewDelegate::StrelkaMTKViewDelegate(MTL::Device* pDevice,
                                      HdEngine* eng,
                                      HdRenderIndex* ri,
                                      std::array<HdRenderBuffer*, 3>& rb,
@@ -613,12 +613,12 @@ MyMTKViewDelegate::MyMTKViewDelegate(MTL::Device* pDevice,
     frameIndex = 0;
 }
 
-MyMTKViewDelegate::~MyMTKViewDelegate()
+StrelkaMTKViewDelegate::~StrelkaMTKViewDelegate()
 {
     // delete _pRenderer;
 }
 
-void MyMTKViewDelegate::drawInMTKView(MTK::View* pView)
+void StrelkaMTKViewDelegate::drawInMTKView(MTK::View* pView)
 {
     HdTaskSharedPtrVector tasks;
     std::shared_ptr<SimpleRenderTask> renderTasks;
@@ -634,7 +634,7 @@ void MyMTKViewDelegate::drawInMTKView(MTK::View* pView)
     mDisplay->display(pView, res);
     frameIndex = (frameIndex + 1) % kMaxFramesInFlight;
 }
-void MyMTKViewDelegate::drawableSizeWillChange(MTK::View* pView, CGSize size)
+void StrelkaMTKViewDelegate::drawableSizeWillChange(MTK::View* pView, CGSize size)
 {
     // _pRenderer->resize(size);
 }

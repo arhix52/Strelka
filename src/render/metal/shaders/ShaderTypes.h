@@ -41,6 +41,10 @@ struct Vertex
 
 struct Uniforms
 {
+    simd::float4x4 viewToWorld;
+    simd::float4x4 clipToView;
+    vector_float3 missColor;
+    
     uint32_t width;
     uint32_t height;
     uint32_t frameIndex;
@@ -48,14 +52,14 @@ struct Uniforms
     uint32_t numLights;
     uint32_t enableAccumulation;
     uint32_t samples_per_launch;
+    uint32_t maxDepth;
 
-    uint32_t randomFromHost;
-    simd::float4x4 viewToWorld;
-    simd::float4x4 clipToView;
+    
 };
 
 struct Triangle
 {
+    vector_float3 positions[3];
     uint32_t normals[3];
     uint32_t tangent[3];
     uint32_t uv[3];
