@@ -18,7 +18,6 @@ Follow setup guide https://vulkan-tutorial.com/Development_environment
 
 Clone the project.
    
-    git clone https://github.com/ikryukov/NeVK --recursive
 
 #### Launch
 Use vscode with preset env variable
@@ -42,12 +41,12 @@ Use vscode with preset env variable
         cd <VULKAN_SDK>
         source ./setup-env.sh
     USD env:
-        export USD_DIR=/Users/ilya/work/usd_build/
-        export PATH=/Users/ilya/work/usd_build/bin:$PATH
-        export PYTHONPATH=/Users/ilya/work/usd_build/lib/python:$PYTHONPATH
+        export USD_DIR=/Users/<user>/work/usd_build/
+        export PATH=/Users/<user>/work/usd_build/bin:$PATH
+        export PYTHONPATH=/Users/<user>/work/usd_build/lib/python:$PYTHONPATH
 
     Cmake:
-        cmake -DCMAKE_INSTALL_PREFIX=/Users/ilya/work/usd_build/plugin/usd/ ..
+        cmake -DCMAKE_INSTALL_PREFIX=/Users/<user>/work/usd_build/plugin/usd/ ..
     Install plugin:
         cmake --install . --component HdStrelka
 

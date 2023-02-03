@@ -6,7 +6,7 @@
 
 #include <scene/camera.h>
 #include <scene/scene.h>
-#include <render/OptiXRender.h>
+#include <render/render.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -19,7 +19,7 @@ public:
     HdStrelkaRenderPass(HdRenderIndex* index,
                      const HdRprimCollection& collection,
                      const HdRenderSettingsMap& settings,
-                     oka::OptiXRender* renderer,
+                     oka::Render* renderer,
                      oka::Scene* scene);
 
     ~HdStrelkaRenderPass() override;
@@ -48,7 +48,7 @@ private:
 
     oka::Scene* mScene;
     // ptr to global render
-    oka::OptiXRender* mRenderer;
+    oka::Render* mRenderer;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

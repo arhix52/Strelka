@@ -27,7 +27,7 @@
 #include <pxr/usdImaging/usdImaging/delegate.h>
 
 #include <render/common.h>
-// #include <render/glfwrender.h>
+#include <render/buffer.h>
 
 #include <display/glfwdisplay.h>
 
@@ -137,11 +137,11 @@ public:
         return mOrientation.Transform(GfVec3d(1.0, 0.0, 0.0));
     }
     // global camera axis depending on scene settings
-    GfVec3d getWorldUp() const 
+    GfVec3d getWorldUp() const
     {
         return mWorldUp;
     }
-    GfVec3d getWorldForward() const 
+    GfVec3d getWorldForward() const
     {
         return mWorldForward;
     }
@@ -545,7 +545,7 @@ int main(int argc, const char* argv[])
     fflush(stdout);
 
     // Print the up-axis
-    TfToken upAxis =  UsdGeomGetStageUpAxis(stage);
+    TfToken upAxis = UsdGeomGetStageUpAxis(stage);
     std::cout << "Stage up-axis: " << upAxis << std::endl;
 
     // Print the stage's linear units, or "meters per unit"
@@ -686,15 +686,16 @@ int main(int argc, const char* argv[])
             }
 
             engine.Execute(renderIndex, &tasks); // main path tracing rendering in fixed render resolution
-            oka::CUDAOutputBuffer<uchar4>* outputBuffer = surfaceController.getRenderBuffer(versionId)
-                                                              ->GetResource(false)
-                                                              .UncheckedGet<oka::CUDAOutputBuffer<uchar4>*>();
+            oka::Buffer* outputBuffer =
+                surfaceController.getRenderBuffer(versionId)->GetResource(false).UncheckedGet<oka::Buffer*>();
             oka::ImageBuffer outputImage;
+            // upload to host
+            outputBuffer->map();
             outputImage.data = outputBuffer->getHostPointer();
             outputImage.dataSize = outputBuffer->getHostDataSize();
             outputImage.height = outputBuffer->height();
             outputImage.width = outputBuffer->width();
-            outputImage.pixel_format = oka::BufferImageFormat::UNSIGNED_BYTE4;
+            outputImage.pixel_format = outputBuffer->getFormat();
             outputImageCopy = outputImage;
 
             leftSpp -= frameSpp;

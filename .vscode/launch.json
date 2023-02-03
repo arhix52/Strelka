@@ -16,13 +16,34 @@
             // "args": ["-s", "C:/work/mustang2.usda"],
             // "args": ["-s", "C:/work/Kitchen_set/Kitchen.usda"],
             "args": ["-s", "C:/work/strelka_test1.usda"],
-            // "args": ["-s", "C:/work/Strelka/misc/coffeemaker2.usdc"],
-            // "args": ["-s", "C:/work/Strelka/misc/Astronaut/Astronaut.usda"],
             "stopAtEntry": false,
-            // "cwd": "${fileDirname}",
             "cwd": "${workspaceFolder}/build/",
             "environment": [],
             "console": "externalTerminal"
+        },
+        {
+            "name": "(Mac) Launch",
+            "type": "cppdbg",
+            "request": "launch",
+            "targetArchitecture": "arm64",
+            "program": "${command:cmake.launchTargetPath}",
+            // "args": ["-s", "../../cube.usda"],
+            // "args": ["-s", "../../senna2.usd"],
+            "args": ["-s", "../../Kitchen_set/Kitchen.usda"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build/",
+            "environment": [
+                {
+                    "name": "MTL_DEBUG_LAYER",
+                    "value": "1"                    
+                },
+                {
+                    "name": "OBJC_DEBUG_MISSING_POOLS",
+                    "value": "YES"
+                }
+            ],
+            "MIMode": "lldb"
+            // "console": "externalTerminal"
         },
         {
         "name": "(Windows) Test Launch",

@@ -572,7 +572,10 @@ void Scene::endFrame()
     FrMod = false;
 }
 
-uint32_t Scene::createCurve(const Curve::Type type, const std::vector<uint32_t>& vertexCounts, const std::vector<glm::float3>& points, const std::vector<float>& widths)
+uint32_t Scene::createCurve(const Curve::Type type,
+                            const std::vector<uint32_t>& vertexCounts,
+                            const std::vector<glm::float3>& points,
+                            const std::vector<float>& widths)
 {
     Curve c = {};
     c.mPointsStart = mCurvePoints.size();

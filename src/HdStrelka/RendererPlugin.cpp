@@ -59,7 +59,7 @@ void HdStrelkaRendererPlugin::DeleteRenderDelegate(HdRenderDelegate* renderDeleg
     delete renderDelegate;
 }
 
-bool HdStrelkaRendererPlugin::IsSupported() const
+bool HdStrelkaRendererPlugin::IsSupported(bool gpuEnabled) const
 {
     return m_isSupported;
 }

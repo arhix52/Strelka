@@ -262,7 +262,6 @@ __device__ float3 estimateDirectLighting(uint32_t& rngSeed, Mdl_state& state, fl
     return r;
 }
 
-
 // Get curve hit-point in world coordinates.
 static __forceinline__ __device__ float3 getHitPoint()
 {
@@ -377,7 +376,7 @@ extern "C" __global__ void __closesthit__radiance()
         float lightPdf = 0.0f; // return value for sampleLights()
         const float3 radiance = estimateDirectLighting(prd->rndSeed, state, toLight, lightPdf);
 
-       if (params.debug == 1)
+        if (params.debug == 1)
         {
             prd->radiance = worldNormal;
             return;

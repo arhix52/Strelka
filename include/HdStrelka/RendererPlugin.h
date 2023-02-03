@@ -22,7 +22,7 @@ public:
 
     void DeleteRenderDelegate(HdRenderDelegate* renderDelegate) override;
 
-    bool IsSupported() const override;
+    bool IsSupported(bool gpuEnabled = true) const override;
 
 private:
     std::unique_ptr<MaterialNetworkTranslator> m_translator;

@@ -1,5 +1,7 @@
 #include "RenderBuffer.h"
 
+#include "render.h"
+
 #include <pxr/base/gf/vec3i.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -42,7 +44,12 @@ bool HdStrelkaRenderBuffer::Allocate(const GfVec3i& dimensions, HdFormat format,
     }
     else
     {
-        mResult = new oka::CUDAOutputBuffer<uchar4>(oka::CUDAOutputBufferType::CUDA_DEVICE, m_width, m_height);
+        oka::BufferDesc desc{};
+        desc.format = oka::BufferFormat::FLOAT4;
+        desc.width = m_width;
+        desc.height = m_height;
+
+        mResult = mCtx->mRender->createBuffer(desc);
     }
     if (!mResult)
     {

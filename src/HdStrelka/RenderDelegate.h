@@ -6,7 +6,7 @@
 
 #include <render/common.h>
 #include <scene/scene.h>
-#include <render/OptiXRender.h>
+#include <render/render.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -82,7 +82,7 @@ private:
 
     oka::SharedContext* mSharedCtx;
     oka::Scene mScene;
-    oka::OptiXRender mRenderer;
+    oka::Render* mRenderer;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

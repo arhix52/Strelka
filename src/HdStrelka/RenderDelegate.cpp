@@ -40,7 +40,14 @@ HdStrelkaRenderDelegate::HdStrelkaRenderDelegate(const HdRenderSettingsMap& sett
         _settingsMap[key] = value;
     }
 
-    mRenderer.setScene(&mScene);
+    oka::RenderType type = oka::RenderType::eOptiX;
+    #ifdef __APPLE__
+        type = oka::RenderType::eMetal;
+    #endif
+
+    mRenderer = oka::RenderFactory::createRender(type);
+
+    mRenderer->setScene(&mScene);
 }
 
 HdStrelkaRenderDelegate::~HdStrelkaRenderDelegate()
@@ -53,9 +60,11 @@ void HdStrelkaRenderDelegate::SetDrivers(HdDriverVector const& drivers)
     {
         if (hdDriver->name == _Tokens->HdStrelkaDriver && hdDriver->driver.IsHolding<oka::SharedContext*>())
         {
+            assert(mRenderer);
             mSharedCtx = hdDriver->driver.UncheckedGet<oka::SharedContext*>();
-            mRenderer.setSharedContext(mSharedCtx);
-            mRenderer.init();
+            mRenderer->setSharedContext(mSharedCtx);
+            mRenderer->init();
+            mSharedCtx->mRender = mRenderer;
             break;
         }
     }
@@ -68,7 +77,7 @@ HdRenderSettingDescriptorList HdStrelkaRenderDelegate::GetRenderSettingDescripto
 
 HdRenderPassSharedPtr HdStrelkaRenderDelegate::CreateRenderPass(HdRenderIndex* index, const HdRprimCollection& collection)
 {
-    return HdRenderPassSharedPtr(new HdStrelkaRenderPass(index, collection, _settingsMap, &mRenderer, &mScene));
+    return HdRenderPassSharedPtr(new HdStrelkaRenderPass(index, collection, _settingsMap, mRenderer, &mScene));
 }
 
 HdResourceRegistrySharedPtr HdStrelkaRenderDelegate::GetResourceRegistry() const
@@ -227,7 +236,7 @@ TfTokenVector HdStrelkaRenderDelegate::GetShaderSourceTypes() const
 
 oka::SharedContext& HdStrelkaRenderDelegate::getSharedContext()
 {
-    return mRenderer.getSharedContext();
+    return mRenderer->getSharedContext();
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

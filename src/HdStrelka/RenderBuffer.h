@@ -51,7 +51,7 @@ protected:
 private:
     // oka::Image* mResult = nullptr;
     oka::SharedContext* mCtx = nullptr;
-    oka::CUDAOutputBuffer<uchar4>* mResult = nullptr;
+    oka::Buffer* mResult = nullptr;
 
     void* m_bufferMem = nullptr;
     uint32_t m_width;

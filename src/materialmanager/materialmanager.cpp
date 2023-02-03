@@ -218,7 +218,7 @@ public:
         std::vector<char> data;
         {
             const std::string cwdPath = fs::current_path().string();
-            const std::string precompiledPath = cwdPath + "\\shaders\\OptixRender_radiance_closest_hit.bc";
+            const std::string precompiledPath = cwdPath + "\\optix\\shaders\\OptixRender_radiance_closest_hit.bc";
 
             std::ifstream file(precompiledPath.c_str(), std::ios::in | std::ios::binary);
 

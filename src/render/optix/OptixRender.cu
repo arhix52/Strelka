@@ -143,7 +143,7 @@ extern "C" __global__ void __raygen__rg()
             if (params.debug == 1)
                 break;
         }
-        result = prd.radiance;
+        result += prd.radiance;
     }
 
     const unsigned int image_index = launch_index.y * params.image_width + launch_index.x;
@@ -159,11 +159,11 @@ extern "C" __global__ void __raygen__rg()
             accum_color = lerp(accum_color_prev, accum_color, a);
         }
         params.accum[image_index] = make_float4(accum_color, 1.0f);
-        params.image[image_index] = make_color(accum_color);
+        params.image[image_index] = make_float4(accum_color, 1.0f);
     }
     else
     {
-        params.image[image_index] = make_color(result);
+        params.image[image_index] = make_float4(result, 1.0f);
     }
 }
 

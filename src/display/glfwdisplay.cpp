@@ -5,7 +5,51 @@
 #include "imgui_impl_opengl3.h"
 #define GL_SILENCE_DEPRECATION
 
+#include <sstream>
+
 using namespace oka;
+
+inline const char* getGLErrorString(GLenum error)
+{
+    switch (error)
+    {
+    case GL_NO_ERROR:
+        return "No error";
+    case GL_INVALID_ENUM:
+        return "Invalid enum";
+    case GL_INVALID_VALUE:
+        return "Invalid value";
+    case GL_INVALID_OPERATION:
+        return "Invalid operation";
+        // case GL_STACK_OVERFLOW:      return "Stack overflow";
+        // case GL_STACK_UNDERFLOW:     return "Stack underflow";
+    case GL_OUT_OF_MEMORY:
+        return "Out of memory";
+        // case GL_TABLE_TOO_LARGE:     return "Table too large";
+    default:
+        return "Unknown GL error";
+    }
+}
+
+inline void glCheck(const char* call, const char* file, unsigned int line)
+{
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR)
+    {
+        std::stringstream ss;
+        ss << "GL error " << getGLErrorString(err) << " at " << file << "(" << line << "): " << call << '\n';
+        std::cerr << ss.str() << std::endl;
+        // throw Exception(ss.str().c_str());
+        assert(0);
+    }
+}
+
+#define GL_CHECK(call)                                                                                                 \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        call;                                                                                                          \
+        glCheck(#call, __FILE__, __LINE__);                                                                            \
+    } while (false)
 
 const std::string glfwdisplay::s_vert_source = R"(
 #version 330 core
@@ -409,17 +453,18 @@ void glfwdisplay::display(const int32_t screen_res_x,
     bool convertToSrgb = true;
 
     // if (m_image_format == BufferImageFormat::UNSIGNED_BYTE4)
-    {
-        // input is assumed to be in srgb since it is only 1 byte per channel in
-        // size
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, screen_res_x, screen_res_y, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-        convertToSrgb = false;
-    }
+    // {
+    //     // input is assumed to be in srgb since it is only 1 byte per channel in
+    //     // size
+    //     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, screen_res_x, screen_res_y, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    //     convertToSrgb = false;
+    // }
     // else if (m_image_format == BufferImageFormat::FLOAT3)
     //     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, screen_res_x, screen_res_y, 0, GL_RGB, GL_FLOAT, nullptr);
 
     // else if (m_image_format == BufferImageFormat::FLOAT4)
-    //     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, screen_res_x, screen_res_y, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, screen_res_x, screen_res_y, 0, GL_RGBA, GL_FLOAT, nullptr);
+        convertToSrgb = false;
 
     // else
     //     throw Exception("Unknown buffer format");

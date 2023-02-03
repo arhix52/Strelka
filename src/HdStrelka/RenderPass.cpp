@@ -27,7 +27,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 HdStrelkaRenderPass::HdStrelkaRenderPass(HdRenderIndex* index,
                                          const HdRprimCollection& collection,
                                          const HdRenderSettingsMap& settings,
-                                         oka::OptiXRender* renderer,
+                                         oka::Render* renderer,
                                          oka::Scene* scene)
     : HdRenderPass(index, collection),
       m_settings(settings),
@@ -311,8 +311,8 @@ void HdStrelkaRenderPass::_Execute(const HdRenderPassStateSharedPtr& renderPassS
     //    return;
     //}
 
-    oka::CUDAOutputBuffer<uchar4>* outputImage =
-        renderBuffer->GetResource(false).UncheckedGet<oka::CUDAOutputBuffer<uchar4>*>();
+    oka::Buffer* outputImage =
+        renderBuffer->GetResource(false).UncheckedGet<oka::Buffer*>();
 
     renderBuffer->SetConverged(false);
 
@@ -392,7 +392,7 @@ void HdStrelkaRenderPass::_Execute(const HdRenderPassStateSharedPtr& renderPassS
 
     float* img_data = (float*)renderBuffer->Map();
 
-    mRenderer->launch(*outputImage);
+    mRenderer->render(outputImage);
 
     renderBuffer->Unmap();
     // renderBuffer->SetConverged(true);
