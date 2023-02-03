@@ -118,3 +118,5 @@ target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/include/)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/include/render)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/external/glm)
+target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/external/mdl-sdk/include)
+

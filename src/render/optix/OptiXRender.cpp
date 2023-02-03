@@ -16,6 +16,8 @@
 #include <vector_types.h>
 #include <vector_functions.h>
 
+#include "texture_support_cuda.h"
+
 #include <filesystem>
 #include <array>
 #include <string>
@@ -689,6 +691,7 @@ void OptiXRender::createSbt()
                 // write all needed data for instances
                 hg_sbt.data.argData = mat.d_argData;
                 hg_sbt.data.roData = mat.d_roData;
+                hg_sbt.data.resHandler = mat.d_textureHandler;
                 if (instance.type == oka::Instance::Type::eMesh)
                 {
                     const oka::Mesh& mesh = meshes[instance.mMeshId];
@@ -1097,6 +1100,13 @@ bool OptiXRender::createOptixMaterials()
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_materialRoData), roDataSize));
     CUDA_CHECK(cudaMemcpy((void*)d_materialRoData, roData, roDataSize, cudaMemcpyHostToDevice));
 
+
+    Texture_handler materialTextures;
+    materialTextures.num_textures = 0;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_texturesHandler), sizeof(Texture_handler)));
+    CUDA_CHECK(cudaMemcpy((void*)d_texturesHandler, &materialTextures, sizeof(Texture_handler), cudaMemcpyHostToDevice));
+
+
     for (int i = 0; i < compiledMaterials.size(); ++i)
     {
         const char* codeData = mMaterialManager.getShaderCode(targetCode, i);
@@ -1110,6 +1120,7 @@ bool OptiXRender::createOptixMaterials()
         optixMaterial.d_argDataSize = argDataSize;
         optixMaterial.d_roData = d_materialRoData + mMaterialManager.getReadOnlyOffset(targetCode, i);
         optixMaterial.d_roSize = roDataSize;
+        optixMaterial.d_textureHandler = d_texturesHandler;
 
         mMaterials.push_back(optixMaterial);
     }
