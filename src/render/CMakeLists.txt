@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 set(RENDERLIB_NAME render)
 
 include_directories(${ROOT_HOME}/external/glm)
+include_directories(${ROOT_HOME}/external/stb)
 
 set(RENDER_SOURCES_COMMON ${ROOT_HOME}/include/render/render.h
                           ${ROOT_HOME}/src/render/render.cpp)
