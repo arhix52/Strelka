@@ -380,7 +380,7 @@ extern "C" __global__ void __closesthit__radiance()
 
         if (params.debug == 1)
         {
-            prd->radiance = radiance;
+            prd->radiance = worldNormal;
             return;
         }
 
