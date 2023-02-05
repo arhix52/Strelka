@@ -360,14 +360,17 @@ void OptiXRender::createAccelerationStructure()
         if (curr.type == oka::Instance::Type::eMesh)
         {
             oi.traversableHandle = mOptixMeshes[curr.mMeshId]->gas_handle;
+            oi.visibilityMask = GEOMETRY_MASK_TRIANGLE;
         }
         else if (curr.type == oka::Instance::Type::eCurve)
         {
             oi.traversableHandle = mOptixCurves[curr.mCurveId]->gas_handle;
+            oi.visibilityMask = GEOMETRY_MASK_CURVE;
         }
         else if (curr.type == oka::Instance::Type::eLight)
         {
             oi.traversableHandle = mOptixMeshes[curr.mMeshId]->gas_handle;
+            oi.visibilityMask = GEOMETRY_MASK_LIGHT;
         }
         else
         {
@@ -376,7 +379,6 @@ void OptiXRender::createAccelerationStructure()
         // fill common instance data
         memcpy(oi.transform, glm::value_ptr(glm::float3x4(glm::rowMajor4(curr.transform))), sizeof(float) * 12);
         oi.sbtOffset = static_cast<unsigned int>(i * RAY_TYPE_COUNT);
-        oi.visibilityMask = 255;
         optixInstances.push_back(oi);
     }
 

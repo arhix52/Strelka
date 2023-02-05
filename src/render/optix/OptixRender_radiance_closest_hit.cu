@@ -138,12 +138,13 @@ static __forceinline__ __device__ bool traceOcclusion(
 {
     unsigned int occluded = 0u;
     optixTrace(handle, ray_origin, ray_direction, tmin, tmax,
-               0.0f, // rayTime
-               OptixVisibilityMask(1), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
-               RAY_TYPE_OCCLUSION, // SBT offset
-               RAY_TYPE_COUNT, // SBT stride
-               RAY_TYPE_OCCLUSION, // missSBTIndex
-               occluded);
+        0.0f, // rayTime
+        OptixVisibilityMask(RAY_MASK_SHADOW),
+        OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+        RAY_TYPE_OCCLUSION, // SBT offset
+        RAY_TYPE_COUNT, // SBT stride
+        RAY_TYPE_OCCLUSION, // missSBTIndex
+        occluded);
     return occluded;
 }
 
@@ -228,9 +229,10 @@ __device__ float3 sampleLight(uint32_t& rngState, const UniformLight& light, Mdl
         // shadowRay.o = float4(offset_ray(state.position, state.geom_normal), lightSampleData.distToLight); // need to
         // set
         const bool occluded = traceOcclusion(params.handle, state.position, lightSampleData.L,
-                                             0.01f, // tmin
+                                             1e-4f, // tmin
                                              lightSampleData.distToLight // tmax
         );
+
         float visibility = occluded ? 0.0f : 1.0f;
         // TODO: skip light hit
 
@@ -454,7 +456,7 @@ extern "C" __global__ void __closesthit__radiance()
         }
 
         // setup next path segment
-        prd->origin = worldPosition;
+        prd->origin = offset_ray(worldPosition, geomNormal);
         prd->dir = sample_data.k2;
         prd->throughput *= sample_data.bsdf_over_pdf;
     }
