@@ -44,7 +44,8 @@ static __forceinline__ __device__ bool traceOcclusion(
     unsigned int occluded = 0u;
     optixTrace(handle, ray_origin, ray_direction, tmin, tmax,
                0.0f, // rayTime
-               OptixVisibilityMask(1), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+               OptixVisibilityMask(RAY_MASK_SHADOW),
+               OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
                RAY_TYPE_OCCLUSION, // SBT offset
                RAY_TYPE_COUNT, // SBT stride
                RAY_TYPE_OCCLUSION, // missSBTIndex
@@ -241,7 +242,7 @@ extern "C" __global__ void __closesthit__light()
             HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
             const int32_t lightId = hit_data->lightId;
             const UniformLight& currLight = params.scene.lights[lightId];
-            
+
             prd->radiance += prd->throughput * make_float3(currLight.color);
             // prd->radiance += make_float3(100.0f, 0.0f, 0.0f);
             prd->throughput = make_float3(0.0f);
