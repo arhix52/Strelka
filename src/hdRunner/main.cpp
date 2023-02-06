@@ -465,6 +465,10 @@ int main(int argc, const char* argv[])
         std::cerr << "usd file doesn't exist";
         exit(0);
     }
+
+    std::filesystem::path usdFilePath = {usdFile.c_str()};
+    std::string resourceSearchPath = usdFilePath.parent_path().string();
+
     int32_t iterationToCapture(result["i"].as<int32_t>());
     // Init plugin.
     HdRendererPluginHandle pluginHandle = GetHdStrelkaPlugin();
@@ -509,6 +513,8 @@ int main(int argc, const char* argv[])
     ctx->mSettingsManager->setAs<bool>("render/pt/isResized", false);
     ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", false);
     ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", result["c"].as<bool>());
+
+    ctx->mSettingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
 
     oka::glfwdisplay display;
     display.init(imageWidth, imageHeight, ctx);

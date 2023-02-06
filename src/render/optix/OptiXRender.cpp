@@ -1144,6 +1144,8 @@ bool OptiXRender::createOptixMaterials()
 
     std::vector<Texture> materialTextures;
 
+    std::string resourcePath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
+    
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
         mMaterialManager.dumpParams(targetCode, compiledMaterials[i]);
@@ -1155,7 +1157,7 @@ bool OptiXRender::createOptixMaterials()
                 std::string texPath(param.value.size(), 0);
                 memcpy(texPath.data(), param.value.data(), param.value.size());
                 // int texId = getTexManager()->loadTextureMdl(texPath);
-                ::Texture tex = loadTextureFromFile(texPath);
+                ::Texture tex = loadTextureFromFile(resourcePath + "/" + texPath);
                 materialTextures.push_back(tex);
                 int texId = 0;
                 int resId = mMaterialManager.registerResource(targetCode, texId);
