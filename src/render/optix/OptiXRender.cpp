@@ -986,34 +986,36 @@ Texture OptiXRender::loadTextureFromFile(std::string& fileName)
         return Texture();
     }
     // convert to float4 format
+    // TODO: add compression here:
+    // std::vector<float> floatData(texWidth * texHeight * 4);
+    // for (int i = 0; i < texHeight; ++i)
+    // {
+    //     for (int j = 0; j < texWidth; ++j)
+    //     {
+    //         const size_t linearPixelIndex = (i * texWidth + j) * 4;
 
-    std::vector<float> floatData(texWidth * texHeight * 4);
-    for (int i = 0; i < texHeight; ++i)
-    {
-        for (int j = 0; j < texWidth; ++j)
-        {
-            const size_t linearPixelIndex = (i * texWidth + j) * 4;
+    //         auto remapToFloat = [](const unsigned char v)
+    //         {
+    //             return float(v) / 255.0f;
+    //         };
 
-            auto remapToFloat = [](const unsigned char v)
-            {
-                return float(v) / 255.0f;
-            };
+    //         floatData[linearPixelIndex + 0] = remapToFloat(data[linearPixelIndex + 0]);
+    //         floatData[linearPixelIndex + 1] = remapToFloat(data[linearPixelIndex + 1]);
+    //         floatData[linearPixelIndex + 2] = remapToFloat(data[linearPixelIndex + 2]);
+    //         floatData[linearPixelIndex + 3] = remapToFloat(data[linearPixelIndex + 3]);
+    //     }
+    // }
 
-            floatData[linearPixelIndex + 0] = remapToFloat(data[linearPixelIndex + 0]);
-            floatData[linearPixelIndex + 1] = remapToFloat(data[linearPixelIndex + 1]);
-            floatData[linearPixelIndex + 2] = remapToFloat(data[linearPixelIndex + 2]);
-            floatData[linearPixelIndex + 3] = remapToFloat(data[linearPixelIndex + 3]);
-        }
-    }
+    const void* dataPtr = data;
 
-    cudaChannelFormatDesc channel_desc = cudaCreateChannelDesc<float4>();
+    cudaChannelFormatDesc channel_desc = cudaCreateChannelDesc<uchar4>();
     cudaResourceDesc res_desc{};
     memset(&res_desc, 0, sizeof(res_desc));
 
     cudaArray_t device_tex_array;
     CUDA_CHECK(cudaMallocArray(&device_tex_array, &channel_desc, texWidth, texHeight));
 
-    CUDA_CHECK(cudaMemcpy2DToArray(device_tex_array, 0, 0, floatData.data(), texWidth * sizeof(float) * 4, texWidth * sizeof(float) * 4,
+    CUDA_CHECK(cudaMemcpy2DToArray(device_tex_array, 0, 0, dataPtr, texWidth * sizeof(char) * 4, texWidth * sizeof(char) * 4,
                                    texHeight, cudaMemcpyHostToDevice));
 
     res_desc.resType = cudaResourceTypeArray;
@@ -1026,8 +1028,8 @@ Texture OptiXRender::loadTextureFromFile(std::string& fileName)
     tex_desc.addressMode[0] = addr_mode;
     tex_desc.addressMode[1] = addr_mode;
     tex_desc.addressMode[2] = addr_mode;
-    tex_desc.filterMode     = cudaFilterModeLinear;
-    tex_desc.readMode       = cudaReadModeElementType;
+    tex_desc.filterMode     = cudaFilterModePoint;
+    tex_desc.readMode       = cudaReadModeNormalizedFloat;
     tex_desc.normalizedCoords = 1;
     if (res_desc.resType == cudaResourceTypeMipmappedArray) {
         tex_desc.mipmapFilterMode = cudaFilterModeLinear;
