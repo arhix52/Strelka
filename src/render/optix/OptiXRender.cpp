@@ -1028,7 +1028,7 @@ Texture OptiXRender::loadTextureFromFile(std::string& fileName)
     tex_desc.addressMode[0] = addr_mode;
     tex_desc.addressMode[1] = addr_mode;
     tex_desc.addressMode[2] = addr_mode;
-    tex_desc.filterMode     = cudaFilterModePoint;
+    tex_desc.filterMode     = cudaFilterModeLinear;
     tex_desc.readMode       = cudaReadModeNormalizedFloat;
     tex_desc.normalizedCoords = 1;
     if (res_desc.resType == cudaResourceTypeMipmappedArray) {
