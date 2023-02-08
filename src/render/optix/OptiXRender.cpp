@@ -420,9 +420,34 @@ void OptiXRender::createAccelerationStructure()
     // d_ias_temp_buffer = state.d_temp_buffer;
     // }
 
+    CUdeviceptr compactedSizeBuffer;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>((&compactedSizeBuffer)), sizeof(uint64_t)));
+
+    OptixAccelEmitDesc property = {};
+    property.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+    property.result = compactedSizeBuffer;
+
     OPTIX_CHECK(optixAccelBuild(mState.context, 0, &ias_accel_options, &ias_instance_input, 1, d_ias_temp_buffer,
                                 ias_buffer_sizes.tempSizeInBytes, d_buffer_temp_output_ias_and_compacted_size,
-                                ias_buffer_sizes.outputSizeInBytes, &mState.ias_handle, nullptr, 0));
+                                ias_buffer_sizes.outputSizeInBytes, &mState.ias_handle, &property, 1));
+
+    // Compress the IAS
+
+    size_t compacted_ias_size;
+    CUDA_CHECK( cudaMemcpy( &compacted_ias_size, (void*)property.result, sizeof( size_t ), cudaMemcpyDeviceToHost ) );
+
+    CUdeviceptr d_compactedOutputBuffer;
+
+    if( compacted_ias_size < ias_buffer_sizes.outputSizeInBytes )
+    {
+        CUDA_CHECK( cudaMalloc( reinterpret_cast<void**>( &d_compactedOutputBuffer ), compacted_ias_size ) );
+
+        // use handle as input and output
+        OPTIX_CHECK( optixAccelCompact( mState.context, 0, mState.ias_handle, d_compactedOutputBuffer,
+                                      compacted_ias_size, &mState.ias_handle ) );
+
+        CUDA_CHECK( cudaFree( (void*)d_buffer_temp_output_ias_and_compacted_size ) );
+    }
 }
 
 void OptiXRender::createModule()
