@@ -370,7 +370,7 @@ extern "C" __global__ void __closesthit__radiance()
         const float3 ior1 = (inside) ? make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR) : make_float3(1.0f); // material -> air
         const float3 ior2 = (inside) ? make_float3(1.0f) : make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR);
 
-        mi::neuraylib::Resource_data res_data = { nullptr, nullptr }; // TODO
+        mi::neuraylib::Resource_data res_data = { nullptr, (Texture_handler*) hit_data->resHandler }; // TODO
 
         mdlcode_init(&state, &res_data, nullptr, (const char*)hit_data->argData);
 

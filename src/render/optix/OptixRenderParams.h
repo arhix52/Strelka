@@ -98,6 +98,7 @@ struct HitGroupData
     int32_t lightId; // only for lights. -1 for others
     CUdeviceptr argData;
     CUdeviceptr roData;
+    CUdeviceptr resHandler;
     float4 world_to_object[4] = {};
     float4 object_to_world[4] = {};
 };

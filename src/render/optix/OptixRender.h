@@ -16,9 +16,10 @@
 
 #include <materialmanager.h>
 
+struct Texture;
+
 namespace oka
 {
-
 
 enum RayType
 {
@@ -86,6 +87,7 @@ private:
         size_t d_argDataSize = 0;
         CUdeviceptr d_roData = 0;
         size_t d_roSize = 0;
+        CUdeviceptr d_textureHandler;
     };
 
     struct View
@@ -111,6 +113,8 @@ private:
 
     CUdeviceptr d_materialRoData = 0;
     CUdeviceptr d_materialArgData = 0;
+    CUdeviceptr d_texturesHandler = 0;
+    CUdeviceptr d_texturesData = 0;
 
     CUdeviceptr d_param = 0;
 
@@ -122,6 +126,8 @@ private:
     void createWidthsBuffer();
 
     void createLightBuffer();
+
+    Texture loadTextureFromFile(std::string& fileName);
 
     bool createOptixMaterials();
     Material& getMaterial(int id);

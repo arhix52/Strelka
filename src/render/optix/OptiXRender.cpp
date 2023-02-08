@@ -13,8 +13,14 @@
 #include <glm/gtx/matrix_major_storage.hpp>
 #include <glm/ext/matrix_relational.hpp>
 
+#define STB_IMAGE_STATIC
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
 #include <vector_types.h>
 #include <vector_functions.h>
+
+#include "texture_support_cuda.h"
 
 #include <filesystem>
 #include <array>
@@ -691,6 +697,7 @@ void OptiXRender::createSbt()
                 // write all needed data for instances
                 hg_sbt.data.argData = mat.d_argData;
                 hg_sbt.data.roData = mat.d_roData;
+                hg_sbt.data.resHandler = mat.d_textureHandler;
                 if (instance.type == oka::Instance::Type::eMesh)
                 {
                     const oka::Mesh& mesh = meshes[instance.mMeshId];
@@ -969,6 +976,88 @@ void OptiXRender::createLightBuffer()
     }
 }
 
+Texture OptiXRender::loadTextureFromFile(std::string& fileName)
+{
+    int texWidth, texHeight, texChannels;
+    stbi_uc* data = stbi_load(fileName.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+    if (!data)
+    {
+        fprintf(stderr, "Unable to load texture from file: %s\n", fileName.c_str());
+        return Texture();
+    }
+    // convert to float4 format
+    // TODO: add compression here:
+    // std::vector<float> floatData(texWidth * texHeight * 4);
+    // for (int i = 0; i < texHeight; ++i)
+    // {
+    //     for (int j = 0; j < texWidth; ++j)
+    //     {
+    //         const size_t linearPixelIndex = (i * texWidth + j) * 4;
+
+    //         auto remapToFloat = [](const unsigned char v)
+    //         {
+    //             return float(v) / 255.0f;
+    //         };
+
+    //         floatData[linearPixelIndex + 0] = remapToFloat(data[linearPixelIndex + 0]);
+    //         floatData[linearPixelIndex + 1] = remapToFloat(data[linearPixelIndex + 1]);
+    //         floatData[linearPixelIndex + 2] = remapToFloat(data[linearPixelIndex + 2]);
+    //         floatData[linearPixelIndex + 3] = remapToFloat(data[linearPixelIndex + 3]);
+    //     }
+    // }
+
+    const void* dataPtr = data;
+
+    cudaChannelFormatDesc channel_desc = cudaCreateChannelDesc<uchar4>();
+    cudaResourceDesc res_desc{};
+    memset(&res_desc, 0, sizeof(res_desc));
+
+    cudaArray_t device_tex_array;
+    CUDA_CHECK(cudaMallocArray(&device_tex_array, &channel_desc, texWidth, texHeight));
+
+    CUDA_CHECK(cudaMemcpy2DToArray(device_tex_array, 0, 0, dataPtr, texWidth * sizeof(char) * 4, texWidth * sizeof(char) * 4,
+                                   texHeight, cudaMemcpyHostToDevice));
+
+    res_desc.resType = cudaResourceTypeArray;
+    res_desc.res.array.array = device_tex_array;
+
+    // Create filtered texture object
+    cudaTextureDesc tex_desc;
+    memset(&tex_desc, 0, sizeof(tex_desc));
+    cudaTextureAddressMode addr_mode = cudaAddressModeWrap;
+    tex_desc.addressMode[0] = addr_mode;
+    tex_desc.addressMode[1] = addr_mode;
+    tex_desc.addressMode[2] = addr_mode;
+    tex_desc.filterMode     = cudaFilterModeLinear;
+    tex_desc.readMode       = cudaReadModeNormalizedFloat;
+    tex_desc.normalizedCoords = 1;
+    if (res_desc.resType == cudaResourceTypeMipmappedArray) {
+        tex_desc.mipmapFilterMode = cudaFilterModeLinear;
+        tex_desc.maxAnisotropy = 16;
+        tex_desc.minMipmapLevelClamp = 0.f;
+        tex_desc.maxMipmapLevelClamp = 1000.f;  // default value in OpenGL
+    }
+    cudaTextureObject_t tex_obj = 0;
+    CUDA_CHECK(cudaCreateTextureObject(&tex_obj, &res_desc, &tex_desc, nullptr));
+    // Create unfiltered texture object if necessary (cube textures have no texel functions)
+    cudaTextureObject_t tex_obj_unfilt = 0;
+    // if (texture_shape != mi::neuraylib::ITarget_code::Texture_shape_cube) 
+    {
+        // Use a black border for access outside of the texture
+        tex_desc.addressMode[0] = cudaAddressModeBorder;
+        tex_desc.addressMode[1] = cudaAddressModeBorder;
+        tex_desc.addressMode[2] = cudaAddressModeBorder;
+        tex_desc.filterMode     = cudaFilterModePoint;
+
+        CUDA_CHECK(cudaCreateTextureObject(
+            &tex_obj_unfilt, &res_desc, &tex_desc, nullptr));
+    }
+    return Texture(
+        tex_obj,
+        tex_obj_unfilt,
+        make_uint3(texWidth, texHeight, 1));
+}
+
 bool OptiXRender::createOptixMaterials()
 {
     std::unordered_map<std::string, MaterialManager::Module*> mNameToModule;
@@ -1055,6 +1144,10 @@ bool OptiXRender::createOptixMaterials()
 
     targetCode = mMaterialManager.generateTargetCode(compiledMaterials.data(), compiledMaterials.size());
 
+    std::vector<Texture> materialTextures;
+
+    std::string resourcePath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
+    
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
         mMaterialManager.dumpParams(targetCode, compiledMaterials[i]);
@@ -1066,6 +1159,8 @@ bool OptiXRender::createOptixMaterials()
                 std::string texPath(param.value.size(), 0);
                 memcpy(texPath.data(), param.value.data(), param.value.size());
                 // int texId = getTexManager()->loadTextureMdl(texPath);
+                ::Texture tex = loadTextureFromFile(resourcePath + "/" + texPath);
+                materialTextures.push_back(tex);
                 int texId = 0;
                 int resId = mMaterialManager.registerResource(targetCode, texId);
                 assert(resId > 0);
@@ -1099,6 +1194,18 @@ bool OptiXRender::createOptixMaterials()
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_materialRoData), roDataSize));
     CUDA_CHECK(cudaMemcpy((void*)d_materialRoData, roData, roDataSize, cudaMemcpyHostToDevice));
 
+
+    const size_t texturesBuffSize = sizeof(Texture) * materialTextures.size();
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_texturesData), texturesBuffSize));
+    CUDA_CHECK(cudaMemcpy((void*)d_texturesData, materialTextures.data(), texturesBuffSize, cudaMemcpyHostToDevice));
+
+    Texture_handler resourceHandler;
+    resourceHandler.num_textures = materialTextures.size();
+    resourceHandler.textures = (const Texture *) d_texturesData;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_texturesHandler), sizeof(Texture_handler)));
+    CUDA_CHECK(cudaMemcpy((void*)d_texturesHandler, &resourceHandler, sizeof(Texture_handler), cudaMemcpyHostToDevice));
+
+
     for (int i = 0; i < compiledMaterials.size(); ++i)
     {
         const char* codeData = mMaterialManager.getShaderCode(targetCode, i);
@@ -1112,6 +1219,7 @@ bool OptiXRender::createOptixMaterials()
         optixMaterial.d_argDataSize = argDataSize;
         optixMaterial.d_roData = d_materialRoData + mMaterialManager.getReadOnlyOffset(targetCode, i);
         optixMaterial.d_roSize = roDataSize;
+        optixMaterial.d_textureHandler = d_texturesHandler;
 
         mMaterials.push_back(optixMaterial);
     }

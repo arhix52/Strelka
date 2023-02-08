@@ -32,6 +32,13 @@ public:
     {
         mMap[name] = std::to_string(value);
     }
+
+    template<>
+    void setAs(const char* name, const std::string& value)
+    {
+        mMap[name] = value;
+    }
+
     template <typename T>
     T getAs(const char* name)
     {
