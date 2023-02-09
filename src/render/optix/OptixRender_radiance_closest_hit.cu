@@ -351,7 +351,8 @@ extern "C" __global__ void __closesthit__radiance()
         const float3 ray_dir = optixGetWorldRayDirection();
 
         // setup MDL state
-        float4 texture_results[16] = {};
+        // values that could be precomputed on material init() stage
+        float4 texture_results[128] = {};
         Mdl_state state;
         state.normal = worldNormal;
         state.geom_normal = geomNormal;
