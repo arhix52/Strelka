@@ -1,26 +1,11 @@
-#include <render/common.h>
-#include <render/buffer.h>
+#pragma once
 
-#include <glad/gl.h>
-#include <GLFW/glfw3.h>
+#incldue "Display.h"
 
 namespace oka
 {
-class InputHandler
-{
-public:
-    virtual void keyCallback(int key, [[maybe_unused]] int scancode, int action, [[maybe_unused]] int mods) = 0;
-    virtual void mouseButtonCallback(int button, int action, [[maybe_unused]] int mods) = 0;
-    virtual void handleMouseMoveCallback([[maybe_unused]] double xpos, [[maybe_unused]] double ypos) = 0;
-};
 
-class ResizeHandler
-{
-public:
-    virtual void framebufferResize(int newWidth, int newHeight) = 0;
-};
-
-class glfwdisplay
+class glfwdisplay : public Display
 {
 private:
     /* data */
