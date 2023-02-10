@@ -167,9 +167,14 @@ void OptiXRender::createContext()
     OptixDeviceContextOptions options = {};
     options.logCallbackFunction = &context_log_cb;
     options.logCallbackLevel = 4;
-#if !defined(NDEBUG)
-    options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
-#endif
+    if (mEnableValidation)
+    {
+        options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
+    }
+    else
+    {
+        options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
+    }
     OPTIX_CHECK(optixDeviceContextCreate(cu_ctx, &options, &context));
 
     mState.context = context;
@@ -488,8 +493,7 @@ void OptiXRender::createModule()
     OptixModuleCompileOptions module_compile_options = {};
 
     {
-        bool enableValidation = getSharedContext().mSettingsManager->getAs<bool>("render/enableValidation");
-        if (enableValidation)
+        if (mEnableValidation)
         {
             module_compile_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
             module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
@@ -505,7 +509,7 @@ void OptiXRender::createModule()
         pipeline_compile_options.numPayloadValues = 2;
         pipeline_compile_options.numAttributeValues = 2;
 
-        if (enableValidation) // Enables debug exceptions during optix launches. This may incur
+        if (mEnableValidation) // Enables debug exceptions during optix launches. This may incur
             // significant performance cost and should only be done during
             // development.
             pipeline_compile_options.exceptionFlags =
@@ -666,11 +670,16 @@ void OptiXRender::createPipeline()
 
         OptixPipelineLinkOptions pipeline_link_options = {};
         pipeline_link_options.maxTraceDepth = max_trace_depth;
-#if !defined(NDEBUG)
-        pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
-#else
-        pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
-#endif
+
+        if (mEnableValidation)
+        {
+            pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
+        }
+        else
+        {
+            pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+        }
+
         char log[2048]; // For error reporting from OptiX creation functions
         size_t sizeof_log = sizeof(log);
         OPTIX_CHECK_LOG(optixPipelineCreate(mState.context, &mState.pipeline_compile_options, &pipeline_link_options,
@@ -919,6 +928,8 @@ void OptiXRender::render(Buffer* output)
 void OptiXRender::init()
 {
     const char* envUSDPath = std::getenv("USD_DIR");
+    mEnableValidation = getSharedContext().mSettingsManager->getAs<bool>("render/enableValidation");
+
     if (!envUSDPath)
     {
         printf("Please, set USD_DIR variable\n");
