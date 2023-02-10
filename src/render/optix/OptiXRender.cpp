@@ -167,15 +167,23 @@ void OptiXRender::createContext()
     OptixDeviceContextOptions options = {};
     options.logCallbackFunction = &context_log_cb;
     options.logCallbackLevel = 4;
-#if !defined(NDEBUG)
-    options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
-#endif
+    if (mEnableValidation)
+    {
+        options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
+    }
+    else
+    {
+        options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
+    }
     OPTIX_CHECK(optixDeviceContextCreate(cu_ctx, &options, &context));
 
     mState.context = context;
 }
 
-bool OptiXRender::compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes)
+bool OptiXRender::compactAccel(CUdeviceptr& buffer,
+                               OptixTraversableHandle& handle,
+                               CUdeviceptr result,
+                               size_t outputSizeInBytes)
 {
     bool flag = false;
 
@@ -188,8 +196,7 @@ bool OptiXRender::compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& hand
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&compactedOutputBuffer), compacted_size));
 
         // use handle as input and output
-        OPTIX_CHECK(optixAccelCompact(
-            mState.context, 0, handle, compactedOutputBuffer, compacted_size, &handle));
+        OPTIX_CHECK(optixAccelCompact(mState.context, 0, handle, compactedOutputBuffer, compacted_size, &handle));
 
         CUDA_CHECK(cudaFree(reinterpret_cast<void*>(buffer)));
         buffer = compactedOutputBuffer;
@@ -472,7 +479,8 @@ void OptiXRender::createAccelerationStructure()
                                 ias_buffer_sizes.tempSizeInBytes, d_buffer_temp_output_ias_and_compacted_size,
                                 ias_buffer_sizes.outputSizeInBytes, &mState.ias_handle, &property, 1));
 
-    compactAccel(d_buffer_temp_output_ias_and_compacted_size, mState.ias_handle, property.result, ias_buffer_sizes.outputSizeInBytes);
+    compactAccel(d_buffer_temp_output_ias_and_compacted_size, mState.ias_handle, property.result,
+                 ias_buffer_sizes.outputSizeInBytes);
 
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(compactedSizeBuffer)));
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_ias_temp_buffer)));
@@ -483,27 +491,34 @@ void OptiXRender::createModule()
     OptixModule module = nullptr;
     OptixPipelineCompileOptions pipeline_compile_options = {};
     OptixModuleCompileOptions module_compile_options = {};
+
     {
-#if !defined(NDEBUG)
-        module_compile_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
-        module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
-#else
-        module_compile_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
-        module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
-#endif
+        if (mEnableValidation)
+        {
+            module_compile_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
+            module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
+        }
+        else
+        {
+            module_compile_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
+            module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+        }
 
         pipeline_compile_options.usesMotionBlur = false;
         pipeline_compile_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
         pipeline_compile_options.numPayloadValues = 2;
         pipeline_compile_options.numAttributeValues = 2;
-#if !defined(NDEBUG) // Enables debug exceptions during optix launches. This may incur
-        // significant performance cost and should only be done during
-        // development.
-        pipeline_compile_options.exceptionFlags =
-            OPTIX_EXCEPTION_FLAG_DEBUG | OPTIX_EXCEPTION_FLAG_TRACE_DEPTH | OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW;
-#else
-        pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
-#endif
+
+        if (mEnableValidation) // Enables debug exceptions during optix launches. This may incur
+            // significant performance cost and should only be done during
+            // development.
+            pipeline_compile_options.exceptionFlags =
+                OPTIX_EXCEPTION_FLAG_DEBUG | OPTIX_EXCEPTION_FLAG_TRACE_DEPTH | OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW;
+        else
+        {
+            pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
+        }
+
         pipeline_compile_options.pipelineLaunchParamsVariableName = "params";
         pipeline_compile_options.usesPrimitiveTypeFlags =
             OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE | OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BSPLINE;
@@ -655,11 +670,16 @@ void OptiXRender::createPipeline()
 
         OptixPipelineLinkOptions pipeline_link_options = {};
         pipeline_link_options.maxTraceDepth = max_trace_depth;
-#if !defined(NDEBUG)
-        pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
-#else
-        pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
-#endif
+
+        if (mEnableValidation)
+        {
+            pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
+        }
+        else
+        {
+            pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+        }
+
         char log[2048]; // For error reporting from OptiX creation functions
         size_t sizeof_log = sizeof(log);
         OPTIX_CHECK_LOG(optixPipelineCreate(mState.context, &mState.pipeline_compile_options, &pipeline_link_options,
@@ -908,6 +928,8 @@ void OptiXRender::render(Buffer* output)
 void OptiXRender::init()
 {
     const char* envUSDPath = std::getenv("USD_DIR");
+    mEnableValidation = getSharedContext().mSettingsManager->getAs<bool>("render/enableValidation");
+
     if (!envUSDPath)
     {
         printf("Please, set USD_DIR variable\n");

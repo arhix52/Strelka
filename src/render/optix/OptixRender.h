@@ -98,6 +98,7 @@ private:
     View mPrevView;
 
     PathTracerState mState;
+    bool mEnableValidation;
 
     Mesh* createMesh(const oka::Mesh& mesh);
     Curve* createCurve(const oka::Curve& curve);
