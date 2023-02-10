@@ -80,7 +80,6 @@ void glfwdisplay::drawFrame(ImageBuffer& result)
 {
     NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
-
     bool needRecreate = (result.height != mTexHeight || result.width != mTexWidth);
     if (needRecreate)
     {
@@ -92,7 +91,6 @@ void glfwdisplay::drawFrame(ImageBuffer& result)
         MTL::Region region = MTL::Region::Make2D(0, 0, mTexWidth, mTexHeight);
         mTexture->replaceRegion(region, 0, result.data, result.width * oka::Buffer::getElementSize(result.pixel_format));
     }
-
 
     renderEncoder->pushDebugGroup(NS::String::string("display", NS::UTF8StringEncoding));
 
@@ -204,7 +202,6 @@ void glfwdisplay::onEndFrame()
 {
     renderEncoder->endEncoding();
     commandBuffer->presentDrawable(drawable);
-    // [commandBuffer commit];
     commandBuffer->commit();
     glfwSwapBuffers(mWindow);
 }
