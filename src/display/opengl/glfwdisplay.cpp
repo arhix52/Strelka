@@ -161,7 +161,6 @@ GLint getGLUniformLocation(GLuint program, const std::string& name)
     return loc;
 }
 
-
 glfwdisplay::glfwdisplay(/* args */)
 {
 }
@@ -228,196 +227,18 @@ void glfwdisplay::init(int width, int height, oka::SharedContext* ctx)
     // Setup Dear ImGui context
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO(); (void)io;
-    //io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
-    //io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+    ImGuiIO& io = ImGui::GetIO();
+    (void)io;
+    // io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+    // io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
 
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
-    //ImGui::StyleColorsLight();
+    // ImGui::StyleColorsLight();
 
     // Setup Platform/Renderer backends
     ImGui_ImplGlfw_InitForOpenGL(mWindow, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
-}
-
-void glfwdisplay::setWindowTitle(const char* title)
-{
-    glfwSetWindowTitle(mWindow, title);
-}
-
-bool glfwdisplay::windowShouldClose()
-{
-    return glfwWindowShouldClose(mWindow);
-}
-
-void glfwdisplay::pollEvents()
-{
-    glfwPollEvents();
-}
-
-void glfwdisplay::framebufferResizeCallback(GLFWwindow* window, int width, int height)
-{
-    assert(window);
-    if (width == 0 || height == 0)
-    {
-        return;
-    }
-
-    auto app = reinterpret_cast<glfwdisplay*>(glfwGetWindowUserPointer(window));
-    app->framebufferResized = true;
-    ResizeHandler* handler = app->getResizeHandler();
-    if (handler)
-    {
-        handler->framebufferResize(width, height);
-    }
-}
-
-void glfwdisplay::keyCallback(GLFWwindow* window,
-                              [[maybe_unused]] int key,
-                              [[maybe_unused]] int scancode,
-                              [[maybe_unused]] int action,
-                              [[maybe_unused]] int mods)
-{
-    assert(window);
-    auto app = reinterpret_cast<glfwdisplay*>(glfwGetWindowUserPointer(window));
-    InputHandler* handler = app->getInputHandler();
-    assert(handler);
-
-    handler->keyCallback(key, scancode, action, mods);
-
-    // Camera& camera = scene->getCamera(app->getActiveCameraIndex());
-
-    // const bool keyState = ((GLFW_REPEAT == action) || (GLFW_PRESS == action)) ? true : false;
-    // switch (key)
-
-    //{
-    // case GLFW_KEY_W: {
-    //    camera.keys.forward = keyState;
-    //    break;
-    //}
-    // case GLFW_KEY_S: {
-    //    camera.keys.back = keyState;
-    //    break;
-    //}
-    // case GLFW_KEY_A: {
-    //    camera.keys.left = keyState;
-    //    break;
-    //}
-    // case GLFW_KEY_D: {
-    //    camera.keys.right = keyState;
-    //    break;
-    //}
-    // case GLFW_KEY_Q: {
-    //    camera.keys.up = keyState;
-    //    break;
-    //}
-    // case GLFW_KEY_E: {
-    //    camera.keys.down = keyState;
-    //    break;
-    //}
-    // default:
-    //    break;
-    //}
-}
-
-void glfwdisplay::mouseButtonCallback(GLFWwindow* window,
-                                      [[maybe_unused]] int button,
-                                      [[maybe_unused]] int action,
-                                      [[maybe_unused]] int mods)
-{
-    assert(window);
-    auto app = reinterpret_cast<glfwdisplay*>(glfwGetWindowUserPointer(window));
-    InputHandler* handler = app->getInputHandler();
-    if (handler)
-    {
-        handler->mouseButtonCallback(button, action, mods);
-    }
-    // Camera& camera = scene->getCamera(app->getActiveCameraIndex());
-    // if (button == GLFW_MOUSE_BUTTON_RIGHT)
-    //{
-    //    if (action == GLFW_PRESS)
-    //    {
-    //        camera.mouseButtons.right = true;
-    //    }
-    //    else if (action == GLFW_RELEASE)
-    //    {
-    //        camera.mouseButtons.right = false;
-    //    }
-    //}
-    // else if (button == GLFW_MOUSE_BUTTON_LEFT)
-    //{
-    //    if (action == GLFW_PRESS)
-    //    {
-    //        camera.mouseButtons.left = true;
-    //    }
-    //    else if (action == GLFW_RELEASE)
-    //    {
-    //        camera.mouseButtons.left = false;
-    //    }
-    //}
-}
-
-void glfwdisplay::handleMouseMoveCallback(GLFWwindow* window, [[maybe_unused]] double xpos, [[maybe_unused]] double ypos)
-{
-    assert(window);
-
-    auto app = reinterpret_cast<glfwdisplay*>(glfwGetWindowUserPointer(window));
-    // if (app->Ui().wantCaptureMouse())
-    // {
-    //     return;
-    // }
-    InputHandler* handler = app->getInputHandler();
-    if (handler)
-    {
-        handler->handleMouseMoveCallback(xpos, ypos);
-    }
-
-    // auto app = reinterpret_cast<Render*>(glfwGetWindowUserPointer(window));
-    // oka::Scene* scene = app->getScene();
-    // Camera& camera = scene->getCamera(app->getActiveCameraIndex());
-    // const float dx = camera.mousePos.x - (float)xpos;
-    // const float dy = camera.mousePos.y - (float)ypos;
-
-    // ImGuiIO& io = ImGui::GetIO();
-    // bool handled = io.WantCaptureMouse;
-    // if (handled)
-    //{
-    //    camera.mousePos = glm::vec2((float)xpos, (float)ypos);
-    //    return;
-    //}
-
-    // if (camera.mouseButtons.right)
-    //{
-    //    camera.rotate(-dx, -dy);
-    //}
-    // if (camera.mouseButtons.left)
-    //{
-    //    camera.translate(glm::float3(-0.0f, 0.0f, -dy * .005f * camera.movementSpeed));
-    //}
-    // if (camera.mouseButtons.middle)
-    //{
-    //    camera.translate(glm::float3(-dx * 0.01f, -dy * 0.01f, 0.0f));
-    //}
-    // camera.mousePos = glm::float2((float)xpos, (float)ypos);
-}
-
-void glfwdisplay::scrollCallback(GLFWwindow* window, [[maybe_unused]] double xoffset, [[maybe_unused]] double yoffset)
-{
-    assert(window);
-    // ImGuiIO& io = ImGui::GetIO();
-    // bool handled = io.WantCaptureMouse;
-    // if (handled)
-    //{
-    //    return;
-    //}
-
-    // auto app = reinterpret_cast<Render*>(glfwGetWindowUserPointer(window));
-    // oka::Scene* mScene = app->getScene();
-    // Camera& mCamera = mScene->getCamera(app->getActiveCameraIndex());
-
-    // mCamera.translate(glm::vec3(0.0f, 0.0f,
-    //                            -yoffset * mCamera.movementSpeed));
 }
 
 void glfwdisplay::display(const int32_t screen_res_x,
@@ -463,8 +284,8 @@ void glfwdisplay::display(const int32_t screen_res_x,
     //     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, screen_res_x, screen_res_y, 0, GL_RGB, GL_FLOAT, nullptr);
 
     // else if (m_image_format == BufferImageFormat::FLOAT4)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, screen_res_x, screen_res_y, 0, GL_RGBA, GL_FLOAT, nullptr);
-        convertToSrgb = true;
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, screen_res_x, screen_res_y, 0, GL_RGBA, GL_FLOAT, nullptr);
+    convertToSrgb = true;
 
     // else
     //     throw Exception("Unknown buffer format");
@@ -541,19 +362,19 @@ void glfwdisplay::drawUI()
     const char* debugItems[] = { "None", "Normals" };
     static int currentDebugItemId = 0;
 
-        /*
-        bool openFD = false;
-        static uint32_t showPropertiesId = -1;
-        static uint32_t lightId = -1;
-        static bool isLight = false;
-        static bool openInspector = false;
+    /*
+    bool openFD = false;
+    static uint32_t showPropertiesId = -1;
+    static uint32_t lightId = -1;
+    static bool isLight = false;
+    static bool openInspector = false;
 
-        const char* tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
-        static int currentTonemapItemId = 1;
+    const char* tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
+    static int currentTonemapItemId = 1;
 
-        const char* stratifiedSamplingItems[] = { "None", "Random", "Stratified", "Optimized" };
-        static int currentSamplingItemId = 1;
-        */
+    const char* stratifiedSamplingItems[] = { "None", "Random", "Stratified", "Optimized" };
+    static int currentSamplingItemId = 1;
+    */
 
     ImGui::Begin("Menu:"); // begin window
 
@@ -592,26 +413,26 @@ void glfwdisplay::drawUI()
         bool enableAccumulation = mCtx->mSettingsManager->getAs<bool>("render/pt/enableAcc");
         ImGui::Checkbox("Enable Path Tracer Acc", &enableAccumulation);
         mCtx->mSettingsManager->setAs<bool>("render/pt/enableAcc", enableAccumulation);
-            /*
-            if (ImGui::BeginCombo("Stratified Sampling", stratifiedSamplingItems[currentSamplingItemId]))
+        /*
+        if (ImGui::BeginCombo("Stratified Sampling", stratifiedSamplingItems[currentSamplingItemId]))
+        {
+            for (int n = 0; n < IM_ARRAYSIZE(stratifiedSamplingItems); n++)
             {
-                for (int n = 0; n < IM_ARRAYSIZE(stratifiedSamplingItems); n++)
+                bool is_selected = (currentSamplingItemId == n);
+                if (ImGui::Selectable(stratifiedSamplingItems[n], is_selected))
                 {
-                    bool is_selected = (currentSamplingItemId == n);
-                    if (ImGui::Selectable(stratifiedSamplingItems[n], is_selected))
-                    {
-                        currentSamplingItemId = n;
-                    }
-                    if (is_selected)
-                    {
-                        ImGui::SetItemDefaultFocus();
-                    }
+                    currentSamplingItemId = n;
                 }
-                ImGui::EndCombo();
+                if (is_selected)
+                {
+                    ImGui::SetItemDefaultFocus();
+                }
             }
-            mCtx->mSettingsManager->setAs<uint32_t>("render/pt/stratifiedSamplingType", currentSamplingItemId);
-             */
-            ImGui::TreePop();
+            ImGui::EndCombo();
+        }
+        mCtx->mSettingsManager->setAs<uint32_t>("render/pt/stratifiedSamplingType", currentSamplingItemId);
+         */
+        ImGui::TreePop();
     }
 
     if (ImGui::Button("Capture Screen"))
@@ -622,49 +443,49 @@ void glfwdisplay::drawUI()
     float cameraSpeed = mCtx->mSettingsManager->getAs<float>("render/cameraSpeed");
     ImGui::InputFloat("Camera Speed", (float*)&cameraSpeed, 0.5);
     mCtx->mSettingsManager->setAs<float>("render/cameraSpeed", cameraSpeed);
-        /*
-        if (ImGui::BeginCombo("Tonemap", tonemapItems[currentTonemapItemId]))
+    /*
+    if (ImGui::BeginCombo("Tonemap", tonemapItems[currentTonemapItemId]))
+    {
+        for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
         {
-            for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
+            bool is_selected = (currentTonemapItemId == n);
+            if (ImGui::Selectable(tonemapItems[n], is_selected))
             {
-                bool is_selected = (currentTonemapItemId == n);
-                if (ImGui::Selectable(tonemapItems[n], is_selected))
-                {
-                    currentTonemapItemId = n;
-                }
-                if (is_selected)
-                {
-                    ImGui::SetItemDefaultFocus();
-                }
+                currentTonemapItemId = n;
             }
-            ImGui::EndCombo();
+            if (is_selected)
+            {
+                ImGui::SetItemDefaultFocus();
+            }
         }
-        mCtx->mSettingsManager->setAs<bool>("render/pt/enableTonemap", currentTonemapItemId != 0 ? true : false);
-        mCtx->mSettingsManager->setAs<uint32_t>("render/pt/tonemapperType", currentTonemapItemId - 1);
+        ImGui::EndCombo();
+    }
+    mCtx->mSettingsManager->setAs<bool>("render/pt/enableTonemap", currentTonemapItemId != 0 ? true : false);
+    mCtx->mSettingsManager->setAs<uint32_t>("render/pt/tonemapperType", currentTonemapItemId - 1);
 
-        bool enableUpscale = mCtx->mSettingsManager->getAs<bool>("render/pt/enableUpscale");
-        ImGui::Checkbox("Enable Upscale", &enableUpscale);
-        mCtx->mSettingsManager->setAs<bool>("render/pt/enableUpscale", enableUpscale);
+    bool enableUpscale = mCtx->mSettingsManager->getAs<bool>("render/pt/enableUpscale");
+    ImGui::Checkbox("Enable Upscale", &enableUpscale);
+    mCtx->mSettingsManager->setAs<bool>("render/pt/enableUpscale", enableUpscale);
 
-        float upscaleFactor = 0.0f;
-        if (enableUpscale)
-        {
-            upscaleFactor = 0.5f;
-        }
-        else
-        {
-            upscaleFactor = 1.0f;
-        }
-        mCtx->mSettingsManager->setAs<float>("render/pt/upscaleFactor", upscaleFactor);
+    float upscaleFactor = 0.0f;
+    if (enableUpscale)
+    {
+        upscaleFactor = 0.5f;
+    }
+    else
+    {
+        upscaleFactor = 1.0f;
+    }
+    mCtx->mSettingsManager->setAs<float>("render/pt/upscaleFactor", upscaleFactor);
 
-        if (ImGui::Button("Capture Screen"))
-        {
-            mCtx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
-        }
+    if (ImGui::Button("Capture Screen"))
+    {
+        mCtx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
+    }
 
-        // bool isRecreate = ImGui::Button("Recreate BVH");
-        // renderConfig.recreateBVH = isRecreate ? true : false;
-        */
+    // bool isRecreate = ImGui::Button("Recreate BVH");
+    // renderConfig.recreateBVH = isRecreate ? true : false;
+    */
 
     ImGui::End(); // end window
 

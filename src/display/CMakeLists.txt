@@ -1,12 +1,13 @@
 cmake_minimum_required(VERSION 3.24)
 set(DISPLAYLIB_NAME display)
 set(DISPLAY_SOURCES_COMMON ${ROOT_HOME}/include/display/Display.h
-                           ${ROOT_HOME}/src/display/Display.cpp)
+                           ${ROOT_HOME}/src/display/Display.cpp
+                           ${ROOT_HOME}/src/display/DisplayFactory.cpp)
 if(WIN32)
 
   set(DISPLAY_SOURCES
-      ${DISPLAY_SOURCES_COMMON} ${ROOT_HOME}/src/display/glfwdisplay.h
-      ${ROOT_HOME}/src/display/glfwdisplay.cpp)
+      ${DISPLAY_SOURCES_COMMON} ${ROOT_HOME}/src/display/opengl/glfwdisplay.h
+      ${ROOT_HOME}/src/display/opengl/glfwdisplay.cpp)
 
   set(IMGUI_SOURCES
       # Imgui
@@ -53,7 +54,5 @@ if(APPLE)
       add_library(${DISPLAYLIB_NAME} STATIC ${DISPLAY_SOURCES} ${IMGUI_SOURCES})
       target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/external/imgui/include)
       target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/external/glfw-3.3.8.bin.MACOS/include)
-
-
 
 endif()

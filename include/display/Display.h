@@ -7,6 +7,7 @@
 
 namespace oka
 {
+
 class InputHandler
 {
 public:
@@ -24,13 +25,20 @@ public:
 class Display
 {
 public:
-    Display() {}
-    virtual ~Display() {}
-    
-    virtual void init(int width, int height, oka::SharedContext* ctx) = 0;
-    void destroy();
+    Display()
+    {
+    }
+    virtual ~Display()
+    {
+    }
 
-    void setWindowTitle(const char* title);
+    virtual void init(int width, int height, oka::SharedContext* ctx) = 0;
+    virtual void destroy() = 0;
+
+    void setWindowTitle(const char* title)
+    {
+        glfwSetWindowTitle(mWindow, title);
+    }
 
     void setInputHandler(InputHandler* handler)
     {
@@ -50,22 +58,46 @@ public:
         return mResizeHandler;
     }
 
-    bool windowShouldClose();
-    void pollEvents();
+    bool windowShouldClose()
+    {
+        return glfwWindowShouldClose(mWindow);
+    }
 
-    void onBeginFrame();
-    void onEndFrame();
+    void pollEvents()
+    {
+        glfwPollEvents();
+    }
 
-    void drawFrame(ImageBuffer& result);
-    void drawUI();
+    virtual void onBeginFrame() = 0;
+    virtual void onEndFrame() = 0;
+
+    virtual void drawFrame(ImageBuffer& result) = 0;
+    virtual void drawUI() = 0;
 
 protected:
+
+    static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
+    static void keyCallback(
+        GLFWwindow* window, int key, [[maybe_unused]] int scancode, int action, [[maybe_unused]] int mods);
+    static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
+    static void handleMouseMoveCallback(GLFWwindow* window, double xpos, double ypos);
+    static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset);
+
+    int mWindowWidth = 800;
+    int mWindowHeight = 600;
+
     InputHandler* mInputHandler = nullptr;
     ResizeHandler* mResizeHandler = nullptr;
 
     oka::SharedContext* mCtx = nullptr;
 
     GLFWwindow* mWindow;
+};
+
+class DisplayFactory
+{
+public:
+    static Display* createDisplay();
 };
 
 } // namespace oka

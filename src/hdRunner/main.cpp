@@ -29,7 +29,7 @@
 #include <render/common.h>
 #include <render/buffer.h>
 
-#include <display/glfwdisplay.h>
+#include <display/Display.h>
 
 #include <algorithm>
 #include <cxxopts.hpp>
@@ -516,8 +516,8 @@ int main(int argc, const char* argv[])
 
     ctx->mSettingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
 
-    oka::glfwdisplay display;
-    display.init(imageWidth, imageHeight, ctx);
+    oka::Display* display = oka::DisplayFactory::createDisplay();
+    display->init(imageWidth, imageHeight, ctx);
 
     HdDriver driver;
     driver.name = _AppTokens->HdStrelkaDriver;
@@ -618,10 +618,10 @@ int main(int argc, const char* argv[])
 
     HdEngine engine;
 
-    display.setInputHandler(&cameraController);
+    display->setInputHandler(&cameraController);
 
     RenderSurfaceController surfaceController(ctx->mSettingsManager, renderBuffers);
-    display.setResizeHandler(&surfaceController);
+    display->setResizeHandler(&surfaceController);
 
     uint64_t frameCount = 0;
     oka::ImageBuffer outputImageCopy;
@@ -632,7 +632,7 @@ int main(int argc, const char* argv[])
     int32_t waitFramesForScreenshot = -1;
     uint32_t iteration = sppTotal - leftSpp;
 
-    while (!display.windowShouldClose())
+    while (!display->windowShouldClose())
     {
         auto start = std::chrono::high_resolution_clock::now();
         HdTaskSharedPtrVector tasks;
@@ -653,7 +653,7 @@ int main(int argc, const char* argv[])
         tasks.push_back(renderTasks[versionId]);
         sceneDelegate.SetTime(1.0f);
 
-        display.pollEvents();
+        display->pollEvents();
 
         static auto prevTime = std::chrono::high_resolution_clock::now();
         auto currentTime = std::chrono::high_resolution_clock::now();
@@ -668,7 +668,7 @@ int main(int argc, const char* argv[])
 
         cam.SetFromCamera(cameraController.getCamera(), 0.0);
 
-        display.onBeginFrame();
+        display->onBeginFrame();
         if (cameraController.getCamera().GetTransform() != transform ||
             sppTotal != ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal") ||
             frameSpp != ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp") ||
@@ -741,16 +741,16 @@ int main(int argc, const char* argv[])
             }
         }
 
-        display.drawFrame(outputImageCopy); // blit rendered image to swapchain
-        display.drawUI(); // render ui to swapchain image in window resolution
-        display.onEndFrame(); // submit command buffer and present
+        display->drawFrame(outputImageCopy); // blit rendered image to swapchain
+        display->drawUI(); // render ui to swapchain image in window resolution
+        display->onEndFrame(); // submit command buffer and present
 
         auto finish = std::chrono::high_resolution_clock::now();
         double frameTime = std::chrono::duration<double, std::milli>(finish - start).count();
 
         surfaceController.release(versionId);
 
-        display.setWindowTitle((std::string("Strelka") + " [" + std::to_string(frameTime) + " ms]" + " [" +
+        display->setWindowTitle((std::string("Strelka") + " [" + std::to_string(frameTime) + " ms]" + " [" +
                                 std::to_string(iteration) + " iteration]")
                                    .c_str());
         ++frameCount;
@@ -761,7 +761,7 @@ int main(int argc, const char* argv[])
 
     timerRender.Stop();
 
-    display.destroy();
+    display->destroy();
 
     printf("Rendering finished (%.3fs)\n", timerRender.GetSeconds());
     fflush(stdout);
