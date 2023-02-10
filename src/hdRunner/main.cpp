@@ -447,7 +447,8 @@ int main(int argc, const char* argv[])
         "i, iteration", "Iteration to capture", cxxopts::value<int32_t>()->default_value("-1"))(
         "h, help", "Print usage")("t, spp_total", "spp total", cxxopts::value<int32_t>()->default_value("64"))(
         "f, spp_subframe", "spp subframe", cxxopts::value<int32_t>()->default_value("1"))(
-        "c, need_screenshot", "Screenshot after spp total", cxxopts::value<bool>()->default_value("false"));
+        "c, need_screenshot", "Screenshot after spp total", cxxopts::value<bool>()->default_value("false"))(
+        "v, validation", "Enable Validation", cxxopts::value<bool>()->default_value("false"));
 
     options.parse_positional({ "s" });
     auto result = options.parse(argc, argv);
@@ -513,7 +514,7 @@ int main(int argc, const char* argv[])
     ctx->mSettingsManager->setAs<bool>("render/pt/isResized", false);
     ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", false);
     ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", result["c"].as<bool>());
-
+    ctx->mSettingsManager->setAs<bool>("render/enableValidation", result["v"].as<bool>());
     ctx->mSettingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
 
     oka::glfwdisplay display;
