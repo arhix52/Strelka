@@ -175,6 +175,31 @@ void OptiXRender::createContext()
     mState.context = context;
 }
 
+bool OptiXRender::compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes)
+{
+    bool flag = false;
+
+    size_t compacted_size;
+    CUDA_CHECK(cudaMemcpy(&compacted_size, (void*)result, sizeof(size_t), cudaMemcpyDeviceToHost));
+
+    CUdeviceptr compactedOutputBuffer;
+    if (compacted_size < outputSizeInBytes)
+    {
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&compactedOutputBuffer), compacted_size));
+
+        // use handle as input and output
+        OPTIX_CHECK(optixAccelCompact(
+            mState.context, 0, handle, compactedOutputBuffer, compacted_size, &handle));
+
+        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(buffer)));
+        buffer = compactedOutputBuffer;
+
+        flag = true;
+    }
+
+    return flag;
+}
+
 OptiXRender::Curve* OptiXRender::createCurve(const oka::Curve& curve)
 {
     Curve* rcurve = new Curve();
@@ -249,13 +274,22 @@ OptiXRender::Curve* OptiXRender::createCurve(const oka::Curve& curve)
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_temp_buffer_gas), gas_buffer_sizes.tempSizeInBytes));
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&rcurve->d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
 
+    CUdeviceptr compactedSizeBuffer;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>((&compactedSizeBuffer)), sizeof(uint64_t)));
+
+    OptixAccelEmitDesc property = {};
+    property.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+    property.result = compactedSizeBuffer;
+
     OPTIX_CHECK(optixAccelBuild(mState.context, 0, // CUDA stream
                                 &accel_options, &curve_input,
                                 1, // num build inputs
                                 d_temp_buffer_gas, gas_buffer_sizes.tempSizeInBytes, rcurve->d_gas_output_buffer,
                                 gas_buffer_sizes.outputSizeInBytes, &rcurve->gas_handle,
-                                nullptr, // emitted property list
-                                0)); // num emitted properties
+                                &property, // emitted property list
+                                1)); // num emitted properties
+
+    compactAccel(rcurve->d_gas_output_buffer, rcurve->gas_handle, property.result, gas_buffer_sizes.outputSizeInBytes);
 
     // We can now free the scratch space buffer used during build and the vertex
     // inputs, since they are not needed by our trivial shading method
@@ -273,7 +307,7 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
         // Use default options for simplicity.  In a real use case we would want to
         // enable compaction, etc
         OptixAccelBuildOptions accel_options = {};
-        accel_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+        accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
         accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
 
         // std::vector<oka::Scene::Vertex>& vertices = mScene->getVertices();
@@ -306,21 +340,29 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_temp_buffer_gas), gas_buffer_sizes.tempSizeInBytes));
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
 
+        CUdeviceptr compactedSizeBuffer;
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>((&compactedSizeBuffer)), sizeof(uint64_t)));
+
+        OptixAccelEmitDesc property = {};
+        property.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+        property.result = compactedSizeBuffer;
+
         OPTIX_CHECK(optixAccelBuild(mState.context,
                                     0, // CUDA stream
                                     &accel_options, &triangle_input,
                                     1, // num build inputs
                                     d_temp_buffer_gas, gas_buffer_sizes.tempSizeInBytes, d_gas_output_buffer,
                                     gas_buffer_sizes.outputSizeInBytes, &gas_handle,
-                                    nullptr, // emitted property list
-                                    0 // num emitted properties
+                                    &property, // emitted property list
+                                    1 // num emitted properties
                                     ));
 
-        // We can now free the scratch space buffer used during build and the vertex
-        // inputs, since they are not needed by our trivial shading method
+        compactAccel(d_gas_output_buffer, gas_handle, property.result, gas_buffer_sizes.outputSizeInBytes);
+
         CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_temp_buffer_gas)));
-        // CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_vertices)));
+        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(compactedSizeBuffer)));
     }
+
     Mesh* rmesh = new Mesh();
     rmesh->d_gas_output_buffer = d_gas_output_buffer;
     rmesh->gas_handle = gas_handle;
@@ -420,9 +462,20 @@ void OptiXRender::createAccelerationStructure()
     // d_ias_temp_buffer = state.d_temp_buffer;
     // }
 
+    CUdeviceptr compactedSizeBuffer;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>((&compactedSizeBuffer)), sizeof(uint64_t)));
+    OptixAccelEmitDesc property = {};
+    property.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+    property.result = compactedSizeBuffer;
+
     OPTIX_CHECK(optixAccelBuild(mState.context, 0, &ias_accel_options, &ias_instance_input, 1, d_ias_temp_buffer,
                                 ias_buffer_sizes.tempSizeInBytes, d_buffer_temp_output_ias_and_compacted_size,
-                                ias_buffer_sizes.outputSizeInBytes, &mState.ias_handle, nullptr, 0));
+                                ias_buffer_sizes.outputSizeInBytes, &mState.ias_handle, &property, 1));
+
+    compactAccel(d_buffer_temp_output_ias_and_compacted_size, mState.ias_handle, property.result, ias_buffer_sizes.outputSizeInBytes);
+
+    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(compactedSizeBuffer)));
+    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_ias_temp_buffer)));
 }
 
 void OptiXRender::createModule()
@@ -819,7 +872,7 @@ void OptiXRender::render(Buffer* output)
     params.scene.lights = (UniformLight*)d_lights;
     params.scene.numLights = mScene->getLights().size();
 
-    params.image = (float4*) ((OptixBuffer*) output)->getNativePtr();
+    params.image = (float4*)((OptixBuffer*)output)->getNativePtr();
     params.subframe_index = getSharedContext().mFrameNumber;
     params.samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
     params.handle = mState.ias_handle;
@@ -898,7 +951,7 @@ Buffer* OptiXRender::createBuffer(const BufferDesc& desc)
     assert(size != 0);
     void* devicePtr = nullptr;
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&devicePtr), size));
-    OptixBuffer* res = new OptixBuffer(devicePtr,  desc.format, desc.width, desc.height);
+    OptixBuffer* res = new OptixBuffer(devicePtr, desc.format, desc.width, desc.height);
     return res;
 }
 
@@ -1015,8 +1068,8 @@ Texture OptiXRender::loadTextureFromFile(std::string& fileName)
     cudaArray_t device_tex_array;
     CUDA_CHECK(cudaMallocArray(&device_tex_array, &channel_desc, texWidth, texHeight));
 
-    CUDA_CHECK(cudaMemcpy2DToArray(device_tex_array, 0, 0, dataPtr, texWidth * sizeof(char) * 4, texWidth * sizeof(char) * 4,
-                                   texHeight, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy2DToArray(device_tex_array, 0, 0, dataPtr, texWidth * sizeof(char) * 4,
+                                   texWidth * sizeof(char) * 4, texHeight, cudaMemcpyHostToDevice));
 
     res_desc.resType = cudaResourceTypeArray;
     res_desc.res.array.array = device_tex_array;
@@ -1028,34 +1081,31 @@ Texture OptiXRender::loadTextureFromFile(std::string& fileName)
     tex_desc.addressMode[0] = addr_mode;
     tex_desc.addressMode[1] = addr_mode;
     tex_desc.addressMode[2] = addr_mode;
-    tex_desc.filterMode     = cudaFilterModeLinear;
-    tex_desc.readMode       = cudaReadModeNormalizedFloat;
+    tex_desc.filterMode = cudaFilterModeLinear;
+    tex_desc.readMode = cudaReadModeNormalizedFloat;
     tex_desc.normalizedCoords = 1;
-    if (res_desc.resType == cudaResourceTypeMipmappedArray) {
+    if (res_desc.resType == cudaResourceTypeMipmappedArray)
+    {
         tex_desc.mipmapFilterMode = cudaFilterModeLinear;
         tex_desc.maxAnisotropy = 16;
         tex_desc.minMipmapLevelClamp = 0.f;
-        tex_desc.maxMipmapLevelClamp = 1000.f;  // default value in OpenGL
+        tex_desc.maxMipmapLevelClamp = 1000.f; // default value in OpenGL
     }
     cudaTextureObject_t tex_obj = 0;
     CUDA_CHECK(cudaCreateTextureObject(&tex_obj, &res_desc, &tex_desc, nullptr));
     // Create unfiltered texture object if necessary (cube textures have no texel functions)
     cudaTextureObject_t tex_obj_unfilt = 0;
-    // if (texture_shape != mi::neuraylib::ITarget_code::Texture_shape_cube) 
+    // if (texture_shape != mi::neuraylib::ITarget_code::Texture_shape_cube)
     {
         // Use a black border for access outside of the texture
         tex_desc.addressMode[0] = cudaAddressModeBorder;
         tex_desc.addressMode[1] = cudaAddressModeBorder;
         tex_desc.addressMode[2] = cudaAddressModeBorder;
-        tex_desc.filterMode     = cudaFilterModePoint;
+        tex_desc.filterMode = cudaFilterModePoint;
 
-        CUDA_CHECK(cudaCreateTextureObject(
-            &tex_obj_unfilt, &res_desc, &tex_desc, nullptr));
+        CUDA_CHECK(cudaCreateTextureObject(&tex_obj_unfilt, &res_desc, &tex_desc, nullptr));
     }
-    return Texture(
-        tex_obj,
-        tex_obj_unfilt,
-        make_uint3(texWidth, texHeight, 1));
+    return Texture(tex_obj, tex_obj_unfilt, make_uint3(texWidth, texHeight, 1));
 }
 
 bool OptiXRender::createOptixMaterials()
@@ -1147,7 +1197,7 @@ bool OptiXRender::createOptixMaterials()
     std::vector<Texture> materialTextures;
 
     std::string resourcePath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
-    
+
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
         mMaterialManager.dumpParams(targetCode, compiledMaterials[i]);
@@ -1201,7 +1251,7 @@ bool OptiXRender::createOptixMaterials()
 
     Texture_handler resourceHandler;
     resourceHandler.num_textures = materialTextures.size();
-    resourceHandler.textures = (const Texture *) d_texturesData;
+    resourceHandler.textures = (const Texture*)d_texturesData;
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_texturesHandler), sizeof(Texture_handler)));
     CUDA_CHECK(cudaMemcpy((void*)d_texturesHandler, &resourceHandler, sizeof(Texture_handler), cudaMemcpyHostToDevice));
 

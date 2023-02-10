@@ -101,6 +101,7 @@ private:
 
     Mesh* createMesh(const oka::Mesh& mesh);
     Curve* createCurve(const oka::Curve& curve);
+    bool compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes);
 
     std::vector<Mesh*> mOptixMeshes;
     std::vector<Curve*> mOptixCurves;
