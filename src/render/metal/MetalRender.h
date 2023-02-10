@@ -17,6 +17,11 @@ public:
     void render(Buffer* output) override;
     Buffer* createBuffer(const BufferDesc& desc) override;
 
+    virtual void* getNativeDevicePtr() override
+    {
+        return mDevice;
+    }
+
 private:
 
     struct Mesh

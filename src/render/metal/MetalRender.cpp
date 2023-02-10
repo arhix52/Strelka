@@ -64,10 +64,11 @@ void oka::MetalRender::createMetalMaterials()
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
         Material material;
+        material.diffuse = {1.0f, 1.0f, 1.0f};
         oka::Scene::MaterialDescription& currMatDesc = matDescs[i];
         for (const auto& param : matDescs[i].params)
         {
-            if (param.name == "diffuse_color")
+            if (param.name == "diffuse_color" || param.name == "diffuseColor" || param.name == "diffuse_color_constant")
             {
                 memcpy(&material.diffuse, param.value.data(), sizeof(float) * 3);
             }

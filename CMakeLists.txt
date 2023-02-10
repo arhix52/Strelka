@@ -30,12 +30,7 @@ add_subdirectory(src/scene)
 add_subdirectory(src/materialmanager)
 # add_subdirectory(src/app)
 add_subdirectory(src/display)
+add_subdirectory(src/hdRunner)
 
-if(WIN32)
-  add_subdirectory(src/hdRunner)
-endif()
-if(APPLE)
-  add_subdirectory(src/hdRunnerMac)
-endif()
 
 add_subdirectory(tests)

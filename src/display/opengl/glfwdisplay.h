@@ -34,9 +34,6 @@ public:
     void drawFrame(ImageBuffer& result);
     void drawUI();
 
-    bool framebufferResized = false;
-
-
     void display(const int32_t screen_res_x,
                  const int32_t screen_res_y,
                  const int32_t framebuf_res_x,

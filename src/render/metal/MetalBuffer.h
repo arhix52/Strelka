@@ -22,6 +22,16 @@ public:
         return mBuffer;
     }
 
+    void* getHostPointer() override
+    {
+        return map();
+    }
+
+    size_t getHostDataSize() override
+    {
+        return mBuffer->length();
+    }
+
 protected:
     MTL::Buffer* mBuffer;
 };

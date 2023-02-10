@@ -516,9 +516,6 @@ int main(int argc, const char* argv[])
 
     ctx->mSettingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
 
-    oka::Display* display = oka::DisplayFactory::createDisplay();
-    display->init(imageWidth, imageHeight, ctx);
-
     HdDriver driver;
     driver.name = _AppTokens->HdStrelkaDriver;
     driver.driver = VtValue(ctx);
@@ -529,6 +526,9 @@ int main(int argc, const char* argv[])
     TF_VERIFY(renderDelegate);
     renderDelegate->SetDrivers(drivers);
 
+    oka::Display* display = oka::DisplayFactory::createDisplay();
+    display->init(imageWidth, imageHeight, ctx);
+    
     // Handle cmdline args.
     // Load scene.
     TfStopwatch timerLoad;
