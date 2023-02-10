@@ -42,8 +42,10 @@ private:
 
     MTL::Texture* buildTexture(uint32_t width, uint32_t heigth);
     void buildShaders();
-    // void display(MTK::View* pView, oka::Buffer* result);
-
+    
+    MTL::CommandBuffer* commandBuffer;
+    MTL::RenderCommandEncoder* renderEncoder;
+    CA::MetalDrawable* drawable;
 };
 
 } // namespace oka

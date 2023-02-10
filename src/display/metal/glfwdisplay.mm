@@ -80,10 +80,6 @@ void glfwdisplay::drawFrame(ImageBuffer& result)
 {
     NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
-    int width, height;
-    glfwGetFramebufferSize(mWindow, &width, &height);
-    layer->setDrawableSize(CGSizeMake(width, height));
-    CA::MetalDrawable* drawable = layer->nextDrawable();
 
     bool needRecreate = (result.height != mTexHeight || result.width != mTexWidth);
     if (needRecreate)
@@ -97,62 +93,18 @@ void glfwdisplay::drawFrame(ImageBuffer& result)
         mTexture->replaceRegion(region, 0, result.data, result.width * oka::Buffer::getElementSize(result.pixel_format));
     }
 
-    float clear_color[4] = {0.45f, 0.55f, 0.60f, 1.00f};
 
-    id<MTLCommandBuffer> commandBuffer = (__bridge id<MTLCommandBuffer>)(_pCommandQueue->commandBuffer());
-    renderPassDescriptor->colorAttachments()->object(0)->setClearColor(MTL::ClearColor::Make(clear_color[0] * clear_color[3], clear_color[1] * clear_color[3], clear_color[2] * clear_color[3], clear_color[3]));
-    renderPassDescriptor->colorAttachments()->object(0)->setTexture(drawable->texture());
-    renderPassDescriptor->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionClear);
-    renderPassDescriptor->colorAttachments()->object(0)->setStoreAction(MTL::StoreActionStore);
+    renderEncoder->pushDebugGroup(NS::String::string("display", NS::UTF8StringEncoding));
 
-    id <MTLRenderCommandEncoder> renderEncoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
-    [renderEncoder pushDebugGroup:@"display"];
+    renderEncoder->setRenderPipelineState(_pPSO);
+    // [renderEncoder setRenderPipelineState: _pPSO];
+    renderEncoder->setFragmentTexture(mTexture, /* index */ 0);
+    // [renderEncoder setFragmentTexture: mTexture atIndex: 0];
 
-    // pEnc->setRenderPipelineState(_pPSO);
-    [renderEncoder setRenderPipelineState: _pPSO];
-    // pEnc->setFragmentTexture(mTexture, /* index */ 0);
-    [renderEncoder setFragmentTexture: mTexture atIndex: 0];
+    renderEncoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0ul, 6ul);
+    // [renderEncoder drawPrimitives: MTL::PrimitiveTypeTriangle vertexStart: 0 vertexCount:6];
 
-    // pEnc->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0ul, 6ul);
-    [renderEncoder drawPrimitives: MTL::PrimitiveTypeTriangle vertexStart: 0 vertexCount:6];
-
-
-    // Start the Dear ImGui frame
-    ImGui_ImplMetal_NewFrame((__bridge MTLRenderPassDescriptor*)renderPassDescriptor);
-    ImGui_ImplGlfw_NewFrame();
-    ImGui::NewFrame();
-
-    // ImGui::ShowDemoWindow(&show_demo_window);
-
-    // 2. Show a simple window that we create ourselves. We use a Begin/End pair to create a named window.
-    {
-        static float f = 0.0f;
-        static int counter = 0;
-
-        ImGui::Begin("Hello, world!");                          // Create a window called "Hello, world!" and append into it.
-
-        ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
-        // ImGui::Checkbox("Demo Window", &show_demo_window);      // Edit bools storing our window open/close state
-        // ImGui::Checkbox("Another Window", &show_another_window);
-
-        ImGui::SliderFloat("float", &f, 0.0f, 1.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
-        ImGui::ColorEdit3("clear color", (float*)&clear_color); // Edit 3 floats representing a color
-
-        if (ImGui::Button("Button"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
-            counter++;
-        ImGui::SameLine();
-        ImGui::Text("counter = %d", counter);
-
-        ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
-        ImGui::End();
-    }
-        // Rendering
-    ImGui::Render();
-    ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), commandBuffer, renderEncoder);
-    [renderEncoder popDebugGroup];
-    [renderEncoder endEncoding];
-    [commandBuffer presentDrawable:drawable];
-    [commandBuffer commit];
+    renderEncoder->popDebugGroup();
 }
 
 MTL::Texture* glfwdisplay::buildTexture(uint32_t width, uint32_t heigth)
@@ -231,16 +183,175 @@ void glfwdisplay::destroy()
 
 void glfwdisplay::onBeginFrame()
 {
+    int width, height;
+    glfwGetFramebufferSize(mWindow, &width, &height);
+    layer->setDrawableSize(CGSizeMake(width, height));
+    drawable = layer->nextDrawable();
 
+    float clear_color[4] = {0.45f, 0.55f, 0.60f, 1.00f};
+
+    commandBuffer = _pCommandQueue->commandBuffer();
+    renderPassDescriptor->colorAttachments()->object(0)->setClearColor(MTL::ClearColor::Make(clear_color[0] * clear_color[3], clear_color[1] * clear_color[3], clear_color[2] * clear_color[3], clear_color[3]));
+    renderPassDescriptor->colorAttachments()->object(0)->setTexture(drawable->texture());
+    renderPassDescriptor->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionClear);
+    renderPassDescriptor->colorAttachments()->object(0)->setStoreAction(MTL::StoreActionStore);
+
+    renderEncoder = commandBuffer->renderCommandEncoder(renderPassDescriptor);
+    
 }
 
 void glfwdisplay::onEndFrame()
 {
-
+    renderEncoder->endEncoding();
+    commandBuffer->presentDrawable(drawable);
+    // [commandBuffer commit];
+    commandBuffer->commit();
+    glfwSwapBuffers(mWindow);
 }
 
 void glfwdisplay::drawUI()
 {
+    // Start the Dear ImGui frame
+    ImGui_ImplMetal_NewFrame((__bridge MTLRenderPassDescriptor*)renderPassDescriptor);
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+    ImGuiIO& io = ImGui::GetIO();
+
+    const char* debugItems[] = { "None", "Normals" };
+    static int currentDebugItemId = 0;
+
+    /*
+    bool openFD = false;
+    static uint32_t showPropertiesId = -1;
+    static uint32_t lightId = -1;
+    static bool isLight = false;
+    static bool openInspector = false;
+
+    const char* tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
+    static int currentTonemapItemId = 1;
+
+    const char* stratifiedSamplingItems[] = { "None", "Random", "Stratified", "Optimized" };
+    static int currentSamplingItemId = 1;
+    */
+
+    ImGui::Begin("Menu:"); // begin window
+
+    if (ImGui::BeginCombo("Debug view", debugItems[currentDebugItemId]))
+    {
+        for (int n = 0; n < IM_ARRAYSIZE(debugItems); n++)
+        {
+            bool is_selected = (currentDebugItemId == n);
+            if (ImGui::Selectable(debugItems[n], is_selected))
+            {
+                currentDebugItemId = n;
+            }
+            if (is_selected)
+            {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    mCtx->mSettingsManager->setAs<uint32_t>("render/pt/debug", currentDebugItemId);
+
+    if (ImGui::TreeNode("Path Tracer"))
+    {
+        uint32_t maxDepth = mCtx->mSettingsManager->getAs<uint32_t>("render/pt/depth");
+        ImGui::SliderInt("Max Depth", (int*)&maxDepth, 1, 16);
+        mCtx->mSettingsManager->setAs<uint32_t>("render/pt/depth", maxDepth);
+
+        uint32_t sppTotal = mCtx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
+        ImGui::SliderInt("SPP Total", (int*)&sppTotal, 1, 10000);
+        mCtx->mSettingsManager->setAs<uint32_t>("render/pt/sppTotal", sppTotal);
+
+        uint32_t sppSubframe = mCtx->mSettingsManager->getAs<uint32_t>("render/pt/spp");
+        ImGui::SliderInt("SPP Subframe", (int*)&sppSubframe, 1, 32);
+        mCtx->mSettingsManager->setAs<uint32_t>("render/pt/spp", sppSubframe);
+
+        bool enableAccumulation = mCtx->mSettingsManager->getAs<bool>("render/pt/enableAcc");
+        ImGui::Checkbox("Enable Path Tracer Acc", &enableAccumulation);
+        mCtx->mSettingsManager->setAs<bool>("render/pt/enableAcc", enableAccumulation);
+        /*
+        if (ImGui::BeginCombo("Stratified Sampling", stratifiedSamplingItems[currentSamplingItemId]))
+        {
+            for (int n = 0; n < IM_ARRAYSIZE(stratifiedSamplingItems); n++)
+            {
+                bool is_selected = (currentSamplingItemId == n);
+                if (ImGui::Selectable(stratifiedSamplingItems[n], is_selected))
+                {
+                    currentSamplingItemId = n;
+                }
+                if (is_selected)
+                {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        mCtx->mSettingsManager->setAs<uint32_t>("render/pt/stratifiedSamplingType", currentSamplingItemId);
+         */
+        ImGui::TreePop();
+    }
+
+    if (ImGui::Button("Capture Screen"))
+    {
+        mCtx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
+    }
+
+    float cameraSpeed = mCtx->mSettingsManager->getAs<float>("render/cameraSpeed");
+    ImGui::InputFloat("Camera Speed", (float*)&cameraSpeed, 0.5);
+    mCtx->mSettingsManager->setAs<float>("render/cameraSpeed", cameraSpeed);
+    /*
+    if (ImGui::BeginCombo("Tonemap", tonemapItems[currentTonemapItemId]))
+    {
+        for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
+        {
+            bool is_selected = (currentTonemapItemId == n);
+            if (ImGui::Selectable(tonemapItems[n], is_selected))
+            {
+                currentTonemapItemId = n;
+            }
+            if (is_selected)
+            {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    mCtx->mSettingsManager->setAs<bool>("render/pt/enableTonemap", currentTonemapItemId != 0 ? true : false);
+    mCtx->mSettingsManager->setAs<uint32_t>("render/pt/tonemapperType", currentTonemapItemId - 1);
+
+    bool enableUpscale = mCtx->mSettingsManager->getAs<bool>("render/pt/enableUpscale");
+    ImGui::Checkbox("Enable Upscale", &enableUpscale);
+    mCtx->mSettingsManager->setAs<bool>("render/pt/enableUpscale", enableUpscale);
+
+    float upscaleFactor = 0.0f;
+    if (enableUpscale)
+    {
+        upscaleFactor = 0.5f;
+    }
+    else
+    {
+        upscaleFactor = 1.0f;
+    }
+    mCtx->mSettingsManager->setAs<float>("render/pt/upscaleFactor", upscaleFactor);
+
+    if (ImGui::Button("Capture Screen"))
+    {
+        mCtx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
+    }
+
+    // bool isRecreate = ImGui::Button("Recreate BVH");
+    // renderConfig.recreateBVH = isRecreate ? true : false;
+    */
+
+    ImGui::End(); // end window
+
+        // Rendering
+    ImGui::Render();
+    ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), 
+    (__bridge id<MTLCommandBuffer>)(commandBuffer), 
+    (__bridge id<MTLRenderCommandEncoder>)renderEncoder);
 
 }
 
