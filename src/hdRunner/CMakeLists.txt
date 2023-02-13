@@ -9,51 +9,53 @@ set(HD_RUNNER_NAME HydraRunner)
 set(HD_RUNNER_SOURCES
     ${ROOT_HOME}/src/hdRunner/main.cpp
     ${ROOT_HOME}/src/hdRunner/SimpleRenderTask.h
-    ${ROOT_HOME}/src/hdRunner/SimpleRenderTask.cpp
-)
+    ${ROOT_HOME}/src/hdRunner/SimpleRenderTask.cpp)
 add_executable(${HD_RUNNER_NAME} ${HD_RUNNER_SOURCES})
 set_target_properties(
   ${HD_RUNNER_NAME}
-  PROPERTIES
-    LINKER_LANGUAGE CXX
-    CXX_STANDARD 17
-    CXX_STANDARD_REQUIRED TRUE
-    CXX_EXTENSIONS OFF
-)
+  PROPERTIES LINKER_LANGUAGE CXX
+             CXX_STANDARD 17
+             CXX_STANDARD_REQUIRED TRUE
+             CXX_EXTENSIONS OFF)
 
-add_custom_command(TARGET ${HD_RUNNER_NAME} PRE_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-        "${OUTPUT_DIRECTORY}/data/materials/mtlx"
-        )
-add_custom_command(TARGET ${HD_RUNNER_NAME} PRE_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-        "${OUTPUT_DIRECTORY}/data/materials/mdl"
-        )
+add_custom_command(
+  TARGET ${HD_RUNNER_NAME}
+  PRE_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${OUTPUT_DIRECTORY}/data/materials/mtlx")
+add_custom_command(
+  TARGET ${HD_RUNNER_NAME}
+  PRE_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${OUTPUT_DIRECTORY}/data/materials/mdl")
 
 # target_include_directories(${PROJECT_NAME} PUBLIC ${Vulkan_INCLUDE_DIR})
-target_include_directories(${HD_RUNNER_NAME} PUBLIC ${ROOT_HOME}/external/glfw/include)
-target_include_directories(${HD_RUNNER_NAME} PUBLIC ${ROOT_HOME}/external/cxxopts/include)
+target_include_directories(${HD_RUNNER_NAME}
+                           PUBLIC ${ROOT_HOME}/external/glfw/include)
+target_include_directories(${HD_RUNNER_NAME}
+                           PUBLIC ${ROOT_HOME}/external/cxxopts/include)
 target_include_directories(${HD_RUNNER_NAME} PUBLIC ${ROOT_HOME}/include/)
 target_include_directories(${HD_RUNNER_NAME} PUBLIC hd)
-target_link_libraries(${HD_RUNNER_NAME} PUBLIC 
-    # ${SETTINGSLIB_NAME}
-    # ${RESMNGR_NAME}
-    # ${SHADERLIB_NAME}
-    # ${MATERIALLIB_NAME}
-    # MaterialXCore
-    # MaterialXFormat
-    # MaterialXGenMdl
-    scene
-    settings
-    display
-    render
-    # ${RENDERLIB_NAME}
-    # ${UILIB_NAME}
-    # ${TEXTURELIB_NAME}
-    # ${TRACY_LIB}
-    # ${Vulkan_LIBRARY}
-    # "${CMAKE_CURRENT_SOURCE_DIR}/external/glfw/glfw3.lib"
-    ${OPENGL_LIBRARIES}
-    glad
-    ar cameraUtil hd hf hgi hio usd usdGeom usdImaging    
-)  # Link the executable to library (if it uses it).
+target_link_libraries(
+  ${HD_RUNNER_NAME}
+  PUBLIC # ${SETTINGSLIB_NAME} ${RESMNGR_NAME} ${SHADERLIB_NAME}
+         # ${MATERIALLIB_NAME} MaterialXCore MaterialXFormat MaterialXGenMdl
+         scene
+         settings
+         display
+         render
+         # ${RENDERLIB_NAME} ${UILIB_NAME} ${TEXTURELIB_NAME} ${TRACY_LIB}
+         # ${Vulkan_LIBRARY}
+         # "${CMAKE_CURRENT_SOURCE_DIR}/external/glfw/glfw3.lib"
+         ar
+         cameraUtil
+         hd
+         hf
+         hgi
+         hio
+         usd
+         usdGeom
+         usdImaging) # Link the executable to library (if it uses it).
+if(WIN32)
+  target_link_libraries(${HD_RUNNER_NAME} PUBLIC ${OPENGL_LIBRARIES} glad)
+endif()

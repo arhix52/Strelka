@@ -40,11 +40,11 @@ public:
     }
 
     // Get output buffer
-    void* getHostPointer()
+    virtual void* getHostPointer()
     {
         return mHostData.data();
     }
-    size_t getHostDataSize()
+    virtual size_t getHostDataSize()
     {
         return mHostData.size();
     }

@@ -64,10 +64,11 @@ void oka::MetalRender::createMetalMaterials()
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
         Material material;
+        material.diffuse = {1.0f, 1.0f, 1.0f};
         oka::Scene::MaterialDescription& currMatDesc = matDescs[i];
         for (const auto& param : matDescs[i].params)
         {
-            if (param.name == "diffuse_color")
+            if (param.name == "diffuse_color" || param.name == "diffuseColor" || param.name == "diffuse_color_constant")
             {
                 memcpy(&material.diffuse, param.value.data(), sizeof(float) * 3);
             }
@@ -123,7 +124,10 @@ void MetalRender::render(Buffer* output)
         glm::any(glm::notEqual(currView.mCamMatrices.view, mPrevView.mCamMatrices.view)))
     {
         // need reset
+        getSharedContext().mFrameNumber = 0;
     }
+
+    SettingsManager& settings = *getSharedContext().mSettingsManager;
 
     MTL::Buffer* pUniformBuffer = _pUniformBuffer[_frame];
     Uniforms* pUniformData = reinterpret_cast<Uniforms*>(pUniformBuffer->contents());
@@ -132,10 +136,10 @@ void MetalRender::render(Buffer* output)
     pUniformData->height = height;
     pUniformData->width = width;
     pUniformData->numLights = mScene->getLightsDesc().size();
-    pUniformData->samples_per_launch = 1;
-    pUniformData->enableAccumulation = 1;
+    pUniformData->samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
+    pUniformData->enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
     pUniformData->missColor = float3(0.0f);
-    pUniformData->maxDepth = 4;
+    pUniformData->maxDepth = settings.getAs<uint32_t>("render/pt/depth");
 
     glm::float4x4 invView = glm::inverse(camera.matrices.view);
     for (int column = 0; column < 4; column++)
