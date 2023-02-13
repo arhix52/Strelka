@@ -203,11 +203,25 @@ void HdStrelkaBasisCurves::_ConvertCurve()
     glm::float3 pnn = pn + (pn - pn1);
     mCurvePoints.push_back(pnn);
 
-    mCurveWidths.push_back(mWidths[0]);
-    for (const float w : mWidths)
+    mCurveWidths.push_back(mWidths[0] * 0.5);
+
+    assert((mWidths.size() == mPoints.size()) || (mWidths.size() == 1));
+
+    if (mWidths.size() == 1)
     {
-        mCurveWidths.push_back(w * 0.5f);
+        for (int i = 0; i < mPoints.size(); ++i)
+        {
+            mCurveWidths.push_back(mWidths[0] * 0.5);
+        }
     }
+    else
+    {
+        for (const float w : mWidths)
+        {
+            mCurveWidths.push_back(w * 0.5f);
+        }
+    }
+
     mCurveWidths.push_back(mCurveWidths.back());
 
     for (const int i : mVertexCounts)
