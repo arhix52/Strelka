@@ -423,7 +423,7 @@ bool saveScreenshot(std::string& outputFilePath, unsigned char* mappedMem, uint3
     storage.width = (int)imageWidth;
     storage.height = (int)imageHeight;
     storage.depth = (int)1;
-    storage.format = HioFormat::HioFormatUNorm8Vec4;
+    storage.format = HioFormat::HioFormatFloat32Vec4;
     storage.flipped = true;
     storage.data = mappedMem;
 
@@ -730,10 +730,21 @@ int main(int argc, const char* argv[])
             std::string fileName = usdPath.substr(0, foundDot);
             fileName = fileName.substr(foundSlash + 1);
 
-            std::string outputFilePath =
-                fileName + "_" + std::to_string(iteration) + "i_" +
-                std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/depth")) + "d_" +
-                std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp")) + "spp" + ".png";
+            auto generateName = [&](const uint32_t attempt) {
+                std::string outputFilePath = fileName + "_" + std::to_string(iteration) + "i_" +
+                                             std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/depth")) +
+                                             "d_" +
+                                             std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp")) +
+                                             "spp_" + std::to_string(attempt) + ".png";
+                return outputFilePath;
+            };
+            uint32_t attempt = 0;
+            std::string outputFilePath;
+            do
+            {
+                outputFilePath = generateName(attempt++);
+            } while (std::filesystem::exists(std::filesystem::path(outputFilePath.c_str())));
+
             unsigned char* mappedMem = (unsigned char*)outputImageCopy.data;
 
             if (saveScreenshot(outputFilePath, mappedMem, outputImageCopy.width, outputImageCopy.height))
