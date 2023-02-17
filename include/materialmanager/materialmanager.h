@@ -48,7 +48,7 @@ public:
     };
 
     void dumpParams(const TargetCode* targetCode, CompiledMaterial* material);
-    bool setParam(TargetCode* targetCode, CompiledMaterial* material, const Param& param);
+    bool setParam(TargetCode* targetCode, uint32_t materialIdx, CompiledMaterial* material, const Param& param);
 
     TextureDescription* createTextureDescription(const char* name, const char* gamma);
     const char* getTextureDbName(TextureDescription* texDesc);

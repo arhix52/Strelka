@@ -398,7 +398,7 @@ public:
         }
     }
 
-    bool setParam(TargetCode* targetCode, CompiledMaterial* material, const Param& param)
+    bool setParam(TargetCode* targetCode, uint32_t materialIdx, CompiledMaterial* material, const Param& param)
     {
         assert(targetCode);
         assert(targetCode->isInitialized);
@@ -408,7 +408,7 @@ public:
         {
             if (!strcmp(material->compiledMaterial->get_parameter_name(pi), param.name.c_str()))
             {
-                const uint32_t internalIndex = targetCode->ptrToInternalIndex[material];
+                const uint32_t internalIndex = materialIdx; //targetCode->ptrToInternalIndex[material];
                 const mi::Size argLayoutIndex = targetCode->internalMaterials[internalIndex].argument_block_layout_index;
                 mi::base::Handle<const mi::neuraylib::ITarget_value_layout> arg_layout(
                     targetCode->internalMaterials[internalIndex].targetCode->get_argument_block_layout(argLayoutIndex));
@@ -883,9 +883,9 @@ void MaterialManager::dumpParams(const TargetCode* targetCode, CompiledMaterial*
     return mContext->dumpParams(targetCode, material);
 }
 
-bool MaterialManager::setParam(TargetCode* targetCode, CompiledMaterial* material, const Param& param)
+bool MaterialManager::setParam(TargetCode* targetCode, uint32_t materialIdx, CompiledMaterial* material, const Param& param)
 {
-    return mContext->setParam(targetCode, material, param);
+    return mContext->setParam(targetCode, materialIdx, material, param);
 }
 
 MaterialManager::CompiledMaterial* MaterialManager::compileMaterial(MaterialManager::MaterialInstance* matInstance)
