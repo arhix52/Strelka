@@ -54,6 +54,7 @@ struct PathTracerState
     OptixProgramGroup light_hit_group = 0;
     CUstream stream = 0;
     Params params = {};
+    Params prevParams = {};
     CUdeviceptr d_params = 0;
 
     OptixShaderBindingTable sbt = {};

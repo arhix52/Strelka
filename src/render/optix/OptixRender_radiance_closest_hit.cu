@@ -179,7 +179,7 @@ static __forceinline__ __device__ float3 offset_ray(const float3& p, const float
 }
 
 //  valid range of coordinates [-1; 1]
-static __device__ float3 unpackNormal(uint32_t val)
+static __forceinline__ __device__ float3 unpackNormal(uint32_t val)
 {
     float3 normal;
     normal.z = ((val & 0xfff00000) >> 20) / 511.99999f * 2.0f - 1.0f;
@@ -190,7 +190,7 @@ static __device__ float3 unpackNormal(uint32_t val)
 }
 
 //  valid range of coordinates [-10; 10]
-static __device__ float2 unpackUV(uint32_t val)
+static __forceinline__ __device__ float2 unpackUV(uint32_t val)
 {
     float2 uv;
     uv.y = ((val & 0xffff0000) >> 16) / 16383.99999f * 20.0f - 10.0f;
@@ -203,14 +203,22 @@ __device__ const float4 identity[3] = { { 1.0f, 0.0f, 0.0f, 0.0f },
                                         { 0.0f, 1.0f, 0.0f, 0.0f },
                                         { 0.0f, 0.0f, 1.0f, 0.0f } };
 
-__device__ float3 sampleLight(uint32_t& rngState, const UniformLight& light, Mdl_state& state, float3& toLight, float& lightPdf)
+__inline__ __device__ float3 sampleLight(uint32_t& rngState, const UniformLight& light, Mdl_state& state, float3& toLight, float& lightPdf)
 {
     LightSampleData lightSampleData = {};
     switch (light.type)
     {
-    case 0:
-        lightSampleData = SampleRectLight(light, make_float2(rnd(rngState), rnd(rngState)), state.position);
+    case 0: {
+        if (params.rectLightSamplingMethod == 0)
+        {
+            lightSampleData = SampleRectLightUniform(light, make_float2(rnd(rngState), rnd(rngState)), state.position);
+        }
+        else
+        {
+            lightSampleData = SampleRectLight(light, make_float2(rnd(rngState), rnd(rngState)), state.position);
+        }
         break;
+    }
         // case 1:
         //     lightSampleData = SampleDiscLight(light, float2(rand(rngState), rand(rngState)), state.position);
         //     break;
