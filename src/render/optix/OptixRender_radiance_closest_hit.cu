@@ -312,21 +312,41 @@ extern "C" __global__ void __closesthit__radiance()
 
         sutil::Matrix3x4 object_to_world((const float*)&hit_data->object_to_world);
 
-        const float3 p0 = params.scene.vb[baseVbOffset + i0].position;
-        const float3 p1 = params.scene.vb[baseVbOffset + i1].position;
-        const float3 p2 = params.scene.vb[baseVbOffset + i2].position;
+        const Vertex v0 = params.scene.vb[baseVbOffset + i0];
+        const Vertex v1 = params.scene.vb[baseVbOffset + i1];
+        const Vertex v2 = params.scene.vb[baseVbOffset + i2];
+        
+        const float3 p0 = make_float3(v0.position);
+        const float3 p1 = make_float3(v1.position);
+        const float3 p2 = make_float3(v2.position);
 
-        const float3 n0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normal);
-        const float3 n1 = unpackNormal(params.scene.vb[baseVbOffset + i1].normal);
-        const float3 n2 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
+        const float3 n0 = unpackNormal(v0.normalTangentUv.x);
+        const float3 n1 = unpackNormal(v1.normalTangentUv.x);
+        const float3 n2 = unpackNormal(v2.normalTangentUv.x);
 
-        const float3 t0 = unpackNormal(params.scene.vb[baseVbOffset + i0].tangent);
-        const float3 t1 = unpackNormal(params.scene.vb[baseVbOffset + i1].tangent);
-        const float3 t2 = unpackNormal(params.scene.vb[baseVbOffset + i2].tangent);
+        const float3 t0 = unpackNormal(v0.normalTangentUv.y);
+        const float3 t1 = unpackNormal(v1.normalTangentUv.y);
+        const float3 t2 = unpackNormal(v2.normalTangentUv.y);
 
-        const float2 uv0 = unpackUV(params.scene.vb[baseVbOffset + i0].uv);
-        const float2 uv1 = unpackUV(params.scene.vb[baseVbOffset + i1].uv);
-        const float2 uv2 = unpackUV(params.scene.vb[baseVbOffset + i2].uv);
+        const float2 uv0 = unpackUV(v0.normalTangentUv.z);
+        const float2 uv1 = unpackUV(v1.normalTangentUv.z);
+        const float2 uv2 = unpackUV(v2.normalTangentUv.z);
+
+        // const float3 p0 = params.scene.vb[baseVbOffset + i0].position;
+        // const float3 p1 = params.scene.vb[baseVbOffset + i1].position;
+        // const float3 p2 = params.scene.vb[baseVbOffset + i2].position;
+
+        // const float3 n0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normal);
+        // const float3 n1 = unpackNormal(params.scene.vb[baseVbOffset + i1].normal);
+        // const float3 n2 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
+
+        // const float3 t0 = unpackNormal(params.scene.vb[baseVbOffset + i0].tangent);
+        // const float3 t1 = unpackNormal(params.scene.vb[baseVbOffset + i1].tangent);
+        // const float3 t2 = unpackNormal(params.scene.vb[baseVbOffset + i2].tangent);
+
+        // const float2 uv0 = unpackUV(params.scene.vb[baseVbOffset + i0].uv);
+        // const float2 uv1 = unpackUV(params.scene.vb[baseVbOffset + i1].uv);
+        // const float2 uv2 = unpackUV(params.scene.vb[baseVbOffset + i2].uv);
 
         float2 uvCoord = interpolateAttrib(uv0, uv1, uv2, barycentrics);
         const float3 text_coords = make_float3(uvCoord.x, uvCoord.y, 0.0f);

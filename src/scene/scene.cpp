@@ -134,13 +134,19 @@ uint32_t Scene::createRectLightMesh()
     v2.pos = glm::float4(-0.5f, 0.5f, 0.0f, 1.0f); // top left 1
     v3.pos = glm::float4(-0.5f, -0.5f, 0.0f, 1.0f); // bottom left 2
     v4.pos = glm::float4(0.5f, -0.5f, 0.0f, 1.0f); // bottom right 3
-    glm::float3 normal = glm::float3(0.f, 0.f, 1.f);
-    v1.normal = v2.normal = v3.normal = v4.normal = packNormals(normal);
+    const glm::float3 normal = glm::float3(0.f, 0.f, 1.f);
+    const uint32_t packedNormal = packNormals(normal);
+
     std::vector<uint32_t> ib = { 0, 1, 2, 2, 3, 0 };
     vb.push_back(v1);
     vb.push_back(v2);
     vb.push_back(v3);
     vb.push_back(v4);
+
+    for (auto& v: vb)
+    {
+        v.setNormal(packedNormal);
+    }
 
     uint32_t meshId = createMesh(vb, ib);
     assert(meshId != -1);
@@ -161,9 +167,9 @@ uint32_t vertexForEdge(Lookup& lookup, std::vector<Scene::Vertex>& vertices, uin
     {
         auto& edge0 = vertices[first].pos;
         auto& edge1 = vertices[second].pos;
-        auto point = normalize(glm::float3{ (edge0.x + edge1.x) / 2, (edge0.y + edge1.y) / 2, (edge0.z + edge1.z) / 2 });
+        const glm::float3 point = normalize(glm::float3{ (edge0.x + edge1.x) / 2, (edge0.y + edge1.y) / 2, (edge0.z + edge1.z) / 2 });
         Scene::Vertex v;
-        v.pos = point;
+        v.setPos(point);
         vertices.push_back(v);
     }
 
@@ -238,7 +244,7 @@ uint32_t Scene::createSphereLightMesh()
     // the first top vertex (0, 0, r)
     float radius = 1.0f;
     Scene::Vertex v0, v1, v2;
-    v0.pos = { 0, 0, radius };
+    v0.setPos({ 0, 0, radius });
 
     vertices[i0] = v0;
 
@@ -251,8 +257,8 @@ uint32_t Scene::createSphereLightMesh()
         z = radius * sinf(V_ANGLE); // elevaton
         xy = radius * cosf(V_ANGLE);
 
-        v1.pos = { xy * cosf(hAngle1), xy * sinf(hAngle1), z };
-        v2.pos = { xy * cosf(hAngle2), xy * sinf(hAngle2), -z };
+        v1.setPos( { xy * cosf(hAngle1), xy * sinf(hAngle1), z });
+        v2.setPos( { xy * cosf(hAngle2), xy * sinf(hAngle2), -z });
 
         vertices[i1] = v1;
         vertices[i2] = v2;
@@ -287,8 +293,8 @@ uint32_t Scene::createSphereLightMesh()
     z = radius * sinf(V_ANGLE); // elevaton
     xy = radius * cosf(V_ANGLE);
 
-    v1.pos = { xy * cosf(hAngle1), xy * sinf(hAngle1), z };
-    v2.pos = { xy * cosf(hAngle2), xy * sinf(hAngle2), -z };
+    v1.setPos({ xy * cosf(hAngle1), xy * sinf(hAngle1), z });
+    v2.setPos({ xy * cosf(hAngle2), xy * sinf(hAngle2), -z });
 
     vertices[i1] = v1;
     vertices[i2] = v2;
@@ -313,7 +319,7 @@ uint32_t Scene::createSphereLightMesh()
     indices.push_back(3);
 
     // the last bottom vertex (0, 0, -r)
-    v1.pos = { 0, 0, -radius };
+    v1.setPos({ 0, 0, -radius });
     vertices[i3] = v1;
 
     IndexedMesh im = subdivideIcosphere(3, vertices, indices);
@@ -339,7 +345,9 @@ uint32_t Scene::createDiscLightMesh()
     v2.pos = glm::float4(1.0f, 0.f, 0.f, 1.f);
 
     glm::float3 normal = glm::float3(0.f, 0.f, 1.f);
-    v1.normal = v2.normal = packNormals(normal);
+    const uint32_t packedNormal = packNormals(normal);
+    v1.setNormal(packedNormal);
+    v2.setNormal(packedNormal);
 
     vertices.push_back(v1); // central point
     vertices.push_back(v2); // first point
@@ -358,7 +366,8 @@ uint32_t Scene::createDiscLightMesh()
 
         Scene::Vertex v;
         v.pos = glm::float4(x, y, 0.0f, 1.0f);
-        v.normal = packNormals(normal);
+        v.setNormal(packNormals(normal));
+
         vertices.push_back(v);
 
         indices.push_back(vertices.size() - 1); // added vertex

@@ -118,8 +118,8 @@ void HdStrelkaMesh::_ConvertMesh()
         vertex.pos[2] = point[2];
 
         glm::float3 glmNormal = glm::float3(normal[0], normal[1], normal[2]);
-        vertex.normal = packNormal(glmNormal);
-        sum += vertex.pos;
+        vertex.setNormal(packNormal(glmNormal));
+        sum += glm::float3(vertex.pos);
     }
     const glm::float3 massCenter = sum / (float)vertexCount;
 

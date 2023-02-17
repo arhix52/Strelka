@@ -22,13 +22,8 @@
 
 struct Vertex
 {
-    float3 position;
-    uint32_t tangent;
-
-    uint32_t normal;
-    uint32_t uv;
-    float pad0;
-    float pad1;
+    float4 position; // .w - pad
+    uint4 normalTangentUv; // .w pad
 };
 
 struct SceneData

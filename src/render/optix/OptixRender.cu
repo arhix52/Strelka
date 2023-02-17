@@ -207,9 +207,9 @@ extern "C" __global__ void __closesthit__ch()
 
     const uint32_t baseVbOffset = hit_data->vertexOffset;
 
-    glm::float3 N0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normal);
-    glm::float3 N1 = unpackNormal(params.scene.vb[baseVbOffset + i1].normal);
-    glm::float3 N2 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
+    glm::float3 N0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normalTangentUv.x);
+    glm::float3 N1 = unpackNormal(params.scene.vb[baseVbOffset + i1].normalTangentUv.x);
+    glm::float3 N2 = unpackNormal(params.scene.vb[baseVbOffset + i2].normalTangentUv.x);
 
     glm::float3 object_normal = glm::normalize(interpolateAttrib(N0, N1, N2, barycentrics));
     // float3 world_normal = normalize( optixTransformNormalFromObjectToWorldSpace( object_normal ) );

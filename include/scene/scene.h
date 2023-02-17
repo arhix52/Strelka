@@ -5,6 +5,7 @@
 // #include "materials.h"
 // #undef float4
 // #undef float3
+#include <vector_types.h>
 
 #include <cstdint>
 #include <mutex>
@@ -79,13 +80,27 @@ public:
 
     struct Vertex
     {
-        glm::float3 pos;
-        uint32_t tangent;
+        glm::float4 pos;
+        glm::int4 normalTangentUv;
 
-        uint32_t normal;
-        uint32_t uv;
-        float pad0;
-        float pad1;
+        void setPos(const glm::float3& p)
+        {
+            pos.x = p.x;
+            pos.y = p.y;
+            pos.z = p.z;
+        }
+        void setNormal(const uint32_t packedNormal)
+        {
+            normalTangentUv.x = packedNormal;
+        }
+        void setTangent(const uint32_t packedTangent)
+        {
+            normalTangentUv.y = packedTangent;
+        }
+        void setUv(const uint32_t packedUv)
+        {
+            normalTangentUv.z = packedUv;
+        }
     };
 
     struct Node

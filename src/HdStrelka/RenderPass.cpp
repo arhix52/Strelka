@@ -98,16 +98,16 @@ void HdStrelkaRenderPass::_BakeMeshInstance(const HdStrelkaMesh* mesh, GfMatrix4
         vertex.pos[1] = point[1];
         vertex.pos[2] = point[2];
 
-        glm::float3 glmNormal = glm::float3(normal[0], normal[1], normal[2]);
-        vertex.normal = packNormal(glmNormal);
-        sum += vertex.pos;
+        const glm::float3 glmNormal = glm::float3(normal[0], normal[1], normal[2]);
+        vertex.setNormal(packNormal(glmNormal));
+        sum += glm::float3(vertex.pos);
 
         // Texture coord
         if (!meshUVs.empty())
         {
             const GfVec2f& uv = meshUVs[j];
             const glm::float2 glmUV = glm::float2(uv[0], 1.0f - uv[1]); // Flip v coordinate
-            vertex.uv = packUV(glmUV);
+            vertex.setUv(packUV(glmUV));
         }
     }
     const glm::float3 massCenter = sum / (float)vertexCount;
