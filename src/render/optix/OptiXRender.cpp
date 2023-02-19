@@ -881,10 +881,9 @@ void OptiXRender::render(Buffer* output)
     }
 
     ::Camera cam;
+    configureCamera(cam, width, height);
 
     SettingsManager& settings = *getSharedContext().mSettingsManager;
-
-    configureCamera(cam, width, height);
 
     Params& params = mState.params;
     params.scene.vb = (Vertex*)d_vb;
@@ -893,14 +892,23 @@ void OptiXRender::render(Buffer* output)
     params.scene.numLights = mScene->getLights().size();
 
     params.image = (float4*)((OptixBuffer*)output)->getNativePtr();
-    params.subframe_index = getSharedContext().mFrameNumber;
     params.samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
     params.handle = mState.ias_handle;
     params.cam_eye = make_float3(cam.eye().x, cam.eye().y, cam.eye().z);
     params.max_depth = settings.getAs<uint32_t>("render/pt/depth");
 
+    params.rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
+
     params.viewToWorld = glm::inverse(camera.matrices.view);
     params.clipToView = camera.matrices.invPerspective;
+
+    if (mState.prevParams.rectLightSamplingMethod != params.rectLightSamplingMethod)
+    {
+        // need reset
+        getSharedContext().mFrameNumber = 0;
+    }
+
+    params.subframe_index = getSharedContext().mFrameNumber;
 
     glm::float3 cam_u, cam_v, cam_w;
     cam.UVWFrame(cam_u, cam_v, cam_w);
@@ -923,6 +931,7 @@ void OptiXRender::render(Buffer* output)
     getSharedContext().mFrameNumber++;
 
     mPrevView = currView;
+    mState.prevParams = mState.params;
 }
 
 void OptiXRender::init()

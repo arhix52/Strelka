@@ -514,6 +514,7 @@ int main(int argc, const char* argv[])
     ctx->mSettingsManager->setAs<bool>("render/pt/isResized", false);
     ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", false);
     ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", result["c"].as<bool>());
+    ctx->mSettingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
     ctx->mSettingsManager->setAs<bool>("render/enableValidation", result["v"].as<bool>());
     ctx->mSettingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
 

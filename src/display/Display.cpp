@@ -110,6 +110,27 @@ void Display::drawUI()
 
     if (ImGui::TreeNode("Path Tracer"))
     {
+        const char* rectlightSamplingMethodItems[] = { "Uniform", "Advanced" };
+        static int currentRectlightSamplingMethodItemId = 0;
+        if (ImGui::BeginCombo("Stratified Sampling", rectlightSamplingMethodItems[currentRectlightSamplingMethodItemId]))
+        {
+            for (int n = 0; n < IM_ARRAYSIZE(rectlightSamplingMethodItems); n++)
+            {
+                bool is_selected = (currentRectlightSamplingMethodItemId == n);
+                if (ImGui::Selectable(rectlightSamplingMethodItems[n], is_selected))
+                {
+                    currentRectlightSamplingMethodItemId = n;
+                }
+                if (is_selected)
+                {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        mCtx->mSettingsManager->setAs<uint32_t>(
+            "render/pt/rectLightSamplingMethod", currentRectlightSamplingMethodItemId);
+
         uint32_t maxDepth = mCtx->mSettingsManager->getAs<uint32_t>("render/pt/depth");
         ImGui::SliderInt("Max Depth", (int*)&maxDepth, 1, 16);
         mCtx->mSettingsManager->setAs<uint32_t>("render/pt/depth", maxDepth);

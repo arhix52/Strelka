@@ -49,6 +49,8 @@ struct Params
     unsigned int samples_per_launch;
     uint32_t max_depth;
 
+    uint32_t rectLightSamplingMethod;
+
     float3 cam_eye;
     float3 cam_u, cam_v, cam_w;
     glm::float4x4 clipToView;
