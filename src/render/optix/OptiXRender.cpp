@@ -1153,6 +1153,11 @@ bool OptiXRender::createOptixMaterials()
             //     compiledMaterials.push_back(mNameToCompiled[currMatDesc.name]);
             //     continue;
             // }
+            if (mNameToCompiled.find(currMatDesc.name) != mNameToCompiled.end())
+            {
+                compiledMaterials.push_back(mNameToCompiled[currMatDesc.name]);
+                continue;
+            }
 
             MaterialManager::Module* mdlModule = nullptr;
             if (mNameToModule.find(currMatDesc.file) != mNameToModule.end())
@@ -1241,11 +1246,11 @@ bool OptiXRender::createOptixMaterials()
                 newParam.type = MaterialManager::Param::Type::eInt;
                 newParam.value.resize(sizeof(resId));
                 memcpy(newParam.value.data(), &resId, sizeof(resId));
-                res = mMaterialManager.setParam(targetCode, compiledMaterials[i], newParam);
+                res = mMaterialManager.setParam(targetCode, i, compiledMaterials[i], newParam);
             }
             else
             {
-                res = mMaterialManager.setParam(targetCode, compiledMaterials[i], param);
+                res = mMaterialManager.setParam(targetCode, i, compiledMaterials[i], param);
             }
             if (!res)
             {
@@ -1266,7 +1271,6 @@ bool OptiXRender::createOptixMaterials()
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_materialRoData), roDataSize));
     CUDA_CHECK(cudaMemcpy((void*)d_materialRoData, roData, roDataSize, cudaMemcpyHostToDevice));
 
-
     const size_t texturesBuffSize = sizeof(Texture) * materialTextures.size();
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_texturesData), texturesBuffSize));
     CUDA_CHECK(cudaMemcpy((void*)d_texturesData, materialTextures.data(), texturesBuffSize, cudaMemcpyHostToDevice));
@@ -1277,16 +1281,21 @@ bool OptiXRender::createOptixMaterials()
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_texturesHandler), sizeof(Texture_handler)));
     CUDA_CHECK(cudaMemcpy((void*)d_texturesHandler, &resourceHandler, sizeof(Texture_handler), cudaMemcpyHostToDevice));
 
-
+    std::unordered_map<MaterialManager::CompiledMaterial*, OptixProgramGroup> compiledToOptixPG;
     for (int i = 0; i < compiledMaterials.size(); ++i)
     {
-        const char* codeData = mMaterialManager.getShaderCode(targetCode, i);
-        assert(codeData);
-        const size_t codeSize = strlen(codeData);
-        assert(codeSize);
+        if (compiledToOptixPG.find(compiledMaterials[i]) == compiledToOptixPG.end())
+        {
+            const char* codeData = mMaterialManager.getShaderCode(targetCode, i);
+            assert(codeData);
+            const size_t codeSize = strlen(codeData);
+            assert(codeSize);
+            OptixProgramGroup pg = createRadianceClosestHitProgramGroup(mState, codeData, codeSize);
+            compiledToOptixPG[compiledMaterials[i]] = pg;
+        }
 
         Material optixMaterial;
-        optixMaterial.programGroup = createRadianceClosestHitProgramGroup(mState, codeData, codeSize);
+        optixMaterial.programGroup = compiledToOptixPG[compiledMaterials[i]];
         optixMaterial.d_argData = d_materialArgData + mMaterialManager.getArgBlockOffset(targetCode, i);
         optixMaterial.d_argDataSize = argDataSize;
         optixMaterial.d_roData = d_materialRoData + mMaterialManager.getReadOnlyOffset(targetCode, i);
