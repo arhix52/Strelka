@@ -495,32 +495,35 @@ kernel void raytracingKernel(
             accum_color = mix(accum_color_prev, accum_color, a);
         }
         accum[linearPixelIndex] = float4(accum_color, 1.0f);
-        // res[linearPixelIndex] = float4(accum_color, 1.0f);
         result = accum_color;
     }
 
-    switch (uniforms.tonemapperType)
+    switch ((ToneMapperType) uniforms.tonemapperType)
     {
-        case 1:
+        case ToneMapperType::eReinhard:
         {
             result = reinhard(result);
             break;
         }
-        case 2:
+        case ToneMapperType::eACES:
         {
             result = ACESFitted(result);
             break;
         }
-        case 3: 
+        case ToneMapperType::eFilmic: 
         {
             result = ACESFilm(result);
+            break;
+        }
+        case ToneMapperType::eNone:
+        {
             break;
         }
     }
 
     if (uniforms.gamma > 0.0f)
     {
-        result = pow(result, float3(1.0f/uniforms.gamma));
+        result = pow(result, float3(1.0f / uniforms.gamma));
     }
 
     res[linearPixelIndex] = float4(result, 1.0f);

@@ -4,6 +4,14 @@
 
 using namespace metal;
 
+enum class ToneMapperType : uint32_t
+{
+    eNone = 0,
+    eReinhard,
+    eACES,
+    eFilmic,
+};
+
 // https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl
 // sRGB => XYZ => D65_2_D60 => AP1 => RRT_SAT
 static constant float3x3 ACESInputMat =
