@@ -205,6 +205,7 @@ bool traceOcclusion(
 }
 
 float3 sampleLight(
+    constant Uniforms& uniforms,
     instance_acceleration_structure accelerationStructure,
     thread intersector<triangle_data, instancing>& isect, 
     thread uint32_t& rngState, 
@@ -219,7 +220,14 @@ float3 sampleLight(
     case 0:
     {
         float2 u = float2(rnd(rngState), rnd(rngState));
-        lightSampleData = SampleRectLight(light, u, state.position);
+        if (uniforms.rectLightSamplingMethod == 0)
+        {
+            lightSampleData = SampleRectLightUniform(light, u, state.position);
+        }
+        else
+        {
+            lightSampleData = SampleRectLight(light, u, state.position);
+        }
         break;
     }
         // case 1:
@@ -248,6 +256,7 @@ float3 sampleLight(
         float visibility = occluded ? 0.0f : 1.0f;
         // TODO: skip light hit
 
+
         // if (visibility == 0.0f)
         // {
         //     // check if it was light hit?
@@ -266,6 +275,7 @@ float3 sampleLight(
 }
 
 float3 estimateDirectLighting(
+    constant Uniforms& uniforms,
     instance_acceleration_structure accelerationStructure,
     thread intersector<triangle_data, instancing>& isect, 
     const uint32_t numLights,
@@ -278,7 +288,7 @@ float3 estimateDirectLighting(
     const uint32_t lightId = (uint32_t)(numLights * rnd(rngSeed));
     const float lightSelectionPdf = 1.0f / numLights;
     device const UniformLight& currLight = lights[lightId];
-    const float3 r = sampleLight(accelerationStructure, isect, rngSeed, currLight, state, toLight, lightPdf);
+    const float3 r = sampleLight(uniforms, accelerationStructure, isect, rngSeed, currLight, state, toLight, lightPdf);
     lightPdf *= lightSelectionPdf;
     return r;
 }
@@ -429,7 +439,7 @@ kernel void raytracingKernel(
 
             float3 toLight; // return value for estimateDirectLighting()
             float lightPdf = 0.0f; // return value for estimateDirectLighting()
-            const float3 radiance = estimateDirectLighting(accelerationStructure, i,
+            const float3 radiance = estimateDirectLighting(uniforms, accelerationStructure, i,
                 uniforms.numLights, lights, rndSeed, matState, toLight, lightPdf);
 
             const bool isNextEventValid = ((dot(toLight, matState.geom_normal) > 0.0f) != prd.inside) && lightPdf != 0.0f;
