@@ -466,7 +466,7 @@ kernel void raytracingKernel(
 
             materialSample(sampleData, matState);
 
-            prd.origin = offset_ray(worldPosition, matState.geom_normal * (prd.inside ? -1.0 : 1.0));
+            prd.origin = offset_ray(worldPosition, matState.geom_normal * (prd.inside ? -1.0f : 1.0f));
             prd.direction = sampleData.k2;
             prd.throughput *= sampleData.bsdf_over_pdf;
 
@@ -482,7 +482,7 @@ kernel void raytracingKernel(
                 {
                     break;
                 }
-                prd.throughput *= 1.0 / (p + 1e-5f);
+                prd.throughput *= 1.0f / (p + 1e-5f);
             }
         }
         ++prd.depth;
