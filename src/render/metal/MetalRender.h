@@ -55,7 +55,7 @@ private:
     MTL::Buffer* _instanceBuffer;
 
     MTL::Buffer* mMaterialBuffer;
-
+    std::vector<MTL::Texture*> mMaterialTextures;
     MTL::Texture* mFramebufferTexture;
 
     int _frame;
@@ -67,6 +67,7 @@ private:
     void buildBuffers();
     void buildTexture(uint32_t width, uint32_t heigth);
     
+    MTL::Texture* loadTextureFromFile(const std::string& fileName);
     void createMetalMaterials();
 
     MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);

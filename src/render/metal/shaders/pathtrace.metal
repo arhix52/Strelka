@@ -125,6 +125,8 @@ struct MaterialState
     float3 normal; // shading normal (normal mapping)
     float3 geom_normal; // triangle normal
     float3 diffuse;
+    float2 textureCoordinates;
+    texture2d<float> diffuseTex;
 };
 
 struct MaterialEval
@@ -157,7 +159,12 @@ struct MaterialSample
 void materialEvaluate(thread MaterialEval& data, thread const MaterialState& state)
 {
     // const float M_PIf = 3.1415926f;
-    data.bsdf_diffuse = state.diffuse * dot(state.normal, data.inDir) / M_PIf; 
+    constexpr sampler textureSampler (mag_filter::linear,
+                                  min_filter::linear);
+
+    const float4 colorSample = state.diffuseTex.sample(textureSampler, state.textureCoordinates);
+
+    data.bsdf_diffuse = colorSample.xyz * state.diffuse * dot(state.normal, data.inDir) / M_PIf; 
     data.bsdf_glossy = float3(0.0f);
     data.pdf = dot(state.normal, data.inDir) / M_PIf;
 }
@@ -401,6 +408,10 @@ kernel void raytracingKernel(
             const float3 n1 = unpackNormal(triangle.normals[1]);
             const float3 n2 = unpackNormal(triangle.normals[2]);
 
+            const float2 uv0 = unpackUV(triangle.uv[0]);
+            const float2 uv1 = unpackUV(triangle.uv[1]);
+            const float2 uv2 = unpackUV(triangle.uv[2]);
+
             // The ray hit something. Look up the transformation matrix for this instance.
             float4x4 objectToWorldSpaceTransform(1.0f);
 
@@ -411,8 +422,8 @@ kernel void raytracingKernel(
             const float2 barycentrics = intersection.triangle_barycentric_coord;
             // // Compute the intersection point in world space.
             // float3 worldPosition = ray.origin + ray.direction * intersection.distance;
-            float3 worldPosition = transformPoint(interpolateAttrib(p0, p1, p2, barycentrics), objectToWorldSpaceTransform);
-
+            const float3 worldPosition = transformPoint(interpolateAttrib(p0, p1, p2, barycentrics), objectToWorldSpaceTransform);
+            const float2 uv = interpolateAttrib(uv0, uv1, uv2, barycentrics);
             // unsigned primitiveIndex = intersection.primitive_id;
             // unsigned int geometryIndex = instances[instanceIndex].accelerationStructureIndex;
 
@@ -433,9 +444,11 @@ kernel void raytracingKernel(
             matState.position = worldPosition;
             matState.normal = worldNormal;
             matState.geom_normal = geomNormal;
+            matState.textureCoordinates = uv;
 
             const uint32_t materialId = instances[instanceIndex].userID;
             matState.diffuse = materials[materialId].diffuse;
+            matState.diffuseTex = materials[materialId].diffuseTexture;
 
             float3 toLight; // return value for estimateDirectLighting()
             float lightPdf = 0.0f; // return value for estimateDirectLighting()

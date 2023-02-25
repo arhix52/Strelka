@@ -2,6 +2,11 @@
 #define ShaderTypes_h
 
 #include <simd/simd.h>
+#ifndef __METAL_VERSION__
+#ifdef __cplusplus
+#include <Metal/MTLTypes.hpp>
+#endif
+#endif
 
 #define GEOMETRY_MASK_TRIANGLE 1
 #define GEOMETRY_MASK_CURVE 2
@@ -90,7 +95,11 @@ struct UniformLight
 struct Material
 {
     vector_float3 diffuse;
-
+#ifdef __METAL_VERSION__
+    texture2d<float>  diffuseTexture;
+#else
+    MTL::ResourceID diffuseTexture;
+#endif
 };
 
 #endif

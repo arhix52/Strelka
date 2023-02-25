@@ -15,6 +15,9 @@
 #include <glm/gtx/matrix_major_storage.hpp>
 #include <glm/ext/matrix_relational.hpp>
 
+#define STB_IMAGE_STATIC
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
 
 #include <simd/simd.h>
 
@@ -56,11 +59,38 @@ void MetalRender::buildTexture(uint32_t width, uint32_t heigth)
     pTextureDesc->release();
 }
 
+MTL::Texture* oka::MetalRender::loadTextureFromFile(const std::string& fileName)
+{
+    int texWidth, texHeight, texChannels;
+    stbi_uc* data = stbi_load(fileName.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+    if (!data)
+    {
+        fprintf(stderr, "Unable to load texture from file: %s\n", fileName.c_str());
+        return nullptr;
+    }
+    MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    pTextureDesc->setWidth(texWidth);
+    pTextureDesc->setHeight(texHeight);
+    pTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+    pTextureDesc->setTextureType(MTL::TextureType2D);
+    pTextureDesc->setStorageMode(MTL::StorageModeManaged);
+    pTextureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+
+    MTL::Texture* pTexture = mDevice->newTexture(pTextureDesc);
+
+    MTL::Region region = MTL::Region::Make3D(0, 0, 0, texWidth, texHeight, 1);
+    pTexture->replaceRegion(region, 0, data, 4 * texWidth);
+
+    pTextureDesc->release();
+    return pTexture;
+}
+
 void oka::MetalRender::createMetalMaterials()
 {
     using simd::float3;
     std::vector<Scene::MaterialDescription>& matDescs = mScene->getMaterials();
     std::vector<Material> gpuMaterials;
+    std::string resourcePath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
         Material material;
@@ -71,6 +101,17 @@ void oka::MetalRender::createMetalMaterials()
             if (param.name == "diffuse_color" || param.name == "diffuseColor" || param.name == "diffuse_color_constant")
             {
                 memcpy(&material.diffuse, param.value.data(), sizeof(float) * 3);
+            }
+            if (param.type == MaterialManager::Param::Type::eTexture)
+            {
+                if (param.name == "diffuse_texture")
+                {
+                    std::string texPath(param.value.size(), 0);
+                    memcpy(texPath.data(), param.value.data(), param.value.size());
+                    MTL::Texture* diffuseTex = loadTextureFromFile(resourcePath + "/" + texPath);
+                    mMaterialTextures.push_back(diffuseTex);
+                    material.diffuseTexture = diffuseTex->gpuResourceID();
+                }
             }
         }
         gpuMaterials.push_back(material);
@@ -164,11 +205,16 @@ void MetalRender::render(Buffer* output)
     pUniformBuffer->didModifyRange(NS::Range::Make(0, sizeof(Uniforms)));
 
     MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
+    pComputeEncoder->useResource(mMaterialBuffer, MTL::ResourceUsageRead);
     pComputeEncoder->useResource(mLightBuffer, MTL::ResourceUsageRead);
     pComputeEncoder->useResource(_instanceAccelerationStructure, MTL::ResourceUsageRead);
     for (int i = 0; i < _primitiveAccelerationStructures.size(); ++i)
     {
         pComputeEncoder->useResource(_primitiveAccelerationStructures[i], MTL::ResourceUsageRead);
+    }
+    for (int i = 0; i < mMaterialTextures.size(); ++i)
+    {
+        pComputeEncoder->useResource(mMaterialTextures[i], MTL::ResourceUsageRead);
     }
 
     pComputeEncoder->setComputePipelineState(mRayTracingPSO);
