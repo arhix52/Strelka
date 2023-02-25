@@ -37,7 +37,7 @@ bool MdlPtxCodeGen::init(MdlRuntime& runtime)
         mLogger->message(mi::base::MESSAGE_SEVERITY_FATAL, "ERROR: Setting PTX option num_texture_spaces failed");
         return false;
     }
-    if (mBackend->set_option("num_texture_results", "128") != 0)
+    if (mBackend->set_option("num_texture_results", "16") != 0)
     {
         mLogger->message(mi::base::MESSAGE_SEVERITY_FATAL, "ERROR: Setting PTX option num_texture_results failed");
         return false;
