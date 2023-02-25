@@ -3,6 +3,8 @@
 
 #include "random.h"
 #include "lights.h"
+#include "tonemappers.h"
+
 #include "ShaderTypes.h"
 
 using namespace metal;
@@ -370,8 +372,11 @@ kernel void raytracingKernel(
             const uint32_t mask = instances[instanceIndex].mask;
             if (mask == GEOMETRY_MASK_LIGHT)
             {
-                // TODO: extract light colors
-                prd.radiance += prd.throughput * float3(1.0f);
+                if (prd.depth == 0 || prd.specularBounce)
+                {
+                    // TODO: extract light colors
+                    prd.radiance += prd.throughput * float3(1.0f);
+                }
                 prd.throughput = float3(0.0f);
                 // stop tracing
                 break;
@@ -477,7 +482,7 @@ kernel void raytracingKernel(
         ++prd.depth;
     }
 
-    const float3 result = prd.radiance;
+    float3 result = prd.radiance;
 
     if (uniforms.enableAccumulation)
     {
@@ -490,10 +495,33 @@ kernel void raytracingKernel(
             accum_color = mix(accum_color_prev, accum_color, a);
         }
         accum[linearPixelIndex] = float4(accum_color, 1.0f);
-        res[linearPixelIndex] = float4(accum_color, 1.0f);
+        // res[linearPixelIndex] = float4(accum_color, 1.0f);
+        result = accum_color;
     }
-    else
+
+    switch (uniforms.tonemapperType)
     {
-        res[linearPixelIndex] = float4(result, 1.0f);
+        case 1:
+        {
+            result = reinhard(result);
+            break;
+        }
+        case 2:
+        {
+            result = ACESFitted(result);
+            break;
+        }
+        case 3: 
+        {
+            result = ACESFilm(result);
+            break;
+        }
     }
+
+    if (uniforms.gamma > 0.0f)
+    {
+        result = pow(result, float3(1.0f/uniforms.gamma));
+    }
+
+    res[linearPixelIndex] = float4(result, 1.0f);
 }

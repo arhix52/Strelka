@@ -81,8 +81,7 @@ void Display::drawUI()
     static bool isLight = false;
     static bool openInspector = false;
 
-    const char* tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
-    static int currentTonemapItemId = 1;
+
 
     const char* stratifiedSamplingItems[] = { "None", "Random", "Stratified", "Optimized" };
     static int currentSamplingItemId = 1;
@@ -176,7 +175,9 @@ void Display::drawUI()
     float cameraSpeed = mCtx->mSettingsManager->getAs<float>("render/cameraSpeed");
     ImGui::InputFloat("Camera Speed", (float*)&cameraSpeed, 0.5);
     mCtx->mSettingsManager->setAs<float>("render/cameraSpeed", cameraSpeed);
-    /*
+    
+    const char* tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
+    static int currentTonemapItemId = 1;
     if (ImGui::BeginCombo("Tonemap", tonemapItems[currentTonemapItemId]))
     {
         for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
@@ -193,9 +194,13 @@ void Display::drawUI()
         }
         ImGui::EndCombo();
     }
-    mCtx->mSettingsManager->setAs<bool>("render/pt/enableTonemap", currentTonemapItemId != 0 ? true : false);
-    mCtx->mSettingsManager->setAs<uint32_t>("render/pt/tonemapperType", currentTonemapItemId - 1);
+    mCtx->mSettingsManager->setAs<uint32_t>("render/pt/tonemapperType", currentTonemapItemId);
+    
+    float gamma = mCtx->mSettingsManager->getAs<float>("render/post/gamma");
+    ImGui::InputFloat("Gamma", (float*)&gamma, 0.5);
+    mCtx->mSettingsManager->setAs<float>("render/post/gamma", gamma);
 
+    /*
     bool enableUpscale = mCtx->mSettingsManager->getAs<bool>("render/pt/enableUpscale");
     ImGui::Checkbox("Enable Upscale", &enableUpscale);
     mCtx->mSettingsManager->setAs<bool>("render/pt/enableUpscale", enableUpscale);
