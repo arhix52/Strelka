@@ -517,6 +517,8 @@ int main(int argc, const char* argv[])
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
     ctx->mSettingsManager->setAs<bool>("render/enableValidation", result["v"].as<bool>());
     ctx->mSettingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
+    // Postprocessing settings:
+    ctx->mSettingsManager->setAs<float>("render/post/gamma", 2.2f); // 0.0f - off
 
     HdDriver driver;
     driver.name = _AppTokens->HdStrelkaDriver;

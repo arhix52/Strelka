@@ -3,6 +3,8 @@
 
 #include "random.h"
 #include "lights.h"
+#include "tonemappers.h"
+
 #include "ShaderTypes.h"
 
 using namespace metal;
@@ -338,7 +340,7 @@ kernel void raytracingKernel(
     prd.specularBounce = false;
 
     generateCameraRay(tid, prd.rndSeed, prd.origin, prd.direction, uniforms);
-
+    DebugMode debugMode = (DebugMode) uniforms.debug;
     while (prd.depth < uniforms.maxDepth)
     {
         ray ray;
@@ -370,8 +372,11 @@ kernel void raytracingKernel(
             const uint32_t mask = instances[instanceIndex].mask;
             if (mask == GEOMETRY_MASK_LIGHT)
             {
-                // TODO: extract light colors
-                prd.radiance += prd.throughput * float3(1.0f);
+                if (prd.depth == 0 || prd.specularBounce)
+                {
+                    // TODO: extract light colors
+                    prd.radiance += prd.throughput * float3(1.0f);
+                }
                 prd.throughput = float3(0.0f);
                 // stop tracing
                 break;
@@ -406,6 +411,12 @@ kernel void raytracingKernel(
 
             float3 geomNormal = normalize(cross(p1 - p0, p2 - p0));
             geomNormal = transformDirection(geomNormal, objectToWorldSpaceTransform); 
+
+            if (debugMode == DebugMode::eNormal)
+            {
+                prd.radiance = (worldNormal + float3(1.0f)) * 0.5f;
+                break;
+            }
 
             MaterialState matState;
 
@@ -455,7 +466,7 @@ kernel void raytracingKernel(
 
             materialSample(sampleData, matState);
 
-            prd.origin = offset_ray(worldPosition, matState.geom_normal * (prd.inside ? -1.0 : 1.0));
+            prd.origin = offset_ray(worldPosition, matState.geom_normal * (prd.inside ? -1.0f : 1.0f));
             prd.direction = sampleData.k2;
             prd.throughput *= sampleData.bsdf_over_pdf;
 
@@ -471,13 +482,13 @@ kernel void raytracingKernel(
                 {
                     break;
                 }
-                prd.throughput *= 1.0 / (p + 1e-5f);
+                prd.throughput *= 1.0f / (p + 1e-5f);
             }
         }
         ++prd.depth;
     }
 
-    const float3 result = prd.radiance;
+    float3 result = prd.radiance;
 
     if (uniforms.enableAccumulation)
     {
@@ -490,10 +501,36 @@ kernel void raytracingKernel(
             accum_color = mix(accum_color_prev, accum_color, a);
         }
         accum[linearPixelIndex] = float4(accum_color, 1.0f);
-        res[linearPixelIndex] = float4(accum_color, 1.0f);
+        result = accum_color;
     }
-    else
+
+    switch ((ToneMapperType) uniforms.tonemapperType)
     {
-        res[linearPixelIndex] = float4(result, 1.0f);
+        case ToneMapperType::eReinhard:
+        {
+            result = reinhard(result);
+            break;
+        }
+        case ToneMapperType::eACES:
+        {
+            result = ACESFitted(result);
+            break;
+        }
+        case ToneMapperType::eFilmic: 
+        {
+            result = ACESFilm(result);
+            break;
+        }
+        case ToneMapperType::eNone:
+        {
+            break;
+        }
     }
+
+    if (uniforms.gamma > 0.0f)
+    {
+        result = pow(result, float3(1.0f / uniforms.gamma));
+    }
+
+    res[linearPixelIndex] = float4(result, 1.0f);
 }

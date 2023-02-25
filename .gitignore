@@ -7,5 +7,5 @@ build_xcode/
 misc/
 external/mdl-sdk
 external/metal-cpp*
+external/glfw-3.3.8*
 data/test_data
-shaders/newPT.hlsl

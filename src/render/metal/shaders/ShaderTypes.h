@@ -28,6 +28,12 @@ struct packed_float3
 };
 #endif
 
+enum class DebugMode : uint32_t
+{
+    eNone = 0,
+    eNormal,
+};
+
 struct Vertex
 {
     vector_float3 pos;
@@ -53,6 +59,11 @@ struct Uniforms
     uint32_t enableAccumulation;
     uint32_t samples_per_launch;
     uint32_t maxDepth;
+
+    uint32_t tonemapperType; // 0 - "None", "Reinhard", "ACES", "Filmic"
+    float gamma; // 0 - off
+
+    uint32_t debug;
 };
 
 struct Triangle
