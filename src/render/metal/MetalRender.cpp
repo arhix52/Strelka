@@ -74,7 +74,7 @@ MTL::Texture* oka::MetalRender::loadTextureFromFile(const std::string& fileName)
     pTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
     pTextureDesc->setTextureType(MTL::TextureType2D);
     pTextureDesc->setStorageMode(MTL::StorageModeManaged);
-    pTextureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+    pTextureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
 
     MTL::Texture* pTexture = mDevice->newTexture(pTextureDesc);
 
