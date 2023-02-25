@@ -340,7 +340,7 @@ kernel void raytracingKernel(
     prd.specularBounce = false;
 
     generateCameraRay(tid, prd.rndSeed, prd.origin, prd.direction, uniforms);
-
+    DebugMode debugMode = (DebugMode) uniforms.debug;
     while (prd.depth < uniforms.maxDepth)
     {
         ray ray;
@@ -411,6 +411,12 @@ kernel void raytracingKernel(
 
             float3 geomNormal = normalize(cross(p1 - p0, p2 - p0));
             geomNormal = transformDirection(geomNormal, objectToWorldSpaceTransform); 
+
+            if (debugMode == DebugMode::eNormal)
+            {
+                prd.radiance = (worldNormal + float3(1.0f)) * 0.5f;
+                break;
+            }
 
             MaterialState matState;
 

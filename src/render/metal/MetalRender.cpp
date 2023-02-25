@@ -142,6 +142,7 @@ void MetalRender::render(Buffer* output)
     pUniformData->maxDepth = settings.getAs<uint32_t>("render/pt/depth");
     pUniformData->tonemapperType = settings.getAs<uint32_t>("render/pt/tonemapperType");
     pUniformData->gamma = settings.getAs<float>("render/post/gamma");
+    pUniformData->debug = settings.getAs<uint32_t>("render/pt/debug");
 
     glm::float4x4 invView = glm::inverse(camera.matrices.view);
     for (int column = 0; column < 4; column++)
