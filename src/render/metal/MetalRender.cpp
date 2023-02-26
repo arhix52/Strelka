@@ -93,7 +93,7 @@ void oka::MetalRender::createMetalMaterials()
     std::string resourcePath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
-        Material material;
+        Material material = {0};
         material.diffuse = {1.0f, 1.0f, 1.0f};
         oka::Scene::MaterialDescription& currMatDesc = matDescs[i];
         for (const auto& param : matDescs[i].params)
@@ -111,6 +111,7 @@ void oka::MetalRender::createMetalMaterials()
                     MTL::Texture* diffuseTex = loadTextureFromFile(resourcePath + "/" + texPath);
                     mMaterialTextures.push_back(diffuseTex);
                     material.diffuseTexture = diffuseTex->gpuResourceID();
+                    setDiffuseTexture(material);
                 }
             }
         }
