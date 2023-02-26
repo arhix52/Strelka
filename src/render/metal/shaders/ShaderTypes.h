@@ -92,37 +92,17 @@ struct UniformLight
     float pad3;
 };
 
-enum class MaterialTexture: uint32_t
-{
-    eDiffuse = 1,
-
-};
-
 struct Material
 {
     simd::float3 diffuse;
-    float pad;
-    uint32_t textureAvailability = 0;
 
 #ifdef __METAL_VERSION__
     texture2d<float>  diffuseTexture;
+    texture2d<float>  normalTexture;
 #else
     MTL::ResourceID diffuseTexture; // uint64_t - alignment 8
+    MTL::ResourceID normalTexture;
 #endif
 };
-
-#ifndef __METAL_VERSION__
-void setDiffuseTexture(Material& material)
-{
-    material.textureAvailability |= (uint32_t) MaterialTexture::eDiffuse;
-}
-#endif
-
-#ifdef __METAL_VERSION__
-constexpr bool hasDiffuseTexture(device const Material& material)
-{
-    return material.textureAvailability & (uint32_t) MaterialTexture::eDiffuse;
-}
-#endif
 
 #endif

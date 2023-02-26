@@ -95,6 +95,7 @@ void oka::MetalRender::createMetalMaterials()
     {
         Material material = {0};
         material.diffuse = {1.0f, 1.0f, 1.0f};
+        material.diffuseTexture = {0};
         oka::Scene::MaterialDescription& currMatDesc = matDescs[i];
         for (const auto& param : matDescs[i].params)
         {
@@ -104,14 +105,19 @@ void oka::MetalRender::createMetalMaterials()
             }
             if (param.type == MaterialManager::Param::Type::eTexture)
             {
+                std::string texPath(param.value.size(), 0);
+                memcpy(texPath.data(), param.value.data(), param.value.size());
                 if (param.name == "diffuse_texture")
                 {
-                    std::string texPath(param.value.size(), 0);
-                    memcpy(texPath.data(), param.value.data(), param.value.size());
                     MTL::Texture* diffuseTex = loadTextureFromFile(resourcePath + "/" + texPath);
                     mMaterialTextures.push_back(diffuseTex);
                     material.diffuseTexture = diffuseTex->gpuResourceID();
-                    setDiffuseTexture(material);
+                }
+                if (param.name == "normalmap_texture")
+                {
+                    MTL::Texture* normalTex = loadTextureFromFile(resourcePath + "/" + texPath);
+                    mMaterialTextures.push_back(normalTex);
+                    material.normalTexture = normalTex->gpuResourceID();
                 }
             }
         }

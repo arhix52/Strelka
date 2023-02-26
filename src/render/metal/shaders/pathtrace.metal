@@ -124,6 +124,8 @@ struct MaterialState
     float3 position;
     float3 normal; // shading normal (normal mapping)
     float3 geom_normal; // triangle normal
+    float3 tangent_u;
+    float3 tangent_v;
     float3 diffuse;
     float2 textureCoordinates;
 };
@@ -159,10 +161,16 @@ void materialInit(thread MaterialState& state, const device Material& material)
 {
     constexpr sampler textureSampler (mag_filter::linear, min_filter::linear);
     state.diffuse = material.diffuse;
-    if (hasDiffuseTexture(material))
+    if (!is_null_texture(material.diffuseTexture))
     {
         const float4 diffuseFromTex = material.diffuseTexture.sample(textureSampler, state.textureCoordinates);
         state.diffuse *= diffuseFromTex.rgb;
+    }
+    if (!is_null_texture(material.normalTexture))
+    {
+        const float3 bumpNormal = material.normalTexture.sample(textureSampler, state.textureCoordinates).xyz * 2.0 - 1.0;
+        const float3x3 TBN = float3x3(state.tangent_u, state.tangent_v, state.normal);
+        state.normal = normalize(TBN * bumpNormal);
     }
 }
 
@@ -413,6 +421,10 @@ kernel void raytracingKernel(
             const float3 n1 = unpackNormal(triangle.normals[1]);
             const float3 n2 = unpackNormal(triangle.normals[2]);
 
+            const float3 t0 = unpackNormal(triangle.tangent[0]);
+            const float3 t1 = unpackNormal(triangle.tangent[1]);
+            const float3 t2 = unpackNormal(triangle.tangent[2]);
+
             const float2 uv0 = unpackUV(triangle.uv[0]);
             const float2 uv1 = unpackUV(triangle.uv[1]);
             const float2 uv2 = unpackUV(triangle.uv[2]);
@@ -435,25 +447,29 @@ kernel void raytracingKernel(
             const float3 objectNormal = normalize(interpolateAttrib(n0, n1, n2, barycentrics));
             const float3 worldNormal = normalize(transformDirection(objectNormal, objectToWorldSpaceTransform));
 
+            const float3 worldTangent = normalize(transformDirection(normalize(interpolateAttrib(t0, t1, t2, barycentrics)), objectToWorldSpaceTransform));
+            const float3 worldBinormal = cross(worldNormal, worldTangent);
+
             float3 geomNormal = normalize(cross(p1 - p0, p2 - p0));
             geomNormal = transformDirection(geomNormal, objectToWorldSpaceTransform); 
-
-            if (debugMode == DebugMode::eNormal)
-            {
-                prd.radiance = (worldNormal + float3(1.0f)) * 0.5f;
-                break;
-            }
 
             MaterialState matState;
 
             matState.position = worldPosition;
             matState.normal = worldNormal;
+            matState.tangent_u = worldTangent;
+            matState.tangent_v = worldBinormal;
             matState.geom_normal = geomNormal;
             matState.textureCoordinates = uv;
 
             const uint32_t materialId = instances[instanceIndex].userID;
-            // matState.diffuse = materials[materialId].diffuse;
             materialInit(matState, materials[materialId]);
+
+            if (debugMode == DebugMode::eNormal)
+            {
+                prd.radiance = (matState.normal + float3(1.0f)) * 0.5f;
+                break;
+            }
 
             float3 toLight; // return value for estimateDirectLighting()
             float lightPdf = 0.0f; // return value for estimateDirectLighting()
