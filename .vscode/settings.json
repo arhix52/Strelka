@@ -3,6 +3,8 @@
     "editor.formatOnSave": false,
     // "clang-format.executable": "C:/Program Files/LLVM/bin/clang-format.exe",
     "clang-format.executable": "/opt/homebrew/Cellar/clang-format/15.0.7/bin/clang-format",
+    "clang-tidy.executable": "/usr/local/bin/clang-tidy",
+    "clang-tidy.buildPath": "build",
     "files.associations": {
         "xstring": "cpp",
         "vector": "cpp",
@@ -110,6 +112,10 @@
         "__threading_support": "cpp",
         "__tree": "cpp",
         "__tuple": "cpp",
-        "string_view": "cpp"
+        "string_view": "cpp",
+        "*.mm": "cpp",
+        "hash_map": "cpp",
+        "hash_set": "cpp",
+        "*.ipp": "cpp"
     },
 }

@@ -9,6 +9,8 @@ endif()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 if(WIN32)
   add_compile_definitions(NOMINMAX)
   add_compile_definitions(_USE_MATH_DEFINES)
