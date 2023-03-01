@@ -14,13 +14,13 @@ TF_REGISTRY_FUNCTION(TfType)
 
 HdStrelkaRendererPlugin::HdStrelkaRendererPlugin()
 {
-    PlugPluginPtr plugin = PLUG_THIS_PLUGIN;
+    const PlugPluginPtr plugin = PLUG_THIS_PLUGIN;
 
     const std::string& resourcePath = plugin->GetResourcePath();
     printf("Resource path %s\n", resourcePath.c_str());
-    std::string shaderPath = resourcePath + "/shaders";
-    std::string mtlxmdlPath = resourcePath + "/mtlxmdl";
-    std::string mtlxlibPath = resourcePath + "/mtlxlib";
+    const std::string shaderPath = resourcePath + "/shaders";
+    const std::string mtlxmdlPath = resourcePath + "/mtlxmdl";
+    const std::string mtlxlibPath = resourcePath + "/mtlxlib";
 
     // m_translator = std::make_unique<MaterialNetworkTranslator>(mtlxlibPath);
     const char* envUSDPath = std::getenv("USD_DIR");
@@ -32,7 +32,7 @@ HdStrelkaRendererPlugin::HdStrelkaRendererPlugin()
     }
     else
     {
-        std::string USDPath(envUSDPath);
+        const std::string USDPath(envUSDPath);
         m_translator = std::make_unique<MaterialNetworkTranslator>(USDPath + "./libraries");
         m_isSupported = true;
     }
@@ -44,7 +44,7 @@ HdStrelkaRendererPlugin::~HdStrelkaRendererPlugin()
 
 HdRenderDelegate* HdStrelkaRendererPlugin::CreateRenderDelegate()
 {
-    HdRenderSettingsMap settingsMap;
+    HdRenderSettingsMap settingsMap = {};
 
     return new HdStrelkaRenderDelegate(settingsMap, *m_translator);
 }

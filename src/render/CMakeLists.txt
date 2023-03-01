@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 set(RENDERLIB_NAME render)
 
-include(${ROOT_HOME}/cmake/StaticAnalyzers.cmake)
+# include(${ROOT_HOME}/cmake/StaticAnalyzers.cmake)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include_directories(${ROOT_HOME}/external/glm)

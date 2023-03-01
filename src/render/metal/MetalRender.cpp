@@ -15,7 +15,6 @@
 #include <glm/gtx/matrix_major_storage.hpp>
 #include <glm/ext/matrix_relational.hpp>
 
-
 #include <simd/simd.h>
 
 #include "shaders/ShaderTypes.h"
@@ -35,9 +34,7 @@ void MetalRender::init()
     mDevice = MTL::CreateSystemDefaultDevice();
     mCommandQueue = mDevice->newCommandQueue();
     buildComputePipeline();
-    // buildBuffers();
-    // createAccelerationStructures();
-    _semaphore = dispatch_semaphore_create(oka::kMaxFramesInFlight);
+    mSemaphoreDispatch = dispatch_semaphore_create(oka::kMaxFramesInFlight);
 }
 
 void MetalRender::buildTexture(uint32_t width, uint32_t heigth)
@@ -59,14 +56,13 @@ void MetalRender::buildTexture(uint32_t width, uint32_t heigth)
 void oka::MetalRender::createMetalMaterials()
 {
     using simd::float3;
-    std::vector<Scene::MaterialDescription>& matDescs = mScene->getMaterials();
+    const std::vector<Scene::MaterialDescription>& matDescs = mScene->getMaterials();
     std::vector<Material> gpuMaterials;
-    for (uint32_t i = 0; i < matDescs.size(); ++i)
+    for (const Scene::MaterialDescription& currMatDesc : matDescs)
     {
-        Material material;
-        material.diffuse = {1.0f, 1.0f, 1.0f};
-        oka::Scene::MaterialDescription& currMatDesc = matDescs[i];
-        for (const auto& param : matDescs[i].params)
+        Material material = {};
+        material.diffuse = { 1.0f, 1.0f, 1.0f };
+        for (const auto& param : currMatDesc.params)
         {
             if (param.name == "diffuse_color" || param.name == "diffuseColor" || param.name == "diffuse_color_constant")
             {
@@ -99,24 +95,24 @@ void MetalRender::render(Buffer* output)
             output->width() * output->height() * output->getElementSize(), MTL::ResourceStorageModePrivate);
     }
 
-    _frame = (_frame + 1) % oka::kMaxFramesInFlight;
+    mFrameIndex = (mFrameIndex + 1) % oka::kMaxFramesInFlight;
 
     MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
-    dispatch_semaphore_wait(_semaphore, DISPATCH_TIME_FOREVER);
+    dispatch_semaphore_wait(mSemaphoreDispatch, DISPATCH_TIME_FOREVER);
     MetalRender* pRenderer = this;
     pCmd->addCompletedHandler(^void(MTL::CommandBuffer* pCmd) {
-      dispatch_semaphore_signal(pRenderer->_semaphore);
+      dispatch_semaphore_signal(pRenderer->mSemaphoreDispatch);
     });
 
     // Update camera state:
-    width = output->width();
-    height = output->height();
+    const uint32_t width = output->width();
+    const uint32_t height = output->height();
 
     oka::Camera& camera = mScene->getCamera(1);
     camera.updateAspectRatio(width / (float)height);
     camera.updateViewMatrix();
 
-    View currView;
+    View currView = {};
 
     currView.mCamMatrices = camera.matrices;
 
@@ -129,15 +125,15 @@ void MetalRender::render(Buffer* output)
 
     SettingsManager& settings = *getSharedContext().mSettingsManager;
 
-    MTL::Buffer* pUniformBuffer = _pUniformBuffer[_frame];
+    MTL::Buffer* pUniformBuffer = mUniformBuffers[mFrameIndex];
     Uniforms* pUniformData = reinterpret_cast<Uniforms*>(pUniformBuffer->contents());
-    pUniformData->frameIndex = _frame;
+    pUniformData->frameIndex = mFrameIndex;
     pUniformData->subframeIndex = getSharedContext().mFrameNumber;
     pUniformData->height = height;
     pUniformData->width = width;
     pUniformData->numLights = mScene->getLightsDesc().size();
     pUniformData->samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
-    pUniformData->enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
+    pUniformData->enableAccumulation = (uint32_t)settings.getAs<bool>("render/pt/enableAcc");
     pUniformData->missColor = float3(0.0f);
     pUniformData->maxDepth = settings.getAs<uint32_t>("render/pt/depth");
     pUniformData->tonemapperType = settings.getAs<uint32_t>("render/pt/tonemapperType");
@@ -165,26 +161,26 @@ void MetalRender::render(Buffer* output)
 
     MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
     pComputeEncoder->useResource(mLightBuffer, MTL::ResourceUsageRead);
-    pComputeEncoder->useResource(_instanceAccelerationStructure, MTL::ResourceUsageRead);
-    for (int i = 0; i < _primitiveAccelerationStructures.size(); ++i)
+    pComputeEncoder->useResource(mInstanceAccelerationStructure, MTL::ResourceUsageRead);
+    for (const MTL::AccelerationStructure* primitiveAccel : mPrimitiveAccelerationStructures)
     {
-        pComputeEncoder->useResource(_primitiveAccelerationStructures[i], MTL::ResourceUsageRead);
+        pComputeEncoder->useResource(primitiveAccel, MTL::ResourceUsageRead);
     }
 
     pComputeEncoder->setComputePipelineState(mRayTracingPSO);
-    pComputeEncoder->setBuffer(_pUniformBuffer[_frame], 0, 0);
-    pComputeEncoder->setBuffer(_instanceBuffer, 0, 1);
-    pComputeEncoder->setAccelerationStructure(_instanceAccelerationStructure, 2);
+    pComputeEncoder->setBuffer(mUniformBuffers[mFrameIndex], 0, 0);
+    pComputeEncoder->setBuffer(mInstanceBuffer, 0, 1);
+    pComputeEncoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
     pComputeEncoder->setBuffer(mLightBuffer, 0, 3);
     pComputeEncoder->setBuffer(mMaterialBuffer, 0, 4);
     // Output
     pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 5);
     pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 6);
 
-    MTL::Size gridSize = MTL::Size(width, height, 1);
+    const MTL::Size gridSize = MTL::Size(width, height, 1);
 
-    NS::UInteger threadGroupSize = mRayTracingPSO->maxTotalThreadsPerThreadgroup();
-    MTL::Size threadgroupSize(threadGroupSize, 1, 1);
+    const NS::UInteger threadGroupSize = mRayTracingPSO->maxTotalThreadsPerThreadgroup();
+    const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
 
     pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
 
@@ -240,7 +236,7 @@ void MetalRender::buildBuffers()
     const std::vector<uint32_t>& indices = mScene->getIndices();
     const std::vector<Scene::Light>& lightDescs = mScene->getLights();
 
-    assert(sizeof(Scene::Light) == sizeof(UniformLight));
+    static_assert(sizeof(Scene::Light) == sizeof(UniformLight));
     const size_t lightBufferSize = sizeof(Scene::Light) * lightDescs.size();
     const size_t vertexDataSize = sizeof(oka::Scene::Vertex) * vertices.size();
     const size_t indexDataSize = sizeof(uint32_t) * indices.size();
@@ -250,20 +246,20 @@ void MetalRender::buildBuffers()
     MTL::Buffer* pIndexBuffer = mDevice->newBuffer(indexDataSize, MTL::ResourceStorageModeManaged);
 
     mLightBuffer = pLightBuffer;
-    _pVertexDataBuffer = pVertexBuffer;
-    _pIndexBuffer = pIndexBuffer;
+    mVertexBuffer = pVertexBuffer;
+    mIndexBuffer = pIndexBuffer;
 
     memcpy(mLightBuffer->contents(), lightDescs.data(), lightBufferSize);
-    memcpy(_pVertexDataBuffer->contents(), vertices.data(), vertexDataSize);
-    memcpy(_pIndexBuffer->contents(), indices.data(), indexDataSize);
+    memcpy(mVertexBuffer->contents(), vertices.data(), vertexDataSize);
+    memcpy(mIndexBuffer->contents(), indices.data(), indexDataSize);
 
     mLightBuffer->didModifyRange(NS::Range::Make(0, mLightBuffer->length()));
-    _pVertexDataBuffer->didModifyRange(NS::Range::Make(0, _pVertexDataBuffer->length()));
-    _pIndexBuffer->didModifyRange(NS::Range::Make(0, _pIndexBuffer->length()));
+    mVertexBuffer->didModifyRange(NS::Range::Make(0, mVertexBuffer->length()));
+    mIndexBuffer->didModifyRange(NS::Range::Make(0, mIndexBuffer->length()));
 
-    for (size_t i = 0; i < kMaxFramesInFlight; ++i)
+    for (MTL::Buffer*& uniformBuffer : mUniformBuffers)
     {
-        _pUniformBuffer[i] = mDevice->newBuffer(sizeof(Uniforms), MTL::ResourceStorageModeManaged);
+        uniformBuffer = mDevice->newBuffer(sizeof(Uniforms), MTL::ResourceStorageModeManaged);
     }
 }
 
@@ -272,7 +268,7 @@ MTL::AccelerationStructure* MetalRender::createAccelerationStructure(MTL::Accele
     NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
     // Query for the sizes needed to store and build the acceleration structure.
-    MTL::AccelerationStructureSizes accelSizes = mDevice->accelerationStructureSizes(descriptor);
+    const MTL::AccelerationStructureSizes accelSizes = mDevice->accelerationStructureSizes(descriptor);
     // Allocate an acceleration structure large enough for this descriptor. This doesn't actually
     // build the acceleration structure, it just allocates memory.
     MTL::AccelerationStructure* accelerationStructure =
@@ -402,10 +398,10 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
     MTL::AccelerationStructureTriangleGeometryDescriptor* geomDescriptor =
         MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
 
-    geomDescriptor->setVertexBuffer(_pVertexDataBuffer);
+    geomDescriptor->setVertexBuffer(mVertexBuffer);
     geomDescriptor->setVertexBufferOffset(mesh.mVbOffset * sizeof(oka::Scene::Vertex));
     geomDescriptor->setVertexStride(sizeof(oka::Scene::Vertex));
-    geomDescriptor->setIndexBuffer(_pIndexBuffer);
+    geomDescriptor->setIndexBuffer(mIndexBuffer);
     geomDescriptor->setIndexBufferOffset(mesh.mIndex * sizeof(uint32_t));
     geomDescriptor->setIndexType(MTL::IndexTypeUInt32);
     geomDescriptor->setTriangleCount(triangleCount);
@@ -441,17 +437,17 @@ void MetalRender::createAccelerationStructures()
         return;
     }
 
-    for (int i = 0; i < meshes.size(); ++i)
+    for (const oka::Mesh& currMesh : meshes)
     {
-        MetalRender::Mesh* m = createMesh(meshes[i]);
-        mMetalMeshes.push_back(m);
-        _primitiveAccelerationStructures.push_back(m->mGas);
+        MetalRender::Mesh* metalMesh = createMesh(currMesh);
+        mMetalMeshes.push_back(metalMesh);
+        mPrimitiveAccelerationStructures.push_back(metalMesh->mGas);
     }
 
-    _instanceBuffer = mDevice->newBuffer(
+    mInstanceBuffer = mDevice->newBuffer(
         sizeof(MTL::AccelerationStructureUserIDInstanceDescriptor) * instances.size(), MTL::ResourceStorageModeManaged);
     MTL::AccelerationStructureUserIDInstanceDescriptor* instanceDescriptors =
-        (MTL::AccelerationStructureUserIDInstanceDescriptor*)_instanceBuffer->contents();
+        (MTL::AccelerationStructureUserIDInstanceDescriptor*)mInstanceBuffer->contents();
     for (int i = 0; i < instances.size(); ++i)
     {
         const oka::Instance& curr = instances[i];
@@ -470,20 +466,17 @@ void MetalRender::createAccelerationStructures()
             }
         }
     }
-
-    simd_float4x4 identity = makeIdentity();
-
-    _instanceBuffer->didModifyRange(NS::Range::Make(0, _instanceBuffer->length()));
+    mInstanceBuffer->didModifyRange(NS::Range::Make(0, mInstanceBuffer->length()));
 
     const NS::Array* instancedAccelerationStructures = NS::Array::array(
-        (const NS::Object* const*)_primitiveAccelerationStructures.data(), _primitiveAccelerationStructures.size());
+        (const NS::Object* const*)mPrimitiveAccelerationStructures.data(), mPrimitiveAccelerationStructures.size());
     MTL::InstanceAccelerationStructureDescriptor* accelDescriptor =
         MTL::InstanceAccelerationStructureDescriptor::descriptor();
     accelDescriptor->setInstancedAccelerationStructures(instancedAccelerationStructures);
     accelDescriptor->setInstanceCount(instances.size());
-    accelDescriptor->setInstanceDescriptorBuffer(_instanceBuffer);
+    accelDescriptor->setInstanceDescriptorBuffer(mInstanceBuffer);
     accelDescriptor->setInstanceDescriptorType(MTL::AccelerationStructureInstanceDescriptorTypeUserID);
 
-    _instanceAccelerationStructure = createAccelerationStructure(accelDescriptor);
+    mInstanceAccelerationStructure = createAccelerationStructure(accelDescriptor);
     pPool->release();
 }

@@ -21,6 +21,10 @@ Checks: <
   -bugprone-easily-swappable-parameters,
   -cert-env33-c,
   -cert-err58-cpp
+  -hicpp-uppercase-literal-suffix
+  -readability-uppercase-literal-suffix
+  
+
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: ''

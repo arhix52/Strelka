@@ -113,8 +113,6 @@ HdAovDescriptor HdStrelkaRenderDelegate::GetDefaultAovDescriptor(const TfToken& 
     return aovDescriptor;
 }
 
-const TfTokenVector SUPPORTED_RPRIM_TYPES = { HdPrimTypeTokens->mesh, HdPrimTypeTokens->basisCurves };
-
 const TfTokenVector& HdStrelkaRenderDelegate::GetSupportedRprimTypes() const
 {
     return SUPPORTED_RPRIM_TYPES;
@@ -139,43 +137,34 @@ void HdStrelkaRenderDelegate::DestroyRprim(HdRprim* rprim)
     delete rprim;
 }
 
-const TfTokenVector SUPPORTED_SPRIM_TYPES = {
-    HdPrimTypeTokens->camera,    HdPrimTypeTokens->material,  HdPrimTypeTokens->light,
-    HdPrimTypeTokens->rectLight, HdPrimTypeTokens->diskLight, HdPrimTypeTokens->sphereLight,
-};
-
 const TfTokenVector& HdStrelkaRenderDelegate::GetSupportedSprimTypes() const
 {
+
     return SUPPORTED_SPRIM_TYPES;
 }
 
 HdSprim* HdStrelkaRenderDelegate::CreateSprim(const TfToken& typeId, const SdfPath& sprimId)
 {
     TF_STATUS("CreateSprim Type: %s", typeId.GetText());
+    HdSprim* res = nullptr;
     if (typeId == HdPrimTypeTokens->camera)
     {
-        return new HdStrelkaCamera(sprimId, mScene);
+        res = new HdStrelkaCamera(sprimId, mScene);
     }
     else if (typeId == HdPrimTypeTokens->material)
     {
-        return new HdStrelkaMaterial(sprimId, m_translator);
+        res = new HdStrelkaMaterial(sprimId, m_translator);
     }
-    else if (typeId == HdPrimTypeTokens->rectLight)
+    else if (typeId == HdPrimTypeTokens->rectLight || typeId == HdPrimTypeTokens->diskLight ||
+             typeId == HdPrimTypeTokens->sphereLight)
     {
-        return new HdStrelkaLight(sprimId, typeId);
+        res = new HdStrelkaLight(sprimId, typeId);
     }
-    else if (typeId == HdPrimTypeTokens->diskLight)
+    else
     {
-        return new HdStrelkaLight(sprimId, typeId);
+        TF_CODING_ERROR("Unknown Sprim Type %s", typeId.GetText());
     }
-    else if (typeId == HdPrimTypeTokens->sphereLight)
-    {
-        return new HdStrelkaLight(sprimId, typeId);
-    }
-
-    TF_CODING_ERROR("Unknown Sprim Type %s", typeId.GetText());
-
-    return nullptr;
+    return res;
 }
 
 HdSprim* HdStrelkaRenderDelegate::CreateFallbackSprim(const TfToken& typeId)
@@ -189,8 +178,6 @@ void HdStrelkaRenderDelegate::DestroySprim(HdSprim* sprim)
 {
     delete sprim;
 }
-
-const TfTokenVector SUPPORTED_BPRIM_TYPES = { HdPrimTypeTokens->renderBuffer };
 
 const TfTokenVector& HdStrelkaRenderDelegate::GetSupportedBprimTypes() const
 {

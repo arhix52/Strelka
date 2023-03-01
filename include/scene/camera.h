@@ -68,12 +68,12 @@ public:
         bool back = false;
     } keys;
 
-    glm::float3 getFront();
-    glm::float3 getUp();
-    glm::float3 getRight();
-    bool moving();
-    float getNearClip();
-    float getFarClip();
+    glm::float3 getFront() const;
+    glm::float3 getUp() const;
+    glm::float3 getRight() const;
+    bool moving() const;
+    float getNearClip() const;
+    float getFarClip() const;
     void setFov(float fov);
     void setPerspective(float fov, float aspect, float znear, float zfar);
     glm::float4x4& getPerspective();
