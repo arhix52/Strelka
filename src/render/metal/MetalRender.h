@@ -54,14 +54,11 @@ private:
 
     MTL::Buffer* mMaterialBuffer;
 
-    MTL::Texture* mFramebufferTexture;
-
     uint32_t mFrameIndex;
     dispatch_semaphore_t mSemaphoreDispatch;
 
     void buildComputePipeline();
     void buildBuffers();
-    void buildTexture(uint32_t width, uint32_t heigth);
 
     void createMetalMaterials();
 
