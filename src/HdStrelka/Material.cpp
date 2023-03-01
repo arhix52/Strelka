@@ -30,7 +30,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
 {
     TF_UNUSED(renderParam);
 
-    bool pullMaterial = (*dirtyBits & DirtyBits::DirtyParams);
+    const bool pullMaterial = (*dirtyBits & DirtyBits::DirtyParams);
 
     *dirtyBits = DirtyBits::Clean;
 
@@ -62,11 +62,11 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
             previewSurfaceNode = &node;
             isUsdPreviewSurface = true;
         }
-        for (std::pair<TfToken, VtValue> params : node.parameters)
+        for (const std::pair<TfToken, VtValue>& params : node.parameters)
         {
             const std::string name = params.first.GetString();
 
-            TfType type = params.second.GetType();
+            const TfType type = params.second.GetType();
             printf("Param name: %s\t%s\n", name.c_str(), params.second.GetTypeName().c_str());
 
             if (type.IsA<GfVec3f>())
@@ -124,7 +124,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
                 oka::MaterialManager::Param param;
                 param.name = params.first;
                 param.type = oka::MaterialManager::Param::Type::eTexture;
-                SdfAssetPath val = params.second.Get<SdfAssetPath>();
+                const SdfAssetPath val = params.second.Get<SdfAssetPath>();
                 printf("path: %s\n", val.GetAssetPath().c_str());
                 std::string texPath = val.GetAssetPath();
                 if (!texPath.empty())
@@ -152,7 +152,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
     }
 
     bool isVolume = false;
-    HdMaterialNetwork2 network = HdConvertToHdMaterialNetwork2(networkMap, &isVolume);
+    const HdMaterialNetwork2 network = HdConvertToHdMaterialNetwork2(networkMap, &isVolume);
     if (isVolume)
     {
         TF_WARN("Volume %s unsupported", id.GetText());
@@ -166,7 +166,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
     else
     {
         // MDL
-        bool res = m_translator.ParseMdlNetwork(id, network, mMdlFileUri, mMdlSubIdentifier);
+        const bool res = m_translator.ParseMdlNetwork(id, network, mMdlFileUri, mMdlSubIdentifier);
         if (!res)
         {
             TF_RUNTIME_ERROR("Failed to translate material!");

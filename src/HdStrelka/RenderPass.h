@@ -24,7 +24,6 @@ public:
 
     ~HdStrelkaRenderPass() override;
 
-public:
     bool IsConverged() const override;
 
 protected:
@@ -39,7 +38,6 @@ private:
     void _BakeMeshes(HdRenderIndex* renderIndex,
                      GfMatrix4d rootTransform);
 
-private:
     const HdRenderSettingsMap& m_settings;
     bool m_isConverged;
     uint32_t m_lastSceneStateVersion;

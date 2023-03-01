@@ -18,7 +18,6 @@ public:
 
     ~HdStrelkaMesh() override;
 
-public:
     void Sync(HdSceneDelegate* delegate,
               HdRenderParam* renderParam,
               HdDirtyBits* dirtyBits,
@@ -50,7 +49,7 @@ private:
 
     void _UpdateGeometry(HdSceneDelegate* sceneDelegate);
 
-    bool _FindPrimvar(HdSceneDelegate* sceneDelegate, TfToken primvarName, HdInterpolation& interpolation) const;
+    bool _FindPrimvar(HdSceneDelegate* sceneDelegate, const TfToken& primvarName, HdInterpolation& interpolation) const;
 
     void _PullPrimvars(HdSceneDelegate* sceneDelegate,
                        VtVec3fArray& points,
@@ -61,16 +60,18 @@ private:
                        GfVec3f& color,
                        bool& hasColor) const;
 
-private:
-    GfMatrix4d m_prototypeTransform;
-    std::vector<GfVec3f> m_points;
-    std::vector<GfVec3f> m_normals;
-    std::vector<GfVec2f> m_uvs;
-    std::vector<GfVec3i> m_faces;
-    GfVec3f m_color;
-    bool m_hasColor;
+    const TfTokenVector BUILTIN_PRIMVAR_NAMES = { HdTokens->points, HdTokens->normals };
+
+    GfMatrix4d mPrototypeTransform;
+    std::vector<GfVec3f> mPoints;
+    std::vector<GfVec3f> mNormals;
+    std::vector<GfVec2f> mUvs;
+    std::vector<GfVec3i> mFaces;
+    GfVec3f mColor;
+    bool mHasColor;
     oka::Scene* mScene;
     std::string mName;
+    uint32_t mStrelkaMeshId;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE
