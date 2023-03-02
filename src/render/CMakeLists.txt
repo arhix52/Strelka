@@ -91,6 +91,7 @@ if(APPLE)
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework QuartzCore")
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework Metal")
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework MetalKit")
+  target_link_libraries(${RENDERLIB_NAME} PUBLIC logger)
 
   add_custom_command(
     TARGET ${RENDERLIB_NAME}
