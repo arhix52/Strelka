@@ -5,6 +5,8 @@
 #include <pxr/imaging/hd/smoothNormals.h>
 #include <pxr/imaging/hd/vertexAdjacency.h>
 
+#include <log.h>
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 // clang-format off
@@ -46,7 +48,7 @@ void HdStrelkaMesh::Sync(HdSceneDelegate* sceneDelegate,
     const SdfPath& id = GetId();
     const char* meshName = id.GetText();
     mName = meshName;
-    printf("Mesh: %s\n", meshName);
+    STRELKA_INFO("Mesh: {}", meshName);
 
     if (*dirtyBits & HdChangeTracker::DirtyMaterialId)
     {

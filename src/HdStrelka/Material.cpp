@@ -4,6 +4,8 @@
 #include <pxr/usd/sdr/registry.h>
 #include <pxr/usdImaging/usdImaging/tokens.h>
 
+#include <log.h>
+
 PXR_NAMESPACE_OPEN_SCOPE
 // clang-format off
 TF_DEFINE_PRIVATE_TOKENS(_tokens,
@@ -41,7 +43,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
 
     const SdfPath& id = GetId();
     const std::string& name = id.GetString();
-    printf("Hydra Material: %s\n", name.c_str());
+    STRELKA_INFO("Hydra Material: {}", name.c_str());
     const VtValue& resource = sceneDelegate->GetMaterialResource(id);
 
     if (!resource.IsHolding<HdMaterialNetworkMap>())
@@ -67,7 +69,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
             const std::string name = params.first.GetString();
 
             TfType type = params.second.GetType();
-            printf("Param name: %s\t%s\n", name.c_str(), params.second.GetTypeName().c_str());
+            STRELKA_DEBUG("Param name: {0}\t{1}", name.c_str(), params.second.GetTypeName().c_str());
 
             if (type.IsA<GfVec3f>())
             {
@@ -125,7 +127,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
                 param.name = params.first;
                 param.type = oka::MaterialManager::Param::Type::eTexture;
                 SdfAssetPath val = params.second.Get<SdfAssetPath>();
-                printf("path: %s\n", val.GetAssetPath().c_str());
+                STRELKA_DEBUG("path: {}", val.GetAssetPath().c_str());
                 std::string texPath = val.GetAssetPath();
                 if (!texPath.empty())
                 {
@@ -146,7 +148,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
             }
             else
             {
-                printf("Unknown parameter type!\n");
+                STRELKA_ERROR("Unknown parameter type!\n");
             }
         }
     }
@@ -155,7 +157,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
     HdMaterialNetwork2 network = HdConvertToHdMaterialNetwork2(networkMap, &isVolume);
     if (isVolume)
     {
-        TF_WARN("Volume %s unsupported", id.GetText());
+        STRELKA_ERROR("Volume %s unsupported", id.GetText());
         return;
     }
 
@@ -169,7 +171,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
         bool res = m_translator.ParseMdlNetwork(id, network, mMdlFileUri, mMdlSubIdentifier);
         if (!res)
         {
-            TF_RUNTIME_ERROR("Failed to translate material!");
+            STRELKA_ERROR("Failed to translate material!");
         }
         mIsMdl = true;
     }

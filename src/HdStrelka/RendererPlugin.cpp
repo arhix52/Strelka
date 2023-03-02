@@ -5,6 +5,8 @@
 #include <pxr/base/plug/plugin.h>
 #include "pxr/base/plug/thisPlugin.h"
 
+#include <log.h>
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 TF_REGISTRY_FUNCTION(TfType)
@@ -17,7 +19,9 @@ HdStrelkaRendererPlugin::HdStrelkaRendererPlugin()
     PlugPluginPtr plugin = PLUG_THIS_PLUGIN;
 
     const std::string& resourcePath = plugin->GetResourcePath();
-    printf("Resource path %s\n", resourcePath.c_str());
+
+    STRELKA_INFO("Resource path: {}", resourcePath.c_str());
+
     std::string shaderPath = resourcePath + "/shaders";
     std::string mtlxmdlPath = resourcePath + "/mtlxmdl";
     std::string mtlxlibPath = resourcePath + "/mtlxlib";
@@ -26,7 +30,7 @@ HdStrelkaRendererPlugin::HdStrelkaRendererPlugin()
     const char* envUSDPath = std::getenv("USD_DIR");
     if (!envUSDPath)
     {
-        printf("Please, set USD_DIR variable\n");
+        STRELKA_FATAL("Please, set USD_DIR variable\n");
         assert(0);
         m_isSupported = false;
     }
