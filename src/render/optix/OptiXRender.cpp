@@ -72,11 +72,7 @@ static inline void optixCheckLog(OptixResult res,
 {
     if (res != OPTIX_SUCCESS)
     {
-        std::stringstream ss;
-        ss << "Optix call '" << call << "' failed: " << file << ':' << line << ")\nLog:\n"
-           << log << (sizeof_log_returned > sizeof_log ? "<TRUNCATED>" : "") << '\n';
-        std::cerr << ss.str() << std::endl;
-        // throw Exception(res, ss.str().c_str());
+        STRELKA_FATAL("OptiX call {0} failed: {1}:{2} : {3}", call, file, line, log);
         assert(0);
     }
 }
@@ -85,12 +81,8 @@ inline void cudaCheck(cudaError_t error, const char* call, const char* file, uns
 {
     if (error != cudaSuccess)
     {
-        std::stringstream ss;
-        ss << "CUDA call (" << call << " ) failed with error: '" << cudaGetErrorString(error) << "' (" << file << ":"
-           << line << ")\n";
-        std::cerr << ss.str() << std::endl;
+        STRELKA_FATAL("CUDA call ({0}) failed with error: {1} {2}:{3}", call, cudaGetErrorString(error), file, line);
         assert(0);
-        // throw Exception(ss.str().c_str());
     }
 }
 
@@ -100,11 +92,7 @@ inline void cudaSyncCheck(const char* file, unsigned int line)
     cudaError_t error = cudaGetLastError();
     if (error != cudaSuccess)
     {
-        std::stringstream ss;
-        ss << "CUDA error on synchronize with error '" << cudaGetErrorString(error) << "' (" << file << ":" << line
-           << ")\n";
-        std::cerr << ss.str() << std::endl;
-        // throw Exception(ss.str().c_str());
+        STRELKA_FATAL("CUDA error on synchronize with error {0} , {1}:{2}", cudaGetErrorString(error), file, line);
         assert(0);
     }
 }
