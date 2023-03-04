@@ -18,6 +18,7 @@
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
+#include <log.h>
 
 #include <simd/simd.h>
 
@@ -271,7 +272,7 @@ void MetalRender::buildComputePipeline()
         mDevice->newLibrary(NS::String::string("./metal/shaders/pathtrace.metallib", NS::UTF8StringEncoding), &pError);
     if (!pComputeLibrary)
     {
-        __builtin_printf("%s", pError->localizedDescription()->utf8String());
+        STRELKA_FATAL("{}", pError->localizedDescription()->utf8String());
         assert(false);
     }
     MTL::Function* pPathTraceFn =
@@ -279,7 +280,7 @@ void MetalRender::buildComputePipeline()
     mRayTracingPSO = mDevice->newComputePipelineState(pPathTraceFn, &pError);
     if (!mRayTracingPSO)
     {
-        __builtin_printf("%s", pError->localizedDescription()->utf8String());
+        STRELKA_FATAL("{}", pError->localizedDescription()->utf8String());
         assert(false);
     }
 

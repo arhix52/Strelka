@@ -9,8 +9,6 @@
 #include <pxr/imaging/hd/smoothNormals.h>
 #include <pxr/imaging/hd/vertexAdjacency.h>
 
-#include <iostream>
-
 PXR_NAMESPACE_OPEN_SCOPE
 
 //  Lookup table from:

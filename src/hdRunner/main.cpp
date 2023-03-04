@@ -31,6 +31,9 @@
 
 #include <display/Display.h>
 
+#include <log.h>
+#include <logmanager.h>
+
 #include <algorithm>
 #include <cxxopts.hpp>
 #include <iostream>
@@ -415,7 +418,7 @@ bool saveScreenshot(std::string& outputFilePath, unsigned char* mappedMem, uint3
 
     if (!image)
     {
-        fprintf(stderr, "Unable to open output file for writing!\n");
+        STRELKA_ERROR("Unable to open output file for writing!");
         return false;
     }
 
@@ -440,6 +443,7 @@ bool saveScreenshot(std::string& outputFilePath, unsigned char* mappedMem, uint3
 
 int main(int argc, const char* argv[])
 {
+    oka::Logmanager loggerManager;
     // config. options
     cxxopts::Options options("Strelka -s <USD Scene path>", "commands");
 
@@ -463,7 +467,7 @@ int main(int argc, const char* argv[])
     std::string usdFile(result["s"].as<std::string>());
     if (!std::filesystem::exists(usdFile) && !usdFile.empty())
     {
-        std::cerr << "usd file doesn't exist";
+        STRELKA_FATAL("usd file doesn't exist");
         exit(0);
     }
 
@@ -476,13 +480,13 @@ int main(int argc, const char* argv[])
 
     if (!pluginHandle)
     {
-        fprintf(stderr, "HdStrelka plugin not found!\n");
+        STRELKA_FATAL("HdStrelka plugin not found!");
         return EXIT_FAILURE;
     }
 
     if (!pluginHandle->IsSupported())
     {
-        fprintf(stderr, "HdStrelka plugin is not supported!\n");
+        STRELKA_FATAL("HdStrelka plugin is not supported!");
         return EXIT_FAILURE;
     }
 
@@ -547,19 +551,18 @@ int main(int argc, const char* argv[])
 
     if (!stage)
     {
-        fprintf(stderr, "Unable to open USD stage file.\n");
+        STRELKA_FATAL("Unable to open USD stage file.");
         return EXIT_FAILURE;
     }
 
-    printf("USD scene loaded (%.3fs)\n", timerLoad.GetSeconds());
-    fflush(stdout);
+    STRELKA_INFO("USD scene loaded {}", timerLoad.GetSeconds());
 
     // Print the up-axis
     TfToken upAxis = UsdGeomGetStageUpAxis(stage);
-    std::cout << "Stage up-axis: " << upAxis << std::endl;
+    STRELKA_INFO("Stage up-axis: {}", (std::string) upAxis);
 
     // Print the stage's linear units, or "meters per unit"
-    std::cout << "Meters per unit: " << UsdGeomGetStageMetersPerUnit(stage) << std::endl;
+    STRELKA_INFO("Meters per unit: {}", UsdGeomGetStageMetersPerUnit(stage));
 
     HdRenderIndex* renderIndex = HdRenderIndex::New(renderDelegate, HdDriverVector());
     TF_VERIFY(renderIndex);
@@ -778,8 +781,7 @@ int main(int argc, const char* argv[])
 
     display->destroy();
 
-    printf("Rendering finished (%.3fs)\n", timerRender.GetSeconds());
-    fflush(stdout);
+    STRELKA_INFO("Rendering finished {}", timerRender.GetSeconds());
 
     for (int i = 0; i < 3; ++i)
     {
