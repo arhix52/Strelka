@@ -42,22 +42,6 @@ void MetalRender::init()
     mSemaphoreDispatch = dispatch_semaphore_create(oka::kMaxFramesInFlight);
 }
 
-void MetalRender::buildTexture(uint32_t width, uint32_t heigth)
-{
-    MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
-    pTextureDesc->setWidth(width);
-    pTextureDesc->setHeight(heigth);
-    pTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
-    pTextureDesc->setTextureType(MTL::TextureType2D);
-    pTextureDesc->setStorageMode(MTL::StorageModeManaged);
-    pTextureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
-
-    MTL::Texture* pTexture = mDevice->newTexture(pTextureDesc);
-    mFramebufferTexture = pTexture;
-
-    pTextureDesc->release();
-}
-
 MTL::Texture* oka::MetalRender::loadTextureFromFile(const std::string& fileName)
 {
     int texWidth, texHeight, texChannels;
