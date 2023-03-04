@@ -9,6 +9,8 @@ endif()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 if(WIN32)
   add_compile_definitions(NOMINMAX)
   add_compile_definitions(_USE_MATH_DEFINES)
@@ -23,6 +25,7 @@ endif()
 set(ROOT_HOME ${CMAKE_CURRENT_LIST_DIR})
 set(OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
+add_subdirectory(src/log)
 add_subdirectory(src/Settings)
 add_subdirectory(src/render)
 add_subdirectory(src/hdStrelka)

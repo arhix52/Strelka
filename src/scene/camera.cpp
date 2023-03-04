@@ -10,7 +10,7 @@ namespace oka
 void Camera::updateViewMatrix()
 {
     const glm::float4x4 rotM{ mOrientation };
-    glm::float4x4 transM = glm::translate(glm::float4x4(1.0f), -position);
+    const glm::float4x4 transM = glm::translate(glm::float4x4(1.0f), -position);
     if (type == CameraType::firstperson)
     {
         matrices.view = rotM * transM;
@@ -22,32 +22,32 @@ void Camera::updateViewMatrix()
     updated = true;
 }
 
-glm::float3 Camera::getFront()
+glm::float3 Camera::getFront() const
 {
     return glm::conjugate(mOrientation) * glm::float3(0.0f, 0.0f, -1.0f);
 }
 
-glm::float3 Camera::getUp()
+glm::float3 Camera::getUp() const 
 {
     return glm::conjugate(mOrientation) * glm::float3(0.0f, 1.0f, 0.0f);
 }
 
-glm::float3 Camera::getRight()
+glm::float3 Camera::getRight() const
 {
     return glm::conjugate(mOrientation) * glm::float3(1.0f, 0.0f, 0.0f);
 }
 
-bool Camera::moving()
+bool Camera::moving() const
 {
     return keys.left || keys.right || keys.up || keys.down || keys.forward || keys.back || mouseButtons.right || mouseButtons.left || mouseButtons.middle;
 }
 
-float Camera::getNearClip()
+float Camera::getNearClip() const
 {
     return znear;
 }
 
-float Camera::getFarClip()
+float Camera::getFarClip() const
 {
     return zfar;
 }
@@ -60,12 +60,12 @@ void Camera::setFov(float fov)
 // original implementation: https://vincent-p.github.io/notes/20201216234910-the_projection_matrix_in_vulkan/
 glm::float4x4 perspective(float fov, float aspect_ratio, float n, float f, glm::float4x4* inverse)
 {
-    float focal_length = 1.0f / std::tan(glm::radians(fov) / 2.0f);
+    const float focal_length = 1.0f / std::tan(glm::radians(fov) / 2.0f);
 
-    float x = focal_length / aspect_ratio;
-    float y = focal_length;
-    float A = n / (f - n);
-    float B = f * A;
+    const float x = focal_length / aspect_ratio;
+    const float y = focal_length;
+    const float A = n / (f - n);
+    const float B = f * A;
 
     //glm::float4x4 projection = glm::perspective(fov, aspect_ratio, n, f);
     //if (inverse)
@@ -164,8 +164,8 @@ void Camera::setRotation(glm::quat rotation)
 
 void Camera::rotate(float rightAngle, float upAngle)
 {
-    glm::quat a = glm::angleAxis(glm::radians(upAngle) * rotationSpeed, glm::float3(1.0f, 0.0f, 0.0f));
-    glm::quat b = glm::angleAxis(glm::radians(rightAngle) * rotationSpeed, glm::float3(0.0f, 1.0f, 0.0f));
+    const glm::quat a = glm::angleAxis(glm::radians(upAngle) * rotationSpeed, glm::float3(1.0f, 0.0f, 0.0f));
+    const glm::quat b = glm::angleAxis(glm::radians(rightAngle) * rotationSpeed, glm::float3(0.0f, 1.0f, 0.0f));
     mOrientation = glm::normalize(a * mOrientation * b);
     updateViewMatrix();
 }

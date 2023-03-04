@@ -4,6 +4,8 @@
 #include <pxr/usd/sdr/registry.h>
 #include <pxr/usdImaging/usdImaging/tokens.h>
 
+#include <log.h>
+
 PXR_NAMESPACE_OPEN_SCOPE
 // clang-format off
 TF_DEFINE_PRIVATE_TOKENS(_tokens,
@@ -30,7 +32,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
 {
     TF_UNUSED(renderParam);
 
-    bool pullMaterial = (*dirtyBits & DirtyBits::DirtyParams);
+    const bool pullMaterial = (*dirtyBits & DirtyBits::DirtyParams);
 
     *dirtyBits = DirtyBits::Clean;
 
@@ -41,7 +43,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
 
     const SdfPath& id = GetId();
     const std::string& name = id.GetString();
-    printf("Hydra Material: %s\n", name.c_str());
+    STRELKA_INFO("Hydra Material: {}", name.c_str());
     const VtValue& resource = sceneDelegate->GetMaterialResource(id);
 
     if (!resource.IsHolding<HdMaterialNetworkMap>())
@@ -62,12 +64,12 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
             previewSurfaceNode = &node;
             isUsdPreviewSurface = true;
         }
-        for (std::pair<TfToken, VtValue> params : node.parameters)
+        for (const std::pair<TfToken, VtValue>& params : node.parameters)
         {
             const std::string name = params.first.GetString();
 
-            TfType type = params.second.GetType();
-            printf("Param name: %s\t%s\n", name.c_str(), params.second.GetTypeName().c_str());
+            const TfType type = params.second.GetType();
+            STRELKA_DEBUG("Param name: {0}\t{1}", name.c_str(), params.second.GetTypeName().c_str());
 
             if (type.IsA<GfVec3f>())
             {
@@ -124,8 +126,8 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
                 oka::MaterialManager::Param param;
                 param.name = params.first;
                 param.type = oka::MaterialManager::Param::Type::eTexture;
-                SdfAssetPath val = params.second.Get<SdfAssetPath>();
-                printf("path: %s\n", val.GetAssetPath().c_str());
+                const SdfAssetPath val = params.second.Get<SdfAssetPath>();
+                STRELKA_DEBUG("path: {}", val.GetAssetPath().c_str());
                 std::string texPath = val.GetAssetPath();
                 if (!texPath.empty())
                 {
@@ -146,16 +148,16 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
             }
             else
             {
-                printf("Unknown parameter type!\n");
+                STRELKA_ERROR("Unknown parameter type!\n");
             }
         }
     }
 
     bool isVolume = false;
-    HdMaterialNetwork2 network = HdConvertToHdMaterialNetwork2(networkMap, &isVolume);
+    const HdMaterialNetwork2 network = HdConvertToHdMaterialNetwork2(networkMap, &isVolume);
     if (isVolume)
     {
-        TF_WARN("Volume %s unsupported", id.GetText());
+        STRELKA_ERROR("Volume %s unsupported", id.GetText());
         return;
     }
 
@@ -166,10 +168,10 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
     else
     {
         // MDL
-        bool res = m_translator.ParseMdlNetwork(id, network, mMdlFileUri, mMdlSubIdentifier);
+        const bool res = m_translator.ParseMdlNetwork(id, network, mMdlFileUri, mMdlSubIdentifier);
         if (!res)
         {
-            TF_RUNTIME_ERROR("Failed to translate material!");
+            STRELKA_ERROR("Failed to translate material!");
         }
         mIsMdl = true;
     }

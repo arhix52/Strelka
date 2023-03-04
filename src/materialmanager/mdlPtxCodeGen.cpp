@@ -6,6 +6,7 @@
 
 #include <cassert>
 #include <sstream>
+#include <log.h>
 
 namespace oka
 {
@@ -168,7 +169,7 @@ bool MdlPtxCodeGen::setOptionBinary(const char* name, const char* data, size_t s
     // limit functions for which PTX code is generated to the entry functions
     if (mBackend->set_option("visible_functions", "__closesthit__radiance") != 0)
     {
-        printf("ERROR: Setting PTX option visible_functions failed\n");
+        STRELKA_ERROR("Setting PTX option visible_functions failed");
         return false;
     }
     return true;

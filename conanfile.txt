@@ -1,0 +1,6 @@
+[requires]
+spdlog/[>=1.4.1]
+
+[generators]
+CMakeDeps
+CMakeToolchain

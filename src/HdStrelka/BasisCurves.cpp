@@ -1,4 +1,5 @@
 #include "BasisCurves.h"
+#include <log.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 void HdStrelkaBasisCurves::Sync(HdSceneDelegate* sceneDelegate,
@@ -13,7 +14,7 @@ void HdStrelkaBasisCurves::Sync(HdSceneDelegate* sceneDelegate,
 
     const SdfPath& id = GetId();
     mName = id.GetText();
-    printf("Curve Name: %s\n", mName.c_str());
+    STRELKA_INFO("Curve Name: {}", mName.c_str());
 
     if (*dirtyBits & HdChangeTracker::DirtyMaterialId)
     {
@@ -88,12 +89,12 @@ void HdStrelkaBasisCurves::_PullPrimvars(HdSceneDelegate* sceneDelegate,
 
     if (!foundPoints)
     {
-        TF_RUNTIME_ERROR("Points primvar not found!");
+        STRELKA_ERROR("Points primvar not found!");
         return;
     }
     else if (pointInterpolation != HdInterpolation::HdInterpolationVertex)
     {
-        TF_RUNTIME_ERROR("Points primvar is not vertex-interpolated!");
+        STRELKA_ERROR("Points primvar is not vertex-interpolated!");
         return;
     }
 

@@ -23,7 +23,7 @@ struct BufferDesc
 class Buffer
 {
 public:
-    virtual ~Buffer(){};
+    virtual ~Buffer() = default;
 
     virtual void resize(uint32_t width, uint32_t height) = 0;
 

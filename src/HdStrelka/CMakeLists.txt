@@ -67,8 +67,8 @@ if(MSVC_VERSION GREATER_EQUAL 1920)
 endif()
 set(Boost_USE_STATIC_LIBS OFF)
 set(BUILD_SHARED_LIBS ON)
-# find_package(Boost COMPONENTS python REQUIRED)
 
+target_include_directories(${HD_PLUGIN_NAME} PUBLIC ${ROOT_HOME}/include/log)
 target_include_directories(${HD_PLUGIN_NAME}
                            PUBLIC ${ROOT_HOME}/include/hdStrelka)
 target_include_directories(${HD_PLUGIN_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -97,6 +97,8 @@ if(APPLE)
   target_link_libraries(${HD_PLUGIN_NAME} PUBLIC "-framework Metal")
   target_link_libraries(${HD_PLUGIN_NAME} PUBLIC "-framework MetalKit")
 endif(APPLE)
+
+target_link_libraries(${HD_PLUGIN_NAME} PUBLIC logger)
 
 set(PLUGINFO_PATH "${CMAKE_CURRENT_BINARY_DIR}/plugInfo.json")
 

@@ -30,8 +30,9 @@ target_include_directories(
   ${MATERIALLIB_NAME}
   PUBLIC ${ROOT_HOME}/include/materialmanager
   PRIVATE ${ROOT_HOME}/include/render/)
-target_link_libraries(${MATERIALLIB_NAME} PRIVATE MaterialXCore MaterialXFormat
-                                                  MaterialXGenMdl)
+target_link_libraries(
+  ${MATERIALLIB_NAME} PRIVATE logger MaterialXCore MaterialXFormat
+                              MaterialXGenMdl)
 
 add_custom_command(
   TARGET ${MATERIALLIB_NAME}

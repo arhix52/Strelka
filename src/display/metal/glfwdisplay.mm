@@ -14,6 +14,7 @@
 #import <QuartzCore/QuartzCore.h>
 
 #include <fstream>
+#include <log.h>
 
 using namespace oka;
 
@@ -26,7 +27,7 @@ void glfwdisplay::init(int width, int height, SharedContext* ctx)
 
     if (!glfwInit())
     {
-        fprintf(stderr, "ERROR: unable to init GLFW\n");
+        STRELKA_FATAL("Failed to init GLFW");
         return;
     }
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -34,7 +35,7 @@ void glfwdisplay::init(int width, int height, SharedContext* ctx)
     mWindow = glfwCreateWindow(mWindowWidth, mWindowHeight, "Strelka", nullptr, nullptr);
     if (!mWindow)
     {
-        fprintf(stderr, "ERROR: unable to create GLFW Window\n");
+        STRELKA_FATAL("Failed to create GLFW Window");
         return;     
     }
     glfwSetWindowUserPointer(mWindow, this);
@@ -148,7 +149,7 @@ void glfwdisplay::buildShaders()
         _pDevice->newLibrary(NS::String::string(shaderSrc.c_str(), UTF8StringEncoding), nullptr, &pError);
     if (!pLibrary)
     {
-        __builtin_printf("%s", pError->localizedDescription()->utf8String());
+        STRELKA_FATAL("{}", pError->localizedDescription()->utf8String());
         assert(false);
     }
 
@@ -164,7 +165,7 @@ void glfwdisplay::buildShaders()
     _pPSO = _pDevice->newRenderPipelineState(pDesc, &pError);
     if (!_pPSO)
     {
-        __builtin_printf("%s", pError->localizedDescription()->utf8String());
+        STRELKA_FATAL("{}", pError->localizedDescription()->utf8String());
         assert(false);
     }
 

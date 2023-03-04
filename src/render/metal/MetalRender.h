@@ -11,19 +11,18 @@ class MetalRender : public Render
 {
 public:
     MetalRender(/* args */);
-    ~MetalRender();
+    ~MetalRender() override;
 
     void init() override;
     void render(Buffer* output) override;
     Buffer* createBuffer(const BufferDesc& desc) override;
 
-    virtual void* getNativeDevicePtr() override
+    void* getNativeDevicePtr() override
     {
         return mDevice;
     }
 
 private:
-
     struct Mesh
     {
         MTL::AccelerationStructure* mGas;
@@ -40,33 +39,28 @@ private:
     MTL::CommandQueue* mCommandQueue;
     MTL::Library* mShaderLibrary;
 
-    MTL::RenderPipelineState* _pPSO;
     MTL::ComputePipelineState* mRayTracingPSO;
 
     MTL::Buffer* mAccumulationBuffer;
     MTL::Buffer* mLightBuffer;
-    MTL::Buffer* _pVertexDataBuffer;
-    MTL::Buffer* _pUniformBuffer[kMaxFramesInFlight];
-    MTL::Buffer* _pIndexBuffer;
-    uint32_t _triangleCount;
+    MTL::Buffer* mVertexBuffer;
+    MTL::Buffer* mUniformBuffers[kMaxFramesInFlight];
+    MTL::Buffer* mIndexBuffer;
+    uint32_t mTriangleCount;
     std::vector<MetalRender::Mesh*> mMetalMeshes;
-    std::vector<MTL::AccelerationStructure*> _primitiveAccelerationStructures;
-    MTL::AccelerationStructure* _instanceAccelerationStructure;
-    MTL::Buffer* _instanceBuffer;
+    std::vector<MTL::AccelerationStructure*> mPrimitiveAccelerationStructures;
+    MTL::AccelerationStructure* mInstanceAccelerationStructure;
+    MTL::Buffer* mInstanceBuffer;
 
     MTL::Buffer* mMaterialBuffer;
-
-    MTL::Texture* mFramebufferTexture;
-
-    int _frame;
-    uint32_t width;
-    uint32_t height;
-    dispatch_semaphore_t _semaphore;
+    std::vector<MTL::Texture*> mMaterialTextures;
+    uint32_t mFrameIndex;
+    dispatch_semaphore_t mSemaphoreDispatch;
 
     void buildComputePipeline();
     void buildBuffers();
-    void buildTexture(uint32_t width, uint32_t heigth);
     
+    MTL::Texture* loadTextureFromFile(const std::string& fileName);
     void createMetalMaterials();
 
     MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);
