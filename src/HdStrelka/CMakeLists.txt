@@ -96,8 +96,9 @@ if(APPLE)
   target_link_libraries(${HD_PLUGIN_NAME} PUBLIC "-framework QuartzCore")
   target_link_libraries(${HD_PLUGIN_NAME} PUBLIC "-framework Metal")
   target_link_libraries(${HD_PLUGIN_NAME} PUBLIC "-framework MetalKit")
-  target_link_libraries(${HD_PLUGIN_NAME} PUBLIC logger)
 endif(APPLE)
+
+target_link_libraries(${HD_PLUGIN_NAME} PUBLIC logger)
 
 set(PLUGINFO_PATH "${CMAKE_CURRENT_BINARY_DIR}/plugInfo.json")
 

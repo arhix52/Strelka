@@ -9,6 +9,6 @@ find_package(spdlog REQUIRED)
 
 add_library(${LOGLIB_NAME} STATIC ${LOGLIB_SOURCES})
 target_include_directories(${LOGLIB_NAME} PUBLIC ${ROOT_HOME}/include/log)
-target_include_directories(${LOGLIB_NAME} PUBLIC spdlog)
+# target_include_directories(${LOGLIB_NAME} PUBLIC spdlog::spdlog)
 
 target_link_libraries(${LOGLIB_NAME} PUBLIC spdlog::spdlog)
