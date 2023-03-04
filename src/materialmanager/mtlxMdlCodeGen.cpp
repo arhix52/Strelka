@@ -30,6 +30,7 @@
 #include <MaterialXGenShader/Util.h>
 
 #include <unordered_set>
+#include <log.h>
 
 namespace mx = MaterialX;
 
@@ -126,7 +127,7 @@ bool MtlxMdlCodeGen::translate(const char* mtlxSrc, std::string& mdlSrc, std::st
     }
     catch (const std::exception& ex)
     {
-        fprintf(stderr, "Exception generating MDL code: %s\n", ex.what());
+        STRELKA_ERROR("Exception generating MDL code: {}", ex.what());
     }
 
     if (!shader)

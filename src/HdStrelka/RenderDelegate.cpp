@@ -13,6 +13,8 @@
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/imaging/hd/resourceRegistry.h>
 
+#include <log.h>
+
 #include <memory>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -41,9 +43,9 @@ HdStrelkaRenderDelegate::HdStrelkaRenderDelegate(const HdRenderSettingsMap& sett
     }
 
     oka::RenderType type = oka::RenderType::eOptiX;
-    #ifdef __APPLE__
-        type = oka::RenderType::eMetal;
-    #endif
+#ifdef __APPLE__
+    type = oka::RenderType::eMetal;
+#endif
 
     mRenderer = oka::RenderFactory::createRender(type);
 
@@ -128,7 +130,7 @@ HdRprim* HdStrelkaRenderDelegate::CreateRprim(const TfToken& typeId, const SdfPa
     {
         return new HdStrelkaBasisCurves(rprimId, &mScene);
     }
-    TF_CODING_ERROR("Unknown Rprim Type %s", typeId.GetText());
+    STRELKA_ERROR("Unknown Rprim Type {}", typeId.GetText());
     return nullptr;
 }
 
@@ -145,7 +147,7 @@ const TfTokenVector& HdStrelkaRenderDelegate::GetSupportedSprimTypes() const
 
 HdSprim* HdStrelkaRenderDelegate::CreateSprim(const TfToken& typeId, const SdfPath& sprimId)
 {
-    TF_STATUS("CreateSprim Type: %s", typeId.GetText());
+    STRELKA_DEBUG("CreateSprim Type: {}", typeId.GetText());
     HdSprim* res = nullptr;
     if (typeId == HdPrimTypeTokens->camera)
     {
@@ -162,7 +164,7 @@ HdSprim* HdStrelkaRenderDelegate::CreateSprim(const TfToken& typeId, const SdfPa
     }
     else
     {
-        TF_CODING_ERROR("Unknown Sprim Type %s", typeId.GetText());
+        STRELKA_ERROR("Unknown Sprim Type {}", typeId.GetText());
     }
     return res;
 }

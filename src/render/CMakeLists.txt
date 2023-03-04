@@ -118,6 +118,8 @@ if(APPLE)
                  PUBLIC ${OUTPUT_DIRECTORY}/metal/shaders/pathtrace.metallib)
 endif(APPLE)
 
+target_link_libraries(${RENDERLIB_NAME} PUBLIC logger)
+
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/include/)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/include/render)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

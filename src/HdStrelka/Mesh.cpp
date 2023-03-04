@@ -5,6 +5,8 @@
 #include <pxr/imaging/hd/smoothNormals.h>
 #include <pxr/imaging/hd/vertexAdjacency.h>
 
+#include <log.h>
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 // clang-format off

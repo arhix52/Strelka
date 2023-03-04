@@ -53,13 +53,14 @@ private:
     MTL::Buffer* mInstanceBuffer;
 
     MTL::Buffer* mMaterialBuffer;
-
+    std::vector<MTL::Texture*> mMaterialTextures;
     uint32_t mFrameIndex;
     dispatch_semaphore_t mSemaphoreDispatch;
 
     void buildComputePipeline();
     void buildBuffers();
-
+    
+    MTL::Texture* loadTextureFromFile(const std::string& fileName);
     void createMetalMaterials();
 
     MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);

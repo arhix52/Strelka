@@ -25,6 +25,7 @@ endif()
 set(ROOT_HOME ${CMAKE_CURRENT_LIST_DIR})
 set(OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
+add_subdirectory(src/log)
 add_subdirectory(src/Settings)
 add_subdirectory(src/render)
 add_subdirectory(src/hdStrelka)

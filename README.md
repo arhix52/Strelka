@@ -2,15 +2,21 @@
 
 ## Project Dependencies
 
+Strelka uses conan https://conan.io/
+install conan: `pip install conan` 
+
+detect conan profile: `conan profile detect --force`
+
+1. `conan install . --output-folder=build --build=missing --settings=build_type=Debug`
+2. `cd build`
+3. `cmake .. -G "Visual Studio 17 2022" -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake --settings=build_type=Debug`
+
+### Libs:
 - glfw    - https://www.glfw.org/     *dll*
-- slang      - https://github.com/shader-slang/slang *dll*
 - cxxopts   - https://github.com/jarro2783/cxxopts  *header*
-- json - https://github.com/nlohmann/json *header*
 - imgui   - https://github.com/ocornut/imgui *header+source*
 - glm      - https://github.com/g-truc/glm *submodule*
 - stb       - https://github.com/nothings/stb *submodule*
-- tinygltf    - https://github.com/syoyo/tinygltf *submodule*
-- tol - https://github.com/tinyobjloader/tinyobjloader *submodule*
 - doctest      - https://github.com/onqtam/doctest *submodule*
 
 #### Installation

@@ -16,6 +16,8 @@
 #include <iostream>
 #include <unordered_map>
 
+#include <log.h>
+
 namespace fs = std::filesystem;
 namespace oka
 {
@@ -256,21 +258,21 @@ public:
             std::ofstream material(mdlFile.c_str());
             if (!material.is_open())
             {
-                printf("Error: can not create file: %s\n", mdlFile.c_str());
+                STRELKA_ERROR("can not create file: {}", mdlFile.c_str());
                 return nullptr;
             }
             material << mMdlSrc;
             material.close();
             if (!mMatCompiler->createModule(module->identifier, module->moduleName))
             {
-                printf("Error: failed to create MDL module\n");
+                STRELKA_ERROR("failed to create MDL module");
                 return nullptr;
             }
             return module.release();
         }
         else
         {
-            printf("Error: failed to translate MaterialX -> MDL\n");
+            STRELKA_ERROR("failed to translate MaterialX -> MDL");
             return nullptr;
         }
     };
@@ -334,7 +336,7 @@ public:
 
         if (targetCode->internalMaterials[internalIndex].arg_block == nullptr)
         {
-            printf("Material : %s has no arg block!\n", material->name.c_str());
+            STRELKA_ERROR("Material : {} has no arg block!\n", material->name.c_str());
             return;
         }
 
@@ -342,16 +344,16 @@ public:
         const mi::Size argBlockOffset = targetCode->internalMaterials[internalIndex].arg_block_offset;
 
         const mi::Size paramCount = material->compiledMaterial->get_parameter_count();
-        printf("Material name: %s\t param count: %lld\n", material->name.c_str(), paramCount);
+        STRELKA_DEBUG("Material name: {0}\t param count: {1}", material->name.c_str(), paramCount);
         for (int pi = 0; pi < paramCount; ++pi)
         {
             const char* name = material->compiledMaterial->get_parameter_name(pi);
-            printf("# %d : Param name: %s\n", pi, name);
+            STRELKA_DEBUG("# {0}: Param name: {1}", pi, name);
             mi::neuraylib::Target_value_layout_state valLayoutState = arg_layout->get_nested_state(pi);
             mi::neuraylib::IValue::Kind kind;
             mi::Size arg_size;
             const mi::Size offsetInArgBlock = arg_layout->get_layout(kind, arg_size, valLayoutState);
-            printf("\t offset = %llu\t size = %llu\n", offsetInArgBlock, arg_size);
+            STRELKA_DEBUG("\t offset = {0} \t size = {1}", offsetInArgBlock, arg_size);
 
             // char* data = baseArgBlockData + offsetInArgBlock;
             const uint8_t* data = targetCode->argBlockData.data() + argBlockOffset + offsetInArgBlock;
@@ -359,32 +361,32 @@ public:
             {
             case mi::neuraylib::IValue::Kind::VK_FLOAT: {
                 float val = *((float*)data);
-                printf("\t type float\n");
-                printf("\t val = %f\n", val);
+                STRELKA_DEBUG("\t type float");
+                STRELKA_DEBUG("\t val = {}", val);
                 break;
             }
             case mi::neuraylib::IValue::Kind::VK_INT: {
                 int val = *((int*)data);
-                printf("\t type int\n");
-                printf("\t val = %d\n", val);
+                STRELKA_DEBUG("\t type int");
+                STRELKA_DEBUG("\t val = {}", val);
                 break;
             }
             case mi::neuraylib::IValue::Kind::VK_BOOL: {
                 bool val = *((bool*)data);
-                printf("\t type bool\n");
-                printf("\t val = %d\n", val);
+                STRELKA_DEBUG("\t type bool");
+                STRELKA_DEBUG("\t val = {}", val);
                 break;
             }
             case mi::neuraylib::IValue::Kind::VK_COLOR: {
                 float* val = (float*)data;
-                printf("\t type color\n");
-                printf("\t val = (%f, %f, %f)\n", val[0], val[1], val[2]);
+                STRELKA_DEBUG("\t type color");
+                STRELKA_DEBUG("\t val = ({}, {}, {})", val[0], val[1], val[2]);
                 break;
             }
             case mi::neuraylib::IValue::Kind::VK_TEXTURE: {
-                printf("\t type texture\n");
+                STRELKA_DEBUG("\t type texture");
                 int val = *((int*)data);
-                printf("\t val = %d\n", val);
+                STRELKA_DEBUG("\t val = {}", val);
                 break;
             }
 
@@ -536,7 +538,7 @@ public:
                 isUnique = true;
                 materialsToCompile.push_back(internalMaterials[i].compiledMaterial->compiledMaterial.get());
                 // log output
-                printf("Material to compile: %s\n", getName(internalMaterials[i].compiledMaterial));
+                STRELKA_DEBUG("Material to compile: {}", getName(internalMaterials[i].compiledMaterial));
             }
             internalMaterials[i].isUnique = isUnique;
             internalMaterials[i].functionNum = functionNum;
@@ -545,7 +547,7 @@ public:
         }
 
         const uint32_t numMaterialsToCompile = materialsToCompile.size();
-        printf("Num Materials to compile: %d\n", numMaterialsToCompile);
+        STRELKA_INFO("Num Materials to compile: {}", numMaterialsToCompile);
         std::vector<oka::MaterialManager::TargetCode::InternalMaterial> compiledInternalMaterials(numMaterialsToCompile);
         for (int i = 0; i < numMaterialsToCompile; ++i)
         {
@@ -796,7 +798,7 @@ private:
         const char* envUSDPath = std::getenv("USD_DIR");
         if (!envUSDPath)
         {
-            printf("Please, set USD_DIR variable\n");
+            STRELKA_FATAL("Please, set USD_DIR variable\n");
             assert(0);
         }
         else

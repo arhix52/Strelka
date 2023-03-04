@@ -16,6 +16,7 @@
 #include <pxr/imaging/hd/rprim.h>
 #include <pxr/imaging/hd/basisCurves.h>
 
+#include <log.h>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -156,7 +157,7 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
             const SdfPath& materialId = mesh->GetMaterialId();
             const std::string& materialName = materialId.GetString();
 
-            printf("Hydra: Mesh: %s \t Material: %s\n", mesh->getName(), materialName.c_str());
+            STRELKA_INFO("Hydra: Mesh: {0} \t Material: {1}", mesh->getName(), materialName.c_str());
 
             uint32_t materialIndex = 0;
 
@@ -243,11 +244,10 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
             mScene->createInstance(oka::Instance::Type::eCurve, curveId, -1, glmTransform, -1);
         }
     }
-    printf("Meshes: %zu\n", mScene->getMeshes().size());
-    printf("Instances: %zu\n", mScene->getInstances().size());
-    printf("Materials: %zu\n", mScene->getMaterials().size());
-    printf("Curves: %zu\n", mScene->getCurves().size());
-    fflush(stdout);
+    STRELKA_INFO("Meshes: {}", mScene->getMeshes().size());
+    STRELKA_INFO("Instances: {}", mScene->getInstances().size());
+    STRELKA_INFO("Materials: {}", mScene->getMaterials().size());
+    STRELKA_INFO("Curves: {}", mScene->getCurves().size());
 }
 
 void HdStrelkaRenderPass::_Execute(const HdRenderPassStateSharedPtr& renderPassState, const TfTokenVector& renderTags)

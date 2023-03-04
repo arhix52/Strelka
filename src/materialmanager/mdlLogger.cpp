@@ -14,8 +14,7 @@
 //    along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #include "mdlLogger.h"
-
-#include <stdio.h>
+#include <log.h>
 
 namespace oka
 {
@@ -75,24 +74,41 @@ void MdlLogger::message(mi::base::Message_severity level,
 #endif
     if (level <= minLogLevel)
     {
-        const char* s_severity = _miMessageSeverityToCStr(level);
-        FILE* os = (level <= mi::base::MESSAGE_SEVERITY_ERROR) ? stderr : stdout;
-        fprintf(os, "[%s] (%s) %s\n", s_severity, moduleCategory, message);
-#ifdef MI_PLATFORM_WINDOWS
-        fflush(stderr);
-#endif
+        // const char* s_severity = _miMessageSeverityToCStr(level);
+        // FILE* os = (level <= mi::base::MESSAGE_SEVERITY_ERROR) ? stderr : stdout;
+        // fprintf(os, "[%s] (%s) %s\n", s_severity, moduleCategory, message);
+        switch (level)
+        {
+        case mi::base::MESSAGE_SEVERITY_FATAL:
+            STRELKA_FATAL("MDL: ({0}) {1}", moduleCategory, message);
+            break;
+        case mi::base::MESSAGE_SEVERITY_ERROR:
+            STRELKA_ERROR("MDL: ({0}) {1}", moduleCategory, message);
+            break;
+        case mi::base::MESSAGE_SEVERITY_WARNING:
+            STRELKA_WARNING("MDL: ({0}) {1}", moduleCategory, message);
+            break;
+        case mi::base::MESSAGE_SEVERITY_INFO:
+            STRELKA_INFO("MDL: ({0}) {1}", moduleCategory, message);
+            break;
+        case mi::base::MESSAGE_SEVERITY_VERBOSE:
+            STRELKA_TRACE("MDL: ({0}) {1}", moduleCategory, message);
+            break;
+        case mi::base::MESSAGE_SEVERITY_DEBUG:
+            STRELKA_DEBUG("MDL: ({0}) {1}", moduleCategory, message);
+            break;
+        default:
+            break;
+        }
     }
 }
 
-void MdlLogger::message(mi::base::Message_severity level,
-                        const char* moduleCategory,
-                        const char* message)
+void MdlLogger::message(mi::base::Message_severity level, const char* moduleCategory, const char* message)
 {
     this->message(level, moduleCategory, mi::base::Message_details{}, message);
 }
 
-void MdlLogger::message(mi::base::Message_severity level,
-                        const char* message)
+void MdlLogger::message(mi::base::Message_severity level, const char* message)
 {
     const char* MODULE_CATEGORY = "shadergen";
     this->message(level, MODULE_CATEGORY, message);
