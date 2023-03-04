@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
+# include(${ROOT_HOME}/cmake/StaticAnalyzers.cmake)
+
 # Scene
 set(SCENE_SOURCES
         ${ROOT_HOME}/include/scene/scene.h

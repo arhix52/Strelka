@@ -24,8 +24,8 @@ private:
     }
 
 public:
-    SettingsManager(/* args */);
-    ~SettingsManager();
+    SettingsManager(/* args */) = default;
+    ~SettingsManager() = default;
 
     template <typename T>
     void setAs(const char* name, const T& value)

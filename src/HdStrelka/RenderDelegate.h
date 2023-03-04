@@ -17,12 +17,10 @@ public:
 
     ~HdStrelkaRenderDelegate() override;
 
-public:
     void SetDrivers(HdDriverVector const& drivers) override;
 
     HdRenderSettingDescriptorList GetRenderSettingDescriptors() const override;
 
-public:
     HdRenderPassSharedPtr CreateRenderPass(HdRenderIndex* index, const HdRprimCollection& collection) override;
 
     HdResourceRegistrySharedPtr GetResourceRegistry() const override;
@@ -35,7 +33,6 @@ public:
 
     HdAovDescriptor GetDefaultAovDescriptor(const TfToken& name) const override;
 
-public:
     /* Rprim */
     const TfTokenVector& GetSupportedRprimTypes() const override;
 
@@ -61,7 +58,6 @@ public:
 
     void DestroyBprim(HdBprim* bprim) override;
 
-public:
     TfToken GetMaterialBindingPurpose() const override;
 
     // In a USD file, there can be multiple networks associated with a material:
@@ -72,13 +68,19 @@ public:
 
     TfTokenVector GetShaderSourceTypes() const override;
 
-public:
     oka::SharedContext& getSharedContext();
 
 private:
     const MaterialNetworkTranslator& m_translator;
     HdRenderSettingDescriptorList m_settingDescriptors;
     HdResourceRegistrySharedPtr m_resourceRegistry;
+
+    const TfTokenVector SUPPORTED_BPRIM_TYPES = { HdPrimTypeTokens->renderBuffer };
+    const TfTokenVector SUPPORTED_RPRIM_TYPES = { HdPrimTypeTokens->mesh, HdPrimTypeTokens->basisCurves };
+    const TfTokenVector SUPPORTED_SPRIM_TYPES = {
+        HdPrimTypeTokens->camera,    HdPrimTypeTokens->material,  HdPrimTypeTokens->light,
+        HdPrimTypeTokens->rectLight, HdPrimTypeTokens->diskLight, HdPrimTypeTokens->sphereLight,
+    };
 
     oka::SharedContext* mSharedCtx;
     oka::Scene mScene;

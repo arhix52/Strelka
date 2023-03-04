@@ -68,7 +68,7 @@ uint32_t packUV(const glm::float2& uv)
 
 void HdStrelkaRenderPass::_BakeMeshInstance(const HdStrelkaMesh* mesh, GfMatrix4d transform, uint32_t materialIndex)
 {
-    GfMatrix4d normalMatrix = transform.GetInverse().GetTranspose();
+    const GfMatrix4d normalMatrix = transform.GetInverse().GetTranspose();
 
     const std::vector<GfVec3f>& meshPoints = mesh->GetPoints();
     const std::vector<GfVec3f>& meshNormals = mesh->GetNormals();
@@ -88,7 +88,6 @@ void HdStrelkaRenderPass::_BakeMeshInstance(const HdStrelkaMesh* mesh, GfMatrix4
         indices[j * 3 + 1] = vertexIndices[1];
         indices[j * 3 + 2] = vertexIndices[2];
     }
-    glm::float3 sum = glm::float3(0.0f, 0.0f, 0.0f);
     for (size_t j = 0; j < vertexCount; ++j)
     {
         const GfVec3f& point = meshPoints[j];
@@ -99,9 +98,8 @@ void HdStrelkaRenderPass::_BakeMeshInstance(const HdStrelkaMesh* mesh, GfMatrix4
         vertex.pos[1] = point[1];
         vertex.pos[2] = point[2];
 
-        glm::float3 glmNormal = glm::float3(normal[0], normal[1], normal[2]);
+        const glm::float3 glmNormal = glm::float3(normal[0], normal[1], normal[2]);
         vertex.normal = packNormal(glmNormal);
-        sum += vertex.pos;
 
         // Texture coord
         if (!meshUVs.empty())
@@ -111,7 +109,6 @@ void HdStrelkaRenderPass::_BakeMeshInstance(const HdStrelkaMesh* mesh, GfMatrix4
             vertex.uv = packUV(glmUV);
         }
     }
-    const glm::float3 massCenter = sum / (float)vertexCount;
 
     glm::float4x4 glmTransform;
     for (int i = 0; i < 4; ++i)
@@ -222,7 +219,7 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
 
             for (size_t i = 0; i < transforms.size(); i++)
             {
-                GfMatrix4d transform = prototypeTransform * transforms[i]; // *rootTransform;
+                const GfMatrix4d transform = prototypeTransform * transforms[i]; // *rootTransform;
                 // GfMatrix4d transform = GfMatrix4d(1.0);
                 _BakeMeshInstance(mesh, transform, materialIndex);
             }
@@ -311,8 +308,7 @@ void HdStrelkaRenderPass::_Execute(const HdRenderPassStateSharedPtr& renderPassS
     //    return;
     //}
 
-    oka::Buffer* outputImage =
-        renderBuffer->GetResource(false).UncheckedGet<oka::Buffer*>();
+    oka::Buffer* outputImage = renderBuffer->GetResource(false).UncheckedGet<oka::Buffer*>();
 
     renderBuffer->SetConverged(false);
 
