@@ -2,6 +2,7 @@
     "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
     "editor.formatOnSave": false,
     // "clang-format.executable": "C:/Program Files/LLVM/bin/clang-format.exe",
+    // "clang-tidy.executable": "C:/Program Files/LLVM/bin/clang-tidy.exe",
     "clang-format.executable": "/opt/homebrew/Cellar/clang-format/15.0.7/bin/clang-format",
     "clang-tidy.executable": "/usr/local/bin/clang-tidy",
     "clang-tidy.buildPath": "build",
@@ -113,9 +114,14 @@
         "__tree": "cpp",
         "__tuple": "cpp",
         "string_view": "cpp",
-        "*.mm": "cpp",
+        "ranges": "cpp",
+        "span": "cpp",
         "hash_map": "cpp",
         "hash_set": "cpp",
-        "*.ipp": "cpp"
+        "*.ipp": "cpp",
+        "any": "cpp",
+        "cfenv": "cpp",
+        "execution": "cpp",
+        "shared_mutex": "cpp"
     },
 }
