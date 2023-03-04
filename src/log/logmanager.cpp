@@ -17,13 +17,17 @@ oka::Logmanager::~Logmanager()
 
 void oka::Logmanager::initialize()
 {
-    auto consolesink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-    std::vector<spdlog::sink_ptr> sinks = { consolesink };
-    auto logger = std::make_shared<spdlog::logger>("Strelka", sinks.begin(), sinks.end());
+    auto logger = spdlog::get("Strelka");
+    if (!logger)
+    {
+        auto consolesink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+        std::vector<spdlog::sink_ptr> sinks = { consolesink };
+        auto logger = std::make_shared<spdlog::logger>("Strelka", sinks.begin(), sinks.end());
 
-    logger->set_level(spdlog::level::trace);
-    logger->flush_on(spdlog::level::trace);
-    spdlog::register_logger(logger);
+        logger->set_level(spdlog::level::trace);
+        logger->flush_on(spdlog::level::trace);
+        spdlog::register_logger(logger);
+    }
 }
 
 void oka::Logmanager::shutdown()
