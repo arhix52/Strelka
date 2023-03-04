@@ -233,7 +233,8 @@ OptiXRender::Curve* OptiXRender::createCurve(const oka::Curve& curve)
         const int segmentsCount = numControlPoints - degree;
         for (int i = 0; i < segmentsCount; ++i)
         {
-            segmentIndices.push_back(curve.mPointsStart + offsetInsideCurveArray + i);
+            int index = curve.mPointsStart + offsetInsideCurveArray + i;
+            segmentIndices.push_back(index);
         }
         offsetInsideCurveArray += numControlPoints;
     }
