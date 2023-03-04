@@ -3,6 +3,7 @@
 #include <pxr/imaging/hd/rendererPlugin.h>
 
 #include <memory>
+#include <log/logmanager.h>
 
 #include "MaterialNetworkTranslator.h"
 
@@ -25,6 +26,7 @@ public:
     bool IsSupported(bool gpuEnabled = true) const override;
 
 private:
+    oka::Logmanager mLoggerManager;
     std::unique_ptr<MaterialNetworkTranslator> m_translator;
     bool m_isSupported;
 };

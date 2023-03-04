@@ -91,7 +91,6 @@ if(APPLE)
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework QuartzCore")
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework Metal")
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework MetalKit")
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC logger)
 
   add_custom_command(
     TARGET ${RENDERLIB_NAME}
@@ -115,6 +114,8 @@ if(APPLE)
   target_sources(${RENDERLIB_NAME}
                  PUBLIC ${OUTPUT_DIRECTORY}/metal/shaders/pathtrace.metallib)
 endif(APPLE)
+
+target_link_libraries(${RENDERLIB_NAME} PUBLIC logger)
 
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/include/)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/include/render)

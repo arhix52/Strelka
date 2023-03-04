@@ -28,21 +28,36 @@
 #include <sstream>
 #include <fstream>
 
+#include <log.h>
+
 #include "Camera.h"
 
 static void context_log_cb(unsigned int level, const char* tag, const char* message, void* /*cbdata */)
 {
-    std::cerr << "[" << std::setw(2) << level << "][" << std::setw(12) << tag << "]: " << message << "\n";
+    switch (level)
+    {
+    case 1:
+        STRELKA_FATAL("OptiX [{0}]: {1}", tag, message);
+        break;
+    case 2:
+        STRELKA_ERROR("OptiX [{0}]: {1}", tag, message);
+        break;
+    case 3:
+        STRELKA_WARNING("OptiX [{0}]: {1}", tag, message);
+        break;
+    case 4:
+        STRELKA_INFO("OptiX [{0}]: {1}", tag, message);
+        break;
+    default:
+        break;
+    }
 }
 
 static inline void optixCheck(OptixResult res, const char* call, const char* file, unsigned int line)
 {
     if (res != OPTIX_SUCCESS)
     {
-        std::stringstream ss;
-        ss << "Optix call '" << call << "' failed: " << file << ':' << line << ")\n";
-        std::cerr << ss.str() << std::endl;
-        // throw Exception(res, ss.str().c_str());
+        STRELKA_ERROR("OptiX call {0} failed: {1}:{2}", call, file, line);
         assert(0);
     }
 }
@@ -941,7 +956,7 @@ void OptiXRender::init()
 
     if (!envUSDPath)
     {
-        printf("Please, set USD_DIR variable\n");
+        STRELKA_FATAL("Please, set USD_DIR variable");
         assert(0);
     }
     const std::string usdMdlLibPath = std::string(envUSDPath) + "\\libraries\\mdl\\";
@@ -954,7 +969,7 @@ void OptiXRender::init()
 
     if (!res)
     {
-        printf("Wrong mdl paths configuration!\n");
+        STRELKA_FATAL("Wrong mdl paths configuration!");
         assert(0);
         return;
     }
@@ -1066,7 +1081,7 @@ Texture OptiXRender::loadTextureFromFile(std::string& fileName)
     stbi_uc* data = stbi_load(fileName.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
     if (!data)
     {
-        fprintf(stderr, "Unable to load texture from file: %s\n", fileName.c_str());
+        STRELKA_ERROR("Unable to load texture from file: {}", fileName.c_str());
         return Texture();
     }
     // convert to float4 format
@@ -1178,7 +1193,7 @@ bool OptiXRender::createOptixMaterials()
                 mdlModule = mMaterialManager.createModule(currMatDesc.file.c_str());
                 if (mdlModule == nullptr)
                 {
-                    fprintf(stderr, "Error: Unable to load MDL file: %s\n", currMatDesc.file.c_str());
+                    STRELKA_FATAL("Unable to load MDL file: {}", currMatDesc.file.c_str());
                     assert(0);
                 }
                 mNameToModule[currMatDesc.file] = mdlModule;
@@ -1263,8 +1278,8 @@ bool OptiXRender::createOptixMaterials()
             }
             if (!res)
             {
-                fprintf(stderr, "Unable to set parameter: %s for material: %s\n", param.name.c_str(),
-                        matDescs[i].name.c_str());
+                STRELKA_ERROR(
+                    "Unable to set parameter: {0} for material: {1}", param.name.c_str(), matDescs[i].name.c_str());
                 // assert(0);
             }
         }
