@@ -72,6 +72,7 @@ void HdStrelkaRenderPass::_BakeMeshInstance(const HdStrelkaMesh* mesh, GfMatrix4
 
     const std::vector<GfVec3f>& meshPoints = mesh->GetPoints();
     const std::vector<GfVec3f>& meshNormals = mesh->GetNormals();
+    const std::vector<GfVec3f>& meshTangents = mesh->GetTangents();
     const std::vector<GfVec3i>& meshFaces = mesh->GetFaces();
     const std::vector<GfVec2f>& meshUVs = mesh->GetUVs();
 
@@ -92,6 +93,7 @@ void HdStrelkaRenderPass::_BakeMeshInstance(const HdStrelkaMesh* mesh, GfMatrix4
     {
         const GfVec3f& point = meshPoints[j];
         const GfVec3f& normal = meshNormals[j];
+        const GfVec3f& tangent = meshTangents[j];
 
         oka::Scene::Vertex& vertex = vertices[j];
         vertex.pos[0] = point[0];
@@ -100,6 +102,8 @@ void HdStrelkaRenderPass::_BakeMeshInstance(const HdStrelkaMesh* mesh, GfMatrix4
 
         const glm::float3 glmNormal = glm::float3(normal[0], normal[1], normal[2]);
         vertex.normal = packNormal(glmNormal);
+        const glm::float3 glmTangent = glm::float3(tangent[0], tangent[1], tangent[2]);
+        vertex.tangent = packNormal(glmTangent);
 
         // Texture coord
         if (!meshUVs.empty())

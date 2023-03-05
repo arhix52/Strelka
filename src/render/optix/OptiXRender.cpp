@@ -923,6 +923,8 @@ void OptiXRender::render(Buffer* output)
 
     params.enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
     params.debug = settings.getAs<uint32_t>("render/pt/debug");
+    params.shadowRayTmin = settings.getAs<float>("render/pt/dev/shadowRayTmin");
+    params.materialRayTmin = settings.getAs<float>("render/pt/dev/materialRayTmin");
 
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(mState.d_params), &params, sizeof(params), cudaMemcpyHostToDevice));
 

@@ -60,7 +60,10 @@ struct Params
     SceneData scene;
 
     bool enableAccumulation;
+    // developers settings:
     uint32_t debug;
+    float shadowRayTmin;
+    float materialRayTmin;
 };
 
 struct PerRayData

@@ -110,7 +110,7 @@ extern "C" __global__ void __raygen__rg()
         while (depth < params.max_depth)
         {
             optixTrace(params.handle, ray_origin, ray_direction,
-                       0.0f, // Min intersection distance
+                       params.materialRayTmin, // Min intersection distance
                        1e16f, // Max intersection distance
                        0.0f, // rayTime -- used for motion blur
                        OptixVisibilityMask(255), // Specify always visible
@@ -130,7 +130,7 @@ extern "C" __global__ void __raygen__rg()
                 {
                     break;
                 }
-                prd.throughput *= 1.0 / (p + 1e-5f);
+                prd.throughput *= 1.0f / (p + 1e-5f);
             }
 
             if (dot(prd.throughput, prd.throughput) < 1e-5f)
@@ -174,6 +174,7 @@ extern "C" __global__ void __miss__ms()
     PerRayData* prd = getPRD();
     prd->radiance += prd->throughput * miss_data->bg_color;
     prd->throughput = make_float3(0.0f);
+    prd->depth = params.max_depth;
 }
 
 __device__ glm::float3 interpolateAttrib(glm::float3 attr1, glm::float3 attr2, glm::float3 attr3, float2 bary)
@@ -236,7 +237,7 @@ extern "C" __global__ void __closesthit__light()
     {
         PerRayData* prd = getPRD();
 
-        // if (prd->depth == 0 || prd->specularBounce)
+        if (prd->depth == 0 || prd->specularBounce)
         // if (prd->specularBounce)
         {
             HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());

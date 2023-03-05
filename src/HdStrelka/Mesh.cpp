@@ -148,9 +148,29 @@ void HdStrelkaMesh::_UpdateGeometry(HdSceneDelegate* sceneDelegate)
         mPoints.push_back(points[faceIndices[0]]);
         mPoints.push_back(points[faceIndices[1]]);
         mPoints.push_back(points[faceIndices[2]]);
+        auto computeTangent = [](const GfVec3f& normal) {
+            GfVec3f c1 = GfCross(normal, GfVec3f(1.0f, 0.0f, 0.0f));
+            GfVec3f c2 = GfCross(normal, GfVec3f(0.0f, 1.0f, 0.0f));
+            GfVec3f tangent;
+            if (c1.GetLengthSq() > c2.GetLengthSq())
+            {
+                tangent = c1;
+            }
+            else
+            {
+                tangent = c2;
+            }
+            GfNormalize(&tangent);
+            return tangent;
+        };
+
         mNormals.push_back(normals[indexedNormals ? faceIndices[0] : newFaceIndices[0]]);
+        mTangents.push_back(computeTangent(normals[indexedNormals ? faceIndices[0] : newFaceIndices[0]]));
         mNormals.push_back(normals[indexedNormals ? faceIndices[1] : newFaceIndices[1]]);
+        mTangents.push_back(computeTangent(normals[indexedNormals ? faceIndices[1] : newFaceIndices[1]]));
         mNormals.push_back(normals[indexedNormals ? faceIndices[2] : newFaceIndices[2]]);
+        mTangents.push_back(computeTangent(normals[indexedNormals ? faceIndices[2] : newFaceIndices[2]]));
+
         if (hasUVs)
         {
             mUvs.push_back(uvs[indexedUVs ? faceIndices[0] : newFaceIndices[0]]);
@@ -298,6 +318,11 @@ const std::vector<GfVec3f>& HdStrelkaMesh::GetPoints() const
 const std::vector<GfVec3f>& HdStrelkaMesh::GetNormals() const
 {
     return mNormals;
+}
+
+const std::vector<GfVec3f>& HdStrelkaMesh::GetTangents() const
+{
+    return mTangents;
 }
 
 const std::vector<GfVec3i>& HdStrelkaMesh::GetFaces() const
