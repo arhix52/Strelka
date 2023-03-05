@@ -2,9 +2,6 @@
 
 #include <cuda.h>
 
-#define GLM_CUDA_FORCE_DEVICE_FUNC
-#include <glm/vec4.hpp>
-
 #include "OptixRenderParams.h"
 #include <cuda/helpers.h>
 #include <cuda/curve.h>
