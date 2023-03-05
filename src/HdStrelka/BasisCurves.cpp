@@ -246,4 +246,8 @@ const GfMatrix4d& HdStrelkaBasisCurves::GetPrototypeTransform() const
 {
     return m_prototypeTransform;
 }
+const char* HdStrelkaBasisCurves::getName() const
+{
+    return mName.c_str();
+}
 PXR_NAMESPACE_CLOSE_SCOPE

@@ -133,7 +133,41 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
 {
     TfHashMap<SdfPath, uint32_t, SdfPath::Hash> materialMapping;
     materialMapping[SdfPath::EmptyPath()] = 0;
+    auto getOrCreateMaterial = [&](const SdfPath& materialId) {
+        uint32_t materialIndex = 0;
+        if (materialMapping.find(materialId) != materialMapping.end())
+        {
+            materialIndex = materialMapping[materialId];
+        }
+        else
+        {
+            HdSprim* sprim = renderIndex->GetSprim(HdPrimTypeTokens->material, materialId);
+            HdStrelkaMaterial* material = dynamic_cast<HdStrelkaMaterial*>(sprim);
 
+            if (material->isMdl())
+            {
+                const std::string& fileUri = material->getFileUri();
+                const std::string& name = material->getSubIdentifier();
+                oka::Scene::MaterialDescription materialDesc;
+                materialDesc.file = fileUri;
+                materialDesc.name = name;
+                materialDesc.type = oka::Scene::MaterialDescription::Type::eMdl;
+                materialDesc.params = material->getParams();
+                materialIndex = mScene->addMaterial(materialDesc);
+            }
+            else
+            {
+                const std::string& code = material->GetStrelkaMaterial();
+                oka::Scene::MaterialDescription materialDesc;
+                materialDesc.code = code;
+                materialDesc.type = oka::Scene::MaterialDescription::Type::eMaterialX;
+                materialDesc.params = material->getParams();
+                materialIndex = mScene->addMaterial(materialDesc);
+            }
+            materialMapping[materialId] = materialIndex;
+        }
+        return materialIndex;
+    };
     for (const auto& rprimId : renderIndex->GetRprimIds())
     {
         const HdRprim* rprim = renderIndex->GetRprim(rprimId);
@@ -187,37 +221,7 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
             }
             else
             {
-                if (materialMapping.find(materialId) != materialMapping.end())
-                {
-                    materialIndex = materialMapping[materialId];
-                }
-                else
-                {
-                    HdSprim* sprim = renderIndex->GetSprim(HdPrimTypeTokens->material, materialId);
-                    HdStrelkaMaterial* material = dynamic_cast<HdStrelkaMaterial*>(sprim);
-
-                    if (material->isMdl())
-                    {
-                        const std::string& fileUri = material->getFileUri();
-                        const std::string& name = material->getSubIdentifier();
-                        oka::Scene::MaterialDescription materialDesc;
-                        materialDesc.file = fileUri;
-                        materialDesc.name = name;
-                        materialDesc.type = oka::Scene::MaterialDescription::Type::eMdl;
-                        materialDesc.params = material->getParams();
-                        materialIndex = mScene->addMaterial(materialDesc);
-                    }
-                    else
-                    {
-                        const std::string& code = material->GetStrelkaMaterial();
-                        oka::Scene::MaterialDescription materialDesc;
-                        materialDesc.code = code;
-                        materialDesc.type = oka::Scene::MaterialDescription::Type::eMaterialX;
-                        materialDesc.params = material->getParams();
-                        materialIndex = mScene->addMaterial(materialDesc);
-                    }
-                    materialMapping[materialId] = materialIndex;
-                }
+                materialIndex = getOrCreateMaterial(materialId);
             }
             const GfMatrix4d& prototypeTransform = mesh->GetPrototypeTransform();
 
@@ -235,6 +239,12 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
             const std::vector<float>& widths = curve->GetWidths();
             const std::vector<uint32_t>& vertexCounts = curve->GetVertexCounts();
 
+            const SdfPath& materialId = curve->GetMaterialId();
+            const std::string& materialName = materialId.GetString();
+
+            STRELKA_INFO("Hydra: Curve: {0} \t Material: {1}", curve->getName(), materialName.c_str());
+            const uint32_t materialIndex = getOrCreateMaterial(materialId);
+
             const GfMatrix4d& prototypeTransform = curve->GetPrototypeTransform();
             glm::float4x4 glmTransform;
             for (int i = 0; i < 4; ++i)
@@ -245,7 +255,7 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
                 }
             }
             uint32_t curveId = mScene->createCurve(oka::Curve::Type::eCubic, vertexCounts, points, widths);
-            mScene->createInstance(oka::Instance::Type::eCurve, curveId, -1, glmTransform, -1);
+            mScene->createInstance(oka::Instance::Type::eCurve, curveId, materialIndex, glmTransform, -1);
         }
     }
     STRELKA_INFO("Meshes: {}", mScene->getMeshes().size());
@@ -253,6 +263,7 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
     STRELKA_INFO("Materials: {}", mScene->getMaterials().size());
     STRELKA_INFO("Curves: {}", mScene->getCurves().size());
 }
+
 
 void HdStrelkaRenderPass::_Execute(const HdRenderPassStateSharedPtr& renderPassState, const TfTokenVector& renderTags)
 {
