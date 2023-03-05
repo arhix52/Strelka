@@ -200,6 +200,13 @@ void Display::drawUI()
     ImGui::InputFloat("Gamma", (float*)&gamma, 0.5);
     mCtx->mSettingsManager->setAs<float>("render/post/gamma", gamma);
 
+    float materialRayTmin = mCtx->mSettingsManager->getAs<float>("render/pt/dev/materialRayTmin");
+    ImGui::InputFloat("Material ray T min", (float*)&materialRayTmin, 0.1);
+    mCtx->mSettingsManager->setAs<float>("render/pt/dev/materialRayTmin", materialRayTmin);   
+    float shadowRayTmin = mCtx->mSettingsManager->getAs<float>("render/pt/dev/shadowRayTmin");
+    ImGui::InputFloat("Shadow ray T min", (float*)&shadowRayTmin, 0.1);
+    mCtx->mSettingsManager->setAs<float>("render/pt/dev/shadowRayTmin", shadowRayTmin);
+
     /*
     bool enableUpscale = mCtx->mSettingsManager->getAs<bool>("render/pt/enableUpscale");
     ImGui::Checkbox("Enable Upscale", &enableUpscale);

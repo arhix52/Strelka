@@ -523,6 +523,9 @@ int main(int argc, const char* argv[])
     ctx->mSettingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
     // Postprocessing settings:
     ctx->mSettingsManager->setAs<float>("render/post/gamma", 2.2f); // 0.0f - off
+    // Dev settings:
+    ctx->mSettingsManager->setAs<float>("render/pt/dev/shadowRayTmin", 0.0f); // offset to avoid self-collision in light sampling
+    ctx->mSettingsManager->setAs<float>("render/pt/dev/materialRayTmin", 0.0f); // offset to avoid self-collision in bsdf sampling
 
     HdDriver driver;
     driver.name = _AppTokens->HdStrelkaDriver;

@@ -29,6 +29,7 @@ public:
 
     const std::vector<GfVec3f>& GetPoints() const;
     const std::vector<GfVec3f>& GetNormals() const;
+    const std::vector<GfVec3f>& GetTangents() const;
     const std::vector<GfVec3i>& GetFaces() const;
     const std::vector<GfVec2f>& GetUVs() const;
     const GfMatrix4d& GetPrototypeTransform() const;
@@ -65,6 +66,7 @@ private:
     GfMatrix4d mPrototypeTransform;
     std::vector<GfVec3f> mPoints;
     std::vector<GfVec3f> mNormals;
+    std::vector<GfVec3f> mTangents;
     std::vector<GfVec2f> mUvs;
     std::vector<GfVec3i> mFaces;
     GfVec3f mColor;

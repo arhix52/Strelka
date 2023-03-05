@@ -233,11 +233,14 @@ __inline__ __device__ float3 sampleLight(uint32_t& rngState, const UniformLight&
         // shadowRay.d = float4(lightSampleData.L, 0.0f);
         // shadowRay.o = float4(offset_ray(state.position, state.geom_normal), lightSampleData.distToLight); // need to
         // set
-        const bool occluded = traceOcclusion(params.handle, state.position, lightSampleData.L,
-                                             1e-4f, // tmin
+        const bool occluded = traceOcclusion(params.handle, offset_ray(state.position, state.geom_normal), lightSampleData.L,
+                                             params.shadowRayTmin, // tmin
                                              lightSampleData.distToLight // tmax
         );
-
+        // if (occluded)
+        // {
+        //     return make_float3(100.0f, 0.0f, 0.0f);
+        // }
         float visibility = occluded ? 0.0f : 1.0f;
         // TODO: skip light hit
 
@@ -315,8 +318,6 @@ extern "C" __global__ void __closesthit__radiance()
 
         const uint32_t baseVbOffset = hit_data->vertexOffset;
 
-        sutil::Matrix3x4 object_to_world((const float*)&hit_data->object_to_world);
-
         const float3 p0 = params.scene.vb[baseVbOffset + i0].position;
         const float3 p1 = params.scene.vb[baseVbOffset + i1].position;
         const float3 p2 = params.scene.vb[baseVbOffset + i2].position;
@@ -333,18 +334,19 @@ extern "C" __global__ void __closesthit__radiance()
         const float2 uv1 = unpackUV(params.scene.vb[baseVbOffset + i1].uv);
         const float2 uv2 = unpackUV(params.scene.vb[baseVbOffset + i2].uv);
 
-        float2 uvCoord = interpolateAttrib(uv0, uv1, uv2, barycentrics);
+        const float2 uvCoord = interpolateAttrib(uv0, uv1, uv2, barycentrics);
         const float3 text_coords = make_float3(uvCoord.x, uvCoord.y, 0.0f);
 
+        const float3 ray_dir = optixGetWorldRayDirection();
         // const float3 worldPosition = optixGetWorldRayOrigin() + optixGetRayTmax() * ray_dir;
-        float3 worldPosition =
+        const float3 worldPosition =
             optixTransformPointFromObjectToWorldSpace(interpolateAttrib(p0, p1, p2, barycentrics));
 
         const float3 object_normal = normalize(interpolateAttrib(n0, n1, n2, barycentrics));
         float3 worldNormal = normalize(optixTransformNormalFromObjectToWorldSpace(object_normal));
 
         float3 geomNormal = normalize(cross(p1 - p0, p2 - p0));
-        geomNormal = optixTransformNormalFromObjectToWorldSpace(geomNormal);
+        geomNormal = normalize(optixTransformNormalFromObjectToWorldSpace(geomNormal));
 
         const float3 worldTangent =
             normalize(optixTransformNormalFromObjectToWorldSpace(interpolateAttrib(t0, t1, t2, barycentrics)));
@@ -352,8 +354,6 @@ extern "C" __global__ void __closesthit__radiance()
         worldNormal *= (inside ? -1.0f : 1.0f);
 
         const float3 worldBinormal = cross(worldNormal, worldTangent);
-
-        const float3 ray_dir = optixGetWorldRayDirection();
 
         // setup MDL state
         float4 texture_results[16] = {};
@@ -385,7 +385,8 @@ extern "C" __global__ void __closesthit__radiance()
 
         if (params.debug == 1)
         {
-            prd->radiance = worldNormal;
+            // prd->radiance = radiance;
+            prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
             return;
         }
 
@@ -397,7 +398,7 @@ extern "C" __global__ void __closesthit__radiance()
             return;
         }
 
-        const bool isNextEventValid = ((dot(toLight, state.geom_normal) > 0.0f) != inside) && lightPdf != 0.0f;
+        const bool isNextEventValid = ((dot(toLight, state.normal) > 0.0f) != inside) && lightPdf != 0.0f;
 
         if (isNextEventValid)
         {
@@ -453,15 +454,17 @@ extern "C" __global__ void __closesthit__radiance()
 
         prd->specularBounce = ((sample_data.event_type & mi::neuraylib::BSDF_EVENT_SPECULAR) != 0);
 
+        // setup next path segment
         // flip inside/outside on transmission
         if((sample_data.event_type & mi::neuraylib::BSDF_EVENT_TRANSMISSION) != 0)
         {
             prd->inside = !prd->inside;
-            worldPosition = offset_ray(worldPosition, -geomNormal);
+            prd->origin = offset_ray(state.position, -state.geom_normal);
         }
-
-        // setup next path segment
-        prd->origin = offset_ray(worldPosition, geomNormal);
+        else
+        {
+            prd->origin = offset_ray(state.position, state.geom_normal);
+        }
         prd->dir = sample_data.k2;
         prd->throughput *= sample_data.bsdf_over_pdf;
     }
@@ -471,8 +474,9 @@ extern "C" __global__ void __closesthit__radiance()
         float3 normal = normalCubic(primitiveIndex);
         PerRayData* prd = getPRD();
 
-        prd->radiance = normal * 10.0f;
-        // prd->radiance = make_float3(1.0f);
+        // prd->radiance = normal * 10.0f;
+        prd->throughput = make_float3(0.0f);
+        prd->radiance = make_float3(1.0f);
 
     }
     // result = (worldNormal + make_float3(1.0f)) * 0.5f;
