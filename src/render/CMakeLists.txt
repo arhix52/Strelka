@@ -55,7 +55,22 @@ if(WIN32)
     ${options})
   list(APPEND generated_files ${generated_files2})
 
-  add_library(${RENDERLIB_NAME} STATIC ${RENDER_SOURCES} ${generated_files})
+  set(RENDER_CUDA_SOURCES 
+  ${ROOT_HOME}/src/render/optix/postprocessing/Tonemappers.h
+  ${ROOT_HOME}/src/render/optix/postprocessing/Tonemappers.cu
+  )
+
+  # cuda_wrap_srcs(
+  #   ${RENDERLIB_NAME}
+  #   OBJ
+  #   generated_files3
+  #   ${RENDER_CUDA_SOURCES}
+  #   ${cmake_options}
+  #   OPTIONS
+  #   ${options})
+  # list(APPEND cuda_generated_files ${generated_files3})
+
+  add_library(${RENDERLIB_NAME} STATIC ${RENDER_SOURCES} ${generated_files} ${RENDER_CUDA_SOURCES})
 
 endif()
 

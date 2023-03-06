@@ -30,6 +30,8 @@
 
 #include <log.h>
 
+#include "postprocessing/Tonemappers.h"
+
 #include "Camera.h"
 
 static void context_log_cb(unsigned int level, const char* tag, const char* message, void* /*cbdata */)
@@ -931,6 +933,8 @@ void OptiXRender::render(Buffer* output)
     OPTIX_CHECK(optixLaunch(
         mState.pipeline, mState.stream, mState.d_params, sizeof(Params), &mState.sbt, width, height, /*depth=*/1));
     CUDA_SYNC_CHECK();
+
+    ::tonemap(params.image, width, height);
 
     output->unmap();
 
