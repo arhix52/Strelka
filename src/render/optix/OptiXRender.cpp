@@ -934,7 +934,9 @@ void OptiXRender::render(Buffer* output)
         mState.pipeline, mState.stream, mState.d_params, sizeof(Params), &mState.sbt, width, height, /*depth=*/1));
     CUDA_SYNC_CHECK();
 
-    ::tonemap(params.image, width, height);
+    const float gamma = settings.getAs<float>("render/post/gamma");
+    const ToneMapperType tonemapperType = (ToneMapperType) settings.getAs<uint32_t>("render/pt/tonemapperType");
+    tonemap(tonemapperType, gamma, params.image, width, height);
 
     output->unmap();
 

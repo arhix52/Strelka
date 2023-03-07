@@ -46,3 +46,11 @@ SUTIL_INLINE SUTIL_HOSTDEVICE bool isnan(const float3 v)
     return isnan(v.x) || isnan(v.y) || isnan(v.z);
 }
 
+SUTIL_INLINE SUTIL_HOSTDEVICE float3 powf(const float3 v, const float p)
+{
+    float3 r = v;
+    r.x = powf(r.x, p);
+    r.y = powf(r.y, p);
+    r.z = powf(r.z, p);
+    return r;
+}

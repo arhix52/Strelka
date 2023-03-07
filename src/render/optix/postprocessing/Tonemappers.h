@@ -2,4 +2,12 @@
 #include <sutil/vec_math.h>
 #include <stdint.h>
 
-extern "C" void tonemap(float4* image, uint32_t width, uint32_t height);
+enum class ToneMapperType : uint32_t
+{
+    eNone = 0,
+    eReinhard,
+    eACES,
+    eFilmic,
+};
+
+extern "C" void tonemap(const ToneMapperType type, const float gamma, float4* image, const uint32_t width, const uint32_t height);
