@@ -285,7 +285,7 @@ void glfwdisplay::display(const int32_t screen_res_x,
 
     // else if (m_image_format == BufferImageFormat::FLOAT4)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, screen_res_x, screen_res_y, 0, GL_RGBA, GL_FLOAT, nullptr);
-    convertToSrgb = true;
+    convertToSrgb = false;
 
     // else
     //     throw Exception("Unknown buffer format");
