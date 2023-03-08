@@ -60,16 +60,6 @@ if(WIN32)
   ${ROOT_HOME}/src/render/optix/postprocessing/Tonemappers.cu
   )
 
-  # cuda_wrap_srcs(
-  #   ${RENDERLIB_NAME}
-  #   OBJ
-  #   generated_files3
-  #   ${RENDER_CUDA_SOURCES}
-  #   ${cmake_options}
-  #   OPTIONS
-  #   ${options})
-  # list(APPEND cuda_generated_files ${generated_files3})
-
   add_library(${RENDERLIB_NAME} STATIC ${RENDER_SOURCES} ${generated_files} ${RENDER_CUDA_SOURCES})
 
 endif()
