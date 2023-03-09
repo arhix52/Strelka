@@ -223,15 +223,15 @@ void glfwdisplay::onEndFrame()
 
 void glfwdisplay::drawUI()
 {
-    NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
+@autoreleasepool 
+    {
+        // Start the Dear ImGui frame
+        ImGui_ImplMetal_NewFrame((__bridge MTLRenderPassDescriptor*)renderPassDescriptor);
 
-    // Start the Dear ImGui frame
-    ImGui_ImplMetal_NewFrame((__bridge MTLRenderPassDescriptor*)renderPassDescriptor);
-    
-    Display::drawUI();
+        Display::drawUI();
 
-    ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), 
-    (__bridge id<MTLCommandBuffer>)(commandBuffer), 
-    (__bridge id<MTLRenderCommandEncoder>)renderEncoder);
-    pPool->release();
+        ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(),
+        (__bridge id<MTLCommandBuffer>)(commandBuffer),
+        (__bridge id<MTLRenderCommandEncoder>)renderEncoder);
+    }
 }
