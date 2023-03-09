@@ -22,6 +22,7 @@ class Render;
 struct SharedContext
 {
     size_t mFrameNumber = 0;
+    size_t mSubframeIndex = 0;
     SettingsManager* mSettingsManager = nullptr;
     Render* mRender = nullptr;
 };

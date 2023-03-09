@@ -669,8 +669,8 @@ int main(int argc, const char* argv[])
         auto currentTime = std::chrono::high_resolution_clock::now();
         const double deltaTime = std::chrono::duration<double, std::milli>(currentTime - prevTime).count() / 1000.0;
 
-        auto tmpCam = cameraController.getCamera();
-        auto transform = tmpCam.GetTransform();
+        GfCamera tmpCam = cameraController.getCamera();
+        GfMatrix4d transform = tmpCam.GetTransform();
 
         uint32_t cameraSpeed = ctx->mSettingsManager->getAs<uint32_t>("render/cameraSpeed");
         cameraController.update(deltaTime, cameraSpeed);
@@ -679,27 +679,27 @@ int main(int argc, const char* argv[])
         cam.SetFromCamera(cameraController.getCamera(), 0.0);
 
         display->onBeginFrame();
-        if (cameraController.getCamera().GetTransform() != transform ||
-            sppTotal != ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal") ||
-            frameSpp != ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp") ||
-            ctx->mSettingsManager->getAs<bool>("render/pt/isResized"))
-        {
-            frameSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp");
-            sppTotal = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
-            ctx->mSettingsManager->setAs<bool>("render/pt/isResized", false);
-            leftSpp = sppTotal;
-        }
+        // if (cameraController.getCamera().GetTransform() != transform ||
+        //     sppTotal != ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal") ||
+        //     frameSpp != ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp") ||
+        //     ctx->mSettingsManager->getAs<bool>("render/pt/isResized"))
+        // {
+        //     frameSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp");
+        //     sppTotal = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
+        //     ctx->mSettingsManager->setAs<bool>("render/pt/isResized", false);
+        //     leftSpp = sppTotal;
+        // }
 
         // This can be moved to render itself
-        if (leftSpp > 0)
+        // if (leftSpp > 0)
         {
             uint32_t savedFSpp = -1;
-            if (frameSpp > leftSpp)
-            {
-                savedFSpp = frameSpp;
-                ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", leftSpp);
-                frameSpp = leftSpp;
-            }
+            // if (frameSpp > leftSpp)
+            // {
+            //     savedFSpp = frameSpp;
+            //     ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", leftSpp);
+            //     frameSpp = leftSpp;
+            // }
 
             engine.Execute(renderIndex, &tasks); // main path tracing rendering in fixed render resolution
             oka::Buffer* outputBuffer =
@@ -771,8 +771,9 @@ int main(int argc, const char* argv[])
 
         surfaceController.release(versionId);
 
+        const uint32_t currentSpp = ctx->mSubframeIndex;
         display->setWindowTitle((std::string("Strelka") + " [" + std::to_string(frameTime) + " ms]" + " [" +
-                                std::to_string(iteration) + " iteration]")
+                                std::to_string(currentSpp) + " spp]")
                                    .c_str());
         ++frameCount;
     }

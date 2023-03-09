@@ -130,13 +130,6 @@ void MetalRender::render(Buffer* output)
 
     mFrameIndex = (mFrameIndex + 1) % oka::kMaxFramesInFlight;
 
-    MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
-    dispatch_semaphore_wait(mSemaphoreDispatch, DISPATCH_TIME_FOREVER);
-    MetalRender* pRenderer = this;
-    pCmd->addCompletedHandler(^void(MTL::CommandBuffer* pCmd) {
-      dispatch_semaphore_signal(pRenderer->mSemaphoreDispatch);
-    });
-
     // Update camera state:
     const uint32_t width = output->width();
     const uint32_t height = output->height();
@@ -153,7 +146,7 @@ void MetalRender::render(Buffer* output)
         glm::any(glm::notEqual(currView.mCamMatrices.view, mPrevView.mCamMatrices.view)))
     {
         // need reset
-        getSharedContext().mFrameNumber = 0;
+        getSharedContext().mSubframeIndex = 0;
     }
 
     SettingsManager& settings = *getSharedContext().mSettingsManager;
@@ -161,7 +154,7 @@ void MetalRender::render(Buffer* output)
     MTL::Buffer* pUniformBuffer = mUniformBuffers[mFrameIndex];
     Uniforms* pUniformData = reinterpret_cast<Uniforms*>(pUniformBuffer->contents());
     pUniformData->frameIndex = mFrameIndex;
-    pUniformData->subframeIndex = getSharedContext().mFrameNumber;
+    pUniformData->subframeIndex = getSharedContext().mSubframeIndex;
     pUniformData->height = height;
     pUniformData->width = width;
     pUniformData->numLights = mScene->getLightsDesc().size();
@@ -172,7 +165,23 @@ void MetalRender::render(Buffer* output)
     pUniformData->tonemapperType = settings.getAs<uint32_t>("render/pt/tonemapperType");
     pUniformData->gamma = settings.getAs<float>("render/post/gamma");
     pUniformData->debug = settings.getAs<uint32_t>("render/pt/debug");
+
+    bool settingsChanged = false;
+
+    static uint32_t rectLightSamplingMethodPrev = 0;
     pUniformData->rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
+    settingsChanged = (rectLightSamplingMethodPrev != pUniformData->rectLightSamplingMethod);
+    rectLightSamplingMethodPrev = pUniformData->rectLightSamplingMethod;
+
+    static uint32_t sspTotalPrev = 0;
+    const uint32_t sspTotal = settings.getAs<uint32_t>("render/pt/sppTotal");
+    settingsChanged |= (sspTotalPrev > sspTotal); // reset only if new spp less than already accumulated
+    sspTotalPrev = sspTotal;
+
+    if (settingsChanged)
+    {
+        getSharedContext().mSubframeIndex = 0;
+    }
 
     glm::float4x4 invView = glm::inverse(camera.matrices.view);
     for (int column = 0; column < 4; column++)
@@ -189,48 +198,64 @@ void MetalRender::render(Buffer* output)
             pUniformData->clipToView.columns[column][row] = camera.matrices.invPerspective[column][row];
         }
     }
-
-    pUniformBuffer->didModifyRange(NS::Range::Make(0, sizeof(Uniforms)));
-
-    MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
-    pComputeEncoder->useResource(mMaterialBuffer, MTL::ResourceUsageRead);
-    pComputeEncoder->useResource(mLightBuffer, MTL::ResourceUsageRead);
-    pComputeEncoder->useResource(mInstanceAccelerationStructure, MTL::ResourceUsageRead);
-    for (const MTL::AccelerationStructure* primitiveAccel : mPrimitiveAccelerationStructures)
+    const uint32_t totalSpp = settings.getAs<uint32_t>("render/pt/sppTotal");
+    const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");
+    const int32_t leftSpp = totalSpp - getSharedContext().mSubframeIndex;
+    const uint32_t samplesThisLaunch = std::min((int32_t)samplesPerLaunch, leftSpp);
+    if (samplesThisLaunch != 0)
     {
-        pComputeEncoder->useResource(primitiveAccel, MTL::ResourceUsageRead);
+        pUniformData->samples_per_launch = samplesThisLaunch;
+
+        pUniformBuffer->didModifyRange(NS::Range::Make(0, sizeof(Uniforms)));
+
+        MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
+        dispatch_semaphore_wait(mSemaphoreDispatch, DISPATCH_TIME_FOREVER);
+        MetalRender* pRenderer = this;
+        pCmd->addCompletedHandler(^void(MTL::CommandBuffer* pCmd) {
+          dispatch_semaphore_signal(pRenderer->mSemaphoreDispatch);
+        });
+
+        MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
+        pComputeEncoder->useResource(mMaterialBuffer, MTL::ResourceUsageRead);
+        pComputeEncoder->useResource(mLightBuffer, MTL::ResourceUsageRead);
+        pComputeEncoder->useResource(mInstanceAccelerationStructure, MTL::ResourceUsageRead);
+        for (const MTL::AccelerationStructure* primitiveAccel : mPrimitiveAccelerationStructures)
+        {
+            pComputeEncoder->useResource(primitiveAccel, MTL::ResourceUsageRead);
+        }
+        for (int i = 0; i < mMaterialTextures.size(); ++i)
+        {
+            pComputeEncoder->useResource(mMaterialTextures[i], MTL::ResourceUsageRead);
+        }
+
+        pComputeEncoder->setComputePipelineState(mRayTracingPSO);
+        pComputeEncoder->setBuffer(mUniformBuffers[mFrameIndex], 0, 0);
+        pComputeEncoder->setBuffer(mInstanceBuffer, 0, 1);
+        pComputeEncoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
+        pComputeEncoder->setBuffer(mLightBuffer, 0, 3);
+        pComputeEncoder->setBuffer(mMaterialBuffer, 0, 4);
+        // Output
+        pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 5);
+        pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 6);
+
+        const MTL::Size gridSize = MTL::Size(width, height, 1);
+
+        const NS::UInteger threadGroupSize = mRayTracingPSO->maxTotalThreadsPerThreadgroup();
+        const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
+
+        pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+
+        pComputeEncoder->endEncoding();
+
+        pCmd->commit();
+        pCmd->waitUntilCompleted();
+
+        getSharedContext().mSubframeIndex += samplesThisLaunch;
     }
-    for (int i = 0; i < mMaterialTextures.size(); ++i)
-    {
-        pComputeEncoder->useResource(mMaterialTextures[i], MTL::ResourceUsageRead);
-    }
-
-    pComputeEncoder->setComputePipelineState(mRayTracingPSO);
-    pComputeEncoder->setBuffer(mUniformBuffers[mFrameIndex], 0, 0);
-    pComputeEncoder->setBuffer(mInstanceBuffer, 0, 1);
-    pComputeEncoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
-    pComputeEncoder->setBuffer(mLightBuffer, 0, 3);
-    pComputeEncoder->setBuffer(mMaterialBuffer, 0, 4);
-    // Output
-    pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 5);
-    pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 6);
-
-    const MTL::Size gridSize = MTL::Size(width, height, 1);
-
-    const NS::UInteger threadGroupSize = mRayTracingPSO->maxTotalThreadsPerThreadgroup();
-    const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
-
-    pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
-
-    pComputeEncoder->endEncoding();
-
-    pCmd->commit();
-    pCmd->waitUntilCompleted();
-
     pPool->release();
 
-    getSharedContext().mFrameNumber++;
     mPrevView = currView;
+    getSharedContext().mFrameNumber++;
 }
 
 Buffer* oka::MetalRender::createBuffer(const BufferDesc& desc)
