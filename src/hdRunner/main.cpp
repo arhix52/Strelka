@@ -729,7 +729,8 @@ int main(int argc, const char* argv[])
             }
             iteration = sppTotal - leftSpp;
         }
-
+        const uint32_t totalSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
+        const uint32_t currentSpp = ctx->mSubframeIndex;
         bool needScreenshot = ctx->mSettingsManager->getAs<bool>("render/pt/needScreenshot");
         if (needScreenshot)
         {
@@ -740,10 +741,10 @@ int main(int argc, const char* argv[])
             fileName = fileName.substr(foundSlash + 1);
 
             auto generateName = [&](const uint32_t attempt) {
-                std::string outputFilePath = fileName + "_" + std::to_string(iteration) + "i_" +
+                std::string outputFilePath = fileName + "_" + std::to_string(currentSpp) + "i_" +
                                              std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/depth")) +
                                              "d_" +
-                                             std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp")) +
+                                             std::to_string(totalSpp) +
                                              "spp_" + std::to_string(attempt) + ".png";
                 return outputFilePath;
             };
@@ -771,7 +772,6 @@ int main(int argc, const char* argv[])
 
         surfaceController.release(versionId);
 
-        const uint32_t currentSpp = ctx->mSubframeIndex;
         display->setWindowTitle((std::string("Strelka") + " [" + std::to_string(frameTime) + " ms]" + " [" +
                                 std::to_string(currentSpp) + " spp]")
                                    .c_str());

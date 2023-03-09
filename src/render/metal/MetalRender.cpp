@@ -173,6 +173,11 @@ void MetalRender::render(Buffer* output)
     settingsChanged = (rectLightSamplingMethodPrev != pUniformData->rectLightSamplingMethod);
     rectLightSamplingMethodPrev = pUniformData->rectLightSamplingMethod;
 
+    static bool enableAccumulationPrev = 0;
+    const bool enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
+    settingsChanged |= (enableAccumulationPrev != enableAccumulation);
+    enableAccumulationPrev = enableAccumulation;
+
     static uint32_t sspTotalPrev = 0;
     const uint32_t sspTotal = settings.getAs<uint32_t>("render/pt/sppTotal");
     settingsChanged |= (sspTotalPrev > sspTotal); // reset only if new spp less than already accumulated
@@ -201,7 +206,9 @@ void MetalRender::render(Buffer* output)
     const uint32_t totalSpp = settings.getAs<uint32_t>("render/pt/sppTotal");
     const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");
     const int32_t leftSpp = totalSpp - getSharedContext().mSubframeIndex;
-    const uint32_t samplesThisLaunch = std::min((int32_t)samplesPerLaunch, leftSpp);
+    // if accumulation is off then launch selected samples per pixel
+    const uint32_t samplesThisLaunch =
+        enableAccumulation ? std::min((int32_t)samplesPerLaunch, leftSpp) : samplesPerLaunch;
     if (samplesThisLaunch != 0)
     {
         pUniformData->samples_per_launch = samplesThisLaunch;
@@ -250,7 +257,14 @@ void MetalRender::render(Buffer* output)
         pCmd->commit();
         pCmd->waitUntilCompleted();
 
-        getSharedContext().mSubframeIndex += samplesThisLaunch;
+        if (enableAccumulation)
+        {
+            getSharedContext().mSubframeIndex += samplesThisLaunch;
+        }
+        else
+        {
+            getSharedContext().mSubframeIndex = samplesThisLaunch;
+        }
     }
     pPool->release();
 
