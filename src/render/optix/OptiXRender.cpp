@@ -886,32 +886,7 @@ void OptiXRender::render(Buffer* output)
         getSharedContext().mSubframeIndex = 0;
     }
 
-    ::Camera cam;
-    configureCamera(cam, width, height);
-
     SettingsManager& settings = *getSharedContext().mSettingsManager;
-
-    Params& params = mState.params;
-    params.scene.vb = (Vertex*)d_vb;
-    params.scene.ib = (uint32_t*)d_ib;
-    params.scene.lights = (UniformLight*)d_lights;
-    params.scene.numLights = mScene->getLights().size();
-
-    params.image = (float4*)((OptixBuffer*)output)->getNativePtr();
-    params.samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
-    params.handle = mState.ias_handle;
-    params.cam_eye = make_float3(cam.eye().x, cam.eye().y, cam.eye().z);
-    params.max_depth = settings.getAs<uint32_t>("render/pt/depth");
-
-    params.rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
-    params.enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
-    params.debug = settings.getAs<uint32_t>("render/pt/debug");
-    params.shadowRayTmin = settings.getAs<float>("render/pt/dev/shadowRayTmin");
-    params.materialRayTmin = settings.getAs<float>("render/pt/dev/materialRayTmin");
-
-    params.viewToWorld = glm::inverse(camera.matrices.view);
-    params.clipToView = camera.matrices.invPerspective;
-
     bool settingsChanged = false;
 
     static uint32_t rectLightSamplingMethodPrev = 0;
@@ -937,14 +912,26 @@ void OptiXRender::render(Buffer* output)
         getSharedContext().mSubframeIndex = 0;
     }
 
+    Params& params = mState.params;
+    params.scene.vb = (Vertex*)d_vb;
+    params.scene.ib = (uint32_t*)d_ib;
+    params.scene.lights = (UniformLight*)d_lights;
+    params.scene.numLights = mScene->getLights().size();
+
+    params.image = (float4*)((OptixBuffer*)output)->getNativePtr();
+    params.samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
+    params.handle = mState.ias_handle;
+    params.max_depth = settings.getAs<uint32_t>("render/pt/depth");
+
+    params.rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
+    params.enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
+    params.debug = settings.getAs<uint32_t>("render/pt/debug");
+    params.shadowRayTmin = settings.getAs<float>("render/pt/dev/shadowRayTmin");
+    params.materialRayTmin = settings.getAs<float>("render/pt/dev/materialRayTmin");
+
+    params.viewToWorld = glm::inverse(camera.matrices.view);
+    params.clipToView = camera.matrices.invPerspective;
     params.subframe_index = getSharedContext().mSubframeIndex;
-
-    glm::float3 cam_u, cam_v, cam_w;
-    cam.UVWFrame(cam_u, cam_v, cam_w);
-
-    params.cam_u = make_float3(cam_u.x, cam_u.y, cam_u.z);
-    params.cam_v = make_float3(cam_v.x, cam_v.y, cam_v.z);
-    params.cam_w = make_float3(cam_w.x, cam_w.y, cam_w.z);
 
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(mState.d_params), &params, sizeof(params), cudaMemcpyHostToDevice));
 
