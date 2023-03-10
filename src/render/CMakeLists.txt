@@ -56,8 +56,8 @@ if(WIN32)
   list(APPEND generated_files ${generated_files2})
 
   set(RENDER_CUDA_SOURCES 
-  ${ROOT_HOME}/src/render/optix/postprocessing/Tonemappers.h
-  ${ROOT_HOME}/src/render/optix/postprocessing/Tonemappers.cu
+    ${ROOT_HOME}/src/render/optix/postprocessing/Tonemappers.h
+    ${ROOT_HOME}/src/render/optix/postprocessing/Tonemappers.cu
   )
 
   add_library(${RENDERLIB_NAME} STATIC ${RENDER_SOURCES} ${generated_files} ${RENDER_CUDA_SOURCES})
