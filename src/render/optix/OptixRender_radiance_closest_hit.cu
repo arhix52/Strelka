@@ -135,22 +135,27 @@ static __forceinline__ __device__ bool traceOcclusion(
 {
     unsigned int occluded = 0u;
     optixTrace(handle, ray_origin, ray_direction, tmin, tmax,
-        0.0f, // rayTime
-        OptixVisibilityMask(RAY_MASK_SHADOW),
-        OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
-        RAY_TYPE_OCCLUSION, // SBT offset
-        RAY_TYPE_COUNT, // SBT stride
-        RAY_TYPE_OCCLUSION, // missSBTIndex
-        occluded);
+               0.0f, // rayTime
+               OptixVisibilityMask(RAY_MASK_SHADOW), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+               RAY_TYPE_OCCLUSION, // SBT offset
+               RAY_TYPE_COUNT, // SBT stride
+               RAY_TYPE_OCCLUSION, // missSBTIndex
+               occluded);
     return occluded;
 }
 
-static __forceinline__ __device__ float3 interpolateAttrib(const float3& attr1, const float3& attr2, const float3& attr3, const float2& bary)
+static __forceinline__ __device__ float3 interpolateAttrib(const float3& attr1,
+                                                           const float3& attr2,
+                                                           const float3& attr3,
+                                                           const float2& bary)
 {
     return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
 
-static __forceinline__ __device__ float2 interpolateAttrib(const float2& attr1, const float2& attr2, const float2& attr3, const float2& bary)
+static __forceinline__ __device__ float2 interpolateAttrib(const float2& attr1,
+                                                           const float2& attr2,
+                                                           const float2& attr3,
+                                                           const float2& bary)
 {
     return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
@@ -200,7 +205,8 @@ __device__ const float4 identity[3] = { { 1.0f, 0.0f, 0.0f, 0.0f },
                                         { 0.0f, 1.0f, 0.0f, 0.0f },
                                         { 0.0f, 0.0f, 1.0f, 0.0f } };
 
-__inline__ __device__ float3 sampleLight(uint32_t& rngState, const UniformLight& light, Mdl_state& state, float3& toLight, float& lightPdf)
+__inline__ __device__ float3
+sampleLight(uint32_t& rngState, const UniformLight& light, Mdl_state& state, float3& toLight, float& lightPdf)
 {
     LightSampleData lightSampleData = {};
     switch (light.type)
@@ -233,10 +239,11 @@ __inline__ __device__ float3 sampleLight(uint32_t& rngState, const UniformLight&
         // shadowRay.d = float4(lightSampleData.L, 0.0f);
         // shadowRay.o = float4(offset_ray(state.position, state.geom_normal), lightSampleData.distToLight); // need to
         // set
-        const bool occluded = traceOcclusion(params.handle, offset_ray(state.position, state.geom_normal), lightSampleData.L,
-                                             params.shadowRayTmin, // tmin
-                                             lightSampleData.distToLight // tmax
-        );
+        const bool occluded =
+            traceOcclusion(params.handle, offset_ray(state.position, state.geom_normal), lightSampleData.L,
+                           params.shadowRayTmin, // tmin
+                           lightSampleData.distToLight // tmax
+            );
         // if (occluded)
         // {
         //     return make_float3(100.0f, 0.0f, 0.0f);
@@ -275,30 +282,30 @@ __device__ float3 estimateDirectLighting(uint32_t& rngSeed, Mdl_state& state, fl
 // Get curve hit-point in world coordinates.
 static __forceinline__ __device__ float3 getHitPoint()
 {
-    const float  t            = optixGetRayTmax();
-    const float3 rayOrigin    = optixGetWorldRayOrigin();
+    const float t = optixGetRayTmax();
+    const float3 rayOrigin = optixGetWorldRayOrigin();
     const float3 rayDirection = optixGetWorldRayDirection();
 
     return rayOrigin + t * rayDirection;
 }
 
 // Compute surface normal of cubic pimitive in world space.
-static __forceinline__ __device__ float3 normalCubic( const int primitiveIndex )
+static __forceinline__ __device__ float3 normalCubic(const int primitiveIndex)
 {
-    const OptixTraversableHandle gas         = optixGetGASTraversableHandle();
-    const unsigned int           gasSbtIndex = optixGetSbtGASIndex();
-    float4                       controlPoints[4];
+    const OptixTraversableHandle gas = optixGetGASTraversableHandle();
+    const unsigned int gasSbtIndex = optixGetSbtGASIndex();
+    float4 controlPoints[4];
 
-    optixGetCubicBSplineVertexData( gas, primitiveIndex, gasSbtIndex, 0.0f, controlPoints );
+    optixGetCubicBSplineVertexData(gas, primitiveIndex, gasSbtIndex, 0.0f, controlPoints);
 
     CubicInterpolator interpolator;
     interpolator.initializeFromBSpline(controlPoints);
 
-    float3              hitPoint = getHitPoint();
+    float3 hitPoint = getHitPoint();
     // interpolators work in object space
-    hitPoint            = optixTransformPointFromWorldToObjectSpace( hitPoint );
-    const float3 normal = surfaceNormal( interpolator, optixGetCurveParameter(), hitPoint );
-    return optixTransformNormalFromObjectToWorldSpace( normal );
+    hitPoint = optixTransformPointFromWorldToObjectSpace(hitPoint);
+    const float3 normal = surfaceNormal(interpolator, optixGetCurveParameter(), hitPoint);
+    return optixTransformNormalFromObjectToWorldSpace(normal);
 }
 
 struct SurfaceHitData
@@ -339,15 +346,14 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
 
     const float2 uvCoord = interpolateAttrib(uv0, uv1, uv2, barycentrics);
     const float3 text_coords = make_float3(uvCoord.x, uvCoord.y, 0.0f);
-    
-    const float3 worldPosition =
-    optixTransformPointFromObjectToWorldSpace(interpolateAttrib(p0, p1, p2, barycentrics));
+
+    const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(interpolateAttrib(p0, p1, p2, barycentrics));
     const float3 object_normal = normalize(interpolateAttrib(n0, n1, n2, barycentrics));
     float3 worldNormal = normalize(optixTransformNormalFromObjectToWorldSpace(object_normal));
     float3 geomNormal = normalize(cross(p1 - p0, p2 - p0));
     geomNormal = normalize(optixTransformNormalFromObjectToWorldSpace(geomNormal));
     const float3 worldTangent =
-    normalize(optixTransformNormalFromObjectToWorldSpace(interpolateAttrib(t0, t1, t2, barycentrics)));
+        normalize(optixTransformNormalFromObjectToWorldSpace(interpolateAttrib(t0, t1, t2, barycentrics)));
     geomNormal *= (inside ? -1.0f : 1.0f);
     worldNormal *= (inside ? -1.0f : 1.0f);
 
@@ -372,13 +378,16 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     optixGetCubicBSplineVertexData(gas, primitiveIndex, gasSbtIndex, 0.0f, controlPoints);
     CubicInterpolator interpolator;
     interpolator.initializeFromBSpline(controlPoints);
-    float3 worldPosition = optixTransformPointFromWorldToObjectSpace(getHitPoint());
+    float3 hitPoint = getHitPoint();
     // interpolators work in object space
-    float3 worldNormal = normalize(optixTransformNormalFromObjectToWorldSpace(surfaceNormal(interpolator, optixGetCurveParameter(), worldPosition)));
-    const float3 worldTangent = normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, optixGetCurveParameter())));
+    hitPoint = optixTransformPointFromWorldToObjectSpace(hitPoint); // interpolators work in object space
+    float3 worldNormal = normalize(
+        optixTransformNormalFromObjectToWorldSpace(surfaceNormal(interpolator, optixGetCurveParameter(), hitPoint)));
+    const float3 worldTangent =
+        normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, optixGetCurveParameter())));
     worldNormal *= (inside ? -1.0f : 1.0f);
     const float3 worldBinormal = cross(worldNormal, worldTangent);
-
+    const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(hitPoint);
     SurfaceHitData res;
     res.normal = worldNormal;
     res.geom_normal = worldNormal;
