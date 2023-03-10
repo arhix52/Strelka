@@ -31,6 +31,8 @@ public:
     const std::vector<uint32_t>& GetVertexCounts() const;
     const GfMatrix4d& GetPrototypeTransform() const;
 
+    const char* getName() const;
+
 protected:
     void _InitRepr(const TfToken& reprName, HdDirtyBits* dirtyBits) override;
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override;
