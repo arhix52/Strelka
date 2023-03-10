@@ -829,7 +829,7 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
         // new dimensions!
         needRealloc = true;
         // reset rendering
-        getSharedContext().mFrameNumber = 0;
+        getSharedContext().mSubframeIndex = 0;
     }
     mState.params.image_width = width;
     mState.params.image_height = height;
@@ -875,7 +875,7 @@ void OptiXRender::render(Buffer* output)
     camera.updateAspectRatio(width / (float)height);
     camera.updateViewMatrix();
 
-    View currView;
+    View currView = {};
 
     currView.mCamMatrices = camera.matrices;
 
@@ -883,13 +883,34 @@ void OptiXRender::render(Buffer* output)
         glm::any(glm::notEqual(currView.mCamMatrices.view, mPrevView.mCamMatrices.view)))
     {
         // need reset
-        getSharedContext().mFrameNumber = 0;
+        getSharedContext().mSubframeIndex = 0;
     }
 
-    ::Camera cam;
-    configureCamera(cam, width, height);
-
     SettingsManager& settings = *getSharedContext().mSettingsManager;
+    bool settingsChanged = false;
+
+    static uint32_t rectLightSamplingMethodPrev = 0;
+    const uint32_t rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
+    settingsChanged = (rectLightSamplingMethodPrev != rectLightSamplingMethod);
+    rectLightSamplingMethodPrev = rectLightSamplingMethod;
+
+    static bool enableAccumulationPrev = 0;
+    const bool enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
+    settingsChanged |= (enableAccumulationPrev != enableAccumulation);
+    enableAccumulationPrev = enableAccumulation;
+
+    static uint32_t sspTotalPrev = 0;
+    const uint32_t sspTotal = settings.getAs<uint32_t>("render/pt/sppTotal");
+    settingsChanged |= (sspTotalPrev > sspTotal); // reset only if new spp less than already accumulated
+    sspTotalPrev = sspTotal;
+
+    const float gamma = settings.getAs<float>("render/post/gamma");
+    const ToneMapperType tonemapperType = (ToneMapperType)settings.getAs<uint32_t>("render/pt/tonemapperType");
+
+    if (settingsChanged)
+    {
+        getSharedContext().mSubframeIndex = 0;
+    }
 
     Params& params = mState.params;
     params.scene.vb = (Vertex*)d_vb;
@@ -900,42 +921,49 @@ void OptiXRender::render(Buffer* output)
     params.image = (float4*)((OptixBuffer*)output)->getNativePtr();
     params.samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
     params.handle = mState.ias_handle;
-    params.cam_eye = make_float3(cam.eye().x, cam.eye().y, cam.eye().z);
     params.max_depth = settings.getAs<uint32_t>("render/pt/depth");
 
     params.rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
-
-    params.viewToWorld = glm::inverse(camera.matrices.view);
-    params.clipToView = camera.matrices.invPerspective;
-
-    if (mState.prevParams.rectLightSamplingMethod != params.rectLightSamplingMethod)
-    {
-        // need reset
-        getSharedContext().mFrameNumber = 0;
-    }
-
-    params.subframe_index = getSharedContext().mFrameNumber;
-
-    glm::float3 cam_u, cam_v, cam_w;
-    cam.UVWFrame(cam_u, cam_v, cam_w);
-
-    params.cam_u = make_float3(cam_u.x, cam_u.y, cam_u.z);
-    params.cam_v = make_float3(cam_v.x, cam_v.y, cam_v.z);
-    params.cam_w = make_float3(cam_w.x, cam_w.y, cam_w.z);
-
     params.enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
     params.debug = settings.getAs<uint32_t>("render/pt/debug");
     params.shadowRayTmin = settings.getAs<float>("render/pt/dev/shadowRayTmin");
     params.materialRayTmin = settings.getAs<float>("render/pt/dev/materialRayTmin");
 
+    params.viewToWorld = glm::inverse(camera.matrices.view);
+    params.clipToView = camera.matrices.invPerspective;
+    params.subframe_index = getSharedContext().mSubframeIndex;
+
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(mState.d_params), &params, sizeof(params), cudaMemcpyHostToDevice));
 
-    OPTIX_CHECK(optixLaunch(
-        mState.pipeline, mState.stream, mState.d_params, sizeof(Params), &mState.sbt, width, height, /*depth=*/1));
-    CUDA_SYNC_CHECK();
+    const uint32_t totalSpp = settings.getAs<uint32_t>("render/pt/sppTotal");
+    const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");
+    const int32_t leftSpp = totalSpp - getSharedContext().mSubframeIndex;
+    // if accumulation is off then launch selected samples per pixel
+    const uint32_t samplesThisLaunch =
+        enableAccumulation ? std::min((int32_t)samplesPerLaunch, leftSpp) : samplesPerLaunch;
+    params.samples_per_launch = samplesThisLaunch;
+    if (samplesThisLaunch != 0)
+    {
+        OPTIX_CHECK(optixLaunch(
+            mState.pipeline, mState.stream, mState.d_params, sizeof(Params), &mState.sbt, width, height, /*depth=*/1));
+        CUDA_SYNC_CHECK();
+        if (enableAccumulation)
+        {
+            getSharedContext().mSubframeIndex += samplesThisLaunch;
+        }
+        else
+        {
+            getSharedContext().mSubframeIndex = samplesThisLaunch;
+        }
+    }
+    else
+    {
+        // just copy latest accumulated raw radiance to destination
+        CUDA_CHECK(cudaMemcpy(params.image, params.accum,
+                              mState.params.image_width * mState.params.image_height * sizeof(float4),
+                              cudaMemcpyDeviceToDevice));
+    }
 
-    const float gamma = settings.getAs<float>("render/post/gamma");
-    const ToneMapperType tonemapperType = (ToneMapperType) settings.getAs<uint32_t>("render/pt/tonemapperType");
     tonemap(tonemapperType, gamma, params.image, width, height);
 
     output->unmap();

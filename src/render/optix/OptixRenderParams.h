@@ -51,8 +51,6 @@ struct Params
 
     uint32_t rectLightSamplingMethod;
 
-    float3 cam_eye;
-    float3 cam_u, cam_v, cam_w;
     glm::float4x4 clipToView;
     glm::float4x4 viewToWorld;
 

@@ -629,18 +629,10 @@ int main(int argc, const char* argv[])
     HdEngine engine;
 
     display->setInputHandler(&cameraController);
-
     RenderSurfaceController surfaceController(ctx->mSettingsManager, renderBuffers);
     display->setResizeHandler(&surfaceController);
 
     uint64_t frameCount = 0;
-    oka::ImageBuffer outputImageCopy;
-    uint32_t frameSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp");
-    uint32_t sppTotal = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
-    uint32_t leftSpp = sppTotal;
-    bool needCopyBuffer = false;
-    int32_t waitFramesForScreenshot = -1;
-    uint32_t iteration = sppTotal - leftSpp;
 
     while (!display->windowShouldClose())
     {
@@ -669,9 +661,6 @@ int main(int argc, const char* argv[])
         auto currentTime = std::chrono::high_resolution_clock::now();
         const double deltaTime = std::chrono::duration<double, std::milli>(currentTime - prevTime).count() / 1000.0;
 
-        auto tmpCam = cameraController.getCamera();
-        auto transform = tmpCam.GetTransform();
-
         uint32_t cameraSpeed = ctx->mSettingsManager->getAs<uint32_t>("render/cameraSpeed");
         cameraController.update(deltaTime, cameraSpeed);
         prevTime = currentTime;
@@ -679,58 +668,30 @@ int main(int argc, const char* argv[])
         cam.SetFromCamera(cameraController.getCamera(), 0.0);
 
         display->onBeginFrame();
-        if (cameraController.getCamera().GetTransform() != transform ||
-            sppTotal != ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal") ||
-            frameSpp != ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp") ||
-            ctx->mSettingsManager->getAs<bool>("render/pt/isResized"))
-        {
-            frameSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp");
-            sppTotal = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
-            ctx->mSettingsManager->setAs<bool>("render/pt/isResized", false);
-            leftSpp = sppTotal;
-        }
 
-        // This can be moved to render itself
-        if (leftSpp > 0)
-        {
-            uint32_t savedFSpp = -1;
-            if (frameSpp > leftSpp)
-            {
-                savedFSpp = frameSpp;
-                ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", leftSpp);
-                frameSpp = leftSpp;
-            }
+        engine.Execute(renderIndex, &tasks); // main path tracing rendering in fixed render resolution
+        oka::Buffer* outputBuffer =
+            surfaceController.getRenderBuffer(versionId)->GetResource(false).UncheckedGet<oka::Buffer*>();
+        oka::ImageBuffer outputImage;
+        // upload to host
+        outputBuffer->map();
+        outputImage.data = outputBuffer->getHostPointer();
+        outputImage.dataSize = outputBuffer->getHostDataSize();
+        outputImage.height = outputBuffer->height();
+        outputImage.width = outputBuffer->width();
+        outputImage.pixel_format = outputBuffer->getFormat();
 
-            engine.Execute(renderIndex, &tasks); // main path tracing rendering in fixed render resolution
-            oka::Buffer* outputBuffer =
-                surfaceController.getRenderBuffer(versionId)->GetResource(false).UncheckedGet<oka::Buffer*>();
-            oka::ImageBuffer outputImage;
-            // upload to host
-            outputBuffer->map();
-            outputImage.data = outputBuffer->getHostPointer();
-            outputImage.dataSize = outputBuffer->getHostDataSize();
-            outputImage.height = outputBuffer->height();
-            outputImage.width = outputBuffer->width();
-            outputImage.pixel_format = outputBuffer->getFormat();
-            outputImageCopy = outputImage;
-
-            leftSpp -= frameSpp;
-
-            if (savedFSpp != -1)
-            {
-                frameSpp = savedFSpp;
-                ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", frameSpp);
-            }
-
-            if (leftSpp == 0 && ctx->mSettingsManager->getAs<bool>("render/pt/screenshotSPP"))
-            {
-                ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
-                ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", false);
-            }
-            iteration = sppTotal - leftSpp;
-        }
-
+        const uint32_t totalSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
+        const uint32_t currentSpp = ctx->mSubframeIndex;
         bool needScreenshot = ctx->mSettingsManager->getAs<bool>("render/pt/needScreenshot");
+
+        if (ctx->mSettingsManager->getAs<bool>("render/pt/screenshotSPP") && (currentSpp == totalSpp))
+        {
+            needScreenshot = true;
+            // need to store screen only once
+            ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", false);
+        }
+    
         if (needScreenshot)
         {
             std::size_t foundSlash = usdPath.find_last_of("/\\");
@@ -740,10 +701,10 @@ int main(int argc, const char* argv[])
             fileName = fileName.substr(foundSlash + 1);
 
             auto generateName = [&](const uint32_t attempt) {
-                std::string outputFilePath = fileName + "_" + std::to_string(iteration) + "i_" +
+                std::string outputFilePath = fileName + "_" + std::to_string(currentSpp) + "i_" +
                                              std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/depth")) +
                                              "d_" +
-                                             std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/spp")) +
+                                             std::to_string(totalSpp) +
                                              "spp_" + std::to_string(attempt) + ".png";
                 return outputFilePath;
             };
@@ -754,15 +715,15 @@ int main(int argc, const char* argv[])
                 outputFilePath = generateName(attempt++);
             } while (std::filesystem::exists(std::filesystem::path(outputFilePath.c_str())));
 
-            unsigned char* mappedMem = (unsigned char*)outputImageCopy.data;
+            unsigned char* mappedMem = (unsigned char*)outputImage.data;
 
-            if (saveScreenshot(outputFilePath, mappedMem, outputImageCopy.width, outputImageCopy.height))
+            if (saveScreenshot(outputFilePath, mappedMem, outputImage.width, outputImage.height))
             {
                 ctx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", false);
             }
         }
 
-        display->drawFrame(outputImageCopy); // blit rendered image to swapchain
+        display->drawFrame(outputImage); // blit rendered image to swapchain
         display->drawUI(); // render ui to swapchain image in window resolution
         display->onEndFrame(); // submit command buffer and present
 
@@ -772,7 +733,7 @@ int main(int argc, const char* argv[])
         surfaceController.release(versionId);
 
         display->setWindowTitle((std::string("Strelka") + " [" + std::to_string(frameTime) + " ms]" + " [" +
-                                std::to_string(iteration) + " iteration]")
+                                std::to_string(currentSpp) + " spp]")
                                    .c_str());
         ++frameCount;
     }
