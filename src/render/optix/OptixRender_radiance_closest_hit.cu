@@ -170,9 +170,9 @@ static __forceinline__ __device__ float3 offset_ray(const float3& p, const float
                              __int_as_float(__float_as_int(p.y) + ((p.y < 0) ? -of_i.y : of_i.y)),
                              __int_as_float(__float_as_int(p.z) + ((p.z < 0) ? -of_i.z : of_i.z)));
 
-    return make_float3(abs(p.x) < origin ? p.x + float_scale * n.x : p_i.x,
-                       abs(p.y) < origin ? p.y + float_scale * n.y : p_i.y,
-                       abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
+    return make_float3(fabs(p.x) < origin ? p.x + float_scale * n.x : p_i.x,
+                       fabs(p.y) < origin ? p.y + float_scale * n.y : p_i.y,
+                       fabs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
 }
 
 //  valid range of coordinates [-1; 1]
