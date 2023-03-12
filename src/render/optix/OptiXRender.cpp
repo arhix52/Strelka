@@ -895,7 +895,7 @@ void OptiXRender::render(Buffer* output)
     rectLightSamplingMethodPrev = rectLightSamplingMethod;
 
     static bool enableAccumulationPrev = 0;
-    const bool enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
+    bool enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
     settingsChanged |= (enableAccumulationPrev != enableAccumulation);
     enableAccumulationPrev = enableAccumulation;
 
@@ -972,9 +972,18 @@ void OptiXRender::render(Buffer* output)
     const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");
     const int32_t leftSpp = totalSpp - getSharedContext().mSubframeIndex;
     // if accumulation is off then launch selected samples per pixel
-    const uint32_t samplesThisLaunch =
+    uint32_t samplesThisLaunch =
         enableAccumulation ? std::min((int32_t)samplesPerLaunch, leftSpp) : samplesPerLaunch;
+
+    if (params.debug != 0)
+    {
+        samplesThisLaunch = 1;
+        enableAccumulation = false;
+    }
+
     params.samples_per_launch = samplesThisLaunch;
+    params.enableAccumulation = enableAccumulation;
+
     if (samplesThisLaunch != 0)
     {
         OPTIX_CHECK(optixLaunch(
@@ -997,7 +1006,11 @@ void OptiXRender::render(Buffer* output)
                               cudaMemcpyDeviceToDevice));
     }
 
-    tonemap(tonemapperType, exposureValue, gamma, params.image, width, height);
+    if (params.debug == 0)
+    {
+        // do not run post processing for debug output
+        tonemap(tonemapperType, exposureValue, gamma, params.image, width, height);
+    }
 
     output->unmap();
 
