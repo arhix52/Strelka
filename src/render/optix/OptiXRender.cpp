@@ -932,6 +932,39 @@ void OptiXRender::render(Buffer* output)
     params.viewToWorld = glm::inverse(camera.matrices.view);
     params.clipToView = camera.matrices.invPerspective;
     params.subframe_index = getSharedContext().mSubframeIndex;
+    // Photometric Units
+
+    // Controls the sensitivity of the “camera film” and is expressed as an index; the ISO number of the film, also
+    // known as “film speed.” The higher this value, the greater the exposure. If this is set to a non-zero value,
+    // “Photographic” mode is enabled. If this is set to 0, “Arbitrary” mode is enabled, and all color scaling is then
+    // strictly defined by the value of cm^2 Factor.
+    float filmIso = settings.getAs<float>("render/post/tonemapper/filmIso");
+    // The candela per meter square factor 
+    float cm2_factor = settings.getAs<float>("render/post/tonemapper/cm2_factor");
+    // The fractional aperture number; e.g., 11 means aperture “f/11.” It adjusts the size of the opening of the “camera
+    // iris” and is expressed as a ratio. The higher this value, the lower the exposure.
+    float fStop = settings.getAs<float>("render/post/tonemapper/fStop");
+    // Controls the duration, in fractions of a second, that the “shutter” is open; e.g., the value 100 means that the
+    // “shutter” is open for 1/100th of a second. The higher this value, the greater the exposure
+    float shutterSpeed = settings.getAs<float>("render/post/tonemapper/shutterSpeed");
+    // Specifies the main color temperature of the light sources; the color that will be mapped to “white” on output,
+    // e.g., an incoming color of this hue/saturation will be mapped to grayscale, but its intensity will remain
+    // unchanged. This is similar to white balance controls on digital cameras.
+    float3 whitePoint { 1.0f, 1.0f, 1.0f };
+
+    float3 exposureValue = { whitePoint.x > 0.0f ? 1.0f / whitePoint.x : 1.0f, 
+                             whitePoint.y > 0.0f ? 1.0f / whitePoint.y : 1.0f,
+                             whitePoint.z > 0.0f ? 1.0f / whitePoint.z : 1.0f };
+    float lum = dot(exposureValue, make_float3(0.299f, 0.587f, 0.114f));
+    if (filmIso > 0.0f)
+    {
+        exposureValue *= cm2_factor * filmIso / (shutterSpeed * fStop * fStop) / 100.0f;
+    }
+    else
+    {
+        exposureValue *= cm2_factor;
+    }
+    exposureValue /= lum;
 
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(mState.d_params), &params, sizeof(params), cudaMemcpyHostToDevice));
 
@@ -964,7 +997,7 @@ void OptiXRender::render(Buffer* output)
                               cudaMemcpyDeviceToDevice));
     }
 
-    tonemap(tonemapperType, gamma, params.image, width, height);
+    tonemap(tonemapperType, exposureValue, gamma, params.image, width, height);
 
     output->unmap();
 

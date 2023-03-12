@@ -10,5 +10,9 @@ enum class ToneMapperType : uint32_t
     eFilmic,
 };
 
-extern "C" void tonemap(
-    const ToneMapperType type, const float gamma, float4* image, const uint32_t width, const uint32_t height);
+extern "C" void tonemap(const ToneMapperType type,
+                        const float3 exposure,
+                        const float gamma,
+                        float4* image,
+                        const uint32_t width,
+                        const uint32_t height);
