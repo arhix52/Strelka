@@ -467,7 +467,7 @@ uint32_t Scene::createLight(const UniformLightDesc& desc)
 
 void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
 {
-    float intensityPerPoint = desc.intensity; // light intensity divided by light area;
+    float intensityPerPoint = desc.intensity; // light intensity
     // transform to GPU light
     // Rect Light
     if (desc.type == 0)
@@ -481,8 +481,6 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].points[3] = localTransform * glm::float4(0.5f, -0.5f, 0.0f, 1.0f);
 
         mLights[lightId].type = 0;
-
-        intensityPerPoint /= (desc.width * desc.height);
     }
     else if (desc.type == 1)
     {
@@ -499,8 +497,6 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         glm::float4 normal = localTransform * glm::float4(0, 0, 1.f, 0.0f);
         mLights[lightId].normal = normal;
         mLights[lightId].type = 1;
-
-        intensityPerPoint /= (M_PI * desc.radius * desc.radius);
     }
     else if (desc.type == 2)
     {
@@ -512,8 +508,6 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].points[1] = localTransform * glm::float4(0.f, 0.f, 0.f, 1.f); // save O
 
         mLights[lightId].type = 2;
-
-        intensityPerPoint /= (4 * M_PI * desc.radius * desc.radius);
     }
 
     mLights[lightId].color = glm::float4(desc.color, 1.0f) * intensityPerPoint;
