@@ -127,12 +127,13 @@ extern "C" __global__ void __raygen__rg()
         result += prd.radiance;
     }
 
+    result /= static_cast<float>(params.samples_per_launch);
+
     const unsigned int image_index = launch_index.y * params.image_width + launch_index.x;
 
     if (params.enableAccumulation && params.debug == 0)
     {
-        float3 accum_color = result / static_cast<float>(params.samples_per_launch);
-
+        float3 accum_color = result;
         if (params.subframe_index > 0)
         {
             const float a = 1.0f / static_cast<float>(params.subframe_index + 1);
