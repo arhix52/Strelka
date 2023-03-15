@@ -1009,7 +1009,7 @@ void OptiXRender::render(Buffer* output)
         }
         else
         {
-            getSharedContext().mSubframeIndex = samplesThisLaunch;
+            getSharedContext().mSubframeIndex = 0;
         }
     }
     else
