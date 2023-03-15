@@ -966,22 +966,6 @@ void OptiXRender::render(Buffer* output)
     }
     exposureValue /= lum;
 
-    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(mState.d_params), &params, sizeof(params), cudaMemcpyHostToDevice));
-
-    float3 exposureValue = { whitePoint.x > 0.0f ? 1.0f / whitePoint.x : 1.0f, 
-                             whitePoint.y > 0.0f ? 1.0f / whitePoint.y : 1.0f,
-                             whitePoint.z > 0.0f ? 1.0f / whitePoint.z : 1.0f };
-    float lum = dot(exposureValue, make_float3(0.299f, 0.587f, 0.114f));
-    if (filmIso > 0.0f)
-    {
-        exposureValue *= cm2_factor * filmIso / (shutterSpeed * fStop * fStop) / 100.0f;
-    }
-    else
-    {
-        exposureValue *= cm2_factor;
-    }
-    exposureValue /= lum;
-
     const uint32_t totalSpp = settings.getAs<uint32_t>("render/pt/sppTotal");
     const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");
     const int32_t leftSpp = totalSpp - getSharedContext().mSubframeIndex;
@@ -997,6 +981,8 @@ void OptiXRender::render(Buffer* output)
 
     params.samples_per_launch = samplesThisLaunch;
     params.enableAccumulation = enableAccumulation;
+
+    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(mState.d_params), &params, sizeof(params), cudaMemcpyHostToDevice));
 
     if (samplesThisLaunch != 0)
     {
