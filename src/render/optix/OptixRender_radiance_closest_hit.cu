@@ -144,18 +144,18 @@ static __forceinline__ __device__ bool traceOcclusion(
     return occluded;
 }
 
-static __forceinline__ __device__ float3 interpolateAttrib(const float3& attr1,
-                                                           const float3& attr2,
-                                                           const float3& attr3,
-                                                           const float2& bary)
+static __forceinline__ __device__ float3 interpolateAttrib(const float3 attr1,
+                                                           const float3 attr2,
+                                                           const float3 attr3,
+                                                           const float2 bary)
 {
     return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
 
-static __forceinline__ __device__ float2 interpolateAttrib(const float2& attr1,
-                                                           const float2& attr2,
-                                                           const float2& attr3,
-                                                           const float2& bary)
+static __forceinline__ __device__ float2 interpolateAttrib(const float2 attr1,
+                                                           const float2 attr2,
+                                                           const float2 attr3,
+                                                           const float2 bary)
 {
     return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
@@ -163,7 +163,7 @@ static __forceinline__ __device__ float2 interpolateAttrib(const float2& attr1,
 // Clever offset_ray function from Ray Tracing Gems chapter 6
 // Offsets the ray origin from current position p, along normal n (which must be geometric normal)
 // so that no self-intersection can occur.
-static __forceinline__ __device__ float3 offset_ray(const float3& p, const float3& n)
+static __forceinline__ __device__ float3 offset_ray(const float3 p, const float3 n)
 {
     static const float origin = 1.0f / 32.0f;
     static const float float_scale = 1.0f / 65536.0f;
@@ -206,7 +206,7 @@ __device__ const float4 identity[3] = { { 1.0f, 0.0f, 0.0f, 0.0f },
                                         { 0.0f, 0.0f, 1.0f, 0.0f } };
 
 __inline__ __device__ float3
-sampleLight(uint32_t& rngState, const UniformLight& light, Mdl_state& state, float3& toLight, float& lightPdf)
+sampleLight(uint32_t& rngState, const UniformLight& light, const Mdl_state& state, float3& toLight, float& lightPdf)
 {
     LightSampleData lightSampleData = {};
     switch (light.type)
@@ -269,7 +269,7 @@ sampleLight(uint32_t& rngState, const UniformLight& light, Mdl_state& state, flo
     return make_float3(0.0f);
 }
 
-__device__ float3 estimateDirectLighting(uint32_t& rngSeed, Mdl_state& state, float3& toLight, float& lightPdf)
+__device__ float3 estimateDirectLighting(uint32_t& rngSeed, const Mdl_state& state, float3& toLight, float& lightPdf)
 {
     const uint32_t lightId = (uint32_t)(params.scene.numLights * rnd(rngSeed));
     const float lightSelectionPdf = 1.0f / params.scene.numLights;
