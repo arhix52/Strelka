@@ -421,11 +421,15 @@ extern "C" __global__ void __closesthit__radiance()
         surfaceHit = fillCurveGeomData(hit_data, isInside);
     }
     // setup MDL state
+    // 16 - predefined value, that should match mdl setup
+    // set_option("num_texture_results", "16")
     float4 texture_results[16] = {};
     Mdl_state state;
     state.position = surfaceHit.position;
     state.normal = surfaceHit.normal;
     state.geom_normal = surfaceHit.geom_normal;
+    // Currently supports only 1 set of textures
+    // see: set_option("num_texture_spaces", "1")
     state.text_coords = &surfaceHit.text_coords;
     state.tangent_u = &surfaceHit.worldTangent;
     state.tangent_v = &surfaceHit.worldBinormal;
