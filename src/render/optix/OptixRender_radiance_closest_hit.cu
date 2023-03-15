@@ -328,29 +328,33 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
 
     const uint32_t baseVbOffset = hit_data->vertexOffset;
 
-    const float3 p0 = params.scene.vb[baseVbOffset + i0].position;
-    const float3 p1 = params.scene.vb[baseVbOffset + i1].position;
-    const float3 p2 = params.scene.vb[baseVbOffset + i2].position;
+    const Vertex v0 = params.scene.vb[baseVbOffset + i0];
+    const Vertex v1 = params.scene.vb[baseVbOffset + i1];
+    const Vertex v2 = params.scene.vb[baseVbOffset + i2];
 
-    const float3 n0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normal);
-    const float3 n1 = unpackNormal(params.scene.vb[baseVbOffset + i1].normal);
-    const float3 n2 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
+    const float3 p0 = v0.position;
+    const float3 p1 = v1.position;
+    const float3 p2 = v2.position;
 
-    const float3 t0 = unpackNormal(params.scene.vb[baseVbOffset + i0].tangent);
-    const float3 t1 = unpackNormal(params.scene.vb[baseVbOffset + i1].tangent);
-    const float3 t2 = unpackNormal(params.scene.vb[baseVbOffset + i2].tangent);
+    const float3 n0 = unpackNormal(v0.normal);
+    const float3 n1 = unpackNormal(v1.normal);
+    const float3 n2 = unpackNormal(v2.normal);
 
-    const float2 uv0 = unpackUV(params.scene.vb[baseVbOffset + i0].uv);
-    const float2 uv1 = unpackUV(params.scene.vb[baseVbOffset + i1].uv);
-    const float2 uv2 = unpackUV(params.scene.vb[baseVbOffset + i2].uv);
+    const float3 t0 = unpackNormal(v0.tangent);
+    const float3 t1 = unpackNormal(v1.tangent);
+    const float3 t2 = unpackNormal(v2.tangent);
+
+    const float2 uv0 = unpackUV(v0.uv);
+    const float2 uv1 = unpackUV(v1.uv);
+    const float2 uv2 = unpackUV(v2.uv);
 
     const float2 uvCoord = interpolateAttrib(uv0, uv1, uv2, barycentrics);
     const float3 text_coords = make_float3(uvCoord.x, uvCoord.y, 0.0f);
 
     const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(interpolateAttrib(p0, p1, p2, barycentrics));
-    const float3 object_normal = normalize(interpolateAttrib(n0, n1, n2, barycentrics));
+    const float3 object_normal = interpolateAttrib(n0, n1, n2, barycentrics);
     float3 worldNormal = normalize(optixTransformNormalFromObjectToWorldSpace(object_normal));
-    float3 geomNormal = normalize(cross(p1 - p0, p2 - p0));
+    float3 geomNormal = cross(p1 - p0, p2 - p0);
     geomNormal = normalize(optixTransformNormalFromObjectToWorldSpace(geomNormal));
     const float3 worldTangent =
         normalize(optixTransformNormalFromObjectToWorldSpace(interpolateAttrib(t0, t1, t2, barycentrics)));
