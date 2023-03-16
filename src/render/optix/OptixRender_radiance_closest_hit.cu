@@ -402,6 +402,11 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     return res;
 }
 
+__forceinline__ __device__ float misWeightBalance(const float a, const float b)
+{
+    return 1.0f / ( 1.0f + (b / a) );
+}
+
 extern "C" __global__ void __closesthit__radiance()
 {
     OptixPrimitiveType primType = optixGetPrimitiveType();
@@ -475,7 +480,7 @@ extern "C" __global__ void __closesthit__radiance()
     {
         const float3 radianceOverPdf = radiance / lightPdf;
 
-        mi::neuraylib::Bsdf_evaluate_data<mi::neuraylib::DF_HSM_NONE> evalData;
+        mi::neuraylib::Bsdf_evaluate_data<mi::neuraylib::DF_HSM_NONE> evalData = {};
         evalData.ior1 = ior1; // IOR current medium
         evalData.ior2 = ior2; // IOR other side
         evalData.k1 = -ray_dir; // outgoing direction
@@ -494,12 +499,10 @@ extern "C" __global__ void __closesthit__radiance()
         }
 
         // compute lighting for this light
-        if (evalData.pdf > 1e-6f)
+        if (evalData.pdf > 0.0f)
         {
-            const float misWeight = (lightPdf == 0.0f) ? 1.0f : lightPdf / (lightPdf + evalData.pdf);
-            const float3 w = prd->throughput * radianceOverPdf * misWeight;
-            prd->radiance += w * evalData.bsdf_diffuse;
-            prd->radiance += w * evalData.bsdf_glossy;
+            const float misWeight = misWeightBalance(lightPdf, evalData.pdf);
+            prd->radiance += prd->throughput * radianceOverPdf * misWeight * (evalData.bsdf_diffuse + evalData.bsdf_glossy);
         }
     }
 
