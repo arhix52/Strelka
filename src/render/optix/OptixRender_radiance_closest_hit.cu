@@ -144,18 +144,18 @@ static __forceinline__ __device__ bool traceOcclusion(
     return occluded;
 }
 
-static __forceinline__ __device__ float3 interpolateAttrib(const float3& attr1,
-                                                           const float3& attr2,
-                                                           const float3& attr3,
-                                                           const float2& bary)
+static __forceinline__ __device__ float3 interpolateAttrib(const float3 attr1,
+                                                           const float3 attr2,
+                                                           const float3 attr3,
+                                                           const float2 bary)
 {
     return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
 
-static __forceinline__ __device__ float2 interpolateAttrib(const float2& attr1,
-                                                           const float2& attr2,
-                                                           const float2& attr3,
-                                                           const float2& bary)
+static __forceinline__ __device__ float2 interpolateAttrib(const float2 attr1,
+                                                           const float2 attr2,
+                                                           const float2 attr3,
+                                                           const float2 bary)
 {
     return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
@@ -163,7 +163,7 @@ static __forceinline__ __device__ float2 interpolateAttrib(const float2& attr1,
 // Clever offset_ray function from Ray Tracing Gems chapter 6
 // Offsets the ray origin from current position p, along normal n (which must be geometric normal)
 // so that no self-intersection can occur.
-static __forceinline__ __device__ float3 offset_ray(const float3& p, const float3& n)
+static __forceinline__ __device__ float3 offset_ray(const float3 p, const float3 n)
 {
     static const float origin = 1.0f / 32.0f;
     static const float float_scale = 1.0f / 65536.0f;
@@ -206,7 +206,7 @@ __device__ const float4 identity[3] = { { 1.0f, 0.0f, 0.0f, 0.0f },
                                         { 0.0f, 0.0f, 1.0f, 0.0f } };
 
 __inline__ __device__ float3
-sampleLight(uint32_t& rngState, const UniformLight& light, Mdl_state& state, float3& toLight, float& lightPdf)
+sampleLight(uint32_t& rngState, const UniformLight& light, const Mdl_state& state, float3& toLight, float& lightPdf)
 {
     LightSampleData lightSampleData = {};
     switch (light.type)
@@ -269,7 +269,7 @@ sampleLight(uint32_t& rngState, const UniformLight& light, Mdl_state& state, flo
     return make_float3(0.0f);
 }
 
-__device__ float3 estimateDirectLighting(uint32_t& rngSeed, Mdl_state& state, float3& toLight, float& lightPdf)
+__device__ float3 estimateDirectLighting(uint32_t& rngSeed, const Mdl_state& state, float3& toLight, float& lightPdf)
 {
     const uint32_t lightId = (uint32_t)(params.scene.numLights * rnd(rngSeed));
     const float lightSelectionPdf = 1.0f / params.scene.numLights;
@@ -328,29 +328,33 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
 
     const uint32_t baseVbOffset = hit_data->vertexOffset;
 
-    const float3 p0 = params.scene.vb[baseVbOffset + i0].position;
-    const float3 p1 = params.scene.vb[baseVbOffset + i1].position;
-    const float3 p2 = params.scene.vb[baseVbOffset + i2].position;
+    const Vertex v0 = params.scene.vb[baseVbOffset + i0];
+    const Vertex v1 = params.scene.vb[baseVbOffset + i1];
+    const Vertex v2 = params.scene.vb[baseVbOffset + i2];
 
-    const float3 n0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normal);
-    const float3 n1 = unpackNormal(params.scene.vb[baseVbOffset + i1].normal);
-    const float3 n2 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
+    const float3 p0 = v0.position;
+    const float3 p1 = v1.position;
+    const float3 p2 = v2.position;
 
-    const float3 t0 = unpackNormal(params.scene.vb[baseVbOffset + i0].tangent);
-    const float3 t1 = unpackNormal(params.scene.vb[baseVbOffset + i1].tangent);
-    const float3 t2 = unpackNormal(params.scene.vb[baseVbOffset + i2].tangent);
+    const float3 n0 = unpackNormal(v0.normal);
+    const float3 n1 = unpackNormal(v1.normal);
+    const float3 n2 = unpackNormal(v2.normal);
 
-    const float2 uv0 = unpackUV(params.scene.vb[baseVbOffset + i0].uv);
-    const float2 uv1 = unpackUV(params.scene.vb[baseVbOffset + i1].uv);
-    const float2 uv2 = unpackUV(params.scene.vb[baseVbOffset + i2].uv);
+    const float3 t0 = unpackNormal(v0.tangent);
+    const float3 t1 = unpackNormal(v1.tangent);
+    const float3 t2 = unpackNormal(v2.tangent);
+
+    const float2 uv0 = unpackUV(v0.uv);
+    const float2 uv1 = unpackUV(v1.uv);
+    const float2 uv2 = unpackUV(v2.uv);
 
     const float2 uvCoord = interpolateAttrib(uv0, uv1, uv2, barycentrics);
     const float3 text_coords = make_float3(uvCoord.x, uvCoord.y, 0.0f);
 
     const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(interpolateAttrib(p0, p1, p2, barycentrics));
-    const float3 object_normal = normalize(interpolateAttrib(n0, n1, n2, barycentrics));
+    const float3 object_normal = interpolateAttrib(n0, n1, n2, barycentrics);
     float3 worldNormal = normalize(optixTransformNormalFromObjectToWorldSpace(object_normal));
-    float3 geomNormal = normalize(cross(p1 - p0, p2 - p0));
+    float3 geomNormal = cross(p1 - p0, p2 - p0);
     geomNormal = normalize(optixTransformNormalFromObjectToWorldSpace(geomNormal));
     const float3 worldTangent =
         normalize(optixTransformNormalFromObjectToWorldSpace(interpolateAttrib(t0, t1, t2, barycentrics)));
@@ -398,6 +402,11 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     return res;
 }
 
+__forceinline__ __device__ float misWeightBalance(const float a, const float b)
+{
+    return 1.0f / ( 1.0f + (b / a) );
+}
+
 extern "C" __global__ void __closesthit__radiance()
 {
     OptixPrimitiveType primType = optixGetPrimitiveType();
@@ -417,11 +426,15 @@ extern "C" __global__ void __closesthit__radiance()
         surfaceHit = fillCurveGeomData(hit_data, isInside);
     }
     // setup MDL state
+    // 16 - predefined value, that should match mdl setup
+    // set_option("num_texture_results", "16")
     float4 texture_results[16] = {};
     Mdl_state state;
     state.position = surfaceHit.position;
     state.normal = surfaceHit.normal;
     state.geom_normal = surfaceHit.geom_normal;
+    // Currently supports only 1 set of textures
+    // see: set_option("num_texture_spaces", "1")
     state.text_coords = &surfaceHit.text_coords;
     state.tangent_u = &surfaceHit.worldTangent;
     state.tangent_v = &surfaceHit.worldBinormal;
@@ -467,7 +480,7 @@ extern "C" __global__ void __closesthit__radiance()
     {
         const float3 radianceOverPdf = radiance / lightPdf;
 
-        mi::neuraylib::Bsdf_evaluate_data<mi::neuraylib::DF_HSM_NONE> evalData;
+        mi::neuraylib::Bsdf_evaluate_data<mi::neuraylib::DF_HSM_NONE> evalData = {};
         evalData.ior1 = ior1; // IOR current medium
         evalData.ior2 = ior2; // IOR other side
         evalData.k1 = -ray_dir; // outgoing direction
@@ -486,12 +499,10 @@ extern "C" __global__ void __closesthit__radiance()
         }
 
         // compute lighting for this light
-        if (evalData.pdf > 1e-6f)
+        if (evalData.pdf > 0.0f)
         {
-            const float misWeight = (lightPdf == 0.0f) ? 1.0f : lightPdf / (lightPdf + evalData.pdf);
-            const float3 w = prd->throughput * radianceOverPdf * misWeight;
-            prd->radiance += w * evalData.bsdf_diffuse;
-            prd->radiance += w * evalData.bsdf_glossy;
+            const float misWeight = misWeightBalance(lightPdf, evalData.pdf);
+            prd->radiance += prd->throughput * radianceOverPdf * misWeight * (evalData.bsdf_diffuse + evalData.bsdf_glossy);
         }
     }
 

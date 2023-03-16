@@ -8,8 +8,6 @@
 
 #include <glm/glm.hpp>
 
-// #include "Lights.h"
-
 extern "C"
 {
     __constant__ Params params;
@@ -22,7 +20,6 @@ static __forceinline__ __device__ void* unpackPointer(unsigned int i0, unsigned 
     return ptr;
 }
 
-
 static __forceinline__ __device__ void packPointer(void* ptr, unsigned int& i0, unsigned int& i1)
 {
     const unsigned long long uptr = reinterpret_cast<unsigned long long>(ptr);
@@ -30,27 +27,11 @@ static __forceinline__ __device__ void packPointer(void* ptr, unsigned int& i0, 
     i1 = uptr & 0x00000000ffffffff;
 }
 
-
 static __forceinline__ __device__ PerRayData* getPRD()
 {
     const unsigned int u0 = optixGetPayload_0();
     const unsigned int u1 = optixGetPayload_1();
     return reinterpret_cast<PerRayData*>(unpackPointer(u0, u1));
-}
-
-static __forceinline__ __device__ bool traceOcclusion(
-    OptixTraversableHandle handle, float3 ray_origin, float3 ray_direction, float tmin, float tmax)
-{
-    unsigned int occluded = 0u;
-    optixTrace(handle, ray_origin, ray_direction, tmin, tmax,
-               0.0f, // rayTime
-               OptixVisibilityMask(RAY_MASK_SHADOW),
-               OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
-               RAY_TYPE_OCCLUSION, // SBT offset
-               RAY_TYPE_COUNT, // SBT stride
-               RAY_TYPE_OCCLUSION, // missSBTIndex
-               occluded);
-    return occluded;
 }
 
 static __forceinline__ __device__ void generateCameraRay(uint2 pixelIndex,
@@ -77,7 +58,6 @@ static __forceinline__ __device__ void generateCameraRay(uint2 pixelIndex,
 extern "C" __global__ void __raygen__rg()
 {
     const int w = params.image_width;
-    const int h = params.image_height;
     const uint3 launch_index = optixGetLaunchIndex();
     const uint3 dim = optixGetLaunchDimensions();
     const int subframe_index = params.subframe_index;
@@ -178,7 +158,10 @@ extern "C" __global__ void __miss__ms()
     prd->depth = params.max_depth;
 }
 
-__device__ glm::float3 interpolateAttrib(glm::float3 attr1, glm::float3 attr2, glm::float3 attr3, float2 bary)
+__device__ glm::float3 interpolateAttrib(const glm::float3 attr1,
+                                         const glm::float3 attr2,
+                                         const glm::float3 attr3,
+                                         const float2 bary)
 {
     return attr1 * (1 - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
@@ -233,23 +216,18 @@ extern "C" __global__ void __closesthit__occlusion()
 
 extern "C" __global__ void __closesthit__light()
 {
-    OptixPrimitiveType primType = optixGetPrimitiveType();
-    if (primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE)
+    PerRayData* prd = getPRD();
+    HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
+    const int32_t lightId = hit_data->lightId;
+    const UniformLight& currLight = params.scene.lights[lightId];
+    const float3 rayDir = optixGetWorldRayDirection();
+    const float3 hitPoint = optixGetWorldRayOrigin() + optixGetRayTmax() * rayDir;
+    const float3 lightNormal = calcLightNormal(currLight, hitPoint);
+    if (-dot(rayDir, lightNormal) > 0.0f)
     {
-        PerRayData* prd = getPRD();
-
-        if (prd->depth == 0 || prd->specularBounce)
-        // if (prd->specularBounce)
-        {
-            HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
-            const int32_t lightId = hit_data->lightId;
-            const UniformLight& currLight = params.scene.lights[lightId];
-
-            prd->radiance += prd->throughput * make_float3(currLight.color);
-            // prd->radiance += make_float3(100.0f, 0.0f, 0.0f);
-            prd->throughput = make_float3(0.0f);
-            // stop tracing
-        }
-        return;
+        prd->radiance += prd->throughput * make_float3(currLight.color);
     }
+    prd->throughput = make_float3(0.0f);
+    // stop tracing
+    return;
 }
