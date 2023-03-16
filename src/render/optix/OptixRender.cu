@@ -216,23 +216,12 @@ extern "C" __global__ void __closesthit__occlusion()
 
 extern "C" __global__ void __closesthit__light()
 {
-    OptixPrimitiveType primType = optixGetPrimitiveType();
-    if (primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE)
-    {
-        PerRayData* prd = getPRD();
-
-        if (prd->depth == 0 || prd->specularBounce)
-        // if (prd->specularBounce)
-        {
-            HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
-            const int32_t lightId = hit_data->lightId;
-            const UniformLight& currLight = params.scene.lights[lightId];
-
-            prd->radiance += prd->throughput * make_float3(currLight.color);
-            // prd->radiance += make_float3(100.0f, 0.0f, 0.0f);
-            prd->throughput = make_float3(0.0f);
-            // stop tracing
-        }
-        return;
-    }
+    PerRayData* prd = getPRD();
+    HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
+    const int32_t lightId = hit_data->lightId;
+    const UniformLight& currLight = params.scene.lights[lightId];
+    prd->radiance += prd->throughput * make_float3(currLight.color);
+    prd->throughput = make_float3(0.0f);
+    // stop tracing
+    return;
 }
