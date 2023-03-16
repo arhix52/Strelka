@@ -220,7 +220,13 @@ extern "C" __global__ void __closesthit__light()
     HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
     const int32_t lightId = hit_data->lightId;
     const UniformLight& currLight = params.scene.lights[lightId];
-    prd->radiance += prd->throughput * make_float3(currLight.color);
+    const float3 rayDir = optixGetWorldRayDirection();
+    const float3 hitPoint = optixGetWorldRayOrigin() + optixGetRayTmax() * rayDir;
+    const float3 lightNormal = calcLightNormal(currLight, hitPoint);
+    if (-dot(rayDir, lightNormal) > 0.0f)
+    {
+        prd->radiance += prd->throughput * make_float3(currLight.color);
+    }
     prd->throughput = make_float3(0.0f);
     // stop tracing
     return;
