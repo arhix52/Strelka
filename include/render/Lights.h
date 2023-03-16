@@ -46,7 +46,7 @@ static __inline__ __device__ float calcLightArea(const UniformLight& l)
     return area;
 }
 
-static __inline__ __device__ float3 calcLightNormal(const UniformLight& l, const float3& hitPoint)
+static __inline__ __device__ float3 calcLightNormal(const UniformLight& l, const float3 hitPoint)
 {
     float3 norm = make_float3(0.0f);
 
@@ -68,7 +68,7 @@ static __inline__ __device__ float3 calcLightNormal(const UniformLight& l, const
     return norm;
 }
 
-static __inline__ __device__ void fillLightData(const UniformLight& l, const float3& hitPoint, LightSampleData& lightSampleData)
+static __inline__ __device__ void fillLightData(const UniformLight& l, const float3 hitPoint, LightSampleData& lightSampleData)
 {
     lightSampleData.area = calcLightArea(l);
     lightSampleData.normal = calcLightNormal(l, hitPoint);
@@ -89,7 +89,7 @@ struct SphQuad
 };
 
 // Precomputation of constants for the spherical rectangle Q.
-static __device__ SphQuad init(const UniformLight& l, const float3& o)
+static __device__ SphQuad init(const UniformLight& l, const float3 o)
 {
     SphQuad squad;
 
@@ -155,7 +155,7 @@ static __device__ SphQuad init(const UniformLight& l, const float3& o)
     return squad;
 }
 
-static __device__ float3 SphQuadSample(const SphQuad& squad, const float2& uv)
+static __device__ float3 SphQuadSample(const SphQuad& squad, const float2 uv)
 {
     float u = uv.x;
     float v = uv.y;
@@ -183,7 +183,7 @@ static __device__ float3 SphQuadSample(const SphQuad& squad, const float2& uv)
     return (squad.o + xu * squad.x + yv * squad.y + squad.z0 * squad.z);
 }
 
-static __inline__ __device__ LightSampleData SampleRectLight(const UniformLight& l, const float2& u, const float3& hitPoint)
+static __inline__ __device__ LightSampleData SampleRectLight(const UniformLight& l, const float2 u, const float3 hitPoint)
 {
     LightSampleData lightSampleData;
     // https://www.arnoldrenderer.com/research/egsr2013_spherical_rectangle.pdf
@@ -195,7 +195,7 @@ static __inline__ __device__ LightSampleData SampleRectLight(const UniformLight&
     return lightSampleData;
 }
 
-static __inline__ __device__ LightSampleData SampleRectLightUniform(const UniformLight& l, const float2& u, const float3& hitPoint)
+static __inline__ __device__ LightSampleData SampleRectLightUniform(const UniformLight& l, const float2 u, const float3 hitPoint)
 {
     LightSampleData lightSampleData;
     // // uniform sampling
