@@ -324,12 +324,12 @@ public:
         delete matInst;
     }
 
-    void dumpParams(const TargetCode* targetCode, CompiledMaterial* material)
+    void dumpParams(const TargetCode* targetCode, uint32_t materialIdx, CompiledMaterial* material)
     {
         assert(targetCode);
         assert(targetCode->isInitialized);
         assert(material);
-        const uint32_t internalIndex = targetCode->ptrToInternalIndex.at(material);
+        const uint32_t internalIndex = materialIdx;// targetCode->ptrToInternalIndex.at(material);
         const mi::Size argLayoutIndex = targetCode->internalMaterials[internalIndex].argument_block_layout_index;
         mi::base::Handle<const mi::neuraylib::ITarget_value_layout> arg_layout(
             targetCode->internalMaterials[internalIndex].targetCode->get_argument_block_layout(argLayoutIndex));
@@ -880,9 +880,9 @@ const char* MaterialManager::getTextureDbName(TextureDescription* texDesc)
     return mContext->getTextureDbName(texDesc);
 }
 
-void MaterialManager::dumpParams(const TargetCode* targetCode, CompiledMaterial* material)
+void MaterialManager::dumpParams(const TargetCode* targetCode, uint32_t materialIdx, CompiledMaterial* material)
 {
-    return mContext->dumpParams(targetCode, material);
+    return mContext->dumpParams(targetCode, materialIdx, material);
 }
 
 bool MaterialManager::setParam(TargetCode* targetCode, uint32_t materialIdx, CompiledMaterial* material, const Param& param)

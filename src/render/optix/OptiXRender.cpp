@@ -1276,7 +1276,6 @@ bool OptiXRender::createOptixMaterials()
 
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
-        mMaterialManager.dumpParams(targetCode, compiledMaterials[i]);
         for (const auto& param : matDescs[i].params)
         {
             bool res = false;
@@ -1308,6 +1307,7 @@ bool OptiXRender::createOptixMaterials()
                 // assert(0);
             }
         }
+        mMaterialManager.dumpParams(targetCode, i, compiledMaterials[i]);
     }
 
     const uint8_t* argData = mMaterialManager.getArgBufferData(targetCode);
