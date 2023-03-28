@@ -36,6 +36,8 @@
 
 #include "Camera.h"
 
+#include <tracy/Tracy.hpp>
+
 static void context_log_cb(unsigned int level, const char* tag, const char* message, void* /*cbdata */)
 {
     switch (level)
@@ -161,6 +163,7 @@ OptiXRender::~OptiXRender()
 
 void OptiXRender::createContext()
 {
+    ZoneScoped;
     // Initialize CUDA
     CUDA_CHECK(cudaFree(0));
 
@@ -192,6 +195,7 @@ bool OptiXRender::compactAccel(CUdeviceptr& buffer,
                                CUdeviceptr result,
                                size_t outputSizeInBytes)
 {
+    ZoneScoped;
     bool flag = false;
 
     size_t compacted_size;
@@ -216,6 +220,7 @@ bool OptiXRender::compactAccel(CUdeviceptr& buffer,
 
 OptiXRender::Curve* OptiXRender::createCurve(const oka::Curve& curve)
 {
+    ZoneScoped;
     Curve* rcurve = new Curve();
     OptixAccelBuildOptions accel_options = {};
     accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS |
@@ -316,6 +321,7 @@ OptiXRender::Curve* OptiXRender::createCurve(const oka::Curve& curve)
 
 OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
 {
+    ZoneScoped;
     OptixTraversableHandle gas_handle;
     CUdeviceptr d_gas_output_buffer;
     {
@@ -386,6 +392,7 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
 
 void OptiXRender::createAccelerationStructure()
 {
+    ZoneScoped;
     const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
     const std::vector<oka::Curve>& curves = mScene->getCurves();
     const std::vector<oka::Instance>& instances = mScene->getInstances();
@@ -563,6 +570,7 @@ OptixProgramGroup OptiXRender::createRadianceClosestHitProgramGroup(PathTracerSt
                                                                     char const* module_code,
                                                                     size_t module_size)
 {
+    ZoneScoped;
     char log[2048];
     size_t sizeof_log = sizeof(log);
 
@@ -659,6 +667,7 @@ void OptiXRender::createProgramGroups()
 
 void OptiXRender::createPipeline()
 {
+    ZoneScoped;
     OptixPipeline pipeline = nullptr;
     {
         const uint32_t max_trace_depth = 2;
@@ -717,6 +726,7 @@ void OptiXRender::createPipeline()
 
 void OptiXRender::createSbt()
 {
+    ZoneScoped;
     OptixShaderBindingTable sbt = {};
     {
         CUdeviceptr raygen_record;
@@ -854,6 +864,8 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
 
 void OptiXRender::render(Buffer* output)
 {
+    ZoneScoped;
+    FrameMark;
     if (getSharedContext().mFrameNumber == 0)
     {
         createOptixMaterials();
@@ -1073,6 +1085,7 @@ Buffer* OptiXRender::createBuffer(const BufferDesc& desc)
 
 void OptiXRender::createPointsBuffer()
 {
+    ZoneScoped;
     const std::vector<glm::float3>& points = mScene->getCurvesPoint();
 
     std::vector<float3> data(points.size());
@@ -1092,6 +1105,7 @@ void OptiXRender::createPointsBuffer()
 
 void OptiXRender::createWidthsBuffer()
 {
+    ZoneScoped;
     const std::vector<float>& data = mScene->getCurvesWidths();
     const size_t size = data.size() * sizeof(float);
 
@@ -1105,6 +1119,7 @@ void OptiXRender::createWidthsBuffer()
 
 void OptiXRender::createVertexBuffer()
 {
+    ZoneScoped;
     const std::vector<oka::Scene::Vertex>& vertices = mScene->getVertices();
     const size_t vbsize = vertices.size() * sizeof(oka::Scene::Vertex);
 
@@ -1118,6 +1133,7 @@ void OptiXRender::createVertexBuffer()
 
 void OptiXRender::createIndexBuffer()
 {
+    ZoneScoped;
     const std::vector<uint32_t>& indices = mScene->getIndices();
     const size_t ibsize = indices.size() * sizeof(uint32_t);
 
@@ -1131,6 +1147,7 @@ void OptiXRender::createIndexBuffer()
 
 void OptiXRender::createLightBuffer()
 {
+    ZoneScoped;
     const std::vector<Scene::Light>& lightDescs = mScene->getLights();
     const size_t lightBufferSize = lightDescs.size() * sizeof(Scene::Light);
     if (d_lights)
@@ -1226,6 +1243,7 @@ Texture OptiXRender::loadTextureFromFile(std::string& fileName)
 
 bool OptiXRender::createOptixMaterials()
 {
+    ZoneScoped;
     std::unordered_map<std::string, MaterialManager::Module*> mNameToModule;
     std::unordered_map<std::string, MaterialManager::MaterialInstance*> mNameToInstance;
     std::unordered_map<std::string, MaterialManager::CompiledMaterial*> mNameToCompiled;

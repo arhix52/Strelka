@@ -4,6 +4,7 @@ find_package(USD REQUIRED HINTS ${USD_DIR} NAMES pxr)
 message(STATUS "USD LIBRARY: ${USD_DIR}")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+add_compile_definitions(TRACY_ENABLE)
 
 # Hydra plugin
 set(HD_PLUGIN_SOURCES
@@ -74,6 +75,8 @@ target_include_directories(${HD_PLUGIN_NAME}
 target_include_directories(${HD_PLUGIN_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(${HD_PLUGIN_NAME} PUBLIC hd)
 target_include_directories(${HD_PLUGIN_NAME} PRIVATE usdImaging hdMtlx)
+target_include_directories(${HD_PLUGIN_NAME} PUBLIC ${ROOT_HOME}/external/tracy/public/)
+
 if(WIN32)
   target_link_libraries(
     ${HD_PLUGIN_NAME}

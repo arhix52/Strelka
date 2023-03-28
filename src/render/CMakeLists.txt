@@ -7,6 +7,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include_directories(${ROOT_HOME}/external/glm)
 include_directories(${ROOT_HOME}/external/stb)
 
+add_compile_definitions(TRACY_ENABLE)
+
+set(TRACY_SOURCES ${ROOT_HOME}/external/tracy/public/tracy/Tracy.hpp
+                          ${ROOT_HOME}/external/tracy/public/TracyClient.cpp)
+
 set(RENDER_SOURCES_COMMON ${ROOT_HOME}/include/render/render.h
                           ${ROOT_HOME}/src/render/render.cpp)
 
@@ -32,6 +37,7 @@ if(WIN32)
 
   set(RENDER_SOURCES
       ${RENDER_SOURCES_COMMON}
+      ${TRACY_SOURCES}
       ${ROOT_HOME}/include/render/Camera.h
       ${ROOT_HOME}/include/render/materials.h
       ${ROOT_HOME}/include/render/Lights.h
@@ -130,4 +136,4 @@ target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/include/render)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/external/glm)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/external/mdl-sdk/include)
-
+target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/external/tracy/public/)
