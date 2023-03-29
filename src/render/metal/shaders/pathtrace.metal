@@ -83,17 +83,17 @@ static float2 unpackUV(uint32_t val)
     return uv;
 }
 
-static __attribute__((always_inline)) float3 interpolateAttrib(thread const float3& attr1, thread const float3& attr2, thread const float3& attr3, thread const float2& bary)
+static __attribute__((always_inline)) float3 interpolateAttrib(const float3 attr1, const float3 attr2, const float3 attr3, const float2 bary)
 {
     return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
 
-static __attribute__((always_inline)) float2 interpolateAttrib(thread const float2& attr1, thread const float2& attr2, thread const float2& attr3, thread const float2& bary)
+static __attribute__((always_inline)) float2 interpolateAttrib(const float2 attr1, const float2 attr2, const float2 attr3, const float2 bary)
 {
     return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
 
-static __attribute__((always_inline)) bool all(thread const float3& v)
+static __attribute__((always_inline)) bool all(const float3 v)
 {
     return v.x != 0.0f && v.y != 0.0f && v.z != 0.0f;
 }
@@ -194,7 +194,6 @@ void materialSample(thread MaterialSample& data, thread MaterialState& state)
         data.k2.z = state.normal.z + a;
         // data.pdf = a / M_PIf;
     }
-
     data.bsdf_over_pdf = state.diffuse;
 }
 
@@ -290,7 +289,7 @@ float3 sampleLight(
         lightPdf = lightSampleData.pdf;
         return visibility * Li * saturate(dot(state.normal, lightSampleData.L));
     }
-
+    lightPdf = 0.0f;
     return float3(0.0f, 0.0f, 0.0f);
 }
 
@@ -305,13 +304,14 @@ float3 estimateDirectLighting(
     thread float3& toLight, 
     thread float& lightPdf)
 {
-    const uint32_t lightId = (uint32_t)(numLights * rnd(rngSeed));
+    const uint32_t lightId = min((uint32_t)(numLights * rnd(rngSeed)), numLights - 1);
     const float lightSelectionPdf = 1.0f / numLights;
     device const UniformLight& currLight = lights[lightId];
     const float3 r = sampleLight(uniforms, accelerationStructure, isect, rngSeed, currLight, state, toLight, lightPdf);
     lightPdf *= lightSelectionPdf;
     return r;
 }
+
 
 __attribute__((always_inline))
 int __float_as_int(float x) 
@@ -324,7 +324,7 @@ float __int_as_float(int x)
     return as_type<float>(x);
 }
 
-static float3 offset_ray(thread const float3& p, thread const float3& n)
+static float3 offset_ray(const float3 p, const float3 n)
 {
     const float origin = 1.0f / 32.0f;
     const float float_scale = 1.0f / 65536.0f;
@@ -465,18 +465,18 @@ kernel void raytracingKernel(
             const uint32_t materialId = instances[instanceIndex].userID;
             materialInit(matState, materials[materialId]);
 
-            if (debugMode == DebugMode::eNormal)
-            {
-                prd.radiance = (matState.normal + float3(1.0f)) * 0.5f;
-                break;
-            }
-
             float3 toLight; // return value for estimateDirectLighting()
             float lightPdf = 0.0f; // return value for estimateDirectLighting()
             const float3 radiance = estimateDirectLighting(uniforms, accelerationStructure, i,
                 uniforms.numLights, lights, rndSeed, matState, toLight, lightPdf);
-
-            const bool isNextEventValid = ((dot(toLight, matState.geom_normal) > 0.0f) != prd.inside) && lightPdf != 0.0f;
+            
+            if (debugMode == DebugMode::eNormal)
+            {
+                prd.radiance = radiance; // (matState.normal + float3(1.0f)) * 0.5f;
+                break;
+            }
+            
+            const bool isNextEventValid = ((dot(toLight, matState.normal) > 0.0f) != prd.inside) && lightPdf != 0.0f;
             if (isNextEventValid)
             {
                 const float3 radianceOverPdf = radiance / lightPdf;
@@ -493,7 +493,6 @@ kernel void raytracingKernel(
                     const float misWeight = (lightPdf == 0.0f) ? 1.0f : lightPdf / (lightPdf + evalData.pdf);
                     const float3 w = prd.throughput * radianceOverPdf * misWeight;
                     prd.radiance += w * evalData.bsdf_diffuse;
-                    prd.radiance += w * evalData.bsdf_glossy;
                 }
             }
 
