@@ -68,6 +68,7 @@ struct Uniforms
 
     uint32_t tonemapperType; // 0 - "None", "Reinhard", "ACES", "Filmic"
     float gamma; // 0 - off
+    vector_float3 exposureValue;
 
     uint32_t debug;
 };

@@ -38,10 +38,10 @@ float3 RRTAndODTFit(float3 v)
 
 float3 ACESFitted(float3 color)
 {
-    color = ACESInputMat * color;
+    color = transpose(ACESInputMat) * color;
     // Apply RRT and ODT
     color = RRTAndODTFit(color);
-    color = ACESOutputMat * color;
+    color = transpose(ACESOutputMat) * color;
     // Clamp to [0, 1]
     color = saturate(color);
     return color;
@@ -67,6 +67,35 @@ float calcLuminance(float3 color)
 float3 reinhard(float3 color)
 {
     float luminance = calcLuminance(color);
-    float reinhard = luminance / (luminance + 1);
-    return color * (reinhard / luminance);
+    // float reinhard = luminance / (luminance + 1);
+    return color / (luminance + 1.0f);
+}
+
+float gammaFloat(const float c, const float gamma)
+{
+    if (isnan(c))
+    {
+        return 0.0f;
+    }
+    if (c > 1.0f)
+    {
+        return 1.0f;
+    }
+    else if (c < 0.0f)
+    {
+        return 0.0f;
+    }
+    else if (c < 0.0031308f)
+    {
+        return 12.92f * c;
+    }
+    else
+    {
+        return 1.055f * pow(c, 1.0f / gamma) - 0.055f;
+    }
+}
+
+float3 srgbGamma(const float3 color, const float gamma)
+{
+    return float3(gammaFloat(color.r, gamma), gammaFloat(color.g, gamma), gammaFloat(color.b, gamma));
 }

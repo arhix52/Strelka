@@ -405,7 +405,7 @@ kernel void raytracingKernel(
                 if (prd.depth == 0 || prd.specularBounce)
                 {
                     // TODO: extract light colors
-                    prd.radiance += prd.throughput * float3(1.0f);
+                    prd.radiance += prd.throughput * float3(150000.0f);
                 }
                 prd.throughput = float3(0.0f);
                 // stop tracing
@@ -552,17 +552,17 @@ kernel void raytracingKernel(
     {
         case ToneMapperType::eReinhard:
         {
-            result = reinhard(result);
+            result = reinhard(result * uniforms.exposureValue);
             break;
         }
         case ToneMapperType::eACES:
         {
-            result = ACESFitted(result);
+            result = ACESFitted(result * uniforms.exposureValue);
             break;
         }
         case ToneMapperType::eFilmic: 
         {
-            result = ACESFilm(result);
+            result = ACESFilm(result * uniforms.exposureValue);
             break;
         }
         case ToneMapperType::eNone:
@@ -573,7 +573,7 @@ kernel void raytracingKernel(
 
     if (uniforms.gamma > 0.0f)
     {
-        result = pow(result, float3(1.0f / uniforms.gamma));
+        result = srgbGamma(result, uniforms.gamma);
     }
 
     res[linearPixelIndex] = float4(result, 1.0f);
