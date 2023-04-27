@@ -80,7 +80,8 @@ if(WIN32)
             "Compile OptixRender_radiance_closest_hit bytecode using clang..."
     COMMAND
       ${clang_PATH} -I ${OptiX_INCLUDE} -I ${ROOT_HOME}/external/mdl-sdk/include
-      -I ${ROOT_HOME}/src/render/ -I ${ROOT_HOME}/include/render -I
+      -I ${ROOT_HOME}/src/render/ -I ${ROOT_HOME}/src/render/optix/
+      -I ${ROOT_HOME}/include/render -I
       ${ROOT_HOME}/external/glm -I ${ROOT_HOME} ${_CLANG_FLAGS}
       -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -emit-llvm -c -O3 -ffast-math
       -fcuda-flush-denormals-to-zero -fno-vectorize --cuda-gpu-arch=sm_75

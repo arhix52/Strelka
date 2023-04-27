@@ -66,8 +66,9 @@ struct Params
 
 struct PerRayData
 {
-    uint32_t rndSeed;
-    uint32_t depth;
+    uint32_t linearPixelIndex;
+    uint32_t sampleIndex;
+    uint32_t depth; // bounce
     float3 radiance;
     float3 throughput;
     float3 origin;

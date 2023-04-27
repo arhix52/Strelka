@@ -2,7 +2,8 @@
 
 #include "OptixRenderParams.h"
 #include <cuda/helpers.h>
-#include <cuda/random.h>
+// #include <cuda/random.h>
+#include "RandomSampler.h"
 
 #include <sutil/vec_math.h>
 
@@ -34,12 +35,15 @@ static __forceinline__ __device__ PerRayData* getPRD()
     return reinterpret_cast<PerRayData*>(unpackPointer(u0, u1));
 }
 
-static __forceinline__ __device__ void generateCameraRay(uint2 pixelIndex,
-                                                         uint32_t& seed,
-                                                         glm::float3& origin,
-                                                         glm::float3& direction)
+static __forceinline__ __device__ void generateCameraRay(
+    uint2 pixelIndex, uint32_t pixelLinearIndex, uint32_t sampleIndex, glm::float3& origin, glm::float3& direction)
 {
-    const float2 subpixel_jitter = make_float2(rnd(seed), rnd(seed));
+    float2 subpixel_jitter = random<SampleDimension::ePixel>(pixelLinearIndex, 0, sampleIndex);
+    // if ((subpixel_jitter.x != 0.0f))
+    {
+        // subpixel_jitter = make_float2(0.0f, 0.0f);
+    }
+    // const float2 subpixel_jitter = make_float2(0.0f, 0.0f);
 
     float2 pixelPos = make_float2(pixelIndex.x + subpixel_jitter.x, pixelIndex.y + subpixel_jitter.y);
 
@@ -62,32 +66,31 @@ extern "C" __global__ void __raygen__rg()
     const uint3 dim = optixGetLaunchDimensions();
     const int subframe_index = params.subframe_index;
 
-    unsigned int seed = tea<4>(launch_index.y * w + launch_index.x, subframe_index);
-
     float3 result = make_float3(0.0f);
 
     for (int sampleIdx = 0; sampleIdx < params.samples_per_launch; ++sampleIdx)
     {
-        float3 ray_origin, ray_direction;
-        glm::float3 rayO, rayD;
-        generateCameraRay({ launch_index.x, launch_index.y }, seed, rayO, rayD);
-
-        ray_origin = { rayO.x, rayO.y, rayO.z };
-        ray_direction = { rayD.x, rayD.y, rayD.z };
-
         PerRayData prd;
-        prd.rndSeed = seed;
+        prd.linearPixelIndex = launch_index.y * w + launch_index.x;
+        prd.sampleIndex = subframe_index + sampleIdx;
         prd.radiance = make_float3(0.0f);
         prd.throughput = make_float3(1.0f);
         prd.inside = false;
         prd.depth = 0;
         prd.specularBounce = false;
+        
+        float3 ray_origin, ray_direction;
+        glm::float3 rayO, rayD;
+
+        ray_origin = { rayO.x, rayO.y, rayO.z };
+        ray_direction = { rayD.x, rayD.y, rayD.z };
+
+        generateCameraRay({ launch_index.x, launch_index.y }, prd.linearPixelIndex, prd.sampleIndex, rayO, rayD);
 
         unsigned int u0, u1;
         packPointer(&prd, u0, u1);
 
-        int depth = 0;
-        while (depth < params.max_depth)
+        while (prd.depth < params.max_depth)
         {
             optixTrace(params.handle, ray_origin, ray_direction,
                        params.materialRayTmin, // Min intersection distance
@@ -103,10 +106,10 @@ extern "C" __global__ void __raygen__rg()
             ray_origin = prd.origin;
             ray_direction = prd.dir;
 
-            if (depth > 3)
+            if (prd.depth > 3)
             {
                 const float p = max(prd.throughput.x, max(prd.throughput.y, prd.throughput.z));
-                if (rnd(prd.rndSeed) > p)
+                if (random<SampleDimension::eRussianRoulette>(prd.linearPixelIndex, prd.depth, prd.sampleIndex).x > p)
                 {
                     break;
                 }
@@ -118,8 +121,7 @@ extern "C" __global__ void __raygen__rg()
                 break;
             }
 
-            ++depth;
-            prd.depth = depth;
+            ++prd.depth;
 
             if (params.debug == 1)
                 break;

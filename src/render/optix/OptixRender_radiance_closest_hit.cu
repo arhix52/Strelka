@@ -6,7 +6,7 @@
 #include <cuda/helpers.h>
 #include <cuda/curve.h>
 
-#include <cuda/random.h>
+#include "RandomSampler.h"
 
 #include <sutil/Matrix.h>
 #include <sutil/vec_math.h>
@@ -205,20 +205,26 @@ __device__ const float4 identity[3] = { { 1.0f, 0.0f, 0.0f, 0.0f },
                                         { 0.0f, 1.0f, 0.0f, 0.0f },
                                         { 0.0f, 0.0f, 1.0f, 0.0f } };
 
-__inline__ __device__ float3
-sampleLight(uint32_t& rngState, const UniformLight& light, const Mdl_state& state, float3& toLight, float& lightPdf)
+__inline__ __device__ float3 sampleLight(const uint32_t sampleIndex,
+                                         const uint32_t pixelIndex,
+                                         const uint32_t depth,
+                                         const UniformLight& light,
+                                         const Mdl_state& state,
+                                         float3& toLight,
+                                         float& lightPdf)
 {
     LightSampleData lightSampleData = {};
     switch (light.type)
     {
     case 0: {
+        const float2 uv = random<SampleDimension::eLightPoint>(pixelIndex, depth, sampleIndex);
         if (params.rectLightSamplingMethod == 0)
         {
-            lightSampleData = SampleRectLightUniform(light, make_float2(rnd(rngState), rnd(rngState)), state.position);
+            lightSampleData = SampleRectLightUniform(light, uv, state.position);
         }
         else
         {
-            lightSampleData = SampleRectLight(light, make_float2(rnd(rngState), rnd(rngState)), state.position);
+            lightSampleData = SampleRectLight(light, uv, state.position);
         }
         break;
     }
@@ -269,12 +275,18 @@ sampleLight(uint32_t& rngState, const UniformLight& light, const Mdl_state& stat
     return make_float3(0.0f);
 }
 
-__device__ float3 estimateDirectLighting(uint32_t& rngSeed, const Mdl_state& state, float3& toLight, float& lightPdf)
+__device__ float3 estimateDirectLighting(const uint32_t sampleIndex,
+                                         const uint32_t pixelIndex,
+                                         const uint32_t depth,
+                                         const Mdl_state& state,
+                                         float3& toLight,
+                                         float& lightPdf)
 {
-    const uint32_t lightId = (uint32_t)(params.scene.numLights * rnd(rngSeed));
+    float u = random<SampleDimension::eLightId>(pixelIndex, depth, sampleIndex).x;
+    const uint32_t lightId = (uint32_t)(params.scene.numLights * u);
     const float lightSelectionPdf = 1.0f / params.scene.numLights;
     const UniformLight& currLight = params.scene.lights[lightId];
-    const float3 r = sampleLight(rngSeed, currLight, state, toLight, lightPdf);
+    const float3 r = sampleLight(sampleIndex, pixelIndex, depth, currLight, state, toLight, lightPdf);
     lightPdf *= lightSelectionPdf;
     return r;
 }
@@ -457,7 +469,7 @@ extern "C" __global__ void __closesthit__radiance()
 
     float3 toLight; // return value for sampleLights()
     float lightPdf = 0.0f; // return value for sampleLights()
-    const float3 radiance = estimateDirectLighting(prd->rndSeed, state, toLight, lightPdf);
+    const float3 radiance = estimateDirectLighting(prd->linearPixelIndex, prd->sampleIndex, prd->depth, state, toLight, lightPdf);
 
     if (params.debug == 1)
     {
@@ -506,16 +518,14 @@ extern "C" __global__ void __closesthit__radiance()
         }
     }
 
-    const float z1 = rnd(prd->rndSeed);
-    const float z2 = rnd(prd->rndSeed);
-    const float z3 = rnd(prd->rndSeed);
-    const float z4 = rnd(prd->rndSeed);
+    const float2 z1 = random<SampleDimension::eBSDF0>(prd->linearPixelIndex, prd->depth, prd->sampleIndex);
+    const float2 z2 = random<SampleDimension::eBSDF1>(prd->linearPixelIndex, prd->depth, prd->sampleIndex);
 
     mi::neuraylib::Bsdf_sample_data sample_data;
     sample_data.ior1 = ior1;
     sample_data.ior2 = ior2;
     sample_data.k1 = -ray_dir;
-    sample_data.xi = make_float4(z1, z2, z3, z4);
+    sample_data.xi = make_float4(z1, z2);
 
     mdlcode_sample(&sample_data, &state, &res_data, nullptr, (const char*)hit_data->argData);
 

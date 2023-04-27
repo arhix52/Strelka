@@ -21,7 +21,6 @@ enum class SampleDimension : uint32_t
   eNUM_DIMENSIONS
 };
 
-#define MAX_BOUNCES 128
 
 // Based on: https://www.reedbeta.com/blog/hash-functions-for-gpu-rendering/
 inline unsigned pcg_hash(unsigned seed) {
