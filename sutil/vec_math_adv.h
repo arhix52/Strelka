@@ -31,6 +31,11 @@ SUTIL_INLINE SUTIL_HOSTDEVICE float3 saturate(const float3 v)
     return r;
 }
 
+SUTIL_INLINE SUTIL_HOSTDEVICE float saturate(const float v)
+{
+    return clamp(v, 0.0f, 1.0f);
+}
+
 SUTIL_INLINE SUTIL_HOSTDEVICE bool all(const float3 v)
 {
     return v.x != 0.0f && v.y != 0.0f && v.z != 0.0f;

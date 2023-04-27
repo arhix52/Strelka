@@ -542,7 +542,7 @@ void OptiXRender::createModule()
         char log[2048]; // For error reporting from OptiX creation functions
         size_t sizeof_log = sizeof(log);
 
-        OPTIX_CHECK_LOG(optixModuleCreateFromPTX(mState.context, &module_compile_options, &pipeline_compile_options,
+        OPTIX_CHECK_LOG(optixModuleCreate(mState.context, &module_compile_options, &pipeline_compile_options,
                                                  input, inputSize, log, &sizeof_log, &module));
     }
     mState.ptx_module = module;
@@ -567,7 +567,7 @@ OptixProgramGroup OptiXRender::createRadianceClosestHitProgramGroup(PathTracerSt
     size_t sizeof_log = sizeof(log);
 
     OptixModule mat_module = nullptr;
-    OPTIX_CHECK_LOG(optixModuleCreateFromPTX(state.context, &state.module_compile_options, &state.pipeline_compile_options,
+    OPTIX_CHECK_LOG(optixModuleCreate(state.context, &state.module_compile_options, &state.pipeline_compile_options,
                                              module_code, module_size, log, &sizeof_log, &mat_module));
 
     OptixProgramGroupOptions program_group_options = {};
@@ -679,14 +679,14 @@ void OptiXRender::createPipeline()
         OptixPipelineLinkOptions pipeline_link_options = {};
         pipeline_link_options.maxTraceDepth = max_trace_depth;
 
-        if (mEnableValidation)
-        {
-            pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
-        }
-        else
-        {
-            pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
-        }
+        // if (mEnableValidation)
+        // {
+        //     pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
+        // }
+        // else
+        // {
+        //     pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+        // }
 
         char log[2048]; // For error reporting from OptiX creation functions
         size_t sizeof_log = sizeof(log);
@@ -696,7 +696,7 @@ void OptiXRender::createPipeline()
         OptixStackSizes stack_sizes = {};
         for (auto& prog_group : program_groups)
         {
-            OPTIX_CHECK(optixUtilAccumulateStackSizes(prog_group, &stack_sizes));
+            OPTIX_CHECK(optixUtilAccumulateStackSizes(prog_group, &stack_sizes, pipeline));
         }
 
         uint32_t direct_callable_stack_size_from_traversal;
