@@ -406,9 +406,11 @@ public:
         assert(targetCode->isInitialized);
         assert(material);
         bool isParamFound = false;
-        for (int pi = 0; pi < material->compiledMaterial->get_parameter_count(); ++pi)
+        const mi::Size parametersCount = material->compiledMaterial->get_parameter_count();
+        for (int pi = 0; pi < parametersCount; ++pi)
         {
-            if (!strcmp(material->compiledMaterial->get_parameter_name(pi), param.name.c_str()))
+            const char* currParamName = material->compiledMaterial->get_parameter_name(pi);
+            if (!strcmp(currParamName, param.name.c_str()))
             {
                 const uint32_t internalIndex = materialIdx; //targetCode->ptrToInternalIndex[material];
                 const mi::Size argLayoutIndex = targetCode->internalMaterials[internalIndex].argument_block_layout_index;
@@ -1030,14 +1032,14 @@ std::vector<uint8_t> MaterialManager::Context::loadArgBlocks(TargetCode* targetC
 
             if (!targetCode->internalMaterials[i].arg_block)
             {
-                std::cerr << ("Failed to create material argument block: ") << std::endl;
+                STRELKA_ERROR("Failed to create material argument block");
                 res.resize(4);
                 return res;
             }
             // create a buffer to provide those parameters to the shader
             // align to 4 bytes and pow of two
-            const size_t buffer_size = round_to_power_of_two(targetCode->internalMaterials[i].arg_block->get_size(), 4);
-            std::vector<uint8_t> argBlockData = std::vector<uint8_t>(buffer_size, 0);
+            const size_t buffer_size = round_to_power_of_two(targetCode->internalMaterials[i].arg_block->get_size(), 16);
+            std::vector<uint8_t> argBlockData(buffer_size, 0);
             memcpy(argBlockData.data(), targetCode->internalMaterials[i].arg_block->get_data(),
                    targetCode->internalMaterials[i].arg_block->get_size());
             // set offset in common arg block buffer
@@ -1049,6 +1051,7 @@ std::vector<uint8_t> MaterialManager::Context::loadArgBlocks(TargetCode* targetC
 
     if (res.empty())
     {
+        STRELKA_DEBUG("Argument block is empty");
         res.resize(4);
     }
     return res;

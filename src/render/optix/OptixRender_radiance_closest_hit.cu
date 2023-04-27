@@ -24,6 +24,11 @@ typedef mi::neuraylib::Material_expr_function Mat_expr_func;
 typedef mi::neuraylib::Bsdf_init_function Bsdf_init_func;
 typedef mi::neuraylib::Bsdf_sample_function Bsdf_sample_func;
 typedef mi::neuraylib::Bsdf_evaluate_function Bsdf_evaluate_func;
+// EDF
+typedef mi::neuraylib::Edf_init_function Edf_init_func;
+typedef mi::neuraylib::Edf_sample_function Edf_sample_func;
+typedef mi::neuraylib::Edf_evaluate_function Edf_evaluate_func;
+
 typedef mi::neuraylib::Shading_state_material Mdl_state;
 //
 // Declarations of generated MDL functions
@@ -31,6 +36,8 @@ typedef mi::neuraylib::Shading_state_material Mdl_state;
 extern "C" __device__ Bsdf_init_func mdlcode_init;
 extern "C" __device__ Bsdf_sample_func mdlcode_sample;
 extern "C" __device__ Bsdf_evaluate_func mdlcode_evaluate;
+extern "C" __device__ Edf_init_func mdlcode_edf_init;
+extern "C" __device__ Edf_evaluate_func mdlcode_edf_evaluate;
 // extern "C" __device__ Mat_expr_func      mdlcode_thin_walled;
 
 //
@@ -356,14 +363,14 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
     float3 worldNormal = normalize(optixTransformNormalFromObjectToWorldSpace(object_normal));
     float3 geomNormal = cross(p1 - p0, p2 - p0);
     geomNormal = normalize(optixTransformNormalFromObjectToWorldSpace(geomNormal));
-    const float3 worldTangent =
-        normalize(optixTransformNormalFromObjectToWorldSpace(interpolateAttrib(t0, t1, t2, barycentrics)));
+    float3 worldTangent = normalize(optixTransformNormalFromObjectToWorldSpace(interpolateAttrib(t0, t1, t2, barycentrics)));
     geomNormal *= (inside ? -1.0f : 1.0f);
     worldNormal *= (inside ? -1.0f : 1.0f);
+    worldTangent *= (inside ? -1.0f : 1.0f);
 
     const float3 worldBinormal = cross(worldNormal, worldTangent);
 
-    SurfaceHitData res;
+    SurfaceHitData res = {};
     res.normal = worldNormal;
     res.geom_normal = geomNormal;
     res.position = worldPosition;
@@ -392,7 +399,7 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     worldNormal *= (inside ? -1.0f : 1.0f);
     const float3 worldBinormal = cross(worldNormal, worldTangent);
     const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(hitPoint);
-    SurfaceHitData res;
+    SurfaceHitData res = {};
     res.normal = worldNormal;
     res.geom_normal = worldNormal;
     res.position = worldPosition;
@@ -429,7 +436,7 @@ extern "C" __global__ void __closesthit__radiance()
     // 16 - predefined value, that should match mdl setup
     // set_option("num_texture_results", "16")
     float4 texture_results[16] = {};
-    Mdl_state state;
+    Mdl_state state = {};
     state.position = surfaceHit.position;
     state.normal = surfaceHit.normal;
     state.geom_normal = surfaceHit.geom_normal;
@@ -447,9 +454,9 @@ extern "C" __global__ void __closesthit__radiance()
     state.object_id = 0;
     state.meters_per_scene_unit = 1.0f;
 
-    const float3 ior1 = (isInside) ? make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR) : make_float3(1.0f); // material ->
+    const float3 ior1 = (isInside) ? make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR, 0.0f, 0.0f) : make_float3(1.0f); // material ->
                                                                                                           // air
-    const float3 ior2 = (isInside) ? make_float3(1.0f) : make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR);
+    const float3 ior2 = (isInside) ? make_float3(1.0f) : make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR, 0.0f, 0.0f);
 
     mi::neuraylib::Resource_data res_data = { nullptr, (Texture_handler*)hit_data->resHandler }; // TODO
 
@@ -459,10 +466,18 @@ extern "C" __global__ void __closesthit__radiance()
     float lightPdf = 0.0f; // return value for sampleLights()
     const float3 radiance = estimateDirectLighting(prd->rndSeed, state, toLight, lightPdf);
 
+    // mdlcode_edf_init(&state, &res_data, nullptr, (const char*)hit_data->argData);
+    // mi::neuraylib::Edf_evaluate_data<mi::neuraylib::DF_HSM_NONE> edfEval = {};
+    // edfEval.k1 = -ray_dir;
+    // mdlcode_edf_evaluate(&edfEval, &state, &res_data, nullptr, (const char*)hit_data->argData);
+
+    // prd->radiance += prd->throughput * edfEval.edf;
+
     if (params.debug == 1)
     {
         // prd->radiance = radiance;
         prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
+        // prd->radiance = (state.geom_normal + make_float3(1.0f)) * 0.5f;
         return;
     }
 
@@ -522,7 +537,8 @@ extern "C" __global__ void __closesthit__radiance()
     if (sample_data.event_type == mi::neuraylib::BSDF_EVENT_ABSORB)
     {
         // stop on absorb
-        prd->throughput = make_float3(0.0f);
+        prd->radiance = make_float3(1000.f, 0.0f, 0.0f);
+        prd->throughput = make_float3(0.0f, 0.0f, 0.0f);
         return;
     }
 

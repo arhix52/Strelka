@@ -137,7 +137,7 @@ bool MdlPtxCodeGen::appendMaterialToLinkUnit(uint32_t idx,
 {
     std::string idxStr = std::to_string(idx);
     auto scatteringFuncName = std::string("mdlcode");
-    auto emissionFuncName = std::string(EMISSION_FUNC_NAME) + "_" + idxStr;
+    auto emissionFuncName = std::string("mdlcode_edf");
     auto emissionIntensityFuncName = std::string(EMISSION_INTENSITY_FUNC_NAME) + "_" + idxStr;
 
     std::vector<mi::neuraylib::Target_function_description> genFunctions;
