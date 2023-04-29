@@ -14,9 +14,9 @@ enum struct SampleDimension
 #define MAX_BOUNCES 128
 
 // Based on: https://www.reedbeta.com/blog/hash-functions-for-gpu-rendering/
-__device__ inline unsigned pcg_hash(unsigned seed) {
-	unsigned state = seed * 747796405u + 2891336453u;
-	unsigned word  = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+__device__ inline unsigned int pcg_hash(unsigned int seed) {
+	unsigned int state = seed * 747796405u + 2891336453u;
+	unsigned int word  = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
 	return (word >> 22u) ^ word;
 }
 
@@ -24,7 +24,7 @@ __device__ inline unsigned hash_combine(unsigned a, unsigned b) {
 	return a ^ (b + 0x9e3779b9 + (a << 6) + (a >> 2));
 }
 
-__device__ inline unsigned hash_with(unsigned seed, unsigned hash) {
+__device__ inline unsigned int hash_with(unsigned int seed, unsigned int hash) {
 	// Wang hash
 	seed = (seed ^ 61u) ^ hash;
 	seed += seed << 3;
@@ -42,22 +42,43 @@ static __host__ __device__ __inline__ unsigned int lcg(unsigned int &prev)
   return prev & 0x00FFFFFF;
 }
 
-template <SampleDimension Dim>
-__device__ float2 random(unsigned pixel_index, unsigned bounce, unsigned sample_index)
+__device__ float halton(uint32_t index, uint32_t base)
 {
-    unsigned hash =
-        pcg_hash((pixel_index * unsigned(SampleDimension::eNUM_DIMENSIONS) + unsigned(Dim)) * 128 + bounce);
+    const float s = 1.0f / float(base);
+    unsigned int i = index;
+    float result = 0.0f;
+    float f = s;
+    while (i)
+    {
+      const unsigned int digit = i % base;
+      result += f * float(digit);
+      i = (i - digit) / base;
+      f *= s;
+    }
+    return clamp(result, 0.0f, 1.0f);
+}
 
-    const unsigned int xx = 0x2f7fffffu;
-    const float one_over_max_unsigned = *((float*)(&xx)); // Constant such that 0xffffffff will map to a
-                                                                     // float strictly less than 1.0f
+template <SampleDimension Dim>
+__device__ __inline__ float2 random(uint32_t pixel_index, uint32_t bounce, uint32_t sample_index)
+{
+	uint32_t dimension = uint32_t(0);
+	// uint32_t scramble = pcg_hash(pixel_index + bounce);
+	uint32_t index = sample_index;// + scramble;
+    const unsigned int base = 2; //primeNumbers[dimension++ & 1023];
 
-    // const float one_over_max_unsigned = 1.0f / (4294967295u);
-    // ((float) lcg(prev) / (float) 0x01000000);
+	return make_float2(halton(index, base), halton(index, base));
+}
 
-    float x = (float) lcg(hash) / (float) 0x01000000;
-    float y = (float) lcg(hash) / (float) 0x01000000;
+__device__ float2 random2(uint32_t pixel_index, uint32_t bounce, const uint32_t sample_index)
+{
+	// uint32_t dimension = uint32_t(0);
+	// uint32_t scramble = pcg_hash(pixel_index + bounce);
+	const uint32_t index = 0;// + scramble;
+    const unsigned int base = 2; //primeNumbers[dimension++ & 1023];
+	// if (sample_index == 0)
+	// {
+	// 	return make_float2(0.0f, 0.0f);
+	// }
 
-    return make_float2(x, y);
-    // return make_float2(one_over_max_unsigned, one_over_max_unsigned);
+	return make_float2(halton(index, base), halton(index, base));
 }
