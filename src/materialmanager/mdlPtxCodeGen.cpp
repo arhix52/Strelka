@@ -33,7 +33,7 @@ bool MdlPtxCodeGen::init(MdlRuntime& runtime)
         mLogger->message(mi::base::MESSAGE_SEVERITY_FATAL, "ERROR: Setting PTX option sm_version failed");
         return false;
     }
-    if (mBackend->set_option("num_texture_spaces", "1") != 0)
+    if (mBackend->set_option("num_texture_spaces", "2") != 0)
     {
         mLogger->message(mi::base::MESSAGE_SEVERITY_FATAL, "ERROR: Setting PTX option num_texture_spaces failed");
         return false;
@@ -141,7 +141,7 @@ bool MdlPtxCodeGen::appendMaterialToLinkUnit(uint32_t idx,
     auto emissionIntensityFuncName = std::string(EMISSION_INTENSITY_FUNC_NAME) + "_" + idxStr;
 
     std::vector<mi::neuraylib::Target_function_description> genFunctions;
-    genFunctions.push_back(mi::neuraylib::Target_function_description("surface.scattering", scatteringFuncName.c_str()));
+    genFunctions.push_back(mi::neuraylib::Target_function_description("hair", scatteringFuncName.c_str()));
     genFunctions.push_back(
         mi::neuraylib::Target_function_description("surface.emission.emission", emissionFuncName.c_str()));
     genFunctions.push_back(
