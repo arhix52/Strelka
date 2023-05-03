@@ -3,10 +3,7 @@
 
 #include <vector_types.h>
 
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/type_ptr.hpp>
-#include <glm/gtx/compatibility.hpp>
+#include <sutil/Matrix.h>
 
 #include "Lights.h"
 
@@ -52,8 +49,8 @@ struct Params
 
     uint32_t rectLightSamplingMethod;
 
-    glm::float4x4 clipToView;
-    glm::float4x4 viewToWorld;
+    float clipToView[16];
+    float viewToWorld[16];
 
     OptixTraversableHandle handle;
     SceneData scene;

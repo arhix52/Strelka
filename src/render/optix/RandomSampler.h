@@ -1,5 +1,13 @@
 #pragma once
 
+__device__ const unsigned int primeNumbers[32] = 
+{
+  2, 3, 5, 7, 11, 13, 17, 19, 23, 29,
+  31, 37, 41, 43, 47, 53, 59, 61, 67, 71,
+  73, 79, 83, 89, 97, 101, 103, 107, 109, 113,
+  127, 131,
+};
+
 enum struct SampleDimension
 {
     ePixel,
@@ -42,6 +50,17 @@ static __host__ __device__ __inline__ unsigned int lcg(unsigned int &prev)
   return prev & 0x00FFFFFF;
 }
 
+__device__ unsigned int hash(unsigned int a)
+{
+  a = (a + 0x7ED55D16) + (a << 12);
+  a = (a ^ 0xC761C23C) ^ (a >> 19);
+  a = (a + 0x165667B1) + (a <<  5);
+  a = (a + 0xD3A2646C) ^ (a <<  9);
+  a = (a + 0xFD7046C5) + (a <<  3);
+  a = (a ^ 0xB55A4F09) ^ (a >> 16);
+  return a;
+}
+
 __device__ float halton(uint32_t index, uint32_t base)
 {
     const float s = 1.0f / float(base);
@@ -61,24 +80,11 @@ __device__ float halton(uint32_t index, uint32_t base)
 template <SampleDimension Dim>
 __device__ __inline__ float2 random(uint32_t pixel_index, uint32_t bounce, uint32_t sample_index)
 {
-	uint32_t dimension = uint32_t(0);
-	// uint32_t scramble = pcg_hash(pixel_index + bounce);
-	uint32_t index = sample_index;// + scramble;
-    const unsigned int base = 2; //primeNumbers[dimension++ & 1023];
+    uint32_t dimension = uint32_t(Dim) * 2;
+    uint32_t scramble = hash(pixel_index);
+    uint32_t index = sample_index + scramble;
+    const unsigned int baseX = primeNumbers[dimension & 31];
+    const unsigned int baseY = primeNumbers[(dimension + 1) & 31];
 
-	return make_float2(halton(index, base), halton(index, base));
-}
-
-__device__ float2 random2(uint32_t pixel_index, uint32_t bounce, const uint32_t sample_index)
-{
-	// uint32_t dimension = uint32_t(0);
-	// uint32_t scramble = pcg_hash(pixel_index + bounce);
-	const uint32_t index = 0;// + scramble;
-    const unsigned int base = 2; //primeNumbers[dimension++ & 1023];
-	// if (sample_index == 0)
-	// {
-	// 	return make_float2(0.0f, 0.0f);
-	// }
-
-	return make_float2(halton(index, base), halton(index, base));
+    return make_float2(halton(index, baseX), halton(index, baseY));
 }

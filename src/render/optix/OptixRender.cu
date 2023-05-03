@@ -6,6 +6,7 @@
 #include "RandomSampler.h"
 
 #include <sutil/vec_math.h>
+#include <sutil/Matrix.h>
 
 #include <glm/glm.hpp>
 
@@ -36,43 +37,32 @@ static __forceinline__ __device__ PerRayData* getPRD()
 }
 
 __device__ void generateCameraRay(
-    const uint2 pixelIndex, const uint32_t pixelLinearIndex, const uint32_t sampleIndex, glm::float3& origin, glm::float3& direction)
+    const uint2 pixelIndex, const uint32_t pixelLinearIndex, const uint32_t sampleIndex, float3& origin, float3& direction)
 {
-    // float2 subpixel_jitter = random<SampleDimension::ePixel>(pixelLinearIndex, 0u, sampleIndex);
-    float2 subpixel_jitter = random2(pixelLinearIndex, 0u, sampleIndex);
-    // if ((sampleIndex == 0u))
-    // {
-    //     subpixel_jitter = make_float2(0.0f, 0.0f);
-    // }
-    // else
-    // {
-    //     subpixel_jitter = make_float2(111110.0f, 111110.0f);//random2(pixelLinearIndex, 0u, sampleIndex);
-    // }
-    // const float2 subpixel_jitter = make_float2(0.0f, 0.0f);
+    float2 subpixel_jitter = random<SampleDimension::ePixel>(pixelLinearIndex, 0u, sampleIndex);
 
     float2 pixelPos = make_float2(pixelIndex.x + subpixel_jitter.x, pixelIndex.y + subpixel_jitter.y);
 
     float2 dimension = make_float2(params.image_width, params.image_height);
     float2 pixelNDC = (pixelPos / dimension) * 2.0f - 1.0f;
 
-    glm::float4 clip{ pixelNDC.x, pixelNDC.y, 1.0f, 1.0f };
-    glm::float4 viewSpace = params.clipToView * clip;
+    float4 clip{ pixelNDC.x, pixelNDC.y, 1.0f, 1.0f };
+    const sutil::Matrix4x4 clipToView(params.clipToView);
+    float4 viewSpace = clipToView * clip;
 
-    glm::float4 wdir = params.viewToWorld * glm::float4(viewSpace.x, viewSpace.y, viewSpace.z, 0.0f);
+    const sutil::Matrix4x4 viewToWorld(params.viewToWorld);
+    float4 wdir = viewToWorld * make_float4(viewSpace.x, viewSpace.y, viewSpace.z, 0.0f);
 
-    origin = params.viewToWorld * glm::float4(0.0f, 0.0f, 0.0f, 1.0f);
-    direction = glm::normalize(wdir);
+    origin = make_float3(viewToWorld * make_float4(0.0f, 0.0f, 0.0f, 1.0f));
+    direction = normalize(make_float3(wdir));
 }
 
 extern "C" __global__ void __raygen__rg()
 {
-    const uint32_t w = params.image_width;
     const uint3 launch_index = optixGetLaunchIndex();
     const uint3 dim = optixGetLaunchDimensions();
-    // const uint32_t subframe_index = params.subframe_index;
 
     float3 result = make_float3(0.0f);
-    uint32_t counter = params.subframe_index; //params.subframe_index ? params.subframe_index : 0;
 
     for (uint32_t sampleIdx = 0; sampleIdx < params.samples_per_launch; ++sampleIdx)
     {
@@ -86,12 +76,9 @@ extern "C" __global__ void __raygen__rg()
         prd.specularBounce = false;
         
         float3 ray_origin, ray_direction;
-        glm::float3 rayO, rayD;
 
-        ray_origin = { rayO.x, rayO.y, rayO.z };
-        ray_direction = { rayD.x, rayD.y, rayD.z };
         const uint2 pixelCoord = make_uint2(launch_index.x, launch_index.y);
-        generateCameraRay(pixelCoord, prd.linearPixelIndex, counter, rayO, rayD);
+        generateCameraRay(pixelCoord, prd.linearPixelIndex, prd.sampleIndex, ray_origin, ray_direction);
 
         unsigned int u0, u1;
         packPointer(&prd, u0, u1);
@@ -166,18 +153,18 @@ extern "C" __global__ void __miss__ms()
     prd->depth = params.max_depth;
 }
 
-__device__ glm::float3 interpolateAttrib(const glm::float3 attr1,
-                                         const glm::float3 attr2,
-                                         const glm::float3 attr3,
+__device__ float3 interpolateAttrib(const float3 attr1,
+                                         const float3 attr2,
+                                         const float3 attr3,
                                          const float2 bary)
 {
-    return attr1 * (1 - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
+    return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
 
 //  valid range of coordinates [-1; 1]
-__device__ glm::float3 unpackNormal(uint32_t val)
+__device__ float3 unpackNormal(uint32_t val)
 {
-    glm::float3 normal;
+    float3 normal;
     normal.z = ((val & 0xfff00000) >> 20) / 511.99999f * 2.0f - 1.0f;
     normal.y = ((val & 0x000ffc00) >> 10) / 511.99999f * 2.0f - 1.0f;
     normal.x = (val & 0x000003ff) / 511.99999f * 2.0f - 1.0f;
@@ -200,14 +187,14 @@ extern "C" __global__ void __closesthit__ch()
 
     const uint32_t baseVbOffset = hit_data->vertexOffset;
 
-    glm::float3 N0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normal);
-    glm::float3 N1 = unpackNormal(params.scene.vb[baseVbOffset + i1].normal);
-    glm::float3 N2 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
+    float3 N0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normal);
+    float3 N1 = unpackNormal(params.scene.vb[baseVbOffset + i1].normal);
+    float3 N2 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
 
-    glm::float3 object_normal = glm::normalize(interpolateAttrib(N0, N1, N2, barycentrics));
+    float3 object_normal = normalize(interpolateAttrib(N0, N1, N2, barycentrics));
     // float3 world_normal = normalize( optixTransformNormalFromObjectToWorldSpace( object_normal ) );
 
-    glm::float3 res = (object_normal + glm::float3(1.0f)) * 0.5f;
+    float3 res = (object_normal + make_float3(1.0f)) * 0.5f;
     // setPayload(make_float3(barycentrics, 1.0f));
     prd->radiance = make_float3(res.x, res.y, res.z);
 }
