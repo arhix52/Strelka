@@ -12,14 +12,19 @@ float uintToFloat(uint x)
 
 enum class SampleDimension : uint32_t
 {
-  ePixel,
+  ePixelX,
+  ePixelY,
   eLightId,
-  eLightPoint,
+  eLightPointX,
+  eLightPointY,
   eBSDF0,
   eBSDF1,
+  eBSDF2,
+  eBSDF3,
   eRussianRoulette,
   eNUM_DIMENSIONS
 };
+#define MAX_BOUNCES 128
 
 
 // Based on: https://www.reedbeta.com/blog/hash-functions-for-gpu-rendering/
@@ -38,17 +43,61 @@ inline unsigned hash_with(unsigned seed, unsigned hash) {
 	return seed;
 }
 
-template<SampleDimension Dim>
-static float2 random(unsigned pixel_index, unsigned bounce, unsigned sample_index)
+// jenkins hash
+unsigned int hash(unsigned int a)
 {
-  	unsigned hash = pcg_hash((pixel_index * unsigned(SampleDimension::eNUM_DIMENSIONS) + unsigned(Dim)) * MAX_BOUNCES + bounce);
+  a = (a + 0x7ED55D16) + (a << 12);
+  a = (a ^ 0xC761C23C) ^ (a >> 19);
+  a = (a + 0x165667B1) + (a <<  5);
+  a = (a + 0xD3A2646C) ^ (a <<  9);
+  a = (a + 0xFD7046C5) + (a <<  3);
+  a = (a ^ 0xB55A4F09) ^ (a >> 16);
+  return a;
+}
 
-		const float one_over_max_unsigned = as_type<float>(0x2f7fffffu); // Constant such that 0xffffffff will map to a float strictly less than 1.0f
+uint jenkinsHash(uint x) 
+{
+    x += x << 10;
+    x ^= x >> 6; 
+    x += x << 3; 
+    x ^= x >> 11; 
+    x += x << 15; 
+    return x;
+}
 
-		float x = hash_with(sample_index,              hash) * one_over_max_unsigned;
-		float y = hash_with(sample_index + 0xdeadbeef, hash) * one_over_max_unsigned;
+constant unsigned int primeNumbers[32] = 
+{
+  2, 3, 5, 7, 11, 13, 17, 19, 23, 29,
+  31, 37, 41, 43, 47, 53, 59, 61, 67, 71,
+  73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 
+  127, 131
+};
 
-		return float2(x, y);
+float halton(uint32_t index, uint32_t base)
+{
+    const float s = 1.0f / float(base);
+    unsigned int i = index;
+    float result = 0.0f;
+    float f = s;
+    while (i)
+    {
+      const unsigned int digit = i % base;
+      result += f * float(digit);
+      i = (i - digit) / base;
+      f *= s;
+    }
+    // return clamp(result, 0.0f, 1.0f);
+    return result;
+}
+
+template <SampleDimension Dim>
+static float random(unsigned linearPixelIndex, unsigned bounce, unsigned sampleIndex)
+{
+    uint32_t seed = hash(linearPixelIndex);
+    uint32_t dimension = uint32_t(Dim);
+    const uint32_t base = primeNumbers[dimension & 31u];
+    float x = halton(sampleIndex + seed, base);
+    return x;
 }
 
 template<unsigned int N>
@@ -94,15 +143,7 @@ static  __inline__ unsigned int rot_seed( unsigned int seed, unsigned int frame 
     return seed ^ frame;
 }
 
-uint jenkinsHash(uint x) 
-{
-    x += x << 10;
-    x ^= x >> 6; 
-    x += x << 3; 
-    x ^= x >> 11; 
-    x += x << 15; 
-    return x;
-}
+
 
 // Implementetion from Ray Tracing gems
 // https://github.com/boksajak/referencePT/blob/master/shaders/PathTracer.hlsl

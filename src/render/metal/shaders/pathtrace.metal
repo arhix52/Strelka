@@ -106,7 +106,9 @@ void generateCameraRay(uint2 pixelIndex,
                         thread float3& direction,
                         const constant Uniforms& params)
 {
-    const float2 subpixel_jitter = random<SampleDimension::ePixel>(pixelLinearIndex, 0, sampleIndex);
+    const float2 subpixel_jitter = { 
+        random<SampleDimension::ePixelX>(pixelLinearIndex, 0, sampleIndex), 
+        random<SampleDimension::ePixelY>(pixelLinearIndex, 0, sampleIndex)};
     float2 pixelPos {pixelIndex.x + subpixel_jitter.x, pixelIndex.y + subpixel_jitter.y};
 
     float2 dimension {(float)params.width, (float)params.height};
@@ -242,14 +244,16 @@ float3 sampleLight(
     {
     case 0:
     {
-        float2 u = random<SampleDimension::eLightPoint>(pixelIndex, depth, sampleIndex);
+        float u = random<SampleDimension::eLightPointX>(pixelIndex, depth, sampleIndex);
+        float v = random<SampleDimension::eLightPointY>(pixelIndex, depth, sampleIndex);
+
         if (uniforms.rectLightSamplingMethod == 0)
         {
-            lightSampleData = SampleRectLightUniform(light, u, state.position);
+            lightSampleData = SampleRectLightUniform(light, float2(u, v), state.position);
         }
         else
         {
-            lightSampleData = SampleRectLight(light, u, state.position);
+            lightSampleData = SampleRectLight(light, float2(u, v), state.position);
         }
         break;
     }
@@ -278,7 +282,6 @@ float3 sampleLight(
         // bool occluded = false;
         float visibility = occluded ? 0.0f : 1.0f;
         // TODO: skip light hit
-
 
         // if (visibility == 0.0f)
         // {
@@ -310,9 +313,9 @@ float3 estimateDirectLighting(
     thread float3& toLight,
     thread float& lightPdf)
 {
-    float2 uv = random<SampleDimension::eLightId>(pixelIndex, depth, sampleIndex);
+    float u = random<SampleDimension::eLightId>(pixelIndex, depth, sampleIndex);
 
-    const uint32_t lightId = min((uint32_t)(numLights * uv.x), numLights - 1);
+    const uint32_t lightId = min((uint32_t)(numLights * u), numLights - 1);
     const float lightSelectionPdf = 1.0f / numLights;
     device const UniformLight& currLight = lights[lightId];
     const float3 r = sampleLight(uniforms, accelerationStructure, isect, sampleIndex, pixelIndex, depth, currLight, state, toLight, lightPdf);
@@ -378,7 +381,7 @@ kernel void raytracingKernel(
     prd.depth = 0;
     prd.specularBounce = false;
 
-    generateCameraRay(tid, linearPixelIndex, uniforms.subframeIndex, prd.origin, prd.direction, uniforms);
+    generateCameraRay(tid, prd.pixelIndex, prd.sampleIndex, prd.origin, prd.direction, uniforms);
     DebugMode debugMode = (DebugMode) uniforms.debug;
     while (prd.depth < uniforms.maxDepth)
     {
@@ -506,14 +509,16 @@ kernel void raytracingKernel(
                 }
             }
 
-            const float2 z1 = random<SampleDimension::eBSDF0>(prd.pixelIndex, prd.depth, prd.sampleIndex);
-            const float2 z2 = random<SampleDimension::eBSDF1>(prd.pixelIndex, prd.depth, prd.sampleIndex);
+            const float z1 = random<SampleDimension::eBSDF0>(prd.pixelIndex, prd.depth, prd.sampleIndex);
+            const float z2 = random<SampleDimension::eBSDF1>(prd.pixelIndex, prd.depth, prd.sampleIndex);
+            const float z3 = random<SampleDimension::eBSDF2>(prd.pixelIndex, prd.depth, prd.sampleIndex);
+            const float z4 = random<SampleDimension::eBSDF3>(prd.pixelIndex, prd.depth, prd.sampleIndex);
 
             MaterialSample sampleData {};
             // sampleData.ior1 = ior1;
             // sampleData.ior2 = ior2;
             sampleData.k1 = -prd.direction;
-            sampleData.xi = float4(z1.x, z1.y, z2.x, z2.y);
+            sampleData.xi = float4(z1, z2, z3, z4);
 
             materialSample(sampleData, matState);
 
@@ -526,10 +531,11 @@ kernel void raytracingKernel(
                 break;
             }
 
+
             if (prd.depth > 3)
             {
                 const float p = max(prd.throughput.x, max(prd.throughput.y, prd.throughput.z));
-                if (random<SampleDimension::eRussianRoulette>(prd.pixelIndex, prd.depth, prd.sampleIndex).x > p)
+                if (random<SampleDimension::eRussianRoulette>(prd.pixelIndex, prd.depth, prd.sampleIndex) > p)
                 {
                     break;
                 }
@@ -554,6 +560,7 @@ kernel void raytracingKernel(
         accum[linearPixelIndex] = float4(accum_color, 1.0f);
         result = accum_color;
     }
+
 
     switch ((ToneMapperType) uniforms.tonemapperType)
     {
