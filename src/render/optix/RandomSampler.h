@@ -50,6 +50,7 @@ static __host__ __device__ __inline__ unsigned int lcg(unsigned int &prev)
   return prev & 0x00FFFFFF;
 }
 
+// jenkins hash
 __device__ unsigned int hash(unsigned int a)
 {
   a = (a + 0x7ED55D16) + (a << 12);
@@ -78,13 +79,13 @@ __device__ float halton(uint32_t index, uint32_t base)
 }
 
 template <SampleDimension Dim>
-__device__ __inline__ float2 random(uint32_t pixel_index, uint32_t bounce, uint32_t sample_index)
+__device__ __inline__ float2 random(uint32_t linearPixelIndex, uint32_t bounce, uint32_t sampleIndex)
 {
     uint32_t dimension = uint32_t(Dim) * 2;
-    uint32_t scramble = hash(pixel_index);
-    uint32_t index = sample_index + scramble;
-    const unsigned int baseX = primeNumbers[dimension & 31];
-    const unsigned int baseY = primeNumbers[(dimension + 1) & 31];
+    uint32_t seed = hash(linearPixelIndex);
+    uint32_t index = seed + sampleIndex;
+    const unsigned int baseX = primeNumbers[dimension & 31u];
+    const unsigned int baseY = primeNumbers[(dimension + 1) & 31u];
 
     return make_float2(halton(index, baseX), halton(index, baseY));
 }
