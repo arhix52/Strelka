@@ -203,6 +203,43 @@ void MetalRender::render(Buffer* output)
             pUniformData->clipToView.columns[column][row] = camera.matrices.invPerspective[column][row];
         }
     }
+
+    // Photometric Units from iray documentation
+    // Controls the sensitivity of the “camera film” and is expressed as an index; the ISO number of the film, also
+    // known as “film speed.” The higher this value, the greater the exposure. If this is set to a non-zero value,
+    // “Photographic” mode is enabled. If this is set to 0, “Arbitrary” mode is enabled, and all color scaling is then
+    // strictly defined by the value of cm^2 Factor.
+    float filmIso = settings.getAs<float>("render/post/tonemapper/filmIso");
+    // The candela per meter square factor
+    float cm2_factor = settings.getAs<float>("render/post/tonemapper/cm2_factor");
+    // The fractional aperture number; e.g., 11 means aperture “f/11.” It adjusts the size of the opening of the “camera
+    // iris” and is expressed as a ratio. The higher this value, the lower the exposure.
+    float fStop = settings.getAs<float>("render/post/tonemapper/fStop");
+    // Controls the duration, in fractions of a second, that the “shutter” is open; e.g., the value 100 means that the
+    // “shutter” is open for 1/100th of a second. The higher this value, the greater the exposure
+    float shutterSpeed = settings.getAs<float>("render/post/tonemapper/shutterSpeed");
+    // Specifies the main color temperature of the light sources; the color that will be mapped to “white” on output,
+    // e.g., an incoming color of this hue/saturation will be mapped to grayscale, but its intensity will remain
+    // unchanged. This is similar to white balance controls on digital cameras.
+    float3 whitePoint{ 1.0f, 1.0f, 1.0f };
+    auto all = [](float3 v)
+    {
+        return v.x > 0.0f && v.y > 0.0f && v.z > 0.0f;
+    };
+    float3 exposureValue = all(whitePoint) ? 1.0f / whitePoint : float3(1.0f);
+    const float lum = simd::dot(exposureValue, float3{0.299f, 0.587f, 0.114f});
+    if (filmIso > 0.0f)
+    {
+        // See https://www.nayuki.io/page/the-photographic-exposure-equation
+        exposureValue *= cm2_factor * filmIso / (shutterSpeed * fStop * fStop) / 100.0f;
+    }
+    else
+    {
+        exposureValue *= cm2_factor;
+    }
+    exposureValue /= lum;
+    pUniformData->exposureValue = exposureValue;
+
     const uint32_t totalSpp = settings.getAs<uint32_t>("render/pt/sppTotal");
     const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");
     const int32_t leftSpp = totalSpp - getSharedContext().mSubframeIndex;

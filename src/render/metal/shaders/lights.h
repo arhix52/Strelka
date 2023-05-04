@@ -95,7 +95,7 @@ struct SphQuad
 };
 
 // Precomputation of constants for the spherical rectangle Q.
-static SphQuad init(device const UniformLight& l, thread const float3& o)
+static SphQuad init(device const UniformLight& l, const float3 o)
 {
     SphQuad squad;
 
@@ -162,7 +162,7 @@ static SphQuad init(device const UniformLight& l, thread const float3& o)
     return squad;
 }
 
-static float3 SphQuadSample(thread const SphQuad& squad, thread const float2& uv)
+static float3 SphQuadSample(const SphQuad squad, const float2 uv)
 {
     float u = uv.x;
     float v = uv.y;
@@ -211,6 +211,6 @@ static __inline__ LightSampleData SampleRectLightUniform(device const UniformLig
     lightSampleData.pointOnLight = float3(l.points[0]) + e1 * u.x + e2 * u.y;
     fillLightData(l, hitPoint, lightSampleData);
     lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
-                          (-dot(lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
+                          (dot(-lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
     return lightSampleData;
 }

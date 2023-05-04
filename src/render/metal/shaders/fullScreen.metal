@@ -36,12 +36,6 @@ fragment float4 copyFragment(CopyVertexOut in [[stage_in]],
                              texture2d<float> tex)
 {
     constexpr sampler sam(min_filter::nearest, mag_filter::nearest, mip_filter::none);
-
     float3 color = tex.sample(sam, in.uv).xyz;
-
-    // Apply a very simple tonemapping function to reduce the dynamic range of the
-    // input image into a range that the screen can display.
-    color = color / (1.0f + color);
-
     return float4(color, 1.0f);
 }
