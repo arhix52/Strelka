@@ -8,7 +8,7 @@ __device__ const unsigned int primeNumbers[32] =
   127, 131,
 };
 
-enum struct SampleDimension
+enum struct SampleDimension : uint32_t
 {
     ePixel,
     eLightId,
@@ -82,10 +82,10 @@ template <SampleDimension Dim>
 __device__ __inline__ float2 random(uint32_t linearPixelIndex, uint32_t bounce, uint32_t sampleIndex)
 {
     uint32_t dimension = uint32_t(Dim) * 2;
-    uint32_t seed = hash(linearPixelIndex);
-    uint32_t index = seed + sampleIndex;
+    uint32_t seed = hash(linearPixelIndex) ^ hash(sampleIndex);
+    // uint32_t index = seed + sampleIndex;
     const unsigned int baseX = primeNumbers[dimension & 31u];
     const unsigned int baseY = primeNumbers[(dimension + 1) & 31u];
 
-    return make_float2(halton(index, baseX), halton(index, baseY));
+    return make_float2(halton(seed, baseX), halton(seed, baseY));
 }
