@@ -516,7 +516,7 @@ extern "C" __global__ void __closesthit__radiance()
     const float z1 = rnd(prd->rndSeed);
     const float z2 = rnd(prd->rndSeed);
     const float z3 = rnd(prd->rndSeed);
-    const float z4 = 0.9f; //rnd(prd->rndSeed);
+    const float z4 = rnd(prd->rndSeed);
 
     mi::neuraylib::Bsdf_sample_data sample_data;
     sample_data.ior1 = ior1;
@@ -530,7 +530,6 @@ extern "C" __global__ void __closesthit__radiance()
     {
         // stop on absorb
         prd->throughput = make_float3(0.0f);
-        prd->radiance = make_float3(1000.0f, 0.0f, 0.0f);
         return;
     }
 

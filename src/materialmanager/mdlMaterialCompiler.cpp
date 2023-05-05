@@ -101,10 +101,10 @@ bool MdlMaterialCompiler::compileMaterial(mi::base::Handle<mi::neuraylib::IFunct
     // performance optimizations available only in class compilation mode
     // (all parameters are folded in instance mode)
 
-    // context->set_option("fold_all_bool_parameters", true);
-    // context->set_option("fold_all_enum_parameters", true);
-    // context->set_option("ignore_noinline", true);
-    // context->set_option("fold_ternary_on_df", true);
+    context->set_option("fold_all_bool_parameters", true);
+    context->set_option("fold_all_enum_parameters", true);
+    context->set_option("ignore_noinline", true);
+    context->set_option("fold_ternary_on_df", true);
 
     auto flags = mi::neuraylib::IMaterial_instance::CLASS_COMPILATION;
     // auto flags = mi::neuraylib::IMaterial_instance::DEFAULT_OPTIONS;
