@@ -325,9 +325,9 @@ struct SurfaceHitData
     float3 position;
     float3 normal;
     float3 geom_normal;
-    float3 text_coords;
-    float3 worldTangent;
-    float3 worldBinormal;
+    float3 text_coords[2];
+    float3 worldTangent[2];
+    float3 worldBinormal[2];
 };
 
 static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitGroupData* hit_data, const bool inside)
@@ -379,9 +379,12 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
     res.normal = worldNormal;
     res.geom_normal = geomNormal;
     res.position = worldPosition;
-    res.text_coords = text_coords;
-    res.worldTangent = worldTangent;
-    res.worldBinormal = worldBinormal;
+    res.text_coords[0] = text_coords;
+    res.text_coords[1] = make_float3(0.0f);
+    res.worldTangent[0] = worldTangent;
+    res.worldBinormal[0] = worldBinormal;
+    res.worldTangent[1] = worldTangent;
+    res.worldBinormal[1] = worldBinormal;
     return res;
 }
 
@@ -408,9 +411,13 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     res.normal = worldNormal;
     res.geom_normal = worldNormal;
     res.position = worldPosition;
-    // res.text_coords = text_coords;
-    res.worldTangent = worldTangent;
-    res.worldBinormal = worldBinormal;
+    res.text_coords[0] = make_float3(0.5f, 0.5f, 0.5f);
+    res.text_coords[1] = make_float3(0.0f);
+    res.worldTangent[0] = worldTangent;
+    res.worldBinormal[0] = worldBinormal;
+    res.worldTangent[1] = worldTangent;
+    res.worldBinormal[1] = worldBinormal;
+
     return res;
 }
 
@@ -445,11 +452,11 @@ extern "C" __global__ void __closesthit__radiance()
     state.position = surfaceHit.position;
     state.normal = surfaceHit.normal;
     state.geom_normal = surfaceHit.geom_normal;
-    // Currently supports only 1 set of textures
-    // see: set_option("num_texture_spaces", "1")
-    state.text_coords = &surfaceHit.text_coords;
-    state.tangent_u = &surfaceHit.worldTangent;
-    state.tangent_v = &surfaceHit.worldBinormal;
+    // Currently supports only 2 set of textures
+    // see: set_option("num_texture_spaces", "2")
+    state.text_coords = surfaceHit.text_coords;
+    state.tangent_u = surfaceHit.worldTangent;
+    state.tangent_v = surfaceHit.worldBinormal;
     // fill common state
     state.animation_time = 0.0f;
     state.text_results = texture_results;
