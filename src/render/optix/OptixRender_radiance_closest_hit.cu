@@ -205,9 +205,7 @@ __device__ const float4 identity[3] = { { 1.0f, 0.0f, 0.0f, 0.0f },
                                         { 0.0f, 1.0f, 0.0f, 0.0f },
                                         { 0.0f, 0.0f, 1.0f, 0.0f } };
 
-__inline__ __device__ float3 sampleLight(const uint32_t sampleIndex,
-                                         const uint32_t pixelIndex,
-                                         const uint32_t depth,
+__inline__ __device__ float3 sampleLight(SamplerState& sampler,
                                          const UniformLight& light,
                                          const Mdl_state& state,
                                          float3& toLight,
@@ -217,7 +215,8 @@ __inline__ __device__ float3 sampleLight(const uint32_t sampleIndex,
     switch (light.type)
     {
     case 0: {
-        const float2 uv = random<SampleDimension::eLightPoint>(pixelIndex, depth, sampleIndex);
+        const float2 uv = make_float2(random<SampleDimension::eLightPointX>(sampler),
+                                      random<SampleDimension::eLightPointY>(sampler));
         if (params.rectLightSamplingMethod == 0)
         {
             lightSampleData = SampleRectLightUniform(light, uv, state.position);
@@ -275,18 +274,16 @@ __inline__ __device__ float3 sampleLight(const uint32_t sampleIndex,
     return make_float3(0.0f);
 }
 
-__device__ float3 estimateDirectLighting(const uint32_t sampleIndex,
-                                         const uint32_t pixelIndex,
-                                         const uint32_t depth,
+__device__ float3 estimateDirectLighting(SamplerState& sampler,
                                          const Mdl_state& state,
                                          float3& toLight,
                                          float& lightPdf)
 {
-    float u = random<SampleDimension::eLightId>(pixelIndex, depth, sampleIndex).x;
+    float u = random<SampleDimension::eLightId>(sampler);
     const uint32_t lightId = (uint32_t)(params.scene.numLights * u);
     const float lightSelectionPdf = 1.0f / params.scene.numLights;
     const UniformLight& currLight = params.scene.lights[lightId];
-    const float3 r = sampleLight(sampleIndex, pixelIndex, depth, currLight, state, toLight, lightPdf);
+    const float3 r = sampleLight(sampler, currLight, state, toLight, lightPdf);
     lightPdf *= lightSelectionPdf;
     return r;
 }
@@ -476,7 +473,7 @@ extern "C" __global__ void __closesthit__radiance()
 
     float3 toLight; // return value for sampleLights()
     float lightPdf = 0.0f; // return value for sampleLights()
-    const float3 radiance = estimateDirectLighting(prd->linearPixelIndex, prd->sampleIndex, prd->depth, state, toLight, lightPdf);
+    const float3 radiance = estimateDirectLighting(prd->sampler, state, toLight, lightPdf);
 
     if (params.debug == 1)
     {
@@ -525,14 +522,16 @@ extern "C" __global__ void __closesthit__radiance()
         }
     }
 
-    const float2 z1 = random<SampleDimension::eBSDF0>(prd->linearPixelIndex, prd->depth, prd->sampleIndex);
-    const float2 z2 = random<SampleDimension::eBSDF1>(prd->linearPixelIndex, prd->depth, prd->sampleIndex);
+    const float z1 = random<SampleDimension::eBSDF0>(prd->sampler);
+    const float z2 = random<SampleDimension::eBSDF1>(prd->sampler);
+    const float z3 = random<SampleDimension::eBSDF2>(prd->sampler);
+    const float z4 = random<SampleDimension::eBSDF3>(prd->sampler);
 
     mi::neuraylib::Bsdf_sample_data sample_data;
     sample_data.ior1 = ior1;
     sample_data.ior2 = ior2;
     sample_data.k1 = -ray_dir;
-    sample_data.xi = make_float4(z1, z2);
+    sample_data.xi = make_float4(z1, z2, z3, z4);
 
     mdlcode_sample(&sample_data, &state, &res_data, nullptr, (const char*)hit_data->argData);
 

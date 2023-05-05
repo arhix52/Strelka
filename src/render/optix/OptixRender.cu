@@ -37,9 +37,10 @@ static __forceinline__ __device__ PerRayData* getPRD()
 }
 
 __device__ void generateCameraRay(
-    const uint2 pixelIndex, const uint32_t pixelLinearIndex, const uint32_t sampleIndex, float3& origin, float3& direction)
+    const uint2 pixelIndex, SamplerState& sampler, float3& origin, float3& direction)
 {
-    float2 subpixel_jitter = random<SampleDimension::ePixel>(pixelLinearIndex, 0u, sampleIndex);
+    float2 subpixel_jitter =
+        make_float2(random<SampleDimension::ePixelX>(sampler), random<SampleDimension::ePixelY>(sampler));
 
     float2 pixelPos = make_float2(pixelIndex.x + subpixel_jitter.x, pixelIndex.y + subpixel_jitter.y);
 
@@ -69,6 +70,9 @@ extern "C" __global__ void __raygen__rg()
         PerRayData prd = {};
         prd.linearPixelIndex = launch_index.y * params.image_width + launch_index.x;
         prd.sampleIndex = params.subframe_index + sampleIdx;
+
+        prd.sampler = initSampler(prd.linearPixelIndex, prd.sampleIndex, 52u);
+
         prd.radiance = make_float3(0.0f);
         prd.throughput = make_float3(1.0f);
         prd.inside = false;
@@ -78,7 +82,7 @@ extern "C" __global__ void __raygen__rg()
         float3 ray_origin, ray_direction;
 
         const uint2 pixelCoord = make_uint2(launch_index.x, launch_index.y);
-        generateCameraRay(pixelCoord, prd.linearPixelIndex, prd.sampleIndex, ray_origin, ray_direction);
+        generateCameraRay(pixelCoord, prd.sampler, ray_origin, ray_direction);
 
         unsigned int u0, u1;
         packPointer(&prd, u0, u1);
@@ -102,7 +106,7 @@ extern "C" __global__ void __raygen__rg()
             if (prd.depth > 3)
             {
                 const float p = max(prd.throughput.x, max(prd.throughput.y, prd.throughput.z));
-                if (random<SampleDimension::eRussianRoulette>(prd.linearPixelIndex, prd.depth, prd.sampleIndex).x > p)
+                if (random<SampleDimension::eRussianRoulette>(prd.sampler) > p)
                 {
                     break;
                 }

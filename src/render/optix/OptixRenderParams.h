@@ -1,10 +1,9 @@
 #pragma once 
 #include <optix_types.h>
-
 #include <vector_types.h>
-
 #include <sutil/Matrix.h>
 
+#include "RandomSampler.h"
 #include "Lights.h"
 
 #define GEOMETRY_MASK_TRIANGLE 1
@@ -64,6 +63,7 @@ struct Params
 
 struct PerRayData
 {
+    SamplerState sampler;
     uint32_t linearPixelIndex;
     uint32_t sampleIndex;
     uint32_t depth; // bounce

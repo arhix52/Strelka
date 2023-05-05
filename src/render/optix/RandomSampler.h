@@ -10,13 +10,23 @@ __device__ const unsigned int primeNumbers[32] =
 
 enum struct SampleDimension : uint32_t
 {
-    ePixel,
-    eLightId,
-    eLightPoint,
-    eBSDF0,
-    eBSDF1,
-    eRussianRoulette,
-    eNUM_DIMENSIONS
+  ePixelX,
+  ePixelY,
+  eLightId,
+  eLightPointX,
+  eLightPointY,
+  eBSDF0,
+  eBSDF1,
+  eBSDF2,
+  eBSDF3,
+  eRussianRoulette,
+  eNUM_DIMENSIONS
+};
+
+struct SamplerState 
+{
+  uint32_t seed;
+  uint32_t sampleIdx;
 };
 
 #define MAX_BOUNCES 128
@@ -51,7 +61,7 @@ static __host__ __device__ __inline__ unsigned int lcg(unsigned int &prev)
 }
 
 // jenkins hash
-__device__ unsigned int hash(unsigned int a)
+static __device__ unsigned int hash(unsigned int a)
 {
   a = (a + 0x7ED55D16) + (a << 12);
   a = (a ^ 0xC761C23C) ^ (a >> 19);
@@ -62,7 +72,7 @@ __device__ unsigned int hash(unsigned int a)
   return a;
 }
 
-__device__ float halton(uint32_t index, uint32_t base)
+static __device__ float halton(uint32_t index, uint32_t base)
 {
     const float s = 1.0f / float(base);
     unsigned int i = index;
@@ -78,14 +88,20 @@ __device__ float halton(uint32_t index, uint32_t base)
     return clamp(result, 0.0f, 1.0f);
 }
 
-template <SampleDimension Dim>
-__device__ __inline__ float2 random(uint32_t linearPixelIndex, uint32_t bounce, uint32_t sampleIndex)
+static __device__ SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t seed)
 {
-    uint32_t dimension = uint32_t(Dim) * 2;
-    uint32_t seed = hash(linearPixelIndex) ^ hash(sampleIndex);
-    // uint32_t index = seed + sampleIndex;
-    const unsigned int baseX = primeNumbers[dimension & 31u];
-    const unsigned int baseY = primeNumbers[(dimension + 1) & 31u];
-
-    return make_float2(halton(seed, baseX), halton(seed, baseY));
+  SamplerState sampler;
+  sampler.seed = hash(linearPixelIndex) ^ hash(pixelSampleIndex) ^ hash(seed);
+  sampler.sampleIdx = 0u;
+  return sampler;
 }
+
+template <SampleDimension Dim>
+__device__ __inline__ float random(SamplerState& state)
+{
+    const uint32_t dimension = uint32_t(Dim);
+    const uint32_t base = primeNumbers[dimension & 31u];
+    return halton(state.seed, base);
+}
+
+ 
