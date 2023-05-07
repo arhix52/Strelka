@@ -145,11 +145,7 @@ bool MdlPtxCodeGen::appendMaterialToLinkUnit(uint32_t idx,
     bool isHair = false;
     if (hairExpr != nullptr)
     {
-        mi::base::Handle<mi::neuraylib::IExpression_constant const> expr_constant(
-            hairExpr->get_interface<mi::neuraylib::IExpression_constant>());
-        mi::base::Handle<mi::neuraylib::IValue const> value(expr_constant->get_value());
-
-        if (value->get_kind() != mi::neuraylib::IValue::VK_INVALID_DF)
+        if (hairExpr->get_kind() != mi::neuraylib::IExpression::EK_CONSTANT)
         {
             isHair = true;
         }
