@@ -142,7 +142,18 @@ bool MdlPtxCodeGen::appendMaterialToLinkUnit(uint32_t idx,
 
     // Here we need to detect if current material for hair, if so, replace name in function description
     mi::base::Handle<mi::neuraylib::IExpression const> hairExpr(compiledMaterial->lookup_sub_expression("hair"));
-    const bool isHair = hairExpr != nullptr;
+    bool isHair = false;
+    if (hairExpr != nullptr)
+    {
+        mi::base::Handle<mi::neuraylib::IExpression_constant const> expr_constant(
+            hairExpr->get_interface<mi::neuraylib::IExpression_constant>());
+        mi::base::Handle<mi::neuraylib::IValue const> value(expr_constant->get_value());
+
+        if (value->get_kind() != mi::neuraylib::IValue::VK_INVALID_DF)
+        {
+            isHair = true;
+        }
+    }
 
     std::vector<mi::neuraylib::Target_function_description> genFunctions;
     genFunctions.push_back(mi::neuraylib::Target_function_description( isHair ? "hair" : "surface.scattering", scatteringFuncName.c_str()));
