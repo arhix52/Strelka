@@ -91,7 +91,7 @@ static __device__ float halton(uint32_t index, uint32_t base)
 static __device__ SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t seed)
 {
   SamplerState sampler;
-  sampler.seed = hash(linearPixelIndex) ^ hash(pixelSampleIndex) ^ hash(seed);
+  sampler.seed = hash(linearPixelIndex) ^ hash(seed) + pixelSampleIndex;
   sampler.sampleIdx = 0u;
   return sampler;
 }
