@@ -183,8 +183,8 @@ static float3 SphQuadSample(const SphQuad squad, const float2 uv)
     float h1 = squad.y1 / sqrt(d * d + squad.y1sq);
     float hv = h0 + v * (h1 - h0);
     float hv2 = hv * hv;
-    float eps = 1e-5;
-    float yv = (hv < 1 - eps) ? (hv * d) / sqrt(1 - hv2) : squad.y1;
+    float eps = 1e-6f;
+    float yv = (hv2 < 1.0f - eps) ? (hv * d) / sqrt(1.0f - hv2) : squad.y1;
 
     // 4. transform (xu, yv, z0) to world coords
     return (squad.o + xu * squad.x + yv * squad.y + squad.z0 * squad.z);
@@ -193,12 +193,30 @@ static float3 SphQuadSample(const SphQuad squad, const float2 uv)
 static LightSampleData SampleRectLight(device const UniformLight& l, thread const float2& u, thread const float3& hitPoint)
 {
     LightSampleData lightSampleData;
+    float3 e1 = float3(l.points[1]) - float3(l.points[0]);
+    float3 e2 = float3(l.points[3]) - float3(l.points[0]);
+
     // https://www.arnoldrenderer.com/research/egsr2013_spherical_rectangle.pdf
     SphQuad quad = init(l, hitPoint);
+    if (quad.S <= 0.0f)
+    {
+        lightSampleData.pdf = 0.0f;
+        lightSampleData.pointOnLight = float3(l.points[0]) + e1 * u.x + e2 * u.y;
+        return lightSampleData;
+    }
+    lightSampleData.pdf = max(0.0f, 1.0f / quad.S);
+    if (quad.S < 1e-3f)
+    {
+        // light too small, use uniform
+        lightSampleData.pointOnLight = float3(l.points[0]) + e1 * u.x + e2 * u.y;
+        fillLightData(l, hitPoint, lightSampleData);
+        lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
+                              (dot(-lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
+        return lightSampleData;
+    }
     lightSampleData.pointOnLight = SphQuadSample(quad, u);
     fillLightData(l, hitPoint, lightSampleData);
-    lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
-                          (-dot(lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
+
     return lightSampleData;
 }
 

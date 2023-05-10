@@ -8,7 +8,6 @@
 #include "ShaderTypes.h"
 
 using namespace metal;
-
 using namespace raytracing;
 
 struct PerRayData
@@ -323,7 +322,6 @@ float3 estimateDirectLighting(
     return r;
 }
 
-
 __attribute__((always_inline))
 int __float_as_int(float x) 
 {
@@ -370,7 +368,6 @@ kernel void raytracingKernel(
     }
     const uint32_t linearPixelIndex = tid.y * uniforms.width + tid.x;
     // uint32_t rndSeed = tea<4>(linearPixelIndex, uniforms.subframeIndex);
-    // uint32_t rndSeed = initRNG(tid.xy, uint2(uniforms.width, uniforms.height), uniforms.subframeIndex);
 
     PerRayData prd;
     prd.pixelIndex = linearPixelIndex;
@@ -531,7 +528,6 @@ kernel void raytracingKernel(
                 break;
             }
 
-
             if (prd.depth > 3)
             {
                 const float p = max(prd.throughput.x, max(prd.throughput.y, prd.throughput.z));
@@ -560,7 +556,6 @@ kernel void raytracingKernel(
         accum[linearPixelIndex] = float4(accum_color, 1.0f);
         result = accum_color;
     }
-
 
     switch ((ToneMapperType) uniforms.tonemapperType)
     {

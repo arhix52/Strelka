@@ -100,6 +100,23 @@ static float random(unsigned linearPixelIndex, unsigned bounce, unsigned sampleI
     return x;
 }
 
+uint xorshift(thread uint& rngState) 
+{
+    rngState ^= rngState << 13; 
+    rngState ^= rngState >> 17; 
+    rngState ^= rngState << 5; 
+    return rngState;
+}
+
+// template <SampleDimension Dim>
+// static float random(unsigned linearPixelIndex, unsigned bounce, unsigned sampleIndex)
+// {
+//     uint32_t dimension = uint32_t(Dim);
+//     uint32_t seed = linearPixelIndex ^ jenkinsHash(sampleIndex * uint(SampleDimension::eNUM_DIMENSIONS) + dimension);
+//     seed = jenkinsHash(seed);
+//     return uintToFloat(xorshift(seed));
+// }
+
 template<unsigned int N>
 static  __inline__ unsigned int tea( unsigned int val0, unsigned int val1 )
 {
@@ -157,13 +174,7 @@ uint initRNG(uint2 pixelCoords, uint2 resolution, uint frameNumber)
 
 
 
-uint xorshift(thread uint& rngState) 
-{
-    rngState ^= rngState << 13; 
-    rngState ^= rngState >> 17; 
-    rngState ^= rngState << 5; 
-    return rngState;
-}
+
 
 // float rnd(thread uint& rngState) 
 // {
