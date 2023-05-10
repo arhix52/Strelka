@@ -2,13 +2,10 @@
 
 #include "OptixRenderParams.h"
 #include <cuda/helpers.h>
-// #include <cuda/random.h>
 #include "RandomSampler.h"
 
 #include <sutil/vec_math.h>
 #include <sutil/Matrix.h>
-
-#include <glm/glm.hpp>
 
 extern "C"
 {
