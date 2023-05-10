@@ -29,6 +29,7 @@ public:
     const std::vector<glm::float3>& GetPoints() const;
     const std::vector<float>& GetWidths() const;
     const std::vector<uint32_t>& GetVertexCounts() const;
+    const std::vector<glm::float2>& GetUvs() const;
     const GfMatrix4d& GetPrototypeTransform() const;
 
     const char* getName() const;
@@ -43,6 +44,7 @@ private:
                        VtVec3fArray& points,
                        VtVec3fArray& normals,
                        VtFloatArray& widths,
+                       VtVec2fArray& uvs,
                        bool& indexedNormals,
                        bool& indexedUVs,
                        GfVec3f& color,
@@ -56,14 +58,14 @@ private:
     VtVec3fArray mPoints;
     VtVec3fArray mNormals;
     VtFloatArray mWidths;
+    VtVec2fArray mUvs;
     GfMatrix4d m_prototypeTransform;
     HdBasisCurvesTopology mTopology;
 
     std::vector<glm::float3> mCurvePoints;
     std::vector<float> mCurveWidths;
     std::vector<uint32_t> mCurveVertexCounts;
-
-    // std::vector<GfVec2f> m_uvs;
+    std::vector<glm::float2> mCurveUvs;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE
