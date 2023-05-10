@@ -200,15 +200,17 @@ static __inline__ __device__ LightSampleData SampleRectLight(const UniformLight&
     }
     if (quad.S < 1e-3f)
     {
+        // just use uniform, because rectangle too small
         lightSampleData.pointOnLight = make_float3(l.points[0]) + e1 * u.x + e2 * u.y;
         fillLightData(l, hitPoint, lightSampleData);
-        lightSampleData.pdf = 1.0f / quad.S * -dot(lightSampleData.L, lightSampleData.normal)/(lightSampleData.distToLight * lightSampleData.distToLight);
+        lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
+                              (-dot(lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
         return lightSampleData;
     }
-  
+
     lightSampleData.pointOnLight = SphQuadSample(quad, u);
     fillLightData(l, hitPoint, lightSampleData);
-    lightSampleData.pdf = 1.0f / quad.S * -dot(lightSampleData.L, lightSampleData.normal)/(lightSampleData.distToLight * lightSampleData.distToLight);
+    lightSampleData.pdf = 1.0f / quad.S;
 
     return lightSampleData;
 }
@@ -221,8 +223,8 @@ static __inline__ __device__ LightSampleData SampleRectLightUniform(const Unifor
     float3 e2 = make_float3(l.points[3]) - make_float3(l.points[0]);
     lightSampleData.pointOnLight = make_float3(l.points[0]) + e1 * u.x + e2 * u.y;
     fillLightData(l, hitPoint, lightSampleData);
-    lightSampleData.pdf = 1.0f / lightSampleData.area;
-    // lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
-                        //   (-dot(lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
+    // here is conversion from are to solid angle: dist2 / cos
+    lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
+                          (-dot(lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
     return lightSampleData;
 }
