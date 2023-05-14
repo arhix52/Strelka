@@ -221,7 +221,7 @@ extern "C" __global__ void __closesthit__light()
     const float3 lightNormal = calcLightNormal(currLight, hitPoint);
     if (-dot(rayDir, lightNormal) > 0.0f)
     {
-        prd->radiance += prd->throughput * make_float3(currLight.color);
+        prd->radiance += prd->throughput * make_float3(currLight.color) * -dot(rayDir, lightNormal);
     }
     prd->throughput = make_float3(0.0f);
     // stop tracing

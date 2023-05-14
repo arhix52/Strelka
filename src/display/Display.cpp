@@ -111,7 +111,7 @@ void Display::drawUI()
     {
         const char* rectlightSamplingMethodItems[] = { "Uniform", "Advanced" };
         static int currentRectlightSamplingMethodItemId = 0;
-        if (ImGui::BeginCombo("Stratified Sampling", rectlightSamplingMethodItems[currentRectlightSamplingMethodItemId]))
+        if (ImGui::BeginCombo("Rect Light Sampling", rectlightSamplingMethodItems[currentRectlightSamplingMethodItemId]))
         {
             for (int n = 0; n < IM_ARRAYSIZE(rectlightSamplingMethodItems); n++)
             {

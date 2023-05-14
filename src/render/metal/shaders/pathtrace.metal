@@ -413,8 +413,13 @@ kernel void raytracingKernel(
             {
                 if (prd.depth == 0 || prd.specularBounce)
                 {
-                    // TODO: extract light colors
-                    prd.radiance += prd.throughput * float3(150000.0f);
+                    float3 hitPoint = ray.origin + ray.direction * intersection.distance;
+                    device const UniformLight& currLight = lights[instances[instanceIndex].userID];
+                    const float3 lightNormal = calcLightNormal(currLight, hitPoint);
+                    if (-dot(prd.direction, lightNormal) > 0.0f)
+                    {
+                        prd.radiance += prd.throughput * float3(currLight.color) * -dot(prd.direction, lightNormal);
+                    }
                 }
                 prd.throughput = float3(0.0f);
                 // stop tracing

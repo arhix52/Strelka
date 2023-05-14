@@ -55,6 +55,16 @@ unsigned int hash(unsigned int a)
   return a;
 }
 
+uint32_t hash2(uint32_t x, uint32_t seed)
+{
+  x ^= x * 0x3d20adea;
+  x += seed;
+  x *= (seed >> 16) | 1;
+  x ^= x * 0x05526c56;
+  x ^= x * 0x53a22864;
+  return x;
+}
+
 uint jenkinsHash(uint x) 
 {
     x += x << 10;
@@ -93,10 +103,10 @@ float halton(uint32_t index, uint32_t base)
 template <SampleDimension Dim>
 static float random(unsigned linearPixelIndex, unsigned bounce, unsigned sampleIndex)
 {
-    uint32_t seed = hash(linearPixelIndex);
+    uint32_t seed = hash2(linearPixelIndex, 52u) + sampleIndex;
     uint32_t dimension = uint32_t(Dim);
     const uint32_t base = primeNumbers[dimension & 31u];
-    float x = halton(sampleIndex + seed, base);
+    float x = halton(seed, base);
     return x;
 }
 
