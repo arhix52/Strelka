@@ -25,6 +25,11 @@ struct LightSampleData
     float distToLight;
 };
 
+__forceinline__ __device__ float misWeightBalance(const float a, const float b)
+{
+    return 1.0f / ( 1.0f + (b / a) );
+}
+
 static __inline__ __device__ float calcLightArea(const UniformLight& l)
 {
     float area = 0.0f;
@@ -183,12 +188,22 @@ static __device__ float3 SphQuadSample(const SphQuad& squad, const float2 uv)
     return (squad.o + xu * squad.x + yv * squad.y + squad.z0 * squad.z);
 }
 
+static __inline__ __device__ float getLightPdf(const UniformLight& l, const float3 hitPoint)
+{
+    SphQuad quad = init(l, hitPoint);
+    if (quad.S <= 0.0f)
+    {
+        return 0.0f;
+    }
+    return 1.0f / quad.S;
+}
+
 static __inline__ __device__ LightSampleData SampleRectLight(const UniformLight& l, const float2 u, const float3 hitPoint)
 {
     LightSampleData lightSampleData;
     float3 e1 = make_float3(l.points[1]) - make_float3(l.points[0]);
     float3 e2 = make_float3(l.points[3]) - make_float3(l.points[0]);
-    lightSampleData.pointOnLight = make_float3(l.points[0]) + e1 * u.x + e2 * u.y;
+    // lightSampleData.pointOnLight = make_float3(l.points[0]) + e1 * u.x + e2 * u.y;
     // https://www.arnoldrenderer.com/research/egsr2013_spherical_rectangle.pdf
     SphQuad quad = init(l, hitPoint);
     if (quad.S <= 0.0f)

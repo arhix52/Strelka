@@ -1263,8 +1263,9 @@ bool OptiXRender::createOptixMaterials()
                 mdlModule = mMaterialManager.createModule(currMatDesc.file.c_str());
                 if (mdlModule == nullptr)
                 {
-                    STRELKA_FATAL("Unable to load MDL file: {}", currMatDesc.file.c_str());
-                    assert(0);
+                    STRELKA_ERROR("Unable to load MDL file: {}, Force replaced to default.mdl", currMatDesc.file.c_str());
+                    mdlModule = mNameToModule["default.mdl"];
+                    // assert(0);
                 }
                 mNameToModule[currMatDesc.file] = mdlModule;
             }

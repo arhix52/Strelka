@@ -158,7 +158,9 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
             else
             {
                 const std::string& code = material->GetStrelkaMaterial();
+                const std::string& name = material->getSubIdentifier();
                 oka::Scene::MaterialDescription materialDesc;
+                materialDesc.name = name;
                 materialDesc.code = code;
                 materialDesc.type = oka::Scene::MaterialDescription::Type::eMaterialX;
                 materialDesc.params = material->getParams();
@@ -199,10 +201,14 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
 
             uint32_t materialIndex = 0;
 
-            if (mesh->HasColor() && materialId.IsEmpty())
+            if (materialId.IsEmpty())
             {
+                GfVec3f color({1.0f});
+                if (mesh->HasColor())
+                {
+                    color = mesh->GetColor();
+                }
                 // materialName += "_color";
-                GfVec3f color = mesh->GetColor();
                 const std::string& fileUri = "default.mdl";
                 const std::string& name = "default_material";
                 oka::Scene::MaterialDescription material;

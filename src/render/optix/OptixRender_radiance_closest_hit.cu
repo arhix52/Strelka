@@ -418,10 +418,7 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     return res;
 }
 
-__forceinline__ __device__ float misWeightBalance(const float a, const float b)
-{
-    return 1.0f / ( 1.0f + (b / a) );
-}
+
 
 extern "C" __global__ void __closesthit__radiance()
 {
@@ -555,6 +552,9 @@ extern "C" __global__ void __closesthit__radiance()
     {
         prd->origin = offset_ray(state.position, state.geom_normal);
     }
+    // MDL returns pdf = 0.0 for specular (it should be infinite)
+    prd->prevHitPos = state.position;
+    prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
     prd->dir = sample_data.k2;
     prd->throughput *= sample_data.bsdf_over_pdf;
 }

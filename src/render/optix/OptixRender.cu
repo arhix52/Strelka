@@ -75,6 +75,7 @@ extern "C" __global__ void __raygen__rg()
         prd.inside = false;
         prd.depth = 0;
         prd.specularBounce = false;
+        prd.lastBsdfPdf = 0.0f;
         
         float3 ray_origin, ray_direction;
 
@@ -119,6 +120,7 @@ extern "C" __global__ void __raygen__rg()
 
             if (params.debug == 1)
                 break;
+            prd.sampler.depth++;
         }
         result += prd.radiance;
     }
@@ -221,7 +223,16 @@ extern "C" __global__ void __closesthit__light()
     const float3 lightNormal = calcLightNormal(currLight, hitPoint);
     if (-dot(rayDir, lightNormal) > 0.0f)
     {
-        prd->radiance += prd->throughput * make_float3(currLight.color) * -dot(rayDir, lightNormal);
+        if (prd->depth == 0)
+        {
+            prd->radiance += prd->throughput * make_float3(currLight.color) * -dot(rayDir, lightNormal);
+        }
+        else
+        {
+            float lightPdf = getLightPdf(currLight, prd->prevHitPos);
+            const float misWeight = misWeightBalance(lightPdf, prd->lastBsdfPdf);
+            prd->radiance += prd->throughput * make_float3(currLight.color) * -dot(rayDir, lightNormal) * misWeight * prd->lastBsdfPdf;
+        }
     }
     prd->throughput = make_float3(0.0f);
     // stop tracing

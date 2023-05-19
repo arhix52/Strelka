@@ -71,8 +71,10 @@ struct PerRayData
     float3 throughput;
     float3 origin;
     float3 dir;
+    float3 prevHitPos;
     bool inside;
     bool specularBounce;
+    float lastBsdfPdf;
 };
 
 enum RayType

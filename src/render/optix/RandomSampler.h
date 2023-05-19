@@ -27,6 +27,7 @@ struct SamplerState
 {
   uint32_t seed;
   uint32_t sampleIdx;
+  uint32_t depth;
 };
 
 #define MAX_BOUNCES 128
@@ -85,7 +86,7 @@ static __device__ float halton(uint32_t index, uint32_t base)
       i = (i - digit) / base;
       f *= s;
     }
-    return clamp(result, 0.0f, 1.0f);
+    return clamp(result, 0.0f, 1.0f); // TODO: 1minusEps
 }
 
 static __device__ SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t seed)
@@ -99,7 +100,7 @@ static __device__ SamplerState initSampler(uint32_t linearPixelIndex, uint32_t p
 template <SampleDimension Dim>
 __device__ __inline__ float random(SamplerState& state)
 {
-    const uint32_t dimension = uint32_t(Dim);
+    const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
     const uint32_t base = primeNumbers[dimension & 31u];
     return halton(state.seed, base);
 }

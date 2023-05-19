@@ -171,7 +171,9 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
         const bool res = m_translator.ParseMdlNetwork(id, network, mMdlFileUri, mMdlSubIdentifier);
         if (!res)
         {
-            STRELKA_ERROR("Failed to translate material!");
+            STRELKA_ERROR("Failed to translate material, replace to default!");
+            mMdlFileUri = "default.mdl";
+            mMdlSubIdentifier = "default_material";
         }
         mIsMdl = true;
     }
