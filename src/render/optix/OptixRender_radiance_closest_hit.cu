@@ -418,8 +418,6 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     return res;
 }
 
-
-
 extern "C" __global__ void __closesthit__radiance()
 {
     OptixPrimitiveType primType = optixGetPrimitiveType();
@@ -468,57 +466,6 @@ extern "C" __global__ void __closesthit__radiance()
 
     mdlcode_init(&state, &res_data, nullptr, (const char*)hit_data->argData);
 
-    float3 toLight; // return value for sampleLights()
-    float lightPdf = 0.0f; // return value for sampleLights()
-    const float3 radiance = estimateDirectLighting(prd->sampler, state, toLight, lightPdf);
-
-    if (params.debug == 1)
-    {
-        // prd->radiance = radiance;
-        prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
-        return;
-    }
-
-    if (isnan(radiance) || isnan(lightPdf))
-    {
-        // ERROR, terminate tracing;
-        prd->radiance = make_float3(100.0f, 0.0f, 0.0f);
-        prd->throughput = make_float3(0.0f);
-        return;
-    }
-
-    const bool isNextEventValid = ((dot(toLight, state.normal) > 0.0f) != isInside) && lightPdf != 0.0f;
-
-    if (isNextEventValid)
-    {
-        const float3 radianceOverPdf = radiance / lightPdf;
-
-        mi::neuraylib::Bsdf_evaluate_data<mi::neuraylib::DF_HSM_NONE> evalData = {};
-        evalData.ior1 = ior1; // IOR current medium
-        evalData.ior2 = ior2; // IOR other side
-        evalData.k1 = -ray_dir; // outgoing direction
-        evalData.k2 = toLight; // incoming direction
-        evalData.bsdf_diffuse = make_float3(0.0f);
-        evalData.bsdf_glossy = make_float3(0.0f);
-
-        mdlcode_evaluate(&evalData, &state, &res_data, nullptr, (const char*)hit_data->argData);
-
-        if (isnan(evalData.bsdf_diffuse) || isnan(evalData.bsdf_glossy))
-        {
-            // ERROR, terminate tracing;
-            prd->radiance = make_float3(100.0f, 0.0f, 0.0f);
-            prd->throughput = make_float3(0.0f);
-            return;
-        }
-
-        // compute lighting for this light
-        if (evalData.pdf > 0.0f)
-        {
-            const float misWeight = misWeightBalance(lightPdf, evalData.pdf);
-            prd->radiance += prd->throughput * radianceOverPdf * misWeight * (evalData.bsdf_diffuse + evalData.bsdf_glossy);
-        }
-    }
-
     const float z1 = random<SampleDimension::eBSDF0>(prd->sampler);
     const float z2 = random<SampleDimension::eBSDF1>(prd->sampler);
     const float z3 = random<SampleDimension::eBSDF2>(prd->sampler);
@@ -538,8 +485,58 @@ extern "C" __global__ void __closesthit__radiance()
         prd->throughput = make_float3(0.0f);
         return;
     }
+    prd->specularBounce = ((sample_data.event_type & (mi::neuraylib::BSDF_EVENT_SPECULAR)) != 0);
 
-    prd->specularBounce = ((sample_data.event_type & mi::neuraylib::BSDF_EVENT_SPECULAR) != 0);
+    if (params.debug == 1)
+    {
+        prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
+        return;
+    }
+
+    if (sample_data.event_type & ((mi::neuraylib::BSDF_EVENT_DIFFUSE | mi::neuraylib::BSDF_EVENT_GLOSSY)))
+    {
+        float3 toLight; // return value for sampleLights()
+        float lightPdf = 0.0f; // return value for sampleLights()
+        const float3 radiance = estimateDirectLighting(prd->sampler, state, toLight, lightPdf);
+
+        if (isnan(radiance) || isnan(lightPdf))
+        {
+            // ERROR, terminate tracing;
+            prd->radiance = make_float3(100.0f, 0.0f, 0.0f);
+            prd->throughput = make_float3(0.0f);
+            return;
+        }
+
+        const bool isNextEventValid = ((dot(toLight, state.normal) > 0.0f) != isInside) && lightPdf != 0.0f;
+        if (isNextEventValid)
+        {
+            mi::neuraylib::Bsdf_evaluate_data<mi::neuraylib::DF_HSM_NONE> evalData = {};
+            evalData.ior1 = ior1; // IOR current medium
+            evalData.ior2 = ior2; // IOR other side
+            evalData.k1 = -ray_dir; // outgoing direction
+            evalData.k2 = toLight; // incoming direction
+            evalData.bsdf_diffuse = make_float3(0.0f);
+            evalData.bsdf_glossy = make_float3(0.0f);
+
+            mdlcode_evaluate(&evalData, &state, &res_data, nullptr, (const char*)hit_data->argData);
+
+            if (isnan(evalData.bsdf_diffuse) || isnan(evalData.bsdf_glossy))
+            {
+                // ERROR, terminate tracing;
+                prd->radiance = make_float3(100.0f, 0.0f, 0.0f);
+                prd->throughput = make_float3(0.0f);
+                return;
+            }
+
+            // compute lighting for this light
+            if (evalData.pdf > 0.0f)
+            {
+                const float3 radianceOverPdf = radiance / lightPdf;
+                const float misWeight = misWeightBalance(lightPdf, evalData.pdf);
+                prd->radiance += prd->throughput * radianceOverPdf * misWeight * (evalData.bsdf_diffuse + evalData.bsdf_glossy);
+            }
+        }
+    }
 
     // setup next path segment
     // flip inside/outside on transmission
@@ -554,7 +551,7 @@ extern "C" __global__ void __closesthit__radiance()
     }
     // MDL returns pdf = 0.0 for specular (it should be infinite)
     prd->prevHitPos = state.position;
-    prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
+    prd->lastBsdfPdf = (sample_data.event_type & mi::neuraylib::BSDF_EVENT_SPECULAR) ? 1.0f : sample_data.pdf;
     prd->dir = sample_data.k2;
     prd->throughput *= sample_data.bsdf_over_pdf;
 }

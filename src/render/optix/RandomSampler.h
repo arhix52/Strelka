@@ -86,7 +86,7 @@ static __device__ float halton(uint32_t index, uint32_t base)
       i = (i - digit) / base;
       f *= s;
     }
-    return clamp(result, 0.0f, 1.0f); // TODO: 1minusEps
+    return clamp(result, 0.0f, 1.0f - 1e-6f); // TODO: 1minusEps
 }
 
 static __device__ SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t seed)

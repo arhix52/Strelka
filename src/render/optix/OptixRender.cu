@@ -223,15 +223,16 @@ extern "C" __global__ void __closesthit__light()
     const float3 lightNormal = calcLightNormal(currLight, hitPoint);
     if (-dot(rayDir, lightNormal) > 0.0f)
     {
-        if (prd->depth == 0)
+        if (prd->depth == 0 || prd->specularBounce)
         {
             prd->radiance += prd->throughput * make_float3(currLight.color) * -dot(rayDir, lightNormal);
         }
         else
         {
-            float lightPdf = getLightPdf(currLight, prd->prevHitPos);
-            const float misWeight = misWeightBalance(lightPdf, prd->lastBsdfPdf);
-            prd->radiance += prd->throughput * make_float3(currLight.color) * -dot(rayDir, lightNormal) * misWeight * prd->lastBsdfPdf;
+            float lightPdf = getLightPdf(currLight, prd->prevHitPos) / (params.scene.numLights);
+            const float misWeight = misWeightBalance(prd->lastBsdfPdf, lightPdf);
+            // float misWeight = lightPdf;
+            prd->radiance += prd->throughput * make_float3(currLight.color) * -dot(rayDir, lightNormal) * misWeight;
         }
     }
     prd->throughput = make_float3(0.0f);
