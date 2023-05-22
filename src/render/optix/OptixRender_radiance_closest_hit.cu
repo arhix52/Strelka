@@ -458,6 +458,12 @@ extern "C" __global__ void __closesthit__radiance()
     state.object_id = 0;
     state.meters_per_scene_unit = 1.0f;
 
+    if (params.debug == 1)
+    {
+        prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
+        return;
+    }
+
     const float3 ior1 = (isInside) ? make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR) : make_float3(1.0f); // material ->
                                                                                                           // air
     const float3 ior2 = (isInside) ? make_float3(1.0f) : make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR);
@@ -486,12 +492,6 @@ extern "C" __global__ void __closesthit__radiance()
         return;
     }
     prd->specularBounce = ((sample_data.event_type & (mi::neuraylib::BSDF_EVENT_SPECULAR)) != 0);
-
-    if (params.debug == 1)
-    {
-        prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
-        return;
-    }
 
     if (sample_data.event_type & ((mi::neuraylib::BSDF_EVENT_DIFFUSE | mi::neuraylib::BSDF_EVENT_GLOSSY)))
     {
@@ -550,8 +550,7 @@ extern "C" __global__ void __closesthit__radiance()
         prd->origin = offset_ray(state.position, state.geom_normal);
     }
     // MDL returns pdf = 0.0 for specular (it should be infinite)
-    prd->prevHitPos = state.position;
-    prd->lastBsdfPdf = (sample_data.event_type & mi::neuraylib::BSDF_EVENT_SPECULAR) ? 1.0f : sample_data.pdf;
+    prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
     prd->dir = sample_data.k2;
     prd->throughput *= sample_data.bsdf_over_pdf;
 }
