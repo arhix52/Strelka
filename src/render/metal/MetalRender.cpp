@@ -568,7 +568,7 @@ void MetalRender::createAccelerationStructures()
         instanceDescriptors[i].accelerationStructureIndex = curr.mMeshId;
         instanceDescriptors[i].options = MTL::AccelerationStructureInstanceOptionOpaque;
         instanceDescriptors[i].intersectionFunctionTableOffset = 0;
-        instanceDescriptors[i].userID = curr.mMaterialId;
+        instanceDescriptors[i].userID = curr.type == oka::Instance::Type::eLight ? curr.mLightId : curr.mMaterialId;
         instanceDescriptors[i].mask =
             curr.type == oka::Instance::Type::eLight ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_TRIANGLE;
 

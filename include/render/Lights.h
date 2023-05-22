@@ -25,6 +25,11 @@ struct LightSampleData
     float distToLight;
 };
 
+__forceinline__ __device__ float misWeightBalance(const float a, const float b)
+{
+    return 1.0f / ( 1.0f + (b / a) );
+}
+
 static __inline__ __device__ float calcLightArea(const UniformLight& l)
 {
     float area = 0.0f;
@@ -162,36 +167,66 @@ static __device__ float3 SphQuadSample(const SphQuad& squad, const float2 uv)
 
     // 1. compute cu
     float au = u * squad.S + squad.k;
-    float fu = (cos(au) * squad.b0 - squad.b1) / sin(au);
-    float cu = 1 / sqrt(fu * fu + squad.b0sq) * (fu > 0 ? 1 : -1);
+    float fu = (cosf(au) * squad.b0 - squad.b1) / sinf(au);
+    float cu = 1.0f / sqrtf(fu * fu + squad.b0sq) * (fu > 0.0f ? 1.0f : -1.0f);
     cu = clamp(cu, -1.0f, 1.0f); // avoid NaNs
 
     // 2. compute xu
-    float xu = -(cu * squad.z0) / sqrt(1 - cu * cu);
+    float xu = -(cu * squad.z0) / sqrtf(1.0f - cu * cu);
     xu = clamp(xu, squad.x0, squad.x1); // avoid Infs
 
     // 3. compute yv
-    float d = sqrt(xu * xu + squad.z0sq);
-    float h0 = squad.y0 / sqrt(d * d + squad.y0sq);
-    float h1 = squad.y1 / sqrt(d * d + squad.y1sq);
+    float d = sqrtf(xu * xu + squad.z0sq);
+    float h0 = squad.y0 / sqrtf(d * d + squad.y0sq);
+    float h1 = squad.y1 / sqrtf(d * d + squad.y1sq);
     float hv = h0 + v * (h1 - h0);
     float hv2 = hv * hv;
-    float eps = 1e-5;
-    float yv = (hv < 1 - eps) ? (hv * d) / sqrt(1 - hv2) : squad.y1;
+    float eps = 1e-5f;
+    float yv = (hv < 1.0f - eps) ? (hv * d) / sqrtf(1 - hv2) : squad.y1;
 
     // 4. transform (xu, yv, z0) to world coords
     return (squad.o + xu * squad.x + yv * squad.y + squad.z0 * squad.z);
 }
 
+static __inline__ __device__ float getLightPdf(const UniformLight& l, const float3 hitPoint)
+{
+    SphQuad quad = init(l, hitPoint);
+    if (quad.S <= 0.0f)
+    {
+        return 0.0f;
+    }
+    return 1.0f / quad.S;
+}
+
 static __inline__ __device__ LightSampleData SampleRectLight(const UniformLight& l, const float2 u, const float3 hitPoint)
 {
     LightSampleData lightSampleData;
+    float3 e1 = make_float3(l.points[1]) - make_float3(l.points[0]);
+    float3 e2 = make_float3(l.points[3]) - make_float3(l.points[0]);
+    // lightSampleData.pointOnLight = make_float3(l.points[0]) + e1 * u.x + e2 * u.y;
     // https://www.arnoldrenderer.com/research/egsr2013_spherical_rectangle.pdf
     SphQuad quad = init(l, hitPoint);
+    if (quad.S <= 0.0f)
+    {
+        lightSampleData.pdf = 0.0f;
+        lightSampleData.pointOnLight = make_float3(l.points[0]) + e1 * u.x + e2 * u.y;
+        fillLightData(l, hitPoint, lightSampleData);
+        return lightSampleData;
+    }
+    if (quad.S < 1e-3f)
+    {
+        // just use uniform, because rectangle too small
+        lightSampleData.pointOnLight = make_float3(l.points[0]) + e1 * u.x + e2 * u.y;
+        fillLightData(l, hitPoint, lightSampleData);
+        lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
+                              (-dot(lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
+        return lightSampleData;
+    }
+
     lightSampleData.pointOnLight = SphQuadSample(quad, u);
     fillLightData(l, hitPoint, lightSampleData);
-    lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
-                          (-dot(lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
+    lightSampleData.pdf = 1.0f / quad.S;
+
     return lightSampleData;
 }
 
@@ -203,6 +238,7 @@ static __inline__ __device__ LightSampleData SampleRectLightUniform(const Unifor
     float3 e2 = make_float3(l.points[3]) - make_float3(l.points[0]);
     lightSampleData.pointOnLight = make_float3(l.points[0]) + e1 * u.x + e2 * u.y;
     fillLightData(l, hitPoint, lightSampleData);
+    // here is conversion from are to solid angle: dist2 / cos
     lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
                           (-dot(lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
     return lightSampleData;

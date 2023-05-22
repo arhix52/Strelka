@@ -931,8 +931,8 @@ void OptiXRender::render(Buffer* output)
     params.shadowRayTmin = settings.getAs<float>("render/pt/dev/shadowRayTmin");
     params.materialRayTmin = settings.getAs<float>("render/pt/dev/materialRayTmin");
 
-    params.viewToWorld = glm::inverse(camera.matrices.view);
-    params.clipToView = camera.matrices.invPerspective;
+    memcpy(params.viewToWorld, glm::value_ptr(glm::transpose(glm::inverse(camera.matrices.view))), sizeof(params.viewToWorld));
+    memcpy(params.clipToView, glm::value_ptr(glm::transpose(camera.matrices.invPerspective)), sizeof(params.clipToView));
     params.subframe_index = getSharedContext().mSubframeIndex;
     // Photometric Units from iray documentation
     // Controls the sensitivity of the “camera film” and is expressed as an index; the ISO number of the film, also
@@ -1263,8 +1263,9 @@ bool OptiXRender::createOptixMaterials()
                 mdlModule = mMaterialManager.createModule(currMatDesc.file.c_str());
                 if (mdlModule == nullptr)
                 {
-                    STRELKA_FATAL("Unable to load MDL file: {}", currMatDesc.file.c_str());
-                    assert(0);
+                    STRELKA_ERROR("Unable to load MDL file: {}, Force replaced to default.mdl", currMatDesc.file.c_str());
+                    mdlModule = mNameToModule["default.mdl"];
+                    // assert(0);
                 }
                 mNameToModule[currMatDesc.file] = mdlModule;
             }

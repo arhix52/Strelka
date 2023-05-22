@@ -1,13 +1,9 @@
 #pragma once 
 #include <optix_types.h>
-
 #include <vector_types.h>
+#include <sutil/Matrix.h>
 
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/type_ptr.hpp>
-#include <glm/gtx/compatibility.hpp>
-
+#include "RandomSampler.h"
 #include "Lights.h"
 
 #define GEOMETRY_MASK_TRIANGLE 1
@@ -41,18 +37,19 @@ struct SceneData
 
 struct Params
 {
+    uint32_t subframe_index;
+    uint32_t samples_per_launch;
     float4* image;
     float4* accum;
-    unsigned int image_width;
-    unsigned int image_height;
-    unsigned int subframe_index;
-    unsigned int samples_per_launch;
+    uint32_t image_width;
+    uint32_t image_height;
+
     uint32_t max_depth;
 
     uint32_t rectLightSamplingMethod;
 
-    glm::float4x4 clipToView;
-    glm::float4x4 viewToWorld;
+    float clipToView[16];
+    float viewToWorld[16];
 
     OptixTraversableHandle handle;
     SceneData scene;
@@ -66,14 +63,17 @@ struct Params
 
 struct PerRayData
 {
-    uint32_t rndSeed;
-    uint32_t depth;
+    SamplerState sampler;
+    uint32_t linearPixelIndex;
+    uint32_t sampleIndex;
+    uint32_t depth; // bounce
     float3 radiance;
     float3 throughput;
     float3 origin;
     float3 dir;
     bool inside;
     bool specularBounce;
+    float lastBsdfPdf;
 };
 
 enum RayType

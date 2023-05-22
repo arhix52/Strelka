@@ -6,7 +6,7 @@
 #include <cuda/helpers.h>
 #include <cuda/curve.h>
 
-#include <cuda/random.h>
+#include "RandomSampler.h"
 
 #include <sutil/Matrix.h>
 #include <sutil/vec_math.h>
@@ -205,20 +205,25 @@ __device__ const float4 identity[3] = { { 1.0f, 0.0f, 0.0f, 0.0f },
                                         { 0.0f, 1.0f, 0.0f, 0.0f },
                                         { 0.0f, 0.0f, 1.0f, 0.0f } };
 
-__inline__ __device__ float3
-sampleLight(uint32_t& rngState, const UniformLight& light, const Mdl_state& state, float3& toLight, float& lightPdf)
+__inline__ __device__ float3 sampleLight(SamplerState& sampler,
+                                         const UniformLight& light,
+                                         const Mdl_state& state,
+                                         float3& toLight,
+                                         float& lightPdf)
 {
     LightSampleData lightSampleData = {};
     switch (light.type)
     {
     case 0: {
+        const float2 uv = make_float2(random<SampleDimension::eLightPointX>(sampler),
+                                      random<SampleDimension::eLightPointY>(sampler));
         if (params.rectLightSamplingMethod == 0)
         {
-            lightSampleData = SampleRectLightUniform(light, make_float2(rnd(rngState), rnd(rngState)), state.position);
+            lightSampleData = SampleRectLightUniform(light, uv, state.position);
         }
         else
         {
-            lightSampleData = SampleRectLight(light, make_float2(rnd(rngState), rnd(rngState)), state.position);
+            lightSampleData = SampleRectLight(light, uv, state.position);
         }
         break;
     }
@@ -269,12 +274,16 @@ sampleLight(uint32_t& rngState, const UniformLight& light, const Mdl_state& stat
     return make_float3(0.0f);
 }
 
-__device__ float3 estimateDirectLighting(uint32_t& rngSeed, const Mdl_state& state, float3& toLight, float& lightPdf)
+__device__ float3 estimateDirectLighting(SamplerState& sampler,
+                                         const Mdl_state& state,
+                                         float3& toLight,
+                                         float& lightPdf)
 {
-    const uint32_t lightId = (uint32_t)(params.scene.numLights * rnd(rngSeed));
+    float u = random<SampleDimension::eLightId>(sampler);
+    const uint32_t lightId = (uint32_t)(params.scene.numLights * u);
     const float lightSelectionPdf = 1.0f / params.scene.numLights;
     const UniformLight& currLight = params.scene.lights[lightId];
-    const float3 r = sampleLight(rngSeed, currLight, state, toLight, lightPdf);
+    const float3 r = sampleLight(sampler, currLight, state, toLight, lightPdf);
     lightPdf *= lightSelectionPdf;
     return r;
 }
@@ -409,11 +418,6 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     return res;
 }
 
-__forceinline__ __device__ float misWeightBalance(const float a, const float b)
-{
-    return 1.0f / ( 1.0f + (b / a) );
-}
-
 extern "C" __global__ void __closesthit__radiance()
 {
     OptixPrimitiveType primType = optixGetPrimitiveType();
@@ -454,6 +458,12 @@ extern "C" __global__ void __closesthit__radiance()
     state.object_id = 0;
     state.meters_per_scene_unit = 1.0f;
 
+    if (params.debug == 1)
+    {
+        prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
+        return;
+    }
+
     const float3 ior1 = (isInside) ? make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR) : make_float3(1.0f); // material ->
                                                                                                           // air
     const float3 ior2 = (isInside) ? make_float3(1.0f) : make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR);
@@ -462,61 +472,10 @@ extern "C" __global__ void __closesthit__radiance()
 
     mdlcode_init(&state, &res_data, nullptr, (const char*)hit_data->argData);
 
-    float3 toLight; // return value for sampleLights()
-    float lightPdf = 0.0f; // return value for sampleLights()
-    const float3 radiance = estimateDirectLighting(prd->rndSeed, state, toLight, lightPdf);
-
-    if (params.debug == 1)
-    {
-        // prd->radiance = radiance;
-        prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
-        return;
-    }
-
-    if (isnan(radiance) || isnan(lightPdf))
-    {
-        // ERROR, terminate tracing;
-        prd->radiance = make_float3(100.0f, 0.0f, 0.0f);
-        prd->throughput = make_float3(0.0f);
-        return;
-    }
-
-    const bool isNextEventValid = ((dot(toLight, state.normal) > 0.0f) != isInside) && lightPdf != 0.0f;
-
-    if (isNextEventValid)
-    {
-        const float3 radianceOverPdf = radiance / lightPdf;
-
-        mi::neuraylib::Bsdf_evaluate_data<mi::neuraylib::DF_HSM_NONE> evalData = {};
-        evalData.ior1 = ior1; // IOR current medium
-        evalData.ior2 = ior2; // IOR other side
-        evalData.k1 = -ray_dir; // outgoing direction
-        evalData.k2 = toLight; // incoming direction
-        evalData.bsdf_diffuse = make_float3(0.0f);
-        evalData.bsdf_glossy = make_float3(0.0f);
-
-        mdlcode_evaluate(&evalData, &state, &res_data, nullptr, (const char*)hit_data->argData);
-
-        if (isnan(evalData.bsdf_diffuse) || isnan(evalData.bsdf_glossy))
-        {
-            // ERROR, terminate tracing;
-            prd->radiance = make_float3(100.0f, 0.0f, 0.0f);
-            prd->throughput = make_float3(0.0f);
-            return;
-        }
-
-        // compute lighting for this light
-        if (evalData.pdf > 0.0f)
-        {
-            const float misWeight = misWeightBalance(lightPdf, evalData.pdf);
-            prd->radiance += prd->throughput * radianceOverPdf * misWeight * (evalData.bsdf_diffuse + evalData.bsdf_glossy);
-        }
-    }
-
-    const float z1 = rnd(prd->rndSeed);
-    const float z2 = rnd(prd->rndSeed);
-    const float z3 = rnd(prd->rndSeed);
-    const float z4 = rnd(prd->rndSeed);
+    const float z1 = random<SampleDimension::eBSDF0>(prd->sampler);
+    const float z2 = random<SampleDimension::eBSDF1>(prd->sampler);
+    const float z3 = random<SampleDimension::eBSDF2>(prd->sampler);
+    const float z4 = random<SampleDimension::eBSDF3>(prd->sampler);
 
     mi::neuraylib::Bsdf_sample_data sample_data;
     sample_data.ior1 = ior1;
@@ -532,8 +491,52 @@ extern "C" __global__ void __closesthit__radiance()
         prd->throughput = make_float3(0.0f);
         return;
     }
+    prd->specularBounce = ((sample_data.event_type & (mi::neuraylib::BSDF_EVENT_SPECULAR)) != 0);
 
-    prd->specularBounce = ((sample_data.event_type & mi::neuraylib::BSDF_EVENT_SPECULAR) != 0);
+    if (sample_data.event_type & ((mi::neuraylib::BSDF_EVENT_DIFFUSE | mi::neuraylib::BSDF_EVENT_GLOSSY)))
+    {
+        float3 toLight; // return value for sampleLights()
+        float lightPdf = 0.0f; // return value for sampleLights()
+        const float3 radiance = estimateDirectLighting(prd->sampler, state, toLight, lightPdf);
+
+        if (isnan(radiance) || isnan(lightPdf))
+        {
+            // ERROR, terminate tracing;
+            prd->radiance = make_float3(100.0f, 0.0f, 0.0f);
+            prd->throughput = make_float3(0.0f);
+            return;
+        }
+
+        const bool isNextEventValid = ((dot(toLight, state.normal) > 0.0f) != isInside) && lightPdf != 0.0f;
+        if (isNextEventValid)
+        {
+            mi::neuraylib::Bsdf_evaluate_data<mi::neuraylib::DF_HSM_NONE> evalData = {};
+            evalData.ior1 = ior1; // IOR current medium
+            evalData.ior2 = ior2; // IOR other side
+            evalData.k1 = -ray_dir; // outgoing direction
+            evalData.k2 = toLight; // incoming direction
+            evalData.bsdf_diffuse = make_float3(0.0f);
+            evalData.bsdf_glossy = make_float3(0.0f);
+
+            mdlcode_evaluate(&evalData, &state, &res_data, nullptr, (const char*)hit_data->argData);
+
+            if (isnan(evalData.bsdf_diffuse) || isnan(evalData.bsdf_glossy))
+            {
+                // ERROR, terminate tracing;
+                prd->radiance = make_float3(100.0f, 0.0f, 0.0f);
+                prd->throughput = make_float3(0.0f);
+                return;
+            }
+
+            // compute lighting for this light
+            if (evalData.pdf > 0.0f)
+            {
+                const float3 radianceOverPdf = radiance / lightPdf;
+                const float misWeight = misWeightBalance(lightPdf, evalData.pdf);
+                prd->radiance += prd->throughput * radianceOverPdf * misWeight * (evalData.bsdf_diffuse + evalData.bsdf_glossy);
+            }
+        }
+    }
 
     // setup next path segment
     // flip inside/outside on transmission
@@ -546,6 +549,8 @@ extern "C" __global__ void __closesthit__radiance()
     {
         prd->origin = offset_ray(state.position, state.geom_normal);
     }
+    // MDL returns pdf = 0.0 for specular (it should be infinite)
+    prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
     prd->dir = sample_data.k2;
     prd->throughput *= sample_data.bsdf_over_pdf;
 }
