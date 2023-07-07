@@ -1,6 +1,13 @@
 # Strelka
+Path tracing render based on NVIDIA OptiX + NVIDIA MDL and Apple Metal
+## OpenUSD Hydra render delegate
+![Kitchen Set from OpenUSD](images/Kitchen_2048i_4d_2048spp_0.png)
+## Basis curves support
+![Hairs](images/hairmat_2_light_10000i_6d_10000spp_0.png)
 
 ## Project Dependencies
+
+OpenUSD https://github.com/PixarAnimationStudios/OpenUSD
 
 Strelka uses conan https://conan.io/
 install conan: `pip install conan` 
@@ -20,15 +27,8 @@ detect conan profile: `conan profile detect --force`
 - doctest      - https://github.com/onqtam/doctest *submodule*
 
 #### Installation
-Follow setup guide https://vulkan-tutorial.com/Development_environment
-
-Clone the project.
-   
 
 #### Launch
-Use vscode with preset env variable
-1. export VULKAN_SDK=~/vulkansdk/macOS
-2. launch code 
     
 ## Synopsis 
 
@@ -43,9 +43,6 @@ Use vscode with preset env variable
     ./Strelka -s misc/coffeemaker.usdc -i 100
 
 ## USD
-    Vulkan:
-        cd <VULKAN_SDK>
-        source ./setup-env.sh
     USD env:
         export USD_DIR=/Users/<user>/work/usd_build/
         export PATH=/Users/<user>/work/usd_build/bin:$PATH
@@ -53,6 +50,7 @@ Use vscode with preset env variable
 
     Cmake:
         cmake -DCMAKE_INSTALL_PREFIX=/Users/<user>/work/usd_build/plugin/usd/ ..
+
     Install plugin:
         cmake --install . --component HdStrelka
 
