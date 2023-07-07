@@ -4,6 +4,7 @@ Path tracing render based on NVIDIA OptiX + NVIDIA MDL and Apple Metal
 ![Kitchen Set from OpenUSD](images/Kitchen_2048i_4d_2048spp_0.png)
 ## Basis curves support
 ![Hairs](images/hairmat_2_light_10000i_6d_10000spp_0.png)
+![Einar](images/einar_1024i_3d_1024spp_0.png)
 
 ## Project Dependencies
 
