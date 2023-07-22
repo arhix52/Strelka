@@ -13,8 +13,6 @@ using namespace raytracing;
 struct PerRayData
 {
     SamplerState sampler;
-    uint32_t sampleIndex;
-    uint32_t pixelIndex;
     uint32_t depth;
     float3 radiance;
     float3 throughput;
@@ -205,10 +203,10 @@ void materialSample(thread MaterialSample& data, thread MaterialState& state)
 bool traceOcclusion(
     instance_acceleration_structure accelerationStructure,
     thread intersector<triangle_data, instancing>& isect, 
-    thread float3 origin, 
-    thread float3 direction,
-    float tMin,
-    float tMax)
+    const float3 origin, 
+    const float3 direction,
+    const float tMin,
+    const float tMax)
 {
     struct ray shadowRay;
     shadowRay.origin = origin;
@@ -267,32 +265,15 @@ float3 sampleLight(
     toLight = lightSampleData.L;
     float3 Li = float3(light.color);
 
-    // TODO: 
+    // TODO: Added here because advanced light sampler produces NaNs in close to orthogonal cases -dot(lightSampleData.L, lightSampleData.normal) > 0.001f
     if (dot(state.normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.001f && all(Li))
     {
-        // Ray shadowRay;
-        // shadowRay.d = float4(lightSampleData.L, 0.0f);
-        // shadowRay.o = float4(offset_ray(state.position, state.geom_normal), lightSampleData.distToLight); // need to
-        // set
         const bool occluded = traceOcclusion(accelerationStructure, isect, state.position, lightSampleData.L,
                                              0.001f, // tmin
                                              lightSampleData.distToLight - 1e-5f // tmax
         );
-
         // bool occluded = false;
         float visibility = occluded ? 0.0f : 1.0f;
-        // TODO: skip light hit
-
-        // if (visibility == 0.0f)
-        // {
-        //     // check if it was light hit?
-        //     InstanceConstants instConst = accel.instanceConstants[NonUniformResourceIndex(shadowHit.instId)];
-        //     if (instConst.lightId != -1)
-        //     {
-        //         // light hit => visible
-        //         visibility = 1.0f;
-        //     }
-        // }
         lightPdf = lightSampleData.pdf;
         return visibility * Li * saturate(dot(state.normal, lightSampleData.L));
     }
@@ -351,32 +332,30 @@ static float3 offset_ray(const float3 p, const float3 n)
 
 // Main ray tracing kernel.
 kernel void raytracingKernel(
-    uint2                                                  tid                       [[thread_position_in_grid]],
-    constant Uniforms&                                     uniforms                  [[buffer(0)]],
-    constant MTLAccelerationStructureUserIDInstanceDescriptor*   instances           [[buffer(1)]],
-    instance_acceleration_structure                        accelerationStructure     [[buffer(2)]],
+    uint2                                                      tid                   [[thread_position_in_grid]],
+    constant Uniforms&                                         uniforms              [[buffer(0)]],
+    constant MTLAccelerationStructureUserIDInstanceDescriptor* instances             [[buffer(1)]],
+    instance_acceleration_structure                            accelerationStructure [[buffer(2)]],
     device UniformLight* lights                                                      [[buffer(3)]],
     device Material* materials                                                       [[buffer(4)]],
     device float4* res                                                               [[buffer(5)]],
     device float4* accum                                                             [[buffer(6)]]
-     )
+    )
 {
     if (tid.x >= uniforms.width || tid.y >= uniforms.height) 
     {
         return;
     }
     const uint32_t linearPixelIndex = tid.y * uniforms.width + tid.x;
-    // uint32_t rndSeed = tea<4>(linearPixelIndex, uniforms.subframeIndex);
-    PerRayData prd;
-    prd.pixelIndex = linearPixelIndex;
-    prd.sampleIndex = uniforms.subframeIndex;
+
+    PerRayData prd{};
     prd.radiance = float3(0.0f);
     prd.throughput = float3(1.0f);
     prd.inside = false;
     prd.depth = 0;
     prd.specularBounce = false;
     prd.lastBsdfPdf = 0.0f;
-    prd.sampler = initSampler(prd.pixelIndex, prd.sampleIndex, 0u);
+    prd.sampler = initSampler(linearPixelIndex, uniforms.subframeIndex, 0u);
 
     generateCameraRay(tid, prd.sampler, prd.origin, prd.direction, uniforms);
     DebugMode debugMode = (DebugMode) uniforms.debug;
@@ -401,6 +380,7 @@ kernel void raytracingKernel(
         // Stop if the ray didn't hit anything and has bounced out of the scene.
         if (intersection.type == intersection_type::none)
         {
+            // Miss
             prd.radiance += prd.throughput * uniforms.missColor;
             prd.throughput = float3(0.0f);
             break;
@@ -411,6 +391,7 @@ kernel void raytracingKernel(
             const uint32_t mask = instances[instanceIndex].mask;
             if (mask == GEOMETRY_MASK_LIGHT)
             {
+                // Light hit
                 float3 hitPoint = ray.origin + ray.direction * intersection.distance;
                 device const UniformLight& currLight = lights[instances[instanceIndex].userID];
                 const float3 lightNormal = calcLightNormal(currLight, hitPoint);
@@ -507,7 +488,6 @@ kernel void raytracingKernel(
                 // evalData.ior2 = ior2;
                 evalData.outDir = -prd.direction;
                 evalData.inDir = toLight;
-
 
                 materialEvaluate(evalData, matState);
                 if (isnan(lightPdf))
