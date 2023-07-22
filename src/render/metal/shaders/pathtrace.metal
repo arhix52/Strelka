@@ -12,6 +12,7 @@ using namespace raytracing;
 
 struct PerRayData
 {
+    SamplerState sampler;
     uint32_t sampleIndex;
     uint32_t pixelIndex;
     uint32_t depth;
@@ -19,6 +20,7 @@ struct PerRayData
     float3 throughput;
     float3 origin;
     float3 direction;
+    float lastBsdfPdf;
     bool inside;
     bool specularBounce;
     bool shouldTerninate;
@@ -99,15 +101,14 @@ static __attribute__((always_inline)) bool all(const float3 v)
 }
 
 void generateCameraRay(uint2 pixelIndex,
-                        uint pixelLinearIndex,
-                        uint sampleIndex,
+                        thread SamplerState& samplerRnd,
                         thread float3& origin,
                         thread float3& direction,
                         const constant Uniforms& params)
 {
     const float2 subpixel_jitter = { 
-        random<SampleDimension::ePixelX>(pixelLinearIndex, 0, sampleIndex), 
-        random<SampleDimension::ePixelY>(pixelLinearIndex, 0, sampleIndex)};
+        random<SampleDimension::ePixelX>(samplerRnd), 
+        random<SampleDimension::ePixelY>(samplerRnd)};
     float2 pixelPos {pixelIndex.x + subpixel_jitter.x, pixelIndex.y + subpixel_jitter.y};
 
     float2 dimension {(float)params.width, (float)params.height};
@@ -157,8 +158,10 @@ struct MaterialSample
     // out
     float3 k2;
     float3 bsdf_over_pdf;
+    float pdf;
     int event_type;
 };
+
 
 void materialInit(thread MaterialState& state, const device Material& material)
 {
@@ -179,10 +182,9 @@ void materialInit(thread MaterialState& state, const device Material& material)
 
 void materialEvaluate(thread MaterialEval& data, thread const MaterialState& state)
 {
-    // const float M_PIf = 3.1415926f;
-    data.bsdf_diffuse = state.diffuse * dot(state.normal, data.inDir) / M_PIf; 
+    data.bsdf_diffuse = state.diffuse * dot(state.normal, data.inDir) / M_PI_F; 
     data.bsdf_glossy = float3(0.0f);
-    data.pdf = dot(state.normal, data.inDir) / M_PIf;
+    data.pdf = dot(state.normal, data.inDir) / M_PI_F;
 }
 
 void materialSample(thread MaterialSample& data, thread MaterialState& state)
@@ -191,11 +193,11 @@ void materialSample(thread MaterialSample& data, thread MaterialState& state)
     {
         float a = 1.0f - 2.0f * data.xi.x;
         float b = sqrt(1.0f - a * a);
-        float phi = data.xi.y * 2.0f * M_PIf;
+        float phi = data.xi.y * 2.0f * M_PI_F;
         data.k2.x = state.normal.x + b * cos(phi);
         data.k2.y = state.normal.y + b * sin(phi);
         data.k2.z = state.normal.z + a;
-        // data.pdf = a / M_PIf;
+        data.pdf = a / M_PI_F;
     }
     data.bsdf_over_pdf = state.diffuse;
 }
@@ -230,9 +232,7 @@ float3 sampleLight(
     constant Uniforms& uniforms,
     instance_acceleration_structure accelerationStructure,
     thread intersector<triangle_data, instancing>& isect, 
-    thread uint32_t sampleIndex,
-    thread uint32_t pixelIndex,
-    thread uint32_t depth,
+    thread SamplerState& samplerRnd,
     device const UniformLight& light, 
     thread MaterialState& state, 
     thread float3& toLight, 
@@ -243,8 +243,8 @@ float3 sampleLight(
     {
     case 0:
     {
-        float u = random<SampleDimension::eLightPointX>(pixelIndex, depth, sampleIndex);
-        float v = random<SampleDimension::eLightPointY>(pixelIndex, depth, sampleIndex);
+        float u = random<SampleDimension::eLightPointX>(samplerRnd);
+        float v = random<SampleDimension::eLightPointY>(samplerRnd);
 
         if (uniforms.rectLightSamplingMethod == 0)
         {
@@ -267,7 +267,8 @@ float3 sampleLight(
     toLight = lightSampleData.L;
     float3 Li = float3(light.color);
 
-    if (dot(state.normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.0 && all(Li))
+    // TODO: 
+    if (dot(state.normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.001f && all(Li))
     {
         // Ray shadowRay;
         // shadowRay.d = float4(lightSampleData.L, 0.0f);
@@ -305,19 +306,17 @@ float3 estimateDirectLighting(
     thread intersector<triangle_data, instancing>& isect, 
     const uint32_t numLights,
     device UniformLight* lights,
-    thread uint32_t sampleIndex,
-    thread uint32_t pixelIndex,
-    thread uint32_t depth,
+    thread SamplerState& samplerRnd,
     thread MaterialState& state, 
     thread float3& toLight,
     thread float& lightPdf)
 {
-    float u = random<SampleDimension::eLightId>(pixelIndex, depth, sampleIndex);
+    float u = random<SampleDimension::eLightId>(samplerRnd);
 
     const uint32_t lightId = min((uint32_t)(numLights * u), numLights - 1);
     const float lightSelectionPdf = 1.0f / numLights;
     device const UniformLight& currLight = lights[lightId];
-    const float3 r = sampleLight(uniforms, accelerationStructure, isect, sampleIndex, pixelIndex, depth, currLight, state, toLight, lightPdf);
+    const float3 r = sampleLight(uniforms, accelerationStructure, isect, samplerRnd, currLight, state, toLight, lightPdf);
     lightPdf *= lightSelectionPdf;
     return r;
 }
@@ -368,7 +367,6 @@ kernel void raytracingKernel(
     }
     const uint32_t linearPixelIndex = tid.y * uniforms.width + tid.x;
     // uint32_t rndSeed = tea<4>(linearPixelIndex, uniforms.subframeIndex);
-
     PerRayData prd;
     prd.pixelIndex = linearPixelIndex;
     prd.sampleIndex = uniforms.subframeIndex;
@@ -377,8 +375,10 @@ kernel void raytracingKernel(
     prd.inside = false;
     prd.depth = 0;
     prd.specularBounce = false;
+    prd.lastBsdfPdf = 0.0f;
+    prd.sampler = initSampler(prd.pixelIndex, prd.sampleIndex, 0u);
 
-    generateCameraRay(tid, prd.pixelIndex, prd.sampleIndex, prd.origin, prd.direction, uniforms);
+    generateCameraRay(tid, prd.sampler, prd.origin, prd.direction, uniforms);
     DebugMode debugMode = (DebugMode) uniforms.debug;
     while (prd.depth < uniforms.maxDepth)
     {
@@ -411,14 +411,20 @@ kernel void raytracingKernel(
             const uint32_t mask = instances[instanceIndex].mask;
             if (mask == GEOMETRY_MASK_LIGHT)
             {
-                if (prd.depth == 0 || prd.specularBounce)
+                float3 hitPoint = ray.origin + ray.direction * intersection.distance;
+                device const UniformLight& currLight = lights[instances[instanceIndex].userID];
+                const float3 lightNormal = calcLightNormal(currLight, hitPoint);
+                if (-dot(prd.direction, lightNormal) > 0.0f)
                 {
-                    float3 hitPoint = ray.origin + ray.direction * intersection.distance;
-                    device const UniformLight& currLight = lights[instances[instanceIndex].userID];
-                    const float3 lightNormal = calcLightNormal(currLight, hitPoint);
-                    if (-dot(prd.direction, lightNormal) > 0.0f)
+                    if (prd.depth == 0 || prd.specularBounce)
                     {
                         prd.radiance += prd.throughput * float3(currLight.color) * -dot(prd.direction, lightNormal);
+                    }
+                    else
+                    {
+                        float lightPdf = getLightPdf(currLight, ray.origin) / (uniforms.numLights);
+                        const float misWeight = misWeightBalance(prd.lastBsdfPdf, lightPdf);
+                        prd.radiance += prd.throughput * float3(currLight.color) * -dot(prd.direction, lightNormal) * misWeight;
                     }
                 }
                 prd.throughput = float3(0.0f);
@@ -483,11 +489,11 @@ kernel void raytracingKernel(
             float lightPdf = 0.0f; // return value for estimateDirectLighting()
             const float3 radiance = estimateDirectLighting(uniforms, accelerationStructure, i,
                 uniforms.numLights, lights, 
-                prd.sampleIndex, prd.pixelIndex, prd.depth, matState, toLight, lightPdf);
+                prd.sampler, matState, toLight, lightPdf);
             
             if (debugMode == DebugMode::eNormal)
             {
-                prd.radiance = radiance; // (matState.normal + float3(1.0f)) * 0.5f;
+                prd.radiance = (matState.normal + float3(1.0f)) * 0.5f;
                 break;
             }
             
@@ -502,19 +508,27 @@ kernel void raytracingKernel(
                 evalData.outDir = -prd.direction;
                 evalData.inDir = toLight;
 
+
                 materialEvaluate(evalData, matState);
-                if (evalData.pdf > 1e-6f)
+                if (isnan(lightPdf))
                 {
-                    const float misWeight = (lightPdf == 0.0f) ? 1.0f : lightPdf / (lightPdf + evalData.pdf);
+                    // ERROR, terminate tracing;
+                    prd.radiance = float3(1000000.0f, 0.0f, 0.0f);
+                    prd.throughput = float3(0.0f);
+                    break;
+                }
+                if (evalData.pdf > 0.0f)
+                {
+                    const float misWeight = misWeightBalance(lightPdf, evalData.pdf);
                     const float3 w = prd.throughput * radianceOverPdf * misWeight;
                     prd.radiance += w * evalData.bsdf_diffuse;
                 }
             }
 
-            const float z1 = random<SampleDimension::eBSDF0>(prd.pixelIndex, prd.depth, prd.sampleIndex);
-            const float z2 = random<SampleDimension::eBSDF1>(prd.pixelIndex, prd.depth, prd.sampleIndex);
-            const float z3 = random<SampleDimension::eBSDF2>(prd.pixelIndex, prd.depth, prd.sampleIndex);
-            const float z4 = random<SampleDimension::eBSDF3>(prd.pixelIndex, prd.depth, prd.sampleIndex);
+            const float z1 = random<SampleDimension::eBSDF0>(prd.sampler);
+            const float z2 = random<SampleDimension::eBSDF1>(prd.sampler);
+            const float z3 = random<SampleDimension::eBSDF2>(prd.sampler);
+            const float z4 = random<SampleDimension::eBSDF3>(prd.sampler);
 
             MaterialSample sampleData {};
             // sampleData.ior1 = ior1;
@@ -527,6 +541,7 @@ kernel void raytracingKernel(
             prd.origin = offset_ray(worldPosition, matState.geom_normal * (prd.inside ? -1.0f : 1.0f));
             prd.direction = sampleData.k2;
             prd.throughput *= sampleData.bsdf_over_pdf;
+            prd.lastBsdfPdf = (prd.specularBounce) ? 1.0f : sampleData.pdf;
 
             if (dot(prd.throughput, prd.throughput) < 1e-4f)
             {
@@ -536,7 +551,7 @@ kernel void raytracingKernel(
             if (prd.depth > 3)
             {
                 const float p = max(prd.throughput.x, max(prd.throughput.y, prd.throughput.z));
-                if (random<SampleDimension::eRussianRoulette>(prd.pixelIndex, prd.depth, prd.sampleIndex) > p)
+                if (random<SampleDimension::eRussianRoulette>(prd.sampler) > p)
                 {
                     break;
                 }
@@ -544,6 +559,7 @@ kernel void raytracingKernel(
             }
         }
         ++prd.depth;
+        ++prd.sampler.depth;
     }
 
     float3 result = prd.radiance;
@@ -560,34 +576,6 @@ kernel void raytracingKernel(
         }
         accum[linearPixelIndex] = float4(accum_color, 1.0f);
         result = accum_color;
-    }
-
-    switch ((ToneMapperType) uniforms.tonemapperType)
-    {
-        case ToneMapperType::eReinhard:
-        {
-            result = reinhard(result * uniforms.exposureValue);
-            break;
-        }
-        case ToneMapperType::eACES:
-        {
-            result = ACESFitted(result * uniforms.exposureValue);
-            break;
-        }
-        case ToneMapperType::eFilmic: 
-        {
-            result = ACESFilm(result * uniforms.exposureValue);
-            break;
-        }
-        case ToneMapperType::eNone:
-        {
-            break;
-        }
-    }
-
-    if (uniforms.gamma > 0.0f)
-    {
-        result = srgbGamma(result, uniforms.gamma);
     }
 
     res[linearPixelIndex] = float4(result, 1.0f);

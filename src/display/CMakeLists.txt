@@ -73,6 +73,7 @@ if(APPLE)
 
 target_link_libraries(${DISPLAYLIB_NAME} "-framework Foundation")
 target_link_libraries(${DISPLAYLIB_NAME} "-framework QuartzCore")
+target_link_libraries(${DISPLAYLIB_NAME} "-framework CoreGraphics")
 target_link_libraries(${DISPLAYLIB_NAME} "-framework Metal")
 target_link_libraries(${DISPLAYLIB_NAME} "-framework MetalKit")
 target_link_libraries(${DISPLAYLIB_NAME} "${ROOT_HOME}/external/glfw-3.3.8.bin.MACOS/lib-arm64/libglfw.3.dylib")
