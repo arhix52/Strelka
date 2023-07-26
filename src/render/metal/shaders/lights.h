@@ -228,7 +228,7 @@ static __inline__ LightSampleData SampleRectLightUniform(device const UniformLig
 static __inline__ float getLightPdf(device const UniformLight& l, const float3 hitPoint)
 {
     SphQuad quad = init(l, hitPoint);
-    if (quad.S <= 0.0f)
+    if (isnan(quad.S) || quad.S <= 0.0f)
     {
         return 0.0f;
     }

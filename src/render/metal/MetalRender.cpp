@@ -40,7 +40,6 @@ void MetalRender::init()
     mCommandQueue = mDevice->newCommandQueue();
     buildComputePipeline();
     buildTonemapperPipeline();
-    mSemaphoreDispatch = dispatch_semaphore_create(oka::kMaxFramesInFlight);
 }
 
 MTL::Texture* oka::MetalRender::loadTextureFromFile(const std::string& fileName)
@@ -258,12 +257,6 @@ void MetalRender::render(Buffer* output)
         pUniformTMBuffer->didModifyRange(NS::Range::Make(0, sizeof(UniformsTonemap)));
 
         MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
-        dispatch_semaphore_wait(mSemaphoreDispatch, DISPATCH_TIME_FOREVER);
-        MetalRender* pRenderer = this;
-        pCmd->addCompletedHandler(^void(MTL::CommandBuffer* pCmd) {
-          dispatch_semaphore_signal(pRenderer->mSemaphoreDispatch);
-        });
-
         MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
         pComputeEncoder->useResource(mMaterialBuffer, MTL::ResourceUsageRead);
         pComputeEncoder->useResource(mLightBuffer, MTL::ResourceUsageRead);
@@ -278,7 +271,7 @@ void MetalRender::render(Buffer* output)
         }
         pComputeEncoder->useResource(((oka::MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageWrite);
 
-        pComputeEncoder->setComputePipelineState(mRayTracingPSO);
+        pComputeEncoder->setComputePipelineState(mPathTracingPSO);
         pComputeEncoder->setBuffer(pUniformBuffer, 0, 0);
         pComputeEncoder->setBuffer(mInstanceBuffer, 0, 1);
         pComputeEncoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
@@ -289,7 +282,7 @@ void MetalRender::render(Buffer* output)
         pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 6);
         {
             const MTL::Size gridSize = MTL::Size(width, height, 1);
-            const NS::UInteger threadGroupSize = mRayTracingPSO->maxTotalThreadsPerThreadgroup();
+            const NS::UInteger threadGroupSize = mPathTracingPSO->maxTotalThreadsPerThreadgroup();
             const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
             pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
         }
@@ -333,7 +326,7 @@ void MetalRender::render(Buffer* output)
         pComputeEncoder->setComputePipelineState(mTonemapperPSO);
         pComputeEncoder->useResource(
             ((oka::MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
-        pComputeEncoder->setBuffer(mUniformTMBuffers[mFrameIndex], 0, 0);
+        pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
         pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 1);
         {
             const MTL::Size gridSize = MTL::Size(width, height, 1);
@@ -376,8 +369,8 @@ void MetalRender::buildComputePipeline()
     }
     MTL::Function* pPathTraceFn =
         pComputeLibrary->newFunction(NS::String::string("raytracingKernel", NS::UTF8StringEncoding));
-    mRayTracingPSO = mDevice->newComputePipelineState(pPathTraceFn, &pError);
-    if (!mRayTracingPSO)
+    mPathTracingPSO = mDevice->newComputePipelineState(pPathTraceFn, &pError);
+    if (!mPathTracingPSO)
     {
         STRELKA_FATAL("{}", pError->localizedDescription()->utf8String());
         assert(false);

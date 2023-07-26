@@ -392,7 +392,7 @@ kernel void raytracingKernel(
             if (mask == GEOMETRY_MASK_LIGHT)
             {
                 // Light hit
-                float3 hitPoint = ray.origin + ray.direction * intersection.distance;
+                const float3 hitPoint = ray.origin + ray.direction * intersection.distance;
                 device const UniformLight& currLight = lights[instances[instanceIndex].userID];
                 const float3 lightNormal = calcLightNormal(currLight, hitPoint);
                 if (-dot(prd.direction, lightNormal) > 0.0f)
