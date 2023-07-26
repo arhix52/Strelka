@@ -286,18 +286,22 @@ void MetalRender::render(Buffer* output)
             const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
             pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
         }
-
-        pComputeEncoder->setComputePipelineState(mTonemapperPSO);
-        pComputeEncoder->useResource(
-            ((oka::MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
-        pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
-        pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 1);
+        // Disable tonemapping for debug output
+        if (pUniformData->debug == 0)
         {
-            const MTL::Size gridSize = MTL::Size(width, height, 1);
-            const NS::UInteger threadGroupSize = mTonemapperPSO->maxTotalThreadsPerThreadgroup();
-            const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
-            pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+            pComputeEncoder->setComputePipelineState(mTonemapperPSO);
+            pComputeEncoder->useResource(
+                ((oka::MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+            pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
+            pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 1);
+            {
+                const MTL::Size gridSize = MTL::Size(width, height, 1);
+                const NS::UInteger threadGroupSize = mTonemapperPSO->maxTotalThreadsPerThreadgroup();
+                const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
+                pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+            }
         }
+
         pComputeEncoder->endEncoding();
 
         pCmd->commit();
@@ -321,20 +325,24 @@ void MetalRender::render(Buffer* output)
             mAccumulationBuffer, 0, ((oka::MetalBuffer*)output)->getNativePtr(), 0, width * height * sizeof(float4));
         pBlitEncoder->endEncoding();
 
-        MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
-
-        pComputeEncoder->setComputePipelineState(mTonemapperPSO);
-        pComputeEncoder->useResource(
-            ((oka::MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
-        pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
-        pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 1);
+        // Disable tonemapping for debug output
+        if (pUniformData->debug == 0)
         {
-            const MTL::Size gridSize = MTL::Size(width, height, 1);
-            const NS::UInteger threadGroupSize = mTonemapperPSO->maxTotalThreadsPerThreadgroup();
-            const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
-            pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+            MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
+
+            pComputeEncoder->setComputePipelineState(mTonemapperPSO);
+            pComputeEncoder->useResource(
+                ((oka::MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+            pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
+            pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 1);
+            {
+                const MTL::Size gridSize = MTL::Size(width, height, 1);
+                const NS::UInteger threadGroupSize = mTonemapperPSO->maxTotalThreadsPerThreadgroup();
+                const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
+                pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+            }
+            pComputeEncoder->endEncoding();
         }
-        pComputeEncoder->endEncoding();
 
         pCmd->commit();
         pCmd->waitUntilCompleted();
