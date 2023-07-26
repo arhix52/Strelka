@@ -225,12 +225,23 @@ static __inline__ LightSampleData SampleRectLightUniform(device const UniformLig
     return lightSampleData;
 }
 
-static __inline__ float getLightPdf(device const UniformLight& l, const float3 hitPoint)
+static __inline__ float getLightPdf(device const UniformLight& l, const float3 surfaceHitPoint)
 {
-    SphQuad quad = init(l, hitPoint);
+    SphQuad quad = init(l, surfaceHitPoint);
     if (isnan(quad.S) || quad.S <= 0.0f)
     {
         return 0.0f;
     }
     return 1.0f / quad.S;
+}
+
+static __inline__ float getLightPdf(device const UniformLight& l, const float3 lightHitPoint, const float3 surfaceHitPoint)
+{
+    LightSampleData lightSampleData {};
+    lightSampleData.pointOnLight = lightHitPoint;
+    fillLightData(l, surfaceHitPoint, lightSampleData);
+    lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
+                            (dot(-lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
+    // lightSampleData.pdf = 1.0f / lightSampleData.area;
+    return lightSampleData.pdf;
 }

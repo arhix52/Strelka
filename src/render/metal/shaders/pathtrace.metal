@@ -403,13 +403,14 @@ kernel void raytracingKernel(
                     }
                     else
                     {
-                        float lightPdf = getLightPdf(currLight, ray.origin) / (uniforms.numLights);
+                        const float lightPdf = getLightPdf(currLight, hitPoint, ray.origin) / (uniforms.numLights);
                         const float misWeight = misWeightBalance(prd.lastBsdfPdf, lightPdf);
                         prd.radiance += prd.throughput * float3(currLight.color) * -dot(prd.direction, lightNormal) * misWeight;
                     }
                 }
                 prd.throughput = float3(0.0f);
                 // stop tracing
+
                 break;
             }
 
@@ -451,8 +452,8 @@ kernel void raytracingKernel(
             const float3 worldTangent = normalize(transformDirection(normalize(interpolateAttrib(t0, t1, t2, barycentrics)), objectToWorldSpaceTransform));
             const float3 worldBinormal = cross(worldNormal, worldTangent);
 
-            float3 geomNormal = normalize(cross(p1 - p0, p2 - p0));
-            geomNormal = transformDirection(geomNormal, objectToWorldSpaceTransform); 
+            float3 geomNormal = cross(p1 - p0, p2 - p0);
+            geomNormal = normalize(transformDirection(geomNormal, objectToWorldSpaceTransform));
 
             MaterialState matState;
 
@@ -518,8 +519,8 @@ kernel void raytracingKernel(
 
             materialSample(sampleData, matState);
 
-            prd.origin = offset_ray(worldPosition, matState.geom_normal * (prd.inside ? -1.0f : 1.0f));
-            prd.direction = sampleData.k2;
+            prd.origin = offset_ray(worldPosition, matState.normal * (prd.inside ? -1.0f : 1.0f));
+            prd.direction = normalize(sampleData.k2);
             prd.throughput *= sampleData.bsdf_over_pdf;
             prd.lastBsdfPdf = (prd.specularBounce) ? 1.0f : sampleData.pdf;
 
