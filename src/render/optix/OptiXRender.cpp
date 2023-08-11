@@ -521,7 +521,7 @@ void OptiXRender::createModule()
             // significant performance cost and should only be done during
             // development.
             pipeline_compile_options.exceptionFlags =
-                OPTIX_EXCEPTION_FLAG_DEBUG | OPTIX_EXCEPTION_FLAG_TRACE_DEPTH | OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW;
+                OPTIX_EXCEPTION_FLAG_USER | OPTIX_EXCEPTION_FLAG_TRACE_DEPTH | OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW;
         else
         {
             pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;

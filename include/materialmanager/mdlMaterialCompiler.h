@@ -15,7 +15,6 @@
 
 #pragma once
 
-#define MI_NEURAYLIB_DEPRECATED_13_0
 #include <string>
 
 #include <mi/base/handle.h>

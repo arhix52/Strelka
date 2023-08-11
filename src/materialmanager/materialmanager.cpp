@@ -106,15 +106,15 @@ public:
             switch (resource->get_kind())
             {
             case mi::neuraylib::IValue::VK_TEXTURE:
-                if (res_idx < m_target_code->get_body_texture_count())
+                if (res_idx < m_target_code->get_texture_count())
                     return res_idx;
                 break;
             case mi::neuraylib::IValue::VK_LIGHT_PROFILE:
-                if (res_idx < m_target_code->get_body_light_profile_count())
+                if (res_idx < m_target_code->get_light_profile_count())
                     return res_idx;
                 break;
             case mi::neuraylib::IValue::VK_BSDF_MEASUREMENT:
-                if (res_idx < m_target_code->get_body_bsdf_measurement_count())
+                if (res_idx < m_target_code->get_bsdf_measurement_count())
                     return res_idx;
                 break;
             default:
