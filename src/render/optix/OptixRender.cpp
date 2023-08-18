@@ -1145,7 +1145,7 @@ void OptiXRender::createLightBuffer()
     }
 }
 
-Texture OptiXRender::loadTextureFromFile(std::string& fileName)
+Texture OptiXRender::loadTextureFromFile(const std::string& fileName)
 {
     int texWidth, texHeight, texChannels;
     stbi_uc* data = stbi_load(fileName.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
@@ -1330,7 +1330,7 @@ bool OptiXRender::createOptixMaterials()
                 std::string texPath(param.value.size(), 0);
                 memcpy(texPath.data(), param.value.data(), param.value.size());
                 // int texId = getTexManager()->loadTextureMdl(texPath);
-                ::Texture tex = loadTextureFromFile(resourcePath + "/" + texPath);
+                ::Texture tex = loadTextureFromFile(resourcePath + std::string("/") + texPath);
                 materialTextures.push_back(tex);
                 int texId = 0;
                 int resId = mMaterialManager.registerResource(targetCode, texId);

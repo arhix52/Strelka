@@ -130,7 +130,7 @@ private:
 
     void createLightBuffer();
 
-    Texture loadTextureFromFile(std::string& fileName);
+    Texture loadTextureFromFile(const std::string& fileName);
 
     bool createOptixMaterials();
     Material& getMaterial(int id);
