@@ -1,4 +1,4 @@
-#include "OptiXRender.h"
+#include "OptixRender.h"
 
 #include "OptixBuffer.h"
 

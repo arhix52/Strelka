@@ -70,11 +70,11 @@ set(BUILD_SHARED_LIBS ON)
 
 target_include_directories(${HD_PLUGIN_NAME} PUBLIC ${ROOT_HOME}/include/log)
 target_include_directories(${HD_PLUGIN_NAME}
-                           PUBLIC ${ROOT_HOME}/include/hdStrelka)
+                           PUBLIC ${ROOT_HOME}/include/HdStrelka)
 target_include_directories(${HD_PLUGIN_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(${HD_PLUGIN_NAME} PUBLIC hd)
 target_include_directories(${HD_PLUGIN_NAME} PRIVATE usdImaging hdMtlx)
-if(WIN32)
+if(WIN32 OR UNIX)
   target_link_libraries(
     ${HD_PLUGIN_NAME}
     PRIVATE usdImaging
@@ -85,7 +85,7 @@ if(WIN32)
             scene
             materialmanager
     PUBLIC hd)
-endif(WIN32)
+endif()
 
 if(APPLE)
   target_link_libraries(

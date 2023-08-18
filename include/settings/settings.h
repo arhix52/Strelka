@@ -33,7 +33,6 @@ public:
         mMap[name] = std::to_string(value);
     }
 
-    template<>
     void setAs(const char* name, const std::string& value)
     {
         mMap[name] = value;
@@ -43,29 +42,35 @@ public:
     T getAs(const char* name)
     {
         isNameValid(name);
-        return mMap[name];
+        return convertValue<T>(mMap[name]);
     }
 
-    template <>
-    bool getAs(const char* name)
+private:
+    template <typename T>
+    T convertValue(const std::string& value)
     {
-        isNameValid(name);
-        return (bool)atoi(mMap[name].c_str());
-    }
-
-    template <>
-    float getAs(const char* name)
-    {
-        isNameValid(name);
-        return (float) atof(mMap[name].c_str());
-    }
-
-    template <>
-    uint32_t getAs(const char* name)
-    {
-        isNameValid(name);
-        return atoi(mMap[name].c_str());
+        // Default implementation for non-specialized types
+        return T{};
     }
 };
+
+// Explicit template specializations in the namespace scope
+template <>
+bool SettingsManager::convertValue(const std::string& value)
+{
+    return static_cast<bool>(atoi(value.c_str()));
+}
+
+template <>
+float SettingsManager::convertValue(const std::string& value)
+{
+    return static_cast<float>(atof(value.c_str()));
+}
+
+template <>
+uint32_t SettingsManager::convertValue(const std::string& value)
+{
+    return static_cast<uint32_t>(atoi(value.c_str()));
+}
 
 } // namespace oka

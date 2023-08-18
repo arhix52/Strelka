@@ -10,7 +10,7 @@ include_directories(${ROOT_HOME}/external/stb)
 set(RENDER_SOURCES_COMMON ${ROOT_HOME}/include/render/render.h
                           ${ROOT_HOME}/src/render/render.cpp)
 
-if(WIN32)
+if(WIN32 OR UNIX)
   enable_language(CUDA)
   # Find at least a 5.0 version of CUDA.
   find_package(CUDA 5.0 REQUIRED)
@@ -38,8 +38,8 @@ if(WIN32)
       ${ROOT_HOME}/src/render/Camera.cpp
       ${ROOT_HOME}/src/render/optix/OptixBuffer.h
       ${ROOT_HOME}/src/render/optix/OptixBuffer.cpp
-      ${ROOT_HOME}/src/render/optix/OptiXRender.h
-      ${ROOT_HOME}/src/render/optix/OptiXRender.cpp)
+      ${ROOT_HOME}/src/render/optix/OptixRender.h
+      ${ROOT_HOME}/src/render/optix/OptixRender.cpp)
   set(RENDER_OPTIX_SOURCES ${ROOT_HOME}/include/render/optix/OptixRenderParams.h
                            ${ROOT_HOME}/src/render/optix/OptixRender.cu)
   include_directories(${ROOT_HOME}/include/render)
@@ -64,7 +64,7 @@ if(WIN32)
 
 endif()
 
-if(WIN32)
+if(WIN32 OR UNIX)
   target_include_directories(${RENDERLIB_NAME} PUBLIC ${OptiX_INCLUDE})
   target_include_directories(${RENDERLIB_NAME} PUBLIC ${CUDA_INCLUDE_DIRS})
   add_custom_command(
@@ -79,7 +79,7 @@ if(WIN32)
 
   target_link_libraries(${RENDERLIB_NAME} PUBLIC ${CUDA_LIBRARIES} glad scene
                                                  materialmanager)
-endif(WIN32)
+endif()
 
 if(APPLE)
   set(RENDER_SOURCES
