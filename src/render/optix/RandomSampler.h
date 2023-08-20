@@ -1,4 +1,5 @@
 #pragma once
+#include <stdint.h>
 
 __device__ const unsigned int primeNumbers[32] = 
 {

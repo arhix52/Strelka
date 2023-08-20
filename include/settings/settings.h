@@ -30,12 +30,8 @@ public:
     template <typename T>
     void setAs(const char* name, const T& value)
     {
-        mMap[name] = std::to_string(value);
-    }
-
-    void setAs(const char* name, const std::string& value)
-    {
-        mMap[name] = value;
+        // mMap[name] = std::to_string(value);
+        mMap[name] = toString(value);
     }
 
     template <typename T>
@@ -52,25 +48,18 @@ private:
         // Default implementation for non-specialized types
         return T{};
     }
+
+    std::string toString(const std::string& value)
+    {
+        return value;
+    }
+
+    template <typename T>
+    std::string toString(const T& value)
+    {
+        // Default implementation for non-specialized types
+        return std::to_string(value);
+    }
 };
-
-// Explicit template specializations in the namespace scope
-template <>
-bool SettingsManager::convertValue(const std::string& value)
-{
-    return static_cast<bool>(atoi(value.c_str()));
-}
-
-template <>
-float SettingsManager::convertValue(const std::string& value)
-{
-    return static_cast<float>(atof(value.c_str()));
-}
-
-template <>
-uint32_t SettingsManager::convertValue(const std::string& value)
-{
-    return static_cast<uint32_t>(atoi(value.c_str()));
-}
 
 } // namespace oka

@@ -219,14 +219,14 @@ public:
         mCodeGen->init(*mRuntime);
         std::vector<char> data;
         {
-            const std::string cwdPath = fs::current_path().string();
-            const std::string precompiledPath = cwdPath + "\\optix\\shaders\\OptixRender_radiance_closest_hit.bc";
+            const fs::path cwdPath = fs::current_path();
+            const fs::path precompiledPath = cwdPath / "optix/shaders/OptixRender_radiance_closest_hit.bc";
 
             std::ifstream file(precompiledPath.c_str(), std::ios::in | std::ios::binary);
 
             if (!file.is_open())
             {
-                std::cerr << "Cannot open precompiled file.\n";
+                STRELKA_FATAL("Cannot open precompiled closest hit file.\n");
                 return false;
             }
 
@@ -239,7 +239,7 @@ public:
 
         if (!mCodeGen->setOptionBinary("llvm_renderer_module", data.data(), data.size()))
         {
-            std::cerr << "Unable to set binary options!\n";
+            STRELKA_ERROR("Unable to set binary options!");
             return false;
         }
 
@@ -803,7 +803,7 @@ private:
         }
         else
         {
-            mtlxLibPath = std::string(envUSDPath) + "./libraries/";
+            mtlxLibPath = (fs::path(envUSDPath) / "libraries/").c_str();
         }
         mMdlSrc = cwd.string() + "/data/materials/mtlx"; // path to the material
 

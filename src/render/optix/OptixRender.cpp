@@ -29,6 +29,7 @@
 #include <string>
 #include <sstream>
 #include <fstream>
+#include <filesystem>
 
 #include <log.h>
 
@@ -533,8 +534,8 @@ void OptiXRender::createModule()
 
         size_t inputSize = 0;
         std::string optixSource;
-        const std::string cwdPath = fs::current_path().string();
-        const std::string precompiledOptixPath = cwdPath + "\\optix\\render_generated_OptixRender.cu.optixir";
+        const fs::path cwdPath = fs::current_path();
+        const fs::path precompiledOptixPath = cwdPath / "optix/render_generated_OptixRender.cu.optixir";
 
         readSourceFile(optixSource, precompiledOptixPath.c_str());
         const char* input = optixSource.c_str();
@@ -1029,10 +1030,12 @@ void OptiXRender::init()
         STRELKA_FATAL("Please, set USD_DIR variable");
         assert(0);
     }
-    const std::string usdMdlLibPath = std::string(envUSDPath) + "\\libraries\\mdl\\";
-    const std::string cwdPath = fs::current_path().string();
-    const std::string mtlxPath = cwdPath + "\\data\\materials\\mtlx";
-    const std::string mdlPath = cwdPath + "\\data\\materials\\mdl";
+    const std::string usdMdlLibPath = std::string(envUSDPath) + "/libraries/mdl/";
+    const fs::path cwdPath = fs::current_path();
+    STRELKA_DEBUG("cwdPath: {}", cwdPath.c_str());
+    const fs::path mtlxPath = cwdPath / fs::path("data/materials/mtlx");
+    STRELKA_DEBUG("mtlxPath: {}", mtlxPath.c_str());
+    const fs::path mdlPath = cwdPath / fs::path("data/materials/mdl");
 
     const char* paths[] = { usdMdlLibPath.c_str(), mtlxPath.c_str(), mdlPath.c_str() };
     bool res = mMaterialManager.addMdlSearchPath(paths, sizeof(paths) / sizeof(char*));

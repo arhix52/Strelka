@@ -122,6 +122,9 @@
         "any": "cpp",
         "cfenv": "cpp",
         "execution": "cpp",
-        "shared_mutex": "cpp"
+        "shared_mutex": "cpp",
+        "*.tcc": "cpp",
+        "numbers": "cpp",
+        "semaphore": "cpp"
     },
 }

@@ -14,12 +14,36 @@
             // "args": ["-s", "C:/work/ball-in-grass.usda"],
             // "args": ["-s", "C:/work/senna2.usda"],
             // "args": ["-s", "C:/work/mustang2.usda"],
-            // "args": ["-s", "C:/work/Kitchen_set/Kitchen.usda"],
-            "args": ["-s", "C:/work/strelka_test1.usda"],
+            "args": ["-s", "~/work/Kitchen_set/Kitchen2.usda"],
+            // "args": ["-s", "~/work/cube.usda"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/build/",
             "environment": [],
             "console": "externalTerminal"
+        },
+        {
+                "name": "(Linux) Launch",
+                "type": "cppdbg",
+                "request": "launch",
+                "program": "${command:cmake.launchTargetPath}",
+                "args": ["-s", "~/work/cube.usda"],
+                "stopAtEntry": false,
+                "cwd": "${workspaceFolder}/build/",
+                "environment": [],
+                "externalConsole": false,
+                "MIMode": "gdb",
+                "setupCommands": [
+                    {
+                        "description": "Enable pretty-printing for gdb",
+                        "text": "-enable-pretty-printing",
+                        "ignoreFailures": true
+                    },
+                    {
+                        "description": "Set Disassembly Flavor to Intel",
+                        "text": "-gdb-set disassembly-flavor intel",
+                        "ignoreFailures": true
+                    }
+                ]
         },
         {
             "name": "(Mac) Launch",

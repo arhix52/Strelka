@@ -10,6 +10,7 @@ endif()
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if(WIN32)
   add_compile_definitions(NOMINMAX)
@@ -17,7 +18,7 @@ if(WIN32)
   add_compile_definitions(_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH)
 endif()
 
-if(WIN32)
+if(WIN32 OR UNIX)
   add_subdirectory(external/glad)
   set_target_properties(glad PROPERTIES LINKER_LANGUAGE CXX)
 endif()

@@ -3,6 +3,7 @@ set(RENDERLIB_NAME render)
 
 # include(${ROOT_HOME}/cmake/StaticAnalyzers.cmake)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 include_directories(${ROOT_HOME}/external/glm)
 include_directories(${ROOT_HOME}/external/stb)
