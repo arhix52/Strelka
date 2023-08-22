@@ -57,6 +57,12 @@ detect conan profile: `conan profile detect --force`
     -i, --iteration arg  Iteration to capture (default: -1)
     -h, --help            Print usage
 
+
+To set log level use
+
+    export SPDLOG_LEVEL=debug
+The available log levels are: trace, debug, info, warn, and err.
+
 ## Example
 
     ./Strelka -s misc/coffeemaker.usdc -i 100
