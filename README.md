@@ -9,21 +9,27 @@ Path tracing render based on NVIDIA OptiX + NVIDIA MDL and Apple Metal
 ## Project Dependencies
 
 OpenUSD https://github.com/PixarAnimationStudios/OpenUSD
-Set evn var: `USD_DIR=c:\work\USD_build`
-Set evn var: `OPTIX_DIR=C:\work\OptiX SDK 8.0.0`
+
+* Set evn var: `USD_DIR=c:\work\USD_build`
+
+OptiX 
+* Set evn var: `OPTIX_DIR=C:\work\OptiX SDK 8.0.0`
 
 Download MDL sdk (for example: mdl-sdk-367100.2992): https://developer.nvidia.com/nvidia-mdl-sdk-get-started
 
-unzip content to /external/mdl-sdk/
+* unzip content to /external/mdl-sdk/
 
 LLVM 12.0.1 (https://github.com/llvm/llvm-project/releases/tag/llvmorg-12.0.1) for MDL ptx code generator
-for win: https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.1/LLVM-12.0.1-win64.exe
-install it to `c:\work` for example
-add to PATH: `c:\work\LLVM\bin`
-extract 2 header files files from external/clang12_patched to `C:\work\LLVM\lib\clang\12.0.1\include`
+
+* for win: https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.1/LLVM-12.0.1-win64.exe
+* for linux: https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.1/clang+llvm-12.0.1-x86_64-linux-gnu-ubuntu-16.04.tar.xz
+* install it to `c:\work` for example
+* add to PATH: `c:\work\LLVM\bin`
+* extract 2 header files files from external/clang12_patched to `C:\work\LLVM\lib\clang\12.0.1\include`
 
 Strelka uses conan https://conan.io/
-install conan: `pip install conan` 
+
+* install conan: `pip install conan` 
 
 detect conan profile: `conan profile detect --force`
 
