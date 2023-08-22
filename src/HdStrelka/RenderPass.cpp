@@ -244,6 +244,7 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
             const std::vector<glm::float3>& points = curve->GetPoints();
             const std::vector<float>& widths = curve->GetWidths();
             const std::vector<uint32_t>& vertexCounts = curve->GetVertexCounts();
+            const std::vector<glm::float2>& uvs = curve->GetUvs();
 
             const SdfPath& materialId = curve->GetMaterialId();
             const std::string& materialName = materialId.GetString();

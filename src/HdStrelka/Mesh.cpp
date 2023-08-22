@@ -7,6 +7,8 @@
 
 #include <log.h>
 
+#include <tracy/Tracy.hpp>
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 // clang-format off
@@ -29,6 +31,7 @@ void HdStrelkaMesh::Sync(HdSceneDelegate* sceneDelegate,
                          HdDirtyBits* dirtyBits,
                          const TfToken& reprToken)
 {
+    ZoneScoped;
     TF_UNUSED(renderParam);
     TF_UNUSED(reprToken);
 
@@ -88,6 +91,7 @@ static uint32_t packNormal(const glm::float3& normal)
 
 void HdStrelkaMesh::_ConvertMesh()
 {
+    ZoneScoped;
     const std::vector<GfVec3f>& meshPoints = GetPoints();
     const std::vector<GfVec3f>& meshNormals = GetNormals();
     const std::vector<GfVec3i>& meshFaces = GetFaces();
@@ -124,6 +128,7 @@ void HdStrelkaMesh::_ConvertMesh()
 
 void HdStrelkaMesh::_UpdateGeometry(HdSceneDelegate* sceneDelegate)
 {
+    ZoneScoped;
     const HdMeshTopology& topology = GetMeshTopology(sceneDelegate);
     const SdfPath& id = GetId();
     const HdMeshUtil meshUtil(&topology, id);
@@ -184,6 +189,7 @@ bool HdStrelkaMesh::_FindPrimvar(HdSceneDelegate* sceneDelegate,
                                  const TfToken& primvarName,
                                  HdInterpolation& interpolation) const
 {
+    ZoneScoped;
     const HdInterpolation interpolations[] = {
         HdInterpolation::HdInterpolationVertex,   HdInterpolation::HdInterpolationFaceVarying,
         HdInterpolation::HdInterpolationConstant, HdInterpolation::HdInterpolationUniform,
@@ -213,6 +219,7 @@ void HdStrelkaMesh::_PullPrimvars(HdSceneDelegate* sceneDelegate,
                                   GfVec3f& color,
                                   bool& hasColor) const
 {
+    ZoneScoped;
     const SdfPath& id = GetId();
     // Handle points.
     HdInterpolation pointInterpolation;
