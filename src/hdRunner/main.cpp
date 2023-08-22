@@ -609,7 +609,8 @@ int main(int argc, const char* argv[])
 
     std::pair<bool, CameraUtilConformWindowPolicy> overrideWindowPolicy(false, CameraUtilFit);
 
-    TfTokenVector renderTags(1, HdRenderTagTokens->geometry);
+    // TODO: add UI control here
+    TfTokenVector renderTags{ HdRenderTagTokens->geometry, HdRenderTagTokens->render };
     HdRprimCollection renderCollection(HdTokens->geometry, HdReprSelector(HdReprTokens->refined));
     HdRenderPassSharedPtr renderPass = renderDelegate->CreateRenderPass(renderIndex, renderCollection);
 

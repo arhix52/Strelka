@@ -177,6 +177,19 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
         {
             const HdStrelkaMesh* mesh = dynamic_cast<const HdStrelkaMesh*>(rprim);
 
+            if (!mesh->IsVisible())
+            {
+                // TODO: add UI/setting control here
+                continue;
+            }
+
+            const TfToken renderTag = mesh->GetRenderTag();
+            if ((renderTag != "geometry") && (renderTag != "render"))
+            {
+                // skip all proxy meshes
+                continue;
+            }
+
             VtMatrix4dArray transforms;
             const SdfPath& instancerId = mesh->GetInstancerId();
 

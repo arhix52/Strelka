@@ -116,8 +116,6 @@ bool MtlxMdlCodeGen::translate(const char* mtlxSrc, std::string& mdlSrc, std::st
         doc->importLibrary(mStdLib);
         mx::readFromXmlString(doc, mtlxSrc); // originally from string
 
-        printf("mtlx code: %s\n", mtlxSrc);
-
         mx::TypedElementPtr element = _FindSurfaceShaderElement(doc);
         if (!element)
         {
