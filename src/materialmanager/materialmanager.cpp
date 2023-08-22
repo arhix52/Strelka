@@ -265,7 +265,8 @@ public:
             material.close();
             if (!mMatCompiler->createModule(module->identifier, module->moduleName))
             {
-                STRELKA_ERROR("failed to create MDL module");
+                STRELKA_ERROR("failed to create MDL module: {} identifier: {}", module->moduleName.c_str(),
+                              module->identifier.c_str());
                 return nullptr;
             }
             return module.release();
