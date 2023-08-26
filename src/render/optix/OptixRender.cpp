@@ -138,7 +138,7 @@ void configureCamera(::Camera& cam, const uint32_t width, const uint32_t height)
     cam.setAspectRatio((float)width / (float)height);
 }
 
-static bool readSourceFile(std::string& str, const std::string& filename)
+static bool readSourceFile(std::string& str, const fs::path& filename)
 {
     // Try to open file
     std::ifstream file(filename.c_str(), std::ios::binary);
@@ -537,7 +537,7 @@ void OptiXRender::createModule()
         const fs::path cwdPath = fs::current_path();
         const fs::path precompiledOptixPath = cwdPath / "optix/render_generated_OptixRender.cu.optixir";
 
-        readSourceFile(optixSource, precompiledOptixPath.c_str());
+        readSourceFile(optixSource, precompiledOptixPath);
         const char* input = optixSource.c_str();
         inputSize = optixSource.size();
         char log[2048]; // For error reporting from OptiX creation functions
@@ -1030,14 +1030,18 @@ void OptiXRender::init()
         STRELKA_FATAL("Please, set USD_DIR variable");
         assert(0);
     }
-    const std::string usdMdlLibPath = std::string(envUSDPath) + "/libraries/mdl/";
+    const fs::path usdMdlLibPath = (fs::path(envUSDPath) / fs::path("libraries/mdl/")).make_preferred();
     const fs::path cwdPath = fs::current_path();
-    STRELKA_DEBUG("cwdPath: {}", cwdPath.c_str());
-    const fs::path mtlxPath = cwdPath / fs::path("data/materials/mtlx");
-    STRELKA_DEBUG("mtlxPath: {}", mtlxPath.c_str());
-    const fs::path mdlPath = cwdPath / fs::path("data/materials/mdl");
+    STRELKA_DEBUG("cwdPath: {}", cwdPath.string().c_str());
+    const fs::path mtlxPath = (cwdPath / fs::path("data/materials/mtlx")).make_preferred();
+    STRELKA_DEBUG("mtlxPath: {}", mtlxPath.string().c_str());
+    const fs::path mdlPath = (cwdPath / fs::path("data/materials/mdl")).make_preferred();
 
-    const char* paths[] = { usdMdlLibPath.c_str(), mtlxPath.c_str(), mdlPath.c_str() };
+    const std::string usdMdlLibPathStr = usdMdlLibPath.string();
+    const std::string mtlxPathStr = mtlxPath.string().c_str();
+    const std::string mdlPathStr = mdlPath.string().c_str();
+
+    const char* paths[] = { usdMdlLibPathStr.c_str(), mtlxPathStr.c_str(), mdlPathStr.c_str() };
     bool res = mMaterialManager.addMdlSearchPath(paths, sizeof(paths) / sizeof(char*));
 
     if (!res)

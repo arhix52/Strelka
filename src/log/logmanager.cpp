@@ -26,8 +26,10 @@ void oka::Logmanager::initialize()
         std::vector<spdlog::sink_ptr> sinks = { consolesink };
         auto logger = std::make_shared<spdlog::logger>("Strelka", sinks.begin(), sinks.end());
 
-        // logger->set_level(spdlog::level::trace);
-        // logger->flush_on(spdlog::level::trace);
+#if defined(WIN32)
+        logger->set_level(spdlog::level::trace);
+        logger->flush_on(spdlog::level::trace);
+#endif
         spdlog::register_logger(logger);
     }
 }

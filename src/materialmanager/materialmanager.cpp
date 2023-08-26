@@ -209,7 +209,7 @@ public:
             return false;
         }
 
-        mMtlxCodeGen = std::make_unique<oka::MtlxMdlCodeGen>(mtlxLibPath.c_str());
+        mMtlxCodeGen = std::make_unique<oka::MtlxMdlCodeGen>(mtlxLibPath.generic_string().c_str());
 
         mMatCompiler = std::make_unique<oka::MdlMaterialCompiler>(*mRuntime);
         mTransaction = mi::base::Handle<mi::neuraylib::ITransaction>(mRuntime->getTransaction());
@@ -787,7 +787,7 @@ private:
     std::string mImagePluginPath;
     std::string mPathso;
     std::string mMdlSrc;
-    std::string mtlxLibPath;
+    fs::path mtlxLibPath;
 
     std::unordered_map<uint32_t, mi::base::Handle<const mi::neuraylib::ICanvas>> m_indexToCanvas;
 
@@ -795,7 +795,6 @@ private:
     {
         using namespace std;
         const fs::path cwd = fs::current_path();
-        mtlxLibPath = "";
         const char* envUSDPath = std::getenv("USD_DIR");
         if (!envUSDPath)
         {
@@ -804,7 +803,7 @@ private:
         }
         else
         {
-            mtlxLibPath = (fs::path(envUSDPath) / "libraries/").c_str();
+            mtlxLibPath = fs::path(envUSDPath) / fs::path("libraries/");
         }
         mMdlSrc = cwd.string() + "/data/materials/mtlx"; // path to the material
 
