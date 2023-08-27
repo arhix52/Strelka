@@ -102,7 +102,8 @@ if(WIN32 OR UNIX)
       ${clang_PATH} -I ${OptiX_INCLUDE} -I ${ROOT_HOME}/external/mdl-sdk/include
       -I ${ROOT_HOME}/src/render/ -I ${ROOT_HOME}/src/render/optix/
       -I ${ROOT_HOME}/include/render -I
-      ${ROOT_HOME}/external/glm -I ${ROOT_HOME} 
+      ${ROOT_HOME}/external/glm -I ${ROOT_HOME}
+      -std=c++11
       -I /usr/include/c++/11/
       ${_CLANG_FLAGS}
       -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -emit-llvm -c -O3 -ffast-math
