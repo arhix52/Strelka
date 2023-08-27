@@ -7,11 +7,6 @@
 #include <log.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
-// clang-format off
-TF_DEFINE_PRIVATE_TOKENS(_tokens,
-    (diffuse_color_constant)
-);
-// clang-format on
 
 HdStrelkaMaterial::HdStrelkaMaterial(const SdfPath& id, const MaterialNetworkTranslator& translator)
     : HdMaterial(id), m_translator(translator)
@@ -56,7 +51,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
 
     bool isUsdPreviewSurface = false;
     HdMaterialNode* previewSurfaceNode = nullptr;
-    //store material parameters
+    // store material parameters
     for (auto& node : surfaceNetwork.nodes)
     {
         if (node.identifier == UsdImagingTokens->UsdPreviewSurface)
