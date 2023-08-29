@@ -209,7 +209,7 @@ public:
             return false;
         }
 
-        mMtlxCodeGen = std::make_unique<oka::MtlxMdlCodeGen>(mtlxLibPath.generic_string().c_str());
+        mMtlxCodeGen = std::make_unique<oka::MtlxMdlCodeGen>(mtlxLibPath.generic_string().c_str(), mRuntime.get());
 
         mMatCompiler = std::make_unique<oka::MdlMaterialCompiler>(*mRuntime);
         mTransaction = mi::base::Handle<mi::neuraylib::ITransaction>(mRuntime->getTransaction());
