@@ -61,7 +61,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
         }
         for (const std::pair<TfToken, VtValue>& params : node.parameters)
         {
-            const std::string name = params.first.GetString();
+            const std::string& name = params.first.GetString();
 
             const TfType type = params.second.GetType();
             STRELKA_DEBUG("Param name: {0}\t{1}", name.c_str(), params.second.GetTypeName().c_str());
@@ -140,6 +140,16 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
                 param.value.resize(sizeof(val));
                 memcpy(param.value.data(), &val, sizeof(val));
                 mMaterialParams.push_back(param);
+            }
+            else if (type.IsA<TfToken>())
+            {
+                TfToken val = params.second.Get<TfToken>();
+                STRELKA_DEBUG("TfToken: {}", val.GetText());
+            }
+            else if (type.IsA<std::string>())
+            {
+                std::string val = params.second.Get<std::string>();
+                STRELKA_DEBUG("String: {}", val.c_str());
             }
             else
             {
