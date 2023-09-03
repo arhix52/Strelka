@@ -40,7 +40,7 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E make_directory
           "${OUTPUT_DIRECTORY}/optix/shaders")
 
-if(WIN32 OR UNIX)
+if(WIN32 OR LINUX)
   set(clang_PATH $ENV{clang_PATH})
   find_program(clang_PATH clang)
   message(STATUS "clang_PATH: ${clang_PATH}")
