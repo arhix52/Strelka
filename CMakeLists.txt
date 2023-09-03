@@ -12,13 +12,17 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+if(UNIX AND NOT APPLE)
+    set(LINUX TRUE)
+endif()
+
 if(WIN32)
   add_compile_definitions(NOMINMAX)
   add_compile_definitions(_USE_MATH_DEFINES)
   add_compile_definitions(_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH)
 endif()
 
-if(WIN32 OR UNIX)
+if(WIN32 OR LINUX)
   add_subdirectory(external/glad)
   set_target_properties(glad PROPERTIES LINKER_LANGUAGE CXX)
 endif()

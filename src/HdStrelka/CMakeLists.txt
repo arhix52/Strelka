@@ -75,7 +75,7 @@ target_include_directories(${HD_PLUGIN_NAME}
 target_include_directories(${HD_PLUGIN_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(${HD_PLUGIN_NAME} PUBLIC hd)
 target_include_directories(${HD_PLUGIN_NAME} PRIVATE usdImaging hdMtlx)
-if(WIN32 OR UNIX)
+if(WIN32 OR LINUX)
   target_link_libraries(
     ${HD_PLUGIN_NAME}
     PRIVATE usdImaging

@@ -68,7 +68,7 @@ if(WIN32 OR UNIX)
       "${OUTPUT_DIRECTORY}")
   endif(WIN32)
 
-  if (UNIX)
+  if (LINUX)
   add_custom_command(
     TARGET ${MATERIALLIB_NAME}
     PRE_BUILD
@@ -83,7 +83,7 @@ if(WIN32 OR UNIX)
       ${CMAKE_COMMAND} -E copy
       "${ROOT_HOME}/external/mdl-sdk/linux-x86-64/lib/nv_freeimage.so"
       "${OUTPUT_DIRECTORY}")
-  endif(UNIX)
+  endif(LINUX)
 
   set(_CLANG_FLAGS ${_CLANG_FLAGS} --cuda-path=${CUDA_TOOLKIT_ROOT_DIR})
 

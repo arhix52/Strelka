@@ -3,7 +3,7 @@ set(DISPLAYLIB_NAME display)
 set(DISPLAY_SOURCES_COMMON
     ${ROOT_HOME}/include/display/Display.h ${ROOT_HOME}/src/display/Display.cpp
     ${ROOT_HOME}/src/display/DisplayFactory.cpp)
-if(WIN32 OR UNIX)
+if(WIN32 OR LINUX)
 
   set(DISPLAY_SOURCES
       ${DISPLAY_SOURCES_COMMON} ${ROOT_HOME}/src/display/opengl/glfwdisplay.h
@@ -38,13 +38,13 @@ if(WIN32)
     PRIVATE glad)
 endif(WIN32)
 
-if(UNIX)
+if(LINUX)
   target_link_libraries(
     ${DISPLAYLIB_NAME}
     PUBLIC ${OPENGL_LIBRARIES}
     glfw
     PRIVATE glad)
-endif(UNIX)
+endif(LINUX)
 
 endif()
 

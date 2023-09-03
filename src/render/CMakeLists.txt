@@ -11,7 +11,7 @@ include_directories(${ROOT_HOME}/external/stb)
 set(RENDER_SOURCES_COMMON ${ROOT_HOME}/include/render/render.h
                           ${ROOT_HOME}/src/render/render.cpp)
 
-if(WIN32 OR UNIX)
+if(WIN32 OR LINUX)
   enable_language(CUDA)
   # Find at least a 5.0 version of CUDA.
   find_package(CUDA 5.0 REQUIRED)
@@ -65,7 +65,7 @@ if(WIN32 OR UNIX)
 
 endif()
 
-if(WIN32 OR UNIX)
+if(WIN32 OR LINUX)
   target_include_directories(${RENDERLIB_NAME} PUBLIC ${OptiX_INCLUDE})
   target_include_directories(${RENDERLIB_NAME} PUBLIC ${CUDA_INCLUDE_DIRS})
   add_custom_command(
