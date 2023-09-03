@@ -501,7 +501,7 @@ int main(int argc, const char* argv[])
 
     ctx->mSettingsManager->setAs<uint32_t>("render/width", imageWidth);
     ctx->mSettingsManager->setAs<uint32_t>("render/height", imageHeight);
-    ctx->mSettingsManager->setAs<uint32_t>("render/pt/depth", 6);
+    ctx->mSettingsManager->setAs<uint32_t>("render/pt/depth", 4);
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/sppTotal", result["t"].as<int32_t>());
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", result["f"].as<int32_t>());
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/iteration", 0);
