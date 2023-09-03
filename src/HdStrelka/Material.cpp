@@ -172,6 +172,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
     if (isUsdPreviewSurface)
     {
         mMaterialXCode = m_translator.ParseNetwork(id, network);
+        // STRELKA_DEBUG("MaterialX code:\n {}\n", mMaterialXCode.c_str());
     }
     else
     {
