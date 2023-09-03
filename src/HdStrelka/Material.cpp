@@ -52,8 +52,10 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
     bool isUsdPreviewSurface = false;
     HdMaterialNode* previewSurfaceNode = nullptr;
     // store material parameters
+    uint32_t nodeIdx = 0;
     for (auto& node : surfaceNetwork.nodes)
     {
+        STRELKA_DEBUG("Node #{}: {}", nodeIdx, node.path.GetText());
         if (node.identifier == UsdImagingTokens->UsdPreviewSurface)
         {
             previewSurfaceNode = &node;
@@ -64,7 +66,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
             const std::string& name = params.first.GetString();
 
             const TfType type = params.second.GetType();
-            STRELKA_DEBUG("Param name: {0}\t{1}", name.c_str(), params.second.GetTypeName().c_str());
+            STRELKA_DEBUG("Node: {}\tParam name: {}\t{}", node.path.GetText(), name.c_str(), params.second.GetTypeName().c_str());
 
             if (type.IsA<GfVec3f>())
             {
@@ -156,6 +158,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
                 STRELKA_ERROR("Unknown parameter type!\n");
             }
         }
+        nodeIdx++;
     }
 
     bool isVolume = false;
