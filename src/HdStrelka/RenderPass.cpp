@@ -216,7 +216,7 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
 
             if (materialId.IsEmpty())
             {
-                GfVec3f color({1.0f});
+                GfVec3f color(1.0f);
                 if (mesh->HasColor())
                 {
                     color = mesh->GetColor();

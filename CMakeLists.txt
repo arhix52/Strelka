@@ -13,7 +13,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if(UNIX AND NOT APPLE)
-    set(LINUX TRUE)
+  set(LINUX TRUE)
 endif()
 
 if(WIN32)
@@ -36,9 +36,9 @@ add_subdirectory(src/render)
 add_subdirectory(src/HdStrelka)
 add_subdirectory(src/scene)
 add_subdirectory(src/materialmanager)
-# add_subdirectory(src/app)
 add_subdirectory(src/display)
 add_subdirectory(src/hdRunner)
 
-
-add_subdirectory(tests)
+if(WIN32 OR LINUX)
+  add_subdirectory(tests)
+endif()
