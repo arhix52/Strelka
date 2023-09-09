@@ -254,15 +254,24 @@ public:
         bool res = mMtlxCodeGen->translate(mtlSrc, mMdlSrc, module->identifier);
         if (res)
         {
+            std::string mtlxFile = "./data/materials/mtlx/" + module->identifier + ".mtlx";
             std::string mdlFile = "./data/materials/mtlx/" + module->identifier + ".mdl";
-            std::ofstream material(mdlFile.c_str());
-            if (!material.is_open())
-            {
-                STRELKA_ERROR("can not create file: {}", mdlFile.c_str());
-                return nullptr;
-            }
-            material << mMdlSrc;
-            material.close();
+            
+            auto dumpToFile = [](const std::string& fileName, const std::string& content) {
+                std::ofstream material(fileName.c_str());
+                if (!material.is_open())
+                {
+                    STRELKA_ERROR("can not create file: {}", fileName.c_str());
+                    return;
+                }
+                material << content;
+                material.close();
+                return;
+            };
+
+            dumpToFile(mtlxFile, mtlSrc);
+            dumpToFile(mdlFile, mMdlSrc);
+
             if (!mMatCompiler->createModule(module->identifier, module->moduleName))
             {
                 STRELKA_ERROR("failed to create MDL module: {} identifier: {}", module->moduleName.c_str(),
