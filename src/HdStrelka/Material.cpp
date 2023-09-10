@@ -7,11 +7,6 @@
 #include <log.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
-// clang-format off
-TF_DEFINE_PRIVATE_TOKENS(_tokens,
-    (diffuse_color_constant)
-);
-// clang-format on
 
 HdStrelkaMaterial::HdStrelkaMaterial(const SdfPath& id, const MaterialNetworkTranslator& translator)
     : HdMaterial(id), m_translator(translator)
@@ -56,9 +51,11 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
 
     bool isUsdPreviewSurface = false;
     HdMaterialNode* previewSurfaceNode = nullptr;
-    //store material parameters
+    // store material parameters
+    uint32_t nodeIdx = 0;
     for (auto& node : surfaceNetwork.nodes)
     {
+        STRELKA_DEBUG("Node #{}: {}", nodeIdx, node.path.GetText());
         if (node.identifier == UsdImagingTokens->UsdPreviewSurface)
         {
             previewSurfaceNode = &node;
@@ -66,10 +63,10 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
         }
         for (const std::pair<TfToken, VtValue>& params : node.parameters)
         {
-            const std::string name = params.first.GetString();
+            const std::string& name = params.first.GetString();
 
             const TfType type = params.second.GetType();
-            STRELKA_DEBUG("Param name: {0}\t{1}", name.c_str(), params.second.GetTypeName().c_str());
+            STRELKA_DEBUG("Node: {}\tParam name: {}\t{}", node.path.GetText(), name.c_str(), params.second.GetTypeName().c_str());
 
             if (type.IsA<GfVec3f>())
             {
@@ -146,11 +143,22 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
                 memcpy(param.value.data(), &val, sizeof(val));
                 mMaterialParams.push_back(param);
             }
+            else if (type.IsA<TfToken>())
+            {
+                TfToken val = params.second.Get<TfToken>();
+                STRELKA_DEBUG("TfToken: {}", val.GetText());
+            }
+            else if (type.IsA<std::string>())
+            {
+                std::string val = params.second.Get<std::string>();
+                STRELKA_DEBUG("String: {}", val.c_str());
+            }
             else
             {
                 STRELKA_ERROR("Unknown parameter type!\n");
             }
         }
+        nodeIdx++;
     }
 
     bool isVolume = false;
@@ -164,6 +172,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
     if (isUsdPreviewSurface)
     {
         mMaterialXCode = m_translator.ParseNetwork(id, network);
+        // STRELKA_DEBUG("MaterialX code:\n {}\n", mMaterialXCode.c_str());
     }
     else
     {

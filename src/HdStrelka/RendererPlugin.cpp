@@ -35,7 +35,7 @@ HdStrelkaRendererPlugin::HdStrelkaRendererPlugin()
     else
     {
         const std::string USDPath(envUSDPath);
-        m_translator = std::make_unique<MaterialNetworkTranslator>(USDPath + "./libraries");
+        m_translator = std::make_unique<MaterialNetworkTranslator>(USDPath + "/libraries");
         m_isSupported = true;
     }
 }

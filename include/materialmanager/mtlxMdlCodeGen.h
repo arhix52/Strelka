@@ -22,12 +22,14 @@
 #include <MaterialXFormat/File.h>
 #include <MaterialXGenShader/ShaderGenerator.h>
 
+#include "mdlRuntime.h"
+
 namespace oka
 {
 class MtlxMdlCodeGen
 {
 public:
-    explicit MtlxMdlCodeGen(const char* mtlxlibPath);
+    explicit MtlxMdlCodeGen(const char* mtlxlibPath, MdlRuntime* mdlRuntime);
 
 public:
     bool translate(const char* mtlxSrc, std::string& mdlSrc, std::string& subIdentifier);
@@ -36,5 +38,6 @@ private:
     const MaterialX::FileSearchPath mMtlxlibPath;
     MaterialX::DocumentPtr mStdLib;
     MaterialX::ShaderGeneratorPtr mShaderGen;
+    MdlRuntime* mMdlRuntime;
 };
 }

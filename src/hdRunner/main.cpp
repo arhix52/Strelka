@@ -501,7 +501,7 @@ int main(int argc, const char* argv[])
 
     ctx->mSettingsManager->setAs<uint32_t>("render/width", imageWidth);
     ctx->mSettingsManager->setAs<uint32_t>("render/height", imageHeight);
-    ctx->mSettingsManager->setAs<uint32_t>("render/pt/depth", 6);
+    ctx->mSettingsManager->setAs<uint32_t>("render/pt/depth", 4);
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/sppTotal", result["t"].as<int32_t>());
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", result["f"].as<int32_t>());
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/iteration", 0);
@@ -609,7 +609,8 @@ int main(int argc, const char* argv[])
 
     std::pair<bool, CameraUtilConformWindowPolicy> overrideWindowPolicy(false, CameraUtilFit);
 
-    TfTokenVector renderTags(1, HdRenderTagTokens->geometry);
+    // TODO: add UI control here
+    TfTokenVector renderTags{ HdRenderTagTokens->geometry, HdRenderTagTokens->render };
     HdRprimCollection renderCollection(HdTokens->geometry, HdReprSelector(HdReprTokens->refined));
     HdRenderPassSharedPtr renderPass = renderDelegate->CreateRenderPass(renderIndex, renderCollection);
 

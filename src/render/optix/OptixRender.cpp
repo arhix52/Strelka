@@ -1,4 +1,4 @@
-#include "OptiXRender.h"
+#include "OptixRender.h"
 
 #include "OptixBuffer.h"
 
@@ -29,6 +29,7 @@
 #include <string>
 #include <sstream>
 #include <fstream>
+#include <filesystem>
 
 #include <log.h>
 
@@ -137,7 +138,7 @@ void configureCamera(::Camera& cam, const uint32_t width, const uint32_t height)
     cam.setAspectRatio((float)width / (float)height);
 }
 
-static bool readSourceFile(std::string& str, const std::string& filename)
+static bool readSourceFile(std::string& str, const fs::path& filename)
 {
     // Try to open file
     std::ifstream file(filename.c_str(), std::ios::binary);
@@ -521,7 +522,7 @@ void OptiXRender::createModule()
             // significant performance cost and should only be done during
             // development.
             pipeline_compile_options.exceptionFlags =
-                OPTIX_EXCEPTION_FLAG_DEBUG | OPTIX_EXCEPTION_FLAG_TRACE_DEPTH | OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW;
+                OPTIX_EXCEPTION_FLAG_USER | OPTIX_EXCEPTION_FLAG_TRACE_DEPTH | OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW;
         else
         {
             pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
@@ -533,10 +534,10 @@ void OptiXRender::createModule()
 
         size_t inputSize = 0;
         std::string optixSource;
-        const std::string cwdPath = fs::current_path().string();
-        const std::string precompiledOptixPath = cwdPath + "\\optix\\render_generated_OptixRender.cu.optixir";
+        const fs::path cwdPath = fs::current_path();
+        const fs::path precompiledOptixPath = cwdPath / "optix/render_generated_OptixRender.cu.optixir";
 
-        readSourceFile(optixSource, precompiledOptixPath.c_str());
+        readSourceFile(optixSource, precompiledOptixPath);
         const char* input = optixSource.c_str();
         inputSize = optixSource.size();
         char log[2048]; // For error reporting from OptiX creation functions
@@ -1029,12 +1030,18 @@ void OptiXRender::init()
         STRELKA_FATAL("Please, set USD_DIR variable");
         assert(0);
     }
-    const std::string usdMdlLibPath = std::string(envUSDPath) + "\\libraries\\mdl\\";
-    const std::string cwdPath = fs::current_path().string();
-    const std::string mtlxPath = cwdPath + "\\data\\materials\\mtlx";
-    const std::string mdlPath = cwdPath + "\\data\\materials\\mdl";
+    const fs::path usdMdlLibPath = (fs::path(envUSDPath) / fs::path("libraries/mdl/")).make_preferred();
+    const fs::path cwdPath = fs::current_path();
+    STRELKA_DEBUG("cwdPath: {}", cwdPath.string().c_str());
+    const fs::path mtlxPath = (cwdPath / fs::path("data/materials/mtlx")).make_preferred();
+    STRELKA_DEBUG("mtlxPath: {}", mtlxPath.string().c_str());
+    const fs::path mdlPath = (cwdPath / fs::path("data/materials/mdl")).make_preferred();
 
-    const char* paths[] = { usdMdlLibPath.c_str(), mtlxPath.c_str(), mdlPath.c_str() };
+    const std::string usdMdlLibPathStr = usdMdlLibPath.string();
+    const std::string mtlxPathStr = mtlxPath.string().c_str();
+    const std::string mdlPathStr = mdlPath.string().c_str();
+
+    const char* paths[] = { usdMdlLibPathStr.c_str(), mtlxPathStr.c_str(), mdlPathStr.c_str() };
     bool res = mMaterialManager.addMdlSearchPath(paths, sizeof(paths) / sizeof(char*));
 
     if (!res)
@@ -1145,7 +1152,7 @@ void OptiXRender::createLightBuffer()
     }
 }
 
-Texture OptiXRender::loadTextureFromFile(std::string& fileName)
+Texture OptiXRender::loadTextureFromFile(const std::string& fileName)
 {
     int texWidth, texHeight, texChannels;
     stbi_uc* data = stbi_load(fileName.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
@@ -1330,7 +1337,7 @@ bool OptiXRender::createOptixMaterials()
                 std::string texPath(param.value.size(), 0);
                 memcpy(texPath.data(), param.value.data(), param.value.size());
                 // int texId = getTexManager()->loadTextureMdl(texPath);
-                ::Texture tex = loadTextureFromFile(resourcePath + "/" + texPath);
+                ::Texture tex = loadTextureFromFile(resourcePath + std::string("/") + texPath);
                 materialTextures.push_back(tex);
                 int texId = 0;
                 int resId = mMaterialManager.registerResource(targetCode, texId);
