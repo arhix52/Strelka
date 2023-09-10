@@ -1,15 +1,41 @@
 # Strelka
+Path tracing render based on NVIDIA OptiX + NVIDIA MDL and Apple Metal
+## OpenUSD Hydra render delegate
+![Kitchen Set from OpenUSD](images/Kitchen_2048i_4d_2048spp_0.png)
+## Basis curves support
+![Hairs](images/hairmat_2_light_10000i_6d_10000spp_0.png)
+![Einar](images/einar_1024i_3d_1024spp_0.png)
 
 ## Project Dependencies
 
+OpenUSD https://github.com/PixarAnimationStudios/OpenUSD
+
+* Set evn var: `USD_DIR=c:\work\USD_build`
+
+OptiX 
+* Set evn var: `OPTIX_DIR=C:\work\OptiX SDK 8.0.0`
+
+Download MDL sdk (for example: mdl-sdk-367100.2992): https://developer.nvidia.com/nvidia-mdl-sdk-get-started
+
+* unzip content to /external/mdl-sdk/
+
+LLVM 12.0.1 (https://github.com/llvm/llvm-project/releases/tag/llvmorg-12.0.1) for MDL ptx code generator
+
+* for win: https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.1/LLVM-12.0.1-win64.exe
+* for linux: https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.1/clang+llvm-12.0.1-x86_64-linux-gnu-ubuntu-16.04.tar.xz
+* install it to `c:\work` for example
+* add to PATH: `c:\work\LLVM\bin`
+* extract 2 header files files from external/clang12_patched to `C:\work\LLVM\lib\clang\12.0.1\include`
+
 Strelka uses conan https://conan.io/
-install conan: `pip install conan` 
+
+* install conan: `pip install conan` 
 
 detect conan profile: `conan profile detect --force`
 
 1. `conan install . --output-folder=build --build=missing --settings=build_type=Debug`
 2. `cd build`
-3. `cmake .. -G "Visual Studio 17 2022" -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake --settings=build_type=Debug`
+3. `cmake .. -G "Visual Studio 17 2022" -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake`
 
 ### Libs:
 - glfw    - https://www.glfw.org/     *dll*
@@ -20,15 +46,8 @@ detect conan profile: `conan profile detect --force`
 - doctest      - https://github.com/onqtam/doctest *submodule*
 
 #### Installation
-Follow setup guide https://vulkan-tutorial.com/Development_environment
-
-Clone the project.
-   
 
 #### Launch
-Use vscode with preset env variable
-1. export VULKAN_SDK=~/vulkansdk/macOS
-2. launch code 
     
 ## Synopsis 
 
@@ -38,14 +57,17 @@ Use vscode with preset env variable
     -i, --iteration arg  Iteration to capture (default: -1)
     -h, --help            Print usage
 
+
+To set log level use
+
+    export SPDLOG_LEVEL=debug
+The available log levels are: trace, debug, info, warn, and err.
+
 ## Example
 
     ./Strelka -s misc/coffeemaker.usdc -i 100
 
 ## USD
-    Vulkan:
-        cd <VULKAN_SDK>
-        source ./setup-env.sh
     USD env:
         export USD_DIR=/Users/<user>/work/usd_build/
         export PATH=/Users/<user>/work/usd_build/bin:$PATH
@@ -53,6 +75,7 @@ Use vscode with preset env variable
 
     Cmake:
         cmake -DCMAKE_INSTALL_PREFIX=/Users/<user>/work/usd_build/plugin/usd/ ..
+
     Install plugin:
         cmake --install . --component HdStrelka
 

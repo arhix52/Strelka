@@ -3,7 +3,7 @@ set(DISPLAYLIB_NAME display)
 set(DISPLAY_SOURCES_COMMON
     ${ROOT_HOME}/include/display/Display.h ${ROOT_HOME}/src/display/Display.cpp
     ${ROOT_HOME}/src/display/DisplayFactory.cpp)
-if(WIN32)
+if(WIN32 OR LINUX)
 
   set(DISPLAY_SOURCES
       ${DISPLAY_SOURCES_COMMON} ${ROOT_HOME}/src/display/opengl/glfwdisplay.h
@@ -31,10 +31,21 @@ if(WIN32)
   target_include_directories(${DISPLAYLIB_NAME}
                              PUBLIC ${ROOT_HOME}/external/imgui/include)
 
+if(WIN32)
   target_link_libraries(
     ${DISPLAYLIB_NAME}
     PUBLIC "${ROOT_HOME}/external/glfw/glfw3.lib" ${OPENGL_LIBRARIES}
     PRIVATE glad)
+endif(WIN32)
+
+if(LINUX)
+  target_link_libraries(
+    ${DISPLAYLIB_NAME}
+    PUBLIC ${OPENGL_LIBRARIES}
+    glfw
+    PRIVATE glad)
+endif(LINUX)
+
 endif()
 
 if(APPLE)

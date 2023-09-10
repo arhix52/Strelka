@@ -106,15 +106,15 @@ public:
             switch (resource->get_kind())
             {
             case mi::neuraylib::IValue::VK_TEXTURE:
-                if (res_idx < m_target_code->get_body_texture_count())
+                if (res_idx < m_target_code->get_texture_count())
                     return res_idx;
                 break;
             case mi::neuraylib::IValue::VK_LIGHT_PROFILE:
-                if (res_idx < m_target_code->get_body_light_profile_count())
+                if (res_idx < m_target_code->get_light_profile_count())
                     return res_idx;
                 break;
             case mi::neuraylib::IValue::VK_BSDF_MEASUREMENT:
-                if (res_idx < m_target_code->get_body_bsdf_measurement_count())
+                if (res_idx < m_target_code->get_bsdf_measurement_count())
                     return res_idx;
                 break;
             default:
@@ -209,7 +209,7 @@ public:
             return false;
         }
 
-        mMtlxCodeGen = std::make_unique<oka::MtlxMdlCodeGen>(mtlxLibPath.c_str());
+        mMtlxCodeGen = std::make_unique<oka::MtlxMdlCodeGen>(mtlxLibPath.generic_string().c_str(), mRuntime.get());
 
         mMatCompiler = std::make_unique<oka::MdlMaterialCompiler>(*mRuntime);
         mTransaction = mi::base::Handle<mi::neuraylib::ITransaction>(mRuntime->getTransaction());
@@ -219,14 +219,14 @@ public:
         mCodeGen->init(*mRuntime);
         std::vector<char> data;
         {
-            const std::string cwdPath = fs::current_path().string();
-            const std::string precompiledPath = cwdPath + "\\optix\\shaders\\OptixRender_radiance_closest_hit.bc";
+            const fs::path cwdPath = fs::current_path();
+            const fs::path precompiledPath = cwdPath / "optix/shaders/OptixRender_radiance_closest_hit.bc";
 
             std::ifstream file(precompiledPath.c_str(), std::ios::in | std::ios::binary);
 
             if (!file.is_open())
             {
-                std::cerr << "Cannot open precompiled file.\n";
+                STRELKA_FATAL("Cannot open precompiled closest hit file.\n");
                 return false;
             }
 
@@ -239,7 +239,7 @@ public:
 
         if (!mCodeGen->setOptionBinary("llvm_renderer_module", data.data(), data.size()))
         {
-            std::cerr << "Unable to set binary options!\n";
+            STRELKA_ERROR("Unable to set binary options!");
             return false;
         }
 
@@ -254,18 +254,28 @@ public:
         bool res = mMtlxCodeGen->translate(mtlSrc, mMdlSrc, module->identifier);
         if (res)
         {
+            std::string mtlxFile = "./data/materials/mtlx/" + module->identifier + ".mtlx";
             std::string mdlFile = "./data/materials/mtlx/" + module->identifier + ".mdl";
-            std::ofstream material(mdlFile.c_str());
-            if (!material.is_open())
-            {
-                STRELKA_ERROR("can not create file: {}", mdlFile.c_str());
-                return nullptr;
-            }
-            material << mMdlSrc;
-            material.close();
+            
+            auto dumpToFile = [](const std::string& fileName, const std::string& content) {
+                std::ofstream material(fileName.c_str());
+                if (!material.is_open())
+                {
+                    STRELKA_ERROR("can not create file: {}", fileName.c_str());
+                    return;
+                }
+                material << content;
+                material.close();
+                return;
+            };
+
+            dumpToFile(mtlxFile, mtlSrc);
+            dumpToFile(mdlFile, mMdlSrc);
+
             if (!mMatCompiler->createModule(module->identifier, module->moduleName))
             {
-                STRELKA_ERROR("failed to create MDL module");
+                STRELKA_ERROR("failed to create MDL module: {} identifier: {}", module->moduleName.c_str(),
+                              module->identifier.c_str());
                 return nullptr;
             }
             return module.release();
@@ -786,7 +796,7 @@ private:
     std::string mImagePluginPath;
     std::string mPathso;
     std::string mMdlSrc;
-    std::string mtlxLibPath;
+    fs::path mtlxLibPath;
 
     std::unordered_map<uint32_t, mi::base::Handle<const mi::neuraylib::ICanvas>> m_indexToCanvas;
 
@@ -794,7 +804,6 @@ private:
     {
         using namespace std;
         const fs::path cwd = fs::current_path();
-        mtlxLibPath = "";
         const char* envUSDPath = std::getenv("USD_DIR");
         if (!envUSDPath)
         {
@@ -803,7 +812,7 @@ private:
         }
         else
         {
-            mtlxLibPath = std::string(envUSDPath) + "./libraries/";
+            mtlxLibPath = fs::path(envUSDPath) / fs::path("libraries/");
         }
         mMdlSrc = cwd.string() + "/data/materials/mtlx"; // path to the material
 

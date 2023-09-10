@@ -40,7 +40,8 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E make_directory
           "${OUTPUT_DIRECTORY}/optix/shaders")
 
-if(WIN32)
+if(WIN32 OR LINUX)
+  set(clang_PATH $ENV{clang_PATH})
   find_program(clang_PATH clang)
   message(STATUS "clang_PATH: ${clang_PATH}")
 
@@ -50,6 +51,7 @@ if(WIN32)
   message(STATUS "OptiX Include DIR: ${OptiX_INCLUDE}")
   include_directories(${OptiX_INCLUDE})
 
+  if (WIN32)
   add_custom_command(
     TARGET ${MATERIALLIB_NAME}
     PRE_BUILD
@@ -64,6 +66,24 @@ if(WIN32)
       ${CMAKE_COMMAND} -E copy
       "${ROOT_HOME}/external/mdl-sdk/nt-x86-64/lib/nv_freeimage.dll"
       "${OUTPUT_DIRECTORY}")
+  endif(WIN32)
+
+  if (LINUX)
+  add_custom_command(
+    TARGET ${MATERIALLIB_NAME}
+    PRE_BUILD
+    COMMAND
+      ${CMAKE_COMMAND} -E copy
+      "${ROOT_HOME}/external/mdl-sdk/linux-x86-64/lib/libmdl_sdk.so"
+      "${OUTPUT_DIRECTORY}")
+  add_custom_command(
+    TARGET ${MATERIALLIB_NAME}
+    PRE_BUILD
+    COMMAND
+      ${CMAKE_COMMAND} -E copy
+      "${ROOT_HOME}/external/mdl-sdk/linux-x86-64/lib/nv_freeimage.so"
+      "${OUTPUT_DIRECTORY}")
+  endif(LINUX)
 
   set(_CLANG_FLAGS ${_CLANG_FLAGS} --cuda-path=${CUDA_TOOLKIT_ROOT_DIR})
 
@@ -82,7 +102,10 @@ if(WIN32)
       ${clang_PATH} -I ${OptiX_INCLUDE} -I ${ROOT_HOME}/external/mdl-sdk/include
       -I ${ROOT_HOME}/src/render/ -I ${ROOT_HOME}/src/render/optix/
       -I ${ROOT_HOME}/include/render -I
-      ${ROOT_HOME}/external/glm -I ${ROOT_HOME} ${_CLANG_FLAGS}
+      ${ROOT_HOME}/external/glm -I ${ROOT_HOME}
+      -std=c++11
+      -I /usr/include/c++/11/
+      ${_CLANG_FLAGS}
       -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -emit-llvm -c -O3 -ffast-math
       -fcuda-flush-denormals-to-zero -fno-vectorize --cuda-gpu-arch=sm_75
       --cuda-device-only
@@ -93,4 +116,4 @@ if(WIN32)
       ${OUTPUT_DIRECTORY}/optix/shaders/OptixRender_radiance_closest_hit.d
     WORKING_DIRECTORY ${CMAKE_CFG_INTDIR}
     DEPENDS "OptixRender_radiance_closest_hit.cu" ${PROJECT_SOURCES} VERBATIM)
-endif(WIN32)
+endif()

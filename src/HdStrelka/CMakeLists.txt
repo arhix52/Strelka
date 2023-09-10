@@ -4,6 +4,7 @@ find_package(USD REQUIRED HINTS ${USD_DIR} NAMES pxr)
 message(STATUS "USD LIBRARY: ${USD_DIR}")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Hydra plugin
 set(HD_PLUGIN_SOURCES
@@ -70,11 +71,11 @@ set(BUILD_SHARED_LIBS ON)
 
 target_include_directories(${HD_PLUGIN_NAME} PUBLIC ${ROOT_HOME}/include/log)
 target_include_directories(${HD_PLUGIN_NAME}
-                           PUBLIC ${ROOT_HOME}/include/hdStrelka)
+                           PUBLIC ${ROOT_HOME}/include/HdStrelka)
 target_include_directories(${HD_PLUGIN_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(${HD_PLUGIN_NAME} PUBLIC hd)
 target_include_directories(${HD_PLUGIN_NAME} PRIVATE usdImaging hdMtlx)
-if(WIN32)
+if(WIN32 OR LINUX)
   target_link_libraries(
     ${HD_PLUGIN_NAME}
     PRIVATE usdImaging
@@ -85,7 +86,7 @@ if(WIN32)
             scene
             materialmanager
     PUBLIC hd)
-endif(WIN32)
+endif()
 
 if(APPLE)
   target_link_libraries(

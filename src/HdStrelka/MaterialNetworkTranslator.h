@@ -40,6 +40,7 @@ public:
 
 private:
     MaterialX::DocumentPtr CreateMaterialXDocumentFromNetwork(const SdfPath& id, const HdMaterialNetwork2& network) const;
+    void patchMaterialNetwork(HdMaterialNetwork2& network) const;
 
 private:
     MaterialX::DocumentPtr m_nodeLib;

@@ -3,6 +3,4 @@
 namespace oka
 {
 
-
-
 } // namespace oka

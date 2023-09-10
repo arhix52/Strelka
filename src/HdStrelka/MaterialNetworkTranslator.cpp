@@ -65,11 +65,16 @@ TF_DEFINE_PRIVATE_TOKENS(
   (ND_UsdPrimvarReader_matrix44)
   (mdl)
   (subIdentifier)
+  (ND_convert_color3_vector3)
+  (diffuse_color_constant)
+  (normal)
+  (rgb)
+  (in)
+  (out)
 );
 // clang-format on
 
-bool _ConvertNodesToMaterialXNodes(const HdMaterialNetwork2& network,
-                                   HdMaterialNetwork2& mtlxNetwork)
+bool _ConvertNodesToMaterialXNodes(const HdMaterialNetwork2& network, HdMaterialNetwork2& mtlxNetwork)
 {
     mtlxNetwork = network;
 
@@ -181,24 +186,25 @@ MaterialNetworkTranslator::MaterialNetworkTranslator(const std::string& mtlxLibP
     mx::loadLibraries(libFolders, folderSearchPath, m_nodeLib);
 }
 
-std::string MaterialNetworkTranslator::ParseNetwork(const SdfPath& id,
-                                                     const HdMaterialNetwork2& network) const
+std::string MaterialNetworkTranslator::ParseNetwork(const SdfPath& id, const HdMaterialNetwork2& network) const
 {
-  HdMaterialNetwork2 mtlxNetwork;
-  if (!_ConvertNodesToMaterialXNodes(network, mtlxNetwork))
-  {
-    return nullptr;
-  }
+    HdMaterialNetwork2 mtlxNetwork;
+    if (!_ConvertNodesToMaterialXNodes(network, mtlxNetwork))
+    {
+        return nullptr;
+    }
 
-  mx::DocumentPtr doc = CreateMaterialXDocumentFromNetwork(id, mtlxNetwork);
-  if (!doc)
-  {
-    return nullptr;
-  }
+    patchMaterialNetwork(mtlxNetwork);
 
-  mx::string docStr = mx::writeToXmlString(doc);
+    mx::DocumentPtr doc = CreateMaterialXDocumentFromNetwork(id, mtlxNetwork);
+    if (!doc)
+    {
+        return nullptr;
+    }
 
-  return std::string(docStr.c_str());
+    mx::string docStr = mx::writeToXmlString(doc);
+
+    return std::string(docStr.c_str());
 }
 
 bool MaterialNetworkTranslator::ParseMdlNetwork(const SdfPath& id,
@@ -247,13 +253,56 @@ mx::DocumentPtr MaterialNetworkTranslator::CreateMaterialXDocumentFromNetwork(co
 
     HdMtlxTexturePrimvarData mxHdData;
 
-    return HdMtlxCreateMtlxDocumentFromHdNetwork(
-        network,
-        surfaceTerminal, 
-        terminalPath,
-        id,
-        m_nodeLib,
-        &mxHdData);
+    return HdMtlxCreateMtlxDocumentFromHdNetwork(network, surfaceTerminal, terminalPath, id, m_nodeLib, &mxHdData);
+}
+
+void MaterialNetworkTranslator::patchMaterialNetwork(HdMaterialNetwork2& network) const
+{
+    for (auto& pathNodePair : network.nodes)
+    {
+        HdMaterialNode2& node = pathNodePair.second;
+        if (node.nodeTypeId != _tokens->ND_UsdPreviewSurface_surfaceshader)
+        {
+            continue;
+        }
+        auto& inputs = node.inputConnections;
+
+        const auto patchColor3Vector3InputConnection = [&inputs, &network](TfToken inputName) {
+            auto inputIt = inputs.find(inputName);
+            if (inputIt == inputs.end())
+            {
+                return;
+            }
+
+            auto& connections = inputIt->second;
+            for (HdMaterialConnection2& connection : connections)
+            {
+                if (connection.upstreamOutputName != _tokens->rgb)
+                {
+                    continue;
+                }
+
+                SdfPath upstreamNodePath = connection.upstreamNode;
+
+                SdfPath convertNodePath = upstreamNodePath;
+                for (int i = 0; network.nodes.count(convertNodePath) > 0; i++)
+                {
+                    std::string convertNodeName = "convert" + std::to_string(i);
+                    convertNodePath = upstreamNodePath.AppendElementString(convertNodeName);
+                }
+
+                HdMaterialNode2 convertNode;
+                convertNode.nodeTypeId = _tokens->ND_convert_color3_vector3;
+                convertNode.inputConnections[_tokens->in] = { { upstreamNodePath, _tokens->rgb } };
+                network.nodes[convertNodePath] = convertNode;
+
+                connection.upstreamNode = convertNodePath;
+                connection.upstreamOutputName = _tokens->out;
+            }
+        };
+
+        patchColor3Vector3InputConnection(_tokens->normal);
+    }
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

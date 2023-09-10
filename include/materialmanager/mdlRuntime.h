@@ -25,6 +25,8 @@
 #include <mi/neuraylib/imdl_impexp_api.h>
 #include <mi/neuraylib/imdl_factory.h>
 
+#include <mi/mdl_sdk.h>
+
 #include <memory>
 #include <vector>
 
@@ -46,8 +48,11 @@ public:
     mi::base::Handle<mi::neuraylib::IMdl_impexp_api> getImpExpApi();
     mi::base::Handle<mi::neuraylib::IMdl_backend_api> getBackendApi();
     mi::base::Handle<mi::neuraylib::INeuray> getNeuray();
+    
+    mi::base::Handle<mi::neuraylib::IMdl_configuration> getConfig();
 
     std::unique_ptr<MdlNeurayLoader> mLoader;
+
 private:
     mi::base::Handle<MdlLogger> mLogger;
     mi::base::Handle<mi::neuraylib::IDatabase> mDatabase;
@@ -55,5 +60,7 @@ private:
     mi::base::Handle<mi::neuraylib::IMdl_factory> mFactory;
     mi::base::Handle<mi::neuraylib::IMdl_backend_api> mBackendApi;
     mi::base::Handle<mi::neuraylib::IMdl_impexp_api> mImpExpApi;
+
+    mi::base::Handle<mi::neuraylib::IMdl_configuration> mConfig;
 };
-}
+} // namespace oka
