@@ -75,6 +75,13 @@ target_include_directories(${HD_PLUGIN_NAME}
 target_include_directories(${HD_PLUGIN_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(${HD_PLUGIN_NAME} PUBLIC hd)
 target_include_directories(${HD_PLUGIN_NAME} PRIVATE usdImaging hdMtlx)
+
+# Add the linker options to suppress the MSVCRT conflict warning
+if(WIN32)
+  target_link_options(${HD_PLUGIN_NAME} PRIVATE "/NODEFAULTLIB:MSVCRT")
+  target_link_options(${HD_PLUGIN_NAME} PRIVATE "/NODEFAULTLIB:LIBCMT")
+endif()
+
 if(WIN32 OR LINUX)
   target_link_libraries(
     ${HD_PLUGIN_NAME}

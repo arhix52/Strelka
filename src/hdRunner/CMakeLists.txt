@@ -58,5 +58,9 @@ target_link_libraries(
          usdGeom
          usdImaging) # Link the executable to library (if it uses it).
 if(WIN32)
+  # Add the linker options to suppress the MSVCRT conflict warning
+  target_link_options(${HD_RUNNER_NAME} PRIVATE "/NODEFAULTLIB:MSVCRT")
+  target_link_options(${HD_RUNNER_NAME} PRIVATE "/NODEFAULTLIB:LIBCMT")
+  
   target_link_libraries(${HD_RUNNER_NAME} PUBLIC ${OPENGL_LIBRARIES} glad)
 endif()
