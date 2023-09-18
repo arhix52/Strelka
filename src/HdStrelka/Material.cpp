@@ -66,7 +66,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
             const std::string& name = params.first.GetString();
 
             const TfType type = params.second.GetType();
-            STRELKA_DEBUG("Node: {}\tParam name: {}\t{}", node.path.GetText(), name.c_str(), params.second.GetTypeName().c_str());
+            STRELKA_DEBUG("Node name: {}\tParam name: {}\t{}", node.path.GetName(), name.c_str(), params.second.GetTypeName().c_str());
 
             if (type.IsA<GfVec3f>())
             {
@@ -121,11 +121,13 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
             else if (type.IsA<SdfAssetPath>())
             {
                 oka::MaterialManager::Param param;
-                param.name = params.first;
+                param.name = node.path.GetName() + "_" + std::string(params.first);
                 param.type = oka::MaterialManager::Param::Type::eTexture;
                 const SdfAssetPath val = params.second.Get<SdfAssetPath>();
-                STRELKA_DEBUG("path: {}", val.GetAssetPath().c_str());
-                std::string texPath = val.GetAssetPath();
+                //STRELKA_DEBUG("path: {}", val.GetAssetPath().c_str());
+                STRELKA_DEBUG("path: {}", val.GetResolvedPath().c_str());
+                // std::string texPath = val.GetAssetPath();
+                std::string texPath = val.GetResolvedPath();
                 if (!texPath.empty())
                 {
                     param.value.resize(texPath.size());
