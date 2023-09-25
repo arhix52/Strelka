@@ -92,9 +92,9 @@ static __device__ float halton(uint32_t index, uint32_t base)
 
 static __device__ SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t seed)
 {
-  SamplerState sampler;
-  sampler.seed = hash(linearPixelIndex) ^ hash(seed) + pixelSampleIndex;
-  sampler.sampleIdx = 0u;
+  SamplerState sampler {};
+  sampler.seed = hash(linearPixelIndex);
+  sampler.sampleIdx = pixelSampleIndex;
   return sampler;
 }
 
@@ -103,7 +103,5 @@ __device__ __inline__ float random(SamplerState& state)
 {
     const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
     const uint32_t base = primeNumbers[dimension & 31u];
-    return halton(state.seed, base);
+    return halton(state.seed + state.sampleIdx, base);
 }
-
- 

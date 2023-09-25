@@ -409,7 +409,7 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     res.geom_normal = worldNormal;
     res.position = worldPosition;
     res.text_coords[0] = make_float3(0.5f, 0.5f, 0.5f);
-    res.text_coords[1] = make_float3(0.0f);
+    res.text_coords[1] = make_float3(0.5f);
     res.worldTangent[0] = worldTangent;
     res.worldBinormal[0] = worldBinormal;
     res.worldTangent[1] = worldTangent;
@@ -502,7 +502,7 @@ extern "C" __global__ void __closesthit__radiance()
         if (isnan(radiance) || isnan(lightPdf))
         {
             // ERROR, terminate tracing;
-            prd->radiance = make_float3(100.0f, 0.0f, 0.0f);
+            prd->radiance = make_float3(10000.0f, 0.0f, 0.0f);
             prd->throughput = make_float3(0.0f);
             return;
         }
@@ -523,7 +523,7 @@ extern "C" __global__ void __closesthit__radiance()
             if (isnan(evalData.bsdf_diffuse) || isnan(evalData.bsdf_glossy))
             {
                 // ERROR, terminate tracing;
-                prd->radiance = make_float3(100.0f, 0.0f, 0.0f);
+                prd->radiance = make_float3(10000.0f, 0.0f, 0.0f);
                 prd->throughput = make_float3(0.0f);
                 return;
             }
