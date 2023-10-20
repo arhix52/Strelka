@@ -40,7 +40,7 @@
                 "environment": [
                     {
                         "name": "SPDLOG_LEVEL",
-                        "value": "warn"
+                        "value": "trace"
                     }
                 ],
                 "externalConsole": false,
