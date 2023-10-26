@@ -149,7 +149,7 @@ public:
         glm::float4 color = glm::float4(1.0f);
         glm::float4 normal;
         int type;
-        float angle;
+        float halfAngle;
         float pad0;
         float pad1;
     };
@@ -174,7 +174,7 @@ public:
         // disc/sphere light
         float radius;
         // distant light
-        float angle; 
+        float halfAngle; 
     };
 
     std::vector<UniformLightDesc> mLightDesc;

@@ -519,7 +519,7 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
     {
         // distant light https://openusd.org/release/api/class_usd_lux_distant_light.html
         mLights[lightId].type = 3;
-        mLights[lightId].angle = desc.angle;
+        mLights[lightId].halfAngle = desc.halfAngle;
         const glm::float4x4 scaleMatrix = glm::float4x4(1.0f);
         const glm::float4x4 localTransform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
         mLights[lightId].normal = glm::normalize(localTransform * glm::float4(0.0f, 0.0f, -1.0f, 0.0f)); // -Z

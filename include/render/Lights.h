@@ -8,7 +8,7 @@ struct UniformLight
     float4 color;
     float4 normal;
     int type;
-    float angle;
+    float halfAngle;
     float pad0;
     float pad1;
 };
@@ -276,7 +276,7 @@ static __inline__ __device__ LightSampleData SampleDistantLight(const UniformLig
 {
     LightSampleData lightSampleData;
     float pdf = 0.0f;
-    float3 coneSample = SampleCone(u, l.angle, -make_float3(l.normal), pdf);
+    float3 coneSample = SampleCone(u, l.halfAngle, -make_float3(l.normal), pdf);
 
     lightSampleData.area = 0.0f;
     lightSampleData.distToLight = 1e9;
