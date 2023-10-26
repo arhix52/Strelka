@@ -244,33 +244,13 @@ __inline__ __device__ float3 sampleLight(SamplerState& sampler,
 
     if (dot(state.normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.0 && all(Li))
     {
-        // Ray shadowRay;
-        // shadowRay.d = float4(lightSampleData.L, 0.0f);
-        // shadowRay.o = float4(offset_ray(state.position, state.geom_normal), lightSampleData.distToLight); // need to
-        // set
+        // Ray shadowRay
         const bool occluded =
             traceOcclusion(params.handle, offset_ray(state.position, state.geom_normal), lightSampleData.L,
                            params.shadowRayTmin, // tmin
                            lightSampleData.distToLight // tmax
             );
-        // if (occluded)
-        // {
-        //     return make_float3(100.0f, 0.0f, 0.0f);
-        // }
         float visibility = occluded ? 0.0f : 1.0f;
-        // TODO: skip light hit
-
-        // if (visibility == 0.0f)
-        // {
-        //     // check if it was light hit?
-        //     InstanceConstants instConst = accel.instanceConstants[NonUniformResourceIndex(shadowHit.instId)];
-        //     if (instConst.lightId != -1)
-        //     {
-        //         // light hit => visible
-        //         visibility = 1.0f;
-        //     }
-        // }
-
         lightPdf = lightSampleData.pdf;
         return visibility * Li * saturate(dot(state.normal, lightSampleData.L));
     }
@@ -462,7 +442,11 @@ extern "C" __global__ void __closesthit__radiance()
     state.object_id = 0;
     state.meters_per_scene_unit = 1.0f;
 
-
+    if (params.debug == 1)
+    {
+        prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
+        return;
+    }
 
     const float3 ior1 = (isInside) ? make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR) : make_float3(1.0f); // material ->
                                                                                                           // air
@@ -498,14 +482,6 @@ extern "C" __global__ void __closesthit__radiance()
         float3 toLight; // return value for sampleLights()
         float lightPdf = 0.0f; // return value for sampleLights()
         const float3 radiance = estimateDirectLighting(prd->sampler, state, toLight, lightPdf);
-
-        if (params.debug == 1)
-        {
-            //prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
-            prd->radiance = radiance;
-            return;
-        }
-
         if (isnan(radiance) || isnan(lightPdf))
         {
             // ERROR, terminate tracing;
