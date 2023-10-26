@@ -44,6 +44,7 @@ if(WIN32 OR LINUX)
   set(RENDER_OPTIX_SOURCES ${ROOT_HOME}/include/render/optix/OptixRenderParams.h
                            ${ROOT_HOME}/src/render/optix/OptixRender.cu)
   include_directories(${ROOT_HOME}/include/render)
+  include_directories(${ROOT_HOME}/src/render/optix)
   include_directories(${ROOT_HOME})
   # Create the rules to build the PTX and/or OPTIX files.
   cuda_wrap_srcs(

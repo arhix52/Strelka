@@ -966,6 +966,8 @@ void OptiXRender::render(Buffer* output)
     }
     exposureValue /= lum;
 
+    params.exposure = exposureValue;
+
     const uint32_t totalSpp = settings.getAs<uint32_t>("render/pt/sppTotal");
     const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");
     const int32_t leftSpp = totalSpp - getSharedContext().mSubframeIndex;
