@@ -212,11 +212,11 @@ __inline__ __device__ float3 sampleLight(SamplerState& sampler,
                                          float& lightPdf)
 {
     LightSampleData lightSampleData = {};
+    const float2 uv = make_float2(random<SampleDimension::eLightPointX>(sampler),
+                                random<SampleDimension::eLightPointY>(sampler));
     switch (light.type)
     {
     case 0: {
-        const float2 uv = make_float2(random<SampleDimension::eLightPointX>(sampler),
-                                      random<SampleDimension::eLightPointY>(sampler));
         if (params.rectLightSamplingMethod == 0)
         {
             lightSampleData = SampleRectLightUniform(light, uv, state.position);
@@ -233,6 +233,10 @@ __inline__ __device__ float3 sampleLight(SamplerState& sampler,
         // case 2:
         //     lightSampleData = SampleSphereLight(light, state.normal, state.position, float2(rand(rngState),
         //     rand(rngState))); break;
+    case 3: {
+        lightSampleData = SampleDistantLight(light, uv, state.position);
+        break;
+    }
     }
 
     toLight = lightSampleData.L;
@@ -458,11 +462,7 @@ extern "C" __global__ void __closesthit__radiance()
     state.object_id = 0;
     state.meters_per_scene_unit = 1.0f;
 
-    if (params.debug == 1)
-    {
-        prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
-        return;
-    }
+
 
     const float3 ior1 = (isInside) ? make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR) : make_float3(1.0f); // material ->
                                                                                                           // air
@@ -498,6 +498,13 @@ extern "C" __global__ void __closesthit__radiance()
         float3 toLight; // return value for sampleLights()
         float lightPdf = 0.0f; // return value for sampleLights()
         const float3 radiance = estimateDirectLighting(prd->sampler, state, toLight, lightPdf);
+
+        if (params.debug == 1)
+        {
+            //prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
+            prd->radiance = radiance;
+            return;
+        }
 
         if (isnan(radiance) || isnan(lightPdf))
         {
