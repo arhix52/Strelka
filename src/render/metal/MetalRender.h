@@ -39,12 +39,15 @@ private:
     MTL::CommandQueue* mCommandQueue;
     MTL::Library* mShaderLibrary;
 
-    MTL::ComputePipelineState* mRayTracingPSO;
+    MTL::ComputePipelineState* mPathTracingPSO;
+    MTL::ComputePipelineState* mTonemapperPSO;
 
     MTL::Buffer* mAccumulationBuffer;
     MTL::Buffer* mLightBuffer;
     MTL::Buffer* mVertexBuffer;
     MTL::Buffer* mUniformBuffers[kMaxFramesInFlight];
+    MTL::Buffer* mUniformTMBuffers[kMaxFramesInFlight];
+    
     MTL::Buffer* mIndexBuffer;
     uint32_t mTriangleCount;
     std::vector<MetalRender::Mesh*> mMetalMeshes;
@@ -55,9 +58,9 @@ private:
     MTL::Buffer* mMaterialBuffer;
     std::vector<MTL::Texture*> mMaterialTextures;
     uint32_t mFrameIndex;
-    dispatch_semaphore_t mSemaphoreDispatch;
 
     void buildComputePipeline();
+    void buildTonemapperPipeline();
     void buildBuffers();
     
     MTL::Texture* loadTextureFromFile(const std::string& fileName);

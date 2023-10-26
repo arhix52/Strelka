@@ -39,7 +39,7 @@ void MetalRender::init()
     mDevice = MTL::CreateSystemDefaultDevice();
     mCommandQueue = mDevice->newCommandQueue();
     buildComputePipeline();
-    mSemaphoreDispatch = dispatch_semaphore_create(oka::kMaxFramesInFlight);
+    buildTonemapperPipeline();
 }
 
 MTL::Texture* oka::MetalRender::loadTextureFromFile(const std::string& fileName)
@@ -152,7 +152,9 @@ void MetalRender::render(Buffer* output)
     SettingsManager& settings = *getSharedContext().mSettingsManager;
 
     MTL::Buffer* pUniformBuffer = mUniformBuffers[mFrameIndex];
+    MTL::Buffer* pUniformTMBuffer = mUniformTMBuffers[mFrameIndex];
     Uniforms* pUniformData = reinterpret_cast<Uniforms*>(pUniformBuffer->contents());
+    UniformsTonemap* pUniformTonemap = reinterpret_cast<UniformsTonemap*>(pUniformTMBuffer->contents());
     pUniformData->frameIndex = mFrameIndex;
     pUniformData->subframeIndex = getSharedContext().mSubframeIndex;
     pUniformData->height = height;
@@ -162,9 +164,12 @@ void MetalRender::render(Buffer* output)
     pUniformData->enableAccumulation = (uint32_t)settings.getAs<bool>("render/pt/enableAcc");
     pUniformData->missColor = float3(0.0f);
     pUniformData->maxDepth = settings.getAs<uint32_t>("render/pt/depth");
-    pUniformData->tonemapperType = settings.getAs<uint32_t>("render/pt/tonemapperType");
-    pUniformData->gamma = settings.getAs<float>("render/post/gamma");
     pUniformData->debug = settings.getAs<uint32_t>("render/pt/debug");
+
+    pUniformTonemap->width = width;
+    pUniformTonemap->height = height;
+    pUniformTonemap->tonemapperType = settings.getAs<uint32_t>("render/pt/tonemapperType");
+    pUniformTonemap->gamma = settings.getAs<float>("render/post/gamma");
 
     bool settingsChanged = false;
 
@@ -203,6 +208,7 @@ void MetalRender::render(Buffer* output)
             pUniformData->clipToView.columns[column][row] = camera.matrices.invPerspective[column][row];
         }
     }
+    pUniformData->subframeIndex = getSharedContext().mSubframeIndex;
 
     // Photometric Units from iray documentation
     // Controls the sensitivity of the “camera film” and is expressed as an index; the ISO number of the film, also
@@ -222,12 +228,9 @@ void MetalRender::render(Buffer* output)
     // e.g., an incoming color of this hue/saturation will be mapped to grayscale, but its intensity will remain
     // unchanged. This is similar to white balance controls on digital cameras.
     float3 whitePoint{ 1.0f, 1.0f, 1.0f };
-    auto all = [](float3 v)
-    {
-        return v.x > 0.0f && v.y > 0.0f && v.z > 0.0f;
-    };
+    auto all = [](float3 v) { return v.x > 0.0f && v.y > 0.0f && v.z > 0.0f; };
     float3 exposureValue = all(whitePoint) ? 1.0f / whitePoint : float3(1.0f);
-    const float lum = simd::dot(exposureValue, float3{0.299f, 0.587f, 0.114f});
+    const float lum = simd::dot(exposureValue, float3{ 0.299f, 0.587f, 0.114f });
     if (filmIso > 0.0f)
     {
         // See https://www.nayuki.io/page/the-photographic-exposure-equation
@@ -238,7 +241,7 @@ void MetalRender::render(Buffer* output)
         exposureValue *= cm2_factor;
     }
     exposureValue /= lum;
-    pUniformData->exposureValue = exposureValue;
+    pUniformTonemap->exposureValue = exposureValue;
 
     const uint32_t totalSpp = settings.getAs<uint32_t>("render/pt/sppTotal");
     const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");
@@ -251,14 +254,9 @@ void MetalRender::render(Buffer* output)
         pUniformData->samples_per_launch = samplesThisLaunch;
 
         pUniformBuffer->didModifyRange(NS::Range::Make(0, sizeof(Uniforms)));
+        pUniformTMBuffer->didModifyRange(NS::Range::Make(0, sizeof(UniformsTonemap)));
 
         MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
-        dispatch_semaphore_wait(mSemaphoreDispatch, DISPATCH_TIME_FOREVER);
-        MetalRender* pRenderer = this;
-        pCmd->addCompletedHandler(^void(MTL::CommandBuffer* pCmd) {
-          dispatch_semaphore_signal(pRenderer->mSemaphoreDispatch);
-        });
-
         MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
         pComputeEncoder->useResource(mMaterialBuffer, MTL::ResourceUsageRead);
         pComputeEncoder->useResource(mLightBuffer, MTL::ResourceUsageRead);
@@ -271,9 +269,10 @@ void MetalRender::render(Buffer* output)
         {
             pComputeEncoder->useResource(mMaterialTextures[i], MTL::ResourceUsageRead);
         }
+        pComputeEncoder->useResource(((oka::MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageWrite);
 
-        pComputeEncoder->setComputePipelineState(mRayTracingPSO);
-        pComputeEncoder->setBuffer(mUniformBuffers[mFrameIndex], 0, 0);
+        pComputeEncoder->setComputePipelineState(mPathTracingPSO);
+        pComputeEncoder->setBuffer(pUniformBuffer, 0, 0);
         pComputeEncoder->setBuffer(mInstanceBuffer, 0, 1);
         pComputeEncoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
         pComputeEncoder->setBuffer(mLightBuffer, 0, 3);
@@ -281,13 +280,27 @@ void MetalRender::render(Buffer* output)
         // Output
         pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 5);
         pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 6);
-
-        const MTL::Size gridSize = MTL::Size(width, height, 1);
-
-        const NS::UInteger threadGroupSize = mRayTracingPSO->maxTotalThreadsPerThreadgroup();
-        const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
-
-        pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+        {
+            const MTL::Size gridSize = MTL::Size(width, height, 1);
+            const NS::UInteger threadGroupSize = mPathTracingPSO->maxTotalThreadsPerThreadgroup();
+            const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
+            pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+        }
+        // Disable tonemapping for debug output
+        if (pUniformData->debug == 0)
+        {
+            pComputeEncoder->setComputePipelineState(mTonemapperPSO);
+            pComputeEncoder->useResource(
+                ((oka::MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+            pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
+            pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 1);
+            {
+                const MTL::Size gridSize = MTL::Size(width, height, 1);
+                const NS::UInteger threadGroupSize = mTonemapperPSO->maxTotalThreadsPerThreadgroup();
+                const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
+                pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+            }
+        }
 
         pComputeEncoder->endEncoding();
 
@@ -300,8 +313,39 @@ void MetalRender::render(Buffer* output)
         }
         else
         {
-            getSharedContext().mSubframeIndex = samplesThisLaunch;
+            getSharedContext().mSubframeIndex = 0;
         }
+    }
+    else
+    {
+        MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
+
+        MTL::BlitCommandEncoder* pBlitEncoder = pCmd->blitCommandEncoder();
+        pBlitEncoder->copyFromBuffer(
+            mAccumulationBuffer, 0, ((oka::MetalBuffer*)output)->getNativePtr(), 0, width * height * sizeof(float4));
+        pBlitEncoder->endEncoding();
+
+        // Disable tonemapping for debug output
+        if (pUniformData->debug == 0)
+        {
+            MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
+
+            pComputeEncoder->setComputePipelineState(mTonemapperPSO);
+            pComputeEncoder->useResource(
+                ((oka::MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+            pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
+            pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 1);
+            {
+                const MTL::Size gridSize = MTL::Size(width, height, 1);
+                const NS::UInteger threadGroupSize = mTonemapperPSO->maxTotalThreadsPerThreadgroup();
+                const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
+                pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+            }
+            pComputeEncoder->endEncoding();
+        }
+
+        pCmd->commit();
+        pCmd->waitUntilCompleted();
     }
     pPool->release();
 
@@ -333,14 +377,37 @@ void MetalRender::buildComputePipeline()
     }
     MTL::Function* pPathTraceFn =
         pComputeLibrary->newFunction(NS::String::string("raytracingKernel", NS::UTF8StringEncoding));
-    mRayTracingPSO = mDevice->newComputePipelineState(pPathTraceFn, &pError);
-    if (!mRayTracingPSO)
+    mPathTracingPSO = mDevice->newComputePipelineState(pPathTraceFn, &pError);
+    if (!mPathTracingPSO)
     {
         STRELKA_FATAL("{}", pError->localizedDescription()->utf8String());
         assert(false);
     }
 
     pPathTraceFn->release();
+    pComputeLibrary->release();
+}
+
+void MetalRender::buildTonemapperPipeline()
+{
+    NS::Error* pError = nullptr;
+    MTL::Library* pComputeLibrary =
+        mDevice->newLibrary(NS::String::string("./metal/shaders/tonemapper.metallib", NS::UTF8StringEncoding), &pError);
+    if (!pComputeLibrary)
+    {
+        STRELKA_FATAL("{}", pError->localizedDescription()->utf8String());
+        assert(false);
+    }
+    MTL::Function* pTonemapperFn =
+        pComputeLibrary->newFunction(NS::String::string("toneMappingComputeShader", NS::UTF8StringEncoding));
+    mTonemapperPSO = mDevice->newComputePipelineState(pTonemapperFn, &pError);
+    if (!mTonemapperPSO)
+    {
+        STRELKA_FATAL("{}", pError->localizedDescription()->utf8String());
+        assert(false);
+    }
+
+    pTonemapperFn->release();
     pComputeLibrary->release();
 }
 
@@ -374,6 +441,10 @@ void MetalRender::buildBuffers()
     for (MTL::Buffer*& uniformBuffer : mUniformBuffers)
     {
         uniformBuffer = mDevice->newBuffer(sizeof(Uniforms), MTL::ResourceStorageModeManaged);
+    }
+    for (MTL::Buffer*& uniformBuffer : mUniformTMBuffers)
+    {
+        uniformBuffer = mDevice->newBuffer(sizeof(UniformsTonemap), MTL::ResourceStorageModeManaged);
     }
 }
 

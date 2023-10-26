@@ -156,7 +156,7 @@ uint32_t vertexForEdge(Lookup& lookup, std::vector<Scene::Vertex>& vertices, uin
         std::swap(key.first, key.second);
     }
 
-    auto inserted = lookup.insert({ key, vertices.size() });
+    auto inserted = lookup.insert({ key, (uint32_t) vertices.size() });
     if (inserted.second)
     {
         auto& edge0 = vertices[first].pos;
