@@ -245,3 +245,47 @@ static __inline__ float getLightPdf(device const UniformLight& l, const float3 l
     // lightSampleData.pdf = 1.0f / lightSampleData.area;
     return lightSampleData.pdf;
 }
+
+static void createCoordinateSystem(thread const float3& N, thread float3& Nt, thread float3& Nb) {
+    if (fabs(N.x) > fabs(N.y)) {
+        float invLen = 1.0f / sqrt(N.x * N.x + N.z * N.z);
+        Nt = float3(-N.z * invLen, 0.0f, N.x * invLen);
+    } else {
+        float invLen = 1.0f / sqrt(N.y * N.y + N.z * N.z);
+        Nt = float3(0.0f, N.z * invLen, -N.y * invLen);
+    }
+    Nb = cross(N, Nt);
+}
+
+static float3 SampleCone(float2 uv, float angle, float3 direction, thread float& pdf) {
+
+    float phi = 2.0 * M_PI_F * uv.x;
+    float cosTheta = 1.0 - uv.y * (1.0 - cos(angle));
+
+    // Convert spherical coordinates to 3D direction
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+
+    float3 u, v;
+    createCoordinateSystem(direction, u, v);
+    float3 sampledDir = normalize(cos(phi) * sinTheta * u + sin(phi) * sinTheta * v + cosTheta * direction);
+
+    // Calculate the PDF for the sampled direction
+    pdf = 1.0 / (2.0 * M_PI_F * (1.0 - cos(angle)));
+    return sampledDir;
+}
+
+static __inline__ LightSampleData SampleDistantLight(device const UniformLight& l, const float2 u, const float3 hitPoint)
+{
+    LightSampleData lightSampleData;
+    float pdf = 0.0f;
+    float3 coneSample = SampleCone(u, l.halfAngle, -float3(l.normal), pdf);
+
+    lightSampleData.area = 0.0f;
+    lightSampleData.distToLight = 1e9;
+    lightSampleData.L = coneSample;
+    lightSampleData.normal = float3(l.normal);
+    lightSampleData.pdf = pdf;
+    lightSampleData.pointOnLight = coneSample;
+
+    return lightSampleData;
+}

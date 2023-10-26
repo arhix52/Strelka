@@ -237,12 +237,12 @@ float3 sampleLight(
     thread float& lightPdf)
 {
     LightSampleData lightSampleData = {};
+    float u = random<SampleDimension::eLightPointX>(samplerRnd);
+    float v = random<SampleDimension::eLightPointY>(samplerRnd);
     switch (light.type)
     {
     case 0:
     {
-        float u = random<SampleDimension::eLightPointX>(samplerRnd);
-        float v = random<SampleDimension::eLightPointY>(samplerRnd);
 
         if (uniforms.rectLightSamplingMethod == 0)
         {
@@ -260,6 +260,11 @@ float3 sampleLight(
         // case 2:
         //     lightSampleData = SampleSphereLight(light, state.normal, state.position, float2(rand(rngState),
         //     rand(rngState))); break;
+    case 3:
+    {
+        lightSampleData = SampleDistantLight(light, float2(u, v), state.position);
+        break;
+    }
     }
 
     toLight = lightSampleData.L;
