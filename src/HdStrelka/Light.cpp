@@ -203,6 +203,7 @@ void HdStrelkaLight::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderP
             angle = angleVal.Get<float>();
         }
         mLightDesc.halfAngle = angle * 0.5f * (M_PI / 180.0f);
+        mLightDesc.intensity /= M_PI * powf(sin(mLightDesc.halfAngle), 2.0f);
     }
 }
 
