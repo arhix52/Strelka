@@ -6,19 +6,6 @@
 
 using namespace metal;
 
-#define M_PIf 3.1415926f;
-
-// struct UniformLight
-// {
-//     float4 points[4];
-//     float4 color;
-//     float4 normal;
-//     int type;
-//     float pad0;
-//     float pad2;
-//     float pad3;
-// };
-
 struct LightSampleData
 {
     float3 pointOnLight;
@@ -30,6 +17,11 @@ struct LightSampleData
     float3 L;
     float distToLight;
 };
+
+__inline__ float misWeightBalance(const float a, const float b)
+{
+    return 1.0f / ( 1.0f + (b / a) );
+}
 
 static float calcLightArea(device const UniformLight& l)
 {
@@ -43,11 +35,11 @@ static float calcLightArea(device const UniformLight& l)
     }
     else if (l.type == 1) // disc area
     {
-        area = l.points[0].x * l.points[0].x * M_PIf; // pi * radius^2
+        area = l.points[0].x * l.points[0].x * M_PI_F; // pi * radius^2
     }
     else if (l.type == 2) // sphere area
     {
-        area = l.points[0].x * l.points[0].x * 4.0f * M_PIf; // 4 * pi * radius^2
+        area = l.points[0].x * l.points[0].x * 4.0f * M_PI_F; // 4 * pi * radius^2
     }
     return area;
 }
@@ -117,10 +109,10 @@ static SphQuad init(device const UniformLight& l, const float3 o)
     squad.z0 = dot(d, squad.z);
 
     // flip ’z’ to make it point against ’Q’
-    if (squad.z0 > 0)
+    if (squad.z0 > 0.0f)
     {
-        squad.z *= -1;
-        squad.z0 *= -1;
+        squad.z *= -1.0f;
+        squad.z0 *= -1.0f;
     }
 
     squad.z0sq = squad.z0 * squad.z0;
@@ -144,16 +136,16 @@ static SphQuad init(device const UniformLight& l, const float3 o)
     float3 n3 = normalize(cross(v01, v00));
 
     // compute internal angles (gamma_i)
-    float g0 = acos(-dot(n0, n1));
-    float g1 = acos(-dot(n1, n2));
-    float g2 = acos(-dot(n2, n3));
-    float g3 = acos(-dot(n3, n0));
+    float g0 = fast::acos(-dot(n0, n1));
+    float g1 = fast::acos(-dot(n1, n2));
+    float g2 = fast::acos(-dot(n2, n3));
+    float g3 = fast::acos(-dot(n3, n0));
 
     // compute predefined constants
     squad.b0 = n0.z;
     squad.b1 = n2.z;
     squad.b0sq = squad.b0 * squad.b0;
-    const float twoPi = 2.0f * M_PIf;
+    const float twoPi = 2.0f * M_PI_F;
     squad.k = twoPi - g2 - g3;
 
     // compute solid angle from internal angles
@@ -202,9 +194,9 @@ static LightSampleData SampleRectLight(device const UniformLight& l, thread cons
     {
         lightSampleData.pdf = 0.0f;
         lightSampleData.pointOnLight = float3(l.points[0]) + e1 * u.x + e2 * u.y;
+        fillLightData(l, hitPoint, lightSampleData);
         return lightSampleData;
     }
-    lightSampleData.pdf = max(0.0f, 1.0f / quad.S);
     if (quad.S < 1e-3f)
     {
         // light too small, use uniform
@@ -216,7 +208,7 @@ static LightSampleData SampleRectLight(device const UniformLight& l, thread cons
     }
     lightSampleData.pointOnLight = SphQuadSample(quad, u);
     fillLightData(l, hitPoint, lightSampleData);
-
+    lightSampleData.pdf = max(0.0f, 1.0f / quad.S);
     return lightSampleData;
 }
 
@@ -231,4 +223,25 @@ static __inline__ LightSampleData SampleRectLightUniform(device const UniformLig
     lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
                           (dot(-lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
     return lightSampleData;
+}
+
+static __inline__ float getLightPdf(device const UniformLight& l, const float3 surfaceHitPoint)
+{
+    SphQuad quad = init(l, surfaceHitPoint);
+    if (isnan(quad.S) || quad.S <= 0.0f)
+    {
+        return 0.0f;
+    }
+    return 1.0f / quad.S;
+}
+
+static __inline__ float getLightPdf(device const UniformLight& l, const float3 lightHitPoint, const float3 surfaceHitPoint)
+{
+    LightSampleData lightSampleData {};
+    lightSampleData.pointOnLight = lightHitPoint;
+    fillLightData(l, surfaceHitPoint, lightSampleData);
+    lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
+                            (dot(-lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
+    // lightSampleData.pdf = 1.0f / lightSampleData.area;
+    return lightSampleData.pdf;
 }

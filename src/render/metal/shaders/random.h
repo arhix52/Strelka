@@ -8,8 +8,6 @@ float uintToFloat(uint x)
     return as_type<float>(0x3f800000 | (x >> 9)) - 1.f;
 }
 
-// Code from optix samples
-
 enum class SampleDimension : uint32_t
 {
   ePixelX,
@@ -24,8 +22,15 @@ enum class SampleDimension : uint32_t
   eRussianRoulette,
   eNUM_DIMENSIONS
 };
-#define MAX_BOUNCES 128
 
+struct SamplerState 
+{
+  uint32_t seed;
+  uint32_t sampleIdx;
+  uint32_t depth;
+};
+
+#define MAX_BOUNCES 128
 
 // Based on: https://www.reedbeta.com/blog/hash-functions-for-gpu-rendering/
 inline unsigned pcg_hash(unsigned seed) {
@@ -96,18 +101,24 @@ float halton(uint32_t index, uint32_t base)
       i = (i - digit) / base;
       f *= s;
     }
-    // return clamp(result, 0.0f, 1.0f);
-    return result;
+    return clamp(result, 0.0f, 1.0f - 1e-6f); // TODO: 1minusEps
+}
+
+static SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t seed)
+{
+  SamplerState sampler {};
+  sampler.seed = hash(linearPixelIndex); //^ 0x736caf6fu;
+  sampler.sampleIdx = pixelSampleIndex;
+  sampler.depth = 0;
+  return sampler;
 }
 
 template <SampleDimension Dim>
-static float random(unsigned linearPixelIndex, unsigned bounce, unsigned sampleIndex)
+static float random(thread SamplerState& state)
 {
-    uint32_t seed = hash2(linearPixelIndex, 52u) + sampleIndex;
-    uint32_t dimension = uint32_t(Dim);
+    const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
     const uint32_t base = primeNumbers[dimension & 31u];
-    float x = halton(seed, base);
-    return x;
+    return halton(state.seed + state.sampleIdx, base);
 }
 
 uint xorshift(thread uint& rngState) 
@@ -117,15 +128,6 @@ uint xorshift(thread uint& rngState)
     rngState ^= rngState << 5; 
     return rngState;
 }
-
-// template <SampleDimension Dim>
-// static float random(unsigned linearPixelIndex, unsigned bounce, unsigned sampleIndex)
-// {
-//     uint32_t dimension = uint32_t(Dim);
-//     uint32_t seed = linearPixelIndex ^ jenkinsHash(sampleIndex * uint(SampleDimension::eNUM_DIMENSIONS) + dimension);
-//     seed = jenkinsHash(seed);
-//     return uintToFloat(xorshift(seed));
-// }
 
 template<unsigned int N>
 static  __inline__ unsigned int tea( unsigned int val0, unsigned int val1 )
@@ -170,8 +172,6 @@ static  __inline__ unsigned int rot_seed( unsigned int seed, unsigned int frame 
     return seed ^ frame;
 }
 
-
-
 // Implementetion from Ray Tracing gems
 // https://github.com/boksajak/referencePT/blob/master/shaders/PathTracer.hlsl
 uint initRNG(uint2 pixelCoords, uint2 resolution, uint frameNumber)
@@ -181,26 +181,6 @@ uint initRNG(uint2 pixelCoords, uint2 resolution, uint frameNumber)
     // uint seed = dot(pixelCoords, uint2(1, resolution.x)) ^ jenkinsHash(frameNumber);
     return jenkinsHash(seed); 
 }
-
-
-
-
-
-// float rnd(thread uint& rngState) 
-// {
-//     return uintToFloat(xorshift(rngState));
-// }
-
-// uint hash_u32(uint n)
-// {
-//     n ^= 0xe6fe3beb;
-//     n ^= n >> 16;
-//     n = n.wrapping_mul(0x7feb352d);
-//     n ^= n >> 15;
-//     n = n.wrapping_mul(0x846ca68b);
-//     n ^= n >> 16;
-//     return n
-// }
 
 uint owen_scramble_rev(uint x, uint seed)
 {
