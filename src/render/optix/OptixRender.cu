@@ -7,6 +7,8 @@
 #include <sutil/vec_math.h>
 #include <sutil/Matrix.h>
 
+#include <postprocessing/Utils.h>
+
 extern "C"
 {
     __constant__ Params params;
@@ -131,12 +133,20 @@ extern "C" __global__ void __raygen__rg()
 
     if (params.enableAccumulation && params.debug == 0)
     {
+        // Accumulation
         float3 accum_color = result;
         if (params.subframe_index > 0)
         {
             const float a = 1.0f / static_cast<float>(params.subframe_index + 1);
             const float3 accum_color_prev = make_float3(params.accum[image_index]);
-            accum_color = lerp(accum_color_prev, accum_color, a);
+            const float3 exposure = params.exposure;
+            // perform lerp in ldr and back to hdr back
+            accum_color = inverseTonemap(
+                lerp(
+                tonemap(accum_color_prev, exposure), 
+                tonemap(accum_color, exposure),
+                a),
+                exposure);
         }
         params.accum[image_index] = make_float4(accum_color, 1.0f);
         params.image[image_index] = make_float4(accum_color, 1.0f);
