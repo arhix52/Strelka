@@ -242,6 +242,7 @@ void MetalRender::render(Buffer* output)
     }
     exposureValue /= lum;
     pUniformTonemap->exposureValue = exposureValue;
+    pUniformData->exposureValue = exposureValue; // need for proper accumulation
 
     const uint32_t totalSpp = settings.getAs<uint32_t>("render/pt/sppTotal");
     const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");

@@ -99,3 +99,15 @@ float3 srgbGamma(const float3 color, const float gamma)
 {
     return float3(gammaFloat(color.r, gamma), gammaFloat(color.g, gamma), gammaFloat(color.b, gamma));
 }
+
+// utility function for accumulation and HDR <=> LDR
+float3 tonemap(float3 color, const float3 exposure)
+{
+    color *= exposure;
+    return color / (color + 1.0f);
+}
+
+float3 inverseTonemap(const float3 color, const float3 exposure)
+{
+    return color / (exposure - color * exposure);
+}
