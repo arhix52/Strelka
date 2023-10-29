@@ -235,7 +235,7 @@ static __inline__ float getLightPdf(device const UniformLight& l, const float3 s
     return 1.0f / quad.S;
 }
 
-static __inline__ float getLightPdf(device const UniformLight& l, const float3 lightHitPoint, const float3 surfaceHitPoint)
+static __inline__ float getRectLightPdf(device const UniformLight& l, const float3 lightHitPoint, const float3 surfaceHitPoint)
 {
     LightSampleData lightSampleData {};
     lightSampleData.pointOnLight = lightHitPoint;
@@ -257,6 +257,11 @@ static void createCoordinateSystem(thread const float3& N, thread float3& Nt, th
     Nb = cross(N, Nt);
 }
 
+static __inline__ float getDirectLightPdf(float angle)
+{
+    return 1.0f / (2.0f * M_PI_F * (1.0f - cos(angle)));
+}
+
 static float3 SampleCone(float2 uv, float angle, float3 direction, thread float& pdf) {
 
     float phi = 2.0 * M_PI_F * uv.x;
@@ -270,7 +275,7 @@ static float3 SampleCone(float2 uv, float angle, float3 direction, thread float&
     float3 sampledDir = normalize(cos(phi) * sinTheta * u + sin(phi) * sinTheta * v + cosTheta * direction);
 
     // Calculate the PDF for the sampled direction
-    pdf = 1.0 / (2.0 * M_PI_F * (1.0 - cos(angle)));
+    pdf = getDirectLightPdf(angle);
     return sampledDir;
 }
 
@@ -288,4 +293,25 @@ static __inline__ LightSampleData SampleDistantLight(device const UniformLight& 
     lightSampleData.pointOnLight = coneSample;
 
     return lightSampleData;
+}
+
+static __inline__ float getLightPdf(device const UniformLight& l, const float3 lightHitPoint, const float3 surfaceHitPoint)
+{
+    switch (l.type)
+    {
+    case 0:
+    {
+        // Rect
+        return getRectLightPdf(l, lightHitPoint, surfaceHitPoint);
+        break;
+    }
+    case 3: 
+    {
+        // Distant
+        return getDirectLightPdf(l.halfAngle);
+        break;
+    }
+    default:
+        break;
+    }
 }
