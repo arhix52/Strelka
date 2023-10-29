@@ -75,7 +75,8 @@ uint32_t Scene::createInstance(const Instance::Type type,
         inst = &mInstances[instId];
     }
     inst->type = type;
-    if (inst->type == Instance::Type::eMesh)
+    if (inst->type == Instance::Type::eMesh ||
+        inst->type == Instance::Type::eLight)
     {
         inst->mMeshId = geomId;
     }
