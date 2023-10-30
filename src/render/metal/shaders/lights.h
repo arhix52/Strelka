@@ -314,4 +314,5 @@ static __inline__ float getLightPdf(device const UniformLight& l, const float3 l
     default:
         break;
     }
+    return 0.0f;
 }

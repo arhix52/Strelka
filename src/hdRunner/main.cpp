@@ -65,7 +65,7 @@ HdCamera* FindCamera(UsdStageRefPtr& stage, HdRenderIndex* renderIndex, SdfPath&
         cameraPath = prim->GetPath();
         break;
     }
-    HdCamera* camera = (HdCamera*)dynamic_cast<HdCamera*>(renderIndex->GetSprim(HdTokens->camera, cameraPath));
+    auto* camera = (HdCamera*)dynamic_cast<HdCamera*>(renderIndex->GetSprim(HdTokens->camera, cameraPath));
     return camera;
 }
 
@@ -84,7 +84,7 @@ std::vector<std::pair<HdCamera*, SdfPath>> FindAllCameras(UsdStageRefPtr& stage,
         cameraPath = prim->GetPath();
         camera = (HdCamera*)dynamic_cast<HdCamera*>(renderIndex->GetSprim(HdTokens->camera, cameraPath));
 
-        cameras.emplace_back(std::make_pair(camera, cameraPath));
+        cameras.emplace_back(camera, cameraPath);
     }
 
     return cameras;
@@ -125,7 +125,6 @@ public:
 
     GfVec2d mMousePos;
 
-public:
     // local cameras axis
     GfVec3d getFront() const
     {
@@ -229,7 +228,7 @@ public:
         mPosition = xform.ExtractTranslation();
     }
 
-    void keyCallback(int key, [[maybe_unused]] int scancode, int action, [[maybe_unused]] int mods)
+    void keyCallback(int key, [[maybe_unused]] int scancode, int action, [[maybe_unused]] int mods) override
     {
         const bool keyState = ((GLFW_REPEAT == action) || (GLFW_PRESS == action)) ? true : false;
         switch (key)
@@ -263,7 +262,7 @@ public:
         }
     }
 
-    void mouseButtonCallback(int button, int action, [[maybe_unused]] int mods)
+    void mouseButtonCallback(int button, int action, [[maybe_unused]] int mods) override
     {
         if (button == GLFW_MOUSE_BUTTON_RIGHT)
         {
@@ -289,7 +288,7 @@ public:
         }
     }
 
-    void handleMouseMoveCallback([[maybe_unused]] double xpos, [[maybe_unused]] double ypos)
+    void handleMouseMoveCallback([[maybe_unused]] double xpos, [[maybe_unused]] double ypos) override
     {
         const float dx = mMousePos[0] - xpos;
         const float dy = mMousePos[1] - ypos;
@@ -343,9 +342,9 @@ public:
         mSettingsManager->setAs<uint32_t>("render/height", newHeight);
         imageWidth = newWidth;
         imageHeight = newHeight;
-        for (int i = 0; i < 3; ++i)
+        for (bool& i : mDirty)
         {
-            mDirty[i] = true;
+            i = true;
         }
         // reallocateBuffers();
     }
@@ -435,8 +434,7 @@ bool saveScreenshot(std::string& outputFilePath, unsigned char* mappedMem, uint3
 
     timerWrite.Stop();
 
-    printf("Wrote image (%.3fs)\n", timerWrite.GetSeconds());
-    fflush(stdout);
+    STRELKA_INFO("Wrote image {}", timerWrite.GetSeconds());
 
     return true;
 }
@@ -495,7 +493,7 @@ int main(int argc, const char* argv[])
     uint32_t imageWidth = 1024;
     uint32_t imageHeight = 768;
 
-    oka::SharedContext* ctx = new oka::SharedContext(); // &display.getSharedContext();
+    auto* ctx = new oka::SharedContext(); // &display.getSharedContext();
 
     ctx->mSettingsManager = new oka::SettingsManager();
 
@@ -551,9 +549,9 @@ int main(int argc, const char* argv[])
     timerLoad.Start();
 
     // ArGetResolver().ConfigureResolverForAsset(settings.sceneFilePath);
-    std::string usdPath = usdFile;
+    const std::string& usdPath = usdFile;
 
-    UsdStageRefPtr stage = UsdStage::Open(usdPath.c_str());
+    UsdStageRefPtr stage = UsdStage::Open(usdPath);
 
     timerLoad.Stop();
 
@@ -676,7 +674,7 @@ int main(int argc, const char* argv[])
         display->onBeginFrame();
 
         engine.Execute(renderIndex, &tasks); // main path tracing rendering in fixed render resolution
-        oka::Buffer* outputBuffer =
+        auto* outputBuffer =
             surfaceController.getRenderBuffer(versionId)->GetResource(false).UncheckedGet<oka::Buffer*>();
         oka::ImageBuffer outputImage;
         // upload to host
@@ -702,7 +700,7 @@ int main(int argc, const char* argv[])
         {
             std::size_t foundSlash = usdPath.find_last_of("/\\");
 
-            std::size_t foundDot = usdPath.find_last_of(".");
+            std::size_t foundDot = usdPath.find_last_of('.');
             std::string fileName = usdPath.substr(0, foundDot);
             fileName = fileName.substr(foundSlash + 1);
 

@@ -46,9 +46,9 @@ MTL::Texture* oka::MetalRender::loadTextureFromFile(const std::string& fileName)
 {
     int texWidth, texHeight, texChannels;
     stbi_uc* data = stbi_load(fileName.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-    if (!data)
+    if (data == nullptr)
     {
-        fprintf(stderr, "Unable to load texture from file: %s\n", fileName.c_str());
+        STRELKA_ERROR("Unable to load texture from file: {}", fileName.c_str());
         return nullptr;
     }
     MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
@@ -178,7 +178,7 @@ void MetalRender::render(Buffer* output)
     settingsChanged = (rectLightSamplingMethodPrev != pUniformData->rectLightSamplingMethod);
     rectLightSamplingMethodPrev = pUniformData->rectLightSamplingMethod;
 
-    static bool enableAccumulationPrev = 0;
+    static bool enableAccumulationPrev = false;
     const bool enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
     settingsChanged |= (enableAccumulationPrev != enableAccumulation);
     enableAccumulationPrev = enableAccumulation;
@@ -266,9 +266,9 @@ void MetalRender::render(Buffer* output)
         {
             pComputeEncoder->useResource(primitiveAccel, MTL::ResourceUsageRead);
         }
-        for (int i = 0; i < mMaterialTextures.size(); ++i)
+        for (auto& materialTexture : mMaterialTextures)
         {
-            pComputeEncoder->useResource(mMaterialTextures[i], MTL::ResourceUsageRead);
+            pComputeEncoder->useResource(materialTexture, MTL::ResourceUsageRead);
         }
         pComputeEncoder->useResource(((oka::MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageWrite);
 
