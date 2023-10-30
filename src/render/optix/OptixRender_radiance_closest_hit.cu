@@ -212,11 +212,11 @@ __inline__ __device__ float3 sampleLight(SamplerState& sampler,
                                          float& lightPdf)
 {
     LightSampleData lightSampleData = {};
+    const float2 uv = make_float2(random<SampleDimension::eLightPointX>(sampler),
+                                random<SampleDimension::eLightPointY>(sampler));
     switch (light.type)
     {
     case 0: {
-        const float2 uv = make_float2(random<SampleDimension::eLightPointX>(sampler),
-                                      random<SampleDimension::eLightPointY>(sampler));
         if (params.rectLightSamplingMethod == 0)
         {
             lightSampleData = SampleRectLightUniform(light, uv, state.position);
@@ -233,6 +233,10 @@ __inline__ __device__ float3 sampleLight(SamplerState& sampler,
         // case 2:
         //     lightSampleData = SampleSphereLight(light, state.normal, state.position, float2(rand(rngState),
         //     rand(rngState))); break;
+    case 3: {
+        lightSampleData = SampleDistantLight(light, uv, state.position);
+        break;
+    }
     }
 
     toLight = lightSampleData.L;
@@ -240,33 +244,13 @@ __inline__ __device__ float3 sampleLight(SamplerState& sampler,
 
     if (dot(state.normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.0 && all(Li))
     {
-        // Ray shadowRay;
-        // shadowRay.d = float4(lightSampleData.L, 0.0f);
-        // shadowRay.o = float4(offset_ray(state.position, state.geom_normal), lightSampleData.distToLight); // need to
-        // set
+        // Ray shadowRay
         const bool occluded =
             traceOcclusion(params.handle, offset_ray(state.position, state.geom_normal), lightSampleData.L,
                            params.shadowRayTmin, // tmin
                            lightSampleData.distToLight // tmax
             );
-        // if (occluded)
-        // {
-        //     return make_float3(100.0f, 0.0f, 0.0f);
-        // }
         float visibility = occluded ? 0.0f : 1.0f;
-        // TODO: skip light hit
-
-        // if (visibility == 0.0f)
-        // {
-        //     // check if it was light hit?
-        //     InstanceConstants instConst = accel.instanceConstants[NonUniformResourceIndex(shadowHit.instId)];
-        //     if (instConst.lightId != -1)
-        //     {
-        //         // light hit => visible
-        //         visibility = 1.0f;
-        //     }
-        // }
-
         lightPdf = lightSampleData.pdf;
         return visibility * Li * saturate(dot(state.normal, lightSampleData.L));
     }
@@ -498,7 +482,6 @@ extern "C" __global__ void __closesthit__radiance()
         float3 toLight; // return value for sampleLights()
         float lightPdf = 0.0f; // return value for sampleLights()
         const float3 radiance = estimateDirectLighting(prd->sampler, state, toLight, lightPdf);
-
         if (isnan(radiance) || isnan(lightPdf))
         {
             // ERROR, terminate tracing;

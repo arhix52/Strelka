@@ -100,9 +100,9 @@ struct UniformLight
     vector_float4 color;
     vector_float4 normal;
     int type;
+    float halfAngle;
     float pad0;
-    float pad2;
-    float pad3;
+    float pad1;
 };
 
 struct Material
