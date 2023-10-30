@@ -80,6 +80,7 @@ private:
     const TfTokenVector SUPPORTED_SPRIM_TYPES = {
         HdPrimTypeTokens->camera,    HdPrimTypeTokens->material,  HdPrimTypeTokens->light,
         HdPrimTypeTokens->rectLight, HdPrimTypeTokens->diskLight, HdPrimTypeTokens->sphereLight,
+        HdPrimTypeTokens->distantLight,
     };
 
     oka::SharedContext* mSharedCtx;

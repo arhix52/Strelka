@@ -158,7 +158,7 @@ HdSprim* HdStrelkaRenderDelegate::CreateSprim(const TfToken& typeId, const SdfPa
         res = new HdStrelkaMaterial(sprimId, m_translator);
     }
     else if (typeId == HdPrimTypeTokens->rectLight || typeId == HdPrimTypeTokens->diskLight ||
-             typeId == HdPrimTypeTokens->sphereLight)
+             typeId == HdPrimTypeTokens->sphereLight || typeId == HdPrimTypeTokens->distantLight)
     {
         res = new HdStrelkaLight(sprimId, typeId);
     }

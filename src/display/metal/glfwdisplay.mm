@@ -12,6 +12,7 @@
 #include <GLFW/glfw3native.h>
 
 #import <QuartzCore/QuartzCore.h>
+#import <CoreGraphics/CGColorSpace.h>
 
 #include <fstream>
 #include <log.h>
@@ -64,8 +65,14 @@ void glfwdisplay::init(int width, int height, SharedContext* ctx)
     NSWindow *nswin = glfwGetCocoaWindow(mWindow);
     layer = CA::MetalLayer::layer();
     layer->setDevice(_pDevice);
-    layer->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+    layer->setPixelFormat(MTL::PixelFormatRGBA16Float);
     CAMetalLayer* l = (__bridge CAMetalLayer*)layer;
+    const CFStringRef name = kCGColorSpaceExtendedLinearSRGB;
+    CGColorSpaceRef colorspace = CGColorSpaceCreateWithName(name);
+    l.colorspace = colorspace;
+    CGColorSpaceRelease(colorspace);
+
+    l.wantsExtendedDynamicRangeContent = YES;
     nswin.contentView.layer = l;
     nswin.contentView.wantsLayer = YES;
 
@@ -163,7 +170,7 @@ void glfwdisplay::buildShaders()
     MTL::RenderPipelineDescriptor* pDesc = MTL::RenderPipelineDescriptor::alloc()->init();
     pDesc->setVertexFunction(pVertexFn);
     pDesc->setFragmentFunction(pFragFn);
-    pDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm);
+    pDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormat::PixelFormatRGBA16Float);
     // pDesc->setDepthAttachmentPixelFormat(MTL::PixelFormat::PixelFormatDepth16Unorm);
 
     _pPSO = _pDevice->newRenderPipelineState(pDesc, &pError);

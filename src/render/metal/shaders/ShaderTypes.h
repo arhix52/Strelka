@@ -60,10 +60,12 @@ struct Uniforms
     uint32_t height;
     uint32_t frameIndex;
     uint32_t subframeIndex;
+
     uint32_t numLights;
     uint32_t enableAccumulation;
     uint32_t samples_per_launch;
     uint32_t maxDepth;
+    
     uint32_t rectLightSamplingMethod;
 
     uint32_t tonemapperType; // 0 - "None", "Reinhard", "ACES", "Filmic"
@@ -71,6 +73,16 @@ struct Uniforms
     vector_float3 exposureValue;
 
     uint32_t debug;
+};
+
+struct UniformsTonemap
+{
+    uint32_t width;
+    uint32_t height;
+    
+    uint32_t tonemapperType; // 0 - "None", "Reinhard", "ACES", "Filmic"
+    float gamma; // 0 - off
+    vector_float3 exposureValue;
 };
 
 struct Triangle
@@ -88,9 +100,9 @@ struct UniformLight
     vector_float4 color;
     vector_float4 normal;
     int type;
+    float halfAngle;
     float pad0;
-    float pad2;
-    float pad3;
+    float pad1;
 };
 
 struct Material

@@ -149,9 +149,9 @@ public:
         glm::float4 color = glm::float4(1.0f);
         glm::float4 normal;
         int type;
+        float halfAngle;
         float pad0;
-        float pad2;
-        float pad3;
+        float pad1;
     };
 
     // CPU side structure
@@ -173,6 +173,8 @@ public:
 
         // disc/sphere light
         float radius;
+        // distant light
+        float halfAngle; 
     };
 
     std::vector<UniformLightDesc> mLightDesc;
