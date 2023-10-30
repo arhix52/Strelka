@@ -75,11 +75,12 @@ uint32_t Scene::createInstance(const Instance::Type type,
         inst = &mInstances[instId];
     }
     inst->type = type;
-    if (inst->type == Instance::Type::eMesh)
+    if (inst->type == Instance::Type::eMesh ||
+        inst->type == Instance::Type::eLight)
     {
         inst->mMeshId = geomId;
     }
-    else
+    else if (inst->type == Instance::Type::eCurve)
     {
         inst->mCurveId = geomId;
     }
@@ -455,6 +456,12 @@ uint32_t Scene::createLight(const UniformLightDesc& desc)
         currentLightMeshId = mSphereLightMeshId;
         scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.radius, desc.radius, desc.radius));
     }
+    else if (desc.type == 3)
+    {
+        // distant light
+        currentLightMeshId = 0; // empty
+        scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.radius, desc.radius, desc.radius));
+    }
 
     const glm::float4x4 transform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
     uint32_t instId = createInstance(Instance::Type::eLight, currentLightMeshId, (uint32_t)-1, transform, lightId);
@@ -508,6 +515,15 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].points[1] = localTransform * glm::float4(0.f, 0.f, 0.f, 1.f); // save O
 
         mLights[lightId].type = 2;
+    }
+    else if (desc.type == 3)
+    {
+        // distant light https://openusd.org/release/api/class_usd_lux_distant_light.html
+        mLights[lightId].type = 3;
+        mLights[lightId].halfAngle = desc.halfAngle;
+        const glm::float4x4 scaleMatrix = glm::float4x4(1.0f);
+        const glm::float4x4 localTransform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
+        mLights[lightId].normal = glm::normalize(localTransform * glm::float4(0.0f, 0.0f, -1.0f, 0.0f)); // -Z
     }
 
     mLights[lightId].color = glm::float4(desc.color, 1.0f) * intensityPerPoint;

@@ -193,6 +193,18 @@ void HdStrelkaLight::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderP
         }
         mLightDesc.radius = radius * mLightDesc.xform[0][0]; // uniform scale
     }
+    else if (mLightType == HdPrimTypeTokens->distantLight)
+    {
+        float angle = 0.0f;
+        mLightDesc.type = 3; // TODO: move to enum
+        VtValue angleVal = sceneDelegate->GetLightParamValue(id, HdLightTokens->angle);
+        if (angleVal.IsHolding<float>())
+        {
+            angle = angleVal.Get<float>();
+        }
+        mLightDesc.halfAngle = angle * 0.5f * (M_PI / 180.0f);
+        mLightDesc.intensity /= M_PI * powf(sin(mLightDesc.halfAngle), 2.0f);
+    }
 }
 
 HdDirtyBits HdStrelkaLight::GetInitialDirtyBitsMask() const

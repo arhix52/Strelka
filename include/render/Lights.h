@@ -8,9 +8,9 @@ struct UniformLight
     float4 color;
     float4 normal;
     int type;
+    float halfAngle;
     float pad0;
-    float pad2;
-    float pad3;
+    float pad1;
 };
 
 struct LightSampleData
@@ -241,5 +241,49 @@ static __inline__ __device__ LightSampleData SampleRectLightUniform(const Unifor
     // here is conversion from are to solid angle: dist2 / cos
     lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
                           (-dot(lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
+    return lightSampleData;
+}
+
+static __device__ void createCoordinateSystem(const float3& N, float3& Nt, float3& Nb) {
+    if (fabs(N.x) > fabs(N.y)) {
+        float invLen = 1.0f / sqrt(N.x * N.x + N.z * N.z);
+        Nt = make_float3(-N.z * invLen, 0.0f, N.x * invLen);
+    } else {
+        float invLen = 1.0f / sqrt(N.y * N.y + N.z * N.z);
+        Nt = make_float3(0.0f, N.z * invLen, -N.y * invLen);
+    }
+    Nb = cross(N, Nt);
+}
+
+static __device__ float3 SampleCone(float2 uv, float angle, float3 direction, float& pdf) {
+
+    float phi = 2.0 * M_PIf * uv.x;
+    float cosTheta = 1.0 - uv.y * (1.0 - cos(angle));
+
+    // Convert spherical coordinates to 3D direction
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+
+    float3 u, v;
+    createCoordinateSystem(direction, u, v);
+    float3 sampledDir = normalize(cos(phi) * sinTheta * u + sin(phi) * sinTheta * v + cosTheta * direction);
+
+    // Calculate the PDF for the sampled direction
+    pdf = 1.0 / (2.0 * M_PIf * (1.0 - cos(angle)));
+    return sampledDir;
+}
+
+static __inline__ __device__ LightSampleData SampleDistantLight(const UniformLight& l, const float2 u, const float3 hitPoint)
+{
+    LightSampleData lightSampleData;
+    float pdf = 0.0f;
+    float3 coneSample = SampleCone(u, l.halfAngle, -make_float3(l.normal), pdf);
+
+    lightSampleData.area = 0.0f;
+    lightSampleData.distToLight = 1e9;
+    lightSampleData.L = coneSample;
+    lightSampleData.normal = make_float3(l.normal);
+    lightSampleData.pdf = pdf;
+    lightSampleData.pointOnLight = coneSample;
+
     return lightSampleData;
 }
