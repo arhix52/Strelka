@@ -1,8 +1,8 @@
 #include "render.h"
 #ifdef __APPLE__
-#include "metal/MetalRender.h"
+#    include "metal/MetalRender.h"
 #else
-#include "optix/OptixRender.h"
+#    include "optix/OptixRender.h"
 #endif
 
 using namespace oka;
@@ -14,19 +14,13 @@ Render* RenderFactory::createRender(const RenderType type)
     {
         return new MetalRender();
     }
-    else
-    {
-        // unsupported
-        return nullptr;
-    }
+    // unsupported
+    return nullptr;
 #else
     if (type == RenderType::eOptiX)
     {
         return new OptiXRender();
     }
-    else
-    {
-        return nullptr;
-    }
+    return nullptr;
 #endif
 }

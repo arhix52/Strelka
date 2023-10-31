@@ -107,6 +107,7 @@ class CameraController : public oka::InputHandler
     double max_yaw_rate = 5;
 
 public:
+    virtual ~CameraController() = default;
     struct
     {
         bool left = false;
