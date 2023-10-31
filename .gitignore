@@ -1,6 +1,7 @@
 build/
 build_xcode/
 *.exe
+.cache
 .vs
 .idea/s
 .DS_Store

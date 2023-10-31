@@ -1,7 +1,7 @@
 #include "Display.h"
 
 #include "imgui.h"
-#include "imgui_impl_glfw.h"
+#include "bindings/imgui_impl_glfw.h"
 
 using namespace oka;
 

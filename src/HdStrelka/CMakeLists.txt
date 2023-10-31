@@ -89,9 +89,11 @@ if(WIN32 OR LINUX)
 endif()
 
 if(APPLE)
+target_include_directories(${HD_PLUGIN_NAME}
+                           PUBLIC ${ROOT_HOME}/include/materialmanager)
   target_link_libraries(
     ${HD_PLUGIN_NAME}
-    PRIVATE usdImaging hdMtlx render scene materialmanager
+    PRIVATE usdImaging hdMtlx render scene
     PUBLIC hd)
   target_link_libraries(${HD_PLUGIN_NAME} PUBLIC "-framework Foundation")
   target_link_libraries(${HD_PLUGIN_NAME} PUBLIC "-framework QuartzCore")

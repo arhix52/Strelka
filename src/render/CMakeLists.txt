@@ -108,6 +108,12 @@ if(APPLE)
     COMMAND ${CMAKE_COMMAND} -E make_directory
             "${OUTPUT_DIRECTORY}/metal/shaders")
 
+  add_custom_command(
+    TARGET ${RENDERLIB_NAME}
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/src/render/metal/shaders/fullScreen.metal "${OUTPUT_DIRECTORY}/metal/shaders"
+  )
+  
   set(METAL_SOURCES ${ROOT_HOME}/src/render/metal/shaders/pathtrace.metal)
   set(METAL_SOURCES_TM ${ROOT_HOME}/src/render/metal/shaders/tonemapper.metal)
   add_custom_command(

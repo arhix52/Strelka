@@ -1,6 +1,14 @@
 [requires]
 spdlog/[>=1.4.1]
+imgui/1.89.3
+glfw/3.3.8
 
 [generators]
 CMakeDeps
 CMakeToolchain
+
+[imports]
+./res/bindings, imgui_impl_glfw.cpp -> ../bindings
+./res/bindings, imgui_impl_opengl3.cpp -> ../bindings
+./res/bindings, imgui_impl_glfw.h -> ../bindings
+./res/bindings, imgui_impl_opengl3.h -> ../bindings
