@@ -32,11 +32,11 @@
                 "type": "cppdbg",
                 "request": "launch",
                 "program": "${command:cmake.launchTargetPath}",
-                // "args": ["-s", "~/work/cube.usda"],
+                "args": ["-s", "~/work/cube.usda"],
                 // "args": ["-s", "~/work/Kitchen_set/Kitchen2.usda"],
-                "args": ["-s", "~/work/alab-v2.0.1/ALab/entry.usda"],
+                // "args": ["-s", "~/work/alab-v2.0.1/ALab/entry.usda"],
                 "stopAtEntry": false,
-                "cwd": "${workspaceFolder}/build/",
+                "cwd": "${workspaceFolder}/build/Debug",
                 "environment": [
                     {
                         "name": "SPDLOG_LEVEL",

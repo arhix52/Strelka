@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 project(Strelka LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 
@@ -35,7 +35,7 @@ add_subdirectory(src/settings)
 add_subdirectory(src/render)
 add_subdirectory(src/HdStrelka)
 add_subdirectory(src/scene)
-# add_subdirectory(src/materialmanager)
+add_subdirectory(src/materialmanager)
 add_subdirectory(src/display)
 add_subdirectory(src/hdRunner)
 

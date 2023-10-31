@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.22)
 set(RENDERLIB_NAME render)
 
 find_package(glm REQUIRED)
@@ -7,7 +7,6 @@ find_package(glm REQUIRED)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-include_directories(${ROOT_HOME}/external/glm)
 include_directories(${ROOT_HOME}/external/stb)
 
 set(RENDER_SOURCES_COMMON ${ROOT_HOME}/include/render/render.h
@@ -15,8 +14,7 @@ set(RENDER_SOURCES_COMMON ${ROOT_HOME}/include/render/render.h
 
 if(WIN32 OR LINUX)
   enable_language(CUDA)
-  # Find at least a 5.0 version of CUDA.
-  find_package(CUDA 5.0 REQUIRED)
+  find_package(CUDA REQUIRED)
   message(STATUS "CUDA Toolkit Root: ${CUDA_TOOLKIT_ROOT_DIR}")
   message(STATUS "CUDA Include DIR: ${CUDA_INCLUDE_DIRS}")
   # Search for the OptiX libraries and include files.
@@ -82,7 +80,7 @@ if(WIN32 OR LINUX)
             "${OUTPUT_DIRECTORY}/optix")
 
   target_link_libraries(${RENDERLIB_NAME} PUBLIC ${CUDA_LIBRARIES} glad scene
-                                                 materialmanager)
+                                                 materialmanager glm::glm)
 endif()
 
 if(APPLE)
@@ -161,6 +159,5 @@ target_link_libraries(${RENDERLIB_NAME} PUBLIC logger)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/include/)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/include/render)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/external/glm)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/external/mdl-sdk/include)
 

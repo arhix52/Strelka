@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 set(DISPLAYLIB_NAME display)
 
 find_package(imgui REQUIRED)
@@ -10,19 +10,23 @@ set(DISPLAY_SOURCES_COMMON
     ${ROOT_HOME}/src/display/DisplayFactory.cpp)
 if(WIN32 OR LINUX)
 
+  set(IMGUI_SOURCES
+  # Imgui
+  ${ROOT_HOME}/external/imgui/imgui_impl_glfw.cpp
+  ${ROOT_HOME}/external/imgui/imgui_impl_opengl3.cpp
+  ${ROOT_HOME}/external/imgui/imgui_impl_glfw.h
+  ${ROOT_HOME}/external/imgui/imgui_impl_opengl3.h)
+
   set(DISPLAY_SOURCES
       ${DISPLAY_SOURCES_COMMON} ${ROOT_HOME}/src/display/opengl/glfwdisplay.h
       ${ROOT_HOME}/src/display/opengl/glfwdisplay.cpp)
 
-  add_library(${DISPLAYLIB_NAME} STATIC ${DISPLAY_SOURCES})
+  add_library(${DISPLAYLIB_NAME} STATIC ${DISPLAY_SOURCES} ${IMGUI_SOURCES})
   target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/include/)
   target_include_directories(${DISPLAYLIB_NAME}
                              PUBLIC ${ROOT_HOME}/include/display)
-
   target_include_directories(${DISPLAYLIB_NAME}
-                             PUBLIC ${ROOT_HOME}/external/glm)
-  target_include_directories(${DISPLAYLIB_NAME}
-                             PUBLIC ${ROOT_HOME}/external/glfw/include)
+                             PUBLIC ${ROOT_HOME}/external/imgui/)
   target_include_directories(${DISPLAYLIB_NAME}
                              PUBLIC ${ROOT_HOME}/external/glad/include)
 
@@ -36,7 +40,7 @@ if(WIN32 OR LINUX)
   if(LINUX)
     target_link_libraries(
       ${DISPLAYLIB_NAME}
-      PUBLIC ${OPENGL_LIBRARIES} glfw
+      PUBLIC ${OPENGL_LIBRARIES} imgui::imgui glfw glm::glm
       PRIVATE glad)
   endif(LINUX)
 
@@ -63,8 +67,6 @@ if(APPLE)
   target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/include/)
   target_include_directories(${DISPLAYLIB_NAME}
                              PUBLIC ${ROOT_HOME}/include/display)
-  target_include_directories(${DISPLAYLIB_NAME}
-                             PUBLIC ${ROOT_HOME}/external/glm)
   target_include_directories(${DISPLAYLIB_NAME}
                              PUBLIC ${ROOT_HOME}/external/metal-cpp/)
   target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME})

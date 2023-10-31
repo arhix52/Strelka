@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 
 find_package(USD REQUIRED HINTS ${USD_DIR} NAMES pxr)
 message(STATUS "USD LIBRARY: ${USD_DIR}")
