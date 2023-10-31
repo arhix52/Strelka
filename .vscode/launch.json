@@ -66,9 +66,9 @@
             "program": "${command:cmake.launchTargetPath}",
             // "args": ["-s", "../../cube.usda"],
             // "args": ["-s", "../../senna2.usd"],
-            "args": ["-s", "../../Kitchen_set/Kitchen.usda"],
+            "args": ["-s", "../../../Kitchen_set/Kitchen.usda"],
             "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/build/",
+            "cwd": "${workspaceFolder}/build/Debug/",
             "environment": [
                 {
                     "name": "MTL_DEBUG_LAYER",

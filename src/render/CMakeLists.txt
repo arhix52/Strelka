@@ -119,6 +119,9 @@ if(APPLE)
   add_custom_command(
     OUTPUT ${OUTPUT_DIRECTORY}/metal/shaders/pathtrace.metallib PRE_BUILD
     OUTPUT ${OUTPUT_DIRECTORY}/metal/shaders/tonemapper.metallib PRE_BUILD
+    
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${OUTPUT_DIRECTORY}/metal/shaders"
 
     COMMAND ${CMAKE_COMMAND} -E echo "Compile metal shaders..."
     COMMAND xcrun -sdk macosx metal -Wall -c ${METAL_SOURCES} -o pathtrace.air -I

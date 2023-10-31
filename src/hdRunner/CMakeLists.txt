@@ -44,9 +44,6 @@ target_link_libraries(
          settings
          display
          render
-         # ${RENDERLIB_NAME} ${UILIB_NAME} ${TEXTURELIB_NAME} ${TRACY_LIB}
-         # ${Vulkan_LIBRARY}
-         # "${CMAKE_CURRENT_SOURCE_DIR}/external/glfw/glfw3.lib"
          logger
          ar
          cameraUtil
