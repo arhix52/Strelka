@@ -3,6 +3,7 @@ set(DISPLAYLIB_NAME display)
 
 find_package(imgui REQUIRED)
 find_package(glfw3 REQUIRED)
+find_package(glm REQUIRED)
 
 set(DISPLAY_SOURCES_COMMON
     ${ROOT_HOME}/include/display/Display.h ${ROOT_HOME}/src/display/Display.cpp
@@ -74,6 +75,6 @@ if(APPLE)
   target_link_libraries(${DISPLAYLIB_NAME} PUBLIC "-framework Metal")
   target_link_libraries(${DISPLAYLIB_NAME} PUBLIC "-framework MetalKit")
   target_link_libraries(${DISPLAYLIB_NAME} PUBLIC logger)
-  target_link_libraries(${DISPLAYLIB_NAME} PUBLIC imgui::imgui glfw)
+  target_link_libraries(${DISPLAYLIB_NAME} PUBLIC imgui::imgui glfw glm::glm)
 
 endif()

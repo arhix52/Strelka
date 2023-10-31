@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 set(RENDERLIB_NAME render)
 
+find_package(glm REQUIRED)
+
 # include(${ROOT_HOME}/cmake/StaticAnalyzers.cmake)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -101,6 +103,7 @@ if(APPLE)
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework QuartzCore")
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework Metal")
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework MetalKit")
+  target_link_libraries(${RENDERLIB_NAME} PUBLIC glm::glm)
 
   add_custom_command(
     TARGET ${RENDERLIB_NAME}

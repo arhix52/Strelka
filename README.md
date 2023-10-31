@@ -37,6 +37,13 @@ detect conan profile: `conan profile detect --force`
 2. `cd build`
 3. `cmake .. -G "Visual Studio 17 2022" -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake`
 
+On Mac/Linux:
+1. `conan install . -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type=Debug`
+2. `cd build/Debug`
+3. `source ./generators/conanbuild.sh`
+4. `cmake ../.. -DCMAKE_TOOLCHAIN_FILE=generators/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Debug`
+5. `cmake --build .`
+
 ### Libs:
 - glfw    - https://www.glfw.org/     *dll*
 - cxxopts   - https://github.com/jarro2783/cxxopts  *header*
