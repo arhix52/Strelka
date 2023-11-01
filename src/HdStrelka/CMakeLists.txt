@@ -80,8 +80,6 @@ if(WIN32 OR LINUX)
     ${HD_PLUGIN_NAME}
     PRIVATE usdImaging
             hdMtlx
-            ${OPENGL_LIBRARIES}
-            glad
             render
             scene
             materialmanager

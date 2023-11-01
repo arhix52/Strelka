@@ -78,7 +78,7 @@ if(WIN32 OR LINUX)
     COMMAND ${CMAKE_COMMAND} -E copy ${generated_files}
             "${OUTPUT_DIRECTORY}/optix")
 
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC ${CUDA_LIBRARIES} glad scene
+  target_link_libraries(${RENDERLIB_NAME} PUBLIC ${CUDA_LIBRARIES} scene
                                                  materialmanager glm::glm stb::stb)
 endif()
 

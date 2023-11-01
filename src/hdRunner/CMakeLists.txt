@@ -55,5 +55,5 @@ target_link_libraries(
          usdGeom
          usdImaging) # Link the executable to library (if it uses it).
 if(WIN32)
-  target_link_libraries(${HD_RUNNER_NAME} PUBLIC ${OPENGL_LIBRARIES} glad)
+  target_link_libraries(${HD_RUNNER_NAME} PUBLIC ${OPENGL_LIBRARIES})
 endif()

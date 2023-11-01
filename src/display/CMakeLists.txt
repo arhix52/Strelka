@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 set(DISPLAYLIB_NAME display)
 
+find_package(glad REQUIRED)
 find_package(imgui REQUIRED)
 find_package(glfw3 REQUIRED)
 find_package(glm REQUIRED)
@@ -27,12 +28,10 @@ if(WIN32 OR LINUX)
                              PUBLIC ${ROOT_HOME}/include/display)
   target_include_directories(${DISPLAYLIB_NAME}
                              PUBLIC ${ROOT_HOME}/external/imgui/)
-  target_include_directories(${DISPLAYLIB_NAME}
-                             PUBLIC ${ROOT_HOME}/external/glad/include)
 
   target_link_libraries(${DISPLAYLIB_NAME}
     PUBLIC ${OPENGL_LIBRARIES}
-    imgui::imgui glfw glm::glm glad)
+    imgui::imgui glfw glm::glm glad::glad)
 
 endif()
 
