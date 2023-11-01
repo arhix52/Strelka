@@ -30,19 +30,9 @@ if(WIN32 OR LINUX)
   target_include_directories(${DISPLAYLIB_NAME}
                              PUBLIC ${ROOT_HOME}/external/glad/include)
 
-  if(WIN32)
-    target_link_libraries(
-      ${DISPLAYLIB_NAME}
-      PUBLIC "${ROOT_HOME}/external/glfw/glfw3.lib" ${OPENGL_LIBRARIES}
-      PRIVATE glad)
-  endif(WIN32)
-
-  if(LINUX)
-    target_link_libraries(
-      ${DISPLAYLIB_NAME}
-      PUBLIC ${OPENGL_LIBRARIES} imgui::imgui glfw glm::glm
-      PRIVATE glad)
-  endif(LINUX)
+  target_link_libraries(${DISPLAYLIB_NAME}
+    PUBLIC ${OPENGL_LIBRARIES}
+    imgui::imgui glfw glm::glm glad)
 
 endif()
 
