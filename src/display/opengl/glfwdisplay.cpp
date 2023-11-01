@@ -192,7 +192,7 @@ void glfwdisplay::init(int width, int height, oka::SharedContext* ctx)
 
     glfwMakeContextCurrent(mWindow);
 
-    if (!gladLoadGL((GLADloadfunc)glfwGetProcAddress))
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
     {
         std::cout << "Failed to initialize GLAD" << std::endl;
         assert(0);

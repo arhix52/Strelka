@@ -2,7 +2,7 @@
 
 // #include <render/render.h>
 
-#include <doctest.h>
+#include <doctest/doctest.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>

@@ -17,9 +17,9 @@ find_package(MaterialX REQUIRED)
 
 add_executable(${TEST_MAIN} ${TESTFILES})
 target_link_libraries(${TEST_MAIN} 
-    PUBLIC 
-    materialmanager
+    PUBLIC
     doctest::doctest
+    materialmanager
     )
 
 target_include_directories(${TEST_MAIN} PRIVATE ${ROOT_HOME}/include/)
