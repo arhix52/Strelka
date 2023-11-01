@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 include(CTest)
-include(Doctest)
+find_package(doctest REQUIRED)
 
 set(TESTFILES
         tests_main.cpp
@@ -19,10 +19,8 @@ add_executable(${TEST_MAIN} ${TESTFILES})
 target_link_libraries(${TEST_MAIN} 
     PUBLIC 
     materialmanager
-    doctest
+    doctest::doctest
     )
-
-target_include_directories(${TEST_MAIN} PRIVATE ${ROOT_HOME}/external/doctest/doctest)
 
 target_include_directories(${TEST_MAIN} PRIVATE ${ROOT_HOME}/include/)
 
