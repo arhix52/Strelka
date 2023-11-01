@@ -2,12 +2,11 @@ cmake_minimum_required(VERSION 3.22)
 set(RENDERLIB_NAME render)
 
 find_package(glm REQUIRED)
+find_package(stb REQUIRED)
 
 # include(${ROOT_HOME}/cmake/StaticAnalyzers.cmake)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
-include_directories(${ROOT_HOME}/external/stb)
 
 set(RENDER_SOURCES_COMMON ${ROOT_HOME}/include/render/render.h
                           ${ROOT_HOME}/src/render/render.cpp)
@@ -80,7 +79,7 @@ if(WIN32 OR LINUX)
             "${OUTPUT_DIRECTORY}/optix")
 
   target_link_libraries(${RENDERLIB_NAME} PUBLIC ${CUDA_LIBRARIES} glad scene
-                                                 materialmanager glm::glm)
+                                                 materialmanager glm::glm stb::stb)
 endif()
 
 if(APPLE)
@@ -101,7 +100,7 @@ if(APPLE)
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework QuartzCore")
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework Metal")
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework MetalKit")
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC glm::glm)
+  target_link_libraries(${RENDERLIB_NAME} PUBLIC glm::glm stb::stb)
 
   add_custom_command(
     TARGET ${RENDERLIB_NAME}

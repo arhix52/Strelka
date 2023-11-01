@@ -14,6 +14,7 @@ class StrelkaRecipe(ConanFile):
         self.requires("spdlog/[>=1.4.1]")
         self.requires("imgui/1.89.3")
         self.requires("glfw/3.3.8")
+        self.requires("stb/cci.20230920")
         
     def generate(self):
         copy(self, "*glfw*", os.path.join(self.dependencies["imgui"].package_folder,
