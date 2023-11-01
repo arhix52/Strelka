@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
+find_package(cxxopts REQUIRED)
 find_package(USD REQUIRED HINTS ${USD_DIR} NAMES pxr)
 message(STATUS "USD LIBRARY: ${USD_DIR}")
 
@@ -29,17 +30,11 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E make_directory
           "${OUTPUT_DIRECTORY}/data/materials/mdl")
 
-# target_include_directories(${PROJECT_NAME} PUBLIC ${Vulkan_INCLUDE_DIR})
-target_include_directories(${HD_RUNNER_NAME}
-                           PUBLIC ${ROOT_HOME}/external/glfw/include)
-target_include_directories(${HD_RUNNER_NAME}
-                           PUBLIC ${ROOT_HOME}/external/cxxopts/include)
 target_include_directories(${HD_RUNNER_NAME} PUBLIC ${ROOT_HOME}/include/)
 target_include_directories(${HD_RUNNER_NAME} PUBLIC hd)
 target_link_libraries(
   ${HD_RUNNER_NAME}
-  PUBLIC # ${SETTINGSLIB_NAME} ${RESMNGR_NAME} ${SHADERLIB_NAME}
-         # ${MATERIALLIB_NAME} MaterialXCore MaterialXFormat MaterialXGenMdl
+  PUBLIC cxxopts::cxxopts
          scene
          settings
          display
