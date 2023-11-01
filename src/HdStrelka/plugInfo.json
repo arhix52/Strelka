@@ -20,7 +20,7 @@
                     }
                 }
             },
-            "LibraryPath": "../HdStrelka.dll",
+            "LibraryPath": "../HdStrelka.dylib",
             "Name": "HdStrelka",
             "ResourcePath": "resources",
             "Root": "..",
