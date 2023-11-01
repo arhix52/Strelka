@@ -1,20 +1,19 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.22)
 set(RENDERLIB_NAME render)
+
+find_package(glm REQUIRED)
+find_package(stb REQUIRED)
 
 # include(${ROOT_HOME}/cmake/StaticAnalyzers.cmake)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
-include_directories(${ROOT_HOME}/external/glm)
-include_directories(${ROOT_HOME}/external/stb)
 
 set(RENDER_SOURCES_COMMON ${ROOT_HOME}/include/render/render.h
                           ${ROOT_HOME}/src/render/render.cpp)
 
 if(WIN32 OR LINUX)
   enable_language(CUDA)
-  # Find at least a 5.0 version of CUDA.
-  find_package(CUDA 5.0 REQUIRED)
+  find_package(CUDA REQUIRED)
   message(STATUS "CUDA Toolkit Root: ${CUDA_TOOLKIT_ROOT_DIR}")
   message(STATUS "CUDA Include DIR: ${CUDA_INCLUDE_DIRS}")
   # Search for the OptiX libraries and include files.
@@ -79,8 +78,8 @@ if(WIN32 OR LINUX)
     COMMAND ${CMAKE_COMMAND} -E copy ${generated_files}
             "${OUTPUT_DIRECTORY}/optix")
 
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC ${CUDA_LIBRARIES} glad scene
-                                                 materialmanager)
+  target_link_libraries(${RENDERLIB_NAME} PUBLIC ${CUDA_LIBRARIES} scene
+                                                 materialmanager glm::glm stb::stb)
 endif()
 
 if(APPLE)
@@ -101,6 +100,7 @@ if(APPLE)
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework QuartzCore")
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework Metal")
   target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework MetalKit")
+  target_link_libraries(${RENDERLIB_NAME} PUBLIC glm::glm stb::stb)
 
   add_custom_command(
     TARGET ${RENDERLIB_NAME}
@@ -108,11 +108,20 @@ if(APPLE)
     COMMAND ${CMAKE_COMMAND} -E make_directory
             "${OUTPUT_DIRECTORY}/metal/shaders")
 
+  add_custom_command(
+    TARGET ${RENDERLIB_NAME}
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/src/render/metal/shaders/fullScreen.metal "${OUTPUT_DIRECTORY}/metal/shaders"
+  )
+  
   set(METAL_SOURCES ${ROOT_HOME}/src/render/metal/shaders/pathtrace.metal)
   set(METAL_SOURCES_TM ${ROOT_HOME}/src/render/metal/shaders/tonemapper.metal)
   add_custom_command(
     OUTPUT ${OUTPUT_DIRECTORY}/metal/shaders/pathtrace.metallib PRE_BUILD
     OUTPUT ${OUTPUT_DIRECTORY}/metal/shaders/tonemapper.metallib PRE_BUILD
+    
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${OUTPUT_DIRECTORY}/metal/shaders"
 
     COMMAND ${CMAKE_COMMAND} -E echo "Compile metal shaders..."
     COMMAND xcrun -sdk macosx metal -Wall -c ${METAL_SOURCES} -o pathtrace.air -I
@@ -149,6 +158,5 @@ target_link_libraries(${RENDERLIB_NAME} PUBLIC logger)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/include/)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/include/render)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/external/glm)
 target_include_directories(${RENDERLIB_NAME} PUBLIC ${ROOT_HOME}/external/mdl-sdk/include)
 

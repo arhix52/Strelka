@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 set(LOGLIB_NAME logger)
 set(LOGLIB_SOURCES
     ${ROOT_HOME}/include/log/log.h 

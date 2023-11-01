@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 
 find_package(USD REQUIRED HINTS ${USD_DIR} NAMES pxr)
 message(STATUS "USD LIBRARY: ${USD_DIR}")
@@ -80,8 +80,6 @@ if(WIN32 OR LINUX)
     ${HD_PLUGIN_NAME}
     PRIVATE usdImaging
             hdMtlx
-            ${OPENGL_LIBRARIES}
-            glad
             render
             scene
             materialmanager
@@ -89,9 +87,11 @@ if(WIN32 OR LINUX)
 endif()
 
 if(APPLE)
+target_include_directories(${HD_PLUGIN_NAME}
+                           PUBLIC ${ROOT_HOME}/include/materialmanager)
   target_link_libraries(
     ${HD_PLUGIN_NAME}
-    PRIVATE usdImaging hdMtlx render scene materialmanager
+    PRIVATE usdImaging hdMtlx render scene
     PUBLIC hd)
   target_link_libraries(${HD_PLUGIN_NAME} PUBLIC "-framework Foundation")
   target_link_libraries(${HD_PLUGIN_NAME} PUBLIC "-framework QuartzCore")

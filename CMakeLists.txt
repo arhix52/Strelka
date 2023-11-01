@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 project(Strelka LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 
@@ -20,11 +20,6 @@ if(WIN32)
   add_compile_definitions(NOMINMAX)
   add_compile_definitions(_USE_MATH_DEFINES)
   add_compile_definitions(_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH)
-endif()
-
-if(WIN32 OR LINUX)
-  add_subdirectory(external/glad)
-  set_target_properties(glad PROPERTIES LINKER_LANGUAGE CXX)
 endif()
 
 set(ROOT_HOME ${CMAKE_CURRENT_LIST_DIR})

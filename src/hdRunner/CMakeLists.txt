@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
+find_package(cxxopts REQUIRED)
 find_package(USD REQUIRED HINTS ${USD_DIR} NAMES pxr)
 message(STATUS "USD LIBRARY: ${USD_DIR}")
 
@@ -29,24 +30,15 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E make_directory
           "${OUTPUT_DIRECTORY}/data/materials/mdl")
 
-# target_include_directories(${PROJECT_NAME} PUBLIC ${Vulkan_INCLUDE_DIR})
-target_include_directories(${HD_RUNNER_NAME}
-                           PUBLIC ${ROOT_HOME}/external/glfw/include)
-target_include_directories(${HD_RUNNER_NAME}
-                           PUBLIC ${ROOT_HOME}/external/cxxopts/include)
 target_include_directories(${HD_RUNNER_NAME} PUBLIC ${ROOT_HOME}/include/)
 target_include_directories(${HD_RUNNER_NAME} PUBLIC hd)
 target_link_libraries(
   ${HD_RUNNER_NAME}
-  PUBLIC # ${SETTINGSLIB_NAME} ${RESMNGR_NAME} ${SHADERLIB_NAME}
-         # ${MATERIALLIB_NAME} MaterialXCore MaterialXFormat MaterialXGenMdl
+  PUBLIC cxxopts::cxxopts
          scene
          settings
          display
          render
-         # ${RENDERLIB_NAME} ${UILIB_NAME} ${TEXTURELIB_NAME} ${TRACY_LIB}
-         # ${Vulkan_LIBRARY}
-         # "${CMAKE_CURRENT_SOURCE_DIR}/external/glfw/glfw3.lib"
          logger
          ar
          cameraUtil
@@ -58,5 +50,5 @@ target_link_libraries(
          usdGeom
          usdImaging) # Link the executable to library (if it uses it).
 if(WIN32)
-  target_link_libraries(${HD_RUNNER_NAME} PUBLIC ${OPENGL_LIBRARIES} glad)
+  target_link_libraries(${HD_RUNNER_NAME} PUBLIC ${OPENGL_LIBRARIES})
 endif()
