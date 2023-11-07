@@ -17,7 +17,7 @@ ucfirst() {
 build_type=$(ucfirst "$build_type")
 
 # Step 1: Install Conan dependencies
-conan install . -e CONAN_CMAKE_GENERATOR=Ninja -c tools.cmake.cmaketoolchain:generator=Ninja -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type="$build_type"
+conan install . -c tools.cmake.cmaketoolchain:generator=Ninja -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type="$build_type"
 
 # Step 2: Navigate to the build directory
 cd build/"$build_type"
