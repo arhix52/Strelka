@@ -30,6 +30,7 @@ LLVM 12.0.1 (https://github.com/llvm/llvm-project/releases/tag/llvmorg-12.0.1) f
 Strelka uses conan https://conan.io/
 
 * install conan: `pip install conan` 
+* install ninja [https://ninja-build.org/] build system: `sudo apt install ninja-build`
 
 detect conan profile: `conan profile detect --force`
 
