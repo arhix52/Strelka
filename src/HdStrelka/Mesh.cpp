@@ -20,9 +20,7 @@ HdStrelkaMesh::HdStrelkaMesh(const SdfPath& id, oka::Scene* scene)
 {
 }
 
-HdStrelkaMesh::~HdStrelkaMesh()
-{
-}
+HdStrelkaMesh::~HdStrelkaMesh() = default;
 
 void HdStrelkaMesh::Sync(HdSceneDelegate* sceneDelegate,
                          HdRenderParam* renderParam,

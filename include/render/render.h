@@ -19,7 +19,7 @@ enum class RenderType : int
 class Render
 {
 public:
-    virtual ~Render(){};
+    virtual ~Render() = default;
 
     virtual void init() = 0;
     virtual void render(Buffer* output) = 0;
@@ -58,7 +58,7 @@ protected:
 class RenderFactory
 {
 public:
-    static Render* createRender(const RenderType type);
+    static Render* createRender(RenderType type);
 };
 
 } // namespace oka

@@ -75,8 +75,7 @@ uint32_t Scene::createInstance(const Instance::Type type,
         inst = &mInstances[instId];
     }
     inst->type = type;
-    if (inst->type == Instance::Type::eMesh ||
-        inst->type == Instance::Type::eLight)
+    if (inst->type == Instance::Type::eMesh || inst->type == Instance::Type::eLight)
     {
         inst->mMeshId = geomId;
     }
@@ -157,7 +156,7 @@ uint32_t vertexForEdge(Lookup& lookup, std::vector<Scene::Vertex>& vertices, uin
         std::swap(key.first, key.second);
     }
 
-    auto inserted = lookup.insert({ key, (uint32_t) vertices.size() });
+    auto inserted = lookup.insert({ key, (uint32_t)vertices.size() });
     if (inserted.second)
     {
         auto& edge0 = vertices[first].pos;

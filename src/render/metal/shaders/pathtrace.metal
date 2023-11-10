@@ -558,7 +558,10 @@ kernel void raytracingKernel(
         {
             const float a = 1.0f / static_cast<float>(uniforms.subframeIndex + 1);
             const float3 accum_color_prev = float3(accum[linearPixelIndex]);
-            accum_color = mix(accum_color_prev, accum_color, a);
+            accum_color = inverseTonemap(mix(
+                tonemap(accum_color_prev, uniforms.exposureValue),
+                tonemap(accum_color, uniforms.exposureValue),
+                a), uniforms.exposureValue);
         }
         accum[linearPixelIndex] = float4(accum_color, 1.0f);
         result = accum_color;

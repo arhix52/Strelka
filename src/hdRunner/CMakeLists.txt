@@ -6,6 +6,9 @@ message(STATUS "USD LIBRARY: ${USD_DIR}")
 
 set(HD_RUNNER_NAME HydraRunner)
 
+# WAR: https://github.com/PixarAnimationStudios/OpenUSD/issues/2634
+add_compile_definitions(BOOST_NO_CXX98_FUNCTION_BASE)
+
 # Application
 set(HD_RUNNER_SOURCES
     ${ROOT_HOME}/src/hdRunner/main.cpp

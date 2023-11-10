@@ -26,13 +26,9 @@
 
 using namespace oka;
 
-MetalRender::MetalRender(/* args */)
-{
-}
+MetalRender::MetalRender(/* args */) = default;
 
-MetalRender::~MetalRender()
-{
-}
+MetalRender::~MetalRender() = default;
 
 void MetalRender::init()
 {
@@ -42,13 +38,13 @@ void MetalRender::init()
     buildTonemapperPipeline();
 }
 
-MTL::Texture* oka::MetalRender::loadTextureFromFile(const std::string& fileName)
+MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName)
 {
     int texWidth, texHeight, texChannels;
     stbi_uc* data = stbi_load(fileName.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-    if (!data)
+    if (data == nullptr)
     {
-        fprintf(stderr, "Unable to load texture from file: %s\n", fileName.c_str());
+        STRELKA_ERROR("Unable to load texture from file: {}", fileName.c_str());
         return nullptr;
     }
     MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
@@ -62,18 +58,18 @@ MTL::Texture* oka::MetalRender::loadTextureFromFile(const std::string& fileName)
     MTL::Texture* pTexture = mDevice->newTexture(pTextureDesc);
 
     MTL::Region region = MTL::Region::Make3D(0, 0, 0, texWidth, texHeight, 1);
-    pTexture->replaceRegion(region, 0, data, 4 * texWidth);
+    pTexture->replaceRegion(region, 0, data, 4ull * texWidth);
 
     pTextureDesc->release();
     return pTexture;
 }
 
-void oka::MetalRender::createMetalMaterials()
+void MetalRender::createMetalMaterials()
 {
     using simd::float3;
     const std::vector<Scene::MaterialDescription>& matDescs = mScene->getMaterials();
     std::vector<Material> gpuMaterials;
-    std::string resourcePath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
+    auto resourcePath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
     for (const Scene::MaterialDescription& currMatDesc : matDescs)
     {
         Material material = {};
@@ -128,7 +124,7 @@ void MetalRender::render(Buffer* output)
             output->width() * output->height() * output->getElementSize(), MTL::ResourceStorageModePrivate);
     }
 
-    mFrameIndex = (mFrameIndex + 1) % oka::kMaxFramesInFlight;
+    mFrameIndex = (mFrameIndex + 1) % kMaxFramesInFlight;
 
     // Update camera state:
     const uint32_t width = output->width();
@@ -178,7 +174,7 @@ void MetalRender::render(Buffer* output)
     settingsChanged = (rectLightSamplingMethodPrev != pUniformData->rectLightSamplingMethod);
     rectLightSamplingMethodPrev = pUniformData->rectLightSamplingMethod;
 
-    static bool enableAccumulationPrev = 0;
+    static bool enableAccumulationPrev = false;
     const bool enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
     settingsChanged |= (enableAccumulationPrev != enableAccumulation);
     enableAccumulationPrev = enableAccumulation;
@@ -242,6 +238,7 @@ void MetalRender::render(Buffer* output)
     }
     exposureValue /= lum;
     pUniformTonemap->exposureValue = exposureValue;
+    pUniformData->exposureValue = exposureValue; // need for proper accumulation
 
     const uint32_t totalSpp = settings.getAs<uint32_t>("render/pt/sppTotal");
     const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");
@@ -265,11 +262,11 @@ void MetalRender::render(Buffer* output)
         {
             pComputeEncoder->useResource(primitiveAccel, MTL::ResourceUsageRead);
         }
-        for (int i = 0; i < mMaterialTextures.size(); ++i)
+        for (auto& materialTexture : mMaterialTextures)
         {
-            pComputeEncoder->useResource(mMaterialTextures[i], MTL::ResourceUsageRead);
+            pComputeEncoder->useResource(materialTexture, MTL::ResourceUsageRead);
         }
-        pComputeEncoder->useResource(((oka::MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageWrite);
+        pComputeEncoder->useResource(((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageWrite);
 
         pComputeEncoder->setComputePipelineState(mPathTracingPSO);
         pComputeEncoder->setBuffer(pUniformBuffer, 0, 0);
@@ -278,7 +275,7 @@ void MetalRender::render(Buffer* output)
         pComputeEncoder->setBuffer(mLightBuffer, 0, 3);
         pComputeEncoder->setBuffer(mMaterialBuffer, 0, 4);
         // Output
-        pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 5);
+        pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 5);
         pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 6);
         {
             const MTL::Size gridSize = MTL::Size(width, height, 1);
@@ -291,9 +288,9 @@ void MetalRender::render(Buffer* output)
         {
             pComputeEncoder->setComputePipelineState(mTonemapperPSO);
             pComputeEncoder->useResource(
-                ((oka::MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+                ((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
             pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
-            pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 1);
+            pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
             {
                 const MTL::Size gridSize = MTL::Size(width, height, 1);
                 const NS::UInteger threadGroupSize = mTonemapperPSO->maxTotalThreadsPerThreadgroup();
@@ -322,7 +319,7 @@ void MetalRender::render(Buffer* output)
 
         MTL::BlitCommandEncoder* pBlitEncoder = pCmd->blitCommandEncoder();
         pBlitEncoder->copyFromBuffer(
-            mAccumulationBuffer, 0, ((oka::MetalBuffer*)output)->getNativePtr(), 0, width * height * sizeof(float4));
+            mAccumulationBuffer, 0, ((MetalBuffer*)output)->getNativePtr(), 0, width * height * sizeof(float4));
         pBlitEncoder->endEncoding();
 
         // Disable tonemapping for debug output
@@ -332,9 +329,9 @@ void MetalRender::render(Buffer* output)
 
             pComputeEncoder->setComputePipelineState(mTonemapperPSO);
             pComputeEncoder->useResource(
-                ((oka::MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+                ((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
             pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
-            pComputeEncoder->setBuffer(((oka::MetalBuffer*)output)->getNativePtr(), 0, 1);
+            pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
             {
                 const MTL::Size gridSize = MTL::Size(width, height, 1);
                 const NS::UInteger threadGroupSize = mTonemapperPSO->maxTotalThreadsPerThreadgroup();
@@ -353,7 +350,7 @@ void MetalRender::render(Buffer* output)
     getSharedContext().mFrameNumber++;
 }
 
-Buffer* oka::MetalRender::createBuffer(const BufferDesc& desc)
+Buffer* MetalRender::createBuffer(const BufferDesc& desc)
 {
     assert(mDevice);
     const size_t size = desc.height * desc.width * Buffer::getElementSize(desc.format);
@@ -413,13 +410,13 @@ void MetalRender::buildTonemapperPipeline()
 
 void MetalRender::buildBuffers()
 {
-    const std::vector<oka::Scene::Vertex>& vertices = mScene->getVertices();
+    const std::vector<Scene::Vertex>& vertices = mScene->getVertices();
     const std::vector<uint32_t>& indices = mScene->getIndices();
     const std::vector<Scene::Light>& lightDescs = mScene->getLights();
 
     static_assert(sizeof(Scene::Light) == sizeof(UniformLight));
     const size_t lightBufferSize = sizeof(Scene::Light) * lightDescs.size();
-    const size_t vertexDataSize = sizeof(oka::Scene::Vertex) * vertices.size();
+    const size_t vertexDataSize = sizeof(Scene::Vertex) * vertices.size();
     const size_t indexDataSize = sizeof(uint32_t) * indices.size();
 
     MTL::Buffer* pLightBuffer = mDevice->newBuffer(lightBufferSize, MTL::ResourceStorageModeManaged);
@@ -540,7 +537,7 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
 
     const uint32_t triangleCount = mesh.mCount / 3;
 
-    const std::vector<oka::Scene::Vertex>& vertices = mScene->getVertices();
+    const std::vector<Scene::Vertex>& vertices = mScene->getVertices();
     const std::vector<uint32_t>& indices = mScene->getIndices();
 
     std::vector<Triangle> triangleData(triangleCount);
@@ -584,8 +581,8 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
         MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
 
     geomDescriptor->setVertexBuffer(mVertexBuffer);
-    geomDescriptor->setVertexBufferOffset(mesh.mVbOffset * sizeof(oka::Scene::Vertex));
-    geomDescriptor->setVertexStride(sizeof(oka::Scene::Vertex));
+    geomDescriptor->setVertexBufferOffset(mesh.mVbOffset * sizeof(Scene::Vertex));
+    geomDescriptor->setVertexStride(sizeof(Scene::Vertex));
     geomDescriptor->setIndexBuffer(mIndexBuffer);
     geomDescriptor->setIndexBufferOffset(mesh.mIndex * sizeof(uint32_t));
     geomDescriptor->setIndexType(MTL::IndexTypeUInt32);
@@ -635,13 +632,12 @@ void MetalRender::createAccelerationStructures()
         (MTL::AccelerationStructureUserIDInstanceDescriptor*)mInstanceBuffer->contents();
     for (int i = 0; i < instances.size(); ++i)
     {
-        const oka::Instance& curr = instances[i];
+        const Instance& curr = instances[i];
         instanceDescriptors[i].accelerationStructureIndex = curr.mMeshId;
         instanceDescriptors[i].options = MTL::AccelerationStructureInstanceOptionOpaque;
         instanceDescriptors[i].intersectionFunctionTableOffset = 0;
-        instanceDescriptors[i].userID = curr.type == oka::Instance::Type::eLight ? curr.mLightId : curr.mMaterialId;
-        instanceDescriptors[i].mask =
-            curr.type == oka::Instance::Type::eLight ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_TRIANGLE;
+        instanceDescriptors[i].userID = curr.type == Instance::Type::eLight ? curr.mLightId : curr.mMaterialId;
+        instanceDescriptors[i].mask = curr.type == Instance::Type::eLight ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_TRIANGLE;
 
         for (int column = 0; column < 4; column++)
         {
