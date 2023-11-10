@@ -40,7 +40,7 @@ detect conan profile: `conan profile detect --force`
 4. `cmake --build . --config Debug`
 
 On Mac/Linux:
-1. `conan install . -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type=Debug`
+1. `conan install . -c tools.cmake.cmaketoolchain:generator=Ninja -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type=Debug --profile clang14`
 2. `cd build/Debug`
 3. `source ./generators/conanbuild.sh`
 4. `cmake ../.. -DCMAKE_TOOLCHAIN_FILE=generators/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Debug`
