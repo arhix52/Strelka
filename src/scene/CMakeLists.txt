@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
+find_package(glm REQUIRED)
+
 # include(${ROOT_HOME}/cmake/StaticAnalyzers.cmake)
 
 # Scene
@@ -15,3 +17,4 @@ target_include_directories(${SCENELIB_NAME} PUBLIC ${ROOT_HOME}/external/glm)
 target_include_directories(${SCENELIB_NAME} PUBLIC ${ROOT_HOME}/include/scene)
 target_include_directories(${SCENELIB_NAME} PUBLIC ${ROOT_HOME}/include/)
 target_include_directories(${SCENELIB_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(${SCENELIB_NAME} PUBLIC glm::glm)

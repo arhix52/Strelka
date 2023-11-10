@@ -1,12 +1,13 @@
 build/
 build_xcode/
 *.exe
+.cache
 .vs
 .idea/s
 .DS_Store
 misc/
 external/mdl-sdk
 external/metal-cpp*
-external/glfw-3.3.8*
+external/imgui*
 data/test_data
 CMakeUserPresets.json

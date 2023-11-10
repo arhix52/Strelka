@@ -49,7 +49,7 @@ private:
         return T{};
     }
 
-    std::string toString(const std::string& value)
+    static std::string toString(const std::string& value)
     {
         return value;
     }

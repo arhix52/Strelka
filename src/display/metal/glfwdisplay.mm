@@ -153,7 +153,7 @@ void glfwdisplay::buildShaders()
     using NS::StringEncoding::UTF8StringEncoding;
 
     std::string shaderSrc;
-    readSourceFile(shaderSrc, "./shaders/fullScreen.metal");
+    readSourceFile(shaderSrc, "./metal/shaders/fullScreen.metal");
 
     NS::Error* pError = nullptr;
     MTL::Library* pLibrary =

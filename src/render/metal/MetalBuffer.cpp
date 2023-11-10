@@ -4,9 +4,8 @@
 
 using namespace oka;
 
-oka::MetalBuffer::MetalBuffer(MTL::Buffer* buff, BufferFormat format, uint32_t width, uint32_t height)
+oka::MetalBuffer::MetalBuffer(MTL::Buffer* buff, BufferFormat format, uint32_t width, uint32_t height) : mBuffer(buff)
 {
-    mBuffer = buff;
     mFormat = format;
     mWidth = width;
     mHeight = height;

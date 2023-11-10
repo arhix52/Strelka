@@ -1,10 +1,14 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 
 find_package(USD REQUIRED HINTS ${USD_DIR} NAMES pxr)
 message(STATUS "USD LIBRARY: ${USD_DIR}")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+add_compile_definitions(BOOST_NO_CXX98_FUNCTION_BASE)
 
 # Hydra plugin
 set(HD_PLUGIN_SOURCES
@@ -87,8 +91,6 @@ if(WIN32 OR LINUX)
     ${HD_PLUGIN_NAME}
     PRIVATE usdImaging
             hdMtlx
-            ${OPENGL_LIBRARIES}
-            glad
             render
             scene
             materialmanager
@@ -96,9 +98,11 @@ if(WIN32 OR LINUX)
 endif()
 
 if(APPLE)
+target_include_directories(${HD_PLUGIN_NAME}
+                           PUBLIC ${ROOT_HOME}/include/materialmanager)
   target_link_libraries(
     ${HD_PLUGIN_NAME}
-    PRIVATE usdImaging hdMtlx render scene materialmanager
+    PRIVATE usdImaging hdMtlx render scene
     PUBLIC hd)
   target_link_libraries(${HD_PLUGIN_NAME} PUBLIC "-framework Foundation")
   target_link_libraries(${HD_PLUGIN_NAME} PUBLIC "-framework QuartzCore")

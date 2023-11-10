@@ -50,7 +50,7 @@ void HdStrelkaBasisCurves::Sync(HdSceneDelegate* sceneDelegate,
 }
 
 bool HdStrelkaBasisCurves::_FindPrimvar(HdSceneDelegate* sceneDelegate,
-                                        TfToken primvarName,
+                                        const TfToken& primvarName,
                                         HdInterpolation& interpolation) const
 {
     HdInterpolation interpolations[] = {

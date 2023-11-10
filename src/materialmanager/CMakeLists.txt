@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 find_package(MaterialX REQUIRED)
+find_package(glm REQUIRED)
 
 set(MATERIALLIB_NAME materialmanager)
 
@@ -24,15 +25,13 @@ set(MATERIALMANAGER_SOURCES
 include_directories(${ROOT_HOME}/external/mdl-sdk/include)
 
 add_library(${MATERIALLIB_NAME} STATIC ${MATERIALMANAGER_SOURCES})
-target_include_directories(${MATERIALLIB_NAME}
-                           PRIVATE ${ROOT_HOME}/external/glm)
 target_include_directories(
   ${MATERIALLIB_NAME}
   PUBLIC ${ROOT_HOME}/include/materialmanager
   PRIVATE ${ROOT_HOME}/include/render/)
 target_link_libraries(
   ${MATERIALLIB_NAME} PRIVATE logger MaterialXCore MaterialXFormat
-                              MaterialXGenMdl)
+                              MaterialXGenMdl glm::glm)
 
 add_custom_command(
   TARGET ${MATERIALLIB_NAME}
@@ -101,8 +100,7 @@ if(WIN32 OR LINUX)
     COMMAND
       ${clang_PATH} -I ${OptiX_INCLUDE} -I ${ROOT_HOME}/external/mdl-sdk/include
       -I ${ROOT_HOME}/src/render/ -I ${ROOT_HOME}/src/render/optix/
-      -I ${ROOT_HOME}/include/render -I
-      ${ROOT_HOME}/external/glm -I ${ROOT_HOME}
+      -I ${ROOT_HOME}/include/render -I ${ROOT_HOME}
       -Wno-unknown-cuda-version 
       -std=c++17
       -I /usr/include/c++/11/

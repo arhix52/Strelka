@@ -38,7 +38,7 @@ protected:
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override;
 
 private:
-    bool _FindPrimvar(HdSceneDelegate* sceneDelegate, TfToken primvarName, HdInterpolation& interpolation) const;
+    bool _FindPrimvar(HdSceneDelegate* sceneDelegate, const TfToken& primvarName, HdInterpolation& interpolation) const;
     void _PullPrimvars(HdSceneDelegate* sceneDelegate,
                        VtVec3fArray& points,
                        VtVec3fArray& normals,
