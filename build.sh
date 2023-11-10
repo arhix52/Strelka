@@ -17,7 +17,7 @@ ucfirst() {
 build_type=$(ucfirst "$build_type")
 
 # Step 1: Install Conan dependencies
-conan install . -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type="$build_type"
+conan install . -c tools.cmake.cmaketoolchain:generator=Ninja -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type="$build_type"
 
 # Step 2: Navigate to the build directory
 cd build/"$build_type"
@@ -32,7 +32,7 @@ fi
 source ./generators/conanbuild.sh
 
 # Step 4: Run CMake with the appropriate toolchain file
-cmake ../.. -DCMAKE_TOOLCHAIN_FILE=generators/conan_toolchain.cmake -DCMAKE_BUILD_TYPE="$build_type"
+cmake ../.. -G Ninja -DCMAKE_TOOLCHAIN_FILE=generators/conan_toolchain.cmake -DCMAKE_BUILD_TYPE="$build_type"
 
 # Step 5: Build the project and capture the time
 start_time=$(date +%s)
