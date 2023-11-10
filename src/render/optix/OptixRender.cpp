@@ -1339,8 +1339,8 @@ bool OptiXRender::createOptixMaterials()
                 std::string texPath(param.value.size(), 0);
                 memcpy(texPath.data(), param.value.data(), param.value.size());
                 // int texId = getTexManager()->loadTextureMdl(texPath);
-                fs::path fullTestureFilePath = resourcePath / texPath;
-                ::Texture tex = loadTextureFromFile(fullTestureFilePath.string());
+                fs::path fullTextureFilePath = resourcePath / texPath;
+                ::Texture tex = loadTextureFromFile(fullTextureFilePath.string());
                 materialTextures.push_back(tex);
                 int texId = 0;
                 int resId = mMaterialManager.registerResource(targetCode, texId);
