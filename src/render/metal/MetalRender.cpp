@@ -40,7 +40,9 @@ void MetalRender::init()
 
 MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName)
 {
-    int texWidth, texHeight, texChannels;
+    int texWidth = 0;
+    int texHeight = 0;
+    int texChannels = 0;
     stbi_uc* data = stbi_load(fileName.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
     if (data == nullptr)
     {
@@ -57,7 +59,7 @@ MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName)
 
     MTL::Texture* pTexture = mDevice->newTexture(pTextureDesc);
 
-    MTL::Region region = MTL::Region::Make3D(0, 0, 0, texWidth, texHeight, 1);
+    const MTL::Region region = MTL::Region::Make3D(0, 0, 0, texWidth, texHeight, 1);
     pTexture->replaceRegion(region, 0, data, 4ull * texWidth);
 
     pTextureDesc->release();
@@ -86,6 +88,7 @@ void MetalRender::createMetalMaterials()
                 memcpy(texPath.data(), param.value.data(), param.value.size());
                 if (param.name == "diffuse_texture")
                 {
+                    // TODO: move to std fs
                     MTL::Texture* diffuseTex = loadTextureFromFile(resourcePath + "/" + texPath);
                     mMaterialTextures.push_back(diffuseTex);
                     material.diffuseTexture = diffuseTex->gpuResourceID();
