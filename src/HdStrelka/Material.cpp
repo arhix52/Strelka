@@ -13,9 +13,7 @@ HdStrelkaMaterial::HdStrelkaMaterial(const SdfPath& id, const MaterialNetworkTra
 {
 }
 
-HdStrelkaMaterial::~HdStrelkaMaterial()
-{
-}
+HdStrelkaMaterial::~HdStrelkaMaterial() = default;
 
 HdDirtyBits HdStrelkaMaterial::GetInitialDirtyBitsMask() const
 {
@@ -27,7 +25,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
 {
     TF_UNUSED(renderParam);
 
-    const bool pullMaterial = (*dirtyBits & DirtyBits::DirtyParams);
+    const bool pullMaterial = (*dirtyBits & DirtyBits::DirtyParams) != 0u;
 
     *dirtyBits = DirtyBits::Clean;
 
@@ -46,7 +44,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
         return;
     }
 
-    HdMaterialNetworkMap networkMap = resource.GetWithDefault<HdMaterialNetworkMap>();
+    auto networkMap = resource.GetWithDefault<HdMaterialNetworkMap>();
     HdMaterialNetwork& surfaceNetwork = networkMap.map[HdMaterialTerminalTokens->surface];
 
     bool isUsdPreviewSurface = false;
@@ -61,12 +59,13 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
             previewSurfaceNode = &node;
             isUsdPreviewSurface = true;
         }
-        for (const std::pair<TfToken, VtValue>& params : node.parameters)
+        for (const auto& params : node.parameters)
         {
             const std::string& name = params.first.GetString();
 
             const TfType type = params.second.GetType();
-            STRELKA_DEBUG("Node name: {}\tParam name: {}\t{}", node.path.GetName(), name.c_str(), params.second.GetTypeName().c_str());
+            STRELKA_DEBUG("Node name: {}\tParam name: {}\t{}", node.path.GetName(), name.c_str(),
+                          params.second.GetTypeName().c_str());
 
             if (type.IsA<GfVec3f>())
             {
@@ -124,7 +123,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
                 param.name = node.path.GetName() + "_" + std::string(params.first);
                 param.type = oka::MaterialManager::Param::Type::eTexture;
                 const SdfAssetPath val = params.second.Get<SdfAssetPath>();
-                //STRELKA_DEBUG("path: {}", val.GetAssetPath().c_str());
+                // STRELKA_DEBUG("path: {}", val.GetAssetPath().c_str());
                 STRELKA_DEBUG("path: {}", val.GetResolvedPath().c_str());
                 // std::string texPath = val.GetAssetPath();
                 std::string texPath = val.GetResolvedPath();
@@ -147,12 +146,12 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
             }
             else if (type.IsA<TfToken>())
             {
-                TfToken val = params.second.Get<TfToken>();
+                const TfToken val = params.second.Get<TfToken>();
                 STRELKA_DEBUG("TfToken: {}", val.GetText());
             }
             else if (type.IsA<std::string>())
             {
-                std::string val = params.second.Get<std::string>();
+                const std::string val = params.second.Get<std::string>();
                 STRELKA_DEBUG("String: {}", val.c_str());
             }
             else
@@ -179,7 +178,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
     else
     {
         // MDL
-        const bool res = m_translator.ParseMdlNetwork(id, network, mMdlFileUri, mMdlSubIdentifier);
+        const bool res = MaterialNetworkTranslator::ParseMdlNetwork(network, mMdlFileUri, mMdlSubIdentifier);
         if (!res)
         {
             STRELKA_ERROR("Failed to translate material, replace to default!");

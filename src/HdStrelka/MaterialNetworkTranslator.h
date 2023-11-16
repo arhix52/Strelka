@@ -33,10 +33,7 @@ public:
     MaterialNetworkTranslator(const std::string& mtlxLibPath);
 
     std::string ParseNetwork(const SdfPath& id, const HdMaterialNetwork2& network) const;
-    bool ParseMdlNetwork(const SdfPath& id,
-                         const HdMaterialNetwork2& network,
-                         std::string& fileUri,
-                         std::string& subIdentifier) const;
+    static bool ParseMdlNetwork(const HdMaterialNetwork2& network, std::string& fileUri, std::string& subIdentifier);
 
 private:
     MaterialX::DocumentPtr CreateMaterialXDocumentFromNetwork(const SdfPath& id, const HdMaterialNetwork2& network) const;
