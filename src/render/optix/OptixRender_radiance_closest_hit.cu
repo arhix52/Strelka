@@ -230,9 +230,10 @@ __inline__ __device__ float3 sampleLight(SamplerState& sampler,
         // case 1:
         //     lightSampleData = SampleDiscLight(light, float2(rand(rngState), rand(rngState)), state.position);
         //     break;
-        // case 2:
-        //     lightSampleData = SampleSphereLight(light, state.normal, state.position, float2(rand(rngState),
-        //     rand(rngState))); break;
+    case 2: {
+        lightSampleData = SampleSphereLight(light, uv, state.position); 
+        break;
+    }
     case 3: {
         lightSampleData = SampleDistantLight(light, uv, state.position);
         break;
