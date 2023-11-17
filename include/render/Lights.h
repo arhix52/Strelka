@@ -359,7 +359,7 @@ static __inline__ __device__ LightSampleData SampleSphereLight(const UniformLigh
     lightSampleData.distToLight = length(lightPoint - hitPoint);
 
     lightSampleData.area = 0.0f;
-    lightSampleData.normal = make_float3(l.normal);
+    lightSampleData.normal = sphereDirection;
     lightSampleData.pdf = 1.0f / (4.0f * M_PIf);
     lightSampleData.pointOnLight = lightPoint;
 
