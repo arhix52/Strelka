@@ -1250,15 +1250,9 @@ bool OptiXRender::createOptixMaterials()
         oka::Scene::MaterialDescription& currMatDesc = matDescs[i];
         if (currMatDesc.type == oka::Scene::MaterialDescription::Type::eMdl)
         {
-            // if (mNameToTargetCode.find(currMatDesc.name) != mNameToTargetCode.end())
-            // {
-            //     targetCodes.push_back(mNameToTargetCode[currMatDesc.name]);
-            //     compiledMaterials.push_back(mNameToCompiled[currMatDesc.name]);
-            //     continue;
-            // }
-            if (mNameToCompiled.find(currMatDesc.name) != mNameToCompiled.end())
+            if (auto it = mNameToCompiled.find(currMatDesc.name); it != mNameToCompiled.end())
             {
-                compiledMaterials.push_back(mNameToCompiled[currMatDesc.name]);
+                compiledMaterials.emplace_back(it->second);
                 continue;
             }
 
@@ -1274,7 +1268,6 @@ bool OptiXRender::createOptixMaterials()
                 {
                     STRELKA_ERROR("Unable to load MDL file: {}, Force replaced to default.mdl", currMatDesc.file.c_str());
                     mdlModule = mNameToModule["default.mdl"];
-                    // assert(0);
                 }
                 mNameToModule[currMatDesc.file] = mdlModule;
             }
@@ -1291,21 +1284,12 @@ bool OptiXRender::createOptixMaterials()
             }
             assert(materialInst);
             MaterialManager::CompiledMaterial* materialComp = nullptr;
-            // if (mNameToCompiled.find(currMatDesc.name) != mNameToCompiled.end())
-            // {
-            //     materialComp = mNameToCompiled[currMatDesc.name];
-            // }
-            // else
             {
                 materialComp = mMaterialManager.compileMaterial(materialInst);
                 mNameToCompiled[currMatDesc.name] = materialComp;
             }
             assert(materialComp);
             compiledMaterials.push_back(materialComp);
-            // MaterialManager::TargetCode* mdlTargetCode = mMaterialManager.generateTargetCode(&materialComp, 1);
-            // assert(mdlTargetCode);
-            // mNameToTargetCode[currMatDesc.name] = mdlTargetCode;
-            // targetCodes.push_back(mdlTargetCode);
         }
         else
         {
