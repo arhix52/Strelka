@@ -1,6 +1,9 @@
 #pragma once
 #include <stdint.h>
 
+// source: https://github.com/mmp/pbrt-v4/blob/5acc5e46cf4b5c3382babd6a3b93b87f54d79b0a/src/pbrt/util/float.h#L46C1-L47C1
+static constexpr float FloatOneMinusEpsilon = 0x1.fffffep-1;
+
 __device__ const unsigned int primeNumbers[32] = 
 {
   2, 3, 5, 7, 11, 13, 17, 19, 23, 29,
@@ -87,7 +90,7 @@ static __device__ float halton(uint32_t index, uint32_t base)
       i = (i - digit) / base;
       f *= s;
     }
-    return clamp(result, 0.0f, 1.0f - 1e-6f); // TODO: 1minusEps
+    return clamp(result, 0.0f, FloatOneMinusEpsilon);
 }
 
 static __device__ SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t seed)
