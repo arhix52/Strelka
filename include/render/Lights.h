@@ -205,7 +205,6 @@ static __inline__ __device__ float getRectLightPdf(const UniformLight& l, const 
     fillLightData(l, surfaceHitPoint, lightSampleData);
     lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
                             (dot(-lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
-    // lightSampleData.pdf = 1.0f / lightSampleData.area;
     return lightSampleData.pdf;
 }
 
@@ -219,28 +218,24 @@ static __inline__ __device__ float getSphereLightPdf()
     return 1.0f / (4.0f * M_PIf);
 }
 
-static __inline__ __device__ float getLightPdf(const UniformLight& l, const float3 lightHitPoint, const float3 surfaceHitPoint)
+static __inline__ __device__ float getLightPdf(const UniformLight& l,
+                                               const float3 lightHitPoint,
+                                               const float3 surfaceHitPoint)
 {
     switch (l.type)
     {
     case 0:
-    {
         // Rect
         return getRectLightPdf(l, lightHitPoint, surfaceHitPoint);
         break;
-    }
     case 2:
-    {
         // sphere
         return getSphereLightPdf();
         break;
-    }
-    case 3: 
-    {
+    case 3:
         // Distant
         return getDirectLightPdf(l.halfAngle);
         break;
-    }
     default:
         break;
     }

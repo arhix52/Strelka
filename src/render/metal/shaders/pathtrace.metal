@@ -241,8 +241,6 @@ float3 sampleLight(
     switch (light.type)
     {
     case 0:
-    {
-
         if (uniforms.rectLightSamplingMethod == 0)
         {
             lightSampleData = SampleRectLightUniform(light, uv, state.position);
@@ -252,20 +250,15 @@ float3 sampleLight(
             lightSampleData = SampleRectLight(light, uv, state.position);
         }
         break;
-    }
         // case 1:
         //     lightSampleData = SampleDiscLight(light, float2(rand(rngState), rand(rngState)), state.position);
         //     break;
     case 2:
-    {
         lightSampleData = SampleSphereLight(light, uv, state.position);
         break;
-    }
     case 3:
-    {
         lightSampleData = SampleDistantLight(light, uv, state.position);
         break;
-    }
     }
 
     toLight = lightSampleData.L;

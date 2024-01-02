@@ -323,23 +323,17 @@ static __inline__ float getLightPdf(device const UniformLight& l, const float3 l
     switch (l.type)
     {
     case 0:
-    {
         // Rect
         return getRectLightPdf(l, lightHitPoint, surfaceHitPoint);
         break;
-    }
-    case 2: 
-    { 
-        // sphere 
-        return getSphereLightPdf(); 
-        break; 
-    } 
-    case 3: 
-    {
+    case 2:
+        // sphere
+        return getSphereLightPdf();
+        break;
+    case 3:
         // Distant
         return getDirectLightPdf(l.halfAngle);
         break;
-    }
     default:
         break;
     }

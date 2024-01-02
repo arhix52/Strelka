@@ -22,27 +22,18 @@ kernel void toneMappingComputeShader(
     float3 result = inputColor.xyz;
     switch ((ToneMapperType) uniforms.tonemapperType)
     {
-        case ToneMapperType::eReinhard:
-        {
-            result = reinhard(result * uniforms.exposureValue);
-            break;
-        }
-        case ToneMapperType::eACES:
-        {
-            result = ACESFitted(result * uniforms.exposureValue);
-            break;
-        }
-        case ToneMapperType::eFilmic: 
-        {
-            result = ACESFilm(result * uniforms.exposureValue);
-            break;
-        }
-        case ToneMapperType::eNone:
-        {
-            break;
-        }
+    case ToneMapperType::eReinhard:
+        result = reinhard(result * uniforms.exposureValue);
+        break;
+    case ToneMapperType::eACES:
+        result = ACESFitted(result * uniforms.exposureValue);
+        break;
+    case ToneMapperType::eFilmic: 
+        result = ACESFilm(result * uniforms.exposureValue);
+        break;
+    case ToneMapperType::eNone:
+        break;
     }
-
     if (uniforms.gamma > 0.0f)
     {
         result = srgbGamma(result, uniforms.gamma);
