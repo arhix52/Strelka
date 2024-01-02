@@ -157,9 +157,9 @@ uint32_t Scene::createSphereLightMesh()
 
     std::vector<Scene::Vertex> vertices;
     std::vector<uint32_t> indices;
-    int segments = 16;
-    int rings = 16;
-    float radius = 1.0f;
+    const int segments = 16;
+    const int rings = 16;
+    const float radius = 1.0f;
     // Generate vertices and normals
     for (int i = 0; i <= rings; ++i)
     {
@@ -202,7 +202,7 @@ uint32_t Scene::createSphereLightMesh()
             indices.push_back(p3);
         }
     }
-    uint32_t meshId = createMesh(vertices, indices);
+    const uint32_t meshId = createMesh(vertices, indices);
     assert(meshId != -1);
 
     return meshId;
@@ -357,7 +357,7 @@ uint32_t Scene::createLight(const UniformLightDesc& desc)
 
 void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
 {
-    float intensityPerPoint = desc.intensity; // light intensity
+    const float intensityPerPoint = desc.intensity; // light intensity
     // transform to GPU light
     // Rect Light
     if (desc.type == 0)

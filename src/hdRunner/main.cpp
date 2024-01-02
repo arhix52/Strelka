@@ -459,7 +459,7 @@ int main(int argc, const char* argv[])
     if (result.count("help"))
     {
         std::cout << options.help() << std::endl;
-        exit(0);
+        return 0;
     }
 
     // check params
