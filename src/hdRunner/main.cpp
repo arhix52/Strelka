@@ -464,10 +464,15 @@ int main(int argc, const char* argv[])
 
     // check params
     const std::string usdFile(result["s"].as<std::string>());
-    if (!std::filesystem::exists(usdFile) && !usdFile.empty())
+    if (usdFile.empty())
     {
-        STRELKA_FATAL("usd file doesn't exist");
-        exit(0);
+        STRELKA_FATAL("Specify usd file name");
+        return 1;
+    }
+    if (!std::filesystem::exists(usdFile))
+    {
+        STRELKA_FATAL("Specified usd file: {} doesn't exist", usdFile.c_str());
+        return -1;
     }
 
     const std::filesystem::path usdFilePath = { usdFile.c_str() };
