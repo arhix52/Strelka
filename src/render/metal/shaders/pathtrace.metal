@@ -237,9 +237,7 @@ float3 sampleLight(
     thread float& lightPdf)
 {
     LightSampleData lightSampleData = {};
-    const float u = random<SampleDimension::eLightPointX>(samplerRnd);
-    const float v = random<SampleDimension::eLightPointY>(samplerRnd);
-    const float2 uv = float2(u, v);
+    const float2 uv = float2(random<SampleDimension::eLightPointX>(samplerRnd), random<SampleDimension::eLightPointY>(samplerRnd));
     switch (light.type)
     {
     case 0:
