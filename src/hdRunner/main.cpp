@@ -442,7 +442,7 @@ bool saveScreenshot(std::string& outputFilePath, unsigned char* mappedMem, uint3
 
 int main(int argc, const char* argv[])
 {
-    oka::Logmanager loggerManager;
+    const oka::Logmanager loggerManager;
     // config. options
     cxxopts::Options options("Strelka -s <USD Scene path>", "commands");
 
@@ -459,24 +459,29 @@ int main(int argc, const char* argv[])
     if (result.count("help"))
     {
         std::cout << options.help() << std::endl;
-        exit(0);
+        return 0;
     }
 
     // check params
-    std::string usdFile(result["s"].as<std::string>());
-    if (!std::filesystem::exists(usdFile) && !usdFile.empty())
+    const std::string usdFile(result["s"].as<std::string>());
+    if (usdFile.empty())
     {
-        STRELKA_FATAL("usd file doesn't exist");
-        exit(0);
+        STRELKA_FATAL("Specify usd file name");
+        return 1;
+    }
+    if (!std::filesystem::exists(usdFile))
+    {
+        STRELKA_FATAL("Specified usd file: {} doesn't exist", usdFile.c_str());
+        return -1;
     }
 
     const std::filesystem::path usdFilePath = { usdFile.c_str() };
     const std::string resourceSearchPath = usdFilePath.parent_path().string();
     STRELKA_DEBUG("Resource path {}", resourceSearchPath);
 
-    int32_t iterationToCapture(result["i"].as<int32_t>());
+    const int32_t iterationToCapture(result["i"].as<int32_t>());
     // Init plugin.
-    HdRendererPluginHandle pluginHandle = GetHdStrelkaPlugin();
+    const HdRendererPluginHandle pluginHandle = GetHdStrelkaPlugin();
 
     if (!pluginHandle)
     {
@@ -529,8 +534,10 @@ int main(int argc, const char* argv[])
 
     ctx->mSettingsManager->setAs<float>("render/post/gamma", 2.4f); // 0.0f - off
     // Dev settings:
-    ctx->mSettingsManager->setAs<float>("render/pt/dev/shadowRayTmin", 0.0f); // offset to avoid self-collision in light sampling
-    ctx->mSettingsManager->setAs<float>("render/pt/dev/materialRayTmin", 0.0f); // offset to avoid self-collision in bsdf sampling
+    ctx->mSettingsManager->setAs<float>("render/pt/dev/shadowRayTmin", 0.0f); // offset to avoid self-collision in light
+                                                                              // sampling
+    ctx->mSettingsManager->setAs<float>("render/pt/dev/materialRayTmin", 0.0f); // offset to avoid self-collision in
+                                                                                // bsdf sampling
 
     HdDriver driver;
     driver.name = _AppTokens->HdStrelkaDriver;
@@ -544,7 +551,7 @@ int main(int argc, const char* argv[])
 
     oka::Display* display = oka::DisplayFactory::createDisplay();
     display->init(imageWidth, imageHeight, ctx);
-    
+
     // Handle cmdline args.
     // Load scene.
     TfStopwatch timerLoad;
@@ -566,8 +573,8 @@ int main(int argc, const char* argv[])
     STRELKA_INFO("USD scene loaded {}", timerLoad.GetSeconds());
 
     // Print the up-axis
-    TfToken upAxis = UsdGeomGetStageUpAxis(stage);
-    STRELKA_INFO("Stage up-axis: {}", (std::string) upAxis);
+    const TfToken upAxis = UsdGeomGetStageUpAxis(stage);
+    STRELKA_INFO("Stage up-axis: {}", (std::string)upAxis);
 
     // Print the stage's linear units, or "meters per unit"
     STRELKA_INFO("Meters per unit: {}", UsdGeomGetStageMetersPerUnit(stage));
@@ -580,7 +587,7 @@ int main(int argc, const char* argv[])
     sceneDelegate.SetTime(0);
     sceneDelegate.SetRefineLevelFallback(4);
 
-    double meterPerUnit = UsdGeomGetStageMetersPerUnit(stage);
+    const double meterPerUnit = UsdGeomGetStageMetersPerUnit(stage);
 
     // Init default camera
     SdfPath cameraPath = SdfPath("/defaultCamera");
@@ -595,7 +602,7 @@ int main(int argc, const char* argv[])
 
     // std::vector<std::pair<HdCamera*, SdfPath>> cameras = FindAllCameras(stage, renderIndex);
 
-    std::array<HdRenderBuffer*, 3> renderBuffers;
+    std::array<HdRenderBuffer*, 3> renderBuffers{};
     for (int i = 0; i < 3; ++i)
     {
         renderBuffers[i] = (HdRenderBuffer*)renderDelegate->CreateFallbackBprim(HdPrimTypeTokens->renderBuffer);
@@ -607,7 +614,7 @@ int main(int argc, const char* argv[])
     framing.displayWindow = GfRange2f(GfVec2f(0.0f, 0.0f), GfVec2f((float)imageWidth, (float)imageHeight));
     framing.pixelAspectRatio = 1.0f;
 
-    std::pair<bool, CameraUtilConformWindowPolicy> overrideWindowPolicy(false, CameraUtilFit);
+    const std::pair<bool, CameraUtilConformWindowPolicy> overrideWindowPolicy(false, CameraUtilFit);
 
     // TODO: add UI control here
     TfTokenVector renderTags{ HdRenderTagTokens->geometry, HdRenderTagTokens->render };
@@ -667,7 +674,7 @@ int main(int argc, const char* argv[])
         auto currentTime = std::chrono::high_resolution_clock::now();
         const double deltaTime = std::chrono::duration<double, std::milli>(currentTime - prevTime).count() / 1000.0;
 
-        uint32_t cameraSpeed = ctx->mSettingsManager->getAs<uint32_t>("render/cameraSpeed");
+        const auto cameraSpeed = ctx->mSettingsManager->getAs<float>("render/cameraSpeed");
         cameraController.update(deltaTime, cameraSpeed);
         prevTime = currentTime;
 
@@ -687,7 +694,7 @@ int main(int argc, const char* argv[])
         outputImage.width = outputBuffer->width();
         outputImage.pixel_format = outputBuffer->getFormat();
 
-        const uint32_t totalSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
+        const auto totalSpp = ctx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
         const uint32_t currentSpp = ctx->mSubframeIndex;
         bool needScreenshot = ctx->mSettingsManager->getAs<bool>("render/pt/needScreenshot");
 
@@ -697,21 +704,19 @@ int main(int argc, const char* argv[])
             // need to store screen only once
             ctx->mSettingsManager->setAs<bool>("render/pt/screenshotSPP", false);
         }
-    
+
         if (needScreenshot)
         {
-            std::size_t foundSlash = usdPath.find_last_of("/\\");
+            const std::size_t foundSlash = usdPath.find_last_of("/\\");
 
-            std::size_t foundDot = usdPath.find_last_of('.');
+            const std::size_t foundDot = usdPath.find_last_of('.');
             std::string fileName = usdPath.substr(0, foundDot);
             fileName = fileName.substr(foundSlash + 1);
 
             auto generateName = [&](const uint32_t attempt) {
                 std::string outputFilePath = fileName + "_" + std::to_string(currentSpp) + "i_" +
                                              std::to_string(ctx->mSettingsManager->getAs<uint32_t>("render/pt/depth")) +
-                                             "d_" +
-                                             std::to_string(totalSpp) +
-                                             "spp_" + std::to_string(attempt) + ".png";
+                                             "d_" + std::to_string(totalSpp) + "spp_" + std::to_string(attempt) + ".png";
                 return outputFilePath;
             };
             uint32_t attempt = 0;
@@ -734,13 +739,13 @@ int main(int argc, const char* argv[])
         display->onEndFrame(); // submit command buffer and present
 
         auto finish = std::chrono::high_resolution_clock::now();
-        double frameTime = std::chrono::duration<double, std::milli>(finish - start).count();
+        const double frameTime = std::chrono::duration<double, std::milli>(finish - start).count();
 
         surfaceController.release(versionId);
 
         display->setWindowTitle((std::string("Strelka") + " [" + std::to_string(frameTime) + " ms]" + " [" +
-                                std::to_string(currentSpp) + " spp]")
-                                   .c_str());
+                                 std::to_string(currentSpp) + " spp]")
+                                    .c_str());
         ++frameCount;
     }
 

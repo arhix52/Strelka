@@ -264,11 +264,11 @@ __inline__ __device__ float3 sampleLight(SamplerState& sampler,
                                          float& lightPdf)
 {
     LightSampleData lightSampleData = {};
-    const float2 uv = make_float2(random<SampleDimension::eLightPointX>(sampler),
-                                random<SampleDimension::eLightPointY>(sampler));
+    const float2 uv =
+        make_float2(random<SampleDimension::eLightPointX>(sampler), random<SampleDimension::eLightPointY>(sampler));
     switch (light.type)
     {
-    case 0: {
+    case 0:
         if (params.rectLightSamplingMethod == 0)
         {
             lightSampleData = SampleRectLightUniform(light, uv, state.position);
@@ -278,17 +278,16 @@ __inline__ __device__ float3 sampleLight(SamplerState& sampler,
             lightSampleData = SampleRectLight(light, uv, state.position);
         }
         break;
-    }
         // case 1:
         //     lightSampleData = SampleDiscLight(light, float2(rand(rngState), rand(rngState)), state.position);
         //     break;
-        // case 2:
-        //     lightSampleData = SampleSphereLight(light, state.normal, state.position, float2(rand(rngState),
-        //     rand(rngState))); break;
-    case 3: {
+    case 2:
+        lightSampleData = SampleSphereLight(light, uv, state.position);
+        break;
+
+    case 3:
         lightSampleData = SampleDistantLight(light, uv, state.position);
         break;
-    }
     }
 
     toLight = lightSampleData.L;
