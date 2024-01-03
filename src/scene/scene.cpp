@@ -148,74 +148,6 @@ uint32_t Scene::createRectLightMesh()
     return meshId;
 }
 
-uint32_t vertexForEdge(Lookup& lookup, std::vector<Scene::Vertex>& vertices, uint32_t first, uint32_t second)
-{
-    Lookup::key_type key(first, second);
-    if (key.first > key.second)
-    {
-        std::swap(key.first, key.second);
-    }
-
-    auto inserted = lookup.insert({ key, (uint32_t)vertices.size() });
-    if (inserted.second)
-    {
-        auto& edge0 = vertices[first].pos;
-        auto& edge1 = vertices[second].pos;
-        auto point = normalize(glm::float3{ (edge0.x + edge1.x) / 2, (edge0.y + edge1.y) / 2, (edge0.z + edge1.z) / 2 });
-        Scene::Vertex v;
-        v.pos = point;
-        vertices.push_back(v);
-    }
-
-    return inserted.first->second;
-}
-
-std::vector<uint32_t> subdivide(std::vector<Scene::Vertex>& vertices, std::vector<uint32_t>& indices)
-{
-    Lookup lookup;
-    std::vector<uint32_t> result;
-
-    for (uint32_t i = 0; i < indices.size(); i += 3)
-    {
-        std::array<uint32_t, 3> mid;
-        for (int edge = 0; edge < 3; ++edge)
-        {
-            mid[edge] = vertexForEdge(lookup, vertices, indices[i + edge], indices[(i + (edge + 1) % 3)]);
-        }
-
-        result.push_back(indices[i]);
-        result.push_back(mid[0]);
-        result.push_back(mid[2]);
-
-        result.push_back(indices[i + 1]);
-        result.push_back(mid[1]);
-        result.push_back(mid[0]);
-
-        result.push_back(indices[i + 2]);
-        result.push_back(mid[2]);
-        result.push_back(mid[1]);
-
-        result.push_back(mid[0]);
-        result.push_back(mid[1]);
-        result.push_back(mid[2]);
-    }
-
-    return result;
-}
-
-IndexedMesh subdivideIcosphere(int subdivisions, std::vector<Scene::Vertex>& _vertices, std::vector<uint32_t>& _indices)
-{
-    std::vector<Scene::Vertex> vertices = _vertices;
-    std::vector<uint32_t> triangles = _indices;
-
-    for (int i = 0; i < subdivisions; ++i)
-    {
-        triangles = subdivide(vertices, triangles);
-    }
-
-    return { vertices, triangles };
-}
-
 uint32_t Scene::createSphereLightMesh()
 {
     if (mSphereLightMeshId != -1)
@@ -223,102 +155,54 @@ uint32_t Scene::createSphereLightMesh()
         return mSphereLightMeshId;
     }
 
-    std::vector<Scene::Vertex> vertices(12); // 12 vertices
+    std::vector<Scene::Vertex> vertices;
     std::vector<uint32_t> indices;
-
-    const float PI = acos(-1);
-    const float H_ANGLE = PI / 180 * 72; // 72 degree = 360 / 5
-    const float V_ANGLE = atanf(1.0f / 2); // elevation = 26.565 degree
-
-    int i0 = 0, i1, i2, i3 = 11; // indices
-    float z, xy; // coords
-    float hAngle1 = -PI / 2 - H_ANGLE / 2; // start from -126 deg at 2nd row
-    float hAngle2 = -PI / 2; // start from -90 deg at 3rd row
-
-    // the first top vertex (0, 0, r)
-    float radius = 1.0f;
-    Scene::Vertex v0, v1, v2;
-    v0.pos = { 0, 0, radius };
-
-    vertices[i0] = v0;
-
-    // 10 vertices at 2nd and 3rd rows
-    for (int i = 1; i <= 4; ++i)
+    const int segments = 16;
+    const int rings = 16;
+    const float radius = 1.0f;
+    // Generate vertices and normals
+    for (int i = 0; i <= rings; ++i)
     {
-        i1 = i; // 2nd row
-        i2 = i + 5; // 3d row
+        float theta = static_cast<float>(i) * static_cast<float>(M_PI) / static_cast<float>(rings);
+        float sinTheta = sin(theta);
+        float cosTheta = cos(theta);
 
-        z = radius * sinf(V_ANGLE); // elevaton
-        xy = radius * cosf(V_ANGLE);
+        for (int j = 0; j <= segments; ++j)
+        {
+            float phi = static_cast<float>(j) * 2.0f * static_cast<float>(M_PI) / static_cast<float>(segments);
+            float sinPhi = sin(phi);
+            float cosPhi = cos(phi);
 
-        v1.pos = { xy * cosf(hAngle1), xy * sinf(hAngle1), z };
-        v2.pos = { xy * cosf(hAngle2), xy * sinf(hAngle2), -z };
+            float x = cosPhi * sinTheta;
+            float y = cosTheta;
+            float z = sinPhi * sinTheta;
 
-        vertices[i1] = v1;
-        vertices[i2] = v2;
+            glm::float3 pos = { radius * x, radius * y, radius * z };
+            glm::float3 normal = { x, y, z };
 
-        // 1st row
-        indices.push_back(i0);
-        indices.push_back(i1);
-        indices.push_back(i1 + 1);
-
-        // 2nd row
-        indices.push_back(i1);
-        indices.push_back(i2);
-        indices.push_back(i1 + 1);
-
-        indices.push_back(i2);
-        indices.push_back(i1 + 6);
-        indices.push_back(i1 + 1);
-
-        // 3d row
-        indices.push_back(i2);
-        indices.push_back(i3);
-        indices.push_back(i1 + 6);
-
-        // next horizontal angles
-        hAngle1 += H_ANGLE;
-        hAngle2 += H_ANGLE;
+            vertices.push_back(Scene::Vertex{ pos, 0, packNormals(normal) });
+        }
     }
+    // Generate indices
+    for (int i = 0; i < rings; ++i)
+    {
+        for (int j = 0; j < segments; ++j)
+        {
+            int p0 = i * (segments + 1) + j;
+            int p1 = p0 + 1;
+            int p2 = (i + 1) * (segments + 1) + j;
+            int p3 = p2 + 1;
 
-    i1 = 5; // 2nd row
-    i2 = 10; // 3d row
+            indices.push_back(p0);
+            indices.push_back(p1);
+            indices.push_back(p2);
 
-    z = radius * sinf(V_ANGLE); // elevaton
-    xy = radius * cosf(V_ANGLE);
-
-    v1.pos = { xy * cosf(hAngle1), xy * sinf(hAngle1), z };
-    v2.pos = { xy * cosf(hAngle2), xy * sinf(hAngle2), -z };
-
-    vertices[i1] = v1;
-    vertices[i2] = v2;
-
-    // 1st row
-    indices.push_back(i0);
-    indices.push_back(i1);
-    indices.push_back(1);
-
-    // 2nd row
-    indices.push_back(i1);
-    indices.push_back(i2);
-    indices.push_back(1);
-
-    indices.push_back(i2);
-    indices.push_back(2);
-    indices.push_back(1);
-
-    // 3d row
-    indices.push_back(i2);
-    indices.push_back(i3);
-    indices.push_back(3);
-
-    // the last bottom vertex (0, 0, -r)
-    v1.pos = { 0, 0, -radius };
-    vertices[i3] = v1;
-
-    IndexedMesh im = subdivideIcosphere(3, vertices, indices);
-
-    uint32_t meshId = createMesh(im.first, im.second);
+            indices.push_back(p2);
+            indices.push_back(p1);
+            indices.push_back(p3);
+        }
+    }
+    const uint32_t meshId = createMesh(vertices, indices);
     assert(meshId != -1);
 
     return meshId;
@@ -473,7 +357,7 @@ uint32_t Scene::createLight(const UniformLightDesc& desc)
 
 void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
 {
-    float intensityPerPoint = desc.intensity; // light intensity
+    const float intensityPerPoint = desc.intensity; // light intensity
     // transform to GPU light
     // Rect Light
     if (desc.type == 0)

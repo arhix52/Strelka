@@ -225,16 +225,6 @@ static __inline__ LightSampleData SampleRectLightUniform(device const UniformLig
     return lightSampleData;
 }
 
-static __inline__ float getLightPdf(device const UniformLight& l, const float3 surfaceHitPoint)
-{
-    SphQuad quad = init(l, surfaceHitPoint);
-    if (isnan(quad.S) || quad.S <= 0.0f)
-    {
-        return 0.0f;
-    }
-    return 1.0f / quad.S;
-}
-
 static __inline__ float getRectLightPdf(device const UniformLight& l, const float3 lightHitPoint, const float3 surfaceHitPoint)
 {
     LightSampleData lightSampleData {};
@@ -242,7 +232,6 @@ static __inline__ float getRectLightPdf(device const UniformLight& l, const floa
     fillLightData(l, surfaceHitPoint, lightSampleData);
     lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
                             (dot(-lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
-    // lightSampleData.pdf = 1.0f / lightSampleData.area;
     return lightSampleData.pdf;
 }
 
@@ -261,6 +250,11 @@ static __inline__ float getDirectLightPdf(float angle)
 {
     return 1.0f / (2.0f * M_PI_F * (1.0f - cos(angle)));
 }
+
+static __inline__ float getSphereLightPdf() 
+{ 
+    return 1.0f / (4.0f * M_PI_F); 
+} 
 
 static float3 SampleCone(float2 uv, float angle, float3 direction, thread float& pdf) {
 
@@ -295,22 +289,51 @@ static __inline__ LightSampleData SampleDistantLight(device const UniformLight& 
     return lightSampleData;
 }
 
+static __inline__ LightSampleData SampleSphereLight(device const UniformLight& l, const float2 u, const float3 hitPoint) 
+{ 
+    LightSampleData lightSampleData; 
+ 
+    // Generate a random direction on the sphere using solid angle sampling 
+    float cosTheta = 1.0f - 2.0f * u.x;  // cosTheta is uniformly distributed between [-1, 1] 
+    float sinTheta = sqrt(1.0f - cosTheta * cosTheta); 
+    float phi = 2.0f * M_PI_F * u.y;  // phi is uniformly distributed between [0, 2*pi] 
+     
+    const float radius = l.points[0].x; 
+ 
+    // Convert spherical coordinates to Cartesian coordinates 
+    float3 sphereDirection = float3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta); 
+    // Scale the direction by the radius of the sphere and move it to the light position 
+    float3 lightPoint = float3(l.points[1]) + radius * sphereDirection; 
+    // Calculate the direction from the hit point to the sampled point on the light 
+    lightSampleData.L = normalize(lightPoint - hitPoint); 
+     
+    // Calculate the distance to the light 
+    lightSampleData.distToLight = length(lightPoint - hitPoint); 
+ 
+    lightSampleData.area = 0.0f; 
+    lightSampleData.normal = sphereDirection; 
+    lightSampleData.pdf = 1.0f / (4.0f * M_PI_F); 
+    lightSampleData.pointOnLight = lightPoint; 
+ 
+    return lightSampleData; 
+}
+
 static __inline__ float getLightPdf(device const UniformLight& l, const float3 lightHitPoint, const float3 surfaceHitPoint)
 {
     switch (l.type)
     {
     case 0:
-    {
         // Rect
         return getRectLightPdf(l, lightHitPoint, surfaceHitPoint);
         break;
-    }
-    case 3: 
-    {
+    case 2:
+        // sphere
+        return getSphereLightPdf();
+        break;
+    case 3:
         // Distant
         return getDirectLightPdf(l.halfAngle);
         break;
-    }
     default:
         break;
     }
