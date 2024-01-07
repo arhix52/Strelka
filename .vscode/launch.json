@@ -25,7 +25,7 @@
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/build/",
-            "console": "externalTerminal"
+            // "console": "externalTerminal"
         },
         {
                 "name": "(Linux) Launch",
