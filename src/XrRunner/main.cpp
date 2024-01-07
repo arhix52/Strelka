@@ -14,8 +14,9 @@ int main(int argc, const char* argv[])
 
     openXrProgram->CreateInstance();
     openXrProgram->InitializeSystem();
-
     openXrProgram->InitializeDevice();
-    
+
+    openXrProgram->InitializeSession();    
+
     return 0;
 }

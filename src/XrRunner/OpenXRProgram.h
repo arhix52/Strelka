@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <openxr/openxr.h>
+#include <vulkan/vulkan.h>
 
 namespace oka
 {
@@ -46,10 +47,22 @@ struct IOpenXrProgram {
     virtual XrEnvironmentBlendMode GetPreferredBlendMode() const = 0;
 };
 
-struct Swapchain {
-    XrSwapchain handle;
-    int32_t width;
-    int32_t height;
+struct Swapchain
+{
+    Swapchain(XrSwapchain swapchain, VkFormat format, uint32_t width, uint32_t height)
+        : swapchain(swapchain), format(format), width(width), height(height)
+    {
+    }
+
+    ~Swapchain()
+    {
+        xrDestroySwapchain(swapchain);
+    }
+
+    XrSwapchain swapchain;
+    VkFormat format;
+    uint32_t width;
+    uint32_t height;
 };
 
 std::shared_ptr<IOpenXrProgram> CreateOpenXrProgram();
