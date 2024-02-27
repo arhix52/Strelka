@@ -2,8 +2,9 @@
 
 #include <render/common.h>
 #include <render/buffer.h>
-
 #include <render/Render.h>
+
+#include <sceneloader/gltfloader.h>
 
 #include <log.h>
 #include <logmanager.h>
@@ -13,7 +14,7 @@
 int main(int argc, const char* argv[])
 {
     const oka::Logmanager loggerManager;
-    cxxopts::Options options("Strelka -s <USD Scene path>", "commands");
+    cxxopts::Options options("Strelka -s <Scene path>", "commands");
 
     // clang-format off
     options.add_options()
@@ -34,19 +35,19 @@ int main(int argc, const char* argv[])
     }
 
     // check params
-    const std::string usdFile(result["s"].as<std::string>());
-    if (usdFile.empty())
+    const std::string sceneFile(result["s"].as<std::string>());
+    if (sceneFile.empty())
     {
-        STRELKA_FATAL("Specify usd file name");
+        STRELKA_FATAL("Specify scene file name");
         return 1;
     }
-    if (!std::filesystem::exists(usdFile))
+    if (!std::filesystem::exists(sceneFile))
     {
-        STRELKA_FATAL("Specified usd file: {} doesn't exist", usdFile.c_str());
+        STRELKA_FATAL("Specified scene file: {} doesn't exist", sceneFile.c_str());
         return -1;
     }
-    const std::filesystem::path usdFilePath = { usdFile.c_str() };
-    const std::string resourceSearchPath = usdFilePath.parent_path().string();
+    const std::filesystem::path sceneFilePath = { sceneFile.c_str() };
+    const std::string resourceSearchPath = sceneFilePath.parent_path().string();
 
 
     auto* ctx = new oka::SharedContext();
@@ -98,6 +99,9 @@ int main(int argc, const char* argv[])
     oka::Render* render = oka::RenderFactory::createRender(type);
     oka::Scene scene;
     
+    oka::GltfLoader sceneLoader;
+    sceneLoader.loadGltf(sceneFilePath.string(), scene);
+
     oka::Camera camera;
     camera.name = "Main";
     camera.fov = 45;
@@ -129,7 +133,8 @@ int main(int argc, const char* argv[])
         display->onBeginFrame();
 
         render->render(outputBuffer);
-        oka::ImageBuffer outputImage;
+        outputBuffer->map();
+        oka::ImageBuffer outputImage;        
         outputImage.data = outputBuffer->getHostPointer();
         outputImage.dataSize = outputBuffer->getHostDataSize();
         outputImage.height = outputBuffer->height();
@@ -138,6 +143,9 @@ int main(int argc, const char* argv[])
         display->drawFrame(outputImage); // blit rendered image to swapchain
         display->drawUI(); // render ui to swapchain image in window resolution
         display->onEndFrame(); // submit command buffer and present
+
+        outputBuffer->unmap();
+        
         const uint32_t currentSpp = ctx->mSubframeIndex;
         auto finish = std::chrono::high_resolution_clock::now();
         const double frameTime = std::chrono::duration<double, std::milli>(finish - start).count();

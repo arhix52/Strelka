@@ -1063,11 +1063,11 @@ void OptiXRender::init()
     }
 
     createContext();
-    createAccelerationStructure();
+    // createAccelerationStructure();
     createModule();
     createProgramGroups();
     createPipeline();
-    createSbt();
+    // createSbt();
 }
 
 Buffer* OptiXRender::createBuffer(const BufferDesc& desc)

@@ -33,6 +33,7 @@ target_include_directories(${RUNNER_NAME} PUBLIC ${ROOT_HOME}/include/)
 target_link_libraries(${RUNNER_NAME} PUBLIC 
   cxxopts::cxxopts
   scene
+  sceneloader
   settings
   display
   render

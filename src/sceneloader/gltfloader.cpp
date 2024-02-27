@@ -199,7 +199,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const tin
 
     uint32_t meshId = scene.createMesh(vertices, indices);
     assert(meshId != -1);
-    uint32_t instId = scene.createInstance(meshId, matId, transform, massCenter);
+    uint32_t instId = scene.createInstance(Instance::Type::eMesh, meshId, matId, transform);
     assert(instId != -1);
 }
 
@@ -297,145 +297,160 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
     }
 }
 
-VkSamplerAddressMode getVkWrapMode(int32_t wrapMode)
-{
-    switch (wrapMode)
-    {
-    case 10497:
-        return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    case 33071:
-        return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    case 33648:
-        return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-    default:
-        return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    }
-}
+// VkSamplerAddressMode getVkWrapMode(int32_t wrapMode)
+// {
+//     switch (wrapMode)
+//     {
+//     case 10497:
+//         return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+//     case 33071:
+//         return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+//     case 33648:
+//         return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+//     default:
+//         return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+//     }
+// }
 
-VkFilter getVkFilterMode(int32_t filterMode)
-{
-    switch (filterMode)
-    {
-    case 9728:
-        return VK_FILTER_NEAREST;
-    case 9729:
-        return VK_FILTER_LINEAR;
-    case 9984:
-        return VK_FILTER_NEAREST;
-    case 9985:
-        return VK_FILTER_NEAREST;
-    case 9986:
-        return VK_FILTER_LINEAR;
-    case 9987:
-        return VK_FILTER_LINEAR;
-    default:
-        return VK_FILTER_LINEAR;
-    }
-}
+// VkFilter getVkFilterMode(int32_t filterMode)
+// {
+//     switch (filterMode)
+//     {
+//     case 9728:
+//         return VK_FILTER_NEAREST;
+//     case 9729:
+//         return VK_FILTER_LINEAR;
+//     case 9984:
+//         return VK_FILTER_NEAREST;
+//     case 9985:
+//         return VK_FILTER_NEAREST;
+//     case 9986:
+//         return VK_FILTER_LINEAR;
+//     case 9987:
+//         return VK_FILTER_LINEAR;
+//     default:
+//         return VK_FILTER_LINEAR;
+//     }
+// }
 std::unordered_map<uint32_t, uint32_t> texIdToModelSamp{};
 std::unordered_map<uint32_t, uint32_t> modelSampIdToLoadedSampId{};
 
-void findTextureSamplers(const tinygltf::Model& model, oka::Scene& scene, oka::TextureManager& textureManager)
-{
-    oka::TextureManager::TextureSamplerDesc currentSamplerDesc{};
-    uint32_t samplerNumber = 0;
+// void findTextureSamplers(const tinygltf::Model& model, oka::Scene& scene, oka::TextureManager& textureManager)
+// {
+//     oka::TextureManager::TextureSamplerDesc currentSamplerDesc{};
+//     uint32_t samplerNumber = 0;
 
-    for (const tinygltf::Sampler& sampler : model.samplers)
-    {
-        currentSamplerDesc = { getVkFilterMode(sampler.minFilter), getVkFilterMode(sampler.magFilter), getVkWrapMode(sampler.wrapS), getVkWrapMode(sampler.wrapT) };
-        if (textureManager.sampDescToId.count(currentSamplerDesc) == 0)
-        {
-            if (textureManager.sampDescToId.size() < 15)
-            {
-                textureManager.createTextureSampler(currentSamplerDesc);
-            }
-            else
-            {
-                std::cerr << "Samplers size limit exceeded" << std::endl;
-            }
-        }
-        modelSampIdToLoadedSampId[samplerNumber] = textureManager.sampDescToId.find(currentSamplerDesc)->second;
-        ++samplerNumber;
-    }
-}
+//     for (const tinygltf::Sampler& sampler : model.samplers)
+//     {
+//         currentSamplerDesc = { getVkFilterMode(sampler.minFilter), getVkFilterMode(sampler.magFilter), getVkWrapMode(sampler.wrapS), getVkWrapMode(sampler.wrapT) };
+//         if (textureManager.sampDescToId.count(currentSamplerDesc) == 0)
+//         {
+//             if (textureManager.sampDescToId.size() < 15)
+//             {
+//                 textureManager.createTextureSampler(currentSamplerDesc);
+//             }
+//             else
+//             {
+//                 std::cerr << "Samplers size limit exceeded" << std::endl;
+//             }
+//         }
+//         modelSampIdToLoadedSampId[samplerNumber] = textureManager.sampDescToId.find(currentSamplerDesc)->second;
+//         ++samplerNumber;
+//     }
+// }
 
-void loadTextures(const tinygltf::Model& model, oka::Scene& scene, oka::TextureManager& textureManager)
-{
-    texIdToModelSamp[-1] = 0;
-    for (const tinygltf::Texture& tex : model.textures)
-    {
-        const tinygltf::Image& image = model.images[tex.source];
-        // TODO: create sampler for tex
+// void loadTextures(const tinygltf::Model& model, oka::Scene& scene, oka::TextureManager& textureManager)
+// {
+//     texIdToModelSamp[-1] = 0;
+//     for (const tinygltf::Texture& tex : model.textures)
+//     {
+//         const tinygltf::Image& image = model.images[tex.source];
+//         // TODO: create sampler for tex
 
-        if (image.component == 3)
-        {
-            // unsupported
-            return;
-        }
-        else if (image.component == 4)
-        {
-            // supported
-        }
-        else
-        {
-            // error
-        }
+//         if (image.component == 3)
+//         {
+//             // unsupported
+//             return;
+//         }
+//         else if (image.component == 4)
+//         {
+//             // supported
+//         }
+//         else
+//         {
+//             // error
+//         }
 
-        const void* data = image.image.data();
-        uint32_t width = image.width;
-        uint32_t height = image.height;
+//         const void* data = image.image.data();
+//         uint32_t width = image.width;
+//         uint32_t height = image.height;
 
-        const std::string name = image.uri;
+//         const std::string name = image.uri;
 
-        int texId = textureManager.loadTextureGltf(data, width, height, name);
-        assert(texId != -1);
+//         int texId = textureManager.loadTextureGltf(data, width, height, name);
+//         assert(texId != -1);
 
-        texIdToModelSamp[texId] = modelSampIdToLoadedSampId.find(tex.sampler)->second;
-    }
-}
+//         texIdToModelSamp[texId] = modelSampIdToLoadedSampId.find(tex.sampler)->second;
+//     }
+// }
 
-void loadMaterials(const tinygltf::Model& model, oka::Scene& scene, oka::TextureManager& textureManager)
+void loadMaterials(const tinygltf::Model& model, oka::Scene& scene)
 {
     for (const tinygltf::Material& material : model.materials)
     {
-        Material currMaterial{};
-        currMaterial.specular = glm::float4(1.0f);
-        currMaterial.diffuse = glm::float4(material.pbrMetallicRoughness.baseColorFactor[0],
-                                           material.pbrMetallicRoughness.baseColorFactor[1],
-                                           material.pbrMetallicRoughness.baseColorFactor[2],
-                                           material.pbrMetallicRoughness.baseColorFactor[3]);
-        currMaterial.texNormalId = material.normalTexture.index;
-        currMaterial.sampNormalId = texIdToModelSamp.find(currMaterial.texNormalId)->second;
+        // oka::Scene::MaterialDescription currMaterial{};
+        // currMaterial.specular = glm::float4(1.0f);
+        // currMaterial.diffuse = glm::float4(material.pbrMetallicRoughness.baseColorFactor[0],
+        //                                    material.pbrMetallicRoughness.baseColorFactor[1],
+        //                                    material.pbrMetallicRoughness.baseColorFactor[2],
+        //                                    material.pbrMetallicRoughness.baseColorFactor[3]);
+        // currMaterial.texNormalId = material.normalTexture.index;
+        // currMaterial.sampNormalId = texIdToModelSamp.find(currMaterial.texNormalId)->second;
 
-        currMaterial.baseColorFactor = glm::float4(material.pbrMetallicRoughness.baseColorFactor[0],
-                                                   material.pbrMetallicRoughness.baseColorFactor[1],
-                                                   material.pbrMetallicRoughness.baseColorFactor[2],
-                                                   material.pbrMetallicRoughness.baseColorFactor[3]);
+        // currMaterial.baseColorFactor = glm::float4(material.pbrMetallicRoughness.baseColorFactor[0],
+        //                                            material.pbrMetallicRoughness.baseColorFactor[1],
+        //                                            material.pbrMetallicRoughness.baseColorFactor[2],
+        //                                            material.pbrMetallicRoughness.baseColorFactor[3]);
 
-        currMaterial.texBaseColor = material.pbrMetallicRoughness.baseColorTexture.index;
-        currMaterial.sampBaseId = texIdToModelSamp.find(currMaterial.texBaseColor)->second;
+        // currMaterial.texBaseColor = material.pbrMetallicRoughness.baseColorTexture.index;
+        // currMaterial.sampBaseId = texIdToModelSamp.find(currMaterial.texBaseColor)->second;
 
-        currMaterial.roughnessFactor = (float)material.pbrMetallicRoughness.roughnessFactor;
-        currMaterial.metallicFactor = (float)material.pbrMetallicRoughness.metallicFactor;
+        // currMaterial.roughnessFactor = (float)material.pbrMetallicRoughness.roughnessFactor;
+        // currMaterial.metallicFactor = (float)material.pbrMetallicRoughness.metallicFactor;
 
-        currMaterial.texMetallicRoughness = material.pbrMetallicRoughness.metallicRoughnessTexture.index;
-        currMaterial.sampMetallicRoughness = texIdToModelSamp.find(currMaterial.texMetallicRoughness)->second;
+        // currMaterial.texMetallicRoughness = material.pbrMetallicRoughness.metallicRoughnessTexture.index;
+        // currMaterial.sampMetallicRoughness = texIdToModelSamp.find(currMaterial.texMetallicRoughness)->second;
 
-        currMaterial.emissiveFactor = glm::float3(material.emissiveFactor[0],
-                                                  material.emissiveFactor[1],
-                                                  material.emissiveFactor[2]);
-        currMaterial.texEmissive = material.emissiveTexture.index;
-        currMaterial.sampEmissiveId = texIdToModelSamp.find(currMaterial.texEmissive)->second;
+        // currMaterial.emissiveFactor = glm::float3(material.emissiveFactor[0],
+        //                                           material.emissiveFactor[1],
+        //                                           material.emissiveFactor[2]);
+        // currMaterial.texEmissive = material.emissiveTexture.index;
+        // currMaterial.sampEmissiveId = texIdToModelSamp.find(currMaterial.texEmissive)->second;
 
-        currMaterial.texOcclusion = material.occlusionTexture.index;
-        currMaterial.sampOcclusionId = texIdToModelSamp.find(currMaterial.texOcclusion)->second;
+        // currMaterial.texOcclusion = material.occlusionTexture.index;
+        // currMaterial.sampOcclusionId = texIdToModelSamp.find(currMaterial.texOcclusion)->second;
 
-        currMaterial.d = (float)material.pbrMetallicRoughness.baseColorFactor[3];
+        // currMaterial.d = (float)material.pbrMetallicRoughness.baseColorFactor[3];
 
-        currMaterial.illum = material.alphaMode == "OPAQUE" ? 2 : 1;
-        currMaterial.isLight = 0;
+        // currMaterial.illum = material.alphaMode == "OPAQUE" ? 2 : 1;
+        // currMaterial.isLight = 0;
 
-        scene.addMaterial(currMaterial);
+        const std::string& fileUri = "default.mdl";
+        const std::string& name = "default_material";
+        oka::Scene::MaterialDescription materialDesc;
+        materialDesc.file = fileUri;
+        materialDesc.name = name;
+        materialDesc.type = oka::Scene::MaterialDescription::Type::eMdl;
+        materialDesc.color = glm::float3(material.pbrMetallicRoughness.baseColorFactor[0], material.pbrMetallicRoughness.baseColorFactor[1], material.pbrMetallicRoughness.baseColorFactor[2]);
+        materialDesc.hasColor = true;
+        oka::MaterialManager::Param colorParam = {};
+        colorParam.name = "diffuse_color";
+        colorParam.type = oka::MaterialManager::Param::Type::eFloat3;
+        colorParam.value.resize(sizeof(float) * 3);
+        memcpy(colorParam.value.data(), glm::value_ptr(materialDesc.color), sizeof(float) * 3);
+        materialDesc.params.push_back(colorParam);
+
+        scene.addMaterial(materialDesc);
     }
 }
 
@@ -638,9 +653,15 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
 
     int sceneId = model.defaultScene;
 
-    findTextureSamplers(model, scene, *mTexManager);
-    loadTextures(model, scene, *mTexManager);
-    loadMaterials(model, scene, *mTexManager);
+    // findTextureSamplers(model, scene);
+    // loadTextures(model, scene, *mTexManager);
+    loadMaterials(model, scene);
+
+    oka::Scene::UniformLightDesc lightDesc {};
+    lightDesc.type = 3; // distant light
+    lightDesc.halfAngle = 0;
+    lightDesc.intensity = 5000;
+    scene.createLight(lightDesc);
 
     loadCameras(model, scene);
 
