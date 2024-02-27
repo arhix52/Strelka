@@ -441,7 +441,8 @@ void loadMaterials(const tinygltf::Model& model, oka::Scene& scene)
         materialDesc.file = fileUri;
         materialDesc.name = name;
         materialDesc.type = oka::Scene::MaterialDescription::Type::eMdl;
-        materialDesc.color = glm::float3(material.pbrMetallicRoughness.baseColorFactor[0], material.pbrMetallicRoughness.baseColorFactor[1], material.pbrMetallicRoughness.baseColorFactor[2]);
+        // materialDesc.color = glm::float3(material.pbrMetallicRoughness.baseColorFactor[0], material.pbrMetallicRoughness.baseColorFactor[1], material.pbrMetallicRoughness.baseColorFactor[2]);
+        materialDesc.color = glm::float3(1.0f);
         materialDesc.hasColor = true;
         oka::MaterialManager::Param colorParam = {};
         colorParam.name = "diffuse_color";
@@ -659,8 +660,9 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
 
     oka::Scene::UniformLightDesc lightDesc {};
     lightDesc.type = 3; // distant light
-    lightDesc.halfAngle = 0;
-    lightDesc.intensity = 5000;
+    lightDesc.halfAngle = 10;
+    lightDesc.intensity = 15000;
+    lightDesc.color = glm::float3(1.0);
     scene.createLight(lightDesc);
 
     loadCameras(model, scene);

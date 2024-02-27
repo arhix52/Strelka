@@ -31,6 +31,8 @@ public:
     // View dir -Z
     glm::quat mOrientation = { 1.0f, 0.0f, 0.0f, 0.0f };
     glm::float3 position = { 0.0f, 0.0f, 10.0f };
+    glm::float3 mWorldUp = {0.0, 1.0, 0.0};
+    glm::float3 mWorldForward = {0.0, 0.0, -1.0};
     glm::quat getOrientation();
 
     float rotationSpeed = 0.025f;
@@ -76,6 +78,10 @@ public:
     float getFarClip() const;
     void setFov(float fov);
     void setPerspective(float fov, float aspect, float znear, float zfar);
+    void setWorldUp(const glm::float3 up);
+    glm::float3 getWorldUp();
+    void setWorldForward(const glm::float3 forward);
+    glm::float3 getWorldForward();
     glm::float4x4& getPerspective();
     glm::float4x4 getView();
     void updateAspectRatio(float aspect);

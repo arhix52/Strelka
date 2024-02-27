@@ -130,6 +130,26 @@ void Camera::setPerspective(float _fov, float _aspect, float _znear, float _zfar
     matrices.perspective = perspective(fov, _aspect, zfar, znear, &matrices.invPerspective);
 }
 
+void Camera::setWorldUp(const glm::float3 up)
+{
+    mWorldUp = up;
+}
+
+glm::float3 Camera::getWorldUp()
+{
+    return mWorldUp;
+}
+
+void Camera::setWorldForward(const glm::float3 forward)
+{
+    mWorldForward = forward;
+}
+
+glm::float3 Camera::getWorldForward()
+{
+    return mWorldForward;
+}
+
 glm::float4x4& Camera::getPerspective()
 {
     return matrices.perspective;
@@ -166,7 +186,12 @@ void Camera::rotate(float rightAngle, float upAngle)
 {
     const glm::quat a = glm::angleAxis(glm::radians(upAngle) * rotationSpeed, glm::float3(1.0f, 0.0f, 0.0f));
     const glm::quat b = glm::angleAxis(glm::radians(rightAngle) * rotationSpeed, glm::float3(0.0f, 1.0f, 0.0f));
+    // const glm::quat a = glm::angleAxis(glm::radians(upAngle) * rotationSpeed, getRight());
+    // const glm::quat b = glm::angleAxis(glm::radians(rightAngle) * rotationSpeed, getWorldUp());
+    // auto c = a * b;
+    // c = glm::normalize(c);
     mOrientation = glm::normalize(a * mOrientation * b);
+    // mOrientation = glm::normalize(c * mOrientation);
     updateViewMatrix();
 }
 
@@ -196,9 +221,9 @@ void Camera::update(float deltaTime)
         {
             float moveSpeed = deltaTime * movementSpeed;
             if (keys.up)
-                position += getUp() * moveSpeed;
+                position += getWorldUp() * moveSpeed;
             if (keys.down)
-                position -= getUp() * moveSpeed;
+                position -= getWorldUp() * moveSpeed;
             if (keys.left)
                 position -= getRight() * moveSpeed;
             if (keys.right)
