@@ -18,6 +18,7 @@ class StrelkaRecipe(ConanFile):
         self.requires("glad/0.1.36")
         self.requires("doctest/2.4.11")
         self.requires("cxxopts/3.1.1")
+        self.requires("tinygltf/2.8.19")
         
     def generate(self):
         copy(self, "*glfw*", os.path.join(self.dependencies["imgui"].package_folder,

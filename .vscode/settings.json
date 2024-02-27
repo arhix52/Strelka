@@ -1,10 +1,10 @@
 {
     "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
     "editor.formatOnSave": false,
-    // "clang-format.executable": "C:/Program Files/LLVM/bin/clang-format.exe",
-    // "clang-tidy.executable": "C:/Program Files/LLVM/bin/clang-tidy.exe",
+    "clang-format.executable": "C:/Program Files/LLVM/bin/clang-format.exe",
+    "clang-tidy.executable": "C:/Program Files/LLVM/bin/clang-tidy.exe",
     
-    "clang-format.executable": "/opt/homebrew/Cellar/clang-format/17.0.6/bin/clang-format",
+    // "clang-format.executable": "/opt/homebrew/Cellar/clang-format/15.0.7/bin/clang-format",
     // "clang-tidy.executable": "/usr/local/bin/clang-tidy",
     
     // "clang-format.executable": "/usr/bin/clang-format",

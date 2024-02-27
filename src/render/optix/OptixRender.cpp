@@ -874,7 +874,7 @@ void OptiXRender::render(Buffer* output)
 
     updatePathtracerParams(width, height);
 
-    oka::Camera& camera = mScene->getCamera(1);
+    oka::Camera& camera = mScene->getCamera(0);
     camera.updateAspectRatio(width / (float)height);
     camera.updateViewMatrix();
 
