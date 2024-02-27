@@ -210,7 +210,8 @@ void HdStrelkaRenderDelegate::DestroyBprim(HdBprim* bprim)
 
 TfToken HdStrelkaRenderDelegate::GetMaterialBindingPurpose() const
 {
-    return HdTokens->full;
+    //return HdTokens->full;
+    return HdTokens->preview;
 }
 
 TfTokenVector HdStrelkaRenderDelegate::GetMaterialRenderContexts() const

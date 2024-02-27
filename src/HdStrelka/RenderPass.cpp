@@ -142,6 +142,11 @@ void HdStrelkaRenderPass::_BakeMeshes(HdRenderIndex* renderIndex, GfMatrix4d roo
         else
         {
             HdSprim* sprim = renderIndex->GetSprim(HdPrimTypeTokens->material, materialId);
+            if (!sprim)
+            {
+                STRELKA_ERROR("Cannot retrive material!");
+                return 0u;
+            }
             HdStrelkaMaterial* material = dynamic_cast<HdStrelkaMaterial*>(sprim);
 
             if (material->isMdl())

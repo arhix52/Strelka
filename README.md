@@ -40,19 +40,11 @@ detect conan profile: `conan profile detect --force`
 4. `cmake --build . --config Debug`
 
 On Mac/Linux:
-1. `conan install . -c tools.cmake.cmaketoolchain:generator=Ninja -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type=Debug --profile clang14`
+1. `conan install . -c tools.cmake.cmaketoolchain:generator=Ninja -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type=Debug`
 2. `cd build/Debug`
 3. `source ./generators/conanbuild.sh`
 4. `cmake ../.. -DCMAKE_TOOLCHAIN_FILE=generators/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Debug`
 5. `cmake --build .`
-
-### Libs:
-- glfw    - https://www.glfw.org/     *dll*
-- cxxopts   - https://github.com/jarro2783/cxxopts  *header*
-- imgui   - https://github.com/ocornut/imgui *header+source*
-- glm      - https://github.com/g-truc/glm *submodule*
-- stb       - https://github.com/nothings/stb *submodule*
-- doctest      - https://github.com/onqtam/doctest *submodule*
 
 #### Installation
 
@@ -69,7 +61,8 @@ On Mac/Linux:
 
 To set log level use
 
-    export SPDLOG_LEVEL=debug
+    `export SPDLOG_LEVEL=debug`
+    
 The available log levels are: trace, debug, info, warn, and err.
 
 ## Example
@@ -81,9 +74,6 @@ The available log levels are: trace, debug, info, warn, and err.
         export USD_DIR=/Users/<user>/work/usd_build/
         export PATH=/Users/<user>/work/usd_build/bin:$PATH
         export PYTHONPATH=/Users/<user>/work/usd_build/lib/python:$PYTHONPATH
-
-    Cmake:
-        cmake -DCMAKE_INSTALL_PREFIX=/Users/<user>/work/usd_build/plugin/usd/ ..
 
     Install plugin:
         cmake --install . --component HdStrelka

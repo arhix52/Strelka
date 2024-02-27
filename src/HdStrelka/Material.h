@@ -13,19 +13,16 @@ class HdStrelkaMaterial final : public HdMaterial
 public:
     HF_MALLOC_TAG_NEW("new HdStrelkaMaterial");
 
-    HdStrelkaMaterial(const SdfPath& id,
-                   const MaterialNetworkTranslator& translator);
+    HdStrelkaMaterial(const SdfPath& id, const MaterialNetworkTranslator& translator);
 
     ~HdStrelkaMaterial() override;
 
     HdDirtyBits GetInitialDirtyBitsMask() const override;
 
-    void Sync(HdSceneDelegate* sceneDelegate,
-              HdRenderParam* renderParam,
-              HdDirtyBits* dirtyBits) override;
+    void Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam, HdDirtyBits* dirtyBits) override;
 
     const std::string& GetStrelkaMaterial() const;
-    bool isMdl()
+    bool isMdl() const
     {
         return mIsMdl;
     }
@@ -42,7 +39,7 @@ public:
     {
         return mMaterialParams;
     }
-    
+
 private:
     const MaterialNetworkTranslator& m_translator;
     bool mIsMdl = false;

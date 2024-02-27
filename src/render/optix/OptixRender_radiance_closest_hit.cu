@@ -104,6 +104,58 @@ extern "C" __device__ __inline__ void __itexCubemap_float4(
     *retVal = make_float4(tmp.x, tmp.y, tmp.z, tmp.w);
 }
 
+static __forceinline__ __device__ float3 get_barycentrics()
+{
+    const float2 bary = optixGetTriangleBarycentrics();
+    return make_float3(1.0f - bary.x - bary.y, bary.x, bary.y);
+}
+
+// Implementation of scene_data_lookup_float4().
+extern "C" __device__ void scene_data_lookup_float4(
+    float                                  result[4],
+    Texture_handler_base const            *self_base,
+    mi::neuraylib::Shading_state_material *state,
+    unsigned                               scene_data_id,
+    float                                  default_value[4],
+    bool                                   uniform_lookup)
+{
+    if (scene_data_id == 0) {
+        result[0] = default_value[0];
+        result[1] = default_value[1];
+        result[2] = default_value[2];
+        result[3] = default_value[3];
+        return;
+    }
+
+
+    result[0] = state->text_coords[0].x;
+    result[1] = state->text_coords[0].y;
+    result[2] = 0.0f;
+    result[3] = 0.0f;
+}
+
+// Implementation of scene_data_lookup_float2().
+extern "C" __device__ void scene_data_lookup_float2(
+    float                                  result[2],
+    Texture_handler_base const            *self_base,
+    mi::neuraylib::Shading_state_material *state,
+    unsigned                               scene_data_id,
+    float                                  default_value[2],
+    bool                                   uniform_lookup)
+{
+    float res4[4];
+    float def_val4[4] = { default_value[0], default_value[1], 0.0f, 0.0f };
+    scene_data_lookup_float4(
+        res4,
+        self_base,
+        state,
+        scene_data_id,
+        def_val4,
+        uniform_lookup);
+    result[0] = res4[0];
+    result[1] = res4[1];
+}
+
 extern "C"
 {
     __constant__ Params params;
@@ -392,7 +444,7 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     res.geom_normal = worldNormal;
     res.position = worldPosition;
     res.text_coords[0] = make_float3(0.5f, 0.5f, 0.5f);
-    res.text_coords[1] = make_float3(0.0f);
+    res.text_coords[1] = make_float3(0.5f);
     res.worldTangent[0] = worldTangent;
     res.worldBinormal[0] = worldBinormal;
     res.worldTangent[1] = worldTangent;
@@ -484,7 +536,7 @@ extern "C" __global__ void __closesthit__radiance()
         if (isnan(radiance) || isnan(lightPdf))
         {
             // ERROR, terminate tracing;
-            prd->radiance = make_float3(100.0f, 0.0f, 0.0f);
+            prd->radiance = make_float3(10000.0f, 0.0f, 0.0f);
             prd->throughput = make_float3(0.0f);
             return;
         }
@@ -505,7 +557,7 @@ extern "C" __global__ void __closesthit__radiance()
             if (isnan(evalData.bsdf_diffuse) || isnan(evalData.bsdf_glossy))
             {
                 // ERROR, terminate tracing;
-                prd->radiance = make_float3(100.0f, 0.0f, 0.0f);
+                prd->radiance = make_float3(10000.0f, 0.0f, 0.0f);
                 prd->throughput = make_float3(0.0f);
                 return;
             }

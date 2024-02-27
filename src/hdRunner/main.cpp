@@ -477,6 +477,7 @@ int main(int argc, const char* argv[])
 
     const std::filesystem::path usdFilePath = { usdFile.c_str() };
     const std::string resourceSearchPath = usdFilePath.parent_path().string();
+    STRELKA_DEBUG("Resource path {}", resourceSearchPath);
 
     const int32_t iterationToCapture(result["i"].as<int32_t>());
     // Init plugin.

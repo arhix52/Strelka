@@ -101,6 +101,7 @@ if(WIN32 OR LINUX)
       ${clang_PATH} -I ${OptiX_INCLUDE} -I ${ROOT_HOME}/external/mdl-sdk/include
       -I ${ROOT_HOME}/src/render/ -I ${ROOT_HOME}/src/render/optix/
       -I ${ROOT_HOME}/include/render -I ${ROOT_HOME}
+      -Wno-unknown-cuda-version 
       -std=c++17
       -I /usr/include/c++/11/
       ${_CLANG_FLAGS}

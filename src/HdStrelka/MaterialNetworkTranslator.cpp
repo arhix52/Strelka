@@ -30,6 +30,8 @@
 
 #include "Tokens.h"
 
+using std::string;
+
 namespace mx = MaterialX;
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -78,9 +80,9 @@ bool _ConvertNodesToMaterialXNodes(const HdMaterialNetwork2& network, HdMaterial
 {
     mtlxNetwork = network;
 
-    for (auto nodeIt = mtlxNetwork.nodes.begin(); nodeIt != mtlxNetwork.nodes.end(); nodeIt++)
+    for (auto& node : mtlxNetwork.nodes)
     {
-        TfToken& nodeTypeId = nodeIt->second.nodeTypeId;
+        TfToken& nodeTypeId = node.second.nodeTypeId;
 
         SdrRegistry& sdrRegistry = SdrRegistry::GetInstance();
         if (sdrRegistry.GetShaderNodeByIdentifierAndType(nodeTypeId, HdStrelkaDiscoveryTypes->mtlx))
@@ -150,9 +152,9 @@ bool _ConvertNodesToMaterialXNodes(const HdMaterialNetwork2& network, HdMaterial
     return true;
 }
 
-bool _GetMaterialNetworkSurfaceTerminal(const HdMaterialNetwork2& network2,
-                                        HdMaterialNode2& surfaceTerminal,
-                                        SdfPath& terminalPath)
+bool GetMaterialNetworkSurfaceTerminal(const HdMaterialNetwork2& network2,
+                                       HdMaterialNode2& surfaceTerminal,
+                                       SdfPath& terminalPath)
 {
     const auto& connectionIt = network2.terminals.find(HdMaterialTerminalTokens->surface);
 
@@ -181,8 +183,8 @@ MaterialNetworkTranslator::MaterialNetworkTranslator(const std::string& mtlxLibP
 {
     m_nodeLib = mx::createDocument();
 
-    mx::FilePathVec libFolders; // All directories if left empty.
-    mx::FileSearchPath folderSearchPath(mtlxLibPath);
+    const mx::FilePathVec libFolders; // All directories if left empty.
+    const mx::FileSearchPath folderSearchPath(mtlxLibPath);
     mx::loadLibraries(libFolders, folderSearchPath, m_nodeLib);
 }
 
@@ -191,26 +193,24 @@ std::string MaterialNetworkTranslator::ParseNetwork(const SdfPath& id, const HdM
     HdMaterialNetwork2 mtlxNetwork;
     if (!_ConvertNodesToMaterialXNodes(network, mtlxNetwork))
     {
-        return nullptr;
+        return "";
     }
 
     patchMaterialNetwork(mtlxNetwork);
 
-    mx::DocumentPtr doc = CreateMaterialXDocumentFromNetwork(id, mtlxNetwork);
+    const mx::DocumentPtr doc = CreateMaterialXDocumentFromNetwork(id, mtlxNetwork);
     if (!doc)
     {
-        return nullptr;
+        return "";
     }
 
     mx::string docStr = mx::writeToXmlString(doc);
-
-    return std::string(docStr.c_str());
+    return docStr;
 }
 
-bool MaterialNetworkTranslator::ParseMdlNetwork(const SdfPath& id,
-                                                const HdMaterialNetwork2& network,
+bool MaterialNetworkTranslator::ParseMdlNetwork(const HdMaterialNetwork2& network,
                                                 std::string& fileUri,
-                                                std::string& subIdentifier) const
+                                                std::string& subIdentifier)
 {
     if (network.nodes.size() == 1)
     {
@@ -219,7 +219,7 @@ bool MaterialNetworkTranslator::ParseMdlNetwork(const SdfPath& id,
         SdrRegistry& sdrRegistry = SdrRegistry::GetInstance();
         SdrShaderNodeConstPtr sdrNode = sdrRegistry.GetShaderNodeByIdentifier(node.nodeTypeId);
 
-        if (!sdrNode || sdrNode->GetContext() != _tokens->mdl)
+        if ((sdrNode == nullptr) || sdrNode->GetContext() != _tokens->mdl)
         {
             return false;
         }
@@ -233,11 +233,9 @@ bool MaterialNetworkTranslator::ParseMdlNetwork(const SdfPath& id,
 
         return true;
     }
-    else
-    {
-        TF_RUNTIME_ERROR("Unsupported multi-node MDL material!");
-        return false;
-    }
+
+    TF_RUNTIME_ERROR("Unsupported multi-node MDL material!");
+    return false;
 }
 
 mx::DocumentPtr MaterialNetworkTranslator::CreateMaterialXDocumentFromNetwork(const SdfPath& id,
@@ -245,7 +243,7 @@ mx::DocumentPtr MaterialNetworkTranslator::CreateMaterialXDocumentFromNetwork(co
 {
     HdMaterialNode2 surfaceTerminal;
     SdfPath terminalPath;
-    if (!_GetMaterialNetworkSurfaceTerminal(network, surfaceTerminal, terminalPath))
+    if (!GetMaterialNetworkSurfaceTerminal(network, surfaceTerminal, terminalPath))
     {
         TF_WARN("Unable to find surface terminal for material network");
         return nullptr;
@@ -267,7 +265,7 @@ void MaterialNetworkTranslator::patchMaterialNetwork(HdMaterialNetwork2& network
         }
         auto& inputs = node.inputConnections;
 
-        const auto patchColor3Vector3InputConnection = [&inputs, &network](TfToken inputName) {
+        const auto patchColor3Vector3InputConnection = [&inputs, &network](const TfToken& inputName) {
             auto inputIt = inputs.find(inputName);
             if (inputIt == inputs.end())
             {
@@ -287,7 +285,7 @@ void MaterialNetworkTranslator::patchMaterialNetwork(HdMaterialNetwork2& network
                 SdfPath convertNodePath = upstreamNodePath;
                 for (int i = 0; network.nodes.count(convertNodePath) > 0; i++)
                 {
-                    std::string convertNodeName = "convert" + std::to_string(i);
+                    const std::string convertNodeName = "convert" + std::to_string(i);
                     convertNodePath = upstreamNodePath.AppendElementString(convertNodeName);
                 }
 

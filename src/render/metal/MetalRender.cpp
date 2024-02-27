@@ -7,6 +7,7 @@
 #include "MetalBuffer.h"
 
 #include <cassert>
+#include <filesystem>
 
 #include <glm/glm.hpp>
 #include <glm/mat4x3.hpp>
@@ -25,6 +26,7 @@
 #include "shaders/ShaderTypes.h"
 
 using namespace oka;
+namespace fs = std::filesystem;
 
 MetalRender::MetalRender(/* args */) = default;
 
@@ -40,7 +42,9 @@ void MetalRender::init()
 
 MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName)
 {
-    int texWidth, texHeight, texChannels;
+    int texWidth = 0;
+    int texHeight = 0;
+    int texChannels = 0;
     stbi_uc* data = stbi_load(fileName.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
     if (data == nullptr)
     {
@@ -57,7 +61,7 @@ MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName)
 
     MTL::Texture* pTexture = mDevice->newTexture(pTextureDesc);
 
-    MTL::Region region = MTL::Region::Make3D(0, 0, 0, texWidth, texHeight, 1);
+    const MTL::Region region = MTL::Region::Make3D(0, 0, 0, texWidth, texHeight, 1);
     pTexture->replaceRegion(region, 0, data, 4ull * texWidth);
 
     pTextureDesc->release();
@@ -69,7 +73,7 @@ void MetalRender::createMetalMaterials()
     using simd::float3;
     const std::vector<Scene::MaterialDescription>& matDescs = mScene->getMaterials();
     std::vector<Material> gpuMaterials;
-    auto resourcePath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
+    const fs::path resourcePath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
     for (const Scene::MaterialDescription& currMatDesc : matDescs)
     {
         Material material = {};
@@ -84,15 +88,16 @@ void MetalRender::createMetalMaterials()
             {
                 std::string texPath(param.value.size(), 0);
                 memcpy(texPath.data(), param.value.data(), param.value.size());
+                const fs::path fullTextureFilePath = resourcePath / texPath;
                 if (param.name == "diffuse_texture")
                 {
-                    MTL::Texture* diffuseTex = loadTextureFromFile(resourcePath + "/" + texPath);
+                    MTL::Texture* diffuseTex = loadTextureFromFile(fullTextureFilePath.string());
                     mMaterialTextures.push_back(diffuseTex);
                     material.diffuseTexture = diffuseTex->gpuResourceID();
                 }
                 if (param.name == "normalmap_texture")
                 {
-                    MTL::Texture* normalTex = loadTextureFromFile(resourcePath + "/" + texPath);
+                    MTL::Texture* normalTex = loadTextureFromFile(fullTextureFilePath.string());
                     mMaterialTextures.push_back(normalTex);
                     material.normalTexture = normalTex->gpuResourceID();
                 }
