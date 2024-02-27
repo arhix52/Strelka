@@ -87,6 +87,12 @@ inline uint32_t SettingsManager::convertValue(const std::string& value)
 }
 
 template <>
+inline std::string SettingsManager::convertValue(const std::string& value)
+{
+    return value;
+}
+
+template <>
 inline std::string SettingsManager::toString(const std::string& value)
 {
     return value;

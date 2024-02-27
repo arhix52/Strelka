@@ -435,8 +435,8 @@ void loadMaterials(const tinygltf::Model& model, oka::Scene& scene)
         // currMaterial.illum = material.alphaMode == "OPAQUE" ? 2 : 1;
         // currMaterial.isLight = 0;
 
-        const std::string& fileUri = "default.mdl";
-        const std::string& name = "default_material";
+        const std::string& fileUri = "OmniPBR.mdl";
+        const std::string& name = "OmniPBR";
         oka::Scene::MaterialDescription materialDesc;
         materialDesc.file = fileUri;
         materialDesc.name = name;
@@ -445,13 +445,28 @@ void loadMaterials(const tinygltf::Model& model, oka::Scene& scene)
         materialDesc.color = glm::float3(1.0f);
         materialDesc.hasColor = true;
         oka::MaterialManager::Param colorParam = {};
-        colorParam.name = "diffuse_color";
+        colorParam.name = "diffuse_color_constant";
         colorParam.type = oka::MaterialManager::Param::Type::eFloat3;
         colorParam.value.resize(sizeof(float) * 3);
         memcpy(colorParam.value.data(), glm::value_ptr(materialDesc.color), sizeof(float) * 3);
         materialDesc.params.push_back(colorParam);
 
+        auto texId = material.pbrMetallicRoughness.baseColorTexture.index;
+        if (texId > 0)
+        {
+            auto imageId = model.textures[texId].source;
+            auto textureUri = model.images[imageId].uri;
+
+            oka::MaterialManager::Param diffuseTexture{};
+            diffuseTexture.name = "diffuse_texture";
+            diffuseTexture.type = oka::MaterialManager::Param::Type::eTexture;
+            diffuseTexture.value.resize(textureUri.size());
+            memcpy(diffuseTexture.value.data(), textureUri.data(), textureUri.size());
+            materialDesc.params.push_back(diffuseTexture);
+        }
+
         scene.addMaterial(materialDesc);
+
     }
 }
 
@@ -659,8 +674,9 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     loadMaterials(model, scene);
 
     oka::Scene::UniformLightDesc lightDesc {};
+    lightDesc.xform = glm::mat4(1.0f);
     lightDesc.type = 3; // distant light
-    lightDesc.halfAngle = 10;
+    lightDesc.halfAngle = 10.0f * 0.5f * (M_PI / 180.0f);
     lightDesc.intensity = 15000;
     lightDesc.color = glm::float3(1.0);
     scene.createLight(lightDesc);

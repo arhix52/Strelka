@@ -1311,7 +1311,9 @@ bool OptiXRender::createOptixMaterials()
 
     std::vector<Texture> materialTextures;
 
-    fs::path resourcePath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
+    const auto searchPath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
+
+    fs::path resourcePath = fs::path(getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath"));
 
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
