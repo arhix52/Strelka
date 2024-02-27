@@ -7,14 +7,13 @@ find_package(TinyGLTF REQUIRED)
 
 # Scene
 set(SCENELOADER_SOURCES
-        ${ROOT_HOME}/include/scene/scene.h
-        ${ROOT_HOME}/include/scene/camera.h
-        ${ROOT_HOME}/src/scene/scene.cpp
-        ${ROOT_HOME}/src/scene/camera.cpp
+        ${ROOT_HOME}/include/sceneloader/gltfloader.h
+        ${ROOT_HOME}/src/sceneloader/gltfloader.cpp
     )
 set(SCENELOADER_NAME sceneloader)
 add_library(${SCENELOADER_NAME} OBJECT ${SCENELOADER_SOURCES})
 
 target_include_directories(${SCENELOADER_NAME} PUBLIC ${ROOT_HOME}/include/)
+target_include_directories(${SCENELOADER_NAME} PUBLIC ${ROOT_HOME}/include/sceneloader/)
 target_include_directories(${SCENELOADER_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(${SCENELOADER_NAME} PUBLIC scene glm::glm TinyGLTF::TinyGLTF)
+target_link_libraries(${SCENELOADER_NAME} PUBLIC logger scene glm::glm TinyGLTF::TinyGLTF)

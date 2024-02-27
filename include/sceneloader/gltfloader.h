@@ -13,7 +13,7 @@ class GltfLoader
 private:
 
 public:
-    explicit GltfLoader()
+    explicit GltfLoader(){}
 
     bool loadGltf(const std::string& modelPath, Scene& mScene);
 

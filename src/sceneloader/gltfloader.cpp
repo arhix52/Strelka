@@ -4,8 +4,8 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-#define TINYOBJLOADER_IMPLEMENTATION
-#include <tiny_obj_loader.h>
+// #define TINYOBJLOADER_IMPLEMENTATION
+// #include <tiny_obj_loader.h>
 #define TINYGLTF_IMPLEMENTATION
 #include "tiny_gltf.h"
 
@@ -88,7 +88,7 @@ void computeTangent(std::vector<Scene::Vertex>& vertices,
     v2.tangent = packedTangent;
 }
 
-void processPrimitive(const tinygltf::Model& model, nevk::Scene& scene, const tinygltf::Primitive& primitive, const glm::float4x4& transform, const float globalScale)
+void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const tinygltf::Primitive& primitive, const glm::float4x4& transform, const float globalScale)
 {
     using namespace std;
     assert(primitive.attributes.find("POSITION") != primitive.attributes.end());
@@ -134,11 +134,11 @@ void processPrimitive(const tinygltf::Model& model, nevk::Scene& scene, const ti
     }
 
     glm::float3 sum = glm::float3(0.0f, 0.0f, 0.0f);
-    std::vector<nevk::Scene::Vertex> vertices;
+    std::vector<oka::Scene::Vertex> vertices;
     vertices.reserve(vertexCount);
     for (uint32_t v = 0; v < vertexCount; ++v)
     {
-        nevk::Scene::Vertex vertex{};
+        oka::Scene::Vertex vertex{};
         vertex.pos = glm::make_vec3(&positionData[v * posStride]) * globalScale;
         vertex.normal = packNormal(glm::normalize(glm::vec3(normalsData ? glm::make_vec3(&normalsData[v * normalStride]) : glm::vec3(0.0f))));
         vertex.uv = packUV(texCoord0Data ? glm::make_vec2(&texCoord0Data[v * texCoord0Stride]) : glm::vec3(0.0f));
@@ -203,7 +203,7 @@ void processPrimitive(const tinygltf::Model& model, nevk::Scene& scene, const ti
     assert(instId != -1);
 }
 
-void processMesh(const tinygltf::Model& model, nevk::Scene& scene, const tinygltf::Mesh& mesh, const glm::float4x4& transform, const float globalScale)
+void processMesh(const tinygltf::Model& model, oka::Scene& scene, const tinygltf::Mesh& mesh, const glm::float4x4& transform, const float globalScale)
 {
     using namespace std;
     cout << "Mesh name: " << mesh.name << endl;
@@ -260,7 +260,7 @@ glm::float4x4 getTransform(const tinygltf::Node& node, const float globalScale)
     }
 }
 
-void processNode(const tinygltf::Model& model, nevk::Scene& scene, const tinygltf::Node& node, const uint32_t currentNodeId, const glm::float4x4& baseTransform, const float globalScale)
+void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf::Node& node, const uint32_t currentNodeId, const glm::float4x4& baseTransform, const float globalScale)
 {
     using namespace std;
     cout << "Node name: " << node.name << endl;
@@ -335,9 +335,9 @@ VkFilter getVkFilterMode(int32_t filterMode)
 std::unordered_map<uint32_t, uint32_t> texIdToModelSamp{};
 std::unordered_map<uint32_t, uint32_t> modelSampIdToLoadedSampId{};
 
-void findTextureSamplers(const tinygltf::Model& model, nevk::Scene& scene, nevk::TextureManager& textureManager)
+void findTextureSamplers(const tinygltf::Model& model, oka::Scene& scene, oka::TextureManager& textureManager)
 {
-    nevk::TextureManager::TextureSamplerDesc currentSamplerDesc{};
+    oka::TextureManager::TextureSamplerDesc currentSamplerDesc{};
     uint32_t samplerNumber = 0;
 
     for (const tinygltf::Sampler& sampler : model.samplers)
@@ -359,7 +359,7 @@ void findTextureSamplers(const tinygltf::Model& model, nevk::Scene& scene, nevk:
     }
 }
 
-void loadTextures(const tinygltf::Model& model, nevk::Scene& scene, nevk::TextureManager& textureManager)
+void loadTextures(const tinygltf::Model& model, oka::Scene& scene, oka::TextureManager& textureManager)
 {
     texIdToModelSamp[-1] = 0;
     for (const tinygltf::Texture& tex : model.textures)
@@ -394,7 +394,7 @@ void loadTextures(const tinygltf::Model& model, nevk::Scene& scene, nevk::Textur
     }
 }
 
-void loadMaterials(const tinygltf::Model& model, nevk::Scene& scene, nevk::TextureManager& textureManager)
+void loadMaterials(const tinygltf::Model& model, oka::Scene& scene, oka::TextureManager& textureManager)
 {
     for (const tinygltf::Material& material : model.materials)
     {
@@ -439,14 +439,14 @@ void loadMaterials(const tinygltf::Model& model, nevk::Scene& scene, nevk::Textu
     }
 }
 
-void loadCameras(const tinygltf::Model& model, nevk::Scene& scene)
+void loadCameras(const tinygltf::Model& model, oka::Scene& scene)
 {
     for (uint32_t i = 0; i < model.cameras.size(); ++i)
     {
         const tinygltf::Camera& cameraGltf = model.cameras[i];
         if (strcmp(cameraGltf.type.c_str(), "perspective") == 0)
         {
-            nevk::Camera camera;
+            oka::Camera camera;
             camera.fov = cameraGltf.perspective.yfov * (180.0f / 3.1415926f);
             camera.znear = cameraGltf.perspective.znear;
             camera.zfar = cameraGltf.perspective.zfar;
@@ -467,18 +467,18 @@ void loadCameras(const tinygltf::Model& model, nevk::Scene& scene)
     }
 }
 
-void loadAnimation(const tinygltf::Model& model, nevk::Scene& scene)
+void loadAnimation(const tinygltf::Model& model, oka::Scene& scene)
 {
-    std::vector<nevk::Scene::Animation> animations;
+    std::vector<oka::Scene::Animation> animations;
 
     using namespace std;
     for (const tinygltf::Animation& animation : model.animations)
     {
-        nevk::Scene::Animation anim{};
+        oka::Scene::Animation anim{};
         cout << "Animation name: " << animation.name << endl;
         for (const tinygltf::AnimationSampler& sampler : animation.samplers)
         {
-            nevk::Scene::AnimationSampler samp{};
+            oka::Scene::AnimationSampler samp{};
             {
                 const tinygltf::Accessor& accessor = model.accessors[sampler.input];
                 const tinygltf::BufferView& bufferView = model.bufferViews[accessor.bufferView];
@@ -538,18 +538,18 @@ void loadAnimation(const tinygltf::Model& model, nevk::Scene& scene)
         }
         for (const tinygltf::AnimationChannel& channel : animation.channels)
         {
-            nevk::Scene::AnimationChannel chan{};
+            oka::Scene::AnimationChannel chan{};
             if (channel.target_path == "rotation")
             {
-                chan.path = nevk::Scene::AnimationChannel::PathType::ROTATION;
+                chan.path = oka::Scene::AnimationChannel::PathType::ROTATION;
             }
             if (channel.target_path == "translation")
             {
-                chan.path = nevk::Scene::AnimationChannel::PathType::TRANSLATION;
+                chan.path = oka::Scene::AnimationChannel::PathType::TRANSLATION;
             }
             if (channel.target_path == "scale")
             {
-                chan.path = nevk::Scene::AnimationChannel::PathType::SCALE;
+                chan.path = oka::Scene::AnimationChannel::PathType::SCALE;
             }
             if (channel.target_path == "weights")
             {
@@ -571,11 +571,11 @@ void loadAnimation(const tinygltf::Model& model, nevk::Scene& scene)
     scene.mAnimations = animations;
 }
 
-void loadNodes(const tinygltf::Model& model, nevk::Scene& scene, const float globalScale = 1.0f)
+void loadNodes(const tinygltf::Model& model, oka::Scene& scene, const float globalScale = 1.0f)
 {
     for (const auto& node : model.nodes)
     {
-        nevk::Scene::Node n{};
+        oka::Scene::Node n{};
         n.name = node.name;
         n.children = node.children;
 
@@ -613,7 +613,7 @@ void loadNodes(const tinygltf::Model& model, nevk::Scene& scene, const float glo
     }
 }
 
-bool ModelLoader::loadModelGltf(const std::string& modelPath, nevk::Scene& scene)
+bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
 {
     if (modelPath.empty())
     {
