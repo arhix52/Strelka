@@ -4,8 +4,6 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-// #define TINYOBJLOADER_IMPLEMENTATION
-// #include <tiny_obj_loader.h>
 #define TINYGLTF_IMPLEMENTATION
 #include "tiny_gltf.h"
 
@@ -17,6 +15,7 @@
 #include <glm/gtx/matrix_decompose.hpp>
 
 #include <iostream>
+#include <log/log.h>
 
 namespace fs = std::filesystem;
 
@@ -531,22 +530,21 @@ void loadNodes(const tinygltf::Model& model, oka::Scene& scene, const float glob
     }
 }
 
-oka::Scene::UniformLightDesc parseFromJson(json light, uint32_t j)
+oka::Scene::UniformLightDesc parseFromJson(const json& light)
 {
-    oka::Scene::UniformLightDesc desc;
+    oka::Scene::UniformLightDesc desc{};
 
-    desc.position = glm::float3(
-        light["lights"][j]["position"][0], light["lights"][j]["position"][1], light["lights"][j]["position"][2]);
-    desc.orientation = glm::float3(light["lights"][j]["orientation"][0], light["lights"][j]["orientation"][1],
-                                   light["lights"][j]["orientation"][2]);
-    desc.width = float(light["lights"][j]["width"]);
-    desc.height = light["lights"][j]["height"];
-    
-    desc.color =
-        glm::float3(light["lights"][j]["color"][0], light["lights"][j]["color"][1], light["lights"][j]["color"][2]);
-    desc.intensity = float(light["lights"][j]["intensity"]);
+    const auto position = light["position"];
+    desc.position = glm::float3(position[0], position[1], position[2]);
+    const auto orientation = light["orientation"];
+    desc.orientation = glm::float3(orientation[0], orientation[1], orientation[2]);
+    desc.width = float(light["width"]);
+    desc.height = light["height"];
+    const auto color = light["color"];
+    desc.color = glm::float3(color[0], color[1], color[2]);
+    desc.intensity = float(light["intensity"]);
 
-    desc.useXform = 0;
+    desc.useXform = false;
     desc.type = 0;
     return desc;
 }
@@ -557,18 +555,18 @@ void loadFromJson(const std::string& modelPath, oka::Scene& scene)
     std::string jsonPath = fileName + "_light" + ".json";
     if (fs::exists(jsonPath))
     {
+        STRELKA_INFO("Found light file, loading lights from it");
         std::ifstream i(jsonPath);
         json light;
         i >> light;
 
-        for (uint32_t j = 0; j < light["lights"].size(); ++j)
+        for (const auto& light : light["lights"])
         {
-            Scene::UniformLightDesc desc = parseFromJson(light, j);
+            Scene::UniformLightDesc desc = parseFromJson(light);
             scene.createLight(desc);
         }
     }
 }
-
 
 bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
 {
@@ -585,18 +583,12 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     bool res = gltf_ctx.LoadASCIIFromFile(&model, &err, &warn, modelPath.c_str());
     if (!res)
     {
-        cerr << "Unable to load file: " << modelPath << endl;
+        STRELKA_ERROR("Unable to load file: {}", modelPath);
         return res;
-    }
-    for (int i = 0; i < model.scenes.size(); ++i)
-    {
-        cout << "Scene: " << model.scenes[i].name << endl;
     }
 
     int sceneId = model.defaultScene;
 
-    // findTextureSamplers(model, scene);
-    // loadTextures(model, scene, *mTexManager);
     loadMaterials(model, scene);
     loadFromJson(modelPath, scene);
 
