@@ -302,151 +302,16 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
     }
 }
 
-// VkSamplerAddressMode getVkWrapMode(int32_t wrapMode)
-// {
-//     switch (wrapMode)
-//     {
-//     case 10497:
-//         return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-//     case 33071:
-//         return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-//     case 33648:
-//         return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-//     default:
-//         return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-//     }
-// }
-
-// VkFilter getVkFilterMode(int32_t filterMode)
-// {
-//     switch (filterMode)
-//     {
-//     case 9728:
-//         return VK_FILTER_NEAREST;
-//     case 9729:
-//         return VK_FILTER_LINEAR;
-//     case 9984:
-//         return VK_FILTER_NEAREST;
-//     case 9985:
-//         return VK_FILTER_NEAREST;
-//     case 9986:
-//         return VK_FILTER_LINEAR;
-//     case 9987:
-//         return VK_FILTER_LINEAR;
-//     default:
-//         return VK_FILTER_LINEAR;
-//     }
-// }
-std::unordered_map<uint32_t, uint32_t> texIdToModelSamp{};
-std::unordered_map<uint32_t, uint32_t> modelSampIdToLoadedSampId{};
-
-// void findTextureSamplers(const tinygltf::Model& model, oka::Scene& scene, oka::TextureManager& textureManager)
-// {
-//     oka::TextureManager::TextureSamplerDesc currentSamplerDesc{};
-//     uint32_t samplerNumber = 0;
-
-//     for (const tinygltf::Sampler& sampler : model.samplers)
-//     {
-//         currentSamplerDesc = { getVkFilterMode(sampler.minFilter), getVkFilterMode(sampler.magFilter), getVkWrapMode(sampler.wrapS), getVkWrapMode(sampler.wrapT) };
-//         if (textureManager.sampDescToId.count(currentSamplerDesc) == 0)
-//         {
-//             if (textureManager.sampDescToId.size() < 15)
-//             {
-//                 textureManager.createTextureSampler(currentSamplerDesc);
-//             }
-//             else
-//             {
-//                 std::cerr << "Samplers size limit exceeded" << std::endl;
-//             }
-//         }
-//         modelSampIdToLoadedSampId[samplerNumber] = textureManager.sampDescToId.find(currentSamplerDesc)->second;
-//         ++samplerNumber;
-//     }
-// }
-
-// void loadTextures(const tinygltf::Model& model, oka::Scene& scene, oka::TextureManager& textureManager)
-// {
-//     texIdToModelSamp[-1] = 0;
-//     for (const tinygltf::Texture& tex : model.textures)
-//     {
-//         const tinygltf::Image& image = model.images[tex.source];
-//         // TODO: create sampler for tex
-
-//         if (image.component == 3)
-//         {
-//             // unsupported
-//             return;
-//         }
-//         else if (image.component == 4)
-//         {
-//             // supported
-//         }
-//         else
-//         {
-//             // error
-//         }
-
-//         const void* data = image.image.data();
-//         uint32_t width = image.width;
-//         uint32_t height = image.height;
-
-//         const std::string name = image.uri;
-
-//         int texId = textureManager.loadTextureGltf(data, width, height, name);
-//         assert(texId != -1);
-
-//         texIdToModelSamp[texId] = modelSampIdToLoadedSampId.find(tex.sampler)->second;
-//     }
-// }
-
 void loadMaterials(const tinygltf::Model& model, oka::Scene& scene)
 {
     for (const tinygltf::Material& material : model.materials)
     {
-        // oka::Scene::MaterialDescription currMaterial{};
-        // currMaterial.specular = glm::float4(1.0f);
-        // currMaterial.diffuse = glm::float4(material.pbrMetallicRoughness.baseColorFactor[0],
-        //                                    material.pbrMetallicRoughness.baseColorFactor[1],
-        //                                    material.pbrMetallicRoughness.baseColorFactor[2],
-        //                                    material.pbrMetallicRoughness.baseColorFactor[3]);
-        // currMaterial.texNormalId = material.normalTexture.index;
-        // currMaterial.sampNormalId = texIdToModelSamp.find(currMaterial.texNormalId)->second;
-
-        // currMaterial.baseColorFactor = glm::float4(material.pbrMetallicRoughness.baseColorFactor[0],
-        //                                            material.pbrMetallicRoughness.baseColorFactor[1],
-        //                                            material.pbrMetallicRoughness.baseColorFactor[2],
-        //                                            material.pbrMetallicRoughness.baseColorFactor[3]);
-
-        // currMaterial.texBaseColor = material.pbrMetallicRoughness.baseColorTexture.index;
-        // currMaterial.sampBaseId = texIdToModelSamp.find(currMaterial.texBaseColor)->second;
-
-        // currMaterial.roughnessFactor = (float)material.pbrMetallicRoughness.roughnessFactor;
-        // currMaterial.metallicFactor = (float)material.pbrMetallicRoughness.metallicFactor;
-
-        // currMaterial.texMetallicRoughness = material.pbrMetallicRoughness.metallicRoughnessTexture.index;
-        // currMaterial.sampMetallicRoughness = texIdToModelSamp.find(currMaterial.texMetallicRoughness)->second;
-
-        // currMaterial.emissiveFactor = glm::float3(material.emissiveFactor[0],
-        //                                           material.emissiveFactor[1],
-        //                                           material.emissiveFactor[2]);
-        // currMaterial.texEmissive = material.emissiveTexture.index;
-        // currMaterial.sampEmissiveId = texIdToModelSamp.find(currMaterial.texEmissive)->second;
-
-        // currMaterial.texOcclusion = material.occlusionTexture.index;
-        // currMaterial.sampOcclusionId = texIdToModelSamp.find(currMaterial.texOcclusion)->second;
-
-        // currMaterial.d = (float)material.pbrMetallicRoughness.baseColorFactor[3];
-
-        // currMaterial.illum = material.alphaMode == "OPAQUE" ? 2 : 1;
-        // currMaterial.isLight = 0;
-
         const std::string& fileUri = "OmniPBR.mdl";
         const std::string& name = "OmniPBR";
         oka::Scene::MaterialDescription materialDesc;
         materialDesc.file = fileUri;
         materialDesc.name = name;
         materialDesc.type = oka::Scene::MaterialDescription::Type::eMdl;
-        // materialDesc.color = glm::float3(material.pbrMetallicRoughness.baseColorFactor[0], material.pbrMetallicRoughness.baseColorFactor[1], material.pbrMetallicRoughness.baseColorFactor[2]);
         materialDesc.color = glm::float3(1.0f);
         materialDesc.hasColor = true;
         oka::MaterialManager::Param colorParam = {};
@@ -456,22 +321,39 @@ void loadMaterials(const tinygltf::Model& model, oka::Scene& scene)
         memcpy(colorParam.value.data(), glm::value_ptr(materialDesc.color), sizeof(float) * 3);
         materialDesc.params.push_back(colorParam);
 
+        auto addFloat = [&](float value, const char* materialParamName) {
+            oka::MaterialManager::Param param{};
+            param.name = materialParamName;
+            param.type = oka::MaterialManager::Param::Type::eFloat;
+            param.value.resize(sizeof(float));
+            *((float*)param.value.data()) = value;
+            materialDesc.params.push_back(param);
+        };
+
+        addFloat((float)material.pbrMetallicRoughness.roughnessFactor, "reflection_roughness_constant");
+        addFloat((float)material.pbrMetallicRoughness.metallicFactor, "metallic_constant");
+
+        auto addTexture = [&](int texId, const char* materialParamName) {
+            const auto imageId = model.textures[texId].source;
+            const auto textureUri = model.images[imageId].uri;
+            oka::MaterialManager::Param paramTexture{};
+            paramTexture.name = materialParamName;
+            paramTexture.type = oka::MaterialManager::Param::Type::eTexture;
+            paramTexture.value.resize(textureUri.size());
+            memcpy(paramTexture.value.data(), textureUri.data(), textureUri.size());
+            materialDesc.params.push_back(paramTexture);
+        };
         auto texId = material.pbrMetallicRoughness.baseColorTexture.index;
-        if (texId > 0)
+        if (texId >= 0)
         {
-            auto imageId = model.textures[texId].source;
-            auto textureUri = model.images[imageId].uri;
-
-            oka::MaterialManager::Param diffuseTexture{};
-            diffuseTexture.name = "diffuse_texture";
-            diffuseTexture.type = oka::MaterialManager::Param::Type::eTexture;
-            diffuseTexture.value.resize(textureUri.size());
-            memcpy(diffuseTexture.value.data(), textureUri.data(), textureUri.size());
-            materialDesc.params.push_back(diffuseTexture);
+            addTexture(texId, "diffuse_texture");
         }
-
+        auto normalTexId = material.normalTexture.index;
+        if (normalTexId >= 0)
+        {
+            addTexture(normalTexId, "normalmap_texture");
+        }
         scene.addMaterial(materialDesc);
-
     }
 }
 
