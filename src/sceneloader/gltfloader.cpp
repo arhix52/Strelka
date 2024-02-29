@@ -307,11 +307,13 @@ void loadMaterials(const tinygltf::Model& model, oka::Scene& scene)
     {
         const std::string& fileUri = "OmniPBR.mdl";
         const std::string& name = "OmniPBR";
-        oka::Scene::MaterialDescription materialDesc;
+        oka::Scene::MaterialDescription materialDesc {};
         materialDesc.file = fileUri;
         materialDesc.name = name;
         materialDesc.type = oka::Scene::MaterialDescription::Type::eMdl;
-        materialDesc.color = glm::float3(1.0f);
+        materialDesc.color = glm::float3(material.pbrMetallicRoughness.baseColorFactor[0],
+                                         material.pbrMetallicRoughness.baseColorFactor[1],
+                                         material.pbrMetallicRoughness.baseColorFactor[2]);
         materialDesc.hasColor = true;
         oka::MaterialManager::Param colorParam = {};
         colorParam.name = "diffuse_color_constant";
