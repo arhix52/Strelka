@@ -18,6 +18,11 @@
 
 #include <iostream>
 
+namespace fs = std::filesystem;
+
+#include "nlohmann/json.hpp"
+using json = nlohmann::json;
+
 namespace oka
 {
 
@@ -644,6 +649,45 @@ void loadNodes(const tinygltf::Model& model, oka::Scene& scene, const float glob
     }
 }
 
+oka::Scene::UniformLightDesc parseFromJson(json light, uint32_t j)
+{
+    oka::Scene::UniformLightDesc desc;
+
+    desc.position = glm::float3(
+        light["lights"][j]["position"][0], light["lights"][j]["position"][1], light["lights"][j]["position"][2]);
+    desc.orientation = glm::float3(light["lights"][j]["orientation"][0], light["lights"][j]["orientation"][1],
+                                   light["lights"][j]["orientation"][2]);
+    desc.width = float(light["lights"][j]["width"]);
+    desc.height = light["lights"][j]["height"];
+    
+    desc.color =
+        glm::float3(light["lights"][j]["color"][0], light["lights"][j]["color"][1], light["lights"][j]["color"][2]);
+    desc.intensity = float(light["lights"][j]["intensity"]);
+
+    desc.useXform = 0;
+    desc.type = 0;
+    return desc;
+}
+
+void loadFromJson(const std::string& modelPath, oka::Scene& scene)
+{
+    std::string fileName = modelPath.substr(0, modelPath.rfind('.')); // w/o extension
+    std::string jsonPath = fileName + "_light" + ".json";
+    if (fs::exists(jsonPath))
+    {
+        std::ifstream i(jsonPath);
+        json light;
+        i >> light;
+
+        for (uint32_t j = 0; j < light["lights"].size(); ++j)
+        {
+            Scene::UniformLightDesc desc = parseFromJson(light, j);
+            scene.createLight(desc);
+        }
+    }
+}
+
+
 bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
 {
     if (modelPath.empty())
@@ -672,14 +716,16 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     // findTextureSamplers(model, scene);
     // loadTextures(model, scene, *mTexManager);
     loadMaterials(model, scene);
+    loadFromJson(modelPath, scene);
 
-    oka::Scene::UniformLightDesc lightDesc {};
-    lightDesc.xform = glm::mat4(1.0f);
-    lightDesc.type = 3; // distant light
-    lightDesc.halfAngle = 10.0f * 0.5f * (M_PI / 180.0f);
-    lightDesc.intensity = 15000;
-    lightDesc.color = glm::float3(1.0);
-    scene.createLight(lightDesc);
+    // oka::Scene::UniformLightDesc lightDesc {};
+    
+    // lightDesc.xform = glm::mat4(1.0f);
+    // lightDesc.type = 3; // distant light
+    // lightDesc.halfAngle = 10.0f * 0.5f * (M_PI / 180.0f);
+    // lightDesc.intensity = 15000;
+    // lightDesc.color = glm::float3(1.0);
+    // scene.createLight(lightDesc);
 
     loadCameras(model, scene);
 
