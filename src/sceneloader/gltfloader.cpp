@@ -361,7 +361,7 @@ oka::Scene::MaterialDescription convertToOmniGlass(const tinygltf::Model& model,
 
     materialDesc.file = "OmniGlass.mdl";
     materialDesc.name = "OmniGlass";
-
+    materialDesc.type = oka::Scene::MaterialDescription::Type::eMdl;
     // oka::MaterialManager::Param param{};
     // param.name = "enable_opacity";
     // param.type = oka::MaterialManager::Param::Type::eBool;
