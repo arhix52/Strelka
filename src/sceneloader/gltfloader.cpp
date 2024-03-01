@@ -362,15 +362,16 @@ oka::Scene::MaterialDescription convertToOmniGlass(const tinygltf::Model& model,
     materialDesc.file = "OmniGlass.mdl";
     materialDesc.name = "OmniGlass";
     materialDesc.type = oka::Scene::MaterialDescription::Type::eMdl;
-    // oka::MaterialManager::Param param{};
-    // param.name = "enable_opacity";
-    // param.type = oka::MaterialManager::Param::Type::eBool;
-    // param.value.resize(sizeof(bool));
-    // *((bool*)param.value.data()) = true;
-    // materialDesc.params.push_back(param);
-    materialDesc.color =
-        glm::float3(material.pbrMetallicRoughness.baseColorFactor[0], material.pbrMetallicRoughness.baseColorFactor[1],
-                    material.pbrMetallicRoughness.baseColorFactor[2]);
+    oka::MaterialManager::Param param{};
+    param.name = "enable_opacity";
+    param.type = oka::MaterialManager::Param::Type::eBool;
+    param.value.resize(sizeof(bool));
+    *((bool*)param.value.data()) = true;
+    materialDesc.params.push_back(param);
+    
+    // materialDesc.color =
+    //     glm::float3(material.pbrMetallicRoughness.baseColorFactor[0], material.pbrMetallicRoughness.baseColorFactor[1],
+    //                 material.pbrMetallicRoughness.baseColorFactor[2]);
 
     // oka::MaterialManager::Param colorParam = {};
     // colorParam.name = "glass_color";
@@ -378,6 +379,17 @@ oka::Scene::MaterialDescription convertToOmniGlass(const tinygltf::Model& model,
     // colorParam.value.resize(sizeof(float) * 3);
     // memcpy(colorParam.value.data(), glm::value_ptr(materialDesc.color), sizeof(float) * 3);
     // materialDesc.params.push_back(colorParam);
+    
+    auto addBool = [&](bool value, const char* materialParamName) {
+        oka::MaterialManager::Param param{};
+        param.name = materialParamName;
+        param.type = oka::MaterialManager::Param::Type::eBool;
+        param.value.resize(sizeof(float));
+        *((bool*)param.value.data()) = value;
+        materialDesc.params.push_back(param);
+    };
+
+    addBool(false, "thin_walled");
 
     auto addFloat = [&](float value, const char* materialParamName) {
         oka::MaterialManager::Param param{};
@@ -389,7 +401,7 @@ oka::Scene::MaterialDescription convertToOmniGlass(const tinygltf::Model& model,
     };
     
     addFloat((float)material.pbrMetallicRoughness.roughnessFactor, "frosting_roughness");
-
+    
     return materialDesc;
 }
 

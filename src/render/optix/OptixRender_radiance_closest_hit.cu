@@ -526,7 +526,7 @@ extern "C" __global__ void __closesthit__radiance()
         prd->throughput = make_float3(0.0f);
         return;
     }
-    prd->specularBounce = ((sample_data.event_type & (mi::neuraylib::BSDF_EVENT_SPECULAR)) != 0);
+    prd->specularBounce = ((sample_data.event_type & mi::neuraylib::BSDF_EVENT_SPECULAR) != 0);
 
     if (sample_data.event_type & ((mi::neuraylib::BSDF_EVENT_DIFFUSE | mi::neuraylib::BSDF_EVENT_GLOSSY)))
     {
