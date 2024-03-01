@@ -301,60 +301,110 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
     }
 }
 
+oka::Scene::MaterialDescription convertToOmniPBR(const tinygltf::Model& model, const tinygltf::Material& material)
+{
+    const std::string& fileUri = "OmniPBR.mdl";
+    const std::string& name = "OmniPBR";
+    oka::Scene::MaterialDescription materialDesc{};
+    materialDesc.file = fileUri;
+    materialDesc.name = name;
+    materialDesc.type = oka::Scene::MaterialDescription::Type::eMdl;
+    materialDesc.color =
+        glm::float3(material.pbrMetallicRoughness.baseColorFactor[0], material.pbrMetallicRoughness.baseColorFactor[1],
+                    material.pbrMetallicRoughness.baseColorFactor[2]);
+    materialDesc.hasColor = true;
+    oka::MaterialManager::Param colorParam = {};
+    colorParam.name = "diffuse_color_constant";
+    colorParam.type = oka::MaterialManager::Param::Type::eFloat3;
+    colorParam.value.resize(sizeof(float) * 3);
+    memcpy(colorParam.value.data(), glm::value_ptr(materialDesc.color), sizeof(float) * 3);
+    materialDesc.params.push_back(colorParam);
+
+    auto addFloat = [&](float value, const char* materialParamName) {
+        oka::MaterialManager::Param param{};
+        param.name = materialParamName;
+        param.type = oka::MaterialManager::Param::Type::eFloat;
+        param.value.resize(sizeof(float));
+        *((float*)param.value.data()) = value;
+        materialDesc.params.push_back(param);
+    };
+
+    addFloat((float)material.pbrMetallicRoughness.roughnessFactor, "reflection_roughness_constant");
+    addFloat((float)material.pbrMetallicRoughness.metallicFactor, "metallic_constant");
+
+    auto addTexture = [&](int texId, const char* materialParamName) {
+        const auto imageId = model.textures[texId].source;
+        const auto textureUri = model.images[imageId].uri;
+        oka::MaterialManager::Param paramTexture{};
+        paramTexture.name = materialParamName;
+        paramTexture.type = oka::MaterialManager::Param::Type::eTexture;
+        paramTexture.value.resize(textureUri.size());
+        memcpy(paramTexture.value.data(), textureUri.data(), textureUri.size());
+        materialDesc.params.push_back(paramTexture);
+    };
+    auto texId = material.pbrMetallicRoughness.baseColorTexture.index;
+    if (texId >= 0)
+    {
+        addTexture(texId, "diffuse_texture");
+    }
+    auto normalTexId = material.normalTexture.index;
+    if (normalTexId >= 0)
+    {
+        addTexture(normalTexId, "normalmap_texture");
+    }
+    return materialDesc;
+}
+
+oka::Scene::MaterialDescription convertToOmniGlass(const tinygltf::Model& model, const tinygltf::Material& material)
+{
+    oka::Scene::MaterialDescription materialDesc{};
+
+    materialDesc.file = "OmniGlass.mdl";
+    materialDesc.name = "OmniGlass";
+
+    // oka::MaterialManager::Param param{};
+    // param.name = "enable_opacity";
+    // param.type = oka::MaterialManager::Param::Type::eBool;
+    // param.value.resize(sizeof(bool));
+    // *((bool*)param.value.data()) = true;
+    // materialDesc.params.push_back(param);
+    materialDesc.color =
+        glm::float3(material.pbrMetallicRoughness.baseColorFactor[0], material.pbrMetallicRoughness.baseColorFactor[1],
+                    material.pbrMetallicRoughness.baseColorFactor[2]);
+
+    // oka::MaterialManager::Param colorParam = {};
+    // colorParam.name = "glass_color";
+    // colorParam.type = oka::MaterialManager::Param::Type::eFloat3;
+    // colorParam.value.resize(sizeof(float) * 3);
+    // memcpy(colorParam.value.data(), glm::value_ptr(materialDesc.color), sizeof(float) * 3);
+    // materialDesc.params.push_back(colorParam);
+
+    auto addFloat = [&](float value, const char* materialParamName) {
+        oka::MaterialManager::Param param{};
+        param.name = materialParamName;
+        param.type = oka::MaterialManager::Param::Type::eFloat;
+        param.value.resize(sizeof(float));
+        *((float*)param.value.data()) = value;
+        materialDesc.params.push_back(param);
+    };
+    
+    addFloat((float)material.pbrMetallicRoughness.roughnessFactor, "frosting_roughness");
+
+    return materialDesc;
+}
+
 void loadMaterials(const tinygltf::Model& model, oka::Scene& scene)
 {
     for (const tinygltf::Material& material : model.materials)
     {
-        const std::string& fileUri = "OmniPBR.mdl";
-        const std::string& name = "OmniPBR";
-        oka::Scene::MaterialDescription materialDesc {};
-        materialDesc.file = fileUri;
-        materialDesc.name = name;
-        materialDesc.type = oka::Scene::MaterialDescription::Type::eMdl;
-        materialDesc.color = glm::float3(material.pbrMetallicRoughness.baseColorFactor[0],
-                                         material.pbrMetallicRoughness.baseColorFactor[1],
-                                         material.pbrMetallicRoughness.baseColorFactor[2]);
-        materialDesc.hasColor = true;
-        oka::MaterialManager::Param colorParam = {};
-        colorParam.name = "diffuse_color_constant";
-        colorParam.type = oka::MaterialManager::Param::Type::eFloat3;
-        colorParam.value.resize(sizeof(float) * 3);
-        memcpy(colorParam.value.data(), glm::value_ptr(materialDesc.color), sizeof(float) * 3);
-        materialDesc.params.push_back(colorParam);
-
-        auto addFloat = [&](float value, const char* materialParamName) {
-            oka::MaterialManager::Param param{};
-            param.name = materialParamName;
-            param.type = oka::MaterialManager::Param::Type::eFloat;
-            param.value.resize(sizeof(float));
-            *((float*)param.value.data()) = value;
-            materialDesc.params.push_back(param);
-        };
-
-        addFloat((float)material.pbrMetallicRoughness.roughnessFactor, "reflection_roughness_constant");
-        addFloat((float)material.pbrMetallicRoughness.metallicFactor, "metallic_constant");
-
-        auto addTexture = [&](int texId, const char* materialParamName) {
-            const auto imageId = model.textures[texId].source;
-            const auto textureUri = model.images[imageId].uri;
-            oka::MaterialManager::Param paramTexture{};
-            paramTexture.name = materialParamName;
-            paramTexture.type = oka::MaterialManager::Param::Type::eTexture;
-            paramTexture.value.resize(textureUri.size());
-            memcpy(paramTexture.value.data(), textureUri.data(), textureUri.size());
-            materialDesc.params.push_back(paramTexture);
-        };
-        auto texId = material.pbrMetallicRoughness.baseColorTexture.index;
-        if (texId >= 0)
+        if (material.alphaMode == "OPAQUE") 
         {
-            addTexture(texId, "diffuse_texture");
+            scene.addMaterial(convertToOmniPBR(model, material));
         }
-        auto normalTexId = material.normalTexture.index;
-        if (normalTexId >= 0)
+        else 
         {
-            addTexture(normalTexId, "normalmap_texture");
+            scene.addMaterial(convertToOmniGlass(model, material));
         }
-        scene.addMaterial(materialDesc);
     }
 }
 
@@ -551,7 +601,7 @@ oka::Scene::UniformLightDesc parseFromJson(const json& light)
     return desc;
 }
 
-void loadFromJson(const std::string& modelPath, oka::Scene& scene)
+bool loadLightsFromJson(const std::string& modelPath, oka::Scene& scene)
 {
     std::string fileName = modelPath.substr(0, modelPath.rfind('.')); // w/o extension
     std::string jsonPath = fileName + "_light" + ".json";
@@ -567,7 +617,9 @@ void loadFromJson(const std::string& modelPath, oka::Scene& scene)
             Scene::UniformLightDesc desc = parseFromJson(light);
             scene.createLight(desc);
         }
+        return true;
     }
+    return false;
 }
 
 bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
@@ -592,16 +644,21 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     int sceneId = model.defaultScene;
 
     loadMaterials(model, scene);
-    loadFromJson(modelPath, scene);
-
-    // oka::Scene::UniformLightDesc lightDesc {};
-    
-    // lightDesc.xform = glm::mat4(1.0f);
-    // lightDesc.type = 3; // distant light
-    // lightDesc.halfAngle = 10.0f * 0.5f * (M_PI / 180.0f);
-    // lightDesc.intensity = 15000;
-    // lightDesc.color = glm::float3(1.0);
-    // scene.createLight(lightDesc);
+    if (loadLightsFromJson(modelPath, scene) == false)
+    {
+        STRELKA_WARNING("No light is scene, adding default distant light");
+        oka::Scene::UniformLightDesc lightDesc {};
+        // lightDesc.xform = glm::mat4(1.0f);
+        // lightDesc.useXform = true;
+        lightDesc.useXform = false;
+        lightDesc.position = glm::float3(0.0f, 0.0f, 0.0f);
+        lightDesc.orientation = glm::float3(-45.0f, 15.0f, 0.0f);
+        lightDesc.type = 3; // distant light
+        lightDesc.halfAngle = 10.0f * 0.5f * (M_PI / 180.0f);
+        lightDesc.intensity = 100000;
+        lightDesc.color = glm::float3(1.0);
+        scene.createLight(lightDesc);
+    }
 
     loadCameras(model, scene);
 
