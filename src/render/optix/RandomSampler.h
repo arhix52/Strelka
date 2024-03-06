@@ -42,9 +42,14 @@ __device__ inline unsigned int pcg_hash(unsigned int seed)
     return (word >> 22u) ^ word;
 }
 
-__device__ inline unsigned hash_combine(unsigned a, unsigned b)
+// __device__ inline unsigned hash_combine(unsigned a, unsigned b)
+// {
+//     return a ^ (b + 0x9e3779b9 + (a << 6) + (a >> 2));
+// }
+
+__device__ __inline__ uint32_t hash_combine(uint32_t seed, uint32_t v)
 {
-    return a ^ (b + 0x9e3779b9 + (a << 6) + (a >> 2));
+    return seed ^ (v + (seed << 6) + (seed >> 2));
 }
 
 __device__ inline unsigned int hash_with(unsigned int seed, unsigned int hash)
@@ -189,8 +194,9 @@ __device__ __inline__ uint32_t nested_uniform_scramble(uint32_t value, uint32_t 
 
 __device__ __inline__ float sobol_scramble(uint32_t index, uint32_t dim, uint32_t seed)
 {
-    index = nested_uniform_scramble(index, hash(seed));
-    uint32_t result = nested_uniform_scramble(sobol_uint(index, dim), hash_combine(hash(seed), dim));
+    seed = hash(seed);
+    index = nested_uniform_scramble(index, seed);
+    uint32_t result = nested_uniform_scramble(sobol_uint(index, dim), hash_combine(seed, dim));
     return min(result * 0x1p-32f, FloatOneMinusEpsilon);
 }
 
