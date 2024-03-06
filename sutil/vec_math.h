@@ -93,6 +93,10 @@ SUTIL_INLINE SUTIL_HOSTDEVICE unsigned long long min(unsigned long long a, unsig
     return a < b ? a : b;
 }
 
+SUTIL_INLINE SUTIL_HOSTDEVICE float min(const float a, const float b)
+{
+    return a < b ? a : b;
+}
 
 /** lerp */
 SUTIL_INLINE SUTIL_HOSTDEVICE float lerp(const float a, const float b, const float t)
