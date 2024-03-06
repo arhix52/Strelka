@@ -493,12 +493,6 @@ extern "C" __global__ void __closesthit__radiance()
     state.object_id = 0;
     state.meters_per_scene_unit = 1.0f;
 
-    if (params.debug == 1)
-    {
-        prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
-        return;
-    }
-
     const float3 ior1 = (isInside) ? make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR) : make_float3(1.0f); // material ->
                                                                                                           // air
     const float3 ior2 = (isInside) ? make_float3(1.0f) : make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR);
@@ -506,6 +500,12 @@ extern "C" __global__ void __closesthit__radiance()
     mi::neuraylib::Resource_data res_data = { nullptr, (Texture_handler*)hit_data->resHandler }; // TODO
 
     mdlcode_init(&state, &res_data, (const char*)hit_data->argData);
+
+    if (params.debug == 1)
+    {
+        prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
+        return;
+    }
 
     const float z1 = random<SampleDimension::eBSDF0>(prd->sampler);
     const float z2 = random<SampleDimension::eBSDF1>(prd->sampler);
