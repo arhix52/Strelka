@@ -43,9 +43,11 @@ bool MdlRuntime::init(const char* paths[], uint32_t numPaths, const char* neuray
 
     mi::base::Handle<mi::neuraylib::INeuray> neuray(mLoader->getNeuray());
     mConfig = neuray->get_api_component<mi::neuraylib::IMdl_configuration>();
-
+    
+    mi::base::Handle<mi::neuraylib::ILogging_configuration> logging_conf(
+        neuray->get_api_component<mi::neuraylib::ILogging_configuration>());
     mLogger = mi::base::Handle<MdlLogger>(new MdlLogger());
-    mConfig->set_logger(mLogger.get());
+    logging_conf->set_receiving_logger(mLogger.get());
 
     for (uint32_t i = 0; i < numPaths; i++)
     {

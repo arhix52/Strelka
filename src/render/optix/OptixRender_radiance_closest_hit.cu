@@ -493,19 +493,19 @@ extern "C" __global__ void __closesthit__radiance()
     state.object_id = 0;
     state.meters_per_scene_unit = 1.0f;
 
-    if (params.debug == 1)
-    {
-        prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
-        return;
-    }
-
     const float3 ior1 = (isInside) ? make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR) : make_float3(1.0f); // material ->
                                                                                                           // air
     const float3 ior2 = (isInside) ? make_float3(1.0f) : make_float3(MI_NEURAYLIB_BSDF_USE_MATERIAL_IOR);
 
     mi::neuraylib::Resource_data res_data = { nullptr, (Texture_handler*)hit_data->resHandler }; // TODO
 
-    mdlcode_init(&state, &res_data, nullptr, (const char*)hit_data->argData);
+    mdlcode_init(&state, &res_data, (const char*)hit_data->argData);
+
+    if (params.debug == 1)
+    {
+        prd->radiance = (state.normal + make_float3(1.0f)) * 0.5f;
+        return;
+    }
 
     const float z1 = random<SampleDimension::eBSDF0>(prd->sampler);
     const float z2 = random<SampleDimension::eBSDF1>(prd->sampler);
@@ -518,7 +518,7 @@ extern "C" __global__ void __closesthit__radiance()
     sample_data.k1 = -ray_dir;
     sample_data.xi = make_float4(z1, z2, z3, z4);
 
-    mdlcode_sample(&sample_data, &state, &res_data, nullptr, (const char*)hit_data->argData);
+    mdlcode_sample(&sample_data, &state, &res_data, (const char*)hit_data->argData);
 
     if (sample_data.event_type == mi::neuraylib::BSDF_EVENT_ABSORB)
     {
@@ -552,7 +552,7 @@ extern "C" __global__ void __closesthit__radiance()
             evalData.bsdf_diffuse = make_float3(0.0f);
             evalData.bsdf_glossy = make_float3(0.0f);
 
-            mdlcode_evaluate(&evalData, &state, &res_data, nullptr, (const char*)hit_data->argData);
+            mdlcode_evaluate(&evalData, &state, &res_data, (const char*)hit_data->argData);
 
             if (isnan(evalData.bsdf_diffuse) || isnan(evalData.bsdf_glossy))
             {
