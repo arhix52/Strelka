@@ -35,6 +35,8 @@ add_subdirectory(src/scene)
 add_subdirectory(src/materialmanager)
 add_subdirectory(src/display)
 add_subdirectory(src/hdRunner)
+add_subdirectory(src/sceneloader)
+add_subdirectory(src/app)
 
 if(WIN32 OR LINUX)
   add_subdirectory(tests)

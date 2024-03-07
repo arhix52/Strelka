@@ -14,8 +14,6 @@ namespace fs = std::filesystem;
 
 namespace oka
 {
-using Lookup = std::map<std::pair<uint32_t, uint32_t>, uint32_t>;
-using IndexedMesh = std::pair<std::vector<Scene::Vertex>, std::vector<uint32_t>>;
 
 uint32_t Scene::createMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib)
 {

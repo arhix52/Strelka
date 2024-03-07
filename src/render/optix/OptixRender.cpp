@@ -874,7 +874,7 @@ void OptiXRender::render(Buffer* output)
 
     updatePathtracerParams(width, height);
 
-    oka::Camera& camera = mScene->getCamera(1);
+    oka::Camera& camera = mScene->getCamera(0);
     camera.updateAspectRatio(width / (float)height);
     camera.updateViewMatrix();
 
@@ -1063,11 +1063,11 @@ void OptiXRender::init()
     }
 
     createContext();
-    createAccelerationStructure();
+    // createAccelerationStructure();
     createModule();
     createProgramGroups();
     createPipeline();
-    createSbt();
+    // createSbt();
 }
 
 Buffer* OptiXRender::createBuffer(const BufferDesc& desc)
@@ -1311,7 +1311,9 @@ bool OptiXRender::createOptixMaterials()
 
     std::vector<Texture> materialTextures;
 
-    fs::path resourcePath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
+    const auto searchPath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
+
+    fs::path resourcePath = fs::path(getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath"));
 
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {

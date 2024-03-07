@@ -1,8 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-find_package(USD REQUIRED HINTS ${USD_DIR} NAMES pxr)
-message(STATUS "USD LIBRARY: ${USD_DIR}")
-find_package( OpenGL REQUIRED )
+find_package(cxxopts REQUIRED)
 
 # Application
 set(RUNNER_SOURCES
@@ -27,21 +25,17 @@ if( WIN32 )
 endif()
 
 # target_include_directories(${PROJECT_NAME} PUBLIC ${Vulkan_INCLUDE_DIR})
-target_include_directories(${RUNNER_NAME} PUBLIC ${ROOT_HOME}/external/glfw/include)
-target_include_directories(${RUNNER_NAME} PUBLIC ${ROOT_HOME}/external/cxxopts/include)
+# target_include_directories(${RUNNER_NAME} PUBLIC ${ROOT_HOME}/external/glfw/include)
+# target_include_directories(${RUNNER_NAME} PUBLIC ${ROOT_HOME}/external/cxxopts/include)
 target_include_directories(${RUNNER_NAME} PUBLIC ${ROOT_HOME}/include/)
-target_include_directories(${RUNNER_NAME} PUBLIC ${ROOT_HOME}/include/display)
+# target_include_directories(${RUNNER_NAME} PUBLIC ${ROOT_HOME}/include/display)
 # target_include_directories(${RUNNER_NAME} PUBLIC hd)
 target_link_libraries(${RUNNER_NAME} PUBLIC 
-    # ${DISPLAYLIB_NAME}
-    # ${SCENELIB_NAME}
-    # ${RENDERLIB_NAME}
-    ${ROOT_HOME}/external/glfw/glfw3.lib
-    # ${OPENGL_LIBRARIES}
-    scene
-    display
-    render
-    # PRIVATE
-    glad
-    # ar cameraUtil hd hf hgi hio usd usdGeom usdImaging    
+  cxxopts::cxxopts
+  scene
+  sceneloader
+  settings
+  display
+  render
+  logger
 )  # Link the executable to library (if it uses it).

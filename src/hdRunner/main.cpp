@@ -446,13 +446,16 @@ int main(int argc, const char* argv[])
     // config. options
     cxxopts::Options options("Strelka -s <USD Scene path>", "commands");
 
-    options.add_options()("s, scene", "scene path", cxxopts::value<std::string>()->default_value(""))(
-        "i, iteration", "Iteration to capture", cxxopts::value<int32_t>()->default_value("-1"))(
-        "h, help", "Print usage")("t, spp_total", "spp total", cxxopts::value<int32_t>()->default_value("64"))(
-        "f, spp_subframe", "spp subframe", cxxopts::value<int32_t>()->default_value("1"))(
-        "c, need_screenshot", "Screenshot after spp total", cxxopts::value<bool>()->default_value("false"))(
-        "v, validation", "Enable Validation", cxxopts::value<bool>()->default_value("false"));
-
+    // clang-format off
+    options.add_options()
+        ("s, scene", "scene path", cxxopts::value<std::string>()->default_value(""))
+        ("i, iteration", "Iteration to capture", cxxopts::value<int32_t>()->default_value("-1"))
+        ("h, help", "Print usage")("t, spp_total", "spp total", cxxopts::value<int32_t>()->default_value("64"))
+        ("f, spp_subframe", "spp subframe", cxxopts::value<int32_t>()->default_value("1"))
+        ("c, need_screenshot", "Screenshot after spp total", cxxopts::value<bool>()->default_value("false"))
+        ("v, validation", "Enable Validation", cxxopts::value<bool>()->default_value("false"));
+    // clang-format on  
+    
     options.parse_positional({ "s" });
     auto result = options.parse(argc, argv);
 
