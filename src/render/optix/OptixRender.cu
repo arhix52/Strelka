@@ -70,7 +70,7 @@ extern "C" __global__ void __raygen__rg()
         prd.linearPixelIndex = launch_index.y * params.image_width + launch_index.x;
         prd.sampleIndex = params.subframe_index + sampleIdx;
 
-        prd.sampler = initSampler(prd.linearPixelIndex, prd.sampleIndex, 52u);
+        prd.sampler = initSampler(prd.linearPixelIndex, prd.sampleIndex, params.maxSampleCount, 52u);
 
         prd.radiance = make_float3(0.0f);
         prd.throughput = make_float3(1.0f);

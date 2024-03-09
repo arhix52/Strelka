@@ -71,17 +71,17 @@ static __host__ __device__ __inline__ unsigned int lcg(unsigned int& prev)
     return prev & 0x00FFFFFF;
 }
 
-// // jenkins hash
-// static __device__ unsigned int hash(unsigned int a)
-// {
-//   a = (a + 0x7ED55D16) + (a << 12);
-//   a = (a ^ 0xC761C23C) ^ (a >> 19);
-//   a = (a + 0x165667B1) + (a <<  5);
-//   a = (a + 0xD3A2646C) ^ (a <<  9);
-//   a = (a + 0xFD7046C5) + (a <<  3);
-//   a = (a ^ 0xB55A4F09) ^ (a >> 16);
-//   return a;
-// }
+// jenkins hash
+static __device__ unsigned int jenkins_hash(unsigned int a)
+{
+  a = (a + 0x7ED55D16) + (a << 12);
+  a = (a ^ 0xC761C23C) ^ (a >> 19);
+  a = (a + 0x165667B1) + (a <<  5);
+  a = (a + 0xD3A2646C) ^ (a <<  9);
+  a = (a + 0xFD7046C5) + (a <<  3);
+  a = (a ^ 0xB55A4F09) ^ (a >> 16);
+  return a;
+}
 
 __device__ __inline__ uint32_t hash(uint32_t x)
 {
@@ -110,11 +110,11 @@ static __device__ float halton(uint32_t index, uint32_t base)
     return clamp(result, 0.0f, FloatOneMinusEpsilon);
 }
 
-static __device__ SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t seed)
+static __device__ SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t maxSampleCount, uint32_t seed)
 {
     SamplerState sampler{};
     sampler.seed = seed;
-    sampler.sampleIdx = pixelSampleIndex + linearPixelIndex * 64;
+    sampler.sampleIdx = pixelSampleIndex + linearPixelIndex * maxSampleCount;
     return sampler;
 }
 
@@ -148,10 +148,6 @@ __device__ const uint32_t sb_matrix[5][32] = {
 __device__ __inline__ uint32_t sobol_uint(uint32_t index, uint32_t dim)
 {
     uint32_t X = 0;
-    if (dim > 4)
-    {
-        return X;
-    }
     for (int bit = 0; bit < 32; bit++)
     {
         int mask = (index >> bit) & 1;
@@ -177,11 +173,15 @@ __device__ __inline__ uint32_t laine_karras_permutation(uint32_t value, uint32_t
 
 __device__ __inline__ uint32_t ReverseBits(uint32_t value)
 {
+#ifdef __CUDACC__
+    return __brev(value);
+#else
     value = (((value & 0xaaaaaaaa) >> 1) | ((value & 0x55555555) << 1));
     value = (((value & 0xcccccccc) >> 2) | ((value & 0x33333333) << 2));
     value = (((value & 0xf0f0f0f0) >> 4) | ((value & 0x0f0f0f0f) << 4));
     value = (((value & 0xff00ff00) >> 8) | ((value & 0x00ff00ff) << 8));
     return ((value >> 16) | (value << 16));
+#endif
 }
 
 __device__ __inline__ uint32_t nested_uniform_scramble(uint32_t value, uint32_t seed)
