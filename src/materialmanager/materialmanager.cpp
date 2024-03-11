@@ -804,17 +804,6 @@ private:
     {
         using namespace std;
         const fs::path cwd = fs::current_path();
-        const char* envUSDPath = std::getenv("USD_DIR");
-        if (!envUSDPath)
-        {
-            STRELKA_FATAL("Please, set USD_DIR variable\n");
-            assert(0);
-        }
-        else
-        {
-            mtlxLibPath = fs::path(envUSDPath) / fs::path("libraries/");
-        }
-        mMdlSrc = cwd.string() + "/data/materials/mtlx"; // path to the material
 
 #ifdef MI_PLATFORM_WINDOWS
         mPathso = cwd.string();
