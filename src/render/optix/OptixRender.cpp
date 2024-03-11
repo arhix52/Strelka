@@ -1024,15 +1024,15 @@ void OptiXRender::render(Buffer* output)
 
 void OptiXRender::init()
 {
+    // TODO: move USD_DIR to settings
     const char* envUSDPath = std::getenv("USD_DIR");
     mEnableValidation = getSharedContext().mSettingsManager->getAs<bool>("render/enableValidation");
 
-    if (!envUSDPath)
+    fs::path usdMdlLibPath;
+    if (envUSDPath)
     {
-        STRELKA_FATAL("Please, set USD_DIR variable");
-        assert(0);
+        usdMdlLibPath = (fs::path(envUSDPath) / fs::path("libraries/mdl/")).make_preferred();
     }
-    const fs::path usdMdlLibPath = (fs::path(envUSDPath) / fs::path("libraries/mdl/")).make_preferred();
     const fs::path cwdPath = fs::current_path();
     STRELKA_DEBUG("cwdPath: {}", cwdPath.string().c_str());
     const fs::path mtlxPath = (cwdPath / fs::path("data/materials/mtlx")).make_preferred();
