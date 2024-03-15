@@ -110,11 +110,29 @@ static __device__ float halton(uint32_t index, uint32_t base)
     return clamp(result, 0.0f, FloatOneMinusEpsilon);
 }
 
-static __device__ SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t maxSampleCount, uint32_t seed)
+// source https://fgiesen.wordpress.com/2009/12/13/decoding-morton-codes/
+// "Insert" a 0 bit after each of the 16 low bits of x
+__device__ __inline__ uint32_t Part1By1(uint32_t x)
+{
+  x &= 0x0000ffff;                  // x = ---- ---- ---- ---- fedc ba98 7654 3210
+  x = (x ^ (x <<  8)) & 0x00ff00ff; // x = ---- ---- fedc ba98 ---- ---- 7654 3210
+  x = (x ^ (x <<  4)) & 0x0f0f0f0f; // x = ---- fedc ---- ba98 ---- 7654 ---- 3210
+  x = (x ^ (x <<  2)) & 0x33333333; // x = --fe --dc --ba --98 --76 --54 --32 --10
+  x = (x ^ (x <<  1)) & 0x55555555; // x = -f-e -d-c -b-a -9-8 -7-6 -5-4 -3-2 -1-0
+  return x;
+}
+
+__device__ __inline__ uint32_t EncodeMorton2(uint32_t x, uint32_t y)
+{
+  return (Part1By1(y) << 1) + Part1By1(x);
+}
+
+static __device__ SamplerState initSampler(uint32_t pixelX, uint32_t pixelY, uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t maxSampleCount, uint32_t seed)
 {
     SamplerState sampler{};
     sampler.seed = seed;
-    sampler.sampleIdx = pixelSampleIndex + linearPixelIndex * maxSampleCount;
+    // sampler.sampleIdx = pixelSampleIndex + linearPixelIndex * maxSampleCount;
+    sampler.sampleIdx = EncodeMorton2(pixelX, pixelY) * maxSampleCount + pixelSampleIndex;
     return sampler;
 }
 
