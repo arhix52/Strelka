@@ -522,11 +522,27 @@ extern "C" __global__ void __closesthit__radiance()
 
     if (sample_data.event_type == mi::neuraylib::BSDF_EVENT_ABSORB)
     {
+        if (prd->depth == 0)
+        {
+            prd->firstEventType = EventType::eAbsorb;
+        }
         // stop on absorb
         prd->throughput = make_float3(0.0f);
         return;
     }
     prd->specularBounce = ((sample_data.event_type & mi::neuraylib::BSDF_EVENT_SPECULAR) != 0);
+
+    if (prd->depth == 0)
+    {
+        if (sample_data.event_type & mi::neuraylib::BSDF_EVENT_DIFFUSE)
+        {
+            prd->firstEventType = EventType::eDiffuse;
+        }
+        if (sample_data.event_type & mi::neuraylib::BSDF_EVENT_GLOSSY)
+        {
+            prd->firstEventType = EventType::eSpecular;
+        }
+    }
 
     if (sample_data.event_type & ((mi::neuraylib::BSDF_EVENT_DIFFUSE | mi::neuraylib::BSDF_EVENT_GLOSSY)))
     {

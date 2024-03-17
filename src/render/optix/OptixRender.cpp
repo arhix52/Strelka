@@ -843,13 +843,31 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
         {
             CUDA_CHECK(cudaFree((void*)mState.params.accum));
         }
+        if (mState.params.diffuse)
+        {
+            CUDA_CHECK(cudaFree((void*)mState.params.diffuse));
+        }
+        if (mState.params.specular)
+        {
+            CUDA_CHECK(cudaFree((void*)mState.params.specular));
+        }
         if (mState.d_params)
         {
             CUDA_CHECK(cudaFree((void*)mState.d_params));
         }
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.d_params), sizeof(Params)));
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.accum),
-                              mState.params.image_width * mState.params.image_height * sizeof(float4)));
+        const size_t frameSize = mState.params.image_width * mState.params.image_height;
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.accum), frameSize * sizeof(float4)));
+        
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.diffuse), frameSize * sizeof(float4)));
+        CUDA_CHECK(cudaMemset(mState.params.diffuse, 0, frameSize * sizeof(float4)));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.diffuseCounter), frameSize * sizeof(uint16_t)));
+        CUDA_CHECK(cudaMemset(mState.params.diffuseCounter, 0, frameSize * sizeof(uint16_t)));
+        
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.specular), frameSize * sizeof(float4)));
+        CUDA_CHECK(cudaMemset(mState.params.specular, 0, frameSize * sizeof(float4)));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.specularCounter), frameSize * sizeof(uint16_t)));
+        CUDA_CHECK(cudaMemset(mState.params.specularCounter, 0, frameSize * sizeof(uint16_t)));
     }
 }
 
@@ -975,7 +993,7 @@ void OptiXRender::render(Buffer* output)
     uint32_t samplesThisLaunch =
         enableAccumulation ? std::min((int32_t)samplesPerLaunch, leftSpp) : samplesPerLaunch;
 
-    if (params.debug != 0)
+    if (params.debug == 1)
     {
         samplesThisLaunch = 1;
         enableAccumulation = false;
@@ -1004,12 +1022,27 @@ void OptiXRender::render(Buffer* output)
     else
     {
         // just copy latest accumulated raw radiance to destination
-        CUDA_CHECK(cudaMemcpy(params.image, params.accum,
-                              mState.params.image_width * mState.params.image_height * sizeof(float4),
-                              cudaMemcpyDeviceToDevice));
+        if (params.debug == 0)
+        {
+            CUDA_CHECK(cudaMemcpy(params.image, params.accum,
+                                mState.params.image_width * mState.params.image_height * sizeof(float4),
+                                cudaMemcpyDeviceToDevice));
+        }
+        if (params.debug == 2)
+        {
+            CUDA_CHECK(cudaMemcpy(params.image, params.diffuse,
+                                mState.params.image_width * mState.params.image_height * sizeof(float4),
+                                cudaMemcpyDeviceToDevice));
+        }
+        if (params.debug == 3)
+        {
+            CUDA_CHECK(cudaMemcpy(params.image, params.specular,
+                                mState.params.image_width * mState.params.image_height * sizeof(float4),
+                                cudaMemcpyDeviceToDevice));
+        }
     }
 
-    if (params.debug == 0)
+    if (params.debug != 1)
     {
         // do not run post processing for debug output
         tonemap(tonemapperType, exposureValue, gamma, params.image, width, height);
