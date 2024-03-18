@@ -39,6 +39,7 @@ struct Params
 {
     uint32_t subframe_index;
     uint32_t samples_per_launch;
+    uint32_t maxSampleCount;
     float4* image;
     float4* accum;
     uint32_t image_width;

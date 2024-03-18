@@ -983,6 +983,7 @@ void OptiXRender::render(Buffer* output)
 
     params.samples_per_launch = samplesThisLaunch;
     params.enableAccumulation = enableAccumulation;
+    params.maxSampleCount = totalSpp;
 
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(mState.d_params), &params, sizeof(params), cudaMemcpyHostToDevice));
 
