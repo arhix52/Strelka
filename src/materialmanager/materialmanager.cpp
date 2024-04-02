@@ -807,10 +807,10 @@ private:
 
 #ifdef MI_PLATFORM_WINDOWS
         mPathso = cwd.string();
-        mImagePluginPath = cwd.string() + "/nv_freeimage.dll";
+        mImagePluginPath = cwd.string() + "/nv_openimageio.dll";
 #else
         mPathso = cwd.string();
-        mImagePluginPath = cwd.string() + "/nv_freeimage.so";
+        mImagePluginPath = cwd.string() + "/nv_openimageio.so";
 #endif
     }
 

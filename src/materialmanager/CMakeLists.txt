@@ -80,7 +80,7 @@ if(WIN32 OR LINUX)
     PRE_BUILD
     COMMAND
       ${CMAKE_COMMAND} -E copy
-      "${ROOT_HOME}/external/mdl-sdk/linux-x86-64/lib/nv_freeimage.so"
+      "${ROOT_HOME}/external/mdl-sdk/linux-x86-64/lib/nv_openimageio.so"
       "${OUTPUT_DIRECTORY}")
   endif(LINUX)
 
