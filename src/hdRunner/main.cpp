@@ -592,15 +592,22 @@ int main(int argc, const char* argv[])
 
     const double meterPerUnit = UsdGeomGetStageMetersPerUnit(stage);
 
-    // Init default camera
-    SdfPath cameraPath = SdfPath("/defaultCamera");
-    UsdGeomCamera cam = UsdGeomCamera::Define(stage, cameraPath);
-    setDefaultCamera(cam);
-
     // Init camera from scene
-    cameraPath = SdfPath::EmptyPath();
+    SdfPath cameraPath = SdfPath::EmptyPath();
     HdCamera* camera = FindCamera(stage, renderIndex, cameraPath);
-    cam = UsdGeomCamera::Get(stage, cameraPath);
+    UsdGeomCamera cam;
+    if (camera)
+    {
+        cam = UsdGeomCamera::Get(stage, cameraPath);
+    }
+    else
+    {
+        // Init default camera
+        cameraPath = SdfPath("/defaultCamera");
+        cam = UsdGeomCamera::Define(stage, cameraPath);
+        setDefaultCamera(cam);
+    }
+    
     CameraController cameraController(cam, upAxis == UsdGeomTokens->y);
 
     // std::vector<std::pair<HdCamera*, SdfPath>> cameras = FindAllCameras(stage, renderIndex);
@@ -632,7 +639,7 @@ int main(int argc, const char* argv[])
         renderPassState[i]->SetCamera(camera);
         renderPassState[i]->SetFraming(framing);
         renderPassState[i]->SetOverrideWindowPolicy(overrideWindowPolicy);
-        
+
         HdRenderPassAovBindingVector aovBindings(1);
         aovBindings[0].aovName = HdAovTokens->color;
         aovBindings[0].renderBuffer = renderBuffers[i];

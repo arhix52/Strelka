@@ -148,6 +148,11 @@ const TfTokenVector& HdStrelkaRenderDelegate::GetSupportedSprimTypes() const
 HdSprim* HdStrelkaRenderDelegate::CreateSprim(const TfToken& typeId, const SdfPath& sprimId)
 {
     STRELKA_DEBUG("CreateSprim Type: {}", typeId.GetText());
+    if (sprimId.IsEmpty())
+    {
+        STRELKA_DEBUG("skipping creation of empty sprim path");
+        return nullptr;
+    }
     HdSprim* res = nullptr;
     if (typeId == HdPrimTypeTokens->camera)
     {
