@@ -617,7 +617,7 @@ int main(int argc, const char* argv[])
     framing.displayWindow = GfRange2f(GfVec2f(0.0f, 0.0f), GfVec2f((float)imageWidth, (float)imageHeight));
     framing.pixelAspectRatio = 1.0f;
 
-    const std::pair<bool, CameraUtilConformWindowPolicy> overrideWindowPolicy(false, CameraUtilFit);
+    const std::optional<CameraUtilConformWindowPolicy> overrideWindowPolicy(CameraUtilFit);
 
     // TODO: add UI control here
     TfTokenVector renderTags{ HdRenderTagTokens->geometry, HdRenderTagTokens->render };
@@ -629,7 +629,10 @@ int main(int argc, const char* argv[])
     for (int i = 0; i < 3; ++i)
     {
         renderPassState[i] = std::make_shared<HdRenderPassState>();
-        renderPassState[i]->SetCameraAndFraming(camera, framing, overrideWindowPolicy);
+        renderPassState[i]->SetCamera(camera);
+        renderPassState[i]->SetFraming(framing);
+        renderPassState[i]->SetOverrideWindowPolicy(overrideWindowPolicy);
+        
         HdRenderPassAovBindingVector aovBindings(1);
         aovBindings[0].aovName = HdAovTokens->color;
         aovBindings[0].renderBuffer = renderBuffers[i];
