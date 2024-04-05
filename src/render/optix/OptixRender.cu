@@ -57,17 +57,45 @@ __device__ void generateCameraRay(
     direction = normalize(make_float3(wdir));
 }
 
+__device__ float4 accumulate(float4* history,
+                             const float3 value,
+                             const uint32_t linearPixelIndex,
+                             const float3 exposure,
+                             const uint32_t subFrameIndex)
+{
+    // Accumulation
+    float3 accumColor = value;
+    if (subFrameIndex > 0)
+    {
+        const float a = 1.0f / static_cast<float>(subFrameIndex + 1);
+        const float3 accumColorPrev = make_float3(history[linearPixelIndex]);
+        const float3 exposure = params.exposure;
+        // perform lerp in ldr and back to hdr back
+        accumColor = inverseTonemap(lerp(tonemap(accumColorPrev, exposure), tonemap(accumColor, exposure), a), exposure);
+    }
+    history[linearPixelIndex] = make_float4(accumColor, 1.0f);
+    return make_float4(accumColor, 1.0f);
+}
+
 extern "C" __global__ void __raygen__rg()
 {
     const uint3 launch_index = optixGetLaunchIndex();
     const uint3 dim = optixGetLaunchDimensions();
 
     float3 result = make_float3(0.0f);
+    float3 diffuse = make_float3(0.0f);
+    float4 diffuseOut = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+    uint32_t diffuseSamples = 0;
+    float3 specular = make_float3(0.0f);
+    float4 specularOut = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+    uint32_t specularSamples = 0;
+    const uint32_t linearPixelIndex = launch_index.y * params.image_width + launch_index.x;
 
     for (uint32_t sampleIdx = 0; sampleIdx < params.samples_per_launch; ++sampleIdx)
     {
         PerRayData prd = {};
-        prd.linearPixelIndex = launch_index.y * params.image_width + launch_index.x;
+        prd.firstEventType = EventType::eUndef;
+        prd.linearPixelIndex = linearPixelIndex;
         prd.sampleIndex = params.subframe_index + sampleIdx;
 
         prd.sampler = initSampler(launch_index.x, launch_index.y, prd.linearPixelIndex, prd.sampleIndex, params.maxSampleCount, 52u);
@@ -125,35 +153,97 @@ extern "C" __global__ void __raygen__rg()
             prd.sampler.depth++;
         }
         result += prd.radiance;
+
+        if (prd.firstEventType == EventType::eDiffuse)
+        {
+            diffuse += prd.radiance;
+            ++diffuseSamples;
+        }
+        if (prd.firstEventType == EventType::eSpecular)
+        {
+            specular += prd.radiance;
+            ++specularSamples;
+        }
     }
 
     result /= static_cast<float>(params.samples_per_launch);
+    if (diffuseSamples > 0)
+    {
+        diffuse /= static_cast<float>(diffuseSamples);
+        uint32_t prevSamplesCount = params.subframe_index > 0 ? params.diffuseCounter[linearPixelIndex] : 0;
+        diffuseOut = accumulate(params.diffuse, diffuse, linearPixelIndex, params.exposure, prevSamplesCount);
+        params.diffuseCounter[linearPixelIndex] = uint16_t(prevSamplesCount + diffuseSamples);
+    }
+    else
+    {
+        if (params.subframe_index == 0)
+        {
+            // need to reset history
+            params.diffuse[linearPixelIndex] = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+            params.diffuseCounter[linearPixelIndex] = 0;
+        }
+        diffuseOut = params.diffuse[linearPixelIndex];
+    }
+    if (specularSamples > 0)
+    {
+        specular /= static_cast<float>(specularSamples);
+        uint32_t prevSamplesCount = params.subframe_index > 0 ? params.specularCounter[linearPixelIndex] : 0;
+        specularOut = accumulate(params.specular, specular, linearPixelIndex, params.exposure, prevSamplesCount);
+        params.specularCounter[linearPixelIndex] = uint16_t(prevSamplesCount + specularSamples);
+    }
+    else
+    {
+        if (params.subframe_index == 0)
+        {
+            // need to reset history
+            params.specular[linearPixelIndex] = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+            params.specularCounter[linearPixelIndex] = 0;
+        }
+        if (params.specularCounter[linearPixelIndex] > 0)
+        {
+            specularOut = params.specular[linearPixelIndex];
+        }
+        else
+        {
+            specularOut = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+        }
+    }
 
-    const unsigned int image_index = launch_index.y * params.image_width + launch_index.x;
+    if (params.debug == 2)
+    {
+        params.image[linearPixelIndex] = diffuseOut;
+        return;
+    }
+    if (params.debug == 3)
+    {
+        params.image[linearPixelIndex] = specularOut;
+        return;
+    }
 
     if (params.enableAccumulation && params.debug == 0)
     {
         // Accumulation
-        float3 accum_color = result;
-        if (params.subframe_index > 0)
-        {
-            const float a = 1.0f / static_cast<float>(params.subframe_index + 1);
-            const float3 accum_color_prev = make_float3(params.accum[image_index]);
-            const float3 exposure = params.exposure;
-            // perform lerp in ldr and back to hdr back
-            accum_color = inverseTonemap(
-                lerp(
-                tonemap(accum_color_prev, exposure), 
-                tonemap(accum_color, exposure),
-                a),
-                exposure);
-        }
-        params.accum[image_index] = make_float4(accum_color, 1.0f);
-        params.image[image_index] = make_float4(accum_color, 1.0f);
+        params.image[linearPixelIndex] = accumulate(params.accum, result, linearPixelIndex, params.exposure, params.subframe_index);
+        // float3 accum_color = result;
+        // if (params.subframe_index > 0)
+        // {
+        //     const float a = 1.0f / static_cast<float>(params.subframe_index + 1);
+        //     const float3 accum_color_prev = make_float3(params.accum[image_index]);
+        //     const float3 exposure = params.exposure;
+        //     // perform lerp in ldr and back to hdr back
+        //     accum_color = inverseTonemap(
+        //         lerp(
+        //         tonemap(accum_color_prev, exposure), 
+        //         tonemap(accum_color, exposure),
+        //         a),
+        //         exposure);
+        // }
+        // params.accum[image_index] = make_float4(accum_color, 1.0f);
+        // params.image[image_index] = make_float4(accum_color, 1.0f);
     }
     else
     {
-        params.image[image_index] = make_float4(result, 1.0f);
+        params.image[linearPixelIndex] = make_float4(result, 1.0f);
     }
 }
 

@@ -42,6 +42,10 @@ struct Params
     uint32_t maxSampleCount;
     float4* image;
     float4* accum;
+    float4* diffuse;
+    uint16_t* diffuseCounter;
+    float4* specular;
+    uint16_t* specularCounter;
     uint32_t image_width;
     uint32_t image_height;
 
@@ -63,6 +67,15 @@ struct Params
     float materialRayTmin;
 };
 
+enum class EventType: uint8_t
+{
+    eUndef,
+    eAbsorb,
+    eDiffuse,
+    eSpecular,
+    eLast,
+};
+
 struct PerRayData
 {
     SamplerState sampler;
@@ -76,6 +89,7 @@ struct PerRayData
     bool inside;
     bool specularBounce;
     float lastBsdfPdf;
+    EventType firstEventType;
 };
 
 enum RayType

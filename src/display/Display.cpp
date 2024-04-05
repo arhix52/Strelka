@@ -71,7 +71,7 @@ void Display::drawUI()
     ImGui::NewFrame();
     ImGuiIO& io = ImGui::GetIO();
 
-    const char* debugItems[] = { "None", "Normals" };
+    const char* debugItems[] = { "None", "Normals", "Diffuse AOV", "Specular AOV" };
     static int currentDebugItemId = 0;
 
     /*
