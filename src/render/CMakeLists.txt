@@ -111,7 +111,7 @@ if(APPLE)
   add_custom_command(
     TARGET ${RENDERLIB_NAME}
     POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/src/render/metal/shaders/fullScreen.metal "${OUTPUT_DIRECTORY}/metal/shaders"
+    COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/src/render/metal/shaders/fullScreen.metal ${OUTPUT_DIRECTORY}/metal/shaders
   )
   
   set(METAL_SOURCES ${ROOT_HOME}/src/render/metal/shaders/pathtrace.metal)
@@ -149,8 +149,8 @@ if(APPLE)
     MAIN_DEPENDENCY ${METAL_SOURCES_TM}
     VERBATIM)
 
-  target_sources(${RENDERLIB_NAME}
-                 PUBLIC ${OUTPUT_DIRECTORY}/metal/shaders/pathtrace.metallib)
+  # target_sources(${RENDERLIB_NAME}
+                #  PUBLIC ${OUTPUT_DIRECTORY}/metal/shaders/pathtrace.metallib)
 endif(APPLE)
 
 target_link_libraries(${RENDERLIB_NAME} PUBLIC logger)

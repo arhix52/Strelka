@@ -804,24 +804,13 @@ private:
     {
         using namespace std;
         const fs::path cwd = fs::current_path();
-        const char* envUSDPath = std::getenv("USD_DIR");
-        if (!envUSDPath)
-        {
-            STRELKA_FATAL("Please, set USD_DIR variable\n");
-            assert(0);
-        }
-        else
-        {
-            mtlxLibPath = fs::path(envUSDPath) / fs::path("libraries/");
-        }
-        mMdlSrc = cwd.string() + "/data/materials/mtlx"; // path to the material
 
 #ifdef MI_PLATFORM_WINDOWS
         mPathso = cwd.string();
-        mImagePluginPath = cwd.string() + "/nv_freeimage.dll";
+        mImagePluginPath = cwd.string() + "/nv_openimageio.dll";
 #else
         mPathso = cwd.string();
-        mImagePluginPath = cwd.string() + "/nv_freeimage.so";
+        mImagePluginPath = cwd.string() + "/nv_openimageio.so";
 #endif
     }
 
