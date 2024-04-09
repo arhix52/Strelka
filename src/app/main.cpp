@@ -265,7 +265,7 @@ int main(int argc, const char* argv[])
 
     if (result.count("help"))
     {
-        std::cout << options.help() << std::endl;
+        std::cout << options.help() << '\n';
         return 0;
     }
 
@@ -330,9 +330,9 @@ int main(int argc, const char* argv[])
 
     display->init(imageWidth, imageHeight, ctx);
 
-    oka::RenderType type = oka::RenderType::eOptiX;
+    const oka::RenderType type = oka::RenderType::eOptiX;
     oka::Render* render = oka::RenderFactory::createRender(type);
-    oka::Scene scene;
+    oka::Scene scene = {};
     
     oka::GltfLoader sceneLoader;
     sceneLoader.loadGltf(sceneFilePath.string(), scene);
