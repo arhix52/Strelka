@@ -2,7 +2,7 @@
 
 #include <render/common.h>
 #include <render/buffer.h>
-#include <render/Render.h>
+#include <render/render.h>
 
 #include <sceneloader/gltfloader.h>
 
