@@ -863,7 +863,7 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
         CUDA_CHECK(cudaMemset(mState.params.diffuse, 0, frameSize * sizeof(float4)));
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.diffuseCounter), frameSize * sizeof(uint16_t)));
         CUDA_CHECK(cudaMemset(mState.params.diffuseCounter, 0, frameSize * sizeof(uint16_t)));
-        
+
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.specular), frameSize * sizeof(float4)));
         CUDA_CHECK(cudaMemset(mState.params.specular, 0, frameSize * sizeof(float4)));
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.specularCounter), frameSize * sizeof(uint16_t)));
@@ -885,6 +885,7 @@ void OptiXRender::render(Buffer* output)
         createAccelerationStructure();
         createSbt();
         createLightBuffer();
+        createBlueNoiseBuffer();
     }
 
     const uint32_t width = output->width();
@@ -949,6 +950,10 @@ void OptiXRender::render(Buffer* output)
     params.debug = settings.getAs<uint32_t>("render/pt/debug");
     params.shadowRayTmin = settings.getAs<float>("render/pt/dev/shadowRayTmin");
     params.materialRayTmin = settings.getAs<float>("render/pt/dev/materialRayTmin");
+
+    params.blueNoise = (float*) d_blueNoise;
+    params.blueNoiseWidth = 16;
+    params.blueNoiseHeight = 16;
 
     memcpy(params.viewToWorld, glm::value_ptr(glm::transpose(glm::inverse(camera.matrices.view))), sizeof(params.viewToWorld));
     memcpy(params.clipToView, glm::value_ptr(glm::transpose(camera.matrices.invPerspective)), sizeof(params.clipToView));
@@ -1185,6 +1190,44 @@ void OptiXRender::createLightBuffer()
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_lights), lightBufferSize));
         CUDA_CHECK(
             cudaMemcpy(reinterpret_cast<void*>(d_lights), lightDescs.data(), lightBufferSize, cudaMemcpyHostToDevice));
+    }
+}
+
+void OptiXRender::createBlueNoiseBuffer()
+{
+    if (d_blueNoise)
+    {
+        STRELKA_WARNING("Blue noise buffer exist, recreating...");
+        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_blueNoise)));
+    }
+    const uint32_t w = 16;
+    const uint32_t h = 16;
+    
+    std::ifstream file("./bn.txt");
+    
+    // Check if the file is opened successfully
+    if (!file.is_open()) {
+        STRELKA_ERROR("Unable to open Blue Noise file");
+        return;
+    }
+    
+    std::vector<float> values;    
+    float num;
+    while (file >> num) {
+        values.push_back(num);
+    }
+    file.close();
+
+    if (values.size() != w * h)
+    {
+        STRELKA_ERROR("wrong blue noise size");
+        return;
+    }
+
+    if (!values.empty())
+    {
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_blueNoise), values.size() * sizeof(float)));
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(d_blueNoise), values.data(), values.size() * sizeof(float), cudaMemcpyHostToDevice));
     }
 }
 

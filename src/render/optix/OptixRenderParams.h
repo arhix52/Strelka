@@ -49,6 +49,10 @@ struct Params
     uint32_t image_width;
     uint32_t image_height;
 
+    float* blueNoise;
+    uint32_t blueNoiseWidth;
+    uint32_t blueNoiseHeight;
+
     uint32_t max_depth;
 
     uint32_t rectLightSamplingMethod;

@@ -77,6 +77,11 @@ __device__ float4 accumulate(float4* history,
     return make_float4(accumColor, 1.0f);
 }
 
+static __forceinline__ __device__ float getBlueNoise(uint32_t x, uint32_t y)
+{
+    return params.blueNoise[(y % params.blueNoiseHeight) * params.blueNoiseWidth + x % params.blueNoiseWidth];
+}
+
 extern "C" __global__ void __raygen__rg()
 {
     const uint3 launch_index = optixGetLaunchIndex();
@@ -98,7 +103,11 @@ extern "C" __global__ void __raygen__rg()
         prd.linearPixelIndex = linearPixelIndex;
         prd.sampleIndex = params.subframe_index + sampleIdx;
 
-        prd.sampler = initSampler(launch_index.x, launch_index.y, prd.linearPixelIndex, prd.sampleIndex, params.maxSampleCount, 52u);
+        const float offset = getBlueNoise(launch_index.x, launch_index.y);
+        // const uint32_t seed = uint32_t((1 << 16) * offset);
+        const uint32_t seed = 52;
+
+        prd.sampler = initSampler(launch_index.x, launch_index.y, prd.linearPixelIndex, prd.sampleIndex, params.maxSampleCount, seed);
 
         prd.radiance = make_float3(0.0f);
         prd.throughput = make_float3(1.0f);
