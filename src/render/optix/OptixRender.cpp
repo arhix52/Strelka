@@ -885,6 +885,7 @@ void OptiXRender::render(Buffer* output)
         createAccelerationStructure();
         createSbt();
         createLightBuffer();
+        createBlueNoiseBuffer();
     }
 
     const uint32_t width = output->width();
@@ -945,10 +946,15 @@ void OptiXRender::render(Buffer* output)
     params.max_depth = settings.getAs<uint32_t>("render/pt/depth");
 
     params.rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
+    params.samplingType = settings.getAs<uint32_t>("render/pt/SamplingType");
     params.enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
     params.debug = settings.getAs<uint32_t>("render/pt/debug");
     params.shadowRayTmin = settings.getAs<float>("render/pt/dev/shadowRayTmin");
     params.materialRayTmin = settings.getAs<float>("render/pt/dev/materialRayTmin");
+
+    params.blueNoise = (float*) d_blueNoise;
+    params.blueNoiseWidth = 256;
+    params.blueNoiseHeight = 256;
 
     memcpy(params.viewToWorld, glm::value_ptr(glm::transpose(glm::inverse(camera.matrices.view))), sizeof(params.viewToWorld));
     memcpy(params.clipToView, glm::value_ptr(glm::transpose(camera.matrices.invPerspective)), sizeof(params.clipToView));
@@ -1185,6 +1191,45 @@ void OptiXRender::createLightBuffer()
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_lights), lightBufferSize));
         CUDA_CHECK(
             cudaMemcpy(reinterpret_cast<void*>(d_lights), lightDescs.data(), lightBufferSize, cudaMemcpyHostToDevice));
+    }
+}
+
+void OptiXRender::createBlueNoiseBuffer()
+{
+    if (d_blueNoise)
+    {
+        STRELKA_WARNING("Blue noise buffer exist, recreating...");
+        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_blueNoise)));
+    }
+    const uint32_t w = 256;
+    const uint32_t h = 256;
+    const uint32_t dim = 2;
+
+    std::ifstream file("../bn.txt");
+
+    // Check if the file is opened successfully
+    if (!file.is_open()) {
+        STRELKA_ERROR("Unable to open Blue Noise file");
+        return;
+    }
+
+    std::vector<float> values;    
+    float num;
+    while (file >> num) {
+        values.push_back(num);
+    }
+    file.close();
+
+    if (values.size() != w * h * dim)
+    {
+        STRELKA_ERROR("wrong blue noise size");
+        return;
+    }
+
+    if (!values.empty())
+    {
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_blueNoise), values.size() * sizeof(float)));
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(d_blueNoise), values.data(), values.size() * sizeof(float), cudaMemcpyHostToDevice));
     }
 }
 

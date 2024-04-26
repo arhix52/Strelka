@@ -39,7 +39,8 @@ __device__ void generateCameraRay(
     const uint2 pixelIndex, SamplerState& sampler, float3& origin, float3& direction)
 {
     float2 subpixel_jitter =
-        make_float2(random<SampleDimension::ePixelX>(sampler), random<SampleDimension::ePixelY>(sampler));
+        make_float2(random<SampleDimension::ePixelX>(sampler, (Generator)params.samplingType, params.blueNoise, params.blueNoiseHeight),
+                    random<SampleDimension::ePixelY>(sampler, (Generator)params.samplingType, params.blueNoise, params.blueNoiseHeight));
 
     float2 pixelPos = make_float2(pixelIndex.x + subpixel_jitter.x, pixelIndex.y + subpixel_jitter.y);
 
@@ -77,6 +78,12 @@ __device__ float4 accumulate(float4* history,
     return make_float4(accumColor, 1.0f);
 }
 
+static __forceinline__ __device__ float getBlueNoise(uint32_t x, uint32_t y, uint32_t dim)
+{   
+    dim = dim % 2;
+    return params.blueNoise[(y % params.blueNoiseHeight) * params.blueNoiseWidth * 2 + x % params.blueNoiseWidth * 2 + dim];
+}
+
 extern "C" __global__ void __raygen__rg()
 {
     const uint3 launch_index = optixGetLaunchIndex();
@@ -98,7 +105,39 @@ extern "C" __global__ void __raygen__rg()
         prd.linearPixelIndex = linearPixelIndex;
         prd.sampleIndex = params.subframe_index + sampleIdx;
 
-        prd.sampler = initSampler(launch_index.x, launch_index.y, prd.linearPixelIndex, prd.sampleIndex, params.maxSampleCount, 52u);
+        uint32_t seed;
+        switch (params.samplingType)
+        {
+        case 0 /* Uniform*/:
+            seed = 42; // const seed
+            break;
+        case 1 /* Halton */:
+            /* seed depends on pixel*/
+            /* jenkins_hash */
+            auto jenkins_hash = [&](uint32_t a) {
+                a = (a + 0x7ED55D16) + (a << 12);
+                a = (a ^ 0xC761C23C) ^ (a >> 19);
+                a = (a + 0x165667B1) + (a << 5);
+                a = (a + 0xD3A2646C) ^ (a << 9);
+                a = (a + 0xFD7046C5) + (a << 3);
+                a = (a ^ 0xB55A4F09) ^ (a >> 16);
+                return a;
+            };
+            seed = jenkins_hash(prd.linearPixelIndex) + prd.sampleIndex;
+            break;
+        case 2 /* Sobol */:
+            /* seed depends on pixel */
+            seed = prd.sampleIndex + prd.linearPixelIndex * params.maxSampleCount;
+            break;
+        case 3 /* Blue noise*/:
+            const float offset = getBlueNoise(launch_index.x, launch_index.y, 0);
+            seed = prd.sampleIndex + uint32_t((1 << 16) * offset);
+            break;
+        default:
+            break;
+        }
+
+        prd.sampler = initSampler(launch_index.x, launch_index.y, prd.linearPixelIndex, prd.sampleIndex, params.maxSampleCount, seed);
 
         prd.radiance = make_float3(0.0f);
         prd.throughput = make_float3(1.0f);

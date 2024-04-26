@@ -130,6 +130,26 @@ void Display::drawUI()
         mCtx->mSettingsManager->setAs<uint32_t>(
             "render/pt/rectLightSamplingMethod", currentRectlightSamplingMethodItemId);
 
+        const char* samplingItems[] = { "Uniform", "Halton", "Sobol", "Blue noise" };
+        static int currentSamplingItemId = 0;
+        if (ImGui::BeginCombo("Sampler", samplingItems[currentSamplingItemId]))
+        {
+            for (int n = 0; n < IM_ARRAYSIZE(samplingItems); n++)
+            {
+                bool is_selected = (currentSamplingItemId == n);
+                if (ImGui::Selectable(samplingItems[n], is_selected))
+                {
+                    currentSamplingItemId = n;
+                }
+                if (is_selected)
+                {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        mCtx->mSettingsManager->setAs<uint32_t>("render/pt/SamplingType", currentSamplingItemId);
+
         uint32_t maxDepth = mCtx->mSettingsManager->getAs<uint32_t>("render/pt/depth");
         ImGui::SliderInt("Max Depth", (int*)&maxDepth, 1, 16);
         mCtx->mSettingsManager->setAs<uint32_t>("render/pt/depth", maxDepth);

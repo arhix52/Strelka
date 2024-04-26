@@ -113,6 +113,7 @@ private:
     CUdeviceptr d_lights = 0;
     CUdeviceptr d_points = 0;
     CUdeviceptr d_widths = 0;
+    CUdeviceptr d_blueNoise = 0;
 
     CUdeviceptr d_materialRoData = 0;
     CUdeviceptr d_materialArgData = 0;
@@ -129,6 +130,7 @@ private:
     void createWidthsBuffer();
 
     void createLightBuffer();
+    void createBlueNoiseBuffer();
 
     Texture loadTextureFromFile(const std::string& fileName);
 

@@ -5,6 +5,10 @@
 // https://github.com/mmp/pbrt-v4/blob/5acc5e46cf4b5c3382babd6a3b93b87f54d79b0a/src/pbrt/util/float.h#L46C1-L47C1
 static constexpr float FloatOneMinusEpsilon = 0x1.fffffep-1;
 
+enum Generator {
+    UNIFORM, HALTON, SOBOL, BLUENOISE
+};
+
 __device__ const unsigned int primeNumbers[32] = {
     2,  3,  5,  7,  11, 13, 17, 19, 23, 29,  31,  37,  41,  43,  47,  53,
     59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131,
@@ -30,6 +34,8 @@ struct SamplerState
     uint32_t seed;
     uint32_t sampleIdx;
     uint32_t depth;
+    uint32_t linearPixelIndex;
+    uint32_t pixelX, pixelY;
 };
 
 #define MAX_BOUNCES 128
@@ -131,8 +137,11 @@ static __device__ SamplerState initSampler(uint32_t pixelX, uint32_t pixelY, uin
 {
     SamplerState sampler{};
     sampler.seed = seed;
-    // sampler.sampleIdx = pixelSampleIndex + linearPixelIndex * maxSampleCount;
-    sampler.sampleIdx = EncodeMorton2(pixelX, pixelY) * maxSampleCount + pixelSampleIndex;
+    sampler.sampleIdx = pixelSampleIndex + linearPixelIndex * maxSampleCount;
+    // sampler.sampleIdx = EncodeMorton2(pixelX, pixelY) * maxSampleCount + pixelSampleIndex;
+    sampler.linearPixelIndex = linearPixelIndex;
+    sampler.pixelX = pixelX;
+    sampler.pixelY = pixelY;
     return sampler;
 }
 
@@ -219,8 +228,20 @@ __device__ __inline__ float sobol_scramble(uint32_t index, uint32_t dim, uint32_
 }
 
 template <SampleDimension Dim>
-__device__ __inline__ float random(SamplerState& state)
+__device__ __inline__ float random(SamplerState& state, Generator gen_type = UNIFORM, float* blueNoiseData = nullptr, uint32_t size_mask = 0)
 {
-    const uint32_t dimension = (uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS)) % 5;
-    return sobol_scramble(state.sampleIdx, dimension, state.seed + state.depth);
+    const uint32_t dimension = (uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS));
+    if (gen_type == HALTON) {
+        const uint32_t base = primeNumbers[dimension & 31u];
+        return halton(state.seed + state.sampleIdx, base);
+    } else if (gen_type == SOBOL) {
+        return sobol_scramble(state.sampleIdx, dimension % 5, state.seed + state.depth);
+    } else if (gen_type == BLUENOISE) {
+        auto dim = dimension % 2;
+        return blueNoiseData[(((state.pixelY + state.seed) % size_mask) * size_mask * 2) + ((state.pixelX + state.seed)  % size_mask) * 2 + dim];
+    } else {
+        const uint32_t base = primeNumbers[dimension & 31u];
+        return halton(state.seed + state.sampleIdx, base); // !!!change to uniform!!!
+    }
+    // return sobol_scramble(state.sampleIdx, dimension, state.seed + state.depth);
 }
