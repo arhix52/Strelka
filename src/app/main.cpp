@@ -297,6 +297,7 @@ int main(int argc, const char* argv[])
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/sppTotal", result["t"].as<int32_t>());
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/spp", result["f"].as<int32_t>());
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/iteration", 0);
+    ctx->mSettingsManager->setAs<uint32_t>("render/pt/SamplingType", 0); // 0 - Uniform, 1 - Halton, 2 - Sobol, 3 - Blue Noise
     ctx->mSettingsManager->setAs<uint32_t>("render/pt/stratifiedSamplingType", 0); // 0 - none, 1 - random, 2 -
                                                                                    // stratified sampling, 3 - optimized
                                                                                    // stratified sampling

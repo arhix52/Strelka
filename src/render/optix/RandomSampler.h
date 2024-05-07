@@ -1,5 +1,8 @@
 #pragma once
 #include <stdint.h>
+#include <stdlib.h>
+// #include <curand.h>
+// #include <curand_kernel.h>
 
 // source:
 // https://github.com/mmp/pbrt-v4/blob/5acc5e46cf4b5c3382babd6a3b93b87f54d79b0a/src/pbrt/util/float.h#L46C1-L47C1
@@ -10,13 +13,17 @@ __device__ const unsigned int primeNumbers[32] = {
     59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131,
 };
 
+enum Generator {
+    UNIFORM, HALTON, SOBOL, BLUENOISE
+};
+
 enum struct SampleDimension : uint32_t
 {
     ePixelX,
     ePixelY,
-    eLightId,
     eLightPointX,
     eLightPointY,
+    eLightId,
     eBSDF0,
     eBSDF1,
     eBSDF2,
@@ -30,6 +37,9 @@ struct SamplerState
     uint32_t seed;
     uint32_t sampleIdx;
     uint32_t depth;
+    uint32_t linearPixelIndex;
+    uint32_t pixelX, pixelY;
+    uint32_t height, width;
 };
 
 #define MAX_BOUNCES 128
@@ -127,12 +137,18 @@ __device__ __inline__ uint32_t EncodeMorton2(uint32_t x, uint32_t y)
   return (Part1By1(y) << 1) + Part1By1(x);
 }
 
-static __device__ SamplerState initSampler(uint32_t pixelX, uint32_t pixelY, uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t maxSampleCount, uint32_t seed)
+static __device__ SamplerState initSampler(uint32_t pixelX, uint32_t pixelY, uint32_t heigth, uint32_t width,
+                                           uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t maxSampleCount, uint32_t seed)
 {
     SamplerState sampler{};
     sampler.seed = seed;
-    // sampler.sampleIdx = pixelSampleIndex + linearPixelIndex * maxSampleCount;
-    sampler.sampleIdx = EncodeMorton2(pixelX, pixelY) * maxSampleCount + pixelSampleIndex;
+    sampler.sampleIdx = pixelSampleIndex + linearPixelIndex * maxSampleCount;
+    // sampler.sampleIdx = EncodeMorton2(pixelX, pixelY) * maxSampleCount + pixelSampleIndex;
+    sampler.linearPixelIndex = linearPixelIndex;
+    sampler.pixelX = pixelX;
+    sampler.pixelY = pixelY;
+    sampler.height = heigth;
+    sampler.width = width;
     return sampler;
 }
 
@@ -218,9 +234,66 @@ __device__ __inline__ float sobol_scramble(uint32_t index, uint32_t dim, uint32_
     return min(result * 0x1p-32f, FloatOneMinusEpsilon);
 }
 
+__device__ __inline__ uint32_t jenkinsHash(uint32_t x) {
+    x += x << 10;
+    x ^= x >> 6;
+    x += x << 3;
+    x ^= x >> 11;
+    x += x << 15;
+    return x;
+};
+
+__device__ __inline__ uint32_t initRNG(SamplerState& state) {
+    uint32_t dot = state.pixelX * 1 + state.pixelY * state.width;
+    uint32_t rngState = dot ^ jenkinsHash(state.sampleIdx);
+    return jenkinsHash(rngState);
+};
+
+__device__ __inline__ float uintToFloat(uint32_t x) {
+    #ifdef __CUDACC__
+    return __uint_as_float((uint32_t)(0x3f800000 | (x >> 9))) - 1.f;
+    #else
+    return 0;
+    #endif
+};
+
+__device__ __inline__ uint32_t xorshift(uint32_t &rngState) {
+    rngState ^= rngState << 13;
+    rngState ^= rngState >> 17;
+    rngState ^= rngState << 5;
+    return rngState;
+};
+
+__device__ __inline__ float uniformRand(uint32_t &rngState) {
+    return uintToFloat(xorshift(rngState));
+};
+
 template <SampleDimension Dim>
-__device__ __inline__ float random(SamplerState& state)
+__device__ __inline__ float random(SamplerState& state, Generator gen_type = UNIFORM, float* blueNoiseData = nullptr, uint32_t size_mask = 0)
 {
-    const uint32_t dimension = (uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS)) % 5;
-    return sobol_scramble(state.sampleIdx, dimension, state.seed + state.depth);
+    const uint32_t dimension = (uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS));
+    if (gen_type == HALTON) {
+        const uint32_t base = primeNumbers[dimension & 31u];
+        return halton(state.seed + state.depth + state.sampleIdx, base);
+    } else if (gen_type == SOBOL) {
+        return sobol_scramble(state.sampleIdx, dimension % 5, state.seed + state.depth);
+    } else if (gen_type == BLUENOISE) {
+        if (dimension > 3) {
+            return sobol_scramble(state.seed + state.depth + state.sampleIdx, ((int32_t)dimension - 4) % 5, state.seed + state.depth);
+        }
+        const int offsetX = state.sampleIdx * 5;
+        const int offsetY = state.sampleIdx * 7;
+        const int bnRow = (state.pixelY + offsetX) % size_mask;
+        const int bnCol = (state.pixelX + offsetY) % size_mask;
+        const int bnLinearIndex = (bnRow * size_mask + bnCol) * 2 + (dimension % 2); // 2 floats per bn texel, we select 0 or 1 to fetch x or y value
+        return blueNoiseData[bnLinearIndex];
+        // float blue_noise = blueNoiseData[(((state.pixelY) % size_mask) * size_mask * 2) + ((state.pixelX) % size_mask) * 2 + dimension % 2];
+        // float sobol = sobol_scramble(state.sampleIdx, dimension % 5, state.seed + state.depth);
+        // if (sobol + blue_noise > 1) {
+        //     return sobol + blue_noise - 1;
+        // }
+        // return sobol + blue_noise;
+    } else {
+        return uniformRand(state.seed);
+    }
 }

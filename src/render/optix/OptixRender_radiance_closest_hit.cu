@@ -265,7 +265,8 @@ __inline__ __device__ float3 sampleLight(SamplerState& sampler,
 {
     LightSampleData lightSampleData = {};
     const float2 uv =
-        make_float2(random<SampleDimension::eLightPointX>(sampler), random<SampleDimension::eLightPointY>(sampler));
+        make_float2(random<SampleDimension::eLightPointX>(sampler, (Generator)params.samplingType, params.blueNoise, params.blueNoiseHeight),
+                    random<SampleDimension::eLightPointY>(sampler, (Generator)params.samplingType, params.blueNoise, params.blueNoiseHeight));
     switch (light.type)
     {
     case 0:
@@ -314,7 +315,7 @@ __device__ float3 estimateDirectLighting(SamplerState& sampler,
                                          float3& toLight,
                                          float& lightPdf)
 {
-    float u = random<SampleDimension::eLightId>(sampler);
+    float u = random<SampleDimension::eLightId>(sampler, (Generator)params.samplingType, params.blueNoise, params.blueNoiseHeight);
     const uint32_t lightId = (uint32_t)(params.scene.numLights * u);
     const float lightSelectionPdf = 1.0f / params.scene.numLights;
     const UniformLight& currLight = params.scene.lights[lightId];
@@ -507,10 +508,10 @@ extern "C" __global__ void __closesthit__radiance()
         return;
     }
 
-    const float z1 = random<SampleDimension::eBSDF0>(prd->sampler);
-    const float z2 = random<SampleDimension::eBSDF1>(prd->sampler);
-    const float z3 = random<SampleDimension::eBSDF2>(prd->sampler);
-    const float z4 = random<SampleDimension::eBSDF3>(prd->sampler);
+    const float z1 = random<SampleDimension::eBSDF0>(prd->sampler, (Generator)params.samplingType, params.blueNoise, params.blueNoiseHeight);
+    const float z2 = random<SampleDimension::eBSDF1>(prd->sampler, (Generator)params.samplingType, params.blueNoise, params.blueNoiseHeight);
+    const float z3 = random<SampleDimension::eBSDF2>(prd->sampler, (Generator)params.samplingType, params.blueNoise, params.blueNoiseHeight);
+    const float z4 = random<SampleDimension::eBSDF3>(prd->sampler, (Generator)params.samplingType, params.blueNoise, params.blueNoiseHeight);
 
     mi::neuraylib::Bsdf_sample_data sample_data;
     sample_data.ior1 = ior1;

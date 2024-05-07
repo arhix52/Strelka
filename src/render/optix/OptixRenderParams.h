@@ -57,6 +57,8 @@ struct Params
 
     uint32_t rectLightSamplingMethod;
 
+    uint32_t samplingType;
+
     float3 exposure;
     float clipToView[16];
     float viewToWorld[16];
