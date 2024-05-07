@@ -886,7 +886,6 @@ void OptiXRender::render(Buffer* output)
         createSbt();
         createLightBuffer();
         createBlueNoiseBuffer();
-        createBlueNoiseBuffer();
     }
 
     const uint32_t width = output->width();
