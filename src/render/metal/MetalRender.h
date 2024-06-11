@@ -1,7 +1,7 @@
 #pragma once
 #include "render.h"
+
 #include <Metal/Metal.hpp>
-#include <MetalKit/MetalKit.hpp>
 
 namespace oka
 {

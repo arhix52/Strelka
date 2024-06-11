@@ -93,14 +93,14 @@ if(APPLE)
   add_library(${RENDERLIB_NAME} STATIC ${RENDER_SOURCES})
 
   target_include_directories(${RENDERLIB_NAME}
-                             PUBLIC ${ROOT_HOME}/external/metal-cpp/)
+                             PRIVATE ${ROOT_HOME}/external/metal-cpp/)
   target_include_directories(${RENDERLIB_NAME}
-                             PUBLIC ${ROOT_HOME}/external/metal-cpp-extensions/)
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework Foundation")
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework QuartzCore")
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework Metal")
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework MetalKit")
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC glm::glm stb::stb)
+                             PRIVATE ${ROOT_HOME}/external/metal-cpp-extensions/)
+  target_link_libraries(${RENDERLIB_NAME} PRIVATE "-framework Foundation")
+  target_link_libraries(${RENDERLIB_NAME} PRIVATE "-framework QuartzCore")
+  target_link_libraries(${RENDERLIB_NAME} PRIVATE "-framework Metal")
+  target_link_libraries(${RENDERLIB_NAME} PRIVATE "-framework MetalKit")
+  target_link_libraries(${RENDERLIB_NAME} PRIVATE glm::glm stb::stb)
 
   add_custom_command(
     TARGET ${RENDERLIB_NAME}
