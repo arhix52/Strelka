@@ -71,7 +71,7 @@ public:
     //     return mWorldForward;
     // }
 
-    bool moving()
+    bool moving() const
     {
         return keys.left || keys.right || keys.up || keys.down || keys.forward || keys.back || mouseButtons.right ||
                mouseButtons.left || mouseButtons.middle;
@@ -287,8 +287,8 @@ int main(int argc, const char* argv[])
 
     auto* ctx = new oka::SharedContext();
         // Set up rendering context.
-    uint32_t imageWidth = 1024;
-    uint32_t imageHeight = 768;
+    const uint32_t imageWidth = 1024;
+    const uint32_t imageHeight = 768;
     ctx->mSettingsManager = new oka::SettingsManager();
 
     ctx->mSettingsManager->setAs<uint32_t>("render/width", imageWidth);
@@ -325,23 +325,22 @@ int main(int argc, const char* argv[])
                                                                               // sampling
     ctx->mSettingsManager->setAs<float>("render/pt/dev/materialRayTmin", 0.0f); // offset to avoid self-collision in
 
-    oka::Display* display = oka::DisplayFactory::createDisplay();
-
-
-    display->init(imageWidth, imageHeight, ctx);
-
     const oka::RenderType type = oka::RenderType::eOptiX;
     oka::Render* render = oka::RenderFactory::createRender(type);
     oka::Scene scene = {};
     
     oka::GltfLoader sceneLoader;
-    sceneLoader.loadGltf(sceneFilePath.string(), scene);
+    if (!sceneLoader.loadGltf(sceneFilePath.string(), scene))
+    {
+        STRELKA_FATAL("unable to load scene: {}", sceneFilePath.string());
+        return 1;
+    }
 
     CameraController cameraController(scene.getCamera(0), true);
 
     oka::Camera camera;
     camera.name = "Main";
-    camera.fov = 45;
+    camera.fov = 45.0f;
     camera.position = glm::vec3(0, 0, -10);
     camera.mOrientation = glm::quat(glm::vec3(0,0,0));
     camera.updateViewMatrix();
@@ -351,6 +350,9 @@ int main(int argc, const char* argv[])
     render->setSharedContext(ctx);
     render->init();
     ctx->mRender = render;
+
+    oka::Display* display = oka::DisplayFactory::createDisplay();
+    display->init(imageWidth, imageHeight, ctx);
 
     oka::BufferDesc desc{};
     desc.format = oka::BufferFormat::FLOAT4;

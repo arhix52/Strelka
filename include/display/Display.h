@@ -25,12 +25,8 @@ public:
 class Display
 {
 public:
-    Display()
-    {
-    }
-    virtual ~Display()
-    {
-    }
+    Display() = default;
+    virtual ~Display() = default;
 
     virtual void init(int width, int height, oka::SharedContext* ctx) = 0;
     virtual void destroy() = 0;
@@ -60,7 +56,7 @@ public:
 
     bool windowShouldClose()
     {
-        return glfwWindowShouldClose(mWindow);
+        return glfwWindowShouldClose(mWindow) != 0;
     }
 
     void pollEvents()
