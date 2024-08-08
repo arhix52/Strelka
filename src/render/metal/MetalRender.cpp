@@ -138,7 +138,7 @@ void MetalRender::render(Buffer* output)
     const uint32_t width = output->width();
     const uint32_t height = output->height();
 
-    oka::Camera& camera = mScene->getCamera(1);
+    oka::Camera& camera = mScene->getCamera(0);
     camera.updateAspectRatio(width / (float)height);
     camera.updateViewMatrix();
 
@@ -369,6 +369,7 @@ Buffer* MetalRender::createBuffer(const BufferDesc& desc)
     assert(res);
     return res;
 }
+
 
 void MetalRender::buildComputePipeline()
 {
@@ -669,3 +670,4 @@ void MetalRender::createAccelerationStructures()
     mInstanceAccelerationStructure = createAccelerationStructure(accelDescriptor);
     pPool->release();
 }
+

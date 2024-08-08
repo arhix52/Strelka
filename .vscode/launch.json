@@ -64,9 +64,10 @@
             "request": "launch",
             "targetArchitecture": "arm64",
             "program": "${command:cmake.launchTargetPath}",
+            "args": ["-s", "../../../vespa/vespa.gltf"],
             // "args": ["-s", "../../cube.usda"],
             // "args": ["-s", "../../senna2.usd"],
-            "args": ["-s", "../../../Kitchen_set/Kitchen.usda"],
+            // "args": ["-s", "../../../Kitchen_set/Kitchen.usda"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/build/Debug/",
             "environment": [
@@ -74,10 +75,10 @@
                     "name": "MTL_DEBUG_LAYER",
                     "value": "1"                    
                 },
-                {
-                    "name": "OBJC_DEBUG_MISSING_POOLS",
-                    "value": "YES"
-                }
+                // {
+                    // "name": "OBJC_DEBUG_MISSING_POOLS",
+                    // "value": "YES"
+                // }
             ],
             "MIMode": "lldb"
             // "console": "externalTerminal"
