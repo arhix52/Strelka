@@ -325,9 +325,7 @@ int main(int argc, const char* argv[])
                                                                               // sampling
     ctx->mSettingsManager->setAs<float>("render/pt/dev/materialRayTmin", 0.0f); // offset to avoid self-collision in
 
-
-    const oka::RenderType type = oka::RenderType::eMetal;
-    oka::Render* render = oka::RenderFactory::createRender(type);
+    oka::Render* render = oka::RenderFactory::createRender();
     oka::Scene scene = {};
     
     oka::GltfLoader sceneLoader;

@@ -24,3 +24,12 @@ Render* RenderFactory::createRender(const RenderType type)
     return nullptr;
 #endif
 }
+
+Render* RenderFactory::createRender()
+{
+#ifdef __APPLE__
+    return new MetalRender();
+#else
+    return new OptiXRender();
+#endif
+}
