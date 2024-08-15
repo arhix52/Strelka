@@ -10,6 +10,7 @@
 #include <logmanager.h>
 #include <cxxopts.hpp>
 #include <filesystem>
+#include <memory>
 
 
 class CameraController : public oka::InputHandler
@@ -285,7 +286,7 @@ int main(int argc, const char* argv[])
     const std::string resourceSearchPath = sceneFilePath.parent_path().string();
     STRELKA_DEBUG("Resource search path {}", resourceSearchPath);
 
-    auto* ctx = new oka::SharedContext();
+    std::unique_ptr<oka::SharedContext> ctx(new oka::SharedContext());
         // Set up rendering context.
     const uint32_t imageWidth = 1024;
     const uint32_t imageHeight = 768;
@@ -346,12 +347,12 @@ int main(int argc, const char* argv[])
     scene.addCamera(camera);
 
     render->setScene(&scene);
-    render->setSharedContext(ctx);
+    render->setSharedContext(ctx.get());
     render->init();
     ctx->mRender = render;
 
     oka::Display* display = oka::DisplayFactory::createDisplay();
-    display->init(imageWidth, imageHeight, ctx);
+    display->init(imageWidth, imageHeight, ctx.get());
 
     oka::BufferDesc desc{};
     desc.format = oka::BufferFormat::FLOAT4;
