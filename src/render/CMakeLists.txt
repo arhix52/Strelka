@@ -93,14 +93,14 @@ if(APPLE)
   add_library(${RENDERLIB_NAME} STATIC ${RENDER_SOURCES})
 
   target_include_directories(${RENDERLIB_NAME}
-                             PUBLIC ${ROOT_HOME}/external/metal-cpp/)
+                             PRIVATE ${ROOT_HOME}/external/metal-cpp/)
   target_include_directories(${RENDERLIB_NAME}
-                             PUBLIC ${ROOT_HOME}/external/metal-cpp-extensions/)
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework Foundation")
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework QuartzCore")
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework Metal")
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC "-framework MetalKit")
-  target_link_libraries(${RENDERLIB_NAME} PUBLIC glm::glm stb::stb)
+                             PRIVATE ${ROOT_HOME}/external/metal-cpp-extensions/)
+  target_link_libraries(${RENDERLIB_NAME} PRIVATE "-framework Foundation")
+  target_link_libraries(${RENDERLIB_NAME} PRIVATE "-framework QuartzCore")
+  target_link_libraries(${RENDERLIB_NAME} PRIVATE "-framework Metal")
+  target_link_libraries(${RENDERLIB_NAME} PRIVATE "-framework MetalKit")
+  target_link_libraries(${RENDERLIB_NAME} PRIVATE glm::glm stb::stb)
 
   add_custom_command(
     TARGET ${RENDERLIB_NAME}
@@ -116,41 +116,38 @@ if(APPLE)
   
   set(METAL_SOURCES ${ROOT_HOME}/src/render/metal/shaders/pathtrace.metal)
   set(METAL_SOURCES_TM ${ROOT_HOME}/src/render/metal/shaders/tonemapper.metal)
-  add_custom_command(
-    OUTPUT ${OUTPUT_DIRECTORY}/metal/shaders/pathtrace.metallib PRE_BUILD
-    OUTPUT ${OUTPUT_DIRECTORY}/metal/shaders/tonemapper.metallib PRE_BUILD
-    
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-            "${OUTPUT_DIRECTORY}/metal/shaders"
 
-    COMMAND ${CMAKE_COMMAND} -E echo "Compile metal shaders..."
-    COMMAND xcrun -sdk macosx metal -Wall -c ${METAL_SOURCES} -o pathtrace.air -I
-            ${ROOT_HOME}/src/render/metal/shaders
-    COMMAND xcrun -sdk macosx metal -Wall -c ${METAL_SOURCES_TM} -o tonemapper.air -I
-            ${ROOT_HOME}/src/render/metal/shaders
-    COMMAND ${CMAKE_COMMAND} -E echo "Link metal shaders..."
-    COMMAND xcrun -sdk macosx metallib pathtrace.air -o
-            ${OUTPUT_DIRECTORY}/metal/shaders/pathtrace.metallib
-    COMMAND xcrun -sdk macosx metallib tonemapper.air -o
-            ${OUTPUT_DIRECTORY}/metal/shaders/tonemapper.metallib
+  set(SHADER_OUTPUT_DIR ${OUTPUT_DIRECTORY}/metal/shaders)
+
+# Create a custom command to compile and link pathtrace.metal shader
+add_custom_command(
+    OUTPUT ${SHADER_OUTPUT_DIR}/pathtrace.metallib
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
+    COMMAND ${CMAKE_COMMAND} -E echo "Compiling pathtrace.metal shader..."
+    COMMAND xcrun -sdk macosx metal -Wall -c ${METAL_SOURCES} -o pathtrace.air -I ${ROOT_HOME}/src/render/metal/shaders
+    COMMAND ${CMAKE_COMMAND} -E echo "Linking pathtrace.metal shader..."
+    COMMAND xcrun -sdk macosx metallib pathtrace.air -o ${SHADER_OUTPUT_DIR}/pathtrace.metallib
     WORKING_DIRECTORY ${CMAKE_CFG_INTDIR}
     MAIN_DEPENDENCY ${METAL_SOURCES}
-    VERBATIM)
-  
-  add_custom_command(
-    OUTPUT ${OUTPUT_DIRECTORY}/metal/shaders/tonemapper.metallib PRE_BUILD
-    COMMAND ${CMAKE_COMMAND} -E echo "Compile Tonemapper metal shaders..."
-    COMMAND xcrun -sdk macosx metal -Wall -c ${METAL_SOURCES_TM} -o tonemapper.air -I
-            ${ROOT_HOME}/src/render/metal/shaders
-    COMMAND ${CMAKE_COMMAND} -E echo "Link Tonemapper metal shaders..."
-    COMMAND xcrun -sdk macosx metallib tonemapper.air -o
-            ${OUTPUT_DIRECTORY}/metal/shaders/tonemapper.metallib
+    VERBATIM
+)
+
+# Create a custom command to compile and link tonemapper.metal shader
+add_custom_command(
+    OUTPUT ${SHADER_OUTPUT_DIR}/tonemapper.metallib
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
+    COMMAND ${CMAKE_COMMAND} -E echo "Compiling tonemapper.metal shader..."
+    COMMAND xcrun -sdk macosx metal -Wall -c ${METAL_SOURCES_TM} -o tonemapper.air -I ${ROOT_HOME}/src/render/metal/shaders
+    COMMAND ${CMAKE_COMMAND} -E echo "Linking tonemapper.metal shader..."
+    COMMAND xcrun -sdk macosx metallib tonemapper.air -o ${SHADER_OUTPUT_DIR}/tonemapper.metallib
     WORKING_DIRECTORY ${CMAKE_CFG_INTDIR}
     MAIN_DEPENDENCY ${METAL_SOURCES_TM}
-    VERBATIM)
+    VERBATIM
+)
+# Create custom targets that will use the custom commands
+add_custom_target(PathtraceShader ALL DEPENDS ${SHADER_OUTPUT_DIR}/pathtrace.metallib)
+add_custom_target(TonemapperShader ALL DEPENDS ${SHADER_OUTPUT_DIR}/tonemapper.metallib)
 
-  # target_sources(${RENDERLIB_NAME}
-                #  PUBLIC ${OUTPUT_DIRECTORY}/metal/shaders/pathtrace.metallib)
 endif(APPLE)
 
 target_link_libraries(${RENDERLIB_NAME} PUBLIC logger)

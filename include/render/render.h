@@ -59,6 +59,7 @@ class RenderFactory
 {
 public:
     static Render* createRender(RenderType type);
+    static Render* createRender();
 };
 
 } // namespace oka

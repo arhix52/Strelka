@@ -2,7 +2,7 @@
 
 #include <render/common.h>
 #include <render/buffer.h>
-#include <render/Render.h>
+#include <render/render.h>
 
 #include <sceneloader/gltfloader.h>
 
@@ -10,6 +10,7 @@
 #include <logmanager.h>
 #include <cxxopts.hpp>
 #include <filesystem>
+#include <memory>
 
 
 class CameraController : public oka::InputHandler
@@ -71,7 +72,7 @@ public:
     //     return mWorldForward;
     // }
 
-    bool moving()
+    bool moving() const
     {
         return keys.left || keys.right || keys.up || keys.down || keys.forward || keys.back || mouseButtons.right ||
                mouseButtons.left || mouseButtons.middle;
@@ -265,7 +266,7 @@ int main(int argc, const char* argv[])
 
     if (result.count("help"))
     {
-        std::cout << options.help() << std::endl;
+        std::cout << options.help() << '\n';
         return 0;
     }
 
@@ -285,10 +286,10 @@ int main(int argc, const char* argv[])
     const std::string resourceSearchPath = sceneFilePath.parent_path().string();
     STRELKA_DEBUG("Resource search path {}", resourceSearchPath);
 
-    auto* ctx = new oka::SharedContext();
+    std::unique_ptr<oka::SharedContext> ctx(new oka::SharedContext());
         // Set up rendering context.
-    uint32_t imageWidth = 1024;
-    uint32_t imageHeight = 768;
+    const uint32_t imageWidth = 1024;
+    const uint32_t imageHeight = 768;
     ctx->mSettingsManager = new oka::SettingsManager();
 
     ctx->mSettingsManager->setAs<uint32_t>("render/width", imageWidth);
@@ -325,32 +326,33 @@ int main(int argc, const char* argv[])
                                                                               // sampling
     ctx->mSettingsManager->setAs<float>("render/pt/dev/materialRayTmin", 0.0f); // offset to avoid self-collision in
 
-    oka::Display* display = oka::DisplayFactory::createDisplay();
-
-
-    display->init(imageWidth, imageHeight, ctx);
-
-    oka::RenderType type = oka::RenderType::eOptiX;
-    oka::Render* render = oka::RenderFactory::createRender(type);
-    oka::Scene scene;
+    oka::Render* render = oka::RenderFactory::createRender();
+    oka::Scene scene = {};
     
     oka::GltfLoader sceneLoader;
-    sceneLoader.loadGltf(sceneFilePath.string(), scene);
+    if (!sceneLoader.loadGltf(sceneFilePath.string(), scene))
+    {
+        STRELKA_FATAL("unable to load scene: {}", sceneFilePath.string());
+        return 1;
+    }
 
     CameraController cameraController(scene.getCamera(0), true);
 
     oka::Camera camera;
     camera.name = "Main";
-    camera.fov = 45;
+    camera.fov = 45.0f;
     camera.position = glm::vec3(0, 0, -10);
     camera.mOrientation = glm::quat(glm::vec3(0,0,0));
     camera.updateViewMatrix();
     scene.addCamera(camera);
 
     render->setScene(&scene);
-    render->setSharedContext(ctx);
+    render->setSharedContext(ctx.get());
     render->init();
     ctx->mRender = render;
+
+    oka::Display* display = oka::DisplayFactory::createDisplay();
+    display->init(imageWidth, imageHeight, ctx.get());
 
     oka::BufferDesc desc{};
     desc.format = oka::BufferFormat::FLOAT4;

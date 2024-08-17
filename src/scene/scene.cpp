@@ -5,10 +5,7 @@
 #include <glm/gtx/norm.hpp>
 
 #include <algorithm>
-#include <array>
 #include <filesystem>
-#include <map>
-#include <utility>
 
 namespace fs = std::filesystem;
 
