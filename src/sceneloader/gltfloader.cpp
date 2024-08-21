@@ -7,6 +7,9 @@
 #define TINYGLTF_IMPLEMENTATION
 #include "tiny_gltf.h"
 
+#define TINYEXR_IMPLEMENTATION
+#include "tinyexr.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -60,8 +63,7 @@ glm::float2 unpackUV(uint32_t val)
     return uv;
 }
 
-void computeTangent(std::vector<Scene::Vertex>& vertices,
-                                 const std::vector<uint32_t>& indices)
+void computeTangent(std::vector<Scene::Vertex>& vertices, const std::vector<uint32_t>& indices)
 {
     const size_t lastIndex = indices.size();
     Scene::Vertex& v0 = vertices[indices[lastIndex - 3]];
@@ -92,14 +94,19 @@ void computeTangent(std::vector<Scene::Vertex>& vertices,
     v2.tangent = packedTangent;
 }
 
-void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const tinygltf::Primitive& primitive, const glm::float4x4& transform, const float globalScale)
+void processPrimitive(const tinygltf::Model& model,
+                      oka::Scene& scene,
+                      const tinygltf::Primitive& primitive,
+                      const glm::float4x4& transform,
+                      const float globalScale)
 {
     using namespace std;
     assert(primitive.attributes.find("POSITION") != primitive.attributes.end());
 
     const tinygltf::Accessor& positionAccessor = model.accessors[primitive.attributes.find("POSITION")->second];
     const tinygltf::BufferView& positionView = model.bufferViews[positionAccessor.bufferView];
-    const float* positionData = reinterpret_cast<const float*>(&model.buffers[positionView.buffer].data[positionAccessor.byteOffset + positionView.byteOffset]);
+    const float* positionData = reinterpret_cast<const float*>(
+        &model.buffers[positionView.buffer].data[positionAccessor.byteOffset + positionView.byteOffset]);
     assert(positionData != nullptr);
     const uint32_t vertexCount = static_cast<uint32_t>(positionAccessor.count);
     assert(vertexCount != 0);
@@ -114,7 +121,8 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const tin
     {
         const tinygltf::Accessor& normalAccessor = model.accessors[primitive.attributes.find("NORMAL")->second];
         const tinygltf::BufferView& normView = model.bufferViews[normalAccessor.bufferView];
-        normalsData = reinterpret_cast<const float*>(&(model.buffers[normView.buffer].data[normalAccessor.byteOffset + normView.byteOffset]));
+        normalsData = reinterpret_cast<const float*>(
+            &(model.buffers[normView.buffer].data[normalAccessor.byteOffset + normView.byteOffset]));
         assert(normalsData != nullptr);
         normalStride = normalAccessor.ByteStride(normView) / sizeof(float);
         assert(normalStride > 0);
@@ -127,7 +135,8 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const tin
     {
         const tinygltf::Accessor& uvAccessor = model.accessors[primitive.attributes.find("TEXCOORD_0")->second];
         const tinygltf::BufferView& uvView = model.bufferViews[uvAccessor.bufferView];
-        texCoord0Data = reinterpret_cast<const float*>(&(model.buffers[uvView.buffer].data[uvAccessor.byteOffset + uvView.byteOffset]));
+        texCoord0Data = reinterpret_cast<const float*>(
+            &(model.buffers[uvView.buffer].data[uvAccessor.byteOffset + uvView.byteOffset]));
         texCoord0Stride = uvAccessor.ByteStride(uvView) / sizeof(float);
     }
 
@@ -144,7 +153,8 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const tin
     {
         oka::Scene::Vertex vertex{};
         vertex.pos = glm::make_vec3(&positionData[v * posStride]) * globalScale;
-        vertex.normal = packNormal(glm::normalize(glm::vec3(normalsData ? glm::make_vec3(&normalsData[v * normalStride]) : glm::vec3(0.0f))));
+        vertex.normal = packNormal(
+            glm::normalize(glm::vec3(normalsData ? glm::make_vec3(&normalsData[v * normalStride]) : glm::vec3(0.0f))));
         vertex.uv = packUV(texCoord0Data ? glm::make_vec2(&texCoord0Data[v * texCoord0Stride]) : glm::vec3(0.0f));
         vertices.push_back(vertex);
         sum += vertex.pos;
@@ -207,7 +217,11 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const tin
     assert(instId != -1);
 }
 
-void processMesh(const tinygltf::Model& model, oka::Scene& scene, const tinygltf::Mesh& mesh, const glm::float4x4& transform, const float globalScale)
+void processMesh(const tinygltf::Model& model,
+                 oka::Scene& scene,
+                 const tinygltf::Mesh& mesh,
+                 const glm::float4x4& transform,
+                 const float globalScale)
 {
     using namespace std;
     cout << "Mesh name: " << mesh.name << endl;
@@ -264,7 +278,12 @@ glm::float4x4 getTransform(const tinygltf::Node& node, const float globalScale)
     }
 }
 
-void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf::Node& node, const uint32_t currentNodeId, const glm::float4x4& baseTransform, const float globalScale)
+void processNode(const tinygltf::Model& model,
+                 oka::Scene& scene,
+                 const tinygltf::Node& node,
+                 const uint32_t currentNodeId,
+                 const glm::float4x4& baseTransform,
+                 const float globalScale)
 {
     using namespace std;
     cout << "Node name: " << node.name << endl;
@@ -368,9 +387,10 @@ oka::Scene::MaterialDescription convertToOmniGlass(const tinygltf::Model& model,
     param.value.resize(sizeof(bool));
     *((bool*)param.value.data()) = true;
     materialDesc.params.push_back(param);
-    
+
     // materialDesc.color =
-    //     glm::float3(material.pbrMetallicRoughness.baseColorFactor[0], material.pbrMetallicRoughness.baseColorFactor[1],
+    //     glm::float3(material.pbrMetallicRoughness.baseColorFactor[0],
+    //     material.pbrMetallicRoughness.baseColorFactor[1],
     //                 material.pbrMetallicRoughness.baseColorFactor[2]);
 
     // oka::MaterialManager::Param colorParam = {};
@@ -379,7 +399,7 @@ oka::Scene::MaterialDescription convertToOmniGlass(const tinygltf::Model& model,
     // colorParam.value.resize(sizeof(float) * 3);
     // memcpy(colorParam.value.data(), glm::value_ptr(materialDesc.color), sizeof(float) * 3);
     // materialDesc.params.push_back(colorParam);
-    
+
     auto addBool = [&](bool value, const char* materialParamName) {
         oka::MaterialManager::Param param{};
         param.name = materialParamName;
@@ -399,9 +419,9 @@ oka::Scene::MaterialDescription convertToOmniGlass(const tinygltf::Model& model,
         *((float*)param.value.data()) = value;
         materialDesc.params.push_back(param);
     };
-    
+
     addFloat((float)material.pbrMetallicRoughness.roughnessFactor, "frosting_roughness");
-    
+
     return materialDesc;
 }
 
@@ -409,11 +429,11 @@ void loadMaterials(const tinygltf::Model& model, oka::Scene& scene)
 {
     for (const tinygltf::Material& material : model.materials)
     {
-        if (material.alphaMode == "OPAQUE") 
+        if (material.alphaMode == "OPAQUE")
         {
             scene.addMaterial(convertToOmniPBR(model, material));
         }
-        else 
+        else
         {
             scene.addMaterial(convertToOmniGlass(model, material));
         }
@@ -569,8 +589,8 @@ void loadNodes(const tinygltf::Model& model, oka::Scene& scene, const float glob
         }
         n.scale = scale;
 
-        //glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-        glm::quat rotation = glm::quat_cast(glm::float4x4(1.0f)); 
+        // glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        glm::quat rotation = glm::quat_cast(glm::float4x4(1.0f));
         if (!node.rotation.empty())
         {
             const float floatRotation[4] = {
@@ -634,6 +654,33 @@ bool loadLightsFromJson(const std::string& modelPath, oka::Scene& scene)
     return false;
 }
 
+bool loadExr()
+{
+    const char* input = "EXR PATH";
+    float* out; // width * height * RGBA
+    int width;
+    int height;
+    const char* err = NULL; // or nullptr in C++11
+
+    int ret = LoadEXR(&out, &width, &height, input, &err);
+
+    if (ret != TINYEXR_SUCCESS)
+    {
+        if (err)
+        {
+            STRELKA_ERROR("ERR : %s\n", err);
+            FreeEXRErrorMessage(err); // release memory of error message.
+        }
+        return false;
+    }
+    else
+    {
+       STRELKA_INFO("EXR WIDTH/HEIGHT : {} {}", width, height); 
+       free(out); // release memory of image data
+       return true;
+    }
+}
+
 bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
 {
     if (modelPath.empty())
@@ -659,7 +706,7 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     if (loadLightsFromJson(modelPath, scene) == false)
     {
         STRELKA_WARNING("No light is scene, adding default distant light");
-        oka::Scene::UniformLightDesc lightDesc {};
+        oka::Scene::UniformLightDesc lightDesc{};
         // lightDesc.xform = glm::mat4(1.0f);
         // lightDesc.useXform = true;
         lightDesc.useXform = false;
@@ -684,6 +731,8 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     }
 
     loadAnimation(model, scene);
+
+    loadExr();
 
     return res;
 }
