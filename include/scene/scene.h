@@ -205,6 +205,7 @@ public:
     std::vector<glm::float3> mCurvePoints;
     std::vector<float> mCurveWidths;
     std::vector<uint32_t> mCurveVertexCounts;
+    std::vector<glm::float2> mCurveUvs;
 
     std::string modelPath;
     std::string getSceneFileName();
@@ -415,7 +416,8 @@ public:
     uint32_t createCurve(const Curve::Type type,
                          const std::vector<uint32_t>& vertexCounts,
                          const std::vector<glm::float3>& points,
-                         const std::vector<float>& widths);
+                         const std::vector<float>& widths,
+                         const std::vector<glm::float2>& uvs);
 
     uint32_t createLight(const UniformLightDesc& desc);
     /// <summary>

@@ -2,6 +2,13 @@
 #include <log.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+// clang-format off
+TF_DEFINE_PRIVATE_TOKENS(_tokens,
+    (st)
+);
+// clang-format on
+
 void HdStrelkaBasisCurves::Sync(HdSceneDelegate* sceneDelegate,
                                 HdRenderParam* renderParam,
                                 HdDirtyBits* dirtyBits,
@@ -77,6 +84,7 @@ void HdStrelkaBasisCurves::_PullPrimvars(HdSceneDelegate* sceneDelegate,
                                          VtVec3fArray& points,
                                          VtVec3fArray& normals,
                                          VtFloatArray& widths,
+                                         VtVec2fArray& uvs,
                                          bool& indexedNormals,
                                          bool& indexedUVs,
                                          GfVec3f& color,
@@ -137,6 +145,15 @@ void HdStrelkaBasisCurves::_PullPrimvars(HdSceneDelegate* sceneDelegate,
         VtValue boxedWidths = sceneDelegate->Get(id, HdTokens->widths);
         widths = boxedWidths.Get<VtFloatArray>();
     }
+
+    // Handle texture coords
+    HdInterpolation textureCoordInterpolation;
+    const bool foundTextureCoord = _FindPrimvar(sceneDelegate, _tokens->st, textureCoordInterpolation);
+    if (foundTextureCoord && textureCoordInterpolation == HdInterpolationVertex)
+    {
+        uvs = sceneDelegate->Get(id, _tokens->st).Get<VtVec2fArray>();
+        indexedUVs = true;
+    }
 }
 
 void HdStrelkaBasisCurves::_UpdateGeometry(HdSceneDelegate* sceneDelegate)
@@ -156,7 +173,7 @@ void HdStrelkaBasisCurves::_UpdateGeometry(HdSceneDelegate* sceneDelegate)
     bool indexedNormals;
     bool indexedUVs;
     bool hasColor = true;
-    _PullPrimvars(sceneDelegate, mPoints, mNormals, mWidths, indexedNormals, indexedUVs, mColor, hasColor);
+    _PullPrimvars(sceneDelegate, mPoints, mNormals, mWidths, mUvs, indexedNormals, indexedUVs, mColor, hasColor);
     _ConvertCurve();
 }
 
@@ -229,6 +246,10 @@ void HdStrelkaBasisCurves::_ConvertCurve()
     {
         mCurveVertexCounts.push_back(i);
     }
+    for (const auto& uv: mUvs)
+    {
+        mCurveUvs.push_back(glm::float2(uv[0], uv[1]));
+    }
 }
 const std::vector<glm::float3>& HdStrelkaBasisCurves::GetPoints() const
 {
@@ -241,6 +262,10 @@ const std::vector<float>& HdStrelkaBasisCurves::GetWidths() const
 const std::vector<uint32_t>& HdStrelkaBasisCurves::GetVertexCounts() const
 {
     return mCurveVertexCounts;
+}
+const std::vector<glm::float2>& HdStrelkaBasisCurves::GetUvs() const
+{
+    return mCurveUvs;
 }
 const GfMatrix4d& HdStrelkaBasisCurves::GetPrototypeTransform() const
 {
