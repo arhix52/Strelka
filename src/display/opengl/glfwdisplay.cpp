@@ -38,8 +38,7 @@ inline void glCheck(const char* call, const char* file, unsigned int line)
     {
         std::stringstream ss;
         ss << "GL error " << getGLErrorString(err) << " at " << file << "(" << line << "): " << call << '\n';
-        std::cerr << ss.str() << std::endl;
-        // throw Exception(ss.str().c_str());
+        STRELKA_FATAL("{}", ss.str());
         assert(0);
     }
 }
@@ -99,7 +98,7 @@ GLuint createGLShader(const std::string& source, GLuint shader_type)
             glGetShaderInfoLog(shader, max_length, nullptr, info_log_data);
 
             glDeleteShader(shader);
-            std::cerr << "Compilation of shader failed: " << info_log << std::endl;
+            STRELKA_FATAL("Compilation of shader failed: {}", info_log);
 
             return 0;
         }
@@ -138,7 +137,7 @@ GLuint createGLProgram(const std::string& vert_source, const std::string& frag_s
         std::string info_log(max_length, '\0');
         GLchar* info_log_data = reinterpret_cast<GLchar*>(&info_log[0]);
         glGetProgramInfoLog(program, max_length, nullptr, info_log_data);
-        std::cerr << "Linking of program failed: " << info_log << std::endl;
+        STRELKA_FATAL("Linking of program failed: {}", info_log);
 
         glDeleteProgram(program);
         glDeleteShader(vert_shader);
@@ -194,7 +193,7 @@ void glfwdisplay::init(int width, int height, oka::SharedContext* ctx)
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
     {
-        std::cout << "Failed to initialize GLAD" << std::endl;
+        STRELKA_FATAL("Failed to initialize GLAD");
         assert(0);
     }
 

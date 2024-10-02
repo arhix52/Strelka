@@ -266,7 +266,7 @@ int main(int argc, const char* argv[])
 
     if (result.count("help"))
     {
-        std::cout << options.help() << '\n';
+        STRELKA_INFO("{}", options.help());
         return 0;
     }
 
