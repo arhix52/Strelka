@@ -64,7 +64,6 @@ if(APPLE)
   target_link_libraries(${DISPLAYLIB_NAME} PRIVATE "-framework CoreGraphics")
   target_link_libraries(${DISPLAYLIB_NAME} PRIVATE "-framework Metal")
   target_link_libraries(${DISPLAYLIB_NAME} PRIVATE "-framework MetalKit")
-  target_link_libraries(${DISPLAYLIB_NAME} PUBLIC logger)
-  target_link_libraries(${DISPLAYLIB_NAME} PUBLIC imgui::imgui glfw glm::glm)
+  target_link_libraries(${DISPLAYLIB_NAME} PUBLIC logger imgui::imgui glfw glm::glm)
 
 endif()
