@@ -31,7 +31,7 @@ if(WIN32 OR LINUX)
 
   target_link_libraries(${DISPLAYLIB_NAME}
     PUBLIC ${OPENGL_LIBRARIES}
-    imgui::imgui glfw glm::glm glad::glad)
+    logger imgui::imgui glfw glm::glm glad::glad)
 
 endif()
 
