@@ -6,9 +6,6 @@
 
 #include "OptixRenderParams.h"
 
-#include <iostream>
-#include <iomanip>
-
 #include <scene/scene.h>
 
 #include "common.h"

@@ -3,7 +3,6 @@
 #include "buffer.h"
 
 #include <stdint.h>
-#include <vector>
 
 namespace oka
 {
