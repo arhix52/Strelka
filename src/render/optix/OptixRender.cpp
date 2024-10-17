@@ -127,15 +127,6 @@ typedef SbtRecord<RayGenData> RayGenSbtRecord;
 typedef SbtRecord<MissData> MissSbtRecord;
 typedef SbtRecord<HitGroupData> HitGroupSbtRecord;
 
-void configureCamera(::Camera& cam, const uint32_t width, const uint32_t height)
-{
-    cam.setEye({ 0.0f, 0.0f, 2.0f });
-    cam.setLookat({ 0.0f, 0.0f, 0.0f });
-    cam.setUp({ 0.0f, 1.0f, 3.0f });
-    cam.setFovY(45.0f);
-    cam.setAspectRatio((float)width / (float)height);
-}
-
 static bool readSourceFile(std::string& str, const fs::path& filename)
 {
     // Try to open file
@@ -162,28 +153,23 @@ void OptiXRender::createContext()
 {
     // Initialize CUDA
     CUDA_CHECK(cudaFree(0));
+    CUDA_CHECK(cudaStreamCreate(&mState.stream));
 
-    CUstream stream;
-    CUDA_CHECK(cudaStreamCreate(&stream));
-    mState.stream = stream;
-
-    OptixDeviceContext context;
-    CUcontext cu_ctx = 0; // zero means take the current context
     OPTIX_CHECK(optixInit());
     OptixDeviceContextOptions options = {};
     options.logCallbackFunction = &context_log_cb;
-    options.logCallbackLevel = 4;
     if (mEnableValidation)
     {
         options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
+        options.logCallbackLevel = 4;
     }
     else
     {
         options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
+        options.logCallbackLevel = 2; // error
     }
-    OPTIX_CHECK(optixDeviceContextCreate(cu_ctx, &options, &context));
-
-    mState.context = context;
+    CUcontext cu_ctx = 0; // zero means take the current context
+    OPTIX_CHECK(optixDeviceContextCreate(cu_ctx, &options, &mState.context));
 }
 
 bool OptiXRender::compactAccel(CUdeviceptr& buffer,
@@ -191,8 +177,6 @@ bool OptiXRender::compactAccel(CUdeviceptr& buffer,
                                CUdeviceptr result,
                                size_t outputSizeInBytes)
 {
-    bool flag = false;
-
     size_t compacted_size;
     CUDA_CHECK(cudaMemcpy(&compacted_size, (void*)result, sizeof(size_t), cudaMemcpyDeviceToHost));
 
@@ -203,14 +187,13 @@ bool OptiXRender::compactAccel(CUdeviceptr& buffer,
 
         // use handle as input and output
         OPTIX_CHECK(optixAccelCompact(mState.context, 0, handle, compactedOutputBuffer, compacted_size, &handle));
-
+        // replace existing buffer
         CUDA_CHECK(cudaFree(reinterpret_cast<void*>(buffer)));
         buffer = compactedOutputBuffer;
-
-        flag = true;
+        return true;
     }
 
-    return flag;
+    return false;
 }
 
 OptiXRender::Curve* OptiXRender::createCurve(const oka::Curve& curve)
@@ -324,9 +307,6 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
         accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
         accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
 
-        // std::vector<oka::Scene::Vertex>& vertices = mScene->getVertices();
-        // std::vector<uint32_t>& indices = mScene->getIndices();
-
         const CUdeviceptr verticesDataStart = d_vb + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
         CUdeviceptr indicesDataStart = d_ib + mesh.mIndex * sizeof(uint32_t);
 
@@ -342,7 +322,6 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
         triangle_input.triangleArray.indexFormat = OptixIndicesFormat::OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
         triangle_input.triangleArray.indexStrideInBytes = sizeof(uint32_t) * 3;
         triangle_input.triangleArray.numIndexTriplets = mesh.mCount / 3;
-        // triangle_input.triangleArray.
         triangle_input.triangleArray.flags = triangle_input_flags;
         triangle_input.triangleArray.numSbtRecords = 1;
 
@@ -408,29 +387,28 @@ void OptiXRender::createAccelerationStructure()
     }
 
     std::vector<OptixInstance> optixInstances;
-    glm::mat3x4 identity = glm::identity<glm::mat3x4>();
     for (int i = 0; i < instances.size(); ++i)
     {
         OptixInstance oi = {};
         const oka::Instance& curr = instances[i];
-        if (curr.type == oka::Instance::Type::eMesh)
+        switch (curr.type)
         {
+        case oka::Instance::Type::eMesh:
             oi.traversableHandle = mOptixMeshes[curr.mMeshId]->gas_handle;
             oi.visibilityMask = GEOMETRY_MASK_TRIANGLE;
-        }
-        else if (curr.type == oka::Instance::Type::eCurve)
-        {
+            break;
+        case oka::Instance::Type::eCurve:
             oi.traversableHandle = mOptixCurves[curr.mCurveId]->gas_handle;
             oi.visibilityMask = GEOMETRY_MASK_CURVE;
-        }
-        else if (curr.type == oka::Instance::Type::eLight)
-        {
+            break;
+        case oka::Instance::Type::eLight:
             oi.traversableHandle = mOptixMeshes[curr.mMeshId]->gas_handle;
             oi.visibilityMask = GEOMETRY_MASK_LIGHT;
-        }
-        else
-        {
+            break;
+        default:
+            STRELKA_ERROR("Unknown instance type");
             assert(0);
+            break;
         }
         // fill common instance data
         memcpy(oi.transform, glm::value_ptr(glm::float3x4(glm::rowMajor4(curr.transform))), sizeof(float) * 12);
@@ -438,7 +416,7 @@ void OptiXRender::createAccelerationStructure()
         optixInstances.push_back(oi);
     }
 
-    size_t instances_size_in_bytes = sizeof(OptixInstance) * optixInstances.size();
+    const size_t instances_size_in_bytes = sizeof(OptixInstance) * optixInstances.size();
     CUDA_CHECK(cudaMalloc((void**)&mState.d_instances, instances_size_in_bytes));
     CUDA_CHECK(
         cudaMemcpy((void*)mState.d_instances, optixInstances.data(), instances_size_in_bytes, cudaMemcpyHostToDevice));
@@ -459,22 +437,11 @@ void OptiXRender::createAccelerationStructure()
     // non-compacted output
     CUdeviceptr d_buffer_temp_output_ias_and_compacted_size;
 
-    auto roundUp = [](size_t x, size_t y) { return ((x + y - 1) / y) * y; };
-
-    size_t compactedSizeOffset = roundUp(ias_buffer_sizes.outputSizeInBytes, 8ull);
-    CUDA_CHECK(
-        cudaMalloc(reinterpret_cast<void**>(&d_buffer_temp_output_ias_and_compacted_size), compactedSizeOffset + 8));
+    CUDA_CHECK(cudaMalloc(
+        reinterpret_cast<void**>(&d_buffer_temp_output_ias_and_compacted_size), ias_buffer_sizes.outputSizeInBytes));
 
     CUdeviceptr d_ias_temp_buffer;
-    // bool        needIASTempBuffer = ias_buffer_sizes.tempSizeInBytes > state.temp_buffer_size;
-    // if( needIASTempBuffer )
-    {
-        CUDA_CHECK(cudaMalloc((void**)&d_ias_temp_buffer, ias_buffer_sizes.tempSizeInBytes));
-    }
-    // else
-    // {
-    // d_ias_temp_buffer = state.d_temp_buffer;
-    // }
+    CUDA_CHECK(cudaMalloc((void**)&d_ias_temp_buffer, ias_buffer_sizes.tempSizeInBytes));
 
     CUdeviceptr compactedSizeBuffer;
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>((&compactedSizeBuffer)), sizeof(uint64_t)));
@@ -541,8 +508,8 @@ void OptiXRender::createModule()
         char log[2048]; // For error reporting from OptiX creation functions
         size_t sizeof_log = sizeof(log);
 
-        OPTIX_CHECK_LOG(optixModuleCreate(mState.context, &module_compile_options, &pipeline_compile_options,
-                                                 input, inputSize, log, &sizeof_log, &module));
+        OPTIX_CHECK_LOG(optixModuleCreate(mState.context, &module_compile_options, &pipeline_compile_options, input,
+                                          inputSize, log, &sizeof_log, &module));
     }
     mState.ptx_module = module;
     mState.pipeline_compile_options = pipeline_compile_options;
@@ -567,7 +534,7 @@ OptixProgramGroup OptiXRender::createRadianceClosestHitProgramGroup(PathTracerSt
 
     OptixModule mat_module = nullptr;
     OPTIX_CHECK_LOG(optixModuleCreate(state.context, &state.module_compile_options, &state.pipeline_compile_options,
-                                             module_code, module_size, log, &sizeof_log, &mat_module));
+                                      module_code, module_size, log, &sizeof_log, &mat_module));
 
     OptixProgramGroupOptions program_group_options = {};
 
@@ -659,58 +626,47 @@ void OptiXRender::createProgramGroups()
 void OptiXRender::createPipeline()
 {
     OptixPipeline pipeline = nullptr;
+    const uint32_t max_trace_depth = 2;
+    std::vector<OptixProgramGroup> program_groups = {};
+
+    program_groups.push_back(mState.raygen_prog_group);
+    program_groups.push_back(mState.radiance_miss_group);
+    program_groups.push_back(mState.radiance_default_hit_group);
+    program_groups.push_back(mState.occlusion_miss_group);
+    program_groups.push_back(mState.occlusion_hit_group);
+    program_groups.push_back(mState.light_hit_group);
+
+    for (auto& m : mMaterials)
     {
-        const uint32_t max_trace_depth = 2;
-        std::vector<OptixProgramGroup> program_groups = {};
-
-        program_groups.push_back(mState.raygen_prog_group);
-        program_groups.push_back(mState.radiance_miss_group);
-        program_groups.push_back(mState.radiance_default_hit_group);
-        program_groups.push_back(mState.occlusion_miss_group);
-        program_groups.push_back(mState.occlusion_hit_group);
-        program_groups.push_back(mState.light_hit_group);
-
-        for (auto& m : mMaterials)
-        {
-            program_groups.push_back(m.programGroup);
-        }
-
-        OptixPipelineLinkOptions pipeline_link_options = {};
-        pipeline_link_options.maxTraceDepth = max_trace_depth;
-
-        // if (mEnableValidation)
-        // {
-        //     pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
-        // }
-        // else
-        // {
-        //     pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
-        // }
-
-        char log[2048]; // For error reporting from OptiX creation functions
-        size_t sizeof_log = sizeof(log);
-        OPTIX_CHECK_LOG(optixPipelineCreate(mState.context, &mState.pipeline_compile_options, &pipeline_link_options,
-                                            program_groups.data(), program_groups.size(), log, &sizeof_log, &pipeline));
-
-        OptixStackSizes stack_sizes = {};
-        for (auto& prog_group : program_groups)
-        {
-            OPTIX_CHECK(optixUtilAccumulateStackSizes(prog_group, &stack_sizes, pipeline));
-        }
-
-        uint32_t direct_callable_stack_size_from_traversal;
-        uint32_t direct_callable_stack_size_from_state;
-        uint32_t continuation_stack_size;
-        OPTIX_CHECK(optixUtilComputeStackSizes(&stack_sizes, max_trace_depth,
-                                               0, // maxCCDepth
-                                               0, // maxDCDepth
-                                               &direct_callable_stack_size_from_traversal,
-                                               &direct_callable_stack_size_from_state, &continuation_stack_size));
-        OPTIX_CHECK(optixPipelineSetStackSize(pipeline, direct_callable_stack_size_from_traversal,
-                                              direct_callable_stack_size_from_state, continuation_stack_size,
-                                              2 // maxTraversableDepth
-                                              ));
+        program_groups.push_back(m.programGroup);
     }
+
+    OptixPipelineLinkOptions pipeline_link_options = {};
+    pipeline_link_options.maxTraceDepth = max_trace_depth;
+
+    char log[2048]; // For error reporting from OptiX creation functions
+    size_t sizeof_log = sizeof(log);
+    OPTIX_CHECK_LOG(optixPipelineCreate(mState.context, &mState.pipeline_compile_options, &pipeline_link_options,
+                                        program_groups.data(), program_groups.size(), log, &sizeof_log, &pipeline));
+
+    OptixStackSizes stack_sizes = {};
+    for (auto& prog_group : program_groups)
+    {
+        OPTIX_CHECK(optixUtilAccumulateStackSizes(prog_group, &stack_sizes, pipeline));
+    }
+
+    uint32_t direct_callable_stack_size_from_traversal;
+    uint32_t direct_callable_stack_size_from_state;
+    uint32_t continuation_stack_size;
+    OPTIX_CHECK(optixUtilComputeStackSizes(&stack_sizes, max_trace_depth,
+                                           0, // maxCCDepth
+                                           0, // maxDCDepth
+                                           &direct_callable_stack_size_from_traversal,
+                                           &direct_callable_stack_size_from_state, &continuation_stack_size));
+    OPTIX_CHECK(optixPipelineSetStackSize(pipeline, direct_callable_stack_size_from_traversal,
+                                          direct_callable_stack_size_from_state, continuation_stack_size,
+                                          2 // maxTraversableDepth
+                                          ));
     mState.pipeline = pipeline;
 }
 
@@ -856,12 +812,12 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.d_params), sizeof(Params)));
         const size_t frameSize = mState.params.image_width * mState.params.image_height;
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.accum), frameSize * sizeof(float4)));
-        
+
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.diffuse), frameSize * sizeof(float4)));
         CUDA_CHECK(cudaMemset(mState.params.diffuse, 0, frameSize * sizeof(float4)));
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.diffuseCounter), frameSize * sizeof(uint16_t)));
         CUDA_CHECK(cudaMemset(mState.params.diffuseCounter, 0, frameSize * sizeof(uint16_t)));
-        
+
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.specular), frameSize * sizeof(float4)));
         CUDA_CHECK(cudaMemset(mState.params.specular, 0, frameSize * sizeof(float4)));
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.specularCounter), frameSize * sizeof(uint16_t)));
@@ -948,7 +904,8 @@ void OptiXRender::render(Buffer* output)
     params.shadowRayTmin = settings.getAs<float>("render/pt/dev/shadowRayTmin");
     params.materialRayTmin = settings.getAs<float>("render/pt/dev/materialRayTmin");
 
-    memcpy(params.viewToWorld, glm::value_ptr(glm::transpose(glm::inverse(camera.matrices.view))), sizeof(params.viewToWorld));
+    memcpy(params.viewToWorld, glm::value_ptr(glm::transpose(glm::inverse(camera.matrices.view))),
+           sizeof(params.viewToWorld));
     memcpy(params.clipToView, glm::value_ptr(glm::transpose(camera.matrices.invPerspective)), sizeof(params.clipToView));
     params.subframe_index = getSharedContext().mSubframeIndex;
     // Photometric Units from iray documentation
@@ -957,7 +914,7 @@ void OptiXRender::render(Buffer* output)
     // “Photographic” mode is enabled. If this is set to 0, “Arbitrary” mode is enabled, and all color scaling is then
     // strictly defined by the value of cm^2 Factor.
     float filmIso = settings.getAs<float>("render/post/tonemapper/filmIso");
-    // The candela per meter square factor 
+    // The candela per meter square factor
     float cm2_factor = settings.getAs<float>("render/post/tonemapper/cm2_factor");
     // The fractional aperture number; e.g., 11 means aperture “f/11.” It adjusts the size of the opening of the “camera
     // iris” and is expressed as a ratio. The higher this value, the lower the exposure.
@@ -968,7 +925,7 @@ void OptiXRender::render(Buffer* output)
     // Specifies the main color temperature of the light sources; the color that will be mapped to “white” on output,
     // e.g., an incoming color of this hue/saturation will be mapped to grayscale, but its intensity will remain
     // unchanged. This is similar to white balance controls on digital cameras.
-    float3 whitePoint { 1.0f, 1.0f, 1.0f };
+    float3 whitePoint{ 1.0f, 1.0f, 1.0f };
     float3 exposureValue = all(whitePoint) ? 1.0f / whitePoint : make_float3(1.0f);
     const float lum = dot(exposureValue, make_float3(0.299f, 0.587f, 0.114f));
     if (filmIso > 0.0f)
@@ -988,8 +945,7 @@ void OptiXRender::render(Buffer* output)
     const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");
     const int32_t leftSpp = totalSpp - getSharedContext().mSubframeIndex;
     // if accumulation is off then launch selected samples per pixel
-    uint32_t samplesThisLaunch =
-        enableAccumulation ? std::min((int32_t)samplesPerLaunch, leftSpp) : samplesPerLaunch;
+    uint32_t samplesThisLaunch = enableAccumulation ? std::min((int32_t)samplesPerLaunch, leftSpp) : samplesPerLaunch;
 
     if (params.debug == 1)
     {
@@ -1023,20 +979,20 @@ void OptiXRender::render(Buffer* output)
         if (params.debug == 0)
         {
             CUDA_CHECK(cudaMemcpy(params.image, params.accum,
-                                mState.params.image_width * mState.params.image_height * sizeof(float4),
-                                cudaMemcpyDeviceToDevice));
+                                  mState.params.image_width * mState.params.image_height * sizeof(float4),
+                                  cudaMemcpyDeviceToDevice));
         }
         if (params.debug == 2)
         {
             CUDA_CHECK(cudaMemcpy(params.image, params.diffuse,
-                                mState.params.image_width * mState.params.image_height * sizeof(float4),
-                                cudaMemcpyDeviceToDevice));
+                                  mState.params.image_width * mState.params.image_height * sizeof(float4),
+                                  cudaMemcpyDeviceToDevice));
         }
         if (params.debug == 3)
         {
             CUDA_CHECK(cudaMemcpy(params.image, params.specular,
-                                mState.params.image_width * mState.params.image_height * sizeof(float4),
-                                cudaMemcpyDeviceToDevice));
+                                  mState.params.image_width * mState.params.image_height * sizeof(float4),
+                                  cudaMemcpyDeviceToDevice));
         }
     }
 
