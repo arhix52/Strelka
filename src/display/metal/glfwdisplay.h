@@ -18,7 +18,8 @@ public:
     {
     }
 
-    virtual void init(int width, int height, oka::SharedContext* ctx) override;
+    virtual void init(int width, int height, SettingsManager* settings) override;
+    virtual void setNativeDevice(void* device) override;
     virtual void destroy() override;
 
     virtual void onBeginFrame() override;

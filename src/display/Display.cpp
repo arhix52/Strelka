@@ -3,8 +3,6 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 
-#include "ImGuizmo.h"
-
 using namespace oka;
 
 void Display::framebufferResizeCallback(GLFWwindow* window, int width, int height)
@@ -72,13 +70,7 @@ void Display::drawUI()
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
-    ImGuizmo::SetOrthographic(false);
-    ImGuizmo::BeginFrame();
-
     ImGuiIO& io = ImGui::GetIO();
-
-
-
 
     const char* debugItems[] = { "None", "Normals", "Diffuse AOV", "Specular AOV" };
     static int currentDebugItemId = 0;

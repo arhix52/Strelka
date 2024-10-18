@@ -19,12 +19,16 @@
 
 using namespace oka;
 
-void glfwdisplay::init(int width, int height, SharedContext* ctx)
+void GlfwDisplay::setNativeDevice(void* device)
 {
-    _pDevice = (MTL::Device*) ctx->mRender->getNativeDevicePtr();
+    _pDevice = (MTL::Device*) device;
+}
+
+void GlfwDisplay::init(int width, int height, SettingsManager* settings)
+{
     mWindowWidth = width;
     mWindowHeight = height;
-    mCtx = ctx;
+    mSettings = settings;
 
     if (!glfwInit())
     {
@@ -83,7 +87,7 @@ void glfwdisplay::init(int width, int height, SharedContext* ctx)
     buildShaders();
 }
 
-void glfwdisplay::drawFrame(ImageBuffer& result)
+void GlfwDisplay::drawFrame(ImageBuffer& result)
 {
     NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
@@ -117,7 +121,7 @@ void glfwdisplay::drawFrame(ImageBuffer& result)
     pPool->release();
 }
 
-MTL::Texture* glfwdisplay::buildTexture(uint32_t width, uint32_t heigth)
+MTL::Texture* GlfwDisplay::buildTexture(uint32_t width, uint32_t heigth)
 {
     MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
     pTextureDesc->setWidth(width);
@@ -148,7 +152,7 @@ static bool readSourceFile(std::string& str, const std::string& filename)
     return false;
 }
 
-void glfwdisplay::buildShaders()
+void GlfwDisplay::buildShaders()
 {
     using NS::StringEncoding::UTF8StringEncoding;
 
@@ -186,12 +190,12 @@ void glfwdisplay::buildShaders()
     _pShaderLibrary = pLibrary;
 }
 
-void glfwdisplay::destroy()
+void GlfwDisplay::destroy()
 {
 
 }
 
-void glfwdisplay::onBeginFrame()
+void GlfwDisplay::onBeginFrame()
 {
     // NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
@@ -212,7 +216,7 @@ void glfwdisplay::onBeginFrame()
     // pPool->release();
 }
 
-void glfwdisplay::onEndFrame()
+void GlfwDisplay::onEndFrame()
 {
     // NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
@@ -228,7 +232,7 @@ void glfwdisplay::onEndFrame()
     // pPool->release();
 }
 
-void glfwdisplay::drawUI()
+void GlfwDisplay::drawUI()
 {
 @autoreleasepool 
     {

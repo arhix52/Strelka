@@ -46,8 +46,6 @@ public:
 
         m_sceneLoader = std::unique_ptr<GltfLoader>(new GltfLoader());
 
-        m_display->init(1024, 768, m_settingsManager.get());
-
         m_render->setScene(&m_scene);
         m_render->setSettingsManager(m_settingsManager.get());
         m_render->setSharedContext(m_sharedCtx.get());
@@ -55,6 +53,10 @@ public:
         prepare();
 
         m_render->init();
+#ifdef __APPLE__
+        m_display->setNativeDevice(m_render->getNativeDevicePtr());
+#endif
+        m_display->init(1024, 768, m_settingsManager.get());
     }
     ~Editor()
     {

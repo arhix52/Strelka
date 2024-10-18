@@ -33,6 +33,9 @@ public:
     virtual void init(int width, int height, SettingsManager* settings) = 0;
     virtual void destroy() = 0;
 
+#ifdef __APPLE__
+    virtual void setNativeDevice(void* device) = 0;
+#endif
     void setWindowTitle(const char* title)
     {
         glfwSetWindowTitle(mWindow, title);
