@@ -3,6 +3,8 @@
 #include <render/common.h>
 #include <render/buffer.h>
 
+#include <settings/settings.h>
+
 #include <GLFW/glfw3.h>
 
 namespace oka
@@ -28,7 +30,7 @@ public:
     Display() = default;
     virtual ~Display() = default;
 
-    virtual void init(int width, int height, oka::SharedContext* ctx) = 0;
+    virtual void init(int width, int height, SettingsManager* settings) = 0;
     virtual void destroy() = 0;
 
     void setWindowTitle(const char* title)
@@ -85,7 +87,7 @@ protected:
     InputHandler* mInputHandler = nullptr;
     ResizeHandler* mResizeHandler = nullptr;
 
-    oka::SharedContext* mCtx = nullptr;
+    SettingsManager* mSettings = nullptr;
 
     GLFWwindow* mWindow;
 };

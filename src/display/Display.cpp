@@ -3,6 +3,8 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 
+#include "ImGuizmo.h"
+
 using namespace oka;
 
 void Display::framebufferResizeCallback(GLFWwindow* window, int width, int height)
@@ -69,23 +71,17 @@ void Display::drawUI()
 {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
+
+    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::BeginFrame();
+
     ImGuiIO& io = ImGui::GetIO();
+
+
+
 
     const char* debugItems[] = { "None", "Normals", "Diffuse AOV", "Specular AOV" };
     static int currentDebugItemId = 0;
-
-    /*
-    bool openFD = false;
-    static uint32_t showPropertiesId = -1;
-    static uint32_t lightId = -1;
-    static bool isLight = false;
-    static bool openInspector = false;
-
-
-
-    const char* stratifiedSamplingItems[] = { "None", "Random", "Stratified", "Optimized" };
-    static int currentSamplingItemId = 1;
-    */
 
     ImGui::Begin("Menu:"); // begin window
 
@@ -105,7 +101,7 @@ void Display::drawUI()
         }
         ImGui::EndCombo();
     }
-    mCtx->mSettingsManager->setAs<uint32_t>("render/pt/debug", currentDebugItemId);
+    mSettings->setAs<uint32_t>("render/pt/debug", currentDebugItemId);
 
     if (ImGui::TreeNode("Path Tracer"))
     {
@@ -127,54 +123,36 @@ void Display::drawUI()
             }
             ImGui::EndCombo();
         }
-        mCtx->mSettingsManager->setAs<uint32_t>(
+        mSettings->setAs<uint32_t>(
             "render/pt/rectLightSamplingMethod", currentRectlightSamplingMethodItemId);
 
-        uint32_t maxDepth = mCtx->mSettingsManager->getAs<uint32_t>("render/pt/depth");
+        uint32_t maxDepth = mSettings->getAs<uint32_t>("render/pt/depth");
         ImGui::SliderInt("Max Depth", (int*)&maxDepth, 1, 16);
-        mCtx->mSettingsManager->setAs<uint32_t>("render/pt/depth", maxDepth);
+        mSettings->setAs<uint32_t>("render/pt/depth", maxDepth);
 
-        uint32_t sppTotal = mCtx->mSettingsManager->getAs<uint32_t>("render/pt/sppTotal");
+        uint32_t sppTotal = mSettings->getAs<uint32_t>("render/pt/sppTotal");
         ImGui::SliderInt("SPP Total", (int*)&sppTotal, 1, 10000);
-        mCtx->mSettingsManager->setAs<uint32_t>("render/pt/sppTotal", sppTotal);
+        mSettings->setAs<uint32_t>("render/pt/sppTotal", sppTotal);
 
-        uint32_t sppSubframe = mCtx->mSettingsManager->getAs<uint32_t>("render/pt/spp");
+        uint32_t sppSubframe = mSettings->getAs<uint32_t>("render/pt/spp");
         ImGui::SliderInt("SPP Subframe", (int*)&sppSubframe, 1, 32);
-        mCtx->mSettingsManager->setAs<uint32_t>("render/pt/spp", sppSubframe);
+        mSettings->setAs<uint32_t>("render/pt/spp", sppSubframe);
 
-        bool enableAccumulation = mCtx->mSettingsManager->getAs<bool>("render/pt/enableAcc");
+        bool enableAccumulation = mSettings->getAs<bool>("render/pt/enableAcc");
         ImGui::Checkbox("Enable Path Tracer Acc", &enableAccumulation);
-        mCtx->mSettingsManager->setAs<bool>("render/pt/enableAcc", enableAccumulation);
-        /*
-        if (ImGui::BeginCombo("Stratified Sampling", stratifiedSamplingItems[currentSamplingItemId]))
-        {
-            for (int n = 0; n < IM_ARRAYSIZE(stratifiedSamplingItems); n++)
-            {
-                bool is_selected = (currentSamplingItemId == n);
-                if (ImGui::Selectable(stratifiedSamplingItems[n], is_selected))
-                {
-                    currentSamplingItemId = n;
-                }
-                if (is_selected)
-                {
-                    ImGui::SetItemDefaultFocus();
-                }
-            }
-            ImGui::EndCombo();
-        }
-        mCtx->mSettingsManager->setAs<uint32_t>("render/pt/stratifiedSamplingType", currentSamplingItemId);
-         */
+        mSettings->setAs<bool>("render/pt/enableAcc", enableAccumulation);
+
         ImGui::TreePop();
     }
 
     if (ImGui::Button("Capture Screen"))
     {
-        mCtx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
+        mSettings->setAs<bool>("render/pt/needScreenshot", true);
     }
 
-    float cameraSpeed = mCtx->mSettingsManager->getAs<float>("render/cameraSpeed");
+    float cameraSpeed = mSettings->getAs<float>("render/cameraSpeed");
     ImGui::InputFloat("Camera Speed", (float*)&cameraSpeed, 0.5);
-    mCtx->mSettingsManager->setAs<float>("render/cameraSpeed", cameraSpeed);
+    mSettings->setAs<float>("render/cameraSpeed", cameraSpeed);
     
     const char* tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
     static int currentTonemapItemId = 1;
@@ -194,46 +172,21 @@ void Display::drawUI()
         }
         ImGui::EndCombo();
     }
-    mCtx->mSettingsManager->setAs<uint32_t>("render/pt/tonemapperType", currentTonemapItemId);
+    mSettings->setAs<uint32_t>("render/pt/tonemapperType", currentTonemapItemId);
     
-    float gamma = mCtx->mSettingsManager->getAs<float>("render/post/gamma");
+    float gamma = mSettings->getAs<float>("render/post/gamma");
     ImGui::InputFloat("Gamma", (float*)&gamma, 0.5);
-    mCtx->mSettingsManager->setAs<float>("render/post/gamma", gamma);
+    mSettings->setAs<float>("render/post/gamma", gamma);
 
-    float materialRayTmin = mCtx->mSettingsManager->getAs<float>("render/pt/dev/materialRayTmin");
+    float materialRayTmin = mSettings->getAs<float>("render/pt/dev/materialRayTmin");
     ImGui::InputFloat("Material ray T min", (float*)&materialRayTmin, 0.1);
-    mCtx->mSettingsManager->setAs<float>("render/pt/dev/materialRayTmin", materialRayTmin);   
-    float shadowRayTmin = mCtx->mSettingsManager->getAs<float>("render/pt/dev/shadowRayTmin");
+    mSettings->setAs<float>("render/pt/dev/materialRayTmin", materialRayTmin);   
+    float shadowRayTmin = mSettings->getAs<float>("render/pt/dev/shadowRayTmin");
     ImGui::InputFloat("Shadow ray T min", (float*)&shadowRayTmin, 0.1);
-    mCtx->mSettingsManager->setAs<float>("render/pt/dev/shadowRayTmin", shadowRayTmin);
-
-    /*
-    bool enableUpscale = mCtx->mSettingsManager->getAs<bool>("render/pt/enableUpscale");
-    ImGui::Checkbox("Enable Upscale", &enableUpscale);
-    mCtx->mSettingsManager->setAs<bool>("render/pt/enableUpscale", enableUpscale);
-
-    float upscaleFactor = 0.0f;
-    if (enableUpscale)
-    {
-        upscaleFactor = 0.5f;
-    }
-    else
-    {
-        upscaleFactor = 1.0f;
-    }
-    mCtx->mSettingsManager->setAs<float>("render/pt/upscaleFactor", upscaleFactor);
-
-    if (ImGui::Button("Capture Screen"))
-    {
-        mCtx->mSettingsManager->setAs<bool>("render/pt/needScreenshot", true);
-    }
-
-    // bool isRecreate = ImGui::Button("Recreate BVH");
-    // renderConfig.recreateBVH = isRecreate ? true : false;
-    */
+    mSettings->setAs<float>("render/pt/dev/shadowRayTmin", shadowRayTmin);
 
     ImGui::End(); // end window
 
-        // Rendering
+    // Rendering
     ImGui::Render();
 }

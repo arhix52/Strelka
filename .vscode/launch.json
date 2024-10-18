@@ -13,7 +13,7 @@
             // "args": ["-s", "C:/work/blender_hair/einar_hair.usd"],
             // "args": ["-s", "C:/work/cube.usda"],
             // "args": ["-s", "C:/work/senna2.usd"],
-            "args": ["-s", "C:/work/vespa/vespa.gltf"],
+            "args": ["-s", "C:/work/vespa/vespa.gltf", "-v"],
             // "args": ["-s", "C:/work/Kitchen_set/Kitchen.usda"],
             // "args": ["-s", "C:/work/alab-v2.0.1/ALab/entry.usda"],
             // "args": ["-s", "C:/work/strelka_test1.usda"],

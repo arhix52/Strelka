@@ -9,6 +9,7 @@ Path tracing render based on NVIDIA OptiX + NVIDIA MDL and Apple Metal
 ## Project Dependencies
 
 OpenUSD https://github.com/PixarAnimationStudios/OpenUSD
+See BuildOpenUSD.md in repo
 
 * Set evn var: `USD_DIR=c:\work\USD_build`
 

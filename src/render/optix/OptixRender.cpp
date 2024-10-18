@@ -362,16 +362,10 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
     return rmesh;
 }
 
-void OptiXRender::createAccelerationStructure()
+void OptiXRender::createBottomLevelAccelerationStructures()
 {
     const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
     const std::vector<oka::Curve>& curves = mScene->getCurves();
-    const std::vector<oka::Instance>& instances = mScene->getInstances();
-    if (meshes.empty() && curves.empty())
-    {
-        return;
-    }
-
     // TODO: add proper clear and free resources
     mOptixMeshes.clear();
     for (int i = 0; i < meshes.size(); ++i)
@@ -385,6 +379,11 @@ void OptiXRender::createAccelerationStructure()
         Curve* c = createCurve(curves[i]);
         mOptixCurves.push_back(c);
     }
+}
+
+void OptiXRender::createTopLevelAccelerationStructure()
+{
+    const std::vector<oka::Instance>& instances = mScene->getInstances();
 
     std::vector<OptixInstance> optixInstances;
     for (int i = 0; i < instances.size(); ++i)
@@ -416,10 +415,17 @@ void OptiXRender::createAccelerationStructure()
         optixInstances.push_back(oi);
     }
 
-    const size_t instances_size_in_bytes = sizeof(OptixInstance) * optixInstances.size();
-    CUDA_CHECK(cudaMalloc((void**)&mState.d_instances, instances_size_in_bytes));
-    CUDA_CHECK(
-        cudaMemcpy((void*)mState.d_instances, optixInstances.data(), instances_size_in_bytes, cudaMemcpyHostToDevice));
+    const size_t need_instances_size = sizeof(OptixInstance) * optixInstances.size();
+    if (need_instances_size != mState.d_instances_size)
+    {
+        if (mState.d_instances != 0)
+        {
+            CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mState.d_instances)));
+        }
+        CUDA_CHECK(cudaMalloc((void**)&mState.d_instances, need_instances_size));
+        mState.d_instances_size = need_instances_size;
+    }
+    CUDA_CHECK(cudaMemcpy((void*)mState.d_instances, optixInstances.data(), need_instances_size, cudaMemcpyHostToDevice));
 
     OptixBuildInput ias_instance_input = {};
     ias_instance_input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
@@ -458,6 +464,7 @@ void OptiXRender::createAccelerationStructure()
 
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(compactedSizeBuffer)));
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_ias_temp_buffer)));
+    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_buffer_temp_output_ias_and_compacted_size)));
 }
 
 void OptiXRender::createModule()
@@ -672,109 +679,107 @@ void OptiXRender::createPipeline()
 
 void OptiXRender::createSbt()
 {
+    // TODO: add clear sbt if needed
     OptixShaderBindingTable sbt = {};
+    CUdeviceptr raygen_record;
+    const size_t raygen_record_size = sizeof(RayGenSbtRecord);
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&raygen_record), raygen_record_size));
+    RayGenSbtRecord rg_sbt;
+    OPTIX_CHECK(optixSbtRecordPackHeader(mState.raygen_prog_group, &rg_sbt));
+    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(raygen_record), &rg_sbt, raygen_record_size, cudaMemcpyHostToDevice));
+
+    CUdeviceptr miss_record;
+    const uint32_t miss_record_count = RAY_TYPE_COUNT;
+    size_t miss_record_size = sizeof(MissSbtRecord) * miss_record_count;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&miss_record), miss_record_size));
+    std::vector<MissSbtRecord> missGroupDataCpu(miss_record_count);
+
+    MissSbtRecord& ms_sbt = missGroupDataCpu[RAY_TYPE_RADIANCE];
+    // ms_sbt.data.bg_color = { 0.5f, 0.5f, 0.5f };
+    ms_sbt.data.bg_color = { 0.0f, 0.0f, 0.0f };
+    OPTIX_CHECK(optixSbtRecordPackHeader(mState.radiance_miss_group, &ms_sbt));
+
+    MissSbtRecord& ms_sbt_occlusion = missGroupDataCpu[RAY_TYPE_OCCLUSION];
+    ms_sbt_occlusion.data = { 0.0f, 0.0f, 0.0f };
+    OPTIX_CHECK(optixSbtRecordPackHeader(mState.occlusion_miss_group, &ms_sbt_occlusion));
+
+    CUDA_CHECK(cudaMemcpy(
+        reinterpret_cast<void*>(miss_record), missGroupDataCpu.data(), miss_record_size, cudaMemcpyHostToDevice));
+
+    uint32_t hitGroupRecordCount = RAY_TYPE_COUNT;
+    CUdeviceptr hitgroup_record = 0;
+    size_t hitgroup_record_size = hitGroupRecordCount * sizeof(HitGroupSbtRecord);
+    const std::vector<oka::Instance>& instances = mScene->getInstances();
+    std::vector<HitGroupSbtRecord> hitGroupDataCpu(hitGroupRecordCount); // default sbt record
+    if (!instances.empty())
     {
-        CUdeviceptr raygen_record;
-        const size_t raygen_record_size = sizeof(RayGenSbtRecord);
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&raygen_record), raygen_record_size));
-        RayGenSbtRecord rg_sbt;
-        OPTIX_CHECK(optixSbtRecordPackHeader(mState.raygen_prog_group, &rg_sbt));
-        CUDA_CHECK(
-            cudaMemcpy(reinterpret_cast<void*>(raygen_record), &rg_sbt, raygen_record_size, cudaMemcpyHostToDevice));
-
-        CUdeviceptr miss_record;
-        const uint32_t miss_record_count = RAY_TYPE_COUNT;
-        size_t miss_record_size = sizeof(MissSbtRecord) * miss_record_count;
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&miss_record), miss_record_size));
-        std::vector<MissSbtRecord> missGroupDataCpu(miss_record_count);
-
-        MissSbtRecord& ms_sbt = missGroupDataCpu[RAY_TYPE_RADIANCE];
-        // ms_sbt.data.bg_color = { 0.5f, 0.5f, 0.5f };
-        ms_sbt.data.bg_color = { 0.0f, 0.0f, 0.0f };
-        OPTIX_CHECK(optixSbtRecordPackHeader(mState.radiance_miss_group, &ms_sbt));
-
-        MissSbtRecord& ms_sbt_occlusion = missGroupDataCpu[RAY_TYPE_OCCLUSION];
-        ms_sbt_occlusion.data = { 0.0f, 0.0f, 0.0f };
-        OPTIX_CHECK(optixSbtRecordPackHeader(mState.occlusion_miss_group, &ms_sbt_occlusion));
-
-        CUDA_CHECK(cudaMemcpy(
-            reinterpret_cast<void*>(miss_record), missGroupDataCpu.data(), miss_record_size, cudaMemcpyHostToDevice));
-
-        uint32_t hitGroupRecordCount = RAY_TYPE_COUNT;
-        CUdeviceptr hitgroup_record = 0;
-        size_t hitgroup_record_size = hitGroupRecordCount * sizeof(HitGroupSbtRecord);
-        const std::vector<oka::Instance>& instances = mScene->getInstances();
-        std::vector<HitGroupSbtRecord> hitGroupDataCpu(hitGroupRecordCount); // default sbt record
-        if (!instances.empty())
+        const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
+        hitGroupRecordCount = instances.size() * RAY_TYPE_COUNT;
+        hitgroup_record_size = sizeof(HitGroupSbtRecord) * hitGroupRecordCount;
+        hitGroupDataCpu.resize(hitGroupRecordCount);
+        for (int i = 0; i < instances.size(); ++i)
         {
-            const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
-            hitGroupRecordCount = instances.size() * RAY_TYPE_COUNT;
-            hitgroup_record_size = sizeof(HitGroupSbtRecord) * hitGroupRecordCount;
-            hitGroupDataCpu.resize(hitGroupRecordCount);
-            for (int i = 0; i < instances.size(); ++i)
+            const oka::Instance& instance = instances[i];
+            int hg_index = i * RAY_TYPE_COUNT + RAY_TYPE_RADIANCE;
+            HitGroupSbtRecord& hg_sbt = hitGroupDataCpu[hg_index];
+            // replace unknown material on default
+            const int materialIdx = instance.mMaterialId == -1 ? 0 : instance.mMaterialId;
+            const Material& mat = getMaterial(materialIdx);
+            if (instance.type == oka::Instance::Type::eLight)
             {
-                const oka::Instance& instance = instances[i];
-                int hg_index = i * RAY_TYPE_COUNT + RAY_TYPE_RADIANCE;
-                HitGroupSbtRecord& hg_sbt = hitGroupDataCpu[hg_index];
-                // replace unknown material on default
-                const int materialIdx = instance.mMaterialId == -1 ? 0 : instance.mMaterialId;
-                const Material& mat = getMaterial(materialIdx);
-                if (instance.type == oka::Instance::Type::eLight)
-                {
-                    hg_sbt.data.lightId = instance.mLightId;
-                    const OptixProgramGroup& lightPg = mState.light_hit_group;
-                    OPTIX_CHECK(optixSbtRecordPackHeader(lightPg, &hg_sbt));
-                }
-                else
-                {
-                    const OptixProgramGroup& hitMaterial = mat.programGroup;
-                    OPTIX_CHECK(optixSbtRecordPackHeader(hitMaterial, &hg_sbt));
-                }
-                // write all needed data for instances
-                hg_sbt.data.argData = mat.d_argData;
-                hg_sbt.data.roData = mat.d_roData;
-                hg_sbt.data.resHandler = mat.d_textureHandler;
-                if (instance.type == oka::Instance::Type::eMesh)
-                {
-                    const oka::Mesh& mesh = meshes[instance.mMeshId];
-                    hg_sbt.data.indexCount = mesh.mCount;
-                    hg_sbt.data.indexOffset = mesh.mIndex;
-                    hg_sbt.data.vertexOffset = mesh.mVbOffset;
-                    hg_sbt.data.lightId = -1;
-                }
-
-                memcpy(hg_sbt.data.object_to_world, glm::value_ptr(glm::float4x4(glm::rowMajor4(instance.transform))),
-                       sizeof(float4) * 4);
-                glm::mat4 world_to_object = glm::inverse(instance.transform);
-                memcpy(hg_sbt.data.world_to_object, glm::value_ptr(glm::float4x4(glm::rowMajor4(world_to_object))),
-                       sizeof(float4) * 4);
-
-                // write data for visibility ray
-                hg_index = i * RAY_TYPE_COUNT + RAY_TYPE_OCCLUSION;
-                HitGroupSbtRecord& hg_sbt_occlusion = hitGroupDataCpu[hg_index];
-                OPTIX_CHECK(optixSbtRecordPackHeader(mState.occlusion_hit_group, &hg_sbt_occlusion));
+                hg_sbt.data.lightId = instance.mLightId;
+                const OptixProgramGroup& lightPg = mState.light_hit_group;
+                OPTIX_CHECK(optixSbtRecordPackHeader(lightPg, &hg_sbt));
             }
-        }
-        else
-        {
-            // stub record
-            HitGroupSbtRecord& hg_sbt = hitGroupDataCpu[RAY_TYPE_RADIANCE];
-            OPTIX_CHECK(optixSbtRecordPackHeader(mState.radiance_default_hit_group, &hg_sbt));
-            HitGroupSbtRecord& hg_sbt_occlusion = hitGroupDataCpu[RAY_TYPE_OCCLUSION];
+            else
+            {
+                const OptixProgramGroup& hitMaterial = mat.programGroup;
+                OPTIX_CHECK(optixSbtRecordPackHeader(hitMaterial, &hg_sbt));
+            }
+            // write all needed data for instances
+            hg_sbt.data.argData = mat.d_argData;
+            hg_sbt.data.roData = mat.d_roData;
+            hg_sbt.data.resHandler = mat.d_textureHandler;
+            if (instance.type == oka::Instance::Type::eMesh)
+            {
+                const oka::Mesh& mesh = meshes[instance.mMeshId];
+                hg_sbt.data.indexCount = mesh.mCount;
+                hg_sbt.data.indexOffset = mesh.mIndex;
+                hg_sbt.data.vertexOffset = mesh.mVbOffset;
+                hg_sbt.data.lightId = -1;
+            }
+
+            memcpy(hg_sbt.data.object_to_world, glm::value_ptr(glm::float4x4(glm::rowMajor4(instance.transform))),
+                   sizeof(float4) * 4);
+            glm::mat4 world_to_object = glm::inverse(instance.transform);
+            memcpy(hg_sbt.data.world_to_object, glm::value_ptr(glm::float4x4(glm::rowMajor4(world_to_object))),
+                   sizeof(float4) * 4);
+
+            // write data for visibility ray
+            hg_index = i * RAY_TYPE_COUNT + RAY_TYPE_OCCLUSION;
+            HitGroupSbtRecord& hg_sbt_occlusion = hitGroupDataCpu[hg_index];
             OPTIX_CHECK(optixSbtRecordPackHeader(mState.occlusion_hit_group, &hg_sbt_occlusion));
         }
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&hitgroup_record), hitgroup_record_size));
-        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(hitgroup_record), hitGroupDataCpu.data(), hitgroup_record_size,
-                              cudaMemcpyHostToDevice));
-
-        sbt.raygenRecord = raygen_record;
-        sbt.missRecordBase = miss_record;
-        sbt.missRecordStrideInBytes = sizeof(MissSbtRecord);
-        sbt.missRecordCount = RAY_TYPE_COUNT;
-        sbt.hitgroupRecordBase = hitgroup_record;
-        sbt.hitgroupRecordStrideInBytes = sizeof(HitGroupSbtRecord);
-        sbt.hitgroupRecordCount = hitGroupRecordCount;
     }
+    else
+    {
+        // stub record
+        HitGroupSbtRecord& hg_sbt = hitGroupDataCpu[RAY_TYPE_RADIANCE];
+        OPTIX_CHECK(optixSbtRecordPackHeader(mState.radiance_default_hit_group, &hg_sbt));
+        HitGroupSbtRecord& hg_sbt_occlusion = hitGroupDataCpu[RAY_TYPE_OCCLUSION];
+        OPTIX_CHECK(optixSbtRecordPackHeader(mState.occlusion_hit_group, &hg_sbt_occlusion));
+    }
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&hitgroup_record), hitgroup_record_size));
+    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(hitgroup_record), hitGroupDataCpu.data(), hitgroup_record_size,
+                          cudaMemcpyHostToDevice));
+
+    sbt.raygenRecord = raygen_record;
+    sbt.missRecordBase = miss_record;
+    sbt.missRecordStrideInBytes = sizeof(MissSbtRecord);
+    sbt.missRecordCount = RAY_TYPE_COUNT;
+    sbt.hitgroupRecordBase = hitgroup_record;
+    sbt.hitgroupRecordStrideInBytes = sizeof(HitGroupSbtRecord);
+    sbt.hitgroupRecordCount = hitGroupRecordCount;
     mState.sbt = sbt;
 }
 
@@ -792,7 +797,7 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
     mState.params.image_height = height;
     if (needRealloc)
     {
-        getSharedContext().mSettingsManager->setAs<bool>("render/pt/isResized", true);
+        getSettings()->setAs<bool>("render/pt/isResized", true);
         if (mState.params.accum)
         {
             CUDA_CHECK(cudaFree((void*)mState.params.accum));
@@ -836,9 +841,19 @@ void OptiXRender::render(Buffer* output)
         // upload all curve data
         createPointsBuffer();
         createWidthsBuffer();
-        createAccelerationStructure();
+        createBottomLevelAccelerationStructures();
+        createTopLevelAccelerationStructure();
         createSbt();
         createLightBuffer();
+    }
+
+    if (mScene->getDirtyState() == DirtyFlag::eLights)
+    {
+        createLightBuffer();
+        createTopLevelAccelerationStructure();
+        // createSbt();
+
+        mScene->clearDirtyState();
     }
 
     const uint32_t width = output->width();
@@ -861,7 +876,7 @@ void OptiXRender::render(Buffer* output)
         getSharedContext().mSubframeIndex = 0;
     }
 
-    SettingsManager& settings = *getSharedContext().mSettingsManager;
+    SettingsManager& settings = *getSettings();
     bool settingsChanged = false;
 
     static uint32_t rectLightSamplingMethodPrev = 0;
@@ -1014,7 +1029,7 @@ void OptiXRender::init()
 {
     // TODO: move USD_DIR to settings
     const char* envUSDPath = std::getenv("USD_DIR");
-    mEnableValidation = getSharedContext().mSettingsManager->getAs<bool>("render/enableValidation");
+    mEnableValidation = getSettings()->getAs<bool>("render/enableValidation");
 
     fs::path usdMdlLibPath;
     if (envUSDPath)
@@ -1299,9 +1314,9 @@ bool OptiXRender::createOptixMaterials()
 
     std::vector<Texture> materialTextures;
 
-    const auto searchPath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
+    const auto searchPath = getSettings()->getAs<std::string>("resource/searchPath");
 
-    fs::path resourcePath = fs::path(getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath"));
+    fs::path resourcePath = fs::path(getSettings()->getAs<std::string>("resource/searchPath"));
 
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {

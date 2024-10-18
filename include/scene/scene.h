@@ -59,6 +59,11 @@ struct Instance
     uint32_t mLightId = (uint32_t)-1;
 };
 
+enum class DirtyFlag: uint32_t {
+    eNone,
+    eLights,
+};
+
 class Scene
 {
 public:
@@ -433,16 +438,22 @@ public:
 
     std::vector<uint32_t>& getTransparentInstancesToRender(const glm::float3& camPos);
 
+    DirtyFlag getDirtyState()
+    {
+        return mDirty;
+    }
+
+    void clearDirtyState()
+    {
+        mDirty = DirtyFlag::eNone;
+    }
+
     /// <summary>
     /// Get set of DirtyInstances
     /// </summary>
     /// <returns>Set of instances</returns>
     std::set<uint32_t> getDirtyInstances();
-    /// <summary>
-    /// Get Frame mode (bool)
-    /// </summary>
-    /// <returns>Bool</returns>
-    bool getFrMod();
+
     /// <summary>
     /// Updates Instance matrix(transform)
     /// </summary>
@@ -476,7 +487,7 @@ private:
     uint32_t createDiscLightMesh();
     uint32_t createSphereLightMesh();
 
-    bool FrMod{};
+    DirtyFlag mDirty;
 
     std::set<uint32_t> mDirtyInstances;
 

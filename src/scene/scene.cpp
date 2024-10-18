@@ -405,6 +405,7 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
     }
 
     mLights[lightId].color = glm::float4(desc.color, 1.0f) * intensityPerPoint;
+    mDirty = DirtyFlag::eLights;
 }
 
 void Scene::removeInstance(const uint32_t instId)
@@ -437,27 +438,11 @@ std::set<uint32_t> Scene::getDirtyInstances()
     return this->mDirtyInstances;
 }
 
-bool Scene::getFrMod()
-{
-    return this->FrMod;
-}
-
 void Scene::updateInstanceTransform(uint32_t instId, glm::float4x4 newTransform)
 {
     Instance& inst = mInstances[instId];
     inst.transform = newTransform;
     mDirtyInstances.insert(instId);
-}
-
-void Scene::beginFrame()
-{
-    FrMod = true;
-    mDirtyInstances.clear();
-}
-
-void Scene::endFrame()
-{
-    FrMod = false;
 }
 
 uint32_t Scene::createCurve(const Curve::Type type,

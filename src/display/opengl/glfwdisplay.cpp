@@ -50,7 +50,7 @@ inline void glCheck(const char* call, const char* file, unsigned int line)
         glCheck(#call, __FILE__, __LINE__);                                                                            \
     } while (false)
 
-const std::string glfwdisplay::s_vert_source = R"(
+const std::string GlfwDisplay::s_vert_source = R"(
 #version 330 core
 
 layout(location = 0) in vec3 vertexPosition_modelspace;
@@ -63,7 +63,7 @@ void main()
 }
 )";
 
-const std::string glfwdisplay::s_frag_source = R"(
+const std::string GlfwDisplay::s_frag_source = R"(
 #version 330 core
 
 in vec2 UV;
@@ -160,19 +160,19 @@ GLint getGLUniformLocation(GLuint program, const std::string& name)
     return loc;
 }
 
-glfwdisplay::glfwdisplay(/* args */)
+GlfwDisplay::GlfwDisplay(/* args */)
 {
 }
 
-glfwdisplay::~glfwdisplay()
+GlfwDisplay::~GlfwDisplay()
 {
 }
 
-void glfwdisplay::init(int width, int height, oka::SharedContext* ctx)
+void GlfwDisplay::init(int width, int height, SettingsManager* settings)
 {
     mWindowWidth = width;
     mWindowHeight = height;
-    mCtx = ctx;
+    mSettings = settings;
 
     glfwInit();
     const char* glsl_version = "#version 130";
@@ -240,7 +240,7 @@ void glfwdisplay::init(int width, int height, oka::SharedContext* ctx)
     ImGui_ImplOpenGL3_Init(glsl_version);
 }
 
-void glfwdisplay::display(const int32_t screen_res_x,
+void GlfwDisplay::display(const int32_t screen_res_x,
                           const int32_t screen_res_y,
                           const int32_t framebuf_res_x,
                           const int32_t framebuf_res_y,
@@ -320,7 +320,7 @@ void glfwdisplay::display(const int32_t screen_res_x,
     // GL_CHECK_ERRORS();
 }
 
-void glfwdisplay::drawFrame(ImageBuffer& result)
+void GlfwDisplay::drawFrame(ImageBuffer& result)
 {
     glClear(GL_COLOR_BUFFER_BIT);
     int framebuf_res_x = 0, framebuf_res_y = 0;
@@ -337,24 +337,23 @@ void glfwdisplay::drawFrame(ImageBuffer& result)
     display(result.width, result.height, framebuf_res_x, framebuf_res_y, m_dislpayPbo);
 }
 
-void glfwdisplay::destroy()
+void GlfwDisplay::destroy()
 {
 }
 
-void glfwdisplay::onBeginFrame()
+void GlfwDisplay::onBeginFrame()
 {
+    ImGui_ImplOpenGL3_NewFrame();
 }
 
-void glfwdisplay::onEndFrame()
+void GlfwDisplay::onEndFrame()
 {
     glfwSwapBuffers(mWindow);
 }
 
-void glfwdisplay::drawUI()
+void GlfwDisplay::drawUI()
 {
-    ImGui_ImplOpenGL3_NewFrame();
-    
-    Display::drawUI();
+    // Display::drawUI();
 
     int display_w, display_h;
     glfwGetFramebufferSize(mWindow, &display_w, &display_h);

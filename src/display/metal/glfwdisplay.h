@@ -8,13 +8,13 @@
 namespace oka
 {
 
-class glfwdisplay : public Display
+class GlfwDisplay : public Display
 {
 public:
-    glfwdisplay()
+    GlfwDisplay()
     {
     }
-    virtual ~glfwdisplay()
+    virtual ~GlfwDisplay()
     {
     }
 

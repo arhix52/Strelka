@@ -7,10 +7,9 @@
 namespace oka
 {
 
-class glfwdisplay : public Display
+class GlfwDisplay : public Display
 {
 private:
-    /* data */
     GLuint m_render_tex = 0u;
     GLuint m_program = 0u;
     GLint m_render_tex_uniform_loc = -1;
@@ -21,11 +20,11 @@ private:
     static const std::string s_frag_source;
 
 public:
-    glfwdisplay(/* args */);
-    virtual ~glfwdisplay();
+    GlfwDisplay();
+    virtual ~GlfwDisplay();
 
 public:
-    virtual void init(int width, int height, oka::SharedContext* ctx) override;
+    virtual void init(int width, int height, SettingsManager* settings) override;
     void destroy();
 
     void onBeginFrame();

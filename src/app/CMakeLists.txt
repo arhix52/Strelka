@@ -1,10 +1,15 @@
 cmake_minimum_required(VERSION 3.16)
 
 find_package(cxxopts REQUIRED)
+find_package(imgui REQUIRED)
+find_package(imguizmo REQUIRED)
 
 # Application
 set(RUNNER_SOURCES
     ${ROOT_HOME}/src/app/main.cpp
+    ${ROOT_HOME}/src/app/Editor.h
+    ${ROOT_HOME}/src/app/CameraController.h
+    ${ROOT_HOME}/external/ImGuiFileDialog/ImGuiFileDialog.cpp
 )
 set(RUNNER_NAME runner)
 
@@ -23,9 +28,13 @@ if( WIN32 )
 endif()
 
 target_include_directories(${RUNNER_NAME} PUBLIC ${ROOT_HOME}/include/)
+target_include_directories(${RUNNER_NAME} PUBLIC ${ROOT_HOME}/src/app/)
+target_include_directories(${RUNNER_NAME} PUBLIC ${ROOT_HOME}/external/ImGuiFileDialog)
 
 target_link_libraries(${RUNNER_NAME} PUBLIC 
   cxxopts::cxxopts
+  # imgui::imgui
+  imguizmo::imguizmo
   scene
   sceneloader
   settings

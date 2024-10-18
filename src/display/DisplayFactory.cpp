@@ -8,5 +8,5 @@ using namespace oka;
 
 Display* DisplayFactory::createDisplay()
 {
-    return new glfwdisplay();
+    return new GlfwDisplay();
 }

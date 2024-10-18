@@ -31,6 +31,7 @@ struct PathTracerState
 
     OptixTraversableHandle ias_handle;
     CUdeviceptr d_instances = 0;
+    size_t d_instances_size = 0;
 
     OptixTraversableHandle gas_handle = 0; // Traversable handle for triangle AS
     CUdeviceptr d_gas_output_buffer = 0; // Triangle AS memory
@@ -146,7 +147,8 @@ public:
     Buffer* createBuffer(const BufferDesc& desc) override;
 
     void createContext();
-    void createAccelerationStructure();
+    void createBottomLevelAccelerationStructures();
+    void createTopLevelAccelerationStructure();
     void createModule();
     void createProgramGroups();
     void createPipeline();

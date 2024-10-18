@@ -3,6 +3,7 @@ set(DISPLAYLIB_NAME display)
 
 find_package(glad REQUIRED)
 find_package(imgui REQUIRED)
+find_package(imguizmo REQUIRED)
 find_package(glfw3 REQUIRED)
 find_package(glm REQUIRED)
 
@@ -31,7 +32,7 @@ if(WIN32 OR LINUX)
 
   target_link_libraries(${DISPLAYLIB_NAME}
     PUBLIC ${OPENGL_LIBRARIES}
-    logger imgui::imgui glfw glm::glm glad::glad)
+    logger imgui::imgui imguizmo::imguizmo glfw glm::glm glad::glad)
 
 endif()
 

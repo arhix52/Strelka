@@ -76,7 +76,7 @@ void MetalRender::createMetalMaterials()
     using simd::float3;
     const std::vector<Scene::MaterialDescription>& matDescs = mScene->getMaterials();
     std::vector<Material> gpuMaterials;
-    const fs::path resourcePath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
+    const fs::path resourcePath = getSettings()->getAs<std::string>("resource/searchPath");
     for (const Scene::MaterialDescription& currMatDesc : matDescs)
     {
         Material material = {};
@@ -153,7 +153,7 @@ void MetalRender::render(Buffer* output)
         getSharedContext().mSubframeIndex = 0;
     }
 
-    SettingsManager& settings = *getSharedContext().mSettingsManager;
+    SettingsManager& settings = *getSettings();
 
     MTL::Buffer* pUniformBuffer = mUniformBuffers[mFrameIndex];
     MTL::Buffer* pUniformTMBuffer = mUniformTMBuffers[mFrameIndex];
