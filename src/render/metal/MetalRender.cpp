@@ -1,3 +1,4 @@
+#include <cstddef>
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
 #define MTK_PRIVATE_IMPLEMENTATION
@@ -110,9 +111,16 @@ void MetalRender::createMetalMaterials()
     }
 
     const size_t materialsDataSize = sizeof(Material) * gpuMaterials.size();
-    mMaterialBuffer = mDevice->newBuffer(materialsDataSize, MTL::ResourceStorageModeManaged);
-    memcpy(mMaterialBuffer->contents(), gpuMaterials.data(), materialsDataSize);
-    mMaterialBuffer->didModifyRange(NS::Range::Make(0, mMaterialBuffer->length()));
+    if (materialsDataSize > 0)
+    {
+        mMaterialBuffer = mDevice->newBuffer(materialsDataSize, MTL::ResourceStorageModeManaged);
+        memcpy(mMaterialBuffer->contents(), gpuMaterials.data(), materialsDataSize);
+        mMaterialBuffer->didModifyRange(NS::Range::Make(0, mMaterialBuffer->length()));
+    }
+    else
+    {
+        mMaterialBuffer = nullptr;
+    }
 }
 
 void MetalRender::render(Buffer* output)
@@ -263,9 +271,18 @@ void MetalRender::render(Buffer* output)
 
         MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
         MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
-        pComputeEncoder->useResource(mMaterialBuffer, MTL::ResourceUsageRead);
-        pComputeEncoder->useResource(mLightBuffer, MTL::ResourceUsageRead);
-        pComputeEncoder->useResource(mInstanceAccelerationStructure, MTL::ResourceUsageRead);
+        if (mMaterialBuffer != nullptr)
+        {
+            pComputeEncoder->useResource(mMaterialBuffer, MTL::ResourceUsageRead);
+        }
+        if (mLightBuffer != nullptr)
+        {
+            pComputeEncoder->useResource(mLightBuffer, MTL::ResourceUsageRead);
+        }
+        if (mInstanceAccelerationStructure != nullptr)
+        {
+            pComputeEncoder->useResource(mInstanceAccelerationStructure, MTL::ResourceUsageRead);
+        }
         for (const MTL::AccelerationStructure* primitiveAccel : mPrimitiveAccelerationStructures)
         {
             pComputeEncoder->useResource(primitiveAccel, MTL::ResourceUsageRead);
@@ -285,6 +302,7 @@ void MetalRender::render(Buffer* output)
         // Output
         pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 5);
         pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 6);
+        if (mInstanceBuffer != nullptr)
         {
             const MTL::Size gridSize = MTL::Size(width, height, 1);
             const NS::UInteger threadGroupSize = mPathTracingPSO->maxTotalThreadsPerThreadgroup();
@@ -428,21 +446,31 @@ void MetalRender::buildBuffers()
     const size_t vertexDataSize = sizeof(Scene::Vertex) * vertices.size();
     const size_t indexDataSize = sizeof(uint32_t) * indices.size();
 
-    MTL::Buffer* pLightBuffer = mDevice->newBuffer(lightBufferSize, MTL::ResourceStorageModeManaged);
-    MTL::Buffer* pVertexBuffer = mDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeManaged);
-    MTL::Buffer* pIndexBuffer = mDevice->newBuffer(indexDataSize, MTL::ResourceStorageModeManaged);
+    MTL::Buffer* pLightBuffer = nullptr;
+    if (lightBufferSize > 0)
+    {
+        pLightBuffer = mDevice->newBuffer(lightBufferSize, MTL::ResourceStorageModeManaged);
+        memcpy(pLightBuffer->contents(), lightDescs.data(), lightBufferSize);
+        pLightBuffer->didModifyRange(NS::Range::Make(0, pLightBuffer->length()));
+    }
+    MTL::Buffer* pVertexBuffer = nullptr;
+    if (vertexDataSize > 0)
+    {
+        pVertexBuffer = mDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeManaged);
+        memcpy(pVertexBuffer->contents(), vertices.data(), vertexDataSize);
+        pVertexBuffer->didModifyRange(NS::Range::Make(0, pVertexBuffer->length()));
+    };
+    MTL::Buffer* pIndexBuffer = nullptr;
+    if (indexDataSize > 0)
+    {
+        pIndexBuffer = mDevice->newBuffer(indexDataSize, MTL::ResourceStorageModeManaged);
+        memcpy(pIndexBuffer->contents(), indices.data(), indexDataSize);
+        pIndexBuffer->didModifyRange(NS::Range::Make(0, pIndexBuffer->length()));
+    }
 
     mLightBuffer = pLightBuffer;
     mVertexBuffer = pVertexBuffer;
     mIndexBuffer = pIndexBuffer;
-
-    memcpy(mLightBuffer->contents(), lightDescs.data(), lightBufferSize);
-    memcpy(mVertexBuffer->contents(), vertices.data(), vertexDataSize);
-    memcpy(mIndexBuffer->contents(), indices.data(), indexDataSize);
-
-    mLightBuffer->didModifyRange(NS::Range::Make(0, mLightBuffer->length()));
-    mVertexBuffer->didModifyRange(NS::Range::Make(0, mVertexBuffer->length()));
-    mIndexBuffer->didModifyRange(NS::Range::Make(0, mIndexBuffer->length()));
 
     for (MTL::Buffer*& uniformBuffer : mUniformBuffers)
     {
@@ -670,4 +698,3 @@ void MetalRender::createAccelerationStructures()
     mInstanceAccelerationStructure = createAccelerationStructure(accelDescriptor);
     pPool->release();
 }
-

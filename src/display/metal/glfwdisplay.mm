@@ -214,6 +214,9 @@ void GlfwDisplay::onBeginFrame()
 
     renderEncoder = commandBuffer->renderCommandEncoder(renderPassDescriptor);
     // pPool->release();
+    
+    // Start the Dear ImGui frame
+    ImGui_ImplMetal_NewFrame((__bridge MTLRenderPassDescriptor*)renderPassDescriptor);
 }
 
 void GlfwDisplay::onEndFrame()
@@ -236,10 +239,8 @@ void GlfwDisplay::drawUI()
 {
 @autoreleasepool 
     {
-        // Start the Dear ImGui frame
-        ImGui_ImplMetal_NewFrame((__bridge MTLRenderPassDescriptor*)renderPassDescriptor);
 
-        Display::drawUI();
+        // Display::drawUI();
 
         ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(),
         (__bridge id<MTLCommandBuffer>)(commandBuffer),
