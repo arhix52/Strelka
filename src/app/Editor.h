@@ -32,7 +32,9 @@ private:
 
     std::unique_ptr<SharedContext> m_sharedCtx;
 
-    Scene m_scene;
+    // Scene m_scene;
+    std::unique_ptr<Scene> m_scene;
+
     std::unique_ptr<CameraController> m_cameraController;
 
 public:
@@ -40,13 +42,14 @@ public:
     {
         m_settingsManager = std::unique_ptr<SettingsManager>(new SettingsManager());
 
+        m_scene = std::unique_ptr<Scene>(new Scene());
         m_display = std::unique_ptr<Display>(DisplayFactory::createDisplay());
         m_render = std::unique_ptr<Render>(RenderFactory::createRender());
         m_sharedCtx = std::unique_ptr<SharedContext>(new SharedContext());
 
         m_sceneLoader = std::unique_ptr<GltfLoader>(new GltfLoader());
 
-        m_render->setScene(&m_scene);
+        m_render->setScene(m_scene.get());
         m_render->setSettingsManager(m_settingsManager.get());
         m_render->setSharedContext(m_sharedCtx.get());
 
@@ -64,16 +67,16 @@ public:
 
     void prepare()
     {
-        m_sceneLoader->loadGltf("C:/work/vespa/vespa.gltf", m_scene);
+        m_sceneLoader->loadGltf("C:/work/vespa/vespa.gltf", *m_scene);
         oka::Camera camera;
         camera.name = "Main";
         camera.fov = 45.0f;
         camera.position = glm::vec3(0, 0, -10);
         camera.mOrientation = glm::quat(glm::vec3(0, 0, 0));
         camera.updateViewMatrix();
-        m_scene.addCamera(camera);
+        m_scene->addCamera(camera);
 
-        m_cameraController = std::unique_ptr<CameraController>(new CameraController(m_scene.getCamera(0), true));
+        m_cameraController = std::unique_ptr<CameraController>(new CameraController(m_scene->getCamera(0), true));
         m_display->setInputHandler(m_cameraController.get());
         loadSettings();
     }
@@ -146,7 +149,7 @@ public:
             m_cameraController->update(deltaTime, cameraSpeed);
             prevTime = currentTime;
 
-            m_scene.updateCamera(m_cameraController->getCamera(), 0);
+            m_scene->updateCamera(m_cameraController->getCamera(), 0);
 
             m_display->onBeginFrame();
 
@@ -184,7 +187,7 @@ public:
         ImGuizmo::SetOrthographic(false);
         ImGuizmo::BeginFrame();
 
-        displayLightSettings(1, m_scene, 0);
+        // displayLightSettings(1, *m_scene, 0);
 
         ImGuiIO& io = ImGui::GetIO();
 
@@ -211,9 +214,31 @@ public:
         {
             if (ImGuiFileDialog::Instance()->IsOk())
             { // action if OK
-                std::string filePathName = ImGuiFileDialog::Instance()->GetFilePathName();
-                std::string filePath = ImGuiFileDialog::Instance()->GetCurrentPath();
+                std::string sceneFile = ImGuiFileDialog::Instance()->GetFilePathName();
+                std::string resourceSearchPath = ImGuiFileDialog::Instance()->GetCurrentPath();
                 // action
+                STRELKA_DEBUG("Resource search path {}", resourceSearchPath);
+                m_settingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
+                std::unique_ptr<Scene> new_scene(new Scene());
+                if (m_sceneLoader->loadGltf(sceneFile, *new_scene))
+                {
+                    m_scene = std::move(new_scene);
+                }
+
+                oka::Camera camera;
+                camera.name = "Main";
+                camera.fov = 45.0f;
+                camera.position = glm::vec3(0, 0, -10);
+                camera.mOrientation = glm::quat(glm::vec3(0, 0, 0));
+                camera.updateViewMatrix();
+                m_scene->addCamera(camera);
+
+                m_sharedCtx.reset(new SharedContext());
+
+                m_render->setSharedContext(m_sharedCtx.get());
+                m_render->setScene(m_scene.get());
+
+                m_cameraController->setCamera(camera);
             }
 
             // close

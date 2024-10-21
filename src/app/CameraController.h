@@ -5,44 +5,13 @@ namespace oka
 class CameraController : public oka::InputHandler
 {
     oka::Camera mCam;
-    glm::quat mOrientation;
-    glm::float3 mPosition;
-    glm::float3 mWorldUp;
-    glm::float3 mWorldForward;
 
     float rotationSpeed = 0.025f;
     float movementSpeed = 1.0f;
 
-    double pitch = 0.0;
-    double yaw = 0.0;
-    double max_pitch_rate = 5;
-    double max_yaw_rate = 5;
-
 public:
     virtual ~CameraController() = default;
-    struct
-    {
-        bool left = false;
-        bool right = false;
-        bool up = false;
-        bool down = false;
-        bool forward = false;
-        bool back = false;
-    } keys;
-    struct MouseButtons
-    {
-        bool left = false;
-        bool right = false;
-        bool middle = false;
-    } mouseButtons;
 
-    glm::float2 mMousePos;
-
-    bool moving() const
-    {
-        return keys.left || keys.right || keys.up || keys.down || keys.forward || keys.back || mouseButtons.right ||
-               mouseButtons.left || mouseButtons.middle;
-    }
     void update(double deltaTime, float speed)
     {
         mCam.rotationSpeed = rotationSpeed;
@@ -58,6 +27,11 @@ public:
     oka::Camera& getCamera()
     {
         return mCam;
+    }
+
+    void setCamera(Camera& cam)
+    {
+        mCam = cam;
     }
 
     CameraController(oka::Camera& cam, bool isYup)
