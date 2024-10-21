@@ -1238,11 +1238,11 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName)
 
 bool OptiXRender::createOptixMaterials()
 {
-    std::unordered_map<std::string, MaterialManager::Module*> mNameToModule;
-    std::unordered_map<std::string, MaterialManager::MaterialInstance*> mNameToInstance;
-    std::unordered_map<std::string, MaterialManager::CompiledMaterial*> mNameToCompiled;
+    std::unordered_map<std::string, MaterialManager::Module*> nameToModule;
+    std::unordered_map<std::string, MaterialManager::MaterialInstance*> nameToInstance;
+    std::unordered_map<std::string, MaterialManager::CompiledMaterial*> nameToCompiled;
 
-    std::unordered_map<std::string, MaterialManager::TargetCode*> mNameToTargetCode;
+    std::unordered_map<std::string, MaterialManager::TargetCode*> nameToTargetCode;
 
     std::vector<MaterialManager::CompiledMaterial*> compiledMaterials;
     MaterialManager::TargetCode* targetCode;
@@ -1253,16 +1253,16 @@ bool OptiXRender::createOptixMaterials()
         oka::Scene::MaterialDescription& currMatDesc = matDescs[i];
         if (currMatDesc.type == oka::Scene::MaterialDescription::Type::eMdl)
         {
-            if (auto it = mNameToCompiled.find(currMatDesc.name); it != mNameToCompiled.end())
+            if (auto it = nameToCompiled.find(currMatDesc.name); it != nameToCompiled.end())
             {
                 compiledMaterials.emplace_back(it->second);
                 continue;
             }
 
             MaterialManager::Module* mdlModule = nullptr;
-            if (mNameToModule.find(currMatDesc.file) != mNameToModule.end())
+            if (nameToModule.find(currMatDesc.file) != nameToModule.end())
             {
-                mdlModule = mNameToModule[currMatDesc.file];
+                mdlModule = nameToModule[currMatDesc.file];
             }
             else
             {
@@ -1270,26 +1270,26 @@ bool OptiXRender::createOptixMaterials()
                 if (mdlModule == nullptr)
                 {
                     STRELKA_ERROR("Unable to load MDL file: {}, Force replaced to default.mdl", currMatDesc.file.c_str());
-                    mdlModule = mNameToModule["default.mdl"];
+                    mdlModule = nameToModule["default.mdl"];
                 }
-                mNameToModule[currMatDesc.file] = mdlModule;
+                nameToModule[currMatDesc.file] = mdlModule;
             }
             assert(mdlModule);
             MaterialManager::MaterialInstance* materialInst = nullptr;
-            if (mNameToInstance.find(currMatDesc.name) != mNameToInstance.end())
+            if (nameToInstance.find(currMatDesc.name) != nameToInstance.end())
             {
-                materialInst = mNameToInstance[currMatDesc.name];
+                materialInst = nameToInstance[currMatDesc.name];
             }
             else
             {
                 materialInst = mMaterialManager.createMaterialInstance(mdlModule, currMatDesc.name.c_str());
-                mNameToInstance[currMatDesc.name] = materialInst;
+                nameToInstance[currMatDesc.name] = materialInst;
             }
             assert(materialInst);
             MaterialManager::CompiledMaterial* materialComp = nullptr;
             {
                 materialComp = mMaterialManager.compileMaterial(materialInst);
-                mNameToCompiled[currMatDesc.name] = materialComp;
+                nameToCompiled[currMatDesc.name] = materialComp;
             }
             assert(materialComp);
             compiledMaterials.push_back(materialComp);

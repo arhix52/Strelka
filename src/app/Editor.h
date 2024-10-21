@@ -223,22 +223,26 @@ public:
                 if (m_sceneLoader->loadGltf(sceneFile, *new_scene))
                 {
                     m_scene = std::move(new_scene);
+
+
+                    oka::Camera camera;
+                    camera.name = "Main";
+                    camera.fov = 45.0f;
+                    camera.position = glm::vec3(0, 0, -10);
+                    camera.mOrientation = glm::quat(glm::vec3(0, 0, 0));
+                    camera.updateViewMatrix();
+                    m_scene->addCamera(camera);
+
+                    m_sharedCtx.reset(new SharedContext());
+
+                    m_render.reset(RenderFactory::createRender());
+                    m_render->setSettingsManager(m_settingsManager.get());
+                    m_render->setSharedContext(m_sharedCtx.get());
+                    m_render->setScene(m_scene.get());
+                    m_render->init();
+
+                    m_cameraController->setCamera(m_scene->getCamera(0));
                 }
-
-                oka::Camera camera;
-                camera.name = "Main";
-                camera.fov = 45.0f;
-                camera.position = glm::vec3(0, 0, -10);
-                camera.mOrientation = glm::quat(glm::vec3(0, 0, 0));
-                camera.updateViewMatrix();
-                m_scene->addCamera(camera);
-
-                m_sharedCtx.reset(new SharedContext());
-
-                m_render->setSharedContext(m_sharedCtx.get());
-                m_render->setScene(m_scene.get());
-
-                m_cameraController->setCamera(camera);
             }
 
             // close
