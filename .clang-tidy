@@ -27,7 +27,8 @@ Checks: <
 
 
 WarningsAsErrors: '*'
-HeaderFilterRegex: ''
+# HeaderFilterRegex: '.*'
+# SystemHeaders: false
 FormatStyle: none
 
 CheckOptions:

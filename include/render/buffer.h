@@ -1,6 +1,6 @@
 #pragma once
-#include "common.h"
-#include <stdint.h>
+#include <cassert>
+#include <cstdint>
 #include <vector>
 
 namespace oka
@@ -8,6 +8,7 @@ namespace oka
 
 enum class BufferFormat : char
 {
+    UNSIGNED_BYTE,
     UNSIGNED_BYTE4,
     FLOAT4,
     FLOAT3
@@ -53,6 +54,9 @@ public:
     {
         switch (format)
         {
+        case BufferFormat::UNSIGNED_BYTE:
+            return sizeof(uint8_t);
+            break;
         case BufferFormat::FLOAT4:
             return 4 * sizeof(float);
             break;
@@ -80,8 +84,8 @@ public:
     }
 
 protected:
-    uint32_t mWidth = 0u;
-    uint32_t mHeight = 0u;
+    size_t mWidth = 0u;
+    size_t mHeight = 0u;
     BufferFormat mFormat;
 
     std::vector<char> mHostData;

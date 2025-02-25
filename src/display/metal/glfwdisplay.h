@@ -8,24 +8,24 @@
 namespace oka
 {
 
-class glfwdisplay : public Display
+class GlfwDisplay : public Display
 {
 public:
-    glfwdisplay()
-    {
-    }
-    virtual ~glfwdisplay()
-    {
-    }
+    GlfwDisplay() = default;
+    ~GlfwDisplay() override = default;
 
-    virtual void init(int width, int height, oka::SharedContext* ctx) override;
-    virtual void destroy() override;
+    void init(int width, int height, SettingsManager* settings) override;
+    void setNativeDevice(void* device) override;
+    void destroy() override;
 
-    virtual void onBeginFrame() override;
-    virtual void onEndFrame() override;
+    void onBeginFrame() override;
+    void onEndFrame() override;
 
-    virtual void drawFrame(ImageBuffer& result) override;
-    virtual void drawUI() override;
+    void* getDisplayNativeTexure() override;
+
+    void drawFrame(ImageBuffer& result) override;
+    void drawUI() override;
+
 private:
     static constexpr size_t kMaxFramesInFlight = 3;
 
@@ -43,8 +43,9 @@ private:
     MTL::Texture* buildTexture(uint32_t width, uint32_t heigth);
     void buildShaders();
     
-    MTL::CommandBuffer* commandBuffer;
-    MTL::RenderCommandEncoder* renderEncoder;
+    MTL::CommandBuffer* mCommandBuffer;
+    MTL::RenderCommandEncoder* mRenderEncoder;
+    MTL::BlitCommandEncoder* mBlitEncoder;
     CA::MetalDrawable* drawable;
 };
 

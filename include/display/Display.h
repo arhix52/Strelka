@@ -3,6 +3,8 @@
 #include <render/common.h>
 #include <render/buffer.h>
 
+#include <settings/settings.h>
+
 #include <GLFW/glfw3.h>
 
 namespace oka
@@ -12,7 +14,7 @@ class InputHandler
 {
 public:
     virtual void keyCallback(int key, [[maybe_unused]] int scancode, int action, [[maybe_unused]] int mods) = 0;
-    virtual void mouseButtonCallback(int button, int action, [[maybe_unused]] int mods) = 0;
+    virtual void mouseButtonCallback(int button, int action, [[maybe_unused]] int mods, bool viewPortHovered) = 0;
     virtual void handleMouseMoveCallback([[maybe_unused]] double xpos, [[maybe_unused]] double ypos) = 0;
 };
 
@@ -28,9 +30,14 @@ public:
     Display() = default;
     virtual ~Display() = default;
 
-    virtual void init(int width, int height, oka::SharedContext* ctx) = 0;
+    virtual void init(int width, int height, SettingsManager* settings) = 0;
     virtual void destroy() = 0;
 
+    virtual void* getDisplayNativeTexure() = 0;
+
+#ifdef __APPLE__
+    virtual void setNativeDevice(void* device) = 0;
+#endif
     void setWindowTitle(const char* title)
     {
         glfwSetWindowTitle(mWindow, title);
@@ -68,10 +75,14 @@ public:
     virtual void onEndFrame() = 0;
 
     virtual void drawFrame(ImageBuffer& result) = 0;
-    virtual void drawUI();
+    virtual void drawUI() = 0;
+
+    void setViewPortHovered(bool state)
+    {
+        mViewPortHovered = state;
+    }
 
 protected:
-
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
     static void keyCallback(
         GLFWwindow* window, int key, [[maybe_unused]] int scancode, int action, [[maybe_unused]] int mods);
@@ -81,11 +92,12 @@ protected:
 
     int mWindowWidth = 800;
     int mWindowHeight = 600;
+    bool mViewPortHovered = false;
 
     InputHandler* mInputHandler = nullptr;
     ResizeHandler* mResizeHandler = nullptr;
 
-    oka::SharedContext* mCtx = nullptr;
+    SettingsManager* mSettings = nullptr;
 
     GLFWwindow* mWindow;
 };

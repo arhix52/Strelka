@@ -13,14 +13,23 @@
             // "args": ["-s", "C:/work/blender_hair/einar_hair.usd"],
             // "args": ["-s", "C:/work/cube.usda"],
             // "args": ["-s", "C:/work/senna2.usd"],
-            "args": ["-s", "C:/work/vespa/vespa.gltf"],
+            //"args": ["-s", "D:/3D/vespa/initial/vespa.gltf", "-v"],
+            //"args": ["-s", "D:/3D/skinning cylinder + vespa/skinningCylinder.gltf", "-v"],
+            //"args": ["-s", "D:/3D/simpleSkin gltf/simpleSkin.gltf", "-v"],
+            //"args": ["-s", "D:/3D/simpleSkin gltf from blender/simpleSkin2.gltf", "-v"],
+            "args": ["-s", "D:/3D/BrainStem gltf/BrainStem.gltf", "-v"],
+            //"args": ["-s", "D:/3D/BrainStem gltf from blender/BrainStem.gltf", "-v"],
+            //"args": ["-s", "D:/3D/RiggedSimple gltf/RiggedSimple.gltf", "-v"],
+            //"args": ["-s", "D:/3D/RiggedSimple gltf from blender/RiggedSimple2.gltf", "-v"],
+            //"args": ["-s", "D:/3D/vespa from blender/untitled.gltf"],
+            //"args": ["-s", "D:/3D/debugScene/untitled.gltf"],
             // "args": ["-s", "C:/work/Kitchen_set/Kitchen.usda"],
             // "args": ["-s", "C:/work/alab-v2.0.1/ALab/entry.usda"],
             // "args": ["-s", "C:/work/strelka_test1.usda"],
             "environment": [
                 {
                     "name": "SPDLOG_LEVEL",
-                    "value": "info"
+                    "value": "debug"
                 }
             ],
             "stopAtEntry": false,

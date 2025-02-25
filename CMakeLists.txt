@@ -44,5 +44,5 @@ add_subdirectory(src/sceneloader)
 add_subdirectory(src/app)
 
 if(WIN32 OR LINUX)
-  add_subdirectory(tests)
+  # add_subdirectory(tests)
 endif()

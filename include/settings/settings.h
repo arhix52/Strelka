@@ -1,6 +1,6 @@
 #pragma once
 
-#include <iostream>
+#include <log.h>
 #include <string>
 #include <unordered_map>
 #include <cassert>
@@ -18,7 +18,7 @@ private:
     {
         if (mMap.find(name) == mMap.end())
         {
-            std::cerr << "The setting " << name << " does not exist" << std::endl;
+            STRELKA_ERROR("The setting {} does not exist", name);
             assert(0);
         }
     }

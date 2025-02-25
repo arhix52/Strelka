@@ -6,13 +6,10 @@
 
 #include "OptixRenderParams.h"
 
-#include <iostream>
-#include <iomanip>
-
 #include <scene/scene.h>
 
 #include "common.h"
-#include "buffer.h"
+#include "OptixBuffer.h"
 
 #include <materialmanager.h>
 
@@ -34,10 +31,7 @@ struct PathTracerState
 
     OptixTraversableHandle ias_handle;
     CUdeviceptr d_instances = 0;
-
-    OptixTraversableHandle gas_handle = 0; // Traversable handle for triangle AS
-    CUdeviceptr d_gas_output_buffer = 0; // Triangle AS memory
-    CUdeviceptr d_vertices = 0;
+    size_t d_instances_size = 0;
 
     OptixModuleCompileOptions module_compile_options = {};
     OptixModule ptx_module = 0;
@@ -55,7 +49,8 @@ struct PathTracerState
     CUstream stream = 0;
     Params params = {};
     Params prevParams = {};
-    CUdeviceptr d_params = 0;
+
+    std::unique_ptr<OptixBuffer> mParamsBuffer;
 
     OptixShaderBindingTable sbt = {};
 };
@@ -63,16 +58,28 @@ struct PathTracerState
 class OptiXRender : public Render
 {
 private:
+
+    float rotationAngle = 0.00f;
+    int updateCount = 0;
+
     struct Mesh
     {
         OptixTraversableHandle gas_handle = 0;
         CUdeviceptr d_gas_output_buffer = 0;
+        ~Mesh()
+        {
+            cudaFree((void*)d_gas_output_buffer);
+        }
     };
 
     struct Curve
     {
         OptixTraversableHandle gas_handle = 0;
         CUdeviceptr d_gas_output_buffer = 0;
+        ~Curve()
+        {
+            cudaFree((void*)d_gas_output_buffer);
+        }
     };
 
     struct Instance
@@ -105,12 +112,13 @@ private:
     Curve* createCurve(const oka::Curve& curve);
     bool compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes);
 
-    std::vector<Mesh*> mOptixMeshes;
-    std::vector<Curve*> mOptixCurves;
+    std::vector<std::unique_ptr<Mesh>> mOptixMeshes;
+    std::vector<std::unique_ptr<Curve>> mOptixCurves;
 
-    CUdeviceptr d_vb = 0;
-    CUdeviceptr d_ib = 0;
-    CUdeviceptr d_lights = 0;
+    std::unique_ptr<OptixBuffer> mVertexBuffer;
+    std::unique_ptr<OptixBuffer> mIndexBuffer;
+    std::unique_ptr<OptixBuffer> mLightBuffer;
+    // TODO: move to raii buffers
     CUdeviceptr d_points = 0;
     CUdeviceptr d_widths = 0;
 
@@ -118,8 +126,6 @@ private:
     CUdeviceptr d_materialArgData = 0;
     CUdeviceptr d_texturesHandler = 0;
     CUdeviceptr d_texturesData = 0;
-
-    CUdeviceptr d_param = 0;
 
     void createVertexBuffer();
     void createIndexBuffer();
@@ -149,7 +155,9 @@ public:
     Buffer* createBuffer(const BufferDesc& desc) override;
 
     void createContext();
-    void createAccelerationStructure();
+    void createBottomLevelAccelerationStructures();
+    void createTopLevelAccelerationStructure();
+    void updateTopLevelAccelerationStructure();
     void createModule();
     void createProgramGroups();
     void createPipeline();

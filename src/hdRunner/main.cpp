@@ -553,7 +553,7 @@ int main(int argc, const char* argv[])
     renderDelegate->SetDrivers(drivers);
 
     oka::Display* display = oka::DisplayFactory::createDisplay();
-    display->init(imageWidth, imageHeight, ctx);
+    display->init(imageWidth, imageHeight, ctx->mSettingsManager);
 
     // Handle cmdline args.
     // Load scene.

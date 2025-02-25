@@ -3,6 +3,7 @@ set(DISPLAYLIB_NAME display)
 
 find_package(glad REQUIRED)
 find_package(imgui REQUIRED)
+find_package(imguizmo REQUIRED)
 find_package(glfw3 REQUIRED)
 find_package(glm REQUIRED)
 
@@ -23,15 +24,15 @@ if(WIN32 OR LINUX)
       ${ROOT_HOME}/src/display/opengl/glfwdisplay.cpp)
 
   add_library(${DISPLAYLIB_NAME} STATIC ${DISPLAY_SOURCES} ${IMGUI_SOURCES})
-  target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/include/)
-  target_include_directories(${DISPLAYLIB_NAME}
-                             PUBLIC ${ROOT_HOME}/include/display)
-  target_include_directories(${DISPLAYLIB_NAME}
-                             PUBLIC ${ROOT_HOME}/external/imgui/)
+  target_include_directories(${DISPLAYLIB_NAME} PUBLIC
+    ${ROOT_HOME}/include/
+    ${ROOT_HOME}/include/display
+    ${ROOT_HOME}/external/imgui/
+  )
 
   target_link_libraries(${DISPLAYLIB_NAME}
     PUBLIC ${OPENGL_LIBRARIES}
-    imgui::imgui glfw glm::glm glad::glad)
+    logger imgui::imgui imguizmo::imguizmo glfw glm::glm glad::glad)
 
 endif()
 
@@ -50,21 +51,19 @@ if(APPLE)
       )
 
   add_library(${DISPLAYLIB_NAME} STATIC ${DISPLAY_SOURCES} ${IMGUI_SOURCES})
-  target_include_directories(${DISPLAYLIB_NAME}
-                             PUBLIC ${ROOT_HOME}/external/imgui/)
-  target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME}/include/)
-  target_include_directories(${DISPLAYLIB_NAME}
-                             PUBLIC ${ROOT_HOME}/include/display)
-  target_include_directories(${DISPLAYLIB_NAME}
-                             PUBLIC ${ROOT_HOME}/external/metal-cpp/)
-  target_include_directories(${DISPLAYLIB_NAME} PUBLIC ${ROOT_HOME})
+  target_include_directories(${DISPLAYLIB_NAME} PUBLIC
+    ${ROOT_HOME}/external/imgui/
+    ${ROOT_HOME}/include/
+    ${ROOT_HOME}/include/display
+    ${ROOT_HOME}/external/metal-cpp/
+    ${ROOT_HOME}
+  )
 
   target_link_libraries(${DISPLAYLIB_NAME} PRIVATE "-framework Foundation")
   target_link_libraries(${DISPLAYLIB_NAME} PRIVATE "-framework QuartzCore")
   target_link_libraries(${DISPLAYLIB_NAME} PRIVATE "-framework CoreGraphics")
   target_link_libraries(${DISPLAYLIB_NAME} PRIVATE "-framework Metal")
   target_link_libraries(${DISPLAYLIB_NAME} PRIVATE "-framework MetalKit")
-  target_link_libraries(${DISPLAYLIB_NAME} PUBLIC logger)
-  target_link_libraries(${DISPLAYLIB_NAME} PUBLIC imgui::imgui glfw glm::glm)
+  target_link_libraries(${DISPLAYLIB_NAME} PUBLIC logger imgui::imgui glfw glm::glm)
 
 endif()

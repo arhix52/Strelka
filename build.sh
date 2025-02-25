@@ -16,6 +16,9 @@ ucfirst() {
 # Convert the build_type to start with a capital letter
 build_type=$(ucfirst "$build_type")
 
+# init submodules
+git submodule update --init --recursive
+
 # Step 1: Install Conan dependencies
 conan install . -c tools.cmake.cmaketoolchain:generator=Ninja -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type="$build_type"
 

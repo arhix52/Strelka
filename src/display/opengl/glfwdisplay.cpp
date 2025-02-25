@@ -38,8 +38,7 @@ inline void glCheck(const char* call, const char* file, unsigned int line)
     {
         std::stringstream ss;
         ss << "GL error " << getGLErrorString(err) << " at " << file << "(" << line << "): " << call << '\n';
-        std::cerr << ss.str() << std::endl;
-        // throw Exception(ss.str().c_str());
+        STRELKA_FATAL("{}", ss.str());
         assert(0);
     }
 }
@@ -51,7 +50,7 @@ inline void glCheck(const char* call, const char* file, unsigned int line)
         glCheck(#call, __FILE__, __LINE__);                                                                            \
     } while (false)
 
-const std::string glfwdisplay::s_vert_source = R"(
+const std::string GlfwDisplay::s_vert_source = R"(
 #version 330 core
 
 layout(location = 0) in vec3 vertexPosition_modelspace;
@@ -64,7 +63,7 @@ void main()
 }
 )";
 
-const std::string glfwdisplay::s_frag_source = R"(
+const std::string GlfwDisplay::s_frag_source = R"(
 #version 330 core
 
 in vec2 UV;
@@ -99,7 +98,7 @@ GLuint createGLShader(const std::string& source, GLuint shader_type)
             glGetShaderInfoLog(shader, max_length, nullptr, info_log_data);
 
             glDeleteShader(shader);
-            std::cerr << "Compilation of shader failed: " << info_log << std::endl;
+            STRELKA_FATAL("Compilation of shader failed: {}", info_log);
 
             return 0;
         }
@@ -138,7 +137,7 @@ GLuint createGLProgram(const std::string& vert_source, const std::string& frag_s
         std::string info_log(max_length, '\0');
         GLchar* info_log_data = reinterpret_cast<GLchar*>(&info_log[0]);
         glGetProgramInfoLog(program, max_length, nullptr, info_log_data);
-        std::cerr << "Linking of program failed: " << info_log << std::endl;
+        STRELKA_FATAL("Linking of program failed: {}", info_log);
 
         glDeleteProgram(program);
         glDeleteShader(vert_shader);
@@ -161,19 +160,19 @@ GLint getGLUniformLocation(GLuint program, const std::string& name)
     return loc;
 }
 
-glfwdisplay::glfwdisplay(/* args */)
+GlfwDisplay::GlfwDisplay(/* args */)
 {
 }
 
-glfwdisplay::~glfwdisplay()
+GlfwDisplay::~GlfwDisplay()
 {
 }
 
-void glfwdisplay::init(int width, int height, oka::SharedContext* ctx)
+void GlfwDisplay::init(int width, int height, SettingsManager* settings)
 {
     mWindowWidth = width;
     mWindowHeight = height;
-    mCtx = ctx;
+    mSettings = settings;
 
     glfwInit();
     const char* glsl_version = "#version 130";
@@ -194,7 +193,7 @@ void glfwdisplay::init(int width, int height, oka::SharedContext* ctx)
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
     {
-        std::cout << "Failed to initialize GLAD" << std::endl;
+        STRELKA_FATAL("Failed to initialize GLAD");
         assert(0);
     }
 
@@ -229,7 +228,8 @@ void glfwdisplay::init(int width, int height, oka::SharedContext* ctx)
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     (void)io;
-    // io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     // io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
 
     // Setup Dear ImGui style
@@ -241,7 +241,12 @@ void glfwdisplay::init(int width, int height, oka::SharedContext* ctx)
     ImGui_ImplOpenGL3_Init(glsl_version);
 }
 
-void glfwdisplay::display(const int32_t screen_res_x,
+void* GlfwDisplay::getDisplayNativeTexure()
+{
+    return (void*) m_render_tex;
+}
+
+void GlfwDisplay::display(const int32_t screen_res_x,
                           const int32_t screen_res_y,
                           const int32_t framebuf_res_x,
                           const int32_t framebuf_res_y,
@@ -321,7 +326,7 @@ void glfwdisplay::display(const int32_t screen_res_x,
     // GL_CHECK_ERRORS();
 }
 
-void glfwdisplay::drawFrame(ImageBuffer& result)
+void GlfwDisplay::drawFrame(ImageBuffer& result)
 {
     glClear(GL_COLOR_BUFFER_BIT);
     int framebuf_res_x = 0, framebuf_res_y = 0;
@@ -338,24 +343,23 @@ void glfwdisplay::drawFrame(ImageBuffer& result)
     display(result.width, result.height, framebuf_res_x, framebuf_res_y, m_dislpayPbo);
 }
 
-void glfwdisplay::destroy()
+void GlfwDisplay::destroy()
 {
 }
 
-void glfwdisplay::onBeginFrame()
+void GlfwDisplay::onBeginFrame()
 {
+    ImGui_ImplOpenGL3_NewFrame();
 }
 
-void glfwdisplay::onEndFrame()
+void GlfwDisplay::onEndFrame()
 {
     glfwSwapBuffers(mWindow);
 }
 
-void glfwdisplay::drawUI()
+void GlfwDisplay::drawUI()
 {
-    ImGui_ImplOpenGL3_NewFrame();
-    
-    Display::drawUI();
+    // Display::drawUI();
 
     int display_w, display_h;
     glfwGetFramebufferSize(mWindow, &display_w, &display_h);

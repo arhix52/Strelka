@@ -1,4 +1,4 @@
-#include "settings/settings.h"
+#include "settings.h"
 
 namespace oka
 {

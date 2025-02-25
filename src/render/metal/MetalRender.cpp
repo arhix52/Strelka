@@ -1,3 +1,4 @@
+#include <cstddef>
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
 #define MTK_PRIVATE_IMPLEMENTATION
@@ -76,7 +77,7 @@ void MetalRender::createMetalMaterials()
     using simd::float3;
     const std::vector<Scene::MaterialDescription>& matDescs = mScene->getMaterials();
     std::vector<Material> gpuMaterials;
-    const fs::path resourcePath = getSharedContext().mSettingsManager->getAs<std::string>("resource/searchPath");
+    const fs::path resourcePath = getSettings()->getAs<std::string>("resource/searchPath");
     for (const Scene::MaterialDescription& currMatDesc : matDescs)
     {
         Material material = {};
@@ -110,9 +111,16 @@ void MetalRender::createMetalMaterials()
     }
 
     const size_t materialsDataSize = sizeof(Material) * gpuMaterials.size();
-    mMaterialBuffer = mDevice->newBuffer(materialsDataSize, MTL::ResourceStorageModeManaged);
-    memcpy(mMaterialBuffer->contents(), gpuMaterials.data(), materialsDataSize);
-    mMaterialBuffer->didModifyRange(NS::Range::Make(0, mMaterialBuffer->length()));
+    if (materialsDataSize > 0)
+    {
+        mMaterialBuffer = mDevice->newBuffer(materialsDataSize, MTL::ResourceStorageModeManaged);
+        memcpy(mMaterialBuffer->contents(), gpuMaterials.data(), materialsDataSize);
+        mMaterialBuffer->didModifyRange(NS::Range::Make(0, mMaterialBuffer->length()));
+    }
+    else
+    {
+        mMaterialBuffer = nullptr;
+    }
 }
 
 void MetalRender::render(Buffer* output)
@@ -153,12 +161,12 @@ void MetalRender::render(Buffer* output)
         getSharedContext().mSubframeIndex = 0;
     }
 
-    SettingsManager& settings = *getSharedContext().mSettingsManager;
+    SettingsManager& settings = *getSettings();
 
     MTL::Buffer* pUniformBuffer = mUniformBuffers[mFrameIndex];
     MTL::Buffer* pUniformTMBuffer = mUniformTMBuffers[mFrameIndex];
-    Uniforms* pUniformData = reinterpret_cast<Uniforms*>(pUniformBuffer->contents());
-    UniformsTonemap* pUniformTonemap = reinterpret_cast<UniformsTonemap*>(pUniformTMBuffer->contents());
+    auto* pUniformData = reinterpret_cast<Uniforms*>(pUniformBuffer->contents());
+    auto* pUniformTonemap = reinterpret_cast<UniformsTonemap*>(pUniformTMBuffer->contents());
     pUniformData->frameIndex = mFrameIndex;
     pUniformData->subframeIndex = getSharedContext().mSubframeIndex;
     pUniformData->height = height;
@@ -188,9 +196,14 @@ void MetalRender::render(Buffer* output)
     enableAccumulationPrev = enableAccumulation;
 
     static uint32_t sspTotalPrev = 0;
-    const uint32_t sspTotal = settings.getAs<uint32_t>("render/pt/sppTotal");
+    const auto sspTotal = settings.getAs<uint32_t>("render/pt/sppTotal");
     settingsChanged |= (sspTotalPrev > sspTotal); // reset only if new spp less than already accumulated
     sspTotalPrev = sspTotal;
+
+    static uint32_t sppPrev = 0;
+    pUniformData->samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
+    settingsChanged |= (sppPrev != pUniformData->samples_per_launch);
+    sppPrev = pUniformData->samples_per_launch;
 
     if (settingsChanged)
     {
@@ -219,15 +232,15 @@ void MetalRender::render(Buffer* output)
     // known as “film speed.” The higher this value, the greater the exposure. If this is set to a non-zero value,
     // “Photographic” mode is enabled. If this is set to 0, “Arbitrary” mode is enabled, and all color scaling is then
     // strictly defined by the value of cm^2 Factor.
-    float filmIso = settings.getAs<float>("render/post/tonemapper/filmIso");
+    auto filmIso = settings.getAs<float>("render/post/tonemapper/filmIso");
     // The candela per meter square factor
-    float cm2_factor = settings.getAs<float>("render/post/tonemapper/cm2_factor");
+    auto cm2_factor = settings.getAs<float>("render/post/tonemapper/cm2_factor");
     // The fractional aperture number; e.g., 11 means aperture “f/11.” It adjusts the size of the opening of the “camera
     // iris” and is expressed as a ratio. The higher this value, the lower the exposure.
-    float fStop = settings.getAs<float>("render/post/tonemapper/fStop");
+    auto fStop = settings.getAs<float>("render/post/tonemapper/fStop");
     // Controls the duration, in fractions of a second, that the “shutter” is open; e.g., the value 100 means that the
     // “shutter” is open for 1/100th of a second. The higher this value, the greater the exposure
-    float shutterSpeed = settings.getAs<float>("render/post/tonemapper/shutterSpeed");
+    auto shutterSpeed = settings.getAs<float>("render/post/tonemapper/shutterSpeed");
     // Specifies the main color temperature of the light sources; the color that will be mapped to “white” on output,
     // e.g., an incoming color of this hue/saturation will be mapped to grayscale, but its intensity will remain
     // unchanged. This is similar to white balance controls on digital cameras.
@@ -248,24 +261,32 @@ void MetalRender::render(Buffer* output)
     pUniformTonemap->exposureValue = exposureValue;
     pUniformData->exposureValue = exposureValue; // need for proper accumulation
 
-    const uint32_t totalSpp = settings.getAs<uint32_t>("render/pt/sppTotal");
-    const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");
-    const int32_t leftSpp = totalSpp - getSharedContext().mSubframeIndex;
+    const auto samplesPerLaunch = pUniformData->samples_per_launch;
+    const int32_t leftSpp = sspTotal - getSharedContext().mSubframeIndex;
     // if accumulation is off then launch selected samples per pixel
     const uint32_t samplesThisLaunch =
         enableAccumulation ? std::min((int32_t)samplesPerLaunch, leftSpp) : samplesPerLaunch;
     if (samplesThisLaunch != 0)
     {
-        pUniformData->samples_per_launch = samplesThisLaunch;
+        pUniformData->samples_per_launch = samplesThisLaunch; // TODO: implement in pt kernel
 
         pUniformBuffer->didModifyRange(NS::Range::Make(0, sizeof(Uniforms)));
         pUniformTMBuffer->didModifyRange(NS::Range::Make(0, sizeof(UniformsTonemap)));
 
         MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
         MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
-        pComputeEncoder->useResource(mMaterialBuffer, MTL::ResourceUsageRead);
-        pComputeEncoder->useResource(mLightBuffer, MTL::ResourceUsageRead);
-        pComputeEncoder->useResource(mInstanceAccelerationStructure, MTL::ResourceUsageRead);
+        if (mMaterialBuffer != nullptr)
+        {
+            pComputeEncoder->useResource(mMaterialBuffer, MTL::ResourceUsageRead);
+        }
+        if (mLightBuffer != nullptr)
+        {
+            pComputeEncoder->useResource(mLightBuffer, MTL::ResourceUsageRead);
+        }
+        if (mInstanceAccelerationStructure != nullptr)
+        {
+            pComputeEncoder->useResource(mInstanceAccelerationStructure, MTL::ResourceUsageRead);
+        }
         for (const MTL::AccelerationStructure* primitiveAccel : mPrimitiveAccelerationStructures)
         {
             pComputeEncoder->useResource(primitiveAccel, MTL::ResourceUsageRead);
@@ -285,6 +306,7 @@ void MetalRender::render(Buffer* output)
         // Output
         pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 5);
         pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 6);
+        if (mInstanceBuffer != nullptr)
         {
             const MTL::Size gridSize = MTL::Size(width, height, 1);
             const NS::UInteger threadGroupSize = mPathTracingPSO->maxTotalThreadsPerThreadgroup();
@@ -365,7 +387,7 @@ Buffer* MetalRender::createBuffer(const BufferDesc& desc)
     assert(size != 0);
     MTL::Buffer* buff = mDevice->newBuffer(size, MTL::ResourceStorageModeManaged);
     assert(buff);
-    MetalBuffer* res = new MetalBuffer(buff, desc.format, desc.width, desc.height);
+    auto* res = new MetalBuffer(buff, desc.format, desc.width, desc.height);
     assert(res);
     return res;
 }
@@ -428,21 +450,31 @@ void MetalRender::buildBuffers()
     const size_t vertexDataSize = sizeof(Scene::Vertex) * vertices.size();
     const size_t indexDataSize = sizeof(uint32_t) * indices.size();
 
-    MTL::Buffer* pLightBuffer = mDevice->newBuffer(lightBufferSize, MTL::ResourceStorageModeManaged);
-    MTL::Buffer* pVertexBuffer = mDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeManaged);
-    MTL::Buffer* pIndexBuffer = mDevice->newBuffer(indexDataSize, MTL::ResourceStorageModeManaged);
+    MTL::Buffer* pLightBuffer = nullptr;
+    if (lightBufferSize > 0)
+    {
+        pLightBuffer = mDevice->newBuffer(lightBufferSize, MTL::ResourceStorageModeManaged);
+        memcpy(pLightBuffer->contents(), lightDescs.data(), lightBufferSize);
+        pLightBuffer->didModifyRange(NS::Range::Make(0, pLightBuffer->length()));
+    }
+    MTL::Buffer* pVertexBuffer = nullptr;
+    if (vertexDataSize > 0)
+    {
+        pVertexBuffer = mDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeManaged);
+        memcpy(pVertexBuffer->contents(), vertices.data(), vertexDataSize);
+        pVertexBuffer->didModifyRange(NS::Range::Make(0, pVertexBuffer->length()));
+    };
+    MTL::Buffer* pIndexBuffer = nullptr;
+    if (indexDataSize > 0)
+    {
+        pIndexBuffer = mDevice->newBuffer(indexDataSize, MTL::ResourceStorageModeManaged);
+        memcpy(pIndexBuffer->contents(), indices.data(), indexDataSize);
+        pIndexBuffer->didModifyRange(NS::Range::Make(0, pIndexBuffer->length()));
+    }
 
     mLightBuffer = pLightBuffer;
     mVertexBuffer = pVertexBuffer;
     mIndexBuffer = pIndexBuffer;
-
-    memcpy(mLightBuffer->contents(), lightDescs.data(), lightBufferSize);
-    memcpy(mVertexBuffer->contents(), vertices.data(), vertexDataSize);
-    memcpy(mIndexBuffer->contents(), indices.data(), indexDataSize);
-
-    mLightBuffer->didModifyRange(NS::Range::Make(0, mLightBuffer->length()));
-    mVertexBuffer->didModifyRange(NS::Range::Make(0, mVertexBuffer->length()));
-    mIndexBuffer->didModifyRange(NS::Range::Make(0, mIndexBuffer->length()));
 
     for (MTL::Buffer*& uniformBuffer : mUniformBuffers)
     {
@@ -542,7 +574,7 @@ constexpr simd_float4x4 makeIdentity()
 
 MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
 {
-    MetalRender::Mesh* result = new MetalRender::Mesh();
+    auto* result = new MetalRender::Mesh();
 
     const uint32_t triangleCount = mesh.mCount / 3;
 
@@ -637,8 +669,7 @@ void MetalRender::createAccelerationStructures()
 
     mInstanceBuffer = mDevice->newBuffer(
         sizeof(MTL::AccelerationStructureUserIDInstanceDescriptor) * instances.size(), MTL::ResourceStorageModeManaged);
-    MTL::AccelerationStructureUserIDInstanceDescriptor* instanceDescriptors =
-        (MTL::AccelerationStructureUserIDInstanceDescriptor*)mInstanceBuffer->contents();
+    auto* instanceDescriptors = (MTL::AccelerationStructureUserIDInstanceDescriptor*)mInstanceBuffer->contents();
     for (int i = 0; i < instances.size(); ++i)
     {
         const Instance& curr = instances[i];
@@ -670,4 +701,3 @@ void MetalRender::createAccelerationStructures()
     mInstanceAccelerationStructure = createAccelerationStructure(accelDescriptor);
     pPool->release();
 }
-

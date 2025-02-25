@@ -19,12 +19,16 @@
 
 using namespace oka;
 
-void glfwdisplay::init(int width, int height, SharedContext* ctx)
+void GlfwDisplay::setNativeDevice(void* device)
 {
-    _pDevice = (MTL::Device*) ctx->mRender->getNativeDevicePtr();
+    _pDevice = (MTL::Device*) device;
+}
+
+void GlfwDisplay::init(int width, int height, SettingsManager* settings)
+{
     mWindowWidth = width;
     mWindowHeight = height;
-    mCtx = ctx;
+    mSettings = settings;
 
     if (!glfwInit())
     {
@@ -52,7 +56,8 @@ void glfwdisplay::init(int width, int height, SharedContext* ctx)
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
-    //io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;  // Enable Keyboard Controls
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;  // Enable Keyboard Controls
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     //io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;   // Enable Gamepad Controls
 
     // Setup style
@@ -83,7 +88,13 @@ void glfwdisplay::init(int width, int height, SharedContext* ctx)
     buildShaders();
 }
 
-void glfwdisplay::drawFrame(ImageBuffer& result)
+void* GlfwDisplay::getDisplayNativeTexure()
+{
+    return mTexture;
+}
+
+
+void GlfwDisplay::drawFrame(ImageBuffer& result)
 {
     NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
@@ -98,26 +109,22 @@ void glfwdisplay::drawFrame(ImageBuffer& result)
         }
         mTexture = buildTexture(mTexWidth, mTexHeight);
     }
-    {
-        MTL::Region region = MTL::Region::Make2D(0, 0, mTexWidth, mTexHeight);
-        mTexture->replaceRegion(region, 0, result.data, result.width * oka::Buffer::getElementSize(result.pixel_format));
-    }
 
-    // renderEncoder->pushDebugGroup(NS::String::string("display", NS::UTF8StringEncoding));
+    mBlitEncoder = mCommandBuffer->blitCommandEncoder();
 
-    renderEncoder->setRenderPipelineState(_pPSO);
-    // [renderEncoder setRenderPipelineState: _pPSO];
-    renderEncoder->setFragmentTexture(mTexture, /* index */ 0);
-    // [renderEncoder setFragmentTexture: mTexture atIndex: 0];
+    mBlitEncoder->copyFromBuffer(
+        (MTL::Buffer*) result.deviceData, 0, 
+        oka::Buffer::getElementSize(result.pixel_format) * mTexWidth, 
+        oka::Buffer::getElementSize(result.pixel_format) * mTexWidth * mTexHeight, 
+        MTL::Size{mTexWidth, mTexHeight, 1}, 
+        mTexture, 0, 0, MTL::Origin{0, 0, 0});
 
-    renderEncoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0ul, 6ul);
-    // [renderEncoder drawPrimitives: MTL::PrimitiveTypeTriangle vertexStart: 0 vertexCount:6];
+    mBlitEncoder->endEncoding();
 
-    // renderEncoder->popDebugGroup();
     pPool->release();
 }
 
-MTL::Texture* glfwdisplay::buildTexture(uint32_t width, uint32_t heigth)
+MTL::Texture* GlfwDisplay::buildTexture(uint32_t width, uint32_t heigth)
 {
     MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
     pTextureDesc->setWidth(width);
@@ -148,7 +155,7 @@ static bool readSourceFile(std::string& str, const std::string& filename)
     return false;
 }
 
-void glfwdisplay::buildShaders()
+void GlfwDisplay::buildShaders()
 {
     using NS::StringEncoding::UTF8StringEncoding;
 
@@ -186,12 +193,12 @@ void glfwdisplay::buildShaders()
     _pShaderLibrary = pLibrary;
 }
 
-void glfwdisplay::destroy()
+void GlfwDisplay::destroy()
 {
 
 }
 
-void glfwdisplay::onBeginFrame()
+void GlfwDisplay::onBeginFrame()
 {
     // NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
@@ -202,43 +209,37 @@ void glfwdisplay::onBeginFrame()
 
     float clear_color[4] = {0.45f, 0.55f, 0.60f, 1.00f};
 
-    commandBuffer = _pCommandQueue->commandBuffer();
+    mCommandBuffer = _pCommandQueue->commandBuffer();
     renderPassDescriptor->colorAttachments()->object(0)->setClearColor(MTL::ClearColor::Make(clear_color[0] * clear_color[3], clear_color[1] * clear_color[3], clear_color[2] * clear_color[3], clear_color[3]));
     renderPassDescriptor->colorAttachments()->object(0)->setTexture(drawable->texture());
     renderPassDescriptor->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionClear);
     renderPassDescriptor->colorAttachments()->object(0)->setStoreAction(MTL::StoreActionStore);
 
-    renderEncoder = commandBuffer->renderCommandEncoder(renderPassDescriptor);
-    // pPool->release();
+    // Start the Dear ImGui frame
+    ImGui_ImplMetal_NewFrame((__bridge MTLRenderPassDescriptor*)renderPassDescriptor);
 }
 
-void glfwdisplay::onEndFrame()
+void GlfwDisplay::onEndFrame()
 {
-    // NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
+    mCommandBuffer->presentDrawable(drawable);
+    mCommandBuffer->commit();
 
-    renderEncoder->endEncoding();
-    commandBuffer->presentDrawable(drawable);
-    commandBuffer->commit();
-
-    renderEncoder->release();
-    commandBuffer->release();
+    mRenderEncoder->release();
+    mCommandBuffer->release();
     drawable->release();
 
     glfwSwapBuffers(mWindow);
-    // pPool->release();
 }
 
-void glfwdisplay::drawUI()
+void GlfwDisplay::drawUI()
 {
+    mRenderEncoder = mCommandBuffer->renderCommandEncoder(renderPassDescriptor);
 @autoreleasepool 
     {
-        // Start the Dear ImGui frame
-        ImGui_ImplMetal_NewFrame((__bridge MTLRenderPassDescriptor*)renderPassDescriptor);
-
-        Display::drawUI();
 
         ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(),
-        (__bridge id<MTLCommandBuffer>)(commandBuffer),
-        (__bridge id<MTLRenderCommandEncoder>)renderEncoder);
+        (__bridge id<MTLCommandBuffer>)(mCommandBuffer),
+        (__bridge id<MTLRenderCommandEncoder>)mRenderEncoder);
     }
+    mRenderEncoder->endEncoding();
 }

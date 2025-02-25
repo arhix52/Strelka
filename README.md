@@ -9,6 +9,7 @@ Path tracing render based on NVIDIA OptiX + NVIDIA MDL and Apple Metal
 ## Project Dependencies
 
 OpenUSD https://github.com/PixarAnimationStudios/OpenUSD
+See BuildOpenUSD.md in repo
 
 * Set evn var: `USD_DIR=c:\work\USD_build`
 
@@ -31,6 +32,8 @@ Strelka uses conan https://conan.io/
 
 * install conan: `pip install conan` 
 * install ninja [https://ninja-build.org/] build system: `sudo apt install ninja-build`
+
+* initialize submodules `git submodule update --init --recursive`
 
 detect conan profile: `conan profile detect --force`
 

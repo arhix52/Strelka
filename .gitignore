@@ -9,5 +9,6 @@ misc/
 external/mdl-sdk
 external/metal-cpp*
 external/imgui*
+external/ImGuiFileDialog
 data/test_data
 CMakeUserPresets.json

@@ -51,10 +51,10 @@ void HdStrelkaInstancer::Sync(HdSceneDelegate* sceneDelegate,
     {
         TfToken primName = primvar.name;
 
-        if (primName != HdInstancerTokens->translate &&
-            primName != HdInstancerTokens->rotate &&
-            primName != HdInstancerTokens->scale &&
-            primName != HdInstancerTokens->instanceTransform)
+        if (primName != HdInstancerTokens->instanceTranslations &&
+            primName != HdInstancerTokens->instanceRotations &&
+            primName != HdInstancerTokens->instanceScales &&
+            primName != HdInstancerTokens->instanceTransforms)
         {
             continue;
         }
@@ -77,10 +77,10 @@ VtMatrix4dArray HdStrelkaInstancer::ComputeInstanceTransforms(const SdfPath& pro
     const SdfPath& id = GetId();
 
     // Calculate instance transforms for this instancer.
-    VtValue boxedTranslates = m_primvarMap[HdInstancerTokens->translate];
-    VtValue boxedRotates = m_primvarMap[HdInstancerTokens->rotate];
-    VtValue boxedScales = m_primvarMap[HdInstancerTokens->scale];
-    VtValue boxedInstanceTransforms = m_primvarMap[HdInstancerTokens->instanceTransform];
+    VtValue boxedTranslates = m_primvarMap[HdInstancerTokens->instanceTranslations];
+    VtValue boxedRotates = m_primvarMap[HdInstancerTokens->instanceRotations];
+    VtValue boxedScales = m_primvarMap[HdInstancerTokens->instanceScales];
+    VtValue boxedInstanceTransforms = m_primvarMap[HdInstancerTokens->instanceTransforms];
 
     VtVec3fArray translates;
     if (boxedTranslates.IsHolding<VtVec3fArray>())

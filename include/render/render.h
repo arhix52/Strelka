@@ -40,6 +40,16 @@ public:
         return *mSharedCtx;
     }
 
+    void setSettingsManager(SettingsManager* settigns)
+    {
+        mSettingsManager = settigns;
+    }
+
+    SettingsManager* getSettings()
+    {
+        return mSettingsManager;
+    }
+
     void setScene(Scene* scene)
     {
         mScene = scene;
@@ -51,6 +61,7 @@ public:
     }
 
 protected:
+    SettingsManager* mSettingsManager;
     SharedContext* mSharedCtx = nullptr;
     oka::Scene* mScene = nullptr;
 };

@@ -98,7 +98,7 @@ extern "C" __global__ void __raygen__rg()
         prd.linearPixelIndex = linearPixelIndex;
         prd.sampleIndex = params.subframe_index + sampleIdx;
 
-        prd.sampler = initSampler(launch_index.x, launch_index.y, prd.linearPixelIndex, prd.sampleIndex, params.maxSampleCount, 52u);
+        prd.sampler = initSampler(launch_index.x, params.image_height - launch_index.y, prd.linearPixelIndex, prd.sampleIndex, params.maxSampleCount, 52u);
 
         prd.radiance = make_float3(0.0f);
         prd.throughput = make_float3(1.0f);
@@ -109,11 +109,11 @@ extern "C" __global__ void __raygen__rg()
         
         float3 ray_origin, ray_direction;
 
-        const uint2 pixelCoord = make_uint2(launch_index.x, launch_index.y);
+        const uint2 pixelCoord = make_uint2(launch_index.x, params.image_height - launch_index.y);
         generateCameraRay(pixelCoord, prd.sampler, ray_origin, ray_direction);
 
-        unsigned int u0, u1;
-        packPointer(&prd, u0, u1);
+        unsigned int payload0, payload1;
+        packPointer(&prd, payload0, payload1);
 
         while (prd.depth < params.max_depth)
         {
@@ -126,7 +126,7 @@ extern "C" __global__ void __raygen__rg()
                        RAY_TYPE_RADIANCE, // SBT offset   -- See SBT discussion
                        RAY_TYPE_COUNT, // SBT stride   -- See SBT discussion
                        RAY_TYPE_RADIANCE, // missSBTIndex -- See SBT discussion
-                       u0, u1);
+                       payload0, payload1);
 
             ray_origin = prd.origin;
             ray_direction = prd.dir;
@@ -224,22 +224,6 @@ extern "C" __global__ void __raygen__rg()
     {
         // Accumulation
         params.image[linearPixelIndex] = accumulate(params.accum, result, linearPixelIndex, params.exposure, params.subframe_index);
-        // float3 accum_color = result;
-        // if (params.subframe_index > 0)
-        // {
-        //     const float a = 1.0f / static_cast<float>(params.subframe_index + 1);
-        //     const float3 accum_color_prev = make_float3(params.accum[image_index]);
-        //     const float3 exposure = params.exposure;
-        //     // perform lerp in ldr and back to hdr back
-        //     accum_color = inverseTonemap(
-        //         lerp(
-        //         tonemap(accum_color_prev, exposure), 
-        //         tonemap(accum_color, exposure),
-        //         a),
-        //         exposure);
-        // }
-        // params.accum[image_index] = make_float4(accum_color, 1.0f);
-        // params.image[image_index] = make_float4(accum_color, 1.0f);
     }
     else
     {
@@ -295,10 +279,8 @@ extern "C" __global__ void __closesthit__ch()
     float3 N2 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
 
     float3 object_normal = normalize(interpolateAttrib(N0, N1, N2, barycentrics));
-    // float3 world_normal = normalize( optixTransformNormalFromObjectToWorldSpace( object_normal ) );
 
     float3 res = (object_normal + make_float3(1.0f)) * 0.5f;
-    // setPayload(make_float3(barycentrics, 1.0f));
     prd->radiance = make_float3(res.x, res.y, res.z);
 }
 
@@ -331,7 +313,6 @@ extern "C" __global__ void __closesthit__light()
         {
             float lightPdf = getLightPdf(currLight, hitPoint, optixGetWorldRayOrigin()) / (params.scene.numLights);
             const float misWeight = misWeightBalance(prd->lastBsdfPdf, lightPdf);
-            // float misWeight = lightPdf;
             prd->radiance += prd->throughput * make_float3(currLight.color) * -dot(rayDir, lightNormal) * misWeight;
         }
     }

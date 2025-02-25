@@ -10,6 +10,7 @@
 using namespace metal;
 using namespace raytracing;
 
+
 struct PerRayData
 {
     SamplerState sampler;
@@ -107,7 +108,7 @@ void generateCameraRay(uint2 pixelIndex,
     const float2 subpixel_jitter = { 
         random<SampleDimension::ePixelX>(samplerRnd), 
         random<SampleDimension::ePixelY>(samplerRnd)};
-    float2 pixelPos {pixelIndex.x + subpixel_jitter.x, pixelIndex.y + subpixel_jitter.y};
+    float2 pixelPos {pixelIndex.x + subpixel_jitter.x, params.height - (pixelIndex.y + subpixel_jitter.y)};
 
     float2 dimension {(float)params.width, (float)params.height};
     float2 pixelNDC = (pixelPos / dimension) * 2.0f - 1.0f;
