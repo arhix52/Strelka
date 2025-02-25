@@ -165,8 +165,8 @@ void MetalRender::render(Buffer* output)
 
     MTL::Buffer* pUniformBuffer = mUniformBuffers[mFrameIndex];
     MTL::Buffer* pUniformTMBuffer = mUniformTMBuffers[mFrameIndex];
-    auto pUniformData = reinterpret_cast<Uniforms*>(pUniformBuffer->contents());
-    auto pUniformTonemap = reinterpret_cast<UniformsTonemap*>(pUniformTMBuffer->contents());
+    auto* pUniformData = reinterpret_cast<Uniforms*>(pUniformBuffer->contents());
+    auto* pUniformTonemap = reinterpret_cast<UniformsTonemap*>(pUniformTMBuffer->contents());
     pUniformData->frameIndex = mFrameIndex;
     pUniformData->subframeIndex = getSharedContext().mSubframeIndex;
     pUniformData->height = height;
@@ -182,7 +182,6 @@ void MetalRender::render(Buffer* output)
     pUniformTonemap->height = height;
     pUniformTonemap->tonemapperType = settings.getAs<uint32_t>("render/pt/tonemapperType");
     pUniformTonemap->gamma = settings.getAs<float>("render/post/gamma");
-    pUniformTonemap->maxEDR = settings.getAs<float>("render/post/tonemapper/maxEDR");
 
     bool settingsChanged = false;
 
@@ -388,10 +387,11 @@ Buffer* MetalRender::createBuffer(const BufferDesc& desc)
     assert(size != 0);
     MTL::Buffer* buff = mDevice->newBuffer(size, MTL::ResourceStorageModeManaged);
     assert(buff);
-    auto res = new MetalBuffer(buff, desc.format, desc.width, desc.height);
+    auto* res = new MetalBuffer(buff, desc.format, desc.width, desc.height);
     assert(res);
     return res;
 }
+
 
 void MetalRender::buildComputePipeline()
 {
@@ -565,9 +565,16 @@ MTL::AccelerationStructure* MetalRender::createAccelerationStructure(MTL::Accele
     return compactedAccelerationStructure->retain();
 }
 
+constexpr simd_float4x4 makeIdentity()
+{
+    using simd::float4;
+    return (simd_float4x4){ (float4){ 1.f, 0.f, 0.f, 0.f }, (float4){ 0.f, 1.f, 0.f, 0.f },
+                            (float4){ 0.f, 0.f, 1.f, 0.f }, (float4){ 0.f, 0.f, 0.f, 1.f } };
+}
+
 MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
 {
-    auto result = new MetalRender::Mesh();
+    auto* result = new MetalRender::Mesh();
 
     const uint32_t triangleCount = mesh.mCount / 3;
 
@@ -662,7 +669,7 @@ void MetalRender::createAccelerationStructures()
 
     mInstanceBuffer = mDevice->newBuffer(
         sizeof(MTL::AccelerationStructureUserIDInstanceDescriptor) * instances.size(), MTL::ResourceStorageModeManaged);
-    auto instanceDescriptors = (MTL::AccelerationStructureUserIDInstanceDescriptor*)mInstanceBuffer->contents();
+    auto* instanceDescriptors = (MTL::AccelerationStructureUserIDInstanceDescriptor*)mInstanceBuffer->contents();
     for (int i = 0; i < instances.size(); ++i)
     {
         const Instance& curr = instances[i];

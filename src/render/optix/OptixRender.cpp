@@ -62,9 +62,7 @@ static inline void optixCheck(OptixResult res, const char* call, const char* fil
 {
     if (res != OPTIX_SUCCESS)
     {
-        const char* errorName = optixGetErrorName(res);
-        const char* errorString = optixGetErrorString(res);
-        STRELKA_ERROR("OptiX call {0} failed: {1}:{2} with [{3}] - [{4}]", call, file, line, errorName, errorString);
+        STRELKA_ERROR("OptiX call {0} failed: {1}:{2}", call, file, line);
         assert(0);
     }
 }
@@ -428,7 +426,7 @@ void OptiXRender::createTopLevelAccelerationStructure()
 
     // Setup IAS build options
     OptixAccelBuildOptions iasOptions = {};
-    iasOptions.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    iasOptions.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
     iasOptions.motionOptions.numKeys = 1;
     iasOptions.operation = OPTIX_BUILD_OPERATION_BUILD;
 
@@ -468,6 +466,92 @@ void OptiXRender::createTopLevelAccelerationStructure()
 
     // Cleanup output buffer
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(outputBuffer)));
+}
+
+void oka::OptiXRender::updateTopLevelAccelerationStructure()
+{
+    const std::vector<oka::Instance>& instances = mScene->getInstances();
+
+    std::vector<OptixInstance> optixInstances;
+    for (int i = 0; i < instances.size(); ++i)
+    {
+        OptixInstance oi = {};
+        const oka::Instance& curr = instances[i];
+        switch (curr.type)
+        {
+        case oka::Instance::Type::eMesh:
+            oi.traversableHandle = mOptixMeshes[curr.mMeshId]->gas_handle;
+            oi.visibilityMask = GEOMETRY_MASK_TRIANGLE;
+            break;
+        case oka::Instance::Type::eCurve:
+            oi.traversableHandle = mOptixCurves[curr.mCurveId]->gas_handle;
+            oi.visibilityMask = GEOMETRY_MASK_CURVE;
+            break;
+        case oka::Instance::Type::eLight:
+            oi.traversableHandle = mOptixMeshes[curr.mMeshId]->gas_handle;
+            oi.visibilityMask = GEOMETRY_MASK_LIGHT;
+            break;
+        default:
+            STRELKA_ERROR("Unknown instance type");
+            assert(0);
+            break;
+        }
+        // fill common instance data
+        memcpy(oi.transform, glm::value_ptr(glm::float3x4(glm::rowMajor4(curr.transform))), sizeof(float) * 12);
+        oi.sbtOffset = static_cast<unsigned int>(i * RAY_TYPE_COUNT);
+        optixInstances.push_back(oi);
+    }
+
+    const size_t need_instances_size = sizeof(OptixInstance) * optixInstances.size();
+    if (need_instances_size != mState.d_instances_size)
+    {
+        if (mState.d_instances != 0)
+        {
+            CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mState.d_instances)));
+        }
+        CUDA_CHECK(cudaMalloc((void**)&mState.d_instances, need_instances_size));
+        mState.d_instances_size = need_instances_size;
+    }
+    CUDA_CHECK(cudaMemcpy((void*)mState.d_instances, optixInstances.data(), need_instances_size, cudaMemcpyHostToDevice));
+
+    OptixBuildInput ias_instance_input = {};
+    ias_instance_input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
+    ias_instance_input.instanceArray.instances = mState.d_instances;
+    ias_instance_input.instanceArray.numInstances = static_cast<int>(optixInstances.size());
+    OptixAccelBuildOptions ias_accel_options = {};
+    ias_accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    ias_accel_options.motionOptions.numKeys = 1;
+    ias_accel_options.operation = OPTIX_BUILD_OPERATION_UPDATE;
+
+    OptixAccelBufferSizes ias_buffer_sizes;
+    OPTIX_CHECK(
+        optixAccelComputeMemoryUsage(mState.context, &ias_accel_options, &ias_instance_input, 1, &ias_buffer_sizes));
+
+    // non-compacted output
+    CUdeviceptr d_buffer_temp_output_ias_and_compacted_size;
+
+    CUDA_CHECK(cudaMalloc(
+        reinterpret_cast<void**>(&d_buffer_temp_output_ias_and_compacted_size), ias_buffer_sizes.outputSizeInBytes));
+
+    CUdeviceptr d_ias_temp_buffer;
+    CUDA_CHECK(cudaMalloc((void**)&d_ias_temp_buffer, ias_buffer_sizes.tempSizeInBytes));
+
+    CUdeviceptr compactedSizeBuffer;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>((&compactedSizeBuffer)), sizeof(uint64_t)));
+    OptixAccelEmitDesc property = {};
+    property.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+    property.result = compactedSizeBuffer;
+
+    OPTIX_CHECK(optixAccelBuild(mState.context, 0, &ias_accel_options, &ias_instance_input, 1, d_ias_temp_buffer,
+                                ias_buffer_sizes.tempSizeInBytes, d_buffer_temp_output_ias_and_compacted_size,
+                                ias_buffer_sizes.outputSizeInBytes, &mState.ias_handle, &property, 1));
+
+    compactAccel(d_buffer_temp_output_ias_and_compacted_size, mState.ias_handle, property.result,
+                 ias_buffer_sizes.outputSizeInBytes);
+
+    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(compactedSizeBuffer)));
+    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_ias_temp_buffer)));
+    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_buffer_temp_output_ias_and_compacted_size)));
 }
 
 void OptiXRender::createModule()
@@ -850,6 +934,62 @@ void OptiXRender::render(Buffer* output)
         mScene->clearDirtyState();
     }
 
+    SettingsManager& settings = *getSettings();
+    bool settingsChanged = false;
+
+    /*
+    // node0 rotation
+    if (mScene->getNodes().size() != 0) 
+    {
+        uint32_t rotationY = settings.getAs<uint32_t>("render/nodes/rotationY");
+        if (rotationAngle != rotationY * 0.01f) 
+        {
+            settingsChanged = true;
+            rotationAngle = rotationY * 0.01f;
+            glm::quat rotationQuat = glm::angleAxis(rotationAngle, glm::vec3(0.0f, 1.0f, 0.0f));
+
+            mScene->animateNode(0, oka::Scene::AnimationChannel::PathType::ROTATION, rotationQuat);
+        }
+    }*/
+
+    // Animation changes
+    std::vector<oka::Scene::Animation> &animations = mScene->getAnimations();
+    bool blasChanged = false;
+    for (int i = 0; i < animations.size(); ++i) 
+    {
+        const std::string scrollNameStr = "render/animation/anim" + std::to_string(i) + "/time";
+        const char *scrollName = scrollNameStr.c_str();
+        float currAnimTime = settings.getAs<float>(scrollName);
+
+        const float EPSILON = 1e-6f; // 0.000001
+
+        if (std::abs(animations[i].current - currAnimTime) > EPSILON) {
+            settingsChanged = true;
+            animations[i].current = currAnimTime;
+            blasChanged = mScene->applyAnimation(i) ? true : blasChanged;
+        }
+    }
+
+    // full rebuild or TLAS refit/reduild
+    if (settingsChanged) {
+        if (blasChanged) {
+            mScene->applySkinning();
+            createVertexBuffer();
+            createBottomLevelAccelerationStructures();
+            createTopLevelAccelerationStructure();
+        }
+        else {
+            if(updateCount < 10) {
+                updateTopLevelAccelerationStructure();
+                updateCount++;
+            }
+            else {
+                createTopLevelAccelerationStructure();
+                updateCount = 0;
+            }
+        }
+    }
+
     const uint32_t width = output->width();
     const uint32_t height = output->height();
 
@@ -870,12 +1010,9 @@ void OptiXRender::render(Buffer* output)
         getSharedContext().mSubframeIndex = 0;
     }
 
-    SettingsManager& settings = *getSettings();
-    bool settingsChanged = false;
-
     static uint32_t rectLightSamplingMethodPrev = 0;
     const uint32_t rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
-    settingsChanged = (rectLightSamplingMethodPrev != rectLightSamplingMethod);
+    settingsChanged |= (rectLightSamplingMethodPrev != rectLightSamplingMethod);
     rectLightSamplingMethodPrev = rectLightSamplingMethod;
 
     static bool enableAccumulationPrev = 0;
@@ -1015,8 +1152,8 @@ void OptiXRender::render(Buffer* output)
     // Apply tonemapping except for debug mode 1
     if (params.debug != 1)
     {
-        float maxEDR = settings.getAs<float>("render/post/tonemapper/maxEDR");
-        exposureValue *= maxEDR;
+        //float maxEDR = settings.getAs<float>("render/post/tonemapper/maxEDR");
+        //exposureValue *= maxEDR;
         tonemap(tonemapperType, exposureValue, gamma, params.image, width, height);
     }
 
@@ -1028,7 +1165,7 @@ void OptiXRender::render(Buffer* output)
 
 void OptiXRender::init()
 {
-    // TODO: move USD_DIR to settings
+    // TODO: move USD_DIR to settings 
     const char* envUSDPath = std::getenv("USD_DIR");
     mEnableValidation = getSettings()->getAs<bool>("render/enableValidation");
 

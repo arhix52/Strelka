@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <filesystem>
 
+#include <iostream>
+
 namespace fs = std::filesystem;
 
 namespace oka
@@ -44,6 +46,44 @@ uint32_t Scene::createMesh(const std::vector<Vertex>& vb, const std::vector<uint
     // }
     mIndices.insert(mIndices.end(), ib.begin(), ib.end());
     mVertices.insert(mVertices.end(), vb.begin(), vb.end()); // copy vertices
+    return meshId;
+}
+
+uint32_t Scene::createMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib, const std::vector<oka::Scene::vertexSkinData>& sb)
+{
+    std::scoped_lock lock(mMeshMutex);
+
+    Mesh* mesh = nullptr;
+    uint32_t meshId = -1;
+    if (mDelMesh.empty())
+    {
+        meshId = mMeshes.size(); // add mesh to storage
+        mMeshes.push_back({});
+        mesh = &mMeshes.back();
+    }
+    else
+    {
+        meshId = mDelMesh.top(); // get index from stack
+        mDelMesh.pop(); // del taken index from stack
+        mesh = &mMeshes[meshId];
+    }
+
+    mesh->mIndex = mIndices.size(); // Index of 1st index in index buffer
+    mesh->mCount = ib.size(); // amount of indices in mesh
+
+    mesh->mVbOffset = mVertices.size();
+    mesh->mVertexCount = vb.size();
+
+    mesh->mSbOffset = mVertexSkinData.size();
+
+    // const uint32_t ibOffset = mVertices.size(); // adjust indices for global index buffer
+    // for (int i = 0; i < ib.size(); ++i)
+    // {
+    //     mIndices.push_back(ibOffset + ib[i]);
+    // }
+    mIndices.insert(mIndices.end(), ib.begin(), ib.end());
+    mVertices.insert(mVertices.end(), vb.begin(), vb.end()); // copy vertices
+    mVertexSkinData.insert(mVertexSkinData.end(), sb.begin(), sb.end());
     return meshId;
 }
 
@@ -105,7 +145,221 @@ std::string Scene::getSceneDir()
 {
     fs::path p(modelPath);
     return p.parent_path().string();
-};
+}
+
+glm::quat Scene::makeQuatFromFloat4(const glm::float4 &value)
+{
+    const float floatRotation[4] = {
+                value[3],
+                value[0],
+                value[1],
+                value[2],
+            };
+    return glm::make_quat(floatRotation);
+}
+
+glm::float4 Scene::makeFloat4FromQuat(const glm::quat &q)
+{
+    return glm::float4(q.x, q.y, q.z, q.w);
+}
+
+glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationChannel::PathType targetProperty, const float time)
+{
+    glm::float4 result;
+    float previousTime = -std::numeric_limits<float>::max();
+    float nextTime = std::numeric_limits<float>::max();
+    glm::float4 previousValue, nextValue;
+
+    for (int i = 0; i < sampler.inputs.size(); ++i)
+    {
+        if (sampler.inputs[i] == time) return sampler.outputsVec4[i]; // dont need to interpolate
+
+        if (sampler.inputs[i] < time && sampler.inputs[i] > previousTime) 
+        {
+            previousTime = sampler.inputs[i];
+            previousValue = sampler.outputsVec4[i];
+        }
+        if (sampler.inputs[i] > time && sampler.inputs[i] < nextTime)
+        {
+            nextTime = sampler.inputs[i];
+            nextValue = sampler.outputsVec4[i];
+        }
+    }
+
+    switch (sampler.interpolation)
+    {
+    case AnimationSampler::InterpolationType::STEP :
+        result = previousValue;
+        break;
+
+    case AnimationSampler::InterpolationType::CUBICSPLINE :
+        std::cout << "CUBICSPLINE interpolation not yet supported, skipping" << std::endl;
+        break;
+    
+    default: //linear
+        float interpolationValue = (time - previousTime) / (nextTime - previousTime);
+        if (targetProperty != AnimationChannel::PathType::ROTATION) result = glm::lerp(previousValue, nextValue, interpolationValue);
+        else result = makeFloat4FromQuat(glm::slerp(makeQuatFromFloat4(previousValue), makeQuatFromFloat4(nextValue), interpolationValue));
+        break;
+    }
+    return result;
+}
+
+bool Scene::applyAnimation(const uint32_t animId)
+{
+    bool blasChanged = false;
+    auto &animation = mAnimations[animId];
+    for (int i = 0; i < animation.channels.size(); ++i)
+    {
+        const uint32_t nodeId = animation.channels[i].node;
+        const AnimationChannel::PathType targetProperty = animation.channels[i].path;
+        const glm::float4 value = interpolate(animation.samplers[animation.channels[i].samplerIndex], targetProperty, animation.current);
+
+        if (targetProperty == AnimationChannel::PathType::ROTATION) 
+            blasChanged = animateNode(nodeId, targetProperty, makeQuatFromFloat4(value)) ? true : blasChanged;
+        else 
+            blasChanged = animateNode(nodeId, targetProperty, glm::float3(value)) ? true : blasChanged;
+    }
+    return blasChanged;
+}
+
+uint32_t packNormal(const glm::float3& normal);
+
+void Scene::applySkinning()
+{
+    for (int i = 0; i < mNodes.size(); ++i)
+    {
+        if (mNodes[i].skin != -1 && mNodes[i].type == Node::NodeType::mesh)
+        {
+            auto jointCount = mSkines[mNodes[i].skin].joints.size();
+            std::vector<glm::mat4> jointMat;
+            computeJointMatrices(&jointMat, jointCount, mNodes[i].skin);
+            for (const auto instId: mNodes[i].instanceIds) {
+                auto &mesh = mMeshes[mInstances[instId].mMeshId];
+                int vbOffset = mesh.mVbOffset;
+                int sbOffset = mesh.mSbOffset;
+                for (int iv = 0; iv < mesh.mVertexCount; ++iv)
+                {
+                    glm::vec4 v_weight = mVertexSkinData[sbOffset + iv].weights;
+                    glm::u16vec4 v_joint = mVertexSkinData[sbOffset + iv].joints;
+                    glm::mat4 skinMat = v_weight[0] * jointMat[v_joint[0]]
+                                      + v_weight[1] * jointMat[v_joint[1]]
+                                      + v_weight[2] * jointMat[v_joint[2]]
+                                      + v_weight[3] * jointMat[v_joint[3]];
+                    mVertices[vbOffset + iv].pos = skinMat * glm::vec4(mVertexSkinData[sbOffset + iv].pos, 1.0);
+                    mVertices[vbOffset + iv].normal = packNormal(glm::normalize(glm::vec3(glm::mat3(skinMat) * glm::vec4(mVertexSkinData[sbOffset + iv].normal, 1.0))));
+                }
+            }
+        }
+    }
+}
+
+void Scene::computeJointMatrices(std::vector<glm::mat4> *jointMatrices, int jointCount, const uint32_t skinId)
+{
+    auto &skin = mSkines[skinId];
+    for (int i = 0; i < jointCount; ++i)
+    {
+        glm::mat4 jointGlobalTransform = calculateNodeGlobalTransform(skin.joints[i]);
+        jointMatrices->push_back(jointGlobalTransform * skin.inverseBindMatrices[i]);
+    }
+}
+
+glm::mat4 Scene::calculateNodeLocalTransform(const uint32_t nodeId)
+{
+    const glm::float4x4 translationMatrix = glm::translate(glm::float4x4(1.0f), mNodes[nodeId].translation);
+    const glm::float4x4 rotationMatrix{ mNodes[nodeId].rotation };
+    const glm::float4x4 scaleMatrix = glm::scale(glm::float4x4(1.0f), mNodes[nodeId].scale);
+    return translationMatrix * rotationMatrix * scaleMatrix;
+}
+
+glm::mat4 Scene::calculateNodeGlobalTransform(const uint32_t nodeId)
+{
+    int parentId = mNodes[nodeId].parent;
+    if (parentId == -1) {
+        return calculateNodeLocalTransform(nodeId);
+    }
+    else {
+        return calculateNodeGlobalTransform(parentId) * calculateNodeLocalTransform(nodeId);
+    }
+}
+
+bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType targetProperty, const glm::float3 newValue)
+{
+    switch (targetProperty)
+    {
+    case AnimationChannel::PathType::TRANSLATION:
+        mNodes[nodeId].translation = newValue;
+        return updateNode(nodeId);
+        break;
+
+    case AnimationChannel::PathType::SCALE:
+        mNodes[nodeId].scale = newValue;
+        return updateNode(nodeId);
+        break;
+    
+    case AnimationChannel::PathType::ROTATION:
+        std::cout << "Invalid value to animate ROTATION, use 2nd definition" << std::endl;
+        break;
+
+    default:
+        break;
+    }
+    return false;
+}
+
+bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType targetProperty, const glm::quat newValue) 
+{
+    switch (targetProperty)
+    {
+    case AnimationChannel::PathType::TRANSLATION:
+        std::cout << "Invalid value to animate TRANSLATION, use 1st definition" << std::endl;
+
+    case AnimationChannel::PathType::SCALE:
+        std::cout << "Invalid value to animate SCALE, use 1st definition" << std::endl;
+        break;
+    
+    case AnimationChannel::PathType::ROTATION:
+        mNodes[nodeId].rotation = newValue;
+        return updateNode(nodeId);
+        break;
+
+    default:
+        break;
+    }
+    return false;
+}
+
+bool Scene::updateNode(const uint32_t nodeId)
+{
+    bool skeletonNodesUpdated = false;
+    const glm::float4x4 globalTransform = calculateNodeGlobalTransform(nodeId);
+
+    // if this node is mesh node - updating Instances
+    // if this node is skeleton node - need to rebuild blas
+    switch (mNodes[nodeId].type)
+    {
+        case Node::NodeType::mesh:
+            for (const auto instId: mNodes[nodeId].instanceIds) {
+                mInstances[instId].transform = globalTransform;
+            }
+            return false;
+            break;
+
+        case Node::NodeType::skeleton:
+            skeletonNodesUpdated = true;
+            break;
+        
+        default:
+            break;
+    }
+
+    for (const auto childId: mNodes[nodeId].children) 
+    {
+        skeletonNodesUpdated = updateNode(childId) ? true : skeletonNodesUpdated;
+    }
+
+    return skeletonNodesUpdated;
+}
 
 //  valid range of coordinates [-1; 1]
 uint32_t packNormals(const glm::float3& normal)
@@ -303,7 +557,7 @@ void Scene::updateAnimation(const float time)
     mCameras[0].matrices.view = getTransform(mCameras[0].node);
 }
 
-uint32_t Scene::createLight(const UniformLightDesc& desc)
+void Scene::createLight(const UniformLightDesc& desc)
 {
     auto lightId = (uint32_t)mLights.size();
     Light l;
@@ -336,17 +590,25 @@ uint32_t Scene::createLight(const UniformLightDesc& desc)
     }
     else if (desc.type == 3)
     {
-        // distant light has no mesh so skip
-        return lightId;
+        // distant light
+        currentLightMeshId = 0; // empty
+        scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.radius, desc.radius, desc.radius));
+        return;
     }
 
     const glm::float4x4 transform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
+    /*const glm::float4x4 transform = glm::mat4(
+                                    1.0f, 0.0f, 0.0f, 0.0f,
+                                    0.0f, 1.0f, 0.0f, 0.0f,
+                                    0.0f, 0.0f, 1.0f, 0.0f,
+                                    0.0f, 0.0f, 0.0f, 1.0f
+                                    );*/
     uint32_t instId = createInstance(Instance::Type::eLight, currentLightMeshId, (uint32_t)-1, transform, lightId);
     assert(instId != -1);
 
     mLightIdToInstanceId[lightId] = instId;
 
-    return lightId;
+    //return lightId;
 }
 
 void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)

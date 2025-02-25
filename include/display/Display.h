@@ -34,7 +34,6 @@ public:
     virtual void destroy() = 0;
 
     virtual void* getDisplayNativeTexure() = 0;
-    virtual float getMaxEDR() = 0;
 
 #ifdef __APPLE__
     virtual void setNativeDevice(void* device) = 0;

@@ -26,53 +26,47 @@ __inline__ float misWeightBalance(const float a, const float b)
 static float calcLightArea(device const UniformLight& l)
 {
     float area = 0.0f;
-    switch (l.type)
-    {
-    case 0: // rectangle area
+
+    if (l.type == 0) // rectangle area
     {
         float3 e1 = float3(l.points[1]) - float3(l.points[0]);
         float3 e2 = float3(l.points[3]) - float3(l.points[0]);
         area = length(cross(e1, e2));
-        break;
     }
-    case 1: // disc area
+    else if (l.type == 1) // disc area
     {
         area = l.points[0].x * l.points[0].x * M_PI_F; // pi * radius^2
-        break;
     }
-    case 2: // sphere area
+    else if (l.type == 2) // sphere area
     {
         area = l.points[0].x * l.points[0].x * 4.0f * M_PI_F; // 4 * pi * radius^2
-        break;
-    }
     }
     return area;
 }
 
-static float3 calcLightNormal(device const UniformLight& l, thread const float3 hitPoint)
+static float3 calcLightNormal(device const UniformLight& l, thread const float3& hitPoint)
 {
     float3 norm = float3(0.0f);
-    switch (l.type)
+
+    if (l.type == 0)
     {
-    case 0: {
         float3 e1 = float3(l.points[1]) - float3(l.points[0]);
         float3 e2 = float3(l.points[3]) - float3(l.points[0]);
+
         norm = -normalize(cross(e1, e2));
-        break;
     }
-    case 1: {
+    else if (l.type == 1)
+    {
         norm = float3(l.normal);
-        break;
     }
-    case 2: {
+    else if (l.type == 2)
+    {
         norm = normalize(hitPoint - float3(l.points[1]));
-        break;
-    }
     }
     return norm;
 }
 
-static void fillLightData(device const UniformLight& l, thread const float3 hitPoint, thread LightSampleData& lightSampleData)
+static void fillLightData(device const UniformLight& l, thread const float3& hitPoint, thread LightSampleData& lightSampleData)
 {
     lightSampleData.area = calcLightArea(l);
     lightSampleData.normal = calcLightNormal(l, hitPoint);
@@ -188,7 +182,7 @@ static float3 SphQuadSample(const SphQuad squad, const float2 uv)
     return (squad.o + xu * squad.x + yv * squad.y + squad.z0 * squad.z);
 }
 
-static LightSampleData SampleRectLight(device const UniformLight& l, thread const float2 u, thread const float3 hitPoint)
+static LightSampleData SampleRectLight(device const UniformLight& l, thread const float2& u, thread const float3& hitPoint)
 {
     LightSampleData lightSampleData;
     float3 e1 = float3(l.points[1]) - float3(l.points[0]);
@@ -218,7 +212,7 @@ static LightSampleData SampleRectLight(device const UniformLight& l, thread cons
     return lightSampleData;
 }
 
-static __inline__ LightSampleData SampleRectLightUniform(device const UniformLight& l, thread const float2 u, thread const float3 hitPoint)
+static __inline__ LightSampleData SampleRectLightUniform(device const UniformLight& l, thread const float2& u, thread const float3& hitPoint)
 {
     LightSampleData lightSampleData;
     // uniform sampling
@@ -241,7 +235,7 @@ static __inline__ float getRectLightPdf(device const UniformLight& l, const floa
     return lightSampleData.pdf;
 }
 
-static void createCoordinateSystem(thread const float3 N, thread float3& Nt, thread float3& Nb) {
+static void createCoordinateSystem(thread const float3& N, thread float3& Nt, thread float3& Nb) {
     if (fabs(N.x) > fabs(N.y)) {
         float invLen = 1.0f / sqrt(N.x * N.x + N.z * N.z);
         Nt = float3(-N.z * invLen, 0.0f, N.x * invLen);

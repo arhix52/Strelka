@@ -235,11 +235,11 @@ static __forceinline__ __device__ float3 offset_ray(const float3 p, const float3
 //  valid range of coordinates [-1; 1]
 static __forceinline__ __device__ float3 unpackNormal(uint32_t val)
 {
-    constexpr float scale = 1.0f / 256.0f;
     float3 normal;
-    normal.z = ((val & 0xfff00000) >> 20) * scale - 1.0f;
-    normal.y = ((val & 0x000ffc00) >> 10) * scale - 1.0f;
-    normal.x = (val & 0x000003ff) * scale - 1.0f;
+    normal.z = ((val & 0xfff00000) >> 20) / 511.99999f * 2.0f - 1.0f;
+    normal.y = ((val & 0x000ffc00) >> 10) / 511.99999f * 2.0f - 1.0f;
+    normal.x = (val & 0x000003ff) / 511.99999f * 2.0f - 1.0f;
+
     return normal;
 }
 
@@ -253,7 +253,11 @@ static __forceinline__ __device__ float2 unpackUV(uint32_t val)
     return uv;
 }
 
-static __device__ float3 sampleLight(SamplerState& sampler,
+__device__ const float4 identity[3] = { { 1.0f, 0.0f, 0.0f, 0.0f },
+                                        { 0.0f, 1.0f, 0.0f, 0.0f },
+                                        { 0.0f, 0.0f, 1.0f, 0.0f } };
+
+__inline__ __device__ float3 sampleLight(SamplerState& sampler,
                                          const UniformLight& light,
                                          const Mdl_state& state,
                                          float3& toLight,
@@ -310,7 +314,7 @@ __device__ float3 estimateDirectLighting(SamplerState& sampler,
                                          float3& toLight,
                                          float& lightPdf)
 {
-    const float u = random<SampleDimension::eLightId>(sampler);
+    float u = random<SampleDimension::eLightId>(sampler);
     const uint32_t lightId = (uint32_t)(params.scene.numLights * u);
     const float lightSelectionPdf = 1.0f / params.scene.numLights;
     const UniformLight& currLight = params.scene.lights[lightId];
@@ -540,10 +544,10 @@ extern "C" __global__ void __closesthit__radiance()
         }
     }
 
-    if (sample_data.event_type & (mi::neuraylib::BSDF_EVENT_DIFFUSE | mi::neuraylib::BSDF_EVENT_GLOSSY))
+    if (sample_data.event_type & ((mi::neuraylib::BSDF_EVENT_DIFFUSE | mi::neuraylib::BSDF_EVENT_GLOSSY)))
     {
-        float3 toLight; // return value for estimateDirectLighting()
-        float lightPdf = 0.0f; // return value for estimateDirectLighting()
+        float3 toLight; // return value for sampleLights()
+        float lightPdf = 0.0f; // return value for sampleLights()
         const float3 radiance = estimateDirectLighting(prd->sampler, state, toLight, lightPdf);
         if (isnan(radiance) || isnan(lightPdf))
         {
@@ -553,7 +557,7 @@ extern "C" __global__ void __closesthit__radiance()
             return;
         }
 
-        const bool isNextEventValid = ((dot(toLight, state.normal) > 0.0f) != isInside) && (lightPdf != 0.0f);
+        const bool isNextEventValid = ((dot(toLight, state.normal) > 0.0f) != isInside) && lightPdf != 0.0f;
         if (isNextEventValid)
         {
             mi::neuraylib::Bsdf_evaluate_data<mi::neuraylib::DF_HSM_NONE> evalData = {};

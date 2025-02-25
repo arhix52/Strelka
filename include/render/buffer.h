@@ -50,11 +50,6 @@ public:
         return mHostData.size();
     }
 
-    void* getDevicePointer()
-    {
-        return mDeviceData;
-    }
-
     static size_t getElementSize(BufferFormat format)
     {
         switch (format)
@@ -89,7 +84,6 @@ public:
     }
 
 protected:
-    void* mDeviceData;
     size_t mWidth = 0u;
     size_t mHeight = 0u;
     BufferFormat mFormat;
@@ -100,7 +94,6 @@ protected:
 struct ImageBuffer
 {
     void* data = nullptr;
-    void* deviceData = nullptr;
     size_t dataSize = 0;
     unsigned int width = 0;
     unsigned int height = 0;
