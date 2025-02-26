@@ -62,7 +62,9 @@ static inline void optixCheck(OptixResult res, const char* call, const char* fil
 {
     if (res != OPTIX_SUCCESS)
     {
-        STRELKA_ERROR("OptiX call {0} failed: {1}:{2}", call, file, line);
+        const char* errorName = optixGetErrorName(res);
+        const char* errorString = optixGetErrorString(res);
+        STRELKA_ERROR("OptiX call {0} failed: {1}:{2} with [{3}] - [{4}]", call, file, line, errorName, errorString);
         assert(0);
     }
 }

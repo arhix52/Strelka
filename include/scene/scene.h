@@ -477,7 +477,7 @@ public:
                          const std::vector<glm::float3>& points,
                          const std::vector<float>& widths);
 
-    void createLight(const UniformLightDesc& desc);
+    uint32_t createLight(const UniformLightDesc& desc);
     /// <summary>
     /// Removes instance/mesh/material
     /// </summary>

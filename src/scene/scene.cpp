@@ -557,7 +557,7 @@ void Scene::updateAnimation(const float time)
     mCameras[0].matrices.view = getTransform(mCameras[0].node);
 }
 
-void Scene::createLight(const UniformLightDesc& desc)
+uint32_t Scene::createLight(const UniformLightDesc& desc)
 {
     auto lightId = (uint32_t)mLights.size();
     Light l;
@@ -590,25 +590,17 @@ void Scene::createLight(const UniformLightDesc& desc)
     }
     else if (desc.type == 3)
     {
-        // distant light
-        currentLightMeshId = 0; // empty
-        scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.radius, desc.radius, desc.radius));
-        return;
+        // distant light has no mesh so skip
+        return lightId;
     }
 
     const glm::float4x4 transform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
-    /*const glm::float4x4 transform = glm::mat4(
-                                    1.0f, 0.0f, 0.0f, 0.0f,
-                                    0.0f, 1.0f, 0.0f, 0.0f,
-                                    0.0f, 0.0f, 1.0f, 0.0f,
-                                    0.0f, 0.0f, 0.0f, 1.0f
-                                    );*/
     uint32_t instId = createInstance(Instance::Type::eLight, currentLightMeshId, (uint32_t)-1, transform, lightId);
     assert(instId != -1);
 
     mLightIdToInstanceId[lightId] = instId;
 
-    //return lightId;
+    return lightId;
 }
 
 void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
