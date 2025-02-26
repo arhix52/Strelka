@@ -14,6 +14,7 @@
 
 #include <Editor.h>
 
+#include <Params.h>
 
 int main(int argc, const char* argv[])
 {
@@ -53,6 +54,9 @@ int main(int argc, const char* argv[])
     const std::filesystem::path sceneFilePath = { sceneFile.c_str() };
     const std::string resourceSearchPath = sceneFilePath.parent_path().string();
     STRELKA_DEBUG("Resource search path {}", resourceSearchPath);
+
+    Params::sceneFile = sceneFile;
+    Params::resourceSearchPath = resourceSearchPath;
 
     oka::Editor editor;
 
