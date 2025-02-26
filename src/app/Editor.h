@@ -9,16 +9,13 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include <memory>
-#include <optional>
-
 #include "gltfloader.h"
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "ImGuizmo.h"
 #include "ImGuiFileDialog.h"
-
-#include "Params.h"
+#include "log.h"
 
 namespace oka
 {
@@ -43,14 +40,14 @@ private:
 public:
     Editor()
     {
-        m_settingsManager = std::unique_ptr<SettingsManager>(new SettingsManager());
+        m_settingsManager = std::make_unique<SettingsManager>();
 
-        m_scene = std::unique_ptr<Scene>(new Scene());
+        m_scene = std::make_unique<Scene>();
         m_display = std::unique_ptr<Display>(DisplayFactory::createDisplay());
         m_render = std::unique_ptr<Render>(RenderFactory::createRender());
-        m_sharedCtx = std::unique_ptr<SharedContext>(new SharedContext());
+        m_sharedCtx = std::make_unique<SharedContext>();
 
-        m_sceneLoader = std::unique_ptr<GltfLoader>(new GltfLoader());
+        m_sceneLoader = std::make_unique<GltfLoader>();
 
         m_render->setScene(m_scene.get());
         m_render->setSettingsManager(m_settingsManager.get());
@@ -64,13 +61,10 @@ public:
 #endif
         m_display->init(1024, 768, m_settingsManager.get());
     }
-    ~Editor()
-    {
-    }
+    ~Editor() = default;
 
     void prepare()
     {
-        m_sceneLoader->loadGltf(Params::sceneFile, *m_scene);
         oka::Camera camera;
         camera.name = "Main";
         camera.fov = 45.0f;
@@ -79,16 +73,13 @@ public:
         camera.updateViewMatrix();
         m_scene->addCamera(camera);
 
-        m_cameraController = std::unique_ptr<CameraController>(new CameraController(m_scene->getCamera(0), true));
+        m_cameraController = std::make_unique<CameraController>(m_scene->getCamera(0), true);
         m_display->setInputHandler(m_cameraController.get());
         loadSettings();
     }
 
     void loadSettings()
     {
-        const std::string resourceSearchPath = Params::resourceSearchPath;
-        STRELKA_DEBUG("Resource search path {}", resourceSearchPath);
-
         const uint32_t imageWidth = 1024;
         const uint32_t imageHeight = 768;
 
@@ -96,7 +87,6 @@ public:
         m_settingsManager->setAs<uint32_t>("render/height", imageHeight);
         m_settingsManager->setAs<uint32_t>("render/pt/depth", 4);
         m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", 256);
-        m_settingsManager->setAs<uint32_t>("render/nodes/rotationY", 500);
         m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
         m_settingsManager->setAs<uint32_t>("render/pt/iteration", 0);
         m_settingsManager->setAs<uint32_t>("render/pt/stratifiedSamplingType", 0); // 0 - none, 1 - random, 2 -
@@ -114,7 +104,7 @@ public:
         m_settingsManager->setAs<bool>("render/pt/screenshotSPP", false);
         m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
         m_settingsManager->setAs<bool>("render/enableValidation", false);
-        m_settingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
+        m_settingsManager->setAs<std::string>("resource/searchPath", "");
         // Postprocessing settings:
         m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", 100.0f);
         m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", 1.0f);
@@ -126,21 +116,6 @@ public:
         m_settingsManager->setAs<float>("render/pt/dev/shadowRayTmin", 0.0f); // offset to avoid self-collision in
                                                                               // light sampling
         m_settingsManager->setAs<float>("render/pt/dev/materialRayTmin", 0.0f); // offset to avoid self-collision in
-
-        loadAnimSettings();
-    }
-
-    void loadAnimSettings(){
-        // Animation settings
-        for (int i = 0; i < m_scene->getAnimations().size(); ++i) 
-        {
-            //TODO: need to erase all previous settings like render/animation/anim
-            std::string checkboxName = "render/animation/anim" + std::to_string(i) + "/state";
-            std::string scrollName = "render/animation/anim" + std::to_string(i) + "/time";
-
-            m_settingsManager->setAs<bool>(checkboxName.c_str(), false);
-            m_settingsManager->setAs<float>(scrollName.c_str(), m_scene->getAnimations()[i].start);
-        }
     }
 
     void run()
@@ -166,27 +141,25 @@ public:
             m_cameraController->update(deltaTime, cameraSpeed);
             prevTime = currentTime;
 
-            playAnimations(deltaTime);
-
             m_scene->updateCamera(m_cameraController->getCamera(), 0);
 
             m_display->onBeginFrame();
 
+            auto maxEDR = m_display->getMaxEDR();
+            m_settingsManager->setAs<float>("render/post/tonemapper/maxEDR", maxEDR);
+
             m_render->render(outputBuffer);
-            outputBuffer->map();
             oka::ImageBuffer outputImage;
-            outputImage.data = outputBuffer->getHostPointer();
-            outputImage.dataSize = outputBuffer->getHostDataSize();
+            outputImage.deviceData = outputBuffer->getDevicePointer();
             outputImage.height = outputBuffer->height();
             outputImage.width = outputBuffer->width();
             outputImage.pixel_format = oka::BufferFormat::FLOAT4;
+            outputImage.dataSize = outputBuffer->width() * outputBuffer->height() * outputBuffer->getElementSize();
             m_display->drawFrame(outputImage); // blit rendered image to swapchain
 
             drawUI(); // render ui to swapchain image in window resolution
             m_display->drawUI();
             m_display->onEndFrame(); // submit command buffer and present
-
-            outputBuffer->unmap();
 
             const uint32_t currentSpp = m_sharedCtx->mSubframeIndex;
             auto finish = std::chrono::high_resolution_clock::now();
@@ -195,31 +168,6 @@ public:
             m_display->setWindowTitle((std::string("Strelka") + " [" + std::to_string(frameTime) + " ms]" + " [" +
                                        std::to_string(currentSpp) + " spp]")
                                           .c_str());
-        }
-    }
-
-    void playAnimations(const double deltaTime) 
-    {
-        for (int i = 0; i < m_scene->getAnimations().size(); ++i) 
-        {
-            // checkboxName setting = play / stop
-            const std::string checkboxNameStr = "render/animation/anim" + std::to_string(i) + "/state";
-            const char *checkboxName = checkboxNameStr.c_str();
-            bool currAnimEnable = m_settingsManager->getAs<bool>(checkboxName);
-
-            if (currAnimEnable) 
-            {
-                const std::string scrollNameStr = "render/animation/anim" + std::to_string(i) + "/time";
-                const char *scrollName = scrollNameStr.c_str();
-                float currAnimTime = m_settingsManager->getAs<float>(scrollName);
-
-                const float currAnimStart = m_scene->getAnimations()[i].start;
-                const float currAnimEnd = m_scene->getAnimations()[i].end;
-
-                currAnimTime += deltaTime;
-                if (currAnimTime > currAnimEnd) currAnimTime -= (currAnimEnd - currAnimStart);
-                m_settingsManager->setAs<float>(scrollName, currAnimTime);
-            }
         }
     }
 
@@ -277,9 +225,7 @@ public:
                     camera.updateViewMatrix();
                     m_scene->addCamera(camera);
 
-                    loadAnimSettings();
-
-                    m_sharedCtx.reset(new SharedContext());
+                    m_sharedCtx = std::make_unique<SharedContext>();
 
                     m_render.reset(RenderFactory::createRender());
                     m_render->setSettingsManager(m_settingsManager.get());
@@ -440,7 +386,7 @@ public:
             m_settingsManager->setAs<bool>("render/pt/needScreenshot", true);
         }
 
-        float cameraSpeed = m_settingsManager->getAs<float>("render/cameraSpeed");
+        auto cameraSpeed = m_settingsManager->getAs<float>("render/cameraSpeed");
         ImGui::InputFloat("Camera Speed", (float*)&cameraSpeed, 0.5);
         m_settingsManager->setAs<float>("render/cameraSpeed", cameraSpeed);
 
@@ -464,43 +410,18 @@ public:
         }
         m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", currentTonemapItemId);
 
-        float gamma = m_settingsManager->getAs<float>("render/post/gamma");
+        auto gamma = m_settingsManager->getAs<float>("render/post/gamma");
         ImGui::InputFloat("Gamma", (float*)&gamma, 0.5);
         m_settingsManager->setAs<float>("render/post/gamma", gamma);
 
-        float materialRayTmin = m_settingsManager->getAs<float>("render/pt/dev/materialRayTmin");
+        auto materialRayTmin = m_settingsManager->getAs<float>("render/pt/dev/materialRayTmin");
         ImGui::InputFloat("Material ray T min", (float*)&materialRayTmin, 0.1);
         m_settingsManager->setAs<float>("render/pt/dev/materialRayTmin", materialRayTmin);
-        float shadowRayTmin = m_settingsManager->getAs<float>("render/pt/dev/shadowRayTmin");
+        auto shadowRayTmin = m_settingsManager->getAs<float>("render/pt/dev/shadowRayTmin");
         ImGui::InputFloat("Shadow ray T min", (float*)&shadowRayTmin, 0.1);
         m_settingsManager->setAs<float>("render/pt/dev/shadowRayTmin", shadowRayTmin);
 
         ImGui::End(); // end window
-
-        if (ImGui::Begin("Animations")) {
-
-            uint32_t rotationY = m_settingsManager->getAs<uint32_t>("render/nodes/rotationY");
-            ImGui::SliderInt("rotation Y", (int*)&rotationY, 500, 750);
-            m_settingsManager->setAs<uint32_t>("render/nodes/rotationY", rotationY);
-            
-            auto animations = m_scene->getAnimations();
-            for (int i = 0; i < animations.size(); ++i) {
-                std::string checkboxNameStr = "render/animation/anim" + std::to_string(i) + "/state";
-                const char *checkboxName = checkboxNameStr.c_str();
-                std::string scrollNameStr = "render/animation/anim" + std::to_string(i) + "/time";
-                const char *scrollName = scrollNameStr.c_str();
-
-                bool currAnimEnable = m_settingsManager->getAs<bool>(checkboxName);
-                ImGui::Checkbox(animations[i].name.c_str(), &currAnimEnable);
-                m_settingsManager->setAs<bool>(checkboxName, currAnimEnable);
-
-                float currAnimTime = m_settingsManager->getAs<float>(scrollName);
-                ImGui::SliderFloat((animations[i].name + " time").c_str(), &currAnimTime, animations[i].start, animations[i].end);
-                m_settingsManager->setAs<float>(scrollName, currAnimTime);
-            }
-
-            ImGui::End(); // end window
-        }
 
         // Rendering
         ImGui::Render();

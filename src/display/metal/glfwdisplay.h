@@ -26,6 +26,8 @@ public:
     void drawFrame(ImageBuffer& result) override;
     void drawUI() override;
 
+    float getMaxEDR() override;
+
 private:
     static constexpr size_t kMaxFramesInFlight = 3;
 

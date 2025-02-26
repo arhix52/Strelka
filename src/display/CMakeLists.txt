@@ -11,13 +11,17 @@ set(DISPLAY_SOURCES_COMMON
     ${ROOT_HOME}/include/display/Display.h ${ROOT_HOME}/src/display/Display.cpp
     ${ROOT_HOME}/src/display/DisplayFactory.cpp)
 if(WIN32 OR LINUX)
+  enable_language(CUDA)
+  find_package(CUDA REQUIRED)
+  message(STATUS "CUDA Toolkit Root: ${CUDA_TOOLKIT_ROOT_DIR}")
+  message(STATUS "CUDA Include DIR: ${CUDA_INCLUDE_DIRS}")
 
   set(IMGUI_SOURCES
-  # Imgui
-  ${ROOT_HOME}/external/imgui/imgui_impl_glfw.cpp
-  ${ROOT_HOME}/external/imgui/imgui_impl_opengl3.cpp
-  ${ROOT_HOME}/external/imgui/imgui_impl_glfw.h
-  ${ROOT_HOME}/external/imgui/imgui_impl_opengl3.h)
+    # Imgui
+    ${ROOT_HOME}/external/imgui/imgui_impl_glfw.cpp
+    ${ROOT_HOME}/external/imgui/imgui_impl_opengl3.cpp
+    ${ROOT_HOME}/external/imgui/imgui_impl_glfw.h
+    ${ROOT_HOME}/external/imgui/imgui_impl_opengl3.h)
 
   set(DISPLAY_SOURCES
       ${DISPLAY_SOURCES_COMMON} ${ROOT_HOME}/src/display/opengl/glfwdisplay.h
@@ -30,6 +34,8 @@ if(WIN32 OR LINUX)
     ${ROOT_HOME}/external/imgui/
   )
 
+  include_directories(${CUDA_INCLUDE_DIRS})
+  link_directories(${CUDA_LIBRARIES})
   target_link_libraries(${DISPLAYLIB_NAME}
     PUBLIC ${OPENGL_LIBRARIES}
     logger imgui::imgui imguizmo::imguizmo glfw glm::glm glad::glad)

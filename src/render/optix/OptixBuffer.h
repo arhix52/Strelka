@@ -45,7 +45,6 @@ public:
     }
 
 protected:
-    void* mDeviceData = nullptr;
     size_t mSizeInBytes;
     uint32_t mDeviceIndex = 0;
 };

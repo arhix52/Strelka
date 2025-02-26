@@ -28,12 +28,15 @@ kernel void toneMappingComputeShader(
     case ToneMapperType::eACES:
         result = ACESFitted(result * uniforms.exposureValue);
         break;
-    case ToneMapperType::eFilmic: 
+    case ToneMapperType::eFilmic:
         result = ACESFilm(result * uniforms.exposureValue);
         break;
     case ToneMapperType::eNone:
         break;
     }
+
+    result *= uniforms.maxEDR;
+
     if (uniforms.gamma > 0.0f)
     {
         result = srgbGamma(result, uniforms.gamma);

@@ -59,10 +59,6 @@ struct PathTracerState
 class OptiXRender : public Render
 {
 private:
-
-    float rotationAngle = 0.00f;
-    int updateCount = 0;
-
     struct Mesh
     {
         OptixTraversableHandle gas_handle = 0;
@@ -165,7 +161,6 @@ public:
     void createContext();
     void createBottomLevelAccelerationStructures();
     void createTopLevelAccelerationStructure();
-    void updateTopLevelAccelerationStructure();
     void createModule();
     void createProgramGroups();
     void createPipeline();

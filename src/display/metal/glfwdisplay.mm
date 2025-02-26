@@ -71,8 +71,8 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     layer = CA::MetalLayer::layer();
     layer->setDevice(_pDevice);
     layer->setPixelFormat(MTL::PixelFormatRGBA16Float);
-    CAMetalLayer* l = (__bridge CAMetalLayer*)layer;
-    const CFStringRef name = kCGColorSpaceExtendedLinearSRGB;
+    auto l = (__bridge CAMetalLayer*)layer;
+    const CFStringRef name = kCGColorSpaceExtendedDisplayP3;
     CGColorSpaceRef colorspace = CGColorSpaceCreateWithName(name);
     l.colorspace = colorspace;
     CGColorSpaceRelease(colorspace);
@@ -93,12 +93,16 @@ void* GlfwDisplay::getDisplayNativeTexure()
     return mTexture;
 }
 
+float GlfwDisplay::getMaxEDR()
+{
+    NSWindow *nswin = glfwGetCocoaWindow(mWindow);
+    return nswin.screen.maximumExtendedDynamicRangeColorComponentValue;
+}
 
 void GlfwDisplay::drawFrame(ImageBuffer& result)
 {
     NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
-
-    bool needRecreate = (result.height != mTexHeight || result.width != mTexWidth);
+    const bool needRecreate = result.height != mTexHeight || result.width != mTexWidth;
     if (needRecreate)
     {
         mTexWidth = result.width;

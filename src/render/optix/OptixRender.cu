@@ -249,13 +249,13 @@ __device__ float3 interpolateAttrib(const float3 attr1,
 }
 
 //  valid range of coordinates [-1; 1]
-__device__ float3 unpackNormal(uint32_t val)
+static __forceinline__ __device__ float3 unpackNormal(uint32_t val)
 {
+    constexpr float scale = 1.0f / 256.0f;
     float3 normal;
-    normal.z = ((val & 0xfff00000) >> 20) / 511.99999f * 2.0f - 1.0f;
-    normal.y = ((val & 0x000ffc00) >> 10) / 511.99999f * 2.0f - 1.0f;
-    normal.x = (val & 0x000003ff) / 511.99999f * 2.0f - 1.0f;
-
+    normal.z = ((val & 0xfff00000) >> 20) * scale - 1.0f;
+    normal.y = ((val & 0x000ffc00) >> 10) * scale - 1.0f;
+    normal.x = (val & 0x000003ff) * scale - 1.0f;
     return normal;
 }
 
