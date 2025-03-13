@@ -34,6 +34,8 @@
 
 #include "cuda_checks.h"
 #include "postprocessing/Tonemappers.h"
+#include "skinning/skinning.h"
+#include <iostream>
 
 #include "Camera.h"
 
@@ -976,6 +978,42 @@ void OptiXRender::render(Buffer* output)
     if (settingsChanged) {
         if (blasChanged) {
             mScene->applySkinning();
+            {
+                const int N = 512;
+                float A[N], B[N], C[N];
+
+                // Инициализация данных
+                for (int i = 0; i < N; i++)
+                {
+                    A[i] = i;
+                    B[i] = i * 2;
+                }
+
+                float *d_A, *d_B, *d_C;
+
+                // Выделение памяти на устройстве
+                cudaMalloc((void **)&d_A, N * sizeof(float));
+                cudaMalloc((void **)&d_B, N * sizeof(float));
+                cudaMalloc((void **)&d_C, N * sizeof(float));
+
+                vectorAdd(A, B, C, N, d_A, d_B, d_C);
+
+                // Проверка результата
+                for (int i = 0; i < N; i++)
+                {
+                    if (C[i] != A[i] + B[i])
+                    {
+                        STRELKA_ERROR("error on pos {0}: {1}", i, C[i]);
+                    }
+                }
+
+                STRELKA_INFO("good!");
+
+                // Освобождение памяти
+                cudaFree(d_A);
+                cudaFree(d_B);
+                cudaFree(d_C);
+            }
             createVertexBuffer();
             createBottomLevelAccelerationStructures();
             createTopLevelAccelerationStructure();
