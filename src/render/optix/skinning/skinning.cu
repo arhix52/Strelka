@@ -1,24 +1,63 @@
 #include "skinning.h"
+#include <sutil/vec_math.h>
 
-// CUDA ядро для сложения двух векторов
-__global__ void cuVectorAdd(const float *A, const float *B, float *C, int N)
+//  valid range of coordinates [-1; 1]
+__device__ uint32_t packNormal(float3 normal)
 {
-    int index = threadIdx.x + blockIdx.x * blockDim.x;
-    if (index < N)
-    {
-        C[index] = A[index] + B[index];
-    }
+    uint32_t packed = (uint32_t)((normal.x + 1.0f) / 2.0f * 511.99999f);
+    packed += (uint32_t)((normal.y + 1.0f) / 2.0f * 511.99999f) << 10;
+    packed += (uint32_t)((normal.z + 1.0f) / 2.0f * 511.99999f) << 20;
+    return packed;
 }
 
-void vectorAdd(float* A, float* B, float* C, int N, float* d_A, float* d_B, float* d_C)
+__global__ void skinningKernel(
+    const int vbOffset,
+    const int sbOffset,
+    void* vertexPtr,
+    const float3* d_initial_positions,
+    const float3* d_initial_normals, 
+    const float4* d_weights,
+    const int4* d_joints,
+    const sutil::Matrix4x4* d_jointMats,
+    const uint32_t vertexCount) 
 {
-    // Копирование данных на устройство
-    cudaMemcpy(d_A, A, N * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, B, N * sizeof(float), cudaMemcpyHostToDevice);
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= vertexCount) return;
 
-    // Запуск ядра (1 блок, N потоков)
-    cuVectorAdd<<<1, N>>>(d_A, d_B, d_C, N);
+    int offsettedId = idx + sbOffset;
+    float3 initialPos = d_initial_positions[offsettedId];
+    float3 initialNorm = d_initial_normals[offsettedId];
+    float4 weights = d_weights[offsettedId];
+    int4 joints = d_joints[offsettedId];
 
-    // Копирование результата с устройства
-    cudaMemcpy(C, d_C, N * sizeof(float), cudaMemcpyDeviceToHost);
+    const sutil::Matrix4x4 skinMat =
+          weights.x * d_jointMats[joints.x]
+        + weights.y * d_jointMats[joints.y]
+        + weights.z * d_jointMats[joints.z]
+        + weights.w * d_jointMats[joints.w];
+
+    char* vertexBase = static_cast<char*>(vertexPtr);
+
+    float3* vertexPos = reinterpret_cast<float3*>(vertexBase + (vbOffset + idx) * 32);
+    *vertexPos = make_float3(skinMat * make_float4(initialPos.x, initialPos.y, initialPos.z, 1.0f));
+
+    uint32_t* vertexNorm = reinterpret_cast<uint32_t*>(vertexBase + (vbOffset + idx) * 32 + 16);
+    *vertexNorm = packNormal(normalize(make_matrix3x3(skinMat) * initialNorm));
+}
+
+void cuApplySkinning(
+    int threads_per_block,
+    const int vbOffset,
+    const int sbOffset,
+    void* vertexPtr,
+    const float3* d_initial_positions,
+    const float3* d_initial_normals, 
+    const float4* d_weights,
+    const int4* d_joints,
+    const sutil::Matrix4x4* d_jointMats,
+    const uint32_t vertexCount)
+{
+    int blocks_per_grid = (vertexCount + threads_per_block - 1) / threads_per_block;
+    skinningKernel<<<blocks_per_grid, threads_per_block>>>(vbOffset, sbOffset, vertexPtr,
+        d_initial_positions, d_initial_normals, d_weights, d_joints, d_jointMats, vertexCount);
 }

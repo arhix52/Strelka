@@ -21,6 +21,7 @@
 #include <vector_functions.h>
 
 #include <sutil/vec_math_adv.h>
+#include <sutil/Matrix.h>
 
 #include "texture_support_cuda.h"
 
@@ -912,6 +913,85 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
     }
 }
 
+//  valid range of coordinates [-1; 1]
+uint32_t packNormal(const glm::float3& normal)
+{
+    auto packed = (uint32_t)((normal.x + 1.0f) / 2.0f * 511.99999f);
+    packed += (uint32_t)((normal.y + 1.0f) / 2.0f * 511.99999f) << 10;
+    packed += (uint32_t)((normal.z + 1.0f) / 2.0f * 511.99999f) << 20;
+    return packed;
+}
+void OptiXRender::applySkinning()
+{
+    for (auto& node: mScene->mNodes)
+    {
+        if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
+        {
+            auto jointCount = mScene->mSkines[node.skin].joints.size();
+            std::vector<glm::mat4> jointMat;
+            mScene->computeJointMatrices(&jointMat, jointCount, node.skin);
+            for (const auto instId: node.instanceIds) {
+                auto &mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
+                sutil::Matrix4x4* d_jointMats;
+                cudaMalloc(&d_jointMats, jointCount * sizeof(sutil::Matrix4x4));
+                std::vector<sutil::Matrix4x4> jointMatrices(jointCount);
+                std::transform(jointMat.begin(), jointMat.end(), jointMatrices.begin(),
+                            [](const glm::mat4& m) -> sutil::Matrix4x4 { 
+                                sutil::Matrix4x4 matrix;
+                                matrix[0] = m[0][0]; matrix[4] = m[0][1]; matrix[8] = m[0][2]; matrix[12] = m[0][3];
+                                matrix[1] = m[1][0]; matrix[5] = m[1][1]; matrix[9] = m[1][2]; matrix[13] = m[1][3];
+                                matrix[2] = m[2][0]; matrix[6] = m[2][1]; matrix[10] = m[2][2]; matrix[14] = m[2][3];
+                                matrix[3] = m[3][0]; matrix[7] = m[3][1]; matrix[11] = m[3][2]; matrix[15] = m[3][3];
+                                return matrix;
+                            });
+                cudaMemcpy(d_jointMats, jointMatrices.data(), jointCount * sizeof(sutil::Matrix4x4), cudaMemcpyHostToDevice);
+
+                cuApplySkinning(256, mesh.mVbOffset, mesh.mSbOffset, reinterpret_cast<void*>(mVertexBuffer->getPtr()),
+                                mSkinningPtrs.d_initial_positions, mSkinningPtrs.d_initial_normals, 
+                                mSkinningPtrs.d_weights, mSkinningPtrs.d_joints, d_jointMats, mesh.mVertexCount);
+
+                cudaFree(d_jointMats);
+            }
+        }
+    }
+}
+
+void OptiXRender::createSkinnigData() {
+    size_t vertexCount = mScene->mVertices.size();
+
+    // initial positions
+    size_t initPosSize = vertexCount * sizeof(float3);
+    cudaMalloc(&mSkinningPtrs.d_initial_positions, initPosSize);
+    std::vector<float3> initPositions(vertexCount);
+    std::transform(mScene->mVertexSkinData.begin(), mScene->mVertexSkinData.end(), initPositions.begin(),
+                [](const oka::Scene::vertexSkinData& v) -> float3 { return make_float3(v.pos.x, v.pos.y, v.pos.z); });
+    cudaMemcpy(mSkinningPtrs.d_initial_positions, initPositions.data(), initPosSize, cudaMemcpyHostToDevice);
+
+    // initial normals
+    size_t initNormSize = vertexCount * sizeof(float3);
+    cudaMalloc(&mSkinningPtrs.d_initial_normals, initNormSize);
+    std::vector<float3> initNormals(vertexCount);
+    std::transform(mScene->mVertexSkinData.begin(), mScene->mVertexSkinData.end(), initNormals.begin(),
+                [](const oka::Scene::vertexSkinData& v) -> float3 { return make_float3(v.normal.x, v.normal.y, v.normal.z); });
+    cudaMemcpy(mSkinningPtrs.d_initial_normals, initNormals.data(), initNormSize, cudaMemcpyHostToDevice);
+
+    // weights
+    size_t weightSize = vertexCount * sizeof(float4);
+    cudaMalloc(&mSkinningPtrs.d_weights, weightSize);
+    std::vector<float4> weights(vertexCount);
+    std::transform(mScene->mVertexSkinData.begin(), mScene->mVertexSkinData.end(), weights.begin(),
+                [](const oka::Scene::vertexSkinData& v) -> float4 { return make_float4(v.weights.x, v.weights.y, v.weights.z, v.weights.w); });
+    cudaMemcpy(mSkinningPtrs.d_weights, weights.data(), weightSize, cudaMemcpyHostToDevice);
+
+    // joints
+    size_t jointSize = vertexCount * sizeof(int4);
+    cudaMalloc(&mSkinningPtrs.d_joints, jointSize);
+    std::vector<int4> joints(vertexCount);
+    std::transform(mScene->mVertexSkinData.begin(), mScene->mVertexSkinData.end(), joints.begin(),
+                [](const oka::Scene::vertexSkinData& v) -> int4 { return make_int4(v.joints.x, v.joints.y, v.joints.z, v.joints.w); });
+    cudaMemcpy(mSkinningPtrs.d_joints, joints.data(), jointSize, cudaMemcpyHostToDevice);
+}
+
 void OptiXRender::render(Buffer* output)
 {
     if (getSharedContext().mFrameNumber == 0)
@@ -920,13 +1000,14 @@ void OptiXRender::render(Buffer* output)
         createPipeline();
         createVertexBuffer();
         createIndexBuffer();
+        createSkinnigData();
         // upload all curve data
         createPointsBuffer();
         createWidthsBuffer();
         createBottomLevelAccelerationStructures();
         createTopLevelAccelerationStructure();
         createSbt();
-        createLightBuffer();
+        createLightBuffer(); 
     }
 
     if (mScene->getDirtyState() == DirtyFlag::eLights)
@@ -977,44 +1058,8 @@ void OptiXRender::render(Buffer* output)
     // full rebuild or TLAS refit/reduild
     if (settingsChanged) {
         if (blasChanged) {
-            mScene->applySkinning();
-            {
-                const int N = 512;
-                float A[N], B[N], C[N];
-
-                // Инициализация данных
-                for (int i = 0; i < N; i++)
-                {
-                    A[i] = i;
-                    B[i] = i * 2;
-                }
-
-                float *d_A, *d_B, *d_C;
-
-                // Выделение памяти на устройстве
-                cudaMalloc((void **)&d_A, N * sizeof(float));
-                cudaMalloc((void **)&d_B, N * sizeof(float));
-                cudaMalloc((void **)&d_C, N * sizeof(float));
-
-                vectorAdd(A, B, C, N, d_A, d_B, d_C);
-
-                // Проверка результата
-                for (int i = 0; i < N; i++)
-                {
-                    if (C[i] != A[i] + B[i])
-                    {
-                        STRELKA_ERROR("error on pos {0}: {1}", i, C[i]);
-                    }
-                }
-
-                STRELKA_INFO("good!");
-
-                // Освобождение памяти
-                cudaFree(d_A);
-                cudaFree(d_B);
-                cudaFree(d_C);
-            }
-            createVertexBuffer();
+            applySkinning();
+            //createVertexBuffer();
             createBottomLevelAccelerationStructures();
             createTopLevelAccelerationStructure();
         }

@@ -104,11 +104,28 @@ private:
         oka::Camera::Matrices mCamMatrices;
     };
 
+    struct DeviceSkinningPtrs
+    {
+        float3* d_initial_positions;
+        float3* d_initial_normals;
+        float4* d_weights;
+        int4* d_joints;
+        ~DeviceSkinningPtrs()
+        {
+            cudaFree(d_initial_positions);
+            cudaFree(d_initial_normals);
+            cudaFree(d_weights);
+            cudaFree(d_joints);
+        }
+    };
+    DeviceSkinningPtrs mSkinningPtrs;
+
     View mPrevView;
 
     PathTracerState mState;
     bool mEnableValidation;
 
+    void createSkinnigData();
     Mesh* createMesh(const oka::Mesh& mesh);
     Curve* createCurve(const oka::Curve& curve);
     bool compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes);
@@ -162,6 +179,7 @@ public:
     void render(Buffer* output_buffer) override;
     Buffer* createBuffer(const BufferDesc& desc) override;
 
+    void applySkinning();
     void createContext();
     void createBottomLevelAccelerationStructures();
     void createTopLevelAccelerationStructure();
