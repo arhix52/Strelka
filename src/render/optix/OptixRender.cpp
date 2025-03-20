@@ -923,34 +923,58 @@ uint32_t packNormal(const glm::float3& normal)
 }
 void OptiXRender::applySkinning()
 {
+    // joint matrices
+    {
+        std::vector<glm::mat4> jointMat;
+        for (auto& node: mScene->mNodes)
+        {
+            if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
+            {
+                auto jointCount = mScene->mSkines[node.skin].joints.size();
+                std::vector<glm::mat4> currJointMats;
+                mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
+                
+                jointMat.insert(jointMat.end(), currJointMats.begin(), currJointMats.end());
+                mSkinMatOffsets.push_back(currJointMats.size());
+            }
+        }
+        
+        size_t jointMatSize = jointMat.size();
+        std::vector<sutil::Matrix4x4> cudaMatrices(jointMatSize);
+
+        std::transform(jointMat.begin(), jointMat.end(), cudaMatrices.begin(),
+            [](glm::mat4& m) -> sutil::Matrix4x4 { 
+                sutil::Matrix4x4 matrix;
+                matrix[0] = m[0][0]; matrix[4] = m[0][1]; matrix[8] = m[0][2]; matrix[12] = m[0][3];
+                matrix[1] = m[1][0]; matrix[5] = m[1][1]; matrix[9] = m[1][2]; matrix[13] = m[1][3];
+                matrix[2] = m[2][0]; matrix[6] = m[2][1]; matrix[10] = m[2][2]; matrix[14] = m[2][3];
+                matrix[3] = m[3][0]; matrix[7] = m[3][1]; matrix[11] = m[3][2]; matrix[15] = m[3][3];
+                return matrix;
+            });          
+        
+        cudaMemcpy(mSkinningPtrs.d_jointMats, cudaMatrices.data(), jointMatSize * sizeof(sutil::Matrix4x4), cudaMemcpyHostToDevice);
+    }
+
+    //apply skinning
+    int index = 0;
+    int jointMatOffset = 0;
     for (auto& node: mScene->mNodes)
     {
         if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
         {
-            auto jointCount = mScene->mSkines[node.skin].joints.size();
-            std::vector<glm::mat4> jointMat;
-            mScene->computeJointMatrices(&jointMat, jointCount, node.skin);
+            if (index > 0) { jointMatOffset += mSkinMatOffsets[index - 1]; }
+            index++;
+
             for (const auto instId: node.instanceIds) {
                 auto &mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
-                sutil::Matrix4x4* d_jointMats;
-                cudaMalloc(&d_jointMats, jointCount * sizeof(sutil::Matrix4x4));
-                std::vector<sutil::Matrix4x4> jointMatrices(jointCount);
-                std::transform(jointMat.begin(), jointMat.end(), jointMatrices.begin(),
-                            [](const glm::mat4& m) -> sutil::Matrix4x4 { 
-                                sutil::Matrix4x4 matrix;
-                                matrix[0] = m[0][0]; matrix[4] = m[0][1]; matrix[8] = m[0][2]; matrix[12] = m[0][3];
-                                matrix[1] = m[1][0]; matrix[5] = m[1][1]; matrix[9] = m[1][2]; matrix[13] = m[1][3];
-                                matrix[2] = m[2][0]; matrix[6] = m[2][1]; matrix[10] = m[2][2]; matrix[14] = m[2][3];
-                                matrix[3] = m[3][0]; matrix[7] = m[3][1]; matrix[11] = m[3][2]; matrix[15] = m[3][3];
-                                return matrix;
-                            });
-                cudaMemcpy(d_jointMats, jointMatrices.data(), jointCount * sizeof(sutil::Matrix4x4), cudaMemcpyHostToDevice);
 
-                cuApplySkinning(256, mesh.mVbOffset, mesh.mSbOffset, reinterpret_cast<void*>(mVertexBuffer->getPtr()),
+                cuApplySkinning(256, 
+                                mesh.mVbOffset, mesh.mSbOffset, 
+                                reinterpret_cast<void*>(mVertexBuffer->getPtr()),
                                 mSkinningPtrs.d_initial_positions, mSkinningPtrs.d_initial_normals, 
-                                mSkinningPtrs.d_weights, mSkinningPtrs.d_joints, d_jointMats, mesh.mVertexCount);
-
-                cudaFree(d_jointMats);
+                                mSkinningPtrs.d_weights, mSkinningPtrs.d_joints, 
+                                mSkinningPtrs.d_jointMats, jointMatOffset, 
+                                mesh.mVertexCount);
             }
         }
     }
@@ -990,6 +1014,26 @@ void OptiXRender::createSkinnigData() {
     std::transform(mScene->mVertexSkinData.begin(), mScene->mVertexSkinData.end(), joints.begin(),
                 [](const oka::Scene::vertexSkinData& v) -> int4 { return make_int4(v.joints.x, v.joints.y, v.joints.z, v.joints.w); });
     cudaMemcpy(mSkinningPtrs.d_joints, joints.data(), jointSize, cudaMemcpyHostToDevice);
+
+    // joint matrices alloc
+    {
+        std::vector<glm::mat4> jointMat;
+        for (auto& node: mScene->mNodes)
+        {
+            if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
+            {
+                auto jointCount = mScene->mSkines[node.skin].joints.size();
+                std::vector<glm::mat4> currJointMats;
+                mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
+                
+                jointMat.insert(jointMat.end(), currJointMats.begin(), currJointMats.end());
+                mSkinMatOffsets.push_back(currJointMats.size());
+            }
+        }
+        
+        size_t jointMatSize = jointMat.size();
+        cudaMalloc(&mSkinningPtrs.d_jointMats, jointMatSize * sizeof(sutil::Matrix4x4));
+    }
 }
 
 void OptiXRender::render(Buffer* output)
@@ -1051,7 +1095,7 @@ void OptiXRender::render(Buffer* output)
         if (std::abs(animations[i].current - currAnimTime) > EPSILON) {
             settingsChanged = true;
             animations[i].current = currAnimTime;
-            blasChanged = mScene->applyAnimation(i) ? true : blasChanged;
+            blasChanged |= mScene->applyAnimation(i);
         }
     }
 
@@ -1059,7 +1103,6 @@ void OptiXRender::render(Buffer* output)
     if (settingsChanged) {
         if (blasChanged) {
             applySkinning();
-            //createVertexBuffer();
             createBottomLevelAccelerationStructures();
             createTopLevelAccelerationStructure();
         }

@@ -110,15 +110,18 @@ private:
         float3* d_initial_normals;
         float4* d_weights;
         int4* d_joints;
+        sutil::Matrix4x4* d_jointMats;
         ~DeviceSkinningPtrs()
         {
             cudaFree(d_initial_positions);
             cudaFree(d_initial_normals);
             cudaFree(d_weights);
             cudaFree(d_joints);
+            cudaFree(d_jointMats);
         }
     };
     DeviceSkinningPtrs mSkinningPtrs;
+    std::vector<int> mSkinMatOffsets;
 
     View mPrevView;
 

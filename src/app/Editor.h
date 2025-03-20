@@ -43,14 +43,14 @@ private:
 public:
     Editor()
     {
-        m_settingsManager = std::unique_ptr<SettingsManager>(new SettingsManager());
+        m_settingsManager = std::make_unique<SettingsManager>();
 
-        m_scene = std::unique_ptr<Scene>(new Scene());
+        m_scene = std::make_unique<Scene>();
         m_display = std::unique_ptr<Display>(DisplayFactory::createDisplay());
         m_render = std::unique_ptr<Render>(RenderFactory::createRender());
-        m_sharedCtx = std::unique_ptr<SharedContext>(new SharedContext());
+        m_sharedCtx = std::make_unique<SharedContext>();
 
-        m_sceneLoader = std::unique_ptr<GltfLoader>(new GltfLoader());
+        m_sceneLoader = std::make_unique<GltfLoader>();
 
         m_render->setScene(m_scene.get());
         m_render->setSettingsManager(m_settingsManager.get());
@@ -64,9 +64,7 @@ public:
 #endif
         m_display->init(1024, 768, m_settingsManager.get());
     }
-    ~Editor()
-    {
-    }
+    ~Editor() = default;
 
     void prepare()
     {
@@ -79,7 +77,7 @@ public:
         camera.updateViewMatrix();
         m_scene->addCamera(camera);
 
-        m_cameraController = std::unique_ptr<CameraController>(new CameraController(m_scene->getCamera(0), true));
+        m_cameraController = std::make_unique<CameraController>(m_scene->getCamera(0), true);
         m_display->setInputHandler(m_cameraController.get());
         loadSettings();
     }
@@ -440,7 +438,7 @@ public:
             m_settingsManager->setAs<bool>("render/pt/needScreenshot", true);
         }
 
-        float cameraSpeed = m_settingsManager->getAs<float>("render/cameraSpeed");
+        auto cameraSpeed = m_settingsManager->getAs<float>("render/cameraSpeed");
         ImGui::InputFloat("Camera Speed", (float*)&cameraSpeed, 0.5);
         m_settingsManager->setAs<float>("render/cameraSpeed", cameraSpeed);
 

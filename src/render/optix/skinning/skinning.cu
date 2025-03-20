@@ -19,6 +19,7 @@ __global__ void skinningKernel(
     const float4* d_weights,
     const int4* d_joints,
     const sutil::Matrix4x4* d_jointMats,
+    int jointMatOffset,
     const uint32_t vertexCount) 
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -31,10 +32,10 @@ __global__ void skinningKernel(
     int4 joints = d_joints[offsettedId];
 
     const sutil::Matrix4x4 skinMat =
-          weights.x * d_jointMats[joints.x]
-        + weights.y * d_jointMats[joints.y]
-        + weights.z * d_jointMats[joints.z]
-        + weights.w * d_jointMats[joints.w];
+          weights.x * d_jointMats[jointMatOffset + joints.x]
+        + weights.y * d_jointMats[jointMatOffset + joints.y]
+        + weights.z * d_jointMats[jointMatOffset + joints.z]
+        + weights.w * d_jointMats[jointMatOffset + joints.w];
 
     char* vertexBase = static_cast<char*>(vertexPtr);
 
@@ -55,9 +56,10 @@ void cuApplySkinning(
     const float4* d_weights,
     const int4* d_joints,
     const sutil::Matrix4x4* d_jointMats,
+    int jointMatOffset,
     const uint32_t vertexCount)
 {
     int blocks_per_grid = (vertexCount + threads_per_block - 1) / threads_per_block;
     skinningKernel<<<blocks_per_grid, threads_per_block>>>(vbOffset, sbOffset, vertexPtr,
-        d_initial_positions, d_initial_normals, d_weights, d_joints, d_jointMats, vertexCount);
+        d_initial_positions, d_initial_normals, d_weights, d_joints, d_jointMats, jointMatOffset, vertexCount);
 }

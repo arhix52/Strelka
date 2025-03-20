@@ -193,7 +193,7 @@ glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationC
         break;
 
     case AnimationSampler::InterpolationType::CUBICSPLINE :
-        std::cout << "CUBICSPLINE interpolation not yet supported, skipping" << std::endl;
+        STRELKA_DEBUG("CUBICSPLINE interpolation not yet supported, skipping");
         break;
     
     default: //linear
@@ -227,14 +227,14 @@ uint32_t packNormal(const glm::float3& normal);
 
 void Scene::applySkinning()
 {
-    for (int i = 0; i < mNodes.size(); ++i)
+    for (auto& node: mNodes)
     {
-        if (mNodes[i].skin != -1 && mNodes[i].type == Node::NodeType::mesh)
+        if (node.skin != -1 && node.type == Node::NodeType::mesh)
         {
-            auto jointCount = mSkines[mNodes[i].skin].joints.size();
+            auto jointCount = mSkines[node.skin].joints.size();
             std::vector<glm::mat4> jointMat;
-            computeJointMatrices(&jointMat, jointCount, mNodes[i].skin);
-            for (const auto instId: mNodes[i].instanceIds) {
+            computeJointMatrices(&jointMat, jointCount, node.skin);
+            for (const auto instId: node.instanceIds) {
                 auto &mesh = mMeshes[mInstances[instId].mMeshId];
                 int vbOffset = mesh.mVbOffset;
                 int sbOffset = mesh.mSbOffset;
@@ -298,7 +298,7 @@ bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType target
         break;
     
     case AnimationChannel::PathType::ROTATION:
-        std::cout << "Invalid value to animate ROTATION, use 2nd definition" << std::endl;
+        STRELKA_DEBUG("Invalid value to animate ROTATION, use 2nd definition");
         break;
 
     default:
@@ -312,10 +312,10 @@ bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType target
     switch (targetProperty)
     {
     case AnimationChannel::PathType::TRANSLATION:
-        std::cout << "Invalid value to animate TRANSLATION, use 1st definition" << std::endl;
+        STRELKA_DEBUG("Invalid value to animate TRANSLATION, use 1st definition");
 
     case AnimationChannel::PathType::SCALE:
-        std::cout << "Invalid value to animate SCALE, use 1st definition" << std::endl;
+        STRELKA_DEBUG("Invalid value to animate SCALE, use 1st definition");
         break;
     
     case AnimationChannel::PathType::ROTATION:

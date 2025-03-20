@@ -11,4 +11,5 @@ extern "C" void cuApplySkinning(
     const float4* d_weights,
     const int4* d_joints,
     const sutil::Matrix4x4* d_jointMats,
+    int jointMatOffset,
     const uint32_t vertexCount);
