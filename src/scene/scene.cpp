@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <filesystem>
 
+#include <log/log.h>
+
 #include <iostream>
 
 namespace fs = std::filesystem;
