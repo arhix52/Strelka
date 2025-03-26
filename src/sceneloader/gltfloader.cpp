@@ -34,12 +34,13 @@ uint32_t packUV(const glm::float2& uv)
 }
 
 //  valid range of coordinates [-1; 1]
-uint32_t packNormal(const glm::float3& normal)
+static uint32_t packNormal(const glm::float3& normal)
 {
-    auto packed = (uint32_t)((normal.x + 1.0f) / 2.0f * 511.99999f);
-    packed += (uint32_t)((normal.y + 1.0f) / 2.0f * 511.99999f) << 10;
-    packed += (uint32_t)((normal.z + 1.0f) / 2.0f * 511.99999f) << 20;
-    return packed;
+    constexpr float scale = 256.0f;
+    auto x = (uint32_t)((normal.x + 1.0f) * scale);
+    auto y = (uint32_t)((normal.y + 1.0f) * scale);
+    auto z = (uint32_t)((normal.z + 1.0f) * scale);
+    return (z << 20) | (y << 10) | x;
 }
 
 //  valid range of coordinates [-10; 10]

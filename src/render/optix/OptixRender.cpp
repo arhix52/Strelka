@@ -36,7 +36,6 @@
 #include "cuda_checks.h"
 #include "postprocessing/Tonemappers.h"
 #include "skinning/skinning.h"
-#include <iostream>
 
 #include "Camera.h"
 
@@ -1004,7 +1003,7 @@ void OptiXRender::render(Buffer* output)
         createBottomLevelAccelerationStructures();
         createTopLevelAccelerationStructure();
         createSbt();
-        createLightBuffer(); 
+        createLightBuffer();
     }
 
     if (mScene->getDirtyState() == DirtyFlag::eLights)
@@ -1232,7 +1231,7 @@ void OptiXRender::render(Buffer* output)
 
 void OptiXRender::init()
 {
-    // TODO: move USD_DIR to settings 
+    // TODO: move USD_DIR to settings
     const char* envUSDPath = std::getenv("USD_DIR");
     mEnableValidation = getSettings()->getAs<bool>("render/enableValidation");
 

@@ -9,8 +9,6 @@
 
 #include <log/log.h>
 
-#include <iostream>
-
 namespace fs = std::filesystem;
 
 namespace oka
