@@ -913,14 +913,6 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
     }
 }
 
-//  valid range of coordinates [-1; 1]
-uint32_t packNormal(const glm::float3& normal)
-{
-    auto packed = (uint32_t)((normal.x + 1.0f) / 2.0f * 511.99999f);
-    packed += (uint32_t)((normal.y + 1.0f) / 2.0f * 511.99999f) << 10;
-    packed += (uint32_t)((normal.z + 1.0f) / 2.0f * 511.99999f) << 20;
-    return packed;
-}
 void OptiXRender::applySkinning()
 {
     // joint matrices
@@ -935,7 +927,6 @@ void OptiXRender::applySkinning()
                 mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
                 
                 jointMat.insert(jointMat.end(), currJointMats.begin(), currJointMats.end());
-                mSkinMatOffsets.push_back(currJointMats.size());
             }
         }
         
@@ -971,8 +962,7 @@ void OptiXRender::applySkinning()
                 cuApplySkinning(256, 
                                 mesh.mVbOffset, mesh.mSbOffset, 
                                 reinterpret_cast<void*>(mVertexBuffer->getPtr()),
-                                mSkinningPtrs.d_initial_positions, mSkinningPtrs.d_initial_normals, 
-                                mSkinningPtrs.d_weights, mSkinningPtrs.d_joints, 
+                                reinterpret_cast<void*>(mVertexSkinDataBuffer->getPtr()),
                                 mSkinningPtrs.d_jointMats, jointMatOffset, 
                                 mesh.mVertexCount);
             }
@@ -980,60 +970,22 @@ void OptiXRender::applySkinning()
     }
 }
 
-void OptiXRender::createSkinnigData() {
-    size_t vertexCount = mScene->mVertices.size();
-
-    // initial positions
-    size_t initPosSize = vertexCount * sizeof(float3);
-    cudaMalloc(&mSkinningPtrs.d_initial_positions, initPosSize);
-    std::vector<float3> initPositions(vertexCount);
-    std::transform(mScene->mVertexSkinData.begin(), mScene->mVertexSkinData.end(), initPositions.begin(),
-                [](const oka::Scene::vertexSkinData& v) -> float3 { return make_float3(v.pos.x, v.pos.y, v.pos.z); });
-    cudaMemcpy(mSkinningPtrs.d_initial_positions, initPositions.data(), initPosSize, cudaMemcpyHostToDevice);
-
-    // initial normals
-    size_t initNormSize = vertexCount * sizeof(float3);
-    cudaMalloc(&mSkinningPtrs.d_initial_normals, initNormSize);
-    std::vector<float3> initNormals(vertexCount);
-    std::transform(mScene->mVertexSkinData.begin(), mScene->mVertexSkinData.end(), initNormals.begin(),
-                [](const oka::Scene::vertexSkinData& v) -> float3 { return make_float3(v.normal.x, v.normal.y, v.normal.z); });
-    cudaMemcpy(mSkinningPtrs.d_initial_normals, initNormals.data(), initNormSize, cudaMemcpyHostToDevice);
-
-    // weights
-    size_t weightSize = vertexCount * sizeof(float4);
-    cudaMalloc(&mSkinningPtrs.d_weights, weightSize);
-    std::vector<float4> weights(vertexCount);
-    std::transform(mScene->mVertexSkinData.begin(), mScene->mVertexSkinData.end(), weights.begin(),
-                [](const oka::Scene::vertexSkinData& v) -> float4 { return make_float4(v.weights.x, v.weights.y, v.weights.z, v.weights.w); });
-    cudaMemcpy(mSkinningPtrs.d_weights, weights.data(), weightSize, cudaMemcpyHostToDevice);
-
-    // joints
-    size_t jointSize = vertexCount * sizeof(int4);
-    cudaMalloc(&mSkinningPtrs.d_joints, jointSize);
-    std::vector<int4> joints(vertexCount);
-    std::transform(mScene->mVertexSkinData.begin(), mScene->mVertexSkinData.end(), joints.begin(),
-                [](const oka::Scene::vertexSkinData& v) -> int4 { return make_int4(v.joints.x, v.joints.y, v.joints.z, v.joints.w); });
-    cudaMemcpy(mSkinningPtrs.d_joints, joints.data(), jointSize, cudaMemcpyHostToDevice);
-
-    // joint matrices alloc
+void OptiXRender::allocJointMatrices() {
+    size_t jointMatSize = 0;
+    for (auto& node: mScene->mNodes)
     {
-        std::vector<glm::mat4> jointMat;
-        for (auto& node: mScene->mNodes)
+        if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
         {
-            if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
-            {
-                auto jointCount = mScene->mSkines[node.skin].joints.size();
-                std::vector<glm::mat4> currJointMats;
-                mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
-                
-                jointMat.insert(jointMat.end(), currJointMats.begin(), currJointMats.end());
-                mSkinMatOffsets.push_back(currJointMats.size());
-            }
+            auto jointCount = mScene->mSkines[node.skin].joints.size();
+            std::vector<glm::mat4> currJointMats;
+            mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
+            
+            jointMatSize += currJointMats.size();
+            mSkinMatOffsets.push_back(currJointMats.size());
         }
-        
-        size_t jointMatSize = jointMat.size();
-        cudaMalloc(&mSkinningPtrs.d_jointMats, jointMatSize * sizeof(sutil::Matrix4x4));
     }
+    
+    cudaMalloc(&mSkinningPtrs.d_jointMats, jointMatSize * sizeof(sutil::Matrix4x4));
 }
 
 void OptiXRender::render(Buffer* output)
@@ -1044,7 +996,8 @@ void OptiXRender::render(Buffer* output)
         createPipeline();
         createVertexBuffer();
         createIndexBuffer();
-        createSkinnigData();
+        createVertexSkinDataBuffer();
+        allocJointMatrices();
         // upload all curve data
         createPointsBuffer();
         createWidthsBuffer();
@@ -1065,25 +1018,11 @@ void OptiXRender::render(Buffer* output)
 
     SettingsManager& settings = *getSettings();
     bool settingsChanged = false;
-
-    /*
-    // node0 rotation
-    if (mScene->getNodes().size() != 0) 
-    {
-        uint32_t rotationY = settings.getAs<uint32_t>("render/nodes/rotationY");
-        if (rotationAngle != rotationY * 0.01f) 
-        {
-            settingsChanged = true;
-            rotationAngle = rotationY * 0.01f;
-            glm::quat rotationQuat = glm::angleAxis(rotationAngle, glm::vec3(0.0f, 1.0f, 0.0f));
-
-            mScene->animateNode(0, oka::Scene::AnimationChannel::PathType::ROTATION, rotationQuat);
-        }
-    }*/
+    bool animStateChanged = false;
 
     // Animation changes
     std::vector<oka::Scene::Animation> &animations = mScene->getAnimations();
-    bool blasChanged = false;
+    bool accelStructureDirty = false;
     for (int i = 0; i < animations.size(); ++i) 
     {
         const std::string scrollNameStr = "render/animation/anim" + std::to_string(i) + "/time";
@@ -1093,27 +1032,27 @@ void OptiXRender::render(Buffer* output)
         const float EPSILON = 1e-6f; // 0.000001
 
         if (std::abs(animations[i].current - currAnimTime) > EPSILON) {
-            settingsChanged = true;
+            animStateChanged = true;
             animations[i].current = currAnimTime;
-            blasChanged |= mScene->applyAnimation(i);
+            accelStructureDirty |= mScene->applyAnimation(i);
         }
     }
 
     // full rebuild or TLAS refit/reduild
-    if (settingsChanged) {
-        if (blasChanged) {
+    if (animStateChanged) {
+        if (accelStructureDirty) {
             applySkinning();
             createBottomLevelAccelerationStructures();
             createTopLevelAccelerationStructure();
         }
         else {
-            if(updateCount < 10) {
+            if(mScene->animUpdateCount < 10) {
                 updateTopLevelAccelerationStructure();
-                updateCount++;
+                mScene->animUpdateCount++;
             }
             else {
                 createTopLevelAccelerationStructure();
-                updateCount = 0;
+                mScene->animUpdateCount = 0;
             }
         }
     }
@@ -1156,7 +1095,7 @@ void OptiXRender::render(Buffer* output)
     const float gamma = settings.getAs<float>("render/post/gamma");
     const ToneMapperType tonemapperType = (ToneMapperType)settings.getAs<uint32_t>("render/pt/tonemapperType");
 
-    if (settingsChanged)
+    if (settingsChanged || animStateChanged)
     {
         getSharedContext().mSubframeIndex = 0;
     }
@@ -1396,6 +1335,11 @@ void OptiXRender::createWidthsBuffer()
 void OptiXRender::createVertexBuffer()
 {
     createOrUpdateBuffer(mVertexBuffer, mScene->getVertices());
+}
+
+void OptiXRender::createVertexSkinDataBuffer()
+{
+    createOrUpdateBuffer(mVertexSkinDataBuffer, mScene->getVerticesSkinData());
 }
 
 void OptiXRender::createIndexBuffer()

@@ -61,7 +61,6 @@ class OptiXRender : public Render
 private:
 
     float rotationAngle = 0.00f;
-    int updateCount = 0;
 
     struct Mesh
     {
@@ -106,17 +105,9 @@ private:
 
     struct DeviceSkinningPtrs
     {
-        float3* d_initial_positions;
-        float3* d_initial_normals;
-        float4* d_weights;
-        int4* d_joints;
         sutil::Matrix4x4* d_jointMats;
         ~DeviceSkinningPtrs()
         {
-            cudaFree(d_initial_positions);
-            cudaFree(d_initial_normals);
-            cudaFree(d_weights);
-            cudaFree(d_joints);
             cudaFree(d_jointMats);
         }
     };
@@ -128,7 +119,7 @@ private:
     PathTracerState mState;
     bool mEnableValidation;
 
-    void createSkinnigData();
+    void allocJointMatrices();
     Mesh* createMesh(const oka::Mesh& mesh);
     Curve* createCurve(const oka::Curve& curve);
     bool compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes);
@@ -137,6 +128,7 @@ private:
     std::vector<std::unique_ptr<Curve>> mOptixCurves;
 
     std::unique_ptr<OptixBuffer> mVertexBuffer;
+    std::unique_ptr<OptixBuffer> mVertexSkinDataBuffer;
     std::unique_ptr<OptixBuffer> mIndexBuffer;
     std::unique_ptr<OptixBuffer> mLightBuffer;
     // TODO: move to raii buffers
@@ -156,6 +148,7 @@ private:
     std::unique_ptr<OptixBuffer> mSegmentIndicesBuffer; // Buffer for curve segment indices
 
     void createVertexBuffer();
+    void createVertexSkinDataBuffer();
     void createIndexBuffer();
 
     // curve utils

@@ -99,8 +99,10 @@ public:
         glm::vec4 weights{0.0};
         glm::float3 pos;
         glm::float3 normal;
+        float pad0;
+        float pad1;
     };
-    std::vector<vertexSkinData> mVertexSkinData;
+    std::vector<vertexSkinData> mVerticesSkinData;
 
     struct Node
     {
@@ -178,6 +180,7 @@ public:
         float current;
     };
     std::vector<Animation> mAnimations;
+    int animUpdateCount;
 
     // GPU side structure
     struct Light
@@ -266,6 +269,11 @@ public:
     std::vector<Vertex>& getVertices()
     {
         return mVertices;
+    }
+
+    std::vector<vertexSkinData>& getVerticesSkinData()
+    {
+        return mVerticesSkinData;
     }
 
     std::vector<uint32_t>& getIndices()
@@ -456,7 +464,7 @@ public:
     /// <param name="ib">Indices</param>
     /// <returns>Mesh id in scene</returns>
     uint32_t createMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib);
-    uint32_t createMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib, const std::vector<oka::Scene::vertexSkinData>& sb);
+    uint32_t createSkeletalMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib, const std::vector<oka::Scene::vertexSkinData>& sb);
     /// <summary>
     /// Creates Instance
     /// </summary>

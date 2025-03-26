@@ -6,10 +6,7 @@ extern "C" void cuApplySkinning(
     const int vbOffset,
     const int sbOffset,
     void* vertexPtr,
-    const float3* d_initial_positions,
-    const float3* d_initial_normals, 
-    const float4* d_weights,
-    const int4* d_joints,
+    const void* vertexSkinDataPtr,
     const sutil::Matrix4x4* d_jointMats,
     int jointMatOffset,
     const uint32_t vertexCount);

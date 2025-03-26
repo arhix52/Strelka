@@ -51,7 +51,7 @@ uint32_t Scene::createMesh(const std::vector<Vertex>& vb, const std::vector<uint
     return meshId;
 }
 
-uint32_t Scene::createMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib, const std::vector<oka::Scene::vertexSkinData>& sb)
+uint32_t Scene::createSkeletalMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib, const std::vector<oka::Scene::vertexSkinData>& sb)
 {
     std::scoped_lock lock(mMeshMutex);
 
@@ -76,7 +76,7 @@ uint32_t Scene::createMesh(const std::vector<Vertex>& vb, const std::vector<uint
     mesh->mVbOffset = mVertices.size();
     mesh->mVertexCount = vb.size();
 
-    mesh->mSbOffset = mVertexSkinData.size();
+    mesh->mSbOffset = mVerticesSkinData.size();
 
     // const uint32_t ibOffset = mVertices.size(); // adjust indices for global index buffer
     // for (int i = 0; i < ib.size(); ++i)
@@ -85,7 +85,7 @@ uint32_t Scene::createMesh(const std::vector<Vertex>& vb, const std::vector<uint
     // }
     mIndices.insert(mIndices.end(), ib.begin(), ib.end());
     mVertices.insert(mVertices.end(), vb.begin(), vb.end()); // copy vertices
-    mVertexSkinData.insert(mVertexSkinData.end(), sb.begin(), sb.end());
+    mVerticesSkinData.insert(mVerticesSkinData.end(), sb.begin(), sb.end());
     return meshId;
 }
 
@@ -165,6 +165,16 @@ glm::float4 Scene::makeFloat4FromQuat(const glm::quat &q)
     return glm::float4(q.x, q.y, q.z, q.w);
 }
 
+//  valid range of coordinates [-1; 1]
+const uint32_t packNormals(const glm::float3& normal)
+{
+    constexpr float scale = 256.0f;
+    auto x = (uint32_t)((normal.x + 1.0f) * scale);
+    auto y = (uint32_t)((normal.y + 1.0f) * scale);
+    auto z = (uint32_t)((normal.z + 1.0f) * scale);
+    return (z << 20) | (y << 10) | x;
+}
+
 glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationChannel::PathType targetProperty, const float time)
 {
     glm::float4 result;
@@ -225,8 +235,6 @@ bool Scene::applyAnimation(const uint32_t animId)
     return blasChanged;
 }
 
-uint32_t packNormal(const glm::float3& normal);
-
 void Scene::applySkinning()
 {
     for (auto& node: mNodes)
@@ -242,14 +250,14 @@ void Scene::applySkinning()
                 int sbOffset = mesh.mSbOffset;
                 for (int iv = 0; iv < mesh.mVertexCount; ++iv)
                 {
-                    glm::vec4 v_weight = mVertexSkinData[sbOffset + iv].weights;
-                    glm::u16vec4 v_joint = mVertexSkinData[sbOffset + iv].joints;
+                    glm::vec4 v_weight = mVerticesSkinData[sbOffset + iv].weights;
+                    glm::u16vec4 v_joint = mVerticesSkinData[sbOffset + iv].joints;
                     glm::mat4 skinMat = v_weight[0] * jointMat[v_joint[0]]
                                       + v_weight[1] * jointMat[v_joint[1]]
                                       + v_weight[2] * jointMat[v_joint[2]]
                                       + v_weight[3] * jointMat[v_joint[3]];
-                    mVertices[vbOffset + iv].pos = skinMat * glm::vec4(mVertexSkinData[sbOffset + iv].pos, 1.0);
-                    mVertices[vbOffset + iv].normal = packNormal(glm::normalize(glm::vec3(glm::mat3(skinMat) * glm::vec4(mVertexSkinData[sbOffset + iv].normal, 1.0))));
+                    mVertices[vbOffset + iv].pos = skinMat * glm::vec4(mVerticesSkinData[sbOffset + iv].pos, 1.0);
+                    mVertices[vbOffset + iv].normal = packNormals(glm::normalize(glm::vec3(glm::mat3(skinMat) * glm::vec4(mVerticesSkinData[sbOffset + iv].normal, 1.0))));
                 }
             }
         }
@@ -361,15 +369,6 @@ bool Scene::updateNode(const uint32_t nodeId)
     }
 
     return skeletonNodesUpdated;
-}
-
-//  valid range of coordinates [-1; 1]
-uint32_t packNormals(const glm::float3& normal)
-{
-    auto packed = (uint32_t)((normal.x + 1.0f) / 2.0f * 511.99999f);
-    packed += (uint32_t)((normal.y + 1.0f) / 2.0f * 511.99999f) << 10;
-    packed += (uint32_t)((normal.z + 1.0f) / 2.0f * 511.99999f) << 20;
-    return packed;
 }
 
 uint32_t Scene::createRectLightMesh()

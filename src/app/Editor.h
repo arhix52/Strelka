@@ -94,7 +94,6 @@ public:
         m_settingsManager->setAs<uint32_t>("render/height", imageHeight);
         m_settingsManager->setAs<uint32_t>("render/pt/depth", 4);
         m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", 256);
-        m_settingsManager->setAs<uint32_t>("render/nodes/rotationY", 500);
         m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
         m_settingsManager->setAs<uint32_t>("render/pt/iteration", 0);
         m_settingsManager->setAs<uint32_t>("render/pt/stratifiedSamplingType", 0); // 0 - none, 1 - random, 2 -
@@ -476,11 +475,6 @@ public:
         ImGui::End(); // end window
 
         if (ImGui::Begin("Animations")) {
-
-            uint32_t rotationY = m_settingsManager->getAs<uint32_t>("render/nodes/rotationY");
-            ImGui::SliderInt("rotation Y", (int*)&rotationY, 500, 750);
-            m_settingsManager->setAs<uint32_t>("render/nodes/rotationY", rotationY);
-            
             auto animations = m_scene->getAnimations();
             for (int i = 0; i < animations.size(); ++i) {
                 std::string checkboxNameStr = "render/animation/anim" + std::to_string(i) + "/state";

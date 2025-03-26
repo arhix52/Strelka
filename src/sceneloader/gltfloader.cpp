@@ -300,7 +300,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
 
     uint32_t meshId = -1;
     if (hasJoints)
-        meshId = scene.createMesh(vertices, indices, sb);
+        meshId = scene.createSkeletalMesh(vertices, indices, sb);
     else
         meshId = scene.createMesh(vertices, indices);
     assert(meshId != -1);
@@ -563,6 +563,7 @@ void loadCameras(const tinygltf::Model& model, oka::Scene& scene)
 void loadAnimation(const tinygltf::Model& model, oka::Scene& scene)
 {
     std::vector<oka::Scene::Animation> animations;
+    scene.animUpdateCount = 0;
 
     using namespace std;
     for (const tinygltf::Animation& animation : model.animations)
@@ -720,7 +721,7 @@ void loadNodes(const tinygltf::Model& model, oka::Scene& scene, const float glob
     }
 }
 
-void loadSkines(const tinygltf::Model& model, oka::Scene& scene, const float globalScale = 1.0f)
+void loadSkeletalData(const tinygltf::Model& model, oka::Scene& scene, const float globalScale = 1.0f)
 {
     for (const auto& skin : model.skins)
     {
@@ -838,7 +839,7 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     const float globalScale = 1.0f;
     loadNodes(model, scene, globalScale);
 
-    loadSkines(model, scene, globalScale);
+    loadSkeletalData(model, scene, globalScale);
 
     for (int i = 0; i < model.scenes[sceneId].nodes.size(); ++i)
     {
