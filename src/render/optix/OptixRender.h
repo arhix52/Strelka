@@ -8,6 +8,7 @@
 
 #include <scene/scene.h>
 
+#include <cuda_checks.h>
 #include "common.h"
 #include "OptixBuffer.h"
 
@@ -64,7 +65,7 @@ private:
         CUdeviceptr d_gas_output_buffer = 0;
         ~Mesh()
         {
-            cudaFree((void*)d_gas_output_buffer);
+            CUDA_CHECK(cudaFree((void*)d_gas_output_buffer));
         }
     };
 
@@ -74,7 +75,7 @@ private:
         CUdeviceptr d_gas_output_buffer = 0;
         ~Curve()
         {
-            cudaFree((void*)d_gas_output_buffer);
+            CUDA_CHECK(cudaFree((void*)d_gas_output_buffer));
         }
     };
 
