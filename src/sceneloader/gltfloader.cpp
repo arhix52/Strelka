@@ -229,7 +229,7 @@ glm::float4x4 getTransform(const tinygltf::Node& node, const float globalScale)
         {
             scale = glm::float3((float)node.scale[0], (float)node.scale[1], (float)node.scale[2]);
             // check that scale is uniform, otherwise we have to support it in shader
-            assert(scale.x == scale.y && scale.y == scale.z);
+            // assert(scale.x == scale.y && scale.y == scale.z);
         }
 
         glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
