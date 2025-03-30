@@ -17,10 +17,11 @@ __global__ void skinningKernel(
     void* vertexPtr,
     const void* vertexSkinDataPtr,
     const sutil::Matrix4x4* d_jointMats,
-    int jointMatOffset) 
+    int jointMatOffset,
+    const uint32_t vertexCount) 
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    //if (idx >= vertexCount) return;
+    if (idx >= vertexCount) return;
 
     int offsettedId = idx + sbOffset;
 
@@ -64,5 +65,5 @@ void cuApplySkinning(
     const uint32_t vertexCount)
 {
     int blocks_per_grid = (vertexCount + threads_per_block - 1) / threads_per_block;
-    skinningKernel<<<blocks_per_grid, threads_per_block>>>(vbOffset, sbOffset, vertexPtr, vertexSkinDataPtr, d_jointMats, jointMatOffset);
+    skinningKernel<<<blocks_per_grid, threads_per_block>>>(vbOffset, sbOffset, vertexPtr, vertexSkinDataPtr, d_jointMats, jointMatOffset, vertexCount);
 }

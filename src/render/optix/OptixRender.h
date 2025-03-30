@@ -105,11 +105,11 @@ private:
         sutil::Matrix4x4* d_jointMats;
         ~DeviceSkinningPtrs()
         {
-            cudaFree(d_jointMats);
+            CUDA_CHECK(cudaFree(d_jointMats));
         }
     };
     DeviceSkinningPtrs mSkinningPtrs;
-    std::vector<int> mSkinMatOffsets;
+    std::vector<int> mJointMatOffsets;
 
     View mPrevView;
 
@@ -132,18 +132,27 @@ private:
     std::unique_ptr<OptixBuffer> mPointsBuffer;
     std::unique_ptr<OptixBuffer> mWidthsBuffer;
 
-    std::unique_ptr<OptixBuffer> mMaterialRoDataBuffer;
-    std::unique_ptr<OptixBuffer> mMaterialArgDataBuffer;
-    std::unique_ptr<OptixBuffer> mTexturesHandlerBuffer;
-    std::unique_ptr<OptixBuffer> mTexturesDataBuffer;
-
-    // Temporary buffers for GAS building
-    // These buffers are reused across multiple GAS builds to reduce allocations
-    // They are automatically resized if needed but never shrink
-    std::unique_ptr<OptixBuffer> mTempAccelBuffer;        // Temporary buffer for acceleration structure building
-    std::unique_ptr<OptixBuffer> mCompactedSizeBuffer;  // Buffer for storing compaction size results
-    std::unique_ptr<OptixBuffer> mSegmentIndicesBuffer; // Buffer for curve segment indices
-
+    CUdeviceptr d_materialRoData = 0;
+    CUdeviceptr d_materialArgData = 0;
+    CUdeviceptr d_texturesHandler = 0;
+    CUdeviceptr d_texturesData = 0;
+    struct asBufferPtrs
+    {
+        CUdeviceptr mCompactedSizeBuffer = 0;
+        OptixAccelEmitDesc mCompactedSizeProperty = {};
+        //CUdeviceptr outputBuffer = 0;
+        //size_t outputBufferSize = 0;
+        CUdeviceptr tempBuffer = 0;
+        size_t tempBufferSize = 0;
+        ~asBufferPtrs()
+        {
+            CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mCompactedSizeBuffer)));
+            //CUDA_CHECK(cudaFree(reinterpret_cast<void*>(outputBuffer)));
+            CUDA_CHECK(cudaFree(reinterpret_cast<void*>(tempBuffer)));
+        }
+    };
+    asBufferPtrs mAsBufferPtrs;
+    
     void createVertexBuffer();
     void createVertexSkinDataBuffer();
     void createIndexBuffer();
@@ -175,6 +184,7 @@ public:
     void applySkinning();
     void createContext();
     void createBottomLevelAccelerationStructures();
+    void updateBottomLevelAccelerationStructures();
     void createTopLevelAccelerationStructure();
     void updateTopLevelAccelerationStructure();
     void createModule();

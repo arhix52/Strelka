@@ -33,7 +33,6 @@
 
 #include <log.h>
 
-#include "cuda_checks.h"
 #include "postprocessing/Tonemappers.h"
 #include "skinning/skinning.h"
 
@@ -311,32 +310,28 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
     OptixAccelBufferSizes gas_buffer_sizes;
     OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &accel_options, &triangle_input, 1, &gas_buffer_sizes));
 
-    // Reuse temporary buffers if large enough, otherwise allocate new ones
-    // These buffers are kept alive and reused for future GAS builds
-    if (!mTempAccelBuffer || mTempAccelBuffer->size() < gas_buffer_sizes.tempSizeInBytes)
+    size_t tempBufferSize = gas_buffer_sizes.tempSizeInBytes;
+    // Allocate/reallocate required buffers
+    if (tempBufferSize > mAsBufferPtrs.tempBufferSize)
     {
-        mTempAccelBuffer.reset(new OptixBuffer(gas_buffer_sizes.tempSizeInBytes));
+        if (mAsBufferPtrs.tempBuffer != 0) CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mAsBufferPtrs.tempBuffer)));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mAsBufferPtrs.tempBuffer), tempBufferSize));
+        mAsBufferPtrs.tempBufferSize = tempBufferSize;
     }
-    if (!mCompactedSizeBuffer || mCompactedSizeBuffer->size() < sizeof(uint64_t))
-    {
-        mCompactedSizeBuffer.reset(new OptixBuffer(sizeof(uint64_t)));
-    }
-
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
 
-    OptixAccelEmitDesc property = {};
-    property.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
-    property.result = mCompactedSizeBuffer->getPtr();
-
+    // Build acceleration structure
     OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &triangle_input,
                                 1, // num build inputs
-                                mTempAccelBuffer->getPtr(), gas_buffer_sizes.tempSizeInBytes, d_gas_output_buffer,
+                                mAsBufferPtrs.tempBuffer, tempBufferSize, d_gas_output_buffer,
                                 gas_buffer_sizes.outputSizeInBytes, &gas_handle,
-                                &property, // emitted property list
+                                &mAsBufferPtrs.mCompactedSizeProperty, // emitted property list
                                 1)); // num emitted properties
 
-    compactAccel(d_gas_output_buffer, gas_handle, property.result, gas_buffer_sizes.outputSizeInBytes);
+    // Compact the acceleration structure
+    compactAccel(d_gas_output_buffer, gas_handle, mAsBufferPtrs.mCompactedSizeProperty.result, gas_buffer_sizes.outputSizeInBytes);
 
+    // Create and return mesh object
     Mesh* rmesh = new Mesh();
     rmesh->d_gas_output_buffer = d_gas_output_buffer;
     rmesh->gas_handle = gas_handle;
@@ -348,6 +343,12 @@ void OptiXRender::createBottomLevelAccelerationStructures()
     // Clear existing acceleration structures
     mOptixMeshes.clear();
     mOptixCurves.clear();
+
+    // set up compactedSizeBuffer and compaction
+    //if (mAsBufferPtrs.mCompactedSizeBuffer) CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mAsBufferPtrs.mCompactedSizeBuffer)));
+    if (!mAsBufferPtrs.mCompactedSizeBuffer) CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mAsBufferPtrs.mCompactedSizeBuffer), sizeof(uint64_t)));
+    mAsBufferPtrs.mCompactedSizeProperty.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+    mAsBufferPtrs.mCompactedSizeProperty.result = mAsBufferPtrs.mCompactedSizeBuffer;
 
     // Create BLAS for meshes
     const auto& meshes = mScene->getMeshes();
@@ -363,6 +364,16 @@ void OptiXRender::createBottomLevelAccelerationStructures()
     for (const auto& curve : curves)
     {
         mOptixCurves.emplace_back(createCurve(curve));
+    }
+}
+
+void OptiXRender::updateBottomLevelAccelerationStructures()
+{
+    // update BLAS for meshes
+    const auto& meshes = mScene->getMeshes();
+    for (int i = 0; i < meshes.size(); ++i)
+    {
+        mOptixMeshes[i].reset(createMesh(meshes[i]));
     }
 }
 
@@ -636,7 +647,6 @@ OptixProgramGroup OptiXRender::createRadianceClosestHitProgramGroup(PathTracerSt
 
     return hit_group;
 }
-
 void OptiXRender::createProgramGroups()
 {
     OptixProgramGroupOptions program_group_options = {}; // Initialize to zeros
@@ -942,7 +952,7 @@ void OptiXRender::applySkinning()
                 return matrix;
             });          
         
-        cudaMemcpy(mSkinningPtrs.d_jointMats, cudaMatrices.data(), jointMatSize * sizeof(sutil::Matrix4x4), cudaMemcpyHostToDevice);
+            CUDA_CHECK(cudaMemcpy(mSkinningPtrs.d_jointMats, cudaMatrices.data(), jointMatSize * sizeof(sutil::Matrix4x4), cudaMemcpyHostToDevice));
     }
 
     //apply skinning
@@ -952,7 +962,7 @@ void OptiXRender::applySkinning()
     {
         if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
         {
-            if (index > 0) { jointMatOffset += mSkinMatOffsets[index - 1]; }
+            if (index > 0) { jointMatOffset += mJointMatOffsets[index - 1]; }
             index++;
 
             for (const auto instId: node.instanceIds) {
@@ -980,11 +990,10 @@ void OptiXRender::allocJointMatrices() {
             mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
             
             jointMatSize += currJointMats.size();
-            mSkinMatOffsets.push_back(currJointMats.size());
+            mJointMatOffsets.push_back(currJointMats.size());
         }
     }
-    
-    cudaMalloc(&mSkinningPtrs.d_jointMats, jointMatSize * sizeof(sutil::Matrix4x4));
+    CUDA_CHECK(cudaMalloc(&mSkinningPtrs.d_jointMats, jointMatSize * sizeof(sutil::Matrix4x4)));
 }
 
 void OptiXRender::render(Buffer* output)
@@ -1042,6 +1051,7 @@ void OptiXRender::render(Buffer* output)
         if (accelStructureDirty) {
             applySkinning();
             createBottomLevelAccelerationStructures();
+            //updateBottomLevelAccelerationStructures();
             createTopLevelAccelerationStructure();
         }
         else {
