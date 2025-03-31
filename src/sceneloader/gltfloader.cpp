@@ -564,7 +564,8 @@ void loadCameras(const tinygltf::Model& model, oka::Scene& scene)
 void loadAnimation(const tinygltf::Model& model, oka::Scene& scene)
 {
     std::vector<oka::Scene::Animation> animations;
-    scene.animUpdateCount = 0;
+    scene.blasUpdateCount = 0;
+    scene.tlasUpdateCount = 0;
 
     using namespace std;
     for (const tinygltf::Animation& animation : model.animations)

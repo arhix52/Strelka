@@ -117,7 +117,8 @@ private:
     bool mEnableValidation;
 
     void allocJointMatrices();
-    Mesh* createMesh(const oka::Mesh& mesh);
+    Mesh* createMesh(const oka::Mesh& mesh, bool isSkeletal);
+    void updateMesh(const oka::Mesh& mesh, int optixMeshesId);
     Curve* createCurve(const oka::Curve& curve);
     bool compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes);
 
@@ -138,20 +139,21 @@ private:
     CUdeviceptr d_texturesData = 0;
     struct asBufferPtrs
     {
-        CUdeviceptr mCompactedSizeBuffer = 0;
-        OptixAccelEmitDesc mCompactedSizeProperty = {};
-        //CUdeviceptr outputBuffer = 0;
-        //size_t outputBufferSize = 0;
+        CUdeviceptr compactedSizeBuffer = 0;
+        OptixAccelEmitDesc compactedSizeProperty = {};
+        CUdeviceptr outputBuffer = 0;
+        size_t outputBufferSize = 0;
         CUdeviceptr tempBuffer = 0;
         size_t tempBufferSize = 0;
         ~asBufferPtrs()
         {
-            CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mCompactedSizeBuffer)));
-            //CUDA_CHECK(cudaFree(reinterpret_cast<void*>(outputBuffer)));
+            CUDA_CHECK(cudaFree(reinterpret_cast<void*>(compactedSizeBuffer)));
+            CUDA_CHECK(cudaFree(reinterpret_cast<void*>(outputBuffer)));
             CUDA_CHECK(cudaFree(reinterpret_cast<void*>(tempBuffer)));
         }
     };
-    asBufferPtrs mAsBufferPtrs;
+    asBufferPtrs mBlasBufferPtrs;
+    asBufferPtrs mTlasBufferPtrs;
     
     void createVertexBuffer();
     void createVertexSkinDataBuffer();

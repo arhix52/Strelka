@@ -281,13 +281,14 @@ OptiXRender::Curve* OptiXRender::createCurve(const oka::Curve& curve)
     return rcurve;
 }
 
-OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
+OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh, bool isSkeletal)
 {
     OptixTraversableHandle gas_handle;
     CUdeviceptr d_gas_output_buffer;
 
     OptixAccelBuildOptions accel_options = {};
-    accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    if (isSkeletal) accel_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_BUILD | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    else accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
     accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
 
     const CUdeviceptr vertexBuffer = mVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
@@ -312,24 +313,31 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
 
     size_t tempBufferSize = gas_buffer_sizes.tempSizeInBytes;
     // Allocate/reallocate required buffers
-    if (tempBufferSize > mAsBufferPtrs.tempBufferSize)
+    if (tempBufferSize > mBlasBufferPtrs.tempBufferSize)
     {
-        if (mAsBufferPtrs.tempBuffer != 0) CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mAsBufferPtrs.tempBuffer)));
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mAsBufferPtrs.tempBuffer), tempBufferSize));
-        mAsBufferPtrs.tempBufferSize = tempBufferSize;
+        if (mBlasBufferPtrs.tempBuffer != 0) CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mBlasBufferPtrs.tempBuffer)));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mBlasBufferPtrs.tempBuffer), tempBufferSize));
+        mBlasBufferPtrs.tempBufferSize = tempBufferSize;
     }
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
 
-    // Build acceleration structure
-    OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &triangle_input,
-                                1, // num build inputs
-                                mAsBufferPtrs.tempBuffer, tempBufferSize, d_gas_output_buffer,
-                                gas_buffer_sizes.outputSizeInBytes, &gas_handle,
-                                &mAsBufferPtrs.mCompactedSizeProperty, // emitted property list
-                                1)); // num emitted properties
+    if (isSkeletal) {
+        OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &triangle_input, 1,
+            mBlasBufferPtrs.tempBuffer, tempBufferSize, d_gas_output_buffer,
+            gas_buffer_sizes.outputSizeInBytes, &gas_handle, nullptr, 0));
+    }
+    else {
+        // Build acceleration structure
+        OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &triangle_input,
+                                    1, // num build inputs
+                                    mBlasBufferPtrs.tempBuffer, tempBufferSize, d_gas_output_buffer,
+                                    gas_buffer_sizes.outputSizeInBytes, &gas_handle,
+                                    &mBlasBufferPtrs.compactedSizeProperty, // emitted property list
+                                    1)); // num emitted properties
 
-    // Compact the acceleration structure
-    compactAccel(d_gas_output_buffer, gas_handle, mAsBufferPtrs.mCompactedSizeProperty.result, gas_buffer_sizes.outputSizeInBytes);
+        // Compact the acceleration structure
+        compactAccel(d_gas_output_buffer, gas_handle, mBlasBufferPtrs.compactedSizeProperty.result, gas_buffer_sizes.outputSizeInBytes);
+    }
 
     // Create and return mesh object
     Mesh* rmesh = new Mesh();
@@ -345,17 +353,31 @@ void OptiXRender::createBottomLevelAccelerationStructures()
     mOptixCurves.clear();
 
     // set up compactedSizeBuffer and compaction
-    //if (mAsBufferPtrs.mCompactedSizeBuffer) CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mAsBufferPtrs.mCompactedSizeBuffer)));
-    if (!mAsBufferPtrs.mCompactedSizeBuffer) CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mAsBufferPtrs.mCompactedSizeBuffer), sizeof(uint64_t)));
-    mAsBufferPtrs.mCompactedSizeProperty.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
-    mAsBufferPtrs.mCompactedSizeProperty.result = mAsBufferPtrs.mCompactedSizeBuffer;
+    if (!mBlasBufferPtrs.compactedSizeBuffer) CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mBlasBufferPtrs.compactedSizeBuffer), sizeof(uint64_t)));
+    mBlasBufferPtrs.compactedSizeProperty.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+    mBlasBufferPtrs.compactedSizeProperty.result = mBlasBufferPtrs.compactedSizeBuffer;
 
     // Create BLAS for meshes
-    const auto& meshes = mScene->getMeshes();
-    mOptixMeshes.reserve(meshes.size());
-    for (const auto& mesh : meshes)
+    mOptixMeshes.reserve(mScene->getMeshes().size());
+    for (auto& node: mScene->mNodes)
     {
-        mOptixMeshes.emplace_back(createMesh(mesh));
+        if (node.type == oka::Scene::Node::NodeType::mesh)
+        {
+            if (node.skin != -1)
+            {
+                for (const auto instId: node.instanceIds) {
+                    auto &mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
+                    mOptixMeshes.emplace_back(createMesh(mesh, true));
+                }
+            }
+            else
+            {
+                for (const auto instId: node.instanceIds) {
+                    auto &mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
+                    mOptixMeshes.emplace_back(createMesh(mesh, false));
+                }
+            }
+        }
     }
 
     // Create BLAS for curves
@@ -367,13 +389,62 @@ void OptiXRender::createBottomLevelAccelerationStructures()
     }
 }
 
+void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
+{
+    OptixTraversableHandle& gas_handle = mOptixMeshes[optixMeshesId]->gas_handle;
+    CUdeviceptr& d_gas_output_buffer = mOptixMeshes[optixMeshesId]->d_gas_output_buffer;
+
+    // Configure acceleration structure build options
+    OptixAccelBuildOptions accel_options = {};
+    accel_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_BUILD | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    accel_options.operation = OPTIX_BUILD_OPERATION_UPDATE;
+
+    // Set up triangle input data
+    const CUdeviceptr vertexBuffer = mVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
+    const CUdeviceptr indexBuffer = mIndexBuffer->getPtr() + mesh.mIndex * sizeof(uint32_t);
+
+    // Our build input is a simple list of non-indexed triangle vertices
+    const uint32_t triangle_input_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+    OptixBuildInput triangle_input = {};
+    triangle_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+    triangle_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
+    triangle_input.triangleArray.numVertices = mesh.mVertexCount;
+    triangle_input.triangleArray.vertexBuffers = &vertexBuffer;
+    triangle_input.triangleArray.vertexStrideInBytes = sizeof(oka::Scene::Vertex);
+    triangle_input.triangleArray.indexBuffer = indexBuffer;
+    triangle_input.triangleArray.indexFormat = OptixIndicesFormat::OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+    triangle_input.triangleArray.indexStrideInBytes = sizeof(uint32_t) * 3;
+    triangle_input.triangleArray.numIndexTriplets = mesh.mCount / 3;
+    triangle_input.triangleArray.flags = triangle_input_flags;
+    triangle_input.triangleArray.numSbtRecords = 1;
+
+    // Calculate memory requirements
+    OptixAccelBufferSizes gas_buffer_sizes;
+    OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &accel_options, &triangle_input, 1, &gas_buffer_sizes));
+
+    OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &triangle_input, 1,
+        mBlasBufferPtrs.tempBuffer, gas_buffer_sizes.tempSizeInBytes, d_gas_output_buffer,
+        gas_buffer_sizes.outputSizeInBytes, &gas_handle, nullptr, 0));
+}
+
 void OptiXRender::updateBottomLevelAccelerationStructures()
 {
     // update BLAS for meshes
-    const auto& meshes = mScene->getMeshes();
-    for (int i = 0; i < meshes.size(); ++i)
+    int index = 0;
+    for (auto& node: mScene->mNodes)
     {
-        mOptixMeshes[i].reset(createMesh(meshes[i]));
+        if (node.type == oka::Scene::Node::NodeType::mesh)
+        {
+            if (node.skin != -1)
+            {
+                for (const auto instId: node.instanceIds) {
+                    auto &mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
+                    updateMesh(mesh, index);
+                    index++;
+                }
+            }
+            else for (const auto instId: node.instanceIds) index++;
+        }
     }
 }
 
@@ -449,61 +520,70 @@ void OptiXRender::createTopLevelAccelerationStructure()
     OptixAccelBufferSizes iasBufferSizes;
     OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &iasOptions, &iasInput, 1, &iasBufferSizes));
 
-    // Allocate buffers
+    // Allocate/Reallocate buffers if needed
     CUdeviceptr outputBuffer;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&outputBuffer), iasBufferSizes.outputSizeInBytes));
-
-    // Reuse temporary buffers if large enough, otherwise allocate new ones
-    if (!mTempAccelBuffer || mTempAccelBuffer->size() < iasBufferSizes.tempSizeInBytes)
+    size_t outputBufferSize = iasBufferSizes.outputSizeInBytes;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&outputBuffer), outputBufferSize));
+    /*if (outputBufferSize > mTlasBufferPtrs.outputBufferSize)
     {
-        mTempAccelBuffer.reset(new OptixBuffer(iasBufferSizes.tempSizeInBytes));
-    }
-    if (!mCompactedSizeBuffer || mCompactedSizeBuffer->size() < sizeof(uint64_t))
+        if (mTlasBufferPtrs.outputBuffer != 0) CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mTlasBufferPtrs.outputBuffer)));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mTlasBufferPtrs.outputBuffer), outputBufferSize));
+        mTlasBufferPtrs.outputBufferSize = outputBufferSize;
+    }*/
+
+    size_t tempBufferSize = iasBufferSizes.tempSizeInBytes;
+    if (tempBufferSize > mTlasBufferPtrs.tempBufferSize)
     {
-        mCompactedSizeBuffer.reset(new OptixBuffer(sizeof(uint64_t)));
+        if (mTlasBufferPtrs.tempBuffer != 0) CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mTlasBufferPtrs.tempBuffer)));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mTlasBufferPtrs.tempBuffer), tempBufferSize));
+        mTlasBufferPtrs.tempBufferSize = tempBufferSize;
     }
 
-    // Setup compaction property
-    OptixAccelEmitDesc property = {};
-    property.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
-    property.result = mCompactedSizeBuffer->getPtr();
+    if (!mTlasBufferPtrs.compactedSizeBuffer) CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mTlasBufferPtrs.compactedSizeBuffer), sizeof(uint64_t)));
+    mTlasBufferPtrs.compactedSizeProperty.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+    mTlasBufferPtrs.compactedSizeProperty.result = mTlasBufferPtrs.compactedSizeBuffer;
 
     // Build IAS
     OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &iasOptions, &iasInput,
                                 1, // num build inputs
-                                mTempAccelBuffer->getPtr(), iasBufferSizes.tempSizeInBytes, outputBuffer,
-                                iasBufferSizes.outputSizeInBytes, &mState.ias_handle, &property,
+                                mTlasBufferPtrs.tempBuffer, tempBufferSize, outputBuffer,
+                                outputBufferSize, &mState.ias_handle, &mTlasBufferPtrs.compactedSizeProperty,
                                 1 // num emitted properties
                                 ));
 
     // Compact acceleration structure
-    compactAccel(outputBuffer, mState.ias_handle, property.result, iasBufferSizes.outputSizeInBytes);
+    compactAccel(outputBuffer, mState.ias_handle, mTlasBufferPtrs.compactedSizeProperty.result, outputBufferSize);
 
-    // Cleanup output buffer
-    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(outputBuffer)));
+    if (mTlasBufferPtrs.outputBuffer != 0) CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mTlasBufferPtrs.outputBuffer)));
+    mTlasBufferPtrs.outputBuffer = outputBuffer;
+    mTlasBufferPtrs.outputBufferSize = outputBufferSize;
 }
 
 void oka::OptiXRender::updateTopLevelAccelerationStructure()
 {
     const std::vector<oka::Instance>& instances = mScene->getInstances();
 
+    // Create OptixInstances from scene instances
     std::vector<OptixInstance> optixInstances;
-    for (int i = 0; i < instances.size(); ++i)
+    optixInstances.reserve(instances.size());
+
+    for (const auto& instance : instances)
     {
         OptixInstance oi = {};
-        const oka::Instance& curr = instances[i];
-        switch (curr.type)
+
+        // Set traversable handle and visibility mask based on instance type
+        switch (instance.type)
         {
         case oka::Instance::Type::eMesh:
-            oi.traversableHandle = mOptixMeshes[curr.mMeshId]->gas_handle;
+            oi.traversableHandle = mOptixMeshes[instance.mMeshId]->gas_handle;
             oi.visibilityMask = GEOMETRY_MASK_TRIANGLE;
             break;
         case oka::Instance::Type::eCurve:
-            oi.traversableHandle = mOptixCurves[curr.mCurveId]->gas_handle;
+            oi.traversableHandle = mOptixCurves[instance.mCurveId]->gas_handle;
             oi.visibilityMask = GEOMETRY_MASK_CURVE;
             break;
         case oka::Instance::Type::eLight:
-            oi.traversableHandle = mOptixMeshes[curr.mMeshId]->gas_handle;
+            oi.traversableHandle = mOptixMeshes[instance.mMeshId]->gas_handle;
             oi.visibilityMask = GEOMETRY_MASK_LIGHT;
             break;
         default:
@@ -511,62 +591,53 @@ void oka::OptiXRender::updateTopLevelAccelerationStructure()
             assert(0);
             break;
         }
-        // fill common instance data
-        memcpy(oi.transform, glm::value_ptr(glm::float3x4(glm::rowMajor4(curr.transform))), sizeof(float) * 12);
-        oi.sbtOffset = static_cast<unsigned int>(i * RAY_TYPE_COUNT);
+
+        // Set transform and SBT offset
+        memcpy(oi.transform, glm::value_ptr(glm::float3x4(glm::rowMajor4(instance.transform))), sizeof(float) * 12);
+        oi.sbtOffset = static_cast<unsigned int>(optixInstances.size() * RAY_TYPE_COUNT);
+
         optixInstances.push_back(oi);
     }
 
-    const size_t need_instances_size = sizeof(OptixInstance) * optixInstances.size();
-    if (need_instances_size != mState.d_instances_size)
+    // Allocate/reallocate device memory for instances if needed
+    const size_t instancesSize = sizeof(OptixInstance) * optixInstances.size();
+    if (instancesSize != mState.d_instances_size)
     {
-        if (mState.d_instances != 0)
+        if (mState.d_instances)
         {
             CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mState.d_instances)));
         }
-        CUDA_CHECK(cudaMalloc((void**)&mState.d_instances, need_instances_size));
-        mState.d_instances_size = need_instances_size;
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.d_instances), instancesSize));
+        mState.d_instances_size = instancesSize;
     }
-    CUDA_CHECK(cudaMemcpy((void*)mState.d_instances, optixInstances.data(), need_instances_size, cudaMemcpyHostToDevice));
 
-    OptixBuildInput ias_instance_input = {};
-    ias_instance_input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
-    ias_instance_input.instanceArray.instances = mState.d_instances;
-    ias_instance_input.instanceArray.numInstances = static_cast<int>(optixInstances.size());
-    OptixAccelBuildOptions ias_accel_options = {};
-    ias_accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
-    ias_accel_options.motionOptions.numKeys = 1;
-    ias_accel_options.operation = OPTIX_BUILD_OPERATION_UPDATE;
+    // Copy instances to device
+    CUDA_CHECK(cudaMemcpy(
+        reinterpret_cast<void*>(mState.d_instances), optixInstances.data(), instancesSize, cudaMemcpyHostToDevice));
 
-    OptixAccelBufferSizes ias_buffer_sizes;
-    OPTIX_CHECK(
-        optixAccelComputeMemoryUsage(mState.context, &ias_accel_options, &ias_instance_input, 1, &ias_buffer_sizes));
+    // Setup IAS build (refit) input
+    OptixBuildInput iasInput = {};
+    iasInput.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
+    iasInput.instanceArray.instances = mState.d_instances;
+    iasInput.instanceArray.numInstances = static_cast<int>(optixInstances.size());
 
-    // non-compacted output
-    CUdeviceptr d_buffer_temp_output_ias_and_compacted_size;
+    // Setup IAS build (refit) options
+    OptixAccelBuildOptions iasOptions = {};
+    iasOptions.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_BUILD | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    iasOptions.motionOptions.numKeys = 1;
+    iasOptions.operation = OPTIX_BUILD_OPERATION_UPDATE;
 
-    CUDA_CHECK(cudaMalloc(
-        reinterpret_cast<void**>(&d_buffer_temp_output_ias_and_compacted_size), ias_buffer_sizes.outputSizeInBytes));
+    // Compute memory requirements
+    OptixAccelBufferSizes iasBufferSizes;
+    OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &iasOptions, &iasInput, 1, &iasBufferSizes));
 
-    CUdeviceptr d_ias_temp_buffer;
-    CUDA_CHECK(cudaMalloc((void**)&d_ias_temp_buffer, ias_buffer_sizes.tempSizeInBytes));
-
-    CUdeviceptr compactedSizeBuffer;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>((&compactedSizeBuffer)), sizeof(uint64_t)));
-    OptixAccelEmitDesc property = {};
-    property.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
-    property.result = compactedSizeBuffer;
-
-    OPTIX_CHECK(optixAccelBuild(mState.context, 0, &ias_accel_options, &ias_instance_input, 1, d_ias_temp_buffer,
-                                ias_buffer_sizes.tempSizeInBytes, d_buffer_temp_output_ias_and_compacted_size,
-                                ias_buffer_sizes.outputSizeInBytes, &mState.ias_handle, &property, 1));
-
-    compactAccel(d_buffer_temp_output_ias_and_compacted_size, mState.ias_handle, property.result,
-                 ias_buffer_sizes.outputSizeInBytes);
-
-    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(compactedSizeBuffer)));
-    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_ias_temp_buffer)));
-    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_buffer_temp_output_ias_and_compacted_size)));
+    // Build (refit) IAS
+    OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &iasOptions, &iasInput,
+                                1, // num build inputs
+                                mTlasBufferPtrs.tempBuffer, mTlasBufferPtrs.tempBufferSize, mTlasBufferPtrs.outputBuffer,
+                                mTlasBufferPtrs.outputBufferSize, &mState.ias_handle, &mTlasBufferPtrs.compactedSizeProperty,
+                                1 // num emitted properties
+                                ));
 }
 
 void OptiXRender::createModule()
@@ -1050,18 +1121,25 @@ void OptiXRender::render(Buffer* output)
     if (animStateChanged) {
         if (accelStructureDirty) {
             applySkinning();
-            createBottomLevelAccelerationStructures();
-            //updateBottomLevelAccelerationStructures();
+            if(mScene->blasUpdateCount < 10) {
+                updateBottomLevelAccelerationStructures();
+                mScene->blasUpdateCount++;
+            }
+            else {
+                createBottomLevelAccelerationStructures();
+                mScene->blasUpdateCount = 0;
+            }
             createTopLevelAccelerationStructure();
+            mScene->tlasUpdateCount = 0;
         }
         else {
-            if(mScene->animUpdateCount < 10) {
+            if(mScene->tlasUpdateCount < 10) {
                 updateTopLevelAccelerationStructure();
-                mScene->animUpdateCount++;
+                mScene->tlasUpdateCount++;
             }
             else {
                 createTopLevelAccelerationStructure();
-                mScene->animUpdateCount = 0;
+                mScene->tlasUpdateCount = 0;
             }
         }
     }

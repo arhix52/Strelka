@@ -180,7 +180,8 @@ public:
         float current;
     };
     std::vector<Animation> mAnimations;
-    int animUpdateCount;
+    int blasUpdateCount;
+    int tlasUpdateCount;
 
     // GPU side structure
     struct Light
