@@ -186,10 +186,8 @@ OptiXRender::Curve* OptiXRender::createCurve(const oka::Curve& curve)
                                OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
     accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
 
-    const uint32_t pointsCount = mScene->getCurvesPoint().size(); // total points count in points buffer
+    const uint32_t pointsCount = mScene->getCurvesPoint().size();
     const int degree = 3;
-
-    // each oka::Curves could contains many curves
     const uint32_t numCurves = curve.mVertexCountsCount;
 
     std::vector<int> segmentIndices;
@@ -208,13 +206,15 @@ OptiXRender::Curve* OptiXRender::createCurve(const oka::Curve& curve)
     }
 
     const size_t segmentIndicesSize = sizeof(int) * segmentIndices.size();
-    CUdeviceptr d_segmentIndices = 0;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_segmentIndices), segmentIndicesSize));
+    // Reuse existing buffer if large enough, otherwise allocate new one
+    if (!mSegmentIndicesBuffer || mSegmentIndicesBuffer->size() < segmentIndicesSize)
+    {
+        mSegmentIndicesBuffer.reset(new OptixBuffer(segmentIndicesSize));
+    }
     CUDA_CHECK(cudaMemcpy(
-        reinterpret_cast<void*>(d_segmentIndices), segmentIndices.data(), segmentIndicesSize, cudaMemcpyHostToDevice));
-    // Curve build input.
-    OptixBuildInput curve_input = {};
+        reinterpret_cast<void*>(mSegmentIndicesBuffer->getPtr()), segmentIndices.data(), segmentIndicesSize, cudaMemcpyHostToDevice));
 
+    OptixBuildInput curve_input = {};
     curve_input.type = OPTIX_BUILD_INPUT_TYPE_CURVES;
     switch (degree)
     {
@@ -239,43 +239,44 @@ OptiXRender::Curve* OptiXRender::createCurve(const oka::Curve& curve)
     curve_input.curveArray.widthStrideInBytes = sizeof(float);
     curve_input.curveArray.normalBuffers = 0;
     curve_input.curveArray.normalStrideInBytes = 0;
-    curve_input.curveArray.indexBuffer = mIndexBuffer->getPtr();
+    curve_input.curveArray.indexBuffer = mSegmentIndicesBuffer->getPtr();
     curve_input.curveArray.indexStrideInBytes = sizeof(int);
     curve_input.curveArray.flag = OPTIX_GEOMETRY_FLAG_NONE;
     curve_input.curveArray.primitiveIndexOffset = 0;
-
-    // curve_input.curveArray.endcapFlags = OPTIX_CURVE_ENDCAP_ON;
 
     OptixAccelBufferSizes gas_buffer_sizes;
     OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &accel_options, &curve_input,
                                              1, // Number of build inputs
                                              &gas_buffer_sizes));
 
-    CUdeviceptr d_temp_buffer_gas;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_temp_buffer_gas), gas_buffer_sizes.tempSizeInBytes));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&rcurve->d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
+    // Reuse temporary buffers if large enough, otherwise allocate new ones
+    // These buffers are kept alive and reused for future GAS builds
+    if (!mTempGasBuffer || mTempGasBuffer->size() < gas_buffer_sizes.tempSizeInBytes)
+    {
+        mTempGasBuffer.reset(new OptixBuffer(gas_buffer_sizes.tempSizeInBytes));
+    }
+    if (!mCompactedSizeBuffer || mCompactedSizeBuffer->size() < sizeof(uint64_t))
+    {
+        mCompactedSizeBuffer.reset(new OptixBuffer(sizeof(uint64_t)));
+    }
 
-    CUdeviceptr compactedSizeBuffer;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>((&compactedSizeBuffer)), sizeof(uint64_t)));
+    CUdeviceptr d_gas_output_buffer;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
 
     OptixAccelEmitDesc property = {};
     property.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
-    property.result = compactedSizeBuffer;
+    property.result = mCompactedSizeBuffer->getPtr();
 
     OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &curve_input,
                                 1, // num build inputs
-                                d_temp_buffer_gas, gas_buffer_sizes.tempSizeInBytes, rcurve->d_gas_output_buffer,
+                                mTempGasBuffer->getPtr(), gas_buffer_sizes.tempSizeInBytes, d_gas_output_buffer,
                                 gas_buffer_sizes.outputSizeInBytes, &rcurve->gas_handle,
                                 &property, // emitted property list
                                 1)); // num emitted properties
 
-    compactAccel(rcurve->d_gas_output_buffer, rcurve->gas_handle, property.result, gas_buffer_sizes.outputSizeInBytes);
+    compactAccel(d_gas_output_buffer, rcurve->gas_handle, property.result, gas_buffer_sizes.outputSizeInBytes);
 
-    // We can now free the scratch space buffer used during build and the vertex
-    // inputs, since they are not needed by our trivial shading method
-    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_temp_buffer_gas)));
-    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_segmentIndices)));
-
+    rcurve->d_gas_output_buffer = d_gas_output_buffer;
     return rcurve;
 }
 
@@ -284,16 +285,13 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
     OptixTraversableHandle gas_handle;
     CUdeviceptr d_gas_output_buffer;
 
-    // Configure acceleration structure build options
     OptixAccelBuildOptions accel_options = {};
     accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
     accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
 
-    // Set up triangle input data
     const CUdeviceptr vertexBuffer = mVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
     const CUdeviceptr indexBuffer = mIndexBuffer->getPtr() + mesh.mIndex * sizeof(uint32_t);
 
-    // Our build input is a simple list of non-indexed triangle vertices
     const uint32_t triangle_input_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
     OptixBuildInput triangle_input = {};
     triangle_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
@@ -308,39 +306,35 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
     triangle_input.triangleArray.flags = triangle_input_flags;
     triangle_input.triangleArray.numSbtRecords = 1;
 
-    // Calculate memory requirements
     OptixAccelBufferSizes gas_buffer_sizes;
     OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &accel_options, &triangle_input, 1, &gas_buffer_sizes));
 
-    // Allocate required buffers
-    CUdeviceptr d_temp_buffer_gas;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_temp_buffer_gas), gas_buffer_sizes.tempSizeInBytes));
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
+    // Reuse temporary buffers if large enough, otherwise allocate new ones
+    // These buffers are kept alive and reused for future GAS builds
+    if (!mTempGasBuffer || mTempGasBuffer->size() < gas_buffer_sizes.tempSizeInBytes)
+    {
+        mTempGasBuffer.reset(new OptixBuffer(gas_buffer_sizes.tempSizeInBytes));
+    }
+    if (!mCompactedSizeBuffer || mCompactedSizeBuffer->size() < sizeof(uint64_t))
+    {
+        mCompactedSizeBuffer.reset(new OptixBuffer(sizeof(uint64_t)));
+    }
 
-    // Set up compaction
-    CUdeviceptr compactedSizeBuffer;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&compactedSizeBuffer), sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
 
     OptixAccelEmitDesc property = {};
     property.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
-    property.result = compactedSizeBuffer;
+    property.result = mCompactedSizeBuffer->getPtr();
 
-    // Build acceleration structure
     OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &triangle_input,
                                 1, // num build inputs
-                                d_temp_buffer_gas, gas_buffer_sizes.tempSizeInBytes, d_gas_output_buffer,
+                                mTempGasBuffer->getPtr(), gas_buffer_sizes.tempSizeInBytes, d_gas_output_buffer,
                                 gas_buffer_sizes.outputSizeInBytes, &gas_handle,
                                 &property, // emitted property list
                                 1)); // num emitted properties
 
-    // Compact the acceleration structure
     compactAccel(d_gas_output_buffer, gas_handle, property.result, gas_buffer_sizes.outputSizeInBytes);
 
-    // Free temporary buffers
-    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_temp_buffer_gas)));
-    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(compactedSizeBuffer)));
-
-    // Create and return mesh object
     Mesh* rmesh = new Mesh();
     rmesh->d_gas_output_buffer = d_gas_output_buffer;
     rmesh->gas_handle = gas_handle;
