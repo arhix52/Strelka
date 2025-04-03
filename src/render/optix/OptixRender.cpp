@@ -121,13 +121,8 @@ static bool readSourceFile(std::string& str, const fs::path& filename)
     return false;
 }
 
-OptiXRender::OptiXRender()
-{
-}
-
-OptiXRender::~OptiXRender()
-{
-}
+OptiXRender::OptiXRender() = default;
+OptiXRender::~OptiXRender() = default;
 
 void OptiXRender::createContext()
 {
@@ -235,14 +230,16 @@ OptiXRender::Curve* OptiXRender::createCurve(const oka::Curve& curve)
     }
 
     curve_input.curveArray.numPrimitives = segmentIndices.size();
-    curve_input.curveArray.vertexBuffers = &d_points;
+    CUdeviceptr vertexBuffers[] = { mPointsBuffer->getPtr() };
+    curve_input.curveArray.vertexBuffers = vertexBuffers;
     curve_input.curveArray.numVertices = pointsCount;
     curve_input.curveArray.vertexStrideInBytes = sizeof(glm::float3);
-    curve_input.curveArray.widthBuffers = &d_widths;
+    CUdeviceptr widthBuffers[] = { mWidthsBuffer->getPtr() };
+    curve_input.curveArray.widthBuffers = widthBuffers;
     curve_input.curveArray.widthStrideInBytes = sizeof(float);
     curve_input.curveArray.normalBuffers = 0;
     curve_input.curveArray.normalStrideInBytes = 0;
-    curve_input.curveArray.indexBuffer = d_segmentIndices;
+    curve_input.curveArray.indexBuffer = mIndexBuffer->getPtr();
     curve_input.curveArray.indexStrideInBytes = sizeof(int);
     curve_input.curveArray.flag = OPTIX_GEOMETRY_FLAG_NONE;
     curve_input.curveArray.primitiveIndexOffset = 0;
@@ -1089,23 +1086,22 @@ Buffer* OptiXRender::createBuffer(const BufferDesc& desc)
 }
 
 template <typename T>
-void createOrUpdateRawBuffer(CUdeviceptr& buffer, const std::vector<T>& data)
+void createOrUpdateBuffer(std::unique_ptr<OptixBuffer>& buffer, const std::vector<T>& data)
 {
-    if (data.empty())
-    {
-        return;
-    }
-
-    // Free old buffer if it exists
-    if (buffer)
-    {
-        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(buffer)));
-        buffer = 0;
-    }
-
     const size_t bufferSize = data.size() * sizeof(T);
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&buffer), bufferSize));
-    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(buffer), data.data(), bufferSize, cudaMemcpyHostToDevice));
+
+    if (buffer == nullptr)
+    {
+        buffer.reset(new OptixBuffer(bufferSize));
+    }
+    if (buffer->size() != bufferSize)
+    {
+        buffer->realloc(bufferSize);
+    }
+    if (bufferSize > 0)
+    {
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(buffer->getPtr()), data.data(), bufferSize, cudaMemcpyHostToDevice));
+    }
 }
 
 void OptiXRender::createPointsBuffer()
@@ -1124,31 +1120,12 @@ void OptiXRender::createPointsBuffer()
         devicePoints.push_back(make_float3(p.x, p.y, p.z));
     }
 
-    createOrUpdateRawBuffer(d_points, devicePoints);
+    createOrUpdateBuffer(mPointsBuffer, devicePoints);
 }
 
 void OptiXRender::createWidthsBuffer()
 {
-    createOrUpdateRawBuffer(d_widths, mScene->getCurvesWidths());
-}
-
-template <typename T>
-void createOrUpdateBuffer(std::unique_ptr<OptixBuffer>& buffer, const std::vector<T>& data)
-{
-    const size_t bufferSize = data.size() * sizeof(T);
-
-    if (buffer == nullptr)
-    {
-        buffer.reset(new OptixBuffer(bufferSize));
-    }
-    if (buffer->size() != bufferSize)
-    {
-        buffer->realloc(bufferSize);
-    }
-    if (bufferSize > 0)
-    {
-        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(buffer->getPtr()), data.data(), bufferSize, cudaMemcpyHostToDevice));
-    }
+    createOrUpdateBuffer(mWidthsBuffer, mScene->getCurvesWidths());
 }
 
 void OptiXRender::createVertexBuffer()
@@ -1392,23 +1369,23 @@ bool OptiXRender::createOptixMaterials()
 
     const uint8_t* argData = mMaterialManager.getArgBufferData(targetCode);
     const size_t argDataSize = mMaterialManager.getArgBufferSize(targetCode);
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_materialArgData), argDataSize));
-    CUDA_CHECK(cudaMemcpy((void*)d_materialArgData, argData, argDataSize, cudaMemcpyHostToDevice));
+    mMaterialArgDataBuffer.reset(new OptixBuffer(argDataSize));
+    CUDA_CHECK(cudaMemcpy((void*)mMaterialArgDataBuffer->getPtr(), argData, argDataSize, cudaMemcpyHostToDevice));
 
     const uint8_t* roData = mMaterialManager.getReadOnlyBlockData(targetCode);
     const size_t roDataSize = mMaterialManager.getReadOnlyBlockSize(targetCode);
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_materialRoData), roDataSize));
-    CUDA_CHECK(cudaMemcpy((void*)d_materialRoData, roData, roDataSize, cudaMemcpyHostToDevice));
+    mMaterialRoDataBuffer.reset(new OptixBuffer(roDataSize));
+    CUDA_CHECK(cudaMemcpy((void*)mMaterialRoDataBuffer->getPtr(), roData, roDataSize, cudaMemcpyHostToDevice));
 
     const size_t texturesBuffSize = sizeof(Texture) * materialTextures.size();
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_texturesData), texturesBuffSize));
-    CUDA_CHECK(cudaMemcpy((void*)d_texturesData, materialTextures.data(), texturesBuffSize, cudaMemcpyHostToDevice));
+    mTexturesDataBuffer.reset(new OptixBuffer(texturesBuffSize));
+    CUDA_CHECK(cudaMemcpy((void*)mTexturesDataBuffer->getPtr(), materialTextures.data(), texturesBuffSize, cudaMemcpyHostToDevice));
 
     Texture_handler resourceHandler;
     resourceHandler.num_textures = materialTextures.size();
-    resourceHandler.textures = (const Texture*)d_texturesData;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_texturesHandler), sizeof(Texture_handler)));
-    CUDA_CHECK(cudaMemcpy((void*)d_texturesHandler, &resourceHandler, sizeof(Texture_handler), cudaMemcpyHostToDevice));
+    resourceHandler.textures = (const Texture*)mTexturesDataBuffer->getPtr();
+    mTexturesHandlerBuffer.reset(new OptixBuffer(sizeof(Texture_handler)));
+    CUDA_CHECK(cudaMemcpy((void*)mTexturesHandlerBuffer->getPtr(), &resourceHandler, sizeof(Texture_handler), cudaMemcpyHostToDevice));
 
     std::unordered_map<MaterialManager::CompiledMaterial*, OptixProgramGroup> compiledToOptixPG;
     for (int i = 0; i < compiledMaterials.size(); ++i)
@@ -1425,11 +1402,11 @@ bool OptiXRender::createOptixMaterials()
 
         Material optixMaterial;
         optixMaterial.programGroup = compiledToOptixPG[compiledMaterials[i]];
-        optixMaterial.d_argData = d_materialArgData + mMaterialManager.getArgBlockOffset(targetCode, i);
+        optixMaterial.d_argData = mMaterialArgDataBuffer->getPtr() + mMaterialManager.getArgBlockOffset(targetCode, i);
         optixMaterial.d_argDataSize = argDataSize;
-        optixMaterial.d_roData = d_materialRoData + mMaterialManager.getReadOnlyOffset(targetCode, i);
+        optixMaterial.d_roData = mMaterialRoDataBuffer->getPtr() + mMaterialManager.getReadOnlyOffset(targetCode, i);
         optixMaterial.d_roSize = roDataSize;
-        optixMaterial.d_textureHandler = d_texturesHandler;
+        optixMaterial.d_textureHandler = mTexturesHandlerBuffer->getPtr();
 
         mMaterials.push_back(optixMaterial);
     }

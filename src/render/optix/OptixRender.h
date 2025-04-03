@@ -116,13 +116,13 @@ private:
     std::unique_ptr<OptixBuffer> mIndexBuffer;
     std::unique_ptr<OptixBuffer> mLightBuffer;
     // TODO: move to raii buffers
-    CUdeviceptr d_points = 0;
-    CUdeviceptr d_widths = 0;
+    std::unique_ptr<OptixBuffer> mPointsBuffer;
+    std::unique_ptr<OptixBuffer> mWidthsBuffer;
 
-    CUdeviceptr d_materialRoData = 0;
-    CUdeviceptr d_materialArgData = 0;
-    CUdeviceptr d_texturesHandler = 0;
-    CUdeviceptr d_texturesData = 0;
+    std::unique_ptr<OptixBuffer> mMaterialRoDataBuffer;
+    std::unique_ptr<OptixBuffer> mMaterialArgDataBuffer;
+    std::unique_ptr<OptixBuffer> mTexturesHandlerBuffer;
+    std::unique_ptr<OptixBuffer> mTexturesDataBuffer;
 
     void createVertexBuffer();
     void createIndexBuffer();
