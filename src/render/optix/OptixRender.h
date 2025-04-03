@@ -127,7 +127,7 @@ private:
     // Temporary buffers for GAS building
     // These buffers are reused across multiple GAS builds to reduce allocations
     // They are automatically resized if needed but never shrink
-    std::unique_ptr<OptixBuffer> mTempGasBuffer;        // Temporary buffer for GAS building
+    std::unique_ptr<OptixBuffer> mTempAccelBuffer;        // Temporary buffer for acceleration structure building
     std::unique_ptr<OptixBuffer> mCompactedSizeBuffer;  // Buffer for storing compaction size results
     std::unique_ptr<OptixBuffer> mSegmentIndicesBuffer; // Buffer for curve segment indices
 
