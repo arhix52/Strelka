@@ -357,26 +357,11 @@ void OptiXRender::createBottomLevelAccelerationStructures()
     mOptixCurves.clear();
 
     // Create BLAS for meshes
+    const auto& meshes = mScene->getMeshes();
     mOptixMeshes.reserve(mScene->getMeshes().size());
-    for (auto& node: mScene->mNodes)
+    for (const auto& mesh : meshes)
     {
-        if (node.type == oka::Scene::Node::NodeType::mesh)
-        {
-            if (node.skin != -1)
-            {
-                for (const auto instId: node.instanceIds) {
-                    auto &mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
-                    mOptixMeshes.emplace_back(createMesh(mesh, true));
-                }
-            }
-            else
-            {
-                for (const auto instId: node.instanceIds) {
-                    auto &mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
-                    mOptixMeshes.emplace_back(createMesh(mesh, false));
-                }
-            }
-        }
+        mOptixMeshes.emplace_back(createMesh(mesh, mesh.isSkeletal));
     }
 
     // Create BLAS for curves
@@ -429,21 +414,12 @@ void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
 void OptiXRender::updateBottomLevelAccelerationStructures()
 {
     // update BLAS for meshes
+    const auto& meshes = mScene->getMeshes();
     int index = 0;
-    for (auto& node: mScene->mNodes)
+    for (const auto& mesh : meshes)
     {
-        if (node.type == oka::Scene::Node::NodeType::mesh)
-        {
-            if (node.skin != -1)
-            {
-                for (const auto instId: node.instanceIds) {
-                    auto &mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
-                    updateMesh(mesh, index);
-                    index++;
-                }
-            }
-            else for (const auto instId: node.instanceIds) index++;
-        }
+        if (mesh.isSkeletal) updateMesh(mesh, index);
+        index++;
     }
 }
 

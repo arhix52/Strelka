@@ -24,6 +24,7 @@ struct Mesh
     uint32_t mVbOffset; // start in vb
     uint32_t mVertexCount; // number of vertices in mesh
     uint32_t mSbOffset; // start in sb
+    bool isSkeletal = false;
 };
 
 struct Curve

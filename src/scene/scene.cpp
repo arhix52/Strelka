@@ -75,6 +75,7 @@ uint32_t Scene::createSkeletalMesh(const std::vector<Vertex>& vb, const std::vec
     mesh->mVertexCount = vb.size();
 
     mesh->mSbOffset = mVerticesSkinData.size();
+    mesh->isSkeletal = true;
 
     // const uint32_t ibOffset = mVertices.size(); // adjust indices for global index buffer
     // for (int i = 0; i < ib.size(); ++i)
