@@ -115,9 +115,10 @@ private:
 
     PathTracerState mState;
     bool mEnableValidation;
+    bool mEnableMotionBlur;
 
     void allocJointMatrices();
-    Mesh* createMesh(const oka::Mesh& mesh, bool isSkeletal);
+    Mesh* createMesh(const oka::Mesh& mesh);
     void updateMesh(const oka::Mesh& mesh, int optixMeshesId);
     Curve* createCurve(const oka::Curve& curve);
     bool compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes);
@@ -126,12 +127,15 @@ private:
     std::vector<std::unique_ptr<Curve>> mOptixCurves;
 
     std::unique_ptr<OptixBuffer> mVertexBuffer;
+    std::unique_ptr<OptixBuffer> mPrevVertexBuffer;
     std::unique_ptr<OptixBuffer> mVertexSkinDataBuffer;
     std::unique_ptr<OptixBuffer> mIndexBuffer;
     std::unique_ptr<OptixBuffer> mLightBuffer;
     // TODO: move to raii buffers
     std::unique_ptr<OptixBuffer> mPointsBuffer;
     std::unique_ptr<OptixBuffer> mWidthsBuffer;
+
+    std::unique_ptr<OptixBuffer> mMatrixMotionTransform; // used for motion blur
 
     struct asOutputBuffer
     {
@@ -157,6 +161,7 @@ private:
     std::unique_ptr<OptixBuffer> mSegmentIndicesBuffer; // Buffer for curve segment indices
 
     void createVertexBuffer();
+    void createPrevVertexBuffer();
     void createVertexSkinDataBuffer();
     void createIndexBuffer();
 

@@ -45,6 +45,9 @@ struct Curve
 struct Instance
 {
     glm::mat4 transform;
+    glm::mat4 prevTransform; // used for motion
+    bool transformReversedOrder = false; // if true --> prevTransform is relevant, transform is obsolete
+    bool isAnimated = false;
     enum class Type : uint8_t
     {
         eMesh,

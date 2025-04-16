@@ -227,9 +227,9 @@ bool Scene::applyAnimation(const uint32_t animId)
         const glm::float4 value = interpolate(animation.samplers[animation.channels[i].samplerIndex], targetProperty, animation.current);
 
         if (targetProperty == AnimationChannel::PathType::ROTATION) 
-            blasChanged = animateNode(nodeId, targetProperty, makeQuatFromFloat4(value)) ? true : blasChanged;
+            blasChanged |= animateNode(nodeId, targetProperty, makeQuatFromFloat4(value));
         else 
-            blasChanged = animateNode(nodeId, targetProperty, glm::float3(value)) ? true : blasChanged;
+            blasChanged |= animateNode(nodeId, targetProperty, glm::float3(value));
     }
     return blasChanged;
 }
@@ -349,7 +349,11 @@ bool Scene::updateNode(const uint32_t nodeId)
     {
         case Node::NodeType::mesh:
             for (const auto instId: mNodes[nodeId].instanceIds) {
-                mInstances[instId].transform = globalTransform;
+                Instance& inst = mInstances[instId];
+                if (inst.transformReversedOrder) inst.transform = globalTransform;
+                else inst.prevTransform = globalTransform;
+                inst.transformReversedOrder = !inst.transformReversedOrder;
+                inst.isAnimated = true;
             }
             return false;
             break;
@@ -364,7 +368,7 @@ bool Scene::updateNode(const uint32_t nodeId)
 
     for (const auto childId: mNodes[nodeId].children) 
     {
-        skeletonNodesUpdated = updateNode(childId) ? true : skeletonNodesUpdated;
+        skeletonNodesUpdated |= updateNode(childId);
     }
 
     return skeletonNodesUpdated;

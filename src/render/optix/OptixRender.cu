@@ -120,7 +120,7 @@ extern "C" __global__ void __raygen__rg()
             optixTrace(params.handle, ray_origin, ray_direction,
                        params.materialRayTmin, // Min intersection distance
                        1e16f, // Max intersection distance
-                       0.0f, // rayTime -- used for motion blur
+                       0.5f, // rayTime -- used for motion blur
                        OptixVisibilityMask(255), // Specify always visible
                        OPTIX_RAY_FLAG_NONE,
                        RAY_TYPE_RADIANCE, // SBT offset   -- See SBT discussion

@@ -111,6 +111,7 @@ public:
         m_settingsManager->setAs<bool>("render/pt/screenshotSPP", false);
         m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
         m_settingsManager->setAs<bool>("render/enableValidation", false);
+        m_settingsManager->setAs<bool>("render/enableMotionBlur", true);
         m_settingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
         // Postprocessing settings:
         m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", 100.0f);
