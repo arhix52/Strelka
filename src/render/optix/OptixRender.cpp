@@ -295,6 +295,7 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
 
     CUdeviceptr vertexBuffer[2];
     if (mEnableMotionBlur) vertexBuffer[0] = mPrevVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
+    else vertexBuffer[0] = 0;
     vertexBuffer[1] = mVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
     
     const CUdeviceptr indexBuffer = mIndexBuffer->getPtr() + mesh.mIndex * sizeof(uint32_t);
@@ -513,15 +514,13 @@ void OptiXRender::createTopLevelAccelerationStructure()
             memcpy(matrixMotionTransform.transform[0], glm::value_ptr(glm::float3x4(glm::rowMajor4(prevTransform))), sizeof(float) * 12);
             memcpy(matrixMotionTransform.transform[1], glm::value_ptr(glm::float3x4(glm::rowMajor4(transform))), sizeof(float) * 12);
 
-            // Ensure matrix motion transform buffer exists then copy data
-            if (!mMatrixMotionTransform)
-            {
-                mMatrixMotionTransform.reset(new OptixBuffer(sizeof(OptixMatrixMotionTransform)));
-            }
-            CUDA_CHECK(cudaMemcpy(mMatrixMotionTransform->getNativePtr(), &matrixMotionTransform, sizeof(OptixMatrixMotionTransform), cudaMemcpyHostToDevice));
+            auto motionTransformBuffer = std::make_shared<OptixBuffer>(sizeof(OptixMatrixMotionTransform));
+            CUDA_CHECK(cudaMemcpy(motionTransformBuffer->getNativePtr(), &matrixMotionTransform, sizeof(OptixMatrixMotionTransform), cudaMemcpyHostToDevice));
 
-            OPTIX_CHECK(optixConvertPointerToTraversableHandle(mState.context, mMatrixMotionTransform->getPtr(), OPTIX_TRAVERSABLE_TYPE_MATRIX_MOTION_TRANSFORM, &matrixMotionTransformHandle));
+            OPTIX_CHECK(optixConvertPointerToTraversableHandle(mState.context, motionTransformBuffer->getPtr(), OPTIX_TRAVERSABLE_TYPE_MATRIX_MOTION_TRANSFORM, &matrixMotionTransformHandle));
 
+            mMotionTransformBuffers.push_back(motionTransformBuffer);
+            
             // No transform on the instance. 
             // The object to world transformation is done by the optixMatrixMotionTransform.
             const float trafoIdentity[12] =
@@ -736,6 +735,8 @@ void OptiXRender::createModule()
     OPTIX_CHECK_LOG(optixModuleCreate(mState.context, &moduleOptions, &pipelineOptions, optixSource.c_str(),
                                       optixSource.size(), log, &sizeof_log, &mState.ptx_module));
 
+    STRELKA_FATAL(log);
+    
     // Store options for later use
     mState.pipeline_compile_options = pipelineOptions;
     mState.module_compile_options = moduleOptions;
@@ -883,7 +884,7 @@ void OptiXRender::createPipeline()
                                            0, // maxDCDepth
                                            &direct_callable_stack_size_from_traversal,
                                            &direct_callable_stack_size_from_state, &continuation_stack_size));
-    int maxTraversableDepth = mEnableMotionBlur ? 3 : 1;
+    int maxTraversableDepth = mEnableMotionBlur ? 3 : 2;
     OPTIX_CHECK(optixPipelineSetStackSize(pipeline, direct_callable_stack_size_from_traversal,
                                           direct_callable_stack_size_from_state, continuation_stack_size,
                                           maxTraversableDepth));

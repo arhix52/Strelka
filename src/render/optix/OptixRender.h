@@ -135,7 +135,7 @@ private:
     std::unique_ptr<OptixBuffer> mPointsBuffer;
     std::unique_ptr<OptixBuffer> mWidthsBuffer;
 
-    std::unique_ptr<OptixBuffer> mMatrixMotionTransform; // used for motion blur
+    std::vector<std::shared_ptr<OptixBuffer>> mMotionTransformBuffers; // used for motion blur
 
     struct asOutputBuffer
     {

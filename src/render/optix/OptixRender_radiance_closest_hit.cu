@@ -185,9 +185,11 @@ static __forceinline__ __device__ PerRayData* getPRD()
 static __forceinline__ __device__ bool traceOcclusion(
     OptixTraversableHandle handle, float3 ray_origin, float3 ray_direction, float tmin, float tmax)
 {
+    const float time = optixGetRayTime();
+
     unsigned int occluded = 0u;
     optixTrace(handle, ray_origin, ray_direction, tmin, tmax,
-               0.0f, // rayTime
+               time, // rayTime
                OptixVisibilityMask(RAY_MASK_SHADOW), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
                RAY_TYPE_OCCLUSION, // SBT offset
                RAY_TYPE_COUNT, // SBT stride
