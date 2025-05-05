@@ -734,8 +734,6 @@ void OptiXRender::createModule()
     size_t sizeof_log = sizeof(log);
     OPTIX_CHECK_LOG(optixModuleCreate(mState.context, &moduleOptions, &pipelineOptions, optixSource.c_str(),
                                       optixSource.size(), log, &sizeof_log, &mState.ptx_module));
-
-    STRELKA_FATAL(log);
     
     // Store options for later use
     mState.pipeline_compile_options = pipelineOptions;
