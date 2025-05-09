@@ -30,6 +30,7 @@ struct Vertex
 struct SceneData
 {
     Vertex* vb;
+    Vertex* vb_prev;
     uint32_t* ib;
     UniformLight* lights;
     uint32_t numLights;
@@ -62,6 +63,8 @@ struct Params
 
     bool enableAccumulation;
     // developers settings:
+    bool enableMotionBlur;
+    bool isMotionBlurVisible;
     uint32_t debug;
     float shadowRayTmin;
     float materialRayTmin;

@@ -115,7 +115,8 @@ extern "C" __global__ void __raygen__rg()
         unsigned int payload0, payload1;
         packPointer(&prd, payload0, payload1);
 
-        const float time = random<SampleDimension::eTime>(prd.sampler);
+        float time = params.enableMotionBlur ? random<SampleDimension::eTime>(prd.sampler) : 0.0f;
+        if (params.enableMotionBlur && !params.isMotionBlurVisible) time = 1.0f;
 
         while (prd.depth < params.max_depth)
         {
@@ -276,9 +277,31 @@ extern "C" __global__ void __closesthit__ch()
 
     const uint32_t baseVbOffset = hit_data->vertexOffset;
 
-    float3 N0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normal);
-    float3 N1 = unpackNormal(params.scene.vb[baseVbOffset + i1].normal);
-    float3 N2 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
+    float3 N0;
+    float3 N1;
+    float3 N2;
+
+    if (params.enableMotionBlur) 
+    {
+        float3 N0_0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normal);
+        float3 N1_0 = unpackNormal(params.scene.vb[baseVbOffset + i1].normal);
+        float3 N2_0 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
+
+        float3 N0_1 = unpackNormal(params.scene.vb_prev[baseVbOffset + i0].normal);
+        float3 N1_1 = unpackNormal(params.scene.vb_prev[baseVbOffset + i1].normal);
+        float3 N2_1 = unpackNormal(params.scene.vb_prev[baseVbOffset + i2].normal);
+
+        const float t = optixGetRayTime();
+        N0 = lerp(N0_0, N0_1, t);
+        N1 = lerp(N1_0, N1_1, t);
+        N2 = lerp(N2_0, N2_1, t);
+    }
+    else
+    {
+        N0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normal);
+        N1 = unpackNormal(params.scene.vb[baseVbOffset + i1].normal);
+        N2 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
+    }
 
     float3 object_normal = normalize(interpolateAttrib(N0, N1, N2, barycentrics));
 

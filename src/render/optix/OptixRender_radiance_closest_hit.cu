@@ -370,25 +370,61 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
 
     const uint32_t baseVbOffset = hit_data->vertexOffset;
 
-    const Vertex v0 = params.scene.vb[baseVbOffset + i0];
-    const Vertex v1 = params.scene.vb[baseVbOffset + i1];
-    const Vertex v2 = params.scene.vb[baseVbOffset + i2];
+    float3 p0, p1, p2, n0, n1, n2, t0, t1, t2;
+    float2 uv0, uv1, uv2;
 
-    const float3 p0 = v0.position;
-    const float3 p1 = v1.position;
-    const float3 p2 = v2.position;
+    if (params.enableMotionBlur)
+    {
+        const float t = optixGetRayTime();
+        const Vertex* vb0 = params.scene.vb_prev;
+        const Vertex* vb1 = params.scene.vb;
 
-    const float3 n0 = unpackNormal(v0.normal);
-    const float3 n1 = unpackNormal(v1.normal);
-    const float3 n2 = unpackNormal(v2.normal);
+        const Vertex v0_0 = vb0[baseVbOffset + i0];
+        const Vertex v1_0 = vb0[baseVbOffset + i1];
+        const Vertex v2_0 = vb0[baseVbOffset + i2];
 
-    const float3 t0 = unpackNormal(v0.tangent);
-    const float3 t1 = unpackNormal(v1.tangent);
-    const float3 t2 = unpackNormal(v2.tangent);
+        const Vertex v0_1 = vb1[baseVbOffset + i0];
+        const Vertex v1_1 = vb1[baseVbOffset + i1];
+        const Vertex v2_1 = vb1[baseVbOffset + i2];
 
-    const float2 uv0 = unpackUV(v0.uv);
-    const float2 uv1 = unpackUV(v1.uv);
-    const float2 uv2 = unpackUV(v2.uv);
+        // Interpolate all vertex attributes
+        p0 = lerp(v0_0.position, v0_1.position, t);
+        p1 = lerp(v1_0.position, v1_1.position, t);
+        p2 = lerp(v2_0.position, v2_1.position, t);
+
+        n0 = lerp(unpackNormal(v0_0.normal), unpackNormal(v0_1.normal), t);
+        n1 = lerp(unpackNormal(v1_0.normal), unpackNormal(v1_1.normal), t);
+        n2 = lerp(unpackNormal(v2_0.normal), unpackNormal(v2_1.normal), t);
+
+        t0 = lerp(unpackNormal(v0_0.tangent), unpackNormal(v0_1.tangent), t);
+        t1 = lerp(unpackNormal(v1_0.tangent), unpackNormal(v1_1.tangent), t);
+        t2 = lerp(unpackNormal(v2_0.tangent), unpackNormal(v2_1.tangent), t);
+
+        uv0 = lerp(unpackUV(v0_0.uv), unpackUV(v0_1.uv), t);
+        uv1 = lerp(unpackUV(v1_0.uv), unpackUV(v1_1.uv), t);
+        uv2 = lerp(unpackUV(v2_0.uv), unpackUV(v2_1.uv), t);
+    }
+    else
+    {
+        const Vertex v0 = params.scene.vb[baseVbOffset + i0];
+        const Vertex v1 = params.scene.vb[baseVbOffset + i1];
+        const Vertex v2 = params.scene.vb[baseVbOffset + i2];
+        p0 = v0.position;
+        p1 = v1.position;
+        p2 = v2.position;
+
+        n0 = unpackNormal(v0.normal);
+        n1 = unpackNormal(v1.normal);
+        n2 = unpackNormal(v2.normal);
+
+        t0 = unpackNormal(v0.tangent);
+        t1 = unpackNormal(v1.tangent);
+        t2 = unpackNormal(v2.tangent);
+
+        uv0 = unpackUV(v0.uv);
+        uv1 = unpackUV(v1.uv);
+        uv2 = unpackUV(v2.uv);
+    }
 
     const float2 uvCoord = interpolateAttrib(uv0, uv1, uv2, barycentrics);
     const float3 text_coords = make_float3(uvCoord.x, uvCoord.y, 0.0f);

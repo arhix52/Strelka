@@ -112,6 +112,7 @@ public:
         m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
         m_settingsManager->setAs<bool>("render/enableValidation", false);
         m_settingsManager->setAs<bool>("render/enableMotionBlur", true);
+        m_settingsManager->setAs<bool>("render/isMotionBlurVisible", true);
         m_settingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
         // Postprocessing settings:
         m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", 100.0f);
@@ -476,6 +477,13 @@ public:
         ImGui::End(); // end window
 
         if (ImGui::Begin("Animations")) {
+            
+            bool isMotionBlurVisible = m_settingsManager->getAs<bool>("render/isMotionBlurVisible");
+            if (ImGui::Checkbox("Motion Blur", &isMotionBlurVisible))
+            {
+                m_settingsManager->setAs<bool>("render/isMotionBlurVisible", isMotionBlurVisible);
+            }
+
             auto animations = m_scene->getAnimations();
             for (int i = 0; i < animations.size(); ++i) {
                 std::string checkboxNameStr = "render/animation/anim" + std::to_string(i) + "/state";

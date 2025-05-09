@@ -401,10 +401,6 @@ void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
     accel_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_BUILD | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
     accel_options.operation = OPTIX_BUILD_OPERATION_UPDATE;
 
-    // Set up triangle input data
-    /*CUdeviceptr vertexBuffer[2];
-        vertexBuffer[0] = mPrevVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
-        vertexBuffer[1] = mVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);*/
     const CUdeviceptr vertexBuffer = mVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
     const CUdeviceptr indexBuffer = mIndexBuffer->getPtr() + mesh.mIndex * sizeof(uint32_t);
 
@@ -414,8 +410,7 @@ void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
     triangle_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
     triangle_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
     triangle_input.triangleArray.numVertices = mesh.mVertexCount;
-    //triangle_input.triangleArray.vertexBuffers = vertexBuffer;
-    triangle_input.triangleArray.vertexBuffers = &vertexBuffer/*[1]*/;
+    triangle_input.triangleArray.vertexBuffers = &vertexBuffer;
     triangle_input.triangleArray.vertexStrideInBytes = sizeof(oka::Scene::Vertex);
     triangle_input.triangleArray.indexBuffer = indexBuffer;
     triangle_input.triangleArray.indexFormat = OptixIndicesFormat::OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
@@ -423,15 +418,6 @@ void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
     triangle_input.triangleArray.numIndexTriplets = mesh.mCount / 3;
     triangle_input.triangleArray.flags = triangle_input_flags;
     triangle_input.triangleArray.numSbtRecords = 1;
-
-    /*
-    // Motion options
-    OptixMotionOptions motion_options = {};
-    motion_options.numKeys = 2;
-    motion_options.timeBegin = 0.0f;
-    motion_options.timeEnd = 1.0f;
-    motion_options.flags = OPTIX_MOTION_FLAG_NONE;
-    accel_options.motionOptions = motion_options;*/
 
     // Calculate memory requirements
     OptixAccelBufferSizes gas_buffer_sizes;
@@ -565,7 +551,8 @@ void OptiXRender::createTopLevelAccelerationStructure()
 
     // Setup IAS build options
     OptixAccelBuildOptions iasOptions = {};
-    iasOptions.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    if (mEnableMotionBlur) iasOptions.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    else iasOptions.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
     iasOptions.motionOptions.numKeys = 1;
     iasOptions.operation = OPTIX_BUILD_OPERATION_BUILD;
 
@@ -1253,6 +1240,9 @@ void OptiXRender::render(Buffer* output)
 
     Params& params = mState.params;
     params.scene.vb = (Vertex*)mVertexBuffer->getPtr();
+    if (mEnableMotionBlur) params.scene.vb_prev = (Vertex*)mPrevVertexBuffer->getPtr();
+    params.enableMotionBlur = mEnableMotionBlur;
+    params.isMotionBlurVisible = settings.getAs<bool>("render/isMotionBlurVisible");
     params.scene.ib = (uint32_t*)mIndexBuffer->getPtr();
     params.scene.lights = (UniformLight*)mLightBuffer->getPtr();
     params.scene.numLights = mScene->getLights().size();
