@@ -448,8 +448,10 @@ void OptiXRender::createTopLevelAccelerationStructure()
     std::vector<OptixInstance> optixInstances;
     optixInstances.reserve(instances.size());
 
-    for (const auto& instance : instances)
+    for (int instID = 0; instID < instances.size(); ++instID)
     {
+        const auto& instance = instances[instID];
+
         OptixInstance oi = {};
 
         // Set traversable handle and visibility mask based on instance type
@@ -485,20 +487,8 @@ void OptiXRender::createTopLevelAccelerationStructure()
             matrixMotionTransform.motionOptions.timeBegin = 0.0f;
             matrixMotionTransform.motionOptions.timeEnd   = 1.0f;
 
-            glm::mat4 transform;
-            glm::mat4 prevTransform;
-            if (instance.transformReversedOrder) 
-            {
-                transform = instance.prevTransform;
-                prevTransform = instance.transform;
-            }
-            else 
-            {
-                transform = instance.transform;
-                prevTransform = instance.prevTransform;
-            }
-            memcpy(matrixMotionTransform.transform[0], glm::value_ptr(glm::float3x4(glm::rowMajor4(prevTransform))), sizeof(float) * 12);
-            memcpy(matrixMotionTransform.transform[1], glm::value_ptr(glm::float3x4(glm::rowMajor4(transform))), sizeof(float) * 12);
+            memcpy(matrixMotionTransform.transform[0], glm::value_ptr(glm::float3x4(glm::rowMajor4(mPrevInstances[instID].transform))), sizeof(float) * 12);
+            memcpy(matrixMotionTransform.transform[1], glm::value_ptr(glm::float3x4(glm::rowMajor4(instance.transform))), sizeof(float) * 12);
 
             auto motionTransformBuffer = std::make_shared<OptixBuffer>(sizeof(OptixMatrixMotionTransform));
             CUDA_CHECK(cudaMemcpy(motionTransformBuffer->getNativePtr(), &matrixMotionTransform, sizeof(OptixMatrixMotionTransform), cudaMemcpyHostToDevice));
@@ -969,8 +959,7 @@ void OptiXRender::createSbt()
                    sizeof(float4) * 4);
 
             glm::mat4 world_to_object;
-            if (instance.transformReversedOrder) world_to_object = glm::inverse(instance.prevTransform);
-            else world_to_object = glm::inverse(instance.transform);
+            world_to_object = glm::inverse(instance.transform);
             memcpy(radiance_hit.data.world_to_object, glm::value_ptr(glm::float4x4(glm::rowMajor4(world_to_object))),
                    sizeof(float4) * 4);
 
@@ -1120,7 +1109,7 @@ void OptiXRender::render(Buffer* output)
         createOptixMaterials();
         createPipeline();
         createVertexBuffer();
-        if (mEnableMotionBlur) createPrevVertexBuffer();
+        if (mEnableMotionBlur) createPrevBuffers();
         createIndexBuffer();
         createVertexSkinDataBuffer();
         allocJointMatrices();
@@ -1149,6 +1138,7 @@ void OptiXRender::render(Buffer* output)
     // Animation changes
     std::vector<oka::Scene::Animation> &animations = mScene->getAnimations();
     bool accelStructureDirty = false;
+    if (mEnableMotionBlur) mPrevInstances.swap(mScene->getInstances());
     for (int i = 0; i < animations.size(); ++i) 
     {
         const std::string scrollNameStr = "render/animation/anim" + std::to_string(i) + "/time";
@@ -1233,16 +1223,19 @@ void OptiXRender::render(Buffer* output)
     const float gamma = settings.getAs<float>("render/post/gamma");
     const ToneMapperType tonemapperType = (ToneMapperType)settings.getAs<uint32_t>("render/pt/tonemapperType");
 
+    Params& params = mState.params;
+    params.scene.vb = (Vertex*)mVertexBuffer->getPtr();
+
+    if (mEnableMotionBlur) params.scene.vb_prev = (Vertex*)mPrevVertexBuffer->getPtr();
+    params.enableMotionBlur = mEnableMotionBlur;
+    settingsChanged |= (params.isMotionBlurVisible != settings.getAs<bool>("render/isMotionBlurVisible"));
+    params.isMotionBlurVisible = settings.getAs<bool>("render/isMotionBlurVisible");
+
     if (settingsChanged || animStateChanged)
     {
         getSharedContext().mSubframeIndex = 0;
     }
-
-    Params& params = mState.params;
-    params.scene.vb = (Vertex*)mVertexBuffer->getPtr();
-    if (mEnableMotionBlur) params.scene.vb_prev = (Vertex*)mPrevVertexBuffer->getPtr();
-    params.enableMotionBlur = mEnableMotionBlur;
-    params.isMotionBlurVisible = settings.getAs<bool>("render/isMotionBlurVisible");
+    
     params.scene.ib = (uint32_t*)mIndexBuffer->getPtr();
     params.scene.lights = (UniformLight*)mLightBuffer->getPtr();
     params.scene.numLights = mScene->getLights().size();
@@ -1479,8 +1472,9 @@ void OptiXRender::createVertexBuffer()
     createOrUpdateBuffer(mVertexBuffer, mScene->getVertices());
 }
 
-void OptiXRender::createPrevVertexBuffer()
+void OptiXRender::createPrevBuffers()
 {
+    mPrevInstances = mScene->getInstances();
     createOrUpdateBuffer(mPrevVertexBuffer, mScene->getVertices());
 }
 

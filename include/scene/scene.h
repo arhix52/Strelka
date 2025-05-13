@@ -45,8 +45,6 @@ struct Curve
 struct Instance
 {
     glm::mat4 transform;
-    glm::mat4 prevTransform; // used for motion
-    bool transformReversedOrder = false; // if true --> prevTransform is relevant, transform is obsolete
     bool isAnimated = false;
     enum class Type : uint8_t
     {
@@ -368,7 +366,7 @@ public:
         return mCameras.size();
     }
 
-    const std::vector<Instance>& getInstances() const
+    std::vector<Instance>& getInstances()
     {
         return mInstances;
     }

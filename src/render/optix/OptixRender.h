@@ -111,6 +111,8 @@ private:
     DeviceSkinningPtrs mSkinningPtrs;
     std::vector<int> mJointMatOffsets;
 
+    std::vector<oka::Instance> mPrevInstances;
+
     View mPrevView;
 
     PathTracerState mState;
@@ -161,7 +163,7 @@ private:
     std::unique_ptr<OptixBuffer> mSegmentIndicesBuffer; // Buffer for curve segment indices
 
     void createVertexBuffer();
-    void createPrevVertexBuffer();
+    void createPrevBuffers();
     void createVertexSkinDataBuffer();
     void createIndexBuffer();
 

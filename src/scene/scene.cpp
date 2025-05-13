@@ -350,9 +350,7 @@ bool Scene::updateNode(const uint32_t nodeId)
         case Node::NodeType::mesh:
             for (const auto instId: mNodes[nodeId].instanceIds) {
                 Instance& inst = mInstances[instId];
-                if (inst.transformReversedOrder) inst.transform = globalTransform;
-                else inst.prevTransform = globalTransform;
-                inst.transformReversedOrder = !inst.transformReversedOrder;
+                inst.transform = globalTransform;
                 inst.isAnimated = true;
             }
             return false;
