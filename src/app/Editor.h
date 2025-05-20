@@ -111,7 +111,7 @@ public:
         m_settingsManager->setAs<bool>("render/pt/screenshotSPP", false);
         m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
         m_settingsManager->setAs<bool>("render/enableValidation", false);
-        m_settingsManager->setAs<bool>("render/enableMotionBlur", true);
+        m_settingsManager->setAs<bool>("render/enableMotionBlur", false);
         m_settingsManager->setAs<bool>("render/isMotionBlurVisible", true);
         m_settingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
         // Postprocessing settings:
@@ -175,20 +175,17 @@ public:
             m_settingsManager->setAs<float>("render/post/tonemapper/maxEDR", maxEDR);
 
             m_render->render(outputBuffer);
-            outputBuffer->map();
             oka::ImageBuffer outputImage;
-            outputImage.data = outputBuffer->getHostPointer();
-            outputImage.dataSize = outputBuffer->getHostDataSize();
+            outputImage.deviceData = outputBuffer->getDevicePointer();
             outputImage.height = outputBuffer->height();
             outputImage.width = outputBuffer->width();
             outputImage.pixel_format = oka::BufferFormat::FLOAT4;
+            outputImage.dataSize = outputBuffer->width() * outputBuffer->height() * outputBuffer->getElementSize();
             m_display->drawFrame(outputImage); // blit rendered image to swapchain
 
             drawUI(); // render ui to swapchain image in window resolution
             m_display->drawUI();
             m_display->onEndFrame(); // submit command buffer and present
-
-            outputBuffer->unmap();
 
             const uint32_t currentSpp = m_sharedCtx->mSubframeIndex;
             auto finish = std::chrono::high_resolution_clock::now();
@@ -470,10 +467,10 @@ public:
         ImGui::InputFloat("Gamma", (float*)&gamma, 0.5);
         m_settingsManager->setAs<float>("render/post/gamma", gamma);
 
-        float materialRayTmin = m_settingsManager->getAs<float>("render/pt/dev/materialRayTmin");
+        auto materialRayTmin = m_settingsManager->getAs<float>("render/pt/dev/materialRayTmin");
         ImGui::InputFloat("Material ray T min", (float*)&materialRayTmin, 0.1);
         m_settingsManager->setAs<float>("render/pt/dev/materialRayTmin", materialRayTmin);
-        float shadowRayTmin = m_settingsManager->getAs<float>("render/pt/dev/shadowRayTmin");
+        auto shadowRayTmin = m_settingsManager->getAs<float>("render/pt/dev/shadowRayTmin");
         ImGui::InputFloat("Shadow ray T min", (float*)&shadowRayTmin, 0.1);
         m_settingsManager->setAs<float>("render/pt/dev/shadowRayTmin", shadowRayTmin);
 

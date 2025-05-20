@@ -714,7 +714,7 @@ void OptiXRender::createModule()
     size_t sizeof_log = sizeof(log);
     OPTIX_CHECK_LOG(optixModuleCreate(mState.context, &moduleOptions, &pipelineOptions, optixSource.c_str(),
                                       optixSource.size(), log, &sizeof_log, &mState.ptx_module));
-    
+
     // Store options for later use
     mState.pipeline_compile_options = pipelineOptions;
     mState.module_compile_options = moduleOptions;
@@ -754,6 +754,7 @@ OptixProgramGroup OptiXRender::createRadianceClosestHitProgramGroup(PathTracerSt
 
     return hit_group;
 }
+
 void OptiXRender::createProgramGroups()
 {
     OptixProgramGroupOptions program_group_options = {}; // Initialize to zeros
