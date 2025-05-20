@@ -100,15 +100,15 @@ public:
         glm::ivec4 joints{0};
         glm::vec4 weights{0.0};
         glm::float3 pos;
-        glm::float3 normal;
         float pad0;
+        glm::float3 normal;
         float pad1;
     };
     std::vector<vertexSkinData> mVerticesSkinData;
 
     struct Node
     {
-        enum class NodeType
+        enum class NodeType : uint8_t
         {
             unknown,
             sceneGraph,

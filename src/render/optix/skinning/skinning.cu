@@ -30,7 +30,7 @@ __global__ void skinningKernel(
     constexpr int jointsOffset = 0;
     constexpr int weightsOffset = 16;
     constexpr int posOffset = weightsOffset + 16;
-    constexpr int normalOffset = posOffset + 12;
+    constexpr int normalOffset = posOffset + 16;
 
     const char* skinData = baseSkinData + offsettedId * 64;
 

@@ -130,6 +130,7 @@ private:
 
     std::unique_ptr<OptixBuffer> mVertexBuffer;
     std::unique_ptr<OptixBuffer> mPrevVertexBuffer;
+    const int NUM_MOTION_KEYS = 2;
     std::unique_ptr<OptixBuffer> mVertexSkinDataBuffer;
     std::unique_ptr<OptixBuffer> mIndexBuffer;
     std::unique_ptr<OptixBuffer> mLightBuffer;

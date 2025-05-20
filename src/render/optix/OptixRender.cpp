@@ -187,7 +187,7 @@ OptiXRender::Curve* OptiXRender::createCurve(const oka::Curve& curve)
                                OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
     accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
 
-    const uint32_t pointsCount = mScene->getCurvesPoint().size();
+    const uint32_t pointsCount = mScene->getCurvesPoint().size(); // total points count in points buffer
     const int degree = 3;
     const uint32_t numCurves = curve.mVertexCountsCount;
 
@@ -293,10 +293,13 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
     else accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
     accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
 
+    constexpr int PREV_VB = 0;
+    constexpr int CURR_VB = 1;
+    // vertexBuffer[0] - previous vertex state (t=0), vertexBuffer[1] - current vertex state (t=1)
     CUdeviceptr vertexBuffer[2];
-    if (mEnableMotionBlur) vertexBuffer[0] = mPrevVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
-    else vertexBuffer[0] = 0;
-    vertexBuffer[1] = mVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
+    if (mEnableMotionBlur) vertexBuffer[PREV_VB] = mPrevVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
+    else vertexBuffer[PREV_VB] = 0;
+    vertexBuffer[CURR_VB] = mVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
     
     const CUdeviceptr indexBuffer = mIndexBuffer->getPtr() + mesh.mIndex * sizeof(uint32_t);
 
@@ -316,7 +319,7 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
     if (mEnableMotionBlur && isSkeletal) {
         // Motion options
         OptixMotionOptions motion_options = {};
-        motion_options.numKeys = 2;
+        motion_options.numKeys = NUM_MOTION_KEYS;
         motion_options.timeBegin = 0.0f;
         motion_options.timeEnd = 1.0f;
         motion_options.flags = OPTIX_MOTION_FLAG_NONE;
@@ -324,7 +327,7 @@ OptiXRender::Mesh* OptiXRender::createMesh(const oka::Mesh& mesh)
 
         triangle_input.triangleArray.vertexBuffers = vertexBuffer;
     }
-    else triangle_input.triangleArray.vertexBuffers = &vertexBuffer[1];
+    else triangle_input.triangleArray.vertexBuffers = &vertexBuffer[CURR_VB];
 
     OptixAccelBufferSizes gas_buffer_sizes;
     OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &accel_options, &triangle_input, 1, &gas_buffer_sizes));
@@ -482,7 +485,7 @@ void OptiXRender::createTopLevelAccelerationStructure()
             OptixTraversableHandle matrixMotionTransformHandle;
 
             matrixMotionTransform.child = oi.traversableHandle;
-            matrixMotionTransform.motionOptions.numKeys   = 2;
+            matrixMotionTransform.motionOptions.numKeys   = NUM_MOTION_KEYS;
             matrixMotionTransform.motionOptions.flags     = OPTIX_MOTION_FLAG_NONE;
             matrixMotionTransform.motionOptions.timeBegin = 0.0f;
             matrixMotionTransform.motionOptions.timeEnd   = 1.0f;
@@ -1030,35 +1033,34 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
 void OptiXRender::applySkinning()
 {
     // joint matrices
+    std::vector<glm::mat4> jointMat;
+    for (auto& node: mScene->mNodes)
     {
-        std::vector<glm::mat4> jointMat;
-        for (auto& node: mScene->mNodes)
+        if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
         {
-            if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
-            {
-                auto jointCount = mScene->mSkines[node.skin].joints.size();
-                std::vector<glm::mat4> currJointMats;
-                mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
-                
-                jointMat.insert(jointMat.end(), currJointMats.begin(), currJointMats.end());
-            }
+            auto jointCount = mScene->mSkines[node.skin].joints.size();
+            std::vector<glm::mat4> currJointMats;
+            mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
+            
+            jointMat.insert(jointMat.end(), currJointMats.begin(), currJointMats.end());
         }
-        
-        size_t jointMatSize = jointMat.size();
-        std::vector<sutil::Matrix4x4> cudaMatrices(jointMatSize);
-
-        std::transform(jointMat.begin(), jointMat.end(), cudaMatrices.begin(),
-            [](glm::mat4& m) -> sutil::Matrix4x4 { 
-                sutil::Matrix4x4 matrix;
-                matrix[0] = m[0][0]; matrix[4] = m[0][1]; matrix[8] = m[0][2]; matrix[12] = m[0][3];
-                matrix[1] = m[1][0]; matrix[5] = m[1][1]; matrix[9] = m[1][2]; matrix[13] = m[1][3];
-                matrix[2] = m[2][0]; matrix[6] = m[2][1]; matrix[10] = m[2][2]; matrix[14] = m[2][3];
-                matrix[3] = m[3][0]; matrix[7] = m[3][1]; matrix[11] = m[3][2]; matrix[15] = m[3][3];
-                return matrix;
-            });          
-        
-            CUDA_CHECK(cudaMemcpy(mSkinningPtrs.d_jointMats, cudaMatrices.data(), jointMatSize * sizeof(sutil::Matrix4x4), cudaMemcpyHostToDevice));
     }
+    
+    size_t jointMatSize = jointMat.size();
+    std::vector<sutil::Matrix4x4> cudaMatrices(jointMatSize);
+    for (size_t i = 0; i < jointMatSize; ++i)
+    {
+        const glm::mat4& m = jointMat[i];
+        sutil::Matrix4x4 matrix;
+        matrix[0]  = m[0][0]; matrix[4]  = m[0][1]; matrix[8]  = m[0][2]; matrix[12] = m[0][3];
+        matrix[1]  = m[1][0]; matrix[5]  = m[1][1]; matrix[9]  = m[1][2]; matrix[13] = m[1][3];
+        matrix[2]  = m[2][0]; matrix[6]  = m[2][1]; matrix[10] = m[2][2]; matrix[14] = m[2][3];
+        matrix[3]  = m[3][0]; matrix[7]  = m[3][1]; matrix[11] = m[3][2]; matrix[15] = m[3][3];
+
+        cudaMatrices[i] = matrix;
+    }        
+    
+    CUDA_CHECK(cudaMemcpy(mSkinningPtrs.d_jointMats, cudaMatrices.data(), jointMatSize * sizeof(sutil::Matrix4x4), cudaMemcpyHostToDevice));
 
     //apply skinning
     int index = 0;
@@ -1109,7 +1111,7 @@ void OptiXRender::render(Buffer* output)
         createOptixMaterials();
         createPipeline();
         createVertexBuffer();
-        if (mEnableMotionBlur) createPrevBuffers();
+        if (mEnableMotionBlur) { createPrevBuffers(); }
         createIndexBuffer();
         createVertexSkinDataBuffer();
         allocJointMatrices();
@@ -1353,8 +1355,8 @@ void OptiXRender::render(Buffer* output)
     // Apply tonemapping except for debug mode 1
     if (params.debug != 1)
     {
-        //float maxEDR = settings.getAs<float>("render/post/tonemapper/maxEDR");
-        //exposureValue *= maxEDR;
+        float maxEDR = settings.getAs<float>("render/post/tonemapper/maxEDR");
+        exposureValue *= maxEDR;
         tonemap(tonemapperType, exposureValue, gamma, params.image, width, height);
     }
 

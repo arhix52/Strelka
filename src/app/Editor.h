@@ -171,6 +171,9 @@ public:
 
             m_display->onBeginFrame();
 
+            auto maxEDR = m_display->getMaxEDR();
+            m_settingsManager->setAs<float>("render/post/tonemapper/maxEDR", maxEDR);
+
             m_render->render(outputBuffer);
             outputBuffer->map();
             oka::ImageBuffer outputImage;
@@ -197,7 +200,7 @@ public:
         }
     }
 
-    void playAnimations(const double deltaTime) 
+    void playAnimations(const float deltaTime) 
     {
         for (int i = 0; i < m_scene->getAnimations().size(); ++i) 
         {
@@ -278,7 +281,7 @@ public:
 
                     loadAnimSettings();
 
-                    m_sharedCtx.reset(new SharedContext());
+                    m_sharedCtx = std::make_unique<SharedContext>();
 
                     m_render.reset(RenderFactory::createRender());
                     m_render->setSettingsManager(m_settingsManager.get());
@@ -463,7 +466,7 @@ public:
         }
         m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", currentTonemapItemId);
 
-        float gamma = m_settingsManager->getAs<float>("render/post/gamma");
+        auto gamma = m_settingsManager->getAs<float>("render/post/gamma");
         ImGui::InputFloat("Gamma", (float*)&gamma, 0.5);
         m_settingsManager->setAs<float>("render/post/gamma", gamma);
 
