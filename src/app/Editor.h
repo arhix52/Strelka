@@ -111,7 +111,7 @@ public:
         m_settingsManager->setAs<bool>("render/pt/screenshotSPP", false);
         m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
         m_settingsManager->setAs<bool>("render/enableValidation", false);
-        m_settingsManager->setAs<bool>("render/enableMotionBlur", false);
+        m_settingsManager->setAs<bool>("render/enableMotionBlur", true);
         m_settingsManager->setAs<bool>("render/isMotionBlurVisible", true);
         m_settingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
         // Postprocessing settings:
@@ -477,11 +477,15 @@ public:
         ImGui::End(); // end window
 
         if (ImGui::Begin("Animations")) {
-            
-            bool isMotionBlurVisible = m_settingsManager->getAs<bool>("render/isMotionBlurVisible");
-            if (ImGui::Checkbox("Motion Blur", &isMotionBlurVisible))
+
+            bool isMotionBlurEnabled = m_settingsManager->getAs<bool>("render/enableMotionBlur");
+            if (isMotionBlurEnabled)
             {
-                m_settingsManager->setAs<bool>("render/isMotionBlurVisible", isMotionBlurVisible);
+                bool isMotionBlurVisible = m_settingsManager->getAs<bool>("render/isMotionBlurVisible");
+                if (ImGui::Checkbox("Motion Blur", &isMotionBlurVisible))
+                {
+                    m_settingsManager->setAs<bool>("render/isMotionBlurVisible", isMotionBlurVisible);
+                }
             }
 
             auto animations = m_scene->getAnimations();
