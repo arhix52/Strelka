@@ -140,16 +140,7 @@ private:
 
     std::vector<std::shared_ptr<OptixBuffer>> mMotionTransformBuffers; // used for motion blur
 
-    struct asOutputBuffer
-    {
-        CUdeviceptr outputBuffer = 0;
-        size_t outputBufferSize = 0;
-        ~asOutputBuffer()
-        {
-            CUDA_CHECK(cudaFree(reinterpret_cast<void*>(outputBuffer)));
-        }
-    };
-    asOutputBuffer mTlasOutputBuffer;
+    std::unique_ptr<OptixBuffer> mTlasBuffer;
     
     std::unique_ptr<OptixBuffer> mMaterialRoDataBuffer;
     std::unique_ptr<OptixBuffer> mMaterialArgDataBuffer;
