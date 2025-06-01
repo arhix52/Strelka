@@ -15,6 +15,7 @@ enum struct SampleDimension : uint32_t
     ePixelX,
     ePixelY,
     eLightId,
+    eTime,
     eLightPointX,
     eLightPointY,
     eBSDF0,

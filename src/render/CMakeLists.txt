@@ -59,6 +59,8 @@ if(WIN32 OR LINUX)
   set(RENDER_CUDA_SOURCES 
     ${ROOT_HOME}/src/render/optix/postprocessing/Tonemappers.h
     ${ROOT_HOME}/src/render/optix/postprocessing/Tonemappers.cu
+    ${ROOT_HOME}/src/render/optix/skinning/skinning.h
+    ${ROOT_HOME}/src/render/optix/skinning/skinning.cu
   )
 
   add_library(${RENDERLIB_NAME} STATIC ${RENDER_SOURCES} ${generated_files} ${RENDER_CUDA_SOURCES})

@@ -100,12 +100,28 @@ private:
         oka::Camera::Matrices mCamMatrices;
     };
 
+    struct DeviceSkinningPtrs
+    {
+        sutil::Matrix4x4* d_jointMats;
+        ~DeviceSkinningPtrs()
+        {
+            CUDA_CHECK(cudaFree(d_jointMats));
+        }
+    };
+    DeviceSkinningPtrs mSkinningPtrs;
+    std::vector<int> mJointMatOffsets;
+
+    std::vector<oka::Instance> mPrevInstances;
+
     View mPrevView;
 
     PathTracerState mState;
     bool mEnableValidation;
+    bool mEnableMotionBlur;
 
+    void allocJointMatrices();
     Mesh* createMesh(const oka::Mesh& mesh);
+    void updateMesh(const oka::Mesh& mesh, int optixMeshesId);
     Curve* createCurve(const oka::Curve& curve);
     bool compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes);
 
@@ -113,12 +129,28 @@ private:
     std::vector<std::unique_ptr<Curve>> mOptixCurves;
 
     std::unique_ptr<OptixBuffer> mVertexBuffer;
+    std::unique_ptr<OptixBuffer> mPrevVertexBuffer;
+    const int NUM_MOTION_KEYS = 2;
+    std::unique_ptr<OptixBuffer> mVertexSkinDataBuffer;
     std::unique_ptr<OptixBuffer> mIndexBuffer;
     std::unique_ptr<OptixBuffer> mLightBuffer;
     // TODO: move to raii buffers
     std::unique_ptr<OptixBuffer> mPointsBuffer;
     std::unique_ptr<OptixBuffer> mWidthsBuffer;
 
+    std::vector<std::shared_ptr<OptixBuffer>> mMotionTransformBuffers; // used for motion blur
+
+    struct asOutputBuffer
+    {
+        CUdeviceptr outputBuffer = 0;
+        size_t outputBufferSize = 0;
+        ~asOutputBuffer()
+        {
+            CUDA_CHECK(cudaFree(reinterpret_cast<void*>(outputBuffer)));
+        }
+    };
+    asOutputBuffer mTlasOutputBuffer;
+    
     std::unique_ptr<OptixBuffer> mMaterialRoDataBuffer;
     std::unique_ptr<OptixBuffer> mMaterialArgDataBuffer;
     std::unique_ptr<OptixBuffer> mTexturesHandlerBuffer;
@@ -132,6 +164,8 @@ private:
     std::unique_ptr<OptixBuffer> mSegmentIndicesBuffer; // Buffer for curve segment indices
 
     void createVertexBuffer();
+    void createPrevBuffers();
+    void createVertexSkinDataBuffer();
     void createIndexBuffer();
 
     // curve utils
@@ -158,9 +192,12 @@ public:
     void render(Buffer* output_buffer) override;
     Buffer* createBuffer(const BufferDesc& desc) override;
 
+    void applySkinning();
     void createContext();
     void createBottomLevelAccelerationStructures();
+    void updateBottomLevelAccelerationStructures();
     void createTopLevelAccelerationStructure();
+    void updateTopLevelAccelerationStructure();
     void createModule();
     void createProgramGroups();
     void createPipeline();

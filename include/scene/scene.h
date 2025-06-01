@@ -23,6 +23,8 @@ struct Mesh
     uint32_t mCount; // amount of indices in mesh
     uint32_t mVbOffset; // start in vb
     uint32_t mVertexCount; // number of vertices in mesh
+    uint32_t mSbOffset; // start in sb
+    bool isSkeletal = false;
 };
 
 struct Curve
@@ -43,6 +45,7 @@ struct Curve
 struct Instance
 {
     glm::mat4 transform;
+    bool isAnimated = false;
     enum class Type : uint8_t
     {
         eMesh,
@@ -92,16 +95,49 @@ public:
         float pad1;
     };
 
+    struct vertexSkinData //vertex skin data
+    {
+        glm::ivec4 joints{0};
+        glm::vec4 weights{0.0};
+        glm::float3 pos;
+        float pad0;
+        glm::float3 normal;
+        float pad1;
+    };
+    std::vector<vertexSkinData> mVerticesSkinData;
+
     struct Node
     {
+        enum class NodeType : uint8_t
+        {
+            unknown,
+            sceneGraph,
+            mesh,
+            camera,
+            skeleton
+        };
+        NodeType type = NodeType::unknown;
         std::string name;
-        glm::float3 translation;
-        glm::float3 scale;
-        glm::quat rotation;
+        glm::float3 translation; //local translation
+        glm::float3 scale; //local scale
+        glm::quat rotation; //local rotation
         int parent = -1;
         std::vector<int> children;
+        std::vector<uint32_t> instanceIds;
+        int skin = -1;
     };
     std::vector<Node> mNodes;
+
+    struct Skin
+    {
+        std::string name;
+        int skeletonId = -1;
+        std::vector<int> joints;
+        std::vector<glm::float4x4> inverseBindMatrices;
+
+        int refNodeId = -1;
+    };
+    std::vector<Skin> mSkines;
 
     enum class AnimationState : uint32_t
     {
@@ -143,8 +179,11 @@ public:
         std::vector<AnimationChannel> channels;
         float start = std::numeric_limits<float>::max();
         float end = std::numeric_limits<float>::min();
+        float current;
     };
     std::vector<Animation> mAnimations;
+    int blasUpdateCount;
+    int tlasUpdateCount;
 
     // GPU side structure
     struct Light
@@ -235,6 +274,11 @@ public:
         return mVertices;
     }
 
+    std::vector<vertexSkinData>& getVerticesSkinData()
+    {
+        return mVerticesSkinData;
+    }
+
     std::vector<uint32_t>& getIndices()
     {
         return mIndices;
@@ -254,6 +298,28 @@ public:
     {
         return mLightDesc;
     }
+
+    std::vector<Animation>& getAnimations()
+    {
+        return mAnimations;
+    }
+
+    glm::quat makeQuatFromFloat4 (const glm::float4 &value);
+    glm::float4 makeFloat4FromQuat(const glm::quat &q);
+    glm::float4 interpolate(const AnimationSampler &sampler, const AnimationChannel::PathType targetProperty, const float time);
+    bool applyAnimation(const uint32_t animId);
+    void applySkinning();
+    void computeJointMatrices(std::vector<glm::mat4> *jointMatrices, int jointCount, const uint32_t skinId);
+    const std::vector<Node>& getNodes() const
+    {
+        return mNodes;
+    }
+
+    glm::mat4 calculateNodeLocalTransform(const uint32_t nodeId);
+    glm::mat4 calculateNodeGlobalTransform(const uint32_t nodeId);
+    bool animateNode(const uint32_t nodeId, AnimationChannel::PathType targetProperty, const glm::float3 newValue);
+    bool animateNode(const uint32_t nodeId, AnimationChannel::PathType targetProperty, const glm::quat newValue);
+    bool updateNode(const uint32_t nodeId);
 
     uint32_t findCameraByName(const std::string& name)
     {
@@ -300,7 +366,7 @@ public:
         return mCameras.size();
     }
 
-    const std::vector<Instance>& getInstances() const
+    std::vector<Instance>& getInstances()
     {
         return mInstances;
     }
@@ -401,6 +467,7 @@ public:
     /// <param name="ib">Indices</param>
     /// <returns>Mesh id in scene</returns>
     uint32_t createMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib);
+    uint32_t createSkeletalMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib, const std::vector<oka::Scene::vertexSkinData>& sb);
     /// <summary>
     /// Creates Instance
     /// </summary>
