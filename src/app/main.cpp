@@ -14,8 +14,6 @@
 
 #include <Editor.h>
 
-#include <Params.h>
-
 int main(int argc, const char* argv[])
 {
     const oka::Logmanager loggerManager;
