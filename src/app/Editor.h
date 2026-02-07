@@ -84,6 +84,35 @@ public:
         m_resized = true;
     }
 
+    // Compute camera position that fits the entire scene in the view frustum
+    glm::vec3 computeSceneFitPosition(float fovDegrees) const
+    {
+        const auto& vertices = m_scene->getVertices();
+        if (vertices.empty())
+            return glm::vec3(0, 0, -10);
+
+        // Compute AABB
+        glm::vec3 aabbMin(std::numeric_limits<float>::max());
+        glm::vec3 aabbMax(std::numeric_limits<float>::lowest());
+        for (const auto& v : vertices)
+        {
+            aabbMin = glm::min(aabbMin, v.pos);
+            aabbMax = glm::max(aabbMax, v.pos);
+        }
+
+        glm::vec3 center = (aabbMin + aabbMax) * 0.5f;
+        float radius = glm::length(aabbMax - center);
+        if (radius < 1e-6f)
+            radius = 1.0f;
+
+        // Distance so the bounding sphere fits in the vertical FOV
+        float halfFovRad = glm::radians(fovDegrees * 0.5f);
+        float distance = radius / std::tan(halfFovRad);
+
+        // Position camera along -Z looking at center (worldForward = (0,0,-1))
+        return center + glm::vec3(0.0f, 0.0f, distance);
+    }
+
     void prepare()
     {
         m_sceneLoader->loadGltf(Params::sceneFile, *m_scene);
@@ -92,7 +121,7 @@ public:
         oka::Camera camera;
         camera.name = "Main";
         camera.fov = 45.0f;
-        camera.position = glm::vec3(0, 0, -10);
+        camera.position = computeSceneFitPosition(camera.fov);
         camera.mOrientation = glm::quat(glm::vec3(0, 0, 0));
         camera.updateViewMatrix();
         m_scene->addCamera(camera);
@@ -189,7 +218,7 @@ public:
         oka::Camera camera;
         camera.name = "Main";
         camera.fov = 45.0f;
-        camera.position = glm::vec3(0, 0, -10);
+        camera.position = computeSceneFitPosition(camera.fov);
         camera.mOrientation = glm::quat(glm::vec3(0, 0, 0));
         camera.updateViewMatrix();
         m_scene->addCamera(camera);
