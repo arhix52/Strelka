@@ -10,6 +10,7 @@
 #include "MetalRender.h"
 #include "MetalBuffer.h"
 
+#include <algorithm>
 #include <cassert>
 #include <filesystem>
 
@@ -138,6 +139,14 @@ void MetalRender::render(Buffer* output)
         // create accum buffer, we don't need cpu access, make it device only
         mAccumulationBuffer = mDevice->newBuffer(
             output->width() * output->height() * output->getElementSize(), MTL::ResourceStorageModePrivate);
+
+        // Initialize skinning pipeline if scene has skeletal data
+        if (!mScene->getVerticesSkinData().empty())
+        {
+            buildSkinningPipeline();
+            createSkinDataBuffer();
+            allocJointMatrices();
+        }
     }
 
     mFrameIndex = (mFrameIndex + 1) % kMaxFramesInFlight;
@@ -153,13 +162,179 @@ void MetalRender::render(Buffer* output)
         getSharedContext().mSubframeIndex = 0;
     }
 
-    oka::Camera& camera = mScene->getCamera(0);
+    // Update motion blur enable state from settings each frame
+    mEnableMotionBlur = getSettings()->getAs<bool>("render/enableMotionBlur");
+
+    bool motionBlurCameraSet = false; // track if animation block sets prev camera
+
+    // Animation detection: two-pass at t_open / t_close for motion blur (CHANGED-only)
+    {
+        SettingsManager& animSettings = *getSettings();
+        std::vector<oka::Scene::Animation>& animations = mScene->getAnimations();
+
+        // Collect target times and detect which animations actually changed
+        constexpr float EPSILON = 1e-6f;
+        bool animStateChanged = false;
+        float maxTimeDelta = 0.0f; // track largest time jump for scrub detection
+        std::vector<float> targetTimes(animations.size());
+        std::vector<bool> changed(animations.size(), false);
+        for (int i = 0; i < (int)animations.size(); ++i)
+        {
+            const std::string scrollNameStr = "render/animation/anim" + std::to_string(i) + "/time";
+            targetTimes[i] = animSettings.getAs<float>(scrollNameStr.c_str());
+            const float delta = std::abs(animations[i].current - targetTimes[i]);
+            if (delta > EPSILON)
+            {
+                changed[i] = true;
+                animStateChanged = true;
+                maxTimeDelta = std::max(maxTimeDelta, delta);
+            }
+        }
+
+        if (animStateChanged)
+        {
+            const float shutterDuration = mEnableMotionBlur
+                ? animSettings.getAs<float>("render/motionBlur/shutterTime") : 0.0f;
+            const uint32_t shutterMode = animSettings.getAs<uint32_t>("render/motionBlur/shutterMode");
+
+            if (mEnableMotionBlur && mPrevVertexBuffer && shutterDuration > 0.0f)
+            {
+                // Shutter offset: Centered straddles t_anim, Leading closes at t_anim,
+                // Trailing opens at t_anim
+                float shutterOffset = 0.0f;
+                switch (shutterMode)
+                {
+                case 0: shutterOffset = -shutterDuration * 0.5f; break; // Centered
+                case 1: shutterOffset = -shutterDuration;        break; // Leading
+                case 2: shutterOffset = 0.0f;                    break; // Trailing
+                }
+
+                // --- Pass 1: evaluate CHANGED animations at t_open ---
+                bool pass1Skeletal = false;
+                for (int i = 0; i < (int)animations.size(); ++i)
+                {
+                    if (!changed[i]) continue;
+                    float tOpen = targetTimes[i] + shutterOffset;
+                    tOpen = std::clamp(tOpen, animations[i].start, animations[i].end);
+                    animations[i].current = tOpen;
+                    pass1Skeletal |= mScene->applyAnimation(i);
+                }
+
+                // Capture camera state at t_open for camera motion blur
+                const uint32_t selCam = animSettings.getAs<uint32_t>("render/selectedCamera");
+                oka::Camera& prevCam = mScene->getCamera(selCam);
+                prevCam.updateAspectRatio(width / (float)height);
+                prevCam.updateViewMatrix();
+                mPrevMotionBlurView.mCamMatrices = prevCam.matrices;
+                motionBlurCameraSet = true;
+
+                if (pass1Skeletal)
+                {
+                    applySkinning();
+                }
+                // Always copy current VB to prevVB — ensures prev state is consistent
+                // even when only camera (not skeleton) animation changed
+                copyVertexBufferToPrev();
+
+                // --- Pass 2: evaluate CHANGED animations at t_close ---
+                bool pass2Skeletal = false;
+                for (int i = 0; i < (int)animations.size(); ++i)
+                {
+                    if (!changed[i]) continue;
+                    float tClose = targetTimes[i] + shutterOffset + shutterDuration;
+                    tClose = std::clamp(tClose, animations[i].start, animations[i].end);
+                    animations[i].current = tClose;
+                    pass2Skeletal |= mScene->applyAnimation(i);
+                }
+
+                if (pass2Skeletal)
+                {
+                    applySkinning();
+                    // Force full rebuild on large time jumps (scrubbing) — refit produces
+                    // degenerate BVH when geometry changes dramatically between frames
+                    const bool fullRebuild = (mBlasUpdateCount >= 10) ||
+                                             (maxTimeDelta > shutterDuration * 2.0f);
+                    const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
+                    for (int mi = 0; mi < (int)meshes.size(); ++mi)
+                    {
+                        if (mMetalMeshes[mi]->mIsSkeletal)
+                        {
+                            if (fullRebuild)
+                                rebuildBLAS(mi);
+                            else
+                                refitBLAS(mi);
+                        }
+                    }
+                    mBlasUpdateCount = fullRebuild ? 0 : (mBlasUpdateCount + 1);
+                }
+                updateInstanceTransforms();
+                rebuildTLAS();
+
+                // Restore target times so next-frame EPSILON check is stable
+                for (int i = 0; i < (int)animations.size(); ++i)
+                    animations[i].current = targetTimes[i];
+            }
+            else
+            {
+                // Motion blur disabled or no shutter: single-pass at target time
+                bool accelStructureDirty = false;
+                for (int i = 0; i < (int)animations.size(); ++i)
+                {
+                    if (!changed[i]) continue;
+                    animations[i].current = targetTimes[i];
+                    accelStructureDirty |= mScene->applyAnimation(i);
+                }
+
+                if (accelStructureDirty)
+                {
+                    applySkinning();
+                    // Sync prevVB with current VB — motion BVH needs both keyframes
+                    // consistent when motion blur is off (otherwise keyframe 0 is stale)
+                    copyVertexBufferToPrev();
+                    // Force full rebuild on large time jumps (scrubbing)
+                    const bool fullRebuild = (mBlasUpdateCount >= 10) ||
+                                             (maxTimeDelta > 0.1f);
+                    const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
+                    for (int mi = 0; mi < (int)meshes.size(); ++mi)
+                    {
+                        if (mMetalMeshes[mi]->mIsSkeletal)
+                        {
+                            if (fullRebuild)
+                                rebuildBLAS(mi);
+                            else
+                                refitBLAS(mi);
+                        }
+                    }
+                    mBlasUpdateCount = fullRebuild ? 0 : (mBlasUpdateCount + 1);
+                    rebuildTLAS();
+                }
+                else
+                {
+                    updateInstanceTransforms();
+                    rebuildTLAS();
+                }
+            }
+            getSharedContext().mSubframeIndex = 0;
+        }
+    }
+
+    SettingsManager& settings = *getSettings();
+
+    const uint32_t selectedCamera = settings.getAs<uint32_t>("render/selectedCamera");
+    oka::Camera& camera = mScene->getCamera(selectedCamera);
     camera.updateAspectRatio(width / (float)height);
     camera.updateViewMatrix();
 
     View currView = {};
-
     currView.mCamMatrices = camera.matrices;
+
+    // Initialize prev motion blur view on first frame if animation block didn't set it.
+    // On subsequent frames, mPrevMotionBlurView retains the t_open camera from the last
+    // animation frame so the converged image shows correct camera motion blur.
+    if (!motionBlurCameraSet && getSharedContext().mFrameNumber == 0)
+    {
+        mPrevMotionBlurView.mCamMatrices = camera.matrices;
+    }
 
     if (glm::any(glm::notEqual(currView.mCamMatrices.perspective, mPrevView.mCamMatrices.perspective)) ||
         glm::any(glm::notEqual(currView.mCamMatrices.view, mPrevView.mCamMatrices.view)))
@@ -167,8 +342,6 @@ void MetalRender::render(Buffer* output)
         // need reset
         getSharedContext().mSubframeIndex = 0;
     }
-
-    SettingsManager& settings = *getSettings();
 
     MTL::Buffer* pUniformBuffer = mUniformBuffers[mFrameIndex];
     MTL::Buffer* pUniformTMBuffer = mUniformTMBuffers[mFrameIndex];
@@ -184,6 +357,9 @@ void MetalRender::render(Buffer* output)
     pUniformData->missColor = float3(0.0f);
     pUniformData->maxDepth = settings.getAs<uint32_t>("render/pt/depth");
     pUniformData->debug = settings.getAs<uint32_t>("render/pt/debug");
+    pUniformData->enableMotionBlur = mEnableMotionBlur ? 1 : 0;
+    pUniformData->isMotionBlurVisible = (uint32_t)settings.getAs<bool>("render/isMotionBlurVisible");
+    pUniformData->enableCameraMotionBlur = (uint32_t)settings.getAs<bool>("render/enableCameraMotionBlur");
 
     pUniformTonemap->width = width;
     pUniformTonemap->height = height;
@@ -218,6 +394,21 @@ void MetalRender::render(Buffer* output)
     settingsChanged |= (sppPrev != pUniformData->samples_per_launch);
     sppPrev = pUniformData->samples_per_launch;
 
+    static bool enableMotionBlurPrev = false;
+    const bool enableMotionBlurCurr = mEnableMotionBlur;
+    settingsChanged |= (enableMotionBlurPrev != enableMotionBlurCurr);
+    enableMotionBlurPrev = enableMotionBlurCurr;
+
+    static bool isMotionBlurVisiblePrev = true;
+    const bool isMotionBlurVisibleCurr = settings.getAs<bool>("render/isMotionBlurVisible");
+    settingsChanged |= (isMotionBlurVisiblePrev != isMotionBlurVisibleCurr);
+    isMotionBlurVisiblePrev = isMotionBlurVisibleCurr;
+
+    static bool enableCameraMotionBlurPrev = true;
+    const bool enableCameraMotionBlurCurr = settings.getAs<bool>("render/enableCameraMotionBlur");
+    settingsChanged |= (enableCameraMotionBlurPrev != enableCameraMotionBlurCurr);
+    enableCameraMotionBlurPrev = enableCameraMotionBlurCurr;
+
     if (settingsChanged)
     {
         getSharedContext().mSubframeIndex = 0;
@@ -238,6 +429,20 @@ void MetalRender::render(Buffer* output)
             pUniformData->clipToView.columns[column][row] = camera.matrices.invPerspective[column][row];
         }
     }
+
+    // Previous camera matrices for camera motion blur
+    {
+        glm::float4x4 prevInvView = glm::inverse(mPrevMotionBlurView.mCamMatrices.view);
+        for (int column = 0; column < 4; column++)
+        {
+            for (int row = 0; row < 4; row++)
+            {
+                pUniformData->prevViewToWorld.columns[column][row] = prevInvView[column][row];
+                pUniformData->prevClipToView.columns[column][row] = mPrevMotionBlurView.mCamMatrices.invPerspective[column][row];
+            }
+        }
+    }
+
     pUniformData->subframeIndex = getSharedContext().mSubframeIndex;
 
     // Photometric Units from iray documentation
@@ -309,6 +514,9 @@ void MetalRender::render(Buffer* output)
             pComputeEncoder->useResource(materialTexture, MTL::ResourceUsageRead);
         }
         pComputeEncoder->useResource(((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageWrite);
+        pComputeEncoder->useResource(mPrevVertexBuffer, MTL::ResourceUsageRead);
+        pComputeEncoder->useResource(mIndexBuffer, MTL::ResourceUsageRead);
+        pComputeEncoder->useResource(mInstanceDataBuffer, MTL::ResourceUsageRead);
 
         pComputeEncoder->setComputePipelineState(mPathTracingPSO);
         pComputeEncoder->setBuffer(pUniformBuffer, 0, 0);
@@ -319,6 +527,10 @@ void MetalRender::render(Buffer* output)
         // Output
         pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 5);
         pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 6);
+        // Motion blur buffers
+        pComputeEncoder->setBuffer(mPrevVertexBuffer, 0, 7);
+        pComputeEncoder->setBuffer(mIndexBuffer, 0, 8);
+        pComputeEncoder->setBuffer(mInstanceDataBuffer, 0, 9);
         if (mInstanceBuffer != nullptr)
         {
             const MTL::Size gridSize = MTL::Size(width, height, 1);
@@ -483,6 +695,33 @@ void MetalRender::buildBuffers()
     mVertexBuffer = pVertexBuffer;
     mIndexBuffer = pIndexBuffer;
 
+    // Allocate prevVertexBuffer as copy of VB (needed for motion BVH keyframes at init time)
+    if (vertexDataSize > 0)
+    {
+        mPrevVertexBuffer = mDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeManaged);
+        memcpy(mPrevVertexBuffer->contents(), vertices.data(), vertexDataSize);
+        mPrevVertexBuffer->didModifyRange(NS::Range::Make(0, mPrevVertexBuffer->length()));
+    }
+
+    // Allocate InstanceData buffer for per-mesh vertex/index offset lookups (motion blur shader)
+    {
+        const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
+        if (!meshes.empty())
+        {
+            std::vector<InstanceData> instanceData(meshes.size());
+            for (size_t mi = 0; mi < meshes.size(); ++mi)
+            {
+                instanceData[mi].vbOffset = meshes[mi].mVbOffset;
+                instanceData[mi].indexOffset = meshes[mi].mIndex;
+            }
+            mInstanceDataBuffer = mDevice->newBuffer(
+                instanceData.size() * sizeof(InstanceData), MTL::ResourceStorageModeManaged);
+            memcpy(mInstanceDataBuffer->contents(), instanceData.data(),
+                   instanceData.size() * sizeof(InstanceData));
+            mInstanceDataBuffer->didModifyRange(NS::Range::Make(0, mInstanceDataBuffer->length()));
+        }
+    }
+
     for (MTL::Buffer*& uniformBuffer : mUniformBuffers)
     {
         uniformBuffer = mDevice->newBuffer(sizeof(Uniforms), MTL::ResourceStorageModeManaged);
@@ -572,11 +811,39 @@ MTL::AccelerationStructure* MetalRender::createAccelerationStructure(MTL::Accele
     return compactedAccelerationStructure->retain();
 }
 
+MTL::AccelerationStructure* MetalRender::createAccelerationStructureNoCompact(
+    MTL::AccelerationStructureDescriptor* descriptor)
+{
+    // Allow refitting on this descriptor
+    descriptor->setUsage(MTL::AccelerationStructureUsageRefit);
+
+    const MTL::AccelerationStructureSizes accelSizes = mDevice->accelerationStructureSizes(descriptor);
+    MTL::AccelerationStructure* accelerationStructure =
+        mDevice->newAccelerationStructure(accelSizes.accelerationStructureSize);
+    MTL::Buffer* scratchBuffer =
+        mDevice->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate);
+
+    MTL::CommandBuffer* commandBuffer = mCommandQueue->commandBuffer();
+    MTL::AccelerationStructureCommandEncoder* commandEncoder = commandBuffer->accelerationStructureCommandEncoder();
+    commandEncoder->buildAccelerationStructure(accelerationStructure, descriptor, scratchBuffer, 0UL);
+    commandEncoder->endEncoding();
+    commandBuffer->commit();
+    // No waitUntilCompleted — Metal queue ordering guarantees subsequent
+    // command buffers on the same queue see the built AS.
+
+    scratchBuffer->release();
+    return accelerationStructure;
+}
+
 MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
 {
     auto result = new MetalRender::Mesh();
 
     const uint32_t triangleCount = mesh.mCount / 3;
+    result->mTriangleCount = triangleCount;
+    result->mVbOffset = mesh.mVbOffset;
+    result->mIndexOffset = mesh.mIndex;
+    result->mIsSkeletal = mesh.isSkeletal;
 
     const std::vector<Scene::Vertex>& vertices = mScene->getVertices();
     const std::vector<uint32_t>& indices = mScene->getIndices();
@@ -618,33 +885,52 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
 
     perPrimitiveBuffer->didModifyRange(NS::Range(0, perPrimitiveBuffer->length()));
 
-    MTL::AccelerationStructureTriangleGeometryDescriptor* geomDescriptor =
-        MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
+    if (mesh.isSkeletal)
+    {
+        // Motion BVH with 2 keyframes (prevVB @ t=0, VB @ t=1)
+        MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
+            createMotionBLASDescriptor(mesh, perPrimitiveBuffer, triangleCount);
+        result->mGas = createAccelerationStructureNoCompact(primDescriptor);
+        primDescriptor->release();
+    }
+    else
+    {
+        // Static BVH for non-skeletal meshes
+        auto* geomDescriptor =
+            MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
 
-    geomDescriptor->setVertexBuffer(mVertexBuffer);
-    geomDescriptor->setVertexBufferOffset(mesh.mVbOffset * sizeof(Scene::Vertex));
-    geomDescriptor->setVertexStride(sizeof(Scene::Vertex));
-    geomDescriptor->setIndexBuffer(mIndexBuffer);
-    geomDescriptor->setIndexBufferOffset(mesh.mIndex * sizeof(uint32_t));
-    geomDescriptor->setIndexType(MTL::IndexTypeUInt32);
-    geomDescriptor->setTriangleCount(triangleCount);
-    // Setup per primitive data
-    geomDescriptor->setPrimitiveDataBuffer(perPrimitiveBuffer);
-    geomDescriptor->setPrimitiveDataBufferOffset(0);
-    geomDescriptor->setPrimitiveDataElementSize(sizeof(Triangle));
-    geomDescriptor->setPrimitiveDataStride(sizeof(Triangle));
+        geomDescriptor->setVertexBuffer(mVertexBuffer);
+        geomDescriptor->setVertexBufferOffset(mesh.mVbOffset * sizeof(Scene::Vertex));
+        geomDescriptor->setVertexStride(sizeof(Scene::Vertex));
+        geomDescriptor->setIndexBuffer(mIndexBuffer);
+        geomDescriptor->setIndexBufferOffset(mesh.mIndex * sizeof(uint32_t));
+        geomDescriptor->setIndexType(MTL::IndexTypeUInt32);
+        geomDescriptor->setTriangleCount(triangleCount);
+        geomDescriptor->setPrimitiveDataBuffer(perPrimitiveBuffer);
+        geomDescriptor->setPrimitiveDataBufferOffset(0);
+        geomDescriptor->setPrimitiveDataElementSize(sizeof(Triangle));
+        geomDescriptor->setPrimitiveDataStride(sizeof(Triangle));
 
-    const NS::Array* geomDescriptors = NS::Array::array((const NS::Object* const*)&geomDescriptor, 1UL);
+        const NS::Array* geomDescriptors =
+            NS::Array::array((const NS::Object* const*)&geomDescriptor, 1UL);
 
-    MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
-        MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init();
-    primDescriptor->setGeometryDescriptors(geomDescriptors);
+        MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
+            MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init();
+        primDescriptor->setGeometryDescriptors(geomDescriptors);
 
-    result->mGas = createAccelerationStructure(primDescriptor);
+        result->mGas = createAccelerationStructure(primDescriptor);
 
-    primDescriptor->release();
-    geomDescriptor->release();
-    perPrimitiveBuffer->release();
+        primDescriptor->release();
+        geomDescriptor->release();
+    }
+
+    // Keep per-primitive buffer alive for skeletal meshes (needed for triangle updates)
+    result->mPerPrimitiveBuffer = perPrimitiveBuffer;
+    if (!mesh.isSkeletal)
+    {
+        perPrimitiveBuffer->release();
+        result->mPerPrimitiveBuffer = nullptr;
+    }
     return result;
 }
 
@@ -699,5 +985,328 @@ void MetalRender::createAccelerationStructures()
     accelDescriptor->setInstanceDescriptorType(MTL::AccelerationStructureInstanceDescriptorTypeUserID);
 
     mInstanceAccelerationStructure = createAccelerationStructure(accelDescriptor);
+    pPool->release();
+}
+
+void MetalRender::buildSkinningPipeline()
+{
+    NS::Error* pError = nullptr;
+    MTL::Library* pLibrary =
+        mDevice->newLibrary(NS::String::string("./metal/shaders/skinning.metallib", NS::UTF8StringEncoding), &pError);
+    if (!pLibrary)
+    {
+        STRELKA_FATAL("Failed to load skinning metallib: {}", pError->localizedDescription()->utf8String());
+        assert(false);
+    }
+
+    MTL::Function* pSkinningFn =
+        pLibrary->newFunction(NS::String::string("skinningKernel", NS::UTF8StringEncoding));
+    mSkinningPSO = mDevice->newComputePipelineState(pSkinningFn, &pError);
+    if (!mSkinningPSO)
+    {
+        STRELKA_FATAL("Failed to create skinning PSO: {}", pError->localizedDescription()->utf8String());
+        assert(false);
+    }
+    pSkinningFn->release();
+
+    MTL::Function* pTriUpdateFn =
+        pLibrary->newFunction(NS::String::string("updateTriangleBufferKernel", NS::UTF8StringEncoding));
+    mTriangleUpdatePSO = mDevice->newComputePipelineState(pTriUpdateFn, &pError);
+    if (!mTriangleUpdatePSO)
+    {
+        STRELKA_FATAL("Failed to create triangle update PSO: {}", pError->localizedDescription()->utf8String());
+        assert(false);
+    }
+    pTriUpdateFn->release();
+
+    pLibrary->release();
+}
+
+void MetalRender::createSkinDataBuffer()
+{
+    const std::vector<Scene::vertexSkinData>& skinData = mScene->getVerticesSkinData();
+    if (skinData.empty())
+        return;
+
+    const size_t dataSize = skinData.size() * sizeof(Scene::vertexSkinData);
+    mSkinDataBuffer = mDevice->newBuffer(dataSize, MTL::ResourceStorageModeManaged);
+    memcpy(mSkinDataBuffer->contents(), skinData.data(), dataSize);
+    mSkinDataBuffer->didModifyRange(NS::Range::Make(0, mSkinDataBuffer->length()));
+}
+
+void MetalRender::allocJointMatrices()
+{
+    size_t jointMatSize = 0;
+    for (auto& node : mScene->mNodes)
+    {
+        if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
+        {
+            auto jointCount = mScene->mSkines[node.skin].joints.size();
+            std::vector<glm::mat4> currJointMats;
+            mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
+
+            jointMatSize += currJointMats.size();
+            mJointMatOffsets.push_back(currJointMats.size());
+        }
+    }
+
+    if (jointMatSize > 0)
+    {
+        mJointMatricesBuffer =
+            mDevice->newBuffer(jointMatSize * sizeof(simd::float4x4), MTL::ResourceStorageModeManaged);
+    }
+}
+
+void MetalRender::applySkinning()
+{
+    if (!mSkinningPSO || !mSkinDataBuffer || !mJointMatricesBuffer)
+        return;
+
+    // Compute joint matrices on CPU
+    std::vector<glm::mat4> jointMat;
+    for (auto& node : mScene->mNodes)
+    {
+        if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
+        {
+            auto jointCount = mScene->mSkines[node.skin].joints.size();
+            std::vector<glm::mat4> currJointMats;
+            mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
+            jointMat.insert(jointMat.end(), currJointMats.begin(), currJointMats.end());
+        }
+    }
+
+    // Convert glm::mat4 → simd::float4x4 (both column-major)
+    std::vector<simd::float4x4> simdMatrices(jointMat.size());
+    for (size_t i = 0; i < jointMat.size(); ++i)
+    {
+        const glm::mat4& m = jointMat[i];
+        for (int col = 0; col < 4; col++)
+        {
+            for (int row = 0; row < 4; row++)
+            {
+                simdMatrices[i].columns[col][row] = m[col][row];
+            }
+        }
+    }
+
+    // Upload joint matrices
+    memcpy(mJointMatricesBuffer->contents(), simdMatrices.data(), simdMatrices.size() * sizeof(simd::float4x4));
+    mJointMatricesBuffer->didModifyRange(NS::Range::Make(0, simdMatrices.size() * sizeof(simd::float4x4)));
+
+    // Dispatch skinning + triangle update kernels
+    MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
+    MTL::ComputeCommandEncoder* pEncoder = pCmd->computeCommandEncoder();
+
+    int skinIndex = 0;
+    int jointMatOffset = 0;
+    for (auto& node : mScene->mNodes)
+    {
+        if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
+        {
+            if (skinIndex > 0)
+            {
+                jointMatOffset += mJointMatOffsets[skinIndex - 1];
+            }
+            skinIndex++;
+
+            for (const auto instId : node.instanceIds)
+            {
+                auto& mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
+                uint32_t meshId = mScene->mInstances[instId].mMeshId;
+
+                // Dispatch skinning kernel
+                SkinningParams skinParams = {};
+                skinParams.vbOffset = mesh.mVbOffset;
+                skinParams.sbOffset = mesh.mSbOffset;
+                skinParams.jointMatOffset = jointMatOffset;
+                skinParams.vertexCount = mesh.mVertexCount;
+
+                pEncoder->setComputePipelineState(mSkinningPSO);
+                pEncoder->setBuffer(mVertexBuffer, 0, 0);
+                pEncoder->setBuffer(mSkinDataBuffer, 0, 1);
+                pEncoder->setBuffer(mJointMatricesBuffer, 0, 2);
+                pEncoder->setBytes(&skinParams, sizeof(SkinningParams), 3);
+
+                const uint32_t threadsPerGroup = 256;
+                const MTL::Size gridSize = MTL::Size(mesh.mVertexCount, 1, 1);
+                const MTL::Size groupSize = MTL::Size(threadsPerGroup, 1, 1);
+                pEncoder->dispatchThreads(gridSize, groupSize);
+
+                // Dispatch triangle update kernel
+                MetalRender::Mesh* metalMesh = mMetalMeshes[meshId];
+                if (metalMesh->mPerPrimitiveBuffer)
+                {
+                    TriangleUpdateParams triParams = {};
+                    triParams.triangleCount = metalMesh->mTriangleCount;
+                    triParams.indexOffset = mesh.mIndex;
+                    triParams.vbOffset = mesh.mVbOffset;
+
+                    pEncoder->setComputePipelineState(mTriangleUpdatePSO);
+                    pEncoder->setBuffer(metalMesh->mPerPrimitiveBuffer, 0, 0);
+                    pEncoder->setBuffer(mVertexBuffer, 0, 1);
+                    pEncoder->setBuffer(mIndexBuffer, 0, 2);
+                    pEncoder->setBytes(&triParams, sizeof(TriangleUpdateParams), 3);
+
+                    const MTL::Size triGridSize = MTL::Size(metalMesh->mTriangleCount, 1, 1);
+                    pEncoder->dispatchThreads(triGridSize, groupSize);
+                }
+            }
+        }
+    }
+
+    pEncoder->endEncoding();
+    pCmd->commit();
+    // No waitUntilCompleted — queue ordering guarantees subsequent AS operations
+    // on the same queue see skinning results.
+}
+
+void MetalRender::copyVertexBufferToPrev()
+{
+    const size_t vertexDataSize = mVertexBuffer->length();
+    MTL::CommandBuffer* blitCmd = mCommandQueue->commandBuffer();
+    MTL::BlitCommandEncoder* blit = blitCmd->blitCommandEncoder();
+    blit->copyFromBuffer(mVertexBuffer, 0, mPrevVertexBuffer, 0, vertexDataSize);
+    blit->endEncoding();
+    blitCmd->commit();
+}
+
+MTL::PrimitiveAccelerationStructureDescriptor* MetalRender::createMotionBLASDescriptor(
+    const oka::Mesh& sceneMesh, MTL::Buffer* perPrimitiveBuffer, uint32_t triangleCount)
+{
+    auto* geomDescriptor =
+        MTL::AccelerationStructureMotionTriangleGeometryDescriptor::alloc()->init();
+
+    MTL::MotionKeyframeData* kf0 = MTL::MotionKeyframeData::alloc()->init();
+    kf0->setBuffer(mPrevVertexBuffer);
+    kf0->setOffset(sceneMesh.mVbOffset * sizeof(Scene::Vertex));
+
+    MTL::MotionKeyframeData* kf1 = MTL::MotionKeyframeData::alloc()->init();
+    kf1->setBuffer(mVertexBuffer);
+    kf1->setOffset(sceneMesh.mVbOffset * sizeof(Scene::Vertex));
+
+    const NS::Object* keyframes[] = { kf0, kf1 };
+    NS::Array* vertexBuffers = NS::Array::array(keyframes, 2UL);
+    geomDescriptor->setVertexBuffers(vertexBuffers);
+    geomDescriptor->setVertexStride(sizeof(Scene::Vertex));
+
+    geomDescriptor->setIndexBuffer(mIndexBuffer);
+    geomDescriptor->setIndexBufferOffset(sceneMesh.mIndex * sizeof(uint32_t));
+    geomDescriptor->setIndexType(MTL::IndexTypeUInt32);
+    geomDescriptor->setTriangleCount(triangleCount);
+    geomDescriptor->setPrimitiveDataBuffer(perPrimitiveBuffer);
+    geomDescriptor->setPrimitiveDataBufferOffset(0);
+    geomDescriptor->setPrimitiveDataElementSize(sizeof(Triangle));
+    geomDescriptor->setPrimitiveDataStride(sizeof(Triangle));
+
+    const NS::Array* geomDescriptors = NS::Array::array((const NS::Object* const*)&geomDescriptor, 1UL);
+
+    MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
+        MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init();
+    primDescriptor->setGeometryDescriptors(geomDescriptors);
+    primDescriptor->setMotionKeyframeCount(2);
+    primDescriptor->setMotionStartTime(0.0f);
+    primDescriptor->setMotionEndTime(1.0f);
+    primDescriptor->setMotionStartBorderMode(MTL::MotionBorderModeClamp);
+    primDescriptor->setMotionEndBorderMode(MTL::MotionBorderModeClamp);
+
+    kf0->release();
+    kf1->release();
+    geomDescriptor->release();
+
+    return primDescriptor;
+}
+
+void MetalRender::refitBLAS(int meshIndex)
+{
+    MetalRender::Mesh* metalMesh = mMetalMeshes[meshIndex];
+    if (!metalMesh->mIsSkeletal)
+        return;
+
+    const oka::Mesh& sceneMesh = mScene->getMeshes()[meshIndex];
+    MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
+        createMotionBLASDescriptor(sceneMesh, metalMesh->mPerPrimitiveBuffer, metalMesh->mTriangleCount);
+    primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit);
+
+    const MTL::AccelerationStructureSizes accelSizes = mDevice->accelerationStructureSizes(primDescriptor);
+    MTL::Buffer* scratchBuffer =
+        mDevice->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate);
+
+    MTL::CommandBuffer* commandBuffer = mCommandQueue->commandBuffer();
+    MTL::AccelerationStructureCommandEncoder* commandEncoder = commandBuffer->accelerationStructureCommandEncoder();
+
+    commandEncoder->refitAccelerationStructure(
+        metalMesh->mGas, primDescriptor, metalMesh->mGas, scratchBuffer, 0UL);
+
+    commandEncoder->endEncoding();
+    commandBuffer->commit();
+
+    scratchBuffer->release();
+    primDescriptor->release();
+}
+
+void MetalRender::rebuildBLAS(int meshIndex)
+{
+    MetalRender::Mesh* metalMesh = mMetalMeshes[meshIndex];
+    if (!metalMesh->mIsSkeletal)
+        return;
+
+    const oka::Mesh& sceneMesh = mScene->getMeshes()[meshIndex];
+    MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
+        createMotionBLASDescriptor(sceneMesh, metalMesh->mPerPrimitiveBuffer, metalMesh->mTriangleCount);
+
+    metalMesh->mGas->release();
+    metalMesh->mGas = createAccelerationStructureNoCompact(primDescriptor);
+    mPrimitiveAccelerationStructures[meshIndex] = metalMesh->mGas;
+
+    primDescriptor->release();
+}
+
+void MetalRender::updateInstanceTransforms()
+{
+    const std::vector<oka::Instance>& instances = mScene->getInstances();
+    auto instanceDescriptors = (MTL::AccelerationStructureUserIDInstanceDescriptor*)mInstanceBuffer->contents();
+
+    for (int i = 0; i < (int)instances.size(); ++i)
+    {
+        const Instance& curr = instances[i];
+        for (int column = 0; column < 4; column++)
+        {
+            for (int row = 0; row < 3; row++)
+            {
+                instanceDescriptors[i].transformationMatrix.columns[column][row] = curr.transform[column][row];
+            }
+        }
+    }
+    mInstanceBuffer->didModifyRange(NS::Range::Make(0, mInstanceBuffer->length()));
+}
+
+void MetalRender::rebuildTLAS()
+{
+    NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
+
+    // Update instance transforms
+    updateInstanceTransforms();
+
+    // Release old TLAS
+    if (mInstanceAccelerationStructure)
+    {
+        mInstanceAccelerationStructure->release();
+        mInstanceAccelerationStructure = nullptr;
+    }
+
+    const std::vector<oka::Instance>& instances = mScene->getInstances();
+
+    const NS::Array* instancedAccelerationStructures = NS::Array::array(
+        (const NS::Object* const*)mPrimitiveAccelerationStructures.data(), mPrimitiveAccelerationStructures.size());
+    MTL::InstanceAccelerationStructureDescriptor* accelDescriptor =
+        MTL::InstanceAccelerationStructureDescriptor::descriptor();
+    accelDescriptor->setInstancedAccelerationStructures(instancedAccelerationStructures);
+    accelDescriptor->setInstanceCount(instances.size());
+    accelDescriptor->setInstanceDescriptorBuffer(mInstanceBuffer);
+    accelDescriptor->setInstanceDescriptorType(MTL::AccelerationStructureInstanceDescriptorTypeUserID);
+
+    // Rebuild without compaction for animation (avoid sync stall)
+    mInstanceAccelerationStructure = createAccelerationStructureNoCompact(accelDescriptor);
+
     pPool->release();
 }

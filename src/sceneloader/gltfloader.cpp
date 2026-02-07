@@ -299,6 +299,15 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
         }
     }
 
+    // Copy computed tangent from vertices into skin data (tangent is computed after vertex loop)
+    if (hasJoints)
+    {
+        for (size_t v = 0; v < sb.size(); ++v)
+        {
+            sb[v].tangent = vertices[v].tangent;
+        }
+    }
+
     uint32_t meshId = -1;
     if (hasJoints)
         meshId = scene.createSkeletalMesh(vertices, indices, sb);
@@ -391,6 +400,7 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
     else if (node.camera != -1) // camera node
     {
         scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::camera;
+        scene.mNodes[currentNodeId].camera = node.camera;
         glm::vec3 scale;
         glm::quat rotation;
         glm::vec3 translation;

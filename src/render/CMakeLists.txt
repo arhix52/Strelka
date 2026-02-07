@@ -118,6 +118,7 @@ if(APPLE)
   
   set(METAL_SOURCES ${ROOT_HOME}/src/render/metal/shaders/pathtrace.metal)
   set(METAL_SOURCES_TM ${ROOT_HOME}/src/render/metal/shaders/tonemapper.metal)
+  set(METAL_SOURCES_SKIN ${ROOT_HOME}/src/render/metal/shaders/skinning.metal)
 
   set(SHADER_OUTPUT_DIR ${OUTPUT_DIRECTORY}/metal/shaders)
 
@@ -146,9 +147,23 @@ add_custom_command(
     MAIN_DEPENDENCY ${METAL_SOURCES_TM}
     VERBATIM
 )
+# Create a custom command to compile and link skinning.metal shader
+add_custom_command(
+    OUTPUT ${SHADER_OUTPUT_DIR}/skinning.metallib
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
+    COMMAND ${CMAKE_COMMAND} -E echo "Compiling skinning.metal shader..."
+    COMMAND xcrun -sdk macosx metal -Wall -c ${METAL_SOURCES_SKIN} -o skinning.air -I ${ROOT_HOME}/src/render/metal/shaders
+    COMMAND ${CMAKE_COMMAND} -E echo "Linking skinning.metal shader..."
+    COMMAND xcrun -sdk macosx metallib skinning.air -o ${SHADER_OUTPUT_DIR}/skinning.metallib
+    WORKING_DIRECTORY ${CMAKE_CFG_INTDIR}
+    MAIN_DEPENDENCY ${METAL_SOURCES_SKIN}
+    VERBATIM
+)
+
 # Create custom targets that will use the custom commands
 add_custom_target(PathtraceShader ALL DEPENDS ${SHADER_OUTPUT_DIR}/pathtrace.metallib)
 add_custom_target(TonemapperShader ALL DEPENDS ${SHADER_OUTPUT_DIR}/tonemapper.metallib)
+add_custom_target(SkinningShader ALL DEPENDS ${SHADER_OUTPUT_DIR}/skinning.metallib)
 
 endif(APPLE)
 

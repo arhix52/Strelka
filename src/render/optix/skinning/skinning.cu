@@ -38,6 +38,8 @@ __global__ void skinningKernel(
     const float4* weights = reinterpret_cast<const float4*>(skinData + weightsOffset);
     const float3* initialPos = reinterpret_cast<const float3*>(skinData + posOffset);
     const float3* initialNorm = reinterpret_cast<const float3*>(skinData + normalOffset);
+    constexpr int tangentOffset = normalOffset + 12; // uint32_t at offset 60
+    const uint32_t* initialTangentPacked = reinterpret_cast<const uint32_t*>(skinData + tangentOffset);
 
     const sutil::Matrix4x4 skinMat =
           weights->x * d_jointMats[jointMatOffset + joints->x]
@@ -50,8 +52,20 @@ __global__ void skinningKernel(
     float3* vertexPos = reinterpret_cast<float3*>(vertexBase + (vbOffset + idx) * 32);
     *vertexPos = make_float3(skinMat * make_float4(*initialPos, 1.0f));
 
+    const sutil::Matrix3x3 skinMat3x3 = make_matrix3x3(skinMat);
+
     uint32_t* vertexNorm = reinterpret_cast<uint32_t*>(vertexBase + (vbOffset + idx) * 32 + 16);
-    *vertexNorm = packNormal(normalize(make_matrix3x3(skinMat) * (*initialNorm)));
+    *vertexNorm = packNormal(normalize(skinMat3x3 * (*initialNorm)));
+
+    // Transform tangent by the same 3x3 matrix
+    constexpr float invScale = 1.0f / 256.0f;
+    uint32_t tp = *initialTangentPacked;
+    float3 initialTangent = make_float3(
+        float(tp & 0x3FFu) * invScale - 1.0f,
+        float((tp >> 10) & 0x3FFu) * invScale - 1.0f,
+        float((tp >> 20) & 0x3FFu) * invScale - 1.0f);
+    uint32_t* vertexTangent = reinterpret_cast<uint32_t*>(vertexBase + (vbOffset + idx) * 32 + 12);
+    *vertexTangent = packNormal(normalize(skinMat3x3 * initialTangent));
 }
 
 void cuApplySkinning(

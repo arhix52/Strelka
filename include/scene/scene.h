@@ -102,7 +102,7 @@ public:
         glm::float3 pos;
         float pad0;
         glm::float3 normal;
-        float pad1;
+        uint32_t tangent{0}; // rest-pose packed tangent for skinning
     };
     std::vector<vertexSkinData> mVerticesSkinData;
 
@@ -125,6 +125,7 @@ public:
         std::vector<int> children;
         std::vector<uint32_t> instanceIds;
         int skin = -1;
+        int camera = -1;
     };
     std::vector<Node> mNodes;
 

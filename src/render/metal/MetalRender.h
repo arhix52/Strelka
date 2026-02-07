@@ -30,7 +30,12 @@ public:
 private:
     struct Mesh
     {
-        MTL::AccelerationStructure* mGas;
+        MTL::AccelerationStructure* mGas = nullptr;
+        MTL::Buffer* mPerPrimitiveBuffer = nullptr;
+        uint32_t mTriangleCount = 0;
+        uint32_t mVbOffset = 0;
+        uint32_t mIndexOffset = 0;
+        bool mIsSkeletal = false;
     };
 
     Mesh* createMesh(const oka::Mesh& mesh);
@@ -44,8 +49,10 @@ private:
     MTL::CommandQueue* mCommandQueue;
     MTL::Library* mShaderLibrary;
 
-    MTL::ComputePipelineState* mPathTracingPSO;
-    MTL::ComputePipelineState* mTonemapperPSO;
+    MTL::ComputePipelineState* mPathTracingPSO = nullptr;
+    MTL::ComputePipelineState* mTonemapperPSO = nullptr;
+    MTL::ComputePipelineState* mSkinningPSO = nullptr;
+    MTL::ComputePipelineState* mTriangleUpdatePSO = nullptr;
 
     MTL::Buffer* mAccumulationBuffer;
     MTL::Buffer* mLightBuffer;
@@ -60,9 +67,21 @@ private:
     MTL::AccelerationStructure* mInstanceAccelerationStructure;
     MTL::Buffer* mInstanceBuffer;
 
-    MTL::Buffer* mMaterialBuffer;
+    MTL::Buffer* mMaterialBuffer = nullptr;
     std::vector<MTL::Texture*> mMaterialTextures;
-    uint32_t mFrameIndex;
+    uint32_t mFrameIndex = 0;
+
+    // Skinning / animation
+    MTL::Buffer* mSkinDataBuffer = nullptr;
+    MTL::Buffer* mJointMatricesBuffer = nullptr;
+    std::vector<uint32_t> mJointMatOffsets;
+    uint32_t mBlasUpdateCount = 0;
+
+    // Motion blur
+    MTL::Buffer* mPrevVertexBuffer = nullptr;
+    MTL::Buffer* mInstanceDataBuffer = nullptr;
+    bool mEnableMotionBlur = false;
+    View mPrevMotionBlurView; // camera at T - shutter for camera motion blur
 
     void buildComputePipeline();
     void buildTonemapperPipeline();
@@ -72,7 +91,23 @@ private:
     void createMetalMaterials();
 
     MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);
+    MTL::AccelerationStructure* createAccelerationStructureNoCompact(MTL::AccelerationStructureDescriptor* descriptor);
     void createAccelerationStructures();
+
+    // Animation / skinning
+    void buildSkinningPipeline();
+    void createSkinDataBuffer();
+    void allocJointMatrices();
+    void applySkinning();
+    void copyVertexBufferToPrev();
+
+    // BVH management
+    MTL::PrimitiveAccelerationStructureDescriptor* createMotionBLASDescriptor(
+        const oka::Mesh& sceneMesh, MTL::Buffer* perPrimitiveBuffer, uint32_t triangleCount);
+    void refitBLAS(int meshIndex);
+    void rebuildBLAS(int meshIndex);
+    void rebuildTLAS();
+    void updateInstanceTransforms();
 };
 
 } // namespace oka

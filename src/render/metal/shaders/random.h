@@ -13,6 +13,7 @@ enum class SampleDimension : uint32_t
   ePixelX,
   ePixelY,
   eLightId,
+  eTime, // motion blur time [0, 1]
   eLightPointX,
   eLightPointY,
   eBSDF0,

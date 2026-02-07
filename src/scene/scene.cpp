@@ -3,6 +3,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/norm.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
 
 #include <algorithm>
 #include <filesystem>
@@ -356,10 +357,28 @@ bool Scene::updateNode(const uint32_t nodeId)
             return false;
             break;
 
+        case Node::NodeType::camera:
+            if (mNodes[nodeId].camera >= 0 && mNodes[nodeId].camera < (int)mCameras.size())
+            {
+                glm::vec3 scale;
+                glm::quat rotation;
+                glm::vec3 translation;
+                glm::vec3 skew;
+                glm::vec4 perspective;
+                glm::decompose(globalTransform, scale, rotation, translation, skew, perspective);
+                rotation = glm::conjugate(rotation);
+
+                Camera& cam = mCameras[mNodes[nodeId].camera];
+                cam.position = translation * scale;
+                cam.mOrientation = rotation;
+                cam.updateViewMatrix();
+            }
+            return false;
+
         case Node::NodeType::skeleton:
             skeletonNodesUpdated = true;
             break;
-        
+
         default:
             break;
     }

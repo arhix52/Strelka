@@ -37,6 +37,7 @@ enum class DebugMode : uint32_t
 {
     eNone = 0,
     eNormal,
+    eMotionBlur,
 };
 
 struct Vertex
@@ -54,6 +55,8 @@ struct Uniforms
 {
     simd::float4x4 viewToWorld;
     simd::float4x4 clipToView;
+    simd::float4x4 prevViewToWorld;
+    simd::float4x4 prevClipToView;
     vector_float3 missColor;
 
     uint32_t width;
@@ -74,6 +77,11 @@ struct Uniforms
     vector_float3 exposureValue;
 
     uint32_t debug;
+
+    uint32_t enableMotionBlur;
+    uint32_t isMotionBlurVisible;
+    uint32_t enableCameraMotionBlur;
+    uint32_t pad0;
 };
 
 struct UniformsTonemap
@@ -93,6 +101,29 @@ struct Triangle
     uint32_t normals[3];
     uint32_t tangent[3];
     uint32_t uv[3];
+};
+
+// Per-instance data for vertex buffer lookups (motion blur)
+struct InstanceData
+{
+    uint32_t vbOffset;     // mesh vertex buffer offset
+    uint32_t indexOffset;  // mesh index buffer offset
+};
+
+struct SkinningParams
+{
+    uint32_t vbOffset;       // vertex buffer offset for this mesh
+    uint32_t sbOffset;       // skin data buffer offset
+    uint32_t jointMatOffset; // offset into joint matrices array
+    uint32_t vertexCount;
+};
+
+struct TriangleUpdateParams
+{
+    uint32_t triangleCount;
+    uint32_t indexOffset;    // mesh.mIndex
+    uint32_t vbOffset;       // mesh.mVbOffset
+    uint32_t pad0;
 };
 
 // GPU side structure

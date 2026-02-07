@@ -100,11 +100,23 @@ static __attribute__((always_inline)) bool all(const float3 v)
     return v.x != 0.0f && v.y != 0.0f && v.z != 0.0f;
 }
 
+__attribute__((always_inline))
+float4x4 lerpMatrix(float4x4 a, float4x4 b, float t)
+{
+    float4x4 r;
+    r[0] = mix(a[0], b[0], t);
+    r[1] = mix(a[1], b[1], t);
+    r[2] = mix(a[2], b[2], t);
+    r[3] = mix(a[3], b[3], t);
+    return r;
+}
+
 void generateCameraRay(uint2 pixelIndex,
                         thread SamplerState& samplerRnd,
                         thread float3& origin,
                         thread float3& direction,
-                        const constant Uniforms& params)
+                        const constant Uniforms& params,
+                        float motionTime)
 {
     const float2 subpixel_jitter = {
         random<SampleDimension::ePixelX>(samplerRnd, params.samplerType),
@@ -114,12 +126,21 @@ void generateCameraRay(uint2 pixelIndex,
     float2 dimension {(float)params.width, (float)params.height};
     float2 pixelNDC = (pixelPos / dimension) * 2.0f - 1.0f;
 
+    // Interpolate camera matrices for camera motion blur (t=0 → current, t=1 → previous)
+    float4x4 clipToView = params.clipToView;
+    float4x4 viewToWorld = params.viewToWorld;
+    if (motionTime > 0.0f && params.enableCameraMotionBlur)
+    {
+        clipToView = lerpMatrix(params.clipToView, params.prevClipToView, motionTime);
+        viewToWorld = lerpMatrix(params.viewToWorld, params.prevViewToWorld, motionTime);
+    }
+
     float4 clip{ pixelNDC.x, pixelNDC.y, 1.0f, 1.0f };
-    float4 viewSpace = params.clipToView * clip;
+    float4 viewSpace = clipToView * clip;
 
-    float4 wdir = params.viewToWorld * float4(viewSpace.x, viewSpace.y, viewSpace.z, 0.0f);
+    float4 wdir = viewToWorld * float4(viewSpace.x, viewSpace.y, viewSpace.z, 0.0f);
 
-    origin = (params.viewToWorld * float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+    origin = (viewToWorld * float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
     direction = normalize(wdir.xyz);
 }
 
@@ -202,12 +223,13 @@ void materialSample(thread MaterialSample& data, thread MaterialState& state)
 }
 
 bool traceOcclusion(
-    instance_acceleration_structure accelerationStructure,
-    thread intersector<triangle_data, instancing>& isect, 
+    acceleration_structure<instancing, primitive_motion> accelerationStructure,
+    thread intersector<triangle_data, instancing, primitive_motion>& isect,
     const float3 origin, 
     const float3 direction,
     const float tMin,
-    const float tMax)
+    const float tMax,
+    const float motionTime)
 {
     struct ray shadowRay;
     shadowRay.origin = origin;
@@ -217,8 +239,8 @@ bool traceOcclusion(
     isect.accept_any_intersection(true);
 
     bool res = true;
-    typename intersector<triangle_data, instancing>::result_type intersection;
-    intersection = isect.intersect(shadowRay, accelerationStructure, RAY_MASK_SHADOW);
+    typename intersector<triangle_data, instancing, primitive_motion>::result_type intersection;
+    intersection = isect.intersect(shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime);
     if (intersection.type == intersection_type::none)
     {
         res = false;
@@ -229,13 +251,14 @@ bool traceOcclusion(
 
 float3 sampleLight(
     constant Uniforms& uniforms,
-    instance_acceleration_structure accelerationStructure,
-    thread intersector<triangle_data, instancing>& isect, 
+    acceleration_structure<instancing, primitive_motion> accelerationStructure,
+    thread intersector<triangle_data, instancing, primitive_motion>& isect,
     thread SamplerState& samplerRnd,
     device const UniformLight& light, 
     thread MaterialState& state, 
     thread float3& toLight, 
-    thread float& lightPdf)
+    thread float& lightPdf,
+    const float motionTime)
 {
     LightSampleData lightSampleData = {};
     const float2 uv = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType), random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
@@ -270,7 +293,8 @@ float3 sampleLight(
     {
         const bool occluded = traceOcclusion(accelerationStructure, isect, state.position, lightSampleData.L,
                                              0.001f, // tmin
-                                             lightSampleData.distToLight - 1e-5f // tmax
+                                             lightSampleData.distToLight - 1e-5f, // tmax
+                                             motionTime
         );
         // bool occluded = false;
         float visibility = occluded ? 0.0f : 1.0f;
@@ -283,21 +307,22 @@ float3 sampleLight(
 
 float3 estimateDirectLighting(
     constant Uniforms& uniforms,
-    instance_acceleration_structure accelerationStructure,
-    thread intersector<triangle_data, instancing>& isect, 
+    acceleration_structure<instancing, primitive_motion> accelerationStructure,
+    thread intersector<triangle_data, instancing, primitive_motion>& isect,
     const uint32_t numLights,
     device UniformLight* lights,
     thread SamplerState& samplerRnd,
     thread MaterialState& state, 
     thread float3& toLight,
-    thread float& lightPdf)
+    thread float& lightPdf,
+    const float motionTime)
 {
     float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
 
     const uint32_t lightId = min((uint32_t)(numLights * u), numLights - 1);
     const float lightSelectionPdf = 1.0f / numLights;
     device const UniformLight& currLight = lights[lightId];
-    const float3 r = sampleLight(uniforms, accelerationStructure, isect, samplerRnd, currLight, state, toLight, lightPdf);
+    const float3 r = sampleLight(uniforms, accelerationStructure, isect, samplerRnd, currLight, state, toLight, lightPdf, motionTime);
     lightPdf *= lightSelectionPdf;
     return r;
 }
@@ -335,11 +360,14 @@ kernel void raytracingKernel(
     uint2                                                      tid                   [[thread_position_in_grid]],
     constant Uniforms&                                         uniforms              [[buffer(0)]],
     constant MTLAccelerationStructureUserIDInstanceDescriptor* instances             [[buffer(1)]],
-    instance_acceleration_structure                            accelerationStructure [[buffer(2)]],
+    acceleration_structure<instancing, primitive_motion>        accelerationStructure [[buffer(2)]],
     device UniformLight* lights                                                      [[buffer(3)]],
     device Material* materials                                                       [[buffer(4)]],
     device float4* res                                                               [[buffer(5)]],
-    device float4* accum                                                             [[buffer(6)]]
+    device float4* accum                                                             [[buffer(6)]],
+    device const char* prevVertexBuffer                                              [[buffer(7)]],
+    device const uint32_t* indexBuffer                                               [[buffer(8)]],
+    device const InstanceData* instanceDataBuffer                                    [[buffer(9)]]
     )
 {
     if (tid.x >= uniforms.width || tid.y >= uniforms.height) 
@@ -357,14 +385,24 @@ kernel void raytracingKernel(
     prd.lastBsdfPdf = 0.0f;
     prd.sampler = initSampler(linearPixelIndex, uniforms.subframeIndex, 0u);
 
-    generateCameraRay(tid, prd.sampler, prd.origin, prd.direction, uniforms);
     DebugMode debugMode = (DebugMode) uniforms.debug;
 
-    // Create intersector once outside the bounce loop
-    intersector<triangle_data, instancing> i;
+    // Sample motion blur time per ray
+    float motionTime = 0.0f;
+    if (uniforms.enableMotionBlur)
+    {
+        motionTime = random<SampleDimension::eTime>(prd.sampler, uniforms.samplerType);
+        if (!uniforms.isMotionBlurVisible)
+            motionTime = 0.0f; // show only current frame (t=0 → current)
+    }
+
+    generateCameraRay(tid, prd.sampler, prd.origin, prd.direction, uniforms, motionTime);
+
+    // Create intersector once outside the bounce loop (primitive_motion for native motion BVH)
+    intersector<triangle_data, instancing, primitive_motion> i;
     i.assume_geometry_type(geometry_type::triangle);
     i.force_opacity(forced_opacity::opaque);
-    typename intersector<triangle_data, instancing>::result_type intersection;
+    typename intersector<triangle_data, instancing, primitive_motion>::result_type intersection;
 
     while (prd.depth < uniforms.maxDepth)
     {
@@ -375,7 +413,7 @@ kernel void raytracingKernel(
         ray.direction = prd.direction;
 
         i.accept_any_intersection(false);
-        intersection = i.intersect(ray, accelerationStructure, RAY_MASK_PRIMARY);
+        intersection = i.intersect(ray, accelerationStructure, RAY_MASK_PRIMARY, motionTime);
 
         // Stop if the ray didn't hit anything and has bounced out of the scene.
         if (intersection.type == intersection_type::none)
@@ -416,17 +454,69 @@ kernel void raytracingKernel(
             }
 
             const Triangle triangle = *(const device Triangle*)intersection.primitive_data;
+
+            // Positions: the motion BVH already intersected the interpolated triangle,
+            // so barycentrics are correct for the motion-time triangle. Use the per-primitive
+            // positions from keyframe 1 (current VB) — the actual hit position is computed
+            // via barycentrics on the interpolated geometry by Metal.
             const float3 p0 = triangle.positions[0];
             const float3 p1 = triangle.positions[1];
             const float3 p2 = triangle.positions[2];
 
-            const float3 n0 = unpackNormal(triangle.normals[0]);
-            const float3 n1 = unpackNormal(triangle.normals[1]);
-            const float3 n2 = unpackNormal(triangle.normals[2]);
+            // Normals and tangents: Metal only interpolates vertex positions for BVH,
+            // not per-primitive data. Manually interpolate normals & tangents from prevVB.
+            float3 n0, n1, n2;
+            float3 t0, t1, t2;
 
-            const float3 t0 = unpackNormal(triangle.tangent[0]);
-            const float3 t1 = unpackNormal(triangle.tangent[1]);
-            const float3 t2 = unpackNormal(triangle.tangent[2]);
+            if (uniforms.enableMotionBlur && motionTime > 0.0f &&
+                prevVertexBuffer && indexBuffer && instanceDataBuffer)
+            {
+                // Read previous frame normals/tangents and interpolate with current
+                const uint32_t geomIndex = inst.accelerationStructureIndex;
+                const uint32_t primitiveId = intersection.primitive_id;
+                const InstanceData instData = instanceDataBuffer[geomIndex];
+
+                const uint32_t i0 = indexBuffer[instData.indexOffset + primitiveId * 3 + 0];
+                const uint32_t i1 = indexBuffer[instData.indexOffset + primitiveId * 3 + 1];
+                const uint32_t i2 = indexBuffer[instData.indexOffset + primitiveId * 3 + 2];
+
+                // Scene::Vertex layout (32 bytes):
+                //   offset 0:  pos     (packed_float3, 12 bytes)
+                //   offset 12: tangent (uint32_t, 4 bytes)
+                //   offset 16: normal  (uint32_t, 4 bytes)
+                constexpr uint32_t vtxStride  = 32;
+                constexpr uint32_t tangentOff = 12;
+                constexpr uint32_t normalOff  = 16;
+
+                // Previous frame normals
+                const float3 n0_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i0) * vtxStride + normalOff));
+                const float3 n1_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i1) * vtxStride + normalOff));
+                const float3 n2_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i2) * vtxStride + normalOff));
+
+                // Interpolate normals: t=0 → current (from Triangle), t=1 → previous
+                n0 = mix(unpackNormal(triangle.normals[0]), n0_prev, motionTime);
+                n1 = mix(unpackNormal(triangle.normals[1]), n1_prev, motionTime);
+                n2 = mix(unpackNormal(triangle.normals[2]), n2_prev, motionTime);
+
+                // Previous frame tangents
+                const float3 t0_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i0) * vtxStride + tangentOff));
+                const float3 t1_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i1) * vtxStride + tangentOff));
+                const float3 t2_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i2) * vtxStride + tangentOff));
+
+                // Interpolate tangents
+                t0 = mix(unpackNormal(triangle.tangent[0]), t0_prev, motionTime);
+                t1 = mix(unpackNormal(triangle.tangent[1]), t1_prev, motionTime);
+                t2 = mix(unpackNormal(triangle.tangent[2]), t2_prev, motionTime);
+            }
+            else
+            {
+                n0 = unpackNormal(triangle.normals[0]);
+                n1 = unpackNormal(triangle.normals[1]);
+                n2 = unpackNormal(triangle.normals[2]);
+                t0 = unpackNormal(triangle.tangent[0]);
+                t1 = unpackNormal(triangle.tangent[1]);
+                t2 = unpackNormal(triangle.tangent[2]);
+            }
 
             const float2 uv0 = unpackUV(triangle.uv[0]);
             const float2 uv1 = unpackUV(triangle.uv[1]);
@@ -440,12 +530,8 @@ kernel void raytracingKernel(
                 float4(float3(inst.transformationMatrix[3]), 1.0f));
 
             const float2 barycentrics = intersection.triangle_barycentric_coord;
-            // Compute the intersection point in world space.
-            // float3 worldPosition = ray.origin + ray.direction * intersection.distance;
             const float3 worldPosition = transformPoint(interpolateAttrib(p0, p1, p2, barycentrics), objectToWorldSpaceTransform);
             const float2 uv = interpolateAttrib(uv0, uv1, uv2, barycentrics);
-            // unsigned primitiveIndex = intersection.primitive_id;
-            // unsigned int geometryIndex = instances[instanceIndex].accelerationStructureIndex;
 
             const float3 objectNormal = normalize(interpolateAttrib(n0, n1, n2, barycentrics));
             const float3 worldNormal = normalize(transformDirection(objectNormal, objectToWorldSpaceTransform));
@@ -472,8 +558,17 @@ kernel void raytracingKernel(
             float lightPdf = 0.0f; // return value for estimateDirectLighting()
             const float3 radiance = estimateDirectLighting(uniforms, accelerationStructure, i,
                 uniforms.numLights, lights, 
-                prd.sampler, matState, toLight, lightPdf);
+                prd.sampler, matState, toLight, lightPdf, motionTime);
             
+            if (debugMode == DebugMode::eMotionBlur)
+            {
+                // Red = motionTime, Green = normal delta (shows skeletal motion magnitude)
+                float3 nDelta = n0 - unpackNormal(triangle.normals[0]);
+                float deltaMag = length(nDelta);
+                prd.radiance = float3(motionTime, clamp(deltaMag * 10.0f, 0.0f, 1.0f), 0.0f);
+                break;
+            }
+
             if (debugMode == DebugMode::eNormal)
             {
                 prd.radiance = (matState.normal + float3(1.0f)) * 0.5f;
