@@ -409,6 +409,14 @@ void MetalRender::render(Buffer* output)
     settingsChanged |= (enableCameraMotionBlurPrev != enableCameraMotionBlurCurr);
     enableCameraMotionBlurPrev = enableCameraMotionBlurCurr;
 
+    static uint32_t maxDepthPrev = 0;
+    settingsChanged |= (maxDepthPrev != pUniformData->maxDepth);
+    maxDepthPrev = pUniformData->maxDepth;
+
+    static uint32_t debugPrev = 0;
+    settingsChanged |= (debugPrev != pUniformData->debug);
+    debugPrev = pUniformData->debug;
+
     if (settingsChanged)
     {
         getSharedContext().mSubframeIndex = 0;

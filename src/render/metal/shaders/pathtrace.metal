@@ -126,13 +126,15 @@ void generateCameraRay(uint2 pixelIndex,
     float2 dimension {(float)params.width, (float)params.height};
     float2 pixelNDC = (pixelPos / dimension) * 2.0f - 1.0f;
 
-    // Interpolate camera matrices for camera motion blur (t=0 → current, t=1 → previous)
+    // Interpolate camera matrices for camera motion blur
+    // BVH keyframes: kf0=prevVB at t=0 (shutter open), kf1=VB at t=1 (shutter close)
+    // Camera must match: t=0 → prev camera, t=1 → current camera
     float4x4 clipToView = params.clipToView;
     float4x4 viewToWorld = params.viewToWorld;
-    if (motionTime > 0.0f && params.enableCameraMotionBlur)
+    if (motionTime < 1.0f && params.enableCameraMotionBlur)
     {
-        clipToView = lerpMatrix(params.clipToView, params.prevClipToView, motionTime);
-        viewToWorld = lerpMatrix(params.viewToWorld, params.prevViewToWorld, motionTime);
+        clipToView = lerpMatrix(params.prevClipToView, params.clipToView, motionTime);
+        viewToWorld = lerpMatrix(params.prevViewToWorld, params.viewToWorld, motionTime);
     }
 
     float4 clip{ pixelNDC.x, pixelNDC.y, 1.0f, 1.0f };
@@ -393,7 +395,7 @@ kernel void raytracingKernel(
     {
         motionTime = random<SampleDimension::eTime>(prd.sampler, uniforms.samplerType);
         if (!uniforms.isMotionBlurVisible)
-            motionTime = 0.0f; // show only current frame (t=0 → current)
+            motionTime = 1.0f; // show current frame only (t=1 → kf1 = current VB)
     }
 
     generateCameraRay(tid, prd.sampler, prd.origin, prd.direction, uniforms, motionTime);
@@ -455,23 +457,17 @@ kernel void raytracingKernel(
 
             const Triangle triangle = *(const device Triangle*)intersection.primitive_data;
 
-            // Positions: the motion BVH already intersected the interpolated triangle,
-            // so barycentrics are correct for the motion-time triangle. Use the per-primitive
-            // positions from keyframe 1 (current VB) — the actual hit position is computed
-            // via barycentrics on the interpolated geometry by Metal.
-            const float3 p0 = triangle.positions[0];
-            const float3 p1 = triangle.positions[1];
-            const float3 p2 = triangle.positions[2];
-
-            // Normals and tangents: Metal only interpolates vertex positions for BVH,
-            // not per-primitive data. Manually interpolate normals & tangents from prevVB.
+            // Per-primitive positions are from keyframe 1 (current VB) only.
+            // For motion blur, we also need keyframe 0 positions to:
+            //  (a) compute correct worldPosition via interpolated positions + barycentrics
+            //  (b) compute correct geomNormal from the interpolated triangle
+            float3 p0, p1, p2;
             float3 n0, n1, n2;
             float3 t0, t1, t2;
 
-            if (uniforms.enableMotionBlur && motionTime > 0.0f &&
+            if (uniforms.enableMotionBlur && motionTime < 1.0f &&
                 prevVertexBuffer && indexBuffer && instanceDataBuffer)
             {
-                // Read previous frame normals/tangents and interpolate with current
                 const uint32_t geomIndex = inst.accelerationStructureIndex;
                 const uint32_t primitiveId = intersection.primitive_id;
                 const InstanceData instData = instanceDataBuffer[geomIndex];
@@ -488,28 +484,42 @@ kernel void raytracingKernel(
                 constexpr uint32_t tangentOff = 12;
                 constexpr uint32_t normalOff  = 16;
 
+                // Previous frame positions (keyframe 0 = prevVB)
+                const float3 p0_prev = float3(*(device const packed_float3*)(prevVertexBuffer + (instData.vbOffset + i0) * vtxStride));
+                const float3 p1_prev = float3(*(device const packed_float3*)(prevVertexBuffer + (instData.vbOffset + i1) * vtxStride));
+                const float3 p2_prev = float3(*(device const packed_float3*)(prevVertexBuffer + (instData.vbOffset + i2) * vtxStride));
+
+                // Interpolate positions: BVH kf0=prevVB at t=0, kf1=VB at t=1
+                // mix(a,b,t) = a*(1-t)+b*t → mix(prev, current, t) gives prev at t=0, current at t=1
+                p0 = mix(p0_prev, triangle.positions[0], motionTime);
+                p1 = mix(p1_prev, triangle.positions[1], motionTime);
+                p2 = mix(p2_prev, triangle.positions[2], motionTime);
+
                 // Previous frame normals
                 const float3 n0_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i0) * vtxStride + normalOff));
                 const float3 n1_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i1) * vtxStride + normalOff));
                 const float3 n2_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i2) * vtxStride + normalOff));
 
-                // Interpolate normals: t=0 → current (from Triangle), t=1 → previous
-                n0 = mix(unpackNormal(triangle.normals[0]), n0_prev, motionTime);
-                n1 = mix(unpackNormal(triangle.normals[1]), n1_prev, motionTime);
-                n2 = mix(unpackNormal(triangle.normals[2]), n2_prev, motionTime);
+                // Interpolate normals: t=0 → prev (matches kf0=prevVB), t=1 → current (matches kf1=VB)
+                n0 = mix(n0_prev, unpackNormal(triangle.normals[0]), motionTime);
+                n1 = mix(n1_prev, unpackNormal(triangle.normals[1]), motionTime);
+                n2 = mix(n2_prev, unpackNormal(triangle.normals[2]), motionTime);
 
                 // Previous frame tangents
                 const float3 t0_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i0) * vtxStride + tangentOff));
                 const float3 t1_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i1) * vtxStride + tangentOff));
                 const float3 t2_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i2) * vtxStride + tangentOff));
 
-                // Interpolate tangents
-                t0 = mix(unpackNormal(triangle.tangent[0]), t0_prev, motionTime);
-                t1 = mix(unpackNormal(triangle.tangent[1]), t1_prev, motionTime);
-                t2 = mix(unpackNormal(triangle.tangent[2]), t2_prev, motionTime);
+                // Interpolate tangents: same direction as normals
+                t0 = mix(t0_prev, unpackNormal(triangle.tangent[0]), motionTime);
+                t1 = mix(t1_prev, unpackNormal(triangle.tangent[1]), motionTime);
+                t2 = mix(t2_prev, unpackNormal(triangle.tangent[2]), motionTime);
             }
             else
             {
+                p0 = triangle.positions[0];
+                p1 = triangle.positions[1];
+                p2 = triangle.positions[2];
                 n0 = unpackNormal(triangle.normals[0]);
                 n1 = unpackNormal(triangle.normals[1]);
                 n2 = unpackNormal(triangle.normals[2]);
@@ -530,7 +540,11 @@ kernel void raytracingKernel(
                 float4(float3(inst.transformationMatrix[3]), 1.0f));
 
             const float2 barycentrics = intersection.triangle_barycentric_coord;
-            const float3 worldPosition = transformPoint(interpolateAttrib(p0, p1, p2, barycentrics), objectToWorldSpaceTransform);
+
+            // Use ray equation for world position — this is always correct for the
+            // motion-interpolated geometry, unlike computing from per-primitive positions
+            // which are only from keyframe 1.
+            const float3 worldPosition = ray.origin + ray.direction * intersection.distance;
             const float2 uv = interpolateAttrib(uv0, uv1, uv2, barycentrics);
 
             const float3 objectNormal = normalize(interpolateAttrib(n0, n1, n2, barycentrics));
@@ -539,6 +553,7 @@ kernel void raytracingKernel(
             const float3 worldTangent = normalize(transformDirection(normalize(interpolateAttrib(t0, t1, t2, barycentrics)), objectToWorldSpaceTransform));
             const float3 worldBinormal = cross(worldNormal, worldTangent);
 
+            // Geometric normal from interpolated positions (correct for motion-blurred triangle)
             float3 geomNormal = cross(p1 - p0, p2 - p0);
             geomNormal = normalize(transformDirection(geomNormal, objectToWorldSpaceTransform));
 
