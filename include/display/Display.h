@@ -38,6 +38,7 @@ public:
 
 #ifdef __APPLE__
     virtual void setNativeDevice(void* device) = 0;
+    virtual void setCommandQueue(void* queue) = 0;
 #endif
     void setWindowTitle(const char* title)
     {

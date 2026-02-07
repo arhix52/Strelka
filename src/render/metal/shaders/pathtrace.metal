@@ -106,9 +106,9 @@ void generateCameraRay(uint2 pixelIndex,
                         thread float3& direction,
                         const constant Uniforms& params)
 {
-    const float2 subpixel_jitter = { 
-        random<SampleDimension::ePixelX>(samplerRnd), 
-        random<SampleDimension::ePixelY>(samplerRnd)};
+    const float2 subpixel_jitter = {
+        random<SampleDimension::ePixelX>(samplerRnd, params.samplerType),
+        random<SampleDimension::ePixelY>(samplerRnd, params.samplerType)};
     float2 pixelPos {pixelIndex.x + subpixel_jitter.x, params.height - (pixelIndex.y + subpixel_jitter.y)};
 
     float2 dimension {(float)params.width, (float)params.height};
@@ -238,7 +238,7 @@ float3 sampleLight(
     thread float& lightPdf)
 {
     LightSampleData lightSampleData = {};
-    const float2 uv = float2(random<SampleDimension::eLightPointX>(samplerRnd), random<SampleDimension::eLightPointY>(samplerRnd));
+    const float2 uv = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType), random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
     switch (light.type)
     {
     case 0:
@@ -292,7 +292,7 @@ float3 estimateDirectLighting(
     thread float3& toLight,
     thread float& lightPdf)
 {
-    float u = random<SampleDimension::eLightId>(samplerRnd);
+    float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
 
     const uint32_t lightId = min((uint32_t)(numLights * u), numLights - 1);
     const float lightSelectionPdf = 1.0f / numLights;
@@ -359,6 +359,13 @@ kernel void raytracingKernel(
 
     generateCameraRay(tid, prd.sampler, prd.origin, prd.direction, uniforms);
     DebugMode debugMode = (DebugMode) uniforms.debug;
+
+    // Create intersector once outside the bounce loop
+    intersector<triangle_data, instancing> i;
+    i.assume_geometry_type(geometry_type::triangle);
+    i.force_opacity(forced_opacity::opaque);
+    typename intersector<triangle_data, instancing>::result_type intersection;
+
     while (prd.depth < uniforms.maxDepth)
     {
         ray ray;
@@ -366,13 +373,6 @@ kernel void raytracingKernel(
         ray.max_distance = INFINITY;
         ray.origin = prd.origin;
         ray.direction = prd.direction;
-
-        // Create an intersector to test for intersection between the ray and the geometry in the scene.
-        intersector<triangle_data, instancing> i;
-        i.assume_geometry_type(geometry_type::triangle);
-        i.force_opacity(forced_opacity::opaque);
-
-        typename intersector<triangle_data, instancing>::result_type intersection;
 
         i.accept_any_intersection(false);
         intersection = i.intersect(ray, accelerationStructure, RAY_MASK_PRIMARY);
@@ -387,13 +387,14 @@ kernel void raytracingKernel(
         }
         else
         {
+            // Load instance descriptor once into registers
             const uint32_t instanceIndex = intersection.instance_id;
-            const uint32_t mask = instances[instanceIndex].mask;
-            if (mask == GEOMETRY_MASK_LIGHT)
+            const auto inst = instances[instanceIndex];
+            if (inst.mask == GEOMETRY_MASK_LIGHT)
             {
                 // Light hit
                 const float3 hitPoint = ray.origin + ray.direction * intersection.distance;
-                device const UniformLight& currLight = lights[instances[instanceIndex].userID];
+                device const UniformLight& currLight = lights[inst.userID];
                 const float3 lightNormal = calcLightNormal(currLight, hitPoint);
                 if (-dot(prd.direction, lightNormal) > 0.0f)
                 {
@@ -431,12 +432,12 @@ kernel void raytracingKernel(
             const float2 uv1 = unpackUV(triangle.uv[1]);
             const float2 uv2 = unpackUV(triangle.uv[2]);
 
-            // The ray hit something. Look up the transformation matrix for this instance.
-            float4x4 objectToWorldSpaceTransform(1.0f);
-
-            for (int column = 0; column < 4; column++)
-                for (int row = 0; row < 3; row++)
-                    objectToWorldSpaceTransform[column][row] = instances[instanceIndex].transformationMatrix[column][row];
+            // Build transform from local instance copy (avoids 12 scattered device reads)
+            const float4x4 objectToWorldSpaceTransform = float4x4(
+                float4(float3(inst.transformationMatrix[0]), 0.0f),
+                float4(float3(inst.transformationMatrix[1]), 0.0f),
+                float4(float3(inst.transformationMatrix[2]), 0.0f),
+                float4(float3(inst.transformationMatrix[3]), 1.0f));
 
             const float2 barycentrics = intersection.triangle_barycentric_coord;
             // Compute the intersection point in world space.
@@ -464,7 +465,7 @@ kernel void raytracingKernel(
             matState.geom_normal = geomNormal;
             matState.textureCoordinates = uv;
 
-            const uint32_t materialId = instances[instanceIndex].userID;
+            const uint32_t materialId = inst.userID;
             materialInit(matState, materials[materialId]);
 
             float3 toLight; // return value for estimateDirectLighting()
@@ -506,10 +507,10 @@ kernel void raytracingKernel(
                 }
             }
 
-            const float z1 = random<SampleDimension::eBSDF0>(prd.sampler);
-            const float z2 = random<SampleDimension::eBSDF1>(prd.sampler);
-            const float z3 = random<SampleDimension::eBSDF2>(prd.sampler);
-            const float z4 = random<SampleDimension::eBSDF3>(prd.sampler);
+            const float z1 = random<SampleDimension::eBSDF0>(prd.sampler, uniforms.samplerType);
+            const float z2 = random<SampleDimension::eBSDF1>(prd.sampler, uniforms.samplerType);
+            const float z3 = random<SampleDimension::eBSDF2>(prd.sampler, uniforms.samplerType);
+            const float z4 = random<SampleDimension::eBSDF3>(prd.sampler, uniforms.samplerType);
 
             MaterialSample sampleData {};
             // sampleData.ior1 = ior1;
@@ -532,7 +533,7 @@ kernel void raytracingKernel(
             if (prd.depth > 3)
             {
                 const float p = max(prd.throughput.x, max(prd.throughput.y, prd.throughput.z));
-                if (random<SampleDimension::eRussianRoulette>(prd.sampler) > p)
+                if (random<SampleDimension::eRussianRoulette>(prd.sampler, uniforms.samplerType) > p)
                 {
                     break;
                 }
@@ -553,10 +554,7 @@ kernel void raytracingKernel(
         {
             const float a = 1.0f / static_cast<float>(uniforms.subframeIndex + 1);
             const float3 accum_color_prev = float3(accum[linearPixelIndex]);
-            accum_color = inverseTonemap(mix(
-                tonemap(accum_color_prev, uniforms.exposureValue),
-                tonemap(accum_color, uniforms.exposureValue),
-                a), uniforms.exposureValue);
+            accum_color = mix(accum_color_prev, accum_color, a);
         }
         accum[linearPixelIndex] = float4(accum_color, 1.0f);
         result = accum_color;

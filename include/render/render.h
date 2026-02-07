@@ -30,6 +30,11 @@ public:
         return nullptr;
     }
 
+    virtual void* getNativeCommandQueue()
+    {
+        return nullptr;
+    }
+
     void setSharedContext(SharedContext* ctx)
     {
         mSharedCtx = ctx;

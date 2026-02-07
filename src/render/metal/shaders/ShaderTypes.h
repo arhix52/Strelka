@@ -67,6 +67,7 @@ struct Uniforms
     uint32_t maxDepth;
     
     uint32_t rectLightSamplingMethod;
+    uint32_t samplerType; // 0 - Halton, 1 - PCG
 
     uint32_t tonemapperType; // 0 - "None", "Reinhard", "ACES", "Filmic"
     float gamma; // 0 - off

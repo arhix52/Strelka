@@ -22,6 +22,11 @@ public:
         return mDevice;
     }
 
+    void* getNativeCommandQueue() override
+    {
+        return mCommandQueue;
+    }
+
 private:
     struct Mesh
     {

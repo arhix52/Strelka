@@ -114,11 +114,28 @@ static SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleI
 }
 
 template <SampleDimension Dim>
-static float random(thread SamplerState& state)
+static float randomHalton(thread SamplerState& state)
 {
     const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
     const uint32_t base = primeNumbers[dimension & 31u];
     return halton(state.seed + state.sampleIdx, base);
+}
+
+template <SampleDimension Dim>
+static float randomPCG(thread SamplerState& state)
+{
+    const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
+    uint32_t h = hash_with(state.seed + state.sampleIdx, dimension);
+    h = pcg_hash(h);
+    return uintToFloat(h);
+}
+
+template <SampleDimension Dim>
+static float random(thread SamplerState& state, uint32_t samplerType)
+{
+    if (samplerType == 1)
+        return randomPCG<Dim>(state);
+    return randomHalton<Dim>(state);
 }
 
 uint xorshift(thread uint& rngState) 

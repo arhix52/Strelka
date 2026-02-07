@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <optional>
+#include <future>
 
 #include "gltfloader.h"
 
@@ -23,9 +24,10 @@
 namespace oka
 {
 
-class Editor
+class Editor : public ResizeHandler
 {
 private:
+    bool m_resized = false;
     std::unique_ptr<Display> m_display;
     std::unique_ptr<SettingsManager> m_settingsManager;
 
@@ -39,6 +41,10 @@ private:
     std::unique_ptr<Scene> m_scene;
 
     std::unique_ptr<CameraController> m_cameraController;
+
+    std::future<std::unique_ptr<Scene>> m_loadingFuture;
+    std::string m_pendingResourcePath;
+    bool m_isLoading = false;
 
 public:
     Editor()
@@ -61,10 +67,19 @@ public:
         m_render->init();
 #ifdef __APPLE__
         m_display->setNativeDevice(m_render->getNativeDevicePtr());
+        m_display->setCommandQueue(m_render->getNativeCommandQueue());
 #endif
         m_display->init(1024, 768, m_settingsManager.get());
+        m_display->setResizeHandler(this);
     }
     ~Editor() = default;
+
+    void framebufferResize(int newWidth, int newHeight) override
+    {
+        m_settingsManager->setAs<uint32_t>("render/width", static_cast<uint32_t>(newWidth));
+        m_settingsManager->setAs<uint32_t>("render/height", static_cast<uint32_t>(newHeight));
+        m_resized = true;
+    }
 
     void prepare()
     {
@@ -110,6 +125,7 @@ public:
         m_settingsManager->setAs<bool>("render/pt/needScreenshot", false);
         m_settingsManager->setAs<bool>("render/pt/screenshotSPP", false);
         m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
+        m_settingsManager->setAs<uint32_t>("render/pt/samplerType", 0); // 0 - Halton, 1 - PCG
         m_settingsManager->setAs<bool>("render/enableValidation", false);
         m_settingsManager->setAs<bool>("render/enableMotionBlur", true);
         m_settingsManager->setAs<bool>("render/isMotionBlurVisible", true);
@@ -142,13 +158,50 @@ public:
         }
     }
 
+    void checkLoadingComplete()
+    {
+        if (!m_isLoading)
+            return;
+        if (m_loadingFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            return;
+
+        auto new_scene = m_loadingFuture.get();
+        m_isLoading = false;
+
+        if (!new_scene)
+            return;
+
+        m_scene = std::move(new_scene);
+
+        oka::Camera camera;
+        camera.name = "Main";
+        camera.fov = 45.0f;
+        camera.position = glm::vec3(0, 0, -10);
+        camera.mOrientation = glm::quat(glm::vec3(0, 0, 0));
+        camera.updateViewMatrix();
+        m_scene->addCamera(camera);
+
+        loadAnimSettings();
+
+        m_sharedCtx = std::make_unique<SharedContext>();
+
+        m_render.reset(RenderFactory::createRender());
+        m_render->setSettingsManager(m_settingsManager.get());
+        m_render->setSharedContext(m_sharedCtx.get());
+        m_render->setScene(m_scene.get());
+        m_render->init();
+
+        m_cameraController->setCamera(m_scene->getCamera(0));
+        m_display->setInputHandler(m_cameraController.get());
+    }
+
     void run()
     {
         // Main render loop
         oka::BufferDesc desc{};
         desc.format = oka::BufferFormat::FLOAT4;
-        desc.width = 1024;
-        desc.height = 768;
+        desc.width = m_settingsManager->getAs<uint32_t>("render/width");
+        desc.height = m_settingsManager->getAs<uint32_t>("render/height");
 
         oka::Buffer* outputBuffer = m_render->createBuffer(desc);
         while (!m_display->windowShouldClose())
@@ -168,6 +221,17 @@ public:
             playAnimations(deltaTime);
 
             m_scene->updateCamera(m_cameraController->getCamera(), 0);
+
+            checkLoadingComplete();
+
+            if (m_resized)
+            {
+                m_resized = false;
+                const uint32_t newW = m_settingsManager->getAs<uint32_t>("render/width");
+                const uint32_t newH = m_settingsManager->getAs<uint32_t>("render/height");
+                outputBuffer->resize(newW, newH);
+                m_sharedCtx->mSubframeIndex = 0;
+            }
 
             m_display->onBeginFrame();
 
@@ -238,7 +302,7 @@ public:
         ImGui::BeginMainMenuBar();
         if (ImGui::BeginMenu("File"))
         {
-            if (ImGui::MenuItem("Open File"))
+            if (ImGui::MenuItem("Open File", nullptr, false, !m_isLoading))
             {
                 IGFD::FileDialogConfig config;
                 config.path = ".";
@@ -257,41 +321,34 @@ public:
         if (ImGuiFileDialog::Instance()->Display("ChooseFileDlgKey"))
         {
             if (ImGuiFileDialog::Instance()->IsOk())
-            { // action if OK
+            {
                 std::string sceneFile = ImGuiFileDialog::Instance()->GetFilePathName();
                 std::string resourceSearchPath = ImGuiFileDialog::Instance()->GetCurrentPath();
-                // action
                 STRELKA_DEBUG("Resource search path {}", resourceSearchPath);
                 m_settingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
-                std::unique_ptr<Scene> new_scene(new Scene());
-                if (m_sceneLoader->loadGltf(sceneFile, *new_scene))
-                {
-                    m_scene = std::move(new_scene);
+                m_pendingResourcePath = resourceSearchPath;
 
-                    oka::Camera camera;
-                    camera.name = "Main";
-                    camera.fov = 45.0f;
-                    camera.position = glm::vec3(0, 0, -10);
-                    camera.mOrientation = glm::quat(glm::vec3(0, 0, 0));
-                    camera.updateViewMatrix();
-                    m_scene->addCamera(camera);
-
-                    loadAnimSettings();
-
-                    m_sharedCtx = std::make_unique<SharedContext>();
-
-                    m_render.reset(RenderFactory::createRender());
-                    m_render->setSettingsManager(m_settingsManager.get());
-                    m_render->setSharedContext(m_sharedCtx.get());
-                    m_render->setScene(m_scene.get());
-                    m_render->init();
-
-                    m_cameraController->setCamera(m_scene->getCamera(0));
-                }
+                auto loader = m_sceneLoader.get();
+                m_loadingFuture = std::async(std::launch::async, [loader, sceneFile]() -> std::unique_ptr<Scene> {
+                    auto scene = std::make_unique<Scene>();
+                    if (loader->loadGltf(sceneFile, *scene))
+                    {
+                        return scene;
+                    }
+                    return nullptr;
+                });
+                m_isLoading = true;
             }
 
             // close
             ImGuiFileDialog::Instance()->Close();
+        }
+
+        if (m_isLoading)
+        {
+            ImGui::Begin("##Loading", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize);
+            ImGui::Text("Loading scene...");
+            ImGui::End();
         }
 
         static bool mIsHoveredViewport = false; // need to track previous state
@@ -321,7 +378,9 @@ public:
                 return (availableSize.y - renderedHeight) / 2.0f; 
             };
             
-            ImVec2 viewportSize = calculateAspectRatioSize(availableSize, 1024, 768);
+            const uint32_t renderW = m_settingsManager->getAs<uint32_t>("render/width");
+            const uint32_t renderH = m_settingsManager->getAs<uint32_t>("render/height");
+            ImVec2 viewportSize = calculateAspectRatioSize(availableSize, renderW, renderH);
             float verticalPadding = calculateVerticalPadding(availableSize, viewportSize.y);
 
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
@@ -404,6 +463,26 @@ public:
                     }
                 }
                 m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", currentRectlightSamplingMethodItemId);
+                ImGui::EndCombo();
+            }
+
+            const char* samplerTypeItems[] = { "Halton", "PCG" };
+            static int currentSamplerTypeId = 0;
+            if (ImGui::BeginCombo("Sampler", samplerTypeItems[currentSamplerTypeId]))
+            {
+                for (const auto& item : samplerTypeItems)
+                {
+                    bool is_selected = (item == samplerTypeItems[currentSamplerTypeId]);
+                    if (ImGui::Selectable(item, is_selected))
+                    {
+                        currentSamplerTypeId = &item - samplerTypeItems;
+                    }
+                    if (is_selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                m_settingsManager->setAs<uint32_t>("render/pt/samplerType", currentSamplerTypeId);
                 ImGui::EndCombo();
             }
 

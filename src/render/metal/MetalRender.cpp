@@ -142,9 +142,16 @@ void MetalRender::render(Buffer* output)
 
     mFrameIndex = (mFrameIndex + 1) % kMaxFramesInFlight;
 
-    // Update camera state:
+    // Recreate accumulation buffer if output size changed
     const uint32_t width = output->width();
     const uint32_t height = output->height();
+    const size_t requiredSize = width * height * output->getElementSize();
+    if (mAccumulationBuffer && requiredSize != mAccumulationBuffer->length())
+    {
+        mAccumulationBuffer->release();
+        mAccumulationBuffer = mDevice->newBuffer(requiredSize, MTL::ResourceStorageModePrivate);
+        getSharedContext().mSubframeIndex = 0;
+    }
 
     oka::Camera& camera = mScene->getCamera(0);
     camera.updateAspectRatio(width / (float)height);
@@ -190,6 +197,11 @@ void MetalRender::render(Buffer* output)
     pUniformData->rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
     settingsChanged = (rectLightSamplingMethodPrev != pUniformData->rectLightSamplingMethod);
     rectLightSamplingMethodPrev = pUniformData->rectLightSamplingMethod;
+
+    static uint32_t samplerTypePrev = 0;
+    pUniformData->samplerType = settings.getAs<uint32_t>("render/pt/samplerType");
+    settingsChanged |= (samplerTypePrev != pUniformData->samplerType);
+    samplerTypePrev = pUniformData->samplerType;
 
     static bool enableAccumulationPrev = false;
     const bool enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
@@ -310,8 +322,7 @@ void MetalRender::render(Buffer* output)
         if (mInstanceBuffer != nullptr)
         {
             const MTL::Size gridSize = MTL::Size(width, height, 1);
-            const NS::UInteger threadGroupSize = mPathTracingPSO->maxTotalThreadsPerThreadgroup();
-            const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
+            const MTL::Size threadgroupSize(8, 8, 1);
             pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
         }
         // Disable tonemapping for debug output
@@ -324,8 +335,7 @@ void MetalRender::render(Buffer* output)
             pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
             {
                 const MTL::Size gridSize = MTL::Size(width, height, 1);
-                const NS::UInteger threadGroupSize = mTonemapperPSO->maxTotalThreadsPerThreadgroup();
-                const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
+                const MTL::Size threadgroupSize(8, 8, 1);
                 pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
             }
         }
@@ -333,7 +343,6 @@ void MetalRender::render(Buffer* output)
         pComputeEncoder->endEncoding();
 
         pCmd->commit();
-        pCmd->waitUntilCompleted();
 
         if (enableAccumulation)
         {
@@ -365,15 +374,13 @@ void MetalRender::render(Buffer* output)
             pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
             {
                 const MTL::Size gridSize = MTL::Size(width, height, 1);
-                const NS::UInteger threadGroupSize = mTonemapperPSO->maxTotalThreadsPerThreadgroup();
-                const MTL::Size threadgroupSize(threadGroupSize, 1, 1);
+                const MTL::Size threadgroupSize(8, 8, 1);
                 pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
             }
             pComputeEncoder->endEncoding();
         }
 
         pCmd->commit();
-        pCmd->waitUntilCompleted();
     }
     pPool->release();
 

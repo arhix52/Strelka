@@ -16,6 +16,7 @@ public:
 
     void init(int width, int height, SettingsManager* settings) override;
     void setNativeDevice(void* device) override;
+    void setCommandQueue(void* queue) override;
     void destroy() override;
 
     void onBeginFrame() override;
@@ -32,7 +33,8 @@ private:
     static constexpr size_t kMaxFramesInFlight = 3;
 
     MTL::Device* _pDevice;
-    MTL::CommandQueue* _pCommandQueue;
+    MTL::CommandQueue* _pCommandQueue = nullptr;
+    bool _ownsCommandQueue = false;
     MTL::Library* _pShaderLibrary;
     MTL::RenderPipelineState* _pPSO;
     MTL::Texture* mTexture;

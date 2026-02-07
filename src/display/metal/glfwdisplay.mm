@@ -24,6 +24,11 @@ void GlfwDisplay::setNativeDevice(void* device)
     _pDevice = (MTL::Device*) device;
 }
 
+void GlfwDisplay::setCommandQueue(void* queue)
+{
+    _pCommandQueue = (MTL::CommandQueue*) queue;
+}
+
 void GlfwDisplay::init(int width, int height, SettingsManager* settings)
 {
     mWindowWidth = width;
@@ -83,7 +88,11 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
 
     renderPassDescriptor = MTL::RenderPassDescriptor::renderPassDescriptor();
 
-    _pCommandQueue = _pDevice->newCommandQueue();
+    if (!_pCommandQueue)
+    {
+        _pCommandQueue = _pDevice->newCommandQueue();
+        _ownsCommandQueue = true;
+    }
     _semaphore = dispatch_semaphore_create(kMaxFramesInFlight);
     buildShaders();
 }
@@ -204,7 +213,7 @@ void GlfwDisplay::destroy()
 
 void GlfwDisplay::onBeginFrame()
 {
-    // NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
+    dispatch_semaphore_wait(_semaphore, DISPATCH_TIME_FOREVER);
 
     int width, height;
     glfwGetFramebufferSize(mWindow, &width, &height);
@@ -226,13 +235,17 @@ void GlfwDisplay::onBeginFrame()
 void GlfwDisplay::onEndFrame()
 {
     mCommandBuffer->presentDrawable(drawable);
+
+    dispatch_semaphore_t sem = _semaphore;
+    mCommandBuffer->addCompletedHandler(^void(MTL::CommandBuffer* cb) {
+        dispatch_semaphore_signal(sem);
+    });
+
     mCommandBuffer->commit();
 
     mRenderEncoder->release();
     mCommandBuffer->release();
     drawable->release();
-
-    glfwSwapBuffers(mWindow);
 }
 
 void GlfwDisplay::drawUI()

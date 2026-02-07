@@ -1391,7 +1391,6 @@ void OptiXRender::render(Buffer* output)
         OPTIX_CHECK(optixLaunch(mState.pipeline, mState.stream, mState.mParamsBuffer->getPtr(), sizeof(Params),
                                 &mState.sbt, width, height,
                                 /*depth=*/1));
-        CUDA_SYNC_CHECK();
 
         // Update subframe index for accumulation
         getSharedContext().mSubframeIndex =
