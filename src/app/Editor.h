@@ -638,30 +638,19 @@ public:
                 // Playback controls
                 if (ImGui::CollapsingHeader("Playback", ImGuiTreeNodeFlags_DefaultOpen))
                 {
-                    float speed = m_settingsManager->getAs<float>("render/animation/speed");
-                    ImGui::SliderFloat("Speed", &speed, 0.0f, 5.0f, "%.2fx");
-                    m_settingsManager->setAs<float>("render/animation/speed", speed);
+                    // Check if any animation is playing
+                    bool anyPlaying = false;
+                    for (int i = 0; i < (int)animations.size(); ++i)
+                    {
+                        std::string key = "render/animation/anim" + std::to_string(i) + "/state";
+                        anyPlaying |= m_settingsManager->getAs<bool>(key.c_str());
+                    }
 
-                    // Play All / Stop All buttons
-                    if (ImGui::Button("Play All"))
-                    {
-                        for (int i = 0; i < (int)animations.size(); ++i)
-                        {
-                            std::string key = "render/animation/anim" + std::to_string(i) + "/state";
-                            m_settingsManager->setAs<bool>(key.c_str(), true);
-                        }
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Stop All"))
-                    {
-                        for (int i = 0; i < (int)animations.size(); ++i)
-                        {
-                            std::string key = "render/animation/anim" + std::to_string(i) + "/state";
-                            m_settingsManager->setAs<bool>(key.c_str(), false);
-                        }
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Reset All"))
+                    // Transport bar: |<  <  Play/Pause  >  >|
+                    constexpr float frameDuration = 1.0f / 24.0f;
+
+                    // |< Reset to start
+                    if (ImGui::Button("|<"))
                     {
                         for (int i = 0; i < (int)animations.size(); ++i)
                         {
@@ -669,6 +658,80 @@ public:
                             m_settingsManager->setAs<float>(key.c_str(), animations[i].start);
                         }
                     }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset to start");
+
+                    ImGui::SameLine();
+
+                    // < Step back one frame
+                    if (ImGui::Button("<"))
+                    {
+                        for (int i = 0; i < (int)animations.size(); ++i)
+                        {
+                            std::string timeKey = "render/animation/anim" + std::to_string(i) + "/time";
+                            float t = m_settingsManager->getAs<float>(timeKey.c_str());
+                            t = std::max(t - frameDuration, animations[i].start);
+                            m_settingsManager->setAs<float>(timeKey.c_str(), t);
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Previous frame (1/24s)");
+
+                    ImGui::SameLine();
+
+                    // Play / Pause toggle
+                    if (anyPlaying)
+                    {
+                        if (ImGui::Button("Pause"))
+                        {
+                            for (int i = 0; i < (int)animations.size(); ++i)
+                            {
+                                std::string key = "render/animation/anim" + std::to_string(i) + "/state";
+                                m_settingsManager->setAs<bool>(key.c_str(), false);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (ImGui::Button(" Play"))
+                        {
+                            for (int i = 0; i < (int)animations.size(); ++i)
+                            {
+                                std::string key = "render/animation/anim" + std::to_string(i) + "/state";
+                                m_settingsManager->setAs<bool>(key.c_str(), true);
+                            }
+                        }
+                    }
+
+                    ImGui::SameLine();
+
+                    // > Step forward one frame
+                    if (ImGui::Button(">"))
+                    {
+                        for (int i = 0; i < (int)animations.size(); ++i)
+                        {
+                            std::string timeKey = "render/animation/anim" + std::to_string(i) + "/time";
+                            float t = m_settingsManager->getAs<float>(timeKey.c_str());
+                            t = std::min(t + frameDuration, animations[i].end);
+                            m_settingsManager->setAs<float>(timeKey.c_str(), t);
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Next frame (1/24s)");
+
+                    ImGui::SameLine();
+
+                    // >| Jump to end
+                    if (ImGui::Button(">|"))
+                    {
+                        for (int i = 0; i < (int)animations.size(); ++i)
+                        {
+                            std::string key = "render/animation/anim" + std::to_string(i) + "/time";
+                            m_settingsManager->setAs<float>(key.c_str(), animations[i].end);
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Jump to end");
+
+                    float speed = m_settingsManager->getAs<float>("render/animation/speed");
+                    ImGui::SliderFloat("Speed", &speed, 0.0f, 5.0f, "%.2fx");
+                    m_settingsManager->setAs<float>("render/animation/speed", speed);
                 }
 
                 // Motion blur
