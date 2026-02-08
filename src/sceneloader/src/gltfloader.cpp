@@ -735,19 +735,64 @@ void loadSkeletalData(const tinygltf::Model& model, oka::Scene& scene, const flo
 oka::Scene::UniformLightDesc parseFromJson(const json& light)
 {
     oka::Scene::UniformLightDesc desc{};
-
-    const auto position = light["position"];
-    desc.position = glm::float3(position[0], position[1], position[2]);
-    const auto orientation = light["orientation"];
-    desc.orientation = glm::float3(orientation[0], orientation[1], orientation[2]);
-    desc.width = float(light["width"]);
-    desc.height = light["height"];
-    const auto color = light["color"];
-    desc.color = glm::float3(color[0], color[1], color[2]);
-    desc.intensity = float(light["intensity"]);
-
     desc.useXform = false;
-    desc.type = LIGHT_TYPE_RECT;
+
+    // Determine light type
+    std::string typeStr = "rect";
+    if (light.contains("type"))
+        typeStr = light["type"].get<std::string>();
+
+    if (light.contains("orientation"))
+    {
+        const auto& o = light["orientation"];
+        desc.orientation = glm::float3(o[0], o[1], o[2]);
+    }
+    if (light.contains("color"))
+    {
+        const auto& c = light["color"];
+        desc.color = glm::float3(c[0], c[1], c[2]);
+    }
+    if (light.contains("intensity"))
+        desc.intensity = light["intensity"].get<float>();
+
+    if (typeStr == "distant")
+    {
+        desc.type = LIGHT_TYPE_DISTANT;
+        desc.halfAngle = light.value("halfAngle", 0.53f) * 0.5f * (M_PI / 180.0f);
+    }
+    else if (typeStr == "sphere")
+    {
+        desc.type = LIGHT_TYPE_SPHERE;
+        if (light.contains("position"))
+        {
+            const auto& p = light["position"];
+            desc.position = glm::float3(p[0], p[1], p[2]);
+        }
+        desc.radius = light.value("radius", 0.1f);
+    }
+    else if (typeStr == "disc")
+    {
+        desc.type = LIGHT_TYPE_DISC;
+        if (light.contains("position"))
+        {
+            const auto& p = light["position"];
+            desc.position = glm::float3(p[0], p[1], p[2]);
+        }
+        desc.radius = light.value("radius", 0.5f);
+    }
+    else
+    {
+        // Default: rect light
+        desc.type = LIGHT_TYPE_RECT;
+        if (light.contains("position"))
+        {
+            const auto& p = light["position"];
+            desc.position = glm::float3(p[0], p[1], p[2]);
+        }
+        desc.width = light.value("width", 1.0f);
+        desc.height = light.value("height", 1.0f);
+    }
+
     return desc;
 }
 
