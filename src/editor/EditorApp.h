@@ -51,6 +51,8 @@ private:
     std::string m_sceneFile;
     std::string m_resourceSearchPath;
 
+    std::string m_pendingScreenshotPath;
+
 public:
     EditorApp(const std::string& sceneFile, const std::string& resourceSearchPath);
     ~EditorApp() = default;
@@ -75,6 +77,9 @@ public:
     void drawRenderSettingsPanel();
     void drawAnimationPanel();
     void drawPropertyPanel(uint32_t lightId);
+
+    // Screenshot
+    void saveScreenshot(Buffer* buf, const std::string& path);
 
     void showGizmo(Camera& cam, float* matrix, ImGuizmo::OPERATION operation);
 };

@@ -1,6 +1,9 @@
 #include "../EditorApp.h"
 
 #include "imgui.h"
+#include "ImGuiFileDialog.h"
+
+#include <ctime>
 
 namespace oka
 {
@@ -182,9 +185,19 @@ void EditorApp::drawRenderSettingsPanel()
         ImGui::TreePop();
     }
 
-    if (ImGui::Button("Capture Screen"))
+    if (ImGui::Button("Save Screenshot"))
     {
-        m_settingsManager->setAs<bool>("render/pt/needScreenshot", true);
+        // Generate default filename with timestamp
+        std::time_t now = std::time(nullptr);
+        std::tm* tm = std::localtime(&now);
+        char defaultName[64];
+        std::strftime(defaultName, sizeof(defaultName), "screenshot_%Y%m%d_%H%M%S.exr", tm);
+
+        IGFD::FileDialogConfig config;
+        config.path = ".";
+        config.fileName = defaultName;
+        ImGuiFileDialog::Instance()->OpenDialog(
+            "SaveScreenshotDlgKey", "Save Screenshot", ".exr,.png", config);
     }
 
     auto cameraSpeed = m_settingsManager->getAs<float>("render/cameraSpeed");

@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <limits>
 #include <cmath>
+#include <ctime>
+
+#include <tinyexr.h>
+#include <stb_image_write.h>
 
 namespace oka
 {
@@ -116,8 +120,6 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<bool>("render/pt/enableAcc", true);
     m_settingsManager->setAs<bool>("render/pt/enableTonemap", true);
     m_settingsManager->setAs<bool>("render/pt/isResized", false);
-    m_settingsManager->setAs<bool>("render/pt/needScreenshot", false);
-    m_settingsManager->setAs<bool>("render/pt/screenshotSPP", false);
     m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/misHeuristic", 0); // 0 = balance, 1 = power
     m_settingsManager->setAs<uint32_t>("render/pt/samplerType", 0); // 0 - Halton, 1 - PCG
@@ -275,6 +277,14 @@ void EditorApp::run()
         }
 
         drawUI();
+
+        // Process pending screenshot save
+        if (!m_pendingScreenshotPath.empty() && readyBuf)
+        {
+            saveScreenshot(readyBuf, m_pendingScreenshotPath);
+            m_pendingScreenshotPath.clear();
+        }
+
         m_display->drawUI();
         m_display->onEndFrame();
 
@@ -310,6 +320,57 @@ void EditorApp::playAnimations(const float deltaTime)
             if (currAnimTime < currAnimStart) currAnimTime = currAnimStart;
             m_settingsManager->setAs<float>(key, currAnimTime);
         }
+    }
+}
+
+void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
+{
+    const uint32_t w = buf->width();
+    const uint32_t h = buf->height();
+    const float* data = static_cast<const float*>(buf->getHostPointer());
+
+    auto dotPos = path.find_last_of('.');
+    std::string ext = (dotPos != std::string::npos) ? path.substr(dotPos) : "";
+
+    if (ext == ".exr")
+    {
+        const char* err = nullptr;
+        int ret = SaveEXR(data, w, h, 4, 0, path.c_str(), &err);
+        if (ret != TINYEXR_SUCCESS)
+        {
+            STRELKA_ERROR("Failed to save EXR: {}", err ? err : "unknown");
+            if (err)
+                FreeEXRErrorMessage(err);
+        }
+        else
+        {
+            STRELKA_INFO("Screenshot saved: {}", path);
+        }
+    }
+    else if (ext == ".png")
+    {
+        std::vector<uint8_t> pixels(w * h * 4);
+        for (uint32_t i = 0; i < w * h; ++i)
+        {
+            for (int c = 0; c < 4; ++c)
+            {
+                float v = std::max(0.0f, std::min(1.0f, data[i * 4 + c]));
+                pixels[i * 4 + c] = static_cast<uint8_t>(v * 255.0f + 0.5f);
+            }
+        }
+        int ret = stbi_write_png(path.c_str(), w, h, 4, pixels.data(), w * 4);
+        if (!ret)
+        {
+            STRELKA_ERROR("Failed to save PNG: {}", path);
+        }
+        else
+        {
+            STRELKA_INFO("Screenshot saved: {}", path);
+        }
+    }
+    else
+    {
+        STRELKA_ERROR("Unsupported screenshot format: {}", ext);
     }
 }
 
@@ -369,6 +430,16 @@ void EditorApp::drawUI()
         }
 
         // close
+        ImGuiFileDialog::Instance()->Close();
+    }
+
+    // --- Save screenshot dialog handling ---
+    if (ImGuiFileDialog::Instance()->Display("SaveScreenshotDlgKey"))
+    {
+        if (ImGuiFileDialog::Instance()->IsOk())
+        {
+            m_pendingScreenshotPath = ImGuiFileDialog::Instance()->GetFilePathName();
+        }
         ImGuiFileDialog::Instance()->Close();
     }
 
