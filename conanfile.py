@@ -20,8 +20,8 @@ class StrelkaRecipe(ConanFile):
         self.requires("stb/cci.20230920")
 
         # Editor (conditional via options)
-        self.requires("imgui/1.90.5-docking", override=True)
-        self.requires("glfw/3.3.8")
+        self.requires("imgui/1.92.5-docking", override=True)
+        self.requires("glfw/3.4")
         self.requires("imguizmo/cci.20231114")
         self.requires("glad/0.1.36")       # Linux/Win only
         self.requires("cxxopts/3.1.1")

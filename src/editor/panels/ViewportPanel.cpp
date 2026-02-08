@@ -42,7 +42,7 @@ void EditorApp::drawViewportPanel()
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
 
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + verticalPadding);
-        ImGui::ImageButton(m_display->getDisplayNativeTexure(), viewportSize);
+        ImGui::ImageButton("##viewport", (ImTextureID)m_display->getDisplayNativeTexure(), viewportSize);
 
         ImGuizmo::SetOrthographic(false);
         ImGuizmo::SetDrawlist();

@@ -326,7 +326,7 @@ void EditorApp::drawUI()
     ImGuiIO& io = ImGui::GetIO();
     (void)io;
 
-    ImGui::DockSpaceOverViewport(ImGui::GetMainViewport());
+    ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
 
     // --- Main menu bar ---
     ImGui::BeginMainMenuBar();
