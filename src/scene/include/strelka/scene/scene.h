@@ -2,6 +2,7 @@
 
 #include "camera.h"
 #include <strelka/material/material_params.h>
+#include <light_types.h>
 
 #include <cstdint>
 #include <mutex>

@@ -1,4 +1,5 @@
 #include <strelka/scene/scene.h>
+#include <strelka/scene/vertex_packing.h>
 
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -165,15 +166,7 @@ glm::float4 Scene::makeFloat4FromQuat(const glm::quat &q)
     return glm::float4(q.x, q.y, q.z, q.w);
 }
 
-//  valid range of coordinates [-1; 1]
-const uint32_t packNormals(const glm::float3& normal)
-{
-    constexpr float scale = 256.0f;
-    auto x = (uint32_t)((normal.x + 1.0f) * scale);
-    auto y = (uint32_t)((normal.y + 1.0f) * scale);
-    auto z = (uint32_t)((normal.z + 1.0f) * scale);
-    return (z << 20) | (y << 10) | x;
-}
+// packNormal() provided by <strelka/scene/vertex_packing.h>
 
 glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationChannel::PathType targetProperty, const float time)
 {
@@ -257,7 +250,7 @@ void Scene::applySkinning()
                                       + v_weight[2] * jointMat[v_joint[2]]
                                       + v_weight[3] * jointMat[v_joint[3]];
                     mVertices[vbOffset + iv].pos = skinMat * glm::vec4(mVerticesSkinData[sbOffset + iv].pos, 1.0);
-                    mVertices[vbOffset + iv].normal = packNormals(glm::normalize(glm::vec3(glm::mat3(skinMat) * glm::vec4(mVerticesSkinData[sbOffset + iv].normal, 1.0))));
+                    mVertices[vbOffset + iv].normal = packNormal(glm::normalize(glm::vec3(glm::mat3(skinMat) * glm::vec4(mVerticesSkinData[sbOffset + iv].normal, 1.0))));
                 }
             }
         }
@@ -405,7 +398,7 @@ uint32_t Scene::createRectLightMesh()
     v3.pos = glm::float4(-0.5f, -0.5f, 0.0f, 1.0f); // bottom left 2
     v4.pos = glm::float4(0.5f, -0.5f, 0.0f, 1.0f); // bottom right 3
     glm::float3 normal = glm::float3(0.f, 0.f, 1.f);
-    v1.normal = v2.normal = v3.normal = v4.normal = packNormals(normal);
+    v1.normal = v2.normal = v3.normal = v4.normal = packNormal(normal);
     std::vector<uint32_t> ib = { 0, 1, 2, 2, 3, 0 };
     vb.push_back(v1);
     vb.push_back(v2);
@@ -450,7 +443,7 @@ uint32_t Scene::createSphereLightMesh()
             glm::float3 pos = { radius * x, radius * y, radius * z };
             glm::float3 normal = { x, y, z };
 
-            vertices.push_back(Scene::Vertex{ pos, 0, packNormals(normal) });
+            vertices.push_back(Scene::Vertex{ pos, 0, packNormal(normal) });
         }
     }
     // Generate indices
@@ -493,7 +486,7 @@ uint32_t Scene::createDiscLightMesh()
     v2.pos = glm::float4(1.0f, 0.f, 0.f, 1.f);
 
     glm::float3 normal = glm::float3(0.f, 0.f, 1.f);
-    v1.normal = v2.normal = packNormals(normal);
+    v1.normal = v2.normal = packNormal(normal);
 
     vertices.push_back(v1); // central point
     vertices.push_back(v2); // first point
@@ -512,7 +505,7 @@ uint32_t Scene::createDiscLightMesh()
 
         Scene::Vertex v;
         v.pos = glm::float4(x, y, 0.0f, 1.0f);
-        v.normal = packNormals(normal);
+        v.normal = packNormal(normal);
         vertices.push_back(v);
 
         indices.push_back(vertices.size() - 1); // added vertex
@@ -639,9 +632,9 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].points[2] = localTransform * glm::float4(-0.5f, -0.5f, 0.0f, 1.0f);
         mLights[lightId].points[3] = localTransform * glm::float4(0.5f, -0.5f, 0.0f, 1.0f);
 
-        mLights[lightId].type = 0;
+        mLights[lightId].type = LIGHT_TYPE_RECT;
     }
-    else if (desc.type == 1)
+    else if (desc.type == LIGHT_TYPE_DISC)
     {
         // Disk Light
         const glm::float4x4 scaleMatrix =
@@ -655,9 +648,9 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
 
         glm::float4 normal = localTransform * glm::float4(0, 0, 1.f, 0.0f);
         mLights[lightId].normal = normal;
-        mLights[lightId].type = 1;
+        mLights[lightId].type = LIGHT_TYPE_DISC;
     }
-    else if (desc.type == 2)
+    else if (desc.type == LIGHT_TYPE_SPHERE)
     {
         // Sphere Light
         const glm::float4x4 scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(1.0f, 1.0f, 1.0f));
@@ -666,12 +659,12 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].points[0] = glm::float4(desc.radius, 0.f, 0.f, 0.f); // save radius
         mLights[lightId].points[1] = localTransform * glm::float4(0.f, 0.f, 0.f, 1.f); // save O
 
-        mLights[lightId].type = 2;
+        mLights[lightId].type = LIGHT_TYPE_SPHERE;
     }
-    else if (desc.type == 3)
+    else if (desc.type == LIGHT_TYPE_DISTANT)
     {
         // distant light https://openusd.org/release/api/class_usd_lux_distant_light.html
-        mLights[lightId].type = 3;
+        mLights[lightId].type = LIGHT_TYPE_DISTANT;
         mLights[lightId].halfAngle = desc.halfAngle;
         const glm::float4x4 scaleMatrix = glm::float4x4(1.0f);
         const glm::float4x4 localTransform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);

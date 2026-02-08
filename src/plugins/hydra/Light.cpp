@@ -164,7 +164,7 @@ void HdStrelkaLight::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderP
 
     if (mLightType == HdPrimTypeTokens->rectLight)
     {
-        mLightDesc.type = 0;
+        mLightDesc.type = LIGHT_TYPE_RECT;
         float width = 0.0f;
         float height = 0.0f;
 
@@ -184,7 +184,7 @@ void HdStrelkaLight::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderP
     }
     else if (mLightType == HdPrimTypeTokens->diskLight || mLightType == HdPrimTypeTokens->sphereLight)
     {
-        mLightDesc.type = mLightType == HdPrimTypeTokens->diskLight ? 1 : 2;
+        mLightDesc.type = mLightType == HdPrimTypeTokens->diskLight ? LIGHT_TYPE_DISC : LIGHT_TYPE_SPHERE;
         float radius = 0.0;
         VtValue radiusVal = sceneDelegate->GetLightParamValue(id, HdLightTokens->radius);
         if (radiusVal.IsHolding<float>())
@@ -196,7 +196,7 @@ void HdStrelkaLight::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderP
     else if (mLightType == HdPrimTypeTokens->distantLight)
     {
         float angle = 0.0f;
-        mLightDesc.type = 3; // TODO: move to enum
+        mLightDesc.type = LIGHT_TYPE_DISTANT;
         VtValue angleVal = sceneDelegate->GetLightParamValue(id, HdLightTokens->angle);
         if (angleVal.IsHolding<float>())
         {

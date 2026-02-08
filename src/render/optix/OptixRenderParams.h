@@ -62,6 +62,10 @@ struct Params
     OptixTraversableHandle handle;
     SceneData scene;
 
+    // Material data (indexed by materialId)
+    MaterialParams* materials;
+    cudaTextureObject_t* materialTextures; // flat array: [materialId * MAX_MATERIAL_TEXTURES + slot]
+
     bool enableAccumulation;
     // developers settings:
     bool enableMotionBlur;
@@ -69,6 +73,7 @@ struct Params
     uint32_t debug;
     float shadowRayTmin;
     float materialRayTmin;
+    uint32_t misHeuristic; // 0 = balance, 1 = power
 };
 
 enum class EventType: uint8_t
@@ -113,14 +118,13 @@ struct MissData
     float3 bg_color;
 };
 
+static constexpr int MAX_MATERIAL_TEXTURES = 6;
+
 struct HitGroupData
 {
     int32_t indexOffset;
     int32_t indexCount;
     int32_t vertexOffset;
-    int32_t lightId; // only for lights. -1 for others
-    MaterialParams materialParams;
-    cudaTextureObject_t* textures; // array of texture objects
-    float4 world_to_object[4] = {};
-    float4 object_to_world[4] = {};
+    int32_t lightId;     // only for lights. -1 for others
+    int32_t materialId;  // index into params.materials[] and params.materialTextures[]
 };

@@ -76,11 +76,10 @@ private:
         OptixInstance instance;
     };
 
-    // Per-material GPU data
+    // Per-material data (host-side; GPU data uploaded to shared device buffers)
     struct Material
     {
-        MaterialParams params;          // Resolved material parameters (with texture indices set)
-        CUdeviceptr d_textures = 0;     // Device pointer to cudaTextureObject_t array
+        MaterialParams params; // Resolved material parameters (with texture indices set)
     };
 
     struct View
@@ -107,10 +106,19 @@ private:
     bool mEnableValidation;
     bool mEnableMotionBlur;
 
+    // Previous-frame settings for change detection (replaces static locals in render())
+    uint32_t mPrevRectLightSamplingMethod = 0;
+    bool mPrevEnableAccumulation = false;
+    uint32_t mPrevSspTotal = 0;
+
+    // Device buffers for per-material data (indexed by materialId)
+    std::unique_ptr<OptixBuffer> mMaterialParamsBuffer; // MaterialParams[] on device
+    uint32_t mMaterialCount = 0;
+
     void allocJointMatrices();
-    Mesh* createMesh(const oka::Mesh& mesh);
+    std::unique_ptr<Mesh> createMesh(const oka::Mesh& mesh);
     void updateMesh(const oka::Mesh& mesh, int optixMeshesId);
-    Curve* createCurve(const oka::Curve& curve);
+    std::unique_ptr<Curve> createCurve(const oka::Curve& curve);
     bool compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes);
 
     std::vector<std::unique_ptr<Mesh>> mOptixMeshes;
@@ -172,6 +180,8 @@ public:
     void updateBottomLevelAccelerationStructures();
     void createTopLevelAccelerationStructure();
     void updateTopLevelAccelerationStructure();
+    void resolveInstanceGeometry(OptixInstance& oi, const oka::Instance& instance) const;
+    void uploadInstancesToDevice(const std::vector<OptixInstance>& optixInstances);
     void createModule();
     void createProgramGroups();
     void createPipeline();

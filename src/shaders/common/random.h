@@ -5,7 +5,7 @@
 // https://github.com/mmp/pbrt-v4/blob/5acc5e46cf4b5c3382babd6a3b93b87f54d79b0a/src/pbrt/util/float.h#L46C1-L47C1
 static constexpr float FloatOneMinusEpsilon = 0x1.fffffep-1;
 
-__device__ const unsigned int primeNumbers[32] = {
+__constant__ const unsigned int primeNumbers[32] = {
     2,  3,  5,  7,  11, 13, 17, 19, 23, 29,  31,  37,  41,  43,  47,  53,
     59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131,
 };
@@ -137,7 +137,7 @@ static __device__ SamplerState initSampler(uint32_t pixelX, uint32_t pixelY, uin
     return sampler;
 }
 
-__device__ const uint32_t sb_matrix[5][32] = {
+__constant__ const uint32_t sb_matrix[5][32] = {
     0x80000000, 0x40000000, 0x20000000, 0x10000000, 0x08000000, 0x04000000, 0x02000000, 0x01000000,
     0x00800000, 0x00400000, 0x00200000, 0x00100000, 0x00080000, 0x00040000, 0x00020000, 0x00010000,
     0x00008000, 0x00004000, 0x00002000, 0x00001000, 0x00000800, 0x00000400, 0x00000200, 0x00000100,
@@ -167,10 +167,9 @@ __device__ const uint32_t sb_matrix[5][32] = {
 __device__ __inline__ uint32_t sobol_uint(uint32_t index, uint32_t dim)
 {
     uint32_t X = 0;
-    for (int bit = 0; bit < 32; bit++)
+    for (int bit = 0; index != 0; ++bit, index >>= 1)
     {
-        int mask = (index >> bit) & 1;
-        X ^= mask * sb_matrix[dim][bit];
+        X ^= (index & 1) * sb_matrix[dim][bit];
     }
     return X;
 }

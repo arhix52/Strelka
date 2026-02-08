@@ -15,6 +15,7 @@ add_library(strelka_scene STATIC ${SCENE_SOURCES})
 target_include_directories(strelka_scene
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src/shaders/common
 )
 
 target_link_libraries(strelka_scene

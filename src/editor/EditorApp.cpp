@@ -119,6 +119,7 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<bool>("render/pt/needScreenshot", false);
     m_settingsManager->setAs<bool>("render/pt/screenshotSPP", false);
     m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
+    m_settingsManager->setAs<uint32_t>("render/pt/misHeuristic", 0); // 0 = balance, 1 = power
     m_settingsManager->setAs<uint32_t>("render/pt/samplerType", 0); // 0 - Halton, 1 - PCG
     m_settingsManager->setAs<bool>("render/enableValidation", false);
     m_settingsManager->setAs<uint32_t>("render/selectedCamera", 0);

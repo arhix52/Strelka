@@ -1,6 +1,7 @@
 #include <strelka/sceneloader/gltfloader.h>
 
 #include <strelka/scene/camera.h>
+#include <strelka/scene/vertex_packing.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -25,41 +26,8 @@ using json = nlohmann::json;
 namespace oka
 {
 
-//  valid range of coordinates [-10; 10]
-uint32_t packUV(const glm::float2& uv)
-{
-    int32_t packed = (uint32_t)((uv.x + 10.0f) / 20.0f * 16383.99999f);
-    packed += (uint32_t)((uv.y + 10.0f) / 20.0f * 16383.99999f) << 16;
-    return packed;
-}
-
-//  valid range of coordinates [-1; 1]
-static uint32_t packNormal(const glm::float3& normal)
-{
-    constexpr float scale = 256.0f;
-    auto x = (uint32_t)((normal.x + 1.0f) * scale);
-    auto y = (uint32_t)((normal.y + 1.0f) * scale);
-    auto z = (uint32_t)((normal.z + 1.0f) * scale);
-    return (z << 20) | (y << 10) | x;
-}
-
-//  valid range of coordinates [-10; 10]
-uint32_t packTangent(const glm::float3& tangent)
-{
-    auto packed = (uint32_t)((tangent.x + 10.0f) / 20.0f * 511.99999f);
-    packed += (uint32_t)((tangent.y + 10.0f) / 20.0f * 511.99999f) << 10;
-    packed += (uint32_t)((tangent.z + 10.0f) / 20.0f * 511.99999f) << 20;
-    return packed;
-}
-
-glm::float2 unpackUV(uint32_t val)
-{
-    glm::float2 uv;
-    uv.y = ((val & 0xffff0000) >> 16) / 16383.99999f * 10.0f - 5.0f;
-    uv.x = (val & 0x0000ffff) / 16383.99999f * 10.0f - 5.0f;
-
-    return uv;
-}
+// packNormal(), packUV(), unpackNormal(), unpackUV() provided by <strelka/scene/vertex_packing.h>
+// packTangent uses same format as packNormal (tangents are unit vectors in [-1,1])
 
 void computeTangent(std::vector<Scene::Vertex>& vertices,
                                  const std::vector<uint32_t>& indices)
@@ -86,7 +54,7 @@ void computeTangent(std::vector<Scene::Vertex>& vertices,
         tangent = (deltaPos1 * deltaUV2.y - deltaPos2 * deltaUV1.y) * r;
     }
 
-    glm::uint32_t packedTangent = packTangent(tangent);
+    glm::uint32_t packedTangent = packNormal(tangent);
 
     v0.tangent = packedTangent;
     v1.tangent = packedTangent;
@@ -779,7 +747,7 @@ oka::Scene::UniformLightDesc parseFromJson(const json& light)
     desc.intensity = float(light["intensity"]);
 
     desc.useXform = false;
-    desc.type = 0;
+    desc.type = LIGHT_TYPE_RECT;
     return desc;
 }
 
@@ -856,7 +824,7 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
         lightDesc.useXform = false;
         lightDesc.position = glm::float3(0.0f, 0.0f, 0.0f);
         lightDesc.orientation = glm::float3(-45.0f, 15.0f, 0.0f);
-        lightDesc.type = 3; // distant light
+        lightDesc.type = LIGHT_TYPE_DISTANT;
         lightDesc.halfAngle = 10.0f * 0.5f * (M_PI / 180.0f);
         lightDesc.intensity = 100000;
         lightDesc.color = glm::float3(1.0);

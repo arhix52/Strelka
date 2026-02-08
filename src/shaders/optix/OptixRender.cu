@@ -9,30 +9,11 @@
 
 #include <postprocessing/Utils.h>
 
+#include "optix_device_utils.h"
+
 extern "C"
 {
     __constant__ Params params;
-}
-
-static __forceinline__ __device__ void* unpackPointer(unsigned int i0, unsigned int i1)
-{
-    const unsigned long long uptr = static_cast<unsigned long long>(i0) << 32 | i1;
-    void* ptr = reinterpret_cast<void*>(uptr);
-    return ptr;
-}
-
-static __forceinline__ __device__ void packPointer(void* ptr, unsigned int& i0, unsigned int& i1)
-{
-    const unsigned long long uptr = reinterpret_cast<unsigned long long>(ptr);
-    i0 = uptr >> 32;
-    i1 = uptr & 0x00000000ffffffff;
-}
-
-static __forceinline__ __device__ PerRayData* getPRD()
-{
-    const unsigned int u0 = optixGetPayload_0();
-    const unsigned int u1 = optixGetPayload_1();
-    return reinterpret_cast<PerRayData*>(unpackPointer(u0, u1));
 }
 
 __device__ void generateCameraRay(
@@ -136,12 +117,13 @@ extern "C" __global__ void __raygen__rg()
 
             if (prd.depth > 3)
             {
-                const float p = max(prd.throughput.x, max(prd.throughput.y, prd.throughput.z));
+                const float lum = dot(prd.throughput, make_float3(0.2126f, 0.7152f, 0.0722f));
+                const float p = clamp(lum, 0.05f, 0.95f);
                 if (random<SampleDimension::eRussianRoulette>(prd.sampler) > p)
                 {
                     break;
                 }
-                prd.throughput *= 1.0f / (p + 1e-5f);
+                prd.throughput *= 1.0f / p;
             }
 
             if (dot(prd.throughput, prd.throughput) < 1e-5f)
@@ -243,72 +225,6 @@ extern "C" __global__ void __miss__ms()
     prd->depth = params.max_depth;
 }
 
-__device__ float3 interpolateAttrib(const float3 attr1,
-                                         const float3 attr2,
-                                         const float3 attr3,
-                                         const float2 bary)
-{
-    return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
-}
-
-//  valid range of coordinates [-1; 1]
-static __forceinline__ __device__ float3 unpackNormal(uint32_t val)
-{
-    constexpr float scale = 1.0f / 256.0f;
-    float3 normal;
-    normal.z = ((val & 0xfff00000) >> 20) * scale - 1.0f;
-    normal.y = ((val & 0x000ffc00) >> 10) * scale - 1.0f;
-    normal.x = (val & 0x000003ff) * scale - 1.0f;
-    return normal;
-}
-
-extern "C" __global__ void __closesthit__ch()
-{
-    PerRayData* prd = getPRD();
-
-    const float2 barycentrics = optixGetTriangleBarycentrics();
-    const unsigned int primitiveId = optixGetPrimitiveIndex();
-
-    HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
-
-    const uint32_t i0 = params.scene.ib[(hit_data->indexOffset + primitiveId * 3 + 0)];
-    const uint32_t i1 = params.scene.ib[(hit_data->indexOffset + primitiveId * 3 + 1)];
-    const uint32_t i2 = params.scene.ib[(hit_data->indexOffset + primitiveId * 3 + 2)];
-
-    const uint32_t baseVbOffset = hit_data->vertexOffset;
-
-    float3 N0;
-    float3 N1;
-    float3 N2;
-
-    if (params.enableMotionBlur) 
-    {
-        float3 N0_0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normal);
-        float3 N1_0 = unpackNormal(params.scene.vb[baseVbOffset + i1].normal);
-        float3 N2_0 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
-
-        float3 N0_1 = unpackNormal(params.scene.vb_prev[baseVbOffset + i0].normal);
-        float3 N1_1 = unpackNormal(params.scene.vb_prev[baseVbOffset + i1].normal);
-        float3 N2_1 = unpackNormal(params.scene.vb_prev[baseVbOffset + i2].normal);
-
-        const float t = optixGetRayTime();
-        N0 = lerp(N0_0, N0_1, t);
-        N1 = lerp(N1_0, N1_1, t);
-        N2 = lerp(N2_0, N2_1, t);
-    }
-    else
-    {
-        N0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normal);
-        N1 = unpackNormal(params.scene.vb[baseVbOffset + i1].normal);
-        N2 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
-    }
-
-    float3 object_normal = normalize(interpolateAttrib(N0, N1, N2, barycentrics));
-
-    float3 res = (object_normal + make_float3(1.0f)) * 0.5f;
-    prd->radiance = make_float3(res.x, res.y, res.z);
-}
-
 static __forceinline__ __device__ void setPayloadOcclusion(bool occluded)
 {
     optixSetPayload_0(static_cast<unsigned int>(occluded));
@@ -337,7 +253,7 @@ extern "C" __global__ void __closesthit__light()
         else
         {
             float lightPdf = getLightPdf(currLight, hitPoint, optixGetWorldRayOrigin()) / (params.scene.numLights);
-            const float misWeight = misWeightBalance(prd->lastBsdfPdf, lightPdf);
+            const float misWeight = computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
             prd->radiance += prd->throughput * make_float3(currLight.color) * -dot(rayDir, lightNormal) * misWeight;
         }
     }

@@ -1,6 +1,7 @@
 #pragma once
 #include <vector_types.h>
 #include <sutil/vec_math.h>
+#include <light_types.h>
 
 struct UniformLight
 {
@@ -30,21 +31,33 @@ __forceinline__ __device__ float misWeightBalance(const float a, const float b)
     return 1.0f / ( 1.0f + (b / a) );
 }
 
+__forceinline__ __device__ float misWeightPower(const float a, const float b)
+{
+    const float a2 = a * a;
+    return a2 / (a2 + b * b);
+}
+
+// Dispatch: 0 = balance heuristic, 1 = power heuristic
+__forceinline__ __device__ float computeMisWeight(const float a, const float b, const uint32_t heuristic)
+{
+    return (heuristic == 1) ? misWeightPower(a, b) : misWeightBalance(a, b);
+}
+
 static __inline__ __device__ float calcLightArea(const UniformLight& l)
 {
     float area = 0.0f;
 
-    if (l.type == 0) // rectangle area
+    if (l.type == LIGHT_TYPE_RECT)
     {
         float3 e1 = make_float3(l.points[1]) - make_float3(l.points[0]);
         float3 e2 = make_float3(l.points[3]) - make_float3(l.points[0]);
         area = length(cross(e1, e2));
     }
-    else if (l.type == 1) // disc area
+    else if (l.type == LIGHT_TYPE_DISC)
     {
         area = M_PIf * l.points[0].x * l.points[0].x; // pi * radius^2
     }
-    else if (l.type == 2) // sphere area
+    else if (l.type == LIGHT_TYPE_SPHERE)
     {
         area = 4.0f * M_PIf * l.points[0].x * l.points[0].x; // 4 * pi * radius^2
     }
@@ -55,18 +68,18 @@ static __inline__ __device__ float3 calcLightNormal(const UniformLight& l, const
 {
     float3 norm = make_float3(0.0f);
 
-    if (l.type == 0)
+    if (l.type == LIGHT_TYPE_RECT)
     {
         float3 e1 = make_float3(l.points[1]) - make_float3(l.points[0]);
         float3 e2 = make_float3(l.points[3]) - make_float3(l.points[0]);
 
         norm = -normalize(cross(e1, e2));
     }
-    else if (l.type == 1)
+    else if (l.type == LIGHT_TYPE_DISC)
     {
         norm = make_float3(l.normal);
     }
-    else if (l.type == 2)
+    else if (l.type == LIGHT_TYPE_SPHERE)
     {
         norm = normalize(hitPoint - make_float3(l.points[1]));
     }
@@ -224,18 +237,12 @@ static __inline__ __device__ float getLightPdf(const UniformLight& l,
 {
     switch (l.type)
     {
-    case 0:
-        // Rect
+    case LIGHT_TYPE_RECT:
         return getRectLightPdf(l, lightHitPoint, surfaceHitPoint);
-        break;
-    case 2:
-        // sphere
+    case LIGHT_TYPE_SPHERE:
         return getSphereLightPdf();
-        break;
-    case 3:
-        // Distant
+    case LIGHT_TYPE_DISTANT:
         return getDirectLightPdf(l.halfAngle);
-        break;
     default:
         break;
     }
