@@ -13,14 +13,16 @@ void EditorApp::drawAnimationPanel()
 
         if (!animations.empty())
         {
+            char key[64];
+
             // Playback controls
             if (ImGui::CollapsingHeader("Playback", ImGuiTreeNodeFlags_DefaultOpen))
             {
                 bool anyPlaying = false;
                 for (int i = 0; i < (int)animations.size(); ++i)
                 {
-                    std::string key = "render/animation/anim" + std::to_string(i) + "/state";
-                    anyPlaying |= m_settingsManager->getAs<bool>(key.c_str());
+                    snprintf(key, sizeof(key), "render/animation/anim%d/state", i);
+                    anyPlaying |= m_settingsManager->getAs<bool>(key);
                 }
 
                 constexpr float frameDuration = 1.0f / 24.0f;
@@ -29,8 +31,8 @@ void EditorApp::drawAnimationPanel()
                 {
                     for (int i = 0; i < (int)animations.size(); ++i)
                     {
-                        std::string key = "render/animation/anim" + std::to_string(i) + "/time";
-                        m_settingsManager->setAs<float>(key.c_str(), animations[i].start);
+                        snprintf(key, sizeof(key), "render/animation/anim%d/time", i);
+                        m_settingsManager->setAs<float>(key, animations[i].start);
                     }
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset to start");
@@ -41,10 +43,10 @@ void EditorApp::drawAnimationPanel()
                 {
                     for (int i = 0; i < (int)animations.size(); ++i)
                     {
-                        std::string timeKey = "render/animation/anim" + std::to_string(i) + "/time";
-                        float t = m_settingsManager->getAs<float>(timeKey.c_str());
+                        snprintf(key, sizeof(key), "render/animation/anim%d/time", i);
+                        float t = m_settingsManager->getAs<float>(key);
                         t = std::max(t - frameDuration, animations[i].start);
-                        m_settingsManager->setAs<float>(timeKey.c_str(), t);
+                        m_settingsManager->setAs<float>(key, t);
                     }
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Previous frame (1/24s)");
@@ -57,8 +59,8 @@ void EditorApp::drawAnimationPanel()
                     {
                         for (int i = 0; i < (int)animations.size(); ++i)
                         {
-                            std::string key = "render/animation/anim" + std::to_string(i) + "/state";
-                            m_settingsManager->setAs<bool>(key.c_str(), false);
+                            snprintf(key, sizeof(key), "render/animation/anim%d/state", i);
+                            m_settingsManager->setAs<bool>(key, false);
                         }
                     }
                 }
@@ -68,8 +70,8 @@ void EditorApp::drawAnimationPanel()
                     {
                         for (int i = 0; i < (int)animations.size(); ++i)
                         {
-                            std::string key = "render/animation/anim" + std::to_string(i) + "/state";
-                            m_settingsManager->setAs<bool>(key.c_str(), true);
+                            snprintf(key, sizeof(key), "render/animation/anim%d/state", i);
+                            m_settingsManager->setAs<bool>(key, true);
                         }
                     }
                 }
@@ -80,10 +82,10 @@ void EditorApp::drawAnimationPanel()
                 {
                     for (int i = 0; i < (int)animations.size(); ++i)
                     {
-                        std::string timeKey = "render/animation/anim" + std::to_string(i) + "/time";
-                        float t = m_settingsManager->getAs<float>(timeKey.c_str());
+                        snprintf(key, sizeof(key), "render/animation/anim%d/time", i);
+                        float t = m_settingsManager->getAs<float>(key);
                         t = std::min(t + frameDuration, animations[i].end);
-                        m_settingsManager->setAs<float>(timeKey.c_str(), t);
+                        m_settingsManager->setAs<float>(key, t);
                     }
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Next frame (1/24s)");
@@ -94,8 +96,8 @@ void EditorApp::drawAnimationPanel()
                 {
                     for (int i = 0; i < (int)animations.size(); ++i)
                     {
-                        std::string key = "render/animation/anim" + std::to_string(i) + "/time";
-                        m_settingsManager->setAs<float>(key.c_str(), animations[i].end);
+                        snprintf(key, sizeof(key), "render/animation/anim%d/time", i);
+                        m_settingsManager->setAs<float>(key, animations[i].end);
                     }
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Jump to end");
@@ -148,18 +150,18 @@ void EditorApp::drawAnimationPanel()
                 for (int i = 0; i < (int)animations.size(); ++i)
                 {
                     ImGui::PushID(i);
-                    std::string checkboxNameStr = "render/animation/anim" + std::to_string(i) + "/state";
-                    std::string scrollNameStr = "render/animation/anim" + std::to_string(i) + "/time";
 
-                    bool currAnimEnable = m_settingsManager->getAs<bool>(checkboxNameStr.c_str());
+                    snprintf(key, sizeof(key), "render/animation/anim%d/state", i);
+                    bool currAnimEnable = m_settingsManager->getAs<bool>(key);
                     ImGui::Checkbox(animations[i].name.c_str(), &currAnimEnable);
-                    m_settingsManager->setAs<bool>(checkboxNameStr.c_str(), currAnimEnable);
+                    m_settingsManager->setAs<bool>(key, currAnimEnable);
 
-                    float currAnimTime = m_settingsManager->getAs<float>(scrollNameStr.c_str());
+                    snprintf(key, sizeof(key), "render/animation/anim%d/time", i);
+                    float currAnimTime = m_settingsManager->getAs<float>(key);
                     ImGui::SameLine();
                     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
                     ImGui::SliderFloat("##time", &currAnimTime, animations[i].start, animations[i].end, "%.3f s");
-                    m_settingsManager->setAs<float>(scrollNameStr.c_str(), currAnimTime);
+                    m_settingsManager->setAs<float>(key, currAnimTime);
 
                     ImGui::PopID();
                 }

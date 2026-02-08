@@ -62,6 +62,20 @@ void EditorApp::drawRenderSettingsPanel()
                 }
                 ImGui::EndCombo();
             }
+
+            // Show re-attach button for GLTF cameras that have been detached
+            auto& selectedCam = cameras[m_selectedCamera];
+            if (selectedCam.node != -1 && m_cameraDetached)
+            {
+                ImGui::SameLine();
+                if (ImGui::Button("Re-attach"))
+                {
+                    m_cameraDetached = false;
+                    m_sharedCtx->mSubframeIndex = 0;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Resume following GLTF camera animation");
+            }
         }
     }
 

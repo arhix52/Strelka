@@ -102,6 +102,7 @@ private:
     MTL::Buffer* mJointMatricesBuffer = nullptr;
     std::vector<uint32_t> mJointMatOffsets;
     uint32_t mBlasUpdateCount = 0;
+    uint32_t mFramesSinceFullRebuild = 0; // throttle full rebuilds during rapid scrubbing
 
     // Reusable per-frame vectors (avoid heap alloc each frame)
     std::vector<float> mAnimTargetTimes;

@@ -147,11 +147,12 @@ void EditorApp::loadSettings()
 
 void EditorApp::loadAnimSettings()
 {
-    // Animation settings
+    // Erase all previous per-animation settings to avoid leaking keys from old scenes
+    m_settingsManager->eraseByPrefix("render/animation/anim");
+
     char key[64];
     for (int i = 0; i < (int)m_scene->getAnimations().size(); ++i)
     {
-        // TODO: need to erase all previous settings like render/animation/anim
         snprintf(key, sizeof(key), "render/animation/anim%d/state", i);
         m_settingsManager->setAs<bool>(key, false);
 

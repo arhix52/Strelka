@@ -170,42 +170,83 @@ glm::float4 Scene::makeFloat4FromQuat(const glm::quat &q)
 
 glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationChannel::PathType targetProperty, const float time)
 {
-    glm::float4 result;
-    float previousTime = -std::numeric_limits<float>::max();
-    float nextTime = std::numeric_limits<float>::max();
-    glm::float4 previousValue, nextValue;
+    const bool isCubic = (sampler.interpolation == AnimationSampler::InterpolationType::CUBICSPLINE);
+    // For CUBICSPLINE, outputsVec4 stores triplets: [inTangent, value, outTangent] per keyframe.
+    // For LINEAR/STEP, outputsVec4 stores one value per keyframe.
+    const int stride = isCubic ? 3 : 1;
+    const int valueOffset = isCubic ? 1 : 0;
 
-    for (int i = 0; i < sampler.inputs.size(); ++i)
+    const int n = (int)sampler.inputs.size();
+    if (n == 0) return glm::float4(0.0f);
+
+    // Clamp to range
+    if (time <= sampler.inputs[0])
+        return sampler.outputsVec4[valueOffset];
+    if (time >= sampler.inputs[n - 1])
+        return sampler.outputsVec4[(n - 1) * stride + valueOffset];
+
+    // Find bracket: inputs[prevIdx] <= time < inputs[nextIdx]
+    int prevIdx = 0;
+    for (int i = 0; i < n - 1; ++i)
     {
-        if (sampler.inputs[i] == time) return sampler.outputsVec4[i]; // dont need to interpolate
-
-        if (sampler.inputs[i] < time && sampler.inputs[i] > previousTime) 
+        if (sampler.inputs[i + 1] > time)
         {
-            previousTime = sampler.inputs[i];
-            previousValue = sampler.outputsVec4[i];
-        }
-        if (sampler.inputs[i] > time && sampler.inputs[i] < nextTime)
-        {
-            nextTime = sampler.inputs[i];
-            nextValue = sampler.outputsVec4[i];
+            prevIdx = i;
+            break;
         }
     }
+    int nextIdx = prevIdx + 1;
+
+    float previousTime = sampler.inputs[prevIdx];
+    float nextTime = sampler.inputs[nextIdx];
+
+    // Exact match — return value directly
+    if (std::abs(time - previousTime) < 1e-7f)
+        return sampler.outputsVec4[prevIdx * stride + valueOffset];
+
+    glm::float4 result;
 
     switch (sampler.interpolation)
     {
-    case AnimationSampler::InterpolationType::STEP :
-        result = previousValue;
+    case AnimationSampler::InterpolationType::STEP:
+        result = sampler.outputsVec4[prevIdx * stride + valueOffset];
         break;
 
-    case AnimationSampler::InterpolationType::CUBICSPLINE :
-        STRELKA_DEBUG("CUBICSPLINE interpolation not yet supported, skipping");
+    case AnimationSampler::InterpolationType::CUBICSPLINE:
+    {
+        // glTF cubic spline: Hermite interpolation
+        // outputsVec4 layout per keyframe: [inTangent, value, outTangent]
+        float deltaTime = nextTime - previousTime;
+        float t = (time - previousTime) / deltaTime;
+        float t2 = t * t;
+        float t3 = t2 * t;
+
+        glm::float4 p0 = sampler.outputsVec4[prevIdx * 3 + 1]; // value at prev
+        glm::float4 m0 = sampler.outputsVec4[prevIdx * 3 + 2] * deltaTime; // out-tangent at prev
+        glm::float4 p1 = sampler.outputsVec4[nextIdx * 3 + 1]; // value at next
+        glm::float4 m1 = sampler.outputsVec4[nextIdx * 3 + 0] * deltaTime; // in-tangent at next
+
+        result = (2.0f * t3 - 3.0f * t2 + 1.0f) * p0
+               + (t3 - 2.0f * t2 + t) * m0
+               + (-2.0f * t3 + 3.0f * t2) * p1
+               + (t3 - t2) * m1;
+
+        if (targetProperty == AnimationChannel::PathType::ROTATION)
+            result = makeFloat4FromQuat(glm::normalize(makeQuatFromFloat4(result)));
         break;
-    
-    default: //linear
+    }
+
+    default: // LINEAR
+    {
         float interpolationValue = (time - previousTime) / (nextTime - previousTime);
-        if (targetProperty != AnimationChannel::PathType::ROTATION) result = glm::lerp(previousValue, nextValue, interpolationValue);
-        else result = makeFloat4FromQuat(glm::slerp(makeQuatFromFloat4(previousValue), makeQuatFromFloat4(nextValue), interpolationValue));
+        glm::float4 prevVal = sampler.outputsVec4[prevIdx];
+        glm::float4 nextVal = sampler.outputsVec4[nextIdx];
+        if (targetProperty != AnimationChannel::PathType::ROTATION)
+            result = glm::lerp(prevVal, nextVal, interpolationValue);
+        else
+            result = makeFloat4FromQuat(glm::slerp(makeQuatFromFloat4(prevVal), makeQuatFromFloat4(nextVal), interpolationValue));
         break;
+    }
     }
     return result;
 }

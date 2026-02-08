@@ -417,10 +417,11 @@ void MetalRender::render(Buffer* output)
                 if (pass2Skeletal)
                 {
                     applySkinning();
-                    // Force full rebuild on large time jumps (scrubbing) — refit produces
-                    // degenerate BVH when geometry changes dramatically between frames
-                    const bool fullRebuild = (mBlasUpdateCount >= 10) ||
-                                             (maxTimeDelta > shutterDuration * 2.0f);
+                    // Full rebuild periodically or on large scrubs, but throttle to avoid
+                    // back-to-back full rebuilds during rapid scrubbing (min 5 frames apart)
+                    const bool wantsFullRebuild = (mBlasUpdateCount >= 10) ||
+                                                  (maxTimeDelta > shutterDuration * 2.0f);
+                    const bool fullRebuild = wantsFullRebuild && (mFramesSinceFullRebuild >= 5);
                     const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
                     for (int mi = 0; mi < (int)meshes.size(); ++mi)
                     {
@@ -433,6 +434,7 @@ void MetalRender::render(Buffer* output)
                         }
                     }
                     mBlasUpdateCount = fullRebuild ? 0 : (mBlasUpdateCount + 1);
+                    mFramesSinceFullRebuild = fullRebuild ? 0 : (mFramesSinceFullRebuild + 1);
                 }
                 updateInstanceTransforms();
                 rebuildTLAS();
@@ -458,9 +460,10 @@ void MetalRender::render(Buffer* output)
                     // Sync prevVB with current VB — motion BVH needs both keyframes
                     // consistent when motion blur is off (otherwise keyframe 0 is stale)
                     copyVertexBufferToPrev();
-                    // Force full rebuild on large time jumps (scrubbing)
-                    const bool fullRebuild = (mBlasUpdateCount >= 10) ||
-                                             (maxTimeDelta > 0.1f);
+                    // Full rebuild periodically or on large scrubs, throttled
+                    const bool wantsFullRebuild = (mBlasUpdateCount >= 10) ||
+                                                  (maxTimeDelta > 0.1f);
+                    const bool fullRebuild = wantsFullRebuild && (mFramesSinceFullRebuild >= 5);
                     const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
                     for (int mi = 0; mi < (int)meshes.size(); ++mi)
                     {
@@ -473,6 +476,7 @@ void MetalRender::render(Buffer* output)
                         }
                     }
                     mBlasUpdateCount = fullRebuild ? 0 : (mBlasUpdateCount + 1);
+                    mFramesSinceFullRebuild = fullRebuild ? 0 : (mFramesSinceFullRebuild + 1);
                     rebuildTLAS();
                 }
                 else

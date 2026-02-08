@@ -40,6 +40,24 @@ public:
         isNameValid(name);
         return std::get<T>(mMap[name]);
     }
+
+    void erase(const char* name)
+    {
+        mMap.erase(name);
+    }
+
+    /// Erase all keys starting with the given prefix.
+    void eraseByPrefix(const char* prefix)
+    {
+        const std::string p(prefix);
+        for (auto it = mMap.begin(); it != mMap.end();)
+        {
+            if (it->first.compare(0, p.size(), p) == 0)
+                it = mMap.erase(it);
+            else
+                ++it;
+        }
+    }
 };
 
 } // namespace oka
