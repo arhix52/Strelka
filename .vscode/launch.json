@@ -1,22 +1,24 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
-    "configurations": [ 
+    "configurations": [
+        {
+            "name": "(Linux) Launch StrelkaEditor",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/Debug/src/editor/StrelkaEditor",
+            "args": ["-s", "${input:sceneFile}"],
+            "cwd": "${workspaceFolder}/build/Debug",
+            "env": {
+                "SPDLOG_LEVEL": "trace"
+            },
+            "preLaunchTask": "CMake Build (Debug)"
+        },
         {
             "name": "(Windows) Launch",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${command:cmake.launchTargetPath}",
-            // "args": ["-s", "C:/work/basicCurves1.usda"],
-            // "args": ["-s", "C:/work/blender_hair/einar_hair.usd"],
-            // "args": ["-s", "C:/work/cube.usda"],
-            // "args": ["-s", "C:/work/senna2.usd"],
+            "program": "${workspaceFolder}/build/Debug/src/editor/StrelkaEditor.exe",
             "args": ["-s", "C:/work/vespa/vespa.gltf", "-v"],
-            // "args": ["-s", "C:/work/Kitchen_set/Kitchen.usda"],
-            // "args": ["-s", "C:/work/alab-v2.0.1/ALab/entry.usda"],
-            // "args": ["-s", "C:/work/strelka_test1.usda"],
             "environment": [
                 {
                     "name": "SPDLOG_LEVEL",
@@ -24,81 +26,26 @@
                 }
             ],
             "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/build/",
-            // "console": "externalTerminal"
-        },
-        {
-                "name": "(Linux) Launch",
-                "type": "cppdbg",
-                "request": "launch",
-                "program": "${command:cmake.launchTargetPath}",
-                "args": ["-s", "~/work/cube.usda"],
-                // "args": ["-s", "~/work/Kitchen_set/Kitchen2.usda"],
-                // "args": ["-s", "~/work/alab-v2.0.1/ALab/entry.usda"],
-                "stopAtEntry": false,
-                "cwd": "${workspaceFolder}/build/Debug",
-                "environment": [
-                    {
-                        "name": "SPDLOG_LEVEL",
-                        "value": "trace"
-                    }
-                ],
-                "externalConsole": false,
-                "MIMode": "gdb",
-                "setupCommands": [
-                    {
-                        "description": "Enable pretty-printing for gdb",
-                        "text": "-enable-pretty-printing",
-                        "ignoreFailures": true
-                    },
-                    {
-                        "description": "Set Disassembly Flavor to Intel",
-                        "text": "-gdb-set disassembly-flavor intel",
-                        "ignoreFailures": true
-                    }
-                ]
+            "cwd": "${workspaceFolder}/build/"
         },
         {
             "name": "(Mac) Launch",
-            "type": "cppdbg",
+            "type": "lldb",
             "request": "launch",
-            "targetArchitecture": "arm64",
-            "program": "${command:cmake.launchTargetPath}",
+            "program": "${workspaceFolder}/build/Debug/src/editor/StrelkaEditor",
             "args": ["-s", "../../../vespa/vespa.gltf"],
-            // "args": ["-s", "../../cube.usda"],
-            // "args": ["-s", "../../senna2.usd"],
-            // "args": ["-s", "../../../Kitchen_set/Kitchen.usda"],
-            "stopAtEntry": false,
             "cwd": "${workspaceFolder}/build/Debug/",
-            "environment": [
-                {
-                    "name": "MTL_DEBUG_LAYER",
-                    "value": "1"                    
-                },
-                // {
-                    // "name": "OBJC_DEBUG_MISSING_POOLS",
-                    // "value": "YES"
-                // }
-            ],
-            "MIMode": "lldb"
-            // "console": "externalTerminal"
-        },
+            "env": {
+                "MTL_DEBUG_LAYER": "1"
+            }
+        }
+    ],
+    "inputs": [
         {
-        "name": "(Windows) Test Launch",
-        "type": "cppvsdbg",
-        "request": "launch",
-        "program": "${command:cmake.launchTargetPath}",
-        "args": [],
-        "stopAtEntry": false,
-        "cwd": "${workspaceFolder}/build/",
-        // "cwd": "${command:cmake.launchTargetDirectory}",
-        // "environment": [
-        //     {
-        //         "name": "PATH",
-        //         "value": "$PATH:${command:cmake.launchTargetDirectory}"
-        //     }
-        // ],
-        // "externalConsole": false,
-        // "internalConsoleOptions": "openOnSessionStart"
-    }]
+            "id": "sceneFile",
+            "type": "promptString",
+            "description": "Path to .gltf scene file",
+            "default": "/home/ilya/work/BrainStem/brainStem.gltf"
+        }
+    ]
 }
