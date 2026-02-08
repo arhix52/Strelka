@@ -160,6 +160,7 @@ private:
     void createLightBuffer();
 
     Texture loadTextureFromFile(const std::string& fileName);
+    void loadEnvMap(const std::string& texturePath);
 
     bool createOptixMaterials();
     void destroyTextures();
@@ -169,6 +170,13 @@ private:
     // Texture resource tracking for cleanup
     std::vector<cudaArray_t> mTextureArrays;
     std::vector<cudaTextureObject_t> mTextureObjects;
+
+    // Environment map resources
+    std::unique_ptr<OptixBuffer> mEnvCdfXBuffer;   // conditional CDF
+    std::unique_ptr<OptixBuffer> mEnvCdfYBuffer;   // marginal CDF
+    std::unique_ptr<OptixBuffer> mEnvRawDataBuffer; // raw float4 data on device for CDF kernel
+    bool mEnvMapLoaded = false;
+    float mEnvMapAutoScale = 1.0f;   // auto-calibration factor for HDRI brightness
 
     void updatePathtracerParams(const uint32_t width, const uint32_t height);
 

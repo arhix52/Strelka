@@ -74,6 +74,18 @@ struct Params
     float shadowRayTmin;
     float materialRayTmin;
     uint32_t misHeuristic; // 0 = balance, 1 = power
+
+    // Environment map (dome light)
+    bool hasEnvMap;
+    cudaTextureObject_t envMapTexture;
+    float* envCdfX;       // conditional CDF per row: [y * envMapWidth + x]
+    float* envCdfY;       // marginal CDF: [y]
+    uint32_t envMapWidth;
+    uint32_t envMapHeight;
+    float envMapIntensity;
+    float envMapRotation; // Y-axis rotation in radians
+    float3 envMapColorTint;
+    float envMapTotalPower;
 };
 
 enum class EventType: uint8_t

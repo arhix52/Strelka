@@ -13,6 +13,7 @@
 #include <sutil/vec_math_adv.h>
 
 #include <lights.h>
+#include <env_light.h>
 
 #include <strelka/material/bsdf.h>
 
@@ -86,18 +87,91 @@ static __device__ float3 sampleLight(SamplerState& sampler,
     return make_float3(0.0f);
 }
 
+static __device__ float3 sampleEnvLightNEE(SamplerState& sampler,
+                                            const SurfaceInteraction& si,
+                                            float3& toLight,
+                                            float& lightPdf)
+{
+    const float2 xi = make_float2(
+        random<SampleDimension::eLightPointX>(sampler),
+        random<SampleDimension::eLightPointY>(sampler));
+
+    float envPdf = 0.0f;
+    float3 dir = sampleEnvMap(xi,
+                              params.envCdfX, params.envCdfY,
+                              params.envMapWidth, params.envMapHeight,
+                              params.envMapRotation,
+                              envPdf);
+
+    toLight = dir;
+    lightPdf = envPdf;
+
+    if (envPdf <= 0.0f)
+        return make_float3(0.0f);
+
+    // Check if direction is above the surface
+    if (dot(si.shading_normal, dir) <= 0.0f)
+        return make_float3(0.0f);
+
+    // Trace shadow ray to infinity
+    const bool occluded = traceOcclusion(
+        params.handle,
+        offset_ray(si.position, si.geometry_normal),
+        dir,
+        params.shadowRayTmin,
+        1e16f);
+
+    if (occluded)
+        return make_float3(0.0f);
+
+    // Evaluate env map radiance at sampled direction
+    const float2 uv = dirToEnvUV(dir, params.envMapRotation);
+    const float4 envSample = tex2D<float4>(params.envMapTexture, uv.x, uv.y);
+    float3 Li = make_float3(envSample.x, envSample.y, envSample.z);
+    Li *= params.envMapIntensity * params.envMapColorTint;
+
+    return Li * fmaxf(dot(si.shading_normal, dir), 0.0f);
+}
+
 __device__ float3 estimateDirectLighting(SamplerState& sampler,
                                          const SurfaceInteraction& si,
                                          float3& toLight,
                                          float& lightPdf)
 {
-    const float u = random<SampleDimension::eLightId>(sampler);
-    const uint32_t lightId = (uint32_t)(params.scene.numLights * u);
-    const float lightSelectionPdf = 1.0f / params.scene.numLights;
-    const UniformLight& currLight = params.scene.lights[lightId];
-    const float3 r = sampleLight(sampler, currLight, si, toLight, lightPdf);
-    lightPdf *= lightSelectionPdf;
-    return r;
+    if (params.hasEnvMap)
+    {
+        const float u = random<SampleDimension::eLightId>(sampler);
+
+        if (params.scene.numLights == 0 || u >= 0.5f)
+        {
+            // Sample environment map
+            const float selectionPdf = (params.scene.numLights > 0) ? 0.5f : 1.0f;
+            const float3 r = sampleEnvLightNEE(sampler, si, toLight, lightPdf);
+            lightPdf *= selectionPdf;
+            return r;
+        }
+        else
+        {
+            // Sample local light (remap u from [0, 0.5) to [0, 1))
+            const float remappedU = u * 2.0f;
+            const uint32_t lightId = (uint32_t)(params.scene.numLights * remappedU);
+            const float lightSelectionPdf = 0.5f / params.scene.numLights;
+            const UniformLight& currLight = params.scene.lights[lightId];
+            const float3 r = sampleLight(sampler, currLight, si, toLight, lightPdf);
+            lightPdf *= lightSelectionPdf;
+            return r;
+        }
+    }
+    else
+    {
+        const float u = random<SampleDimension::eLightId>(sampler);
+        const uint32_t lightId = (uint32_t)(params.scene.numLights * u);
+        const float lightSelectionPdf = 1.0f / params.scene.numLights;
+        const UniformLight& currLight = params.scene.lights[lightId];
+        const float3 r = sampleLight(sampler, currLight, si, toLight, lightPdf);
+        lightPdf *= lightSelectionPdf;
+        return r;
+    }
 }
 
 // Get curve hit-point in world coordinates.

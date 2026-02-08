@@ -8,4 +8,5 @@ enum LightType : int
     LIGHT_TYPE_DISC    = 1,
     LIGHT_TYPE_SPHERE  = 2,
     LIGHT_TYPE_DISTANT = 3,
+    LIGHT_TYPE_DOME    = 4,
 };

@@ -788,6 +788,25 @@ bool loadLightsFromJson(const std::string& modelPath, oka::Scene& scene)
             Scene::UniformLightDesc desc = parseFromJson(light);
             scene.createLight(desc);
         }
+
+        // Parse environment map (dome light)
+        if (light.contains("environment"))
+        {
+            const auto& env = light["environment"];
+            Scene::EnvLightDesc envDesc{};
+            if (env.contains("texture"))
+                envDesc.texturePath = env["texture"].get<std::string>();
+            if (env.contains("intensity"))
+                envDesc.intensity = env["intensity"].get<float>();
+            if (env.contains("color"))
+            {
+                const auto& c = env["color"];
+                envDesc.color = glm::float3(c[0].get<float>(), c[1].get<float>(), c[2].get<float>());
+            }
+            if (env.contains("rotation"))
+                envDesc.rotationY = env["rotation"].get<float>();
+            scene.setEnvLight(envDesc);
+        }
         return true;
     }
     return false;
@@ -805,10 +824,23 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     tinygltf::TinyGLTF gltf_ctx;
     std::string err;
     std::string warn;
-    bool res = gltf_ctx.LoadASCIIFromFile(&model, &err, &warn, modelPath.c_str());
+    bool res = false;
+    const std::string ext = fs::path(modelPath).extension().string();
+    if (ext == ".glb")
+    {
+        res = gltf_ctx.LoadBinaryFromFile(&model, &err, &warn, modelPath.c_str());
+    }
+    else
+    {
+        res = gltf_ctx.LoadASCIIFromFile(&model, &err, &warn, modelPath.c_str());
+    }
+    if (!warn.empty())
+    {
+        STRELKA_WARNING("glTF warning: {}", warn);
+    }
     if (!res)
     {
-        STRELKA_ERROR("Unable to load file: {}", modelPath);
+        STRELKA_ERROR("Unable to load file: {}{}", modelPath, err.empty() ? "" : " — " + err);
         return res;
     }
 

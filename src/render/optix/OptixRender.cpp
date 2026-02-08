@@ -17,6 +17,9 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#define TINYEXR_IMPLEMENTATION
+#include <tinyexr.h>
+
 #include <vector_types.h>
 #include <vector_functions.h>
 
@@ -36,6 +39,7 @@
 
 #include <postprocessing/Tonemappers.h>
 #include <skinning/skinning.h>
+#include <env_cdf.h>
 
 #include <strelka/render/Camera.h>
 
@@ -1155,6 +1159,23 @@ void OptiXRender::render(Buffer* output)
     if (getSharedContext().mFrameNumber == 0)
     {
         createOptixMaterials();
+
+        // Load environment map if specified
+        const auto& envLight = mScene->getEnvLight();
+        if (envLight.has_value() && !envLight->texturePath.empty())
+        {
+            const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");
+            const fs::path envTexPath = fs::path(resourcePathStr) / envLight->texturePath;
+            loadEnvMap(envTexPath.string());
+            mState.params.envMapIntensity = mEnvMapAutoScale * envLight->intensity;
+            mState.params.envMapRotation = envLight->rotationY * (M_PI / 180.0f);
+            mState.params.envMapColorTint = make_float3(envLight->color.x, envLight->color.y, envLight->color.z);
+        }
+        else
+        {
+            mState.params.hasEnvMap = false;
+        }
+
         createVertexBuffer();
         if (mEnableMotionBlur)
         {
@@ -1603,6 +1624,115 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName)
     mTextureObjects.push_back(tex_obj_unfilt);
 
     return Texture(tex_obj, tex_obj_unfilt, make_uint3(texWidth, texHeight, 1));
+}
+
+void OptiXRender::loadEnvMap(const std::string& texturePath)
+{
+    int width = 0, height = 0;
+    float* pixelData = nullptr;
+
+    const std::string ext = fs::path(texturePath).extension().string();
+    if (ext == ".exr" || ext == ".EXR")
+    {
+        const char* err = nullptr;
+        int ret = LoadEXR(&pixelData, &width, &height, texturePath.c_str(), &err);
+        if (ret != TINYEXR_SUCCESS)
+        {
+            STRELKA_ERROR("Failed to load EXR env map: {} ({})", texturePath, err ? err : "unknown");
+            if (err) FreeEXRErrorMessage(err);
+            return;
+        }
+    }
+    else
+    {
+        // HDR / LDR via stbi
+        int channels = 0;
+        pixelData = stbi_loadf(texturePath.c_str(), &width, &height, &channels, 4);
+        if (!pixelData)
+        {
+            STRELKA_ERROR("Failed to load env map: {}", texturePath);
+            return;
+        }
+    }
+
+    STRELKA_INFO("Loaded env map: {} ({}x{})", texturePath, width, height);
+
+    // Create CUDA array and texture object for the env map (float4)
+    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
+    cudaArray_t envArray = nullptr;
+    CUDA_CHECK(cudaMallocArray(&envArray, &channelDesc, width, height));
+    CUDA_CHECK(cudaMemcpy2DToArray(envArray, 0, 0, pixelData,
+                                   width * sizeof(float4),
+                                   width * sizeof(float4), height,
+                                   cudaMemcpyHostToDevice));
+
+    cudaResourceDesc resDesc{};
+    resDesc.resType = cudaResourceTypeArray;
+    resDesc.res.array.array = envArray;
+
+    cudaTextureDesc texDesc{};
+    texDesc.addressMode[0] = cudaAddressModeWrap;
+    texDesc.addressMode[1] = cudaAddressModeClamp;
+    texDesc.filterMode = cudaFilterModeLinear;
+    texDesc.readMode = cudaReadModeElementType;
+    texDesc.normalizedCoords = 1;
+
+    cudaTextureObject_t envTexObj = 0;
+    CUDA_CHECK(cudaCreateTextureObject(&envTexObj, &resDesc, &texDesc, nullptr));
+
+    // Track for cleanup
+    mTextureArrays.push_back(envArray);
+    mTextureObjects.push_back(envTexObj);
+
+    // Upload raw pixel data to device for CDF construction
+    const size_t rawDataSize = (size_t)width * height * 4 * sizeof(float);
+    mEnvRawDataBuffer.reset(new OptixBuffer(rawDataSize));
+    CUDA_CHECK(cudaMemcpy((void*)mEnvRawDataBuffer->getPtr(), pixelData, rawDataSize, cudaMemcpyHostToDevice));
+
+    // Free host pixel data
+    if (ext == ".exr" || ext == ".EXR")
+        free(pixelData);
+    else
+        stbi_image_free(pixelData);
+
+    // Allocate CDF buffers
+    mEnvCdfXBuffer.reset(new OptixBuffer((size_t)width * height * sizeof(float)));
+    mEnvCdfYBuffer.reset(new OptixBuffer((size_t)height * sizeof(float)));
+
+    // Build CDF on GPU
+    float totalPower = 0.0f;
+    buildEnvMapCdf(
+        (const float*)mEnvRawDataBuffer->getPtr(),
+        width, height,
+        (float*)mEnvCdfXBuffer->getPtr(),
+        (float*)mEnvCdfYBuffer->getPtr(),
+        &totalPower);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Free raw data buffer (no longer needed after CDF build)
+    mEnvRawDataBuffer.reset();
+
+    // Store env map params
+    mState.params.envMapTexture = envTexObj;
+    mState.params.envCdfX = (float*)mEnvCdfXBuffer->getPtr();
+    mState.params.envCdfY = (float*)mEnvCdfYBuffer->getPtr();
+    mState.params.envMapWidth = width;
+    mState.params.envMapHeight = height;
+    mState.params.envMapTotalPower = totalPower;
+    mState.params.hasEnvMap = true;
+    mEnvMapLoaded = true;
+
+    // Auto-calibrate env map to renderer's internal radiance scale.
+    // Uncalibrated HDRIs have pixel values ~0.1-100 while the renderer's
+    // light system uses intensities ~1000-10000. Scale the env map so its
+    // average weighted luminance maps to a reference that produces correct
+    // exposure with the photographic camera model.
+    const float avgWeightedLum = totalPower / (float)(width * height);
+    const float kCalibrationTarget = 1000.0f;
+    mEnvMapAutoScale = (avgWeightedLum > 1e-6f) ? kCalibrationTarget / avgWeightedLum : 1.0f;
+
+    STRELKA_INFO("Env map CDF built, total power: {}, avgLum: {:.4f}, autoScale: {:.1f}",
+                 totalPower, avgWeightedLum, mEnvMapAutoScale);
 }
 
 void OptiXRender::destroyTextures()

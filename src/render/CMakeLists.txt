@@ -39,6 +39,8 @@ if(WIN32 OR LINUX)
             ${CMAKE_SOURCE_DIR}/src/shaders/optix
     )
 
+    find_package(tinyexr REQUIRED)
+
     target_link_libraries(strelka_render
         PUBLIC
             CUDA::cudart
@@ -48,6 +50,7 @@ if(WIN32 OR LINUX)
             strelka_material
             glm::glm
             stb::stb
+            tinyexr::tinyexr
     )
 endif()
 

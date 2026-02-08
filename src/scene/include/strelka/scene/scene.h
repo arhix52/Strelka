@@ -6,8 +6,10 @@
 
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <stack>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -455,6 +457,17 @@ public:
 
     void updateAnimation(const float dt);
 
+    struct EnvLightDesc
+    {
+        std::string texturePath;
+        float intensity = 1.0f;
+        glm::float3 color = glm::float3(1.0f);
+        float rotationY = 0.0f;
+    };
+
+    void setEnvLight(const EnvLightDesc& desc) { mEnvLight = desc; }
+    const std::optional<EnvLightDesc>& getEnvLight() const { return mEnvLight; }
+
     void updateLight(uint32_t lightId, const UniformLightDesc& desc);
     /// <summary>
     /// Create Mesh geometry
@@ -550,6 +563,8 @@ private:
     uint32_t createSphereLightMesh();
 
     DirtyFlag mDirty;
+
+    std::optional<EnvLightDesc> mEnvLight;
 
     std::set<uint32_t> mDirtyInstances;
 

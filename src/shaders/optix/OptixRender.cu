@@ -8,6 +8,7 @@
 #include <sutil/Matrix.h>
 
 #include <postprocessing/Utils.h>
+#include <env_light.h>
 
 #include "optix_device_utils.h"
 
@@ -218,9 +219,44 @@ extern "C" __global__ void __raygen__rg()
 
 extern "C" __global__ void __miss__ms()
 {
-    MissData* miss_data = reinterpret_cast<MissData*>(optixGetSbtDataPointer());
     PerRayData* prd = getPRD();
-    prd->radiance += prd->throughput * miss_data->bg_color;
+
+    if (params.hasEnvMap)
+    {
+        const float3 ray_dir = optixGetWorldRayDirection();
+        const float2 uv = dirToEnvUV(ray_dir, params.envMapRotation);
+        const float4 envSample = tex2D<float4>(params.envMapTexture, uv.x, uv.y);
+        float3 envColor = make_float3(envSample.x, envSample.y, envSample.z);
+        envColor *= params.envMapIntensity * params.envMapColorTint;
+
+        if (prd->depth == 0 || prd->specularBounce)
+        {
+            // Direct camera ray or specular bounce: add full env contribution
+            prd->radiance += prd->throughput * envColor;
+        }
+        else
+        {
+            // MIS weight with BSDF sampling vs env map PDF
+            const float envPdf = envMapPdf(ray_dir,
+                                           params.envCdfX, params.envCdfY,
+                                           params.envMapWidth, params.envMapHeight,
+                                           params.envMapRotation);
+            // Account for 50% selection probability when local lights exist
+            const float envSelectionPdf = (params.scene.numLights > 0) ? 0.5f : 1.0f;
+            const float effectiveEnvPdf = envPdf * envSelectionPdf;
+            if (effectiveEnvPdf > 0.0f)
+            {
+                const float misWeight = computeMisWeight(prd->lastBsdfPdf, effectiveEnvPdf, params.misHeuristic);
+                prd->radiance += prd->throughput * envColor * misWeight;
+            }
+        }
+    }
+    else
+    {
+        MissData* miss_data = reinterpret_cast<MissData*>(optixGetSbtDataPointer());
+        prd->radiance += prd->throughput * miss_data->bg_color;
+    }
+
     prd->throughput = make_float3(0.0f);
     prd->depth = params.max_depth;
 }
@@ -252,7 +288,11 @@ extern "C" __global__ void __closesthit__light()
         }
         else
         {
-            float lightPdf = getLightPdf(currLight, hitPoint, optixGetWorldRayOrigin()) / (params.scene.numLights);
+            // When env map is present, local lights are selected with 50% probability
+            const float lightSelectionPdf = params.hasEnvMap
+                ? 0.5f / params.scene.numLights
+                : 1.0f / params.scene.numLights;
+            float lightPdf = getLightPdf(currLight, hitPoint, optixGetWorldRayOrigin()) * lightSelectionPdf;
             const float misWeight = computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
             prd->radiance += prd->throughput * make_float3(currLight.color) * -dot(rayDir, lightNormal) * misWeight;
         }

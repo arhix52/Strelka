@@ -18,6 +18,7 @@ class StrelkaRecipe(ConanFile):
         self.requires("tinygltf/2.8.19")
         self.requires("nlohmann_json/3.11.3")
         self.requires("stb/cci.20230920")
+        self.requires("tinyexr/1.0.7")
 
         # Editor (conditional via options)
         self.requires("imgui/1.92.5-docking", override=True)
