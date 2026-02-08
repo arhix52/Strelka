@@ -9,9 +9,9 @@ kernel void toneMappingComputeShader(
     uint2 tid [[thread_position_in_grid]],
     constant UniformsTonemap& uniforms [[buffer(0)]],
     device float4* buffer [[buffer(1)]]
-    ) 
+    )
 {
-    if (tid.x >= uniforms.width || tid.y >= uniforms.height) 
+    if (tid.x >= uniforms.width || tid.y >= uniforms.height)
     {
         return;
     }
@@ -20,22 +20,23 @@ kernel void toneMappingComputeShader(
     // Fetch the input color
     float4 inputColor = buffer[linearPixelIndex];
     float3 result = inputColor.xyz;
+    // Apply exposure only (maxEDR is macOS HDR headroom — irrelevant for SDR/gamma output)
+    float3 exposedResult = result * uniforms.exposureValue;
     switch ((ToneMapperType) uniforms.tonemapperType)
     {
     case ToneMapperType::eReinhard:
-        result = reinhard(result * uniforms.exposureValue);
+        result = reinhard(exposedResult);
         break;
     case ToneMapperType::eACES:
-        result = ACESFitted(result * uniforms.exposureValue);
+        result = ACESFitted(exposedResult);
         break;
     case ToneMapperType::eFilmic:
-        result = ACESFilm(result * uniforms.exposureValue);
+        result = ACESFilm(exposedResult);
         break;
     case ToneMapperType::eNone:
+        result = exposedResult;
         break;
     }
-
-    result *= uniforms.maxEDR;
 
     if (uniforms.gamma > 0.0f)
     {
@@ -43,4 +44,3 @@ kernel void toneMappingComputeShader(
     }
     buffer[linearPixelIndex] = float4(result, inputColor.a);
 }
-

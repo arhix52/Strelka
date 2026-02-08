@@ -68,6 +68,11 @@ public:
         return glfwWindowShouldClose(mWindow) != 0;
     }
 
+    void requestClose()
+    {
+        glfwSetWindowShouldClose(mWindow, GLFW_TRUE);
+    }
+
     void pollEvents()
     {
         glfwPollEvents();

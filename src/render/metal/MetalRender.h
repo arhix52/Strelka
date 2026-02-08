@@ -2,6 +2,8 @@
 #include <strelka/render/render.h>
 
 #include <Metal/Metal.hpp>
+#include <atomic>
+#include <vector>
 
 namespace oka
 {
@@ -16,6 +18,9 @@ public:
     void init() override;
     void render(Buffer* output) override;
     Buffer* createBuffer(const BufferDesc& desc) override;
+
+    void triggerRenderIfIdle() override;
+    Buffer* getReadyBuffer() override;
 
     void* getNativeDevicePtr() override
     {
@@ -44,28 +49,49 @@ private:
         oka::Camera::Matrices mCamMatrices;
     };
 
+    // --- Settings change detection (replaces 16 static locals in render()) ---
+    struct PrevSettings
+    {
+        uint32_t rectLightSamplingMethod = 0;
+        uint32_t samplerType = 0;
+        bool enableAccumulation = false;
+        uint32_t sspTotal = 0;
+        uint32_t spp = 0;
+        bool enableMotionBlur = false;
+        bool isMotionBlurVisible = true;
+        bool enableCameraMotionBlur = true;
+        int32_t useDof = 0;
+        float focalDistance = 0.0f;
+        float lensRadius = 0.0f;
+        int32_t apertureBlades = 0;
+        float shiftX = 0.0f;
+        float shiftY = 0.0f;
+        uint32_t maxDepth = 0;
+        uint32_t debug = 0;
+    };
+    PrevSettings mPrevSettings;
+
     View mPrevView;
-    MTL::Device* mDevice;
-    MTL::CommandQueue* mCommandQueue;
-    MTL::Library* mShaderLibrary;
+    MTL::Device* mDevice = nullptr;
+    MTL::CommandQueue* mCommandQueue = nullptr;
 
     MTL::ComputePipelineState* mPathTracingPSO = nullptr;
     MTL::ComputePipelineState* mTonemapperPSO = nullptr;
     MTL::ComputePipelineState* mSkinningPSO = nullptr;
     MTL::ComputePipelineState* mTriangleUpdatePSO = nullptr;
 
-    MTL::Buffer* mAccumulationBuffer;
-    MTL::Buffer* mLightBuffer;
-    MTL::Buffer* mVertexBuffer;
-    MTL::Buffer* mUniformBuffers[kMaxFramesInFlight];
-    MTL::Buffer* mUniformTMBuffers[kMaxFramesInFlight];
-    
-    MTL::Buffer* mIndexBuffer;
-    uint32_t mTriangleCount;
+    MTL::Buffer* mAccumulationBuffer = nullptr;
+    MTL::Buffer* mLightBuffer = nullptr;
+    MTL::Buffer* mVertexBuffer = nullptr;
+    MTL::Buffer* mUniformBuffers[kMaxFramesInFlight] = {};
+    MTL::Buffer* mUniformTMBuffers[kMaxFramesInFlight] = {};
+
+    MTL::Buffer* mIndexBuffer = nullptr;
+    uint32_t mTriangleCount = 0;
     std::vector<MetalRender::Mesh*> mMetalMeshes;
     std::vector<MTL::AccelerationStructure*> mPrimitiveAccelerationStructures;
-    MTL::AccelerationStructure* mInstanceAccelerationStructure;
-    MTL::Buffer* mInstanceBuffer;
+    MTL::AccelerationStructure* mInstanceAccelerationStructure = nullptr;
+    MTL::Buffer* mInstanceBuffer = nullptr;
 
     MTL::Buffer* mMaterialBuffer = nullptr;
     std::vector<MTL::Texture*> mMaterialTextures;
@@ -76,6 +102,10 @@ private:
     MTL::Buffer* mJointMatricesBuffer = nullptr;
     std::vector<uint32_t> mJointMatOffsets;
     uint32_t mBlasUpdateCount = 0;
+
+    // Reusable per-frame vectors (avoid heap alloc each frame)
+    std::vector<float> mAnimTargetTimes;
+    std::vector<bool> mAnimChanged;
 
     // Motion blur
     MTL::Buffer* mPrevVertexBuffer = nullptr;
@@ -93,7 +123,7 @@ private:
     void buildComputePipeline();
     void buildTonemapperPipeline();
     void buildBuffers();
-    
+
     MTL::Texture* loadTextureFromFile(const std::string& fileName);
     void createMetalMaterials();
 
@@ -107,6 +137,12 @@ private:
     void allocJointMatrices();
     void applySkinning();
     void copyVertexBufferToPrev();
+
+    // Async render (double-buffered output)
+    Buffer* mAsyncOutputBuffers[2] = {nullptr, nullptr};
+    std::atomic<int> mReadyIndex{-1};
+    std::atomic<bool> mRenderBusy{false};
+    int mWriteIndex = 0;
 
     // Environment map
     void loadEnvMap(const std::string& texturePath);

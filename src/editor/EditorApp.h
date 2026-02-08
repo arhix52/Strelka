@@ -31,16 +31,15 @@ private:
     bool m_resized = false;
     std::unique_ptr<Display> m_display;
     std::unique_ptr<SettingsManager> m_settingsManager;
-
-    std::unique_ptr<Render> m_render;
-
     std::unique_ptr<GltfLoader> m_sceneLoader;
-
     std::unique_ptr<SharedContext> m_sharedCtx;
-
     std::unique_ptr<Scene> m_scene;
-
     std::unique_ptr<CameraController> m_cameraController;
+
+    // Render must be declared after scene/sharedCtx/settings so it is
+    // destroyed first (reverse declaration order), since it holds raw
+    // pointers to them and its destructor drains the GPU.
+    std::unique_ptr<Render> m_render;
 
     int m_selectedCamera = 0;
     bool m_cameraDetached = false; // true when user takes manual control of a GLTF camera

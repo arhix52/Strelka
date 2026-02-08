@@ -30,7 +30,7 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     m_render->init();
 #ifdef __APPLE__
     m_display->setNativeDevice(m_render->getNativeDevicePtr());
-    m_display->setCommandQueue(m_render->getNativeCommandQueue());
+    // Display creates its own command queue for independent frame pacing
 #endif
     m_display->init(1024, 768, m_settingsManager.get());
     m_display->setResizeHandler(this);
@@ -108,7 +108,7 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/stratifiedSamplingType", 0); // 0 - none, 1 - random, 2 -
                                                                                // stratified sampling, 3 -
                                                                                // optimized stratified sampling
-    m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", 0); // 0 - reinhard, 1 - aces, 2 - filmic
+    m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", 1); // 0 - None, 1 - Reinhard, 2 - ACES, 3 - Filmic
     m_settingsManager->setAs<uint32_t>("render/pt/debug", 0); // 0 - none, 1 - normals
     m_settingsManager->setAs<float>("render/cameraSpeed", 1.0f);
     m_settingsManager->setAs<float>("render/pt/upscaleFactor", 0.5f);
@@ -125,7 +125,7 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/selectedCamera", 0);
     m_settingsManager->setAs<bool>("render/enableMotionBlur", true);
     m_settingsManager->setAs<bool>("render/isMotionBlurVisible", true);
-    m_settingsManager->setAs<bool>("render/enableCameraMotionBlur", true);
+    m_settingsManager->setAs<bool>("render/enableCameraMotionBlur", false);
     m_settingsManager->setAs<float>("render/motionBlur/shutterTime", 1.0f / 24.0f);
     m_settingsManager->setAs<uint32_t>("render/motionBlur/shutterMode", 1); // 0=centered, 1=leading, 2=trailing
     m_settingsManager->setAs<float>("render/animation/speed", 1.0f);
@@ -148,14 +148,15 @@ void EditorApp::loadSettings()
 void EditorApp::loadAnimSettings()
 {
     // Animation settings
+    char key[64];
     for (int i = 0; i < (int)m_scene->getAnimations().size(); ++i)
     {
         // TODO: need to erase all previous settings like render/animation/anim
-        std::string checkboxName = "render/animation/anim" + std::to_string(i) + "/state";
-        std::string scrollName = "render/animation/anim" + std::to_string(i) + "/time";
+        snprintf(key, sizeof(key), "render/animation/anim%d/state", i);
+        m_settingsManager->setAs<bool>(key, false);
 
-        m_settingsManager->setAs<bool>(checkboxName.c_str(), false);
-        m_settingsManager->setAs<float>(scrollName.c_str(), m_scene->getAnimations()[i].start);
+        snprintf(key, sizeof(key), "render/animation/anim%d/time", i);
+        m_settingsManager->setAs<float>(key, m_scene->getAnimations()[i].start);
     }
 }
 
@@ -201,13 +202,6 @@ void EditorApp::checkLoadingComplete()
 
 void EditorApp::run()
 {
-    // Main render loop
-    oka::BufferDesc desc{};
-    desc.format = oka::BufferFormat::FLOAT4;
-    desc.width = m_settingsManager->getAs<uint32_t>("render/width");
-    desc.height = m_settingsManager->getAs<uint32_t>("render/height");
-
-    oka::Buffer* outputBuffer = m_render->createBuffer(desc);
     while (!m_display->windowShouldClose())
     {
         auto start = std::chrono::high_resolution_clock::now();
@@ -228,17 +222,12 @@ void EditorApp::run()
         if (selectedCam.node != -1 && !m_cameraDetached)
         {
             // GLTF camera in animation mode
-            if (m_cameraController->getCamera().moving())
+            if (m_cameraController->getCamera().moving() || m_cameraController->isRotating())
             {
-                // User wants manual control -- detach from animation,
-                // keeping the current animated position as starting point
                 m_cameraDetached = true;
             }
             else
             {
-                // Sync CameraController to animated position each frame
-                // so manual takeover starts from the right place.
-                // Only copy position/orientation -- preserve key/mouse state.
                 auto& ctrlCam = m_cameraController->getCamera();
                 ctrlCam.position = selectedCam.position;
                 ctrlCam.mOrientation = selectedCam.mOrientation;
@@ -248,8 +237,6 @@ void EditorApp::run()
 
         if (selectedCam.node == -1 || m_cameraDetached)
         {
-            // Sync position/orientation/matrices from controller to scene camera,
-            // preserving DOF/lens properties set by UI or JSON sidecar.
             auto& ctrlCam = m_cameraController->getCamera();
             selectedCam.position = ctrlCam.position;
             selectedCam.mOrientation = ctrlCam.mOrientation;
@@ -263,37 +250,39 @@ void EditorApp::run()
         if (m_resized)
         {
             m_resized = false;
-            const uint32_t newW = m_settingsManager->getAs<uint32_t>("render/width");
-            const uint32_t newH = m_settingsManager->getAs<uint32_t>("render/height");
-            outputBuffer->resize(newW, newH);
             m_sharedCtx->mSubframeIndex = 0;
         }
 
-        m_display->onBeginFrame();
-
+        // Fire-and-forget: enqueue render if GPU is idle
         auto maxEDR = m_display->getMaxEDR();
         m_settingsManager->setAs<float>("render/post/tonemapper/maxEDR", maxEDR);
+        m_render->triggerRenderIfIdle();
 
-        m_render->render(outputBuffer);
-        oka::ImageBuffer outputImage;
-        outputImage.deviceData = outputBuffer->getDevicePointer();
-        outputImage.height = outputBuffer->height();
-        outputImage.width = outputBuffer->width();
-        outputImage.pixel_format = oka::BufferFormat::FLOAT4;
-        outputImage.dataSize = outputBuffer->width() * outputBuffer->height() * outputBuffer->getElementSize();
-        m_display->drawFrame(outputImage); // blit rendered image to swapchain
+        // Display: always runs at vsync, independent of render
+        m_display->onBeginFrame();
 
-        drawUI(); // render ui to swapchain image in window resolution
+        oka::Buffer* readyBuf = m_render->getReadyBuffer();
+        if (readyBuf)
+        {
+            oka::ImageBuffer outputImage;
+            outputImage.deviceData = readyBuf->getDevicePointer();
+            outputImage.height = readyBuf->height();
+            outputImage.width = readyBuf->width();
+            outputImage.pixel_format = oka::BufferFormat::FLOAT4;
+            outputImage.dataSize = readyBuf->width() * readyBuf->height() * readyBuf->getElementSize();
+            m_display->drawFrame(outputImage);
+        }
+
+        drawUI();
         m_display->drawUI();
-        m_display->onEndFrame(); // submit command buffer and present
+        m_display->onEndFrame();
 
         const uint32_t currentSpp = m_sharedCtx->mSubframeIndex;
-        auto finish = std::chrono::high_resolution_clock::now();
-        const double frameTime = std::chrono::duration<double, std::milli>(finish - start).count();
+        const double renderMs = m_render->getLastRenderTimeMs();
 
-        m_display->setWindowTitle((std::string("Strelka") + " [" + std::to_string(frameTime) + " ms]" + " [" +
-                                   std::to_string(currentSpp) + " spp]")
-                                      .c_str());
+        char title[128];
+        snprintf(title, sizeof(title), "Strelka [render: %.1f ms] [%u spp]", renderMs, currentSpp);
+        m_display->setWindowTitle(title);
     }
 }
 
@@ -301,15 +290,16 @@ void EditorApp::playAnimations(const float deltaTime)
 {
     const float speed = m_settingsManager->getAs<float>("render/animation/speed");
     const auto& animations = m_scene->getAnimations();
+    char key[64];
     for (int i = 0; i < (int)animations.size(); ++i)
     {
-        const std::string checkboxNameStr = "render/animation/anim" + std::to_string(i) + "/state";
-        bool currAnimEnable = m_settingsManager->getAs<bool>(checkboxNameStr.c_str());
+        snprintf(key, sizeof(key), "render/animation/anim%d/state", i);
+        const bool currAnimEnable = m_settingsManager->getAs<bool>(key);
 
         if (currAnimEnable)
         {
-            const std::string scrollNameStr = "render/animation/anim" + std::to_string(i) + "/time";
-            float currAnimTime = m_settingsManager->getAs<float>(scrollNameStr.c_str());
+            snprintf(key, sizeof(key), "render/animation/anim%d/time", i);
+            float currAnimTime = m_settingsManager->getAs<float>(key);
 
             const float currAnimStart = animations[i].start;
             const float currAnimEnd = animations[i].end;
@@ -317,7 +307,7 @@ void EditorApp::playAnimations(const float deltaTime)
             currAnimTime += deltaTime * speed;
             if (currAnimTime > currAnimEnd) currAnimTime -= (currAnimEnd - currAnimStart);
             if (currAnimTime < currAnimStart) currAnimTime = currAnimStart;
-            m_settingsManager->setAs<float>(scrollNameStr.c_str(), currAnimTime);
+            m_settingsManager->setAs<float>(key, currAnimTime);
         }
     }
 }
@@ -348,7 +338,7 @@ void EditorApp::drawUI()
 
         if (ImGui::MenuItem("Exit"))
         {
-            exit(0);
+            m_display->requestClose();
         }
         ImGui::EndMenu();
     }

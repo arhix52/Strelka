@@ -2,6 +2,7 @@
 #include <strelka/render/common.h>
 #include <strelka/render/buffer.h>
 #include <strelka/scene/scene.h>
+#include <atomic>
 
 namespace oka
 {
@@ -24,6 +25,15 @@ public:
     virtual void init() = 0;
     virtual void render(Buffer* output) = 0;
     virtual Buffer* createBuffer(const BufferDesc& desc) = 0;
+
+    /// Start a render pass if the GPU is idle. Non-blocking.
+    virtual void triggerRenderIfIdle() {}
+
+    /// Return the last completed output buffer, or nullptr if none ready yet.
+    virtual Buffer* getReadyBuffer() { return nullptr; }
+
+    /// Last completed render frame time in milliseconds (GPU time).
+    double getLastRenderTimeMs() const { return mLastRenderTimeMs.load(std::memory_order_relaxed); }
 
     virtual void* getNativeDevicePtr()
     {
@@ -69,6 +79,7 @@ protected:
     SettingsManager* mSettingsManager;
     SharedContext* mSharedCtx = nullptr;
     oka::Scene* mScene = nullptr;
+    std::atomic<double> mLastRenderTimeMs{0.0};
 };
 
 class RenderFactory
