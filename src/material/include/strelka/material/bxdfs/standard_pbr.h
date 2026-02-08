@@ -35,7 +35,7 @@ struct PbrLobeWeights
     float total;
 };
 
-DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const SurfaceInteraction& si)
+DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const THREAD_REF SurfaceInteraction& si)
 {
     PbrLobeWeights w;
 
@@ -72,7 +72,7 @@ DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const SurfaceInteraction& si)
 // u_lobe: uniform random for lobe selection
 // u_fresnel: uniform random for dielectric reflect/refract choice
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const SurfaceInteraction& si,
+DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInteraction& si,
                                                  float u1, float u2,
                                                  float u_lobe, float u_fresnel)
 {
@@ -362,7 +362,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const SurfaceInteraction& si,
 // ---------------------------------------------------------------------------
 // Evaluate
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const SurfaceInteraction& si,
+DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction& si,
                                              float3 wi)
 {
     BsdfEvalResult result;
@@ -478,7 +478,7 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const SurfaceInteraction& si,
 // ---------------------------------------------------------------------------
 // PDF only
 // ---------------------------------------------------------------------------
-DEVICE_FUNC float standard_pbr_pdf(const SurfaceInteraction& si, float3 wi)
+DEVICE_FUNC float standard_pbr_pdf(const THREAD_REF SurfaceInteraction& si, float3 wi)
 {
     BsdfEvalResult r = standard_pbr_eval(si, wi);
     return r.pdf;

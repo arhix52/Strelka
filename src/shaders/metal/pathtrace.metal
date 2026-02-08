@@ -1,9 +1,9 @@
 #include <metal_stdlib>
 #include <simd/simd.h>
 
-#include "random.h"
-#include "lights.h"
-#include "tonemappers.h"
+#include "random_metal.h"
+#include "lights_metal.h"
+#include "env_light_metal.h"
 
 #include "ShaderTypes.h"
 #include <strelka/material/bsdf.h>
@@ -112,6 +112,69 @@ float4x4 lerpMatrix(float4x4 a, float4x4 b, float t)
     return r;
 }
 
+// Concentric disk mapping (Shirley & Chiu 1997)
+float2 concentricDiskSample(float u1, float u2)
+{
+    float2 offset = float2(2.0f * u1 - 1.0f, 2.0f * u2 - 1.0f);
+    if (offset.x == 0.0f && offset.y == 0.0f)
+        return float2(0.0f, 0.0f);
+
+    float theta, r;
+    if (abs(offset.x) > abs(offset.y))
+    {
+        r = offset.x;
+        theta = (M_PI_F / 4.0f) * (offset.y / offset.x);
+    }
+    else
+    {
+        r = offset.y;
+        theta = (M_PI_F / 2.0f) - (M_PI_F / 4.0f) * (offset.x / offset.y);
+    }
+    return float2(r * cos(theta), r * sin(theta));
+}
+
+// Sample regular polygon aperture (blades >= 3)
+float2 samplePolygonAperture(float u1, float u2, int blades)
+{
+    float sectorAngle = 2.0f * M_PI_F / (float)blades;
+    int sector = (int)(u1 * blades);
+    if (sector >= blades) sector = blades - 1;
+    float u = u1 * blades - (float)sector;
+
+    float su = sqrt(u);
+    float bary0 = 1.0f - su;
+    float bary1 = u2 * su;
+
+    float angle0 = sectorAngle * sector;
+    float angle1 = sectorAngle * (sector + 1);
+
+    float x = bary1 * cos(angle0) + (1.0f - bary0 - bary1) * cos(angle1);
+    float y = bary1 * sin(angle0) + (1.0f - bary0 - bary1) * sin(angle1);
+    return float2(x, y);
+}
+
+float2 sampleAperture(thread SamplerState& sampler, const constant Uniforms& params)
+{
+    float u1 = random<SampleDimension::eLensU>(sampler, params.samplerType);
+    float u2 = random<SampleDimension::eLensV>(sampler, params.samplerType);
+
+    float2 p;
+    if (params.apertureBlades < 3)
+        p = concentricDiskSample(u1, u2);
+    else
+        p = samplePolygonAperture(u1, u2, params.apertureBlades);
+
+    if (params.bladeRotation != 0.0f)
+    {
+        float cosR = cos(params.bladeRotation);
+        float sinR = sin(params.bladeRotation);
+        p = float2(p.x * cosR - p.y * sinR, p.x * sinR + p.y * cosR);
+    }
+
+    p.y *= params.anamorphicRatio;
+    return p;
+}
+
 void generateCameraRay(uint2 pixelIndex,
                         thread SamplerState& samplerRnd,
                         thread float3& origin,
@@ -127,9 +190,11 @@ void generateCameraRay(uint2 pixelIndex,
     float2 dimension {(float)params.width, (float)params.height};
     float2 pixelNDC = (pixelPos / dimension) * 2.0f - 1.0f;
 
+    // Lens shift
+    pixelNDC.x += params.shiftX * 2.0f;
+    pixelNDC.y += params.shiftY * 2.0f;
+
     // Interpolate camera matrices for camera motion blur
-    // BVH keyframes: kf0=prevVB at t=0 (shutter open), kf1=VB at t=1 (shutter close)
-    // Camera must match: t=0 → prev camera, t=1 → current camera
     float4x4 clipToView = params.clipToView;
     float4x4 viewToWorld = params.viewToWorld;
     if (motionTime < 1.0f && params.enableCameraMotionBlur)
@@ -145,6 +210,21 @@ void generateCameraRay(uint2 pixelIndex,
 
     origin = (viewToWorld * float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
     direction = normalize(wdir.xyz);
+
+    // Thin lens depth of field
+    if (params.useDof && params.lensRadius > 0.0f)
+    {
+        float3 camRight = float3(viewToWorld[0][0], viewToWorld[1][0], viewToWorld[2][0]);
+        float3 camUp    = float3(viewToWorld[0][1], viewToWorld[1][1], viewToWorld[2][1]);
+        float3 camFwd   = float3(-viewToWorld[0][2], -viewToWorld[1][2], -viewToWorld[2][2]);
+
+        float t = params.focalDistance / max(dot(direction, camFwd), 1e-6f);
+        float3 focalPoint = origin + direction * t;
+
+        float2 lensSample = sampleAperture(samplerRnd, params) * params.lensRadius;
+        origin += camRight * lensSample.x + camUp * lensSample.y;
+        direction = normalize(focalPoint - origin);
+    }
 }
 
 // Fill SurfaceInteraction from hit geometry and sample Material textures
@@ -307,35 +387,13 @@ float3 sampleLight(
     return float3(0.0f, 0.0f, 0.0f);
 }
 
-float3 estimateDirectLighting(
-    constant Uniforms& uniforms,
-    acceleration_structure<instancing, primitive_motion> accelerationStructure,
-    thread intersector<triangle_data, instancing, primitive_motion>& isect,
-    const uint32_t numLights,
-    device UniformLight* lights,
-    thread SamplerState& samplerRnd,
-    thread SurfaceInteraction& si,
-    thread float3& toLight,
-    thread float& lightPdf,
-    const float motionTime)
-{
-    float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
-
-    const uint32_t lightId = min((uint32_t)(numLights * u), numLights - 1);
-    const float lightSelectionPdf = 1.0f / numLights;
-    device const UniformLight& currLight = lights[lightId];
-    const float3 r = sampleLight(uniforms, accelerationStructure, isect, samplerRnd, currLight, si, toLight, lightPdf, motionTime);
-    lightPdf *= lightSelectionPdf;
-    return r;
-}
-
 __attribute__((always_inline))
-int __float_as_int(float x) 
+int __float_as_int(float x)
 {
     return as_type<int>(x);
 }
 __attribute__((always_inline))
-float __int_as_float(int x) 
+float __int_as_float(int x)
 {
     return as_type<float>(x);
 }
@@ -357,6 +415,109 @@ static float3 offset_ray(const float3 p, const float3 n)
                        abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
 }
 
+float3 sampleEnvLightNEE(
+    constant Uniforms& uniforms,
+    acceleration_structure<instancing, primitive_motion> accelerationStructure,
+    thread intersector<triangle_data, instancing, primitive_motion>& isect,
+    thread SamplerState& samplerRnd,
+    thread SurfaceInteraction& si,
+    thread float3& toLight,
+    thread float& lightPdf,
+    device const float* envCdfX,
+    device const float* envCdfY,
+    texture2d<float> envMapTexture,
+    const float motionTime)
+{
+    const float2 xi = float2(
+        random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
+        random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
+
+    float envPdf = 0.0f;
+    float3 dir = sampleEnvMap(xi,
+                              envCdfX, envCdfY,
+                              uniforms.envMapWidth, uniforms.envMapHeight,
+                              uniforms.envMapRotation,
+                              envPdf);
+
+    toLight = dir;
+    lightPdf = envPdf;
+
+    if (envPdf <= 0.0f)
+        return float3(0.0f);
+
+    if (dot(si.shading_normal, dir) <= 0.0f)
+        return float3(0.0f);
+
+    const bool occluded = traceOcclusion(
+        accelerationStructure, isect,
+        offset_ray(si.position, si.geometry_normal),
+        dir,
+        0.001f,
+        1e16f,
+        motionTime);
+
+    if (occluded)
+        return float3(0.0f);
+
+    constexpr sampler envSampler(mag_filter::linear, min_filter::linear, address::repeat, coord::normalized);
+    const float2 uv = dirToEnvUV(dir, uniforms.envMapRotation);
+    const float4 envSample = envMapTexture.sample(envSampler, uv);
+    float3 Li = envSample.xyz;
+    Li *= uniforms.envMapIntensity * float3(uniforms.envMapColorTint);
+
+    return Li * max(dot(si.shading_normal, dir), 0.0f);
+}
+
+float3 estimateDirectLighting(
+    constant Uniforms& uniforms,
+    acceleration_structure<instancing, primitive_motion> accelerationStructure,
+    thread intersector<triangle_data, instancing, primitive_motion>& isect,
+    const uint32_t numLights,
+    device UniformLight* lights,
+    thread SamplerState& samplerRnd,
+    thread SurfaceInteraction& si,
+    thread float3& toLight,
+    thread float& lightPdf,
+    device const float* envCdfX,
+    device const float* envCdfY,
+    texture2d<float> envMapTexture,
+    const float motionTime)
+{
+    if (uniforms.hasEnvMap)
+    {
+        const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
+
+        if (numLights == 0 || u >= 0.5f)
+        {
+            // Sample environment map
+            const float selectionPdf = (numLights > 0) ? 0.5f : 1.0f;
+            const float3 r = sampleEnvLightNEE(uniforms, accelerationStructure, isect,
+                samplerRnd, si, toLight, lightPdf, envCdfX, envCdfY, envMapTexture, motionTime);
+            lightPdf *= selectionPdf;
+            return r;
+        }
+        else
+        {
+            // Sample local light (remap u from [0, 0.5) to [0, 1))
+            const float remappedU = u * 2.0f;
+            const uint32_t lightId = min((uint32_t)(numLights * remappedU), numLights - 1);
+            const float lightSelectionPdf = 0.5f / numLights;
+            device const UniformLight& currLight = lights[lightId];
+            const float3 r = sampleLight(uniforms, accelerationStructure, isect, samplerRnd, currLight, si, toLight, lightPdf, motionTime);
+            lightPdf *= lightSelectionPdf;
+            return r;
+        }
+    }
+
+    float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
+    const uint32_t lightId = min((uint32_t)(numLights * u), numLights - 1);
+    const float lightSelectionPdf = 1.0f / numLights;
+    device const UniformLight& currLight = lights[lightId];
+    const float3 r = sampleLight(uniforms, accelerationStructure, isect, samplerRnd, currLight, si, toLight, lightPdf, motionTime);
+    lightPdf *= lightSelectionPdf;
+    return r;
+}
+
 // Main ray tracing kernel.
 kernel void raytracingKernel(
     uint2                                                      tid                   [[thread_position_in_grid]],
@@ -369,7 +530,10 @@ kernel void raytracingKernel(
     device float4* accum                                                             [[buffer(6)]],
     device const char* prevVertexBuffer                                              [[buffer(7)]],
     device const uint32_t* indexBuffer                                               [[buffer(8)]],
-    device const InstanceData* instanceDataBuffer                                    [[buffer(9)]]
+    device const InstanceData* instanceDataBuffer                                    [[buffer(9)]],
+    device const float* envCdfX                                                      [[buffer(10)]],
+    device const float* envCdfY                                                      [[buffer(11)]],
+    texture2d<float>                                           envMapTexture         [[texture(0)]]
     )
 {
     if (tid.x >= uniforms.width || tid.y >= uniforms.height) 
@@ -421,7 +585,37 @@ kernel void raytracingKernel(
         if (intersection.type == intersection_type::none)
         {
             // Miss
-            prd.radiance += prd.throughput * uniforms.missColor;
+            if (uniforms.hasEnvMap)
+            {
+                constexpr sampler envSampler(mag_filter::linear, min_filter::linear, address::repeat, coord::normalized);
+                const float2 envUV = dirToEnvUV(prd.direction, uniforms.envMapRotation);
+                const float4 envSample = envMapTexture.sample(envSampler, envUV);
+                float3 envColor = envSample.xyz;
+                envColor *= uniforms.envMapIntensity * float3(uniforms.envMapColorTint);
+
+                if (prd.depth == 0 || prd.specularBounce)
+                {
+                    prd.radiance += prd.throughput * envColor;
+                }
+                else
+                {
+                    const float envPdf = envMapPdf(prd.direction,
+                                                   envCdfX, envCdfY,
+                                                   uniforms.envMapWidth, uniforms.envMapHeight,
+                                                   uniforms.envMapRotation);
+                    const float envSelectionPdf = (uniforms.numLights > 0) ? 0.5f : 1.0f;
+                    const float effectiveEnvPdf = envPdf * envSelectionPdf;
+                    if (effectiveEnvPdf > 0.0f)
+                    {
+                        const float misWeight = misWeightBalance(prd.lastBsdfPdf, effectiveEnvPdf);
+                        prd.radiance += prd.throughput * envColor * misWeight;
+                    }
+                }
+            }
+            else
+            {
+                prd.radiance += prd.throughput * uniforms.missColor;
+            }
             prd.throughput = float3(0.0f);
             break;
         }
@@ -444,7 +638,11 @@ kernel void raytracingKernel(
                     }
                     else
                     {
-                        const float lightPdf = getLightPdf(currLight, hitPoint, ray.origin) / (uniforms.numLights);
+                        // Account for env map selection probability in light PDF
+                        const float lightSelectionPdf = uniforms.hasEnvMap
+                            ? 0.5f / (float)uniforms.numLights
+                            : 1.0f / (float)uniforms.numLights;
+                        const float lightPdf = getLightPdf(currLight, hitPoint, ray.origin) * lightSelectionPdf;
                         const float misWeight = misWeightBalance(prd.lastBsdfPdf, lightPdf);
                         prd.radiance += prd.throughput * float3(currLight.color) * -dot(prd.direction, lightNormal) * misWeight;
                     }
@@ -609,7 +807,8 @@ kernel void raytracingKernel(
                 float lightPdf = 0.0f;
                 const float3 radiance = estimateDirectLighting(uniforms, accelerationStructure, i,
                     uniforms.numLights, lights,
-                    prd.sampler, si, toLight, lightPdf, motionTime);
+                    prd.sampler, si, toLight, lightPdf,
+                    envCdfX, envCdfY, envMapTexture, motionTime);
 
                 const bool isNextEventValid = ((dot(toLight, si.shading_normal) > 0.0f) != prd.inside) && lightPdf != 0.0f;
                 if (isNextEventValid)

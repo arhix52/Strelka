@@ -74,8 +74,8 @@ DEVICE_FUNC void bsdf_init(SurfaceInteraction& si,
 }
 #elif defined(__METAL_VERSION__)
 // Metal: textures are resolved externally; this overload takes no texture arg.
-DEVICE_FUNC void bsdf_init(SurfaceInteraction& si,
-                            const MaterialParams& params)
+DEVICE_FUNC void bsdf_init(THREAD_REF SurfaceInteraction& si,
+                            const THREAD_REF MaterialParams& params)
 {
     // Assume si.albedo, si.emission are pre-filled from texture sampling.
     // Clamp and finalize derived values.
@@ -131,7 +131,7 @@ DEVICE_FUNC void bsdf_init(SurfaceInteraction& si,
 //   xi.z         -- lobe selection  (standard_pbr)
 //   xi.w         -- Fresnel coin-flip (dielectric, transmission)
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfSampleResult bsdf_sample(const SurfaceInteraction& si,
+DEVICE_FUNC BsdfSampleResult bsdf_sample(const THREAD_REF SurfaceInteraction& si,
                                          float4 xi)
 {
     switch (si.material_type)
@@ -154,7 +154,7 @@ DEVICE_FUNC BsdfSampleResult bsdf_sample(const SurfaceInteraction& si,
 // ---------------------------------------------------------------------------
 // bsdf_eval -- Evaluate f(wo, wi) and return the sampling PDF
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfEvalResult bsdf_eval(const SurfaceInteraction& si,
+DEVICE_FUNC BsdfEvalResult bsdf_eval(const THREAD_REF SurfaceInteraction& si,
                                      float3 wi)
 {
     switch (si.material_type)
@@ -177,7 +177,7 @@ DEVICE_FUNC BsdfEvalResult bsdf_eval(const SurfaceInteraction& si,
 // ---------------------------------------------------------------------------
 // bsdf_pdf -- Return only the PDF for a given (wo, wi) pair
 // ---------------------------------------------------------------------------
-DEVICE_FUNC float bsdf_pdf(const SurfaceInteraction& si,
+DEVICE_FUNC float bsdf_pdf(const THREAD_REF SurfaceInteraction& si,
                            float3 wi)
 {
     switch (si.material_type)

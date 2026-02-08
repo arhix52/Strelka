@@ -12,6 +12,7 @@
     #else
     #define DEVICE_FUNC   inline
     #endif
+    #define THREAD_REF
     #define M_PI_F        3.14159265358979323846f
     #define M_1_PI_F      0.31830988618379067154f
     #define M_2_PI_F      0.63661977236758134308f
@@ -62,6 +63,7 @@
 #elif defined(__METAL_VERSION__)
 // ---- Metal Shading Language ------------------------------------------------
     #define DEVICE_FUNC   inline
+    #define THREAD_REF    thread
     // M_PI_F is defined by <metal_stdlib>; only define if missing
     #ifndef M_PI_F
     #define M_PI_F        3.14159265358979323846f
@@ -73,12 +75,21 @@
     #define M_2_PI_F      0.63661977236758134308f
     #endif
 
+    // C math compat aliases so shared headers (sampling.h, fresnel.h) compile
+    #define sqrtf(x)   metal::sqrt(x)
+    #define cosf(x)    metal::cos(x)
+    #define sinf(x)    metal::sin(x)
+    #define fmaxf(x,y) metal::fmax(x,y)
+    #define fminf(x,y) metal::fmin(x,y)
+    #define fabsf(x)   metal::fabs(x)
+
     inline float3 make_float3(float x, float y, float z) { return float3(x, y, z); }
     inline float3 make_float3(float v)                    { return float3(v); }
     inline float2 make_float2(float x, float y)           { return float2(x, y); }
     inline float4 make_float4(float x, float y, float z, float w) { return float4(x, y, z, w); }
 
-    inline float  saturate(float v)  { return metal::saturate(v); }
+    // Use metal::saturate directly; do NOT define a wrapper (ambiguous with using namespace metal)
+    #define saturate(v) metal::saturate(v)
     inline float  sqr(float v)       { return v * v; }
     inline float  luminance(float3 c){ return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
 
@@ -105,6 +116,7 @@
 #else
 // ---- CPU (tests, previews) ------------------------------------------------
     #define DEVICE_FUNC   inline
+    #define THREAD_REF
 
     #include <glm/glm.hpp>
     #include <glm/gtc/constants.hpp>

@@ -55,7 +55,7 @@ DEVICE_FUNC float uniform_hemisphere_pdf()
 // Build an orthonormal basis from a normal vector (Frisvad / Duff et al.)
 // Returns tangent T and bitangent B such that (T, B, N) is right-handed.
 // ---------------------------------------------------------------------------
-DEVICE_FUNC void build_onb(float3 N, float3& T, float3& B)
+DEVICE_FUNC void build_onb(float3 N, THREAD_REF float3& T, THREAD_REF float3& B)
 {
     if (N.z < -0.9999999f)
     {

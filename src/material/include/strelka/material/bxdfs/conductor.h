@@ -20,7 +20,7 @@
 // ---------------------------------------------------------------------------
 // Sample
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfSampleResult conductor_sample(const SurfaceInteraction& si,
+DEVICE_FUNC BsdfSampleResult conductor_sample(const THREAD_REF SurfaceInteraction& si,
                                               float u1, float u2)
 {
     BsdfSampleResult result;
@@ -97,7 +97,7 @@ DEVICE_FUNC BsdfSampleResult conductor_sample(const SurfaceInteraction& si,
 // ---------------------------------------------------------------------------
 // Evaluate
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfEvalResult conductor_eval(const SurfaceInteraction& si,
+DEVICE_FUNC BsdfEvalResult conductor_eval(const THREAD_REF SurfaceInteraction& si,
                                           float3 wi)
 {
     BsdfEvalResult result;
@@ -141,7 +141,7 @@ DEVICE_FUNC BsdfEvalResult conductor_eval(const SurfaceInteraction& si,
 // ---------------------------------------------------------------------------
 // PDF only
 // ---------------------------------------------------------------------------
-DEVICE_FUNC float conductor_pdf(const SurfaceInteraction& si, float3 wi)
+DEVICE_FUNC float conductor_pdf(const THREAD_REF SurfaceInteraction& si, float3 wi)
 {
     float3 N = si.shading_normal;
     float3 V = si.wo;

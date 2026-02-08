@@ -24,11 +24,13 @@
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
+#define TINYEXR_IMPLEMENTATION
+#include <tinyexr.h>
 #include <log.h>
 
 #include <simd/simd.h>
 
-#include "shaders/ShaderTypes.h"
+#include "ShaderTypes.h"
 
 using namespace oka;
 namespace fs = std::filesystem;
@@ -92,7 +94,7 @@ void MetalRender::createMetalMaterials()
     {
         Material material = {};
         const auto& p = currMatDesc.params;
-        material.base_color = { p.base_color.x, p.base_color.y, p.base_color.z };
+        material.base_color = packed_float3(simd_make_float3(p.base_color.x, p.base_color.y, p.base_color.z));
         material.metallic = p.metallic;
         material.roughness = p.roughness;
         material.ior = p.ior;
@@ -102,7 +104,7 @@ void MetalRender::createMetalMaterials()
         material.clearcoat = p.clearcoat;
         material.clearcoat_roughness = p.clearcoat_roughness;
         material.anisotropy = p.anisotropy;
-        material.emission = { p.emission.x, p.emission.y, p.emission.z };
+        material.emission = packed_float3(simd_make_float3(p.emission.x, p.emission.y, p.emission.z));
         material.emission_strength = p.emission_strength;
         material.normal_scale = p.normal_scale;
         material.occlusion_strength = p.occlusion_strength;
@@ -154,6 +156,15 @@ void MetalRender::render(Buffer* output)
             buildSkinningPipeline();
             createSkinDataBuffer();
             allocJointMatrices();
+        }
+
+        // Load environment map if specified
+        const auto& envLight = mScene->getEnvLight();
+        if (envLight.has_value() && !envLight->texturePath.empty())
+        {
+            const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");
+            const fs::path envTexPath = fs::path(resourcePathStr) / envLight->texturePath;
+            loadEnvMap(envTexPath.string());
         }
     }
 
@@ -369,6 +380,41 @@ void MetalRender::render(Buffer* output)
     pUniformData->isMotionBlurVisible = (uint32_t)settings.getAs<bool>("render/isMotionBlurVisible");
     pUniformData->enableCameraMotionBlur = (uint32_t)settings.getAs<bool>("render/enableCameraMotionBlur");
 
+    // Depth of field
+    pUniformData->useDof = camera.useDof ? 1 : 0;
+    pUniformData->focalDistance = camera.focalDistance;
+    pUniformData->lensRadius = camera.useDof ? camera.focalLengthMm / (2.0f * camera.fStopDof * 1000.0f) : 0.0f;
+    pUniformData->apertureBlades = camera.apertureBlades;
+    pUniformData->bladeRotation = camera.bladeRotation;
+    pUniformData->anamorphicRatio = camera.anamorphicRatio;
+
+    // Lens shift
+    pUniformData->shiftX = camera.shiftX;
+    pUniformData->shiftY = camera.shiftY;
+
+    // Environment map
+    if (mEnvMapLoaded)
+    {
+        const auto& envLight = mScene->getEnvLight();
+        pUniformData->hasEnvMap = 1;
+        pUniformData->envMapWidth = (uint32_t)mEnvMapTexture->width();
+        pUniformData->envMapHeight = (uint32_t)mEnvMapTexture->height();
+        pUniformData->envMapIntensity = mEnvMapAutoScale * (envLight.has_value() ? envLight->intensity : 1.0f);
+        pUniformData->envMapRotation = envLight.has_value() ? envLight->rotationY * (M_PI / 180.0f) : 0.0f;
+        if (envLight.has_value())
+        {
+            pUniformData->envMapColorTint = { envLight->color.x, envLight->color.y, envLight->color.z };
+        }
+        else
+        {
+            pUniformData->envMapColorTint = { 1.0f, 1.0f, 1.0f };
+        }
+    }
+    else
+    {
+        pUniformData->hasEnvMap = 0;
+    }
+
     pUniformTonemap->width = width;
     pUniformTonemap->height = height;
     pUniformTonemap->tonemapperType = settings.getAs<uint32_t>("render/pt/tonemapperType");
@@ -416,6 +462,28 @@ void MetalRender::render(Buffer* output)
     const bool enableCameraMotionBlurCurr = settings.getAs<bool>("render/enableCameraMotionBlur");
     settingsChanged |= (enableCameraMotionBlurPrev != enableCameraMotionBlurCurr);
     enableCameraMotionBlurPrev = enableCameraMotionBlurCurr;
+
+    static int32_t useDofPrev = 0;
+    settingsChanged |= (useDofPrev != pUniformData->useDof);
+    useDofPrev = pUniformData->useDof;
+
+    static float focalDistancePrev = 0.0f;
+    settingsChanged |= (focalDistancePrev != pUniformData->focalDistance);
+    focalDistancePrev = pUniformData->focalDistance;
+
+    static float lensRadiusPrev = 0.0f;
+    settingsChanged |= (lensRadiusPrev != pUniformData->lensRadius);
+    lensRadiusPrev = pUniformData->lensRadius;
+
+    static int32_t apertureBladesPrev = 0;
+    settingsChanged |= (apertureBladesPrev != pUniformData->apertureBlades);
+    apertureBladesPrev = pUniformData->apertureBlades;
+
+    static float shiftXPrev = 0.0f;
+    static float shiftYPrev = 0.0f;
+    settingsChanged |= (shiftXPrev != pUniformData->shiftX) || (shiftYPrev != pUniformData->shiftY);
+    shiftXPrev = pUniformData->shiftX;
+    shiftYPrev = pUniformData->shiftY;
 
     static uint32_t maxDepthPrev = 0;
     settingsChanged |= (maxDepthPrev != pUniformData->maxDepth);
@@ -547,6 +615,22 @@ void MetalRender::render(Buffer* output)
         pComputeEncoder->setBuffer(mPrevVertexBuffer, 0, 7);
         pComputeEncoder->setBuffer(mIndexBuffer, 0, 8);
         pComputeEncoder->setBuffer(mInstanceDataBuffer, 0, 9);
+        // Environment map buffers
+        if (mEnvCdfXBuffer)
+        {
+            pComputeEncoder->useResource(mEnvCdfXBuffer, MTL::ResourceUsageRead);
+            pComputeEncoder->setBuffer(mEnvCdfXBuffer, 0, 10);
+        }
+        if (mEnvCdfYBuffer)
+        {
+            pComputeEncoder->useResource(mEnvCdfYBuffer, MTL::ResourceUsageRead);
+            pComputeEncoder->setBuffer(mEnvCdfYBuffer, 0, 11);
+        }
+        if (mEnvMapTexture)
+        {
+            pComputeEncoder->useResource(mEnvMapTexture, MTL::ResourceUsageRead);
+            pComputeEncoder->setTexture(mEnvMapTexture, 0);
+        }
         if (mInstanceBuffer != nullptr)
         {
             const MTL::Size gridSize = MTL::Size(width, height, 1);
@@ -1325,4 +1409,130 @@ void MetalRender::rebuildTLAS()
     mInstanceAccelerationStructure = createAccelerationStructureNoCompact(accelDescriptor);
 
     pPool->release();
+}
+
+void MetalRender::loadEnvMap(const std::string& texturePath)
+{
+    int width = 0, height = 0;
+    float* pixelData = nullptr;
+    bool isExr = false;
+
+    const std::string ext = fs::path(texturePath).extension().string();
+    if (ext == ".exr" || ext == ".EXR")
+    {
+        const char* err = nullptr;
+        int ret = LoadEXR(&pixelData, &width, &height, texturePath.c_str(), &err);
+        if (ret != TINYEXR_SUCCESS)
+        {
+            STRELKA_ERROR("Failed to load EXR env map: {} ({})", texturePath, err ? err : "unknown");
+            if (err) FreeEXRErrorMessage(err);
+            return;
+        }
+        isExr = true;
+    }
+    else
+    {
+        int channels = 0;
+        pixelData = stbi_loadf(texturePath.c_str(), &width, &height, &channels, 4);
+        if (!pixelData)
+        {
+            STRELKA_ERROR("Failed to load env map: {}", texturePath);
+            return;
+        }
+    }
+
+    STRELKA_INFO("Loaded env map: {} ({}x{})", texturePath, width, height);
+
+    // Create Metal texture (RGBA32Float)
+    MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    pTextureDesc->setWidth(width);
+    pTextureDesc->setHeight(height);
+    pTextureDesc->setPixelFormat(MTL::PixelFormatRGBA32Float);
+    pTextureDesc->setTextureType(MTL::TextureType2D);
+    pTextureDesc->setStorageMode(MTL::StorageModeManaged);
+    pTextureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
+
+    mEnvMapTexture = mDevice->newTexture(pTextureDesc);
+    pTextureDesc->release();
+
+    const MTL::Region region = MTL::Region::Make3D(0, 0, 0, width, height, 1);
+    mEnvMapTexture->replaceRegion(region, 0, pixelData, width * sizeof(float) * 4);
+
+    // Build 2D CDF on CPU (sequential, runs once at load)
+    const size_t cdfXSize = (size_t)width * height;
+    const size_t cdfYSize = (size_t)height;
+    std::vector<float> cdfX(cdfXSize);
+    std::vector<float> cdfY(cdfYSize);
+    std::vector<float> rowSums(height);
+
+    // Phase 1: Build conditional CDF per row
+    for (int y = 0; y < height; ++y)
+    {
+        const float v = ((float)y + 0.5f) / (float)height;
+        const float sinTheta = std::sin(v * M_PI);
+
+        float sum = 0.0f;
+        for (int x = 0; x < width; ++x)
+        {
+            const int pixelIdx = (y * width + x) * 4;
+            const float r = pixelData[pixelIdx + 0];
+            const float g = pixelData[pixelIdx + 1];
+            const float b = pixelData[pixelIdx + 2];
+            const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+            sum += lum * sinTheta;
+            cdfX[y * width + x] = sum;
+        }
+        rowSums[y] = sum;
+
+        // Normalize to [0, 1]
+        if (sum > 0.0f)
+        {
+            const float invSum = 1.0f / sum;
+            for (int x = 0; x < width; ++x)
+                cdfX[y * width + x] *= invSum;
+        }
+        else
+        {
+            for (int x = 0; x < width; ++x)
+                cdfX[y * width + x] = (float)(x + 1) / (float)width;
+        }
+    }
+
+    // Phase 2: Build marginal CDF from row sums
+    float totalPower = 0.0f;
+    for (int y = 0; y < height; ++y)
+    {
+        totalPower += rowSums[y];
+        cdfY[y] = totalPower;
+    }
+    if (totalPower > 0.0f)
+    {
+        const float invTotal = 1.0f / totalPower;
+        for (int y = 0; y < height; ++y)
+            cdfY[y] *= invTotal;
+    }
+    else
+    {
+        for (int y = 0; y < height; ++y)
+            cdfY[y] = (float)(y + 1) / (float)height;
+    }
+
+    // Upload CDF buffers to GPU
+    mEnvCdfXBuffer = mDevice->newBuffer(cdfX.data(), cdfXSize * sizeof(float), MTL::ResourceStorageModeManaged);
+    mEnvCdfYBuffer = mDevice->newBuffer(cdfY.data(), cdfYSize * sizeof(float), MTL::ResourceStorageModeManaged);
+
+    // Free host pixel data
+    if (isExr)
+        free(pixelData);
+    else
+        stbi_image_free(pixelData);
+
+    // Auto-calibrate env map intensity
+    const float avgWeightedLum = totalPower / (float)(width * height);
+    const float kCalibrationTarget = 1000.0f;
+    mEnvMapAutoScale = (avgWeightedLum > 1e-6f) ? kCalibrationTarget / avgWeightedLum : 1.0f;
+    mEnvMapLoaded = true;
+
+    STRELKA_INFO("Env map CDF built, total power: {}, avgLum: {:.4f}, autoScale: {:.1f}",
+                 totalPower, avgWeightedLum, mEnvMapAutoScale);
 }

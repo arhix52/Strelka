@@ -140,7 +140,7 @@ DEVICE_FUNC float ggx_vndf_pdf(float alpha, float NdotH, float NdotV, float Vdot
 // Anisotropic GGX helpers (for future use)
 // ---------------------------------------------------------------------------
 DEVICE_FUNC void anisotropic_alpha(float roughness, float anisotropy,
-                                   float& alpha_x, float& alpha_y)
+                                   THREAD_REF float& alpha_x, THREAD_REF float& alpha_y)
 {
     float r2 = roughness * roughness;
     float aspect = sqrtf(1.0f - 0.9f * anisotropy);

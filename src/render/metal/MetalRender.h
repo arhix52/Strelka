@@ -83,6 +83,13 @@ private:
     bool mEnableMotionBlur = false;
     View mPrevMotionBlurView; // camera at T - shutter for camera motion blur
 
+    // Environment map (dome light)
+    MTL::Texture* mEnvMapTexture = nullptr;
+    MTL::Buffer* mEnvCdfXBuffer = nullptr;
+    MTL::Buffer* mEnvCdfYBuffer = nullptr;
+    float mEnvMapAutoScale = 1.0f;
+    bool mEnvMapLoaded = false;
+
     void buildComputePipeline();
     void buildTonemapperPipeline();
     void buildBuffers();
@@ -100,6 +107,9 @@ private:
     void allocJointMatrices();
     void applySkinning();
     void copyVertexBufferToPrev();
+
+    // Environment map
+    void loadEnvMap(const std::string& texturePath);
 
     // BVH management
     MTL::PrimitiveAccelerationStructureDescriptor* createMotionBLASDescriptor(

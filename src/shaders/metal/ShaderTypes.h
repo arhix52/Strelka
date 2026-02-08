@@ -81,7 +81,26 @@ struct Uniforms
     uint32_t enableMotionBlur;
     uint32_t isMotionBlurVisible;
     uint32_t enableCameraMotionBlur;
-    uint32_t pad0;
+
+    // Depth of field
+    int32_t useDof;
+    float focalDistance;
+    float lensRadius;
+    int32_t apertureBlades;
+    float bladeRotation;
+    float anamorphicRatio;
+
+    // Lens shift
+    float shiftX;
+    float shiftY;
+
+    // Environment map (dome light)
+    uint32_t hasEnvMap;
+    uint32_t envMapWidth;
+    uint32_t envMapHeight;
+    float envMapIntensity;
+    float envMapRotation;
+    vector_float3 envMapColorTint;
 };
 
 struct UniformsTonemap

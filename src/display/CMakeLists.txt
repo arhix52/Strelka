@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
 
-find_package(glad REQUIRED)
 find_package(imgui REQUIRED)
 find_package(imguizmo REQUIRED)
 find_package(glfw3 REQUIRED)
@@ -13,6 +12,7 @@ set(DISPLAY_SOURCES_COMMON
 )
 
 if(WIN32 OR LINUX)
+    find_package(glad REQUIRED)
     find_package(CUDAToolkit REQUIRED)
 
     set(IMGUI_SOURCES
@@ -73,6 +73,8 @@ if(APPLE)
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${ROOT_HOME}/external/imgui/
             ${ROOT_HOME}/third_party/metal_cpp/
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
     )
 
     target_link_libraries(strelka_display
@@ -86,6 +88,7 @@ if(APPLE)
     target_link_libraries(strelka_display
         PUBLIC
             strelka_foundation
+            strelka_render
             imgui::imgui
             glfw
             glm::glm

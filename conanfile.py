@@ -24,7 +24,8 @@ class StrelkaRecipe(ConanFile):
         self.requires("imgui/1.92.5-docking", override=True)
         self.requires("glfw/3.4")
         self.requires("imguizmo/cci.20231114")
-        self.requires("glad/0.1.36")       # Linux/Win only
+        if self.settings.os != "Macos":
+            self.requires("glad/0.1.36")
         self.requires("cxxopts/3.1.1")
 
         # Testing

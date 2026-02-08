@@ -18,7 +18,7 @@
 // ---------------------------------------------------------------------------
 // Sample
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfSampleResult dielectric_sample(const SurfaceInteraction& si,
+DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteraction& si,
                                                float u1, float u2, float u3)
 {
     BsdfSampleResult result;
@@ -167,7 +167,7 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const SurfaceInteraction& si,
 // ---------------------------------------------------------------------------
 // Evaluate  (for rough dielectrics; smooth dielectrics are delta and return 0)
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfEvalResult dielectric_eval(const SurfaceInteraction& si,
+DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& si,
                                            float3 wi)
 {
     BsdfEvalResult result;
@@ -245,7 +245,7 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const SurfaceInteraction& si,
 // ---------------------------------------------------------------------------
 // PDF only
 // ---------------------------------------------------------------------------
-DEVICE_FUNC float dielectric_pdf(const SurfaceInteraction& si, float3 wi)
+DEVICE_FUNC float dielectric_pdf(const THREAD_REF SurfaceInteraction& si, float3 wi)
 {
     BsdfEvalResult r = dielectric_eval(si, wi);
     return r.pdf;

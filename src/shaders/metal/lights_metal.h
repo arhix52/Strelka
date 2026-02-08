@@ -23,6 +23,12 @@ __inline__ float misWeightBalance(const float a, const float b)
     return 1.0f / ( 1.0f + (b / a) );
 }
 
+__inline__ float misWeightPower(const float a, const float b)
+{
+    const float a2 = a * a;
+    return a2 / (a2 + b * b);
+}
+
 static float calcLightArea(device const UniformLight& l)
 {
     float area = 0.0f;

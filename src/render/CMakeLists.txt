@@ -55,6 +55,8 @@ if(WIN32 OR LINUX)
 endif()
 
 if(APPLE)
+    find_package(tinyexr REQUIRED)
+
     set(RENDER_SOURCES
         ${RENDER_SOURCES_COMMON}
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalRender.h
@@ -69,6 +71,9 @@ if(APPLE)
         PRIVATE
             ${ROOT_HOME}/third_party/metal_cpp/
             ${ROOT_HOME}/third_party/metal_cpp_extensions/
+        PUBLIC
+            ${CMAKE_SOURCE_DIR}/src/shaders/common
+            ${CMAKE_SOURCE_DIR}/src/shaders/metal
     )
 
     target_link_libraries(strelka_render
@@ -85,6 +90,7 @@ if(APPLE)
             strelka_material
             glm::glm
             stb::stb
+            tinyexr::tinyexr
     )
 endif()
 

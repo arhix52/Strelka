@@ -35,15 +35,32 @@ target_include_directories(StrelkaEditor
         ${ROOT_HOME}/third_party/imgui_file_dialog
 )
 
-target_link_libraries(StrelkaEditor
-    PUBLIC
-        cxxopts::cxxopts
-        imgui::imgui
-        imguizmo::imguizmo
-        strelka_render
-        strelka_shaders
-        strelka_display
-        strelka_sceneloader
-        strelka_foundation
-        strelka_scene
-)
+if(APPLE)
+    # On Apple, strelka_shaders is a custom_target (metallib compilation), not a library.
+    # Use add_dependencies for build ordering; no link needed.
+    target_link_libraries(StrelkaEditor
+        PUBLIC
+            cxxopts::cxxopts
+            imgui::imgui
+            imguizmo::imguizmo
+            strelka_render
+            strelka_display
+            strelka_sceneloader
+            strelka_foundation
+            strelka_scene
+    )
+    add_dependencies(StrelkaEditor strelka_shaders)
+else()
+    target_link_libraries(StrelkaEditor
+        PUBLIC
+            cxxopts::cxxopts
+            imgui::imgui
+            imguizmo::imguizmo
+            strelka_render
+            strelka_shaders
+            strelka_display
+            strelka_sceneloader
+            strelka_foundation
+            strelka_scene
+    )
+endif()

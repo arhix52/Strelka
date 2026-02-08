@@ -21,6 +21,8 @@ enum class SampleDimension : uint32_t
   eBSDF2,
   eBSDF3,
   eRussianRoulette,
+  eLensU,
+  eLensV,
   eNUM_DIMENSIONS
 };
 

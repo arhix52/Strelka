@@ -14,7 +14,7 @@
 // Lambertian diffuse: f(wo, wi) = albedo / pi
 // ---------------------------------------------------------------------------
 
-DEVICE_FUNC BsdfSampleResult diffuse_sample(const SurfaceInteraction& si,
+DEVICE_FUNC BsdfSampleResult diffuse_sample(const THREAD_REF SurfaceInteraction& si,
                                             float u1, float u2)
 {
     BsdfSampleResult result;
@@ -47,7 +47,7 @@ DEVICE_FUNC BsdfSampleResult diffuse_sample(const SurfaceInteraction& si,
     return result;
 }
 
-DEVICE_FUNC BsdfEvalResult diffuse_eval(const SurfaceInteraction& si,
+DEVICE_FUNC BsdfEvalResult diffuse_eval(const THREAD_REF SurfaceInteraction& si,
                                         float3 wi)
 {
     BsdfEvalResult result;
@@ -66,7 +66,7 @@ DEVICE_FUNC BsdfEvalResult diffuse_eval(const SurfaceInteraction& si,
     return result;
 }
 
-DEVICE_FUNC float diffuse_pdf(const SurfaceInteraction& si, float3 wi)
+DEVICE_FUNC float diffuse_pdf(const THREAD_REF SurfaceInteraction& si, float3 wi)
 {
     float cos_theta = dot(si.shading_normal, wi);
     return cosine_hemisphere_pdf(fmaxf(cos_theta, 0.0f));
