@@ -60,7 +60,7 @@ if(APPLE)
     set(RENDER_SOURCES
         ${RENDER_SOURCES_COMMON}
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalRender.h
-        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalRender.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalRender.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalBuffer.h
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalBuffer.cpp
     )

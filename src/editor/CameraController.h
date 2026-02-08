@@ -11,8 +11,17 @@ class CameraController : public oka::InputHandler
 
     float rotationSpeed = 0.025f;
     float movementSpeed = 1.0f;
+    float keyRotationSpeed = 60.0f; // degrees per second for arrow key rotation
 
     bool mIsViewportHovered = false;
+
+    struct RotateKeys
+    {
+        bool left = false;
+        bool right = false;
+        bool up = false;
+        bool down = false;
+    } mRotateKeys;
 
 public:
     virtual ~CameraController() = default;
@@ -22,6 +31,17 @@ public:
         mCam.rotationSpeed = rotationSpeed;
         mCam.movementSpeed = speed;
         mCam.update(deltaTime);
+
+        // Arrow key rotation
+        if (mRotateKeys.left || mRotateKeys.right || mRotateKeys.up || mRotateKeys.down)
+        {
+            float dx = 0.0f, dy = 0.0f;
+            if (mRotateKeys.left)  dx -= keyRotationSpeed * deltaTime;
+            if (mRotateKeys.right) dx += keyRotationSpeed * deltaTime;
+            if (mRotateKeys.up)    dy -= keyRotationSpeed * deltaTime;
+            if (mRotateKeys.down)  dy += keyRotationSpeed * deltaTime;
+            mCam.rotate(dx, dy);
+        }
     }
 
     void updateViewMatrix()
@@ -40,7 +60,13 @@ public:
             mCam.keys.down = false;
             mCam.keys.forward = false;
             mCam.keys.back = false;
+            mRotateKeys = {};
         }
+    }
+
+    bool isRotating() const
+    {
+        return mRotateKeys.left || mRotateKeys.right || mRotateKeys.up || mRotateKeys.down;
     }
 
     Camera& getCamera()
@@ -95,6 +121,22 @@ public:
         }
         case GLFW_KEY_E: {
             mCam.keys.down = keyState;
+            break;
+        }
+        case GLFW_KEY_LEFT: {
+            mRotateKeys.left = keyState;
+            break;
+        }
+        case GLFW_KEY_RIGHT: {
+            mRotateKeys.right = keyState;
+            break;
+        }
+        case GLFW_KEY_UP: {
+            mRotateKeys.up = keyState;
+            break;
+        }
+        case GLFW_KEY_DOWN: {
+            mRotateKeys.down = keyState;
             break;
         }
         default:

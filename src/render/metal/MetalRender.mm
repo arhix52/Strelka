@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cassert>
 #include <filesystem>
+#include <unistd.h>
 
 #include <glm/glm.hpp>
 #include <glm/mat4x3.hpp>
@@ -37,11 +38,153 @@ namespace fs = std::filesystem;
 
 MetalRender::MetalRender(/* args */) = default;
 
-MetalRender::~MetalRender() = default;
+MetalRender::~MetalRender()
+{
+    @autoreleasepool
+    {
+        // Drain the GPU: submit a fence and wait for all prior work to finish.
+        // Then spin until the async completion handler has set mRenderBusy=false,
+        // ensuring no handler is still accessing members when we release resources.
+        if (mCommandQueue)
+        {
+            MTL::CommandBuffer* fence = mCommandQueue->commandBuffer();
+            if (fence)
+            {
+                fence->commit();
+                fence->waitUntilCompleted();
+            }
+        }
+        while (mRenderBusy.load(std::memory_order_acquire))
+        {
+            usleep(100);
+        }
+
+        // Delete C++ wrapper objects (MetalBuffer) for async output.
+        // MetalBuffer::~MetalBuffer calls release() on its inner MTL::Buffer.
+        delete mAsyncOutputBuffers[0];
+        mAsyncOutputBuffers[0] = nullptr;
+        delete mAsyncOutputBuffers[1];
+        mAsyncOutputBuffers[1] = nullptr;
+
+        // Free heap-allocated Mesh structs (but NOT their Metal resources,
+        // which are ref-counted by the device and released below).
+        for (auto* mesh : mMetalMeshes)
+            delete mesh;
+        mMetalMeshes.clear();
+
+        // Metal objects: release only those we explicitly created with newXxx().
+        // Some objects (e.g. acceleration structures returned by newAccelerationStructure)
+        // may share internal references. Use a flat release-and-null pattern to
+        // avoid double-release from pointer authentication failures.
+        auto safeRelease = [](auto*& p) {
+            if (p) { p->release(); p = nullptr; }
+        };
+
+        // Acceleration structures
+        for (auto*& as : mPrimitiveAccelerationStructures)
+            safeRelease(as);
+        safeRelease(mInstanceAccelerationStructure);
+
+        // Material textures
+        for (auto*& tex : mMaterialTextures)
+            safeRelease(tex);
+
+        // Buffers
+        safeRelease(mAccumulationBuffer);
+        safeRelease(mLightBuffer);
+        safeRelease(mVertexBuffer);
+        safeRelease(mIndexBuffer);
+        safeRelease(mInstanceBuffer);
+        safeRelease(mMaterialBuffer);
+        safeRelease(mSkinDataBuffer);
+        safeRelease(mJointMatricesBuffer);
+        safeRelease(mPrevVertexBuffer);
+        safeRelease(mInstanceDataBuffer);
+        for (auto*& buf : mUniformBuffers) safeRelease(buf);
+        for (auto*& buf : mUniformTMBuffers) safeRelease(buf);
+
+        // Environment map
+        safeRelease(mEnvMapTexture);
+        safeRelease(mEnvCdfXBuffer);
+        safeRelease(mEnvCdfYBuffer);
+
+        // Pipeline states
+        safeRelease(mPathTracingPSO);
+        safeRelease(mTonemapperPSO);
+        safeRelease(mSkinningPSO);
+        safeRelease(mTriangleUpdatePSO);
+
+        // Queue & device (release last)
+        safeRelease(mCommandQueue);
+        safeRelease(mDevice);
+    }
+}
+
+void MetalRender::triggerRenderIfIdle()
+{
+    if (mRenderBusy.load())
+        return;
+
+    const uint32_t w = getSettings()->getAs<uint32_t>("render/width");
+    const uint32_t h = getSettings()->getAs<uint32_t>("render/height");
+
+    // Pick the buffer that is NOT currently being displayed
+    int ri = mReadyIndex.load();
+    mWriteIndex = (ri >= 0) ? (1 - ri) : 0;
+
+    // Create or resize the write buffer
+    if (!mAsyncOutputBuffers[mWriteIndex])
+    {
+        BufferDesc desc{};
+        desc.format = BufferFormat::FLOAT4;
+        desc.width = w;
+        desc.height = h;
+        mAsyncOutputBuffers[mWriteIndex] = createBuffer(desc);
+    }
+    else if (mAsyncOutputBuffers[mWriteIndex]->width() != w ||
+             mAsyncOutputBuffers[mWriteIndex]->height() != h)
+    {
+        mAsyncOutputBuffers[mWriteIndex]->resize(w, h);
+    }
+
+    // Also ensure the other buffer exists (display may need it)
+    int otherIdx = 1 - mWriteIndex;
+    if (!mAsyncOutputBuffers[otherIdx])
+    {
+        BufferDesc desc{};
+        desc.format = BufferFormat::FLOAT4;
+        desc.width = w;
+        desc.height = h;
+        mAsyncOutputBuffers[otherIdx] = createBuffer(desc);
+    }
+    else if (mAsyncOutputBuffers[otherIdx]->width() != w ||
+             mAsyncOutputBuffers[otherIdx]->height() != h)
+    {
+        // Resize ready buffer too — display will pick up new size next frame
+        mAsyncOutputBuffers[otherIdx]->resize(w, h);
+        mReadyIndex.store(-1); // invalidate since we resized
+    }
+
+    mRenderBusy.store(true);
+    render(mAsyncOutputBuffers[mWriteIndex]);
+}
+
+Buffer* MetalRender::getReadyBuffer()
+{
+    int ri = mReadyIndex.load();
+    if (ri < 0)
+        return nullptr;
+    return mAsyncOutputBuffers[ri];
+}
 
 void MetalRender::init()
 {
     mDevice = MTL::CreateSystemDefaultDevice();
+    if (!mDevice)
+    {
+        STRELKA_FATAL("Failed to create Metal device");
+        return;
+    }
     mCommandQueue = mDevice->newCommandQueue();
     buildComputePipeline();
     buildTonemapperPipeline();
@@ -141,7 +284,9 @@ void MetalRender::render(Buffer* output)
     using simd::float4x4;
     NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
-    if (getSharedContext().mFrameNumber == 0)
+    SharedContext& ctx = getSharedContext();
+
+    if (ctx.mFrameNumber == 0)
     {
         buildBuffers();
         createMetalMaterials();
@@ -178,7 +323,7 @@ void MetalRender::render(Buffer* output)
     {
         mAccumulationBuffer->release();
         mAccumulationBuffer = mDevice->newBuffer(requiredSize, MTL::ResourceStorageModePrivate);
-        getSharedContext().mSubframeIndex = 0;
+        ctx.mSubframeIndex = 0;
     }
 
     // Update motion blur enable state from settings each frame
@@ -195,16 +340,19 @@ void MetalRender::render(Buffer* output)
         constexpr float EPSILON = 1e-6f;
         bool animStateChanged = false;
         float maxTimeDelta = 0.0f; // track largest time jump for scrub detection
-        std::vector<float> targetTimes(animations.size());
-        std::vector<bool> changed(animations.size(), false);
-        for (int i = 0; i < (int)animations.size(); ++i)
+        const size_t animCount = animations.size();
+        mAnimTargetTimes.resize(animCount);
+        mAnimChanged.resize(animCount);
+        std::fill(mAnimChanged.begin(), mAnimChanged.end(), false);
+        for (int i = 0; i < (int)animCount; ++i)
         {
-            const std::string scrollNameStr = "render/animation/anim" + std::to_string(i) + "/time";
-            targetTimes[i] = animSettings.getAs<float>(scrollNameStr.c_str());
-            const float delta = std::abs(animations[i].current - targetTimes[i]);
+            char key[64];
+            snprintf(key, sizeof(key), "render/animation/anim%d/time", i);
+            mAnimTargetTimes[i] = animSettings.getAs<float>(key);
+            const float delta = std::abs(animations[i].current - mAnimTargetTimes[i]);
             if (delta > EPSILON)
             {
-                changed[i] = true;
+                mAnimChanged[i] = true;
                 animStateChanged = true;
                 maxTimeDelta = std::max(maxTimeDelta, delta);
             }
@@ -232,8 +380,8 @@ void MetalRender::render(Buffer* output)
                 bool pass1Skeletal = false;
                 for (int i = 0; i < (int)animations.size(); ++i)
                 {
-                    if (!changed[i]) continue;
-                    float tOpen = targetTimes[i] + shutterOffset;
+                    if (!mAnimChanged[i]) continue;
+                    float tOpen = mAnimTargetTimes[i] + shutterOffset;
                     tOpen = std::clamp(tOpen, animations[i].start, animations[i].end);
                     animations[i].current = tOpen;
                     pass1Skeletal |= mScene->applyAnimation(i);
@@ -259,8 +407,8 @@ void MetalRender::render(Buffer* output)
                 bool pass2Skeletal = false;
                 for (int i = 0; i < (int)animations.size(); ++i)
                 {
-                    if (!changed[i]) continue;
-                    float tClose = targetTimes[i] + shutterOffset + shutterDuration;
+                    if (!mAnimChanged[i]) continue;
+                    float tClose = mAnimTargetTimes[i] + shutterOffset + shutterDuration;
                     tClose = std::clamp(tClose, animations[i].start, animations[i].end);
                     animations[i].current = tClose;
                     pass2Skeletal |= mScene->applyAnimation(i);
@@ -291,7 +439,7 @@ void MetalRender::render(Buffer* output)
 
                 // Restore target times so next-frame EPSILON check is stable
                 for (int i = 0; i < (int)animations.size(); ++i)
-                    animations[i].current = targetTimes[i];
+                    animations[i].current = mAnimTargetTimes[i];
             }
             else
             {
@@ -299,8 +447,8 @@ void MetalRender::render(Buffer* output)
                 bool accelStructureDirty = false;
                 for (int i = 0; i < (int)animations.size(); ++i)
                 {
-                    if (!changed[i]) continue;
-                    animations[i].current = targetTimes[i];
+                    if (!mAnimChanged[i]) continue;
+                    animations[i].current = mAnimTargetTimes[i];
                     accelStructureDirty |= mScene->applyAnimation(i);
                 }
 
@@ -333,7 +481,7 @@ void MetalRender::render(Buffer* output)
                     rebuildTLAS();
                 }
             }
-            getSharedContext().mSubframeIndex = 0;
+            ctx.mSubframeIndex = 0;
         }
     }
 
@@ -344,13 +492,9 @@ void MetalRender::render(Buffer* output)
     camera.updateAspectRatio(width / (float)height);
     camera.updateViewMatrix();
 
-    View currView = {};
-    currView.mCamMatrices = camera.matrices;
+    const View currView{camera.matrices};
 
-    // Initialize prev motion blur view on first frame if animation block didn't set it.
-    // On subsequent frames, mPrevMotionBlurView retains the t_open camera from the last
-    // animation frame so the converged image shows correct camera motion blur.
-    if (!motionBlurCameraSet && getSharedContext().mFrameNumber == 0)
+    if (!motionBlurCameraSet && ctx.mFrameNumber == 0)
     {
         mPrevMotionBlurView.mCamMatrices = camera.matrices;
     }
@@ -358,27 +502,39 @@ void MetalRender::render(Buffer* output)
     if (glm::any(glm::notEqual(currView.mCamMatrices.perspective, mPrevView.mCamMatrices.perspective)) ||
         glm::any(glm::notEqual(currView.mCamMatrices.view, mPrevView.mCamMatrices.view)))
     {
-        // need reset
-        getSharedContext().mSubframeIndex = 0;
+        ctx.mSubframeIndex = 0;
     }
+
+    // --- Cache all settings once per frame ---
+    const uint32_t spp = settings.getAs<uint32_t>("render/pt/spp");
+    const bool enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
+    const uint32_t maxDepth = settings.getAs<uint32_t>("render/pt/depth");
+    const uint32_t debug = settings.getAs<uint32_t>("render/pt/debug");
+    const uint32_t rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
+    const uint32_t samplerType = settings.getAs<uint32_t>("render/pt/samplerType");
+    const uint32_t sspTotal = settings.getAs<uint32_t>("render/pt/sppTotal");
+    const bool isMotionBlurVisible = settings.getAs<bool>("render/isMotionBlurVisible");
+    const bool enableCameraMotionBlur = settings.getAs<bool>("render/enableCameraMotionBlur");
 
     MTL::Buffer* pUniformBuffer = mUniformBuffers[mFrameIndex];
     MTL::Buffer* pUniformTMBuffer = mUniformTMBuffers[mFrameIndex];
     auto pUniformData = reinterpret_cast<Uniforms*>(pUniformBuffer->contents());
     auto pUniformTonemap = reinterpret_cast<UniformsTonemap*>(pUniformTMBuffer->contents());
     pUniformData->frameIndex = mFrameIndex;
-    pUniformData->subframeIndex = getSharedContext().mSubframeIndex;
+    pUniformData->subframeIndex = ctx.mSubframeIndex;
     pUniformData->height = height;
     pUniformData->width = width;
     pUniformData->numLights = mScene->getLightsDesc().size();
-    pUniformData->samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
-    pUniformData->enableAccumulation = (uint32_t)settings.getAs<bool>("render/pt/enableAcc");
+    pUniformData->samples_per_launch = spp;
+    pUniformData->enableAccumulation = (uint32_t)enableAccumulation;
     pUniformData->missColor = float3(0.0f);
-    pUniformData->maxDepth = settings.getAs<uint32_t>("render/pt/depth");
-    pUniformData->debug = settings.getAs<uint32_t>("render/pt/debug");
+    pUniformData->maxDepth = maxDepth;
+    pUniformData->debug = debug;
     pUniformData->enableMotionBlur = mEnableMotionBlur ? 1 : 0;
-    pUniformData->isMotionBlurVisible = (uint32_t)settings.getAs<bool>("render/isMotionBlurVisible");
-    pUniformData->enableCameraMotionBlur = (uint32_t)settings.getAs<bool>("render/enableCameraMotionBlur");
+    pUniformData->isMotionBlurVisible = (uint32_t)isMotionBlurVisible;
+    pUniformData->enableCameraMotionBlur = (uint32_t)enableCameraMotionBlur;
+    pUniformData->rectLightSamplingMethod = rectLightSamplingMethod;
+    pUniformData->samplerType = samplerType;
 
     // Depth of field
     pUniformData->useDof = camera.useDof ? 1 : 0;
@@ -399,7 +555,8 @@ void MetalRender::render(Buffer* output)
         pUniformData->hasEnvMap = 1;
         pUniformData->envMapWidth = (uint32_t)mEnvMapTexture->width();
         pUniformData->envMapHeight = (uint32_t)mEnvMapTexture->height();
-        pUniformData->envMapIntensity = mEnvMapAutoScale * (envLight.has_value() ? envLight->intensity : 1.0f);
+        const float userIntensity = envLight.has_value() ? envLight->intensity : 1.0f;
+        pUniformData->envMapIntensity = mEnvMapAutoScale * userIntensity;
         pUniformData->envMapRotation = envLight.has_value() ? envLight->rotationY * (M_PI / 180.0f) : 0.0f;
         if (envLight.has_value())
         {
@@ -421,128 +578,64 @@ void MetalRender::render(Buffer* output)
     pUniformTonemap->gamma = settings.getAs<float>("render/post/gamma");
     pUniformTonemap->maxEDR = settings.getAs<float>("render/post/tonemapper/maxEDR");
 
+    // --- Detect settings changes (member-based, not static) ---
     bool settingsChanged = false;
+    settingsChanged |= (mPrevSettings.rectLightSamplingMethod != rectLightSamplingMethod);
+    settingsChanged |= (mPrevSettings.samplerType != samplerType);
+    settingsChanged |= (mPrevSettings.enableAccumulation != enableAccumulation);
+    settingsChanged |= (mPrevSettings.sspTotal > sspTotal);
+    settingsChanged |= (mPrevSettings.spp != spp);
+    settingsChanged |= (mPrevSettings.enableMotionBlur != mEnableMotionBlur);
+    settingsChanged |= (mPrevSettings.isMotionBlurVisible != isMotionBlurVisible);
+    settingsChanged |= (mPrevSettings.enableCameraMotionBlur != enableCameraMotionBlur);
+    settingsChanged |= (mPrevSettings.useDof != pUniformData->useDof);
+    settingsChanged |= (mPrevSettings.focalDistance != pUniformData->focalDistance);
+    settingsChanged |= (mPrevSettings.lensRadius != pUniformData->lensRadius);
+    settingsChanged |= (mPrevSettings.apertureBlades != pUniformData->apertureBlades);
+    settingsChanged |= (mPrevSettings.shiftX != pUniformData->shiftX) || (mPrevSettings.shiftY != pUniformData->shiftY);
+    settingsChanged |= (mPrevSettings.maxDepth != maxDepth);
+    settingsChanged |= (mPrevSettings.debug != debug);
 
-    static uint32_t rectLightSamplingMethodPrev = 0;
-    pUniformData->rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
-    settingsChanged = (rectLightSamplingMethodPrev != pUniformData->rectLightSamplingMethod);
-    rectLightSamplingMethodPrev = pUniformData->rectLightSamplingMethod;
-
-    static uint32_t samplerTypePrev = 0;
-    pUniformData->samplerType = settings.getAs<uint32_t>("render/pt/samplerType");
-    settingsChanged |= (samplerTypePrev != pUniformData->samplerType);
-    samplerTypePrev = pUniformData->samplerType;
-
-    static bool enableAccumulationPrev = false;
-    const bool enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
-    settingsChanged |= (enableAccumulationPrev != enableAccumulation);
-    enableAccumulationPrev = enableAccumulation;
-
-    static uint32_t sspTotalPrev = 0;
-    const auto sspTotal = settings.getAs<uint32_t>("render/pt/sppTotal");
-    settingsChanged |= (sspTotalPrev > sspTotal); // reset only if new spp less than already accumulated
-    sspTotalPrev = sspTotal;
-
-    static uint32_t sppPrev = 0;
-    pUniformData->samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
-    settingsChanged |= (sppPrev != pUniformData->samples_per_launch);
-    sppPrev = pUniformData->samples_per_launch;
-
-    static bool enableMotionBlurPrev = false;
-    const bool enableMotionBlurCurr = mEnableMotionBlur;
-    settingsChanged |= (enableMotionBlurPrev != enableMotionBlurCurr);
-    enableMotionBlurPrev = enableMotionBlurCurr;
-
-    static bool isMotionBlurVisiblePrev = true;
-    const bool isMotionBlurVisibleCurr = settings.getAs<bool>("render/isMotionBlurVisible");
-    settingsChanged |= (isMotionBlurVisiblePrev != isMotionBlurVisibleCurr);
-    isMotionBlurVisiblePrev = isMotionBlurVisibleCurr;
-
-    static bool enableCameraMotionBlurPrev = true;
-    const bool enableCameraMotionBlurCurr = settings.getAs<bool>("render/enableCameraMotionBlur");
-    settingsChanged |= (enableCameraMotionBlurPrev != enableCameraMotionBlurCurr);
-    enableCameraMotionBlurPrev = enableCameraMotionBlurCurr;
-
-    static int32_t useDofPrev = 0;
-    settingsChanged |= (useDofPrev != pUniformData->useDof);
-    useDofPrev = pUniformData->useDof;
-
-    static float focalDistancePrev = 0.0f;
-    settingsChanged |= (focalDistancePrev != pUniformData->focalDistance);
-    focalDistancePrev = pUniformData->focalDistance;
-
-    static float lensRadiusPrev = 0.0f;
-    settingsChanged |= (lensRadiusPrev != pUniformData->lensRadius);
-    lensRadiusPrev = pUniformData->lensRadius;
-
-    static int32_t apertureBladesPrev = 0;
-    settingsChanged |= (apertureBladesPrev != pUniformData->apertureBlades);
-    apertureBladesPrev = pUniformData->apertureBlades;
-
-    static float shiftXPrev = 0.0f;
-    static float shiftYPrev = 0.0f;
-    settingsChanged |= (shiftXPrev != pUniformData->shiftX) || (shiftYPrev != pUniformData->shiftY);
-    shiftXPrev = pUniformData->shiftX;
-    shiftYPrev = pUniformData->shiftY;
-
-    static uint32_t maxDepthPrev = 0;
-    settingsChanged |= (maxDepthPrev != pUniformData->maxDepth);
-    maxDepthPrev = pUniformData->maxDepth;
-
-    static uint32_t debugPrev = 0;
-    settingsChanged |= (debugPrev != pUniformData->debug);
-    debugPrev = pUniformData->debug;
+    mPrevSettings.rectLightSamplingMethod = rectLightSamplingMethod;
+    mPrevSettings.samplerType = samplerType;
+    mPrevSettings.enableAccumulation = enableAccumulation;
+    mPrevSettings.sspTotal = sspTotal;
+    mPrevSettings.spp = spp;
+    mPrevSettings.enableMotionBlur = mEnableMotionBlur;
+    mPrevSettings.isMotionBlurVisible = isMotionBlurVisible;
+    mPrevSettings.enableCameraMotionBlur = enableCameraMotionBlur;
+    mPrevSettings.useDof = pUniformData->useDof;
+    mPrevSettings.focalDistance = pUniformData->focalDistance;
+    mPrevSettings.lensRadius = pUniformData->lensRadius;
+    mPrevSettings.apertureBlades = pUniformData->apertureBlades;
+    mPrevSettings.shiftX = pUniformData->shiftX;
+    mPrevSettings.shiftY = pUniformData->shiftY;
+    mPrevSettings.maxDepth = maxDepth;
+    mPrevSettings.debug = debug;
 
     if (settingsChanged)
     {
-        getSharedContext().mSubframeIndex = 0;
+        ctx.mSubframeIndex = 0;
     }
 
-    glm::float4x4 invView = glm::inverse(camera.matrices.view);
-    for (int column = 0; column < 4; column++)
+    // Matrix copies: glm and simd both use column-major layout
+    const glm::float4x4 invView = glm::inverse(camera.matrices.view);
+    std::memcpy(&pUniformData->viewToWorld, glm::value_ptr(invView), sizeof(float4x4));
+    std::memcpy(&pUniformData->clipToView, glm::value_ptr(camera.matrices.invPerspective), sizeof(float4x4));
+
     {
-        for (int row = 0; row < 4; row++)
-        {
-            pUniformData->viewToWorld.columns[column][row] = invView[column][row];
-        }
-    }
-    for (int column = 0; column < 4; column++)
-    {
-        for (int row = 0; row < 4; row++)
-        {
-            pUniformData->clipToView.columns[column][row] = camera.matrices.invPerspective[column][row];
-        }
+        const glm::float4x4 prevInvView = glm::inverse(mPrevMotionBlurView.mCamMatrices.view);
+        std::memcpy(&pUniformData->prevViewToWorld, glm::value_ptr(prevInvView), sizeof(float4x4));
+        std::memcpy(&pUniformData->prevClipToView, glm::value_ptr(mPrevMotionBlurView.mCamMatrices.invPerspective), sizeof(float4x4));
     }
 
-    // Previous camera matrices for camera motion blur
-    {
-        glm::float4x4 prevInvView = glm::inverse(mPrevMotionBlurView.mCamMatrices.view);
-        for (int column = 0; column < 4; column++)
-        {
-            for (int row = 0; row < 4; row++)
-            {
-                pUniformData->prevViewToWorld.columns[column][row] = prevInvView[column][row];
-                pUniformData->prevClipToView.columns[column][row] = mPrevMotionBlurView.mCamMatrices.invPerspective[column][row];
-            }
-        }
-    }
+    pUniformData->subframeIndex = ctx.mSubframeIndex;
 
-    pUniformData->subframeIndex = getSharedContext().mSubframeIndex;
-
-    // Photometric Units from iray documentation
-    // Controls the sensitivity of the “camera film” and is expressed as an index; the ISO number of the film, also
-    // known as “film speed.” The higher this value, the greater the exposure. If this is set to a non-zero value,
-    // “Photographic” mode is enabled. If this is set to 0, “Arbitrary” mode is enabled, and all color scaling is then
-    // strictly defined by the value of cm^2 Factor.
-    auto filmIso = settings.getAs<float>("render/post/tonemapper/filmIso");
-    // The candela per meter square factor
-    auto cm2_factor = settings.getAs<float>("render/post/tonemapper/cm2_factor");
-    // The fractional aperture number; e.g., 11 means aperture “f/11.” It adjusts the size of the opening of the “camera
-    // iris” and is expressed as a ratio. The higher this value, the lower the exposure.
-    auto fStop = settings.getAs<float>("render/post/tonemapper/fStop");
-    // Controls the duration, in fractions of a second, that the “shutter” is open; e.g., the value 100 means that the
-    // “shutter” is open for 1/100th of a second. The higher this value, the greater the exposure
-    auto shutterSpeed = settings.getAs<float>("render/post/tonemapper/shutterSpeed");
+    // Photometric exposure
+    const float filmIso = settings.getAs<float>("render/post/tonemapper/filmIso");
+    const float cm2_factor = settings.getAs<float>("render/post/tonemapper/cm2_factor");
+    const float fStop = settings.getAs<float>("render/post/tonemapper/fStop");
+    const float shutterSpeed = settings.getAs<float>("render/post/tonemapper/shutterSpeed");
     // Specifies the main color temperature of the light sources; the color that will be mapped to “white” on output,
     // e.g., an incoming color of this hue/saturation will be mapped to grayscale, but its intensity will remain
     // unchanged. This is similar to white balance controls on digital cameras.
@@ -564,7 +657,7 @@ void MetalRender::render(Buffer* output)
     pUniformData->exposureValue = exposureValue; // need for proper accumulation
 
     const auto samplesPerLaunch = pUniformData->samples_per_launch;
-    const int32_t leftSpp = sspTotal - getSharedContext().mSubframeIndex;
+    const int32_t leftSpp = sspTotal - ctx.mSubframeIndex;
     // if accumulation is off then launch selected samples per pixel
     const uint32_t samplesThisLaunch =
         enableAccumulation ? std::min((int32_t)samplesPerLaunch, leftSpp) : samplesPerLaunch;
@@ -654,16 +747,27 @@ void MetalRender::render(Buffer* output)
 
         pComputeEncoder->endEncoding();
 
-        pCmd->commit();
-
         if (enableAccumulation)
         {
-            getSharedContext().mSubframeIndex += samplesThisLaunch;
+            ctx.mSubframeIndex += samplesThisLaunch;
         }
         else
         {
-            getSharedContext().mSubframeIndex = 0;
+            ctx.mSubframeIndex = 0;
         }
+
+        // Completion handler for async double-buffered output
+        if (mRenderBusy.load())
+        {
+            int writeIdx = mWriteIndex;
+            pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdx](MTL::CommandBuffer* cb) {
+                double gpuMs = (cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0;
+                mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
+                mReadyIndex.store(writeIdx);
+                mRenderBusy.store(false);
+            }));
+        }
+        pCmd->commit();
     }
     else
     {
@@ -692,12 +796,23 @@ void MetalRender::render(Buffer* output)
             pComputeEncoder->endEncoding();
         }
 
+        // Completion handler for async double-buffered output
+        if (mRenderBusy.load())
+        {
+            int writeIdx = mWriteIndex;
+            pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdx](MTL::CommandBuffer* cb) {
+                double gpuMs = (cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0;
+                mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
+                mReadyIndex.store(writeIdx);
+                mRenderBusy.store(false);
+            }));
+        }
         pCmd->commit();
     }
     pPool->release();
 
     mPrevView = currView;
-    getSharedContext().mFrameNumber++;
+    ctx.mFrameNumber++;
 }
 
 Buffer* MetalRender::createBuffer(const BufferDesc& desc)
@@ -1413,6 +1528,12 @@ void MetalRender::rebuildTLAS()
 
 void MetalRender::loadEnvMap(const std::string& texturePath)
 {
+    // Release previous env map resources to avoid leaks on reload
+    if (mEnvMapTexture) { mEnvMapTexture->release(); mEnvMapTexture = nullptr; }
+    if (mEnvCdfXBuffer) { mEnvCdfXBuffer->release(); mEnvCdfXBuffer = nullptr; }
+    if (mEnvCdfYBuffer) { mEnvCdfYBuffer->release(); mEnvCdfYBuffer = nullptr; }
+    mEnvMapLoaded = false;
+
     int width = 0, height = 0;
     float* pixelData = nullptr;
     bool isExr = false;

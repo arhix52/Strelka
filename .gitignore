@@ -12,3 +12,4 @@ data/test_data
 CMakeUserPresets.json
 compile_commands.json
 *.log
+third_party/metal_cpp/
