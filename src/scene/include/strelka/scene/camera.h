@@ -28,6 +28,21 @@ public:
     float fov = 45.0f;
     float znear = 0.1f, zfar = 1000.0f;
 
+    // Depth of field
+    bool useDof = false;
+    float focalDistance = 10.0f;
+    float fStopDof = 2.8f;
+    int apertureBlades = 0;
+    float bladeRotation = 0.0f;
+    float anamorphicRatio = 1.0f;
+
+    // Sensor / lens
+    float focalLengthMm = 50.0f;
+    float sensorWidth = 36.0f;
+    float sensorHeight = 24.0f;
+    float shiftX = 0.0f;
+    float shiftY = 0.0f;
+
     // View dir -Z
     glm::quat mOrientation = { 1.0f, 0.0f, 0.0f, 0.0f };
     glm::float3 position = { 0.0f, 0.0f, 10.0f };

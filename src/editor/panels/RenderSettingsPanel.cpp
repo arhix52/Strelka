@@ -65,6 +65,40 @@ void EditorApp::drawRenderSettingsPanel()
         }
     }
 
+    // Camera DOF / Lens controls
+    if (ImGui::TreeNode("Camera / DOF"))
+    {
+        oka::Camera& cam = m_scene->getCamera(m_selectedCamera);
+        bool changed = false;
+
+        if (ImGui::Checkbox("Enable DOF", &cam.useDof))
+            changed = true;
+
+        if (cam.useDof)
+        {
+            if (ImGui::SliderFloat("Focus Distance", &cam.focalDistance, 0.1f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic))
+                changed = true;
+            if (ImGui::SliderFloat("F-Stop", &cam.fStopDof, 1.0f, 22.0f, "%.1f"))
+                changed = true;
+            if (ImGui::SliderInt("Aperture Blades", &cam.apertureBlades, 0, 8))
+                changed = true;
+            if (ImGui::SliderFloat("Blade Rotation", &cam.bladeRotation, 0.0f, 6.2832f, "%.2f"))
+                changed = true;
+            if (ImGui::SliderFloat("Anamorphic Ratio", &cam.anamorphicRatio, 0.25f, 4.0f, "%.2f"))
+                changed = true;
+        }
+
+        if (ImGui::InputFloat("Shift X", &cam.shiftX, 0.01f))
+            changed = true;
+        if (ImGui::InputFloat("Shift Y", &cam.shiftY, 0.01f))
+            changed = true;
+
+        if (changed)
+            m_sharedCtx->mSubframeIndex = 0;
+
+        ImGui::TreePop();
+    }
+
     if (ImGui::TreeNode("Path Tracer"))
     {
         const char* rectlightSamplingMethodItems[] = { "Uniform", "Advanced" };

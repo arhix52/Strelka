@@ -1274,7 +1274,8 @@ void OptiXRender::render(Buffer* output)
 
     updatePathtracerParams(width, height);
 
-    oka::Camera& camera = mScene->getCamera(0);
+    const uint32_t selectedCameraIdx = settings.getAs<uint32_t>("render/selectedCamera");
+    oka::Camera& camera = mScene->getCamera(selectedCameraIdx < mScene->getCameraCount() ? selectedCameraIdx : 0);
     camera.updateAspectRatio(width / (float)height);
     camera.updateViewMatrix();
 
@@ -1337,6 +1338,17 @@ void OptiXRender::render(Buffer* output)
     memcpy(params.viewToWorld, glm::value_ptr(glm::transpose(glm::inverse(camera.matrices.view))),
            sizeof(params.viewToWorld));
     memcpy(params.clipToView, glm::value_ptr(glm::transpose(camera.matrices.invPerspective)), sizeof(params.clipToView));
+
+    // Depth of field params
+    params.useDof = camera.useDof ? 1 : 0;
+    params.focalDistance = camera.focalDistance;
+    params.apertureBlades = camera.apertureBlades;
+    params.bladeRotation = camera.bladeRotation;
+    params.anamorphicRatio = camera.anamorphicRatio;
+    params.shiftX = camera.shiftX;
+    params.shiftY = camera.shiftY;
+    params.lensRadius = camera.useDof ? camera.focalLengthMm / (2.0f * camera.fStopDof * 1000.0f) : 0.0f;
+
     params.subframe_index = getSharedContext().mSubframeIndex;
     // Photometric Units from iray documentation
     // Controls the sensitivity of the "camera film" and is expressed as an index; the ISO number of the film, also

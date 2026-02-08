@@ -857,6 +857,87 @@ bool loadLightsFromJson(const std::string& modelPath, oka::Scene& scene)
     return false;
 }
 
+void loadCamerasFromJson(const std::string& modelPath, oka::Scene& scene)
+{
+    std::string fileName = modelPath.substr(0, modelPath.rfind('.'));
+    std::string jsonPath = fileName + "_camera.json";
+
+    if (!fs::exists(jsonPath))
+    {
+        fs::path dir = fs::path(modelPath).parent_path();
+        jsonPath.clear();
+        for (const auto& entry : fs::directory_iterator(dir))
+        {
+            if (entry.is_regular_file())
+            {
+                std::string name = entry.path().filename().string();
+                if (name.size() > 12 && name.substr(name.size() - 12) == "_camera.json")
+                {
+                    jsonPath = entry.path().string();
+                    break;
+                }
+            }
+        }
+    }
+
+    if (jsonPath.empty() || !fs::exists(jsonPath))
+        return;
+
+    STRELKA_INFO("Found camera file: {}", jsonPath);
+    std::ifstream i(jsonPath);
+    json root;
+    i >> root;
+
+    if (!root.contains("cameras"))
+        return;
+
+    for (const auto& cam : root["cameras"])
+    {
+        if (!cam.contains("name"))
+            continue;
+
+        std::string name = cam["name"].get<std::string>();
+        uint32_t idx = scene.findCameraByName(name);
+        if (idx == (uint32_t)-1)
+        {
+            STRELKA_WARNING("Camera JSON: no matching camera '{}' in scene", name);
+            continue;
+        }
+
+        oka::Camera& camera = scene.getCamera(idx);
+
+        if (cam.contains("focal_length_mm"))
+            camera.focalLengthMm = cam["focal_length_mm"].get<float>();
+        if (cam.contains("sensor_width"))
+            camera.sensorWidth = cam["sensor_width"].get<float>();
+        if (cam.contains("sensor_height"))
+            camera.sensorHeight = cam["sensor_height"].get<float>();
+        if (cam.contains("shift_x"))
+            camera.shiftX = cam["shift_x"].get<float>();
+        if (cam.contains("shift_y"))
+            camera.shiftY = cam["shift_y"].get<float>();
+
+        if (cam.contains("dof"))
+        {
+            const auto& dof = cam["dof"];
+            if (dof.contains("enabled"))
+                camera.useDof = dof["enabled"].get<bool>();
+            if (dof.contains("focus_distance"))
+                camera.focalDistance = dof["focus_distance"].get<float>();
+            if (dof.contains("fstop"))
+                camera.fStopDof = dof["fstop"].get<float>();
+            if (dof.contains("blades"))
+                camera.apertureBlades = dof["blades"].get<int>();
+            if (dof.contains("blade_rotation"))
+                camera.bladeRotation = dof["blade_rotation"].get<float>();
+            if (dof.contains("anamorphic_ratio"))
+                camera.anamorphicRatio = dof["anamorphic_ratio"].get<float>();
+        }
+
+        STRELKA_INFO("Camera JSON: applied properties to '{}'", name);
+    }
+}
+
 bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
 {
     if (modelPath.empty())
@@ -909,6 +990,7 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     }
 
     loadCameras(model, scene);
+    loadCamerasFromJson(modelPath, scene);
 
     const float globalScale = 1.0f;
     loadNodes(model, scene, globalScale);

@@ -63,15 +63,24 @@ if(WIN32 OR LINUX)
             ${CMAKE_SOURCE_DIR}/src/material/include
     )
 
-    # Copy OPTIXIR files to output directory
-    add_custom_command(
-        TARGET strelka_shaders PRE_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${OUTPUT_DIRECTORY}/optix"
-    )
-    add_custom_command(
-        TARGET strelka_shaders POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy ${generated_optix_files} ${generated_hit_files} "${OUTPUT_DIRECTORY}/optix"
-    )
+    # Copy OPTIXIR files to output directory using file-level dependencies
+    # (POST_BUILD can be skipped by ninja when the target doesn't need relinking)
+    set(OPTIXIR_OUTPUT_DIR "${OUTPUT_DIRECTORY}/optix")
+    set(copied_optixir_files "")
+    foreach(optixir_file ${generated_optix_files} ${generated_hit_files})
+        get_filename_component(optixir_name "${optixir_file}" NAME)
+        set(dest_file "${OPTIXIR_OUTPUT_DIR}/${optixir_name}")
+        add_custom_command(
+            OUTPUT "${dest_file}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${OPTIXIR_OUTPUT_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E copy "${optixir_file}" "${dest_file}"
+            DEPENDS "${optixir_file}"
+            COMMENT "Copying ${optixir_name} to output directory"
+        )
+        list(APPEND copied_optixir_files "${dest_file}")
+    endforeach()
+    add_custom_target(copy_optixir ALL DEPENDS ${copied_optixir_files})
+    add_dependencies(copy_optixir strelka_shaders)
 endif()
 
 if(APPLE)

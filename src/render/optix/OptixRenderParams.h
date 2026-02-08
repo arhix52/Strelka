@@ -86,6 +86,18 @@ struct Params
     float envMapRotation; // Y-axis rotation in radians
     float3 envMapColorTint;
     float envMapTotalPower;
+
+    // Depth of field
+    int   useDof;
+    float focalDistance;
+    float lensRadius;
+    int   apertureBlades;
+    float bladeRotation;
+    float anamorphicRatio;
+
+    // Lens shift
+    float shiftX;
+    float shiftY;
 };
 
 enum class EventType: uint8_t

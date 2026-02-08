@@ -248,7 +248,14 @@ void EditorApp::run()
 
         if (selectedCam.node == -1 || m_cameraDetached)
         {
-            m_scene->updateCamera(m_cameraController->getCamera(), m_selectedCamera);
+            // Sync position/orientation/matrices from controller to scene camera,
+            // preserving DOF/lens properties set by UI or JSON sidecar.
+            auto& ctrlCam = m_cameraController->getCamera();
+            selectedCam.position = ctrlCam.position;
+            selectedCam.mOrientation = ctrlCam.mOrientation;
+            selectedCam.matrices = ctrlCam.matrices;
+            selectedCam.updated = ctrlCam.updated;
+            selectedCam.isDirty = ctrlCam.isDirty;
         }
 
         checkLoadingComplete();

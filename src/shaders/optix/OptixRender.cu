@@ -17,6 +17,80 @@ extern "C"
     __constant__ Params params;
 }
 
+// Concentric disk mapping (Shirley & Chiu 1997)
+__device__ float2 concentricDiskSample(float u1, float u2)
+{
+    float2 offset = make_float2(2.0f * u1 - 1.0f, 2.0f * u2 - 1.0f);
+    if (offset.x == 0.0f && offset.y == 0.0f)
+        return make_float2(0.0f, 0.0f);
+
+    float theta, r;
+    if (fabsf(offset.x) > fabsf(offset.y))
+    {
+        r = offset.x;
+        theta = (M_PIf / 4.0f) * (offset.y / offset.x);
+    }
+    else
+    {
+        r = offset.y;
+        theta = (M_PIf / 2.0f) - (M_PIf / 4.0f) * (offset.x / offset.y);
+    }
+    return make_float2(r * cosf(theta), r * sinf(theta));
+}
+
+// Sample regular polygon aperture (blades >= 3)
+__device__ float2 samplePolygonAperture(float u1, float u2, int blades)
+{
+    float sectorAngle = 2.0f * M_PIf / (float)blades;
+    int sector = (int)(u1 * blades);
+    if (sector >= blades) sector = blades - 1;
+    float u = u1 * blades - (float)sector;
+
+    // Sample triangle: center to two adjacent vertices
+    float su = sqrtf(u);
+    float bary0 = 1.0f - su;
+    float bary1 = u2 * su;
+
+    float angle0 = sectorAngle * sector;
+    float angle1 = sectorAngle * (sector + 1);
+    float cosA0 = cosf(angle0), sinA0 = sinf(angle0);
+    float cosA1 = cosf(angle1), sinA1 = sinf(angle1);
+
+    // Vertices on unit circle; interpolate from center (0,0)
+    float x = bary1 * cosA0 + (1.0f - bary0 - bary1) * cosA1;
+    float y = bary1 * sinA0 + (1.0f - bary0 - bary1) * sinA1;
+    return make_float2(x, y);
+}
+
+__device__ float2 sampleAperture(SamplerState& sampler)
+{
+    float u1 = random<SampleDimension::eLensU>(sampler);
+    float u2 = random<SampleDimension::eLensV>(sampler);
+
+    float2 p;
+    if (params.apertureBlades < 3)
+    {
+        p = concentricDiskSample(u1, u2);
+    }
+    else
+    {
+        p = samplePolygonAperture(u1, u2, params.apertureBlades);
+    }
+
+    // Blade rotation
+    if (params.bladeRotation != 0.0f)
+    {
+        float cosR = cosf(params.bladeRotation);
+        float sinR = sinf(params.bladeRotation);
+        p = make_float2(p.x * cosR - p.y * sinR, p.x * sinR + p.y * cosR);
+    }
+
+    // Anamorphic ratio: stretch Y
+    p.y *= params.anamorphicRatio;
+
+    return p;
+}
+
 __device__ void generateCameraRay(
     const uint2 pixelIndex, SamplerState& sampler, float3& origin, float3& direction)
 {
@@ -28,6 +102,10 @@ __device__ void generateCameraRay(
     float2 dimension = make_float2(params.image_width, params.image_height);
     float2 pixelNDC = (pixelPos / dimension) * 2.0f - 1.0f;
 
+    // Lens shift
+    pixelNDC.x += params.shiftX * 2.0f;
+    pixelNDC.y += params.shiftY * 2.0f;
+
     float4 clip{ pixelNDC.x, pixelNDC.y, 1.0f, 1.0f };
     const sutil::Matrix4x4 clipToView(params.clipToView);
     float4 viewSpace = clipToView * clip;
@@ -37,6 +115,24 @@ __device__ void generateCameraRay(
 
     origin = make_float3(viewToWorld * make_float4(0.0f, 0.0f, 0.0f, 1.0f));
     direction = normalize(make_float3(wdir));
+
+    // Thin lens DOF
+    if (params.useDof && params.lensRadius > 0.0f)
+    {
+        // Camera basis vectors from viewToWorld matrix
+        float3 camRight = make_float3(viewToWorld[0], viewToWorld[4], viewToWorld[8]);
+        float3 camUp    = make_float3(viewToWorld[1], viewToWorld[5], viewToWorld[9]);
+        float3 camFwd   = make_float3(-viewToWorld[2], -viewToWorld[6], -viewToWorld[10]);
+
+        // Focal point along ray at focal distance (measured along camera forward axis)
+        float t = params.focalDistance / fmaxf(dot(direction, camFwd), 1e-6f);
+        float3 focalPoint = origin + direction * t;
+
+        // Jitter origin on lens aperture
+        float2 lensSample = sampleAperture(sampler) * params.lensRadius;
+        origin += camRight * lensSample.x + camUp * lensSample.y;
+        direction = normalize(focalPoint - origin);
+    }
 }
 
 __device__ float4 accumulate(float4* history,
