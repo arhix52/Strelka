@@ -89,10 +89,11 @@ private:
 
     struct DeviceSkinningPtrs
     {
-        sutil::Matrix4x4* d_jointMats;
+        sutil::Matrix4x4* d_jointMats = nullptr;
         ~DeviceSkinningPtrs()
         {
-            CUDA_CHECK(cudaFree(d_jointMats));
+            if (d_jointMats)
+                cudaFree(d_jointMats);
         }
     };
     DeviceSkinningPtrs mSkinningPtrs;
@@ -161,8 +162,13 @@ private:
     Texture loadTextureFromFile(const std::string& fileName);
 
     bool createOptixMaterials();
+    void destroyTextures();
 
     std::vector<Material> mMaterials;
+
+    // Texture resource tracking for cleanup
+    std::vector<cudaArray_t> mTextureArrays;
+    std::vector<cudaTextureObject_t> mTextureObjects;
 
     void updatePathtracerParams(const uint32_t width, const uint32_t height);
 

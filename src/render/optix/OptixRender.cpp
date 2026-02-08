@@ -126,7 +126,72 @@ static bool readSourceFile(std::string& str, const fs::path& filename)
 }
 
 OptiXRender::OptiXRender() = default;
-OptiXRender::~OptiXRender() = default;
+
+OptiXRender::~OptiXRender()
+{
+    // Destroy texture objects and arrays
+    destroyTextures();
+
+    // Free SBT records
+    if (mState.sbt.raygenRecord)
+        cudaFree(reinterpret_cast<void*>(mState.sbt.raygenRecord));
+    if (mState.sbt.missRecordBase)
+        cudaFree(reinterpret_cast<void*>(mState.sbt.missRecordBase));
+    if (mState.sbt.hitgroupRecordBase)
+        cudaFree(reinterpret_cast<void*>(mState.sbt.hitgroupRecordBase));
+
+    // Destroy pipeline
+    if (mState.pipeline)
+        optixPipelineDestroy(mState.pipeline);
+
+    // Destroy program groups
+    if (mState.raygen_prog_group)
+        optixProgramGroupDestroy(mState.raygen_prog_group);
+    if (mState.radiance_miss_group)
+        optixProgramGroupDestroy(mState.radiance_miss_group);
+    if (mState.occlusion_miss_group)
+        optixProgramGroupDestroy(mState.occlusion_miss_group);
+    if (mState.radiance_default_hit_group)
+        optixProgramGroupDestroy(mState.radiance_default_hit_group);
+    for (auto& pg : mState.radiance_hit_groups)
+        if (pg) optixProgramGroupDestroy(pg);
+    if (mState.occlusion_hit_group)
+        optixProgramGroupDestroy(mState.occlusion_hit_group);
+    if (mState.light_hit_group)
+        optixProgramGroupDestroy(mState.light_hit_group);
+
+    // Destroy modules
+    if (mState.ptx_module)
+        optixModuleDestroy(mState.ptx_module);
+    if (mState.closest_hit_module)
+        optixModuleDestroy(mState.closest_hit_module);
+    if (mState.m_catromCurveModule)
+        optixModuleDestroy(mState.m_catromCurveModule);
+
+    // Free raw device pointers in Params
+    if (mState.params.accum)
+        cudaFree(mState.params.accum);
+    if (mState.params.diffuse)
+        cudaFree(mState.params.diffuse);
+    if (mState.params.diffuseCounter)
+        cudaFree(mState.params.diffuseCounter);
+    if (mState.params.specular)
+        cudaFree(mState.params.specular);
+    if (mState.params.specularCounter)
+        cudaFree(mState.params.specularCounter);
+
+    // Free instance device memory
+    if (mState.d_instances)
+        cudaFree(reinterpret_cast<void*>(mState.d_instances));
+
+    // Destroy CUDA stream
+    if (mState.stream)
+        cudaStreamDestroy(mState.stream);
+
+    // Destroy OptiX device context (must be last)
+    if (mState.context)
+        optixDeviceContextDestroy(mState.context);
+}
 
 void OptiXRender::createContext()
 {
@@ -503,6 +568,8 @@ void OptiXRender::uploadInstancesToDevice(const std::vector<OptixInstance>& opti
 
 void OptiXRender::createTopLevelAccelerationStructure()
 {
+    mMotionTransformBuffers.clear();
+
     const std::vector<oka::Instance>& instances = mScene->getInstances();
 
     // Build OptixInstance array
@@ -856,6 +923,15 @@ void OptiXRender::createPipeline()
 
 void OptiXRender::createSbt()
 {
+    // Free previous SBT records if they exist
+    if (mState.sbt.raygenRecord)
+        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mState.sbt.raygenRecord)));
+    if (mState.sbt.missRecordBase)
+        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mState.sbt.missRecordBase)));
+    if (mState.sbt.hitgroupRecordBase)
+        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mState.sbt.hitgroupRecordBase)));
+    mState.sbt = {};
+
     // Create raygen record
     CUdeviceptr raygen_record;
     const size_t raygen_record_size = sizeof(RayGenSbtRecord);
@@ -977,17 +1053,15 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
     {
         getSettings()->setAs<bool>("render/pt/isResized", true);
         if (mState.params.accum)
-        {
             CUDA_CHECK(cudaFree((void*)mState.params.accum));
-        }
         if (mState.params.diffuse)
-        {
             CUDA_CHECK(cudaFree((void*)mState.params.diffuse));
-        }
+        if (mState.params.diffuseCounter)
+            CUDA_CHECK(cudaFree((void*)mState.params.diffuseCounter));
         if (mState.params.specular)
-        {
             CUDA_CHECK(cudaFree((void*)mState.params.specular));
-        }
+        if (mState.params.specularCounter)
+            CUDA_CHECK(cudaFree((void*)mState.params.specularCounter));
         const size_t frameSize = mState.params.image_width * mState.params.image_height;
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.accum), frameSize * sizeof(float4)));
 
@@ -1522,7 +1596,24 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName)
         CUDA_CHECK(cudaCreateTextureObject(&tex_obj_unfilt, &res_desc, &tex_desc, nullptr));
     }
     stbi_image_free(data);
+
+    // Track resources for cleanup
+    mTextureArrays.push_back(device_tex_array);
+    mTextureObjects.push_back(tex_obj);
+    mTextureObjects.push_back(tex_obj_unfilt);
+
     return Texture(tex_obj, tex_obj_unfilt, make_uint3(texWidth, texHeight, 1));
+}
+
+void OptiXRender::destroyTextures()
+{
+    for (auto obj : mTextureObjects)
+        if (obj) cudaDestroyTextureObject(obj);
+    mTextureObjects.clear();
+
+    for (auto arr : mTextureArrays)
+        if (arr) cudaFreeArray(arr);
+    mTextureArrays.clear();
 }
 
 bool OptiXRender::createOptixMaterials()

@@ -52,12 +52,16 @@ void oka::OptixBuffer::resize(uint32_t width, uint32_t height)
 
 void oka::OptixBuffer::realloc(size_t size)
 {
-    if (mDeviceData && mSizeInBytes != size)
+    if (mSizeInBytes == size && mDeviceData)
+        return;
+    if (mDeviceData)
     {
         CUDA_CHECK(cudaFree(mDeviceData));
+        mDeviceData = nullptr;
     }
     mSizeInBytes = size;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mDeviceData), mSizeInBytes));
+    if (size > 0)
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mDeviceData), size));
 }
 
 void* oka::OptixBuffer::map()
