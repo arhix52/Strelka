@@ -79,35 +79,43 @@ void MetalRender::createMetalMaterials()
     const std::vector<Scene::MaterialDescription>& matDescs = mScene->getMaterials();
     std::vector<Material> gpuMaterials;
     const fs::path resourcePath = getSettings()->getAs<std::string>("resource/searchPath");
+
+    auto loadTex = [&](const std::string& path) -> MTL::ResourceID {
+        if (path.empty()) return MTL::ResourceID{};
+        const fs::path fullPath = resourcePath / path;
+        MTL::Texture* tex = loadTextureFromFile(fullPath.string());
+        if (tex) mMaterialTextures.push_back(tex);
+        return tex ? tex->gpuResourceID() : MTL::ResourceID{};
+    };
+
     for (const Scene::MaterialDescription& currMatDesc : matDescs)
     {
         Material material = {};
-        material.diffuse = { 1.0f, 1.0f, 1.0f };
-        for (const auto& param : currMatDesc.params)
-        {
-            if (param.name == "diffuse_color" || param.name == "diffuseColor" || param.name == "diffuse_color_constant")
-            {
-                memcpy(&material.diffuse, param.value.data(), sizeof(float) * 3);
-            }
-            if (param.type == MaterialManager::Param::Type::eTexture)
-            {
-                std::string texPath(param.value.size(), 0);
-                memcpy(texPath.data(), param.value.data(), param.value.size());
-                const fs::path fullTextureFilePath = resourcePath / texPath;
-                if (param.name == "diffuse_texture")
-                {
-                    MTL::Texture* diffuseTex = loadTextureFromFile(fullTextureFilePath.string());
-                    mMaterialTextures.push_back(diffuseTex);
-                    material.diffuseTexture = diffuseTex->gpuResourceID();
-                }
-                if (param.name == "normalmap_texture")
-                {
-                    MTL::Texture* normalTex = loadTextureFromFile(fullTextureFilePath.string());
-                    mMaterialTextures.push_back(normalTex);
-                    material.normalTexture = normalTex->gpuResourceID();
-                }
-            }
-        }
+        const auto& p = currMatDesc.params;
+        material.base_color = { p.base_color.x, p.base_color.y, p.base_color.z };
+        material.metallic = p.metallic;
+        material.roughness = p.roughness;
+        material.ior = p.ior;
+        material.specular = p.specular;
+        material.specular_tint = p.specular_tint;
+        material.transmission = p.transmission;
+        material.clearcoat = p.clearcoat;
+        material.clearcoat_roughness = p.clearcoat_roughness;
+        material.anisotropy = p.anisotropy;
+        material.emission = { p.emission.x, p.emission.y, p.emission.z };
+        material.emission_strength = p.emission_strength;
+        material.normal_scale = p.normal_scale;
+        material.occlusion_strength = p.occlusion_strength;
+        material.alpha_cutoff = p.alpha_cutoff;
+        material.material_type = p.material_type;
+        material.thin_walled = p.thin_walled;
+
+        material.baseColorTexture = loadTex(currMatDesc.baseColorTexPath);
+        material.metallicRoughnessTexture = loadTex(currMatDesc.metallicRoughnessTexPath);
+        material.normalTexture = loadTex(currMatDesc.normalTexPath);
+        material.emissionTexture = loadTex(currMatDesc.emissionTexPath);
+        material.occlusionTexture = loadTex(currMatDesc.occlusionTexPath);
+
         gpuMaterials.push_back(material);
     }
 

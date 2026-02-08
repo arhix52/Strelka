@@ -1,5 +1,4 @@
 cmake_minimum_required(VERSION 3.22)
-set(DISPLAYLIB_NAME display)
 
 find_package(glad REQUIRED)
 find_package(imgui REQUIRED)
@@ -8,68 +7,87 @@ find_package(glfw3 REQUIRED)
 find_package(glm REQUIRED)
 
 set(DISPLAY_SOURCES_COMMON
-    ${ROOT_HOME}/include/display/Display.h ${ROOT_HOME}/src/display/Display.cpp
-    ${ROOT_HOME}/src/display/DisplayFactory.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/display/display.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/display.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/display_factory.cpp
+)
+
 if(WIN32 OR LINUX)
-  enable_language(CUDA)
-  find_package(CUDA REQUIRED)
-  message(STATUS "CUDA Toolkit Root: ${CUDA_TOOLKIT_ROOT_DIR}")
-  message(STATUS "CUDA Include DIR: ${CUDA_INCLUDE_DIRS}")
+    find_package(CUDAToolkit REQUIRED)
 
-  set(IMGUI_SOURCES
-    # Imgui
-    ${ROOT_HOME}/external/imgui/imgui_impl_glfw.cpp
-    ${ROOT_HOME}/external/imgui/imgui_impl_opengl3.cpp
-    ${ROOT_HOME}/external/imgui/imgui_impl_glfw.h
-    ${ROOT_HOME}/external/imgui/imgui_impl_opengl3.h)
+    set(IMGUI_SOURCES
+        ${ROOT_HOME}/external/imgui/imgui_impl_glfw.cpp
+        ${ROOT_HOME}/external/imgui/imgui_impl_opengl3.cpp
+        ${ROOT_HOME}/external/imgui/imgui_impl_glfw.h
+        ${ROOT_HOME}/external/imgui/imgui_impl_opengl3.h
+    )
 
-  set(DISPLAY_SOURCES
-      ${DISPLAY_SOURCES_COMMON} ${ROOT_HOME}/src/display/opengl/glfwdisplay.h
-      ${ROOT_HOME}/src/display/opengl/glfwdisplay.cpp)
+    set(DISPLAY_SOURCES
+        ${DISPLAY_SOURCES_COMMON}
+        ${CMAKE_CURRENT_SOURCE_DIR}/opengl/glfw_display.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/opengl/glfw_display.cpp
+    )
 
-  add_library(${DISPLAYLIB_NAME} STATIC ${DISPLAY_SOURCES} ${IMGUI_SOURCES})
-  target_include_directories(${DISPLAYLIB_NAME} PUBLIC
-    ${ROOT_HOME}/include/
-    ${ROOT_HOME}/include/display
-    ${ROOT_HOME}/external/imgui/
-  )
+    add_library(strelka_display STATIC ${DISPLAY_SOURCES} ${IMGUI_SOURCES})
 
-  include_directories(${CUDA_INCLUDE_DIRS})
-  link_directories(${CUDA_LIBRARIES})
-  target_link_libraries(${DISPLAYLIB_NAME}
-    PUBLIC ${OPENGL_LIBRARIES}
-    logger imgui::imgui imguizmo::imguizmo glfw glm::glm glad::glad)
+    target_include_directories(strelka_display
+        PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${ROOT_HOME}/external/imgui/
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CUDAToolkit_INCLUDE_DIRS}
+    )
 
+    target_link_libraries(strelka_display
+        PUBLIC
+            ${OPENGL_LIBRARIES}
+            strelka_foundation
+            strelka_render
+            imgui::imgui
+            imguizmo::imguizmo
+            glfw
+            glm::glm
+            glad::glad
+    )
 endif()
 
 if(APPLE)
-  set(DISPLAY_SOURCES
-      ${DISPLAY_SOURCES_COMMON} ${ROOT_HOME}/src/display/metal/glfwdisplay.h
-      ${ROOT_HOME}/src/display/metal/glfwdisplay.mm
-      )
+    set(IMGUI_SOURCES
+        ${ROOT_HOME}/external/imgui/imgui_impl_glfw.cpp
+        ${ROOT_HOME}/external/imgui/imgui_impl_metal.mm
+        ${ROOT_HOME}/external/imgui/imgui_impl_glfw.h
+        ${ROOT_HOME}/external/imgui/imgui_impl_metal.h
+    )
 
-  set(IMGUI_SOURCES
-      # Imgui
-      ${ROOT_HOME}/external/imgui/imgui_impl_glfw.cpp
-      ${ROOT_HOME}/external/imgui/imgui_impl_metal.mm
-      ${ROOT_HOME}/external/imgui/imgui_impl_glfw.h
-      ${ROOT_HOME}/external/imgui/imgui_impl_metal.h
-      )
+    set(DISPLAY_SOURCES
+        ${DISPLAY_SOURCES_COMMON}
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/glfw_display.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/glfw_display.mm
+    )
 
-  add_library(${DISPLAYLIB_NAME} STATIC ${DISPLAY_SOURCES} ${IMGUI_SOURCES})
-  target_include_directories(${DISPLAYLIB_NAME} PUBLIC
-    ${ROOT_HOME}/external/imgui/
-    ${ROOT_HOME}/include/
-    ${ROOT_HOME}/include/display
-    ${ROOT_HOME}/external/metal-cpp/
-    ${ROOT_HOME}
-  )
+    add_library(strelka_display STATIC ${DISPLAY_SOURCES} ${IMGUI_SOURCES})
 
-  target_link_libraries(${DISPLAYLIB_NAME} PRIVATE "-framework Foundation")
-  target_link_libraries(${DISPLAYLIB_NAME} PRIVATE "-framework QuartzCore")
-  target_link_libraries(${DISPLAYLIB_NAME} PRIVATE "-framework CoreGraphics")
-  target_link_libraries(${DISPLAYLIB_NAME} PRIVATE "-framework Metal")
-  target_link_libraries(${DISPLAYLIB_NAME} PRIVATE "-framework MetalKit")
-  target_link_libraries(${DISPLAYLIB_NAME} PUBLIC logger imgui::imgui glfw glm::glm)
+    target_include_directories(strelka_display
+        PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${ROOT_HOME}/external/imgui/
+            ${ROOT_HOME}/third_party/metal_cpp/
+    )
 
+    target_link_libraries(strelka_display
+        PRIVATE
+            "-framework Foundation"
+            "-framework QuartzCore"
+            "-framework CoreGraphics"
+            "-framework Metal"
+            "-framework MetalKit"
+    )
+    target_link_libraries(strelka_display
+        PUBLIC
+            strelka_foundation
+            imgui::imgui
+            glfw
+            glm::glm
+    )
 endif()

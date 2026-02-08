@@ -1,5 +1,5 @@
 #pragma once
-#include "buffer.h"
+#include <strelka/render/buffer.h>
 
 #include <Metal/Metal.hpp>
 

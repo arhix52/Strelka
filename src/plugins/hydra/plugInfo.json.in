@@ -1,0 +1,22 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "HdStrelkaRendererPlugin": {
+                        "bases": [
+                            "HdRendererPlugin"
+                        ],
+                        "displayName": "Strelka",
+                        "priority": 99
+                    }
+                }
+            },
+            "LibraryPath": "../$<TARGET_FILE_NAME:HdStrelka>",
+            "Name": "HdStrelka",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

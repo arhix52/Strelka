@@ -26,10 +26,10 @@
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usdImaging/usdImaging/delegate.h>
 
-#include <render/common.h>
-#include <render/buffer.h>
+#include <strelka/render/common.h>
+#include <strelka/render/buffer.h>
 
-#include <display/Display.h>
+#include <strelka/display/display.h>
 
 #include <log.h>
 #include <logmanager.h>

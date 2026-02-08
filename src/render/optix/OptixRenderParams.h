@@ -1,10 +1,11 @@
-#pragma once 
+#pragma once
 #include <optix_types.h>
 #include <vector_types.h>
 #include <sutil/Matrix.h>
 
-#include "RandomSampler.h"
-#include "Lights.h"
+#include <random.h>
+#include <lights.h>
+#include <strelka/material/material_params.h>
 
 #define GEOMETRY_MASK_TRIANGLE 1
 #define GEOMETRY_MASK_CURVE 2
@@ -118,9 +119,8 @@ struct HitGroupData
     int32_t indexCount;
     int32_t vertexOffset;
     int32_t lightId; // only for lights. -1 for others
-    CUdeviceptr argData;
-    CUdeviceptr roData;
-    CUdeviceptr resHandler;
+    MaterialParams materialParams;
+    cudaTextureObject_t* textures; // array of texture objects
     float4 world_to_object[4] = {};
     float4 object_to_world[4] = {};
 };

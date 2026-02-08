@@ -1,5 +1,5 @@
 #pragma once
-#include <log/log.h>
+#include <log.h>
 
 inline void cudaCheck(cudaError_t error, const char* call, const char* file, unsigned int line)
 {

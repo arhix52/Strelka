@@ -1,6 +1,6 @@
 #pragma once
 
-#include "buffer.h"
+#include <strelka/render/buffer.h>
 
 #include <optix_types.h>
 #include <stdint.h>

@@ -1,20 +1,25 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.22)
 
 find_package(glm REQUIRED)
 
-# include(${ROOT_HOME}/cmake/StaticAnalyzers.cmake)
-
-# Scene
 set(SCENE_SOURCES
-        ${ROOT_HOME}/include/scene/scene.h
-        ${ROOT_HOME}/include/scene/camera.h
-        ${ROOT_HOME}/src/scene/scene.cpp
-        ${ROOT_HOME}/src/scene/camera.cpp
-    )
-set(SCENELIB_NAME scene)
-add_library(${SCENELIB_NAME} OBJECT ${SCENE_SOURCES})
-target_include_directories(${SCENELIB_NAME} PUBLIC ${ROOT_HOME}/external/glm)
-target_include_directories(${SCENELIB_NAME} PUBLIC ${ROOT_HOME}/include/scene)
-target_include_directories(${SCENELIB_NAME} PUBLIC ${ROOT_HOME}/include/)
-target_include_directories(${SCENELIB_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(${SCENELIB_NAME} PUBLIC logger glm::glm)
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/scene/scene.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/scene/camera.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/scene/glm_wrapper.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/scene.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/camera.cpp
+)
+
+add_library(strelka_scene STATIC ${SCENE_SOURCES})
+
+target_include_directories(strelka_scene
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(strelka_scene
+    PUBLIC
+        strelka_foundation
+        strelka_material
+        glm::glm
+)

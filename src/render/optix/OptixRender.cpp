@@ -33,10 +33,10 @@
 
 #include <log.h>
 
-#include "postprocessing/Tonemappers.h"
-#include "skinning/skinning.h"
+#include <postprocessing/Tonemappers.h>
+#include <skinning/skinning.h>
 
-#include "Camera.h"
+#include <strelka/render/Camera.h>
 
 static void context_log_cb(unsigned int level, const char* tag, const char* message, void* /*cbdata */)
 {
@@ -80,8 +80,10 @@ static inline void optixCheckLog(OptixResult res,
 {
     if (res != OPTIX_SUCCESS)
     {
-        STRELKA_FATAL("OptiX call {0} failed: {1}:{2} : {3}", call, file, line, log);
-        assert(0);
+        const char* errorName = optixGetErrorName(res);
+        const char* errorString = optixGetErrorString(res);
+        STRELKA_FATAL("OptiX call {0} failed: {1}:{2} : result={3} ({4}) log={5}", call, file, line, errorName, errorString, log);
+        std::abort();
     }
 }
 
@@ -739,18 +741,28 @@ void OptiXRender::createModule()
             (OPTIX_EXCEPTION_FLAG_USER | OPTIX_EXCEPTION_FLAG_TRACE_DEPTH | OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW) :
             OPTIX_EXCEPTION_FLAG_NONE;
     pipelineOptions.pipelineLaunchParamsVariableName = "params";
+    pipelineOptions.pipelineLaunchParamsSizeInBytes = sizeof(Params);
     pipelineOptions.usesPrimitiveTypeFlags =
         OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE | OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BSPLINE;
 
-    // Load and create main module
-    const fs::path optixPath = fs::current_path() / "optix/render_generated_OptixRender.cu.optixir";
+    // Load and create main module (raygen, miss, occlusion, light hit)
+    const fs::path optixPath = fs::current_path() / "optix/strelka_shaders_generated_OptixRender.cu.optixir";
     std::string optixSource;
     readSourceFile(optixSource, optixPath);
 
-    char log[2048];
+    char log[16384];
     size_t sizeof_log = sizeof(log);
     OPTIX_CHECK_LOG(optixModuleCreate(mState.context, &moduleOptions, &pipelineOptions, optixSource.c_str(),
                                       optixSource.size(), log, &sizeof_log, &mState.ptx_module));
+
+    // Load closest-hit module (radiance closest hit with BSDF evaluation)
+    const fs::path closestHitPath = fs::current_path() / "optix/strelka_shaders_generated_OptixRender_closest_hit.cu.optixir";
+    std::string closestHitSource;
+    readSourceFile(closestHitSource, closestHitPath);
+
+    sizeof_log = sizeof(log);
+    OPTIX_CHECK_LOG(optixModuleCreate(mState.context, &moduleOptions, &pipelineOptions, closestHitSource.c_str(),
+                                      closestHitSource.size(), log, &sizeof_log, &mState.closest_hit_module));
 
     // Store options for later use
     mState.pipeline_compile_options = pipelineOptions;
@@ -763,33 +775,6 @@ void OptiXRender::createModule()
 
     OPTIX_CHECK(optixBuiltinISModuleGet(
         mState.context, &moduleOptions, &pipelineOptions, &builtinOptions, &mState.m_catromCurveModule));
-}
-
-OptixProgramGroup OptiXRender::createRadianceClosestHitProgramGroup(PathTracerState& state,
-                                                                    const char* module_code,
-                                                                    size_t module_size)
-{
-    // Create material module
-    char log[2048];
-    size_t sizeof_log = sizeof(log);
-    OptixModule mat_module = nullptr;
-    OPTIX_CHECK_LOG(optixModuleCreate(state.context, &state.module_compile_options, &state.pipeline_compile_options,
-                                      module_code, module_size, log, &sizeof_log, &mat_module));
-
-    // Configure hit group program
-    OptixProgramGroupDesc hit_group_desc = {};
-    hit_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-    hit_group_desc.hitgroup.moduleCH = mat_module;
-    hit_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__radiance";
-    hit_group_desc.hitgroup.moduleIS = mState.m_catromCurveModule;
-    hit_group_desc.hitgroup.entryFunctionNameIS = nullptr; // Built-in module auto-supplies this
-
-    // Create program group
-    OptixProgramGroup hit_group = nullptr;
-    OptixProgramGroupOptions options = {};
-    OPTIX_CHECK_LOG(optixProgramGroupCreate(state.context, &hit_group_desc, 1, &options, log, &sizeof_log, &hit_group));
-
-    return hit_group;
 }
 
 void OptiXRender::createProgramGroups()
@@ -826,8 +811,10 @@ void OptiXRender::createProgramGroups()
 
     OptixProgramGroupDesc hit_prog_group_desc = {};
     hit_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-    hit_prog_group_desc.hitgroup.moduleCH = mState.ptx_module;
-    hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__ch";
+    hit_prog_group_desc.hitgroup.moduleCH = mState.closest_hit_module;
+    hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__radiance";
+    hit_prog_group_desc.hitgroup.moduleIS = mState.m_catromCurveModule;
+    hit_prog_group_desc.hitgroup.entryFunctionNameIS = nullptr; // auto for built-in
     sizeof_log = sizeof(log);
     OptixProgramGroup radiance_hit_group;
     OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &hit_prog_group_desc,
@@ -872,11 +859,6 @@ void OptiXRender::createPipeline()
     program_groups.push_back(mState.occlusion_miss_group);
     program_groups.push_back(mState.occlusion_hit_group);
     program_groups.push_back(mState.light_hit_group);
-
-    for (auto& m : mMaterials)
-    {
-        program_groups.push_back(m.programGroup);
-    }
 
     OptixPipelineLinkOptions pipeline_link_options = {};
     pipeline_link_options.maxTraceDepth = max_trace_depth;
@@ -965,7 +947,8 @@ void OptiXRender::createSbt()
         {
             const oka::Instance& instance = instances[i];
             const int material_idx = instance.mMaterialId == -1 ? 0 : instance.mMaterialId;
-            const Material& material = getMaterial(material_idx);
+            assert(material_idx < (int)mMaterials.size());
+            const Material& material = mMaterials[material_idx];
 
             // Radiance hit group
             HitGroupSbtRecord& radiance_hit = hit_groups[i * RAY_TYPE_COUNT + RAY_TYPE_RADIANCE];
@@ -977,13 +960,13 @@ void OptiXRender::createSbt()
             }
             else
             {
-                OPTIX_CHECK(optixSbtRecordPackHeader(material.programGroup, &radiance_hit));
+                // All non-light materials use the same closest-hit program
+                OPTIX_CHECK(optixSbtRecordPackHeader(mState.radiance_default_hit_group, &radiance_hit));
             }
 
             // Set material data
-            radiance_hit.data.argData = material.d_argData;
-            radiance_hit.data.roData = material.d_roData;
-            radiance_hit.data.resHandler = material.d_textureHandler;
+            radiance_hit.data.materialParams = material.params;
+            radiance_hit.data.textures = (cudaTextureObject_t*)material.d_textures;
 
             // Set mesh data if applicable
             if (instance.type == oka::Instance::Type::eMesh)
@@ -1163,7 +1146,6 @@ void OptiXRender::render(Buffer* output)
     if (getSharedContext().mFrameNumber == 0)
     {
         createOptixMaterials();
-        createPipeline();
         createVertexBuffer();
         if (mEnableMotionBlur)
         {
@@ -1438,51 +1420,35 @@ void OptiXRender::render(Buffer* output)
 
 void OptiXRender::init()
 {
-    // TODO: move USD_DIR to settings
-    const char* envUSDPath = std::getenv("USD_DIR");
     mEnableValidation = getSettings()->getAs<bool>("render/enableValidation");
     mEnableMotionBlur = getSettings()->getAs<bool>("render/enableMotionBlur");
 
-    fs::path usdMdlLibPath;
-    if (envUSDPath)
-    {
-        usdMdlLibPath = (fs::path(envUSDPath) / fs::path("libraries/mdl/")).make_preferred();
-    }
-    const fs::path cwdPath = fs::current_path();
-    STRELKA_DEBUG("cwdPath: {}", cwdPath.string().c_str());
-    const fs::path mtlxPath = (cwdPath / fs::path("data/materials/mtlx")).make_preferred();
-    STRELKA_DEBUG("mtlxPath: {}", mtlxPath.string().c_str());
-    const fs::path mdlPath = (cwdPath / fs::path("data/materials/mdl")).make_preferred();
-
-    const std::string usdMdlLibPathStr = usdMdlLibPath.string();
-    const std::string mtlxPathStr = mtlxPath.string().c_str();
-    const std::string mdlPathStr = mdlPath.string().c_str();
-
-    const char* paths[] = { usdMdlLibPathStr.c_str(), mtlxPathStr.c_str(), mdlPathStr.c_str() };
-    bool res = mMaterialManager.addMdlSearchPath(paths, sizeof(paths) / sizeof(char*));
-
-    if (!res)
-    {
-        STRELKA_FATAL("Wrong mdl paths configuration!");
-        assert(0);
-        return;
-    }
-
-    // default material
+    // Add a default material (standard PBR, white)
     {
         oka::Scene::MaterialDescription defaultMaterial{};
-        defaultMaterial.file = "default.mdl";
         defaultMaterial.name = "default_material";
-        defaultMaterial.type = oka::Scene::MaterialDescription::Type::eMdl;
+        defaultMaterial.params.material_type = MATERIAL_TYPE_STANDARD_PBR;
+        defaultMaterial.params.base_color = {1.0f, 1.0f, 1.0f};
+        defaultMaterial.params.roughness = 0.5f;
+        defaultMaterial.params.metallic = 0.0f;
+        defaultMaterial.params.ior = 1.5f;
+        defaultMaterial.params.specular = 0.5f;
+        defaultMaterial.params.normal_scale = 1.0f;
+        defaultMaterial.params.occlusion_strength = 1.0f;
+        defaultMaterial.params.alpha_cutoff = 0.5f;
+        defaultMaterial.params.base_color_tex = -1;
+        defaultMaterial.params.metallic_roughness_tex = -1;
+        defaultMaterial.params.normal_tex = -1;
+        defaultMaterial.params.emission_tex = -1;
+        defaultMaterial.params.occlusion_tex = -1;
+        defaultMaterial.params.transmission_tex = -1;
         mScene->addMaterial(defaultMaterial);
     }
 
     createContext();
-    // createAccelerationStructure();
     createModule();
     createProgramGroups();
     createPipeline();
-    // createSbt();
 }
 
 Buffer* OptiXRender::createBuffer(const BufferDesc& desc)
@@ -1628,232 +1594,88 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName)
 
 bool OptiXRender::createOptixMaterials()
 {
-    // Create maps to cache resources
-    std::unordered_map<std::string, MaterialManager::Module*> nameToModule;
-    std::unordered_map<std::string, MaterialManager::MaterialInstance*> nameToInstance;
-    std::unordered_map<std::string, MaterialManager::CompiledMaterial*> nameToCompiled;
-    std::vector<MaterialManager::CompiledMaterial*> compiledMaterials;
-
-    // Pre-allocate vectors to avoid reallocations
     const auto& matDescs = mScene->getMaterials();
-    compiledMaterials.reserve(matDescs.size());
-
-    // Process each material description
-    for (uint32_t i = 0; i < matDescs.size(); ++i)
+    if (matDescs.empty())
     {
-        const auto& currMatDesc = matDescs[i];
+        STRELKA_WARNING("No materials in scene");
+        return true;
+    }
 
-        // Try to reuse already compiled material
-        if (currMatDesc.type == oka::Scene::MaterialDescription::Type::eMdl)
+    const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");
+    const fs::path resourcePath(resourcePathStr);
+
+    static constexpr int MAX_MATERIAL_TEXTURES = 6; // base_color, metallic_roughness, normal, emission, occlusion, transmission
+
+    // Host-side storage for all texture objects (flat array: mat[0].tex[0..5], mat[1].tex[0..5], ...)
+    std::vector<cudaTextureObject_t> allTexObjects(matDescs.size() * MAX_MATERIAL_TEXTURES, 0);
+
+    // Cache: file path -> texture object (avoid loading the same file twice)
+    std::unordered_map<std::string, cudaTextureObject_t> texCache;
+
+    auto loadOrCacheTex = [&](const std::string& relPath) -> cudaTextureObject_t {
+        if (relPath.empty())
+            return 0;
+        fs::path fullPath = resourcePath / relPath;
+        std::string key = fullPath.string();
+        auto it = texCache.find(key);
+        if (it != texCache.end())
+            return it->second;
+        if (!fs::exists(fullPath))
         {
-            if (auto it = nameToCompiled.find(currMatDesc.name); it != nameToCompiled.end())
-            {
-                compiledMaterials.emplace_back(it->second);
-                continue;
-            }
-
-            // Create or get cached MDL module
-            MaterialManager::Module* mdlModule = nullptr;
-            auto moduleIt = nameToModule.find(currMatDesc.file);
-            if (moduleIt != nameToModule.end())
-            {
-                mdlModule = moduleIt->second;
-            }
-            else
-            {
-                mdlModule = mMaterialManager.createModule(currMatDesc.file.c_str());
-                if (!mdlModule)
-                {
-                    STRELKA_ERROR("Failed to load MDL file: {}, falling back to default.mdl", currMatDesc.file);
-                    mdlModule = nameToModule["default.mdl"];
-                    if (!mdlModule)
-                    {
-                        STRELKA_FATAL("Default material module not found!");
-                        return false;
-                    }
-                }
-                nameToModule[currMatDesc.file] = mdlModule;
-            }
-
-            // Create or get cached material instance
-            MaterialManager::MaterialInstance* materialInst = nullptr;
-            auto instIt = nameToInstance.find(currMatDesc.name);
-            if (instIt != nameToInstance.end())
-            {
-                materialInst = instIt->second;
-            }
-            else
-            {
-                materialInst = mMaterialManager.createMaterialInstance(mdlModule, currMatDesc.name.c_str());
-                if (!materialInst)
-                {
-                    STRELKA_ERROR("Failed to create material instance for: {}", currMatDesc.name);
-                    continue;
-                }
-                nameToInstance[currMatDesc.name] = materialInst;
-            }
-
-            // Compile material
-            auto materialComp = mMaterialManager.compileMaterial(materialInst);
-            if (!materialComp)
-            {
-                STRELKA_ERROR("Failed to compile material: {}", currMatDesc.name);
-                continue;
-            }
-            nameToCompiled[currMatDesc.name] = materialComp;
-            compiledMaterials.push_back(materialComp);
+            STRELKA_WARNING("Texture not found: {}", key);
+            texCache[key] = 0;
+            return 0;
         }
-        else
-        {
-            // Handle MaterialX materials
-            auto mdlModule = mMaterialManager.createMtlxModule(currMatDesc.code.c_str());
-            if (!mdlModule)
-            {
-                STRELKA_ERROR("Failed to create MaterialX module");
-                continue;
-            }
+        ::Texture tex = loadTextureFromFile(key);
+        cudaTextureObject_t obj = tex.filtered_object;
+        texCache[key] = obj;
+        return obj;
+    };
 
-            auto materialInst = mMaterialManager.createMaterialInstance(mdlModule, "");
-            if (!materialInst)
-            {
-                STRELKA_ERROR("Failed to create MaterialX instance");
-                mMaterialManager.destroyModule(mdlModule);
-                continue;
-            }
-
-            auto materialComp = mMaterialManager.compileMaterial(materialInst);
-            if (!materialComp)
-            {
-                STRELKA_ERROR("Failed to compile MaterialX material");
-                mMaterialManager.destroyMaterialInstance(materialInst);
-                mMaterialManager.destroyModule(mdlModule);
-                continue;
-            }
-
-            compiledMaterials.push_back(materialComp);
-        }
-    }
-
-    if (compiledMaterials.empty())
-    {
-        STRELKA_ERROR("No materials were successfully compiled");
-        return false;
-    }
-
-    // Generate target code for all compiled materials
-    auto targetCode = mMaterialManager.generateTargetCode(compiledMaterials.data(), compiledMaterials.size());
-    if (!targetCode)
-    {
-        STRELKA_ERROR("Failed to generate target code");
-        return false;
-    }
-
-    // Process textures and parameters
-    std::vector<Texture> materialTextures;
-    materialTextures.reserve(matDescs.size()); // Conservative estimate
-
-    const fs::path resourcePath(getSettings()->getAs<std::string>("resource/searchPath"));
+    mMaterials.resize(matDescs.size());
 
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
-        for (const auto& param : matDescs[i].params)
-        {
-            bool res = false;
-            if (param.type == MaterialManager::Param::Type::eTexture)
-            {
-                std::string texPath(param.value.begin(), param.value.end());
-                fs::path fullTextureFilePath = resourcePath / texPath;
-                ::Texture tex = loadTextureFromFile(fullTextureFilePath.string());
-                materialTextures.push_back(tex);
-                int texId = 0;
-                int resId = mMaterialManager.registerResource(targetCode, texId);
-                assert(resId > 0);
-                MaterialManager::Param newParam;
-                newParam.name = param.name;
-                newParam.type = MaterialManager::Param::Type::eInt;
-                newParam.value.resize(sizeof(resId));
-                memcpy(newParam.value.data(), &resId, sizeof(resId));
-                res = mMaterialManager.setParam(targetCode, i, compiledMaterials[i], newParam);
-            }
-            else
-            {
-                res = mMaterialManager.setParam(targetCode, i, compiledMaterials[i], param);
-            }
-            if (!res)
-            {
-                STRELKA_ERROR(
-                    "Unable to set parameter: {0} for material: {1}", param.name.c_str(), matDescs[i].name.c_str());
-                // assert(0);
-            }
-        }
-        mMaterialManager.dumpParams(targetCode, i, compiledMaterials[i]);
+        const auto& desc = matDescs[i];
+        cudaTextureObject_t* texSlots = &allTexObjects[i * MAX_MATERIAL_TEXTURES];
+
+        // Copy material params (we'll update texture indices)
+        MaterialParams params = desc.params;
+
+        // Load textures from file paths, assign slots
+        texSlots[0] = loadOrCacheTex(desc.baseColorTexPath);
+        params.base_color_tex = texSlots[0] ? 0 : -1;
+
+        texSlots[1] = loadOrCacheTex(desc.metallicRoughnessTexPath);
+        params.metallic_roughness_tex = texSlots[1] ? 1 : -1;
+
+        texSlots[2] = loadOrCacheTex(desc.normalTexPath);
+        params.normal_tex = texSlots[2] ? 2 : -1;
+
+        texSlots[3] = loadOrCacheTex(desc.emissionTexPath);
+        params.emission_tex = texSlots[3] ? 3 : -1;
+
+        texSlots[4] = loadOrCacheTex(desc.occlusionTexPath);
+        params.occlusion_tex = texSlots[4] ? 4 : -1;
+
+        // Slot 5 reserved for transmission texture (not yet populated by gltf loader)
+        params.transmission_tex = -1;
+
+        mMaterials[i].params = params;
     }
 
-    const uint8_t* argData = mMaterialManager.getArgBufferData(targetCode);
-    const size_t argDataSize = mMaterialManager.getArgBufferSize(targetCode);
-    mMaterialArgDataBuffer.reset(new OptixBuffer(argDataSize));
-    CUDA_CHECK(cudaMemcpy((void*)mMaterialArgDataBuffer->getPtr(), argData, argDataSize, cudaMemcpyHostToDevice));
-
-    const uint8_t* roData = mMaterialManager.getReadOnlyBlockData(targetCode);
-    const size_t roDataSize = mMaterialManager.getReadOnlyBlockSize(targetCode);
-    mMaterialRoDataBuffer.reset(new OptixBuffer(roDataSize));
-    CUDA_CHECK(cudaMemcpy((void*)mMaterialRoDataBuffer->getPtr(), roData, roDataSize, cudaMemcpyHostToDevice));
-
-    const size_t texturesBuffSize = sizeof(Texture) * materialTextures.size();
-    mTexturesDataBuffer.reset(new OptixBuffer(texturesBuffSize));
+    // Upload all texture objects to GPU in one contiguous buffer
+    const size_t totalTexSize = allTexObjects.size() * sizeof(cudaTextureObject_t);
+    mTexturesDataBuffer.reset(new OptixBuffer(totalTexSize));
     CUDA_CHECK(cudaMemcpy(
-        (void*)mTexturesDataBuffer->getPtr(), materialTextures.data(), texturesBuffSize, cudaMemcpyHostToDevice));
+        (void*)mTexturesDataBuffer->getPtr(), allTexObjects.data(), totalTexSize, cudaMemcpyHostToDevice));
 
-    Texture_handler resourceHandler;
-    resourceHandler.num_textures = materialTextures.size();
-    resourceHandler.textures = (const Texture*)mTexturesDataBuffer->getPtr();
-    mTexturesHandlerBuffer.reset(new OptixBuffer(sizeof(Texture_handler)));
-    CUDA_CHECK(cudaMemcpy(
-        (void*)mTexturesHandlerBuffer->getPtr(), &resourceHandler, sizeof(Texture_handler), cudaMemcpyHostToDevice));
-
-    std::unordered_map<MaterialManager::CompiledMaterial*, OptixProgramGroup> compiledToOptixPG;
-    for (int i = 0; i < compiledMaterials.size(); ++i)
+    // Set per-material device pointers into the shared buffer
+    for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
-        if (compiledToOptixPG.find(compiledMaterials[i]) == compiledToOptixPG.end())
-        {
-            const char* codeData = mMaterialManager.getShaderCode(targetCode, i);
-            assert(codeData);
-            const size_t codeSize = strlen(codeData);
-            assert(codeSize);
-            OptixProgramGroup pg = createRadianceClosestHitProgramGroup(mState, codeData, codeSize);
-            compiledToOptixPG[compiledMaterials[i]] = pg;
-        }
-
-        Material optixMaterial;
-        optixMaterial.programGroup = compiledToOptixPG[compiledMaterials[i]];
-        optixMaterial.d_argData = mMaterialArgDataBuffer->getPtr() + mMaterialManager.getArgBlockOffset(targetCode, i);
-        optixMaterial.d_argDataSize = argDataSize;
-        optixMaterial.d_roData = mMaterialRoDataBuffer->getPtr() + mMaterialManager.getReadOnlyOffset(targetCode, i);
-        optixMaterial.d_roSize = roDataSize;
-        optixMaterial.d_textureHandler = mTexturesHandlerBuffer->getPtr();
-
-        mMaterials.push_back(optixMaterial);
+        mMaterials[i].d_textures = mTexturesDataBuffer->getPtr() + i * MAX_MATERIAL_TEXTURES * sizeof(cudaTextureObject_t);
     }
 
-    // Clean up material resources
-    for (auto& [name, module] : nameToModule)
-    {
-        mMaterialManager.destroyModule(module);
-    }
-    for (auto& [name, instance] : nameToInstance)
-    {
-        mMaterialManager.destroyMaterialInstance(instance);
-    }
-    for (auto& [name, compiled] : nameToCompiled)
-    {
-        mMaterialManager.destroyCompiledMaterial(compiled);
-    }
-
+    STRELKA_INFO("Loaded {} materials ({} unique textures cached)", matDescs.size(), texCache.size());
     return true;
-}
-
-OptiXRender::Material& OptiXRender::getMaterial(int id)
-{
-    assert(id < mMaterials.size());
-    return mMaterials[id];
 }

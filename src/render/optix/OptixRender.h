@@ -1,30 +1,21 @@
 #pragma once
 
-#include "render.h"
+#include <strelka/render/render.h>
 
 #include <optix.h>
 
 #include "OptixRenderParams.h"
 
-#include <scene/scene.h>
+#include <strelka/scene/scene.h>
 
-#include <cuda_checks.h>
-#include "common.h"
+#include "cuda_checks.h"
+#include <strelka/render/common.h>
 #include "OptixBuffer.h"
-
-#include <materialmanager.h>
 
 struct Texture;
 
 namespace oka
 {
-
-enum RayType
-{
-    RAY_TYPE_RADIANCE = 0,
-    RAY_TYPE_OCCLUSION = 1,
-    RAY_TYPE_COUNT
-};
 
 struct PathTracerState
 {
@@ -36,6 +27,7 @@ struct PathTracerState
 
     OptixModuleCompileOptions module_compile_options = {};
     OptixModule ptx_module = 0;
+    OptixModule closest_hit_module = 0; // Loaded from OptixRender_closest_hit.cu.optixir
     OptixPipelineCompileOptions pipeline_compile_options = {};
     OptixPipeline pipeline = 0;
     OptixModule m_catromCurveModule = 0;
@@ -84,15 +76,11 @@ private:
         OptixInstance instance;
     };
 
-    // optix material
+    // Per-material GPU data
     struct Material
     {
-        OptixProgramGroup programGroup;
-        CUdeviceptr d_argData = 0;
-        size_t d_argDataSize = 0;
-        CUdeviceptr d_roData = 0;
-        size_t d_roSize = 0;
-        CUdeviceptr d_textureHandler;
+        MaterialParams params;          // Resolved material parameters (with texture indices set)
+        CUdeviceptr d_textures = 0;     // Device pointer to cudaTextureObject_t array
     };
 
     struct View
@@ -142,10 +130,7 @@ private:
 
     std::unique_ptr<OptixBuffer> mTlasBuffer;
     
-    std::unique_ptr<OptixBuffer> mMaterialRoDataBuffer;
-    std::unique_ptr<OptixBuffer> mMaterialArgDataBuffer;
-    std::unique_ptr<OptixBuffer> mTexturesHandlerBuffer;
-    std::unique_ptr<OptixBuffer> mTexturesDataBuffer;
+    std::unique_ptr<OptixBuffer> mTexturesDataBuffer; // Consolidated GPU texture object array
 
     // Temporary buffers for GAS building
     // These buffers are reused across multiple GAS builds to reduce allocations
@@ -168,9 +153,7 @@ private:
     Texture loadTextureFromFile(const std::string& fileName);
 
     bool createOptixMaterials();
-    Material& getMaterial(int id);
 
-    MaterialManager mMaterialManager;
     std::vector<Material> mMaterials;
 
     void updatePathtracerParams(const uint32_t width, const uint32_t height);
@@ -194,9 +177,6 @@ public:
     void createPipeline();
     void createSbt();
 
-    OptixProgramGroup createRadianceClosestHitProgramGroup(PathTracerState& state,
-                                                           char const* module_code,
-                                                           size_t module_size);
 };
 
 } // namespace oka
