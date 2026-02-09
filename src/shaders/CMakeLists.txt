@@ -103,7 +103,7 @@ if(APPLE)
     )
 
     # Compile Metal shaders
-    foreach(shader pathtrace tonemapper skinning)
+    foreach(shader pathtrace tonemapper skinning bdpt_camera_subpath bdpt_light_subpath bdpt_connect vcm_clear vcm_hash_grid_build vcm_merge)
         add_custom_command(
             OUTPUT ${SHADER_OUTPUT_DIR}/${shader}.metallib
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
@@ -124,6 +124,12 @@ if(APPLE)
             ${SHADER_OUTPUT_DIR}/pathtrace.metallib
             ${SHADER_OUTPUT_DIR}/tonemapper.metallib
             ${SHADER_OUTPUT_DIR}/skinning.metallib
+            ${SHADER_OUTPUT_DIR}/bdpt_camera_subpath.metallib
+            ${SHADER_OUTPUT_DIR}/bdpt_light_subpath.metallib
+            ${SHADER_OUTPUT_DIR}/bdpt_connect.metallib
+            ${SHADER_OUTPUT_DIR}/vcm_clear.metallib
+            ${SHADER_OUTPUT_DIR}/vcm_hash_grid_build.metallib
+            ${SHADER_OUTPUT_DIR}/vcm_merge.metallib
             ${SHADER_OUTPUT_DIR}/fullScreen.metal
     )
 endif()

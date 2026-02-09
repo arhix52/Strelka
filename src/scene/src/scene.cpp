@@ -609,7 +609,10 @@ void Scene::updateAnimation(const float time)
             }
         }
     }
-    mCameras[0].matrices.view = getTransform(mCameras[0].node);
+    if (!mCameras.empty() && mCameras[0].node != -1)
+    {
+        mCameras[0].matrices.view = getTransform(mCameras[0].node);
+    }
 }
 
 uint32_t Scene::createLight(const UniformLightDesc& desc)

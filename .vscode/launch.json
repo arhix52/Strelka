@@ -33,11 +33,13 @@
             "type": "lldb",
             "request": "launch",
             "program": "${workspaceFolder}/build/Debug/src/editor/StrelkaEditor",
-            "args": ["-s", "../../../vespa/vespa.gltf"],
+            "args": ["-s", "${input:sceneFile}"],
             "cwd": "${workspaceFolder}/build/Debug/",
             "env": {
+                "SPDLOG_LEVEL": "trace",
                 "MTL_DEBUG_LAYER": "1"
-            }
+            },
+            "preLaunchTask": "CMake Build (Debug)"
         }
     ],
     "inputs": [

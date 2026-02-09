@@ -203,4 +203,44 @@ DEVICE_FUNC float bsdf_pdf(const THREAD_REF SurfaceInteraction& si,
     }
 }
 
+// ---------------------------------------------------------------------------
+// bsdf_pdf_reverse -- Reverse PDF p(wo | wi) for BDPT
+//
+// Computes the probability of sampling the outgoing direction wo_light given
+// that wi is the "view" direction. Used for MIS weight computation in BDPT.
+// ---------------------------------------------------------------------------
+DEVICE_FUNC float bsdf_pdf_reverse(const THREAD_REF SurfaceInteraction& si,
+                                   float3 wo_light)
+{
+    switch (si.material_type)
+    {
+    case MATERIAL_TYPE_DIFFUSE:
+        return diffuse_pdf_reverse(si, wo_light);
+
+    case MATERIAL_TYPE_CONDUCTOR:
+        return conductor_pdf_reverse(si, wo_light);
+
+    case MATERIAL_TYPE_DIELECTRIC:
+        return dielectric_pdf_reverse(si, wo_light);
+
+    case MATERIAL_TYPE_STANDARD_PBR:
+    default:
+        return standard_pbr_pdf_reverse(si, wo_light);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// adjoint_correction -- Shading normal correction for non-symmetric BSDF
+//
+// When tracing from the light side, the shading normal introduces a
+// non-symmetry in the BSDF (Veach 1997, Chapter 5). This factor corrects
+// for the difference between geometry and shading normals.
+// ---------------------------------------------------------------------------
+DEVICE_FUNC float adjoint_correction(const THREAD_REF SurfaceInteraction& si, float3 wi)
+{
+    float num = fabsf(dot(si.geometry_normal, wi)) * fabsf(dot(si.shading_normal, si.wo));
+    float den = fabsf(dot(si.shading_normal, wi)) * fabsf(dot(si.geometry_normal, si.wo));
+    return (den > 1e-8f) ? (num / den) : 0.0f;
+}
+
 #endif // STRELKA_BSDF_H

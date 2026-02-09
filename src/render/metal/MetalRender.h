@@ -148,6 +148,39 @@ private:
     // Environment map
     void loadEnvMap(const std::string& texturePath);
 
+    // BDPT
+    MTL::ComputePipelineState* mBDPTCameraSubpathPSO = nullptr;
+    MTL::ComputePipelineState* mBDPTLightSubpathPSO = nullptr;
+    MTL::ComputePipelineState* mBDPTConnectPSO = nullptr;
+
+    MTL::Buffer* mBDPTCameraVertices = nullptr;
+    MTL::Buffer* mBDPTLightVertices = nullptr;
+    MTL::Buffer* mBDPTCameraPathLengths = nullptr;
+    MTL::Buffer* mBDPTLightPathLengths = nullptr;
+    MTL::Buffer* mBDPTSplatBuffer = nullptr;
+    uint32_t mBDPTMaxDepth = 5;
+    float mSceneBoundRadius = 100.0f;
+    float mSceneBoundCenter[3] = {0.0f, 0.0f, 0.0f};
+
+    void buildBDPTPipelines();
+    void allocBDPTBuffers(uint32_t width, uint32_t height);
+    void renderBDPT(MTL::ComputeCommandEncoder* encoder, MTL::Buffer* output, uint32_t width, uint32_t height);
+    void renderVCM(MTL::ComputeCommandEncoder* encoder, MTL::Buffer* output, uint32_t width, uint32_t height);
+    void computeSceneBounds();
+
+    // VCM
+    MTL::ComputePipelineState* mVCMClearPSO = nullptr;
+    MTL::ComputePipelineState* mVCMHashBuildPSO = nullptr;
+    MTL::ComputePipelineState* mVCMMergePSO = nullptr;
+
+    MTL::Buffer* mVCMHashHeads = nullptr;       // uint32_t[VCM_HASH_SIZE] - head pointers
+    MTL::Buffer* mVCMHashEntries = nullptr;     // VCMHashEntry[numPixels * BDPT_MAX_DEPTH]
+    MTL::Buffer* mVCMHashCounter = nullptr;     // atomic_uint - global entry counter
+    MTL::Buffer* mVCMMergeOutput = nullptr;     // float4[numPixels] - merge contribution
+
+    float mVCMInitialRadius = 0.0f;
+    uint32_t mVCMIterationCount = 0;
+
     // BVH management
     MTL::PrimitiveAccelerationStructureDescriptor* createMotionBLASDescriptor(
         const oka::Mesh& sceneMesh, MTL::Buffer* perPrimitiveBuffer, uint32_t triangleCount);

@@ -32,6 +32,8 @@
 #include <simd/simd.h>
 
 #include "ShaderTypes.h"
+#include "bdpt_types.h"
+#include "vcm_types.h"
 
 using namespace oka;
 namespace fs = std::filesystem;
@@ -108,11 +110,30 @@ MetalRender::~MetalRender()
         safeRelease(mEnvCdfXBuffer);
         safeRelease(mEnvCdfYBuffer);
 
+        // BDPT buffers
+        safeRelease(mBDPTCameraVertices);
+        safeRelease(mBDPTLightVertices);
+        safeRelease(mBDPTCameraPathLengths);
+        safeRelease(mBDPTLightPathLengths);
+        safeRelease(mBDPTSplatBuffer);
+
+        // VCM buffers
+        safeRelease(mVCMHashHeads);
+        safeRelease(mVCMHashEntries);
+        safeRelease(mVCMHashCounter);
+        safeRelease(mVCMMergeOutput);
+
         // Pipeline states
         safeRelease(mPathTracingPSO);
         safeRelease(mTonemapperPSO);
         safeRelease(mSkinningPSO);
         safeRelease(mTriangleUpdatePSO);
+        safeRelease(mBDPTCameraSubpathPSO);
+        safeRelease(mBDPTLightSubpathPSO);
+        safeRelease(mBDPTConnectPSO);
+        safeRelease(mVCMClearPSO);
+        safeRelease(mVCMHashBuildPSO);
+        safeRelease(mVCMMergePSO);
 
         // Queue & device (release last)
         safeRelease(mCommandQueue);
@@ -312,6 +333,15 @@ void MetalRender::render(Buffer* output)
             const fs::path envTexPath = fs::path(resourcePathStr) / envLight->texturePath;
             loadEnvMap(envTexPath.string());
         }
+
+        // Compute scene bounds for BDPT
+        computeSceneBounds();
+
+        // Build BDPT pipelines
+        buildBDPTPipelines();
+
+        // Allocate BDPT buffers
+        allocBDPTBuffers(output->width(), output->height());
     }
 
     mFrameIndex = (mFrameIndex + 1) % kMaxFramesInFlight;
@@ -577,6 +607,32 @@ void MetalRender::render(Buffer* output)
         pUniformData->hasEnvMap = 0;
     }
 
+    // BDPT integrator
+    pUniformData->integratorType = settings.getAs<uint32_t>("render/integrator");
+    pUniformData->maxLightSubpathDepth = maxDepth;
+    pUniformData->maxCameraSubpathDepth = maxDepth;
+    pUniformData->sceneBoundRadius = mSceneBoundRadius;
+    pUniformData->sceneBoundCenter = simd_make_float3(mSceneBoundCenter[0], mSceneBoundCenter[1], mSceneBoundCenter[2]);
+
+    // VCM integrator parameters
+    if (pUniformData->integratorType == 2)
+    {
+        const float alpha = 0.75f;
+        const float radiusScale = sqrtf(alpha / (alpha + (float)mVCMIterationCount));
+        const float radius = mVCMInitialRadius * radiusScale;
+        pUniformData->vcmMergeRadius = radius;
+        pUniformData->vcmMergeRadiusSqr = radius * radius;
+        pUniformData->vcmNvm = (float)M_PI * radius * radius * (float)(width * height);
+        pUniformData->vcmHashCellSize = 2.0f * radius;
+    }
+    else
+    {
+        pUniformData->vcmMergeRadius = 0.0f;
+        pUniformData->vcmMergeRadiusSqr = 0.0f;
+        pUniformData->vcmNvm = 0.0f;
+        pUniformData->vcmHashCellSize = 0.0f;
+    }
+
     pUniformTonemap->width = width;
     pUniformTonemap->height = height;
     pUniformTonemap->tonemapperType = settings.getAs<uint32_t>("render/pt/tonemapperType");
@@ -700,38 +756,66 @@ void MetalRender::render(Buffer* output)
         pComputeEncoder->useResource(mIndexBuffer, MTL::ResourceUsageRead);
         pComputeEncoder->useResource(mInstanceDataBuffer, MTL::ResourceUsageRead);
 
-        pComputeEncoder->setComputePipelineState(mPathTracingPSO);
-        pComputeEncoder->setBuffer(pUniformBuffer, 0, 0);
-        pComputeEncoder->setBuffer(mInstanceBuffer, 0, 1);
-        pComputeEncoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
-        pComputeEncoder->setBuffer(mLightBuffer, 0, 3);
-        pComputeEncoder->setBuffer(mMaterialBuffer, 0, 4);
-        // Output
-        pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 5);
-        pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 6);
-        // Motion blur buffers
-        pComputeEncoder->setBuffer(mPrevVertexBuffer, 0, 7);
-        pComputeEncoder->setBuffer(mIndexBuffer, 0, 8);
-        pComputeEncoder->setBuffer(mInstanceDataBuffer, 0, 9);
-        // Environment map buffers (must always be bound — shader expects indices 10/11)
+        // Ensure env CDF buffers exist (shader expects indices even if unused)
         if (!mEnvCdfXBuffer)
             mEnvCdfXBuffer = mDevice->newBuffer(sizeof(float), MTL::ResourceStorageModeManaged);
         if (!mEnvCdfYBuffer)
             mEnvCdfYBuffer = mDevice->newBuffer(sizeof(float), MTL::ResourceStorageModeManaged);
-        pComputeEncoder->useResource(mEnvCdfXBuffer, MTL::ResourceUsageRead);
-        pComputeEncoder->setBuffer(mEnvCdfXBuffer, 0, 10);
-        pComputeEncoder->useResource(mEnvCdfYBuffer, MTL::ResourceUsageRead);
-        pComputeEncoder->setBuffer(mEnvCdfYBuffer, 0, 11);
-        if (mEnvMapTexture)
+
+        if (pUniformData->integratorType >= 1 && mBDPTCameraSubpathPSO && mBDPTLightSubpathPSO && mBDPTConnectPSO)
         {
-            pComputeEncoder->useResource(mEnvMapTexture, MTL::ResourceUsageRead);
-            pComputeEncoder->setTexture(mEnvMapTexture, 0);
+            // --- BDPT / VCM integrator ---
+            pComputeEncoder->useResource(mEnvCdfXBuffer, MTL::ResourceUsageRead);
+            pComputeEncoder->useResource(mEnvCdfYBuffer, MTL::ResourceUsageRead);
+            if (mEnvMapTexture)
+                pComputeEncoder->useResource(mEnvMapTexture, MTL::ResourceUsageRead);
+
+            if (pUniformData->integratorType == 2 && mVCMClearPSO && mVCMHashBuildPSO && mVCMMergePSO)
+            {
+                pComputeEncoder->useResource(mVCMHashHeads, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+                pComputeEncoder->useResource(mVCMHashEntries, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+                pComputeEncoder->useResource(mVCMHashCounter, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+                pComputeEncoder->useResource(mVCMMergeOutput, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+                renderVCM(pComputeEncoder, ((MetalBuffer*)output)->getNativePtr(), width, height);
+                mVCMIterationCount++;
+            }
+            else
+            {
+                renderBDPT(pComputeEncoder, ((MetalBuffer*)output)->getNativePtr(), width, height);
+            }
         }
-        if (mInstanceBuffer != nullptr)
+        else
         {
-            const MTL::Size gridSize = MTL::Size(width, height, 1);
-            const MTL::Size threadgroupSize(8, 8, 1);
-            pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+            // --- Path tracing integrator ---
+            pComputeEncoder->setComputePipelineState(mPathTracingPSO);
+            pComputeEncoder->setBuffer(pUniformBuffer, 0, 0);
+            pComputeEncoder->setBuffer(mInstanceBuffer, 0, 1);
+            pComputeEncoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
+            pComputeEncoder->setBuffer(mLightBuffer, 0, 3);
+            pComputeEncoder->setBuffer(mMaterialBuffer, 0, 4);
+            // Output
+            pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 5);
+            pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 6);
+            // Motion blur buffers
+            pComputeEncoder->setBuffer(mPrevVertexBuffer, 0, 7);
+            pComputeEncoder->setBuffer(mIndexBuffer, 0, 8);
+            pComputeEncoder->setBuffer(mInstanceDataBuffer, 0, 9);
+            // Environment map buffers
+            pComputeEncoder->useResource(mEnvCdfXBuffer, MTL::ResourceUsageRead);
+            pComputeEncoder->setBuffer(mEnvCdfXBuffer, 0, 10);
+            pComputeEncoder->useResource(mEnvCdfYBuffer, MTL::ResourceUsageRead);
+            pComputeEncoder->setBuffer(mEnvCdfYBuffer, 0, 11);
+            if (mEnvMapTexture)
+            {
+                pComputeEncoder->useResource(mEnvMapTexture, MTL::ResourceUsageRead);
+                pComputeEncoder->setTexture(mEnvMapTexture, 0);
+            }
+            if (mInstanceBuffer != nullptr)
+            {
+                const MTL::Size gridSize = MTL::Size(width, height, 1);
+                const MTL::Size threadgroupSize(8, 8, 1);
+                pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+            }
         }
         // Disable tonemapping for debug output
         if (pUniformData->debug == 0)
@@ -874,6 +958,352 @@ void MetalRender::buildTonemapperPipeline()
 
     pTonemapperFn->release();
     pComputeLibrary->release();
+}
+
+void MetalRender::buildBDPTPipelines()
+{
+    NS::Error* pError = nullptr;
+
+    // Camera subpath
+    {
+        MTL::Library* lib = mDevice->newLibrary(
+            NS::String::string("./metal/shaders/bdpt_camera_subpath.metallib", NS::UTF8StringEncoding), &pError);
+        if (!lib) { STRELKA_ERROR("Failed to load bdpt_camera_subpath.metallib: {}", pError->localizedDescription()->utf8String()); return; }
+        MTL::Function* fn = lib->newFunction(NS::String::string("bdpt_camera_subpath", NS::UTF8StringEncoding));
+        mBDPTCameraSubpathPSO = mDevice->newComputePipelineState(fn, &pError);
+        if (!mBDPTCameraSubpathPSO) { STRELKA_ERROR("Failed to create BDPT camera subpath PSO: {}", pError->localizedDescription()->utf8String()); }
+        fn->release();
+        lib->release();
+    }
+
+    // Light subpath
+    {
+        MTL::Library* lib = mDevice->newLibrary(
+            NS::String::string("./metal/shaders/bdpt_light_subpath.metallib", NS::UTF8StringEncoding), &pError);
+        if (!lib) { STRELKA_ERROR("Failed to load bdpt_light_subpath.metallib: {}", pError->localizedDescription()->utf8String()); return; }
+        MTL::Function* fn = lib->newFunction(NS::String::string("bdpt_light_subpath", NS::UTF8StringEncoding));
+        mBDPTLightSubpathPSO = mDevice->newComputePipelineState(fn, &pError);
+        if (!mBDPTLightSubpathPSO) { STRELKA_ERROR("Failed to create BDPT light subpath PSO: {}", pError->localizedDescription()->utf8String()); }
+        fn->release();
+        lib->release();
+    }
+
+    // Connect
+    {
+        MTL::Library* lib = mDevice->newLibrary(
+            NS::String::string("./metal/shaders/bdpt_connect.metallib", NS::UTF8StringEncoding), &pError);
+        if (!lib) { STRELKA_ERROR("Failed to load bdpt_connect.metallib: {}", pError->localizedDescription()->utf8String()); return; }
+        MTL::Function* fn = lib->newFunction(NS::String::string("bdpt_connect", NS::UTF8StringEncoding));
+        mBDPTConnectPSO = mDevice->newComputePipelineState(fn, &pError);
+        if (!mBDPTConnectPSO) { STRELKA_ERROR("Failed to create BDPT connect PSO: {}", pError->localizedDescription()->utf8String()); }
+        fn->release();
+        lib->release();
+    }
+
+    // VCM clear
+    {
+        MTL::Library* lib = mDevice->newLibrary(
+            NS::String::string("./metal/shaders/vcm_clear.metallib", NS::UTF8StringEncoding), &pError);
+        if (!lib) { STRELKA_ERROR("Failed to load vcm_clear.metallib: {}", pError->localizedDescription()->utf8String()); return; }
+        MTL::Function* fn = lib->newFunction(NS::String::string("vcm_clear", NS::UTF8StringEncoding));
+        mVCMClearPSO = mDevice->newComputePipelineState(fn, &pError);
+        if (!mVCMClearPSO) { STRELKA_ERROR("Failed to create VCM clear PSO: {}", pError->localizedDescription()->utf8String()); }
+        fn->release();
+        lib->release();
+    }
+
+    // VCM hash grid build
+    {
+        MTL::Library* lib = mDevice->newLibrary(
+            NS::String::string("./metal/shaders/vcm_hash_grid_build.metallib", NS::UTF8StringEncoding), &pError);
+        if (!lib) { STRELKA_ERROR("Failed to load vcm_hash_grid_build.metallib: {}", pError->localizedDescription()->utf8String()); return; }
+        MTL::Function* fn = lib->newFunction(NS::String::string("vcm_hash_grid_build", NS::UTF8StringEncoding));
+        mVCMHashBuildPSO = mDevice->newComputePipelineState(fn, &pError);
+        if (!mVCMHashBuildPSO) { STRELKA_ERROR("Failed to create VCM hash build PSO: {}", pError->localizedDescription()->utf8String()); }
+        fn->release();
+        lib->release();
+    }
+
+    // VCM merge
+    {
+        MTL::Library* lib = mDevice->newLibrary(
+            NS::String::string("./metal/shaders/vcm_merge.metallib", NS::UTF8StringEncoding), &pError);
+        if (!lib) { STRELKA_ERROR("Failed to load vcm_merge.metallib: {}", pError->localizedDescription()->utf8String()); return; }
+        MTL::Function* fn = lib->newFunction(NS::String::string("vcm_merge", NS::UTF8StringEncoding));
+        mVCMMergePSO = mDevice->newComputePipelineState(fn, &pError);
+        if (!mVCMMergePSO) { STRELKA_ERROR("Failed to create VCM merge PSO: {}", pError->localizedDescription()->utf8String()); }
+        fn->release();
+        lib->release();
+    }
+}
+
+void MetalRender::allocBDPTBuffers(uint32_t width, uint32_t height)
+{
+    auto safeRelease = [](MTL::Buffer*& p) { if (p) { p->release(); p = nullptr; } };
+    safeRelease(mBDPTCameraVertices);
+    safeRelease(mBDPTLightVertices);
+    safeRelease(mBDPTCameraPathLengths);
+    safeRelease(mBDPTLightPathLengths);
+    safeRelease(mBDPTSplatBuffer);
+
+    const uint32_t numPixels = width * height;
+    const size_t vertexBufSize = (size_t)numPixels * BDPT_MAX_DEPTH * sizeof(BDPTVertex);
+    const size_t pathLenBufSize = (size_t)numPixels * sizeof(uint32_t);
+    // Splat buffer: 3 floats (RGB) per pixel stored as uint32_t for atomic ops
+    const size_t splatBufSize = (size_t)numPixels * 3 * sizeof(uint32_t);
+
+    mBDPTCameraVertices   = mDevice->newBuffer(vertexBufSize, MTL::ResourceStorageModePrivate);
+    mBDPTLightVertices    = mDevice->newBuffer(vertexBufSize, MTL::ResourceStorageModePrivate);
+    mBDPTCameraPathLengths = mDevice->newBuffer(pathLenBufSize, MTL::ResourceStorageModePrivate);
+    mBDPTLightPathLengths  = mDevice->newBuffer(pathLenBufSize, MTL::ResourceStorageModePrivate);
+    mBDPTSplatBuffer       = mDevice->newBuffer(splatBufSize, MTL::ResourceStorageModePrivate);
+
+    // VCM buffers
+    auto safeReleaseVCM = [](MTL::Buffer*& p) { if (p) { p->release(); p = nullptr; } };
+    safeReleaseVCM(mVCMHashHeads);
+    safeReleaseVCM(mVCMHashEntries);
+    safeReleaseVCM(mVCMHashCounter);
+    safeReleaseVCM(mVCMMergeOutput);
+
+    const size_t hashHeadSize = VCM_HASH_SIZE * sizeof(uint32_t);
+    const size_t hashEntrySize = (size_t)numPixels * BDPT_MAX_DEPTH * sizeof(VCMHashEntry);
+    const size_t counterSize = sizeof(uint32_t);
+    const size_t mergeOutputSize = (size_t)numPixels * sizeof(float) * 4;
+
+    mVCMHashHeads    = mDevice->newBuffer(hashHeadSize, MTL::ResourceStorageModePrivate);
+    mVCMHashEntries  = mDevice->newBuffer(hashEntrySize, MTL::ResourceStorageModePrivate);
+    mVCMHashCounter  = mDevice->newBuffer(counterSize, MTL::ResourceStorageModePrivate);
+    mVCMMergeOutput  = mDevice->newBuffer(mergeOutputSize, MTL::ResourceStorageModePrivate);
+
+    // Initial merge radius based on scene bounds
+    mVCMInitialRadius = mSceneBoundRadius * 0.003f;
+    mVCMIterationCount = 0;
+}
+
+void MetalRender::computeSceneBounds()
+{
+    const auto& vertices = mScene->getVertices();
+    if (vertices.empty())
+    {
+        mSceneBoundCenter[0] = 0.0f;
+        mSceneBoundCenter[1] = 0.0f;
+        mSceneBoundCenter[2] = 0.0f;
+        mSceneBoundRadius = 100.0f;
+        return;
+    }
+
+    glm::vec3 minBound(FLT_MAX);
+    glm::vec3 maxBound(-FLT_MAX);
+    for (const auto& v : vertices)
+    {
+        minBound = glm::min(minBound, glm::vec3(v.pos.x, v.pos.y, v.pos.z));
+        maxBound = glm::max(maxBound, glm::vec3(v.pos.x, v.pos.y, v.pos.z));
+    }
+
+    glm::vec3 center = (minBound + maxBound) * 0.5f;
+    float radius = glm::length(maxBound - center) * 1.1f; // 10% margin
+
+    mSceneBoundCenter[0] = center.x;
+    mSceneBoundCenter[1] = center.y;
+    mSceneBoundCenter[2] = center.z;
+    mSceneBoundRadius = radius;
+}
+
+void MetalRender::renderBDPT(MTL::ComputeCommandEncoder* encoder, MTL::Buffer* output, uint32_t width, uint32_t height)
+{
+    const MTL::Size gridSize = MTL::Size(width, height, 1);
+    const MTL::Size threadgroupSize(8, 8, 1);
+
+    // Shared resource usage declarations
+    encoder->useResource(mBDPTCameraVertices, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+    encoder->useResource(mBDPTLightVertices, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+    encoder->useResource(mBDPTCameraPathLengths, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+    encoder->useResource(mBDPTLightPathLengths, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+    encoder->useResource(mBDPTSplatBuffer, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+
+    MTL::Buffer* pUniformBuffer = mUniformBuffers[mFrameIndex];
+
+    // --- 1. Light subpath kernel ---
+    encoder->setComputePipelineState(mBDPTLightSubpathPSO);
+    encoder->setBuffer(pUniformBuffer, 0, 0);
+    encoder->setBuffer(mInstanceBuffer, 0, 1);
+    encoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
+    encoder->setBuffer(mLightBuffer, 0, 3);
+    encoder->setBuffer(mMaterialBuffer, 0, 4);
+    encoder->setBuffer(mPrevVertexBuffer, 0, 5);
+    encoder->setBuffer(mIndexBuffer, 0, 6);
+    encoder->setBuffer(mInstanceDataBuffer, 0, 7);
+    encoder->setBuffer(mEnvCdfXBuffer, 0, 8);
+    encoder->setBuffer(mEnvCdfYBuffer, 0, 9);
+    encoder->setBuffer(mBDPTLightVertices, 0, 10);
+    encoder->setBuffer(mBDPTLightPathLengths, 0, 11);
+    if (mEnvMapTexture)
+        encoder->setTexture(mEnvMapTexture, 0);
+    encoder->dispatchThreads(gridSize, threadgroupSize);
+
+    // Memory barrier between light and camera subpaths
+    encoder->memoryBarrier(MTL::BarrierScopeBuffers);
+
+    // --- 2. Camera subpath kernel ---
+    encoder->setComputePipelineState(mBDPTCameraSubpathPSO);
+    encoder->setBuffer(pUniformBuffer, 0, 0);
+    encoder->setBuffer(mInstanceBuffer, 0, 1);
+    encoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
+    encoder->setBuffer(mLightBuffer, 0, 3);
+    encoder->setBuffer(mMaterialBuffer, 0, 4);
+    encoder->setBuffer(mPrevVertexBuffer, 0, 5);
+    encoder->setBuffer(mIndexBuffer, 0, 6);
+    encoder->setBuffer(mInstanceDataBuffer, 0, 7);
+    encoder->setBuffer(mEnvCdfXBuffer, 0, 8);
+    encoder->setBuffer(mEnvCdfYBuffer, 0, 9);
+    encoder->setBuffer(mBDPTCameraVertices, 0, 10);
+    encoder->setBuffer(mBDPTCameraPathLengths, 0, 11);
+    if (mEnvMapTexture)
+        encoder->setTexture(mEnvMapTexture, 0);
+    encoder->dispatchThreads(gridSize, threadgroupSize);
+
+    // Memory barrier between subpath tracing and connection
+    encoder->memoryBarrier(MTL::BarrierScopeBuffers);
+
+    // --- 3. Connection kernel ---
+    encoder->setComputePipelineState(mBDPTConnectPSO);
+    encoder->setBuffer(pUniformBuffer, 0, 0);
+    encoder->setBuffer(mInstanceBuffer, 0, 1);
+    encoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
+    encoder->setBuffer(mLightBuffer, 0, 3);
+    encoder->setBuffer(mMaterialBuffer, 0, 4);
+    encoder->setBuffer(output, 0, 5);
+    encoder->setBuffer(mAccumulationBuffer, 0, 6);
+    encoder->setBuffer(mBDPTCameraVertices, 0, 7);
+    encoder->setBuffer(mBDPTCameraPathLengths, 0, 8);
+    encoder->setBuffer(mBDPTLightVertices, 0, 9);
+    encoder->setBuffer(mBDPTLightPathLengths, 0, 10);
+    encoder->setBuffer(mBDPTSplatBuffer, 0, 11);
+    encoder->setBuffer(mEnvCdfXBuffer, 0, 12);
+    encoder->setBuffer(mEnvCdfYBuffer, 0, 13);
+    if (mEnvMapTexture)
+        encoder->setTexture(mEnvMapTexture, 0);
+    encoder->dispatchThreads(gridSize, threadgroupSize);
+}
+
+void MetalRender::renderVCM(MTL::ComputeCommandEncoder* encoder, MTL::Buffer* output, uint32_t width, uint32_t height)
+{
+    const MTL::Size gridSize = MTL::Size(width, height, 1);
+    const MTL::Size threadgroupSize(8, 8, 1);
+
+    // Shared resource usage declarations
+    encoder->useResource(mBDPTCameraVertices, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+    encoder->useResource(mBDPTLightVertices, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+    encoder->useResource(mBDPTCameraPathLengths, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+    encoder->useResource(mBDPTLightPathLengths, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+    encoder->useResource(mBDPTSplatBuffer, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+
+    MTL::Buffer* pUniformBuffer = mUniformBuffers[mFrameIndex];
+
+    // --- 1. Light subpath kernel ---
+    encoder->setComputePipelineState(mBDPTLightSubpathPSO);
+    encoder->setBuffer(pUniformBuffer, 0, 0);
+    encoder->setBuffer(mInstanceBuffer, 0, 1);
+    encoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
+    encoder->setBuffer(mLightBuffer, 0, 3);
+    encoder->setBuffer(mMaterialBuffer, 0, 4);
+    encoder->setBuffer(mPrevVertexBuffer, 0, 5);
+    encoder->setBuffer(mIndexBuffer, 0, 6);
+    encoder->setBuffer(mInstanceDataBuffer, 0, 7);
+    encoder->setBuffer(mEnvCdfXBuffer, 0, 8);
+    encoder->setBuffer(mEnvCdfYBuffer, 0, 9);
+    encoder->setBuffer(mBDPTLightVertices, 0, 10);
+    encoder->setBuffer(mBDPTLightPathLengths, 0, 11);
+    if (mEnvMapTexture)
+        encoder->setTexture(mEnvMapTexture, 0);
+    encoder->dispatchThreads(gridSize, threadgroupSize);
+
+    // Memory barrier
+    encoder->memoryBarrier(MTL::BarrierScopeBuffers);
+
+    // --- 2. Camera subpath kernel ---
+    encoder->setComputePipelineState(mBDPTCameraSubpathPSO);
+    encoder->setBuffer(pUniformBuffer, 0, 0);
+    encoder->setBuffer(mInstanceBuffer, 0, 1);
+    encoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
+    encoder->setBuffer(mLightBuffer, 0, 3);
+    encoder->setBuffer(mMaterialBuffer, 0, 4);
+    encoder->setBuffer(mPrevVertexBuffer, 0, 5);
+    encoder->setBuffer(mIndexBuffer, 0, 6);
+    encoder->setBuffer(mInstanceDataBuffer, 0, 7);
+    encoder->setBuffer(mEnvCdfXBuffer, 0, 8);
+    encoder->setBuffer(mEnvCdfYBuffer, 0, 9);
+    encoder->setBuffer(mBDPTCameraVertices, 0, 10);
+    encoder->setBuffer(mBDPTCameraPathLengths, 0, 11);
+    if (mEnvMapTexture)
+        encoder->setTexture(mEnvMapTexture, 0);
+    encoder->dispatchThreads(gridSize, threadgroupSize);
+
+    // Memory barrier
+    encoder->memoryBarrier(MTL::BarrierScopeBuffers);
+
+    // --- 3. Clear hash grid ---
+    encoder->setComputePipelineState(mVCMClearPSO);
+    encoder->setBuffer(mVCMHashHeads, 0, 0);
+    encoder->setBuffer(mVCMHashCounter, 0, 1);
+    {
+        const MTL::Size clearGrid = MTL::Size(VCM_HASH_SIZE, 1, 1);
+        const MTL::Size clearTG(256, 1, 1);
+        encoder->dispatchThreads(clearGrid, clearTG);
+    }
+
+    // Memory barrier
+    encoder->memoryBarrier(MTL::BarrierScopeBuffers);
+
+    // --- 4. Build hash grid from light vertices ---
+    encoder->setComputePipelineState(mVCMHashBuildPSO);
+    encoder->setBuffer(pUniformBuffer, 0, 0);
+    encoder->setBuffer(mBDPTLightVertices, 0, 1);
+    encoder->setBuffer(mBDPTLightPathLengths, 0, 2);
+    encoder->setBuffer(mVCMHashHeads, 0, 3);
+    encoder->setBuffer(mVCMHashEntries, 0, 4);
+    encoder->setBuffer(mVCMHashCounter, 0, 5);
+    encoder->dispatchThreads(gridSize, threadgroupSize);
+
+    // Memory barrier
+    encoder->memoryBarrier(MTL::BarrierScopeBuffers);
+
+    // --- 5. Connection kernel (vertex connections) ---
+    encoder->setComputePipelineState(mBDPTConnectPSO);
+    encoder->setBuffer(pUniformBuffer, 0, 0);
+    encoder->setBuffer(mInstanceBuffer, 0, 1);
+    encoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
+    encoder->setBuffer(mLightBuffer, 0, 3);
+    encoder->setBuffer(mMaterialBuffer, 0, 4);
+    encoder->setBuffer(output, 0, 5);
+    encoder->setBuffer(mAccumulationBuffer, 0, 6);
+    encoder->setBuffer(mBDPTCameraVertices, 0, 7);
+    encoder->setBuffer(mBDPTCameraPathLengths, 0, 8);
+    encoder->setBuffer(mBDPTLightVertices, 0, 9);
+    encoder->setBuffer(mBDPTLightPathLengths, 0, 10);
+    encoder->setBuffer(mBDPTSplatBuffer, 0, 11);
+    encoder->setBuffer(mEnvCdfXBuffer, 0, 12);
+    encoder->setBuffer(mEnvCdfYBuffer, 0, 13);
+    if (mEnvMapTexture)
+        encoder->setTexture(mEnvMapTexture, 0);
+    encoder->dispatchThreads(gridSize, threadgroupSize);
+
+    // Memory barrier
+    encoder->memoryBarrier(MTL::BarrierScopeBuffers);
+
+    // --- 6. Merge kernel (vertex merging via hash grid + accumulation) ---
+    encoder->setComputePipelineState(mVCMMergePSO);
+    encoder->setBuffer(pUniformBuffer, 0, 0);
+    encoder->setBuffer(mBDPTCameraVertices, 0, 1);
+    encoder->setBuffer(mBDPTCameraPathLengths, 0, 2);
+    encoder->setBuffer(mBDPTLightVertices, 0, 3);
+    encoder->setBuffer(mBDPTLightPathLengths, 0, 4);
+    encoder->setBuffer(mVCMHashHeads, 0, 5);
+    encoder->setBuffer(mVCMHashEntries, 0, 6);
+    encoder->setBuffer(mMaterialBuffer, 0, 7);
+    encoder->setBuffer(output, 0, 8);
+    encoder->setBuffer(mAccumulationBuffer, 0, 9);
+    encoder->dispatchThreads(gridSize, threadgroupSize);
 }
 
 void MetalRender::buildBuffers()

@@ -37,6 +37,14 @@ enum BsdfEventType : unsigned int
 };
 
 // ---------------------------------------------------------------------------
+// Delta event detection (specular reflection or transmission)
+// ---------------------------------------------------------------------------
+DEVICE_FUNC bool isDeltaEvent(unsigned int event_type)
+{
+    return (event_type & (BSDF_EVENT_SPECULAR_REFLECTION | BSDF_EVENT_SPECULAR_TRANSMISSION)) != 0;
+}
+
+// ---------------------------------------------------------------------------
 // Result of bsdf_sample()
 // ---------------------------------------------------------------------------
 struct BsdfSampleResult

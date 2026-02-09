@@ -162,4 +162,30 @@ DEVICE_FUNC float conductor_pdf(const THREAD_REF SurfaceInteraction& si, float3 
     return ggx_vndf_pdf(alpha, NdotH, NdotV, VdotH);
 }
 
+// ---------------------------------------------------------------------------
+// Reverse PDF: p(wo | wi) -- for BDPT
+// Evaluate VNDF PDF with wi as the "view" direction
+// ---------------------------------------------------------------------------
+DEVICE_FUNC float conductor_pdf_reverse(const THREAD_REF SurfaceInteraction& si, float3 wi)
+{
+    float3 N = si.shading_normal;
+    float3 wo = si.wo;
+
+    float NdotWo = dot(N, wo);
+    float NdotWi = dot(N, wi);
+    if (NdotWo <= 0.0f || NdotWi <= 0.0f)
+        return 0.0f;
+
+    float alpha = alpha_from_roughness(si.roughness);
+    float3 H    = safe_normalize(wo + wi);
+    float NdotH = dot(N, H);
+    float WidotH = dot(wi, H);
+
+    if (NdotH <= 0.0f || WidotH <= 0.0f)
+        return 0.0f;
+
+    // VNDF PDF with wi as view direction (swap V -> wi in the formula)
+    return ggx_vndf_pdf(alpha, NdotH, NdotWi, WidotH);
+}
+
 #endif // STRELKA_BXDF_CONDUCTOR_H

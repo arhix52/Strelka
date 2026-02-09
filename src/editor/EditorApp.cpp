@@ -105,6 +105,7 @@ void EditorApp::loadSettings()
 
     m_settingsManager->setAs<uint32_t>("render/width", imageWidth);
     m_settingsManager->setAs<uint32_t>("render/height", imageHeight);
+    m_settingsManager->setAs<uint32_t>("render/integrator", 0); // 0 - Path Tracing, 1 - BDPT
     m_settingsManager->setAs<uint32_t>("render/pt/depth", 8);
     m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", 256);
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);

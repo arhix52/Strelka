@@ -251,4 +251,64 @@ DEVICE_FUNC float dielectric_pdf(const THREAD_REF SurfaceInteraction& si, float3
     return r.pdf;
 }
 
+// ---------------------------------------------------------------------------
+// Reverse PDF: p(wo | wi) -- for BDPT
+// For smooth dielectric: delta -> return 0
+// For rough: reflection symmetric (swap V<->wi), transmission inverts eta
+// ---------------------------------------------------------------------------
+DEVICE_FUNC float dielectric_pdf_reverse(const THREAD_REF SurfaceInteraction& si, float3 wo_light)
+{
+    float alpha = alpha_from_roughness(si.roughness);
+    if (alpha < 0.001f)
+        return 0.0f; // Delta distribution
+
+    float3 N = si.shading_normal;
+    float3 wi = si.wo; // "view" direction in forward path = wi for reverse
+    float3 wo = wo_light;
+
+    float NdotWi = dot(N, wi);
+    float NdotWo = dot(N, wo);
+    bool entering   = NdotWi > 0.0f;
+    float3 Nf       = entering ? N : -N;
+    float eta_fwd    = entering ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
+    float eta_rev    = 1.0f / eta_fwd; // inverted for reverse
+
+    bool is_reflection = (NdotWo * NdotWi > 0.0f);
+
+    if (is_reflection)
+    {
+        float NdotWo_abs = fabsf(NdotWo);
+        float3 H     = safe_normalize(wi + wo);
+        float NdotH  = dot(Nf, H);
+        float WidotH = dot(wi, H);
+
+        if (NdotH <= 0.0f || WidotH <= 0.0f)
+            return 0.0f;
+
+        float F = fresnel_dielectric(WidotH, eta_fwd);
+        // VNDF PDF with wi as view direction
+        return F * ggx_vndf_pdf(alpha, NdotH, NdotWo_abs, fabsf(dot(wo, H)));
+    }
+    else
+    {
+        // Transmission: use inverted eta for reverse half-vector
+        float NdotWo_abs = fabsf(NdotWo);
+        float3 H = safe_normalize(wi + eta_rev * wo);
+        if (dot(Nf, H) < 0.0f) H = -H;
+
+        float NdotH  = dot(Nf, H);
+        float WidotH = dot(wi, H);
+        float WodotH = dot(wo, H);
+
+        if (NdotH <= 0.0f || WidotH <= 0.0f)
+            return 0.0f;
+
+        float F_rev = fresnel_dielectric(fabsf(WodotH), eta_rev);
+        float denom = (fabsf(WodotH) + eta_rev * fabsf(WidotH));
+        float dwh_dwo = (eta_rev * eta_rev * fabsf(WidotH)) / (denom * denom + 1e-10f);
+        float vndf_p  = ggx_vndf_pdf(alpha, NdotH, NdotWo_abs, fabsf(WodotH));
+        return (1.0f - F_rev) * vndf_p * dwh_dwo;
+    }
+}
+
 #endif // STRELKA_BXDF_DIELECTRIC_H

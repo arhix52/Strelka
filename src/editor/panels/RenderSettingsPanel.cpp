@@ -12,6 +12,31 @@ void EditorApp::drawRenderSettingsPanel()
 {
     ImGui::Begin("Render Settings:");
 
+    // Integrator selection
+    const char* integratorItems[] = { "Path Tracing", "BDPT", "VCM" };
+    static int currentIntegratorId = 0;
+    if (ImGui::BeginCombo("Integrator", integratorItems[currentIntegratorId]))
+    {
+        for (int n = 0; n < IM_ARRAYSIZE(integratorItems); n++)
+        {
+            bool is_selected = (currentIntegratorId == n);
+            if (ImGui::Selectable(integratorItems[n], is_selected))
+            {
+                if (currentIntegratorId != n)
+                {
+                    currentIntegratorId = n;
+                    m_settingsManager->setAs<uint32_t>("render/integrator", currentIntegratorId);
+                    m_sharedCtx->mSubframeIndex = 0;
+                }
+            }
+            if (is_selected)
+                ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
+    ImGui::Separator();
+
     const char* debugViewOptions[] = { "None", "Normals", "Motion Blur", "Diffuse AOV", "Specular AOV" };
     static int currentDebugViewOption = 0;
     if (ImGui::BeginCombo("Debug view", debugViewOptions[currentDebugViewOption]))

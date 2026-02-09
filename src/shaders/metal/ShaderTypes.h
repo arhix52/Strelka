@@ -101,6 +101,19 @@ struct Uniforms
     float envMapIntensity;
     float envMapRotation;
     vector_float3 envMapColorTint;
+
+    // BDPT integrator
+    uint32_t integratorType;        // 0=PT, 1=BDPT, 2=VCM
+    uint32_t maxLightSubpathDepth;
+    uint32_t maxCameraSubpathDepth;
+    float    sceneBoundRadius;
+    vector_float3 sceneBoundCenter;
+
+    // VCM integrator
+    float    vcmMergeRadius;        // current merge radius r_n
+    float    vcmMergeRadiusSqr;     // r_n^2
+    float    vcmNvm;                // pi * r^2 * numLightSubpaths
+    float    vcmHashCellSize;       // cell size for spatial hash (= 2 * r_n)
 };
 
 struct UniformsTonemap

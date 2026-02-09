@@ -72,4 +72,14 @@ DEVICE_FUNC float diffuse_pdf(const THREAD_REF SurfaceInteraction& si, float3 wi
     return cosine_hemisphere_pdf(fmaxf(cos_theta, 0.0f));
 }
 
+// ---------------------------------------------------------------------------
+// Reverse PDF: p(wo | wi) -- for BDPT
+// Diffuse is symmetric: just use wo instead of wi
+// ---------------------------------------------------------------------------
+DEVICE_FUNC float diffuse_pdf_reverse(const THREAD_REF SurfaceInteraction& si, float3 wo)
+{
+    float cos_theta = dot(si.shading_normal, wo);
+    return cosine_hemisphere_pdf(fmaxf(cos_theta, 0.0f));
+}
+
 #endif // STRELKA_BXDF_DIFFUSE_H
