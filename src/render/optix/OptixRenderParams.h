@@ -6,6 +6,7 @@
 #include <random.h>
 #include <lights.h>
 #include <strelka/material/material_params.h>
+#include <strelka/material/ior_stack.h>
 
 #define GEOMETRY_MASK_TRIANGLE 1
 #define GEOMETRY_MASK_CURVE 2
@@ -119,7 +120,7 @@ struct PerRayData
     float3 throughput;
     float3 origin;
     float3 dir;
-    bool inside;
+    IorStack iorStack;
     bool specularBounce;
     float lastBsdfPdf;
     EventType firstEventType;

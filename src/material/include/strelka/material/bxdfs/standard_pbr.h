@@ -216,7 +216,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         // ===== TRANSMISSION LOBE ==========================================
         bool entering = NdotV > 0.0f;
         float3 Nf     = entering ? N : -N;
-        float eta     = entering ? (1.0f / si.ior) : si.ior;
+        float eta     = entering ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
         bool is_smooth = (alpha < 0.001f);
 
         float3 H;
@@ -444,7 +444,7 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
         float3 Nf       = entering ? N : -N;
         float NdotV_abs = fabsf(NdotV);
         float NdotL_abs = fabsf(NdotL);
-        float eta       = entering ? (1.0f / si.ior) : si.ior;
+        float eta       = entering ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
 
         float3 H = safe_normalize(V + eta * wi);
         if (dot(Nf, H) < 0.0f) H = -H;

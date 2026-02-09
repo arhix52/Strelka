@@ -47,6 +47,10 @@ struct SurfaceInteraction
 
     unsigned int material_type; // MaterialType tag
     unsigned int thin_walled;   // 1 = thin-walled surface
+    unsigned int dielectric_priority; // Priority for nested dielectrics (0 = air)
+
+    // -- Nested dielectrics -------------------------------------------------
+    float   exterior_ior;       // IOR of the medium the ray is traveling through
 
     // -- Flags / state ------------------------------------------------------
     bool    front_face;         // True when the ray hit the front face

@@ -6,6 +6,7 @@
 #include "env_light_metal.h"
 
 #include "ShaderTypes.h"
+#include <strelka/material/ior_stack.h>
 #include <strelka/material/bsdf.h>
 
 using namespace metal;
@@ -21,7 +22,7 @@ struct PerRayData
     float3 origin;
     float3 direction;
     float lastBsdfPdf;
-    bool inside;
+    IorStack iorStack;
     bool specularBounce;
     bool shouldTerninate;
 };
@@ -237,8 +238,7 @@ void initSurfaceInteraction(
     float3 worldTangent,
     float3 worldBinormal,
     float2 uv,
-    float3 rayDir,
-    bool inside)
+    float3 rayDir)
 {
     constexpr sampler texSampler(mag_filter::linear, min_filter::linear);
 
@@ -249,7 +249,7 @@ void initSurfaceInteraction(
     si.bitangent      = worldBinormal;
     si.uv             = uv;
     si.wo             = -rayDir;
-    si.front_face     = !inside;
+    si.front_face     = dot(geomNormal, -rayDir) > 0.0f;
 
     // Sample base color texture
     float3 baseColor = float3(material.base_color);
@@ -301,6 +301,7 @@ void initSurfaceInteraction(
     matParams.specular_tint = material.specular_tint;
     matParams.material_type = material.material_type;
     matParams.thin_walled = material.thin_walled;
+    matParams.dielectric_priority = material.dielectric_priority;
 
     // bsdf_init (Metal overload) clamps and finalizes derived values
     bsdf_init(si, matParams);
@@ -545,7 +546,7 @@ kernel void raytracingKernel(
     PerRayData prd{};
     prd.radiance = float3(0.0f);
     prd.throughput = float3(1.0f);
-    prd.inside = false;
+    ior_stack_init(prd.iorStack);
     prd.depth = 0;
     prd.specularBounce = false;
     prd.lastBsdfPdf = 0.0f;
@@ -761,7 +762,7 @@ kernel void raytracingKernel(
             initSurfaceInteraction(si, materials[materialId],
                 worldPosition, worldNormal, geomNormal,
                 worldTangent, worldBinormal, uv,
-                prd.direction, prd.inside);
+                prd.direction);
 
             if (debugMode == DebugMode::eMotionBlur)
             {
@@ -781,6 +782,17 @@ kernel void raytracingKernel(
             if (si.emission.x > 0.0f || si.emission.y > 0.0f || si.emission.z > 0.0f)
             {
                 prd.radiance += prd.throughput * si.emission;
+            }
+
+            // Set exterior IOR from the IOR stack for nested dielectrics
+            bool entering = si.front_face;
+            if (entering)
+            {
+                si.exterior_ior = ior_stack_current_ior(prd.iorStack);
+            }
+            else
+            {
+                si.exterior_ior = ior_stack_peek_after_pop(prd.iorStack, si.dielectric_priority);
             }
 
             // Sample BSDF to determine event type
@@ -810,7 +822,7 @@ kernel void raytracingKernel(
                     prd.sampler, si, toLight, lightPdf,
                     envCdfX, envCdfY, envMapTexture, motionTime);
 
-                const bool isNextEventValid = ((dot(toLight, si.shading_normal) > 0.0f) != prd.inside) && lightPdf != 0.0f;
+                const bool isNextEventValid = ((dot(toLight, si.shading_normal) > 0.0f) == si.front_face) && lightPdf != 0.0f;
                 if (isNextEventValid)
                 {
                     BsdfEvalResult evalResult = bsdf_eval(si, toLight);
@@ -830,14 +842,20 @@ kernel void raytracingKernel(
             }
 
             // Setup next path segment
+            // Face normal oriented toward the incoming ray (wo)
+            float3 faceNg = (dot(si.geometry_normal, si.wo) > 0.0f)
+                          ? si.geometry_normal : -si.geometry_normal;
             if ((sampleResult.event_type & BSDF_EVENT_TRANSMISSION) != 0)
             {
-                prd.inside = !prd.inside;
-                prd.origin = offset_ray(si.position, -si.geometry_normal);
+                if (entering)
+                    ior_stack_push(prd.iorStack, si.dielectric_priority, si.ior);
+                else
+                    ior_stack_pop(prd.iorStack, si.dielectric_priority);
+                prd.origin = offset_ray(si.position, -faceNg);
             }
             else
             {
-                prd.origin = offset_ray(si.position, si.geometry_normal);
+                prd.origin = offset_ray(si.position, faceNg);
             }
             prd.direction = normalize(sampleResult.wi);
             prd.throughput *= sampleResult.bsdf_over_pdf;

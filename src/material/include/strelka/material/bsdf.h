@@ -71,6 +71,8 @@ DEVICE_FUNC void bsdf_init(SurfaceInteraction& si,
     si.specular_tint      = params.specular_tint;
     si.material_type      = params.material_type;
     si.thin_walled        = params.thin_walled;
+    si.dielectric_priority = params.dielectric_priority;
+    si.exterior_ior       = 1.0f;  // default: air; overridden by IOR stack
 }
 #elif defined(__METAL_VERSION__)
 // Metal: textures are resolved externally; this overload takes no texture arg.
@@ -90,6 +92,8 @@ DEVICE_FUNC void bsdf_init(THREAD_REF SurfaceInteraction& si,
     si.specular_tint      = params.specular_tint;
     si.material_type      = params.material_type;
     si.thin_walled        = params.thin_walled;
+    si.dielectric_priority = params.dielectric_priority;
+    si.exterior_ior       = 1.0f;  // default: air; overridden by IOR stack
 }
 #else
 // CPU
@@ -120,6 +124,8 @@ DEVICE_FUNC void bsdf_init(SurfaceInteraction& si,
     si.specular_tint      = params.specular_tint;
     si.material_type      = params.material_type;
     si.thin_walled        = params.thin_walled;
+    si.dielectric_priority = params.dielectric_priority;
+    si.exterior_ior       = 1.0f;  // default: air; overridden by IOR stack
 }
 #endif
 

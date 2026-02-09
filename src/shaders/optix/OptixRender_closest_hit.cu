@@ -213,7 +213,7 @@ struct SurfaceHitData
     float3 worldBinormal;
 };
 
-static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitGroupData* hit_data, const bool inside)
+static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitGroupData* hit_data)
 {
     const float2 barycentrics = optixGetTriangleBarycentrics();
     const unsigned int primitiveId = optixGetPrimitiveIndex();
@@ -288,9 +288,6 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
     geomNormal = normalize(optixTransformNormalFromObjectToWorldSpace(geomNormal));
     const float3 worldTangent =
         normalize(optixTransformNormalFromObjectToWorldSpace(interpolateAttrib(t0, t1, t2, barycentrics)));
-    geomNormal *= (inside ? -1.0f : 1.0f);
-    worldNormal *= (inside ? -1.0f : 1.0f);
-
     const float3 worldBinormal = cross(worldNormal, worldTangent);
 
     SurfaceHitData res;
@@ -303,7 +300,7 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
     return res;
 }
 
-static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGroupData* hit_data, const bool inside)
+static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGroupData* hit_data)
 {
     const unsigned int primitiveIndex = optixGetPrimitiveIndex();
     const OptixTraversableHandle gas = optixGetGASTraversableHandle();
@@ -319,7 +316,6 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
         optixTransformNormalFromObjectToWorldSpace(surfaceNormal(interpolator, optixGetCurveParameter(), hitPoint)));
     const float3 worldTangent =
         normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, optixGetCurveParameter())));
-    worldNormal *= (inside ? -1.0f : 1.0f);
     const float3 worldBinormal = cross(worldNormal, worldTangent);
     const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(hitPoint);
     SurfaceHitData res;
@@ -338,18 +334,17 @@ extern "C" __global__ void __closesthit__radiance()
     OptixPrimitiveType primType = optixGetPrimitiveType();
 
     PerRayData* prd = getPRD();
-    const bool isInside = prd->inside;
     HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
     const float3 ray_dir = optixGetWorldRayDirection();
 
     SurfaceHitData surfaceHit;
     if (primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE)
     {
-        surfaceHit = fillTriangleGeomData(hit_data, isInside);
+        surfaceHit = fillTriangleGeomData(hit_data);
     }
     else if (primType == OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE)
     {
-        surfaceHit = fillCurveGeomData(hit_data, isInside);
+        surfaceHit = fillCurveGeomData(hit_data);
     }
 
     // Fill SurfaceInteraction from hit data
@@ -361,7 +356,7 @@ extern "C" __global__ void __closesthit__radiance()
     si.bitangent = surfaceHit.worldBinormal;
     si.uv = surfaceHit.uv;
     si.wo = -ray_dir;
-    si.front_face = !isInside;
+    si.front_face = dot(surfaceHit.geom_normal, -ray_dir) > 0.0f;
 
     // Look up material from device buffer (indexed by materialId)
     const int32_t matId = hit_data->materialId;
@@ -379,6 +374,17 @@ extern "C" __global__ void __closesthit__radiance()
     if (si.emission.x > 0.0f || si.emission.y > 0.0f || si.emission.z > 0.0f)
     {
         prd->radiance += prd->throughput * si.emission;
+    }
+
+    // Set exterior IOR from the IOR stack for nested dielectrics
+    bool entering = si.front_face;
+    if (entering)
+    {
+        si.exterior_ior = ior_stack_current_ior(prd->iorStack);
+    }
+    else
+    {
+        si.exterior_ior = ior_stack_peek_after_pop(prd->iorStack, si.dielectric_priority);
     }
 
     const float z1 = random<SampleDimension::eBSDF0>(prd->sampler);
@@ -426,7 +432,7 @@ extern "C" __global__ void __closesthit__radiance()
             return;
         }
 
-        const bool isNextEventValid = ((dot(toLight, si.shading_normal) > 0.0f) != isInside) && (lightPdf != 0.0f);
+        const bool isNextEventValid = ((dot(toLight, si.shading_normal) > 0.0f) == si.front_face) && (lightPdf != 0.0f);
         if (isNextEventValid)
         {
             BsdfEvalResult evalData = bsdf_eval(si, toLight);
@@ -450,15 +456,21 @@ extern "C" __global__ void __closesthit__radiance()
     }
 
     // setup next path segment
-    // flip inside/outside on transmission
+    // Face normal oriented toward the incoming ray (wo)
+    float3 faceNg = (dot(si.geometry_normal, si.wo) > 0.0f)
+                  ? si.geometry_normal : -si.geometry_normal;
+    // Update IOR stack on transmission
     if ((sample_data.event_type & BSDF_EVENT_TRANSMISSION) != 0)
     {
-        prd->inside = !prd->inside;
-        prd->origin = offset_ray(si.position, -si.geometry_normal);
+        if (entering)
+            ior_stack_push(prd->iorStack, si.dielectric_priority, si.ior);
+        else
+            ior_stack_pop(prd->iorStack, si.dielectric_priority);
+        prd->origin = offset_ray(si.position, -faceNg);
     }
     else
     {
-        prd->origin = offset_ray(si.position, si.geometry_normal);
+        prd->origin = offset_ray(si.position, faceNg);
     }
     prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
     prd->dir = sample_data.wi;
