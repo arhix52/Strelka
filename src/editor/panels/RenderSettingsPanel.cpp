@@ -138,7 +138,7 @@ void EditorApp::drawRenderSettingsPanel()
             ImGui::EndCombo();
         }
 
-        const char* samplerTypeItems[] = { "Halton", "PCG" };
+        const char* samplerTypeItems[] = { "Halton", "PCG", "Sobol" };
         static int currentSamplerTypeId = 0;
         if (ImGui::BeginCombo("Sampler", samplerTypeItems[currentSamplerTypeId]))
         {
