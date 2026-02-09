@@ -254,6 +254,7 @@ void MetalRender::createMetalMaterials()
         material.alpha_cutoff = p.alpha_cutoff;
         material.material_type = p.material_type;
         material.thin_walled = p.thin_walled;
+        material.dielectric_priority = p.dielectric_priority;
 
         material.baseColorTexture = loadTex(currMatDesc.baseColorTexPath);
         material.metallicRoughnessTexture = loadTex(currMatDesc.metallicRoughnessTexPath);
@@ -712,17 +713,15 @@ void MetalRender::render(Buffer* output)
         pComputeEncoder->setBuffer(mPrevVertexBuffer, 0, 7);
         pComputeEncoder->setBuffer(mIndexBuffer, 0, 8);
         pComputeEncoder->setBuffer(mInstanceDataBuffer, 0, 9);
-        // Environment map buffers
-        if (mEnvCdfXBuffer)
-        {
-            pComputeEncoder->useResource(mEnvCdfXBuffer, MTL::ResourceUsageRead);
-            pComputeEncoder->setBuffer(mEnvCdfXBuffer, 0, 10);
-        }
-        if (mEnvCdfYBuffer)
-        {
-            pComputeEncoder->useResource(mEnvCdfYBuffer, MTL::ResourceUsageRead);
-            pComputeEncoder->setBuffer(mEnvCdfYBuffer, 0, 11);
-        }
+        // Environment map buffers (must always be bound — shader expects indices 10/11)
+        if (!mEnvCdfXBuffer)
+            mEnvCdfXBuffer = mDevice->newBuffer(sizeof(float), MTL::ResourceStorageModeManaged);
+        if (!mEnvCdfYBuffer)
+            mEnvCdfYBuffer = mDevice->newBuffer(sizeof(float), MTL::ResourceStorageModeManaged);
+        pComputeEncoder->useResource(mEnvCdfXBuffer, MTL::ResourceUsageRead);
+        pComputeEncoder->setBuffer(mEnvCdfXBuffer, 0, 10);
+        pComputeEncoder->useResource(mEnvCdfYBuffer, MTL::ResourceUsageRead);
+        pComputeEncoder->setBuffer(mEnvCdfYBuffer, 0, 11);
         if (mEnvMapTexture)
         {
             pComputeEncoder->useResource(mEnvMapTexture, MTL::ResourceUsageRead);

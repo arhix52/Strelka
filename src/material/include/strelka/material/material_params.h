@@ -82,7 +82,7 @@ struct MaterialParams
 
     int         occlusion_tex;          //  4 bytes
     int         transmission_tex;       //  4 bytes
-    float       _pad0;                  //  4 bytes
+    unsigned int dielectric_priority;   //  4 bytes  (nested dielectrics)
     float       _pad1;                  //  4 bytes  -- total 112
 
     // -- Thin-surface flag --------------------------------------------------

@@ -33,8 +33,8 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
     float3 Nf = entering ? N : -N;
     float NdotV_abs = fabsf(NdotV);
 
-    // IOR ratio: exterior / interior
-    float eta = entering ? (1.0f / si.ior) : si.ior;
+    // IOR ratio: exterior / interior (supports nested dielectrics via exterior_ior)
+    float eta = entering ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
 
     float alpha = alpha_from_roughness(si.roughness);
     bool is_smooth = (alpha < 0.001f);
@@ -186,7 +186,7 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& 
     bool entering   = NdotV > 0.0f;
     float3 Nf       = entering ? N : -N;
     float NdotV_abs = fabsf(NdotV);
-    float eta       = entering ? (1.0f / si.ior) : si.ior;
+    float eta       = entering ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
 
     bool is_reflection = (NdotL * NdotV > 0.0f); // same hemisphere
 

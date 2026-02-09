@@ -87,6 +87,16 @@ DEVICE_FUNC float f0_from_ior(float ior)
 }
 
 // ---------------------------------------------------------------------------
+// F0 from IOR ratio (for nested dielectrics)
+//   n1 = exterior IOR, n2 = interior IOR
+// ---------------------------------------------------------------------------
+DEVICE_FUNC float f0_from_ior_ratio(float n1, float n2)
+{
+    float r = (n2 - n1) / (n2 + n1);
+    return r * r;
+}
+
+// ---------------------------------------------------------------------------
 // F0 for the glTF specular extension
 //   ior            = index of refraction
 //   specular       = specular level [0, 1]

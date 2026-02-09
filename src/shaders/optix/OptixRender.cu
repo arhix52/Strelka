@@ -180,7 +180,7 @@ extern "C" __global__ void __raygen__rg()
 
         prd.radiance = make_float3(0.0f);
         prd.throughput = make_float3(1.0f);
-        prd.inside = false;
+        ior_stack_init(prd.iorStack);
         prd.depth = 0;
         prd.specularBounce = false;
         prd.lastBsdfPdf = 0.0f;

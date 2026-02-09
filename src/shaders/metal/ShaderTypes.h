@@ -182,7 +182,7 @@ struct Material
     uint32_t material_type;         //  4 bytes  -- 80
 
     uint32_t thin_walled;           //  4 bytes
-    uint32_t _pad0;                 //  4 bytes
+    uint32_t dielectric_priority;   //  4 bytes  (nested dielectrics)
     uint32_t _pad1;                 //  4 bytes
     uint32_t _pad2;                 //  4 bytes  -- 96
 

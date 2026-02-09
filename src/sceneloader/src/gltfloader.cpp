@@ -444,6 +444,7 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     p.occlusion_tex = -1;
     p.transmission_tex = -1;
     p.thin_walled = 0;
+    p.dielectric_priority = 0; // opaque: not a dielectric volume
 
     // Store texture file paths for the renderer to load
     desc.baseColorTexPath = getTextureUri(model, material.pbrMetallicRoughness.baseColorTexture.index);
@@ -489,6 +490,7 @@ oka::Scene::MaterialDescription convertToDielectric(const tinygltf::Model& model
     p.occlusion_tex = -1;
     p.transmission_tex = -1;
     p.thin_walled = 0;
+    p.dielectric_priority = 10; // glass: default dielectric priority
 
     return desc;
 }
@@ -526,13 +528,8 @@ void loadCameras(const tinygltf::Model& model, oka::Scene& scene)
             // not supported
         }
     }
-    if (scene.getCameraCount() == 0)
-    {
-        // add default camera
-        Camera camera;
-        camera.updateViewMatrix();
-        scene.addCamera(camera);
-    }
+    // No default camera added here — the editor creates its own "Main" camera
+    // with proper scene-fit positioning in EditorApp::prepare().
 }
 
 void loadAnimation(const tinygltf::Model& model, oka::Scene& scene)
