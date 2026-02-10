@@ -617,8 +617,9 @@ void MetalRender::render(Buffer* output)
     // VCM integrator parameters
     if (pUniformData->integratorType == 2)
     {
-        const float alpha = 0.75f;
-        const float radiusScale = sqrtf(alpha / (alpha + (float)mVCMIterationCount));
+        // Kaplanyan & Dachsbacher 2013 progressive shrinkage: r_n = r_0 * (n+1)^((alpha-1)/2)
+        const float alpha = 2.0f / 3.0f;
+        const float radiusScale = powf((float)(mVCMIterationCount + 1), 0.5f * (alpha - 1.0f));
         const float radius = mVCMInitialRadius * radiusScale;
         pUniformData->vcmMergeRadius = radius;
         pUniformData->vcmMergeRadiusSqr = radius * radius;
@@ -920,6 +921,17 @@ void MetalRender::renderSync(Buffer* output)
         mLastCommandBuffer = nullptr;
     }
     mSyncMode = false;
+
+    // Synchronize StorageModeManaged buffer for CPU readback
+    NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
+    MTL::CommandBuffer* syncCmd = mCommandQueue->commandBuffer()->retain();
+    MTL::BlitCommandEncoder* blit = syncCmd->blitCommandEncoder();
+    blit->synchronizeResource(static_cast<MetalBuffer*>(output)->getNativePtr());
+    blit->endEncoding();
+    syncCmd->commit();
+    syncCmd->waitUntilCompleted();
+    syncCmd->release();
+    pPool->release();
 }
 
 Buffer* MetalRender::createBuffer(const BufferDesc& desc)
@@ -1096,7 +1108,7 @@ void MetalRender::allocBDPTBuffers(uint32_t width, uint32_t height)
     mVCMMergeOutput  = mDevice->newBuffer(mergeOutputSize, MTL::ResourceStorageModePrivate);
 
     // Initial merge radius based on scene bounds
-    mVCMInitialRadius = mSceneBoundRadius * 0.003f;
+    mVCMInitialRadius = mSceneBoundRadius * 0.01f;
     mVCMIterationCount = 0;
 }
 

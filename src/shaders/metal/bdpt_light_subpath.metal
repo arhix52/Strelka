@@ -384,8 +384,12 @@ kernel void bdpt_light_subpath(
         {
             float cosOut = fabs(dot(si.shading_normal, sampleResult.wi));
             float factor = cosOut / (pdf_fwd + 1e-10f);
-            dVM = factor * (dVCM * uniforms.vcmNvm + dVM * pdf_rev);
-            dVC = factor * (dVCM + dVC * pdf_rev);
+            // Georgiev 2012 Eq. 34-36: VcWeightFactor = 1/etaVCM, VmWeightFactor = etaVCM
+            float vcmNvm = uniforms.vcmNvm;
+            float vcmVcFactor = (vcmNvm > 0.0f) ? (1.0f / vcmNvm) : 0.0f;
+            float vcmActive = (vcmNvm > 0.0f) ? 1.0f : 0.0f;
+            dVM = factor * (dVM * pdf_rev + dVCM * vcmVcFactor + vcmActive);
+            dVC = factor * (dVC * pdf_rev + dVCM + vcmNvm);
             dVCM = 1.0f / (pdf_fwd + 1e-10f);
         }
 

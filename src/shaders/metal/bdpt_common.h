@@ -178,13 +178,15 @@ static SurfaceInteraction vertexToSI(device const BDPTVertex& v, device Material
 }
 
 // ---------------------------------------------------------------------------
-// VCM merge MIS weight (Georgiev 2012, Eq. 47)
+// VCM merge MIS weight (SmallVCM / Georgiev 2012)
 // ---------------------------------------------------------------------------
 static inline float vcmMergeMISWeight(
-    float cameraDVCM, float cameraDVC, float cameraDVM,
-    float pdfRev_camera, float pdfFwd_light, float nvm)
+    float cameraDVCM, float cameraDVM,
+    float lightDVCM,  float lightDVM,
+    float cameraBsdfFwdPdf, float cameraBsdfRevPdf,
+    float vcWeightFactor)
 {
-    float wLight  = pdfFwd_light * cameraDVCM;
-    float wCamera = cameraDVC * pdfRev_camera + cameraDVM * pdfRev_camera;
+    float wLight  = lightDVCM  * vcWeightFactor + lightDVM  * cameraBsdfFwdPdf;
+    float wCamera = cameraDVCM * vcWeightFactor + cameraDVM * cameraBsdfRevPdf;
     return 1.0f / (wLight + 1.0f + wCamera + 1e-10f);
 }

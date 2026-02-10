@@ -61,6 +61,7 @@ kernel void vcm_merge(
         const float invCellSize = 1.0f / cellSize;
         const float invNvm = 1.0f / (uniforms.vcmNvm + 1e-10f);
         const float radius = uniforms.vcmMergeRadius;
+        const float vcWeightFactor = (uniforms.vcmNvm > 0.0f) ? (1.0f / uniforms.vcmNvm) : 0.0f;
 
         // Iterate over non-delta camera vertices (skip vertex 0 = on lens)
         for (uint32_t t = 1; t < cameraLen; ++t)
@@ -110,23 +111,30 @@ kernel void vcm_merge(
                         // (merging across opposite hemispheres is physically invalid)
                         float3 lightNormal = float3(lv.shading_normal);
                         float normalDot = dot(camNormal, lightNormal);
-                        if (normalDot > 0.0f)
+                        if (normalDot > -0.1f)  // allow coplanar merges
                         {
                             float3 lightWo = float3(lv.wo);
 
-                            // Evaluate BSDF at camera vertex for the light path direction
-                            BsdfEvalResult evalCam = bsdf_eval(si_cam, -lightWo);
+                            // Evaluate BSDF at camera vertex for the light arrival direction.
+                            // lightWo points from merge point toward previous light vertex
+                            // (toward the light source) — correct BSDF wi convention.
+                            BsdfEvalResult evalCam = bsdf_eval(si_cam, lightWo);
                             if (evalCam.pdf > 0.0f)
                             {
                                 float3 lightThroughput = float3(lv.throughput);
 
-                                // Epanechnikov kernel weight
-                                float kernel_weight = (1.0f - dist2 / radiusSqr) * invNvm;
+                                // Reverse PDF at camera vertex (SmallVCM: cameraBsdfRevPdfW)
+                                float cameraBsdfRevPdf = bsdf_pdf_reverse(si_cam, lightWo);
 
-                                // VCM MIS weight for merging
+                                // Epanechnikov kernel weight (2D normalization: 2/π per unit disk)
+                                float kernel_weight = 2.0f * (1.0f - dist2 / radiusSqr) * invNvm;
+
+                                // VCM MIS weight for merging (SmallVCM formula)
                                 float misWeight = vcmMergeMISWeight(
-                                    cv.dVCM, cv.dVC, cv.dVM,
-                                    evalCam.pdf, lv.pdf_fwd, uniforms.vcmNvm);
+                                    cv.dVCM, cv.dVM,
+                                    lv.dVCM, lv.dVM,
+                                    evalCam.pdf, cameraBsdfRevPdf,
+                                    vcWeightFactor);
 
                                 mergeResult += camThroughput * evalCam.bsdf * kernel_weight * lightThroughput * misWeight;
                             }
