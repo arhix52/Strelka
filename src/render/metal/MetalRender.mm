@@ -814,7 +814,7 @@ void MetalRender::render(Buffer* output)
             if (mInstanceBuffer != nullptr)
             {
                 const MTL::Size gridSize = MTL::Size(width, height, 1);
-                const MTL::Size threadgroupSize(8, 8, 1);
+                const MTL::Size threadgroupSize(16, 16, 1);
                 pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
             }
         }
@@ -828,7 +828,7 @@ void MetalRender::render(Buffer* output)
             pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
             {
                 const MTL::Size gridSize = MTL::Size(width, height, 1);
-                const MTL::Size threadgroupSize(8, 8, 1);
+                const MTL::Size threadgroupSize(16, 16, 1);
                 pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
             }
         }
@@ -880,7 +880,7 @@ void MetalRender::render(Buffer* output)
             pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
             {
                 const MTL::Size gridSize = MTL::Size(width, height, 1);
-                const MTL::Size threadgroupSize(8, 8, 1);
+                const MTL::Size threadgroupSize(16, 16, 1);
                 pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
             }
             pComputeEncoder->endEncoding();
@@ -1144,7 +1144,7 @@ void MetalRender::computeSceneBounds()
 void MetalRender::renderBDPT(MTL::ComputeCommandEncoder* encoder, MTL::Buffer* output, uint32_t width, uint32_t height)
 {
     const MTL::Size gridSize = MTL::Size(width, height, 1);
-    const MTL::Size threadgroupSize(8, 8, 1);
+    const MTL::Size threadgroupSize(16, 16, 1);
 
     // Shared resource usage declarations
     encoder->useResource(mBDPTCameraVertices, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
@@ -1221,7 +1221,7 @@ void MetalRender::renderBDPT(MTL::ComputeCommandEncoder* encoder, MTL::Buffer* o
 void MetalRender::renderVCM(MTL::ComputeCommandEncoder* encoder, MTL::Buffer* output, uint32_t width, uint32_t height)
 {
     const MTL::Size gridSize = MTL::Size(width, height, 1);
-    const MTL::Size threadgroupSize(8, 8, 1);
+    const MTL::Size threadgroupSize(16, 16, 1);
 
     // Shared resource usage declarations
     encoder->useResource(mBDPTCameraVertices, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);

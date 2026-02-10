@@ -137,11 +137,12 @@ kernel void vcm_merge(
                                     vcWeightFactor);
 
                                 mergeResult += camThroughput * evalCam.bsdf * kernel_weight * lightThroughput * misWeight;
+
+                                ++mergeCount;
+                                if (mergeCount >= VCM_MAX_MERGES_PER_VERTEX)
+                                    break;
                             }
                         }
-                        ++mergeCount;
-                        if (mergeCount >= VCM_MAX_MERGES_PER_VERTEX)
-                            break;
                     }
 
                     entryIdx = entry.next;

@@ -314,7 +314,6 @@ kernel void bdpt_light_subpath(
         dVM  /= cosIn;
 
         // Sample BSDF
-        ++sampler.depth;
         const float z1 = random<SampleDimension::eBSDF0>(sampler, uniforms.samplerType);
         const float z2 = random<SampleDimension::eBSDF1>(sampler, uniforms.samplerType);
         const float z3 = random<SampleDimension::eBSDF2>(sampler, uniforms.samplerType);
@@ -409,6 +408,8 @@ kernel void bdpt_light_subpath(
             origin = offset_ray_ls(si.position, faceNg);
         }
         direction = normalize(sampleResult.wi);
+
+        ++sampler.depth;
     }
 
     lightPathLengths[linearPixelIndex] = pathLength;

@@ -13,7 +13,7 @@
 #endif
 
 // Maximum subpath depth for BDPT
-#define BDPT_MAX_DEPTH 10
+#define BDPT_MAX_DEPTH 6
 
 // ---------------------------------------------------------------------------
 // BDPTVertex -- stored per-vertex in camera and light subpath buffers
