@@ -121,9 +121,9 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<bool>("render/pt/enableAcc", true);
     m_settingsManager->setAs<bool>("render/pt/enableTonemap", true);
     m_settingsManager->setAs<bool>("render/pt/isResized", false);
-    m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
+    m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 1); // 0 = Uniform, 1 = Advanced
     m_settingsManager->setAs<uint32_t>("render/pt/misHeuristic", 0); // 0 = balance, 1 = power
-    m_settingsManager->setAs<uint32_t>("render/pt/samplerType", 0); // 0 - Halton, 1 - PCG
+    m_settingsManager->setAs<uint32_t>("render/pt/samplerType", 2); // 0 - Halton, 1 - PCG, 2 - Sobol
     m_settingsManager->setAs<bool>("render/enableValidation", false);
     m_settingsManager->setAs<uint32_t>("render/selectedCamera", 0);
     m_settingsManager->setAs<bool>("render/enableMotionBlur", true);

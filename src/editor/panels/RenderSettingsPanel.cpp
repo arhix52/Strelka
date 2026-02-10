@@ -144,7 +144,7 @@ void EditorApp::drawRenderSettingsPanel()
     if (ImGui::TreeNode("Path Tracer"))
     {
         const char* rectlightSamplingMethodItems[] = { "Uniform", "Advanced" };
-        static int currentRectlightSamplingMethodItemId = 0;
+        static int currentRectlightSamplingMethodItemId = 1;
         if (ImGui::BeginCombo("Rect Light Sampling", rectlightSamplingMethodItems[currentRectlightSamplingMethodItemId]))
         {
             for (const auto& item : rectlightSamplingMethodItems)
@@ -164,7 +164,7 @@ void EditorApp::drawRenderSettingsPanel()
         }
 
         const char* samplerTypeItems[] = { "Halton", "PCG", "Sobol" };
-        static int currentSamplerTypeId = 0;
+        static int currentSamplerTypeId = 2;
         if (ImGui::BeginCombo("Sampler", samplerTypeItems[currentSamplerTypeId]))
         {
             for (const auto& item : samplerTypeItems)
