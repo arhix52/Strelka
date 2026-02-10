@@ -26,6 +26,9 @@ public:
     virtual void render(Buffer* output) = 0;
     virtual Buffer* createBuffer(const BufferDesc& desc) = 0;
 
+    /// Synchronous render: calls render() and waits for GPU completion.
+    virtual void renderSync(Buffer* output) { render(output); }
+
     /// Start a render pass if the GPU is idle. Non-blocking.
     virtual void triggerRenderIfIdle() {}
 

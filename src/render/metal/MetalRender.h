@@ -17,6 +17,7 @@ public:
 
     void init() override;
     void render(Buffer* output) override;
+    void renderSync(Buffer* output) override;
     Buffer* createBuffer(const BufferDesc& desc) override;
 
     void triggerRenderIfIdle() override;
@@ -144,6 +145,10 @@ private:
     std::atomic<int> mReadyIndex{-1};
     std::atomic<bool> mRenderBusy{false};
     int mWriteIndex = 0;
+
+    // Sync mode (headless CLI)
+    bool mSyncMode = false;
+    MTL::CommandBuffer* mLastCommandBuffer = nullptr;
 
     // Environment map
     void loadEnvMap(const std::string& texturePath);

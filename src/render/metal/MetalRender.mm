@@ -844,7 +844,7 @@ void MetalRender::render(Buffer* output)
         }
 
         // Completion handler for async double-buffered output
-        if (mRenderBusy.load())
+        if (!mSyncMode && mRenderBusy.load())
         {
             int writeIdx = mWriteIndex;
             pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdx](MTL::CommandBuffer* cb) {
@@ -854,6 +854,8 @@ void MetalRender::render(Buffer* output)
                 mRenderBusy.store(false);
             }));
         }
+        if (mSyncMode)
+            mLastCommandBuffer = pCmd->retain();
         pCmd->commit();
     }
     else
@@ -884,7 +886,7 @@ void MetalRender::render(Buffer* output)
         }
 
         // Completion handler for async double-buffered output
-        if (mRenderBusy.load())
+        if (!mSyncMode && mRenderBusy.load())
         {
             int writeIdx = mWriteIndex;
             pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdx](MTL::CommandBuffer* cb) {
@@ -894,12 +896,30 @@ void MetalRender::render(Buffer* output)
                 mRenderBusy.store(false);
             }));
         }
+        if (mSyncMode)
+            mLastCommandBuffer = pCmd->retain();
         pCmd->commit();
     }
     pPool->release();
 
     mPrevView = currView;
     ctx.mFrameNumber++;
+}
+
+void MetalRender::renderSync(Buffer* output)
+{
+    mSyncMode = true;
+    mLastCommandBuffer = nullptr;
+    render(output);
+    if (mLastCommandBuffer)
+    {
+        mLastCommandBuffer->waitUntilCompleted();
+        double gpuMs = (mLastCommandBuffer->GPUEndTime() - mLastCommandBuffer->GPUStartTime()) * 1000.0;
+        mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
+        mLastCommandBuffer->release();
+        mLastCommandBuffer = nullptr;
+    }
+    mSyncMode = false;
 }
 
 Buffer* MetalRender::createBuffer(const BufferDesc& desc)
