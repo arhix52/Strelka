@@ -137,28 +137,44 @@ kernel void bdpt_connect(
                 device const UniformLight& light = lights[cv.light_index];
                 float3 Le = float3(light.color);
 
-                // MIS weight: balance between direct hit (s=0) and NEE (s=1)
+                // Lambertian emission cosine (must match PT's -dot(direction, lightNormal))
+                float cosAtLight = max(dot(float3(cv.geometry_normal), float3(cv.wo)), 0.0f);
+                if (cosAtLight <= 0.0f)
+                    continue; // backface hit
+
+                // MIS weight: SmallVCM multi-strategy
                 float misWeight = 1.0f;
                 if (t > 1)
                 {
                     device const BDPTVertex& prevCv = cameraVertices[linearPixelIndex * BDPT_MAX_DEPTH + t - 1];
-                    if (prevCv.is_delta)
+                    if (!prevCv.is_delta)
                     {
-                        misWeight = 1.0f;
-                    }
-                    else
-                    {
-                        float lightPdf = getLightPdf(light, float3(cv.position), float3(prevCv.position));
+                        // SmallVCM multi-strategy MIS weight for s=0
+                        float3 diff = float3(cv.position) - float3(prevCv.position);
+                        float dist2 = dot(diff, diff);
+                        float cosAtLightClamped = max(cosAtLight, 1e-6f);
+
+                        // Area PDF of NEE technique sampling this light point
                         float lightSelectionPdf = uniforms.hasEnvMap
                             ? 0.5f / float(uniforms.numLights)
                             : 1.0f / float(uniforms.numLights);
-                        lightPdf *= lightSelectionPdf;
-                        float bsdfPdf = prevCv.pdf_fwd;
-                        if (bsdfPdf > 0.0f && lightPdf > 0.0f)
-                            misWeight = misWeightBalance(bsdfPdf, lightPdf);
+                        float lightArea_val = calcLightArea(light);
+                        float directPdfA = lightSelectionPdf / max(lightArea_val, 1e-10f);
+
+                        // Lambertian emission directional PDF
+                        float emissionPdfW = cosAtLightClamped * M_1_PI_F;
+
+                        // cv.dVCM/dVC/dVM lack the distance/cos propagation for the last segment
+                        float invCos = 1.0f / cosAtLightClamped;
+                        float dVCM_l = cv.dVCM * dist2 * invCos;
+                        float dVC_l  = cv.dVC  * invCos;
+                        float dVM_l  = cv.dVM  * invCos;
+
+                        float wCamera = directPdfA * dVCM_l + emissionPdfW * (dVC_l + dVM_l);
+                        misWeight = 1.0f / (1.0f + wCamera + 1e-10f);
                     }
                 }
-                result += float3(cv.throughput) * Le * misWeight;
+                result += float3(cv.throughput) * Le * cosAtLight * misWeight;
             }
         }
     }
@@ -317,6 +333,11 @@ kernel void bdpt_connect(
             float lightPdf = 0.0f;
             float3 radiance = float3(0.0f);
             float lightSelectionPdf = 1.0f;
+            bool neeIsLocalLight = false;
+            float neeCosAtLight = 0.0f;
+            float neeDistToLight = 0.0f;
+            float neeLightArea = 0.0f;
+            float neeLightSelPdf = 0.0f;
 
             // Advance sampler depth to get unique random numbers per camera vertex
             neeSampler.depth = t;
@@ -398,6 +419,11 @@ kernel void bdpt_connect(
                     {
                         lightPdf = lsd.pdf * lightSelectionPdf;
                         radiance = Li * cosAtSurface;
+                        neeIsLocalLight = true;
+                        neeCosAtLight = cosAtLightN;
+                        neeDistToLight = lsd.distToLight;
+                        neeLightArea = calcLightArea(light);
+                        neeLightSelPdf = lightSelectionPdf;
                     }
                 }
             }
@@ -408,8 +434,33 @@ kernel void bdpt_connect(
                 BsdfEvalResult evalCam = bsdf_eval(si_cam, toLight);
                 if (evalCam.pdf > 0.0f)
                 {
-                    // MIS weight: balance between NEE (s=1) and BSDF hit (s=0)
-                    float misWeight = bdptMISWeightNEE(lightPdf, evalCam.pdf);
+                    float misWeight;
+                    if (neeIsLocalLight && neeLightArea > 0.0f)
+                    {
+                        // SmallVCM multi-strategy MIS weight for s=1 (local light)
+                        float cosLN = max(neeCosAtLight, 1e-6f);
+                        float emPdfW = cosLN * M_1_PI_F;
+                        float ptPdfA = neeLightSelPdf / max(neeLightArea, 1e-10f);
+
+                        float cameraRevPdfW = bsdf_pdf_reverse(si_cam, toLight);
+
+                        float d2 = neeDistToLight * neeDistToLight;
+                        float cosC = max(dot(si_cam.shading_normal, toLight), 0.0f);
+                        float camDirPdfA = evalCam.pdf * cosLN / d2;
+                        float lgtDirPdfA = emPdfW * cosC / d2;
+
+                        // Virtual light vertex 0: dVCM = emissionPdfW / pointPdfA
+                        float dVCM_v0 = emPdfW / max(ptPdfA, 1e-10f);
+
+                        float wL = camDirPdfA * dVCM_v0;
+                        float wC = lgtDirPdfA * (cv.dVCM + cv.dVC * cameraRevPdfW + cv.dVM * cameraRevPdfW);
+                        misWeight = 1.0f / (wL + 1.0f + wC + 1e-10f);
+                    }
+                    else
+                    {
+                        // Env map or non-area light: 2-strategy balance
+                        misWeight = bdptMISWeightNEE(lightPdf, evalCam.pdf);
+                    }
 
                     float3 contrib = float3(cv.throughput) * evalCam.bsdf
                                    * radiance / lightPdf * misWeight;

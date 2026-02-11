@@ -114,6 +114,11 @@ struct Uniforms
     float    vcmMergeRadiusSqr;     // r_n^2
     float    vcmNvm;                // pi * r^2 * numLightSubpaths
     float    vcmHashCellSize;       // cell size for spatial hash (= 2 * r_n)
+
+    // Padding: Metal's packed constant-buffer IR can report a larger
+    // dereferenceable size than the standard struct layout.  Adding 16
+    // bytes guarantees the CPU-allocated buffer satisfies Metal validation.
+    uint32_t _pad_end[4];
 };
 
 struct UniformsTonemap

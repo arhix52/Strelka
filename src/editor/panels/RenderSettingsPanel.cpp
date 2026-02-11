@@ -66,13 +66,25 @@ void EditorApp::drawRenderSettingsPanel()
         int cameraCount = (int)cameras.size();
         if (cameraCount > 0)
         {
-            const char* previewName = cameras[m_selectedCamera].name.c_str();
-            if (ImGui::BeginCombo("Camera", previewName))
+            char previewBuf[128];
+            const auto& selName = cameras[m_selectedCamera].name;
+            if (selName.empty())
+                snprintf(previewBuf, sizeof(previewBuf), "Camera %d", m_selectedCamera);
+            else
+                snprintf(previewBuf, sizeof(previewBuf), "%s", selName.c_str());
+
+            if (ImGui::BeginCombo("Camera", previewBuf))
             {
                 for (int n = 0; n < cameraCount; n++)
                 {
                     bool is_selected = (m_selectedCamera == n);
-                    if (ImGui::Selectable(cameras[n].name.c_str(), is_selected))
+                    // Always append ##idx so empty names don't produce an empty ID
+                    char label[128];
+                    if (cameras[n].name.empty())
+                        snprintf(label, sizeof(label), "Camera %d", n);
+                    else
+                        snprintf(label, sizeof(label), "%s##cam%d", cameras[n].name.c_str(), n);
+                    if (ImGui::Selectable(label, is_selected))
                     {
                         if (m_selectedCamera != n)
                         {
