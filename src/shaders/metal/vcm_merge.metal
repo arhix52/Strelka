@@ -61,12 +61,16 @@ kernel void vcm_merge(
         const float invCellSize = 1.0f / cellSize;
         const float invNvm = 1.0f / (uniforms.vcmNvm + 1e-10f);
         const float radius = uniforms.vcmMergeRadius;
-        const float vcWeightFactor = (uniforms.vcmNvm > 0.0f) ? (1.0f / uniforms.vcmNvm) : 0.0f;
+        // vcWeightFactor=1: connections run at BDPT strength (vmWF=0),
+        // so merge must see full connection probability in its denominator
+        const float vcWeightFactor = (uniforms.vcmNvm > 0.0f) ? 1.0f : 0.0f;
 
-        // Iterate over non-delta camera vertices (skip vertex 0 = on lens)
-        for (uint32_t t = 1; t < cameraLen; ++t)
+        // Iterate over non-delta camera vertices (skip vertex 0 = on lens,
+        // skip vertex 1 = first surface hit where dVCM=dVM=0 from no light
+        // tracing, giving merge no camera-side MIS competition)
+        for (uint32_t t = 2; t < cameraLen; ++t)
         {
-            device const BDPTVertex& cv = cameraVertices[linearPixelIndex * BDPT_MAX_DEPTH + t];
+            device const BDPTVertex& cv = cameraVertices[linearPixelIndex * uniforms.bdptStride + t];
 
             // Skip delta, light-hit, or camera vertices
             if (cv.is_delta || cv.is_on_light || cv.is_on_camera)

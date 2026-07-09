@@ -611,6 +611,13 @@ void MetalRender::render(Buffer* output)
     pUniformData->integratorType = settings.getAs<uint32_t>("render/integrator");
     pUniformData->maxLightSubpathDepth = maxDepth;
     pUniformData->maxCameraSubpathDepth = maxDepth;
+    // Per-pixel vertex slots. Need (maxDepth + 1) slots so the s=0/s=1 strategies
+    // reach the same path length as the path tracer; bounded by the hard cap and
+    // by what the buffers were actually allocated with (mBDPTAllocStride) so a
+    // later max_depth increase can never index past the allocation.
+    pUniformData->bdptStride = std::min<uint32_t>(maxDepth + 1u, (uint32_t)BDPT_MAX_DEPTH);
+    if (mBDPTAllocStride > 0)
+        pUniformData->bdptStride = std::min<uint32_t>(pUniformData->bdptStride, mBDPTAllocStride);
     pUniformData->sceneBoundRadius = mSceneBoundRadius;
     pUniformData->sceneBoundCenter = simd_make_float3(mSceneBoundCenter[0], mSceneBoundCenter[1], mSceneBoundCenter[2]);
 
@@ -618,7 +625,7 @@ void MetalRender::render(Buffer* output)
     if (pUniformData->integratorType == 2)
     {
         // Kaplanyan & Dachsbacher 2013 progressive shrinkage: r_n = r_0 * (n+1)^((alpha-1)/2)
-        const float alpha = 2.0f / 3.0f;
+        const float alpha = 0.75f; // SmallVCM default: 0.75
         const float radiusScale = powf((float)(mVCMIterationCount + 1), 0.5f * (alpha - 1.0f));
         const float radius = mVCMInitialRadius * radiusScale;
         pUniformData->vcmMergeRadius = radius;
@@ -657,6 +664,9 @@ void MetalRender::render(Buffer* output)
     settingsChanged |= (mPrevSettings.shiftX != pUniformData->shiftX) || (mPrevSettings.shiftY != pUniformData->shiftY);
     settingsChanged |= (mPrevSettings.maxDepth != maxDepth);
     settingsChanged |= (mPrevSettings.debug != debug);
+    settingsChanged |= (mPrevSettings.integratorType != pUniformData->integratorType);
+    if (mPrevSettings.integratorType != pUniformData->integratorType)
+        mVCMIterationCount = 0;
 
     mPrevSettings.rectLightSamplingMethod = rectLightSamplingMethod;
     mPrevSettings.samplerType = samplerType;
@@ -674,6 +684,7 @@ void MetalRender::render(Buffer* output)
     mPrevSettings.shiftY = pUniformData->shiftY;
     mPrevSettings.maxDepth = maxDepth;
     mPrevSettings.debug = debug;
+    mPrevSettings.integratorType = pUniformData->integratorType;
 
     if (settingsChanged)
     {
@@ -1079,7 +1090,12 @@ void MetalRender::allocBDPTBuffers(uint32_t width, uint32_t height)
     safeRelease(mBDPTSplatBuffer);
 
     const uint32_t numPixels = width * height;
-    const size_t vertexBufSize = (size_t)numPixels * BDPT_MAX_DEPTH * sizeof(BDPTVertex);
+    // Size the vertex/hash buffers to the configured max_depth (+1 slot for the
+    // camera/light origin vertex), bounded by the hard cap. Keeps memory
+    // proportional to max_depth instead of always paying for BDPT_MAX_DEPTH.
+    const uint32_t maxDepth = getSettings()->getAs<uint32_t>("render/pt/depth");
+    mBDPTAllocStride = std::min<uint32_t>(maxDepth + 1u, (uint32_t)BDPT_MAX_DEPTH);
+    const size_t vertexBufSize = (size_t)numPixels * mBDPTAllocStride * sizeof(BDPTVertex);
     const size_t pathLenBufSize = (size_t)numPixels * sizeof(uint32_t);
     // Splat buffer: 3 floats (RGB) per pixel stored as uint32_t for atomic ops
     const size_t splatBufSize = (size_t)numPixels * 3 * sizeof(uint32_t);
@@ -1098,7 +1114,7 @@ void MetalRender::allocBDPTBuffers(uint32_t width, uint32_t height)
     safeReleaseVCM(mVCMMergeOutput);
 
     const size_t hashHeadSize = VCM_HASH_SIZE * sizeof(uint32_t);
-    const size_t hashEntrySize = (size_t)numPixels * BDPT_MAX_DEPTH * sizeof(VCMHashEntry);
+    const size_t hashEntrySize = (size_t)numPixels * mBDPTAllocStride * sizeof(VCMHashEntry);
     const size_t counterSize = sizeof(uint32_t);
     const size_t mergeOutputSize = (size_t)numPixels * sizeof(float) * 4;
 
@@ -1108,7 +1124,7 @@ void MetalRender::allocBDPTBuffers(uint32_t width, uint32_t height)
     mVCMMergeOutput  = mDevice->newBuffer(mergeOutputSize, MTL::ResourceStorageModePrivate);
 
     // Initial merge radius based on scene bounds
-    mVCMInitialRadius = mSceneBoundRadius * 0.01f;
+    mVCMInitialRadius = mSceneBoundRadius * 0.003f; // SmallVCM default: 0.003
     mVCMIterationCount = 0;
 }
 

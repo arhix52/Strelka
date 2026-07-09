@@ -46,7 +46,7 @@ kernel void vcm_hash_grid_build(
     // Insert each non-delta, non-camera light vertex (skip vertex 0 = on light surface)
     for (uint32_t d = 1; d < pathLen; ++d)
     {
-        const uint32_t vertIdx = linearPixelIndex * BDPT_MAX_DEPTH + d;
+        const uint32_t vertIdx = linearPixelIndex * uniforms.bdptStride + d;
         device const BDPTVertex& lv = lightVertices[vertIdx];
 
         // Skip delta vertices (can't merge with delta)
@@ -63,8 +63,8 @@ kernel void vcm_hash_grid_build(
         // Allocate entry
         uint32_t entryIdx = atomic_fetch_add_explicit(hashCounter, 1, memory_order_relaxed);
 
-        // Guard against overflow (numPixels * BDPT_MAX_DEPTH entries max)
-        uint32_t maxEntries = uniforms.width * uniforms.height * BDPT_MAX_DEPTH;
+        // Guard against overflow (numPixels * bdptStride entries max)
+        uint32_t maxEntries = uniforms.width * uniforms.height * uniforms.bdptStride;
         if (entryIdx >= maxEntries)
             return;
 

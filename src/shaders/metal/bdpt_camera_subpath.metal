@@ -178,9 +178,7 @@ kernel void bdpt_camera_subpath(
         return;
 
     const uint32_t linearPixelIndex = tid.y * uniforms.width + tid.x;
-    const uint32_t maxDepth = min(uniforms.maxCameraSubpathDepth, (uint32_t)BDPT_MAX_DEPTH);
-    const uint32_t numPixels = uniforms.width * uniforms.height;
-
+    const uint32_t maxDepth = min(uniforms.maxCameraSubpathDepth, uniforms.bdptStride - 1u);
     // Initialize sampler
     SamplerState sampler = initSampler(linearPixelIndex, uniforms.subframeIndex, 0u);
 
@@ -210,19 +208,21 @@ kernel void bdpt_camera_subpath(
                                                     -uniforms.viewToWorld[2][2])));
     cosAtCamera = max(cosAtCamera, 1e-6f);
 
-    // The pixel solid angle subtended by a single pixel
-    // For perspective camera: pdf_image = 1 / numPixels
-    // pdf_direction (solid angle) = 1 / (cosAtCamera^3 * A_film_per_pixel)
-    // For SmallVCM: dVCM = numPixels (area measure), dVC = 0 on lens
-
+    // SmallVCM: dVCM = numPixels / cameraPdfW for light tracing (s>=1,t=1).
+    // Since we do NOT implement light tracing, set dVCM = 0 to remove
+    // the non-existent strategy from MIS weights. This causes the merge
+    // at camera vertex 1 to get slightly more weight than optimal (no
+    // camera-side competition), but setting dVCM non-zero without light
+    // tracing to compensate makes the result too dark. The small merge
+    // bias (~5-10%) decreases with progressive radius shrinkage.
     float3 throughput = float3(1.0f);
-    float dVCM = (float)numPixels; // initial camera dVCM
+    float dVCM = 0.0f;
     float dVC  = 0.0f;
     float dVM  = 0.0f;
 
     // Store camera vertex 0 (lens point)
     {
-        device BDPTVertex& v = cameraVertices[linearPixelIndex * BDPT_MAX_DEPTH + 0];
+        device BDPTVertex& v = cameraVertices[linearPixelIndex * uniforms.bdptStride + 0];
         v.position        = packed_float3(origin);
         v.geometry_normal  = packed_float3(float3(-uniforms.viewToWorld[0][2],
                                                    -uniforms.viewToWorld[1][2],
@@ -243,6 +243,7 @@ kernel void bdpt_camera_subpath(
         v.is_on_light      = 0;
         v.is_on_camera     = 1;
         v.light_index      = 0;
+        v.exterior_ior     = 1.0f; // camera is in air
     }
 
     // IOR stack for nested dielectrics
@@ -270,7 +271,7 @@ kernel void bdpt_camera_subpath(
         if (intersection.type == intersection_type::none)
         {
             // Miss -- record env map hit as a special light vertex
-            if (uniforms.hasEnvMap && pathLength < BDPT_MAX_DEPTH)
+            if (uniforms.hasEnvMap && pathLength < uniforms.bdptStride)
             {
                 // Evaluate env map radiance
                 constexpr struct sampler envSampler(mag_filter::linear, min_filter::linear,
@@ -280,7 +281,7 @@ kernel void bdpt_camera_subpath(
                 float3 envLe = envSample.xyz * uniforms.envMapIntensity
                              * float3(uniforms.envMapColorTint);
 
-                device BDPTVertex& v = cameraVertices[linearPixelIndex * BDPT_MAX_DEPTH + pathLength];
+                device BDPTVertex& v = cameraVertices[linearPixelIndex * uniforms.bdptStride + pathLength];
                 v.position        = packed_float3(float3(0.0f)); // no position for env
                 v.geometry_normal  = packed_float3(float3(0.0f));
                 v.shading_normal   = packed_float3(float3(0.0f));
@@ -299,6 +300,7 @@ kernel void bdpt_camera_subpath(
                 v.is_on_light      = 1;
                 v.is_on_camera     = 0;
                 v.light_index      = 0xFFFFFFFF; // sentinel for env map
+                v.exterior_ior     = 1.0f;
                 pathLength++;
             }
             break;
@@ -313,9 +315,9 @@ kernel void bdpt_camera_subpath(
             const float3 hitPoint = r.origin + r.direction * intersection.distance;
             device const UniformLight& currLight = lights[inst.userID];
 
-            if (pathLength < BDPT_MAX_DEPTH)
+            if (pathLength < uniforms.bdptStride)
             {
-                device BDPTVertex& v = cameraVertices[linearPixelIndex * BDPT_MAX_DEPTH + pathLength];
+                device BDPTVertex& v = cameraVertices[linearPixelIndex * uniforms.bdptStride + pathLength];
                 v.position        = packed_float3(hitPoint);
                 v.geometry_normal  = packed_float3(calcLightNormal(currLight, hitPoint));
                 v.shading_normal   = v.geometry_normal;
@@ -334,6 +336,7 @@ kernel void bdpt_camera_subpath(
                 v.is_on_light      = 1;
                 v.is_on_camera     = 0;
                 v.light_index      = inst.userID;
+                v.exterior_ior     = 1.0f;
                 pathLength++;
             }
             break;
@@ -414,9 +417,9 @@ kernel void bdpt_camera_subpath(
         float pdf_rev = isDelta ? 0.0f : bsdf_pdf_reverse(si, sampleResult.wi);
 
         // Store this vertex
-        if (pathLength < BDPT_MAX_DEPTH)
+        if (pathLength < uniforms.bdptStride)
         {
-            device BDPTVertex& v = cameraVertices[linearPixelIndex * BDPT_MAX_DEPTH + pathLength];
+            device BDPTVertex& v = cameraVertices[linearPixelIndex * uniforms.bdptStride + pathLength];
             v.position        = packed_float3(si.position);
             v.geometry_normal  = packed_float3(si.geometry_normal);
             v.shading_normal   = packed_float3(si.shading_normal);
@@ -435,6 +438,7 @@ kernel void bdpt_camera_subpath(
             v.is_on_light      = 0;
             v.is_on_camera     = 0;
             v.light_index      = 0;
+            v.exterior_ior     = si.exterior_ior;
             pathLength++;
         }
 
@@ -466,12 +470,14 @@ kernel void bdpt_camera_subpath(
         {
             float cosOut = fabs(dot(si.shading_normal, sampleResult.wi));
             float factor = cosOut / (pdf_fwd + 1e-10f);
-            // Georgiev 2012 Eq. 34-36: VcWeightFactor = 1/etaVCM, VmWeightFactor = etaVCM
+            // Split recursion for VCM without light tracing:
+            //   dVC  = BDPT mode (no etaVCM) — used by connection kernel only
+            //   dVM  = vcWeightFactor=1 to match BDPT-strength connections
+            //          (connections use vmWF=0, so merge must see full connection weight)
             float vcmNvm = uniforms.vcmNvm;
-            float vcmVcFactor = (vcmNvm > 0.0f) ? (1.0f / vcmNvm) : 0.0f;
-            float vcmActive = (vcmNvm > 0.0f) ? 1.0f : 0.0f;
-            dVM = factor * (dVM * pdf_rev + dVCM * vcmVcFactor + vcmActive);
-            dVC = factor * (dVC * pdf_rev + dVCM + vcmNvm);
+            float vcmOn = (vcmNvm > 0.0f) ? 1.0f : 0.0f;
+            dVM = factor * (dVM * pdf_rev + dVCM * vcmOn + vcmOn);
+            dVC = factor * (dVC * pdf_rev + dVCM);
             dVCM = 1.0f / (pdf_fwd + 1e-10f);
         }
 

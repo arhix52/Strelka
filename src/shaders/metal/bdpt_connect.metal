@@ -105,7 +105,7 @@ kernel void bdpt_connect(
     // ===================================================================
     for (uint32_t t = 1; t < cameraLen; ++t)
     {
-        device const BDPTVertex& cv = cameraVertices[linearPixelIndex * BDPT_MAX_DEPTH + t];
+        device const BDPTVertex& cv = cameraVertices[linearPixelIndex * uniforms.bdptStride + t];
         if (cv.is_on_light)
         {
             if (cv.light_index == 0xFFFFFFFF)
@@ -114,7 +114,7 @@ kernel void bdpt_connect(
                 float misWeight = 1.0f;
                 if (t > 1)
                 {
-                    device const BDPTVertex& prevCv = cameraVertices[linearPixelIndex * BDPT_MAX_DEPTH + t - 1];
+                    device const BDPTVertex& prevCv = cameraVertices[linearPixelIndex * uniforms.bdptStride + t - 1];
                     if (!prevCv.is_delta)
                     {
                         // Compute env map PDF for MIS against NEE
@@ -146,7 +146,7 @@ kernel void bdpt_connect(
                 float misWeight = 1.0f;
                 if (t > 1)
                 {
-                    device const BDPTVertex& prevCv = cameraVertices[linearPixelIndex * BDPT_MAX_DEPTH + t - 1];
+                    device const BDPTVertex& prevCv = cameraVertices[linearPixelIndex * uniforms.bdptStride + t - 1];
                     if (!prevCv.is_delta)
                     {
                         // SmallVCM multi-strategy MIS weight for s=0
@@ -164,13 +164,16 @@ kernel void bdpt_connect(
                         // Lambertian emission directional PDF
                         float emissionPdfW = cosAtLightClamped * M_1_PI_F;
 
-                        // cv.dVCM/dVC/dVM lack the distance/cos propagation for the last segment
+                        // cv.dVCM/dVC lack the distance/cos propagation for the last segment
+                        // (light-hit vertex was stored before propagation in camera subpath)
                         float invCos = 1.0f / cosAtLightClamped;
                         float dVCM_l = cv.dVCM * dist2 * invCos;
                         float dVC_l  = cv.dVC  * invCos;
-                        float dVM_l  = cv.dVM  * invCos;
 
-                        float wCamera = directPdfA * dVCM_l + emissionPdfW * (dVC_l + dVM_l);
+                        // SmallVCM GetLightRadiance: multiply PDFs by lightPickProb
+                        // directPdfA already includes lightSelectionPdf; apply same to emissionPdfW
+                        float wCamera = directPdfA * dVCM_l
+                                      + emissionPdfW * lightSelectionPdf * dVC_l;
                         misWeight = 1.0f / (1.0f + wCamera + 1e-10f);
                     }
                 }
@@ -202,23 +205,46 @@ kernel void bdpt_connect(
     // ===================================================================
     for (uint32_t t = 1; t < cameraLen; ++t)
     {
-        device const BDPTVertex& cv = cameraVertices[linearPixelIndex * BDPT_MAX_DEPTH + t];
+        device const BDPTVertex& cv = cameraVertices[linearPixelIndex * uniforms.bdptStride + t];
 
         // Skip delta camera vertices (can't connect) and light-hit vertices
         if (cv.is_delta || cv.is_on_light || cv.is_on_camera)
+            continue;
+
+        // Skip back-face camera vertices: transmission connections via straight
+        // shadow rays are physically incorrect (no refraction handling).
+        // For opaque surfaces, bsdf_eval returns 0 at back-face anyway.
+        bool camFrontFace = dot(float3(cv.geometry_normal), float3(cv.wo)) > 0.0f;
+        if (!camFrontFace)
             continue;
 
         float3 camPos = float3(cv.position);
         float3 camNormal = float3(cv.shading_normal);
         float3 camGeomNormal = float3(cv.geometry_normal);
 
+        // Without light tracing, vmWeightFactor=etaVCM suppresses connections
+        // in favor of merge, but merge can't fully compensate (small radius).
+        // The merge kernel uses its own weight via (dVCM, dVM) with
+        // vcWeightFactor=1/etaVCM — it does NOT use vmWeightFactor. So we
+        // can safely set vmWF=0 here for BDPT-strength connections while
+        // the merge kernel independently computes proper merge weights.
+        float vmWF = 0.0f;
+
         for (uint32_t s = 1; s < lightLen; ++s)
         {
-            device const BDPTVertex& lv = lightVertices[linearPixelIndex * BDPT_MAX_DEPTH + s];
+            device const BDPTVertex& lv = lightVertices[linearPixelIndex * uniforms.bdptStride + s];
 
             // Skip delta light vertices
             if (lv.is_delta)
                 continue;
+
+            // Skip back-face light vertices (same reason as camera: no refraction in shadow rays)
+            if (!lv.is_on_light)
+            {
+                bool lvFrontFace = dot(float3(lv.geometry_normal), float3(lv.wo)) > 0.0f;
+                if (!lvFrontFace)
+                    continue;
+            }
 
             float3 lightPos = float3(lv.position);
             float3 lightNormal = float3(lv.shading_normal);
@@ -252,29 +278,27 @@ kernel void bdpt_connect(
             SurfaceInteraction si_light = vertexToSI(lv, materials);
             if (lv.is_on_light)
             {
-                // Light surface vertex (s=1): emission angular profile + geometry term
+                // Light surface vertex (s=1): geometry term provides Lambertian cosine
                 float G = cosAtCamera * cosAtLight / dist2;
 
-                // Lambertian emission angular profile for connection direction
-                float emissionProfile = cosAtLight * M_1_PI_F;
-
-                // Reverse PDF at camera vertex for SmallVCM MIS
+                // Reverse PDFs for SmallVCM MIS
                 float cameraRevPdfW = bsdf_pdf_reverse(si_cam, connDir);
 
                 // Convert forward PDFs to area measure
                 float cameraDirPdfA = evalCam.pdf * cosAtLight / dist2;
                 // Light emission directional PDF for direction toward camera
-                float lightDirPdfW = cosAtLight * M_1_PI_F; // Lambertian
+                float lightDirPdfW = cosAtLight * M_1_PI_F; // Lambertian sampling PDF
                 float lightDirPdfA = lightDirPdfW * cosAtCamera / dist2;
 
-                // SmallVCM MIS weight (lv.dVC = 0 for vertex 0)
-                // VCM: include dVM merge term when integratorType == 2
-                float wLight  = cameraDirPdfA * lv.dVCM;
-                float wCamera = lightDirPdfA * (cv.dVCM + cv.dVC * cameraRevPdfW + cv.dVM * cameraRevPdfW);
+                // SmallVCM MIS weight [tech. rep. (40)-(41)]
+                // For on-light vertex: lightRevPdf = lightDirPdfW (Lambertian symmetric)
+                // vmWF=0: BDPT-strength connections (see comment above)
+                float wLight  = cameraDirPdfA * (vmWF + lv.dVCM + lv.dVC * lightDirPdfW);
+                float wCamera = lightDirPdfA * (cv.dVCM + cv.dVC * cameraRevPdfW);
                 float misWeight = 1.0f / (wLight + 1.0f + wCamera + 1e-10f);
 
-                // lv.throughput = Le / pdf_pos; emissionProfile provides the angular distribution
-                float3 contrib = float3(cv.throughput) * evalCam.bsdf * G * emissionProfile * float3(lv.throughput) * misWeight;
+                // lv.throughput = Le / pdf_pos; G provides the Lambertian emission cosine
+                float3 contrib = float3(cv.throughput) * evalCam.bsdf * G * float3(lv.throughput) * misWeight;
                 result += contrib;
             }
             else
@@ -294,9 +318,11 @@ kernel void bdpt_connect(
                 float cameraDirPdfA = evalCam.pdf * cosAtLight / dist2;
                 float lightDirPdfA  = evalLight.pdf * cosAtCamera / dist2;
 
-                // SmallVCM MIS weight (VCM: include dVM merge terms)
-                float wLight  = cameraDirPdfA * (lv.dVCM + lv.dVC * lightRevPdfW + lv.dVM * lightRevPdfW);
-                float wCamera = lightDirPdfA  * (cv.dVCM + cv.dVC * cameraRevPdfW + cv.dVM * cameraRevPdfW);
+                // SmallVCM MIS weight [tech. rep. (40)-(41)]
+                // Each vertex's dVC is multiplied by the reverse PDF at THAT vertex
+                // vmWF=0: BDPT-strength connections (see comment above)
+                float wLight  = cameraDirPdfA * (vmWF + lv.dVCM + lv.dVC * lightRevPdfW);
+                float wCamera = lightDirPdfA  * (cv.dVCM + cv.dVC * cameraRevPdfW);
                 float misWeight = 1.0f / (wLight + 1.0f + wCamera + 1e-10f);
 
                 float3 contrib = float3(cv.throughput) * evalCam.bsdf * G * evalLight.bsdf * float3(lv.throughput) * misWeight;
@@ -320,7 +346,7 @@ kernel void bdpt_connect(
 
         for (uint32_t t = 1; t < cameraLen; ++t)
         {
-            device const BDPTVertex& cv = cameraVertices[linearPixelIndex * BDPT_MAX_DEPTH + t];
+            device const BDPTVertex& cv = cameraVertices[linearPixelIndex * uniforms.bdptStride + t];
 
             // Skip delta, light-hit, or camera-origin vertices
             if (cv.is_delta || cv.is_on_light || cv.is_on_camera)
@@ -346,6 +372,13 @@ kernel void bdpt_connect(
             float2 uLightPt = float2(
                 random<SampleDimension::eLightPointX>(neeSampler, uniforms.samplerType),
                 random<SampleDimension::eLightPointY>(neeSampler, uniforms.samplerType));
+
+            // Skip NEE at back-face vertices (matches PT behavior):
+            // PT's isNextEventValid requires (dot(toLight,normal)>0) == front_face,
+            // and sampleLight requires dot>0, so both require front_face == true.
+            // Back-face NEE would need refraction-aware shadow rays.
+            if (!si_cam.front_face)
+                continue;
 
             if (uniforms.hasEnvMap && (uniforms.numLights == 0 || uLightId >= 0.5f))
             {
@@ -438,22 +471,33 @@ kernel void bdpt_connect(
                     if (neeIsLocalLight && neeLightArea > 0.0f)
                     {
                         // SmallVCM multi-strategy MIS weight for s=1 (local light)
+                        // Following SmallVCM::DirectIllumination() [tech. rep. (44)-(45)]
                         float cosLN = max(neeCosAtLight, 1e-6f);
-                        float emPdfW = cosLN * M_1_PI_F;
-                        float ptPdfA = neeLightSelPdf / max(neeLightArea, 1e-10f);
-
-                        float cameraRevPdfW = bsdf_pdf_reverse(si_cam, toLight);
-
                         float d2 = neeDistToLight * neeDistToLight;
-                        float cosC = max(dot(si_cam.shading_normal, toLight), 0.0f);
+                        float cosAtSurface = dot(si_cam.shading_normal, toLight);
+
+                        // directPdfA = light point area PDF (= selection / area)
+                        float directPdfA = neeLightSelPdf / max(neeLightArea, 1e-10f);
+                        // emissionPdfW = Lambertian directional PDF (cos/PI)
+                        float emissionPdfW = cosLN * M_1_PI_F;
+                        // lightDirPdfA = emission PDF converted to area at camera vertex
+                        float lightDirPdfA_nee = emissionPdfW * cosAtSurface / d2;
+
+                        // Camera BSDF forward PDF converted to area at light
                         float camDirPdfA = evalCam.pdf * cosLN / d2;
-                        float lgtDirPdfA = emPdfW * cosC / d2;
+                        // Camera BSDF reverse PDF (solid angle)
+                        float camRevPdfW = bsdf_pdf_reverse(si_cam, toLight);
 
-                        // Virtual light vertex 0: dVCM = emissionPdfW / pointPdfA
-                        float dVCM_v0 = emPdfW / max(ptPdfA, 1e-10f);
-
-                        float wL = camDirPdfA * dVCM_v0;
-                        float wC = lgtDirPdfA * (cv.dVCM + cv.dVC * cameraRevPdfW + cv.dVM * cameraRevPdfW);
+                        // wLight: ratio of s=0 (direct hit) to s=1 (NEE) probability
+                        // SmallVCM: bsdfDirPdfW / (lightPickProb * directPdfW)
+                        // directPdfA already includes neeLightSelPdf, so this is correct
+                        float wL = camDirPdfA / max(directPdfA, 1e-10f);
+                        // wCamera: SmallVCM DirectIllumination [tech. rep. (45)]
+                        //   = (emissionPdfW * cosAtSurface / (directPdfW * cosAtLight))
+                        //     * (vmWeightFactor + cv.dVCM + camRevPdfW * cv.dVC)
+                        // BDPT-mode: no vmWeightFactor (see camera subpath comment)
+                        float wCFactor = lightDirPdfA_nee * max(neeLightArea, 1e-10f);
+                        float wC = wCFactor * (cv.dVCM + camRevPdfW * cv.dVC);
                         misWeight = 1.0f / (wL + 1.0f + wC + 1e-10f);
                     }
                     else

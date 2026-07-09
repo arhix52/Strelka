@@ -106,6 +106,7 @@ struct Uniforms
     uint32_t integratorType;        // 0=PT, 1=BDPT, 2=VCM
     uint32_t maxLightSubpathDepth;
     uint32_t maxCameraSubpathDepth;
+    uint32_t bdptStride;            // per-pixel vertex slots = min(maxDepth+1, BDPT_MAX_DEPTH)
     float    sceneBoundRadius;
     vector_float3 sceneBoundCenter;
 

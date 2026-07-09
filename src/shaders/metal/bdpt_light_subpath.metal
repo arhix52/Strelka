@@ -172,7 +172,7 @@ kernel void bdpt_light_subpath(
         return;
 
     const uint32_t linearPixelIndex = tid.y * uniforms.width + tid.x;
-    const uint32_t maxDepth = min(uniforms.maxLightSubpathDepth, (uint32_t)BDPT_MAX_DEPTH);
+    const uint32_t maxDepth = min(uniforms.maxLightSubpathDepth, uniforms.bdptStride - 1u);
 
     // Initialize sampler with different seed for light paths
     SamplerState sampler = initSampler(linearPixelIndex + uniforms.width * uniforms.height,
@@ -196,16 +196,38 @@ kernel void bdpt_light_subpath(
     float3 vertex0Throughput = emission.Le / (emission.pdf_pos + 1e-10f);
     float3 throughput = emission.Le / (emission.pdf_pos * emission.pdf_dir);
 
-    // SmallVCM: dVCM = pdf_dir / pdf_pos, dVC = 0, dVM = 0
-    float dVCM = emission.pdf_dir / (emission.pdf_pos + 1e-10f);
-    float dVC  = 0.0f;
-    float dVM  = 0.0f;
+    // SmallVCM partial MIS weights for light vertex 0:
+    //   dVCM = directPdfA / emissionPdfW  (directPdfA = 1/area, no light selection)
+    //   dVC  = cos / emissionPdfW         (PI for Lambertian; 0 for delta lights)
+    //   dVM  = dVC * vcWeightFactor
+    // directPdfA must exclude light selection probability (it's handled at connection time).
+    float lightSelPdf;
+    if (emission.light_index < 0) {
+        lightSelPdf = (uniforms.numLights > 0) ? 0.5f : 1.0f;
+    } else {
+        lightSelPdf = uniforms.hasEnvMap ? 0.5f / float(uniforms.numLights) : 1.0f / float(uniforms.numLights);
+    }
+    float directPdfA = emission.pdf_pos / (lightSelPdf + 1e-10f); // = 1/area
+    float emissionPdfW = emission.pdf_dir;                         // = cos/PI for Lambertian
+    float cosAtLight = max(dot(emission.normal, emission.direction), 0.0f);
+
+    // Delta lights (env map, distant) have no reversible angular distribution
+    bool isDeltaLight = (emission.light_index < 0) ||
+        (emission.light_index >= 0 && lights[emission.light_index].type == 3);
+
+    // vcWeightFactor=1 for VCM without light tracing (matches BDPT-strength connections)
+    float vcmNvm_init = uniforms.vcmNvm;
+    float vcWF_init = (vcmNvm_init > 0.0f) ? 1.0f : 0.0f;
+
+    float dVCM = directPdfA / (emissionPdfW + 1e-10f);
+    float dVC  = isDeltaLight ? 0.0f : (cosAtLight / (emissionPdfW + 1e-10f));
+    float dVM  = dVC * vcWF_init;
 
     uint32_t pathLength = 0;
 
     // Store light vertex 0
     {
-        device BDPTVertex& v = lightVertices[linearPixelIndex * BDPT_MAX_DEPTH + 0];
+        device BDPTVertex& v = lightVertices[linearPixelIndex * uniforms.bdptStride + 0];
         v.position        = packed_float3(emission.position);
         v.geometry_normal  = packed_float3(emission.normal);
         v.shading_normal   = packed_float3(emission.normal);
@@ -224,6 +246,7 @@ kernel void bdpt_light_subpath(
         v.is_on_light      = 1;
         v.is_on_camera     = 0;
         v.light_index      = (uint32_t)max(emission.light_index, 0);
+        v.exterior_ior     = 1.0f; // light surface is in air
         pathLength = 1;
     }
 
@@ -332,9 +355,9 @@ kernel void bdpt_light_subpath(
         float adj = adjoint_correction(si, sampleResult.wi);
 
         // Store this vertex
-        if (pathLength < BDPT_MAX_DEPTH)
+        if (pathLength < uniforms.bdptStride)
         {
-            device BDPTVertex& v = lightVertices[linearPixelIndex * BDPT_MAX_DEPTH + pathLength];
+            device BDPTVertex& v = lightVertices[linearPixelIndex * uniforms.bdptStride + pathLength];
             v.position        = packed_float3(si.position);
             v.geometry_normal  = packed_float3(si.geometry_normal);
             v.shading_normal   = packed_float3(si.shading_normal);
@@ -353,6 +376,7 @@ kernel void bdpt_light_subpath(
             v.is_on_light      = 0;
             v.is_on_camera     = 0;
             v.light_index      = 0;
+            v.exterior_ior     = si.exterior_ior;
             pathLength++;
         }
 
@@ -383,12 +407,14 @@ kernel void bdpt_light_subpath(
         {
             float cosOut = fabs(dot(si.shading_normal, sampleResult.wi));
             float factor = cosOut / (pdf_fwd + 1e-10f);
-            // Georgiev 2012 Eq. 34-36: VcWeightFactor = 1/etaVCM, VmWeightFactor = etaVCM
+            // Split recursion for VCM without light tracing:
+            //   dVC  = BDPT mode (no etaVCM) — used by connection kernel only
+            //   dVM  = vcWeightFactor=1 to match BDPT-strength connections
+            // Matches camera subpath split recursion for consistent MIS weights.
             float vcmNvm = uniforms.vcmNvm;
-            float vcmVcFactor = (vcmNvm > 0.0f) ? (1.0f / vcmNvm) : 0.0f;
-            float vcmActive = (vcmNvm > 0.0f) ? 1.0f : 0.0f;
-            dVM = factor * (dVM * pdf_rev + dVCM * vcmVcFactor + vcmActive);
-            dVC = factor * (dVC * pdf_rev + dVCM + vcmNvm);
+            float vcmOn = (vcmNvm > 0.0f) ? 1.0f : 0.0f;
+            dVM = factor * (dVM * pdf_rev + dVCM * vcmOn + vcmOn);
+            dVC = factor * (dVC * pdf_rev + dVCM);
             dVCM = 1.0f / (pdf_fwd + 1e-10f);
         }
 

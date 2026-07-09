@@ -69,6 +69,7 @@ private:
         float shiftY = 0.0f;
         uint32_t maxDepth = 0;
         uint32_t debug = 0;
+        uint32_t integratorType = 0;
     };
     PrevSettings mPrevSettings;
 
@@ -185,6 +186,11 @@ private:
 
     float mVCMInitialRadius = 0.0f;
     uint32_t mVCMIterationCount = 0;
+
+    // Per-pixel vertex slots the BDPT/VCM buffers were allocated with
+    // (= min(max_depth+1, BDPT_MAX_DEPTH) at allocation time). The runtime
+    // uniforms.bdptStride is clamped to this so indexing never overflows.
+    uint32_t mBDPTAllocStride = 0;
 
     // BVH management
     MTL::PrimitiveAccelerationStructureDescriptor* createMotionBLASDescriptor(
