@@ -135,7 +135,7 @@ static SurfaceInteraction vertexToSI(device const BDPTVertex& v, device Material
         si.material_type = mat.material_type;
         si.thin_walled = mat.thin_walled;
         si.dielectric_priority = mat.dielectric_priority;
-        si.exterior_ior = 1.0f;
+        si.exterior_ior = v.exterior_ior;
 
         constexpr sampler texSampler(mag_filter::linear, min_filter::linear);
         if (!is_null_texture(mat.baseColorTexture))
@@ -165,7 +165,7 @@ static SurfaceInteraction vertexToSI(device const BDPTVertex& v, device Material
         si.material_type = MATERIAL_TYPE_DIFFUSE;
         si.thin_walled = 0;
         si.dielectric_priority = 0;
-        si.exterior_ior = 1.0f;
+        si.exterior_ior = v.exterior_ior;
     }
 
     float3 T, B;

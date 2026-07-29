@@ -39,7 +39,7 @@ struct RenderConfig
 
     // tonemap
     uint32_t tonemapType = 2;  // 0=None, 1=Reinhard, 2=ACES, 3=Filmic
-    float gamma = 2.4f;
+    float gamma = 0.0f;
     float filmIso = 100.0f;
     float fStop = 4.0f;
     float shutterSpeed = 100.0f;

@@ -261,6 +261,23 @@ void EditorApp::drawRenderSettingsPanel()
     }
     m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", currentTonemapItemId);
 
+    if (ImGui::TreeNode("Exposure"))
+    {
+        auto filmIso = m_settingsManager->getAs<float>("render/post/tonemapper/filmIso");
+        if (ImGui::SliderFloat("Film ISO", &filmIso, 50.0f, 3200.0f, "%.0f", ImGuiSliderFlags_Logarithmic))
+            m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", filmIso);
+
+        auto fStop = m_settingsManager->getAs<float>("render/post/tonemapper/fStop");
+        if (ImGui::SliderFloat("F-Stop", &fStop, 1.0f, 22.0f, "%.1f"))
+            m_settingsManager->setAs<float>("render/post/tonemapper/fStop", fStop);
+
+        auto shutterSpeed = m_settingsManager->getAs<float>("render/post/tonemapper/shutterSpeed");
+        if (ImGui::SliderFloat("Shutter Speed", &shutterSpeed, 10.0f, 1000.0f, "1/%.0f", ImGuiSliderFlags_Logarithmic))
+            m_settingsManager->setAs<float>("render/post/tonemapper/shutterSpeed", shutterSpeed);
+
+        ImGui::TreePop();
+    }
+
     auto gamma = m_settingsManager->getAs<float>("render/post/gamma");
     ImGui::InputFloat("Gamma", (float*)&gamma, 0.5);
     m_settingsManager->setAs<float>("render/post/gamma", gamma);

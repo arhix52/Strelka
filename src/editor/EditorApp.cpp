@@ -134,12 +134,12 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<float>("render/animation/speed", 1.0f);
     m_settingsManager->setAs<std::string>("resource/searchPath", m_resourceSearchPath);
     // Postprocessing settings:
-    m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", 100.0f);
+    m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", 400.0f);
     m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", 1.0f);
-    m_settingsManager->setAs<float>("render/post/tonemapper/fStop", 4.0f);
-    m_settingsManager->setAs<float>("render/post/tonemapper/shutterSpeed", 100.0f);
+    m_settingsManager->setAs<float>("render/post/tonemapper/fStop", 2.8f);
+    m_settingsManager->setAs<float>("render/post/tonemapper/shutterSpeed", 60.0f);
 
-    m_settingsManager->setAs<float>("render/post/gamma", 2.4f); // 0.0f - off
+    m_settingsManager->setAs<float>("render/post/gamma", 0.0f); // 0.0f - off (display layer applies its own transfer function)
     // Dev settings:
     m_settingsManager->setAs<float>("render/pt/dev/shadowRayTmin", 0.0f); // offset to avoid self-collision in
                                                                           // light sampling
