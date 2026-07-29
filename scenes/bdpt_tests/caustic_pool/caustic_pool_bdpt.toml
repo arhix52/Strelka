@@ -1,0 +1,27 @@
+[scene]
+path = "../../scenes/bdpt_tests/caustic_pool/caustic_pool.glb"
+
+[output]
+path = "output/caustic_pool_bdpt.exr"
+width = 512
+height = 384
+
+[render]
+integrator = "bdpt"
+spp = 512
+spp_per_launch = 1
+max_depth = 12
+sampler = "sobol"
+
+[camera]
+index = 0
+position = [0.0, 1.5, 3.9]
+target = [0.0, 0.55, -0.2]
+fov = 45.0
+
+[tonemap]
+type = "aces"
+gamma = 0.0
+exposure_iso = 400.0
+exposure_fstop = 2.8
+exposure_shutter = 60.0
