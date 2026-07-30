@@ -121,6 +121,7 @@ private:
     float mEnvMapAutoScale = 1.0f;
     bool mEnvMapLoaded = false;
 
+    MTL::Library* loadShaderLibrary(const char* relativePath);
     void buildComputePipeline();
     void buildTonemapperPipeline();
     void buildBuffers();

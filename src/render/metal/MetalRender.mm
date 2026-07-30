@@ -28,6 +28,7 @@
 #define TINYEXR_IMPLEMENTATION
 #include <tinyexr.h>
 #include <log.h>
+#include <paths.h>
 
 #include <simd/simd.h>
 
@@ -830,22 +831,34 @@ Buffer* MetalRender::createBuffer(const BufferDesc& desc)
     return res;
 }
 
+MTL::Library* MetalRender::loadShaderLibrary(const char* relativePath)
+{
+    const std::string path = oka::resolveResourcePath(relativePath);
+    NS::Error* pError = nullptr;
+    MTL::Library* pLibrary =
+        mDevice->newLibrary(NS::String::string(path.c_str(), NS::UTF8StringEncoding), &pError);
+    if (!pLibrary)
+    {
+        STRELKA_FATAL("Failed to load {}: {}", path,
+                      pError ? pError->localizedDescription()->utf8String() : "unknown error");
+    }
+    return pLibrary;
+}
+
 void MetalRender::buildComputePipeline()
 {
-    NS::Error* pError = nullptr;
-    MTL::Library* pComputeLibrary =
-        mDevice->newLibrary(NS::String::string("./metal/shaders/pathtrace.metallib", NS::UTF8StringEncoding), &pError);
+    MTL::Library* pComputeLibrary = loadShaderLibrary("metal/shaders/pathtrace.metallib");
     if (!pComputeLibrary)
     {
-        STRELKA_FATAL("{}", pError->localizedDescription()->utf8String());
-        assert(false);
+        return;
     }
+    NS::Error* pError = nullptr;
     MTL::Function* pPathTraceFn =
         pComputeLibrary->newFunction(NS::String::string("raytracingKernel", NS::UTF8StringEncoding));
     mPathTracingPSO = mDevice->newComputePipelineState(pPathTraceFn, &pError);
     if (!mPathTracingPSO)
     {
-        STRELKA_FATAL("{}", pError->localizedDescription()->utf8String());
+        STRELKA_FATAL("{}", pError ? pError->localizedDescription()->utf8String() : "unknown error");
         assert(false);
     }
 
@@ -855,20 +868,18 @@ void MetalRender::buildComputePipeline()
 
 void MetalRender::buildTonemapperPipeline()
 {
-    NS::Error* pError = nullptr;
-    MTL::Library* pComputeLibrary =
-        mDevice->newLibrary(NS::String::string("./metal/shaders/tonemapper.metallib", NS::UTF8StringEncoding), &pError);
+    MTL::Library* pComputeLibrary = loadShaderLibrary("metal/shaders/tonemapper.metallib");
     if (!pComputeLibrary)
     {
-        STRELKA_FATAL("{}", pError->localizedDescription()->utf8String());
-        assert(false);
+        return;
     }
+    NS::Error* pError = nullptr;
     MTL::Function* pTonemapperFn =
         pComputeLibrary->newFunction(NS::String::string("toneMappingComputeShader", NS::UTF8StringEncoding));
     mTonemapperPSO = mDevice->newComputePipelineState(pTonemapperFn, &pError);
     if (!mTonemapperPSO)
     {
-        STRELKA_FATAL("{}", pError->localizedDescription()->utf8String());
+        STRELKA_FATAL("{}", pError ? pError->localizedDescription()->utf8String() : "unknown error");
         assert(false);
     }
 
@@ -1208,14 +1219,12 @@ void MetalRender::createAccelerationStructures()
 
 void MetalRender::buildSkinningPipeline()
 {
-    NS::Error* pError = nullptr;
-    MTL::Library* pLibrary =
-        mDevice->newLibrary(NS::String::string("./metal/shaders/skinning.metallib", NS::UTF8StringEncoding), &pError);
+    MTL::Library* pLibrary = loadShaderLibrary("metal/shaders/skinning.metallib");
     if (!pLibrary)
     {
-        STRELKA_FATAL("Failed to load skinning metallib: {}", pError->localizedDescription()->utf8String());
-        assert(false);
+        return;
     }
+    NS::Error* pError = nullptr;
 
     MTL::Function* pSkinningFn =
         pLibrary->newFunction(NS::String::string("skinningKernel", NS::UTF8StringEncoding));
