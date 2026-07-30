@@ -76,7 +76,11 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     ImGui_ImplMetal_Init((__bridge id<MTLDevice>)(_pDevice));
 
     NSWindow *nswin = glfwGetCocoaWindow(mWindow);
-    layer = CA::MetalLayer::layer();
+    // CA::MetalLayer::layer() and RenderPassDescriptor::renderPassDescriptor()
+    // below are autoreleased factories. Both are stored as members and used for
+    // the whole process lifetime, so they must be retained explicitly — they only
+    // survived before because nothing ever drained the enclosing pool.
+    layer = CA::MetalLayer::layer()->retain();
     layer->setDevice(_pDevice);
     layer->setPixelFormat(MTL::PixelFormatRGBA16Float);
     auto l = (__bridge CAMetalLayer*)layer;
@@ -89,7 +93,7 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     nswin.contentView.layer = l;
     nswin.contentView.wantsLayer = YES;
 
-    renderPassDescriptor = MTL::RenderPassDescriptor::renderPassDescriptor();
+    renderPassDescriptor = MTL::RenderPassDescriptor::renderPassDescriptor()->retain();
 
     if (!_pCommandQueue)
     {
@@ -113,7 +117,11 @@ float GlfwDisplay::getMaxEDR()
 
 void GlfwDisplay::drawFrame(ImageBuffer& result)
 {
-    NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
+    if (!mFrameValid || result.deviceData == nullptr || result.width == 0 || result.height == 0)
+    {
+        return;
+    }
+
     const bool needRecreate = result.height != mTexHeight || result.width != mTexWidth;
     if (needRecreate)
     {
@@ -136,8 +144,7 @@ void GlfwDisplay::drawFrame(ImageBuffer& result)
         mTexture, 0, 0, MTL::Origin{0, 0, 0});
 
     mBlitEncoder->endEncoding();
-
-    pPool->release();
+    mBlitEncoder = nullptr;
 }
 
 MTL::Texture* GlfwDisplay::buildTexture(uint32_t width, uint32_t heigth)
@@ -215,19 +222,92 @@ void GlfwDisplay::buildShaders()
     _pShaderLibrary = pLibrary;
 }
 
+GlfwDisplay::~GlfwDisplay()
+{
+    @autoreleasepool
+    {
+        destroy();
+    }
+}
+
 void GlfwDisplay::destroy()
 {
+    if (mDestroyed)
+    {
+        return;
+    }
+    mDestroyed = true;
 
+    if (mWindow)
+    {
+        ImGui_ImplMetal_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+    }
+
+    if (_pPSO)
+    {
+        _pPSO->release();
+        _pPSO = nullptr;
+    }
+    if (_pShaderLibrary)
+    {
+        _pShaderLibrary->release();
+        _pShaderLibrary = nullptr;
+    }
+    if (mTexture)
+    {
+        mTexture->release();
+        mTexture = nullptr;
+    }
+    if (renderPassDescriptor)
+    {
+        renderPassDescriptor->release();
+        renderPassDescriptor = nullptr;
+    }
+    if (layer)
+    {
+        layer->release();
+        layer = nullptr;
+    }
+    if (_pCommandQueue && _ownsCommandQueue)
+    {
+        _pCommandQueue->release();
+    }
+    _pCommandQueue = nullptr;
+    // _pDevice is owned by the renderer — do not release it here.
 }
 
 void GlfwDisplay::onBeginFrame()
 {
     dispatch_semaphore_wait(_semaphore, DISPATCH_TIME_FOREVER);
 
+    mFramePool = NS::AutoreleasePool::alloc()->init();
+    mFrameValid = false;
+
     int width, height;
     glfwGetFramebufferSize(mWindow, &width, &height);
+    // A minimised window reports a 0x0 framebuffer; asking CAMetalLayer for a
+    // zero-sized drawable is invalid.
+    if (width <= 0 || height <= 0)
+    {
+        dispatch_semaphore_signal(_semaphore);
+        mFramePool->release();
+        mFramePool = nullptr;
+        return;
+    }
+
     layer->setDrawableSize(CGSizeMake(width, height));
     drawable = layer->nextDrawable();
+    if (!drawable)
+    {
+        // The drawable pool is exhausted (compositor back-pressure). Drop this
+        // frame rather than dereferencing null; the next iteration retries.
+        dispatch_semaphore_signal(_semaphore);
+        mFramePool->release();
+        mFramePool = nullptr;
+        return;
+    }
 
     float clear_color[4] = {0.45f, 0.55f, 0.60f, 1.00f};
 
@@ -237,12 +317,19 @@ void GlfwDisplay::onBeginFrame()
     renderPassDescriptor->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionClear);
     renderPassDescriptor->colorAttachments()->object(0)->setStoreAction(MTL::StoreActionStore);
 
+    mFrameValid = true;
+
     // Start the Dear ImGui frame
     ImGui_ImplMetal_NewFrame((__bridge MTLRenderPassDescriptor*)renderPassDescriptor);
 }
 
 void GlfwDisplay::onEndFrame()
 {
+    if (!mFrameValid)
+    {
+        return;
+    }
+
     mCommandBuffer->presentDrawable(drawable);
 
     dispatch_semaphore_t sem = _semaphore;
@@ -252,20 +339,31 @@ void GlfwDisplay::onEndFrame()
 
     mCommandBuffer->commit();
 
-    mRenderEncoder->release();
-    mCommandBuffer->release();
-    drawable->release();
+    // commandBuffer(), nextDrawable() and renderCommandEncoder() all return
+    // autoreleased objects — they are owned by mFramePool, not by us. Releasing
+    // them explicitly (as the previous code did) was an over-release that only
+    // stayed latent because the pool was never drained.
+    mRenderEncoder = nullptr;
+    mCommandBuffer = nullptr;
+    drawable = nullptr;
+    mFrameValid = false;
+
+    mFramePool->release();
+    mFramePool = nullptr;
 }
 
 void GlfwDisplay::drawUI()
 {
-    mRenderEncoder = mCommandBuffer->renderCommandEncoder(renderPassDescriptor);
-@autoreleasepool 
+    if (!mFrameValid)
     {
+        return;
+    }
 
-        ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(),
+    mRenderEncoder = mCommandBuffer->renderCommandEncoder(renderPassDescriptor);
+
+    ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(),
         (__bridge id<MTLCommandBuffer>)(mCommandBuffer),
         (__bridge id<MTLRenderCommandEncoder>)mRenderEncoder);
-    }
+
     mRenderEncoder->endEncoding();
 }
