@@ -379,6 +379,8 @@ void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* 
     const MTL::Size tg = MTL::Size(kThreadsPerGroup, 1, 1);
     // Byte offset of the indirect dispatch arguments inside the control buffer.
     const NS::UInteger kDispatchArgsOffset = 2 * sizeof(uint32_t);
+    const NS::UInteger kShadowArgsOffset = 8 * sizeof(uint32_t);
+    const NS::UInteger kShadowCounterOffset = 6 * sizeof(uint32_t);
 
     for (uint32_t s = 0; s < sampleCount; ++s)
     {
@@ -436,11 +438,31 @@ void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* 
             enc->setBuffer(mPathQueueBuffer[dst], 0, 16);
             enc->setBuffer(mWavefrontControlBuffer, dst * sizeof(uint32_t), 17);
             enc->setBuffer(mWavefrontControlBuffer, 0, 18);
+            enc->setBuffer(mShadowRayBuffer, 0, 19);
+            enc->setBuffer(mWavefrontControlBuffer, kShadowCounterOffset, 20);
             if (mEnvMapTexture)
             {
                 enc->setTexture(mEnvMapTexture, 0);
             }
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kDispatchArgsOffset, tg);
+
+            // Deferred occlusion. It has to run before the next bounce's shade,
+            // so that this bounce's direct lighting lands in the accumulator
+            // ahead of the next bounce's emission -- the same order the
+            // megakernel adds them in.
+            enc->setComputePipelineState(mWavefrontPrepareShadowPSO);
+            enc->setBuffer(mWavefrontControlBuffer, 0, 0);
+            enc->setBytes(&kThreadsPerGroup, sizeof(uint32_t), 1);
+            enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
+
+            enc->setComputePipelineState(mWavefrontShadowPSO);
+            enc->setBuffer(uniformBuffer, 0, 0);
+            enc->setAccelerationStructure(mInstanceAccelerationStructure, 1);
+            enc->setBuffer(mShadowRayBuffer, 0, 2);
+            enc->setBuffer(mRadianceBuffer, 0, 3);
+            enc->setBuffer(mWavefrontControlBuffer, 0, 4);
+            enc->setBytes(&s, sizeof(uint32_t), 5);
+            enc->dispatchThreadgroups(mWavefrontControlBuffer, kShadowArgsOffset, tg);
         }
     }
 
@@ -1130,6 +1152,8 @@ void MetalRender::buildWavefrontPipelines()
     mWavefrontShadePSO = make("wavefrontShade");
     mWavefrontResolvePSO = make("wavefrontResolve");
     mWavefrontPreparePSO = make("wavefrontPrepare");
+    mWavefrontPrepareShadowPSO = make("wavefrontPrepareShadow");
+    mWavefrontShadowPSO = make("wavefrontShadow");
     lib->release();
 
     if (mWavefrontShadePSO)
@@ -1156,6 +1180,7 @@ void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)
     release(mPathQueueBuffer[0]);
     release(mPathQueueBuffer[1]);
     release(mWavefrontControlBuffer);
+    release(mShadowRayBuffer);
 
     // Private storage: these never leave the GPU.
     mPathStateBuffer = mDevice->newBuffer(pixels * sizeof(PathState), MTL::ResourceStorageModePrivate);
@@ -1164,8 +1189,10 @@ void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)
     mRadianceBuffer = mDevice->newBuffer(pixels * sizeof(simd::float4), MTL::ResourceStorageModePrivate);
     mPathQueueBuffer[0] = mDevice->newBuffer(pixels * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
     mPathQueueBuffer[1] = mDevice->newBuffer(pixels * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
-    // Two counters, three indirect dispatch arguments and the active count.
-    mWavefrontControlBuffer = mDevice->newBuffer(8 * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
+    // Queue counters, active counts, and two sets of indirect dispatch arguments.
+    mWavefrontControlBuffer = mDevice->newBuffer(12 * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
+    // At most one deferred connection per path per bounce.
+    mShadowRayBuffer = mDevice->newBuffer(pixels * sizeof(ShadowRay), MTL::ResourceStorageModePrivate);
     mWavefrontCapacity = pixels;
 
     STRELKA_INFO("wavefront buffers for {}x{}: {:.1f} MB total", width, height,

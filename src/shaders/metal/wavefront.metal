@@ -17,8 +17,9 @@
 // side tables (hits, IOR stacks, radiance) addressable by a single index and
 // makes the queue's contents a permutation rather than a copy.
 //
-// Shadow rays are still traced inline inside estimateDirectLighting, as in the
-// megakernel; splitting them into their own stage is a later step.
+// Shadow rays are deferred into their own stage: they are a second, incoherent
+// traversal that would otherwise run inside the most register-hungry kernel, and
+// only a subset of the shaded paths emit one.
 // ============================================================================
 
 // Bit 31 of HitRecord::geomEntryIndex marks a hit on emissive geometry, in which
@@ -27,12 +28,18 @@
 
 // Layout of the control buffer, shared by every stage.
 //   [0], [1] : live path count of each ping-pong queue
-//   [2..4]   : MTLDispatchThreadgroupsIndirectArguments for this bounce
+//   [2..4]   : MTLDispatchThreadgroupsIndirectArguments for extend/shade
 //   [5]      : live path count for this bounce, so stages need no queue index
-#define WF_CTRL_COUNT0    0
-#define WF_CTRL_COUNT1    1
-#define WF_CTRL_DISPATCH  2
-#define WF_CTRL_ACTIVE    5
+//   [6]      : shadow rays emitted by this bounce
+//   [7]      : that count, republished for the shadow kernel's bounds check
+//   [8..10]  : MTLDispatchThreadgroupsIndirectArguments for the shadow stage
+#define WF_CTRL_COUNT0     0
+#define WF_CTRL_COUNT1     1
+#define WF_CTRL_DISPATCH   2
+#define WF_CTRL_ACTIVE     5
+#define WF_CTRL_SHADOW     6
+#define WF_CTRL_SHADOW_N   7
+#define WF_CTRL_SHADOW_DIS 8
 
 // Reserve a run of output slots for the surviving lanes of one simdgroup.
 //
@@ -101,6 +108,7 @@ kernel void wavefrontGenerate(
     {
         control[WF_CTRL_COUNT0] = pixelCount;
         control[WF_CTRL_COUNT1] = 0u;
+        control[WF_CTRL_SHADOW] = 0u;
     }
     if (tid >= pixelCount)
     {
@@ -282,6 +290,8 @@ kernel void wavefrontShade(
     device uint32_t*                                           queueOut       [[buffer(16)]],
     device atomic_uint*                                        outCounter     [[buffer(17)]],
     device const uint32_t*                                     control        [[buffer(18)]],
+    device ShadowRay*                                          shadowRays     [[buffer(19)]],
+    device atomic_uint*                                        shadowCounter  [[buffer(20)]],
     texture2d<float>                                           envMapTexture  [[texture(0)]])
 {
     if (gid >= control[WF_CTRL_ACTIVE])
@@ -454,33 +464,39 @@ kernel void wavefrontShade(
                   (uniforms.numLights > 0 || uniforms.hasEnvMap);
     if (didNee)
     {
-        // Occlusion is still traced inline here, exactly as the megakernel does;
-        // promoting it to its own stage is a later step.
-        intersector<triangle_data, instancing, primitive_motion> isect;
-        isect.assume_geometry_type(geometry_type::triangle);
-        isect.force_opacity(forced_opacity::opaque);
-
-        float3 toLight;
-        float lightPdf = 0.0f;
-        const float3 Li = estimateDirectLighting(uniforms, accelerationStructure, isect,
-                                                 uniforms.numLights, lights, rng, si,
-                                                 toLight, lightPdf, envAliasTable,
-                                                 envMapTexture, motionTime);
+        // Build the connection here and hand the ray to the shadow stage, which
+        // adds the contribution if nothing is in the way. Multiplying by a
+        // visibility of 0 and adding the result is the same as not adding it, so
+        // deferring changes no arithmetic.
+        const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, rng, si,
+                                                    envAliasTable, envMapTexture);
 
         const bool isNextEventValid =
-            ((dot(toLight, si.shading_normal) > 0.0f) == si.front_face) && lightPdf > 0.0f;
+            ((dot(conn.toLight, si.shading_normal) > 0.0f) == si.front_face) && conn.pdf > 0.0f;
         if (isNextEventValid)
         {
-            BsdfEvalResult evalResult = bsdf_eval(si, toLight);
-            if (isnan(lightPdf) || isnan(evalResult.pdf))
+            BsdfEvalResult evalResult = bsdf_eval(si, conn.toLight);
+            if (isnan(conn.pdf) || isnan(evalResult.pdf))
             {
                 radianceOut[tid] = float4(1000000.0f, 0.0f, 0.0f, 0.0f);
-                        return;
+                return;
             }
-            if (evalResult.pdf > 0.0f)
+            if (evalResult.pdf > 0.0f && conn.needsRay)
             {
-                radiance += throughput * (Li / lightPdf) *
-                            misWeightBalance(lightPdf, evalResult.pdf) * evalResult.bsdf;
+                const float3 weight = throughput * (conn.radiance / conn.pdf) *
+                                      misWeightBalance(conn.pdf, evalResult.pdf) * evalResult.bsdf;
+                if (any(weight != 0.0f))
+                {
+                    ShadowRay sr;
+                    sr.origin = packed_float3(conn.origin);
+                    sr.direction = packed_float3(conn.toLight);
+                    sr.weight = packed_float3(weight);
+                    sr.maxDistance = conn.tMax;
+                    sr.pixelIndex = tid;
+                    const uint32_t slot =
+                        atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                    shadowRays[slot] = sr;
+                }
             }
         }
     }
@@ -568,6 +584,53 @@ kernel void wavefrontPrepare(
     // The stage about to run appends into the other queue, so clear its count
     // before anything can add to it.
     control[1u - srcIdx] = 0u;
+    control[WF_CTRL_SHADOW] = 0u;
+}
+
+// Between `shade` and `shadow`: publish the number of shadow rays `shade`
+// emitted and size their dispatch. Separate from wavefrontPrepare because the
+// count does not exist until `shade` has run.
+kernel void wavefrontPrepareShadow(
+    device uint32_t&        controlRef      [[buffer(0)]],
+    constant uint32_t&      threadsPerGroup [[buffer(1)]])
+{
+    device uint32_t* control = &controlRef;
+    const uint32_t n = control[WF_CTRL_SHADOW];
+    control[WF_CTRL_SHADOW_N] = n;
+    control[WF_CTRL_SHADOW_DIS + 0] = (n + threadsPerGroup - 1u) / threadsPerGroup;
+    control[WF_CTRL_SHADOW_DIS + 1] = 1u;
+    control[WF_CTRL_SHADOW_DIS + 2] = 1u;
+}
+
+// ---------------------------------------------------------------------------
+// shadow -- resolve the deferred connections
+// ---------------------------------------------------------------------------
+kernel void wavefrontShadow(
+    uint                                                       gid            [[thread_position_in_grid]],
+    constant Uniforms&                                         uniforms       [[buffer(0)]],
+    acceleration_structure<instancing, primitive_motion>       accelerationStructure [[buffer(1)]],
+    device const ShadowRay*                                    shadowRays     [[buffer(2)]],
+    device float4*                                             radianceOut    [[buffer(3)]],
+    device const uint32_t*                                     control        [[buffer(4)]],
+    constant uint32_t&                                         sampleIdx      [[buffer(5)]])
+{
+    if (gid >= control[WF_CTRL_SHADOW_N])
+    {
+        return;
+    }
+    const ShadowRay sr = shadowRays[gid];
+
+    intersector<triangle_data, instancing, primitive_motion> isect;
+    isect.assume_geometry_type(geometry_type::triangle);
+    isect.force_opacity(forced_opacity::opaque);
+
+    const float motionTime = motionTimeFor(uniforms, sr.pixelIndex, sampleIdx);
+    const bool occluded = traceOcclusion(accelerationStructure, isect, float3(sr.origin),
+                                         float3(sr.direction), 0.001f, sr.maxDistance, motionTime);
+    if (!occluded)
+    {
+        radianceOut[sr.pixelIndex] += float4(float3(sr.weight), 0.0f);
+    }
 }
 
 // ---------------------------------------------------------------------------

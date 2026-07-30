@@ -186,6 +186,8 @@ private:
     MTL::ComputePipelineState* mWavefrontShadePSO = nullptr;
     MTL::ComputePipelineState* mWavefrontResolvePSO = nullptr;
     MTL::ComputePipelineState* mWavefrontPreparePSO = nullptr;
+    MTL::ComputePipelineState* mWavefrontPrepareShadowPSO = nullptr;
+    MTL::ComputePipelineState* mWavefrontShadowPSO = nullptr;
     MTL::Buffer* mPathStateBuffer = nullptr;
     MTL::Buffer* mHitBuffer = nullptr;
     MTL::Buffer* mIorStackBuffer = nullptr;
@@ -195,6 +197,7 @@ private:
     // read back, or every bounce would carry a round trip.
     MTL::Buffer* mPathQueueBuffer[2] = { nullptr, nullptr };
     MTL::Buffer* mWavefrontControlBuffer = nullptr;
+    MTL::Buffer* mShadowRayBuffer = nullptr;
     uint32_t mWavefrontCapacity = 0; // pixels the buffers above are sized for
 
     void buildWavefrontPipelines();

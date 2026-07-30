@@ -347,16 +347,42 @@ bool traceOcclusion(
     return res;
 }
 
-float3 sampleLight(
+// A next-event connection, before the visibility test.
+//
+// Splitting the light sample from the occlusion trace is what lets the wavefront
+// tracer defer the shadow ray into its own stage while the megakernel keeps
+// tracing it inline: both build the same connection, they just resolve it at
+// different times. Nothing here depends on the trace's result, so the split
+// changes no arithmetic and draws no extra random numbers.
+struct LightConnection
+{
+    float3 radiance;  // unoccluded Li times the cosine at the surface
+    float3 toLight;   // shadow ray direction
+    float3 origin;    // shadow ray origin
+    float pdf;
+    float tMin;
+    float tMax;
+    bool needsRay;    // false when the connection is degenerate and contributes nothing
+};
+
+static LightConnection makeEmptyConnection()
+{
+    LightConnection c;
+    c.radiance = float3(0.0f);
+    c.toLight = float3(0.0f);
+    c.origin = float3(0.0f);
+    c.pdf = 0.0f;
+    c.tMin = 0.0f;
+    c.tMax = 0.0f;
+    c.needsRay = false;
+    return c;
+}
+
+LightConnection connectLight(
     constant Uniforms& uniforms,
-    acceleration_structure<instancing, primitive_motion> accelerationStructure,
-    thread intersector<triangle_data, instancing, primitive_motion>& isect,
     thread SamplerState& samplerRnd,
     device const UniformLight& light,
-    thread SurfaceInteraction& si,
-    thread float3& toLight,
-    thread float& lightPdf,
-    const float motionTime)
+    thread SurfaceInteraction& si)
 {
     LightSampleData lightSampleData = {};
     const float2 uv = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType), random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
@@ -380,22 +406,20 @@ float3 sampleLight(
         break;
     }
 
-    toLight = lightSampleData.L;
-    float3 Li = float3(light.color);
+    LightConnection c = makeEmptyConnection();
+    c.toLight = lightSampleData.L;
 
+    const float3 Li = float3(light.color);
     if (dot(si.shading_normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.001f && all(Li))
     {
-        const bool occluded = traceOcclusion(accelerationStructure, isect, si.position, lightSampleData.L,
-                                             0.001f, // tmin
-                                             lightSampleData.distToLight - 1e-5f, // tmax
-                                             motionTime
-        );
-        float visibility = occluded ? 0.0f : 1.0f;
-        lightPdf = lightSampleData.pdf;
-        return visibility * Li * saturate(dot(si.shading_normal, lightSampleData.L));
+        c.radiance = Li * saturate(dot(si.shading_normal, lightSampleData.L));
+        c.origin = si.position;
+        c.pdf = lightSampleData.pdf;
+        c.tMin = 0.001f;
+        c.tMax = lightSampleData.distToLight - 1e-5f;
+        c.needsRay = true;
     }
-    lightPdf = 0.0f;
-    return float3(0.0f, 0.0f, 0.0f);
+    return c;
 }
 
 __attribute__((always_inline))
@@ -426,17 +450,12 @@ static float3 offset_ray(const float3 p, const float3 n)
                        abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
 }
 
-float3 sampleEnvLightNEE(
+LightConnection connectEnvLight(
     constant Uniforms& uniforms,
-    acceleration_structure<instancing, primitive_motion> accelerationStructure,
-    thread intersector<triangle_data, instancing, primitive_motion>& isect,
     thread SamplerState& samplerRnd,
     thread SurfaceInteraction& si,
-    thread float3& toLight,
-    thread float& lightPdf,
     device const EnvAliasEntry* envAliasTable,
-    texture2d<float> envMapTexture,
-    const float motionTime)
+    texture2d<float> envMapTexture)
 {
     const float2 xi = float2(
         random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
@@ -450,33 +469,15 @@ float3 sampleEnvLightNEE(
                               uniforms.envPdfScale,
                               envPdf);
 
-    toLight = dir;
-    lightPdf = envPdf;
+    LightConnection c = makeEmptyConnection();
+    c.toLight = dir;
+    c.pdf = envPdf;
 
     if (envPdf <= 0.0f)
-        return float3(0.0f);
+        return c;
 
     if (dot(si.shading_normal, dir) <= 0.0f)
-        return float3(0.0f);
-
-    // Offset along the face the shadow ray actually leaves from. The raw
-    // geometry normal points to a fixed side of the triangle, so on a back-face
-    // hit it pushes the origin *into* the surface and the ray immediately hits
-    // the geometry it started on — NEE then reports occlusion that the BSDF
-    // strategy does not see, and the two estimators disagree. The bounce ray in
-    // the main loop already orients its offset this way.
-    const float3 offsetNg = (dot(si.geometry_normal, dir) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
-
-    const bool occluded = traceOcclusion(
-        accelerationStructure, isect,
-        offset_ray(si.position, offsetNg),
-        dir,
-        0.001f,
-        1e16f,
-        motionTime);
-
-    if (occluded)
-        return float3(0.0f);
+        return c;
 
     constexpr sampler envSampler(mag_filter::linear, min_filter::linear, address::repeat, coord::normalized);
     const float2 uv = dirToEnvUV(dir, uniforms.envMapRotation);
@@ -484,9 +485,69 @@ float3 sampleEnvLightNEE(
     float3 Li = envSample.xyz;
     Li *= uniforms.envMapIntensity * float3(uniforms.envMapColorTint);
 
-    return Li * max(dot(si.shading_normal, dir), 0.0f);
+    c.radiance = Li * max(dot(si.shading_normal, dir), 0.0f);
+    // Offset along the face the shadow ray actually leaves from. The raw
+    // geometry normal points to a fixed side of the triangle, so on a back-face
+    // hit it pushes the origin *into* the surface and the ray immediately hits
+    // the geometry it started on — NEE then reports occlusion that the BSDF
+    // strategy does not see, and the two estimators disagree. The bounce ray in
+    // the main loop already orients its offset this way.
+    const float3 offsetNg = (dot(si.geometry_normal, dir) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
+    c.origin = offset_ray(si.position, offsetNg);
+    c.tMin = 0.001f;
+    c.tMax = 1e16f;
+    c.needsRay = true;
+    return c;
 }
 
+// Choose a strategy and build the connection. The caller decides when to test
+// visibility.
+LightConnection connectToLight(
+    constant Uniforms& uniforms,
+    const uint32_t numLights,
+    device UniformLight* lights,
+    thread SamplerState& samplerRnd,
+    thread SurfaceInteraction& si,
+    device const EnvAliasEntry* envAliasTable,
+    texture2d<float> envMapTexture)
+{
+    if (uniforms.hasEnvMap)
+    {
+        const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
+
+        if (numLights == 0 || u >= 0.5f)
+        {
+            const float selectionPdf = (numLights > 0) ? 0.5f : 1.0f;
+            LightConnection c = connectEnvLight(uniforms, samplerRnd, si, envAliasTable, envMapTexture);
+            c.pdf *= selectionPdf;
+            return c;
+        }
+        // Sample a local light (remap u from [0, 0.5) to [0, 1)).
+        const float remappedU = u * 2.0f;
+        const uint32_t lightId = min((uint32_t)(numLights * remappedU), numLights - 1);
+        LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si);
+        c.pdf *= 0.5f / numLights;
+        return c;
+    }
+
+    // No env map and no analytic lights: nothing to connect to. Falling through
+    // would divide by numLights == 0, produce a NaN light PDF, and trip the
+    // isnan() guard in the caller that paints the pixel bright red.
+    if (numLights == 0)
+    {
+        return makeEmptyConnection();
+    }
+
+    const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
+    const uint32_t lightId = min((uint32_t)(numLights * u), numLights - 1);
+    LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si);
+    c.pdf *= 1.0f / numLights;
+    return c;
+}
+
+// Immediate form: build the connection and resolve its visibility on the spot.
+// The megakernel uses this; the wavefront tracer calls connectToLight directly
+// and defers the trace to its shadow stage.
 float3 estimateDirectLighting(
     constant Uniforms& uniforms,
     acceleration_structure<instancing, primitive_motion> accelerationStructure,
@@ -501,47 +562,16 @@ float3 estimateDirectLighting(
     texture2d<float> envMapTexture,
     const float motionTime)
 {
-    if (uniforms.hasEnvMap)
-    {
-        const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
+    const LightConnection c = connectToLight(uniforms, numLights, lights, samplerRnd, si,
+                                             envAliasTable, envMapTexture);
+    toLight = c.toLight;
+    lightPdf = c.pdf;
 
-        if (numLights == 0 || u >= 0.5f)
-        {
-            // Sample environment map
-            const float selectionPdf = (numLights > 0) ? 0.5f : 1.0f;
-            const float3 r = sampleEnvLightNEE(uniforms, accelerationStructure, isect,
-                samplerRnd, si, toLight, lightPdf, envAliasTable, envMapTexture, motionTime);
-            lightPdf *= selectionPdf;
-            return r;
-        }
-        else
-        {
-            // Sample local light (remap u from [0, 0.5) to [0, 1))
-            const float remappedU = u * 2.0f;
-            const uint32_t lightId = min((uint32_t)(numLights * remappedU), numLights - 1);
-            const float lightSelectionPdf = 0.5f / numLights;
-            device const UniformLight& currLight = lights[lightId];
-            const float3 r = sampleLight(uniforms, accelerationStructure, isect, samplerRnd, currLight, si, toLight, lightPdf, motionTime);
-            lightPdf *= lightSelectionPdf;
-            return r;
-        }
-    }
-
-    // No env map and no analytic lights: nothing to connect to. Falling through
-    // would divide by numLights == 0, produce a NaN light PDF, and trip the
-    // isnan() guard in the caller that paints the pixel bright red.
-    if (numLights == 0)
+    if (!c.needsRay)
     {
-        toLight = float3(0.0f);
-        lightPdf = 0.0f;
         return float3(0.0f);
     }
-
-    float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
-    const uint32_t lightId = min((uint32_t)(numLights * u), numLights - 1);
-    const float lightSelectionPdf = 1.0f / numLights;
-    device const UniformLight& currLight = lights[lightId];
-    const float3 r = sampleLight(uniforms, accelerationStructure, isect, samplerRnd, currLight, si, toLight, lightPdf, motionTime);
-    lightPdf *= lightSelectionPdf;
-    return r;
+    const bool occluded =
+        traceOcclusion(accelerationStructure, isect, c.origin, c.toLight, c.tMin, c.tMax, motionTime);
+    return occluded ? float3(0.0f) : c.radiance;
 }
