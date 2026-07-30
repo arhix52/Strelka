@@ -450,9 +450,17 @@ float3 sampleEnvLightNEE(
     if (dot(si.shading_normal, dir) <= 0.0f)
         return float3(0.0f);
 
+    // Offset along the face the shadow ray actually leaves from. The raw
+    // geometry normal points to a fixed side of the triangle, so on a back-face
+    // hit it pushes the origin *into* the surface and the ray immediately hits
+    // the geometry it started on — NEE then reports occlusion that the BSDF
+    // strategy does not see, and the two estimators disagree. The bounce ray in
+    // the main loop already orients its offset this way.
+    const float3 offsetNg = (dot(si.geometry_normal, dir) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
+
     const bool occluded = traceOcclusion(
         accelerationStructure, isect,
-        offset_ray(si.position, si.geometry_normal),
+        offset_ray(si.position, offsetNg),
         dir,
         0.001f,
         1e16f,
@@ -905,6 +913,17 @@ kernel void raytracingKernel(
             prd.direction = normalize(sampleResult.wi);
             prd.throughput *= sampleResult.bsdf_over_pdf;
             prd.lastBsdfPdf = (prd.specularBounce) ? 1.0f : sampleResult.pdf;
+
+            // Narrow "NEE ran here" to "NEE could have generated a direction in
+            // the hemisphere this ray is heading into". Light sampling only ever
+            // returns directions above the shading normal of a front face — see
+            // the guard in sampleEnvLightNEE and isNextEventValid above — so its
+            // effective PDF elsewhere is zero. Applying a balance-heuristic
+            // weight to such a hit would discount it against a strategy that
+            // could never have produced it, and the two weights would sum to
+            // less than one. Those hits must take full weight instead.
+            prd.neeDone = prd.neeDone && si.front_face &&
+                          dot(si.shading_normal, prd.direction) > 0.0f;
 
             if (dot(prd.throughput, prd.throughput) < 1e-4f)
             {
