@@ -690,7 +690,13 @@ kernel void raytracingKernel(
             // its own material and vertex-buffer offsets.
             const uint32_t geomEntryIndex = inst.userID + intersection.geometry_id;
 
-            const Triangle triangle = *(const device Triangle*)intersection.primitive_data;
+            // Reference the per-primitive record in place instead of copying all
+            // 72 bytes into registers up front. Its fields are consumed at
+            // different points — positions only to build the geometric normal,
+            // then normals/tangents for the shading frame, then uvs — so loading
+            // them lazily lets the compiler retire each group early. This kernel
+            // is occupancy-limited by register pressure.
+            device const Triangle* triangle = (device const Triangle*)intersection.primitive_data;
 
             // Per-primitive positions are from keyframe 1 (current VB) only.
             // For motion blur, we also need keyframe 0 positions to:
@@ -725,9 +731,9 @@ kernel void raytracingKernel(
 
                 // Interpolate positions: BVH kf0=prevVB at t=0, kf1=VB at t=1
                 // mix(a,b,t) = a*(1-t)+b*t → mix(prev, current, t) gives prev at t=0, current at t=1
-                p0 = mix(p0_prev, triangle.positions[0], motionTime);
-                p1 = mix(p1_prev, triangle.positions[1], motionTime);
-                p2 = mix(p2_prev, triangle.positions[2], motionTime);
+                p0 = mix(p0_prev, float3(triangle->positions[0]), motionTime);
+                p1 = mix(p1_prev, float3(triangle->positions[1]), motionTime);
+                p2 = mix(p2_prev, float3(triangle->positions[2]), motionTime);
 
                 // Previous frame normals
                 const float3 n0_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i0) * vtxStride + normalOff));
@@ -735,9 +741,9 @@ kernel void raytracingKernel(
                 const float3 n2_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i2) * vtxStride + normalOff));
 
                 // Interpolate normals: t=0 → prev (matches kf0=prevVB), t=1 → current (matches kf1=VB)
-                n0 = mix(n0_prev, unpackNormal(triangle.normals[0]), motionTime);
-                n1 = mix(n1_prev, unpackNormal(triangle.normals[1]), motionTime);
-                n2 = mix(n2_prev, unpackNormal(triangle.normals[2]), motionTime);
+                n0 = mix(n0_prev, unpackNormal(triangle->normals[0]), motionTime);
+                n1 = mix(n1_prev, unpackNormal(triangle->normals[1]), motionTime);
+                n2 = mix(n2_prev, unpackNormal(triangle->normals[2]), motionTime);
 
                 // Previous frame tangents
                 const float3 t0_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i0) * vtxStride + tangentOff));
@@ -745,26 +751,26 @@ kernel void raytracingKernel(
                 const float3 t2_prev = unpackNormal(*(device const uint32_t*)(prevVertexBuffer + (instData.vbOffset + i2) * vtxStride + tangentOff));
 
                 // Interpolate tangents: same direction as normals
-                t0 = mix(t0_prev, unpackNormal(triangle.tangent[0]), motionTime);
-                t1 = mix(t1_prev, unpackNormal(triangle.tangent[1]), motionTime);
-                t2 = mix(t2_prev, unpackNormal(triangle.tangent[2]), motionTime);
+                t0 = mix(t0_prev, unpackNormal(triangle->tangent[0]), motionTime);
+                t1 = mix(t1_prev, unpackNormal(triangle->tangent[1]), motionTime);
+                t2 = mix(t2_prev, unpackNormal(triangle->tangent[2]), motionTime);
             }
             else
             {
-                p0 = triangle.positions[0];
-                p1 = triangle.positions[1];
-                p2 = triangle.positions[2];
-                n0 = unpackNormal(triangle.normals[0]);
-                n1 = unpackNormal(triangle.normals[1]);
-                n2 = unpackNormal(triangle.normals[2]);
-                t0 = unpackNormal(triangle.tangent[0]);
-                t1 = unpackNormal(triangle.tangent[1]);
-                t2 = unpackNormal(triangle.tangent[2]);
+                p0 = float3(triangle->positions[0]);
+                p1 = float3(triangle->positions[1]);
+                p2 = float3(triangle->positions[2]);
+                n0 = unpackNormal(triangle->normals[0]);
+                n1 = unpackNormal(triangle->normals[1]);
+                n2 = unpackNormal(triangle->normals[2]);
+                t0 = unpackNormal(triangle->tangent[0]);
+                t1 = unpackNormal(triangle->tangent[1]);
+                t2 = unpackNormal(triangle->tangent[2]);
             }
 
-            const float2 uv0 = unpackUV(triangle.uv[0]);
-            const float2 uv1 = unpackUV(triangle.uv[1]);
-            const float2 uv2 = unpackUV(triangle.uv[2]);
+            const float2 uv0 = unpackUV(triangle->uv[0]);
+            const float2 uv1 = unpackUV(triangle->uv[1]);
+            const float2 uv2 = unpackUV(triangle->uv[2]);
 
             // Build transform from local instance copy (avoids 12 scattered device reads)
             const float4x4 objectToWorldSpaceTransform = float4x4(
@@ -801,7 +807,7 @@ kernel void raytracingKernel(
 
             if (debugMode == DebugMode::eMotionBlur)
             {
-                float3 nDelta = n0 - unpackNormal(triangle.normals[0]);
+                float3 nDelta = n0 - unpackNormal(triangle->normals[0]);
                 float deltaMag = length(nDelta);
                 prd.radiance = float3(motionTime, clamp(deltaMag * 10.0f, 0.0f, 1.0f), 0.0f);
                 break;

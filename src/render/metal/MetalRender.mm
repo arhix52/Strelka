@@ -1119,12 +1119,15 @@ void MetalRender::createMeshData(size_t meshIndex)
         const uint32_t i1 = indices[mesh.mIndex + i * 3 + 1];
         const uint32_t i2 = indices[mesh.mIndex + i * 3 + 2];
 
-        curr.positions[0] = { vertices[mesh.mVbOffset + i0].pos.x, vertices[mesh.mVbOffset + i0].pos.y,
-                              vertices[mesh.mVbOffset + i0].pos.z };
-        curr.positions[1] = { vertices[mesh.mVbOffset + i1].pos.x, vertices[mesh.mVbOffset + i1].pos.y,
-                              vertices[mesh.mVbOffset + i1].pos.z };
-        curr.positions[2] = { vertices[mesh.mVbOffset + i2].pos.x, vertices[mesh.mVbOffset + i2].pos.y,
-                              vertices[mesh.mVbOffset + i2].pos.z };
+        curr.positions[0] = packed_float3(simd_make_float3(vertices[mesh.mVbOffset + i0].pos.x,
+                                                          vertices[mesh.mVbOffset + i0].pos.y,
+                                                          vertices[mesh.mVbOffset + i0].pos.z));
+        curr.positions[1] = packed_float3(simd_make_float3(vertices[mesh.mVbOffset + i1].pos.x,
+                                                          vertices[mesh.mVbOffset + i1].pos.y,
+                                                          vertices[mesh.mVbOffset + i1].pos.z));
+        curr.positions[2] = packed_float3(simd_make_float3(vertices[mesh.mVbOffset + i2].pos.x,
+                                                          vertices[mesh.mVbOffset + i2].pos.y,
+                                                          vertices[mesh.mVbOffset + i2].pos.z));
         curr.normals[0] = vertices[mesh.mVbOffset + i0].normal;
         curr.normals[1] = vertices[mesh.mVbOffset + i1].normal;
         curr.normals[2] = vertices[mesh.mVbOffset + i2].normal;
