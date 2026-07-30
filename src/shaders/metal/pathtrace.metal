@@ -424,8 +424,7 @@ float3 sampleEnvLightNEE(
     thread SurfaceInteraction& si,
     thread float3& toLight,
     thread float& lightPdf,
-    device const float* envCdfX,
-    device const float* envCdfY,
+    device const EnvAliasEntry* envAliasTable,
     texture2d<float> envMapTexture,
     const float motionTime)
 {
@@ -435,9 +434,10 @@ float3 sampleEnvLightNEE(
 
     float envPdf = 0.0f;
     float3 dir = sampleEnvMap(xi,
-                              envCdfX, envCdfY,
+                              envAliasTable, envMapTexture,
                               uniforms.envMapWidth, uniforms.envMapHeight,
                               uniforms.envMapRotation,
+                              uniforms.envPdfScale,
                               envPdf);
 
     toLight = dir;
@@ -479,8 +479,7 @@ float3 estimateDirectLighting(
     thread SurfaceInteraction& si,
     thread float3& toLight,
     thread float& lightPdf,
-    device const float* envCdfX,
-    device const float* envCdfY,
+    device const EnvAliasEntry* envAliasTable,
     texture2d<float> envMapTexture,
     const float motionTime)
 {
@@ -493,7 +492,7 @@ float3 estimateDirectLighting(
             // Sample environment map
             const float selectionPdf = (numLights > 0) ? 0.5f : 1.0f;
             const float3 r = sampleEnvLightNEE(uniforms, accelerationStructure, isect,
-                samplerRnd, si, toLight, lightPdf, envCdfX, envCdfY, envMapTexture, motionTime);
+                samplerRnd, si, toLight, lightPdf, envAliasTable, envMapTexture, motionTime);
             lightPdf *= selectionPdf;
             return r;
         }
@@ -542,8 +541,7 @@ kernel void raytracingKernel(
     device const char* prevVertexBuffer                                              [[buffer(7)]],
     device const uint32_t* indexBuffer                                               [[buffer(8)]],
     device const InstanceData* instanceDataBuffer                                    [[buffer(9)]],
-    device const float* envCdfX                                                      [[buffer(10)]],
-    device const float* envCdfY                                                      [[buffer(11)]],
+    device const EnvAliasEntry* envAliasTable                                        [[buffer(10)]],
     constant uint32_t&                                         tileOffsetY           [[buffer(12)]],
     texture2d<float>                                           envMapTexture         [[texture(0)]]
     )
@@ -623,9 +621,10 @@ kernel void raytracingKernel(
                 else
                 {
                     const float envPdf = envMapPdf(prd.direction,
-                                                   envCdfX, envCdfY,
+                                                   envMapTexture,
                                                    uniforms.envMapWidth, uniforms.envMapHeight,
-                                                   uniforms.envMapRotation);
+                                                   uniforms.envMapRotation,
+                                                   uniforms.envPdfScale);
                     const float envSelectionPdf = (uniforms.numLights > 0) ? 0.5f : 1.0f;
                     const float effectiveEnvPdf = envPdf * envSelectionPdf;
                     if (effectiveEnvPdf > 0.0f)
@@ -843,7 +842,7 @@ kernel void raytracingKernel(
                 const float3 radiance = estimateDirectLighting(uniforms, accelerationStructure, i,
                     uniforms.numLights, lights,
                     prd.sampler, si, toLight, lightPdf,
-                    envCdfX, envCdfY, envMapTexture, motionTime);
+                    envAliasTable, envMapTexture, motionTime);
 
                 // `> 0` rather than `!= 0`: a NaN PDF must not be treated as valid.
                 const bool isNextEventValid = ((dot(toLight, si.shading_normal) > 0.0f) == si.front_face) && lightPdf > 0.0f;

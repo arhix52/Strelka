@@ -100,6 +100,9 @@ struct Uniforms
     uint32_t envMapHeight;
     float envMapIntensity;
     float envMapRotation;
+    // (w*h) / (2*pi^2 * totalPower): converts a texel's luminance straight into
+    // its solid-angle sampling PDF, so no CDF or PDF table is needed on the GPU.
+    float envPdfScale;
     vector_float3 envMapColorTint;
 };
 
@@ -127,6 +130,15 @@ struct InstanceData
 {
     uint32_t vbOffset;     // mesh vertex buffer offset
     uint32_t indexOffset;  // mesh index buffer offset
+};
+
+// One entry of the environment map alias table (Walker/Vose), one per texel.
+// Sampling is a single load: draw a bucket uniformly, then keep it with
+// probability `prob`, otherwise jump to `alias`.
+struct EnvAliasEntry
+{
+    float prob;
+    uint32_t alias;
 };
 
 struct SkinningParams
