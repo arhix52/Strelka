@@ -40,6 +40,10 @@
 #define WF_CTRL_SHADOW     6
 #define WF_CTRL_SHADOW_N   7
 #define WF_CTRL_SHADOW_DIS 8
+// Profiling only: live path count and shadow ray count per bounce, so the
+// per-stage timings can be read as a cost per ray rather than a cost per stage.
+#define WF_CTRL_STATS_PATHS  16
+#define WF_CTRL_STATS_SHADOW 48
 
 // Reserve a run of output slots for the surviving lanes of one simdgroup.
 //
@@ -573,11 +577,13 @@ kernel void wavefrontShade(
 kernel void wavefrontPrepare(
     device uint32_t&        controlRef    [[buffer(0)]],
     constant uint32_t&      srcIdx        [[buffer(1)]],
-    constant uint32_t&      threadsPerGroup [[buffer(2)]])
+    constant uint32_t&      threadsPerGroup [[buffer(2)]],
+    constant uint32_t&      bounceIdx       [[buffer(3)]])
 {
     device uint32_t* control = &controlRef;
     const uint32_t n = control[srcIdx];
     control[WF_CTRL_ACTIVE] = n;
+    control[WF_CTRL_STATS_PATHS + min(bounceIdx, 31u)] = n;
     control[WF_CTRL_DISPATCH + 0] = (n + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_DISPATCH + 1] = 1u;
     control[WF_CTRL_DISPATCH + 2] = 1u;
@@ -592,11 +598,13 @@ kernel void wavefrontPrepare(
 // count does not exist until `shade` has run.
 kernel void wavefrontPrepareShadow(
     device uint32_t&        controlRef      [[buffer(0)]],
-    constant uint32_t&      threadsPerGroup [[buffer(1)]])
+    constant uint32_t&      threadsPerGroup [[buffer(1)]],
+    constant uint32_t&      bounceIdx       [[buffer(2)]])
 {
     device uint32_t* control = &controlRef;
     const uint32_t n = control[WF_CTRL_SHADOW];
     control[WF_CTRL_SHADOW_N] = n;
+    control[WF_CTRL_STATS_SHADOW + min(bounceIdx, 31u)] = n;
     control[WF_CTRL_SHADOW_DIS + 0] = (n + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_SHADOW_DIS + 1] = 1u;
     control[WF_CTRL_SHADOW_DIS + 2] = 1u;

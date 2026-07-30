@@ -129,10 +129,18 @@ MetalRender::~MetalRender()
         safeRelease(mWavefrontExtendPSO);
         safeRelease(mWavefrontShadePSO);
         safeRelease(mWavefrontResolvePSO);
+        safeRelease(mWavefrontPreparePSO);
+        safeRelease(mWavefrontPrepareShadowPSO);
+        safeRelease(mWavefrontShadowPSO);
         safeRelease(mPathStateBuffer);
         safeRelease(mHitBuffer);
         safeRelease(mIorStackBuffer);
         safeRelease(mRadianceBuffer);
+        safeRelease(mPathQueueBuffer[0]);
+        safeRelease(mPathQueueBuffer[1]);
+        safeRelease(mWavefrontControlBuffer);
+        safeRelease(mShadowRayBuffer);
+        safeRelease(mStageTimestampBuffer);
         safeRelease(mPathTracingPSO);
         safeRelease(mTonemapperPSO);
         safeRelease(mSkinningPSO);
@@ -347,7 +355,158 @@ uint32_t MetalRender::computeBandHeight(uint32_t height) const
 // Stages within a single compute encoder run in order with an implicit barrier
 // (Metal's default serial dispatch type), which is exactly the dependency
 // extend -> shade -> extend needs.
-void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer,
+
+// Stage kinds, in the order the encode loop issues them.
+// Two timestamps per stage (encoder start and end), so the counter buffer holds
+// 2 * kMaxStageSamples entries.
+namespace
+{
+enum StageKind : uint8_t
+{
+    kStageGenerate = 0,
+    kStagePrepare,
+    kStageExtend,
+    kStageShade,
+    kStagePrepareShadow,
+    kStageShadow,
+    kStageResolve,
+    kStageCount
+};
+const char* const kStageNames[kStageCount] = { "generate",      "prepare", "extend",  "shade",
+                                               "prepareShadow", "shadow",  "resolve" };
+} // namespace
+
+// A timestamp counter buffer, if the device can sample at dispatch boundaries.
+// Apple Silicon can; the check exists because the API does not promise it.
+void MetalRender::createStageTimestampBuffer()
+{
+    if (mStageTimestampBuffer)
+    {
+        return;
+    }
+    // M1/M2 sample only at encoder boundaries, not at dispatch boundaries, which
+    // is why profiling mode gives every stage its own encoder rather than
+    // stamping around each dispatch.
+    if (!mDevice->supportsCounterSampling(MTL::CounterSamplingPointAtStageBoundary))
+    {
+        STRELKA_WARNING("stage profiling unavailable: no counter sampling at encoder boundaries");
+        return;
+    }
+    MTL::CounterSet* timestampSet = nullptr;
+    NS::Array* sets = mDevice->counterSets();
+    for (NS::UInteger i = 0; sets && i < sets->count(); ++i)
+    {
+        MTL::CounterSet* set = static_cast<MTL::CounterSet*>(sets->object(i));
+        if (set->name()->isEqualToString(MTL::CommonCounterSetTimestamp))
+        {
+            timestampSet = set;
+            break;
+        }
+    }
+    if (!timestampSet)
+    {
+        return;
+    }
+
+    MTL::CounterSampleBufferDescriptor* desc = MTL::CounterSampleBufferDescriptor::alloc()->init();
+    desc->setCounterSet(timestampSet);
+    desc->setStorageMode(MTL::StorageModeShared);
+    desc->setSampleCount(2 * kMaxStageSamples); // start and end per stage
+    NS::Error* err = nullptr;
+    mStageTimestampBuffer = mDevice->newCounterSampleBuffer(desc, &err);
+    desc->release();
+    if (!mStageTimestampBuffer)
+    {
+        STRELKA_WARNING("stage profiling unavailable: {}",
+                        err ? err->localizedDescription()->utf8String() : "unknown error");
+    }
+}
+
+// Resolve the timestamps and print the per-stage breakdown. GPU timestamps are
+// in nanoseconds on Apple Silicon; a sample can come back as MTLCounterErrorValue
+// when the GPU dropped it, and those gaps are skipped rather than counted as
+// enormous durations.
+void MetalRender::reportStageTimings()
+{
+    if (!mStageTimestampBuffer || mStageKinds.empty())
+    {
+        return;
+    }
+    const NS::UInteger n = 2 * mStageKinds.size();
+    NS::Data* data = mStageTimestampBuffer->resolveCounterRange(NS::Range::Make(0, n));
+    if (!data)
+    {
+        return;
+    }
+    const MTL::CounterResultTimestamp* ts = static_cast<const MTL::CounterResultTimestamp*>(data->bytes());
+
+    double totals[kStageCount] = {};
+    uint32_t counts[kStageCount] = {};
+    // Per-bounce durations of the three traversal-heavy stages. The cost of a
+    // bounce says more than the total does: bounce 0 is a coherent primary pass
+    // and the later ones are not, which is what decides whether sorting rays is
+    // worth anything.
+    std::string perBounce[kStageCount];
+    for (NS::UInteger i = 0; i < mStageKinds.size(); ++i)
+    {
+        const MTL::CounterResultTimestamp& a = ts[2 * i];
+        const MTL::CounterResultTimestamp& b = ts[2 * i + 1];
+        if (a.timestamp == MTL::CounterErrorValue || b.timestamp == MTL::CounterErrorValue ||
+            b.timestamp <= a.timestamp)
+        {
+            continue;
+        }
+        const uint8_t kind = mStageKinds[i];
+        const double ms = (b.timestamp - a.timestamp) / 1e6; // ns -> ms
+        totals[kind] += ms;
+        ++counts[kind];
+        if (kind == kStageExtend || kind == kStageShade || kind == kStageShadow)
+        {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.2f ", ms);
+            perBounce[kind] += buf;
+        }
+    }
+
+    double sum = 0.0;
+    for (uint32_t k = 0; k < kStageCount; ++k)
+    {
+        sum += totals[k];
+    }
+    std::string line;
+    for (uint32_t k = 0; k < kStageCount; ++k)
+    {
+        if (counts[k] == 0)
+        {
+            continue;
+        }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%s %.2fms(%.0f%%, n=%u)  ", kStageNames[k], totals[k],
+                 sum > 0.0 ? 100.0 * totals[k] / sum : 0.0, counts[k]);
+        line += buf;
+    }
+    STRELKA_INFO("STAGES total {:.2f}ms  {}", sum, line);
+    STRELKA_INFO("STAGES per bounce: extend [{}] shade [{}] shadow [{}]", perBounce[kStageExtend],
+                 perBounce[kStageShade], perBounce[kStageShadow]);
+
+    if (mStageStatsBuffer)
+    {
+        const uint32_t* stats = static_cast<const uint32_t*>(mStageStatsBuffer->contents());
+        std::string paths, shadows;
+        for (uint32_t i = 0; i < counts[kStageExtend]; ++i)
+        {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.0fk ", stats[16 + i] / 1000.0);
+            paths += buf;
+            snprintf(buf, sizeof(buf), "%.0fk ", stats[48 + i] / 1000.0);
+            shadows += buf;
+        }
+        STRELKA_INFO("STAGES rays per bounce: paths [{}] shadow [{}]", paths, shadows);
+    }
+}
+
+MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCmd,
+                                  MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer,
                                   Buffer* output, uint32_t width, uint32_t height,
                                   uint32_t sampleCount)
 {
@@ -355,24 +514,31 @@ void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* 
     const uint32_t maxDepth = std::max(1u, getSettings()->getAs<uint32_t>("render/pt/depth"));
     MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
 
-    if (!mMaterialTextures.empty())
-    {
-        enc->useResources(reinterpret_cast<const MTL::Resource* const*>(mMaterialTextures.data()),
-                          mMaterialTextures.size(), MTL::ResourceUsageRead);
-    }
-    if (!mPrimitiveAccelerationStructures.empty())
-    {
-        enc->useResources(reinterpret_cast<const MTL::Resource* const*>(mPrimitiveAccelerationStructures.data()),
-                          mPrimitiveAccelerationStructures.size(), MTL::ResourceUsageRead);
-    }
-    if (mInstanceAccelerationStructure)
-    {
-        enc->useResource(mInstanceAccelerationStructure, MTL::ResourceUsageRead);
-    }
-    if (mEnvMapTexture)
-    {
-        enc->useResource(mEnvMapTexture, MTL::ResourceUsageRead);
-    }
+    // Textures are reached through resource IDs inside the Material struct, so
+    // Metal cannot infer their use from the bindings and every encoder has to be
+    // told about them again.
+    auto declareResidency = [&](MTL::ComputeCommandEncoder* e) {
+        if (!mMaterialTextures.empty())
+        {
+            e->useResources(reinterpret_cast<const MTL::Resource* const*>(mMaterialTextures.data()),
+                            mMaterialTextures.size(), MTL::ResourceUsageRead);
+        }
+        if (!mPrimitiveAccelerationStructures.empty())
+        {
+            e->useResources(reinterpret_cast<const MTL::Resource* const*>(mPrimitiveAccelerationStructures.data()),
+                            mPrimitiveAccelerationStructures.size(), MTL::ResourceUsageRead);
+        }
+        if (mInstanceAccelerationStructure)
+        {
+            e->useResource(mInstanceAccelerationStructure, MTL::ResourceUsageRead);
+        }
+        if (mEnvMapTexture)
+        {
+            e->useResource(mEnvMapTexture, MTL::ResourceUsageRead);
+        }
+        e->useResource(((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageWrite);
+    };
+    declareResidency(enc);
 
     const MTL::Size grid = MTL::Size(pixels, 1, 1);
     const uint32_t kThreadsPerGroup = 64;
@@ -382,8 +548,31 @@ void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* 
     const NS::UInteger kShadowArgsOffset = 8 * sizeof(uint32_t);
     const NS::UInteger kShadowCounterOffset = 6 * sizeof(uint32_t);
 
+    // Profiling gives each stage its own encoder, because this hardware samples
+    // counters only at encoder boundaries. That costs encoder overhead, so it is
+    // a measurement mode and not something to leave on.
+    mStageKinds.clear();
+    const bool profile = mProfileStages && mStageTimestampBuffer != nullptr;
+    auto stamp = [&](uint8_t kind) {
+        if (!profile || mStageKinds.size() >= kMaxStageSamples)
+        {
+            return;
+        }
+        enc->endEncoding();
+        MTL::ComputePassDescriptor* desc = MTL::ComputePassDescriptor::computePassDescriptor();
+        MTL::ComputePassSampleBufferAttachmentDescriptor* att =
+            desc->sampleBufferAttachments()->object(0);
+        att->setSampleBuffer(mStageTimestampBuffer);
+        att->setStartOfEncoderSampleIndex(2 * mStageKinds.size());
+        att->setEndOfEncoderSampleIndex(2 * mStageKinds.size() + 1);
+        enc = pCmd->computeCommandEncoder(desc);
+        declareResidency(enc);
+        mStageKinds.push_back(kind);
+    };
+
     for (uint32_t s = 0; s < sampleCount; ++s)
     {
+        stamp(kStageGenerate);
         enc->setComputePipelineState(mWavefrontGeneratePSO);
         enc->setBuffer(uniformBuffer, 0, 0);
         enc->setBuffer(mPathStateBuffer, 0, 1);
@@ -401,12 +590,15 @@ void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* 
 
             // Publish this bounce's live count and clear the destination's, then
             // dispatch both stages indirectly from it. Nothing crosses to the CPU.
+            stamp(kStagePrepare);
             enc->setComputePipelineState(mWavefrontPreparePSO);
             enc->setBuffer(mWavefrontControlBuffer, 0, 0);
             enc->setBytes(&src, sizeof(uint32_t), 1);
             enc->setBytes(&kThreadsPerGroup, sizeof(uint32_t), 2);
+            enc->setBytes(&bounce, sizeof(uint32_t), 3);
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
+            stamp(kStageExtend);
             enc->setComputePipelineState(mWavefrontExtendPSO);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(mInstanceBuffer, 0, 1);
@@ -418,6 +610,7 @@ void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* 
             enc->setBuffer(mWavefrontControlBuffer, 0, 7);
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kDispatchArgsOffset, tg);
 
+            stamp(kStageShade);
             enc->setComputePipelineState(mWavefrontShadePSO);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(mInstanceBuffer, 0, 1);
@@ -450,11 +643,14 @@ void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* 
             // so that this bounce's direct lighting lands in the accumulator
             // ahead of the next bounce's emission -- the same order the
             // megakernel adds them in.
+            stamp(kStagePrepareShadow);
             enc->setComputePipelineState(mWavefrontPrepareShadowPSO);
             enc->setBuffer(mWavefrontControlBuffer, 0, 0);
             enc->setBytes(&kThreadsPerGroup, sizeof(uint32_t), 1);
+            enc->setBytes(&bounce, sizeof(uint32_t), 2);
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
+            stamp(kStageShadow);
             enc->setComputePipelineState(mWavefrontShadowPSO);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setAccelerationStructure(mInstanceAccelerationStructure, 1);
@@ -468,6 +664,7 @@ void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* 
 
     // Fold the accumulated radiance into the output exactly as the megakernel's
     // tail does, reusing the resolve kernel in wavefront.metal.
+    stamp(kStageResolve);
     enc->setComputePipelineState(mWavefrontResolvePSO);
     enc->setBuffer(uniformBuffer, 0, 0);
     enc->setBuffer(mRadianceBuffer, 0, 1);
@@ -475,6 +672,17 @@ void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* 
     enc->setBuffer(mAccumulationBuffer, 0, 3);
     enc->setBytes(&sampleCount, sizeof(uint32_t), 4);
     enc->dispatchThreads(grid, tg);
+
+    if (profile && mStageStatsBuffer)
+    {
+        enc->endEncoding();
+        MTL::BlitCommandEncoder* blit = pCmd->blitCommandEncoder();
+        blit->copyFromBuffer(mWavefrontControlBuffer, 0, mStageStatsBuffer, 0, mStageStatsBuffer->length());
+        blit->endEncoding();
+        enc = pCmd->computeCommandEncoder();
+        declareResidency(enc);
+    }
+    return enc;
 }
 
 void MetalRender::encodePathTraceBindings(MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer, Buffer* output)
@@ -912,11 +1120,15 @@ void MetalRender::render(Buffer* output)
         if (useWavefront)
         {
             ensureWavefrontBuffers(width, height);
+            mProfileStages = settings.getAs<uint32_t>("render/pt/profileStages") != 0;
+            if (mProfileStages)
+            {
+                createStageTimestampBuffer();
+            }
 
             MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
             MTL::ComputeCommandEncoder* enc = pCmd->computeCommandEncoder();
-            enc->useResource(((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageWrite);
-            encodeWavefront(enc, pUniformBuffer, output, width, height, samplesThisLaunch);
+            enc = encodeWavefront(pCmd, enc, pUniformBuffer, output, width, height, samplesThisLaunch);
 
             if (pUniformData->debug == 0)
             {
@@ -933,6 +1145,10 @@ void MetalRender::render(Buffer* output)
             pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdxWf](MTL::CommandBuffer* cb) {
                 mLastRenderTimeMs.store((cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0,
                                         std::memory_order_relaxed);
+                if (mProfileStages)
+                {
+                    reportStageTimings();
+                }
                 mReadyIndex.store(writeIdxWf);
                 mRenderBusy.store(false, std::memory_order_release);
             }));
@@ -1181,6 +1397,7 @@ void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)
     release(mPathQueueBuffer[1]);
     release(mWavefrontControlBuffer);
     release(mShadowRayBuffer);
+    release(mStageStatsBuffer);
 
     // Private storage: these never leave the GPU.
     mPathStateBuffer = mDevice->newBuffer(pixels * sizeof(PathState), MTL::ResourceStorageModePrivate);
@@ -1190,9 +1407,10 @@ void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)
     mPathQueueBuffer[0] = mDevice->newBuffer(pixels * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
     mPathQueueBuffer[1] = mDevice->newBuffer(pixels * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
     // Queue counters, active counts, and two sets of indirect dispatch arguments.
-    mWavefrontControlBuffer = mDevice->newBuffer(12 * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
+    mWavefrontControlBuffer = mDevice->newBuffer(80 * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
     // At most one deferred connection per path per bounce.
     mShadowRayBuffer = mDevice->newBuffer(pixels * sizeof(ShadowRay), MTL::ResourceStorageModePrivate);
+    mStageStatsBuffer = mDevice->newBuffer(80 * sizeof(uint32_t), MTL::ResourceStorageModeShared);
     mWavefrontCapacity = pixels;
 
     STRELKA_INFO("wavefront buffers for {}x{}: {:.1f} MB total", width, height,

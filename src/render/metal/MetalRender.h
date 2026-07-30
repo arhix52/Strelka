@@ -198,11 +198,26 @@ private:
     MTL::Buffer* mPathQueueBuffer[2] = { nullptr, nullptr };
     MTL::Buffer* mWavefrontControlBuffer = nullptr;
     MTL::Buffer* mShadowRayBuffer = nullptr;
+    MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
+    MTL::Buffer* mStageStatsBuffer = nullptr; // shared copy of the control buffer, profiling only
+    static constexpr uint32_t kMaxStageSamples = 256;
+    // Stage kind of each timestamp, in encode order. A stage's duration is the
+    // gap to the next timestamp, so there is always one more sample than stage.
+    std::vector<uint8_t> mStageKinds;
+    bool mProfileStages = false;
     uint32_t mWavefrontCapacity = 0; // pixels the buffers above are sized for
 
     void buildWavefrontPipelines();
+    // Per-dispatch GPU timestamps for the wavefront stages. Without them the
+    // question "which stage is the frame in" can only be answered by ablation,
+    // and every ablation changes the workload it is trying to measure.
+    void createStageTimestampBuffer();
+    void reportStageTimings();
     void ensureWavefrontBuffers(uint32_t width, uint32_t height);
-    void encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer,
+    // Returns the encoder to keep using: in profiling mode each stage gets its
+    // own, because this hardware can only sample counters at encoder boundaries.
+    MTL::ComputeCommandEncoder* encodeWavefront(MTL::CommandBuffer* pCmd, MTL::ComputeCommandEncoder* enc,
+                         MTL::Buffer* uniformBuffer,
                          Buffer* output, uint32_t width, uint32_t height, uint32_t sampleCount);
 
     MTL::Library* loadShaderLibrary(const char* relativePath);

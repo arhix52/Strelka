@@ -135,6 +135,7 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<float>("render/animation/speed", 1.0f);
     m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", 0); // 0 = megakernel, 1 = wavefront
     m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 1);
+    m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 0);
     if (const char* tracer = getenv("STRELKA_TRACER"))
     {
         m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", (uint32_t)atoi(tracer));
@@ -244,6 +245,10 @@ void EditorApp::runBenchmark()
     if (const char* tracer = getenv("STRELKA_TRACER"))
     {
         m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", (uint32_t)atoi(tracer));
+    }
+    if (getenv("STRELKA_STAGES"))
+    {
+        m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 1);
     }
 
     std::vector<double> samples;
