@@ -11,6 +11,7 @@
 #include "MetalBuffer.h"
 
 #include <algorithm>
+#include <map>
 #include <cassert>
 #include <filesystem>
 #include <unistd.h>
@@ -71,15 +72,20 @@ MetalRender::~MetalRender()
         // which are released below via mPrimitiveAccelerationStructures).
         for (auto* mesh : mMetalMeshes)
         {
-            if (mesh->mRefitScratchBuffer)
-                mesh->mRefitScratchBuffer->release();
             if (mesh->mPerPrimitiveBuffer)
                 mesh->mPerPrimitiveBuffer->release();
-            if (mesh->mMotionDescriptor)
-                mesh->mMotionDescriptor->release();
             delete mesh;
         }
         mMetalMeshes.clear();
+
+        for (Blas& blas : mBlasList)
+        {
+            if (blas.mScratch)
+                blas.mScratch->release();
+            if (blas.mDescriptor)
+                blas.mDescriptor->release();
+        }
+        mBlasList.clear();
 
         // Metal objects: release only those we explicitly created with newXxx().
         // Some objects (e.g. acceleration structures returned by newAccelerationStructure)
@@ -108,7 +114,7 @@ MetalRender::~MetalRender()
         safeRelease(mSkinDataBuffer);
         safeRelease(mJointMatricesBuffer);
         safeRelease(mPrevVertexBuffer);
-        safeRelease(mInstanceDataBuffer);
+        safeRelease(mGeometryEntryBuffer);
         safeRelease(mTlasScratchBuffer);
         for (auto*& buf : mUniformBuffers) safeRelease(buf);
         for (auto*& buf : mUniformTMBuffers) safeRelease(buf);
@@ -355,7 +361,7 @@ void MetalRender::encodePathTraceBindings(MTL::ComputeCommandEncoder* enc, MTL::
     // Motion blur buffers
     enc->setBuffer(mPrevVertexBuffer, 0, 7);
     enc->setBuffer(mIndexBuffer, 0, 8);
-    enc->setBuffer(mInstanceDataBuffer, 0, 9);
+    enc->setBuffer(mGeometryEntryBuffer, 0, 9);
     // Environment map
     enc->setBuffer(mEnvAliasBuffer, 0, 10);
     if (mEnvMapTexture)
@@ -975,25 +981,6 @@ void MetalRender::buildBuffers()
         mPrevVertexBuffer->didModifyRange(NS::Range::Make(0, mPrevVertexBuffer->length()));
     }
 
-    // Allocate InstanceData buffer for per-mesh vertex/index offset lookups (motion blur shader)
-    {
-        const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
-        if (!meshes.empty())
-        {
-            std::vector<InstanceData> instanceData(meshes.size());
-            for (size_t mi = 0; mi < meshes.size(); ++mi)
-            {
-                instanceData[mi].vbOffset = meshes[mi].mVbOffset;
-                instanceData[mi].indexOffset = meshes[mi].mIndex;
-            }
-            mInstanceDataBuffer = mDevice->newBuffer(
-                instanceData.size() * sizeof(InstanceData), MTL::ResourceStorageModeManaged);
-            memcpy(mInstanceDataBuffer->contents(), instanceData.data(),
-                   instanceData.size() * sizeof(InstanceData));
-            mInstanceDataBuffer->didModifyRange(NS::Range::Make(0, mInstanceDataBuffer->length()));
-        }
-    }
-
     for (MTL::Buffer*& uniformBuffer : mUniformBuffers)
     {
         uniformBuffer = mDevice->newBuffer(sizeof(Uniforms), MTL::ResourceStorageModeManaged);
@@ -1107,8 +1094,9 @@ MTL::AccelerationStructure* MetalRender::createAccelerationStructureNoCompact(
     return accelerationStructure;
 }
 
-MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
+void MetalRender::createMeshData(size_t meshIndex)
 {
+    const oka::Mesh& mesh = mScene->getMeshes()[meshIndex];
     auto result = new MetalRender::Mesh();
 
     const uint32_t triangleCount = mesh.mCount / 3;
@@ -1121,14 +1109,12 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
     const std::vector<uint32_t>& indices = mScene->getIndices();
 
     std::vector<Triangle> triangleData(triangleCount);
-    for (int i = 0; i < triangleCount; ++i)
+    for (uint32_t i = 0; i < triangleCount; ++i)
     {
         Triangle& curr = triangleData[i];
         const uint32_t i0 = indices[mesh.mIndex + i * 3 + 0];
         const uint32_t i1 = indices[mesh.mIndex + i * 3 + 1];
         const uint32_t i2 = indices[mesh.mIndex + i * 3 + 2];
-        // Positions
-        using simd::float3;
 
         curr.positions[0] = { vertices[mesh.mVbOffset + i0].pos.x, vertices[mesh.mVbOffset + i0].pos.y,
                               vertices[mesh.mVbOffset + i0].pos.z };
@@ -1136,83 +1122,122 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
                               vertices[mesh.mVbOffset + i1].pos.z };
         curr.positions[2] = { vertices[mesh.mVbOffset + i2].pos.x, vertices[mesh.mVbOffset + i2].pos.y,
                               vertices[mesh.mVbOffset + i2].pos.z };
-        // Normals
         curr.normals[0] = vertices[mesh.mVbOffset + i0].normal;
         curr.normals[1] = vertices[mesh.mVbOffset + i1].normal;
         curr.normals[2] = vertices[mesh.mVbOffset + i2].normal;
-        // Tangents
         curr.tangent[0] = vertices[mesh.mVbOffset + i0].tangent;
         curr.tangent[1] = vertices[mesh.mVbOffset + i1].tangent;
         curr.tangent[2] = vertices[mesh.mVbOffset + i2].tangent;
-        // UVs
         curr.uv[0] = vertices[mesh.mVbOffset + i0].uv;
         curr.uv[1] = vertices[mesh.mVbOffset + i1].uv;
         curr.uv[2] = vertices[mesh.mVbOffset + i2].uv;
     }
 
-    MTL::Buffer* perPrimitiveBuffer =
+    result->mPerPrimitiveBuffer =
         mDevice->newBuffer(triangleData.size() * sizeof(Triangle), MTL::ResourceStorageModeManaged);
+    memcpy(result->mPerPrimitiveBuffer->contents(), triangleData.data(), sizeof(Triangle) * triangleData.size());
+    result->mPerPrimitiveBuffer->didModifyRange(NS::Range(0, result->mPerPrimitiveBuffer->length()));
 
-    memcpy(perPrimitiveBuffer->contents(), triangleData.data(), sizeof(Triangle) * triangleData.size());
+    mMetalMeshes.push_back(result);
+}
 
-    perPrimitiveBuffer->didModifyRange(NS::Range(0, perPrimitiveBuffer->length()));
+MTL::AccelerationStructureTriangleGeometryDescriptor* MetalRender::createStaticGeometryDescriptor(
+    const oka::Mesh& sceneMesh, MTL::Buffer* perPrimitiveBuffer, uint32_t triangleCount)
+{
+    auto* geomDescriptor = MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
 
-    if (mesh.isSkeletal)
+    geomDescriptor->setVertexBuffer(mVertexBuffer);
+    geomDescriptor->setVertexBufferOffset(sceneMesh.mVbOffset * sizeof(Scene::Vertex));
+    geomDescriptor->setVertexStride(sizeof(Scene::Vertex));
+    geomDescriptor->setIndexBuffer(mIndexBuffer);
+    geomDescriptor->setIndexBufferOffset(sceneMesh.mIndex * sizeof(uint32_t));
+    geomDescriptor->setIndexType(MTL::IndexTypeUInt32);
+    geomDescriptor->setTriangleCount(triangleCount);
+    geomDescriptor->setPrimitiveDataBuffer(perPrimitiveBuffer);
+    geomDescriptor->setPrimitiveDataBufferOffset(0);
+    geomDescriptor->setPrimitiveDataElementSize(sizeof(Triangle));
+    geomDescriptor->setPrimitiveDataStride(sizeof(Triangle));
+
+    return geomDescriptor;
+}
+
+// Build one acceleration structure covering every listed instance's mesh as a
+// separate geometry, and record the per-geometry lookup entries.
+size_t MetalRender::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, bool skeletal)
+{
+    const std::vector<oka::Instance>& instances = mScene->getInstances();
+    const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
+
+    Blas blas;
+    blas.mIsSkeletal = skeletal;
+    blas.mGeometryBase = (uint32_t)mGeometryEntries.size();
+
+    std::vector<const NS::Object*> geomDescriptors;
+    geomDescriptors.reserve(sceneInstanceIds.size());
+
+    for (const uint32_t instId : sceneInstanceIds)
     {
-        // Motion BVH with 2 keyframes (prevVB @ t=0, VB @ t=1).
-        // Build the descriptor and query its scratch sizes once: both are
-        // invariant for the lifetime of the mesh, and refitting re-reads the
-        // keyframe buffers directly.
-        MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
-            createMotionBLASDescriptor(mesh, perPrimitiveBuffer, triangleCount);
+        const oka::Instance& inst = instances[instId];
+        const uint32_t meshId = inst.mMeshId;
+        const oka::Mesh& mesh = meshes[meshId];
+        MetalRender::Mesh* meshData = mMetalMeshes[meshId];
+
+        if (skeletal)
+        {
+            geomDescriptors.push_back(
+                createMotionGeometryDescriptor(mesh, meshData->mPerPrimitiveBuffer, meshData->mTriangleCount));
+        }
+        else
+        {
+            geomDescriptors.push_back(
+                createStaticGeometryDescriptor(mesh, meshData->mPerPrimitiveBuffer, meshData->mTriangleCount));
+        }
+
+        // The geometry index within this BLAS is the position in this list, so
+        // the material of the instance that contributed it lands in the right slot.
+        GeometryEntry entry{};
+        entry.vbOffset = mesh.mVbOffset;
+        entry.indexOffset = mesh.mIndex;
+        entry.materialId = inst.mMaterialId;
+        mGeometryEntries.push_back(entry);
+    }
+
+    NS::Array* geomArray = NS::Array::array(geomDescriptors.data(), geomDescriptors.size());
+    MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
+        MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init();
+    primDescriptor->setGeometryDescriptors(geomArray);
+
+    if (skeletal)
+    {
+        primDescriptor->setMotionKeyframeCount(2);
+        primDescriptor->setMotionStartTime(0.0f);
+        primDescriptor->setMotionEndTime(1.0f);
+        primDescriptor->setMotionStartBorderMode(MTL::MotionBorderModeClamp);
+        primDescriptor->setMotionEndBorderMode(MTL::MotionBorderModeClamp);
         primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit);
 
         const MTL::AccelerationStructureSizes sizes = mDevice->accelerationStructureSizes(primDescriptor);
-        result->mRefitScratchSize = sizes.refitScratchBufferSize;
-        result->mBuildScratchSize = sizes.buildScratchBufferSize;
+        blas.mRefitScratchSize = sizes.refitScratchBufferSize;
+        blas.mBuildScratchSize = sizes.buildScratchBufferSize;
 
-        result->mGas = createAccelerationStructureNoCompact(primDescriptor);
-        result->mMotionDescriptor = primDescriptor; // kept, released in the destructor
+        blas.mAs = createAccelerationStructureNoCompact(primDescriptor);
+        blas.mDescriptor = primDescriptor; // kept for refit, released in the destructor
     }
     else
     {
-        // Static BVH for non-skeletal meshes
-        auto* geomDescriptor =
-            MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
-
-        geomDescriptor->setVertexBuffer(mVertexBuffer);
-        geomDescriptor->setVertexBufferOffset(mesh.mVbOffset * sizeof(Scene::Vertex));
-        geomDescriptor->setVertexStride(sizeof(Scene::Vertex));
-        geomDescriptor->setIndexBuffer(mIndexBuffer);
-        geomDescriptor->setIndexBufferOffset(mesh.mIndex * sizeof(uint32_t));
-        geomDescriptor->setIndexType(MTL::IndexTypeUInt32);
-        geomDescriptor->setTriangleCount(triangleCount);
-        geomDescriptor->setPrimitiveDataBuffer(perPrimitiveBuffer);
-        geomDescriptor->setPrimitiveDataBufferOffset(0);
-        geomDescriptor->setPrimitiveDataElementSize(sizeof(Triangle));
-        geomDescriptor->setPrimitiveDataStride(sizeof(Triangle));
-
-        const NS::Array* geomDescriptors =
-            NS::Array::array((const NS::Object* const*)&geomDescriptor, 1UL);
-
-        MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
-            MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init();
-        primDescriptor->setGeometryDescriptors(geomDescriptors);
-
-        result->mGas = createAccelerationStructure(primDescriptor);
-
+        // Static geometry is built once, so it is worth compacting.
+        blas.mAs = createAccelerationStructure(primDescriptor);
         primDescriptor->release();
-        geomDescriptor->release();
     }
 
-    // Keep per-primitive buffer alive for skeletal meshes (needed for triangle updates)
-    result->mPerPrimitiveBuffer = perPrimitiveBuffer;
-    if (!mesh.isSkeletal)
+    for (const NS::Object* g : geomDescriptors)
     {
-        perPrimitiveBuffer->release();
-        result->mPerPrimitiveBuffer = nullptr;
+        ((NS::Object*)g)->release();
     }
-    return result;
+
+    mBlasList.push_back(blas);
+    mPrimitiveAccelerationStructures.push_back(blas.mAs);
+    return mBlasList.size() - 1;
 }
 
 void MetalRender::createAccelerationStructures()
@@ -1224,48 +1249,157 @@ void MetalRender::createAccelerationStructures()
     const std::vector<oka::Instance>& instances = mScene->getInstances();
     if (meshes.empty() && curves.empty())
     {
+        pPool->release();
         return;
     }
 
-    for (const oka::Mesh& currMesh : meshes)
+    for (size_t mi = 0; mi < meshes.size(); ++mi)
     {
-        MetalRender::Mesh* metalMesh = createMesh(currMesh);
-        mMetalMeshes.push_back(metalMesh);
-        mPrimitiveAccelerationStructures.push_back(metalMesh->mGas);
+        createMeshData(mi);
+    }
+
+    // --- Group mesh instances that always move together -----------------------
+    //
+    // glTF splits a mesh into primitives by material, and the loader turns each
+    // primitive into its own instance. Left alone that produces one BLAS per
+    // primitive, all with the same transform and heavily overlapping bounds, and
+    // every ray that has to traverse deeply pays for the overlap. Instances that
+    // hang off the same node share a transform by construction, so they can be
+    // merged into a single BLAS with one geometry per primitive.
+    std::vector<int> instanceNode(instances.size(), -1);
+    const std::vector<Scene::Node>& nodes = mScene->getNodes();
+    for (size_t n = 0; n < nodes.size(); ++n)
+    {
+        for (const uint32_t id : nodes[n].instanceIds)
+        {
+            if (id < instanceNode.size())
+                instanceNode[id] = (int)n;
+        }
+    }
+
+    // Key: (node, skeletal). Instances without a node, and any whose transform
+    // does not actually match the group's, get a group of their own.
+    std::map<std::pair<int, int>, size_t> groupOfKey;
+    std::vector<std::vector<uint32_t>> groups;
+    std::vector<bool> groupSkeletal;
+
+    // Light instances keep one BLAS per mesh, shared between lights, because
+    // their userID must stay the light index.
+    std::map<uint32_t, size_t> lightBlasOfMesh;
+
+    mGeometryEntries.clear();
+    mEmittedInstances.clear();
+
+    std::vector<size_t> groupBlas;
+
+    for (size_t i = 0; i < instances.size(); ++i)
+    {
+        const oka::Instance& curr = instances[i];
+        if (curr.type == oka::Instance::Type::eLight)
+        {
+            continue; // handled below
+        }
+        const bool skeletal = meshes[curr.mMeshId].isSkeletal;
+        const int nodeId = instanceNode[i];
+        const std::pair<int, int> key{ nodeId >= 0 ? nodeId : -(int)i - 2, skeletal ? 1 : 0 };
+
+        auto it = groupOfKey.find(key);
+        if (it == groupOfKey.end())
+        {
+            groupOfKey[key] = groups.size();
+            groups.push_back({ (uint32_t)i });
+            groupSkeletal.push_back(skeletal);
+            continue;
+        }
+        // Merging is only valid while the members share a transform.
+        const oka::Instance& rep = instances[groups[it->second].front()];
+        if (memcmp(&rep.transform, &curr.transform, sizeof(glm::mat4)) == 0)
+        {
+            groups[it->second].push_back((uint32_t)i);
+        }
+        else
+        {
+            groups.push_back({ (uint32_t)i });
+            groupSkeletal.push_back(skeletal);
+        }
+    }
+
+    size_t mergedGeometries = 0;
+    for (size_t g = 0; g < groups.size(); ++g)
+    {
+        const size_t blasIdx = buildBlas(groups[g], groupSkeletal[g]);
+        groupBlas.push_back(blasIdx);
+        mergedGeometries += groups[g].size();
+
+        EmittedInstance emitted{};
+        emitted.sceneInstanceId = groups[g].front();
+        emitted.asIndex = (uint32_t)blasIdx;
+        emitted.userID = mBlasList[blasIdx].mGeometryBase;
+        emitted.mask = GEOMETRY_MASK_TRIANGLE;
+        mEmittedInstances.push_back(emitted);
+    }
+
+    for (size_t i = 0; i < instances.size(); ++i)
+    {
+        const oka::Instance& curr = instances[i];
+        if (curr.type != oka::Instance::Type::eLight)
+        {
+            continue;
+        }
+        auto it = lightBlasOfMesh.find(curr.mMeshId);
+        if (it == lightBlasOfMesh.end())
+        {
+            const size_t blasIdx = buildBlas({ (uint32_t)i }, meshes[curr.mMeshId].isSkeletal);
+            it = lightBlasOfMesh.emplace(curr.mMeshId, blasIdx).first;
+        }
+        EmittedInstance emitted{};
+        emitted.sceneInstanceId = (uint32_t)i;
+        emitted.asIndex = (uint32_t)it->second;
+        emitted.userID = curr.mLightId; // lights address the light table, not geometry
+        emitted.mask = GEOMETRY_MASK_LIGHT;
+        mEmittedInstances.push_back(emitted);
+    }
+
+    STRELKA_INFO("Acceleration structures: {} BLAS ({} geometries), {} TLAS instances (from {} scene instances)",
+                 mBlasList.size(), mergedGeometries, mEmittedInstances.size(), instances.size());
+
+    // Per-geometry lookup table consumed by the kernel.
+    if (!mGeometryEntries.empty())
+    {
+        mGeometryEntryBuffer = mDevice->newBuffer(
+            mGeometryEntries.size() * sizeof(GeometryEntry), MTL::ResourceStorageModeManaged);
+        memcpy(mGeometryEntryBuffer->contents(), mGeometryEntries.data(),
+               mGeometryEntries.size() * sizeof(GeometryEntry));
+        mGeometryEntryBuffer->didModifyRange(NS::Range::Make(0, mGeometryEntryBuffer->length()));
     }
 
     mInstanceBuffer = mDevice->newBuffer(
-        sizeof(MTL::AccelerationStructureUserIDInstanceDescriptor) * instances.size(), MTL::ResourceStorageModeManaged);
+        sizeof(MTL::AccelerationStructureUserIDInstanceDescriptor) * std::max<size_t>(mEmittedInstances.size(), 1),
+        MTL::ResourceStorageModeManaged);
     auto instanceDescriptors = (MTL::AccelerationStructureUserIDInstanceDescriptor*)mInstanceBuffer->contents();
-    for (int i = 0; i < instances.size(); ++i)
+    for (size_t d = 0; d < mEmittedInstances.size(); ++d)
     {
-        const Instance& curr = instances[i];
-        instanceDescriptors[i].accelerationStructureIndex = curr.mMeshId;
-        instanceDescriptors[i].options = MTL::AccelerationStructureInstanceOptionOpaque;
-        instanceDescriptors[i].intersectionFunctionTableOffset = 0;
-        instanceDescriptors[i].userID = curr.type == Instance::Type::eLight ? curr.mLightId : curr.mMaterialId;
-        instanceDescriptors[i].mask = curr.type == Instance::Type::eLight ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_TRIANGLE;
-
-        for (int column = 0; column < 4; column++)
-        {
-            for (int row = 0; row < 3; row++)
-            {
-                instanceDescriptors[i].transformationMatrix.columns[column][row] = curr.transform[column][row];
-            }
-        }
+        const EmittedInstance& e = mEmittedInstances[d];
+        instanceDescriptors[d].accelerationStructureIndex = e.asIndex;
+        instanceDescriptors[d].options = MTL::AccelerationStructureInstanceOptionOpaque;
+        instanceDescriptors[d].intersectionFunctionTableOffset = 0;
+        instanceDescriptors[d].userID = e.userID;
+        instanceDescriptors[d].mask = e.mask;
     }
     mInstanceBuffer->didModifyRange(NS::Range::Make(0, mInstanceBuffer->length()));
+    updateInstanceTransforms();
 
     const NS::Array* instancedAccelerationStructures = NS::Array::array(
         (const NS::Object* const*)mPrimitiveAccelerationStructures.data(), mPrimitiveAccelerationStructures.size());
     MTL::InstanceAccelerationStructureDescriptor* accelDescriptor =
         MTL::InstanceAccelerationStructureDescriptor::descriptor();
     accelDescriptor->setInstancedAccelerationStructures(instancedAccelerationStructures);
-    accelDescriptor->setInstanceCount(instances.size());
+    accelDescriptor->setInstanceCount(mEmittedInstances.size());
     accelDescriptor->setInstanceDescriptorBuffer(mInstanceBuffer);
     accelDescriptor->setInstanceDescriptorType(MTL::AccelerationStructureInstanceDescriptorTypeUserID);
 
     mInstanceAccelerationStructure = createAccelerationStructure(accelDescriptor);
+    mTlasInstanceCount = mEmittedInstances.size();
     pPool->release();
 }
 
@@ -1441,7 +1575,7 @@ void MetalRender::copyVertexBufferToPrev()
     blitCmd->commit();
 }
 
-MTL::PrimitiveAccelerationStructureDescriptor* MetalRender::createMotionBLASDescriptor(
+MTL::AccelerationStructureMotionTriangleGeometryDescriptor* MetalRender::createMotionGeometryDescriptor(
     const oka::Mesh& sceneMesh, MTL::Buffer* perPrimitiveBuffer, uint32_t triangleCount)
 {
     auto* geomDescriptor =
@@ -1469,22 +1603,10 @@ MTL::PrimitiveAccelerationStructureDescriptor* MetalRender::createMotionBLASDesc
     geomDescriptor->setPrimitiveDataElementSize(sizeof(Triangle));
     geomDescriptor->setPrimitiveDataStride(sizeof(Triangle));
 
-    const NS::Array* geomDescriptors = NS::Array::array((const NS::Object* const*)&geomDescriptor, 1UL);
-
-    MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
-        MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init();
-    primDescriptor->setGeometryDescriptors(geomDescriptors);
-    primDescriptor->setMotionKeyframeCount(2);
-    primDescriptor->setMotionStartTime(0.0f);
-    primDescriptor->setMotionEndTime(1.0f);
-    primDescriptor->setMotionStartBorderMode(MTL::MotionBorderModeClamp);
-    primDescriptor->setMotionEndBorderMode(MTL::MotionBorderModeClamp);
-
     kf0->release();
     kf1->release();
-    geomDescriptor->release();
 
-    return primDescriptor;
+    return geomDescriptor;
 }
 
 void MetalRender::ensureScratchBuffer(MTL::Buffer*& buffer, size_t requiredSize)
@@ -1516,48 +1638,42 @@ void MetalRender::updateSkeletalBLAS(bool largeTimeJump)
     MTL::CommandBuffer* commandBuffer = mCommandQueue->commandBuffer();
     MTL::AccelerationStructureCommandEncoder* commandEncoder = commandBuffer->accelerationStructureCommandEncoder();
 
-    const size_t meshCount = mMetalMeshes.size();
+    const size_t blasCount = mBlasList.size();
     size_t rebuiltThisFrame = 0;
 
-    for (size_t mi = 0; mi < meshCount; ++mi)
+    for (size_t mi = 0; mi < blasCount; ++mi)
     {
-        MetalRender::Mesh* metalMesh = mMetalMeshes[mi];
-        if (!metalMesh->mIsSkeletal)
+        Blas& blas = mBlasList[mi];
+        if (!blas.mIsSkeletal || !blas.mDescriptor)
             continue;
 
         // The descriptor and its scratch requirements were computed once when the
-        // mesh was created. Rebuilding them here meant five Objective-C
-        // allocations plus an accelerationStructureSizes() driver query per mesh
-        // per frame — 59 meshes' worth of pure overhead on this scene, describing
-        // geometry that never changes shape, only contents.
-        MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor = metalMesh->mMotionDescriptor;
-        if (!primDescriptor)
-            continue;
-
+        // structure was created: they only name buffers, offsets and triangle
+        // counts, none of which change while the pose does. Rebuilding them per
+        // frame meant a pile of Objective-C allocations plus an
+        // accelerationStructureSizes() driver query describing geometry that
+        // never changes shape, only contents.
         const bool inRebuildSlice = doRebuildSlice && rebuiltThisFrame < kMaxBlasRebuildsPerFrame &&
                                     mi >= mNextBlasRebuildIndex;
         if (inRebuildSlice)
         {
             // A rebuild needs build scratch, which is the larger of the two.
-            ensureScratchBuffer(metalMesh->mRefitScratchBuffer,
-                                std::max(metalMesh->mBuildScratchSize, metalMesh->mRefitScratchSize));
-            commandEncoder->buildAccelerationStructure(
-                metalMesh->mGas, primDescriptor, metalMesh->mRefitScratchBuffer, 0UL);
+            ensureScratchBuffer(blas.mScratch, std::max(blas.mBuildScratchSize, blas.mRefitScratchSize));
+            commandEncoder->buildAccelerationStructure(blas.mAs, blas.mDescriptor, blas.mScratch, 0UL);
             ++rebuiltThisFrame;
             mNextBlasRebuildIndex = mi + 1;
         }
         else
         {
-            ensureScratchBuffer(metalMesh->mRefitScratchBuffer, metalMesh->mRefitScratchSize);
-            commandEncoder->refitAccelerationStructure(
-                metalMesh->mGas, primDescriptor, metalMesh->mGas, metalMesh->mRefitScratchBuffer, 0UL);
+            ensureScratchBuffer(blas.mScratch, blas.mRefitScratchSize);
+            commandEncoder->refitAccelerationStructure(blas.mAs, blas.mDescriptor, blas.mAs, blas.mScratch, 0UL);
         }
     }
 
     commandEncoder->endEncoding();
     commandBuffer->commit();
 
-    if (doRebuildSlice && mNextBlasRebuildIndex >= meshCount)
+    if (doRebuildSlice && mNextBlasRebuildIndex >= blasCount)
     {
         // Finished a full sweep over every skeletal mesh.
         mNextBlasRebuildIndex = 0;
@@ -1578,14 +1694,14 @@ void MetalRender::updateInstanceTransforms()
     const std::vector<oka::Instance>& instances = mScene->getInstances();
     auto instanceDescriptors = (MTL::AccelerationStructureUserIDInstanceDescriptor*)mInstanceBuffer->contents();
 
-    for (int i = 0; i < (int)instances.size(); ++i)
+    for (size_t d = 0; d < mEmittedInstances.size(); ++d)
     {
-        const Instance& curr = instances[i];
+        const Instance& curr = instances[mEmittedInstances[d].sceneInstanceId];
         for (int column = 0; column < 4; column++)
         {
             for (int row = 0; row < 3; row++)
             {
-                instanceDescriptors[i].transformationMatrix.columns[column][row] = curr.transform[column][row];
+                instanceDescriptors[d].transformationMatrix.columns[column][row] = curr.transform[column][row];
             }
         }
     }
@@ -1606,7 +1722,7 @@ void MetalRender::rebuildTLAS()
     MTL::InstanceAccelerationStructureDescriptor* accelDescriptor =
         MTL::InstanceAccelerationStructureDescriptor::descriptor();
     accelDescriptor->setInstancedAccelerationStructures(instancedAccelerationStructures);
-    accelDescriptor->setInstanceCount(instances.size());
+    accelDescriptor->setInstanceCount(mEmittedInstances.size());
     accelDescriptor->setInstanceDescriptorBuffer(mInstanceBuffer);
     accelDescriptor->setInstanceDescriptorType(MTL::AccelerationStructureInstanceDescriptorTypeUserID);
     accelDescriptor->setUsage(MTL::AccelerationStructureUsageRefit);
@@ -1617,7 +1733,7 @@ void MetalRender::rebuildTLAS()
     // single frame, which is what the previous full rebuild did.
     const MTL::AccelerationStructureSizes sizes = mDevice->accelerationStructureSizes(accelDescriptor);
     const bool canRefit = mInstanceAccelerationStructure != nullptr &&
-                          mTlasInstanceCount == instances.size() &&
+                          mTlasInstanceCount == mEmittedInstances.size() &&
                           mInstanceAccelerationStructure->size() >= sizes.accelerationStructureSize;
 
     if (canRefit)
@@ -1639,7 +1755,7 @@ void MetalRender::rebuildTLAS()
             mInstanceAccelerationStructure = nullptr;
         }
         mInstanceAccelerationStructure = createAccelerationStructureNoCompact(accelDescriptor);
-        mTlasInstanceCount = instances.size();
+        mTlasInstanceCount = mEmittedInstances.size();
     }
 
     pPool->release();
