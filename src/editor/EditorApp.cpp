@@ -176,6 +176,13 @@ void EditorApp::checkLoadingComplete()
     if (!new_scene)
         return;
 
+    // Tear the old renderer down *before* the scene and shared context it points
+    // at are replaced. ~MetalRender drains the GPU and waits for in-flight
+    // completion handlers; running that after the Scene/SharedContext it holds
+    // raw pointers to have already been freed is a use-after-free waiting for
+    // the right timing.
+    m_render.reset();
+
     m_scene = std::move(new_scene);
 
     oka::Camera camera;
@@ -193,7 +200,7 @@ void EditorApp::checkLoadingComplete()
 
     m_sharedCtx = std::make_unique<SharedContext>();
 
-    m_render.reset(RenderFactory::createRender());
+    m_render = std::unique_ptr<Render>(RenderFactory::createRender());
     m_render->setSettingsManager(m_settingsManager.get());
     m_render->setSharedContext(m_sharedCtx.get());
     m_render->setScene(m_scene.get());
@@ -205,15 +212,14 @@ void EditorApp::checkLoadingComplete()
 
 void EditorApp::run()
 {
+    auto prevTime = std::chrono::high_resolution_clock::now();
+
     while (!m_display->windowShouldClose())
     {
-        auto start = std::chrono::high_resolution_clock::now();
-
         m_display->pollEvents();
 
-        static auto prevTime = std::chrono::high_resolution_clock::now();
         auto currentTime = std::chrono::high_resolution_clock::now();
-        const double deltaTime = std::chrono::duration<double, std::milli>(currentTime - prevTime).count() / 1000.0;
+        const double deltaTime = std::chrono::duration<double>(currentTime - prevTime).count();
 
         const auto cameraSpeed = m_settingsManager->getAs<float>("render/cameraSpeed");
         m_cameraController->update(deltaTime, cameraSpeed);
