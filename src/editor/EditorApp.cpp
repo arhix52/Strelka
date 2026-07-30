@@ -133,6 +133,8 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<float>("render/motionBlur/shutterTime", 1.0f / 24.0f);
     m_settingsManager->setAs<uint32_t>("render/motionBlur/shutterMode", 1); // 0=centered, 1=leading, 2=trailing
     m_settingsManager->setAs<float>("render/animation/speed", 1.0f);
+    m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", 0); // 0 = megakernel, 1 = wavefront
+    m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 1);
     m_settingsManager->setAs<uint32_t>("render/validate/estimatorMode", 0);
     m_settingsManager->setAs<bool>("render/validate/analyticLights", true);
     m_settingsManager->setAs<std::string>("resource/searchPath", m_resourceSearchPath);
@@ -215,6 +217,64 @@ void EditorApp::checkLoadingComplete()
     m_display->setInputHandler(m_cameraController.get());
 }
 
+// GPU timing harness (STRELKA_BENCH=<frames>).
+//
+// Reports the median, not the mean: the first frames warm caches and the
+// occasional frame is stretched by an unrelated compositor stall, and both would
+// move a mean by more than the effect sizes being measured here. Accumulation is
+// off so every frame does the full amount of work.
+void EditorApp::runBenchmark()
+{
+    const uint32_t frames = std::max(4, atoi(getenv("STRELKA_BENCH")));
+    const uint32_t warmup = std::max(4u, frames / 4);
+
+    m_settingsManager->setAs<bool>("render/pt/enableAcc", false);
+    m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
+    // One submission per frame, so the number is the tracer's cost and not the
+    // inter-band gaps of the responsiveness split.
+    m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 0);
+    if (const char* d = getenv("STRELKA_REF_DEPTH"))
+    {
+        m_settingsManager->setAs<uint32_t>("render/pt/depth", (uint32_t)atoi(d));
+    }
+    if (const char* tracer = getenv("STRELKA_TRACER"))
+    {
+        m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", (uint32_t)atoi(tracer));
+    }
+
+    std::vector<double> samples;
+    samples.reserve(frames);
+    double last = -1.0;
+    for (uint32_t i = 0; i < warmup + frames && !m_display->windowShouldClose();)
+    {
+        m_display->pollEvents();
+        m_render->triggerRenderIfIdle();
+        const double t = m_render->getLastRenderTimeMs();
+        if (t > 0.0 && t != last)
+        {
+            last = t;
+            if (i >= warmup)
+            {
+                samples.push_back(t);
+            }
+            ++i;
+        }
+        usleep(200);
+    }
+
+    std::sort(samples.begin(), samples.end());
+    if (samples.empty())
+    {
+        STRELKA_INFO("BENCH  no frames measured");
+        return;
+    }
+    const double median = samples[samples.size() / 2];
+    STRELKA_INFO("BENCH  tracer={} depth={} frames={}  median={:.2f} ms  min={:.2f}  max={:.2f}",
+                 m_settingsManager->getAs<uint32_t>("render/pt/tracerMode"),
+                 m_settingsManager->getAs<uint32_t>("render/pt/depth"),
+                 samples.size(), median, samples.front(), samples.back());
+}
+
 // Reference capture / estimator self-consistency check (STRELKA_REF=<dir>).
 void EditorApp::runReferenceCapture()
 {
@@ -237,6 +297,16 @@ void EditorApp::runReferenceCapture()
     m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", spp);
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
     m_settingsManager->setAs<bool>("render/isMotionBlurVisible", false);
+    // Same harness for both tracers, so the wavefront rewrite can be checked
+    // against the megakernel's recorded numbers without touching anything else.
+    if (const char* d = getenv("STRELKA_REF_DEPTH"))
+    {
+        m_settingsManager->setAs<uint32_t>("render/pt/depth", (uint32_t)atoi(d));
+    }
+    if (const char* tracer = getenv("STRELKA_TRACER"))
+    {
+        m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", (uint32_t)atoi(tracer));
+    }
 
     std::vector<std::vector<float>> images;
     for (const C& c : cases)
@@ -306,6 +376,7 @@ void EditorApp::runReferenceCapture()
 void EditorApp::run()
 {
     if (getenv("STRELKA_REF")) { runReferenceCapture(); return; }
+    if (getenv("STRELKA_BENCH")) { runBenchmark(); return; }
     auto prevTime = std::chrono::high_resolution_clock::now();
 
     while (!m_display->windowShouldClose())

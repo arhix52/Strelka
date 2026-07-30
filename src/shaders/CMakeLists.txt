@@ -109,6 +109,15 @@ if(APPLE)
 
     # -gline-tables-only/-frecord-sources keep Metal frame captures usable.
     set(METAL_BUILD_FLAGS -Wall -std=metal3.0)
+    # Two kernels that do the same arithmetic in a different order (the megakernel
+    # and the wavefront tracer) fuse multiply-adds differently, which leaves a
+    # ~1e-7 relative difference in most pixels and, through chaotic paths, a
+    # visible one in a handful. Turning contraction off makes the two bit-identical
+    # and is the only way to tell an arithmetic difference from a logic bug.
+    option(STRELKA_METAL_STRICT_FP "Disable Metal FMA contraction (for A/B image comparison)" OFF)
+    if(STRELKA_METAL_STRICT_FP)
+        list(APPEND METAL_BUILD_FLAGS -ffp-contract=off)
+    endif()
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         list(APPEND METAL_BUILD_FLAGS -gline-tables-only -frecord-sources)
     endif()
@@ -135,7 +144,7 @@ if(APPLE)
     # without it the metallibs silently go stale after a header change or a
     # `git checkout`, and the app runs against shaders that no longer match the
     # host-side struct layouts.
-    foreach(shader pathtrace tonemapper skinning)
+    foreach(shader pathtrace wavefront tonemapper skinning)
         add_custom_command(
             OUTPUT ${SHADER_OUTPUT_DIR}/${shader}.metallib
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
@@ -159,6 +168,7 @@ if(APPLE)
     add_custom_target(strelka_shaders ALL
         DEPENDS
             ${SHADER_OUTPUT_DIR}/pathtrace.metallib
+            ${SHADER_OUTPUT_DIR}/wavefront.metallib
             ${SHADER_OUTPUT_DIR}/tonemapper.metallib
             ${SHADER_OUTPUT_DIR}/skinning.metallib
             ${SHADER_OUTPUT_DIR}/fullScreen.metal

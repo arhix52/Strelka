@@ -180,6 +180,22 @@ private:
     uint32_t computeBandHeight(uint32_t height) const;
     void encodePathTraceBindings(MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer, Buffer* output);
 
+    // --- Wavefront tracer ---------------------------------------------------
+    MTL::ComputePipelineState* mWavefrontGeneratePSO = nullptr;
+    MTL::ComputePipelineState* mWavefrontExtendPSO = nullptr;
+    MTL::ComputePipelineState* mWavefrontShadePSO = nullptr;
+    MTL::ComputePipelineState* mWavefrontResolvePSO = nullptr;
+    MTL::Buffer* mPathStateBuffer = nullptr;
+    MTL::Buffer* mHitBuffer = nullptr;
+    MTL::Buffer* mIorStackBuffer = nullptr;
+    MTL::Buffer* mRadianceBuffer = nullptr;
+    uint32_t mWavefrontCapacity = 0; // pixels the buffers above are sized for
+
+    void buildWavefrontPipelines();
+    void ensureWavefrontBuffers(uint32_t width, uint32_t height);
+    void encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer,
+                         Buffer* output, uint32_t width, uint32_t height, uint32_t sampleCount);
+
     MTL::Library* loadShaderLibrary(const char* relativePath);
     void buildComputePipeline();
     void buildTonemapperPipeline();

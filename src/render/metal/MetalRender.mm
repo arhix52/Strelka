@@ -34,6 +34,7 @@
 #include <simd/simd.h>
 
 #include "ShaderTypes.h"
+#include <strelka/material/ior_stack.h> // IorStack: sized per path in the wavefront side table
 
 using namespace oka;
 namespace fs = std::filesystem;
@@ -124,6 +125,14 @@ MetalRender::~MetalRender()
         safeRelease(mEnvAliasBuffer);
 
         // Pipeline states
+        safeRelease(mWavefrontGeneratePSO);
+        safeRelease(mWavefrontExtendPSO);
+        safeRelease(mWavefrontShadePSO);
+        safeRelease(mWavefrontResolvePSO);
+        safeRelease(mPathStateBuffer);
+        safeRelease(mHitBuffer);
+        safeRelease(mIorStackBuffer);
+        safeRelease(mRadianceBuffer);
         safeRelease(mPathTracingPSO);
         safeRelease(mTonemapperPSO);
         safeRelease(mSkinningPSO);
@@ -207,6 +216,7 @@ void MetalRender::init()
     mCommandQueue = mDevice->newCommandQueue();
     buildComputePipeline();
     buildTonemapperPipeline();
+    buildWavefrontPipelines();
 }
 
 MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName)
@@ -328,6 +338,99 @@ uint32_t MetalRender::computeBandHeight(uint32_t height) const
     const uint32_t clamped =
         static_cast<uint32_t>(std::clamp(rows, static_cast<double>(lowerBound), static_cast<double>(height)));
     return std::max(minRows, (clamped + 7u) & ~7u);
+}
+
+// Encode one full wavefront frame: for each sample, generate camera rays then
+// alternate extend/shade for maxDepth bounces. Every stage is dispatched over
+// all pixels; dead paths return immediately. Compaction replaces that next.
+//
+// Stages within a single compute encoder run in order with an implicit barrier
+// (Metal's default serial dispatch type), which is exactly the dependency
+// extend -> shade -> extend needs.
+void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer,
+                                  Buffer* output, uint32_t width, uint32_t height,
+                                  uint32_t sampleCount)
+{
+    const uint32_t pixels = width * height;
+    const uint32_t maxDepth = std::max(1u, getSettings()->getAs<uint32_t>("render/pt/depth"));
+    MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
+
+    if (!mMaterialTextures.empty())
+    {
+        enc->useResources(reinterpret_cast<const MTL::Resource* const*>(mMaterialTextures.data()),
+                          mMaterialTextures.size(), MTL::ResourceUsageRead);
+    }
+    if (!mPrimitiveAccelerationStructures.empty())
+    {
+        enc->useResources(reinterpret_cast<const MTL::Resource* const*>(mPrimitiveAccelerationStructures.data()),
+                          mPrimitiveAccelerationStructures.size(), MTL::ResourceUsageRead);
+    }
+    if (mInstanceAccelerationStructure)
+    {
+        enc->useResource(mInstanceAccelerationStructure, MTL::ResourceUsageRead);
+    }
+    if (mEnvMapTexture)
+    {
+        enc->useResource(mEnvMapTexture, MTL::ResourceUsageRead);
+    }
+
+    const MTL::Size grid = MTL::Size(pixels, 1, 1);
+    const MTL::Size tg = MTL::Size(64, 1, 1);
+
+    for (uint32_t s = 0; s < sampleCount; ++s)
+    {
+        enc->setComputePipelineState(mWavefrontGeneratePSO);
+        enc->setBuffer(uniformBuffer, 0, 0);
+        enc->setBuffer(mPathStateBuffer, 0, 1);
+        enc->setBuffer(mRadianceBuffer, 0, 2);
+        enc->setBuffer(mIorStackBuffer, 0, 3);
+        enc->setBytes(&s, sizeof(uint32_t), 4);
+        enc->dispatchThreads(grid, tg);
+
+        for (uint32_t bounce = 0; bounce < maxDepth; ++bounce)
+        {
+            enc->setComputePipelineState(mWavefrontExtendPSO);
+            enc->setBuffer(uniformBuffer, 0, 0);
+            enc->setBuffer(mInstanceBuffer, 0, 1);
+            enc->setAccelerationStructure(mInstanceAccelerationStructure, 2);
+            enc->setBuffer(mPathStateBuffer, 0, 3);
+            enc->setBuffer(mHitBuffer, 0, 4);
+            enc->setBytes(&s, sizeof(uint32_t), 5);
+            enc->dispatchThreads(grid, tg);
+
+            enc->setComputePipelineState(mWavefrontShadePSO);
+            enc->setBuffer(uniformBuffer, 0, 0);
+            enc->setBuffer(mInstanceBuffer, 0, 1);
+            enc->setAccelerationStructure(mInstanceAccelerationStructure, 2);
+            enc->setBuffer(mLightBuffer, 0, 3);
+            enc->setBuffer(mMaterialBuffer, 0, 4);
+            enc->setBuffer(mPathStateBuffer, 0, 5);
+            enc->setBuffer(mHitBuffer, 0, 6);
+            enc->setBuffer(mRadianceBuffer, 0, 7);
+            enc->setBuffer(mIorStackBuffer, 0, 8);
+            enc->setBuffer(mGeometryEntryBuffer, 0, 9);
+            enc->setBuffer(mEnvAliasBuffer, 0, 10);
+            enc->setBuffer(mVertexBuffer, 0, 11);
+            enc->setBuffer(mPrevVertexBuffer, 0, 12);
+            enc->setBuffer(mIndexBuffer, 0, 13);
+            enc->setBytes(&s, sizeof(uint32_t), 14);
+            if (mEnvMapTexture)
+            {
+                enc->setTexture(mEnvMapTexture, 0);
+            }
+            enc->dispatchThreads(grid, tg);
+        }
+    }
+
+    // Fold the accumulated radiance into the output exactly as the megakernel's
+    // tail does, reusing the resolve kernel in wavefront.metal.
+    enc->setComputePipelineState(mWavefrontResolvePSO);
+    enc->setBuffer(uniformBuffer, 0, 0);
+    enc->setBuffer(mRadianceBuffer, 0, 1);
+    enc->setBuffer(outputBuffer, 0, 2);
+    enc->setBuffer(mAccumulationBuffer, 0, 3);
+    enc->setBytes(&sampleCount, sizeof(uint32_t), 4);
+    enc->dispatchThreads(grid, tg);
 }
 
 void MetalRender::encodePathTraceBindings(MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer, Buffer* output)
@@ -758,7 +861,61 @@ void MetalRender::render(Buffer* output)
         // drawables and the UI keeps its vsync cadence regardless of how long
         // the full frame takes. The band height is derived from the measured
         // per-row cost so each submission stays near kTargetSubmissionMs.
-        const uint32_t rowsPerBand = computeBandHeight(height);
+        // Wavefront mode replaces the banded megakernel dispatch entirely: it
+        // already issues many short dispatches, so it needs no banding of its own.
+        const bool useWavefront = settings.getAs<uint32_t>("render/pt/tracerMode") == 1 &&
+                                  mWavefrontShadePSO != nullptr;
+        if (useWavefront)
+        {
+            ensureWavefrontBuffers(width, height);
+
+            MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
+            MTL::ComputeCommandEncoder* enc = pCmd->computeCommandEncoder();
+            enc->useResource(((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageWrite);
+            encodeWavefront(enc, pUniformBuffer, output, width, height, samplesThisLaunch);
+
+            if (pUniformData->debug == 0)
+            {
+                enc->setComputePipelineState(mTonemapperPSO);
+                enc->useResource(((MetalBuffer*)output)->getNativePtr(),
+                                 MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+                enc->setBuffer(pUniformTMBuffer, 0, 0);
+                enc->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
+                enc->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
+            }
+            enc->endEncoding();
+
+            const int writeIdxWf = mWriteIndex;
+            pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdxWf](MTL::CommandBuffer* cb) {
+                mLastRenderTimeMs.store((cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0,
+                                        std::memory_order_relaxed);
+                mReadyIndex.store(writeIdxWf);
+                mRenderBusy.store(false, std::memory_order_release);
+            }));
+            pCmd->commit();
+
+            if (enableAccumulation)
+            {
+                ctx.mSubframeIndex += samplesThisLaunch;
+            }
+            else
+            {
+                ctx.mSubframeIndex = 0;
+            }
+            pPool->release();
+            mPrevView = currView;
+            ctx.mFrameNumber++;
+            return;
+        }
+
+        // Banding exists to keep the UI responsive, and it costs a little: each
+        // band is another command buffer, and the frame's measured span includes
+        // the gaps between them. A benchmark comparing tracers has to be able to
+        // turn it off, or it measures the submission strategy as much as the
+        // tracer.
+        const uint32_t rowsPerBand = settings.getAs<uint32_t>("render/pt/splitSubmissions")
+                                         ? computeBandHeight(height)
+                                         : height;
         const uint32_t bandCount = (height + rowsPerBand - 1) / rowsPerBand;
         mLastBandTotalRows = height;
 
@@ -920,6 +1077,70 @@ void MetalRender::buildComputePipeline()
 
     pPathTraceFn->release();
     pComputeLibrary->release();
+}
+
+void MetalRender::buildWavefrontPipelines()
+{
+    MTL::Library* lib = loadShaderLibrary("metal/shaders/wavefront.metallib");
+    if (!lib)
+    {
+        return;
+    }
+    NS::Error* err = nullptr;
+    auto make = [&](const char* name) -> MTL::ComputePipelineState* {
+        MTL::Function* fn = lib->newFunction(NS::String::string(name, NS::UTF8StringEncoding));
+        if (!fn)
+        {
+            STRELKA_FATAL("wavefront: missing function {}", name);
+            return nullptr;
+        }
+        MTL::ComputePipelineState* pso = mDevice->newComputePipelineState(fn, &err);
+        if (!pso)
+        {
+            STRELKA_FATAL("wavefront: {} -> {}", name,
+                          err ? err->localizedDescription()->utf8String() : "unknown error");
+        }
+        fn->release();
+        return pso;
+    };
+    mWavefrontGeneratePSO = make("wavefrontGenerate");
+    mWavefrontExtendPSO = make("wavefrontExtend");
+    mWavefrontShadePSO = make("wavefrontShade");
+    mWavefrontResolvePSO = make("wavefrontResolve");
+    lib->release();
+
+    if (mWavefrontShadePSO)
+    {
+        STRELKA_INFO("wavefront PSO: shade maxThreadsPerTG={} extend={} generate={}",
+                     mWavefrontShadePSO->maxTotalThreadsPerThreadgroup(),
+                     mWavefrontExtendPSO ? mWavefrontExtendPSO->maxTotalThreadsPerThreadgroup() : 0,
+                     mWavefrontGeneratePSO ? mWavefrontGeneratePSO->maxTotalThreadsPerThreadgroup() : 0);
+    }
+}
+
+void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)
+{
+    const uint32_t pixels = width * height;
+    if (pixels == mWavefrontCapacity && mPathStateBuffer)
+    {
+        return;
+    }
+    auto release = [](MTL::Buffer*& b) { if (b) { b->release(); b = nullptr; } };
+    release(mPathStateBuffer);
+    release(mHitBuffer);
+    release(mIorStackBuffer);
+    release(mRadianceBuffer);
+
+    // Private storage: these never leave the GPU.
+    mPathStateBuffer = mDevice->newBuffer(pixels * sizeof(PathState), MTL::ResourceStorageModePrivate);
+    mHitBuffer = mDevice->newBuffer(pixels * sizeof(HitRecord), MTL::ResourceStorageModePrivate);
+    mIorStackBuffer = mDevice->newBuffer(pixels * sizeof(IorStack), MTL::ResourceStorageModePrivate);
+    mRadianceBuffer = mDevice->newBuffer(pixels * sizeof(simd::float4), MTL::ResourceStorageModePrivate);
+    mWavefrontCapacity = pixels;
+
+    STRELKA_INFO("wavefront buffers for {}x{}: {:.1f} MB total", width, height,
+                 (pixels * (sizeof(PathState) + sizeof(HitRecord) + sizeof(IorStack) + sizeof(simd::float4)))
+                     / (1024.0 * 1024.0));
 }
 
 void MetalRender::buildTonemapperPipeline()
@@ -1346,6 +1567,18 @@ void MetalRender::createAccelerationStructures()
         emitted.asIndex = (uint32_t)blasIdx;
         emitted.userID = mBlasList[blasIdx].mGeometryBase;
         emitted.mask = GEOMETRY_MASK_TRIANGLE;
+
+        // Point every geometry of this BLAS back at the instance that carries
+        // it. The megakernel reads the object-to-world transform off the
+        // intersection, but the wavefront tracer shades in a separate kernel
+        // where the intersection is gone, so this is its only route back to the
+        // instance descriptor. Each group emits exactly one instance, so the
+        // mapping is one run of entries per instance.
+        const uint32_t instanceIndex = (uint32_t)mEmittedInstances.size();
+        for (size_t e = mBlasList[blasIdx].mGeometryBase; e < mGeometryEntries.size(); ++e)
+        {
+            mGeometryEntries[e].instanceIndex = instanceIndex;
+        }
         mEmittedInstances.push_back(emitted);
     }
 

@@ -152,7 +152,12 @@ struct GeometryEntry
     uint32_t vbOffset;     // mesh vertex buffer offset
     uint32_t indexOffset;  // mesh index buffer offset
     uint32_t materialId;
-    uint32_t pad0;
+    // Emitted TLAS instance this geometry belongs to. The megakernel reads the
+    // object-to-world transform straight off the intersection, but the wavefront
+    // tracer shades in a separate kernel where the intersection is gone, so it
+    // needs a way back to the instance descriptor. Each emitted instance owns a
+    // contiguous run of geometry entries, so this is well defined.
+    uint32_t instanceIndex;
 };
 
 // --- Wavefront path tracing ------------------------------------------------
