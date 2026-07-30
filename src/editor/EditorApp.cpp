@@ -262,10 +262,14 @@ void EditorApp::run()
             m_sharedCtx->mSubframeIndex = 0;
         }
 
-        // Fire-and-forget: enqueue render if GPU is idle
-        auto maxEDR = m_display->getMaxEDR();
-        m_settingsManager->setAs<float>("render/post/tonemapper/maxEDR", maxEDR);
-        m_render->triggerRenderIfIdle();
+        // getMaxEDR() crosses into AppKit; the value only changes when the window
+        // moves between displays, so poll it a few times a second instead of
+        // every frame.
+        if (std::chrono::duration<double>(currentTime - m_lastEdrQuery).count() > 0.25)
+        {
+            m_lastEdrQuery = currentTime;
+            m_settingsManager->setAs<float>("render/post/tonemapper/maxEDR", m_display->getMaxEDR());
+        }
 
         // Display: always runs at vsync, independent of render
         m_display->onBeginFrame();
@@ -294,12 +298,23 @@ void EditorApp::run()
         m_display->drawUI();
         m_display->onEndFrame();
 
-        const uint32_t currentSpp = m_sharedCtx->mSubframeIndex;
-        const double renderMs = m_render->getLastRenderTimeMs();
+        // Enqueue the next render pass only after this frame's presentation work
+        // has been committed. The renderer runs on its own command queue, but the
+        // GPU still executes submissions roughly in arrival order — submitting a
+        // multi-second path-trace batch first would push the compositor's work
+        // behind it and stall nextDrawable() on the following frame.
+        m_render->triggerRenderIfIdle();
 
-        char title[128];
-        snprintf(title, sizeof(title), "Strelka [render: %.1f ms] [%u spp]", renderMs, currentSpp);
-        m_display->setWindowTitle(title);
+        // Window titles go through AppKit; refreshing at vsync is pure overhead
+        // and the numbers are unreadable at 60+ Hz anyway.
+        if (std::chrono::duration<double>(currentTime - m_lastTitleUpdate).count() > 0.25)
+        {
+            m_lastTitleUpdate = currentTime;
+            char title[128];
+            snprintf(title, sizeof(title), "Strelka [render: %.1f ms] [%zu spp]",
+                     m_render->getLastRenderTimeMs(), m_sharedCtx->mSubframeIndex);
+            m_display->setWindowTitle(title);
+        }
     }
 }
 

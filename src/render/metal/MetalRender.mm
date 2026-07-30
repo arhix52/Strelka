@@ -279,6 +279,85 @@ void MetalRender::createMetalMaterials()
     }
 }
 
+uint32_t MetalRender::computeBandHeight(uint32_t height) const
+{
+    if (height == 0)
+    {
+        return 1;
+    }
+
+    // First frame: no timing yet. Start with a conservative band so a pathological
+    // scene cannot lock the UI on the very first submission.
+    const double lastMs = mLastRenderTimeMs.load(std::memory_order_relaxed);
+    if (lastMs <= 0.0)
+    {
+        return std::min<uint32_t>(height, 128);
+    }
+
+    const double msPerRow = lastMs / static_cast<double>(mLastBandTotalRows > 0 ? mLastBandTotalRows : height);
+    if (msPerRow <= 0.0)
+    {
+        return height;
+    }
+
+    const double rows = kTargetSubmissionMs / msPerRow;
+    // Round to a multiple of the 8-row threadgroup so bands stay aligned, and cap
+    // the band count hard. Every extra band is another command buffer whose
+    // bindings and resource residency have to be re-established, so past a
+    // handful of bands the split costs more than the responsiveness it buys.
+    const uint32_t minRows = 8;
+    const uint32_t lowerBound = std::max(minRows, (height + kMaxBands - 1) / kMaxBands);
+    const uint32_t clamped =
+        static_cast<uint32_t>(std::clamp(rows, static_cast<double>(lowerBound), static_cast<double>(height)));
+    return std::max(minRows, (clamped + 7u) & ~7u);
+}
+
+void MetalRender::encodePathTraceBindings(MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer, Buffer* output)
+{
+    // Residency declarations. Textures are reached through resource IDs stored in
+    // the Material struct, so Metal cannot infer their use from the bindings —
+    // they must be declared explicitly. useResources() batches the whole array
+    // into one call instead of one call per texture per band.
+    if (!mMaterialTextures.empty())
+    {
+        enc->useResources(reinterpret_cast<const MTL::Resource* const*>(mMaterialTextures.data()),
+                          mMaterialTextures.size(), MTL::ResourceUsageRead);
+    }
+    if (!mPrimitiveAccelerationStructures.empty())
+    {
+        enc->useResources(reinterpret_cast<const MTL::Resource* const*>(mPrimitiveAccelerationStructures.data()),
+                          mPrimitiveAccelerationStructures.size(), MTL::ResourceUsageRead);
+    }
+    if (mInstanceAccelerationStructure)
+    {
+        enc->useResource(mInstanceAccelerationStructure, MTL::ResourceUsageRead);
+    }
+
+    MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
+
+    enc->setComputePipelineState(mPathTracingPSO);
+    enc->setBuffer(uniformBuffer, 0, 0);
+    enc->setBuffer(mInstanceBuffer, 0, 1);
+    enc->setAccelerationStructure(mInstanceAccelerationStructure, 2);
+    enc->setBuffer(mLightBuffer, 0, 3);
+    enc->setBuffer(mMaterialBuffer, 0, 4);
+    // Output
+    enc->setBuffer(outputBuffer, 0, 5);
+    enc->setBuffer(mAccumulationBuffer, 0, 6);
+    // Motion blur buffers
+    enc->setBuffer(mPrevVertexBuffer, 0, 7);
+    enc->setBuffer(mIndexBuffer, 0, 8);
+    enc->setBuffer(mInstanceDataBuffer, 0, 9);
+    // Environment map
+    enc->setBuffer(mEnvCdfXBuffer, 0, 10);
+    enc->setBuffer(mEnvCdfYBuffer, 0, 11);
+    if (mEnvMapTexture)
+    {
+        enc->useResource(mEnvMapTexture, MTL::ResourceUsageRead);
+        enc->setTexture(mEnvMapTexture, 0);
+    }
+}
+
 void MetalRender::render(Buffer* output)
 {
     using simd::float3;
@@ -667,89 +746,94 @@ void MetalRender::render(Buffer* output)
     // if accumulation is off then launch selected samples per pixel
     const uint32_t samplesThisLaunch =
         enableAccumulation ? std::min((int32_t)samplesPerLaunch, leftSpp) : samplesPerLaunch;
-    if (samplesThisLaunch != 0)
+    if (samplesThisLaunch != 0 && mInstanceBuffer != nullptr)
     {
-        pUniformData->samples_per_launch = samplesThisLaunch; // TODO: implement in pt kernel
+        pUniformData->samples_per_launch = samplesThisLaunch;
 
         pUniformBuffer->didModifyRange(NS::Range::Make(0, sizeof(Uniforms)));
         pUniformTMBuffer->didModifyRange(NS::Range::Make(0, sizeof(UniformsTonemap)));
 
-        MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
-        MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
-        if (mMaterialBuffer != nullptr)
-        {
-            pComputeEncoder->useResource(mMaterialBuffer, MTL::ResourceUsageRead);
-        }
-        if (mLightBuffer != nullptr)
-        {
-            pComputeEncoder->useResource(mLightBuffer, MTL::ResourceUsageRead);
-        }
-        if (mInstanceAccelerationStructure != nullptr)
-        {
-            pComputeEncoder->useResource(mInstanceAccelerationStructure, MTL::ResourceUsageRead);
-        }
-        for (const MTL::AccelerationStructure* primitiveAccel : mPrimitiveAccelerationStructures)
-        {
-            pComputeEncoder->useResource(primitiveAccel, MTL::ResourceUsageRead);
-        }
-        for (auto& materialTexture : mMaterialTextures)
-        {
-            pComputeEncoder->useResource(materialTexture, MTL::ResourceUsageRead);
-        }
-        pComputeEncoder->useResource(((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageWrite);
-        pComputeEncoder->useResource(mPrevVertexBuffer, MTL::ResourceUsageRead);
-        pComputeEncoder->useResource(mIndexBuffer, MTL::ResourceUsageRead);
-        pComputeEncoder->useResource(mInstanceDataBuffer, MTL::ResourceUsageRead);
-
-        pComputeEncoder->setComputePipelineState(mPathTracingPSO);
-        pComputeEncoder->setBuffer(pUniformBuffer, 0, 0);
-        pComputeEncoder->setBuffer(mInstanceBuffer, 0, 1);
-        pComputeEncoder->setAccelerationStructure(mInstanceAccelerationStructure, 2);
-        pComputeEncoder->setBuffer(mLightBuffer, 0, 3);
-        pComputeEncoder->setBuffer(mMaterialBuffer, 0, 4);
-        // Output
-        pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 5);
-        pComputeEncoder->setBuffer(mAccumulationBuffer, 0, 6);
-        // Motion blur buffers
-        pComputeEncoder->setBuffer(mPrevVertexBuffer, 0, 7);
-        pComputeEncoder->setBuffer(mIndexBuffer, 0, 8);
-        pComputeEncoder->setBuffer(mInstanceDataBuffer, 0, 9);
-        // Environment map buffers (must always be bound — shader expects indices 10/11)
+        // Environment map buffers must always be bound — the kernel declares
+        // indices 10/11 unconditionally.
         if (!mEnvCdfXBuffer)
             mEnvCdfXBuffer = mDevice->newBuffer(sizeof(float), MTL::ResourceStorageModeManaged);
         if (!mEnvCdfYBuffer)
             mEnvCdfYBuffer = mDevice->newBuffer(sizeof(float), MTL::ResourceStorageModeManaged);
-        pComputeEncoder->useResource(mEnvCdfXBuffer, MTL::ResourceUsageRead);
-        pComputeEncoder->setBuffer(mEnvCdfXBuffer, 0, 10);
-        pComputeEncoder->useResource(mEnvCdfYBuffer, MTL::ResourceUsageRead);
-        pComputeEncoder->setBuffer(mEnvCdfYBuffer, 0, 11);
-        if (mEnvMapTexture)
-        {
-            pComputeEncoder->useResource(mEnvMapTexture, MTL::ResourceUsageRead);
-            pComputeEncoder->setTexture(mEnvMapTexture, 0);
-        }
-        if (mInstanceBuffer != nullptr)
-        {
-            const MTL::Size gridSize = MTL::Size(width, height, 1);
-            const MTL::Size threadgroupSize(8, 8, 1);
-            pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
-        }
-        // Disable tonemapping for debug output
-        if (pUniformData->debug == 0)
-        {
-            pComputeEncoder->setComputePipelineState(mTonemapperPSO);
-            pComputeEncoder->useResource(
-                ((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
-            pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
-            pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
-            {
-                const MTL::Size gridSize = MTL::Size(width, height, 1);
-                const MTL::Size threadgroupSize(8, 8, 1);
-                pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
-            }
-        }
 
-        pComputeEncoder->endEncoding();
+        // --- Split the path trace into horizontal bands ---------------------
+        //
+        // A full-frame path-trace dispatch is a single indivisible unit of GPU
+        // work. While it runs, the display queue's command buffer cannot start,
+        // so nextDrawable() blocks and the whole UI thread stalls for the entire
+        // render time — seconds per frame on a heavy scene.
+        //
+        // Splitting the frame into several command buffers gives the scheduler
+        // preemption points between them, so the compositor keeps getting
+        // drawables and the UI keeps its vsync cadence regardless of how long
+        // the full frame takes. The band height is derived from the measured
+        // per-row cost so each submission stays near kTargetSubmissionMs.
+        const uint32_t rowsPerBand = computeBandHeight(height);
+        const uint32_t bandCount = (height + rowsPerBand - 1) / rowsPerBand;
+        mLastBandTotalRows = height;
+
+        for (uint32_t band = 0; band < bandCount; ++band)
+        {
+            const uint32_t bandStart = band * rowsPerBand;
+            const uint32_t bandRows = std::min(rowsPerBand, height - bandStart);
+            const bool isLastBand = (band + 1 == bandCount);
+
+            MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
+            MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
+
+            encodePathTraceBindings(pComputeEncoder, pUniformBuffer, output);
+            pComputeEncoder->setBytes(&bandStart, sizeof(uint32_t), 12);
+
+            pComputeEncoder->dispatchThreads(MTL::Size(width, bandRows, 1), MTL::Size(8, 8, 1));
+
+            // Tonemapping reads back the whole image, so it can only run once
+            // every band has been written. Command buffers on a single queue
+            // execute in submission order, so the last one is the right place.
+            if (isLastBand && pUniformData->debug == 0)
+            {
+                pComputeEncoder->setComputePipelineState(mTonemapperPSO);
+                pComputeEncoder->useResource(
+                    ((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+                pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
+                pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
+                pComputeEncoder->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
+            }
+
+            pComputeEncoder->endEncoding();
+
+            const int writeIdx = mWriteIndex;
+            const bool isFirstBand = (band == 0);
+            pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdx, isFirstBand, isLastBand](MTL::CommandBuffer* cb) {
+                // Measure the span from the first band starting to the last one
+                // finishing. Summing each band's own GPU interval instead would
+                // overcount: the bands are separate submissions, so the sum also
+                // picks up per-command-buffer setup and any time the GPU spent on
+                // the display queue in between. That inflated number fed straight
+                // back into computeBandHeight() and drove the split ever finer —
+                // a feedback loop that made the renderer slower every frame.
+                if (isFirstBand)
+                {
+                    mFrameGpuStartSeconds.store(cb->GPUStartTime(), std::memory_order_relaxed);
+                }
+                if (isLastBand)
+                {
+                    const double start = mFrameGpuStartSeconds.load(std::memory_order_relaxed);
+                    const double spanMs = (cb->GPUEndTime() - start) * 1000.0;
+                    if (spanMs > 0.0)
+                    {
+                        mLastRenderTimeMs.store(spanMs, std::memory_order_relaxed);
+                    }
+                    mReadyIndex.store(writeIdx);
+                    // Must be released last: it is what lets the next frame start.
+                    mRenderBusy.store(false, std::memory_order_release);
+                }
+            }));
+            pCmd->commit();
+        }
 
         if (enableAccumulation)
         {
@@ -759,19 +843,6 @@ void MetalRender::render(Buffer* output)
         {
             ctx.mSubframeIndex = 0;
         }
-
-        // Completion handler for async double-buffered output
-        if (mRenderBusy.load())
-        {
-            int writeIdx = mWriteIndex;
-            pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdx](MTL::CommandBuffer* cb) {
-                double gpuMs = (cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0;
-                mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
-                mReadyIndex.store(writeIdx);
-                mRenderBusy.store(false);
-            }));
-        }
-        pCmd->commit();
     }
     else
     {
@@ -800,17 +871,16 @@ void MetalRender::render(Buffer* output)
             pComputeEncoder->endEncoding();
         }
 
-        // Completion handler for async double-buffered output
-        if (mRenderBusy.load())
-        {
-            int writeIdx = mWriteIndex;
-            pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdx](MTL::CommandBuffer* cb) {
-                double gpuMs = (cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0;
-                mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
-                mReadyIndex.store(writeIdx);
-                mRenderBusy.store(false);
-            }));
-        }
+        // Completion handler for async double-buffered output. It must be
+        // installed unconditionally: it is the only thing that clears
+        // mRenderBusy, and skipping it would wedge the renderer permanently.
+        const int writeIdx = mWriteIndex;
+        pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdx](MTL::CommandBuffer* cb) {
+            const double gpuMs = (cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0;
+            mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
+            mReadyIndex.store(writeIdx);
+            mRenderBusy.store(false, std::memory_order_release);
+        }));
         pCmd->commit();
     }
     pPool->release();
