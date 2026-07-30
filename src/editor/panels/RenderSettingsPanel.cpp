@@ -158,6 +158,13 @@ void EditorApp::drawRenderSettingsPanel()
             ImGui::EndCombo();
         }
 
+        const char* tracerItems[] = { "Megakernel", "Wavefront" };
+        auto tracerMode = m_settingsManager->getAs<uint32_t>("render/pt/tracerMode");
+        if (ImGui::Combo("Tracer", (int*)&tracerMode, tracerItems, IM_ARRAYSIZE(tracerItems)))
+        {
+            m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", tracerMode);
+        }
+
         auto maxDepth = m_settingsManager->getAs<uint32_t>("render/pt/depth");
         if (ImGui::SliderInt("Max Depth", (int*)&maxDepth, 1, 16))
         {

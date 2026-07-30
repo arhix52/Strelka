@@ -8,9 +8,14 @@
 // that each stage can later run over just the paths that are still alive, rather
 // than making every lane of a simdgroup wait for the longest-lived path in it.
 //
-// This first version does *not* compact yet: every stage is dispatched over all
-// pixels and dead paths return immediately. That isolates the cost of moving
-// state to memory from the benefit of compaction, which comes next.
+// Live paths are compacted between bounces into an index queue, so a stage only
+// dispatches threads for work that is still alive. Compaction moves 4-byte
+// indices, not 48-byte records, and reserves output slots one atomic per
+// simdgroup rather than one per lane.
+//
+// Path state stays indexed by pixel; only the queue is compacted. That keeps the
+// side tables (hits, IOR stacks, radiance) addressable by a single index and
+// makes the queue's contents a permutation rather than a copy.
 //
 // Shadow rays are still traced inline inside estimateDirectLighting, as in the
 // megakernel; splitting them into their own stage is a later step.
@@ -19,6 +24,34 @@
 // Bit 31 of HitRecord::geomEntryIndex marks a hit on emissive geometry, in which
 // case the remaining bits hold the light index rather than a geometry entry.
 #define HIT_LIGHT_BIT 0x80000000u
+
+// Layout of the control buffer, shared by every stage.
+//   [0], [1] : live path count of each ping-pong queue
+//   [2..4]   : MTLDispatchThreadgroupsIndirectArguments for this bounce
+//   [5]      : live path count for this bounce, so stages need no queue index
+#define WF_CTRL_COUNT0    0
+#define WF_CTRL_COUNT1    1
+#define WF_CTRL_DISPATCH  2
+#define WF_CTRL_ACTIVE    5
+
+// Reserve a run of output slots for the surviving lanes of one simdgroup.
+//
+// Every lane that reaches here survived -- the ones that did not have already
+// returned, so they are inactive and the simdgroup reductions below see only
+// survivors. One atomic per simdgroup instead of one per lane.
+static inline void queuePush(device atomic_uint* counter, device uint32_t* queueOut,
+                             uint32_t pathIndex)
+{
+    const uint32_t rank = simd_prefix_exclusive_sum(1u);
+    const uint32_t total = simd_sum(1u);
+    uint32_t base = 0u;
+    if (simd_is_first())
+    {
+        base = atomic_fetch_add_explicit(counter, total, memory_order_relaxed);
+    }
+    base = simd_broadcast_first(base);
+    queueOut[base + rank] = pathIndex;
+}
 
 static inline uint32_t pathDepth(uint32_t depthAndFlags)
 {
@@ -59,13 +92,23 @@ kernel void wavefrontGenerate(
     device PathState*                                          paths          [[buffer(1)]],
     device float4*                                             radianceOut    [[buffer(2)]],
     device IorStack*                                           iorStacks      [[buffer(3)]],
-    constant uint32_t&                                         sampleIdx      [[buffer(4)]])
+    constant uint32_t&                                         sampleIdx      [[buffer(4)]],
+    device uint32_t*                                           queueOut       [[buffer(5)]],
+    device uint32_t*                                           control        [[buffer(6)]])
 {
     const uint32_t pixelCount = uniforms.width * uniforms.height;
+    if (tid == 0u)
+    {
+        control[WF_CTRL_COUNT0] = pixelCount;
+        control[WF_CTRL_COUNT1] = 0u;
+    }
     if (tid >= pixelCount)
     {
         return;
     }
+    // Every camera ray starts alive, so the first queue is the identity and
+    // needs no compaction.
+    queueOut[tid] = tid;
 
     if (sampleIdx == 0u)
     {
@@ -98,25 +141,24 @@ kernel void wavefrontGenerate(
 // extend -- closest hit
 // ---------------------------------------------------------------------------
 kernel void wavefrontExtend(
-    uint                                                       tid            [[thread_position_in_grid]],
+    uint                                                       gid            [[thread_position_in_grid]],
     constant Uniforms&                                         uniforms       [[buffer(0)]],
     constant MTLAccelerationStructureUserIDInstanceDescriptor* instances      [[buffer(1)]],
     acceleration_structure<instancing, primitive_motion>       accelerationStructure [[buffer(2)]],
     device const PathState*                                    paths          [[buffer(3)]],
     device HitRecord*                                          hits           [[buffer(4)]],
-    constant uint32_t&                                         sampleIdx      [[buffer(5)]])
+    constant uint32_t&                                         sampleIdx      [[buffer(5)]],
+    device const uint32_t*                                     queue          [[buffer(6)]],
+    device const uint32_t*                                     control        [[buffer(7)]])
 {
-    const uint32_t pixelCount = uniforms.width * uniforms.height;
-    if (tid >= pixelCount)
+    // Indirect dispatch can only launch whole threadgroups, so the tail of the
+    // last one runs past the queue and has to be discarded here.
+    if (gid >= control[WF_CTRL_ACTIVE])
     {
         return;
     }
-
+    const uint32_t tid = queue[gid];
     const PathState p = paths[tid];
-    if ((p.depthAndFlags & PATH_FLAG_ALIVE) == 0u)
-    {
-        return; // hits[] is not read for dead paths
-    }
 
     const float motionTime = motionTimeFor(uniforms, p.pixelIndex, sampleIdx);
 
@@ -220,7 +262,7 @@ static void fetchTriangle(device const char* vertexBuffer,
 // shade -- material evaluation, next-event estimation, next ray
 // ---------------------------------------------------------------------------
 kernel void wavefrontShade(
-    uint                                                       tid            [[thread_position_in_grid]],
+    uint                                                       gid            [[thread_position_in_grid]],
     constant Uniforms&                                         uniforms       [[buffer(0)]],
     constant MTLAccelerationStructureUserIDInstanceDescriptor* instances      [[buffer(1)]],
     acceleration_structure<instancing, primitive_motion>       accelerationStructure [[buffer(2)]],
@@ -236,19 +278,18 @@ kernel void wavefrontShade(
     device const char*                                         prevVertexBuffer [[buffer(12)]],
     device const uint32_t*                                     indexBuffer    [[buffer(13)]],
     constant uint32_t&                                         sampleIdx      [[buffer(14)]],
+    device const uint32_t*                                     queue          [[buffer(15)]],
+    device uint32_t*                                           queueOut       [[buffer(16)]],
+    device atomic_uint*                                        outCounter     [[buffer(17)]],
+    device const uint32_t*                                     control        [[buffer(18)]],
     texture2d<float>                                           envMapTexture  [[texture(0)]])
 {
-    const uint32_t pixelCount = uniforms.width * uniforms.height;
-    if (tid >= pixelCount)
+    if (gid >= control[WF_CTRL_ACTIVE])
     {
         return;
     }
-
+    const uint32_t tid = queue[gid];
     PathState p = paths[tid];
-    if ((p.depthAndFlags & PATH_FLAG_ALIVE) == 0u)
-    {
-        return;
-    }
 
     const uint32_t depth = pathDepth(p.depthAndFlags);
     const bool specularBounce = (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u;
@@ -296,7 +337,6 @@ kernel void wavefrontShade(
             radiance += throughput * uniforms.missColor;
         }
         radianceOut[tid] += float4(radiance, 0.0f);
-        paths[tid].depthAndFlags = 0u; // dead
         return;
     }
 
@@ -324,7 +364,6 @@ kernel void wavefrontShade(
             }
         }
         radianceOut[tid] += float4(radiance, 0.0f);
-        paths[tid].depthAndFlags = 0u;
         return;
     }
 
@@ -383,7 +422,6 @@ kernel void wavefrontShade(
             dbg = float3(motionTime, clamp(length(nv[0] - nCur[0]) * 10.0f, 0.0f, 1.0f), 0.0f);
         }
         radianceOut[tid] = float4(dbg, 0.0f);
-        paths[tid].depthAndFlags = 0u;
         return;
     }
 
@@ -406,7 +444,6 @@ kernel void wavefrontShade(
     if (sampleResult.event_type == BSDF_EVENT_ABSORB)
     {
         radianceOut[tid] += float4(radiance, 0.0f);
-        paths[tid].depthAndFlags = 0u;
         return;
     }
 
@@ -438,8 +475,7 @@ kernel void wavefrontShade(
             if (isnan(lightPdf) || isnan(evalResult.pdf))
             {
                 radianceOut[tid] = float4(1000000.0f, 0.0f, 0.0f, 0.0f);
-                paths[tid].depthAndFlags = 0u;
-                return;
+                        return;
             }
             if (evalResult.pdf > 0.0f)
             {
@@ -496,7 +532,6 @@ kernel void wavefrontShade(
 
     if (!alive)
     {
-        paths[tid].depthAndFlags = 0u;
         return;
     }
 
@@ -508,6 +543,31 @@ kernel void wavefrontShade(
                       (nextSpecular ? PATH_FLAG_SPECULAR : 0u) |
                       (didNee ? PATH_FLAG_NEE_DONE : 0u);
     paths[tid] = p;
+
+    queuePush(outCounter, queueOut, tid);
+}
+
+// ---------------------------------------------------------------------------
+// prepare -- turn the live path count into an indirect dispatch
+//
+// The count only exists on the GPU. Reading it back to size the next dispatch on
+// the CPU would put a round trip in the middle of every bounce, which costs far
+// more than the empty threadgroups an indirect dispatch occasionally launches.
+// ---------------------------------------------------------------------------
+kernel void wavefrontPrepare(
+    device uint32_t&        controlRef    [[buffer(0)]],
+    constant uint32_t&      srcIdx        [[buffer(1)]],
+    constant uint32_t&      threadsPerGroup [[buffer(2)]])
+{
+    device uint32_t* control = &controlRef;
+    const uint32_t n = control[srcIdx];
+    control[WF_CTRL_ACTIVE] = n;
+    control[WF_CTRL_DISPATCH + 0] = (n + threadsPerGroup - 1u) / threadsPerGroup;
+    control[WF_CTRL_DISPATCH + 1] = 1u;
+    control[WF_CTRL_DISPATCH + 2] = 1u;
+    // The stage about to run appends into the other queue, so clear its count
+    // before anything can add to it.
+    control[1u - srcIdx] = 0u;
 }
 
 // ---------------------------------------------------------------------------

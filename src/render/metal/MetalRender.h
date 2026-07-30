@@ -185,10 +185,16 @@ private:
     MTL::ComputePipelineState* mWavefrontExtendPSO = nullptr;
     MTL::ComputePipelineState* mWavefrontShadePSO = nullptr;
     MTL::ComputePipelineState* mWavefrontResolvePSO = nullptr;
+    MTL::ComputePipelineState* mWavefrontPreparePSO = nullptr;
     MTL::Buffer* mPathStateBuffer = nullptr;
     MTL::Buffer* mHitBuffer = nullptr;
     MTL::Buffer* mIorStackBuffer = nullptr;
     MTL::Buffer* mRadianceBuffer = nullptr;
+    // Ping-pong queues of live path indices, plus the counters and the indirect
+    // dispatch arguments derived from them. All GPU-side: the counts are never
+    // read back, or every bounce would carry a round trip.
+    MTL::Buffer* mPathQueueBuffer[2] = { nullptr, nullptr };
+    MTL::Buffer* mWavefrontControlBuffer = nullptr;
     uint32_t mWavefrontCapacity = 0; // pixels the buffers above are sized for
 
     void buildWavefrontPipelines();

@@ -375,7 +375,10 @@ void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* 
     }
 
     const MTL::Size grid = MTL::Size(pixels, 1, 1);
-    const MTL::Size tg = MTL::Size(64, 1, 1);
+    const uint32_t kThreadsPerGroup = 64;
+    const MTL::Size tg = MTL::Size(kThreadsPerGroup, 1, 1);
+    // Byte offset of the indirect dispatch arguments inside the control buffer.
+    const NS::UInteger kDispatchArgsOffset = 2 * sizeof(uint32_t);
 
     for (uint32_t s = 0; s < sampleCount; ++s)
     {
@@ -385,10 +388,23 @@ void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* 
         enc->setBuffer(mRadianceBuffer, 0, 2);
         enc->setBuffer(mIorStackBuffer, 0, 3);
         enc->setBytes(&s, sizeof(uint32_t), 4);
+        enc->setBuffer(mPathQueueBuffer[0], 0, 5);
+        enc->setBuffer(mWavefrontControlBuffer, 0, 6);
         enc->dispatchThreads(grid, tg);
 
         for (uint32_t bounce = 0; bounce < maxDepth; ++bounce)
         {
+            const uint32_t src = bounce & 1u;
+            const uint32_t dst = src ^ 1u;
+
+            // Publish this bounce's live count and clear the destination's, then
+            // dispatch both stages indirectly from it. Nothing crosses to the CPU.
+            enc->setComputePipelineState(mWavefrontPreparePSO);
+            enc->setBuffer(mWavefrontControlBuffer, 0, 0);
+            enc->setBytes(&src, sizeof(uint32_t), 1);
+            enc->setBytes(&kThreadsPerGroup, sizeof(uint32_t), 2);
+            enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
+
             enc->setComputePipelineState(mWavefrontExtendPSO);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(mInstanceBuffer, 0, 1);
@@ -396,7 +412,9 @@ void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* 
             enc->setBuffer(mPathStateBuffer, 0, 3);
             enc->setBuffer(mHitBuffer, 0, 4);
             enc->setBytes(&s, sizeof(uint32_t), 5);
-            enc->dispatchThreads(grid, tg);
+            enc->setBuffer(mPathQueueBuffer[src], 0, 6);
+            enc->setBuffer(mWavefrontControlBuffer, 0, 7);
+            enc->dispatchThreadgroups(mWavefrontControlBuffer, kDispatchArgsOffset, tg);
 
             enc->setComputePipelineState(mWavefrontShadePSO);
             enc->setBuffer(uniformBuffer, 0, 0);
@@ -414,11 +432,15 @@ void MetalRender::encodeWavefront(MTL::ComputeCommandEncoder* enc, MTL::Buffer* 
             enc->setBuffer(mPrevVertexBuffer, 0, 12);
             enc->setBuffer(mIndexBuffer, 0, 13);
             enc->setBytes(&s, sizeof(uint32_t), 14);
+            enc->setBuffer(mPathQueueBuffer[src], 0, 15);
+            enc->setBuffer(mPathQueueBuffer[dst], 0, 16);
+            enc->setBuffer(mWavefrontControlBuffer, dst * sizeof(uint32_t), 17);
+            enc->setBuffer(mWavefrontControlBuffer, 0, 18);
             if (mEnvMapTexture)
             {
                 enc->setTexture(mEnvMapTexture, 0);
             }
-            enc->dispatchThreads(grid, tg);
+            enc->dispatchThreadgroups(mWavefrontControlBuffer, kDispatchArgsOffset, tg);
         }
     }
 
@@ -1107,6 +1129,7 @@ void MetalRender::buildWavefrontPipelines()
     mWavefrontExtendPSO = make("wavefrontExtend");
     mWavefrontShadePSO = make("wavefrontShade");
     mWavefrontResolvePSO = make("wavefrontResolve");
+    mWavefrontPreparePSO = make("wavefrontPrepare");
     lib->release();
 
     if (mWavefrontShadePSO)
@@ -1130,12 +1153,19 @@ void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)
     release(mHitBuffer);
     release(mIorStackBuffer);
     release(mRadianceBuffer);
+    release(mPathQueueBuffer[0]);
+    release(mPathQueueBuffer[1]);
+    release(mWavefrontControlBuffer);
 
     // Private storage: these never leave the GPU.
     mPathStateBuffer = mDevice->newBuffer(pixels * sizeof(PathState), MTL::ResourceStorageModePrivate);
     mHitBuffer = mDevice->newBuffer(pixels * sizeof(HitRecord), MTL::ResourceStorageModePrivate);
     mIorStackBuffer = mDevice->newBuffer(pixels * sizeof(IorStack), MTL::ResourceStorageModePrivate);
     mRadianceBuffer = mDevice->newBuffer(pixels * sizeof(simd::float4), MTL::ResourceStorageModePrivate);
+    mPathQueueBuffer[0] = mDevice->newBuffer(pixels * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
+    mPathQueueBuffer[1] = mDevice->newBuffer(pixels * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
+    // Two counters, three indirect dispatch arguments and the active count.
+    mWavefrontControlBuffer = mDevice->newBuffer(8 * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
     mWavefrontCapacity = pixels;
 
     STRELKA_INFO("wavefront buffers for {}x{}: {:.1f} MB total", width, height,

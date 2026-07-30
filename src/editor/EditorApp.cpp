@@ -135,6 +135,10 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<float>("render/animation/speed", 1.0f);
     m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", 0); // 0 = megakernel, 1 = wavefront
     m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 1);
+    if (const char* tracer = getenv("STRELKA_TRACER"))
+    {
+        m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", (uint32_t)atoi(tracer));
+    }
     m_settingsManager->setAs<uint32_t>("render/validate/estimatorMode", 0);
     m_settingsManager->setAs<bool>("render/validate/analyticLights", true);
     m_settingsManager->setAs<std::string>("resource/searchPath", m_resourceSearchPath);
