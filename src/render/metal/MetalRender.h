@@ -121,6 +121,21 @@ private:
     float mEnvMapAutoScale = 1.0f;
     bool mEnvMapLoaded = false;
 
+    // --- Frame splitting ----------------------------------------------------
+    // Target wall-clock cost of a single path-trace command buffer. Keeping each
+    // submission short is what keeps the display queue (and therefore the UI)
+    // running at vsync while a heavy frame renders.
+    static constexpr double kTargetSubmissionMs = 6.0;
+    // Upper bound on bands per frame. Each band is a separate command buffer with
+    // its own binding + residency setup, so splitting past this costs more than
+    // the interleaving it enables.
+    static constexpr uint32_t kMaxBands = 8;
+    std::atomic<double> mFrameGpuStartSeconds{ 0.0 };
+    uint32_t mLastBandTotalRows = 0;
+
+    uint32_t computeBandHeight(uint32_t height) const;
+    void encodePathTraceBindings(MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer, Buffer* output);
+
     MTL::Library* loadShaderLibrary(const char* relativePath);
     void buildComputePipeline();
     void buildTonemapperPipeline();

@@ -544,14 +544,26 @@ kernel void raytracingKernel(
     device const InstanceData* instanceDataBuffer                                    [[buffer(9)]],
     device const float* envCdfX                                                      [[buffer(10)]],
     device const float* envCdfY                                                      [[buffer(11)]],
+    constant uint32_t&                                         tileOffsetY           [[buffer(12)]],
     texture2d<float>                                           envMapTexture         [[texture(0)]]
     )
 {
-    if (tid.x >= uniforms.width || tid.y >= uniforms.height) 
+    // The host splits a frame into horizontal bands, each dispatched from its own
+    // command buffer, so that no single submission monopolises the GPU. tid.y is
+    // band-local; tileOffsetY maps it back to the full image.
+    const uint2 pixel = uint2(tid.x, tid.y + tileOffsetY);
+    if (pixel.x >= uniforms.width || pixel.y >= uniforms.height)
     {
         return;
     }
-    const uint32_t linearPixelIndex = tid.y * uniforms.width + tid.x;
+    const uint32_t linearPixelIndex = pixel.y * uniforms.width + pixel.x;
+
+    // samples_per_launch paths are traced per dispatch and averaged below.
+    const uint32_t sampleCount = max(uniforms.samples_per_launch, 1u);
+    float3 radianceSum = float3(0.0f);
+
+    for (uint32_t sampleIdx = 0; sampleIdx < sampleCount; ++sampleIdx)
+    {
 
     PerRayData prd{};
     prd.radiance = float3(0.0f);
@@ -560,7 +572,7 @@ kernel void raytracingKernel(
     prd.depth = 0;
     prd.specularBounce = false;
     prd.lastBsdfPdf = 0.0f;
-    prd.sampler = initSampler(linearPixelIndex, uniforms.subframeIndex, 0u);
+    prd.sampler = initSampler(linearPixelIndex, uniforms.subframeIndex + sampleIdx, 0u);
 
     DebugMode debugMode = (DebugMode) uniforms.debug;
 
@@ -573,7 +585,7 @@ kernel void raytracingKernel(
             motionTime = 1.0f; // show current frame only (t=1 → kf1 = current VB)
     }
 
-    generateCameraRay(tid, prd.sampler, prd.origin, prd.direction, uniforms, motionTime);
+    generateCameraRay(pixel, prd.sampler, prd.origin, prd.direction, uniforms, motionTime);
 
     // Create intersector once outside the bounce loop (primitive_motion for native motion BVH)
     intersector<triangle_data, instancing, primitive_motion> i;
@@ -880,27 +892,41 @@ kernel void raytracingKernel(
 
             if (prd.depth > 3)
             {
-                const float p = max(prd.throughput.x, max(prd.throughput.y, prd.throughput.z));
+                // The survival probability must be <= 1. Without the clamp a
+                // throughput above 1 (bright albedo, emissive gain) never
+                // terminates yet still gets divided by p > 1, silently losing
+                // energy on every bounce past the third.
+                const float p = min(max(prd.throughput.x, max(prd.throughput.y, prd.throughput.z)), 1.0f);
                 if (random<SampleDimension::eRussianRoulette>(prd.sampler, uniforms.samplerType) > p)
                 {
                     break;
                 }
-                prd.throughput *= 1.0f / (p + 1e-5f);
+                prd.throughput *= 1.0f / max(p, 1e-5f);
             }
         }
         ++prd.depth;
         ++prd.sampler.depth;
     }
 
-    float3 result = prd.radiance;
+    radianceSum += prd.radiance;
+
+    } // sample loop
+
+    float3 result = radianceSum / static_cast<float>(sampleCount);
 
     if (uniforms.enableAccumulation)
     {
-        float3 accum_color = result / static_cast<float>(uniforms.samples_per_launch);
+        float3 accum_color = result;
 
         if (uniforms.subframeIndex > 0)
         {
-            const float a = 1.0f / static_cast<float>(uniforms.subframeIndex + 1);
+            // subframeIndex counts *samples* already folded into the accumulator,
+            // and this launch contributes sampleCount more. Merging two means of
+            // n and m samples weights the new mean by m / (n + m); the previous
+            // 1 / (subframeIndex + 1) was only correct for sampleCount == 1 and
+            // biased the running average for any larger SPP-per-subframe.
+            const float a = static_cast<float>(sampleCount) /
+                            static_cast<float>(uniforms.subframeIndex + sampleCount);
             const float3 accum_color_prev = float3(accum[linearPixelIndex]);
             accum_color = mix(accum_color_prev, accum_color, a);
         }
