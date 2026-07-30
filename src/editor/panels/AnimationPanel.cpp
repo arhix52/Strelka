@@ -7,7 +7,12 @@ namespace oka
 
 void EditorApp::drawAnimationPanel()
 {
-    if (ImGui::Begin("Animations"))
+    // ImGui::End() must be called for every Begin(), including the collapsed /
+    // clipped case where Begin() returns false — otherwise the window stack is
+    // left unbalanced and ImGui asserts on the next frame. Collapsing the
+    // Animations panel used to be enough to trip this.
+    const bool visible = ImGui::Begin("Animations");
+    if (visible)
     {
         const auto& animations = m_scene->getAnimations();
 
@@ -171,9 +176,8 @@ void EditorApp::drawAnimationPanel()
         {
             ImGui::TextDisabled("No animations in scene");
         }
-
-        ImGui::End();
     }
+    ImGui::End();
 }
 
 } // namespace oka

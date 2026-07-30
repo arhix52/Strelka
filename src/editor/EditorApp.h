@@ -10,6 +10,7 @@
 #include <glm/gtx/compatibility.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <future>
@@ -52,6 +53,10 @@ private:
     std::string m_resourceSearchPath;
 
     std::string m_pendingScreenshotPath;
+
+    // Throttles for AppKit round-trips that do not need per-frame accuracy.
+    std::chrono::high_resolution_clock::time_point m_lastTitleUpdate{};
+    std::chrono::high_resolution_clock::time_point m_lastEdrQuery{};
 
 public:
     EditorApp(const std::string& sceneFile, const std::string& resourceSearchPath);
