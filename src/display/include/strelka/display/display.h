@@ -106,7 +106,7 @@ protected:
 
     SettingsManager* mSettings = nullptr;
 
-    GLFWwindow* mWindow;
+    GLFWwindow* mWindow = nullptr;
 };
 
 class DisplayFactory
