@@ -8,6 +8,8 @@
 #include <QuartzCore/QuartzCore.hpp>
 
 #include "MetalRender.h"
+
+#include <chrono>
 #include "MetalBuffer.h"
 
 #include <algorithm>
@@ -1176,7 +1178,15 @@ void MetalRender::render(Buffer* output)
 
             MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
             MTL::ComputeCommandEncoder* enc = pCmd->computeCommandEncoder();
+            const auto encodeStart = std::chrono::high_resolution_clock::now();
             enc = encodeWavefront(pCmd, enc, pUniformBuffer, output, width, height, samplesThisLaunch);
+            if (mProfileStages)
+            {
+                const double encodeMs =
+                    std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - encodeStart)
+                        .count();
+                STRELKA_INFO("STAGES cpu encode {:.3f} ms", encodeMs);
+            }
 
             if (pUniformData->debug == 0)
             {
