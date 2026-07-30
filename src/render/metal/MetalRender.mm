@@ -141,6 +141,12 @@ MetalRender::~MetalRender()
         safeRelease(mWavefrontControlBuffer);
         safeRelease(mShadowRayBuffer);
         safeRelease(mStageTimestampBuffer);
+        safeRelease(mStageStatsBuffer);
+        safeRelease(mSortBinBuffer);
+        safeRelease(mSortTgBaseBuffer);
+        safeRelease(mWavefrontSortCountPSO);
+        safeRelease(mWavefrontSortScanPSO);
+        safeRelease(mWavefrontSortScatterPSO);
         safeRelease(mPathTracingPSO);
         safeRelease(mTonemapperPSO);
         safeRelease(mSkinningPSO);
@@ -369,11 +375,12 @@ enum StageKind : uint8_t
     kStageShade,
     kStagePrepareShadow,
     kStageShadow,
+    kStageSort,
     kStageResolve,
     kStageCount
 };
-const char* const kStageNames[kStageCount] = { "generate",      "prepare", "extend",  "shade",
-                                               "prepareShadow", "shadow",  "resolve" };
+const char* const kStageNames[kStageCount] = { "generate", "prepare", "extend",  "shade",
+                                               "prepShadow", "shadow", "sort", "resolve" };
 } // namespace
 
 // A timestamp counter buffer, if the device can sample at dispatch boundaries.
@@ -547,6 +554,10 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
     const NS::UInteger kDispatchArgsOffset = 2 * sizeof(uint32_t);
     const NS::UInteger kShadowArgsOffset = 8 * sizeof(uint32_t);
     const NS::UInteger kShadowCounterOffset = 6 * sizeof(uint32_t);
+    const NS::UInteger kSortArgsOffset = 11 * sizeof(uint32_t);
+    const bool sortRays = getSettings()->getAs<uint32_t>("render/pt/sortRays") != 0 &&
+                          mWavefrontSortScatterPSO != nullptr;
+    const MTL::Size sortTg = MTL::Size(kSortThreadgroup, 1, 1);
 
     // Profiling gives each stage its own encoder, because this hardware samples
     // counters only at encoder boundaries. That costs encoder overhead, so it is
@@ -581,11 +592,15 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
         enc->setBytes(&s, sizeof(uint32_t), 4);
         enc->setBuffer(mPathQueueBuffer[0], 0, 5);
         enc->setBuffer(mWavefrontControlBuffer, 0, 6);
+        enc->setBuffer(mSortBinBuffer, 0, 7);
         enc->dispatchThreads(grid, tg);
 
         for (uint32_t bounce = 0; bounce < maxDepth; ++bounce)
         {
-            const uint32_t src = bounce & 1u;
+            // With sorting on, the queues take fixed roles -- [0] is what the
+            // bounce traverses, [1] is what `shade` appends to and the sort
+            // reads -- because the sort already rewrites [0] every bounce.
+            const uint32_t src = sortRays ? 0u : (bounce & 1u);
             const uint32_t dst = src ^ 1u;
 
             // Publish this bounce's live count and clear the destination's, then
@@ -659,6 +674,35 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->setBuffer(mWavefrontControlBuffer, 0, 4);
             enc->setBytes(&s, sizeof(uint32_t), 5);
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kShadowArgsOffset, tg);
+
+            if (sortRays)
+            {
+                stamp(kStageSort);
+                enc->setComputePipelineState(mWavefrontSortCountPSO);
+                enc->setBuffer(mPathQueueBuffer[dst], 0, 0);
+                enc->setBuffer(mPathStateBuffer, 0, 1);
+                enc->setBuffer(mWavefrontControlBuffer, 0, 2);
+                enc->setBuffer(mSortBinBuffer, 0, 3);
+                enc->setBuffer(mSortTgBaseBuffer, 0, 4);
+                enc->setThreadgroupMemoryLength(kSortBins * sizeof(uint32_t), 0);
+                enc->dispatchThreadgroups(mWavefrontControlBuffer, kSortArgsOffset, sortTg);
+
+                enc->setComputePipelineState(mWavefrontSortScanPSO);
+                enc->setBuffer(mSortBinBuffer, 0, 0);
+                enc->setBuffer(mSortBinBuffer, kSortBins * sizeof(uint32_t), 1);
+                enc->setBuffer(mWavefrontControlBuffer, 0, 2);
+                enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
+
+                enc->setComputePipelineState(mWavefrontSortScatterPSO);
+                enc->setBuffer(mPathQueueBuffer[dst], 0, 0);
+                enc->setBuffer(mPathStateBuffer, 0, 1);
+                enc->setBuffer(mWavefrontControlBuffer, 0, 2);
+                enc->setBuffer(mSortBinBuffer, kSortBins * sizeof(uint32_t), 3);
+                enc->setBuffer(mSortTgBaseBuffer, 0, 4);
+                enc->setBuffer(mPathQueueBuffer[src], 0, 5);
+                enc->setThreadgroupMemoryLength(kSortBins * sizeof(uint32_t), 0);
+                enc->dispatchThreadgroups(mWavefrontControlBuffer, kSortArgsOffset, sortTg);
+            }
         }
     }
 
@@ -1370,6 +1414,9 @@ void MetalRender::buildWavefrontPipelines()
     mWavefrontPreparePSO = make("wavefrontPrepare");
     mWavefrontPrepareShadowPSO = make("wavefrontPrepareShadow");
     mWavefrontShadowPSO = make("wavefrontShadow");
+    mWavefrontSortCountPSO = make("wavefrontSortCount");
+    mWavefrontSortScanPSO = make("wavefrontSortScan");
+    mWavefrontSortScatterPSO = make("wavefrontSortScatter");
     lib->release();
 
     if (mWavefrontShadePSO)
@@ -1398,6 +1445,8 @@ void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)
     release(mWavefrontControlBuffer);
     release(mShadowRayBuffer);
     release(mStageStatsBuffer);
+    release(mSortBinBuffer);
+    release(mSortTgBaseBuffer);
 
     // Private storage: these never leave the GPU.
     mPathStateBuffer = mDevice->newBuffer(pixels * sizeof(PathState), MTL::ResourceStorageModePrivate);
@@ -1411,6 +1460,10 @@ void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)
     // At most one deferred connection per path per bounce.
     mShadowRayBuffer = mDevice->newBuffer(pixels * sizeof(ShadowRay), MTL::ResourceStorageModePrivate);
     mStageStatsBuffer = mDevice->newBuffer(80 * sizeof(uint32_t), MTL::ResourceStorageModeShared);
+    const uint32_t sortGroups = (pixels + kSortThreadgroup - 1) / kSortThreadgroup;
+    mSortBinBuffer = mDevice->newBuffer(2 * kSortBins * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
+    mSortTgBaseBuffer =
+        mDevice->newBuffer((size_t)sortGroups * kSortBins * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
     mWavefrontCapacity = pixels;
 
     STRELKA_INFO("wavefront buffers for {}x{}: {:.1f} MB total", width, height,

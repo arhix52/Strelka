@@ -40,10 +40,45 @@
 #define WF_CTRL_SHADOW     6
 #define WF_CTRL_SHADOW_N   7
 #define WF_CTRL_SHADOW_DIS 8
+#define WF_CTRL_SORT_DIS   11
 // Profiling only: live path count and shadow ray count per bounce, so the
 // per-stage timings can be read as a cost per ray rather than a cost per stage.
 #define WF_CTRL_STATS_PATHS  16
 #define WF_CTRL_STATS_SHADOW 48
+
+// Ray sorting. Traversing a coherent primary ray costs 3.5 ns on this hardware;
+// traversing an incoherent secondary one costs two to three times that. Binning
+// the queue by ray direction before `extend` buys back part of that gap.
+//
+// The bin is a cube-face parameterisation: which of the six faces the direction
+// points at, times a 4x4 grid within the face. Directions in one bin span at
+// most ~25 degrees, which is enough for them to walk the same part of the BVH.
+#define WF_SORT_BINS   96
+#define WF_SORT_TG     1024
+
+static inline uint32_t directionBin(float3 d)
+{
+    const float3 a = abs(d);
+    uint32_t face;
+    float m, u, v;
+    if (a.x >= a.y && a.x >= a.z)
+    {
+        face = (d.x > 0.0f) ? 0u : 1u; m = a.x; u = d.y; v = d.z;
+    }
+    else if (a.y >= a.z)
+    {
+        face = (d.y > 0.0f) ? 2u : 3u; m = a.y; u = d.x; v = d.z;
+    }
+    else
+    {
+        face = (d.z > 0.0f) ? 4u : 5u; m = a.z; u = d.x; v = d.y;
+    }
+    m = max(m, 1e-20f);
+    const uint32_t g = 4u;
+    const uint32_t iu = min((uint32_t)((u / m * 0.5f + 0.5f) * g), g - 1u);
+    const uint32_t iv = min((uint32_t)((v / m * 0.5f + 0.5f) * g), g - 1u);
+    return face * (g * g) + iv * g + iu;
+}
 
 // Reserve a run of output slots for the surviving lanes of one simdgroup.
 //
@@ -105,8 +140,13 @@ kernel void wavefrontGenerate(
     device IorStack*                                           iorStacks      [[buffer(3)]],
     constant uint32_t&                                         sampleIdx      [[buffer(4)]],
     device uint32_t*                                           queueOut       [[buffer(5)]],
-    device uint32_t*                                           control        [[buffer(6)]])
+    device uint32_t*                                           control        [[buffer(6)]],
+    device uint32_t*                                           binCounts      [[buffer(7)]])
 {
+    if (tid < WF_SORT_BINS)
+    {
+        binCounts[tid] = 0u;
+    }
     const uint32_t pixelCount = uniforms.width * uniforms.height;
     if (tid == 0u)
     {
@@ -608,6 +648,12 @@ kernel void wavefrontPrepareShadow(
     control[WF_CTRL_SHADOW_DIS + 0] = (n + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_SHADOW_DIS + 1] = 1u;
     control[WF_CTRL_SHADOW_DIS + 2] = 1u;
+    // The sort runs over the paths `shade` just queued, in much larger
+    // threadgroups, so it needs dispatch arguments of its own.
+    const uint32_t live = control[WF_CTRL_COUNT1];
+    control[WF_CTRL_SORT_DIS + 0] = (live + WF_SORT_TG - 1u) / WF_SORT_TG;
+    control[WF_CTRL_SORT_DIS + 1] = 1u;
+    control[WF_CTRL_SORT_DIS + 2] = 1u;
 }
 
 // ---------------------------------------------------------------------------
@@ -678,4 +724,106 @@ kernel void wavefrontResolve(
     }
 
     res[tid] = float4(result, 1.0f);
+}
+
+// ---------------------------------------------------------------------------
+// sort -- bin the live queue by ray direction
+//
+// A counting sort in three dispatches. The histogram is built in threadgroup
+// memory so the device sees one atomic per (threadgroup, bin) rather than one
+// per ray: at 1024 threads a bounce costs ~74k device atomics instead of ~786k.
+// ---------------------------------------------------------------------------
+kernel void wavefrontSortCount(
+    uint                        gid       [[thread_position_in_grid]],
+    uint                        lid       [[thread_position_in_threadgroup]],
+    uint                        tgIdx     [[threadgroup_position_in_grid]],
+    device const uint32_t*      queue     [[buffer(0)]],
+    device const PathState*     paths     [[buffer(1)]],
+    device const uint32_t*      control   [[buffer(2)]],
+    device atomic_uint*         binCounts [[buffer(3)]],
+    device uint32_t*            tgBase    [[buffer(4)]],
+    threadgroup atomic_uint*    hist      [[threadgroup(0)]])
+{
+    for (uint32_t i = lid; i < WF_SORT_BINS; i += WF_SORT_TG)
+    {
+        atomic_store_explicit(&hist[i], 0u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint32_t n = control[WF_CTRL_COUNT1];
+    if (gid < n)
+    {
+        const uint32_t bin = directionBin(float3(paths[queue[gid]].direction));
+        atomic_fetch_add_explicit(&hist[bin], 1u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // One device atomic per bin per threadgroup reserves this group's run inside
+    // that bin. The run's absolute position needs the bin bases, which only the
+    // scan below knows.
+    for (uint32_t i = lid; i < WF_SORT_BINS; i += WF_SORT_TG)
+    {
+        const uint32_t c = atomic_load_explicit(&hist[i], memory_order_relaxed);
+        tgBase[tgIdx * WF_SORT_BINS + i] =
+            atomic_fetch_add_explicit(&binCounts[i], c, memory_order_relaxed);
+    }
+}
+
+// Exclusive prefix sum over the bins, and publish the new live count. One
+// thread: 96 elements is far below the point where a parallel scan pays off.
+kernel void wavefrontSortScan(
+    device uint32_t&        binCountsRef [[buffer(0)]],
+    device uint32_t*        binBase      [[buffer(1)]],
+    device uint32_t&        controlRef   [[buffer(2)]])
+{
+    device uint32_t* binCounts = &binCountsRef;
+    device uint32_t* control = &controlRef;
+    uint32_t running = 0u;
+    for (uint32_t i = 0; i < WF_SORT_BINS; ++i)
+    {
+        binBase[i] = running;
+        running += binCounts[i];
+        binCounts[i] = 0u; // ready for the next bounce
+    }
+    // The sorted queue becomes the next bounce's input.
+    control[WF_CTRL_COUNT0] = running;
+}
+
+kernel void wavefrontSortScatter(
+    uint                        gid       [[thread_position_in_grid]],
+    uint                        lid       [[thread_position_in_threadgroup]],
+    uint                        tgIdx     [[threadgroup_position_in_grid]],
+    device const uint32_t*      queue     [[buffer(0)]],
+    device const PathState*     paths     [[buffer(1)]],
+    device const uint32_t*      control   [[buffer(2)]],
+    device const uint32_t*      binBase   [[buffer(3)]],
+    device const uint32_t*      tgBase    [[buffer(4)]],
+    device uint32_t*            queueOut  [[buffer(5)]],
+    threadgroup atomic_uint*    cursor    [[threadgroup(0)]])
+{
+    for (uint32_t i = lid; i < WF_SORT_BINS; i += WF_SORT_TG)
+    {
+        atomic_store_explicit(&cursor[i], 0u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint32_t n = control[WF_CTRL_COUNT1];
+    uint32_t pathIndex = 0u;
+    uint32_t bin = 0u;
+    uint32_t rank = 0u;
+    const bool active = gid < n;
+    if (active)
+    {
+        pathIndex = queue[gid];
+        bin = directionBin(float3(paths[pathIndex].direction));
+        // Order within a (threadgroup, bin) run is arbitrary; coherence is only
+        // claimed at bin granularity, so an atomic ticket is enough.
+        rank = atomic_fetch_add_explicit(&cursor[bin], 1u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (active)
+    {
+        queueOut[binBase[bin] + tgBase[tgIdx * WF_SORT_BINS + bin] + rank] = pathIndex;
+    }
 }

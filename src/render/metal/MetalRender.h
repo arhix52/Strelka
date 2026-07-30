@@ -188,6 +188,9 @@ private:
     MTL::ComputePipelineState* mWavefrontPreparePSO = nullptr;
     MTL::ComputePipelineState* mWavefrontPrepareShadowPSO = nullptr;
     MTL::ComputePipelineState* mWavefrontShadowPSO = nullptr;
+    MTL::ComputePipelineState* mWavefrontSortCountPSO = nullptr;
+    MTL::ComputePipelineState* mWavefrontSortScanPSO = nullptr;
+    MTL::ComputePipelineState* mWavefrontSortScatterPSO = nullptr;
     MTL::Buffer* mPathStateBuffer = nullptr;
     MTL::Buffer* mHitBuffer = nullptr;
     MTL::Buffer* mIorStackBuffer = nullptr;
@@ -198,9 +201,14 @@ private:
     MTL::Buffer* mPathQueueBuffer[2] = { nullptr, nullptr };
     MTL::Buffer* mWavefrontControlBuffer = nullptr;
     MTL::Buffer* mShadowRayBuffer = nullptr;
+    MTL::Buffer* mSortBinBuffer = nullptr;      // 96 counts followed by 96 bases
+    MTL::Buffer* mSortTgBaseBuffer = nullptr;   // per (threadgroup, bin) run offset
     MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
     MTL::Buffer* mStageStatsBuffer = nullptr; // shared copy of the control buffer, profiling only
     static constexpr uint32_t kMaxStageSamples = 256;
+    // Must match WF_SORT_BINS / WF_SORT_TG in wavefront.metal.
+    static constexpr uint32_t kSortBins = 96;
+    static constexpr uint32_t kSortThreadgroup = 1024;
     // Stage kind of each timestamp, in encode order. A stage's duration is the
     // gap to the next timestamp, so there is always one more sample than stage.
     std::vector<uint8_t> mStageKinds;
