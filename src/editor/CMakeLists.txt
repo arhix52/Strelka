@@ -18,6 +18,20 @@ set(EDITOR_SOURCES
 
 add_executable(StrelkaEditor ${EDITOR_SOURCES})
 
+# Ship the default docking layout next to the binary. On first run the editor
+# copies it to its own imgui.ini, so a fresh checkout starts with the panels
+# already arranged instead of an empty dockspace.
+add_custom_command(
+    OUTPUT ${OUTPUT_DIRECTORY}/default_layout.ini
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/default_layout.ini
+        ${OUTPUT_DIRECTORY}/default_layout.ini
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/default_layout.ini
+    COMMENT "Copying default ImGui layout"
+)
+add_custom_target(strelka_editor_layout ALL DEPENDS ${OUTPUT_DIRECTORY}/default_layout.ini)
+add_dependencies(StrelkaEditor strelka_editor_layout)
+
 set_target_properties(StrelkaEditor PROPERTIES
     LINKER_LANGUAGE CXX
     CXX_STANDARD 17

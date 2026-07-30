@@ -66,6 +66,34 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;  // Enable Keyboard Controls
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+
+    // ImGui defaults to a bare "imgui.ini" resolved against the *working
+    // directory*, so launching the editor from anywhere but the build root meant
+    // it neither found nor persisted a layout, and the dockspace came up empty
+    // every time. Anchor it to the executable instead, and seed it from the
+    // layout shipped in the source tree on first run.
+    mIniPath = (oka::getExecutableDir() / "imgui.ini").string();
+    std::error_code ec;
+    if (!std::filesystem::exists(mIniPath, ec))
+    {
+        const std::string defaultLayout = oka::resolveResourcePath("default_layout.ini");
+        if (std::filesystem::exists(defaultLayout, ec))
+        {
+            std::filesystem::copy_file(defaultLayout, mIniPath, ec);
+            // Braces are required: the STRELKA_* macros expand to a full
+            // `if (...) { ... }` statement, so an unbraced if/else around them
+            // does not parse.
+            if (ec)
+            {
+                STRELKA_WARNING("Could not seed ImGui layout from {}: {}", defaultLayout, ec.message());
+            }
+            else
+            {
+                STRELKA_INFO("Initialised ImGui layout from {}", defaultLayout);
+            }
+        }
+    }
+    io.IniFilename = mIniPath.c_str(); // mIniPath must outlive the ImGui context
     //io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;   // Enable Gamepad Controls
 
     // Setup style
