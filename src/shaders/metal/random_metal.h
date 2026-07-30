@@ -157,7 +157,11 @@ static float randomHalton(thread SamplerState& state)
 {
     const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
     const uint32_t base = primeNumbers[dimension & 31u];
-    return halton(state.seed + state.sampleIdx, base);
+    // Only 32 bases exist, so dimension 32 reuses base(0), 33 reuses base(1), etc.
+    // With a shared sequence index that made e.g. eBSDF0@depth2 return exactly the
+    // same number as ePixelX@depth0, correlating the pixel filter with a BSDF
+    // lobe choice. Offsetting the sequence index per dimension breaks the tie.
+    return halton(state.seed + state.sampleIdx + hash(dimension), base);
 }
 
 template <SampleDimension Dim>
@@ -199,19 +203,28 @@ inline uint32_t nested_uniform_scramble(uint32_t value, uint32_t seed)
     return value;
 }
 
-inline float sobol_scramble(uint32_t index, uint32_t dim, uint32_t seed)
+// `matrixIndex` selects one of the 5 available Sobol direction matrices;
+// `scrambleDim` is the true (unreduced) sample dimension and only feeds the Owen
+// scramble seed.
+inline float sobol_scramble(uint32_t index, uint32_t matrixIndex, uint32_t scrambleDim, uint32_t seed)
 {
     seed = hash(seed);
     index = nested_uniform_scramble(index, seed);
-    uint32_t result = nested_uniform_scramble(sobol_uint(index, dim), hash_combine(seed, dim));
+    uint32_t result = nested_uniform_scramble(sobol_uint(index, matrixIndex), hash_combine(seed, scrambleDim));
     return min(result * 0x1p-32f, FloatOneMinusEpsilon);
 }
 
 template <SampleDimension Dim>
 static float randomSobol(thread SamplerState& state)
 {
-    const uint32_t dimension = (uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS)) % 5;
-    return sobol_scramble(state.sampleIdx, dimension, state.seed + state.depth);
+    const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
+    // Only 5 direction matrices are tabulated, so dimensions alias modulo 5.
+    // Previously the reduced index was also used as the Owen scramble seed, which
+    // made aliased dimensions produce *identical* values — at depth 0, ePixelY
+    // (1) and eLensU (11 % 5 == 1) returned the same number, locking the pixel
+    // jitter to the lens sample and structuring DoF bokeh. Seeding the scramble
+    // with the unreduced dimension decorrelates them.
+    return sobol_scramble(state.sampleIdx, dimension % 5u, dimension, state.seed + state.depth);
 }
 
 // ── Sampler dispatch ────────────────────────────────────────────────────────
