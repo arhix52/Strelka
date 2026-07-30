@@ -654,11 +654,17 @@ kernel void raytracingKernel(
                 const float3 hitPoint = ray.origin + ray.direction * intersection.distance;
                 device const UniformLight& currLight = lights[inst.userID];
                 const float3 lightNormal = calcLightNormal(currLight, hitPoint);
+                // One-sided emitter: only the front face radiates. The cosine at
+                // the light must not scale the result — light.color is radiance,
+                // and NEE (sampleLight) adds no such factor either. Scaling it
+                // here made the two strategies estimate different quantities, so
+                // MIS was blending inconsistent estimators.
                 if (-dot(prd.direction, lightNormal) > 0.0f)
                 {
+                    const float3 Le = float3(currLight.color);
                     if (prd.depth == 0 || prd.specularBounce || !prd.neeDone)
                     {
-                        prd.radiance += prd.throughput * float3(currLight.color) * -dot(prd.direction, lightNormal);
+                        prd.radiance += prd.throughput * Le;
                     }
                     else
                     {
@@ -668,7 +674,7 @@ kernel void raytracingKernel(
                             : 1.0f / (float)uniforms.numLights;
                         const float lightPdf = getLightPdf(currLight, hitPoint, ray.origin) * lightSelectionPdf;
                         const float misWeight = misWeightBalance(prd.lastBsdfPdf, lightPdf);
-                        prd.radiance += prd.throughput * float3(currLight.color) * -dot(prd.direction, lightNormal) * misWeight;
+                        prd.radiance += prd.throughput * Le * misWeight;
                     }
                 }
                 prd.throughput = float3(0.0f);
