@@ -510,6 +510,16 @@ float3 estimateDirectLighting(
         }
     }
 
+    // No env map and no analytic lights: nothing to connect to. Falling through
+    // would divide by numLights == 0, produce a NaN light PDF, and trip the
+    // isnan() guard in the caller that paints the pixel bright red.
+    if (numLights == 0)
+    {
+        toLight = float3(0.0f);
+        lightPdf = 0.0f;
+        return float3(0.0f);
+    }
+
     float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
     const uint32_t lightId = min((uint32_t)(numLights * u), numLights - 1);
     const float lightSelectionPdf = 1.0f / numLights;
@@ -813,7 +823,8 @@ kernel void raytracingKernel(
             prd.specularBounce = ((sampleResult.event_type & BSDF_EVENT_SPECULAR) != 0);
 
             // Direct lighting (NEE) for diffuse/glossy events
-            if (sampleResult.event_type & (BSDF_EVENT_DIFFUSE | BSDF_EVENT_GLOSSY))
+            if ((sampleResult.event_type & (BSDF_EVENT_DIFFUSE | BSDF_EVENT_GLOSSY)) &&
+                (uniforms.numLights > 0 || uniforms.hasEnvMap))
             {
                 float3 toLight;
                 float lightPdf = 0.0f;
@@ -822,7 +833,8 @@ kernel void raytracingKernel(
                     prd.sampler, si, toLight, lightPdf,
                     envCdfX, envCdfY, envMapTexture, motionTime);
 
-                const bool isNextEventValid = ((dot(toLight, si.shading_normal) > 0.0f) == si.front_face) && lightPdf != 0.0f;
+                // `> 0` rather than `!= 0`: a NaN PDF must not be treated as valid.
+                const bool isNextEventValid = ((dot(toLight, si.shading_normal) > 0.0f) == si.front_face) && lightPdf > 0.0f;
                 if (isNextEventValid)
                 {
                     BsdfEvalResult evalResult = bsdf_eval(si, toLight);
