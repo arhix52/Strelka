@@ -155,6 +155,56 @@ struct GeometryEntry
     uint32_t pad0;
 };
 
+// --- Wavefront path tracing ------------------------------------------------
+//
+// The megakernel keeps a path's state in registers, which is free but forces
+// every lane of a simdgroup to wait for the longest-lived path in it. The
+// wavefront tracer trades that for explicit state in memory, so each stage only
+// runs over paths that are still alive. Memory traffic is therefore the design
+// constraint, and this struct is deliberately kept at 48 bytes.
+//
+// Two things are *not* stored:
+//   - the sampler, because it is a pure function of
+//     (pixelIndex, sampleIndex, depth) and is cheaper to recompute than to load;
+//   - the IOR stack (36 B), which only matters to paths currently inside a
+//     dielectric and lives in a side table indexed by path slot.
+struct PathState
+{
+    packed_float3 origin;
+    packed_float3 direction;
+    packed_float3 throughput;
+    uint32_t pixelIndex;
+    uint32_t depthAndFlags; // depth in bits 0..7, flags above
+    float lastBsdfPdf;
+};
+
+#define PATH_FLAG_ALIVE      (1u << 8)
+#define PATH_FLAG_SPECULAR   (1u << 9)
+#define PATH_FLAG_NEE_DONE   (1u << 10)
+#define PATH_DEPTH_MASK      0xFFu
+
+// What `extend` hands to `shade`. Deliberately small: `intersection.primitive_data`
+// is only valid inside the kernel that ran the intersect, so instead of copying
+// vertex attributes across, `shade` refetches them from the vertex buffer using
+// the geometry entry — the same lookup the motion-blur path already performs.
+struct HitRecord
+{
+    uint32_t geomEntryIndex; // instance userID + intersection.geometry_id
+    uint32_t primitiveId;
+    vector_float2 barycentrics; // not float2: this header is compiled by the host too
+    float distance; // < 0 means the ray escaped
+};
+
+// A deferred occlusion query produced by `shade` and consumed by `shadow`.
+struct ShadowRay
+{
+    packed_float3 origin;
+    packed_float3 direction;
+    packed_float3 weight; // radiance already divided by pdf and multiplied by the BSDF
+    float maxDistance;
+    uint32_t pixelIndex;
+};
+
 // One entry of the environment map alias table (Walker/Vose), one per texel.
 // Sampling is a single load: draw a bucket uniformly, then keep it with
 // probability `prob`, otherwise jump to `alias`.

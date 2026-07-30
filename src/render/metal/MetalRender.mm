@@ -194,6 +194,10 @@ Buffer* MetalRender::getReadyBuffer()
 
 void MetalRender::init()
 {
+    static_assert(sizeof(PathState) == 48, "PathState must stay at 48 bytes: it is read and written for every live path on every bounce");
+    static_assert(sizeof(HitRecord) == 24, "HitRecord size changed");
+    static_assert(sizeof(GeometryEntry) == 16, "GeometryEntry size changed");
+
     mDevice = MTL::CreateSystemDefaultDevice();
     if (!mDevice)
     {
