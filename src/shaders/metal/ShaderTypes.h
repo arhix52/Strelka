@@ -126,9 +126,15 @@ struct UniformsTonemap
     vector_float3 exposureValue;
 };
 
+// Per-primitive attributes stored inside the acceleration structure.
+//
+// positions must be packed: a 16-byte-aligned float3 would pad the array to 48
+// bytes and the struct to 96, where the packed form needs 36 and 72. On a
+// skinned mesh this buffer is also rewritten by the skinning pass every frame,
+// so the padding cost both memory and bandwidth for nothing.
 struct Triangle
 {
-    vector_float3 positions[3];
+    packed_float3 positions[3];
     uint32_t normals[3];
     uint32_t tangent[3];
     uint32_t uv[3];

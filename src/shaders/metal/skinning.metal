@@ -102,9 +102,11 @@ kernel void updateTriangleBufferKernel(
     uint addr1 = (params.vbOffset + i1) * 32;
     uint addr2 = (params.vbOffset + i2) * 32;
 
-    const device float3* p0 = (const device float3*)(vertexBuffer + addr0);
-    const device float3* p1 = (const device float3*)(vertexBuffer + addr1);
-    const device float3* p2 = (const device float3*)(vertexBuffer + addr2);
+    // packed: the position occupies bytes 0..11 of a 32-byte vertex, reading it
+    // as float3 would also pull in the tangent that follows.
+    const device packed_float3* p0 = (const device packed_float3*)(vertexBuffer + addr0);
+    const device packed_float3* p1 = (const device packed_float3*)(vertexBuffer + addr1);
+    const device packed_float3* p2 = (const device packed_float3*)(vertexBuffer + addr2);
 
     const device uint32_t* t0 = (const device uint32_t*)(vertexBuffer + addr0 + 12);
     const device uint32_t* t1 = (const device uint32_t*)(vertexBuffer + addr1 + 12);
