@@ -125,11 +125,19 @@ struct Triangle
     uint32_t uv[3];
 };
 
-// Per-instance data for vertex buffer lookups (motion blur)
-struct InstanceData
+// Per-geometry data, indexed by (instance userID + intersection.geometry_id).
+//
+// One acceleration structure now holds many geometries — a glTF mesh's
+// primitives are split by material, and merging them into a single BLAS is what
+// keeps the top-level structure small. The material therefore can no longer
+// travel in the instance's userID; userID holds the instance's base offset into
+// this table instead, and the geometry index within the BLAS selects the entry.
+struct GeometryEntry
 {
     uint32_t vbOffset;     // mesh vertex buffer offset
     uint32_t indexOffset;  // mesh index buffer offset
+    uint32_t materialId;
+    uint32_t pad0;
 };
 
 // One entry of the environment map alias table (Walker/Vose), one per texel.

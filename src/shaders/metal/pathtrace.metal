@@ -540,7 +540,7 @@ kernel void raytracingKernel(
     device float4* accum                                                             [[buffer(6)]],
     device const char* prevVertexBuffer                                              [[buffer(7)]],
     device const uint32_t* indexBuffer                                               [[buffer(8)]],
-    device const InstanceData* instanceDataBuffer                                    [[buffer(9)]],
+    device const GeometryEntry* geometryEntries                                      [[buffer(9)]],
     device const EnvAliasEntry* envAliasTable                                        [[buffer(10)]],
     constant uint32_t&                                         tileOffsetY           [[buffer(12)]],
     texture2d<float>                                           envMapTexture         [[texture(0)]]
@@ -675,6 +675,13 @@ kernel void raytracingKernel(
                 break;
             }
 
+            // One acceleration structure holds many geometries, so the instance's
+            // userID is a base offset into the per-geometry table and the
+            // geometry index within the structure selects the entry. This is what
+            // lets every primitive of a mesh share a single BLAS while keeping
+            // its own material and vertex-buffer offsets.
+            const uint32_t geomEntryIndex = inst.userID + intersection.geometry_id;
+
             const Triangle triangle = *(const device Triangle*)intersection.primitive_data;
 
             // Per-primitive positions are from keyframe 1 (current VB) only.
@@ -686,11 +693,10 @@ kernel void raytracingKernel(
             float3 t0, t1, t2;
 
             if (uniforms.enableMotionBlur && motionTime < 1.0f &&
-                prevVertexBuffer && indexBuffer && instanceDataBuffer)
+                prevVertexBuffer && indexBuffer && geometryEntries)
             {
-                const uint32_t geomIndex = inst.accelerationStructureIndex;
                 const uint32_t primitiveId = intersection.primitive_id;
-                const InstanceData instData = instanceDataBuffer[geomIndex];
+                const GeometryEntry instData = geometryEntries[geomEntryIndex];
 
                 const uint32_t i0 = indexBuffer[instData.indexOffset + primitiveId * 3 + 0];
                 const uint32_t i1 = indexBuffer[instData.indexOffset + primitiveId * 3 + 1];
@@ -777,7 +783,7 @@ kernel void raytracingKernel(
             float3 geomNormal = cross(p1 - p0, p2 - p0);
             geomNormal = normalize(transformDirection(geomNormal, objectToWorldSpaceTransform));
 
-            const uint32_t materialId = inst.userID;
+            const uint32_t materialId = geometryEntries[geomEntryIndex].materialId;
 
             SurfaceInteraction si;
             initSurfaceInteraction(si, materials[materialId],

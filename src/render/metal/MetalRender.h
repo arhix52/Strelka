@@ -3,6 +3,8 @@
 
 #include <Metal/Metal.hpp>
 #include <glm/glm.hpp>
+
+#include "ShaderTypes.h" // GeometryEntry, shared with the path-trace kernel
 #include <atomic>
 #include <vector>
 
@@ -34,25 +36,49 @@ public:
     }
 
 private:
+    // Per scene mesh (one glTF primitive): just the data the skinning pass and
+    // the geometry descriptors need. Acceleration structures live in Blas below,
+    // because many meshes now share one.
     struct Mesh
     {
-        MTL::AccelerationStructure* mGas = nullptr;
         MTL::Buffer* mPerPrimitiveBuffer = nullptr;
-        MTL::Buffer* mRefitScratchBuffer = nullptr; // persistent, reused every refit
-        // Motion BLAS descriptor, built once. It only names the two keyframe
-        // buffers, their offsets and the triangle count — all invariant. Only the
-        // *contents* of the vertex buffers change per frame, and refit re-reads
-        // those, so there is nothing to rebuild.
-        MTL::PrimitiveAccelerationStructureDescriptor* mMotionDescriptor = nullptr;
-        size_t mRefitScratchSize = 0;
-        size_t mBuildScratchSize = 0;
         uint32_t mTriangleCount = 0;
         uint32_t mVbOffset = 0;
         uint32_t mIndexOffset = 0;
         bool mIsSkeletal = false;
     };
 
-    Mesh* createMesh(const oka::Mesh& mesh);
+    // One acceleration structure covering N geometries that always move together
+    // (in practice: every primitive of one glTF mesh node).
+    struct Blas
+    {
+        MTL::AccelerationStructure* mAs = nullptr;
+        // Kept alive for refit. Invariant: it only names buffers, offsets and
+        // triangle counts, none of which change while the pose does.
+        MTL::PrimitiveAccelerationStructureDescriptor* mDescriptor = nullptr;
+        MTL::Buffer* mScratch = nullptr; // persistent, reused every refit/rebuild
+        size_t mRefitScratchSize = 0;
+        size_t mBuildScratchSize = 0;
+        bool mIsSkeletal = false;
+        uint32_t mGeometryBase = 0; // first index into mGeometryEntries
+    };
+
+    // One emitted TLAS instance. A merged group contributes a single instance,
+    // so this no longer maps one-to-one onto Scene::Instance.
+    struct EmittedInstance
+    {
+        uint32_t sceneInstanceId; // representative, supplies the transform
+        uint32_t asIndex;
+        uint32_t userID;
+        uint32_t mask;
+    };
+
+    void createMeshData(size_t meshIndex);
+    MTL::AccelerationStructureMotionTriangleGeometryDescriptor* createMotionGeometryDescriptor(
+        const oka::Mesh& sceneMesh, MTL::Buffer* perPrimitiveBuffer, uint32_t triangleCount);
+    MTL::AccelerationStructureTriangleGeometryDescriptor* createStaticGeometryDescriptor(
+        const oka::Mesh& sceneMesh, MTL::Buffer* perPrimitiveBuffer, uint32_t triangleCount);
+    size_t buildBlas(const std::vector<uint32_t>& sceneInstanceIds, bool skeletal);
     struct View
     {
         oka::Camera::Matrices mCamMatrices;
@@ -98,6 +124,9 @@ private:
     MTL::Buffer* mIndexBuffer = nullptr;
     uint32_t mTriangleCount = 0;
     std::vector<MetalRender::Mesh*> mMetalMeshes;
+    std::vector<MetalRender::Blas> mBlasList;
+    std::vector<EmittedInstance> mEmittedInstances;
+    std::vector<GeometryEntry> mGeometryEntries;
     std::vector<MTL::AccelerationStructure*> mPrimitiveAccelerationStructures;
     MTL::AccelerationStructure* mInstanceAccelerationStructure = nullptr;
     MTL::Buffer* mInstanceBuffer = nullptr;
@@ -122,7 +151,7 @@ private:
 
     // Motion blur
     MTL::Buffer* mPrevVertexBuffer = nullptr;
-    MTL::Buffer* mInstanceDataBuffer = nullptr;
+    MTL::Buffer* mGeometryEntryBuffer = nullptr;
     bool mEnableMotionBlur = false;
     View mPrevMotionBlurView; // camera at T - shutter for camera motion blur
 
@@ -180,8 +209,6 @@ private:
     void loadEnvMap(const std::string& texturePath);
 
     // BVH management
-    MTL::PrimitiveAccelerationStructureDescriptor* createMotionBLASDescriptor(
-        const oka::Mesh& sceneMesh, MTL::Buffer* perPrimitiveBuffer, uint32_t triangleCount);
     void ensureScratchBuffer(MTL::Buffer*& buffer, size_t requiredSize);
     /// Refit every skeletal BLAS in one command buffer, rebuilding a bounded
     /// slice of them per frame to amortise the periodic quality refresh.
