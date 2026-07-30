@@ -14,8 +14,11 @@
 #import <QuartzCore/QuartzCore.h>
 #import <CoreGraphics/CGColorSpace.h>
 
+#include <cassert>
+#include <filesystem>
 #include <fstream>
 #include <log.h>
+#include <paths.h>
 
 using namespace oka;
 
@@ -172,8 +175,14 @@ void GlfwDisplay::buildShaders()
 {
     using NS::StringEncoding::UTF8StringEncoding;
 
+    const std::string shaderPath = oka::resolveResourcePath("metal/shaders/fullScreen.metal");
     std::string shaderSrc;
-    readSourceFile(shaderSrc, "./metal/shaders/fullScreen.metal");
+    if (!readSourceFile(shaderSrc, shaderPath))
+    {
+        STRELKA_FATAL("Failed to read {} (looked next to the executable and in the working directory)", shaderPath);
+        assert(false);
+        return;
+    }
 
     NS::Error* pError = nullptr;
     MTL::Library* pLibrary =
