@@ -319,6 +319,32 @@ public:
     bool animateNode(const uint32_t nodeId, AnimationChannel::PathType targetProperty, const glm::quat newValue);
     bool updateNode(const uint32_t nodeId);
 
+    /// World transform of every node, refreshed in one top-down pass.
+    ///
+    /// Recomputing a node's world transform by walking up to the root (as
+    /// calculateNodeGlobalTransform does) is O(depth) *per node*, and driving it
+    /// from every animation channel independently re-walked the same subtrees
+    /// over and over. Caching turns per-frame animation into O(nodes).
+    const std::vector<glm::mat4>& getGlobalTransforms()
+    {
+        ensureGlobalTransforms();
+        return mGlobalTransforms;
+    }
+
+private:
+    std::vector<glm::mat4> mGlobalTransforms;
+    std::vector<uint8_t> mNodeDirty;
+    std::vector<int> mNodeOrder; // parents always precede their children
+
+    void buildNodeOrder();
+    void ensureGlobalTransforms();
+    void refreshGlobalTransforms();
+    /// Apply the side effects (instance transforms, camera poses) of a changed
+    /// node subtree and report whether a skeleton node was touched.
+    bool applyNodeSideEffects(const uint32_t nodeId);
+
+public:
+
     uint32_t findCameraByName(const std::string& name)
     {
         std::scoped_lock lock(mCameraMutex);

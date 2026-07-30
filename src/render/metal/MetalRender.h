@@ -2,6 +2,7 @@
 #include <strelka/render/render.h>
 
 #include <Metal/Metal.hpp>
+#include <glm/glm.hpp>
 #include <atomic>
 #include <vector>
 
@@ -37,6 +38,14 @@ private:
     {
         MTL::AccelerationStructure* mGas = nullptr;
         MTL::Buffer* mPerPrimitiveBuffer = nullptr;
+        MTL::Buffer* mRefitScratchBuffer = nullptr; // persistent, reused every refit
+        // Motion BLAS descriptor, built once. It only names the two keyframe
+        // buffers, their offsets and the triangle count — all invariant. Only the
+        // *contents* of the vertex buffers change per frame, and refit re-reads
+        // those, so there is nothing to rebuild.
+        MTL::PrimitiveAccelerationStructureDescriptor* mMotionDescriptor = nullptr;
+        size_t mRefitScratchSize = 0;
+        size_t mBuildScratchSize = 0;
         uint32_t mTriangleCount = 0;
         uint32_t mVbOffset = 0;
         uint32_t mIndexOffset = 0;
@@ -92,6 +101,8 @@ private:
     std::vector<MTL::AccelerationStructure*> mPrimitiveAccelerationStructures;
     MTL::AccelerationStructure* mInstanceAccelerationStructure = nullptr;
     MTL::Buffer* mInstanceBuffer = nullptr;
+    MTL::Buffer* mTlasScratchBuffer = nullptr; // persistent, reused every TLAS refit
+    size_t mTlasInstanceCount = 0;
 
     MTL::Buffer* mMaterialBuffer = nullptr;
     std::vector<MTL::Texture*> mMaterialTextures;
@@ -101,6 +112,7 @@ private:
     MTL::Buffer* mSkinDataBuffer = nullptr;
     MTL::Buffer* mJointMatricesBuffer = nullptr;
     std::vector<uint32_t> mJointMatOffsets;
+    std::vector<glm::mat4> mJointMatScratch; // reused across the two skinning passes
     uint32_t mBlasUpdateCount = 0;
     uint32_t mFramesSinceFullRebuild = 0; // throttle full rebuilds during rapid scrubbing
 
@@ -167,8 +179,12 @@ private:
     // BVH management
     MTL::PrimitiveAccelerationStructureDescriptor* createMotionBLASDescriptor(
         const oka::Mesh& sceneMesh, MTL::Buffer* perPrimitiveBuffer, uint32_t triangleCount);
-    void refitBLAS(int meshIndex);
-    void rebuildBLAS(int meshIndex);
+    void ensureScratchBuffer(MTL::Buffer*& buffer, size_t requiredSize);
+    /// Refit every skeletal BLAS in one command buffer, rebuilding a bounded
+    /// slice of them per frame to amortise the periodic quality refresh.
+    void updateSkeletalBLAS(bool largeTimeJump);
+    static constexpr size_t kMaxBlasRebuildsPerFrame = 8;
+    size_t mNextBlasRebuildIndex = 0;
     void rebuildTLAS();
     void updateInstanceTransforms();
 };

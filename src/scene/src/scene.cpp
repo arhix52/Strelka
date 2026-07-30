@@ -185,17 +185,14 @@ glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationC
     if (time >= sampler.inputs[n - 1])
         return sampler.outputsVec4[(n - 1) * stride + valueOffset];
 
-    // Find bracket: inputs[prevIdx] <= time < inputs[nextIdx]
-    int prevIdx = 0;
-    for (int i = 0; i < n - 1; ++i)
-    {
-        if (sampler.inputs[i + 1] > time)
-        {
-            prevIdx = i;
-            break;
-        }
-    }
-    int nextIdx = prevIdx + 1;
+    // Find bracket: inputs[prevIdx] <= time < inputs[nextIdx].
+    // inputs is sorted by construction, so binary search it — the previous linear
+    // scan cost O(keyframes) per channel per frame (BrainStem has channels with
+    // 838 keys, evaluated 116 times per pass and twice per frame).
+    const auto upper = std::upper_bound(sampler.inputs.begin(), sampler.inputs.end(), time);
+    int nextIdx = (int)std::distance(sampler.inputs.begin(), upper);
+    nextIdx = std::clamp(nextIdx, 1, n - 1);
+    const int prevIdx = nextIdx - 1;
 
     float previousTime = sampler.inputs[prevIdx];
     float nextTime = sampler.inputs[nextIdx];
@@ -251,20 +248,169 @@ glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationC
     return result;
 }
 
+void Scene::buildNodeOrder()
+{
+    mNodeOrder.clear();
+    mNodeOrder.reserve(mNodes.size());
+
+    // Breadth-first from every root guarantees a parent is emitted before any of
+    // its children, which is all the top-down transform pass needs.
+    std::vector<int> queue;
+    queue.reserve(mNodes.size());
+    for (size_t i = 0; i < mNodes.size(); ++i)
+    {
+        if (mNodes[i].parent == -1)
+            queue.push_back((int)i);
+    }
+    for (size_t head = 0; head < queue.size(); ++head)
+    {
+        const int nodeId = queue[head];
+        mNodeOrder.push_back(nodeId);
+        for (const int childId : mNodes[nodeId].children)
+        {
+            if (childId >= 0 && childId < (int)mNodes.size())
+                queue.push_back(childId);
+        }
+    }
+
+    // A malformed hierarchy (cycle or orphan) would leave nodes unvisited; append
+    // them so their transforms are at least computed from their own local TRS.
+    if (mNodeOrder.size() != mNodes.size())
+    {
+        std::vector<uint8_t> seen(mNodes.size(), 0);
+        for (const int nodeId : mNodeOrder)
+            seen[nodeId] = 1;
+        for (size_t i = 0; i < mNodes.size(); ++i)
+        {
+            if (!seen[i])
+                mNodeOrder.push_back((int)i);
+        }
+    }
+}
+
+void Scene::refreshGlobalTransforms()
+{
+    mGlobalTransforms.resize(mNodes.size());
+    for (const int nodeId : mNodeOrder)
+    {
+        const glm::mat4 local = calculateNodeLocalTransform(nodeId);
+        const int parent = mNodes[nodeId].parent;
+        mGlobalTransforms[nodeId] =
+            (parent == -1) ? local : mGlobalTransforms[parent] * local;
+    }
+}
+
+void Scene::ensureGlobalTransforms()
+{
+    if (mNodeOrder.size() != mNodes.size())
+    {
+        buildNodeOrder();
+        mNodeDirty.assign(mNodes.size(), 0);
+        refreshGlobalTransforms();
+    }
+}
+
+bool Scene::applyNodeSideEffects(const uint32_t nodeId)
+{
+    // Mirrors the traversal the old updateNode() performed: mesh and camera nodes
+    // consume the update and do not propagate it to their children.
+    switch (mNodes[nodeId].type)
+    {
+    case Node::NodeType::mesh:
+        for (const auto instId : mNodes[nodeId].instanceIds)
+        {
+            Instance& inst = mInstances[instId];
+            inst.transform = mGlobalTransforms[nodeId];
+            inst.isAnimated = true;
+        }
+        return false;
+
+    case Node::NodeType::camera:
+        if (mNodes[nodeId].camera >= 0 && mNodes[nodeId].camera < (int)mCameras.size())
+        {
+            glm::vec3 scale;
+            glm::quat rotation;
+            glm::vec3 translation;
+            glm::vec3 skew;
+            glm::vec4 perspective;
+            glm::decompose(mGlobalTransforms[nodeId], scale, rotation, translation, skew, perspective);
+            rotation = glm::conjugate(rotation);
+
+            Camera& cam = mCameras[mNodes[nodeId].camera];
+            cam.position = translation * scale;
+            cam.mOrientation = rotation;
+            cam.updateViewMatrix();
+        }
+        return false;
+
+    case Node::NodeType::skeleton:
+        break;
+
+    default:
+        break;
+    }
+
+    bool skeletonUpdated = (mNodes[nodeId].type == Node::NodeType::skeleton);
+    for (const auto childId : mNodes[nodeId].children)
+    {
+        skeletonUpdated |= applyNodeSideEffects(childId);
+    }
+    return skeletonUpdated;
+}
+
 bool Scene::applyAnimation(const uint32_t animId)
 {
-    bool blasChanged = false;
-    auto &animation = mAnimations[animId];
-    for (int i = 0; i < animation.channels.size(); ++i)
+    ensureGlobalTransforms();
+
+    // Two phases instead of one update per channel. The old code called
+    // updateNode() for every channel, and updateNode() recomputed each visited
+    // node's world transform by walking back up to the root — so a scene with C
+    // channels cost O(C * subtree * depth) matrix builds every frame, re-deriving
+    // the same ancestors again and again. BrainStem has 116 channels over a
+    // 30-node graph and paid that twice per frame (motion blur is a two-pass
+    // evaluation), which is what made playback stutter on a 34k-triangle scene.
+    //
+    // Phase 1 only writes local TRS; phase 2 derives every world transform in a
+    // single parent-before-child sweep.
+    auto& animation = mAnimations[animId];
+    std::fill(mNodeDirty.begin(), mNodeDirty.end(), 0);
+
+    for (size_t i = 0; i < animation.channels.size(); ++i)
     {
         const uint32_t nodeId = animation.channels[i].node;
-        const AnimationChannel::PathType targetProperty = animation.channels[i].path;
-        const glm::float4 value = interpolate(animation.samplers[animation.channels[i].samplerIndex], targetProperty, animation.current);
+        if (nodeId >= mNodes.size())
+            continue;
 
-        if (targetProperty == AnimationChannel::PathType::ROTATION) 
-            blasChanged |= animateNode(nodeId, targetProperty, makeQuatFromFloat4(value));
-        else 
-            blasChanged |= animateNode(nodeId, targetProperty, glm::float3(value));
+        const AnimationChannel::PathType targetProperty = animation.channels[i].path;
+        const glm::float4 value =
+            interpolate(animation.samplers[animation.channels[i].samplerIndex], targetProperty, animation.current);
+
+        switch (targetProperty)
+        {
+        case AnimationChannel::PathType::TRANSLATION:
+            mNodes[nodeId].translation = glm::float3(value);
+            break;
+        case AnimationChannel::PathType::SCALE:
+            mNodes[nodeId].scale = glm::float3(value);
+            break;
+        case AnimationChannel::PathType::ROTATION:
+            mNodes[nodeId].rotation = makeQuatFromFloat4(value);
+            break;
+        default:
+            continue;
+        }
+        mNodeDirty[nodeId] = 1;
+    }
+
+    // Every world transform is recomputed, so the cache stays valid for skinning
+    // even where the side-effect traversal below stops early.
+    refreshGlobalTransforms();
+
+    bool blasChanged = false;
+    for (size_t nodeId = 0; nodeId < mNodes.size(); ++nodeId)
+    {
+        if (mNodeDirty[nodeId])
+            blasChanged |= applyNodeSideEffects((uint32_t)nodeId);
     }
     return blasChanged;
 }
@@ -300,11 +446,15 @@ void Scene::applySkinning()
 
 void Scene::computeJointMatrices(std::vector<glm::mat4> *jointMatrices, int jointCount, const uint32_t skinId)
 {
+    ensureGlobalTransforms();
+
     auto &skin = mSkines[skinId];
+    jointMatrices->reserve(jointMatrices->size() + jointCount);
     for (int i = 0; i < jointCount; ++i)
     {
-        glm::mat4 jointGlobalTransform = calculateNodeGlobalTransform(skin.joints[i]);
-        jointMatrices->push_back(jointGlobalTransform * skin.inverseBindMatrices[i]);
+        // Read the cached world transform instead of re-walking to the root for
+        // each joint: applyAnimation() already refreshed the whole table.
+        jointMatrices->push_back(mGlobalTransforms[skin.joints[i]] * skin.inverseBindMatrices[i]);
     }
 }
 
