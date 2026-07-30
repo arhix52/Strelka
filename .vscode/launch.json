@@ -2,10 +2,10 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "(Linux) Launch StrelkaEditor",
+            "name": "Launch StrelkaEditor (Debug)",
             "type": "lldb",
             "request": "launch",
-            "program": "${workspaceFolder}/build/Debug/src/editor/StrelkaEditor",
+            "program": "${workspaceFolder}/build/Debug/StrelkaEditor",
             "args": ["-s", "${input:sceneFile}"],
             "cwd": "${workspaceFolder}/build/Debug",
             "env": {
@@ -14,11 +14,47 @@
             "preLaunchTask": "CMake Build (Debug)"
         },
         {
-            "name": "(Windows) Launch",
+            "name": "Launch StrelkaEditor (Release)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/Release/StrelkaEditor",
+            "args": ["-s", "${input:sceneFile}"],
+            "cwd": "${workspaceFolder}/build/Release",
+            "env": {
+                "SPDLOG_LEVEL": "info"
+            },
+            "preLaunchTask": "CMake Build (Release)"
+        },
+        {
+            "name": "Launch StrelkaEditor (Debug + Metal validation)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/Debug/StrelkaEditor",
+            "args": ["-s", "${input:sceneFile}"],
+            "cwd": "${workspaceFolder}/build/Debug",
+            "env": {
+                "SPDLOG_LEVEL": "trace",
+                "MTL_DEBUG_LAYER": "1",
+                "MTL_SHADER_VALIDATION": "1"
+            },
+            "preLaunchTask": "CMake Build (Debug)"
+        },
+        {
+            "name": "Run unit tests (Debug)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/Debug/unit_tests",
+            "args": [],
+            "cwd": "${workspaceFolder}/build/Debug",
+            "preLaunchTask": "CMake Build (Debug)"
+        },
+        {
+            "name": "(Windows) Launch StrelkaEditor (Debug)",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/Debug/src/editor/StrelkaEditor.exe",
-            "args": ["-s", "C:/work/vespa/vespa.gltf", "-v"],
+            "program": "${workspaceFolder}/build/Debug/StrelkaEditor.exe",
+            "args": ["-s", "${input:sceneFile}"],
+            "cwd": "${workspaceFolder}/build/Debug",
             "environment": [
                 {
                     "name": "SPDLOG_LEVEL",
@@ -26,18 +62,7 @@
                 }
             ],
             "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/build/"
-        },
-        {
-            "name": "(Mac) Launch",
-            "type": "lldb",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/Debug/src/editor/StrelkaEditor",
-            "args": ["-s", "../../../vespa/vespa.gltf"],
-            "cwd": "${workspaceFolder}/build/Debug/",
-            "env": {
-                "MTL_DEBUG_LAYER": "1"
-            }
+            "preLaunchTask": "CMake Build (Debug)"
         }
     ],
     "inputs": [
@@ -45,7 +70,7 @@
             "id": "sceneFile",
             "type": "promptString",
             "description": "Path to .gltf scene file",
-            "default": "/home/ilya/work/BrainStem/brainStem.gltf"
+            "default": "${userHome}/work/BrainStem/brainStem.gltf"
         }
     ]
 }
