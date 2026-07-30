@@ -133,6 +133,7 @@ MetalRender::~MetalRender()
         safeRelease(mWavefrontPrepareShadowPSO);
         safeRelease(mWavefrontShadowPSO);
         safeRelease(mPathStateBuffer);
+        safeRelease(mPathRayBuffer);
         safeRelease(mHitBuffer);
         safeRelease(mIorStackBuffer);
         safeRelease(mRadianceBuffer);
@@ -217,7 +218,8 @@ Buffer* MetalRender::getReadyBuffer()
 
 void MetalRender::init()
 {
-    static_assert(sizeof(PathState) == 48, "PathState must stay at 48 bytes: it is read and written for every live path on every bounce");
+    static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
+    static_assert(sizeof(PathState) == 20, "PathState is read and written for every live path on every bounce");
     static_assert(sizeof(HitRecord) == 24, "HitRecord size changed");
     static_assert(sizeof(GeometryEntry) == 16, "GeometryEntry size changed");
 
@@ -593,6 +595,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
         enc->setBuffer(mPathQueueBuffer[0], 0, 5);
         enc->setBuffer(mWavefrontControlBuffer, 0, 6);
         enc->setBuffer(mSortBinBuffer, 0, 7);
+        enc->setBuffer(mPathRayBuffer, 0, 8);
         enc->dispatchThreads(grid, tg);
 
         for (uint32_t bounce = 0; bounce < maxDepth; ++bounce)
@@ -618,7 +621,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(mInstanceBuffer, 0, 1);
             enc->setAccelerationStructure(mInstanceAccelerationStructure, 2);
-            enc->setBuffer(mPathStateBuffer, 0, 3);
+            enc->setBuffer(mPathRayBuffer, 0, 3);
             enc->setBuffer(mHitBuffer, 0, 4);
             enc->setBytes(&s, sizeof(uint32_t), 5);
             enc->setBuffer(mPathQueueBuffer[src], 0, 6);
@@ -648,6 +651,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->setBuffer(mWavefrontControlBuffer, 0, 18);
             enc->setBuffer(mShadowRayBuffer, 0, 19);
             enc->setBuffer(mWavefrontControlBuffer, kShadowCounterOffset, 20);
+            enc->setBuffer(mPathRayBuffer, 0, 21);
             if (mEnvMapTexture)
             {
                 enc->setTexture(mEnvMapTexture, 0);
@@ -680,7 +684,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
                 stamp(kStageSort);
                 enc->setComputePipelineState(mWavefrontSortCountPSO);
                 enc->setBuffer(mPathQueueBuffer[dst], 0, 0);
-                enc->setBuffer(mPathStateBuffer, 0, 1);
+                enc->setBuffer(mPathRayBuffer, 0, 1);
                 enc->setBuffer(mWavefrontControlBuffer, 0, 2);
                 enc->setBuffer(mSortBinBuffer, 0, 3);
                 enc->setBuffer(mSortTgBaseBuffer, 0, 4);
@@ -695,7 +699,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
 
                 enc->setComputePipelineState(mWavefrontSortScatterPSO);
                 enc->setBuffer(mPathQueueBuffer[dst], 0, 0);
-                enc->setBuffer(mPathStateBuffer, 0, 1);
+                enc->setBuffer(mPathRayBuffer, 0, 1);
                 enc->setBuffer(mWavefrontControlBuffer, 0, 2);
                 enc->setBuffer(mSortBinBuffer, kSortBins * sizeof(uint32_t), 3);
                 enc->setBuffer(mSortTgBaseBuffer, 0, 4);
@@ -1437,6 +1441,7 @@ void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)
     }
     auto release = [](MTL::Buffer*& b) { if (b) { b->release(); b = nullptr; } };
     release(mPathStateBuffer);
+    release(mPathRayBuffer);
     release(mHitBuffer);
     release(mIorStackBuffer);
     release(mRadianceBuffer);
@@ -1450,6 +1455,7 @@ void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)
 
     // Private storage: these never leave the GPU.
     mPathStateBuffer = mDevice->newBuffer(pixels * sizeof(PathState), MTL::ResourceStorageModePrivate);
+    mPathRayBuffer = mDevice->newBuffer(pixels * sizeof(PathRay), MTL::ResourceStorageModePrivate);
     mHitBuffer = mDevice->newBuffer(pixels * sizeof(HitRecord), MTL::ResourceStorageModePrivate);
     mIorStackBuffer = mDevice->newBuffer(pixels * sizeof(IorStack), MTL::ResourceStorageModePrivate);
     mRadianceBuffer = mDevice->newBuffer(pixels * sizeof(simd::float4), MTL::ResourceStorageModePrivate);

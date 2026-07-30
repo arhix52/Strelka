@@ -173,12 +173,21 @@ struct GeometryEntry
 //     (pixelIndex, sampleIndex, depth) and is cheaper to recompute than to load;
 //   - the IOR stack (36 B), which only matters to paths currently inside a
 //     dielectric and lives in a side table indexed by path slot.
-struct PathState
+// The ray is separate from the rest of the state because `extend` reads only
+// the ray and is the most traffic-sensitive stage: keeping them together made it
+// pull 48 bytes per path to use 24. `shade` reads both, so nothing is read twice.
+//
+// There is no pixelIndex: a path lives in the slot of the pixel it belongs to,
+// so its index *is* its pixel.
+struct PathRay
 {
     packed_float3 origin;
     packed_float3 direction;
+};
+
+struct PathState
+{
     packed_float3 throughput;
-    uint32_t pixelIndex;
     uint32_t depthAndFlags; // depth in bits 0..7, flags above
     float lastBsdfPdf;
 };

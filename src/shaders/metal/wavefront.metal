@@ -136,6 +136,7 @@ kernel void wavefrontGenerate(
     uint                                                       tid            [[thread_position_in_grid]],
     constant Uniforms&                                         uniforms       [[buffer(0)]],
     device PathState*                                          paths          [[buffer(1)]],
+    device PathRay*                                            rays           [[buffer(8)]],
     device float4*                                             radianceOut    [[buffer(2)]],
     device IorStack*                                           iorStacks      [[buffer(3)]],
     constant uint32_t&                                         sampleIdx      [[buffer(4)]],
@@ -174,11 +175,13 @@ kernel void wavefrontGenerate(
     float3 origin, direction;
     generateCameraRay(pixel, rng, origin, direction, uniforms, motionTime);
 
+    PathRay r;
+    r.origin = packed_float3(origin);
+    r.direction = packed_float3(direction);
+    rays[tid] = r;
+
     PathState p;
-    p.origin = packed_float3(origin);
-    p.direction = packed_float3(direction);
     p.throughput = packed_float3(float3(1.0f));
-    p.pixelIndex = tid;
     p.depthAndFlags = PATH_FLAG_ALIVE; // depth 0, not specular, NEE not done
     p.lastBsdfPdf = 0.0f;
     paths[tid] = p;
@@ -197,7 +200,7 @@ kernel void wavefrontExtend(
     constant Uniforms&                                         uniforms       [[buffer(0)]],
     constant MTLAccelerationStructureUserIDInstanceDescriptor* instances      [[buffer(1)]],
     acceleration_structure<instancing, primitive_motion>       accelerationStructure [[buffer(2)]],
-    device const PathState*                                    paths          [[buffer(3)]],
+    device const PathRay*                                      rays           [[buffer(3)]],
     device HitRecord*                                          hits           [[buffer(4)]],
     constant uint32_t&                                         sampleIdx      [[buffer(5)]],
     device const uint32_t*                                     queue          [[buffer(6)]],
@@ -210,15 +213,15 @@ kernel void wavefrontExtend(
         return;
     }
     const uint32_t tid = queue[gid];
-    const PathState p = paths[tid];
+    const PathRay pr = rays[tid];
 
-    const float motionTime = motionTimeFor(uniforms, p.pixelIndex, sampleIdx);
+    const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
 
     ray r;
     r.min_distance = 0.0f;
     r.max_distance = INFINITY;
-    r.origin = float3(p.origin);
-    r.direction = float3(p.direction);
+    r.origin = float3(pr.origin);
+    r.direction = float3(pr.direction);
 
     intersector<triangle_data, instancing, primitive_motion> isect;
     isect.assume_geometry_type(geometry_type::triangle);
@@ -321,6 +324,7 @@ kernel void wavefrontShade(
     device UniformLight*                                       lights         [[buffer(3)]],
     device Material*                                           materials      [[buffer(4)]],
     device PathState*                                          paths          [[buffer(5)]],
+    device PathRay*                                            rays           [[buffer(21)]],
     device const HitRecord*                                    hits           [[buffer(6)]],
     device float4*                                             radianceOut    [[buffer(7)]],
     device IorStack*                                           iorStacks      [[buffer(8)]],
@@ -344,16 +348,17 @@ kernel void wavefrontShade(
     }
     const uint32_t tid = queue[gid];
     PathState p = paths[tid];
+    const PathRay pr = rays[tid];
 
     const uint32_t depth = pathDepth(p.depthAndFlags);
     const bool specularBounce = (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u;
     const bool neeDone = (p.depthAndFlags & PATH_FLAG_NEE_DONE) != 0u;
 
-    SamplerState rng = samplerFor(uniforms, p.pixelIndex, sampleIdx, depth);
-    const float motionTime = motionTimeFor(uniforms, p.pixelIndex, sampleIdx);
+    SamplerState rng = samplerFor(uniforms, tid, sampleIdx, depth);
+    const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
 
-    const float3 rayOrigin = float3(p.origin);
-    const float3 rayDir = float3(p.direction);
+    const float3 rayOrigin = float3(pr.origin);
+    const float3 rayDir = float3(pr.direction);
     const float3 throughput = float3(p.throughput);
 
     float3 radiance = float3(0.0f);
@@ -595,8 +600,11 @@ kernel void wavefrontShade(
         return;
     }
 
-    p.origin = packed_float3(nextOrigin);
-    p.direction = packed_float3(nextDir);
+    PathRay nextRay;
+    nextRay.origin = packed_float3(nextOrigin);
+    nextRay.direction = packed_float3(nextDir);
+    rays[tid] = nextRay;
+
     p.throughput = packed_float3(nextThroughput);
     p.lastBsdfPdf = nextSpecular ? 1.0f : sampleResult.pdf;
     p.depthAndFlags = (depth + 1u) | PATH_FLAG_ALIVE |
@@ -738,7 +746,7 @@ kernel void wavefrontSortCount(
     uint                        lid       [[thread_position_in_threadgroup]],
     uint                        tgIdx     [[threadgroup_position_in_grid]],
     device const uint32_t*      queue     [[buffer(0)]],
-    device const PathState*     paths     [[buffer(1)]],
+    device const PathRay*       rays      [[buffer(1)]],
     device const uint32_t*      control   [[buffer(2)]],
     device atomic_uint*         binCounts [[buffer(3)]],
     device uint32_t*            tgBase    [[buffer(4)]],
@@ -753,7 +761,7 @@ kernel void wavefrontSortCount(
     const uint32_t n = control[WF_CTRL_COUNT1];
     if (gid < n)
     {
-        const uint32_t bin = directionBin(float3(paths[queue[gid]].direction));
+        const uint32_t bin = directionBin(float3(rays[queue[gid]].direction));
         atomic_fetch_add_explicit(&hist[bin], 1u, memory_order_relaxed);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -794,7 +802,7 @@ kernel void wavefrontSortScatter(
     uint                        lid       [[thread_position_in_threadgroup]],
     uint                        tgIdx     [[threadgroup_position_in_grid]],
     device const uint32_t*      queue     [[buffer(0)]],
-    device const PathState*     paths     [[buffer(1)]],
+    device const PathRay*       rays      [[buffer(1)]],
     device const uint32_t*      control   [[buffer(2)]],
     device const uint32_t*      binBase   [[buffer(3)]],
     device const uint32_t*      tgBase    [[buffer(4)]],
@@ -815,7 +823,7 @@ kernel void wavefrontSortScatter(
     if (active)
     {
         pathIndex = queue[gid];
-        bin = directionBin(float3(paths[pathIndex].direction));
+        bin = directionBin(float3(rays[pathIndex].direction));
         // Order within a (threadgroup, bin) run is arbitrary; coherence is only
         // claimed at bin granularity, so an atomic ticket is enough.
         rank = atomic_fetch_add_explicit(&cursor[bin], 1u, memory_order_relaxed);

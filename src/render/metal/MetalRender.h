@@ -192,6 +192,7 @@ private:
     MTL::ComputePipelineState* mWavefrontSortScanPSO = nullptr;
     MTL::ComputePipelineState* mWavefrontSortScatterPSO = nullptr;
     MTL::Buffer* mPathStateBuffer = nullptr;
+    MTL::Buffer* mPathRayBuffer = nullptr;
     MTL::Buffer* mHitBuffer = nullptr;
     MTL::Buffer* mIorStackBuffer = nullptr;
     MTL::Buffer* mRadianceBuffer = nullptr;
