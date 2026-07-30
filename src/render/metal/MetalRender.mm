@@ -67,10 +67,18 @@ MetalRender::~MetalRender()
         delete mAsyncOutputBuffers[1];
         mAsyncOutputBuffers[1] = nullptr;
 
-        // Free heap-allocated Mesh structs (but NOT their Metal resources,
-        // which are ref-counted by the device and released below).
+        // Free heap-allocated Mesh structs (but NOT their acceleration structures,
+        // which are released below via mPrimitiveAccelerationStructures).
         for (auto* mesh : mMetalMeshes)
+        {
+            if (mesh->mRefitScratchBuffer)
+                mesh->mRefitScratchBuffer->release();
+            if (mesh->mPerPrimitiveBuffer)
+                mesh->mPerPrimitiveBuffer->release();
+            if (mesh->mMotionDescriptor)
+                mesh->mMotionDescriptor->release();
             delete mesh;
+        }
         mMetalMeshes.clear();
 
         // Metal objects: release only those we explicitly created with newXxx().
@@ -101,6 +109,7 @@ MetalRender::~MetalRender()
         safeRelease(mJointMatricesBuffer);
         safeRelease(mPrevVertexBuffer);
         safeRelease(mInstanceDataBuffer);
+        safeRelease(mTlasScratchBuffer);
         for (auto*& buf : mUniformBuffers) safeRelease(buf);
         for (auto*& buf : mUniformTMBuffers) safeRelease(buf);
 
@@ -498,27 +507,9 @@ void MetalRender::render(Buffer* output)
                 if (pass2Skeletal)
                 {
                     applySkinning();
-                    // Full rebuild periodically or on large scrubs, but throttle to avoid
-                    // back-to-back full rebuilds during rapid scrubbing (min 5 frames apart)
-                    const bool wantsFullRebuild = (mBlasUpdateCount >= 10) ||
-                                                  (maxTimeDelta > shutterDuration * 2.0f);
-                    const bool fullRebuild = wantsFullRebuild && (mFramesSinceFullRebuild >= 5);
-                    const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
-                    for (int mi = 0; mi < (int)meshes.size(); ++mi)
-                    {
-                        if (mMetalMeshes[mi]->mIsSkeletal)
-                        {
-                            if (fullRebuild)
-                                rebuildBLAS(mi);
-                            else
-                                refitBLAS(mi);
-                        }
-                    }
-                    mBlasUpdateCount = fullRebuild ? 0 : (mBlasUpdateCount + 1);
-                    mFramesSinceFullRebuild = fullRebuild ? 0 : (mFramesSinceFullRebuild + 1);
+                    updateSkeletalBLAS(maxTimeDelta > shutterDuration * 2.0f);
                 }
-                updateInstanceTransforms();
-                rebuildTLAS();
+                rebuildTLAS(); // already re-uploads the instance transforms
 
                 // Restore target times so next-frame EPSILON check is stable
                 for (int i = 0; i < (int)animations.size(); ++i)
@@ -541,29 +532,12 @@ void MetalRender::render(Buffer* output)
                     // Sync prevVB with current VB — motion BVH needs both keyframes
                     // consistent when motion blur is off (otherwise keyframe 0 is stale)
                     copyVertexBufferToPrev();
-                    // Full rebuild periodically or on large scrubs, throttled
-                    const bool wantsFullRebuild = (mBlasUpdateCount >= 10) ||
-                                                  (maxTimeDelta > 0.1f);
-                    const bool fullRebuild = wantsFullRebuild && (mFramesSinceFullRebuild >= 5);
-                    const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
-                    for (int mi = 0; mi < (int)meshes.size(); ++mi)
-                    {
-                        if (mMetalMeshes[mi]->mIsSkeletal)
-                        {
-                            if (fullRebuild)
-                                rebuildBLAS(mi);
-                            else
-                                refitBLAS(mi);
-                        }
-                    }
-                    mBlasUpdateCount = fullRebuild ? 0 : (mBlasUpdateCount + 1);
-                    mFramesSinceFullRebuild = fullRebuild ? 0 : (mFramesSinceFullRebuild + 1);
+                    updateSkeletalBLAS(maxTimeDelta > 0.1f);
                     rebuildTLAS();
                 }
                 else
                 {
-                    updateInstanceTransforms();
-                    rebuildTLAS();
+                    rebuildTLAS(); // already re-uploads the instance transforms
                 }
             }
             ctx.mSubframeIndex = 0;
@@ -1186,11 +1160,20 @@ MetalRender::Mesh* MetalRender::createMesh(const oka::Mesh& mesh)
 
     if (mesh.isSkeletal)
     {
-        // Motion BVH with 2 keyframes (prevVB @ t=0, VB @ t=1)
+        // Motion BVH with 2 keyframes (prevVB @ t=0, VB @ t=1).
+        // Build the descriptor and query its scratch sizes once: both are
+        // invariant for the lifetime of the mesh, and refitting re-reads the
+        // keyframe buffers directly.
         MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
             createMotionBLASDescriptor(mesh, perPrimitiveBuffer, triangleCount);
+        primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit);
+
+        const MTL::AccelerationStructureSizes sizes = mDevice->accelerationStructureSizes(primDescriptor);
+        result->mRefitScratchSize = sizes.refitScratchBufferSize;
+        result->mBuildScratchSize = sizes.buildScratchBufferSize;
+
         result->mGas = createAccelerationStructureNoCompact(primDescriptor);
-        primDescriptor->release();
+        result->mMotionDescriptor = primDescriptor; // kept, released in the destructor
     }
     else
     {
@@ -1338,12 +1321,11 @@ void MetalRender::allocJointMatrices()
     {
         if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
         {
-            auto jointCount = mScene->mSkines[node.skin].joints.size();
-            std::vector<glm::mat4> currJointMats;
-            mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
-
-            jointMatSize += currJointMats.size();
-            mJointMatOffsets.push_back(currJointMats.size());
+            // Only the joint *count* matters here; evaluating the matrices was
+            // wasted work at init time.
+            const size_t jointCount = mScene->mSkines[node.skin].joints.size();
+            jointMatSize += jointCount;
+            mJointMatOffsets.push_back((uint32_t)jointCount);
         }
     }
 
@@ -1359,36 +1341,29 @@ void MetalRender::applySkinning()
     if (!mSkinningPSO || !mSkinDataBuffer || !mJointMatricesBuffer)
         return;
 
-    // Compute joint matrices on CPU
-    std::vector<glm::mat4> jointMat;
+    // Compute joint matrices on CPU. mJointMatScratch is a member so the two
+    // skinning passes per frame (t_open / t_close for motion blur) reuse the same
+    // allocation instead of churning two vectors each.
+    mJointMatScratch.clear();
     for (auto& node : mScene->mNodes)
     {
         if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
         {
             auto jointCount = mScene->mSkines[node.skin].joints.size();
-            std::vector<glm::mat4> currJointMats;
-            mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
-            jointMat.insert(jointMat.end(), currJointMats.begin(), currJointMats.end());
+            mScene->computeJointMatrices(&mJointMatScratch, jointCount, node.skin);
         }
     }
 
-    // Convert glm::mat4 → simd::float4x4 (both column-major)
-    std::vector<simd::float4x4> simdMatrices(jointMat.size());
-    for (size_t i = 0; i < jointMat.size(); ++i)
-    {
-        const glm::mat4& m = jointMat[i];
-        for (int col = 0; col < 4; col++)
-        {
-            for (int row = 0; row < 4; row++)
-            {
-                simdMatrices[i].columns[col][row] = m[col][row];
-            }
-        }
-    }
-
-    // Upload joint matrices
-    memcpy(mJointMatricesBuffer->contents(), simdMatrices.data(), simdMatrices.size() * sizeof(simd::float4x4));
-    mJointMatricesBuffer->didModifyRange(NS::Range::Make(0, simdMatrices.size() * sizeof(simd::float4x4)));
+    // glm::mat4 and simd::float4x4 are both 4 column-major float4s with identical
+    // layout, so the element-by-element conversion loop (and its temporary
+    // vector) was pure overhead — copy straight into the GPU buffer.
+    static_assert(sizeof(glm::mat4) == sizeof(simd::float4x4), "matrix layout mismatch");
+    const size_t uploadBytes = std::min(mJointMatScratch.size() * sizeof(glm::mat4),
+                                        (size_t)mJointMatricesBuffer->length());
+    if (uploadBytes == 0)
+        return;
+    memcpy(mJointMatricesBuffer->contents(), mJointMatScratch.data(), uploadBytes);
+    mJointMatricesBuffer->didModifyRange(NS::Range::Make(0, uploadBytes));
 
     // Dispatch skinning + triangle update kernels
     MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
@@ -1513,49 +1488,90 @@ MTL::PrimitiveAccelerationStructureDescriptor* MetalRender::createMotionBLASDesc
     return primDescriptor;
 }
 
-void MetalRender::refitBLAS(int meshIndex)
+void MetalRender::ensureScratchBuffer(MTL::Buffer*& buffer, size_t requiredSize)
 {
-    MetalRender::Mesh* metalMesh = mMetalMeshes[meshIndex];
-    if (!metalMesh->mIsSkeletal)
+    if (requiredSize == 0)
+        requiredSize = 1;
+    if (buffer && buffer->length() >= requiredSize)
         return;
+    if (buffer)
+        buffer->release();
+    buffer = mDevice->newBuffer(requiredSize, MTL::ResourceStorageModePrivate);
+}
 
-    const oka::Mesh& sceneMesh = mScene->getMeshes()[meshIndex];
-    MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
-        createMotionBLASDescriptor(sceneMesh, metalMesh->mPerPrimitiveBuffer, metalMesh->mTriangleCount);
-    primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit);
+void MetalRender::updateSkeletalBLAS(bool largeTimeJump)
+{
+    NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
-    const MTL::AccelerationStructureSizes accelSizes = mDevice->accelerationStructureSizes(primDescriptor);
-    MTL::Buffer* scratchBuffer =
-        mDevice->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate);
+    // Refit degrades BVH quality as the pose drifts from the one it was built
+    // for, so a periodic full rebuild is still needed — but rebuilding *every*
+    // skeletal mesh on the same frame produced a visible hitch every 10 frames.
+    // Rebuild a bounded slice per frame instead and rotate through the meshes.
+    const bool wantsFullRebuild = (mBlasUpdateCount >= 10) || largeTimeJump;
+    const bool doRebuildSlice = wantsFullRebuild && (mFramesSinceFullRebuild >= 5);
 
+    // All refits go into a single command buffer and a single encoder. Each mesh
+    // used to get its own command buffer, so BrainStem — 59 skeletal meshes —
+    // submitted 59 command buffers per animated frame. Submission overhead alone
+    // dominated the frame; the actual refit work is tiny.
     MTL::CommandBuffer* commandBuffer = mCommandQueue->commandBuffer();
     MTL::AccelerationStructureCommandEncoder* commandEncoder = commandBuffer->accelerationStructureCommandEncoder();
 
-    commandEncoder->refitAccelerationStructure(
-        metalMesh->mGas, primDescriptor, metalMesh->mGas, scratchBuffer, 0UL);
+    const size_t meshCount = mMetalMeshes.size();
+    size_t rebuiltThisFrame = 0;
+
+    for (size_t mi = 0; mi < meshCount; ++mi)
+    {
+        MetalRender::Mesh* metalMesh = mMetalMeshes[mi];
+        if (!metalMesh->mIsSkeletal)
+            continue;
+
+        // The descriptor and its scratch requirements were computed once when the
+        // mesh was created. Rebuilding them here meant five Objective-C
+        // allocations plus an accelerationStructureSizes() driver query per mesh
+        // per frame — 59 meshes' worth of pure overhead on this scene, describing
+        // geometry that never changes shape, only contents.
+        MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor = metalMesh->mMotionDescriptor;
+        if (!primDescriptor)
+            continue;
+
+        const bool inRebuildSlice = doRebuildSlice && rebuiltThisFrame < kMaxBlasRebuildsPerFrame &&
+                                    mi >= mNextBlasRebuildIndex;
+        if (inRebuildSlice)
+        {
+            // A rebuild needs build scratch, which is the larger of the two.
+            ensureScratchBuffer(metalMesh->mRefitScratchBuffer,
+                                std::max(metalMesh->mBuildScratchSize, metalMesh->mRefitScratchSize));
+            commandEncoder->buildAccelerationStructure(
+                metalMesh->mGas, primDescriptor, metalMesh->mRefitScratchBuffer, 0UL);
+            ++rebuiltThisFrame;
+            mNextBlasRebuildIndex = mi + 1;
+        }
+        else
+        {
+            ensureScratchBuffer(metalMesh->mRefitScratchBuffer, metalMesh->mRefitScratchSize);
+            commandEncoder->refitAccelerationStructure(
+                metalMesh->mGas, primDescriptor, metalMesh->mGas, metalMesh->mRefitScratchBuffer, 0UL);
+        }
+    }
 
     commandEncoder->endEncoding();
     commandBuffer->commit();
 
-    scratchBuffer->release();
-    primDescriptor->release();
-}
+    if (doRebuildSlice && mNextBlasRebuildIndex >= meshCount)
+    {
+        // Finished a full sweep over every skeletal mesh.
+        mNextBlasRebuildIndex = 0;
+        mBlasUpdateCount = 0;
+        mFramesSinceFullRebuild = 0;
+    }
+    else
+    {
+        mBlasUpdateCount++;
+        mFramesSinceFullRebuild++;
+    }
 
-void MetalRender::rebuildBLAS(int meshIndex)
-{
-    MetalRender::Mesh* metalMesh = mMetalMeshes[meshIndex];
-    if (!metalMesh->mIsSkeletal)
-        return;
-
-    const oka::Mesh& sceneMesh = mScene->getMeshes()[meshIndex];
-    MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
-        createMotionBLASDescriptor(sceneMesh, metalMesh->mPerPrimitiveBuffer, metalMesh->mTriangleCount);
-
-    metalMesh->mGas->release();
-    metalMesh->mGas = createAccelerationStructureNoCompact(primDescriptor);
-    mPrimitiveAccelerationStructures[meshIndex] = metalMesh->mGas;
-
-    primDescriptor->release();
+    pPool->release();
 }
 
 void MetalRender::updateInstanceTransforms()
@@ -1584,13 +1600,6 @@ void MetalRender::rebuildTLAS()
     // Update instance transforms
     updateInstanceTransforms();
 
-    // Release old TLAS
-    if (mInstanceAccelerationStructure)
-    {
-        mInstanceAccelerationStructure->release();
-        mInstanceAccelerationStructure = nullptr;
-    }
-
     const std::vector<oka::Instance>& instances = mScene->getInstances();
 
     const NS::Array* instancedAccelerationStructures = NS::Array::array(
@@ -1601,9 +1610,38 @@ void MetalRender::rebuildTLAS()
     accelDescriptor->setInstanceCount(instances.size());
     accelDescriptor->setInstanceDescriptorBuffer(mInstanceBuffer);
     accelDescriptor->setInstanceDescriptorType(MTL::AccelerationStructureInstanceDescriptorTypeUserID);
+    accelDescriptor->setUsage(MTL::AccelerationStructureUsageRefit);
 
-    // Rebuild without compaction for animation (avoid sync stall)
-    mInstanceAccelerationStructure = createAccelerationStructureNoCompact(accelDescriptor);
+    // Only the instance transforms change while an animation plays — the set of
+    // instances and the BLAS list are fixed. Refitting in place avoids allocating
+    // (and freeing) a whole acceleration structure plus a scratch buffer on every
+    // single frame, which is what the previous full rebuild did.
+    const MTL::AccelerationStructureSizes sizes = mDevice->accelerationStructureSizes(accelDescriptor);
+    const bool canRefit = mInstanceAccelerationStructure != nullptr &&
+                          mTlasInstanceCount == instances.size() &&
+                          mInstanceAccelerationStructure->size() >= sizes.accelerationStructureSize;
+
+    if (canRefit)
+    {
+        ensureScratchBuffer(mTlasScratchBuffer, sizes.refitScratchBufferSize);
+
+        MTL::CommandBuffer* commandBuffer = mCommandQueue->commandBuffer();
+        MTL::AccelerationStructureCommandEncoder* commandEncoder = commandBuffer->accelerationStructureCommandEncoder();
+        commandEncoder->refitAccelerationStructure(
+            mInstanceAccelerationStructure, accelDescriptor, mInstanceAccelerationStructure, mTlasScratchBuffer, 0UL);
+        commandEncoder->endEncoding();
+        commandBuffer->commit();
+    }
+    else
+    {
+        if (mInstanceAccelerationStructure)
+        {
+            mInstanceAccelerationStructure->release();
+            mInstanceAccelerationStructure = nullptr;
+        }
+        mInstanceAccelerationStructure = createAccelerationStructureNoCompact(accelDescriptor);
+        mTlasInstanceCount = instances.size();
+    }
 
     pPool->release();
 }
