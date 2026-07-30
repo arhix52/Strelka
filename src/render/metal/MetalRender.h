@@ -128,8 +128,11 @@ private:
 
     // Environment map (dome light)
     MTL::Texture* mEnvMapTexture = nullptr;
-    MTL::Buffer* mEnvCdfXBuffer = nullptr;
-    MTL::Buffer* mEnvCdfYBuffer = nullptr;
+    // Flat alias table, one entry per texel — replaces the marginal/conditional
+    // CDF pair, so importance sampling costs one load instead of two binary
+    // searches.
+    MTL::Buffer* mEnvAliasBuffer = nullptr;
+    float mEnvPdfScale = 0.0f;
     float mEnvMapAutoScale = 1.0f;
     bool mEnvMapLoaded = false;
 

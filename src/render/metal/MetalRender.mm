@@ -115,8 +115,7 @@ MetalRender::~MetalRender()
 
         // Environment map
         safeRelease(mEnvMapTexture);
-        safeRelease(mEnvCdfXBuffer);
-        safeRelease(mEnvCdfYBuffer);
+        safeRelease(mEnvAliasBuffer);
 
         // Pipeline states
         safeRelease(mPathTracingPSO);
@@ -358,8 +357,7 @@ void MetalRender::encodePathTraceBindings(MTL::ComputeCommandEncoder* enc, MTL::
     enc->setBuffer(mIndexBuffer, 0, 8);
     enc->setBuffer(mInstanceDataBuffer, 0, 9);
     // Environment map
-    enc->setBuffer(mEnvCdfXBuffer, 0, 10);
-    enc->setBuffer(mEnvCdfYBuffer, 0, 11);
+    enc->setBuffer(mEnvAliasBuffer, 0, 10);
     if (mEnvMapTexture)
     {
         enc->useResource(mEnvMapTexture, MTL::ResourceUsageRead);
@@ -617,6 +615,7 @@ void MetalRender::render(Buffer* output)
         const float userIntensity = envLight.has_value() ? envLight->intensity : 1.0f;
         pUniformData->envMapIntensity = mEnvMapAutoScale * userIntensity;
         pUniformData->envMapRotation = envLight.has_value() ? envLight->rotationY * (M_PI / 180.0f) : 0.0f;
+        pUniformData->envPdfScale = mEnvPdfScale;
         if (envLight.has_value())
         {
             pUniformData->envMapColorTint = { envLight->color.x, envLight->color.y, envLight->color.z };
@@ -629,6 +628,7 @@ void MetalRender::render(Buffer* output)
     else
     {
         pUniformData->hasEnvMap = 0;
+        pUniformData->envPdfScale = 0.0f;
     }
 
     pUniformTonemap->width = width;
@@ -729,10 +729,9 @@ void MetalRender::render(Buffer* output)
 
         // Environment map buffers must always be bound — the kernel declares
         // indices 10/11 unconditionally.
-        if (!mEnvCdfXBuffer)
-            mEnvCdfXBuffer = mDevice->newBuffer(sizeof(float), MTL::ResourceStorageModeManaged);
-        if (!mEnvCdfYBuffer)
-            mEnvCdfYBuffer = mDevice->newBuffer(sizeof(float), MTL::ResourceStorageModeManaged);
+        // The kernel declares buffer(10) unconditionally, so it must always be bound.
+        if (!mEnvAliasBuffer)
+            mEnvAliasBuffer = mDevice->newBuffer(sizeof(EnvAliasEntry), MTL::ResourceStorageModeManaged);
 
         // --- Split the path trace into horizontal bands ---------------------
         //
@@ -1650,8 +1649,7 @@ void MetalRender::loadEnvMap(const std::string& texturePath)
 {
     // Release previous env map resources to avoid leaks on reload
     if (mEnvMapTexture) { mEnvMapTexture->release(); mEnvMapTexture = nullptr; }
-    if (mEnvCdfXBuffer) { mEnvCdfXBuffer->release(); mEnvCdfXBuffer = nullptr; }
-    if (mEnvCdfYBuffer) { mEnvCdfYBuffer->release(); mEnvCdfYBuffer = nullptr; }
+    if (mEnvAliasBuffer) { mEnvAliasBuffer->release(); mEnvAliasBuffer = nullptr; }
     mEnvMapLoaded = false;
 
     int width = 0, height = 0;
@@ -1691,7 +1689,10 @@ void MetalRender::loadEnvMap(const std::string& texturePath)
     pTextureDesc->setPixelFormat(MTL::PixelFormatRGBA32Float);
     pTextureDesc->setTextureType(MTL::TextureType2D);
     pTextureDesc->setStorageMode(MTL::StorageModeManaged);
-    pTextureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
+    // TextureUsage flags, not ResourceUsage: the old value happened to set
+    // ShaderRead's bit but also asked for RenderTarget. The PDF path now point-
+    // reads this texture, so ShaderRead must be declared correctly.
+    pTextureDesc->setUsage(MTL::TextureUsageShaderRead);
 
     mEnvMapTexture = mDevice->newTexture(pTextureDesc);
     pTextureDesc->release();
@@ -1699,68 +1700,83 @@ void MetalRender::loadEnvMap(const std::string& texturePath)
     const MTL::Region region = MTL::Region::Make3D(0, 0, 0, width, height, 1);
     mEnvMapTexture->replaceRegion(region, 0, pixelData, width * sizeof(float) * 4);
 
-    // Build 2D CDF on CPU (sequential, runs once at load)
-    const size_t cdfXSize = (size_t)width * height;
-    const size_t cdfYSize = (size_t)height;
-    std::vector<float> cdfX(cdfXSize);
-    std::vector<float> cdfY(cdfYSize);
-    std::vector<float> rowSums(height);
+    // --- Build a flat alias table over every texel (Walker/Vose) --------------
+    //
+    // Replaces the previous 2D CDF (marginal over rows + conditional per row).
+    // Sampling that needed two binary searches, ~21 dependent and scattered
+    // loads into an 8 MB buffer for a 2K map, on every NEE sample at every
+    // bounce. An alias table answers the same query with one 8-byte load.
+    //
+    // Texel weight is luminance times sin(theta) of the row (the equirectangular
+    // solid-angle Jacobian) — unchanged from the CDF version, so the sampling
+    // distribution itself is identical.
+    const size_t texelCount = (size_t)width * (size_t)height;
+    std::vector<double> weights(texelCount);
+    double totalPower = 0.0;
 
-    // Phase 1: Build conditional CDF per row
     for (int y = 0; y < height; ++y)
     {
-        const float v = ((float)y + 0.5f) / (float)height;
-        const float sinTheta = std::sin(v * M_PI);
-
-        float sum = 0.0f;
+        const double v = ((double)y + 0.5) / (double)height;
+        const double sinTheta = std::sin(v * M_PI);
         for (int x = 0; x < width; ++x)
         {
-            const int pixelIdx = (y * width + x) * 4;
-            const float r = pixelData[pixelIdx + 0];
-            const float g = pixelData[pixelIdx + 1];
-            const float b = pixelData[pixelIdx + 2];
-            const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-            sum += lum * sinTheta;
-            cdfX[y * width + x] = sum;
-        }
-        rowSums[y] = sum;
-
-        // Normalize to [0, 1]
-        if (sum > 0.0f)
-        {
-            const float invSum = 1.0f / sum;
-            for (int x = 0; x < width; ++x)
-                cdfX[y * width + x] *= invSum;
-        }
-        else
-        {
-            for (int x = 0; x < width; ++x)
-                cdfX[y * width + x] = (float)(x + 1) / (float)width;
+            const size_t i = (size_t)y * width + x;
+            const float* px = pixelData + i * 4;
+            const double lum = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
+            const double w = std::max(lum, 0.0) * sinTheta;
+            weights[i] = w;
+            totalPower += w;
         }
     }
 
-    // Phase 2: Build marginal CDF from row sums
-    float totalPower = 0.0f;
-    for (int y = 0; y < height; ++y)
+    std::vector<EnvAliasEntry> alias(texelCount);
+    if (totalPower > 0.0)
     {
-        totalPower += rowSums[y];
-        cdfY[y] = totalPower;
-    }
-    if (totalPower > 0.0f)
-    {
-        const float invTotal = 1.0f / totalPower;
-        for (int y = 0; y < height; ++y)
-            cdfY[y] *= invTotal;
+        // Normalise so the mean probability is exactly 1; then every bucket is
+        // either "under" (<1) or "over" (>=1) and they pair up.
+        const double scale = (double)texelCount / totalPower;
+        std::vector<double> p(texelCount);
+        std::vector<uint32_t> small, large;
+        small.reserve(texelCount / 2);
+        large.reserve(texelCount / 2);
+        for (size_t i = 0; i < texelCount; ++i)
+        {
+            p[i] = weights[i] * scale;
+            (p[i] < 1.0 ? small : large).push_back((uint32_t)i);
+        }
+
+        while (!small.empty() && !large.empty())
+        {
+            const uint32_t l = small.back(); small.pop_back();
+            const uint32_t g = large.back(); large.pop_back();
+
+            alias[l].prob = (float)p[l];
+            alias[l].alias = g;
+
+            p[g] = (p[g] + p[l]) - 1.0;
+            (p[g] < 1.0 ? small : large).push_back(g);
+        }
+        // Whatever is left is 1.0 up to rounding.
+        for (const uint32_t i : large)  { alias[i].prob = 1.0f; alias[i].alias = i; }
+        for (const uint32_t i : small)  { alias[i].prob = 1.0f; alias[i].alias = i; }
     }
     else
     {
-        for (int y = 0; y < height; ++y)
-            cdfY[y] = (float)(y + 1) / (float)height;
+        // Black environment: nothing to importance sample.
+        for (size_t i = 0; i < texelCount; ++i)
+        {
+            alias[i].prob = 1.0f;
+            alias[i].alias = (uint32_t)i;
+        }
     }
 
-    // Upload CDF buffers to GPU
-    mEnvCdfXBuffer = mDevice->newBuffer(cdfX.data(), cdfXSize * sizeof(float), MTL::ResourceStorageModeManaged);
-    mEnvCdfYBuffer = mDevice->newBuffer(cdfY.data(), cdfYSize * sizeof(float), MTL::ResourceStorageModeManaged);
+    // pdf(texel) / dOmega(texel) reduces to lum * envPdfScale — see envTexelPdf().
+    mEnvPdfScale = (totalPower > 0.0)
+        ? (float)((double)texelCount / (2.0 * M_PI * M_PI * totalPower))
+        : 0.0f;
+
+    mEnvAliasBuffer = mDevice->newBuffer(
+        alias.data(), alias.size() * sizeof(EnvAliasEntry), MTL::ResourceStorageModeManaged);
 
     // Free host pixel data
     if (isExr)
@@ -1769,11 +1785,12 @@ void MetalRender::loadEnvMap(const std::string& texturePath)
         stbi_image_free(pixelData);
 
     // Auto-calibrate env map intensity
-    const float avgWeightedLum = totalPower / (float)(width * height);
+    const float avgWeightedLum = (float)(totalPower / (double)(width * height));
     const float kCalibrationTarget = 1000.0f;
     mEnvMapAutoScale = (avgWeightedLum > 1e-6f) ? kCalibrationTarget / avgWeightedLum : 1.0f;
     mEnvMapLoaded = true;
 
-    STRELKA_INFO("Env map CDF built, total power: {}, avgLum: {:.4f}, autoScale: {:.1f}",
+    STRELKA_INFO("Env map alias table built: {} texels ({:.1f} MB), total power: {:.1f}, avgLum: {:.4f}, autoScale: {:.1f}",
+                 texelCount, alias.size() * sizeof(EnvAliasEntry) / (1024.0 * 1024.0),
                  totalPower, avgWeightedLum, mEnvMapAutoScale);
 }

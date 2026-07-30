@@ -3,6 +3,7 @@
 // Ported from common/env_light.h (CUDA/OptiX version).
 
 #include <metal_stdlib>
+#include "ShaderTypes.h"
 using namespace metal;
 
 // Convert a world-space direction to equirectangular UV coordinates.
@@ -46,98 +47,110 @@ static inline float3 envUVToDir(const float2 uv, float rotation)
     return float3(rx, y, rz);
 }
 
-// Binary search in a CDF array. Returns index i such that cdf[i-1] < xi <= cdf[i].
-static inline int binarySearchCdf(device const float* cdf, int n, float xi)
+// Luminance used to build the sampling distribution. Must match the CPU-side
+// weight in MetalRender::loadEnvMap exactly, or sampling and PDF disagree.
+static inline float envLuminance(const float3 rgb)
 {
-    int lo = 0;
-    int hi = n - 1;
-    while (lo < hi)
-    {
-        int mid = (lo + hi) >> 1;
-        if (cdf[mid] < xi)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    return lo;
+    return 0.2126f * rgb.x + 0.7152f * rgb.y + 0.0722f * rgb.z;
 }
 
-// Sample the environment map using the 2D CDF.
-// xi: two uniform random numbers in [0, 1)
-// Returns: world-space direction, writes pdf.
+// Solid-angle PDF of the texel a direction falls into.
+//
+// The discrete probability of texel i is  w_i / W  with  w_i = lum_i * sin(theta_row),
+// and the texel subtends  dOmega = 2*pi^2 * sin(theta_row) / (w*h).
+// Dividing them cancels sin(theta) outright, so the whole PDF collapses to the
+// texel luminance times one precomputed constant:
+//     envPdfScale = (w*h) / (2*pi^2 * totalPower)
+// That is why no CDF or per-texel PDF array has to be stored or searched.
+static inline float envTexelPdf(const float3 radiance, float envPdfScale)
+{
+    return envLuminance(radiance) * envPdfScale;
+}
+
+// Sample the environment map with an alias table (Walker/Vose).
+//
+// The previous 2D-CDF sampler needed two binary searches per sample: ~10
+// dependent loads in the marginal CDF plus ~11 scattered dependent loads into
+// the conditional CDF, which for a 2K map is an 8 MB buffer — 21 cache-missing
+// round trips, all serialised, for every NEE sample at every bounce. An alias
+// table answers the same query with a single 8-byte load.
+//
+// xi: two uniform random numbers in [0, 1). Returns a world-space direction and
+// writes the solid-angle pdf.
 static inline float3 sampleEnvMap(
     const float2 xi,
-    device const float* cdfX,
-    device const float* cdfY,
+    device const EnvAliasEntry* aliasTable,
+    texture2d<float> envMapTexture,
     uint32_t envMapWidth,
     uint32_t envMapHeight,
     float envMapRotation,
+    float envPdfScale,
     thread float& pdf)
 {
-    const int w = (int)envMapWidth;
-    const int h = (int)envMapHeight;
+    const uint32_t w = envMapWidth;
+    const uint32_t h = envMapHeight;
+    const uint32_t n = w * h;
 
-    // Sample marginal CDF to get row y
-    const int y = binarySearchCdf(cdfY, h, xi.y);
+    // Scale one variate up to bucket index + a fractional part.
+    const float scaled = min(xi.x * (float)n, (float)n - 1e-6f);
+    const uint32_t bucket = (uint32_t)scaled;
+    float frac = scaled - (float)bucket;
 
-    // Sample conditional CDF for row y to get column x
-    const int x = binarySearchCdf(&cdfX[y * w], w, xi.x);
+    const EnvAliasEntry entry = aliasTable[bucket];
 
-    // PDF of selecting this pixel = p_y * p_x
-    float pdfY = (y == 0) ? cdfY[0] : (cdfY[y] - cdfY[y - 1]);
-    float pdfX = (x == 0) ? cdfX[y * w] : (cdfX[y * w + x] - cdfX[y * w + x - 1]);
-
-    // UV at pixel center
-    float u = ((float)x + 0.5f) / (float)w;
-    float v = ((float)y + 0.5f) / (float)h;
-
-    float3 dir = envUVToDir(float2(u, v), envMapRotation);
-
-    // sin(theta) for Jacobian
-    float theta = v * M_PI_F;
-    float sinTheta = sin(theta);
-
-    // PDF: pdfX * pdfY * (w * h) / (2 * pi^2 * sinTheta)
-    if (sinTheta > 1e-6f && pdfX > 0.0f && pdfY > 0.0f)
+    // Recycle `frac` as both the alias coin flip and the first jitter axis:
+    // remapping it back onto [0,1) conditioned on the branch taken keeps it
+    // exactly uniform, so no third random number is needed.
+    uint32_t texel;
+    if (frac < entry.prob)
     {
-        pdf = (pdfX * pdfY * (float)(w * h)) / (2.0f * M_PI_F * M_PI_F * sinTheta);
+        texel = bucket;
+        frac = (entry.prob > 0.0f) ? (frac / entry.prob) : 0.0f;
     }
     else
     {
-        pdf = 0.0f;
+        texel = entry.alias;
+        const float rest = 1.0f - entry.prob;
+        frac = (rest > 0.0f) ? ((frac - entry.prob) / rest) : 0.0f;
     }
+    frac = clamp(frac, 0.0f, 0.9999999f);
+
+    const uint32_t x = texel % w;
+    const uint32_t y = texel / w;
+
+    // Jitter inside the texel. The old sampler always returned the texel centre,
+    // so it could only ever generate w*h distinct directions while its pdf was a
+    // continuous density — visible as quantised highlights and inconsistent MIS.
+    const float u = ((float)x + frac) / (float)w;
+    const float v = ((float)y + xi.y) / (float)h;
+
+    const float3 dir = envUVToDir(float2(u, v), envMapRotation);
+
+    // Read the same texel the distribution was built from (point sampling, not
+    // the bilinear tap used for radiance) so sampling and pdf agree.
+    const float3 radiance = envMapTexture.read(uint2(x, y)).xyz;
+    pdf = envTexelPdf(radiance, envPdfScale);
 
     return dir;
 }
 
-// Evaluate PDF for a given world-space direction against the env map CDF.
+// Evaluate the solid-angle PDF for a direction — used for MIS against BSDF
+// sampling. One texel fetch, no search.
 static inline float envMapPdf(
     const float3 dir,
-    device const float* cdfX,
-    device const float* cdfY,
+    texture2d<float> envMapTexture,
     uint32_t envMapWidth,
     uint32_t envMapHeight,
-    float envMapRotation)
+    float envMapRotation,
+    float envPdfScale)
 {
+    const float2 uv = dirToEnvUV(dir, envMapRotation);
+
     const int w = (int)envMapWidth;
     const int h = (int)envMapHeight;
+    const int x = clamp((int)(uv.x * (float)w), 0, w - 1);
+    const int y = clamp((int)(uv.y * (float)h), 0, h - 1);
 
-    float2 uv = dirToEnvUV(dir, envMapRotation);
-
-    int x = (int)(uv.x * w);
-    int y = (int)(uv.y * h);
-    x = clamp(x, 0, w - 1);
-    y = clamp(y, 0, h - 1);
-
-    float pdfY = (y == 0) ? cdfY[0] : (cdfY[y] - cdfY[y - 1]);
-    float pdfX = (x == 0) ? cdfX[y * w] : (cdfX[y * w + x] - cdfX[y * w + x - 1]);
-
-    float theta = uv.y * M_PI_F;
-    float sinTheta = sin(theta);
-
-    if (sinTheta > 1e-6f && pdfX > 0.0f && pdfY > 0.0f)
-    {
-        return (pdfX * pdfY * (float)(w * h)) / (2.0f * M_PI_F * M_PI_F * sinTheta);
-    }
-    return 0.0f;
+    const float3 radiance = envMapTexture.read(uint2((uint)x, (uint)y)).xyz;
+    return envTexelPdf(radiance, envPdfScale);
 }
