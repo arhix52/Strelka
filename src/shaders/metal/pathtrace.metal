@@ -24,6 +24,7 @@ struct PerRayData
     float lastBsdfPdf;
     IorStack iorStack;
     bool specularBounce;
+    bool neeDone; // did NEE run at the vertex that spawned this ray?
     bool shouldTerninate;
 };
 
@@ -569,6 +570,7 @@ kernel void raytracingKernel(
     ior_stack_init(prd.iorStack);
     prd.depth = 0;
     prd.specularBounce = false;
+    prd.neeDone = false;
     prd.lastBsdfPdf = 0.0f;
     prd.sampler = initSampler(linearPixelIndex, uniforms.subframeIndex + sampleIdx, 0u);
 
@@ -600,7 +602,7 @@ kernel void raytracingKernel(
         ray.direction = prd.direction;
 
         i.accept_any_intersection(false);
-        intersection = i.intersect(ray, accelerationStructure, RAY_MASK_PRIMARY, motionTime);
+        intersection = i.intersect(ray, accelerationStructure, uniforms.primaryRayMask, motionTime);
 
         // Stop if the ray didn't hit anything and has bounced out of the scene.
         if (intersection.type == intersection_type::none)
@@ -614,7 +616,7 @@ kernel void raytracingKernel(
                 float3 envColor = envSample.xyz;
                 envColor *= uniforms.envMapIntensity * float3(uniforms.envMapColorTint);
 
-                if (prd.depth == 0 || prd.specularBounce)
+                if (prd.depth == 0 || prd.specularBounce || !prd.neeDone)
                 {
                     prd.radiance += prd.throughput * envColor;
                 }
@@ -654,7 +656,7 @@ kernel void raytracingKernel(
                 const float3 lightNormal = calcLightNormal(currLight, hitPoint);
                 if (-dot(prd.direction, lightNormal) > 0.0f)
                 {
-                    if (prd.depth == 0 || prd.specularBounce)
+                    if (prd.depth == 0 || prd.specularBounce || !prd.neeDone)
                     {
                         prd.radiance += prd.throughput * float3(currLight.color) * -dot(prd.direction, lightNormal);
                     }
@@ -840,8 +842,10 @@ kernel void raytracingKernel(
             prd.specularBounce = ((sampleResult.event_type & BSDF_EVENT_SPECULAR) != 0);
 
             // Direct lighting (NEE) for diffuse/glossy events
-            if ((sampleResult.event_type & (BSDF_EVENT_DIFFUSE | BSDF_EVENT_GLOSSY)) &&
-                (uniforms.numLights > 0 || uniforms.hasEnvMap))
+            prd.neeDone = (uniforms.estimatorMode == 0) &&
+                          (sampleResult.event_type & (BSDF_EVENT_DIFFUSE | BSDF_EVENT_GLOSSY)) &&
+                          (uniforms.numLights > 0 || uniforms.hasEnvMap);
+            if (prd.neeDone)
             {
                 float3 toLight;
                 float lightPdf = 0.0f;

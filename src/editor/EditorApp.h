@@ -72,6 +72,7 @@ public:
     void loadAnimSettings();
     void checkLoadingComplete();
     void run();
+    void runReferenceCapture();
     void playAnimations(float deltaTime);
 
     // --- UI drawing ---
