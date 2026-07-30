@@ -1,3 +1,6 @@
 [submodule "external/ImGuiFileDialog"]
 	path = third_party/imgui_file_dialog
 	url = https://github.com/aiekick/ImGuiFileDialog
+[submodule "third_party/metal_cpp"]
+	path = third_party/metal_cpp
+	url = https://github.com/apple/metal-cpp.git
