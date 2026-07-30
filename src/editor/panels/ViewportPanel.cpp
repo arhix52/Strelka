@@ -42,7 +42,28 @@ void EditorApp::drawViewportPanel()
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
 
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + verticalPadding);
-        ImGui::ImageButton("##viewport", (ImTextureID)m_display->getDisplayNativeTexure(), viewportSize);
+
+        // The display texture only exists once a render has completed and been
+        // blitted, which takes a couple of frames at startup. Passing the null
+        // handle to ImageButton is not harmless: imgui_impl_metal skips
+        // setFragmentTexture entirely for a zero ImTextureID, so the draw reuses
+        // whatever was bound last — in practice the font atlas, which flashed
+        // across the viewport for the first frames. Draw an empty frame instead.
+        void* viewportTexture = m_display->getDisplayNativeTexure();
+        const ImVec2 topLeft = ImGui::GetCursorScreenPos();
+        if (viewportTexture != nullptr)
+        {
+            ImGui::ImageButton("##viewport", (ImTextureID)viewportTexture, viewportSize);
+        }
+        else
+        {
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                topLeft, ImVec2(topLeft.x + viewportSize.x, topLeft.y + viewportSize.y),
+                ImGui::GetColorU32(ImGuiCol_FrameBg));
+            // Keep the same item id and size so hover handling below and the
+            // surrounding layout behave identically either way.
+            ImGui::InvisibleButton("##viewport", viewportSize);
+        }
 
         ImGuizmo::SetOrthographic(false);
         ImGuizmo::SetDrawlist();
