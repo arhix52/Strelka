@@ -84,38 +84,75 @@ if(WIN32 OR LINUX)
 endif()
 
 if(APPLE)
+    # Fail at configure time with an actionable message instead of an opaque
+    # "cannot execute tool 'metal'" error in the middle of the build.
+    execute_process(
+        COMMAND xcrun -sdk macosx --find metal
+        RESULT_VARIABLE METAL_COMPILER_FOUND
+        OUTPUT_VARIABLE METAL_COMPILER_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(NOT METAL_COMPILER_FOUND EQUAL 0)
+        message(FATAL_ERROR
+            "The Metal shader compiler was not found.\n"
+            "Install the Metal toolchain with:\n"
+            "    xcodebuild -downloadComponent MetalToolchain\n"
+            "(and make sure `xcode-select -p` points at a full Xcode install).")
+    endif()
+
     set(METAL_INCLUDE_FLAGS
         -I ${CMAKE_SOURCE_DIR}/src/material/include
         -I ${SHADER_COMMON_DIR}
         -I ${CMAKE_CURRENT_SOURCE_DIR}/metal
     )
 
+    # -gline-tables-only/-frecord-sources keep Metal frame captures usable.
+    set(METAL_BUILD_FLAGS -Wall -std=metal3.0)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        list(APPEND METAL_BUILD_FLAGS -gline-tables-only -frecord-sources)
+    endif()
+
     set(SHADER_OUTPUT_DIR ${OUTPUT_DIRECTORY}/metal/shaders)
+    set(SHADER_AIR_DIR ${CMAKE_CURRENT_BINARY_DIR}/air)
 
     # Copy fullScreen.metal (no compilation needed, loaded at runtime)
     add_custom_command(
         OUTPUT ${SHADER_OUTPUT_DIR}/fullScreen.metal
         COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
-        COMMAND ${CMAKE_COMMAND} -E copy
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_CURRENT_SOURCE_DIR}/metal/fullScreen.metal
             ${SHADER_OUTPUT_DIR}/fullScreen.metal
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/metal/fullScreen.metal
+        COMMENT "Copying fullScreen.metal"
     )
 
-    # Compile Metal shaders
+    # Compile Metal shaders.
+    #
+    # `metal -MD` emits a Make-style depfile listing every transitively included
+    # header (ShaderTypes.h, bsdf.h, material_math.h, ...). Feeding it back to the
+    # generator via DEPFILE is what makes header edits actually trigger a rebuild;
+    # without it the metallibs silently go stale after a header change or a
+    # `git checkout`, and the app runs against shaders that no longer match the
+    # host-side struct layouts.
     foreach(shader pathtrace tonemapper skinning)
         add_custom_command(
             OUTPUT ${SHADER_OUTPUT_DIR}/${shader}.metallib
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
-            COMMAND xcrun -sdk macosx metal -Wall -std=metal3.0
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_AIR_DIR}
+            COMMAND xcrun -sdk macosx metal ${METAL_BUILD_FLAGS}
                 ${METAL_INCLUDE_FLAGS}
+                -MD -MF ${SHADER_AIR_DIR}/${shader}.d
+                -MT ${SHADER_OUTPUT_DIR}/${shader}.metallib
                 -c ${CMAKE_CURRENT_SOURCE_DIR}/metal/${shader}.metal
-                -o ${CMAKE_BINARY_DIR}/${shader}.air
+                -o ${SHADER_AIR_DIR}/${shader}.air
             COMMAND xcrun -sdk macosx metallib
-                ${CMAKE_BINARY_DIR}/${shader}.air
+                ${SHADER_AIR_DIR}/${shader}.air
                 -o ${SHADER_OUTPUT_DIR}/${shader}.metallib
             DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/metal/${shader}.metal
+            DEPFILE ${SHADER_AIR_DIR}/${shader}.d
             COMMENT "Compiling ${shader}.metal"
+            VERBATIM
         )
     endforeach()
 

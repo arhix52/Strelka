@@ -35,32 +35,24 @@ target_include_directories(StrelkaEditor
         ${ROOT_HOME}/third_party/imgui_file_dialog
 )
 
+# strelka_display already PUBLIC-links strelka_render, strelka_foundation and
+# imgui, and strelka_render PUBLIC-links strelka_scene — listing them again here
+# made the linker warn about duplicate libraries. Link only what this target
+# uses directly and let usage requirements propagate the rest.
+#
+# This is an executable: its link interface is never consumed, so PRIVATE.
+set(EDITOR_LINK_LIBS
+    cxxopts::cxxopts
+    imguizmo::imguizmo
+    strelka_display
+    strelka_sceneloader
+)
+
 if(APPLE)
-    # On Apple, strelka_shaders is a custom_target (metallib compilation), not a library.
-    # Use add_dependencies for build ordering; no link needed.
-    target_link_libraries(StrelkaEditor
-        PUBLIC
-            cxxopts::cxxopts
-            imgui::imgui
-            imguizmo::imguizmo
-            strelka_render
-            strelka_display
-            strelka_sceneloader
-            strelka_foundation
-            strelka_scene
-    )
+    # On Apple, strelka_shaders is a custom_target (metallib compilation), not a
+    # library. Use add_dependencies for build ordering; no link needed.
+    target_link_libraries(StrelkaEditor PRIVATE ${EDITOR_LINK_LIBS})
     add_dependencies(StrelkaEditor strelka_shaders)
 else()
-    target_link_libraries(StrelkaEditor
-        PUBLIC
-            cxxopts::cxxopts
-            imgui::imgui
-            imguizmo::imguizmo
-            strelka_render
-            strelka_shaders
-            strelka_display
-            strelka_sceneloader
-            strelka_foundation
-            strelka_scene
-    )
+    target_link_libraries(StrelkaEditor PRIVATE ${EDITOR_LINK_LIBS} strelka_shaders)
 endif()

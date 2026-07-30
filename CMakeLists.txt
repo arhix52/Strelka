@@ -32,6 +32,15 @@ endif()
 set(ROOT_HOME ${CMAKE_CURRENT_LIST_DIR})
 set(OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
+# Executables must sit next to the runtime asset trees they load
+# (${OUTPUT_DIRECTORY}/metal/shaders, ${OUTPUT_DIRECTORY}/optix). Without this
+# the editor lands in <build>/src/editor/ and only starts if the working
+# directory happens to be the build root.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${OUTPUT_DIRECTORY})
+foreach(cfg IN ITEMS DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${cfg} ${OUTPUT_DIRECTORY})
+endforeach()
+
 # Build options
 option(STRELKA_BUILD_EDITOR "Build interactive editor application" ON)
 option(STRELKA_BUILD_HYDRA  "Build Hydra render delegate (requires OpenUSD)" OFF)
