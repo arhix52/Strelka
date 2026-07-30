@@ -587,7 +587,10 @@ void MetalRender::render(Buffer* output)
     pUniformData->subframeIndex = ctx.mSubframeIndex;
     pUniformData->height = height;
     pUniformData->width = width;
-    pUniformData->numLights = mScene->getLightsDesc().size();
+    const bool analyticLightsEnabled = settings.getAs<bool>("render/validate/analyticLights");
+    pUniformData->numLights = analyticLightsEnabled ? (uint32_t)mScene->getLightsDesc().size() : 0u;
+    pUniformData->primaryRayMask = analyticLightsEnabled ? RAY_MASK_PRIMARY : GEOMETRY_MASK_GEOMETRY;
+    pUniformData->estimatorMode = settings.getAs<uint32_t>("render/validate/estimatorMode");
     pUniformData->samples_per_launch = spp;
     pUniformData->enableAccumulation = (uint32_t)enableAccumulation;
     pUniformData->missColor = float3(0.0f);

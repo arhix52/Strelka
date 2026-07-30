@@ -6,6 +6,8 @@
 #include <limits>
 #include <cmath>
 #include <ctime>
+#include <vector>
+#include <unistd.h>
 
 #include <tinyexr.h>
 #include <stb_image_write.h>
@@ -131,8 +133,11 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<float>("render/motionBlur/shutterTime", 1.0f / 24.0f);
     m_settingsManager->setAs<uint32_t>("render/motionBlur/shutterMode", 1); // 0=centered, 1=leading, 2=trailing
     m_settingsManager->setAs<float>("render/animation/speed", 1.0f);
+    m_settingsManager->setAs<uint32_t>("render/validate/estimatorMode", 0);
+    m_settingsManager->setAs<bool>("render/validate/analyticLights", true);
     m_settingsManager->setAs<std::string>("resource/searchPath", m_resourceSearchPath);
     // Postprocessing settings:
+    m_settingsManager->setAs<float>("render/post/tonemapper/maxEDR", 1.0f); // refreshed per frame from the display
     m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", 100.0f);
     m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", 1.0f);
     m_settingsManager->setAs<float>("render/post/tonemapper/fStop", 4.0f);
@@ -210,8 +215,97 @@ void EditorApp::checkLoadingComplete()
     m_display->setInputHandler(m_cameraController.get());
 }
 
+// Reference capture / estimator self-consistency check (STRELKA_REF=<dir>).
+void EditorApp::runReferenceCapture()
+{
+    const char* outDir = getenv("STRELKA_REF");
+    const uint32_t spp = (uint32_t)atoi(getenv("STRELKA_REF_SPP") ? getenv("STRELKA_REF_SPP") : "512");
+
+    struct C { const char* name; uint32_t estimator; bool analyticLights; };
+    const C cases[] = {
+        { "nee",           0, true  },
+        { "bsdf_only",     1, true  },
+        { "nee_envonly",   0, false },
+        { "bsdf_envonly",  1, false },
+    };
+
+    // Linear output: the tone curve is irrelevant for comparing estimators and
+    // would compress exactly the differences we are looking for.
+    m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", 0);
+    m_settingsManager->setAs<float>("render/post/gamma", 0.0f);
+    m_settingsManager->setAs<bool>("render/pt/enableAcc", true);
+    m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", spp);
+    m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
+    m_settingsManager->setAs<bool>("render/isMotionBlurVisible", false);
+
+    std::vector<std::vector<float>> images;
+    for (const C& c : cases)
+    {
+        m_settingsManager->setAs<uint32_t>("render/validate/estimatorMode", c.estimator);
+        m_settingsManager->setAs<bool>("render/validate/analyticLights", c.analyticLights);
+        m_sharedCtx->mSubframeIndex = 0;
+
+        while (m_sharedCtx->mSubframeIndex < spp && !m_display->windowShouldClose())
+        {
+            m_display->pollEvents();
+            m_render->triggerRenderIfIdle();
+            usleep(300);
+        }
+        // Let the last submission land.
+        for (int i = 0; i < 2000 && m_render->getReadyBuffer() == nullptr; ++i) usleep(500);
+        usleep(200000);
+
+        oka::Buffer* rb = m_render->getReadyBuffer();
+        std::vector<float> img;
+        double meanLum = 0.0;
+        if (rb)
+        {
+            const float* px = static_cast<const float*>(rb->getHostPointer());
+            const size_t n = (size_t)rb->width() * rb->height() * 4;
+            img.assign(px, px + n);
+            for (size_t i = 0; i < n; i += 4)
+                meanLum += 0.2126*px[i] + 0.7152*px[i+1] + 0.0722*px[i+2];
+            meanLum /= (double)(n / 4);
+            if (outDir)
+            {
+                saveScreenshot(rb, std::string(outDir) + "/" + c.name + ".exr");
+            }
+        }
+        images.push_back(std::move(img));
+        STRELKA_INFO("REF  {:14s} spp={} meanLum={:.6f}", c.name, (uint32_t)m_sharedCtx->mSubframeIndex, meanLum);
+    }
+
+    auto compare = [&](const char* label, size_t a, size_t b) {
+        if (images[a].empty() || images[b].empty() || images[a].size() != images[b].size()) return;
+        double se = 0.0, refEnergy = 0.0; size_t n = 0;
+        double lumA = 0.0, lumB = 0.0;
+        for (size_t i = 0; i < images[a].size(); i += 4)
+        {
+            for (int k = 0; k < 3; ++k)
+            {
+                const double d = images[a][i+k] - images[b][i+k];
+                se += d * d;
+                refEnergy += (double)images[a][i+k] * images[a][i+k];
+            }
+            lumA += 0.2126*images[a][i] + 0.7152*images[a][i+1] + 0.0722*images[a][i+2];
+            lumB += 0.2126*images[b][i] + 0.7152*images[b][i+1] + 0.0722*images[b][i+2];
+            ++n;
+        }
+        const double rmse = sqrt(se / (double)(n * 3));
+        const double rel = refEnergy > 0 ? sqrt(se / refEnergy) : 0.0;
+        STRELKA_INFO("REF  {:28s} RMSE={:.6f}  relative={:.3f}%  meanLum {:.6f} vs {:.6f}  bias={:+.2f}%",
+                     label, rmse, 100.0*rel, lumA/n, lumB/n, 100.0*(lumB/lumA - 1.0));
+    };
+    compare("NEE vs BSDF-only (all)", 0, 1);
+    compare("NEE vs BSDF-only (env only)", 2, 3);
+
+    STRELKA_INFO("REF done");
+    m_display->requestClose();
+}
+
 void EditorApp::run()
 {
+    if (getenv("STRELKA_REF")) { runReferenceCapture(); return; }
     auto prevTime = std::chrono::high_resolution_clock::now();
 
     while (!m_display->windowShouldClose())

@@ -103,6 +103,15 @@ struct Uniforms
     // (w*h) / (2*pi^2 * totalPower): converts a texel's luminance straight into
     // its solid-angle sampling PDF, so no CDF or PDF table is needed on the GPU.
     float envPdfScale;
+    // Validation switches. estimatorMode: 0 = NEE + MIS (normal), 1 = BSDF
+    // sampling only. The two are independent unbiased estimators of the same
+    // integral, so at convergence they must produce the same image; the
+    // difference between them measures estimator inconsistency directly.
+    uint32_t estimatorMode;
+    // Ray mask for camera/secondary rays. Excluding light geometry is the only
+    // way to actually remove analytic lights: zeroing numLights just disables
+    // NEE's light selection, the emissive geometry is still hit by BSDF rays.
+    uint32_t primaryRayMask;
     vector_float3 envMapColorTint;
 };
 

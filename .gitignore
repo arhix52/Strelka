@@ -12,3 +12,6 @@ data/test_data
 CMakeUserPresets.json
 compile_commands.json
 *.log
+
+# Reference renders for correctness validation (large, regenerated on demand)
+refs/
