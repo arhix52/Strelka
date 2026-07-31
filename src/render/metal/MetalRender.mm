@@ -167,6 +167,8 @@ MetalRender::~MetalRender()
         safeRelease(mTonemapperPSO4);
         safeRelease(mSkinningPSO);
         safeRelease(mTriangleUpdatePSO);
+        safeRelease(mSkinningPSO4);
+        safeRelease(mTriangleUpdatePSO4);
 
         // Queue & device (release last)
         mMetal4.release();
@@ -2538,6 +2540,11 @@ void MetalRender::buildSkinningPipeline()
     MTL::Function* pTriUpdateFn =
         pLibrary->newFunction(NS::String::string("updateTriangleBufferKernel", NS::UTF8StringEncoding));
     mTriangleUpdatePSO = mDevice->newComputePipelineState(pTriUpdateFn, &pError);
+    if (mMetal4.isValid())
+    {
+        mSkinningPSO4 = mMetal4.newComputePipelineState(pLibrary, "skinningKernel", nullptr);
+        mTriangleUpdatePSO4 = mMetal4.newComputePipelineState(pLibrary, "updateTriangleBufferKernel", nullptr);
+    }
     if (!mTriangleUpdatePSO)
     {
         STRELKA_FATAL("Failed to create triangle update PSO: {}", pError->localizedDescription()->utf8String());
@@ -2612,8 +2619,10 @@ void MetalRender::applySkinning()
     mJointMatricesBuffer->didModifyRange(NS::Range::Make(0, uploadBytes));
 
     // Dispatch skinning + triangle update kernels
-    MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
-    MTL::ComputeCommandEncoder* pEncoder = pCmd->computeCommandEncoder();
+    MTL4::CommandBuffer* pCmd = mMetal4.beginImmediate();
+    MTL4::ComputeCommandEncoder* pEncoder = pCmd->computeCommandEncoder();
+    MTL4::ArgumentTable* skinTable = mMetal4.argumentTable();
+    pEncoder->setArgumentTable(skinTable);
 
     int skinIndex = 0;
     int jointMatOffset = 0;
@@ -2639,16 +2648,16 @@ void MetalRender::applySkinning()
                 skinParams.jointMatOffset = jointMatOffset;
                 skinParams.vertexCount = mesh.mVertexCount;
 
-                pEncoder->setComputePipelineState(mSkinningPSO);
-                pEncoder->setBuffer(mVertexBuffer, 0, 0);
-                pEncoder->setBuffer(mSkinDataBuffer, 0, 1);
-                pEncoder->setBuffer(mJointMatricesBuffer, 0, 2);
-                pEncoder->setBytes(&skinParams, sizeof(SkinningParams), 3);
+                pEncoder->setComputePipelineState(mSkinningPSO4);
+                skinTable->setAddress(mVertexBuffer->gpuAddress(), 0);
+                skinTable->setAddress(mSkinDataBuffer->gpuAddress(), 1);
+                skinTable->setAddress(mJointMatricesBuffer->gpuAddress(), 2);
+                skinTable->setAddress(mMetal4.constants().push(skinParams), 3);
 
                 const uint32_t threadsPerGroup = 256;
-                const MTL::Size gridSize = MTL::Size(mesh.mVertexCount, 1, 1);
                 const MTL::Size groupSize = MTL::Size(threadsPerGroup, 1, 1);
-                pEncoder->dispatchThreads(gridSize, groupSize);
+                pEncoder->dispatchThreadgroups(
+                    MTL::Size((mesh.mVertexCount + threadsPerGroup - 1) / threadsPerGroup, 1, 1), groupSize);
 
                 // Dispatch triangle update kernel
                 MetalRender::Mesh* metalMesh = mMetalMeshes[meshId];
@@ -2659,33 +2668,37 @@ void MetalRender::applySkinning()
                     triParams.indexOffset = mesh.mIndex;
                     triParams.vbOffset = mesh.mVbOffset;
 
-                    pEncoder->setComputePipelineState(mTriangleUpdatePSO);
-                    pEncoder->setBuffer(metalMesh->mPerPrimitiveBuffer, 0, 0);
-                    pEncoder->setBuffer(mVertexBuffer, 0, 1);
-                    pEncoder->setBuffer(mIndexBuffer, 0, 2);
-                    pEncoder->setBytes(&triParams, sizeof(TriangleUpdateParams), 3);
+                    // Skinning writes the vertices this reads.
+                    pEncoder->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch,
+                                                        MTL4::VisibilityOptionDevice);
+                    pEncoder->setComputePipelineState(mTriangleUpdatePSO4);
+                    skinTable->setAddress(metalMesh->mPerPrimitiveBuffer->gpuAddress(), 0);
+                    skinTable->setAddress(mVertexBuffer->gpuAddress(), 1);
+                    skinTable->setAddress(mIndexBuffer->gpuAddress(), 2);
+                    skinTable->setAddress(mMetal4.constants().push(triParams), 3);
 
-                    const MTL::Size triGridSize = MTL::Size(metalMesh->mTriangleCount, 1, 1);
-                    pEncoder->dispatchThreads(triGridSize, groupSize);
+                    pEncoder->dispatchThreadgroups(
+                        MTL::Size((metalMesh->mTriangleCount + 255) / 256, 1, 1), groupSize);
                 }
             }
         }
     }
 
     pEncoder->endEncoding();
-    pCmd->commit();
-    // No waitUntilCompleted — queue ordering guarantees subsequent AS operations
-    // on the same queue see skinning results.
+    mMetal4.submitAndWait(pCmd);
 }
 
 void MetalRender::copyVertexBufferToPrev()
 {
     const size_t vertexDataSize = mVertexBuffer->length();
-    MTL::CommandBuffer* blitCmd = mCommandQueue->commandBuffer();
-    MTL::BlitCommandEncoder* blit = blitCmd->blitCommandEncoder();
-    blit->copyFromBuffer(mVertexBuffer, 0, mPrevVertexBuffer, 0, vertexDataSize);
-    blit->endEncoding();
-    blitCmd->commit();
+    // Metal 4 has no blit encoder; copies are commands on the compute encoder,
+    // which is the same consolidation that lets acceleration structure builds
+    // share an encoder with the dispatches that feed them.
+    MTL4::CommandBuffer* cmd = mMetal4.beginImmediate();
+    MTL4::ComputeCommandEncoder* enc = cmd->computeCommandEncoder();
+    enc->copyFromBuffer(mVertexBuffer, 0, mPrevVertexBuffer, 0, vertexDataSize);
+    enc->endEncoding();
+    mMetal4.submitAndWait(cmd);
 }
 
 MTL::AccelerationStructureMotionTriangleGeometryDescriptor* MetalRender::createMotionGeometryDescriptor(

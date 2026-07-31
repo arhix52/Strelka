@@ -284,6 +284,8 @@ private:
     MTL::ComputePipelineState* mWavefrontPrepareShadowPSO4 = nullptr;
     MTL::ComputePipelineState* mWavefrontPrepareHitMissPSO4 = nullptr;
     MTL::ComputePipelineState* mTonemapperPSO4 = nullptr;
+    MTL::ComputePipelineState* mSkinningPSO4 = nullptr;
+    MTL::ComputePipelineState* mTriangleUpdatePSO4 = nullptr;
 
     MTL::Library* loadShaderLibrary(const char* relativePath);
     void buildComputePipeline();

@@ -104,6 +104,13 @@ public:
     /// here, so the frame's previous work must already have completed.
     MTL4::CommandBuffer* beginFrame(uint32_t frameIndex);
 
+    /// One-off work outside the frame loop -- scene load, acceleration structure
+    /// builds, skinning. Uses an allocator of its own so it cannot collide with a
+    /// frame still in flight, and submitAndWait() blocks until it is done, which
+    /// is what every caller of this needs anyway.
+    MTL4::CommandBuffer* beginImmediate();
+    void submitAndWait(MTL4::CommandBuffer* commandBuffer);
+
     /// Declare a resource resident for as long as it exists. Cheap to call
     /// repeatedly; commitResidency() must follow before the next submit.
     void addResident(MTL::Allocation* allocation);
@@ -123,6 +130,10 @@ private:
     MTL::ResidencySet* mResidencySet = nullptr;
     std::vector<MTL4::CommandAllocator*> mAllocators;
     std::vector<MTL4::CommandBuffer*> mCommandBuffers;
+    MTL4::CommandAllocator* mImmediateAllocator = nullptr;
+    MTL4::CommandBuffer* mImmediateBuffer = nullptr;
+    MTL::SharedEvent* mImmediateEvent = nullptr;
+    uint64_t mImmediateValue = 0;
     ConstantRing mConstants;
     bool mResidencyDirty = false;
 };

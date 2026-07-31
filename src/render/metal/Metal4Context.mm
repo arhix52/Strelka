@@ -138,6 +138,18 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
         mCommandBuffers.push_back(commandBuffer);
     }
 
+    mImmediateAllocator = device->newCommandAllocator();
+    mImmediateBuffer = device->newCommandBuffer();
+    // Metal 4 has no waitUntilCompleted; a shared event signalled by the queue is
+    // how a submission is waited on.
+    mImmediateEvent = device->newSharedEvent();
+    if (!mImmediateAllocator || !mImmediateBuffer || !mImmediateEvent)
+    {
+        STRELKA_ERROR("Metal 4 immediate submission objects failed");
+        release();
+        return false;
+    }
+
     if (!mConstants.init(device, constantBytesPerFrame, frameCount))
     {
         STRELKA_ERROR("Metal 4 constant ring allocation failed");
@@ -155,8 +167,48 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     return true;
 }
 
+MTL4::CommandBuffer* Metal4Context::beginImmediate()
+{
+    if (!mImmediateBuffer)
+    {
+        return nullptr;
+    }
+    mImmediateAllocator->reset();
+    mImmediateBuffer->beginCommandBuffer(mImmediateAllocator);
+    mImmediateBuffer->useResidencySet(mResidencySet);
+    return mImmediateBuffer;
+}
+
+void Metal4Context::submitAndWait(MTL4::CommandBuffer* commandBuffer)
+{
+    if (!commandBuffer || !mQueue)
+    {
+        return;
+    }
+    commandBuffer->endCommandBuffer();
+    const MTL4::CommandBuffer* buffers[] = { commandBuffer };
+    mQueue->commit(buffers, 1);
+    mQueue->signalEvent(mImmediateEvent, ++mImmediateValue);
+    mImmediateEvent->waitUntilSignaledValue(mImmediateValue, 5000);
+}
+
 void Metal4Context::release()
 {
+    if (mImmediateEvent)
+    {
+        mImmediateEvent->release();
+        mImmediateEvent = nullptr;
+    }
+    if (mImmediateBuffer)
+    {
+        mImmediateBuffer->release();
+        mImmediateBuffer = nullptr;
+    }
+    if (mImmediateAllocator)
+    {
+        mImmediateAllocator->release();
+        mImmediateAllocator = nullptr;
+    }
     mConstants.release();
     for (MTL4::CommandBuffer* commandBuffer : mCommandBuffers)
     {
