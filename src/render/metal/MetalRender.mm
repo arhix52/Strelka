@@ -146,6 +146,8 @@ MetalRender::~MetalRender()
         safeRelease(mHitQueueBuffer);
         safeRelease(mMissQueueBuffer);
         safeRelease(mWavefrontMissPSO);
+        safeRelease(mWavefrontExtendStaticPSO);
+        safeRelease(mWavefrontShadowStaticPSO);
         safeRelease(mWavefrontPrepareHitMissPSO);
         safeRelease(mStageTimestampBuffer);
         safeRelease(mStageStatsBuffer);
@@ -562,6 +564,10 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
     const NS::UInteger kHitCounterOffset = 11 * sizeof(uint32_t);
     const NS::UInteger kMissArgsOffset = 18 * sizeof(uint32_t);
     const NS::UInteger kMissCounterOffset = 16 * sizeof(uint32_t);
+    // Nothing in the scene deforms -> traverse it as a static structure. Every ray
+    // was otherwise paying for motion-BVH traversal it could not use.
+    const bool useMotion = mSceneHasMotionBlas || mWavefrontExtendStaticPSO == nullptr ||
+                          getSettings()->getAs<uint32_t>("render/pt/staticTraversal") == 0;
 
 
     // Profiling gives each stage its own encoder, because this hardware samples
@@ -616,7 +622,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
             stamp(kStageExtend);
-            enc->setComputePipelineState(mWavefrontExtendPSO);
+            enc->setComputePipelineState(useMotion ? mWavefrontExtendPSO : mWavefrontExtendStaticPSO);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(mInstanceBuffer, 0, 1);
             enc->setAccelerationStructure(mInstanceAccelerationStructure, 2);
@@ -654,7 +660,6 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->setComputePipelineState(mWavefrontShadePSO);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(mInstanceBuffer, 0, 1);
-            enc->setAccelerationStructure(mInstanceAccelerationStructure, 2);
             enc->setBuffer(mLightBuffer, 0, 3);
             enc->setBuffer(mMaterialBuffer, 0, 4);
             enc->setBuffer(mPathStateBuffer, 0, 5);
@@ -692,7 +697,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
             stamp(kStageShadow);
-            enc->setComputePipelineState(mWavefrontShadowPSO);
+            enc->setComputePipelineState(useMotion ? mWavefrontShadowPSO : mWavefrontShadowStaticPSO);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setAccelerationStructure(mInstanceAccelerationStructure, 1);
             enc->setBuffer(mShadowRayBuffer, 0, 2);
@@ -1420,6 +1425,8 @@ void MetalRender::buildWavefrontPipelines()
     mWavefrontPreparePSO = make("wavefrontPrepare");
     mWavefrontPrepareShadowPSO = make("wavefrontPrepareShadow");
     mWavefrontShadowPSO = make("wavefrontShadow");
+    mWavefrontExtendStaticPSO = make("wavefrontExtendStatic");
+    mWavefrontShadowStaticPSO = make("wavefrontShadowStatic");
     mWavefrontMissPSO = make("wavefrontMiss");
     mWavefrontPrepareHitMissPSO = make("wavefrontPrepareHitMiss");
 
@@ -1802,6 +1809,7 @@ size_t MetalRender::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, boo
         ((NS::Object*)g)->release();
     }
 
+    mSceneHasMotionBlas = mSceneHasMotionBlas || skeletal;
     mBlasList.push_back(blas);
     mPrimitiveAccelerationStructures.push_back(blas.mAs);
     return mBlasList.size() - 1;
@@ -1856,6 +1864,7 @@ void MetalRender::createAccelerationStructures()
 
     mGeometryEntries.clear();
     mEmittedInstances.clear();
+    mSceneHasMotionBlas = false;
 
     std::vector<size_t> groupBlas;
 

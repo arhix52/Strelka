@@ -138,6 +138,14 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", 1); // 0 = megakernel, 1 = wavefront
     m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 1);
     m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 0);
+    // Static-geometry traversal. Forcing it off makes the wavefront traverse the
+    // same structure the megakernel does, which is what the bit-identity check
+    // needs: the two intersector types round intersection distances differently.
+    m_settingsManager->setAs<uint32_t>("render/pt/staticTraversal", 1);
+    if (const char* st = getenv("STRELKA_STATIC"))
+    {
+        m_settingsManager->setAs<uint32_t>("render/pt/staticTraversal", (uint32_t)atoi(st));
+    }
 
     if (const char* tracer = getenv("STRELKA_TRACER"))
     {

@@ -188,6 +188,11 @@ private:
     MTL::ComputePipelineState* mWavefrontPreparePSO = nullptr;
     MTL::ComputePipelineState* mWavefrontPrepareShadowPSO = nullptr;
     MTL::ComputePipelineState* mWavefrontShadowPSO = nullptr;
+    // Static-geometry variants. A motion acceleration structure is a different
+    // type from a static one, so this is two compiled kernels, not a branch.
+    MTL::ComputePipelineState* mWavefrontExtendStaticPSO = nullptr;
+    MTL::ComputePipelineState* mWavefrontShadowStaticPSO = nullptr;
+    bool mSceneHasMotionBlas = false;
     MTL::ComputePipelineState* mWavefrontMissPSO = nullptr;
     MTL::ComputePipelineState* mWavefrontPrepareHitMissPSO = nullptr;
 

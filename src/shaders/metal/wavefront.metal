@@ -70,6 +70,34 @@ static inline void queuePush(device atomic_uint* counter, device uint32_t* queue
     queueOut[base + rank] = pathIndex;
 }
 
+
+// Traversal specialisation.
+//
+// A motion acceleration structure is a different type from a static one, and the
+// intersector that walks it is a different type again — so this cannot be a
+// runtime branch or a function constant, it has to be two compiled variants. It
+// is worth it: every ray was paying for motion-BVH traversal, including in scenes
+// with no deforming geometry at all, and that was 12-19% of the frame.
+struct MotionTraversal
+{
+    using structure = acceleration_structure<instancing, primitive_motion>;
+    using isect = intersector<triangle_data, instancing, primitive_motion>;
+    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float time)
+    {
+        return i.intersect(r, as, mask, time);
+    }
+};
+
+struct StaticTraversal
+{
+    using structure = acceleration_structure<instancing>;
+    using isect = intersector<triangle_data, instancing>;
+    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float)
+    {
+        return i.intersect(r, as, mask);
+    }
+};
+
 static inline uint32_t pathDepth(uint32_t depthAndFlags)
 {
     return depthAndFlags & PATH_DEPTH_MASK;
@@ -163,20 +191,21 @@ kernel void wavefrontGenerate(
 // ---------------------------------------------------------------------------
 // extend -- closest hit
 // ---------------------------------------------------------------------------
-kernel void wavefrontExtend(
-    uint                                                       gid            [[thread_position_in_grid]],
-    constant Uniforms&                                         uniforms       [[buffer(0)]],
-    constant MTLAccelerationStructureUserIDInstanceDescriptor* instances      [[buffer(1)]],
-    acceleration_structure<instancing, primitive_motion>       accelerationStructure [[buffer(2)]],
-    device const PathRay*                                      rays           [[buffer(3)]],
-    device HitRecord*                                          hits           [[buffer(4)]],
-    constant uint32_t&                                         sampleIdx      [[buffer(5)]],
-    device const uint32_t*                                     queue          [[buffer(6)]],
-    device const uint32_t*                                     control        [[buffer(7)]],
-    device uint32_t*                                           hitQueue       [[buffer(8)]],
-    device atomic_uint*                                        hitCounter     [[buffer(9)]],
-    device uint32_t*                                           missQueue      [[buffer(10)]],
-    device atomic_uint*                                        missCounter    [[buffer(11)]])
+template <typename T>
+static void extendImpl(
+    uint gid,
+    constant Uniforms&                                         uniforms,
+    constant MTLAccelerationStructureUserIDInstanceDescriptor* instances,
+    typename T::structure accelerationStructure,
+    device const PathRay*                                      rays,
+    device HitRecord*                                          hits,
+    constant uint32_t&                                         sampleIdx,
+    device const uint32_t*                                     queue,
+    device const uint32_t*                                     control,
+    device uint32_t*                                           hitQueue,
+    device atomic_uint*                                        hitCounter,
+    device uint32_t*                                           missQueue,
+    device atomic_uint*                                        missCounter)
 {
     // Indirect dispatch can only launch whole threadgroups, so the tail of the
     // last one runs past the queue and has to be discarded here.
@@ -195,13 +224,13 @@ kernel void wavefrontExtend(
     r.origin = float3(pr.origin);
     r.direction = float3(pr.direction);
 
-    intersector<triangle_data, instancing, primitive_motion> isect;
+    typename T::isect isect;
     isect.assume_geometry_type(geometry_type::triangle);
     isect.force_opacity(forced_opacity::opaque);
     isect.accept_any_intersection(false);
 
-    typename intersector<triangle_data, instancing, primitive_motion>::result_type hit =
-        isect.intersect(r, accelerationStructure, uniforms.primaryRayMask, motionTime);
+    typename T::isect::result_type hit =
+        T::trace(isect, r, accelerationStructure, uniforms.primaryRayMask, motionTime);
 
     // A ray that escaped carries no information beyond the fact, so it goes
     // straight to the miss stage: no hit record is written and the path never
@@ -226,6 +255,27 @@ kernel void wavefrontExtend(
     hits[tid] = rec;
     queuePush(hitCounter, hitQueue, tid);
 }
+
+
+#define WF_EXTEND_ENTRY(NAME, TRAITS)                                                                       \
+    kernel void NAME(uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],       \
+                     constant MTLAccelerationStructureUserIDInstanceDescriptor* instances [[buffer(1)]],    \
+                     TRAITS::structure accelerationStructure [[buffer(2)]],                                 \
+                     device const PathRay* rays [[buffer(3)]], device HitRecord* hits [[buffer(4)]],        \
+                     constant uint32_t& sampleIdx [[buffer(5)]],                                            \
+                     device const uint32_t* queue [[buffer(6)]],                                            \
+                     device const uint32_t* control [[buffer(7)]],                                          \
+                     device uint32_t* hitQueue [[buffer(8)]],                                               \
+                     device atomic_uint* hitCounter [[buffer(9)]],                                          \
+                     device uint32_t* missQueue [[buffer(10)]],                                             \
+                     device atomic_uint* missCounter [[buffer(11)]])                                        \
+    {                                                                                                       \
+        extendImpl<TRAITS>(gid, uniforms, instances, accelerationStructure, rays, hits, sampleIdx, queue,    \
+                           control, hitQueue, hitCounter, missQueue, missCounter);                          \
+    }
+
+WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
+WF_EXTEND_ENTRY(wavefrontExtendStatic, StaticTraversal)
 
 // Rebuild the triangle's vertex attributes from the vertex buffer.
 //
@@ -356,7 +406,6 @@ kernel void wavefrontShade(
     uint                                                       gid            [[thread_position_in_grid]],
     constant Uniforms&                                         uniforms       [[buffer(0)]],
     constant MTLAccelerationStructureUserIDInstanceDescriptor* instances      [[buffer(1)]],
-    acceleration_structure<instancing, primitive_motion>       accelerationStructure [[buffer(2)]],
     device UniformLight*                                       lights         [[buffer(3)]],
     device Material*                                           materials      [[buffer(4)]],
     device PathState*                                          paths          [[buffer(5)]],
@@ -683,14 +732,15 @@ kernel void wavefrontPrepareShadow(
 // ---------------------------------------------------------------------------
 // shadow -- resolve the deferred connections
 // ---------------------------------------------------------------------------
-kernel void wavefrontShadow(
-    uint                                                       gid            [[thread_position_in_grid]],
-    constant Uniforms&                                         uniforms       [[buffer(0)]],
-    acceleration_structure<instancing, primitive_motion>       accelerationStructure [[buffer(1)]],
-    device const ShadowRay*                                    shadowRays     [[buffer(2)]],
-    device float4*                                             radianceOut    [[buffer(3)]],
-    device const uint32_t*                                     control        [[buffer(4)]],
-    constant uint32_t&                                         sampleIdx      [[buffer(5)]])
+template <typename T>
+static void shadowImpl(
+    uint                    gid,
+    constant Uniforms&      uniforms,
+    typename T::structure   accelerationStructure,
+    device const ShadowRay* shadowRays,
+    device float4*          radianceOut,
+    device const uint32_t*  control,
+    constant uint32_t&      sampleIdx)
 {
     if (gid >= control[WF_CTRL_SHADOW_N])
     {
@@ -698,18 +748,41 @@ kernel void wavefrontShadow(
     }
     const ShadowRay sr = shadowRays[gid];
 
-    intersector<triangle_data, instancing, primitive_motion> isect;
+    typename T::isect isect;
     isect.assume_geometry_type(geometry_type::triangle);
     isect.force_opacity(forced_opacity::opaque);
+    isect.accept_any_intersection(true);
+
+    ray shadowRay;
+    shadowRay.origin = float3(sr.origin);
+    shadowRay.direction = float3(sr.direction);
+    shadowRay.min_distance = 0.001f;
+    shadowRay.max_distance = sr.maxDistance;
 
     const float motionTime = motionTimeFor(uniforms, sr.pixelIndex, sampleIdx);
-    const bool occluded = traceOcclusion(accelerationStructure, isect, float3(sr.origin),
-                                         float3(sr.direction), 0.001f, sr.maxDistance, motionTime);
+    const bool occluded =
+        T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime).type !=
+        intersection_type::none;
     if (!occluded)
     {
         radianceOut[sr.pixelIndex] += float4(float3(sr.weight), 0.0f);
     }
 }
+
+#define WF_SHADOW_ENTRY(NAME, TRAITS)                                                                \
+    kernel void NAME(uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]], \
+                     TRAITS::structure accelerationStructure [[buffer(1)]],                          \
+                     device const ShadowRay* shadowRays [[buffer(2)]],                               \
+                     device float4* radianceOut [[buffer(3)]],                                       \
+                     device const uint32_t* control [[buffer(4)]],                                   \
+                     constant uint32_t& sampleIdx [[buffer(5)]])                                     \
+    {                                                                                                \
+        shadowImpl<TRAITS>(gid, uniforms, accelerationStructure, shadowRays, radianceOut, control,    \
+                           sampleIdx);                                                               \
+    }
+
+WF_SHADOW_ENTRY(wavefrontShadow, MotionTraversal)
+WF_SHADOW_ENTRY(wavefrontShadowStatic, StaticTraversal)
 
 // ---------------------------------------------------------------------------
 // resolve -- average the samples and fold into the accumulation buffer
