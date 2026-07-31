@@ -139,6 +139,11 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 1);
     m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/writeAov", 0);
+    m_settingsManager->setAs<uint32_t>("render/pt/metal4", 0);
+    if (const char* m4 = getenv("STRELKA_METAL4"))
+    {
+        m_settingsManager->setAs<uint32_t>("render/pt/metal4", (uint32_t)atoi(m4));
+    }
     if (const char* aovEnv = getenv("STRELKA_AOV"))
     {
         m_settingsManager->setAs<uint32_t>("render/pt/writeAov", (uint32_t)atoi(aovEnv));

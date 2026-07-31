@@ -202,6 +202,10 @@ private:
         kFeatureMotionBlur = 1u << 2,
         kFeatureDof = 1u << 3,
         kFeatureDebug = 1u << 4,
+        // Not a shader feature: pipelines for the Metal 4 path are built by a
+        // different compiler and are not interchangeable, so the mode has to
+        // separate them in the cache.
+        kFeatureMetal4 = 1u << 5,
         kFeatureCount = 1u << 5,
     };
     std::map<uint32_t, WavefrontVariant> mWavefrontVariants;
@@ -244,6 +248,10 @@ private:
     // Metal 4 submission. Created alongside the Metal 3 objects so both paths
     // exist and can be compared; selected by render/pt/metal4.
     Metal4Context mMetal4;
+    // Bumped when the allocation set can have changed, so residency is
+    // rebuilt then and not every frame.
+    uint32_t mMetal4ResidencyGeneration = 0;
+    void makeResourcesResidentForMetal4(Buffer* output);
 
     MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
     MTL::Buffer* mStageStatsBuffer = nullptr; // shared copy of the control buffer, profiling only
@@ -268,6 +276,14 @@ private:
                          MTL::Buffer* uniformBuffer,
                          Buffer* output, uint32_t width, uint32_t height, uint32_t sampleCount,
                          uint32_t features);
+    void encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer, Buffer* output,
+                               uint32_t width, uint32_t height, uint32_t sampleCount, uint32_t features);
+    /// Constant-free stages, built by the Metal 4 compiler.
+    MTL::ComputePipelineState* mWavefrontResolvePSO4 = nullptr;
+    MTL::ComputePipelineState* mWavefrontPreparePSO4 = nullptr;
+    MTL::ComputePipelineState* mWavefrontPrepareShadowPSO4 = nullptr;
+    MTL::ComputePipelineState* mWavefrontPrepareHitMissPSO4 = nullptr;
+    MTL::ComputePipelineState* mTonemapperPSO4 = nullptr;
 
     MTL::Library* loadShaderLibrary(const char* relativePath);
     void buildComputePipeline();

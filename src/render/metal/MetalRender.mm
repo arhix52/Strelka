@@ -155,11 +155,16 @@ MetalRender::~MetalRender()
         mWavefrontVariants.clear();
         safeRelease(mWavefrontLibrary);
         safeRelease(mWavefrontPrepareHitMissPSO);
+        safeRelease(mWavefrontResolvePSO4);
+        safeRelease(mWavefrontPreparePSO4);
+        safeRelease(mWavefrontPrepareShadowPSO4);
+        safeRelease(mWavefrontPrepareHitMissPSO4);
         safeRelease(mStageTimestampBuffer);
         safeRelease(mStageStatsBuffer);
 
         safeRelease(mPathTracingPSO);
         safeRelease(mTonemapperPSO);
+        safeRelease(mTonemapperPSO4);
         safeRelease(mSkinningPSO);
         safeRelease(mTriangleUpdatePSO);
 
@@ -245,7 +250,12 @@ void MetalRender::init()
     mCommandQueue = mDevice->newCommandQueue();
     // 64 KB of constants per frame is far more than the tracer's handful of
     // small values needs; the ring is cheap and running out is a hard error.
-    mMetal4.init(mDevice, (uint32_t)kMaxFramesInFlight, 64 * 1024);
+    // STRELKA_NO_MTL4 keeps the layer out of the process entirely, which is what
+    // isolates it when a measurement looks wrong.
+    if (!getenv("STRELKA_NO_MTL4"))
+    {
+        mMetal4.init(mDevice, (uint32_t)kMaxFramesInFlight, 64 * 1024);
+    }
     buildComputePipeline();
     buildTonemapperPipeline();
     buildWavefrontPipelines();
@@ -528,6 +538,244 @@ void MetalRender::reportStageTimings()
         }
         STRELKA_INFO("STAGES rays per bounce: paths [{}] shadow [{}]", paths, shadows);
     }
+}
+
+
+// Metal 4 encode of the wavefront tracer.
+//
+// Same stage order and the same dispatch counts as the Metal 3 path; what
+// changes is how the GPU is told about them. Bindings become addresses in an
+// argument table, the values that used to ride in setBytes come out of the
+// per-frame constant ring, and every dependency between dispatches is stated
+// with a barrier because nothing tracks them any more.
+
+// Declare every persistent allocation resident for the Metal 4 queue.
+//
+// Metal 3 infers residency from the bindings an encoder makes; Metal 4 does not,
+// and an address in an argument table pointing at a non-resident allocation is a
+// GPU fault rather than a validation message. This is the price of the argument
+// table: the caller owns lifetime and residency both.
+void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
+{
+    if (!mMetal4.isValid())
+    {
+        return;
+    }
+    auto add = [&](MTL::Allocation* a) { mMetal4.addResident(a); };
+
+    for (MTL::Buffer* b : mUniformBuffers) add(b);
+    for (MTL::Buffer* b : mUniformTMBuffers) add(b);
+    add(mVertexBuffer);
+    add(mPrevVertexBuffer);
+    add(mIndexBuffer);
+    add(mInstanceBuffer);
+    add(mMaterialBuffer);
+    add(mLightBuffer);
+    add(mGeometryEntryBuffer);
+    add(mEnvAliasBuffer);
+    add(mAccumulationBuffer);
+    add(mPathStateBuffer);
+    add(mPathRayBuffer);
+    add(mHitBuffer);
+    add(mIorStackBuffer);
+    add(mRadianceBuffer);
+    add(mPathQueueBuffer[0]);
+    add(mPathQueueBuffer[1]);
+    add(mHitQueueBuffer);
+    add(mMissQueueBuffer);
+    add(mShadowRayBuffer);
+    add(mAovBuffer);
+    add(mWavefrontControlBuffer);
+    add(mSkinDataBuffer);
+    add(mJointMatricesBuffer);
+    add(mEnvMapTexture);
+    for (MTL::Texture* t : mMaterialTextures) add(t);
+    for (MTL::AccelerationStructure* as : mPrimitiveAccelerationStructures) add(as);
+    add(mInstanceAccelerationStructure);
+    for (Mesh* mesh : mMetalMeshes)
+    {
+        if (mesh) add(mesh->mPerPrimitiveBuffer);
+    }
+    // The renderer alternates between output buffers, so declaring only the one
+    // this frame happens to use leaves every other frame writing into an
+    // allocation the queue does not know about -- which reads back as black
+    // rather than as an error.
+    for (Buffer* b : mAsyncOutputBuffers)
+    {
+        if (b)
+        {
+            add(((MetalBuffer*)b)->getNativePtr());
+        }
+    }
+    if (output)
+    {
+        add(((MetalBuffer*)output)->getNativePtr());
+    }
+    mMetal4.commitResidency();
+}
+
+void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer,
+                                        Buffer* output, uint32_t width, uint32_t height,
+                                        uint32_t sampleCount, uint32_t features)
+{
+    const WavefrontVariant* variant = wavefrontVariantFor(features | kFeatureMetal4);
+    if (!variant)
+    {
+        return;
+    }
+    const uint32_t pixels = width * height;
+    const uint32_t maxDepth = std::max(1u, getSettings()->getAs<uint32_t>("render/pt/depth"));
+    MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
+
+    MTL4::ArgumentTable* table = mMetal4.argumentTable();
+    ConstantRing& ring = mMetal4.constants();
+    enc->setArgumentTable(table);
+
+    const uint32_t kThreadsPerGroup = 64;
+    const MTL::Size tg = MTL::Size(kThreadsPerGroup, 1, 1);
+    const MTL::Size fullGrid = MTL::Size((pixels + kThreadsPerGroup - 1) / kThreadsPerGroup, 1, 1);
+    const MTL::GPUAddress control = mWavefrontControlBuffer->gpuAddress();
+    const NS::UInteger kDispatchArgsOffset = 2 * sizeof(uint32_t);
+    const NS::UInteger kShadowArgsOffset = 8 * sizeof(uint32_t);
+    const NS::UInteger kShadowCounterOffset = 6 * sizeof(uint32_t);
+    const NS::UInteger kHitArgsOffset = 13 * sizeof(uint32_t);
+    const NS::UInteger kHitCounterOffset = 11 * sizeof(uint32_t);
+    const NS::UInteger kMissArgsOffset = 18 * sizeof(uint32_t);
+    const NS::UInteger kMissCounterOffset = 16 * sizeof(uint32_t);
+
+    const bool useMotion = mSceneHasMotionBlas || variant->extendStatic == nullptr ||
+                           getSettings()->getAs<uint32_t>("render/pt/staticTraversal") == 0;
+
+    // Every dispatch here reads what the one before it wrote. Metal 4 does not
+    // work that out, so say it: dispatch-to-dispatch, visible device-wide.
+    auto barrier = [&]() {
+        enc->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch, MTL4::VisibilityOptionDevice);
+    };
+    auto bind = [&](MTL::Buffer* buffer, NS::UInteger offset, NS::UInteger index) {
+        table->setAddress(buffer ? buffer->gpuAddress() + offset : 0, index);
+    };
+
+    for (uint32_t s = 0; s < sampleCount; ++s)
+    {
+        const MTL::GPUAddress sampleIdx = ring.push(s);
+
+        enc->setComputePipelineState(variant->generate);
+        bind(uniformBuffer, 0, 0);
+        bind(mPathStateBuffer, 0, 1);
+        bind(mRadianceBuffer, 0, 2);
+        bind(mIorStackBuffer, 0, 3);
+        table->setAddress(sampleIdx, 4);
+        bind(mPathQueueBuffer[0], 0, 5);
+        bind(mWavefrontControlBuffer, 0, 6);
+        bind(mPathRayBuffer, 0, 8);
+        enc->dispatchThreadgroups(fullGrid, tg);
+        barrier();
+
+        for (uint32_t bounce = 0; bounce < maxDepth; ++bounce)
+        {
+            const uint32_t src = bounce & 1u;
+            const uint32_t dst = src ^ 1u;
+            const MTL::GPUAddress srcIdx = ring.push(src);
+            const MTL::GPUAddress groupSize = ring.push(kThreadsPerGroup);
+            const MTL::GPUAddress bounceIdx = ring.push(bounce);
+
+            enc->setComputePipelineState(mWavefrontPreparePSO4);
+            bind(mWavefrontControlBuffer, 0, 0);
+            table->setAddress(srcIdx, 1);
+            table->setAddress(groupSize, 2);
+            table->setAddress(bounceIdx, 3);
+            enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
+            barrier();
+
+            enc->setComputePipelineState(useMotion ? variant->extendMotion : variant->extendStatic);
+            bind(uniformBuffer, 0, 0);
+            bind(mInstanceBuffer, 0, 1);
+            table->setResource(mInstanceAccelerationStructure->gpuResourceID(), 2);
+            bind(mPathRayBuffer, 0, 3);
+            bind(mHitBuffer, 0, 4);
+            table->setAddress(sampleIdx, 5);
+            bind(mPathQueueBuffer[src], 0, 6);
+            bind(mWavefrontControlBuffer, 0, 7);
+            bind(mHitQueueBuffer, 0, 8);
+            bind(mWavefrontControlBuffer, kHitCounterOffset, 9);
+            bind(mMissQueueBuffer, 0, 10);
+            bind(mWavefrontControlBuffer, kMissCounterOffset, 11);
+            enc->dispatchThreadgroups(control + kDispatchArgsOffset, tg);
+            barrier();
+
+            enc->setComputePipelineState(mWavefrontPrepareHitMissPSO4);
+            bind(mWavefrontControlBuffer, 0, 0);
+            table->setAddress(groupSize, 1);
+            enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
+            barrier();
+
+            enc->setComputePipelineState(variant->miss);
+            bind(uniformBuffer, 0, 0);
+            bind(mPathStateBuffer, 0, 1);
+            bind(mPathRayBuffer, 0, 2);
+            bind(mRadianceBuffer, 0, 3);
+            bind(mMissQueueBuffer, 0, 4);
+            bind(mWavefrontControlBuffer, 0, 5);
+            bind(mAovBuffer, 0, 6);
+            if (mEnvMapTexture)
+            {
+                table->setTexture(mEnvMapTexture->gpuResourceID(), 0);
+            }
+            enc->dispatchThreadgroups(control + kMissArgsOffset, tg);
+
+            enc->setComputePipelineState(variant->shade);
+            bind(uniformBuffer, 0, 0);
+            bind(mInstanceBuffer, 0, 1);
+            bind(mLightBuffer, 0, 3);
+            bind(mMaterialBuffer, 0, 4);
+            bind(mPathStateBuffer, 0, 5);
+            bind(mHitBuffer, 0, 6);
+            bind(mRadianceBuffer, 0, 7);
+            bind(mIorStackBuffer, 0, 8);
+            bind(mGeometryEntryBuffer, 0, 9);
+            bind(mEnvAliasBuffer, 0, 10);
+            bind(mVertexBuffer, 0, 11);
+            bind(mPrevVertexBuffer, 0, 12);
+            bind(mIndexBuffer, 0, 13);
+            table->setAddress(sampleIdx, 14);
+            bind(mHitQueueBuffer, 0, 15);
+            bind(mPathQueueBuffer[dst], 0, 16);
+            bind(mWavefrontControlBuffer, dst * sizeof(uint32_t), 17);
+            bind(mWavefrontControlBuffer, 0, 18);
+            bind(mShadowRayBuffer, 0, 19);
+            bind(mWavefrontControlBuffer, kShadowCounterOffset, 20);
+            bind(mPathRayBuffer, 0, 21);
+            bind(mAovBuffer, 0, 22);
+            enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
+            barrier();
+
+            enc->setComputePipelineState(mWavefrontPrepareShadowPSO4);
+            bind(mWavefrontControlBuffer, 0, 0);
+            table->setAddress(groupSize, 1);
+            table->setAddress(bounceIdx, 2);
+            enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
+            barrier();
+
+            enc->setComputePipelineState(useMotion ? variant->shadowMotion : variant->shadowStatic);
+            bind(uniformBuffer, 0, 0);
+            table->setResource(mInstanceAccelerationStructure->gpuResourceID(), 1);
+            bind(mShadowRayBuffer, 0, 2);
+            bind(mRadianceBuffer, 0, 3);
+            bind(mWavefrontControlBuffer, 0, 4);
+            table->setAddress(sampleIdx, 5);
+            enc->dispatchThreadgroups(control + kShadowArgsOffset, tg);
+            barrier();
+        }
+    }
+
+    enc->setComputePipelineState(mWavefrontResolvePSO4);
+    bind(uniformBuffer, 0, 0);
+    bind(mRadianceBuffer, 0, 1);
+    bind(outputBuffer, 0, 2);
+    bind(mAccumulationBuffer, 0, 3);
+    table->setAddress(ring.push(sampleCount), 4);
+    bind(mAovBuffer, 0, 5);
+    enc->dispatchThreadgroups(fullGrid, tg);
 }
 
 MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCmd,
@@ -1236,14 +1484,24 @@ void MetalRender::render(Buffer* output)
         if (useWavefront)
         {
             ensureWavefrontBuffers(width, height);
+
+            // Metal 4 path. Residency has to be refreshed whenever the set of
+            // allocations can have changed; ensureWavefrontBuffers only does work
+            // when the resolution does, so its capacity doubles as the generation.
+            const bool useMetal4 = mMetal4.isValid() && settings.getAs<uint32_t>("render/pt/metal4") != 0 &&
+                                   mWavefrontResolvePSO4 != nullptr;
+            if (useMetal4 && mMetal4ResidencyGeneration != mWavefrontCapacity)
+            {
+                makeResourcesResidentForMetal4(output);
+                mMetal4ResidencyGeneration = mWavefrontCapacity;
+            }
+
             mProfileStages = settings.getAs<uint32_t>("render/pt/profileStages") != 0;
             if (mProfileStages)
             {
                 createStageTimestampBuffer();
             }
 
-            MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
-            MTL::ComputeCommandEncoder* enc = pCmd->computeCommandEncoder();
             const auto encodeStart = std::chrono::high_resolution_clock::now();
             uint32_t features = 0;
             if (pUniformData->hasEnvMap)
@@ -1260,6 +1518,50 @@ void MetalRender::render(Buffer* output)
                 features |= kFeatureDof;
             if (pUniformData->debug != 0)
                 features |= kFeatureDebug;
+
+            if (useMetal4)
+            {
+                MTL4::CommandBuffer* cmd4 = mMetal4.beginFrame((uint32_t)ctx.mFrameNumber);
+                MTL4::ComputeCommandEncoder* enc4 = cmd4->computeCommandEncoder();
+                encodeWavefrontMetal4(enc4, pUniformBuffer, output, width, height, samplesThisLaunch, features);
+                if (pUniformData->debug == 0 && mTonemapperPSO4)
+                {
+                    enc4->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch,
+                                                    MTL4::VisibilityOptionDevice);
+                    enc4->setComputePipelineState(mTonemapperPSO4);
+                    mMetal4.argumentTable()->setAddress(pUniformTMBuffer->gpuAddress(), 0);
+                    mMetal4.argumentTable()->setAddress(((MetalBuffer*)output)->getNativePtr()->gpuAddress(), 1);
+                    enc4->dispatchThreadgroups(MTL::Size((width + 7) / 8, (height + 7) / 8, 1),
+                                               MTL::Size(8, 8, 1));
+                }
+                enc4->endEncoding();
+                cmd4->endCommandBuffer();
+
+                // Completion arrives through commit options rather than a
+                // handler on the command buffer, and carries the GPU interval
+                // with it, so the Metal 3 timing path needs no counterpart.
+                const int writeIdx4 = mWriteIndex;
+                MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
+                options->addFeedbackHandler(
+                    MTL4::CommitFeedbackHandlerFunction([this, writeIdx4](MTL4::CommitFeedback* fb) {
+                        mLastRenderTimeMs.store((fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0,
+                                                std::memory_order_relaxed);
+                        mReadyIndex.store(writeIdx4);
+                        mRenderBusy.store(false, std::memory_order_release);
+                    }));
+                const MTL4::CommandBuffer* buffers[] = { cmd4 };
+                mMetal4.queue()->commit(buffers, 1, options);
+                options->release();
+
+                ctx.mSubframeIndex = enableAccumulation ? ctx.mSubframeIndex + samplesThisLaunch : 0;
+                pPool->release();
+                mPrevView = currView;
+                ctx.mFrameNumber++;
+                return;
+            }
+
+            MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
+            MTL::ComputeCommandEncoder* enc = pCmd->computeCommandEncoder();
             enc = encodeWavefront(pCmd, enc, pUniformBuffer, output, width, height, samplesThisLaunch,
                                   features);
             if (mProfileStages)
@@ -1514,8 +1816,15 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
     values->setConstantValue(&dof, MTL::DataTypeBool, (NS::UInteger)3);
     values->setConstantValue(&debug, MTL::DataTypeBool, (NS::UInteger)4);
 
+    // A pipeline built the Metal 3 way cannot be used with an argument table, so
+    // the two paths need separate pipelines and the mode is part of the cache key.
+    const bool useMetal4 = (features & kFeatureMetal4) != 0;
     NS::Error* err = nullptr;
     auto make = [&](const char* name) -> MTL::ComputePipelineState* {
+        if (useMetal4)
+        {
+            return mMetal4.newComputePipelineState(mWavefrontLibrary, name, values);
+        }
         MTL::Function* fn = mWavefrontLibrary->newFunction(
             NS::String::string(name, NS::UTF8StringEncoding), values, &err);
         if (!fn)
@@ -1548,8 +1857,8 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
     {
         return nullptr;
     }
-    STRELKA_INFO("wavefront variant env={} lights={} motion={} dof={} debug={}: shade maxThreadsPerTG={} extend={}",
-                 envMap, lights, motionBlur, dof, debug, v.shade->maxTotalThreadsPerThreadgroup(),
+    STRELKA_INFO("wavefront variant env={} lights={} motion={} dof={} debug={} metal4={}: shade maxThreadsPerTG={} extend={}",
+                 envMap, lights, motionBlur, dof, debug, useMetal4, v.shade->maxTotalThreadsPerThreadgroup(),
                  v.extendStatic ? v.extendStatic->maxTotalThreadsPerThreadgroup() : 0);
     return &mWavefrontVariants.emplace(features, v).first->second;
 }
@@ -1586,6 +1895,15 @@ void MetalRender::buildWavefrontPipelines()
     mWavefrontPreparePSO = make("wavefrontPrepare");
     mWavefrontPrepareShadowPSO = make("wavefrontPrepareShadow");
     mWavefrontPrepareHitMissPSO = make("wavefrontPrepareHitMiss");
+    if (mMetal4.isValid())
+    {
+        // The same four stages again, built by the other compiler: a pipeline is
+        // tied to the binding model it was compiled for.
+        mWavefrontResolvePSO4 = mMetal4.newComputePipelineState(lib, "wavefrontResolve", nullptr);
+        mWavefrontPreparePSO4 = mMetal4.newComputePipelineState(lib, "wavefrontPrepare", nullptr);
+        mWavefrontPrepareShadowPSO4 = mMetal4.newComputePipelineState(lib, "wavefrontPrepareShadow", nullptr);
+        mWavefrontPrepareHitMissPSO4 = mMetal4.newComputePipelineState(lib, "wavefrontPrepareHitMiss", nullptr);
+    }
     lib->release();
 }
 
@@ -1647,6 +1965,10 @@ void MetalRender::buildTonemapperPipeline()
     MTL::Function* pTonemapperFn =
         pComputeLibrary->newFunction(NS::String::string("toneMappingComputeShader", NS::UTF8StringEncoding));
     mTonemapperPSO = mDevice->newComputePipelineState(pTonemapperFn, &pError);
+    if (mMetal4.isValid())
+    {
+        mTonemapperPSO4 = mMetal4.newComputePipelineState(pComputeLibrary, "toneMappingComputeShader", nullptr);
+    }
     if (!mTonemapperPSO)
     {
         STRELKA_FATAL("{}", pError ? pError->localizedDescription()->utf8String() : "unknown error");
