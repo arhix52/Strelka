@@ -800,6 +800,9 @@ void MetalRender::render(Buffer* output)
     {
         buildBuffers();
         createMetalMaterials();
+        // Nothing is playing yet, so start static; the per-frame check below
+        // switches to motion structures if playback begins.
+        mBuildMotionBlas = false;
         createAccelerationStructures();
         // create accum buffer, we don't need cpu access, make it device only
         mAccumulationBuffer = mDevice->newBuffer(
@@ -838,6 +841,40 @@ void MetalRender::render(Buffer* output)
 
     // Update motion blur enable state from settings each frame
     mEnableMotionBlur = getSettings()->getAs<bool>("render/enableMotionBlur");
+
+    // Deforming geometry only needs a two-keyframe structure while the shutter is
+    // actually open across them. When it is not, the sample time is pinned to
+    // keyframe 1, the second keyframe is dead weight, and every ray pays for
+    // motion traversal it cannot use.
+    // ...and while nothing is animating, the two keyframes hold the same pose, so
+    // there is nothing to interpolate between either. That is the case that
+    // matters: accumulation runs with playback paused.
+    bool anyAnimationPlaying = false;
+    for (size_t a = 0; a < mScene->getAnimations().size(); ++a)
+    {
+        char key[64];
+        snprintf(key, sizeof(key), "render/animation/anim%zu/state", a);
+        anyAnimationPlaying = anyAnimationPlaying || getSettings()->getAs<bool>(key);
+    }
+    const bool wantMotionBlas = mEnableMotionBlur &&
+                                getSettings()->getAs<bool>("render/isMotionBlurVisible") &&
+                                anyAnimationPlaying;
+    // Hysteresis: a rebuild costs a few milliseconds, and pausing for a single
+    // frame then resuming must not pay for it twice.
+    if (wantMotionBlas != mMotionBlasBuilt && !mBlasList.empty())
+    {
+        if (++mMotionBlasSwitchFrames > 4)
+        {
+            mBuildMotionBlas = wantMotionBlas;
+            rebuildAccelerationStructures();
+            mMotionBlasSwitchFrames = 0;
+            ctx.mSubframeIndex = 0;
+        }
+    }
+    else
+    {
+        mMotionBlasSwitchFrames = 0;
+    }
 
     bool motionBlurCameraSet = false; // track if animation block sets prev camera
 
@@ -1845,7 +1882,7 @@ size_t MetalRender::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, boo
         const oka::Mesh& mesh = meshes[meshId];
         MetalRender::Mesh* meshData = mMetalMeshes[meshId];
 
-        if (skeletal)
+        if (skeletal && mBuildMotionBlas)
         {
             geomDescriptors.push_back(
                 createMotionGeometryDescriptor(mesh, meshData->mPerPrimitiveBuffer, meshData->mTriangleCount));
@@ -1872,11 +1909,14 @@ size_t MetalRender::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, boo
 
     if (skeletal)
     {
-        primDescriptor->setMotionKeyframeCount(2);
-        primDescriptor->setMotionStartTime(0.0f);
-        primDescriptor->setMotionEndTime(1.0f);
-        primDescriptor->setMotionStartBorderMode(MTL::MotionBorderModeClamp);
-        primDescriptor->setMotionEndBorderMode(MTL::MotionBorderModeClamp);
+        if (mBuildMotionBlas)
+        {
+            primDescriptor->setMotionKeyframeCount(2);
+            primDescriptor->setMotionStartTime(0.0f);
+            primDescriptor->setMotionEndTime(1.0f);
+            primDescriptor->setMotionStartBorderMode(MTL::MotionBorderModeClamp);
+            primDescriptor->setMotionEndBorderMode(MTL::MotionBorderModeClamp);
+        }
         primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit);
 
         const MTL::AccelerationStructureSizes sizes = mDevice->accelerationStructureSizes(primDescriptor);
@@ -1898,10 +1938,55 @@ size_t MetalRender::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, boo
         ((NS::Object*)g)->release();
     }
 
-    mSceneHasMotionBlas = mSceneHasMotionBlas || skeletal;
+    mSceneHasMotionBlas = mSceneHasMotionBlas || (skeletal && mBuildMotionBlas);
     mBlasList.push_back(blas);
     mPrimitiveAccelerationStructures.push_back(blas.mAs);
     return mBlasList.size() - 1;
+}
+
+
+// Rebuild the acceleration structures for a different motion setting.
+//
+// Only reachable from the motion-blur toggle, which is a UI action, so a hitch is
+// acceptable — but the structures about to be released may still be referenced by
+// the last frame's command buffers, hence the drain.
+void MetalRender::rebuildAccelerationStructures()
+{
+    MTL::CommandBuffer* drain = mCommandQueue->commandBuffer();
+    drain->retain();
+    drain->commit();
+    drain->waitUntilCompleted();
+    drain->release();
+
+    auto safeRelease = [](auto*& p) {
+        if (p)
+        {
+            p->release();
+            p = nullptr;
+        }
+    };
+    for (Blas& blas : mBlasList)
+    {
+        safeRelease(blas.mScratch);
+        safeRelease(blas.mDescriptor);
+    }
+    mBlasList.clear();
+    // blas.mAs and the entries here are the same objects; release through one path.
+    for (auto*& as : mPrimitiveAccelerationStructures)
+    {
+        safeRelease(as);
+    }
+    mPrimitiveAccelerationStructures.clear();
+    safeRelease(mInstanceAccelerationStructure);
+    safeRelease(mInstanceBuffer);
+    safeRelease(mGeometryEntryBuffer);
+    safeRelease(mTlasScratchBuffer);
+
+    const auto rebuildStart = std::chrono::high_resolution_clock::now();
+    createAccelerationStructures();
+    STRELKA_INFO("Acceleration structures rebuilt for motion={} in {:.1f} ms", mBuildMotionBlas,
+                 std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - rebuildStart)
+                     .count());
 }
 
 void MetalRender::createAccelerationStructures()
@@ -1917,10 +2002,15 @@ void MetalRender::createAccelerationStructures()
         return;
     }
 
-    for (size_t mi = 0; mi < meshes.size(); ++mi)
+    // Per-mesh buffers survive a rebuild of the structures that reference them.
+    if (mMetalMeshes.empty())
     {
-        createMeshData(mi);
+        for (size_t mi = 0; mi < meshes.size(); ++mi)
+        {
+            createMeshData(mi);
+        }
     }
+    mMotionBlasBuilt = mBuildMotionBlas;
 
     // --- Group mesh instances that always move together -----------------------
     //

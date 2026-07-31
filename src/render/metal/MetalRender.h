@@ -213,6 +213,15 @@ private:
     MTL::ComputePipelineState* mWavefrontPreparePSO = nullptr;
     MTL::ComputePipelineState* mWavefrontPrepareShadowPSO = nullptr;
     bool mSceneHasMotionBlas = false;
+    // What the acceleration structures were actually built for. A skeletal mesh
+    // only needs two keyframes when the shutter is open across them; with motion
+    // blur off the shader pins the sample time to keyframe 1 and the second one
+    // is never read, so the structure can be a plain static one and traversed as
+    // such. Flipping the setting has to rebuild them.
+    bool mMotionBlasBuilt = false;
+    bool mBuildMotionBlas = false;
+    uint32_t mMotionBlasSwitchFrames = 0;
+    void rebuildAccelerationStructures();
     MTL::ComputePipelineState* mWavefrontPrepareHitMissPSO = nullptr;
 
     MTL::Buffer* mPathStateBuffer = nullptr;

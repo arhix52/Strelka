@@ -262,12 +262,29 @@ void EditorApp::runBenchmark()
         m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 1);
     }
 
+    // Playback changes the workload qualitatively — deforming geometry needs
+    // two-keyframe acceleration structures — so it needs its own measurement.
+    const bool play = getenv("STRELKA_PLAY") != nullptr;
+    if (play)
+    {
+        for (size_t i = 0; i < m_scene->getAnimations().size(); ++i)
+        {
+            char key[64];
+            snprintf(key, sizeof(key), "render/animation/anim%zu/state", i);
+            m_settingsManager->setAs<bool>(key, true);
+        }
+    }
+
     std::vector<double> samples;
     samples.reserve(frames);
     double last = -1.0;
     for (uint32_t i = 0; i < warmup + frames && !m_display->windowShouldClose();)
     {
         m_display->pollEvents();
+        if (play)
+        {
+            playAnimations(1.0 / 60.0);
+        }
         m_render->triggerRenderIfIdle();
         const double t = m_render->getLastRenderTimeMs();
         if (t > 0.0 && t != last)
