@@ -21,9 +21,16 @@ class StrelkaRecipe(ConanFile):
         self.requires("tinyexr/1.0.7")
 
         # Editor (conditional via options)
-        self.requires("imgui/1.92.5-docking", override=True)
+        # 1.92.9b-docking is the first release carrying imgui_impl_metal4, which is
+        # what lets the UI pass move off Metal 3. conan-center has not published it
+        # yet, so the recipe is exported locally -- see docs/imgui-metal4.md.
+        self.requires("imgui/1.92.9b-docking", override=True)
         self.requires("glfw/3.4")
-        self.requires("imguizmo/cci.20231114")
+        # ImGuizmo's conan-center package is from 2023 and calls ImGui APIs that
+        # 1.92 removed (BeginChildFrame, the old AddPolyline signature). Upstream
+        # has kept up; this is a local export of its head. Bumping ImGui for the
+        # Metal 4 backend forces this bump with it.
+        self.requires("imguizmo/cci.20260729")
         if self.settings.os != "Macos":
             self.requires("glad/0.1.36")
         self.requires("cxxopts/3.1.1")
