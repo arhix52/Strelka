@@ -140,6 +140,7 @@ MetalRender::~MetalRender()
         safeRelease(mWavefrontControlBuffer);
         safeRelease(mShadowRayBuffer);
         safeRelease(mHitQueueBuffer);
+        safeRelease(mAovBuffer);
         safeRelease(mMissQueueBuffer);
         for (auto& kv : mWavefrontVariants)
         {
@@ -231,6 +232,8 @@ void MetalRender::init()
     static_assert(sizeof(PathState) == 20, "PathState is read and written for every live path on every bounce");
     static_assert(sizeof(HitRecord) == 24, "HitRecord size changed");
     static_assert(sizeof(GeometryEntry) == 16, "GeometryEntry size changed");
+    static_assert(sizeof(AovSample) == 64,
+                  "AovSample is written once per pixel per frame; keep an eye on the size");
 
     mDevice = MTL::CreateSystemDefaultDevice();
     if (!mDevice)
@@ -660,6 +663,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->setBuffer(mRadianceBuffer, 0, 3);
             enc->setBuffer(mMissQueueBuffer, 0, 4);
             enc->setBuffer(mWavefrontControlBuffer, 0, 5);
+            enc->setBuffer(mAovBuffer, 0, 6);
             if (mEnvMapTexture)
             {
                 enc->setTexture(mEnvMapTexture, 0);
@@ -689,6 +693,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->setBuffer(mShadowRayBuffer, 0, 19);
             enc->setBuffer(mWavefrontControlBuffer, kShadowCounterOffset, 20);
             enc->setBuffer(mPathRayBuffer, 0, 21);
+            enc->setBuffer(mAovBuffer, 0, 22);
             if (mEnvMapTexture)
             {
                 enc->setTexture(mEnvMapTexture, 0);
@@ -728,6 +733,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
     enc->setBuffer(outputBuffer, 0, 2);
     enc->setBuffer(mAccumulationBuffer, 0, 3);
     enc->setBytes(&sampleCount, sizeof(uint32_t), 4);
+    enc->setBuffer(mAovBuffer, 0, 5);
     enc->dispatchThreads(grid, tg);
 
     if (profile && mStageStatsBuffer)
@@ -1049,6 +1055,18 @@ void MetalRender::render(Buffer* output)
     pUniformData->missColor = float3(0.0f);
     pUniformData->maxDepth = maxDepth;
     pUniformData->debug = debug;
+    // Denoiser guides. Off unless something downstream consumes them: writing
+    // them costs a 64-byte store per pixel at the primary hit.
+    // Looking at a guide implies producing it.
+    pUniformData->writeAov =
+        settings.getAs<uint32_t>("render/pt/writeAov") || debug >= DEBUG_MODE_FIRST_AOV;
+    {
+        // Previous frame's world-to-clip for screen-space reprojection. The
+        // motion-blur uniforms hold the inverses and cannot serve here.
+        const glm::float4x4 prevWorldToClip =
+            mPrevView.mCamMatrices.perspective * mPrevView.mCamMatrices.view;
+        std::memcpy(&pUniformData->prevWorldToClip, glm::value_ptr(prevWorldToClip), sizeof(float4x4));
+    }
     pUniformData->enableMotionBlur = mEnableMotionBlur ? 1 : 0;
     pUniformData->isMotionBlurVisible = (uint32_t)isMotionBlurVisible;
     pUniformData->enableCameraMotionBlur = (uint32_t)enableCameraMotionBlur;
@@ -1586,6 +1604,7 @@ void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)
     release(mShadowRayBuffer);
     release(mStageStatsBuffer);
     release(mHitQueueBuffer);
+    release(mAovBuffer);
     release(mMissQueueBuffer);
 
 
@@ -1602,6 +1621,7 @@ void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)
     // At most one deferred connection per path per bounce.
     mShadowRayBuffer = mDevice->newBuffer(pixels * sizeof(ShadowRay), MTL::ResourceStorageModePrivate);
     mStageStatsBuffer = mDevice->newBuffer(96 * sizeof(uint32_t), MTL::ResourceStorageModeShared);
+    mAovBuffer = mDevice->newBuffer(pixels * sizeof(AovSample), MTL::ResourceStorageModePrivate);
     mHitQueueBuffer = mDevice->newBuffer(pixels * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
     mMissQueueBuffer = mDevice->newBuffer(pixels * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
 

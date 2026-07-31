@@ -38,7 +38,17 @@ enum class DebugMode : uint32_t
     eNone = 0,
     eNormal,
     eMotionBlur,
+    // Denoiser guides, visualised by the resolve pass. Selecting any of these
+    // turns their production on, so they cost nothing when not being looked at.
+    eAovDiffuseAlbedo,
+    eAovSpecularAlbedo,
+    eAovNormal,
+    eAovRoughness,
+    eAovDepth,
+    eAovMotion,
 };
+
+#define DEBUG_MODE_FIRST_AOV 3
 
 struct Vertex
 {
@@ -113,6 +123,36 @@ struct Uniforms
     // NEE's light selection, the emissive geometry is still hit by BSDF rays.
     uint32_t primaryRayMask;
     vector_float3 envMapColorTint;
+    // Previous frame's world-to-clip, for reprojecting a hit point into the last
+    // frame's screen space. The motion-blur matrices are the inverses and cannot
+    // be used for this.
+    simd::float4x4 prevWorldToClip;
+    uint32_t writeAov;
+    uint32_t pad_aov0;
+    uint32_t pad_aov1;
+    uint32_t pad_aov2;
+};
+
+// What a denoiser needs to know about the primary hit, written once per pixel by
+// the stage that shades it (or by the miss stage for background).
+//
+// One packed record in a buffer rather than six render targets: `shade` is the
+// most register-pressured kernel in the tracer and a single buffer write costs it
+// far less than binding and writing six textures. A resolve pass afterwards
+// spreads it into the texture formats MetalFX wants, which keeps every format
+// decision in one place.
+struct AovSample
+{
+    packed_float3 diffuseAlbedo;
+    float depth;            // view-space distance along the camera forward axis
+    packed_float3 specularAlbedo;
+    float roughness;
+    packed_float3 normal;   // world space
+    float motionX;          // previous-frame screen position minus current, in pixels
+    float motionY;
+    float pad0;
+    float pad1;
+    float pad2;
 };
 
 struct UniformsTonemap

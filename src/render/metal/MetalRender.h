@@ -237,6 +237,8 @@ private:
     // escaped, so neither stage dispatches threads for the other's work.
     MTL::Buffer* mHitQueueBuffer = nullptr;
     MTL::Buffer* mMissQueueBuffer = nullptr;
+    // Denoiser guides: one packed record per pixel, written at the primary hit.
+    MTL::Buffer* mAovBuffer = nullptr;
 
     MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
     MTL::Buffer* mStageStatsBuffer = nullptr; // shared copy of the control buffer, profiling only

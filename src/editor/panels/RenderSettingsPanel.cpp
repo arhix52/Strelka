@@ -12,7 +12,10 @@ void EditorApp::drawRenderSettingsPanel()
 {
     ImGui::Begin("Render Settings:");
 
-    const char* debugViewOptions[] = { "None", "Normals", "Motion Blur", "Diffuse AOV", "Specular AOV" };
+    // Must match DebugMode in ShaderTypes.h, in order.
+    const char* debugViewOptions[] = { "None",          "Normals",         "Motion Blur",
+                                       "AOV: diffuse",  "AOV: specular",   "AOV: normal",
+                                       "AOV: roughness", "AOV: depth",     "AOV: motion" };
     static int currentDebugViewOption = 0;
     if (ImGui::BeginCombo("Debug view", debugViewOptions[currentDebugViewOption]))
     {

@@ -353,6 +353,7 @@ kernel void wavefrontMiss(
     device float4*          radianceOut   [[buffer(3)]],
     device const uint32_t*  queue         [[buffer(4)]],
     device const uint32_t*  control       [[buffer(5)]],
+    device AovSample*       aov           [[buffer(6)]],
     texture2d<float>        envMapTexture [[texture(0)]])
 {
     if (gid >= control[WF_CTRL_MISS_N])
@@ -366,6 +367,22 @@ kernel void wavefrontMiss(
     const uint32_t depth = pathDepth(p.depthAndFlags);
     const bool specularBounce = (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u;
     const bool neeDone = (p.depthAndFlags & PATH_FLAG_NEE_DONE) != 0u;
+
+    // Background still needs a record, or the denoiser reads whatever the
+    // previous frame left in the guides and smears the silhouette.
+    if (uniforms.writeAov && depth == 0u)
+    {
+        AovSample a;
+        a.diffuseAlbedo = packed_float3(float3(0.0f));
+        a.specularAlbedo = packed_float3(float3(0.0f));
+        a.normal = packed_float3(-rayDir);
+        a.roughness = 1.0f;
+        a.depth = 1e7f;
+        a.motionX = 0.0f;
+        a.motionY = 0.0f;
+        a.pad0 = a.pad1 = a.pad2 = 0.0f;
+        aov[tid] = a;
+    }
 
     float3 radiance = float3(0.0f);
     if (SPEC_ENV_MAP && uniforms.hasEnvMap)
@@ -428,6 +445,7 @@ kernel void wavefrontShade(
     device const uint32_t*                                     control        [[buffer(18)]],
     device ShadowRay*                                          shadowRays     [[buffer(19)]],
     device atomic_uint*                                        shadowCounter  [[buffer(20)]],
+    device AovSample*                                          aov            [[buffer(22)]],
     texture2d<float>                                           envMapTexture  [[texture(0)]])
 {
     if (gid >= control[WF_CTRL_HIT_N])
@@ -457,6 +475,23 @@ kernel void wavefrontShade(
     {
         const uint32_t lightId = rec.geomEntryIndex & ~HIT_LIGHT_BIT;
         const float3 hitPoint = rayOrigin + rayDir * rec.distance;
+        // A light's geometry is still a surface the denoiser has to reconstruct.
+        // Its emission is unaffected by denoising, so it gets a black albedo and
+        // its own geometry, which keeps the guides continuous across the edge.
+        if (uniforms.writeAov && depth == 0u)
+        {
+            AovSample a;
+            a.diffuseAlbedo = packed_float3(float3(0.0f));
+            a.specularAlbedo = packed_float3(float3(0.0f));
+            a.normal = packed_float3(-rayDir);
+            a.roughness = 1.0f;
+            const float4 eye = uniforms.viewToWorld * float4(0.0f, 0.0f, 0.0f, 1.0f);
+            a.depth = length(hitPoint - eye.xyz);
+            a.motionX = 0.0f;
+            a.motionY = 0.0f;
+            a.pad0 = a.pad1 = a.pad2 = 0.0f;
+            aov[tid] = a;
+        }
         device const UniformLight& currLight = lights[lightId];
         const float3 lightNormal = calcLightNormal(currLight, hitPoint);
         if (-dot(rayDir, lightNormal) > 0.0f)
@@ -535,6 +570,43 @@ kernel void wavefrontShade(
         }
         radianceOut[tid] = float4(dbg, 0.0f);
         return;
+    }
+
+    // Denoiser guides, from the first hit only: everything a temporal denoiser
+    // needs to tell a surface from the noise on it.
+    if (uniforms.writeAov && depth == 0u)
+    {
+        AovSample a;
+        // Metals put their colour in the specular lobe and have no diffuse one.
+        const float3 base = float3(si.albedo);
+        a.diffuseAlbedo = packed_float3(base * (1.0f - si.metallic));
+        a.specularAlbedo = packed_float3(mix(float3(0.04f), base, si.metallic));
+        a.normal = packed_float3(si.shading_normal);
+        a.roughness = si.roughness;
+        // View-space distance along the camera axis, which is what a depth
+        // texture is expected to hold; the ray parameter would be the distance to
+        // the eye instead and would bend the surfaces the denoiser reconstructs.
+        const float4 viewPos = uniforms.viewToWorld * float4(0.0f, 0.0f, 0.0f, 1.0f);
+        a.depth = length(worldPosition - viewPos.xyz);
+
+        // Where this point was on screen last frame. Static geometry only: a
+        // deforming surface would need its previous position, which the tracer
+        // does not keep per hit.
+        const float4 prevClip = uniforms.prevWorldToClip * float4(worldPosition, 1.0f);
+        float2 motion = float2(0.0f);
+        if (prevClip.w > 0.0f)
+        {
+            const float2 prevNdc = prevClip.xy / prevClip.w;
+            const float2 prevPixel = float2((prevNdc.x * 0.5f + 0.5f) * (float)uniforms.width,
+                                            (1.0f - (prevNdc.y * 0.5f + 0.5f)) * (float)uniforms.height);
+            const float2 currPixel = float2((float)(tid % uniforms.width) + 0.5f,
+                                            (float)(tid / uniforms.width) + 0.5f);
+            motion = prevPixel - currPixel;
+        }
+        a.motionX = motion.x;
+        a.motionY = motion.y;
+        a.pad0 = a.pad1 = a.pad2 = 0.0f;
+        aov[tid] = a;
     }
 
     if (si.emission.x > 0.0f || si.emission.y > 0.0f || si.emission.z > 0.0f)
@@ -799,11 +871,38 @@ kernel void wavefrontResolve(
     device const float4*    radianceIn    [[buffer(1)]],
     device float4*          res           [[buffer(2)]],
     device float4*          accum         [[buffer(3)]],
-    constant uint32_t&      sampleCount   [[buffer(4)]])
+    constant uint32_t&      sampleCount   [[buffer(4)]],
+    device const AovSample* aov           [[buffer(5)]])
 {
     const uint32_t pixelCount = uniforms.width * uniforms.height;
     if (tid >= pixelCount)
     {
+        return;
+    }
+
+    // Guide views. A denoiser fed a broken guide degrades quietly, so the guides
+    // have to be inspectable on their own.
+    const uint32_t debugMode = uniforms.debug;
+    if (debugMode >= DEBUG_MODE_FIRST_AOV)
+    {
+        const AovSample a = aov[tid];
+        float3 v = float3(0.0f);
+        switch ((DebugMode)debugMode)
+        {
+        case DebugMode::eAovDiffuseAlbedo:  v = float3(a.diffuseAlbedo); break;
+        case DebugMode::eAovSpecularAlbedo: v = float3(a.specularAlbedo); break;
+        case DebugMode::eAovNormal:         v = float3(a.normal) * 0.5f + 0.5f; break;
+        case DebugMode::eAovRoughness:      v = float3(a.roughness); break;
+        // d/(1+d): monotonic and scale-free, so a scene of any size is readable
+        // and nothing crosses zero the way a logarithm does at d == 1.
+        case DebugMode::eAovDepth:          v = float3(a.depth / (1.0f + a.depth)); break;
+        // Red/green for the two axes, scaled so a few pixels of motion is visible.
+        case DebugMode::eAovMotion:
+            v = float3(a.motionX, a.motionY, 0.0f) * 0.05f + 0.5f;
+            break;
+        default: break;
+        }
+        res[tid] = float4(v, 1.0f);
         return;
     }
 
