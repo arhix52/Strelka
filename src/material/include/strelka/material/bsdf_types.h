@@ -39,6 +39,24 @@ enum BsdfEventType : unsigned int
 // ---------------------------------------------------------------------------
 // Result of bsdf_sample()
 // ---------------------------------------------------------------------------
+// The two results below use *different conventions for the cosine*, and mixing
+// them up is silent:
+//
+//   bsdf_sample() -> bsdf_over_pdf  =  f * |cos(theta_i)| / pdf   (cosine included)
+//   bsdf_eval()   -> bsdf           =  f                          (cosine NOT included)
+//
+// That is why a path tracer can write `throughput *= bsdf_over_pdf` after
+// sampling, while next-event estimation has to multiply the cosine in itself --
+// see connectLight()/connectEnvLight(), which fold it into the returned radiance.
+//
+// Multiple importance sampling weighs each strategy by the other's density, so
+// the two routines must agree once put in the same convention:
+//
+//   bsdf_over_pdf  ==  bsdf * |cos(theta_i)| / pdf     (same wi, same si)
+//
+// tests/material/test_bsdf.cpp checks exactly that equality, and both pdfs, at
+// the sampled direction. Comparing the two f's *without* converting looks like a
+// failure of exactly the factor (1 - cos), which is a false alarm.
 struct BsdfSampleResult
 {
     float3          wi;         // Sampled incoming (light) direction, world space
@@ -52,7 +70,7 @@ struct BsdfSampleResult
 // ---------------------------------------------------------------------------
 struct BsdfEvalResult
 {
-    float3  bsdf;   // f(wo, wi) -- the BSDF value
+    float3  bsdf;   // f(wo, wi) -- the BSDF value, *without* the cosine
     float   pdf;    // Probability density of wi (solid angle)
 };
 

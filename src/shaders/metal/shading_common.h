@@ -438,6 +438,9 @@ LightConnection connectLight(
     const float3 Li = float3(light.color);
     if (dot(si.shading_normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.001f && all(Li))
     {
+        // The cosine belongs here because bsdf_eval() returns f alone, unlike
+        // bsdf_sample()'s bsdf_over_pdf which already carries it. See the note on
+        // both result structs in bsdf_types.h.
         c.radiance = Li * saturate(dot(si.shading_normal, lightSampleData.L));
         c.origin = si.position;
         c.pdf = lightSampleData.pdf;
@@ -511,6 +514,7 @@ LightConnection connectEnvLight(
     float3 Li = envSample.xyz;
     Li *= uniforms.envMapIntensity * float3(uniforms.envMapColorTint);
 
+    // Cosine folded in here for the same reason as in connectLight().
     c.radiance = Li * max(dot(si.shading_normal, dir), 0.0f);
     // Offset along the face the shadow ray actually leaves from. The raw
     // geometry normal points to a fixed side of the triangle, so on a back-face

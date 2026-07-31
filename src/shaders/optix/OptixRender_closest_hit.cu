@@ -81,6 +81,9 @@ static __device__ float3 sampleLight(SamplerState& sampler,
             );
         float visibility = occluded ? 0.0f : 1.0f;
         lightPdf = lightSampleData.pdf;
+        // The cosine belongs here because bsdf_eval() returns f alone, unlike
+        // bsdf_sample()'s bsdf_over_pdf which already carries it. See the note on
+        // both result structs in bsdf_types.h.
         return visibility * Li * saturate(dot(si.shading_normal, lightSampleData.L));
     }
 

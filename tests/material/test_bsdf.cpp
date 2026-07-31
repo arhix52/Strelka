@@ -412,12 +412,10 @@ TEST_CASE("bsdf_eval reports the density bsdf_sample draws from")
                         worstPdf = std::max(worstPdf, (double)std::fabs(e.pdf - s.pdf) / s.pdf);
 
                         // And the throughput each route produces for that
-                        // direction must agree. bsdf_over_pdf carries the cosine;
-                        // bsdf_eval returns f alone, which is why next-event
-                        // estimation multiplies the cosine in separately. Compare
-                        // the two after putting them in the same convention --
-                        // this is precisely the quantity multiple importance
-                        // sampling assumes is the same on both paths.
+                        // direction must agree, once both are in the same cosine
+                        // convention -- see the note on the result structs in
+                        // bsdf_types.h. This is precisely the quantity multiple
+                        // importance sampling assumes is the same on both paths.
                         const float cosWi = std::fabs(dot(si.shading_normal, s.wi));
                         const float3 fromSample = s.bsdf_over_pdf;
                         const float3 fromEval = e.bsdf * (cosWi / e.pdf);
