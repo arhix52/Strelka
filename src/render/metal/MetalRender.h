@@ -188,9 +188,9 @@ private:
     MTL::ComputePipelineState* mWavefrontPreparePSO = nullptr;
     MTL::ComputePipelineState* mWavefrontPrepareShadowPSO = nullptr;
     MTL::ComputePipelineState* mWavefrontShadowPSO = nullptr;
-    MTL::ComputePipelineState* mWavefrontSortCountPSO = nullptr;
-    MTL::ComputePipelineState* mWavefrontSortScanPSO = nullptr;
-    MTL::ComputePipelineState* mWavefrontSortScatterPSO = nullptr;
+    MTL::ComputePipelineState* mWavefrontMissPSO = nullptr;
+    MTL::ComputePipelineState* mWavefrontPrepareHitMissPSO = nullptr;
+
     MTL::Buffer* mPathStateBuffer = nullptr;
     MTL::Buffer* mPathRayBuffer = nullptr;
     MTL::Buffer* mHitBuffer = nullptr;
@@ -202,14 +202,15 @@ private:
     MTL::Buffer* mPathQueueBuffer[2] = { nullptr, nullptr };
     MTL::Buffer* mWavefrontControlBuffer = nullptr;
     MTL::Buffer* mShadowRayBuffer = nullptr;
-    MTL::Buffer* mSortBinBuffer = nullptr;      // 96 counts followed by 96 bases
-    MTL::Buffer* mSortTgBaseBuffer = nullptr;   // per (threadgroup, bin) run offset
+    // `extend` splits its input into rays that hit geometry and rays that
+    // escaped, so neither stage dispatches threads for the other's work.
+    MTL::Buffer* mHitQueueBuffer = nullptr;
+    MTL::Buffer* mMissQueueBuffer = nullptr;
+
     MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
     MTL::Buffer* mStageStatsBuffer = nullptr; // shared copy of the control buffer, profiling only
     static constexpr uint32_t kMaxStageSamples = 256;
-    // Must match WF_SORT_BINS / WF_SORT_TG in wavefront.metal.
-    static constexpr uint32_t kSortBins = 96;
-    static constexpr uint32_t kSortThreadgroup = 1024;
+
     // Stage kind of each timestamp, in encode order. A stage's duration is the
     // gap to the next timestamp, so there is always one more sample than stage.
     std::vector<uint8_t> mStageKinds;

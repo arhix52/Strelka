@@ -138,9 +138,7 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", 1); // 0 = megakernel, 1 = wavefront
     m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 1);
     m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 0);
-    // Off by default: measured a net loss on BrainStem (see the commit that
-    // added it). Kept because the trade it makes is scene-dependent.
-    m_settingsManager->setAs<uint32_t>("render/pt/sortRays", 0);
+
     if (const char* tracer = getenv("STRELKA_TRACER"))
     {
         m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", (uint32_t)atoi(tracer));
@@ -250,10 +248,6 @@ void EditorApp::runBenchmark()
     if (const char* tracer = getenv("STRELKA_TRACER"))
     {
         m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", (uint32_t)atoi(tracer));
-    }
-    if (const char* sr = getenv("STRELKA_SORT"))
-    {
-        m_settingsManager->setAs<uint32_t>("render/pt/sortRays", (uint32_t)atoi(sr));
     }
     if (getenv("STRELKA_STAGES"))
     {

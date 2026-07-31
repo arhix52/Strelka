@@ -30,9 +30,9 @@
 //   [0], [1] : live path count of each ping-pong queue
 //   [2..4]   : MTLDispatchThreadgroupsIndirectArguments for extend/shade
 //   [5]      : live path count for this bounce, so stages need no queue index
-//   [6]      : shadow rays emitted by this bounce
-//   [7]      : that count, republished for the shadow kernel's bounds check
-//   [8..10]  : MTLDispatchThreadgroupsIndirectArguments for the shadow stage
+//   [6..10]  : shadow ray count, republished count, and its dispatch arguments
+//   [11..15] : the same for rays that hit geometry
+//   [16..20] : the same for rays that escaped
 #define WF_CTRL_COUNT0     0
 #define WF_CTRL_COUNT1     1
 #define WF_CTRL_DISPATCH   2
@@ -40,51 +40,22 @@
 #define WF_CTRL_SHADOW     6
 #define WF_CTRL_SHADOW_N   7
 #define WF_CTRL_SHADOW_DIS 8
-#define WF_CTRL_SORT_DIS   11
+#define WF_CTRL_HIT        11
+#define WF_CTRL_HIT_N      12
+#define WF_CTRL_HIT_DIS    13
+#define WF_CTRL_MISS       16
+#define WF_CTRL_MISS_N     17
+#define WF_CTRL_MISS_DIS   18
 // Profiling only: live path count and shadow ray count per bounce, so the
 // per-stage timings can be read as a cost per ray rather than a cost per stage.
-#define WF_CTRL_STATS_PATHS  16
-#define WF_CTRL_STATS_SHADOW 48
+#define WF_CTRL_STATS_PATHS  32
+#define WF_CTRL_STATS_SHADOW 64
 
-// Ray sorting. Traversing a coherent primary ray costs 3.5 ns on this hardware;
-// traversing an incoherent secondary one costs two to three times that. Binning
-// the queue by ray direction before `extend` buys back part of that gap.
-//
-// The bin is a cube-face parameterisation: which of the six faces the direction
-// points at, times a 4x4 grid within the face. Directions in one bin span at
-// most ~25 degrees, which is enough for them to walk the same part of the BVH.
-#define WF_SORT_BINS   96
-#define WF_SORT_TG     1024
-
-static inline uint32_t directionBin(float3 d)
-{
-    const float3 a = abs(d);
-    uint32_t face;
-    float m, u, v;
-    if (a.x >= a.y && a.x >= a.z)
-    {
-        face = (d.x > 0.0f) ? 0u : 1u; m = a.x; u = d.y; v = d.z;
-    }
-    else if (a.y >= a.z)
-    {
-        face = (d.y > 0.0f) ? 2u : 3u; m = a.y; u = d.x; v = d.z;
-    }
-    else
-    {
-        face = (d.z > 0.0f) ? 4u : 5u; m = a.z; u = d.x; v = d.y;
-    }
-    m = max(m, 1e-20f);
-    const uint32_t g = 4u;
-    const uint32_t iu = min((uint32_t)((u / m * 0.5f + 0.5f) * g), g - 1u);
-    const uint32_t iv = min((uint32_t)((v / m * 0.5f + 0.5f) * g), g - 1u);
-    return face * (g * g) + iv * g + iu;
-}
-
-// Reserve a run of output slots for the surviving lanes of one simdgroup.
-//
-// Every lane that reaches here survived -- the ones that did not have already
-// returned, so they are inactive and the simdgroup reductions below see only
-// survivors. One atomic per simdgroup instead of one per lane.
+// Reserve a run of output slots for the active lanes of one simdgroup. Every
+// lane that reaches a call site belongs in that queue -- the others already
+// returned or took the other branch, so they are inactive and the simdgroup
+// reductions below see only the lanes being queued. One atomic per simdgroup
+// instead of one per lane.
 static inline void queuePush(device atomic_uint* counter, device uint32_t* queueOut,
                              uint32_t pathIndex)
 {
@@ -141,19 +112,16 @@ kernel void wavefrontGenerate(
     device IorStack*                                           iorStacks      [[buffer(3)]],
     constant uint32_t&                                         sampleIdx      [[buffer(4)]],
     device uint32_t*                                           queueOut       [[buffer(5)]],
-    device uint32_t*                                           control        [[buffer(6)]],
-    device uint32_t*                                           binCounts      [[buffer(7)]])
+    device uint32_t*                                           control        [[buffer(6)]])
 {
-    if (tid < WF_SORT_BINS)
-    {
-        binCounts[tid] = 0u;
-    }
     const uint32_t pixelCount = uniforms.width * uniforms.height;
     if (tid == 0u)
     {
         control[WF_CTRL_COUNT0] = pixelCount;
         control[WF_CTRL_COUNT1] = 0u;
         control[WF_CTRL_SHADOW] = 0u;
+        control[WF_CTRL_HIT] = 0u;
+        control[WF_CTRL_MISS] = 0u;
     }
     if (tid >= pixelCount)
     {
@@ -204,7 +172,11 @@ kernel void wavefrontExtend(
     device HitRecord*                                          hits           [[buffer(4)]],
     constant uint32_t&                                         sampleIdx      [[buffer(5)]],
     device const uint32_t*                                     queue          [[buffer(6)]],
-    device const uint32_t*                                     control        [[buffer(7)]])
+    device const uint32_t*                                     control        [[buffer(7)]],
+    device uint32_t*                                           hitQueue       [[buffer(8)]],
+    device atomic_uint*                                        hitCounter     [[buffer(9)]],
+    device uint32_t*                                           missQueue      [[buffer(10)]],
+    device atomic_uint*                                        missCounter    [[buffer(11)]])
 {
     // Indirect dispatch can only launch whole threadgroups, so the tail of the
     // last one runs past the queue and has to be discarded here.
@@ -231,27 +203,28 @@ kernel void wavefrontExtend(
     typename intersector<triangle_data, instancing, primitive_motion>::result_type hit =
         isect.intersect(r, accelerationStructure, uniforms.primaryRayMask, motionTime);
 
-    HitRecord rec;
+    // A ray that escaped carries no information beyond the fact, so it goes
+    // straight to the miss stage: no hit record is written and the path never
+    // enters `shade`. On a scene with an open background that is most of the
+    // secondary rays, and it was the whole cost of the bounce.
     if (hit.type == intersection_type::none)
     {
-        rec.geomEntryIndex = 0u;
-        rec.primitiveId = 0u;
-        rec.barycentrics = float2(0.0f);
-        rec.distance = -1.0f; // escaped
+        queuePush(missCounter, missQueue, tid);
+        return;
     }
-    else
-    {
-        const auto inst = instances[hit.instance_id];
-        const bool isLight = (inst.mask == GEOMETRY_MASK_LIGHT);
-        // For emissive geometry userID indexes the light table, not the geometry
-        // table; the flag bit tells `shade` which one it is.
-        rec.geomEntryIndex = isLight ? (HIT_LIGHT_BIT | inst.userID)
-                                     : (inst.userID + hit.geometry_id);
-        rec.primitiveId = hit.primitive_id;
-        rec.barycentrics = hit.triangle_barycentric_coord;
-        rec.distance = hit.distance;
-    }
+
+    const auto inst = instances[hit.instance_id];
+    const bool isLight = (inst.mask == GEOMETRY_MASK_LIGHT);
+    // For emissive geometry userID indexes the light table, not the geometry
+    // table; the flag bit tells `shade` which one it is.
+    HitRecord rec;
+    rec.geomEntryIndex = isLight ? (HIT_LIGHT_BIT | inst.userID)
+                                 : (inst.userID + hit.geometry_id);
+    rec.primitiveId = hit.primitive_id;
+    rec.barycentrics = hit.triangle_barycentric_coord;
+    rec.distance = hit.distance;
     hits[tid] = rec;
+    queuePush(hitCounter, hitQueue, tid);
 }
 
 // Rebuild the triangle's vertex attributes from the vertex buffer.
@@ -313,6 +286,69 @@ static void fetchTriangle(device const char* vertexBuffer,
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// miss -- rays that escaped the scene
+//
+// Split out of `shade` rather than branched inside it. The work is a texture
+// fetch and one MIS weight, and keeping it here means `shade` neither dispatches
+// threads for escaped rays nor carries the environment sampler in its register
+// budget.
+// ---------------------------------------------------------------------------
+kernel void wavefrontMiss(
+    uint                    gid           [[thread_position_in_grid]],
+    constant Uniforms&      uniforms      [[buffer(0)]],
+    device const PathState* paths         [[buffer(1)]],
+    device const PathRay*   rays          [[buffer(2)]],
+    device float4*          radianceOut   [[buffer(3)]],
+    device const uint32_t*  queue         [[buffer(4)]],
+    device const uint32_t*  control       [[buffer(5)]],
+    texture2d<float>        envMapTexture [[texture(0)]])
+{
+    if (gid >= control[WF_CTRL_MISS_N])
+    {
+        return;
+    }
+    const uint32_t tid = queue[gid];
+    const PathState p = paths[tid];
+    const float3 rayDir = float3(rays[tid].direction);
+    const float3 throughput = float3(p.throughput);
+    const uint32_t depth = pathDepth(p.depthAndFlags);
+    const bool specularBounce = (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u;
+    const bool neeDone = (p.depthAndFlags & PATH_FLAG_NEE_DONE) != 0u;
+
+    float3 radiance = float3(0.0f);
+    if (uniforms.hasEnvMap)
+    {
+        constexpr sampler envSampler(mag_filter::linear, min_filter::linear, address::repeat, coord::normalized);
+        const float2 envUV = dirToEnvUV(rayDir, uniforms.envMapRotation);
+        float3 envColor = envMapTexture.sample(envSampler, envUV).xyz;
+        envColor *= uniforms.envMapIntensity * float3(uniforms.envMapColorTint);
+
+        if (depth == 0u || specularBounce || !neeDone)
+        {
+            radiance += throughput * envColor;
+        }
+        else
+        {
+            const float envPdf = envMapPdf(rayDir, envMapTexture,
+                                           uniforms.envMapWidth, uniforms.envMapHeight,
+                                           uniforms.envMapRotation, uniforms.envPdfScale);
+            const float envSelectionPdf = (uniforms.numLights > 0) ? 0.5f : 1.0f;
+            const float effectiveEnvPdf = envPdf * envSelectionPdf;
+            if (effectiveEnvPdf > 0.0f)
+            {
+                radiance += throughput * envColor * misWeightBalance(p.lastBsdfPdf, effectiveEnvPdf);
+            }
+        }
+    }
+    else
+    {
+        radiance += throughput * uniforms.missColor;
+    }
+    radianceOut[tid] += float4(radiance, 0.0f);
+}
+
 // ---------------------------------------------------------------------------
 // shade -- material evaluation, next-event estimation, next ray
 // ---------------------------------------------------------------------------
@@ -342,7 +378,7 @@ kernel void wavefrontShade(
     device atomic_uint*                                        shadowCounter  [[buffer(20)]],
     texture2d<float>                                           envMapTexture  [[texture(0)]])
 {
-    if (gid >= control[WF_CTRL_ACTIVE])
+    if (gid >= control[WF_CTRL_HIT_N])
     {
         return;
     }
@@ -363,41 +399,6 @@ kernel void wavefrontShade(
 
     float3 radiance = float3(0.0f);
     const HitRecord rec = hits[tid];
-
-    // --- Miss ---------------------------------------------------------------
-    if (rec.distance < 0.0f)
-    {
-        if (uniforms.hasEnvMap)
-        {
-            constexpr sampler envSampler(mag_filter::linear, min_filter::linear, address::repeat, coord::normalized);
-            const float2 envUV = dirToEnvUV(rayDir, uniforms.envMapRotation);
-            float3 envColor = envMapTexture.sample(envSampler, envUV).xyz;
-            envColor *= uniforms.envMapIntensity * float3(uniforms.envMapColorTint);
-
-            if (depth == 0u || specularBounce || !neeDone)
-            {
-                radiance += throughput * envColor;
-            }
-            else
-            {
-                const float envPdf = envMapPdf(rayDir, envMapTexture,
-                                               uniforms.envMapWidth, uniforms.envMapHeight,
-                                               uniforms.envMapRotation, uniforms.envPdfScale);
-                const float envSelectionPdf = (uniforms.numLights > 0) ? 0.5f : 1.0f;
-                const float effectiveEnvPdf = envPdf * envSelectionPdf;
-                if (effectiveEnvPdf > 0.0f)
-                {
-                    radiance += throughput * envColor * misWeightBalance(p.lastBsdfPdf, effectiveEnvPdf);
-                }
-            }
-        }
-        else
-        {
-            radiance += throughput * uniforms.missColor;
-        }
-        radianceOut[tid] += float4(radiance, 0.0f);
-        return;
-    }
 
     // --- Emissive geometry --------------------------------------------------
     if ((rec.geomEntryIndex & HIT_LIGHT_BIT) != 0u)
@@ -635,10 +636,31 @@ kernel void wavefrontPrepare(
     control[WF_CTRL_DISPATCH + 0] = (n + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_DISPATCH + 1] = 1u;
     control[WF_CTRL_DISPATCH + 2] = 1u;
-    // The stage about to run appends into the other queue, so clear its count
-    // before anything can add to it.
+    // The stages about to run append into these, so clear their counts before
+    // anything can add to them.
     control[1u - srcIdx] = 0u;
     control[WF_CTRL_SHADOW] = 0u;
+    control[WF_CTRL_HIT] = 0u;
+    control[WF_CTRL_MISS] = 0u;
+}
+
+// Between `extend` and the two stages that consume its classification.
+kernel void wavefrontPrepareHitMiss(
+    device uint32_t&        controlRef      [[buffer(0)]],
+    constant uint32_t&      threadsPerGroup [[buffer(1)]])
+{
+    device uint32_t* control = &controlRef;
+    const uint32_t h = control[WF_CTRL_HIT];
+    control[WF_CTRL_HIT_N] = h;
+    control[WF_CTRL_HIT_DIS + 0] = (h + threadsPerGroup - 1u) / threadsPerGroup;
+    control[WF_CTRL_HIT_DIS + 1] = 1u;
+    control[WF_CTRL_HIT_DIS + 2] = 1u;
+
+    const uint32_t m = control[WF_CTRL_MISS];
+    control[WF_CTRL_MISS_N] = m;
+    control[WF_CTRL_MISS_DIS + 0] = (m + threadsPerGroup - 1u) / threadsPerGroup;
+    control[WF_CTRL_MISS_DIS + 1] = 1u;
+    control[WF_CTRL_MISS_DIS + 2] = 1u;
 }
 
 // Between `shade` and `shadow`: publish the number of shadow rays `shade`
@@ -656,12 +678,6 @@ kernel void wavefrontPrepareShadow(
     control[WF_CTRL_SHADOW_DIS + 0] = (n + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_SHADOW_DIS + 1] = 1u;
     control[WF_CTRL_SHADOW_DIS + 2] = 1u;
-    // The sort runs over the paths `shade` just queued, in much larger
-    // threadgroups, so it needs dispatch arguments of its own.
-    const uint32_t live = control[WF_CTRL_COUNT1];
-    control[WF_CTRL_SORT_DIS + 0] = (live + WF_SORT_TG - 1u) / WF_SORT_TG;
-    control[WF_CTRL_SORT_DIS + 1] = 1u;
-    control[WF_CTRL_SORT_DIS + 2] = 1u;
 }
 
 // ---------------------------------------------------------------------------
@@ -732,106 +748,4 @@ kernel void wavefrontResolve(
     }
 
     res[tid] = float4(result, 1.0f);
-}
-
-// ---------------------------------------------------------------------------
-// sort -- bin the live queue by ray direction
-//
-// A counting sort in three dispatches. The histogram is built in threadgroup
-// memory so the device sees one atomic per (threadgroup, bin) rather than one
-// per ray: at 1024 threads a bounce costs ~74k device atomics instead of ~786k.
-// ---------------------------------------------------------------------------
-kernel void wavefrontSortCount(
-    uint                        gid       [[thread_position_in_grid]],
-    uint                        lid       [[thread_position_in_threadgroup]],
-    uint                        tgIdx     [[threadgroup_position_in_grid]],
-    device const uint32_t*      queue     [[buffer(0)]],
-    device const PathRay*       rays      [[buffer(1)]],
-    device const uint32_t*      control   [[buffer(2)]],
-    device atomic_uint*         binCounts [[buffer(3)]],
-    device uint32_t*            tgBase    [[buffer(4)]],
-    threadgroup atomic_uint*    hist      [[threadgroup(0)]])
-{
-    for (uint32_t i = lid; i < WF_SORT_BINS; i += WF_SORT_TG)
-    {
-        atomic_store_explicit(&hist[i], 0u, memory_order_relaxed);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    const uint32_t n = control[WF_CTRL_COUNT1];
-    if (gid < n)
-    {
-        const uint32_t bin = directionBin(float3(rays[queue[gid]].direction));
-        atomic_fetch_add_explicit(&hist[bin], 1u, memory_order_relaxed);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // One device atomic per bin per threadgroup reserves this group's run inside
-    // that bin. The run's absolute position needs the bin bases, which only the
-    // scan below knows.
-    for (uint32_t i = lid; i < WF_SORT_BINS; i += WF_SORT_TG)
-    {
-        const uint32_t c = atomic_load_explicit(&hist[i], memory_order_relaxed);
-        tgBase[tgIdx * WF_SORT_BINS + i] =
-            atomic_fetch_add_explicit(&binCounts[i], c, memory_order_relaxed);
-    }
-}
-
-// Exclusive prefix sum over the bins, and publish the new live count. One
-// thread: 96 elements is far below the point where a parallel scan pays off.
-kernel void wavefrontSortScan(
-    device uint32_t&        binCountsRef [[buffer(0)]],
-    device uint32_t*        binBase      [[buffer(1)]],
-    device uint32_t&        controlRef   [[buffer(2)]])
-{
-    device uint32_t* binCounts = &binCountsRef;
-    device uint32_t* control = &controlRef;
-    uint32_t running = 0u;
-    for (uint32_t i = 0; i < WF_SORT_BINS; ++i)
-    {
-        binBase[i] = running;
-        running += binCounts[i];
-        binCounts[i] = 0u; // ready for the next bounce
-    }
-    // The sorted queue becomes the next bounce's input.
-    control[WF_CTRL_COUNT0] = running;
-}
-
-kernel void wavefrontSortScatter(
-    uint                        gid       [[thread_position_in_grid]],
-    uint                        lid       [[thread_position_in_threadgroup]],
-    uint                        tgIdx     [[threadgroup_position_in_grid]],
-    device const uint32_t*      queue     [[buffer(0)]],
-    device const PathRay*       rays      [[buffer(1)]],
-    device const uint32_t*      control   [[buffer(2)]],
-    device const uint32_t*      binBase   [[buffer(3)]],
-    device const uint32_t*      tgBase    [[buffer(4)]],
-    device uint32_t*            queueOut  [[buffer(5)]],
-    threadgroup atomic_uint*    cursor    [[threadgroup(0)]])
-{
-    for (uint32_t i = lid; i < WF_SORT_BINS; i += WF_SORT_TG)
-    {
-        atomic_store_explicit(&cursor[i], 0u, memory_order_relaxed);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    const uint32_t n = control[WF_CTRL_COUNT1];
-    uint32_t pathIndex = 0u;
-    uint32_t bin = 0u;
-    uint32_t rank = 0u;
-    const bool active = gid < n;
-    if (active)
-    {
-        pathIndex = queue[gid];
-        bin = directionBin(float3(rays[pathIndex].direction));
-        // Order within a (threadgroup, bin) run is arbitrary; coherence is only
-        // claimed at bin granularity, so an atomic ticket is enough.
-        rank = atomic_fetch_add_explicit(&cursor[bin], 1u, memory_order_relaxed);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    if (active)
-    {
-        queueOut[binBase[bin] + tgBase[tgIdx * WF_SORT_BINS + bin] + rank] = pathIndex;
-    }
 }
