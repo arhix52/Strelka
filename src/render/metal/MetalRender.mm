@@ -964,7 +964,7 @@ void MetalRender::render(Buffer* output)
                 if (pass2Skeletal)
                 {
                     applySkinning();
-                    updateSkeletalBLAS(maxTimeDelta > shutterDuration * 2.0f);
+                    updateSkeletalBLAS();
                 }
                 rebuildTLAS(); // already re-uploads the instance transforms
 
@@ -989,7 +989,7 @@ void MetalRender::render(Buffer* output)
                     // Sync prevVB with current VB — motion BVH needs both keyframes
                     // consistent when motion blur is off (otherwise keyframe 0 is stale)
                     copyVertexBufferToPrev();
-                    updateSkeletalBLAS(maxTimeDelta > 0.1f);
+                    updateSkeletalBLAS();
                     rebuildTLAS();
                 }
                 else
@@ -2387,16 +2387,24 @@ void MetalRender::ensureScratchBuffer(MTL::Buffer*& buffer, size_t requiredSize)
     buffer = mDevice->newBuffer(requiredSize, MTL::ResourceStorageModePrivate);
 }
 
-void MetalRender::updateSkeletalBLAS(bool largeTimeJump)
+void MetalRender::updateSkeletalBLAS()
 {
     NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
-    // Refit degrades BVH quality as the pose drifts from the one it was built
-    // for, so a periodic full rebuild is still needed — but rebuilding *every*
-    // skeletal mesh on the same frame produced a visible hitch every 10 frames.
-    // Rebuild a bounded slice per frame instead and rotate through the meshes.
-    const bool wantsFullRebuild = (mBlasUpdateCount >= 10) || largeTimeJump;
-    const bool doRebuildSlice = wantsFullRebuild && (mFramesSinceFullRebuild >= 5);
+    // Rebuild rather than refit, every frame, up to the per-frame cap.
+    //
+    // The old policy refitted and rebuilt one slice every ten frames, from when a
+    // skinned scene meant one BLAS per mesh primitive — 59 on BrainStem — and
+    // rebuilding them together hitched. Merging a node's primitives into one
+    // structure left 6, and at that size the arithmetic reverses: a refitted BVH
+    // is bad enough that traversal pays far more than the rebuild costs.
+    // BrainStem, animating, depth 8, median of 32 frames:
+    //
+    //   refit + periodic slice   render 91-117 ms, wall 96-121 ms
+    //   rebuild every frame      render 77-79 ms,  wall 86 ms
+    //
+    // The refit numbers also swing by 50% depending where in the ten-frame cycle
+    // the samples land; rebuilding every frame is steady.
 
     // All refits go into a single command buffer and a single encoder. Each mesh
     // used to get its own command buffer, so BrainStem — 59 skeletal meshes —
@@ -2420,9 +2428,11 @@ void MetalRender::updateSkeletalBLAS(bool largeTimeJump)
         // frame meant a pile of Objective-C allocations plus an
         // accelerationStructureSizes() driver query describing geometry that
         // never changes shape, only contents.
-        const bool inRebuildSlice = doRebuildSlice && rebuiltThisFrame < kMaxBlasRebuildsPerFrame &&
-                                    mi >= mNextBlasRebuildIndex;
-        if (inRebuildSlice)
+        // The cap only exists so a scene with very many skeletal structures
+        // cannot hitch on one frame; anything it skips is refitted and rebuilt
+        // on the next.
+        const bool rebuild = rebuiltThisFrame < kMaxBlasRebuildsPerFrame && mi >= mNextBlasRebuildIndex;
+        if (rebuild)
         {
             // A rebuild needs build scratch, which is the larger of the two.
             ensureScratchBuffer(blas.mScratch, std::max(blas.mBuildScratchSize, blas.mRefitScratchSize));
@@ -2440,17 +2450,12 @@ void MetalRender::updateSkeletalBLAS(bool largeTimeJump)
     commandEncoder->endEncoding();
     commandBuffer->commit();
 
-    if (doRebuildSlice && mNextBlasRebuildIndex >= blasCount)
+    // Under the cap means everything eligible was covered, so start again from
+    // the top rather than from one past the last skeletal structure — which may
+    // be well short of blasCount when the scene also has static ones.
+    if (rebuiltThisFrame < kMaxBlasRebuildsPerFrame)
     {
-        // Finished a full sweep over every skeletal mesh.
         mNextBlasRebuildIndex = 0;
-        mBlasUpdateCount = 0;
-        mFramesSinceFullRebuild = 0;
-    }
-    else
-    {
-        mBlasUpdateCount++;
-        mFramesSinceFullRebuild++;
     }
 
     pPool->release();

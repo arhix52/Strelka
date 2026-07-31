@@ -277,6 +277,11 @@ void EditorApp::runBenchmark()
 
     std::vector<double> samples;
     samples.reserve(frames);
+    // Wall clock too: the GPU render time excludes skinning and acceleration
+    // structure work, which is most of what changes when playback is on.
+    std::vector<double> wall;
+    wall.reserve(frames);
+    auto prevFrame = std::chrono::high_resolution_clock::now();
     double last = -1.0;
     for (uint32_t i = 0; i < warmup + frames && !m_display->windowShouldClose();)
     {
@@ -290,26 +295,31 @@ void EditorApp::runBenchmark()
         if (t > 0.0 && t != last)
         {
             last = t;
+            const auto now = std::chrono::high_resolution_clock::now();
             if (i >= warmup)
             {
                 samples.push_back(t);
+                wall.push_back(std::chrono::duration<double, std::milli>(now - prevFrame).count());
             }
+            prevFrame = now;
             ++i;
         }
         usleep(200);
     }
 
     std::sort(samples.begin(), samples.end());
+    std::sort(wall.begin(), wall.end());
     if (samples.empty())
     {
         STRELKA_INFO("BENCH  no frames measured");
         return;
     }
     const double median = samples[samples.size() / 2];
-    STRELKA_INFO("BENCH  tracer={} depth={} frames={}  median={:.2f} ms  min={:.2f}  max={:.2f}",
+    STRELKA_INFO("BENCH  tracer={} depth={} frames={}  median={:.2f} ms  min={:.2f}  max={:.2f}  wall={:.2f} ms",
                  m_settingsManager->getAs<uint32_t>("render/pt/tracerMode"),
                  m_settingsManager->getAs<uint32_t>("render/pt/depth"),
-                 samples.size(), median, samples.front(), samples.back());
+                 samples.size(), median, samples.front(), samples.back(),
+                 wall.empty() ? 0.0 : wall[wall.size() / 2]);
 }
 
 // Reference capture / estimator self-consistency check (STRELKA_REF=<dir>).
