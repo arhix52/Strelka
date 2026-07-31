@@ -6,6 +6,7 @@
 
 #include "ShaderTypes.h" // GeometryEntry, shared with the path-trace kernel
 #include <atomic>
+#include <map>
 #include <vector>
 
 namespace oka
@@ -181,19 +182,37 @@ private:
     void encodePathTraceBindings(MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer, Buffer* output);
 
     // --- Wavefront tracer ---------------------------------------------------
-    MTL::ComputePipelineState* mWavefrontGeneratePSO = nullptr;
-    MTL::ComputePipelineState* mWavefrontExtendPSO = nullptr;
-    MTL::ComputePipelineState* mWavefrontShadePSO = nullptr;
+    // One set of pipelines per combination of scene features. Every branch a
+    // function constant removes is on something that cannot change between rays,
+    // so it is compiled away rather than executed; the cost is that a change to
+    // any of those facts needs a new pipeline, hence the cache.
+    struct WavefrontVariant
+    {
+        MTL::ComputePipelineState* generate = nullptr;
+        MTL::ComputePipelineState* extendMotion = nullptr;
+        MTL::ComputePipelineState* extendStatic = nullptr;
+        MTL::ComputePipelineState* shade = nullptr;
+        MTL::ComputePipelineState* miss = nullptr;
+        MTL::ComputePipelineState* shadowMotion = nullptr;
+        MTL::ComputePipelineState* shadowStatic = nullptr;
+    };
+    enum WavefrontFeature : uint32_t
+    {
+        kFeatureEnvMap = 1u << 0,
+        kFeatureLights = 1u << 1,
+        kFeatureMotionBlur = 1u << 2,
+        kFeatureDof = 1u << 3,
+        kFeatureDebug = 1u << 4,
+        kFeatureCount = 1u << 5,
+    };
+    std::map<uint32_t, WavefrontVariant> mWavefrontVariants;
+    MTL::Library* mWavefrontLibrary = nullptr;
+    const WavefrontVariant* wavefrontVariantFor(uint32_t features);
+
     MTL::ComputePipelineState* mWavefrontResolvePSO = nullptr;
     MTL::ComputePipelineState* mWavefrontPreparePSO = nullptr;
     MTL::ComputePipelineState* mWavefrontPrepareShadowPSO = nullptr;
-    MTL::ComputePipelineState* mWavefrontShadowPSO = nullptr;
-    // Static-geometry variants. A motion acceleration structure is a different
-    // type from a static one, so this is two compiled kernels, not a branch.
-    MTL::ComputePipelineState* mWavefrontExtendStaticPSO = nullptr;
-    MTL::ComputePipelineState* mWavefrontShadowStaticPSO = nullptr;
     bool mSceneHasMotionBlas = false;
-    MTL::ComputePipelineState* mWavefrontMissPSO = nullptr;
     MTL::ComputePipelineState* mWavefrontPrepareHitMissPSO = nullptr;
 
     MTL::Buffer* mPathStateBuffer = nullptr;
@@ -233,7 +252,8 @@ private:
     // own, because this hardware can only sample counters at encoder boundaries.
     MTL::ComputeCommandEncoder* encodeWavefront(MTL::CommandBuffer* pCmd, MTL::ComputeCommandEncoder* enc,
                          MTL::Buffer* uniformBuffer,
-                         Buffer* output, uint32_t width, uint32_t height, uint32_t sampleCount);
+                         Buffer* output, uint32_t width, uint32_t height, uint32_t sampleCount,
+                         uint32_t features);
 
     MTL::Library* loadShaderLibrary(const char* relativePath);
     void buildComputePipeline();

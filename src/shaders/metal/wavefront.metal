@@ -119,7 +119,7 @@ static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixe
 // different time on every bounce and smear the path across the shutter.
 static inline float motionTimeFor(constant Uniforms& uniforms, uint32_t pixelIndex, uint32_t sampleIdx)
 {
-    if (!uniforms.enableMotionBlur)
+    if (!SPEC_MOTION_BLUR || !uniforms.enableMotionBlur)
     {
         return 0.0f;
     }
@@ -368,7 +368,7 @@ kernel void wavefrontMiss(
     const bool neeDone = (p.depthAndFlags & PATH_FLAG_NEE_DONE) != 0u;
 
     float3 radiance = float3(0.0f);
-    if (uniforms.hasEnvMap)
+    if (SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
         constexpr sampler envSampler(mag_filter::linear, min_filter::linear, address::repeat, coord::normalized);
         const float2 envUV = dirToEnvUV(rayDir, uniforms.envMapRotation);
@@ -450,7 +450,7 @@ kernel void wavefrontShade(
     const HitRecord rec = hits[tid];
 
     // --- Emissive geometry --------------------------------------------------
-    if ((rec.geomEntryIndex & HIT_LIGHT_BIT) != 0u)
+    if (SPEC_LIGHTS && (rec.geomEntryIndex & HIT_LIGHT_BIT) != 0u)
     {
         const uint32_t lightId = rec.geomEntryIndex & ~HIT_LIGHT_BIT;
         const float3 hitPoint = rayOrigin + rayDir * rec.distance;
@@ -478,8 +478,8 @@ kernel void wavefrontShade(
 
     // --- Surface ------------------------------------------------------------
     const GeometryEntry entry = geometryEntries[rec.geomEntryIndex];
-    const bool interpolateMotion = uniforms.enableMotionBlur && motionTime < 1.0f &&
-                                   prevVertexBuffer && indexBuffer;
+    const bool interpolateMotion = SPEC_MOTION_BLUR && uniforms.enableMotionBlur &&
+                                   motionTime < 1.0f && prevVertexBuffer && indexBuffer;
 
     float3 pv[3], nv[3], tv[3];
     float2 uvv[3];
@@ -512,7 +512,7 @@ kernel void wavefrontShade(
                            worldTangent, worldBinormal, uv, rayDir);
 
     const DebugMode debugMode = (DebugMode)uniforms.debug;
-    if (debugMode == DebugMode::eMotionBlur || debugMode == DebugMode::eNormal)
+    if (SPEC_DEBUG && (debugMode == DebugMode::eMotionBlur || debugMode == DebugMode::eNormal))
     {
         // Debug views replace the radiance outright rather than accumulating.
         float3 dbg;
@@ -560,7 +560,7 @@ kernel void wavefrontShade(
 
     bool didNee = (uniforms.estimatorMode == 0) &&
                   (sampleResult.event_type & (BSDF_EVENT_DIFFUSE | BSDF_EVENT_GLOSSY)) &&
-                  (uniforms.numLights > 0 || uniforms.hasEnvMap);
+                  ((SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap));
     if (didNee)
     {
         // Build the connection here and hand the ray to the shadow stage, which

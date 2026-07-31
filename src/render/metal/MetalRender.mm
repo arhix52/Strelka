@@ -127,13 +127,9 @@ MetalRender::~MetalRender()
         safeRelease(mEnvAliasBuffer);
 
         // Pipeline states
-        safeRelease(mWavefrontGeneratePSO);
-        safeRelease(mWavefrontExtendPSO);
-        safeRelease(mWavefrontShadePSO);
         safeRelease(mWavefrontResolvePSO);
         safeRelease(mWavefrontPreparePSO);
         safeRelease(mWavefrontPrepareShadowPSO);
-        safeRelease(mWavefrontShadowPSO);
         safeRelease(mPathStateBuffer);
         safeRelease(mPathRayBuffer);
         safeRelease(mHitBuffer);
@@ -145,9 +141,18 @@ MetalRender::~MetalRender()
         safeRelease(mShadowRayBuffer);
         safeRelease(mHitQueueBuffer);
         safeRelease(mMissQueueBuffer);
-        safeRelease(mWavefrontMissPSO);
-        safeRelease(mWavefrontExtendStaticPSO);
-        safeRelease(mWavefrontShadowStaticPSO);
+        for (auto& kv : mWavefrontVariants)
+        {
+            safeRelease(kv.second.generate);
+            safeRelease(kv.second.extendMotion);
+            safeRelease(kv.second.extendStatic);
+            safeRelease(kv.second.shade);
+            safeRelease(kv.second.miss);
+            safeRelease(kv.second.shadowMotion);
+            safeRelease(kv.second.shadowStatic);
+        }
+        mWavefrontVariants.clear();
+        safeRelease(mWavefrontLibrary);
         safeRelease(mWavefrontPrepareHitMissPSO);
         safeRelease(mStageTimestampBuffer);
         safeRelease(mStageStatsBuffer);
@@ -521,9 +526,10 @@ void MetalRender::reportStageTimings()
 MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCmd,
                                   MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer,
                                   Buffer* output, uint32_t width, uint32_t height,
-                                  uint32_t sampleCount)
+                                  uint32_t sampleCount, uint32_t features)
 {
     const uint32_t pixels = width * height;
+    const WavefrontVariant* variant = wavefrontVariantFor(features);
     const uint32_t maxDepth = std::max(1u, getSettings()->getAs<uint32_t>("render/pt/depth"));
     MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
 
@@ -566,8 +572,12 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
     const NS::UInteger kMissCounterOffset = 16 * sizeof(uint32_t);
     // Nothing in the scene deforms -> traverse it as a static structure. Every ray
     // was otherwise paying for motion-BVH traversal it could not use.
-    const bool useMotion = mSceneHasMotionBlas || mWavefrontExtendStaticPSO == nullptr ||
+    const bool useMotion = mSceneHasMotionBlas || !variant || variant->extendStatic == nullptr ||
                           getSettings()->getAs<uint32_t>("render/pt/staticTraversal") == 0;
+    if (!variant)
+    {
+        return enc;
+    }
 
 
     // Profiling gives each stage its own encoder, because this hardware samples
@@ -595,7 +605,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
     for (uint32_t s = 0; s < sampleCount; ++s)
     {
         stamp(kStageGenerate);
-        enc->setComputePipelineState(mWavefrontGeneratePSO);
+        enc->setComputePipelineState(variant->generate);
         enc->setBuffer(uniformBuffer, 0, 0);
         enc->setBuffer(mPathStateBuffer, 0, 1);
         enc->setBuffer(mRadianceBuffer, 0, 2);
@@ -622,7 +632,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
             stamp(kStageExtend);
-            enc->setComputePipelineState(useMotion ? mWavefrontExtendPSO : mWavefrontExtendStaticPSO);
+            enc->setComputePipelineState(useMotion ? variant->extendMotion : variant->extendStatic);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(mInstanceBuffer, 0, 1);
             enc->setAccelerationStructure(mInstanceAccelerationStructure, 2);
@@ -643,7 +653,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
             stamp(kStageMiss);
-            enc->setComputePipelineState(mWavefrontMissPSO);
+            enc->setComputePipelineState(variant->miss);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(mPathStateBuffer, 0, 1);
             enc->setBuffer(mPathRayBuffer, 0, 2);
@@ -657,7 +667,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kMissArgsOffset, tg);
 
             stamp(kStageShade);
-            enc->setComputePipelineState(mWavefrontShadePSO);
+            enc->setComputePipelineState(variant->shade);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(mInstanceBuffer, 0, 1);
             enc->setBuffer(mLightBuffer, 0, 3);
@@ -697,7 +707,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
             stamp(kStageShadow);
-            enc->setComputePipelineState(useMotion ? mWavefrontShadowPSO : mWavefrontShadowStaticPSO);
+            enc->setComputePipelineState(useMotion ? variant->shadowMotion : variant->shadowStatic);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setAccelerationStructure(mInstanceAccelerationStructure, 1);
             enc->setBuffer(mShadowRayBuffer, 0, 2);
@@ -1163,7 +1173,7 @@ void MetalRender::render(Buffer* output)
         // Wavefront mode replaces the banded megakernel dispatch entirely: it
         // already issues many short dispatches, so it needs no banding of its own.
         const bool useWavefront = settings.getAs<uint32_t>("render/pt/tracerMode") == 1 &&
-                                  mWavefrontShadePSO != nullptr;
+                                  mWavefrontLibrary != nullptr;
         if (useWavefront)
         {
             ensureWavefrontBuffers(width, height);
@@ -1176,7 +1186,23 @@ void MetalRender::render(Buffer* output)
             MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
             MTL::ComputeCommandEncoder* enc = pCmd->computeCommandEncoder();
             const auto encodeStart = std::chrono::high_resolution_clock::now();
-            enc = encodeWavefront(pCmd, enc, pUniformBuffer, output, width, height, samplesThisLaunch);
+            uint32_t features = 0;
+            if (pUniformData->hasEnvMap)
+                features |= kFeatureEnvMap;
+            if (pUniformData->numLights > 0)
+                features |= kFeatureLights;
+            // Motion blur is only a feature of the shader if something can
+            // actually move: with neither deforming geometry nor a moving
+            // camera, the shutter time is a number nothing reads.
+            if (pUniformData->enableMotionBlur &&
+                (mSceneHasMotionBlas || pUniformData->enableCameraMotionBlur))
+                features |= kFeatureMotionBlur;
+            if (pUniformData->useDof)
+                features |= kFeatureDof;
+            if (pUniformData->debug != 0)
+                features |= kFeatureDebug;
+            enc = encodeWavefront(pCmd, enc, pUniformBuffer, output, width, height, samplesThisLaunch,
+                                  features);
             if (mProfileStages)
             {
                 const double encodeMs =
@@ -1381,8 +1407,14 @@ void MetalRender::buildComputePipeline()
         return;
     }
     NS::Error* pError = nullptr;
-    MTL::Function* pPathTraceFn =
-        pComputeLibrary->newFunction(NS::String::string("raytracingKernel", NS::UTF8StringEncoding));
+    // The megakernel shares shading_common.h, which now declares function
+    // constants, so Metal requires the specialising overload even though the
+    // megakernel supplies no values — every constant falls back to its
+    // unspecialised default.
+    MTL::FunctionConstantValues* noValues = MTL::FunctionConstantValues::alloc()->init();
+    MTL::Function* pPathTraceFn = pComputeLibrary->newFunction(
+        NS::String::string("raytracingKernel", NS::UTF8StringEncoding), noValues, &pError);
+    noValues->release();
     mPathTracingPSO = mDevice->newComputePipelineState(pPathTraceFn, &pError);
     if (!mPathTracingPSO)
     {
@@ -1394,6 +1426,75 @@ void MetalRender::buildComputePipeline()
     pComputeLibrary->release();
 }
 
+
+// Build (or return) the pipeline set specialised for one combination of scene
+// features. Compiling seven kernels takes a few milliseconds, which is fine
+// because the key only changes when a setting or the scene does — never per
+// frame.
+const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t features)
+{
+    const auto it = mWavefrontVariants.find(features);
+    if (it != mWavefrontVariants.end())
+    {
+        return &it->second;
+    }
+    if (!mWavefrontLibrary)
+    {
+        return nullptr;
+    }
+
+    MTL::FunctionConstantValues* values = MTL::FunctionConstantValues::alloc()->init();
+    const bool envMap = (features & kFeatureEnvMap) != 0;
+    const bool lights = (features & kFeatureLights) != 0;
+    const bool motionBlur = (features & kFeatureMotionBlur) != 0;
+    const bool dof = (features & kFeatureDof) != 0;
+    const bool debug = (features & kFeatureDebug) != 0;
+    values->setConstantValue(&envMap, MTL::DataTypeBool, (NS::UInteger)0);
+    values->setConstantValue(&lights, MTL::DataTypeBool, (NS::UInteger)1);
+    values->setConstantValue(&motionBlur, MTL::DataTypeBool, (NS::UInteger)2);
+    values->setConstantValue(&dof, MTL::DataTypeBool, (NS::UInteger)3);
+    values->setConstantValue(&debug, MTL::DataTypeBool, (NS::UInteger)4);
+
+    NS::Error* err = nullptr;
+    auto make = [&](const char* name) -> MTL::ComputePipelineState* {
+        MTL::Function* fn = mWavefrontLibrary->newFunction(
+            NS::String::string(name, NS::UTF8StringEncoding), values, &err);
+        if (!fn)
+        {
+            STRELKA_FATAL("wavefront: specialising {} -> {}", name,
+                          err ? err->localizedDescription()->utf8String() : "unknown error");
+            return nullptr;
+        }
+        MTL::ComputePipelineState* pso = mDevice->newComputePipelineState(fn, &err);
+        if (!pso)
+        {
+            STRELKA_FATAL("wavefront: {} -> {}", name,
+                          err ? err->localizedDescription()->utf8String() : "unknown error");
+        }
+        fn->release();
+        return pso;
+    };
+
+    WavefrontVariant v;
+    v.generate = make("wavefrontGenerate");
+    v.extendMotion = make("wavefrontExtend");
+    v.extendStatic = make("wavefrontExtendStatic");
+    v.shade = make("wavefrontShade");
+    v.miss = make("wavefrontMiss");
+    v.shadowMotion = make("wavefrontShadow");
+    v.shadowStatic = make("wavefrontShadowStatic");
+    values->release();
+
+    if (!v.shade)
+    {
+        return nullptr;
+    }
+    STRELKA_INFO("wavefront variant env={} lights={} motion={} dof={} debug={}: shade maxThreadsPerTG={} extend={}",
+                 envMap, lights, motionBlur, dof, debug, v.shade->maxTotalThreadsPerThreadgroup(),
+                 v.extendStatic ? v.extendStatic->maxTotalThreadsPerThreadgroup() : 0);
+    return &mWavefrontVariants.emplace(features, v).first->second;
+}
+
 void MetalRender::buildWavefrontPipelines()
 {
     MTL::Library* lib = loadShaderLibrary("metal/shaders/wavefront.metallib");
@@ -1401,7 +1502,11 @@ void MetalRender::buildWavefrontPipelines()
     {
         return;
     }
+    mWavefrontLibrary = lib->retain();
     NS::Error* err = nullptr;
+    // Only the kernels that reference no function constants are built here. The
+    // rest are specialised per scene by wavefrontVariantFor(), and Metal refuses
+    // to build a pipeline from an unspecialised function that declares any.
     auto make = [&](const char* name) -> MTL::ComputePipelineState* {
         MTL::Function* fn = lib->newFunction(NS::String::string(name, NS::UTF8StringEncoding));
         if (!fn)
@@ -1418,27 +1523,11 @@ void MetalRender::buildWavefrontPipelines()
         fn->release();
         return pso;
     };
-    mWavefrontGeneratePSO = make("wavefrontGenerate");
-    mWavefrontExtendPSO = make("wavefrontExtend");
-    mWavefrontShadePSO = make("wavefrontShade");
     mWavefrontResolvePSO = make("wavefrontResolve");
     mWavefrontPreparePSO = make("wavefrontPrepare");
     mWavefrontPrepareShadowPSO = make("wavefrontPrepareShadow");
-    mWavefrontShadowPSO = make("wavefrontShadow");
-    mWavefrontExtendStaticPSO = make("wavefrontExtendStatic");
-    mWavefrontShadowStaticPSO = make("wavefrontShadowStatic");
-    mWavefrontMissPSO = make("wavefrontMiss");
     mWavefrontPrepareHitMissPSO = make("wavefrontPrepareHitMiss");
-
     lib->release();
-
-    if (mWavefrontShadePSO)
-    {
-        STRELKA_INFO("wavefront PSO: shade maxThreadsPerTG={} extend={} generate={}",
-                     mWavefrontShadePSO->maxTotalThreadsPerThreadgroup(),
-                     mWavefrontExtendPSO ? mWavefrontExtendPSO->maxTotalThreadsPerThreadgroup() : 0,
-                     mWavefrontGeneratePSO ? mWavefrontGeneratePSO->maxTotalThreadsPerThreadgroup() : 0);
-    }
 }
 
 void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)

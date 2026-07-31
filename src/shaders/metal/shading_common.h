@@ -22,6 +22,32 @@ using namespace metal;
 using namespace raytracing;
 
 
+
+// ---------------------------------------------------------------------------
+// Feature specialisation.
+//
+// Every branch below is on a scene- or settings-level fact that does not change
+// between rays, so leaving it in the instruction stream costs every ray in every
+// scene. Function constants let the compiler delete the untaken side outright,
+// which matters less for the branch itself than for the registers and texture
+// state the dead code was keeping alive.
+//
+// Each constant falls back to `true` when the pipeline does not supply it, so
+// the megakernel — which is built without constant values — keeps the full,
+// unspecialised behaviour and needs no changes.
+// ---------------------------------------------------------------------------
+constant bool kFcEnvMap [[function_constant(0)]];
+constant bool kFcLights [[function_constant(1)]];
+constant bool kFcMotionBlur [[function_constant(2)]];
+constant bool kFcDof [[function_constant(3)]];
+constant bool kFcDebug [[function_constant(4)]];
+
+constant bool SPEC_ENV_MAP = is_function_constant_defined(kFcEnvMap) ? kFcEnvMap : true;
+constant bool SPEC_LIGHTS = is_function_constant_defined(kFcLights) ? kFcLights : true;
+constant bool SPEC_MOTION_BLUR = is_function_constant_defined(kFcMotionBlur) ? kFcMotionBlur : true;
+constant bool SPEC_DOF = is_function_constant_defined(kFcDof) ? kFcDof : true;
+constant bool SPEC_DEBUG = is_function_constant_defined(kFcDebug) ? kFcDebug : true;
+
 struct PerRayData
 {
     SamplerState sampler;
@@ -208,7 +234,7 @@ void generateCameraRay(uint2 pixelIndex,
     // Interpolate camera matrices for camera motion blur
     float4x4 clipToView = params.clipToView;
     float4x4 viewToWorld = params.viewToWorld;
-    if (motionTime < 1.0f && params.enableCameraMotionBlur)
+    if (SPEC_MOTION_BLUR && motionTime < 1.0f && params.enableCameraMotionBlur)
     {
         clipToView = lerpMatrix(params.prevClipToView, params.clipToView, motionTime);
         viewToWorld = lerpMatrix(params.prevViewToWorld, params.viewToWorld, motionTime);
@@ -223,7 +249,7 @@ void generateCameraRay(uint2 pixelIndex,
     direction = normalize(wdir.xyz);
 
     // Thin lens depth of field
-    if (params.useDof && params.lensRadius > 0.0f)
+    if (SPEC_DOF && params.useDof && params.lensRadius > 0.0f)
     {
         float3 camRight = float3(viewToWorld[0][0], viewToWorld[1][0], viewToWorld[2][0]);
         float3 camUp    = float3(viewToWorld[0][1], viewToWorld[1][1], viewToWorld[2][1]);
@@ -511,11 +537,11 @@ LightConnection connectToLight(
     device const EnvAliasEntry* envAliasTable,
     texture2d<float> envMapTexture)
 {
-    if (uniforms.hasEnvMap)
+    if (SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
         const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
 
-        if (numLights == 0 || u >= 0.5f)
+        if (!SPEC_LIGHTS || numLights == 0 || u >= 0.5f)
         {
             const float selectionPdf = (numLights > 0) ? 0.5f : 1.0f;
             LightConnection c = connectEnvLight(uniforms, samplerRnd, si, envAliasTable, envMapTexture);
@@ -533,7 +559,7 @@ LightConnection connectToLight(
     // No env map and no analytic lights: nothing to connect to. Falling through
     // would divide by numLights == 0, produce a NaN light PDF, and trip the
     // isnan() guard in the caller that paints the pixel bright red.
-    if (numLights == 0)
+    if (!SPEC_LIGHTS || numLights == 0)
     {
         return makeEmptyConnection();
     }
