@@ -164,6 +164,7 @@ MetalRender::~MetalRender()
         safeRelease(mTriangleUpdatePSO);
 
         // Queue & device (release last)
+        mMetal4.release();
         safeRelease(mCommandQueue);
         safeRelease(mDevice);
     }
@@ -242,6 +243,9 @@ void MetalRender::init()
         return;
     }
     mCommandQueue = mDevice->newCommandQueue();
+    // 64 KB of constants per frame is far more than the tracer's handful of
+    // small values needs; the ring is cheap and running out is a hard error.
+    mMetal4.init(mDevice, (uint32_t)kMaxFramesInFlight, 64 * 1024);
     buildComputePipeline();
     buildTonemapperPipeline();
     buildWavefrontPipelines();

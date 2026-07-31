@@ -4,6 +4,7 @@
 #include <Metal/Metal.hpp>
 #include <glm/glm.hpp>
 
+#include "Metal4Context.h"
 #include "ShaderTypes.h" // GeometryEntry, shared with the path-trace kernel
 #include <atomic>
 #include <map>
@@ -239,6 +240,10 @@ private:
     MTL::Buffer* mMissQueueBuffer = nullptr;
     // Denoiser guides: one packed record per pixel, written at the primary hit.
     MTL::Buffer* mAovBuffer = nullptr;
+
+    // Metal 4 submission. Created alongside the Metal 3 objects so both paths
+    // exist and can be compared; selected by render/pt/metal4.
+    Metal4Context mMetal4;
 
     MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
     MTL::Buffer* mStageStatsBuffer = nullptr; // shared copy of the control buffer, profiling only

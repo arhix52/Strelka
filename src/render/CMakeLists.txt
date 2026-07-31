@@ -63,6 +63,8 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalRender.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalBuffer.h
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalBuffer.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/Metal4Context.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/Metal4Context.mm
     )
 
     add_library(strelka_render STATIC ${RENDER_SOURCES})
