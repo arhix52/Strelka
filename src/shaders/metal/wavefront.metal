@@ -386,10 +386,13 @@ kernel void wavefrontMiss(
                                            uniforms.envMapRotation, uniforms.envPdfScale);
             const float envSelectionPdf = (uniforms.numLights > 0) ? 0.5f : 1.0f;
             const float effectiveEnvPdf = envPdf * envSelectionPdf;
-            if (effectiveEnvPdf > 0.0f)
-            {
-                radiance += throughput * envColor * misWeightBalance(p.lastBsdfPdf, effectiveEnvPdf);
-            }
+            // A texel of zero luminance has zero sampling density, so light
+            // sampling could never have produced this direction and the BSDF
+            // strategy owns it outright. Dropping the contribution instead --
+            // which the guard used to do -- loses energy exactly along the edges
+            // of dark regions, where the bilinear radiance is still non-zero.
+            radiance += throughput * envColor *
+                        (effectiveEnvPdf > 0.0f ? misWeightBalance(p.lastBsdfPdf, effectiveEnvPdf) : 1.0f);
         }
     }
     else

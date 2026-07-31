@@ -10,6 +10,9 @@
 #include <strelka/material/microfacet.h>
 #include <strelka/material/bsdf.h>
 
+#include <algorithm>
+#include <cmath>
+
 static SurfaceInteraction make_test_si()
 {
     SurfaceInteraction si = {};
@@ -329,6 +332,110 @@ TEST_CASE("diffuse bsdf_over_pdf bounded")
             CHECK(r.bsdf_over_pdf.z >= 0.0f);
             // bsdf_over_pdf should be bounded (energy conservation)
             CHECK(r.bsdf_over_pdf.x <= 2.0f); // allow some margin
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sample / eval consistency
+//
+// Multiple importance sampling weighs two strategies by each other's density,
+// so bsdf_eval() has to report exactly the density bsdf_sample() draws from, and
+// exactly the same f(wo, wi). If they disagree the weights no longer sum to one
+// and the estimator is biased — invisibly, because each strategy on its own
+// still looks plausible. This is checked pointwise at the sampled direction,
+// which is far sharper than any histogram test.
+// ---------------------------------------------------------------------------
+namespace
+{
+struct Lcg
+{
+    uint32_t s = 123456789u;
+    float next()
+    {
+        s = s * 1664525u + 1013904223u;
+        return (float)((s >> 8) & 0xFFFFFF) / (float)0x1000000;
+    }
+};
+
+SurfaceInteraction si_with(uint32_t materialType, float roughness, float metallic,
+                           float transmission, float clearcoat, float wo_tilt)
+{
+    MaterialParams p = make_diffuse_params();
+    p.material_type = materialType;
+    p.roughness = roughness;
+    p.metallic = metallic;
+    p.transmission = transmission;
+    p.clearcoat = clearcoat;
+    p.base_color = make_float3(0.8f, 0.6f, 0.4f);
+
+    SurfaceInteraction si = make_test_si();
+    const float s = std::sin(wo_tilt);
+    si.wo = normalize(make_float3(s, std::cos(wo_tilt), 0.0f));
+    bsdf_init(si, p, nullptr);
+    si.exterior_ior = 1.0f;
+    return si;
+}
+} // namespace
+
+TEST_CASE("bsdf_eval reports the density bsdf_sample draws from")
+{
+    const uint32_t types[] = { MATERIAL_TYPE_DIFFUSE, MATERIAL_TYPE_CONDUCTOR, MATERIAL_TYPE_STANDARD_PBR };
+    Lcg rng;
+    for (uint32_t type : types)
+    {
+        for (float roughness : { 0.15f, 0.45f, 1.0f })
+        {
+            for (float metallic : { 0.0f, 1.0f })
+            {
+                for (float tilt : { 0.1f, 0.7f, 1.2f })
+                {
+                    SurfaceInteraction si = si_with(type, roughness, metallic, 0.0f, 0.0f, tilt);
+                    int compared = 0;
+                    double worstPdf = 0.0, worstF = 0.0;
+                    for (int i = 0; i < 4000; ++i)
+                    {
+                        const float4 xi =
+                            make_float4(rng.next(), rng.next(), rng.next(), rng.next());
+                        BsdfSampleResult s = bsdf_sample(si, xi);
+                        if (s.event_type == BSDF_EVENT_ABSORB ||
+                            (s.event_type & BSDF_EVENT_SPECULAR) != 0 || s.pdf <= 1e-4f)
+                        {
+                            continue; // delta lobes have no density to compare
+                        }
+                        BsdfEvalResult e = bsdf_eval(si, s.wi);
+                        if (e.pdf <= 1e-4f)
+                        {
+                            continue;
+                        }
+                        ++compared;
+                        worstPdf = std::max(worstPdf, (double)std::fabs(e.pdf - s.pdf) / s.pdf);
+
+                        // And the throughput each route produces for that
+                        // direction must agree. bsdf_over_pdf carries the cosine;
+                        // bsdf_eval returns f alone, which is why next-event
+                        // estimation multiplies the cosine in separately. Compare
+                        // the two after putting them in the same convention --
+                        // this is precisely the quantity multiple importance
+                        // sampling assumes is the same on both paths.
+                        const float cosWi = std::fabs(dot(si.shading_normal, s.wi));
+                        const float3 fromSample = s.bsdf_over_pdf;
+                        const float3 fromEval = e.bsdf * (cosWi / e.pdf);
+                        const float denom =
+                            std::max({ fromEval.x, fromEval.y, fromEval.z, 1e-4f });
+                        worstF = std::max(worstF, (double)length(fromSample - fromEval) / denom);
+                    }
+                    if (compared > 100)
+                    {
+                        CAPTURE(type);
+                        CAPTURE(roughness);
+                        CAPTURE(metallic);
+                        CAPTURE(tilt);
+                        CHECK(worstPdf < 0.02);
+                        CHECK(worstF < 0.02);
+                    }
+                }
+            }
         }
     }
 }

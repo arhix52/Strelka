@@ -101,11 +101,16 @@ kernel void raytracingKernel(
                                                    uniforms.envPdfScale);
                     const float envSelectionPdf = (uniforms.numLights > 0) ? 0.5f : 1.0f;
                     const float effectiveEnvPdf = envPdf * envSelectionPdf;
-                    if (effectiveEnvPdf > 0.0f)
-                    {
-                        const float misWeight = misWeightBalance(prd.lastBsdfPdf, effectiveEnvPdf);
-                        prd.radiance += prd.throughput * envColor * misWeight;
-                    }
+                    // A texel of zero luminance has zero sampling density, so
+                    // light sampling could never have produced this direction and
+                    // the BSDF strategy owns it outright. Dropping it instead --
+                    // which the guard used to do -- loses energy exactly along the
+                    // edges of dark regions, where the bilinear radiance is still
+                    // non-zero.
+                    const float misWeight = (effectiveEnvPdf > 0.0f)
+                                                ? misWeightBalance(prd.lastBsdfPdf, effectiveEnvPdf)
+                                                : 1.0f;
+                    prd.radiance += prd.throughput * envColor * misWeight;
                 }
             }
             else
