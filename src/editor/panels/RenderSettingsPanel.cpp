@@ -168,6 +168,17 @@ void EditorApp::drawRenderSettingsPanel()
             m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", tracerMode);
         }
 
+        bool denoise = m_settingsManager->getAs<bool>("render/pt/denoise");
+        if (ImGui::Checkbox("MetalFX denoise", &denoise))
+        {
+            m_settingsManager->setAs<bool>("render/pt/denoise", denoise);
+        }
+        if (denoise)
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(temporal; upscales too)");
+        }
+
         bool enableUpscale = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
         if (ImGui::Checkbox("MetalFX upscale", &enableUpscale))
         {

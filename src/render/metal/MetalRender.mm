@@ -164,12 +164,24 @@ MetalRender::~MetalRender()
         safeRelease(mWavefrontPreparePSO4);
         safeRelease(mWavefrontPrepareShadowPSO4);
         safeRelease(mWavefrontPrepareHitMissPSO4);
+        safeRelease(mAovResolvePSO);
+        safeRelease(mAovResolvePSO4);
+        safeRelease(mGuides.color);
+        safeRelease(mGuides.depth);
+        safeRelease(mGuides.motion);
+        safeRelease(mGuides.diffuse);
+        safeRelease(mGuides.specular);
+        safeRelease(mGuides.normal);
+        safeRelease(mGuides.roughness);
+        safeRelease(mDenoisedTexture);
         safeRelease(mStageTimestampBuffer);
         safeRelease(mStageStatsBuffer);
 
         safeRelease(mPathTracingPSO);
         safeRelease(mTonemapperPSO);
         safeRelease(mTonemapperPSO4);
+        safeRelease(mTonemapperTexPSO);
+        safeRelease(mTonemapperTexPSO4);
         safeRelease(mSkinningPSO);
         safeRelease(mTriangleUpdatePSO);
         safeRelease(mSkinningPSO4);
@@ -241,6 +253,80 @@ void MetalRender::triggerRenderIfIdle()
 // Usage flags come from the scaler rather than being guessed: MetalFX validates
 // them at encode time, and a texture allocated without what it wants fails there
 // rather than at creation.
+
+// Halton, base 2 and 3, centred on the pixel. A temporal upscaler needs the
+// sample positions to cover the pixel evenly over a handful of frames and to know
+// where each one was; a random offset would do the first but not the second.
+static float haltonAt(uint64_t index, uint32_t base)
+{
+    float result = 0.0f;
+    float f = 1.0f / (float)base;
+    while (index > 0)
+    {
+        result += f * (float)(index % base);
+        index /= base;
+        f /= (float)base;
+    }
+    return result;
+}
+
+void MetalRender::frameJitter(uint64_t frameIndex, float& x, float& y) const
+{
+    // Index from 1: Halton's first entry is 0, which would leave the first frame
+    // unjittered and bias the sequence.
+    x = haltonAt(frameIndex + 1, 2) - 0.5f;
+    y = haltonAt(frameIndex + 1, 3) - 0.5f;
+}
+
+// Guides live at render resolution, the denoised result at display resolution.
+// Usage flags come from the denoiser for the same reason they do for the spatial
+// scaler: it validates them and a guess fails at encode time.
+void MetalRender::ensureGuideTextures(uint32_t width, uint32_t height, uint32_t outWidth, uint32_t outHeight)
+{
+    if (width == mGuideWidth && height == mGuideHeight && mGuides.color)
+    {
+        return;
+    }
+    auto release = [](MTL::Texture*& t) { if (t) { t->release(); t = nullptr; } };
+    release(mGuides.color);
+    release(mGuides.depth);
+    release(mGuides.motion);
+    release(mGuides.diffuse);
+    release(mGuides.specular);
+    release(mGuides.normal);
+    release(mGuides.roughness);
+    release(mDenoisedTexture);
+
+    const MTL::TextureUsage guideUsage = MTL::TextureUsageShaderWrite | mMetalFx.denoiseGuideUsage();
+    auto make = [&](MTL::PixelFormat fmt, uint32_t w, uint32_t h, MTL::TextureUsage usage) {
+        MTL::TextureDescriptor* d = MTL::TextureDescriptor::alloc()->init();
+        d->setWidth(w);
+        d->setHeight(h);
+        d->setPixelFormat(fmt);
+        d->setTextureType(MTL::TextureType2D);
+        d->setStorageMode(MTL::StorageModePrivate);
+        d->setUsage(usage);
+        MTL::Texture* t = mDevice->newTexture(d);
+        d->release();
+        return t;
+    };
+    // Formats must match the descriptor in MetalFxContext exactly.
+    mGuides.color = make(MTL::PixelFormatRGBA16Float, width, height,
+                         MTL::TextureUsageShaderWrite | mMetalFx.denoiseColorUsage());
+    mGuides.depth = make(MTL::PixelFormatR32Float, width, height, guideUsage);
+    mGuides.motion = make(MTL::PixelFormatRG16Float, width, height, guideUsage);
+    mGuides.diffuse = make(MTL::PixelFormatRGBA16Float, width, height, guideUsage);
+    mGuides.specular = make(MTL::PixelFormatRGBA16Float, width, height, guideUsage);
+    mGuides.normal = make(MTL::PixelFormatRGBA16Float, width, height, guideUsage);
+    mGuides.roughness = make(MTL::PixelFormatR16Float, width, height, guideUsage);
+    mDenoisedTexture = make(MTL::PixelFormatRGBA16Float, outWidth, outHeight,
+                            MTL::TextureUsageShaderRead | mMetalFx.denoiseOutputUsage());
+
+    mGuideWidth = width;
+    mGuideHeight = height;
+    mMetal4ResidencyGeneration = 0;
+}
+
 void MetalRender::ensureUpscaleTextures(uint32_t width, uint32_t height)
 {
     if (width == mUpscaleTextureWidth && height == mUpscaleTextureHeight && mUpscaleTextures[0])
@@ -1269,7 +1355,24 @@ void MetalRender::render(Buffer* output)
     const uint32_t width = std::max(1u, (uint32_t)(outWidth * upscaleFactor));
     const uint32_t height = std::max(1u, (uint32_t)(outHeight * upscaleFactor));
     const bool upscaling = (width != outWidth || height != outHeight);
-    if (upscaling)
+
+    // Temporal denoising subsumes upscaling: the denoised scaler takes the
+    // reduced-resolution frame and produces the display-resolution one, so the
+    // spatial scaler is only for when denoising is off.
+    const bool denoising = getSettings()->getAs<bool>("render/pt/denoise") &&
+                           getSettings()->getAs<uint32_t>("render/pt/tracerMode") == 1;
+    if (denoising)
+    {
+        // No Metal 4 variant on purpose. newTemporalDenoisedScalerWithDevice:compiler:
+        // asserts inside MPSGraph ("Incompatible shape for parameter at index 0")
+        // on macOS 26.5 / M1 Pro, while the Metal 3 constructor with the identical
+        // descriptor works -- verified with a standalone probe that creates both.
+        // The spatial scaler's Metal 4 variant is fine, so this is specific to the
+        // denoiser.
+        mMetalFx.ensureDenoiser(mDevice, width, height, outWidth, outHeight, nullptr);
+        ensureGuideTextures(width, height, outWidth, outHeight);
+    }
+    if (upscaling && !denoising)
     {
         mMetalFx.ensureSpatialScaler(mDevice, MTL::PixelFormatRGBA16Float, MTL::PixelFormatRGBA16Float, width,
                                      height, outWidth, outHeight,
@@ -1499,9 +1602,21 @@ void MetalRender::render(Buffer* output)
     pUniformData->debug = debug;
     // Denoiser guides. Off unless something downstream consumes them: writing
     // them costs a 64-byte store per pixel at the primary hit.
-    // Looking at a guide implies producing it.
+    // Looking at a guide implies producing it, and so does denoising.
+    const bool denoiseOn = settings.getAs<bool>("render/pt/denoise") &&
+                           settings.getAs<uint32_t>("render/pt/tracerMode") == 1;
     pUniformData->writeAov =
-        settings.getAs<uint32_t>("render/pt/writeAov") || debug >= DEBUG_MODE_FIRST_AOV;
+        settings.getAs<uint32_t>("render/pt/writeAov") || debug >= DEBUG_MODE_FIRST_AOV || denoiseOn;
+    // A temporal upscaler reconstructs from a known per-frame displacement, so
+    // the jitter has to be one offset for the whole image and reported to it.
+    float jx = 0.0f, jy = 0.0f;
+    if (denoiseOn)
+    {
+        frameJitter(ctx.mFrameNumber, jx, jy);
+    }
+    pUniformData->jitterX = jx;
+    pUniformData->jitterY = jy;
+    pUniformData->useFrameJitter = denoiseOn ? 1u : 0u;
     {
         // Previous frame's world-to-clip for screen-space reprojection. The
         // motion-blur uniforms hold the inverses and cannot serve here.
@@ -1681,8 +1796,10 @@ void MetalRender::render(Buffer* output)
             // Metal 4 path. Residency has to be refreshed whenever the set of
             // allocations can have changed; ensureWavefrontBuffers only does work
             // when the resolution does, so its capacity doubles as the generation.
+            // Denoising pins the frame to Metal 3: the denoiser has no working
+            // Metal 4 variant to encode into an MTL4 command buffer.
             const bool useMetal4 = mMetal4.isValid() && settings.getAs<uint32_t>("render/pt/metal4") != 0 &&
-                                   mWavefrontResolvePSO4 != nullptr;
+                                   mWavefrontResolvePSO4 != nullptr && !denoising;
             if (useMetal4 && mMetal4ResidencyGeneration != mWavefrontCapacity)
             {
                 makeResourcesResidentForMetal4(output);
@@ -1773,7 +1890,7 @@ void MetalRender::render(Buffer* output)
                 STRELKA_INFO("STAGES cpu encode {:.3f} ms", encodeMs);
             }
 
-            if (pUniformData->debug == 0)
+            if (pUniformData->debug == 0 && !denoising)
             {
                 enc->setComputePipelineState(mTonemapperPSO);
                 enc->useResource(((MetalBuffer*)output)->getNativePtr(),
@@ -1783,8 +1900,57 @@ void MetalRender::render(Buffer* output)
                 enc->setTexture(tonemapTarget(upscaling), 0);
                 enc->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
             }
+            if (denoising)
+            {
+                // Spread the packed guides into the textures MetalFX reads, and
+                // hand it linear radiance: exposure and the tone curve come after
+                // the denoise, not before it.
+                enc->setComputePipelineState(mAovResolvePSO);
+                enc->setBuffer(pUniformBuffer, 0, 0);
+                enc->setBuffer(mAovBuffer, 0, 1);
+                enc->setBuffer(mRadianceBuffer, 0, 2);
+                enc->setTexture(mGuides.color, 0);
+                enc->setTexture(mGuides.depth, 1);
+                enc->setTexture(mGuides.motion, 2);
+                enc->setTexture(mGuides.diffuse, 3);
+                enc->setTexture(mGuides.specular, 4);
+                enc->setTexture(mGuides.normal, 5);
+                enc->setTexture(mGuides.roughness, 6);
+                enc->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
+            }
             enc->endEncoding();
-            if (upscaling)
+
+            if (denoising)
+            {
+                MetalFxContext::DenoiseInputs in;
+                in.color = mGuides.color;
+                in.depth = mGuides.depth;
+                in.motion = mGuides.motion;
+                in.diffuseAlbedo = mGuides.diffuse;
+                in.specularAlbedo = mGuides.specular;
+                in.normal = mGuides.normal;
+                in.roughness = mGuides.roughness;
+                in.output = mDenoisedTexture;
+                in.jitterX = pUniformData->jitterX;
+                in.jitterY = pUniformData->jitterY;
+                // A moved camera invalidates every reprojection, and so does the
+                // first frame after a resize.
+                in.resetHistory = mResetDenoiseHistory || ctx.mSubframeIndex == 0;
+                mResetDenoiseHistory = false;
+                mMetalFx.encodeDenoise(pCmd, false, in);
+
+                if (pUniformData->debug == 0 && mTonemapperTexPSO)
+                {
+                    MTL::ComputeCommandEncoder* tm = pCmd->computeCommandEncoder();
+                    tm->setComputePipelineState(mTonemapperTexPSO);
+                    tm->setBuffer(pUniformTMBuffer, 0, 0);
+                    tm->setTexture(mDisplayTextures[mWriteIndex], 0);
+                    tm->setTexture(mDenoisedTexture, 1);
+                    tm->dispatchThreads(MTL::Size(outWidth, outHeight, 1), MTL::Size(8, 8, 1));
+                    tm->endEncoding();
+                }
+            }
+            else if (upscaling)
             {
                 mMetalFx.encodeSpatial(pCmd, false, mUpscaleTextures[mWriteIndex],
                                        mDisplayTextures[mWriteIndex], width, height);
@@ -2104,6 +2270,7 @@ void MetalRender::buildWavefrontPipelines()
     mWavefrontPreparePSO = make("wavefrontPrepare");
     mWavefrontPrepareShadowPSO = make("wavefrontPrepareShadow");
     mWavefrontPrepareHitMissPSO = make("wavefrontPrepareHitMiss");
+    mAovResolvePSO = make("wavefrontAovResolve");
     if (mMetal4.isValid())
     {
         // The same four stages again, built by the other compiler: a pipeline is
@@ -2112,6 +2279,7 @@ void MetalRender::buildWavefrontPipelines()
         mWavefrontPreparePSO4 = mMetal4.newComputePipelineState(lib, "wavefrontPrepare", nullptr);
         mWavefrontPrepareShadowPSO4 = mMetal4.newComputePipelineState(lib, "wavefrontPrepareShadow", nullptr);
         mWavefrontPrepareHitMissPSO4 = mMetal4.newComputePipelineState(lib, "wavefrontPrepareHitMiss", nullptr);
+        mAovResolvePSO4 = mMetal4.newComputePipelineState(lib, "wavefrontAovResolve", nullptr);
     }
     lib->release();
 }
@@ -2174,9 +2342,17 @@ void MetalRender::buildTonemapperPipeline()
     MTL::Function* pTonemapperFn =
         pComputeLibrary->newFunction(NS::String::string("toneMappingComputeShader", NS::UTF8StringEncoding));
     mTonemapperPSO = mDevice->newComputePipelineState(pTonemapperFn, &pError);
+    {
+        NS::Error* e2 = nullptr;
+        MTL::Function* fn = pComputeLibrary->newFunction(
+            NS::String::string("toneMappingTextureShader", NS::UTF8StringEncoding));
+        mTonemapperTexPSO = fn ? mDevice->newComputePipelineState(fn, &e2) : nullptr;
+        if (fn) fn->release();
+    }
     if (mMetal4.isValid())
     {
         mTonemapperPSO4 = mMetal4.newComputePipelineState(pComputeLibrary, "toneMappingComputeShader", nullptr);
+        mTonemapperTexPSO4 = mMetal4.newComputePipelineState(pComputeLibrary, "toneMappingTextureShader", nullptr);
     }
     if (!mTonemapperPSO)
     {

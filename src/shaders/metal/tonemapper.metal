@@ -48,3 +48,36 @@ kernel void toneMappingComputeShader(
     }
     displayTexture.write(float4(result, inputColor.a), tid);
 }
+
+// Same tone curve, texture in instead of buffer in.
+//
+// After denoising the frame is a texture at display resolution and the buffer no
+// longer holds it, so the input side has to change; the maths below is the same
+// and stays in one place by construction, because both kernels call it.
+kernel void toneMappingTextureShader(
+    uint2 tid [[thread_position_in_grid]],
+    constant UniformsTonemap& uniforms [[buffer(0)]],
+    texture2d<float, access::read> source [[texture(1)]],
+    texture2d<float, access::write> displayTexture [[texture(0)]]
+    )
+{
+    if (tid.x >= uniforms.width || tid.y >= uniforms.height)
+    {
+        return;
+    }
+    const float4 inputColor = source.read(tid);
+    float3 result = inputColor.xyz;
+    const float3 exposedResult = result * uniforms.exposureValue;
+    switch ((ToneMapperType) uniforms.tonemapperType)
+    {
+    case ToneMapperType::eReinhard: result = reinhard(exposedResult); break;
+    case ToneMapperType::eACES:     result = ACESFitted(exposedResult); break;
+    case ToneMapperType::eFilmic:   result = ACESFilm(exposedResult); break;
+    case ToneMapperType::eNone:     result = exposedResult; break;
+    }
+    if (uniforms.gamma > 0.0f)
+    {
+        result = srgbGamma(result, uniforms.gamma);
+    }
+    displayTexture.write(float4(result, inputColor.a), tid);
+}

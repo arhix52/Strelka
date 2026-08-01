@@ -287,6 +287,8 @@ private:
     MTL::ComputePipelineState* mWavefrontPrepareShadowPSO4 = nullptr;
     MTL::ComputePipelineState* mWavefrontPrepareHitMissPSO4 = nullptr;
     MTL::ComputePipelineState* mTonemapperPSO4 = nullptr;
+    MTL::ComputePipelineState* mTonemapperTexPSO = nullptr;
+    MTL::ComputePipelineState* mTonemapperTexPSO4 = nullptr;
     MTL::ComputePipelineState* mSkinningPSO4 = nullptr;
     MTL::ComputePipelineState* mTriangleUpdatePSO4 = nullptr;
 
@@ -328,6 +330,30 @@ private:
     /// Where the tonemapper should write this frame: the reduced-resolution
     /// texture when upscaling, the display texture otherwise.
     MTL::Texture* tonemapTarget(bool upscaling) const;
+
+    // Denoiser guides at render resolution, plus the linear output the denoiser
+    // writes and the tonemapper then reads. Allocated only when denoising is on.
+    struct GuideTextures
+    {
+        MTL::Texture* color = nullptr;
+        MTL::Texture* depth = nullptr;
+        MTL::Texture* motion = nullptr;
+        MTL::Texture* diffuse = nullptr;
+        MTL::Texture* specular = nullptr;
+        MTL::Texture* normal = nullptr;
+        MTL::Texture* roughness = nullptr;
+    };
+    GuideTextures mGuides;
+    MTL::Texture* mDenoisedTexture = nullptr;
+    bool mResetDenoiseHistory = true;
+    uint32_t mGuideWidth = 0;
+    uint32_t mGuideHeight = 0;
+    MTL::ComputePipelineState* mAovResolvePSO = nullptr;
+    MTL::ComputePipelineState* mAovResolvePSO4 = nullptr;
+    void ensureGuideTextures(uint32_t width, uint32_t height, uint32_t outWidth, uint32_t outHeight);
+    /// Halton (2,3), the standard temporal jitter sequence: MetalFX reconstructs
+    /// detail from knowing exactly how each frame was displaced.
+    void frameJitter(uint64_t frameIndex, float& x, float& y) const;
     std::atomic<int> mReadyIndex{-1};
     std::atomic<bool> mRenderBusy{false};
     int mWriteIndex = 0;

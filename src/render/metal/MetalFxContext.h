@@ -65,11 +65,55 @@ public:
                        uint32_t inputContentWidth,
                        uint32_t inputContentHeight);
 
+    /// The guide textures a temporal denoise needs, all at render resolution.
+    struct DenoiseInputs
+    {
+        MTL::Texture* color = nullptr;    ///< linear radiance, before tonemapping
+        MTL::Texture* depth = nullptr;
+        MTL::Texture* motion = nullptr;   ///< previous-frame offset in pixels
+        MTL::Texture* diffuseAlbedo = nullptr;
+        MTL::Texture* specularAlbedo = nullptr;
+        MTL::Texture* normal = nullptr;
+        MTL::Texture* roughness = nullptr;
+        MTL::Texture* output = nullptr;   ///< display resolution, linear
+        float jitterX = 0.0f;             ///< the offset this frame was rendered with
+        float jitterY = 0.0f;
+        bool resetHistory = false;        ///< camera cut, scene change, resize
+    };
+
+    /// Create or recreate the temporal denoiser. Bound to its formats and both
+    /// resolutions, like the spatial one.
+    bool ensureDenoiser(MTL::Device* device,
+                        uint32_t inputWidth,
+                        uint32_t inputHeight,
+                        uint32_t outputWidth,
+                        uint32_t outputHeight,
+                        void* metal4Compiler);
+
+    bool hasDenoiser() const
+    {
+        return mDenoiser != nullptr;
+    }
+
+    /// Usage flags the denoiser demands of each input, in the order of
+    /// DenoiseInputs. Guessing them fails at encode time, not at creation.
+    MTL::TextureUsage denoiseColorUsage() const;
+    MTL::TextureUsage denoiseGuideUsage() const;
+    MTL::TextureUsage denoiseOutputUsage() const;
+
+    void encodeDenoise(void* commandBuffer, bool metal4, const DenoiseInputs& inputs);
+
     void release();
 
 private:
     void* mSpatialScaler = nullptr; ///< id<MTLFXSpatialScaler>, retained
     void* mSpatialScaler4 = nullptr; ///< id<MTL4FXSpatialScaler>, retained
+    void* mDenoiser = nullptr; ///< id<MTLFXTemporalDenoisedScaler>, retained
+    void* mDenoiser4 = nullptr; ///< id<MTL4FXTemporalDenoisedScaler>, retained
+    uint32_t mDenoiseInputWidth = 0;
+    uint32_t mDenoiseInputHeight = 0;
+    uint32_t mDenoiseOutputWidth = 0;
+    uint32_t mDenoiseOutputHeight = 0;
     MTL::PixelFormat mColorFormat = MTL::PixelFormatInvalid;
     MTL::PixelFormat mOutputFormat = MTL::PixelFormatInvalid;
     uint32_t mInputWidth = 0;

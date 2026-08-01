@@ -141,6 +141,11 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 1);
     m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/writeAov", 0);
+    m_settingsManager->setAs<bool>("render/pt/denoise", false);
+    if (const char* dn = getenv("STRELKA_DENOISE"))
+    {
+        m_settingsManager->setAs<bool>("render/pt/denoise", atoi(dn) != 0);
+    }
     m_settingsManager->setAs<uint32_t>("render/pt/metal4", 0);
     if (const char* m4 = getenv("STRELKA_METAL4"))
     {

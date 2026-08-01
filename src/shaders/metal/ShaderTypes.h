@@ -128,6 +128,12 @@ struct Uniforms
     // be used for this.
     simd::float4x4 prevWorldToClip;
     uint32_t writeAov;
+    // Sub-pixel offset applied to every pixel of this frame, in pixels. Temporal
+    // upscaling needs the whole image shifted by a known amount it can undo; the
+    // per-pixel random jitter that antialiases a still frame is noise to it.
+    float jitterX;
+    float jitterY;
+    uint32_t useFrameJitter;
     uint32_t pad_aov0;
     uint32_t pad_aov1;
     uint32_t pad_aov2;

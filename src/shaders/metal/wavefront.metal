@@ -924,3 +924,41 @@ kernel void wavefrontResolve(
 
     res[tid] = float4(result, 1.0f);
 }
+
+// ---------------------------------------------------------------------------
+// aovResolve -- spread the packed guide records into the textures MetalFX wants
+//
+// One kernel so every pixel-format decision lives in one place; `shade` stays
+// free of texture bindings, which matters because it is the kernel with the
+// least register headroom.
+// ---------------------------------------------------------------------------
+kernel void wavefrontAovResolve(
+    uint2                          tid       [[thread_position_in_grid]],
+    constant Uniforms&             uniforms  [[buffer(0)]],
+    device const AovSample*        aov       [[buffer(1)]],
+    device const float4*           radiance  [[buffer(2)]],
+    texture2d<float, access::write> colorTex   [[texture(0)]],
+    texture2d<float, access::write> depthTex   [[texture(1)]],
+    texture2d<float, access::write> motionTex  [[texture(2)]],
+    texture2d<float, access::write> diffuseTex [[texture(3)]],
+    texture2d<float, access::write> specularTex[[texture(4)]],
+    texture2d<float, access::write> normalTex  [[texture(5)]],
+    texture2d<float, access::write> roughTex   [[texture(6)]])
+{
+    if (tid.x >= uniforms.width || tid.y >= uniforms.height)
+    {
+        return;
+    }
+    const uint32_t i = tid.y * uniforms.width + tid.x;
+    const AovSample a = aov[i];
+
+    // Linear radiance, not the tonemapped image: the denoiser works in the space
+    // the light actually arrived in and exposure comes after it.
+    colorTex.write(float4(radiance[i].xyz, 1.0f), tid);
+    depthTex.write(float4(a.depth, 0.0f, 0.0f, 0.0f), tid);
+    motionTex.write(float4(a.motionX, a.motionY, 0.0f, 0.0f), tid);
+    diffuseTex.write(float4(float3(a.diffuseAlbedo), 1.0f), tid);
+    specularTex.write(float4(float3(a.specularAlbedo), 1.0f), tid);
+    normalTex.write(float4(float3(a.normal), 0.0f), tid);
+    roughTex.write(float4(a.roughness, 0.0f, 0.0f, 0.0f), tid);
+}

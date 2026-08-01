@@ -219,9 +219,15 @@ void generateCameraRay(uint2 pixelIndex,
                         const constant Uniforms& params,
                         float motionTime)
 {
-    const float2 subpixel_jitter = {
-        random<SampleDimension::ePixelX>(samplerRnd, params.samplerType),
-        random<SampleDimension::ePixelY>(samplerRnd, params.samplerType)};
+    // A temporal upscaler reconstructs detail from a known per-frame shift, so
+    // when one is running the whole image moves together and the per-pixel random
+    // jitter -- which is antialiasing for a still frame -- would only add noise it
+    // has to filter out.
+    const float2 subpixel_jitter =
+        params.useFrameJitter ?
+            float2(params.jitterX + 0.5f, params.jitterY + 0.5f) :
+            float2(random<SampleDimension::ePixelX>(samplerRnd, params.samplerType),
+                   random<SampleDimension::ePixelY>(samplerRnd, params.samplerType));
     float2 pixelPos {pixelIndex.x + subpixel_jitter.x, params.height - (pixelIndex.y + subpixel_jitter.y)};
 
     float2 dimension {(float)params.width, (float)params.height};
