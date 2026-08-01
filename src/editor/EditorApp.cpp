@@ -257,6 +257,7 @@ void EditorApp::checkLoadingComplete()
     m_render->init();
 
     m_cameraController->setCamera(m_scene->getCamera(m_selectedCamera));
+    m_render->resetTemporalHistory(); // new scene, new everything
     m_display->setInputHandler(m_cameraController.get());
 }
 

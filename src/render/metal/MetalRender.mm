@@ -325,6 +325,9 @@ void MetalRender::ensureGuideTextures(uint32_t width, uint32_t height, uint32_t 
     mGuideWidth = width;
     mGuideHeight = height;
     mMetal4ResidencyGeneration = 0;
+    // Fresh textures hold nothing, and a scaler built for new dimensions has no
+    // history either.
+    mResetDenoiseHistory = true;
 }
 
 void MetalRender::ensureUpscaleTextures(uint32_t width, uint32_t height)
@@ -1313,6 +1316,9 @@ void MetalRender::render(Buffer* output)
 
     if (ctx.mFrameNumber == 0)
     {
+        // New scene: nothing from before relates to it.
+        mResetDenoiseHistory = true;
+        mHasPrevCamera = false;
         buildBuffers();
         createMetalMaterials();
         // Nothing is playing yet, so start static; the per-frame check below
@@ -1428,6 +1434,7 @@ void MetalRender::render(Buffer* output)
             rebuildAccelerationStructures();
             mMotionBlasSwitchFrames = 0;
             ctx.mSubframeIndex = 0;
+            mResetDenoiseHistory = true;
         }
     }
     else
@@ -1580,6 +1587,48 @@ void MetalRender::render(Buffer* output)
         ctx.mSubframeIndex = 0;
     }
 
+    // Temporal history: reset on a cut, not on a move.
+    //
+    // Reprojection maps this frame's pixels onto the previous frame's. Panning,
+    // orbiting and flying keep that mapping meaningful and the motion vectors
+    // describe it. What breaks it is a discontinuity -- a teleport, a switch to
+    // another camera, a projection change -- after which the history describes a
+    // different place and blending it in is ghosting.
+    {
+        const glm::float3 camPos = glm::float3(glm::inverse(currView.mCamMatrices.view)[3]);
+        // Third column of the view matrix is the camera's backward axis.
+        const glm::float3 camForward =
+            -glm::float3(currView.mCamMatrices.view[0][2], currView.mCamMatrices.view[1][2],
+                         currView.mCamMatrices.view[2][2]);
+        if (mHasPrevCamera)
+        {
+            const float step = glm::length(camPos - mPrevCameraPos);
+            const float turn = glm::dot(camForward, mPrevCameraForward);
+            // A jump is a step far larger than the one before it -- scale-free, so
+            // it works on a scene of any size -- or a turn no hand makes in a frame.
+            const bool teleported = mPrevCameraStep > 0.0f && step > 8.0f * mPrevCameraStep;
+            const bool spun = turn < 0.5f; // more than 60 degrees in one frame
+            const bool projectionChanged = glm::any(
+                glm::notEqual(currView.mCamMatrices.perspective, mPrevView.mCamMatrices.perspective));
+            if (teleported || spun || projectionChanged)
+            {
+                mResetDenoiseHistory = true;
+            }
+            mPrevCameraStep = step;
+        }
+        mPrevCameraPos = camPos;
+        mPrevCameraForward = camForward;
+        mHasPrevCamera = true;
+    }
+
+    // Turning the denoiser on hands it a history from whenever it last ran.
+    const bool denoiseEnabledNow = settings.getAs<bool>("render/pt/denoise");
+    if (denoiseEnabledNow != mPrevDenoiseEnabled)
+    {
+        mResetDenoiseHistory = true;
+        mPrevDenoiseEnabled = denoiseEnabledNow;
+    }
+
     // --- Cache all settings once per frame ---
     const uint32_t spp = settings.getAs<uint32_t>("render/pt/spp");
     const bool enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
@@ -1720,6 +1769,10 @@ void MetalRender::render(Buffer* output)
     if (settingsChanged)
     {
         ctx.mSubframeIndex = 0;
+        // The pixels still correspond but their content jumps -- a new depth, a
+        // different sampler, a debug view. Blending across that is ghosting, and a
+        // reset costs one noisy frame after a change the user asked for.
+        mResetDenoiseHistory = true;
     }
 
     // Matrix copies: glm and simd both use column-major layout
@@ -1941,9 +1994,13 @@ void MetalRender::render(Buffer* output)
                 in.output = mDenoisedTexture;
                 in.jitterX = pUniformData->jitterX;
                 in.jitterY = pUniformData->jitterY;
-                // A moved camera invalidates every reprojection, and so does the
-                // first frame after a resize.
-                in.resetHistory = mResetDenoiseHistory || ctx.mSubframeIndex == 0;
+                // Reset when this frame has no valid predecessor to reproject
+                // from -- *not* when the estimator restarts. Accumulation restarts
+                // on every camera move, and resetting the denoiser with it throws
+                // the history away exactly when it is worth most: while the camera
+                // moves every frame is one sample and the history is all there is.
+                // Motion vectors exist to carry smooth motion, so let them.
+                in.resetHistory = mResetDenoiseHistory;
                 std::memcpy(in.worldToView, glm::value_ptr(currView.mCamMatrices.view), sizeof(in.worldToView));
                 std::memcpy(in.viewToClip, glm::value_ptr(currView.mCamMatrices.perspective),
                             sizeof(in.viewToClip));
@@ -3046,7 +3103,7 @@ void MetalRender::applySkinning()
                 skinTable->setAddress(mVertexBuffer->gpuAddress(), 0);
                 skinTable->setAddress(mSkinDataBuffer->gpuAddress(), 1);
                 skinTable->setAddress(mJointMatricesBuffer->gpuAddress(), 2);
-                skinTable->setAddress(mMetal4.constants().push(skinParams), 3);
+                skinTable->setAddress(mMetal4.immediateConstants().push(skinParams), 3);
 
                 const uint32_t threadsPerGroup = 256;
                 const MTL::Size groupSize = MTL::Size(threadsPerGroup, 1, 1);
@@ -3069,7 +3126,7 @@ void MetalRender::applySkinning()
                     skinTable->setAddress(metalMesh->mPerPrimitiveBuffer->gpuAddress(), 0);
                     skinTable->setAddress(mVertexBuffer->gpuAddress(), 1);
                     skinTable->setAddress(mIndexBuffer->gpuAddress(), 2);
-                    skinTable->setAddress(mMetal4.constants().push(triParams), 3);
+                    skinTable->setAddress(mMetal4.immediateConstants().push(triParams), 3);
 
                     pEncoder->dispatchThreadgroups(
                         MTL::Size((metalMesh->mTriangleCount + 255) / 256, 1, 1), groupSize);

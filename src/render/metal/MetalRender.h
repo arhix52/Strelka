@@ -28,6 +28,10 @@ public:
     void triggerRenderIfIdle() override;
     Buffer* getReadyBuffer() override;
     void* getReadyTexture() override;
+    void resetTemporalHistory() override
+    {
+        mResetDenoiseHistory = true;
+    }
     bool readDisplayTexture(std::vector<float>& rgba, uint32_t& width, uint32_t& height) override;
 
     void* getNativeDevicePtr() override
@@ -346,6 +350,12 @@ private:
     GuideTextures mGuides;
     MTL::Texture* mDenoisedTexture = nullptr;
     bool mResetDenoiseHistory = true;
+    // Enough of the previous camera to tell a cut from a pan.
+    glm::float3 mPrevCameraPos{ 0.0f };
+    glm::float3 mPrevCameraForward{ 0.0f, 0.0f, -1.0f };
+    float mPrevCameraStep = 0.0f;
+    bool mHasPrevCamera = false;
+    bool mPrevDenoiseEnabled = false;
     bool mLoggedMetal4DenoiserGap = false;
     uint32_t mGuideWidth = 0;
     uint32_t mGuideHeight = 0;

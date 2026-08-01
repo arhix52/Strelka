@@ -25,6 +25,15 @@ public:
     virtual ~Render() = default;
 
     virtual void init() = 0;
+
+    /// Tell the renderer that the next frame has no valid temporal predecessor --
+    /// a camera cut, a scene change, anything that breaks pixel-to-pixel
+    /// correspondence. Smooth camera motion is *not* such an event: motion vectors
+    /// exist to carry it, and resetting on it throws the history away exactly when
+    /// it is worth most.
+    virtual void resetTemporalHistory()
+    {
+    }
     virtual void render(Buffer* output) = 0;
     virtual Buffer* createBuffer(const BufferDesc& desc) = 0;
 

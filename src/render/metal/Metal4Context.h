@@ -95,9 +95,19 @@ public:
     {
         return mArgumentTable;
     }
+    /// The frame's ring, reset by beginFrame().
     ConstantRing& constants()
     {
         return mConstants;
+    }
+
+    /// A ring of its own for work outside the frame loop, reset by
+    /// beginImmediate(). Sharing the frame's would either run it dry -- skinning
+    /// pushes two constants per mesh per frame and never resets -- or overwrite
+    /// constants a frame still in flight is reading.
+    ConstantRing& immediateConstants()
+    {
+        return mImmediateConstants;
     }
 
     /// Begin recording into the given frame's allocator. The allocator is reset
@@ -135,6 +145,7 @@ private:
     MTL::SharedEvent* mImmediateEvent = nullptr;
     uint64_t mImmediateValue = 0;
     ConstantRing mConstants;
+    ConstantRing mImmediateConstants;
     bool mResidencyDirty = false;
 };
 

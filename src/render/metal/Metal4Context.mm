@@ -150,13 +150,18 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
         return false;
     }
 
-    if (!mConstants.init(device, constantBytesPerFrame, frameCount))
+    if (!mConstants.init(device, constantBytesPerFrame, frameCount) ||
+        !mImmediateConstants.init(device, constantBytesPerFrame, 1))
     {
         STRELKA_ERROR("Metal 4 constant ring allocation failed");
         release();
         return false;
     }
     for (MTL::Buffer* buffer : mConstants.buffers())
+    {
+        addResident(buffer);
+    }
+    for (MTL::Buffer* buffer : mImmediateConstants.buffers())
     {
         addResident(buffer);
     }
@@ -174,6 +179,8 @@ MTL4::CommandBuffer* Metal4Context::beginImmediate()
         return nullptr;
     }
     mImmediateAllocator->reset();
+    // submitAndWait() blocks, so one buffer's worth is always safe to reuse.
+    mImmediateConstants.beginFrame(0);
     mImmediateBuffer->beginCommandBuffer(mImmediateAllocator);
     mImmediateBuffer->useResidencySet(mResidencySet);
     return mImmediateBuffer;
@@ -210,6 +217,7 @@ void Metal4Context::release()
         mImmediateAllocator = nullptr;
     }
     mConstants.release();
+    mImmediateConstants.release();
     for (MTL4::CommandBuffer* commandBuffer : mCommandBuffers)
     {
         commandBuffer->release();

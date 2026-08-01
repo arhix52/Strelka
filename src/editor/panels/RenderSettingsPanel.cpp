@@ -58,6 +58,10 @@ void EditorApp::drawRenderSettingsPanel()
                             m_cameraDetached = false;
                             m_cameraController->setCamera(m_scene->getCamera(m_selectedCamera));
                             m_sharedCtx->mSubframeIndex = 0;
+                            // A different camera is a cut: nothing in the previous
+                            // frame reprojects into this one. The renderer cannot
+                            // see this -- the jump may be small in world space.
+                            m_render->resetTemporalHistory();
                             m_settingsManager->setAs<uint32_t>("render/selectedCamera", m_selectedCamera);
                         }
                     }
