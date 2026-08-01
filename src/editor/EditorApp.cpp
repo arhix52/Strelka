@@ -508,6 +508,9 @@ void EditorApp::run()
             outputImage.height = readyBuf->height();
             outputImage.width = readyBuf->width();
             outputImage.pixel_format = oka::BufferFormat::FLOAT4;
+            // Metal hands over the tonemapped texture directly; the buffer is
+            // still there and still linear, which is what a screenshot wants.
+            outputImage.deviceTexture = m_render->getReadyTexture();
             outputImage.dataSize = readyBuf->width() * readyBuf->height() * readyBuf->getElementSize();
             m_display->drawFrame(outputImage);
         }

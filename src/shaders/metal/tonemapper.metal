@@ -8,7 +8,11 @@ using namespace metal;
 kernel void toneMappingComputeShader(
     uint2 tid [[thread_position_in_grid]],
     constant UniformsTonemap& uniforms [[buffer(0)]],
-    device float4* buffer [[buffer(1)]]
+    device float4* buffer [[buffer(1)]],
+    // The display image goes to a texture rather than back into the buffer, so
+    // the buffer keeps the linear radiance the reference capture writes out and
+    // MetalFX gets something it can consume without a copy.
+    texture2d<float, access::write> displayTexture [[texture(0)]]
     )
 {
     if (tid.x >= uniforms.width || tid.y >= uniforms.height)
@@ -42,5 +46,5 @@ kernel void toneMappingComputeShader(
     {
         result = srgbGamma(result, uniforms.gamma);
     }
-    buffer[linearPixelIndex] = float4(result, inputColor.a);
+    displayTexture.write(float4(result, inputColor.a), tid);
 }

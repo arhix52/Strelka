@@ -106,6 +106,8 @@ MetalRender::~MetalRender()
         // Material textures
         for (auto*& tex : mMaterialTextures)
             safeRelease(tex);
+        for (auto*& tex : mDisplayTextures)
+            safeRelease(tex);
 
         // Buffers
         safeRelease(mAccumulationBuffer);
@@ -224,6 +226,55 @@ void MetalRender::triggerRenderIfIdle()
 
     mRenderBusy.store(true);
     render(mAsyncOutputBuffers[mWriteIndex]);
+}
+
+
+// The texture the tonemapper writes and the display reads. One per async slot,
+// matching the output buffers, so a frame being shown is never the one being
+// written.
+void MetalRender::ensureDisplayTextures(uint32_t width, uint32_t height)
+{
+    if (width == mDisplayTextureWidth && height == mDisplayTextureHeight && mDisplayTextures[0])
+    {
+        return;
+    }
+    for (MTL::Texture*& tex : mDisplayTextures)
+    {
+        if (tex)
+        {
+            tex->release();
+            tex = nullptr;
+        }
+    }
+
+    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
+    desc->setWidth(width);
+    desc->setHeight(height);
+    // Half float: the display image is post-tonemap and never exceeds the range
+    // a half can hold, and MetalFX takes this format directly.
+    desc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    desc->setTextureType(MTL::TextureType2D);
+    desc->setStorageMode(MTL::StorageModePrivate);
+    desc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    for (MTL::Texture*& tex : mDisplayTextures)
+    {
+        tex = mDevice->newTexture(desc);
+    }
+    desc->release();
+
+    mDisplayTextureWidth = width;
+    mDisplayTextureHeight = height;
+    mMetal4ResidencyGeneration = 0; // new allocations: residency has to be redone
+}
+
+void* MetalRender::getReadyTexture()
+{
+    const int ri = mReadyIndex.load();
+    if (ri < 0)
+    {
+        return nullptr;
+    }
+    return mDisplayTextures[ri];
 }
 
 Buffer* MetalRender::getReadyBuffer()
@@ -592,6 +643,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mJointMatricesBuffer);
     add(mEnvMapTexture);
     for (MTL::Texture* t : mMaterialTextures) add(t);
+    for (MTL::Texture* t : mDisplayTextures) add(t);
     for (MTL::AccelerationStructure* as : mPrimitiveAccelerationStructures) add(as);
     add(mInstanceAccelerationStructure);
     for (Mesh* mesh : mMetalMeshes)
@@ -1486,6 +1538,7 @@ void MetalRender::render(Buffer* output)
         if (useWavefront)
         {
             ensureWavefrontBuffers(width, height);
+            ensureDisplayTextures(width, height);
 
             // Metal 4 path. Residency has to be refreshed whenever the set of
             // allocations can have changed; ensureWavefrontBuffers only does work
@@ -1533,6 +1586,7 @@ void MetalRender::render(Buffer* output)
                     enc4->setComputePipelineState(mTonemapperPSO4);
                     mMetal4.argumentTable()->setAddress(pUniformTMBuffer->gpuAddress(), 0);
                     mMetal4.argumentTable()->setAddress(((MetalBuffer*)output)->getNativePtr()->gpuAddress(), 1);
+                    mMetal4.argumentTable()->setTexture(mDisplayTextures[mWriteIndex]->gpuResourceID(), 0);
                     enc4->dispatchThreadgroups(MTL::Size((width + 7) / 8, (height + 7) / 8, 1),
                                                MTL::Size(8, 8, 1));
                 }
@@ -1581,6 +1635,7 @@ void MetalRender::render(Buffer* output)
                                  MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
                 enc->setBuffer(pUniformTMBuffer, 0, 0);
                 enc->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
+                enc->setTexture(mDisplayTextures[mWriteIndex], 0);
                 enc->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
             }
             enc->endEncoding();
@@ -1647,6 +1702,7 @@ void MetalRender::render(Buffer* output)
                     ((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
                 pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
                 pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
+                pComputeEncoder->setTexture(mDisplayTextures[mWriteIndex], 0);
                 pComputeEncoder->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
             }
 
@@ -1710,6 +1766,7 @@ void MetalRender::render(Buffer* output)
                 ((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
             pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
             pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
+            pComputeEncoder->setTexture(mDisplayTextures[mWriteIndex], 0);
             {
                 const MTL::Size gridSize = MTL::Size(width, height, 1);
                 const MTL::Size threadgroupSize(8, 8, 1);

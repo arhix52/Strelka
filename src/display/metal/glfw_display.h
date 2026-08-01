@@ -40,6 +40,9 @@ private:
     MTL::Library* _pShaderLibrary = nullptr;
     MTL::RenderPipelineState* _pPSO = nullptr;
     MTL::Texture* mTexture = nullptr;
+    // False when the texture belongs to the renderer, which is the normal case
+    // on Metal; the display must not release what it does not own.
+    bool mOwnsTexture = false;
     uint32_t mTexWidth = 32;
     uint32_t mTexHeight = 32;
     dispatch_semaphore_t _semaphore = nullptr;

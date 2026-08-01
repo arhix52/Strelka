@@ -150,16 +150,31 @@ void GlfwDisplay::drawFrame(ImageBuffer& result)
         return;
     }
 
+    // A renderer that produced a texture has already done this work.
+    if (result.deviceTexture)
+    {
+        if (mTexture && mOwnsTexture)
+        {
+            mTexture->release();
+        }
+        mTexture = (MTL::Texture*)result.deviceTexture;
+        mOwnsTexture = false;
+        mTexWidth = result.width;
+        mTexHeight = result.height;
+        return;
+    }
+
     const bool needRecreate = result.height != mTexHeight || result.width != mTexWidth;
     if (needRecreate)
     {
         mTexWidth = result.width;
         mTexHeight = result.height;
-        if (mTexture)
+        if (mTexture && mOwnsTexture)
         {
             mTexture->release();
         }
         mTexture = buildTexture(mTexWidth, mTexHeight);
+        mOwnsTexture = true;
     }
 
     mBlitEncoder = mCommandBuffer->blitCommandEncoder();

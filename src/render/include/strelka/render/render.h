@@ -30,6 +30,14 @@ public:
     virtual void triggerRenderIfIdle() {}
 
     /// Return the last completed output buffer, or nullptr if none ready yet.
+    /// The finished frame as a texture, when the backend can produce one.
+    /// Nullptr means the caller should fall back to getReadyBuffer(); OptiX does.
+    /// Returned as void* so this header stays free of Metal types.
+    virtual void* getReadyTexture()
+    {
+        return nullptr;
+    }
+
     virtual Buffer* getReadyBuffer() { return nullptr; }
 
     /// Last completed render frame time in milliseconds (GPU time).

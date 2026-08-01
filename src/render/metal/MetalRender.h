@@ -26,6 +26,7 @@ public:
 
     void triggerRenderIfIdle() override;
     Buffer* getReadyBuffer() override;
+    void* getReadyTexture() override;
 
     void* getNativeDevicePtr() override
     {
@@ -308,6 +309,12 @@ private:
 
     // Async render (double-buffered output)
     Buffer* mAsyncOutputBuffers[2] = {nullptr, nullptr};
+    // What the screen shows: tonemapped, one per async slot. The buffers above
+    // keep the linear radiance, which is what the reference capture writes out.
+    MTL::Texture* mDisplayTextures[2] = { nullptr, nullptr };
+    uint32_t mDisplayTextureWidth = 0;
+    uint32_t mDisplayTextureHeight = 0;
+    void ensureDisplayTextures(uint32_t width, uint32_t height);
     std::atomic<int> mReadyIndex{-1};
     std::atomic<bool> mRenderBusy{false};
     int mWriteIndex = 0;

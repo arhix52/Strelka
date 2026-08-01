@@ -101,6 +101,10 @@ struct ImageBuffer
 {
     void* data = nullptr;
     void* deviceData = nullptr;
+    /// A backend that renders straight into a texture puts it here, and the
+    /// display uses it instead of copying deviceData into one of its own. Opaque
+    /// so this header stays backend-agnostic.
+    void* deviceTexture = nullptr;
     size_t dataSize = 0;
     unsigned int width = 0;
     unsigned int height = 0;
