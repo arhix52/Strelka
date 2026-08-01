@@ -108,7 +108,8 @@ static inline uint32_t pathDepth(uint32_t depthAndFlags)
 static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixelIndex,
                                       uint32_t sampleIdx, uint32_t depth)
 {
-    SamplerState s = initSampler(pixelIndex, uniforms.subframeIndex + sampleIdx, 0u);
+    SamplerState s = initSampler(pixelIndex, uniforms.subframeIndex + sampleIdx, uniforms.width,
+                                 uniforms.blueNoiseSwitchSpp);
     s.depth = depth;
     return s;
 }

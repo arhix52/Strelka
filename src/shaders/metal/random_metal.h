@@ -1,12 +1,13 @@
 #pragma once
 #include <simd/simd.h>
+#include "bluenoise_mask.h"
 
 using namespace metal;
 
 // source: https://github.com/mmp/pbrt-v4
 constant constexpr float FloatOneMinusEpsilon = 0x1.fffffep-1;
 
-float uintToFloat(uint x) 
+float uintToFloat(uint x)
 {
     return as_type<float>(0x3f800000 | (x >> 9)) - 1.f;
 }
@@ -29,11 +30,18 @@ enum class SampleDimension : uint32_t
   eNUM_DIMENSIONS
 };
 
-struct SamplerState 
+struct SamplerState
 {
   uint32_t seed;
   uint32_t sampleIdx;
   uint32_t depth;
+  /// This pixel's position in the blue-noise mask, in [0, 1). Only the
+  /// blue-noise samplers read it; it is one register, and computing it costs one
+  /// table lookup at path start rather than one per dimension.
+  float bn;
+  /// Sample count at which the hybrid sampler hands over from the blue-noise
+  /// sequence to the per-pixel scrambled one. Zero disables the handover.
+  uint32_t bnSwitch;
 };
 
 #define MAX_BOUNCES 128
@@ -81,13 +89,13 @@ inline uint32_t hash_combine(uint32_t seed, uint32_t v)
     return seed ^ (v + (seed << 6) + (seed >> 2));
 }
 
-uint jenkinsHash(uint x) 
+uint jenkinsHash(uint x)
 {
     x += x << 10;
-    x ^= x >> 6; 
-    x += x << 3; 
-    x ^= x >> 11; 
-    x += x << 15; 
+    x ^= x >> 6;
+    x += x << 3;
+    x ^= x >> 11;
+    x += x << 15;
     return x;
 }
 
@@ -143,12 +151,21 @@ float halton(uint32_t index, uint32_t base)
     return clamp(result, 0.0f, 1.0f - 1e-6f); // TODO: 1minusEps
 }
 
-static SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t seed)
+constant constexpr uint32_t kBlueNoiseTile = 128u;
+
+static SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleIndex, uint32_t width,
+                                uint32_t bnSwitch)
 {
   SamplerState sampler {};
   sampler.seed = hash(linearPixelIndex); //^ 0x736caf6fu;
   sampler.sampleIdx = pixelSampleIndex;
   sampler.depth = 0;
+  const uint32_t px = linearPixelIndex % max(width, 1u);
+  const uint32_t py = linearPixelIndex / max(width, 1u);
+  const uint32_t cell =
+      (py % kBlueNoiseTile) * kBlueNoiseTile + (px % kBlueNoiseTile);
+  sampler.bn = (float(kBlueNoiseRank[cell]) + 0.5f) / float(kBlueNoiseTile * kBlueNoiseTile);
+  sampler.bnSwitch = bnSwitch;
   return sampler;
 }
 
@@ -227,12 +244,94 @@ static float randomSobol(thread SamplerState& state)
     return sobol_scramble(state.sampleIdx, dimension % 5u, dimension, state.seed + state.depth);
 }
 
+// ── Sobol with a blue-noise screen-space error distribution ─────────────────
+//
+// randomSobol gives every pixel its own scramble, so the error at neighbouring
+// pixels is independent: white noise. Total error is right, but white noise is
+// the *worst* spectrum to look at and the worst for any reconstruction filter to
+// remove, because it puts as much energy at low frequencies -- where the eye is
+// sensitive and where blurring cannot reach -- as at high ones.
+//
+// The alternative (Georgiev & Fajardo 2016; Heitz & Belcour 2019): let every
+// pixel draw the *same* point set, and give each pixel a toroidal shift of it.
+// The error is then a smooth function of that pixel's shift, so the error field
+// inherits the spectrum of the shift field. A blue-noise shift field therefore
+// buys a blue-noise error field -- the same total error, moved into the high
+// frequencies that a filter and the eye both discard.
+//
+// This is a low-sample-count technique and does not pretend otherwise: the shift
+// is a rotation, and a rotation is a weaker randomisation than a scramble for
+// the discontinuous integrands a path tracer actually has. Past a few dozen
+// samples per pixel randomSobol converges faster. See randomHybrid.
+
+constant constexpr float kGoldenRatioConjugate = 0.61803398875f;
+// One sequence for the whole screen: the construction depends on the pixels
+// sharing it, so this seed must not vary per pixel.
+constant constexpr uint32_t kBlueNoiseGlobalSeed = 0x9e3779b9u;
+
+inline float blueNoiseShift(float bn, uint32_t dimension)
+{
+    // One mask, advanced per dimension along an additive recurrence. The golden
+    // ratio's continued fraction makes it the slowest-approximated irrational,
+    // so successive dimensions are as far apart as an additive step can put
+    // them -- and an additive step, unlike a hash, leaves the mask's spatial
+    // spectrum intact, which is the whole point of using the mask.
+    return fract(bn + float(dimension) * kGoldenRatioConjugate);
+}
+
+// Blue noise reaches the error field only through the primary hit's dimensions.
+//
+// The construction needs the error to be a slowly-varying function of the pixel's
+// shift. A depth-8 path draws 117 dimensions; shifting all of them makes the
+// error oscillate many times as the shift crosses [0, 1), so error(shift) is
+// effectively a hash of the shift and the mask's spectrum does not survive the
+// map. Measured: shifting every dimension gave lowPassErr/rawErr = 0.28, which is
+// the white-noise value for that filter -- no better than the per-pixel scramble
+// it replaced. Only depth 0 responds smoothly enough to be worth shifting, and
+// that is also where most of the visible noise is.
+template <SampleDimension Dim>
+static float randomSobolBlueNoise(thread SamplerState& state)
+{
+    if (state.depth != 0u)
+    {
+        return randomSobol<Dim>(state);
+    }
+    const uint32_t dimension = uint32_t(Dim);
+    // One sequence shared by the whole screen -- the pixels have to be drawing
+    // the same points for their shifts to be comparable.
+    const float v = sobol_scramble(state.sampleIdx, dimension % 5u, dimension, kBlueNoiseGlobalSeed);
+    return fract(v + blueNoiseShift(state.bn, dimension));
+}
+
+// Blue noise while the frame is young, per-pixel scrambling once it is not.
+//
+// The two are unbiased estimates of the same integral, so an accumulator can
+// average across the handover without correcting anything. The second stage
+// restarts its sequence index at zero rather than continuing from bnSwitch, so
+// it gets a whole stratified block instead of the tail of one.
+template <SampleDimension Dim>
+static float randomHybrid(thread SamplerState& state)
+{
+    if (state.sampleIdx < state.bnSwitch)
+    {
+        return randomSobolBlueNoise<Dim>(state);
+    }
+    SamplerState tail = state;
+    tail.sampleIdx = state.sampleIdx - state.bnSwitch;
+    return randomSobol<Dim>(tail);
+}
+
 // ── Sampler dispatch ────────────────────────────────────────────────────────
-// 0 = Halton, 1 = PCG, 2 = Sobol (Owen scrambled)
+// 0 = Halton, 1 = PCG, 2 = Sobol (Owen scrambled), 3 = Sobol + blue noise,
+// 4 = hybrid (3 below bnSwitch samples, 2 above)
 
 template <SampleDimension Dim>
 static float random(thread SamplerState& state, uint32_t samplerType)
 {
+    if (samplerType == 4)
+        return randomHybrid<Dim>(state);
+    if (samplerType == 3)
+        return randomSobolBlueNoise<Dim>(state);
     if (samplerType == 2)
         return randomSobol<Dim>(state);
     if (samplerType == 1)
@@ -240,11 +339,11 @@ static float random(thread SamplerState& state, uint32_t samplerType)
     return randomHalton<Dim>(state);
 }
 
-uint xorshift(thread uint& rngState) 
+uint xorshift(thread uint& rngState)
 {
-    rngState ^= rngState << 13; 
-    rngState ^= rngState >> 17; 
-    rngState ^= rngState << 5; 
+    rngState ^= rngState << 13;
+    rngState ^= rngState >> 17;
+    rngState ^= rngState << 5;
     return rngState;
 }
 
@@ -298,7 +397,7 @@ uint initRNG(uint2 pixelCoords, uint2 resolution, uint frameNumber)
     uint t = dot(float2(pixelCoords), float2(1, resolution.x));
     uint seed = t ^ jenkinsHash(frameNumber);
     // uint seed = dot(pixelCoords, uint2(1, resolution.x)) ^ jenkinsHash(frameNumber);
-    return jenkinsHash(seed); 
+    return jenkinsHash(seed);
 }
 
 uint owen_scramble_rev(uint x, uint seed)

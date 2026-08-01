@@ -44,7 +44,8 @@ kernel void raytracingKernel(
     prd.specularBounce = false;
     prd.neeDone = false;
     prd.lastBsdfPdf = 0.0f;
-    prd.sampler = initSampler(linearPixelIndex, uniforms.subframeIndex + sampleIdx, 0u);
+    prd.sampler = initSampler(linearPixelIndex, uniforms.subframeIndex + sampleIdx, uniforms.width,
+                              uniforms.blueNoiseSwitchSpp);
 
     DebugMode debugMode = (DebugMode) uniforms.debug;
 
