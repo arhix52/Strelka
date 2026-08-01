@@ -64,7 +64,7 @@ bool MetalFxContext::ensureSpatialScaler(MTL::Device* device,
                           outputWidth, outputHeight);
             return false;
         }
-        mSpatialScaler = (__bridge_retained void*)scaler;
+        mSpatialScaler = (void*)scaler;
 
         if (metal4Compiler)
         {
@@ -73,7 +73,7 @@ bool MetalFxContext::ensureSpatialScaler(MTL::Device* device,
                                         compiler:(__bridge id<MTL4Compiler>)metal4Compiler];
             if (scaler4)
             {
-                mSpatialScaler4 = (__bridge_retained void*)scaler4;
+                mSpatialScaler4 = (void*)scaler4;
             }
             else
             {
@@ -157,6 +157,15 @@ static constexpr MTLPixelFormat kMotionFormat = MTLPixelFormatRG16Float;
 static constexpr MTLPixelFormat kAlbedoFormat = MTLPixelFormatRGBA16Float;
 static constexpr MTLPixelFormat kNormalFormat = MTLPixelFormatRGBA16Float;
 static constexpr MTLPixelFormat kRoughnessFormat = MTLPixelFormatR16Float;
+static constexpr MTLPixelFormat kSpecularHitDistanceFormat = MTLPixelFormatR16Float;
+static constexpr MTLPixelFormat kReactiveFormat = MTLPixelFormatR8Unorm;
+
+void MetalFxContext::denoiserScaleRange(MTL::Device* device, float& minScale, float& maxScale)
+{
+    id<MTLDevice> native = (__bridge id<MTLDevice>)device;
+    minScale = [MTLFXTemporalDenoisedScalerDescriptor supportedInputContentMinScaleForDevice:native];
+    maxScale = [MTLFXTemporalDenoisedScalerDescriptor supportedInputContentMaxScaleForDevice:native];
+}
 
 bool MetalFxContext::denoiserSupportsMetal4(MTL::Device* device)
 {
@@ -167,24 +176,14 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
                                     uint32_t inputWidth,
                                     uint32_t inputHeight,
                                     uint32_t outputWidth,
-                                    uint32_t outputHeight,
-                                    void* metal4Compiler)
+                                    uint32_t outputHeight)
 {
     if (mDenoiser && inputWidth == mDenoiseInputWidth && inputHeight == mDenoiseInputHeight &&
         outputWidth == mDenoiseOutputWidth && outputHeight == mDenoiseOutputHeight)
     {
         return true;
     }
-    if (mDenoiser)
-    {
-        CFRelease(mDenoiser);
-        mDenoiser = nullptr;
-    }
-    if (mDenoiser4)
-    {
-        CFRelease(mDenoiser4);
-        mDenoiser4 = nullptr;
-    }
+    release();
 
     @autoreleasepool
     {
@@ -203,12 +202,17 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         desc.normalTextureFormat = kNormalFormat;
         desc.roughnessTextureFormat = kRoughnessFormat;
         desc.outputTextureFormat = kColorFormat;
+        // Two inputs aimed at exactly what a path tracer gets wrong: a reflection
+        // does not sit on the surface that reflects it, and a motion vector on a
+        // mirror describes the mirror rather than the image in it.
+        desc.specularHitDistanceTextureEnabled = getenv("STRELKA_NO_SPECDIST") ? NO : YES;
+        desc.specularHitDistanceTextureFormat = kSpecularHitDistanceFormat;
+        desc.reactiveMaskTextureEnabled = getenv("STRELKA_NO_REACTIVE") ? NO : YES;
+        desc.reactiveMaskTextureFormat = kReactiveFormat;
         desc.inputWidth = inputWidth;
         desc.inputHeight = inputHeight;
         desc.outputWidth = outputWidth;
         desc.outputHeight = outputHeight;
-        // The tracer has no exposure texture to offer and its radiance is already
-        // absolute, so let MetalFX work the exposure out itself.
         desc.autoExposureEnabled = YES;
         // Block until the graph is built. Asynchronous initialisation returns a
         // scaler whose network is still being assembled, and encoding into it
@@ -222,18 +226,7 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
                           outputWidth, outputHeight);
             return false;
         }
-        mDenoiser = (__bridge_retained void*)denoiser;
-
-        if (metal4Compiler)
-        {
-            id<MTL4FXTemporalDenoisedScaler> denoiser4 =
-                [desc newTemporalDenoisedScalerWithDevice:nativeDevice
-                                                 compiler:(__bridge id<MTL4Compiler>)metal4Compiler];
-            if (denoiser4)
-            {
-                mDenoiser4 = (__bridge_retained void*)denoiser4;
-            }
-        }
+        mDenoiser = (void*)denoiser;
     }
 
     mDenoiseInputWidth = inputWidth;
@@ -258,7 +251,8 @@ MTL::TextureUsage MetalFxContext::denoiseGuideUsage() const
     // union costs nothing.
     return (MTL::TextureUsage)(d.depthTextureUsage | d.motionTextureUsage | d.normalTextureUsage |
                                d.roughnessTextureUsage | d.diffuseAlbedoTextureUsage |
-                               d.specularAlbedoTextureUsage);
+                               d.specularAlbedoTextureUsage | d.specularHitDistanceTextureUsage |
+                               d.reactiveTextureUsage);
 }
 
 MTL::TextureUsage MetalFxContext::denoiseOutputUsage() const
@@ -267,7 +261,7 @@ MTL::TextureUsage MetalFxContext::denoiseOutputUsage() const
     return (MTL::TextureUsage)((__bridge id<MTLFXTemporalDenoisedScaler>)mDenoiser).outputTextureUsage;
 }
 
-void MetalFxContext::encodeDenoise(void* commandBuffer, bool metal4, const DenoiseInputs& inputs)
+void MetalFxContext::encodeDenoise(void* commandBuffer, const DenoiseInputs& inputs)
 {
     if (!mDenoiser || !commandBuffer || !inputs.color || !inputs.output)
     {
@@ -281,6 +275,8 @@ void MetalFxContext::encodeDenoise(void* commandBuffer, bool metal4, const Denoi
     d.specularAlbedoTexture = (__bridge id<MTLTexture>)inputs.specularAlbedo;
     d.normalTexture = (__bridge id<MTLTexture>)inputs.normal;
     d.roughnessTexture = (__bridge id<MTLTexture>)inputs.roughness;
+    d.specularHitDistanceTexture = (__bridge id<MTLTexture>)inputs.specularHitDistance;
+    d.reactiveMaskTexture = (__bridge id<MTLTexture>)inputs.reactive;
     d.outputTexture = (__bridge id<MTLTexture>)inputs.output;
     d.jitterOffsetX = inputs.jitterX;
     d.jitterOffsetY = inputs.jitterY;
@@ -288,8 +284,7 @@ void MetalFxContext::encodeDenoise(void* commandBuffer, bool metal4, const Denoi
     // back to the previous one, which is the sign MetalFX expects.
     d.motionVectorScaleX = 1.0f;
     d.motionVectorScaleY = 1.0f;
-    // Distance to the camera, growing away from it.
-    d.depthReversed = NO;
+    d.depthReversed = inputs.depthReversed ? YES : NO;
     d.shouldResetHistory = inputs.resetHistory ? YES : NO;
     // Reprojection uses the camera directly, not just the motion vectors, which
     // is what lets it tell a moving camera from moving geometry.
@@ -299,15 +294,6 @@ void MetalFxContext::encodeDenoise(void* commandBuffer, bool metal4, const Denoi
     d.worldToViewMatrix = w2v;
     d.viewToClipMatrix = v2c;
 
-    if (metal4)
-    {
-        id<MTL4FXTemporalDenoisedScaler> d4 = (__bridge id<MTL4FXTemporalDenoisedScaler>)mDenoiser4;
-        if (d4)
-        {
-            [d4 encodeToCommandBuffer:(__bridge id<MTL4CommandBuffer>)commandBuffer];
-        }
-        return;
-    }
     [d encodeToCommandBuffer:(__bridge id<MTLCommandBuffer>)commandBuffer];
 }
 
@@ -327,11 +313,6 @@ void MetalFxContext::release()
     {
         CFRelease(mDenoiser);
         mDenoiser = nullptr;
-    }
-    if (mDenoiser4)
-    {
-        CFRelease(mDenoiser4);
-        mDenoiser4 = nullptr;
     }
     mDenoiseInputWidth = mDenoiseInputHeight = mDenoiseOutputWidth = mDenoiseOutputHeight = 0;
     mColorFormat = MTL::PixelFormatInvalid;

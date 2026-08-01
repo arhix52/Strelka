@@ -40,6 +40,12 @@ public:
     /// Start a render pass if the GPU is idle. Non-blocking.
     virtual void triggerRenderIfIdle() {}
 
+    /// True while a submitted frame has not finished on the GPU. The interactive
+    /// loop does not need this -- it just draws whatever is ready -- but anything
+    /// measuring a frame has to know when that frame is actually there, and
+    /// sleeping a guessed interval instead makes the measurement a race.
+    virtual bool isRenderBusy() const { return false; }
+
     /// Return the last completed output buffer, or nullptr if none ready yet.
     /// The finished frame as a texture, when the backend can produce one.
     /// Nullptr means the caller should fall back to getReadyBuffer(); OptiX does.
@@ -55,6 +61,53 @@ public:
     virtual void* getReadyTexture()
     {
         return nullptr;
+    }
+
+    /// The guide textures handed to the denoiser, in the order the denoiser reads
+    /// them. Named rather than indexed by number so a reordering in the renderer
+    /// cannot silently change what a check is checking.
+    enum class Guide : uint32_t
+    {
+        Color = 0,
+        Depth,
+        Motion,
+        DiffuseAlbedo,
+        SpecularAlbedo,
+        Normal,
+        Roughness,
+        SpecularHitDistance,
+        Reactive,
+        Denoised,
+        Count,
+    };
+
+    /// Whether the scene is currently traversed as motion geometry, i.e. whether
+    /// the frame being produced actually carries motion blur. Exposed because the
+    /// alternative -- inferring it from image sharpness -- is confounded by
+    /// accumulation, which removes noise and changes the same gradient measure.
+    virtual bool motionGeometryActive()
+    {
+        return false;
+    }
+
+    /// Diagonal of the bounding box of the skinned vertices, read back from the
+    /// GPU. Negative when the backend cannot answer or nothing in the scene is
+    /// skinned. This exists because a character collapsing to a point is
+    /// invisible to every whole-frame metric -- it is small next to its
+    /// surroundings, so coverage and mean brightness barely move -- and that is
+    /// exactly how a broken skinning submission went unnoticed.
+    virtual float skinnedGeometryExtent()
+    {
+        return -1.0f;
+    }
+
+    /// Read one guide back as RGBA floats, unused channels zeroed. This reads the
+    /// exact bytes MetalFX consumes, which is the only way to check a guide
+    /// without also testing everything downstream of it. False when the backend
+    /// has no such texture, or when denoising has never run.
+    virtual bool readGuideTexture(Guide, std::vector<float>&, uint32_t&, uint32_t&)
+    {
+        return false;
     }
 
     virtual Buffer* getReadyBuffer() { return nullptr; }

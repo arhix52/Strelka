@@ -83,6 +83,7 @@ public:
 
     virtual void drawFrame(ImageBuffer& result) = 0;
     virtual void drawUI() = 0;
+    virtual void resetFrame() {}
 
     void setViewPortHovered(bool state)
     {

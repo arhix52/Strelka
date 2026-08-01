@@ -88,11 +88,10 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
         return false;
     }
 
-    // One argument table shared by every stage. Sized to the largest binding
-    // index any kernel uses, with headroom: an index past the end is a hard
-    // failure at encode time, not a warning.
+    // One argument table shared by every stage. Buffer index 24 is the largest
+    // any kernel uses; an index past the declared count is a hard failure.
     MTL4::ArgumentTableDescriptor* tableDesc = MTL4::ArgumentTableDescriptor::alloc()->init();
-    tableDesc->setMaxBufferBindCount(32);
+    tableDesc->setMaxBufferBindCount(25);
     tableDesc->setMaxTextureBindCount(8);
     mArgumentTable = device->newArgumentTable(tableDesc, &error);
     tableDesc->release();

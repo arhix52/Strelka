@@ -49,7 +49,7 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     if (!mWindow)
     {
         STRELKA_FATAL("Failed to create GLFW Window");
-        return;     
+        return;
     }
     glfwSetWindowUserPointer(mWindow, this);
     glfwSetFramebufferSizeCallback(mWindow, framebufferResizeCallback);
@@ -137,6 +137,16 @@ void* GlfwDisplay::getDisplayNativeTexure()
     return mTexture;
 }
 
+void GlfwDisplay::resetFrame()
+{
+    if (mTexture && mOwnsTexture)
+    {
+        mTexture->release();
+    }
+    mTexture = nullptr;
+    mOwnsTexture = false;
+}
+
 float GlfwDisplay::getMaxEDR()
 {
     NSWindow *nswin = glfwGetCocoaWindow(mWindow);
@@ -180,10 +190,10 @@ void GlfwDisplay::drawFrame(ImageBuffer& result)
     mBlitEncoder = mCommandBuffer->blitCommandEncoder();
 
     mBlitEncoder->copyFromBuffer(
-        (MTL::Buffer*) result.deviceData, 0, 
-        oka::Buffer::getElementSize(result.pixel_format) * mTexWidth, 
-        oka::Buffer::getElementSize(result.pixel_format) * mTexWidth * mTexHeight, 
-        MTL::Size{mTexWidth, mTexHeight, 1}, 
+        (MTL::Buffer*) result.deviceData, 0,
+        oka::Buffer::getElementSize(result.pixel_format) * mTexWidth,
+        oka::Buffer::getElementSize(result.pixel_format) * mTexWidth * mTexHeight,
+        MTL::Size{mTexWidth, mTexHeight, 1},
         mTexture, 0, 0, MTL::Origin{0, 0, 0});
 
     mBlitEncoder->endEncoding();
@@ -298,11 +308,16 @@ void GlfwDisplay::destroy()
         _pShaderLibrary->release();
         _pShaderLibrary = nullptr;
     }
-    if (mTexture)
+    // Only if it is ours. Since the renderer began handing over its own texture,
+    // mTexture is usually borrowed -- and the renderer is destroyed before the
+    // display, so releasing a borrowed one here sends a message to freed memory
+    // and takes the process down on exit. Every other release site already checks
+    // this; this one did not.
+    if (mTexture && mOwnsTexture)
     {
         mTexture->release();
-        mTexture = nullptr;
     }
+    mTexture = nullptr;
     if (renderPassDescriptor)
     {
         renderPassDescriptor->release();

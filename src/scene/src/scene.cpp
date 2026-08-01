@@ -490,7 +490,7 @@ bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType target
         mNodes[nodeId].scale = newValue;
         return updateNode(nodeId);
         break;
-    
+
     case AnimationChannel::PathType::ROTATION:
         STRELKA_DEBUG("Invalid value to animate ROTATION, use 2nd definition");
         break;
@@ -501,7 +501,7 @@ bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType target
     return false;
 }
 
-bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType targetProperty, const glm::quat newValue) 
+bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType targetProperty, const glm::quat newValue)
 {
     switch (targetProperty)
     {
@@ -511,7 +511,7 @@ bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType target
     case AnimationChannel::PathType::SCALE:
         STRELKA_DEBUG("Invalid value to animate SCALE, use 1st definition");
         break;
-    
+
     case AnimationChannel::PathType::ROTATION:
         mNodes[nodeId].rotation = newValue;
         return updateNode(nodeId);
@@ -567,7 +567,7 @@ bool Scene::updateNode(const uint32_t nodeId)
             break;
     }
 
-    for (const auto childId: mNodes[nodeId].children) 
+    for (const auto childId: mNodes[nodeId].children)
     {
         skeletonNodesUpdated |= updateNode(childId);
     }

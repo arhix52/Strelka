@@ -28,6 +28,7 @@ public:
 
     void drawFrame(ImageBuffer& result) override;
     void drawUI() override;
+    void resetFrame() override;
 
     float getMaxEDR() override;
 

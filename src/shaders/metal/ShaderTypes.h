@@ -78,9 +78,13 @@ struct Uniforms
     uint32_t enableAccumulation;
     uint32_t samples_per_launch;
     uint32_t maxDepth;
-    
+
     uint32_t rectLightSamplingMethod;
-    uint32_t samplerType; // 0 - Halton, 1 - PCG
+    // 0 - Halton, 1 - PCG, 2 - Sobol (Owen), 3 - Sobol + blue noise, 4 - hybrid
+    uint32_t samplerType;
+    /// Sample count at which sampler 4 hands the frame from the blue-noise
+    /// sequence to the per-pixel scrambled one.
+    uint32_t blueNoiseSwitchSpp;
 
     uint32_t tonemapperType; // 0 - "None", "Reinhard", "ACES", "Filmic"
     float gamma; // 0 - off
@@ -127,17 +131,45 @@ struct Uniforms
     // frame's screen space. The motion-blur matrices are the inverses and cannot
     // be used for this.
     simd::float4x4 prevWorldToClip;
+    // This frame's world-to-clip. Needed for the device-depth guide, which cannot
+    // be derived from the inverses the camera-ray path carries.
+    simd::float4x4 worldToClip;
     uint32_t writeAov;
+    // Which convention the depth guide is written in; see kDenoiseDepth* below.
+    uint32_t denoiseDepthMode;
+    // Whether the previous frame's pose and instance transforms are valid to
+    // read. False on the first frame of a scene and after anything that
+    // invalidates the correspondence between frames.
+    uint32_t hasPrevFramePose;
+    /// Feed the denoiser the accumulated mean instead of this launch's samples.
+    uint32_t useAccumulatedColor;
+    /// Luminance ceiling, in exposed units, for the colour handed to the
+    /// denoiser. Zero disables it.
+    float denoiseFireflyClamp;
     // Sub-pixel offset applied to every pixel of this frame, in pixels. Temporal
     // upscaling needs the whole image shifted by a known amount it can undo; the
     // per-pixel random jitter that antialiases a still frame is noise to it.
     float jitterX;
     float jitterY;
     uint32_t useFrameJitter;
-    uint32_t pad_aov0;
+    /// When set, sample zero is a deterministic shutter-close guide pass. Its
+    /// radiance is discarded and the remaining samples estimate the image.
+    uint32_t canonicalGuideSample;
     uint32_t pad_aov1;
     uint32_t pad_aov2;
 };
+
+// How the depth guide is encoded.
+//
+// MetalFX does not document which it wants. Two things point at device depth: the
+// scaler takes a viewToClipMatrix, which is only useful for undoing a projection,
+// and depthReversed defaults to YES, which is a statement about NDC. Against that,
+// the texture is R32Float and a linear distance would fit it. So the renderer can
+// write any of the three and the choice is settled by measurement rather than by
+// reading the header harder.
+#define kDenoiseDepthDevice 0u ///< clip z / w, the value a depth buffer holds
+#define kDenoiseDepthViewZ  1u ///< distance along the camera's forward axis
+#define kDenoiseDepthRadial 2u ///< distance to the eye
 
 // What a denoiser needs to know about the primary hit, written once per pixel by
 // the stage that shades it (or by the miss stage for background).
@@ -150,22 +182,34 @@ struct Uniforms
 struct AovSample
 {
     packed_float3 diffuseAlbedo;
-    float depth;            // view-space distance along the camera forward axis
+    float depth;            // encoding selected by Uniforms::denoiseDepthMode
     packed_float3 specularAlbedo;
     float roughness;
     packed_float3 normal;   // world space
     float motionX;          // previous-frame screen position minus current, in pixels
     float motionY;
-    float pad0;
-    float pad1;
+    /// Distance from the primary hit to what its specular lobe sees. MetalFX
+    /// reprojects reflections with this instead of treating them as if they sat
+    /// on the surface. Zero when the surface is not specular.
+    float specularHitDistance;
+    /// 0 = trust the history here, 1 = ignore it. Raised where the motion vector
+    /// is known to be a lie: mirrors, glass, and anything whose previous position
+    /// could not be established.
+    float reactive;
     float pad2;
 };
 
 struct UniformsTonemap
 {
+    // Render resolution: the linear radiance buffer is indexed with it.
     uint32_t width;
     uint32_t height;
-    
+    // Display resolution. Not the same thing once anything upscales, and the
+    // texture-input tonemapper covers this, not the render size.
+    uint32_t outWidth;
+    uint32_t outHeight;
+
+
     uint32_t tonemapperType; // 0 - "None", "Reinhard", "ACES", "Filmic"
     float gamma; // 0 - off
     float maxEDR;
@@ -241,6 +285,11 @@ struct PathState
 #define PATH_FLAG_ALIVE      (1u << 8)
 #define PATH_FLAG_SPECULAR   (1u << 9)
 #define PATH_FLAG_NEE_DONE   (1u << 10)
+// The denoiser guides for this pixel have been written. A mirror or a glass
+// surface has no albedo to demodulate against and a roughness of nothing, so the
+// guides are deferred to the first surface that does -- and then must not be
+// overwritten by the bounce after it.
+#define PATH_FLAG_AOV_DONE   (1u << 11)
 #define PATH_DEPTH_MASK      0xFFu
 
 // What `extend` hands to `shade`. Deliberately small: `intersection.primitive_data`

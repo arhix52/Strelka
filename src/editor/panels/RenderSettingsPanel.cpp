@@ -82,9 +82,14 @@ void EditorApp::drawRenderSettingsPanel()
                 {
                     m_cameraDetached = false;
                     m_sharedCtx->mSubframeIndex = 0;
+                    m_render->resetTemporalHistory();
                 }
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Resume following GLTF camera animation");
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted("Resume following GLTF camera animation");
+                    ImGui::EndTooltip();
+                }
             }
         }
     }
@@ -145,8 +150,13 @@ void EditorApp::drawRenderSettingsPanel()
             ImGui::EndCombo();
         }
 
-        const char* samplerTypeItems[] = { "Halton", "PCG", "Sobol" };
-        static int currentSamplerTypeId = 0;
+        const char* samplerTypeItems[] = { "Halton", "PCG", "Sobol (Owen)", "Sobol + blue noise",
+                                           "Hybrid (blue noise -> Sobol)" };
+        // Read back rather than remembered in a static: the default is set in
+        // loadSettings, and a static starting at zero showed "Halton" no matter
+        // what was actually running.
+        int currentSamplerTypeId =
+            (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/samplerType"), 4u);
         if (ImGui::BeginCombo("Sampler", samplerTypeItems[currentSamplerTypeId]))
         {
             for (const auto& item : samplerTypeItems)
@@ -154,15 +164,35 @@ void EditorApp::drawRenderSettingsPanel()
                 bool is_selected = (item == samplerTypeItems[currentSamplerTypeId]);
                 if (ImGui::Selectable(item, is_selected))
                 {
-                    currentSamplerTypeId = &item - samplerTypeItems;
+                    currentSamplerTypeId = (int)(&item - samplerTypeItems);
+                    m_settingsManager->setAs<uint32_t>("render/pt/samplerType", currentSamplerTypeId);
                 }
                 if (is_selected)
                 {
                     ImGui::SetItemDefaultFocus();
                 }
             }
-            m_settingsManager->setAs<uint32_t>("render/pt/samplerType", currentSamplerTypeId);
             ImGui::EndCombo();
+        }
+        if (currentSamplerTypeId == 0)
+        {
+            ImGui::TextDisabled("Halton aliases its bases every 32 dimensions; error stalls past ~512 spp.");
+        }
+        if (currentSamplerTypeId == 4)
+        {
+            auto bnSwitch = m_settingsManager->getAs<uint32_t>("render/pt/blueNoiseSwitchSpp");
+            if (ImGui::SliderInt("Blue-noise samples", (int*)&bnSwitch, 0, 256))
+            {
+                m_settingsManager->setAs<uint32_t>("render/pt/blueNoiseSwitchSpp", bnSwitch);
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Samples drawn from the blue-noise sequence before handing over to\n"
+                                  "per-pixel scrambling. Blue noise looks cleaner at low sample counts;\n"
+                                  "scrambling converges faster past a few dozen.");
+            }
         }
 
         const char* tracerItems[] = { "Megakernel", "Wavefront" };
@@ -172,29 +202,83 @@ void EditorApp::drawRenderSettingsPanel()
             m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", tracerMode);
         }
 
-        bool denoise = m_settingsManager->getAs<bool>("render/pt/denoise");
-        if (ImGui::Checkbox("MetalFX denoise", &denoise))
+        // One choice, not two checkboxes.
+        //
+        // The two effects are alternatives -- MetalFX has a spatial scaler and a
+        // temporal denoised scaler, and a frame goes through one or the other --
+        // but as separate toggles they offered four states, two of which meant the
+        // same thing and none of which said so. The render scale stays a separate
+        // control because it applies to both: at 1.00 the denoiser only denoises.
+        //
+        // Only the wavefront tracer writes the guides the denoiser reads, so on
+        // the megakernel that entry is unavailable rather than silently ignored.
+        const bool denoiseAvailable = tracerMode == 1;
+        // Keep the setting and the list in step. Selecting the megakernel while
+        // denoising left the mode index pointing past the end of a now shorter
+        // list -- the combo showed whatever happened to be there, the next click
+        // picked something the user did not ask for, and the setting stayed on
+        // while the renderer ignored it. Turning it off here means the control and
+        // the renderer always agree about what is running.
+        if (!denoiseAvailable && m_settingsManager->getAs<bool>("render/pt/denoise"))
         {
-            m_settingsManager->setAs<bool>("render/pt/denoise", denoise);
+            m_settingsManager->setAs<bool>("render/pt/denoise", false);
+            m_render->resetTemporalHistory();
         }
-        if (denoise)
+        const bool denoiseSetting = m_settingsManager->getAs<bool>("render/pt/denoise");
+        const bool upscaleSetting = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
+        int fxMode = denoiseSetting ? 2 : (upscaleSetting ? 1 : 0);
+        const char* fxItems[] = { "Off", "Spatial upscale", "Temporal denoise" };
+        const int fxItemCount = denoiseAvailable ? 3 : 2;
+        if (ImGui::Combo("MetalFX", &fxMode, fxItems, fxItemCount))
+        {
+            const bool wantDenoise = (fxMode == 2);
+            m_settingsManager->setAs<bool>("render/pt/denoise", wantDenoise);
+            // The denoiser is a scaler too: it needs the reduced-resolution render
+            // whenever the scale asks for one, and nothing else does.
+            const float factor = m_settingsManager->getAs<float>("render/pt/upscaleFactor");
+            m_settingsManager->setAs<bool>("render/pt/enableUpscale", fxMode != 0 && factor < 1.0f);
+            m_render->resetTemporalHistory();
+        }
+        if (!denoiseAvailable)
         {
             ImGui::SameLine();
-            ImGui::TextDisabled("(temporal; upscales too)");
+            ImGui::BeginDisabled();
+            ImGui::TextUnformatted("(denoise needs the wavefront tracer)");
+            ImGui::EndDisabled();
         }
 
-        bool enableUpscale = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
-        if (ImGui::Checkbox("MetalFX upscale", &enableUpscale))
+        if (fxMode == 2)
         {
-            m_settingsManager->setAs<bool>("render/pt/enableUpscale", enableUpscale);
+            bool playbackBlur =
+                m_settingsManager->getAs<bool>(
+                    "render/pt/denoisePlaybackMotionBlur");
+            if (ImGui::Checkbox("Path-traced playback blur", &playbackBlur))
+            {
+                m_settingsManager->setAs<bool>(
+                    "render/pt/denoisePlaybackMotionBlur", playbackBlur);
+                m_render->resetTemporalHistory();
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled();
+            ImGui::TextUnformatted(
+                playbackBlur ? "(uses SPP per frame)" : "(stable shutter-close guides)");
+            ImGui::EndDisabled();
         }
-        if (enableUpscale)
+
+        if (fxMode != 0)
         {
             auto factor = m_settingsManager->getAs<float>("render/pt/upscaleFactor");
             if (ImGui::SliderFloat("Render scale", &factor, 0.25f, 1.0f, "%.2f"))
             {
                 m_settingsManager->setAs<float>("render/pt/upscaleFactor", factor);
+                m_settingsManager->setAs<bool>("render/pt/enableUpscale", factor < 1.0f);
+                m_render->resetTemporalHistory();
             }
+            ImGui::SameLine();
+            ImGui::BeginDisabled();
+            ImGui::TextUnformatted(
+                factor < 1.0f ? "(rendering below display resolution)" : "(1:1)");
+            ImGui::EndDisabled();
         }
 
         auto maxDepth = m_settingsManager->getAs<uint32_t>("render/pt/depth");
@@ -203,20 +287,20 @@ void EditorApp::drawRenderSettingsPanel()
             m_settingsManager->setAs<uint32_t>("render/pt/depth", maxDepth);
         }
 
-        auto sppTotal = m_settingsManager->getAs<uint32_t>("render/pt/sppTotal");
-        if (ImGui::SliderInt("SPP Total", (int*)&sppTotal, 1, 10000))
-        {
-            m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", sppTotal);
-        }
-
         auto sppSubframe = m_settingsManager->getAs<uint32_t>("render/pt/spp");
-        if (ImGui::SliderInt("SPP Subframe", (int*)&sppSubframe, 1, 32))
+        if (ImGui::SliderInt("SPP per frame", (int*)&sppSubframe, 1, 32))
         {
             m_settingsManager->setAs<uint32_t>("render/pt/spp", sppSubframe);
         }
 
+        auto sppTotal = m_settingsManager->getAs<uint32_t>("render/pt/sppTotal");
+        if (ImGui::SliderInt("Accumulation SPP limit", (int*)&sppTotal, 1, 10000))
+        {
+            m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", sppTotal);
+        }
+
         bool accumulationEnabled = m_settingsManager->getAs<bool>("render/pt/enableAcc");
-        if (ImGui::Checkbox("Enable Path Tracer Acc", &accumulationEnabled))
+        if (ImGui::Checkbox("Accumulate while still", &accumulationEnabled))
         {
             m_settingsManager->setAs<bool>("render/pt/enableAcc", accumulationEnabled);
         }

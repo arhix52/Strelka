@@ -12,7 +12,6 @@
 
 #include <chrono>
 #include <memory>
-#include <optional>
 #include <future>
 #include <string>
 
@@ -73,7 +72,10 @@ public:
     void checkLoadingComplete();
     void run();
     void runReferenceCapture();
+    void runConvergenceSweep();
     void runBenchmark();
+    void runJitterTest();
+    void runDenoiseAudit();
     void playAnimations(float deltaTime);
 
     // --- UI drawing ---

@@ -26,6 +26,10 @@ public:
     Buffer* createBuffer(const BufferDesc& desc) override;
 
     void triggerRenderIfIdle() override;
+    bool isRenderBusy() const override
+    {
+        return mRenderBusy.load(std::memory_order_acquire);
+    }
     Buffer* getReadyBuffer() override;
     void* getReadyTexture() override;
     void resetTemporalHistory() override
@@ -33,6 +37,12 @@ public:
         mResetDenoiseHistory = true;
     }
     bool readDisplayTexture(std::vector<float>& rgba, uint32_t& width, uint32_t& height) override;
+    bool readGuideTexture(Guide guide, std::vector<float>& rgba, uint32_t& width, uint32_t& height) override;
+    float skinnedGeometryExtent() override;
+    bool motionGeometryActive() override
+    {
+        return mMotionBlasBuilt && mShutterIntervalActive;
+    }
 
     void* getNativeDevicePtr() override
     {
@@ -98,12 +108,16 @@ private:
     {
         uint32_t rectLightSamplingMethod = 0;
         uint32_t samplerType = 0;
+        uint32_t blueNoiseSwitchSpp = 0;
         bool enableAccumulation = false;
         uint32_t sspTotal = 0;
         uint32_t spp = 0;
+        bool playbackBlur = false;
+        uint32_t shutterMode = 0;
+        float shutterTime = 0.0f;
         bool enableMotionBlur = false;
         bool isMotionBlurVisible = true;
-        bool enableCameraMotionBlur = true;
+        bool enableCameraMotionBlur = false;
         int32_t useDof = 0;
         float focalDistance = 0.0f;
         float lensRadius = 0.0f;
@@ -155,6 +169,21 @@ private:
     // Reusable per-frame vectors (avoid heap alloc each frame)
     std::vector<float> mAnimTargetTimes;
     std::vector<bool> mAnimChanged;
+
+    // The previous frame's pose, for denoiser motion vectors.
+    //
+    // Deliberately not mPrevVertexBuffer: that one is a motion-blur shutter
+    // keyframe, and when motion blur is off it is forced equal to the current
+    // pose, which would make every motion vector describe a scene that never
+    // deforms. These two are snapshots taken at the top of a frame, before
+    // skinning and before the instance transforms are re-uploaded, so during
+    // frame N they hold frame N-1.
+    MTL::Buffer* mPrevFrameVertexBuffer = nullptr;
+    MTL::Buffer* mPrevFrameInstanceBuffer = nullptr;
+    bool mHasPrevFramePose = false;
+    /// Snapshot the current pose. No-op when nothing in the scene can deform,
+    /// in which case the current vertex buffer is already the previous one.
+    void capturePrevFramePose();
 
     // Motion blur
     MTL::Buffer* mPrevVertexBuffer = nullptr;
@@ -222,15 +251,18 @@ private:
     MTL::ComputePipelineState* mWavefrontResolvePSO = nullptr;
     MTL::ComputePipelineState* mWavefrontPreparePSO = nullptr;
     MTL::ComputePipelineState* mWavefrontPrepareShadowPSO = nullptr;
-    bool mSceneHasMotionBlas = false;
     // What the acceleration structures were actually built for. A skeletal mesh
     // only needs two keyframes when the shutter is open across them; with motion
     // blur off the shader pins the sample time to keyframe 1 and the second one
     // is never read, so the structure can be a plain static one and traversed as
     // such. Flipping the setting has to rebuild them.
     bool mMotionBlasBuilt = false;
+    /// The two pose keyframes currently hold different poses, so the shutter spans
+    /// a real interval and the frame has motion blur in it -- true across a pause.
+    bool mShutterIntervalActive = false;
+    bool mWasAnimationPlaying = false;
+    bool mPausedBlurRefine = false;
     bool mBuildMotionBlas = false;
-    uint32_t mMotionBlasSwitchFrames = 0;
     void rebuildAccelerationStructures();
     MTL::ComputePipelineState* mWavefrontPrepareHitMissPSO = nullptr;
 
@@ -239,6 +271,7 @@ private:
     MTL::Buffer* mHitBuffer = nullptr;
     MTL::Buffer* mIorStackBuffer = nullptr;
     MTL::Buffer* mRadianceBuffer = nullptr;
+    MTL::Buffer* mGuideRadianceBuffer = nullptr;
     // Ping-pong queues of live path indices, plus the counters and the indirect
     // dispatch arguments derived from them. All GPU-side: the counts are never
     // read back, or every bounce would carry a round trip.
@@ -292,7 +325,6 @@ private:
     MTL::ComputePipelineState* mWavefrontPrepareHitMissPSO4 = nullptr;
     MTL::ComputePipelineState* mTonemapperPSO4 = nullptr;
     MTL::ComputePipelineState* mTonemapperTexPSO = nullptr;
-    MTL::ComputePipelineState* mTonemapperTexPSO4 = nullptr;
     MTL::ComputePipelineState* mSkinningPSO4 = nullptr;
     MTL::ComputePipelineState* mTriangleUpdatePSO4 = nullptr;
 
@@ -346,6 +378,8 @@ private:
         MTL::Texture* specular = nullptr;
         MTL::Texture* normal = nullptr;
         MTL::Texture* roughness = nullptr;
+        MTL::Texture* specularHitDistance = nullptr;
+        MTL::Texture* reactive = nullptr;
     };
     GuideTextures mGuides;
     MTL::Texture* mDenoisedTexture = nullptr;
@@ -357,14 +391,28 @@ private:
     bool mHasPrevCamera = false;
     bool mPrevDenoiseEnabled = false;
     bool mLoggedMetal4DenoiserGap = false;
+    bool mLoggedShaderValidationDenoiserGap = false;
     uint32_t mGuideWidth = 0;
     uint32_t mGuideHeight = 0;
+    // The output size the denoised texture was built for. Part of the cache key:
+    // guides live at render resolution but the result does not.
+    uint32_t mGuideOutWidth = 0;
+    uint32_t mGuideOutHeight = 0;
+    bool mLoggedUpscaleClamp = false;
+    bool mLoggedSkinningPipelineGap = false;
+    /// Opt back into the Metal 4 skinning submission, which is still wrong.
+    const bool mSkinMetal4 = getenv("STRELKA_SKIN_METAL4") != nullptr;
+    /// Force motion vectors back to camera-only, for measuring what the
+    /// previous-frame pose is actually worth.
+    const bool mNoPrevPose = getenv("STRELKA_NO_PREV_POSE") != nullptr;
+    const bool mNoAccumColor = getenv("STRELKA_NO_ACCUM_COLOR") != nullptr;
+    void applySkinningMetal3();
     MTL::ComputePipelineState* mAovResolvePSO = nullptr;
-    MTL::ComputePipelineState* mAovResolvePSO4 = nullptr;
+    void releaseGuideTextures();
     void ensureGuideTextures(uint32_t width, uint32_t height, uint32_t outWidth, uint32_t outHeight);
     /// Halton (2,3), the standard temporal jitter sequence: MetalFX reconstructs
     /// detail from knowing exactly how each frame was displaced.
-    void frameJitter(uint64_t frameIndex, float& x, float& y) const;
+    void frameJitter(uint64_t frameIndex, uint32_t phaseCount, float& x, float& y) const;
     std::atomic<int> mReadyIndex{-1};
     std::atomic<bool> mRenderBusy{false};
     int mWriteIndex = 0;

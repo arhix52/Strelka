@@ -61,7 +61,13 @@ kernel void toneMappingTextureShader(
     texture2d<float, access::write> displayTexture [[texture(0)]]
     )
 {
-    if (tid.x >= uniforms.width || tid.y >= uniforms.height)
+    // Display resolution, not render resolution. The denoiser hands back a
+    // display-sized texture, and bounding this pass by the render size instead
+    // leaves everything outside the top-left corner holding whatever was in the
+    // display texture before -- a quarter of the screen live and the rest a stale
+    // still, which reads as "working" for as long as that still happens to be
+    // roughly right.
+    if (tid.x >= uniforms.outWidth || tid.y >= uniforms.outHeight)
     {
         return;
     }

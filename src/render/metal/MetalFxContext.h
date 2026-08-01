@@ -75,9 +75,16 @@ public:
         MTL::Texture* specularAlbedo = nullptr;
         MTL::Texture* normal = nullptr;
         MTL::Texture* roughness = nullptr;
+        /// Distance from a specular surface to what it reflects, so reflections
+        /// reproject at the depth of the reflected thing.
+        MTL::Texture* specularHitDistance = nullptr;
+        /// Per-pixel "ignore the history", for surfaces whose motion vectors
+        /// cannot describe what is actually moving on them.
+        MTL::Texture* reactive = nullptr;
         MTL::Texture* output = nullptr;   ///< display resolution, linear
         float jitterX = 0.0f;             ///< the offset this frame was rendered with
         float jitterY = 0.0f;
+        bool depthReversed = true;
         bool resetHistory = false;        ///< camera cut, scene change, resize
         // The denoiser reprojects with these rather than inferring them from the
         // motion vectors alone. Column-major, as Metal and glm both are.
@@ -91,8 +98,12 @@ public:
                         uint32_t inputWidth,
                         uint32_t inputHeight,
                         uint32_t outputWidth,
-                        uint32_t outputHeight,
-                        void* metal4Compiler);
+                        uint32_t outputHeight);
+
+    /// The range of output/input ratios the denoiser supports on this device.
+    /// Asking for one outside it does not fail the creation call -- it returns a
+    /// scaler that produces NaN.
+    static void denoiserScaleRange(MTL::Device* device, float& minScale, float& maxScale);
 
     /// Whether the device can drive this effect through Metal 4 at all. Separate
     /// from supportsDevice, and worth asking even though the answer is currently
@@ -110,7 +121,7 @@ public:
     MTL::TextureUsage denoiseGuideUsage() const;
     MTL::TextureUsage denoiseOutputUsage() const;
 
-    void encodeDenoise(void* commandBuffer, bool metal4, const DenoiseInputs& inputs);
+    void encodeDenoise(void* commandBuffer, const DenoiseInputs& inputs);
 
     void release();
 
@@ -118,7 +129,6 @@ private:
     void* mSpatialScaler = nullptr; ///< id<MTLFXSpatialScaler>, retained
     void* mSpatialScaler4 = nullptr; ///< id<MTL4FXSpatialScaler>, retained
     void* mDenoiser = nullptr; ///< id<MTLFXTemporalDenoisedScaler>, retained
-    void* mDenoiser4 = nullptr; ///< id<MTL4FXTemporalDenoisedScaler>, retained
     uint32_t mDenoiseInputWidth = 0;
     uint32_t mDenoiseInputHeight = 0;
     uint32_t mDenoiseOutputWidth = 0;

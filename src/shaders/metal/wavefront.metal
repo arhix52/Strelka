@@ -119,13 +119,28 @@ static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixe
 // different time on every bounce and smear the path across the shutter.
 static inline float motionTimeFor(constant Uniforms& uniforms, uint32_t pixelIndex, uint32_t sampleIdx)
 {
+    if (uniforms.canonicalGuideSample && sampleIdx == 0u)
+    {
+        return 1.0f;
+    }
     if (!SPEC_MOTION_BLUR || !uniforms.enableMotionBlur)
     {
         return 0.0f;
     }
     SamplerState s = samplerFor(uniforms, pixelIndex, sampleIdx, 0u);
-    const float t = random<SampleDimension::eTime>(s, uniforms.samplerType);
+    const uint32_t firstRadianceSample = uniforms.canonicalGuideSample ? 1u : 0u;
+    const uint32_t radianceSample = sampleIdx - firstRadianceSample;
+    const uint32_t sampleCount = max(uniforms.samples_per_launch, 1u);
+    const float t =
+        ((float)radianceSample + random<SampleDimension::eTime>(s, uniforms.samplerType)) /
+        (float)sampleCount;
     return uniforms.isMotionBlurVisible ? t : 1.0f;
+}
+
+static inline bool shouldWriteAov(constant Uniforms& uniforms, uint32_t sampleIdx)
+{
+    return uniforms.writeAov &&
+           (!uniforms.canonicalGuideSample || sampleIdx == 0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +155,8 @@ kernel void wavefrontGenerate(
     device IorStack*                                           iorStacks      [[buffer(3)]],
     constant uint32_t&                                         sampleIdx      [[buffer(4)]],
     device uint32_t*                                           queueOut       [[buffer(5)]],
-    device uint32_t*                                           control        [[buffer(6)]])
+    device uint32_t*                                           control        [[buffer(6)]],
+    device AovSample*                                          aov            [[buffer(7)]])
 {
     const uint32_t pixelCount = uniforms.width * uniforms.height;
     if (tid == 0u)
@@ -159,7 +175,8 @@ kernel void wavefrontGenerate(
     // needs no compaction.
     queueOut[tid] = tid;
 
-    if (sampleIdx == 0u)
+    const uint32_t firstRadianceSample = uniforms.canonicalGuideSample ? 1u : 0u;
+    if (sampleIdx == firstRadianceSample)
     {
         radianceOut[tid] = float4(0.0f);
     }
@@ -170,6 +187,22 @@ kernel void wavefrontGenerate(
 
     float3 origin, direction;
     generateCameraRay(pixel, rng, origin, direction, uniforms, motionTime);
+    if (uniforms.canonicalGuideSample && sampleIdx == 0u)
+    {
+        AovSample a;
+        a.diffuseAlbedo = packed_float3(float3(0.0f));
+        a.specularAlbedo = packed_float3(float3(0.0f));
+        a.normal = packed_float3(-direction);
+        a.roughness = 1.0f;
+        a.depth =
+            uniforms.denoiseDepthMode == kDenoiseDepthDevice ? 0.0f : 1e7f;
+        a.motionX = 0.0f;
+        a.motionY = 0.0f;
+        a.specularHitDistance = 0.0f;
+        a.reactive = 1.0f;
+        a.pad2 = 0.0f;
+        aov[tid] = a;
+    }
 
     PathRay r;
     r.origin = packed_float3(origin);
@@ -337,6 +370,101 @@ static void fetchTriangle(device const char* vertexBuffer,
 }
 
 
+// Where this hit point stood one frame ago, in world space.
+//
+// This is the whole difference between a motion vector that describes the scene
+// and one that only describes the camera. Two things can have moved a surface
+// between frames: the skinning pass rewrote its vertices, and the node holding it
+// was re-placed. Both are read from the previous frame's copies, at the same
+// barycentric coordinates, so what comes back is the same material point earlier
+// in time. Without it a temporal denoiser reprojects a moving limb onto wherever
+// that pixel used to be looking and smears the two together -- the ghosting that
+// shows up on exactly the animated content the denoiser is supposed to help with.
+static inline float3 previousWorldPosition(
+    device const char* prevFrameVertexBuffer,
+    device const uint32_t* indexBuffer,
+    constant MTLAccelerationStructureUserIDInstanceDescriptor* prevInstances,
+    GeometryEntry entry,
+    uint32_t primitiveId,
+    float2 bary)
+{
+    constexpr uint32_t vtxStride = 32; // see fetchTriangle for the layout
+
+    float3 p[3];
+    for (uint32_t k = 0; k < 3; ++k)
+    {
+        const uint32_t idx = indexBuffer[entry.indexOffset + primitiveId * 3 + k];
+        p[k] = float3(*(device const packed_float3*)(prevFrameVertexBuffer +
+                                                     (entry.vbOffset + idx) * vtxStride));
+    }
+    const float3 objectPos = interpolateAttrib(p[0], p[1], p[2], bary);
+
+    const auto inst = prevInstances[entry.instanceIndex];
+    const float4x4 prevObjectToWorld = float4x4(
+        float4(float3(inst.transformationMatrix[0]), 0.0f),
+        float4(float3(inst.transformationMatrix[1]), 0.0f),
+        float4(float3(inst.transformationMatrix[2]), 0.0f),
+        float4(float3(inst.transformationMatrix[3]), 1.0f));
+    return (prevObjectToWorld * float4(objectPos, 1.0f)).xyz;
+}
+
+// Depth in whichever convention the denoiser is currently being fed; see
+// kDenoiseDepth* for why this is a switch rather than a decision.
+static inline float viewDepth(constant Uniforms& uniforms, float3 worldPosition)
+{
+    if (uniforms.denoiseDepthMode == kDenoiseDepthDevice)
+    {
+        const float4 clip = uniforms.worldToClip * float4(worldPosition, 1.0f);
+        return clip.w > 0.0f ? clip.z / clip.w : 1.0f;
+    }
+    const float3 eye = (uniforms.viewToWorld * float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+    if (uniforms.denoiseDepthMode == kDenoiseDepthViewZ)
+    {
+        // Along the camera axis, which is what a depth buffer holds before the
+        // projection is applied. The third column of viewToWorld is the camera's
+        // backward axis, so forward is its negation.
+        const float3 forward =
+            -float3(uniforms.viewToWorld[0][2], uniforms.viewToWorld[1][2], uniforms.viewToWorld[2][2]);
+        return dot(worldPosition - eye, forward);
+    }
+    return length(worldPosition - eye);
+}
+
+// The value the background writes. Device depth has a finite far plane, so the
+// sentinel has to match the convention or the denoiser reads the sky as being
+// nearer than the geometry.
+static inline float backgroundDepth(constant Uniforms& uniforms)
+{
+    return uniforms.denoiseDepthMode == kDenoiseDepthDevice ? 0.0f : 1e7f;
+}
+
+// Where a point was on screen last frame, in pixels, y down. That is the sign
+// MetalFX documents: "the motion vectors for an object that moves down and to
+// the right by 10 pixels would be (-10,-10)".
+//
+// The current position is the *jittered* sample position, not the pixel centre.
+// The ray that produced this hit went through the jitter offset, so projecting
+// the hit back through the current camera lands there, not at the centre.
+// Differencing against the centre instead leaves the jitter inside every motion
+// vector -- a subpixel wobble on every pixel of a perfectly still image, which is
+// the one thing a temporal reconstruction must not be told, because MetalFX
+// already accounts for the jitter itself through jitterOffsetX/Y.
+static inline float2 screenMotion(constant Uniforms& uniforms, float4 prevClip, uint2 pixel)
+{
+    if (prevClip.w <= 0.0f)
+    {
+        return float2(0.0f);
+    }
+    const float2 prevNdc = prevClip.xy / prevClip.w;
+    const float2 prevPixel = float2((prevNdc.x * 0.5f + 0.5f) * (float)uniforms.width,
+                                    (1.0f - (prevNdc.y * 0.5f + 0.5f)) * (float)uniforms.height);
+    // generateCameraRay builds pixelPos.y as height - (y + 0.5 + jitterY), so the
+    // flip cancels and the sample sits at row y + 0.5 + jitterY in screen space.
+    const float2 currPixel = float2((float)pixel.x + 0.5f + uniforms.jitterX,
+                                    (float)pixel.y + 0.5f + uniforms.jitterY);
+    return prevPixel - currPixel;
+}
+
 // ---------------------------------------------------------------------------
 // miss -- rays that escaped the scene
 //
@@ -354,6 +482,7 @@ kernel void wavefrontMiss(
     device const uint32_t*  queue         [[buffer(4)]],
     device const uint32_t*  control       [[buffer(5)]],
     device AovSample*       aov           [[buffer(6)]],
+    constant uint32_t&      sampleIdx     [[buffer(7)]],
     texture2d<float>        envMapTexture [[texture(0)]])
 {
     if (gid >= control[WF_CTRL_MISS_N])
@@ -369,18 +498,33 @@ kernel void wavefrontMiss(
     const bool neeDone = (p.depthAndFlags & PATH_FLAG_NEE_DONE) != 0u;
 
     // Background still needs a record, or the denoiser reads whatever the
-    // previous frame left in the guides and smears the silhouette.
-    if (uniforms.writeAov && depth == 0u)
+    // previous frame left in the guides and smears the silhouette. Not only at
+    // depth 0: a specular primary hit defers its guides, so if the reflected ray
+    // is the one that escapes, this is the only chance to write them.
+    if (shouldWriteAov(uniforms, sampleIdx) &&
+        (depth == 0u || (p.depthAndFlags & PATH_FLAG_AOV_DONE) == 0u))
     {
         AovSample a;
         a.diffuseAlbedo = packed_float3(float3(0.0f));
         a.specularAlbedo = packed_float3(float3(0.0f));
         a.normal = packed_float3(-rayDir);
         a.roughness = 1.0f;
-        a.depth = 1e7f;
-        a.motionX = 0.0f;
-        a.motionY = 0.0f;
-        a.pad0 = a.pad1 = a.pad2 = 0.0f;
+        a.depth = backgroundDepth(uniforms);
+        // The sky moves on screen when the camera turns, and leaving this at zero
+        // tells the denoiser it did not: the history is then blended from the
+        // wrong place across the whole background. A direction reprojects like a
+        // point at infinity -- w = 0 -- so the previous camera is all that is
+        // needed, and no depth.
+        const float2 motion =
+            screenMotion(uniforms, uniforms.prevWorldToClip * float4(rayDir, 0.0f),
+                         uint2(tid % uniforms.width, tid / uniforms.width));
+        a.motionX = motion.x;
+        a.motionY = motion.y;
+        a.specularHitDistance = 0.0f;
+        // Sky seen through a mirror moves with the reflection, not with the
+        // reflector, so its history is not reliable either.
+        a.reactive = (depth > 0u) ? 1.0f : 0.0f;
+        a.pad2 = 0.0f;
         aov[tid] = a;
     }
 
@@ -446,6 +590,11 @@ kernel void wavefrontShade(
     device ShadowRay*                                          shadowRays     [[buffer(19)]],
     device atomic_uint*                                        shadowCounter  [[buffer(20)]],
     device AovSample*                                          aov            [[buffer(22)]],
+    // The previous frame's pose, for motion vectors. Separate from
+    // prevVertexBuffer, which is a motion-blur shutter keyframe and is forced
+    // equal to the current pose whenever motion blur is off.
+    device const char*                                         prevFrameVertexBuffer [[buffer(23)]],
+    constant MTLAccelerationStructureUserIDInstanceDescriptor* prevInstances  [[buffer(24)]],
     texture2d<float>                                           envMapTexture  [[texture(0)]])
 {
     if (gid >= control[WF_CTRL_HIT_N])
@@ -478,18 +627,24 @@ kernel void wavefrontShade(
         // A light's geometry is still a surface the denoiser has to reconstruct.
         // Its emission is unaffected by denoising, so it gets a black albedo and
         // its own geometry, which keeps the guides continuous across the edge.
-        if (uniforms.writeAov && depth == 0u)
+        if (shouldWriteAov(uniforms, sampleIdx) && depth == 0u)
         {
             AovSample a;
             a.diffuseAlbedo = packed_float3(float3(0.0f));
             a.specularAlbedo = packed_float3(float3(0.0f));
             a.normal = packed_float3(-rayDir);
             a.roughness = 1.0f;
-            const float4 eye = uniforms.viewToWorld * float4(0.0f, 0.0f, 0.0f, 1.0f);
-            a.depth = length(hitPoint - eye.xyz);
-            a.motionX = 0.0f;
-            a.motionY = 0.0f;
-            a.pad0 = a.pad1 = a.pad2 = 0.0f;
+            a.depth = viewDepth(uniforms, hitPoint);
+            // Analytic lights do not move, so the camera is the only thing that
+            // can have displaced them.
+            const float2 motion =
+                screenMotion(uniforms, uniforms.prevWorldToClip * float4(hitPoint, 1.0f),
+                             uint2(tid % uniforms.width, tid / uniforms.width));
+            a.motionX = motion.x;
+            a.motionY = motion.y;
+            a.specularHitDistance = 0.0f;
+            a.reactive = (depth > 0u) ? 1.0f : 0.0f;
+            a.pad2 = 0.0f;
             aov[tid] = a;
         }
         device const UniformLight& currLight = lights[lightId];
@@ -572,9 +727,25 @@ kernel void wavefrontShade(
         return;
     }
 
-    // Denoiser guides, from the first hit only: everything a temporal denoiser
-    // needs to tell a surface from the noise on it.
-    if (uniforms.writeAov && depth == 0u)
+    // Denoiser guides, from the first surface that can actually be described.
+    //
+    // A mirror or a pane of glass has no albedo to demodulate against and a
+    // roughness of nothing, so guides taken there tell the denoiser that a
+    // featureless black surface sits where a whole reflected world is, and the
+    // reflection is left to denoise itself with no help at all. Walking on to the
+    // first rough surface gives it something to work with. PATH_FLAG_AOV_DONE
+    // stops the bounce after that from overwriting it.
+    const bool aovDone = (p.depthAndFlags & PATH_FLAG_AOV_DONE) != 0u;
+    // Below this a surface reflects rather than scatters, and its own albedo is
+    // not what the pixel's colour comes from.
+    constexpr float kGuideRoughnessFloor = 0.05f;
+    const bool guideWorthy = si.roughness > kGuideRoughnessFloor;
+    // Never walk forever: past a couple of bounces the reflected surface has
+    // little to do with this pixel, and no guides at all is worse than imperfect
+    // ones.
+    const bool guideLastChance = depth >= 2u;
+    if (shouldWriteAov(uniforms, sampleIdx) && !aovDone &&
+        (guideWorthy || guideLastChance))
     {
         AovSample a;
         // Metals put their colour in the specular lobe and have no diffuse one.
@@ -583,30 +754,42 @@ kernel void wavefrontShade(
         a.specularAlbedo = packed_float3(mix(float3(0.04f), base, si.metallic));
         a.normal = packed_float3(si.shading_normal);
         a.roughness = si.roughness;
-        // View-space distance along the camera axis, which is what a depth
-        // texture is expected to hold; the ray parameter would be the distance to
-        // the eye instead and would bend the surfaces the denoiser reconstructs.
-        const float4 viewPos = uniforms.viewToWorld * float4(0.0f, 0.0f, 0.0f, 1.0f);
-        a.depth = length(worldPosition - viewPos.xyz);
+        a.depth = viewDepth(uniforms, worldPosition);
 
-        // Where this point was on screen last frame. Static geometry only: a
-        // deforming surface would need its previous position, which the tracer
-        // does not keep per hit.
-        const float4 prevClip = uniforms.prevWorldToClip * float4(worldPosition, 1.0f);
-        float2 motion = float2(0.0f);
-        if (prevClip.w > 0.0f)
-        {
-            const float2 prevNdc = prevClip.xy / prevClip.w;
-            const float2 prevPixel = float2((prevNdc.x * 0.5f + 0.5f) * (float)uniforms.width,
-                                            (1.0f - (prevNdc.y * 0.5f + 0.5f)) * (float)uniforms.height);
-            const float2 currPixel = float2((float)(tid % uniforms.width) + 0.5f,
-                                            (float)(tid / uniforms.width) + 0.5f);
-            motion = prevPixel - currPixel;
-        }
+        // Where this point was on screen last frame. With no previous pose to
+        // read -- the first frame, or the frame after a reset -- the best
+        // available answer is that it has not moved, and the history is being
+        // discarded for that frame anyway.
+        const float3 prevWorldPosition =
+            uniforms.hasPrevFramePose
+                ? previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances, entry,
+                                        rec.primitiveId, bary)
+                : worldPosition;
+        const float2 motion =
+            screenMotion(uniforms, uniforms.prevWorldToClip * float4(prevWorldPosition, 1.0f),
+                         uint2(tid % uniforms.width, tid / uniforms.width));
         a.motionX = motion.x;
         a.motionY = motion.y;
-        a.pad0 = a.pad1 = a.pad2 = 0.0f;
+        // Filled in by the bounce that follows a specular one; see below.
+        a.specularHitDistance = 0.0f;
+        // Guides taken past a specular bounce describe a reflected surface, and
+        // its motion vector is the *reflector's* -- which is not where the
+        // reflection moves. Tell the denoiser not to trust the history there.
+        const float sweptReactive =
+            uniforms.isMotionBlurVisible ? saturate(length(motion) * 0.25f) : 0.0f;
+        a.reactive = max((depth > 0u) ? 1.0f : 0.0f, sweptReactive);
+        a.pad2 = 0.0f;
         aov[tid] = a;
+        p.depthAndFlags |= PATH_FLAG_AOV_DONE;
+        paths[tid].depthAndFlags = p.depthAndFlags;
+    }
+
+    // What the specular lobe of the primary hit is looking at. MetalFX takes this
+    // separately so it can reproject a reflection at the depth of the thing being
+    // reflected rather than at the mirror's own.
+    if (shouldWriteAov(uniforms, sampleIdx) && depth == 1u && specularBounce)
+    {
+        aov[tid].specularHitDistance = rec.distance;
     }
 
     if (si.emission.x > 0.0f || si.emission.y > 0.0f || si.emission.z > 0.0f)
@@ -732,9 +915,14 @@ kernel void wavefrontShade(
 
     p.throughput = packed_float3(nextThroughput);
     p.lastBsdfPdf = nextSpecular ? 1.0f : sampleResult.pdf;
+    // AOV_DONE is carried, not rebuilt: it records something that already
+    // happened to this path, unlike the others, which describe the bounce being
+    // set up. Dropping it let every escaping ray overwrite guides that a surface
+    // had already written, which is most of the frame in an open scene.
     p.depthAndFlags = (depth + 1u) | PATH_FLAG_ALIVE |
                       (nextSpecular ? PATH_FLAG_SPECULAR : 0u) |
-                      (didNee ? PATH_FLAG_NEE_DONE : 0u);
+                      (didNee ? PATH_FLAG_NEE_DONE : 0u) |
+                      (p.depthAndFlags & PATH_FLAG_AOV_DONE);
     paths[tid] = p;
 
     queuePush(outCounter, queueOut, tid);
@@ -937,13 +1125,17 @@ kernel void wavefrontAovResolve(
     constant Uniforms&             uniforms  [[buffer(0)]],
     device const AovSample*        aov       [[buffer(1)]],
     device const float4*           radiance  [[buffer(2)]],
+    constant uint32_t&             sampleCount [[buffer(3)]],
+    device const float4*           accumulated [[buffer(4)]],
     texture2d<float, access::write> colorTex   [[texture(0)]],
     texture2d<float, access::write> depthTex   [[texture(1)]],
     texture2d<float, access::write> motionTex  [[texture(2)]],
     texture2d<float, access::write> diffuseTex [[texture(3)]],
     texture2d<float, access::write> specularTex[[texture(4)]],
     texture2d<float, access::write> normalTex  [[texture(5)]],
-    texture2d<float, access::write> roughTex   [[texture(6)]])
+    texture2d<float, access::write> roughTex   [[texture(6)]],
+    texture2d<float, access::write> specHitTex [[texture(7)]],
+    texture2d<float, access::write> reactiveTex[[texture(8)]])
 {
     if (tid.x >= uniforms.width || tid.y >= uniforms.height)
     {
@@ -954,11 +1146,41 @@ kernel void wavefrontAovResolve(
 
     // Linear radiance, not the tonemapped image: the denoiser works in the space
     // the light actually arrived in and exposure comes after it.
-    colorTex.write(float4(radiance[i].xyz, 1.0f), tid);
+    //
+    // Divided by the sample count, as the resolve pass does. The radiance buffer
+    // holds the *sum* over this launch's samples, so handing it over raw makes the
+    // denoiser's input brighter by a factor of spp -- invisible at one sample per
+    // launch, which is why it survived, and wrong the moment anyone raises it.
+    //
+    // When the estimator is accumulating, hand over the running mean rather than
+    // this launch's samples. Nothing stops a paused, static scene from converging
+    // -- the accumulator is already doing it -- but the denoiser was being fed a
+    // one-sample frame forever, so what reached the screen never got better than
+    // its own temporal filter could make it.
+    const float3 launch = radiance[i].xyz / (float)max(sampleCount, 1u);
+    float3 color = uniforms.useAccumulatedColor ? accumulated[i].xyz : launch;
+
+    // Firefly clamp, in exposed units so the threshold means the same thing at
+    // any exposure. A single unbounded sample is a bright dot that a temporal
+    // filter then smears across many frames -- it costs far more than the energy
+    // it carries. Clamped rather than dropped, so the pixel keeps its hue and
+    // most of its brightness. Off when the threshold is zero.
+    if (uniforms.denoiseFireflyClamp > 0.0f)
+    {
+        const float3 exposed = color * float3(uniforms.exposureValue);
+        const float lum = dot(exposed, float3(0.2126f, 0.7152f, 0.0722f));
+        if (lum > uniforms.denoiseFireflyClamp)
+        {
+            color *= uniforms.denoiseFireflyClamp / lum;
+        }
+    }
+    colorTex.write(float4(color, 1.0f), tid);
     depthTex.write(float4(a.depth, 0.0f, 0.0f, 0.0f), tid);
     motionTex.write(float4(a.motionX, a.motionY, 0.0f, 0.0f), tid);
     diffuseTex.write(float4(float3(a.diffuseAlbedo), 1.0f), tid);
     specularTex.write(float4(float3(a.specularAlbedo), 1.0f), tid);
     normalTex.write(float4(float3(a.normal), 0.0f), tid);
     roughTex.write(float4(a.roughness, 0.0f, 0.0f, 0.0f), tid);
+    specHitTex.write(float4(a.specularHitDistance, 0.0f, 0.0f, 0.0f), tid);
+    reactiveTex.write(float4(saturate(a.reactive), 0.0f, 0.0f, 0.0f), tid);
 }
