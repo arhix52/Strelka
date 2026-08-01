@@ -60,10 +60,36 @@ struct Instance
     uint32_t mLightId = (uint32_t)-1;
 };
 
-enum class DirtyFlag: uint32_t {
-    eNone,
-    eLights,
+enum class ChangeBits : uint32_t
+{
+    None = 0,
+    Transforms = 1u << 0,
+    Lights = 1u << 1,
+    Materials = 1u << 2,
+    Env = 1u << 3,
+    Geometry = 1u << 4,
 };
+
+inline ChangeBits operator|(ChangeBits a, ChangeBits b)
+{
+    return static_cast<ChangeBits>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+
+inline ChangeBits operator&(ChangeBits a, ChangeBits b)
+{
+    return static_cast<ChangeBits>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+}
+
+inline ChangeBits& operator|=(ChangeBits& a, ChangeBits b)
+{
+    a = a | b;
+    return a;
+}
+
+inline bool any(ChangeBits bits)
+{
+    return static_cast<uint32_t>(bits) != 0;
+}
 
 class Scene
 {
@@ -292,9 +318,44 @@ public:
         return mLights;
     }
 
+    const std::vector<Light>& getLights() const
+    {
+        return mLights;
+    }
+
     std::vector<UniformLightDesc>& getLightsDesc()
     {
         return mLightDesc;
+    }
+
+    const std::vector<UniformLightDesc>& getLightsDesc() const
+    {
+        return mLightDesc;
+    }
+
+    const std::vector<MaterialDescription>& getMaterials() const
+    {
+        return mMaterialsDescs;
+    }
+
+    const std::vector<Vertex>& getVertices() const
+    {
+        return mVertices;
+    }
+
+    const std::vector<uint32_t>& getIndices() const
+    {
+        return mIndices;
+    }
+
+    const std::vector<Instance>& getInstances() const
+    {
+        return mInstances;
+    }
+
+    std::vector<Instance>& getInstances()
+    {
+        return mInstances;
     }
 
     std::vector<Animation>& getAnimations()
@@ -388,11 +449,6 @@ public:
     {
         std::scoped_lock lock(mCameraMutex);
         return mCameras.size();
-    }
-
-    std::vector<Instance>& getInstances()
-    {
-        return mInstances;
     }
 
     const std::vector<Mesh>& getMeshes() const
@@ -491,10 +547,34 @@ public:
         float rotationY = 0.0f;
     };
 
-    void setEnvLight(const EnvLightDesc& desc) { mEnvLight = desc; }
+    void setEnvLight(const EnvLightDesc& desc)
+    {
+        mEnvLight = desc;
+        markChanged(ChangeBits::Env);
+    }
     const std::optional<EnvLightDesc>& getEnvLight() const { return mEnvLight; }
 
+    void setSourcePath(const std::string& path) { modelPath = path; }
+    const std::string& getSourcePath() const { return modelPath; }
+
+    /// Unified light edit: updates desc, baked GPU light, and proxy instance.
+    void setLight(uint32_t lightId, const UniformLightDesc& desc);
+    /// Legacy: bakes GPU light from desc without writing mLightDesc (prefer setLight).
     void updateLight(uint32_t lightId, const UniformLightDesc& desc);
+
+    uint32_t getLightInstanceId(uint32_t lightId) const
+    {
+        auto it = mLightIdToInstanceId.find(lightId);
+        return it != mLightIdToInstanceId.end() ? it->second : (uint32_t)-1;
+    }
+
+    /// Authoritative node local TRS edit; refreshes derived instance transforms.
+    void setNodeLocalTransform(uint32_t nodeId,
+                               const glm::float3& translation,
+                               const glm::quat& rotation,
+                               const glm::float3& scale);
+
+    void setMaterial(uint32_t id, const MaterialDescription& desc);
     /// <summary>
     /// Create Mesh geometry
     /// </summary>
@@ -539,14 +619,34 @@ public:
 
     std::vector<uint32_t>& getTransparentInstancesToRender(const glm::float3& camPos);
 
-    DirtyFlag getDirtyState()
+    ChangeBits peekChanges() const
     {
-        return mDirty;
+        return mChanges;
+    }
+
+    ChangeBits consumeChanges()
+    {
+        const ChangeBits bits = mChanges;
+        mChanges = ChangeBits::None;
+        mDirtyInstances.clear();
+        return bits;
+    }
+
+    void markChanged(ChangeBits bits)
+    {
+        mChanges |= bits;
+    }
+
+    /// Legacy wrappers — prefer peekChanges / consumeChanges.
+    ChangeBits getDirtyState()
+    {
+        return mChanges;
     }
 
     void clearDirtyState()
     {
-        mDirty = DirtyFlag::eNone;
+        mChanges = ChangeBits::None;
+        mDirtyInstances.clear();
     }
 
     /// <summary>
@@ -562,16 +662,40 @@ public:
     /// <param name="newTransform">new transformation matrix</param>
     /// <returns>Nothing</returns>
     void updateInstanceTransform(uint32_t instId, glm::float4x4 newTransform);
-    /// <summary>
-    /// Changes status of scene and cleans up mDirty* sets
-    /// </summary>
-    /// <returns>Nothing</returns>
-    void beginFrame();
-    /// <summary>
-    /// Changes status of scene
-    /// </summary>
-    /// <returns>Nothing</returns>
-    void endFrame();
+
+    struct PickHit
+    {
+        bool hit = false;
+        uint32_t instanceId = (uint32_t)-1;
+        uint32_t nodeId = (uint32_t)-1;
+        uint32_t lightId = (uint32_t)-1;
+        float distance = 0.0f;
+        glm::float3 position{ 0.0f };
+    };
+
+    /// CPU raycast against mesh instances (and light proxies). Closest hit wins.
+    PickHit pick(const glm::float3& origin, const glm::float3& direction);
+
+    /// Axis aligned bounds of an instance in the space its transform maps to
+    /// world, with the current skinning pose applied.
+    ///
+    /// Skinning runs on the GPU and its result never comes back, so the CPU
+    /// vertex buffer of a skeletal mesh keeps holding the rest pose. Anything
+    /// CPU side that needs the posed geometry has to re-evaluate it from the
+    /// joint palette, which is what this does.
+    bool computeInstanceBounds(uint32_t instId, glm::float3& outMin, glm::float3& outMax);
+
+    /// Joint matrices driving the instance this frame, empty when it is rigid.
+    std::vector<glm::mat4> buildJointPalette(uint32_t instId);
+
+    /// Position of a mesh vertex after skinning, in the space the instance
+    /// transform maps to world. Pass the palette from buildJointPalette().
+    glm::float3 posedVertexPosition(const Mesh& mesh,
+                                    uint32_t vertexIndex,
+                                    const std::vector<glm::mat4>& jointPalette) const;
+
+    /// Node owning the instance, -1 when the instance is not attached to one.
+    int findInstanceNodeId(uint32_t instId) const;
 
 private:
     std::vector<Camera> mCameras;
@@ -584,11 +708,18 @@ private:
 
     std::vector<MaterialDescription> mMaterialsDescs;
 
+    /// Weight blended skinning matrix of a mesh vertex. Returns false when the
+    /// vertex carries no skinning, in which case its stored position is final.
+    bool vertexSkinMatrix(const Mesh& mesh,
+                          uint32_t vertexIndex,
+                          const std::vector<glm::mat4>& jointPalette,
+                          glm::mat4& outMat) const;
+
     uint32_t createRectLightMesh();
     uint32_t createDiscLightMesh();
     uint32_t createSphereLightMesh();
 
-    DirtyFlag mDirty;
+    ChangeBits mChanges = ChangeBits::None;
 
     std::optional<EnvLightDesc> mEnvLight;
 

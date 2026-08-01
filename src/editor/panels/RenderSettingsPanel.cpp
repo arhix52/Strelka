@@ -12,6 +12,15 @@ void EditorApp::drawRenderSettingsPanel()
 {
     ImGui::Begin("Render Settings:");
 
+    {
+        bool analytic = m_settingsManager->getAs<bool>("render/validate/analyticLights");
+        if (ImGui::Checkbox("Analytic Lights", &analytic))
+        {
+            m_settingsManager->setAs<bool>("render/validate/analyticLights", analytic);
+            m_sharedCtx->mSubframeIndex = 0;
+        }
+    }
+
     // Must match DebugMode in ShaderTypes.h, in order.
     const char* debugViewOptions[] = { "None",          "Normals",         "Motion Blur",
                                        "AOV: diffuse",  "AOV: specular",   "AOV: normal",

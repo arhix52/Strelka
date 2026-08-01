@@ -237,4 +237,18 @@ void Camera::update(float deltaTime)
     }
 }
 
+void generatePickRay(const Camera& camera, const glm::float2& uv, glm::float3& origin, glm::float3& direction)
+{
+    // Same chain as the shader: NDC with y up, unprojected through clipToView,
+    // then rotated into world space. The w component is deliberately left alone;
+    // only the direction matters here.
+    const float ndcX = uv.x * 2.0f - 1.0f + camera.shiftX * 2.0f;
+    const float ndcY = (1.0f - uv.y) * 2.0f - 1.0f + camera.shiftY * 2.0f;
+    const glm::float4 viewSpace = camera.matrices.invPerspective * glm::float4(ndcX, ndcY, 1.0f, 1.0f);
+    const glm::float4x4 viewToWorld = glm::inverse(camera.matrices.view);
+
+    origin = glm::float3(viewToWorld * glm::float4(0.0f, 0.0f, 0.0f, 1.0f));
+    direction = glm::normalize(glm::float3(viewToWorld * glm::float4(viewSpace.x, viewSpace.y, viewSpace.z, 0.0f)));
+}
+
 } // namespace oka

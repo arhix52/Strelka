@@ -942,6 +942,8 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
         return false;
     }
 
+    scene.setSourcePath(modelPath);
+
     using namespace std;
     tinygltf::Model model;
     tinygltf::TinyGLTF gltf_ctx;

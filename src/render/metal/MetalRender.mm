@@ -1600,6 +1600,12 @@ void MetalRender::render(Buffer* output)
             const fs::path envTexPath = fs::path(resourcePathStr) / envLight->texturePath;
             loadEnvMap(envTexPath.string());
         }
+        // Fresh scene: drop any pending edit bits from load-time createLight.
+        mScene->consumeChanges();
+    }
+    else
+    {
+        handleSceneChanges();
     }
 
     mFrameIndex = (mFrameIndex + 1) % kMaxFramesInFlight;
@@ -2869,24 +2875,86 @@ void MetalRender::buildTonemapperPipeline()
     pComputeLibrary->release();
 }
 
+void MetalRender::uploadLightBuffer()
+{
+    const std::vector<Scene::Light>& lightDescs = mScene->getLights();
+    static_assert(sizeof(Scene::Light) == sizeof(UniformLight));
+    const size_t lightBufferSize = sizeof(Scene::Light) * lightDescs.size();
+
+    if (lightBufferSize == 0)
+    {
+        if (mLightBuffer)
+        {
+            mLightBuffer->release();
+            mLightBuffer = nullptr;
+        }
+        return;
+    }
+
+    if (!mLightBuffer || mLightBuffer->length() < lightBufferSize)
+    {
+        if (mLightBuffer)
+            mLightBuffer->release();
+        mLightBuffer = mDevice->newBuffer(lightBufferSize, MTL::ResourceStorageModeManaged);
+    }
+    memcpy(mLightBuffer->contents(), lightDescs.data(), lightBufferSize);
+    mLightBuffer->didModifyRange(NS::Range::Make(0, lightBufferSize));
+}
+
+void MetalRender::handleSceneChanges()
+{
+    SharedContext& ctx = getSharedContext();
+    const ChangeBits changes = mScene->peekChanges();
+    if (!any(changes))
+        return;
+
+    bool needReset = false;
+    if (any(changes & ChangeBits::Lights))
+    {
+        uploadLightBuffer();
+        needReset = true;
+    }
+    if (any(changes & ChangeBits::Transforms))
+    {
+        if (!mBlasList.empty())
+            rebuildTLAS();
+        needReset = true;
+    }
+    if (any(changes & ChangeBits::Materials))
+    {
+        createMetalMaterials();
+        needReset = true;
+    }
+    if (any(changes & ChangeBits::Env))
+    {
+        const auto& envLight = mScene->getEnvLight();
+        if (envLight.has_value() && !envLight->texturePath.empty())
+        {
+            const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");
+            const fs::path envTexPath = fs::path(resourcePathStr) / envLight->texturePath;
+            loadEnvMap(envTexPath.string());
+        }
+        needReset = true;
+    }
+
+    mScene->consumeChanges();
+    if (needReset)
+    {
+        ctx.mSubframeIndex = 0;
+        mResetDenoiseHistory = true;
+    }
+}
+
 void MetalRender::buildBuffers()
 {
     const std::vector<Scene::Vertex>& vertices = mScene->getVertices();
     const std::vector<uint32_t>& indices = mScene->getIndices();
-    const std::vector<Scene::Light>& lightDescs = mScene->getLights();
 
-    static_assert(sizeof(Scene::Light) == sizeof(UniformLight));
-    const size_t lightBufferSize = sizeof(Scene::Light) * lightDescs.size();
     const size_t vertexDataSize = sizeof(Scene::Vertex) * vertices.size();
     const size_t indexDataSize = sizeof(uint32_t) * indices.size();
 
-    MTL::Buffer* pLightBuffer = nullptr;
-    if (lightBufferSize > 0)
-    {
-        pLightBuffer = mDevice->newBuffer(lightBufferSize, MTL::ResourceStorageModeManaged);
-        memcpy(pLightBuffer->contents(), lightDescs.data(), lightBufferSize);
-        pLightBuffer->didModifyRange(NS::Range::Make(0, pLightBuffer->length()));
-    }
+    uploadLightBuffer();
+
     MTL::Buffer* pVertexBuffer = nullptr;
     if (vertexDataSize > 0)
     {
@@ -2902,7 +2970,6 @@ void MetalRender::buildBuffers()
         pIndexBuffer->didModifyRange(NS::Range::Make(0, pIndexBuffer->length()));
     }
 
-    mLightBuffer = pLightBuffer;
     mVertexBuffer = pVertexBuffer;
     mIndexBuffer = pIndexBuffer;
 

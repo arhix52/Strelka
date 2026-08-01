@@ -14,6 +14,7 @@ class CameraController : public oka::InputHandler
     float keyRotationSpeed = 60.0f; // degrees per second for arrow key rotation
 
     bool mIsViewportHovered = false;
+    bool mGizmoBlocksInput = false;
 
     struct RotateKeys
     {
@@ -26,6 +27,17 @@ class CameraController : public oka::InputHandler
 public:
     virtual ~CameraController() = default;
 
+    void setGizmoBlocksInput(bool blocks)
+    {
+        mGizmoBlocksInput = blocks;
+        if (blocks)
+        {
+            mCam.mouseButtons.left = false;
+            mCam.mouseButtons.right = false;
+            mCam.mouseButtons.middle = false;
+        }
+    }
+
     void update(double deltaTime, float speed)
     {
         mCam.rotationSpeed = rotationSpeed;
@@ -36,10 +48,14 @@ public:
         if (mRotateKeys.left || mRotateKeys.right || mRotateKeys.up || mRotateKeys.down)
         {
             float dx = 0.0f, dy = 0.0f;
-            if (mRotateKeys.left)  dx -= keyRotationSpeed * deltaTime;
-            if (mRotateKeys.right) dx += keyRotationSpeed * deltaTime;
-            if (mRotateKeys.up)    dy -= keyRotationSpeed * deltaTime;
-            if (mRotateKeys.down)  dy += keyRotationSpeed * deltaTime;
+            if (mRotateKeys.left)
+                dx -= keyRotationSpeed * deltaTime;
+            if (mRotateKeys.right)
+                dx += keyRotationSpeed * deltaTime;
+            if (mRotateKeys.up)
+                dy -= keyRotationSpeed * deltaTime;
+            if (mRotateKeys.down)
+                dy += keyRotationSpeed * deltaTime;
             mCam.rotate(dx, dy);
         }
     }
@@ -146,6 +162,16 @@ public:
 
     void mouseButtonCallback(int button, int action, [[maybe_unused]] int mods, bool viewPortHovered)
     {
+        if (mGizmoBlocksInput)
+        {
+            if (action == GLFW_RELEASE)
+            {
+                mCam.mouseButtons.left = false;
+                mCam.mouseButtons.right = false;
+            }
+            return;
+        }
+
         if (button == GLFW_MOUSE_BUTTON_RIGHT)
         {
             if (action == GLFW_PRESS && viewPortHovered)
@@ -172,6 +198,13 @@ public:
 
     void handleMouseMoveCallback([[maybe_unused]] double xpos, [[maybe_unused]] double ypos)
     {
+        if (mGizmoBlocksInput)
+        {
+            mCam.mousePos[0] = xpos;
+            mCam.mousePos[1] = ypos;
+            return;
+        }
+
         const float dx = mCam.mousePos[0] - xpos;
         const float dy = mCam.mousePos[1] - ypos;
 

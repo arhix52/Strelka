@@ -1193,13 +1193,20 @@ void OptiXRender::render(Buffer* output)
         createLightBuffer();
     }
 
-    if (mScene->getDirtyState() == DirtyFlag::eLights)
+    const ChangeBits changes = mScene->peekChanges();
+    if (any(changes & ChangeBits::Lights))
     {
         createLightBuffer();
         createTopLevelAccelerationStructure();
-        // createSbt();
-
-        mScene->clearDirtyState();
+    }
+    if (any(changes & ChangeBits::Transforms))
+    {
+        // Instance transforms changed outside the animation path
+        createTopLevelAccelerationStructure();
+    }
+    if (any(changes & (ChangeBits::Lights | ChangeBits::Transforms | ChangeBits::Materials)))
+    {
+        mScene->consumeChanges();
     }
 
     SettingsManager& settings = *getSettings();

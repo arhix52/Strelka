@@ -332,6 +332,8 @@ private:
     void buildComputePipeline();
     void buildTonemapperPipeline();
     void buildBuffers();
+    void uploadLightBuffer();
+    void handleSceneChanges();
 
     MTL::Texture* loadTextureFromFile(const std::string& fileName);
     void createMetalMaterials();

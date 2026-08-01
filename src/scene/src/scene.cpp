@@ -7,7 +7,10 @@
 #include <glm/gtx/matrix_decompose.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
+#include <limits>
+#include <unordered_map>
 
 #include <log.h>
 
@@ -322,6 +325,7 @@ bool Scene::applyNodeSideEffects(const uint32_t nodeId)
             Instance& inst = mInstances[instId];
             inst.transform = mGlobalTransforms[nodeId];
             inst.isAnimated = true;
+            mDirtyInstances.insert(instId);
         }
         return false;
 
@@ -412,6 +416,9 @@ bool Scene::applyAnimation(const uint32_t animId)
         if (mNodeDirty[nodeId])
             blasChanged |= applyNodeSideEffects((uint32_t)nodeId);
     }
+    // Playback already returns whether the accel structure needs a rebuild; do
+    // not also raise ChangeBits::Transforms or the renderer would rebuild TLAS
+    // twice a frame (once from handleSceneChanges, once from the anim path).
     return blasChanged;
 }
 
@@ -425,19 +432,18 @@ void Scene::applySkinning()
             std::vector<glm::mat4> jointMat;
             computeJointMatrices(&jointMat, jointCount, node.skin);
             for (const auto instId: node.instanceIds) {
-                auto &mesh = mMeshes[mInstances[instId].mMeshId];
-                int vbOffset = mesh.mVbOffset;
-                int sbOffset = mesh.mSbOffset;
-                for (int iv = 0; iv < mesh.mVertexCount; ++iv)
+                const Mesh& mesh = mMeshes[mInstances[instId].mMeshId];
+                for (uint32_t iv = 0; iv < mesh.mVertexCount; ++iv)
                 {
-                    glm::vec4 v_weight = mVerticesSkinData[sbOffset + iv].weights;
-                    glm::u16vec4 v_joint = mVerticesSkinData[sbOffset + iv].joints;
-                    glm::mat4 skinMat = v_weight[0] * jointMat[v_joint[0]]
-                                      + v_weight[1] * jointMat[v_joint[1]]
-                                      + v_weight[2] * jointMat[v_joint[2]]
-                                      + v_weight[3] * jointMat[v_joint[3]];
-                    mVertices[vbOffset + iv].pos = skinMat * glm::vec4(mVerticesSkinData[sbOffset + iv].pos, 1.0);
-                    mVertices[vbOffset + iv].normal = packNormal(glm::normalize(glm::vec3(glm::mat3(skinMat) * glm::vec4(mVerticesSkinData[sbOffset + iv].normal, 1.0))));
+                    glm::mat4 skinMat(0.0f);
+                    if (!vertexSkinMatrix(mesh, iv, jointMat, skinMat))
+                    {
+                        continue;
+                    }
+                    const vertexSkinData& skinData = mVerticesSkinData[mesh.mSbOffset + iv];
+                    mVertices[mesh.mVbOffset + iv].pos = glm::float3(skinMat * glm::float4(skinData.pos, 1.0f));
+                    mVertices[mesh.mVbOffset + iv].normal =
+                        packNormal(glm::normalize(glm::mat3(skinMat) * skinData.normal));
                 }
             }
         }
@@ -525,53 +531,10 @@ bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType target
 
 bool Scene::updateNode(const uint32_t nodeId)
 {
-    bool skeletonNodesUpdated = false;
-    const glm::float4x4 globalTransform = calculateNodeGlobalTransform(nodeId);
-
-    // if this node is mesh node - updating Instances
-    // if this node is skeleton node - need to rebuild blas
-    switch (mNodes[nodeId].type)
-    {
-        case Node::NodeType::mesh:
-            for (const auto instId: mNodes[nodeId].instanceIds) {
-                Instance& inst = mInstances[instId];
-                inst.transform = globalTransform;
-                inst.isAnimated = true;
-            }
-            return false;
-            break;
-
-        case Node::NodeType::camera:
-            if (mNodes[nodeId].camera >= 0 && mNodes[nodeId].camera < (int)mCameras.size())
-            {
-                glm::vec3 scale;
-                glm::quat rotation;
-                glm::vec3 translation;
-                glm::vec3 skew;
-                glm::vec4 perspective;
-                glm::decompose(globalTransform, scale, rotation, translation, skew, perspective);
-                rotation = glm::conjugate(rotation);
-
-                Camera& cam = mCameras[mNodes[nodeId].camera];
-                cam.position = translation * scale;
-                cam.mOrientation = rotation;
-                cam.updateViewMatrix();
-            }
-            return false;
-
-        case Node::NodeType::skeleton:
-            skeletonNodesUpdated = true;
-            break;
-
-        default:
-            break;
-    }
-
-    for (const auto childId: mNodes[nodeId].children)
-    {
-        skeletonNodesUpdated |= updateNode(childId);
-    }
-
+    ensureGlobalTransforms();
+    refreshGlobalTransforms();
+    const bool skeletonNodesUpdated = applyNodeSideEffects(nodeId);
+    markChanged(ChangeBits::Transforms);
     return skeletonNodesUpdated;
 }
 
@@ -863,7 +826,284 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
     }
 
     mLights[lightId].color = glm::float4(desc.color, 1.0f) * intensityPerPoint;
-    mDirty = DirtyFlag::eLights;
+    markChanged(ChangeBits::Lights);
+}
+
+void Scene::setLight(const uint32_t lightId, const UniformLightDesc& desc)
+{
+    assert(lightId < mLightDesc.size());
+    mLightDesc[lightId] = desc;
+    updateLight(lightId, desc);
+
+    auto it = mLightIdToInstanceId.find(lightId);
+    if (it != mLightIdToInstanceId.end())
+    {
+        glm::float4x4 scaleMatrix = glm::float4x4(1.0f);
+        if (desc.type == LIGHT_TYPE_RECT)
+            scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.width, desc.height, 1.0f));
+        else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPHERE)
+            scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.radius, desc.radius, desc.radius));
+
+        const glm::float4x4 transform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
+        updateInstanceTransform(it->second, transform);
+        markChanged(ChangeBits::Lights | ChangeBits::Transforms);
+    }
+}
+
+void Scene::setNodeLocalTransform(const uint32_t nodeId,
+                                  const glm::float3& translation,
+                                  const glm::quat& rotation,
+                                  const glm::float3& scale)
+{
+    assert(nodeId < mNodes.size());
+    mNodes[nodeId].translation = translation;
+    mNodes[nodeId].rotation = rotation;
+    mNodes[nodeId].scale = scale;
+
+    ensureGlobalTransforms();
+    mNodeDirty.assign(mNodes.size(), 0);
+    mNodeDirty[nodeId] = 1;
+    // Mark entire subtree dirty so side effects propagate
+    std::vector<uint32_t> stack;
+    stack.push_back(nodeId);
+    while (!stack.empty())
+    {
+        const uint32_t id = stack.back();
+        stack.pop_back();
+        mNodeDirty[id] = 1;
+        for (const int child : mNodes[id].children)
+        {
+            if (child >= 0 && child < (int)mNodes.size())
+                stack.push_back((uint32_t)child);
+        }
+    }
+    refreshGlobalTransforms();
+    for (size_t i = 0; i < mNodes.size(); ++i)
+    {
+        if (mNodeDirty[i])
+            applyNodeSideEffects((uint32_t)i);
+    }
+    markChanged(ChangeBits::Transforms);
+}
+
+void Scene::setMaterial(const uint32_t id, const MaterialDescription& desc)
+{
+    assert(id < mMaterialsDescs.size());
+    mMaterialsDescs[id] = desc;
+    markChanged(ChangeBits::Materials);
+}
+
+static bool intersectTriangle(const glm::float3& orig,
+                              const glm::float3& dir,
+                              const glm::float3& v0,
+                              const glm::float3& v1,
+                              const glm::float3& v2,
+                              float& tOut)
+{
+    const glm::float3 e1 = v1 - v0;
+    const glm::float3 e2 = v2 - v0;
+    const glm::float3 pvec = glm::cross(dir, e2);
+    const float det = glm::dot(e1, pvec);
+    if (std::fabs(det) < 1e-8f)
+        return false;
+    const float invDet = 1.0f / det;
+    const glm::float3 tvec = orig - v0;
+    // Barycentric bounds are tested with a tolerance: a ray through a point on an
+    // edge shared by two triangles would otherwise be rejected by both, so
+    // clicking along an interior edge of a mesh selects whatever is behind it.
+    // Counting such a hit twice is harmless, the closest one wins either way.
+    constexpr float kEdgeTolerance = 1e-6f;
+    const float u = glm::dot(tvec, pvec) * invDet;
+    if (u < -kEdgeTolerance || u > 1.0f + kEdgeTolerance)
+        return false;
+    const glm::float3 qvec = glm::cross(tvec, e1);
+    const float v = glm::dot(dir, qvec) * invDet;
+    if (v < -kEdgeTolerance || u + v > 1.0f + kEdgeTolerance)
+        return false;
+    const float t = glm::dot(e2, qvec) * invDet;
+    if (t < 1e-5f)
+        return false;
+    tOut = t;
+    return true;
+}
+
+int Scene::findInstanceNodeId(const uint32_t instId) const
+{
+    for (uint32_t n = 0; n < mNodes.size(); ++n)
+    {
+        const std::vector<uint32_t>& ids = mNodes[n].instanceIds;
+        if (std::find(ids.begin(), ids.end(), instId) != ids.end())
+        {
+            return (int)n;
+        }
+    }
+    return -1;
+}
+
+std::vector<glm::mat4> Scene::buildJointPalette(const uint32_t instId)
+{
+    if (instId >= mInstances.size())
+    {
+        return {};
+    }
+    const Instance& inst = mInstances[instId];
+    if (inst.mMeshId >= mMeshes.size() || !mMeshes[inst.mMeshId].isSkeletal)
+    {
+        return {};
+    }
+    const int nodeId = findInstanceNodeId(instId);
+    if (nodeId < 0 || mNodes[nodeId].skin < 0 || (size_t)mNodes[nodeId].skin >= mSkines.size())
+    {
+        return {};
+    }
+    const uint32_t skinId = (uint32_t)mNodes[nodeId].skin;
+    std::vector<glm::mat4> palette;
+    computeJointMatrices(&palette, (int)mSkines[skinId].joints.size(), skinId);
+    return palette;
+}
+
+bool Scene::vertexSkinMatrix(const Mesh& mesh,
+                             const uint32_t vertexIndex,
+                             const std::vector<glm::mat4>& jointPalette,
+                             glm::mat4& outMat) const
+{
+    if (!mesh.isSkeletal || jointPalette.empty())
+    {
+        return false;
+    }
+    const size_t skinIndex = (size_t)mesh.mSbOffset + vertexIndex;
+    if (skinIndex >= mVerticesSkinData.size())
+    {
+        return false;
+    }
+
+    const vertexSkinData& skinData = mVerticesSkinData[skinIndex];
+    glm::mat4 skinMat(0.0f);
+    for (int j = 0; j < 4; ++j)
+    {
+        const int joint = skinData.joints[j];
+        if (skinData.weights[j] == 0.0f || joint < 0 || (size_t)joint >= jointPalette.size())
+        {
+            continue;
+        }
+        skinMat += skinData.weights[j] * jointPalette[joint];
+    }
+    // The bottom right element accumulates the weights, so a zero there means the
+    // vertex is bound to no joint and its stored position already is final.
+    if (skinMat[3][3] < 1e-6f)
+    {
+        return false;
+    }
+    outMat = skinMat;
+    return true;
+}
+
+glm::float3 Scene::posedVertexPosition(const Mesh& mesh,
+                                       const uint32_t vertexIndex,
+                                       const std::vector<glm::mat4>& jointPalette) const
+{
+    glm::mat4 skinMat(0.0f);
+    if (!vertexSkinMatrix(mesh, vertexIndex, jointPalette, skinMat))
+    {
+        return mVertices[mesh.mVbOffset + vertexIndex].pos;
+    }
+    return glm::float3(skinMat * glm::float4(mVerticesSkinData[mesh.mSbOffset + vertexIndex].pos, 1.0f));
+}
+
+bool Scene::computeInstanceBounds(const uint32_t instId, glm::float3& outMin, glm::float3& outMax)
+{
+    if (instId >= mInstances.size())
+    {
+        return false;
+    }
+    const Instance& inst = mInstances[instId];
+    if (inst.mMeshId >= mMeshes.size())
+    {
+        return false;
+    }
+    const Mesh& mesh = mMeshes[inst.mMeshId];
+    if (mesh.mVertexCount == 0)
+    {
+        return false;
+    }
+
+    const std::vector<glm::mat4> palette = buildJointPalette(instId);
+    outMin = glm::float3(std::numeric_limits<float>::max());
+    outMax = glm::float3(std::numeric_limits<float>::lowest());
+    for (uint32_t i = 0; i < mesh.mVertexCount; ++i)
+    {
+        const glm::float3 p = posedVertexPosition(mesh, i, palette);
+        outMin = glm::min(outMin, p);
+        outMax = glm::max(outMax, p);
+    }
+    return true;
+}
+
+Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& direction)
+{
+    PickHit best;
+    best.hit = false;
+    best.distance = std::numeric_limits<float>::max();
+
+    // Build reverse map instance -> node for selection
+    std::unordered_map<uint32_t, uint32_t> instToNode;
+    for (uint32_t n = 0; n < mNodes.size(); ++n)
+    {
+        for (const uint32_t instId : mNodes[n].instanceIds)
+            instToNode[instId] = n;
+    }
+
+    const glm::float3 dir = glm::normalize(direction);
+
+    for (uint32_t instId = 0; instId < mInstances.size(); ++instId)
+    {
+        const Instance& inst = mInstances[instId];
+        if (inst.type != Instance::Type::eMesh && inst.type != Instance::Type::eLight)
+            continue;
+        if (inst.mMeshId >= mMeshes.size())
+            continue;
+
+        const Mesh& mesh = mMeshes[inst.mMeshId];
+        const glm::mat4& xform = inst.transform;
+        const glm::mat4 invXform = glm::inverse(xform);
+
+        const glm::float3 localOrig = glm::float3(invXform * glm::float4(origin, 1.0f));
+        const glm::float3 localDir = glm::normalize(glm::float3(invXform * glm::float4(dir, 0.0f)));
+
+        // Skinning happens in the same space the instance transform maps to
+        // world, so only the vertex positions have to be posed: the ray stays in
+        // instance space.
+        const std::vector<glm::mat4> palette = buildJointPalette(instId);
+
+        for (uint32_t i = 0; i + 2 < mesh.mCount; i += 3)
+        {
+            const uint32_t i0 = mIndices[mesh.mIndex + i];
+            const uint32_t i1 = mIndices[mesh.mIndex + i + 1];
+            const uint32_t i2 = mIndices[mesh.mIndex + i + 2];
+            const glm::float3 v0 = posedVertexPosition(mesh, i0, palette);
+            const glm::float3 v1 = posedVertexPosition(mesh, i1, palette);
+            const glm::float3 v2 = posedVertexPosition(mesh, i2, palette);
+
+            float tLocal = 0.0f;
+            if (!intersectTriangle(localOrig, localDir, v0, v1, v2, tLocal))
+                continue;
+
+            const glm::float3 localHit = localOrig + localDir * tLocal;
+            const glm::float3 worldHit = glm::float3(xform * glm::float4(localHit, 1.0f));
+            const float tWorld = glm::length(worldHit - origin);
+            if (tWorld >= best.distance)
+                continue;
+
+            best.hit = true;
+            best.distance = tWorld;
+            best.position = worldHit;
+            best.instanceId = instId;
+            best.lightId = inst.mLightId;
+            auto nit = instToNode.find(instId);
+            best.nodeId = nit != instToNode.end() ? nit->second : (uint32_t)-1;
+        }
+    }
+    return best;
 }
 
 void Scene::removeInstance(const uint32_t instId)
@@ -901,6 +1141,7 @@ void Scene::updateInstanceTransform(uint32_t instId, glm::float4x4 newTransform)
     Instance& inst = mInstances[instId];
     inst.transform = newTransform;
     mDirtyInstances.insert(instId);
+    markChanged(ChangeBits::Transforms);
 }
 
 uint32_t Scene::createCurve(const Curve::Type type,

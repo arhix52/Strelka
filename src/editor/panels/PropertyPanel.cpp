@@ -3,7 +3,6 @@
 #include "imgui.h"
 #include "ImGuizmo.h"
 
-#include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
 namespace oka
@@ -11,72 +10,102 @@ namespace oka
 
 void EditorApp::showGizmo(Camera& cam, float* matrix, ImGuizmo::OPERATION operation)
 {
-    static ImGuizmo::MODE mCurrentGizmoMode(ImGuizmo::LOCAL);
     glm::float4x4 cameraView = cam.matrices.view;
     glm::float4x4 cameraProjection = cam.matrices.perspective;
     ImGuizmo::Manipulate(
-        glm::value_ptr(cameraView), glm::value_ptr(cameraProjection), operation, mCurrentGizmoMode, matrix);
+        glm::value_ptr(cameraView), glm::value_ptr(cameraProjection), operation, m_gizmoMode, matrix);
 }
 
-void EditorApp::drawPropertyPanel(uint32_t lightId)
+void EditorApp::drawPropertyPanel()
 {
-    static ImGuizmo::OPERATION mCurrentGizmoOperation(ImGuizmo::TRANSLATE);
+    if (!ImGui::Begin("Properties", &m_showProperties))
+    {
+        ImGui::End();
+        return;
+    }
 
-    Camera& cam = m_scene->getCamera(m_selectedCamera);
-    glm::float3 camPos = cam.getPosition();
-
-    std::vector<Scene::UniformLightDesc>& lightDescs = m_scene->getLightsDesc();
-    Scene::UniformLightDesc& currLightDesc = lightDescs[lightId];
-
-    if (ImGui::RadioButton("Translate", mCurrentGizmoOperation == ImGuizmo::TRANSLATE))
-        mCurrentGizmoOperation = ImGuizmo::TRANSLATE;
+    if (ImGui::RadioButton("Translate", m_gizmoOperation == ImGuizmo::TRANSLATE))
+        m_gizmoOperation = ImGuizmo::TRANSLATE;
     ImGui::SameLine();
-    if (ImGui::RadioButton("Rotate", mCurrentGizmoOperation == ImGuizmo::ROTATE))
-        mCurrentGizmoOperation = ImGuizmo::ROTATE;
+    if (ImGui::RadioButton("Rotate", m_gizmoOperation == ImGuizmo::ROTATE))
+        m_gizmoOperation = ImGuizmo::ROTATE;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Scale", m_gizmoOperation == ImGuizmo::SCALE))
+        m_gizmoOperation = ImGuizmo::SCALE;
 
-    ImGui::Text("Rectangle light");
-    ImGui::Spacing();
-    ImGui::AlignTextToFramePadding();
-    ImGui::DragFloat3("Position", &currLightDesc.position.x);
-    ImGui::Spacing();
-    ImGui::DragFloat3("Orientation", &currLightDesc.orientation.x);
-    ImGui::Spacing();
-    float width_height[2] = { currLightDesc.width, currLightDesc.height };
-    ImGui::DragFloat2("Width/Height", width_height, 0.1f, 0.005f);
-    ImGui::Spacing();
-    ImGui::ColorEdit3("Color", &currLightDesc.color.x);
-    ImGui::DragFloat("Intensity", &currLightDesc.intensity, 1.0f, 1.0f);
-    currLightDesc.intensity = glm::clamp(currLightDesc.intensity, 1.0f, std::numeric_limits<float>::max());
-    currLightDesc.width = glm::clamp(width_height[0], 0.005f, std::numeric_limits<float>::max());
-    currLightDesc.height = glm::clamp(width_height[1], 0.005f, std::numeric_limits<float>::max());
+    if (ImGui::RadioButton("Local", m_gizmoMode == ImGuizmo::LOCAL))
+        m_gizmoMode = ImGuizmo::LOCAL;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("World", m_gizmoMode == ImGuizmo::WORLD))
+        m_gizmoMode = ImGuizmo::WORLD;
 
-    ImGuizmo::SetID(lightId);
+    if (m_selectedLightId != (uint32_t)-1 && m_selectedLightId < m_scene->getLightsDesc().size())
+    {
+        Scene::UniformLightDesc desc = m_scene->getLightsDesc()[m_selectedLightId];
+        ImGui::SeparatorText("Light");
+        ImGui::Text("Light id: %u  type: %d", m_selectedLightId, desc.type);
 
-    const glm::float4x4 translationMatrix = glm::translate(glm::float4x4(1.0f), currLightDesc.position);
-    glm::quat rotation = glm::quat(glm::radians(currLightDesc.orientation));
-    const glm::float4x4 rotationMatrix{ rotation };
-    glm::float3 scale = { currLightDesc.width, currLightDesc.height, 1.0f };
-    const glm::float4x4 scaleMatrix = glm::scale(glm::float4x4(1.0f), scale);
+        bool changed = false;
+        changed |= ImGui::DragFloat3("Position", &desc.position.x, 0.05f);
+        changed |= ImGui::DragFloat3("Orientation", &desc.orientation.x, 0.5f);
+        if (desc.type == 0)
+        {
+            float wh[2] = { desc.width, desc.height };
+            if (ImGui::DragFloat2("Width/Height", wh, 0.05f, 0.005f))
+            {
+                desc.width = wh[0];
+                desc.height = wh[1];
+                changed = true;
+            }
+        }
+        else if (desc.type == 1 || desc.type == 2)
+        {
+            changed |= ImGui::DragFloat("Radius", &desc.radius, 0.05f, 0.001f);
+        }
+        changed |= ImGui::ColorEdit3("Color", &desc.color.x);
+        changed |= ImGui::DragFloat("Intensity", &desc.intensity, 1.0f, 0.0f);
 
-    glm::float4x4 lightXform = translationMatrix * rotationMatrix * scaleMatrix;
+        if (changed)
+        {
+            pushUndoLight(m_selectedLightId);
+            desc.intensity = glm::max(desc.intensity, 0.0f);
+            m_scene->setLight(m_selectedLightId, desc);
+            markDocumentDirty();
+        }
+    }
+    else if (m_selectedNodeId != (uint32_t)-1 && m_selectedNodeId < m_scene->getNodes().size())
+    {
+        const Scene::Node& node = m_scene->getNodes()[m_selectedNodeId];
+        ImGui::SeparatorText("Node");
+        ImGui::Text("%s", node.name.empty() ? "(unnamed)" : node.name.c_str());
 
-    showGizmo(cam, &lightXform[0][0], mCurrentGizmoOperation);
+        glm::float3 translation = node.translation;
+        glm::quat rotation = node.rotation;
+        glm::float3 scale = node.scale;
+        glm::float3 eulerDegrees = glm::degrees(glm::eulerAngles(rotation));
 
-    float matrixTranslation[3], matrixRotation[3], matrixScale[3];
-    ImGuizmo::DecomposeMatrixToComponents(&lightXform[0][0], matrixTranslation, matrixRotation, matrixScale);
+        bool changed = false;
+        changed |= ImGui::DragFloat3("Translation", &translation.x, 0.05f);
+        if (ImGui::DragFloat3("Rotation", &eulerDegrees.x, 0.5f))
+        {
+            rotation = glm::quat(glm::radians(eulerDegrees));
+            changed = true;
+        }
+        changed |= ImGui::DragFloat3("Scale", &scale.x, 0.05f, 0.001f);
 
-    currLightDesc.position = glm::float3(matrixTranslation[0], matrixTranslation[1], matrixTranslation[2]);
-    currLightDesc.orientation = glm::float3(matrixRotation[0], matrixRotation[1], matrixRotation[2]);
+        if (changed)
+        {
+            pushUndoNode(m_selectedNodeId);
+            m_scene->setNodeLocalTransform(m_selectedNodeId, translation, rotation, scale);
+            markDocumentDirty();
+        }
+    }
+    else
+    {
+        ImGui::TextUnformatted("Nothing selected. Click in the viewport or Outliner.");
+    }
 
-    Scene::UniformLightDesc desc{};
-    desc.position = currLightDesc.position;
-    desc.orientation = currLightDesc.orientation;
-    desc.width = currLightDesc.width;
-    desc.height = currLightDesc.height;
-    desc.color = currLightDesc.color;
-    desc.intensity = currLightDesc.intensity;
-    m_scene->updateLight(lightId, desc);
-    m_scene->updateInstanceTransform(m_scene->mLightIdToInstanceId[lightId], lightXform);
+    ImGui::End();
 }
 
 } // namespace oka

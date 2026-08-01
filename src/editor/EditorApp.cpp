@@ -1,7 +1,10 @@
 #include "EditorApp.h"
 
+#include <strelka/sceneloader/sceneserializer.h>
 #include <log.h>
+#include <paths.h>
 #include <chrono>
+#include <filesystem>
 #include <algorithm>
 #include <limits>
 #include <cmath>
@@ -2489,6 +2492,19 @@ void EditorApp::run()
             selectedCam.isDirty = ctrlCam.isDirty;
         }
 
+        // The renderer refreshes the projection of the camera it draws with, but
+        // the UI reads the same camera earlier in the frame: picking and the gizmo
+        // run before the first render has happened, and with an unset projection
+        // both fail without a trace (an inf pick ray, a gizmo that never draws).
+        const uint32_t renderWidth = m_settingsManager->getAs<uint32_t>("render/width");
+        const uint32_t renderHeight = m_settingsManager->getAs<uint32_t>("render/height");
+        if (renderHeight != 0)
+        {
+            const float aspect = (float)renderWidth / (float)renderHeight;
+            selectedCam.updateAspectRatio(aspect);
+            m_cameraController->getCamera().updateAspectRatio(aspect);
+        }
+
         checkLoadingComplete();
 
         if (m_resized)
@@ -2633,6 +2649,162 @@ void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
     }
 }
 
+void EditorApp::clearSelection()
+{
+    m_selectedNodeId = (uint32_t)-1;
+    m_selectedInstanceId = (uint32_t)-1;
+    m_selectedLightId = (uint32_t)-1;
+    m_selectedMaterialId = (uint32_t)-1;
+}
+
+void EditorApp::markDocumentDirty()
+{
+    m_documentDirty = true;
+}
+
+void EditorApp::pushUndoLight(uint32_t lightId)
+{
+    if (lightId >= m_scene->getLightsDesc().size())
+        return;
+    UndoState s;
+    s.kind = UndoState::Kind::Light;
+    s.id = lightId;
+    s.light = m_scene->getLightsDesc()[lightId];
+    m_undoStack.push_back(s);
+    m_redoStack.clear();
+}
+
+void EditorApp::pushUndoNode(uint32_t nodeId)
+{
+    if (nodeId >= m_scene->getNodes().size())
+        return;
+    const auto& n = m_scene->getNodes()[nodeId];
+    UndoState s;
+    s.kind = UndoState::Kind::Node;
+    s.id = nodeId;
+    s.translation = n.translation;
+    s.rotation = n.rotation;
+    s.scale = n.scale;
+    m_undoStack.push_back(s);
+    m_redoStack.clear();
+}
+
+void EditorApp::pushUndoMaterial(uint32_t materialId)
+{
+    if (materialId >= m_scene->getMaterials().size())
+        return;
+    UndoState s;
+    s.kind = UndoState::Kind::Material;
+    s.id = materialId;
+    s.material = m_scene->getMaterials()[materialId];
+    m_undoStack.push_back(s);
+    m_redoStack.clear();
+}
+
+void EditorApp::undo()
+{
+    if (m_undoStack.empty())
+        return;
+    UndoState cur = m_undoStack.back();
+    m_undoStack.pop_back();
+    UndoState redo = cur;
+    if (cur.kind == UndoState::Kind::Light && cur.id < m_scene->getLightsDesc().size())
+    {
+        redo.light = m_scene->getLightsDesc()[cur.id];
+        m_scene->setLight(cur.id, cur.light);
+    }
+    else if (cur.kind == UndoState::Kind::Node && cur.id < m_scene->getNodes().size())
+    {
+        const auto& n = m_scene->getNodes()[cur.id];
+        redo.translation = n.translation;
+        redo.rotation = n.rotation;
+        redo.scale = n.scale;
+        m_scene->setNodeLocalTransform(cur.id, cur.translation, cur.rotation, cur.scale);
+    }
+    else if (cur.kind == UndoState::Kind::Material && cur.id < m_scene->getMaterials().size())
+    {
+        redo.material = m_scene->getMaterials()[cur.id];
+        m_scene->setMaterial(cur.id, cur.material);
+    }
+    m_redoStack.push_back(redo);
+    markDocumentDirty();
+}
+
+void EditorApp::redo()
+{
+    if (m_redoStack.empty())
+        return;
+    UndoState cur = m_redoStack.back();
+    m_redoStack.pop_back();
+    if (cur.kind == UndoState::Kind::Light)
+        m_scene->setLight(cur.id, cur.light);
+    else if (cur.kind == UndoState::Kind::Node)
+        m_scene->setNodeLocalTransform(cur.id, cur.translation, cur.rotation, cur.scale);
+    else if (cur.kind == UndoState::Kind::Material)
+        m_scene->setMaterial(cur.id, cur.material);
+    markDocumentDirty();
+}
+
+void EditorApp::applySelectionFromPick(const Scene::PickHit& hit)
+{
+    clearSelection();
+    if (!hit.hit)
+        return;
+    m_selectedInstanceId = hit.instanceId;
+    m_selectedNodeId = hit.nodeId;
+    m_selectedLightId = hit.lightId;
+    m_outlinerScrollToSelection = true;
+    if (hit.instanceId < m_scene->getInstances().size())
+        m_selectedMaterialId = m_scene->getInstances()[hit.instanceId].mMaterialId;
+}
+
+bool EditorApp::saveDocument(bool saveAs)
+{
+    if (saveAs || m_sceneFile.empty())
+    {
+        IGFD::FileDialogConfig config;
+        config.path = m_resourceSearchPath.empty() ? "." : m_resourceSearchPath;
+        ImGuiFileDialog::Instance()->OpenDialog("SaveSceneDlgKey", "Save Scene As", ".gltf,.glb", config);
+        m_pendingSaveAs = true;
+        return true;
+    }
+
+    const bool okGltf = saveGltf(*m_scene, m_sceneFile);
+    const bool okLights = saveLightsJson(*m_scene, m_sceneFile);
+    if (okGltf && okLights)
+    {
+        m_documentDirty = false;
+        STRELKA_INFO("Saved scene: {}", m_sceneFile);
+        return true;
+    }
+    return false;
+}
+
+void EditorApp::buildDefaultDockLayout(ImGuiID dockspaceId)
+{
+    ImGui::DockBuilderRemoveNode(dockspaceId);
+    ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockspaceId, ImGui::GetMainViewport()->WorkSize);
+
+    ImGuiID center = dockspaceId;
+    const ImGuiID left = ImGui::DockBuilderSplitNode(center, ImGuiDir_Left, 0.20f, nullptr, &center);
+    const ImGuiID right = ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.28f, nullptr, &center);
+    ImGuiID leftTop = left;
+    const ImGuiID leftBottom = ImGui::DockBuilderSplitNode(leftTop, ImGuiDir_Down, 0.35f, nullptr, &leftTop);
+    ImGuiID rightTop = right;
+    const ImGuiID rightBottom = ImGui::DockBuilderSplitNode(rightTop, ImGuiDir_Down, 0.45f, nullptr, &rightTop);
+
+    ImGui::DockBuilderDockWindow("Outliner", leftTop);
+    ImGui::DockBuilderDockWindow("Animations", leftBottom);
+    ImGui::DockBuilderDockWindow("Viewport", center);
+    ImGui::DockBuilderDockWindow("Render Settings:", rightTop);
+    ImGui::DockBuilderDockWindow("Properties", rightBottom);
+    ImGui::DockBuilderDockWindow("Materials", rightBottom);
+    ImGui::DockBuilderFinish(dockspaceId);
+
+    STRELKA_INFO("Editor layout rebuilt from defaults");
+}
+
 void EditorApp::drawUI()
 {
     ImGui_ImplGlfw_NewFrame();
@@ -2641,10 +2813,40 @@ void EditorApp::drawUI()
     ImGuizmo::SetOrthographic(false);
     ImGuizmo::BeginFrame();
 
-    ImGuiIO& io = ImGui::GetIO();
-    (void)io;
+    m_cameraController->setGizmoBlocksInput(ImGuizmo::IsOver() || ImGuizmo::IsUsing());
 
-    ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+    ImGuiIO& io = ImGui::GetIO();
+
+    // Hotkeys
+    if (!io.WantTextInput)
+    {
+        if (ImGui::IsKeyPressed(ImGuiKey_W) && m_selectedNodeId != (uint32_t)-1)
+            m_gizmoOperation = ImGuizmo::TRANSLATE;
+        if (ImGui::IsKeyPressed(ImGuiKey_E))
+            m_gizmoOperation = ImGuizmo::ROTATE;
+        if (ImGui::IsKeyPressed(ImGuiKey_R))
+            m_gizmoOperation = ImGuizmo::SCALE;
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+            clearSelection();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
+            saveDocument(io.KeyShift);
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z))
+            undo();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y))
+            redo();
+    }
+
+    const ImGuiID dockspaceId = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+
+    // A layout saved by an older build has no entry for panels added since, and
+    // ImGui then floats them in the top-left corner on top of everything else.
+    // Rebuild the default arrangement in that case instead of leaving the user to
+    // hunt for the windows.
+    if (m_layoutRebuildPending || ImGui::FindWindowSettingsByID(ImHashStr("Outliner")) == nullptr)
+    {
+        m_layoutRebuildPending = false;
+        buildDefaultDockLayout(dockspaceId);
+    }
 
     // --- Main menu bar ---
     ImGui::BeginMainMenuBar();
@@ -2654,12 +2856,35 @@ void EditorApp::drawUI()
         {
             IGFD::FileDialogConfig config;
             config.path = ".";
-            ImGuiFileDialog::Instance()->OpenDialog("ChooseFileDlgKey", "Choose File", ".gltf", config);
+            ImGuiFileDialog::Instance()->OpenDialog("ChooseFileDlgKey", "Choose File", ".gltf,.glb", config);
         }
-
+        if (ImGui::MenuItem("Save", "Ctrl+S", false, !m_isLoading && !m_sceneFile.empty()))
+            saveDocument(false);
+        if (ImGui::MenuItem("Save As...", "Ctrl+Shift+S", false, !m_isLoading))
+            saveDocument(true);
+        ImGui::Separator();
         if (ImGui::MenuItem("Exit"))
-        {
             m_display->requestClose();
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Edit"))
+    {
+        if (ImGui::MenuItem("Undo", "Ctrl+Z", false, !m_undoStack.empty()))
+            undo();
+        if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !m_redoStack.empty()))
+            redo();
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Window"))
+    {
+        ImGui::MenuItem("Outliner", nullptr, &m_showOutliner);
+        ImGui::MenuItem("Properties", nullptr, &m_showProperties);
+        ImGui::MenuItem("Materials", nullptr, &m_showMaterials);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reset Layout"))
+        {
+            m_layoutRebuildPending = true;
+            m_showOutliner = m_showProperties = m_showMaterials = true;
         }
         ImGui::EndMenu();
     }
@@ -2675,21 +2900,35 @@ void EditorApp::drawUI()
             STRELKA_DEBUG("Resource search path {}", resourceSearchPath);
             m_settingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
             m_pendingResourcePath = resourceSearchPath;
+            m_sceneFile = sceneFile;
 
             auto loader = m_sceneLoader.get();
             m_loadingFuture = std::async(std::launch::async, [loader, sceneFile]() -> std::unique_ptr<Scene> {
                 auto scene = std::make_unique<Scene>();
                 if (loader->loadGltf(sceneFile, *scene))
-                {
                     return scene;
-                }
                 return nullptr;
             });
             m_isLoading = true;
+            clearSelection();
+            m_documentDirty = false;
+            m_undoStack.clear();
+            m_redoStack.clear();
         }
-
-        // close
         ImGuiFileDialog::Instance()->Close();
+    }
+
+    if (ImGuiFileDialog::Instance()->Display("SaveSceneDlgKey"))
+    {
+        if (ImGuiFileDialog::Instance()->IsOk())
+        {
+            m_sceneFile = ImGuiFileDialog::Instance()->GetFilePathName();
+            m_resourceSearchPath = ImGuiFileDialog::Instance()->GetCurrentPath();
+            m_settingsManager->setAs<std::string>("resource/searchPath", m_resourceSearchPath);
+            saveDocument(false);
+        }
+        ImGuiFileDialog::Instance()->Close();
+        m_pendingSaveAs = false;
     }
 
     // --- Save screenshot dialog handling ---
@@ -2713,6 +2952,12 @@ void EditorApp::drawUI()
     drawViewportPanel();
     drawRenderSettingsPanel();
     drawAnimationPanel();
+    if (m_showOutliner)
+        drawOutlinerPanel();
+    if (m_showProperties)
+        drawPropertyPanel();
+    if (m_showMaterials)
+        drawMaterialPanel();
 
     // Rendering
     ImGui::Render();

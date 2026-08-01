@@ -67,9 +67,13 @@ public:
 
     struct Matrices
     {
-        glm::float4x4 perspective;
-        glm::float4x4 invPerspective;
-        glm::float4x4 view;
+        // Identity, not uninitialised: these are read by picking, gizmos and the
+        // renderer, and a camera can reach any of them before setPerspective or
+        // updateViewMatrix has run. Garbage here turns into inf/NaN rays that fail
+        // silently instead of visibly.
+        glm::float4x4 perspective{ 1.0f };
+        glm::float4x4 invPerspective{ 1.0f };
+        glm::float4x4 view{ 1.0f };
     };
     Matrices matrices;
 
@@ -108,4 +112,14 @@ public:
     void translate(glm::float3 delta);
     void update(float deltaTime);
 };
+
+/// Primary ray through a point of the rendered image, where uv is normalised
+/// image space with (0,0) at the top-left corner.
+///
+/// Kept next to the camera (and not in the editor) because it has to stay in
+/// lockstep with generateCameraRay in the shaders: a CPU pick that maps pixels
+/// differently than the renderer selects something other than what the user
+/// clicked, and the mismatch is invisible until it is off by a mirrored axis.
+void generatePickRay(const Camera& camera, const glm::float2& uv, glm::float3& origin, glm::float3& direction);
+
 } // namespace oka

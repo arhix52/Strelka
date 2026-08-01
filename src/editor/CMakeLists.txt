@@ -13,6 +13,8 @@ set(EDITOR_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/RenderSettingsPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/AnimationPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/PropertyPanel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/panels/OutlinerPanel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/panels/MaterialPanel.cpp
     ${ROOT_HOME}/third_party/imgui_file_dialog/ImGuiFileDialog.cpp
 )
 
