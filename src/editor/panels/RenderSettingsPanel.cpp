@@ -168,6 +168,20 @@ void EditorApp::drawRenderSettingsPanel()
             m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", tracerMode);
         }
 
+        bool enableUpscale = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
+        if (ImGui::Checkbox("MetalFX upscale", &enableUpscale))
+        {
+            m_settingsManager->setAs<bool>("render/pt/enableUpscale", enableUpscale);
+        }
+        if (enableUpscale)
+        {
+            auto factor = m_settingsManager->getAs<float>("render/pt/upscaleFactor");
+            if (ImGui::SliderFloat("Render scale", &factor, 0.25f, 1.0f, "%.2f"))
+            {
+                m_settingsManager->setAs<float>("render/pt/upscaleFactor", factor);
+            }
+        }
+
         auto maxDepth = m_settingsManager->getAs<uint32_t>("render/pt/depth");
         if (ImGui::SliderInt("Max Depth", (int*)&maxDepth, 1, 16))
         {

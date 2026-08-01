@@ -108,6 +108,9 @@ MetalRender::~MetalRender()
             safeRelease(tex);
         for (auto*& tex : mDisplayTextures)
             safeRelease(tex);
+        for (auto*& tex : mUpscaleTextures)
+            safeRelease(tex);
+        mMetalFx.release();
 
         // Buffers
         safeRelease(mAccumulationBuffer);
@@ -232,12 +235,63 @@ void MetalRender::triggerRenderIfIdle()
 // The texture the tonemapper writes and the display reads. One per async slot,
 // matching the output buffers, so a frame being shown is never the one being
 // written.
-void MetalRender::ensureDisplayTextures(uint32_t width, uint32_t height)
+
+// The reduced-resolution target the tracer renders into when upscaling.
+//
+// Usage flags come from the scaler rather than being guessed: MetalFX validates
+// them at encode time, and a texture allocated without what it wants fails there
+// rather than at creation.
+void MetalRender::ensureUpscaleTextures(uint32_t width, uint32_t height)
 {
-    if (width == mDisplayTextureWidth && height == mDisplayTextureHeight && mDisplayTextures[0])
+    if (width == mUpscaleTextureWidth && height == mUpscaleTextureHeight && mUpscaleTextures[0])
     {
         return;
     }
+    for (MTL::Texture*& tex : mUpscaleTextures)
+    {
+        if (tex)
+        {
+            tex->release();
+            tex = nullptr;
+        }
+    }
+
+    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
+    desc->setWidth(width);
+    desc->setHeight(height);
+    desc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    desc->setTextureType(MTL::TextureType2D);
+    desc->setStorageMode(MTL::StorageModePrivate);
+    desc->setUsage(MTL::TextureUsageShaderWrite | mMetalFx.requiredColorUsage());
+    for (MTL::Texture*& tex : mUpscaleTextures)
+    {
+        tex = mDevice->newTexture(desc);
+    }
+    desc->release();
+
+    mUpscaleTextureWidth = width;
+    mUpscaleTextureHeight = height;
+    mMetal4ResidencyGeneration = 0;
+}
+
+MTL::Texture* MetalRender::tonemapTarget(bool upscaling) const
+{
+    return upscaling ? mUpscaleTextures[mWriteIndex] : mDisplayTextures[mWriteIndex];
+}
+
+void MetalRender::ensureDisplayTextures(uint32_t width, uint32_t height)
+{
+    // The usage MetalFX demands is only known once a scaler exists, so turning
+    // upscaling on at runtime changes what these textures need. Recreate them
+    // when it does, or the first upscaled frame fails validation.
+    const MTL::TextureUsage usage =
+        MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite | mMetalFx.requiredOutputUsage();
+    if (width == mDisplayTextureWidth && height == mDisplayTextureHeight && mDisplayTextures[0] &&
+        usage == mDisplayTextureUsage)
+    {
+        return;
+    }
+    mDisplayTextureUsage = usage;
     for (MTL::Texture*& tex : mDisplayTextures)
     {
         if (tex)
@@ -255,7 +309,7 @@ void MetalRender::ensureDisplayTextures(uint32_t width, uint32_t height)
     desc->setPixelFormat(MTL::PixelFormatRGBA16Float);
     desc->setTextureType(MTL::TextureType2D);
     desc->setStorageMode(MTL::StorageModePrivate);
-    desc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    desc->setUsage(usage);
     for (MTL::Texture*& tex : mDisplayTextures)
     {
         tex = mDevice->newTexture(desc);
@@ -265,6 +319,68 @@ void MetalRender::ensureDisplayTextures(uint32_t width, uint32_t height)
     mDisplayTextureWidth = width;
     mDisplayTextureHeight = height;
     mMetal4ResidencyGeneration = 0; // new allocations: residency has to be redone
+}
+
+
+// Read the display texture back to the CPU.
+//
+// This is what the screen shows -- after tonemapping, after MetalFX -- which the
+// output buffer no longer is. Every effect on the MetalFX plan is invisible
+// without it, and "no validation error" has already been shown this session not
+// to mean "correct image".
+bool MetalRender::readDisplayTexture(std::vector<float>& rgba, uint32_t& width, uint32_t& height)
+{
+    const int ri = mReadyIndex.load();
+    if (ri < 0 || !mDisplayTextures[ri])
+    {
+        return false;
+    }
+    MTL::Texture* tex = mDisplayTextures[ri];
+    width = (uint32_t)tex->width();
+    height = (uint32_t)tex->height();
+
+    // Half float on the GPU, so the staging buffer is 8 bytes a pixel.
+    const size_t rowBytes = (size_t)width * 8;
+    MTL::Buffer* staging = mDevice->newBuffer(rowBytes * height, MTL::ResourceStorageModeShared);
+    MTL::CommandBuffer* cmd = mCommandQueue->commandBuffer();
+    cmd->retain();
+    MTL::BlitCommandEncoder* blit = cmd->blitCommandEncoder();
+    blit->copyFromTexture(tex, 0, 0, MTL::Origin(0, 0, 0), MTL::Size(width, height, 1), staging, 0, rowBytes,
+                          rowBytes * height);
+    blit->endEncoding();
+    cmd->commit();
+    cmd->waitUntilCompleted();
+    cmd->release();
+
+    const uint16_t* src = static_cast<const uint16_t*>(staging->contents());
+    rgba.resize((size_t)width * height * 4);
+    for (size_t i = 0; i < rgba.size(); ++i)
+    {
+        // Half to float by hand: the alternative is pulling in a conversion
+        // library for a debug path.
+        const uint16_t h = src[i];
+        const uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+        int32_t exponent = (h >> 10) & 0x1F;
+        uint32_t mantissa = h & 0x3FF;
+        uint32_t bits;
+        if (exponent == 0)
+        {
+            bits = sign; // zero or subnormal, close enough for a preview
+        }
+        else if (exponent == 31)
+        {
+            bits = sign | 0x7F800000u | (mantissa << 13);
+        }
+        else
+        {
+            bits = sign | ((uint32_t)(exponent - 15 + 127) << 23) | (mantissa << 13);
+        }
+        float f;
+        std::memcpy(&f, &bits, sizeof(f));
+        rgba[i] = f;
+    }
+    staging->release();
+    return true;
 }
 
 void* MetalRender::getReadyTexture()
@@ -644,6 +760,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mEnvMapTexture);
     for (MTL::Texture* t : mMaterialTextures) add(t);
     for (MTL::Texture* t : mDisplayTextures) add(t);
+    for (MTL::Texture* t : mUpscaleTextures) add(t);
     for (MTL::AccelerationStructure* as : mPrimitiveAccelerationStructures) add(as);
     add(mInstanceAccelerationStructure);
     for (Mesh* mesh : mMetalMeshes)
@@ -1141,8 +1258,27 @@ void MetalRender::render(Buffer* output)
     mFrameIndex = (mFrameIndex + 1) % kMaxFramesInFlight;
 
     // Recreate accumulation buffer if output size changed
-    const uint32_t width = output->width();
-    const uint32_t height = output->height();
+    // Render resolution. Upscaling renders fewer pixels and lets MetalFX bring
+    // them up to the display size; the factor is clamped because below a quarter
+    // the scaler has too little to work with and the result is mush.
+    const uint32_t outWidth = output->width();
+    const uint32_t outHeight = output->height();
+    const bool wantUpscale = getSettings()->getAs<bool>("render/pt/enableUpscale");
+    const float upscaleFactor =
+        wantUpscale ? std::clamp(getSettings()->getAs<float>("render/pt/upscaleFactor"), 0.25f, 1.0f) : 1.0f;
+    const uint32_t width = std::max(1u, (uint32_t)(outWidth * upscaleFactor));
+    const uint32_t height = std::max(1u, (uint32_t)(outHeight * upscaleFactor));
+    const bool upscaling = (width != outWidth || height != outHeight);
+    if (upscaling)
+    {
+        mMetalFx.ensureSpatialScaler(mDevice, MTL::PixelFormatRGBA16Float, MTL::PixelFormatRGBA16Float, width,
+                                     height, outWidth, outHeight,
+                                     // The tonemapper has already applied the tone curve and gamma,
+                                     // so what the scaler sees is display-referred.
+                                     MetalFxContext::ColorMode::Perceptual,
+                                     mMetal4.isValid() ? (void*)mMetal4.compiler() : nullptr);
+        ensureUpscaleTextures(width, height);
+    }
     const size_t requiredSize = width * height * output->getElementSize();
     if (mAccumulationBuffer && requiredSize != mAccumulationBuffer->length())
     {
@@ -1538,7 +1674,9 @@ void MetalRender::render(Buffer* output)
         if (useWavefront)
         {
             ensureWavefrontBuffers(width, height);
-            ensureDisplayTextures(width, height);
+            // Output resolution, not render resolution: this is what the display
+            // shows and what MetalFX upscales into.
+            ensureDisplayTextures(outWidth, outHeight);
 
             // Metal 4 path. Residency has to be refreshed whenever the set of
             // allocations can have changed; ensureWavefrontBuffers only does work
@@ -1586,11 +1724,18 @@ void MetalRender::render(Buffer* output)
                     enc4->setComputePipelineState(mTonemapperPSO4);
                     mMetal4.argumentTable()->setAddress(pUniformTMBuffer->gpuAddress(), 0);
                     mMetal4.argumentTable()->setAddress(((MetalBuffer*)output)->getNativePtr()->gpuAddress(), 1);
-                    mMetal4.argumentTable()->setTexture(mDisplayTextures[mWriteIndex]->gpuResourceID(), 0);
+                    mMetal4.argumentTable()->setTexture(tonemapTarget(upscaling)->gpuResourceID(), 0);
                     enc4->dispatchThreadgroups(MTL::Size((width + 7) / 8, (height + 7) / 8, 1),
                                                MTL::Size(8, 8, 1));
                 }
                 enc4->endEncoding();
+                if (upscaling)
+                {
+                    // MetalFX encodes into the command buffer, not an encoder of
+                    // ours, so this has to follow endEncoding().
+                    mMetalFx.encodeSpatial(cmd4, true, mUpscaleTextures[mWriteIndex],
+                                           mDisplayTextures[mWriteIndex], width, height);
+                }
                 cmd4->endCommandBuffer();
 
                 // Completion arrives through commit options rather than a
@@ -1635,10 +1780,15 @@ void MetalRender::render(Buffer* output)
                                  MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
                 enc->setBuffer(pUniformTMBuffer, 0, 0);
                 enc->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
-                enc->setTexture(mDisplayTextures[mWriteIndex], 0);
+                enc->setTexture(tonemapTarget(upscaling), 0);
                 enc->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
             }
             enc->endEncoding();
+            if (upscaling)
+            {
+                mMetalFx.encodeSpatial(pCmd, false, mUpscaleTextures[mWriteIndex],
+                                       mDisplayTextures[mWriteIndex], width, height);
+            }
 
             const int writeIdxWf = mWriteIndex;
             pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdxWf](MTL::CommandBuffer* cb) {
@@ -1702,7 +1852,7 @@ void MetalRender::render(Buffer* output)
                     ((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
                 pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
                 pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
-                pComputeEncoder->setTexture(mDisplayTextures[mWriteIndex], 0);
+                pComputeEncoder->setTexture(tonemapTarget(upscaling), 0);
                 pComputeEncoder->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
             }
 
@@ -1766,7 +1916,7 @@ void MetalRender::render(Buffer* output)
                 ((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
             pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
             pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
-            pComputeEncoder->setTexture(mDisplayTextures[mWriteIndex], 0);
+            pComputeEncoder->setTexture(tonemapTarget(upscaling), 0);
             {
                 const MTL::Size gridSize = MTL::Size(width, height, 1);
                 const MTL::Size threadgroupSize(8, 8, 1);

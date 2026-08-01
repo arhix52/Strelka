@@ -118,7 +118,9 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/debug", 0); // 0 - none, 1 - normals
     m_settingsManager->setAs<float>("render/cameraSpeed", 1.0f);
     m_settingsManager->setAs<float>("render/pt/upscaleFactor", 0.5f);
-    m_settingsManager->setAs<bool>("render/pt/enableUpscale", true);
+    // Off by default until the temporal path lands: spatial upscaling alone
+    // trades noise for softness, and a path tracer is already noisy.
+    m_settingsManager->setAs<bool>("render/pt/enableUpscale", false);
     m_settingsManager->setAs<bool>("render/pt/enableAcc", true);
     m_settingsManager->setAs<bool>("render/pt/enableTonemap", true);
     m_settingsManager->setAs<bool>("render/pt/isResized", false);
@@ -143,6 +145,12 @@ void EditorApp::loadSettings()
     if (const char* m4 = getenv("STRELKA_METAL4"))
     {
         m_settingsManager->setAs<uint32_t>("render/pt/metal4", (uint32_t)atoi(m4));
+    }
+    if (const char* up = getenv("STRELKA_UPSCALE"))
+    {
+        const float f = (float)atof(up);
+        m_settingsManager->setAs<bool>("render/pt/enableUpscale", f > 0.0f && f < 1.0f);
+        m_settingsManager->setAs<float>("render/pt/upscaleFactor", f);
     }
     if (const char* aovEnv = getenv("STRELKA_AOV"))
     {
@@ -358,6 +366,13 @@ void EditorApp::runReferenceCapture()
     m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", spp);
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
     m_settingsManager->setAs<bool>("render/isMotionBlurVisible", false);
+    // Full resolution unless asked otherwise: an upscaled capture is not what the
+    // estimators are being compared at, and the buffer would hold a smaller image
+    // than the EXR claims. The display EXR alongside it is the upscaled one.
+    if (!getenv("STRELKA_UPSCALE"))
+    {
+        m_settingsManager->setAs<bool>("render/pt/enableUpscale", false);
+    }
     // Same harness for both tracers, so the wavefront rewrite can be checked
     // against the megakernel's recorded numbers without touching anything else.
     if (const char* d = getenv("STRELKA_REF_DEPTH"))
@@ -400,6 +415,16 @@ void EditorApp::runReferenceCapture()
             if (outDir)
             {
                 saveScreenshot(rb, std::string(outDir) + "/" + c.name + ".exr");
+            }
+            // ...and what the screen actually shows, which after MetalFX is a
+            // different image at a different resolution.
+            std::vector<float> shown;
+            uint32_t sw = 0, sh = 0;
+            if (outDir && m_render->readDisplayTexture(shown, sw, sh))
+            {
+                const char* err = nullptr;
+                SaveEXR(shown.data(), (int)sw, (int)sh, 4, 0,
+                        (std::string(outDir) + "/" + c.name + "_display.exr").c_str(), &err);
             }
         }
         images.push_back(std::move(img));

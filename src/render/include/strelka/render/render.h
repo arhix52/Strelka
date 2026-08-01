@@ -1,4 +1,6 @@
 #pragma once
+
+#include <vector>
 #include <strelka/render/common.h>
 #include <strelka/render/buffer.h>
 #include <strelka/scene/scene.h>
@@ -33,6 +35,14 @@ public:
     /// The finished frame as a texture, when the backend can produce one.
     /// Nullptr means the caller should fall back to getReadyBuffer(); OptiX does.
     /// Returned as void* so this header stays free of Metal types.
+    /// Read the finished frame back to the CPU as linear RGBA floats -- what the
+    /// screen shows, after tonemapping and any post effect. False when the
+    /// backend cannot.
+    virtual bool readDisplayTexture(std::vector<float>&, uint32_t&, uint32_t&)
+    {
+        return false;
+    }
+
     virtual void* getReadyTexture()
     {
         return nullptr;

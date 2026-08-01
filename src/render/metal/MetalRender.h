@@ -5,6 +5,7 @@
 #include <glm/glm.hpp>
 
 #include "Metal4Context.h"
+#include "MetalFxContext.h"
 #include "ShaderTypes.h" // GeometryEntry, shared with the path-trace kernel
 #include <atomic>
 #include <map>
@@ -27,6 +28,7 @@ public:
     void triggerRenderIfIdle() override;
     Buffer* getReadyBuffer() override;
     void* getReadyTexture() override;
+    bool readDisplayTexture(std::vector<float>& rgba, uint32_t& width, uint32_t& height) override;
 
     void* getNativeDevicePtr() override
     {
@@ -314,7 +316,18 @@ private:
     MTL::Texture* mDisplayTextures[2] = { nullptr, nullptr };
     uint32_t mDisplayTextureWidth = 0;
     uint32_t mDisplayTextureHeight = 0;
+    MTL::TextureUsage mDisplayTextureUsage = 0;
     void ensureDisplayTextures(uint32_t width, uint32_t height);
+    // What the tracer renders into when upscaling: the reduced resolution. The
+    // display textures stay at output resolution and MetalFX bridges the two.
+    MTL::Texture* mUpscaleTextures[2] = { nullptr, nullptr };
+    uint32_t mUpscaleTextureWidth = 0;
+    uint32_t mUpscaleTextureHeight = 0;
+    MetalFxContext mMetalFx;
+    void ensureUpscaleTextures(uint32_t width, uint32_t height);
+    /// Where the tonemapper should write this frame: the reduced-resolution
+    /// texture when upscaling, the display texture otherwise.
+    MTL::Texture* tonemapTarget(bool upscaling) const;
     std::atomic<int> mReadyIndex{-1};
     std::atomic<bool> mRenderBusy{false};
     int mWriteIndex = 0;

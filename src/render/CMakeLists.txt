@@ -65,6 +65,8 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalBuffer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/Metal4Context.h
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/Metal4Context.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalFxContext.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalFxContext.mm
     )
 
     add_library(strelka_render STATIC ${RENDER_SOURCES})
@@ -83,6 +85,7 @@ if(APPLE)
             "-framework Foundation"
             "-framework QuartzCore"
             "-framework Metal"
+            "-framework MetalFX"
             "-framework MetalKit"
     )
     target_link_libraries(strelka_render
