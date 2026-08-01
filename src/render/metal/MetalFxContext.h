@@ -79,6 +79,10 @@ public:
         float jitterX = 0.0f;             ///< the offset this frame was rendered with
         float jitterY = 0.0f;
         bool resetHistory = false;        ///< camera cut, scene change, resize
+        // The denoiser reprojects with these rather than inferring them from the
+        // motion vectors alone. Column-major, as Metal and glm both are.
+        float worldToView[16] = {};
+        float viewToClip[16] = {};
     };
 
     /// Create or recreate the temporal denoiser. Bound to its formats and both
@@ -89,6 +93,11 @@ public:
                         uint32_t outputWidth,
                         uint32_t outputHeight,
                         void* metal4Compiler);
+
+    /// Whether the device can drive this effect through Metal 4 at all. Separate
+    /// from supportsDevice, and worth asking even though the answer is currently
+    /// not trustworthy -- see the note in ensureDenoiser.
+    static bool denoiserSupportsMetal4(MTL::Device* device);
 
     bool hasDenoiser() const
     {

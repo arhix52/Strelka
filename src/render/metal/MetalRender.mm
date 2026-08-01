@@ -1364,12 +1364,19 @@ void MetalRender::render(Buffer* output)
     if (denoising)
     {
         // No Metal 4 variant on purpose: newTemporalDenoisedScalerWithDevice:compiler:
-        // aborts inside MPSGraph on macOS 26.5.2 / M1 Pro. The spatial and the
-        // plain temporal scalers both build fine through the same compiler, and
-        // the Metal 3 constructor accepts the identical descriptor, so this is the
-        // denoised scaler alone. tools/metalfx_mtl4_denoiser_repro.mm reproduces it
-        // in 40 lines and lists everything ruled out; re-run it after an OS update
-        // and delete this branch when it prints four OK lines.
+        // aborts, and Apple has confirmed it as a framework bug (FB22575333) with
+        // the Metal 3 constructor as the recommended workaround -- which is this
+        // call. supportsMetal4FX answers YES and is not to be trusted; the same
+        // trap is reported on A17 Pro, where it aborts differently again.
+        // tools/metalfx_mtl4_denoiser_repro.mm reproduces it and lists what was
+        // ruled out. Re-run it after an OS update and pass the compiler here once
+        // it prints four OK lines.
+        if (!mLoggedMetal4DenoiserGap && mMetal4.isValid())
+        {
+            mLoggedMetal4DenoiserGap = true;
+            STRELKA_INFO("MetalFX denoiser stays on Metal 3 (supportsMetal4FX={}, FB22575333)",
+                         MetalFxContext::denoiserSupportsMetal4(mDevice));
+        }
         mMetalFx.ensureDenoiser(mDevice, width, height, outWidth, outHeight, nullptr);
         ensureGuideTextures(width, height, outWidth, outHeight);
     }
@@ -1937,6 +1944,9 @@ void MetalRender::render(Buffer* output)
                 // A moved camera invalidates every reprojection, and so does the
                 // first frame after a resize.
                 in.resetHistory = mResetDenoiseHistory || ctx.mSubframeIndex == 0;
+                std::memcpy(in.worldToView, glm::value_ptr(currView.mCamMatrices.view), sizeof(in.worldToView));
+                std::memcpy(in.viewToClip, glm::value_ptr(currView.mCamMatrices.perspective),
+                            sizeof(in.viewToClip));
                 mResetDenoiseHistory = false;
                 mMetalFx.encodeDenoise(pCmd, false, in);
 

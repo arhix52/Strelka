@@ -17,6 +17,13 @@
 //   MTL4FXTemporalScaler                OK
 //   MTL4FXTemporalDenoisedScaler        assert
 //
+// Apple has confirmed this as a framework bug and asked for feedback; FB22575333
+// tracks it, filed from developer.apple.com/forums/thread/819276, where the same
+// call aborts on an A17 Pro with a different symptom again
+// ("-[AGXG16XFamilyHeap baseObject]: unrecognized selector"). The recommended
+// workaround is the Metal 3 constructor. Note that supportsMetal4FX: answers YES
+// on both machines, so it cannot be used to decide.
+//
 // Ruled out by bisection, each tried on its own and in combination: every texture
 // format the descriptor accepts, input and output sizes including 1:1, autoExposure
 // on and off, requiresSynchronousInitialization on and off, a plain MTL4Compiler

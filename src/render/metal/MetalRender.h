@@ -346,6 +346,7 @@ private:
     GuideTextures mGuides;
     MTL::Texture* mDenoisedTexture = nullptr;
     bool mResetDenoiseHistory = true;
+    bool mLoggedMetal4DenoiserGap = false;
     uint32_t mGuideWidth = 0;
     uint32_t mGuideHeight = 0;
     MTL::ComputePipelineState* mAovResolvePSO = nullptr;

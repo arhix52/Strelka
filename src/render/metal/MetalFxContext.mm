@@ -158,6 +158,11 @@ static constexpr MTLPixelFormat kAlbedoFormat = MTLPixelFormatRGBA16Float;
 static constexpr MTLPixelFormat kNormalFormat = MTLPixelFormatRGBA16Float;
 static constexpr MTLPixelFormat kRoughnessFormat = MTLPixelFormatR16Float;
 
+bool MetalFxContext::denoiserSupportsMetal4(MTL::Device* device)
+{
+    return [MTLFXTemporalDenoisedScalerDescriptor supportsMetal4FX:(__bridge id<MTLDevice>)device];
+}
+
 bool MetalFxContext::ensureDenoiser(MTL::Device* device,
                                     uint32_t inputWidth,
                                     uint32_t inputHeight,
@@ -286,6 +291,13 @@ void MetalFxContext::encodeDenoise(void* commandBuffer, bool metal4, const Denoi
     // Distance to the camera, growing away from it.
     d.depthReversed = NO;
     d.shouldResetHistory = inputs.resetHistory ? YES : NO;
+    // Reprojection uses the camera directly, not just the motion vectors, which
+    // is what lets it tell a moving camera from moving geometry.
+    simd_float4x4 w2v, v2c;
+    memcpy(&w2v, inputs.worldToView, sizeof(w2v));
+    memcpy(&v2c, inputs.viewToClip, sizeof(v2c));
+    d.worldToViewMatrix = w2v;
+    d.viewToClipMatrix = v2c;
 
     if (metal4)
     {
