@@ -184,7 +184,7 @@ extern "C" __global__ void __raygen__rg()
         prd.depth = 0;
         prd.specularBounce = false;
         prd.lastBsdfPdf = 0.0f;
-        
+
         float3 ray_origin, ray_direction;
 
         const uint2 pixelCoord = make_uint2(launch_index.x, params.image_height - launch_index.y);

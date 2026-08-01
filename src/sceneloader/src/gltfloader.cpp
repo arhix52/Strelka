@@ -114,7 +114,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
     int weightsStride = 0;
     bool hasJoints = false;
     std::vector<oka::Scene::vertexSkinData> sb;
-    if ( (primitive.attributes.find("JOINTS_0") != primitive.attributes.end()) && (primitive.attributes.find("WEIGHTS_0") != primitive.attributes.end()) ) 
+    if ( (primitive.attributes.find("JOINTS_0") != primitive.attributes.end()) && (primitive.attributes.find("WEIGHTS_0") != primitive.attributes.end()) )
     {
         hasJoints = true;
         const tinygltf::Accessor& jointsAccessor = model.accessors[primitive.attributes.find("JOINTS_0")->second];
@@ -154,7 +154,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
 
         sb.reserve(vertexCount);
     }
-    
+
     glm::float3 sum = glm::float3(0.0f, 0.0f, 0.0f);
     std::vector<oka::Scene::Vertex> vertices;
     vertices.reserve(vertexCount);
@@ -169,7 +169,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
         vertices.push_back(vertex);
         sum += vertex.pos;
 
-        if (hasJoints) 
+        if (hasJoints)
         {
             oka::Scene::vertexSkinData skinData{};
             const tinygltf::Accessor& jointsAccessor = model.accessors[primitive.attributes.find("JOINTS_0")->second];
@@ -359,7 +359,7 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
         processMesh(model, scene, currentNodeId, mesh, globalTransform, globalScale);
 
         //skin binding
-        if (node.skin != -1) 
+        if (node.skin != -1)
         {
             scene.mNodes[currentNodeId].skin = node.skin;
             scene.mSkines[node.skin].refNodeId = currentNodeId;
@@ -542,9 +542,9 @@ void loadAnimation(const tinygltf::Model& model, oka::Scene& scene)
     for (const tinygltf::Animation& animation : model.animations)
     {
         oka::Scene::Animation anim{};
-        
+
         anim.name = animation.name;
-        if (anim.name.empty()) 
+        if (anim.name.empty())
         {
             anim.name = "noname animation";
         }
@@ -670,7 +670,7 @@ void loadNodes(const tinygltf::Model& model, oka::Scene& scene, const float glob
         n.scale = scale;
 
         //glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-        glm::quat rotation = glm::quat_cast(glm::float4x4(1.0f)); 
+        glm::quat rotation = glm::quat_cast(glm::float4x4(1.0f));
         if (!node.rotation.empty())
         {
             const float floatRotation[4] = {
@@ -712,7 +712,7 @@ void loadSkeletalData(const tinygltf::Model& model, oka::Scene& scene, const flo
         assert(matrixCount != 0);
         const int matStride = matrixAccessor.ByteStride(bufferView) / sizeof(float);;
         assert(matStride > 0);
-        
+
         for (const int jointid : s.joints)
         {
             scene.mNodes[jointid].type = oka::Scene::Node::NodeType::skeleton;
@@ -723,7 +723,7 @@ void loadSkeletalData(const tinygltf::Model& model, oka::Scene& scene, const flo
             glm::mat4 inverseBindMatrix = glm::make_mat4(&matrixData[m * matStride]);
             s.inverseBindMatrices.push_back(inverseBindMatrix);
         }
-        
+
         scene.mSkines.push_back(s);
     }
 }

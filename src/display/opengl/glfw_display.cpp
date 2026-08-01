@@ -75,10 +75,10 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     mSettings = settings;
 
     glfwInit();
-    
+
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
-    
+
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_RED_BITS, 16);
     glfwWindowHint(GLFW_GREEN_BITS, 16);

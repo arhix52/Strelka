@@ -810,7 +810,7 @@ cuda_find_host_program(CUDA_FATBINARY_EXECUTABLE
   NO_DEFAULT_PATH
   )
 # Search default search paths, after we search our own set of paths.
-cuda_find_host_program(CUDA_FATBINARY_EXECUTABLE fatbinary)  
+cuda_find_host_program(CUDA_FATBINARY_EXECUTABLE fatbinary)
 mark_as_advanced(CUDA_FATBINARY_EXECUTABLE)
 
 
@@ -1754,7 +1754,7 @@ macro(CUDA_WRAP_SRCS cuda_target format generated_files)
         endif()
       endif()
       # message("_cuda_generate_dependencies = ${_cuda_generate_dependencies}")
-     
+
       # If we needed to regenerate the dependency file, do so now.
       if (_cuda_generate_dependencies)
         set(_cuda_dependency_ccbin)
@@ -1778,7 +1778,7 @@ macro(CUDA_WRAP_SRCS cuda_target format generated_files)
         if(_cuda_dependency_ccbin OR NOT ccbin_flags)
           # Only do this if we have some kind of host compiler defined in
           # _cuda_dependency_ccbin or ccbin_flags isn't set.
-          
+
           set( _execute_process_args
             COMMAND ${CMAKE_COMMAND}
             -D generate_dependency_only:BOOL=TRUE
@@ -1791,8 +1791,8 @@ macro(CUDA_WRAP_SRCS cuda_target format generated_files)
             RESULT_VARIABLE _cuda_dependency_error
             OUTPUT_VARIABLE _cuda_dependency_output
             ERROR_VARIABLE  _cuda_dependency_output
-            )    
-          if( CUDA_BATCH_DEPENDS_LOG )  
+            )
+          if( CUDA_BATCH_DEPENDS_LOG )
             file( APPEND ${CUDA_BATCH_DEPENDS_LOG} "COMMENT;Generating dependencies for ${file};${_execute_process_args}\n" )
           else()
             message(STATUS "Generating dependencies for ${file}")
@@ -1806,7 +1806,7 @@ macro(CUDA_WRAP_SRCS cuda_target format generated_files)
             # Try and reload the dependies
             cuda_include_nvcc_dependencies(${cmake_dependency_file})
           endif()
-        endif()          
+        endif()
       endif()
 
       # Build the generated file and dependency file ##########################
@@ -2214,12 +2214,12 @@ function(CUDA_BATCH_BUILD_END target)
       COMMENT "CUDA batch build ${cuda_batch_build_target}..."
       COMMAND "${PYTHON_EXECUTABLE}" "${BATCH_CMAKE_SCRIPT}" -t ${cuda_batch_build_target} -c ${CUDA_BATCH_BUILD_LOG} -s "\"%24(VCInstallDir)=$(VCInstallDir)\\\"" -s "%24(ConfigurationName)=$(ConfigurationName)" -s "%24(Configuration)=$(Configuration)" -s "%24(VCToolsVersion)=$(VCToolsVersion)" -s "%24(Platform)=$(Platform)" -s "%24(PlatformTarget)=$(PlatformTarget)"   # %24 is the '$' character - needed to escape '$' in VS rule
       DEPENDS ${cuda_depends}
-      )    
+      )
     add_dependencies( ${target} ${cuda_batch_build_target} )
-  endif() 
-  
+  endif()
+
   set( CUDA_BATCH_BUILD_LOG )
-  set_property( GLOBAL PROPERTY CUDA_BATCH_BUILD_DEPENDS "" )    
+  set_property( GLOBAL PROPERTY CUDA_BATCH_BUILD_DEPENDS "" )
 endfunction()
 
 ##############################################################################
@@ -2276,7 +2276,7 @@ function(CUDA_BATCH_DEPENDS_END)
       endif()
     endif()
   endif()
-  
+
   set( CUDA_BATCH_DEPENDS_LOG )
-  
+
 endfunction()

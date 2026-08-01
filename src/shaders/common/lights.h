@@ -347,7 +347,7 @@ static __inline__ __device__ LightSampleData SampleSphereLight(const UniformLigh
     float cosTheta = 1.0f - 2.0f * u.x;  // cosTheta is uniformly distributed between [-1, 1]
     float sinTheta = sqrt(1.0f - cosTheta * cosTheta);
     float phi = 2.0f * M_PIf * u.y;  // phi is uniformly distributed between [0, 2*pi]
-    
+
     const float radius = l.points[0].x;
 
     // Convert spherical coordinates to Cartesian coordinates
@@ -356,7 +356,7 @@ static __inline__ __device__ LightSampleData SampleSphereLight(const UniformLigh
     float3 lightPoint = make_float3(l.points[1]) + radius * sphereDirection;
     // Calculate the direction from the hit point to the sampled point on the light
     lightSampleData.L = normalize(lightPoint - hitPoint);
-    
+
     // Calculate the distance to the light
     lightSampleData.distToLight = length(lightPoint - hitPoint);
 

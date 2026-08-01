@@ -138,7 +138,7 @@ private:
     std::vector<std::shared_ptr<OptixBuffer>> mMotionTransformBuffers; // used for motion blur
 
     std::unique_ptr<OptixBuffer> mTlasBuffer;
-    
+
     std::unique_ptr<OptixBuffer> mTexturesDataBuffer; // Consolidated GPU texture object array
 
     // Temporary buffers for GAS building
