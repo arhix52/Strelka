@@ -3,6 +3,8 @@
 #include <strelka/scene/camera.h>
 #include <GLFW/glfw3.h>
 
+#include <cmath>
+
 namespace oka
 {
 class CameraController : public oka::InputHandler
@@ -15,6 +17,15 @@ class CameraController : public oka::InputHandler
 
     bool mIsViewportHovered = false;
     bool mGizmoBlocksInput = false;
+
+    // Whether user input actually moved the camera, as opposed to a mouse button
+    // merely being down: selecting in the viewport holds the left button, and a
+    // click that picks an object must not read as taking the camera over.
+    bool mUserMovedCamera = false;
+    // Cursor travel with a button held, reset on press. Matched to the drag
+    // threshold picking uses, so one gesture cannot both select and take over.
+    float mDragDistance = 0.0f;
+    static constexpr float kDragTakeoverPixels = 4.0f;
 
     struct RotateKeys
     {
@@ -38,15 +49,29 @@ public:
         }
     }
 
+    /// Whether the user drove the camera since the last call, clearing the flag.
+    bool consumeUserMovedCamera()
+    {
+        const bool moved = mUserMovedCamera;
+        mUserMovedCamera = false;
+        return moved;
+    }
+
     void update(double deltaTime, float speed)
     {
         mCam.rotationSpeed = rotationSpeed;
         mCam.movementSpeed = speed;
+        if (mCam.keys.left || mCam.keys.right || mCam.keys.up || mCam.keys.down || mCam.keys.forward ||
+            mCam.keys.back)
+        {
+            mUserMovedCamera = true;
+        }
         mCam.update(deltaTime);
 
         // Arrow key rotation
         if (mRotateKeys.left || mRotateKeys.right || mRotateKeys.up || mRotateKeys.down)
         {
+            mUserMovedCamera = true;
             float dx = 0.0f, dy = 0.0f;
             if (mRotateKeys.left)
                 dx -= keyRotationSpeed * deltaTime;
@@ -78,11 +103,6 @@ public:
             mCam.keys.back = false;
             mRotateKeys = {};
         }
-    }
-
-    bool isRotating() const
-    {
-        return mRotateKeys.left || mRotateKeys.right || mRotateKeys.up || mRotateKeys.down;
     }
 
     Camera& getCamera()
@@ -172,6 +192,11 @@ public:
             return;
         }
 
+        if (action == GLFW_PRESS)
+        {
+            mDragDistance = 0.0f;
+        }
+
         if (button == GLFW_MOUSE_BUTTON_RIGHT)
         {
             if (action == GLFW_PRESS && viewPortHovered)
@@ -207,6 +232,15 @@ public:
 
         const float dx = mCam.mousePos[0] - xpos;
         const float dy = mCam.mousePos[1] - ypos;
+
+        if (mCam.mouseButtons.right || mCam.mouseButtons.left || mCam.mouseButtons.middle)
+        {
+            mDragDistance += std::abs(dx) + std::abs(dy);
+            if (mDragDistance > kDragTakeoverPixels)
+            {
+                mUserMovedCamera = true;
+            }
+        }
 
         if (mCam.mouseButtons.right)
         {

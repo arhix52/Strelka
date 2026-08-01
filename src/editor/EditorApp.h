@@ -103,6 +103,7 @@ private:
     std::chrono::high_resolution_clock::time_point m_lastTitleUpdate{};
     std::chrono::high_resolution_clock::time_point m_lastEdrQuery{};
 
+    void setCameraDetached(bool detached);
     void clearSelection();
     void markDocumentDirty();
     void pushUndoLight(uint32_t lightId);

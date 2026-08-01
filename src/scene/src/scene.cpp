@@ -330,7 +330,8 @@ bool Scene::applyNodeSideEffects(const uint32_t nodeId)
         return false;
 
     case Node::NodeType::camera:
-        if (mNodes[nodeId].camera >= 0 && mNodes[nodeId].camera < (int)mCameras.size())
+        if (mNodes[nodeId].camera >= 0 && mNodes[nodeId].camera < (int)mCameras.size() &&
+            !mCameras[mNodes[nodeId].camera].manualControl)
         {
             glm::vec3 scale;
             glm::quat rotation;

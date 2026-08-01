@@ -95,6 +95,7 @@ void EditorApp::prepare()
 
     // Select first GLTF camera (index 0) by default
     m_selectedCamera = 0;
+    setCameraDetached(false);
 
     m_cameraController = std::make_unique<CameraController>(m_scene->getCamera(m_selectedCamera), true);
     m_display->setInputHandler(m_cameraController.get());
@@ -275,7 +276,7 @@ void EditorApp::checkLoadingComplete()
     m_scene->addCamera(camera);
 
     m_selectedCamera = 0;
-    m_cameraDetached = false;
+    setCameraDetached(false);
 
     loadAnimSettings();
 
@@ -2465,13 +2466,16 @@ void EditorApp::run()
 
         playAnimations(deltaTime);
 
+        // Consumed every frame so a gesture cannot be acted on twice.
+        const bool userMovedCamera = m_cameraController->consumeUserMovedCamera();
+
         auto& selectedCam = m_scene->getCamera(m_selectedCamera);
         if (selectedCam.node != -1 && !m_cameraDetached)
         {
             // GLTF camera in animation mode
-            if (m_cameraController->getCamera().moving() || m_cameraController->isRotating())
+            if (userMovedCamera)
             {
-                m_cameraDetached = true;
+                setCameraDetached(true);
             }
             else
             {
@@ -2646,6 +2650,23 @@ void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
     else
     {
         STRELKA_ERROR("Unsupported screenshot format: {}", ext);
+    }
+}
+
+void EditorApp::setCameraDetached(bool detached)
+{
+    m_cameraDetached = detached;
+
+    // Exactly one camera can be under manual control, and clearing all of them
+    // first means a camera left detached and then switched away from does not
+    // stay frozen out of playback.
+    for (uint32_t i = 0; i < (uint32_t)m_scene->getCameraCount(); ++i)
+    {
+        m_scene->getCamera(i).manualControl = false;
+    }
+    if (detached && m_selectedCamera >= 0 && m_selectedCamera < (int)m_scene->getCameraCount())
+    {
+        m_scene->getCamera(m_selectedCamera).manualControl = true;
     }
 }
 

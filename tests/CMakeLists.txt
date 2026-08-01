@@ -11,7 +11,9 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_light_json.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_pick_ray.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_skinned_bounds.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_camera_animation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_gizmo.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_camera_takeover.cpp
 )
 
 target_link_libraries(unit_tests
@@ -20,6 +22,7 @@ target_link_libraries(unit_tests
         strelka_material
         strelka_scene
         strelka_sceneloader
+        strelka_display
         glm::glm
         imgui::imgui
         imguizmo::imguizmo

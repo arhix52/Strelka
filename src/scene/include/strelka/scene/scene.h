@@ -141,9 +141,12 @@ public:
         };
         NodeType type = NodeType::unknown;
         std::string name;
-        glm::float3 translation; //local translation
-        glm::float3 scale; //local scale
-        glm::quat rotation; //local rotation
+        // Identity, not left to whatever the allocation held: a node the loader
+        // did not fill in every field of still has to describe a usable
+        // transform, and a garbage 3x3 propagates to every descendant.
+        glm::float3 translation{ 0.0f }; //local translation
+        glm::float3 scale{ 1.0f }; //local scale
+        glm::quat rotation{ 1.0f, 0.0f, 0.0f, 0.0f }; //local rotation
         int parent = -1;
         std::vector<int> children;
         std::vector<uint32_t> instanceIds;

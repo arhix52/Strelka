@@ -64,7 +64,7 @@ void EditorApp::drawRenderSettingsPanel()
                         if (m_selectedCamera != n)
                         {
                             m_selectedCamera = n;
-                            m_cameraDetached = false;
+                            setCameraDetached(false);
                             m_cameraController->setCamera(m_scene->getCamera(m_selectedCamera));
                             m_sharedCtx->mSubframeIndex = 0;
                             // A different camera is a cut: nothing in the previous
@@ -89,7 +89,7 @@ void EditorApp::drawRenderSettingsPanel()
                 ImGui::SameLine();
                 if (ImGui::Button("Re-attach"))
                 {
-                    m_cameraDetached = false;
+                    setCameraDetached(false);
                     m_sharedCtx->mSubframeIndex = 0;
                     m_render->resetTemporalHistory();
                 }

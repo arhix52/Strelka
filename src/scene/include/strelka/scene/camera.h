@@ -56,6 +56,14 @@ public:
     bool updated = false;
     bool isDirty = true;
 
+    /// While set, animation leaves this camera's pose alone.
+    ///
+    /// A glTF camera is posed from its node, so playback and an editor that has
+    /// handed the camera to the user are two owners of one transform: the frame
+    /// gets rendered from the animated pose while the viewport overlay and
+    /// picking use the user's, and the two disagree on screen.
+    bool manualControl = false;
+
     struct MouseButtons
     {
         bool left = false;
