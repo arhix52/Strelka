@@ -1363,12 +1363,13 @@ void MetalRender::render(Buffer* output)
                            getSettings()->getAs<uint32_t>("render/pt/tracerMode") == 1;
     if (denoising)
     {
-        // No Metal 4 variant on purpose. newTemporalDenoisedScalerWithDevice:compiler:
-        // asserts inside MPSGraph ("Incompatible shape for parameter at index 0")
-        // on macOS 26.5 / M1 Pro, while the Metal 3 constructor with the identical
-        // descriptor works -- verified with a standalone probe that creates both.
-        // The spatial scaler's Metal 4 variant is fine, so this is specific to the
-        // denoiser.
+        // No Metal 4 variant on purpose: newTemporalDenoisedScalerWithDevice:compiler:
+        // aborts inside MPSGraph on macOS 26.5.2 / M1 Pro. The spatial and the
+        // plain temporal scalers both build fine through the same compiler, and
+        // the Metal 3 constructor accepts the identical descriptor, so this is the
+        // denoised scaler alone. tools/metalfx_mtl4_denoiser_repro.mm reproduces it
+        // in 40 lines and lists everything ruled out; re-run it after an OS update
+        // and delete this branch when it prints four OK lines.
         mMetalFx.ensureDenoiser(mDevice, width, height, outWidth, outHeight, nullptr);
         ensureGuideTextures(width, height, outWidth, outHeight);
     }
