@@ -110,6 +110,10 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    // A drag over a panel's body is content interaction, not a window move: the
+    // viewport spends every drag on the camera or a gizmo, and an undocked one
+    // would otherwise slide across the screen as the user works in it.
+    io.ConfigWindowsMoveFromTitleBarOnly = true;
 
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();

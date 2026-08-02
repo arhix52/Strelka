@@ -13,7 +13,8 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/compatibility.hpp>
-#include <glm/gtx/matrix_decompose.hpp>
+
+#include <strelka/scene/transform.h>
 
 #include <iostream>
 #include <log.h>
@@ -369,12 +370,10 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
     {
         scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::camera;
         scene.mNodes[currentNodeId].camera = node.camera;
-        glm::vec3 scale;
+        glm::float3 scale;
         glm::quat rotation;
-        glm::vec3 translation;
-        glm::vec3 skew;
-        glm::vec4 perspective;
-        glm::decompose(globalTransform, scale, rotation, translation, skew, perspective);
+        glm::float3 translation;
+        oka::decomposeTrs(globalTransform, translation, rotation, scale);
 
         rotation = glm::conjugate(rotation);
 

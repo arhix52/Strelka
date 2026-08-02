@@ -4,7 +4,8 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/norm.hpp>
-#include <glm/gtx/matrix_decompose.hpp>
+
+#include <strelka/scene/transform.h>
 
 #include <algorithm>
 #include <cmath>
@@ -333,12 +334,10 @@ bool Scene::applyNodeSideEffects(const uint32_t nodeId)
         if (mNodes[nodeId].camera >= 0 && mNodes[nodeId].camera < (int)mCameras.size() &&
             !mCameras[mNodes[nodeId].camera].manualControl)
         {
-            glm::vec3 scale;
+            glm::float3 scale;
             glm::quat rotation;
-            glm::vec3 translation;
-            glm::vec3 skew;
-            glm::vec4 perspective;
-            glm::decompose(mGlobalTransforms[nodeId], scale, rotation, translation, skew, perspective);
+            glm::float3 translation;
+            decomposeTrs(mGlobalTransforms[nodeId], translation, rotation, scale);
             rotation = glm::conjugate(rotation);
 
             Camera& cam = mCameras[mNodes[nodeId].camera];

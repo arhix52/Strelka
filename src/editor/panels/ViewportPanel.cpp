@@ -6,8 +6,9 @@
 #include <cmath>
 #include <limits>
 
+#include <strelka/scene/transform.h>
+
 #include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtx/matrix_decompose.hpp>
 
 namespace oka
 {
@@ -241,10 +242,9 @@ void EditorApp::drawSelectionGizmo(Camera& cam)
             parentWorld = m_scene->getGlobalTransforms()[node.parent];
         }
         const glm::mat4 local = glm::inverse(parentWorld) * world;
-        glm::float3 translation, scale, skew;
-        glm::float4 perspective;
+        glm::float3 translation, scale;
         glm::quat rotation;
-        glm::decompose(local, scale, rotation, translation, skew, perspective);
+        decomposeTrs(local, translation, rotation, scale);
         m_scene->setNodeLocalTransform(m_selectedNodeId, translation, rotation, scale);
         markDocumentDirty();
     }
@@ -283,23 +283,27 @@ void EditorApp::drawViewportPanel()
         float verticalPadding = calculateVerticalPadding(availableSize, viewportSize.y);
         const float horizontalPadding = (availableSize.x - viewportSize.x) * 0.5f;
 
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_ImageBorderSize, 0.0f);
 
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + verticalPadding);
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + horizontalPadding);
 
+        // The frame is shown through items that claim no ID. ImGuizmo starts a
+        // drag only while ImGui reports nothing hovered and nothing active, so an
+        // ImageButton spanning the viewport leaves the handles drawn but dead:
+        // the cursor is always over it whenever it is over a handle.
         void* viewportTexture = m_display->getDisplayNativeTexure();
         const ImVec2 topLeft = ImGui::GetCursorScreenPos();
         if (viewportTexture != nullptr)
         {
-            ImGui::ImageButton("##viewport", (ImTextureID)viewportTexture, viewportSize);
+            ImGui::Image((ImTextureID)viewportTexture, viewportSize);
         }
         else
         {
             ImGui::GetWindowDrawList()->AddRectFilled(
                 topLeft, ImVec2(topLeft.x + viewportSize.x, topLeft.y + viewportSize.y),
                 ImGui::GetColorU32(ImGuiCol_FrameBg));
-            ImGui::InvisibleButton("##viewport", viewportSize);
+            ImGui::Dummy(viewportSize);
         }
 
         m_viewportRectMin = ImGui::GetItemRectMin();
