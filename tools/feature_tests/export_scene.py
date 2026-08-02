@@ -95,6 +95,36 @@ def collect_lights(depsgraph):
     return out
 
 
+def merge_scenes():
+    """Fold every other Blender scene into the active one.
+
+    A .blend with several scenes exports several glTF scenes, and a renderer that
+    honours defaultScene then draws one of them. The pine forest keeps its camera
+    in main_scene and its entire forest in trees, so the export looked successful
+    and arrived without a single tree. Collections and objects can belong to more
+    than one scene, so linking is enough -- nothing is copied.
+    """
+    target = bpy.context.scene
+    linked_objects = 0
+    linked_collections = 0
+    for sc in bpy.data.scenes:
+        if sc is target or sc.name.startswith("__"):
+            continue
+        for coll in list(sc.collection.children):
+            if coll.name not in target.collection.children:
+                target.collection.children.link(coll)
+                linked_collections += 1
+        for ob in list(sc.collection.objects):
+            if ob.name not in target.collection.objects:
+                target.collection.objects.link(ob)
+                linked_objects += 1
+    if linked_objects or linked_collections:
+        bpy.context.view_layer.update()
+        print("merged %d other scene(s): +%d collections, +%d objects"
+              % (len(bpy.data.scenes) - 1, linked_collections, linked_objects))
+    return linked_objects + linked_collections
+
+
 def export_gltf(path):
     """Filter kwargs against the operator's RNA so this survives version churn."""
     wanted = dict(
@@ -145,11 +175,22 @@ def main():
         bpy.context.scene.frame_set(int(argv[argv.index("--frame") + 1]))
 
     name = os.path.splitext(os.path.basename(bpy.data.filepath))[0] or "scene"
+    merge_scenes()
     depsgraph = bpy.context.evaluated_depsgraph_get()
 
     lights = collect_lights(depsgraph)
+    sidecar = {"lights": lights}
+    # An environment baked earlier by bake_env.py, if it is sitting next to us.
+    # Absolute, because the loader joins it onto the resource search path and an
+    # absolute path replaces rather than appends.
+    env = os.path.join(out, name + "_env.exr")
+    if os.path.exists(env):
+        sidecar["environment"] = {"texture": env, "intensity": 1.0}
+        print("environment -> %s" % env)
+    else:
+        print("[gap] no baked environment; run bake_env.py for the world")
     with open(os.path.join(out, name + "_light.json"), "w") as f:
-        json.dump({"lights": lights}, f, indent=2)
+        json.dump(sidecar, f, indent=2)
     print("lights -> sidecar: %d (%s)"
           % (len(lights), ", ".join(sorted({l["type"] for l in lights})) or "none"))
 
