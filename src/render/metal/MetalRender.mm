@@ -877,10 +877,23 @@ void MetalRender::createMetalMaterials()
     std::vector<Material> gpuMaterials;
     const fs::path resourcePath = getSettings()->getAs<std::string>("resource/searchPath");
 
+    // One texture per file, not per slot. A scene routinely uses the same map in
+    // several materials -- the pine forest fills 83 slots from 56 files -- and
+    // without this each slot decoded and uploaded its own copy, which cost 2.8 GB
+    // there. Keyed on path and colour space together, because the same file can
+    // legitimately be needed both sRGB-decoded and linear.
+    std::unordered_map<std::string, MTL::Texture*> textureCache;
     auto loadTex = [&](const std::string& path, bool srgb) -> MTL::ResourceID {
         if (path.empty()) return MTL::ResourceID{};
         const fs::path fullPath = resourcePath / path;
+        const std::string key = fullPath.string() + (srgb ? "|srgb" : "|linear");
+        const auto it = textureCache.find(key);
+        if (it != textureCache.end())
+        {
+            return it->second ? it->second->gpuResourceID() : MTL::ResourceID{};
+        }
         MTL::Texture* tex = loadTextureFromFile(fullPath.string(), srgb);
+        textureCache.emplace(key, tex);
         if (tex) mMaterialTextures.push_back(tex);
         return tex ? tex->gpuResourceID() : MTL::ResourceID{};
     };
@@ -3673,6 +3686,25 @@ void MetalRender::createAccelerationStructures()
         else
             emitted.mask = GEOMETRY_MASK_LIGHT;
         mEmittedInstances.push_back(emitted);
+    }
+
+    // Where the memory goes. On a 50 M triangle scene the total runs past what a
+    // 16 GB machine can hold resident, and the first question is always which
+    // part -- so state it rather than leave it to Activity Monitor.
+    {
+        const size_t vtxBytes = mScene->getVertices().size() * sizeof(Scene::Vertex);
+        const size_t idxBytes = mScene->getIndices().size() * sizeof(uint32_t);
+        size_t texBytes = 0;
+        for (MTL::Texture* t : mMaterialTextures)
+        {
+            if (!t)
+                continue;
+            // Every level of a full mip chain adds a third again.
+            texBytes += (size_t)t->width() * t->height() * 4 * 4 / 3;
+        }
+        STRELKA_INFO("Memory: vertices {:.2f} GB (x2, host copy is kept), indices {:.2f} GB (x2), "
+                     "textures {:.2f} GB with mips",
+                     vtxBytes / 1e9, idxBytes / 1e9, texBytes / 1e9);
     }
 
     STRELKA_INFO("Acceleration structures: {} BLAS ({} geometries), {} TLAS instances (from {} scene instances)",
