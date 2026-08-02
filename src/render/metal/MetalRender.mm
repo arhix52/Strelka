@@ -3156,6 +3156,13 @@ void MetalRender::handleSceneChanges()
 
 void MetalRender::buildBuffers()
 {
+    if (mScene->hostGeometryReleased())
+    {
+        // Rebuilding from arrays that were handed back would quietly replace the
+        // buffers with empty ones and render nothing.
+        STRELKA_ERROR("buildBuffers() after releaseHostGeometry(); reload the scene instead");
+        return;
+    }
     const std::vector<Scene::Vertex>& vertices = mScene->getVertices();
     const std::vector<uint32_t>& indices = mScene->getIndices();
 
@@ -3688,12 +3695,27 @@ void MetalRender::createAccelerationStructures()
         mEmittedInstances.push_back(emitted);
     }
 
-    // Where the memory goes. On a 50 M triangle scene the total runs past what a
-    // 16 GB machine can hold resident, and the first question is always which
-    // part -- so state it rather than leave it to Activity Monitor.
+    // Hand the host copies back once everything that reads them has run: the
+    // vertex and index buffers are uploaded, the per-primitive data (if the
+    // megakernel wanted any) is built, and the structures are up. On unified
+    // memory the GPU-visible buffers and these vectors come out of the same pool,
+    // so the duplicate is real, not bookkeeping.
+    //
+    // Off by default because Scene::pick() walks these arrays -- the editor needs
+    // them, a headless render does not.
+    const size_t vtxBytes = mScene->getVertices().size() * sizeof(Scene::Vertex);
+    const size_t idxBytes = mScene->getIndices().size() * sizeof(uint32_t);
+    bool hostFreed = false;
+    if (getSettings()->getAs<bool>("scene/releaseHostGeometry") && !mScene->hostGeometryReleased())
     {
-        const size_t vtxBytes = mScene->getVertices().size() * sizeof(Scene::Vertex);
-        const size_t idxBytes = mScene->getIndices().size() * sizeof(uint32_t);
+        mScene->releaseHostGeometry();
+        hostFreed = true;
+    }
+
+    // Where the memory goes. On a 50 M triangle scene the total runs past what a
+    // 16 GB machine holds resident, and the first question is always which part
+    // -- so state it rather than leave it to Activity Monitor.
+    {
         size_t texBytes = 0;
         for (MTL::Texture* t : mMaterialTextures)
         {
@@ -3702,9 +3724,10 @@ void MetalRender::createAccelerationStructures()
             // Every level of a full mip chain adds a third again.
             texBytes += (size_t)t->width() * t->height() * 4 * 4 / 3;
         }
-        STRELKA_INFO("Memory: vertices {:.2f} GB (x2, host copy is kept), indices {:.2f} GB (x2), "
-                     "textures {:.2f} GB with mips",
-                     vtxBytes / 1e9, idxBytes / 1e9, texBytes / 1e9);
+        STRELKA_INFO("Memory: vertices {:.2f} GB, indices {:.2f} GB, textures {:.2f} GB with mips; "
+                     "host geometry {}",
+                     vtxBytes / 1e9, idxBytes / 1e9, texBytes / 1e9,
+                     hostFreed ? "released (picking disabled for this scene)" : "kept (doubles the first two)");
     }
 
     STRELKA_INFO("Acceleration structures: {} BLAS ({} geometries), {} TLAS instances (from {} scene instances)",

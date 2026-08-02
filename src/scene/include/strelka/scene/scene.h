@@ -395,6 +395,27 @@ public:
         return mIndices;
     }
 
+    /// Drop the CPU-side vertex and index arrays once a backend has uploaded
+    /// them. On a 50 M triangle scene that is 2.3 GB held for the life of the
+    /// process, duplicating what already sits in GPU-visible buffers -- on
+    /// unified memory both halves are the same pool, and the machine starts
+    /// swapping.
+    ///
+    /// Not free of consequence, which is why it is opt-in: Scene::pick() walks
+    /// these arrays, so the editor keeps them and headless rendering does not.
+    /// Anything that reads them afterwards must handle them being empty.
+    void releaseHostGeometry()
+    {
+        std::vector<Vertex>().swap(mVertices);
+        std::vector<uint32_t>().swap(mIndices);
+        mHostGeometryReleased = true;
+    }
+
+    bool hostGeometryReleased() const
+    {
+        return mHostGeometryReleased;
+    }
+
     const std::vector<Instance>& getInstances() const
     {
         return mInstances;
@@ -789,6 +810,10 @@ private:
     uint32_t createSphereLightMesh();
 
     ChangeBits mChanges = ChangeBits::None;
+
+    // Set by releaseHostGeometry(). Anything that needs the arrays back has to
+    // reload the scene.
+    bool mHostGeometryReleased = false;
 
     std::optional<EnvLightDesc> mEnvLight;
 

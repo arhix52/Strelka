@@ -1096,6 +1096,14 @@ bool Scene::computeInstanceBounds(const uint32_t instId, glm::float3& outMin, gl
 
 Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& direction)
 {
+    // The arrays this walks can have been handed back to the OS; see
+    // releaseHostGeometry(). Returning a miss is the honest answer -- the
+    // alternative is reading a freed vector.
+    if (mHostGeometryReleased)
+    {
+        return {};
+    }
+
     PickHit best;
     best.hit = false;
     best.distance = std::numeric_limits<float>::max();

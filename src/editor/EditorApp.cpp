@@ -211,6 +211,8 @@ void EditorApp::loadSettings()
     // Absorption convention for transmissive media: 0 = glTF, 1 = Cycles.
     m_settingsManager->setAs<uint32_t>("render/material/volumeModel", 0);
     m_settingsManager->setAs<uint32_t>("render/texture/maxDimension", 0);
+    // The editor picks against the host arrays, so it keeps them.
+    m_settingsManager->setAs<bool>("scene/releaseHostGeometry", false);
     m_settingsManager->setAs<bool>("render/validate/analyticLights", true);
     m_settingsManager->setAs<std::string>("resource/searchPath", m_resourceSearchPath);
     // Postprocessing settings:

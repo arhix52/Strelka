@@ -286,6 +286,8 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/material/volumeModel", m_config.volumeModel);
     // 0 = load textures at full resolution.
     m_settings->setAs<uint32_t>("render/texture/maxDimension", m_config.textureMaxDim);
+    // Headless: nothing picks, nothing saves the scene back out.
+    m_settings->setAs<bool>("scene/releaseHostGeometry", true);
     m_settings->setAs<bool>("render/validate/analyticLights", true);
 
     m_settings->setAs<float>("render/post/tonemapper/filmIso", m_config.filmIso);
