@@ -19,13 +19,18 @@ struct IorStackEntry
 {
     unsigned int priority;
     float ior;
+    // Which material this medium came from. Absorption is a property of the
+    // volume, so a path inside one has to be able to look its coefficients back
+    // up; carrying the index is cheaper than carrying a float3 sigma_t, and the
+    // stack sits in the OptiX payload and in a per-pixel device buffer.
+    unsigned int material_index;
 };
 
 #define IOR_STACK_SIZE 4
 
 struct IorStack
 {
-    IorStackEntry entries[IOR_STACK_SIZE]; // 32 bytes
+    IorStackEntry entries[IOR_STACK_SIZE]; // 48 bytes
     int top;                               //  4 bytes (-1 = empty = air)
 };
 
@@ -49,14 +54,22 @@ DEVICE_FUNC float ior_stack_current_ior(const THREAD_REF IorStack& stack)
 // ior_stack_push -- Push a new medium onto the stack (entering geometry)
 // ---------------------------------------------------------------------------
 DEVICE_FUNC void ior_stack_push(THREAD_REF IorStack& stack,
-                                 unsigned int priority, float ior)
+                                 unsigned int priority, float ior,
+                                 unsigned int material_index)
 {
     if (stack.top < IOR_STACK_SIZE - 1)
     {
         stack.top++;
         stack.entries[stack.top].priority = priority;
         stack.entries[stack.top].ior = ior;
+        stack.entries[stack.top].material_index = material_index;
     }
+}
+
+// Which material's volume the ray is currently inside, or 0xFFFFFFFF for air.
+DEVICE_FUNC unsigned int ior_stack_current_material(const THREAD_REF IorStack& stack)
+{
+    return (stack.top >= 0) ? stack.entries[stack.top].material_index : 0xFFFFFFFFu;
 }
 
 // ---------------------------------------------------------------------------

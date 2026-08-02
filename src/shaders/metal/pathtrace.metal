@@ -269,7 +269,10 @@ kernel void raytracingKernel(
             const float3 worldNormal = normalize(transformDirection(objectNormal, objectToWorldSpaceTransform));
 
             const float3 worldTangent = normalize(transformDirection(normalize(interpolateAttrib(t0, t1, t2, barycentrics)), objectToWorldSpaceTransform));
-            const float3 worldBinormal = cross(worldNormal, worldTangent);
+            // glTF TANGENT.w. Handedness is per-mesh, so vertex 0 settles it;
+            // without it every normal map is mirrored along the bitangent.
+            const float3 worldBinormal =
+                cross(worldNormal, worldTangent) * unpackTangentSign(triangle->tangent[0]);
 
             // Geometric normal from interpolated positions (correct for motion-blurred triangle)
             float3 geomNormal = cross(p1 - p0, p2 - p0);
@@ -339,9 +342,10 @@ kernel void raytracingKernel(
             {
                 float3 toLight;
                 float lightPdf = 0.0f;
+                bool lightIsDelta = false;
                 const float3 radiance = estimateDirectLighting(uniforms, accelerationStructure, i,
                     uniforms.numLights, lights,
-                    prd.sampler, si, toLight, lightPdf,
+                    prd.sampler, si, toLight, lightPdf, lightIsDelta,
                     envAliasTable, envMapTexture, motionTime);
 
                 // `> 0` rather than `!= 0`: a NaN PDF must not be treated as valid.
@@ -358,7 +362,10 @@ kernel void raytracingKernel(
                     if (evalResult.pdf > 0.0f)
                     {
                         const float3 radianceOverPdf = radiance / lightPdf;
-                        const float misWeight = misWeightBalance(lightPdf, evalResult.pdf);
+                        // A delta light cannot be reached by BSDF sampling, so
+                        // there is no second strategy to weight against.
+                        const float misWeight =
+                            lightIsDelta ? 1.0f : misWeightBalance(lightPdf, evalResult.pdf);
                         prd.radiance += prd.throughput * radianceOverPdf * misWeight * evalResult.bsdf;
                     }
                 }
@@ -371,7 +378,7 @@ kernel void raytracingKernel(
             if ((sampleResult.event_type & BSDF_EVENT_TRANSMISSION) != 0)
             {
                 if (entering)
-                    ior_stack_push(prd.iorStack, si.dielectric_priority, si.ior);
+                    ior_stack_push(prd.iorStack, si.dielectric_priority, si.ior, materialId);
                 else
                     ior_stack_pop(prd.iorStack, si.dielectric_priority);
                 prd.origin = offset_ray(si.position, -faceNg);

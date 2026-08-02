@@ -30,6 +30,15 @@
 // ---------------------------------------------------------------------------
 // Material type tag -- selects which BxDF to evaluate
 // ---------------------------------------------------------------------------
+// glTF alphaMode. MASK is the degenerate case of BLEND -- a binary opacity --
+// so everything downstream only ever sees a resolved float in [0,1].
+enum AlphaMode : unsigned int
+{
+    ALPHA_MODE_OPAQUE = 0,
+    ALPHA_MODE_MASK   = 1,
+    ALPHA_MODE_BLEND  = 2,
+};
+
 enum MaterialType : unsigned int
 {
     MATERIAL_TYPE_DIFFUSE       = 0,
@@ -83,16 +92,24 @@ struct MaterialParams
     int         occlusion_tex;          //  4 bytes
     int         transmission_tex;       //  4 bytes
     unsigned int dielectric_priority;   //  4 bytes  (nested dielectrics)
-    float       _pad1;                  //  4 bytes  -- total 112
+    // glTF alphaMode. Opacity, not material type: routing MASK/BLEND to a
+    // dielectric converter is what used to turn every cutout into glass.
+    unsigned int alpha_mode;            //  4 bytes  (AlphaMode)  -- total 112
 
     // -- Thin-surface flag --------------------------------------------------
     unsigned int thin_walled;           //  4 bytes
-    float       _pad2;                  //  4 bytes
-    float       _pad3;                  //  4 bytes
-    float       _pad4;                  //  4 bytes  -- total 128
+    float       base_color_alpha;       //  4 bytes  (baseColorFactor.a)
+    float       anisotropy_rotation;    //  4 bytes  (radians, CCW about N)
+    float       attenuation_distance;   //  4 bytes  -- total 128
+
+    // -- KHR_materials_volume ------------------------------------------------
+    // Colour the medium leaves after attenuation_distance of travel. See
+    // volume_extinction() for the two conventions this can be read under.
+    float3      attenuation_color;      // 12 bytes
+    float       _pad4;                  //  4 bytes  -- total 144
 };
 
 // Static assert equivalent for size (works on all three backends)
-// 128 bytes, 16-byte aligned -- fits nicely in SBT / argument buffers.
+// 144 bytes, 16-byte aligned -- fits nicely in SBT / argument buffers.
 
 #endif // STRELKA_MATERIAL_PARAMS_H

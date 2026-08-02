@@ -486,7 +486,7 @@ extern "C" __global__ void __closesthit__radiance()
     if ((sample_data.event_type & BSDF_EVENT_TRANSMISSION) != 0)
     {
         if (entering)
-            ior_stack_push(prd->iorStack, si.dielectric_priority, si.ior);
+            ior_stack_push(prd->iorStack, si.dielectric_priority, si.ior, materialId);
         else
             ior_stack_pop(prd->iorStack, si.dielectric_priority);
         prd->origin = offset_ray(si.position, -faceNg);

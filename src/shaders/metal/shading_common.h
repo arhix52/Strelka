@@ -16,6 +16,7 @@
 
 #include "ShaderTypes.h"
 #include <strelka/material/ior_stack.h>
+#include <strelka/material/volume.h>
 #include <strelka/material/bsdf.h>
 
 using namespace metal;
@@ -41,12 +42,18 @@ constant bool kFcLights [[function_constant(1)]];
 constant bool kFcMotionBlur [[function_constant(2)]];
 constant bool kFcDof [[function_constant(3)]];
 constant bool kFcDebug [[function_constant(4)]];
+constant bool kFcAlpha [[function_constant(5)]];
 
 constant bool SPEC_ENV_MAP = is_function_constant_defined(kFcEnvMap) ? kFcEnvMap : true;
 constant bool SPEC_LIGHTS = is_function_constant_defined(kFcLights) ? kFcLights : true;
 constant bool SPEC_MOTION_BLUR = is_function_constant_defined(kFcMotionBlur) ? kFcMotionBlur : true;
 constant bool SPEC_DOF = is_function_constant_defined(kFcDof) ? kFcDof : true;
 constant bool SPEC_DEBUG = is_function_constant_defined(kFcDebug) ? kFcDebug : true;
+// Only set when the scene actually contains a MASK or BLEND material. Scenes
+// without cutouts then compile the same kernels they compiled before and pay
+// nothing for the feature -- which matters most in the shadow stage, where the
+// alternative to any-hit traversal is a loop over closest hits.
+constant bool SPEC_ALPHA = is_function_constant_defined(kFcAlpha) ? kFcAlpha : true;
 
 struct PerRayData
 {
@@ -104,14 +111,51 @@ float3 transformDirection(float3 p, float4x4 transform) {
 }
 
 //  valid range of coordinates [-1; 1]
+//
+// z is 10 bits wide, not 12: bit 30 carries the tangent handedness sign that
+// packTangent() writes, and folding it into z would warp the shading frame.
 static float3 unpackNormal(uint32_t val)
 {
     constexpr float scale = 1.0f / 256.0f;
     float3 normal;
-    normal.z = ((val & 0xfff00000) >> 20) * scale - 1.0f;
+    normal.z = ((val & 0x3ff00000) >> 20) * scale - 1.0f;
     normal.y = ((val & 0x000ffc00) >> 10) * scale - 1.0f;
     normal.x = (val & 0x000003ff) * scale - 1.0f;
     return normal;
+}
+
+// Coverage of a surface at a given uv. MASK is a binary predicate, BLEND passes
+// the alpha through, OPAQUE is always 1 -- so callers only ever see a float in
+// [0,1] and never need to branch on the mode themselves.
+static float resolveOpacity(device const Material& material, float2 uv)
+{
+    if (material.alpha_mode == ALPHA_MODE_OPAQUE)
+        return 1.0f;
+    constexpr sampler alphaSampler(mag_filter::linear, min_filter::linear);
+    float alpha = material.base_color_alpha;
+    if (!is_null_texture(material.baseColorTexture))
+    {
+        // RGBA8Unorm_sRGB puts only RGB through the transfer function, so the
+        // alpha channel read here is already linear.
+        alpha *= material.baseColorTexture.sample(alphaSampler, uv).a;
+    }
+    if (material.alpha_mode == ALPHA_MODE_MASK)
+        return alpha >= material.alpha_cutoff ? 1.0f : 0.0f;
+    return saturate(alpha);
+}
+
+// glTF COLOR_0, packed RGBA8 and LINEAR -- it carries no transfer function,
+// unlike a base-colour texture, so nothing is decoded here.
+static float3 unpackVertexColor(uint32_t val)
+{
+    constexpr float s = 1.0f / 255.0f;
+    return float3((val & 0xffu) * s, ((val >> 8) & 0xffu) * s, ((val >> 16) & 0xffu) * s);
+}
+
+// glTF TANGENT.w: +1 or -1, deciding which way the bitangent points.
+static float unpackTangentSign(uint32_t val)
+{
+    return (val & (1u << 30)) ? -1.0f : 1.0f;
 }
 
 //  valid range of coordinates [-10; 10]
@@ -283,7 +327,8 @@ void initSurfaceInteraction(
     float3 worldTangent,
     float3 worldBinormal,
     float2 uv,
-    float3 rayDir)
+    float3 rayDir,
+    float3 vertexColor = float3(1.0f))
 {
     constexpr sampler texSampler(mag_filter::linear, min_filter::linear);
 
@@ -296,14 +341,15 @@ void initSurfaceInteraction(
     si.wo             = -rayDir;
     si.front_face     = dot(geomNormal, -rayDir) > 0.0f;
 
-    // Sample base color texture
-    float3 baseColor = float3(material.base_color);
+    // Sample base color texture. glTF composes base colour as
+    // baseColorFactor * baseColorTexture * COLOR_0, all three multiplicative.
+    float3 baseColor = float3(material.base_color) * vertexColor;
     if (!is_null_texture(material.baseColorTexture))
     {
-        float4 texVal = material.baseColorTexture.sample(texSampler, uv);
-        baseColor *= texVal.rgb;
+        baseColor *= material.baseColorTexture.sample(texSampler, uv).rgb;
     }
     si.albedo = baseColor;
+    si.opacity = resolveOpacity(material, uv);
 
     // Sample metallic-roughness texture (glTF: G = roughness, B = metallic)
     float resolvedRoughness = material.roughness;
@@ -398,6 +444,11 @@ struct LightConnection
     float tMin;
     float tMax;
     bool needsRay;    // false when the connection is degenerate and contributes nothing
+    // A delta light has no area, so BSDF sampling can never generate a direction
+    // that hits it and there is no second strategy to combine with. Its pdf is a
+    // placeholder of 1, not a solid-angle density, so feeding it to the balance
+    // heuristic would silently scale the contribution by 1/(1 + pdf_bsdf).
+    bool isDelta;
 };
 
 static LightConnection makeEmptyConnection()
@@ -410,6 +461,7 @@ static LightConnection makeEmptyConnection()
     c.tMin = 0.0f;
     c.tMax = 0.0f;
     c.needsRay = false;
+    c.isDelta = false;
     return c;
 }
 
@@ -450,6 +502,9 @@ LightConnection connectLight(
 
     LightConnection c = makeEmptyConnection();
     c.toLight = lightSampleData.L;
+    // Sharp point/spot only: give one a radius and it is sampled as a sphere,
+    // which BSDF rays can hit and which therefore does need MIS.
+    c.isDelta = (light.type == 5 || light.type == 6) && !(light.points[0].x > 1e-4f);
 
     float3 Li = float3(light.color);
     // Point/spot colour is radiant intensity: convert to irradiance on the
@@ -624,6 +679,7 @@ float3 estimateDirectLighting(
     thread SurfaceInteraction& si,
     thread float3& toLight,
     thread float& lightPdf,
+    thread bool& isDelta,
     device const EnvAliasEntry* envAliasTable,
     texture2d<float> envMapTexture,
     const float motionTime)
@@ -632,6 +688,7 @@ float3 estimateDirectLighting(
                                              envAliasTable, envMapTexture);
     toLight = c.toLight;
     lightPdf = c.pdf;
+    isDelta = c.isDelta;
 
     if (!c.needsRay)
     {

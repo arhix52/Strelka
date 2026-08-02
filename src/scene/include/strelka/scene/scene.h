@@ -108,6 +108,13 @@ public:
         std::string occlusionTexPath;
     };
 
+    // 32 bytes, and it must stay 32: the Metal shaders hardcode this stride and
+    // read attributes by byte offset (search for vtxStride). The two trailing
+    // words were padding; uv1 and color fit in them exactly, so a second UV set
+    // and vertex colours cost nothing and change no offset that already exists.
+    //
+    // color defaults to opaque white rather than zero: an unset vertex colour is
+    // a multiplier of 1, and a zeroed one would render the surface black.
     struct Vertex
     {
         glm::float3 pos;
@@ -115,8 +122,8 @@ public:
 
         uint32_t normal;
         uint32_t uv;
-        float pad0;
-        float pad1;
+        uint32_t uv1 = 0;                  // byte 24, packUV format
+        uint32_t color = 0xFFFFFFFFu;      // byte 28, packed RGBA8, linear
     };
 
     struct vertexSkinData //vertex skin data

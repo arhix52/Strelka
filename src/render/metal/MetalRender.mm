@@ -764,7 +764,7 @@ void MetalRender::init()
     buildWavefrontPipelines();
 }
 
-MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName)
+MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName, bool srgb)
 {
     int texWidth = 0;
     int texHeight = 0;
@@ -778,7 +778,11 @@ MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName)
     MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
     pTextureDesc->setWidth(texWidth);
     pTextureDesc->setHeight(texHeight);
-    pTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+    // Colour maps carry sRGB-encoded bytes. Loading them as a linear format
+    // hands the encoded values straight to the BSDF, which lifts every midtone
+    // and desaturates the result; the _sRGB format makes the sampler decode.
+    pTextureDesc->setPixelFormat(srgb ? MTL::PixelFormatRGBA8Unorm_sRGB
+                                      : MTL::PixelFormatRGBA8Unorm);
     pTextureDesc->setTextureType(MTL::TextureType2D);
     pTextureDesc->setStorageMode(MTL::StorageModeManaged);
     pTextureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
@@ -799,10 +803,10 @@ void MetalRender::createMetalMaterials()
     std::vector<Material> gpuMaterials;
     const fs::path resourcePath = getSettings()->getAs<std::string>("resource/searchPath");
 
-    auto loadTex = [&](const std::string& path) -> MTL::ResourceID {
+    auto loadTex = [&](const std::string& path, bool srgb) -> MTL::ResourceID {
         if (path.empty()) return MTL::ResourceID{};
         const fs::path fullPath = resourcePath / path;
-        MTL::Texture* tex = loadTextureFromFile(fullPath.string());
+        MTL::Texture* tex = loadTextureFromFile(fullPath.string(), srgb);
         if (tex) mMaterialTextures.push_back(tex);
         return tex ? tex->gpuResourceID() : MTL::ResourceID{};
     };
@@ -826,16 +830,23 @@ void MetalRender::createMetalMaterials()
         material.normal_scale = p.normal_scale;
         material.occlusion_strength = p.occlusion_strength;
         material.alpha_cutoff = p.alpha_cutoff;
+        material.alpha_mode = p.alpha_mode;
+        material.base_color_alpha = p.base_color_alpha;
+        material.attenuation_color = packed_float3(
+            simd_make_float3(p.attenuation_color.x, p.attenuation_color.y, p.attenuation_color.z));
+        material.attenuation_distance = p.attenuation_distance;
         material.material_type = p.material_type;
         material.thin_walled = p.thin_walled;
         material.dielectric_priority = p.dielectric_priority;
 
-        material.baseColorTexture = loadTex(currMatDesc.baseColorTexPath);
-        material.metallicRoughnessTexture = loadTex(currMatDesc.metallicRoughnessTexPath);
-        material.normalTexture = loadTex(currMatDesc.normalTexPath);
-        material.emissionTexture = loadTex(currMatDesc.emissionTexPath);
-        material.occlusionTexture = loadTex(currMatDesc.occlusionTexPath);
+        material.baseColorTexture = loadTex(currMatDesc.baseColorTexPath, true);
+        material.metallicRoughnessTexture = loadTex(currMatDesc.metallicRoughnessTexPath, false);
+        material.normalTexture = loadTex(currMatDesc.normalTexPath, false);
+        material.emissionTexture = loadTex(currMatDesc.emissionTexPath, true);
+        material.occlusionTexture = loadTex(currMatDesc.occlusionTexPath, false);
 
+        if (p.alpha_mode != ALPHA_MODE_OPAQUE)
+            mSceneHasAlphaMaterials = true;
         gpuMaterials.push_back(material);
     }
 
@@ -1272,6 +1283,11 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
             bind(sampleRadiance, 0, 3);
             bind(mWavefrontControlBuffer, 0, 4);
             table->setAddress(sampleIdx, 5);
+            bind(mInstanceBuffer, 0, 6);
+            bind(mMaterialBuffer, 0, 7);
+            bind(mGeometryEntryBuffer, 0, 8);
+            bind(mVertexBuffer, 0, 9);
+            bind(mIndexBuffer, 0, 10);
             enc->dispatchThreadgroups(control + kShadowArgsOffset, tg);
             barrier();
         }
@@ -1490,6 +1506,12 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->setBuffer(sampleRadiance, 0, 3);
             enc->setBuffer(mWavefrontControlBuffer, 0, 4);
             enc->setBytes(&s, sizeof(uint32_t), 5);
+            // Cutout shadows need to resolve the material and its uv at each hit.
+            enc->setBuffer(mInstanceBuffer, 0, 6);
+            enc->setBuffer(mMaterialBuffer, 0, 7);
+            enc->setBuffer(mGeometryEntryBuffer, 0, 8);
+            enc->setBuffer(mVertexBuffer, 0, 9);
+            enc->setBuffer(mIndexBuffer, 0, 10);
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kShadowArgsOffset, tg);
 
         }
@@ -2030,6 +2052,8 @@ void MetalRender::render(Buffer* output)
     pUniformData->numLights = analyticLightsEnabled ? (uint32_t)mScene->getLightsDesc().size() : 0u;
     pUniformData->primaryRayMask = analyticLightsEnabled ? RAY_MASK_PRIMARY : GEOMETRY_MASK_GEOMETRY;
     pUniformData->estimatorMode = settings.getAs<uint32_t>("render/validate/estimatorMode");
+    // 0 = glTF (-ln(C)/d), 1 = Cycles ((1-C)/d). See volume.h.
+    pUniformData->volumeModel = settings.getAs<uint32_t>("render/material/volumeModel");
     pUniformData->samples_per_launch = spp;
     pUniformData->enableAccumulation = (uint32_t)accumulationActive;
     pUniformData->missColor = float3(0.0f);
@@ -2289,6 +2313,10 @@ void MetalRender::render(Buffer* output)
                 features |= kFeatureEnvMap;
             if (pUniformData->numLights > 0)
                 features |= kFeatureLights;
+            // Cutouts change how the shadow stage traverses, so scenes without
+            // any pay nothing: they compile the any-hit variant.
+            if (mSceneHasAlphaMaterials)
+                features |= kFeatureAlpha;
             // Motion blur is only a feature of the shader if something can
             // actually move: with neither deforming geometry nor a moving
             // camera, the shutter time is a number nothing reads.
@@ -2767,11 +2795,13 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
     const bool motionBlur = (features & kFeatureMotionBlur) != 0;
     const bool dof = (features & kFeatureDof) != 0;
     const bool debug = (features & kFeatureDebug) != 0;
+    const bool alpha = (features & kFeatureAlpha) != 0;
     values->setConstantValue(&envMap, MTL::DataTypeBool, (NS::UInteger)0);
     values->setConstantValue(&lights, MTL::DataTypeBool, (NS::UInteger)1);
     values->setConstantValue(&motionBlur, MTL::DataTypeBool, (NS::UInteger)2);
     values->setConstantValue(&dof, MTL::DataTypeBool, (NS::UInteger)3);
     values->setConstantValue(&debug, MTL::DataTypeBool, (NS::UInteger)4);
+    values->setConstantValue(&alpha, MTL::DataTypeBool, (NS::UInteger)5);
 
     // A pipeline built the Metal 3 way cannot be used with an argument table, so
     // the two paths need separate pipelines and the mode is part of the cache key.
@@ -3498,6 +3528,14 @@ void MetalRender::createAccelerationStructures()
         // Point/spot proxies exist for picking and the gizmo; they are not
         // emissive surfaces. Putting them on the light mask would treat their
         // radiant intensity as radiance and blow out the frame.
+        //
+        // They must not be on the geometry mask either. A point light is sampled
+        // at its centre, which sits inside the proxy sphere, so a shadow ray to
+        // it necessarily crosses the shell -- and RAY_MASK_SHADOW *is*
+        // GEOMETRY_MASK_GEOMETRY, so every next-event connection to a point or
+        // spot light was reported occluded and those lights lit nothing at all.
+        // Picking runs on the CPU in Scene::pick() and never consults these
+        // masks, so a proxy invisible to every ray costs nothing.
         const int lightType =
             curr.mLightId < mScene->getLightsDesc().size() ? mScene->getLightsDesc()[curr.mLightId].type : -1;
         const bool enabled =
@@ -3505,7 +3543,7 @@ void MetalRender::createAccelerationStructures()
         if (!enabled)
             emitted.mask = 0;
         else if (lightType == LIGHT_TYPE_POINT || lightType == LIGHT_TYPE_SPOT)
-            emitted.mask = GEOMETRY_MASK_GEOMETRY;
+            emitted.mask = 0;
         else
             emitted.mask = GEOMETRY_MASK_LIGHT;
         mEmittedInstances.push_back(emitted);

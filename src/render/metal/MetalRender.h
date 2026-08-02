@@ -158,6 +158,9 @@ private:
     size_t mTlasInstanceCount = 0;
 
     MTL::Buffer* mMaterialBuffer = nullptr;
+    // Set while uploading materials. Gates the alpha function constant, so a
+    // scene with no cutouts compiles the same kernels it always did.
+    bool mSceneHasAlphaMaterials = false;
     std::vector<MTL::Texture*> mMaterialTextures;
     uint32_t mFrameIndex = 0;
 
@@ -236,6 +239,7 @@ private:
     {
         kFeatureEnvMap = 1u << 0,
         kFeatureLights = 1u << 1,
+        kFeatureAlpha = 1u << 6,
         kFeatureMotionBlur = 1u << 2,
         kFeatureDof = 1u << 3,
         kFeatureDebug = 1u << 4,
@@ -336,7 +340,10 @@ private:
     void uploadLightBuffer();
     void handleSceneChanges();
 
-    MTL::Texture* loadTextureFromFile(const std::string& fileName);
+    // srgb selects the transfer function the sampler applies. Colour maps are
+    // authored sRGB-encoded; data maps (normal, metallic-roughness, occlusion)
+    // are not and must stay linear.
+    MTL::Texture* loadTextureFromFile(const std::string& fileName, bool srgb);
     void createMetalMaterials();
 
     MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);

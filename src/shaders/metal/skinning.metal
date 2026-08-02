@@ -74,9 +74,11 @@ kernel void skinningKernel(
     device float3* posPtr = (device float3*)(vertexBuffer + vertexAddr);
     *posPtr = skinnedPos.xyz;
 
-    // Write packed tangent (4 bytes at offset 12)
+    // Write packed tangent (4 bytes at offset 12). Skinning rotates the tangent
+    // but cannot change which side of the surface the bitangent is on, so bit 30
+    // is carried over from the rest pose rather than recomputed.
     device uint32_t* tanPtr = (device uint32_t*)(vertexBuffer + vertexAddr + 12);
-    *tanPtr = packNormal(skinnedTangent);
+    *tanPtr = packNormal(skinnedTangent) | (sd.tangent & (1u << 30));
 
     // Write packed normal (4 bytes at offset 16)
     device uint32_t* normPtr = (device uint32_t*)(vertexBuffer + vertexAddr + 16);

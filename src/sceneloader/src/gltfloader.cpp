@@ -105,6 +105,41 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
         texCoord0Stride = uvAccessor.ByteStride(uvView) / sizeof(float);
     }
 
+    // Tangents. vec4: xyz is the tangent, w the bitangent handedness. Exporters
+    // emit this whenever a normal map is in play (Blender emits it always), and
+    // it is per-vertex and smooth, unlike the per-triangle fallback below.
+    const float* tangentData = nullptr;
+    int tangentStride = 0;
+    if (primitive.attributes.find("TANGENT") != primitive.attributes.end())
+    {
+        const tinygltf::Accessor& tanAccessor = model.accessors[primitive.attributes.find("TANGENT")->second];
+        const tinygltf::BufferView& tanView = model.bufferViews[tanAccessor.bufferView];
+        tangentData = reinterpret_cast<const float*>(
+            &(model.buffers[tanView.buffer].data[tanAccessor.byteOffset + tanView.byteOffset]));
+        tangentStride = tanAccessor.ByteStride(tanView) / sizeof(float);
+        assert(tangentStride > 0);
+    }
+
+    // Vertex colours. glTF allows VEC3 or VEC4, as float or as normalised
+    // unsigned byte/short, and the values are linear multipliers on base colour.
+    const void* colorData = nullptr;
+    int colorStride = 0;          // in components, not bytes
+    int colorComponents = 4;
+    int colorComponentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
+    if (primitive.attributes.find("COLOR_0") != primitive.attributes.end())
+    {
+        const tinygltf::Accessor& ca = model.accessors[primitive.attributes.find("COLOR_0")->second];
+        const tinygltf::BufferView& cv = model.bufferViews[ca.bufferView];
+        colorData = reinterpret_cast<const void*>(&model.buffers[cv.buffer].data[ca.byteOffset + cv.byteOffset]);
+        colorComponents = ca.type == TINYGLTF_TYPE_VEC3 ? 3 : 4;
+        colorComponentType = ca.componentType;
+        const int elemSize = colorComponentType == TINYGLTF_COMPONENT_TYPE_FLOAT          ? 4
+                             : colorComponentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT ? 2
+                                                                                            : 1;
+        colorStride = ca.ByteStride(cv) / elemSize;
+        assert(colorStride > 0);
+    }
+
     int matId = primitive.material;
     if (matId == -1)
     {
@@ -170,6 +205,41 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
         vertex.pos = vPos;
         vertex.normal = packNormal(glm::normalize(vNorm));
         vertex.uv = packUV(texCoord0Data ? glm::make_vec2(&texCoord0Data[v * texCoord0Stride]) : glm::vec3(0.0f));
+        if (colorData)
+        {
+            glm::float4 c(1.0f);
+            switch (colorComponentType)
+            {
+            case TINYGLTF_COMPONENT_TYPE_FLOAT: {
+                const float* src = static_cast<const float*>(colorData) + v * colorStride;
+                for (int k = 0; k < colorComponents; ++k)
+                    c[k] = src[k];
+                break;
+            }
+            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
+                const uint8_t* src = static_cast<const uint8_t*>(colorData) + v * colorStride;
+                for (int k = 0; k < colorComponents; ++k)
+                    c[k] = src[k] / 255.0f;
+                break;
+            }
+            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
+                const uint16_t* src = static_cast<const uint16_t*>(colorData) + v * colorStride;
+                for (int k = 0; k < colorComponents; ++k)
+                    c[k] = src[k] / 65535.0f;
+                break;
+            }
+            default:
+                break; // leave white
+            }
+            vertex.color = packColor(c);
+        }
+        if (tangentData)
+        {
+            const float* t = &tangentData[v * tangentStride];
+            const glm::float3 tan{ t[0], t[1], t[2] };
+            const float lenSq = glm::dot(tan, tan);
+            vertex.tangent = packTangent(lenSq > 1e-12f ? tan * glm::inversesqrt(lenSq) : glm::float3(0, 0, 1), t[3]);
+        }
         vertices.push_back(vertex);
         sum += vertex.pos;
 
@@ -244,7 +314,8 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
             {
                 indices.push_back(buf[index]);
             }
-            computeTangent(vertices, indices);
+            if (!tangentData)
+                computeTangent(vertices, indices);
             break;
         }
         case TINYGLTF_PARAMETER_TYPE_UNSIGNED_SHORT: {
@@ -253,7 +324,8 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
             {
                 indices.push_back(buf[index]);
             }
-            computeTangent(vertices, indices);
+            if (!tangentData)
+                computeTangent(vertices, indices);
             break;
         }
         case TINYGLTF_PARAMETER_TYPE_UNSIGNED_BYTE: {
@@ -262,7 +334,8 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
             {
                 indices.push_back(buf[index]);
             }
-            computeTangent(vertices, indices);
+            if (!tangentData)
+                computeTangent(vertices, indices);
             break;
         }
         default:
@@ -403,6 +476,25 @@ std::string getTextureUri(const tinygltf::Model& model, int texIndex)
     return model.images[imageId].uri;
 }
 
+// Read one scalar out of a KHR_materials_* extension, falling back to the
+// spec default when the extension or the key is absent.
+//
+// Blender writes the whole Principled BSDF through these: ior, specular,
+// transmission, anisotropy and emissive strength all leave as extensions rather
+// than as core glTF fields. Every one of them used to be hardcoded below, which
+// is why a scene could round-trip through glTF carrying the right numbers and
+// still render with none of them.
+static float khrFloat(const tinygltf::Material& material,
+                      const char* extension,
+                      const char* key,
+                      float fallback)
+{
+    const auto it = material.extensions.find(extension);
+    if (it == material.extensions.end() || !it->second.IsObject() || !it->second.Has(key))
+        return fallback;
+    return (float)it->second.Get(key).GetNumberAsDouble();
+}
+
 oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& model, const tinygltf::Material& material)
 {
     oka::Scene::MaterialDescription desc{};
@@ -414,24 +506,57 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     // Base color
     const auto& bcf = material.pbrMetallicRoughness.baseColorFactor;
     p.base_color = {(float)bcf[0], (float)bcf[1], (float)bcf[2]};
+    p.base_color_alpha = (float)bcf[3];
+    p.alpha_mode = material.alphaMode == "MASK"    ? ALPHA_MODE_MASK
+                   : material.alphaMode == "BLEND" ? ALPHA_MODE_BLEND
+                                                   : ALPHA_MODE_OPAQUE;
 
     // Metallic / roughness
     p.roughness = (float)material.pbrMetallicRoughness.roughnessFactor;
     p.metallic  = (float)material.pbrMetallicRoughness.metallicFactor;
 
-    // IOR / specular defaults
-    p.ior = 1.5f;
-    p.specular = 0.5f;
+    // IOR / specular / transmission / anisotropy, from the KHR extensions.
+    // specularFactor is a 0..1 multiplier on the dielectric F0, and glTF's
+    // default of 1.0 corresponds to Strelka's specular 0.5 -- so halve it, or a
+    // material Blender exported with specularFactor 0 still gets an F0 = 0.04
+    // lobe it was never meant to have.
+    p.ior = khrFloat(material, "KHR_materials_ior", "ior", 1.5f);
+    p.specular = 0.5f * khrFloat(material, "KHR_materials_specular", "specularFactor", 1.0f);
     p.specular_tint = 0.0f;
-    p.transmission = 0.0f;
-    p.clearcoat = 0.0f;
-    p.clearcoat_roughness = 0.0f;
-    p.anisotropy = 0.0f;
+    p.transmission = khrFloat(material, "KHR_materials_transmission", "transmissionFactor", 0.0f);
+    p.clearcoat = khrFloat(material, "KHR_materials_clearcoat", "clearcoatFactor", 0.0f);
+    p.clearcoat_roughness =
+        khrFloat(material, "KHR_materials_clearcoat", "clearcoatRoughnessFactor", 0.0f);
+    p.anisotropy = khrFloat(material, "KHR_materials_anisotropy", "anisotropyStrength", 0.0f);
+    p.anisotropy_rotation = khrFloat(material, "KHR_materials_anisotropy", "anisotropyRotation", 0.0f);
 
-    // Emission
+    // KHR_materials_volume. attenuationDistance defaults to +infinity, i.e. no
+    // absorption; 0 is the encoding used downstream for "none".
+    p.attenuation_distance = khrFloat(material, "KHR_materials_volume", "attenuationDistance", 0.0f);
+    p.attenuation_color = { 1.0f, 1.0f, 1.0f };
+    {
+        const auto vit = material.extensions.find("KHR_materials_volume");
+        if (vit != material.extensions.end() && vit->second.IsObject() &&
+            vit->second.Has("attenuationColor"))
+        {
+            const tinygltf::Value& c = vit->second.Get("attenuationColor");
+            if (c.IsArray() && c.ArrayLen() >= 3)
+            {
+                p.attenuation_color = { (float)c.Get(0).GetNumberAsDouble(),
+                                        (float)c.Get(1).GetNumberAsDouble(),
+                                        (float)c.Get(2).GetNumberAsDouble() };
+            }
+        }
+    }
+
+    // Emission. emissiveFactor is clamped to [0,1] by the spec, so anything
+    // brighter than 1 leaves in KHR_materials_emissive_strength -- which is
+    // exactly the field this used to overwrite with a presence flag, collapsing
+    // every emitter in every Blender export to 1x.
     const auto& emf = material.emissiveFactor;
     p.emission = {(float)emf[0], (float)emf[1], (float)emf[2]};
-    p.emission_strength = (emf[0] + emf[1] + emf[2]) > 0.0f ? 1.0f : 0.0f;
+    p.emission_strength =
+        khrFloat(material, "KHR_materials_emissive_strength", "emissiveStrength", 1.0f);
 
     // Normal / occlusion / alpha
     p.normal_scale = (float)material.normalTexture.scale;
@@ -446,7 +571,9 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     p.occlusion_tex = -1;
     p.transmission_tex = -1;
     p.thin_walled = 0;
-    p.dielectric_priority = 0; // opaque: not a dielectric volume
+    // A transmissive surface is a dielectric volume and needs a priority so the
+    // nested-dielectric IOR stack can order it; an opaque one must stay at 0.
+    p.dielectric_priority = p.transmission > 0.0f ? 10u : 0u;
 
     // Store texture file paths for the renderer to load
     desc.baseColorTexPath = getTextureUri(model, material.pbrMetallicRoughness.baseColorTexture.index);
@@ -458,57 +585,17 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     return desc;
 }
 
-oka::Scene::MaterialDescription convertToDielectric(const tinygltf::Model& model, const tinygltf::Material& material)
-{
-    oka::Scene::MaterialDescription desc{};
-    desc.name = material.name.empty() ? "glass" : material.name;
-
-    MaterialParams& p = desc.params;
-    p.material_type = MATERIAL_TYPE_DIELECTRIC;
-
-    const auto& bcf = material.pbrMetallicRoughness.baseColorFactor;
-    p.base_color = {(float)bcf[0], (float)bcf[1], (float)bcf[2]};
-
-    p.roughness = (float)material.pbrMetallicRoughness.roughnessFactor;
-    p.metallic = 0.0f;
-    p.ior = 1.5f;
-    p.specular = 0.5f;
-    p.specular_tint = 0.0f;
-    p.transmission = 1.0f;
-    p.clearcoat = 0.0f;
-    p.clearcoat_roughness = 0.0f;
-    p.anisotropy = 0.0f;
-
-    p.emission = {0.0f, 0.0f, 0.0f};
-    p.emission_strength = 0.0f;
-    p.normal_scale = 1.0f;
-    p.occlusion_strength = 1.0f;
-    p.alpha_cutoff = 0.5f;
-
-    p.base_color_tex = -1;
-    p.metallic_roughness_tex = -1;
-    p.normal_tex = -1;
-    p.emission_tex = -1;
-    p.occlusion_tex = -1;
-    p.transmission_tex = -1;
-    p.thin_walled = 0;
-    p.dielectric_priority = 10; // glass: default dielectric priority
-
-    return desc;
-}
-
 void loadMaterials(const tinygltf::Model& model, oka::Scene& scene)
 {
     for (const tinygltf::Material& material : model.materials)
     {
-        if (material.alphaMode == "OPAQUE")
-        {
-            scene.addMaterial(convertToStandardPBR(model, material));
-        }
-        else
-        {
-            scene.addMaterial(convertToDielectric(model, material));
-        }
+        // alphaMode describes opacity, not material type. Routing MASK and BLEND
+        // to the dielectric converter turned every cutout and every blended
+        // surface into rough glass -- and, worse, silently dropped all five
+        // texture paths, because convertToDielectric never assigns them. Glass
+        // arrives through KHR_materials_transmission instead, which
+        // convertToStandardPBR now parses into a transmission lobe.
+        scene.addMaterial(convertToStandardPBR(model, material));
     }
 }
 
@@ -763,6 +850,13 @@ bool loadLightsFromJson(const std::string& modelPath, oka::Scene& scene)
     return loadLightsJson(scene, jsonPath);
 }
 
+// Peak luminous efficacy, lm/W. KHR_lights_punctual intensity is photometric
+// (candela for point/spot, lux for directional) while everything downstream of
+// UniformLightDesc is radiometric, so the two are exactly this factor apart.
+// Blender's exporter multiplies watts by the same constant on the way out, so
+// dividing here round-trips: 27175.7 cd / 683 = 39.79 W/sr = 500 W / 4pi.
+static constexpr float kLumensPerWatt = 683.0f;
+
 // KHR_lights_punctual: lights live in root extensions and are referenced from
 // nodes. Intensity is candela for point/spot and lux for directional.
 bool loadPunctualLights(const tinygltf::Model& model, oka::Scene& scene)
@@ -802,7 +896,8 @@ bool loadPunctualLights(const tinygltf::Model& model, oka::Scene& scene)
         desc.enabled = true;
         desc.name = L.Has("name") ? L.Get("name").Get<std::string>() : node.name;
         desc.color = L.Has("color") ? readVec3(L.Get("color"), glm::float3(1.0f)) : glm::float3(1.0f);
-        desc.intensity = L.Has("intensity") ? (float)L.Get("intensity").GetNumberAsDouble() : 1.0f;
+        desc.intensity =
+            (L.Has("intensity") ? (float)L.Get("intensity").GetNumberAsDouble() : 1.0f) / kLumensPerWatt;
         desc.range = L.Has("range") ? (float)L.Get("range").GetNumberAsDouble() : 0.0f;
 
         const std::string type = L.Has("type") ? L.Get("type").Get<std::string>() : "point";

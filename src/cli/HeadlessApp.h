@@ -29,6 +29,8 @@ struct RenderConfig
     uint32_t maxDepth = 8;
     // 0=Halton, 1=PCG, 2=Sobol, 3=Sobol+BN, 4=Hybrid (BN→Sobol)
     uint32_t samplerType = 0;
+    // 0 = glTF (-ln(C)/d), 1 = Cycles ((1-C)/d)
+    uint32_t volumeModel = 0;
     uint32_t blueNoiseSwitchSpp = 16;
 
     int cameraIndex = 0;

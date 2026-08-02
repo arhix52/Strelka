@@ -325,7 +325,8 @@ static void fetchTriangle(device const char* vertexBuffer,
                           uint32_t primitiveId,
                           bool interpolateMotion,
                           float motionTime,
-                          thread float3* p, thread float3* n, thread float3* t, thread float2* uv)
+                          thread float3* p, thread float3* n, thread float3* t, thread float2* uv,
+                          thread float& tangentSign, thread float3* vcol)
 {
     // Scene::Vertex layout (32 bytes): pos@0 (packed_float3), tangent@12,
     // normal@16, uv@20 — all uint32 after the position. The `Vertex` struct in
@@ -334,6 +335,7 @@ static void fetchTriangle(device const char* vertexBuffer,
     constexpr uint32_t tangentOff = 12;
     constexpr uint32_t normalOff  = 16;
     constexpr uint32_t uvOff      = 20;
+    constexpr uint32_t colorOff   = 28;   // Scene::Vertex::color, packed RGBA8
 
     uint32_t idx[3];
     idx[0] = indexBuffer[entry.indexOffset + primitiveId * 3 + 0];
@@ -347,8 +349,17 @@ static void fetchTriangle(device const char* vertexBuffer,
 
         const float3 pos = float3(*(device const packed_float3*)v);
         const float3 nrm = unpackNormal(*(device const uint32_t*)(v + normalOff));
-        const float3 tan = unpackNormal(*(device const uint32_t*)(v + tangentOff));
+        const uint32_t tanPacked = *(device const uint32_t*)(v + tangentOff);
+        const float3 tan = unpackNormal(tanPacked);
         uv[k] = unpackUV(*(device const uint32_t*)(v + uvOff));
+        // Vertex colour is not skinned and does not animate, so it is read from
+        // the current frame even when the rest is motion-interpolated.
+        vcol[k] = unpackVertexColor(*(device const uint32_t*)(v + colorOff));
+
+        // Handedness is a per-mesh property in every exporter that writes it, so
+        // one vertex settles it -- there is nothing sensible to interpolate.
+        if (k == 0)
+            tangentSign = unpackTangentSign(tanPacked);
 
         if (interpolateMotion)
         {
@@ -615,7 +626,7 @@ kernel void wavefrontShade(
 
     const float3 rayOrigin = float3(pr.origin);
     const float3 rayDir = float3(pr.direction);
-    const float3 throughput = float3(p.throughput);
+    float3 throughput = float3(p.throughput);
 
     float3 radiance = float3(0.0f);
     const HitRecord rec = hits[tid];
@@ -675,10 +686,11 @@ kernel void wavefrontShade(
     const bool interpolateMotion = SPEC_MOTION_BLUR && uniforms.enableMotionBlur &&
                                    motionTime < 1.0f && prevVertexBuffer && indexBuffer;
 
-    float3 pv[3], nv[3], tv[3];
+    float3 pv[3], nv[3], tv[3], cv[3];
     float2 uvv[3];
+    float tangentSign = 1.0f;
     fetchTriangle(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId,
-                  interpolateMotion, motionTime, pv, nv, tv, uvv);
+                  interpolateMotion, motionTime, pv, nv, tv, uvv, tangentSign, cv);
 
     const auto inst = instances[entry.instanceIndex];
     const float4x4 objectToWorld = float4x4(
@@ -689,13 +701,16 @@ kernel void wavefrontShade(
 
     const float2 bary = rec.barycentrics;
     const float2 uv = interpolateAttrib(uvv[0], uvv[1], uvv[2], bary);
+    const float3 vertexColor = interpolateAttrib(cv[0], cv[1], cv[2], bary);
     const float3 worldPosition = rayOrigin + rayDir * rec.distance;
 
     const float3 objectNormal = normalize(interpolateAttrib(nv[0], nv[1], nv[2], bary));
     const float3 worldNormal = normalize(transformDirection(objectNormal, objectToWorld));
     const float3 worldTangent = normalize(transformDirection(
         normalize(interpolateAttrib(tv[0], tv[1], tv[2], bary)), objectToWorld));
-    const float3 worldBinormal = cross(worldNormal, worldTangent);
+    // glTF TANGENT.w. Without it the bitangent points the wrong way and every
+    // normal map is mirrored along it -- bumps light from the opposite side.
+    const float3 worldBinormal = cross(worldNormal, worldTangent) * tangentSign;
 
     float3 geomNormal = cross(pv[1] - pv[0], pv[2] - pv[0]);
     geomNormal = normalize(transformDirection(geomNormal, objectToWorld));
@@ -703,7 +718,58 @@ kernel void wavefrontShade(
     SurfaceInteraction si;
     initSurfaceInteraction(si, materials[entry.materialId],
                            worldPosition, worldNormal, geomNormal,
-                           worldTangent, worldBinormal, uv, rayDir);
+                           worldTangent, worldBinormal, uv, rayDir, vertexColor);
+
+    // Absorption over the segment just travelled. The IOR stack already knows
+    // which medium the path is inside; it now also carries which material that
+    // medium came from, so the extinction can be looked up here rather than
+    // threaded through the path state.
+    {
+        IorStack preStack = iorStacks[tid];
+        const uint32_t medium = ior_stack_current_material(preStack);
+        if (medium != 0xFFFFFFFFu)
+        {
+            device const Material& mm = materials[medium];
+            const float3 sigma_t = volume_extinction(float3(mm.attenuation_color),
+                                                     mm.attenuation_distance, uniforms.volumeModel);
+            throughput *= beer_lambert_transmittance(sigma_t, rec.distance);
+        }
+    }
+
+    // Coverage. A MASK surface resolves to 0 or 1 and a BLEND one to its alpha,
+    // so one stochastic test covers both: with probability (1 - opacity) the
+    // path continues straight through, unchanged and unshaded.
+    //
+    // Bounces through transparent geometry deliberately do NOT advance `depth`.
+    // A hedge of cutout leaves would otherwise exhaust maxDepth before any of
+    // its light transport happened. They are bounded by their own counter in the
+    // high bits of depthAndFlags, which PATH_DEPTH_MASK (0xFF) and the flags at
+    // bits 8..11 leave free.
+    if (si.opacity < 1.0f)
+    {
+        SamplerState orng = samplerFor(uniforms, tid, sampleIdx, depth);
+        if (random<SampleDimension::eOpacity>(orng, uniforms.samplerType) >= si.opacity)
+        {
+            const uint32_t passes = p.depthAndFlags >> PATH_PASSTHROUGH_SHIFT;
+            radianceOut[tid] += float4(radiance, 0.0f);
+            if (passes >= PATH_PASSTHROUGH_MAX)
+            {
+                return;
+            }
+            // Step off the surface on the side the ray was travelling, so the
+            // next trace cannot re-hit the triangle it just passed through.
+            const float3 faceNg = dot(geomNormal, rayDir) > 0.0f ? geomNormal : -geomNormal;
+            PathRay through;
+            through.origin = packed_float3(offset_ray(worldPosition, faceNg));
+            through.direction = packed_float3(rayDir);
+            rays[tid] = through;
+            p.depthAndFlags = (p.depthAndFlags & ((1u << PATH_PASSTHROUGH_SHIFT) - 1u)) |
+                              ((passes + 1u) << PATH_PASSTHROUGH_SHIFT);
+            paths[tid] = p;
+            queuePush(outCounter, queueOut, tid);
+            return;
+        }
+    }
 
     const DebugMode debugMode = (DebugMode)uniforms.debug;
     if (SPEC_DEBUG && (debugMode == DebugMode::eMotionBlur || debugMode == DebugMode::eNormal))
@@ -718,10 +784,11 @@ kernel void wavefrontShade(
         {
             // Same quantity as the megakernel: how far the motion-interpolated
             // normal has moved from the current-frame one.
-            float3 nCur[3], pCur[3], tCur[3];
+            float3 nCur[3], pCur[3], tCur[3], cCur[3];
             float2 uvCur[3];
+            float signCur = 1.0f; // unused by this debug view
             fetchTriangle(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId,
-                          false, motionTime, pCur, nCur, tCur, uvCur);
+                          false, motionTime, pCur, nCur, tCur, uvCur, signCur, cCur);
             dbg = float3(motionTime, clamp(length(nv[0] - nCur[0]) * 10.0f, 0.0f, 1.0f), 0.0f);
         }
         radianceOut[tid] = float4(dbg, 0.0f);
@@ -829,6 +896,7 @@ kernel void wavefrontShade(
         const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, rng, si,
                                                     envAliasTable, envMapTexture);
 
+
         const bool isNextEventValid =
             ((dot(conn.toLight, si.shading_normal) > 0.0f) == si.front_face) && conn.pdf > 0.0f;
         if (isNextEventValid)
@@ -841,8 +909,10 @@ kernel void wavefrontShade(
             }
             if (evalResult.pdf > 0.0f && conn.needsRay)
             {
-                const float3 weight = throughput * (conn.radiance / conn.pdf) *
-                                      misWeightBalance(conn.pdf, evalResult.pdf) * evalResult.bsdf;
+                const float misWeight =
+                    conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, evalResult.pdf);
+                const float3 weight =
+                    throughput * (conn.radiance / conn.pdf) * misWeight * evalResult.bsdf;
                 if (any(weight != 0.0f))
                 {
                     ShadowRay sr;
@@ -866,7 +936,7 @@ kernel void wavefrontShade(
     if ((sampleResult.event_type & BSDF_EVENT_TRANSMISSION) != 0)
     {
         if (entering)
-            ior_stack_push(iorStack, si.dielectric_priority, si.ior);
+            ior_stack_push(iorStack, si.dielectric_priority, si.ior, entry.materialId);
         else
             ior_stack_pop(iorStack, si.dielectric_priority);
         nextOrigin = offset_ray(si.position, -faceNg);
@@ -1004,7 +1074,12 @@ static void shadowImpl(
     device const ShadowRay* shadowRays,
     device float4*          radianceOut,
     device const uint32_t*  control,
-    constant uint32_t&      sampleIdx)
+    constant uint32_t&      sampleIdx,
+    constant MTLAccelerationStructureUserIDInstanceDescriptor* instances,
+    device const Material*  materials,
+    device const GeometryEntry* geometryEntries,
+    device const char*      vertexBuffer,
+    device const uint32_t*  indexBuffer)
 {
     if (gid >= control[WF_CTRL_SHADOW_N])
     {
@@ -1015,7 +1090,6 @@ static void shadowImpl(
     typename T::isect isect;
     isect.assume_geometry_type(geometry_type::triangle);
     isect.force_opacity(forced_opacity::opaque);
-    isect.accept_any_intersection(true);
 
     ray shadowRay;
     shadowRay.origin = float3(sr.origin);
@@ -1024,13 +1098,71 @@ static void shadowImpl(
     shadowRay.max_distance = sr.maxDistance;
 
     const float motionTime = motionTimeFor(uniforms, sr.pixelIndex, sampleIdx);
-    const bool occluded =
-        T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime).type !=
-        intersection_type::none;
-    if (!occluded)
+    float3 weight = float3(sr.weight);
+
+    if (!SPEC_ALPHA)
     {
-        radianceOut[sr.pixelIndex] += float4(float3(sr.weight), 0.0f);
+        // No cutouts in this scene: one any-hit trace, exactly as before.
+        isect.accept_any_intersection(true);
+        if (T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime).type ==
+            intersection_type::none)
+        {
+            radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
+        }
+        return;
     }
+
+    // Cutouts make occlusion a product rather than a predicate, so any-hit no
+    // longer answers the question -- the nearest hit may be a hole. Walk the
+    // closest hits instead, attenuating by coverage and stepping past anything
+    // that does not fully block. Deterministic rather than stochastic: a MASK
+    // surface contributes 0 or 1 exactly and a BLEND one its alpha, which is far
+    // quieter than rolling a second random number per shadow ray.
+    isect.accept_any_intersection(false);
+    for (uint32_t step = 0u; step < 8u; ++step)
+    {
+        const auto hit = T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime);
+        if (hit.type == intersection_type::none)
+        {
+            break;
+        }
+
+        const auto inst = instances[hit.instance_id];
+        const GeometryEntry entry = geometryEntries[inst.userID + hit.geometry_id];
+        device const Material& mat = materials[entry.materialId];
+
+        float opacity = 1.0f;
+        if (mat.alpha_mode != ALPHA_MODE_OPAQUE)
+        {
+            constexpr uint32_t vtxStride = 32;
+            constexpr uint32_t uvOff     = 20;
+            float2 uvv[3];
+            for (uint32_t k = 0; k < 3; ++k)
+            {
+                const uint32_t idx = indexBuffer[entry.indexOffset + hit.primitive_id * 3 + k];
+                uvv[k] = unpackUV(*(device const uint32_t*)(vertexBuffer +
+                                                            (entry.vbOffset + idx) * vtxStride + uvOff));
+            }
+            const float2 uv =
+                interpolateAttrib(uvv[0], uvv[1], uvv[2], hit.triangle_barycentric_coord);
+            opacity = resolveOpacity(mat, uv);
+        }
+
+        weight *= (1.0f - opacity);
+        if (all(weight <= 1e-6f))
+        {
+            return; // fully blocked
+        }
+
+        const float advance = hit.distance + 1e-4f;
+        shadowRay.origin = shadowRay.origin + shadowRay.direction * advance;
+        shadowRay.max_distance -= advance;
+        if (shadowRay.max_distance <= 0.0f)
+        {
+            break;
+        }
+    }
+    radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
 }
 
 #define WF_SHADOW_ENTRY(NAME, TRAITS)                                                                \
@@ -1039,10 +1171,17 @@ static void shadowImpl(
                      device const ShadowRay* shadowRays [[buffer(2)]],                               \
                      device float4* radianceOut [[buffer(3)]],                                       \
                      device const uint32_t* control [[buffer(4)]],                                   \
-                     constant uint32_t& sampleIdx [[buffer(5)]])                                     \
+                     constant uint32_t& sampleIdx [[buffer(5)]],                                     \
+                     constant MTLAccelerationStructureUserIDInstanceDescriptor* instances            \
+                         [[buffer(6)]],                                                              \
+                     device const Material* materials [[buffer(7)]],                                 \
+                     device const GeometryEntry* geometryEntries [[buffer(8)]],                      \
+                     device const char* vertexBuffer [[buffer(9)]],                                  \
+                     device const uint32_t* indexBuffer [[buffer(10)]])                              \
     {                                                                                                \
         shadowImpl<TRAITS>(gid, uniforms, accelerationStructure, shadowRays, radianceOut, control,    \
-                           sampleIdx);                                                               \
+                           sampleIdx, instances, materials, geometryEntries, vertexBuffer,           \
+                           indexBuffer);                                                             \
     }
 
 WF_SHADOW_ENTRY(wavefrontShadow, MotionTraversal)

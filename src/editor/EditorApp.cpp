@@ -208,6 +208,8 @@ void EditorApp::loadSettings()
         m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", (uint32_t)atoi(tracer));
     }
     m_settingsManager->setAs<uint32_t>("render/validate/estimatorMode", 0);
+    // Absorption convention for transmissive media: 0 = glTF, 1 = Cycles.
+    m_settingsManager->setAs<uint32_t>("render/material/volumeModel", 0);
     m_settingsManager->setAs<bool>("render/validate/analyticLights", true);
     m_settingsManager->setAs<std::string>("resource/searchPath", m_resourceSearchPath);
     // Postprocessing settings:

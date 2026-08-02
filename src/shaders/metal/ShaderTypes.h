@@ -80,6 +80,9 @@ struct Uniforms
     uint32_t maxDepth;
 
     uint32_t rectLightSamplingMethod;
+    // VOLUME_MODEL_GLTF or VOLUME_MODEL_CYCLES; see volume.h for why this is a
+    // setting rather than a constant.
+    uint32_t volumeModel;
     // 0 - Halton, 1 - PCG, 2 - Sobol (Owen), 3 - Sobol + blue noise, 4 - hybrid
     uint32_t samplerType;
     /// Sample count at which sampler 4 hands the frame from the blue-noise
@@ -291,6 +294,10 @@ struct PathState
 // overwritten by the bounce after it.
 #define PATH_FLAG_AOV_DONE   (1u << 11)
 #define PATH_DEPTH_MASK      0xFFu
+// Transparent hits are counted apart from bounces: passing through a cutout is
+// not a scattering event and must not consume path depth. Bits 12+ are free.
+#define PATH_PASSTHROUGH_SHIFT 12u
+#define PATH_PASSTHROUGH_MAX   32u
 
 // What `extend` hands to `shade`. Deliberately small: `intersection.primitive_data`
 // is only valid inside the kernel that ran the intersect, so instead of copying
@@ -379,8 +386,11 @@ struct Material
 
     uint32_t thin_walled;           //  4 bytes
     uint32_t dielectric_priority;   //  4 bytes  (nested dielectrics)
-    uint32_t _pad1;                 //  4 bytes
-    uint32_t _pad2;                 //  4 bytes  -- 96
+    uint32_t alpha_mode;            //  4 bytes  (AlphaMode)
+    float base_color_alpha;         //  4 bytes  -- 96
+
+    packed_float3 attenuation_color; // 12 bytes (KHR_materials_volume)
+    float attenuation_distance;      //  4 bytes -- 112
 
     // Textures (8 bytes each: resource ID on CPU, texture handle on GPU)
 #ifdef __METAL_VERSION__

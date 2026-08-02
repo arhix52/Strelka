@@ -161,6 +161,8 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     {
         cfg.maxDepth = static_cast<uint32_t>(*v);
     }
+    if (auto v = tbl["render"]["volume_model"].value<std::string>())
+        cfg.volumeModel = (*v == "cycles") ? 1u : 0u;
     if (auto v = tbl["render"]["sampler"].value<std::string>())
     {
         cfg.samplerType = parseEnumOrDefault(*v, parseSamplerName, 0, "sampler");
@@ -278,6 +280,8 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/metal4", 0);
     m_settings->setAs<uint32_t>("render/pt/staticTraversal", 1);
     m_settings->setAs<uint32_t>("render/validate/estimatorMode", 0);
+    // Absorption convention for transmissive media: 0 = glTF, 1 = Cycles.
+    m_settings->setAs<uint32_t>("render/material/volumeModel", m_config.volumeModel);
     m_settings->setAs<bool>("render/validate/analyticLights", true);
 
     m_settings->setAs<float>("render/post/tonemapper/filmIso", m_config.filmIso);

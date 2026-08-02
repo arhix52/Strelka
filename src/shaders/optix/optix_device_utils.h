@@ -52,10 +52,18 @@ static __forceinline__ __device__ float3 unpackNormal(uint32_t val)
 {
     constexpr float scale = 1.0f / 256.0f;
     float3 normal;
-    normal.z = ((val & 0xfff00000) >> 20) * scale - 1.0f;
+    // 10 bits for z, not 12: bit 30 holds the tangent handedness sign written
+    // by packTangent(), and must not leak into the coordinate.
+    normal.z = ((val & 0x3ff00000) >> 20) * scale - 1.0f;
     normal.y = ((val & 0x000ffc00) >> 10) * scale - 1.0f;
     normal.x = (val & 0x000003ff) * scale - 1.0f;
     return normal;
+}
+
+// glTF TANGENT.w: +1 or -1, deciding which way the bitangent points.
+static __forceinline__ __device__ float unpackTangentSign(uint32_t val)
+{
+    return (val & (1u << 30)) ? -1.0f : 1.0f;
 }
 
 // Unpack UV from uint32_t. Valid range: [-10, 10]

@@ -81,8 +81,12 @@ DEVICE_FUNC BsdfSampleResult conductor_sample(const THREAD_REF SurfaceInteractio
     // G1 for the outgoing direction (needed for VNDF PDF cancellation)
     float G1 = ggx_smith_g1(alpha, NdotV);
 
-    // bsdf_over_pdf = F * G2 / G1  (VNDF sampling simplification)
-    result.bsdf_over_pdf = F * (G2 / (G1 + 1e-10f));
+    // bsdf_over_pdf = F * G2 / G1  (VNDF sampling simplification), then the
+    // multiple-scattering energy the single-scatter lobe drops. The pdf is
+    // deliberately left alone: compensation rescales the BRDF, not the density
+    // it was sampled from.
+    const float3 ms = ggx_energy_compensation(si.albedo, si.roughness, NdotV);
+    result.bsdf_over_pdf = F * (G2 / (G1 + 1e-10f)) * ms;
 
     // PDF in solid-angle measure
     result.pdf = ggx_vndf_pdf(alpha, NdotH, NdotV, VdotH);
@@ -131,8 +135,11 @@ DEVICE_FUNC BsdfEvalResult conductor_eval(const THREAD_REF SurfaceInteraction& s
     float  G2 = ggx_smith_g2(alpha, NdotV, NdotL);
     float3 F  = fresnel_schlick(si.albedo, VdotH);
 
-    // Cook-Torrance: D * G2 * F / (4 * NdotV * NdotL)
-    result.bsdf = F * (D * G2 / (4.0f * NdotV * NdotL + 1e-10f));
+    // Cook-Torrance: D * G2 * F / (4 * NdotV * NdotL), plus the multiple
+    // scattering the single-scatter lobe drops. Must match conductor_sample()
+    // exactly or MIS blends two different BRDFs.
+    const float3 ms = ggx_energy_compensation(si.albedo, si.roughness, NdotV);
+    result.bsdf = F * (D * G2 / (4.0f * NdotV * NdotL + 1e-10f)) * ms;
     result.pdf  = ggx_vndf_pdf(alpha, NdotH, NdotV, VdotH);
 
     return result;

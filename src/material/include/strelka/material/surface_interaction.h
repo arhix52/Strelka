@@ -34,6 +34,9 @@ struct SurfaceInteraction
     // Pointer (or index) to the material params is stored externally; these
     // resolved values are computed *after* texture lookups.
     float3  albedo;             // Resolved base color (texture * vertex color * param)
+    // Resolved coverage in [0,1]: MASK already thresholded, BLEND passed through.
+    // The renderer never has to know which mode produced it.
+    float   opacity;
     float   metallic;           // Resolved metallic
     float   roughness;          // Resolved roughness (clamped to [min, 1])
     float   ior;                // Index of refraction

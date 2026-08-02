@@ -82,6 +82,8 @@
     #define fmaxf(x,y) metal::fmax(x,y)
     #define fminf(x,y) metal::fmin(x,y)
     #define fabsf(x)   metal::fabs(x)
+    #define expf(x)    metal::exp(x)
+    #define logf(x)    metal::log(x)
 
     inline float3 make_float3(float x, float y, float z) { return float3(x, y, z); }
     inline float3 make_float3(float v)                    { return float3(v); }

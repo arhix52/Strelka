@@ -21,14 +21,53 @@ inline uint32_t packNormal(const glm::float3& normal)
 }
 
 // Unpack normal from uint32_t.
+//
+// The z mask is 10 bits, not 12: packNormal only ever fills bits 0..29, and
+// bit 30 now carries the tangent handedness sign (see packTangent). A wider
+// mask would fold that sign into z.
 inline glm::float3 unpackNormal(uint32_t val)
 {
     constexpr float scale = 1.0f / 256.0f;
     glm::float3 normal;
-    normal.z = ((val & 0xfff00000) >> 20) * scale - 1.0f;
+    normal.z = ((val & 0x3ff00000) >> 20) * scale - 1.0f;
     normal.y = ((val & 0x000ffc00) >> 10) * scale - 1.0f;
     normal.x = (val & 0x000003ff) * scale - 1.0f;
     return normal;
+}
+
+// glTF stores TANGENT as vec4 whose w is the bitangent handedness (+1/-1).
+// Dropping it mirrors every normal map along the bitangent, so it rides along
+// in bit 30 of the packed tangent -- free, since packNormal leaves it clear.
+constexpr uint32_t kTangentSignBit = 1u << 30;
+
+inline uint32_t packTangent(const glm::float3& tangent, float handedness)
+{
+    return packNormal(tangent) | (handedness < 0.0f ? kTangentSignBit : 0u);
+}
+
+inline float unpackTangentSign(uint32_t val)
+{
+    return (val & kTangentSignBit) ? -1.0f : 1.0f;
+}
+
+// glTF COLOR_0, packed RGBA8. The values are LINEAR -- COLOR_0 carries no
+// transfer function, unlike a base-colour texture -- so nothing here decodes.
+// 8 bits is ample: COLOR_0 is a multiplier on base colour, and a quarter-percent
+// quantisation step is far below anything the surface it modulates can show.
+inline uint32_t packColor(const glm::float4& c)
+{
+    auto q = [](float v) -> uint32_t {
+        const float x = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+        return (uint32_t)(x * 255.0f + 0.5f);
+    };
+    return q(c.x) | (q(c.y) << 8) | (q(c.z) << 16) | (q(c.w) << 24);
+}
+
+inline glm::float4 unpackColor(uint32_t val)
+{
+    constexpr float s = 1.0f / 255.0f;
+    return glm::float4((val & 0xffu) * s, ((val >> 8) & 0xffu) * s, ((val >> 16) & 0xffu) * s,
+                       ((val >> 24) & 0xffu) * s);
 }
 
 // Pack UV to uint32_t. Valid range: [-10, 10]
