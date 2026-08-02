@@ -392,6 +392,12 @@ struct Material
     packed_float3 attenuation_color; // 12 bytes (KHR_materials_volume)
     float attenuation_distance;      //  4 bytes -- 112
 
+    // KHR_texture_transform, one per material; see material_params.h.
+    vector_float2 uv_offset;         //  8 bytes
+    vector_float2 uv_scale;          //  8 bytes
+    float uv_rotation;               //  4 bytes
+    float _pad_uv;                   //  4 bytes -- 136
+
     // Textures (8 bytes each: resource ID on CPU, texture handle on GPU)
 #ifdef __METAL_VERSION__
     texture2d<float> baseColorTexture;

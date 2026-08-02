@@ -20,6 +20,7 @@
 #include <strelka/scene/transform.h>
 
 #include <iostream>
+#include <limits>
 #include <log.h>
 
 namespace fs = std::filesystem;
@@ -484,6 +485,48 @@ std::string getTextureUri(const tinygltf::Model& model, int texIndex)
 // than as core glTF fields. Every one of them used to be hardcoded below, which
 // is why a scene could round-trip through glTF carrying the right numbers and
 // still render with none of them.
+// KHR_texture_transform lives on the texture *slot*, not the material, so it has
+// to be dug out of whichever slot carries one. Blender drives every slot of a
+// material from a single Mapping node, so taking the first is not a compromise
+// in practice -- and without it a tiled texture authored at scale 0.1 renders
+// ten times too large.
+static void readTextureTransform(const tinygltf::Material& material, MaterialParams& p)
+{
+    p.uv_offset_x = 0.0f;
+    p.uv_offset_y = 0.0f;
+    p.uv_scale_x = 1.0f;
+    p.uv_scale_y = 1.0f;
+    p.uv_rotation = 0.0f;
+
+    const tinygltf::ExtensionMap* slots[] = {
+        &material.pbrMetallicRoughness.baseColorTexture.extensions,
+        &material.pbrMetallicRoughness.metallicRoughnessTexture.extensions,
+        &material.normalTexture.extensions,
+        &material.emissiveTexture.extensions,
+        &material.occlusionTexture.extensions,
+    };
+    for (const tinygltf::ExtensionMap* ext : slots)
+    {
+        const auto it = ext->find("KHR_texture_transform");
+        if (it == ext->end() || !it->second.IsObject())
+            continue;
+        const tinygltf::Value& t = it->second;
+        if (t.Has("offset") && t.Get("offset").IsArray() && t.Get("offset").ArrayLen() >= 2)
+        {
+            p.uv_offset_x = (float)t.Get("offset").Get(0).GetNumberAsDouble();
+            p.uv_offset_y = (float)t.Get("offset").Get(1).GetNumberAsDouble();
+        }
+        if (t.Has("scale") && t.Get("scale").IsArray() && t.Get("scale").ArrayLen() >= 2)
+        {
+            p.uv_scale_x = (float)t.Get("scale").Get(0).GetNumberAsDouble();
+            p.uv_scale_y = (float)t.Get("scale").Get(1).GetNumberAsDouble();
+        }
+        if (t.Has("rotation"))
+            p.uv_rotation = (float)t.Get("rotation").GetNumberAsDouble();
+        return;
+    }
+}
+
 static float khrFloat(const tinygltf::Material& material,
                       const char* extension,
                       const char* key,
@@ -574,6 +617,8 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     // A transmissive surface is a dielectric volume and needs a priority so the
     // nested-dielectric IOR stack can order it; an opaque one must stay at 0.
     p.dielectric_priority = p.transmission > 0.0f ? 10u : 0u;
+
+    readTextureTransform(material, p);
 
     // Store texture file paths for the renderer to load
     desc.baseColorTexPath = getTextureUri(model, material.pbrMetallicRoughness.baseColorTexture.index);
@@ -1049,6 +1094,11 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     using namespace std;
     tinygltf::Model model;
     tinygltf::TinyGLTF gltf_ctx;
+    // tinygltf refuses external buffers over INT32_MAX by default. A production
+    // scene passes that easily -- a 50 M triangle forest lands at 2.8 GB of
+    // positions, normals, indices and uvs -- and the refusal reads as a plain
+    // load failure with nothing to act on.
+    gltf_ctx.SetMaxExternalFileSize(std::numeric_limits<size_t>::max());
     std::string err;
     std::string warn;
     bool res = false;
@@ -1071,7 +1121,17 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
         return res;
     }
 
-    int sceneId = model.defaultScene;
+    int sceneId = model.defaultScene < 0 ? 0 : model.defaultScene;
+    if (model.scenes.size() > 1)
+    {
+        // Only the default scene is instantiated. A file with several is
+        // ambiguous by construction, and silently drawing a fraction of it looks
+        // like missing geometry rather than a choice.
+        STRELKA_WARNING("glTF has {} scenes; loading only '{}' (index {}). The rest are ignored.",
+                        model.scenes.size(),
+                        model.scenes[sceneId].name.empty() ? "<unnamed>" : model.scenes[sceneId].name,
+                        sceneId);
+    }
 
     loadMaterials(model, scene);
     const bool hadJsonLights = loadLightsFromJson(modelPath, scene);

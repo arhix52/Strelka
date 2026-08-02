@@ -157,6 +157,10 @@ private:
     MTL::Buffer* mTlasScratchBuffer = nullptr; // persistent, reused every TLAS refit
     size_t mTlasInstanceCount = 0;
 
+    // Textures awaiting one shared mipmap blit; see generateTextureMips().
+    std::vector<MTL::Texture*> mTexturesNeedingMips;
+    void generateTextureMips();
+
     MTL::Buffer* mMaterialBuffer = nullptr;
     // Set while uploading materials. Gates the alpha function constant, so a
     // scene with no cutouts compiles the same kernels it always did.
@@ -190,6 +194,12 @@ private:
     void capturePrevFramePose();
 
     // Motion blur
+    // Whether the megakernel was the selected tracer when the scene was built.
+    // Per-primitive attribute data exists only for it; the wavefront tracer
+    // refetches from the vertex buffer and would otherwise pay 72 bytes per
+    // triangle twice over for nothing.
+    bool mNeedsPrimitiveData = false;
+
     MTL::Buffer* mPrevVertexBuffer = nullptr;
     MTL::Buffer* mGeometryEntryBuffer = nullptr;
     bool mEnableMotionBlur = false;

@@ -28,6 +28,8 @@
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include <stb_image_resize.h>
 #define TINYEXR_IMPLEMENTATION
 #include <tinyexr.h>
 #include <log.h>
@@ -775,9 +777,55 @@ MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName, bool
         STRELKA_ERROR("Unable to load texture from file: {}", fileName.c_str());
         return nullptr;
     }
+
+    // Optional downscale on load. A forest of 4K maps is 3.4 GB decoded, and
+    // block compression -- the right answer -- needs an encoder this project does
+    // not vendor. Halving the longest side is a 4x cut per step, it is a
+    // deliberate quality trade the user asks for, and 0 disables it.
+    const uint32_t maxDim = getSettings()->getAs<uint32_t>("render/texture/maxDimension");
+    if (maxDim > 0 && (uint32_t)std::max(texWidth, texHeight) > maxDim)
+    {
+        int dstW = texWidth;
+        int dstH = texHeight;
+        while ((uint32_t)std::max(dstW, dstH) > maxDim && dstW > 1 && dstH > 1)
+        {
+            dstW = std::max(1, dstW / 2);
+            dstH = std::max(1, dstH / 2);
+        }
+        auto* scaled = (stbi_uc*)malloc((size_t)dstW * dstH * 4);
+        // Colour maps must be resampled through the transfer function, or the
+        // average of two sRGB bytes is not the sRGB of their average and every
+        // downscale darkens.
+        const int ok = scaled ? (srgb ? stbir_resize_uint8_srgb(data, texWidth, texHeight, 0, scaled,
+                                                                dstW, dstH, 0, 4, 3, 0)
+                                      : stbir_resize_uint8(data, texWidth, texHeight, 0, scaled,
+                                                           dstW, dstH, 0, 4))
+                              : 0;
+        if (ok)
+        {
+            stbi_image_free(data);
+            data = scaled;
+            texWidth = dstW;
+            texHeight = dstH;
+        }
+        else if (scaled)
+        {
+            free(scaled);
+        }
+    }
+
     MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
     pTextureDesc->setWidth(texWidth);
     pTextureDesc->setHeight(texHeight);
+    // Mipmaps. They cost 33% more memory and buy nothing on their own in a path
+    // tracer -- a compute kernel has no implicit derivatives, so sample() reads
+    // level 0 until something computes an explicit LOD. They are built here so
+    // that the LOD path has something to read; see the ray-cone estimate in
+    // shading_common.h.
+    uint32_t levels = 1;
+    while ((1u << levels) <= (uint32_t)std::max(texWidth, texHeight))
+        ++levels;
+    pTextureDesc->setMipmapLevelCount(levels);
     // Colour maps carry sRGB-encoded bytes. Loading them as a linear format
     // hands the encoded values straight to the BSDF, which lifts every midtone
     // and desaturates the result; the _sRGB format makes the sampler decode.
@@ -791,9 +839,35 @@ MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName, bool
 
     const MTL::Region region = MTL::Region::Make3D(0, 0, 0, texWidth, texHeight, 1);
     pTexture->replaceRegion(region, 0, data, 4ull * texWidth);
+    stbi_image_free(data);
+
+    if (levels > 1)
+    {
+        mTexturesNeedingMips.push_back(pTexture);
+    }
 
     pTextureDesc->release();
     return pTexture;
+}
+
+// One blit pass for every texture loaded this scene. Doing it per texture would
+// mean a command buffer and a round trip each, which on a scene with a hundred
+// 4K maps is the dominant part of load time.
+void MetalRender::generateTextureMips()
+{
+    if (mTexturesNeedingMips.empty())
+        return;
+    MTL::CommandBuffer* cb = mCommandQueue->commandBuffer();
+    cb->retain();
+    MTL::BlitCommandEncoder* blit = cb->blitCommandEncoder();
+    for (MTL::Texture* t : mTexturesNeedingMips)
+        blit->generateMipmaps(t);
+    blit->endEncoding();
+    cb->commit();
+    cb->waitUntilCompleted();
+    cb->release();
+    STRELKA_INFO("Generated mipmaps for {} textures", mTexturesNeedingMips.size());
+    mTexturesNeedingMips.clear();
 }
 
 void MetalRender::createMetalMaterials()
@@ -835,6 +909,9 @@ void MetalRender::createMetalMaterials()
         material.attenuation_color = packed_float3(
             simd_make_float3(p.attenuation_color.x, p.attenuation_color.y, p.attenuation_color.z));
         material.attenuation_distance = p.attenuation_distance;
+        material.uv_offset = simd_make_float2(p.uv_offset_x, p.uv_offset_y);
+        material.uv_scale = simd_make_float2(p.uv_scale_x, p.uv_scale_y);
+        material.uv_rotation = p.uv_rotation;
         material.material_type = p.material_type;
         material.thin_walled = p.thin_walled;
         material.dielectric_priority = p.dielectric_priority;
@@ -849,6 +926,8 @@ void MetalRender::createMetalMaterials()
             mSceneHasAlphaMaterials = true;
         gpuMaterials.push_back(material);
     }
+
+    generateTextureMips();
 
     const size_t materialsDataSize = sizeof(Material) * gpuMaterials.size();
     if (materialsDataSize > 0)
@@ -1106,7 +1185,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mInstanceAccelerationStructure);
     for (Mesh* mesh : mMetalMeshes)
     {
-        if (mesh) add(mesh->mPerPrimitiveBuffer);
+        if (mesh && mesh->mPerPrimitiveBuffer) add(mesh->mPerPrimitiveBuffer);
     }
     // The renderer alternates between output buffers, so declaring only the one
     // this frame happens to use leaves every other frame writing into an
@@ -1680,8 +1759,24 @@ void MetalRender::render(Buffer* output)
     // used to leave the frame jittered with nothing to reconstruct it -- a picture
     // that shakes forever -- so the availability of the tracer is part of the
     // condition, not a separate check further down.
-    const bool useWavefrontTracer =
+    bool useWavefrontTracer =
         getSettings()->getAs<uint32_t>("render/pt/tracerMode") == 1 && mWavefrontLibrary != nullptr;
+    // The megakernel reads per-primitive data, which is only built when it was
+    // the selected tracer at load time. Switching to it afterwards would shade
+    // from a buffer that does not exist, so stay on the wavefront path and say
+    // why once.
+    if (!useWavefrontTracer && !mNeedsPrimitiveData && mWavefrontLibrary != nullptr)
+    {
+        static bool warned = false;
+        if (!warned)
+        {
+            STRELKA_WARNING("Megakernel needs per-primitive data, which was not built for this "
+                            "scene; staying on the wavefront tracer. Reload the scene with "
+                            "render/pt/tracerMode = 0 to use it.");
+            warned = true;
+        }
+        useWavefrontTracer = true;
+    }
     const uint32_t debug = getSettings()->getAs<uint32_t>("render/pt/debug");
     // Debug views are final outputs. Sending them through MetalFX would alter
     // their values, while the debug path deliberately skips the final tonemap.
@@ -3209,6 +3304,22 @@ void MetalRender::createMeshData(size_t meshIndex)
     const std::vector<Scene::Vertex>& vertices = mScene->getVertices();
     const std::vector<uint32_t>& indices = mScene->getIndices();
 
+    // Per-primitive data is a second copy of every triangle's attributes, 72
+    // bytes each, held both here and inside the acceleration structure Metal
+    // builds from it. Only the megakernel reads it: the wavefront tracer cannot,
+    // because intersection.primitive_data is addressable solely inside the
+    // kernel that ran the intersect, so its shade stage refetches attributes
+    // from the vertex buffer instead (see fetchTriangle in wavefront.metal).
+    //
+    // Skipping it under the wavefront tracer is worth far more than it sounds:
+    // on a 50 M triangle forest it is 3.7 GB of host memory, the same again
+    // inside the acceleration structures, and the CPU time to fill it.
+    if (!mNeedsPrimitiveData)
+    {
+        mMetalMeshes.push_back(result);
+        return;
+    }
+
     std::vector<Triangle> triangleData(triangleCount);
     for (uint32_t i = 0; i < triangleCount; ++i)
     {
@@ -3257,10 +3368,13 @@ MTL::AccelerationStructureTriangleGeometryDescriptor* MetalRender::createStaticG
     geomDescriptor->setIndexBufferOffset(sceneMesh.mIndex * sizeof(uint32_t));
     geomDescriptor->setIndexType(MTL::IndexTypeUInt32);
     geomDescriptor->setTriangleCount(triangleCount);
-    geomDescriptor->setPrimitiveDataBuffer(perPrimitiveBuffer);
-    geomDescriptor->setPrimitiveDataBufferOffset(0);
-    geomDescriptor->setPrimitiveDataElementSize(sizeof(Triangle));
-    geomDescriptor->setPrimitiveDataStride(sizeof(Triangle));
+    if (perPrimitiveBuffer)
+    {
+        geomDescriptor->setPrimitiveDataBuffer(perPrimitiveBuffer);
+        geomDescriptor->setPrimitiveDataBufferOffset(0);
+        geomDescriptor->setPrimitiveDataElementSize(sizeof(Triangle));
+        geomDescriptor->setPrimitiveDataStride(sizeof(Triangle));
+    }
 
     return geomDescriptor;
 }
@@ -3408,9 +3522,21 @@ void MetalRender::createAccelerationStructures()
     // Per-mesh buffers survive a rebuild of the structures that reference them.
     if (mMetalMeshes.empty())
     {
+        // Read once, here: the meshes are built now and the acceleration
+        // structures embed whatever they are given, so a later change of tracer
+        // cannot retroactively add the data.
+        mNeedsPrimitiveData = getSettings()->getAs<uint32_t>("render/pt/tracerMode") == 0;
+        size_t primitiveBytes = 0;
         for (size_t mi = 0; mi < meshes.size(); ++mi)
         {
             createMeshData(mi);
+            primitiveBytes += (size_t)(meshes[mi].mCount / 3) * sizeof(Triangle);
+        }
+        if (!mNeedsPrimitiveData && primitiveBytes > 0)
+        {
+            STRELKA_INFO("Skipped {:.2f} GB of per-primitive attribute data: the wavefront tracer "
+                         "refetches from the vertex buffer",
+                         primitiveBytes / 1e9);
         }
     }
     mMotionBlasBuilt = mBuildMotionBlas;
@@ -3913,10 +4039,13 @@ MTL::AccelerationStructureMotionTriangleGeometryDescriptor* MetalRender::createM
     geomDescriptor->setIndexBufferOffset(sceneMesh.mIndex * sizeof(uint32_t));
     geomDescriptor->setIndexType(MTL::IndexTypeUInt32);
     geomDescriptor->setTriangleCount(triangleCount);
-    geomDescriptor->setPrimitiveDataBuffer(perPrimitiveBuffer);
-    geomDescriptor->setPrimitiveDataBufferOffset(0);
-    geomDescriptor->setPrimitiveDataElementSize(sizeof(Triangle));
-    geomDescriptor->setPrimitiveDataStride(sizeof(Triangle));
+    if (perPrimitiveBuffer)
+    {
+        geomDescriptor->setPrimitiveDataBuffer(perPrimitiveBuffer);
+        geomDescriptor->setPrimitiveDataBufferOffset(0);
+        geomDescriptor->setPrimitiveDataElementSize(sizeof(Triangle));
+        geomDescriptor->setPrimitiveDataStride(sizeof(Triangle));
+    }
 
     kf0->release();
     kf1->release();

@@ -27,7 +27,7 @@ import math
 import os
 import sys
 
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 
 def gltf_pos(v):
@@ -50,13 +50,18 @@ def collect_lights(depsgraph):
         L = ob.data
         m = ob.matrix_world
         pos = gltf_pos(m.translation)
-        # -Z is the emission axis for every Blender lamp that has one.
-        d = (m.to_3x3() @ Vector((0.0, 0.0, -1.0))).normalized()
+        # The sidecar takes euler angles in degrees, not a direction vector --
+        # writing a "direction" key gets silently ignored and every light ends up
+        # pointing wherever the default orientation happens to face. The angles
+        # are in the glTF frame, so the Blender rotation is taken through the
+        # same Z-up to Y-up change of basis the positions are.
+        yup = Matrix.Rotation(math.radians(-90.0), 4, "X")
+        eul = (yup @ m).to_euler("XYZ")
         entry = {
             "name": ob.name,
             "position": pos,
             "color": list(L.color),
-            "direction": [d.x, d.z, -d.y],
+            "orientation": [math.degrees(eul.x), math.degrees(eul.y), math.degrees(eul.z)],
         }
         if L.type == "AREA":
             if L.shape in {"SQUARE", "RECTANGLE"}:
@@ -78,7 +83,12 @@ def collect_lights(depsgraph):
                          outerConeAngle=L.spot_size * 0.5,
                          innerConeAngle=L.spot_size * 0.5 * (1.0 - L.spot_blend))
         elif L.type == "SUN":
-            entry.update(type="distant", halfAngle=L.angle * 0.5, intensity=L.energy)
+            # Blender's sun strength is irradiance in W/m^2, not radiance. The
+            # sidecar defaults to radiance, and taking 5 W/m^2 as radiance over a
+            # 0.0046 rad cone under-lights the scene by four orders of magnitude
+            # -- which reads as a black frame, not as a units mistake.
+            entry.update(type="distant", halfAngle=L.angle * 0.5, intensity=L.energy,
+                         unit="irradiance")
         else:
             continue
         out.append(entry)
@@ -92,6 +102,7 @@ def export_gltf(path):
         export_format="GLTF_SEPARATE",
         use_selection=False,
         use_visible=True,
+        use_active_scene=True,   # a multi-scene file loses everything but scene 0
         export_apply=True,          # realise modifiers at render settings
         export_yup=True,
         export_cameras=True,

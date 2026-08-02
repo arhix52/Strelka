@@ -31,6 +31,8 @@ struct RenderConfig
     uint32_t samplerType = 0;
     // 0 = glTF (-ln(C)/d), 1 = Cycles ((1-C)/d)
     uint32_t volumeModel = 0;
+    // Longest side a texture is allowed on load; 0 = no limit.
+    uint32_t textureMaxDim = 0;
     uint32_t blueNoiseSwitchSpp = 16;
 
     int cameraIndex = 0;

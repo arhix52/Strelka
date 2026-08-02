@@ -106,10 +106,19 @@ struct MaterialParams
     // Colour the medium leaves after attenuation_distance of travel. See
     // volume_extinction() for the two conventions this can be read under.
     float3      attenuation_color;      // 12 bytes
-    float       _pad4;                  //  4 bytes  -- total 144
+    float       uv_rotation;            //  4 bytes  (radians, KHR_texture_transform)
+
+    // -- KHR_texture_transform -----------------------------------------------
+    // One transform per material rather than per slot: Blender drives every
+    // slot of a material from the same Mapping node, and every material in the
+    // scenes checked so far has an identical transform on all of its slots.
+    float       uv_offset_x;            //  4 bytes
+    float       uv_offset_y;            //  4 bytes
+    float       uv_scale_x;             //  4 bytes
+    float       uv_scale_y;             //  4 bytes  -- total 160
 };
 
 // Static assert equivalent for size (works on all three backends)
-// 144 bytes, 16-byte aligned -- fits nicely in SBT / argument buffers.
+// 160 bytes, 16-byte aligned -- fits nicely in SBT / argument buffers.
 
 #endif // STRELKA_MATERIAL_PARAMS_H

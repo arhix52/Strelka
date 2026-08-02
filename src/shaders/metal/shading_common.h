@@ -124,6 +124,22 @@ static float3 unpackNormal(uint32_t val)
     return normal;
 }
 
+// KHR_texture_transform. The spec composes it as a row-vector multiply,
+//   [u v 1] * [ sx*cos(r)  sx*sin(r)  0 ]
+//             [-sy*sin(r)  sy*cos(r)  0 ]
+//             [ tx         ty         1 ]
+// so scale applies before rotation and the translation last. Getting the order
+// wrong is invisible at rotation 0 -- which is what every exporter writes by
+// default -- and wrong everywhere else.
+static float2 applyTextureTransform(float2 uv, device const Material& m)
+{
+    const float c = cos(m.uv_rotation);
+    const float s = sin(m.uv_rotation);
+    const float2 k = float2(m.uv_scale);
+    return float2(uv.x * k.x * c - uv.y * k.y * s, uv.x * k.x * s + uv.y * k.y * c) +
+           float2(m.uv_offset);
+}
+
 // Coverage of a surface at a given uv. MASK is a binary predicate, BLEND passes
 // the alpha through, OPAQUE is always 1 -- so callers only ever see a float in
 // [0,1] and never need to branch on the mode themselves.
@@ -135,6 +151,7 @@ static float resolveOpacity(device const Material& material, float2 uv)
     float alpha = material.base_color_alpha;
     if (!is_null_texture(material.baseColorTexture))
     {
+        uv = applyTextureTransform(uv, material);
         // RGBA8Unorm_sRGB puts only RGB through the transfer function, so the
         // alpha channel read here is already linear.
         alpha *= material.baseColorTexture.sample(alphaSampler, uv).a;
@@ -338,6 +355,9 @@ void initSurfaceInteraction(
     si.tangent        = worldTangent;
     si.bitangent      = worldBinormal;
     si.uv             = uv;
+    // One transform for every slot of the material -- see readTextureTransform()
+    // in the loader for why that is not a compromise in practice.
+    const float2 tuv = applyTextureTransform(uv, material);
     si.wo             = -rayDir;
     si.front_face     = dot(geomNormal, -rayDir) > 0.0f;
 
@@ -346,17 +366,17 @@ void initSurfaceInteraction(
     float3 baseColor = float3(material.base_color) * vertexColor;
     if (!is_null_texture(material.baseColorTexture))
     {
-        baseColor *= material.baseColorTexture.sample(texSampler, uv).rgb;
+        baseColor *= material.baseColorTexture.sample(texSampler, tuv).rgb;
     }
     si.albedo = baseColor;
-    si.opacity = resolveOpacity(material, uv);
+    si.opacity = resolveOpacity(material, uv);   // applies the transform itself
 
     // Sample metallic-roughness texture (glTF: G = roughness, B = metallic)
     float resolvedRoughness = material.roughness;
     float resolvedMetallic = material.metallic;
     if (!is_null_texture(material.metallicRoughnessTexture))
     {
-        float4 mrTex = material.metallicRoughnessTexture.sample(texSampler, uv);
+        float4 mrTex = material.metallicRoughnessTexture.sample(texSampler, tuv);
         resolvedRoughness *= mrTex.g;
         resolvedMetallic *= mrTex.b;
     }
@@ -364,7 +384,7 @@ void initSurfaceInteraction(
     // Sample normal map
     if (!is_null_texture(material.normalTexture))
     {
-        float3 bumpNormal = material.normalTexture.sample(texSampler, uv).xyz * 2.0f - 1.0f;
+        float3 bumpNormal = material.normalTexture.sample(texSampler, tuv).xyz * 2.0f - 1.0f;
         bumpNormal.xy *= material.normal_scale;
         float3x3 TBN = float3x3(worldTangent, worldBinormal, worldNormal);
         si.shading_normal = normalize(TBN * bumpNormal);
@@ -374,7 +394,7 @@ void initSurfaceInteraction(
     float3 emissionColor = float3(material.emission);
     if (!is_null_texture(material.emissionTexture))
     {
-        float4 emTex = material.emissionTexture.sample(texSampler, uv);
+        float4 emTex = material.emissionTexture.sample(texSampler, tuv);
         emissionColor *= emTex.rgb;
     }
     si.emission = emissionColor * material.emission_strength;
