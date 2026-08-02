@@ -783,11 +783,15 @@ MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName, bool
     // not vendor. Halving the longest side is a 4x cut per step, it is a
     // deliberate quality trade the user asks for, and 0 disables it.
     const uint32_t maxDim = getSettings()->getAs<uint32_t>("render/texture/maxDimension");
-    if (maxDim > 0 && (uint32_t)std::max(texWidth, texHeight) > maxDim)
+    // A plain divisor as well as a ceiling: halving everything is the quickest
+    // way to see whether a scene fits at all, and it keeps relative detail
+    // between a 4K map and a 512 one, which a ceiling does not.
+    const uint32_t divisor = std::max(1u, getSettings()->getAs<uint32_t>("render/texture/downscale"));
+    if ((maxDim > 0 && (uint32_t)std::max(texWidth, texHeight) > maxDim) || divisor > 1)
     {
-        int dstW = texWidth;
-        int dstH = texHeight;
-        while ((uint32_t)std::max(dstW, dstH) > maxDim && dstW > 1 && dstH > 1)
+        int dstW = std::max(1, texWidth / (int)divisor);
+        int dstH = std::max(1, texHeight / (int)divisor);
+        while (maxDim > 0 && (uint32_t)std::max(dstW, dstH) > maxDim && dstW > 1 && dstH > 1)
         {
             dstW = std::max(1, dstW / 2);
             dstH = std::max(1, dstH / 2);
@@ -2801,6 +2805,27 @@ void MetalRender::renderSync(Buffer* output)
     if (mLastCommandBuffer)
     {
         mLastCommandBuffer->waitUntilCompleted();
+        if (mLastCommandBuffer->status() == MTL::CommandBufferStatusError)
+        {
+            // Once, not once per sample: a scene that does not fit fails every
+            // launch, and sixteen identical lines bury the one that matters.
+            mDeviceError = true;
+            if (!mDeviceErrorReported)
+            {
+                mDeviceErrorReported = true;
+            // A render command buffer that failed produces a black frame and
+            // nothing else. The usual cause is that the scene's resources do not
+            // all fit on the device at once -- acceleration structures, vertex
+            // and index buffers and textures are all needed resident -- and the
+            // failure is otherwise completely silent.
+            NS::Error* err = mLastCommandBuffer->error();
+            STRELKA_ERROR("Render command buffer failed: {}. The scene may not fit on the device; "
+                          "try render/texture/maxDimension.",
+                          err && err->localizedDescription()
+                              ? err->localizedDescription()->utf8String()
+                              : "unknown error");
+            }
+        }
         const double gpuMs =
             (mLastCommandBuffer->GPUEndTime() - mLastCommandBuffer->GPUStartTime()) * 1000.0;
         mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
@@ -3217,6 +3242,18 @@ MTL::AccelerationStructure* MetalRender::createAccelerationStructure(MTL::Accele
     // build the acceleration structure, it just allocates memory.
     MTL::AccelerationStructure* accelerationStructure =
         mDevice->newAccelerationStructure(accelSizes.accelerationStructureSize);
+    if (!accelerationStructure)
+    {
+        // newAccelerationStructure returns nil when the device cannot find the
+        // memory, and nothing downstream notices: the TLAS ends up null, every
+        // ray misses, and the result is a black frame that looks like a lighting
+        // problem. Say it here instead.
+        STRELKA_ERROR("Acceleration structure allocation failed: {:.2f} GB requested, "
+                      "{:.2f} GB max buffer. The scene does not fit -- lower "
+                      "render/texture/maxDimension or reduce geometry.",
+                      accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
+        return nullptr;
+    }
     // Allocate scratch space Metal uses to build the acceleration structure.
     // Use MTLResourceStorageModePrivate for best performance because the sample
     // doesn't need access to the buffer's contents.
@@ -3250,6 +3287,17 @@ MTL::AccelerationStructure* MetalRender::createAccelerationStructure(MTL::Accele
     // you rebuild every frame because the synchronization cost may be significant.
 
     commandBuffer->waitUntilCompleted();
+    if (commandBuffer->status() == MTL::CommandBufferStatusError)
+    {
+        // Out of device memory during a build leaves the structure allocated but
+        // empty, so every ray misses and the frame comes out black with nothing
+        // in the log. This is the only place that failure is visible.
+        NS::Error* err = commandBuffer->error();
+        STRELKA_ERROR("Acceleration structure build failed on the GPU: {}",
+                      err && err->localizedDescription()
+                          ? err->localizedDescription()->utf8String()
+                          : "unknown error (most likely out of device memory)");
+    }
 
     const uint32_t compactedSize = *(uint32_t*)compactedSizeBuffer->contents();
 
@@ -3258,6 +3306,16 @@ MTL::AccelerationStructure* MetalRender::createAccelerationStructure(MTL::Accele
 
     // Allocate a smaller acceleration structure based on the returned size.
     MTL::AccelerationStructure* compactedAccelerationStructure = mDevice->newAccelerationStructure(compactedSize);
+    if (!compactedAccelerationStructure)
+    {
+        STRELKA_ERROR("Compacted acceleration structure allocation failed: {:.2f} GB requested",
+                      compactedSize / 1e9);
+        accelerationStructure->release();
+        scratchBuffer->release();
+        compactedSizeBuffer->release();
+        pPool->release();
+        return nullptr;
+    }
 
     // Create another command buffer and encoder.
     commandBuffer = mCommandQueue->commandBuffer();
@@ -3295,6 +3353,18 @@ MTL::AccelerationStructure* MetalRender::createAccelerationStructureNoCompact(
     const MTL::AccelerationStructureSizes accelSizes = mDevice->accelerationStructureSizes(descriptor);
     MTL::AccelerationStructure* accelerationStructure =
         mDevice->newAccelerationStructure(accelSizes.accelerationStructureSize);
+    if (!accelerationStructure)
+    {
+        // newAccelerationStructure returns nil when the device cannot find the
+        // memory, and nothing downstream notices: the TLAS ends up null, every
+        // ray misses, and the result is a black frame that looks like a lighting
+        // problem. Say it here instead.
+        STRELKA_ERROR("Acceleration structure allocation failed: {:.2f} GB requested, "
+                      "{:.2f} GB max buffer. The scene does not fit -- lower "
+                      "render/texture/maxDimension or reduce geometry.",
+                      accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
+        return nullptr;
+    }
     MTL::Buffer* scratchBuffer =
         mDevice->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate);
 
@@ -3770,6 +3840,26 @@ void MetalRender::createAccelerationStructures()
         MTL::AccelerationStructureInstanceDescriptorTypeUserID);
 
     mInstanceAccelerationStructure = createAccelerationStructure(accelDescriptor);
+    if (!mInstanceAccelerationStructure)
+    {
+        STRELKA_ERROR("Top-level acceleration structure could not be built; every ray will miss "
+                      "and the image will be black.");
+    }
+    {
+        size_t asBytes = 0;
+        size_t nullAs = 0;
+        for (const Blas& b : mBlasList)
+        {
+            if (b.mAs)
+                asBytes += b.mAs->size();
+            else
+                ++nullAs;
+        }
+        STRELKA_INFO("Structures: BLAS {:.2f} GB ({} failed), TLAS {:.3f} GB, device max buffer {:.2f} GB",
+                     asBytes / 1e9, nullAs,
+                     mInstanceAccelerationStructure ? mInstanceAccelerationStructure->size() / 1e9 : 0.0,
+                     mDevice->maxBufferLength() / 1e9);
+    }
     mTlasInstanceCount = mEmittedInstances.size();
     pPool->release();
 }

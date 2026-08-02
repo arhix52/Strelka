@@ -161,6 +161,13 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     {
         cfg.maxDepth = static_cast<uint32_t>(*v);
     }
+    // 1 = shading normals, 3..6 = denoiser guides; see DebugMode in ShaderTypes.h.
+    if (auto v = tbl["render"]["debug"].value<int64_t>())
+        cfg.debugMode = (uint32_t)*v;
+    // Plain divisor: 2 halves every texture, which is the quickest way to find
+    // out whether a scene fits at all.
+    if (auto v = tbl["render"]["texture_downscale"].value<int64_t>())
+        cfg.textureDownscale = (uint32_t)*v;
     if (auto v = tbl["render"]["texture_max_dim"].value<int64_t>())
         cfg.textureMaxDim = (uint32_t)*v;
     if (auto v = tbl["render"]["volume_model"].value<std::string>())
@@ -254,7 +261,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/sppTotal", m_config.spp);
     m_settings->setAs<uint32_t>("render/pt/spp", m_config.sppPerLaunch);
     m_settings->setAs<uint32_t>("render/pt/tonemapperType", m_config.tonemapType);
-    m_settings->setAs<uint32_t>("render/pt/debug", 0);
+    m_settings->setAs<uint32_t>("render/pt/debug", m_config.debugMode);
     m_settings->setAs<uint32_t>("render/pt/samplerType", m_config.samplerType);
     m_settings->setAs<uint32_t>("render/pt/blueNoiseSwitchSpp", m_config.blueNoiseSwitchSpp);
     m_settings->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
@@ -288,6 +295,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/texture/maxDimension", m_config.textureMaxDim);
     // Headless: nothing picks, nothing saves the scene back out.
     m_settings->setAs<bool>("scene/releaseHostGeometry", true);
+    m_settings->setAs<uint32_t>("render/texture/downscale", m_config.textureDownscale);
     m_settings->setAs<bool>("render/validate/analyticLights", true);
 
     m_settings->setAs<float>("render/post/tonemapper/filmIso", m_config.filmIso);
@@ -458,6 +466,17 @@ int HeadlessApp::run()
         printProgress(static_cast<uint32_t>(m_sharedCtx->mSubframeIndex), m_config.spp, m_render->getLastRenderTimeMs());
     }
     const auto totalTime = duration_cast<milliseconds>(high_resolution_clock::now() - startTime);
+
+    if (m_render->deviceError())
+    {
+        // Writing the file anyway would hand back a black image that looks like a
+        // lighting problem; saying so and failing is the honest outcome.
+        fprintf(stderr,
+                "\nGPU command buffer failed -- the render is not valid. The scene most likely "
+                "does not fit on the device.\nTry render.texture_downscale = 2 or "
+                "render.texture_max_dim = 2048 in the config.\n");
+        return 2;
+    }
 
     saveOutput(outputBuf.get());
 

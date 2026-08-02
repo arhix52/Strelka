@@ -31,6 +31,12 @@ public:
     /// correspondence. Smooth camera motion is *not* such an event: motion vectors
     /// exist to carry it, and resetting on it throws the history away exactly when
     /// it is worth most.
+    /// True when a GPU command buffer failed; the image is not trustworthy.
+    virtual bool deviceError() const
+    {
+        return false;
+    }
+
     virtual void resetTemporalHistory()
     {
     }

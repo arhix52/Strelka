@@ -40,6 +40,11 @@ public:
     bool readDisplayTexture(std::vector<float>& rgba, uint32_t& width, uint32_t& height) override;
     bool readGuideTexture(Guide guide, std::vector<float>& rgba, uint32_t& width, uint32_t& height) override;
     float skinnedGeometryExtent() override;
+    bool deviceError() const override
+    {
+        return mDeviceError;
+    }
+
     bool motionGeometryActive() override
     {
         return mMotionBlasBuilt && mShutterIntervalActive;
@@ -165,6 +170,10 @@ private:
     // Set while uploading materials. Gates the alpha function constant, so a
     // scene with no cutouts compiles the same kernels it always did.
     bool mSceneHasAlphaMaterials = false;
+    // A GPU command buffer failed. Kept so a headless run can exit non-zero
+    // instead of writing a black image and reporting success.
+    bool mDeviceError = false;
+    bool mDeviceErrorReported = false;
     std::vector<MTL::Texture*> mMaterialTextures;
     uint32_t mFrameIndex = 0;
 
