@@ -7,6 +7,12 @@ find_package(imguizmo REQUIRED)
 
 add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_bsdf.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_energy_conservation.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_anisotropy.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_dielectric_exit.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_sample_eval_consistency.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_vertex_packing.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_light_units.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_scene.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_light_json.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_pick_ray.cpp
