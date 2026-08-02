@@ -61,6 +61,9 @@ static __device__ float3 sampleLight(SamplerState& sampler,
             lightSampleData = SampleRectLight(light, uv, si.position);
         }
         break;
+    case LIGHT_TYPE_DISC:
+        lightSampleData = SampleDiscLight(light, uv, si.position);
+        break;
     case LIGHT_TYPE_SPHERE:
         lightSampleData = SampleSphereLight(light, uv, si.position);
         break;
@@ -72,7 +75,8 @@ static __device__ float3 sampleLight(SamplerState& sampler,
     toLight = lightSampleData.L;
     float3 Li = make_float3(light.color);
 
-    if (dot(si.shading_normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.0 && all(Li))
+    if (dot(si.shading_normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.0 &&
+        emitsLight(Li))
     {
         const bool occluded =
             traceOcclusion(params.handle, offset_ray(si.position, si.geometry_normal), lightSampleData.L,

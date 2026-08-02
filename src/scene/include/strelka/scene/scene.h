@@ -213,15 +213,19 @@ public:
     int tlasUpdateCount;
 
     // GPU side structure
+    // Uploaded to the GPU verbatim, so every field is initialized: a light type
+    // that does not write one (a rect light never sets normal) otherwise ships
+    // whatever the allocation held, and a huge or NaN value sitting in a buffer
+    // the shader may start reading is a trap that costs a day to find.
     struct Light
     {
-        glm::float4 points[4];
+        glm::float4 points[4]{};
         glm::float4 color = glm::float4(1.0f);
-        glm::float4 normal;
-        int type;
-        float halfAngle;
-        float pad0;
-        float pad1;
+        glm::float4 normal{ 0.0f };
+        int type = -1;
+        float halfAngle = 0.0f;
+        float pad0 = 0.0f;
+        float pad1 = 0.0f;
     };
 
     // CPU side structure
@@ -492,7 +496,20 @@ public:
         const glm::float4x4 translationMatrix = glm::translate(glm::float4x4(1.0f), desc.position);
         glm::quat rotation = glm::quat(glm::radians(desc.orientation)); // to quaternion
         const glm::float4x4 rotationMatrix{ rotation };
-        glm::float3 scale = { desc.width, desc.height, 1.0f };
+        // The shape's own size, not always the rectangle's. A disc or sphere light
+        // carries a radius and no width, so scaling every light by
+        // (width, height, 1) collapsed its transform: the in-plane axes came out
+        // zero and the light's mesh was squashed flat, which left a light that
+        // illuminated nothing and could not be seen either.
+        glm::float3 scale{ 1.0f };
+        if (desc.type == LIGHT_TYPE_RECT)
+        {
+            scale = glm::float3(desc.width, desc.height, 1.0f);
+        }
+        else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPHERE)
+        {
+            scale = glm::float3(desc.radius);
+        }
         const glm::float4x4 scaleMatrix = glm::scale(glm::float4x4(1.0f), scale);
 
         const glm::float4x4 localTransform = translationMatrix * rotationMatrix * scaleMatrix;

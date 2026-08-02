@@ -211,7 +211,10 @@ static __inline__ __device__ float getLightPdf(const UniformLight& l, const floa
     return 1.0f / quad.S;
 }
 
-static __inline__ __device__ float getRectLightPdf(const UniformLight& l, const float3 lightHitPoint, const float3 surfaceHitPoint)
+// Area-to-solid-angle pdf of a point sampled uniformly on a flat light. Both the
+// rectangle and the disc reach it: fillLightData() already knows the shape, so
+// nothing here is specific to one.
+static __inline__ __device__ float getAreaLightPdf(const UniformLight& l, const float3 lightHitPoint, const float3 surfaceHitPoint)
 {
     LightSampleData lightSampleData {};
     lightSampleData.pointOnLight = lightHitPoint;
@@ -219,6 +222,14 @@ static __inline__ __device__ float getRectLightPdf(const UniformLight& l, const 
     lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /
                             (dot(-lightSampleData.L, lightSampleData.normal) * lightSampleData.area);
     return lightSampleData.pdf;
+}
+
+// Whether a radiance carries any energy at all. Testing every channel instead
+// would drop a saturated light: a pure red one has two zero channels and still
+// lights the scene.
+static __inline__ __device__ bool emitsLight(const float3 radiance)
+{
+    return radiance.x > 0.0f || radiance.y > 0.0f || radiance.z > 0.0f;
 }
 
 static __inline__ __device__ float getDirectLightPdf(float angle)
@@ -238,7 +249,9 @@ static __inline__ __device__ float getLightPdf(const UniformLight& l,
     switch (l.type)
     {
     case LIGHT_TYPE_RECT:
-        return getRectLightPdf(l, lightHitPoint, surfaceHitPoint);
+        return getAreaLightPdf(l, lightHitPoint, surfaceHitPoint);
+    case LIGHT_TYPE_DISC:
+        return getAreaLightPdf(l, lightHitPoint, surfaceHitPoint);
     case LIGHT_TYPE_SPHERE:
         return getSphereLightPdf();
     case LIGHT_TYPE_DISTANT:
@@ -336,6 +349,33 @@ static __inline__ __device__ LightSampleData SampleDistantLight(const UniformLig
     lightSampleData.pdf = pdf;
     lightSampleData.pointOnLight = coneSample;
 
+    return lightSampleData;
+}
+
+// Uniform over the disc's area. points[0].x carries the radius and points[2..3]
+// the in-plane axes; the axes are normalized here because whether the light's
+// transform already scaled them depends on how the light was authored, while the
+// area is computed from the radius in points[0] either way.
+static __inline__ __device__ LightSampleData SampleDiscLight(const UniformLight& l, const float2 u, const float3 hitPoint)
+{
+    LightSampleData lightSampleData;
+
+    const float radius = l.points[0].x;
+    const float3 center = make_float3(l.points[1]);
+    const float3 axisX = normalize(make_float3(l.points[2]));
+    const float3 axisY = normalize(make_float3(l.points[3]));
+
+    // sqrt keeps the samples uniform per unit area rather than crowding the centre.
+    const float r = radius * sqrtf(u.x);
+    const float phi = 2.0f * M_PIf * u.y;
+    lightSampleData.pointOnLight = center + r * (cosf(phi) * axisX + sinf(phi) * axisY);
+
+    fillLightData(l, hitPoint, lightSampleData);
+    const float cosAtLight = -dot(lightSampleData.L, lightSampleData.normal);
+    lightSampleData.pdf = (cosAtLight > 0.0f && lightSampleData.area > 0.0f)
+                              ? lightSampleData.distToLight * lightSampleData.distToLight /
+                                    (cosAtLight * lightSampleData.area)
+                              : 0.0f;
     return lightSampleData;
 }
 

@@ -133,9 +133,12 @@ static __attribute__((always_inline)) float2 interpolateAttrib(const float2 attr
     return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
 
-static __attribute__((always_inline)) bool all(const float3 v)
+// Whether a radiance carries any energy at all. Testing every channel instead
+// would drop a saturated light: a pure red one has two zero channels and still
+// lights the scene.
+static __attribute__((always_inline)) bool emitsLight(const float3 radiance)
 {
-    return v.x != 0.0f && v.y != 0.0f && v.z != 0.0f;
+    return radiance.x > 0.0f || radiance.y > 0.0f || radiance.z > 0.0f;
 }
 
 __attribute__((always_inline))
@@ -430,6 +433,9 @@ LightConnection connectLight(
             lightSampleData = SampleRectLight(light, uv, si.position);
         }
         break;
+    case 1:
+        lightSampleData = SampleDiscLight(light, uv, si.position);
+        break;
     case 2:
         lightSampleData = SampleSphereLight(light, uv, si.position);
         break;
@@ -442,7 +448,8 @@ LightConnection connectLight(
     c.toLight = lightSampleData.L;
 
     const float3 Li = float3(light.color);
-    if (dot(si.shading_normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.001f && all(Li))
+    if (dot(si.shading_normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.001f &&
+        emitsLight(Li))
     {
         // The cosine belongs here because bsdf_eval() returns f alone, unlike
         // bsdf_sample()'s bsdf_over_pdf which already carries it. See the note on

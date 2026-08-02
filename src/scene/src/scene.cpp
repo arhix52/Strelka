@@ -800,8 +800,12 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].points[2] = localTransform * glm::float4(1.f, 0.f, 0.f, 0.f); // OXws
         mLights[lightId].points[3] = localTransform * glm::float4(0.f, 1.f, 0.f, 0.f); // OYws
 
-        glm::float4 normal = localTransform * glm::float4(0, 0, 1.f, 0.0f);
-        mLights[lightId].normal = normal;
+        // Emission along -Z, like the rect light (whose normal comes out as the
+        // negated edge cross product) and the distant light. Pointing a disc along
+        // +Z faced it away from whatever its orientation was aimed at, so it lit
+        // nothing and was invisible from the side it was supposed to illuminate.
+        // Normalized because localTransform scales by the radius.
+        mLights[lightId].normal = glm::normalize(localTransform * glm::float4(0.0f, 0.0f, -1.0f, 0.0f));
         mLights[lightId].type = LIGHT_TYPE_DISC;
     }
     else if (desc.type == LIGHT_TYPE_SPHERE)

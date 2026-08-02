@@ -698,7 +698,323 @@ bool auditFinite(const AuditImage& img)
     return true;
 }
 
+// Per-channel means, for telling "the light got dimmer" from "the light changed
+// colour".
+glm::float3 auditChannelMean(const AuditImage& img)
+{
+    glm::double3 sum(0.0);
+    for (size_t i = 0; i < img.px.size(); i += 4)
+    {
+        sum.x += img.px[i];
+        sum.y += img.px[i + 1];
+        sum.z += img.px[i + 2];
+    }
+    const double pixels = img.px.empty() ? 1.0 : (double)(img.px.size() / 4);
+    return glm::float3(sum / pixels);
+}
+
 } // namespace
+
+// --- Light plumbing audit (STRELKA_LIGHT_AUDIT=[dir]) -----------------------
+//
+// Editing a light has to change the picture. Between the panel and the pixels
+// sit the baked GPU light, a dirty bit, a buffer upload, a shader variant keyed
+// on whether the scene has lights at all, and an accumulation reset -- and any
+// one of them dropping the edit looks from the outside exactly like the renderer
+// ignoring it. So this measures the picture: it makes the same
+// Scene::setLight() call the panels make and then reads back the frame the
+// screen shows.
+void EditorApp::runLightAudit()
+{
+    const char* outDir = getenv("STRELKA_LIGHT_AUDIT");
+    const bool saveImages = outDir && outDir[0] && strchr(outDir, '/') != nullptr;
+    const uint32_t refSpp = (uint32_t)atoi(getenv("STRELKA_AUDIT_SPP") ? getenv("STRELKA_AUDIT_SPP") : "32");
+    const uint32_t auditW = (uint32_t)atoi(getenv("STRELKA_AUDIT_W") ? getenv("STRELKA_AUDIT_W") : "512");
+    const uint32_t auditH = (uint32_t)atoi(getenv("STRELKA_AUDIT_H") ? getenv("STRELKA_AUDIT_H") : "384");
+    const double budgetSec = atof(getenv("STRELKA_AUDIT_BUDGET") ? getenv("STRELKA_AUDIT_BUDGET") : "300");
+    const double stepTimeoutSec = atof(getenv("STRELKA_AUDIT_STEP_SEC") ? getenv("STRELKA_AUDIT_STEP_SEC") : "20");
+
+    const auto auditStart = std::chrono::steady_clock::now();
+    auto outOfTime = [&]() {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - auditStart).count() > budgetSec ||
+               m_display->windowShouldClose();
+    };
+    auto report = [&](const std::string& line) {
+        STRELKA_INFO("{}", line);
+        std::fputs(line.c_str(), stdout);
+        std::fputc('\n', stdout);
+        std::fflush(stdout);
+    };
+
+    m_settingsManager->setAs<bool>("render/enableMotionBlur", false);
+    m_settingsManager->setAs<bool>("render/isMotionBlurVisible", false);
+    m_settingsManager->setAs<bool>("render/pt/denoise", false);
+    m_settingsManager->setAs<bool>("render/pt/enableUpscale", false);
+    m_settingsManager->setAs<bool>("render/pt/enableAcc", true);
+    m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
+    m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", refSpp);
+    m_settingsManager->setAs<uint32_t>("render/width", auditW);
+    m_settingsManager->setAs<uint32_t>("render/height", auditH);
+
+    auto step = [&]() -> bool {
+        const size_t target = m_sharedCtx->mFrameNumber + 1;
+        bool submitted = false;
+        auto phaseStart = std::chrono::steady_clock::now();
+        while (!m_display->windowShouldClose())
+        {
+            m_display->pollEvents();
+            if (!submitted)
+            {
+                m_render->triggerRenderIfIdle();
+                if (m_sharedCtx->mFrameNumber >= target)
+                {
+                    submitted = true;
+                    phaseStart = std::chrono::steady_clock::now();
+                }
+            }
+            if (submitted && !m_render->isRenderBusy())
+                return true;
+            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - phaseStart).count() > stepTimeoutSec)
+            {
+                report(fmt::format("LIGHTAUDIT WARN frame did not {} within {:.0f}s",
+                                   submitted ? "complete" : "submit", stepTimeoutSec));
+                return false;
+            }
+            usleep(200);
+        }
+        return false;
+    };
+
+    auto converge = [&](AuditImage& img) {
+        m_sharedCtx->mSubframeIndex = 0;
+        m_render->resetTemporalHistory();
+        uint32_t guard = refSpp * 4 + 16;
+        while (m_sharedCtx->mSubframeIndex < refSpp && guard-- > 0 && !outOfTime())
+        {
+            if (!step())
+                break;
+        }
+        // Two spare frames, not one: the display texture is double buffered and
+        // what mReadyIndex points at trails the trace by a frame, so a single
+        // extra step can still hand back the picture of the state before this one.
+        step();
+        step();
+        return m_render->readDisplayTexture(img.px, img.w, img.h);
+    };
+
+    auto save = [&](const std::string& name, const AuditImage& img) {
+        if (!saveImages || !img.valid())
+            return;
+        const char* err = nullptr;
+        SaveEXR(img.px.data(), (int)img.w, (int)img.h, 4, 0, (std::string(outDir) + "/" + name + ".exr").c_str(), &err);
+        if (err)
+            FreeEXRErrorMessage(err);
+    };
+
+    const std::vector<Scene::UniformLightDesc> original = m_scene->getLightsDesc();
+    report(fmt::format("LIGHTAUDIT lights={} analytic={} tracerMode={} envMap={} spp={} {}x{}", original.size(),
+                       m_settingsManager->getAs<bool>("render/validate/analyticLights"),
+                       m_settingsManager->getAs<uint32_t>("render/pt/tracerMode"),
+                       m_scene->getEnvLight().has_value(), refSpp, auditW, auditH));
+    for (size_t i = 0; i < original.size(); ++i)
+    {
+        const Scene::UniformLightDesc& d = original[i];
+        const glm::float4 baked = m_scene->getLights()[i].color;
+        report(fmt::format("LIGHTAUDIT light{} type={} intensity={:.1f} color=({:.3f},{:.3f},{:.3f}) "
+                           "baked=({:.1f},{:.1f},{:.1f}) pos=({:.3f},{:.3f},{:.3f})",
+                           i, d.type, d.intensity, d.color.x, d.color.y, d.color.z, baked.x, baked.y, baked.z,
+                           d.position.x, d.position.y, d.position.z));
+    }
+    // The GPU record, not the description: the sampling routines read these
+    // points and this normal, and a light that emits nothing usually has
+    // something degenerate in here.
+    for (size_t i = 0; i < original.size(); ++i)
+    {
+        const Scene::Light& l = m_scene->getLights()[i];
+        report(fmt::format("LIGHTAUDIT light{} gpu p0=({:.3f},{:.3f},{:.3f}) p1=({:.3f},{:.3f},{:.3f}) "
+                           "p2=({:.3f},{:.3f},{:.3f}) p3=({:.3f},{:.3f},{:.3f}) n=({:.3f},{:.3f},{:.3f})",
+                           i, l.points[0].x, l.points[0].y, l.points[0].z, l.points[1].x, l.points[1].y, l.points[1].z,
+                           l.points[2].x, l.points[2].y, l.points[2].z, l.points[3].x, l.points[3].y, l.points[3].z,
+                           l.normal.x, l.normal.y, l.normal.z));
+    }
+    if (original.empty())
+    {
+        report("LIGHTAUDIT no analytic lights in scene, nothing to measure");
+        return;
+    }
+
+    AuditImage base;
+    if (!converge(base) || !base.valid())
+    {
+        report("LIGHTAUDIT FAIL could not read the displayed frame");
+        return;
+    }
+    const double baseMean = auditMean(base);
+    report(fmt::format("LIGHTAUDIT base mean={:.5f}", baseMean));
+    save("light_base", base);
+
+    // One light at a time: a scene lit by several of them can lose one and still
+    // look lit, so the per-light delta is what says the edit arrived.
+    for (size_t i = 0; i < original.size() && !outOfTime(); ++i)
+    {
+        Scene::UniformLightDesc dark = original[i];
+        dark.intensity = 0.0f;
+        m_scene->setLight((uint32_t)i, dark);
+        const glm::float4 baked = m_scene->getLights()[i].color;
+
+        AuditImage img;
+        converge(img);
+        const double mean = auditMean(img);
+        int dx = 0, dy = 0;
+        const double rmse = auditRmse(base, img, dx, dy);
+        report(fmt::format("LIGHTAUDIT light{} intensity=0 baked=({:.1f},{:.1f},{:.1f}) mean={:.5f} delta={:+.5f} ({:+.1f}%) rmse_vs_base={:.5f}",
+                           i, baked.x, baked.y, baked.z, mean, mean - baseMean,
+                           baseMean > 0.0 ? 100.0 * (mean - baseMean) / baseMean : 0.0, rmse));
+        save(fmt::format("light{}_off", i), img);
+
+        m_scene->setLight((uint32_t)i, original[i]);
+    }
+
+    // Everything off. With no env light there is nothing left to illuminate the
+    // scene, so anything but a black frame means the edits are not reaching the
+    // GPU at all.
+    if (!outOfTime())
+    {
+        for (size_t i = 0; i < original.size(); ++i)
+        {
+            Scene::UniformLightDesc dark = original[i];
+            dark.intensity = 0.0f;
+            m_scene->setLight((uint32_t)i, dark);
+        }
+        AuditImage img;
+        converge(img);
+        const double mean = auditMean(img);
+        int dx = 0, dy = 0;
+        report(fmt::format("LIGHTAUDIT all off mean={:.5f} ({:.2f}% of base) rmse_vs_base={:.5f}", mean,
+                           baseMean > 0.0 ? 100.0 * mean / baseMean : 0.0, auditRmse(base, img, dx, dy)));
+        save("light_all_off", img);
+    }
+
+    // Back to the start: an edit that cannot be undone is as broken as one that
+    // never arrives.
+    if (!outOfTime())
+    {
+        for (size_t i = 0; i < original.size(); ++i)
+        {
+            m_scene->setLight((uint32_t)i, original[i]);
+        }
+        AuditImage img;
+        converge(img);
+        const double mean = auditMean(img);
+        report(fmt::format("LIGHTAUDIT restored mean={:.5f} (base {:.5f}, {:+.2f}%)", mean, baseMean,
+                           baseMean > 0.0 ? 100.0 * (mean - baseMean) / baseMean : 0.0));
+        save("light_restored", img);
+    }
+
+    // Colour, size and position each reach the GPU by a different route: colour
+    // multiplies the baked radiance, the other two rebuild the light's geometry
+    // and its instance transform.
+    //
+    // Saturated against nearly saturated, because the two must agree. A test that
+    // only sets pure red cannot tell "the colour arrived" from "the light was
+    // dropped for having a zero channel", which is what the shader used to do.
+    if (!outOfTime())
+    {
+        Scene::UniformLightDesc red = original[0];
+        red.color = glm::float3(1.0f, 0.0f, 0.0f);
+        m_scene->setLight(0, red);
+        AuditImage pure;
+        converge(pure);
+        const glm::float3 pureRgb = auditChannelMean(pure);
+        save("light0_red", pure);
+
+        Scene::UniformLightDesc almost = original[0];
+        almost.color = glm::float3(1.0f, 0.02f, 0.02f);
+        m_scene->setLight(0, almost);
+        AuditImage nearly;
+        converge(nearly);
+        const glm::float3 nearlyRgb = auditChannelMean(nearly);
+        save("light0_almost_red", nearly);
+
+        report(fmt::format("LIGHTAUDIT light0 red=({:.5f},{:.5f},{:.5f}) almost_red=({:.5f},{:.5f},{:.5f}) "
+                           "red_r/almost_r={:.3f}",
+                           pureRgb.x, pureRgb.y, pureRgb.z, nearlyRgb.x, nearlyRgb.y, nearlyRgb.z,
+                           nearlyRgb.x > 0.0f ? pureRgb.x / nearlyRgb.x : 0.0f));
+        m_scene->setLight(0, original[0]);
+    }
+
+    if (!outOfTime())
+    {
+        Scene::UniformLightDesc moved = original[0];
+        moved.position += glm::float3(0.0f, 2.0f, 0.0f);
+        m_scene->setLight(0, moved);
+        AuditImage img;
+        converge(img);
+        int dx = 0, dy = 0;
+        const double rmse = auditRmse(base, img, dx, dy);
+        report(fmt::format("LIGHTAUDIT light0 moved +2y mean={:.5f} rmse_vs_base={:.5f}", auditMean(img), rmse));
+        save("light0_moved", img);
+        m_scene->setLight(0, original[0]);
+    }
+
+    if (!outOfTime() && original[0].type == LIGHT_TYPE_RECT)
+    {
+        Scene::UniformLightDesc big = original[0];
+        big.width *= 3.0f;
+        big.height *= 3.0f;
+        m_scene->setLight(0, big);
+        AuditImage img;
+        converge(img);
+        report(fmt::format("LIGHTAUDIT light0 3x size mean={:.5f} delta={:+.5f}", auditMean(img),
+                           auditMean(img) - baseMean));
+        save("light0_big", img);
+        m_scene->setLight(0, original[0]);
+    }
+
+    // NEE against BSDF sampling alone, per light type. The two are independent
+    // unbiased estimators of the same integral, so at convergence they have to
+    // produce the same image -- and they only do if the light's sampling routine
+    // and the pdf its MIS weight uses describe the same shape the light's
+    // geometry has. A light type the sampler does not handle shows up here: NEE
+    // contributes nothing for it, or contributes with the wrong weight.
+    //
+    // Needs samples to mean anything. BSDF sampling finds a small bright light by
+    // accident, so at the default spp it is nowhere near converged and reads 7%
+    // dark on scenes where the two agree to within 1% at STRELKA_AUDIT_SPP=400.
+    for (size_t i = 0; i < original.size() && !outOfTime(); ++i)
+    {
+        for (size_t j = 0; j < original.size(); ++j)
+        {
+            Scene::UniformLightDesc d = original[j];
+            if (j != i)
+                d.intensity = 0.0f;
+            m_scene->setLight((uint32_t)j, d);
+        }
+
+        m_settingsManager->setAs<uint32_t>("render/validate/estimatorMode", 0);
+        AuditImage nee;
+        converge(nee);
+        const double neeMean = auditMean(nee);
+
+        m_settingsManager->setAs<uint32_t>("render/validate/estimatorMode", 1);
+        AuditImage bsdf;
+        converge(bsdf);
+        const double bsdfMean = auditMean(bsdf);
+
+        m_settingsManager->setAs<uint32_t>("render/validate/estimatorMode", 0);
+        report(fmt::format("LIGHTAUDIT light{} type={} alone nee={:.5f} bsdfOnly={:.5f} diff={:+.2f}%", i,
+                           original[i].type, neeMean, bsdfMean,
+                           bsdfMean > 0.0 ? 100.0 * (neeMean - bsdfMean) / bsdfMean : 0.0));
+        save(fmt::format("light{}_nee", i), nee);
+        save(fmt::format("light{}_bsdf", i), bsdf);
+    }
+
+    for (size_t i = 0; i < original.size(); ++i)
+    {
+        m_scene->setLight((uint32_t)i, original[i]);
+    }
+    report("LIGHTAUDIT done");
+}
 
 void EditorApp::runDenoiseAudit()
 {
@@ -2450,6 +2766,7 @@ void EditorApp::run()
     if (getenv("STRELKA_REF")) { runReferenceCapture(); return; }
     if (getenv("STRELKA_JITTER_TEST")) { runJitterTest(); return; }
     if (getenv("STRELKA_DENOISE_AUDIT")) { runDenoiseAudit(); return; }
+    if (getenv("STRELKA_LIGHT_AUDIT")) { runLightAudit(); return; }
     if (getenv("STRELKA_BENCH")) { runBenchmark(); return; }
     auto prevTime = std::chrono::high_resolution_clock::now();
 

@@ -144,6 +144,7 @@ public:
     void runBenchmark();
     void runJitterTest();
     void runDenoiseAudit();
+    void runLightAudit();
     void playAnimations(float deltaTime);
 
     // --- UI drawing ---

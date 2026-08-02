@@ -13,6 +13,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_skinned_bounds.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_camera_animation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_transform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_lights.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_gizmo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_camera_takeover.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_viewport_input.cpp
