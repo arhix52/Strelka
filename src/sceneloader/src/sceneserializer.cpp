@@ -1,5 +1,7 @@
 #include <strelka/sceneloader/sceneserializer.h>
+#include <strelka/sceneloader/light_json.h>
 #include <strelka/scene/vertex_packing.h>
+#include <strelka/scene/light_desc.h>
 
 #include "tiny_gltf.h"
 #include "nlohmann/json.hpp"
@@ -20,22 +22,6 @@ namespace oka
 {
 namespace
 {
-
-std::string lightTypeToString(int type)
-{
-    switch (type)
-    {
-    case LIGHT_TYPE_DISC:
-        return "disc";
-    case LIGHT_TYPE_SPHERE:
-        return "sphere";
-    case LIGHT_TYPE_DISTANT:
-        return "distant";
-    case LIGHT_TYPE_RECT:
-    default:
-        return "rect";
-    }
-}
 
 std::string lightJsonPathFromScenePath(const std::string& gltfOrJsonPath)
 {
@@ -58,35 +44,7 @@ bool saveLightsJson(const Scene& scene, const std::string& gltfOrJsonPath)
 
     const auto& descs = scene.getLightsDesc();
     for (const Scene::UniformLightDesc& desc : descs)
-    {
-        json light;
-        light["type"] = lightTypeToString(desc.type);
-        light["color"] = { desc.color.x, desc.color.y, desc.color.z };
-        light["intensity"] = desc.intensity;
-        light["orientation"] = { desc.orientation.x, desc.orientation.y, desc.orientation.z };
-
-        if (desc.type == LIGHT_TYPE_DISTANT)
-        {
-            // Loader stores halfAngle in radians after * 0.5 * deg2rad from degrees in JSON.
-            // Write back as full angular diameter in degrees to match parseFromJson.
-            const float halfAngleDeg = desc.halfAngle * 2.0f * (180.0f / float(M_PI));
-            light["halfAngle"] = halfAngleDeg;
-        }
-        else
-        {
-            light["position"] = { desc.position.x, desc.position.y, desc.position.z };
-            if (desc.type == LIGHT_TYPE_RECT)
-            {
-                light["width"] = desc.width;
-                light["height"] = desc.height;
-            }
-            else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPHERE)
-            {
-                light["radius"] = desc.radius;
-            }
-        }
-        root["lights"].push_back(light);
-    }
+        root["lights"].push_back(lightjson::toJson(desc));
 
     if (const auto& env = scene.getEnvLight(); env.has_value())
     {
@@ -122,64 +80,13 @@ bool loadLightsJson(Scene& scene, const std::string& lightJsonPath)
     if (!root.contains("lights"))
         return false;
 
-    auto parseDesc = [](const json& light) -> Scene::UniformLightDesc {
-        Scene::UniformLightDesc desc{};
-        desc.useXform = false;
-        std::string typeStr = light.value("type", "rect");
-        if (light.contains("orientation"))
-        {
-            const auto& o = light["orientation"];
-            desc.orientation = glm::float3(o[0], o[1], o[2]);
-        }
-        if (light.contains("color"))
-        {
-            const auto& c = light["color"];
-            desc.color = glm::float3(c[0], c[1], c[2]);
-        }
-        if (light.contains("intensity"))
-            desc.intensity = light["intensity"].get<float>();
-
-        if (typeStr == "distant")
-        {
-            desc.type = LIGHT_TYPE_DISTANT;
-            desc.halfAngle = light.value("halfAngle", 0.53f) * 0.5f * (float(M_PI) / 180.0f);
-        }
-        else if (typeStr == "sphere")
-        {
-            desc.type = LIGHT_TYPE_SPHERE;
-            if (light.contains("position"))
-            {
-                const auto& p = light["position"];
-                desc.position = glm::float3(p[0], p[1], p[2]);
-            }
-            desc.radius = light.value("radius", 0.1f);
-        }
-        else if (typeStr == "disc")
-        {
-            desc.type = LIGHT_TYPE_DISC;
-            if (light.contains("position"))
-            {
-                const auto& p = light["position"];
-                desc.position = glm::float3(p[0], p[1], p[2]);
-            }
-            desc.radius = light.value("radius", 0.5f);
-        }
-        else
-        {
-            desc.type = LIGHT_TYPE_RECT;
-            if (light.contains("position"))
-            {
-                const auto& p = light["position"];
-                desc.position = glm::float3(p[0], p[1], p[2]);
-            }
-            desc.width = light.value("width", 1.0f);
-            desc.height = light.value("height", 1.0f);
-        }
-        return desc;
-    };
-
+    const std::string searchDir = fs::path(lightJsonPath).parent_path().string();
     for (const auto& light : root["lights"])
-        scene.createLight(parseDesc(light));
+    {
+        Scene::UniformLightDesc desc = lightjson::parseDesc(light, searchDir);
+        lightjson::resolveIes(scene, desc, searchDir);
+        scene.createLight(desc);
+    }
 
     if (root.contains("environment"))
     {

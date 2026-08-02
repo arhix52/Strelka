@@ -7,8 +7,11 @@ find_package(nlohmann_json REQUIRED)
 set(SCENELOADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/sceneloader/gltfloader.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/sceneloader/sceneserializer.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/sceneloader/iesloader.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/sceneloader/light_json.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gltfloader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/sceneserializer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/iesloader.cpp
 )
 
 add_library(strelka_sceneloader STATIC ${SCENELOADER_SOURCES})

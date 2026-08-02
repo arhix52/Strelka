@@ -1,0 +1,148 @@
+#pragma once
+
+#include <strelka/scene/scene.h>
+#include <strelka/scene/light_desc.h>
+#include <strelka/sceneloader/iesloader.h>
+
+#include "nlohmann/json.hpp"
+
+#include <cmath>
+#include <filesystem>
+#include <string>
+
+namespace oka
+{
+namespace lightjson
+{
+
+inline Scene::UniformLightDesc parseDesc(const nlohmann::json& light, const std::string& searchDir = {})
+{
+    Scene::UniformLightDesc desc{};
+    desc.useXform = false;
+    desc.enabled = light.value("enabled", true);
+    desc.name = light.value("name", "");
+    desc.type = lightTypeFromName(light.value("type", "rect"));
+    desc.intensityUnit = lightUnitFromName(light.value("unit", "radiance"));
+
+    if (light.contains("orientation"))
+    {
+        const auto& o = light["orientation"];
+        desc.orientation = glm::float3(o[0], o[1], o[2]);
+    }
+    if (light.contains("color"))
+    {
+        const auto& c = light["color"];
+        desc.color = glm::float3(c[0], c[1], c[2]);
+    }
+    if (light.contains("intensity"))
+        desc.intensity = light["intensity"].get<float>();
+    if (light.contains("range"))
+        desc.range = light["range"].get<float>();
+
+    if (desc.type != LIGHT_TYPE_DISTANT && light.contains("position"))
+    {
+        const auto& p = light["position"];
+        desc.position = glm::float3(p[0], p[1], p[2]);
+    }
+
+    switch (desc.type)
+    {
+    case LIGHT_TYPE_DISTANT:
+        // JSON stores full angular diameter in degrees; GPU wants half-angle rad.
+        desc.halfAngle = light.value("halfAngle", 0.53f) * 0.5f * (float(M_PI) / 180.0f);
+        if (!light.contains("unit"))
+            desc.intensityUnit = LIGHT_UNIT_RADIANCE;
+        break;
+    case LIGHT_TYPE_SPHERE:
+        desc.radius = light.value("radius", 0.1f);
+        break;
+    case LIGHT_TYPE_DISC:
+        desc.radius = light.value("radius", 0.5f);
+        break;
+    case LIGHT_TYPE_POINT:
+        desc.radius = light.value("radius", 0.0f);
+        if (!light.contains("unit"))
+            desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+        break;
+    case LIGHT_TYPE_SPOT:
+        desc.radius = light.value("radius", 0.0f);
+        // Degrees in JSON, radians on the desc — matches Blender / KHR UX.
+        desc.innerConeAngle = light.value("innerConeAngle", 0.0f) * (float(M_PI) / 180.0f);
+        desc.outerConeAngle = light.value("outerConeAngle", 45.0f) * (float(M_PI) / 180.0f);
+        if (!light.contains("unit"))
+            desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+        break;
+    case LIGHT_TYPE_RECT:
+    default:
+        desc.type = LIGHT_TYPE_RECT;
+        desc.width = light.value("width", 1.0f);
+        desc.height = light.value("height", 1.0f);
+        break;
+    }
+
+    if (light.contains("ies") && !searchDir.empty())
+    {
+        desc.iesPath = light["ies"].get<std::string>();
+    }
+    return desc;
+}
+
+inline nlohmann::json toJson(const Scene::UniformLightDesc& desc)
+{
+    nlohmann::json light;
+    light["type"] = lightTypeName(desc.type);
+    light["enabled"] = desc.enabled;
+    if (!desc.name.empty())
+        light["name"] = desc.name;
+    light["color"] = { desc.color.x, desc.color.y, desc.color.z };
+    light["intensity"] = desc.intensity;
+    light["unit"] = lightUnitName(desc.intensityUnit);
+    light["orientation"] = { desc.orientation.x, desc.orientation.y, desc.orientation.z };
+
+    if (desc.type == LIGHT_TYPE_DISTANT)
+    {
+        light["halfAngle"] = desc.halfAngle * 2.0f * (180.0f / float(M_PI));
+    }
+    else
+    {
+        light["position"] = { desc.position.x, desc.position.y, desc.position.z };
+        if (desc.type == LIGHT_TYPE_RECT)
+        {
+            light["width"] = desc.width;
+            light["height"] = desc.height;
+        }
+        else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPHERE || desc.type == LIGHT_TYPE_POINT ||
+                 desc.type == LIGHT_TYPE_SPOT)
+        {
+            light["radius"] = desc.radius;
+        }
+        if (desc.type == LIGHT_TYPE_SPOT)
+        {
+            light["innerConeAngle"] = desc.innerConeAngle * (180.0f / float(M_PI));
+            light["outerConeAngle"] = desc.outerConeAngle * (180.0f / float(M_PI));
+        }
+        if (desc.range > 0.0f)
+            light["range"] = desc.range;
+        if (!desc.iesPath.empty())
+            light["ies"] = desc.iesPath;
+    }
+    return light;
+}
+
+inline void resolveIes(Scene& scene, Scene::UniformLightDesc& desc, const std::string& searchDir)
+{
+    if (desc.iesPath.empty())
+        return;
+    std::filesystem::path p(desc.iesPath);
+    if (!p.is_absolute())
+        p = std::filesystem::path(searchDir) / p;
+    Scene::IesProfile profile;
+    if (loadIesProfile(p.string(), profile))
+    {
+        desc.iesProfile = scene.addIesProfile(std::move(profile));
+        desc.iesPath = p.string();
+    }
+}
+
+} // namespace lightjson
+} // namespace oka

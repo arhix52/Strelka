@@ -3424,7 +3424,19 @@ void MetalRender::createAccelerationStructures()
         emitted.sceneInstanceId = (uint32_t)i;
         emitted.asIndex = (uint32_t)it->second;
         emitted.userID = curr.mLightId; // lights address the light table, not geometry
-        emitted.mask = GEOMETRY_MASK_LIGHT;
+        // Point/spot proxies exist for picking and the gizmo; they are not
+        // emissive surfaces. Putting them on the light mask would treat their
+        // radiant intensity as radiance and blow out the frame.
+        const int lightType =
+            curr.mLightId < mScene->getLightsDesc().size() ? mScene->getLightsDesc()[curr.mLightId].type : -1;
+        const bool enabled =
+            curr.mLightId < mScene->getLightsDesc().size() ? mScene->getLightsDesc()[curr.mLightId].enabled : true;
+        if (!enabled)
+            emitted.mask = 0;
+        else if (lightType == LIGHT_TYPE_POINT || lightType == LIGHT_TYPE_SPOT)
+            emitted.mask = GEOMETRY_MASK_GEOMETRY;
+        else
+            emitted.mask = GEOMETRY_MASK_LIGHT;
         mEmittedInstances.push_back(emitted);
     }
 

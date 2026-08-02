@@ -5,6 +5,7 @@
 #include <light_types.h>
 
 #include <cstdint>
+#include <cmath>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -220,35 +221,66 @@ public:
     struct Light
     {
         glm::float4 points[4]{};
+        // Area / distant: radiance. Point / spot: radiant intensity (shader / r²).
         glm::float4 color = glm::float4(1.0f);
         glm::float4 normal{ 0.0f };
         int type = -1;
+        // Distant: angular half-width (rad). Spot: outer cone angle (rad).
         float halfAngle = 0.0f;
+        // Spot: inner cone angle (rad). Point: soft radius (0 = sharp).
         float pad0 = 0.0f;
+        // Attenuation range in world units; 0 = infinite (KHR_lights_punctual).
         float pad1 = 0.0f;
     };
 
     // CPU side structure
     struct UniformLightDesc
     {
-        int32_t type;
+        int32_t type = LIGHT_TYPE_RECT;
         glm::float4x4 xform{ 1.0 };
-        glm::float3 position; // world position
-        glm::float3 orientation; // euler angles in degrees
-        bool useXform;
+        glm::float3 position{ 0.0f }; // world position
+        glm::float3 orientation{ 0.0f }; // euler angles in degrees
+        bool useXform = false;
+        bool enabled = true;
+        std::string name;
 
-        // OX - axis of light or normal
-        glm::float3 color;
-        float intensity;
+        glm::float3 color{ 1.0f };
+        float intensity = 1.0f;
+        // How `intensity` is interpreted; see LightIntensityUnit. Default keeps
+        // the historical colour×intensity = radiance (or legacy intensity) path.
+        int32_t intensityUnit = LIGHT_UNIT_RADIANCE;
 
         // rectangle light
-        float width; // OY
-        float height; // OZ
+        float width = 1.0f;
+        float height = 1.0f;
 
-        // disc/sphere light
-        float radius;
-        // distant light
-        float halfAngle; 
+        // disc / sphere / soft point
+        float radius = 0.0f;
+        // distant: half-angle in radians. spot: unused here (see cone angles).
+        float halfAngle = 0.0f;
+
+        // Spot cone, radians. Defaults match KHR_lights_punctual (π/4 outer,
+        // 0 inner = hard edge). Emission along local -Z, like every other light.
+        float innerConeAngle = 0.0f;
+        float outerConeAngle = float(M_PI) / 4.0f;
+
+        // KHR range; 0 = infinite. Applied as a smooth window for point/spot.
+        float range = 0.0f;
+
+        // Optional IES profile path (resolved relative to the scene). Empty =
+        // isotropic. Indexed into Scene::mIesProfiles at bake time.
+        std::string iesPath;
+        int32_t iesProfile = -1;
+    };
+
+    // Candela table from an IESNA LM-63 file. Sampled on the GPU by (θ, φ).
+    struct IesProfile
+    {
+        std::string path;
+        std::vector<float> verticalAngles; // degrees
+        std::vector<float> horizontalAngles; // degrees
+        std::vector<float> candela; // row-major: v + h * nVertical
+        float maxCandela = 0.0f;
     };
 
     std::vector<UniformLightDesc> mLightDesc;
@@ -288,6 +320,7 @@ public:
     std::vector<Curve> mCurves;
     std::vector<Instance> mInstances;
     std::vector<Light> mLights;
+    std::vector<IesProfile> mIesProfiles;
 
     std::vector<uint32_t> mTransparentInstances;
     std::vector<uint32_t> mOpaqueInstances;
@@ -506,9 +539,13 @@ public:
         {
             scale = glm::float3(desc.width, desc.height, 1.0f);
         }
-        else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPHERE)
+        else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPHERE ||
+                 desc.type == LIGHT_TYPE_POINT || desc.type == LIGHT_TYPE_SPOT)
         {
-            scale = glm::float3(desc.radius);
+            // Point/spot use radius as a viewport proxy (and soft size); a zero
+            // radius still needs a unit scale so the orientation is not lost.
+            const float r = desc.radius > 0.0f ? desc.radius : 1.0f;
+            scale = glm::float3(r);
         }
         const glm::float4x4 scaleMatrix = glm::scale(glm::float4x4(1.0f), scale);
 
@@ -581,6 +618,11 @@ public:
     void setLight(uint32_t lightId, const UniformLightDesc& desc);
     /// Legacy: bakes GPU light from desc without writing mLightDesc (prefer setLight).
     void updateLight(uint32_t lightId, const UniformLightDesc& desc);
+    int32_t addIesProfile(IesProfile profile);
+    const std::vector<IesProfile>& getIesProfiles() const
+    {
+        return mIesProfiles;
+    }
 
     uint32_t getLightInstanceId(uint32_t lightId) const
     {

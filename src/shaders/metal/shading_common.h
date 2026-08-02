@@ -442,14 +442,37 @@ LightConnection connectLight(
     case 3:
         lightSampleData = SampleDistantLight(light, uv, si.position);
         break;
+    case 5: // point
+    case 6: // spot
+        lightSampleData = SamplePointLight(light, uv, si.position);
+        break;
     }
 
     LightConnection c = makeEmptyConnection();
     c.toLight = lightSampleData.L;
 
-    const float3 Li = float3(light.color);
-    if (dot(si.shading_normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.001f &&
-        emitsLight(Li))
+    float3 Li = float3(light.color);
+    // Point/spot colour is radiant intensity: convert to irradiance on the
+    // surface by the inverse-square law. Soft points sampled as spheres still
+    // carry intensity, so divide by the distance to the sampled point.
+    if (light.type == 5 || light.type == 6)
+    {
+        const float dist = max(lightSampleData.distToLight, 1e-4f);
+        Li *= rangeWindow(light, dist) / (dist * dist);
+        if (light.type == 6)
+        {
+            Li *= spotAttenuation(light, -lightSampleData.L);
+        }
+    }
+
+    // For area lights the facing test uses the light's surface normal; for a
+    // sharp point the "normal" is -L, so -dot(L, normal) = 1 always.
+    const bool facing =
+        (light.type == 5 || light.type == 6)
+            ? (dot(si.shading_normal, lightSampleData.L) > 0.0f && emitsLight(Li))
+            : (dot(si.shading_normal, lightSampleData.L) > 0.0f &&
+               -dot(lightSampleData.L, lightSampleData.normal) > 0.001f && emitsLight(Li));
+    if (facing)
     {
         // The cosine belongs here because bsdf_eval() returns f alone, unlike
         // bsdf_sample()'s bsdf_over_pdf which already carries it. See the note on

@@ -70,13 +70,29 @@ static __device__ float3 sampleLight(SamplerState& sampler,
     case LIGHT_TYPE_DISTANT:
         lightSampleData = SampleDistantLight(light, uv, si.position);
         break;
+    case LIGHT_TYPE_POINT:
+    case LIGHT_TYPE_SPOT:
+        lightSampleData = SamplePointLight(light, uv, si.position);
+        break;
     }
 
     toLight = lightSampleData.L;
     float3 Li = make_float3(light.color);
+    if (light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT)
+    {
+        const float dist = fmaxf(lightSampleData.distToLight, 1e-4f);
+        Li *= rangeWindow(light, dist) / (dist * dist);
+        if (light.type == LIGHT_TYPE_SPOT)
+        {
+            Li *= spotAttenuation(light, -lightSampleData.L);
+        }
+    }
 
-    if (dot(si.shading_normal, lightSampleData.L) > 0.0f && -dot(lightSampleData.L, lightSampleData.normal) > 0.0 &&
-        emitsLight(Li))
+    const bool facing = (light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT)
+                            ? (dot(si.shading_normal, lightSampleData.L) > 0.0f && emitsLight(Li))
+                            : (dot(si.shading_normal, lightSampleData.L) > 0.0f &&
+                               -dot(lightSampleData.L, lightSampleData.normal) > 0.0f && emitsLight(Li));
+    if (facing)
     {
         const bool occluded =
             traceOcclusion(params.handle, offset_ray(si.position, si.geometry_normal), lightSampleData.L,

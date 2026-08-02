@@ -340,6 +340,8 @@ struct TriangleUpdateParams
 };
 
 // GPU side structure
+// pad0: spot inner cone (rad) or point soft radius.
+// pad1: KHR attenuation range (0 = infinite).
 struct UniformLight
 {
     vector_float4 points[4];

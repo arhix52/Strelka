@@ -256,6 +256,11 @@ static __inline__ __device__ float getLightPdf(const UniformLight& l,
         return getSphereLightPdf();
     case LIGHT_TYPE_DISTANT:
         return getDirectLightPdf(l.halfAngle);
+    case LIGHT_TYPE_POINT:
+    case LIGHT_TYPE_SPOT:
+        if (l.points[0].x > 1e-4f)
+            return getSphereLightPdf();
+        return 1.0f;
     default:
         break;
     }
@@ -406,4 +411,47 @@ static __inline__ __device__ LightSampleData SampleSphereLight(const UniformLigh
     lightSampleData.pointOnLight = lightPoint;
 
     return lightSampleData;
+}
+
+static __inline__ __device__ LightSampleData SamplePointLight(const UniformLight& l, const float2 u, const float3 hitPoint)
+{
+    const float radius = l.points[0].x;
+    if (radius > 1e-4f)
+    {
+        return SampleSphereLight(l, u, hitPoint);
+    }
+
+    LightSampleData lightSampleData;
+    const float3 center = make_float3(l.points[1]);
+    const float3 toLight = center - hitPoint;
+    const float dist = length(toLight);
+    lightSampleData.pointOnLight = center;
+    lightSampleData.L = toLight / fmaxf(dist, 1e-8f);
+    lightSampleData.distToLight = dist;
+    lightSampleData.normal = -lightSampleData.L;
+    lightSampleData.area = 0.0f;
+    lightSampleData.pdf = 1.0f;
+    return lightSampleData;
+}
+
+static __inline__ __device__ float spotAttenuation(const UniformLight& l, const float3 dirFromLight)
+{
+    const float3 axis = normalize(make_float3(l.normal));
+    const float cosOuter = cosf(l.halfAngle);
+    const float cosInner = cosf(l.pad0);
+    const float cosTheta = dot(axis, dirFromLight);
+    if (cosTheta < cosOuter)
+        return 0.0f;
+    if (cosInner <= cosOuter)
+        return 1.0f;
+    return saturate((cosTheta - cosOuter) / (cosInner - cosOuter));
+}
+
+static __inline__ __device__ float rangeWindow(const UniformLight& l, float dist)
+{
+    if (l.pad1 <= 0.0f)
+        return 1.0f;
+    const float x = saturate(dist / l.pad1);
+    const float y = 1.0f - x * x * x * x;
+    return y * y;
 }

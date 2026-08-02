@@ -1,5 +1,6 @@
 #include <strelka/scene/scene.h>
 #include <strelka/scene/vertex_packing.h>
+#include <strelka/scene/light_desc.h>
 
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -734,31 +735,42 @@ uint32_t Scene::createLight(const UniformLightDesc& desc)
 
     updateLight(lightId, desc);
 
-    // TODO: only for rect light
-    // Lazy init light mesh
-    glm::float4x4 scaleMatrix = glm::float4x4(0.f);
+    // Lazy init light mesh. Distant lights have none; point/spot get a small
+    // proxy so the outliner and the gizmo still have something to select.
+    glm::float4x4 scaleMatrix = glm::float4x4(1.0f);
     uint32_t currentLightMeshId = 0;
-    if (desc.type == 0)
+    if (desc.type == LIGHT_TYPE_RECT)
     {
         mRectLightMeshId = createRectLightMesh();
         currentLightMeshId = mRectLightMeshId;
         scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.width, desc.height, 1.0f));
     }
-    else if (desc.type == 1)
+    else if (desc.type == LIGHT_TYPE_DISC)
     {
         mDiskLightMeshId = createDiscLightMesh();
         currentLightMeshId = mDiskLightMeshId;
         scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.radius, desc.radius, desc.radius));
     }
-    else if (desc.type == 2)
+    else if (desc.type == LIGHT_TYPE_SPHERE || desc.type == LIGHT_TYPE_POINT)
     {
         mSphereLightMeshId = createSphereLightMesh();
         currentLightMeshId = mSphereLightMeshId;
-        scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.radius, desc.radius, desc.radius));
+        const float r = desc.radius > 1e-4f ? desc.radius : 0.05f;
+        scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(r));
     }
-    else if (desc.type == 3)
+    else if (desc.type == LIGHT_TYPE_SPOT)
     {
-        // distant light has no mesh so skip
+        mDiskLightMeshId = createDiscLightMesh();
+        currentLightMeshId = mDiskLightMeshId;
+        const float r = desc.radius > 1e-4f ? desc.radius : 0.05f;
+        scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(r));
+    }
+    else if (desc.type == LIGHT_TYPE_DISTANT)
+    {
+        return lightId;
+    }
+    else
+    {
         return lightId;
     }
 
@@ -773,10 +785,8 @@ uint32_t Scene::createLight(const UniformLightDesc& desc)
 
 void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
 {
-    const float intensityPerPoint = desc.intensity; // light intensity
     // transform to GPU light
-    // Rect Light
-    if (desc.type == 0)
+    if (desc.type == LIGHT_TYPE_RECT)
     {
         const glm::float4x4 scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.width, desc.height, 1.0f));
         const glm::float4x4 localTransform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
@@ -787,50 +797,86 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].points[3] = localTransform * glm::float4(0.5f, -0.5f, 0.0f, 1.0f);
 
         mLights[lightId].type = LIGHT_TYPE_RECT;
+        mLights[lightId].halfAngle = 0.0f;
+        mLights[lightId].pad0 = 0.0f;
+        mLights[lightId].pad1 = 0.0f;
     }
     else if (desc.type == LIGHT_TYPE_DISC)
     {
-        // Disk Light
         const glm::float4x4 scaleMatrix =
             glm::scale(glm::float4x4(1.0f), glm::float3(desc.radius, desc.radius, desc.radius));
         const glm::float4x4 localTransform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
 
-        mLights[lightId].points[0] = glm::float4(desc.radius, 0.f, 0.f, 0.f); // save radius
-        mLights[lightId].points[1] = localTransform * glm::float4(0.f, 0.f, 0.f, 1.f); // save O
-        mLights[lightId].points[2] = localTransform * glm::float4(1.f, 0.f, 0.f, 0.f); // OXws
-        mLights[lightId].points[3] = localTransform * glm::float4(0.f, 1.f, 0.f, 0.f); // OYws
+        mLights[lightId].points[0] = glm::float4(desc.radius, 0.f, 0.f, 0.f);
+        mLights[lightId].points[1] = localTransform * glm::float4(0.f, 0.f, 0.f, 1.f);
+        mLights[lightId].points[2] = localTransform * glm::float4(1.f, 0.f, 0.f, 0.f);
+        mLights[lightId].points[3] = localTransform * glm::float4(0.f, 1.f, 0.f, 0.f);
 
         // Emission along -Z, like the rect light (whose normal comes out as the
-        // negated edge cross product) and the distant light. Pointing a disc along
-        // +Z faced it away from whatever its orientation was aimed at, so it lit
-        // nothing and was invisible from the side it was supposed to illuminate.
-        // Normalized because localTransform scales by the radius.
+        // negated edge cross product) and the distant light.
         mLights[lightId].normal = glm::normalize(localTransform * glm::float4(0.0f, 0.0f, -1.0f, 0.0f));
         mLights[lightId].type = LIGHT_TYPE_DISC;
+        mLights[lightId].halfAngle = 0.0f;
+        mLights[lightId].pad0 = 0.0f;
+        mLights[lightId].pad1 = 0.0f;
     }
     else if (desc.type == LIGHT_TYPE_SPHERE)
     {
-        // Sphere Light
-        const glm::float4x4 scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(1.0f, 1.0f, 1.0f));
-        const glm::float4x4 localTransform = desc.useXform ? scaleMatrix * desc.xform : getTransform(desc);
+        const glm::float4x4 localTransform = desc.useXform ? desc.xform : getTransform(desc);
 
-        mLights[lightId].points[0] = glm::float4(desc.radius, 0.f, 0.f, 0.f); // save radius
-        mLights[lightId].points[1] = localTransform * glm::float4(0.f, 0.f, 0.f, 1.f); // save O
+        mLights[lightId].points[0] = glm::float4(desc.radius, 0.f, 0.f, 0.f);
+        mLights[lightId].points[1] = localTransform * glm::float4(0.f, 0.f, 0.f, 1.f);
 
         mLights[lightId].type = LIGHT_TYPE_SPHERE;
+        mLights[lightId].halfAngle = 0.0f;
+        mLights[lightId].pad0 = 0.0f;
+        mLights[lightId].pad1 = 0.0f;
+    }
+    else if (desc.type == LIGHT_TYPE_POINT || desc.type == LIGHT_TYPE_SPOT)
+    {
+        const glm::float4x4 localTransform = desc.useXform ? desc.xform : getTransform(desc);
+        mLights[lightId].points[0] = glm::float4(desc.radius, (float)desc.iesProfile, 0.f, 0.f);
+        mLights[lightId].points[1] = localTransform * glm::float4(0.f, 0.f, 0.f, 1.f);
+        // Local axes so an IES profile can be evaluated in light space.
+        mLights[lightId].points[2] = localTransform * glm::float4(1.f, 0.f, 0.f, 0.f);
+        mLights[lightId].points[3] = localTransform * glm::float4(0.f, 1.f, 0.f, 0.f);
+        mLights[lightId].normal = glm::normalize(localTransform * glm::float4(0.0f, 0.0f, -1.0f, 0.0f));
+        mLights[lightId].type = desc.type;
+        mLights[lightId].halfAngle = desc.type == LIGHT_TYPE_SPOT ? desc.outerConeAngle : 0.0f;
+        mLights[lightId].pad0 = desc.type == LIGHT_TYPE_SPOT ? desc.innerConeAngle : desc.radius;
+        mLights[lightId].pad1 = desc.range;
     }
     else if (desc.type == LIGHT_TYPE_DISTANT)
     {
-        // distant light https://openusd.org/release/api/class_usd_lux_distant_light.html
         mLights[lightId].type = LIGHT_TYPE_DISTANT;
         mLights[lightId].halfAngle = desc.halfAngle;
-        const glm::float4x4 scaleMatrix = glm::float4x4(1.0f);
-        const glm::float4x4 localTransform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
-        mLights[lightId].normal = glm::normalize(localTransform * glm::float4(0.0f, 0.0f, -1.0f, 0.0f)); // -Z
+        mLights[lightId].pad0 = 0.0f;
+        mLights[lightId].pad1 = 0.0f;
+        const glm::float4x4 localTransform = desc.useXform ? desc.xform : getTransform(desc);
+        mLights[lightId].normal = glm::normalize(localTransform * glm::float4(0.0f, 0.0f, -1.0f, 0.0f));
     }
 
-    mLights[lightId].color = glm::float4(desc.color, 1.0f) * intensityPerPoint;
+    const glm::float3 radiometric =
+        desc.enabled ? bakeLightRadiometric(desc.type, desc.intensityUnit, desc.color, desc.intensity, desc.width,
+                                            desc.height, desc.radius, desc.halfAngle, desc.outerConeAngle)
+                     : glm::float3(0.0f);
+    mLights[lightId].color = glm::float4(radiometric, 1.0f);
     markChanged(ChangeBits::Lights);
+}
+
+int32_t Scene::addIesProfile(IesProfile profile)
+{
+    // Reuse an already-loaded path so toggling the same file in the UI does not
+    // grow the table without bound.
+    for (int32_t i = 0; i < (int32_t)mIesProfiles.size(); ++i)
+    {
+        if (mIesProfiles[(size_t)i].path == profile.path)
+        {
+            return i;
+        }
+    }
+    mIesProfiles.push_back(std::move(profile));
+    return (int32_t)mIesProfiles.size() - 1;
 }
 
 void Scene::setLight(const uint32_t lightId, const UniformLightDesc& desc)
@@ -847,6 +893,11 @@ void Scene::setLight(const uint32_t lightId, const UniformLightDesc& desc)
             scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.width, desc.height, 1.0f));
         else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPHERE)
             scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.radius, desc.radius, desc.radius));
+        else if (desc.type == LIGHT_TYPE_POINT || desc.type == LIGHT_TYPE_SPOT)
+        {
+            const float r = desc.radius > 1e-4f ? desc.radius : 0.05f;
+            scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(r));
+        }
 
         const glm::float4x4 transform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
         updateInstanceTransform(it->second, transform);

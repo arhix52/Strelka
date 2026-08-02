@@ -115,17 +115,19 @@ def blender_light_to_strelka(obj):
         "orientation": orientation,
         "color": [light.color.r, light.color.g, light.color.b],
         "intensity": light.energy,
+        "enabled": obj.visible_get() if hasattr(obj, "visible_get") else True,
+        "name": obj.name,
     }
 
     if light.type == "AREA":
-        # Map Blender area lights → Strelka rect or disc
+        # Blender area lights use Power (W).
+        base["unit"] = "power"
         if light.shape in ("RECTANGLE", "SQUARE"):
             base["width"] = light.size
             base["height"] = light.size_y if light.shape == "RECTANGLE" else light.size
             base["type"] = "rect"
         elif light.shape in ("DISK", "ELLIPSE"):
-            base["width"] = light.size
-            base["height"] = light.size_y if light.shape == "ELLIPSE" else light.size
+            base["radius"] = 0.5 * light.size
             base["type"] = "disc"
         else:
             base["width"] = light.size
@@ -133,28 +135,31 @@ def blender_light_to_strelka(obj):
             base["type"] = "rect"
 
     elif light.type == "POINT":
-        base["width"] = light.shadow_soft_size  # radius
-        base["height"] = light.shadow_soft_size
-        base["type"] = "sphere"
+        base["type"] = "point"
+        base["unit"] = "power"
+        base["radius"] = light.shadow_soft_size
 
     elif light.type == "SUN":
-        # Distant / directional light
-        base["width"] = 0.0
-        base["height"] = 0.0
-        base["halfAngle"] = math.radians(light.angle * 0.5) if hasattr(light, "angle") else 0.0
+        # Distant / directional light. halfAngle is full angular diameter in degrees.
         base["type"] = "distant"
+        base["unit"] = "irradiance"
+        base["halfAngle"] = math.degrees(light.angle) if hasattr(light, "angle") else 0.53
 
     elif light.type == "SPOT":
-        # Approximate spot as a small disc light
-        base["width"] = light.shadow_soft_size
-        base["height"] = light.shadow_soft_size
-        base["type"] = "disc"
+        base["type"] = "spot"
+        base["unit"] = "power"
+        base["radius"] = light.shadow_soft_size
+        # Blender spot_size is the outer cone full angle; blend softens the penumbra.
+        outer = light.spot_size * 0.5
+        blend = getattr(light, "spot_blend", 0.15)
+        base["outerConeAngle"] = math.degrees(outer)
+        base["innerConeAngle"] = math.degrees(outer * (1.0 - blend))
 
     else:
-        # Fallback: treat as rect
         base["width"] = 1.0
         base["height"] = 1.0
         base["type"] = "rect"
+        base["unit"] = "power"
 
     return base
 

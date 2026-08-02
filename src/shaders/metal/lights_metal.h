@@ -360,6 +360,56 @@ static __inline__ LightSampleData SampleSphereLight(device const UniformLight& l
     return lightSampleData; 
 }
 
+// Point and spot lights store radiant intensity in colour. The contribution is
+// I / r²; the inverse-square is applied in connectLight, not here. Soft radius
+// (points[0].x > 0) falls back to sphere sampling so the light has a visible size.
+static __inline__ LightSampleData SamplePointLight(device const UniformLight& l, const float2 u, const float3 hitPoint)
+{
+    const float radius = l.points[0].x;
+    if (radius > 1e-4f)
+    {
+        return SampleSphereLight(l, u, hitPoint);
+    }
+
+    LightSampleData lightSampleData;
+    const float3 center = float3(l.points[1]);
+    const float3 toLight = center - hitPoint;
+    const float dist = length(toLight);
+    lightSampleData.pointOnLight = center;
+    lightSampleData.L = toLight / max(dist, 1e-8f);
+    lightSampleData.distToLight = dist;
+    lightSampleData.normal = -lightSampleData.L;
+    lightSampleData.area = 0.0f;
+    // Delta light: the BSDF never hits it, so the NEE pdf is 1 in the measure
+    // connectLight divides by.
+    lightSampleData.pdf = 1.0f;
+    return lightSampleData;
+}
+
+static __inline__ float spotAttenuation(device const UniformLight& l, const float3 dirFromLight)
+{
+    // halfAngle = outer, pad0 = inner. Smoothstep between the two cosines.
+    const float3 axis = normalize(float3(l.normal));
+    const float cosOuter = cos(l.halfAngle);
+    const float cosInner = cos(l.pad0);
+    const float cosTheta = dot(axis, dirFromLight);
+    if (cosTheta < cosOuter)
+        return 0.0f;
+    if (cosInner <= cosOuter)
+        return 1.0f;
+    return saturate((cosTheta - cosOuter) / (cosInner - cosOuter));
+}
+
+static __inline__ float rangeWindow(device const UniformLight& l, float dist)
+{
+    // KHR_lights_punctual range window: 1 at d=0, 0 at d=range.
+    if (l.pad1 <= 0.0f)
+        return 1.0f;
+    const float x = saturate(dist / l.pad1);
+    const float y = 1.0f - x * x * x * x;
+    return y * y;
+}
+
 static __inline__ float getLightPdf(device const UniformLight& l, const float3 lightHitPoint, const float3 surfaceHitPoint)
 {
     switch (l.type)
@@ -380,6 +430,11 @@ static __inline__ float getLightPdf(device const UniformLight& l, const float3 l
         // Distant
         return getDirectLightPdf(l.halfAngle);
         break;
+    case 5: // point
+    case 6: // spot
+        if (l.points[0].x > 1e-4f)
+            return getSphereLightPdf();
+        return 1.0f;
     default:
         break;
     }

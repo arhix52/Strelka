@@ -87,7 +87,7 @@ TEST_CASE("intensity and colour end up multiplied into the GPU light")
 
     desc.intensity = 0.0f;
     scene.setLight(id, desc);
-    CHECK(scene.getLights()[id].color == glm::float4(0.0f));
+    CHECK(glm::float3(scene.getLights()[id].color) == glm::float3(0.0f));
     CHECK(any(scene.peekChanges() & ChangeBits::Lights));
 }
 

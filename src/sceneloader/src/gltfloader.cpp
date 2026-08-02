@@ -1,7 +1,10 @@
 #include <strelka/sceneloader/gltfloader.h>
+#include <strelka/sceneloader/sceneserializer.h>
+#include <strelka/sceneloader/light_json.h>
 
 #include <strelka/scene/camera.h>
 #include <strelka/scene/vertex_packing.h>
+#include <strelka/scene/light_desc.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -728,70 +731,6 @@ void loadSkeletalData(const tinygltf::Model& model, oka::Scene& scene, const flo
 }
 
 
-oka::Scene::UniformLightDesc parseFromJson(const json& light)
-{
-    oka::Scene::UniformLightDesc desc{};
-    desc.useXform = false;
-
-    // Determine light type
-    std::string typeStr = "rect";
-    if (light.contains("type"))
-        typeStr = light["type"].get<std::string>();
-
-    if (light.contains("orientation"))
-    {
-        const auto& o = light["orientation"];
-        desc.orientation = glm::float3(o[0], o[1], o[2]);
-    }
-    if (light.contains("color"))
-    {
-        const auto& c = light["color"];
-        desc.color = glm::float3(c[0], c[1], c[2]);
-    }
-    if (light.contains("intensity"))
-        desc.intensity = light["intensity"].get<float>();
-
-    if (typeStr == "distant")
-    {
-        desc.type = LIGHT_TYPE_DISTANT;
-        desc.halfAngle = light.value("halfAngle", 0.53f) * 0.5f * (M_PI / 180.0f);
-    }
-    else if (typeStr == "sphere")
-    {
-        desc.type = LIGHT_TYPE_SPHERE;
-        if (light.contains("position"))
-        {
-            const auto& p = light["position"];
-            desc.position = glm::float3(p[0], p[1], p[2]);
-        }
-        desc.radius = light.value("radius", 0.1f);
-    }
-    else if (typeStr == "disc")
-    {
-        desc.type = LIGHT_TYPE_DISC;
-        if (light.contains("position"))
-        {
-            const auto& p = light["position"];
-            desc.position = glm::float3(p[0], p[1], p[2]);
-        }
-        desc.radius = light.value("radius", 0.5f);
-    }
-    else
-    {
-        // Default: rect light
-        desc.type = LIGHT_TYPE_RECT;
-        if (light.contains("position"))
-        {
-            const auto& p = light["position"];
-            desc.position = glm::float3(p[0], p[1], p[2]);
-        }
-        desc.width = light.value("width", 1.0f);
-        desc.height = light.value("height", 1.0f);
-    }
-
-    return desc;
-}
-
 bool loadLightsFromJson(const std::string& modelPath, oka::Scene& scene)
 {
     // First try exact match: <modelname>_light.json
@@ -817,40 +756,109 @@ bool loadLightsFromJson(const std::string& modelPath, oka::Scene& scene)
         }
     }
 
-    if (!jsonPath.empty() && fs::exists(jsonPath))
+    if (jsonPath.empty() || !fs::exists(jsonPath))
+        return false;
+
+    STRELKA_INFO("Found light file: {}", jsonPath);
+    return loadLightsJson(scene, jsonPath);
+}
+
+// KHR_lights_punctual: lights live in root extensions and are referenced from
+// nodes. Intensity is candela for point/spot and lux for directional.
+bool loadPunctualLights(const tinygltf::Model& model, oka::Scene& scene)
+{
+    const auto rootIt = model.extensions.find("KHR_lights_punctual");
+    if (rootIt == model.extensions.end() || !rootIt->second.IsObject())
+        return false;
+    const tinygltf::Value& rootExt = rootIt->second;
+    if (!rootExt.Has("lights") || !rootExt.Get("lights").IsArray())
+        return false;
+    const tinygltf::Value& lightsArr = rootExt.Get("lights");
+    if (lightsArr.ArrayLen() == 0)
+        return false;
+
+    auto readVec3 = [](const tinygltf::Value& v, glm::float3 fallback) {
+        if (!v.IsArray() || v.ArrayLen() < 3)
+            return fallback;
+        return glm::float3((float)v.Get(0).GetNumberAsDouble(), (float)v.Get(1).GetNumberAsDouble(),
+                           (float)v.Get(2).GetNumberAsDouble());
+    };
+
+    uint32_t created = 0;
+    for (size_t nodeIdx = 0; nodeIdx < model.nodes.size(); ++nodeIdx)
     {
-        STRELKA_INFO("Found light file: {}", jsonPath);
-        std::ifstream i(jsonPath);
-        json light;
-        i >> light;
+        const tinygltf::Node& node = model.nodes[nodeIdx];
+        const auto lightIt = node.extensions.find("KHR_lights_punctual");
+        if (lightIt == node.extensions.end() || !lightIt->second.Has("light"))
+            continue;
+        const int lightIndex = lightIt->second.Get("light").GetNumberAsInt();
+        if (lightIndex < 0 || lightIndex >= (int)lightsArr.ArrayLen())
+            continue;
+        const tinygltf::Value& L = lightsArr.Get(lightIndex);
+        if (!L.IsObject())
+            continue;
 
-        for (const auto& light : light["lights"])
+        Scene::UniformLightDesc desc{};
+        desc.enabled = true;
+        desc.name = L.Has("name") ? L.Get("name").Get<std::string>() : node.name;
+        desc.color = L.Has("color") ? readVec3(L.Get("color"), glm::float3(1.0f)) : glm::float3(1.0f);
+        desc.intensity = L.Has("intensity") ? (float)L.Get("intensity").GetNumberAsDouble() : 1.0f;
+        desc.range = L.Has("range") ? (float)L.Get("range").GetNumberAsDouble() : 0.0f;
+
+        const std::string type = L.Has("type") ? L.Get("type").Get<std::string>() : "point";
+        if (type == "directional")
         {
-            Scene::UniformLightDesc desc = parseFromJson(light);
-            scene.createLight(desc);
+            desc.type = LIGHT_TYPE_DISTANT;
+            desc.intensityUnit = LIGHT_UNIT_IRRADIANCE;
+            // glTF has no sun angular size; use a small disk so soft shadows work.
+            desc.halfAngle = 0.53f * 0.5f * (float(M_PI) / 180.0f);
         }
-
-        // Parse environment map (dome light)
-        if (light.contains("environment"))
+        else if (type == "spot")
         {
-            const auto& env = light["environment"];
-            Scene::EnvLightDesc envDesc{};
-            if (env.contains("texture"))
-                envDesc.texturePath = env["texture"].get<std::string>();
-            if (env.contains("intensity"))
-                envDesc.intensity = env["intensity"].get<float>();
-            if (env.contains("color"))
+            desc.type = LIGHT_TYPE_SPOT;
+            desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+            float inner = 0.0f;
+            float outer = float(M_PI) / 4.0f;
+            if (L.Has("spot") && L.Get("spot").IsObject())
             {
-                const auto& c = env["color"];
-                envDesc.color = glm::float3(c[0].get<float>(), c[1].get<float>(), c[2].get<float>());
+                const tinygltf::Value& spot = L.Get("spot");
+                if (spot.Has("innerConeAngle"))
+                    inner = (float)spot.Get("innerConeAngle").GetNumberAsDouble();
+                if (spot.Has("outerConeAngle"))
+                    outer = (float)spot.Get("outerConeAngle").GetNumberAsDouble();
             }
-            if (env.contains("rotation"))
-                envDesc.rotationY = env["rotation"].get<float>();
-            scene.setEnvLight(envDesc);
+            desc.innerConeAngle = inner;
+            desc.outerConeAngle = outer;
         }
-        return true;
+        else
+        {
+            desc.type = LIGHT_TYPE_POINT;
+            desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+        }
+
+        // Node world transform → position + orientation. Prefer the already
+        // computed scene global transform when the node was ingested.
+        if (nodeIdx < scene.getGlobalTransforms().size())
+        {
+            glm::float3 T, S;
+            glm::quat R;
+            decomposeTrs(scene.getGlobalTransforms()[nodeIdx], T, R, S);
+            desc.position = T;
+            desc.orientation = glm::degrees(glm::eulerAngles(R));
+        }
+        else
+        {
+            desc.useXform = true;
+            desc.xform = getTransform(node, 1.0f);
+        }
+
+        scene.createLight(desc);
+        ++created;
     }
-    return false;
+
+    if (created > 0)
+        STRELKA_INFO("Loaded {} KHR_lights_punctual light(s)", created);
+    return created > 0;
 }
 
 void loadCamerasFromJson(const std::string& modelPath, oka::Scene& scene)
@@ -971,21 +979,7 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     int sceneId = model.defaultScene;
 
     loadMaterials(model, scene);
-    if (loadLightsFromJson(modelPath, scene) == false)
-    {
-        STRELKA_WARNING("No light in scene, adding default distant light");
-        oka::Scene::UniformLightDesc lightDesc {};
-        // lightDesc.xform = glm::mat4(1.0f);
-        // lightDesc.useXform = true;
-        lightDesc.useXform = false;
-        lightDesc.position = glm::float3(0.0f, 0.0f, 0.0f);
-        lightDesc.orientation = glm::float3(-45.0f, 15.0f, 0.0f);
-        lightDesc.type = LIGHT_TYPE_DISTANT;
-        lightDesc.halfAngle = 10.0f * 0.5f * (M_PI / 180.0f);
-        lightDesc.intensity = 100000;
-        lightDesc.color = glm::float3(1.0);
-        scene.createLight(lightDesc);
-    }
+    const bool hadJsonLights = loadLightsFromJson(modelPath, scene);
 
     loadCameras(model, scene);
     loadCamerasFromJson(modelPath, scene);
@@ -999,6 +993,21 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     {
         const int rootNodeIdx = model.scenes[sceneId].nodes[i];
         processNode(model, scene, model.nodes[rootNodeIdx], rootNodeIdx, glm::float4x4(1.0f), globalScale);
+    }
+
+    // Punctual lights need node world transforms, so they land after the graph.
+    if (!hadJsonLights && !loadPunctualLights(model, scene))
+    {
+        STRELKA_WARNING("No light in scene, adding default distant light");
+        oka::Scene::UniformLightDesc lightDesc{};
+        lightDesc.useXform = false;
+        lightDesc.position = glm::float3(0.0f, 0.0f, 0.0f);
+        lightDesc.orientation = glm::float3(-45.0f, 15.0f, 0.0f);
+        lightDesc.type = LIGHT_TYPE_DISTANT;
+        lightDesc.halfAngle = 10.0f * 0.5f * (float(M_PI) / 180.0f);
+        lightDesc.intensity = 100000;
+        lightDesc.color = glm::float3(1.0);
+        scene.createLight(lightDesc);
     }
 
     loadAnimation(model, scene);
