@@ -159,6 +159,39 @@ def export_gltf(path):
     bpy.ops.export_scene.gltf(**kwargs)
 
 
+def force_render_geometry():
+    """Make the viewport evaluate what the render would.
+
+    The instance placements are read from the render depsgraph, but the *meshes*
+    come from the glTF exporter, which uses the viewport one. In a scene that
+    branches on Is Viewport that mismatch puts render-accurate transforms on
+    proxy geometry: the pine forest came back with thin bare sticks leaning
+    across the frame where the reference has fir trees, which looks like a
+    transform bug and is not one.
+
+    Cutting the Is Viewport links and pinning what they fed to False collapses
+    the distinction, so both halves of the export see the same scene.
+    """
+    cut = 0
+    for group in bpy.data.node_groups:
+        for node in list(group.nodes):
+            if node.type != "IS_VIEWPORT":
+                continue
+            for output in node.outputs:
+                for link in list(output.links):
+                    socket = link.to_socket
+                    group.links.remove(link)
+                    try:
+                        socket.default_value = False
+                    except (TypeError, ValueError, AttributeError):
+                        pass
+                    cut += 1
+    if cut:
+        bpy.context.view_layer.update()
+        print("forced render geometry: %d Is Viewport links cut" % cut)
+    return cut
+
+
 def collect_instances(depsgraph):
     """Every geometry-nodes / particle instance, as (source object, world matrix).
 
@@ -186,10 +219,23 @@ def collect_instances(depsgraph):
         # ground litter with nothing standing in it.
         if it.object.type != "MESH":
             continue
+        # Keyed on the mesh data, not the object.
+        #
+        # The depsgraph flattens nested instancing, and every branch of a
+        # scattered tree reports the *tree* as its original -- so keying on the
+        # object drew a whole 25 m fir at each of its own branches, 806 of them
+        # stacked within 14 m of the camera. That is what the trunks leaning
+        # across the frame were. The mesh data names the geometry the instance
+        # actually holds, and the exporter writes glTF meshes under those same
+        # names, so the two line up.
+        data = it.object.data
         src = it.object.original
-        if src is None:
+        name = data.name if data is not None else None
+        if name is None and src is not None:
+            name = src.name
+        if name is None:
             continue
-        out.append((src.name, it.matrix_world.copy()))
+        out.append((name, it.matrix_world.copy()))
     return out
 
 
@@ -260,7 +306,12 @@ def write_instances(gltf_path, instances):
         doc = json.load(f)
 
     nodes = doc.setdefault("nodes", [])
+    # By mesh name first, since that is what an instance names; by node name as
+    # a fallback, for a source whose mesh the exporter renamed.
     mesh_of_name = {}
+    for index, mesh in enumerate(doc.get("meshes", [])):
+        if mesh.get("name"):
+            mesh_of_name.setdefault(mesh["name"], index)
     for n in nodes:
         if "mesh" in n and n.get("name"):
             mesh_of_name.setdefault(n["name"], n["mesh"])
@@ -319,6 +370,7 @@ def main():
 
     name = os.path.splitext(os.path.basename(bpy.data.filepath))[0] or "scene"
     merge_scenes()
+    force_render_geometry()
     depsgraph = bpy.context.evaluated_depsgraph_get()
 
     lights = collect_lights(depsgraph)
