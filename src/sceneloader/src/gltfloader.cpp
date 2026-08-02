@@ -455,9 +455,14 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
         rotation = glm::conjugate(rotation);
 
         scene.getCamera(node.camera).node = currentNodeId;
-        scene.getCamera(node.camera).position = translation * scale;
+        // decomposeTrs already returns the world translation; multiplying it by
+        // the node's scale again moves the camera by however much the hierarchy
+        // was scaled. Harmless while every scale is 1, which is why it survived.
+        scene.getCamera(node.camera).position = translation;
         scene.getCamera(node.camera).mOrientation = rotation;
         scene.getCamera(node.camera).updateViewMatrix();
+        STRELKA_INFO("Camera '{}' (glTF camera {}) at [{:.3f} {:.3f} {:.3f}]", node.name,
+                     node.camera, translation.x, translation.y, translation.z);
     }
 
     for (int childIdx : node.children)
