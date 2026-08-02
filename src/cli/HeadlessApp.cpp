@@ -296,6 +296,9 @@ void HeadlessApp::populateSettings()
     // Headless: nothing picks, nothing saves the scene back out.
     m_settings->setAs<bool>("scene/releaseHostGeometry", true);
     m_settings->setAs<uint32_t>("render/texture/downscale", m_config.textureDownscale);
+    // An HDRI carries radiance; normalising it away makes physical parity
+    // impossible. See loadEnvMap().
+    m_settings->setAs<bool>("render/env/autoCalibrate", false);
     m_settings->setAs<bool>("render/validate/analyticLights", true);
 
     m_settings->setAs<float>("render/post/tonemapper/filmIso", m_config.filmIso);

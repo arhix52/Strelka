@@ -212,6 +212,9 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/material/volumeModel", 0);
     m_settingsManager->setAs<uint32_t>("render/texture/maxDimension", 0);
     m_settingsManager->setAs<uint32_t>("render/texture/downscale", 1);
+    // An HDRI carries radiance; normalising it away makes physical parity
+    // impossible. See loadEnvMap().
+    m_settingsManager->setAs<bool>("render/env/autoCalibrate", false);
     // The editor picks against the host arrays, so it keeps them.
     m_settingsManager->setAs<bool>("scene/releaseHostGeometry", false);
     m_settingsManager->setAs<bool>("render/validate/analyticLights", true);

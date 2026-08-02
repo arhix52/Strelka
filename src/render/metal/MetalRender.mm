@@ -4493,10 +4493,23 @@ void MetalRender::loadEnvMap(const std::string& texturePath)
     else
         stbi_image_free(pixelData);
 
-    // Auto-calibrate env map intensity
+    // An HDRI's values *are* radiance. Normalising them to a fixed average
+    // discards that: the same environment lights a scene differently depending
+    // on what its own mean happens to be, and nothing physically lit can be
+    // matched against a reference renderer. On the pine forest the factor came
+    // out at ~6200, which put every surface three orders of magnitude too bright
+    // and read as a lighting bug rather than a normalisation.
+    //
+    // Off by default, therefore. It stays available because it is genuinely
+    // useful for look-dev -- drop in an arbitrary HDRI and see something
+    // sensible without touching exposure -- but that is a convenience, not the
+    // default a renderer should have.
     const float avgWeightedLum = (float)(totalPower / (double)(width * height));
+    const bool autoCalibrate = getSettings()->getAs<bool>("render/env/autoCalibrate");
     const float kCalibrationTarget = 1000.0f;
-    mEnvMapAutoScale = (avgWeightedLum > 1e-6f) ? kCalibrationTarget / avgWeightedLum : 1.0f;
+    mEnvMapAutoScale = (autoCalibrate && avgWeightedLum > 1e-6f)
+                           ? kCalibrationTarget / avgWeightedLum
+                           : 1.0f;
     mEnvMapLoaded = true;
 
     STRELKA_INFO("Env map alias table built: {} texels ({:.1f} MB), total power: {:.1f}, avgLum: {:.4f}, autoScale: {:.1f}",

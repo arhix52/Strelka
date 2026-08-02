@@ -99,9 +99,36 @@ def verdict(rel):
     return "FAIL"
 
 
+def compare_pair(ref_p, tst_p, out_p):
+    """Two loose images, for production scenes that have no harness directory.
+
+    Also reports the median of each, because a reference rendered under a wall
+    clock is noisy: a handful of fireflies move the mean by a lot and the median
+    by nothing, so the two together separate "different brightness" from "same
+    brightness, different noise".
+    """
+    ref, tst = load_exr(ref_p), load_exr(tst_p)
+    if ref.shape != tst.shape:
+        print("shape mismatch: %s vs %s" % (ref.shape, tst.shape))
+        return
+    rel, rmse, ratio = stats(ref, tst)
+    print("rel %.4f  rmse %.5f  mean ratio %.3f  %s" % (rel, rmse, ratio, verdict(rel)))
+    print("median: reference %.4f  strelka %.4f  ratio %.3f"
+          % (np.median(ref), np.median(tst),
+             np.median(tst) / max(np.median(ref), 1e-9)))
+    contact_sheet(out_p, ref, tst)
+    print("wrote %s (reference | strelka | 8x diff)" % out_p)
+
+
 def main():
     argv = sys.argv
     argv = argv[argv.index("--") + 1:] if "--" in argv else []
+
+    if "--pair" in argv:
+        i = argv.index("--pair")
+        compare_pair(argv[i + 1], argv[i + 2], argv[i + 3])
+        return
+
     out_root = os.path.abspath(argv[argv.index("--out") + 1]) if "--out" in argv \
         else os.path.abspath("scenes/feature_tests")
 
