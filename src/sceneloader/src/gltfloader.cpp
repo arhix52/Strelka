@@ -13,6 +13,8 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+
+#include <unordered_map>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/compatibility.hpp>
@@ -66,10 +68,37 @@ void computeTangent(std::vector<Scene::Vertex>& vertices,
     v2.tangent = packedTangent;
 }
 
-void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uint32_t parentNodeId, const tinygltf::Primitive& primitive, const glm::float4x4& transform, const float globalScale)
+// Maps a glTF (mesh, primitive) onto the oka mesh built for it, so geometry
+// referenced by many nodes is parsed and uploaded once.
+using MeshCache = std::unordered_map<uint64_t, uint32_t>;
+
+void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uint32_t parentNodeId, const tinygltf::Primitive& primitive, const glm::float4x4& transform, const float globalScale, MeshCache& meshCache, uint64_t primitiveKey)
 {
     using namespace std;
     assert(primitive.attributes.find("POSITION") != primitive.attributes.end());
+
+    // A glTF mesh referenced by more than one node is one mesh, not one per
+    // node. The pine forest scatters 34 539 placements over 24 objects; built
+    // per node that is 34 539 copies of vertices that are bit-identical, and
+    //34 539 acceleration structures over them -- the instancing the scene is
+    // made of buys nothing at all.
+    //
+    // Safe because the vertices here are in object space: only globalScale is
+    // folded in, the node transform goes to the instance. Checked before the
+    // accessors are read, so a hit skips the parse as well as the upload.
+    {
+        const auto cached = meshCache.find(primitiveKey);
+        if (cached != meshCache.end())
+        {
+            int cachedMatId = primitive.material;
+            if (cachedMatId == -1)
+                cachedMatId = 0;
+            const uint32_t instId =
+                scene.createInstance(Instance::Type::eMesh, cached->second, cachedMatId, transform);
+            scene.mNodes[parentNodeId].instanceIds.push_back(instId);
+            return;
+        }
+    }
 
     const tinygltf::Accessor& positionAccessor = model.accessors[primitive.attributes.find("POSITION")->second];
     const tinygltf::BufferView& positionView = model.bufferViews[positionAccessor.bufferView];
@@ -360,19 +389,26 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
     else
         meshId = scene.createMesh(vertices, indices);
     assert(meshId != -1);
+    // Skinned meshes are deliberately never cached: their vertices are rewritten
+    // per frame from their own skin, so two nodes sharing one would deform the
+    // same geometry twice.
+    if (!hasJoints)
+        meshCache.emplace(primitiveKey, meshId);
     uint32_t instId = scene.createInstance(Instance::Type::eMesh, meshId, matId, transform);
     assert(instId != -1);
     scene.mNodes[parentNodeId].instanceIds.push_back(instId);
 }
 
-void processMesh(const tinygltf::Model& model, oka::Scene& scene, const uint32_t parentNodeId, const tinygltf::Mesh& mesh, const glm::float4x4& transform, const float globalScale)
+void processMesh(const tinygltf::Model& model, oka::Scene& scene, const uint32_t parentNodeId, const tinygltf::Mesh& mesh, const glm::float4x4& transform, const float globalScale, MeshCache& meshCache, uint32_t meshIndex)
 {
     using namespace std;
     cout << "Mesh name: " << mesh.name << endl;
     cout << "Primitive count: " << mesh.primitives.size() << endl;
+    uint64_t primitiveIndex = 0;
     for (const auto& primitive : mesh.primitives)
     {
-        processPrimitive(model, scene, parentNodeId, primitive, transform, globalScale);
+        processPrimitive(model, scene, parentNodeId, primitive, transform, globalScale, meshCache,
+                         ((uint64_t)meshIndex << 32) | primitiveIndex++);
     }
 }
 
@@ -422,7 +458,7 @@ glm::float4x4 getTransform(const tinygltf::Node& node, const float globalScale)
     }
 }
 
-void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf::Node& node, const uint32_t currentNodeId, const glm::float4x4& baseTransform, const float globalScale)
+void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf::Node& node, const uint32_t currentNodeId, const glm::float4x4& baseTransform, const float globalScale, MeshCache& meshCache)
 {
     using namespace std;
     cout << "Node name: " << node.name << endl;
@@ -434,7 +470,7 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
     {
         scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::mesh;
         const tinygltf::Mesh& mesh = model.meshes[node.mesh];
-        processMesh(model, scene, currentNodeId, mesh, globalTransform, globalScale);
+        processMesh(model, scene, currentNodeId, mesh, globalTransform, globalScale, meshCache, (uint32_t)node.mesh);
 
         //skin binding
         if (node.skin != -1)
@@ -470,7 +506,7 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
         if (scene.mNodes[currentNodeId].type == oka::Scene::Node::NodeType::unknown)
             scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::sceneGraph;
         scene.mNodes[childIdx].parent = currentNodeId;
-        processNode(model, scene, model.nodes[childIdx], childIdx, globalTransform, globalScale);
+        processNode(model, scene, model.nodes[childIdx], childIdx, globalTransform, globalScale, meshCache);
     }
 }
 
@@ -1149,10 +1185,13 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
 
     loadSkeletalData(model, scene, globalScale);
 
+    // Lives for the whole graph walk: two nodes anywhere in the scene that point
+    // at the same glTF mesh share the geometry built for the first of them.
+    MeshCache meshCache;
     for (int i = 0; i < model.scenes[sceneId].nodes.size(); ++i)
     {
         const int rootNodeIdx = model.scenes[sceneId].nodes[i];
-        processNode(model, scene, model.nodes[rootNodeIdx], rootNodeIdx, glm::float4x4(1.0f), globalScale);
+        processNode(model, scene, model.nodes[rootNodeIdx], rootNodeIdx, glm::float4x4(1.0f), globalScale, meshCache);
     }
 
     // Punctual lights need node world transforms, so they land after the graph.

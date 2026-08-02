@@ -283,6 +283,7 @@ static void extendImpl(
     HitRecord rec;
     rec.geomEntryIndex = isLight ? (HIT_LIGHT_BIT | inst.userID)
                                  : (inst.userID + hit.geometry_id);
+    rec.instanceIndex = hit.instance_id;
     rec.primitiveId = hit.primitive_id;
     rec.barycentrics = hit.triangle_barycentric_coord;
     rec.distance = hit.distance;
@@ -397,6 +398,7 @@ static inline float3 previousWorldPosition(
     device const uint32_t* indexBuffer,
     constant MTLAccelerationStructureUserIDInstanceDescriptor* prevInstances,
     GeometryEntry entry,
+    uint32_t instanceIndex,
     uint32_t primitiveId,
     float2 bary)
 {
@@ -411,7 +413,7 @@ static inline float3 previousWorldPosition(
     }
     const float3 objectPos = interpolateAttrib(p[0], p[1], p[2], bary);
 
-    const auto inst = prevInstances[entry.instanceIndex];
+    const auto inst = prevInstances[instanceIndex];
     const float4x4 prevObjectToWorld = float4x4(
         float4(float3(inst.transformationMatrix[0]), 0.0f),
         float4(float3(inst.transformationMatrix[1]), 0.0f),
@@ -692,7 +694,7 @@ kernel void wavefrontShade(
     fetchTriangle(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId,
                   interpolateMotion, motionTime, pv, nv, tv, uvv, tangentSign, cv);
 
-    const auto inst = instances[entry.instanceIndex];
+    const auto inst = instances[rec.instanceIndex];
     const float4x4 objectToWorld = float4x4(
         float4(float3(inst.transformationMatrix[0]), 0.0f),
         float4(float3(inst.transformationMatrix[1]), 0.0f),
@@ -830,7 +832,7 @@ kernel void wavefrontShade(
         // discarded for that frame anyway.
         const float3 prevWorldPosition =
             uniforms.hasPrevFramePose
-                ? previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances, entry,
+                ? previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances, entry, rec.instanceIndex,
                                         rec.primitiveId, bary)
                 : worldPosition;
         const float2 motion =

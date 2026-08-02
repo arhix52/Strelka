@@ -741,8 +741,10 @@ void MetalRender::init()
 {
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(PathState) == 20, "PathState is read and written for every live path on every bounce");
-    static_assert(sizeof(HitRecord) == 24, "HitRecord size changed");
-    static_assert(sizeof(GeometryEntry) == 16, "GeometryEntry size changed");
+    // 32 rather than 24: the hit now carries the TLAS instance, because a shared
+    // BLAS belongs to no single one. One extra word per live path.
+    static_assert(sizeof(HitRecord) == 32, "HitRecord size changed");
+    static_assert(sizeof(GeometryEntry) == 12, "GeometryEntry size changed");
     static_assert(sizeof(AovSample) == 64,
                   "AovSample is written once per pixel per frame; keep an eye on the size");
 
@@ -2977,8 +2979,8 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
     {
         return nullptr;
     }
-    STRELKA_INFO("wavefront variant env={} lights={} motion={} dof={} debug={} metal4={}: shade maxThreadsPerTG={} extend={}",
-                 envMap, lights, motionBlur, dof, debug, useMetal4, v.shade->maxTotalThreadsPerThreadgroup(),
+    STRELKA_INFO("wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} metal4={}: shade maxThreadsPerTG={} extend={}",
+                 envMap, lights, motionBlur, dof, debug, alpha, useMetal4, v.shade->maxTotalThreadsPerThreadgroup(),
                  v.extendStatic ? v.extendStatic->maxTotalThreadsPerThreadgroup() : 0);
     return &mWavefrontVariants.emplace(features, v).first->second;
 }
@@ -3697,12 +3699,49 @@ void MetalRender::createAccelerationStructures()
         }
     }
 
+    // Share one BLAS between every group that holds the same geometry.
+    //
+    // Scattered scenes are built almost entirely out of repeats: the pine forest
+    // places 38 000 instances drawn from 50 distinct objects. A BLAS per instance
+    // would be 38 000 structures over the same 50 meshes, which is both the build
+    // time and the memory of a scene 700 times larger than the one authored.
+    //
+    // The signature is (mesh, material) per geometry rather than mesh alone,
+    // because the material is baked into the shared geometry entries -- two
+    // instances of the same mesh with different materials are not the same BLAS.
+    // Skeletal groups are excluded: their vertices are rewritten per frame and
+    // the structure refit alongside, so sharing one would mean two instances
+    // deforming the same geometry.
+    std::map<std::vector<uint64_t>, size_t> blasOfSignature;
+    size_t sharedBlas = 0;
+
     size_t mergedGeometries = 0;
     for (size_t g = 0; g < groups.size(); ++g)
     {
-        const size_t blasIdx = buildBlas(groups[g], groupSkeletal[g]);
+        std::vector<uint64_t> signature;
+        signature.reserve(groups[g].size());
+        for (const uint32_t id : groups[g])
+        {
+            signature.push_back(((uint64_t)instances[id].mMeshId << 32) | instances[id].mMaterialId);
+        }
+
+        size_t blasIdx;
+        auto shared = groupSkeletal[g] ? blasOfSignature.end() : blasOfSignature.find(signature);
+        if (shared != blasOfSignature.end())
+        {
+            blasIdx = shared->second;
+            ++sharedBlas;
+        }
+        else
+        {
+            blasIdx = buildBlas(groups[g], groupSkeletal[g]);
+            mergedGeometries += groups[g].size();
+            if (!groupSkeletal[g])
+            {
+                blasOfSignature.emplace(std::move(signature), blasIdx);
+            }
+        }
         groupBlas.push_back(blasIdx);
-        mergedGeometries += groups[g].size();
 
         EmittedInstance emitted{};
         emitted.sceneInstanceId = groups[g].front();
@@ -3710,17 +3749,6 @@ void MetalRender::createAccelerationStructures()
         emitted.userID = mBlasList[blasIdx].mGeometryBase;
         emitted.mask = GEOMETRY_MASK_TRIANGLE;
 
-        // Point every geometry of this BLAS back at the instance that carries
-        // it. The megakernel reads the object-to-world transform off the
-        // intersection, but the wavefront tracer shades in a separate kernel
-        // where the intersection is gone, so this is its only route back to the
-        // instance descriptor. Each group emits exactly one instance, so the
-        // mapping is one run of entries per instance.
-        const uint32_t instanceIndex = (uint32_t)mEmittedInstances.size();
-        for (size_t e = mBlasList[blasIdx].mGeometryBase; e < mGeometryEntries.size(); ++e)
-        {
-            mGeometryEntries[e].instanceIndex = instanceIndex;
-        }
         mEmittedInstances.push_back(emitted);
     }
 
@@ -3800,8 +3828,9 @@ void MetalRender::createAccelerationStructures()
                      hostFreed ? "released (picking disabled for this scene)" : "kept (doubles the first two)");
     }
 
-    STRELKA_INFO("Acceleration structures: {} BLAS ({} geometries), {} TLAS instances (from {} scene instances)",
-                 mBlasList.size(), mergedGeometries, mEmittedInstances.size(), instances.size());
+    STRELKA_INFO("Acceleration structures: {} BLAS ({} geometries, {} groups shared one), "
+                 "{} TLAS instances (from {} scene instances)",
+                 mBlasList.size(), mergedGeometries, sharedBlas, mEmittedInstances.size(), instances.size());
 
     // Per-geometry lookup table consumed by the kernel.
     if (!mGeometryEntries.empty())

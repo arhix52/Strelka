@@ -27,6 +27,10 @@ import math
 import os
 import sys
 
+# Alongside this file, which is not on the path when Blender runs a script by
+# absolute path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from mathutils import Matrix, Vector
 
 
@@ -155,6 +159,142 @@ def export_gltf(path):
     bpy.ops.export_scene.gltf(**kwargs)
 
 
+def collect_instances(depsgraph):
+    """Every geometry-nodes / particle instance, as (source object, world matrix).
+
+    These are the scene. The glTF exporter walks real objects, and anything a
+    Geometry Nodes tree instanced is not one -- so the pine forest exported its
+    50 tree *variants*, sitting in tidy rows off to the side where they were
+    authored, and not one of the 38 737 trees actually placed on the terrain. The
+    render came back with the ground, the ruins and the hand-placed rocks, and no
+    forest, which reads as a renderer fault and is not one.
+
+    Realising them into meshes would be the obvious fix and the wrong one: it
+    turns 50 shared meshes into 38 737 copies. They are written as glTF nodes
+    pointing at the meshes that already exist instead, which is what glTF
+    instancing is, and what the renderer wants -- one BLAS per distinct object,
+    one TLAS instance per placement.
+    """
+    out = []
+    for it in depsgraph.object_instances:
+        if not it.is_instance:
+            continue
+        # The *evaluated* object is what has geometry; the original may not be a
+        # mesh at all. Every tall tree in the pine forest is a Curve object that
+        # evaluates to one, so filtering on the original's type dropped all five
+        # fir variants -- half a million placements -- and left a forest of
+        # ground litter with nothing standing in it.
+        if it.object.type != "MESH":
+            continue
+        src = it.object.original
+        if src is None:
+            continue
+        out.append((src.name, it.matrix_world.copy()))
+    return out
+
+
+def render_depsgraph_instances():
+    """The same, but from the render depsgraph rather than the viewport one.
+
+    Production scatter setups branch on the Is Viewport node -- the pine forest
+    has fifty of them, each feeding a Switch -- so the viewport gets cheap proxy
+    stand-ins and the render gets the real trees. Reading the viewport depsgraph
+    therefore exports a forest of faceted blobs that is placed exactly right and
+    shaped nothing like the reference, which is a confusing thing to debug from
+    the image alone.
+
+    There is no API for a render depsgraph outside a render, so a throwaway
+    render engine is registered and asked to render four pixels; what it is
+    handed is the real thing. The frame is discarded.
+    """
+    captured = []
+
+    class _Capture(bpy.types.RenderEngine):
+        bl_idname = "STRELKA_INSTANCE_CAPTURE"
+        bl_label = "Strelka instance capture"
+        bl_use_preview = False
+
+        def render(self, depsgraph):
+            captured.extend(collect_instances(depsgraph))
+
+    sc = bpy.context.scene
+    saved = (sc.render.engine, sc.render.resolution_x, sc.render.resolution_y,
+             sc.render.resolution_percentage)
+    bpy.utils.register_class(_Capture)
+    try:
+        sc.render.engine = _Capture.bl_idname
+        sc.render.resolution_x = 4
+        sc.render.resolution_y = 4
+        sc.render.resolution_percentage = 100
+        bpy.ops.render.render()
+    finally:
+        (sc.render.engine, sc.render.resolution_x, sc.render.resolution_y,
+         sc.render.resolution_percentage) = saved
+        bpy.utils.unregister_class(_Capture)
+    return captured
+
+
+# Blender is Z-up, glTF is Y-up, and the exporter has already converted the mesh
+# data -- a 20 m pine measures 20 along glTF y. So an instance placement is the
+# Blender matrix conjugated into that frame, not merely rotated by it.
+_YUP = Matrix.Rotation(math.radians(-90.0), 4, "X")
+
+
+def gltf_matrix(m):
+    """Blender world matrix -> glTF node matrix, column-major as the spec stores it."""
+    g = _YUP @ m @ _YUP.inverted()
+    return [g[r][c] for c in range(4) for r in range(4)]
+
+
+def write_instances(gltf_path, instances):
+    """Append one node per instance, and report any source that never made it.
+
+    A source can be missing when it lives in a collection excluded from the view
+    layer -- common, because that is how the scattered originals are kept out of
+    the render. Nothing can be done about it here without changing what gets
+    exported, so it is counted and named rather than passed over: an instance
+    with no mesh to point at is geometry that will be missing from the render,
+    and that has to be visible in the log rather than found later in the image.
+    """
+    with open(gltf_path) as f:
+        doc = json.load(f)
+
+    nodes = doc.setdefault("nodes", [])
+    mesh_of_name = {}
+    for n in nodes:
+        if "mesh" in n and n.get("name"):
+            mesh_of_name.setdefault(n["name"], n["mesh"])
+
+    scene = doc["scenes"][doc.get("scene", 0)]
+    roots = scene.setdefault("nodes", [])
+
+    added = 0
+    missing = {}
+    for src_name, mat in instances:
+        mesh = mesh_of_name.get(src_name)
+        if mesh is None:
+            missing[src_name] = missing.get(src_name, 0) + 1
+            continue
+        roots.append(len(nodes))
+        nodes.append({"name": "%s_inst%d" % (src_name, added),
+                      "mesh": mesh,
+                      "matrix": gltf_matrix(mat)})
+        added += 1
+
+    with open(gltf_path, "w") as f:
+        json.dump(doc, f)
+
+    print("instances -> %d nodes over %d distinct meshes"
+          % (added, len({m for m in (mesh_of_name.get(s) for s, _ in instances) if m is not None})))
+    if missing:
+        total = sum(missing.values())
+        print("[gap] %d instances dropped: their source object was not exported "
+              "(hidden, or in a collection excluded from the view layer)" % total)
+        for name, count in sorted(missing.items(), key=lambda kv: -kv[1])[:10]:
+            print("        %-40s x%d" % (name, count))
+    return added
+
+
 def curve_objects(depsgraph):
     """Curve and hair-curves objects, which glTF has no representation for.
 
@@ -163,7 +303,10 @@ def curve_objects(depsgraph):
     Catmull-Rom/Bezier bases and a motion variant), and oka::Curve already
     exists, so these want their own binary sidecar once that path is built.
     """
-    return [ob.name for ob in depsgraph.objects if ob.type in {"CURVES", "CURVE"}]
+    # Only hair curves. A legacy Curve object is converted to a mesh on export
+    # and comes through fine -- reporting those as missing sent the search after
+    # trees that were in the file all along.
+    return [ob.name for ob in depsgraph.objects if ob.type == "CURVES"]
 
 
 def main():
@@ -194,6 +337,11 @@ def main():
     print("lights -> sidecar: %d (%s)"
           % (len(lights), ", ".join(sorted({l["type"] for l in lights})) or "none"))
 
+    instances = render_depsgraph_instances()
+    viewport = collect_instances(depsgraph)
+    print("instances: %d from the render depsgraph (%d in the viewport one)"
+          % (len(instances), len(viewport)))
+
     curves = curve_objects(depsgraph)
     if curves:
         print("[gap] %d curve objects have no glTF representation and are NOT exported:"
@@ -202,6 +350,14 @@ def main():
             print("        %s" % c)
         if len(curves) > 10:
             print("        ... and %d more" % (len(curves) - 10))
+
+    # Before the export, because it rewrites the graphs the exporter reads.
+    import flatten_materials
+    flat = flatten_materials.flatten(out)
+    if flat:
+        print("materials rewritten for export: %d" % len(flat))
+        for mat_name, note in flat:
+            print("        %-28s %s" % (mat_name, note))
 
     gltf = os.path.join(out, name + ".gltf")
     print("exporting %s ..." % gltf)
@@ -222,6 +378,10 @@ def main():
              len(doc.get("materials", [])), len(doc.get("images", []))))
     print("  extensions: %s" % ", ".join(sorted(doc.get("extensionsUsed", []))) or "(none)")
     print("  attributes: %s" % ", ".join(sorted(attrs)))
+
+    # After the summary, because it rewrites the file the summary was read from.
+    if instances:
+        write_instances(gltf, instances)
 
 
 main()
