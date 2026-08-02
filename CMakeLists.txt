@@ -43,6 +43,7 @@ endforeach()
 
 # Build options
 option(STRELKA_BUILD_EDITOR "Build interactive editor application" ON)
+option(STRELKA_BUILD_CLI    "Build headless CLI renderer" ON)
 option(STRELKA_BUILD_HYDRA  "Build Hydra render delegate (requires OpenUSD)" OFF)
 option(STRELKA_BUILD_TESTS  "Build unit tests" ON)
 
@@ -53,8 +54,8 @@ add_subdirectory(src/material)
 add_subdirectory(src/sceneloader)
 
 # Render + Shaders require CUDA/OptiX on Linux/Win, Metal on macOS
-# Gated behind editor or hydra since they require a render backend
-if(STRELKA_BUILD_EDITOR OR STRELKA_BUILD_HYDRA)
+# Gated behind editor, CLI, or hydra since they require a render backend
+if(STRELKA_BUILD_EDITOR OR STRELKA_BUILD_CLI OR STRELKA_BUILD_HYDRA)
     add_subdirectory(src/render)
     add_subdirectory(src/shaders)
 endif()
@@ -63,6 +64,11 @@ endif()
 if(STRELKA_BUILD_EDITOR)
     add_subdirectory(src/display)
     add_subdirectory(src/editor)
+endif()
+
+# Headless CLI renderer (optional, default ON)
+if(STRELKA_BUILD_CLI)
+    add_subdirectory(src/cli)
 endif()
 
 # Hydra delegate (optional, default OFF)

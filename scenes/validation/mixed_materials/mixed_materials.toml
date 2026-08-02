@@ -1,0 +1,26 @@
+[scene]
+path = "mixed_materials.glb"
+
+[output]
+path = "output/mixed_materials.exr"
+width = 512
+height = 384
+
+[render]
+spp = 512
+spp_per_launch = 1
+max_depth = 12
+sampler = "sobol"
+
+[camera]
+index = 0
+position = [0.0, 1.2, 7.0]
+target = [0.0, 1.2, 0.0]
+fov = 45.0
+
+[tonemap]
+type = "aces"
+gamma = 0.0
+exposure_iso = 400.0
+exposure_fstop = 2.8
+exposure_shutter = 60.0

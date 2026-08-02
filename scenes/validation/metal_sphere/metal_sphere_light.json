@@ -1,0 +1,25 @@
+{
+    "lights": [
+        {
+            "type": "rect",
+            "position": [
+                -2.0,
+                4.0,
+                1.0
+            ],
+            "orientation": [
+                -90.0,
+                0.0,
+                0.0
+            ],
+            "color": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "intensity": 1500.0,
+            "width": 1.5,
+            "height": 1.5
+        }
+    ]
+}

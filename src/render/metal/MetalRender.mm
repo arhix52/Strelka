@@ -64,6 +64,12 @@ MetalRender::~MetalRender()
             usleep(100);
         }
 
+        if (mLastCommandBuffer)
+        {
+            mLastCommandBuffer->release();
+            mLastCommandBuffer = nullptr;
+        }
+
         // Delete C++ wrapper objects (MetalBuffer) for async output.
         // MetalBuffer::~MetalBuffer calls release() on its inner MTL::Buffer.
         delete mAsyncOutputBuffers[0];
@@ -2451,16 +2457,23 @@ void MetalRender::render(Buffer* output)
             }
 
             const int writeIdxWf = mWriteIndex;
-            pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdxWf](MTL::CommandBuffer* cb) {
-                mLastRenderTimeMs.store((cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0,
-                                        std::memory_order_relaxed);
-                if (mProfileStages)
-                {
-                    reportStageTimings();
-                }
-                mReadyIndex.store(writeIdxWf);
-                mRenderBusy.store(false, std::memory_order_release);
-            }));
+            if (!mSyncMode)
+            {
+                pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdxWf](MTL::CommandBuffer* cb) {
+                    mLastRenderTimeMs.store((cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0,
+                                            std::memory_order_relaxed);
+                    if (mProfileStages)
+                    {
+                        reportStageTimings();
+                    }
+                    mReadyIndex.store(writeIdxWf);
+                    mRenderBusy.store(false, std::memory_order_release);
+                }));
+            }
+            else
+            {
+                retainCommandBufferForSync(pCmd);
+            }
             pCmd->commit();
 
             if (accumulationActive)
@@ -2535,31 +2548,39 @@ void MetalRender::render(Buffer* output)
 
             const int writeIdx = mWriteIndex;
             const bool isFirstBand = (band == 0);
-            pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdx, isFirstBand, isLastBand](MTL::CommandBuffer* cb) {
-                // Measure the span from the first band starting to the last one
-                // finishing. Summing each band's own GPU interval instead would
-                // overcount: the bands are separate submissions, so the sum also
-                // picks up per-command-buffer setup and any time the GPU spent on
-                // the display queue in between. That inflated number fed straight
-                // back into computeBandHeight() and drove the split ever finer —
-                // a feedback loop that made the renderer slower every frame.
-                if (isFirstBand)
-                {
-                    mFrameGpuStartSeconds.store(cb->GPUStartTime(), std::memory_order_relaxed);
-                }
-                if (isLastBand)
-                {
-                    const double start = mFrameGpuStartSeconds.load(std::memory_order_relaxed);
-                    const double spanMs = (cb->GPUEndTime() - start) * 1000.0;
-                    if (spanMs > 0.0)
-                    {
-                        mLastRenderTimeMs.store(spanMs, std::memory_order_relaxed);
-                    }
-                    mReadyIndex.store(writeIdx);
-                    // Must be released last: it is what lets the next frame start.
-                    mRenderBusy.store(false, std::memory_order_release);
-                }
-            }));
+            if (!mSyncMode)
+            {
+                pCmd->addCompletedHandler(
+                    MTL::HandlerFunction([this, writeIdx, isFirstBand, isLastBand](MTL::CommandBuffer* cb) {
+                        // Measure the span from the first band starting to the last one
+                        // finishing. Summing each band's own GPU interval instead would
+                        // overcount: the bands are separate submissions, so the sum also
+                        // picks up per-command-buffer setup and any time the GPU spent on
+                        // the display queue in between. That inflated number fed straight
+                        // back into computeBandHeight() and drove the split ever finer —
+                        // a feedback loop that made the renderer slower every frame.
+                        if (isFirstBand)
+                        {
+                            mFrameGpuStartSeconds.store(cb->GPUStartTime(), std::memory_order_relaxed);
+                        }
+                        if (isLastBand)
+                        {
+                            const double start = mFrameGpuStartSeconds.load(std::memory_order_relaxed);
+                            const double spanMs = (cb->GPUEndTime() - start) * 1000.0;
+                            if (spanMs > 0.0)
+                            {
+                                mLastRenderTimeMs.store(spanMs, std::memory_order_relaxed);
+                            }
+                            mReadyIndex.store(writeIdx);
+                            // Must be released last: it is what lets the next frame start.
+                            mRenderBusy.store(false, std::memory_order_release);
+                        }
+                    }));
+            }
+            else if (isLastBand)
+            {
+                retainCommandBufferForSync(pCmd);
+            }
             pCmd->commit();
         }
 
@@ -2601,15 +2622,22 @@ void MetalRender::render(Buffer* output)
         }
 
         // Completion handler for async double-buffered output. It must be
-        // installed unconditionally: it is the only thing that clears
-        // mRenderBusy, and skipping it would wedge the renderer permanently.
+        // installed unconditionally in interactive mode: it is the only thing
+        // that clears mRenderBusy, and skipping it would wedge the renderer.
         const int writeIdx = mWriteIndex;
-        pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdx](MTL::CommandBuffer* cb) {
-            const double gpuMs = (cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0;
-            mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
-            mReadyIndex.store(writeIdx);
-            mRenderBusy.store(false, std::memory_order_release);
-        }));
+        if (!mSyncMode)
+        {
+            pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdx](MTL::CommandBuffer* cb) {
+                const double gpuMs = (cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0;
+                mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
+                mReadyIndex.store(writeIdx);
+                mRenderBusy.store(false, std::memory_order_release);
+            }));
+        }
+        else
+        {
+            retainCommandBufferForSync(pCmd);
+        }
         pCmd->commit();
     }
     pPool->release();
@@ -2618,6 +2646,49 @@ void MetalRender::render(Buffer* output)
 
     mHasPrevFramePose = true;
     ctx.mFrameNumber++;
+}
+
+void MetalRender::retainCommandBufferForSync(MTL::CommandBuffer* pCmd)
+{
+    if (mLastCommandBuffer)
+    {
+        mLastCommandBuffer->release();
+    }
+    mLastCommandBuffer = pCmd->retain();
+}
+
+void MetalRender::renderSync(Buffer* output)
+{
+    mSyncMode = true;
+    mLastCommandBuffer = nullptr;
+    render(output);
+    if (mLastCommandBuffer)
+    {
+        mLastCommandBuffer->waitUntilCompleted();
+        const double gpuMs =
+            (mLastCommandBuffer->GPUEndTime() - mLastCommandBuffer->GPUStartTime()) * 1000.0;
+        mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
+        mLastCommandBuffer->release();
+        mLastCommandBuffer = nullptr;
+    }
+
+    // Managed storage needs an explicit GPU→CPU sync before the host can read.
+    // On Apple silicon Managed behaves like Shared, but this keeps Intel Macs correct.
+    if (output)
+    {
+        MTL::Buffer* native = ((MetalBuffer*)output)->getNativePtr();
+        if (native && native->storageMode() == MTL::StorageModeManaged)
+        {
+            MTL::CommandBuffer* syncCmd = mCommandQueue->commandBuffer();
+            MTL::BlitCommandEncoder* blit = syncCmd->blitCommandEncoder();
+            blit->synchronizeResource(native);
+            blit->endEncoding();
+            syncCmd->commit();
+            syncCmd->waitUntilCompleted();
+        }
+    }
+
+    mSyncMode = false;
 }
 
 Buffer* MetalRender::createBuffer(const BufferDesc& desc)
