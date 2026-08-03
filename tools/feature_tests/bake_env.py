@@ -85,7 +85,11 @@ def make_bake_scene(src_world, width, height):
     sc.render.resolution_y = height
     sc.render.resolution_percentage = 100
     sc.render.film_transparent = False
-    sc.view_settings.view_transform = "Standard"
+    # Raw, not Standard. Blender writes an EXR through the view transform when
+    # the render is saved as a render, which is what bpy.ops.render.render does,
+    # and Standard is an sRGB display transform -- so a bake meant to carry
+    # radiance would carry display values instead.
+    sc.view_settings.view_transform = "Raw"
     sc.view_settings.look = "None"
     sc.view_settings.exposure = 0.0
     sc.view_settings.gamma = 1.0
@@ -196,7 +200,8 @@ def main():
     img.filepath_raw = final
     img.file_format = "OPEN_EXR"
     img.save()
-    os.remove(raw)
+    if "--keep-raw" not in argv:
+        os.remove(raw)
 
     print("ENVBAKE %s  %dx%d  world='%s'  mean=%.4f max=%.3f"
           % (final, w, h, world.name, float(dst.mean()), float(dst.max())))
