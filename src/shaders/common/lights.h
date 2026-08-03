@@ -327,7 +327,8 @@ static __device__ void createCoordinateSystem(const float3& N, float3& Nt, float
 static __device__ float3 SampleCone(float2 uv, float angle, float3 direction, float& pdf) {
 
     float phi = 2.0 * M_PIf * uv.x;
-    float cosTheta = 1.0 - uv.y * (1.0 - cos(angle));
+    const float halfSin = sin(0.5f * angle);
+    float cosTheta = 1.0 - uv.y * (2.0f * halfSin * halfSin);
 
     // Convert spherical coordinates to 3D direction
     float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
@@ -337,7 +338,11 @@ static __device__ float3 SampleCone(float2 uv, float angle, float3 direction, fl
     float3 sampledDir = normalize(cos(phi) * sinTheta * u + sin(phi) * sinTheta * v + cosTheta * direction);
 
     // Calculate the PDF for the sampled direction
-    pdf = 1.0 / (2.0 * M_PIf * (1.0 - cos(angle)));
+    // 4pi sin^2(x/2), not 2pi (1 - cos x): see coneSolidAngle() in light_desc.h.
+    // The host bakes a distant light's radiance as irradiance / solid angle and
+    // this divides it back out, so the two have to be the same number; at
+    // sun-sized angles 1 - cos is mostly rounding.
+    pdf = 1.0f / (4.0f * M_PIf * halfSin * halfSin);
     return sampledDir;
 }
 

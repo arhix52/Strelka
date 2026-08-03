@@ -33,6 +33,42 @@ import sys
 import numpy as np
 
 
+def resolve_light_path(world, branch):
+    """Collapse Light Path branches in a world to one side of the mix.
+
+    A production world is routinely two environments: this one shows an 8k HDRI
+    to camera rays at strength 0.2 and a procedural sky to everything else at
+    0.7. Rendering a panorama through a camera captures only the first, so a bake
+    that ignores this lights the scene with the backdrop -- here roughly three
+    and a half times too bright, and wrong in colour as well as level.
+
+    Blender's Mix Shader takes its first input at factor 0, so "Is Camera Ray"
+    feeding the factor means slot 1 is the camera branch and slot 0 is everything
+    else.
+    """
+    if world.node_tree is None:
+        return 0
+    nt = world.node_tree
+    rewired = 0
+    for node in list(nt.nodes):
+        if node.type != "MIX_SHADER":
+            continue
+        fac = node.inputs["Fac"] if "Fac" in node.inputs else node.inputs[0]
+        if not fac.links or fac.links[0].from_node.type != "LIGHT_PATH":
+            continue
+        if fac.links[0].from_socket.name != "Is Camera Ray":
+            continue
+        shaders = [i for i in node.inputs if i.type == "SHADER"]
+        keep = shaders[1] if branch == "camera" else shaders[0]
+        if not keep.links:
+            continue
+        source = keep.links[0].from_socket
+        for link in list(node.outputs[0].links):
+            nt.links.new(source, link.to_socket)
+        rewired += 1
+    return rewired
+
+
 def make_bake_scene(src_world, width, height):
     sc = bpy.data.scenes.new("__env_bake")
     sc.world = src_world
@@ -135,6 +171,11 @@ def main():
     if world is None:
         print("ENVBAKE none: scene has no world")
         return
+    branch = argv[argv.index("--branch") + 1] if "--branch" in argv else "light"
+    rewired = resolve_light_path(world, branch)
+    if rewired:
+        print("world Light Path resolved to the %s branch (%d mix nodes)" % (branch, rewired))
+
     name = os.path.splitext(os.path.basename(bpy.data.filepath))[0] or "scene"
 
     sc = make_bake_scene(world, width, height)
@@ -145,8 +186,9 @@ def main():
     src, w, h = load_rgb(raw)
     dst = resample_to_strelka(src, w, h)
 
-    final = os.path.join(out, name + "_env.exr")
-    img = bpy.data.images.new(name + "_env", width=w, height=h, float_buffer=True)
+    suffix = "_env.exr" if branch == "light" else "_env_camera.exr"
+    final = os.path.join(out, name + suffix)
+    img = bpy.data.images.new(name + suffix, width=w, height=h, float_buffer=True)
     rgba = np.ones((h, w, 4), dtype=np.float32)
     # Strelka reads row 0 as v = 0; Blender writes pixels bottom-up, so flip.
     rgba[:, :, :3] = dst[::-1]

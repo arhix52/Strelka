@@ -630,6 +630,14 @@ public:
         float intensity = 1.0f;
         glm::float3 color = glm::float3(1.0f);
         float rotationY = 0.0f;
+        // What camera rays see, when that differs from what lights the scene.
+        // Production worlds routinely branch on Light Path: the pine forest
+        // shows an 8k HDRI backdrop at strength 0.2 to the camera and a
+        // procedural sky at 0.7 to everything else. Baking one environment out
+        // of that has to pick a side, and either choice is wrong in the frame.
+        // Empty means camera rays see the lighting environment, as before.
+        std::string backgroundTexturePath;
+        float backgroundIntensity = 1.0f;
     };
 
     void setEnvLight(const EnvLightDesc& desc)

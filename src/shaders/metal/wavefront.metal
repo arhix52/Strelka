@@ -497,7 +497,8 @@ kernel void wavefrontMiss(
     device const uint32_t*  control       [[buffer(5)]],
     device AovSample*       aov           [[buffer(6)]],
     constant uint32_t&      sampleIdx     [[buffer(7)]],
-    texture2d<float>        envMapTexture [[texture(0)]])
+    texture2d<float>        envMapTexture [[texture(0)]],
+    texture2d<float>        envBackgroundTexture [[texture(1)]])
 {
     if (gid >= control[WF_CTRL_MISS_N])
     {
@@ -552,6 +553,16 @@ kernel void wavefrontMiss(
 
         if (depth == 0u || specularBounce || !neeDone)
         {
+            // A ray still at depth 0 has scattered off nothing -- it may have
+            // passed through cutout foliage, which Cycles also counts as a
+            // camera ray -- so this is exactly where the backdrop belongs, and
+            // the MIS branch below is left reading the lighting environment
+            // because that is the one that was importance sampled.
+            if (uniforms.hasEnvBackground && depth == 0u)
+            {
+                envColor = envBackgroundTexture.sample(envSampler, envUV).xyz *
+                           uniforms.envBackgroundIntensity * float3(uniforms.envMapColorTint);
+            }
             radiance += throughput * envColor;
         }
         else

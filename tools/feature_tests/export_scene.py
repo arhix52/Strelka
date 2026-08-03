@@ -91,7 +91,17 @@ def collect_lights(depsgraph):
             # sidecar defaults to radiance, and taking 5 W/m^2 as radiance over a
             # 0.0046 rad cone under-lights the scene by four orders of magnitude
             # -- which reads as a black frame, not as a units mistake.
-            entry.update(type="distant", halfAngle=L.angle * 0.5, intensity=L.energy,
+            # The sidecar's "halfAngle" is an angular *diameter in degrees*
+            # despite the name -- light_json.h halves it and converts on read,
+            # and writes it back the same way. Blender's sun.angle is exactly
+            # that quantity, in radians.
+            #
+            # Writing radians here made the loader see 4e-5 rad instead of
+            # 0.0046. At that angle the pdf the shader computes stops matching
+            # the radiance the host baked, and the sun came out 73 times too
+            # bright -- which looked like a blown-out riverbed, not like a unit
+            # mistake.
+            entry.update(type="distant", halfAngle=math.degrees(L.angle), intensity=L.energy,
                          unit="irradiance")
         else:
             continue
@@ -382,6 +392,15 @@ def main():
     if os.path.exists(env):
         sidecar["environment"] = {"texture": env, "intensity": 1.0}
         print("environment -> %s" % env)
+        # What the camera sees, when bake_env.py found the world branching on
+        # Light Path and baked both sides. Without it the backdrop in frame is
+        # the lighting environment, which here is a procedural sky at strength
+        # 0.7 standing in for an 8k HDRI at 0.2.
+        backdrop = os.path.join(out, name + "_env_camera.exr")
+        if os.path.exists(backdrop):
+            sidecar["environment"]["backgroundTexture"] = backdrop
+            sidecar["environment"]["backgroundIntensity"] = 1.0
+            print("environment backdrop -> %s" % backdrop)
     else:
         print("[gap] no baked environment; run bake_env.py for the world")
     with open(os.path.join(out, name + "_light.json"), "w") as f:

@@ -113,6 +113,9 @@ struct Uniforms
 
     // Environment map (dome light)
     uint32_t hasEnvMap;
+    // A separate environment for camera rays. See Scene::EnvLightDesc.
+    uint32_t hasEnvBackground;
+    float envBackgroundIntensity;
     uint32_t envMapWidth;
     uint32_t envMapHeight;
     float envMapIntensity;

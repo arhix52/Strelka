@@ -50,6 +50,11 @@ bool saveLightsJson(const Scene& scene, const std::string& gltfOrJsonPath)
     {
         json envJ;
         envJ["texture"] = env->texturePath;
+        if (!env->backgroundTexturePath.empty())
+        {
+            envJ["backgroundTexture"] = env->backgroundTexturePath;
+            envJ["backgroundIntensity"] = env->backgroundIntensity;
+        }
         envJ["intensity"] = env->intensity;
         envJ["color"] = { env->color.x, env->color.y, env->color.z };
         envJ["rotation"] = env->rotationY;
@@ -103,6 +108,10 @@ bool loadLightsJson(Scene& scene, const std::string& lightJsonPath)
         }
         if (env.contains("rotation"))
             envDesc.rotationY = env["rotation"].get<float>();
+        if (env.contains("backgroundTexture"))
+            envDesc.backgroundTexturePath = env["backgroundTexture"].get<std::string>();
+        if (env.contains("backgroundIntensity"))
+            envDesc.backgroundIntensity = env["backgroundIntensity"].get<float>();
         scene.setEnvLight(envDesc);
     }
     return true;

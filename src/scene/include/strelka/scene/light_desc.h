@@ -77,9 +77,17 @@ inline int lightUnitFromName(const std::string& name)
 }
 
 /// Solid angle of a cone with the given half-angle (radians).
+///
+/// 4pi sin^2(x/2) rather than 2pi (1 - cos x). They agree exactly in real
+/// arithmetic and not at all in floats at the angles that matter: the sun is
+/// 0.0046 rad, where 1 - cos loses three digits to cancellation, and anything
+/// narrower rounds to zero. The shader computes the sampling pdf from the same
+/// quantity, so a discrepancy here does not cancel against the baked radiance --
+/// it is a multiplier on the light, and it was 73x.
 inline float coneSolidAngle(float halfAngleRad)
 {
-    return 2.0f * float(M_PI) * (1.0f - std::cos(halfAngleRad));
+    const float s = std::sin(0.5f * halfAngleRad);
+    return 4.0f * float(M_PI) * s * s;
 }
 
 /// Area of the light's emissive surface in world units squared. Zero for

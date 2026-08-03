@@ -263,7 +263,12 @@ static void createCoordinateSystem(thread const float3 N, thread float3& Nt, thr
 
 static __inline__ float getDirectLightPdf(float angle)
 {
-    return 1.0f / (2.0f * M_PI_F * (1.0f - cos(angle)));
+    // 4pi sin^2(x/2), not 2pi (1 - cos x): see coneSolidAngle() in light_desc.h.
+    // The CPU bakes the radiance as irradiance / solid angle and this divides it
+    // back out, so the two have to be the same number, and at sun-sized angles
+    // 1 - cos is not a number so much as a rounding artefact.
+    const float s = sin(0.5f * angle);
+    return 1.0f / (4.0f * M_PI_F * s * s);
 }
 
 static __inline__ float getSphereLightPdf() 
@@ -274,7 +279,8 @@ static __inline__ float getSphereLightPdf()
 static float3 SampleCone(float2 uv, float angle, float3 direction, thread float& pdf) {
 
     float phi = 2.0 * M_PI_F * uv.x;
-    float cosTheta = 1.0 - uv.y * (1.0 - cos(angle));
+    const float halfSin = sin(0.5f * angle);
+    float cosTheta = 1.0 - uv.y * (2.0f * halfSin * halfSin);
 
     // Convert spherical coordinates to 3D direction
     float sinTheta = sqrt(1.0 - cosTheta * cosTheta);

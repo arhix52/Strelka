@@ -304,3 +304,46 @@ TEST_CASE("unit names round-trip through the sidecar spellings")
     CHECK(lightUnitFromName("lumens") == LIGHT_UNIT_RADIANCE);
     CHECK(lightUnitFromName("") == LIGHT_UNIT_RADIANCE);
 }
+
+TEST_CASE("cone solid angle survives sun-sized half-angles")
+{
+    // 2pi (1 - cos x) is exact in real arithmetic and worthless in floats here:
+    // at the sun's 0.00459 rad, cos rounds to within 6e-8 of 1 while the true
+    // 1 - cos is 1.05e-5, so three of the five significant digits are gone, and
+    // a few times narrower it collapses to zero outright.
+    //
+    // This matters more than a precision note usually would. The host bakes a
+    // distant light's radiance as irradiance / solid angle and the shader
+    // divides it back out by the sampling pdf; they only cancel while both are
+    // computing the same number. Once they stopped, the sun came out 73 times
+    // too bright.
+    struct Case { double halfAngle; };
+    const Case cases[] = { { 0.5 }, { 0.05 }, { 0.00459216 }, { 1e-3 }, { 1e-4 }, { 1e-5 } };
+    for (const Case& c : cases)
+    {
+        CAPTURE(c.halfAngle);
+        // Reference in double, where the cancellation is survivable.
+        const double reference = 2.0 * M_PI * (1.0 - std::cos(c.halfAngle));
+        const double got = coneSolidAngle((float)c.halfAngle);
+        CHECK(got == doctest::Approx(reference).epsilon(1e-4));
+        CHECK(got > 0.0);
+    }
+}
+
+TEST_CASE("a distant light's baked radiance times its solid angle is its irradiance")
+{
+    // What the renderer actually does: bake E / omega on the host, multiply by
+    // omega again in the estimator. The product has to come back as E for every
+    // sun anyone would author, which is the invariant that broke.
+    const float irradiance = 5.0f;
+    const double halfAngles[] = { 0.5, 0.05, 0.00459216, 1e-3, 1e-4 };
+    for (double halfAngle : halfAngles)
+    {
+        CAPTURE(halfAngle);
+        const glm::float3 radiance =
+            bakeLightRadiometric(LIGHT_TYPE_DISTANT, LIGHT_UNIT_IRRADIANCE, glm::float3(1.0f), irradiance,
+                                 0.0f, 0.0f, 0.0f, (float)halfAngle, 0.0f);
+        const float recovered = radiance.x * coneSolidAngle((float)halfAngle);
+        CHECK(recovered == doctest::Approx(irradiance).epsilon(1e-3));
+    }
+}

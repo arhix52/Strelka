@@ -15,11 +15,10 @@ Two idioms are handled here, both being the same thing written two ways:
     Output <- Add(Mix(mask, Principled, Transparent), Translucent)      pine_cover
     Output <- Mix(alpha, Transparent, Add(Principled, Mix(..)))         fir_twig
 
-Note the operand order differs, and so does the polarity: Mix Shader takes its
-first input at factor 0, so a Transparent in slot 1 means alpha = factor and a
-Transparent in slot 0 means alpha = 1 - factor. Guessing this wrong inverts every
-leaf in the scene, which does not look like an inverted mask -- it looks like the
-foliage is missing.
+Note the operand order differs, and so does the polarity; the reasoning is at the
+rewiring itself. Once the graph is a plain Principled BSDF the exporter merges the
+base colour and the alpha into one RGBA texture on its own, which is the only
+place glTF has to put alpha.
 
 What is lost, and deliberately: the Translucent BSDF. Light passing through a
 leaf is a large part of how foliage reads, and glTF has no diffuse-transmission
@@ -92,50 +91,37 @@ def _image_of(link):
     return None, None
 
 
-def _resample(a, h, w):
-    """Nearest-neighbour, because a mask only has to line up, not interpolate."""
-    sh, sw = a.shape[:2]
-    if (sh, sw) == (h, w):
-        return a
-    yi = (np.arange(h) * sh // h).clip(0, sh - 1)
-    xi = (np.arange(w) * sw // w).clip(0, sw - 1)
-    return a[yi][:, xi]
+def _invert_image(img, out_dir):
+    """1 - value, written to disk next to the export.
 
+    Cached per source image, so a mask shared by several materials is inverted
+    once rather than once per use.
+    """
+    name = "%s_inv" % os.path.splitext(img.name)[0]
+    existing = bpy.data.images.get(name)
+    if existing is not None:
+        return existing
 
-def _pixels(img):
     w, h = img.size
     buf = np.empty(w * h * 4, dtype=np.float32)
     img.pixels.foreach_get(buf)
-    return buf.reshape(h, w, 4)
+    px = buf.reshape(-1, 4)
+    px[:, :3] = 1.0 - px[:, :3]
 
-
-def _merge_rgba(base_img, mask_img, invert, out_dir):
-    """Write base RGB with the mask in alpha, because glTF has nowhere else for it.
-
-    glTF carries alpha in baseColorTexture.A and only there. Foliage is authored
-    with the mask as its own file, so without this the exporter has a base colour
-    and an alpha that cannot travel together, and drops the alpha.
-    """
-    base = _pixels(base_img)
-    h, w, _ = base.shape
-    mask = _resample(_pixels(mask_img), h, w)[:, :, 0]
-    if invert:
-        mask = 1.0 - mask
-
-    name = "%s_rgba" % os.path.splitext(base_img.name)[0]
-    merged = bpy.data.images.new(name, width=w, height=h, alpha=True)
-    rgba = np.empty((h, w, 4), dtype=np.float32)
-    rgba[:, :, :3] = base[:, :, :3]
-    rgba[:, :, 3] = mask
-    merged.pixels.foreach_set(rgba.ravel())
-    # sRGB and 8-bit to match what was there: pixels come back linear, and
-    # Blender re-encodes on save, so this round-trips the original values.
-    merged.colorspace_settings.name = base_img.colorspace_settings.name
-    merged.alpha_mode = "CHANNEL_PACKED"
-    merged.filepath_raw = os.path.join(out_dir, name + ".png")
-    merged.file_format = "PNG"
-    merged.save()
-    return merged
+    # Byte buffer, and the colour space set before the pixels are written. Both
+    # matter, and neither fails loudly. A float buffer saved to PNG puts the
+    # values through a transfer function on the way out (0.75 arrives as 0.52),
+    # and setting the colour space afterwards drops the write entirely -- the
+    # file comes out uniformly black, which reads as a mask covering nothing
+    # rather than as a save that did not happen. Measured, all four ways.
+    out = bpy.data.images.new(name, width=w, height=h, alpha=False)
+    out.colorspace_settings.name = img.colorspace_settings.name
+    out.pixels.foreach_set(px.ravel())
+    out.update()
+    out.filepath_raw = os.path.join(out_dir, name + ".png")
+    out.file_format = "PNG"
+    out.save()
+    return out
 
 
 def flatten(out_dir):
@@ -162,30 +148,39 @@ def flatten(out_dir):
 
         if alpha is not None:
             link, transparent_first = alpha
-            mask_img, mask_node = _image_of(link)
-            base_in = principled.inputs["Base Color"]
-            base_img, _ = _image_of(base_in.links[0]) if base_in.links else (None, None)
-
-            if mask_img is not None and base_img is not None and mask_img != base_img:
-                merged = _merge_rgba(base_img, mask_img, transparent_first, out_dir)
+            # Mix Shader outputs (1 - Fac) * slot0 + Fac * slot1. A Transparent
+            # in slot 0 therefore means opacity *is* the factor; in slot 1 it
+            # means opacity is one minus it.
+            #
+            # fir_twig settles which way round that is without any guessing: its
+            # Principled node already drives Alpha from the same texture that
+            # feeds the mix, and its Transparent sits in slot 0. So slot 0 means
+            # no inversion.
+            #
+            # Backwards, this does not look like an inverted mask. It looks like
+            # the canopy is the wrong density, and the error arrives as light on
+            # the ground far from anything to do with foliage.
+            src = link.from_socket
+            note = "alpha from the %s mix branch" % ("first" if transparent_first else "second")
+            if not transparent_first:
+                # Inverted in the image rather than with a Math node, because the
+                # exporter does not evaluate the graph feeding Alpha -- it looks
+                # for a texture and takes it whole. A SUBTRACT node in between is
+                # silently skipped, and the mask exports at exactly the polarity
+                # it was meant not to have.
+                mask_img, _ = _image_of(link)
+                if mask_img is None:
+                    report.append((mat.name, "alpha needs inverting but is not a plain texture"))
+                    continue
+                inverted = _invert_image(mask_img, out_dir)
                 tex = nt.nodes.new("ShaderNodeTexImage")
-                tex.image = merged
-                # The base colour may run through Hue/Saturation or similar; that
-                # chain is left alone and only its texture swapped, so the look is
-                # preserved rather than approximated.
-                nt.links.new(tex.outputs["Color"], base_in.links[0].to_socket)
-                nt.links.new(tex.outputs["Alpha"], principled.inputs["Alpha"])
-                note = "alpha from %s merged into base colour" % mask_img.name
-            else:
-                src = link.from_socket
-                if transparent_first:
-                    inv = nt.nodes.new("ShaderNodeMath")
-                    inv.operation = "SUBTRACT"
-                    inv.inputs[0].default_value = 1.0
-                    nt.links.new(src, inv.inputs[1])
-                    src = inv.outputs["Value"]
-                nt.links.new(src, principled.inputs["Alpha"])
-                note = "alpha wired directly"
+                tex.image = inverted
+                for old in list(link.from_node.inputs):
+                    if old.name == "Vector" and old.links:
+                        nt.links.new(old.links[0].from_socket, tex.inputs["Vector"])
+                src = tex.outputs["Color"]
+                note += ", inverted into %s" % inverted.name
+            nt.links.new(src, principled.inputs["Alpha"])
         else:
             note = "flattened, no transparency found"
 

@@ -139,6 +139,7 @@ MetalRender::~MetalRender()
 
         // Environment map
         safeRelease(mEnvMapTexture);
+        safeRelease(mEnvBackgroundTexture);
         safeRelease(mEnvAliasBuffer);
 
         // Pipeline states
@@ -1336,6 +1337,9 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
             if (mEnvMapTexture)
             {
                 table->setTexture(mEnvMapTexture->gpuResourceID(), 0);
+                table->setTexture((mEnvBackgroundTexture ? mEnvBackgroundTexture : mEnvMapTexture)
+                                      ->gpuResourceID(),
+                                  1);
             }
             enc->dispatchThreadgroups(control + kMissArgsOffset, tg);
 
@@ -1548,6 +1552,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             if (mEnvMapTexture)
             {
                 enc->setTexture(mEnvMapTexture, 0);
+                enc->setTexture(mEnvBackgroundTexture ? mEnvBackgroundTexture : mEnvMapTexture, 1);
             }
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kMissArgsOffset, tg);
 
@@ -1725,6 +1730,10 @@ void MetalRender::render(Buffer* output)
             const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");
             const fs::path envTexPath = fs::path(resourcePathStr) / envLight->texturePath;
             loadEnvMap(envTexPath.string());
+            if (!envLight->backgroundTexturePath.empty())
+            {
+                loadEnvBackground((fs::path(resourcePathStr) / envLight->backgroundTexturePath).string());
+            }
         }
         // Fresh scene: drop any pending edit bits from load-time createLight.
         mScene->consumeChanges();
@@ -2244,6 +2253,10 @@ void MetalRender::render(Buffer* output)
         pUniformData->envMapIntensity = mEnvMapAutoScale * userIntensity;
         pUniformData->envMapRotation = envLight.has_value() ? envLight->rotationY * (M_PI / 180.0f) : 0.0f;
         pUniformData->envPdfScale = mEnvPdfScale;
+        const bool hasBackdrop = mEnvBackgroundTexture != nullptr;
+        pUniformData->hasEnvBackground = hasBackdrop ? 1u : 0u;
+        pUniformData->envBackgroundIntensity =
+            hasBackdrop && envLight.has_value() ? envLight->backgroundIntensity : 1.0f;
         if (envLight.has_value())
         {
             pUniformData->envMapColorTint = { envLight->color.x, envLight->color.y, envLight->color.z };
@@ -2256,6 +2269,7 @@ void MetalRender::render(Buffer* output)
     else
     {
         pUniformData->hasEnvMap = 0;
+        pUniformData->hasEnvBackground = 0;
         pUniformData->envPdfScale = 0.0f;
     }
 
@@ -4381,6 +4395,64 @@ void MetalRender::rebuildTLAS()
     }
 
     pPool->release();
+}
+
+// The backdrop camera rays see, when the scene wants a different one from what
+// lights it. No alias table: it is never sampled, only looked up along the ray
+// that missed, so it needs no sampling distribution.
+void MetalRender::loadEnvBackground(const std::string& texturePath)
+{
+    if (mEnvBackgroundTexture)
+    {
+        mEnvBackgroundTexture->release();
+        mEnvBackgroundTexture = nullptr;
+    }
+
+    int width = 0, height = 0;
+    float* pixelData = nullptr;
+    bool isExr = false;
+
+    const std::string ext = fs::path(texturePath).extension().string();
+    if (ext == ".exr" || ext == ".EXR")
+    {
+        const char* err = nullptr;
+        if (LoadEXR(&pixelData, &width, &height, texturePath.c_str(), &err) != TINYEXR_SUCCESS)
+        {
+            STRELKA_ERROR("Failed to load EXR env background: {} ({})", texturePath, err ? err : "unknown");
+            if (err)
+                FreeEXRErrorMessage(err);
+            return;
+        }
+        isExr = true;
+    }
+    else
+    {
+        int channels = 0;
+        pixelData = stbi_loadf(texturePath.c_str(), &width, &height, &channels, 4);
+        if (!pixelData)
+        {
+            STRELKA_ERROR("Failed to load env background: {}", texturePath);
+            return;
+        }
+    }
+
+    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
+    desc->setWidth(width);
+    desc->setHeight(height);
+    desc->setPixelFormat(MTL::PixelFormatRGBA32Float);
+    desc->setTextureType(MTL::TextureType2D);
+    desc->setStorageMode(MTL::StorageModeManaged);
+    desc->setUsage(MTL::TextureUsageShaderRead);
+    mEnvBackgroundTexture = mDevice->newTexture(desc);
+    desc->release();
+    mEnvBackgroundTexture->replaceRegion(MTL::Region::Make3D(0, 0, 0, width, height, 1), 0, pixelData,
+                                         width * sizeof(float) * 4);
+    if (isExr)
+        free(pixelData);
+    else
+        stbi_image_free(pixelData);
+
+    STRELKA_INFO("Loaded env background: {} ({}x{})", texturePath, width, height);
 }
 
 void MetalRender::loadEnvMap(const std::string& texturePath)

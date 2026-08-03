@@ -216,6 +216,7 @@ private:
 
     // Environment map (dome light)
     MTL::Texture* mEnvMapTexture = nullptr;
+    MTL::Texture* mEnvBackgroundTexture = nullptr;
     // Flat alias table, one entry per texel — replaces the marginal/conditional
     // CDF pair, so importance sampling costs one load instead of two binary
     // searches.
@@ -453,6 +454,7 @@ private:
 
     // Environment map
     void loadEnvMap(const std::string& texturePath);
+    void loadEnvBackground(const std::string& texturePath);
 
     // BVH management
     void ensureScratchBuffer(MTL::Buffer*& buffer, size_t requiredSize);
