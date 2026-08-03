@@ -21,6 +21,8 @@ render-resolution depsgraph, so Subdivision comes through at its render level an
 Geometry Nodes are realised.
 """
 
+import array
+
 import bpy
 import json
 import math
@@ -218,7 +220,11 @@ def collect_instances(depsgraph):
     instancing is, and what the renderer wants -- one BLAS per distinct object,
     one TLAS instance per placement.
     """
-    out = []
+    # Decomposed on the spot into flat float arrays rather than kept as Matrix
+    # objects. At 2.2 M placements the objects alone are some 450 MB of Python,
+    # which is memory the glTF exporter needs a few seconds later -- on a 17 GB
+    # machine that is the difference between exporting and being killed.
+    out = {}
     for it in depsgraph.object_instances:
         if not it.is_instance:
             continue
@@ -245,7 +251,18 @@ def collect_instances(depsgraph):
             name = src.name
         if name is None:
             continue
-        out.append((name, it.matrix_world.copy()))
+
+        entry = out.get(name)
+        if entry is None:
+            entry = (array.array("f"), array.array("f"), array.array("f"))
+            out[name] = entry
+        # Conjugated into the glTF frame here -- see gltf_matrix() -- then split,
+        # because EXT_mesh_gpu_instancing stores TRS and not a matrix.
+        t, q, sc = (_YUP @ it.matrix_world @ _YUP_INV).decompose()
+        entry[0].extend((t.x, t.y, t.z))
+        # glTF orders a quaternion xyzw; Blender's is wxyz.
+        entry[1].extend((q.x, q.y, q.z, q.w))
+        entry[2].extend((sc.x, sc.y, sc.z))
     return out
 
 
@@ -327,7 +344,7 @@ def render_depsgraph_instances():
     render engine is registered and asked to render four pixels; what it is
     handed is the real thing. The frame is discarded.
     """
-    captured = []
+    captured = {}
 
     class _Capture(bpy.types.RenderEngine):
         bl_idname = "STRELKA_INSTANCE_CAPTURE"
@@ -335,7 +352,7 @@ def render_depsgraph_instances():
         bl_use_preview = False
 
         def render(self, depsgraph):
-            captured.extend(collect_instances(depsgraph))
+            captured.update(collect_instances(depsgraph))
 
     sc = bpy.context.scene
     saved = (sc.render.engine, sc.render.resolution_x, sc.render.resolution_y,
@@ -358,6 +375,7 @@ def render_depsgraph_instances():
 # data -- a 20 m pine measures 20 along glTF y. So an instance placement is the
 # Blender matrix conjugated into that frame, not merely rotated by it.
 _YUP = Matrix.Rotation(math.radians(-90.0), 4, "X")
+_YUP_INV = _YUP.inverted()
 
 
 def gltf_matrix(m):
@@ -367,14 +385,23 @@ def gltf_matrix(m):
 
 
 def write_instances(gltf_path, instances):
-    """Append one node per instance, and report any source that never made it.
+    """Write the placements as EXT_mesh_gpu_instancing: one node per mesh, TRS in
+    the binary buffer.
+
+    A node apiece was the obvious first version and it does not scale. The pine
+    forest's 2 238 410 placements came to 763 MB of JSON -- a 16-float matrix
+    written out as text, roughly 340 bytes a placement -- and 33 seconds of the
+    103-second load was tinygltf reading it. The same data as three float
+    accessors is about 60 bytes and lands in the .bin, where it is a memcpy.
+
+    EXT_mesh_gpu_instancing rather than a private sidecar because it is the
+    standard answer to exactly this and other tools can read it.
 
     A source can be missing when it lives in a collection excluded from the view
     layer -- common, because that is how the scattered originals are kept out of
-    the render. Nothing can be done about it here without changing what gets
-    exported, so it is counted and named rather than passed over: an instance
-    with no mesh to point at is geometry that will be missing from the render,
-    and that has to be visible in the log rather than found later in the image.
+    the render. Counted and named rather than passed over: an instance with no
+    mesh to point at is geometry that will be missing from the render, and that
+    has to be visible in the log rather than found later in the image.
     """
     with open(gltf_path) as f:
         doc = json.load(f)
@@ -390,34 +417,136 @@ def write_instances(gltf_path, instances):
         if "mesh" in n and n.get("name"):
             mesh_of_name.setdefault(n["name"], n["mesh"])
 
+    by_mesh = {}
+    missing = {}
+    for src_name, (translation, rotation, scale) in instances.items():
+        mesh = mesh_of_name.get(src_name)
+        if mesh is None:
+            missing[src_name] = missing.get(src_name, 0) + len(translation) // 3
+            continue
+        by_mesh.setdefault(mesh, []).append((translation, rotation, scale))
+
+    if not by_mesh:
+        _report_missing(missing)
+        return 0
+
+    buffers = doc.setdefault("buffers", [])
+    if not buffers or "uri" not in buffers[0]:
+        raise RuntimeError("expected a separate .bin buffer to append to")
+    bin_path = os.path.join(os.path.dirname(gltf_path), buffers[0]["uri"])
+    views = doc.setdefault("bufferViews", [])
+    accessors = doc.setdefault("accessors", [])
     scene = doc["scenes"][doc.get("scene", 0)]
     roots = scene.setdefault("nodes", [])
 
+    def add_accessor(payload, count, kind, offset):
+        views.append({"buffer": 0, "byteOffset": offset, "byteLength": len(payload)})
+        accessors.append({"bufferView": len(views) - 1, "componentType": 5126,
+                          "count": count, "type": kind})
+        return len(accessors) - 1
+
     added = 0
-    missing = {}
-    for src_name, mat in instances:
-        mesh = mesh_of_name.get(src_name)
-        if mesh is None:
-            missing[src_name] = missing.get(src_name, 0) + 1
-            continue
-        roots.append(len(nodes))
-        nodes.append({"name": "%s_inst%d" % (src_name, added),
-                      "mesh": mesh,
-                      "matrix": gltf_matrix(mat)})
-        added += 1
+    with open(bin_path, "ab") as blob:
+        offset = os.path.getsize(bin_path)
+        for mesh, groups in sorted(by_mesh.items()):
+            # Several sources can share one glTF mesh; their placements merge.
+            translation = array.array("f")
+            rotation = array.array("f")
+            scale = array.array("f")
+            for t, r, sc in groups:
+                translation.extend(t)
+                rotation.extend(r)
+                scale.extend(sc)
+            count = len(translation) // 3
+
+            # Four-byte alignment, which is all a float accessor asks for.
+            pad = (-offset) % 4
+            if pad:
+                blob.write(b"\x00" * pad)
+                offset += pad
+
+            attributes = {}
+            for payload, kind, name in ((translation, "VEC3", "TRANSLATION"),
+                                        (rotation, "VEC4", "ROTATION"),
+                                        (scale, "VEC3", "SCALE")):
+                raw = payload.tobytes()
+                attributes[name] = add_accessor(raw, count, kind, offset)
+                blob.write(raw)
+                offset += len(raw)
+
+            roots.append(len(nodes))
+            nodes.append({
+                "name": "instances_mesh%d" % mesh,
+                "mesh": mesh,
+                "extensions": {"EXT_mesh_gpu_instancing": {"attributes": attributes}},
+            })
+            added += count
+
+    buffers[0]["byteLength"] = os.path.getsize(bin_path)
+    used = set(doc.get("extensionsUsed", []))
+    used.add("EXT_mesh_gpu_instancing")
+    doc["extensionsUsed"] = sorted(used)
 
     with open(gltf_path, "w") as f:
         json.dump(doc, f)
 
-    print("instances -> %d nodes over %d distinct meshes"
-          % (added, len({m for m in (mesh_of_name.get(s) for s, _ in instances) if m is not None})))
-    if missing:
-        total = sum(missing.values())
-        print("[gap] %d instances dropped: their source object was not exported "
-              "(hidden, or in a collection excluded from the view layer)" % total)
-        for name, count in sorted(missing.items(), key=lambda kv: -kv[1])[:10]:
-            print("        %-40s x%d" % (name, count))
+    print("instances -> %d placements over %d meshes, %d nodes, %.1f MB of binary"
+          % (added, len(by_mesh), len(by_mesh), added * 40 / 1e6))
+    _report_missing(missing)
     return added
+
+
+def strip_instance_nodes(gltf_path):
+    """Remove nodes written by an earlier per-placement export.
+
+    They are recognised by name -- "<source>_instN" -- because that is what the
+    first version wrote, and by carrying EXT_mesh_gpu_instancing, which is what
+    this one writes. Removing nodes renumbers the rest, so every reference has to
+    be remapped rather than the entries simply dropped.
+    """
+    with open(gltf_path) as f:
+        doc = json.load(f)
+
+    nodes = doc.get("nodes", [])
+    def is_placement(n):
+        name = n.get("name", "")
+        return ("_inst" in name and "matrix" in n) or \
+               "EXT_mesh_gpu_instancing" in n.get("extensions", {})
+
+    keep = [i for i, n in enumerate(nodes) if not is_placement(n)]
+    if len(keep) == len(nodes):
+        return 0
+
+    remap = {old: new for new, old in enumerate(keep)}
+    doc["nodes"] = [nodes[i] for i in keep]
+    for n in doc["nodes"]:
+        if "children" in n:
+            n["children"] = [remap[c] for c in n["children"] if c in remap]
+            if not n["children"]:
+                del n["children"]
+    for scene in doc.get("scenes", []):
+        scene["nodes"] = [remap[r] for r in scene.get("nodes", []) if r in remap]
+    for skin in doc.get("skins", []):
+        if "skeleton" in skin and skin["skeleton"] in remap:
+            skin["skeleton"] = remap[skin["skeleton"]]
+        if "joints" in skin:
+            skin["joints"] = [remap[j] for j in skin["joints"] if j in remap]
+
+    removed = len(nodes) - len(keep)
+    with open(gltf_path, "w") as f:
+        json.dump(doc, f)
+    print("removed %d placement nodes from a previous export" % removed)
+    return removed
+
+
+def _report_missing(missing):
+    if not missing:
+        return
+    total = sum(missing.values())
+    print("[gap] %d instances dropped: their source object was not exported "
+          "(hidden, or in a collection excluded from the view layer)" % total)
+    for name, count in sorted(missing.items(), key=lambda kv: -kv[1])[:10]:
+        print("        %-40s x%d" % (name, count))
 
 
 def write_material_extensions(gltf_path, translucency, volumes):
@@ -527,9 +656,9 @@ def main():
           % (len(lights), ", ".join(sorted({l["type"] for l in lights})) or "none"))
 
     instances = render_depsgraph_instances()
-    viewport = collect_instances(depsgraph)
-    print("instances: %d from the render depsgraph (%d in the viewport one)"
-          % (len(instances), len(viewport)))
+    placements = sum(len(t) // 3 for t, _, _ in instances.values())
+    print("instances: %d placements over %d sources, from the render depsgraph"
+          % (placements, len(instances)))
 
     curves = curve_objects(depsgraph)
     if curves:
@@ -549,6 +678,18 @@ def main():
             print("        %-28s %s" % (mat_name, note))
 
     gltf = os.path.join(out, name + ".gltf")
+
+    # --instances-only rewrites the placements of an export that already exists,
+    # leaving its geometry, materials and textures alone. The glTF exporter needs
+    # several gigabytes on a scene this size and there is no reason to pay that
+    # again to change how the placements are stored.
+    if "--instances-only" in argv:
+        print("rewriting placements in %s (geometry left as it is)" % gltf)
+        strip_instance_nodes(gltf)
+        if instances:
+            write_instances(gltf, instances)
+        return
+
     print("exporting %s ..." % gltf)
     export_gltf(gltf)
 

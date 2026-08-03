@@ -14,6 +14,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <cstring>
 #include <unordered_map>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -458,6 +459,70 @@ glm::float4x4 getTransform(const tinygltf::Node& node, const float globalScale)
     }
 }
 
+// Per-instance transforms from EXT_mesh_gpu_instancing, empty when the node has
+// none. Floats only: the extension permits normalised integer rotations, which
+// nothing here writes, and silently misreading them would be worse than saying so.
+void readGpuInstancing(const tinygltf::Model& model, const tinygltf::Node& node,
+                       std::vector<glm::float4x4>& out)
+{
+    const auto ext = node.extensions.find("EXT_mesh_gpu_instancing");
+    if (ext == node.extensions.end() || !ext->second.Has("attributes"))
+        return;
+    const tinygltf::Value& attributes = ext->second.Get("attributes");
+
+    auto readAttribute = [&](const char* name, int components,
+                             std::vector<float>& values) -> size_t {
+        if (!attributes.Has(name))
+            return 0;
+        const int index = attributes.Get(name).GetNumberAsInt();
+        if (index < 0 || (size_t)index >= model.accessors.size())
+            return 0;
+        const tinygltf::Accessor& accessor = model.accessors[index];
+        if (accessor.componentType != TINYGLTF_COMPONENT_TYPE_FLOAT)
+        {
+            STRELKA_WARNING("EXT_mesh_gpu_instancing {} is not float; ignoring", name);
+            return 0;
+        }
+        const tinygltf::BufferView& view = model.bufferViews[accessor.bufferView];
+        const unsigned char* base =
+            model.buffers[view.buffer].data.data() + view.byteOffset + accessor.byteOffset;
+        const size_t stride = accessor.ByteStride(view) ? accessor.ByteStride(view)
+                                                        : sizeof(float) * components;
+        values.resize(accessor.count * components);
+        for (size_t i = 0; i < accessor.count; ++i)
+        {
+            std::memcpy(&values[i * components], base + i * stride, sizeof(float) * components);
+        }
+        return accessor.count;
+    };
+
+    std::vector<float> translation, rotation, scale;
+    size_t count = readAttribute("TRANSLATION", 3, translation);
+    count = std::max(count, readAttribute("ROTATION", 4, rotation));
+    count = std::max(count, readAttribute("SCALE", 3, scale));
+    if (count == 0)
+        return;
+
+    out.resize(count);
+    for (size_t i = 0; i < count; ++i)
+    {
+        const glm::float3 t = translation.empty()
+                                  ? glm::float3(0.0f)
+                                  : glm::float3(translation[i * 3], translation[i * 3 + 1],
+                                                translation[i * 3 + 2]);
+        // glTF stores a quaternion xyzw; glm::quat takes w first.
+        const glm::quat r = rotation.empty()
+                                ? glm::quat(1.0f, 0.0f, 0.0f, 0.0f)
+                                : glm::quat(rotation[i * 4 + 3], rotation[i * 4], rotation[i * 4 + 1],
+                                            rotation[i * 4 + 2]);
+        const glm::float3 s = scale.empty()
+                                  ? glm::float3(1.0f)
+                                  : glm::float3(scale[i * 3], scale[i * 3 + 1], scale[i * 3 + 2]);
+        out[i] = glm::translate(glm::float4x4(1.0f), t) * glm::mat4_cast(r) *
+                 glm::scale(glm::float4x4(1.0f), s);
+    }
+}
+
 void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf::Node& node, const uint32_t currentNodeId, const glm::float4x4& baseTransform, const float globalScale, MeshCache& meshCache)
 {
     using namespace std;
@@ -470,7 +535,30 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
     {
         scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::mesh;
         const tinygltf::Mesh& mesh = model.meshes[node.mesh];
-        processMesh(model, scene, currentNodeId, mesh, globalTransform, globalScale, meshCache, (uint32_t)node.mesh);
+
+        // EXT_mesh_gpu_instancing: the node's mesh is drawn once per entry in
+        // the TRANSLATION/ROTATION/SCALE accessors, and the node itself is not
+        // drawn on its own.
+        //
+        // A scattered scene is almost entirely this. Written as one node per
+        // placement -- the obvious first version -- the pine forest's 2.2 M
+        // placements came to 763 MB of JSON and a third of the load time was
+        // spent reading it back as text.
+        std::vector<glm::float4x4> instanceTransforms;
+        readGpuInstancing(model, node, instanceTransforms);
+
+        if (!instanceTransforms.empty())
+        {
+            for (const glm::float4x4& instance : instanceTransforms)
+            {
+                processMesh(model, scene, currentNodeId, mesh, globalTransform * instance, globalScale,
+                            meshCache, (uint32_t)node.mesh);
+            }
+        }
+        else
+        {
+            processMesh(model, scene, currentNodeId, mesh, globalTransform, globalScale, meshCache, (uint32_t)node.mesh);
+        }
 
         //skin binding
         if (node.skin != -1)
