@@ -1356,6 +1356,26 @@ kernel void wavefrontPrepare(
     control[WF_CTRL_MISS] = 0u;
 }
 
+// Measured and not kept: reordering the extend queue so that neighbouring
+// threads trace similar rays.
+//
+// The profile invites it. A camera ray costs 0.090 us of traversal and a bounce
+// ray costs 0.166 -- same structure, same scene, 1.8x the time -- and extend is
+// two thirds of the frame, so closing that gap would be worth a fifth of it.
+//
+// A counting sort into octahedral direction bins (count, scan, scatter) costs
+// almost nothing to run, 0.6 ms against extend's 95, and made extend slower
+// both ways it was tried. Sorting the whole queue: 94.7 ms -> 103.5. Sorting
+// within blocks of 8192, which keeps the origins together: 94.7 -> 98.2.
+//
+// Why it does not pay here: the queue already arrives in pixel order, because
+// `generate` writes it that way and `shade` compacts it in place, so
+// neighbouring entries already start from neighbouring points and read
+// neighbouring PathRay, HitRecord and PathState. A permutation buys direction
+// coherence by giving up both origin coherence and every coalesced access in
+// the stage. The 1.8x is also not all divergence -- a bounce ray is simply
+// longer than a camera ray into a canopy, and no reordering shortens it.
+
 // Between `extend` and the two stages that consume its classification.
 kernel void wavefrontPrepareHitMiss(
     device uint32_t&        controlRef      [[buffer(0)]],
