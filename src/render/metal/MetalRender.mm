@@ -915,6 +915,9 @@ void MetalRender::createMetalMaterials()
         material.ior = p.ior;
         material.specular = p.specular;
         material.specular_tint = p.specular_tint;
+        material.diffuse_transmission = p.diffuse_transmission;
+        material.diffuse_transmission_color = packed_float3(simd_make_float3(
+            p.diffuse_transmission_color.x, p.diffuse_transmission_color.y, p.diffuse_transmission_color.z));
         material.transmission = p.transmission;
         material.clearcoat = p.clearcoat;
         material.clearcoat_roughness = p.clearcoat_roughness;
@@ -1316,6 +1319,7 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
             bind(mWavefrontControlBuffer, kHitCounterOffset, 9);
             bind(mMissQueueBuffer, 0, 10);
             bind(mWavefrontControlBuffer, kMissCounterOffset, 11);
+            bind(mPathStateBuffer, 0, 12);
             enc->dispatchThreadgroups(control + kDispatchArgsOffset, tg);
             barrier();
 
@@ -1532,6 +1536,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->setBuffer(mWavefrontControlBuffer, kHitCounterOffset, 9);
             enc->setBuffer(mMissQueueBuffer, 0, 10);
             enc->setBuffer(mWavefrontControlBuffer, kMissCounterOffset, 11);
+            enc->setBuffer(mPathStateBuffer, 0, 12);
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kDispatchArgsOffset, tg);
 
             enc->setComputePipelineState(mWavefrontPrepareHitMissPSO);
@@ -2242,6 +2247,19 @@ void MetalRender::render(Buffer* output)
     pUniformData->shiftX = camera.shiftX;
     pUniformData->shiftY = camera.shiftY;
 
+    // Atmosphere
+    {
+        const auto& atmosphere = mScene->getAtmosphere();
+        const bool on = atmosphere.has_value() && atmosphere->density > 0.0f;
+        pUniformData->hasFog = on ? 1u : 0u;
+        pUniformData->fogSigmaT = on ? atmosphere->density : 0.0f;
+        pUniformData->fogAnisotropy = on ? atmosphere->anisotropy : 0.0f;
+        pUniformData->fogHeight = on ? atmosphere->height : 0.0f;
+        pUniformData->fogAlbedo = on ? (vector_float3){ atmosphere->color.x, atmosphere->color.y,
+                                                        atmosphere->color.z }
+                                     : (vector_float3){ 0.0f, 0.0f, 0.0f };
+    }
+
     // Environment map
     if (mEnvMapLoaded)
     {
@@ -2455,6 +2473,10 @@ void MetalRender::render(Buffer* output)
                 features |= kFeatureDof;
             if (pUniformData->debug != 0)
                 features |= kFeatureDebug;
+            // Every ray, including every shadow ray, pays for the medium test.
+            // A scene without an atmosphere compiles the variant that has none.
+            if (pUniformData->hasFog)
+                features |= kFeatureFog;
 
             if (useMetal4)
             {
@@ -2945,12 +2967,14 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
     const bool dof = (features & kFeatureDof) != 0;
     const bool debug = (features & kFeatureDebug) != 0;
     const bool alpha = (features & kFeatureAlpha) != 0;
+    const bool fog = (features & kFeatureFog) != 0;
     values->setConstantValue(&envMap, MTL::DataTypeBool, (NS::UInteger)0);
     values->setConstantValue(&lights, MTL::DataTypeBool, (NS::UInteger)1);
     values->setConstantValue(&motionBlur, MTL::DataTypeBool, (NS::UInteger)2);
     values->setConstantValue(&dof, MTL::DataTypeBool, (NS::UInteger)3);
     values->setConstantValue(&debug, MTL::DataTypeBool, (NS::UInteger)4);
     values->setConstantValue(&alpha, MTL::DataTypeBool, (NS::UInteger)5);
+    values->setConstantValue(&fog, MTL::DataTypeBool, (NS::UInteger)6);
 
     // A pipeline built the Metal 3 way cannot be used with an argument table, so
     // the two paths need separate pipelines and the mode is part of the cache key.
@@ -2993,8 +3017,8 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
     {
         return nullptr;
     }
-    STRELKA_INFO("wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} metal4={}: shade maxThreadsPerTG={} extend={}",
-                 envMap, lights, motionBlur, dof, debug, alpha, useMetal4, v.shade->maxTotalThreadsPerThreadgroup(),
+    STRELKA_INFO("wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} metal4={}: shade maxThreadsPerTG={} extend={}",
+                 envMap, lights, motionBlur, dof, debug, alpha, fog, useMetal4, v.shade->maxTotalThreadsPerThreadgroup(),
                  v.extendStatic ? v.extendStatic->maxTotalThreadsPerThreadgroup() : 0);
     return &mWavefrontVariants.emplace(features, v).first->second;
 }

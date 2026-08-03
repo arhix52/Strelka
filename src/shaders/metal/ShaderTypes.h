@@ -113,6 +113,13 @@ struct Uniforms
 
     // Environment map (dome light)
     uint32_t hasEnvMap;
+    // Atmospheric scattering, homogeneous below fogHeight. See fog.h for why a
+    // slab and not a bounded volume.
+    uint32_t hasFog;
+    float fogSigmaT;
+    float fogAnisotropy;
+    float fogHeight;
+    vector_float3 fogAlbedo;
     // A separate environment for camera rays. See Scene::EnvLightDesc.
     uint32_t hasEnvBackground;
     float envBackgroundIntensity;
@@ -400,6 +407,10 @@ struct Material
     vector_float2 uv_scale;          //  8 bytes
     float uv_rotation;               //  4 bytes
     float _pad_uv;                   //  4 bytes -- 136
+
+    // KHR_materials_diffuse_transmission; see material_params.h.
+    packed_float3 diffuse_transmission_color; // 12 bytes
+    float diffuse_transmission;               //  4 bytes -- 152
 
     // Textures (8 bytes each: resource ID on CPU, texture handle on GPU)
 #ifdef __METAL_VERSION__

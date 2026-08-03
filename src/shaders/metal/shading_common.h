@@ -43,7 +43,9 @@ constant bool kFcMotionBlur [[function_constant(2)]];
 constant bool kFcDof [[function_constant(3)]];
 constant bool kFcDebug [[function_constant(4)]];
 constant bool kFcAlpha [[function_constant(5)]];
+constant bool kFcFog [[function_constant(6)]];
 
+constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
 constant bool SPEC_ENV_MAP = is_function_constant_defined(kFcEnvMap) ? kFcEnvMap : true;
 constant bool SPEC_LIGHTS = is_function_constant_defined(kFcLights) ? kFcLights : true;
 constant bool SPEC_MOTION_BLUR = is_function_constant_defined(kFcMotionBlur) ? kFcMotionBlur : true;
@@ -410,6 +412,8 @@ void initSurfaceInteraction(
     matParams.anisotropy = material.anisotropy;
     matParams.specular = material.specular;
     matParams.specular_tint = material.specular_tint;
+    matParams.diffuse_transmission = material.diffuse_transmission;
+    matParams.diffuse_transmission_color = float3(material.diffuse_transmission_color);
     matParams.material_type = material.material_type;
     matParams.thin_walled = material.thin_walled;
     matParams.dielectric_priority = material.dielectric_priority;
@@ -489,7 +493,11 @@ LightConnection connectLight(
     constant Uniforms& uniforms,
     thread SamplerState& samplerRnd,
     device const UniformLight& light,
-    thread SurfaceInteraction& si)
+    thread SurfaceInteraction& si,
+    // A scattering event in a medium has a position and no normal. The facing
+    // test and the cosine below are surface terms; applied to a volume they
+    // reject half of every connection and darken the other half.
+    bool volumeEvent)
 {
     LightSampleData lightSampleData = {};
     const float2 uv = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType), random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
@@ -543,7 +551,11 @@ LightConnection connectLight(
     // For area lights the facing test uses the light's surface normal; for a
     // sharp point the "normal" is -L, so -dot(L, normal) = 1 always.
     const bool facing =
-        (light.type == 5 || light.type == 6)
+        volumeEvent
+            ? (emitsLight(Li) &&
+               (light.type == 5 || light.type == 6 ||
+                -dot(lightSampleData.L, lightSampleData.normal) > 0.001f))
+        : (light.type == 5 || light.type == 6)
             ? (dot(si.shading_normal, lightSampleData.L) > 0.0f && emitsLight(Li))
             : (dot(si.shading_normal, lightSampleData.L) > 0.0f &&
                -dot(lightSampleData.L, lightSampleData.normal) > 0.001f && emitsLight(Li));
@@ -552,7 +564,7 @@ LightConnection connectLight(
         // The cosine belongs here because bsdf_eval() returns f alone, unlike
         // bsdf_sample()'s bsdf_over_pdf which already carries it. See the note on
         // both result structs in bsdf_types.h.
-        c.radiance = Li * saturate(dot(si.shading_normal, lightSampleData.L));
+        c.radiance = volumeEvent ? Li : Li * saturate(dot(si.shading_normal, lightSampleData.L));
         c.origin = si.position;
         c.pdf = lightSampleData.pdf;
         c.tMin = 0.001f;
@@ -595,7 +607,8 @@ LightConnection connectEnvLight(
     thread SamplerState& samplerRnd,
     thread SurfaceInteraction& si,
     device const EnvAliasEntry* envAliasTable,
-    texture2d<float> envMapTexture)
+    texture2d<float> envMapTexture,
+    bool volumeEvent)
 {
     const float2 xi = float2(
         random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
@@ -616,7 +629,7 @@ LightConnection connectEnvLight(
     if (envPdf <= 0.0f)
         return c;
 
-    if (dot(si.shading_normal, dir) <= 0.0f)
+    if (!volumeEvent && dot(si.shading_normal, dir) <= 0.0f)
         return c;
 
     constexpr sampler envSampler(mag_filter::linear, min_filter::linear, address::repeat, coord::normalized);
@@ -626,7 +639,7 @@ LightConnection connectEnvLight(
     Li *= uniforms.envMapIntensity * float3(uniforms.envMapColorTint);
 
     // Cosine folded in here for the same reason as in connectLight().
-    c.radiance = Li * max(dot(si.shading_normal, dir), 0.0f);
+    c.radiance = volumeEvent ? Li : Li * max(dot(si.shading_normal, dir), 0.0f);
     // Offset along the face the shadow ray actually leaves from. The raw
     // geometry normal points to a fixed side of the triangle, so on a back-face
     // hit it pushes the origin *into* the surface and the ray immediately hits
@@ -650,7 +663,8 @@ LightConnection connectToLight(
     thread SamplerState& samplerRnd,
     thread SurfaceInteraction& si,
     device const EnvAliasEntry* envAliasTable,
-    texture2d<float> envMapTexture)
+    texture2d<float> envMapTexture,
+    bool volumeEvent = false)
 {
     if (SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
@@ -659,14 +673,15 @@ LightConnection connectToLight(
         if (!SPEC_LIGHTS || numLights == 0 || u >= 0.5f)
         {
             const float selectionPdf = (numLights > 0) ? 0.5f : 1.0f;
-            LightConnection c = connectEnvLight(uniforms, samplerRnd, si, envAliasTable, envMapTexture);
+            LightConnection c =
+                connectEnvLight(uniforms, samplerRnd, si, envAliasTable, envMapTexture, volumeEvent);
             c.pdf *= selectionPdf;
             return c;
         }
         // Sample a local light (remap u from [0, 0.5) to [0, 1)).
         const float remappedU = u * 2.0f;
         const uint32_t lightId = min((uint32_t)(numLights * remappedU), numLights - 1);
-        LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si);
+        LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent);
         c.pdf *= 0.5f / numLights;
         return c;
     }
@@ -681,7 +696,7 @@ LightConnection connectToLight(
 
     const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
     const uint32_t lightId = min((uint32_t)(numLights * u), numLights - 1);
-    LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si);
+    LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent);
     c.pdf *= 1.0f / numLights;
     return c;
 }

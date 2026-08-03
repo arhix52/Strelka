@@ -48,6 +48,14 @@ struct SurfaceInteraction
     float   specular;           // Specular level
     float   specular_tint;      // Specular tint
 
+    // -- KHR_materials_diffuse_transmission ---------------------------------
+    // Light that enters the surface and leaves diffusely on the far side. This
+    // is what a leaf does, and it is not `transmission`: that lobe is specular
+    // and refracts through an interface, which would make a needle look like
+    // glass. Weight splits the diffuse lobe rather than adding to it.
+    float   diffuse_transmission;        // [0, 1]
+    float3  diffuse_transmission_color;  // tint of what comes through
+
     unsigned int material_type; // MaterialType tag
     unsigned int thin_walled;   // 1 = thin-walled surface
     unsigned int dielectric_priority; // Priority for nested dielectrics (0 = air)

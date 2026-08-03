@@ -30,6 +30,13 @@ enum class SampleDimension : uint32_t
   eOpacity,
   eLensU,
   eLensV,
+  // Atmospheric scattering: the free-flight distance, and the two draws that
+  // pick a direction out of the phase function. Their own dimensions for the
+  // same reason eOpacity has one -- a scattering event must not correlate with
+  // the BSDF draws of the surface the ray was heading for.
+  eFogDistance,
+  eFogPhaseU,
+  eFogPhaseV,
   eNUM_DIMENSIONS
 };
 

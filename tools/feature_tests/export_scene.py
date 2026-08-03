@@ -249,6 +249,62 @@ def collect_instances(depsgraph):
     return out
 
 
+def collect_atmosphere(depsgraph):
+    """A Volume Scatter object, as the sidecar's global atmosphere.
+
+    The pine forest describes its haze the usual way: one box the size of the
+    set, containing the camera, with a Volume Scatter on the material output.
+    Strelka offers a slab rather than bounded media (see fog.h), so the box
+    becomes "everything below its ceiling", which for a box centred on the scene
+    is the same region wherever the camera can go.
+
+    Two approximations, both stated: the box's horizontal extent is dropped, and
+    Blender's per-channel scattering coefficient is split into a scalar
+    extinction and a colour, so a coloured medium picks up a little absorption
+    Cycles would not have. At the densities haze is authored with -- 0.004 here
+    -- neither is visible.
+    """
+    # bpy.data.objects rather than the depsgraph: a fog box is routinely hidden
+    # in the viewport, which is the depsgraph this runs against, and it is the
+    # object's parameters that are wanted rather than its evaluated geometry.
+    best = None
+    for ob in bpy.data.objects:
+        if ob.type != "MESH" or ob.data is None or ob.hide_render:
+            continue
+        for mat in ob.data.materials:
+            if mat is None or not mat.use_nodes:
+                continue
+            out = next((n for n in mat.node_tree.nodes
+                        if n.type == "OUTPUT_MATERIAL" and n.is_active_output), None)
+            if out is None:
+                continue
+            socket = out.inputs.get("Volume")
+            if socket is None or not socket.links:
+                continue
+            node = socket.links[0].from_node
+            if node.type not in {"VOLUME_SCATTER", "PRINCIPLED_VOLUME"}:
+                continue
+            density = float(node.inputs["Density"].default_value)
+            if density <= 0.0:
+                continue
+            colour = node.inputs["Color"].default_value
+            g = float(node.inputs["Anisotropy"].default_value) if "Anisotropy" in node.inputs else 0.0
+            top = max((ob.matrix_world @ Vector(corner)).z for corner in ob.bound_box)
+            entry = {
+                "name": ob.name,
+                "color": [float(colour[0]), float(colour[1]), float(colour[2])],
+                "density": density,
+                "anisotropy": g,
+                "height": top,   # Blender z is glTF y
+            }
+            # The largest one wins if a scene has several: the atmosphere is the
+            # one that contains the camera, and a small volume elsewhere is
+            # something else that a slab cannot represent anyway.
+            if best is None or top > best["height"]:
+                best = entry
+    return best
+
+
 def render_depsgraph_instances():
     """The same, but from the render depsgraph rather than the viewport one.
 
@@ -356,6 +412,53 @@ def write_instances(gltf_path, instances):
     return added
 
 
+def write_material_extensions(gltf_path, translucency, volumes):
+    """Add the KHR material extensions the exporter has no mapping for.
+
+    KHR_materials_diffuse_transmission from a Translucent BSDF: without it the
+    pine canopy is roughly ten times darker than the reference in a backlit shot,
+    which looks like a shadowing problem and is a missing lobe.
+
+    KHR_materials_volume from a Volume Absorption wired to the output: the river
+    is a transmissive surface over an absorbing medium, and without the medium it
+    is clear glass over sand.
+    """
+    with open(gltf_path) as f:
+        doc = json.load(f)
+
+    used = set(doc.get("extensionsUsed", []))
+    counts = {"diffuse_transmission": 0, "volume": 0}
+    for mat in doc.get("materials", []):
+        name = mat.get("name")
+        entry = translucency.get(name)
+        if entry is not None:
+            factor, colour = entry
+            mat.setdefault("extensions", {})["KHR_materials_diffuse_transmission"] = {
+                "diffuseTransmissionFactor": factor,
+                "diffuseTransmissionColorFactor": colour,
+            }
+            used.add("KHR_materials_diffuse_transmission")
+            counts["diffuse_transmission"] += 1
+
+        volume = volumes.get(name)
+        if volume is not None:
+            colour, distance = volume
+            mat.setdefault("extensions", {})["KHR_materials_volume"] = {
+                "thicknessFactor": 1.0,
+                "attenuationColor": colour,
+                "attenuationDistance": distance,
+            }
+            used.add("KHR_materials_volume")
+            counts["volume"] += 1
+
+    doc["extensionsUsed"] = sorted(used)
+    with open(gltf_path, "w") as f:
+        json.dump(doc, f)
+    print("material extensions -> diffuse transmission %d, volume %d"
+          % (counts["diffuse_transmission"], counts["volume"]))
+    return counts
+
+
 def curve_objects(depsgraph):
     """Curve and hair-curves objects, which glTF has no representation for.
 
@@ -403,6 +506,13 @@ def main():
             print("environment backdrop -> %s" % backdrop)
     else:
         print("[gap] no baked environment; run bake_env.py for the world")
+    atmosphere = collect_atmosphere(depsgraph)
+    if atmosphere is not None:
+        sidecar["atmosphere"] = {k: v for k, v in atmosphere.items() if k != "name"}
+        print("atmosphere <- %s: density %.4g, anisotropy %.2f, below y=%.1f"
+              % (atmosphere["name"], atmosphere["density"], atmosphere["anisotropy"],
+                 atmosphere["height"]))
+
     with open(os.path.join(out, name + "_light.json"), "w") as f:
         json.dump(sidecar, f, indent=2)
     print("lights -> sidecar: %d (%s)"
@@ -424,7 +534,7 @@ def main():
 
     # Before the export, because it rewrites the graphs the exporter reads.
     import flatten_materials
-    flat = flatten_materials.flatten(out)
+    flat, translucency, volumes = flatten_materials.flatten(out)
     if flat:
         print("materials rewritten for export: %d" % len(flat))
         for mat_name, note in flat:
@@ -450,7 +560,9 @@ def main():
     print("  extensions: %s" % ", ".join(sorted(doc.get("extensionsUsed", []))) or "(none)")
     print("  attributes: %s" % ", ".join(sorted(attrs)))
 
-    # After the summary, because it rewrites the file the summary was read from.
+    # After the summary, because these rewrite the file the summary was read from.
+    if translucency or volumes:
+        write_material_extensions(gltf, translucency, volumes)
     if instances:
         write_instances(gltf, instances)
 

@@ -114,6 +114,24 @@ bool loadLightsJson(Scene& scene, const std::string& lightJsonPath)
             envDesc.backgroundIntensity = env["backgroundIntensity"].get<float>();
         scene.setEnvLight(envDesc);
     }
+
+    if (root.contains("atmosphere"))
+    {
+        const auto& atm = root["atmosphere"];
+        Scene::AtmosphereDesc desc{};
+        if (atm.contains("color"))
+        {
+            const auto& c = atm["color"];
+            desc.color = glm::float3(c[0].get<float>(), c[1].get<float>(), c[2].get<float>());
+        }
+        if (atm.contains("density"))
+            desc.density = atm["density"].get<float>();
+        if (atm.contains("anisotropy"))
+            desc.anisotropy = atm["anisotropy"].get<float>();
+        if (atm.contains("height"))
+            desc.height = atm["height"].get<float>();
+        scene.setAtmosphere(desc);
+    }
     return true;
 }
 

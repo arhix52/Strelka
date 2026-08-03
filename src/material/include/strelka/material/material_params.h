@@ -116,9 +116,16 @@ struct MaterialParams
     float       uv_offset_y;            //  4 bytes
     float       uv_scale_x;             //  4 bytes
     float       uv_scale_y;             //  4 bytes  -- total 160
+
+    // -- KHR_materials_diffuse_transmission ----------------------------------
+    // What a leaf does: light enters and leaves diffusely on the far side. Kept
+    // apart from `transmission`, which is specular refraction through an
+    // interface and would make foliage look like glass.
+    float3      diffuse_transmission_color; // 12 bytes
+    float       diffuse_transmission;       //  4 bytes  -- total 176
 };
 
 // Static assert equivalent for size (works on all three backends)
-// 160 bytes, 16-byte aligned -- fits nicely in SBT / argument buffers.
+// 176 bytes, 16-byte aligned -- fits nicely in SBT / argument buffers.
 
 #endif // STRELKA_MATERIAL_PARAMS_H

@@ -640,6 +640,23 @@ public:
         float backgroundIntensity = 1.0f;
     };
 
+    // Homogeneous atmospheric scattering below `height`. A slab, not a bounded
+    // volume -- see fog.h for why that is the shape offered.
+    struct AtmosphereDesc
+    {
+        glm::float3 color = glm::float3(1.0f); // single-scattering albedo
+        float density = 0.0f;                  // extinction, per world unit
+        float anisotropy = 0.0f;               // Henyey-Greenstein g
+        float height = 0.0f;                   // world y above which there is none
+    };
+
+    void setAtmosphere(const AtmosphereDesc& desc)
+    {
+        mAtmosphere = desc;
+        markChanged(ChangeBits::Env);
+    }
+    const std::optional<AtmosphereDesc>& getAtmosphere() const { return mAtmosphere; }
+
     void setEnvLight(const EnvLightDesc& desc)
     {
         mEnvLight = desc;
@@ -824,6 +841,7 @@ private:
     bool mHostGeometryReleased = false;
 
     std::optional<EnvLightDesc> mEnvLight;
+    std::optional<AtmosphereDesc> mAtmosphere;
 
     std::set<uint32_t> mDirtyInstances;
 

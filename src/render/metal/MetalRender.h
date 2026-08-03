@@ -267,6 +267,7 @@ private:
         // different compiler and are not interchangeable, so the mode has to
         // separate them in the cache.
         kFeatureMetal4 = 1u << 5,
+        kFeatureFog = 1u << 7,
         kFeatureCount = 1u << 5,
     };
     std::map<uint32_t, WavefrontVariant> mWavefrontVariants;

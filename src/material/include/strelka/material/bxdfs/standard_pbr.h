@@ -29,6 +29,7 @@
 struct PbrLobeWeights
 {
     float diffuse;
+    float diffuse_transmission;
     float specular;
     float transmission;
     float clearcoat;
@@ -41,8 +42,18 @@ DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const THREAD_REF SurfaceInteraction&
 
     float dielectric_weight = 1.0f - si.metallic;
 
-    w.diffuse      = dielectric_weight * (1.0f - si.transmission) * luminance(si.albedo);
+    // The diffuse lobe splits rather than grows: KHR_materials_diffuse_transmission
+    // defines the result as mix(diffuse_brdf, diffuse_btdf, weight), so what goes
+    // through is what no longer comes back, and a leaf cannot reflect and
+    // transmit its way past the energy that hit it.
+    const float dt = saturate(si.diffuse_transmission);
+    const float diffuse_base = dielectric_weight * (1.0f - si.transmission);
+
+    w.diffuse      = diffuse_base * (1.0f - dt) * luminance(si.albedo);
     w.diffuse      = fmaxf(w.diffuse, 0.0f);
+
+    w.diffuse_transmission = diffuse_base * dt * luminance(si.diffuse_transmission_color);
+    w.diffuse_transmission = fmaxf(w.diffuse_transmission, 0.0f);
 
     // For specular, use the approximate Fresnel reflectance at normal incidence.
     //
@@ -62,7 +73,7 @@ DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const THREAD_REF SurfaceInteraction&
     w.clearcoat     = si.clearcoat * 0.25f; // fixed F0 ~ 0.04, attenuated
     w.clearcoat     = fmaxf(w.clearcoat, 0.0f);
 
-    w.total = w.diffuse + w.specular + w.transmission + w.clearcoat;
+    w.total = w.diffuse + w.diffuse_transmission + w.specular + w.transmission + w.clearcoat;
     if (w.total < 1e-10f)
     {
         w.total    = 1.0f;
@@ -93,9 +104,10 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
 
     // Normalize weights to probabilities
     float p_diffuse      = w.diffuse      * inv_total;
+    float p_diffuse_tr   = w.diffuse_transmission * inv_total;
     float p_specular     = w.specular     * inv_total;
     float p_transmission = w.transmission * inv_total;
-    // p_clearcoat = 1 - p_diffuse - p_specular - p_transmission
+    // p_clearcoat = 1 - p_diffuse - p_diffuse_tr - p_specular - p_transmission
 
     float3 N = si.shading_normal;
     float3 V = si.wo;
@@ -109,7 +121,12 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
     // into Nf and picks eta by direction), so the reflection lobes are skipped
     // rather than evaluated against a back-facing normal.
     const bool exiting = NdotV <= 0.0f;
-    if (exiting && si.transmission <= 0.0f) return result;
+    // Diffuse transmission is the one lobe that legitimately answers a back-face
+    // hit without an interface to refract through: a leaf lit from behind is
+    // seen from the front through its own thickness. A thin cutout card gets hit
+    // from both sides constantly, so this is the common case, not a corner one.
+    const bool dt_only_exit = exiting && si.transmission <= 0.0f;
+    if (dt_only_exit && w.diffuse_transmission <= 0.0f) return result;
     // Exiting takes the transmission lobe with probability 1, so its selection
     // probability must not divide into the pdf.
     const float p_trans_eff = exiting ? 1.0f : p_transmission;
@@ -146,7 +163,10 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
     // -----------------------------------------------------------------------
     // Lobe selection
     // -----------------------------------------------------------------------
-    float cdf = p_diffuse;
+    // On an exit hit with nothing but diffuse transmission available, the lobe
+    // draw must land there with probability 1 rather than be filtered out by a
+    // branch that never runs.
+    float cdf = dt_only_exit ? 0.0f : p_diffuse;
     if (!exiting && u_lobe < cdf)
     {
         // ===== DIFFUSE LOBE ===============================================
@@ -158,7 +178,8 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
 
         // Evaluate all lobes for the sampled direction (MIS)
         // Diffuse contribution
-        float3 f_diffuse = si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission);
+        float3 f_diffuse = si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) *
+                           (1.0f - saturate(si.diffuse_transmission));
 
         // Specular contribution
         float3 H     = safe_normalize(V + result.wi);
@@ -208,6 +229,39 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         result.pdf           = combined_pdf;
         result.event_type    = BSDF_EVENT_DIFFUSE_REFLECTION;
     }
+    else if (dt_only_exit || u_lobe < (cdf += p_diffuse_tr))
+    {
+        // ===== DIFFUSE TRANSMISSION LOBE ==================================
+        //
+        // Lambertian about -N: light enters, scatters inside, and leaves on the
+        // far side with no memory of where it came from. No Fresnel and no eta,
+        // which is what separates this from the specular transmission lobe
+        // below -- there is no interface being refracted through.
+        const float3 Nt = (NdotV > 0.0f) ? -N : N;
+        float3 Tt, Bt;
+        build_onb(Nt, Tt, Bt);
+        float3 wi_local = cosine_hemisphere_sample(u1, u2);
+        result.wi = local_to_world(wi_local, Tt, Bt, Nt);
+
+        const float NdotL_t = dot(Nt, result.wi);
+        if (NdotL_t <= 0.0f) return result;
+
+        const float dt = saturate(si.diffuse_transmission);
+        const float3 f_dt = si.diffuse_transmission_color * M_1_PI_F *
+                            (1.0f - si.metallic) * (1.0f - si.transmission) * dt;
+
+        // Only this lobe reaches the far hemisphere without an interface, so the
+        // pdf has no other term to share with -- unless the material is also
+        // specularly transmissive, which foliage is not and glass does not do
+        // diffusely.
+        const float pdf_dt = cosine_hemisphere_pdf(NdotL_t);
+        const float p_eff = dt_only_exit ? 1.0f : p_diffuse_tr;
+        const float combined_pdf = fmaxf(p_eff * pdf_dt, 1e-10f);
+
+        result.bsdf_over_pdf = f_dt * NdotL_t / combined_pdf;
+        result.pdf           = combined_pdf;
+        result.event_type    = BSDF_EVENT_DIFFUSE_TRANSMISSION;
+    }
     else if (!exiting && u_lobe < (cdf += p_specular))
     {
         // ===== SPECULAR LOBE ==============================================
@@ -233,7 +287,8 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         float3 f_spec = F * (D * G2 / (4.0f * NdotV * NdotL + 1e-10f)) *
                         ggx_energy_compensation(F0, si.roughness, NdotV);
 
-        float3 f_diffuse = si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission);
+        float3 f_diffuse = si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) *
+                           (1.0f - saturate(si.diffuse_transmission));
 
         float3 f_cc  = make_float3(0.0f);
         float pdf_cc = 0.0f;
@@ -385,7 +440,8 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         float3 f_spec = F * (D * G2_main / (4.0f * NdotV * NdotL + 1e-10f)) *
                         ggx_energy_compensation(F0, si.roughness, NdotV);
 
-        float3 f_diffuse = si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission);
+        float3 f_diffuse = si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) *
+                           (1.0f - saturate(si.diffuse_transmission));
 
         float D_cc    = ggx_ndf(alpha_cc, NdotH);
         float G2_cc   = ggx_smith_g2(alpha_cc, NdotV, NdotL);
@@ -462,6 +518,7 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
     PbrLobeWeights w = pbr_lobe_weights(si);
     float inv_total  = 1.0f / w.total;
     float p_diffuse      = w.diffuse      * inv_total;
+    float p_diffuse_tr   = w.diffuse_transmission * inv_total;
     float p_specular     = w.specular     * inv_total;
     float p_transmission = w.transmission * inv_total;
     float p_clearcoat    = w.clearcoat    * inv_total;
@@ -489,7 +546,8 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
             return result;
 
         // Diffuse
-        float3 f_diffuse = si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission);
+        float3 f_diffuse = si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) *
+                           (1.0f - saturate(si.diffuse_transmission));
 
         // Specular
         float3 F      = fresnel_schlick(F0, VdotH);
@@ -524,8 +582,26 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
     else
     {
         // ---- Transmission hemisphere --------------------------------------
+        //
+        // Diffuse transmission first, and on its own terms: it is not delta at
+        // any roughness and needs no interface, so neither of the guards below
+        // applies to it. A leaf is the whole reason next-event estimation has
+        // anything to connect to on the shadowed side of a canopy.
+        const float dt = saturate(si.diffuse_transmission);
+        if (dt > 0.0f)
+        {
+            const float3 Nt = (NdotV > 0.0f) ? -N : N;
+            const float NdotL_t = dot(Nt, wi);
+            if (NdotL_t > 0.0f)
+            {
+                result.bsdf = si.diffuse_transmission_color * M_1_PI_F *
+                              (1.0f - si.metallic) * (1.0f - si.transmission) * dt;
+                result.pdf = p_diffuse_tr * cosine_hemisphere_pdf(NdotL_t);
+            }
+        }
+
         if (alpha < 0.001f)
-            return result; // Smooth transmission is delta -- cannot eval
+            return result; // Smooth specular transmission is delta -- cannot eval
 
         if (si.transmission <= 0.0f)
             return result;
@@ -554,12 +630,15 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
         float factor  = fabsf(VdotH * LdotH) / (NdotV_abs * NdotL_abs + 1e-10f);
         float btdf    = (1.0f - F_val) * D * G2 * eta * eta * factor / (denom * denom + 1e-10f);
 
-        // Weight by transmission and dielectric fraction
-        result.bsdf = si.albedo * fmaxf(btdf, 0.0f) * (1.0f - si.metallic) * si.transmission;
+        // Accumulated, not assigned: a material can be both diffusely and
+        // specularly transmissive, and the diffuse term above has already
+        // written into the same hemisphere.
+        result.bsdf = result.bsdf +
+                      si.albedo * fmaxf(btdf, 0.0f) * (1.0f - si.metallic) * si.transmission;
 
         float dwh_dwi = (eta * eta * fabsf(LdotH)) / (denom * denom + 1e-10f);
         float vndf_p  = ggx_vndf_pdf(alpha, NdotH, NdotV_abs, VdotH);
-        result.pdf    = p_trans_eff * (1.0f - F_val) * vndf_p * dwh_dwi;
+        result.pdf    = result.pdf + p_trans_eff * (1.0f - F_val) * vndf_p * dwh_dwi;
     }
 
     return result;

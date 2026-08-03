@@ -22,6 +22,15 @@
 // only a subset of the shaded paths emit one.
 // ============================================================================
 
+#include "fog.h"
+
+// Bit 30 of HitRecord::geomEntryIndex marks a scattering event in the
+// atmosphere: no surface was reached, the ray was stopped by the medium. Bit 31
+// is the emissive-geometry flag; both live in the same word because a fog event
+// is a third kind of "what did this ray hit" and the shade kernel already
+// branches on that word.
+#define HIT_FOG_BIT (1u << 30)
+
 // Bit 31 of HitRecord::geomEntryIndex marks a hit on emissive geometry, in which
 // case the remaining bits hold the light index rather than a geometry entry.
 #define HIT_LIGHT_BIT 0x80000000u
@@ -239,7 +248,11 @@ static void extendImpl(
     device uint32_t*                                           hitQueue,
     device atomic_uint*                                        hitCounter,
     device uint32_t*                                           missQueue,
-    device atomic_uint*                                        missCounter)
+    device atomic_uint*                                        missCounter,
+    // Only for the fog: the path's depth decorrelates the free-flight draw
+    // across bounces, and without it every bounce of a path scatters at the same
+    // fraction of its segment, which shows up as banding in the haze.
+    device const PathState*                                    paths)
 {
     // Indirect dispatch can only launch whole threadgroups, so the tail of the
     // last one runs past the queue and has to be discarded here.
@@ -270,6 +283,33 @@ static void extendImpl(
     // straight to the miss stage: no hit record is written and the path never
     // enters `shade`. On a scene with an open background that is most of the
     // secondary rays, and it was the whole cost of the bounce.
+    // Atmospheric scattering, decided here because this is the one kernel that
+    // knows both where the ray ended and whether it ended at all. A ray that
+    // scatters never reaches its surface, and one that escapes can still scatter
+    // on the way out -- so the miss branch is inside this test, not before it.
+    if (SPEC_FOG && uniforms.hasFog)
+    {
+        const float surfaceT =
+            (hit.type == intersection_type::none) ? 1e16f : hit.distance;
+        SamplerState frng =
+            samplerFor(uniforms, tid, sampleIdx, pathDepth(paths[tid].depthAndFlags));
+        float scatterT = 0.0f;
+        if (fogSampleDistance(r.origin, r.direction, surfaceT, uniforms.fogHeight, uniforms.fogSigmaT,
+                              random<SampleDimension::eFogDistance>(frng, uniforms.samplerType),
+                              scatterT))
+        {
+            HitRecord fogRec;
+            fogRec.geomEntryIndex = HIT_FOG_BIT;
+            fogRec.instanceIndex = 0u;
+            fogRec.primitiveId = 0u;
+            fogRec.barycentrics = vector_float2(0.0f, 0.0f);
+            fogRec.distance = scatterT;
+            hits[tid] = fogRec;
+            queuePush(hitCounter, hitQueue, tid);
+            return;
+        }
+    }
+
     if (hit.type == intersection_type::none)
     {
         queuePush(missCounter, missQueue, tid);
@@ -303,10 +343,11 @@ static void extendImpl(
                      device uint32_t* hitQueue [[buffer(8)]],                                               \
                      device atomic_uint* hitCounter [[buffer(9)]],                                          \
                      device uint32_t* missQueue [[buffer(10)]],                                             \
-                     device atomic_uint* missCounter [[buffer(11)]])                                        \
+                     device atomic_uint* missCounter [[buffer(11)]],                                        \
+                     device const PathState* paths [[buffer(12)]])                                          \
     {                                                                                                       \
         extendImpl<TRAITS>(gid, uniforms, instances, accelerationStructure, rays, hits, sampleIdx, queue,    \
-                           control, hitQueue, hitCounter, missQueue, missCounter);                          \
+                           control, hitQueue, hitCounter, missQueue, missCounter, paths);                          \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
@@ -643,6 +684,96 @@ kernel void wavefrontShade(
 
     float3 radiance = float3(0.0f);
     const HitRecord rec = hits[tid];
+
+    // --- Atmospheric scattering ---------------------------------------------
+    //
+    // Handled before anything to do with surfaces: the ray never reached one.
+    // Free-flight sampling was analog, so the only weight is the single-
+    // scattering albedo -- the fraction of an extinction event that scatters
+    // rather than absorbs.
+    if (SPEC_FOG && (rec.geomEntryIndex & HIT_FOG_BIT) != 0u)
+    {
+        const float3 scatterPoint = rayOrigin + rayDir * rec.distance;
+        throughput *= float3(uniforms.fogAlbedo);
+
+        // A medium event has a position and no normal, which is what the
+        // volumeEvent flag tells the light connection.
+        SurfaceInteraction si = {};
+        si.position = scatterPoint;
+        si.shading_normal = -rayDir;
+        si.geometry_normal = -rayDir;
+        si.front_face = true;
+
+        bool didNee = false;
+        if (SPEC_LIGHTS || (SPEC_ENV_MAP && uniforms.hasEnvMap))
+        {
+            const LightConnection conn =
+                connectToLight(uniforms, uniforms.numLights, lights, rng, si, envAliasTable,
+                               envMapTexture, true);
+            if (conn.needsRay && conn.pdf > 0.0f)
+            {
+                const float phase = hgPhase(dot(-rayDir, conn.toLight), uniforms.fogAnisotropy);
+                // The phase function is the medium's BSDF and its own pdf, so
+                // MIS pairs it against the light density exactly as a surface
+                // lobe would.
+                const float misWeight =
+                    conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, phase);
+                const float3 weight = throughput * (conn.radiance / conn.pdf) * misWeight * phase;
+                if (any(weight > 1e-6f))
+                {
+                    const uint32_t slot =
+                        atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                    ShadowRay sr;
+                    sr.origin = packed_float3(scatterPoint);
+                    sr.direction = packed_float3(conn.toLight);
+                    sr.weight = packed_float3(weight);
+                    sr.maxDistance = conn.tMax;
+                    sr.pixelIndex = tid;
+                    shadowRays[slot] = sr;
+                    didNee = true;
+                }
+            }
+        }
+
+        float phasePdf = 0.0f;
+        const float3 nextDir =
+            hgSample(-rayDir, uniforms.fogAnisotropy,
+                     random<SampleDimension::eFogPhaseU>(rng, uniforms.samplerType),
+                     random<SampleDimension::eFogPhaseV>(rng, uniforms.samplerType), phasePdf);
+
+        radianceOut[tid] += float4(radiance, 0.0f);
+
+        // Roulette on the medium's albedo, which is the only thing multiplying
+        // the throughput here. Without it a thin haze is a very long random walk
+        // that contributes almost nothing per step.
+        const float survive = clamp(max(max(throughput.x, throughput.y), throughput.z), 0.05f, 1.0f);
+        if (random<SampleDimension::eRussianRoulette>(rng, uniforms.samplerType) >= survive)
+        {
+            return;
+        }
+        throughput /= survive;
+
+        PathRay nextRay;
+        nextRay.origin = packed_float3(scatterPoint);
+        nextRay.direction = packed_float3(nextDir);
+        rays[tid] = nextRay;
+
+        p.throughput = packed_float3(throughput);
+        p.lastBsdfPdf = phasePdf;
+        // Depth advances: a scattering event is a bounce, and a medium with no
+        // depth budget of its own would let a path wander forever.
+        p.depthAndFlags = (depth + 1u) | PATH_FLAG_ALIVE |
+                          (p.depthAndFlags & ~(PATH_DEPTH_MASK | PATH_FLAG_ALIVE |
+                                               PATH_FLAG_SPECULAR | PATH_FLAG_NEE_DONE)) |
+                          (didNee ? PATH_FLAG_NEE_DONE : 0u);
+        if (depth + 1u >= uniforms.maxDepth)
+        {
+            return;
+        }
+        paths[tid] = p;
+        queuePush(outCounter, queueOut, tid);
+        return;
+    }
 
     // --- Emissive geometry --------------------------------------------------
     if (SPEC_LIGHTS && (rec.geomEntryIndex & HIT_LIGHT_BIT) != 0u)
@@ -1120,7 +1251,17 @@ static void shadowImpl(
         if (T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime).type ==
             intersection_type::none)
         {
-            radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
+            // Whatever survived the geometry still has to cross the atmosphere. Without
+    // this a shadow ray is a hole in the fog, and every light reads as if the
+    // haze were not there -- which is exactly the term that makes a low sun
+    // through trees look like a low sun through trees.
+    if (SPEC_FOG && uniforms.hasFog)
+    {
+        const float tau = fogOpticalDepth(float3(sr.origin), float3(sr.direction),
+                                          sr.maxDistance, uniforms.fogHeight, uniforms.fogSigmaT);
+        weight *= exp(-tau);
+    }
+    radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
         }
         return;
     }

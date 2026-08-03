@@ -608,6 +608,27 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     p.specular = 0.5f * khrFloat(material, "KHR_materials_specular", "specularFactor", 1.0f);
     p.specular_tint = 0.0f;
     p.transmission = khrFloat(material, "KHR_materials_transmission", "transmissionFactor", 0.0f);
+
+    // KHR_materials_diffuse_transmission. Foliage: light enters the leaf and
+    // leaves diffusely on the far side. Blender writes this through a Translucent
+    // BSDF, which the glTF exporter cannot express, so export_scene.py injects
+    // the extension after the fact -- see flatten_materials.py.
+    p.diffuse_transmission =
+        khrFloat(material, "KHR_materials_diffuse_transmission", "diffuseTransmissionFactor", 0.0f);
+    p.diffuse_transmission_color = glm::float3(1.0f);
+    {
+        const auto ext = material.extensions.find("KHR_materials_diffuse_transmission");
+        if (ext != material.extensions.end() && ext->second.Has("diffuseTransmissionColorFactor"))
+        {
+            const auto& c = ext->second.Get("diffuseTransmissionColorFactor");
+            if (c.IsArray() && c.ArrayLen() >= 3)
+            {
+                p.diffuse_transmission_color =
+                    glm::float3((float)c.Get(0).GetNumberAsDouble(), (float)c.Get(1).GetNumberAsDouble(),
+                                (float)c.Get(2).GetNumberAsDouble());
+            }
+        }
+    }
     p.clearcoat = khrFloat(material, "KHR_materials_clearcoat", "clearcoatFactor", 0.0f);
     p.clearcoat_roughness =
         khrFloat(material, "KHR_materials_clearcoat", "clearcoatRoughnessFactor", 0.0f);

@@ -69,6 +69,8 @@ DEVICE_FUNC void bsdf_init(SurfaceInteraction& si,
     si.anisotropy         = params.anisotropy;
     si.specular           = params.specular;
     si.specular_tint      = params.specular_tint;
+    si.diffuse_transmission = params.diffuse_transmission;
+    si.diffuse_transmission_color = params.diffuse_transmission_color;
     si.material_type      = params.material_type;
     si.thin_walled        = params.thin_walled;
     si.dielectric_priority = params.dielectric_priority;
@@ -90,6 +92,8 @@ DEVICE_FUNC void bsdf_init(THREAD_REF SurfaceInteraction& si,
     si.anisotropy         = params.anisotropy;
     si.specular           = params.specular;
     si.specular_tint      = params.specular_tint;
+    si.diffuse_transmission = params.diffuse_transmission;
+    si.diffuse_transmission_color = params.diffuse_transmission_color;
     si.material_type      = params.material_type;
     si.thin_walled        = params.thin_walled;
     si.dielectric_priority = params.dielectric_priority;
@@ -122,6 +126,8 @@ DEVICE_FUNC void bsdf_init(SurfaceInteraction& si,
     si.anisotropy         = params.anisotropy;
     si.specular           = params.specular;
     si.specular_tint      = params.specular_tint;
+    si.diffuse_transmission = params.diffuse_transmission;
+    si.diffuse_transmission_color = params.diffuse_transmission_color;
     si.material_type      = params.material_type;
     si.thin_walled        = params.thin_walled;
     si.dielectric_priority = params.dielectric_priority;
