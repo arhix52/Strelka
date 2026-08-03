@@ -11,6 +11,9 @@
 
 #include <chrono>
 #include "MetalBuffer.h"
+#include "texture_compress.h"
+
+#include <fstream>
 
 #include <algorithm>
 #include <map>
@@ -769,8 +772,125 @@ void MetalRender::init()
     buildWavefrontPipelines();
 }
 
-MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName, bool srgb)
+namespace
 {
+// Bumped whenever the cache's layout or the encoder changes, so an old cache is
+// ignored rather than misread.
+constexpr uint32_t kTextureCacheVersion = 1;
+
+struct CachedTextureHeader
+{
+    char magic[4];
+    uint32_t version;
+    uint32_t width;
+    uint32_t height;
+    uint32_t levels;
+    uint32_t pixelFormat;
+    uint32_t blockBytes; // 0 when the payload is uncompressed RGBA8
+    uint32_t reserved;
+};
+} // namespace
+
+// A stable name for a texture as it will be uploaded: the file it came from, when
+// that file last changed, and every setting that alters the result.
+std::string MetalRender::textureCacheKey(const std::string& fileName, bool srgb, TextureKind kind) const
+{
+    std::error_code ec;
+    const auto size = fs::file_size(fileName, ec);
+    const auto stamp = fs::last_write_time(fileName, ec).time_since_epoch().count();
+    const uint32_t maxDim = const_cast<MetalRender*>(this)->getSettings()->getAs<uint32_t>("render/texture/maxDimension");
+    const uint32_t divisor = const_cast<MetalRender*>(this)->getSettings()->getAs<uint32_t>("render/texture/downscale");
+
+    std::string blob = fileName;
+    blob += "|" + std::to_string((unsigned long long)size);
+    blob += "|" + std::to_string((long long)stamp);
+    blob += "|" + std::to_string(maxDim) + "|" + std::to_string(divisor);
+    blob += srgb ? "|srgb" : "|linear";
+    blob += "|" + std::to_string((int)kind);
+    blob += "|v" + std::to_string(kTextureCacheVersion);
+
+    // FNV-1a. The key never leaves this machine and never has to resist anything,
+    // so a short hash that is cheap to compute is the right one.
+    uint64_t hash = 1469598103934665603ull;
+    for (const char c : blob)
+    {
+        hash ^= (uint64_t)(unsigned char)c;
+        hash *= 1099511628211ull;
+    }
+    char name[32];
+    std::snprintf(name, sizeof(name), "%016llx.btex", (unsigned long long)hash);
+    return name;
+}
+
+MTL::Texture* MetalRender::loadCachedTexture(const std::string& cachePath)
+{
+    std::ifstream in(cachePath, std::ios::binary);
+    if (!in)
+        return nullptr;
+
+    CachedTextureHeader header{};
+    in.read(reinterpret_cast<char*>(&header), sizeof(header));
+    if (!in || std::memcmp(header.magic, "BTEX", 4) != 0 || header.version != kTextureCacheVersion)
+        return nullptr;
+
+    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
+    desc->setWidth(header.width);
+    desc->setHeight(header.height);
+    desc->setMipmapLevelCount(header.levels);
+    desc->setPixelFormat((MTL::PixelFormat)header.pixelFormat);
+    desc->setTextureType(MTL::TextureType2D);
+    desc->setStorageMode(MTL::StorageModeManaged);
+    desc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
+    MTL::Texture* texture = mDevice->newTexture(desc);
+    desc->release();
+    if (!texture)
+        return nullptr;
+
+    std::vector<uint8_t> level;
+    for (uint32_t l = 0; l < header.levels; ++l)
+    {
+        uint32_t byteLength = 0;
+        in.read(reinterpret_cast<char*>(&byteLength), sizeof(byteLength));
+        if (!in || byteLength == 0)
+        {
+            texture->release();
+            return nullptr;
+        }
+        level.resize(byteLength);
+        in.read(reinterpret_cast<char*>(level.data()), byteLength);
+        if (!in)
+        {
+            texture->release();
+            return nullptr;
+        }
+        const uint32_t w = std::max(1u, header.width >> l);
+        const uint32_t h = std::max(1u, header.height >> l);
+        const size_t rowBytes = header.blockBytes
+                                    ? (size_t)((w + 3) / 4) * header.blockBytes
+                                    : (size_t)w * 4;
+        texture->replaceRegion(MTL::Region::Make3D(0, 0, 0, w, h, 1), l, level.data(), rowBytes);
+    }
+    return texture;
+}
+
+MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName, bool srgb, TextureKind kind)
+{
+    // The cache holds the finished article: downscaled, mipped and compressed.
+    // A hit skips the PNG decode, the resample, the mip chain and the encode --
+    // on the pine forest that is 37 seconds of blit and most of the decode time,
+    // every launch, for textures that never change.
+    const fs::path cacheDir = getSettings()->getAs<std::string>("render/texture/cachePath");
+    std::string cacheFile;
+    if (!cacheDir.empty())
+    {
+        cacheFile = (cacheDir / textureCacheKey(fileName, srgb, kind)).string();
+        if (MTL::Texture* cached = loadCachedTexture(cacheFile))
+        {
+            ++mTextureCacheHits;
+            return cached;
+        }
+    }
+
     int texWidth = 0;
     int texHeight = 0;
     int texChannels = 0;
@@ -821,39 +941,124 @@ MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName, bool
         }
     }
 
-    MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
-    pTextureDesc->setWidth(texWidth);
-    pTextureDesc->setHeight(texHeight);
-    // Mipmaps. They cost 33% more memory and buy nothing on their own in a path
-    // tracer -- a compute kernel has no implicit derivatives, so sample() reads
-    // level 0 until something computes an explicit LOD. They are built here so
-    // that the LOD path has something to read; see the ray-cone estimate in
-    // shading_common.h.
     uint32_t levels = 1;
     while ((1u << levels) <= (uint32_t)std::max(texWidth, texHeight))
         ++levels;
+
+    // The mip chain is built here rather than by a blit pass, because a
+    // compressed texture cannot be mipped on the GPU -- generateMipmaps does not
+    // accept a block format -- and because building it on the CPU is what lets
+    // the result be cached at all.
+    std::vector<std::vector<uint8_t>> chain;
+    chain.reserve(levels);
+    chain.emplace_back(data, data + (size_t)texWidth * texHeight * 4);
+    stbi_image_free(data);
+    for (uint32_t l = 1; l < levels; ++l)
+    {
+        const int prevW = std::max(1, texWidth >> (l - 1));
+        const int prevH = std::max(1, texHeight >> (l - 1));
+        const int w = std::max(1, texWidth >> l);
+        const int h = std::max(1, texHeight >> l);
+        std::vector<uint8_t> next((size_t)w * h * 4);
+        // Colour goes through the transfer function, for the same reason the
+        // downscale above does: the average of two sRGB bytes is not the sRGB of
+        // their average, and every level would come out darker than the last.
+        const int ok = srgb ? stbir_resize_uint8_srgb(chain[l - 1].data(), prevW, prevH, 0,
+                                                      next.data(), w, h, 0, 4, 3, 0)
+                            : stbir_resize_uint8(chain[l - 1].data(), prevW, prevH, 0,
+                                                 next.data(), w, h, 0, 4);
+        if (!ok)
+        {
+            levels = l;
+            break;
+        }
+        chain.push_back(std::move(next));
+    }
+
+    const bool canCompress = kind != TextureKind::Normal && mDevice->supportsBCTextureCompression() &&
+                             getSettings()->getAs<bool>("render/texture/compress");
+    const bool withAlpha = canCompress && oka::bc::hasAlpha(chain[0].data(), texWidth, texHeight);
+    MTL::PixelFormat format;
+    if (!canCompress)
+        format = srgb ? MTL::PixelFormatRGBA8Unorm_sRGB : MTL::PixelFormatRGBA8Unorm;
+    else if (withAlpha)
+        format = srgb ? MTL::PixelFormatBC3_RGBA_sRGB : MTL::PixelFormatBC3_RGBA;
+    else
+        format = srgb ? MTL::PixelFormatBC1_RGBA_sRGB : MTL::PixelFormatBC1_RGBA;
+
+    std::vector<std::vector<uint8_t>> payload;
+    payload.reserve(levels);
+    for (uint32_t l = 0; l < levels; ++l)
+    {
+        const int w = std::max(1, texWidth >> l);
+        const int h = std::max(1, texHeight >> l);
+        payload.push_back(canCompress ? oka::bc::compressImage(chain[l].data(), w, h, withAlpha)
+                                      : std::move(chain[l]));
+    }
+    chain.clear();
+    chain.shrink_to_fit();
+
+    MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    pTextureDesc->setWidth(texWidth);
+    pTextureDesc->setHeight(texHeight);
+    // Mipmaps buy nothing on their own in a path tracer -- a compute kernel has
+    // no implicit derivatives, so sample() reads level 0 until something computes
+    // an explicit LOD. They are here so the LOD path has something to read; see
+    // the ray-cone estimate in shading_common.h.
     pTextureDesc->setMipmapLevelCount(levels);
     // Colour maps carry sRGB-encoded bytes. Loading them as a linear format
     // hands the encoded values straight to the BSDF, which lifts every midtone
     // and desaturates the result; the _sRGB format makes the sampler decode.
-    pTextureDesc->setPixelFormat(srgb ? MTL::PixelFormatRGBA8Unorm_sRGB
-                                      : MTL::PixelFormatRGBA8Unorm);
+    pTextureDesc->setPixelFormat(format);
     pTextureDesc->setTextureType(MTL::TextureType2D);
     pTextureDesc->setStorageMode(MTL::StorageModeManaged);
     pTextureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
 
     MTL::Texture* pTexture = mDevice->newTexture(pTextureDesc);
+    pTextureDesc->release();
+    if (!pTexture)
+        return nullptr;
 
-    const MTL::Region region = MTL::Region::Make3D(0, 0, 0, texWidth, texHeight, 1);
-    pTexture->replaceRegion(region, 0, data, 4ull * texWidth);
-    stbi_image_free(data);
-
-    if (levels > 1)
+    const uint32_t blockBytes = canCompress ? (withAlpha ? 16u : 8u) : 0u;
+    for (uint32_t l = 0; l < levels; ++l)
     {
-        mTexturesNeedingMips.push_back(pTexture);
+        const uint32_t w = std::max(1, texWidth >> l);
+        const uint32_t h = std::max(1, texHeight >> l);
+        const size_t rowBytes = blockBytes ? (size_t)((w + 3) / 4) * blockBytes : (size_t)w * 4;
+        pTexture->replaceRegion(MTL::Region::Make3D(0, 0, 0, w, h, 1), l, payload[l].data(), rowBytes);
     }
 
-    pTextureDesc->release();
+    if (!cacheFile.empty())
+    {
+        std::error_code ec;
+        fs::create_directories(cacheDir, ec);
+        // Written to a temporary name and renamed, so a run interrupted halfway
+        // leaves no half-file for the next one to read as valid.
+        const std::string tmp = cacheFile + ".tmp";
+        std::ofstream out(tmp, std::ios::binary);
+        if (out)
+        {
+            CachedTextureHeader header{};
+            std::memcpy(header.magic, "BTEX", 4);
+            header.version = kTextureCacheVersion;
+            header.width = (uint32_t)texWidth;
+            header.height = (uint32_t)texHeight;
+            header.levels = levels;
+            header.pixelFormat = (uint32_t)format;
+            header.blockBytes = blockBytes;
+            out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+            for (uint32_t l = 0; l < levels; ++l)
+            {
+                const uint32_t byteLength = (uint32_t)payload[l].size();
+                out.write(reinterpret_cast<const char*>(&byteLength), sizeof(byteLength));
+                out.write(reinterpret_cast<const char*>(payload[l].data()), byteLength);
+            }
+            out.close();
+            fs::rename(tmp, cacheFile, ec);
+        }
+    }
+
+    ++mTextureCacheMisses;
     return pTexture;
 }
 
@@ -875,6 +1080,10 @@ void MetalRender::generateTextureMips()
     cb->release();
     STRELKA_INFO("Generated mipmaps for {} textures", mTexturesNeedingMips.size());
     mTexturesNeedingMips.clear();
+    // Nothing reaches here any more: mip chains are built on the CPU alongside
+    // the block compression, because generateMipmaps does not accept a block
+    // format and because a CPU chain is what can be cached. Kept for a scene
+    // that somehow loads an uncompressed texture outside that path.
 }
 
 void MetalRender::createMetalMaterials()
@@ -890,16 +1099,18 @@ void MetalRender::createMetalMaterials()
     // there. Keyed on path and colour space together, because the same file can
     // legitimately be needed both sRGB-decoded and linear.
     std::unordered_map<std::string, MTL::Texture*> textureCache;
-    auto loadTex = [&](const std::string& path, bool srgb) -> MTL::ResourceID {
+    auto loadTex = [&](const std::string& path, bool srgb,
+                       TextureKind kind = TextureKind::Color) -> MTL::ResourceID {
         if (path.empty()) return MTL::ResourceID{};
         const fs::path fullPath = resourcePath / path;
-        const std::string key = fullPath.string() + (srgb ? "|srgb" : "|linear");
+        const std::string key =
+            fullPath.string() + (srgb ? "|srgb" : "|linear") + "|" + std::to_string((int)kind);
         const auto it = textureCache.find(key);
         if (it != textureCache.end())
         {
             return it->second ? it->second->gpuResourceID() : MTL::ResourceID{};
         }
-        MTL::Texture* tex = loadTextureFromFile(fullPath.string(), srgb);
+        MTL::Texture* tex = loadTextureFromFile(fullPath.string(), srgb, kind);
         textureCache.emplace(key, tex);
         if (tex) mMaterialTextures.push_back(tex);
         return tex ? tex->gpuResourceID() : MTL::ResourceID{};
@@ -940,10 +1151,11 @@ void MetalRender::createMetalMaterials()
         material.dielectric_priority = p.dielectric_priority;
 
         material.baseColorTexture = loadTex(currMatDesc.baseColorTexPath, true);
-        material.metallicRoughnessTexture = loadTex(currMatDesc.metallicRoughnessTexPath, false);
-        material.normalTexture = loadTex(currMatDesc.normalTexPath, false);
+        material.metallicRoughnessTexture =
+            loadTex(currMatDesc.metallicRoughnessTexPath, false, TextureKind::NonColor);
+        material.normalTexture = loadTex(currMatDesc.normalTexPath, false, TextureKind::Normal);
         material.emissionTexture = loadTex(currMatDesc.emissionTexPath, true);
-        material.occlusionTexture = loadTex(currMatDesc.occlusionTexPath, false);
+        material.occlusionTexture = loadTex(currMatDesc.occlusionTexPath, false, TextureKind::NonColor);
 
         if (p.alpha_mode != ALPHA_MODE_OPAQUE)
             mSceneHasAlphaMaterials = true;
@@ -951,6 +1163,7 @@ void MetalRender::createMetalMaterials()
     }
 
     generateTextureMips();
+    STRELKA_INFO("Textures: {} from cache, {} built and cached", mTextureCacheHits, mTextureCacheMisses);
 
     const size_t materialsDataSize = sizeof(Material) * gpuMaterials.size();
     if (materialsDataSize > 0)

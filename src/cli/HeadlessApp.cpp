@@ -299,6 +299,12 @@ void HeadlessApp::populateSettings()
     // An HDRI carries radiance; normalising it away makes physical parity
     // impossible. See loadEnvMap().
     m_settings->setAs<bool>("render/env/autoCalibrate", false);
+    // Block compression and a disk cache for the finished textures.
+    // The cache holds them downscaled, mipped and compressed, so a second
+    // launch skips the decode, the resample, the mip chain and the encode.
+    m_settings->setAs<bool>("render/texture/compress", true);
+    m_settings->setAs<std::string>("render/texture/cachePath",
+                           (std::filesystem::temp_directory_path() / "strelka_texcache").string());
     m_settings->setAs<bool>("render/validate/analyticLights", true);
 
     m_settings->setAs<float>("render/post/tonemapper/filmIso", m_config.filmIso);

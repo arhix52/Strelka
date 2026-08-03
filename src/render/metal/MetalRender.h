@@ -164,6 +164,8 @@ private:
 
     // Textures awaiting one shared mipmap blit; see generateTextureMips().
     std::vector<MTL::Texture*> mTexturesNeedingMips;
+    uint32_t mTextureCacheHits = 0;
+    uint32_t mTextureCacheMisses = 0;
     void generateTextureMips();
 
     MTL::Buffer* mMaterialBuffer = nullptr;
@@ -364,7 +366,20 @@ private:
     // srgb selects the transfer function the sampler applies. Colour maps are
     // authored sRGB-encoded; data maps (normal, metallic-roughness, occlusion)
     // are not and must stay linear.
-    MTL::Texture* loadTextureFromFile(const std::string& fileName, bool srgb);
+    // What a texture is for, which decides whether it can be block compressed.
+    // A normal map cannot: a two-bit index along a line through 5:6:5 space is
+    // not enough for a direction, and the banding shows as facets on every
+    // curved surface.
+    enum class TextureKind
+    {
+        Color,
+        NonColor,
+        Normal,
+    };
+    MTL::Texture* loadTextureFromFile(const std::string& fileName, bool srgb,
+                                      TextureKind kind = TextureKind::Color);
+    MTL::Texture* loadCachedTexture(const std::string& cachePath);
+    std::string textureCacheKey(const std::string& fileName, bool srgb, TextureKind kind) const;
     void createMetalMaterials();
 
     MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);
