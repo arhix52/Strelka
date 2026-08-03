@@ -330,6 +330,87 @@ def collect_atmosphere(depsgraph):
     return best
 
 
+def rendered_object_names():
+    """The objects Cycles actually draws, as opposed to those merely present.
+
+    A scatter rig keeps its sources in the file -- proxies, trunk variants, the
+    row of tree types off to the side -- and excludes them from the view layer.
+    They are not in the render and they should not be in the export: on the pine
+    forest they are 174 of 450 mesh nodes and, because they are the full-detail
+    originals, most of the acceleration structure. 9.79 GB of it, against a
+    device that will not allocate more than 9.53.
+    """
+    names = set()
+
+    class _Capture(bpy.types.RenderEngine):
+        bl_idname = "STRELKA_RENDERED_CAPTURE"
+        bl_label = "Strelka rendered-object capture"
+        bl_use_preview = False
+
+        def render(self, depsgraph):
+            for it in depsgraph.object_instances:
+                if not it.is_instance and it.object is not None:
+                    names.add(it.object.original.name)
+
+    sc = bpy.context.scene
+    saved = (sc.render.engine, sc.render.resolution_x, sc.render.resolution_y)
+    bpy.utils.register_class(_Capture)
+    try:
+        sc.render.engine = _Capture.bl_idname
+        sc.render.resolution_x = 4
+        sc.render.resolution_y = 4
+        bpy.ops.render.render()
+    finally:
+        (sc.render.engine, sc.render.resolution_x, sc.render.resolution_y) = saved
+        bpy.utils.unregister_class(_Capture)
+    return names
+
+
+def strip_unrendered_nodes(gltf_path, rendered):
+    """Drop mesh nodes for objects the render does not draw.
+
+    Their meshes stay in the file if something else references them -- the
+    instancing nodes do, which is the whole point -- so this removes placements,
+    not geometry.
+    """
+    with open(gltf_path) as f:
+        doc = json.load(f)
+
+    nodes = doc.get("nodes", [])
+    def keep_node(n):
+        if "mesh" not in n:
+            return True
+        name = n.get("name", "")
+        if name.startswith("instances_mesh"):
+            return True
+        return name in rendered
+
+    keep = [i for i, n in enumerate(nodes) if keep_node(n)]
+    if len(keep) == len(nodes):
+        return 0
+
+    remap = {old: new for new, old in enumerate(keep)}
+    doc["nodes"] = [nodes[i] for i in keep]
+    for n in doc["nodes"]:
+        if "children" in n:
+            n["children"] = [remap[c] for c in n["children"] if c in remap]
+            if not n["children"]:
+                del n["children"]
+    for scene in doc.get("scenes", []):
+        scene["nodes"] = [remap[r] for r in scene.get("nodes", []) if r in remap]
+    for skin in doc.get("skins", []):
+        if "skeleton" in skin and skin["skeleton"] in remap:
+            skin["skeleton"] = remap[skin["skeleton"]]
+        if "joints" in skin:
+            skin["joints"] = [remap[j] for j in skin["joints"] if j in remap]
+
+    removed = len(nodes) - len(keep)
+    with open(gltf_path, "w") as f:
+        json.dump(doc, f)
+    print("removed %d nodes for objects the render does not draw" % removed)
+    return removed
+
+
 def render_depsgraph_instances():
     """The same, but from the render depsgraph rather than the viewport one.
 
@@ -686,6 +767,7 @@ def main():
     if "--instances-only" in argv:
         print("rewriting placements in %s (geometry left as it is)" % gltf)
         strip_instance_nodes(gltf)
+        strip_unrendered_nodes(gltf, rendered_object_names())
         if instances:
             write_instances(gltf, instances)
         return
@@ -710,6 +792,7 @@ def main():
     print("  attributes: %s" % ", ".join(sorted(attrs)))
 
     # After the summary, because these rewrite the file the summary was read from.
+    strip_unrendered_nodes(gltf, rendered_object_names())
     if translucency or volumes:
         write_material_extensions(gltf, translucency, volumes)
     if instances:

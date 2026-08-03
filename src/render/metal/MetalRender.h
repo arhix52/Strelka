@@ -212,6 +212,8 @@ private:
     bool mNeedsPrimitiveData = false;
 
     MTL::Buffer* mPrevVertexBuffer = nullptr;
+    bool mOwnsPrevVertexBuffer = false;
+    std::pair<size_t, size_t> mHostGeometryBytes{ 0, 0 };
     MTL::Buffer* mGeometryEntryBuffer = nullptr;
     bool mEnableMotionBlur = false;
     View mPrevMotionBlurView; // camera at T - shutter for camera motion blur

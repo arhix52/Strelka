@@ -1304,6 +1304,27 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
         processNode(model, scene, model.nodes[rootNodeIdx], rootNodeIdx, glm::float4x4(1.0f), globalScale, meshCache);
     }
 
+    // The binary buffers have been consumed: every vertex and index is in the
+    // scene's own arrays now, and what follows -- lights, cameras, materials --
+    // reads node transforms and URIs. Holding them costs 2.7 GB on the pine
+    // forest, and it is held across exactly the moment the renderer allocates its
+    // own copy and starts building acceleration structures, which is where a
+    // scene that would otherwise fit stops fitting.
+    {
+        size_t released = 0;
+        for (tinygltf::Buffer& buffer : model.buffers)
+        {
+            released += buffer.data.size();
+            buffer.data.clear();
+            buffer.data.shrink_to_fit();
+        }
+        if (released > 0)
+        {
+            STRELKA_INFO("Released {:.2f} GB of glTF buffer data after building geometry",
+                         released / 1e9);
+        }
+    }
+
     // Punctual lights need node world transforms, so they land after the graph.
     if (!hadJsonLights && !loadPunctualLights(model, scene))
     {

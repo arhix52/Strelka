@@ -132,7 +132,12 @@ MetalRender::~MetalRender()
         safeRelease(mMaterialBuffer);
         safeRelease(mSkinDataBuffer);
         safeRelease(mJointMatricesBuffer);
-        safeRelease(mPrevVertexBuffer);
+        // Shared with mVertexBuffer when nothing in the scene deforms; releasing
+        // it through both paths would be a double free.
+        if (mOwnsPrevVertexBuffer)
+            safeRelease(mPrevVertexBuffer);
+        else
+            mPrevVertexBuffer = nullptr;
         safeRelease(mPrevFrameVertexBuffer);
         safeRelease(mPrevFrameInstanceBuffer);
         safeRelease(mGeometryEntryBuffer);
@@ -3467,12 +3472,28 @@ void MetalRender::buildBuffers()
     mVertexBuffer = pVertexBuffer;
     mIndexBuffer = pIndexBuffer;
 
-    // Allocate prevVertexBuffer as copy of VB (needed for motion BVH keyframes at init time)
-    if (vertexDataSize > 0)
+    // The previous shutter keyframe, for motion blur and for the denoiser's
+    // reprojection. It is a second copy of every vertex in the scene -- 1.66 GB
+    // on the pine forest -- and it only ever differs from the current one where
+    // something deforms. A scene with no skeletal geometry can share the buffer
+    // instead of duplicating it, which is the difference between that scene
+    // fitting in memory and not.
+    bool anySkeletal = false;
+    for (const oka::Mesh& mesh : mScene->getMeshes())
+    {
+        anySkeletal = anySkeletal || mesh.isSkeletal;
+    }
+    if (vertexDataSize > 0 && anySkeletal)
     {
         mPrevVertexBuffer = mDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeManaged);
         memcpy(mPrevVertexBuffer->contents(), vertices.data(), vertexDataSize);
         mPrevVertexBuffer->didModifyRange(NS::Range::Make(0, mPrevVertexBuffer->length()));
+        mOwnsPrevVertexBuffer = true;
+    }
+    else
+    {
+        mPrevVertexBuffer = mVertexBuffer;
+        mOwnsPrevVertexBuffer = false;
     }
 
     for (MTL::Buffer*& uniformBuffer : mUniformBuffers)
@@ -3884,6 +3905,21 @@ void MetalRender::createAccelerationStructures()
     }
     mMotionBlasBuilt = mBuildMotionBlas;
 
+    // Before the structures are built, not after. The host arrays are a full
+    // duplicate of the GPU buffers -- 2.27 GB here -- and holding them across the
+    // acceleration structure build stacks that on top of the largest allocation
+    // the renderer makes. Nothing below this point reads them: buildBlas() works
+    // from buffer offsets and triangle counts.
+    //
+    // Off by default because Scene::pick() walks these arrays -- the editor needs
+    // them, a headless render does not.
+    mHostGeometryBytes = { mScene->getVertices().size() * sizeof(Scene::Vertex),
+                           mScene->getIndices().size() * sizeof(uint32_t) };
+    if (getSettings()->getAs<bool>("scene/releaseHostGeometry") && !mScene->hostGeometryReleased())
+    {
+        mScene->releaseHostGeometry();
+    }
+
     // --- Group mesh instances that always move together -----------------------
     //
     // glTF splits a mesh into primitives by material, and the loader turns each
@@ -3903,9 +3939,37 @@ void MetalRender::createAccelerationStructures()
         }
     }
 
-    // Key: (node, skeletal). Instances without a node, and any whose transform
-    // does not actually match the group's, get a group of their own.
-    std::map<std::pair<int, int>, size_t> groupOfKey;
+    // Key: (node, skeletal, transform). The transform belongs in the key because
+    // a single node can now carry a million placements -- that is what
+    // EXT_mesh_gpu_instancing is -- and keying on the node alone puts the first
+    // placement's primitives in one group and scatters every later placement's
+    // across groups of their own. Those then have different signatures, so the
+    // BLAS sharing below cannot collapse them, and a multi-primitive mesh is
+    // built once per primitive as well as once whole: 9.7 GB of structures where
+    // 5.0 will do.
+    struct GroupKey
+    {
+        int node;
+        int skeletal;
+        uint64_t transform;
+        bool operator<(const GroupKey& o) const
+        {
+            if (node != o.node) return node < o.node;
+            if (skeletal != o.skeletal) return skeletal < o.skeletal;
+            return transform < o.transform;
+        }
+    };
+    auto hashTransform = [](const glm::mat4& m) {
+        uint64_t h = 1469598103934665603ull;
+        const auto* raw = reinterpret_cast<const unsigned char*>(&m);
+        for (size_t i = 0; i < sizeof(glm::mat4); ++i)
+        {
+            h ^= raw[i];
+            h *= 1099511628211ull;
+        }
+        return h;
+    };
+    std::map<GroupKey, size_t> groupOfKey;
     std::vector<std::vector<uint32_t>> groups;
     std::vector<bool> groupSkeletal;
 
@@ -3927,7 +3991,8 @@ void MetalRender::createAccelerationStructures()
         }
         const bool skeletal = meshes[curr.mMeshId].isSkeletal;
         const int nodeId = instanceNode[i];
-        const std::pair<int, int> key{ nodeId >= 0 ? nodeId : -(int)i - 2, skeletal ? 1 : 0 };
+        const GroupKey key{ nodeId >= 0 ? nodeId : -(int)i - 2, skeletal ? 1 : 0,
+                            hashTransform(curr.transform) };
 
         auto it = groupOfKey.find(key);
         if (it == groupOfKey.end())
@@ -4052,14 +4117,9 @@ void MetalRender::createAccelerationStructures()
     //
     // Off by default because Scene::pick() walks these arrays -- the editor needs
     // them, a headless render does not.
-    const size_t vtxBytes = mScene->getVertices().size() * sizeof(Scene::Vertex);
-    const size_t idxBytes = mScene->getIndices().size() * sizeof(uint32_t);
-    bool hostFreed = false;
-    if (getSettings()->getAs<bool>("scene/releaseHostGeometry") && !mScene->hostGeometryReleased())
-    {
-        mScene->releaseHostGeometry();
-        hostFreed = true;
-    }
+    const size_t vtxBytes = mHostGeometryBytes.first;
+    const size_t idxBytes = mHostGeometryBytes.second;
+    const bool hostFreed = mScene->hostGeometryReleased();
 
     // Where the memory goes. On a 50 M triangle scene the total runs past what a
     // 16 GB machine holds resident, and the first question is always which part
@@ -4135,7 +4195,24 @@ void MetalRender::createAccelerationStructures()
             else
                 ++nullAs;
         }
-        STRELKA_INFO("Structures: BLAS {:.2f} GB ({} failed), TLAS {:.3f} GB, device max buffer {:.2f} GB",
+                // The largest few, because a structure that should have been shared and
+        // was not is worth several gigabytes and is invisible in the total.
+        {
+            std::vector<std::pair<size_t, size_t>> bySize;
+            bySize.reserve(mBlasList.size());
+            for (size_t bi = 0; bi < mBlasList.size(); ++bi)
+            {
+                if (mBlasList[bi].mAs)
+                    bySize.emplace_back(mBlasList[bi].mAs->size(), bi);
+            }
+            std::sort(bySize.rbegin(), bySize.rend());
+            for (size_t k = 0; k < std::min<size_t>(5, bySize.size()); ++k)
+            {
+                STRELKA_INFO("  BLAS {} : {:.2f} GB, geometry base {}", bySize[k].second,
+                             bySize[k].first / 1e9, mBlasList[bySize[k].second].mGeometryBase);
+            }
+        }
+STRELKA_INFO("Structures: BLAS {:.2f} GB ({} failed), TLAS {:.3f} GB, device max buffer {:.2f} GB",
                      asBytes / 1e9, nullAs,
                      mInstanceAccelerationStructure ? mInstanceAccelerationStructure->size() / 1e9 : 0.0,
                      mDevice->maxBufferLength() / 1e9);
