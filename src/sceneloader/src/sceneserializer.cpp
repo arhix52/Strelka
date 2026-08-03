@@ -82,11 +82,19 @@ bool loadLightsJson(Scene& scene, const std::string& lightJsonPath)
     std::ifstream i(lightJsonPath);
     json root;
     i >> root;
-    if (!root.contains("lights"))
+    // Any one of these is a reason for the file to exist. Requiring "lights"
+    // meant a sidecar carrying only an environment was read, parsed and thrown
+    // away without a word -- and a scene lit entirely by its environment is not
+    // an odd thing to write.
+    if (!root.contains("lights") && !root.contains("environment") && !root.contains("atmosphere"))
+    {
+        STRELKA_WARNING("Light file {} has no lights, environment or atmosphere; ignoring",
+                        lightJsonPath);
         return false;
+    }
 
     const std::string searchDir = fs::path(lightJsonPath).parent_path().string();
-    for (const auto& light : root["lights"])
+    for (const auto& light : root.contains("lights") ? root["lights"] : json::array())
     {
         Scene::UniformLightDesc desc = lightjson::parseDesc(light, searchDir);
         lightjson::resolveIes(scene, desc, searchDir);

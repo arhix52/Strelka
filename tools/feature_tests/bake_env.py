@@ -30,6 +30,8 @@ import math
 import os
 import sys
 
+import tempfile
+
 import numpy as np
 
 
@@ -110,9 +112,17 @@ def make_bake_scene(src_world, width, height):
                 pass
     cam = bpy.data.objects.new("__env_cam", cam_data)
     sc.collection.objects.link(cam)
-    # Identity rotation, so Cycles' generated ray direction *is* the world
-    # direction and the mapping below has no camera matrix in it.
-    cam.rotation_euler = (0.0, 0.0, 0.0)
+    # Upright, not identity. Cycles maps an equirectangular panorama in *camera*
+    # space, so its poles are the camera's own +/-Y -- with an identity rotation
+    # that is the world's +/-Y, which is a horizontal axis in a Z-up scene. The
+    # resulting panorama is a perfectly good image of the sphere and a terrible
+    # grid to resample from: its dense rows run through the horizon and its poles
+    # sit on it, ninety degrees from where the destination's are, so a scatter
+    # between the two leaves a tenth of the output with no sample at all.
+    #
+    # Ninety degrees about X puts the camera's up on the world's, and the two
+    # grids then agree on where the poles are.
+    cam.rotation_euler = (math.radians(90.0), 0.0, 0.0)
     cam.location = (0.0, 0.0, 0.0)
     sc.camera = cam
     return sc
@@ -127,40 +137,109 @@ def load_rgb(path):
     return buf.reshape(h, w, 4)[:, :, :3], w, h  # bottom-up rows, as Blender stores them
 
 
-def resample_to_strelka(src, w, h):
-    """Rebuild the panorama in Strelka's convention.
+def direction_field(width, height):
+    """Render a panorama whose pixels hold the direction Cycles used for them.
+
+    Rather than assume Cycles' equirectangular convention and hope. The assumed
+    one was wrong, and wrong in a way that survived every check: a round trip
+    through my own formula reproduced itself perfectly, because both halves of
+    the test shared the mistake. What it could not survive was a render with the
+    geometry deleted, where the reference showed a horizon and Strelka showed the
+    zenith.
+
+    The world is replaced by one that outputs its own incoming direction, so each
+    pixel of the result *is* the answer for that pixel. Nothing is assumed and
+    nothing can drift when Blender changes its mind.
+    """
+    world = bpy.data.worlds.new("__dir_probe")
+    world.use_nodes = True
+    nt = world.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    geo = nt.nodes.new("ShaderNodeNewGeometry")
+    # Incoming points back along the ray, so negate; then map [-1,1] to [0,1]
+    # because the encoding has to survive a render.
+    neg = nt.nodes.new("ShaderNodeVectorMath")
+    neg.operation = "MULTIPLY"
+    neg.inputs[1].default_value = (-0.5, -0.5, -0.5)
+    add = nt.nodes.new("ShaderNodeVectorMath")
+    add.operation = "ADD"
+    add.inputs[1].default_value = (0.5, 0.5, 0.5)
+    bg = nt.nodes.new("ShaderNodeBackground")
+    bg.inputs["Strength"].default_value = 1.0
+    out = nt.nodes.new("ShaderNodeOutputWorld")
+    nt.links.new(geo.outputs["Incoming"], neg.inputs[0])
+    nt.links.new(neg.outputs["Vector"], add.inputs[0])
+    nt.links.new(add.outputs["Vector"], bg.inputs["Color"])
+    nt.links.new(bg.outputs["Background"], out.inputs["Surface"])
+
+    sc = make_bake_scene(world, width, height)
+    sc.cycles.samples = 1
+    # No pixel filter: a filtered edge averages two directions into one that is
+    # neither, and this pass is a coordinate, not an image.
+    sc.render.filter_size = 0.01
+    path = os.path.join(tempfile.gettempdir(), "__strelka_dir_probe.exr")
+    sc.render.filepath = path
+    bpy.ops.render.render(write_still=True, scene=sc.name)
+    field, w, h = load_rgb(path)
+    os.remove(path)
+    bpy.data.scenes.remove(sc)
+    bpy.data.worlds.remove(world)
+    return field * 2.0 - 1.0   # back to [-1, 1], bottom-up like everything here
+
+
+def resample_to_strelka(src, dirs, out_w, out_h):
+    """Rebuild the panorama in Strelka's convention, using measured directions.
 
     Strelka (env_light_metal.h):
         u = (atan2(d.x, d.z) + pi) / 2pi,  v = acos(d.y) / pi
     with d in the glTF frame (Y up) and v = 0 at the top row.
 
-    Cycles (equirectangular_to_direction), camera space, which the identity
-    camera rotation makes world space:
-        phi = pi * (1 - 2u),  theta = pi * (v - 0.5)
-        d = (cos(theta)cos(phi), cos(theta)sin(phi), sin(theta))
-    with v = 0 at the bottom row, which is also how Blender stores pixels.
+    Forward-scattered rather than inverse-sampled: every source pixel knows its
+    own direction, so it knows where it belongs, and no inverse of Cycles'
+    mapping has to be written down -- which is the assumption that was wrong.
+
+    The source is rendered at twice the output resolution so that each
+    destination pixel collects several samples and the scatter is an average
+    rather than a lottery. At equal resolutions it is neither: rounding leaves
+    gaps that have to be filled from neighbours, and filling them lifts the dark
+    bands until the sky has no contrast left.
     """
-    j, i = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
-    u_s = (i + 0.5) / w
-    v_s = (j + 0.5) / h
+    norm = np.linalg.norm(dirs, axis=2, keepdims=True)
+    d = dirs / np.maximum(norm, 1e-9)
+    bx, by, bz = d[:, :, 0], d[:, :, 1], d[:, :, 2]
+    # Blender (Z up) -> glTF (Y up), the same change of basis as gltf_pos().
+    gx, gy, gz = bx, bz, -by
 
-    phi = u_s * 2.0 * math.pi - math.pi
-    theta = v_s * math.pi
-    # glTF-frame direction for this output pixel
-    gx = np.sin(theta) * np.sin(phi)
-    gy = np.cos(theta)
-    gz = np.sin(theta) * np.cos(phi)
-    # glTF -> Blender: gltf(x, y, z) == blender(bx, bz, -by)
-    bx, by, bz = gx, -gz, gy
+    u = (np.arctan2(gx, gz) + math.pi) / (2.0 * math.pi)
+    v = np.arccos(np.clip(gy, -1.0, 1.0)) / math.pi
 
-    theta_c = np.arcsin(np.clip(bz, -1.0, 1.0))
-    phi_c = np.arctan2(by, bx)
-    v_c = theta_c / math.pi + 0.5
-    u_c = (1.0 - phi_c / math.pi) * 0.5
+    tx = np.clip((u * out_w).astype(np.int32), 0, out_w - 1).ravel()
+    ty = np.clip((v * out_h).astype(np.int32), 0, out_h - 1).ravel()
 
-    sx = np.clip((u_c * w).astype(np.int32), 0, w - 1)
-    sy = np.clip((v_c * h).astype(np.int32), 0, h - 1)
-    return src[sy, sx]
+    accum = np.zeros((out_h, out_w, 3), dtype=np.float64)
+    count = np.zeros((out_h, out_w), dtype=np.int32)
+    np.add.at(accum, (ty, tx), src.reshape(-1, 3))
+    np.add.at(count, (ty, tx), 1)
+
+    hit = count > 0
+    dst = np.zeros((out_h, out_w, 3), dtype=np.float32)
+    dst[hit] = (accum[hit] / count[hit][:, None]).astype(np.float32)
+
+    missing = int((~hit).sum())
+    for _ in range(6):
+        if hit.all():
+            break
+        for shift, axis in ((1, 1), (-1, 1), (1, 0), (-1, 0)):
+            near_hit = np.roll(hit, shift, axis=axis)
+            near_val = np.roll(dst, shift, axis=axis)
+            fill = near_hit & ~hit
+            dst[fill] = near_val[fill]
+            hit |= fill
+    if missing:
+        print("  resample: %d of %d output texels had no source sample (%.3f%%)"
+              % (missing, out_w * out_h, 100.0 * missing / (out_w * out_h)))
+    return dst
 
 
 def main():
@@ -182,17 +261,26 @@ def main():
 
     name = os.path.splitext(os.path.basename(bpy.data.filepath))[0] or "scene"
 
-    sc = make_bake_scene(world, width, height)
+    # Twice the output resolution: the resample scatters source pixels into
+    # destination texels, and at 1:1 that leaves gaps.
+    sc = make_bake_scene(world, width * 2, height * 2)
     raw = os.path.join(out, name + "_env_raw.exr")
     sc.render.filepath = raw
     bpy.ops.render.render(write_still=True, scene=sc.name)
 
     src, w, h = load_rgb(raw)
-    dst = resample_to_strelka(src, w, h)
+    dst = resample_to_strelka(src, direction_field(w, h), width, height)
+    w, h = width, height
 
     suffix = "_env.exr" if branch == "light" else "_env_camera.exr"
     final = os.path.join(out, name + suffix)
     img = bpy.data.images.new(name + suffix, width=w, height=h, float_buffer=True)
+    # Linear, set before the pixels are written. Without it the image is sRGB and
+    # Blender encodes on save, so the file holds display values where the
+    # renderer expects radiance: midtones lift, contrast flattens, and the sky
+    # comes out about a quarter too bright in a way that looks like a lighting
+    # difference rather than a colour-management one.
+    img.colorspace_settings.name = "Non-Color"
     rgba = np.ones((h, w, 4), dtype=np.float32)
     # Strelka reads row 0 as v = 0; Blender writes pixels bottom-up, so flip.
     rgba[:, :, :3] = dst[::-1]
@@ -207,4 +295,8 @@ def main():
           % (final, w, h, world.name, float(dst.mean()), float(dst.max())))
 
 
-main()
+# Guarded, because these are imported as a module by env_check.py -- without it
+# the import runs a full export as a side effect, which is slow, confusing, and
+# writes files the caller did not ask for.
+if __name__ == "__main__":
+    main()

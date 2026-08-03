@@ -567,4 +567,8 @@ def main():
         write_instances(gltf, instances)
 
 
-main()
+# Guarded, because these are imported as a module by env_check.py -- without it
+# the import runs a full export as a side effect, which is slow, confusing, and
+# writes files the caller did not ask for.
+if __name__ == "__main__":
+    main()
