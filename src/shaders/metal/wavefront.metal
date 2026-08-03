@@ -144,6 +144,24 @@ bool shadowAlphaAnyHit(uint primitive_id [[primitive_id]],
     return all(payload.transmittance <= 1e-6f);
 }
 
+// Measured and not kept: the same stochastic alpha test as an intersection
+// function on the *main* rays, so a canopy resolves in one traversal instead of
+// one per leaf slipped past.
+//
+// It works and it is slightly more accurate on a single blended plane -- the
+// harness scene went from 0.052 to 0.042 relative error -- but on the pine
+// forest, which is the scene it was written for, it renders the same image
+// (0.5% relative) 4% slower: 31.3 s against 30.0 s at 128 spp, twice each. An
+// intersection-function callback per candidate costs more than the handful of
+// traversal restarts it saves, because a ray meets few leaves, not many.
+//
+// The shadow case above is the opposite and stays: there the old path restarted
+// a full closest-hit query up to eight times per ray.
+//
+// The first version of this measured as a 9% win, which it was not -- it also
+// ran the coverage test a second time in `shade`, so foliage passed a^2 instead
+// of a and rays escaped the canopy that should not have.
+
 struct MotionTraversal
 {
     using structure = acceleration_structure<instancing, primitive_motion>;
@@ -345,10 +363,12 @@ static void extendImpl(
 
     typename T::isect isect;
     isect.assume_geometry_type(geometry_type::triangle);
+    // The coverage test for cutout geometry happens in `shade`, not here -- see
+    // the note above extendAlphaAnyHit's replacement for the measurement.
     isect.force_opacity(forced_opacity::opaque);
     isect.accept_any_intersection(false);
 
-    typename T::isect::result_type hit =
+    const typename T::isect::result_type hit =
         T::trace(isect, r, accelerationStructure, uniforms.primaryRayMask, motionTime);
 
     // A ray that escaped carries no information beyond the fact, so it goes
@@ -416,10 +436,10 @@ static void extendImpl(
                      device atomic_uint* hitCounter [[buffer(9)]],                                          \
                      device uint32_t* missQueue [[buffer(10)]],                                             \
                      device atomic_uint* missCounter [[buffer(11)]],                                        \
-                     device const PathState* paths [[buffer(12)]])                                          \
+                     device const PathState* paths [[buffer(12)]])                                         \
     {                                                                                                       \
         extendImpl<TRAITS>(gid, uniforms, instances, accelerationStructure, rays, hits, sampleIdx, queue,    \
-                           control, hitQueue, hitCounter, missQueue, missCounter, paths);                          \
+                           control, hitQueue, hitCounter, missQueue, missCounter, paths);              \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
@@ -971,10 +991,38 @@ kernel void wavefrontShade(
     // its light transport happened. They are bounded by their own counter in the
     // high bits of depthAndFlags, which PATH_DEPTH_MASK (0xFF) and the flags at
     // bits 8..11 leave free.
+    //
+    // Only when traversal did not already do it. With SPEC_ALPHA the
+    // intersection function tests every candidate and a hit that arrives here
+    // has already been accepted with probability `opacity` -- testing it a
+    // second time makes the effective coverage opacity squared. That reads as
+    // extra noise at low sample counts, which is what the harness first showed,
+    // and only at 8k samples does it resolve into what it is: a blended plane
+    // 27% too transparent.
     if (si.opacity < 1.0f)
     {
+        const uint32_t layer = p.depthAndFlags >> PATH_PASSTHROUGH_SHIFT;
         SamplerState orng = samplerFor(uniforms, tid, sampleIdx, depth);
-        if (random<SampleDimension::eOpacity>(orng, uniforms.samplerType) >= si.opacity)
+        float u = random<SampleDimension::eOpacity>(orng, uniforms.samplerType);
+        // Rotated by which layer of cutout this is.
+        //
+        // Passing through deliberately does not advance `depth`, so the sampler
+        // is rebuilt in the same state at every layer and hands back the same
+        // number. Two leaves with the same alpha then make the same decision: a
+        // ray that slipped through the first slips through the second as well,
+        // and a canopy that should pass (1-a)^2 of what reaches it passes (1-a).
+        // In a pine forest that is most of the geometry.
+        //
+        // A rotation rather than a fresh hash, because each layer on its own
+        // stays stratified across samples -- white noise here is what turned a
+        // blended plane into salt and pepper when this test first moved into
+        // traversal.
+        if (layer != 0u)
+        {
+            uint32_t r = sharcHash(layer * 2654435761u + tid * 2246822519u);
+            u = fract(u + float(r) * (1.0f / 4294967296.0f));
+        }
+        if (u >= si.opacity)
         {
             const uint32_t passes = p.depthAndFlags >> PATH_PASSTHROUGH_SHIFT;
             radianceOut[tid] += float4(radiance, 0.0f);
