@@ -290,10 +290,18 @@ def collect_atmosphere(depsgraph):
             colour = node.inputs["Color"].default_value
             g = float(node.inputs["Anisotropy"].default_value) if "Anisotropy" in node.inputs else 0.0
             top = max((ob.matrix_world @ Vector(corner)).z for corner in ob.bound_box)
+            # Cycles' Volume Scatter has no absorption: its extinction is
+            # density * colour and every extinction event scatters. Strelka
+            # carries a scalar extinction and a colour albedo, so the colour goes
+            # into the extinction and the albedo comes out as 1 -- otherwise a
+            # grey 0.8 medium is read as 20% absorbing and the haze comes out
+            # dimmer than the scene was authored with.
+            tint = [float(colour[0]), float(colour[1]), float(colour[2])]
+            mean_tint = max(sum(tint) / 3.0, 1e-6)
             entry = {
                 "name": ob.name,
-                "color": [float(colour[0]), float(colour[1]), float(colour[2])],
-                "density": density,
+                "color": [c / mean_tint for c in tint],
+                "density": density * mean_tint,
                 "anisotropy": g,
                 "height": top,   # Blender z is glTF y
             }

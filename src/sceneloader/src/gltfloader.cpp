@@ -714,6 +714,7 @@ void loadCameras(const tinygltf::Model& model, oka::Scene& scene)
         {
             oka::Camera camera;
             camera.fov = cameraGltf.perspective.yfov * (180.0f / 3.1415926f);
+            camera.authoredAspect = (float)cameraGltf.perspective.aspectRatio;
             camera.znear = cameraGltf.perspective.znear;
             camera.zfar = cameraGltf.perspective.zfar;
             camera.name = cameraGltf.name;

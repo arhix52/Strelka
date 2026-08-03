@@ -25,7 +25,13 @@ public:
     };
     CameraType type = CameraType::firstperson;
 
-    float fov = 45.0f;
+    float fov = 45.0f;   // vertical, degrees
+    // The frame aspect the fov was authored against, 0 when unknown. glTF's yfov
+    // means nothing without it: a camera authored for 16:9 and rendered at 4:3
+    // has to keep its *horizontal* angle, which is what every DCC does for a
+    // landscape frame and what a renderer that keeps the vertical angle instead
+    // gets wrong by exactly the ratio of the two aspects.
+    float authoredAspect = 0.0f;
     float znear = 0.1f, zfar = 1000.0f;
 
     // Depth of field
@@ -112,6 +118,7 @@ public:
     glm::float4x4& getPerspective();
     glm::float4x4 getView();
     void updateAspectRatio(float aspect);
+    float fovForAspect(float aspect) const;
     void setPosition(glm::float3 position);
     glm::float3 getPosition();
     void setRotation(glm::quat rotation);

@@ -71,6 +71,68 @@ def resolve_light_path(world, branch):
     return rewired
 
 
+def make_cube_scene(src_world, size):
+    """A 90-degree perspective camera, for baking the world one cube face at a time.
+
+    Not a panorama, though a panorama is one render instead of six. Measured:
+    Cycles gives a *different* value for the same direction through an
+    equirectangular camera than through a perspective one -- 8 to 23% lower on
+    this world, worst where the sky is brightest. Both cannot be right, and the
+    one that matters is the one the reference renders with.
+
+    So the environment is baked the way it will be compared: perspective, six
+    faces, and the equirectangular map assembled afterwards from directions that
+    are themselves measured.
+    """
+    sc = bpy.data.scenes.new("__env_cube")
+    sc.world = src_world
+
+    sc.render.engine = "CYCLES"
+    sc.cycles.device = "CPU"
+    sc.cycles.samples = 16
+    sc.cycles.use_denoising = False
+    sc.cycles.use_adaptive_sampling = False
+    for b_ in ("max_bounces", "diffuse_bounces", "glossy_bounces", "transmission_bounces"):
+        setattr(sc.cycles, b_, 0)
+
+    sc.render.resolution_x = size
+    sc.render.resolution_y = size
+    sc.render.resolution_percentage = 100
+    sc.render.film_transparent = False
+    sc.view_settings.view_transform = "Raw"
+    sc.view_settings.look = "None"
+    sc.view_settings.exposure = 0.0
+    sc.view_settings.gamma = 1.0
+    sc.render.image_settings.file_format = "OPEN_EXR"
+    sc.render.image_settings.color_mode = "RGB"
+    sc.render.image_settings.color_depth = "32"
+    sc.render.image_settings.exr_codec = "ZIP"
+
+    cam_data = bpy.data.cameras.new("__cube_cam")
+    cam_data.type = "PERSP"
+    cam_data.lens_unit = "FOV"
+    cam_data.angle = math.radians(90.0)
+    cam_data.sensor_fit = "HORIZONTAL"
+    cam = bpy.data.objects.new("__cube_cam", cam_data)
+    sc.collection.objects.link(cam)
+    cam.location = (0.0, 0.0, 0.0)
+    sc.camera = cam
+    return sc, cam
+
+
+# The six ways to point a camera at a cube's faces. Which face is which does not
+# matter -- the directions are measured, not assumed -- only that together they
+# cover the sphere.
+CUBE_ROTATIONS = [
+    (math.radians(90.0), 0.0, 0.0),
+    (math.radians(90.0), 0.0, math.radians(90.0)),
+    (math.radians(90.0), 0.0, math.radians(180.0)),
+    (math.radians(90.0), 0.0, math.radians(270.0)),
+    (0.0, 0.0, 0.0),
+    (math.radians(180.0), 0.0, 0.0),
+]
+
+
 def make_bake_scene(src_world, width, height):
     sc = bpy.data.scenes.new("__env_bake")
     sc.world = src_world

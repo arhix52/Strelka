@@ -97,14 +97,21 @@ def main():
     export_scene.merge_scenes()
     name = os.path.splitext(os.path.basename(bpy.data.filepath))[0] or "scene"
 
+    branch = opt("--branch", "camera")
+
     world = bpy.context.scene.world
     camera = strip_scene()
     add_backstop(camera)
 
+    # Resolved before the reference is rendered, not after, when the lighting
+    # branch is the one under test: Cycles shows a camera ray the camera branch,
+    # so measuring the other one means making it the only one there is.
+    if branch != "camera":
+        bake_env.resolve_light_path(world, branch)
+
     render_reference(os.path.join(out, "reference.exr"), width, height)
 
-    # The camera branch of the world, which is what a camera ray sees.
-    bake_env.resolve_light_path(world, "camera")
+    bake_env.resolve_light_path(world, branch)
     sc = bake_env.make_bake_scene(world, 4096, 2048)
     raw = os.path.join(out, "env_raw.exr")
     sc.render.filepath = raw
@@ -135,6 +142,7 @@ def main():
 
     print("ENVCHECK %s  world='%s'  camera='%s'  %dx%d"
           % (out, world.name, camera.name, width, height))
+    print("  branch=%s" % branch)
 
 
 main()

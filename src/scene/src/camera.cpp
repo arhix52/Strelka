@@ -162,7 +162,36 @@ glm::float4x4 Camera::getView()
 
 void Camera::updateAspectRatio(float _aspect)
 {
-    setPerspective(fov, _aspect, znear, zfar);
+    // Deliberately not through setPerspective(): that stores the fov it is
+    // given, so feeding it an adapted angle would adapt the adapted angle on the
+    // next frame, and the frame after that. `fov` stays the authored vertical
+    // angle; only the projection sees the adapted one.
+    matrices.perspective =
+        perspective(fovForAspect(_aspect), _aspect, zfar, znear, &matrices.invPerspective);
+}
+
+// The vertical angle to use when rendering at `aspect`, given what the camera
+// was authored for.
+//
+// A landscape frame is fitted horizontally -- Blender's AUTO sensor fit puts the
+// lens angle on the larger axis, and so does every other tool -- so the
+// horizontal angle is the one that survives a change of aspect. Keeping the
+// vertical angle instead widens the frame by the ratio of the two aspects: a
+// camera authored at 16:9 and rendered at 4:3 sees 1.33x too much, which does
+// not look like a camera bug so much as a scene that does not match, and it
+// quietly invalidates every whole-frame measurement taken against a reference.
+float Camera::fovForAspect(float aspect) const
+{
+    if (authoredAspect <= 0.0f || aspect <= 0.0f)
+        return fov;
+    // Portrait frames are fitted vertically, so the authored vertical angle is
+    // already the right one.
+    if (authoredAspect < 1.0f || aspect < 1.0f)
+        return fov;
+
+    const float halfV = glm::radians(fov) * 0.5f;
+    const float tanH = std::tan(halfV) * authoredAspect; // horizontal, preserved
+    return glm::degrees(2.0f * std::atan(tanH / aspect));
 }
 
 void Camera::setPosition(glm::float3 _position)
