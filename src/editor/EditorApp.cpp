@@ -215,6 +215,14 @@ void EditorApp::loadSettings()
     // An HDRI carries radiance; normalising it away makes physical parity
     // impossible. See loadEnvMap().
     m_settingsManager->setAs<bool>("render/env/autoCalibrate", false);
+    // Spatially hashed radiance cache. Off by default: it trades a little
+    // bias for a large cut in path length, which is a choice a scene makes.
+    m_settingsManager->setAs<bool>("render/pt/sharc", false);
+    m_settingsManager->setAs<uint32_t>("render/pt/sharcCapacity", 1u << 22);
+    m_settingsManager->setAs<uint32_t>("render/pt/sharcMinSamples", 8);
+    m_settingsManager->setAs<uint32_t>("render/pt/sharcDepth", 1);
+    // How many pixels wide a cache voxel should be at any distance.
+    m_settingsManager->setAs<float>("render/pt/sharcVoxelPixels", 4.0f);
     // Block compression and a disk cache for the finished textures.
     // The cache holds them downscaled, mipped and compressed, so a second
     // launch skips the decode, the resample, the mip chain and the encode.

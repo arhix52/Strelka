@@ -44,8 +44,10 @@ constant bool kFcDof [[function_constant(3)]];
 constant bool kFcDebug [[function_constant(4)]];
 constant bool kFcAlpha [[function_constant(5)]];
 constant bool kFcFog [[function_constant(6)]];
+constant bool kFcSharc [[function_constant(7)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
+constant bool SPEC_SHARC = is_function_constant_defined(kFcSharc) ? kFcSharc : false;
 constant bool SPEC_ENV_MAP = is_function_constant_defined(kFcEnvMap) ? kFcEnvMap : true;
 constant bool SPEC_LIGHTS = is_function_constant_defined(kFcLights) ? kFcLights : true;
 constant bool SPEC_MOTION_BLUR = is_function_constant_defined(kFcMotionBlur) ? kFcMotionBlur : true;

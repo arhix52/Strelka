@@ -213,6 +213,11 @@ private:
 
     MTL::Buffer* mPrevVertexBuffer = nullptr;
     bool mOwnsPrevVertexBuffer = false;
+    // The radiance cache. Sized once and reused for the whole render: a still
+    // frame wants every sample's deposits, and a moving one is invalidated by
+    // the camera check in updateUniforms.
+    MTL::Buffer* mSharcBuffer = nullptr;
+    uint32_t mSharcCapacity = 0;
     std::pair<size_t, size_t> mHostGeometryBytes{ 0, 0 };
     MTL::Buffer* mGeometryEntryBuffer = nullptr;
     bool mEnableMotionBlur = false;
@@ -262,6 +267,7 @@ private:
         // traversal rather than as a restart loop around it.
         MTL::IntersectionFunctionTable* shadowTableMotion = nullptr;
         MTL::IntersectionFunctionTable* shadowTableStatic = nullptr;
+        MTL::ComputePipelineState* sharcDeposit = nullptr;
     };
     enum WavefrontFeature : uint32_t
     {
@@ -276,6 +282,7 @@ private:
         // separate them in the cache.
         kFeatureMetal4 = 1u << 5,
         kFeatureFog = 1u << 7,
+        kFeatureSharc = 1u << 8,
         kFeatureCount = 1u << 5,
     };
     std::map<uint32_t, WavefrontVariant> mWavefrontVariants;

@@ -176,6 +176,14 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.denoise = *v;
     if (auto v = tbl["render"]["profile_stages"].value<bool>())
         cfg.profileStages = *v;
+    if (auto v = tbl["render"]["sharc"].value<bool>())
+        cfg.sharc = *v;
+    if (auto v = tbl["render"]["sharc_depth"].value<int64_t>())
+        cfg.sharcDepth = (uint32_t)*v;
+    if (auto v = tbl["render"]["sharc_min_samples"].value<int64_t>())
+        cfg.sharcMinSamples = (uint32_t)*v;
+    if (auto v = tbl["render"]["sharc_base_size"].value<double>())
+        cfg.sharcBaseSize = (float)*v;
     if (auto v = tbl["render"]["sampler"].value<std::string>())
     {
         cfg.samplerType = parseEnumOrDefault(*v, parseSamplerName, 0, "sampler");
@@ -304,6 +312,13 @@ void HeadlessApp::populateSettings()
     // An HDRI carries radiance; normalising it away makes physical parity
     // impossible. See loadEnvMap().
     m_settings->setAs<bool>("render/env/autoCalibrate", false);
+    // Spatially hashed radiance cache. Off by default: it trades a little
+    // bias for a large cut in path length, which is a choice a scene makes.
+    m_settings->setAs<bool>("render/pt/sharc", m_config.sharc);
+    m_settings->setAs<uint32_t>("render/pt/sharcCapacity", 1u << 22);
+    m_settings->setAs<uint32_t>("render/pt/sharcMinSamples", m_config.sharcMinSamples);
+    m_settings->setAs<uint32_t>("render/pt/sharcDepth", m_config.sharcDepth);
+    m_settings->setAs<float>("render/pt/sharcVoxelPixels", m_config.sharcBaseSize);
     // Block compression and a disk cache for the finished textures.
     // The cache holds them downscaled, mipped and compressed, so a second
     // launch skips the decode, the resample, the mip chain and the encode.

@@ -23,6 +23,7 @@
 // ============================================================================
 
 #include "fog.h"
+#include "sharc.h"
 
 // Bit 30 of HitRecord::geomEntryIndex marks a scattering event in the
 // atmosphere: no surface was reached, the ray was stopped by the medium. Bit 31
@@ -291,6 +292,9 @@ kernel void wavefrontGenerate(
     p.throughput = packed_float3(float3(1.0f));
     p.depthAndFlags = PATH_FLAG_ALIVE; // depth 0, not specular, NEE not done
     p.lastBsdfPdf = 0.0f;
+    p.sharcIndex = SHARC_NO_ENTRY;
+    p.sharcRadianceAtVisit = packed_float3(0.0f);
+    p.sharcInvThroughput = packed_float3(0.0f);
     paths[tid] = p;
 
     // ior_stack_* take a thread reference; device memory cannot bind to one.
@@ -729,6 +733,7 @@ kernel void wavefrontShade(
     // equal to the current pose whenever motion blur is off.
     device const char*                                         prevFrameVertexBuffer [[buffer(23)]],
     constant MTLAccelerationStructureUserIDInstanceDescriptor* prevInstances  [[buffer(24)]],
+    device SharcEntry*                                         sharcEntries   [[buffer(25)]],
     texture2d<float>                                           envMapTexture  [[texture(0)]])
 {
     if (gid >= control[WF_CTRL_HIT_N])
@@ -1091,6 +1096,61 @@ kernel void wavefrontShade(
     si.exterior_ior = entering ? ior_stack_current_ior(iorStack)
                                : ior_stack_peek_after_pop(iorStack, si.dielectric_priority);
 
+    // --- Radiance cache ------------------------------------------------------
+    //
+    // Read only past the first few bounces and only off a rough surface: the
+    // camera ray and the first bounce carry the detail a voxel average would
+    // blur, and a mirror reflects a direction rather than a place.
+    if (SPEC_SHARC && uniforms.sharcCapacity != 0u && depth >= uniforms.sharcDepth &&
+        si.roughness > 0.3f)
+    {
+        uint32_t voxelHash = 0u, voxelKey = 0u;
+        sharcVoxel(si.position, si.shading_normal, uniforms.viewToWorld[3].xyz, uniforms.sharcBaseSize,
+                   voxelHash, voxelKey);
+
+        uint32_t slot = 0u;
+        // Insert only when this path is going to fill it in; a read that misses
+        // simply carries on tracing.
+        const bool wantVisit = (p.sharcIndex == SHARC_NO_ENTRY);
+        // A fixed share of paths never read and always trace to the end, so the
+        // cache keeps converging instead of freezing at whatever the first few
+        // paths through a voxel happened to find. This is what SHARC gives its
+        // separate update pass; here it is the same paths, thinned.
+        const bool updatePath =
+            (sharcHash(tid * 9781u + sampleIdx * 6271u) & 7u) == 0u;
+        if (sharcFind(sharcEntries, uniforms.sharcCapacity, voxelHash, voxelKey, wantVisit, slot))
+        {
+            uint32_t cachedCount = 0u;
+            const float3 cached = sharcRead(sharcEntries, slot, cachedCount);
+            // A path either reads or records, never both. One that has recorded
+            // a voxel owes it an honest estimate of the rest of the path, and a
+            // cached read inside that estimate feeds the cache its own output --
+            // a loop that amplifies whatever error it starts with. It showed as
+            // a classroom 11% bright with no single step being wrong.
+            if (!updatePath && p.sharcIndex == SHARC_NO_ENTRY &&
+                cachedCount >= uniforms.sharcMinSamples)
+            {
+                // The rest of this path is what the cache already knows.
+                radiance += throughput * cached;
+                radianceOut[tid] += float4(radiance, 0.0f);
+                p.sharcIndex = SHARC_NO_ENTRY;
+                paths[tid] = p;
+                return;
+            }
+            // Recorded only while the throughput is worth dividing by. The
+            // deposit is what the path gathered divided by its throughput here,
+            // and at a throughput of a thousandth that estimator has a variance
+            // to match -- a handful of such deposits pulled a classroom 46%
+            // bright. Below the threshold the path simply carries on untracked.
+            if (wantVisit && luminance(throughput) > 0.05f)
+            {
+                p.sharcIndex = slot;
+                p.sharcRadianceAtVisit = packed_float3(float3(radianceOut[tid].xyz) + radiance);
+                p.sharcInvThroughput = packed_float3(1.0f / max(throughput, float3(0.02f)));
+            }
+        }
+    }
+
     const float4 xi = float4(random<SampleDimension::eBSDF0>(rng, uniforms.samplerType),
                              random<SampleDimension::eBSDF1>(rng, uniforms.samplerType),
                              random<SampleDimension::eBSDF2>(rng, uniforms.samplerType),
@@ -1378,6 +1438,37 @@ static void shadowImpl(
         weight *= exp(-tau);
     }
     radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
+}
+
+// One pass at the end of a sample: every path that passed through a cache voxel
+// deposits what it gathered afterwards.
+//
+// Here rather than at each of the half-dozen places a path can end, because the
+// path state survives to the end of the sample and this is one dispatch instead
+// of six scattered edits that would each have to stay correct.
+kernel void wavefrontSharcDeposit(uint tid [[thread_position_in_grid]],
+                                  constant Uniforms& uniforms [[buffer(0)]],
+                                  device PathState* paths [[buffer(1)]],
+                                  device const float4* radianceOut [[buffer(2)]],
+                                  device SharcEntry* sharcEntries [[buffer(3)]])
+{
+    if (tid >= uniforms.width * uniforms.height)
+    {
+        return;
+    }
+    PathState p = paths[tid];
+    if (p.sharcIndex == SHARC_NO_ENTRY)
+    {
+        return;
+    }
+    const float3 gathered =
+        (float3(radianceOut[tid].xyz) - float3(p.sharcRadianceAtVisit)) * float3(p.sharcInvThroughput);
+    if (all(gathered >= 0.0f))
+    {
+        sharcWrite(sharcEntries, p.sharcIndex, gathered);
+    }
+    p.sharcIndex = SHARC_NO_ENTRY;
+    paths[tid] = p;
 }
 
 #define WF_SHADOW_ENTRY(NAME, TRAITS)                                                                \

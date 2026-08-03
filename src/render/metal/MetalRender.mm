@@ -148,6 +148,7 @@ MetalRender::~MetalRender()
         // Environment map
         safeRelease(mEnvMapTexture);
         safeRelease(mEnvBackgroundTexture);
+        safeRelease(mSharcBuffer);
         safeRelease(mEnvAliasBuffer);
 
         // Pipeline states
@@ -178,6 +179,7 @@ MetalRender::~MetalRender()
             safeRelease(kv.second.shadowStatic);
             safeRelease(kv.second.shadowTableMotion);
             safeRelease(kv.second.shadowTableStatic);
+            safeRelease(kv.second.sharcDeposit);
         }
         mWavefrontVariants.clear();
         safeRelease(mWavefrontLibrary);
@@ -751,7 +753,11 @@ Buffer* MetalRender::getReadyBuffer()
 void MetalRender::init()
 {
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
-    static_assert(sizeof(PathState) == 20, "PathState is read and written for every live path on every bounce");
+    // 48 rather than 20: the radiance cache adds a slot index, the pixel's
+    // radiance at the moment the path passed through it, and the reciprocal
+    // throughput there. Read and written for every live path on every bounce, so
+    // worth watching.
+    static_assert(sizeof(PathState) == 48, "PathState is read and written for every live path on every bounce");
     // 32 rather than 24: the hit now carries the TLAS instance, because a shared
     // BLAS belongs to no single one. One extra word per live path.
     static_assert(sizeof(HitRecord) == 32, "HitRecord size changed");
@@ -1813,6 +1819,10 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             {
                 enc->setTexture(mEnvMapTexture, 0);
             }
+            if (mSharcBuffer)
+            {
+                enc->setBuffer(mSharcBuffer, 0, 25);
+            }
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kHitArgsOffset, tg);
 
             // Deferred occlusion. It has to run before the next bounce's shade,
@@ -1856,6 +1866,22 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             }
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kShadowArgsOffset, tg);
 
+        }
+
+        // Every path that passed through a cache voxel deposits what it gathered
+        // after it -- here, at the end of the sample, because by now the sample's
+        // deferred shadow rays have landed in the accumulator too.
+        if (mSharcBuffer && variant->sharcDeposit)
+        {
+            enc->setComputePipelineState(variant->sharcDeposit);
+            enc->setBuffer(uniformBuffer, 0, 0);
+            enc->setBuffer(mPathStateBuffer, 0, 1);
+            enc->setBuffer(sampleRadiance, 0, 2);
+            enc->setBuffer(mSharcBuffer, 0, 3);
+            const MTL::Size depositTg = MTL::Size::Make(
+                std::min<NS::UInteger>(variant->sharcDeposit->maxTotalThreadsPerThreadgroup(), 256u),
+                1, 1);
+            enc->dispatchThreads(MTL::Size::Make(width * height, 1, 1), depositTg);
         }
     }
 
@@ -2481,6 +2507,44 @@ void MetalRender::render(Buffer* output)
     pUniformData->shiftX = camera.shiftX;
     pUniformData->shiftY = camera.shiftY;
 
+    // Radiance cache
+    {
+        const bool wantSharc = getSettings()->getAs<bool>("render/pt/sharc");
+        const uint32_t capacity =
+            wantSharc ? std::max(1u << 16, getSettings()->getAs<uint32_t>("render/pt/sharcCapacity"))
+                      : 0u;
+        if (capacity != mSharcCapacity)
+        {
+            if (mSharcBuffer)
+            {
+                mSharcBuffer->release();
+                mSharcBuffer = nullptr;
+            }
+            mSharcCapacity = 0;
+            if (capacity)
+            {
+                // 20 bytes an entry: a key, three sums and a count.
+                mSharcBuffer = mDevice->newBuffer((size_t)capacity * 20, MTL::ResourceStorageModePrivate);
+                if (mSharcBuffer)
+                {
+                    mSharcCapacity = capacity;
+                    STRELKA_INFO("Radiance cache: {} entries ({:.1f} MB)", capacity,
+                                 capacity * 20 / 1e6);
+                }
+            }
+        }
+        pUniformData->sharcCapacity = mSharcCapacity;
+        pUniformData->sharcMinSamples = getSettings()->getAs<uint32_t>("render/pt/sharcMinSamples");
+        pUniformData->sharcDepth = getSettings()->getAs<uint32_t>("render/pt/sharcDepth");
+        // The world size of one pixel at unit distance, times the number of
+        // pixels a voxel should span. Everything scene-dependent -- field of
+        // view, resolution -- is folded in here so the setting itself is not.
+        const float tanHalfFov = std::tan(glm::radians(camera.fovForAspect((float)width / height)) * 0.5f);
+        const float pixelAngle = 2.0f * tanHalfFov / (float)height;
+        pUniformData->sharcBaseSize =
+            pixelAngle * std::max(1.0f, getSettings()->getAs<float>("render/pt/sharcVoxelPixels"));
+    }
+
     // Atmosphere
     {
         const auto& atmosphere = mScene->getAtmosphere();
@@ -2711,6 +2775,8 @@ void MetalRender::render(Buffer* output)
             // A scene without an atmosphere compiles the variant that has none.
             if (pUniformData->hasFog)
                 features |= kFeatureFog;
+            if (pUniformData->sharcCapacity != 0)
+                features |= kFeatureSharc;
 
             if (useMetal4)
             {
@@ -3216,6 +3282,8 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
     values->setConstantValue(&debug, MTL::DataTypeBool, (NS::UInteger)4);
     values->setConstantValue(&alpha, MTL::DataTypeBool, (NS::UInteger)5);
     values->setConstantValue(&fog, MTL::DataTypeBool, (NS::UInteger)6);
+    const bool sharc = (features & kFeatureSharc) != 0;
+    values->setConstantValue(&sharc, MTL::DataTypeBool, (NS::UInteger)7);
 
     // A pipeline built the Metal 3 way cannot be used with an argument table, so
     // the two paths need separate pipelines and the mode is part of the cache key.
@@ -3298,6 +3366,7 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
     v.extendStatic = make("wavefrontExtendStatic");
     v.shade = make("wavefrontShade");
     v.miss = make("wavefrontMiss");
+    v.sharcDeposit = make("wavefrontSharcDeposit");
     v.shadowMotion = makeLinked("wavefrontShadow");
     v.shadowStatic = makeLinked("wavefrontShadowStatic");
 
@@ -4779,6 +4848,10 @@ void MetalRender::rebuildTLAS()
     accelDescriptor->setInstanceDescriptorBuffer(mInstanceBuffer);
     accelDescriptor->setInstanceDescriptorType(
         MTL::AccelerationStructureInstanceDescriptorTypeUserID);
+    // Measured: building the top level without Refit -- which lets the builder
+    // split more freely -- made no difference to traversal on a scene with a
+    // million instances (184 ms against 188). Kept refittable, because that is
+    // what the animation path needs and the alternative buys nothing.
     accelDescriptor->setUsage(MTL::AccelerationStructureUsageRefit);
 
     // Only the instance transforms change while an animation plays — the set of

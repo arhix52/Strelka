@@ -37,6 +37,10 @@ struct RenderConfig
     // per-bounce breakdown. Costs a sample either side of every dispatch, so it
     // is off unless asked for.
     bool profileStages = false;
+    bool sharc = false;
+    uint32_t sharcDepth = 1;
+    uint32_t sharcMinSamples = 8;
+    float sharcBaseSize = 4.0f; // voxel width in pixels
     // 0 = glTF (-ln(C)/d), 1 = Cycles ((1-C)/d)
     uint32_t volumeModel = 0;
     // Longest side a texture is allowed on load; 0 = no limit.

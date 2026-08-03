@@ -116,6 +116,11 @@ struct Uniforms
     // Atmospheric scattering, homogeneous below fogHeight. See fog.h for why a
     // slab and not a bounded volume.
     uint32_t hasFog;
+    // Radiance cache; see sharc.h.
+    uint32_t sharcCapacity;   // 0 disables
+    uint32_t sharcMinSamples; // before a voxel may be read
+    uint32_t sharcDepth;      // first bounce allowed to read the cache
+    float sharcBaseSize;
     float fogSigmaT;
     float fogAnisotropy;
     float fogHeight;
@@ -287,7 +292,21 @@ struct PathState
     packed_float3 throughput;
     uint32_t depthAndFlags; // depth in bits 0..7, flags above
     float lastBsdfPdf;
+
+    // Radiance cache bookkeeping. A path that passes through a cache voxel
+    // remembers the slot, what the pixel had already gathered at that moment and
+    // the reciprocal of its throughput there; when the path ends, the difference
+    // over that throughput is what the rest of the path was worth from that
+    // voxel, and that is what the cache stores.
+    //
+    // Costs 28 bytes on every live path and buys the whole tail of the path, so
+    // it is only allocated when the cache is on.
+    uint32_t sharcIndex;
+    packed_float3 sharcRadianceAtVisit;
+    packed_float3 sharcInvThroughput;
 };
+
+#define SHARC_NO_ENTRY 0xFFFFFFFFu
 
 #define PATH_FLAG_ALIVE      (1u << 8)
 #define PATH_FLAG_SPECULAR   (1u << 9)
