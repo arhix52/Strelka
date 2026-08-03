@@ -113,7 +113,17 @@ static inline float3 hgSample(float3 wo, float g, float u1, float u2, thread flo
     else
     {
         const float s = (1.0f - g * g) / (1.0f + g - 2.0f * g * u1);
-        cosTheta = -(1.0f + g * g - s * s) / (2.0f * g);
+        // The standard inversion returns the cosine against `wo`, which points
+        // back the way the ray came. Everything here works in directions of
+        // *travel*, where that cosine is the other sign -- and at g = 0.8 the
+        // median draw is -0.944, so taken at face value a forward-scattering
+        // medium scatters backwards.
+        //
+        // It does not show up in single scattering, where the outgoing direction
+        // is fixed by the camera: only once a path continues does the lobe point
+        // the wrong way, and then the second scattering event is worth sixty
+        // times the first instead of a fraction of it.
+        cosTheta = (1.0f + g * g - s * s) / (2.0f * g);
     }
     cosTheta = clamp(cosTheta, -1.0f, 1.0f);
 

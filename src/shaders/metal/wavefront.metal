@@ -712,7 +712,16 @@ kernel void wavefrontShade(
                                envMapTexture, true);
             if (conn.needsRay && conn.pdf > 0.0f)
             {
-                const float phase = hgPhase(dot(-rayDir, conn.toLight), uniforms.fogAnisotropy);
+                // dot(rayDir, toLight), not dot(-rayDir, toLight). The phase
+                // function takes the angle between the two directions of
+                // *travel*: light arrives along -toLight and leaves toward the
+                // camera along -rayDir, so their cosine is dot(rayDir, toLight).
+                //
+                // Negated, a forward-scattering medium becomes a backward-
+                // scattering one. Looking into a low sun -- where the glow is --
+                // it was six times too dim, and looking away from it, where
+                // there should be almost nothing, thirty-seven times too bright.
+                const float phase = hgPhase(dot(rayDir, conn.toLight), uniforms.fogAnisotropy);
                 // The phase function is the medium's BSDF and its own pdf, so
                 // MIS pairs it against the light density exactly as a surface
                 // lobe would.
