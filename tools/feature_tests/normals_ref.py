@@ -137,6 +137,14 @@ def main():
     sc.render.resolution_y = height
     sc.render.resolution_percentage = 100
     sc.render.film_transparent = False
+    # The scene's own sequencer and compositor are switched off. A production
+    # .blend routinely has both enabled, and Blender runs the render through them
+    # before it is written: on this file a constant world of (0.2, 0.5, 0.9) came
+    # out as (0.197, 0.578, 1.428), which is a 59% lift in blue applied to every
+    # reference rendered from this scene. What Strelka is being compared against
+    # has to be the render, not a graded version of it.
+    sc.render.use_sequencer = False
+    sc.render.use_compositing = False
     sc.view_settings.view_transform = "Standard"
     sc.view_settings.look = "None"
     sc.view_settings.exposure = 0.0

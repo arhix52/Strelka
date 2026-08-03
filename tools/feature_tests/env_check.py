@@ -68,6 +68,14 @@ def render_reference(path, width, height):
     sc.render.resolution_y = height
     sc.render.resolution_percentage = 100
     sc.render.film_transparent = False
+    # The scene's own sequencer and compositor are switched off. A production
+    # .blend routinely has both enabled, and Blender runs the render through them
+    # before it is written: on this file a constant world of (0.2, 0.5, 0.9) came
+    # out as (0.197, 0.578, 1.428), which is a 59% lift in blue applied to every
+    # reference rendered from this scene. What Strelka is being compared against
+    # has to be the render, not a graded version of it.
+    sc.render.use_sequencer = False
+    sc.render.use_compositing = False
     sc.view_settings.view_transform = "Raw"
     sc.view_settings.look = "None"
     sc.view_settings.exposure = 0.0
@@ -118,14 +126,10 @@ def main():
     bpy.ops.render.render(write_still=True, scene=sc.name)
     src, w, h = bake_env.load_rgb(raw)
     dst = bake_env.resample_to_strelka(src, bake_env.direction_field(w, h), 2048, 1024)
+    os.remove(raw)
     w, h = 2048, 1024
     import numpy as np
     img = bpy.data.images.new("env", width=w, height=h, float_buffer=True)
-    # Linear, set before the pixels are written. Without it the image is sRGB and
-    # Blender encodes on save, so the file holds display values where the
-    # renderer expects radiance: midtones lift, contrast flattens, and the sky
-    # comes out about a quarter too bright in a way that looks like a lighting
-    # difference rather than a colour-management one.
     img.colorspace_settings.name = "Non-Color"
     rgba = np.ones((h, w, 4), dtype=np.float32)
     rgba[:, :, :3] = dst[::-1]
@@ -133,7 +137,6 @@ def main():
     img.filepath_raw = os.path.join(out, "env.exr")
     img.file_format = "OPEN_EXR"
     img.save()
-    os.remove(raw)
 
     with open(os.path.join(out, "scene_light.json"), "w") as f:
         json.dump({"environment": {"texture": os.path.join(out, "env.exr"), "intensity": 1.0}}, f,
@@ -145,4 +148,6 @@ def main():
     print("  branch=%s" % branch)
 
 
-main()
+# Guarded so this can be imported for its helpers without running a whole bake.
+if __name__ == "__main__":
+    main()

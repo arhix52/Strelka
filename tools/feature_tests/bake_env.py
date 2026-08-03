@@ -71,68 +71,6 @@ def resolve_light_path(world, branch):
     return rewired
 
 
-def make_cube_scene(src_world, size):
-    """A 90-degree perspective camera, for baking the world one cube face at a time.
-
-    Not a panorama, though a panorama is one render instead of six. Measured:
-    Cycles gives a *different* value for the same direction through an
-    equirectangular camera than through a perspective one -- 8 to 23% lower on
-    this world, worst where the sky is brightest. Both cannot be right, and the
-    one that matters is the one the reference renders with.
-
-    So the environment is baked the way it will be compared: perspective, six
-    faces, and the equirectangular map assembled afterwards from directions that
-    are themselves measured.
-    """
-    sc = bpy.data.scenes.new("__env_cube")
-    sc.world = src_world
-
-    sc.render.engine = "CYCLES"
-    sc.cycles.device = "CPU"
-    sc.cycles.samples = 16
-    sc.cycles.use_denoising = False
-    sc.cycles.use_adaptive_sampling = False
-    for b_ in ("max_bounces", "diffuse_bounces", "glossy_bounces", "transmission_bounces"):
-        setattr(sc.cycles, b_, 0)
-
-    sc.render.resolution_x = size
-    sc.render.resolution_y = size
-    sc.render.resolution_percentage = 100
-    sc.render.film_transparent = False
-    sc.view_settings.view_transform = "Raw"
-    sc.view_settings.look = "None"
-    sc.view_settings.exposure = 0.0
-    sc.view_settings.gamma = 1.0
-    sc.render.image_settings.file_format = "OPEN_EXR"
-    sc.render.image_settings.color_mode = "RGB"
-    sc.render.image_settings.color_depth = "32"
-    sc.render.image_settings.exr_codec = "ZIP"
-
-    cam_data = bpy.data.cameras.new("__cube_cam")
-    cam_data.type = "PERSP"
-    cam_data.lens_unit = "FOV"
-    cam_data.angle = math.radians(90.0)
-    cam_data.sensor_fit = "HORIZONTAL"
-    cam = bpy.data.objects.new("__cube_cam", cam_data)
-    sc.collection.objects.link(cam)
-    cam.location = (0.0, 0.0, 0.0)
-    sc.camera = cam
-    return sc, cam
-
-
-# The six ways to point a camera at a cube's faces. Which face is which does not
-# matter -- the directions are measured, not assumed -- only that together they
-# cover the sphere.
-CUBE_ROTATIONS = [
-    (math.radians(90.0), 0.0, 0.0),
-    (math.radians(90.0), 0.0, math.radians(90.0)),
-    (math.radians(90.0), 0.0, math.radians(180.0)),
-    (math.radians(90.0), 0.0, math.radians(270.0)),
-    (0.0, 0.0, 0.0),
-    (math.radians(180.0), 0.0, 0.0),
-]
-
-
 def make_bake_scene(src_world, width, height):
     sc = bpy.data.scenes.new("__env_bake")
     sc.world = src_world
@@ -149,6 +87,14 @@ def make_bake_scene(src_world, width, height):
     sc.render.resolution_y = height
     sc.render.resolution_percentage = 100
     sc.render.film_transparent = False
+    # The scene's own sequencer and compositor are switched off. A production
+    # .blend routinely has both enabled, and Blender runs the render through them
+    # before it is written: on this file a constant world of (0.2, 0.5, 0.9) came
+    # out as (0.197, 0.578, 1.428), which is a 59% lift in blue applied to every
+    # reference rendered from this scene. What Strelka is being compared against
+    # has to be the render, not a graded version of it.
+    sc.render.use_sequencer = False
+    sc.render.use_compositing = False
     # Raw, not Standard. Blender writes an EXR through the view transform when
     # the render is saved as a render, which is what bpy.ops.render.render does,
     # and Standard is an sRGB display transform -- so a bake meant to carry
@@ -267,21 +213,22 @@ def resample_to_strelka(src, dirs, out_w, out_h):
     gaps that have to be filled from neighbours, and filling them lifts the dark
     bands until the sky has no contrast left.
     """
-    norm = np.linalg.norm(dirs, axis=2, keepdims=True)
-    d = dirs / np.maximum(norm, 1e-9)
-    bx, by, bz = d[:, :, 0], d[:, :, 1], d[:, :, 2]
+    src = src.reshape(-1, 3)
+    dirs = dirs.reshape(-1, 3)
+    d = dirs / np.maximum(np.linalg.norm(dirs, axis=1, keepdims=True), 1e-9)
+    bx, by, bz = d[:, 0], d[:, 1], d[:, 2]
     # Blender (Z up) -> glTF (Y up), the same change of basis as gltf_pos().
     gx, gy, gz = bx, bz, -by
 
     u = (np.arctan2(gx, gz) + math.pi) / (2.0 * math.pi)
     v = np.arccos(np.clip(gy, -1.0, 1.0)) / math.pi
 
-    tx = np.clip((u * out_w).astype(np.int32), 0, out_w - 1).ravel()
-    ty = np.clip((v * out_h).astype(np.int32), 0, out_h - 1).ravel()
+    tx = np.clip((u * out_w).astype(np.int32), 0, out_w - 1)
+    ty = np.clip((v * out_h).astype(np.int32), 0, out_h - 1)
 
     accum = np.zeros((out_h, out_w, 3), dtype=np.float64)
     count = np.zeros((out_h, out_w), dtype=np.int32)
-    np.add.at(accum, (ty, tx), src.reshape(-1, 3))
+    np.add.at(accum, (ty, tx), src)
     np.add.at(count, (ty, tx), 1)
 
     hit = count > 0
@@ -329,9 +276,9 @@ def main():
     raw = os.path.join(out, name + "_env_raw.exr")
     sc.render.filepath = raw
     bpy.ops.render.render(write_still=True, scene=sc.name)
-
     src, w, h = load_rgb(raw)
     dst = resample_to_strelka(src, direction_field(w, h), width, height)
+    os.remove(raw)
     w, h = width, height
 
     suffix = "_env.exr" if branch == "light" else "_env_camera.exr"
@@ -350,8 +297,6 @@ def main():
     img.filepath_raw = final
     img.file_format = "OPEN_EXR"
     img.save()
-    if "--keep-raw" not in argv:
-        os.remove(raw)
 
     print("ENVBAKE %s  %dx%d  world='%s'  mean=%.4f max=%.3f"
           % (final, w, h, world.name, float(dst.mean()), float(dst.max())))
