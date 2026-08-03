@@ -87,13 +87,75 @@ static inline void queuePush(device atomic_uint* counter, device uint32_t* queue
 // runtime branch or a function constant, it has to be two compiled variants. It
 // is worth it: every ray was paying for motion-BVH traversal, including in scenes
 // with no deforming geometry at all, and that was 12-19% of the frame.
+// What a cutout shadow ray carries through traversal. The intersection function
+// multiplies into it and lets traversal continue, so one traversal answers the
+// whole ray instead of eight restarts from the root.
+struct ShadowPayload
+{
+    float3 transmittance;
+};
+
+// Alpha test during traversal.
+//
+// Returning false means "this was a hole, keep going", which is what an any-hit
+// shader is for. The alternative -- and what this replaces -- is to find the
+// closest hit, test it, move the ray past it and trace again, up to eight times.
+// Each of those restarts walks the tree from the root, and on this forest that
+// loop was a quarter of the whole frame.
+//
+// Accepting on a collapsed transmittance keeps the early-out the loop had: once
+// nothing measurable can get through, the ray is blocked and traversal stops.
+[[intersection(triangle, triangle_data, instancing)]]
+bool shadowAlphaAnyHit(uint primitive_id [[primitive_id]],
+                       uint geometry_id [[geometry_id]],
+                       uint instance_id [[instance_id]],
+                       float2 barycentric_coord [[barycentric_coord]],
+                       ray_data ShadowPayload& payload [[payload]],
+                       constant MTLAccelerationStructureUserIDInstanceDescriptor* instances
+                           [[buffer(0)]],
+                       device const Material* materials [[buffer(1)]],
+                       device const GeometryEntry* geometryEntries [[buffer(2)]],
+                       device const char* vertexBuffer [[buffer(3)]],
+                       device const uint32_t* indexBuffer [[buffer(4)]])
+{
+    const auto inst = instances[instance_id];
+    const GeometryEntry entry = geometryEntries[inst.userID + geometry_id];
+    device const Material& mat = materials[entry.materialId];
+
+    if (mat.alpha_mode == ALPHA_MODE_OPAQUE)
+    {
+        return true; // blocks outright
+    }
+
+    constexpr uint32_t vtxStride = 32;
+    constexpr uint32_t uvOff = 20;
+    float2 uvv[3];
+    for (uint32_t k = 0; k < 3; ++k)
+    {
+        const uint32_t idx = indexBuffer[entry.indexOffset + primitive_id * 3 + k];
+        uvv[k] = unpackUV(
+            *(device const uint32_t*)(vertexBuffer + (entry.vbOffset + idx) * vtxStride + uvOff));
+    }
+    const float2 uv = interpolateAttrib(uvv[0], uvv[1], uvv[2], barycentric_coord);
+    const float opacity = resolveOpacity(mat, uv);
+
+    payload.transmittance *= (1.0f - opacity);
+    return all(payload.transmittance <= 1e-6f);
+}
+
 struct MotionTraversal
 {
     using structure = acceleration_structure<instancing, primitive_motion>;
     using isect = intersector<triangle_data, instancing, primitive_motion>;
+    using table = intersection_function_table<triangle_data, instancing, primitive_motion>;
     static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float time)
     {
         return i.intersect(r, as, mask, time);
+    }
+    static isect::result_type traceAnyHit(thread isect& i, ray r, structure as, uint32_t mask,
+                                          float time, table t, thread ShadowPayload& payload)
+    {
+        return i.intersect(r, as, mask, time, t, payload);
     }
 };
 
@@ -101,9 +163,15 @@ struct StaticTraversal
 {
     using structure = acceleration_structure<instancing>;
     using isect = intersector<triangle_data, instancing>;
+    using table = intersection_function_table<triangle_data, instancing>;
     static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float)
     {
         return i.intersect(r, as, mask);
+    }
+    static isect::result_type traceAnyHit(thread isect& i, ray r, structure as, uint32_t mask,
+                                          float, table t, thread ShadowPayload& payload)
+    {
+        return i.intersect(r, as, mask, t, payload);
     }
 };
 
@@ -1232,7 +1300,8 @@ static void shadowImpl(
     device const Material*  materials,
     device const GeometryEntry* geometryEntries,
     device const char*      vertexBuffer,
-    device const uint32_t*  indexBuffer)
+    device const uint32_t*  indexBuffer,
+    typename T::table       functionTable)
 {
     if (gid >= control[WF_CTRL_SHADOW_N])
     {
@@ -1275,55 +1344,38 @@ static void shadowImpl(
         return;
     }
 
-    // Cutouts make occlusion a product rather than a predicate, so any-hit no
-    // longer answers the question -- the nearest hit may be a hole. Walk the
-    // closest hits instead, attenuating by coverage and stepping past anything
-    // that does not fully block. Deterministic rather than stochastic: a MASK
-    // surface contributes 0 or 1 exactly and a BLEND one its alpha, which is far
-    // quieter than rolling a second random number per shadow ray.
+    // Cutouts make occlusion a product rather than a predicate, so a plain
+    // any-hit does not answer the question: the nearest hit may be a hole. The
+    // alpha test runs inside traversal instead, accumulating coverage into the
+    // ray payload, so the whole ray is answered by one traversal.
+    //
+    // Deterministic rather than stochastic: a MASK surface contributes 0 or 1
+    // exactly and a BLEND one its alpha, which is far quieter than rolling a
+    // second random number per shadow ray.
+    //
+    // force_opacity is not set here -- the instance flag decides -- because
+    // forcing opacity is exactly what makes traversal skip the function.
     isect.accept_any_intersection(false);
-    for (uint32_t step = 0u; step < 8u; ++step)
+
+    ShadowPayload payload;
+    payload.transmittance = float3(1.0f);
+    const auto hit = T::traceAnyHit(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW,
+                                    motionTime, functionTable, payload);
+    if (hit.type != intersection_type::none)
     {
-        const auto hit = T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime);
-        if (hit.type == intersection_type::none)
-        {
-            break;
-        }
+        return; // something accepted: fully blocked
+    }
+    weight *= payload.transmittance;
+    if (all(weight <= 1e-6f))
+    {
+        return;
+    }
 
-        const auto inst = instances[hit.instance_id];
-        const GeometryEntry entry = geometryEntries[inst.userID + hit.geometry_id];
-        device const Material& mat = materials[entry.materialId];
-
-        float opacity = 1.0f;
-        if (mat.alpha_mode != ALPHA_MODE_OPAQUE)
-        {
-            constexpr uint32_t vtxStride = 32;
-            constexpr uint32_t uvOff     = 20;
-            float2 uvv[3];
-            for (uint32_t k = 0; k < 3; ++k)
-            {
-                const uint32_t idx = indexBuffer[entry.indexOffset + hit.primitive_id * 3 + k];
-                uvv[k] = unpackUV(*(device const uint32_t*)(vertexBuffer +
-                                                            (entry.vbOffset + idx) * vtxStride + uvOff));
-            }
-            const float2 uv =
-                interpolateAttrib(uvv[0], uvv[1], uvv[2], hit.triangle_barycentric_coord);
-            opacity = resolveOpacity(mat, uv);
-        }
-
-        weight *= (1.0f - opacity);
-        if (all(weight <= 1e-6f))
-        {
-            return; // fully blocked
-        }
-
-        const float advance = hit.distance + 1e-4f;
-        shadowRay.origin = shadowRay.origin + shadowRay.direction * advance;
-        shadowRay.max_distance -= advance;
-        if (shadowRay.max_distance <= 0.0f)
-        {
-            break;
-        }
+    if (SPEC_FOG && uniforms.hasFog)
+    {
+        const float tau = fogOpticalDepth(float3(sr.origin), float3(sr.direction),
+                                          sr.maxDistance, uniforms.fogHeight, uniforms.fogSigmaT);
+        weight *= exp(-tau);
     }
     radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
 }
@@ -1340,11 +1392,12 @@ static void shadowImpl(
                      device const Material* materials [[buffer(7)]],                                 \
                      device const GeometryEntry* geometryEntries [[buffer(8)]],                      \
                      device const char* vertexBuffer [[buffer(9)]],                                  \
-                     device const uint32_t* indexBuffer [[buffer(10)]])                              \
+                     device const uint32_t* indexBuffer [[buffer(10)]],                             \
+                     TRAITS::table functionTable [[buffer(11)]])                                     \
     {                                                                                                \
         shadowImpl<TRAITS>(gid, uniforms, accelerationStructure, shadowRays, radianceOut, control,    \
                            sampleIdx, instances, materials, geometryEntries, vertexBuffer,           \
-                           indexBuffer);                                                             \
+                           indexBuffer, functionTable);                                              \
     }
 
 WF_SHADOW_ENTRY(wavefrontShadow, MotionTraversal)

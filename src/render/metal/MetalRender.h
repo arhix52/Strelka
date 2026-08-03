@@ -258,6 +258,10 @@ private:
         MTL::ComputePipelineState* miss = nullptr;
         MTL::ComputePipelineState* shadowMotion = nullptr;
         MTL::ComputePipelineState* shadowStatic = nullptr;
+        // Bound to the shadow dispatch so the alpha test can run inside
+        // traversal rather than as a restart loop around it.
+        MTL::IntersectionFunctionTable* shadowTableMotion = nullptr;
+        MTL::IntersectionFunctionTable* shadowTableStatic = nullptr;
     };
     enum WavefrontFeature : uint32_t
     {

@@ -172,6 +172,10 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.textureMaxDim = (uint32_t)*v;
     if (auto v = tbl["render"]["volume_model"].value<std::string>())
         cfg.volumeModel = (*v == "cycles") ? 1u : 0u;
+    if (auto v = tbl["render"]["denoise"].value<bool>())
+        cfg.denoise = *v;
+    if (auto v = tbl["render"]["profile_stages"].value<bool>())
+        cfg.profileStages = *v;
     if (auto v = tbl["render"]["sampler"].value<std::string>())
     {
         cfg.samplerType = parseEnumOrDefault(*v, parseSamplerName, 0, "sampler");
@@ -281,7 +285,8 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/splitSubmissions", 0);
     m_settings->setAs<uint32_t>("render/pt/profileStages", 0);
     m_settings->setAs<uint32_t>("render/pt/writeAov", 0);
-    m_settings->setAs<bool>("render/pt/denoise", false);
+    m_settings->setAs<bool>("render/pt/denoise", m_config.denoise);
+    m_settings->setAs<uint32_t>("render/pt/profileStages", m_config.profileStages ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/jitterSign", 0);
     m_settings->setAs<uint32_t>("render/pt/denoiseDepthMode", 0);
     m_settings->setAs<float>("render/pt/denoiseFireflyClamp", 8.0f);

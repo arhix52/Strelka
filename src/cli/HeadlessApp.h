@@ -29,6 +29,14 @@ struct RenderConfig
     uint32_t maxDepth = 8;
     // 0=Halton, 1=PCG, 2=Sobol, 3=Sobol+BN, 4=Hybrid (BN→Sobol)
     uint32_t samplerType = 0;
+    // MetalFX denoising. Off by default: it is a temporal filter and a still
+    // frame gives it one frame to work with, so whether it helps is a question
+    // to be measured per scene rather than assumed.
+    bool denoise = false;
+    // Per-stage GPU timestamps, resolved from a counter sample buffer, with a
+    // per-bounce breakdown. Costs a sample either side of every dispatch, so it
+    // is off unless asked for.
+    bool profileStages = false;
     // 0 = glTF (-ln(C)/d), 1 = Cycles ((1-C)/d)
     uint32_t volumeModel = 0;
     // Longest side a texture is allowed on load; 0 = no limit.

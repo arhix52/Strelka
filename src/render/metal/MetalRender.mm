@@ -176,6 +176,8 @@ MetalRender::~MetalRender()
             safeRelease(kv.second.miss);
             safeRelease(kv.second.shadowMotion);
             safeRelease(kv.second.shadowStatic);
+            safeRelease(kv.second.shadowTableMotion);
+            safeRelease(kv.second.shadowTableStatic);
         }
         mWavefrontVariants.clear();
         safeRelease(mWavefrontLibrary);
@@ -1838,6 +1840,20 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->setBuffer(mGeometryEntryBuffer, 0, 8);
             enc->setBuffer(mVertexBuffer, 0, 9);
             enc->setBuffer(mIndexBuffer, 0, 10);
+            // The intersection function reads the same tables the kernel does,
+            // through the function table's own binding points.
+            MTL::IntersectionFunctionTable* shadowTable =
+                useMotion ? variant->shadowTableMotion : variant->shadowTableStatic;
+            if (shadowTable)
+            {
+                shadowTable->setBuffer(mInstanceBuffer, 0, 0);
+                shadowTable->setBuffer(mMaterialBuffer, 0, 1);
+                shadowTable->setBuffer(mGeometryEntryBuffer, 0, 2);
+                shadowTable->setBuffer(mVertexBuffer, 0, 3);
+                shadowTable->setBuffer(mIndexBuffer, 0, 4);
+                enc->setIntersectionFunctionTable(shadowTable, 11);
+                enc->useResource(shadowTable, MTL::ResourceUsageRead);
+            }
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kShadowArgsOffset, tg);
 
         }
@@ -3061,6 +3077,13 @@ void MetalRender::renderSync(Buffer* output)
     if (mLastCommandBuffer)
     {
         mLastCommandBuffer->waitUntilCompleted();
+        // The async path reports these from a completion handler; the synchronous
+        // one had nowhere to report from, so a headless profiling run printed the
+        // CPU encode time and nothing about the GPU.
+        if (mProfileStages)
+        {
+            reportStageTimings();
+        }
         if (mLastCommandBuffer->status() == MTL::CommandBufferStatusError)
         {
             // Once, not once per sample: a scene that does not fit fails every
@@ -3221,14 +3244,88 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
         return pso;
     };
 
+    // The alpha-shadow intersection function has to be linked into the pipelines
+    // that call it, and the pipeline then hands out a table to bind it through.
+    MTL::Function* anyHitFn = nullptr;
+    MTL::LinkedFunctions* linked = nullptr;
+    if (alpha && !useMetal4)
+    {
+        anyHitFn = mWavefrontLibrary->newFunction(
+            NS::String::string("shadowAlphaAnyHit", NS::UTF8StringEncoding), values, &err);
+        if (anyHitFn)
+        {
+            const NS::Object* fns[] = { anyHitFn };
+            linked = MTL::LinkedFunctions::alloc()->init();
+            linked->setFunctions(NS::Array::array(fns, 1));
+        }
+        else
+        {
+            STRELKA_ERROR("wavefront: specialising shadowAlphaAnyHit -> {}",
+                          err ? err->localizedDescription()->utf8String() : "unknown error");
+        }
+    }
+    auto makeLinked = [&](const char* name) -> MTL::ComputePipelineState* {
+        if (!linked)
+        {
+            return make(name);
+        }
+        MTL::Function* fn = mWavefrontLibrary->newFunction(
+            NS::String::string(name, NS::UTF8StringEncoding), values, &err);
+        if (!fn)
+        {
+            STRELKA_FATAL("wavefront: specialising {} -> {}", name,
+                          err ? err->localizedDescription()->utf8String() : "unknown error");
+            return nullptr;
+        }
+        MTL::ComputePipelineDescriptor* desc = MTL::ComputePipelineDescriptor::alloc()->init();
+        desc->setComputeFunction(fn);
+        desc->setLinkedFunctions(linked);
+        MTL::ComputePipelineState* pso =
+            mDevice->newComputePipelineState(desc, MTL::PipelineOptionNone, nullptr, &err);
+        if (!pso)
+        {
+            STRELKA_FATAL("wavefront: {} with linked functions -> {}", name,
+                          err ? err->localizedDescription()->utf8String() : "unknown error");
+        }
+        desc->release();
+        fn->release();
+        return pso;
+    };
+
     WavefrontVariant v;
     v.generate = make("wavefrontGenerate");
     v.extendMotion = make("wavefrontExtend");
     v.extendStatic = make("wavefrontExtendStatic");
     v.shade = make("wavefrontShade");
     v.miss = make("wavefrontMiss");
-    v.shadowMotion = make("wavefrontShadow");
-    v.shadowStatic = make("wavefrontShadowStatic");
+    v.shadowMotion = makeLinked("wavefrontShadow");
+    v.shadowStatic = makeLinked("wavefrontShadowStatic");
+
+    // One table per pipeline: it is created from the pipeline that will bind it,
+    // and the two shadow pipelines are different pipelines.
+    if (linked && anyHitFn)
+    {
+        auto makeTable = [&](MTL::ComputePipelineState* pso) -> MTL::IntersectionFunctionTable* {
+            if (!pso)
+                return nullptr;
+            MTL::IntersectionFunctionTableDescriptor* d =
+                MTL::IntersectionFunctionTableDescriptor::alloc()->init();
+            d->setFunctionCount(1);
+            MTL::IntersectionFunctionTable* table = pso->newIntersectionFunctionTable(d);
+            d->release();
+            if (!table)
+                return nullptr;
+            MTL::FunctionHandle* handle = pso->functionHandle(anyHitFn);
+            table->setFunction(handle, 0);
+            return table;
+        };
+        v.shadowTableMotion = makeTable(v.shadowMotion);
+        v.shadowTableStatic = makeTable(v.shadowStatic);
+    }
+    if (anyHitFn)
+        anyHitFn->release();
+    if (linked)
+        linked->release();
     values->release();
 
     if (!v.shade)
@@ -4161,7 +4258,14 @@ void MetalRender::createAccelerationStructures()
     {
         const EmittedInstance& e = mEmittedInstances[d];
         instanceDescriptors[d].accelerationStructureIndex = e.asIndex;
-        instanceDescriptors[d].options = MTL::AccelerationStructureInstanceOptionOpaque;
+        // Not marked opaque when the scene has cutouts: the flag makes traversal
+        // skip the intersection function, which is what performs the alpha test.
+        // The kernels that do not want the test -- extend, and the shadow path of
+        // a scene without cutouts -- force opacity on the intersector instead,
+        // which overrides this and costs them nothing.
+        instanceDescriptors[d].options = mSceneHasAlphaMaterials
+                                             ? MTL::AccelerationStructureInstanceOptionNone
+                                             : MTL::AccelerationStructureInstanceOptionOpaque;
         instanceDescriptors[d].intersectionFunctionTableOffset = 0;
         instanceDescriptors[d].userID = e.userID;
         instanceDescriptors[d].mask = e.mask;
