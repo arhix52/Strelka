@@ -14,6 +14,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 #include <glm/gtc/quaternion.hpp>
@@ -33,6 +34,12 @@ using json = nlohmann::json;
 
 namespace oka
 {
+
+bool gltfDebugLoggingEnabled()
+{
+    static const bool enabled = std::getenv("STRELKA_GLTF_DEBUG") != nullptr;
+    return enabled;
+}
 
 // packNormal(), packUV(), unpackNormal(), unpackUV() provided by <strelka/scene/vertex_packing.h>
 // packTangent uses same format as packNormal (tangents are unit vectors in [-1,1])
@@ -402,9 +409,10 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
 
 void processMesh(const tinygltf::Model& model, oka::Scene& scene, const uint32_t parentNodeId, const tinygltf::Mesh& mesh, const glm::float4x4& transform, const float globalScale, MeshCache& meshCache, uint32_t meshIndex)
 {
-    using namespace std;
-    cout << "Mesh name: " << mesh.name << endl;
-    cout << "Primitive count: " << mesh.primitives.size() << endl;
+    if (gltfDebugLoggingEnabled())
+    {
+        STRELKA_DEBUG("glTF mesh '{}' has {} primitives", mesh.name, mesh.primitives.size());
+    }
     uint64_t primitiveIndex = 0;
     for (const auto& primitive : mesh.primitives)
     {
@@ -525,8 +533,10 @@ void readGpuInstancing(const tinygltf::Model& model, const tinygltf::Node& node,
 
 void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf::Node& node, const uint32_t currentNodeId, const glm::float4x4& baseTransform, const float globalScale, MeshCache& meshCache)
 {
-    using namespace std;
-    cout << "Node name: " << node.name << endl;
+    if (gltfDebugLoggingEnabled())
+    {
+        STRELKA_DEBUG("glTF node '{}'", node.name);
+    }
 
     const glm::float4x4 localTransform = getTransform(node, globalScale);
     const glm::float4x4 globalTransform = baseTransform * localTransform;
@@ -833,7 +843,10 @@ void loadAnimation(const tinygltf::Model& model, oka::Scene& scene)
         {
             anim.name = "noname animation";
         }
-        cout << "Animation name: " << anim.name << endl;
+        if (gltfDebugLoggingEnabled())
+        {
+            STRELKA_DEBUG("glTF animation '{}'", anim.name);
+        }
 
         for (const tinygltf::AnimationSampler& sampler : animation.samplers)
         {
