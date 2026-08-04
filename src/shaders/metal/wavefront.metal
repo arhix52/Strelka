@@ -580,6 +580,77 @@ static void fetchTriangle(device const char* vertexBuffer,
     }
 }
 
+// The same fetch, interpolated on the way out.
+//
+// `shade` is the register-starved kernel of the three -- the pipeline caps it at
+// 384 threads per threadgroup where `extend` takes 640, and Instruments records
+// it spilling. Holding three vertices of position, normal, tangent, colour and
+// uv keeps 42 floats live at once purely to feed a barycentric blend a few lines
+// later; blending inside brings that down to twelve. The geometric normal is the
+// only thing that needs the vertices themselves, so the two edges are kept and
+// the third position is not.
+static void fetchTriangleBlended(device const char* vertexBuffer,
+                                 device const char* prevVertexBuffer,
+                                 device const uint32_t* indexBuffer,
+                                 GeometryEntry entry,
+                                 uint32_t primitiveId,
+                                 bool interpolateMotion,
+                                 float motionTime,
+                                 float2 bary,
+                                 thread float3& outNormal, thread float3& outTangent,
+                                 thread float2& outUv, thread float3& outColor,
+                                 thread float& tangentSign, thread float3& outGeomNormal)
+{
+    constexpr uint32_t vtxStride  = 32;
+    constexpr uint32_t tangentOff = 12;
+    constexpr uint32_t normalOff  = 16;
+    constexpr uint32_t uvOff      = 20;
+    constexpr uint32_t colorOff   = 28;
+
+    const float w0 = 1.0f - bary.x - bary.y;
+    const float3 weight = float3(w0, bary.x, bary.y);
+
+    outNormal = float3(0.0f);
+    outTangent = float3(0.0f);
+    outColor = float3(0.0f);
+    outUv = float2(0.0f);
+    float3 p0 = float3(0.0f), e1 = float3(0.0f), e2 = float3(0.0f);
+
+    for (uint32_t k = 0; k < 3; ++k)
+    {
+        const uint32_t idx = indexBuffer[entry.indexOffset + primitiveId * 3 + k];
+        const uint32_t byteOff = (entry.vbOffset + idx) * vtxStride;
+        device const char* v = vertexBuffer + byteOff;
+
+        float3 pos = float3(*(device const packed_float3*)v);
+        float3 nrm = unpackNormal(*(device const uint32_t*)(v + normalOff));
+        const uint32_t tanPacked = *(device const uint32_t*)(v + tangentOff);
+        float3 tan = unpackNormal(tanPacked);
+
+        if (k == 0)
+        {
+            tangentSign = unpackTangentSign(tanPacked);
+        }
+
+        if (interpolateMotion)
+        {
+            device const char* pvb = prevVertexBuffer + byteOff;
+            pos = mix(float3(*(device const packed_float3*)pvb), pos, motionTime);
+            nrm = mix(unpackNormal(*(device const uint32_t*)(pvb + normalOff)), nrm, motionTime);
+            tan = mix(unpackNormal(*(device const uint32_t*)(pvb + tangentOff)), tan, motionTime);
+        }
+
+        outNormal += nrm * weight[k];
+        outTangent += tan * weight[k];
+        outUv += unpackUV(*(device const uint32_t*)(v + uvOff)) * weight[k];
+        outColor += unpackVertexColor(*(device const uint32_t*)(v + colorOff)) * weight[k];
+
+        if (k == 0) p0 = pos;
+        else if (k == 1) e1 = pos - p0;
+        else e2 = pos - p0;
+    }
+    outGeomNormal = cross(e1, e2);
+}
 
 // Where this hit point stood one frame ago, in world space.
 //
@@ -1007,11 +1078,13 @@ kernel void wavefrontShade(
     const bool interpolateMotion = SPEC_MOTION_BLUR && uniforms.enableMotionBlur &&
                                    motionTime < 1.0f && prevVertexBuffer && indexBuffer;
 
-    float3 pv[3], nv[3], tv[3], cv[3];
-    float2 uvv[3];
+    const float2 bary = rec.barycentrics;
+    float3 objectNormal, objectTangent, vertexColor, objectGeomNormal;
+    float2 uv;
     float tangentSign = 1.0f;
-    fetchTriangle(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId,
-                  interpolateMotion, motionTime, pv, nv, tv, uvv, tangentSign, cv);
+    fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId,
+                         interpolateMotion, motionTime, bary, objectNormal, objectTangent, uv,
+                         vertexColor, tangentSign, objectGeomNormal);
 
     const auto inst = instances[rec.instanceIndex];
     const float4x4 objectToWorld = float4x4(
@@ -1020,21 +1093,16 @@ kernel void wavefrontShade(
         float4(float3(inst.transformationMatrix[2]), 0.0f),
         float4(float3(inst.transformationMatrix[3]), 1.0f));
 
-    const float2 bary = rec.barycentrics;
-    const float2 uv = interpolateAttrib(uvv[0], uvv[1], uvv[2], bary);
-    const float3 vertexColor = interpolateAttrib(cv[0], cv[1], cv[2], bary);
     const float3 worldPosition = rayOrigin + rayDir * rec.distance;
 
-    const float3 objectNormal = normalize(interpolateAttrib(nv[0], nv[1], nv[2], bary));
-    const float3 worldNormal = normalize(transformDirection(objectNormal, objectToWorld));
-    const float3 worldTangent = normalize(transformDirection(
-        normalize(interpolateAttrib(tv[0], tv[1], tv[2], bary)), objectToWorld));
+    const float3 worldNormal = normalize(transformDirection(normalize(objectNormal), objectToWorld));
+    const float3 worldTangent =
+        normalize(transformDirection(normalize(objectTangent), objectToWorld));
     // glTF TANGENT.w. Without it the bitangent points the wrong way and every
     // normal map is mirrored along it -- bumps light from the opposite side.
     const float3 worldBinormal = cross(worldNormal, worldTangent) * tangentSign;
 
-    float3 geomNormal = cross(pv[1] - pv[0], pv[2] - pv[0]);
-    geomNormal = normalize(transformDirection(geomNormal, objectToWorld));
+    const float3 geomNormal = normalize(transformDirection(objectGeomNormal, objectToWorld));
 
     SurfaceInteraction si;
     initSurfaceInteraction(si, materials[entry.materialId],
@@ -1139,7 +1207,9 @@ kernel void wavefrontShade(
             float signCur = 1.0f; // unused by this debug view
             fetchTriangle(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId,
                           false, motionTime, pCur, nCur, tCur, uvCur, signCur, cCur);
-            dbg = float3(motionTime, clamp(length(nv[0] - nCur[0]) * 10.0f, 0.0f, 1.0f), 0.0f);
+            dbg = float3(motionTime,
+                         clamp(length(normalize(objectNormal) - normalize(nCur[0])) * 10.0f, 0.0f, 1.0f),
+                         0.0f);
         }
         radianceOut[tid] = float4(dbg, 0.0f);
         return;
