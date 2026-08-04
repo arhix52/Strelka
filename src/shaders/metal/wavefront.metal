@@ -1439,7 +1439,6 @@ static void shadowImpl(
 
     typename T::isect isect;
     isect.assume_geometry_type(geometry_type::triangle);
-    isect.force_opacity(forced_opacity::opaque);
 
     ray shadowRay;
     shadowRay.origin = float3(sr.origin);
@@ -1453,6 +1452,7 @@ static void shadowImpl(
     if (!SPEC_ALPHA)
     {
         // No cutouts in this scene: one any-hit trace, exactly as before.
+        isect.force_opacity(forced_opacity::opaque);
         isect.accept_any_intersection(true);
         if (T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime).type ==
             intersection_type::none)
@@ -1483,6 +1483,12 @@ static void shadowImpl(
     //
     // force_opacity is not set here -- the instance flag decides -- because
     // forcing opacity is exactly what makes traversal skip the function.
+    //
+    // It used to be set, a few lines up and before this branch existed, left
+    // over from when a shadow ray was a plain predicate. The intersection
+    // function was therefore never called once, cutouts blocked light outright,
+    // and every measurement of this stage was measuring a closest-hit search
+    // with no alpha test in it.
     isect.accept_any_intersection(false);
 
     ShadowPayload payload;
