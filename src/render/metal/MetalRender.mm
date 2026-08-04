@@ -3818,6 +3818,17 @@ MTL::AccelerationStructure* MetalRender::createAccelerationStructureNoCompact(
     MTL::Buffer* scratchBuffer =
         mDevice->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate);
 
+    // One command buffer per structure, which a profile makes look wrong and
+    // measurement says is right.
+    //
+    // A CPU profile of the load has a third of its main-thread samples blocked
+    // inside `commandQueue->commandBuffer()`, waiting on the semaphore that
+    // bounds how many are in flight. That is not a stall to remove -- it is
+    // back-pressure from a GPU that is already busy building. Batching sixteen
+    // builds into a shared command buffer so the CPU never blocks makes the load
+    // 18% *slower* -- 9.9 s against 8.4 -- because the GPU then waits for
+    // sixteen structures to be allocated and encoded before it may start on any
+    // of them. Committing each one as it is ready keeps it fed.
     MTL::CommandBuffer* commandBuffer = mCommandQueue->commandBuffer();
     MTL::AccelerationStructureCommandEncoder* commandEncoder = commandBuffer->accelerationStructureCommandEncoder();
     commandEncoder->buildAccelerationStructure(accelerationStructure, descriptor, scratchBuffer, 0UL);
