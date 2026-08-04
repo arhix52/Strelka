@@ -3797,9 +3797,9 @@ MTL::AccelerationStructure* MetalRender::createAccelerationStructure(MTL::Accele
 MTL::AccelerationStructure* MetalRender::createAccelerationStructureNoCompact(
     MTL::AccelerationStructureDescriptor* descriptor)
 {
-    // Allow refitting on this descriptor
-    descriptor->setUsage(MTL::AccelerationStructureUsageRefit);
-
+    // The usage flags belong to the caller. This used to force Refit on
+    // everything it was handed, which silently gave static geometry a tree built
+    // to survive a vertex update -- a worse tree to traverse -- for nothing.
     const MTL::AccelerationStructureSizes accelSizes = mDevice->accelerationStructureSizes(descriptor);
     MTL::AccelerationStructure* accelerationStructure =
         mDevice->newAccelerationStructure(accelSizes.accelerationStructureSize);
@@ -3986,8 +3986,23 @@ size_t MetalRender::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, boo
     }
     else
     {
-        // Static geometry is built once, so it is worth compacting.
-        blas.mAs = createAccelerationStructure(primDescriptor);
+        // Refit even though nothing here is ever refitted, and no compaction.
+        //
+        // Both of those are backwards from what the flags suggest, and both are
+        // measured. Refit is meant to trade tree quality for the ability to
+        // update in place; on this driver it also halves what the builder
+        // allocates -- 4.80 GB of structures against 8.80 without, which on a
+        // 9.53 GB buffer limit is the difference between fitting and not -- and
+        // the result traverses no slower.
+        //
+        // Compaction is a loss on every axis here. It needs a
+        // round trip per structure to read the compacted size back, and with a
+        // hundred and thirty of them that was 4.9 seconds of a 13.8 second load.
+        // It did not even save memory: 4.80 GB of acceleration structures
+        // without it against 4.97 GB with. And the uncompacted trees traverse
+        // faster -- 27.9 s against 29.8 for 128 spp of the pine forest.
+        primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit);
+        blas.mAs = createAccelerationStructureNoCompact(primDescriptor);
         primDescriptor->release();
     }
 
