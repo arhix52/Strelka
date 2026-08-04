@@ -263,6 +263,47 @@ static inline bool shouldWriteAov(constant Uniforms& uniforms, uint32_t sampleId
            (!uniforms.canonicalGuideSample || sampleIdx == 0u);
 }
 
+// Measured and not kept: adaptive sampling -- retiring a pixel once its estimate
+// stops moving, so that nothing downstream traces for it.
+//
+// It works, it is not worth it, and the reasons are structural rather than a
+// matter of tuning. Pine forest, 640x480, against a 512 spp reference:
+//
+//   128 spp uniform    33.0 s   rel 0.0787  rmse 0.01404  median 0.994
+//   116 spp uniform    29.4 s   rel 0.0853  rmse 0.01516  median 0.992
+//   adaptive 0.002     30.0 s   rel 0.0876  rmse 0.01461  median 0.955
+//   100 spp uniform    28.4 s   rel 0.0932  rmse 0.01654  median 0.992
+//   adaptive 0.005     26.5 s   rel 0.0950  rmse 0.01515  median 0.854
+//
+// At equal wall clock it loses to simply asking for fewer samples, and it pays
+// for that with a bias the uniform render does not have.
+//
+// Three things go wrong, and each is worth knowing before trying again.
+//
+// A pixel that converges cheaply is also cheap to sample. The sky retires first,
+// and a sky ray misses almost immediately -- with a criterion relative to the
+// pixel's own mean only a tenth of the frame ever retired, all of it sky: the
+// camera-ray count fell from 307k to 275k while the bounce-1 count did not move
+// at all. Nothing expensive stops.
+//
+// Retiring anything expensive needs an absolute criterion, and an absolute
+// criterion retires dark pixels. Radiance is non-negative and heavy-tailed, so a
+// dark pixel that has not yet found its rare bright path looks converged
+// precisely because it has not found it. Freezing it there is a systematic
+// darkening -- 15% at the median at a threshold of 0.005, far more than the
+// noise it saved.
+//
+// And retirement needs a compacted queue, which this architecture charges for.
+// `generate` writes the identity, and every later stage reads PathRay,
+// HitRecord and PathState in pixel order because of it. Compacting a queue that
+// had nothing to compact -- the machinery enabled, the threshold zero -- cost
+// 15% of the frame on its own, the same coherence effect that made ray sorting
+// lose.
+//
+// A tile-level version answers the second and third of those: a tile mean is
+// estimated well enough not to freeze low, and whole tiles keep the queue
+// ordered. It does not answer the first, which is the one that bounds the win.
+//
 // ---------------------------------------------------------------------------
 // generate -- camera rays
 // ---------------------------------------------------------------------------
