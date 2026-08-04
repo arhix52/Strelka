@@ -2444,6 +2444,7 @@ void MetalRender::render(Buffer* output)
     pUniformData->volumeModel = settings.getAs<uint32_t>("render/material/volumeModel");
     pUniformData->samples_per_launch = spp;
     pUniformData->enableAccumulation = (uint32_t)accumulationActive;
+    pUniformData->risCandidates = std::max(settings.getAs<uint32_t>("render/pt/risCandidates"), 1u);
     pUniformData->missColor = float3(0.0f);
     pUniformData->maxDepth = maxDepth;
     pUniformData->debug = debug;

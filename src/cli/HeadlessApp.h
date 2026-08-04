@@ -37,6 +37,7 @@ struct RenderConfig
     // per-bounce breakdown. Costs a sample either side of every dispatch, so it
     // is off unless asked for.
     bool profileStages = false;
+    uint32_t risCandidates = 1; // 1 = plain next-event estimation
     bool sharc = false;
     uint32_t sharcDepth = 1;
     uint32_t sharcMinSamples = 8;

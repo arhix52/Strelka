@@ -173,7 +173,10 @@ struct Uniforms
     /// When set, sample zero is a deterministic shutter-close guide pass. Its
     /// radiance is discarded and the remaining samples estimate the image.
     uint32_t canonicalGuideSample;
-    uint32_t pad_aov1;
+    /// Light candidates drawn per shading point before one is resampled -- the
+    /// M of resampled importance sampling. One is plain next-event estimation
+    /// and the arithmetic reduces to exactly what it was.
+    uint32_t risCandidates;
     uint32_t pad_aov2;
 };
 

@@ -176,6 +176,8 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.denoise = *v;
     if (auto v = tbl["render"]["profile_stages"].value<bool>())
         cfg.profileStages = *v;
+    if (auto v = tbl["render"]["ris_candidates"].value<int64_t>())
+        cfg.risCandidates = (uint32_t)*v;
     if (auto v = tbl["render"]["sharc"].value<bool>())
         cfg.sharc = *v;
     if (auto v = tbl["render"]["sharc_depth"].value<int64_t>())
@@ -292,9 +294,11 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/tracerMode", 1);
     m_settings->setAs<uint32_t>("render/pt/splitSubmissions", 0);
     m_settings->setAs<uint32_t>("render/pt/profileStages", 0);
+    m_settings->setAs<uint32_t>("render/pt/risCandidates", 1u);
     m_settings->setAs<uint32_t>("render/pt/writeAov", 0);
     m_settings->setAs<bool>("render/pt/denoise", m_config.denoise);
     m_settings->setAs<uint32_t>("render/pt/profileStages", m_config.profileStages ? 1u : 0u);
+    m_settings->setAs<uint32_t>("render/pt/risCandidates", m_config.risCandidates);
     m_settings->setAs<uint32_t>("render/pt/jitterSign", 0);
     m_settings->setAs<uint32_t>("render/pt/denoiseDepthMode", 0);
     m_settings->setAs<float>("render/pt/denoiseFireflyClamp", 8.0f);

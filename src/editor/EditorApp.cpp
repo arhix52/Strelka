@@ -157,6 +157,7 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", 1); // 0 = megakernel, 1 = wavefront
     m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 1);
     m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 0);
+    m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", 1u);
     m_settingsManager->setAs<uint32_t>("render/pt/writeAov", 0);
     m_settingsManager->setAs<bool>("render/pt/denoise", false);
     m_settingsManager->setAs<uint32_t>("render/pt/jitterSign", 0);
