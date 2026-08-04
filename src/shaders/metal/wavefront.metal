@@ -94,6 +94,7 @@ static inline void queuePush(device atomic_uint* counter, device uint32_t* queue
 struct ShadowPayload
 {
     float3 transmittance;
+    float cutoff;
 };
 
 // Alpha test during traversal.
@@ -106,6 +107,19 @@ struct ShadowPayload
 //
 // Accepting on a collapsed transmittance keeps the early-out the loop had: once
 // nothing measurable can get through, the ray is blocked and traversal stops.
+// A shadow ray that is already almost blocked is allowed to stop.
+//
+// Through a canopy the expensive rays are not the blocked ones -- those accept
+// at the first opaque leaf -- but the ones that keep slipping past cutouts with
+// a hundredth of the light left, traversing the whole crown to deliver
+// something that rounds to nothing. Below this fraction of the light the ray is
+// killed by Russian roulette and what survives is scaled back up, so the
+// estimate stays unbiased and only its variance moves.
+//
+// A fraction of the light, not a distance or a size, so it means the same thing
+// in any scene.
+constant float kShadowTransmittanceCutoff = 0.05f;
+
 [[intersection(triangle, triangle_data, instancing)]]
 bool shadowAlphaAnyHit(uint primitive_id [[primitive_id]],
                        uint geometry_id [[geometry_id]],
@@ -141,6 +155,15 @@ bool shadowAlphaAnyHit(uint primitive_id [[primitive_id]],
     const float opacity = resolveOpacity(mat, uv);
 
     payload.transmittance *= (1.0f - opacity);
+
+    // Monotonically decreasing, so crossing the threshold once is the same
+    // event as ending below it -- which is what lets the compensation be
+    // applied at the end, from one draw taken before the ray was traced.
+    const float3 t = payload.transmittance;
+    if (max(max(t.x, t.y), t.z) <= payload.cutoff)
+    {
+        return true; // roulette says this ray is done
+    }
     return all(payload.transmittance <= 1e-6f);
 }
 
@@ -831,6 +854,8 @@ kernel void wavefrontShade(
                     sr.weight = packed_float3(weight);
                     sr.maxDistance = conn.tMax;
                     sr.pixelIndex = tid;
+                    sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) *
+                                  kShadowTransmittanceCutoff;
                     shadowRays[slot] = sr;
                     didNee = true;
                 }
@@ -1250,6 +1275,8 @@ kernel void wavefrontShade(
                     sr.weight = packed_float3(weight);
                     sr.maxDistance = conn.tMax;
                     sr.pixelIndex = tid;
+                    sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) *
+                                  kShadowTransmittanceCutoff;
                     const uint32_t slot =
                         atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
                     shadowRays[slot] = sr;
@@ -1493,13 +1520,24 @@ static void shadowImpl(
 
     ShadowPayload payload;
     payload.transmittance = float3(1.0f);
+    payload.cutoff = sr.rrCutoff;
     const auto hit = T::traceAnyHit(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW,
                                     motionTime, functionTable, payload);
     if (hit.type != intersection_type::none)
     {
         return; // something accepted: fully blocked
     }
-    weight *= payload.transmittance;
+    // The survivors of the roulette carry the weight of the ones it killed. A
+    // ray ends below the cutoff only if it passed the test, which it does with
+    // probability (its transmittance / cutoff), so scaling by the inverse of
+    // that puts the expectation back where it was.
+    float3 transmittance = payload.transmittance;
+    const float m = max(max(transmittance.x, transmittance.y), transmittance.z);
+    if (m < kShadowTransmittanceCutoff)
+    {
+        transmittance *= kShadowTransmittanceCutoff / max(m, 1e-20f);
+    }
+    weight *= transmittance;
     if (all(weight <= 1e-6f))
     {
         return;

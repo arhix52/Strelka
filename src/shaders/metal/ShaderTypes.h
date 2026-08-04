@@ -348,6 +348,9 @@ struct ShadowRay
     packed_float3 weight; // radiance already divided by pdf and multiplied by the BSDF
     float maxDistance;
     uint32_t pixelIndex;
+    // Threshold at which traversal may give up on this ray, drawn where the ray
+    // was created because that is where the sampler knows the path's depth.
+    float rrCutoff;
 };
 
 // One entry of the environment map alias table (Walker/Vose), one per texel.

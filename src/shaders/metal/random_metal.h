@@ -37,6 +37,10 @@ enum class SampleDimension : uint32_t
   eFogDistance,
   eFogPhaseU,
   eFogPhaseV,
+  // Russian roulette on a shadow ray's accumulated transmittance. Its own
+  // dimension so that killing a ray that is already almost blocked does not
+  // correlate with which light was chosen or where on it the point landed.
+  eShadowRR,
   eNUM_DIMENSIONS
 };
 
