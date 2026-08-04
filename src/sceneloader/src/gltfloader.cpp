@@ -1263,6 +1263,22 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     // positions, normals, indices and uvs -- and the refusal reads as a plain
     // load failure with nothing to act on.
     gltf_ctx.SetMaxExternalFileSize(std::numeric_limits<size_t>::max());
+    // Do not let tinygltf decode the images.
+    //
+    // The only thing this loader ever reads out of model.images is the uri --
+    // the renderer opens the file itself, mips it, compresses it and keeps its
+    // own cache of the result. Every pixel tinygltf decodes here is thrown
+    // away, and it decodes them one at a time on the calling thread while
+    // parsing. On the pine forest that was 9017 of the 14680 samples in a CPU
+    // profile of the load: 61% of it, for nothing.
+    //
+    // An image embedded in a buffer view rather than referenced by uri would
+    // lose its pixels this way -- but such an image has no file to open either,
+    // so it was never supported.
+    gltf_ctx.SetImageLoader(
+        [](tinygltf::Image*, const int, std::string*, std::string*, int, int,
+           const unsigned char*, int, void*) { return true; },
+        nullptr);
     std::string err;
     std::string warn;
     bool res = false;

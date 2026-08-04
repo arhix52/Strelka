@@ -1712,6 +1712,10 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
         att->setStartOfEncoderSampleIndex(2 * mStageKinds.size());
         att->setEndOfEncoderSampleIndex(2 * mStageKinds.size() + 1);
         enc = pCmd->computeCommandEncoder(desc);
+        // Named so that a capture can attribute to a stage. Instruments reports
+        // register spills against an encoder id and nothing else, and an
+        // unlabelled trace says only that *something* spilled.
+        enc->setLabel(NS::String::string(kStageNames[kind], NS::UTF8StringEncoding));
         declareResidency(enc);
         mStageKinds.push_back(kind);
     };
@@ -1749,6 +1753,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
             stamp(kStageExtend);
+            enc->pushDebugGroup(NS::String::string("extend", NS::UTF8StringEncoding));
             enc->setComputePipelineState(useMotion ? variant->extendMotion : variant->extendStatic);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(mInstanceBuffer, 0, 1);
@@ -1764,6 +1769,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->setBuffer(mWavefrontControlBuffer, kMissCounterOffset, 11);
             enc->setBuffer(mPathStateBuffer, 0, 12);
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kDispatchArgsOffset, tg);
+            enc->popDebugGroup();
 
             enc->setComputePipelineState(mWavefrontPrepareHitMissPSO);
             enc->setBuffer(mWavefrontControlBuffer, 0, 0);
@@ -1788,6 +1794,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kMissArgsOffset, tg);
 
             stamp(kStageShade);
+            enc->pushDebugGroup(NS::String::string("shade", NS::UTF8StringEncoding));
             enc->setComputePipelineState(variant->shade);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(mInstanceBuffer, 0, 1);
@@ -1824,6 +1831,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
                 enc->setBuffer(mSharcBuffer, 0, 25);
             }
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kHitArgsOffset, tg);
+            enc->popDebugGroup();
 
             // Deferred occlusion. It has to run before the next bounce's shade,
             // so that this bounce's direct lighting lands in the accumulator
@@ -1904,6 +1912,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
         blit->copyFromBuffer(mWavefrontControlBuffer, 0, mStageStatsBuffer, 0, mStageStatsBuffer->length());
         blit->endEncoding();
         enc = pCmd->computeCommandEncoder();
+        enc->setLabel(NS::String::string("stats readback", NS::UTF8StringEncoding));
         declareResidency(enc);
     }
     return enc;
