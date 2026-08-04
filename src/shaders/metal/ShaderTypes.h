@@ -295,6 +295,15 @@ struct PathState
     packed_float3 throughput;
     uint32_t depthAndFlags; // depth in bits 0..7, flags above
     float lastBsdfPdf;
+    // How far the ray has travelled since the vertex `lastBsdfPdf` was measured
+    // at. Zero for every path that has not passed through anything.
+    //
+    // Passing through a cutout resets the ray's origin to the surface it slipped
+    // past, and the multiple-importance weight at an area light needs the
+    // distance from the vertex that *scattered*, not from wherever the ray was
+    // last restarted. The direction does not change across a pass-through, so
+    // one number recovers that vertex: origin - direction * this.
+    float misDistance;
 
     // Radiance cache bookkeeping. A path that passes through a cache voxel
     // remembers the slot, what the pixel had already gathered at that moment and

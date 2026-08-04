@@ -38,6 +38,7 @@ struct RenderConfig
     // is off unless asked for.
     bool profileStages = false;
     uint32_t risCandidates = 1; // 1 = plain next-event estimation
+    uint32_t estimatorMode = 0; // 0 = NEE + MIS, 1 = BSDF sampling only
     bool sharc = false;
     uint32_t sharcDepth = 1;
     uint32_t sharcMinSamples = 8;

@@ -374,6 +374,7 @@ kernel void wavefrontGenerate(
     p.throughput = packed_float3(float3(1.0f));
     p.depthAndFlags = PATH_FLAG_ALIVE; // depth 0, not specular, NEE not done
     p.lastBsdfPdf = 0.0f;
+    p.misDistance = 0.0f;
     p.sharcIndex = SHARC_NO_ENTRY;
     p.sharcRadianceAtVisit = packed_float3(0.0f);
     p.sharcInvThroughput = packed_float3(0.0f);
@@ -928,6 +929,7 @@ kernel void wavefrontShade(
 
         p.throughput = packed_float3(throughput);
         p.lastBsdfPdf = phasePdf;
+        p.misDistance = 0.0f;
         // Depth advances: a scattering event is a bounce, and a medium with no
         // depth budget of its own would let a path wander forever.
         p.depthAndFlags = (depth + 1u) | PATH_FLAG_ALIVE |
@@ -985,7 +987,14 @@ kernel void wavefrontShade(
                 const float lightSelectionPdf = uniforms.hasEnvMap
                     ? 0.5f / (float)uniforms.numLights
                     : 1.0f / (float)uniforms.numLights;
-                const float lightPdf = getLightPdf(currLight, hitPoint, rayOrigin) * lightSelectionPdf;
+                // From the vertex that scattered, which is not the ray's origin
+                // once it has passed through a cutout on the way here. Using the
+                // origin makes the light look nearer than the scattering vertex
+                // saw it, which shrinks its solid-angle density, which inflates
+                // this weight -- and the next-event estimate at that vertex has
+                // already claimed the rest. The two then sum to more than one.
+                const float3 misOrigin = rayOrigin - rayDir * p.misDistance;
+                const float lightPdf = getLightPdf(currLight, hitPoint, misOrigin) * lightSelectionPdf;
                 radiance += throughput * Le * misWeightBalance(p.lastBsdfPdf, lightPdf);
             }
         }
@@ -1103,6 +1112,7 @@ kernel void wavefrontShade(
             through.origin = packed_float3(offset_ray(worldPosition, faceNg));
             through.direction = packed_float3(rayDir);
             rays[tid] = through;
+            p.misDistance += rec.distance;
             p.depthAndFlags = (p.depthAndFlags & ((1u << PATH_PASSTHROUGH_SHIFT) - 1u)) |
                               ((passes + 1u) << PATH_PASSTHROUGH_SHIFT);
             paths[tid] = p;
@@ -1465,6 +1475,7 @@ kernel void wavefrontShade(
 
     p.throughput = packed_float3(nextThroughput);
     p.lastBsdfPdf = nextSpecular ? 1.0f : sampleResult.pdf;
+    p.misDistance = 0.0f;
     // AOV_DONE is carried, not rebuilt: it records something that already
     // happened to this path, unlike the others, which describe the bounce being
     // set up. Dropping it let every escaping ray overwrite guides that a surface

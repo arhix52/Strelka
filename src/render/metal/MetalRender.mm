@@ -757,7 +757,7 @@ void MetalRender::init()
     // radiance at the moment the path passed through it, and the reciprocal
     // throughput there. Read and written for every live path on every bounce, so
     // worth watching.
-    static_assert(sizeof(PathState) == 48, "PathState is read and written for every live path on every bounce");
+    static_assert(sizeof(PathState) == 52, "PathState is read and written for every live path on every bounce");
     // 32 rather than 24: the hit now carries the TLAS instance, because a shared
     // BLAS belongs to no single one. One extra word per live path.
     static_assert(sizeof(HitRecord) == 32, "HitRecord size changed");

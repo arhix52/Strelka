@@ -178,6 +178,8 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.profileStages = *v;
     if (auto v = tbl["render"]["ris_candidates"].value<int64_t>())
         cfg.risCandidates = (uint32_t)*v;
+    if (auto v = tbl["render"]["estimator_mode"].value<int64_t>())
+        cfg.estimatorMode = (uint32_t)*v;
     if (auto v = tbl["render"]["sharc"].value<bool>())
         cfg.sharc = *v;
     if (auto v = tbl["render"]["sharc_depth"].value<int64_t>())
@@ -305,7 +307,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);
     m_settings->setAs<uint32_t>("render/pt/metal4", 0);
     m_settings->setAs<uint32_t>("render/pt/staticTraversal", 1);
-    m_settings->setAs<uint32_t>("render/validate/estimatorMode", 0);
+    m_settings->setAs<uint32_t>("render/validate/estimatorMode", m_config.estimatorMode);
     // Absorption convention for transmissive media: 0 = glTF, 1 = Cycles.
     m_settings->setAs<uint32_t>("render/material/volumeModel", m_config.volumeModel);
     // 0 = load textures at full resolution.
