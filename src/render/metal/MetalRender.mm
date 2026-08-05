@@ -428,9 +428,11 @@ void MetalRender::capturePrevFramePose()
         return;
     }
     // Instance transforms are always worth keeping: a node animation moves rigid
-    // geometry without touching a single vertex, and the buffer is a few
-    // kilobytes. It is managed memory the CPU writes, so a memcpy is both simpler
-    // and cheaper than a blit.
+    // geometry without touching a single vertex. Skipping the copy for a scene
+    // with no animation and no skinning was tried on a two-million-instance
+    // forest, where it is 143 MB a sample: it measured as nothing against a
+    // 0.49 s sample, and it costs the editor a correct motion vector on the
+    // frame after something is dragged.
     if (!mPrevFrameInstanceBuffer || mPrevFrameInstanceBuffer->length() != mInstanceBuffer->length())
     {
         if (mPrevFrameInstanceBuffer)
@@ -3149,10 +3151,23 @@ void MetalRender::renderSync(Buffer* output)
 {
     mSyncMode = true;
     mLastCommandBuffer = nullptr;
+    const auto tEncode = std::chrono::steady_clock::now();
     render(output);
+    const auto tSubmitted = std::chrono::steady_clock::now();
     if (mLastCommandBuffer)
     {
         mLastCommandBuffer->waitUntilCompleted();
+        if (mProfileStages)
+        {
+            const auto tDone = std::chrono::steady_clock::now();
+            STRELKA_INFO("LAUNCH encode {:.1f} ms, wait {:.1f} ms",
+                         std::chrono::duration<double, std::milli>(tSubmitted - tEncode).count(),
+                         std::chrono::duration<double, std::milli>(tDone - tSubmitted).count());
+            STRELKA_INFO("CMDBUF gpu {:.1f} ms (start->end {:.1f} ms, kernel {:.1f} ms)",
+                         (mLastCommandBuffer->GPUEndTime() - mLastCommandBuffer->GPUStartTime()) * 1000.0,
+                         (mLastCommandBuffer->kernelEndTime() - mLastCommandBuffer->kernelStartTime()) * 1000.0,
+                         (mLastCommandBuffer->kernelEndTime() - mLastCommandBuffer->GPUStartTime()) * 1000.0);
+        }
         // The async path reports these from a completion handler; the synchronous
         // one had nowhere to report from, so a headless profiling run printed the
         // CPU encode time and nothing about the GPU.
