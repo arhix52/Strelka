@@ -426,6 +426,25 @@ static void extendImpl(
     r.origin = float3(pr.origin);
     r.direction = float3(pr.direction);
 
+    // Measured and not kept: `intersection_query`, Metal's inline traversal, in
+    // place of the intersector object.
+    //
+    // The hardware counters say this kernel runs at 16% compute occupancy where
+    // a saturating ALU kernel reaches 88%, and the hope was that stepping
+    // traversal in the shader would ask for fewer registers and let more waves
+    // stay resident. It does not: occupancy comes back 15.2% against 16.9%, and
+    // the frame takes the same 174 ms. Occupancy is pinned by something below
+    // this API -- most likely how many traversals the ray tracing unit will
+    // carry at once -- and neither threadgroup size (64, 128, 256 all give
+    // 16.9%) nor the API form moves it.
+    //
+    // It does move the *limiters*: MMU 44% -> 29% and last level cache 29% ->
+    // 20%, with ALU going 34% -> 39%. Same work, differently constrained, same
+    // wall clock. Worth knowing if the memory picture ever changes.
+    //
+    // It also cannot serve the whole renderer: `intersection_query` rejects the
+    // primitive_motion tag, so a deforming scene would need the intersector kept
+    // alongside it.
     typename T::isect isect;
     isect.assume_geometry_type(geometry_type::triangle);
     // The coverage test for cutout geometry happens in `shade`, not here -- see

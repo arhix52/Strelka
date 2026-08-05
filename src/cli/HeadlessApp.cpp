@@ -495,9 +495,26 @@ int HeadlessApp::run()
     std::unique_ptr<Buffer> outputBuf(m_render->createBuffer(desc));
 
     const auto startTime = high_resolution_clock::now();
+    bool announced = false;
     while (m_sharedCtx->mSubframeIndex < m_config.spp)
     {
         m_render->renderSync(outputBuf.get());
+        if (!announced)
+        {
+            // A marker for anything sampling the GPU from outside.
+            //
+            // Hardware counters are a time average, and on a heavy scene the
+            // loading, the texture cache and the acceleration structure build
+            // are most of a short run -- sample across them and the numbers
+            // describe a BVH build rather than a render. This is printed after
+            // the *first* sample has completed, so everything expensive and
+            // one-off is already behind it, and flushed because stdout is block
+            // buffered when redirected: without the flush a profiler waiting on
+            // this line waits forever.
+            announced = true;
+            fprintf(stdout, "\nSTRELKA_RENDER_BEGIN\n");
+            fflush(stdout);
+        }
         printProgress(static_cast<uint32_t>(m_sharedCtx->mSubframeIndex), m_config.spp, m_render->getLastRenderTimeMs());
     }
     const auto totalTime = duration_cast<milliseconds>(high_resolution_clock::now() - startTime);

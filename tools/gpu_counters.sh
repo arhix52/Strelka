@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # Sample Apple's GPU hardware counters against a running renderer.
 #
-#   tools/gpu_counters.sh <pid|--idle> [seconds]
+#   tools/gpu_counters.sh <pid|--idle|--run "<command>"> [seconds]
+#
+# `--run` is the one to use on a renderer: it launches the command, waits for it
+# to print STRELKA_RENDER_BEGIN -- which HeadlessApp emits once the first sample
+# has completed -- and only then starts sampling. Counters are a time average,
+# and on a heavy scene the load, the texture cache and the acceleration
+# structure build are most of a short run; sample across those and the numbers
+# describe a BVH build rather than a render.
 #
 # Two things about these counters decide how they have to be used.
 #
@@ -21,11 +28,31 @@
 # ~70 MB and its export ~600 MB; leaving those around fills a disk in a few
 # runs, which is how this script came to exist.
 set -u
-TARGET="${1:?usage: gpu_counters.sh <pid|--idle> [seconds]}"
-SECS="${2:-2}"
+TARGET="${1:?usage: gpu_counters.sh <pid|--idle|--run \"cmd\"> [seconds]}"
+CHILD=""
+if [ "$TARGET" = "--run" ]; then
+    CMD="${2:?--run needs a command}"
+    SECS="${3:-2}"
+    LOG="$(mktemp)"
+    eval "$CMD" > "$LOG" 2>&1 &
+    CHILD=$!
+    for _ in $(seq 1 600); do
+        grep -q STRELKA_RENDER_BEGIN "$LOG" 2>/dev/null && break
+        kill -0 "$CHILD" 2>/dev/null || { echo "target exited before rendering:" >&2; tail -3 "$LOG" >&2; exit 1; }
+        sleep 1
+    done
+    grep -q STRELKA_RENDER_BEGIN "$LOG" 2>/dev/null || { echo "timed out waiting for STRELKA_RENDER_BEGIN" >&2; exit 1; }
+    TARGET="$(pgrep -P $CHILD -n . 2>/dev/null || echo "$CHILD")"
+else
+    SECS="${2:-2}"
+fi
 TRACE="$(mktemp -d)/counters.trace"
 XML="${TRACE%.trace}.xml"
-trap 'rm -rf "$(dirname "$TRACE")"' EXIT
+cleanup() {
+    [ -n "$CHILD" ] && kill "$CHILD" 2>/dev/null
+    rm -rf "$(dirname "$TRACE")" "${LOG:-}"
+}
+trap cleanup EXIT
 
 if [ "$TARGET" = "--idle" ]; then
     ATTACH=(--all-processes)
