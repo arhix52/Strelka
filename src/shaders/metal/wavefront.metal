@@ -1770,7 +1770,15 @@ static void shadowImpl(
     // function was therefore never called once, cutouts blocked light outright,
     // and every measurement of this stage was measuring a closest-hit search
     // with no alpha test in it.
-    isect.accept_any_intersection(false);
+    // Any hit, not the closest one.
+    //
+    // The alpha test accumulates a product over the candidates it lets through,
+    // and a product does not care in which order they arrive; the traversal
+    // stops when the function accepts, which it does only once nothing
+    // measurable is left. Asking for the closest accepted hit instead makes the
+    // intersector keep candidates in distance order for an answer that is
+    // discarded.
+    isect.accept_any_intersection(true);
 
     ShadowPayload payload;
     payload.transmittance = float3(1.0f);
