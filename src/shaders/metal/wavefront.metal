@@ -1742,6 +1742,13 @@ static void shadowImpl(
     // this a shadow ray is a hole in the fog, and every light reads as if the
     // haze were not there -- which is exactly the term that makes a low sun
     // through trees look like a low sun through trees.
+    // Measured and not moved: this depends only on the ray, so it can be folded
+    // into sr.weight where the ray is built, and doing so lifts this kernel's
+    // threadgroup limit from 576 to 640. Six interleaved runs of each say the
+    // stage does not care -- 36.7 ms against 37.5 -- which is what the model
+    // predicts: the same 11% of limit was worth 4.5% of the frame on `extend`
+    // at 63% of it, so on a stage at 28% it is around 2%, under the noise floor
+    // of a machine that swings 5% between runs.
     if (SPEC_FOG && uniforms.hasFog)
     {
         const float tau = fogOpticalDepth(float3(sr.origin), float3(sr.direction),
