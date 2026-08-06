@@ -42,7 +42,10 @@ if [ "$TARGET" = "--run" ]; then
         sleep 1
     done
     grep -q STRELKA_RENDER_BEGIN "$LOG" 2>/dev/null || { echo "timed out waiting for STRELKA_RENDER_BEGIN" >&2; exit 1; }
-    TARGET="$(pgrep -P $CHILD -n . 2>/dev/null || echo "$CHILD")"
+    # By executable name, not by command line: this script's own arguments
+    # contain the renderer's, so a -f match finds the script itself.
+    TARGET="$(pgrep -x StrelkaCLI | tail -1)"
+    [ -n "$TARGET" ] || TARGET="$CHILD"
 else
     SECS="${2:-2}"
 fi

@@ -463,6 +463,37 @@ static void extendImpl(
     // knows both where the ray ended and whether it ended at all. A ray that
     // scatters never reaches its surface, and one that escapes can still scatter
     // on the way out -- so the miss branch is inside this test, not before it.
+    // Everything below this line is on the wrong side of a register cliff, and
+    // the cliff is the only lever the hardware counters leave.
+    //
+    // This kernel runs at 17% compute occupancy where a saturating ALU kernel
+    // reaches 88%. The machine is empty, not busy: relieving memory pressure
+    // without raising occupancy buys nothing at all -- Metal's inline
+    // `intersection_query` cut the MMU limiter from 44% to 29% and the last
+    // level cache from 29% to 20% for exactly the same 174 ms frame. What does
+    // move is occupancy, and occupancy moves with registers: compiling the fog
+    // out lifts the pipeline's threadgroup limit from 640 to 704, occupancy from
+    // 16.5% to 18.8%, and the frame from ~175 ms to ~167 (three interleaved
+    // runs each, swapping metallibs to cancel thermal drift).
+    //
+    // Reaching 704 with the fog still in was tried and cannot be done piecemeal.
+    // Every one of these on its own leaves it at 640, and only removing the
+    // whole block reaches 704:
+    //   - writing the fog HitRecord field by field instead of through a local
+    //   - calling randomSobol directly, so the runtime samplerType switch does
+    //     not inline all five samplers here
+    //   - merging the fog and surface exits into a single hit-queue push
+    //   - carrying the free-flight draw on PathRay, taken where the ray was
+    //     created, so no SamplerState is built here at all -- and that one is
+    //     self-defeating: the extra word takes PathRay from 24 bytes to 28 and
+    //     lives across the traversal, which costs what it saved
+    //
+    // The remaining route is a separate dispatch for the fog decision, which
+    // buys at most those 4.5% and pays a barrier and a drain per bounce -- and
+    // this renderer has already measured that dispatch boundaries are not free
+    // (see the acceleration structure batching note). Not attempted.
+    //
+    // A scene without fog already gets 704: SPEC_FOG is a function constant.
     if (SPEC_FOG && uniforms.hasFog)
     {
         const float surfaceT =
