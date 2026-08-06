@@ -24,6 +24,8 @@ public:
     void init() override;
     void render(Buffer* output) override;
     void renderSync(Buffer* output) override;
+    void beginGpuCapture(const std::string& path) override;
+    void endGpuCapture() override;
     Buffer* createBuffer(const BufferDesc& desc) override;
 
     void triggerRenderIfIdle() override;

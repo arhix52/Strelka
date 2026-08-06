@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <string>
 #include <strelka/render/common.h>
 #include <strelka/render/buffer.h>
 #include <strelka/scene/scene.h>
@@ -48,6 +49,16 @@ public:
     {
         render(output);
     }
+
+    /// Capture one frame into a .gputrace document for Xcode's shader profiler.
+    ///
+    /// The only place that reports what a shader spends its registers on: the
+    /// public API offers `maxTotalThreadsPerThreadgroup` and nothing else, and
+    /// the offline `metal` compiler produces AIR, where registers are still
+    /// virtual. Requires MTL_CAPTURE_ENABLED=1 in the environment *before* the
+    /// device is created -- main() sets it when the flag is given.
+    virtual void beginGpuCapture(const std::string&) {}
+    virtual void endGpuCapture() {}
 
     /// Start a render pass if the GPU is idle. Non-blocking.
     virtual void triggerRenderIfIdle() {}

@@ -11,6 +11,18 @@
 
 int main(int argc, const char* argv[])
 {
+    // Before anything can touch Metal. The capture layer is inserted when the
+    // device is created and reads this then; setting it afterwards leaves
+    // startCapture failing with "Capture layer is not inserted".
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::string(argv[i]) == "--capture" || std::string(argv[i]).rfind("--capture=", 0) == 0)
+        {
+            setenv("MTL_CAPTURE_ENABLED", "1", 1);
+            break;
+        }
+    }
+
     const oka::Logmanager loggerManager;
 
     // clang-format off
@@ -25,6 +37,7 @@ int main(int argc, const char* argv[])
         ("depth",        "Max ray depth",                   cxxopts::value<uint32_t>())
         ("sampler",      "Sampler: halton, pcg, sobol, sobol_bn, hybrid", cxxopts::value<std::string>())
         ("bn-switch",    "Hybrid: spp before switching blue-noise -> Sobol", cxxopts::value<uint32_t>())
+        ("capture",      "Capture one steady-state frame to a .gputrace for Xcode (as large as the scene on the device)", cxxopts::value<std::string>())
         ("camera",       "Camera index",                    cxxopts::value<int>())
         ("tonemap",      "Tonemap: none, reinhard, aces, filmic", cxxopts::value<std::string>())
         ("h,help",       "Print usage");
@@ -113,6 +126,10 @@ int main(int argc, const char* argv[])
         if (result.count("sampler"))
         {
             cfg.samplerType = oka::parseSamplerName(result["sampler"].as<std::string>());
+        }
+        if (result.count("capture"))
+        {
+            cfg.capturePath = result["capture"].as<std::string>();
         }
         if (result.count("tonemap"))
         {

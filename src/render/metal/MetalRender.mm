@@ -3147,6 +3147,43 @@ void MetalRender::retainCommandBufferForSync(MTL::CommandBuffer* pCmd)
     mLastCommandBuffer = pCmd->retain();
 }
 
+// One frame into a .gputrace, for Xcode's shader profiler -- the only tool that
+// reports a shader's register allocation. `MTL_CAPTURE_ENABLED` has to be set
+// before the device exists, which main() does when --capture is given: the
+// capture layer is inserted when Metal initialises, and asking for it later
+// fails with "Capture layer is not inserted".
+void MetalRender::beginGpuCapture(const std::string& path)
+{
+    MTL::CaptureManager* mgr = MTL::CaptureManager::sharedCaptureManager();
+    if (!mgr->supportsDestination(MTL::CaptureDestinationGPUTraceDocument))
+    {
+        STRELKA_ERROR("GPU capture unavailable. Set MTL_CAPTURE_ENABLED=1 before launching.");
+        return;
+    }
+    MTL::CaptureDescriptor* desc = MTL::CaptureDescriptor::alloc()->init();
+    desc->setCaptureObject(mDevice);
+    desc->setDestination(MTL::CaptureDestinationGPUTraceDocument);
+    desc->setOutputURL(
+        NS::URL::fileURLWithPath(NS::String::string(path.c_str(), NS::UTF8StringEncoding)));
+    NS::Error* err = nullptr;
+    if (!mgr->startCapture(desc, &err))
+    {
+        STRELKA_ERROR("GPU capture failed to start: {}",
+                      err && err->localizedDescription() ? err->localizedDescription()->utf8String()
+                                                         : "unknown");
+    }
+    else
+    {
+        STRELKA_INFO("GPU capture -> {}", path);
+    }
+    desc->release();
+}
+
+void MetalRender::endGpuCapture()
+{
+    MTL::CaptureManager::sharedCaptureManager()->stopCapture();
+}
+
 void MetalRender::renderSync(Buffer* output)
 {
     mSyncMode = true;

@@ -499,6 +499,24 @@ int HeadlessApp::run()
     while (m_sharedCtx->mSubframeIndex < m_config.spp)
     {
         m_render->renderSync(outputBuf.get());
+        if (!announced && !m_config.capturePath.empty())
+        {
+            // One frame, in steady state: the point of the capture is the
+            // shading kernels, and starting it at launch would record the
+            // acceleration structure build instead.
+            //
+            // It writes every resource the frame reads, so the document is the
+            // size of the scene on the device: the pine forest produces 7.7 GB.
+            // Register allocation depends on the shader and its function
+            // constants, not on how much geometry it traverses, so a small
+            // scene with the same constants answers the same question for a few
+            // megabytes.
+            m_render->beginGpuCapture(m_config.capturePath);
+            m_render->renderSync(outputBuf.get());
+            m_render->endGpuCapture();
+            fprintf(stdout, "\ncaptured one frame -> %s\n", m_config.capturePath.c_str());
+            fflush(stdout);
+        }
         if (!announced)
         {
             // A marker for anything sampling the GPU from outside.

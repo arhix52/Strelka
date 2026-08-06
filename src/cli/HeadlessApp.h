@@ -37,6 +37,7 @@ struct RenderConfig
     // per-bounce breakdown. Costs a sample either side of every dispatch, so it
     // is off unless asked for.
     bool profileStages = false;
+    std::string capturePath; // --capture: one steady-state frame to a .gputrace
     uint32_t risCandidates = 1; // 1 = plain next-event estimation
     uint32_t estimatorMode = 0; // 0 = NEE + MIS, 1 = BSDF sampling only
     bool sharc = false;
