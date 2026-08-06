@@ -49,11 +49,22 @@ if [ "$TARGET" = "--run" ]; then
 else
     SECS="${2:-2}"
 fi
-TRACE="$(mktemp -d)/counters.trace"
+# STRELKA_KEEP_TRACE=<path> keeps the recording instead of deleting it, for
+# opening in the Instruments UI.
+KEEP="${STRELKA_KEEP_TRACE:-}"
+if [ -n "$KEEP" ]; then
+    rm -rf "$KEEP"
+    TRACE="$KEEP"
+else
+    TRACE="$(mktemp -d)/counters.trace"
+fi
 XML="${TRACE%.trace}.xml"
 cleanup() {
     [ -n "$CHILD" ] && kill "$CHILD" 2>/dev/null
-    rm -rf "$(dirname "$TRACE")" "${LOG:-}"
+    rm -f "${XML:-}" "${LOG:-}"
+    [ -z "$KEEP" ] && rm -rf "$(dirname "$TRACE")"
+    [ -n "$KEEP" ] && echo "trace kept at $KEEP" >&2
+    return 0
 }
 trap cleanup EXIT
 

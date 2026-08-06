@@ -2844,6 +2844,13 @@ void MetalRender::render(Buffer* output)
             }
 
             MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
+            {
+                // Numbered, so a capture names the sample a frame came from
+                // rather than "Command Buffer 0" four hundred times over.
+                char label[32];
+                std::snprintf(label, sizeof(label), "sample %u", (uint32_t)ctx.mSubframeIndex);
+                pCmd->setLabel(NS::String::string(label, NS::UTF8StringEncoding));
+            }
             MTL::ComputeCommandEncoder* enc = pCmd->computeCommandEncoder();
             enc = encodeWavefront(pCmd, enc, pUniformBuffer, output, width, height, samplesThisLaunch,
                                   features);
@@ -3086,6 +3093,13 @@ void MetalRender::render(Buffer* output)
     else
     {
         MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
+        {
+            // Numbered, so a capture names the frame it came from rather than
+            // "Command Buffer 0" four hundred times.
+            char label[32];
+            std::snprintf(label, sizeof(label), "sample %u", (uint32_t)ctx.mSubframeIndex);
+            pCmd->setLabel(NS::String::string(label, NS::UTF8StringEncoding));
+        }
 
         MTL::BlitCommandEncoder* pBlitEncoder = pCmd->blitCommandEncoder();
         pBlitEncoder->copyFromBuffer(
@@ -3186,6 +3200,26 @@ void MetalRender::endGpuCapture()
 
 void MetalRender::renderSync(Buffer* output)
 {
+    // Frame boundaries, for anything watching from outside.
+    //
+    // Metal infers a frame from presentDrawable, and a headless renderer never
+    // presents one -- so Instruments sees a single unbroken stretch of work and
+    // every number it reports is an average over the whole run. A capture scope
+    // is the API that says "this is a frame"; with one per sample the timeline
+    // has countable, numbered frames and the counters can be read per frame
+    // instead of per session.
+    if (mFrameScope == nullptr && mCommandQueue)
+    {
+        mFrameScope = MTL::CaptureManager::sharedCaptureManager()->newCaptureScope(mCommandQueue);
+        if (mFrameScope)
+        {
+            mFrameScope->setLabel(NS::String::string("Strelka sample", NS::UTF8StringEncoding));
+        }
+    }
+    if (mFrameScope)
+    {
+        mFrameScope->beginScope();
+    }
     mSyncMode = true;
     mLastCommandBuffer = nullptr;
     const auto tEncode = std::chrono::steady_clock::now();
@@ -3256,6 +3290,10 @@ void MetalRender::renderSync(Buffer* output)
         }
     }
 
+    if (mFrameScope)
+    {
+        mFrameScope->endScope();
+    }
     mSyncMode = false;
 }
 

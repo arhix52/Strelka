@@ -292,6 +292,8 @@ private:
     const WavefrontVariant* wavefrontVariantFor(uint32_t features);
 
     MTL::ComputePipelineState* mWavefrontResolvePSO = nullptr;
+    // One capture scope per sample, so a profiler sees discrete frames.
+    MTL::CaptureScope* mFrameScope = nullptr;
     MTL::ComputePipelineState* mWavefrontPreparePSO = nullptr;
     MTL::ComputePipelineState* mWavefrontPrepareShadowPSO = nullptr;
     // What the acceleration structures were actually built for. A skeletal mesh
