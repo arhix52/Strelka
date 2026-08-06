@@ -65,8 +65,25 @@ else
     TRACE="$(mktemp -d)/counters.trace"
 fi
 XML="${TRACE%.trace}.xml"
+# Instruments writes a multi-gigabyte kernel trace next to the recording and
+# leaves it behind whenever a recording is interrupted rather than ending on its
+# own. Forty-five of them, seventeen gigabytes, filled this machine's disk twice
+# in a day -- and once it is full nothing can be run, not even the `rm` that
+# would fix it. Reported rather than deleted: this is a shared scratch directory
+# and a live recording is writing into one of these right now.
+warn_orphans() {
+    local n size
+    n=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name '*.ktrace' -mmin +10 2>/dev/null | wc -l | tr -d ' ')
+    [ "${n:-0}" -eq 0 ] && return 0
+    size=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name '*.ktrace' -mmin +10 -exec du -ch {} + 2>/dev/null | tail -1 | cut -f1)
+    echo "note: $n abandoned Instruments kernel traces (${size:-?}) in ${TMPDIR:-/tmp}" >&2
+    echo "      rm -rf \"\${TMPDIR:-/tmp}\"*.ktrace   # when nothing is recording" >&2
+    return 0
+}
+
 cleanup() {
     [ -n "$CHILD" ] && kill "$CHILD" 2>/dev/null
+    warn_orphans
     rm -f "${XML:-}" "${LOG:-}"
     [ -z "$KEEP" ] && rm -rf "$(dirname "$TRACE")"
     [ -n "$KEEP" ] && echo "trace kept at $KEEP" >&2

@@ -3501,9 +3501,25 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
     {
         return nullptr;
     }
-    STRELKA_INFO("wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} metal4={}: shade maxThreadsPerTG={} extend={}",
-                 envMap, lights, motionBlur, dof, debug, alpha, fog, useMetal4, v.shade->maxTotalThreadsPerThreadgroup(),
-                 v.extendStatic ? v.extendStatic->maxTotalThreadsPerThreadgroup() : 0);
+    STRELKA_INFO("wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} metal4={}",
+                 envMap, lights, motionBlur, dof, debug, alpha, fog, useMetal4);
+    // Every pipeline's threadgroup limit, not just two of them.
+    //
+    // This is the only figure the public API gives on register pressure -- the
+    // driver's own answer to how many threads fit -- and against the 1024 a
+    // register-light kernel reaches it reads directly: 640 is roughly 1.6x the
+    // registers per thread, 384 is 2.7x. There is no breakdown of what they
+    // hold anywhere in Metal; the way to find that is to remove something and
+    // watch this number, and having all of them at once makes each rebuild
+    // answer for the whole renderer rather than for one kernel.
+    auto tgLimit = [](MTL::ComputePipelineState* p) -> uint32_t {
+        return p ? (uint32_t)p->maxTotalThreadsPerThreadgroup() : 0u;
+    };
+    STRELKA_INFO("  maxThreadsPerTG: generate {} extend {} (motion {}) shade {} shadow {} (motion {}) "
+                 "miss {} sharcDeposit {}",
+                 tgLimit(v.generate), tgLimit(v.extendStatic), tgLimit(v.extendMotion),
+                 tgLimit(v.shade), tgLimit(v.shadowStatic), tgLimit(v.shadowMotion),
+                 tgLimit(v.miss), tgLimit(v.sharcDeposit));
     return &mWavefrontVariants.emplace(features, v).first->second;
 }
 
