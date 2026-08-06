@@ -19,6 +19,12 @@
 # Performance" templates produces zero counter rows and looks like a permissions
 # problem. It is not one; no entitlement or signature is needed.
 #
+# Record them *alone*. Adding `--instrument "Metal Application"` alongside, to
+# get the encoder and frame tracks in the same document, leaves
+# `metal-gpu-counter-intervals` empty -- the raw `gpu-counter-value` samples are
+# still there, but the aggregated table the UI draws its tracks from is not, and
+# the counters simply do not appear. Take two recordings instead.
+#
 # And they are device-wide. Attaching to a pid does not isolate them -- an idle
 # desktop reads ALU Utilization 56% and Fragment Occupancy 48%, which is the
 # compositor. Only the difference against an idle control means anything, so
