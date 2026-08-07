@@ -21,5 +21,17 @@ refs/
 # Strelka renders and contact sheets -- and it runs to ~100 MB.
 scenes/feature_tests/
 
+# Scene exports written in the repository root are local test artifacts.
+/*.gltf
+/*.glb
+/*.bin
+/*.png
+/*.jpg
+/*_light.json
+
+# Python bytecode is generated locally by the feature-test tools.
+__pycache__/
+*.py[cod]
+
 # Editor window state.
 imgui.ini
