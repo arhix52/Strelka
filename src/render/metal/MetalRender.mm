@@ -4074,15 +4074,45 @@ MTL::AccelerationStructure* MetalRender::createAccelerationStructure(MTL::Accele
     return compactedAccelerationStructure->retain();
 }
 
+
+// Close the current group: end its encoder, commit, and drop the scratch the
+// group was using. Metal retains what a committed command buffer references, so
+// releasing here hands the buffers to the GPU's lifetime rather than ours.
+void MetalRender::flushAccelerationStructureGroup()
+{
+    if (!mAsGroupCommandBuffer)
+    {
+        return;
+    }
+    mAsGroupEncoder->endEncoding();
+    mAsGroupCommandBuffer->commit();
+    mAsGroupEncoder->release();
+    mAsGroupCommandBuffer->release();
+    mAsGroupEncoder = nullptr;
+    mAsGroupCommandBuffer = nullptr;
+    for (MTL::Buffer* b : mAsGroupScratch)
+    {
+        b->release();
+    }
+    mAsGroupScratch.clear();
+    mAsGroupPending = 0;
+}
+
+static double sBlasSizesMs = 0.0, sBlasAllocMs = 0.0, sBlasScratchMs = 0.0, sBlasEncodeMs = 0.0;
+static uint32_t sBlasCount = 0;
+
 MTL::AccelerationStructure* MetalRender::createAccelerationStructureNoCompact(
     MTL::AccelerationStructureDescriptor* descriptor)
 {
     // The usage flags belong to the caller. This used to force Refit on
     // everything it was handed, which silently gave static geometry a tree built
     // to survive a vertex update -- a worse tree to traverse -- for nothing.
+    const auto tSizes = std::chrono::steady_clock::now();
     const MTL::AccelerationStructureSizes accelSizes = mDevice->accelerationStructureSizes(descriptor);
+    const auto tAlloc = std::chrono::steady_clock::now();
     MTL::AccelerationStructure* accelerationStructure =
         mDevice->newAccelerationStructure(accelSizes.accelerationStructureSize);
+    const auto tScratch = std::chrono::steady_clock::now();
     if (!accelerationStructure)
     {
         // newAccelerationStructure returns nil when the device cannot find the
@@ -4097,27 +4127,45 @@ MTL::AccelerationStructure* MetalRender::createAccelerationStructureNoCompact(
     }
     MTL::Buffer* scratchBuffer =
         mDevice->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate);
+    const auto tEncode = std::chrono::steady_clock::now();
 
-    // One command buffer per structure, which a profile makes look wrong and
-    // measurement says is right.
-    //
-    // A CPU profile of the load has a third of its main-thread samples blocked
-    // inside `commandQueue->commandBuffer()`, waiting on the semaphore that
-    // bounds how many are in flight. That is not a stall to remove -- it is
-    // back-pressure from a GPU that is already busy building. Batching sixteen
-    // builds into a shared command buffer so the CPU never blocks makes the load
-    // 18% *slower* -- 9.9 s against 8.4 -- because the GPU then waits for
-    // sixteen structures to be allocated and encoded before it may start on any
-    // of them. Committing each one as it is ready keeps it fed.
-    MTL::CommandBuffer* commandBuffer = mCommandQueue->commandBuffer();
-    MTL::AccelerationStructureCommandEncoder* commandEncoder = commandBuffer->accelerationStructureCommandEncoder();
-    commandEncoder->buildAccelerationStructure(accelerationStructure, descriptor, scratchBuffer, 0UL);
-    commandEncoder->endEncoding();
-    commandBuffer->commit();
+    // Builds are grouped: STRELKA_AS_GROUP structures share one encoder, each
+    // with its own scratch, and the group is committed together. Apple's guidance
+    // is that several builds in *one encoder* run in parallel on this hardware,
+    // which needs a scratch buffer per build rather than one reused -- two builds
+    // sharing scratch is a data race, not a slow path. Group size 1 is the
+    // one-per-command-buffer arrangement this replaces.
+    static const uint32_t kGroupSize = [] {
+        const char* v = getenv("STRELKA_AS_GROUP");
+        return v ? std::max(1u, (uint32_t)atoi(v)) : 1u;
+    }();
+
+    if (!mAsGroupCommandBuffer)
+    {
+        mAsGroupCommandBuffer = mCommandQueue->commandBuffer()->retain();
+        mAsGroupEncoder = mAsGroupCommandBuffer->accelerationStructureCommandEncoder()->retain();
+    }
+    mAsGroupEncoder->buildAccelerationStructure(accelerationStructure, descriptor, scratchBuffer, 0UL);
+    // Held until the group is committed: the GPU reads it for the whole build,
+    // and dropping the last reference before commit is what a race would look
+    // like if Metal did not retain committed resources.
+    mAsGroupScratch.push_back(scratchBuffer);
+    if (++mAsGroupPending >= kGroupSize)
+    {
+        flushAccelerationStructureGroup();
+    }
     // No waitUntilCompleted — Metal queue ordering guarantees subsequent
     // command buffers on the same queue see the built AS.
 
-    scratchBuffer->release();
+    {
+        using ms = std::chrono::duration<double, std::milli>;
+        const auto tEnd = std::chrono::steady_clock::now();
+        sBlasSizesMs += ms(tAlloc - tSizes).count();
+        sBlasAllocMs += ms(tScratch - tAlloc).count();
+        sBlasScratchMs += ms(tEncode - tScratch).count();
+        sBlasEncodeMs += ms(tEnd - tEncode).count();
+        ++sBlasCount;
+    }
     return accelerationStructure;
 }
 
@@ -4702,6 +4750,9 @@ void MetalRender::createAccelerationStructures()
 
     const NS::Array* instancedAccelerationStructures = NS::Array::array(
         (const NS::Object* const*)mPrimitiveAccelerationStructures.data(), mPrimitiveAccelerationStructures.size());
+    // Every BLAS must be committed before the TLAS that references them is
+    // encoded, so close whatever group the last one landed in.
+    flushAccelerationStructureGroup();
     MTL::InstanceAccelerationStructureDescriptor* accelDescriptor =
         MTL::InstanceAccelerationStructureDescriptor::descriptor();
     accelDescriptor->setInstancedAccelerationStructures(instancedAccelerationStructures);
@@ -4709,6 +4760,24 @@ void MetalRender::createAccelerationStructures()
     accelDescriptor->setInstanceDescriptorBuffer(mInstanceBuffer);
     accelDescriptor->setInstanceDescriptorType(
         MTL::AccelerationStructureInstanceDescriptorTypeUserID);
+    // The top level was built with no usage flags at all, which cost two things.
+    // Refit is one of them: rebuildAccelerationStructures refits this structure
+    // when an animation moves instances, and refitting one not built to be
+    // refittable is undefined -- canRefit checks the instance count and the size
+    // and never asked what it was built as. The other is that every ray goes
+    // through this structure and a million instances of it, so it wants the same
+    // fast-intersection preference the bottom level already gets.
+    //
+    // STRELKA_TLAS_USAGE selects them for measurement: 1 = Refit, 2 = prefer fast
+    // intersection, 3 = both.
+    static const uint32_t kTlasUsage = [] {
+        const char* v = getenv("STRELKA_TLAS_USAGE");
+        return v ? (uint32_t)atoi(v) : 3u;
+    }();
+    accelDescriptor->setUsage(
+        ((kTlasUsage & 1u) ? MTL::AccelerationStructureUsageRefit : MTL::AccelerationStructureUsageNone) |
+        ((kTlasUsage & 2u) ? MTL::AccelerationStructureUsagePreferFastIntersection
+                           : MTL::AccelerationStructureUsageNone));
 
     mInstanceAccelerationStructure = createAccelerationStructure(accelDescriptor);
     if (!mInstanceAccelerationStructure)
@@ -4743,7 +4812,9 @@ void MetalRender::createAccelerationStructures()
                              bySize[k].first / 1e9, mBlasList[bySize[k].second].mGeometryBase);
             }
         }
-STRELKA_INFO("Structures: BLAS {:.2f} GB ({} failed), TLAS {:.3f} GB, device max buffer {:.2f} GB",
+STRELKA_INFO("BLAS build CPU: sizes {:.0f} ms, alloc {:.0f} ms, scratch {:.0f} ms, encode {:.0f} ms ({} structures)",
+                 sBlasSizesMs, sBlasAllocMs, sBlasScratchMs, sBlasEncodeMs, sBlasCount);
+    STRELKA_INFO("Structures: BLAS {:.2f} GB ({} failed), TLAS {:.3f} GB, device max buffer {:.2f} GB",
                      asBytes / 1e9, nullAs,
                      mInstanceAccelerationStructure ? mInstanceAccelerationStructure->size() / 1e9 : 0.0,
                      mDevice->maxBufferLength() / 1e9);

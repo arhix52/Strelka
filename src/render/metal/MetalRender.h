@@ -408,6 +408,13 @@ private:
     void createMetalMaterials();
 
     MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);
+    // Acceleration structure builds are grouped into one encoder so the hardware
+    // can run them in parallel; each build in a group needs its own scratch.
+    MTL::CommandBuffer* mAsGroupCommandBuffer = nullptr;
+    MTL::AccelerationStructureCommandEncoder* mAsGroupEncoder = nullptr;
+    std::vector<MTL::Buffer*> mAsGroupScratch;
+    uint32_t mAsGroupPending = 0;
+    void flushAccelerationStructureGroup();
     MTL::AccelerationStructure* createAccelerationStructureNoCompact(MTL::AccelerationStructureDescriptor* descriptor);
     void createAccelerationStructures();
 
