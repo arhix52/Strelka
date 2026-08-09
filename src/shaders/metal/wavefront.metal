@@ -2105,7 +2105,7 @@ kernel void wavefrontShade(
             if (entering)
                 ior_stack_push(iorStack, si.dielectric_priority, si.ior, entry.materialId);
             else
-                ior_stack_pop(iorStack, si.dielectric_priority);
+                ior_stack_pop(iorStack, si.dielectric_priority, entry.materialId);
         }
         nextOrigin = offset_ray(si.position, -faceNg);
 

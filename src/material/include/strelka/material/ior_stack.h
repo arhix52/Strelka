@@ -73,14 +73,43 @@ DEVICE_FUNC unsigned int ior_stack_current_material(const THREAD_REF IorStack& s
 }
 
 // ---------------------------------------------------------------------------
-// ior_stack_pop -- Remove the entry matching the given priority (exiting)
+// ior_stack_pop -- Remove the entry for the surface being left (exiting)
+//
+// Matched on the material first, and only then on the priority.
+//
+// Priority alone cannot identify the entry: it says which surface wins where two
+// dielectrics overlap, not which object this is, and glTF gives no way to author
+// it -- the loader assigns one value to everything transmissive. The bathroom
+// has twelve such materials all at 10, so leaving the shower glass popped
+// whichever of them happened to be on top: the bath water, a bubble, the lotion
+// in the bottle. The path then carried the wrong medium, or none, for the rest
+// of its life, and the absorption it applied afterwards belonged to something
+// else.
+//
+// The priority search stays as the fallback for the case it was written for: a
+// material that legitimately shares a priority with the one being left, where
+// removing any of them leaves the same IOR on top.
 //
 // Searches from top to bottom. Shifts remaining entries down to fill the gap.
 // Returns the new current IOR after popping.
 // ---------------------------------------------------------------------------
 DEVICE_FUNC float ior_stack_pop(THREAD_REF IorStack& stack,
-                                 unsigned int priority)
+                                 unsigned int priority,
+                                 unsigned int material_index)
 {
+    // The surface this exit belongs to, if the path ever entered it.
+    for (int i = stack.top; i >= 0; i--)
+    {
+        if (stack.entries[i].material_index == material_index)
+        {
+            for (int j = i; j < stack.top; j++)
+            {
+                stack.entries[j] = stack.entries[j + 1];
+            }
+            stack.top--;
+            return ior_stack_current_ior(stack);
+        }
+    }
     // Find the entry with matching priority (search from top)
     for (int i = stack.top; i >= 0; i--)
     {

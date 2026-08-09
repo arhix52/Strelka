@@ -946,6 +946,69 @@ def light_mtl_plane_to_rect(obj, strength, opts):
     }
 
 
+def close_open_transmissive():
+    """Fill the boundary loops of any mesh carrying a transmissive material.
+
+    A path that enters a dielectric pushes it onto the renderer's IOR stack and
+    pops it on the way out. An open mesh has no way out: the ray leaves through
+    the hole without crossing a surface, so the entry never comes off, and every
+    segment the path travels afterwards -- anywhere in the room -- is attenuated
+    as though it were still inside. Nothing in the renderer can recover from
+    that, because there is no event to hang the recovery on. It has to be fixed
+    where the geometry is.
+
+    Measured on this scene before the fill: the bath water is 3712 triangles
+    with 288 boundary edges, and the foam beside it 9454 with 672.
+
+    The fill is `holes_fill`, which spans a boundary loop with faces and adds no
+    thickness. On the water that is the rim where it meets the tub, which is
+    hidden by the tub; anything it cannot span it leaves alone rather than
+    guessing.
+    """
+    import bmesh  # local: the rest of this tool does not need it
+
+    closed = []
+    for obj in list(bpy.data.objects):
+        if obj.type != "MESH" or not obj.data.polygons:
+            continue
+        if not any(sl.material is not None and is_transmissive_material(sl.material)
+                   for sl in obj.material_slots):
+            continue
+
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        before = sum(1 for e in bm.edges if len(e.link_faces) == 1)
+        if before == 0:
+            bm.free()
+            continue
+        bmesh.ops.holes_fill(bm, edges=list(bm.edges), sides=0)
+        after = sum(1 for e in bm.edges if len(e.link_faces) == 1)
+        tris = len(bm.faces)
+        bm.to_mesh(obj.data)
+        bm.free()
+        obj.data.update()
+        closed.append((obj.name, tris, before, after))
+    return closed
+
+
+def is_transmissive_material(mat):
+    """Does this material refract, as the exported glTF will see it?
+
+    Read off the Principled node the conversion has already built, rather than
+    off the V-Ray plugin, so it answers the question the renderer will ask.
+    """
+    nt = getattr(mat, "node_tree", None)
+    if nt is None:
+        return False
+    for n in nt.nodes:
+        if n.type != "BSDF_PRINCIPLED":
+            continue
+        sock = n.inputs.get("Transmission Weight")
+        if sock is not None and not sock.is_linked and sock.default_value > 0.0:
+            return True
+    return False
+
+
 def rebuild_proxy_rug(obj, opts):
     """Replace a V-Ray proxy's preview mesh with a coiled braid.
 
@@ -1228,6 +1291,10 @@ def parse_args():
     ap.add_argument("--no-fog-volumes", dest="fog_volumes", action="store_false",
                     help="skip the EnvironmentFog gizmos. The bathtub one costs "
                          "more than it buys today -- see the note in main()")
+    ap.add_argument("--no-close-transmissive", dest="close_transmissive",
+                    action="store_false",
+                    help="leave open refractive meshes open; they unbalance the IOR "
+                         "stack and tint everything the path touches afterwards")
     ap.add_argument("--rebuild-rug", action="store_true",
                     help="replace the Rug_Round proxy preview with a generated "
                          "coiled braid (the .vrmesh it stands in for is unreadable)")
@@ -1393,6 +1460,13 @@ def main():
         if opts.drop_ortho_camera:
             bpy.data.objects.remove(cam_obj, do_unlink=True)
             print("  camera: orthographic camera dropped from the export")
+
+    if opts.close_transmissive:
+        closed = close_open_transmissive()
+        for name, tris, before, after in closed:
+            print(f"  closed: {name} ({tris} tris) {before} boundary edges -> {after}")
+        if not closed:
+            print("  closed: no open transmissive meshes")
 
     for obj in bpy.data.objects:
         if obj.type != "MESH":

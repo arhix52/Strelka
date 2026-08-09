@@ -36,76 +36,48 @@ colour.
 
 ---
 
-## 1. The transmissive meshes in this scene are open, and that is what colours the water
+## 1. Nested dielectrics cannot tell two objects apart
 
-**Symptom.** With the bathtub's `EnvironmentFog` gizmo present, the bath water
-loses its cyan everywhere except a ring at the tub's rim. Measured as the
-red-to-green ratio over the water, against the reference's 0.871:
+**Fixed for this scene, open in general.** The open-mesh half is closed and the
+identification half is closed; what is left is that neither has a defence.
 
-| Configuration | R/G |
+`ior_stack_pop` now matches on the material being left and falls back to the
+priority. Priority alone could not identify anything: glTF has no way to author
+it and the loader gives one value to everything transmissive, so all twelve
+refracting materials in the bathroom sit at 10 and leaving the shower glass
+popped whichever of them was topmost. `tests/material/test_ior_stack.cpp` pins
+it. It is worth nothing in this frame -- byte-identical output -- because the
+scene rarely has two of them nested at once, which is exactly why it went
+unnoticed.
+
+The converter now fills the boundary loops of any refracting mesh, because a ray
+that leaves an open one through the hole never crosses a surface and so never
+generates the exit event a recovery would have to hang on. There is nothing the
+renderer can do about it. What was open:
+
+| Mesh | Boundary edges |
 |---|---|
-| gizmo present | 0.968 |
-| gizmo present, density 1e-6 and no emission | 0.967 |
-| gizmo removed from the same export | 0.777 |
+| `Brush_Fibers` | 2912 |
+| `Bubbles` (the foam) | 196 |
+| `Water_Bathtub` | 96 |
+| `Water_Shower` | 64 |
 
-**What it is.** `Water_Bathtub` is an open mesh: 3712 triangles carrying 288
-boundary edges. `Bubbles_Mtl`'s mesh, which is the foam in the tub, carries 672
-across 9454. A ray entering an open transmissive mesh pushes the IOR stack and
-never finds the exit that would pop it, so every segment it travels afterwards --
-anywhere in the room -- is attenuated as though it were still inside the water.
+That takes the bath water's red-to-green ratio from 0.776 to 0.823 against the
+reference's 0.837 over the same rectangle -- the error falls by 4.4x -- and moves
+no other patch in the frame by more than 0.001.
 
-That is where the colour comes from. The water is a 2 mm slab (world Y 0.14487
-to 0.14687) with an attenuation distance of 0.1, so its own thickness is worth
-1.2% of the red channel; it renders at 0.777 against a wall at 1.0. The number
-the gizmo is being measured against was never the water's absorption.
+It also corrects a prediction this entry used to make. The water is a 2 mm slab
+and I reasoned from its thickness that closing it could be worth about 1% of the
+red channel. It is worth 6%, because the colour never came from one crossing:
+the slab is thin, nearly parallel-sided and sits over a reflective tub, so a
+path crosses it many times.
 
-It also explains the direction of the error. Removing the gizmo gives 0.777 and
-the reference is 0.871, so the case treated as correct is the one that
-*over*-absorbs.
-
-### Ruled out, with the test that ruled it out
-
-Rendered from one export, with the two gizmo nodes detached from the scene graph
-for the "removed" row, so the two differ by nothing else. The water's absorption
-is set 20x stronger for these (attenuationColor 0.05, attenuationDistance 0.05)
-to put the effect well clear of the noise; the ratios below are that scene.
-
-| Suspect | Test | Result |
-|---|---|---|
-| The medium itself | density 1e-6, emission 0 | R/G 0.967 against 0.968 at full density -- the boundary alone does it |
-| The pass-through budget | `PATH_PASSTHROUGH_MAX` 32 -> 255 | byte-identical output |
-| The bounce budget | `--depth 16` -> `--depth 64` | 0.918 -> 0.911 |
-| Primary visibility | water given emission 20 | 237.32 against 237.35 -- both renders see the same surface |
-| Segment absorption at a scattering vertex | fixed, see below | the ladder and this scene both unmoved |
-| **The IOR stack** | water marked `thin_walled`, which is the one path that never pushes it | **0.431 / 0.918 becomes 0.988 / 0.993 -- the whole difference collapses** |
-
-The last row is the finding: with nothing pushed onto the stack the gizmo makes
-no difference at all. What the gizmo changes is how long an unbalanced path
-survives, not what any surface does.
-
-One real gap was found on the way and is fixed rather than listed: the absorption
-over a segment was applied in the surface branch and the boundary-crossing branch
-of `shade`, but not at a volume scattering vertex, which returns from its own
-branch before either. It is hoisted to the top of the kernel now. It is worth
-nothing in this scene -- the fog gizmo could be neutered to 1e-6 density and the
-symptom did not move -- and it is still wrong to skip.
-
-### What to do about it
-
-Two candidates, and the measurement to choose between them is the same:
-
-- close the meshes in `tools/iso_bathroom/vray2strelka.py`, which is where the
-  asset is already being repaired for other reasons;
-- or make an unmatched exit recoverable in `ior_stack.h`, which is the general
-  fix and the riskier one -- `ior_stack_pop` searches by priority and silently
-  succeeds when it finds nothing, so there is no signal today that a path is
-  lost.
-
-Either way the check is the same: with the water closed, the gizmo should stop
-mattering, and R/G should move toward 0.871 rather than away from it.
-
-`tools/iso_bathroom/vray2strelka.py --no-fog-volumes` is the lever meanwhile, and
-is what the current export uses.
+**What is still open** is that both failures were silent. `ior_stack_push` does
+nothing when the stack is full at four entries, and `ior_stack_pop` returns
+success having found nothing. A scene can lose paths to either without a single
+warning, and this one did for as long as it has existed. Somewhere to put a
+counter -- a debug view of stack depth, or a once-per-frame tally of unmatched
+pops -- would turn the next instance into a measurement instead of a hunt.
 
 ---
 
