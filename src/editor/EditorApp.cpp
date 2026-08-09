@@ -383,6 +383,10 @@ void EditorApp::checkLoadingComplete()
     m_render->setSharedContext(m_sharedCtx.get());
     m_render->setScene(m_scene.get());
     m_render->init();
+    // The display keeps a raw Render* to wait on that render's frame event, and
+    // the assignment above destroyed the one it was given at construction. Left
+    // stale it is a use-after-free on the first frame after any scene open.
+    m_display->setRender(m_render.get());
 
     m_cameraController->setCamera(m_scene->getCamera(m_selectedCamera));
     m_render->resetTemporalHistory(); // new scene, new everything
