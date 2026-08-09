@@ -13,6 +13,11 @@
 
 namespace oka
 {
+
+// Defined in MetalRender.mm: the working state of a resumable acceleration
+// structure build. Opaque here because it is nobody else's business and it
+// holds containers with an entry per scene instance.
+struct AsBuildState;
 static constexpr size_t kMaxFramesInFlight = 3;
 
 class MetalRender : public Render
@@ -432,7 +437,22 @@ private:
     uint32_t mAsGroupPending = 0;
     void flushAccelerationStructureGroup();
     MTL::AccelerationStructure* createAccelerationStructureNoCompact(MTL::AccelerationStructureDescriptor* descriptor);
+    /// Build every acceleration structure the scene needs, in one call.
     void createAccelerationStructures();
+    /// The same build, resumable.
+    ///
+    /// This is the longest thing the renderer does -- two seconds on the pine
+    /// forest, and the two loops inside it run once per scene instance, which is
+    /// 1.1 million there. Returns true when the build is complete; call it again
+    /// while it returns false.
+    ///
+    /// The budget is in milliseconds rather than in items because the per-item
+    /// cost spans three orders of magnitude: a group that shares an existing
+    /// structure costs a map lookup, one that does not costs a build. Any fixed
+    /// item count is either a stutter or pointless overhead. Zero means no limit.
+    bool stepAccelerationStructures(double budgetMs);
+    /// Carried between calls of the above; see the definition in the .mm.
+    AsBuildState* mAsBuild = nullptr;
 
     // --- Deferred scene build -------------------------------------------------
     //

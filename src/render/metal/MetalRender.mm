@@ -47,6 +47,74 @@
 using namespace oka;
 namespace fs = std::filesystem;
 
+// Working state of a resumable acceleration structure build.
+//
+// Everything here used to be a local of createAccelerationStructures(). It has
+// to survive between calls now that the build runs a slice at a time, and it is
+// heap-allocated for the duration of one build rather than kept as members: the
+// two maps hold an entry per scene instance, which is 1.1 million on the pine
+// forest, and there is no reason to carry that between loads.
+struct oka::AsBuildState
+{
+    // Instances that hang off the same node share a transform by construction.
+    // The transform is part of the key because one node can carry a million
+    // placements -- that is what EXT_mesh_gpu_instancing is -- and keying on the
+    // node alone scatters every placement after the first into groups of its own.
+    struct GroupKey
+    {
+        int node;
+        int skeletal;
+        uint64_t transform;
+        bool operator<(const GroupKey& o) const
+        {
+            if (node != o.node)
+                return node < o.node;
+            if (skeletal != o.skeletal)
+                return skeletal < o.skeletal;
+            return transform < o.transform;
+        }
+    };
+
+    enum class Phase : uint32_t
+    {
+        Meshes = 0,
+        Grouping,
+        Blas,
+        Lights,
+        Finish,
+        Done,
+    };
+    Phase phase = Phase::Meshes;
+
+    // Meshes
+    size_t meshCursor = 0;
+    size_t primitiveBytes = 0;
+
+    // Grouping
+    std::vector<int> instanceNode;
+    std::map<GroupKey, size_t> groupOfKey;
+    std::vector<std::vector<uint32_t>> groups;
+    std::vector<bool> groupSkeletal;
+    size_t groupCursor = 0;
+
+    // One BLAS per distinct geometry, shared by every group that holds the same.
+    std::map<std::vector<uint64_t>, size_t> blasOfSignature;
+    std::vector<size_t> groupBlas;
+    size_t blasCursor = 0;
+    size_t sharedBlas = 0;
+    size_t mergedGeometries = 0;
+
+    // Light instances keep one BLAS per mesh, shared between lights, because
+    // their userID must stay the light index.
+    std::map<uint32_t, size_t> lightBlasOfMesh;
+    size_t lightCursor = 0;
+
+    // Per-phase wall clock, so the split between grouping and building is a
+    // measurement rather than an assumption.
+    double phaseMs[(size_t)Phase::Done] = {};
+};
+
+
 MetalRender::MetalRender(/* args */) = default;
 
 MetalRender::~MetalRender()
@@ -201,6 +269,11 @@ MetalRender::~MetalRender()
         safeRelease(mTriangleUpdatePSO);
         safeRelease(mSkinningPSO4);
         safeRelease(mTriangleUpdatePSO4);
+
+        // A build abandoned mid-slice -- the window was closed while the scene
+        // was still coming up -- still owns its working state.
+        delete mAsBuild;
+        mAsBuild = nullptr;
 
         // Queue & device (release last)
         mMetal4.release();
@@ -4424,6 +4497,11 @@ void MetalRender::rebuildAccelerationStructures()
                      .count());
 }
 
+// How much work one call of the sliced stages may do. Long enough that the
+// per-slice overhead is noise, short enough that the window still answers the
+// mouse -- one slice per displayed frame, at a frame that is not a fast one.
+static constexpr double kBuildSliceMs = 24.0;
+
 // One stage of the scene build per call; see BuildStage in the header for why it
 // is split at all. The stages are ordered by dependency, not by cost: materials
 // index into the buffers and the acceleration structures reference both.
@@ -4459,15 +4537,20 @@ bool MetalRender::stepSceneBuild(Buffer* output)
         break;
 
     case BuildStage::Structures:
-        if (mLoadProgress)
+        if (mLoadProgress && !mAsBuild)
         {
             mLoadProgress->beginStage(LoadProgress::Stage::Structures);
         }
         // Nothing is playing yet, so start static; the per-frame check in render()
         // switches to motion structures if playback begins.
         mBuildMotionBlas = false;
-        createAccelerationStructures();
-        mBuildStage = BuildStage::Tail;
+        // The one stage too long to run whole: two seconds on the pine forest,
+        // against roughly one frame's worth per slice here. The stage stays
+        // current until the build says it is finished.
+        if (stepAccelerationStructures(kBuildSliceMs))
+        {
+            mBuildStage = BuildStage::Tail;
+        }
         break;
 
     case BuildStage::Tail:
@@ -4534,94 +4617,144 @@ void MetalRender::finishSceneBuild(Buffer* output)
 
 void MetalRender::createAccelerationStructures()
 {
+    // No budget: one call does the lot, which is what a rebuild driven by an
+    // animation and what the headless path both want.
+    while (!stepAccelerationStructures(0.0))
+    {
+    }
+}
+
+bool MetalRender::stepAccelerationStructures(double budgetMs)
+{
     NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
+    auto finish = [&](bool complete) {
+        pPool->release();
+        return complete;
+    };
 
     const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
     const std::vector<oka::Curve>& curves = mScene->getCurves();
     const std::vector<oka::Instance>& instances = mScene->getInstances();
     if (meshes.empty() && curves.empty())
     {
-        pPool->release();
-        return;
+        delete mAsBuild;
+        mAsBuild = nullptr;
+        return finish(true);
     }
 
-    // Per-mesh buffers survive a rebuild of the structures that reference them.
-    if (mMetalMeshes.empty())
+    using Phase = AsBuildState::Phase;
+    if (!mAsBuild)
     {
-        // Read once, here: the meshes are built now and the acceleration
-        // structures embed whatever they are given, so a later change of tracer
-        // cannot retroactively add the data.
-        // Nothing reads per-primitive data now: it existed for the megakernel.
-        mNeedsPrimitiveData = false;
-        size_t primitiveBytes = 0;
-        for (size_t mi = 0; mi < meshes.size(); ++mi)
-        {
-            createMeshData(mi);
-            primitiveBytes += (size_t)(meshes[mi].mCount / 3) * sizeof(Triangle);
-        }
-        if (!mNeedsPrimitiveData && primitiveBytes > 0)
-        {
-            STRELKA_INFO("Skipped {:.2f} GB of per-primitive attribute data: the wavefront tracer "
-                         "refetches from the vertex buffer",
-                         primitiveBytes / 1e9);
-        }
+        mAsBuild = new AsBuildState();
     }
-    mMotionBlasBuilt = mBuildMotionBlas;
+    AsBuildState& st = *mAsBuild;
 
-    // Before the structures are built, not after. The host arrays are a full
-    // duplicate of the GPU buffers -- 2.27 GB here -- and holding them across the
-    // acceleration structure build stacks that on top of the largest allocation
-    // the renderer makes. Nothing below this point reads them: buildBlas() works
-    // from buffer offsets and triangle counts.
-    //
-    // Off by default because Scene::pick() walks these arrays -- the editor needs
-    // them, a headless render does not.
-    mHostGeometryBytes = { mScene->getVertices().size() * sizeof(Scene::Vertex),
-                           mScene->getIndices().size() * sizeof(uint32_t) };
-    if (getSettings()->getAs<bool>("scene/releaseHostGeometry") && !mScene->hostGeometryReleased())
-    {
-        mScene->releaseHostGeometry();
-    }
-
-    // --- Group mesh instances that always move together -----------------------
-    //
-    // glTF splits a mesh into primitives by material, and the loader turns each
-    // primitive into its own instance. Left alone that produces one BLAS per
-    // primitive, all with the same transform and heavily overlapping bounds, and
-    // every ray that has to traverse deeply pays for the overlap. Instances that
-    // hang off the same node share a transform by construction, so they can be
-    // merged into a single BLAS with one geometry per primitive.
-    std::vector<int> instanceNode(instances.size(), -1);
-    const std::vector<Scene::Node>& nodes = mScene->getNodes();
-    for (size_t n = 0; n < nodes.size(); ++n)
-    {
-        for (const uint32_t id : nodes[n].instanceIds)
+    // The clock is read every so many iterations rather than on each one: for the
+    // cheap majority of items -- a group that shares an existing structure --
+    // reading it costs more than the work it is measuring.
+    constexpr size_t kCheckEvery = 64;
+    const auto sliceStart = std::chrono::steady_clock::now();
+    auto mark = sliceStart;
+    auto chargePhase = [&]() {
+        const auto t = std::chrono::steady_clock::now();
+        st.phaseMs[(size_t)st.phase] += std::chrono::duration<double, std::milli>(t - mark).count();
+        mark = t;
+    };
+    // Grouping and building are one item per scene instance each, so the two
+    // cursors against twice the instance count is close enough for a bar -- the
+    // group count is within a percent of the instance count on any scene where
+    // this stage is long enough to matter.
+    auto report = [&]() {
+        if (mLoadProgress)
         {
-            if (id < instanceNode.size())
-                instanceNode[id] = (int)n;
-        }
-    }
-
-    // Key: (node, skeletal, transform). The transform belongs in the key because
-    // a single node can now carry a million placements -- that is what
-    // EXT_mesh_gpu_instancing is -- and keying on the node alone puts the first
-    // placement's primitives in one group and scatters every later placement's
-    // across groups of their own. Those then have different signatures, so the
-    // BLAS sharing below cannot collapse them, and a multi-primitive mesh is
-    // built once per primitive as well as once whole: 9.7 GB of structures where
-    // 5.0 will do.
-    struct GroupKey
-    {
-        int node;
-        int skeletal;
-        uint64_t transform;
-        bool operator<(const GroupKey& o) const
-        {
-            if (node != o.node) return node < o.node;
-            if (skeletal != o.skeletal) return skeletal < o.skeletal;
-            return transform < o.transform;
+            mLoadProgress->total.store((uint32_t)(instances.size() * 2), std::memory_order_relaxed);
+            mLoadProgress->done.store((uint32_t)(st.groupCursor + st.blasCursor), std::memory_order_relaxed);
         }
     };
+    // `force` is for the items that are not cheap: one BLAS build can outlast the
+    // whole slice budget on its own, and sampling the clock every kCheckEvery
+    // items would then let 511 more of them through behind it.
+    auto outOfTime = [&](size_t iteration, bool force = false) {
+        if (budgetMs <= 0.0 || (!force && (iteration % kCheckEvery) != 0))
+        {
+            return false;
+        }
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceStart).count() >=
+               budgetMs;
+    };
+
+    if (st.phase == Phase::Meshes)
+    {
+        // Per-mesh buffers survive a rebuild of the structures that reference them.
+        if (mMetalMeshes.empty())
+        {
+            // Read once, here: the meshes are built now and the acceleration
+            // structures embed whatever they are given, so a later change of tracer
+            // cannot retroactively add the data.
+            // Nothing reads per-primitive data now: it existed for the megakernel.
+            mNeedsPrimitiveData = false;
+            while (st.meshCursor < meshes.size())
+            {
+                createMeshData(st.meshCursor);
+                st.primitiveBytes += (size_t)(meshes[st.meshCursor].mCount / 3) * sizeof(Triangle);
+                ++st.meshCursor;
+                if (outOfTime(st.meshCursor))
+                {
+                    chargePhase();
+                    report();
+                    return finish(false);
+                }
+            }
+            if (!mNeedsPrimitiveData && st.primitiveBytes > 0)
+            {
+                STRELKA_INFO("Skipped {:.2f} GB of per-primitive attribute data: the wavefront tracer "
+                             "refetches from the vertex buffer",
+                             st.primitiveBytes / 1e9);
+            }
+        }
+        mMotionBlasBuilt = mBuildMotionBlas;
+
+        // Before the structures are built, not after. The host arrays are a full
+        // duplicate of the GPU buffers -- 2.27 GB here -- and holding them across the
+        // acceleration structure build stacks that on top of the largest allocation
+        // the renderer makes. Nothing below this point reads them: buildBlas() works
+        // from buffer offsets and triangle counts.
+        //
+        // Off by default because Scene::pick() walks these arrays -- the editor needs
+        // them, a headless render does not.
+        mHostGeometryBytes = { mScene->getVertices().size() * sizeof(Scene::Vertex),
+                               mScene->getIndices().size() * sizeof(uint32_t) };
+        if (getSettings()->getAs<bool>("scene/releaseHostGeometry") && !mScene->hostGeometryReleased())
+        {
+            mScene->releaseHostGeometry();
+        }
+
+        // --- Group mesh instances that always move together -----------------------
+        //
+        // glTF splits a mesh into primitives by material, and the loader turns each
+        // primitive into its own instance. Left alone that produces one BLAS per
+        // primitive, all with the same transform and heavily overlapping bounds, and
+        // every ray that has to traverse deeply pays for the overlap. Instances that
+        // hang off the same node share a transform by construction, so they can be
+        // merged into a single BLAS with one geometry per primitive.
+        st.instanceNode.assign(instances.size(), -1);
+        const std::vector<Scene::Node>& nodes = mScene->getNodes();
+        for (size_t n = 0; n < nodes.size(); ++n)
+        {
+            for (const uint32_t id : nodes[n].instanceIds)
+            {
+                if (id < st.instanceNode.size())
+                    st.instanceNode[id] = (int)n;
+            }
+        }
+
+        mGeometryEntries.clear();
+        mEmittedInstances.clear();
+
+        chargePhase();
+        st.phase = Phase::Grouping;
+    }
+
     auto hashTransform = [](const glm::mat4& m) {
         uint64_t h = 1469598103934665603ull;
         const auto* raw = reinterpret_cast<const unsigned char*>(&m);
@@ -4632,145 +4765,188 @@ void MetalRender::createAccelerationStructures()
         }
         return h;
     };
-    std::map<GroupKey, size_t> groupOfKey;
-    std::vector<std::vector<uint32_t>> groups;
-    std::vector<bool> groupSkeletal;
 
-    // Light instances keep one BLAS per mesh, shared between lights, because
-    // their userID must stay the light index.
-    std::map<uint32_t, size_t> lightBlasOfMesh;
-
-    mGeometryEntries.clear();
-    mEmittedInstances.clear();
-
-    std::vector<size_t> groupBlas;
-
-    for (size_t i = 0; i < instances.size(); ++i)
+    if (st.phase == Phase::Grouping)
     {
-        const oka::Instance& curr = instances[i];
-        if (curr.type == oka::Instance::Type::eLight)
+        while (st.groupCursor < instances.size())
         {
-            continue; // handled below
-        }
-        const bool skeletal = meshes[curr.mMeshId].isSkeletal;
-        const int nodeId = instanceNode[i];
-        const GroupKey key{ nodeId >= 0 ? nodeId : -(int)i - 2, skeletal ? 1 : 0,
-                            hashTransform(curr.transform) };
-
-        auto it = groupOfKey.find(key);
-        if (it == groupOfKey.end())
-        {
-            groupOfKey[key] = groups.size();
-            groups.push_back({ (uint32_t)i });
-            groupSkeletal.push_back(skeletal);
-            continue;
-        }
-        // Merging is only valid while the members share a transform.
-        const oka::Instance& rep = instances[groups[it->second].front()];
-        if (memcmp(&rep.transform, &curr.transform, sizeof(glm::mat4)) == 0)
-        {
-            groups[it->second].push_back((uint32_t)i);
-        }
-        else
-        {
-            groups.push_back({ (uint32_t)i });
-            groupSkeletal.push_back(skeletal);
-        }
-    }
-
-    // Share one BLAS between every group that holds the same geometry.
-    //
-    // Scattered scenes are built almost entirely out of repeats: the pine forest
-    // places 38 000 instances drawn from 50 distinct objects. A BLAS per instance
-    // would be 38 000 structures over the same 50 meshes, which is both the build
-    // time and the memory of a scene 700 times larger than the one authored.
-    //
-    // The signature is (mesh, material) per geometry rather than mesh alone,
-    // because the material is baked into the shared geometry entries -- two
-    // instances of the same mesh with different materials are not the same BLAS.
-    // Skeletal groups are excluded: their vertices are rewritten per frame and
-    // the structure refit alongside, so sharing one would mean two instances
-    // deforming the same geometry.
-    std::map<std::vector<uint64_t>, size_t> blasOfSignature;
-    size_t sharedBlas = 0;
-
-    size_t mergedGeometries = 0;
-    for (size_t g = 0; g < groups.size(); ++g)
-    {
-        std::vector<uint64_t> signature;
-        signature.reserve(groups[g].size());
-        for (const uint32_t id : groups[g])
-        {
-            signature.push_back(((uint64_t)instances[id].mMeshId << 32) | instances[id].mMaterialId);
-        }
-
-        size_t blasIdx;
-        auto shared = groupSkeletal[g] ? blasOfSignature.end() : blasOfSignature.find(signature);
-        if (shared != blasOfSignature.end())
-        {
-            blasIdx = shared->second;
-            ++sharedBlas;
-        }
-        else
-        {
-            blasIdx = buildBlas(groups[g], groupSkeletal[g]);
-            mergedGeometries += groups[g].size();
-            if (!groupSkeletal[g])
+            const size_t i = st.groupCursor++;
+            const oka::Instance& curr = instances[i];
+            if (curr.type != oka::Instance::Type::eLight) // lights are handled in their own phase
             {
-                blasOfSignature.emplace(std::move(signature), blasIdx);
+                const bool skeletal = meshes[curr.mMeshId].isSkeletal;
+                const int nodeId = st.instanceNode[i];
+                const AsBuildState::GroupKey key{ nodeId >= 0 ? nodeId : -(int)i - 2, skeletal ? 1 : 0,
+                                                  hashTransform(curr.transform) };
+
+                auto it = st.groupOfKey.find(key);
+                if (it == st.groupOfKey.end())
+                {
+                    st.groupOfKey[key] = st.groups.size();
+                    st.groups.push_back({ (uint32_t)i });
+                    st.groupSkeletal.push_back(skeletal);
+                }
+                // Merging is only valid while the members share a transform.
+                else if (memcmp(&instances[st.groups[it->second].front()].transform, &curr.transform,
+                                sizeof(glm::mat4)) == 0)
+                {
+                    st.groups[it->second].push_back((uint32_t)i);
+                }
+                else
+                {
+                    st.groups.push_back({ (uint32_t)i });
+                    st.groupSkeletal.push_back(skeletal);
+                }
+            }
+            if (outOfTime(st.groupCursor))
+            {
+                chargePhase();
+                report();
+                return finish(false);
             }
         }
-        groupBlas.push_back(blasIdx);
-
-        EmittedInstance emitted{};
-        emitted.sceneInstanceId = groups[g].front();
-        emitted.asIndex = (uint32_t)blasIdx;
-        emitted.userID = mBlasList[blasIdx].mGeometryBase;
-        emitted.mask = GEOMETRY_MASK_TRIANGLE;
-
-        mEmittedInstances.push_back(emitted);
+        chargePhase();
+        st.phase = Phase::Blas;
+        // The key map has done its job and is the largest thing here -- an entry
+        // per scene instance. Nothing below reads it.
+        st.groupOfKey.clear();
+        st.instanceNode.clear();
+        st.instanceNode.shrink_to_fit();
     }
 
-    for (size_t i = 0; i < instances.size(); ++i)
+    if (st.phase == Phase::Blas)
     {
-        const oka::Instance& curr = instances[i];
-        if (curr.type != oka::Instance::Type::eLight)
-        {
-            continue;
-        }
-        auto it = lightBlasOfMesh.find(curr.mMeshId);
-        if (it == lightBlasOfMesh.end())
-        {
-            const size_t blasIdx = buildBlas({ (uint32_t)i }, meshes[curr.mMeshId].isSkeletal);
-            it = lightBlasOfMesh.emplace(curr.mMeshId, blasIdx).first;
-        }
-        EmittedInstance emitted{};
-        emitted.sceneInstanceId = (uint32_t)i;
-        emitted.asIndex = (uint32_t)it->second;
-        emitted.userID = curr.mLightId; // lights address the light table, not geometry
-        // Point/spot proxies exist for picking and the gizmo; they are not
-        // emissive surfaces. Putting them on the light mask would treat their
-        // radiant intensity as radiance and blow out the frame.
+        // Share one BLAS between every group that holds the same geometry.
         //
-        // They must not be on the geometry mask either. A point light is sampled
-        // at its centre, which sits inside the proxy sphere, so a shadow ray to
-        // it necessarily crosses the shell -- and RAY_MASK_SHADOW *is*
-        // GEOMETRY_MASK_GEOMETRY, so every next-event connection to a point or
-        // spot light was reported occluded and those lights lit nothing at all.
-        // Picking runs on the CPU in Scene::pick() and never consults these
-        // masks, so a proxy invisible to every ray costs nothing.
-        const int lightType =
-            curr.mLightId < mScene->getLightsDesc().size() ? mScene->getLightsDesc()[curr.mLightId].type : -1;
-        const bool enabled =
-            curr.mLightId < mScene->getLightsDesc().size() ? mScene->getLightsDesc()[curr.mLightId].enabled : true;
-        if (!enabled)
-            emitted.mask = 0;
-        else if (lightType == LIGHT_TYPE_POINT || lightType == LIGHT_TYPE_SPOT)
-            emitted.mask = 0;
-        else
-            emitted.mask = GEOMETRY_MASK_LIGHT;
-        mEmittedInstances.push_back(emitted);
+        // Scattered scenes are built almost entirely out of repeats: the pine forest
+        // places 38 000 instances drawn from 50 distinct objects. A BLAS per instance
+        // would be 38 000 structures over the same 50 meshes, which is both the build
+        // time and the memory of a scene 700 times larger than the one authored.
+        //
+        // The signature is (mesh, material) per geometry rather than mesh alone,
+        // because the material is baked into the shared geometry entries -- two
+        // instances of the same mesh with different materials are not the same BLAS.
+        // Skeletal groups are excluded: their vertices are rewritten per frame and
+        // the structure refit alongside, so sharing one would mean two instances
+        // deforming the same geometry.
+        while (st.blasCursor < st.groups.size())
+        {
+            const size_t g = st.blasCursor++;
+            std::vector<uint64_t> signature;
+            signature.reserve(st.groups[g].size());
+            for (const uint32_t id : st.groups[g])
+            {
+                signature.push_back(((uint64_t)instances[id].mMeshId << 32) | instances[id].mMaterialId);
+            }
+
+            size_t blasIdx;
+            auto shared = st.groupSkeletal[g] ? st.blasOfSignature.end() : st.blasOfSignature.find(signature);
+            const bool built = shared == st.blasOfSignature.end();
+            if (!built)
+            {
+                blasIdx = shared->second;
+                ++st.sharedBlas;
+            }
+            else
+            {
+                blasIdx = buildBlas(st.groups[g], st.groupSkeletal[g]);
+                st.mergedGeometries += st.groups[g].size();
+                if (!st.groupSkeletal[g])
+                {
+                    st.blasOfSignature.emplace(std::move(signature), blasIdx);
+                }
+            }
+
+            EmittedInstance emitted{};
+            emitted.sceneInstanceId = st.groups[g].front();
+            emitted.asIndex = (uint32_t)blasIdx;
+            emitted.userID = mBlasList[blasIdx].mGeometryBase;
+            emitted.mask = GEOMETRY_MASK_TRIANGLE;
+
+            mEmittedInstances.push_back(emitted);
+
+            if (outOfTime(st.blasCursor, built))
+            {
+                // Close whatever group the last build landed in before handing
+                // control back, so the scratch buffers it holds are not carried
+                // across frames waiting for a group that may be many slices away
+                // from filling up.
+                flushAccelerationStructureGroup();
+                chargePhase();
+                report();
+                return finish(false);
+            }
+        }
+        chargePhase();
+        st.phase = Phase::Lights;
     }
+
+    if (st.phase == Phase::Lights)
+    {
+        while (st.lightCursor < instances.size())
+        {
+            const size_t i = st.lightCursor++;
+            const oka::Instance& curr = instances[i];
+            if (curr.type == oka::Instance::Type::eLight)
+            {
+                auto it = st.lightBlasOfMesh.find(curr.mMeshId);
+                if (it == st.lightBlasOfMesh.end())
+                {
+                    const size_t blasIdx = buildBlas({ (uint32_t)i }, meshes[curr.mMeshId].isSkeletal);
+                    it = st.lightBlasOfMesh.emplace(curr.mMeshId, blasIdx).first;
+                }
+                EmittedInstance emitted{};
+                emitted.sceneInstanceId = (uint32_t)i;
+                emitted.asIndex = (uint32_t)it->second;
+                emitted.userID = curr.mLightId; // lights address the light table, not geometry
+                // Point/spot proxies exist for picking and the gizmo; they are not
+                // emissive surfaces. Putting them on the light mask would treat their
+                // radiant intensity as radiance and blow out the frame.
+                //
+                // They must not be on the geometry mask either. A point light is sampled
+                // at its centre, which sits inside the proxy sphere, so a shadow ray to
+                // it necessarily crosses the shell -- and RAY_MASK_SHADOW *is*
+                // GEOMETRY_MASK_GEOMETRY, so every next-event connection to a point or
+                // spot light was reported occluded and those lights lit nothing at all.
+                // Picking runs on the CPU in Scene::pick() and never consults these
+                // masks, so a proxy invisible to every ray costs nothing.
+                const int lightType =
+                    curr.mLightId < mScene->getLightsDesc().size() ? mScene->getLightsDesc()[curr.mLightId].type : -1;
+                const bool enabled = curr.mLightId < mScene->getLightsDesc().size() ?
+                                         mScene->getLightsDesc()[curr.mLightId].enabled :
+                                         true;
+                if (!enabled)
+                    emitted.mask = 0;
+                else if (lightType == LIGHT_TYPE_POINT || lightType == LIGHT_TYPE_SPOT)
+                    emitted.mask = 0;
+                else
+                    emitted.mask = GEOMETRY_MASK_LIGHT;
+                mEmittedInstances.push_back(emitted);
+            }
+            if (outOfTime(st.lightCursor))
+            {
+                flushAccelerationStructureGroup();
+                chargePhase();
+                report();
+                return finish(false);
+            }
+        }
+        chargePhase();
+        st.phase = Phase::Finish;
+        // Not needed past this point and one vector per group, so worth dropping
+        // before the top level is built rather than after.
+        st.groups.clear();
+        st.groups.shrink_to_fit();
+        st.groupSkeletal.clear();
+        st.blasOfSignature.clear();
+    }
+
+    // --- Finish: buffers and the top level ------------------------------------
+    //
+    // Not sliced. What is left is one pass over the emitted instances and a single
+    // top-level build, which measures in the tens of milliseconds even on the
+    // largest scene here -- and it cannot be interrupted anyway, since the TLAS
+    // descriptor has to see every structure at once.
 
     // Hand the host copies back once everything that reads them has run: the
     // vertex and index buffers are uploaded, the per-primitive data (if the
@@ -4804,7 +4980,7 @@ void MetalRender::createAccelerationStructures()
 
     STRELKA_INFO("Acceleration structures: {} BLAS ({} geometries, {} groups shared one), "
                  "{} TLAS instances (from {} scene instances)",
-                 mBlasList.size(), mergedGeometries, sharedBlas, mEmittedInstances.size(), instances.size());
+                 mBlasList.size(), st.mergedGeometries, st.sharedBlas, mEmittedInstances.size(), instances.size());
     STRELKA_INFO("Geometry opacity: {} opaque, {} cutout ({:.1f}% of geometries need the alpha test)",
                  mOpaqueGeometryCount, mCutoutGeometryCount,
                  100.0 * mCutoutGeometryCount /
@@ -4915,7 +5091,16 @@ STRELKA_INFO("BLAS build CPU: sizes {:.0f} ms, alloc {:.0f} ms, scratch {:.0f} m
                      mDevice->maxBufferLength() / 1e9);
     }
     mTlasInstanceCount = mEmittedInstances.size();
-    pPool->release();
+
+    chargePhase();
+    STRELKA_DEBUG("Acceleration structures CPU: meshes {:.0f} ms, grouping {:.0f} ms, blas {:.0f} ms, "
+                  "lights {:.0f} ms, finish {:.0f} ms",
+                  st.phaseMs[(size_t)Phase::Meshes], st.phaseMs[(size_t)Phase::Grouping],
+                  st.phaseMs[(size_t)Phase::Blas], st.phaseMs[(size_t)Phase::Lights],
+                  st.phaseMs[(size_t)Phase::Finish]);
+    delete mAsBuild;
+    mAsBuild = nullptr;
+    return finish(true);
 }
 
 void MetalRender::buildSkinningPipeline()
