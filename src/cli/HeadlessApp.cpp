@@ -1,5 +1,7 @@
 #include "HeadlessApp.h"
 
+#include <tonemappers.h>
+
 #include <log.h>
 
 #include <strelka/sceneloader/gltfloader.h>
@@ -420,13 +422,53 @@ void HeadlessApp::saveOutput(Buffer* buf)
     }
     else if (ext == ".png")
     {
+        // A PNG is a display image and has to go through the tone curve; the EXR
+        // above is data and must not. The renderer's own tonemap pass writes to a
+        // texture rather than back into this buffer -- deliberately, so the
+        // buffer keeps linear radiance -- which left this writer emitting the
+        // same file whatever `--tonemap` said. Byte-identical, measured on the
+        // Cornell box with `none` against `aces`.
+        //
+        // The curve comes from the same header the shader uses, so the two
+        // cannot drift.
+        const float exposure = m_settings->getAs<float>("render/post/tonemapper/filmIso") > 0.0f ?
+                                   m_settings->getAs<float>("render/post/tonemapper/cm2_factor") *
+                                       m_settings->getAs<float>("render/post/tonemapper/filmIso") /
+                                       (m_settings->getAs<float>("render/post/tonemapper/shutterSpeed") *
+                                        m_settings->getAs<float>("render/post/tonemapper/fStop") *
+                                        m_settings->getAs<float>("render/post/tonemapper/fStop")) /
+                                       100.0f :
+                                   m_settings->getAs<float>("render/post/tonemapper/cm2_factor");
+        const uint32_t curve = m_settings->getAs<uint32_t>("render/pt/tonemapperType");
+        const float gamma = m_settings->getAs<float>("render/post/gamma");
+
         std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4);
         for (uint32_t i = 0; i < w * h; ++i)
         {
-            for (int c = 0; c < 4; ++c)
+            oka::tonemap::float3 c = simd_make_float3(data[i * 4 + 0], data[i * 4 + 1], data[i * 4 + 2]) * exposure;
+            switch (static_cast<oka::tonemap::ToneMapperType>(curve))
             {
-                const float v = std::clamp(data[i * 4 + c], 0.0f, 1.0f);
-                pixels[i * 4 + c] = static_cast<uint8_t>(v * 255.0f + 0.5f);
+            case oka::tonemap::ToneMapperType::eReinhard:
+                c = oka::tonemap::reinhard(c);
+                break;
+            case oka::tonemap::ToneMapperType::eACES:
+                c = oka::tonemap::ACESFitted(c);
+                break;
+            case oka::tonemap::ToneMapperType::eFilmic:
+                c = oka::tonemap::ACESFilm(c);
+                break;
+            case oka::tonemap::ToneMapperType::eNone:
+                break;
+            }
+            if (gamma > 0.0f)
+            {
+                c = oka::tonemap::srgbGamma(c, gamma);
+            }
+            const float rgba[4] = { c.x, c.y, c.z, data[i * 4 + 3] };
+            for (int k = 0; k < 4; ++k)
+            {
+                const float v = std::clamp(rgba[k], 0.0f, 1.0f);
+                pixels[i * 4 + k] = static_cast<uint8_t>(v * 255.0f + 0.5f);
             }
         }
         if (!stbi_write_png(m_config.outputPath.c_str(), static_cast<int>(w), static_cast<int>(h), 4, pixels.data(),

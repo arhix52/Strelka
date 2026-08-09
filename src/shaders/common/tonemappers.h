@@ -2,7 +2,86 @@
 
 #include <simd/simd.h>
 
+// Compiled by the Metal compiler and by the host C++ compiler both.
+//
+// The host needs the curve because a display image has to go through it, and the
+// GPU writes its tonemapped result to a texture rather than back into the buffer
+// -- deliberately, so the buffer keeps the linear radiance an EXR wants. That
+// left the headless PNG writer reading a buffer nothing had tonemapped, and
+// `--tonemap none` and `--tonemap aces` produced byte-identical files.
+//
+// One definition rather than two, for the reason material_math.h gives: a tone
+// curve copied to the host is a tone curve that drifts from the one on screen.
+#ifdef __METAL_VERSION__
 using namespace metal;
+#define TONEMAP_CONST constant
+#define MAKE_FLOAT3(a, b, c) float3(a, b, c)
+#define TONEMAP_NS_BEGIN
+#define TONEMAP_NS_END
+#else
+#include <cmath>
+#include <algorithm>
+
+// Namespaced on the host, unqualified on the GPU where there is nothing to
+// collide with. `float3` is already taken in this codebase -- glm has one -- so
+// injecting simd's into the global namespace turns every translation unit that
+// includes both into a pile of ambiguity errors.
+#define TONEMAP_CONST const
+#define MAKE_FLOAT3(a, b, c) simd_make_float3(a, b, c)
+#define TONEMAP_NS_BEGIN namespace oka { namespace tonemap {
+#define TONEMAP_NS_END } }
+
+namespace oka
+{
+namespace tonemap
+{
+using float3 = simd_float3;
+
+// Three columns, in the order Metal's float3x3 stores them, so `transpose(M) * v`
+// means the same thing on both sides.
+struct float3x3
+{
+    float3 c0;
+    float3 c1;
+    float3 c2;
+};
+
+inline float3x3 transpose(const float3x3& m)
+{
+    return { simd_make_float3(m.c0.x, m.c1.x, m.c2.x), simd_make_float3(m.c0.y, m.c1.y, m.c2.y),
+             simd_make_float3(m.c0.z, m.c1.z, m.c2.z) };
+}
+
+inline float3 operator*(const float3x3& m, const float3& v)
+{
+    return m.c0 * v.x + m.c1 * v.y + m.c2 * v.z;
+}
+
+inline float saturate(float v)
+{
+    return std::min(std::max(v, 0.0f), 1.0f);
+}
+inline float3 saturate(const float3& v)
+{
+    return simd_make_float3(saturate(v.x), saturate(v.y), saturate(v.z));
+}
+inline bool isnan(float v)
+{
+    return std::isnan(v);
+}
+inline float pow(float a, float b)
+{
+    return std::pow(a, b);
+}
+inline float dot(const float3& a, const float3& b)
+{
+    return simd_dot(a, b);
+}
+} // namespace tonemap
+} // namespace oka
+#endif
+
+TONEMAP_NS_BEGIN
 
 enum class ToneMapperType : uint32_t
 {
@@ -14,7 +93,7 @@ enum class ToneMapperType : uint32_t
 
 // https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl
 // sRGB => XYZ => D65_2_D60 => AP1 => RRT_SAT
-static constant float3x3 ACESInputMat =
+static TONEMAP_CONST float3x3 ACESInputMat =
 {
     {0.59719, 0.35458, 0.04823},
     {0.07600, 0.90834, 0.01566},
@@ -22,7 +101,7 @@ static constant float3x3 ACESInputMat =
 };
 
 // ODT_SAT => XYZ => D60_2_D65 => sRGB
-static constant float3x3 ACESOutputMat =
+static TONEMAP_CONST float3x3 ACESOutputMat =
 {
     { 1.60475, -0.53108, -0.07367},
     {-0.10208,  1.10813, -0.00605},
@@ -61,7 +140,7 @@ float3 ACESFilm(float3 x)
 // original implementation https://github.com/NVIDIAGameWorks/Falcor/blob/5236495554f57a734cc815522d95ae9a7dfe458a/Source/RenderPasses/ToneMapper/ToneMapping.ps.slang
 float calcLuminance(float3 color)
 {
-    return dot(color, float3(0.299, 0.587, 0.114));
+    return dot(color, MAKE_FLOAT3(0.299f, 0.587f, 0.114f));
 }
 
 float3 reinhard(float3 color)
@@ -97,7 +176,7 @@ float gammaFloat(const float c, const float gamma)
 
 float3 srgbGamma(const float3 color, const float gamma)
 {
-    return float3(gammaFloat(color.r, gamma), gammaFloat(color.g, gamma), gammaFloat(color.b, gamma));
+    return MAKE_FLOAT3(gammaFloat(color.x, gamma), gammaFloat(color.y, gamma), gammaFloat(color.z, gamma));
 }
 
 // utility function for accumulation and HDR <=> LDR
@@ -111,3 +190,5 @@ float3 inverseTonemap(const float3 color, const float3 exposure)
 {
     return color / (exposure - color * exposure);
 }
+
+TONEMAP_NS_END

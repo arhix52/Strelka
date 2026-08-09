@@ -18,6 +18,13 @@ set_target_properties(StrelkaCLI PROPERTIES
     CXX_EXTENSIONS OFF
 )
 
+# The tone curve is shared with the shaders rather than copied here; see the
+# note at the top of tonemappers.h.
+target_include_directories(StrelkaCLI
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/shaders/common
+)
+
 target_link_libraries(StrelkaCLI
     PRIVATE
         cxxopts::cxxopts

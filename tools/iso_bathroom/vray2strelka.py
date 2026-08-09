@@ -1193,6 +1193,15 @@ def parse_args():
     ap.add_argument("--mesh-light-gain", type=float, default=1.0)
     ap.add_argument("--env-gain", type=float, default=1.0)
     ap.add_argument("--env-rotation", type=float, default=0.0)
+    # Exposure, as a plain multiplier. Written with fstop and shutter pinned at 1
+    # so the photographic equation collapses to iso/100 and the number in the
+    # sidecar is the number that multiplies the image.
+    #
+    # 1.5 is fitted, and to a measurement rather than to a look: mean brightness
+    # over the blue floor, the outer wall and the backdrop against the reference
+    # comes out at 0.89, 1.07 and 1.02.
+    ap.add_argument("--exposure", type=float, default=1.5,
+                    help="exposure multiplier written to the light sidecar")
     ap.add_argument("--noise-bump-gain", type=float, default=3.0)
     # V-Ray's fog density is in units this conversion cannot recover: the value
     # is 10 and the gizmo is a quarter of a scene unit across, which taken at face
@@ -1406,6 +1415,12 @@ def main():
     sidecar = {"lights": lights}
     if environment:
         sidecar["environment"] = environment
+    sidecar["exposure"] = {
+        "iso": opts.exposure * 100.0,
+        "fstop": 1.0,
+        "shutter": 1.0,
+        "cm2_factor": 1.0,
+    }
     sidecar_path = out_dir / f"{opts.name}_light.json"
     with open(sidecar_path, "w") as f:
         json.dump(sidecar, f, indent=4)
