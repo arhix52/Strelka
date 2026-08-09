@@ -74,6 +74,9 @@ struct RenderConfig
     // Debug visualisation; 0 renders normally.
     uint32_t debugMode = 0;
     uint32_t blueNoiseSwitchSpp = 16;
+    // Upper bound on one indirect path's contribution; 0 = unclamped, which is
+    // the default because clamping is a bias the caller has to ask for.
+    float clampIndirect = 0.0f;
 
     int cameraIndex = 0;
     std::optional<glm::vec3> cameraPosition;

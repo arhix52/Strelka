@@ -161,6 +161,10 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     {
         cfg.maxDepth = static_cast<uint32_t>(*v);
     }
+    if (auto v = tbl["render"]["clamp_indirect"].value<double>())
+    {
+        cfg.clampIndirect = static_cast<float>(*v);
+    }
     // 1 = shading normals, 3..6 = denoiser guides; see DebugMode in ShaderTypes.h.
     if (auto v = tbl["render"]["debug"].value<int64_t>())
         cfg.debugMode = (uint32_t)*v;
@@ -315,6 +319,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/jitterSign", 0);
     m_settings->setAs<uint32_t>("render/pt/denoiseDepthMode", 0);
     m_settings->setAs<float>("render/pt/denoiseFireflyClamp", 8.0f);
+    m_settings->setAs<float>("render/pt/clampIndirect", m_config.clampIndirect);
     m_settings->setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);
     m_settings->setAs<uint32_t>("render/pt/metal4", m_config.metal4);
     m_settings->setAs<uint32_t>("render/pt/sortRays", m_config.sortRays ? 1u : 0u);

@@ -123,11 +123,75 @@ glm::float4x4 perspective(float fov, float aspect_ratio, float n, float f, glm::
 
 void Camera::setPerspective(float _fov, float _aspect, float _znear, float _zfar)
 {
+    projection = ProjectionType::perspective;
     fov = _fov;
     znear = _znear;
     zfar = _zfar;
     // swap near and far plane for reverse z
     matrices.perspective = perspective(fov, _aspect, zfar, znear, &matrices.invPerspective);
+}
+
+// Reverse-z orthographic, to match what perspective() above produces: the near
+// plane maps to 1 and the far plane to 0. Unlike the perspective case the fourth
+// row is (0,0,0,1) -- there is no divide -- so clip space and view space differ
+// only by a scale, which is what makes the inverse trivial.
+glm::float4x4 orthographic(float halfWidth, float halfHeight, float n, float f, glm::float4x4* inverse)
+{
+    const float x = 1.0f / halfWidth;
+    const float y = 1.0f / halfHeight;
+    const float A = 1.0f / (f - n);
+    const float B = f * A;
+
+    glm::float4x4 projection({
+        x,    0.0f, 0.0f, 0.0f,
+        0.0f, y,    0.0f, 0.0f,
+        0.0f, 0.0f, A,    B,
+        0.0f, 0.0f, 0.0f, 1.0f,
+    });
+
+    if (inverse)
+    {
+        *inverse = glm::transpose(glm::float4x4({
+            halfWidth, 0.0f,       0.0f,     0.0f,
+            0.0f,      halfHeight, 0.0f,     0.0f,
+            0.0f,      0.0f,       1.0f / A, -B / A,
+            0.0f,      0.0f,       0.0f,     1.0f,
+        }));
+    }
+
+    return glm::transpose(projection);
+}
+
+void Camera::setOrthographic(float _xmag, float _ymag, float _znear, float _zfar)
+{
+    projection = ProjectionType::orthographic;
+    xmag = _xmag;
+    ymag = _ymag;
+    znear = _znear;
+    zfar = _zfar;
+    authoredAspect = (_ymag > 0.0f) ? (_xmag / _ymag) : 0.0f;
+    matrices.perspective = orthographic(xmag, ymag, znear, zfar, &matrices.invPerspective);
+}
+
+// The perspective path holds the horizontal angle across a change of aspect
+// (see fovForAspect); an orthographic frame has to hold the matching extent for
+// the same reason, or the same scene rendered at a different aspect is framed
+// differently and every whole-frame comparison measures the reframe instead.
+void Camera::magForAspect(float aspect, float& halfWidth, float& halfHeight) const
+{
+    halfWidth = xmag;
+    halfHeight = ymag;
+    if (aspect <= 0.0f)
+        return;
+    if (authoredAspect < 1.0f || aspect < 1.0f)
+    {
+        // Portrait: the authored vertical extent is the one that was fitted.
+        halfWidth = ymag * aspect;
+    }
+    else
+    {
+        halfHeight = xmag / aspect;
+    }
 }
 
 void Camera::setWorldUp(const glm::float3 up)
@@ -165,7 +229,15 @@ void Camera::updateAspectRatio(float _aspect)
     // Deliberately not through setPerspective(): that stores the fov it is
     // given, so feeding it an adapted angle would adapt the adapted angle on the
     // next frame, and the frame after that. `fov` stays the authored vertical
-    // angle; only the projection sees the adapted one.
+    // angle; only the projection sees the adapted one. Same reasoning for the
+    // orthographic extents, which is why magForAspect does not write xmag/ymag.
+    if (projection == ProjectionType::orthographic)
+    {
+        float halfWidth = xmag, halfHeight = ymag;
+        magForAspect(_aspect, halfWidth, halfHeight);
+        matrices.perspective = orthographic(halfWidth, halfHeight, znear, zfar, &matrices.invPerspective);
+        return;
+    }
     matrices.perspective =
         perspective(fovForAspect(_aspect), _aspect, zfar, znear, &matrices.invPerspective);
 }
@@ -273,9 +345,19 @@ void generatePickRay(const Camera& camera, const glm::float2& uv, glm::float3& o
     // only the direction matters here.
     const float ndcX = uv.x * 2.0f - 1.0f + camera.shiftX * 2.0f;
     const float ndcY = (1.0f - uv.y) * 2.0f - 1.0f + camera.shiftY * 2.0f;
-    const glm::float4 viewSpace = camera.matrices.invPerspective * glm::float4(ndcX, ndcY, 1.0f, 1.0f);
     const glm::float4x4 viewToWorld = glm::inverse(camera.matrices.view);
 
+    if (camera.projection == Camera::ProjectionType::orthographic)
+    {
+        // The orthographic branch of generateCameraRay, in the same order: the
+        // pixel moves the origin, not the direction.
+        const glm::float3 filmPos(ndcX * camera.xmag, ndcY * camera.ymag, 0.0f);
+        origin = glm::float3(viewToWorld * glm::float4(filmPos, 1.0f));
+        direction = glm::normalize(glm::float3(viewToWorld * glm::float4(0.0f, 0.0f, -1.0f, 0.0f)));
+        return;
+    }
+
+    const glm::float4 viewSpace = camera.matrices.invPerspective * glm::float4(ndcX, ndcY, 1.0f, 1.0f);
     origin = glm::float3(viewToWorld * glm::float4(0.0f, 0.0f, 0.0f, 1.0f));
     direction = glm::normalize(glm::float3(viewToWorld * glm::float4(viewSpace.x, viewSpace.y, viewSpace.z, 0.0f)));
 }

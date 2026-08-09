@@ -45,9 +45,11 @@ constant bool kFcDebug [[function_constant(4)]];
 constant bool kFcAlpha [[function_constant(5)]];
 constant bool kFcFog [[function_constant(6)]];
 constant bool kFcSharc [[function_constant(7)]];
+constant bool kFcSubsurface [[function_constant(8)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
 constant bool SPEC_SHARC = is_function_constant_defined(kFcSharc) ? kFcSharc : false;
+constant bool SPEC_SSS = is_function_constant_defined(kFcSubsurface) ? kFcSubsurface : false;
 constant bool SPEC_ENV_MAP = is_function_constant_defined(kFcEnvMap) ? kFcEnvMap : true;
 constant bool SPEC_LIGHTS = is_function_constant_defined(kFcLights) ? kFcLights : true;
 constant bool SPEC_MOTION_BLUR = is_function_constant_defined(kFcMotionBlur) ? kFcMotionBlur : true;
@@ -119,7 +121,13 @@ static float resolveOpacity(device const Material& material, float2 uv)
 {
     if (material.alpha_mode == ALPHA_MODE_OPAQUE)
         return 1.0f;
-    constexpr sampler alphaSampler(mag_filter::linear, min_filter::linear);
+    // address::repeat, not Metal's clamp_to_edge default: glTF's default wrap is
+    // REPEAT (10497), and a UV transform is the normal way to tile -- the marble
+    // worktop in the bathroom scene repeats 2x2 and the plant's ramp 50x50. Under
+    // clamping neither tiles; the edge texel is smeared across the whole surface,
+    // which reads as a texture that simply did not load rather than as a wrap-mode
+    // bug.
+    constexpr sampler alphaSampler(mag_filter::linear, min_filter::linear, address::repeat);
     float alpha = material.base_color_alpha;
     if (!is_null_texture(material.baseColorTexture))
     {
@@ -248,6 +256,25 @@ float2 sampleAperture(thread SamplerState& sampler, const constant Uniforms& par
     return p;
 }
 
+// Bound what a single indirect path may contribute.
+//
+// A firefly is a sample with an enormous weight and a tiny probability -- a
+// caustic that found the light through a specular chain, which is most of what a
+// bathroom full of glass and chrome produces. Averaging it in is unbiased and
+// does converge; the estimator is correct and the sample budget is not. Clamping
+// trades that for bias, so it is off by default and applied only past the first
+// bounce, where those paths live: clamping depth 0 as well would dim every
+// directly visible emitter and the environment behind it.
+inline float3 clampIndirectContribution(float3 radiance, uint depth, float limit)
+{
+    if (limit <= 0.0f || depth == 0u)
+    {
+        return radiance;
+    }
+    const float m = max(radiance.x, max(radiance.y, radiance.z));
+    return (m > limit) ? radiance * (limit / m) : radiance;
+}
+
 void generateCameraRay(uint2 pixelIndex,
                         thread SamplerState& samplerRnd,
                         thread float3& origin,
@@ -282,13 +309,28 @@ void generateCameraRay(uint2 pixelIndex,
         viewToWorld = lerpMatrix(params.prevViewToWorld, params.viewToWorld, motionTime);
     }
 
-    float4 clip{ pixelNDC.x, pixelNDC.y, 1.0f, 1.0f };
-    float4 viewSpace = clipToView * clip;
+    if (params.projectionType == PROJECTION_ORTHOGRAPHIC)
+    {
+        // No centre of projection: every ray runs down the view axis and the
+        // pixel picks where on the film it starts. clipToView is deliberately
+        // unused -- for an orthographic frame it is a scale, and going through it
+        // would only re-derive the half-extents that are already here.
+        const float3 filmPos = float3(pixelNDC.x * params.orthoHalfWidth,
+                                      pixelNDC.y * params.orthoHalfHeight,
+                                      0.0f);
+        origin = (viewToWorld * float4(filmPos, 1.0f)).xyz;
+        direction = normalize((viewToWorld * float4(0.0f, 0.0f, -1.0f, 0.0f)).xyz);
+    }
+    else
+    {
+        float4 clip{ pixelNDC.x, pixelNDC.y, 1.0f, 1.0f };
+        float4 viewSpace = clipToView * clip;
 
-    float4 wdir = viewToWorld * float4(viewSpace.x, viewSpace.y, viewSpace.z, 0.0f);
+        float4 wdir = viewToWorld * float4(viewSpace.x, viewSpace.y, viewSpace.z, 0.0f);
 
-    origin = (viewToWorld * float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
-    direction = normalize(wdir.xyz);
+        origin = (viewToWorld * float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+        direction = normalize(wdir.xyz);
+    }
 
     // Thin lens depth of field
     if (SPEC_DOF && params.useDof && params.lensRadius > 0.0f)
@@ -345,8 +387,10 @@ void initSurfaceInteraction(
     // it -- so leaving it on would make "level of detail off" mean something
     // other than what the renderer did before this existed. With the switch off
     // the sampler, and the call, are exactly the originals.
-    constexpr sampler texSampler(mag_filter::linear, min_filter::linear);
-    constexpr sampler texSamplerMip(mag_filter::linear, min_filter::linear, mip_filter::linear);
+    // See the note on alphaSampler: glTF's default wrap is REPEAT.
+    constexpr sampler texSampler(mag_filter::linear, min_filter::linear, address::repeat);
+    constexpr sampler texSamplerMip(mag_filter::linear, min_filter::linear, mip_filter::linear,
+                                    address::repeat);
 
     si.position       = worldPosition;
     si.shading_normal = worldNormal;
@@ -412,9 +456,17 @@ void initSurfaceInteraction(
     matParams.clearcoat_roughness = material.clearcoat_roughness;
     matParams.anisotropy = material.anisotropy;
     matParams.specular = material.specular;
-    matParams.specular_tint = material.specular_tint;
+    matParams.specular_color = float3(material.specular_color);
+    matParams.subsurface_reference = float3(material.subsurface_reference);
+    matParams.iridescence = material.iridescence;
+    matParams.iridescence_ior = material.iridescence_ior;
+    matParams.iridescence_thickness = material.iridescence_thickness;
     matParams.diffuse_transmission = material.diffuse_transmission;
     matParams.diffuse_transmission_color = float3(material.diffuse_transmission_color);
+    matParams.clearcoat_ior = material.clearcoat_ior;
+    matParams.sheen = material.sheen;
+    matParams.sheen_roughness = material.sheen_roughness;
+    matParams.sheen_color = float3(material.sheen_color);
     matParams.material_type = material.material_type;
     matParams.thin_walled = material.thin_walled;
     matParams.dielectric_priority = material.dielectric_priority;

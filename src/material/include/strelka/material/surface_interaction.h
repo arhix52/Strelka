@@ -44,9 +44,16 @@ struct SurfaceInteraction
     float3  emission;           // Resolved emission color * strength
     float   clearcoat;          // Clearcoat weight
     float   clearcoat_roughness;// Clearcoat roughness
+    float   clearcoat_ior;      // IOR of the coat layer (1.5 = clear lacquer)
     float   anisotropy;         // Anisotropy [-1, 1]
     float   specular;           // Specular level
-    float   specular_tint;      // Specular tint
+    float3  specular_color;     // KHR_materials_specular specularColorFactor
+
+    // -- KHR_materials_iridescence ------------------------------------------
+    float3  subsurface_reference;  // albedo the scatter colour was derived from
+    float   iridescence;           // weight [0, 1]; 0 = no film
+    float   iridescence_ior;       // refractive index of the film
+    float   iridescence_thickness; // nanometres
 
     // -- KHR_materials_diffuse_transmission ---------------------------------
     // Light that enters the surface and leaves diffusely on the far side. This
@@ -55,6 +62,22 @@ struct SurfaceInteraction
     // glass. Weight splits the diffuse lobe rather than adding to it.
     float   diffuse_transmission;        // [0, 1]
     float3  diffuse_transmission_color;  // tint of what comes through
+
+    // -- KHR_materials_sheen ------------------------------------------------
+    // A retroreflective fabric layer over the base lobes. It shares the
+    // cosine-sampled lobe with diffuse rather than getting its own -- see
+    // pbr_lobe_weights for why.
+    float   sheen;               // weight [0, 1]; 0 = no sheen layer
+    float   sheen_roughness;     // [0, 1]
+    float3  sheen_color;         // hue of the fabric highlight
+
+    // -- STRELKA_materials_subsurface ---------------------------------------
+    // Weight of the interior medium. The lobe that enters it is the diffuse
+    // transmission one; this only says that what went in random-walks rather
+    // than leaving on the far side immediately.
+    float   subsurface;
+    float3  subsurface_radius;   // mean free path per channel, world units
+    float   subsurface_anisotropy;
 
     unsigned int material_type; // MaterialType tag
     unsigned int thin_walled;   // 1 = thin-walled surface

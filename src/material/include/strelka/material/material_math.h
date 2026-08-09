@@ -12,6 +12,8 @@
     #else
     #define DEVICE_FUNC   inline
     #endif
+    // Storage class for a module-scope constant table; see sheen_albedo_lut.h.
+    #define DEVICE_CONST  static const
     #define THREAD_REF
     #define M_PI_F        3.14159265358979323846f
     #define M_1_PI_F      0.31830988618379067154f
@@ -63,6 +65,9 @@
 #elif defined(__METAL_VERSION__)
 // ---- Metal Shading Language ------------------------------------------------
     #define DEVICE_FUNC   inline
+    // Metal rejects a plain `const` array at module scope; it wants an explicit
+    // address space. See sheen_albedo_lut.h.
+    #define DEVICE_CONST  constant
     #define THREAD_REF    thread
     // M_PI_F is defined by <metal_stdlib>; only define if missing
     #ifndef M_PI_F
@@ -84,6 +89,7 @@
     #define fabsf(x)   metal::fabs(x)
     #define expf(x)    metal::exp(x)
     #define logf(x)    metal::log(x)
+    #define powf(x,y)  metal::pow(x,y)
 
     inline float3 make_float3(float x, float y, float z) { return float3(x, y, z); }
     inline float3 make_float3(float v)                    { return float3(v); }
@@ -118,6 +124,7 @@
 #else
 // ---- CPU (tests, previews) ------------------------------------------------
     #define DEVICE_FUNC   inline
+    #define DEVICE_CONST  static const
     #define THREAD_REF
 
     #include <glm/glm.hpp>

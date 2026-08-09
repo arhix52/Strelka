@@ -21,6 +21,11 @@ refs/
 # Strelka renders and contact sheets -- and it runs to ~100 MB.
 scenes/feature_tests/
 
+# The same for the Isometric Bathroom conversion: tools/iso_bathroom/vray2strelka.py
+# regenerates the whole thing from the .blend, and it runs to ~170 MB of glTF,
+# buffers and baked textures.
+scenes/iso_bathroom/
+
 # Scene exports written in the repository root are local test artifacts.
 /*.gltf
 /*.glb

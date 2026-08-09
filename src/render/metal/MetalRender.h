@@ -158,6 +158,7 @@ private:
         float shiftY = 0.0f;
         uint32_t maxDepth = 0;
         uint32_t debug = 0;
+        float clampIndirect = 0.0f;
     };
     PrevSettings mPrevSettings;
 
@@ -196,6 +197,15 @@ private:
     // Set while uploading materials. Gates the alpha function constant, so a
     // scene with no cutouts compiles the same kernels it always did.
     bool mSceneHasAlphaMaterials = false;
+    /// Per material: is this the boundary of a participating medium? Its
+    /// geometry goes on its own ray mask, so a shadow ray is not stopped by a fog
+    /// gizmo.
+    std::vector<uint32_t> mMaterialIsMediumBoundary;
+    /// Whether any material bounds a medium a shadow ray could cross.
+    bool mSceneHasBoundedMedium = false;
+    /// Whether any material carries an interior scattering medium; drives
+    /// kFeatureSubsurface, so a scene without one compiles the cheaper variant.
+    bool mSceneHasSubsurfaceMaterials = false;
     // One byte per material: does it need the alpha test at all. Drives the
     // per-geometry opaque flag, so traversal skips the intersection function on
     // geometry that never had a cutout in it.
@@ -308,6 +318,10 @@ private:
         kFeatureMetal4 = 1u << 5,
         kFeatureFog = 1u << 7,
         kFeatureSharc = 1u << 8,
+        // Every ray inside a medium pays for the free-flight test, and reading
+        // the medium's parameters costs a load in `extend`. A scene with no
+        // subsurface material compiles the variant that has neither.
+        kFeatureSubsurface = 1u << 9,
         kFeatureCount = 1u << 5,
     };
     std::map<uint32_t, WavefrontVariant> mWavefrontVariants;

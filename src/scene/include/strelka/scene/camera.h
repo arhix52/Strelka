@@ -25,7 +25,26 @@ public:
     };
     CameraType type = CameraType::firstperson;
 
+    /// Perspective or orthographic, matching glTF's two camera types.
+    ///
+    /// An orthographic camera is not a perspective one with a long lens: it has
+    /// no centre of projection, so the primary ray's origin varies across the
+    /// film and its direction does not. That is a branch in ray generation, not
+    /// a different projection matrix -- which is why this is carried to the GPU
+    /// as its own field rather than being left implicit in clipToView.
+    enum class ProjectionType : uint32_t
+    {
+        perspective = 0,
+        orthographic = 1
+    };
+    ProjectionType projection = ProjectionType::perspective;
+
     float fov = 45.0f;   // vertical, degrees
+
+    // Orthographic half-extents in world units, i.e. glTF xmag / ymag. Blender's
+    // `ortho_scale` is the full extent of the fitted axis, so it is half of that.
+    float xmag = 1.0f;
+    float ymag = 1.0f;
     // The frame aspect the fov was authored against, 0 when unknown. glTF's yfov
     // means nothing without it: a camera authored for 16:9 and rendered at 4:3
     // has to keep its *horizontal* angle, which is what every DCC does for a
@@ -111,6 +130,10 @@ public:
     float getFarClip() const;
     void setFov(float fov);
     void setPerspective(float fov, float aspect, float znear, float zfar);
+    void setOrthographic(float xmag, float ymag, float znear, float zfar);
+    /// Orthographic half-extents to render `aspect` with, given what the camera
+    /// was authored for. Mirrors fovForAspect: the wider axis is the one held.
+    void magForAspect(float aspect, float& halfWidth, float& halfHeight) const;
     void setWorldUp(const glm::float3 up);
     glm::float3 getWorldUp();
     void setWorldForward(const glm::float3 forward);

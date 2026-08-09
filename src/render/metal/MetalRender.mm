@@ -1007,7 +1007,14 @@ void MetalRender::init()
     // radiance at the moment the path passed through it, and the reciprocal
     // throughput there. Read and written for every live path on every bounce, so
     // worth watching.
-    static_assert(sizeof(PathState) == 52, "PathState is read and written for every live path on every bounce");
+    // 60 rather than 52: the subsurface walk adds two words. One holds which
+    // medium the path is inside and how far into the walk it is -- not the
+    // medium's parameters, which would be 28 more bytes per pixel to avoid a load
+    // from a material table that fits in cache. The other holds the walk's
+    // albedo, packed RGBA8, which cannot come from the material because it is
+    // textured and the texture only exists on the boundary the walk entered
+    // through.
+    static_assert(sizeof(PathState) == 60, "PathState is read and written for every live path on every bounce");
     // 32 rather than 24: the hit now carries the TLAS instance, because a shared
     // BLAS belongs to no single one. One extra word per live path.
     static_assert(sizeof(HitRecord) == 32, "HitRecord size changed");
@@ -1372,6 +1379,7 @@ bool MetalRender::stepMetalMaterials(double budgetMs)
         // Appended to below, so it has to start empty even if a previous build
         // for this renderer got as far as filling some of it.
         mMaterialIsCutout.clear();
+        mMaterialIsMediumBoundary.clear();
     }
     MaterialBuildState& st = *mMaterialBuild;
 
@@ -1407,7 +1415,25 @@ bool MetalRender::stepMetalMaterials(double budgetMs)
         material.roughness = p.roughness;
         material.ior = p.ior;
         material.specular = p.specular;
-        material.specular_tint = p.specular_tint;
+        material.subsurface_reference = packed_float3(simd_make_float3(
+            p.subsurface_reference.x, p.subsurface_reference.y, p.subsurface_reference.z));
+        material.iridescence = p.iridescence;
+        material.iridescence_ior = p.iridescence_ior;
+        material.iridescence_thickness = p.iridescence_thickness;
+        material.specular_color = packed_float3(
+            simd_make_float3(p.specular_color.x, p.specular_color.y, p.specular_color.z));
+        material.clearcoat_ior = p.clearcoat_ior;
+        material.medium_flags = p.medium_flags;
+        material.medium_emission = packed_float3(
+            simd_make_float3(p.medium_emission.x, p.medium_emission.y, p.medium_emission.z));
+        material.subsurface = p.subsurface;
+        material.subsurface_anisotropy = p.subsurface_anisotropy;
+        material.subsurface_radius = packed_float3(
+            simd_make_float3(p.subsurface_radius.x, p.subsurface_radius.y, p.subsurface_radius.z));
+        material.sheen = p.sheen;
+        material.sheen_roughness = p.sheen_roughness;
+        material.sheen_color =
+            packed_float3(simd_make_float3(p.sheen_color.x, p.sheen_color.y, p.sheen_color.z));
         material.diffuse_transmission = p.diffuse_transmission;
         material.diffuse_transmission_color = packed_float3(simd_make_float3(
             p.diffuse_transmission_color.x, p.diffuse_transmission_color.y, p.diffuse_transmission_color.z));
@@ -1441,6 +1467,12 @@ bool MetalRender::stepMetalMaterials(double budgetMs)
 
         if (p.alpha_mode != ALPHA_MODE_OPAQUE)
             mSceneHasAlphaMaterials = true;
+        // Both kinds of medium compile into the same free-flight path.
+        if (p.subsurface > 0.0f || (p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
+            mSceneHasSubsurfaceMaterials = true;
+        if ((p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
+            mSceneHasBoundedMedium = true;
+        mMaterialIsMediumBoundary.push_back((p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u ? 1u : 0u);
         // Per material, so a BLAS can say which of its geometries actually need
         // the alpha test. The scene-wide flag below only answers "is there any
         // cutout anywhere", which in a forest is always yes and drags trunks,
@@ -2001,6 +2033,12 @@ void MetalRender::encodeWavefrontMetal4(MTL4::CommandBuffer* cmd, MTL4::ComputeC
             bind(mMissQueueBuffer, 0, 10);
             bind(mWavefrontControlBuffer, kMissCounterOffset, 11);
             bind(mPathStateBuffer, 0, 12);
+            bind(mMaterialBuffer, 0, 13);
+            // Only the camera bounce is denied the hidden lights.
+            const uint32_t extendMask =
+                (bounce == 0) ? uniforms->primaryRayMask
+                              : (uniforms->primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN);
+            table->setAddress(ring.push(extendMask), 14);
             enc->dispatchThreadgroups(control + kDispatchArgsOffset, tg);
             closeStage();
             barrier();
@@ -2273,6 +2311,12 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->setBuffer(mMissQueueBuffer, 0, 10);
             enc->setBuffer(mWavefrontControlBuffer, kMissCounterOffset, 11);
             enc->setBuffer(mPathStateBuffer, 0, 12);
+            enc->setBuffer(mMaterialBuffer, 0, 13);
+            // Only the camera bounce is denied the hidden lights.
+            const uint32_t extendMask =
+                (bounce == 0) ? uniforms->primaryRayMask
+                              : (uniforms->primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN);
+            enc->setBytes(&extendMask, sizeof(uint32_t), 14);
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kDispatchArgsOffset, tg);
             enc->popDebugGroup();
 
@@ -2939,6 +2983,8 @@ void MetalRender::render(Buffer* output)
     pUniformData->useFrameJitter = temporalOn ? 1u : 0u;
     pUniformData->canonicalGuideSample = denoiseOn ? 1u : 0u;
     pUniformData->denoiseFireflyClamp = settings.getAs<float>("render/pt/denoiseFireflyClamp");
+    pUniformData->clampIndirect = settings.getAs<float>("render/pt/clampIndirect");
+    pUniformData->hasBoundedMedium = mSceneHasBoundedMedium ? 1u : 0u;
     {
         // Previous frame's world-to-clip for screen-space reprojection. The
         // motion-blur uniforms hold the inverses and cannot serve here.
@@ -2973,6 +3019,18 @@ void MetalRender::render(Buffer* output)
     // Lens shift
     pUniformData->shiftX = camera.shiftX;
     pUniformData->shiftY = camera.shiftY;
+
+    // Projection. The half-extents are adapted to the render aspect the same way
+    // the perspective fov is (Camera::magForAspect), so a camera authored square
+    // and rendered wide keeps its framing instead of stretching.
+    pUniformData->projectionType = (uint32_t)camera.projection;
+    {
+        float halfWidth = camera.xmag, halfHeight = camera.ymag;
+        const float aspect = (height > 0) ? (float)width / (float)height : 1.0f;
+        camera.magForAspect(aspect, halfWidth, halfHeight);
+        pUniformData->orthoHalfWidth = halfWidth;
+        pUniformData->orthoHalfHeight = halfHeight;
+    }
 
     // Radiance cache
     {
@@ -3093,6 +3151,7 @@ void MetalRender::render(Buffer* output)
     settingsChanged |= (mPrevSettings.shiftX != pUniformData->shiftX) || (mPrevSettings.shiftY != pUniformData->shiftY);
     settingsChanged |= (mPrevSettings.maxDepth != maxDepth);
     settingsChanged |= (mPrevSettings.debug != debug);
+    settingsChanged |= (mPrevSettings.clampIndirect != pUniformData->clampIndirect);
 
     mPrevSettings.rectLightSamplingMethod = rectLightSamplingMethod;
     mPrevSettings.samplerType = samplerType;
@@ -3114,6 +3173,7 @@ void MetalRender::render(Buffer* output)
     mPrevSettings.shiftY = pUniformData->shiftY;
     mPrevSettings.maxDepth = maxDepth;
     mPrevSettings.debug = debug;
+    mPrevSettings.clampIndirect = pUniformData->clampIndirect;
 
     if (settingsChanged)
     {
@@ -3251,6 +3311,8 @@ void MetalRender::render(Buffer* output)
                 features |= kFeatureFog;
             if (pUniformData->sharcCapacity != 0)
                 features |= kFeatureSharc;
+            if (mSceneHasSubsurfaceMaterials)
+                features |= kFeatureSubsurface;
 
             if (useMetal4)
             {
@@ -3803,6 +3865,8 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
     values->setConstantValue(&fog, MTL::DataTypeBool, (NS::UInteger)6);
     const bool sharc = (features & kFeatureSharc) != 0;
     values->setConstantValue(&sharc, MTL::DataTypeBool, (NS::UInteger)7);
+    const bool subsurface = (features & kFeatureSubsurface) != 0;
+    values->setConstantValue(&subsurface, MTL::DataTypeBool, (NS::UInteger)8);
 
     // A pipeline built the Metal 3 way cannot be used with an argument table, so
     // the two paths need separate pipelines and the mode is part of the cache key.
@@ -3940,8 +4004,9 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
     {
         return nullptr;
     }
-    STRELKA_INFO("wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} metal4={}",
-                 envMap, lights, motionBlur, dof, debug, alpha, fog, useMetal4);
+    STRELKA_INFO(
+        "wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} sss={} sharc={} metal4={}",
+        envMap, lights, motionBlur, dof, debug, alpha, fog, subsurface, sharc, useMetal4);
     // Every pipeline's threadgroup limit, not just two of them.
     //
     // This is the only figure the public API gives on register pressure -- the
@@ -5094,7 +5159,15 @@ bool MetalRender::stepAccelerationStructures(double budgetMs)
             emitted.sceneInstanceId = st.groups[g].front();
             emitted.asIndex = (uint32_t)blasIdx;
             emitted.userID = mBlasList[blasIdx].mGeometryBase;
-            emitted.mask = GEOMETRY_MASK_TRIANGLE;
+            // The boundary of a participating medium gets its own mask: shadow
+            // rays must pass through it, or a fog gizmo blacks out everything it
+            // encloses. Groups are keyed by node, so a gizmo -- one object, one
+            // material -- is never merged with anything else, and reading the
+            // first member's material is reading the group's.
+            const uint32_t groupMaterial = instances[st.groups[g].front()].mMaterialId;
+            const bool isMediumBoundary = groupMaterial < mMaterialIsMediumBoundary.size() &&
+                                          mMaterialIsMediumBoundary[groupMaterial] != 0u;
+            emitted.mask = isMediumBoundary ? GEOMETRY_MASK_MEDIUM : GEOMETRY_MASK_TRIANGLE;
 
             mEmittedInstances.push_back(emitted);
 
@@ -5148,12 +5221,15 @@ bool MetalRender::stepAccelerationStructures(double budgetMs)
                 const bool enabled = curr.mLightId < mScene->getLightsDesc().size() ?
                                          mScene->getLightsDesc()[curr.mLightId].enabled :
                                          true;
+                const bool visibleToCamera = curr.mLightId < mScene->getLightsDesc().size() ?
+                                                 mScene->getLightsDesc()[curr.mLightId].visibleToCamera :
+                                                 true;
                 if (!enabled)
                     emitted.mask = 0;
                 else if (lightType == LIGHT_TYPE_POINT || lightType == LIGHT_TYPE_SPOT)
                     emitted.mask = 0;
                 else
-                    emitted.mask = GEOMETRY_MASK_LIGHT;
+                    emitted.mask = visibleToCamera ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_LIGHT_HIDDEN;
                 mEmittedInstances.push_back(emitted);
             }
             if (outOfTime(st.lightCursor))

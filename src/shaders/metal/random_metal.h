@@ -41,6 +41,21 @@ enum class SampleDimension : uint32_t
   // dimension so that killing a ray that is already almost blocked does not
   // correlate with which light was chosen or where on it the point landed.
   eShadowRR,
+  // The subsurface random walk: which colour channel drives free flight, how far
+  // it goes, and the phase-function draw at the scattering event.
+  //
+  // Distinct from the fog dimensions even though the two never scatter at the
+  // same vertex, because the channel choice happens in `extend` and the phase
+  // draw in `shade` at the same walk step -- sharing eFogPhaseU between them
+  // would tie which channel was picked to which way the walk turned.
+  //
+  // Adding dimensions changes the stride in random<>(), so every scene's noise
+  // is realised differently from here on. That moves the noise, not the image
+  // the samples converge to.
+  eSssChannel,
+  eSssDistance,
+  eSssPhaseU,
+  eSssPhaseV,
   eNUM_DIMENSIONS
 };
 

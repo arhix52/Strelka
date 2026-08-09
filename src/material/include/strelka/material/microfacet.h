@@ -19,6 +19,34 @@
 // ---------------------------------------------------------------------------
 // Clamp and square roughness
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Charlie sheen -- Estevez & Kulla, "Production Friendly Microfacet Sheen BRDF",
+// which is the distribution KHR_materials_sheen is specified against.
+//
+// The whole point of it is retroreflection at grazing angles. A GGX lobe falls
+// off exactly where fabric gets brighter, which is why a towel or a rug rendered
+// with roughness alone reads as plastic no matter what roughness it is given.
+// ---------------------------------------------------------------------------
+DEVICE_FUNC float sheen_d_charlie(float alpha, float n_dot_h)
+{
+    alpha = fmaxf(alpha, 1e-3f);
+    const float inv_alpha = 1.0f / alpha;
+    const float cos2h = n_dot_h * n_dot_h;
+    // Clamped away from zero: sin2h == 0 at normal incidence and the exponent is
+    // negative for alpha < 1, so the unclamped form is an infinity on the one
+    // direction every flat-on surface is sampled at.
+    const float sin2h = fmaxf(1.0f - cos2h, 1e-7f);
+    return (2.0f + inv_alpha) * powf(sin2h, inv_alpha * 0.5f) * (0.5f * M_1_PI_F);
+}
+
+// Ashikhmin's visibility term, as in the glTF spec's reference implementation.
+// Not height-correlated Smith: Charlie has no matching Smith term, and this is
+// what the extension is defined against.
+DEVICE_FUNC float sheen_v_ashikhmin(float n_dot_l, float n_dot_v)
+{
+    return 1.0f / (4.0f * (n_dot_l + n_dot_v - n_dot_l * n_dot_v) + 1e-7f);
+}
+
 DEVICE_FUNC float alpha_from_roughness(float roughness)
 {
     float r = fmaxf(roughness, ROUGHNESS_MIN);

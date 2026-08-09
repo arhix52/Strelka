@@ -20,6 +20,7 @@ inline Scene::UniformLightDesc parseDesc(const nlohmann::json& light, const std:
     Scene::UniformLightDesc desc{};
     desc.useXform = false;
     desc.enabled = light.value("enabled", true);
+    desc.visibleToCamera = light.value("visibleToCamera", true);
     desc.name = light.value("name", "");
     desc.type = lightTypeFromName(light.value("type", "rect"));
     desc.intensityUnit = lightUnitFromName(light.value("unit", "radiance"));
@@ -92,6 +93,8 @@ inline nlohmann::json toJson(const Scene::UniformLightDesc& desc)
     nlohmann::json light;
     light["type"] = lightTypeName(desc.type);
     light["enabled"] = desc.enabled;
+    if (!desc.visibleToCamera)
+        light["visibleToCamera"] = false;
     if (!desc.name.empty())
         light["name"] = desc.name;
     light["color"] = { desc.color.x, desc.color.y, desc.color.z };

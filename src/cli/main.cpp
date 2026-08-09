@@ -35,6 +35,8 @@ int main(int argc, const char* argv[])
         ("height",       "Render height",                   cxxopts::value<uint32_t>())
         ("spp",          "Samples per pixel",               cxxopts::value<uint32_t>())
         ("depth",        "Max ray depth",                   cxxopts::value<uint32_t>())
+        ("clamp",        "Clamp each indirect path's contribution (0 = off)",
+                                                            cxxopts::value<float>())
         ("sampler",      "Sampler: halton, pcg, sobol, sobol_bn, hybrid", cxxopts::value<std::string>())
         ("bn-switch",    "Hybrid: spp before switching blue-noise -> Sobol", cxxopts::value<uint32_t>())
         ("capture",      "Capture one steady-state frame to a .gputrace for Xcode (as large as the scene on the device)", cxxopts::value<std::string>())
@@ -111,6 +113,10 @@ int main(int argc, const char* argv[])
     if (result.count("depth"))
     {
         cfg.maxDepth = result["depth"].as<uint32_t>();
+    }
+    if (result.count("clamp"))
+    {
+        cfg.clampIndirect = result["clamp"].as<float>();
     }
     if (result.count("camera"))
     {

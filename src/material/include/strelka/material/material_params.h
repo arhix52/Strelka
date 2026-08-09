@@ -65,7 +65,7 @@ struct MaterialParams
     float       roughness;              //  4 bytes
     float       ior;                    //  4 bytes  (index of refraction)
     float       specular;               //  4 bytes  (specular level, glTF)
-    float       specular_tint;          //  4 bytes  -- total 32
+    float       _pad_specular;          //  4 bytes  -- total 32 (was specular_tint)
 
     // -- Transmission / clearcoat -------------------------------------------
     float       transmission;           //  4 bytes
@@ -123,9 +123,69 @@ struct MaterialParams
     // interface and would make foliage look like glass.
     float3      diffuse_transmission_color; // 12 bytes
     float       diffuse_transmission;       //  4 bytes  -- total 176
+
+    // -- KHR_materials_sheen -------------------------------------------------
+    // A retroreflective fabric layer over the base. `sheen` is the extension's
+    // sheenColorFactor collapsed to a weight and `sheen_color` its hue, kept
+    // apart so a black sheen colour reads as "off" rather than as "black fuzz".
+    float3      sheen_color;            // 12 bytes
+    float       sheen;                  //  4 bytes  -- total 192
+
+    // -- STRELKA_materials_subsurface ----------------------------------------
+    // A scattering medium bounded by the surface, entered through the diffuse
+    // transmission lobe and left by a random walk -- see the SSS block in
+    // wavefront.metal. `subsurface_radius` is the mean free path per channel in
+    // world units, which is where the colour of wax, marble and skin comes from:
+    // red travels furthest, so a thin edge goes red before it goes bright.
+    float3      subsurface_radius;      // 12 bytes
+    float       sheen_roughness;        //  4 bytes  -- total 208
+    float       subsurface;             //  4 bytes  (weight; 0 = no medium)
+    float       subsurface_anisotropy;  //  4 bytes  (Henyey-Greenstein g)
+    /// KHR_materials_clearcoat has no IOR field, but V-Ray and every DCC that
+    /// authors a coat does; 1.5 is the extension's implied lacquer.
+    float       clearcoat_ior;          //  4 bytes
+
+    // -- STRELKA_materials_medium --------------------------------------------
+    // A participating medium bounded by the geometry carrying this material --
+    // V-Ray's EnvironmentFog with a gizmo, and the reason the bath water glows.
+    //
+    // The medium reuses subsurface_radius (mean free path), the scattering albedo
+    // and the anisotropy: a fog volume and a block of wax differ in where light
+    // enters, not in what happens inside. What is only a medium's is emission,
+    // and the flag saying the surface is a boundary to be crossed rather than a
+    // surface to be shaded.
+    unsigned int medium_flags;          //  4 bytes
+    float3       medium_emission;       // 12 bytes  -- total 240
+
+    // -- KHR_materials_specular ----------------------------------------------
+    // specularColorFactor: an independent tint on the dielectric F0. White is
+    // the neutral value, so this cannot share the zero-initialised default the
+    // rest of the struct relies on -- see the note in bsdf_init.
+    float3      specular_color;         // 12 bytes
+
+    // -- KHR_materials_iridescence -------------------------------------------
+    // Thin-film interference over the specular lobe. `thickness` is in
+    // nanometres and is the extension's iridescenceThicknessMaximum, which is
+    // what the spec says to use when there is no thickness texture.
+    // The surface albedo `diffuse_transmission_color` was derived from. The walk
+    // scales its albedo by how far the resolved surface colour departs from this,
+    // which is what lets a textured translucent surface -- marble veining, a
+    // printed rubber duck -- carry its texture into the medium. Equal to the
+    // resolved albedo when there is no texture, so the ratio is exactly 1 and
+    // nothing changes for a flat material.
+    float3      subsurface_reference;   // 12 bytes
+    float       iridescence;            //  4 bytes  -- total 272
+    float       iridescence_ior;        //  4 bytes
+    float       iridescence_thickness;  //  4 bytes
+    float       _pad_irid;              //  4 bytes  -- total 288
 };
 
+/// medium_flags bit 0: this material's geometry is the boundary of a medium.
+/// A ray crossing it toggles the medium it is in and carries on, unshaded and
+/// without spending a bounce.
+#define MEDIUM_FLAG_BOUNDARY 1u
+
 // Static assert equivalent for size (works on all three backends)
-// 176 bytes, 16-byte aligned -- fits nicely in SBT / argument buffers.
+// 288 bytes, 16-byte aligned -- fits nicely in SBT / argument buffers.
 
 #endif // STRELKA_MATERIAL_PARAMS_H

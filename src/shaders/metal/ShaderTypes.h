@@ -11,12 +11,21 @@
 #define GEOMETRY_MASK_TRIANGLE 1
 #define GEOMETRY_MASK_CURVE 2
 #define GEOMETRY_MASK_LIGHT 4
+// A light the camera must not see directly but that still lights the scene and
+// still appears in reflections. V-Ray calls it "invisible"; it is how a softbox
+// stays out of frame while doing its job. Its own bit rather than a per-light
+// test in the shader, because the distinction is exactly what a ray mask is for.
+#define GEOMETRY_MASK_LIGHT_HIDDEN 8
+// The boundary of a participating medium. Its own bit because a shadow ray must
+// not be stopped by it -- RAY_MASK_SHADOW is the geometry bits alone, so a fog
+// gizmo left on the triangle mask would black out everything it encloses.
+#define GEOMETRY_MASK_MEDIUM 16
 
 #define GEOMETRY_MASK_GEOMETRY (GEOMETRY_MASK_TRIANGLE | GEOMETRY_MASK_CURVE)
 
-#define RAY_MASK_PRIMARY (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT)
+#define RAY_MASK_PRIMARY (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_MEDIUM)
 #define RAY_MASK_SHADOW GEOMETRY_MASK_GEOMETRY
-#define RAY_MASK_SECONDARY GEOMETRY_MASK_GEOMETRY
+#define RAY_MASK_SECONDARY (RAY_MASK_PRIMARY | GEOMETRY_MASK_LIGHT_HIDDEN)
 
 #ifndef __METAL_VERSION__
 struct packed_float3
@@ -115,11 +124,27 @@ struct Uniforms
     float shiftX;
     float shiftY;
 
+    // Projection: 0 = perspective, 1 = orthographic. An orthographic camera is
+    // not expressible as a clipToView matrix the perspective path can share --
+    // it has no centre of projection, so the ray origin varies across the film
+    // and the direction does not -- hence a flag and the film half-extents
+    // rather than a different matrix.
+    // Values are Camera::ProjectionType; PROJECTION_* below names them for the
+    // shaders, which cannot see the host enum.
+    uint32_t projectionType;
+    float orthoHalfWidth;
+    float orthoHalfHeight;
+
     // Environment map (dome light)
     uint32_t hasEnvMap;
     // Atmospheric scattering, homogeneous below fogHeight. See fog.h for why a
     // slab and not a bounded volume.
     uint32_t hasFog;
+    /// Whether any material in the scene bounds a medium. Gates the extra
+    /// traversal the shadow stage needs to attenuate through one, so a scene with
+    /// only subsurface media -- whose boundaries a shadow ray never crosses --
+    /// pays nothing for it.
+    uint32_t hasBoundedMedium;
     // Radiance cache; see sharc.h.
     uint32_t sharcCapacity;   // 0 disables
     uint32_t sharcMinSamples; // before a voxel may be read
@@ -168,6 +193,12 @@ struct Uniforms
     /// Luminance ceiling, in exposed units, for the colour handed to the
     /// denoiser. Zero disables it.
     float denoiseFireflyClamp;
+    /// Upper bound on what one indirect path may contribute; 0 disables it.
+    ///
+    /// Separate from denoiseFireflyClamp, which only conditions the denoiser's
+    /// input and leaves the rendered image and the EXR alone. This one changes
+    /// the image, so it is off by default -- see clampIndirectContribution.
+    float clampIndirect;
     // Sub-pixel offset applied to every pixel of this frame, in pixels. Temporal
     // upscaling needs the whole image shifted by a known amount it can undo; the
     // per-pixel random jitter that antialiases a still frame is noise to it.
@@ -197,6 +228,11 @@ struct Uniforms
 // the texture is R32Float and a linear distance would fit it. So the renderer can
 // write any of the three and the choice is settled by measurement rather than by
 // reading the header harder.
+// Uniforms::projectionType. Mirrors oka::Camera::ProjectionType, which the
+// shaders cannot include.
+#define PROJECTION_PERSPECTIVE  0u
+#define PROJECTION_ORTHOGRAPHIC 1u
+
 #define kDenoiseDepthDevice 0u ///< clip z / w, the value a depth buffer holds
 #define kDenoiseDepthViewZ  1u ///< distance along the camera's forward axis
 #define kDenoiseDepthRadial 2u ///< distance to the eye
@@ -325,7 +361,38 @@ struct PathState
     uint32_t sharcIndex;
     packed_float3 sharcRadianceAtVisit;
     packed_float3 sharcInvThroughput;
+
+    /// Which participating medium the path is inside, and how many scattering
+    /// events it has had there: material index + 1 in the low 16 bits, step count
+    /// in the high 16. Zero means the path is outside every medium.
+    ///
+    /// One slot, so media do not nest: a path inside a fog volume that enters a
+    /// block of wax takes the wax and forgets the fog until it leaves. Nesting
+    /// needs a stack like the one the dielectrics keep, and nothing in the scenes
+    /// this serves overlaps two media.
+    ///
+    /// One packed word rather than the medium's parameters, because this is per
+    /// pixel and the parameters are per material: at 1024x1024 carrying sigma_t,
+    /// albedo and g would cost 28 MB to avoid a load from a table that fits in
+    /// cache.
+    uint32_t medium;
+    /// The medium's single-scattering albedo at the point the path entered it,
+    /// packed RGBA8.
+    ///
+    /// Carried rather than read from the material at each scattering event,
+    /// because inside a medium there is no surface left to sample a texture on:
+    /// the only place the marble's veining exists is the boundary the walk came
+    /// through. Packed to one word -- a scattering albedo has nothing like eight
+    /// bits of meaningful precision, and this is per pixel.
+    uint32_t mediumAlbedo;
 };
+
+#define MEDIUM_INDEX_MASK  0xFFFFu
+#define MEDIUM_STEP_SHIFT   16u
+/// Ceiling on one walk. A dense medium is a long walk that Russian roulette
+/// alone terminates slowly, and a path that never ends is a hang rather than a
+/// dim pixel.
+#define MEDIUM_MAX_STEPS    256u
 
 #define SHARC_NO_ENTRY 0xFFFFFFFFu
 
@@ -372,6 +439,13 @@ struct ShadowRay
     // Threshold at which traversal may give up on this ray, drawn where the ray
     // was created because that is where the sampler knows the path's depth.
     float rrCutoff;
+    /// Which bounded medium the ray starts inside, material index + 1, or 0.
+    ///
+    /// Carried rather than re-derived: the shadow stage can find where the ray
+    /// *leaves* a medium by tracing its boundary, but nothing in the ray itself
+    /// says whether it began within one. A vertex inside a fog volume and a
+    /// vertex just outside it produce the same origin and direction.
+    uint32_t medium;
 };
 
 // One entry of the environment map alias table (Walker/Vose), one per texel.
@@ -422,7 +496,7 @@ struct Material
     float roughness;                //  4 bytes
     float ior;                      //  4 bytes
     float specular;                 //  4 bytes
-    float specular_tint;            //  4 bytes  -- 32
+    float _pad_specular;            //  4 bytes  -- 32 (was specular_tint)
 
     float transmission;             //  4 bytes
     float clearcoat;                //  4 bytes
@@ -454,6 +528,32 @@ struct Material
     // KHR_materials_diffuse_transmission; see material_params.h.
     packed_float3 diffuse_transmission_color; // 12 bytes
     float diffuse_transmission;               //  4 bytes -- 152
+
+    // KHR_materials_sheen; see material_params.h.
+    packed_float3 sheen_color;                // 12 bytes
+    float sheen;                              //  4 bytes -- 168
+
+    // STRELKA_materials_subsurface; see material_params.h.
+    packed_float3 subsurface_radius;          // 12 bytes
+    float sheen_roughness;                    //  4 bytes -- 184
+    float subsurface;                         //  4 bytes
+    float subsurface_anisotropy;              //  4 bytes -- 192
+
+    // STRELKA_materials_medium; see material_params.h.
+    packed_float3 medium_emission;            // 12 bytes
+    uint32_t medium_flags;                    //  4 bytes -- 208
+    float clearcoat_ior;                      //  4 bytes -- 212
+
+    // KHR_materials_specular specularColorFactor; see material_params.h.
+    packed_float3 specular_color;             // 12 bytes -- 224
+
+    // KHR_materials_iridescence; see material_params.h.
+    float iridescence;                        //  4 bytes
+    float iridescence_ior;                    //  4 bytes
+    float iridescence_thickness;              //  4 bytes -- 236
+
+    packed_float3 subsurface_reference;       // 12 bytes -- 248
+    float _pad_irid[2];                       //  8 bytes -- 256
 
     // Textures (8 bytes each: resource ID on CPU, texture handle on GPU)
 #ifdef __METAL_VERSION__

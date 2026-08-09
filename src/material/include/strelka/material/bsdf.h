@@ -68,9 +68,28 @@ DEVICE_FUNC void bsdf_init(SurfaceInteraction& si,
     si.clearcoat_roughness = fmaxf(params.clearcoat_roughness, 0.0001f);
     si.anisotropy         = params.anisotropy;
     si.specular           = params.specular;
-    si.specular_tint      = params.specular_tint;
+    // White when unset. Every other field here is happy with a zero-initialised
+    // MaterialParams; a zero tint is a black highlight, so this one is not.
+    si.specular_color     = (params.specular_color.x + params.specular_color.y +
+                             params.specular_color.z) > 0.0f
+                                ? params.specular_color
+                                : make_float3(1.0f);
     si.diffuse_transmission = params.diffuse_transmission;
     si.diffuse_transmission_color = params.diffuse_transmission_color;
+    si.sheen = params.sheen;
+    si.sheen_roughness = params.sheen_roughness;
+    si.sheen_color = params.sheen_color;
+    si.subsurface = params.subsurface;
+    si.subsurface_radius = params.subsurface_radius;
+    si.subsurface_anisotropy = params.subsurface_anisotropy;
+    si.subsurface_reference = params.subsurface_reference;
+    // 1.5, the extension's clear lacquer, for anything below it. A
+    // zero-initialised MaterialParams would otherwise give the coat an F0 of
+    // zero, and the layer would vanish without a word.
+    si.clearcoat_ior = (params.clearcoat_ior >= 1.0f) ? params.clearcoat_ior : 1.5f;
+    si.iridescence = params.iridescence;
+    si.iridescence_ior = (params.iridescence_ior >= 1.0f) ? params.iridescence_ior : 1.3f;
+    si.iridescence_thickness = params.iridescence_thickness;
     si.material_type      = params.material_type;
     si.thin_walled        = params.thin_walled;
     si.dielectric_priority = params.dielectric_priority;
@@ -91,9 +110,28 @@ DEVICE_FUNC void bsdf_init(THREAD_REF SurfaceInteraction& si,
     si.clearcoat_roughness = fmax(params.clearcoat_roughness, 0.0001f);
     si.anisotropy         = params.anisotropy;
     si.specular           = params.specular;
-    si.specular_tint      = params.specular_tint;
+    // White when unset. Every other field here is happy with a zero-initialised
+    // MaterialParams; a zero tint is a black highlight, so this one is not.
+    si.specular_color     = (params.specular_color.x + params.specular_color.y +
+                             params.specular_color.z) > 0.0f
+                                ? params.specular_color
+                                : make_float3(1.0f);
     si.diffuse_transmission = params.diffuse_transmission;
     si.diffuse_transmission_color = params.diffuse_transmission_color;
+    si.sheen = params.sheen;
+    si.sheen_roughness = params.sheen_roughness;
+    si.sheen_color = params.sheen_color;
+    si.subsurface = params.subsurface;
+    si.subsurface_radius = params.subsurface_radius;
+    si.subsurface_anisotropy = params.subsurface_anisotropy;
+    si.subsurface_reference = params.subsurface_reference;
+    // 1.5, the extension's clear lacquer, for anything below it. A
+    // zero-initialised MaterialParams would otherwise give the coat an F0 of
+    // zero, and the layer would vanish without a word.
+    si.clearcoat_ior = (params.clearcoat_ior >= 1.0f) ? params.clearcoat_ior : 1.5f;
+    si.iridescence = params.iridescence;
+    si.iridescence_ior = (params.iridescence_ior >= 1.0f) ? params.iridescence_ior : 1.3f;
+    si.iridescence_thickness = params.iridescence_thickness;
     si.material_type      = params.material_type;
     si.thin_walled        = params.thin_walled;
     si.dielectric_priority = params.dielectric_priority;
@@ -125,9 +163,28 @@ DEVICE_FUNC void bsdf_init(SurfaceInteraction& si,
     si.clearcoat_roughness = fmaxf(params.clearcoat_roughness, 0.0001f);
     si.anisotropy         = params.anisotropy;
     si.specular           = params.specular;
-    si.specular_tint      = params.specular_tint;
+    // White when unset. Every other field here is happy with a zero-initialised
+    // MaterialParams; a zero tint is a black highlight, so this one is not.
+    si.specular_color     = (params.specular_color.x + params.specular_color.y +
+                             params.specular_color.z) > 0.0f
+                                ? params.specular_color
+                                : make_float3(1.0f);
     si.diffuse_transmission = params.diffuse_transmission;
     si.diffuse_transmission_color = params.diffuse_transmission_color;
+    si.sheen = params.sheen;
+    si.sheen_roughness = params.sheen_roughness;
+    si.sheen_color = params.sheen_color;
+    si.subsurface = params.subsurface;
+    si.subsurface_radius = params.subsurface_radius;
+    si.subsurface_anisotropy = params.subsurface_anisotropy;
+    si.subsurface_reference = params.subsurface_reference;
+    // 1.5, the extension's clear lacquer, for anything below it. A
+    // zero-initialised MaterialParams would otherwise give the coat an F0 of
+    // zero, and the layer would vanish without a word.
+    si.clearcoat_ior = (params.clearcoat_ior >= 1.0f) ? params.clearcoat_ior : 1.5f;
+    si.iridescence = params.iridescence;
+    si.iridescence_ior = (params.iridescence_ior >= 1.0f) ? params.iridescence_ior : 1.3f;
+    si.iridescence_thickness = params.iridescence_thickness;
     si.material_type      = params.material_type;
     si.thin_walled        = params.thin_walled;
     si.dielectric_priority = params.dielectric_priority;

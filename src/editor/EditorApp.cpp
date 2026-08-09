@@ -290,6 +290,7 @@ void EditorApp::loadSettings()
     // single unbounded sample gets smeared over many frames by a temporal filter.
     // 0 disables it.
     m_settingsManager->setAs<float>("render/pt/denoiseFireflyClamp", 8.0f);
+    m_settingsManager->setAs<float>("render/pt/clampIndirect", 0.0f);
     // Playback stays stable at shutter close unless path-traced blur is enabled;
     // render/pt/spp controls its sample count.
     m_settingsManager->setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);

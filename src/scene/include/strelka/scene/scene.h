@@ -249,6 +249,13 @@ public:
         glm::float3 orientation{ 0.0f }; // euler angles in degrees
         bool useXform = false;
         bool enabled = true;
+        /// Whether camera rays may hit the light's own geometry.
+        ///
+        /// False is a light that lights the scene and appears in reflections but
+        /// is not in frame -- a softbox just outside the crop, which is what
+        /// V-Ray's "invisible" flag means. Distinct from `enabled`, which turns
+        /// the light off entirely.
+        bool visibleToCamera = true;
         std::string name;
 
         glm::float3 color{ 1.0f };

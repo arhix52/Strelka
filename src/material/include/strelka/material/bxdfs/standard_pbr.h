@@ -22,6 +22,8 @@
 #include "../sampling.h"
 #include "../fresnel.h"
 #include "../microfacet.h"
+#include "../sheen_albedo_lut.h"
+#include "../iridescence.h"
 
 // ---------------------------------------------------------------------------
 // Internal: compute lobe weights for stochastic lobe selection
@@ -35,6 +37,137 @@ struct PbrLobeWeights
     float clearcoat;
     float total;
 };
+
+// The specular lobe's Fresnel, with a thin film over it when the material has
+// one. Everything the film changes is here: it replaces the reflectance and
+// leaves the distribution and the shadowing alone, which is what makes it a
+// property of the interface rather than of the microsurface.
+DEVICE_FUNC float3 specular_fresnel(const THREAD_REF SurfaceInteraction& si, float3 F0,
+                                    float v_dot_h)
+{
+    const float3 base = fresnel_schlick(F0, v_dot_h);
+    if (si.iridescence <= 0.0f)
+    {
+        return base;
+    }
+    // At the microfacet, not at the shading normal. The glTF reference evaluates
+    // the film once per shading point against NdotV; inside a microfacet BRDF the
+    // angle the Fresnel is taken at is VdotH, and using anything else makes the
+    // film disagree with the lobe it is modifying.
+    const float3 film =
+        iridescence_fresnel(1.0f, si.iridescence_ior, v_dot_h, si.iridescence_thickness, F0);
+    return mix(base, film, saturate(si.iridescence));
+}
+
+// How much of the separate specular lobe survives a transmissive material.
+//
+// Zero for glass, and the same factor pbr_lobe_weights uses to zero the lobe's
+// selection probability. The transmission lobe runs its own Fresnel and produces
+// reflection events itself, so a second specular lobe would double-count -- which
+// is why the weight was already scaled this way. The *BRDF* was not, and that is
+// worse than double-counting: a lobe evaluated into f_total whose selection
+// probability is zero is divided by a pdf that does not include it. On a smooth
+// coated bubble the coat lobe is the only one selected, and the specular term
+// rides along at 1/0.19 of its proper weight.
+//
+// What that looked like: soap bubbles that glowed instead of being transparent.
+// Adding thin-film interference did not cause it, it coloured it -- the same
+// over-count had been shipping as a white halo.
+DEVICE_FUNC float specular_lobe_scale(const THREAD_REF SurfaceInteraction& si)
+{
+    return 1.0f - si.transmission * (1.0f - si.metallic);
+}
+
+// Charlie sheen evaluated for one direction pair. Zero unless the material
+// carries the extension, so every scene without fabric compiles to the same
+// work it did before.
+DEVICE_FUNC float3 sheen_brdf(const THREAD_REF SurfaceInteraction& si,
+                              float n_dot_h, float n_dot_l, float n_dot_v)
+{
+    if (si.sheen <= 0.0f)
+    {
+        return make_float3(0.0f);
+    }
+    const float alpha = alpha_from_roughness(si.sheen_roughness);
+    // Normalised by its own directional albedo where that exceeds 1. Ashikhmin's
+    // visibility term does not conserve energy -- it reaches 2.78 at low
+    // roughness and grazing incidence -- so the raw lobe returns more light than
+    // arrived, which is a glowing towel rather than a shiny one.
+    const float e = sheen_albedo(fabsf(n_dot_v), si.sheen_roughness);
+    const float norm = (e > 1.0f) ? (1.0f / e) : 1.0f;
+    return si.sheen_color * (si.sheen * norm * sheen_d_charlie(alpha, n_dot_h) *
+                             sheen_v_ashikhmin(n_dot_l, n_dot_v));
+}
+
+// The coat's reflectance at normal incidence. KHR_materials_clearcoat fixes this
+// at 0.04, i.e. a clear lacquer; a DCC that lets an artist author the coat's IOR
+// means something else by a "coat" and the difference is not subtle -- a coat at
+// IOR 2.0 reflects 11% head-on rather than 4%.
+DEVICE_FUNC float clearcoat_f0(const THREAD_REF SurfaceInteraction& si)
+{
+    return f0_from_ior(fmaxf(si.clearcoat_ior, 1.0f));
+}
+
+// What survives under the coat.
+//
+// The coat used to be added on top with nothing taken away, which makes a glazed
+// ceramic brighter than the light falling on it -- the same defect the sheen
+// layer had, and it is easier to see here because the coat sits over a white
+// diffuse base rather than over fabric. A directional-albedo table would be more
+// accurate; the split approximation below costs nothing and is what the glTF
+// sample viewer uses for the same layer.
+DEVICE_FUNC float clearcoat_base_scale(const THREAD_REF SurfaceInteraction& si, float n_dot_v,
+                                       float n_dot_l)
+{
+    if (si.clearcoat <= 0.0f)
+    {
+        return 1.0f;
+    }
+    const float f0 = clearcoat_f0(si);
+    // Twice, because the light crosses the coat twice: in along L and out along
+    // V. Scaling by the view-side Fresnel alone -- which is what the glTF sample
+    // viewer does -- still let a glazed white ceramic reach 1.06 directional
+    // albedo, measured in tests/material/test_clearcoat.cpp.
+    const float down = 1.0f - si.clearcoat * fresnel_schlick_scalar(f0, fabsf(n_dot_l));
+    const float up = 1.0f - si.clearcoat * fresnel_schlick_scalar(f0, fabsf(n_dot_v));
+    return down * up;
+
+    // What is deliberately *not* here: the light that goes through the coat, off
+    // the base, and back down off the coat's underside, round and round. Cycles
+    // models it, and scenes/feature_tests/15_clearcoat measures its absence --
+    // 6% dark at the strong end of the IOR ramp, matching exactly at IOR 1.0,
+    // which is the signature of a missing term scaling with the coat's
+    // reflectance.
+    //
+    // Two formulations were tried and both were measurably worse than the gap
+    // they were closing. Summed against the coat's internal hemispherical
+    // reflectance -- around 60% for ordinary lacquer, because everything past the
+    // critical angle is trapped -- a glazed white ceramic reached 2.43
+    // directional albedo. Summed against the external average instead, 1.02.
+    // The round trip carries a 1/eta^2 radiance compression on the way back out
+    // that does not separate cleanly from the reflectance when what sits under
+    // the coat is a full BSDF rather than a Lambertian, and guessing at where it
+    // goes produced a material brighter than the light falling on it both times.
+    //
+    // A documented 6% beats an energy violation, so the term stays out until it
+    // can be derived rather than fitted. tests/material/test_clearcoat.cpp is
+    // what caught both attempts.
+}
+
+// How much of the base layer survives under the sheen, per KHR_materials_sheen.
+// What the fabric reflected is not available to the lobes beneath it; leaving
+// this out is what made an additive sheen measure 1.40 directional albedo on a
+// plain white cloth.
+DEVICE_FUNC float sheen_base_scale(const THREAD_REF SurfaceInteraction& si, float n_dot_v)
+{
+    if (si.sheen <= 0.0f)
+    {
+        return 1.0f;
+    }
+    const float peak = fmaxf(si.sheen_color.x, fmaxf(si.sheen_color.y, si.sheen_color.z));
+    const float e = fminf(sheen_albedo(fabsf(n_dot_v), si.sheen_roughness), 1.0f);
+    return saturate(1.0f - peak * si.sheen * e);
+}
 
 DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const THREAD_REF SurfaceInteraction& si)
 {
@@ -52,6 +185,15 @@ DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const THREAD_REF SurfaceInteraction&
     w.diffuse      = diffuse_base * (1.0f - dt) * luminance(si.albedo);
     w.diffuse      = fmaxf(w.diffuse, 0.0f);
 
+    // Sheen rides the cosine-sampled lobe instead of getting one of its own.
+    // Charlie has no cheap invertible sampling routine, a cosine hemisphere
+    // covers its support, and sharing the selection probability keeps
+    // combined_pdf a single cosine term in every branch below. What sharing does
+    // require is that the lobe stays reachable on a dark fabric, which the max
+    // guarantees; for a material without sheen this is exactly a no-op.
+    const float sheen_lum = si.sheen * luminance(si.sheen_color);
+    w.diffuse = fmaxf(w.diffuse, diffuse_base * (1.0f - dt) * sheen_lum);
+
     w.diffuse_transmission = diffuse_base * dt * luminance(si.diffuse_transmission_color);
     w.diffuse_transmission = fmaxf(w.diffuse_transmission, 0.0f);
 
@@ -64,13 +206,16 @@ DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const THREAD_REF SurfaceInteraction&
     // other. Neither over-counts on its own; together they do, and smooth glass
     // came out about 9% too bright.
     float f0_scalar = f0_from_ior(si.ior);
-    float spec_lum  = mix(f0_scalar, luminance(si.albedo), si.metallic);
+    float spec_lum  = mix(f0_scalar * luminance(si.specular_color), luminance(si.albedo), si.metallic);
     w.specular      = fmaxf(spec_lum, 0.04f) * (1.0f - si.transmission * dielectric_weight);
 
     w.transmission  = dielectric_weight * si.transmission;
     w.transmission  = fmaxf(w.transmission, 0.0f);
 
-    w.clearcoat     = si.clearcoat * 0.25f; // fixed F0 ~ 0.04, attenuated
+    // Scaled by the coat's own reflectance rather than by a constant: at IOR 2.0
+    // the coat is nearly three times as reflective as the lacquer the old 0.25
+    // stood in for, and a lobe selected too rarely is noise, not bias.
+    w.clearcoat     = si.clearcoat * fmaxf(f0_from_ior(fmaxf(si.clearcoat_ior, 1.0f)), 0.04f) * 6.0f;
     w.clearcoat     = fmaxf(w.clearcoat, 0.0f);
 
     w.total = w.diffuse + w.diffuse_transmission + w.specular + w.transmission + w.clearcoat;
@@ -158,7 +303,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
     anisotropic_alpha(si.roughness, si.anisotropy, ax, ay);
 
     // F0 for the specular lobe (mix between dielectric F0 and base color for metals)
-    float3 F0 = gltf_f0(si.ior, si.specular, si.specular_tint, si.albedo, si.metallic);
+    float3 F0 = gltf_f0(si.ior, si.specular, si.specular_color, si.albedo, si.metallic);
 
     // -----------------------------------------------------------------------
     // Lobe selection
@@ -190,7 +335,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         const float3 Ll_s = world_to_local(result.wi, T, B, N);
         float D      = ggx_ndf_aniso(ax, ay, Hl_s);
         float G2     = ggx_smith_g2_aniso(ax, ay, Vl_s, Ll_s);
-        float3 F     = fresnel_schlick(F0, VdotH);
+        float3 F     = specular_fresnel(si, F0, VdotH);
         // Multiple-scattering compensation. The single-scatter lobe drops every
         // bounce after the first, which costs a rough metal half its energy; see
         // ggx_energy_term(). Applied identically in all four places f_spec is
@@ -206,13 +351,16 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         {
             float D_cc    = ggx_ndf(alpha_cc, NdotH);
             float G2_cc   = ggx_smith_g2(alpha_cc, NdotV, NdotL);
-            float F_cc    = fresnel_schlick_scalar(0.04f, VdotH);
+            float F_cc    = fresnel_schlick_scalar(clearcoat_f0(si), VdotH);
             float cc_brdf = D_cc * G2_cc * F_cc / (4.0f * NdotV * NdotL + 1e-10f);
             f_cc          = make_float3(si.clearcoat * cc_brdf);
             pdf_cc        = ggx_vndf_pdf(alpha_cc, NdotH, NdotV, VdotH);
         }
 
-        float3 f_total = f_diffuse + f_spec + f_cc;
+        float3 f_sheen = sheen_brdf(si, NdotH, NdotL, NdotV);
+        float3 f_total = ((f_diffuse + f_spec * specular_lobe_scale(si)) * clearcoat_base_scale(si, NdotV, NdotL) + f_cc) *
+                             sheen_base_scale(si, NdotV) +
+                         f_sheen;
 
         // Combined PDF
         float pdf_diffuse = cosine_hemisphere_pdf(NdotL);
@@ -278,7 +426,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         float NdotH = dot(N, H);
 
         // Evaluate all lobes
-        float3 F     = fresnel_schlick(F0, VdotH);
+        float3 F     = specular_fresnel(si, F0, VdotH);
         const float3 Hl_s = world_to_local(H, T, B, N);
         const float3 Vl_s = world_to_local(V, T, B, N);
         const float3 Ll_s = world_to_local(result.wi, T, B, N);
@@ -296,13 +444,16 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         {
             float D_cc    = ggx_ndf(alpha_cc, NdotH);
             float G2_cc   = ggx_smith_g2(alpha_cc, NdotV, NdotL);
-            float F_cc    = fresnel_schlick_scalar(0.04f, VdotH);
+            float F_cc    = fresnel_schlick_scalar(clearcoat_f0(si), VdotH);
             float cc_brdf = D_cc * G2_cc * F_cc / (4.0f * NdotV * NdotL + 1e-10f);
             f_cc          = make_float3(si.clearcoat * cc_brdf);
             pdf_cc        = ggx_vndf_pdf(alpha_cc, NdotH, NdotV, VdotH);
         }
 
-        float3 f_total = f_diffuse + f_spec + f_cc;
+        float3 f_sheen = sheen_brdf(si, NdotH, NdotL, NdotV);
+        float3 f_total = ((f_diffuse + f_spec * specular_lobe_scale(si)) * clearcoat_base_scale(si, NdotV, NdotL) + f_cc) *
+                             sheen_base_scale(si, NdotV) +
+                         f_sheen;
 
         float pdf_diffuse = cosine_hemisphere_pdf(NdotL);
         float pdf_spec    = ggx_vndf_pdf_aniso(ax, ay, world_to_local(H, T, B, N),
@@ -433,7 +584,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         float NdotH = dot(N, H);
 
         // Evaluate all lobes at this direction for proper MIS weighting
-        float3 F      = fresnel_schlick(F0, VdotH);
+        float3 F      = specular_fresnel(si, F0, VdotH);
         float D       = ggx_ndf_aniso(ax, ay, H_local);
         float G2_main = ggx_smith_g2_aniso(ax, ay, world_to_local(V, T, B, N),
                                            world_to_local(result.wi, T, B, N));
@@ -445,11 +596,14 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
 
         float D_cc    = ggx_ndf(alpha_cc, NdotH);
         float G2_cc   = ggx_smith_g2(alpha_cc, NdotV, NdotL);
-        float F_cc    = fresnel_schlick_scalar(0.04f, VdotH);
+        float F_cc    = fresnel_schlick_scalar(clearcoat_f0(si), VdotH);
         float cc_brdf = D_cc * G2_cc * F_cc / (4.0f * NdotV * NdotL + 1e-10f);
         float3 f_cc   = make_float3(si.clearcoat * cc_brdf);
 
-        float3 f_total = f_diffuse + f_spec + f_cc;
+        float3 f_sheen = sheen_brdf(si, NdotH, NdotL, NdotV);
+        float3 f_total = ((f_diffuse + f_spec * specular_lobe_scale(si)) * clearcoat_base_scale(si, NdotV, NdotL) + f_cc) *
+                             sheen_base_scale(si, NdotV) +
+                         f_sheen;
 
         float pdf_diffuse = cosine_hemisphere_pdf(NdotL);
         float pdf_spec    = ggx_vndf_pdf_aniso(ax, ay, world_to_local(H, T, B, N),
@@ -526,7 +680,7 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
     // only one that can be chosen, so it carries probability 1.
     const float p_trans_eff = exiting ? 1.0f : p_transmission;
 
-    float3 F0 = gltf_f0(si.ior, si.specular, si.specular_tint, si.albedo, si.metallic);
+    float3 F0 = gltf_f0(si.ior, si.specular, si.specular_color, si.albedo, si.metallic);
 
     // Reflection means wi and wo are on the SAME side of the surface. Testing
     // NdotL alone only worked while NdotV was guaranteed positive; on an exit
@@ -550,7 +704,7 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
                            (1.0f - saturate(si.diffuse_transmission));
 
         // Specular
-        float3 F      = fresnel_schlick(F0, VdotH);
+        float3 F      = specular_fresnel(si, F0, VdotH);
         float  D      = ggx_ndf_aniso(ax, ay, world_to_local(H, T, B, N));
         float  G2     = ggx_smith_g2_aniso(ax, ay, world_to_local(V, T, B, N),
                                            world_to_local(wi, T, B, N));
@@ -564,13 +718,21 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
         {
             float D_cc    = ggx_ndf(alpha_cc, NdotH);
             float G2_cc   = ggx_smith_g2(alpha_cc, NdotV, NdotL);
-            float F_cc    = fresnel_schlick_scalar(0.04f, VdotH);
+            float F_cc    = fresnel_schlick_scalar(clearcoat_f0(si), VdotH);
             float cc_brdf = D_cc * G2_cc * F_cc / (4.0f * NdotV * NdotL + 1e-10f);
             f_cc          = make_float3(si.clearcoat * cc_brdf);
             pdf_cc        = ggx_vndf_pdf(alpha_cc, NdotH, NdotV, VdotH);
         }
 
-        result.bsdf = f_diffuse + f_spec + f_cc;
+        // Sheen. Added here and in all three reflection branches of sample():
+        // the two paths are MIS-weighted against each other, so a term present
+        // in one and missing from the other is not a small error, it is two
+        // different BRDFs being blended.
+        float3 f_sheen = sheen_brdf(si, NdotH, NdotL, NdotV);
+
+        result.bsdf = ((f_diffuse + f_spec * specular_lobe_scale(si)) * clearcoat_base_scale(si, NdotV, NdotL) + f_cc) *
+                          sheen_base_scale(si, NdotV) +
+                      f_sheen;
 
         float pdf_diffuse = cosine_hemisphere_pdf(NdotL);
         float pdf_spec    = ggx_vndf_pdf_aniso(ax, ay, world_to_local(H, T, B, N),

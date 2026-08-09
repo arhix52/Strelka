@@ -98,7 +98,7 @@ void HdStrelkaMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* rend
     mDescription.params.roughness = 0.5f;
     mDescription.params.ior = 1.5f;
     mDescription.params.specular = 0.5f;
-    mDescription.params.specular_tint = 0.0f;
+    mDescription.params.specular_color = glm::float3(1.0f);
     mDescription.params.transmission = 0.0f;
     mDescription.params.clearcoat = 0.0f;
     mDescription.params.clearcoat_roughness = 0.01f;

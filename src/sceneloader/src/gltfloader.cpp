@@ -532,7 +532,9 @@ void readGpuInstancing(const tinygltf::Model& model, const tinygltf::Node& node,
     }
 }
 
-void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf::Node& node, const uint32_t currentNodeId, const glm::float4x4& baseTransform, const float globalScale, MeshCache& meshCache)
+void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf::Node& node,
+                 const uint32_t currentNodeId, const glm::float4x4& baseTransform, const float globalScale,
+                 MeshCache& meshCache, const std::vector<int>& cameraIndexMap)
 {
     if (gltfDebugLoggingEnabled())
     {
@@ -580,24 +582,34 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
     }
     else if (node.camera != -1) // camera node
     {
-        scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::camera;
-        scene.mNodes[currentNodeId].camera = node.camera;
-        glm::float3 scale;
-        glm::quat rotation;
-        glm::float3 translation;
-        oka::decomposeTrs(globalTransform, translation, rotation, scale);
+        // Through the map, never by the raw glTF index -- see loadCameras.
+        const int cameraId = ((size_t)node.camera < cameraIndexMap.size()) ? cameraIndexMap[node.camera] : -1;
+        if (cameraId < 0)
+        {
+            STRELKA_WARNING("Node '{}' points at glTF camera {}, which was not loaded", node.name, node.camera);
+        }
+        else
+        {
+            scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::camera;
+            scene.mNodes[currentNodeId].camera = cameraId;
+            glm::float3 scale;
+            glm::quat rotation;
+            glm::float3 translation;
+            oka::decomposeTrs(globalTransform, translation, rotation, scale);
 
-        rotation = glm::conjugate(rotation);
+            rotation = glm::conjugate(rotation);
 
-        scene.getCamera(node.camera).node = currentNodeId;
-        // decomposeTrs already returns the world translation; multiplying it by
-        // the node's scale again moves the camera by however much the hierarchy
-        // was scaled. Harmless while every scale is 1, which is why it survived.
-        scene.getCamera(node.camera).position = translation;
-        scene.getCamera(node.camera).mOrientation = rotation;
-        scene.getCamera(node.camera).updateViewMatrix();
-        STRELKA_INFO("Camera '{}' (glTF camera {}) at [{:.3f} {:.3f} {:.3f}]", node.name,
-                     node.camera, translation.x, translation.y, translation.z);
+            oka::Camera& camera = scene.getCamera((uint32_t)cameraId);
+            camera.node = currentNodeId;
+            // decomposeTrs already returns the world translation; multiplying it by
+            // the node's scale again moves the camera by however much the hierarchy
+            // was scaled. Harmless while every scale is 1, which is why it survived.
+            camera.position = translation;
+            camera.mOrientation = rotation;
+            camera.updateViewMatrix();
+            STRELKA_INFO("Camera '{}' (glTF camera {} -> scene camera {}) at [{:.3f} {:.3f} {:.3f}]", node.name,
+                         node.camera, cameraId, translation.x, translation.y, translation.z);
+        }
     }
 
     for (int childIdx : node.children)
@@ -605,7 +617,8 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
         if (scene.mNodes[currentNodeId].type == oka::Scene::Node::NodeType::unknown)
             scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::sceneGraph;
         scene.mNodes[childIdx].parent = currentNodeId;
-        processNode(model, scene, model.nodes[childIdx], childIdx, globalTransform, globalScale, meshCache);
+        processNode(model, scene, model.nodes[childIdx], childIdx, globalTransform, globalScale, meshCache,
+                    cameraIndexMap);
     }
 }
 
@@ -614,7 +627,16 @@ std::string getTextureUri(const tinygltf::Model& model, int texIndex)
     if (texIndex < 0)
         return {};
     const auto imageId = model.textures[texIndex].source;
-    return model.images[imageId].uri;
+    const std::string& uri = model.images[imageId].uri;
+
+    // A glTF URI is percent-encoded, and a filename is not: an exporter that
+    // writes "Material #449.png" stores "Material%20%23449.png", which opens
+    // nothing. Spaces in texture names are common enough in DCC exports that
+    // this shows up as a single missing texture rather than as an obvious fault.
+    std::string decoded;
+    if (tinygltf::URIDecode(uri, &decoded, nullptr))
+        return decoded;
+    return uri;
 }
 
 // Read one scalar out of a KHR_materials_* extension, falling back to the
@@ -705,7 +727,22 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     // lobe it was never meant to have.
     p.ior = khrFloat(material, "KHR_materials_ior", "ior", 1.5f);
     p.specular = 0.5f * khrFloat(material, "KHR_materials_specular", "specularFactor", 1.0f);
-    p.specular_tint = 0.0f;
+    // specularColorFactor, white when the extension is absent or silent about it.
+    p.specular_color = glm::float3(1.0f);
+    {
+        const auto sp = material.extensions.find("KHR_materials_specular");
+        if (sp != material.extensions.end() && sp->second.IsObject() &&
+            sp->second.Has("specularColorFactor"))
+        {
+            const tinygltf::Value& c = sp->second.Get("specularColorFactor");
+            if (c.IsArray() && c.ArrayLen() >= 3)
+            {
+                p.specular_color = { (float)c.Get(0).GetNumberAsDouble(),
+                                     (float)c.Get(1).GetNumberAsDouble(),
+                                     (float)c.Get(2).GetNumberAsDouble() };
+            }
+        }
+    }
     p.transmission = khrFloat(material, "KHR_materials_transmission", "transmissionFactor", 0.0f);
 
     // KHR_materials_diffuse_transmission. Foliage: light enters the leaf and
@@ -728,9 +765,170 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
             }
         }
     }
+    // KHR_materials_sheen. The extension carries a colour and a roughness and no
+    // separate weight, so the weight is the colour's peak channel and the colour
+    // is normalised by it -- that keeps a dim grey sheen dim rather than turning
+    // it into a full-strength grey layer, and leaves sheen at 0 (the lobe off)
+    // when the extension is absent.
+    p.sheen = 0.0f;
+    p.sheen_roughness = khrFloat(material, "KHR_materials_sheen", "sheenRoughnessFactor", 0.0f);
+    p.sheen_color = glm::float3(1.0f);
+    {
+        const auto sit = material.extensions.find("KHR_materials_sheen");
+        if (sit != material.extensions.end() && sit->second.IsObject() && sit->second.Has("sheenColorFactor"))
+        {
+            const tinygltf::Value& c = sit->second.Get("sheenColorFactor");
+            if (c.IsArray() && c.ArrayLen() >= 3)
+            {
+                const glm::float3 sheenColor((float)c.Get(0).GetNumberAsDouble(),
+                                             (float)c.Get(1).GetNumberAsDouble(),
+                                             (float)c.Get(2).GetNumberAsDouble());
+                p.sheen = std::max(sheenColor.x, std::max(sheenColor.y, sheenColor.z));
+                if (p.sheen > 0.0f)
+                    p.sheen_color = sheenColor / p.sheen;
+            }
+        }
+    }
+
+    // STRELKA_materials_subsurface. Not a ratified extension: glTF has nothing
+    // for subsurface, and the alternative was to fold it into
+    // KHR_materials_diffuse_transmission, which describes a leaf -- light out the
+    // far side immediately -- and not a random walk through wax.
+    //
+    // scatterColor is the *single-scattering* albedo, not the diffuse albedo a
+    // DCC shows in its colour picker. The two are related by an inversion that
+    // needs a fit, and stating which one this field is beats implementing the
+    // fit badly. Values near 1 are what marble, soap and skin want.
+    p.subsurface = 0.0f;
+    p.subsurface_radius = glm::float3(0.0f);
+    p.subsurface_anisotropy = 0.0f;
+    {
+        const auto sit = material.extensions.find("STRELKA_materials_subsurface");
+        if (sit != material.extensions.end() && sit->second.IsObject())
+        {
+            const tinygltf::Value& ext = sit->second;
+            if (ext.Has("scatterRadius"))
+            {
+                const tinygltf::Value& r = ext.Get("scatterRadius");
+                if (r.IsArray() && r.ArrayLen() >= 3)
+                {
+                    p.subsurface_radius = { (float)r.Get(0).GetNumberAsDouble(),
+                                            (float)r.Get(1).GetNumberAsDouble(),
+                                            (float)r.Get(2).GetNumberAsDouble() };
+                }
+            }
+            p.subsurface_anisotropy = khrFloat(material, "STRELKA_materials_subsurface", "anisotropy", 0.0f);
+            // The albedo scatterColor was derived from. Absent means "the same
+            // colour", i.e. a flat material, and the ratio the walk takes is 1.
+            p.subsurface_reference = glm::float3(0.0f);
+            if (ext.Has("scatterReference"))
+            {
+                const tinygltf::Value& r = ext.Get("scatterReference");
+                if (r.IsArray() && r.ArrayLen() >= 3)
+                {
+                    p.subsurface_reference = { (float)r.Get(0).GetNumberAsDouble(),
+                                               (float)r.Get(1).GetNumberAsDouble(),
+                                               (float)r.Get(2).GetNumberAsDouble() };
+                }
+            }
+            p.subsurface = khrFloat(material, "STRELKA_materials_subsurface", "subsurfaceFactor", 1.0f);
+
+            // A zero mean free path is an infinitely dense medium, i.e. a walk
+            // that never terminates. Treat it as "no medium" rather than as a
+            // hang.
+            if (p.subsurface_radius.x <= 0.0f && p.subsurface_radius.y <= 0.0f &&
+                p.subsurface_radius.z <= 0.0f)
+            {
+                p.subsurface = 0.0f;
+            }
+
+            if (p.subsurface > 0.0f)
+            {
+                // The medium is entered through the diffuse transmission lobe:
+                // everything that would have scattered diffusely goes in instead
+                // and comes back out of the walk. scatterColor rides on
+                // diffuse_transmission_color, which is what the walk uses as its
+                // single-scattering albedo.
+                p.diffuse_transmission = p.subsurface;
+                const auto cit = ext.Has("scatterColor") ? &ext.Get("scatterColor") : nullptr;
+                if (cit && cit->IsArray() && cit->ArrayLen() >= 3)
+                {
+                    p.diffuse_transmission_color = { (float)cit->Get(0).GetNumberAsDouble(),
+                                                     (float)cit->Get(1).GetNumberAsDouble(),
+                                                     (float)cit->Get(2).GetNumberAsDouble() };
+                }
+            }
+        }
+    }
+
+    // STRELKA_materials_medium: a participating medium bounded by the geometry
+    // carrying this material. V-Ray's EnvironmentFog with a gizmo.
+    //
+    // The medium's interior parameters ride on the subsurface fields -- a fog
+    // volume and a block of wax differ in where light enters, not in what happens
+    // once it is inside -- so only the emission and the boundary flag are read
+    // here. `density` is the extinction, i.e. the reciprocal of the mean free
+    // path, because that is the number a DCC's fog gizmo exposes.
+    p.medium_flags = 0u;
+    p.medium_emission = glm::float3(0.0f);
+    {
+        const auto mit = material.extensions.find("STRELKA_materials_medium");
+        if (mit != material.extensions.end() && mit->second.IsObject())
+        {
+            const tinygltf::Value& ext = mit->second;
+            const float density = khrFloat(material, "STRELKA_materials_medium", "density", 1.0f);
+            if (density > 0.0f)
+            {
+                p.medium_flags |= MEDIUM_FLAG_BOUNDARY;
+                p.subsurface_radius = glm::float3(1.0f / density);
+                p.subsurface_anisotropy =
+                    khrFloat(material, "STRELKA_materials_medium", "anisotropy", 0.0f);
+                p.diffuse_transmission_color = glm::float3(1.0f);
+                if (ext.Has("scatterColor"))
+                {
+                    const tinygltf::Value& c = ext.Get("scatterColor");
+                    if (c.IsArray() && c.ArrayLen() >= 3)
+                    {
+                        p.diffuse_transmission_color = { (float)c.Get(0).GetNumberAsDouble(),
+                                                         (float)c.Get(1).GetNumberAsDouble(),
+                                                         (float)c.Get(2).GetNumberAsDouble() };
+                    }
+                }
+                if (ext.Has("emissionColor"))
+                {
+                    const tinygltf::Value& c = ext.Get("emissionColor");
+                    if (c.IsArray() && c.ArrayLen() >= 3)
+                    {
+                        p.medium_emission = { (float)c.Get(0).GetNumberAsDouble(),
+                                              (float)c.Get(1).GetNumberAsDouble(),
+                                              (float)c.Get(2).GetNumberAsDouble() };
+                    }
+                }
+            }
+        }
+    }
+
+    // KHR_materials_iridescence. With no thickness texture the spec says to use
+    // iridescenceThicknessMaximum, so that is the only thickness read here; an
+    // exporter that wants a specific film writes the same value to both bounds.
+    p.iridescence = khrFloat(material, "KHR_materials_iridescence", "iridescenceFactor", 0.0f);
+    p.iridescence_ior = khrFloat(material, "KHR_materials_iridescence", "iridescenceIor", 1.3f);
+    p.iridescence_thickness =
+        khrFloat(material, "KHR_materials_iridescence", "iridescenceThicknessMaximum", 400.0f);
+
     p.clearcoat = khrFloat(material, "KHR_materials_clearcoat", "clearcoatFactor", 0.0f);
     p.clearcoat_roughness =
         khrFloat(material, "KHR_materials_clearcoat", "clearcoatRoughnessFactor", 0.0f);
+    // Not in KHR_materials_clearcoat, which fixes the coat at a clear lacquer.
+    // Blender writes it into extras, and the ceramics in the bathroom scene are
+    // authored at 2.0 -- an F0 of 0.111 against the extension's 0.04, which is
+    // most of the difference between glazed and painted.
+    p.clearcoat_ior = 1.5f;
+    {
+        const auto cit = material.extensions.find("KHR_materials_clearcoat");
+        if (cit != material.extensions.end() && cit->second.Has("clearcoatIor"))
+            p.clearcoat_ior = (float)cit->second.Get("clearcoatIor").GetNumberAsDouble();
+    }
     p.anisotropy = khrFloat(material, "KHR_materials_anisotropy", "anisotropyStrength", 0.0f);
     p.anisotropy_rotation = khrFloat(material, "KHR_materials_anisotropy", "anisotropyRotation", 0.0f);
 
@@ -774,7 +972,29 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     p.emission_tex = -1;
     p.occlusion_tex = -1;
     p.transmission_tex = -1;
+    // Thin-walled: a surface with no interior, so light passes straight through
+    // instead of refracting twice. A soap bubble, not a marble.
+    //
+    // glTF says a transmissive material is thin-walled unless KHR_materials_volume
+    // gives it a non-zero thickness, and taken literally that would be right. It
+    // is not followed here, because Blender only writes that extension for a
+    // specific node setup ("glTF Material Output" with a Thickness socket): under
+    // the literal reading every ordinary glass export becomes a bubble. Absence
+    // is read as solid, and thin-walledness has to be stated.
+    //
+    // What this fixes: the bubbles floating on the bath water rendered as dark
+    // specks, because a solid sphere of IOR 1.6 refracts into itself and the path
+    // dies before it gets out.
     p.thin_walled = 0;
+    {
+        const auto vit = material.extensions.find("KHR_materials_volume");
+        if (vit != material.extensions.end() && vit->second.IsObject())
+        {
+            const float thickness =
+                khrFloat(material, "KHR_materials_volume", "thicknessFactor", 0.0f);
+            p.thin_walled = (thickness <= 0.0f) ? 1u : 0u;
+        }
+    }
     // A transmissive surface is a dielectric volume and needs a priority so the
     // nested-dielectric IOR stack can order it; an opaque one must stay at 0.
     p.dielectric_priority = p.transmission > 0.0f ? 10u : 0u;
@@ -805,24 +1025,53 @@ void loadMaterials(const tinygltf::Model& model, oka::Scene& scene)
     }
 }
 
-void loadCameras(const tinygltf::Model& model, oka::Scene& scene)
+// Fills `gltfToScene` with one entry per glTF camera: the index of the camera it
+// became in the scene, or -1 if it was not loaded.
+//
+// The map is the point. Camera *nodes* address cameras by glTF index, so if this
+// function ever appends fewer cameras than the file declares, every later index
+// is off by the number skipped and the last one addresses past the end of the
+// vector. That went unnoticed for a while because it does not crash: it corrupts
+// a projection matrix, which then compares unequal to itself in MetalRender's
+// "did the camera move" test and resets the accumulator on every single frame.
+void loadCameras(const tinygltf::Model& model, oka::Scene& scene, std::vector<int>& gltfToScene)
 {
-    for (const auto& cameraGltf : model.cameras)
+    gltfToScene.assign(model.cameras.size(), -1);
+
+    for (size_t i = 0; i < model.cameras.size(); ++i)
     {
-        if (strcmp(cameraGltf.type.c_str(), "perspective") == 0)
+        const auto& cameraGltf = model.cameras[i];
+        oka::Camera camera;
+        camera.name = cameraGltf.name;
+
+        if (cameraGltf.type == "perspective")
         {
-            oka::Camera camera;
+            camera.projection = oka::Camera::ProjectionType::perspective;
             camera.fov = cameraGltf.perspective.yfov * (180.0f / 3.1415926f);
             camera.authoredAspect = (float)cameraGltf.perspective.aspectRatio;
             camera.znear = cameraGltf.perspective.znear;
             camera.zfar = cameraGltf.perspective.zfar;
-            camera.name = cameraGltf.name;
-            scene.addCamera(camera);
+        }
+        else if (cameraGltf.type == "orthographic")
+        {
+            // glTF xmag/ymag are half-extents, so they go straight across; the
+            // authored aspect follows from them and needs no separate field.
+            camera.projection = oka::Camera::ProjectionType::orthographic;
+            camera.xmag = (float)cameraGltf.orthographic.xmag;
+            camera.ymag = (float)cameraGltf.orthographic.ymag;
+            camera.authoredAspect = (camera.ymag > 0.0f) ? (camera.xmag / camera.ymag) : 0.0f;
+            camera.znear = cameraGltf.orthographic.znear;
+            camera.zfar = cameraGltf.orthographic.zfar;
         }
         else
         {
-            // not supported
+            STRELKA_WARNING("glTF camera {} '{}': unknown type '{}', skipped", i, cameraGltf.name,
+                            cameraGltf.type);
+            continue;
         }
+
+        gltfToScene[i] = (int)scene.getCameraCount();
+        scene.addCamera(camera);
     }
     // No default camera added here — the editor creates its own "Main" camera
     // with proper scene-fit positioning in EditorApp::prepare().
@@ -1344,12 +1593,15 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     // Lives for the whole graph walk: two nodes anywhere in the scene that point
     // at the same glTF mesh share the geometry built for the first of them.
     MeshCache meshCache;
+    // glTF camera index -> scene camera index; filled by loadCameras, read by the
+    // graph walk, so it has to outlive both phases.
+    std::vector<int> cameraIndexMap;
 
     std::vector<Phase> phases;
     phases.push_back({ "materials", [&] { loadMaterials(model, scene); } });
     phases.push_back({ "lights", [&] { hadJsonLights = loadLightsFromJson(modelPath, scene); } });
     phases.push_back({ "cameras", [&] {
-                          loadCameras(model, scene);
+                          loadCameras(model, scene, cameraIndexMap);
                           loadCamerasFromJson(modelPath, scene);
                       } });
     phases.push_back({ "nodes", [&] { loadNodes(model, scene, globalScale); } });
@@ -1359,7 +1611,7 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
         phases.push_back({ "geometry", [&, i] {
                               const int rootNodeIdx = model.scenes[sceneId].nodes[i];
                               processNode(model, scene, model.nodes[rootNodeIdx], rootNodeIdx,
-                                          glm::float4x4(1.0f), globalScale, meshCache);
+                                          glm::float4x4(1.0f), globalScale, meshCache, cameraIndexMap);
                           } });
     }
     // Punctual lights need node world transforms, so they land after the graph.

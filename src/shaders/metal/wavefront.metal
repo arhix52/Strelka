@@ -23,6 +23,7 @@
 // ============================================================================
 
 #include "fog.h"
+#include "subsurface.h"
 #include "sharc.h"
 
 // Bit 30 of HitRecord::geomEntryIndex marks a scattering event in the
@@ -31,6 +32,26 @@
 // is a third kind of "what did this ray hit" and the shade kernel already
 // branches on that word.
 #define HIT_FOG_BIT (1u << 30)
+
+// Bit 29 marks a scattering event inside a subsurface medium: like the fog bit,
+// the ray never reached a surface, but the medium is the one bounded by the
+// object the path is currently inside rather than the atmosphere.
+#define HIT_SSS_BIT (1u << 29)
+
+// The walk's albedo, packed to one word. Eight bits a channel is more precision
+// than a scattering albedo carries meaning at, and this rides on every live path.
+static inline uint32_t packMediumAlbedo(float3 a)
+{
+    return (uint32_t)(saturate(a.x) * 255.0f + 0.5f) |
+           ((uint32_t)(saturate(a.y) * 255.0f + 0.5f) << 8) |
+           ((uint32_t)(saturate(a.z) * 255.0f + 0.5f) << 16);
+}
+
+static inline float3 unpackMediumAlbedo(uint32_t v)
+{
+    constexpr float s = 1.0f / 255.0f;
+    return float3((v & 0xffu) * s, ((v >> 8) & 0xffu) * s, ((v >> 16) & 0xffu) * s);
+}
 
 // Bit 31 of HitRecord::geomEntryIndex marks a hit on emissive geometry, in which
 // case the remaining bits hold the light index rather than a geometry entry.
@@ -378,6 +399,10 @@ kernel void wavefrontGenerate(
     p.sharcIndex = SHARC_NO_ENTRY;
     p.sharcRadianceAtVisit = packed_float3(0.0f);
     p.sharcInvThroughput = packed_float3(0.0f);
+    // Outside every medium. A camera that starts inside a translucent object is
+    // not handled -- there is nothing to tell the path which medium it is in.
+    p.medium = 0u;
+    p.mediumAlbedo = 0u;
     paths[tid] = p;
 
     // ior_stack_* take a thread reference; device memory cannot bind to one.
@@ -407,7 +432,15 @@ static void extendImpl(
     // Only for the fog: the path's depth decorrelates the free-flight draw
     // across bounces, and without it every bounce of a path scatters at the same
     // fraction of its segment, which shows up as banding in the haze.
-    device const PathState*                                    paths)
+    device const PathState*                                    paths,
+    // Only for the subsurface walk, which needs the medium's mean free path to
+    // sample a free flight and reads it from the material the path is inside.
+    device const Material*                                     materials,
+    // Chosen per dispatch rather than per ray: the only thing it distinguishes
+    // is the camera bounce from the rest, and `extend` is encoded once per
+    // bounce anyway. Reading the path's depth here to answer the same question
+    // would put a load in the hottest kernel in the renderer.
+    uint32_t                                                   rayMask)
 {
     // Indirect dispatch can only launch whole threadgroups, so the tail of the
     // last one runs past the queue and has to be discarded here.
@@ -453,7 +486,7 @@ static void extendImpl(
     isect.accept_any_intersection(false);
 
     const typename T::isect::result_type hit =
-        T::trace(isect, r, accelerationStructure, uniforms.primaryRayMask, motionTime);
+        T::trace(isect, r, accelerationStructure, rayMask, motionTime);
 
     // Chased through the ray buffer -- 22 MB at 720p, past the caches -- because
     // the queue this used to walk is 3.7 MB and fits in them, which made the
@@ -497,8 +530,46 @@ static void extendImpl(
     // this renderer has already measured that dispatch boundaries are not free
     // (see the acceleration structure batching note). Not attempted.
     //
+    // Inside a subsurface medium the path is inside a solid object, so the
+    // atmosphere does not apply and this runs instead of the fog test rather
+    // than alongside it.
+    if (SPEC_SSS)
+    {
+        const uint32_t sss = paths[tid].medium;
+        const uint32_t medium = sss & MEDIUM_INDEX_MASK;
+        if (medium != 0u)
+        {
+            const float surfaceT = (hit.type == intersection_type::none) ? 1e16f : hit.distance;
+            const float3 sigmaT = sssSigmaT(float3(materials[medium - 1u].subsurface_radius));
+            // The walk step, not the path depth, indexes the sampler: a walk can
+            // take hundreds of steps at one depth, and rebuilding the sampler in
+            // the same state at each of them would have every step draw the same
+            // distance and turn the same way.
+            const uint32_t step = sss >> MEDIUM_STEP_SHIFT;
+            SamplerState srng = samplerFor(uniforms, tid, sampleIdx,
+                                           pathDepth(paths[tid].depthAndFlags) + step);
+            float scatterT = 0.0f;
+            if (step < MEDIUM_MAX_STEPS &&
+                sssSampleDistance(sigmaT, surfaceT,
+                                  random<SampleDimension::eSssChannel>(srng, uniforms.samplerType),
+                                  random<SampleDimension::eSssDistance>(srng, uniforms.samplerType),
+                                  scatterT))
+            {
+                HitRecord sssRec;
+                sssRec.geomEntryIndex = HIT_SSS_BIT;
+                sssRec.instanceIndex = 0u;
+                sssRec.primitiveId = 0u;
+                sssRec.barycentrics = vector_float2(0.0f, 0.0f);
+                sssRec.distance = scatterT;
+                hits[tid] = sssRec;
+                queuePush(hitCounter, hitQueue, tid);
+                return;
+            }
+        }
+    }
+
     // A scene without fog already gets 704: SPEC_FOG is a function constant.
-    if (SPEC_FOG && uniforms.hasFog)
+    if (SPEC_FOG && uniforms.hasFog && !(SPEC_SSS && (paths[tid].medium & MEDIUM_INDEX_MASK) != 0u))
     {
         const float surfaceT =
             (hit.type == intersection_type::none) ? 1e16f : hit.distance;
@@ -528,7 +599,7 @@ static void extendImpl(
     }
 
     const auto inst = instances[hit.instance_id];
-    const bool isLight = (inst.mask == GEOMETRY_MASK_LIGHT);
+    const bool isLight = (inst.mask == GEOMETRY_MASK_LIGHT || inst.mask == GEOMETRY_MASK_LIGHT_HIDDEN);
     // For emissive geometry userID indexes the light table, not the geometry
     // table; the flag bit tells `shade` which one it is.
     HitRecord rec;
@@ -555,10 +626,13 @@ static void extendImpl(
                      device atomic_uint* hitCounter [[buffer(9)]],                                          \
                      device uint32_t* missQueue [[buffer(10)]],                                             \
                      device atomic_uint* missCounter [[buffer(11)]],                                        \
-                     device const PathState* paths [[buffer(12)]])                                         \
+                     device const PathState* paths [[buffer(12)]],                                          \
+                     device const Material* materials [[buffer(13)]],                                       \
+                     constant uint32_t& rayMask [[buffer(14)]])                                            \
     {                                                                                                       \
         extendImpl<TRAITS>(gid, uniforms, instances, accelerationStructure, rays, hits, sampleIdx, queue,    \
-                           control, hitQueue, hitCounter, missQueue, missCounter, paths);              \
+                           control, hitQueue, hitCounter, missQueue, missCounter, paths, materials,       \
+                           rayMask);                                                                        \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
@@ -964,7 +1038,7 @@ kernel void wavefrontMiss(
     {
         radiance += throughput * uniforms.missColor;
     }
-    radianceOut[tid] += float4(radiance, 0.0f);
+    radianceOut[tid] += float4(clampIndirectContribution(radiance, depth, uniforms.clampIndirect), 0.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -1074,9 +1148,10 @@ kernel void wavefrontShade(
                     ShadowRay sr;
                     sr.origin = packed_float3(scatterPoint);
                     sr.direction = packed_float3(conn.toLight);
-                    sr.weight = packed_float3(weight);
+                    sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
                     sr.maxDistance = conn.tMax;
                     sr.pixelIndex = tid;
+                    sr.medium = p.medium & MEDIUM_INDEX_MASK;
                     sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) *
                                   kShadowTransmittanceCutoff;
                     shadowRays[slot] = sr;
@@ -1119,6 +1194,140 @@ kernel void wavefrontShade(
                                                PATH_FLAG_SPECULAR | PATH_FLAG_NEE_DONE)) |
                           (didNee ? PATH_FLAG_NEE_DONE : 0u);
         if (depth + 1u >= uniforms.maxDepth)
+        {
+            return;
+        }
+        paths[tid] = p;
+        queuePush(outCounter, queueOut, tid);
+        return;
+    }
+
+    // --- Subsurface random walk ---------------------------------------------
+    //
+    // A scattering event inside the medium bounded by the surface the path
+    // entered through. Shaped like the fog case above and different from it in
+    // two ways: the medium is per material rather than global, and there is no
+    // next-event estimation -- the boundary occludes nearly every shadow ray a
+    // dense medium would spawn, so the cost is real and the contribution is not.
+    // Light gets in and out through the surface, where NEE does run.
+    if (SPEC_SSS && (rec.geomEntryIndex & HIT_SSS_BIT) != 0u)
+    {
+        const uint32_t medium = p.medium & MEDIUM_INDEX_MASK;
+        const uint32_t step = p.medium >> MEDIUM_STEP_SHIFT;
+        device const Material& mm = materials[medium - 1u];
+        const float3 sigmaT = sssSigmaT(float3(mm.subsurface_radius));
+        // A bounded volume has no entry surface to have textured, so it keeps the
+        // material's constant; a subsurface walk takes what the boundary resolved.
+        const bool isBoundedMedium = (mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u;
+        const float3 albedo = isBoundedMedium ? float3(mm.diffuse_transmission_color)
+                                              : unpackMediumAlbedo(p.mediumAlbedo);
+
+        throughput *= sssScatterWeight(sigmaT, albedo, rec.distance);
+
+        const float3 scatterPoint = rayOrigin + rayDir * rec.distance;
+        SamplerState wrng = samplerFor(uniforms, tid, sampleIdx, depth + step);
+
+        // A bounded volume is the one kind of medium worth connecting to a light
+        // from: it is thin, it is lit from outside, and the shafts and the glow
+        // are single scattering. A subsurface walk gets neither -- its boundary
+        // occludes almost every shadow ray it would spawn.
+        const bool isBounded = isBoundedMedium;
+        bool didNeeVolume = false;
+        if (isBounded)
+        {
+            // Volumetric emission: what makes the bath water glow rather than
+            // merely tint what is behind it.
+            //
+            // Clamped like every other contribution. Emission reached through a
+            // glass or specular chain arrives with a throughput well above one,
+            // and adding that unclamped put fireflies over the entire frame --
+            // including the backdrop outside the room, which is what made it
+            // obvious the term and not the medium was at fault.
+            radiance += clampIndirectContribution(throughput * float3(mm.medium_emission), depth,
+                                                  uniforms.clampIndirect);
+
+            if (SPEC_LIGHTS || (SPEC_ENV_MAP && uniforms.hasEnvMap))
+            {
+                SurfaceInteraction vsi = {};
+                vsi.position = scatterPoint;
+                vsi.shading_normal = -rayDir;
+                vsi.geometry_normal = -rayDir;
+                vsi.front_face = true;
+                const LightConnection conn =
+                    connectToLight(uniforms, uniforms.numLights, lights, wrng, vsi, envAliasTable,
+                                   envMapTexture, true);
+                if (conn.needsRay && conn.pdf > 0.0f)
+                {
+                    // dot(rayDir, toLight): the phase function takes the angle
+                    // between the two directions of travel, not between the two
+                    // directions pointing away from the vertex. See the same
+                    // note on the fog path.
+                    const float phase = hgPhase(dot(rayDir, conn.toLight), mm.subsurface_anisotropy);
+                    const float misWeight = conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, phase);
+                    const float3 weight = throughput * (conn.radiance / conn.pdf) * misWeight * phase;
+                    if (any(weight > 1e-6f))
+                    {
+                        ShadowRay sr;
+                        sr.origin = packed_float3(scatterPoint);
+                        sr.direction = packed_float3(conn.toLight);
+                        sr.weight = packed_float3(
+                            clampIndirectContribution(weight, depth, uniforms.clampIndirect));
+                        sr.maxDistance = conn.tMax;
+                        sr.pixelIndex = tid;
+                        sr.medium = p.medium & MEDIUM_INDEX_MASK;
+                        sr.rrCutoff = random<SampleDimension::eShadowRR>(wrng, uniforms.samplerType) *
+                                      kShadowTransmittanceCutoff;
+                        const uint32_t slot =
+                            atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                        shadowRays[slot] = sr;
+                        didNeeVolume = true;
+                    }
+                }
+            }
+        }
+
+        float phasePdf = 0.0f;
+        const float3 nextDir =
+            hgSample(-rayDir, mm.subsurface_anisotropy,
+                     random<SampleDimension::eSssPhaseU>(wrng, uniforms.samplerType),
+                     random<SampleDimension::eSssPhaseV>(wrng, uniforms.samplerType), phasePdf);
+
+        radianceOut[tid] += float4(radiance, 0.0f);
+
+        // Roulette on what the walk has left. The step ceiling is a backstop for
+        // a medium dense enough that roulette alone would take thousands of
+        // steps to end; this is what actually terminates the walk.
+        const float survive = clamp(max(max(throughput.x, throughput.y), throughput.z), 0.05f, 1.0f);
+        if (random<SampleDimension::eRussianRoulette>(wrng, uniforms.samplerType) >= survive)
+        {
+            return;
+        }
+        throughput /= survive;
+
+        PathRay nextRay;
+        nextRay.origin = packed_float3(scatterPoint);
+        nextRay.direction = packed_float3(nextDir);
+        rays[tid] = nextRay;
+
+        p.throughput = packed_float3(throughput);
+        p.lastBsdfPdf = phasePdf;
+        p.misDistance = 0.0f;
+        // The walk advances its own step counter and not the path depth: the
+        // whole walk is one scattering event as far as the path budget is
+        // concerned, and charging it per step would make a translucent object go
+        // black at any sane maxDepth.
+        p.medium = medium | ((step + 1u) << MEDIUM_STEP_SHIFT);
+        // A subsurface walk keeps its depth: the whole walk is one scattering
+        // event as far as the path budget is concerned, and charging it per step
+        // would make a translucent object go black at any sane maxDepth. A
+        // bounded volume does advance, for the reason the fog path does -- a
+        // medium with no depth budget of its own is a path that wanders forever.
+        const uint32_t nextDepth = isBounded ? (depth + 1u) : depth;
+        p.depthAndFlags = nextDepth | PATH_FLAG_ALIVE |
+                          (p.depthAndFlags & ~(PATH_DEPTH_MASK | PATH_FLAG_ALIVE |
+                                               PATH_FLAG_SPECULAR | PATH_FLAG_NEE_DONE)) |
+                          (didNeeVolume ? PATH_FLAG_NEE_DONE : 0u);
+        if (nextDepth >= uniforms.maxDepth)
         {
             return;
         }
@@ -1180,7 +1389,7 @@ kernel void wavefrontShade(
                 radiance += throughput * Le * misWeightBalance(p.lastBsdfPdf, lightPdf);
             }
         }
-        radianceOut[tid] += float4(radiance, 0.0f);
+        radianceOut[tid] += float4(clampIndirectContribution(radiance, depth, uniforms.clampIndirect), 0.0f);
         return;
     }
 
@@ -1216,6 +1425,175 @@ kernel void wavefrontShade(
     const float3 worldBinormal = cross(worldNormal, worldTangent) * tangentSign;
 
     const float3 geomNormal = normalize(transformDirection(objectGeomNormal, objectToWorld));
+
+    // --- Crossing the boundary of a participating medium --------------------
+    //
+    // The gizmo of a bounded fog volume is not a surface: it is where the medium
+    // starts and stops. A ray through it toggles which medium it is in and
+    // carries on with the same direction and throughput -- unshaded, and without
+    // spending a bounce, because a volume the light passes through twice would
+    // otherwise cost two of them.
+    if (SPEC_SSS && (materials[entry.materialId].medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
+    {
+        // Bounded by the same counter the cutout pass-through uses, and for the
+        // same reason: neither advances `depth`, so neither has a natural end. A
+        // boundary the ray re-hits through a self-intersection would otherwise
+        // toggle the medium forever, and the path would stay in the queue burning
+        // samples rather than stopping.
+        const uint32_t passes = p.depthAndFlags >> PATH_PASSTHROUGH_SHIFT;
+        if (passes >= PATH_PASSTHROUGH_MAX)
+        {
+            radianceOut[tid] += float4(radiance, 0.0f);
+            return;
+        }
+        p.depthAndFlags = (p.depthAndFlags & ((1u << PATH_PASSTHROUGH_SHIFT) - 1u)) |
+                          ((passes + 1u) << PATH_PASSTHROUGH_SHIFT);
+
+        // Toggle, rather than deciding from the normal.
+        //
+        // A gizmo's winding is arbitrary: V-Ray decides inside from an
+        // inside/outside test and never looks at the normal, so a box exported
+        // from it may be wound either way. Reading `entering` off
+        // dot(rayDir, geomNormal) therefore inverted one of the two volumes in
+        // this scene -- and an inverted volume is not a subtle error, it is a
+        // medium that fills all of space except the gizmo. Every path in the
+        // frame then scattered in open air, which is what the speckle over the
+        // backdrop and the haze through the window were.
+        const uint32_t here = (entry.materialId + 1u) & MEDIUM_INDEX_MASK;
+        const bool leaving = (p.medium & MEDIUM_INDEX_MASK) == here;
+        p.medium = leaving ? 0u : here;
+
+        // Push past the surface on the side the ray is heading, which needs the
+        // sign of the normal and not its direction.
+        const float3 exitSide = (dot(rayDir, geomNormal) > 0.0f) ? geomNormal : -geomNormal;
+
+        PathRay nextRay;
+        nextRay.origin = packed_float3(offset_ray(worldPosition, exitSide));
+        nextRay.direction = packed_float3(rayDir);
+        rays[tid] = nextRay;
+
+        // The MIS distance has to keep counting: as far as the light at the end
+        // of this ray is concerned, the scattering vertex is still the one before
+        // the boundary, and resetting it here would inflate the weight the same
+        // way a cutout pass-through would.
+        p.misDistance += rec.distance;
+        radianceOut[tid] += float4(radiance, 0.0f);
+        paths[tid] = p;
+        queuePush(outCounter, queueOut, tid);
+        return;
+    }
+
+    // --- Leaving a subsurface medium ----------------------------------------
+    //
+    // The walk reached the boundary. Everything below -- the material, the BSDF,
+    // the cutout test -- describes what happens to a ray arriving from outside,
+    // and none of it applies to one on its way out, so the exit is handled here
+    // and the rest is skipped.
+    //
+    // Whatever surface the walk hit is treated as the boundary, not only the
+    // object it entered. For the closed shapes this serves that is the same
+    // surface; for geometry that interpenetrates it is a simplification, and the
+    // alternative is carrying the entry instance and rejecting hits on anything
+    // else -- which turns an open mesh into a light leak instead.
+    if (SPEC_SSS && (p.medium & MEDIUM_INDEX_MASK) != 0u &&
+        (materials[(p.medium & MEDIUM_INDEX_MASK) - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u)
+    {
+        const uint32_t medium = p.medium & MEDIUM_INDEX_MASK;
+        const uint32_t step = p.medium >> MEDIUM_STEP_SHIFT;
+        device const Material& mm = materials[medium - 1u];
+        throughput *= sssBoundaryWeight(sssSigmaT(float3(mm.subsurface_radius)), rec.distance);
+
+        // The ray is travelling outwards, so the outward normal is the one it
+        // agrees with.
+        const float3 outward = (dot(geomNormal, rayDir) > 0.0f) ? geomNormal : -geomNormal;
+        SamplerState xrng = samplerFor(uniforms, tid, sampleIdx, depth + step);
+
+        bool didNeeExit = false;
+        if (SPEC_LIGHTS || (SPEC_ENV_MAP && uniforms.hasEnvMap))
+        {
+            // NEE here and not inside the walk: this is the vertex light can
+            // actually reach, and leaving it to BSDF sampling alone is what makes
+            // a translucent object the noisiest thing in a frame.
+            SurfaceInteraction xsi = {};
+            xsi.position = worldPosition;
+            xsi.shading_normal = outward;
+            xsi.geometry_normal = outward;
+            xsi.wo = -rayDir;
+            xsi.front_face = true;
+            const LightConnection conn =
+                connectToLight(uniforms, uniforms.numLights, lights, xrng, xsi, envAliasTable,
+                               envMapTexture, false);
+            if (conn.needsRay && conn.pdf > 0.0f)
+            {
+                const float cosOut = dot(outward, conn.toLight);
+                if (cosOut > 0.0f)
+                {
+                    // The exit is Lambertian and the medium's albedo was already
+                    // paid for during the walk, so the lobe here is 1/pi and its
+                    // own density is cos/pi.
+                    const float lobePdf = cosOut * M_1_PI_F;
+                    const float misWeight = conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, lobePdf);
+                    const float3 weight =
+                        throughput * (conn.radiance / conn.pdf) * misWeight * lobePdf;
+                    if (any(weight > 1e-6f))
+                    {
+                        ShadowRay sr;
+                        sr.origin = packed_float3(offset_ray(worldPosition, outward));
+                        sr.direction = packed_float3(conn.toLight);
+                        sr.weight = packed_float3(
+                            clampIndirectContribution(weight, depth, uniforms.clampIndirect));
+                        sr.maxDistance = conn.tMax;
+                        sr.pixelIndex = tid;
+                        sr.medium = p.medium & MEDIUM_INDEX_MASK;
+                        sr.rrCutoff = random<SampleDimension::eShadowRR>(xrng, uniforms.samplerType) *
+                                      kShadowTransmittanceCutoff;
+                        const uint32_t slot =
+                            atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                        shadowRays[slot] = sr;
+                        didNeeExit = true;
+                    }
+                }
+            }
+        }
+
+        const float3 exitDir =
+            sssCosineDirection(outward,
+                               random<SampleDimension::eSssPhaseU>(xrng, uniforms.samplerType),
+                               random<SampleDimension::eSssPhaseV>(xrng, uniforms.samplerType));
+
+        radianceOut[tid] += float4(radiance, 0.0f);
+
+        const float survive = clamp(max(max(throughput.x, throughput.y), throughput.z), 0.05f, 1.0f);
+        if (random<SampleDimension::eRussianRoulette>(xrng, uniforms.samplerType) >= survive)
+        {
+            return;
+        }
+        throughput /= survive;
+
+        PathRay nextRay;
+        nextRay.origin = packed_float3(offset_ray(worldPosition, outward));
+        nextRay.direction = packed_float3(exitDir);
+        rays[tid] = nextRay;
+
+        p.throughput = packed_float3(throughput);
+        p.lastBsdfPdf = fmax(dot(outward, exitDir), 0.0f) * M_1_PI_F;
+        p.misDistance = 0.0f;
+        p.medium = 0u;
+        // Depth advances once for the whole walk, here rather than at the entry:
+        // charging it at both ends would cost a translucent surface two bounces
+        // to do what an opaque one does in one.
+        p.depthAndFlags = (depth + 1u) | PATH_FLAG_ALIVE |
+                          (p.depthAndFlags & ~(PATH_DEPTH_MASK | PATH_FLAG_ALIVE |
+                                               PATH_FLAG_SPECULAR | PATH_FLAG_NEE_DONE)) |
+                          (didNeeExit ? PATH_FLAG_NEE_DONE : 0u);
+        if (depth + 1u >= uniforms.maxDepth)
+        {
+            return;
+        }
+        paths[tid] = p;
+        queuePush(outCounter, queueOut, tid);
+        return;
+    }
 
     // Ray-cone footprint at this hit. The cone opened by `coneSpread` over the
     // distance just travelled; the triangle turns that width into texels via the
@@ -1664,9 +2042,10 @@ kernel void wavefrontShade(
                 ShadowRay sr;
                 sr.origin = packed_float3(bestConn.origin);
                 sr.direction = packed_float3(bestConn.toLight);
-                sr.weight = packed_float3(weight);
+                sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
                 sr.maxDistance = bestConn.tMax;
                 sr.pixelIndex = tid;
+                sr.medium = p.medium & MEDIUM_INDEX_MASK;
                 sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) *
                               kShadowTransmittanceCutoff;
                 const uint32_t slot =
@@ -1687,6 +2066,31 @@ kernel void wavefrontShade(
         else
             ior_stack_pop(iorStack, si.dielectric_priority);
         nextOrigin = offset_ray(si.position, -faceNg);
+
+        // Entering a subsurface medium. The lobe that got here is the diffuse
+        // transmission one, which on its own puts the light straight out the far
+        // side; what this adds is that it random-walks on the way. From here the
+        // path is inside, and `extend` samples free flight instead of running to
+        // the next surface.
+        if (SPEC_SSS && si.subsurface > 0.0f &&
+            (sampleResult.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION) != 0)
+        {
+            p.medium = (entry.materialId + 1u) & MEDIUM_INDEX_MASK;
+
+            // The walk's albedo, resolved here because this is the last place a
+            // texture exists: inside the medium there is no surface to sample.
+            // Scaled by how far this point's albedo departs from the one the
+            // material's scatter colour was derived from, so a flat material
+            // takes the ratio 1 and is unchanged, and marble carries its veining
+            // in.
+            float3 walkAlbedo = float3(materials[entry.materialId].diffuse_transmission_color);
+            const float3 reference = float3(materials[entry.materialId].subsurface_reference);
+            if (reference.x > 1e-4f && reference.y > 1e-4f && reference.z > 1e-4f)
+            {
+                walkAlbedo *= si.albedo / reference;
+            }
+            p.mediumAlbedo = packMediumAlbedo(saturate(walkAlbedo));
+        }
     }
     else
     {
@@ -1831,6 +2235,80 @@ kernel void wavefrontPrepareShadow(
     control[WF_CTRL_SHADOW_DIS + 2] = 1u;
 }
 
+// Transmittance of a shadow ray through whatever bounded media it crosses.
+//
+// The medium's boundary is not on the shadow mask -- a fog gizmo left there would
+// black out everything it encloses -- so the segments inside it have to be found
+// with a traversal of their own. That is the second traversal this feature was
+// scoped to avoid, which is why it is gated on the scene having a bounded medium
+// at all, and why it walks a bounded number of crossings rather than to
+// completion.
+//
+// Alternating closest hits rather than an any-hit sweep: a convex volume answers
+// in two, and the alternative is a payload that sorts an unbounded set of
+// distances. `startMedium` is the one thing the ray cannot work out for itself --
+// whether it began inside. A vertex within a fog volume and one just outside it
+// produce the same origin and direction.
+template <typename T>
+static float3 mediumTransmittance(typename T::structure accelerationStructure,
+                                  device const Material* materials,
+                                  device const GeometryEntry* geometryEntries,
+                                  constant MTLAccelerationStructureUserIDInstanceDescriptor* instances,
+                                  float3 origin, float3 direction, float maxDistance,
+                                  uint32_t startMedium, float motionTime)
+{
+    constexpr uint32_t kMaxCrossings = 8u;
+
+    float3 optical = float3(0.0f);
+    float travelled = 0.0f;
+    uint32_t medium = startMedium;
+
+    for (uint32_t i = 0u; i < kMaxCrossings; ++i)
+    {
+        const float remaining = maxDistance - travelled;
+        if (remaining <= 1e-5f)
+        {
+            break;
+        }
+
+        typename T::isect isect;
+        isect.assume_geometry_type(geometry_type::triangle);
+        isect.force_opacity(forced_opacity::opaque);
+        isect.accept_any_intersection(false);
+
+        ray r;
+        r.origin = origin + direction * travelled;
+        r.direction = direction;
+        r.min_distance = 1e-4f;
+        r.max_distance = remaining;
+
+        const auto hit = T::trace(isect, r, accelerationStructure, GEOMETRY_MASK_MEDIUM, motionTime);
+        const bool escaped = (hit.type == intersection_type::none);
+        const float segment = escaped ? remaining : hit.distance;
+
+        if (medium != 0u)
+        {
+            optical += sssSigmaT(float3(materials[medium - 1u].subsurface_radius)) * segment;
+        }
+        if (escaped)
+        {
+            break;
+        }
+
+        // The same toggle the crossing in `shade` uses, for the same reason: a
+        // gizmo's winding is arbitrary, so the normal cannot say which way the
+        // ray is going.
+        const auto inst = instances[hit.instance_id];
+        const uint32_t here =
+            (geometryEntries[inst.userID + hit.geometry_id].materialId + 1u) & MEDIUM_INDEX_MASK;
+        medium = (medium == here) ? 0u : here;
+
+        travelled += segment + 1e-4f;
+    }
+
+    return exp(-optical);
+}
+
 // ---------------------------------------------------------------------------
 // shadow -- resolve the deferred connections
 // ---------------------------------------------------------------------------
@@ -1892,6 +2370,12 @@ static void shadowImpl(
         const float tau = fogOpticalDepth(float3(sr.origin), float3(sr.direction),
                                           sr.maxDistance, uniforms.fogHeight, uniforms.fogSigmaT);
         weight *= exp(-tau);
+    }
+    if (SPEC_SSS && uniforms.hasBoundedMedium)
+    {
+        weight *= mediumTransmittance<T>(accelerationStructure, materials, geometryEntries,
+                                         instances, float3(sr.origin), float3(sr.direction),
+                                         sr.maxDistance, sr.medium, motionTime);
     }
     radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
         }
@@ -1959,6 +2443,12 @@ static void shadowImpl(
         const float tau = fogOpticalDepth(float3(sr.origin), float3(sr.direction),
                                           sr.maxDistance, uniforms.fogHeight, uniforms.fogSigmaT);
         weight *= exp(-tau);
+    }
+    if (SPEC_SSS && uniforms.hasBoundedMedium)
+    {
+        weight *= mediumTransmittance<T>(accelerationStructure, materials, geometryEntries,
+                                         instances, float3(sr.origin), float3(sr.direction),
+                                         sr.maxDistance, sr.medium, motionTime);
     }
     radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
 }

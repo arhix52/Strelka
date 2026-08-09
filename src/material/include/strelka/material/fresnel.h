@@ -98,19 +98,29 @@ DEVICE_FUNC float f0_from_ior_ratio(float n1, float n2)
 
 // ---------------------------------------------------------------------------
 // F0 for the glTF specular extension
-//   ior            = index of refraction
-//   specular       = specular level [0, 1]
-//   specular_tint  = specular tint weight (tints F0 toward base color)
-//   base_color     = albedo
-//   metallic       = metallic weight [0, 1]
+//   ior             = index of refraction
+//   specular        = specular level [0, 1], i.e. specularFactor / 2
+//   specular_color  = KHR_materials_specular specularColorFactor
+//   base_color      = albedo
+//   metallic        = metallic weight [0, 1]
+//
+// specular_color is an independent multiplier on the dielectric F0, not a weight
+// blending it toward the base colour. The Disney-style tint this used to take
+// was a different parameter wearing the same name: it made a red plastic's
+// highlight red, where the extension makes a gold-tinted varnish's highlight
+// gold over any base at all. The loader hardcoded it to 0, so nothing ever
+// exercised the difference.
 // ---------------------------------------------------------------------------
-DEVICE_FUNC float3 gltf_f0(float ior, float specular, float specular_tint,
+DEVICE_FUNC float3 gltf_f0(float ior, float specular, float3 specular_color,
                             float3 base_color, float metallic)
 {
-    float dielectric_f0 = f0_from_ior(ior) * 2.0f * specular;
-    float3 F0_dielectric = mix(make_float3(dielectric_f0),
-                               base_color * dielectric_f0,
-                               specular_tint);
+    const float dielectric_f0 = f0_from_ior(ior) * 2.0f * specular;
+    // Clamped per the extension: F0 is a reflectance and a tint above 1 would
+    // make a dielectric reflect more than it receives.
+    float3 F0_dielectric = specular_color * dielectric_f0;
+    F0_dielectric.x = fminf(F0_dielectric.x, 1.0f);
+    F0_dielectric.y = fminf(F0_dielectric.y, 1.0f);
+    F0_dielectric.z = fminf(F0_dielectric.z, 1.0f);
     return mix(F0_dielectric, base_color, metallic);
 }
 
