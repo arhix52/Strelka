@@ -1435,6 +1435,28 @@ kernel void wavefrontShade(
     // otherwise cost two of them.
     if (SPEC_SSS && (materials[entry.materialId].medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
     {
+        // Absorption over the segment just travelled, before anything returns.
+        //
+        // The block that normally does this sits further down, past the point
+        // this branch leaves by, and skipping it loses the segment outright. The
+        // bathtub is the case that shows it: its water is inside the fog gizmo,
+        // so a ray through the water leaves through the boundary, and the water's
+        // cyan absorption was being dropped on the way out. It read as the fog
+        // washing the colour out -- except it did not vary with the fog's
+        // density, which is what gave it away.
+        {
+            IorStack crossStack = iorStacks[tid];
+            const uint32_t inside = ior_stack_current_material(crossStack);
+            if (inside != 0xFFFFFFFFu)
+            {
+                device const Material& im = materials[inside];
+                const float3 sigma_t = volume_extinction(float3(im.attenuation_color),
+                                                         im.attenuation_distance, uniforms.volumeModel);
+                throughput *= beer_lambert_transmittance(sigma_t, rec.distance);
+                p.throughput = packed_float3(throughput);
+            }
+        }
+
         // Bounded by the same counter the cutout pass-through uses, and for the
         // same reason: neither advances `depth`, so neither has a natural end. A
         // boundary the ray re-hits through a self-intersection would otherwise

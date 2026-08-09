@@ -1201,6 +1201,9 @@ def parse_args():
     # script that are.
     ap.add_argument("--fog-density-scale", type=float, default=0.12,
                     help="multiplier on V-Ray's fog density (a fit, see the note)")
+    ap.add_argument("--no-fog-volumes", dest="fog_volumes", action="store_false",
+                    help="skip the EnvironmentFog gizmos. The bathtub one costs "
+                         "more than it buys today -- see the note in main()")
     ap.add_argument("--rebuild-rug", action="store_true",
                     help="replace the Rug_Round proxy preview with a generated "
                          "coiled braid (the .vrmesh it stands in for is unreadable)")
@@ -1285,7 +1288,21 @@ def main():
     # material. They are hidden helpers in the .blend precisely because V-Ray
     # never draws them; here the boundary *is* the description of the volume, so
     # it has to reach the renderer.
-    fog_volumes = collect_fog_volumes(scene_world, opts)
+    # The bathtub volume is currently a net loss and the reason is a defect, not a
+    # modelling choice.
+    #
+    # Measured on the bath water's red-to-green ratio, against the reference's
+    # 0.871: with the gizmo present 0.975, with its density cut fourfold 0.971,
+    # with the density at essentially zero and no emission 0.971, and with the
+    # gizmo gone 0.734. Four orders of magnitude of density move it by 0.004 and
+    # removing the boundary moves it by 0.24 -- so it is the crossing that costs
+    # the colour, not the medium.
+    #
+    # One cause was found and fixed: the crossing returned before the block that
+    # applies absorption over the segment just travelled, so a ray leaving the
+    # water through the gizmo lost the water's cyan. That was worth 0.011. The
+    # rest is unexplained, and until it is, this switch is the honest lever.
+    fog_volumes = collect_fog_volumes(scene_world, opts) if opts.fog_volumes else {}
     fog_materials = {}
     for gizmo_name, medium in fog_volumes.items():
         obj = bpy.data.objects.get(gizmo_name)
