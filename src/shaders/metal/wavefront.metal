@@ -2083,10 +2083,18 @@ kernel void wavefrontShade(
     float3 nextOrigin;
     if ((sampleResult.event_type & BSDF_EVENT_TRANSMISSION) != 0)
     {
-        if (entering)
-            ior_stack_push(iorStack, si.dielectric_priority, si.ior, entry.materialId);
-        else
-            ior_stack_pop(iorStack, si.dielectric_priority);
+        // A thin-walled surface has no interior, so crossing it does not put the
+        // path inside anything. Pushing the stack anyway left a ray that had gone
+        // through the front of a bubble believing it was inside glass, so the far
+        // side was an exit from a dense medium -- and every grazing angle there is
+        // past the critical angle.
+        if (!si.thin_walled)
+        {
+            if (entering)
+                ior_stack_push(iorStack, si.dielectric_priority, si.ior, entry.materialId);
+            else
+                ior_stack_pop(iorStack, si.dielectric_priority);
+        }
         nextOrigin = offset_ray(si.position, -faceNg);
 
         // Entering a subsurface medium. The lobe that got here is the diffuse

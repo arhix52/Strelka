@@ -552,8 +552,15 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         {
             // Refraction
             float3 wi_refracted;
-            bool valid = refract_dir(-V, H, eta, wi_refracted);
-            if (!valid)
+            const bool valid = refract_dir(-V, H, eta, wi_refracted);
+            // A thin-walled surface cannot total-internally-reflect: there is no
+            // interior for the light to be trapped in. The refraction was
+            // computed anyway and its verdict discarded -- so at grazing angles,
+            // where any dielectric reports TIR, a soap bubble reflected instead
+            // of passing through and the ray rattled around until it died. That
+            // is the black rim on the bubbles by the window; as solid glass the
+            // same spheres render fine, which is what pointed here.
+            if (!valid && !si.thin_walled)
             {
                 // Total internal reflection
                 result.wi            = reflect_dir(-V, H);
@@ -563,13 +570,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
                 return result;
             }
 
-            result.wi = safe_normalize(wi_refracted);
-
-            if (si.thin_walled)
-            {
-                // Thin-walled: pass through without bending
-                result.wi = safe_normalize(-V);
-            }
+            result.wi = si.thin_walled ? safe_normalize(-V) : safe_normalize(wi_refracted);
 
             if (is_smooth)
             {
