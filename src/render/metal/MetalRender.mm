@@ -54,6 +54,24 @@ namespace fs = std::filesystem;
 // heap-allocated for the duration of one build rather than kept as members: the
 // two maps hold an entry per scene instance, which is 1.1 million on the pine
 // forest, and there is no reason to carry that between loads.
+// Working state of a resumable material build.
+//
+// Same reason as AsBuildState below: these were locals, and they have to survive
+// between calls now that the build runs a slice at a time. The texture cache in
+// particular must, or a material in the second slice would re-decode a map the
+// first slice already uploaded.
+struct oka::MaterialBuildState
+{
+    std::vector<Material> gpuMaterials;
+    // One texture per file, not per slot. A scene routinely uses the same map in
+    // several materials -- the pine forest fills 83 slots from 56 files -- and
+    // without this each slot decoded and uploaded its own copy, which cost 2.8 GB
+    // there. Keyed on path and colour space together, because the same file can
+    // legitimately be needed both sRGB-decoded and linear.
+    std::unordered_map<std::string, MTL::Texture*> textureCache;
+    size_t cursor = 0;
+};
+
 struct oka::AsBuildState
 {
     // Instances that hang off the same node share a transform by construction.
@@ -274,6 +292,8 @@ MetalRender::~MetalRender()
         // was still coming up -- still owns its working state.
         delete mAsBuild;
         mAsBuild = nullptr;
+        delete mMaterialBuild;
+        mMaterialBuild = nullptr;
 
         // Queue & device (release last)
         mMetal4.release();
@@ -1191,36 +1211,53 @@ void MetalRender::generateTextureMips()
 
 void MetalRender::createMetalMaterials()
 {
+    // No budget: one call does the lot, which is what the headless path wants.
+    while (!stepMetalMaterials(0.0))
+    {
+    }
+}
+
+bool MetalRender::stepMetalMaterials(double budgetMs)
+{
     using simd::float3;
     const std::vector<Scene::MaterialDescription>& matDescs = mScene->getMaterials();
-    std::vector<Material> gpuMaterials;
     const fs::path resourcePath = getSettings()->getAs<std::string>("resource/searchPath");
 
-    // One texture per file, not per slot. A scene routinely uses the same map in
-    // several materials -- the pine forest fills 83 slots from 56 files -- and
-    // without this each slot decoded and uploaded its own copy, which cost 2.8 GB
-    // there. Keyed on path and colour space together, because the same file can
-    // legitimately be needed both sRGB-decoded and linear.
-    std::unordered_map<std::string, MTL::Texture*> textureCache;
+    if (!mMaterialBuild)
+    {
+        mMaterialBuild = new MaterialBuildState();
+        mMaterialBuild->gpuMaterials.reserve(matDescs.size());
+        // Appended to below, so it has to start empty even if a previous build
+        // for this renderer got as far as filling some of it.
+        mMaterialIsCutout.clear();
+    }
+    MaterialBuildState& st = *mMaterialBuild;
+
     auto loadTex = [&](const std::string& path, bool srgb,
                        TextureKind kind = TextureKind::Color) -> MTL::ResourceID {
         if (path.empty()) return MTL::ResourceID{};
         const fs::path fullPath = resourcePath / path;
         const std::string key =
             fullPath.string() + (srgb ? "|srgb" : "|linear") + "|" + std::to_string((int)kind);
-        const auto it = textureCache.find(key);
-        if (it != textureCache.end())
+        const auto it = st.textureCache.find(key);
+        if (it != st.textureCache.end())
         {
             return it->second ? it->second->gpuResourceID() : MTL::ResourceID{};
         }
         MTL::Texture* tex = loadTextureFromFile(fullPath.string(), srgb, kind);
-        textureCache.emplace(key, tex);
+        st.textureCache.emplace(key, tex);
         if (tex) mMaterialTextures.push_back(tex);
         return tex ? tex->gpuResourceID() : MTL::ResourceID{};
     };
 
-    for (const Scene::MaterialDescription& currMatDesc : matDescs)
+    // Checked after every material rather than every so many: one material can
+    // pull in five maps, and a map that misses the cache is a decode and an
+    // upload -- far more than the clock read that guards it.
+    const auto sliceStart = std::chrono::steady_clock::now();
+    while (st.cursor < matDescs.size())
     {
+        const Scene::MaterialDescription& currMatDesc = matDescs[st.cursor];
+        ++st.cursor;
         Material material = {};
         const auto& p = currMatDesc.params;
         material.base_color = packed_float3(simd_make_float3(p.base_color.x, p.base_color.y, p.base_color.z));
@@ -1267,23 +1304,39 @@ void MetalRender::createMetalMaterials()
         // cutout anywhere", which in a forest is always yes and drags trunks,
         // rocks and ground into the callback with the needles.
         mMaterialIsCutout.push_back(p.alpha_mode != ALPHA_MODE_OPAQUE ? 1u : 0u);
-        gpuMaterials.push_back(material);
+        st.gpuMaterials.push_back(material);
+
+        if (budgetMs > 0.0 &&
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceStart).count() >=
+                budgetMs)
+        {
+            if (mLoadProgress)
+            {
+                mLoadProgress->total.store((uint32_t)matDescs.size(), std::memory_order_relaxed);
+                mLoadProgress->done.store((uint32_t)st.cursor, std::memory_order_relaxed);
+            }
+            return false;
+        }
     }
 
     generateTextureMips();
     STRELKA_INFO("Textures: {} from cache, {} built and cached", mTextureCacheHits, mTextureCacheMisses);
 
-    const size_t materialsDataSize = sizeof(Material) * gpuMaterials.size();
+    const size_t materialsDataSize = sizeof(Material) * st.gpuMaterials.size();
     if (materialsDataSize > 0)
     {
         mMaterialBuffer = mDevice->newBuffer(materialsDataSize, MTL::ResourceStorageModeManaged);
-        memcpy(mMaterialBuffer->contents(), gpuMaterials.data(), materialsDataSize);
+        memcpy(mMaterialBuffer->contents(), st.gpuMaterials.data(), materialsDataSize);
         mMaterialBuffer->didModifyRange(NS::Range::Make(0, mMaterialBuffer->length()));
     }
     else
     {
         mMaterialBuffer = nullptr;
     }
+
+    delete mMaterialBuild;
+    mMaterialBuild = nullptr;
+    return true;
 }
 
 
@@ -4528,12 +4581,15 @@ bool MetalRender::stepSceneBuild(Buffer* output)
         break;
 
     case BuildStage::Materials:
-        if (mLoadProgress)
+        if (mLoadProgress && !mMaterialBuild)
         {
-            mLoadProgress->beginStage(LoadProgress::Stage::Textures);
+            mLoadProgress->beginStage(LoadProgress::Stage::Textures,
+                                      (uint32_t)mScene->getMaterials().size());
         }
-        createMetalMaterials();
-        mBuildStage = BuildStage::Structures;
+        if (stepMetalMaterials(kBuildSliceMs))
+        {
+            mBuildStage = BuildStage::Structures;
+        }
         break;
 
     case BuildStage::Structures:

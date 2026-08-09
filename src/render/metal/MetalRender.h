@@ -18,6 +18,8 @@ namespace oka
 // structure build. Opaque here because it is nobody else's business and it
 // holds containers with an entry per scene instance.
 struct AsBuildState;
+// Likewise for the material build.
+struct MaterialBuildState;
 static constexpr size_t kMaxFramesInFlight = 3;
 
 class MetalRender : public Render
@@ -426,7 +428,13 @@ private:
                                       TextureKind kind = TextureKind::Color);
     MTL::Texture* loadCachedTexture(const std::string& cachePath);
     std::string textureCacheKey(const std::string& fileName, bool srgb, TextureKind kind) const;
+    /// Upload every material and the textures they reference, in one call.
     void createMetalMaterials();
+    /// The same, resumable: a slice at a time against a millisecond budget, so a
+    /// scene whose textures take most of a second does not freeze the window
+    /// while they decode. Zero means no limit. Returns true when complete.
+    bool stepMetalMaterials(double budgetMs);
+    MaterialBuildState* mMaterialBuild = nullptr;
 
     MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);
     // Acceleration structure builds are grouped into one encoder so the hardware
