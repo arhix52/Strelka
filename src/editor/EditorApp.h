@@ -62,6 +62,7 @@ private:
     bool m_showOutliner = true;
     bool m_showProperties = true;
     bool m_showMaterials = true;
+    bool m_showMemory = true;
     bool m_outlinerScrollToSelection = false;
     bool m_layoutRebuildPending = false;
 
@@ -177,6 +178,7 @@ public:
     // Panel draw methods (defined in panels/*.cpp)
     void drawViewportPanel();
     void drawRenderSettingsPanel();
+    void drawMemoryPanel();
     void drawAnimationPanel();
     void drawPropertyPanel();
     void drawOutlinerPanel();

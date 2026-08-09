@@ -138,6 +138,31 @@ public:
 
     virtual Buffer* getReadyBuffer() { return nullptr; }
 
+    /// Where the memory went, measured rather than estimated.
+    ///
+    /// Every entry is the size the API reports for the objects themselves, so a
+    /// category cannot drift from reality as the code around it changes. The two
+    /// totals are independent ground truth -- what the device says it has
+    /// allocated, and what the OS says the process occupies -- and the panel
+    /// showing this subtracts the categories from them, so anything not accounted
+    /// for appears as a slice of its own instead of quietly going missing.
+    struct MemoryReport
+    {
+        struct Entry
+        {
+            const char* name;
+            size_t bytes;
+        };
+        std::vector<Entry> gpu;
+        std::vector<Entry> cpu;
+        size_t deviceAllocated = 0;  ///< the backend's own total, 0 if it cannot say
+        size_t processFootprint = 0; ///< what the OS charges this process
+    };
+    virtual bool memoryReport(MemoryReport&) const
+    {
+        return false;
+    }
+
     /// Where to report the GPU-side scene build, and where to read cancellation
     /// from. The editor hands the same object to the loader, so one bar covers
     /// the parse and the build without the two having to agree on anything.

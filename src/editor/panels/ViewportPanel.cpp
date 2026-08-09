@@ -1,5 +1,7 @@
 #include "../EditorApp.h"
 
+#include <cstring>
+
 #include "imgui.h"
 #include "ImGuizmo.h"
 
@@ -128,9 +130,26 @@ bool EditorApp::computeNodeBounds(const Scene::Node& node,
     outMin = glm::float3(std::numeric_limits<float>::max());
     outMax = glm::float3(std::numeric_limits<float>::lowest());
 
+    // Only the placements that share the picked one's transform.
+    //
+    // The union used to run over every instance of the node, which is right for
+    // the case it was written for -- a glTF mesh split into primitives by
+    // material, all at one transform. EXT_mesh_gpu_instancing breaks that: one
+    // node there carries up to a million placements scattered across the scene,
+    // so the union was a box around the whole forest rather than around the tree
+    // under the cursor, and it cost a pass over every placement to draw. Sibling
+    // primitives of the clicked placement still share its transform, so they are
+    // still boxed together.
+    const bool haveSelected = m_selectedInstanceId != (uint32_t)-1 && m_selectedInstanceId < instances.size();
+    const glm::mat4* selectedXform = haveSelected ? &instances[m_selectedInstanceId].transform : nullptr;
+
     for (const uint32_t instId : node.instanceIds)
     {
         if (instId >= instances.size())
+        {
+            continue;
+        }
+        if (selectedXform && memcmp(selectedXform, &instances[instId].transform, sizeof(glm::mat4)) != 0)
         {
             continue;
         }

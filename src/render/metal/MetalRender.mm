@@ -21,6 +21,8 @@
 #include <cassert>
 #include <filesystem>
 #include <unistd.h>
+#include <mach/mach.h>
+#include <mach/task_info.h>
 
 #include <glm/glm.hpp>
 #include <glm/mat4x3.hpp>
@@ -46,6 +48,21 @@
 
 using namespace oka;
 namespace fs = std::filesystem;
+
+// What the OS charges this process, which on unified memory includes everything
+// the device allocated. `phys_footprint` is the number Activity Monitor shows;
+// resident size is not, and undercounts GPU allocations badly.
+static size_t processFootprintBytes()
+{
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS)
+    {
+        return 0;
+    }
+    return (size_t)info.phys_footprint;
+}
+
 
 // Working state of a resumable acceleration structure build.
 //
@@ -856,6 +873,122 @@ Buffer* MetalRender::getReadyBuffer()
     if (ri < 0)
         return nullptr;
     return mAsyncOutputBuffers[ri];
+}
+
+
+// Where the memory went, measured from the objects themselves.
+//
+// Deliberately not a running tally kept at allocation sites: those drift the
+// moment someone adds a buffer and forgets the counter, and the first symptom is
+// a total that no longer matches the device's. Walking the members costs a few
+// microseconds and cannot be wrong about anything it looks at -- and what it
+// fails to look at shows up as the unaccounted remainder rather than vanishing.
+bool MetalRender::memoryReport(MemoryReport& report) const
+{
+    report.gpu.clear();
+    report.cpu.clear();
+
+    auto add = [&report](const char* name, size_t bytes) {
+        if (bytes > 0)
+        {
+            report.gpu.push_back({ name, bytes });
+        }
+    };
+    auto bufBytes = [](MTL::Buffer* b) { return b ? b->length() : 0; };
+    auto texBytes = [](MTL::Texture* t) { return t ? t->allocatedSize() : 0; };
+
+    add("Vertices", bufBytes(mVertexBuffer));
+    add("Indices", bufBytes(mIndexBuffer));
+    // A second copy of every vertex, for motion blur and for the denoiser's
+    // reprojection. Shared with the current one on a scene with nothing skinned,
+    // in which case this reports zero rather than double-counting.
+    add("Vertices (previous)",
+        bufBytes(mPrevVertexBuffer != mVertexBuffer ? mPrevVertexBuffer : nullptr) +
+            bufBytes(mPrevFrameVertexBuffer));
+
+    {
+        size_t bytes = 0;
+        for (MTL::Texture* t : mMaterialTextures)
+        {
+            bytes += texBytes(t);
+        }
+        add("Textures", bytes);
+    }
+    add("Environment", texBytes(mEnvMapTexture) + texBytes(mEnvBackgroundTexture) + bufBytes(mEnvAliasBuffer));
+
+    {
+        size_t as = 0, scratch = 0;
+        for (const Blas& b : mBlasList)
+        {
+            as += b.mAs ? b.mAs->size() : 0;
+            scratch += bufBytes(b.mScratch);
+        }
+        add("BLAS", as);
+        // Kept for the lifetime of the structure so a refit needs no allocation.
+        add("BLAS scratch", scratch);
+    }
+    add("TLAS", mInstanceAccelerationStructure ? mInstanceAccelerationStructure->size() : 0);
+    add("TLAS scratch", bufBytes(mTlasScratchBuffer));
+    add("Instance descriptors", bufBytes(mInstanceBuffer) + bufBytes(mPrevFrameInstanceBuffer));
+    add("Geometry table", bufBytes(mGeometryEntryBuffer));
+    add("Materials", bufBytes(mMaterialBuffer));
+    add("Lights", bufBytes(mLightBuffer));
+    add("Skinning", bufBytes(mSkinDataBuffer) + bufBytes(mJointMatricesBuffer));
+
+    // The per-path side tables: one entry per pixel per stage, so they scale with
+    // resolution rather than with the scene, and are the reason a render at
+    // native resolution costs more than the upscaled one before a ray is cast.
+    add("Wavefront queues",
+        bufBytes(mPathStateBuffer) + bufBytes(mPathRayBuffer) + bufBytes(mHitBuffer) +
+            bufBytes(mIorStackBuffer) + bufBytes(mRadianceBuffer) + bufBytes(mGuideRadianceBuffer) +
+            bufBytes(mPathQueueBuffer[0]) + bufBytes(mPathQueueBuffer[1]) + bufBytes(mWavefrontControlBuffer) +
+            bufBytes(mShadowRayBuffer) + bufBytes(mHitQueueBuffer) + bufBytes(mMissQueueBuffer) +
+            bufBytes(mAovBuffer) + bufBytes(mStageStatsBuffer));
+    add("Radiance cache", bufBytes(mSharcBuffer));
+    add("Accumulation", bufBytes(mAccumulationBuffer));
+
+    {
+        size_t bytes = texBytes(mDisplayTextures[0]) + texBytes(mDisplayTextures[1]) +
+                       texBytes(mUpscaleTextures[0]) + texBytes(mUpscaleTextures[1]) +
+                       texBytes(mDenoisedTexture);
+        bytes += texBytes(mGuides.color) + texBytes(mGuides.depth) + texBytes(mGuides.motion) +
+                 texBytes(mGuides.diffuse) + texBytes(mGuides.specular) + texBytes(mGuides.normal) +
+                 texBytes(mGuides.roughness) + texBytes(mGuides.specularHitDistance) +
+                 texBytes(mGuides.reactive);
+        add("Display & guides", bytes);
+    }
+
+    {
+        size_t bytes = 0;
+        for (MTL::Buffer* b : mUniformBuffers)
+        {
+            bytes += bufBytes(b);
+        }
+        for (MTL::Buffer* b : mUniformTMBuffers)
+        {
+            bytes += bufBytes(b);
+        }
+        for (MTL::Buffer* b : mAsGroupScratch)
+        {
+            bytes += bufBytes(b);
+        }
+        for (const Mesh* m : mMetalMeshes)
+        {
+            bytes += m ? bufBytes(m->mPerPrimitiveBuffer) : 0;
+        }
+        add("Uniforms & misc", bytes);
+    }
+
+    // The host arrays the editor keeps so Scene::pick() can walk them. A full
+    // duplicate of the two largest GPU buffers, which is why it is worth naming.
+    if (mScene && !mScene->hostGeometryReleased())
+    {
+        report.cpu.push_back({ "Host geometry (picking)", mHostGeometryBytes.first + mHostGeometryBytes.second });
+    }
+
+    report.deviceAllocated = mDevice ? mDevice->currentAllocatedSize() : 0;
+    report.processFootprint = processFootprintBytes();
+    return true;
 }
 
 void MetalRender::init()
@@ -4646,6 +4779,28 @@ bool MetalRender::stepSceneBuild(Buffer* output)
             mLoadProgress->beginStage(LoadProgress::Stage::Done);
         }
         mBuildStage = BuildStage::Done;
+        // What the scene actually cost, once. The per-category figures scattered
+        // through the build are estimates made at allocation time; this is the
+        // sizes the API reports, and it is the only place the two totals -- the
+        // device's and the OS's -- can be seen next to each other.
+        {
+            MemoryReport report;
+            if (memoryReport(report))
+            {
+                std::sort(report.gpu.begin(), report.gpu.end(),
+                          [](const MemoryReport::Entry& a, const MemoryReport::Entry& b) {
+                              return a.bytes > b.bytes;
+                          });
+                std::string top;
+                for (size_t i = 0; i < std::min<size_t>(4, report.gpu.size()); ++i)
+                {
+                    top += fmt::format("{}{} {:.2f} GB", i ? ", " : "", report.gpu[i].name,
+                                       report.gpu[i].bytes / 1073741824.0);
+                }
+                STRELKA_INFO("Memory: device {:.2f} GB, process {:.2f} GB; largest: {}",
+                             report.deviceAllocated / 1073741824.0, report.processFootprint / 1073741824.0, top);
+            }
+        }
         break;
     }
 

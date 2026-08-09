@@ -324,6 +324,26 @@ public:
     std::string getSceneDir();
 
     std::vector<Mesh> mMeshes;
+    // Filled on first use, indexed by mesh. Empty extents mean "not computed
+    // yet"; a mesh with no vertices never gets an entry to begin with.
+    struct MeshBounds
+    {
+        glm::float3 min{ 0.0f };
+        glm::float3 max{ 0.0f };
+        bool valid = false;
+    };
+    std::vector<MeshBounds> mMeshBounds;
+
+    // Conservative world-space box per instance, for picking.
+    //
+    // Rebuilt when the transforms have moved since it was made, which is what the
+    // generation counter tracks -- mDirtyInstances cannot be used for this, since
+    // the renderer consumes and clears it every frame. Without the cache a pick
+    // pays a 4x4 inverse per instance, and at 1.1 million instances that alone is
+    // most of a second of latency on a click.
+    std::vector<MeshBounds> mInstanceWorldBounds;
+    uint64_t mTransformGeneration = 1;
+    uint64_t mInstanceBoundsGeneration = 0;
     std::vector<Curve> mCurves;
     std::vector<Instance> mInstances;
     std::vector<Light> mLights;
@@ -819,6 +839,16 @@ public:
     /// CPU side that needs the posed geometry has to re-evaluate it from the
     /// joint palette, which is what this does.
     bool computeInstanceBounds(uint32_t instId, glm::float3& outMin, glm::float3& outMax);
+
+    /// Local-space bounds of a mesh, computed once and kept.
+    ///
+    /// A mesh's extent is a property of the mesh, not of the instance drawing it,
+    /// and a scattered scene has orders of magnitude more instances than meshes:
+    /// the pine forest places 1.1 million of them over 316 geometries. Walking
+    /// the vertices per instance is what made selecting anything there take
+    /// seconds. Skeletal meshes are excluded -- their extent depends on the pose,
+    /// so they keep the per-instance path.
+    bool meshBounds(uint32_t meshId, glm::float3& outMin, glm::float3& outMax);
 
     /// Joint matrices driving the instance this frame, empty when it is rigid.
     std::vector<glm::mat4> buildJointPalette(uint32_t instId);

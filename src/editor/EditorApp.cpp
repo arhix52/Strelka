@@ -3366,6 +3366,7 @@ void EditorApp::drawUI()
     if (ImGui::BeginMenu("Window"))
     {
         ImGui::MenuItem("Outliner", nullptr, &m_showOutliner);
+        ImGui::MenuItem("Memory", nullptr, &m_showMemory);
         ImGui::MenuItem("Properties", nullptr, &m_showProperties);
         ImGui::MenuItem("Materials", nullptr, &m_showMaterials);
         ImGui::Separator();
@@ -3419,6 +3420,10 @@ void EditorApp::drawUI()
     // --- Panel draw calls (implementations in panels/*.cpp) ---
     drawViewportPanel();
     drawRenderSettingsPanel();
+    if (m_showMemory)
+    {
+        drawMemoryPanel();
+    }
     drawAnimationPanel();
     if (m_showOutliner)
         drawOutlinerPanel();

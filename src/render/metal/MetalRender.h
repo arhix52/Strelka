@@ -43,6 +43,8 @@ public:
     Buffer* getReadyBuffer() override;
     void* getReadyTexture() override;
 
+    bool memoryReport(MemoryReport& report) const override;
+
     bool isBuildingScene() const override
     {
         return mBuildStage != BuildStage::Done;

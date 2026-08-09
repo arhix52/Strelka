@@ -1,4 +1,6 @@
 #include <strelka/scene/scene.h>
+
+#include <chrono>
 #include <strelka/scene/vertex_packing.h>
 #include <strelka/scene/light_desc.h>
 
@@ -328,6 +330,7 @@ bool Scene::applyNodeSideEffects(const uint32_t nodeId)
             inst.transform = mGlobalTransforms[nodeId];
             inst.isAnimated = true;
             mDirtyInstances.insert(instId);
+            ++mTransformGeneration;
         }
         return false;
 
@@ -1065,6 +1068,42 @@ glm::float3 Scene::posedVertexPosition(const Mesh& mesh,
     return glm::float3(skinMat * glm::float4(mVerticesSkinData[mesh.mSbOffset + vertexIndex].pos, 1.0f));
 }
 
+bool Scene::meshBounds(const uint32_t meshId, glm::float3& outMin, glm::float3& outMax)
+{
+    if (mHostGeometryReleased || meshId >= mMeshes.size())
+    {
+        return false;
+    }
+    const Mesh& mesh = mMeshes[meshId];
+    if (mesh.mVertexCount == 0 || mesh.isSkeletal)
+    {
+        return false;
+    }
+    if (mMeshBounds.size() != mMeshes.size())
+    {
+        mMeshBounds.resize(mMeshes.size());
+    }
+    MeshBounds& cached = mMeshBounds[meshId];
+    if (!cached.valid)
+    {
+        // No palette: a mesh that is not skeletal has no pose, so the rest
+        // position is the only position it has.
+        const std::vector<glm::mat4> noPalette;
+        cached.min = glm::float3(std::numeric_limits<float>::max());
+        cached.max = glm::float3(std::numeric_limits<float>::lowest());
+        for (uint32_t i = 0; i < mesh.mVertexCount; ++i)
+        {
+            const glm::float3 p = posedVertexPosition(mesh, i, noPalette);
+            cached.min = glm::min(cached.min, p);
+            cached.max = glm::max(cached.max, p);
+        }
+        cached.valid = true;
+    }
+    outMin = cached.min;
+    outMax = cached.max;
+    return true;
+}
+
 bool Scene::computeInstanceBounds(const uint32_t instId, glm::float3& outMin, glm::float3& outMax)
 {
     if (instId >= mInstances.size())
@@ -1080,6 +1119,12 @@ bool Scene::computeInstanceBounds(const uint32_t instId, glm::float3& outMin, gl
     if (mesh.mVertexCount == 0)
     {
         return false;
+    }
+    // The common case: bounds that do not depend on the instance, answered from
+    // the cache instead of by walking the mesh again.
+    if (!mesh.isSkeletal)
+    {
+        return meshBounds(inst.mMeshId, outMin, outMax);
     }
 
     const std::vector<glm::mat4> palette = buildJointPalette(instId);
@@ -1104,20 +1149,89 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
         return {};
     }
 
+    const auto pickStart = std::chrono::steady_clock::now();
+    size_t traversed = 0, trianglesTested = 0;
+
     PickHit best;
     best.hit = false;
     best.distance = std::numeric_limits<float>::max();
 
-    // Build reverse map instance -> node for selection
-    std::unordered_map<uint32_t, uint32_t> instToNode;
-    for (uint32_t n = 0; n < mNodes.size(); ++n)
-    {
-        for (const uint32_t instId : mNodes[n].instanceIds)
-            instToNode[instId] = n;
-    }
-
     const glm::float3 dir = glm::normalize(direction);
 
+    // Slab test against a box. This is the whole reason picking is usable on a
+    // scattered scene: without it every one of 1.1 million instances has all of
+    // its triangles tested, and with it all but a handful stop at twelve
+    // compares.
+    auto missesBounds = [](const glm::float3& o, const glm::float3& d, const glm::float3& bbMin,
+                           const glm::float3& bbMax, float maxT, float* tEnter = nullptr) {
+        float tMin = 0.0f;
+        float tMax = maxT;
+        for (int a = 0; a < 3; ++a)
+        {
+            // A component of exactly zero would make this a nan rather than an
+            // infinity, and nan compares false against everything, which would
+            // let the box through instead of rejecting it.
+            const float inv = 1.0f / (d[a] != 0.0f ? d[a] : 1e-20f);
+            float t0 = (bbMin[a] - o[a]) * inv;
+            float t1 = (bbMax[a] - o[a]) * inv;
+            if (t0 > t1)
+                std::swap(t0, t1);
+            tMin = std::max(tMin, t0);
+            tMax = std::min(tMax, t1);
+            if (tMax < tMin)
+                return true;
+        }
+        if (tEnter)
+        {
+            *tEnter = tMin;
+        }
+        return false;
+    };
+
+    // World boxes first, so the common rejection costs no matrix work at all.
+    // Built from the eight transformed corners of the mesh box, which is
+    // conservative -- looser than the oriented box, never tighter, so it cannot
+    // reject something the triangles would have hit.
+    if (mInstanceWorldBounds.size() != mInstances.size() || mInstanceBoundsGeneration != mTransformGeneration)
+    {
+        mInstanceWorldBounds.assign(mInstances.size(), MeshBounds{});
+        for (uint32_t instId = 0; instId < mInstances.size(); ++instId)
+        {
+            const Instance& inst = mInstances[instId];
+            glm::float3 lo(0.0f), hi(0.0f);
+            if (!meshBounds(inst.mMeshId, lo, hi))
+            {
+                continue;
+            }
+            MeshBounds& wb = mInstanceWorldBounds[instId];
+            wb.min = glm::float3(std::numeric_limits<float>::max());
+            wb.max = glm::float3(std::numeric_limits<float>::lowest());
+            for (int c = 0; c < 8; ++c)
+            {
+                const glm::float3 corner((c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z);
+                const glm::float3 w = glm::float3(inst.transform * glm::float4(corner, 1.0f));
+                wb.min = glm::min(wb.min, w);
+                wb.max = glm::max(wb.max, w);
+            }
+            wb.valid = true;
+        }
+        mInstanceBoundsGeneration = mTransformGeneration;
+    }
+
+    // Candidates first, nearest box first.
+    //
+    // The box test throws out all but a handful, but that handful can still be
+    // tens of millions of triangles -- a ground plane and a canopy are one mesh
+    // each here. Testing them in instance order means the ray may walk the
+    // furthest one before it has any hit distance to prune with; in entry-point
+    // order the first hit usually makes every remaining candidate a single
+    // compare.
+    struct Candidate
+    {
+        uint32_t instId;
+        float tEnter;
+    };
+    std::vector<Candidate> candidates;
     for (uint32_t instId = 0; instId < mInstances.size(); ++instId)
     {
         const Instance& inst = mInstances[instId];
@@ -1125,6 +1239,29 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
             continue;
         if (inst.mMeshId >= mMeshes.size())
             continue;
+
+        const MeshBounds& wb = mInstanceWorldBounds[instId];
+        float tEnter = 0.0f;
+        if (wb.valid && missesBounds(origin, dir, wb.min, wb.max, std::numeric_limits<float>::max(), &tEnter))
+        {
+            continue;
+        }
+        candidates.push_back({ instId, tEnter });
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) { return a.tEnter < b.tEnter; });
+
+    for (const Candidate& candidate : candidates)
+    {
+        // Everything left starts beyond the closest hit found so far, and the
+        // list is sorted, so nothing after this can win either.
+        if (candidate.tEnter >= best.distance)
+        {
+            break;
+        }
+        const uint32_t instId = candidate.instId;
+        const Instance& inst = mInstances[instId];
+        ++traversed;
 
         const Mesh& mesh = mMeshes[inst.mMeshId];
         const glm::mat4& xform = inst.transform;
@@ -1135,9 +1272,11 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
 
         // Skinning happens in the same space the instance transform maps to
         // world, so only the vertex positions have to be posed: the ray stays in
-        // instance space.
-        const std::vector<glm::mat4> palette = buildJointPalette(instId);
+        // instance space. Only skeletal meshes have a pose to build; for the rest
+        // this was an allocation per instance for an empty vector.
+        const std::vector<glm::mat4> palette = mesh.isSkeletal ? buildJointPalette(instId) : std::vector<glm::mat4>();
 
+        trianglesTested += mesh.mCount / 3;
         for (uint32_t i = 0; i + 2 < mesh.mCount; i += 3)
         {
             const uint32_t i0 = mIndices[mesh.mIndex + i];
@@ -1162,10 +1301,30 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
             best.position = worldHit;
             best.instanceId = instId;
             best.lightId = inst.mLightId;
-            auto nit = instToNode.find(instId);
-            best.nodeId = nit != instToNode.end() ? nit->second : (uint32_t)-1;
         }
     }
+
+    // The owning node, resolved for the one instance that won rather than by
+    // building a reverse map of every instance in the scene on every click.
+    best.nodeId = (uint32_t)-1;
+    if (best.hit)
+    {
+        for (uint32_t n = 0; n < mNodes.size() && best.nodeId == (uint32_t)-1; ++n)
+        {
+            for (const uint32_t instId : mNodes[n].instanceIds)
+            {
+                if (instId == best.instanceId)
+                {
+                    best.nodeId = n;
+                    break;
+                }
+            }
+        }
+    }
+    STRELKA_DEBUG("Pick: {} instances, {} boxes hit, {} traversed, {} triangles, {:.1f} ms ({})",
+                  mInstances.size(), candidates.size(), traversed, trianglesTested,
+                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pickStart).count(),
+                  best.hit ? "hit" : "miss");
     return best;
 }
 
@@ -1204,6 +1363,7 @@ void Scene::updateInstanceTransform(uint32_t instId, glm::float4x4 newTransform)
     Instance& inst = mInstances[instId];
     inst.transform = newTransform;
     mDirtyInstances.insert(instId);
+    ++mTransformGeneration;
     markChanged(ChangeBits::Transforms);
 }
 

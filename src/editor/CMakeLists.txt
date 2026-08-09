@@ -15,6 +15,7 @@ set(EDITOR_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/PropertyPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/OutlinerPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/MaterialPanel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/panels/MemoryPanel.cpp
     ${ROOT_HOME}/third_party/imgui_file_dialog/ImGuiFileDialog.cpp
 )
 
