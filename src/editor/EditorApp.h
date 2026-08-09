@@ -162,6 +162,7 @@ public:
     void applySceneExposure();
     void loadAnimSettings();
     void checkLoadingComplete();
+    void waitForSceneLoad();
     void run();
     void runReferenceCapture();
     void runConvergenceSweep();

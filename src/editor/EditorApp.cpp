@@ -1432,15 +1432,30 @@ void EditorApp::runDenoiseAudit()
             return AuditImage{};
         }
         double maxMag = 0.0;
+        size_t maxIdx = 0;
+        // Bucketed, because "max" alone cannot tell one broken pixel from a
+        // broken frame -- and the two want completely different investigations.
+        size_t over1 = 0, over10 = 0, over1000 = 0;
         for (size_t i = 0; i < mv.px.size(); i += 4)
         {
             const double m = std::abs((double)mv.px[i]) + std::abs((double)mv.px[i + 1]);
-            maxMag = std::max(maxMag, m);
+            if (m > maxMag)
+            {
+                maxMag = m;
+                maxIdx = i / 4;
+            }
             if (m > 0.05) ++nonZero;
+            if (m > 1.0) ++over1;
+            if (m > 10.0) ++over10;
+            if (m > 1000.0) ++over1000;
             ++total;
         }
-        report(fmt::format("AUDIT motion {:22s} nonzero={:.1f}%  max={:.2f} px", label,
-                           total ? 100.0 * (double)nonZero / (double)total : 0.0, maxMag));
+        const double pct = total ? 100.0 / (double)total : 0.0;
+        report(fmt::format("AUDIT motion {:22s} nonzero={:.1f}%  >1px={:.1f}%  >10px={:.1f}%  >1000px={:.2f}%  "
+                           "max={:.2f} px at ({},{}) of {}x{}",
+                           label, (double)nonZero * pct, (double)over1 * pct, (double)over10 * pct,
+                           (double)over1000 * pct, maxMag, mv.w ? maxIdx % mv.w : 0, mv.w ? maxIdx / mv.w : 0,
+                           mv.w, mv.h));
         return mv;
     };
 
@@ -2897,8 +2912,32 @@ void EditorApp::runConvergenceSweep()
     m_display->requestClose();
 }
 
+// Block until the scene is on the GPU.
+//
+// Every harness below expects a loaded scene, and since the load moved off the
+// main thread there is nothing that guarantees one by the time run() is called.
+// It silently did not: the denoise audit reported every guide as empty and
+// "0.0% of frame is geometry", because it measured an empty scene.
+void EditorApp::waitForSceneLoad()
+{
+    while (m_isLoading || (m_render && m_render->isBuildingScene()))
+    {
+        checkLoadingComplete();
+        if (!m_isLoading && m_render)
+        {
+            // What advances the GPU-side build, one stage per call.
+            m_render->triggerRenderIfIdle();
+        }
+        if (m_isLoading)
+        {
+            usleep(1000);
+        }
+    }
+}
+
 void EditorApp::run()
 {
+    waitForSceneLoad();
     if (getenv("STRELKA_CONV")) { runConvergenceSweep(); return; }
     if (getenv("STRELKA_REF")) { runReferenceCapture(); return; }
     if (getenv("STRELKA_JITTER_TEST")) { runJitterTest(); return; }

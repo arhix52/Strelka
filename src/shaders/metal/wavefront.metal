@@ -802,7 +802,19 @@ static inline float backgroundDepth(constant Uniforms& uniforms)
 // already accounts for the jitter itself through jitterOffsetX/Y.
 static inline float2 screenMotion(constant Uniforms& uniforms, float4 prevClip, uint2 pixel)
 {
-    if (prevClip.w <= 0.0f)
+    // A w at or near zero is a point on the previous camera's plane, and dividing
+    // by it does not produce a large motion vector -- it produces a meaningless
+    // one. Measured on the pine forest before this guard: 14% of pixels claimed
+    // more than ten pixels of motion with the camera standing still, and the
+    // worst saturated the half-float motion texture at 65504 in both channels.
+    // The denoiser then fetched history from those coordinates, which is a
+    // temporal filter that cannot converge by construction.
+    //
+    // Zero is the honest answer for a reprojection that has none: it says "this
+    // pixel did not move", the history it blends is the one under the pixel, and
+    // every caller that can reach this case already marks the pixel reactive.
+    const float kMinW = 1e-4f;
+    if (prevClip.w <= kMinW)
     {
         return float2(0.0f);
     }
@@ -813,7 +825,14 @@ static inline float2 screenMotion(constant Uniforms& uniforms, float4 prevClip, 
     // flip cancels and the sample sits at row y + 0.5 + jitterY in screen space.
     const float2 currPixel = float2((float)pixel.x + 0.5f + uniforms.jitterX,
                                     (float)pixel.y + 0.5f + uniforms.jitterY);
-    return prevPixel - currPixel;
+    const float2 motion = prevPixel - currPixel;
+    // Nothing that moved further than the frame is across in one frame can be
+    // reprojected onto anything: past that the history lookup lands outside the
+    // image, and the value is far more likely to be a reprojection artefact than
+    // a real displacement. Clamped rather than zeroed so a genuinely fast object
+    // still drags its history in the right direction.
+    const float limit = (float)(uniforms.width + uniforms.height);
+    return clamp(motion, -limit, limit);
 }
 
 // ---------------------------------------------------------------------------
@@ -867,17 +886,40 @@ kernel void wavefrontMiss(
         // wrong place across the whole background. A direction reprojects like a
         // point at infinity -- w = 0 -- so the previous camera is all that is
         // needed, and no depth.
+        // Only for a camera ray. Past a bounce, `rayDir` is the direction the
+        // path left the surface in, and projecting it through the previous
+        // camera answers "where would something infinitely far in that direction
+        // have been on screen" -- a question about the bounce, not about this
+        // pixel. Those directions point everywhere, including nearly across the
+        // view, where the projection is degenerate; that is where most of the
+        // absurd motion vectors came from.
         const float2 motion =
-            screenMotion(uniforms, uniforms.prevWorldToClip * float4(rayDir, 0.0f),
-                         uint2(tid % uniforms.width, tid / uniforms.width));
-        a.motionX = motion.x;
-        a.motionY = motion.y;
+            (depth == 0u) ? screenMotion(uniforms, uniforms.prevWorldToClip * float4(rayDir, 0.0f),
+                                         uint2(tid % uniforms.width, tid / uniforms.width))
+                          : float2(0.0f);
         a.specularHitDistance = 0.0f;
         // Sky seen through a mirror moves with the reflection, not with the
         // reflector, so its history is not reliable either.
         a.reactive = (depth > 0u) ? 1.0f : 0.0f;
         a.pad2 = 0.0f;
-        aov[tid] = a;
+        if (depth == 0u)
+        {
+            a.motionX = motion.x;
+            a.motionY = motion.y;
+            aov[tid] = a;
+        }
+        else
+        {
+            // Depth and motion belong to the surface the camera sees, and this is
+            // not it -- the path got here through a bounce. Leaving the primary
+            // hit's values in place keeps the denoiser reprojecting this pixel by
+            // this pixel's own motion; overwriting them with the sky's asked it to
+            // reproject by something several hundred pixels away.
+            a.depth = aov[tid].depth;
+            a.motionX = aov[tid].motionX;
+            a.motionY = aov[tid].motionY;
+            aov[tid] = a;
+        }
     }
 
     float3 radiance = float3(0.0f);
@@ -1356,8 +1398,34 @@ kernel void wavefrontShade(
     // little to do with this pixel, and no guides at all is worse than imperfect
     // ones.
     const bool guideLastChance = depth >= 2u;
-    if (shouldWriteAov(uniforms, sampleIdx) && !aovDone &&
-        (guideWorthy || guideLastChance))
+
+    // Depth and motion, always from the surface the camera actually sees.
+    //
+    // These two are what the denoiser reprojects with, and unlike albedo or
+    // roughness they belong to the pixel rather than to whatever surface the
+    // material guides were eventually taken from. Written here, before the walk
+    // to the first rough surface, so a specular or alpha-tested primary hit
+    // cannot hand the pixel a secondary surface's screen position instead --
+    // which is not a small error: the two sit in different places on screen, and
+    // measured on the pine forest it gave a fifth of the frame motion vectors of
+    // tens of pixels with the camera standing still.
+    const bool writingAov = shouldWriteAov(uniforms, sampleIdx);
+    if (writingAov && depth == 0u)
+    {
+        const float3 prevPrimary =
+            uniforms.hasPrevFramePose
+                ? previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances, entry, rec.instanceIndex,
+                                        rec.primitiveId, bary)
+                : worldPosition;
+        const float2 primaryMotion =
+            screenMotion(uniforms, uniforms.prevWorldToClip * float4(prevPrimary, 1.0f),
+                         uint2(tid % uniforms.width, tid / uniforms.width));
+        aov[tid].depth = viewDepth(uniforms, worldPosition);
+        aov[tid].motionX = primaryMotion.x;
+        aov[tid].motionY = primaryMotion.y;
+    }
+
+    if (writingAov && !aovDone && (guideWorthy || guideLastChance))
     {
         AovSample a;
         // Metals put their colour in the specular lobe and have no diffuse one.
@@ -1366,20 +1434,10 @@ kernel void wavefrontShade(
         a.specularAlbedo = packed_float3(mix(float3(0.04f), base, si.metallic));
         a.normal = packed_float3(si.shading_normal);
         a.roughness = si.roughness;
-        a.depth = viewDepth(uniforms, worldPosition);
-
-        // Where this point was on screen last frame. With no previous pose to
-        // read -- the first frame, or the frame after a reset -- the best
-        // available answer is that it has not moved, and the history is being
-        // discarded for that frame anyway.
-        const float3 prevWorldPosition =
-            uniforms.hasPrevFramePose
-                ? previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances, entry, rec.instanceIndex,
-                                        rec.primitiveId, bary)
-                : worldPosition;
-        const float2 motion =
-            screenMotion(uniforms, uniforms.prevWorldToClip * float4(prevWorldPosition, 1.0f),
-                         uint2(tid % uniforms.width, tid / uniforms.width));
+        // Taken from the block above, which wrote them for the primary surface
+        // whatever this one is.
+        a.depth = aov[tid].depth;
+        const float2 motion = float2(aov[tid].motionX, aov[tid].motionY);
         a.motionX = motion.x;
         a.motionY = motion.y;
         // Filled in by the bounce that follows a specular one; see below.
