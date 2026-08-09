@@ -2901,9 +2901,22 @@ void MetalRender::render(Buffer* output)
     const bool denoiseOn = denoising;
     pUniformData->writeAov =
         settings.getAs<uint32_t>("render/pt/writeAov") || debug >= DEBUG_MODE_FIRST_AOV || denoiseOn;
+    // Hand the denoiser the accumulated estimate whenever there is one.
+    //
+    // A camera that has stopped keeps tracing samples into the accumulation
+    // buffer, and that buffer is a far better input than the frame's single
+    // sample: it converges, and the denoiser then has almost nothing left to
+    // invent. Restricted to the paused-motion-blur case before, so standing
+    // still in the editor fed the denoiser one noisy sample per frame forever
+    // and left MetalFX's short history as the only thing cleaning it up -- which
+    // is why a still camera stayed visibly noisy no matter how long it sat there.
+    //
+    // Moving the camera resets the subframe counter, so this falls back to the
+    // single-sample path by itself. Jitter is skipped while it is on (see just
+    // below): the accumulation already samples the pixel area, and jittering on
+    // top of an average is a second, uncontrolled blur.
     pUniformData->useAccumulatedColor =
-        (mPausedBlurRefine && effectiveAccumulation &&
-         ctx.mSubframeIndex > 0 && mAccumulationBuffer && !mNoAccumColor)
+        (effectiveAccumulation && ctx.mSubframeIndex > 0 && mAccumulationBuffer && !mNoAccumColor)
             ? 1u
             : 0u;
     const bool accumulating = pUniformData->useAccumulatedColor != 0u;
