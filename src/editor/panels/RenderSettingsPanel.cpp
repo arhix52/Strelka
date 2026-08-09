@@ -330,7 +330,11 @@ void EditorApp::drawRenderSettingsPanel()
     m_settingsManager->setAs<float>("render/cameraSpeed", cameraSpeed);
 
     const char* tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
-    static int currentTonemapItemId = 1;
+    // Read back rather than kept in a static, for the same reason as the sampler
+    // above: a static starts at a guess and then writes that guess over the real
+    // setting every frame, so anything the scene or a config asked for is gone by
+    // the first frame the panel is drawn.
+    int currentTonemapItemId = (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/tonemapperType"), 3u);
     if (ImGui::BeginCombo("Tonemap", tonemapItems[currentTonemapItemId]))
     {
         for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
@@ -339,6 +343,7 @@ void EditorApp::drawRenderSettingsPanel()
             if (ImGui::Selectable(tonemapItems[n], is_selected))
             {
                 currentTonemapItemId = n;
+                m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", (uint32_t)n);
             }
             if (is_selected)
             {
@@ -347,7 +352,75 @@ void EditorApp::drawRenderSettingsPanel()
         }
         ImGui::EndCombo();
     }
-    m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", currentTonemapItemId);
+
+    // Exposure, the camera side of the tone curve. The renderer computes
+    //     film speed  > 0 : scale * iso / (shutter * fstop^2) / 100
+    //     film speed == 0 : scale
+    // so a zero film speed is the arbitrary-units mode, which is what a scene lit
+    // in normalised rather than photometric units wants -- and what the light
+    // sidecar writes. Both forms are editable here because the sidecar can carry
+    // either, and a scene that opens too dark is otherwise unexplainable from
+    // inside the editor.
+    if (ImGui::TreeNode("Exposure"))
+    {
+        float iso = m_settingsManager->getAs<float>("render/post/tonemapper/filmIso");
+        float fStop = m_settingsManager->getAs<float>("render/post/tonemapper/fStop");
+        float shutter = m_settingsManager->getAs<float>("render/post/tonemapper/shutterSpeed");
+        float scale = m_settingsManager->getAs<float>("render/post/tonemapper/cm2_factor");
+        bool changed = false;
+
+        int mode = iso > 0.0f ? 0 : 1;
+        const char* modeItems[] = { "Photographic", "Multiplier" };
+        if (ImGui::Combo("Mode", &mode, modeItems, 2))
+        {
+            // Carry the current exposure across the switch: the user is changing
+            // how it is expressed, not how bright the frame is.
+            if (mode == 1)
+            {
+                scale = scale * iso / (shutter * fStop * fStop) / 100.0f;
+                iso = 0.0f;
+            }
+            else
+            {
+                iso = 100.0f;
+                fStop = 4.0f;
+                shutter = 100.0f;
+                scale = scale * (shutter * fStop * fStop) * 100.0f / iso;
+            }
+            changed = true;
+        }
+
+        if (mode == 0)
+        {
+            changed |= ImGui::DragFloat("Film ISO", &iso, 1.0f, 1.0f, 25600.0f, "%.0f",
+                                        ImGuiSliderFlags_Logarithmic);
+            changed |= ImGui::DragFloat("Aperture", &fStop, 0.05f, 0.7f, 32.0f, "f/%.1f");
+            changed |= ImGui::DragFloat("Shutter", &shutter, 1.0f, 1.0f, 8000.0f, "1/%.0f s",
+                                        ImGuiSliderFlags_Logarithmic);
+        }
+        changed |= ImGui::DragFloat(mode == 0 ? "Scale" : "Exposure", &scale, 0.01f, 0.0001f, 100000.0f, "x%.4f",
+                                    ImGuiSliderFlags_Logarithmic);
+
+        const float effective = iso > 0.0f ? scale * iso / (shutter * fStop * fStop) / 100.0f : scale;
+        ImGui::TextDisabled("Linear radiance x%.4f", effective);
+
+        if (ImGui::Button("Auto-expose"))
+        {
+            m_autoExposurePending = true;
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(meters the frame for middle grey)");
+
+        if (changed)
+        {
+            m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", iso);
+            m_settingsManager->setAs<float>("render/post/tonemapper/fStop", fStop);
+            m_settingsManager->setAs<float>("render/post/tonemapper/shutterSpeed", shutter);
+            m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", scale);
+        }
+
+        ImGui::TreePop();
+    }
 
     auto gamma = m_settingsManager->getAs<float>("render/post/gamma");
     ImGui::InputFloat("Gamma", (float*)&gamma, 0.5);
