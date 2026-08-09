@@ -372,28 +372,25 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         // mirror describes the mirror rather than the image in it.
         desc.specularHitDistanceTextureEnabled = getenv("STRELKA_NO_SPECDIST") ? NO : YES;
         desc.specularHitDistanceTextureFormat = kSpecularHitDistanceFormat;
-        // Off by default, on measurement rather than on principle.
+        // On, and the aggregate metrics argue against it. They are wrong, and how
+        // they are wrong is worth keeping.
         //
-        // The mask is meant for pixels whose history cannot be trusted -- a
-        // reflection does not move with the surface that reflects it. The rule
-        // producing it marks every pixel whose guides came from a bounce, which
-        // on the pine forest is 22.6% of the frame, and a pixel marked reactive
-        // barely accumulates: a fifth of the image stayed at single-sample noise
-        // no matter how long it ran.
+        // The mask marks pixels whose history cannot be trusted. The rule that
+        // produces it fires when the guides had to be taken past the primary hit,
+        // which happens exactly when that hit was too smooth to describe -- water,
+        // glass, a mirror. On the pine forest that is 22.6% of the frame, and it
+        // is water.
         //
-        // A/B through the denoise audit, still camera, everything else equal:
+        // Turning it off improves every number the denoise audit reports: swim
+        // 0.0793 -> 0.0301, sharpness 0.368 -> 0.441, pixels below a tenth of the
+        // truth 0.7% -> 0.4%. It also makes the water surface vanish. The audit
+        // averages over the frame, and a fifth of it getting worse in a way that
+        // matters is worth less to a mean than four fifths getting slightly
+        // better -- so the summary improved while the picture lost an object.
         //
-        //                       with mask   without
-        //   swim                 0.0793      0.0301
-        //   sharpness            0.368       0.441
-        //   below 10% of truth   0.7%        0.4%
-        //   median vs truth      0.911       0.923
-        //   rmse                 0.1681      0.1678
-        //
-        // Worse on every measure and better on none. The scene has no mirrors,
-        // so this does not settle whether a *narrow* mask would earn its place --
-        // it settles that this one does not. STRELKA_REACTIVE=1 turns it back on.
-        desc.reactiveMaskTextureEnabled = getenv("STRELKA_REACTIVE") ? YES : NO;
+        // STRELKA_NO_REACTIVE=1 turns it off, which is the configuration those
+        // numbers describe.
+        desc.reactiveMaskTextureEnabled = getenv("STRELKA_NO_REACTIVE") ? NO : YES;
         desc.reactiveMaskTextureFormat = kReactiveFormat;
         desc.inputWidth = inputWidth;
         desc.inputHeight = inputHeight;

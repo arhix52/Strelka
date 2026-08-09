@@ -24,9 +24,10 @@ void EditorApp::drawRenderSettingsPanel()
     }
 
     // Must match DebugMode in ShaderTypes.h, in order.
-    const char* debugViewOptions[] = { "None",          "Normals",         "Motion Blur",
-                                       "AOV: diffuse",  "AOV: specular",   "AOV: normal",
-                                       "AOV: roughness", "AOV: depth",     "AOV: motion" };
+    const char* debugViewOptions[] = { "None",           "Normals",        "Motion Blur",
+                                       "AOV: diffuse",   "AOV: specular",  "AOV: normal",
+                                       "AOV: roughness", "AOV: depth",     "AOV: motion",
+                                       "AOV: reactive",  "AOV: spec hit distance" };
     static int currentDebugViewOption = 0;
     if (ImGui::BeginCombo("Debug view", debugViewOptions[currentDebugViewOption]))
     {

@@ -46,6 +46,10 @@ enum class DebugMode : uint32_t
     eAovRoughness,
     eAovDepth,
     eAovMotion,
+    // The two guides that had no view of their own, which is how a mask covering
+    // a fifth of the frame went unnoticed until an object disappeared.
+    eAovReactive,
+    eAovSpecularHitDistance,
 };
 
 #define DEBUG_MODE_FIRST_AOV 3

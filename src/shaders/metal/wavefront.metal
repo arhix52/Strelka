@@ -2052,6 +2052,13 @@ kernel void wavefrontResolve(
         case DebugMode::eAovMotion:
             v = float3(a.motionX, a.motionY, 0.0f) * 0.05f + 0.5f;
             break;
+        // Red where the denoiser is being told to distrust its history, so the
+        // extent of the mask is a thing you can look at rather than infer.
+        case DebugMode::eAovReactive:      v = float3(a.reactive, 0.0f, 0.0f); break;
+        // d/(1+d) again: scale-free, and zero stays zero.
+        case DebugMode::eAovSpecularHitDistance:
+            v = float3(a.specularHitDistance / (1.0f + a.specularHitDistance));
+            break;
         default: break;
         }
         res[tid] = float4(v, 1.0f);
