@@ -26,8 +26,10 @@ Crop the same region from both with `sips`, which does not touch the bytes:
 sips -c 150 190 --cropOffset 330 300 /tmp/iso.png --out /tmp/crop.png
 ```
 
-Entry 1 needs the export *with* its fog volumes, so drop `--no-fog-volumes` and
-send it somewhere else -- the checked-in scene is the one without.
+`--no-close-transmissive` leaves refracting meshes open, which is what entry 1
+was about and is worth having as a lever while working on it. The fog volumes are
+the other lever: dropping `--no-fog-volumes` exports them, and it is a boundary
+crossing per scattering event, so it is a good way to stress the medium code.
 
 `tools/iso_bathroom/bubble_profile.py` reads back a rendered PNG as mean
 luminance per radial bin across one of the bubbles, against the wall just
@@ -81,58 +83,27 @@ pops -- would turn the next instance into a measurement instead of a hunt.
 
 ---
 
-## 2. A pass-through costs a bounce, whatever the comments say
+## 2. A thin wall does not blur what is behind it
 
-Three places in `src/shaders/metal/wavefront.metal` deliberately do not advance
-the path's `depth`: cutout geometry, a medium boundary crossing, and a
-subsurface walk step. Each says why -- a hedge of cutout leaves would otherwise
-exhaust `maxDepth` before any of its transport happened, and a volume the light
-crosses twice would cost two bounces.
+The consistency half of this is fixed: thin-walled transmission returns exactly
+`-V` at every roughness, and now reports itself as the delta it is rather than as
+a spread lobe with a microfacet density behind it. `eval` returns zero for it
+instead of building a half vector for a refraction that never happened. Measured
+before the fix, over 50k samples: at roughness 0.1 every transmitted sample
+landed on one direction carrying a pdf of 48.9.
 
-The budget they are avoiding is not the one that ends the path. `MetalRender.mm`
-drives the wavefront as `for (uint32_t bounce = 0; bounce < maxDepth; ++bounce)`,
-one extend/shade pair per iteration, and a path that spends an iteration passing
-through something has spent it whether or not `depth` moved. `depth` gates NEE
-weighting, clamping and Russian roulette; it does not gate the loop.
+What is left is that a frosted thin sheet ought to blur what is behind it and
+does not. Modelling that means refracting through the microfacet and back at the
+second interface, which is a small amount of code and no way at all to check it:
+there is no rough thin-walled material anywhere in the tree, so
+`tools/feature_tests/` has nothing to build a rung from. A lobe written against
+no measurement is how the clearcoat term below was rejected twice.
 
-Not measured as a cost anywhere yet -- raising `--depth` from 16 to 64 on the
-bathtub above moved R/G by 0.007, so whatever that scene is limited by, it is not
-this. It is recorded because the comments state the opposite, and the next person
-to trust them will be debugging a canopy that goes black at a `maxDepth` that
-looks generous.
+The soap bubbles are at roughness 0 and are unaffected either way.
 
 ---
 
-## 3. A rough thin-walled surface transmits as a delta but is weighted as glossy
-
-`standard_pbr_sample` sends thin-walled transmission straight through -- `wi` is
-exactly `-wo` -- at every roughness, because a thin wall has no interior to
-refract across. The pdf and the event type do not agree with that. Measured over
-50k samples per roughness, on a thin-walled dielectric at IOR 1.6:
-
-| Roughness | max distance from `wi` to `-wo` | mean returned pdf | event |
-|---|---|---|---|
-| 0.0 | 0 | 0.945 | `SPECULAR_TRANSMISSION` |
-| 0.1 | 0 | 48.9 | `GLOSSY_TRANSMISSION` |
-| 0.3 | 0 | 0.619 | `GLOSSY_TRANSMISSION` |
-| 0.6 | 0 | 0.045 | `GLOSSY_TRANSMISSION` |
-
-So a frosted thin sheet passes light as a perfect mirror-through while telling
-MIS it sampled a spread lobe, and `standard_pbr_eval` compounds it: it builds
-the half vector as `normalize(V + eta * wi)`, a refraction that never happened,
-and evaluates a BTDF over directions the sampler cannot produce. A light seen
-through such a sheet is therefore weighted against a density that describes a
-different surface.
-
-The soap bubbles are at roughness 0 and are not affected -- the smooth row above
-is self-consistent. What this costs has not been measured because no scene in
-the tree has a rough thin-walled material; `tools/feature_tests/` would need a
-new rung before the fix could be checked against Cycles, and inventing the
-weighting without that is how the clearcoat term below got rejected twice.
-
----
-
-## 4. The clearcoat does not return what bounces under it
+## 3. The clearcoat does not return what bounces under it
 
 `scenes/feature_tests/15_clearcoat` runs 6% dark against Cycles at the strong end
 of its IOR ramp and matches exactly at IOR 1.0 — the signature of a missing term
@@ -151,7 +122,7 @@ derived rather than fitted.
 
 ---
 
-## 5. V-Ray colour correction drops `adv_base`
+## 4. V-Ray colour correction drops `adv_base`
 
 `tools/iso_bathroom/vray2strelka.py`'s `bake_color_correction` implements
 brightness, contrast, the advanced lightness curve and the hue tint, but not
@@ -186,40 +157,78 @@ a conversion.
 
 ---
 
-## 6. The room is darker than the reference and the backdrop is brighter
+## 5. The rect lights lose their directionality, and the room loses the light
 
-Not exposure: an exposure error scales the whole frame, and this moves the two
-halves of it in opposite directions. Mean luminance over patches of the 1024²
-render against the same patches of the reference:
+**Symptom.** Not exposure: an exposure error scales the whole frame, and this
+moves the two halves of it in opposite directions. Mean luminance over patches of
+the 1024² render against the same patches of the reference:
 
 | Patch | Reference | Strelka | |
 |---|---|---|---|
 | backdrop, outside the room | 0.703 | 0.764 | +9% |
-| outer wall | 0.418 | 0.398 | -5% |
-| interior white wall | 0.674 | 0.630 | -6% |
-| floor tile | 0.846 | 0.725 | -14% |
-| tiled wall | 0.773 | 0.648 | -16% |
-| tub rim | 0.676 | 0.525 | -22% |
+| outer wall | 0.418 | 0.396 | -5% |
+| interior white wall | 0.674 | 0.627 | -7% |
+| floor tile | 0.846 | 0.724 | -14% |
+| tiled wall | 0.773 | 0.643 | -17% |
+| tub rim | 0.676 | 0.519 | -23% |
 
-The backdrop is lit by the dome light alone and everything else is lit through a
-window and by two rect lights plus whatever bounces. So the shape of it is that
-the environment carries too much of the frame and the room's own light too
-little, or that too much is lost per bounce inside a closed room.
+**What it is.** Both `VRayRectLight`s carry a `directional` parameter that the
+conversion drops:
 
-Ruled out: indirect clamping (`--clamp 8` against none moves the floor tile by
-1.5% and nothing else by more than that) and path depth (16 against 32 is
-identical to four decimal places). Entry 5 accounts for part of the tiles and
-none of the plaster.
+| Light | `intensity` | `directional` | other |
+|---|---|---|---|
+| `VRayRectLight_Side` | 35.0 | 0.1 | |
+| `VRayRectLight_Window` | 10.0 | 0.5 | `invisible 1`, `specular_contribution 0.5` |
 
-Worth checking next, in this order: the sidecar's radiance conversion for the two
-rect lights against V-Ray's `intensity` units, the dome light's 0.3 multiplier,
-and whether the room's white plaster is being converted with an albedo low enough
-to cost this much over the several bounces an enclosed room needs.
+V-Ray's `directional` narrows the emission lobe: at 0 the light is an ordinary
+Lambertian rectangle, and toward 1 it concentrates along its normal. Both of
+these point into the room. Exported as plain Lambertian rectangles they spread
+their power over the whole hemisphere instead, so less of it reaches the room and
+more of it leaves through the open sides of what is, after all, a cutaway
+diorama -- and the backdrop behind it is lit by the difference.
 
-A note on what this is *not*: the lamp globe above the mirror reads as a dull
-grey ball here and a bright white one in the reference, which looks like a
-missing light and is not. The blend has exactly four emitters -- a dome, two
-`VRayRectLight`s and one mesh light on `Light_Plane` -- and all four are
-exported. `Lamp_Bulb` is `Glass_Clear_Mtl`, `Lamp_Plafond` is a plain diffuse
-shade, and neither emits in V-Ray either. The globe is dim here for the same
-reason the rest of the room is.
+One cause, both signs. That is the part worth having: the room being dark and the
+backdrop being bright are not two problems.
+
+### Ruled out
+
+| Suspect | Test | Result |
+|---|---|---|
+| Indirect clamping | `--clamp 8` against none | floor tile +1.5%, nothing else past that |
+| Path depth | `--depth 16` against 32 | identical to four decimals |
+| Light magnitude | rect intensity x1, x1.5, x2, x3 | no single gain reconciles them, see below |
+
+The gain sweep is what rules out a units error and points at the distribution.
+Scaling both rect lights together:
+
+| Patch | Reference | x1 | x1.5 | x2 | x3 |
+|---|---|---|---|---|---|
+| backdrop | 0.703 | 0.764 | 0.829 | 0.867 | 0.907 |
+| floor tile | 0.846 | 0.724 | 0.783 | 0.822 | 0.866 |
+| tiled wall | 0.773 | 0.643 | 0.699 | 0.733 | 0.771 |
+| tub rim | 0.676 | 0.519 | 0.547 | 0.566 | 0.591 |
+
+By x3 the tiled wall has arrived, the floor has overshot, the backdrop is 29%
+over, and the tub rim is still 13% under. A brightness that is wrong by a
+different factor in every part of the frame is not a brightness.
+
+### Why it is not fixed here
+
+Implementing `directional` means knowing V-Ray's falloff, and Chaos documents
+what the slider does rather than the function behind it. Fitting a cosine power
+to this one frame would be the same mistake as entry 4 -- worse, because the
+lights are what everything else in the scene is measured against, so a fitted
+light would quietly absorb every other error in the conversion.
+
+What would close it without a guess: one V-Ray render of a rectangle at
+`directional` 0, 0.25, 0.5, 0.75 and 1 against a flat wall. The falloff can be
+read straight off that, and the sidecar already has somewhere to put it.
+
+### A note on what this is *not*
+
+The lamp globe above the mirror reads as a dull grey ball here and a bright white
+one in the reference, which looks like a missing light and is not. The blend has
+exactly four emitters -- a dome, the two `VRayRectLight`s and one mesh light on
+`Light_Plane` -- and all four are exported. `Lamp_Bulb` is `Glass_Clear_Mtl`,
+`Lamp_Plafond` is a plain diffuse shade, and neither emits in V-Ray either. The
+globe is dim for the same reason the rest of the room is.
