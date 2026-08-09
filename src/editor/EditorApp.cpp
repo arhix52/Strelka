@@ -1405,6 +1405,26 @@ void EditorApp::runDenoiseAudit()
     reportGuide("roughness", Render::Guide::Roughness, 0.0f, 1.0f, 1);
     reportGuide("specHitDistance", Render::Guide::SpecularHitDistance, 0.0f, 1e9f, 1);
     reportGuide("reactive", Render::Guide::Reactive, 0.0f, 1.0f, 1);
+    // How much of the frame the mask tells the denoiser to treat as unreliable.
+    // A range of [0,1] says nothing about this: a mask that is 1 everywhere and
+    // one that is 1 on a handful of pixels report the same range, and the first
+    // means no temporal accumulation happens at all.
+    {
+        AuditImage r;
+        if (guide(Render::Guide::Reactive, r) && !r.px.empty())
+        {
+            double sum = 0.0;
+            size_t high = 0, n = 0;
+            for (size_t i = 0; i < r.px.size(); i += 4)
+            {
+                sum += r.px[i];
+                if (r.px[i] > 0.5f) ++high;
+                ++n;
+            }
+            report(fmt::format("AUDIT guide reactive       mean={:.3f}  above 0.5={:.1f}% of the frame",
+                               n ? sum / (double)n : 0.0, n ? 100.0 * (double)high / (double)n : 0.0));
+        }
+    }
     {
         AuditImage n;
         if (guide(Render::Guide::Normal, n))
@@ -2390,9 +2410,10 @@ void EditorApp::runDenoiseAudit()
         { "denoise odd+3", true, true, 0.50f, 1, baseW + 3, baseH + 3 },
         { "upscale only", false, true, 0.50f, 1, baseW, baseH },
         { "plain wavefront", false, false, 1.00f, 1, baseW, baseH },
-        { "megakernel plain", false, false, 1.00f, 0, baseW, baseH },
-        { "megakernel upscale", false, true, 0.50f, 0, baseW, baseH },
-        { "denoise on megakernel", true, true, 0.50f, 0, baseW, baseH },
+        // The megakernel modes went with the megakernel. They were still listed
+        // here and still failing -- STALE and BLACK, every run -- which is worse
+        // than not testing them: an audit with permanent failures in it stops
+        // being something anyone reads.
     };
     AuditImage prevModeImage;
     std::string prevModeKey;
@@ -2428,12 +2449,9 @@ void EditorApp::runDenoiseAudit()
         // and the display is still showing the last one. That reads as a pass on
         // every other check, and it is exactly what a path that forgets to encode
         // its scaler looks like.
-        // Compared only against a mode that should look different. Denoising is
-        // ignored on the megakernel, so "megakernel + denoise" and "megakernel +
-        // upscale" are the same configuration and produce the same pixels; that
-        // is correct behaviour, not a mode that wrote nothing.
+        // Compared only against a mode that should look different.
         const std::string modeKey =
-            fmt::format("{}|{}|{:.2f}|{}x{}", m.tracer, (int)(m.denoise && m.tracer == 1),
+            fmt::format("{}|{}|{:.2f}|{}x{}", m.tracer, (int)m.denoise,
                         m.upscale ? m.factor : 1.0f, m.w, m.h);
         const bool stale = got && prevModeImage.valid() && modeKey != prevModeKey &&
                            prevModeImage.px.size() == img.px.size() &&

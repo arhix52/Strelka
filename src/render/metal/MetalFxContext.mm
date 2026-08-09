@@ -372,7 +372,28 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         // mirror describes the mirror rather than the image in it.
         desc.specularHitDistanceTextureEnabled = getenv("STRELKA_NO_SPECDIST") ? NO : YES;
         desc.specularHitDistanceTextureFormat = kSpecularHitDistanceFormat;
-        desc.reactiveMaskTextureEnabled = getenv("STRELKA_NO_REACTIVE") ? NO : YES;
+        // Off by default, on measurement rather than on principle.
+        //
+        // The mask is meant for pixels whose history cannot be trusted -- a
+        // reflection does not move with the surface that reflects it. The rule
+        // producing it marks every pixel whose guides came from a bounce, which
+        // on the pine forest is 22.6% of the frame, and a pixel marked reactive
+        // barely accumulates: a fifth of the image stayed at single-sample noise
+        // no matter how long it ran.
+        //
+        // A/B through the denoise audit, still camera, everything else equal:
+        //
+        //                       with mask   without
+        //   swim                 0.0793      0.0301
+        //   sharpness            0.368       0.441
+        //   below 10% of truth   0.7%        0.4%
+        //   median vs truth      0.911       0.923
+        //   rmse                 0.1681      0.1678
+        //
+        // Worse on every measure and better on none. The scene has no mirrors,
+        // so this does not settle whether a *narrow* mask would earn its place --
+        // it settles that this one does not. STRELKA_REACTIVE=1 turns it back on.
+        desc.reactiveMaskTextureEnabled = getenv("STRELKA_REACTIVE") ? YES : NO;
         desc.reactiveMaskTextureFormat = kReactiveFormat;
         desc.inputWidth = inputWidth;
         desc.inputHeight = inputHeight;
