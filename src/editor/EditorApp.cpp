@@ -139,29 +139,6 @@ void EditorApp::prepare()
 {
     m_sceneLoader->loadGltf(m_sceneFile, *m_scene);
 
-    // Exposure comes from the scene when the scene says, and is measured from the
-    // first frame when it does not.
-    //
-    // A glTF camera carries a projection and nothing else, so a file cannot state
-    // how bright it is meant to look. The photographic defaults below are a real
-    // daylight setting -- ISO 100, f/4, 1/100 s -- and against a scene authored in
-    // normalised units, which is most of them, they land about 1600x under: the
-    // pine forest arrives with two suns at irradiance 5 and 1 and an environment
-    // at intensity 1, and renders as black. That reads as a broken renderer.
-    if (const auto& exposure = m_scene->getExposure(); exposure.has_value())
-    {
-        m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", exposure->filmIso);
-        m_settingsManager->setAs<float>("render/post/tonemapper/fStop", exposure->fStop);
-        m_settingsManager->setAs<float>("render/post/tonemapper/shutterSpeed", exposure->shutterSpeed);
-        m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", exposure->cm2Factor);
-        STRELKA_INFO("Exposure from scene: ISO {:.0f}, f/{:.1f}, 1/{:.0f} s", exposure->filmIso,
-                     exposure->fStop, exposure->shutterSpeed);
-    }
-    else
-    {
-        m_autoExposurePending = true;
-    }
-
     // Add a free-fly "Main" camera as the last entry
     oka::Camera camera;
     camera.name = "Main";
@@ -178,6 +155,31 @@ void EditorApp::prepare()
     m_cameraController = std::make_unique<CameraController>(m_scene->getCamera(m_selectedCamera), true);
     m_display->setInputHandler(m_cameraController.get());
     loadSettings();
+
+    // Exposure comes from the scene when the scene says, and is measured from the
+    // first frame when it does not. This has to run *after* loadSettings(), which
+    // writes the photographic defaults unconditionally and would otherwise put
+    // them back over whatever the scene asked for.
+    //
+    // A glTF camera carries a projection and nothing else, so a file cannot state
+    // how bright it is meant to look. Those defaults are a real daylight setting
+    // -- ISO 100, f/4, 1/100 s -- and against a scene authored in normalised
+    // units, which is most of them, they land about 1600x under: the pine forest
+    // arrives with two suns at irradiance 5 and 1 and an environment at intensity
+    // 1, and renders as black. That reads as a broken renderer.
+    if (const auto& exposure = m_scene->getExposure(); exposure.has_value())
+    {
+        m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", exposure->filmIso);
+        m_settingsManager->setAs<float>("render/post/tonemapper/fStop", exposure->fStop);
+        m_settingsManager->setAs<float>("render/post/tonemapper/shutterSpeed", exposure->shutterSpeed);
+        m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", exposure->cm2Factor);
+        STRELKA_INFO("Exposure from scene: ISO {:.0f}, f/{:.1f}, 1/{:.0f} s, x{:.2f}", exposure->filmIso,
+                     exposure->fStop, exposure->shutterSpeed, exposure->cm2Factor);
+    }
+    else
+    {
+        m_autoExposurePending = true;
+    }
 }
 
 void EditorApp::loadSettings()
