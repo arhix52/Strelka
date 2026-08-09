@@ -10,6 +10,7 @@
 #include "MetalRender.h"
 
 #include <chrono>
+#include <thread>
 #include "MetalBuffer.h"
 #include "texture_compress.h"
 
@@ -189,11 +190,10 @@ MetalRender::~MetalRender()
         safeRelease(mWavefrontPrepareShadowPSO4);
         safeRelease(mWavefrontPrepareHitMissPSO4);
         safeRelease(mAovResolvePSO);
+        safeRelease(mAovResolvePSO4);
         releaseGuideTextures();
         safeRelease(mStageTimestampBuffer);
         safeRelease(mStageStatsBuffer);
-
-        safeRelease(mPathTracingPSO);
         safeRelease(mTonemapperPSO);
         safeRelease(mTonemapperPSO4);
         safeRelease(mTonemapperTexPSO);
@@ -341,7 +341,16 @@ void MetalRender::ensureGuideTextures(uint32_t width, uint32_t height, uint32_t 
     }
     releaseGuideTextures();
 
-    const MTL::TextureUsage guideUsage = MTL::TextureUsageShaderWrite | mMetalFx.denoiseGuideUsage();
+    // Usage comes from whichever scaler will read these, not always from the
+    // denoiser: the temporal scaler reads colour, depth and motion too, and the
+    // two need not want the same flags. Asking the denoiser while only the
+    // temporal scaler exists worked by accident -- the accessor falls back to a
+    // plain ShaderRead when there is no denoiser to ask.
+    const bool temporalOnly = !mMetalFx.hasDenoiser() && mMetalFx.hasTemporalScaler();
+    const MTL::TextureUsage guideUsage =
+        MTL::TextureUsageShaderWrite |
+        (temporalOnly ? (mMetalFx.temporalDepthUsage() | mMetalFx.temporalMotionUsage())
+                      : mMetalFx.denoiseGuideUsage());
     auto make = [&](MTL::PixelFormat fmt, uint32_t w, uint32_t h, MTL::TextureUsage usage) {
         MTL::TextureDescriptor* d = MTL::TextureDescriptor::alloc()->init();
         d->setWidth(w);
@@ -356,7 +365,8 @@ void MetalRender::ensureGuideTextures(uint32_t width, uint32_t height, uint32_t 
     };
     // Formats must match the descriptor in MetalFxContext exactly.
     mGuides.color = make(MTL::PixelFormatRGBA16Float, width, height,
-                         MTL::TextureUsageShaderWrite | mMetalFx.denoiseColorUsage());
+                         MTL::TextureUsageShaderWrite |
+                             (temporalOnly ? mMetalFx.temporalColorUsage() : mMetalFx.denoiseColorUsage()));
     mGuides.depth = make(MTL::PixelFormatR32Float, width, height, guideUsage);
     mGuides.motion = make(MTL::PixelFormatRG16Float, width, height, guideUsage);
     mGuides.diffuse = make(MTL::PixelFormatRGBA16Float, width, height, guideUsage);
@@ -366,7 +376,9 @@ void MetalRender::ensureGuideTextures(uint32_t width, uint32_t height, uint32_t 
     mGuides.specularHitDistance = make(MTL::PixelFormatR16Float, width, height, guideUsage);
     mGuides.reactive = make(MTL::PixelFormatR8Unorm, width, height, guideUsage);
     mDenoisedTexture = make(MTL::PixelFormatRGBA16Float, outWidth, outHeight,
-                            MTL::TextureUsageShaderRead | mMetalFx.denoiseOutputUsage());
+                            MTL::TextureUsageShaderRead |
+                                (temporalOnly ? mMetalFx.temporalOutputUsage()
+                                              : mMetalFx.denoiseOutputUsage()));
 
     mGuideWidth = width;
     mGuideHeight = height;
@@ -782,7 +794,6 @@ void MetalRender::init()
     {
         mMetal4.init(mDevice, (uint32_t)kMaxFramesInFlight, 64 * 1024);
     }
-    buildComputePipeline();
     buildTonemapperPipeline();
     buildWavefrontPipelines();
 }
@@ -1174,6 +1185,11 @@ void MetalRender::createMetalMaterials()
 
         if (p.alpha_mode != ALPHA_MODE_OPAQUE)
             mSceneHasAlphaMaterials = true;
+        // Per material, so a BLAS can say which of its geometries actually need
+        // the alpha test. The scene-wide flag below only answers "is there any
+        // cutout anywhere", which in a forest is always yes and drags trunks,
+        // rocks and ground into the callback with the needles.
+        mMaterialIsCutout.push_back(p.alpha_mode != ALPHA_MODE_OPAQUE ? 1u : 0u);
         gpuMaterials.push_back(material);
     }
 
@@ -1193,38 +1209,6 @@ void MetalRender::createMetalMaterials()
     }
 }
 
-uint32_t MetalRender::computeBandHeight(uint32_t height) const
-{
-    if (height == 0)
-    {
-        return 1;
-    }
-
-    // First frame: no timing yet. Start with a conservative band so a pathological
-    // scene cannot lock the UI on the very first submission.
-    const double lastMs = mLastRenderTimeMs.load(std::memory_order_relaxed);
-    if (lastMs <= 0.0)
-    {
-        return std::min<uint32_t>(height, 128);
-    }
-
-    const double msPerRow = lastMs / static_cast<double>(mLastBandTotalRows > 0 ? mLastBandTotalRows : height);
-    if (msPerRow <= 0.0)
-    {
-        return height;
-    }
-
-    const double rows = kTargetSubmissionMs / msPerRow;
-    // Round to a multiple of the 8-row threadgroup so bands stay aligned, and cap
-    // the band count hard. Every extra band is another command buffer whose
-    // bindings and resource residency have to be re-established, so past a
-    // handful of bands the split costs more than the responsiveness it buys.
-    const uint32_t minRows = 8;
-    const uint32_t lowerBound = std::max(minRows, (height + kMaxBands - 1) / kMaxBands);
-    const uint32_t clamped =
-        static_cast<uint32_t>(std::clamp(rows, static_cast<double>(lowerBound), static_cast<double>(height)));
-    return std::max(minRows, (clamped + 7u) & ~7u);
-}
 
 // Encode one full wavefront frame: for each sample, generate camera rays then
 // alternate extend/shade for maxDepth bounces. Every stage is dispatched over
@@ -1249,10 +1233,12 @@ enum StageKind : uint8_t
     kStageShadow,
     kStageMiss,
     kStageResolve,
+    kStageSort,
     kStageCount
 };
 const char* const kStageNames[kStageCount] = { "generate",   "prepare", "extend", "shade",
-                                               "prepShadow", "shadow",  "miss",   "resolve" };
+                                               "prepShadow", "shadow",  "miss",   "resolve",
+                                               "sort" };
 } // namespace
 
 // A timestamp counter buffer, if the device can sample at dispatch boundaries.
@@ -1305,6 +1291,128 @@ void MetalRender::createStageTimestampBuffer()
 // in nanoseconds on Apple Silicon; a sample can come back as MTLCounterErrorValue
 // when the GPU dropped it, and those gaps are skipped rather than counted as
 // enormous durations.
+void MetalRender::createStageCounterHeap()
+{
+    if (mStageCounterHeap || !mMetal4.isValid())
+    {
+        return;
+    }
+    MTL4::CounterHeapDescriptor* d = MTL4::CounterHeapDescriptor::alloc()->init();
+    d->setType(MTL4::CounterHeapTypeTimestamp);
+    d->setCount(kMaxStageSamples * 2);
+    NS::Error* err = nullptr;
+    mStageCounterHeap = mDevice->newCounterHeap(d, &err);
+    d->release();
+    if (!mStageCounterHeap)
+    {
+        STRELKA_WARNING("Metal 4 counter heap unavailable: {}",
+                        err && err->localizedDescription() ? err->localizedDescription()->utf8String()
+                                                           : "unknown error");
+    }
+}
+
+// Same report as the Metal 3 path, from timestamps written inline rather than at
+// encoder boundaries. Stage kinds are recorded in encode order, one pair each.
+void MetalRender::reportStageTimingsMetal4()
+{
+    if (!mStageCounterHeap || mStageKinds.empty())
+    {
+        return;
+    }
+    const NS::UInteger n = mStageKinds.size() + 1;
+    NS::Data* data = mStageCounterHeap->resolveCounterRange(NS::Range::Make(0, n));
+    if (!data)
+    {
+        return;
+    }
+    const MTL4::TimestampHeapEntry* ts = static_cast<const MTL4::TimestampHeapEntry*>(data->bytes());
+
+    // Anchor the tick scale once, against the frame this heap just timed.
+    //
+    // The obvious calibration -- MTLDevice::sampleTimestamps, which pairs a CPU
+    // clock with a GPU one -- does not apply: it reports the GPU side in
+    // nanoseconds, while the counter heap ticks at its own rate (about 24 MHz on
+    // this part, so ~42 ns each). Calibrating against it returned a factor of
+    // exactly 1 ns/tick and a report forty times too small. The command buffer's
+    // measured GPU time is the one number known to be in milliseconds and to
+    // cover the same work, so the marks are scaled to it.
+    //
+    // Everything outside the marks -- the resolve and the tonemapper, together
+    // well under a millisecond -- is folded into the factor, which biases it by
+    // under a percent and only once.
+    // A mark that was never written reads back as zero, and a run that wrote
+    // fewer marks than the last one leaves the tail stale. Anchoring on either
+    // gives a span orders of magnitude too large and a scale that rounds every
+    // stage to nothing -- which is how this first presented.
+    bool marksValid = ts[0].timestamp != 0;
+    for (NS::UInteger i = 0; marksValid && i < mStageKinds.size(); ++i)
+    {
+        marksValid = ts[i + 1].timestamp >= ts[i].timestamp && ts[i + 1].timestamp != 0;
+    }
+    if (!marksValid)
+    {
+        return;
+    }
+
+    const uint64_t spanTicks = ts[mStageKinds.size()].timestamp - ts[0].timestamp;
+    if (mGpuTicksToMs == 0.0 && spanTicks > 0)
+    {
+        const double frameMs = getLastRenderTimeMs();
+        if (frameMs > 0.0)
+        {
+            mGpuTicksToMs = frameMs / double(spanTicks);
+            STRELKA_INFO("GPU timestamp scale anchored: 1 tick = {:.2f} ns ({} ticks over {:.2f} ms)",
+                         mGpuTicksToMs * 1e6, spanTicks, frameMs);
+        }
+    }
+    if (mGpuTicksToMs == 0.0)
+    {
+        return;
+    }
+
+    double totals[kStageCount] = {};
+    uint32_t counts[kStageCount] = {};
+    std::string perBounce[kStageCount];
+    for (NS::UInteger i = 0; i < mStageKinds.size(); ++i)
+    {
+        const uint64_t a = ts[i].timestamp;
+        const uint64_t b = ts[i + 1].timestamp;
+        if (a == 0 || b <= a)
+        {
+            continue;
+        }
+        const uint8_t kind = mStageKinds[i];
+        const double ms = double(b - a) * mGpuTicksToMs;
+        totals[kind] += ms;
+        ++counts[kind];
+        if (kind == kStageExtend || kind == kStageShade || kind == kStageShadow)
+        {
+            perBounce[kind] += fmt::format("{:.2f} ", ms);
+        }
+    }
+    double sum = 0.0;
+    for (uint32_t k = 0; k < kStageCount; ++k)
+    {
+        sum += totals[k];
+    }
+    std::string line;
+    for (uint32_t k = 0; k < kStageCount; ++k)
+    {
+        if (counts[k] == 0)
+        {
+            continue;
+        }
+        line += fmt::format("{} {:.2f}ms({:.0f}%, n={})  ", kStageNames[k], totals[k],
+                            sum > 0.0 ? 100.0 * totals[k] / sum : 0.0, counts[k]);
+    }
+    // Diagnostic: the span between the first and last mark against the command
+    // buffer's own GPU time. If the span matches and the gaps do not, the marks
+    // are misplaced; if neither matches, the clock is not the one being assumed.
+    STRELKA_INFO("STAGES total {:.2f}ms  {}", sum, line);
+    STRELKA_INFO("STAGES per bounce: extend [{}] shade [{}] shadow [{}]", perBounce[kStageExtend],
+                 perBounce[kStageShade], perBounce[kStageShadow]);
+}
+
 void MetalRender::reportStageTimings()
 {
     if (!mStageTimestampBuffer || mStageKinds.empty())
@@ -1429,6 +1537,29 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mSkinDataBuffer);
     add(mJointMatricesBuffer);
     add(mEnvMapTexture);
+    // Bound by the miss stage alongside mEnvMapTexture. Metal 4 has no
+    // useResource to fall back on, so a texture the argument table names and the
+    // residency set does not is a page fault, and the command buffer just fails.
+    add(mEnvBackgroundTexture);
+    add(mSharcBuffer);
+    add(mGuides.color);
+    add(mGuides.depth);
+    add(mGuides.motion);
+    add(mGuides.diffuse);
+    add(mGuides.specular);
+    add(mGuides.normal);
+    add(mGuides.roughness);
+    add(mGuides.specularHitDistance);
+    add(mGuides.reactive);
+    add(mDenoisedTexture);
+    // Intersection function tables are resources like any other, and they are
+    // built on first use of a variant -- which is why residency is settled after
+    // the variant exists rather than before.
+    for (const auto& entry : mWavefrontVariants)
+    {
+        add(entry.second.shadowTableMotion);
+        add(entry.second.shadowTableStatic);
+    }
     for (MTL::Texture* t : mMaterialTextures) add(t);
     for (MTL::Texture* t : mDisplayTextures) add(t);
     for (MTL::Texture* t : mUpscaleTextures) add(t);
@@ -1456,7 +1587,8 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     mMetal4.commitResidency();
 }
 
-void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer,
+void MetalRender::encodeWavefrontMetal4(MTL4::CommandBuffer* cmd, MTL4::ComputeCommandEncoder*& enc,
+                                        MTL::Buffer* uniformBuffer,
                                         Buffer* output, uint32_t width, uint32_t height,
                                         uint32_t sampleCount, uint32_t features)
 {
@@ -1490,6 +1622,52 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
     const bool useMotion = mMotionBlasBuilt || variant->extendStatic == nullptr ||
                            getSettings()->getAs<uint32_t>("render/pt/staticTraversal") == 0;
 
+    // One timestamp per stage boundary. Each mark is written in the *same*
+    // encoder as the work it closes, immediately after a queue-scoped barrier
+    // that waits for that work -- not at the start of the next encoder, which is
+    // where the first working version put it and which attributed each stage's
+    // wait to its successor (extend and shadow swapped places against Metal 3).
+    //
+    // The barrier has to be queue-scoped: barrierAfterEncoderStages, which every
+    // stage below uses, orders only within one encoder, so a split without it
+    // left stages reading indirect arguments the previous one had not finished
+    // writing and the frame collapsed to a tenth of its work.
+    //
+    // A stage's duration is the gap to the next mark, so there is one more mark
+    // than stage. This reshapes the frame exactly as the Metal 3 path does -- a
+    // measurement mode, not something to leave on.
+    const bool profile = mProfileStages && mStageCounterHeap != nullptr;
+    uint32_t markIndex = 0;
+    auto writeMark = [&]() {
+        enc->barrierAfterQueueStages(MTL::StageDispatch, MTL::StageDispatch, MTL4::VisibilityOptionDevice);
+        enc->writeTimestamp(MTL4::TimestampGranularityPrecise, mStageCounterHeap, markIndex++);
+        enc->endEncoding();
+        enc = cmd->computeCommandEncoder();
+        enc->setArgumentTable(table);
+    };
+    auto mark = [&](uint8_t kind) {
+        if (!profile || mStageKinds.size() + 1 >= kMaxStageSamples)
+        {
+            return;
+        }
+        // The opening mark rides in the encoder that carries the first stage's
+        // work. On its own, in an encoder holding nothing else, it never lands:
+        // the timestamp reads back zero and the whole run is discarded. Nothing
+        // precedes it, so it needs no barrier either.
+        if (markIndex == 0)
+        {
+            enc->writeTimestamp(MTL4::TimestampGranularityPrecise, mStageCounterHeap, markIndex++);
+        }
+        mStageKinds.push_back(kind);
+    };
+    auto closeStage = [&]() {
+        if (!profile || mStageKinds.empty())
+        {
+            return;
+        }
+        writeMark();
+    };
+
     // Every dispatch here reads what the one before it wrote. Metal 4 does not
     // work that out, so say it: dispatch-to-dispatch, visible device-wide.
     auto barrier = [&]() {
@@ -1505,6 +1683,7 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
         MTL::Buffer* sampleRadiance =
             (uniforms->canonicalGuideSample && s == 0u) ? mGuideRadianceBuffer : mRadianceBuffer;
 
+        mark(kStageGenerate);
         enc->setComputePipelineState(variant->generate);
         bind(uniformBuffer, 0, 0);
         bind(mPathStateBuffer, 0, 1);
@@ -1516,6 +1695,7 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
         bind(mAovBuffer, 0, 7);
         bind(mPathRayBuffer, 0, 8);
         enc->dispatchThreadgroups(fullGrid, tg);
+        closeStage();
         barrier();
 
         for (uint32_t bounce = 0; bounce < maxDepth; ++bounce)
@@ -1534,6 +1714,7 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
             enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
             barrier();
 
+            mark(kStageExtend);
             enc->setComputePipelineState(useMotion ? variant->extendMotion : variant->extendStatic);
             bind(uniformBuffer, 0, 0);
             bind(mInstanceBuffer, 0, 1);
@@ -1549,6 +1730,7 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
             bind(mWavefrontControlBuffer, kMissCounterOffset, 11);
             bind(mPathStateBuffer, 0, 12);
             enc->dispatchThreadgroups(control + kDispatchArgsOffset, tg);
+            closeStage();
             barrier();
 
             enc->setComputePipelineState(mWavefrontPrepareHitMissPSO4);
@@ -1557,6 +1739,7 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
             enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
             barrier();
 
+            mark(kStageMiss);
             enc->setComputePipelineState(variant->miss);
             bind(uniformBuffer, 0, 0);
             bind(mPathStateBuffer, 0, 1);
@@ -1574,7 +1757,9 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
                                   1);
             }
             enc->dispatchThreadgroups(control + kMissArgsOffset, tg);
+            closeStage();
 
+            mark(kStageShade);
             enc->setComputePipelineState(variant->shade);
             bind(uniformBuffer, 0, 0);
             bind(mInstanceBuffer, 0, 1);
@@ -1601,6 +1786,7 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
             bind(mPrevFrameVertexBuffer ? mPrevFrameVertexBuffer : mVertexBuffer, 0, 23);
             bind(mPrevFrameInstanceBuffer ? mPrevFrameInstanceBuffer : mInstanceBuffer, 0, 24);
             enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
+            closeStage();
             barrier();
 
             enc->setComputePipelineState(mWavefrontPrepareShadowPSO4);
@@ -1610,6 +1796,7 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
             enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
             barrier();
 
+            mark(kStageShadow);
             enc->setComputePipelineState(useMotion ? variant->shadowMotion : variant->shadowStatic);
             bind(uniformBuffer, 0, 0);
             table->setResource(mInstanceAccelerationStructure->gpuResourceID(), 1);
@@ -1622,7 +1809,22 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
             bind(mGeometryEntryBuffer, 0, 8);
             bind(mVertexBuffer, 0, 9);
             bind(mIndexBuffer, 0, 10);
+            // Cutout shadows: without this the shadow kernel calls into a table
+            // that was never bound, and a canopy blocks light outright instead
+            // of letting the alpha test decide.
+            MTL::IntersectionFunctionTable* shadowTable =
+                useMotion ? variant->shadowTableMotion : variant->shadowTableStatic;
+            if (shadowTable)
+            {
+                shadowTable->setBuffer(mInstanceBuffer, 0, 0);
+                shadowTable->setBuffer(mMaterialBuffer, 0, 1);
+                shadowTable->setBuffer(mGeometryEntryBuffer, 0, 2);
+                shadowTable->setBuffer(mVertexBuffer, 0, 3);
+                shadowTable->setBuffer(mIndexBuffer, 0, 4);
+                table->setResource(shadowTable->gpuResourceID(), 11);
+            }
             enc->dispatchThreadgroups(control + kShadowArgsOffset, tg);
+            closeStage();
             barrier();
         }
     }
@@ -1635,6 +1837,30 @@ void MetalRender::encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::B
     table->setAddress(ring.push(sampleCount), 4);
     bind(mAovBuffer, 0, 5);
     enc->dispatchThreadgroups(fullGrid, tg);
+
+    // Guide resolve. The guides exist only when something downstream reads them,
+    // which is either MetalFX mode, so their presence is the condition -- the
+    // encoder has no other way to know which one the frame selected.
+    if (mGuides.color && mAovResolvePSO4)
+    {
+        barrier();
+        enc->setComputePipelineState(mAovResolvePSO4);
+        bind(uniformBuffer, 0, 0);
+        bind(mAovBuffer, 0, 1);
+        bind(mRadianceBuffer, 0, 2);
+        table->setAddress(ring.push(sampleCount), 3);
+        bind(mAccumulationBuffer, 0, 4);
+        table->setTexture(mGuides.color->gpuResourceID(), 0);
+        table->setTexture(mGuides.depth->gpuResourceID(), 1);
+        table->setTexture(mGuides.motion->gpuResourceID(), 2);
+        table->setTexture(mGuides.diffuse->gpuResourceID(), 3);
+        table->setTexture(mGuides.specular->gpuResourceID(), 4);
+        table->setTexture(mGuides.normal->gpuResourceID(), 5);
+        table->setTexture(mGuides.roughness->gpuResourceID(), 6);
+        table->setTexture(mGuides.specularHitDistance->gpuResourceID(), 7);
+        table->setTexture(mGuides.reactive->gpuResourceID(), 8);
+        enc->dispatchThreadgroups(MTL::Size((width + 7) / 8, (height + 7) / 8, 1), MTL::Size(8, 8, 1));
+    }
 }
 
 MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCmd,
@@ -1753,6 +1979,11 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->setBytes(&kThreadsPerGroup, sizeof(uint32_t), 2);
             enc->setBytes(&bounce, sizeof(uint32_t), 3);
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
+
+            // Sort the queue this bounce is about to traverse. Bounce 0 is the
+            // camera and already perfectly coherent, so it is skipped -- sorting
+            // it is pure cost.
+
 
             stamp(kStageExtend);
             enc->pushDebugGroup(NS::String::string("extend", NS::UTF8StringEncoding));
@@ -1920,50 +2151,6 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
     return enc;
 }
 
-void MetalRender::encodePathTraceBindings(MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer, Buffer* output)
-{
-    // Residency declarations. Textures are reached through resource IDs stored in
-    // the Material struct, so Metal cannot infer their use from the bindings —
-    // they must be declared explicitly. useResources() batches the whole array
-    // into one call instead of one call per texture per band.
-    if (!mMaterialTextures.empty())
-    {
-        enc->useResources(reinterpret_cast<const MTL::Resource* const*>(mMaterialTextures.data()),
-                          mMaterialTextures.size(), MTL::ResourceUsageRead);
-    }
-    if (!mPrimitiveAccelerationStructures.empty())
-    {
-        enc->useResources(reinterpret_cast<const MTL::Resource* const*>(mPrimitiveAccelerationStructures.data()),
-                          mPrimitiveAccelerationStructures.size(), MTL::ResourceUsageRead);
-    }
-    if (mInstanceAccelerationStructure)
-    {
-        enc->useResource(mInstanceAccelerationStructure, MTL::ResourceUsageRead);
-    }
-
-    MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
-
-    enc->setComputePipelineState(mPathTracingPSO);
-    enc->setBuffer(uniformBuffer, 0, 0);
-    enc->setBuffer(mInstanceBuffer, 0, 1);
-    enc->setAccelerationStructure(mInstanceAccelerationStructure, 2);
-    enc->setBuffer(mLightBuffer, 0, 3);
-    enc->setBuffer(mMaterialBuffer, 0, 4);
-    // Output
-    enc->setBuffer(outputBuffer, 0, 5);
-    enc->setBuffer(mAccumulationBuffer, 0, 6);
-    // Motion blur buffers
-    enc->setBuffer(mPrevVertexBuffer, 0, 7);
-    enc->setBuffer(mIndexBuffer, 0, 8);
-    enc->setBuffer(mGeometryEntryBuffer, 0, 9);
-    // Environment map
-    enc->setBuffer(mEnvAliasBuffer, 0, 10);
-    if (mEnvMapTexture)
-    {
-        enc->useResource(mEnvMapTexture, MTL::ResourceUsageRead);
-        enc->setTexture(mEnvMapTexture, 0);
-    }
-}
 
 void MetalRender::render(Buffer* output)
 {
@@ -2058,29 +2245,10 @@ void MetalRender::render(Buffer* output)
     // Temporal denoising subsumes upscaling: the denoised scaler takes the
     // reduced-resolution frame and produces the display-resolution one, so the
     // spatial scaler is only for when denoising is off.
-    // Denoising needs the wavefront tracer, because that is the only one that
-    // writes the guides. Asking for it without the library actually being there
-    // used to leave the frame jittered with nothing to reconstruct it -- a picture
-    // that shakes forever -- so the availability of the tracer is part of the
-    // condition, not a separate check further down.
-    bool useWavefrontTracer =
-        getSettings()->getAs<uint32_t>("render/pt/tracerMode") == 1 && mWavefrontLibrary != nullptr;
-    // The megakernel reads per-primitive data, which is only built when it was
-    // the selected tracer at load time. Switching to it afterwards would shade
-    // from a buffer that does not exist, so stay on the wavefront path and say
-    // why once.
-    if (!useWavefrontTracer && !mNeedsPrimitiveData && mWavefrontLibrary != nullptr)
-    {
-        static bool warned = false;
-        if (!warned)
-        {
-            STRELKA_WARNING("Megakernel needs per-primitive data, which was not built for this "
-                            "scene; staying on the wavefront tracer. Reload the scene with "
-                            "render/pt/tracerMode = 0 to use it.");
-            warned = true;
-        }
-        useWavefrontTracer = true;
-    }
+    // Denoising needs the guides, and the wavefront tracer writes them. It is
+    // also the only tracer left: the megakernel went with the banded Metal 3
+    // submission it was encoded through.
+    const bool useWavefrontTracer = mWavefrontLibrary != nullptr;
     const uint32_t debug = getSettings()->getAs<uint32_t>("render/pt/debug");
     // Debug views are final outputs. Sending them through MetalFX would alter
     // their values, while the debug path deliberately skips the final tonemap.
@@ -2125,7 +2293,29 @@ void MetalRender::render(Buffer* output)
     {
         releaseGuideTextures();
     }
-    if (upscaling && !denoising)
+    // Three ways to get from render resolution to output resolution, and the
+    // choice matters most at one sample: the spatial scaler has no history and
+    // resamples noise as-is, the temporal scaler accumulates across frames, and
+    // the denoiser does that plus a guided denoise -- at the price of a second
+    // traced sample for clean guides.
+    const uint32_t upscaleMode = getSettings()->getAs<uint32_t>("render/pt/upscaleMode");
+    const bool wantTemporal = upscaling && !denoising && upscaleMode == 1u;
+    if (wantTemporal)
+    {
+        void* compiler = mMetal4.isValid() && getSettings()->getAs<uint32_t>("render/pt/metal4") != 0
+                             ? (void*)mMetal4.compiler()
+                             : nullptr;
+        if (mMetalFx.ensureTemporalScaler(mDevice, MTL::PixelFormatRGBA16Float, MTL::PixelFormatR32Float,
+                                          MTL::PixelFormatRG16Float, MTL::PixelFormatRGBA16Float, width,
+                                          height, outWidth, outHeight, compiler))
+        {
+            // Depth and motion are guides the temporal scaler needs as much as
+            // the denoiser does, so the same textures and the same producing
+            // pass serve both.
+            ensureGuideTextures(width, height, outWidth, outHeight);
+        }
+    }
+    if (upscaling && !denoising && !mMetalFx.hasTemporalScaler())
     {
         void* spatialCompiler =
             mMetal4.isValid() &&
@@ -2456,6 +2646,7 @@ void MetalRender::render(Buffer* output)
     pUniformData->samples_per_launch = spp;
     pUniformData->enableAccumulation = (uint32_t)accumulationActive;
     pUniformData->risCandidates = std::max(settings.getAs<uint32_t>("render/pt/risCandidates"), 1u);
+    pUniformData->textureLodMode = settings.getAs<uint32_t>("render/pt/textureLod");
     pUniformData->missColor = float3(0.0f);
     pUniformData->maxDepth = maxDepth;
     pUniformData->debug = debug;
@@ -2481,7 +2672,13 @@ void MetalRender::render(Buffer* output)
     }
     pUniformData->jitterX = jx;
     pUniformData->jitterY = jy;
-    pUniformData->useFrameJitter = denoiseOn ? 1u : 0u;
+    // Temporal reconstruction of any kind needs the frame shifted by a known
+    // amount it can undo; without jitter the scaler has nothing new to
+    // accumulate between frames and degenerates to a blur.
+    const bool temporalOn =
+        denoiseOn || (settings.getAs<bool>("render/pt/enableUpscale") &&
+                      settings.getAs<uint32_t>("render/pt/upscaleMode") == 1u);
+    pUniformData->useFrameJitter = temporalOn ? 1u : 0u;
     pUniformData->canonicalGuideSample = denoiseOn ? 1u : 0u;
     pUniformData->denoiseFireflyClamp = settings.getAs<float>("render/pt/denoiseFireflyClamp");
     {
@@ -2736,8 +2933,6 @@ void MetalRender::render(Buffer* output)
         // per-row cost so each submission stays near kTargetSubmissionMs.
         // Wavefront mode replaces the banded megakernel dispatch entirely: it
         // already issues many short dispatches, so it needs no banding of its own.
-        const bool useWavefront = useWavefrontTracer;
-        if (useWavefront)
         {
             ensureWavefrontBuffers(width, height);
             // Output resolution, not render resolution: this is what the display
@@ -2749,13 +2944,13 @@ void MetalRender::render(Buffer* output)
             // when the resolution does, so its capacity doubles as the generation.
             // Denoising pins the frame to Metal 3: the denoiser has no working
             // Metal 4 variant to encode into an MTL4 command buffer.
+            // Only the denoiser pins a frame to Metal 3, and only because its
+            // Metal 4 constructor asserts inside MPSGraph -- see the note above
+            // ensureDenoiser and tools/metalfx_mtl4_denoiser_repro.mm. The
+            // temporal and spatial scalers both build through the Metal 4
+            // compiler, so upscaling no longer forces the older path.
             const bool useMetal4 = mMetal4.isValid() && settings.getAs<uint32_t>("render/pt/metal4") != 0 &&
                                    mWavefrontResolvePSO4 != nullptr && !denoising;
-            if (useMetal4 && mMetal4ResidencyGeneration != mWavefrontCapacity)
-            {
-                makeResourcesResidentForMetal4(output);
-                mMetal4ResidencyGeneration = mWavefrontCapacity;
-            }
 
             mProfileStages = settings.getAs<uint32_t>("render/pt/profileStages") != 0;
             if (mProfileStages)
@@ -2792,9 +2987,31 @@ void MetalRender::render(Buffer* output)
 
             if (useMetal4)
             {
+                // Build the variant first: its intersection function tables are
+                // allocations, and residency has to name every allocation the
+                // frame will touch before the frame is committed.
+                if (mProfileStages)
+                {
+                    createStageCounterHeap();
+                    if (mStageCounterHeap)
+                    {
+                        mStageCounterHeap->invalidateCounterRange(
+                            NS::Range::Make(0, mStageCounterHeap->count()));
+                    }
+                }
+                mStageKinds.clear();
+                wavefrontVariantFor(features | kFeatureMetal4);
+                if (mMetal4ResidencyGeneration != mWavefrontCapacity || mMetal4ResidencyDirty)
+                {
+                    makeResourcesResidentForMetal4(output);
+                    mMetal4ResidencyGeneration = mWavefrontCapacity;
+                    mMetal4ResidencyDirty = false;
+                }
+
                 MTL4::CommandBuffer* cmd4 = mMetal4.beginFrame((uint32_t)ctx.mFrameNumber);
                 MTL4::ComputeCommandEncoder* enc4 = cmd4->computeCommandEncoder();
-                encodeWavefrontMetal4(enc4, pUniformBuffer, output, width, height, samplesThisLaunch, features);
+                encodeWavefrontMetal4(cmd4, enc4, pUniformBuffer, output, width, height,
+                                      samplesThisLaunch, features);
                 if (pUniformData->debug == 0 && mTonemapperPSO4)
                 {
                     enc4->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch,
@@ -2831,6 +3048,10 @@ void MetalRender::render(Buffer* output)
                 const MTL4::CommandBuffer* buffers[] = { cmd4 };
                 mMetal4.queue()->commit(buffers, 1, options);
                 options->release();
+                // Signalled on the queue after the commit, so it orders behind
+                // this frame's work. renderSync waits on it; the async loop
+                // ignores it and keeps using the feedback handler above.
+                mMetal4FrameValue = mMetal4.signalFrame();
 
                 ctx.mSubframeIndex =
                     accumulationActive
@@ -2872,11 +3093,14 @@ void MetalRender::render(Buffer* output)
                 enc->setTexture(tonemapTarget(upscaling), 0);
                 enc->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
             }
-            if (denoising)
+            const bool temporalUpscale = upscaling && !denoising && mMetalFx.hasTemporalScaler();
+            if (denoising || temporalUpscale)
             {
                 // Spread the packed guides into the textures MetalFX reads, and
                 // hand it linear radiance: exposure and the tone curve come after
-                // the denoise, not before it.
+                // the denoise, not before it. The temporal scaler reads two of
+                // the same textures -- depth and motion -- so it takes the same
+                // pass rather than a second one that writes a subset.
                 enc->setComputePipelineState(mAovResolvePSO);
                 enc->setBuffer(pUniformBuffer, 0, 0);
                 enc->setBuffer(mAovBuffer, 0, 1);
@@ -2947,6 +3171,35 @@ void MetalRender::render(Buffer* output)
                     tm->endEncoding();
                 }
             }
+            else if (temporalUpscale)
+            {
+                // Colour comes from the guide texture, which holds linear
+                // radiance -- the same input the denoiser takes -- so the tone
+                // curve is applied after the scaler, not before it.
+                MetalFxContext::TemporalInputs tin;
+                tin.color = mGuides.color;
+                tin.depth = mGuides.depth;
+                tin.motion = mGuides.motion;
+                tin.output = mDenoisedTexture;
+                const uint32_t jitterSign = settings.getAs<uint32_t>("render/pt/jitterSign");
+                tin.jitterX = (jitterSign & 1u) ? -pUniformData->jitterX : pUniformData->jitterX;
+                tin.jitterY = (jitterSign & 2u) ? -pUniformData->jitterY : pUniformData->jitterY;
+                tin.depthReversed = pUniformData->denoiseDepthMode == kDenoiseDepthDevice;
+                tin.resetHistory = mResetDenoiseHistory;
+                mResetDenoiseHistory = false;
+                mMetalFx.encodeTemporal(pCmd, false, tin);
+
+                if (pUniformData->debug == 0 && mTonemapperTexPSO)
+                {
+                    MTL::ComputeCommandEncoder* tm = pCmd->computeCommandEncoder();
+                    tm->setComputePipelineState(mTonemapperTexPSO);
+                    tm->setBuffer(pUniformTMBuffer, 0, 0);
+                    tm->setTexture(mDisplayTextures[mWriteIndex], 0);
+                    tm->setTexture(mDenoisedTexture, 1);
+                    tm->dispatchThreads(MTL::Size(outWidth, outHeight, 1), MTL::Size(8, 8, 1));
+                    tm->endEncoding();
+                }
+            }
             else if (upscaling)
             {
                 mMetalFx.encodeSpatial(pCmd, false, mUpscaleTextures[mWriteIndex],
@@ -2986,108 +3239,6 @@ void MetalRender::render(Buffer* output)
             mHasPrevFramePose = true;
             ctx.mFrameNumber++;
             return;
-        }
-
-        // Banding exists to keep the UI responsive, and it costs a little: each
-        // band is another command buffer, and the frame's measured span includes
-        // the gaps between them. A benchmark comparing tracers has to be able to
-        // turn it off, or it measures the submission strategy as much as the
-        // tracer.
-        const uint32_t rowsPerBand = settings.getAs<uint32_t>("render/pt/splitSubmissions")
-                                         ? computeBandHeight(height)
-                                         : height;
-        const uint32_t bandCount = (height + rowsPerBand - 1) / rowsPerBand;
-        mLastBandTotalRows = height;
-        // The wavefront path does this for itself; the megakernel never did, so
-        // its display textures were whatever a previous wavefront frame had left
-        // -- and with upscaling on it tonemapped into the reduced-resolution
-        // texture and never scaled it up, leaving the screen showing a stale frame.
-        ensureDisplayTextures(outWidth, outHeight);
-
-        for (uint32_t band = 0; band < bandCount; ++band)
-        {
-            const uint32_t bandStart = band * rowsPerBand;
-            const uint32_t bandRows = std::min(rowsPerBand, height - bandStart);
-            const bool isLastBand = (band + 1 == bandCount);
-
-            MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
-            MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
-
-            encodePathTraceBindings(pComputeEncoder, pUniformBuffer, output);
-            pComputeEncoder->setBytes(&bandStart, sizeof(uint32_t), 12);
-
-            pComputeEncoder->dispatchThreads(MTL::Size(width, bandRows, 1), MTL::Size(8, 8, 1));
-
-            // Tonemapping reads back the whole image, so it can only run once
-            // every band has been written. Command buffers on a single queue
-            // execute in submission order, so the last one is the right place.
-            if (isLastBand && pUniformData->debug == 0)
-            {
-                pComputeEncoder->setComputePipelineState(mTonemapperPSO);
-                pComputeEncoder->useResource(
-                    ((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
-                pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
-                pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
-                pComputeEncoder->setTexture(tonemapTarget(upscaling), 0);
-                pComputeEncoder->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
-            }
-
-            pComputeEncoder->endEncoding();
-
-            if (isLastBand && upscaling && pUniformData->debug == 0)
-            {
-                // MetalFX encodes into the command buffer rather than an encoder
-                // of ours, so this has to follow endEncoding() -- same as the
-                // wavefront path.
-                mMetalFx.encodeSpatial(pCmd, false, mUpscaleTextures[mWriteIndex],
-                                       mDisplayTextures[mWriteIndex], width, height);
-            }
-
-            const int writeIdx = mWriteIndex;
-            const bool isFirstBand = (band == 0);
-            if (!mSyncMode)
-            {
-                pCmd->addCompletedHandler(
-                    MTL::HandlerFunction([this, writeIdx, isFirstBand, isLastBand](MTL::CommandBuffer* cb) {
-                        // Measure the span from the first band starting to the last one
-                        // finishing. Summing each band's own GPU interval instead would
-                        // overcount: the bands are separate submissions, so the sum also
-                        // picks up per-command-buffer setup and any time the GPU spent on
-                        // the display queue in between. That inflated number fed straight
-                        // back into computeBandHeight() and drove the split ever finer —
-                        // a feedback loop that made the renderer slower every frame.
-                        if (isFirstBand)
-                        {
-                            mFrameGpuStartSeconds.store(cb->GPUStartTime(), std::memory_order_relaxed);
-                        }
-                        if (isLastBand)
-                        {
-                            const double start = mFrameGpuStartSeconds.load(std::memory_order_relaxed);
-                            const double spanMs = (cb->GPUEndTime() - start) * 1000.0;
-                            if (spanMs > 0.0)
-                            {
-                                mLastRenderTimeMs.store(spanMs, std::memory_order_relaxed);
-                            }
-                            mReadyIndex.store(writeIdx);
-                            // Must be released last: it is what lets the next frame start.
-                            mRenderBusy.store(false, std::memory_order_release);
-                        }
-                    }));
-            }
-            else if (isLastBand)
-            {
-                retainCommandBufferForSync(pCmd);
-            }
-            pCmd->commit();
-        }
-
-        if (accumulationActive)
-        {
-            ctx.mSubframeIndex += samplesThisLaunch;
-        }
-        else if (!effectiveAccumulation)
-        {
-            ctx.mSubframeIndex = 0;
         }
     }
     else
@@ -3222,10 +3373,36 @@ void MetalRender::renderSync(Buffer* output)
     }
     mSyncMode = true;
     mLastCommandBuffer = nullptr;
+    mMetal4FrameValue = 0;
     const auto tEncode = std::chrono::steady_clock::now();
     render(output);
     const auto tSubmitted = std::chrono::steady_clock::now();
-    if (mLastCommandBuffer)
+    if (!mLastCommandBuffer && mMetal4FrameValue != 0)
+    {
+        // Metal 4 frame. The event is signalled on the queue behind this
+        // frame's work, so returning from here means the output buffer holds it.
+        if (!mMetal4.waitForFrame(mMetal4FrameValue))
+        {
+            mDeviceError = true;
+            if (!mDeviceErrorReported)
+            {
+                mDeviceErrorReported = true;
+                STRELKA_ERROR("Metal 4 frame did not complete within the timeout");
+            }
+        }
+        if (mProfileStages)
+        {
+            const auto tDone = std::chrono::steady_clock::now();
+            STRELKA_INFO("LAUNCH encode {:.1f} ms, wait {:.1f} ms",
+                         std::chrono::duration<double, std::milli>(tSubmitted - tEncode).count(),
+                         std::chrono::duration<double, std::milli>(tDone - tSubmitted).count());
+            // The commit feedback carries the GPU interval, so this is the same
+            // number the Metal 3 path reads off its command buffer.
+            STRELKA_INFO("CMDBUF gpu {:.1f} ms (metal4)", getLastRenderTimeMs());
+            reportStageTimingsMetal4();
+        }
+    }
+    else if (mLastCommandBuffer)
     {
         mLastCommandBuffer->waitUntilCompleted();
         if (mProfileStages)
@@ -3323,32 +3500,6 @@ MTL::Library* MetalRender::loadShaderLibrary(const char* relativePath)
     return pLibrary;
 }
 
-void MetalRender::buildComputePipeline()
-{
-    MTL::Library* pComputeLibrary = loadShaderLibrary("metal/shaders/pathtrace.metallib");
-    if (!pComputeLibrary)
-    {
-        return;
-    }
-    NS::Error* pError = nullptr;
-    // The megakernel shares shading_common.h, which now declares function
-    // constants, so Metal requires the specialising overload even though the
-    // megakernel supplies no values — every constant falls back to its
-    // unspecialised default.
-    MTL::FunctionConstantValues* noValues = MTL::FunctionConstantValues::alloc()->init();
-    MTL::Function* pPathTraceFn = pComputeLibrary->newFunction(
-        NS::String::string("raytracingKernel", NS::UTF8StringEncoding), noValues, &pError);
-    noValues->release();
-    mPathTracingPSO = mDevice->newComputePipelineState(pPathTraceFn, &pError);
-    if (!mPathTracingPSO)
-    {
-        STRELKA_FATAL("{}", pError ? pError->localizedDescription()->utf8String() : "unknown error");
-        assert(false);
-    }
-
-    pPathTraceFn->release();
-    pComputeLibrary->release();
-}
 
 
 // Build (or return) the pipeline set specialised for one combination of scene
@@ -3433,6 +3584,14 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
         }
     }
     auto makeLinked = [&](const char* name) -> MTL::ComputePipelineState* {
+        if (useMetal4)
+        {
+            // Metal 4 states linking through descriptors, so it never builds the
+            // MTL::Function above and cannot go through the branch below.
+            return alpha ? mMetal4.newComputePipelineStateLinked(mWavefrontLibrary, name,
+                                                                 "shadowAlphaAnyHit", values)
+                         : make(name);
+        }
         if (!linked)
         {
             return make(name);
@@ -3472,7 +3631,7 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
 
     // One table per pipeline: it is created from the pipeline that will bind it,
     // and the two shadow pipelines are different pipelines.
-    if (linked && anyHitFn)
+    if ((linked && anyHitFn) || (useMetal4 && alpha))
     {
         auto makeTable = [&](MTL::ComputePipelineState* pso) -> MTL::IntersectionFunctionTable* {
             if (!pso)
@@ -3484,12 +3643,24 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
             d->release();
             if (!table)
                 return nullptr;
-            MTL::FunctionHandle* handle = pso->functionHandle(anyHitFn);
+            // By name on the Metal 4 path: linking there is stated with
+            // descriptors, so there is no MTL::Function to ask for a handle.
+            MTL::FunctionHandle* handle =
+                anyHitFn ? pso->functionHandle(anyHitFn)
+                         : pso->functionHandle(
+                               NS::String::string("shadowAlphaAnyHit", NS::UTF8StringEncoding));
+            if (!handle)
+            {
+                STRELKA_ERROR("wavefront: no function handle for shadowAlphaAnyHit");
+                table->release();
+                return nullptr;
+            }
             table->setFunction(handle, 0);
             return table;
         };
         v.shadowTableMotion = makeTable(v.shadowMotion);
         v.shadowTableStatic = makeTable(v.shadowStatic);
+        mMetal4ResidencyDirty = true;
     }
     if (anyHitFn)
         anyHitFn->release();
@@ -3564,6 +3735,9 @@ void MetalRender::buildWavefrontPipelines()
         mWavefrontPreparePSO4 = mMetal4.newComputePipelineState(lib, "wavefrontPrepare", nullptr);
         mWavefrontPrepareShadowPSO4 = mMetal4.newComputePipelineState(lib, "wavefrontPrepareShadow", nullptr);
         mWavefrontPrepareHitMissPSO4 = mMetal4.newComputePipelineState(lib, "wavefrontPrepareHitMiss", nullptr);
+        // The guide resolve too: without it the Metal 4 path cannot feed either
+        // MetalFX mode, both of which read depth and motion from these textures.
+        mAovResolvePSO4 = mMetal4.newComputePipelineState(lib, "wavefrontAovResolve", nullptr);
     }
     lib->release();
 }
@@ -3955,7 +4129,6 @@ void MetalRender::createMeshData(size_t meshIndex)
     const uint32_t triangleCount = mesh.mCount / 3;
     result->mTriangleCount = triangleCount;
     result->mVbOffset = mesh.mVbOffset;
-    result->mIndexOffset = mesh.mIndex;
     result->mIsSkeletal = mesh.isSkeletal;
 
     const std::vector<Scene::Vertex>& vertices = mScene->getVertices();
@@ -4038,6 +4211,26 @@ MTL::AccelerationStructureTriangleGeometryDescriptor* MetalRender::createStaticG
 
 // Build one acceleration structure covering every listed instance's mesh as a
 // separate geometry, and record the per-geometry lookup entries.
+// Metal 4's flag asking the builder to trade build time and structure size for
+// traversal speed. A separate bit from Refit, so it composes with the one this
+// renderer already needs for skinning.
+//
+// On by default because it measured as a free 4.1% on the pine forest: 48.94 ms
+// against 46.92 (n=8 each, two mirrored ABBA blocks to cancel thermal drift,
+// t=3.14), with the image unchanged and the structures the same 5.46 GB -- the
+// concern that a scene this close to the buffer limit could not afford it did
+// not materialise. NVIDIA report the same order for PREFER_FAST_TRACE.
+//
+// The escape hatch is here because that is one scene on one driver, and the
+// flag is exactly the kind of hint whose sign can change with either.
+static MTL::AccelerationStructureUsage blasExtraUsage()
+{
+    static const bool disabled = getenv("STRELKA_NO_PREFER_FAST_INTERSECTION") != nullptr;
+    return disabled ? MTL::AccelerationStructureUsageNone
+                    : MTL::AccelerationStructureUsagePreferFastIntersection;
+}
+
+
 size_t MetalRender::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, bool skeletal)
 {
     const std::vector<oka::Instance>& instances = mScene->getInstances();
@@ -4057,16 +4250,34 @@ size_t MetalRender::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, boo
         const oka::Mesh& mesh = meshes[meshId];
         MetalRender::Mesh* meshData = mMetalMeshes[meshId];
 
+        // Opaque unless this geometry's own material has a cutout. Leaving the
+        // instance flag alone lets this decide, and traversal then resolves a
+        // trunk or a rock without ever leaving the ray tracing unit.
+        // STRELKA_ALL_GEOM_OPAQUE=1 forces every geometry opaque -- a diagnostic
+        // for whether the alpha test is running at all, not a rendering mode.
+        static const bool forceAllOpaque = getenv("STRELKA_ALL_GEOM_OPAQUE") != nullptr;
+        const bool isCutout = !forceAllOpaque && inst.mMaterialId < mMaterialIsCutout.size() &&
+                              mMaterialIsCutout[inst.mMaterialId] != 0;
+
+        MTL::AccelerationStructureGeometryDescriptor* geom = nullptr;
         if (skeletal && mBuildMotionBlas)
         {
-            geomDescriptors.push_back(
-                createMotionGeometryDescriptor(mesh, meshData->mPerPrimitiveBuffer, meshData->mTriangleCount));
+            geom = createMotionGeometryDescriptor(mesh, meshData->mPerPrimitiveBuffer, meshData->mTriangleCount);
         }
         else
         {
-            geomDescriptors.push_back(
-                createStaticGeometryDescriptor(mesh, meshData->mPerPrimitiveBuffer, meshData->mTriangleCount));
+            geom = createStaticGeometryDescriptor(mesh, meshData->mPerPrimitiveBuffer, meshData->mTriangleCount);
         }
+        // STRELKA_NO_SET_OPAQUE=1 leaves the descriptor's own default in place,
+        // which is what the code did before this flag existed -- the control for
+        // telling "the alpha test changed" apart from "the alpha test started".
+        static const bool leaveDefault = getenv("STRELKA_NO_SET_OPAQUE") != nullptr;
+        if (!leaveDefault)
+        {
+            geom->setOpaque(!isCutout);
+        }
+        (isCutout ? mCutoutGeometryCount : mOpaqueGeometryCount)++;
+        geomDescriptors.push_back(geom);
 
         // The geometry index within this BLAS is the position in this list, so
         // the material of the instance that contributed it lands in the right slot.
@@ -4092,7 +4303,7 @@ size_t MetalRender::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, boo
             primDescriptor->setMotionStartBorderMode(MTL::MotionBorderModeClamp);
             primDescriptor->setMotionEndBorderMode(MTL::MotionBorderModeClamp);
         }
-        primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit);
+        primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit | blasExtraUsage());
 
         const MTL::AccelerationStructureSizes sizes = mDevice->accelerationStructureSizes(primDescriptor);
         blas.mRefitScratchSize = sizes.refitScratchBufferSize;
@@ -4118,7 +4329,7 @@ size_t MetalRender::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, boo
         // It did not even save memory: 4.80 GB of acceleration structures
         // without it against 4.97 GB with. And the uncompacted trees traverse
         // faster -- 27.9 s against 29.8 for 128 spp of the pine forest.
-        primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit);
+        primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit | blasExtraUsage());
         blas.mAs = createAccelerationStructureNoCompact(primDescriptor);
         primDescriptor->release();
     }
@@ -4197,7 +4408,8 @@ void MetalRender::createAccelerationStructures()
         // Read once, here: the meshes are built now and the acceleration
         // structures embed whatever they are given, so a later change of tracer
         // cannot retroactively add the data.
-        mNeedsPrimitiveData = getSettings()->getAs<uint32_t>("render/pt/tracerMode") == 0;
+        // Nothing reads per-primitive data now: it existed for the megakernel.
+        mNeedsPrimitiveData = false;
         size_t primitiveBytes = 0;
         for (size_t mi = 0; mi < meshes.size(); ++mi)
         {
@@ -4450,6 +4662,10 @@ void MetalRender::createAccelerationStructures()
     STRELKA_INFO("Acceleration structures: {} BLAS ({} geometries, {} groups shared one), "
                  "{} TLAS instances (from {} scene instances)",
                  mBlasList.size(), mergedGeometries, sharedBlas, mEmittedInstances.size(), instances.size());
+    STRELKA_INFO("Geometry opacity: {} opaque, {} cutout ({:.1f}% of geometries need the alpha test)",
+                 mOpaqueGeometryCount, mCutoutGeometryCount,
+                 100.0 * mCutoutGeometryCount /
+                     std::max<uint32_t>(1u, mOpaqueGeometryCount + mCutoutGeometryCount));
 
     // Per-geometry lookup table consumed by the kernel.
     if (!mGeometryEntries.empty())

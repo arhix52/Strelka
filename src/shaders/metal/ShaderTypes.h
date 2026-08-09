@@ -177,8 +177,13 @@ struct Uniforms
     /// M of resampled importance sampling. One is plain next-event estimation
     /// and the arithmetic reduces to exactly what it was.
     uint32_t risCandidates;
-    uint32_t pad_aov2;
+    /// 0 = sample level 0 (what a compute kernel does by default), 1 = ray-cone
+    /// level of detail. A switch rather than a constant because the whole point
+    /// of it is a memory-pressure trade that has to be measured per scene.
+    uint32_t textureLodMode;
 };
+
+
 
 // How the depth guide is encoded.
 //

@@ -1055,7 +1055,6 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
     mState.params.image_height = height;
     if (needRealloc)
     {
-        getSettings()->setAs<bool>("render/pt/isResized", true);
         if (mState.params.accum)
             CUDA_CHECK(cudaFree((void*)mState.params.accum));
         if (mState.params.diffuse)

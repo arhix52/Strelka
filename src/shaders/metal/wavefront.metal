@@ -455,6 +455,10 @@ static void extendImpl(
     const typename T::isect::result_type hit =
         T::trace(isect, r, accelerationStructure, uniforms.primaryRayMask, motionTime);
 
+    // Chased through the ray buffer -- 22 MB at 720p, past the caches -- because
+    // the queue this used to walk is 3.7 MB and fits in them, which made the
+    // probe report on cache hits rather than on memory.
+
     // A ray that escaped carries no information beyond the fact, so it goes
     // straight to the miss stage: no hit record is written and the path never
     // enters `shade`. On a scene with an open background that is most of the
@@ -649,7 +653,13 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
                                  float2 bary,
                                  thread float3& outNormal, thread float3& outTangent,
                                  thread float2& outUv, thread float3& outColor,
-                                 thread float& tangentSign, thread float3& outGeomNormal)
+                                 thread float& tangentSign, thread float3& outGeomNormal,
+                                 // For the ray-cone texture LOD: the two object-space
+                                 // edges and twice the triangle's area in uv. Both fall
+                                 // out of loads this function already does, so the
+                                 // footprint costs no extra memory traffic.
+                                 thread float3& outEdge1, thread float3& outEdge2,
+                                 thread float& outUvArea2)
 {
     constexpr uint32_t vtxStride  = 32;
     constexpr uint32_t tangentOff = 12;
@@ -665,6 +675,7 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
     outColor = float3(0.0f);
     outUv = float2(0.0f);
     float3 p0 = float3(0.0f), e1 = float3(0.0f), e2 = float3(0.0f);
+    float2 uv0 = float2(0.0f), uvE1 = float2(0.0f), uvE2 = float2(0.0f);
 
     for (uint32_t k = 0; k < 3; ++k)
     {
@@ -692,7 +703,11 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
 
         outNormal += nrm * weight[k];
         outTangent += tan * weight[k];
-        outUv += unpackUV(*(device const uint32_t*)(v + uvOff)) * weight[k];
+        const float2 vertUv = unpackUV(*(device const uint32_t*)(v + uvOff));
+        outUv += vertUv * weight[k];
+        if (k == 0) uv0 = vertUv;
+        else if (k == 1) uvE1 = vertUv - uv0;
+        else uvE2 = vertUv - uv0;
         outColor += unpackVertexColor(*(device const uint32_t*)(v + colorOff)) * weight[k];
 
         if (k == 0) p0 = pos;
@@ -700,6 +715,9 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
         else e2 = pos - p0;
     }
     outGeomNormal = cross(e1, e2);
+    outEdge1 = e1;
+    outEdge2 = e2;
+    outUvArea2 = abs(uvE1.x * uvE2.y - uvE2.x * uvE1.y);
 }
 
 // Where this hit point stood one frame ago, in world space.
@@ -1051,6 +1069,7 @@ kernel void wavefrontShade(
         p.throughput = packed_float3(throughput);
         p.lastBsdfPdf = phasePdf;
         p.misDistance = 0.0f;
+
         // Depth advances: a scattering event is a bounce, and a medium with no
         // depth budget of its own would let a path wander forever.
         p.depthAndFlags = (depth + 1u) | PATH_FLAG_ALIVE |
@@ -1132,9 +1151,11 @@ kernel void wavefrontShade(
     float3 objectNormal, objectTangent, vertexColor, objectGeomNormal;
     float2 uv;
     float tangentSign = 1.0f;
+    float3 objEdge1, objEdge2;
+    float uvArea2 = 0.0f;
     fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId,
                          interpolateMotion, motionTime, bary, objectNormal, objectTangent, uv,
-                         vertexColor, tangentSign, objectGeomNormal);
+                         vertexColor, tangentSign, objectGeomNormal, objEdge1, objEdge2, uvArea2);
 
     const auto inst = instances[rec.instanceIndex];
     const float4x4 objectToWorld = float4x4(
@@ -1154,10 +1175,63 @@ kernel void wavefrontShade(
 
     const float3 geomNormal = normalize(transformDirection(objectGeomNormal, objectToWorld));
 
+    // Ray-cone footprint at this hit. The cone opened by `coneSpread` over the
+    // distance just travelled; the triangle turns that width into texels via the
+    // ratio of its uv area to its world area, and the grazing term accounts for a
+    // footprint stretched by hitting the surface at an angle.
+    const float3 worldEdge1 = transformDirection(objEdge1, objectToWorld);
+    const float3 worldEdge2 = transformDirection(objEdge2, objectToWorld);
+    const float worldArea2 = length(cross(worldEdge1, worldEdge2));
+    // MEASURED: no faster. 45.15 ms against 45.25 at 1280x720 native, and 13.80
+    // against 13.88 at half resolution with the radiance cache on (n=4 each,
+    // ABBA, t=0.10 and t=0.20) -- zero either way, while the image moves on 29%
+    // of pixels, so the level of detail is certainly being applied.
+    //
+    // The premise was that `shade` costs 26% of the frame because five level-0
+    // fetches per hit pull against the cache the acceleration structures need.
+    // It does not: cutting that traffic moves neither `shade` nor `extend`. The
+    // same answer is already recorded above the extend kernel, reached from the
+    // other side -- inline traversal cut the MMU limiter from 44% to 29% and the
+    // last level cache from 29% to 20% for exactly the same frame time. This
+    // renderer is latency-bound on the ray tracing unit at 17% occupancy, and
+    // memory-side work of any kind measures as nothing until that moves.
+    //
+    // Kept, and off by default, because it is a filtering fix rather than a
+    // performance one: the renderer builds mip chains, pays for them in memory,
+    // and without this reads level 0 for every fetch -- a compute kernel has no
+    // derivatives, so sample() takes the top level however the sampler is set.
+    // That aliases minified surfaces. At high sample counts the supersampling
+    // hides it and mip 0 converges correctly, which is why an offline render
+    // should leave this alone; at a genuine 1 spp there is nothing to hide it.
+    //
+    // The cone is derived rather than carried. PathState is read and written for
+    // every live path on every bounce and is guarded at 52 bytes, so two floats
+    // there would cost more memory traffic than the mips they buy back.
+    //
+    // What the width needs is the spread times the segment, and past the primary
+    // hit the spread is dominated by the last scattering event, not by the pixel
+    // it started from: one diffuse bounce opens the cone over the hemisphere and
+    // whatever it was before that stops mattering. So a specular path keeps the
+    // pixel's own spread -- which is what keeps a mirror sharp -- and everything
+    // else takes a hemisphere's worth.
+    const float pixelSpread = 2.0f * abs(uniforms.clipToView[1][1]) / float(max(uniforms.height, 1u));
+    const bool coneIsPixelWide = (depth == 0u) || ((p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u);
+    const float coneSpread = coneIsPixelWide ? pixelSpread : 1.0f;
+    const float coneWidthHere = coneSpread * rec.distance;
+    float lodBase = -1e30f;
+    if (uniforms.textureLodMode != 0u && uvArea2 > 0.0f && worldArea2 > 1e-20f && coneWidthHere > 0.0f)
+    {
+        const float ndotd = max(abs(dot(geomNormal, rayDir)), 1e-4f);
+        lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd);
+    }
+
     SurfaceInteraction si;
     initSurfaceInteraction(si, materials[entry.materialId],
                            worldPosition, worldNormal, geomNormal,
-                           worldTangent, worldBinormal, uv, rayDir, vertexColor);
+                           worldTangent, worldBinormal, uv, rayDir, vertexColor, lodBase);
+
+    // 0xFFFFFF words is 64 MB of chase, past any cache on this part; the earlier
+    // version walked a 3.7 MB queue and was measuring cache hits, not memory.
 
     // Absorption over the segment just travelled. The IOR stack already knows
     // which medium the path is inside; it now also carries which material that
@@ -1792,6 +1866,10 @@ static void shadowImpl(
     payload.cutoff = sr.rrCutoff;
     const auto hit = T::traceAnyHit(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW,
                                     motionTime, functionTable, payload);
+    // Above the early return, not below it: in a canopy most shadow rays are
+    // blocked and return here, so a probe past this point runs on the minority
+    // that got through and reports headroom the stage does not have.
+
     if (hit.type != intersection_type::none)
     {
         return; // something accepted: fully blocked

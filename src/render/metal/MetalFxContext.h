@@ -94,6 +94,48 @@ public:
 
     /// Create or recreate the temporal denoiser. Bound to its formats and both
     /// resolutions, like the spatial one.
+    /// Temporal upscaling without denoising: history and jitter, but none of the
+    /// guides the denoiser wants. The middle of the three -- the spatial scaler
+    /// has no history at all and so cannot help a one-sample frame, and the
+    /// denoiser costs a second traced sample for its clean guides.
+    ///
+    /// Unlike the denoiser, this one has a working Metal 4 constructor; the
+    /// repro in tools/ shows spatial and temporal building through the Metal 4
+    /// compiler while only the denoised scaler asserts.
+    bool ensureTemporalScaler(MTL::Device* device,
+                              MTL::PixelFormat colorFormat,
+                              MTL::PixelFormat depthFormat,
+                              MTL::PixelFormat motionFormat,
+                              MTL::PixelFormat outputFormat,
+                              uint32_t inputWidth,
+                              uint32_t inputHeight,
+                              uint32_t outputWidth,
+                              uint32_t outputHeight,
+                              void* metal4Compiler);
+
+    bool hasTemporalScaler() const
+    {
+        return mTemporalScaler != nullptr;
+    }
+
+    MTL::TextureUsage temporalColorUsage() const;
+    MTL::TextureUsage temporalDepthUsage() const;
+    MTL::TextureUsage temporalMotionUsage() const;
+    MTL::TextureUsage temporalOutputUsage() const;
+
+    struct TemporalInputs
+    {
+        void* color = nullptr;
+        void* depth = nullptr;
+        void* motion = nullptr;
+        void* output = nullptr;
+        float jitterX = 0.0f;
+        float jitterY = 0.0f;
+        bool depthReversed = true;
+        bool resetHistory = false;
+    };
+    void encodeTemporal(void* commandBuffer, bool metal4, const TemporalInputs& inputs);
+
     bool ensureDenoiser(MTL::Device* device,
                         uint32_t inputWidth,
                         uint32_t inputHeight,
@@ -129,6 +171,12 @@ private:
     void* mSpatialScaler = nullptr; ///< id<MTLFXSpatialScaler>, retained
     void* mSpatialScaler4 = nullptr; ///< id<MTL4FXSpatialScaler>, retained
     void* mDenoiser = nullptr; ///< id<MTLFXTemporalDenoisedScaler>, retained
+    void* mTemporalScaler = nullptr;  ///< id<MTLFXTemporalScaler>, retained
+    void* mTemporalScaler4 = nullptr; ///< id<MTL4FXTemporalScaler>, retained
+    uint32_t mTemporalInputWidth = 0;
+    uint32_t mTemporalInputHeight = 0;
+    uint32_t mTemporalOutputWidth = 0;
+    uint32_t mTemporalOutputHeight = 0;
     uint32_t mDenoiseInputWidth = 0;
     uint32_t mDenoiseInputHeight = 0;
     uint32_t mDenoiseOutputWidth = 0;

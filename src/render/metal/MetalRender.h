@@ -71,7 +71,6 @@ private:
         MTL::Buffer* mPerPrimitiveBuffer = nullptr;
         uint32_t mTriangleCount = 0;
         uint32_t mVbOffset = 0;
-        uint32_t mIndexOffset = 0;
         bool mIsSkeletal = false;
     };
 
@@ -140,8 +139,6 @@ private:
     View mPrevView;
     MTL::Device* mDevice = nullptr;
     MTL::CommandQueue* mCommandQueue = nullptr;
-
-    MTL::ComputePipelineState* mPathTracingPSO = nullptr;
     MTL::ComputePipelineState* mTonemapperPSO = nullptr;
     MTL::ComputePipelineState* mSkinningPSO = nullptr;
     MTL::ComputePipelineState* mTriangleUpdatePSO = nullptr;
@@ -174,6 +171,14 @@ private:
     // Set while uploading materials. Gates the alpha function constant, so a
     // scene with no cutouts compiles the same kernels it always did.
     bool mSceneHasAlphaMaterials = false;
+    // One byte per material: does it need the alpha test at all. Drives the
+    // per-geometry opaque flag, so traversal skips the intersection function on
+    // geometry that never had a cutout in it.
+    std::vector<uint8_t> mMaterialIsCutout;
+    uint32_t mOpaqueGeometryCount = 0;
+    uint32_t mCutoutGeometryCount = 0;
+
+
     // A GPU command buffer failed. Kept so a headless run can exit non-zero
     // instead of writing a black image and reporting success.
     bool mDeviceError = false;
@@ -240,16 +245,9 @@ private:
     // Target wall-clock cost of a single path-trace command buffer. Keeping each
     // submission short is what keeps the display queue (and therefore the UI)
     // running at vsync while a heavy frame renders.
-    static constexpr double kTargetSubmissionMs = 6.0;
     // Upper bound on bands per frame. Each band is a separate command buffer with
     // its own binding + residency setup, so splitting past this costs more than
     // the interleaving it enables.
-    static constexpr uint32_t kMaxBands = 8;
-    std::atomic<double> mFrameGpuStartSeconds{ 0.0 };
-    uint32_t mLastBandTotalRows = 0;
-
-    uint32_t computeBandHeight(uint32_t height) const;
-    void encodePathTraceBindings(MTL::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer, Buffer* output);
 
     // --- Wavefront tracer ---------------------------------------------------
     // One set of pipelines per combination of scene features. Every branch a
@@ -336,9 +334,20 @@ private:
     // Bumped when the allocation set can have changed, so residency is
     // rebuilt then and not every frame.
     uint32_t mMetal4ResidencyGeneration = 0;
+    // Set whenever an allocation the frame can touch appears outside the
+    // resolution change the generation above tracks -- a newly built wavefront
+    // variant and its intersection function tables, in practice.
+    bool mMetal4ResidencyDirty = true;
     void makeResourcesResidentForMetal4(Buffer* output);
 
     MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
+    // Metal 4 counts the same stages through a heap the encoder writes into.
+    MTL4::CounterHeap* mStageCounterHeap = nullptr;
+    void createStageCounterHeap();
+    void reportStageTimingsMetal4();
+    // Heap ticks are not nanoseconds and not the clock sampleTimestamps reports,
+    // so the scale is anchored once against the command buffer's own GPU time.
+    double mGpuTicksToMs = 0.0;
     MTL::Buffer* mStageStatsBuffer = nullptr; // shared copy of the control buffer, profiling only
     static constexpr uint32_t kMaxStageSamples = 256;
 
@@ -361,7 +370,7 @@ private:
                          MTL::Buffer* uniformBuffer,
                          Buffer* output, uint32_t width, uint32_t height, uint32_t sampleCount,
                          uint32_t features);
-    void encodeWavefrontMetal4(MTL4::ComputeCommandEncoder* enc, MTL::Buffer* uniformBuffer, Buffer* output,
+    void encodeWavefrontMetal4(MTL4::CommandBuffer* cmd, MTL4::ComputeCommandEncoder*& enc, MTL::Buffer* uniformBuffer, Buffer* output,
                                uint32_t width, uint32_t height, uint32_t sampleCount, uint32_t features);
     /// Constant-free stages, built by the Metal 4 compiler.
     MTL::ComputePipelineState* mWavefrontResolvePSO4 = nullptr;
@@ -374,7 +383,6 @@ private:
     MTL::ComputePipelineState* mTriangleUpdatePSO4 = nullptr;
 
     MTL::Library* loadShaderLibrary(const char* relativePath);
-    void buildComputePipeline();
     void buildTonemapperPipeline();
     void buildBuffers();
     void uploadLightBuffer();
@@ -471,6 +479,7 @@ private:
     const bool mNoAccumColor = getenv("STRELKA_NO_ACCUM_COLOR") != nullptr;
     void applySkinningMetal3();
     MTL::ComputePipelineState* mAovResolvePSO = nullptr;
+    MTL::ComputePipelineState* mAovResolvePSO4 = nullptr;
     void releaseGuideTextures();
     void ensureGuideTextures(uint32_t width, uint32_t height, uint32_t outWidth, uint32_t outHeight);
     /// Halton (2,3), the standard temporal jitter sequence: MetalFX reconstructs
@@ -483,6 +492,9 @@ private:
     // Sync mode (headless CLI): retain the last committed buffer and wait on it.
     bool mSyncMode = false;
     MTL::CommandBuffer* mLastCommandBuffer = nullptr;
+    // What renderSync blocks on when the frame went out through Metal 4: there is
+    // no MTL4 command buffer to wait on, so the queue signals a shared event.
+    uint64_t mMetal4FrameValue = 0;
     void retainCommandBufferForSync(MTL::CommandBuffer* pCmd);
 
     // Environment map

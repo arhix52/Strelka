@@ -172,6 +172,150 @@ bool MetalFxContext::denoiserSupportsMetal4(MTL::Device* device)
     return [MTLFXTemporalDenoisedScalerDescriptor supportsMetal4FX:(__bridge id<MTLDevice>)device];
 }
 
+
+bool MetalFxContext::ensureTemporalScaler(MTL::Device* device,
+                                          MTL::PixelFormat colorFormat,
+                                          MTL::PixelFormat depthFormat,
+                                          MTL::PixelFormat motionFormat,
+                                          MTL::PixelFormat outputFormat,
+                                          uint32_t inputWidth,
+                                          uint32_t inputHeight,
+                                          uint32_t outputWidth,
+                                          uint32_t outputHeight,
+                                          void* metal4Compiler)
+{
+    if (mTemporalScaler && inputWidth == mTemporalInputWidth && inputHeight == mTemporalInputHeight &&
+        outputWidth == mTemporalOutputWidth && outputHeight == mTemporalOutputHeight)
+    {
+        return true;
+    }
+    release();
+
+    @autoreleasepool
+    {
+        id<MTLDevice> nativeDevice = (__bridge id<MTLDevice>)device;
+        if (!nativeDevice || inputWidth == 0 || inputHeight == 0)
+        {
+            return false;
+        }
+
+        MTLFXTemporalScalerDescriptor* desc = [MTLFXTemporalScalerDescriptor new];
+        desc.colorTextureFormat = (MTLPixelFormat)colorFormat;
+        desc.depthTextureFormat = (MTLPixelFormat)depthFormat;
+        desc.motionTextureFormat = (MTLPixelFormat)motionFormat;
+        desc.outputTextureFormat = (MTLPixelFormat)outputFormat;
+        desc.inputWidth = inputWidth;
+        desc.inputHeight = inputHeight;
+        desc.outputWidth = outputWidth;
+        desc.outputHeight = outputHeight;
+        // The colour handed over is linear radiance, not a tonemapped image, so
+        // the scaler has to work out its own exposure -- the same choice the
+        // denoiser path makes, and for the same reason.
+        desc.autoExposureEnabled = YES;
+        desc.requiresSynchronousInitialization = YES;
+
+        id<MTLFXTemporalScaler> scaler = [desc newTemporalScalerWithDevice:nativeDevice];
+        if (!scaler)
+        {
+            STRELKA_ERROR("MetalFX temporal scaler unavailable for {}x{} -> {}x{}", inputWidth, inputHeight,
+                          outputWidth, outputHeight);
+            return false;
+        }
+        mTemporalScaler = (void*)scaler;
+
+        if (metal4Compiler)
+        {
+            id<MTL4FXTemporalScaler> scaler4 =
+                [desc newTemporalScalerWithDevice:nativeDevice
+                                         compiler:(__bridge id<MTL4Compiler>)metal4Compiler];
+            if (scaler4)
+            {
+                mTemporalScaler4 = (void*)scaler4;
+            }
+            else
+            {
+                STRELKA_WARNING("MetalFX Metal 4 temporal scaler unavailable; falling back to Metal 3");
+            }
+        }
+    }
+
+    mTemporalInputWidth = inputWidth;
+    mTemporalInputHeight = inputHeight;
+    mTemporalOutputWidth = outputWidth;
+    mTemporalOutputHeight = outputHeight;
+    STRELKA_INFO("MetalFX temporal scaler: {}x{} -> {}x{}{}", inputWidth, inputHeight, outputWidth, outputHeight,
+                 mTemporalScaler4 ? " (metal4)" : "");
+    return true;
+}
+
+MTL::TextureUsage MetalFxContext::temporalColorUsage() const
+{
+    if (!mTemporalScaler)
+        return MTL::TextureUsageShaderRead;
+    return (MTL::TextureUsage)((__bridge id<MTLFXTemporalScaler>)mTemporalScaler).colorTextureUsage;
+}
+
+MTL::TextureUsage MetalFxContext::temporalDepthUsage() const
+{
+    if (!mTemporalScaler)
+        return MTL::TextureUsageShaderRead;
+    return (MTL::TextureUsage)((__bridge id<MTLFXTemporalScaler>)mTemporalScaler).depthTextureUsage;
+}
+
+MTL::TextureUsage MetalFxContext::temporalMotionUsage() const
+{
+    if (!mTemporalScaler)
+        return MTL::TextureUsageShaderRead;
+    return (MTL::TextureUsage)((__bridge id<MTLFXTemporalScaler>)mTemporalScaler).motionTextureUsage;
+}
+
+MTL::TextureUsage MetalFxContext::temporalOutputUsage() const
+{
+    if (!mTemporalScaler)
+        return MTL::TextureUsageShaderWrite;
+    return (MTL::TextureUsage)((__bridge id<MTLFXTemporalScaler>)mTemporalScaler).outputTextureUsage;
+}
+
+void MetalFxContext::encodeTemporal(void* commandBuffer, bool metal4, const TemporalInputs& inputs)
+{
+    if (!commandBuffer || !inputs.color || !inputs.output)
+    {
+        return;
+    }
+    if (metal4 && mTemporalScaler4)
+    {
+        id<MTL4FXTemporalScaler> t = (__bridge id<MTL4FXTemporalScaler>)mTemporalScaler4;
+        t.colorTexture = (__bridge id<MTLTexture>)inputs.color;
+        t.depthTexture = (__bridge id<MTLTexture>)inputs.depth;
+        t.motionTexture = (__bridge id<MTLTexture>)inputs.motion;
+        t.outputTexture = (__bridge id<MTLTexture>)inputs.output;
+        t.jitterOffsetX = inputs.jitterX;
+        t.jitterOffsetY = inputs.jitterY;
+        t.motionVectorScaleX = 1.0f;
+        t.motionVectorScaleY = 1.0f;
+        t.depthReversed = inputs.depthReversed ? YES : NO;
+        t.reset = inputs.resetHistory ? YES : NO;
+        [t encodeToCommandBuffer:(__bridge id<MTL4CommandBuffer>)commandBuffer];
+        return;
+    }
+    if (!mTemporalScaler)
+    {
+        return;
+    }
+    id<MTLFXTemporalScaler> t = (__bridge id<MTLFXTemporalScaler>)mTemporalScaler;
+    t.colorTexture = (__bridge id<MTLTexture>)inputs.color;
+    t.depthTexture = (__bridge id<MTLTexture>)inputs.depth;
+    t.motionTexture = (__bridge id<MTLTexture>)inputs.motion;
+    t.outputTexture = (__bridge id<MTLTexture>)inputs.output;
+    t.jitterOffsetX = inputs.jitterX;
+    t.jitterOffsetY = inputs.jitterY;
+    t.motionVectorScaleX = 1.0f;
+    t.motionVectorScaleY = 1.0f;
+    t.depthReversed = inputs.depthReversed ? YES : NO;
+    t.reset = inputs.resetHistory ? YES : NO;
+    [t encodeToCommandBuffer:(__bridge id<MTLCommandBuffer>)commandBuffer];
+}
+
 bool MetalFxContext::ensureDenoiser(MTL::Device* device,
                                     uint32_t inputWidth,
                                     uint32_t inputHeight,
@@ -299,6 +443,17 @@ void MetalFxContext::encodeDenoise(void* commandBuffer, const DenoiseInputs& inp
 
 void MetalFxContext::release()
 {
+    if (mTemporalScaler4)
+    {
+        CFRelease(mTemporalScaler4);
+        mTemporalScaler4 = nullptr;
+    }
+    if (mTemporalScaler)
+    {
+        CFRelease(mTemporalScaler);
+        mTemporalScaler = nullptr;
+    }
+    mTemporalInputWidth = mTemporalInputHeight = mTemporalOutputWidth = mTemporalOutputHeight = 0;
     if (mSpatialScaler)
     {
         CFRelease(mSpatialScaler);

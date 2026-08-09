@@ -114,8 +114,6 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/depth", 8);
     m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", 256);
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
-    m_settingsManager->setAs<uint32_t>("render/pt/iteration", 0);
-    m_settingsManager->setAs<uint32_t>("render/pt/stratifiedSamplingType", 0); // 0 - none, 1 - random, 2 -
                                                                                // stratified sampling, 3 -
                                                                                // optimized stratified sampling
     m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", 1); // 0 - None, 1 - Reinhard, 2 - ACES, 3 - Filmic
@@ -125,8 +123,6 @@ void EditorApp::loadSettings()
     // MetalFX is opt-in; keep native-resolution output as the default.
     m_settingsManager->setAs<bool>("render/pt/enableUpscale", false);
     m_settingsManager->setAs<bool>("render/pt/enableAcc", true);
-    m_settingsManager->setAs<bool>("render/pt/enableTonemap", true);
-    m_settingsManager->setAs<bool>("render/pt/isResized", false);
     m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/misHeuristic", 0); // 0 = balance, 1 = power
     // Sobol with a blue-noise screen-space error distribution, handing over to
@@ -154,8 +150,6 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<float>("render/animation/speed", 1.0f);
     // Wavefront by default: bit-identical output, 2.6x faster at depth 8. The
     // megakernel stays selectable so any change can still be A/B'd against it.
-    m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", 1); // 0 = megakernel, 1 = wavefront
-    m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 1);
     m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", 1u);
     m_settingsManager->setAs<uint32_t>("render/pt/writeAov", 0);
@@ -176,7 +170,10 @@ void EditorApp::loadSettings()
     {
         m_settingsManager->setAs<bool>("render/pt/denoise", atoi(dn) != 0);
     }
-    m_settingsManager->setAs<uint32_t>("render/pt/metal4", 0);
+    m_settingsManager->setAs<uint32_t>("render/pt/metal4", 1);
+    m_settingsManager->setAs<uint32_t>("render/pt/sortRays", 0);
+    m_settingsManager->setAs<uint32_t>("render/pt/textureLod", 0);
+    m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
     if (const char* m4 = getenv("STRELKA_METAL4"))
     {
         m_settingsManager->setAs<uint32_t>("render/pt/metal4", (uint32_t)atoi(m4));
@@ -202,11 +199,6 @@ void EditorApp::loadSettings()
     if (const char* st = getenv("STRELKA_STATIC"))
     {
         m_settingsManager->setAs<uint32_t>("render/pt/staticTraversal", (uint32_t)atoi(st));
-    }
-
-    if (const char* tracer = getenv("STRELKA_TRACER"))
-    {
-        m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", (uint32_t)atoi(tracer));
     }
     m_settingsManager->setAs<uint32_t>("render/validate/estimatorMode", 0);
     // Absorption convention for transmissive media: 0 = glTF, 1 = Cycles.
@@ -332,14 +324,9 @@ void EditorApp::runBenchmark()
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
     // One submission per frame, so the number is the tracer's cost and not the
     // inter-band gaps of the responsiveness split.
-    m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 0);
     if (const char* d = getenv("STRELKA_REF_DEPTH"))
     {
         m_settingsManager->setAs<uint32_t>("render/pt/depth", (uint32_t)atoi(d));
-    }
-    if (const char* tracer = getenv("STRELKA_TRACER"))
-    {
-        m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", (uint32_t)atoi(tracer));
     }
     if (getenv("STRELKA_STAGES"))
     {
@@ -403,7 +390,7 @@ void EditorApp::runBenchmark()
     }
     const double median = samples[samples.size() / 2];
     STRELKA_INFO("BENCH  tracer={} depth={} frames={}  median={:.2f} ms  min={:.2f}  max={:.2f}  wall={:.2f} ms",
-                 m_settingsManager->getAs<uint32_t>("render/pt/tracerMode"),
+                 1u,
                  m_settingsManager->getAs<uint32_t>("render/pt/depth"),
                  samples.size(), median, samples.front(), samples.back(),
                  wall.empty() ? 0.0 : wall[wall.size() / 2]);
@@ -433,8 +420,6 @@ void EditorApp::runJitterTest()
     const uint32_t frames = std::max(16, atoi(getenv("STRELKA_JITTER_TEST")));
     m_settingsManager->setAs<bool>("render/pt/enableAcc", false);
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
-    m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 0);
-    m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", 1);
     m_settingsManager->setAs<bool>("render/pt/denoise", true);
     m_settingsManager->setAs<bool>("render/pt/enableUpscale", true);
     if (const char* up = getenv("STRELKA_UPSCALE"))
@@ -838,7 +823,7 @@ void EditorApp::runLightAudit()
     const std::vector<Scene::UniformLightDesc> original = m_scene->getLightsDesc();
     report(fmt::format("LIGHTAUDIT lights={} analytic={} tracerMode={} envMap={} spp={} {}x{}", original.size(),
                        m_settingsManager->getAs<bool>("render/validate/analyticLights"),
-                       m_settingsManager->getAs<uint32_t>("render/pt/tracerMode"),
+                       1u,
                        m_scene->getEnvLight().has_value(), refSpp, auditW, auditH));
     for (size_t i = 0; i < original.size(); ++i)
     {
@@ -1088,8 +1073,6 @@ void EditorApp::runDenoiseAudit()
     // Deterministic conditions for everything below. Motion blur off: it makes
     // the shutter, and therefore the pose the frame is rendered at, depend on
     // playback state, and the audit drives time by hand.
-    m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", 1);
-    m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 0);
     m_settingsManager->setAs<bool>("render/enableMotionBlur", false);
     m_settingsManager->setAs<bool>("render/isMotionBlurVisible", false);
     m_settingsManager->setAs<float>("render/pt/upscaleFactor", upscale);
@@ -2273,7 +2256,6 @@ void EditorApp::runDenoiseAudit()
                            m.name, m.w, m.h, m.tracer, (int)m.denoise, (int)m.upscale, m.factor));
         m_settingsManager->setAs<uint32_t>("render/width", m.w);
         m_settingsManager->setAs<uint32_t>("render/height", m.h);
-        m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", m.tracer);
         m_settingsManager->setAs<bool>("render/pt/denoise", m.denoise);
         m_settingsManager->setAs<bool>("render/pt/enableUpscale", m.upscale);
         m_settingsManager->setAs<float>("render/pt/upscaleFactor", m.factor);
@@ -2363,10 +2345,6 @@ void EditorApp::runReferenceCapture()
     if (const char* d = getenv("STRELKA_REF_DEPTH"))
     {
         m_settingsManager->setAs<uint32_t>("render/pt/depth", (uint32_t)atoi(d));
-    }
-    if (const char* tracer = getenv("STRELKA_TRACER"))
-    {
-        m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", (uint32_t)atoi(tracer));
     }
 
     std::vector<std::vector<float>> images;
@@ -2506,9 +2484,6 @@ void EditorApp::runConvergenceSweep()
     // Linear output and no reconstruction: a tone curve compresses exactly the
     // bright noise this is measuring, and a temporal upscaler would be the thing
     // under test instead of the estimator.
-    m_settingsManager->setAs<uint32_t>("render/pt/tracerMode",
-                                       getenv("STRELKA_TRACER") ? m_settingsManager->getAs<uint32_t>("render/pt/tracerMode") : 1);
-    m_settingsManager->setAs<uint32_t>("render/pt/splitSubmissions", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", 0);
     m_settingsManager->setAs<float>("render/post/gamma", 0.0f);
     m_settingsManager->setAs<bool>("render/pt/denoise", false);
@@ -2659,7 +2634,7 @@ void EditorApp::runConvergenceSweep()
 
     report(fmt::format("CONV {}x{} spp {}..{} step={} depth={} tracer={}", convW, convH, firstSpp, maxSpp,
                        sppPerLaunch, m_settingsManager->getAs<uint32_t>("render/pt/depth"),
-                       m_settingsManager->getAs<uint32_t>("render/pt/tracerMode")));
+                       1u));
 
     for (const char* p = samplersEnv; p && *p;)
     {

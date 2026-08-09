@@ -38,6 +38,27 @@ struct RenderConfig
     // is off unless asked for.
     bool profileStages = false;
     std::string capturePath; // --capture: one steady-state frame to a .gputrace
+    // Render below the output resolution and let MetalFX scale up. Off by
+    // default because it changes what the image *is*, which an offline render
+    // should not do silently; for a realtime budget it is the largest lever
+    // there is, since cost is per traced pixel.
+    bool upscale = false;
+    float upscaleFactor = 0.5f;
+    // Metal 4 submission layer. The default: wavefront tracing, both MetalFX
+    // scalers and the guide resolve all build and run through it, and it matches
+    // Metal 3 to within the renderer's own run-to-run spread. A frame falls back
+    // on its own where no Metal 4 path exists -- the denoiser, whose Metal 4
+    // constructor asserts inside MPSGraph, and the megakernel.
+    uint32_t metal4 = 1;
+    // Reorder each bounce's queue by ray origin before traversing it.
+    bool sortRays = false;
+    // Ray-cone texture level of detail. Off by default -- not because it costs
+    // anything, but because it changes the image and buys no time, so turning it
+    // on is a decision about filtering rather than about performance. See the
+    // note in wavefront.metal for the measurement.
+    bool textureLod = false;
+    // 0 = spatial scaler, 1 = temporal scaler (ignored when denoise is on).
+    uint32_t upscaleMode = 0;
     uint32_t risCandidates = 1; // 1 = plain next-event estimation
     uint32_t estimatorMode = 0; // 0 = NEE + MIS, 1 = BSDF sampling only
     bool sharc = false;

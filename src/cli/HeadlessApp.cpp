@@ -176,6 +176,18 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.denoise = *v;
     if (auto v = tbl["render"]["profile_stages"].value<bool>())
         cfg.profileStages = *v;
+    if (auto v = tbl["render"]["upscale"].value<bool>())
+        cfg.upscale = *v;
+    if (auto v = tbl["render"]["upscale_factor"].value<double>())
+        cfg.upscaleFactor = (float)*v;
+    if (auto v = tbl["render"]["upscale_mode"].value<std::string>())
+        cfg.upscaleMode = (*v == "temporal") ? 1u : 0u;
+    if (auto v = tbl["render"]["metal4"].value<bool>())
+        cfg.metal4 = *v ? 1u : 0u;
+    if (auto v = tbl["render"]["sort_rays"].value<bool>())
+        cfg.sortRays = *v;
+    if (auto v = tbl["render"]["texture_lod"].value<bool>())
+        cfg.textureLod = *v;
     if (auto v = tbl["render"]["ris_candidates"].value<int64_t>())
         cfg.risCandidates = (uint32_t)*v;
     if (auto v = tbl["render"]["estimator_mode"].value<int64_t>())
@@ -281,8 +293,9 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/samplerType", m_config.samplerType);
     m_settings->setAs<uint32_t>("render/pt/blueNoiseSwitchSpp", m_config.blueNoiseSwitchSpp);
     m_settings->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
-    m_settings->setAs<float>("render/pt/upscaleFactor", 0.5f);
-    m_settings->setAs<bool>("render/pt/enableUpscale", false);
+    m_settings->setAs<float>("render/pt/upscaleFactor", m_config.upscaleFactor);
+    m_settings->setAs<bool>("render/pt/enableUpscale", m_config.upscale);
+    m_settings->setAs<uint32_t>("render/pt/upscaleMode", m_config.upscaleMode);
     m_settings->setAs<bool>("render/pt/enableAcc", true);
     m_settings->setAs<uint32_t>("render/selectedCamera", static_cast<uint32_t>(std::max(0, m_config.cameraIndex)));
     m_settings->setAs<bool>("render/enableMotionBlur", false);
@@ -293,8 +306,6 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<std::string>("resource/searchPath", resourceSearchPath);
 
     // Wavefront + single submission: deterministic sync, no banding overhead.
-    m_settings->setAs<uint32_t>("render/pt/tracerMode", 1);
-    m_settings->setAs<uint32_t>("render/pt/splitSubmissions", 0);
     m_settings->setAs<uint32_t>("render/pt/profileStages", 0);
     m_settings->setAs<uint32_t>("render/pt/risCandidates", 1u);
     m_settings->setAs<uint32_t>("render/pt/writeAov", 0);
@@ -305,7 +316,9 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/denoiseDepthMode", 0);
     m_settings->setAs<float>("render/pt/denoiseFireflyClamp", 8.0f);
     m_settings->setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);
-    m_settings->setAs<uint32_t>("render/pt/metal4", 0);
+    m_settings->setAs<uint32_t>("render/pt/metal4", m_config.metal4);
+    m_settings->setAs<uint32_t>("render/pt/sortRays", m_config.sortRays ? 1u : 0u);
+    m_settings->setAs<uint32_t>("render/pt/textureLod", m_config.textureLod ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/staticTraversal", 1);
     m_settings->setAs<uint32_t>("render/validate/estimatorMode", m_config.estimatorMode);
     // Absorption convention for transmissive media: 0 = glTF, 1 = Cycles.
@@ -496,9 +509,15 @@ int HeadlessApp::run()
 
     const auto startTime = high_resolution_clock::now();
     bool announced = false;
+    // Headroom sweep. Every variant is measured inside one process and one
+    // thermal state, cycling round-robin, because the alternative -- a run per
+    // variant -- puts a scene load and a fresh clock ramp between the numbers
+    // being compared. Measured sequentially, this probe reported that adding
+    // dependent loads made the frame *faster*, which is drift and not headroom.
     while (m_sharedCtx->mSubframeIndex < m_config.spp)
     {
         m_render->renderSync(outputBuf.get());
+
         if (!announced && !m_config.capturePath.empty())
         {
             // One frame, in steady state: the point of the capture is the

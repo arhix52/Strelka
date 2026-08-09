@@ -144,7 +144,7 @@ if(APPLE)
     # without it the metallibs silently go stale after a header change or a
     # `git checkout`, and the app runs against shaders that no longer match the
     # host-side struct layouts.
-    foreach(shader pathtrace wavefront tonemapper skinning)
+    foreach(shader wavefront tonemapper skinning)
         add_custom_command(
             OUTPUT ${SHADER_OUTPUT_DIR}/${shader}.metallib
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
@@ -167,7 +167,6 @@ if(APPLE)
 
     add_custom_target(strelka_shaders ALL
         DEPENDS
-            ${SHADER_OUTPUT_DIR}/pathtrace.metallib
             ${SHADER_OUTPUT_DIR}/wavefront.metallib
             ${SHADER_OUTPUT_DIR}/tonemapper.metallib
             ${SHADER_OUTPUT_DIR}/skinning.metallib

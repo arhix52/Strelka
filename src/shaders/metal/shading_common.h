@@ -74,40 +74,8 @@ struct PerRayData
     bool shouldTerninate;
 };
 
-// Interpolates the vertex attribute of an arbitrary type across the surface of a triangle
-// given the barycentric coordinates and triangle index in an intersection structure.
-template<typename T, typename IndexType>
-inline T interpolateVertexAttribute(device T *attributes,
-                                    IndexType i0,
-                                    IndexType i1,
-                                    IndexType i2,
-                                    float2 uv) {
-    // Look up value for each vertex.
-    const T T0 = attributes[i0];
-    const T T1 = attributes[i1];
-    const T T2 = attributes[i2];
 
-    // Compute the sum of the vertex attributes weighted by the barycentric coordinates.
-    // The barycentric coordinates sum to one.
-    return (1.0f - uv.x - uv.y) * T0 + uv.x * T1 + uv.y * T2;
-}
 
-template<typename T>
-inline T interpolateVertexAttribute(thread T *attributes, float2 uv) {
-    // Look up the value for each vertex.
-    const T T0 = attributes[0];
-    const T T1 = attributes[1];
-    const T T2 = attributes[2];
-
-    // Compute the sum of the vertex attributes weighted by the barycentric coordinates.
-    // The barycentric coordinates sum to one.
-    return (1.0f - uv.x - uv.y) * T0 + uv.x * T1 + uv.y * T2;
-}
-
-__attribute__((always_inline))
-float3 transformPoint(float3 p, float4x4 transform) {
-    return (transform * float4(p.x, p.y, p.z, 1.0f)).xyz;
-}
 
 __attribute__((always_inline))
 float3 transformDirection(float3 p, float4x4 transform) {
@@ -338,6 +306,21 @@ void generateCameraRay(uint2 pixelIndex,
     }
 }
 
+// Ray-cone level of detail, following Akenine-Moller et al: the triangle term
+// carries texels per world unit, the cone term carries how wide the footprint
+// has grown, and the texture contributes its own resolution here because one
+// material's slots are rarely all the same size.
+template <typename Tex2D>
+inline float texLod(Tex2D tex, float lodBase, bool hasLod)
+{
+    if (!hasLod)
+    {
+        return 0.0f;
+    }
+    const float dim = float(tex.get_width() * tex.get_height());
+    return max(0.0f, lodBase + 0.5f * log2(max(dim, 1.0f)));
+}
+
 // Fill SurfaceInteraction from hit geometry and sample Material textures
 void initSurfaceInteraction(
     thread SurfaceInteraction& si,
@@ -349,9 +332,21 @@ void initSurfaceInteraction(
     float3 worldBinormal,
     float2 uv,
     float3 rayDir,
-    float3 vertexColor = float3(1.0f))
+    float3 vertexColor = float3(1.0f),
+    // Ray-cone footprint for this hit, in log2 texels-per-unit *before* the
+    // texture's own resolution is folded in -- each texture adds its own, since
+    // the slots of one material are rarely the same size. FLT_MAX_10_EXP as the
+    // sentinel would be cute; -1e30 says "no cone, use level 0" and is checked once.
+    float lodBase = -1e30f)
 {
+    // Two samplers, not one with mip_filter::linear always on. Turning mip
+    // filtering on changes the image even when every fetch asks for level 0 --
+    // measured, 4.4/255 mean over 55% of pixels against the same render without
+    // it -- so leaving it on would make "level of detail off" mean something
+    // other than what the renderer did before this existed. With the switch off
+    // the sampler, and the call, are exactly the originals.
     constexpr sampler texSampler(mag_filter::linear, min_filter::linear);
+    constexpr sampler texSamplerMip(mag_filter::linear, min_filter::linear, mip_filter::linear);
 
     si.position       = worldPosition;
     si.shading_normal = worldNormal;
@@ -359,6 +354,10 @@ void initSurfaceInteraction(
     si.tangent        = worldTangent;
     si.bitangent      = worldBinormal;
     si.uv             = uv;
+    // The cone gives texels per world unit; a texture turns that into a level
+    // once its own resolution is known. Clamped at zero because a cone narrower
+    // than a texel still wants the sharpest mip, not a negative one.
+    const bool hasLod = lodBase > -1e29f;
     // One transform for every slot of the material -- see readTextureTransform()
     // in the loader for why that is not a compromise in practice.
     const float2 tuv = applyTextureTransform(uv, material);
@@ -370,7 +369,7 @@ void initSurfaceInteraction(
     float3 baseColor = float3(material.base_color) * vertexColor;
     if (!is_null_texture(material.baseColorTexture))
     {
-        baseColor *= material.baseColorTexture.sample(texSampler, tuv).rgb;
+        baseColor *= (hasLod ? material.baseColorTexture.sample(texSamplerMip, tuv, level(texLod(material.baseColorTexture, lodBase, hasLod))) : material.baseColorTexture.sample(texSampler, tuv)).rgb;
     }
     si.albedo = baseColor;
     si.opacity = resolveOpacity(material, uv);   // applies the transform itself
@@ -380,7 +379,7 @@ void initSurfaceInteraction(
     float resolvedMetallic = material.metallic;
     if (!is_null_texture(material.metallicRoughnessTexture))
     {
-        float4 mrTex = material.metallicRoughnessTexture.sample(texSampler, tuv);
+        float4 mrTex = (hasLod ? material.metallicRoughnessTexture.sample(texSamplerMip, tuv, level(texLod(material.metallicRoughnessTexture, lodBase, hasLod))) : material.metallicRoughnessTexture.sample(texSampler, tuv));
         resolvedRoughness *= mrTex.g;
         resolvedMetallic *= mrTex.b;
     }
@@ -388,7 +387,7 @@ void initSurfaceInteraction(
     // Sample normal map
     if (!is_null_texture(material.normalTexture))
     {
-        float3 bumpNormal = material.normalTexture.sample(texSampler, tuv).xyz * 2.0f - 1.0f;
+        float3 bumpNormal = (hasLod ? material.normalTexture.sample(texSamplerMip, tuv, level(texLod(material.normalTexture, lodBase, hasLod))) : material.normalTexture.sample(texSampler, tuv)).xyz * 2.0f - 1.0f;
         bumpNormal.xy *= material.normal_scale;
         float3x3 TBN = float3x3(worldTangent, worldBinormal, worldNormal);
         si.shading_normal = normalize(TBN * bumpNormal);
@@ -398,7 +397,7 @@ void initSurfaceInteraction(
     float3 emissionColor = float3(material.emission);
     if (!is_null_texture(material.emissionTexture))
     {
-        float4 emTex = material.emissionTexture.sample(texSampler, tuv);
+        float4 emTex = (hasLod ? material.emissionTexture.sample(texSamplerMip, tuv, level(texLod(material.emissionTexture, lodBase, hasLod))) : material.emissionTexture.sample(texSampler, tuv));
         emissionColor *= emTex.rgb;
     }
     si.emission = emissionColor * material.emission_strength;
@@ -703,35 +702,3 @@ LightConnection connectToLight(
     return c;
 }
 
-// Immediate form: build the connection and resolve its visibility on the spot.
-// The megakernel uses this; the wavefront tracer calls connectToLight directly
-// and defers the trace to its shadow stage.
-float3 estimateDirectLighting(
-    constant Uniforms& uniforms,
-    acceleration_structure<instancing, primitive_motion> accelerationStructure,
-    thread intersector<triangle_data, instancing, primitive_motion>& isect,
-    const uint32_t numLights,
-    device UniformLight* lights,
-    thread SamplerState& samplerRnd,
-    thread SurfaceInteraction& si,
-    thread float3& toLight,
-    thread float& lightPdf,
-    thread bool& isDelta,
-    device const EnvAliasEntry* envAliasTable,
-    texture2d<float> envMapTexture,
-    const float motionTime)
-{
-    const LightConnection c = connectToLight(uniforms, numLights, lights, samplerRnd, si,
-                                             envAliasTable, envMapTexture);
-    toLight = c.toLight;
-    lightPdf = c.pdf;
-    isDelta = c.isDelta;
-
-    if (!c.needsRay)
-    {
-        return float3(0.0f);
-    }
-    const bool occluded =
-        traceOcclusion(accelerationStructure, isect, c.origin, c.toLight, c.tMin, c.tMax, motionTime);
-    return occluded ? float3(0.0f) : c.radiance;
-}

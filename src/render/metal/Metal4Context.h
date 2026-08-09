@@ -121,6 +121,17 @@ public:
     MTL4::CommandBuffer* beginImmediate();
     void submitAndWait(MTL4::CommandBuffer* commandBuffer);
 
+    /// Frame-loop counterpart of submitAndWait's tail, split in two so the
+    /// caller can commit, do other work, and block later -- which is what an
+    /// interactive loop wants and a headless one does not.
+    ///
+    /// Metal 4 answers a committed command buffer through a commit feedback
+    /// handler, never through the buffer itself, so there is no
+    /// waitUntilCompleted to call. A queue-signalled shared event is the only
+    /// thing a caller can block on.
+    uint64_t signalFrame();
+    bool waitForFrame(uint64_t value, uint32_t timeoutMs = 5000);
+
     /// Declare a resource resident for as long as it exists. Cheap to call
     /// repeatedly; commitResidency() must follow before the next submit.
     void addResident(MTL::Allocation* allocation);
@@ -131,6 +142,16 @@ public:
     MTL::ComputePipelineState* newComputePipelineState(MTL::Library* library,
                                                        const char* functionName,
                                                        MTL::FunctionConstantValues* constants);
+
+    /// Same, with an intersection function statically linked in, so the pipeline
+    /// can hand out a table to bind it through. Metal 3 states this with
+    /// MTLLinkedFunctions on the pipeline descriptor; Metal 4 replaces that with
+    /// a StaticLinkingDescriptor carrying function *descriptors*, which is why
+    /// this cannot just take the MTL::Function the other path builds.
+    MTL::ComputePipelineState* newComputePipelineStateLinked(MTL::Library* library,
+                                                             const char* functionName,
+                                                             const char* linkedFunctionName,
+                                                             MTL::FunctionConstantValues* constants);
 
 private:
     MTL::Device* mDevice = nullptr;
@@ -144,6 +165,8 @@ private:
     MTL4::CommandBuffer* mImmediateBuffer = nullptr;
     MTL::SharedEvent* mImmediateEvent = nullptr;
     uint64_t mImmediateValue = 0;
+    MTL::SharedEvent* mFrameEvent = nullptr;
+    uint64_t mFrameValue = 0;
     ConstantRing mConstants;
     ConstantRing mImmediateConstants;
     bool mResidencyDirty = false;

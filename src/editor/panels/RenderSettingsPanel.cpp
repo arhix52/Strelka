@@ -204,13 +204,6 @@ void EditorApp::drawRenderSettingsPanel()
             }
         }
 
-        const char* tracerItems[] = { "Megakernel", "Wavefront" };
-        auto tracerMode = m_settingsManager->getAs<uint32_t>("render/pt/tracerMode");
-        if (ImGui::Combo("Tracer", (int*)&tracerMode, tracerItems, IM_ARRAYSIZE(tracerItems)))
-        {
-            m_settingsManager->setAs<uint32_t>("render/pt/tracerMode", tracerMode);
-        }
-
         // One choice, not two checkboxes.
         //
         // The two effects are alternatives -- MetalFX has a spatial scaler and a
@@ -219,9 +212,9 @@ void EditorApp::drawRenderSettingsPanel()
         // same thing and none of which said so. The render scale stays a separate
         // control because it applies to both: at 1.00 the denoiser only denoises.
         //
-        // Only the wavefront tracer writes the guides the denoiser reads, so on
-        // the megakernel that entry is unavailable rather than silently ignored.
-        const bool denoiseAvailable = tracerMode == 1;
+        // Always available now: the wavefront tracer writes the guides the
+        // denoiser reads, and it is the only tracer.
+        const bool denoiseAvailable = true;
         // Keep the setting and the list in step. Selecting the megakernel while
         // denoising left the mode index pointing past the end of a now shorter
         // list -- the combo showed whatever happened to be there, the next click

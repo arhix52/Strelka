@@ -142,7 +142,8 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     // Metal 4 has no waitUntilCompleted; a shared event signalled by the queue is
     // how a submission is waited on.
     mImmediateEvent = device->newSharedEvent();
-    if (!mImmediateAllocator || !mImmediateBuffer || !mImmediateEvent)
+    mFrameEvent = device->newSharedEvent();
+    if (!mImmediateAllocator || !mImmediateBuffer || !mImmediateEvent || !mFrameEvent)
     {
         STRELKA_ERROR("Metal 4 immediate submission objects failed");
         release();
@@ -198,12 +199,36 @@ void Metal4Context::submitAndWait(MTL4::CommandBuffer* commandBuffer)
     mImmediateEvent->waitUntilSignaledValue(mImmediateValue, 5000);
 }
 
+uint64_t Metal4Context::signalFrame()
+{
+    if (!mQueue || !mFrameEvent)
+    {
+        return 0;
+    }
+    mQueue->signalEvent(mFrameEvent, ++mFrameValue);
+    return mFrameValue;
+}
+
+bool Metal4Context::waitForFrame(uint64_t value, uint32_t timeoutMs)
+{
+    if (!mFrameEvent || value == 0)
+    {
+        return false;
+    }
+    return mFrameEvent->waitUntilSignaledValue(value, timeoutMs);
+}
+
 void Metal4Context::release()
 {
     if (mImmediateEvent)
     {
         mImmediateEvent->release();
         mImmediateEvent = nullptr;
+    }
+    if (mFrameEvent)
+    {
+        mFrameEvent->release();
+        mFrameEvent = nullptr;
     }
     if (mImmediateBuffer)
     {
@@ -335,6 +360,59 @@ MTL::ComputePipelineState* Metal4Context::newComputePipelineState(MTL::Library* 
     }
     pipelineDesc->release();
     functionDesc->release();
+    return pipeline;
+}
+
+MTL::ComputePipelineState* Metal4Context::newComputePipelineStateLinked(
+    MTL::Library* library, const char* functionName, const char* linkedFunctionName,
+    MTL::FunctionConstantValues* constants)
+{
+    if (!mCompiler || !library)
+    {
+        return nullptr;
+    }
+    NS::Error* error = nullptr;
+
+    auto describe = [&](const char* name) -> NS::Object* {
+        MTL4::LibraryFunctionDescriptor* fd = MTL4::LibraryFunctionDescriptor::alloc()->init();
+        fd->setLibrary(library);
+        fd->setName(NS::String::string(name, NS::UTF8StringEncoding));
+        if (!constants)
+        {
+            return fd;
+        }
+        // The intersection function reads the same function constants as its
+        // caller -- SPEC_ALPHA among them -- so it has to be specialised with
+        // the identical set, or the two disagree about what the scene contains.
+        MTL4::SpecializedFunctionDescriptor* sd = MTL4::SpecializedFunctionDescriptor::alloc()->init();
+        sd->setFunctionDescriptor(fd);
+        sd->setConstantValues(constants);
+        fd->release();
+        return sd;
+    };
+
+    NS::Object* computeDesc = describe(functionName);
+    NS::Object* linkedDesc = describe(linkedFunctionName);
+
+    MTL4::ComputePipelineDescriptor* pipelineDesc = MTL4::ComputePipelineDescriptor::alloc()->init();
+    pipelineDesc->setComputeFunctionDescriptor(static_cast<MTL4::FunctionDescriptor*>(computeDesc));
+
+    const NS::Object* fns[] = { linkedDesc };
+    MTL4::StaticLinkingDescriptor* linking = MTL4::StaticLinkingDescriptor::alloc()->init();
+    linking->setFunctionDescriptors(NS::Array::array(fns, 1));
+    pipelineDesc->setStaticLinkingDescriptor(linking);
+
+    MTL::ComputePipelineState* pipeline = mCompiler->newComputePipelineState(pipelineDesc, nullptr, &error);
+    if (!pipeline)
+    {
+        STRELKA_ERROR("Metal 4 pipeline {} (linking {}): {}", functionName, linkedFunctionName,
+                      error ? error->localizedDescription()->utf8String() : "unknown error");
+    }
+
+    linking->release();
+    pipelineDesc->release();
+    computeDesc->release();
+    linkedDesc->release();
     return pipeline;
 }
 
