@@ -303,17 +303,30 @@ class TextureBaker:
         out[..., :3] = c
         return self._write(name, out, w, h, "sRGB")
 
-    def bake_gradient_ramp(self, name, size=512):
+    def bake_gradient_ramp(self, name, color_a, color_b, size=512):
         """
         V-Ray Gradient Ramp with no stored stops -> the plugin default, a black
         to white V-ramp.  It drives the Sansevieria's diffuse amount through a
         50x tiled, 90-degree-rotated UV, which is what makes the leaf stripes.
+
+        The two colours it mixes between are baked in here rather than left to a
+        Mix node, because glTF has exactly one base-colour slot: the exporter
+        resolves a node graph it cannot represent by taking the upstream texture
+        and dropping everything downstream of it. That put a black-to-white ramp
+        into the leaf's base colour and threw the plant's green away -- the
+        Sansevieria rendered as pale grey stripes instead of banded green, which
+        is the whole of what the ramp exists to draw.
+
+        Written as linear, like every other bake here: _write hands the values to
+        Blender's PNG writer, which encodes them.
         """
-        v = np.linspace(0.0, 1.0, size, dtype=np.float32)
-        ramp = np.tile(v.reshape(-1, 1), (1, size))
+        v = np.linspace(0.0, 1.0, size, dtype=np.float32).reshape(-1, 1)
+        ramp = np.tile(v, (1, size))[..., None]
+        a = np.array(color_a, dtype=np.float32).reshape(1, 1, 3)
+        b = np.array(color_b, dtype=np.float32).reshape(1, 1, 3)
         out = np.ones((size, size, 4), dtype=np.float32)
-        out[..., :3] = ramp[..., None]
-        return self._write(name, out, size, size, "Non-Color")
+        out[..., :3] = a + (b - a) * ramp
+        return self._write(name, out, size, size, "sRGB")
 
     def bake_noise_normal(self, name, size=256, amount=1.0):
         """
@@ -672,7 +685,14 @@ class MaterialConverter:
 
         overall = g("overall_color")
         diffuse = g("diffuse_color")
-        subsurf = g("sub_surface_color")
+        # Overall colour is the general colour of the whole shader in Fast SSS2:
+        # it multiplies the sub-surface colour as well as the diffuse one. Only
+        # the diffuse got it here, which leaves the two ends of the material in
+        # different hues. On the Sansevieria that is the whole plant: overall is
+        # (0.32, 0.52, 0.09), so the diffuse end came out deep green and the
+        # scattering end stayed the raw (0.44, 0.50, 0.25) grey-yellow, and the
+        # gradient ramp between them drew the leaves pale instead of banded.
+        subsurf = tuple(o * s for o, s in zip(overall, g("sub_surface_color")))
         radius = g("scatter_radius")
         mult = float(g("scatter_radius_mult"))
         scale = float(g("scale"))
@@ -740,16 +760,11 @@ class MaterialConverter:
             approx.append("TexFalloff on subsurface colour -> flat facing colour")
 
         if inputs.get("Diffuse Amount") is not None:
-            approx.append("gradient-ramp diffuse mask baked to a texture")
-            ramp = self.baker.bake_gradient_ramp(f"{safe_name(mat.name)}_ramp.png")
+            approx.append("gradient-ramp diffuse mask baked into the base colour")
+            ramp = self.baker.bake_gradient_ramp(f"{safe_name(mat.name)}_ramp.png",
+                                                 subsurf, base)
             tex = self._tex_node(nt, ramp, -300, 100, uvw)
-            mix = nt.nodes.new("ShaderNodeMix")
-            mix.data_type = "RGBA"
-            mix.location = (-40, 250)
-            mix.inputs[6].default_value = (*subsurf, 1.0)
-            mix.inputs[7].default_value = (*base, 1.0)
-            nt.links.new(tex.outputs["Color"], mix.inputs["Factor"])
-            nt.links.new(mix.outputs[2], bsdf.inputs["Base Color"])
+            nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
 
         return {
             "subsurface": {
