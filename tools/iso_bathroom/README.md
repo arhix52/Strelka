@@ -264,6 +264,15 @@ load. It now goes through `tinygltf::URIDecode`. The exporter also sanitises the
 names it generates, which is belt and braces rather than a substitute -- any
 third-party glTF with a space in a texture name hit this.
 
+## Open defects
+
+Five things are measured and unfixed, and they live in `docs/open-defects.md`
+rather than here: each one is written so a reader starting cold can act without
+repeating the elimination. The one to start with is the black rim on the
+thin-walled bubbles -- six suspects are already ruled out with the test that
+ruled each one out, and the remaining hypothesis says to instrument rather than
+substitute.
+
 ## Plan
 
 Ordered so that each phase produces a visibly better image than the last, and so the cheap
