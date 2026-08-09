@@ -26,10 +26,11 @@ Crop the same region from both with `sips`, which does not touch the bytes:
 sips -c 150 190 --cropOffset 330 300 /tmp/iso.png --out /tmp/crop.png
 ```
 
-`--no-close-transmissive` leaves refracting meshes open, which is what entry 1
-was about and is worth having as a lever while working on it. The fog volumes are
-the other lever: dropping `--no-fog-volumes` exports them, and it is a boundary
-crossing per scattering event, so it is a good way to stress the medium code.
+`--close-transmissive` joins the boundary loops of refracting meshes, which is
+entry 1's lever and is off by default for the reason given there. The fog volumes
+are the other one: dropping `--no-fog-volumes` exports them, and they cost a
+boundary crossing per scattering event, so they are a good way to stress the
+medium code.
 
 `tools/iso_bathroom/bubble_profile.py` reads back a rendered PNG as mean
 luminance per radial bin across one of the bubbles, against the wall just
@@ -40,8 +41,8 @@ colour.
 
 ## 1. Nested dielectrics cannot tell two objects apart
 
-**Fixed for this scene, open in general.** The open-mesh half is closed and the
-identification half is closed; what is left is that neither has a defence.
+**Half fixed.** The renderer can now tell two nested objects apart; it still
+cannot survive a mesh with a hole in it, and neither failure says a word.
 
 `ior_stack_pop` now matches on the material being left and falls back to the
 priority. Priority alone could not identify anything: glTF has no way to author
@@ -52,27 +53,37 @@ it. It is worth nothing in this frame -- byte-identical output -- because the
 scene rarely has two of them nested at once, which is exactly why it went
 unnoticed.
 
-The converter now fills the boundary loops of any refracting mesh, because a ray
-that leaves an open one through the hole never crosses a surface and so never
-generates the exit event a recovery would have to hang on. There is nothing the
-renderer can do about it. What was open:
+The other half cannot be fixed in the renderer at all: a ray leaving an open mesh
+goes out through the hole without crossing a surface, so there is no exit event
+to hang a recovery on. It has to be repaired where the geometry is, and that is
+where this stands. What is open in this scene:
 
-| Mesh | Boundary edges |
+| Mesh | Boundary edges | Shape |
+|---|---|---|
+| `Brush_Fibers` | 2912 | open-ended strips |
+| `Bubbles` (the foam) | 196 | a cluster of open shells |
+| `Water_Bathtub` | 96 | one loop, flat, at the top of a 2 mm dish |
+| `Water_Shower` | 64 | one flat loop |
+
+`--close-transmissive` joins those loops and is **off by default**, because the
+repair is only sound where the loops were meant to be joined. Measured both ways:
+
+| | bath water R/G |
 |---|---|
-| `Brush_Fibers` | 2912 |
-| `Bubbles` (the foam) | 196 |
-| `Water_Bathtub` | 96 |
-| `Water_Shower` | 64 |
+| left open, as shipped | 0.776 |
+| water capped, foam capped | 0.823 |
+| foam bridged, water left open | 0.709 |
+| reference | 0.837 |
 
-That takes the bath water's red-to-green ratio from 0.776 to 0.823 against the
-reference's 0.837 over the same rectangle -- the error falls by 4.4x -- and moves
-no other patch in the frame by more than 0.001.
+So closing the water is right -- it takes the error down by 4.4x -- and closing
+the foam is not: bridging a cluster of open shells draws a bright streak across
+the tub, and capping the fibre strips is no better. Partial closure is worse than
+none, which is the row at 0.709.
 
-It also corrects a prediction this entry used to make. The water is a 2 mm slab
-and I reasoned from its thickness that closing it could be worth about 1% of the
-red channel. It is worth 6%, because the colour never came from one crossing:
-the slab is thin, nearly parallel-sided and sits over a reflective tub, so a
-path crosses it many times.
+What would make it shippable is a per-mesh decision rather than a per-scene flag:
+cap a boundary loop that is planar and closes a dish, bridge a pair of loops that
+face each other, and leave anything else alone and say so. The measurement to
+aim at is already here.
 
 **What is still open** is that both failures were silent. `ior_stack_push` does
 nothing when the stack is full at four entries, and `ior_stack_pop` returns

@@ -960,10 +960,15 @@ def close_open_transmissive():
     Measured on this scene before the fill: the bath water is 3712 triangles
     with 288 boundary edges, and the foam beside it 9454 with 672.
 
-    The fill is `holes_fill`, which spans a boundary loop with faces and adds no
-    thickness. On the water that is the rim where it meets the tub, which is
-    hidden by the tub; anything it cannot span it leaves alone rather than
-    guessing.
+    Bridged, not filled. These meshes are slabs -- a top surface and a bottom
+    surface with the rim between them missing -- so each has two boundary loops
+    that want joining to each other. `holes_fill` spans a loop with faces
+    instead, which on the bath water draws a flat cap straight across the tub at
+    rim height, through the duck. Rendered once, and it is unmistakable.
+
+    A mesh the bridge does not close is left exactly as it was, and said so.
+    Half-closed geometry is worse than open geometry: it still unbalances the
+    stack and now it also has faces that were not in the asset.
     """
     import bmesh  # local: the rest of this tool does not need it
 
@@ -981,8 +986,16 @@ def close_open_transmissive():
         if before == 0:
             bm.free()
             continue
-        bmesh.ops.holes_fill(bm, edges=list(bm.edges), sides=0)
+        try:
+            bmesh.ops.bridge_loops(bm, edges=[e for e in bm.edges if len(e.link_faces) == 1])
+        except Exception:
+            pass
         after = sum(1 for e in bm.edges if len(e.link_faces) == 1)
+        if after >= before:
+            # Nothing was joined. Put the mesh back the way it came.
+            bm.free()
+            closed.append((obj.name, len(obj.data.polygons), before, before))
+            continue
         tris = len(bm.faces)
         bm.to_mesh(obj.data)
         bm.free()
@@ -1291,10 +1304,17 @@ def parse_args():
     ap.add_argument("--no-fog-volumes", dest="fog_volumes", action="store_false",
                     help="skip the EnvironmentFog gizmos. The bathtub one costs "
                          "more than it buys today -- see the note in main()")
-    ap.add_argument("--no-close-transmissive", dest="close_transmissive",
-                    action="store_false",
-                    help="leave open refractive meshes open; they unbalance the IOR "
-                         "stack and tint everything the path touches afterwards")
+    # Off by default: an open refractive mesh unbalances the IOR stack and is a
+    # real defect, but the repair is only sound on a mesh whose boundary loops
+    # are meant to be joined. On this scene it closes the water correctly --
+    # the bath's red-to-green goes 0.776 to 0.823 against the reference's
+    # 0.837 -- and draws a bright streak through the foam, which is a cluster
+    # of open shells that were never a slab. Shipping that trade by default is
+    # not the tool's call to make. See docs/open-defects.md.
+    ap.add_argument("--close-transmissive", dest="close_transmissive",
+                    action="store_true",
+                    help="join the boundary loops of refractive meshes; sound only "
+                         "where those loops were meant to be joined")
     ap.add_argument("--rebuild-rug", action="store_true",
                     help="replace the Rug_Round proxy preview with a generated "
                          "coiled braid (the .vrmesh it stands in for is unreadable)")
