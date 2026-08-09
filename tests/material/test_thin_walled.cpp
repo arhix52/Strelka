@@ -1,0 +1,223 @@
+#include <doctest/doctest.h>
+
+#include <strelka/material/material_math.h>
+#include <strelka/material/bsdf_types.h>
+#include <strelka/material/material_params.h>
+#include <strelka/material/surface_interaction.h>
+#include <strelka/material/sampling.h>
+#include <strelka/material/fresnel.h>
+#include <strelka/material/microfacet.h>
+#include <strelka/material/bsdf.h>
+
+#include <cmath>
+
+// ---------------------------------------------------------------------------
+// A thin-walled surface hit from its far side.
+//
+// A soap bubble is a closed sphere of film with air on both sides. A ray that
+// passes through the front wall crosses the inside and meets the far wall from
+// behind, so the shading normal points away from it -- geometrically identical
+// to a ray leaving solid glass, and physically nothing like it. There is no
+// medium being left: the far wall is another air-to-film interface, and its
+// index ratio is the entering one.
+//
+// Deriving the ratio from the side instead made the far wall dense-to-thin,
+// where everything past the critical angle reflects with probability 1. At IOR
+// 1.6 the critical angle is 38.7 degrees, and the incidence angle at radius r
+// on a sphere is asin(r / R), so the entire annulus outside r / R = 1 / 1.6 =
+// 0.625 reflected every ray that reached it. Reflected, never absorbed -- so
+// Russian roulette never ended the path and maxDepth did, after the ray had
+// bounced between the two walls carrying full throughput and returning nothing.
+//
+// The rendered symptom was a black ring covering the outer 37.5% of every
+// bubble in the Isometric Bathroom scene, which is what that arithmetic says it
+// should be. tools/iso_bathroom/bubble_profile.py is what measured it: the
+// luminance across a bubble sat at 0.94 of the wall behind it out to r / R =
+// 0.6 and fell to 0.18 beyond it, and the break landed in the bin holding
+// 0.625.
+//
+// What is pinned here:
+//   1. the far wall really is a back-face hit, or the rest of the file is
+//      testing nothing
+//   2. it transmits past the solid critical angle, at every angle up to grazing
+//   3. its reflectance follows the entering-side Fresnel, not the exiting one
+//   4. neither wall creates or destroys energy
+//   5. solid glass still total-internally-reflects, i.e. the exemption did not
+//      leak into the case the critical angle is real for
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+constexpr float kIor = 1.6f;
+
+MaterialParams film_params(float roughness, bool thin)
+{
+    MaterialParams p = {};
+    p.material_type = MATERIAL_TYPE_STANDARD_PBR;
+    p.base_color = make_float3(1.0f, 1.0f, 1.0f);
+    p.roughness = roughness;
+    p.metallic = 0.0f;
+    p.ior = kIor;
+    p.specular = 0.5f;
+    p.transmission = 1.0f;
+    p.thin_walled = thin ? 1u : 0u;
+    p.alpha_mode = ALPHA_MODE_OPAQUE;
+    p.base_color_alpha = 1.0f;
+    p.base_color_tex = -1;
+    p.metallic_roughness_tex = -1;
+    p.normal_tex = -1;
+    p.emission_tex = -1;
+    p.occlusion_tex = -1;
+    p.transmission_tex = -1;
+    p.dielectric_priority = 10;
+    return p;
+}
+
+// The wall as seen by a ray arriving at `degrees` from the normal. `front` is
+// the near wall, hit from outside; otherwise it is the far wall, hit from
+// within the bubble, which is the case the defect lived in.
+SurfaceInteraction wall_si(float degrees, bool front, float roughness = 0.0f, bool thin = true)
+{
+    const float th = degrees * (float)M_PI / 180.0f;
+    const float c = std::cos(th) * (front ? 1.0f : -1.0f);
+    const float s = std::sin(th);
+
+    SurfaceInteraction si = {};
+    si.position = make_float3(0.0f, 0.0f, 0.0f);
+    si.shading_normal = make_float3(0.0f, 1.0f, 0.0f);
+    si.geometry_normal = make_float3(0.0f, 1.0f, 0.0f);
+    si.tangent = make_float3(1.0f, 0.0f, 0.0f);
+    si.bitangent = make_float3(0.0f, 0.0f, 1.0f);
+    si.uv = make_float2(0.0f, 0.0f);
+    si.wo = safe_normalize(make_float3(s, c, 0.0f));
+    si.front_face = front;
+    bsdf_init(si, film_params(roughness, thin));
+    si.exterior_ior = 1.0f;
+    return si;
+}
+
+// Fraction of draws that leave through the wall rather than reflecting off it,
+// and the mean throughput multiplier over the same draws. The lobe decides with
+// xi.w, so sweeping it is sweeping the Fresnel coin.
+void sweep(const SurfaceInteraction& si, float& transmitted, float& mean_throughput)
+{
+    const int N = 4096;
+    int through = 0;
+    double sum = 0.0;
+    for (int i = 0; i < N; ++i)
+    {
+        // Offset off the ends of the interval: the draw is compared against F
+        // with a strict inequality, and 0 or 1 exactly would test the boundary
+        // rather than the distribution.
+        const float u = (i + 0.5f) / (float)N;
+        BsdfSampleResult r = bsdf_sample(si, make_float4(0.5f, 0.5f, 0.25f, u));
+        if ((r.event_type & BSDF_EVENT_TRANSMISSION) != 0)
+        {
+            ++through;
+        }
+        sum += (r.bsdf_over_pdf.x + r.bsdf_over_pdf.y + r.bsdf_over_pdf.z) / 3.0;
+    }
+    transmitted = (float)through / (float)N;
+    mean_throughput = (float)(sum / N);
+}
+
+} // namespace
+
+TEST_CASE("the far wall of a bubble is set up as a back-face hit")
+{
+    // The premise. If this stops being negative the rest of the file passes for
+    // the wrong reason.
+    for (float deg : { 10.0f, 50.0f, 80.0f })
+    {
+        SurfaceInteraction si = wall_si(deg, /*front=*/false);
+        CAPTURE(deg);
+        CHECK(dot(si.shading_normal, si.wo) < 0.0f);
+        CHECK(si.thin_walled == 1u);
+        CHECK(si.transmission == doctest::Approx(1.0f));
+    }
+}
+
+TEST_CASE("a thin wall transmits past the critical angle of the solid it is made of")
+{
+    // asin(1 / 1.6) = 38.68 degrees. Everything below used to reflect with
+    // probability 1 on the far wall.
+    const float critical = std::asin(1.0f / kIor) * 180.0f / (float)M_PI;
+    REQUIRE(critical == doctest::Approx(38.68f).epsilon(0.01));
+
+    for (float deg : { 40.0f, 50.0f, 60.0f, 70.0f, 80.0f, 88.0f })
+    {
+        SurfaceInteraction si = wall_si(deg, /*front=*/false);
+        float transmitted = 0.0f, throughput = 0.0f;
+        sweep(si, transmitted, throughput);
+        CAPTURE(deg);
+        CHECK(transmitted > 0.0f);
+    }
+}
+
+TEST_CASE("a thin wall reflects by the entering-side Fresnel from either side")
+{
+    // Both walls are air-to-film, so both reflect the same fraction at the same
+    // angle -- which is the whole content of "thin-walled". The exiting-side
+    // ratio would put the far wall at 1.0 for every angle past 38.7 degrees.
+    for (float deg : { 0.0f, 20.0f, 40.0f, 60.0f, 80.0f })
+    {
+        const float cos_i = std::cos(deg * (float)M_PI / 180.0f);
+        const float expect = fresnel_dielectric(cos_i, 1.0f / kIor);
+
+        float front_t = 0.0f, front_e = 0.0f, far_t = 0.0f, far_e = 0.0f;
+        sweep(wall_si(deg, /*front=*/true), front_t, front_e);
+        sweep(wall_si(deg, /*front=*/false), far_t, far_e);
+
+        CAPTURE(deg);
+        // The near wall shares its draw with the clearcoat lobe selection, so
+        // only the far wall -- where the transmission lobe is taken with
+        // probability 1 -- reads the coin directly.
+        CHECK(1.0f - far_t == doctest::Approx(expect).epsilon(0.02));
+        CHECK(far_t >= front_t);
+    }
+}
+
+TEST_CASE("neither wall of a bubble creates or destroys energy")
+{
+    for (float deg : { 0.0f, 30.0f, 60.0f, 85.0f })
+    {
+        for (bool front : { true, false })
+        {
+            float transmitted = 0.0f, throughput = 0.0f;
+            sweep(wall_si(deg, front), transmitted, throughput);
+            CAPTURE(deg);
+            CAPTURE(front);
+            // The near wall carries the clearcoat lobe as well and is checked
+            // only for the ceiling; the far wall is the transmission lobe alone
+            // and has to come out at exactly one.
+            CHECK(throughput <= doctest::Approx(1.0f).epsilon(0.02));
+            if (!front)
+            {
+                CHECK(throughput == doctest::Approx(1.0f).epsilon(0.02));
+            }
+        }
+    }
+}
+
+TEST_CASE("solid glass still total-internally-reflects")
+{
+    // The exemption is for materials with no interior. A solid sphere has one,
+    // and past the critical angle its far wall must keep the light in -- this is
+    // what makes glass look like glass, and it is the case the thin-walled
+    // branch must not have leaked into.
+    for (float deg : { 45.0f, 60.0f, 80.0f })
+    {
+        SurfaceInteraction si = wall_si(deg, /*front=*/false, 0.0f, /*thin=*/false);
+        float transmitted = 0.0f, throughput = 0.0f;
+        sweep(si, transmitted, throughput);
+        CAPTURE(deg);
+        CHECK(transmitted == doctest::Approx(0.0f));
+    }
+
+    // And below it, the same surface lets light out.
+    SurfaceInteraction si = wall_si(20.0f, /*front=*/false, 0.0f, /*thin=*/false);
+    float transmitted = 0.0f, throughput = 0.0f;
+    sweep(si, transmitted, throughput);
+    CHECK(transmitted > 0.9f);
+}

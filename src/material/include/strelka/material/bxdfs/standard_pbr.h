@@ -499,7 +499,23 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         // ===== TRANSMISSION LOBE ==========================================
         bool entering = NdotV > 0.0f;
         float3 Nf     = entering ? N : -N;
-        float eta     = entering ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
+        // Which side of the interface the ray is on decides eta -- except that a
+        // thin-walled surface has no side to be on. Its far wall is another film
+        // met from the air, not the way out of a dense medium, so the ratio is
+        // the entering one whichever way the shading normal points.
+        //
+        // Reading that far wall as an exit made it dense-to-thin, where
+        // everything past the critical angle reflects with probability 1. At IOR
+        // 1.6 the critical angle is 38.7 degrees, and on a sphere the incidence
+        // angle at radius r is asin(r / R) -- so the whole annulus outside
+        // r / R = 1 / 1.6 = 0.625 total-internally-reflected. A ray through the
+        // front wall was trapped between the two walls, reflected every time and
+        // absorbed none, so Russian roulette never ended it and maxDepth did:
+        // the path returned nothing. That is the black ring on the soap bubbles,
+        // and it covered the outer 37.5% of each one, which is what the
+        // arithmetic above predicts.
+        float eta     = (entering || si.thin_walled) ? (si.exterior_ior / si.ior)
+                                                     : (si.ior / si.exterior_ior);
         bool is_smooth = (alpha < 0.001f);
 
         float3 H;
@@ -554,12 +570,10 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
             float3 wi_refracted;
             const bool valid = refract_dir(-V, H, eta, wi_refracted);
             // A thin-walled surface cannot total-internally-reflect: there is no
-            // interior for the light to be trapped in. The refraction was
-            // computed anyway and its verdict discarded -- so at grazing angles,
-            // where any dielectric reports TIR, a soap bubble reflected instead
-            // of passing through and the ray rattled around until it died. That
-            // is the black rim on the bubbles by the window; as solid glass the
-            // same spheres render fine, which is what pointed here.
+            // interior for the light to be trapped in. With eta taken from the
+            // entering side above this is unreachable for one -- refraction into
+            // a denser medium always succeeds -- and it stays because the guard
+            // is what states the invariant, not what enforces it.
             if (!valid && !si.thin_walled)
             {
                 // Total internal reflection
@@ -802,7 +816,11 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
         float3 Nf       = entering ? N : -N;
         float NdotV_abs = fabsf(NdotV);
         float NdotL_abs = fabsf(NdotL);
-        float eta       = entering ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
+        // Entering-side eta on a thin wall, for the reason given in sample().
+        // MIS weighs this density against the one sample() wrote, so the two
+        // have to read the interface the same way or the weights do not sum.
+        float eta       = (entering || si.thin_walled) ? (si.exterior_ior / si.ior)
+                                                       : (si.ior / si.exterior_ior);
 
         float3 H = safe_normalize(V + eta * wi);
         if (dot(Nf, H) < 0.0f) H = -H;

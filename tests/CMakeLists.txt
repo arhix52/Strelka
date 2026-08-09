@@ -10,6 +10,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_energy_conservation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_anisotropy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_dielectric_exit.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_thin_walled.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_diffuse_transmission.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_sample_eval_consistency.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_sheen.cpp

@@ -26,85 +26,59 @@ Crop the same region from both with `sips`, which does not touch the bytes:
 sips -c 150 190 --cropOffset 330 300 /tmp/iso.png --out /tmp/crop.png
 ```
 
----
-
-## 1. Thin-walled spheres render with a black rim
-
-**Symptom.** The three soap bubbles floating by the window have a thick dark
-ring where the sphere is seen edge-on. The reference has pale bubbles with a
-bright thin rim. Crop offset `330 300`, size `150 190`.
-
-**Where it is.** The thin-walled branch of the specular transmission lobe,
-`src/material/include/strelka/material/bxdfs/standard_pbr.h:499` onward. The
-material reaching it: `transmission 1`, `ior 1.6`, `thin_walled 1`,
-`clearcoat 1` at roughness 0, iridescence at 400 nm.
-
-### Ruled out, with the test that ruled it out
-
-| Suspect | Test | Result |
-|---|---|---|
-| Path depth | `--depth 48` against `--depth 16` | identical, pixel for pixel |
-| Clearcoat | removed from the material, and separately set to roughness 0.5 | rim unchanged |
-| Thin film | `KHR_materials_iridescence` removed, *after* the film was wired into this lobe | rim unchanged |
-| Geometry thickness | bmesh: the three bubbles are closed 386-vertex spheres, 0 open edges | not a shell with thickness |
-| Total internal reflection | fixed — thin-walled no longer TIRs | rim unchanged |
-| IOR stack imbalance | fixed — thin-walled no longer pushes the stack | rim unchanged |
-
-Patch the glTF directly for these; the material is `Bubbles_Mtl`:
-
-```python
-import json
-d = json.load(open("scenes/iso_bathroom/iso_bathroom.gltf"))
-for m in d["materials"]:
-    if m["name"] == "Bubbles_Mtl":
-        m["extensions"].pop("KHR_materials_clearcoat", None)
-json.dump(d, open("scenes/iso_bathroom/probe.gltf", "w"))
-```
-and copy `iso_bathroom_light.json` to `probe_light.json` beside it.
-
-### The discriminator that matters
-
-The same spheres render **correctly** two other ways:
-
-- as opaque (drop `KHR_materials_transmission` and `KHR_materials_volume`, set a
-  grey base colour) — clean spheres, no rim;
-- as **solid** glass (drop only `KHR_materials_volume`, so `thin_walled` reads 0)
-  — they look like glass marbles, and the rim is bright.
-
-So it is specific to the thin-walled path, and not to the geometry, the lighting
-or the lobe selection.
-
-### Remaining hypothesis, and how to test it
-
-Grazing self-intersection. At the silhouette the Fresnel coin flip takes the
-reflection almost always, and a reflection there leaves nearly tangentially. If
-`offset_ray` (`src/shaders/metal/shading_common.h:641`) does not clear the
-sphere's curvature, the ray re-hits the same surface, reflects again at grazing,
-and the throughput bleeds away over many hits. That would also explain the
-indifference to depth: at grazing almost nothing is lost per hit, so more bounces
-do not brighten it.
-
-The solid case would be exempt because its refracted ray goes inward and away.
-
-Test it by instrumenting rather than substituting: count hits per path on the
-bubble instance and write the count to a debug view, or write the path's surface
-crossing count into an AOV. `DebugMode` in `src/shaders/metal/ShaderTypes.h`
-already has the enumeration and `--config` exposes `render.debug`. If the count
-spikes at the rim, the fix is a curvature-aware offset or a shading-normal
-reconciliation at grazing (Schüssler et al. 2017 and relatives), not another
-change to the lobe.
-
-### Related, and worth its own look
-
-The foam clusters in the bathtub are two open meshes carrying 126 and 70
-boundary edges between them. An open transmissive mesh unbalances the IOR stack
-by construction — every entry without a matching exit leaves the path believing
-it is inside glass. The window bubbles are closed, so this is not what causes
-their rim, but it is a real hazard in the same scene.
+`tools/iso_bathroom/bubble_profile.py` reads back a rendered PNG as mean
+luminance per radial bin across one of the bubbles, against the wall just
+outside it. A defect with a radius is far easier to name than one with only a
+colour.
 
 ---
 
-## 2. Crossing a medium boundary costs the water its colour
+## 1. The foam clusters are open transmissive meshes
+
+The two foam clusters in the bathtub carry 126 and 70 boundary edges between
+them. An open transmissive mesh unbalances the IOR stack by construction — every
+entry without a matching exit leaves the path believing it is inside glass, and
+from there every exit it does find is read as an exit from a medium it never
+entered.
+
+Nothing in the current render has been traced to this, which is why it is here
+rather than fixed: it is a measured property of the asset with a known
+consequence, and no measurement yet says which pixels it costs. Closing the
+meshes in the converter, or giving the material `thin_walled`, are both cheaper
+than teaching the stack to recover.
+
+---
+
+## 2. A rough thin-walled surface transmits as a delta but is weighted as glossy
+
+`standard_pbr_sample` sends thin-walled transmission straight through — `wi` is
+exactly `-wo` — at every roughness, because a thin wall has no interior to
+refract across. The pdf and the event type do not agree with that. Measured over
+50k samples per roughness, on a thin-walled dielectric at IOR 1.6:
+
+| Roughness | max distance from `wi` to `-wo` | mean returned pdf | event |
+|---|---|---|---|
+| 0.0 | 0 | 0.945 | `SPECULAR_TRANSMISSION` |
+| 0.1 | 0 | 48.9 | `GLOSSY_TRANSMISSION` |
+| 0.3 | 0 | 0.619 | `GLOSSY_TRANSMISSION` |
+| 0.6 | 0 | 0.045 | `GLOSSY_TRANSMISSION` |
+
+So a frosted thin sheet passes light as a perfect mirror-through while telling
+MIS it sampled a spread lobe, and `standard_pbr_eval` compounds it: it builds
+the half vector as `normalize(V + eta * wi)`, a refraction that never happened,
+and evaluates a BTDF over directions the sampler cannot produce. A light seen
+through such a sheet is therefore weighted against a density that describes a
+different surface.
+
+The soap bubbles are at roughness 0 and are not affected — the smooth row above
+is self-consistent. What this costs has not been measured because no scene in
+the tree has a rough thin-walled material; `tools/feature_tests/` would need a
+new rung before the fix could be checked against Cycles, and inventing the
+weighting without that is how the clearcoat term below got rejected twice.
+
+---
+
+## 3. Crossing a medium boundary costs the water its colour
 
 **Symptom.** With the bathtub's `EnvironmentFog` gizmo present, the bath water
 loses its cyan. Measured as the red-to-green ratio of the water against the
@@ -130,7 +104,7 @@ is what the current export uses.
 
 ---
 
-## 3. The clearcoat does not return what bounces under it
+## 4. The clearcoat does not return what bounces under it
 
 `scenes/feature_tests/15_clearcoat` runs 6% dark against Cycles at the strong end
 of its IOR ramp and matches exactly at IOR 1.0 — the signature of a missing term
@@ -149,7 +123,7 @@ derived rather than fitted.
 
 ---
 
-## 4. `18_bounded_volume` still fails at 1.215
+## 5. `18_bounded_volume` still fails at 1.215
 
 Shadow rays now attenuate through a bounded medium, which took the row from 1.899
 to 1.215. What is left is the medium not shadowing itself as strongly as Cycles',
@@ -160,7 +134,7 @@ scattering alone.
 
 ---
 
-## 5. V-Ray colour correction drops `adv_base`
+## 6. V-Ray colour correction drops `adv_base`
 
 `tools/iso_bathroom/vray2strelka.py`'s `bake_color_correction` implements
 brightness, contrast, the advanced lightness curve and the hue tint, but not
