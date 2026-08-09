@@ -148,6 +148,22 @@ public:
         return nullptr;
     }
 
+    /// The event a finished frame signals, and the value it signals with.
+    ///
+    /// A backend that renders on a different queue than the one displaying the
+    /// result has to say so: Metal orders work within a queue and not across
+    /// two, so a display that samples the render's texture without waiting reads
+    /// whatever was there -- a black frame, or half of one. Null means the render
+    /// and the display share a queue and nothing is needed.
+    virtual void* getNativeFrameEvent()
+    {
+        return nullptr;
+    }
+    virtual uint64_t frameEventValue() const
+    {
+        return 0;
+    }
+
     void setSharedContext(SharedContext* ctx)
     {
         mSharedCtx = ctx;

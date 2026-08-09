@@ -70,6 +70,9 @@ private:
     ImVec2 m_viewportRectMax{ 0, 0 };
 
     bool m_documentDirty = false;
+    // No exposure in the light sidecar: measure it from the first frame instead.
+    bool m_autoExposurePending = false;
+    void applyAutoExposure(oka::Buffer* buf);
     bool m_pendingSaveAs = false;
 
     struct UndoState

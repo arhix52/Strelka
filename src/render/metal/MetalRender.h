@@ -62,6 +62,17 @@ public:
         return mCommandQueue;
     }
 
+    // Non-null only while frames go out through Metal 4: that is the case where
+    // the display's queue is not the one that produced the texture.
+    void* getNativeFrameEvent() override
+    {
+        return (mMetal4.isValid() && mMetal4FrameValue != 0) ? (void*)mMetal4.frameEvent() : nullptr;
+    }
+    uint64_t frameEventValue() const override
+    {
+        return mMetal4FrameValue;
+    }
+
 private:
     // Per scene mesh (one glTF primitive): just the data the skinning pass and
     // the geometry descriptors need. Acceleration structures live in Blas below,

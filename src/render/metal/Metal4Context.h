@@ -20,6 +20,7 @@
 // flight, reset only once that frame's work has actually completed.
 
 #include <Metal/Metal.hpp>
+#include <dispatch/dispatch.h>
 
 #include <cstdint>
 #include <cstring>
@@ -130,6 +131,11 @@ public:
     /// waitUntilCompleted to call. A queue-signalled shared event is the only
     /// thing a caller can block on.
     uint64_t signalFrame();
+    /// The event signalFrame() signals, for a consumer on another queue to wait on.
+    MTL::SharedEvent* frameEvent() const
+    {
+        return mFrameEvent;
+    }
     bool waitForFrame(uint64_t value, uint32_t timeoutMs = 5000);
 
     /// Declare a resource resident for as long as it exists. Cheap to call
@@ -156,6 +162,8 @@ public:
 private:
     MTL::Device* mDevice = nullptr;
     MTL4::CommandQueue* mQueue = nullptr;
+    // Commit feedback is delivered here; a queue built without one delivers none.
+    dispatch_queue_t mFeedbackQueue = nullptr;
     MTL4::Compiler* mCompiler = nullptr;
     MTL4::ArgumentTable* mArgumentTable = nullptr;
     MTL::ResidencySet* mResidencySet = nullptr;

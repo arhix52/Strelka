@@ -374,6 +374,23 @@ void GlfwDisplay::onBeginFrame()
     float clear_color[4] = {0.45f, 0.55f, 0.60f, 1.00f};
 
     mCommandBuffer = _pCommandQueue->commandBuffer();
+    // Wait for the frame the renderer produced, when it produced it on another
+    // queue. Metal orders work inside a queue and not between two, so with the
+    // renderer on the Metal 4 queue and this display on a Metal 3 one, sampling
+    // its texture without waiting reads whatever happens to be there: a black
+    // viewport, or a half-written one that a screenshot catches mid-flight.
+    // Returns null when both share a queue, where the ordering is implicit.
+    if (mRender)
+    {
+        if (auto* ev = (MTL::Event*)mRender->getNativeFrameEvent())
+        {
+            const uint64_t v = mRender->frameEventValue();
+            if (v != 0)
+            {
+                mCommandBuffer->encodeWait(ev, v);
+            }
+        }
+    }
     renderPassDescriptor->colorAttachments()->object(0)->setClearColor(MTL::ClearColor::Make(clear_color[0] * clear_color[3], clear_color[1] * clear_color[3], clear_color[2] * clear_color[3], clear_color[3]));
     renderPassDescriptor->colorAttachments()->object(0)->setTexture(drawable->texture());
     renderPassDescriptor->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionClear);

@@ -60,6 +60,15 @@ bool saveLightsJson(const Scene& scene, const std::string& gltfOrJsonPath)
         envJ["rotation"] = env->rotationY;
         root["environment"] = envJ;
     }
+    if (const auto& exp = scene.getExposure(); exp.has_value())
+    {
+        nlohmann::json e;
+        e["iso"] = exp->filmIso;
+        e["fstop"] = exp->fStop;
+        e["shutter"] = exp->shutterSpeed;
+        e["cm2_factor"] = exp->cm2Factor;
+        root["exposure"] = e;
+    }
 
     std::ofstream out(jsonPath);
     if (!out)
@@ -86,7 +95,8 @@ bool loadLightsJson(Scene& scene, const std::string& lightJsonPath)
     // meant a sidecar carrying only an environment was read, parsed and thrown
     // away without a word -- and a scene lit entirely by its environment is not
     // an odd thing to write.
-    if (!root.contains("lights") && !root.contains("environment") && !root.contains("atmosphere"))
+    if (!root.contains("lights") && !root.contains("environment") && !root.contains("atmosphere") &&
+        !root.contains("exposure"))
     {
         STRELKA_WARNING("Light file {} has no lights, environment or atmosphere; ignoring",
                         lightJsonPath);
@@ -121,6 +131,21 @@ bool loadLightsJson(Scene& scene, const std::string& lightJsonPath)
         if (env.contains("backgroundIntensity"))
             envDesc.backgroundIntensity = env["backgroundIntensity"].get<float>();
         scene.setEnvLight(envDesc);
+    }
+
+    if (root.contains("exposure"))
+    {
+        const auto& e = root["exposure"];
+        Scene::ExposureDesc desc{};
+        if (e.contains("iso"))
+            desc.filmIso = e["iso"].get<float>();
+        if (e.contains("fstop"))
+            desc.fStop = e["fstop"].get<float>();
+        if (e.contains("shutter"))
+            desc.shutterSpeed = e["shutter"].get<float>();
+        if (e.contains("cm2_factor"))
+            desc.cm2Factor = e["cm2_factor"].get<float>();
+        scene.setExposure(desc);
     }
 
     if (root.contains("atmosphere"))

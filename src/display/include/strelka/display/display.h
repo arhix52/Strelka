@@ -2,6 +2,7 @@
 
 #include <strelka/render/common.h>
 #include <strelka/render/buffer.h>
+#include <strelka/render/render.h>
 
 #include <settings.h>
 
@@ -39,6 +40,14 @@ public:
 #ifdef __APPLE__
     virtual void setNativeDevice(void* device) = 0;
     virtual void setCommandQueue(void* queue) = 0;
+
+    /// The renderer whose output this display samples. Needed only so the
+    /// display can wait on the frame event when the two are on different queues;
+    /// a backend that shares a queue can ignore it.
+    void setRender(Render* render)
+    {
+        mRender = render;
+    }
 #endif
     void setWindowTitle(const char* title)
     {
@@ -106,6 +115,7 @@ protected:
     ResizeHandler* mResizeHandler = nullptr;
 
     SettingsManager* mSettings = nullptr;
+    Render* mRender = nullptr;
 
     GLFWwindow* mWindow = nullptr;
 };

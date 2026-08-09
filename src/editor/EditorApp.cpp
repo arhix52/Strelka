@@ -42,6 +42,7 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     // Display creates its own command queue for independent frame pacing
 #endif
     m_display->init(1024, 768, m_settingsManager.get());
+    m_display->setRender(m_render.get());
     m_display->setResizeHandler(this);
 }
 
@@ -80,9 +81,86 @@ glm::vec3 EditorApp::computeSceneFitPosition(float fovDegrees) const
     return center + glm::vec3(0.0f, 0.0f, distance);
 }
 
+
+// Measure the scene's own brightness and expose for it, once.
+//
+// The radiance buffer is linear and pre-tonemap, which is the only place the
+// question can be asked: after the tone curve every scene looks like it has
+// roughly the range the curve has. Middle grey is the target because that is
+// what a photographer's meter aims at, and it is what makes an unknown scene
+// arrive looking neither black nor blown out.
+//
+// Set through cm2_factor with the film speed at zero, which is the tonemapper's
+// own arbitrary-units mode -- the alternative, solving back to an f-stop, states
+// a photographic setting the scene never had.
+void EditorApp::applyAutoExposure(oka::Buffer* buf)
+{
+    if (!buf)
+    {
+        return;
+    }
+    const float* px = static_cast<const float*>(buf->getHostPointer());
+    const size_t count = buf->getHostDataSize() / sizeof(float);
+    if (!px || count < 4)
+    {
+        return;
+    }
+    double sum = 0.0;
+    size_t n = 0;
+    for (size_t i = 0; i + 3 < count; i += 4)
+    {
+        // Rec.709 luma of the linear radiance, which is what the eye weights.
+        sum += 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+        ++n;
+    }
+    if (n == 0)
+    {
+        return;
+    }
+    const double mean = sum / double(n);
+    // A frame that is genuinely black -- lights off, camera in a wall -- has
+    // nothing to expose for, and dividing by it would produce an absurd factor
+    // that the next frame cannot recover from.
+    if (!(mean > 1e-8))
+    {
+        return;
+    }
+    constexpr double kMiddleGrey = 0.18;
+    const double factor = kMiddleGrey / mean;
+    m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", 0.0f);
+    m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", (float)factor);
+    m_autoExposurePending = false;
+    STRELKA_INFO("Auto exposure: scene mean luminance {:.5f}, exposure x{:.1f} "
+                 "(no exposure in the light sidecar)",
+                 mean, factor);
+}
+
 void EditorApp::prepare()
 {
     m_sceneLoader->loadGltf(m_sceneFile, *m_scene);
+
+    // Exposure comes from the scene when the scene says, and is measured from the
+    // first frame when it does not.
+    //
+    // A glTF camera carries a projection and nothing else, so a file cannot state
+    // how bright it is meant to look. The photographic defaults below are a real
+    // daylight setting -- ISO 100, f/4, 1/100 s -- and against a scene authored in
+    // normalised units, which is most of them, they land about 1600x under: the
+    // pine forest arrives with two suns at irradiance 5 and 1 and an environment
+    // at intensity 1, and renders as black. That reads as a broken renderer.
+    if (const auto& exposure = m_scene->getExposure(); exposure.has_value())
+    {
+        m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", exposure->filmIso);
+        m_settingsManager->setAs<float>("render/post/tonemapper/fStop", exposure->fStop);
+        m_settingsManager->setAs<float>("render/post/tonemapper/shutterSpeed", exposure->shutterSpeed);
+        m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", exposure->cm2Factor);
+        STRELKA_INFO("Exposure from scene: ISO {:.0f}, f/{:.1f}, 1/{:.0f} s", exposure->filmIso,
+                     exposure->fStop, exposure->shutterSpeed);
+    }
+    else
+    {
+        m_autoExposurePending = true;
+    }
 
     // Add a free-fly "Main" camera as the last entry
     oka::Camera camera;
@@ -170,7 +248,7 @@ void EditorApp::loadSettings()
     {
         m_settingsManager->setAs<bool>("render/pt/denoise", atoi(dn) != 0);
     }
-    m_settingsManager->setAs<uint32_t>("render/pt/metal4", 1);
+m_settingsManager->setAs<uint32_t>("render/pt/metal4", 1);
     m_settingsManager->setAs<uint32_t>("render/pt/sortRays", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/textureLod", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
@@ -2846,6 +2924,10 @@ void EditorApp::run()
         m_display->onBeginFrame();
 
         oka::Buffer* readyBuf = m_render->getReadyBuffer();
+        if (readyBuf && m_autoExposurePending)
+        {
+            applyAutoExposure(readyBuf);
+        }
         if (readyBuf)
         {
             oka::ImageBuffer outputImage;

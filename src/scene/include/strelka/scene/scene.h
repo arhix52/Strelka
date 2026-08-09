@@ -642,6 +642,26 @@ public:
 
     // Homogeneous atmospheric scattering below `height`. A slab, not a bounded
     // volume -- see fog.h for why that is the shape offered.
+    /// Camera exposure, in the photographic terms the tonemapper already takes.
+    ///
+    /// glTF cameras carry a projection and nothing else -- no ISO, no aperture,
+    /// no shutter -- so a scene cannot say how bright it is meant to look, and a
+    /// renderer defaulting to a daylight exposure renders a world authored in
+    /// normalised units as black. Whoever builds the scene knows which it is, so
+    /// this travels in the light sidecar alongside the lights it belongs with.
+    struct ExposureDesc
+    {
+        float filmIso = 100.0f;
+        float fStop = 1.0f;
+        float shutterSpeed = 1.0f;
+        float cm2Factor = 1.0f;
+    };
+    void setExposure(const ExposureDesc& desc)
+    {
+        mExposure = desc;
+    }
+    const std::optional<ExposureDesc>& getExposure() const { return mExposure; }
+
     struct AtmosphereDesc
     {
         glm::float3 color = glm::float3(1.0f); // single-scattering albedo
@@ -842,6 +862,7 @@ private:
 
     std::optional<EnvLightDesc> mEnvLight;
     std::optional<AtmosphereDesc> mAtmosphere;
+    std::optional<ExposureDesc> mExposure;
 
     std::set<uint32_t> mDirtyInstances;
 

@@ -256,6 +256,7 @@ void MetalRender::triggerRenderIfIdle()
 
     mRenderBusy.store(true);
     render(mAsyncOutputBuffers[mWriteIndex]);
+
 }
 
 

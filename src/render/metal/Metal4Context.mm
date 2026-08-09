@@ -70,7 +70,17 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     mDevice = device;
 
     NS::Error* error = nullptr;
-    mQueue = device->newMTL4CommandQueue();
+    // The queue has to be created with a descriptor naming a feedback queue.
+    // Without one, commit feedback handlers are never delivered -- and this
+    // renderer's asynchronous loop clears its in-flight flag from exactly that
+    // handler, so the editor rendered one frame, never learned it had finished,
+    // and showed a black viewport forever. The headless path did not notice
+    // because it waits on the queue's shared event instead.
+    MTL4::CommandQueueDescriptor* queueDesc = MTL4::CommandQueueDescriptor::alloc()->init();
+    mFeedbackQueue = dispatch_queue_create("com.strelka.mtl4.feedback", DISPATCH_QUEUE_SERIAL);
+    queueDesc->setFeedbackQueue(mFeedbackQueue);
+    mQueue = device->newMTL4CommandQueue(queueDesc, &error);
+    queueDesc->release();
     if (!mQueue)
     {
         STRELKA_WARNING("Metal 4 unavailable on this device; keeping the Metal 3 path");
@@ -220,6 +230,11 @@ bool Metal4Context::waitForFrame(uint64_t value, uint32_t timeoutMs)
 
 void Metal4Context::release()
 {
+    if (mFeedbackQueue)
+    {
+        dispatch_release(mFeedbackQueue);
+        mFeedbackQueue = nullptr;
+    }
     if (mImmediateEvent)
     {
         mImmediateEvent->release();
