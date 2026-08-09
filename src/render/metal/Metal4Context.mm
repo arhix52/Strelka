@@ -78,6 +78,15 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     // because it waits on the queue's shared event instead.
     MTL4::CommandQueueDescriptor* queueDesc = MTL4::CommandQueueDescriptor::alloc()->init();
     mFeedbackQueue = dispatch_queue_create("com.strelka.mtl4.feedback", DISPATCH_QUEUE_SERIAL);
+    // A reference of our own, because the descriptor's ownership of this is
+    // one-sided. Measured, since the header says nothing: setFeedbackQueue does
+    // not retain and neither does newMTL4CommandQueue, but releasing the
+    // descriptor *does* release the queue. So the create's +1 is consumed by
+    // queueDesc->release() below, leaving the command queue -- which is still
+    // running -- pointed at a deallocated dispatch queue, and leaving our own
+    // dispatch_release in release() to trap as an over-release. It did: every
+    // teardown of a Metal 4 renderer aborted in libdispatch.
+    dispatch_retain(mFeedbackQueue);
     queueDesc->setFeedbackQueue(mFeedbackQueue);
     mQueue = device->newMTL4CommandQueue(queueDesc, &error);
     queueDesc->release();
@@ -230,11 +239,6 @@ bool Metal4Context::waitForFrame(uint64_t value, uint32_t timeoutMs)
 
 void Metal4Context::release()
 {
-    if (mFeedbackQueue)
-    {
-        dispatch_release(mFeedbackQueue);
-        mFeedbackQueue = nullptr;
-    }
     if (mImmediateEvent)
     {
         mImmediateEvent->release();
@@ -290,6 +294,13 @@ void Metal4Context::release()
     {
         mQueue->release();
         mQueue = nullptr;
+    }
+    // Last, and after the queue that delivers feedback on it: our own reference
+    // from init(), see the note there about who does and does not retain this.
+    if (mFeedbackQueue)
+    {
+        dispatch_release(mFeedbackQueue);
+        mFeedbackQueue = nullptr;
     }
 }
 
