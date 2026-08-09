@@ -179,18 +179,7 @@ derived rather than fitted.
 
 ---
 
-## 5. `18_bounded_volume` still fails at 1.215
-
-Shadow rays now attenuate through a bounded medium, which took the row from 1.899
-to 1.215. What is left is the medium not shadowing itself as strongly as Cycles',
-and the emission convention: Cycles adds volume emission with its own coefficient
-and Strelka adds it per free-flight event. The scene sets emission to zero rather
-than measure the mismatch as though it were an error, so the residual is
-scattering alone.
-
----
-
-## 6. V-Ray colour correction drops `adv_base`
+## 5. V-Ray colour correction drops `adv_base`
 
 `tools/iso_bathroom/vray2strelka.py`'s `bake_color_correction` implements
 brightness, contrast, the advanced lightness curve and the hue tint, but not

@@ -326,6 +326,13 @@ def reset_scene():
     scene.cycles.glossy_bounces = MAX_DEPTH
     scene.cycles.transmission_bounces = MAX_DEPTH
     scene.cycles.transparent_max_bounces = MAX_DEPTH
+    # Blender defaults this one to 0, and 0 does not mean "no volumes" -- it means
+    # single scattering. Left unset, 18_bounded_volume compared Strelka's multiply
+    # scattered medium against a reference that scatters once, which is a
+    # difference that grows with the albedo: at 0.05 the two agreed to 1%, at 1.0
+    # the reference was 2.4x darker. That is the whole of what the row called a
+    # renderer defect.
+    scene.cycles.volume_bounces = MAX_DEPTH
     scene.cycles.seed = 0
 
     scene.render.resolution_x = RES

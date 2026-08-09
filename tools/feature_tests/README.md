@@ -83,23 +83,25 @@ fixing, but it is not a shading bug.
 | `15_clearcoat` | `KHR_materials_clearcoat` + IOR ramp | 0.038 / 0.995 |
 | `16_iridescence` | `KHR_materials_iridescence` thickness ramp | 0.023 / 1.010 |
 | `17_coated_glass` | transmission + clearcoat together | 0.067 / 0.994 |
-| `18_bounded_volume` | `STRELKA_materials_medium` | **0.899 / 1.899 — known FAIL** |
+| `18_bounded_volume` | `STRELKA_materials_medium` | 0.027 / 1.000 |
 
-`18_bounded_volume` fails on purpose and is left failing.
+`18_bounded_volume` used to be the row that failed on purpose, first at 1.899 and
+then at 1.215. Both numbers were real and only the first was Strelka's fault.
 
-Shadow rays do not attenuate through a bounded medium: they are traced with
-`RAY_MASK_SHADOW`, which is the geometry bits alone, and the medium's boundary is
-on its own bit so that a fog gizmo does not black out everything it encloses. The
-consequence is exactly what the comparison image shows -- Cycles' box is dark at
-the bottom and light at the top because the volume shadows itself, and casts a
-shadow on the floor; Strelka's is uniformly bright and casts none. That is the
-whole 1.9x.
+The 1.899 was shadow rays not attenuating through a bounded medium, and that is
+fixed: they take a second traversal against `GEOMETRY_MASK_MEDIUM` and accumulate
+optical depth across the boundaries they cross.
 
-Closing it needs the shadow ray to know where it leaves the medium, which is a
-second traversal against `GEOMETRY_MASK_MEDIUM` -- the cost this feature was
-explicitly scoped to avoid. The row stays in the ladder as the thing that will
-flip to CLOSE when that lands, and until then it is a measurement of one known
-approximation rather than an unexplained failure.
+The 1.215 left over was the reference. `scene.cycles.volume_bounces` defaults to
+**0** in Blender and this file set every other bounce limit but not that one --
+and 0 does not mean "no volumes", it means single scattering. So the row was
+comparing Strelka's multiply scattered medium against a reference that scatters
+once. What makes that diagnosis rather than a guess is that the gap tracks the
+albedo: rebuild the scene at a single-scattering albedo of 0.05 and the two agree
+to within 1% down the whole box, at 1.0 the reference comes out 2.4x darker.
+Setting `volume_bounces = MAX_DEPTH` takes the row to 1.000.
+
+A reference is a measurement too, and this one had an unstated setting in it.
 
 `17_coated_glass` is a regression guard rather than a feature test. Transmission
 and a clearcoat on the same material is the one configuration that hid a
