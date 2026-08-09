@@ -2803,8 +2803,16 @@ void MetalRender::render(Buffer* output)
     pUniformTonemap->height = height;
     pUniformTonemap->outWidth = outWidth;
     pUniformTonemap->outHeight = outHeight;
-    pUniformTonemap->tonemapperType = settings.getAs<uint32_t>("render/pt/tonemapperType");
-    pUniformTonemap->gamma = settings.getAs<float>("render/post/gamma");
+    // A debug view is data, not a picture: a normal, a roughness or a motion
+    // vector means what it means, and a tone curve would misreport it. So the
+    // pass runs as a straight copy instead of being skipped -- it is the only
+    // thing that writes the texture the display samples, and skipping it left
+    // every debug view showing the last tonemapped frame, which reads as the
+    // control doing nothing at all.
+    const bool debugView = debug != 0;
+    // 0 is ToneMapperType::eNone, which lives in the shader-side tonemappers.h.
+    pUniformTonemap->tonemapperType = debugView ? 0u : settings.getAs<uint32_t>("render/pt/tonemapperType");
+    pUniformTonemap->gamma = debugView ? 0.0f : settings.getAs<float>("render/post/gamma");
     pUniformTonemap->maxEDR = settings.getAs<float>("render/post/tonemapper/maxEDR");
 
     // --- Detect settings changes (member-based, not static) ---
@@ -2894,7 +2902,8 @@ void MetalRender::render(Buffer* output)
         exposureValue *= cm2_factor;
     }
     exposureValue /= lum;
-    pUniformTonemap->exposureValue = exposureValue;
+    // Exposure is part of the picture, not part of the data, so it goes too.
+    pUniformTonemap->exposureValue = debugView ? float3(1.0f) : exposureValue;
     pUniformData->exposureValue = exposureValue; // need for proper accumulation
 
     const auto samplesPerLaunch = pUniformData->samples_per_launch;
@@ -3013,7 +3022,7 @@ void MetalRender::render(Buffer* output)
                 MTL4::ComputeCommandEncoder* enc4 = cmd4->computeCommandEncoder();
                 encodeWavefrontMetal4(cmd4, enc4, pUniformBuffer, output, width, height,
                                       samplesThisLaunch, features);
-                if (pUniformData->debug == 0 && mTonemapperPSO4)
+                if (mTonemapperPSO4)
                 {
                     enc4->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch,
                                                     MTL4::VisibilityOptionDevice);
@@ -3084,7 +3093,7 @@ void MetalRender::render(Buffer* output)
                 STRELKA_INFO("STAGES cpu encode {:.3f} ms", encodeMs);
             }
 
-            if (pUniformData->debug == 0 && !denoising)
+            if (!denoising)
             {
                 enc->setComputePipelineState(mTonemapperPSO);
                 enc->useResource(((MetalBuffer*)output)->getNativePtr(),
@@ -3161,7 +3170,7 @@ void MetalRender::render(Buffer* output)
                 mResetDenoiseHistory = false;
                 mMetalFx.encodeDenoise(pCmd, in);
 
-                if (pUniformData->debug == 0 && mTonemapperTexPSO)
+                if (mTonemapperTexPSO)
                 {
                     MTL::ComputeCommandEncoder* tm = pCmd->computeCommandEncoder();
                     tm->setComputePipelineState(mTonemapperTexPSO);
@@ -3190,7 +3199,7 @@ void MetalRender::render(Buffer* output)
                 mResetDenoiseHistory = false;
                 mMetalFx.encodeTemporal(pCmd, false, tin);
 
-                if (pUniformData->debug == 0 && mTonemapperTexPSO)
+                if (mTonemapperTexPSO)
                 {
                     MTL::ComputeCommandEncoder* tm = pCmd->computeCommandEncoder();
                     tm->setComputePipelineState(mTonemapperTexPSO);
@@ -3258,8 +3267,6 @@ void MetalRender::render(Buffer* output)
             mAccumulationBuffer, 0, ((MetalBuffer*)output)->getNativePtr(), 0, width * height * sizeof(float4));
         pBlitEncoder->endEncoding();
 
-        // Disable tonemapping for debug output
-        if (pUniformData->debug == 0)
         {
             MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
 
