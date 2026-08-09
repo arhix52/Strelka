@@ -69,7 +69,7 @@ SurfaceInteraction whiteMetal(unsigned int materialType, float roughness, float 
     p.metallic = 1.0f;
     p.ior = 1.5f;
     p.specular = 0.5f;
-    p.specular_tint = 0.0f;
+    p.specular_color = make_float3(1.0f);
     p.transmission = 0.0f;
     p.clearcoat = 0.0f;
     p.clearcoat_roughness = 0.0f;

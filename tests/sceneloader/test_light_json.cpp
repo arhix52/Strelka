@@ -22,6 +22,9 @@ TEST_CASE("Light JSON round-trip preserves desc fields")
     rect.height = 0.5f;
     rect.color = glm::float3(0.9f, 0.8f, 0.7f);
     rect.intensity = 123.0f;
+    // A light that lights the scene without being in frame. Written only when
+    // false, so this also pins that the sidecar stays quiet about the default.
+    rect.visibleToCamera = false;
     scene.createLight(rect);
 
     Scene::UniformLightDesc distant{};
@@ -54,11 +57,14 @@ TEST_CASE("Light JSON round-trip preserves desc fields")
     CHECK(r.height == doctest::Approx(0.5f));
     CHECK(r.intensity == doctest::Approx(123.0f));
     CHECK(r.orientation.y == doctest::Approx(20.0f));
+    CHECK(r.visibleToCamera == false);
 
     const auto& d = loaded.getLightsDesc()[1];
     CHECK(d.type == LIGHT_TYPE_DISTANT);
     CHECK(d.intensity == doctest::Approx(50000.0f));
     CHECK(d.halfAngle == doctest::Approx(distant.halfAngle).epsilon(1e-4));
+    // Absent from the JSON entirely; the loader has to default it to visible.
+    CHECK(d.visibleToCamera == true);
 
     REQUIRE(loaded.getEnvLight().has_value());
     CHECK(loaded.getEnvLight()->texturePath == "hdr/studio.exr");

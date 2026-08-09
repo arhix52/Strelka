@@ -12,6 +12,9 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_dielectric_exit.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_diffuse_transmission.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_sample_eval_consistency.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_sheen.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_clearcoat.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_iridescence.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_vertex_packing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_light_units.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_scene.cpp
