@@ -26,6 +26,9 @@ Crop the same region from both with `sips`, which does not touch the bytes:
 sips -c 150 190 --cropOffset 330 300 /tmp/iso.png --out /tmp/crop.png
 ```
 
+Entry 1 needs the export *with* its fog volumes, so drop `--no-fog-volumes` and
+send it somewhere else -- the checked-in scene is the one without.
+
 `tools/iso_bathroom/bubble_profile.py` reads back a rendered PNG as mean
 luminance per radial bin across one of the bubbles, against the wall just
 outside it. A defect with a radius is far easier to name than one with only a
@@ -33,26 +36,105 @@ colour.
 
 ---
 
-## 1. The foam clusters are open transmissive meshes
+## 1. The transmissive meshes in this scene are open, and that is what colours the water
 
-The two foam clusters in the bathtub carry 126 and 70 boundary edges between
-them. An open transmissive mesh unbalances the IOR stack by construction — every
-entry without a matching exit leaves the path believing it is inside glass, and
-from there every exit it does find is read as an exit from a medium it never
-entered.
+**Symptom.** With the bathtub's `EnvironmentFog` gizmo present, the bath water
+loses its cyan everywhere except a ring at the tub's rim. Measured as the
+red-to-green ratio over the water, against the reference's 0.871:
 
-Nothing in the current render has been traced to this, which is why it is here
-rather than fixed: it is a measured property of the asset with a known
-consequence, and no measurement yet says which pixels it costs. Closing the
-meshes in the converter, or giving the material `thin_walled`, are both cheaper
-than teaching the stack to recover.
+| Configuration | R/G |
+|---|---|
+| gizmo present | 0.968 |
+| gizmo present, density 1e-6 and no emission | 0.967 |
+| gizmo removed from the same export | 0.777 |
+
+**What it is.** `Water_Bathtub` is an open mesh: 3712 triangles carrying 288
+boundary edges. `Bubbles_Mtl`'s mesh, which is the foam in the tub, carries 672
+across 9454. A ray entering an open transmissive mesh pushes the IOR stack and
+never finds the exit that would pop it, so every segment it travels afterwards --
+anywhere in the room -- is attenuated as though it were still inside the water.
+
+That is where the colour comes from. The water is a 2 mm slab (world Y 0.14487
+to 0.14687) with an attenuation distance of 0.1, so its own thickness is worth
+1.2% of the red channel; it renders at 0.777 against a wall at 1.0. The number
+the gizmo is being measured against was never the water's absorption.
+
+It also explains the direction of the error. Removing the gizmo gives 0.777 and
+the reference is 0.871, so the case treated as correct is the one that
+*over*-absorbs.
+
+### Ruled out, with the test that ruled it out
+
+Rendered from one export, with the two gizmo nodes detached from the scene graph
+for the "removed" row, so the two differ by nothing else. The water's absorption
+is set 20x stronger for these (attenuationColor 0.05, attenuationDistance 0.05)
+to put the effect well clear of the noise; the ratios below are that scene.
+
+| Suspect | Test | Result |
+|---|---|---|
+| The medium itself | density 1e-6, emission 0 | R/G 0.967 against 0.968 at full density -- the boundary alone does it |
+| The pass-through budget | `PATH_PASSTHROUGH_MAX` 32 -> 255 | byte-identical output |
+| The bounce budget | `--depth 16` -> `--depth 64` | 0.918 -> 0.911 |
+| Primary visibility | water given emission 20 | 237.32 against 237.35 -- both renders see the same surface |
+| Segment absorption at a scattering vertex | fixed, see below | the ladder and this scene both unmoved |
+| **The IOR stack** | water marked `thin_walled`, which is the one path that never pushes it | **0.431 / 0.918 becomes 0.988 / 0.993 -- the whole difference collapses** |
+
+The last row is the finding: with nothing pushed onto the stack the gizmo makes
+no difference at all. What the gizmo changes is how long an unbalanced path
+survives, not what any surface does.
+
+One real gap was found on the way and is fixed rather than listed: the absorption
+over a segment was applied in the surface branch and the boundary-crossing branch
+of `shade`, but not at a volume scattering vertex, which returns from its own
+branch before either. It is hoisted to the top of the kernel now. It is worth
+nothing in this scene -- the fog gizmo could be neutered to 1e-6 density and the
+symptom did not move -- and it is still wrong to skip.
+
+### What to do about it
+
+Two candidates, and the measurement to choose between them is the same:
+
+- close the meshes in `tools/iso_bathroom/vray2strelka.py`, which is where the
+  asset is already being repaired for other reasons;
+- or make an unmatched exit recoverable in `ior_stack.h`, which is the general
+  fix and the riskier one -- `ior_stack_pop` searches by priority and silently
+  succeeds when it finds nothing, so there is no signal today that a path is
+  lost.
+
+Either way the check is the same: with the water closed, the gizmo should stop
+mattering, and R/G should move toward 0.871 rather than away from it.
+
+`tools/iso_bathroom/vray2strelka.py --no-fog-volumes` is the lever meanwhile, and
+is what the current export uses.
 
 ---
 
-## 2. A rough thin-walled surface transmits as a delta but is weighted as glossy
+## 2. A pass-through costs a bounce, whatever the comments say
 
-`standard_pbr_sample` sends thin-walled transmission straight through — `wi` is
-exactly `-wo` — at every roughness, because a thin wall has no interior to
+Three places in `src/shaders/metal/wavefront.metal` deliberately do not advance
+the path's `depth`: cutout geometry, a medium boundary crossing, and a
+subsurface walk step. Each says why -- a hedge of cutout leaves would otherwise
+exhaust `maxDepth` before any of its transport happened, and a volume the light
+crosses twice would cost two bounces.
+
+The budget they are avoiding is not the one that ends the path. `MetalRender.mm`
+drives the wavefront as `for (uint32_t bounce = 0; bounce < maxDepth; ++bounce)`,
+one extend/shade pair per iteration, and a path that spends an iteration passing
+through something has spent it whether or not `depth` moved. `depth` gates NEE
+weighting, clamping and Russian roulette; it does not gate the loop.
+
+Not measured as a cost anywhere yet -- raising `--depth` from 16 to 64 on the
+bathtub above moved R/G by 0.007, so whatever that scene is limited by, it is not
+this. It is recorded because the comments state the opposite, and the next person
+to trust them will be debugging a canopy that goes black at a `maxDepth` that
+looks generous.
+
+---
+
+## 3. A rough thin-walled surface transmits as a delta but is weighted as glossy
+
+`standard_pbr_sample` sends thin-walled transmission straight through -- `wi` is
+exactly `-wo` -- at every roughness, because a thin wall has no interior to
 refract across. The pdf and the event type do not agree with that. Measured over
 50k samples per roughness, on a thin-walled dielectric at IOR 1.6:
 
@@ -70,37 +152,11 @@ and evaluates a BTDF over directions the sampler cannot produce. A light seen
 through such a sheet is therefore weighted against a density that describes a
 different surface.
 
-The soap bubbles are at roughness 0 and are not affected — the smooth row above
+The soap bubbles are at roughness 0 and are not affected -- the smooth row above
 is self-consistent. What this costs has not been measured because no scene in
 the tree has a rough thin-walled material; `tools/feature_tests/` would need a
 new rung before the fix could be checked against Cycles, and inventing the
 weighting without that is how the clearcoat term below got rejected twice.
-
----
-
-## 3. Crossing a medium boundary costs the water its colour
-
-**Symptom.** With the bathtub's `EnvironmentFog` gizmo present, the bath water
-loses its cyan. Measured as the red-to-green ratio of the water against the
-reference's 0.871:
-
-| Configuration | R/G |
-|---|---|
-| gizmo present | 0.975 |
-| density cut fourfold | 0.971 |
-| density ~0 and no emission | 0.971 |
-| gizmo removed | 0.734 |
-
-Four orders of magnitude of density move it by 0.004; removing the boundary moves
-it by 0.24. It is the crossing, not the medium.
-
-One cause was found and fixed: the crossing branch in
-`src/shaders/metal/wavefront.metal` returned before the block that attenuates
-over the segment just travelled, so a ray leaving the water through the gizmo
-lost the water's absorption. Worth 0.011 of the 0.24. The rest is unexplained.
-
-`tools/iso_bathroom/vray2strelka.py --no-fog-volumes` is the lever meanwhile, and
-is what the current export uses.
 
 ---
 

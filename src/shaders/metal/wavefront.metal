@@ -1098,6 +1098,53 @@ kernel void wavefrontShade(
     float3 radiance = float3(0.0f);
     const HitRecord rec = hits[tid];
 
+    // --- Absorption over the segment just travelled -------------------------
+    //
+    // The IOR stack already knows which medium the path is inside; it also
+    // carries which material that medium came from, so the extinction can be
+    // looked up here rather than threaded through the path state.
+    //
+    // Once, here, rather than inside each of the four branches below -- because
+    // three of them return before the fourth is reached, and a branch that
+    // forgets this does not lose a highlight, it loses the colour of everything
+    // seen through the medium.
+    //
+    // That is what the fog gizmo around the bathtub was doing to the water. The
+    // gizmo is dense enough that nearly every ray inside the water scatters in
+    // it before reaching a surface, a scattering event returns from its own
+    // branch, and the water's absorption over the segment leading to that event
+    // was applied by nobody. It read as the fog washing the cyan out, which is
+    // why four orders of magnitude of fog density barely moved it: the fog was
+    // not tinting anything, it was replacing the vertex that would have.
+    //
+    // rec.distance is the segment in all four cases -- a scattering event
+    // carries the free-flight distance it sampled, a surface hit carries the
+    // hit distance.
+    //
+    // Skipped inside a subsurface walk, which is a different medium model:
+    // sssScatterWeight already carries that medium's extinction, and a material
+    // carrying both extensions would otherwise be attenuated twice for one
+    // interior. A bounded volume is not skipped -- being inside a fog gizmo says
+    // nothing about whether the path is also inside glass.
+    {
+        const uint32_t walk = p.medium & MEDIUM_INDEX_MASK;
+        const bool inSubsurfaceWalk =
+            SPEC_SSS && walk != 0u &&
+            (materials[walk - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u;
+        IorStack preStack = iorStacks[tid];
+        const uint32_t inside = ior_stack_current_material(preStack);
+        if (!inSubsurfaceWalk && inside != 0xFFFFFFFFu)
+        {
+            device const Material& im = materials[inside];
+            const float3 sigma_t = volume_extinction(float3(im.attenuation_color),
+                                                     im.attenuation_distance, uniforms.volumeModel);
+            throughput *= beer_lambert_transmittance(sigma_t, rec.distance);
+            // Every branch below that persists the path either recomputes this
+            // or writes `p` unchanged, so it is written once here.
+            p.throughput = packed_float3(throughput);
+        }
+    }
+
     // --- Atmospheric scattering ---------------------------------------------
     //
     // Handled before anything to do with surfaces: the ray never reached one.
@@ -1435,28 +1482,9 @@ kernel void wavefrontShade(
     // otherwise cost two of them.
     if (SPEC_SSS && (materials[entry.materialId].medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
     {
-        // Absorption over the segment just travelled, before anything returns.
+        // The segment just travelled was attenuated at the top of this kernel,
+        // which is the only place that sees all four kinds of vertex.
         //
-        // The block that normally does this sits further down, past the point
-        // this branch leaves by, and skipping it loses the segment outright. The
-        // bathtub is the case that shows it: its water is inside the fog gizmo,
-        // so a ray through the water leaves through the boundary, and the water's
-        // cyan absorption was being dropped on the way out. It read as the fog
-        // washing the colour out -- except it did not vary with the fog's
-        // density, which is what gave it away.
-        {
-            IorStack crossStack = iorStacks[tid];
-            const uint32_t inside = ior_stack_current_material(crossStack);
-            if (inside != 0xFFFFFFFFu)
-            {
-                device const Material& im = materials[inside];
-                const float3 sigma_t = volume_extinction(float3(im.attenuation_color),
-                                                         im.attenuation_distance, uniforms.volumeModel);
-                throughput *= beer_lambert_transmittance(sigma_t, rec.distance);
-                p.throughput = packed_float3(throughput);
-            }
-        }
-
         // Bounded by the same counter the cutout pass-through uses, and for the
         // same reason: neither advances `depth`, so neither has a natural end. A
         // boundary the ray re-hits through a self-intersection would otherwise
@@ -1674,22 +1702,6 @@ kernel void wavefrontShade(
 
     // 0xFFFFFF words is 64 MB of chase, past any cache on this part; the earlier
     // version walked a 3.7 MB queue and was measuring cache hits, not memory.
-
-    // Absorption over the segment just travelled. The IOR stack already knows
-    // which medium the path is inside; it now also carries which material that
-    // medium came from, so the extinction can be looked up here rather than
-    // threaded through the path state.
-    {
-        IorStack preStack = iorStacks[tid];
-        const uint32_t medium = ior_stack_current_material(preStack);
-        if (medium != 0xFFFFFFFFu)
-        {
-            device const Material& mm = materials[medium];
-            const float3 sigma_t = volume_extinction(float3(mm.attenuation_color),
-                                                     mm.attenuation_distance, uniforms.volumeModel);
-            throughput *= beer_lambert_transmittance(sigma_t, rec.distance);
-        }
-    }
 
     // Coverage. A MASK surface resolves to 0 or 1 and a BLEND one to its alpha,
     // so one stochastic test covers both: with probability (1 - opacity) the
