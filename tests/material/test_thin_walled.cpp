@@ -200,6 +200,51 @@ TEST_CASE("neither wall of a bubble creates or destroys energy")
     }
 }
 
+TEST_CASE("a thin wall transmits as a delta at every roughness, and says so")
+{
+    // The direction was always this; only the label and the density disagreed
+    // with it. A pdf of 48.9 on a lobe whose every sample lands on one direction
+    // is a density MIS cannot weigh against anything.
+    for (float rough : { 0.0f, 0.1f, 0.3f, 0.6f, 1.0f })
+    {
+        SurfaceInteraction si = wall_si(35.0f, /*front=*/true, rough);
+        int transmitted = 0;
+        for (int i = 0; i < 512; ++i)
+        {
+            const float u = (i + 0.5f) / 512.0f;
+            BsdfSampleResult r = bsdf_sample(si, make_float4(0.3f, 0.7f, 0.25f, u));
+            if ((r.event_type & BSDF_EVENT_TRANSMISSION) == 0) continue;
+            ++transmitted;
+            CAPTURE(rough);
+            // Straight through, and reported as the delta that is.
+            const float3 d = r.wi - (make_float3(0.0f) - si.wo);
+            CHECK(dot(d, d) == doctest::Approx(0.0f).epsilon(1e-6));
+            CHECK(r.event_type == BSDF_EVENT_SPECULAR_TRANSMISSION);
+        }
+        REQUIRE(transmitted > 0);
+    }
+}
+
+TEST_CASE("a thin wall cannot be evaluated in transmission")
+{
+    // eval() used to build a half vector for a refraction that never happens and
+    // return a BTDF over directions the sampler cannot reach. Anything a light
+    // connection asks about on the far side has to come back zero.
+    for (float rough : { 0.0f, 0.4f })
+    {
+        SurfaceInteraction si = wall_si(35.0f, /*front=*/true, rough);
+        // Straight through, and a spread of directions around it.
+        for (float tilt : { 0.0f, 0.15f, 0.4f })
+        {
+            const float3 wi = safe_normalize(make_float3(-si.wo.x + tilt, tilt, -si.wo.z));
+            BsdfEvalResult e = bsdf_eval(si, wi);
+            CAPTURE(rough);
+            CAPTURE(tilt);
+            CHECK(dot(e.bsdf, e.bsdf) == doctest::Approx(0.0f));
+        }
+    }
+}
+
 TEST_CASE("solid glass still total-internally-reflects")
 {
     // The exemption is for materials with no interior. A solid sphere has one,

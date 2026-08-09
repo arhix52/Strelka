@@ -193,6 +193,14 @@ private:
     uint32_t mTextureCacheMisses = 0;
     void generateTextureMips();
 
+    /// Extra extend/shade iterations a scene needs so that geometry which does
+    /// not advance a path's depth cannot eat its bounce budget. See
+    /// wavefrontIterations().
+    static constexpr uint32_t kPassthroughIterations = 8;
+    static constexpr uint32_t kSubsurfaceIterations = 16;
+    /// Iterations of the wavefront loop for one sample at this path depth.
+    uint32_t wavefrontIterations(uint32_t maxDepth) const;
+
     MTL::Buffer* mMaterialBuffer = nullptr;
     // Set while uploading materials. Gates the alpha function constant, so a
     // scene with no cutouts compiles the same kernels it always did.

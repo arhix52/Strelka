@@ -1891,6 +1891,42 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     mMetal4.commitResidency();
 }
 
+// How many extend/shade iterations one sample needs to reach `maxDepth` bounces.
+//
+// More than maxDepth, whenever the scene contains something that consumes an
+// iteration without advancing the path's depth: a cutout pass-through, a medium
+// boundary crossing, a subsurface walk step. Each of those deliberately leaves
+// `depth` alone, and each is documented as doing so to avoid exhausting the
+// bounce budget -- but the budget that ends a path is this loop, not `depth`, so
+// without headroom the two disagree and the deepest transport is never encoded.
+// A hedge of cutout leaves goes black at a maxDepth that looks generous.
+//
+// The headroom is per feature and a scene without them pays nothing, which
+// matters because an iteration is five stage encodes even when the queue it
+// dispatches over is empty. It is a budget rather than a guarantee: the paths'
+// own counters (PATH_PASSTHROUGH_MAX, MEDIUM_MAX_STEPS) still bound how many
+// pass-throughs any one path may take, and those are larger than this.
+uint32_t MetalRender::wavefrontIterations(uint32_t maxDepth) const
+{
+    uint32_t iterations = maxDepth;
+    // Cutouts and medium boundaries share PATH_PASSTHROUGH_MAX, so one budget
+    // covers both, and a scene with both does not need it twice: a path spends
+    // from the same counter whichever kind it crosses.
+    if (mSceneHasAlphaMaterials || mSceneHasBoundedMedium)
+    {
+        iterations += kPassthroughIterations;
+    }
+    // A walk step is not a pass-through and has its own, much larger, ceiling.
+    // Matching MEDIUM_MAX_STEPS here would be 256 extra iterations on any scene
+    // with a bar of soap in it, so this buys a walk of useful length rather than
+    // the longest one the shader will take.
+    if (mSceneHasSubsurfaceMaterials)
+    {
+        iterations += kSubsurfaceIterations;
+    }
+    return iterations;
+}
+
 void MetalRender::encodeWavefrontMetal4(MTL4::CommandBuffer* cmd, MTL4::ComputeCommandEncoder*& enc,
                                         MTL::Buffer* uniformBuffer,
                                         Buffer* output, uint32_t width, uint32_t height,
@@ -1903,6 +1939,7 @@ void MetalRender::encodeWavefrontMetal4(MTL4::CommandBuffer* cmd, MTL4::ComputeC
     }
     const uint32_t pixels = width * height;
     const uint32_t maxDepth = std::max(1u, getSettings()->getAs<uint32_t>("render/pt/depth"));
+    const uint32_t bounceIterations = wavefrontIterations(maxDepth);
     MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
     const auto* uniforms = reinterpret_cast<const Uniforms*>(uniformBuffer->contents());
     const uint32_t dispatchSampleCount = sampleCount + (uniforms->canonicalGuideSample ? 1u : 0u);
@@ -2002,7 +2039,7 @@ void MetalRender::encodeWavefrontMetal4(MTL4::CommandBuffer* cmd, MTL4::ComputeC
         closeStage();
         barrier();
 
-        for (uint32_t bounce = 0; bounce < maxDepth; ++bounce)
+        for (uint32_t bounce = 0; bounce < bounceIterations; ++bounce)
         {
             const uint32_t src = bounce & 1u;
             const uint32_t dst = src ^ 1u;
@@ -2181,6 +2218,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
     const uint32_t pixels = width * height;
     const WavefrontVariant* variant = wavefrontVariantFor(features);
     const uint32_t maxDepth = std::max(1u, getSettings()->getAs<uint32_t>("render/pt/depth"));
+    const uint32_t bounceIterations = wavefrontIterations(maxDepth);
     MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
     const auto* uniforms = reinterpret_cast<const Uniforms*>(uniformBuffer->contents());
     const uint32_t dispatchSampleCount = sampleCount + (uniforms->canonicalGuideSample ? 1u : 0u);
@@ -2275,7 +2313,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
         enc->setBuffer(mPathRayBuffer, 0, 8);
         enc->dispatchThreads(grid, tg);
 
-        for (uint32_t bounce = 0; bounce < maxDepth; ++bounce)
+        for (uint32_t bounce = 0; bounce < bounceIterations; ++bounce)
         {
             const uint32_t src = bounce & 1u;
             const uint32_t dst = src ^ 1u;

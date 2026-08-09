@@ -586,7 +586,21 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
 
             result.wi = si.thin_walled ? safe_normalize(-V) : safe_normalize(wi_refracted);
 
-            if (is_smooth)
+            // A thin wall passes light straight through at every roughness --
+            // `wi` is exactly `-V` above, and it was still being reported as a
+            // spread lobe with a finite microfacet density behind it. Measured:
+            // at roughness 0.1 every transmitted sample came back at exactly
+            // `-V` carrying a pdf of 48.9. MIS then weighed a delta against a
+            // density describing a surface that was never sampled.
+            //
+            // Reported as the delta it is, which costs nothing and is at least
+            // self-consistent. What it is *not* is the physics: a frosted sheet
+            // does blur what is behind it, and modelling that means refracting
+            // through the microfacet and back at the second interface. That
+            // needs a rung on the Cycles ladder to check against, and there is
+            // no rough thin-walled material in the tree to build one from -- so
+            // the approximation is stated rather than guessed at.
+            if (is_smooth || si.thin_walled)
             {
                 float factor = si.thin_walled ? 1.0f : (eta * eta);
                 result.bsdf_over_pdf = si.albedo * refractTint * factor;
@@ -806,8 +820,13 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
             }
         }
 
-        if (alpha < 0.001f)
-            return result; // Smooth specular transmission is delta -- cannot eval
+        // Delta transmission cannot be evaluated, and a thin wall is delta at
+        // every roughness -- sample() returns exactly -V there. Falling through
+        // built the half vector as normalize(V + eta * wi), a refraction that
+        // never happened, and returned a BTDF over directions the sampler
+        // cannot produce. NEE through a frosted sheet was weighed against it.
+        if (alpha < 0.001f || si.thin_walled)
+            return result;
 
         if (si.transmission <= 0.0f)
             return result;
