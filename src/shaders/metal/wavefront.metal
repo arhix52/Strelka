@@ -1442,12 +1442,18 @@ kernel void wavefrontShade(
         a.motionY = motion.y;
         // Filled in by the bounce that follows a specular one; see below.
         a.specularHitDistance = 0.0f;
-        // Guides taken past a specular bounce describe a reflected surface, and
-        // its motion vector is the *reflector's* -- which is not where the
-        // reflection moves. Tell the denoiser not to trust the history there.
-        const float sweptReactive =
-            uniforms.isMotionBlurVisible ? saturate(length(motion) * 0.25f) : 0.0f;
-        a.reactive = max((depth > 0u) ? 1.0f : 0.0f, sweptReactive);
+        // Reactive means "the history for this pixel is not valid", and the one
+        // thing that makes it so is guides describing a surface other than the one
+        // the camera sees -- which is exactly the deferred-guide case, a primary
+        // hit too smooth to describe. Water, glass, a mirror.
+        //
+        // It used to also scale with the motion vector, saturating at four pixels
+        // of movement. That marked the whole frame the moment the camera moved at
+        // all, so every camera movement threw away the entire history and the
+        // image fell back to single-sample noise -- everywhere, not just on the
+        // reflective surfaces the mask is for. Motion is what motion vectors are
+        // for; a pixel that moved is reprojectable, not untrustworthy.
+        a.reactive = (depth > 0u) ? 1.0f : 0.0f;
         a.pad2 = 0.0f;
         aov[tid] = a;
         p.depthAndFlags |= PATH_FLAG_AOV_DONE;

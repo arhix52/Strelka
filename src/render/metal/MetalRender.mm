@@ -536,6 +536,9 @@ void MetalRender::ensureUpscaleTextures(uint32_t width, uint32_t height)
     mUpscaleTextureWidth = width;
     mUpscaleTextureHeight = height;
     mMetal4ResidencyGeneration = 0;
+    // Whatever the display was about to show lived in a texture that no longer
+    // exists; the one now at that index has never been written.
+    mReadyIndex.store(-1);
 }
 
 // Snapshot the pose the previous frame was rendered with.
@@ -639,6 +642,12 @@ void MetalRender::ensureDisplayTextures(uint32_t width, uint32_t height)
     mDisplayTextureWidth = width;
     mDisplayTextureHeight = height;
     mMetal4ResidencyGeneration = 0; // new allocations: residency has to be redone
+    // Both textures were just replaced, and the index still pointed into the old
+    // pair. Presenting from it hands the display a texture with no defined
+    // contents -- which is what the flash of noise on switching modes was: the
+    // usage MetalFX requires changes when upscaling turns on, so a switch
+    // reallocates these even when the size does not change.
+    mReadyIndex.store(-1);
 }
 
 
