@@ -85,6 +85,11 @@ struct RenderConfig
 
     // 0=None, 1=Reinhard, 2=ACES, 3=Filmic
     uint32_t tonemapType = 2;
+    /// Whether the caller stated an exposure. A scene can carry its own in the
+    /// light sidecar, and it should win over these defaults -- but not over a
+    /// value the caller asked for, which is the only way to pin exposure for a
+    /// measurement (see tools/feature_tests, which needs exactly 1.0).
+    bool exposureOverridden = false;
     float gamma = 2.4f;
     float filmIso = 100.0f;
     float fStop = 4.0f;

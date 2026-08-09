@@ -35,6 +35,8 @@ int main(int argc, const char* argv[])
         ("height",       "Render height",                   cxxopts::value<uint32_t>())
         ("spp",          "Samples per pixel",               cxxopts::value<uint32_t>())
         ("depth",        "Max ray depth",                   cxxopts::value<uint32_t>())
+        ("exposure-iso", "Film ISO; overrides the scene's own exposure",
+                                                            cxxopts::value<float>())
         ("clamp",        "Clamp each indirect path's contribution (0 = off)",
                                                             cxxopts::value<float>())
         ("sampler",      "Sampler: halton, pcg, sobol, sobol_bn, hybrid", cxxopts::value<std::string>())
@@ -113,6 +115,11 @@ int main(int argc, const char* argv[])
     if (result.count("depth"))
     {
         cfg.maxDepth = result["depth"].as<uint32_t>();
+    }
+    if (result.count("exposure-iso"))
+    {
+        cfg.filmIso = result["exposure-iso"].as<float>();
+        cfg.exposureOverridden = true;
     }
     if (result.count("clamp"))
     {

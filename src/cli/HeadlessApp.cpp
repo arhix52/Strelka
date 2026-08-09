@@ -249,14 +249,17 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     if (auto v = tbl["tonemap"]["exposure_iso"].value<double>())
     {
         cfg.filmIso = static_cast<float>(*v);
+        cfg.exposureOverridden = true;
     }
     if (auto v = tbl["tonemap"]["exposure_fstop"].value<double>())
     {
         cfg.fStop = static_cast<float>(*v);
+        cfg.exposureOverridden = true;
     }
     if (auto v = tbl["tonemap"]["exposure_shutter"].value<double>())
     {
         cfg.shutterSpeed = static_cast<float>(*v);
+        cfg.exposureOverridden = true;
     }
 
     return cfg;
@@ -351,10 +354,31 @@ void HeadlessApp::populateSettings()
                            (std::filesystem::temp_directory_path() / "strelka_texcache").string());
     m_settings->setAs<bool>("render/validate/analyticLights", true);
 
-    m_settings->setAs<float>("render/post/tonemapper/filmIso", m_config.filmIso);
-    m_settings->setAs<float>("render/post/tonemapper/cm2_factor", 1.0f);
-    m_settings->setAs<float>("render/post/tonemapper/fStop", m_config.fStop);
-    m_settings->setAs<float>("render/post/tonemapper/shutterSpeed", m_config.shutterSpeed);
+    // A scene may state its own exposure in the light sidecar, and when it does
+    // it wins over the defaults here -- an exposure is a property of the shot,
+    // not of the renderer. It does not win over an exposure the caller asked for:
+    // tools/feature_tests pins all three to hold the factor at exactly 1.0, and a
+    // scene quietly overriding that would make every row measure its exposure.
+    float filmIso = m_config.filmIso;
+    float fStop = m_config.fStop;
+    float shutterSpeed = m_config.shutterSpeed;
+    float cm2Factor = 1.0f;
+    if (!m_config.exposureOverridden)
+    {
+        if (const auto& exp = m_scene->getExposure(); exp.has_value())
+        {
+            filmIso = exp->filmIso;
+            fStop = exp->fStop;
+            shutterSpeed = exp->shutterSpeed;
+            cm2Factor = exp->cm2Factor;
+            STRELKA_INFO("Exposure from scene: iso={} fstop={} shutter={}", filmIso, fStop,
+                         shutterSpeed);
+        }
+    }
+    m_settings->setAs<float>("render/post/tonemapper/filmIso", filmIso);
+    m_settings->setAs<float>("render/post/tonemapper/cm2_factor", cm2Factor);
+    m_settings->setAs<float>("render/post/tonemapper/fStop", fStop);
+    m_settings->setAs<float>("render/post/tonemapper/shutterSpeed", shutterSpeed);
     m_settings->setAs<float>("render/post/tonemapper/maxEDR", 1.0f);
     m_settings->setAs<float>("render/post/gamma", m_config.gamma);
 

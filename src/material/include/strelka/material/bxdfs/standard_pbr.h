@@ -78,6 +78,30 @@ DEVICE_FUNC float specular_lobe_scale(const THREAD_REF SurfaceInteraction& si)
     return 1.0f - si.transmission * (1.0f - si.metallic);
 }
 
+// Reflectance at a transmissive interface, coloured when a thin film sits on it.
+//
+// The film is applied in the specular lobe, and a transmissive material does not
+// have one: its reflection is the transmission lobe's own Fresnel coin flip. So
+// a soap bubble -- the thing thin-film interference exists to render -- got no
+// film at all, and came out with a black rim where the reference has a bright
+// iridescent one.
+//
+// Returned as a colour with the scalar the coin flip uses left alone, so the
+// sampling is unchanged and the tint rides on the throughput. With no film the
+// colour is that same scalar and both correction factors are exactly one.
+DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si, float v_dot_h,
+                                        float eta)
+{
+    const float f = fresnel_dielectric(v_dot_h, eta);
+    if (si.iridescence <= 0.0f)
+    {
+        return make_float3(f);
+    }
+    const float3 film = iridescence_fresnel(1.0f, si.iridescence_ior, fabsf(v_dot_h),
+                                            si.iridescence_thickness, make_float3(f));
+    return mix(make_float3(f), film, saturate(si.iridescence));
+}
+
 // Charlie sheen evaluated for one direction pair. Zero unless the material
 // carries the extension, so every scene without fabric compiles to the same
 // work it did before.
@@ -493,7 +517,12 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         float VdotH = dot(V, H);
         if (VdotH <= 0.0f) return result;
 
-        float F_val = fresnel_dielectric(VdotH, eta);
+        const float F_val = fresnel_dielectric(VdotH, eta);
+        const float3 F_film = transmission_fresnel(si, VdotH, eta);
+        // Expected value F_film with a coin flipped at F_val.
+        const float3 reflectTint = F_film / fmaxf(F_val, 1e-4f);
+        const float3 refractTint =
+            (make_float3(1.0f) - F_film) / fmaxf(1.0f - F_val, 1e-4f);
 
         if (u_fresnel < F_val)
         {
@@ -504,7 +533,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
 
             if (is_smooth)
             {
-                result.bsdf_over_pdf = si.albedo;
+                result.bsdf_over_pdf = si.albedo * reflectTint;
                 result.pdf           = p_trans_eff * F_val;
                 result.event_type    = BSDF_EVENT_SPECULAR_REFLECTION;
             }
@@ -513,7 +542,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
                 float NdotH  = dot(Nf, H);
                 float G2     = ggx_smith_g2(alpha, fabsf(NdotV), NdotL);
                 float G1     = ggx_smith_g1(alpha, fabsf(NdotV));
-                result.bsdf_over_pdf = si.albedo * (G2 / (G1 + 1e-10f));
+                result.bsdf_over_pdf = si.albedo * reflectTint * (G2 / (G1 + 1e-10f));
                 result.pdf   = p_trans_eff * F_val
                              * ggx_vndf_pdf(alpha, NdotH, fabsf(NdotV), VdotH);
                 result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
@@ -545,7 +574,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
             if (is_smooth)
             {
                 float factor = si.thin_walled ? 1.0f : (eta * eta);
-                result.bsdf_over_pdf = si.albedo * factor;
+                result.bsdf_over_pdf = si.albedo * refractTint * factor;
                 result.pdf           = p_trans_eff * (1.0f - F_val);
                 result.event_type    = BSDF_EVENT_SPECULAR_TRANSMISSION;
             }
@@ -785,18 +814,22 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
             return result;
 
         float F_val   = fresnel_dielectric(VdotH, eta);
+        const float3 F_film = transmission_fresnel(si, VdotH, eta);
         float D       = ggx_ndf(alpha, NdotH);
         float G2      = ggx_smith_g2(alpha, NdotV_abs, NdotL_abs);
 
         float denom   = (VdotH + eta * LdotH);
         float factor  = fabsf(VdotH * LdotH) / (NdotV_abs * NdotL_abs + 1e-10f);
-        float btdf    = (1.0f - F_val) * D * G2 * eta * eta * factor / (denom * denom + 1e-10f);
+        const float3 btdf = (make_float3(1.0f) - F_film) * (D * G2 * eta * eta * factor /
+                                                            (denom * denom + 1e-10f));
 
         // Accumulated, not assigned: a material can be both diffusely and
         // specularly transmissive, and the diffuse term above has already
         // written into the same hemisphere.
+        const float3 btdf_pos = make_float3(fmaxf(btdf.x, 0.0f), fmaxf(btdf.y, 0.0f),
+                                            fmaxf(btdf.z, 0.0f));
         result.bsdf = result.bsdf +
-                      si.albedo * fmaxf(btdf, 0.0f) * (1.0f - si.metallic) * si.transmission;
+                      si.albedo * btdf_pos * (1.0f - si.metallic) * si.transmission;
 
         float dwh_dwi = (eta * eta * fabsf(LdotH)) / (denom * denom + 1e-10f);
         float vndf_p  = ggx_vndf_pdf(alpha, NdotH, NdotV_abs, VdotH);
