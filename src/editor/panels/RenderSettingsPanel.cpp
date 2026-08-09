@@ -3,7 +3,9 @@
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
 
+#include <cfloat>
 #include <ctime>
+#include <filesystem>
 
 namespace oka
 {
@@ -432,6 +434,99 @@ void EditorApp::drawRenderSettingsPanel()
     auto shadowRayTmin = m_settingsManager->getAs<float>("render/pt/dev/shadowRayTmin");
     ImGui::InputFloat("Shadow ray T min", (float*)&shadowRayTmin, 0.1);
     m_settingsManager->setAs<float>("render/pt/dev/shadowRayTmin", shadowRayTmin);
+
+    ImGui::End();
+}
+
+// The scene load, while it is happening.
+//
+// Shown for the parse and for the GPU build alike: to the user those are one
+// wait, and the fact that one runs on a worker and the other a stage per frame
+// on the main loop is not something the window should expose.
+void EditorApp::drawLoadingOverlay()
+{
+    const bool building = m_render && m_render->isBuildingScene();
+    if (!m_isLoading && !building)
+    {
+        return;
+    }
+
+    // Weighted by measured cost on a large scene (the pine forest, seconds), not
+    // by stage count: evenly divided, the bar would spend 40% of the wait in one
+    // sixth of its length, which reads as stuck rather than slow. Indexed by
+    // Stage, which is declared in run order for this to be meaningful.
+    static constexpr float kStageWeights[(size_t)LoadProgress::Stage::Count] = {
+        0.00f, // Idle
+        1.12f, // Reading
+        0.73f, // Parsing
+        0.14f, // Geometry
+        1.07f, // Textures
+        1.95f, // Structures
+        0.04f, // Environment
+        0.00f, // Done
+    };
+    static const char* kStageNames[(size_t)LoadProgress::Stage::Count] = {
+        "Starting", "Reading file",   "Parsing scene", "Uploading geometry",
+        "Loading textures", "Building acceleration structures", "Environment", "Finishing",
+    };
+
+    const uint32_t stage =
+        std::min(m_loadProgress.stage.load(std::memory_order_acquire), (uint32_t)LoadProgress::Stage::Done);
+    const uint32_t done = m_loadProgress.done.load(std::memory_order_relaxed);
+    const uint32_t total = m_loadProgress.total.load(std::memory_order_relaxed);
+
+    float totalWeight = 0.0f;
+    for (float w : kStageWeights)
+    {
+        totalWeight += w;
+    }
+    float before = 0.0f;
+    for (uint32_t i = 0; i < stage; ++i)
+    {
+        before += kStageWeights[i];
+    }
+    // A stage that cannot say how much work it holds contributes nothing beyond
+    // its starting point, rather than pretending to be complete.
+    const float within = total > 0 ? std::min(1.0f, (float)done / (float)total) : 0.0f;
+    const float fraction = totalWeight > 0.0f ? (before + kStageWeights[stage] * within) / totalWeight : 0.0f;
+
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_Always);
+    ImGui::Begin("##Loading", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+
+    ImGui::TextUnformatted(std::filesystem::path(m_sceneFile).filename().string().c_str());
+    ImGui::Spacing();
+
+    char label[128];
+    if (total > 0)
+    {
+        snprintf(label, sizeof(label), "%s  %u/%u", kStageNames[stage], done, total);
+    }
+    else
+    {
+        snprintf(label, sizeof(label), "%s", kStageNames[stage]);
+    }
+    ImGui::ProgressBar(fraction, ImVec2(-FLT_MIN, 0.0f), label);
+
+    // Only the parse can be abandoned. The GPU build hands out buffers and
+    // acceleration structures that the renderer is already holding, so stopping
+    // halfway would leave it in a state nothing else knows how to describe --
+    // and it is the shorter half of the wait anyway.
+    ImGui::Spacing();
+    ImGui::BeginDisabled(!m_isLoading || m_loadProgress.isCancelled());
+    if (ImGui::Button("Cancel"))
+    {
+        m_loadProgress.cancel();
+    }
+    ImGui::EndDisabled();
+    if (m_loadProgress.isCancelled())
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled("cancelling...");
+    }
 
     ImGui::End();
 }

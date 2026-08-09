@@ -1,6 +1,8 @@
 #pragma once
 
 #include <strelka/display/display.h>
+
+#include <loadprogress.h>
 #include <strelka/render/render.h>
 
 #include "CameraController.h"
@@ -94,6 +96,9 @@ private:
     std::vector<UndoState> m_redoStack;
 
     std::future<std::unique_ptr<Scene>> m_loadingFuture;
+    /// Owned by the app rather than by a load, so both the worker and the
+    /// renderer can hold a pointer to it for as long as either exists.
+    LoadProgress m_loadProgress;
     std::string m_pendingResourcePath;
     bool m_isLoading = false;
 
@@ -127,18 +132,33 @@ private:
                            glm::float3& outMax,
                            glm::mat4& outWorldFromLocal);
     void drawSelectionGizmo(Camera& cam);
+    void drawLoadingOverlay();
 
 public:
     EditorApp(const std::string& sceneFile, const std::string& resourceSearchPath);
-    ~EditorApp() = default;
+    /// Cancels a load in flight and waits for it.
+    ///
+    /// std::future's destructor blocks until the task finishes, so without the
+    /// cancel first, closing the window during a load hangs the app for the rest
+    /// of that load. Waiting here rather than letting the member destructor do it
+    /// also keeps the worker's raw pointer to m_sceneLoader valid for as long as
+    /// the worker can still use it.
+    ~EditorApp();
 
     void framebufferResize(int newWidth, int newHeight) override;
 
     /// Compute camera position that fits the entire scene in the view frustum.
     glm::vec3 computeSceneFitPosition(float fovDegrees) const;
 
-    void prepare();
     void loadSettings();
+    /// Start loading a scene on a worker. Returns immediately; the main loop
+    /// picks the result up in checkLoadingComplete(). Used both for the scene
+    /// named on the command line and for File -> Open, so startup and reload
+    /// cannot drift apart.
+    void beginSceneLoad(const std::string& sceneFile, const std::string& resourceSearchPath);
+    /// Take the exposure the freshly loaded scene asks for, or arrange to measure
+    /// it. Must run after loadSettings(), which writes the photographic defaults.
+    void applySceneExposure();
     void loadAnimSettings();
     void checkLoadingComplete();
     void run();

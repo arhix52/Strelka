@@ -5,6 +5,9 @@
 #include <strelka/render/common.h>
 #include <strelka/render/buffer.h>
 #include <strelka/scene/scene.h>
+
+#include <loadprogress.h>
+
 #include <atomic>
 
 namespace oka
@@ -135,6 +138,23 @@ public:
 
     virtual Buffer* getReadyBuffer() { return nullptr; }
 
+    /// Where to report the GPU-side scene build, and where to read cancellation
+    /// from. The editor hands the same object to the loader, so one bar covers
+    /// the parse and the build without the two having to agree on anything.
+    void setLoadProgress(LoadProgress* progress)
+    {
+        mLoadProgress = progress;
+    }
+
+    /// True while the scene's GPU resources are still being built. A backend that
+    /// builds them in chunks does one chunk per render() call and produces no
+    /// image until this goes false; one that builds them up front never returns
+    /// true, and the caller's loop is the same either way.
+    virtual bool isBuildingScene() const
+    {
+        return false;
+    }
+
     /// Last completed render frame time in milliseconds (GPU time).
     double getLastRenderTimeMs() const { return mLastRenderTimeMs.load(std::memory_order_relaxed); }
 
@@ -195,6 +215,8 @@ public:
     }
 
 protected:
+    /// Null unless a caller asked for progress; every use is guarded.
+    LoadProgress* mLoadProgress = nullptr;
     SettingsManager* mSettingsManager;
     SharedContext* mSharedCtx = nullptr;
     oka::Scene* mScene = nullptr;

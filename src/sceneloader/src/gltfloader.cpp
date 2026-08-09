@@ -16,6 +16,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <unordered_map>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -1283,6 +1284,14 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     std::string warn;
     bool res = false;
     const std::string ext = fs::path(modelPath).extension().string();
+    // One indivisible read with no way in for a callback, and a third of the load
+    // on a scene the size of the pine forest. It gets a stage of its own so the
+    // UI can name what it is waiting on instead of showing a bar that does not
+    // move for a second.
+    if (mProgress)
+    {
+        mProgress->beginStage(LoadProgress::Stage::Reading, 0);
+    }
     if (ext == ".glb")
     {
         res = gltf_ctx.LoadBinaryFromFile(&model, &err, &warn, modelPath.c_str());
@@ -1313,42 +1322,84 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
                         sceneId);
     }
 
-    loadMaterials(model, scene);
-    const bool hadJsonLights = loadLightsFromJson(modelPath, scene);
+    // The load expressed as a list of phases rather than as a sequence of calls.
+    //
+    // Progress is then a property of the list: the loop reports it, so there is
+    // no per-phase call to forget and no separately maintained total that has to
+    // agree with how many of those calls there are. Adding a phase and not
+    // listing it here means it does not run at all, which is a loud failure --
+    // unlike a bar that quietly stops short of the end.
+    //
+    // The graph walk contributes one phase per root node because it is most of
+    // the parse, and a bar that sits still through it is indistinguishable from
+    // one that has hung.
+    struct Phase
+    {
+        const char* name;
+        std::function<void()> run;
+    };
 
-    loadCameras(model, scene);
-    loadCamerasFromJson(modelPath, scene);
-
+    bool hadJsonLights = false;
     const float globalScale = 1.0f;
-    loadNodes(model, scene, globalScale);
-
-    loadSkeletalData(model, scene, globalScale);
-
     // Lives for the whole graph walk: two nodes anywhere in the scene that point
     // at the same glTF mesh share the geometry built for the first of them.
     MeshCache meshCache;
-    for (int i = 0; i < model.scenes[sceneId].nodes.size(); ++i)
-    {
-        const int rootNodeIdx = model.scenes[sceneId].nodes[i];
-        processNode(model, scene, model.nodes[rootNodeIdx], rootNodeIdx, glm::float4x4(1.0f), globalScale, meshCache);
-    }
 
+    std::vector<Phase> phases;
+    phases.push_back({ "materials", [&] { loadMaterials(model, scene); } });
+    phases.push_back({ "lights", [&] { hadJsonLights = loadLightsFromJson(modelPath, scene); } });
+    phases.push_back({ "cameras", [&] {
+                          loadCameras(model, scene);
+                          loadCamerasFromJson(modelPath, scene);
+                      } });
+    phases.push_back({ "nodes", [&] { loadNodes(model, scene, globalScale); } });
+    phases.push_back({ "skins", [&] { loadSkeletalData(model, scene, globalScale); } });
+    for (size_t i = 0; i < model.scenes[sceneId].nodes.size(); ++i)
+    {
+        phases.push_back({ "geometry", [&, i] {
+                              const int rootNodeIdx = model.scenes[sceneId].nodes[i];
+                              processNode(model, scene, model.nodes[rootNodeIdx], rootNodeIdx,
+                                          glm::float4x4(1.0f), globalScale, meshCache);
+                          } });
+    }
     // Punctual lights need node world transforms, so they land after the graph.
-    if (!hadJsonLights && !loadPunctualLights(model, scene))
-    {
-        STRELKA_WARNING("No light in scene, adding default distant light");
-        oka::Scene::UniformLightDesc lightDesc{};
-        lightDesc.useXform = false;
-        lightDesc.position = glm::float3(0.0f, 0.0f, 0.0f);
-        lightDesc.orientation = glm::float3(-45.0f, 15.0f, 0.0f);
-        lightDesc.type = LIGHT_TYPE_DISTANT;
-        lightDesc.halfAngle = 10.0f * 0.5f * (float(M_PI) / 180.0f);
-        lightDesc.intensity = 100000;
-        lightDesc.color = glm::float3(1.0);
-        scene.createLight(lightDesc);
-    }
+    phases.push_back({ "punctual lights", [&] {
+                          if (!hadJsonLights && !loadPunctualLights(model, scene))
+                          {
+                              STRELKA_WARNING("No light in scene, adding default distant light");
+                              oka::Scene::UniformLightDesc lightDesc{};
+                              lightDesc.useXform = false;
+                              lightDesc.position = glm::float3(0.0f, 0.0f, 0.0f);
+                              lightDesc.orientation = glm::float3(-45.0f, 15.0f, 0.0f);
+                              lightDesc.type = LIGHT_TYPE_DISTANT;
+                              lightDesc.halfAngle = 10.0f * 0.5f * (float(M_PI) / 180.0f);
+                              lightDesc.intensity = 100000;
+                              lightDesc.color = glm::float3(1.0);
+                              scene.createLight(lightDesc);
+                          }
+                      } });
+    phases.push_back({ "animation", [&] { loadAnimation(model, scene); } });
 
-    loadAnimation(model, scene);
+    if (mProgress)
+    {
+        mProgress->beginStage(LoadProgress::Stage::Parsing, (uint32_t)phases.size());
+    }
+    for (const Phase& phase : phases)
+    {
+        // Checked between phases rather than inside them: a cancelled load should
+        // stop within one phase's worth of work, and threading a flag through the
+        // node recursion would put a check on every node for no extra benefit.
+        if (mProgress && mProgress->isCancelled())
+        {
+            STRELKA_INFO("Scene load cancelled during '{}'", phase.name);
+            return false;
+        }
+        phase.run();
+        if (mProgress)
+        {
+            mProgress->step();
+        }
+    }
 
     // Geometry, skins, and animations have copied all binary data into the
     // scene's own arrays. Holding the source buffers while the renderer builds

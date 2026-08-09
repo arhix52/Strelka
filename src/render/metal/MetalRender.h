@@ -35,6 +35,11 @@ public:
     }
     Buffer* getReadyBuffer() override;
     void* getReadyTexture() override;
+
+    bool isBuildingScene() const override
+    {
+        return mBuildStage != BuildStage::Done;
+    }
     void resetTemporalHistory() override
     {
         mResetDenoiseHistory = true;
@@ -428,6 +433,33 @@ private:
     void flushAccelerationStructureGroup();
     MTL::AccelerationStructure* createAccelerationStructureNoCompact(MTL::AccelerationStructureDescriptor* descriptor);
     void createAccelerationStructures();
+
+    // --- Deferred scene build -------------------------------------------------
+    //
+    // Building a scene's GPU resources takes 3.3 s on the pine forest, and it
+    // used to happen inside the first render() call -- 3.3 s in which the editor
+    // could not draw, could not say what it was doing, and could not be closed.
+    //
+    // It now runs one stage per render() call. The loop gets control back between
+    // them, so the window stays alive and the progress bar moves; the frame that
+    // finishes the last stage goes on to render normally. The stages are listed
+    // in the order they must run: materials index into the buffers, and the
+    // acceleration structures reference both.
+    enum class BuildStage : uint32_t
+    {
+        Buffers = 0,
+        Materials,
+        Structures,
+        Tail, ///< accumulation buffer, skinning, environment
+        Done,
+    };
+    BuildStage mBuildStage = BuildStage::Done;
+    /// Runs the current stage and moves to the next. Returns true once the whole
+    /// build is finished, which is when the caller may go on to render.
+    bool stepSceneBuild(Buffer* output);
+    /// Drive the build to completion in one call, for callers that want the frame
+    /// rather than a responsive window -- renderSync, i.e. the CLI.
+    void finishSceneBuild(Buffer* output);
 
     // Animation / skinning
     void buildSkinningPipeline();

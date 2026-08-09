@@ -33,9 +33,17 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     m_render->setScene(m_scene.get());
     m_render->setSettingsManager(m_settingsManager.get());
     m_render->setSharedContext(m_sharedCtx.get());
+    m_render->setLoadProgress(&m_loadProgress);
+    m_sceneLoader->setProgress(&m_loadProgress);
 
-    prepare();
-
+    // Window first, scene second.
+    //
+    // The scene used to be parsed here, before the window existed, so the five
+    // seconds a large scene takes were five seconds of an application that had
+    // not drawn anything and could not be closed. Render::init() is only the
+    // device and the pipelines -- some twenty milliseconds -- so there is nothing
+    // stopping the window from coming up first and the scene arriving into it.
+    loadSettings();
     m_render->init();
 #ifdef __APPLE__
     m_display->setNativeDevice(m_render->getNativeDevicePtr());
@@ -44,6 +52,61 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     m_display->init(1024, 768, m_settingsManager.get());
     m_display->setRender(m_render.get());
     m_display->setResizeHandler(this);
+
+    // A camera has to exist before a scene does: the main loop reads
+    // getCamera(m_selectedCamera) on every iteration, including the ones that
+    // draw nothing but the progress bar. It is replaced with one framed to the
+    // scene's bounds when the load lands.
+    oka::Camera camera;
+    camera.name = "Main";
+    camera.fov = 45.0f;
+    camera.position = glm::float3(0.0f, 0.0f, 5.0f);
+    camera.mOrientation = glm::quat(glm::vec3(0, 0, 0));
+    camera.updateViewMatrix();
+    m_scene->addCamera(camera);
+    m_selectedCamera = 0;
+    setCameraDetached(false);
+    m_cameraController = std::make_unique<CameraController>(m_scene->getCamera(m_selectedCamera), true);
+    m_display->setInputHandler(m_cameraController.get());
+
+    beginSceneLoad(m_sceneFile, m_resourceSearchPath);
+}
+
+EditorApp::~EditorApp()
+{
+    if (m_isLoading && m_loadingFuture.valid())
+    {
+        m_loadProgress.cancel();
+        m_loadingFuture.wait();
+    }
+}
+
+void EditorApp::beginSceneLoad(const std::string& sceneFile, const std::string& resourceSearchPath)
+{
+    m_settingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
+    m_pendingResourcePath = resourceSearchPath;
+    m_sceneFile = sceneFile;
+    m_loadProgress.reset();
+
+    // The loader is captured raw because it outlives every load: ~EditorApp
+    // cancels and joins before any member is destroyed.
+    auto loader = m_sceneLoader.get();
+    m_loadingFuture = std::async(std::launch::async, [loader, sceneFile]() -> std::unique_ptr<Scene> {
+        auto scene = std::make_unique<Scene>();
+        if (loader->loadGltf(sceneFile, *scene))
+        {
+            return scene;
+        }
+        // Cancelled or malformed. Either way the partial scene is destroyed here,
+        // on the worker, rather than handed to a main thread that would have to
+        // know which of the two happened.
+        return nullptr;
+    });
+    m_isLoading = true;
+    clearSelection();
+    m_documentDirty = false;
+    m_undoStack.clear();
+    m_redoStack.clear();
 }
 
 void EditorApp::framebufferResize(int newWidth, int newHeight)
@@ -135,44 +198,28 @@ void EditorApp::applyAutoExposure(oka::Buffer* buf)
                  mean, factor);
 }
 
-void EditorApp::prepare()
+// Exposure comes from the scene when the scene says, and is measured from the
+// first frame when it does not.
+//
+// Has to run after loadSettings(), which writes the photographic defaults
+// unconditionally and would otherwise put them back over whatever the scene
+// asked for -- that ordering is why the pine forest opened black.
+//
+// A glTF camera carries a projection and nothing else, so a file cannot state
+// how bright it is meant to look. Those defaults are a real daylight setting --
+// ISO 100, f/4, 1/100 s -- and against a scene authored in normalised units,
+// which is most of them, they land about 1600x under: the pine forest arrives
+// with two suns at irradiance 5 and 1 and an environment at intensity 1, and
+// renders as black. That reads as a broken renderer.
+void EditorApp::applySceneExposure()
 {
-    m_sceneLoader->loadGltf(m_sceneFile, *m_scene);
-
-    // Add a free-fly "Main" camera as the last entry
-    oka::Camera camera;
-    camera.name = "Main";
-    camera.fov = 45.0f;
-    camera.position = computeSceneFitPosition(camera.fov);
-    camera.mOrientation = glm::quat(glm::vec3(0, 0, 0));
-    camera.updateViewMatrix();
-    m_scene->addCamera(camera);
-
-    // Select first GLTF camera (index 0) by default
-    m_selectedCamera = 0;
-    setCameraDetached(false);
-
-    m_cameraController = std::make_unique<CameraController>(m_scene->getCamera(m_selectedCamera), true);
-    m_display->setInputHandler(m_cameraController.get());
-    loadSettings();
-
-    // Exposure comes from the scene when the scene says, and is measured from the
-    // first frame when it does not. This has to run *after* loadSettings(), which
-    // writes the photographic defaults unconditionally and would otherwise put
-    // them back over whatever the scene asked for.
-    //
-    // A glTF camera carries a projection and nothing else, so a file cannot state
-    // how bright it is meant to look. Those defaults are a real daylight setting
-    // -- ISO 100, f/4, 1/100 s -- and against a scene authored in normalised
-    // units, which is most of them, they land about 1600x under: the pine forest
-    // arrives with two suns at irradiance 5 and 1 and an environment at intensity
-    // 1, and renders as black. That reads as a broken renderer.
     if (const auto& exposure = m_scene->getExposure(); exposure.has_value())
     {
         m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", exposure->filmIso);
         m_settingsManager->setAs<float>("render/post/tonemapper/fStop", exposure->fStop);
         m_settingsManager->setAs<float>("render/post/tonemapper/shutterSpeed", exposure->shutterSpeed);
         m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", exposure->cm2Factor);
+        m_autoExposurePending = false;
         STRELKA_INFO("Exposure from scene: ISO {:.0f}, f/{:.1f}, 1/{:.0f} s, x{:.2f}", exposure->filmIso,
                      exposure->fStop, exposure->shutterSpeed, exposure->cm2Factor);
     }
@@ -382,6 +429,7 @@ void EditorApp::checkLoadingComplete()
     m_render->setSettingsManager(m_settingsManager.get());
     m_render->setSharedContext(m_sharedCtx.get());
     m_render->setScene(m_scene.get());
+    m_render->setLoadProgress(&m_loadProgress);
     m_render->init();
     // The display keeps a raw Render* to wait on that render's frame event, and
     // the assignment above destroyed the one it was given at construction. Left
@@ -391,6 +439,12 @@ void EditorApp::checkLoadingComplete()
     m_cameraController->setCamera(m_scene->getCamera(m_selectedCamera));
     m_render->resetTemporalHistory(); // new scene, new everything
     m_display->setInputHandler(m_cameraController.get());
+
+    // Every scene brings its own exposure, so this belongs here rather than in
+    // startup: before, a scene opened through File -> Open kept the previous
+    // one's exposure and there was no way to tell from the picture whether that
+    // was the scene's intent.
+    applySceneExposure();
 }
 
 // GPU timing harness (STRELKA_BENCH=<frames>).
@@ -2965,7 +3019,16 @@ void EditorApp::run()
         // GPU still executes submissions roughly in arrival order — submitting a
         // multi-second path-trace batch first would push the compositor's work
         // behind it and stall nextDrawable() on the following frame.
-        m_render->triggerRenderIfIdle();
+        //
+        // Skipped while a scene is being parsed: the renderer still points at the
+        // outgoing scene, or at the empty one the window came up with. It is
+        // deliberately *not* skipped while the GPU build runs -- that build
+        // advances one stage per call to this, and gating it here would stop it
+        // before it started.
+        if (!m_isLoading)
+        {
+            m_render->triggerRenderIfIdle();
+        }
 
         // Window titles go through AppKit; refreshing at vsync is pure overhead
         // and the numbers are unreadable at 60+ Hz anyway.
@@ -3320,25 +3383,10 @@ void EditorApp::drawUI()
     {
         if (ImGuiFileDialog::Instance()->IsOk())
         {
-            std::string sceneFile = ImGuiFileDialog::Instance()->GetFilePathName();
-            std::string resourceSearchPath = ImGuiFileDialog::Instance()->GetCurrentPath();
+            const std::string sceneFile = ImGuiFileDialog::Instance()->GetFilePathName();
+            const std::string resourceSearchPath = ImGuiFileDialog::Instance()->GetCurrentPath();
             STRELKA_DEBUG("Resource search path {}", resourceSearchPath);
-            m_settingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
-            m_pendingResourcePath = resourceSearchPath;
-            m_sceneFile = sceneFile;
-
-            auto loader = m_sceneLoader.get();
-            m_loadingFuture = std::async(std::launch::async, [loader, sceneFile]() -> std::unique_ptr<Scene> {
-                auto scene = std::make_unique<Scene>();
-                if (loader->loadGltf(sceneFile, *scene))
-                    return scene;
-                return nullptr;
-            });
-            m_isLoading = true;
-            clearSelection();
-            m_documentDirty = false;
-            m_undoStack.clear();
-            m_redoStack.clear();
+            beginSceneLoad(sceneFile, resourceSearchPath);
         }
         ImGuiFileDialog::Instance()->Close();
     }
@@ -3366,12 +3414,7 @@ void EditorApp::drawUI()
         ImGuiFileDialog::Instance()->Close();
     }
 
-    if (m_isLoading)
-    {
-        ImGui::Begin("##Loading", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize);
-        ImGui::Text("Loading scene...");
-        ImGui::End();
-    }
+    drawLoadingOverlay();
 
     // --- Panel draw calls (implementations in panels/*.cpp) ---
     drawViewportPanel();

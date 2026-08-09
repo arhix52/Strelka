@@ -797,6 +797,9 @@ void MetalRender::init()
     }
     buildTonemapperPipeline();
     buildWavefrontPipelines();
+    // Arm the deferred scene build. The first render() call picks it up a stage
+    // at a time; a synchronous caller drives it to the end through renderSync.
+    mBuildStage = BuildStage::Buffers;
 }
 
 namespace
@@ -2164,43 +2167,16 @@ void MetalRender::render(Buffer* output)
 
     if (ctx.mFrameNumber == 0)
     {
-        // New scene: nothing from before relates to it.
-        mResetDenoiseHistory = true;
-        mHasPrevCamera = false;
-        mHasPrevFramePose = false;
-        mShutterIntervalActive = false;
-        buildBuffers();
-        createMetalMaterials();
-        // Nothing is playing yet, so start static; the per-frame check below
-        // switches to motion structures if playback begins.
-        mBuildMotionBlas = false;
-        createAccelerationStructures();
-        // create accum buffer, we don't need cpu access, make it device only
-        mAccumulationBuffer = mDevice->newBuffer(
-            output->width() * output->height() * output->getElementSize(), MTL::ResourceStorageModePrivate);
-
-        // Initialize skinning pipeline if scene has skeletal data
-        if (!mScene->getVerticesSkinData().empty())
+        if (!stepSceneBuild(output))
         {
-            buildSkinningPipeline();
-            createSkinDataBuffer();
-            allocJointMatrices();
+            // Nothing to trace yet. The busy flag has to come off here: it is set
+            // by triggerRenderIfIdle before every call, and a build stage that
+            // returns without submitting anything leaves no completion handler to
+            // clear it, so the build would stall one stage in.
+            mRenderBusy.store(false, std::memory_order_release);
+            pPool->release();
+            return;
         }
-
-        // Load environment map if specified
-        const auto& envLight = mScene->getEnvLight();
-        if (envLight.has_value() && !envLight->texturePath.empty())
-        {
-            const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");
-            const fs::path envTexPath = fs::path(resourcePathStr) / envLight->texturePath;
-            loadEnvMap(envTexPath.string());
-            if (!envLight->backgroundTexturePath.empty())
-            {
-                loadEnvBackground((fs::path(resourcePathStr) / envLight->backgroundTexturePath).string());
-            }
-        }
-        // Fresh scene: drop any pending edit bits from load-time createLight.
-        mScene->consumeChanges();
     }
     else
     {
@@ -3382,6 +3358,9 @@ void MetalRender::renderSync(Buffer* output)
     mSyncMode = true;
     mLastCommandBuffer = nullptr;
     mMetal4FrameValue = 0;
+    // A synchronous caller wants the frame, not a responsive window, so the
+    // build runs to completion here rather than one stage per call.
+    finishSceneBuild(output);
     const auto tEncode = std::chrono::steady_clock::now();
     render(output);
     const auto tSubmitted = std::chrono::steady_clock::now();
@@ -4443,6 +4422,114 @@ void MetalRender::rebuildAccelerationStructures()
     STRELKA_INFO("Acceleration structures rebuilt for motion={} in {:.1f} ms", mBuildMotionBlas,
                  std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - rebuildStart)
                      .count());
+}
+
+// One stage of the scene build per call; see BuildStage in the header for why it
+// is split at all. The stages are ordered by dependency, not by cost: materials
+// index into the buffers and the acceleration structures reference both.
+bool MetalRender::stepSceneBuild(Buffer* output)
+{
+    NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
+    const auto started = std::chrono::steady_clock::now();
+    const BuildStage ran = mBuildStage;
+
+    switch (mBuildStage)
+    {
+    case BuildStage::Buffers:
+        // New scene: nothing from before relates to it.
+        mResetDenoiseHistory = true;
+        mHasPrevCamera = false;
+        mHasPrevFramePose = false;
+        mShutterIntervalActive = false;
+        if (mLoadProgress)
+        {
+            mLoadProgress->beginStage(LoadProgress::Stage::Geometry);
+        }
+        buildBuffers();
+        mBuildStage = BuildStage::Materials;
+        break;
+
+    case BuildStage::Materials:
+        if (mLoadProgress)
+        {
+            mLoadProgress->beginStage(LoadProgress::Stage::Textures);
+        }
+        createMetalMaterials();
+        mBuildStage = BuildStage::Structures;
+        break;
+
+    case BuildStage::Structures:
+        if (mLoadProgress)
+        {
+            mLoadProgress->beginStage(LoadProgress::Stage::Structures);
+        }
+        // Nothing is playing yet, so start static; the per-frame check in render()
+        // switches to motion structures if playback begins.
+        mBuildMotionBlas = false;
+        createAccelerationStructures();
+        mBuildStage = BuildStage::Tail;
+        break;
+
+    case BuildStage::Tail:
+    {
+        if (mLoadProgress)
+        {
+            mLoadProgress->beginStage(LoadProgress::Stage::Environment);
+        }
+        // create accum buffer, we don't need cpu access, make it device only
+        mAccumulationBuffer = mDevice->newBuffer(
+            output->width() * output->height() * output->getElementSize(), MTL::ResourceStorageModePrivate);
+
+        // Initialize skinning pipeline if scene has skeletal data
+        if (!mScene->getVerticesSkinData().empty())
+        {
+            buildSkinningPipeline();
+            createSkinDataBuffer();
+            allocJointMatrices();
+        }
+
+        // Load environment map if specified
+        const auto& envLight = mScene->getEnvLight();
+        if (envLight.has_value() && !envLight->texturePath.empty())
+        {
+            const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");
+            const fs::path envTexPath = fs::path(resourcePathStr) / envLight->texturePath;
+            loadEnvMap(envTexPath.string());
+            if (!envLight->backgroundTexturePath.empty())
+            {
+                loadEnvBackground((fs::path(resourcePathStr) / envLight->backgroundTexturePath).string());
+            }
+        }
+        // Fresh scene: drop any pending edit bits from load-time createLight.
+        mScene->consumeChanges();
+        if (mLoadProgress)
+        {
+            mLoadProgress->beginStage(LoadProgress::Stage::Done);
+        }
+        mBuildStage = BuildStage::Done;
+        break;
+    }
+
+    case BuildStage::Done:
+        break;
+    }
+
+    if (ran != BuildStage::Done)
+    {
+        static const char* kStageNames[] = { "buffers", "materials", "structures", "tail" };
+        STRELKA_DEBUG("Scene build stage '{}' took {:.0f} ms", kStageNames[(uint32_t)ran],
+                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
+    }
+    pPool->release();
+    return mBuildStage == BuildStage::Done;
+}
+
+void MetalRender::finishSceneBuild(Buffer* output)
+{
+    while (mBuildStage != BuildStage::Done)
+    {
+        stepSceneBuild(output);
+    }
 }
 
 void MetalRender::createAccelerationStructures()
