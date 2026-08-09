@@ -183,10 +183,71 @@ derived rather than fitted.
 
 `tools/iso_bathroom/vray2strelka.py`'s `bake_color_correction` implements
 brightness, contrast, the advanced lightness curve and the hue tint, but not
-`adv_base`. The wood materials set it to 2.0, and without it the contrast of 2.4
-pivots around 0.5 and crushes the dark end to black — which is what makes the
-window frame read as too dark and too contrasty against the reference.
+`adv_base`. It is the largest material difference left against the reference:
+the window frame, the sill, the stool and the vanity all read too dark and too
+contrasty, and the shower's pastel checkerboard comes out saturated maroon and
+olive where the reference is cream and pale green.
 
-V-Ray's formula for the advanced lightness mode is not documented anywhere this
-conversion could check, and fitting one by eye would be a guess wearing the
-clothes of a conversion.
+The two materials that set it, read out of the blend:
+
+| Material | `lightness_mode` | `adv_base` | `adv_contrast` | `adv_brightness` | `adv_offset` |
+|---|---|---|---|---|---|
+| `Wood_Light_Mtl` | 1 | 2.0 | 2.4 | 1.5 | -0.20 |
+| `Pot_02_Ceramic_Mtl` | 1 | 5.0 | 1.0 | 1.3 | -0.15 |
+
+What that second row rules out, and it is the useful part: **`adv_base` is not
+only a pivot for the contrast.** The pot sets contrast to exactly 1.0, where a
+pivot cannot do anything at all, and still authors a base of 5.0. So the term
+enters somewhere the contrast does not reach.
+
+It also rules out the two readings that are easiest to reach for. A plain
+multiplier gives the pot `5 * in * 1.3 - 0.15`, which is past 1.0 for anything
+above 0.18 and would render it flat white; a plain divisor gives
+`in / 5 * 1.3 - 0.15`, which is negative below 0.58 and would render it black.
+The pot is neither. Whatever `adv_base` is, it roughly preserves mid grey at 5.0
+while doing nothing visible at 1.0 — which is the shape of a base for a
+logarithm or a gamma, not of a gain.
+
+Still not fitted. The constraint above narrows the search rather than closing
+it, and a curve fitted to two materials by eye is a guess wearing the clothes of
+a conversion.
+
+---
+
+## 6. The room is darker than the reference and the backdrop is brighter
+
+Not exposure: an exposure error scales the whole frame, and this moves the two
+halves of it in opposite directions. Mean luminance over patches of the 1024²
+render against the same patches of the reference:
+
+| Patch | Reference | Strelka | |
+|---|---|---|---|
+| backdrop, outside the room | 0.703 | 0.764 | +9% |
+| outer wall | 0.418 | 0.398 | -5% |
+| interior white wall | 0.674 | 0.630 | -6% |
+| floor tile | 0.846 | 0.725 | -14% |
+| tiled wall | 0.773 | 0.648 | -16% |
+| tub rim | 0.676 | 0.525 | -22% |
+
+The backdrop is lit by the dome light alone and everything else is lit through a
+window and by two rect lights plus whatever bounces. So the shape of it is that
+the environment carries too much of the frame and the room's own light too
+little, or that too much is lost per bounce inside a closed room.
+
+Ruled out: indirect clamping (`--clamp 8` against none moves the floor tile by
+1.5% and nothing else by more than that) and path depth (16 against 32 is
+identical to four decimal places). Entry 5 accounts for part of the tiles and
+none of the plaster.
+
+Worth checking next, in this order: the sidecar's radiance conversion for the two
+rect lights against V-Ray's `intensity` units, the dome light's 0.3 multiplier,
+and whether the room's white plaster is being converted with an albedo low enough
+to cost this much over the several bounces an enclosed room needs.
+
+A note on what this is *not*: the lamp globe above the mirror reads as a dull
+grey ball here and a bright white one in the reference, which looks like a
+missing light and is not. The blend has exactly four emitters -- a dome, two
+`VRayRectLight`s and one mesh light on `Light_Plane` -- and all four are
+exported. `Lamp_Bulb` is `Glass_Clear_Mtl`, `Lamp_Plafond` is a plain diffuse
+shade, and neither emits in V-Ray either. The globe is dim here for the same
+reason the rest of the room is.
