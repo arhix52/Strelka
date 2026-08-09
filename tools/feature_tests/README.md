@@ -66,19 +66,74 @@ fixing, but it is not a shading bug.
 | Scene | Tests | Expected today |
 |---|---|---|
 | `00_calibration` | light units + exposure | 0.021 / 1.010 |
-| `01_srgb_texture` | sRGB decode of base colour | 0.028 / 0.998 |
-| `02_basecolor` | untextured albedo | 0.023 / 1.003 |
+| `01_srgb_texture` | sRGB decode of base colour | 0.026 / 1.004 |
+| `02_basecolor` | untextured albedo | 0.022 / 1.003 |
 | `03_roughness` | dielectric roughness ramp | 0.024 / 1.015 |
-| `04_metal` | conductor roughness ramp | 0.056 / 0.986 |
-| `05_anisotropy` | `KHR_materials_anisotropy` | 0.063 / 1.006 |
-| `06_normalmap` | normal map + tangents | 0.072 / 1.060 |
-| `07_alpha_clip` | `alphaMode: MASK` | 0.022 / 1.015 |
-| `08_alpha_blend` | `alphaMode: BLEND` | 0.051 / 1.044 |
+| `04_metal` | conductor roughness ramp | 0.055 / 0.986 |
+| `05_anisotropy` | `KHR_materials_anisotropy` | 0.061 / 1.007 |
+| `06_normalmap` | normal map + tangents | 0.071 / 1.061 |
+| `07_alpha_clip` | `alphaMode: MASK` | 0.025 / 1.018 |
+| `08_alpha_blend` | `alphaMode: BLEND` | 0.024 / 1.016 |
 | `09_glass_ior` | `KHR_materials_ior` / `_transmission` | 0.059 / 1.012 |
 | `10_glass_absorption` | `KHR_materials_volume` | 0.038 / 1.012 |
 | `11_emission` | `KHR_materials_emissive_strength` | 0.017 / 1.004 |
-| `12_lights_punctual` | point / spot / sun via KHR | 0.032 / 1.006 |
-| `13_uv2_vcol` | `TEXCOORD_1`, `COLOR_0` | 0.024 / 1.008 |
+| `12_lights_punctual` | point / spot / sun via KHR | 0.031 / 1.002 |
+| `13_uv2_vcol` | `TEXCOORD_1`, `COLOR_0` | 0.024 / 1.010 |
+| `14_sheen` | `KHR_materials_sheen` roughness ramp | 0.053 / 1.016 |
+| `15_clearcoat` | `KHR_materials_clearcoat` + IOR ramp | 0.038 / 0.995 |
+| `16_iridescence` | `KHR_materials_iridescence` thickness ramp | 0.023 / 1.010 |
+| `17_coated_glass` | transmission + clearcoat together | 0.067 / 0.994 |
+| `18_bounded_volume` | `STRELKA_materials_medium` | **0.899 / 1.899 — known FAIL** |
+
+`18_bounded_volume` fails on purpose and is left failing.
+
+Shadow rays do not attenuate through a bounded medium: they are traced with
+`RAY_MASK_SHADOW`, which is the geometry bits alone, and the medium's boundary is
+on its own bit so that a fog gizmo does not black out everything it encloses. The
+consequence is exactly what the comparison image shows -- Cycles' box is dark at
+the bottom and light at the top because the volume shadows itself, and casts a
+shadow on the floor; Strelka's is uniformly bright and casts none. That is the
+whole 1.9x.
+
+Closing it needs the shadow ray to know where it leaves the medium, which is a
+second traversal against `GEOMETRY_MASK_MEDIUM` -- the cost this feature was
+explicitly scoped to avoid. The row stays in the ladder as the thing that will
+flip to CLOSE when that lands, and until then it is a measurement of one known
+approximation rather than an unexplained failure.
+
+`17_coated_glass` is a regression guard rather than a feature test. Transmission
+and a clearcoat on the same material is the one configuration that hid a
+double-count: the separate specular lobe's selection weight is zeroed for a
+transmissive material, because the transmission lobe runs its own Fresnel, while
+its BRDF was still summed into `f_total`. With no other reflection lobe
+selectable the specular term is never evaluated, which is why plain glass never
+showed it -- add a coat and it rides along, divided by a pdf that does not
+include it. It shipped as soap bubbles that glowed instead of being transparent.
+
+Two more rows need reading with their per-sphere behaviour in hand, because the
+whole-frame `ratio` hides what they are actually saying:
+
+- **`14_sheen` is not an agreement check.** Cycles' Principled uses Zeltner et
+  al.'s microflake sheen; Strelka implements Charlie with Ashikhmin visibility,
+  because that is what the extension is specified against. Across the roughness
+  ramp ours runs +25% at roughness 0.05 and −20% at roughness 1.0, crossing over
+  around 0.6 — so the aggregate ratio of 1.016 is two errors cancelling, not two
+  renderers agreeing. Treat the row as a regression guard: if it moves, something
+  on our side changed.
+- **`15_clearcoat` is an agreement check**, and it finds a real approximation.
+  The IOR 1.0 sphere — where the coat's F0 is zero and the layer has to vanish —
+  matches at 1.003, so the layering itself is right. From there the ratio falls
+  to 0.94 by IOR 2.2: our coat takes energy out of the base for the way in and
+  the way out, and never gives back what bounces between the coat's underside and
+  the base. Cycles models that inter-reflection. The missing term is worth about
+  6% at the strongest coat in the ramp.
+
+Re-recorded after the sheen, subsurface, clearcoat-IOR, specular-colour,
+thin-walled and iridescence work. Every row is at or better than the numbers it
+replaces; `08_alpha_blend` moved the most, from 0.051 / 1.044, and that is *not*
+attributed to any of it -- 32 commits touched shading between the original
+recording and this one, two of which ("shadow rays take any hit" and "tabulate
+256 Sobol dimensions") are the obvious candidates.
 
 The right-hand column is `rel / ratio` as measured, not a prediction. Every scene
 is CLOSE or OK. Read them against the noise floor, which is what two runs of the
@@ -122,7 +177,23 @@ the 4.2+ exporter infers them from the node graph:
 
 ## Not covered
 
-Curves/hair, displacement, subsurface, sheen, shape keys and Sun & Sky are all
-absent — either glTF cannot carry them or Strelka cannot render them, so a
-comparison would only restate what is already known. Add them as those features
-land.
+Curves/hair, displacement, shape keys and Sun & Sky are absent — either glTF
+cannot carry them or Strelka cannot render them, so a comparison would only
+restate what is already known.
+
+Sheen, clearcoat, iridescence and bounded volumetrics are on the ladder as of
+scenes 14 to 18. Subsurface
+scattering, thin-film iridescence and bounded volumetrics are not, and are
+covered only by unit tests in `tests/material/`, which pin the properties those
+features exist for and the energy they are allowed to carry — a different
+question from whether they agree with another renderer.
+
+Subsurface is the one still missing, and the awkward one to add: Cycles' random
+walk derives its scattering albedo from a diffuse colour through a fit, and
+Strelka's extension carries the single-scattering albedo directly, so a scene
+would have to invert that fit before the two could be compared at all.
+
+Volume *emission* is not compared either, in the row that exists. Cycles adds it
+with its own coefficient and Strelka adds it per free-flight event; the two
+conventions do not line up, and `18_bounded_volume` sets emission to zero rather
+than measure the mismatch as though it were an error.

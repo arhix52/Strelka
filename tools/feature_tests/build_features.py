@@ -169,6 +169,13 @@ ALIASES = {
     "anisotropic":       ["Anisotropic"],
     "coat":              ["Coat Weight", "Clearcoat"],
     "coat_roughness":    ["Coat Roughness", "Clearcoat Roughness"],
+    "coat_ior":          ["Coat IOR"],
+    "sheen":             ["Sheen Weight", "Sheen"],
+    "sheen_roughness":   ["Sheen Roughness"],
+    "sheen_tint":        ["Sheen Tint"],
+    "film_thickness":    ["Thin Film Thickness"],
+    "film_ior":          ["Thin Film IOR"],
+    "thin_wall":         ["Thin Wall"],
 }
 
 MISSING_SOCKETS = set()
@@ -665,6 +672,213 @@ def s13_uv2_vcol(tex):
     obj.data.materials.append(mat2)
 
 
+def s14_sheen(tex):
+    """Sheen roughness ramp on a dark base.
+
+    Read this row differently from the others. Cycles' Principled uses Zeltner et
+    al.'s microflake sheen; Strelka implements the Charlie distribution with
+    Ashikhmin visibility, because that is what KHR_materials_sheen is specified
+    against. The two are different models of the same phenomenon, so this row
+    measures how far apart they are, not whether one of them is wrong -- which
+    makes it a regression guard on our side and not an agreement check.
+
+    Dark base and full sheen weight on purpose: with a lit base underneath, most
+    of what the comparison sees is the base agreeing with itself.
+    """
+    add_stage()
+    n = 7
+    for i, pos in enumerate(row_positions(n)):
+        r = i / (n - 1)
+        obj = sphere("S%d" % i, pos)
+        obj.data.materials.append(
+            new_material("sheen%d" % i, base_color=(0.04, 0.04, 0.05, 1.0),
+                         roughness=0.6, metallic=0.0, specular=0.1,
+                         sheen=1.0, sheen_roughness=max(0.05, r),
+                         sheen_tint=(1.0, 1.0, 1.0, 1.0)))
+
+
+def s15_clearcoat(tex):
+    """Coat IOR ramp at full coat weight.
+
+    Cycles' Coat is a layered dielectric with its own IOR that darkens what is
+    under it, which is the same model Strelka implements, so unlike the sheen row
+    this one is a real agreement check.
+
+    The ramp starts at IOR 1.0, where the coat's F0 is exactly zero and the layer
+    has to vanish. That end is the control: if the first sphere differs, the
+    disagreement is in the layering rather than in the Fresnel.
+    """
+    add_stage()
+    n = 7
+    for i, pos in enumerate(row_positions(n)):
+        ior = 1.0 + 1.2 * (i / (n - 1))
+        obj = sphere("C%d" % i, pos)
+        obj.data.materials.append(
+            new_material("coat%d" % i, base_color=(0.55, 0.18, 0.16, 1.0),
+                         roughness=0.35, metallic=0.0,
+                         coat=1.0, coat_roughness=0.08, coat_ior=ior))
+
+
+def s16_iridescence(tex):
+    """Thin-film thickness ramp on a smooth dielectric.
+
+    Isolated on purpose: no coat, no transmission, so what varies across the row
+    is the film and nothing else. Blender's Principled has carried Thin Film
+    Thickness and IOR since 4.2, and Cycles evaluates the same Airy summation
+    Strelka does, so this is a real agreement check rather than a comparison of
+    two different models.
+    """
+    add_stage()
+    n = 7
+    for i, pos in enumerate(row_positions(n)):
+        thickness = 200.0 + 600.0 * (i / (n - 1))
+        obj = sphere("F%d" % i, pos)
+        obj.data.materials.append(
+            new_material("film%d" % i, base_color=(0.02, 0.02, 0.02, 1.0),
+                         roughness=0.08, metallic=0.0,
+                         film_thickness=thickness, film_ior=1.4))
+
+
+def s17_coated_glass(tex):
+    """Transmission and a clearcoat on the same material.
+
+    This configuration, and only this configuration, hid a double-count for as
+    long as both features have existed: the separate specular lobe's *selection
+    weight* is zeroed for a transmissive material -- the transmission lobe runs
+    its own Fresnel -- while its BRDF was still summed into f_total. With no
+    other reflection lobe selectable the specular term is simply never evaluated,
+    which is why plain glass never showed it. Add a coat and the coat lobe gets
+    selected, the specular term rides along, and it is divided by a pdf that does
+    not include it.
+
+    It shipped as soap bubbles that glowed instead of being transparent.
+    """
+    add_stage()
+    n = 5
+    for i, pos in enumerate(row_positions(n)):
+        coat = i / (n - 1)
+        obj = sphere("G%d" % i, pos)
+        obj.data.materials.append(
+            new_material("coatglass%d" % i, base_color=(1.0, 1.0, 1.0, 1.0),
+                         roughness=0.05, metallic=0.0, ior=1.5,
+                         transmission=1.0, coat=coat, coat_roughness=0.03))
+
+
+def s18_bounded_volume(tex):
+    """A scattering medium bounded by a box.
+
+    Cycles' Principled Volume splits its Density into scattering and absorption
+    by Color -- so Density is the extinction and Color is the single-scattering
+    albedo, which is exactly what STRELKA_materials_medium carries and why the
+    two can be compared at all without a fit.
+
+    No emission: Cycles adds volume emission with its own coefficient and Strelka
+    adds it per free-flight event, and the two conventions do not line up. What
+    this row does test is free flight, the scattering albedo, the phase function
+    and the boundary crossing -- the bulk of the feature.
+    """
+    add_stage()
+    bpy.ops.mesh.primitive_cube_add(size=1.3, location=(0.0, 0.0, 0.75))
+    obj = bpy.context.active_object
+    obj.name = "FogBox"
+
+    mat = bpy.data.materials.new("medium")
+    mat.use_nodes = True
+    tree = mat.node_tree
+    tree.nodes.clear()
+    out = tree.nodes.new("ShaderNodeOutputMaterial")
+    vol = tree.nodes.new("ShaderNodeVolumePrincipled")
+    vol.inputs["Color"].default_value = (0.75, 0.82, 0.95, 1.0)  # single-scattering albedo
+    vol.inputs["Density"].default_value = 2.5                     # extinction, per unit
+    vol.inputs["Anisotropy"].default_value = 0.0
+    vol.inputs["Emission Strength"].default_value = 0.0
+    tree.links.new(vol.outputs["Volume"], out.inputs["Volume"])
+    obj.data.materials.append(mat)
+
+
+# KHR_materials_clearcoat has no IOR field and Blender writes no sheen extension
+# at all, so both scenes are patched after the export. Keyed by scene name; the
+# function is handed the parsed glTF document and mutates it in place.
+def patch_sheen(doc):
+    for mat in doc.get("materials", []):
+        if not mat.get("name", "").startswith("sheen"):
+            continue
+        i = int(mat["name"][len("sheen"):])
+        roughness = max(0.05, i / 6.0)
+        mat.setdefault("extensions", {})["KHR_materials_sheen"] = {
+            "sheenColorFactor": [1.0, 1.0, 1.0],
+            "sheenRoughnessFactor": roughness,
+        }
+    used = set(doc.get("extensionsUsed", []))
+    used.add("KHR_materials_sheen")
+    doc["extensionsUsed"] = sorted(used)
+
+
+def patch_clearcoat_ior(doc):
+    for mat in doc.get("materials", []):
+        if not mat.get("name", "").startswith("coat"):
+            continue
+        i = int(mat["name"][len("coat"):])
+        ext = mat.setdefault("extensions", {}).setdefault("KHR_materials_clearcoat", {})
+        # Blender writes the weight and roughness; only the IOR is ours to add.
+        ext.setdefault("clearcoatFactor", 1.0)
+        ext["clearcoatIor"] = 1.0 + 1.2 * (i / 6.0)
+    used = set(doc.get("extensionsUsed", []))
+    used.add("KHR_materials_clearcoat")
+    doc["extensionsUsed"] = sorted(used)
+
+
+def patch_iridescence(doc):
+    for mat in doc.get("materials", []):
+        if not mat.get("name", "").startswith("film"):
+            continue
+        i = int(mat["name"][len("film"):])
+        thickness = 200.0 + 600.0 * (i / 6.0)
+        mat.setdefault("extensions", {})["KHR_materials_iridescence"] = {
+            "iridescenceFactor": 1.0,
+            "iridescenceIor": 1.4,
+            # Both bounds the same: with no thickness texture the spec says to use
+            # the maximum, and a range nothing samples is a way of writing the
+            # wrong number.
+            "iridescenceThicknessMinimum": thickness,
+            "iridescenceThicknessMaximum": thickness,
+        }
+    used = set(doc.get("extensionsUsed", []))
+    used.add("KHR_materials_iridescence")
+    doc["extensionsUsed"] = sorted(used)
+
+
+def patch_bounded_volume(doc):
+    # Blender exports no volume at all, so the box arrives as an ordinary opaque
+    # cube and the medium is written here. The numbers mirror the Principled
+    # Volume node the Cycles side renders.
+    for mat in doc.get("materials", []):
+        if mat.get("name") != "medium":
+            continue
+        mat.setdefault("extensions", {})["STRELKA_materials_medium"] = {
+            "density": 2.5,
+            "scatterColor": [0.75, 0.82, 0.95],
+            "emissionColor": [0.0, 0.0, 0.0],
+            "anisotropy": 0.0,
+        }
+        # Transmissive to any viewer that does not know the extension, rather
+        # than a solid white box.
+        mat.setdefault("extensions", {})["KHR_materials_transmission"] = {
+            "transmissionFactor": 1.0
+        }
+    used = set(doc.get("extensionsUsed", []))
+    used.update(("STRELKA_materials_medium", "KHR_materials_transmission"))
+    doc["extensionsUsed"] = sorted(used)
+
+
+GLTF_PATCHERS = {
+    "14_sheen": patch_sheen,
+    "15_clearcoat": patch_clearcoat_ior,
+    "16_iridescence": patch_iridescence,
+    "18_bounded_volume": patch_bounded_volume,
+}
+
+
 SCENES = [
     ("00_calibration",      s00_calibration,   True),
     ("01_srgb_texture",     s01_srgb_texture,  True),
@@ -680,6 +894,11 @@ SCENES = [
     ("11_emission",         s11_emission,      True),
     ("12_lights_punctual",  s12_lights_punctual, False),   # no sidecar on purpose
     ("13_uv2_vcol",         s13_uv2_vcol,      True),
+    ("14_sheen",            s14_sheen,         True),
+    ("15_clearcoat",        s15_clearcoat,     True),
+    ("16_iridescence",      s16_iridescence,   True),
+    ("17_coated_glass",     s17_coated_glass,  True),
+    ("18_bounded_volume",   s18_bounded_volume, True),
 ]
 
 
@@ -852,6 +1071,14 @@ def main():
 
         gltf_path = os.path.join(scene_dir, name + ".gltf")
         export_gltf(gltf_path, export_lights=not use_sidecar)
+        patcher = GLTF_PATCHERS.get(name)
+        if patcher is not None:
+            with open(gltf_path) as f:
+                doc = json.load(f)
+            patcher(doc)
+            with open(gltf_path, "w") as f:
+                json.dump(doc, f)
+            print("  patch  : %s" % patcher.__name__)
         print("  glTF   -> %s" % os.path.relpath(gltf_path, out_root))
         manifest[name] = verify_export(gltf_path)
 
