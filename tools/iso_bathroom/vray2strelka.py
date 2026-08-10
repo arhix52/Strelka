@@ -94,7 +94,11 @@ SSS2_DEFAULTS = {
 # V-Ray's idiom for a conductor -- the scene sets no `metalness` anywhere.
 METAL_IOR_THRESHOLD = 5.0
 
-SHADER_PLUGINS = ("BRDFVRayMtl", "BRDFSSS2Complex", "BRDFLight")
+# Ordered by which one owns the material when several are present: a blend
+# holds two shader nodes and is the one the output is wired to, so picking
+# "the last one found" silently converted whichever layer happened to come
+# later in the node list and threw the other away.
+SHADER_PLUGINS = ("BRDFLayered", "BRDFVRayMtl", "BRDFSSS2Complex", "BRDFLight")
 
 
 def lum(c):
@@ -318,6 +322,33 @@ class TextureBaker:
         out[..., :3] = c
         return self._write(name, out, w, h, "sRGB")
 
+    def bake_blend(self, mask_path, value_a, value_b, name, colorspace="sRGB"):
+        """`mix(a, b, mask)` over a whole parameter map.
+
+        `value_a` / `value_b` are either a constant triple or a path to an image
+        that supplies it per texel, which is what lets a blend whose two sides
+        differ in more than a number be flattened -- one side of the drone is a
+        flat orange and the other is a decal sheet.
+        """
+        px, w, h = self._pixels(mask_path, colorspace="Non-Color")
+        m = px[..., :3].mean(axis=2, keepdims=True)
+
+        def side(v):
+            if isinstance(v, (str, Path)):
+                q, qw, qh = self._pixels(v, colorspace=colorspace)
+                if (qh, qw) != (h, w):
+                    # Nearest resample rather than a filter: this is a parameter
+                    # map, and the mask is what decides where it matters.
+                    yi = (np.arange(h) * qh // h).clip(0, qh - 1)
+                    xi = (np.arange(w) * qw // w).clip(0, qw - 1)
+                    q = q[yi][:, xi]
+                return q[..., :3]
+            return np.array(v, dtype=np.float32).reshape(1, 1, 3)
+
+        out = np.ones((h, w, 4), dtype=np.float32)
+        out[..., :3] = np.clip(side(value_a) + (side(value_b) - side(value_a)) * m, 0.0, 1.0)
+        return self._write(name, out, w, h, colorspace)
+
     def bake_mix(self, mask_path, color1, color2, name):
         """V-Ray TexMix -> a texture, with the two colours folded in.
 
@@ -419,10 +450,11 @@ class MaterialConverter:
         if mat.node_tree is None:
             return None
         shader = kind = None
+        best = len(SHADER_PLUGINS)
         for n in mat.node_tree.nodes:
-            for k in SHADER_PLUGINS:
-                if k in n.keys():
-                    shader, kind = n, k
+            for i, k in enumerate(SHADER_PLUGINS):
+                if k in n.keys() and i < best:
+                    shader, kind, best = n, k, i
         if shader is None:
             return None
         snap = {
@@ -890,12 +922,124 @@ class MaterialConverter:
 
     # -- entry point ------------------------------------------------------
 
+    def layer_params(self, snapnode):
+        """What one side of a blend resolves to, as Principled parameters.
+
+        Only what a blend can carry per texel: colour, metallic and roughness.
+        The rest -- transmission, an IOR, a coat -- cannot be mixed by a mask
+        into one standard_pbr, and none of the three blends in this scene puts
+        such a layer under one.
+        """
+        plugins = snapnode["plugins"] if snapnode else {}
+
+        cp = plugins.get("BRDFCarPaint2")
+        if isinstance(cp, dict):
+            return {
+                "color": tuple(cp.get("base_color", [0.5, 0.5, 0.5])),
+                "metallic": 0.0,
+                "roughness": gloss_to_rough(float(cp.get("coat_glossiness", 0.9))),
+                "tex": None,
+                "note": "car paint flattened to its base colour and coat gloss; "
+                        "the flake layer has no equivalent",
+            }
+
+        p = plugins.get("BRDFVRayMtl")
+        if not isinstance(p, dict):
+            return None
+        d = VRAYMTL_DEFAULTS
+        g = lambda k: self._get(p, k, d)
+        diffuse = g("diffuse")
+        reflect = g("reflect")
+        gloss = float(g("reflect_glossiness"))
+        # The same conductor test convert_vraymtl makes, for the same reason.
+        is_metal = (max(diffuse) < 0.02 and max(g("refract")) <= 0.005
+                    and (float(g("fresnel_ior")) >= METAL_IOR_THRESHOLD
+                         or int(g("fresnel")) == 0))
+        path, _ = self._bitmap_of(snapnode["inputs"].get("Diffuse Color"))
+        return {
+            "color": tuple(reflect) if is_metal else tuple(diffuse),
+            "metallic": 1.0 if is_metal else 0.0,
+            "roughness": gloss_to_rough(gloss),
+            "tex": path,
+            "note": None,
+        }
+
+    def convert_layered(self, mat, snap):
+        """V-Ray Blend Mtl -> one standard_pbr, mixed per texel.
+
+        A blend is a base material, a coat material and a mask, and with
+        `additive_mode` off it is exactly `mix(base, coat, mask)`. Strelka has a
+        fixed set of lobes rather than a stack, so this cannot be layered -- but
+        it can be *flattened*, because everything the mask varies here is a
+        parameter the glTF material already carries as a texture. Colour,
+        metallic and roughness are baked; the car grid needs all three, since its
+        base is a conductor and its coat is not.
+
+        What that loses is the thing a mask cannot express: two different lobe
+        *shapes* under one pixel. It is a good trade here and would not be under
+        a layer that refracts.
+        """
+        inputs = snap["inputs"]
+        base = self.layer_params(inputs.get("Base Material"))
+        coat = self.layer_params(inputs.get("Coat Material 1"))
+        mask_path, _ = self._bitmap_of(inputs.get("Blend Amount 1"))
+        extra = {"approx": ["V-Ray Blend Mtl flattened to one material"]}
+        for side in (base, coat):
+            if side and side["note"]:
+                extra["approx"].append(side["note"])
+
+        if base is None or coat is None or mask_path is None:
+            # Nothing to mix with: keep whichever side we understood rather than
+            # dropping the material to a default grey.
+            side = base or coat
+            if side is None:
+                return {"approx": ["V-Ray Blend Mtl: neither layer is convertible"]}
+            nt, bsdf = self._new_tree(mat)
+            self._set(bsdf, "Base Color", (*side["color"], 1.0))
+            self._set(bsdf, "Metallic", side["metallic"])
+            self._set(bsdf, "Roughness", side["roughness"])
+            extra["approx"].append("no blend mask; kept one layer")
+            return extra
+
+        safe = safe_name(mat.name)
+        nt, bsdf = self._new_tree(mat)
+        uvw = self._uvw_of(snap)
+
+        color = self.baker.bake_blend(mask_path, base["tex"] or base["color"],
+                                      coat["tex"] or coat["color"], f"{safe}_blend_col.png")
+        tex = self._tex_node(nt, color, -300, 300, uvw)
+        nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+
+        # Metallic and roughness ride their own maps only when the two sides
+        # disagree; a constant is cheaper to carry and easier to read.
+        if base["metallic"] != coat["metallic"]:
+            mt = self.baker.bake_blend(mask_path, [base["metallic"]] * 3,
+                                       [coat["metallic"]] * 3, f"{safe}_blend_met.png",
+                                       colorspace="Non-Color")
+            n = self._tex_node(nt, mt, -300, -100, uvw)
+            nt.links.new(n.outputs["Color"], bsdf.inputs["Metallic"])
+        else:
+            self._set(bsdf, "Metallic", base["metallic"])
+
+        if abs(base["roughness"] - coat["roughness"]) > 1e-3:
+            rg = self.baker.bake_blend(mask_path, [base["roughness"]] * 3,
+                                       [coat["roughness"]] * 3, f"{safe}_blend_rough.png",
+                                       colorspace="Non-Color")
+            n = self._tex_node(nt, rg, -300, -300, uvw)
+            nt.links.new(n.outputs["Color"], bsdf.inputs["Roughness"])
+        else:
+            self._set(bsdf, "Roughness", base["roughness"])
+
+        return extra
+
     def convert(self, mat):
         snap = self.snapshot(mat)
         if snap is None:
             return None  # already a native Blender material
         kind = snap["kind"]
-        if kind == "BRDFVRayMtl":
+        if kind == "BRDFLayered":
+            extra = self.convert_layered(mat, snap)
+        elif kind == "BRDFVRayMtl":
             extra = self.convert_vraymtl(mat, snap)
         elif kind == "BRDFSSS2Complex":
             extra = self.convert_sss(mat, snap)
