@@ -180,4 +180,13 @@ if(APPLE)
             ${SHADER_OUTPUT_DIR}/skinning.metallib
             ${SHADER_OUTPUT_DIR}/fullScreen.metal
     )
+
+    # Same layout as the build tree: metal/shaders next to the installed binaries.
+    install(FILES
+        ${SHADER_OUTPUT_DIR}/wavefront.metallib
+        ${SHADER_OUTPUT_DIR}/tonemapper.metallib
+        ${SHADER_OUTPUT_DIR}/skinning.metallib
+        ${SHADER_OUTPUT_DIR}/fullScreen.metal
+        DESTINATION metal/shaders
+    )
 endif()

@@ -41,3 +41,4 @@ __pycache__/
 # Editor window state.
 imgui.ini
 CLAUDE.md
+dist/

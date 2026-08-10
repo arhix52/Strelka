@@ -44,7 +44,6 @@ endforeach()
 # Build options
 option(STRELKA_BUILD_EDITOR "Build interactive editor application" ON)
 option(STRELKA_BUILD_CLI    "Build headless CLI renderer" ON)
-option(STRELKA_BUILD_HYDRA  "Build Hydra render delegate (requires OpenUSD)" OFF)
 option(STRELKA_BUILD_TESTS  "Build unit tests" ON)
 
 # Core libraries (always built)
@@ -54,8 +53,7 @@ add_subdirectory(src/material)
 add_subdirectory(src/sceneloader)
 
 # Render + Shaders require CUDA/OptiX on Linux/Win, Metal on macOS
-# Gated behind editor, CLI, or hydra since they require a render backend
-if(STRELKA_BUILD_EDITOR OR STRELKA_BUILD_CLI OR STRELKA_BUILD_HYDRA)
+if(STRELKA_BUILD_EDITOR OR STRELKA_BUILD_CLI OR STRELKA_BUILD_TESTS)
     add_subdirectory(src/render)
     add_subdirectory(src/shaders)
 endif()
@@ -71,14 +69,16 @@ if(STRELKA_BUILD_CLI)
     add_subdirectory(src/cli)
 endif()
 
-# Hydra delegate (optional, default OFF)
-if(STRELKA_BUILD_HYDRA)
-    find_package(pxr REQUIRED HINTS ${USD_DIR})
-    add_subdirectory(src/plugins/hydra)
-endif()
-
 # Tests
 if(STRELKA_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+# macOS package layout: binaries and metallibs share the install prefix root so
+# resolveResourcePath("metal/shaders/...") keeps working without path changes.
+if(APPLE)
+    include(GNUInstallDirs)
+    install(FILES "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION .)
+    install(FILES "${CMAKE_SOURCE_DIR}/README.md" DESTINATION .)
 endif()

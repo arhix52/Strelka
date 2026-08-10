@@ -1,86 +1,103 @@
 # Strelka
-Path tracing render based on NVIDIA OptiX + NVIDIA MDL and Apple Metal
-## OpenUSD Hydra render delegate
-![Kitchen Set from OpenUSD](images/Kitchen_2048i_4d_2048spp_0.png)
-## Basis curves support
-![Hairs](images/hairmat_2_light_10000i_6d_10000spp_0.png)
-![Einar](images/einar_1024i_3d_1024spp_0.png)
 
-## Project Dependencies
+GPU path tracer for macOS (Metal). Scenes are glTF/GLB; analytic lights and
+environment live in a `<stem>_light.json` sidecar, curves in `<stem>_curves.bin`.
 
-OpenUSD https://github.com/PixarAnimationStudios/OpenUSD
-See BuildOpenUSD.md in repo
+Two apps ship from a default build:
 
-* Set evn var: `USD_DIR=c:\work\USD_build`
+| Binary | Role |
+|--------|------|
+| `StrelkaEditor` | Interactive ImGui editor |
+| `StrelkaCLI` | Headless renderer (EXR/PNG, TOML config) |
 
-OptiX 
-* Set evn var: `OPTIX_DIR=C:\work\OptiX SDK 8.0.0`
+Windows/Linux still contain an OptiX/CUDA backend; it is **not** the packaged
+product path and is not covered by the macOS CI job.
 
-Download MDL sdk (for example: mdl-sdk-367100.2992): https://developer.nvidia.com/nvidia-mdl-sdk-get-started
+## Prerequisites (macOS)
 
-* unzip content to /external/mdl-sdk/
+- Xcode with the Metal toolchain (`xcrun -sdk macosx --find metal`)
+- [Conan 2](https://conan.io/), [Ninja](https://ninja-build.org/)
+- `git submodule update --init --recursive` (or use `./build.sh`, which does it)
 
-LLVM 12.0.1 (https://github.com/llvm/llvm-project/releases/tag/llvmorg-12.0.1) for MDL ptx code generator
+Two Conan packages are pinned to versions conan-center does not publish yet
+(`imgui/1.92.9b-docking`, `imguizmo/cci.20260729`). `./build.sh` exports them
+when missing; details are in [docs/local-conan-packages.md](docs/local-conan-packages.md).
 
-* for win: https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.1/LLVM-12.0.1-win64.exe
-* for linux: https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.1/clang+llvm-12.0.1-x86_64-linux-gnu-ubuntu-16.04.tar.xz
-* install it to `c:\work` for example
-* add to PATH: `c:\work\LLVM\bin`
-* extract 2 header files files from external/clang12_patched to `C:\work\LLVM\lib\clang\12.0.1\include`
+## Build
 
-Strelka uses conan https://conan.io/
+```bash
+./build.sh Release   # or: ./build.sh Debug
+```
 
-* install conan: `pip install conan` 
-* install ninja [https://ninja-build.org/] build system: `sudo apt install ninja-build`
+Binaries and runtime assets land in `build/Release/` (or `build/Debug/`):
 
-* initialize submodules `git submodule update --init --recursive`
+```text
+build/Release/
+  StrelkaEditor
+  StrelkaCLI
+  unit_tests
+  metal/shaders/*.metallib
+  default_layout.ini
+```
 
-detect conan profile: `conan profile detect --force`
+Launch from that directory (or from anywhere — assets resolve relative to the
+executable):
 
-1. `conan install . --build=missing --settings=build_type=Debug`
-2. `cd build`
-3. `cmake .. -G "Visual Studio 17 2022" -DCMAKE_TOOLCHAIN_FILE=generators\conan_toolchain.cmake`
-4. `cmake --build . --config Debug`
+```bash
+cd build/Release
+./StrelkaEditor -s ../../scenes/validation/cornell_box/cornell_box.glb
+./StrelkaCLI ../../scenes/validation/cornell_box/cornell_box.glb -o out.exr -w 512 --height 384 --spp 256
+SPDLOG_LEVEL=debug ./StrelkaCLI ...
+```
 
-On Mac/Linux:
-1. `conan install . -c tools.cmake.cmaketoolchain:generator=Ninja -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type=Debug`
-2. `cd build/Debug`
-3. `source ./generators/conanbuild.sh`
-4. `cmake ../.. -DCMAKE_TOOLCHAIN_FILE=generators/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Debug`
-5. `cmake --build .`
+`StrelkaCLI` accepts a TOML config (`-c` / `--config`); every flag overrides the
+matching key. See `RenderConfig` in `src/cli/HeadlessApp.h`.
 
-#### Installation
+## Package (macOS)
 
-#### Launch
-    
-## Synopsis 
+After a Release build:
 
-    Strelka -s <USD Scene path> [OPTION...] positional parameters
+```bash
+./scripts/package_macos.sh
+# -> dist/Strelka-macos-<arch>.zip
+```
 
-    -s, --scene arg       scene path (default: "")
-    -i, --iteration arg  Iteration to capture (default: -1)
-    -h, --help            Print usage
+Layout inside the zip (prefix root — same as the build tree for asset paths):
 
+```text
+Strelka/
+  StrelkaEditor
+  StrelkaCLI
+  metal/shaders/*.metallib
+  default_layout.ini
+  LICENSE
+  README.md
+```
 
-To set log level use
+## IDE setup (VS Code / Cursor)
 
-    `export SPDLOG_LEVEL=debug`
-    
-The available log levels are: trace, debug, info, warn, and err.
+1. Install the **clangd** extension (Microsoft C/C++ IntelliSense is disabled in
+   [`.vscode/settings.json`](.vscode/settings.json)).
+2. Run the **Full Build (Debug)** task once (`Terminal → Run Task…`). That runs
+   Conan, configures Ninja, builds, and symlinks `compile_commands.json` for clangd.
+3. Press **F5** → **Launch StrelkaEditor (Debug)**. Leave the scene path empty to
+   start with an empty document.
 
-## Example
+Useful tasks: **CMake Build (Debug/Release)**, **Run unit_tests**, **CLI smoke (Release)**.
 
-    ./Strelka -s misc/coffeemaker.usdc -i 100
+## Tests
 
-## USD
-    USD env:
-        export USD_DIR=/Users/<user>/work/usd_build/
-        export PATH=/Users/<user>/work/usd_build/bin:$PATH
-        export PYTHONPATH=/Users/<user>/work/usd_build/lib/python:$PYTHONPATH
+```bash
+cd build/Release
+ctest
+# or:
+./unit_tests
+./unit_tests -tc="<test case name>"
+```
 
-    Install plugin:
-        cmake --install . --component HdStrelka
+Image-level feature tests vs Blender Cycles live under `tools/feature_tests/`
+and are run manually — they are not part of CI (no golden images in the repo).
 
 ## License
-* USD plugin design and material translation code based on Pablo Gatling code:
-https://github.com/pablode/gatling
+
+MIT — see [LICENSE](LICENSE). Third-party trees keep their own licenses.

@@ -2,10 +2,11 @@
     // Disable Microsoft C/C++ intellisense in favor of clangd
     "C_Cpp.intelliSenseEngine": "disabled",
 
-    // clangd configuration
+    // clangd: prefer workspace-root compile_commands.json (symlinked by build.sh
+    // after a Debug configure); fall back to the Debug build dir.
     "clangd.path": "clangd",
     "clangd.arguments": [
-        "--compile-commands-dir=${workspaceFolder}/build/Debug",
+        "--compile-commands-dir=${workspaceFolder}",
         "--header-insertion=iwyu",
         "--completion-style=detailed",
         "--clang-tidy",
@@ -14,8 +15,8 @@
 
     "editor.formatOnSave": false,
 
-    // clang-format executable (used by clangd for formatting)
-    "clang-format.executable": "/usr/bin/clang-format",
+    // Resolve via PATH (Homebrew llvm on Apple Silicon is not /usr/bin).
+    "clang-format.executable": "clang-format",
 
     // Disable makefile-tools intellisense (conflicts with clangd)
     "makefile.configureOnOpen": false,

@@ -1,9 +1,79 @@
 {
     "version": "2.0.0",
+    // Build/run tasks are "process": VS Code hands the argv to the program
+    // directly instead of composing a shell line, so nothing here has to be
+    // quoted for zsh. The shell tasks below use double quotes only -- VS Code
+    // wraps each arg in single quotes, and a single quote inside the arg ends
+    // that wrapping early (zsh: "missing end of string").
     "tasks": [
         {
-            "label": "CMake Build (Debug)",
+            "label": "Full Build (Debug)",
+            "type": "process",
+            "command": "bash",
+            "args": [
+                "${workspaceFolder}/build.sh",
+                "Debug"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "detail": "First-time / full: export local Conan pkgs, conan install, configure, build (Debug), symlink compile_commands.json"
+        },
+        {
+            "label": "Full Build (Release)",
+            "type": "process",
+            "command": "bash",
+            "args": [
+                "${workspaceFolder}/build.sh",
+                "Release"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "detail": "Full: export local Conan pkgs, conan install, configure, build (Release)"
+        },
+        {
+            "label": "CMake Configure (Debug)",
             "type": "shell",
+            "command": "bash",
+            "args": [
+                "-c",
+                "./scripts/export_local_conan.sh && conan install . -c tools.cmake.cmaketoolchain:generator=Ninja -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type=Debug && cd build/Debug && source ./generators/conanbuild.sh && cmake ../.. -G Ninja -DCMAKE_TOOLCHAIN_FILE=generators/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Debug && ln -sfn \"${workspaceFolder}/build/Debug/compile_commands.json\" \"${workspaceFolder}/compile_commands.json\""
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "detail": "Conan install + CMake configure (Debug) and symlink compile_commands.json"
+        },
+        {
+            "label": "CMake Configure (Release)",
+            "type": "shell",
+            "command": "bash",
+            "args": [
+                "-c",
+                "./scripts/export_local_conan.sh && conan install . -c tools.cmake.cmaketoolchain:generator=Ninja -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type=Release && cd build/Release && source ./generators/conanbuild.sh && cmake ../.. -G Ninja -DCMAKE_TOOLCHAIN_FILE=generators/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Release"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "detail": "Conan install + CMake configure (Release)"
+        },
+        {
+            "label": "CMake Build (Debug)",
+            "type": "process",
             "command": "cmake",
             "args": [
                 "--build",
@@ -13,18 +83,15 @@
             "options": {
                 "cwd": "${workspaceFolder}/build/Debug"
             },
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
+            "group": "build",
             "problemMatcher": [
                 "$gcc"
             ],
-            "detail": "Build Strelka (Debug) using cmake"
+            "detail": "Incremental Debug build (preLaunchTask for F5). Run Full Build (Debug) once first."
         },
         {
             "label": "CMake Build (Release)",
-            "type": "shell",
+            "type": "process",
             "command": "cmake",
             "args": [
                 "--build",
@@ -38,41 +105,58 @@
             "problemMatcher": [
                 "$gcc"
             ],
-            "detail": "Build Strelka (Release) using cmake"
+            "detail": "Incremental Release build. Run Full Build (Release) once first."
         },
         {
-            "label": "Conan Install + CMake Configure (Debug)",
+            "label": "Run unit_tests (Debug)",
+            "type": "process",
+            "command": "${workspaceFolder}/build/Debug/unit_tests",
+            "options": {
+                "cwd": "${workspaceFolder}/build/Debug"
+            },
+            "problemMatcher": [],
+            "detail": "Run doctest unit_tests (Debug)"
+        },
+        {
+            "label": "Run unit_tests (Release)",
+            "type": "process",
+            "command": "${workspaceFolder}/build/Release/unit_tests",
+            "options": {
+                "cwd": "${workspaceFolder}/build/Release"
+            },
+            "problemMatcher": [],
+            "detail": "Run doctest unit_tests (Release)"
+        },
+        {
+            "label": "CLI smoke (Release)",
             "type": "shell",
             "command": "bash",
             "args": [
                 "-c",
-                "conan install . -c tools.cmake.cmaketoolchain:generator=Ninja -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type=Debug && cd build/Debug && source ./generators/conanbuild.sh && cmake ../.. -G Ninja -DCMAKE_TOOLCHAIN_FILE=generators/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Debug"
+                "./StrelkaCLI ../../scenes/validation/cornell_box/cornell_box.glb -o /tmp/strelka_smoke.png -w 64 --height 48 --spp 4 && test -s /tmp/strelka_smoke.png && echo \"CLI smoke OK\""
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/build/Release"
+            },
+            "problemMatcher": [],
+            "detail": "Same smoke as CI: cornell 64x48 spp 4, non-empty PNG"
+        },
+        {
+            "label": "Package macOS zip (Release)",
+            "type": "process",
+            "command": "bash",
+            "args": [
+                "${workspaceFolder}/scripts/package_macos.sh"
             ],
             "options": {
                 "cwd": "${workspaceFolder}"
             },
             "problemMatcher": [],
-            "detail": "Run conan install and cmake configure for Debug"
-        },
-        {
-            "label": "Full Build (Debug)",
-            "type": "shell",
-            "command": "bash",
-            "args": [
-                "${workspaceFolder}/build.sh",
-                "debug"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": [
-                "$gcc"
-            ],
-            "detail": "Full build: conan install + configure + build (Debug)"
+            "detail": "cmake --install + zip under dist/"
         },
         {
             "label": "Run Clang-Tidy",
-            "type": "shell",
+            "type": "process",
             "command": "clang-tidy",
             "args": [
                 "-system-headers=0",

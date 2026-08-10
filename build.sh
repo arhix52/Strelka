@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 if [ "$#" -ne 1 ] && [ "$#" -ne 2 ]; then
     echo "Usage: $0 <build_type> [clean]"
@@ -6,44 +7,51 @@ if [ "$#" -ne 1 ] && [ "$#" -ne 2 ]; then
 fi
 
 build_type="$1"
-clean_option="$2"
+clean_option="${2:-}"
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
 
 # Function to convert the input parameter to start with a capital letter
 ucfirst() {
     echo "$1" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}'
 }
 
-# Convert the build_type to start with a capital letter
 build_type=$(ucfirst "$build_type")
 
-# init submodules
 git submodule update --init --recursive
 
-# Step 1: Install Conan dependencies
-conan install . -c tools.cmake.cmaketoolchain:generator=Ninja -c tools.system.package_manager:mode=install -c tools.system.package_manager:sudo=True --build=missing --settings=build_type="$build_type"
+# Pins that conan-center does not publish yet (imgui Metal 4, ImGuizmo).
+./scripts/export_local_conan.sh
 
-# Step 2: Navigate to the build directory
+conan install . -c tools.cmake.cmaketoolchain:generator=Ninja \
+    -c tools.system.package_manager:mode=install \
+    -c tools.system.package_manager:sudo=True \
+    --build=missing --settings=build_type="$build_type"
+
 cd build/"$build_type"
 
-# Check if the "clean" option is specified
 if [ "$clean_option" == "clean" ]; then
-    # Clean the build directory
     cmake --build . --target clean
 fi
 
-# Step 3: Source the Conan environment variables
+# shellcheck disable=SC1091
 source ./generators/conanbuild.sh
 
-# Step 4: Run CMake with the appropriate toolchain file
-cmake ../.. -G Ninja -DCMAKE_TOOLCHAIN_FILE=generators/conan_toolchain.cmake -DCMAKE_BUILD_TYPE="$build_type"
+cmake ../.. -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE=generators/conan_toolchain.cmake \
+    -DCMAKE_BUILD_TYPE="$build_type"
 
-# Step 5: Build the project and capture the time
-start_time=$(date +%s)
 cmake --build .
-end_time=$(date +%s)
 
-# Calculate the elapsed time
-elapsed_time=$((end_time - start_time))
+# clangd / Cursor: prefer a workspace-root compile_commands.json when present.
+# Debug is the default IDE configuration; Release builds leave an existing
+# Debug symlink alone so IntelliSense stays pointed at a TU graph that matches
+# the F5 launch config.
+if [ -f compile_commands.json ]; then
+    if [ "$build_type" = "Debug" ] || [ ! -e "$ROOT/compile_commands.json" ]; then
+        ln -sfn "build/${build_type}/compile_commands.json" "$ROOT/compile_commands.json"
+    fi
+fi
 
-# Output the build time
-echo "Build completed in $elapsed_time seconds."
+echo "Build completed (${build_type})."

@@ -73,3 +73,10 @@ if(APPLE)
 else()
     target_link_libraries(StrelkaEditor PRIVATE ${EDITOR_LINK_LIBS} strelka_shaders)
 endif()
+
+if(APPLE)
+    # Prefix root (not bin/): resolveResourcePath("metal/shaders/...") is relative
+    # to the executable directory.
+    install(TARGETS StrelkaEditor RUNTIME DESTINATION .)
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/default_layout.ini DESTINATION .)
+endif()

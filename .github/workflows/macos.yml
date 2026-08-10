@@ -1,0 +1,52 @@
+name: macOS
+
+on:
+  push:
+    branches: [main, arhix/wavefront]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test-smoke:
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install tools
+        run: |
+          brew install ninja
+          python3 -m pip install --user "conan>=2,<3"
+          echo "$HOME/Library/Python/"*/bin | tr ' ' '\n' >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          which conan
+          conan --version
+
+      - name: Metal toolchain
+        run: |
+          xcrun -sdk macosx --find metal
+          xcrun -sdk macosx --find metallib
+          xcodebuild -version
+
+      - name: Conan profile
+        run: |
+          conan profile detect --force
+          conan --version
+
+      - name: Build Release
+        run: ./build.sh Release
+
+      - name: Unit tests
+        working-directory: build/Release
+        run: ./unit_tests
+
+      - name: CLI smoke (no golden images)
+        working-directory: build/Release
+        run: |
+          ./StrelkaCLI ../../scenes/validation/cornell_box/cornell_box.glb \
+            -o /tmp/strelka_smoke.png -w 64 --height 48 --spp 4
+          test -s /tmp/strelka_smoke.png

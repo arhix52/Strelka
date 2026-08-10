@@ -40,4 +40,5 @@ target_link_libraries(StrelkaCLI
 # On Apple, strelka_shaders is a custom_target (metallib compilation), not a library.
 if(APPLE)
     add_dependencies(StrelkaCLI strelka_shaders)
+    install(TARGETS StrelkaCLI RUNTIME DESTINATION .)
 endif()
