@@ -54,36 +54,50 @@ scene rarely has two of them nested at once, which is exactly why it went
 unnoticed.
 
 The other half cannot be fixed in the renderer at all: a ray leaving an open mesh
-goes out through the hole without crossing a surface, so there is no exit event
-to hang a recovery on. It has to be repaired where the geometry is, and that is
-where this stands. What is open in this scene:
+goes out through the hole without crossing a surface, so there is no exit event to
+hang a recovery on. The converter repairs what it safely can, per boundary loop:
 
-| Mesh | Boundary edges | Shape |
+| Mesh | Loops | Span, as a fraction of the object | Out of plane | Verdict |
+|---|---|---|---|---|
+| `Brush_Fibers` | 364 | 0.013 - 0.014 | 1e-5 | capped, 2912 edges |
+| `Bubbles` (foam) | 2 | 0.29, 0.41 | 7e-4 | left open |
+| `Water_Shower` | 1 | 0.56 | 2e-3 | left open |
+| `Water_Bathtub` | 1 | 1.00 | 0 | left open |
+
+A loop is capped when it is flat *and* small against the object it belongs to --
+a hole rather than a feature. The two clusters in that table are an order of
+magnitude apart, so the threshold sits in the gap rather than on a case. That
+takes 2912 of the scene's 3268 open edges, which is the largest single unbalance
+in it, and moves no patch of the frame by more than 0.003.
+
+### What refuses to be repaired, and why that is the finding
+
+Every wider rule I tried made the render worse while making the number better,
+which is worth writing down because the number is the obvious thing to optimise:
+
+| Repair | bath water R/G | Render |
 |---|---|---|
-| `Brush_Fibers` | 2912 | open-ended strips |
-| `Bubbles` (the foam) | 196 | a cluster of open shells |
-| `Water_Bathtub` | 96 | one loop, flat, at the top of a 2 mm dish |
-| `Water_Shower` | 64 | one flat loop |
+| none | 0.776 | correct |
+| holes only, as above | 0.776 | correct |
+| foam capped as well | 0.731 | green streaks across the tub |
+| foam bridged instead | 0.709 | one bright streak |
+| every flat loop capped, water included | **0.823** | a pale sheet across the tub, duck half under it |
+| reference | 0.837 | |
 
-`--close-transmissive` joins those loops and is **off by default**, because the
-repair is only sound where the loops were meant to be joined. Measured both ways:
+The last row but one is the trap. Capping the bath water is arithmetically the
+best result available and it is plainly wrong on screen, because the water is a
+2 mm dish and not a tub full of water: its one boundary loop spans the whole
+object, so a cap does not close a volume, it lays a second sheet over one.
 
-| | bath water R/G |
-|---|---|
-| left open, as shipped | 0.776 |
-| water capped, foam capped | 0.823 |
-| foam bridged, water left open | 0.709 |
-| reference | 0.837 |
+What makes the bath look full today is the defect itself. An unbalanced stack
+applies the water's absorption to every segment the path travels afterwards,
+including the inside of the tub -- so the tub reads as full of water because the
+renderer believes the ray still is. The asset has no water volume, and nothing
+here can invent one. Repair the mesh and the accident goes with it.
 
-So closing the water is right -- it takes the error down by 4.4x -- and closing
-the foam is not: bridging a cluster of open shells draws a bright streak across
-the tub, and capping the fibre strips is no better. Partial closure is worse than
-none, which is the row at 0.709.
-
-What would make it shippable is a per-mesh decision rather than a per-scene flag:
-cap a boundary loop that is planar and closes a dish, bridge a pair of loops that
-face each other, and leave anything else alone and say so. The measurement to
-aim at is already here.
+So the bath is right for the wrong reason, and will stay that way until the water
+is modelled as a volume upstream. That is a note for whoever next opens the
+.blend, not something the converter should paper over.
 
 **What is still open** is that both failures were silent. `ior_stack_push` does
 nothing when the stack is full at four entries, and `ior_stack_pop` returns

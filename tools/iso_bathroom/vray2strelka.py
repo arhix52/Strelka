@@ -946,33 +946,102 @@ def light_mtl_plane_to_rect(obj, strength, opts):
     }
 
 
+def _boundary_loops(bm):
+    """Boundary edges of `bm`, grouped into connected loops."""
+    from collections import defaultdict
+
+    boundary = [e for e in bm.edges if len(e.link_faces) == 1]
+    at_vert = defaultdict(list)
+    for e in boundary:
+        at_vert[e.verts[0]].append(e)
+        at_vert[e.verts[1]].append(e)
+    seen, loops = set(), []
+    for e in boundary:
+        if e in seen:
+            continue
+        stack, group = [e], []
+        while stack:
+            x = stack.pop()
+            if x in seen:
+                continue
+            seen.add(x)
+            group.append(x)
+            for v in x.verts:
+                stack.extend(y for y in at_vert[v] if y not in seen)
+        loops.append(group)
+    return loops
+
+
+def _loop_flatness(loop):
+    """How far a boundary loop departs from a plane, as a fraction of its size.
+
+    Principal axes of the loop's vertices: the smallest spread is the thickness
+    of the slab they lie in and the largest is how big the loop is, so the ratio
+    is scale free and does not care which way the loop is turned. Zero is a
+    perfect plane.
+    """
+    pts = np.array(sorted({tuple(v.co) for e in loop for v in e.verts}), dtype=np.float64)
+    if len(pts) < 3:
+        return 1.0
+    spread = np.linalg.svd(pts - pts.mean(axis=0), compute_uv=False)
+    return float(spread[-1] / max(spread[0], 1e-12))
+
+
+def _loop_span(loop):
+    """Largest extent of a boundary loop, in object space."""
+    pts = np.array([tuple(v.co) for e in loop for v in e.verts], dtype=np.float64)
+    return float(np.max(pts.max(axis=0) - pts.min(axis=0)))
+
+
 def close_open_transmissive():
-    """Fill the boundary loops of any mesh carrying a transmissive material.
+    """Close the boundary loops of refracting meshes, where that is sound.
 
-    A path that enters a dielectric pushes it onto the renderer's IOR stack and
-    pops it on the way out. An open mesh has no way out: the ray leaves through
-    the hole without crossing a surface, so the entry never comes off, and every
+    A path entering a dielectric pushes it onto the renderer's IOR stack and pops
+    it on the way out. An open mesh has no way out: the ray leaves through the
+    hole without crossing a surface, so the entry never comes off and every
     segment the path travels afterwards -- anywhere in the room -- is attenuated
-    as though it were still inside. Nothing in the renderer can recover from
-    that, because there is no event to hang the recovery on. It has to be fixed
-    where the geometry is.
+    as though it were still inside. There is no event for the renderer to hang a
+    recovery on, so it has to be repaired here.
 
-    Measured on this scene before the fill: the bath water is 3712 triangles
-    with 288 boundary edges, and the foam beside it 9454 with 672.
+    Per loop, not per mesh, because the two failures this scene contains want
+    opposite things. The bath water is a dish: one boundary loop, flat, and
+    spanning it is exactly the water's surface. The foam is a cluster of open
+    shells and the brush is open-ended strips; there is no surface that closing
+    them would mean, and both a fill and a bridge invent one -- a fill drew a cap
+    across the tub through the duck, a bridge drew a bright streak through the
+    foam. Rendered both, and they are unmistakable.
 
-    Bridged, not filled. These meshes are slabs -- a top surface and a bottom
-    surface with the rim between them missing -- so each has two boundary loops
-    that want joining to each other. `holes_fill` spans a loop with faces
-    instead, which on the bath water draws a flat cap straight across the tub at
-    rim height, through the duck. Rendered once, and it is unmistakable.
+    So: a flat loop is capped, and anything else is left exactly as it was and
+    reported. Half-repaired geometry is worse than open geometry, because it
+    still unbalances the stack and now also has faces the asset never had.
 
-    A mesh the bridge does not close is left exactly as it was, and said so.
-    Half-closed geometry is worse than open geometry: it still unbalances the
-    stack and now it also has faces that were not in the asset.
+    Returns (object, faces, edges before, edges after, note) per mesh touched.
     """
     import bmesh  # local: the rest of this tool does not need it
 
-    closed = []
+    # A loop this far out of plane is not a hole, it is a torn shell.
+    kFlatEnough = 1e-3
+    # And a loop this large is not a hole either: it is a feature of the shape,
+    # and spanning it does not close a volume, it adds a sheet across one.
+    #
+    # Measured on this scene, as a fraction of the object it belongs to: the
+    # brush's fibre ends run 0.013 to 0.014, the foam's two loops 0.29 and 0.41,
+    # the shower water 0.56 and the bath water 1.00. Two clusters an order of
+    # magnitude apart, so the threshold sits in the gap rather than on a case.
+    #
+    # The bath water is the case that needs this. Its one loop is flat, and
+    # capping it is arithmetically the best result in the scene -- the water's
+    # red-to-green goes 0.776 to 0.823 against the reference's 0.837 -- and the
+    # render is plainly wrong: a pale sheet across the tub with the duck half
+    # under it. The mesh is a 2 mm dish, not a tub full of water, and its loop
+    # spans the whole object. What makes the bath look full today is the very
+    # defect this function exists to remove: an unbalanced stack applies the
+    # water's absorption to everything the ray meets afterwards, including the
+    # inside of the tub. The asset has no water volume, and no repair here can
+    # invent one.
+    kHoleFraction = 0.1
+
+    report = []
     for obj in list(bpy.data.objects):
         if obj.type != "MESH" or not obj.data.polygons:
             continue
@@ -982,26 +1051,43 @@ def close_open_transmissive():
 
         bm = bmesh.new()
         bm.from_mesh(obj.data)
-        before = sum(1 for e in bm.edges if len(e.link_faces) == 1)
-        if before == 0:
+        loops = _boundary_loops(bm)
+        if not loops:
             bm.free()
             continue
-        try:
-            bmesh.ops.bridge_loops(bm, edges=[e for e in bm.edges if len(e.link_faces) == 1])
-        except Exception:
-            pass
+
+        before = sum(len(l) for l in loops)
+        span = max(obj.dimensions) or 1.0
+        flat = [l for l in loops
+                if _loop_flatness(l) <= kFlatEnough and _loop_span(l) <= kHoleFraction * span]
+        capped = 0
+        for loop in flat:
+            filled = bmesh.ops.holes_fill(bm, edges=list(loop), sides=0)
+            faces = filled.get("faces", [])
+            if faces:
+                # The fill takes its winding from whichever face it started at,
+                # and a dish's rim can be walked either way. Point them the same
+                # way as the shell they close, or the surface is inside out and
+                # every ray that meets it refracts the wrong way.
+                bmesh.ops.recalc_face_normals(bm, faces=faces)
+                capped += 1
+
         after = sum(1 for e in bm.edges if len(e.link_faces) == 1)
-        if after >= before:
-            # Nothing was joined. Put the mesh back the way it came.
+        if capped == 0:
             bm.free()
-            closed.append((obj.name, len(obj.data.polygons), before, before))
+            report.append((obj.name, len(obj.data.polygons), before, after,
+                           f"left open, {len(loops)} loop(s), none is a hole"))
             continue
+
+        note = f"capped {capped} of {len(loops)} loop(s)"
+        if after:
+            note += f", {after} edges left open"
         tris = len(bm.faces)
         bm.to_mesh(obj.data)
         bm.free()
         obj.data.update()
-        closed.append((obj.name, tris, before, after))
-    return closed
+        report.append((obj.name, tris, before, after, note))
+    return report
 
 
 def is_transmissive_material(mat):
@@ -1304,17 +1390,14 @@ def parse_args():
     ap.add_argument("--no-fog-volumes", dest="fog_volumes", action="store_false",
                     help="skip the EnvironmentFog gizmos. The bathtub one costs "
                          "more than it buys today -- see the note in main()")
-    # Off by default: an open refractive mesh unbalances the IOR stack and is a
-    # real defect, but the repair is only sound on a mesh whose boundary loops
-    # are meant to be joined. On this scene it closes the water correctly --
-    # the bath's red-to-green goes 0.776 to 0.823 against the reference's
-    # 0.837 -- and draws a bright streak through the foam, which is a cluster
-    # of open shells that were never a slab. Shipping that trade by default is
-    # not the tool's call to make. See docs/open-defects.md.
-    ap.add_argument("--close-transmissive", dest="close_transmissive",
-                    action="store_true",
-                    help="join the boundary loops of refractive meshes; sound only "
-                         "where those loops were meant to be joined")
+    # On by default now that the repair decides per loop rather than per scene:
+    # a flat rim is capped and a torn shell is left alone and reported. The
+    # per-scene version had to be opt-in because it could only do both or
+    # neither, and this asset wants one of each. See docs/open-defects.md.
+    ap.add_argument("--no-close-transmissive", dest="close_transmissive",
+                    action="store_false",
+                    help="leave refracting meshes open; an unclosed one unbalances "
+                         "the IOR stack and tints everything the path meets after it")
     ap.add_argument("--rebuild-rug", action="store_true",
                     help="replace the Rug_Round proxy preview with a generated "
                          "coiled braid (the .vrmesh it stands in for is unreadable)")
@@ -1482,11 +1565,9 @@ def main():
             print("  camera: orthographic camera dropped from the export")
 
     if opts.close_transmissive:
-        closed = close_open_transmissive()
-        for name, tris, before, after in closed:
-            print(f"  closed: {name} ({tris} tris) {before} boundary edges -> {after}")
-        if not closed:
-            print("  closed: no open transmissive meshes")
+        for name, faces, before, after, note in close_open_transmissive():
+            print(f"  mesh  : {name} ({faces} faces) {before} boundary edges -> {after}"
+                  f"  [{note}]")
 
     for obj in bpy.data.objects:
         if obj.type != "MESH":
