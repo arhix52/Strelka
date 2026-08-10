@@ -408,6 +408,39 @@ class TextureBaker:
         out[..., :3] = a + (b - a) * ramp
         return self._write(name, out, size, size, "sRGB")
 
+    def bake_height_normal(self, path, amount, name, repeat=(1.0, 1.0)):
+        """A height field on a bump socket -> a tangent-space normal map.
+
+        This is the only conversion here that was actively wrong rather than
+        merely missing. V-Ray's `bump_type` 0 means the map is a *height*, and
+        the converter wired it straight into a normal-map node, so a grey of
+        0.5 became the direction (0.5, 0.5, 0.5) rescaled to (0, 0, 0) -- no
+        direction at all -- and a white pixel became a 55 degree tilt in the
+        corner of tangent space, everywhere, regardless of the surface. Seven of
+        the nine bump maps in this scene are height fields.
+
+        The gradient is the standard one and needs no fitting. A height map
+        covers the uv range in `width` texels, so dh/du is the central difference
+        times the width, times however many times the map repeats across the
+        surface; the perturbed normal is then (-amount * dh/du, -amount * dh/dv,
+        1) normalised, and the strength on the node afterwards is 1 because the
+        amount is already in here.
+        """
+        px, w, h = self._pixels(path, "Non-Color")
+        # Luminance rather than a channel: these are greyscale maps stored as
+        # RGB, and one that is not is a mask whose brightness is its height.
+        z = (0.2126 * px[..., 0] + 0.7152 * px[..., 1] + 0.0722 * px[..., 2]).astype(np.float32)
+
+        gx = (np.roll(z, -1, 1) - np.roll(z, 1, 1)) * 0.5 * w * repeat[0] * amount
+        gy = (np.roll(z, -1, 0) - np.roll(z, 1, 0)) * 0.5 * h * repeat[1] * amount
+        nz = np.ones_like(z)
+        ln = np.sqrt(gx * gx + gy * gy + nz * nz)
+        out = np.ones((h, w, 4), dtype=np.float32)
+        out[..., 0] = (-gx / ln) * 0.5 + 0.5
+        out[..., 1] = (-gy / ln) * 0.5 + 0.5
+        out[..., 2] = (nz / ln) * 0.5 + 0.5
+        return self._write(name, out, w, h, "Non-Color")
+
     def bake_noise_normal(self, name, size=256, amount=1.0):
         """
         V-Ray TexNoiseMax driving a bump socket.  Baked to a tiling normal map
@@ -832,11 +865,27 @@ class MaterialConverter:
             bump_type = int(self._get(p, "bump_type", VRAYMTL_DEFAULTS))
             bump_amount = float(self._get(p, "bump_amount", VRAYMTL_DEFAULTS))
             img = None
+            # Whether the amount is already baked into the map, which decides
+            # what the node's strength has to be.
+            baked_amount = False
             if "BitmapBuffer" in bump["plugins"]:
                 path, _ = self._bitmap_of(bump)
-                if path is not None:
+                if path is not None and bump_type == 1:
                     img = self.baker.load(path, "Non-Color")
+                elif path is not None:
+                    # bump_type 0: a height field, which is not a normal map and
+                    # must not be handed to one. See bake_height_normal.
+                    repeat = (uvw["repeat_u"], uvw["repeat_v"]) if uvw else (1.0, 1.0)
+                    img = self.baker.bake_height_normal(
+                        path, bump_amount, f"{safe_name(mat.name)}_bump_nrm.png", repeat)
+                    baked_amount = True
+                    extra.setdefault("approx", []).append(
+                        f"height bump map differentiated to a normal map (amount {bump_amount:g})")
             elif "TexNoiseMax" in bump["plugins"]:
+                # The noise bake takes its slope from --noise-bump-gain and not
+                # from the material, so the material's own amount is still the
+                # strength -- unlike the height bake above, which has already
+                # multiplied it in.
                 img = self.baker.bake_noise_normal(
                     f"{safe_name(mat.name)}_noise_nrm.png", amount=self.opts.noise_bump_gain)
                 extra.setdefault("approx", []).append("procedural noise bump baked to a normal map")
@@ -847,7 +896,7 @@ class MaterialConverter:
                 # bump_type 1 = "Normal map (tangent)".  V-Ray's amount there is
                 # a multiplier on data already in [-1,1], not a strength.
                 nm.inputs["Strength"].default_value = (
-                    1.0 if bump_type == 1 else min(2.0, bump_amount))
+                    1.0 if (bump_type == 1 or baked_amount) else min(2.0, bump_amount))
                 nt.links.new(tex.outputs["Color"], nm.inputs["Color"])
                 nt.links.new(nm.outputs["Normal"], bsdf.inputs["Normal"])
 
