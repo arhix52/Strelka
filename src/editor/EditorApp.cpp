@@ -1,4 +1,5 @@
 #include "EditorApp.h"
+#include "editor_document.h"
 
 #include <strelka/sceneloader/sceneserializer.h>
 #include <env.h>
@@ -15,12 +16,17 @@
 
 #include <tinyexr.h>
 #include <stb_image_write.h>
+#include <cstring>
 
 namespace oka
 {
+namespace
+{
+constexpr double kInteractiveLoadTimeoutSec = 300.0;
+}
 
 EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSearchPath)
-    : m_sceneFile(sceneFile), m_resourceSearchPath(resourceSearchPath)
+    : m_resourceSearchPath(resourceSearchPath)
 {
     m_settingsManager = std::make_unique<SettingsManager>();
 
@@ -70,7 +76,9 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     m_cameraController = std::make_unique<CameraController>(m_scene->getCamera(m_selectedCamera), true);
     m_display->setInputHandler(m_cameraController.get());
 
-    beginSceneLoad(m_sceneFile, m_resourceSearchPath);
+    // Keep m_sceneFile empty until a load succeeds, so a failed startup open
+    // restores to an empty document instead of pointing Save at a never-loaded path.
+    beginSceneLoad(sceneFile, resourceSearchPath);
 }
 
 EditorApp::~EditorApp()
@@ -82,11 +90,82 @@ EditorApp::~EditorApp()
     }
 }
 
+void EditorApp::showAlert(const std::string& message)
+{
+    m_alertMessage = message;
+    m_alertOpen = true;
+}
+
+void EditorApp::drawAlertModal()
+{
+    if (m_alertOpen)
+    {
+        ImGui::OpenPopup("EditorAlert");
+    }
+    if (ImGui::BeginPopupModal("EditorAlert", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::TextWrapped("%s", m_alertMessage.c_str());
+        if (ImGui::Button("OK", ImVec2(120, 0)))
+        {
+            m_alertOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void EditorApp::ensureValidCameraSelection()
+{
+    const uint32_t count = m_scene ? m_scene->getCameraCount() : 0;
+    m_selectedCamera = editor_document::clampCameraIndex(m_selectedCamera, count);
+}
+
+void EditorApp::handleDeviceError()
+{
+    if (!m_render || !m_render->deviceError())
+    {
+        return;
+    }
+    m_renderSubmissionsBlocked = true;
+    if (m_deviceErrorLatched)
+    {
+        return;
+    }
+    m_deviceErrorLatched = true;
+    STRELKA_INFO("ACTION device_error");
+    STRELKA_ERROR("GPU device error — render submissions stopped");
+    showAlert("GPU device error.\nRender submissions have been stopped.\nCheck the log for details.");
+}
+
+void EditorApp::restoreDocumentAfterFailedLoad(const char* reason)
+{
+    const std::string attempted = m_attemptedSceneFile.empty() ? m_sceneFile : m_attemptedSceneFile;
+    m_sceneFile = editor_document::restorePathAfterFailedLoad(m_sceneFileBeforeLoad);
+    m_documentDirty = m_documentDirtyBeforeLoad;
+    m_undoStack = std::move(m_undoStackBeforeLoad);
+    m_redoStack = std::move(m_redoStackBeforeLoad);
+    m_undoStackBeforeLoad.clear();
+    m_redoStackBeforeLoad.clear();
+
+    const bool cancelled = m_loadProgress.isCancelled() || std::strcmp(reason, "cancel") == 0;
+    if (cancelled)
+    {
+        STRELKA_INFO("ACTION open_cancel path={}", attempted);
+        STRELKA_ERROR("Scene open cancelled: {}", attempted);
+        showAlert(fmt::format("Open cancelled:\n{}", attempted));
+    }
+    else
+    {
+        STRELKA_INFO("ACTION open_fail path={} reason={}", attempted, reason);
+        STRELKA_ERROR("Scene open failed ({}): {}", reason, attempted);
+        showAlert(fmt::format("Failed to open scene:\n{}\n({})", attempted, reason));
+    }
+}
+
 void EditorApp::beginSceneLoad(const std::string& sceneFile, const std::string& resourceSearchPath)
 {
     m_settingsManager->setAs<std::string>("resource/searchPath", resourceSearchPath);
     m_pendingResourcePath = resourceSearchPath;
-    m_sceneFile = sceneFile;
     m_loadProgress.reset();
 
     if (sceneFile.empty())
@@ -94,13 +173,25 @@ void EditorApp::beginSceneLoad(const std::string& sceneFile, const std::string& 
         // No document to read. The editor keeps the scene it was constructed with
         // -- one camera, no geometry -- and renders it; starting a load of "" would
         // only produce a loader error and a progress bar for nothing.
+        m_sceneFile.clear();
         m_isLoading = false;
         clearSelection();
         m_documentDirty = false;
         m_undoStack.clear();
         m_redoStack.clear();
+        STRELKA_INFO("ACTION open_ok path=(empty)");
         return;
     }
+
+    m_sceneFileBeforeLoad = m_sceneFile;
+    m_documentDirtyBeforeLoad = m_documentDirty;
+    m_undoStackBeforeLoad = m_undoStack;
+    m_redoStackBeforeLoad = m_redoStack;
+    m_attemptedSceneFile = sceneFile;
+    m_sceneFile = sceneFile;
+    m_loadStartedAt = std::chrono::steady_clock::now();
+
+    STRELKA_INFO("ACTION open_begin path={}", sceneFile);
 
     // The loader is captured raw because it outlives every load: ~EditorApp
     // cancels and joins before any member is destroyed.
@@ -421,7 +512,11 @@ void EditorApp::checkLoadingComplete()
     m_isLoading = false;
 
     if (!new_scene)
+    {
+        const char* reason = m_loadProgress.isCancelled() ? "cancel" : "loader";
+        restoreDocumentAfterFailedLoad(reason);
         return;
+    }
 
     // Tear the old renderer down *before* the scene and shared context it points
     // at are replaced. ~MetalRender drains the GPU and waits for in-flight
@@ -429,6 +524,8 @@ void EditorApp::checkLoadingComplete()
     // raw pointers to have already been freed is a use-after-free waiting for
     // the right timing.
     m_display->resetFrame();
+    // Clear the display's raw Render* before destroying the object it points at.
+    m_display->setRender(nullptr);
     m_render.reset();
 
     m_scene = std::move(new_scene);
@@ -441,7 +538,7 @@ void EditorApp::checkLoadingComplete()
     camera.updateViewMatrix();
     m_scene->addCamera(camera);
 
-    m_selectedCamera = 0;
+    m_selectedCamera = editor_document::selectMainCameraIndexAfterLoad(m_scene->getCameraCount());
     setCameraDetached(false);
 
     loadAnimSettings();
@@ -459,6 +556,14 @@ void EditorApp::checkLoadingComplete()
     // stale it is a use-after-free on the first frame after any scene open.
     m_display->setRender(m_render.get());
 
+    m_resourceSearchPath = m_pendingResourcePath;
+    m_documentDirty = false;
+    m_undoStackBeforeLoad.clear();
+    m_redoStackBeforeLoad.clear();
+    m_deviceErrorLatched = false;
+    m_renderSubmissionsBlocked = false;
+
+    ensureValidCameraSelection();
     m_cameraController->setCamera(m_scene->getCamera(m_selectedCamera));
     m_render->resetTemporalHistory(); // new scene, new everything
     m_display->setInputHandler(m_cameraController.get());
@@ -468,6 +573,8 @@ void EditorApp::checkLoadingComplete()
     // one's exposure and there was no way to tell from the picture whether that
     // was the scene's intent.
     applySceneExposure();
+
+    STRELKA_INFO("ACTION open_ok path={}", m_sceneFile);
 }
 
 // GPU timing harness (STRELKA_BENCH=<frames>).
@@ -2941,22 +3048,40 @@ void EditorApp::waitForSceneLoad()
 {
     while (m_isLoading || (m_render && m_render->isBuildingScene()))
     {
+        if (m_display)
+        {
+            m_display->pollEvents();
+            if (m_display->windowShouldClose())
+            {
+                if (m_isLoading)
+                {
+                    m_loadProgress.cancel();
+                }
+                return;
+            }
+        }
         checkLoadingComplete();
         if (!m_isLoading && m_render)
         {
             // What advances the GPU-side build, one stage per call.
             m_render->triggerRenderIfIdle();
         }
-        if (m_isLoading)
-        {
-            usleep(1000);
-        }
+        // Sleep on both parse and GPU-build spins so harness waits cannot peg a core.
+        usleep(1000);
     }
 }
 
 void EditorApp::run()
 {
-    waitForSceneLoad();
+    // Harnesses need a fully loaded scene before measuring; interactive use
+    // enters the main loop immediately and shows the loading overlay (same as
+    // File -> Open) so the window stays responsive during the initial open.
+    const bool harness = envFlag("STRELKA_CONV") || envFlag("STRELKA_REF") || envFlag("STRELKA_JITTER_TEST") ||
+                         envFlag("STRELKA_DENOISE_AUDIT") || envFlag("STRELKA_LIGHT_AUDIT") || envFlag("STRELKA_BENCH");
+    if (harness)
+    {
+        waitForSceneLoad();
+    }
     if (envFlag("STRELKA_CONV"))
     {
         runConvergenceSweep();
@@ -3005,6 +3130,7 @@ void EditorApp::run()
         // Consumed every frame so a gesture cannot be acted on twice.
         const bool userMovedCamera = m_cameraController->consumeUserMovedCamera();
 
+        ensureValidCameraSelection();
         auto& selectedCam = m_scene->getCamera(m_selectedCamera);
         if (selectedCam.node != -1 && !m_cameraDetached)
         {
@@ -3045,7 +3171,20 @@ void EditorApp::run()
             m_cameraController->getCamera().updateAspectRatio(aspect);
         }
 
+        if (m_isLoading)
+        {
+            const double elapsed =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - m_loadStartedAt).count();
+            if (elapsed > kInteractiveLoadTimeoutSec)
+            {
+                STRELKA_INFO("ACTION open_timeout path={} elapsed_s={:.0f}", m_attemptedSceneFile, elapsed);
+                STRELKA_ERROR("Scene open timed out after {:.0f}s: {}", elapsed, m_attemptedSceneFile);
+                m_loadProgress.cancel();
+            }
+        }
+
         checkLoadingComplete();
+        handleDeviceError();
 
         if (m_resized)
         {
@@ -3084,7 +3223,12 @@ void EditorApp::run()
             m_display->drawFrame(outputImage);
         }
 
-        drawUI();
+        // Match the Metal backend: when minimised / no drawable, skip ImGui so
+        // we do not call NewFrame without ImGui_ImplMetal_NewFrame.
+        if (m_display->isFrameValid())
+        {
+            drawUI();
+        }
 
         // Process pending screenshot save
         if (!m_pendingScreenshotPath.empty() && readyBuf)
@@ -3107,7 +3251,7 @@ void EditorApp::run()
         // deliberately *not* skipped while the GPU build runs -- that build
         // advances one stage per call to this, and gating it here would stop it
         // before it started.
-        if (!m_isLoading)
+        if (!m_isLoading && !m_renderSubmissionsBlocked)
         {
             m_render->triggerRenderIfIdle();
         }
@@ -3117,11 +3261,13 @@ void EditorApp::run()
         if (std::chrono::duration<double>(currentTime - m_lastTitleUpdate).count() > 0.25)
         {
             m_lastTitleUpdate = currentTime;
-            const std::string title = fmt::format(
-                "Strelka [render: {:.1f} ms] [{} spp]", m_render->getLastRenderTimeMs(), m_sharedCtx->mSubframeIndex);
+            const std::string title = editor_document::formatWindowTitle(
+                m_documentDirty, m_sceneFile, m_render->getLastRenderTimeMs(), m_sharedCtx->mSubframeIndex);
             m_display->setWindowTitle(title.c_str());
         }
     }
+
+    STRELKA_INFO("ACTION exit path={}", m_sceneFile.empty() ? "(empty)" : m_sceneFile);
 }
 
 void EditorApp::playAnimations(const float deltaTime)
@@ -3164,12 +3310,15 @@ void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
         int ret = SaveEXR(data, w, h, 4, 0, path.c_str(), &err);
         if (ret != TINYEXR_SUCCESS)
         {
+            STRELKA_INFO("ACTION screenshot path={} ok=false", path);
             STRELKA_ERROR("Failed to save EXR: {}", err ? err : "unknown");
             if (err)
                 FreeEXRErrorMessage(err);
+            showAlert(fmt::format("Failed to save screenshot:\n{}", path));
         }
         else
         {
+            STRELKA_INFO("ACTION screenshot path={} ok=true", path);
             STRELKA_INFO("Screenshot saved: {}", path);
         }
     }
@@ -3188,16 +3337,21 @@ void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
         int ret = stbi_write_png(path.c_str(), w, h, 4, pixels.data(), w * 4);
         if (!ret)
         {
+            STRELKA_INFO("ACTION screenshot path={} ok=false", path);
             STRELKA_ERROR("Failed to save PNG: {}", path);
+            showAlert(fmt::format("Failed to save screenshot:\n{}", path));
         }
         else
         {
+            STRELKA_INFO("ACTION screenshot path={} ok=true", path);
             STRELKA_INFO("Screenshot saved: {}", path);
         }
     }
     else
     {
+        STRELKA_INFO("ACTION screenshot path={} ok=false", path);
         STRELKA_ERROR("Unsupported screenshot format: {}", ext);
+        showAlert(fmt::format("Unsupported screenshot format: {}", ext));
     }
 }
 
@@ -3295,8 +3449,13 @@ void EditorApp::undo()
         redo.material = m_scene->getMaterials()[cur.id];
         m_scene->setMaterial(cur.id, cur.material);
     }
+    else
+    {
+        return;
+    }
     m_redoStack.push_back(redo);
     markDocumentDirty();
+    STRELKA_INFO("ACTION undo kind={} id={}", static_cast<int>(cur.kind), cur.id);
 }
 
 void EditorApp::redo()
@@ -3305,26 +3464,63 @@ void EditorApp::redo()
         return;
     UndoState cur = m_redoStack.back();
     m_redoStack.pop_back();
-    if (cur.kind == UndoState::Kind::Light)
+    UndoState undo = cur;
+    if (cur.kind == UndoState::Kind::Light && cur.id < m_scene->getLightsDesc().size())
+    {
+        undo.light = m_scene->getLightsDesc()[cur.id];
         m_scene->setLight(cur.id, cur.light);
-    else if (cur.kind == UndoState::Kind::Node)
+    }
+    else if (cur.kind == UndoState::Kind::Node && cur.id < m_scene->getNodes().size())
+    {
+        const auto& n = m_scene->getNodes()[cur.id];
+        undo.translation = n.translation;
+        undo.rotation = n.rotation;
+        undo.scale = n.scale;
         m_scene->setNodeLocalTransform(cur.id, cur.translation, cur.rotation, cur.scale);
-    else if (cur.kind == UndoState::Kind::Material)
+    }
+    else if (cur.kind == UndoState::Kind::Material && cur.id < m_scene->getMaterials().size())
+    {
+        undo.material = m_scene->getMaterials()[cur.id];
         m_scene->setMaterial(cur.id, cur.material);
+    }
+    else
+    {
+        return;
+    }
+    m_undoStack.push_back(undo);
     markDocumentDirty();
+    STRELKA_INFO("ACTION redo kind={} id={}", static_cast<int>(cur.kind), cur.id);
 }
 
 void EditorApp::applySelectionFromPick(const Scene::PickHit& hit)
 {
+    const uint32_t prevNode = m_selectedNodeId;
+    const uint32_t prevInstance = m_selectedInstanceId;
+    const uint32_t prevLight = m_selectedLightId;
+    const uint32_t prevMaterial = m_selectedMaterialId;
+
     clearSelection();
     if (!hit.hit)
+    {
+        if (prevNode != (uint32_t)-1 || prevInstance != (uint32_t)-1 || prevLight != (uint32_t)-1)
+        {
+            STRELKA_INFO("ACTION select clear");
+        }
         return;
+    }
     m_selectedInstanceId = hit.instanceId;
     m_selectedNodeId = hit.nodeId;
     m_selectedLightId = hit.lightId;
     m_outlinerScrollToSelection = true;
     if (hit.instanceId < m_scene->getInstances().size())
         m_selectedMaterialId = m_scene->getInstances()[hit.instanceId].mMaterialId;
+
+    if (m_selectedNodeId != prevNode || m_selectedInstanceId != prevInstance || m_selectedLightId != prevLight ||
+        m_selectedMaterialId != prevMaterial)
+    {
+        STRELKA_INFO("ACTION select node={} instance={} light={} material={}", m_selectedNodeId, m_selectedInstanceId,
+                     m_selectedLightId, m_selectedMaterialId);
+    }
 }
 
 bool EditorApp::saveDocument(bool saveAs)
@@ -3335,6 +3531,7 @@ bool EditorApp::saveDocument(bool saveAs)
         config.path = m_resourceSearchPath.empty() ? "." : m_resourceSearchPath;
         ImGuiFileDialog::Instance()->OpenDialog("SaveSceneDlgKey", "Save Scene As", ".gltf,.glb", config);
         m_pendingSaveAs = true;
+        STRELKA_INFO("ACTION save_as path={}", m_sceneFile.empty() ? "(empty)" : m_sceneFile);
         return true;
     }
 
@@ -3343,9 +3540,13 @@ bool EditorApp::saveDocument(bool saveAs)
     if (okGltf && okLights)
     {
         m_documentDirty = false;
+        STRELKA_INFO("ACTION save_ok path={}", m_sceneFile);
         STRELKA_INFO("Saved scene: {}", m_sceneFile);
         return true;
     }
+    STRELKA_INFO("ACTION save_fail path={} gltf={} lights={}", m_sceneFile, okGltf, okLights);
+    STRELKA_ERROR("Failed to save scene: {} (gltf={}, lights={})", m_sceneFile, okGltf, okLights);
+    showAlert(fmt::format("Failed to save scene:\n{}", m_sceneFile));
     return false;
 }
 
@@ -3389,14 +3590,29 @@ void EditorApp::drawUI()
     // Hotkeys
     if (!io.WantTextInput)
     {
-        if (ImGui::IsKeyPressed(ImGuiKey_W) && m_selectedNodeId != (uint32_t)-1)
-            m_gizmoOperation = ImGuizmo::TRANSLATE;
-        if (ImGui::IsKeyPressed(ImGuiKey_E))
-            m_gizmoOperation = ImGuizmo::ROTATE;
-        if (ImGui::IsKeyPressed(ImGuiKey_R))
-            m_gizmoOperation = ImGuizmo::SCALE;
+        // Gizmo W/E/R only with a selection and the viewport hovered — otherwise
+        // camera WASD (and E for down) would fight the gizmo bindings.
+        const bool gizmoHotkeys =
+            m_display->isViewPortHovered() &&
+            (m_selectedNodeId != (uint32_t)-1 || m_selectedLightId != (uint32_t)-1);
+        if (gizmoHotkeys)
+        {
+            if (ImGui::IsKeyPressed(ImGuiKey_W))
+                m_gizmoOperation = ImGuizmo::TRANSLATE;
+            if (ImGui::IsKeyPressed(ImGuiKey_E))
+                m_gizmoOperation = ImGuizmo::ROTATE;
+            if (ImGui::IsKeyPressed(ImGuiKey_R))
+                m_gizmoOperation = ImGuizmo::SCALE;
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+        {
+            if (m_selectedNodeId != (uint32_t)-1 || m_selectedLightId != (uint32_t)-1 ||
+                m_selectedInstanceId != (uint32_t)-1)
+            {
+                STRELKA_INFO("ACTION select clear");
+            }
             clearSelection();
+        }
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
             saveDocument(io.KeyShift);
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z))
@@ -3433,7 +3649,10 @@ void EditorApp::drawUI()
             saveDocument(true);
         ImGui::Separator();
         if (ImGui::MenuItem("Exit"))
+        {
+            STRELKA_INFO("ACTION exit path={}", m_sceneFile.empty() ? "(empty)" : m_sceneFile);
             m_display->requestClose();
+        }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit"))
@@ -3497,6 +3716,7 @@ void EditorApp::drawUI()
     }
 
     drawLoadingOverlay();
+    drawAlertModal();
 
     // --- Panel draw calls (implementations in panels/*.cpp) ---
     drawViewportPanel();

@@ -94,9 +94,21 @@ public:
     virtual void drawUI() = 0;
     virtual void resetFrame() {}
 
+    /// False when the backend skipped Metal/GL NewFrame (minimised, no drawable,
+    /// semaphore timeout). The editor must not run an ImGui frame in that case.
+    virtual bool isFrameValid() const
+    {
+        return true;
+    }
+
     void setViewPortHovered(bool state)
     {
         mViewPortHovered = state;
+    }
+
+    bool isViewPortHovered() const
+    {
+        return mViewPortHovered;
     }
 
 protected:

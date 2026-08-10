@@ -73,6 +73,21 @@ private:
     ImVec2 m_viewportRectMax{ 0, 0 };
 
     bool m_documentDirty = false;
+    // Snapshot taken at beginSceneLoad so a failed/cancelled open can restore
+    // the previous document instead of leaving Save pointed at a never-loaded path.
+    std::string m_sceneFileBeforeLoad;
+    bool m_documentDirtyBeforeLoad = false;
+    std::string m_attemptedSceneFile;
+    std::chrono::steady_clock::time_point m_loadStartedAt{};
+
+    // One-shot ImGui modal for open/save/device failures (no toast system).
+    std::string m_alertMessage;
+    bool m_alertOpen = false;
+
+    // After Render::deviceError(), stop submitting and show the alert once.
+    bool m_deviceErrorLatched = false;
+    bool m_renderSubmissionsBlocked = false;
+
     // No exposure in the light sidecar: measure it from the first frame instead.
     bool m_autoExposurePending = false;
     void applyAutoExposure(oka::Buffer* buf);
@@ -95,6 +110,8 @@ private:
     };
     std::vector<UndoState> m_undoStack;
     std::vector<UndoState> m_redoStack;
+    std::vector<UndoState> m_undoStackBeforeLoad;
+    std::vector<UndoState> m_redoStackBeforeLoad;
 
     std::future<std::unique_ptr<Scene>> m_loadingFuture;
     /// Owned by the app rather than by a load, so both the worker and the
@@ -134,6 +151,11 @@ private:
                            glm::mat4& outWorldFromLocal);
     void drawSelectionGizmo(Camera& cam);
     void drawLoadingOverlay();
+    void showAlert(const std::string& message);
+    void drawAlertModal();
+    void ensureValidCameraSelection();
+    void handleDeviceError();
+    void restoreDocumentAfterFailedLoad(const char* reason);
 
 public:
     EditorApp(const std::string& sceneFile, const std::string& resourceSearchPath);

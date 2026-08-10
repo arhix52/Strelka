@@ -354,7 +354,16 @@ void GlfwDisplay::destroy()
 
 void GlfwDisplay::onBeginFrame()
 {
-    dispatch_semaphore_wait(_semaphore, DISPATCH_TIME_FOREVER);
+    // Bounded like Metal4's 5s waits: a forever wait here freezes the whole
+    // editor if a completed-handler never runs (GPU hang / lost device).
+    constexpr int64_t kFrameWaitNs = 5ll * 1000ll * 1000ll * 1000ll;
+    const dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, kFrameWaitNs);
+    if (dispatch_semaphore_wait(_semaphore, deadline) != 0)
+    {
+        STRELKA_ERROR("Display frame semaphore timed out after 5s — skipping frame");
+        mFrameValid = false;
+        return;
+    }
 
     mFramePool = NS::AutoreleasePool::alloc()->init();
     mFrameValid = false;

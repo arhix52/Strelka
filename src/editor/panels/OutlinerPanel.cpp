@@ -1,6 +1,7 @@
 #include "../EditorApp.h"
 
 #include "imgui.h"
+#include <log.h>
 
 #include <string>
 
@@ -90,6 +91,7 @@ void EditorApp::drawNodeRecursive(int nodeId, const ImGuiTextFilter& filter)
     }
     if (ImGui::IsItemClicked())
     {
+        const uint32_t prevNode = m_selectedNodeId;
         m_selectedNodeId = (uint32_t)nodeId;
         m_selectedLightId = (uint32_t)-1;
         m_selectedInstanceId = node.instanceIds.empty() ? (uint32_t)-1 : node.instanceIds.front();
@@ -102,6 +104,11 @@ void EditorApp::drawNodeRecursive(int nodeId, const ImGuiTextFilter& filter)
             {
                 m_selectedLightId = inst.mLightId;
             }
+        }
+        if (m_selectedNodeId != prevNode)
+        {
+            STRELKA_INFO("ACTION select node={} instance={} light={} material={}", m_selectedNodeId,
+                         m_selectedInstanceId, m_selectedLightId, m_selectedMaterialId);
         }
     }
     if (open)

@@ -30,6 +30,11 @@ public:
     void drawUI() override;
     void resetFrame() override;
 
+    bool isFrameValid() const override
+    {
+        return mFrameValid;
+    }
+
     float getMaxEDR() override;
 
 private:
