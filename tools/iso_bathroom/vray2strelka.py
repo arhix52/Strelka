@@ -31,6 +31,11 @@ import bpy  # type: ignore
 import numpy as np  # type: ignore
 from mathutils import Matrix, Vector  # type: ignore
 
+# Blender runs `-P script.py` without putting the script's directory on the
+# path, so a sibling module is not importable unless it is added here.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from curve_sidecar import CurveSet, BASIS_LINEAR, write_curve_sidecar  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # V-Ray plugin defaults.
@@ -98,7 +103,15 @@ METAL_IOR_THRESHOLD = 5.0
 # holds two shader nodes and is the one the output is wired to, so picking
 # "the last one found" silently converted whichever layer happened to come
 # later in the node list and threw the other away.
-SHADER_PLUGINS = ("BRDFLayered", "BRDFVRayMtl", "BRDFSSS2Complex", "BRDFLight")
+SHADER_PLUGINS = ("BRDFLayered", "BRDFVRayMtl", "BRDFSSS2Complex", "BRDFLight", "BRDFHair4")
+
+# Absorption of the two hair pigments, per Chiang et al. 2016 ("A Practical and
+# Controllable Hair and Fur Model for Production Path Rendering"), which is the
+# model V-Ray Hair Next exposes as melanin/pheomelanin. These are the sigma_a
+# coefficients at unit concentration; eumelanin is the brown-black pigment and
+# pheomelanin the red-yellow one.
+EUMELANIN_SIGMA_A = (0.419, 0.697, 1.37)
+PHEOMELANIN_SIGMA_A = (0.187, 0.4, 1.05)
 
 
 def lum(c):
@@ -449,6 +462,7 @@ class MaterialConverter:
         """Copy the whole V-Ray graph to plain Python before touching the tree."""
         if mat.node_tree is None:
             return None
+
         shader = kind = None
         best = len(SHADER_PLUGINS)
         for n in mat.node_tree.nodes:
@@ -920,6 +934,68 @@ class MaterialConverter:
         self._set(bsdf, "Emission Strength", strength)
         return {"emissiveStrength": strength}
 
+    def convert_hair(self, mat, snap):
+        """V-Ray Hair Next (BRDFHair4) -> a colour, and an honest note.
+
+        There is no hair BSDF in Strelka, so what this carries is the *colour*
+        and nothing else. That is deliberate rather than lazy: the colour is
+        what the frame shows at this scale -- the monster is forty pixels across
+        -- and it can be derived rather than fitted, where the lobe structure
+        cannot.
+
+        The derivation is the pigment model V-Ray exposes, from Chiang et al.
+        2016: melanin and pheomelanin are concentrations of two pigments with
+        known absorption, and `exp(-sigma_a)` is the fraction that survives one
+        unit of it. `dye_color` multiplies that, which is what a dye does.
+
+        Everything else in the plugin is reported and dropped, and it is a long
+        list: the primary/secondary/transmission lobes, the highlight shift that
+        gives hair its two offset specular bands, and the glossiness boost. A
+        rough dielectric cylinder is wrong here, but it is not absurd, and it is
+        what a curve with a standard material is.
+        """
+        p = snap["params"]
+        melanin = float(p.get("melanin", 0.0))
+        pheomelanin = float(p.get("pheomelanin", 0.0))
+        dye = tuple(p.get("dye_color", [1.0, 1.0, 1.0]))
+        diffuse = tuple(p.get("diffuse_color", [0.5, 0.5, 0.5]))
+        diffuse_amount = float(p.get("diffuse_amount", 0.0))
+        gloss = float(p.get("glossiness", 0.6))
+        transparency = tuple(p.get("transparency", [0.0, 0.0, 0.0]))
+
+        sigma_a = tuple(melanin * e + pheomelanin * ph
+                        for e, ph in zip(EUMELANIN_SIGMA_A, PHEOMELANIN_SIGMA_A))
+        pigment = tuple(math.exp(-s) for s in sigma_a)
+        # The diffuse component is a second colour the plugin blends in by
+        # amount; with one lobe to write, the two are mixed by that amount.
+        base = tuple((1.0 - diffuse_amount) * dye[i] * pigment[i] +
+                     diffuse_amount * diffuse[i] for i in range(3))
+
+        nt, bsdf = self._new_tree(mat)
+        self._set(bsdf, "Base Color", (*base, 1.0))
+        self._set(bsdf, "Metallic", 0.0)
+        self._set(bsdf, "Roughness", gloss_to_rough(gloss))
+        # Hair is a dielectric cylinder and its keratin IOR is well established;
+        # this is the one number in the plugin that transfers exactly.
+        self._set(bsdf, "IOR", 1.55)
+        # Only when it is worth what it costs. A BLEND material puts the whole
+        # scene on the cutout traversal -- every shadow ray in the frame then
+        # goes through an intersection function instead of stopping at the first
+        # opaque leaf -- and the spider's 2.5% is a difference nothing can see.
+        if max(transparency) > 0.05:
+            self._set(bsdf, "Alpha", 1.0 - lum(transparency))
+
+        return {
+            "hair": True,
+            "baseColor": base,
+            "melanin": melanin,
+            "pheomelanin": pheomelanin,
+            "dropped": ["primary/secondary/transmission lobes", "highlight_shift",
+                        "primary_glossiness_boost", "secondary_tint",
+                        "transmission_tint"],
+            "note": "BRDFHair4 reduced to its pigment colour; Strelka has no hair BSDF",
+        }
+
     # -- entry point ------------------------------------------------------
 
     def layer_params(self, snapnode):
@@ -1043,10 +1119,120 @@ class MaterialConverter:
             extra = self.convert_vraymtl(mat, snap)
         elif kind == "BRDFSSS2Complex":
             extra = self.convert_sss(mat, snap)
+        elif kind == "BRDFHair4":
+            extra = self.convert_hair(mat, snap)
         else:
             extra = self.convert_light_mtl(mat, snap)
         self.report.append({"material": mat.name, "kind": kind, "extra": extra})
         return extra
+
+# ---------------------------------------------------------------------------
+# Hair
+# ---------------------------------------------------------------------------
+
+
+def collect_hair(opts):
+    """Every hair particle system in the file, as curve sets.
+
+    Returns a list of CurveSet, one per (object, particle system), plus a list
+    of one-line summaries for the console.
+
+    Three things this has to get right and one it cannot:
+
+    * **Render resolution, not viewport.** A hair system caches two different
+      strand counts and two different segment counts -- what the viewport draws
+      and what a render uses -- and Blender hands out whichever the depsgraph
+      last evaluated. The viewport numbers are an eighth of the render ones here,
+      so reading them silently exports a thinner, coarser groom. Both are pushed
+      to the render values and the depsgraph re-evaluated before anything is
+      read.
+
+    * **The axis convention.** The glTF export writes Y-up; `co_hair` returns
+      Blender's Z-up world space. Same -90 degree X rotation the lights take.
+
+    * **The radius.** Blender authors a root and a tip radius and a separate
+      scale that multiplies both; Cycles renders `radius_scale * radius`, and
+      that product is what Metal and OptiX both want.
+
+    What it cannot do is carry the strand's own shading: the material comes out
+    of the particle system's material slot and is whatever `convert_hair` made
+    of it.
+    """
+    axis_conv = Matrix.Rotation(-math.pi / 2, 4, "X")
+    sets = []
+    notes = []
+
+    # Push every system to its render settings first, then evaluate once: a
+    # depsgraph update per system would re-cache every other system as well.
+    touched = []
+    for obj in bpy.data.objects:
+        for psys in obj.particle_systems:
+            s = psys.settings
+            if s.type != "HAIR":
+                continue
+            touched.append((s, s.child_percent, s.display_step))
+            if opts.hair_children == "render":
+                s.child_percent = s.rendered_child_count
+            elif opts.hair_children == "none":
+                s.child_percent = 0
+            s.display_step = min(s.render_step, opts.hair_max_step)
+    if not touched:
+        return sets, notes
+    bpy.context.view_layer.update()
+    dg = bpy.context.evaluated_depsgraph_get()
+    dg.update()
+
+    for obj in bpy.data.objects:
+        if not obj.particle_systems:
+            continue
+        if not obj.visible_get():
+            continue
+        ev = obj.evaluated_get(dg)
+        for index, psys in enumerate(ev.particle_systems):
+            s = psys.settings
+            if s.type != "HAIR":
+                continue
+            # From the original object, not the evaluated one. `material_slot` is
+            # an enum over the object's slots, and the evaluated copy answers
+            # "Default Material" for every system in the file -- which put both
+            # grooms on a material that does not exist and rendered them white.
+            # `material` is the 1-based slot index and survives evaluation.
+            slots = [m.name if m else "" for m in obj.data.materials]
+            slot = int(s.material) - 1
+            material = slots[slot] if 0 <= slot < len(slots) else (slots[0] if slots else "")
+            n_strands = len(psys.particles) + len(psys.child_particles)
+            if n_strands == 0:
+                continue
+            # The cached path has 2**display_step segments, so one more point.
+            n_points = (1 << s.display_step) + 1
+            root = s.root_radius * s.radius_scale * opts.hair_radius_gain
+            tip = s.tip_radius * s.radius_scale * opts.hair_radius_gain
+
+            strands = []
+            co = psys.co_hair
+            for i in range(n_strands):
+                pts = []
+                for k in range(n_points):
+                    c = axis_conv @ co(ev, particle_no=i, step=k)
+                    t = k / (n_points - 1)
+                    pts.append((c.x, c.y, c.z, root + (tip - root) * t))
+                # A strand whose cache never filled comes back as the origin
+                # repeated; exporting it puts a spike through the scene.
+                if pts[0][:3] == pts[-1][:3]:
+                    continue
+                strands.append(pts)
+
+            if not strands:
+                notes.append(f"{obj.name}::{psys.name}: no cached strands, skipped")
+                continue
+            sets.append(CurveSet(material, strands, BASIS_LINEAR))
+            notes.append(f"{obj.name}::{psys.name} -> {material}: {len(strands)} strands "
+                         f"x {n_points} points, radius {root:.6f}..{tip:.6f}")
+
+    for s, child_percent, display_step in touched:
+        s.child_percent = child_percent
+        s.display_step = display_step
+    return sets, notes
 
 
 # ---------------------------------------------------------------------------
@@ -1778,6 +1964,20 @@ def parse_args():
                     help="export only the long-lens perspective proxy")
     ap.add_argument("--no-subdiv", action="store_true",
                     help="strip Subdivision modifiers (faster, coarser)")
+    # Hair. glTF has no curve primitive, so the strands go in a binary sidecar
+    # beside it; see tools/iso_bathroom/curve_sidecar.py.
+    ap.add_argument("--no-hair", dest="hair", action="store_false",
+                    help="skip the hair particle systems entirely")
+    ap.add_argument("--hair-children", default="render",
+                    choices=["render", "display", "none"],
+                    help="how many child strands to export: the render count, "
+                         "whatever the viewport was showing, or parents only")
+    ap.add_argument("--hair-max-step", type=int, default=3,
+                    help="ceiling on the strand subdivision exponent; a strand "
+                         "gets 2**step segments. The render setting is used when "
+                         "it is lower.")
+    ap.add_argument("--hair-radius-gain", type=float, default=1.0,
+                    help="multiplier on the authored strand radius")
     ap.add_argument("--format", default="GLTF_SEPARATE", choices=["GLTF_SEPARATE", "GLB"])
     return ap.parse_args(argv)
 
@@ -1940,6 +2140,11 @@ def main():
             print(f"  mesh  : {name} ({faces} faces) {before} boundary edges -> {after}"
                   f"  [{note}]")
 
+    # Before the triangulate modifiers go on: reading hair forces a depsgraph
+    # evaluation, and there is no reason to make it evaluate a triangulation of
+    # the whole scene that the strands do not depend on.
+    hair_sets, hair_notes = collect_hair(opts) if opts.hair else ([], [])
+
     for obj in bpy.data.objects:
         if obj.type != "MESH":
             continue
@@ -1986,6 +2191,17 @@ def main():
     with open(sidecar_path, "w") as f:
         json.dump(sidecar, f, indent=4)
     print(f"  wrote {sidecar_path}")
+
+    # Hair, after the glTF: the strands reference materials by name, and the
+    # names are only settled once the exporter has written them.
+    if opts.hair:
+        for note in hair_notes:
+            print(f"  hair  : {note}")
+        if hair_sets:
+            curves_path = out_dir / f"{opts.name}_curves.bin"
+            n_strands, n_points = write_curve_sidecar(str(curves_path), hair_sets)
+            print(f"  wrote {curves_path} ({n_strands} strands, {n_points} control points, "
+                  f"{curves_path.stat().st_size / 1e6:.1f} MB)")
 
     if opts.format == "GLTF_SEPARATE":
         summary = patch_gltf(gltf_path, conv.report, camera_info,

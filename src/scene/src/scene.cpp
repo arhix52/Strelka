@@ -1373,6 +1373,7 @@ uint32_t Scene::createCurve(const Curve::Type type,
                             const std::vector<float>& widths)
 {
     Curve c = {};
+    c.mType = type;
     c.mPointsStart = mCurvePoints.size();
     c.mPointsCount = points.size();
     mCurvePoints.insert(mCurvePoints.end(), points.begin(), points.end());

@@ -115,6 +115,7 @@ struct oka::AsBuildState
         Meshes = 0,
         Grouping,
         Blas,
+        Curves,
         Lights,
         Finish,
         Done,
@@ -143,6 +144,12 @@ struct oka::AsBuildState
     // their userID must stay the light index.
     std::map<uint32_t, size_t> lightBlasOfMesh;
     size_t lightCursor = 0;
+
+    // Curve instances. One BLAS per curve set, shared between instances that
+    // place the same set -- which the sidecar does not yet produce, but a
+    // groomed character with two eyebrows would.
+    std::map<uint32_t, size_t> curveBlasOfSet;
+    size_t curveCursor = 0;
 
     // Per-phase wall clock, so the split between grouping and building is a
     // measurement rather than an assumption.
@@ -245,6 +252,9 @@ MetalRender::~MetalRender()
         safeRelease(mPrevFrameVertexBuffer);
         safeRelease(mPrevFrameInstanceBuffer);
         safeRelease(mGeometryEntryBuffer);
+        safeRelease(mCurvePointBuffer);
+        safeRelease(mCurveRadiusBuffer);
+        safeRelease(mCurveSegmentBuffer);
         safeRelease(mTlasScratchBuffer);
         for (auto*& buf : mUniformBuffers) safeRelease(buf);
         for (auto*& buf : mUniformTMBuffers) safeRelease(buf);
@@ -941,6 +951,8 @@ bool MetalRender::memoryReport(MemoryReport& report) const
     add("TLAS scratch", bufBytes(mTlasScratchBuffer));
     add("Instance descriptors", bufBytes(mInstanceBuffer) + bufBytes(mPrevFrameInstanceBuffer));
     add("Geometry table", bufBytes(mGeometryEntryBuffer));
+    add("Curves", bufBytes(mCurvePointBuffer) + bufBytes(mCurveRadiusBuffer) +
+                      bufBytes(mCurveSegmentBuffer));
     add("Materials", bufBytes(mMaterialBuffer));
     add("Lights", bufBytes(mLightBuffer));
     add("Skinning", bufBytes(mSkinDataBuffer) + bufBytes(mJointMatricesBuffer));
@@ -1019,7 +1031,10 @@ void MetalRender::init()
     // 32 rather than 24: the hit now carries the TLAS instance, because a shared
     // BLAS belongs to no single one. One extra word per live path.
     static_assert(sizeof(HitRecord) == 32, "HitRecord size changed");
-    static_assert(sizeof(GeometryEntry) == 12, "GeometryEntry size changed");
+    // 16 rather than 12: the fourth word says whether the geometry is a triangle
+    // mesh or a curve set, and for a curve set how many segments a strand has.
+    // One entry per geometry, not per primitive or per ray, so the word is free.
+    static_assert(sizeof(GeometryEntry) == 16, "GeometryEntry size changed");
     static_assert(sizeof(AovSample) == 64,
                   "AovSample is written once per pixel per frame; keep an eye on the size");
 
@@ -1824,6 +1839,9 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mMaterialBuffer);
     add(mLightBuffer);
     add(mGeometryEntryBuffer);
+    add(mCurvePointBuffer);
+    add(mCurveRadiusBuffer);
+    add(mCurveSegmentBuffer);
     add(mEnvAliasBuffer);
     add(mAccumulationBuffer);
     add(mPathStateBuffer);
@@ -2133,6 +2151,12 @@ void MetalRender::encodeWavefrontMetal4(MTL4::CommandBuffer* cmd, MTL4::ComputeC
             bind(mAovBuffer, 0, 22);
             bind(mPrevFrameVertexBuffer ? mPrevFrameVertexBuffer : mVertexBuffer, 0, 23);
             bind(mPrevFrameInstanceBuffer ? mPrevFrameInstanceBuffer : mInstanceBuffer, 0, 24);
+            // See the Metal 3 path: a curve hit is rebuilt from these, not carried.
+            if (mCurvePointBuffer)
+            {
+                bind(mCurvePointBuffer, 0, 26);
+                bind(mCurveSegmentBuffer, 0, 27);
+            }
             enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
             closeStage();
             barrier();
@@ -2417,6 +2441,15 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             if (mSharcBuffer)
             {
                 enc->setBuffer(mSharcBuffer, 0, 25);
+            }
+            // A curve hit carries a segment index and a parameter along it, and
+            // nothing else: the position, the tangent and the radius all come
+            // back out of these three buffers, the same way a triangle hit is
+            // refetched from the vertex buffer.
+            if (mCurvePointBuffer)
+            {
+                enc->setBuffer(mCurvePointBuffer, 0, 26);
+                enc->setBuffer(mCurveSegmentBuffer, 0, 27);
             }
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kHitArgsOffset, tg);
             enc->popDebugGroup();
@@ -3383,6 +3416,11 @@ void MetalRender::render(Buffer* output)
                 features |= kFeatureSharc;
             if (mSceneHasSubsurfaceMaterials)
                 features |= kFeatureSubsurface;
+            // The curve-capable intersector is a different type, so this selects
+            // different kernels rather than a different branch inside them; a
+            // scene without hair keeps the triangle-only traversal it had.
+            if (mSceneHasCurves)
+                features |= kFeatureCurves;
 
             if (useMetal4)
             {
@@ -3965,6 +4003,15 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
     // A pipeline built the Metal 3 way cannot be used with an argument table, so
     // the two paths need separate pipelines and the mode is part of the cache key.
     const bool useMetal4 = (features & kFeatureMetal4) != 0;
+    // Curves change the intersector's *type*, which no function constant can do,
+    // so this picks a different entry point out of the same library. `shade`
+    // takes a constant as well: it has no intersector, only the branch that
+    // rebuilds a curve hit's geometry, and that one is worth compiling out.
+    const bool curves = (features & kFeatureCurves) != 0;
+    values->setConstantValue(&curves, MTL::DataTypeBool, (NS::UInteger)9);
+    auto entry = [&](const char* base) -> std::string {
+        return curves ? std::string(base) + "Curve" : std::string(base);
+    };
     NS::Error* err = nullptr;
     auto make = [&](const char* name) -> MTL::ComputePipelineState* {
         if (useMetal4)
@@ -3993,10 +4040,14 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
     // that call it, and the pipeline then hands out a table to bind it through.
     MTL::Function* anyHitFn = nullptr;
     MTL::LinkedFunctions* linked = nullptr;
+    // The table's tags must match the intersector's, so a curve-capable shadow
+    // pipeline links a curve-tagged copy of the same test. Same body; the tag
+    // list is the whole difference.
+    const std::string anyHitName = entry("shadowAlphaAnyHit");
     if (alpha && !useMetal4)
     {
         anyHitFn = mWavefrontLibrary->newFunction(
-            NS::String::string("shadowAlphaAnyHit", NS::UTF8StringEncoding), values, &err);
+            NS::String::string(anyHitName.c_str(), NS::UTF8StringEncoding), values, &err);
         if (anyHitFn)
         {
             const NS::Object* fns[] = { anyHitFn };
@@ -4005,7 +4056,7 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
         }
         else
         {
-            STRELKA_ERROR("wavefront: specialising shadowAlphaAnyHit -> {}",
+            STRELKA_ERROR("wavefront: specialising {} -> {}", anyHitName,
                           err ? err->localizedDescription()->utf8String() : "unknown error");
         }
     }
@@ -4015,7 +4066,7 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
             // Metal 4 states linking through descriptors, so it never builds the
             // MTL::Function above and cannot go through the branch below.
             return alpha ? mMetal4.newComputePipelineStateLinked(mWavefrontLibrary, name,
-                                                                 "shadowAlphaAnyHit", values)
+                                                                 anyHitName.c_str(), values)
                          : make(name);
         }
         if (!linked)
@@ -4047,13 +4098,13 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
 
     WavefrontVariant v;
     v.generate = make("wavefrontGenerate");
-    v.extendMotion = make("wavefrontExtend");
-    v.extendStatic = make("wavefrontExtendStatic");
+    v.extendMotion = make(entry("wavefrontExtend").c_str());
+    v.extendStatic = make(entry("wavefrontExtendStatic").c_str());
     v.shade = make("wavefrontShade");
     v.miss = make("wavefrontMiss");
     v.sharcDeposit = make("wavefrontSharcDeposit");
-    v.shadowMotion = makeLinked("wavefrontShadow");
-    v.shadowStatic = makeLinked("wavefrontShadowStatic");
+    v.shadowMotion = makeLinked(entry("wavefrontShadow").c_str());
+    v.shadowStatic = makeLinked(entry("wavefrontShadowStatic").c_str());
 
     // One table per pipeline: it is created from the pipeline that will bind it,
     // and the two shadow pipelines are different pipelines.
@@ -4074,10 +4125,10 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
             MTL::FunctionHandle* handle =
                 anyHitFn ? pso->functionHandle(anyHitFn)
                          : pso->functionHandle(
-                               NS::String::string("shadowAlphaAnyHit", NS::UTF8StringEncoding));
+                               NS::String::string(anyHitName.c_str(), NS::UTF8StringEncoding));
             if (!handle)
             {
-                STRELKA_ERROR("wavefront: no function handle for shadowAlphaAnyHit");
+                STRELKA_ERROR("wavefront: no function handle for {}", anyHitName);
                 table->release();
                 return nullptr;
             }
@@ -4099,8 +4150,9 @@ const MetalRender::WavefrontVariant* MetalRender::wavefrontVariantFor(uint32_t f
         return nullptr;
     }
     STRELKA_INFO(
-        "wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} sss={} sharc={} metal4={}",
-        envMap, lights, motionBlur, dof, debug, alpha, fog, subsurface, sharc, useMetal4);
+        "wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} sss={} sharc={} "
+        "curves={} metal4={}",
+        envMap, lights, motionBlur, dof, debug, alpha, fog, subsurface, sharc, curves, useMetal4);
     // Every pipeline's threadgroup limit, not just two of them.
     //
     // This is the only figure the public API gives on register pressure -- the
@@ -4386,6 +4438,8 @@ void MetalRender::buildBuffers()
         mOwnsPrevVertexBuffer = false;
     }
 
+    buildCurveBuffers();
+
     for (MTL::Buffer*& uniformBuffer : mUniformBuffers)
     {
         uniformBuffer = mDevice->newBuffer(sizeof(Uniforms), MTL::ResourceStorageModeManaged);
@@ -4395,6 +4449,91 @@ void MetalRender::buildBuffers()
         uniformBuffer = mDevice->newBuffer(sizeof(UniformsTonemap), MTL::ResourceStorageModeManaged);
     }
 }
+
+// Upload the scene's curves and derive the segment index buffer.
+//
+// The scene stores strands -- a list of control point counts and one flat point
+// array -- and Metal wants segments: one index per segment naming its first
+// control point. The conversion is the only thing here that is not a memcpy, and
+// it is what keeps a strand's points contiguous, which is what makes the
+// segments of one strand share cache lines during traversal.
+void MetalRender::buildCurveBuffers()
+{
+    const std::vector<oka::Curve>& curves = mScene->getCurves();
+    if (curves.empty())
+    {
+        return;
+    }
+    const std::vector<glm::float3>& points = mScene->getCurvesPoint();
+    const std::vector<float>& radii = mScene->getCurvesWidths();
+    const std::vector<uint32_t>& vertexCounts = mScene->getCurvesVertexCounts();
+
+    mCurveRanges.assign(curves.size(), CurveRange{});
+    std::vector<uint32_t> segments;
+    for (size_t c = 0; c < curves.size(); ++c)
+    {
+        const oka::Curve& curve = curves[c];
+        const uint32_t perSegment = (curve.mType == oka::Curve::Type::eLinear) ? 2u : 4u;
+        CurveRange& range = mCurveRanges[c];
+        range.segmentStart = (uint32_t)segments.size();
+        range.controlPointsPerSegment = perSegment;
+        range.segmentsPerStrand = curve.mSegmentsPerStrand;
+
+        uint32_t pointCursor = curve.mPointsStart;
+        for (uint32_t s = 0; s < curve.mVertexCountsCount; ++s)
+        {
+            const uint32_t n = vertexCounts[curve.mVertexCountsStart + s];
+            // A strand shorter than one segment contributes nothing rather than
+            // an index that runs off the end of the point array.
+            for (uint32_t seg = 0; seg + perSegment <= n; ++seg)
+            {
+                segments.push_back(pointCursor + seg);
+            }
+            pointCursor += n;
+        }
+        range.segmentCount = (uint32_t)segments.size() - range.segmentStart;
+    }
+
+    if (segments.empty())
+    {
+        STRELKA_WARNING("Scene has {} curve set(s) but no segment long enough to build", curves.size());
+        return;
+    }
+
+    // packed_float3 rather than glm::float3: they are the same 12 bytes here, but
+    // the acceleration structure is told the stride explicitly and a mismatch
+    // reads every third point as garbage.
+    static_assert(sizeof(glm::float3) == 12, "curve control points are uploaded as tight float3");
+    mCurvePointBuffer = mDevice->newBuffer(points.size() * sizeof(glm::float3), MTL::ResourceStorageModeManaged);
+    memcpy(mCurvePointBuffer->contents(), points.data(), points.size() * sizeof(glm::float3));
+    mCurvePointBuffer->didModifyRange(NS::Range::Make(0, mCurvePointBuffer->length()));
+
+    // A set exported without radii still has to intersect: the sidecar always
+    // writes them, but Scene::createCurve allows the empty case and a zero-radius
+    // curve is invisible rather than wrong-looking.
+    std::vector<float> radiusData;
+    if (radii.size() < points.size())
+    {
+        radiusData.assign(points.size(), 0.001f);
+        std::copy(radii.begin(), radii.end(), radiusData.begin());
+        STRELKA_WARNING("Curve sets carry {} radii for {} control points; the rest default to 1 mm",
+                        radii.size(), points.size());
+    }
+    const float* radiusSrc = radiusData.empty() ? radii.data() : radiusData.data();
+    mCurveRadiusBuffer = mDevice->newBuffer(points.size() * sizeof(float), MTL::ResourceStorageModeManaged);
+    memcpy(mCurveRadiusBuffer->contents(), radiusSrc, points.size() * sizeof(float));
+    mCurveRadiusBuffer->didModifyRange(NS::Range::Make(0, mCurveRadiusBuffer->length()));
+
+    mCurveSegmentBuffer = mDevice->newBuffer(segments.size() * sizeof(uint32_t), MTL::ResourceStorageModeManaged);
+    memcpy(mCurveSegmentBuffer->contents(), segments.data(), segments.size() * sizeof(uint32_t));
+    mCurveSegmentBuffer->didModifyRange(NS::Range::Make(0, mCurveSegmentBuffer->length()));
+
+    mSceneHasCurves = true;
+    STRELKA_INFO("Curves: {} set(s), {} control points, {} segments ({:.2f} MB)", curves.size(),
+                 points.size(), segments.size(),
+                 (points.size() * 16 + segments.size() * 4) / 1e6);
+}
+
 
 MTL::AccelerationStructure* MetalRender::createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor)
 {
@@ -4826,6 +4965,76 @@ size_t MetalRender::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, boo
     return mBlasList.size() - 1;
 }
 
+// One acceleration structure per curve set.
+//
+// Not merged with the triangle path: a curve geometry descriptor names different
+// buffers and a different primitive, and the grouping that merges a glTF mesh's
+// primitives has nothing to merge here -- the converter already writes one set
+// per material.
+size_t MetalRender::buildCurveBlas(uint32_t sceneInstanceId)
+{
+    const oka::Instance& inst = mScene->getInstances()[sceneInstanceId];
+    const uint32_t curveId = inst.mCurveId;
+    if (curveId >= mCurveRanges.size() || mCurveRanges[curveId].segmentCount == 0 || !mCurvePointBuffer)
+    {
+        return (size_t)-1;
+    }
+    const CurveRange& range = mCurveRanges[curveId];
+    const oka::Curve& curve = mScene->getCurves()[curveId];
+
+    auto* geom = MTL::AccelerationStructureCurveGeometryDescriptor::alloc()->init();
+    geom->setControlPointBuffer(mCurvePointBuffer);
+    geom->setControlPointBufferOffset(0);
+    geom->setControlPointCount(mScene->getCurvesPoint().size());
+    geom->setControlPointFormat(MTL::AttributeFormatFloat3);
+    geom->setControlPointStride(sizeof(glm::float3));
+    geom->setRadiusBuffer(mCurveRadiusBuffer);
+    geom->setRadiusBufferOffset(0);
+    geom->setRadiusFormat(MTL::AttributeFormatFloat);
+    geom->setRadiusStride(sizeof(float));
+    geom->setIndexBuffer(mCurveSegmentBuffer);
+    geom->setIndexBufferOffset(range.segmentStart * sizeof(uint32_t));
+    geom->setIndexType(MTL::IndexTypeUInt32);
+    geom->setSegmentCount(range.segmentCount);
+    geom->setSegmentControlPointCount(range.controlPointsPerSegment);
+    geom->setCurveType(MTL::CurveTypeRound);
+    geom->setCurveBasis(curve.mType == oka::Curve::Type::eLinear ? MTL::CurveBasisLinear
+                                                                 : MTL::CurveBasisBSpline);
+    // Spherical caps on a linear basis, so consecutive segments of one strand
+    // join without a notch at every control point. A B-spline is already
+    // continuous there and takes disks at the two real ends.
+    geom->setCurveEndCaps(curve.mType == oka::Curve::Type::eLinear ? MTL::CurveEndCapsSphere
+                                                                   : MTL::CurveEndCapsDisk);
+    // Hair has no alpha cutout, and leaving it non-opaque would send every curve
+    // hit through an intersection function that does not exist for curves.
+    geom->setOpaque(true);
+
+    Blas blas;
+    blas.mIsSkeletal = false;
+    blas.mGeometryBase = (uint32_t)mGeometryEntries.size();
+
+    GeometryEntry entry{};
+    entry.vbOffset = curve.mPointsStart;
+    entry.indexOffset = range.segmentStart;
+    entry.materialId = inst.mMaterialId;
+    entry.flags = GEOM_FLAG_CURVE | (range.segmentsPerStrand & GEOM_CURVE_STRAND_MASK) |
+                  (curve.mType == oka::Curve::Type::eLinear ? 0u : GEOM_CURVE_CUBIC);
+    mGeometryEntries.push_back(entry);
+
+    const NS::Object* geoms[] = { geom };
+    MTL::PrimitiveAccelerationStructureDescriptor* primDescriptor =
+        MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init();
+    primDescriptor->setGeometryDescriptors(NS::Array::array(geoms, 1));
+    primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit | blasExtraUsage());
+    blas.mAs = createAccelerationStructureNoCompact(primDescriptor);
+    primDescriptor->release();
+    geom->release();
+
+    mBlasList.push_back(blas);
+    mPrimitiveAccelerationStructures.push_back(blas.mAs);
+    return mBlasList.size() - 1;
+}
+
 
 // Rebuild the acceleration structures for a different motion setting.
 //
@@ -5171,7 +5380,10 @@ bool MetalRender::stepAccelerationStructures(double budgetMs)
         {
             const size_t i = st.groupCursor++;
             const oka::Instance& curr = instances[i];
-            if (curr.type != oka::Instance::Type::eLight) // lights are handled in their own phase
+            // Lights and curves each have a phase of their own. A curve instance
+            // reaching here would read meshes[mCurveId] -- the two ids share a
+            // union -- and index a mesh that has nothing to do with it.
+            if (curr.type == oka::Instance::Type::eMesh)
             {
                 const bool skeletal = meshes[curr.mMeshId].isSkeletal;
                 const int nodeId = st.instanceNode[i];
@@ -5278,6 +5490,43 @@ bool MetalRender::stepAccelerationStructures(double budgetMs)
                 // control back, so the scratch buffers it holds are not carried
                 // across frames waiting for a group that may be many slices away
                 // from filling up.
+                flushAccelerationStructureGroup();
+                chargePhase();
+                report();
+                return finish(false);
+            }
+        }
+        chargePhase();
+        st.phase = Phase::Curves;
+    }
+
+    if (st.phase == Phase::Curves)
+    {
+        while (st.curveCursor < instances.size())
+        {
+            const size_t i = st.curveCursor++;
+            const oka::Instance& curr = instances[i];
+            if (curr.type == oka::Instance::Type::eCurve)
+            {
+                auto it = st.curveBlasOfSet.find(curr.mCurveId);
+                if (it == st.curveBlasOfSet.end())
+                {
+                    const size_t blasIdx = buildCurveBlas((uint32_t)i);
+                    if (blasIdx == (size_t)-1)
+                    {
+                        continue; // an empty set: warned about in buildCurveBuffers
+                    }
+                    it = st.curveBlasOfSet.emplace(curr.mCurveId, blasIdx).first;
+                }
+                EmittedInstance emitted{};
+                emitted.sceneInstanceId = (uint32_t)i;
+                emitted.asIndex = (uint32_t)it->second;
+                emitted.userID = mBlasList[it->second].mGeometryBase;
+                emitted.mask = GEOMETRY_MASK_CURVE;
+                mEmittedInstances.push_back(emitted);
+            }
+            if (outOfTime(st.curveCursor, true))
+            {
                 flushAccelerationStructureGroup();
                 chargePhase();
                 report();
@@ -5504,10 +5753,10 @@ STRELKA_INFO("BLAS build CPU: sizes {:.0f} ms, alloc {:.0f} ms, scratch {:.0f} m
 
     chargePhase();
     STRELKA_DEBUG("Acceleration structures CPU: meshes {:.0f} ms, grouping {:.0f} ms, blas {:.0f} ms, "
-                  "lights {:.0f} ms, finish {:.0f} ms",
+                  "curves {:.0f} ms, lights {:.0f} ms, finish {:.0f} ms",
                   st.phaseMs[(size_t)Phase::Meshes], st.phaseMs[(size_t)Phase::Grouping],
-                  st.phaseMs[(size_t)Phase::Blas], st.phaseMs[(size_t)Phase::Lights],
-                  st.phaseMs[(size_t)Phase::Finish]);
+                  st.phaseMs[(size_t)Phase::Blas], st.phaseMs[(size_t)Phase::Curves],
+                  st.phaseMs[(size_t)Phase::Lights], st.phaseMs[(size_t)Phase::Finish]);
     delete mAsBuild;
     mAsBuild = nullptr;
     return finish(true);

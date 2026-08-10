@@ -141,18 +141,16 @@ struct ShadowPayload
 // in any scene.
 constant float kShadowTransmittanceCutoff = 0.05f;
 
-[[intersection(triangle, triangle_data, instancing)]]
-bool shadowAlphaAnyHit(uint primitive_id [[primitive_id]],
-                       uint geometry_id [[geometry_id]],
-                       uint instance_id [[instance_id]],
-                       float2 barycentric_coord [[barycentric_coord]],
-                       ray_data ShadowPayload& payload [[payload]],
-                       constant MTLAccelerationStructureUserIDInstanceDescriptor* instances
-                           [[buffer(0)]],
-                       device const Material* materials [[buffer(1)]],
-                       device const GeometryEntry* geometryEntries [[buffer(2)]],
-                       device const char* vertexBuffer [[buffer(3)]],
-                       device const uint32_t* indexBuffer [[buffer(4)]])
+static bool shadowAlphaAnyHitImpl(uint primitive_id,
+                                  uint geometry_id,
+                                  uint instance_id,
+                                  float2 barycentric_coord,
+                                  ray_data ShadowPayload& payload,
+                                  constant MTLAccelerationStructureUserIDInstanceDescriptor* instances,
+                                  device const Material* materials,
+                                  device const GeometryEntry* geometryEntries,
+                                  device const char* vertexBuffer,
+                                  device const uint32_t* indexBuffer)
 {
     const auto inst = instances[instance_id];
     const GeometryEntry entry = geometryEntries[inst.userID + geometry_id];
@@ -188,6 +186,29 @@ bool shadowAlphaAnyHit(uint primitive_id [[primitive_id]],
     return all(payload.transmittance <= 1e-6f);
 }
 
+// Two entry points over one body. The tags an intersection function carries have
+// to match the intersector and the table that will hold it, so a curve-capable
+// shadow pipeline needs its own copy -- the test itself is identical, and curve
+// geometry is built opaque, so this is never called on a strand.
+#define WF_ANY_HIT_ENTRY(NAME, ...)                                                                  \
+    [[intersection(triangle, __VA_ARGS__)]]                                                          \
+    bool NAME(uint primitive_id [[primitive_id]], uint geometry_id [[geometry_id]],                  \
+              uint instance_id [[instance_id]], float2 barycentric_coord [[barycentric_coord]],      \
+              ray_data ShadowPayload& payload [[payload]],                                           \
+              constant MTLAccelerationStructureUserIDInstanceDescriptor* instances [[buffer(0)]],    \
+              device const Material* materials [[buffer(1)]],                                        \
+              device const GeometryEntry* geometryEntries [[buffer(2)]],                             \
+              device const char* vertexBuffer [[buffer(3)]],                                         \
+              device const uint32_t* indexBuffer [[buffer(4)]])                                      \
+    {                                                                                                \
+        return shadowAlphaAnyHitImpl(primitive_id, geometry_id, instance_id, barycentric_coord,      \
+                                     payload, instances, materials, geometryEntries, vertexBuffer,   \
+                                     indexBuffer);                                                   \
+    }
+
+WF_ANY_HIT_ENTRY(shadowAlphaAnyHit, triangle_data, instancing)
+WF_ANY_HIT_ENTRY(shadowAlphaAnyHitCurve, triangle_data, curve_data, instancing)
+
 // Measured and not kept: the same stochastic alpha test as an intersection
 // function on the *main* rays, so a canopy resolves in one traversal instead of
 // one per leaf slipped past.
@@ -211,6 +232,14 @@ struct MotionTraversal
     using structure = acceleration_structure<instancing, primitive_motion>;
     using isect = intersector<triangle_data, instancing, primitive_motion>;
     using table = intersection_function_table<triangle_data, instancing, primitive_motion>;
+    static geometry_type geometryTypes()
+    {
+        return geometry_type::triangle;
+    }
+    static float curveParameter(thread const isect::result_type&)
+    {
+        return 0.0f;
+    }
     static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float time)
     {
         return i.intersect(r, as, mask, time);
@@ -227,6 +256,70 @@ struct StaticTraversal
     using structure = acceleration_structure<instancing>;
     using isect = intersector<triangle_data, instancing>;
     using table = intersection_function_table<triangle_data, instancing>;
+    static geometry_type geometryTypes()
+    {
+        return geometry_type::triangle;
+    }
+    static float curveParameter(thread const isect::result_type&)
+    {
+        return 0.0f;
+    }
+    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float)
+    {
+        return i.intersect(r, as, mask);
+    }
+    static isect::result_type traceAnyHit(thread isect& i, ray r, structure as, uint32_t mask,
+                                          float, table t, thread ShadowPayload& payload)
+    {
+        return i.intersect(r, as, mask, t, payload);
+    }
+};
+
+// The same two, able to see curves.
+//
+// A separate pair rather than a flag, because `curve_data` is a *tag*: it decides
+// what the intersector's result type carries, so it cannot be turned on by a
+// function constant any more than the motion tag can. That is also why it is
+// worth keeping apart -- a scene with no hair in it goes on traversing with the
+// triangle-only intersector it always used, and the extra geometry type costs it
+// nothing.
+struct CurveMotionTraversal
+{
+    using structure = acceleration_structure<instancing, primitive_motion>;
+    using isect = intersector<triangle_data, curve_data, instancing, primitive_motion>;
+    using table = intersection_function_table<triangle_data, curve_data, instancing, primitive_motion>;
+    static geometry_type geometryTypes()
+    {
+        return geometry_type::triangle | geometry_type::curve;
+    }
+    static float curveParameter(thread const isect::result_type& r)
+    {
+        return r.curve_parameter;
+    }
+    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float time)
+    {
+        return i.intersect(r, as, mask, time);
+    }
+    static isect::result_type traceAnyHit(thread isect& i, ray r, structure as, uint32_t mask,
+                                          float time, table t, thread ShadowPayload& payload)
+    {
+        return i.intersect(r, as, mask, time, t, payload);
+    }
+};
+
+struct CurveStaticTraversal
+{
+    using structure = acceleration_structure<instancing>;
+    using isect = intersector<triangle_data, curve_data, instancing>;
+    using table = intersection_function_table<triangle_data, curve_data, instancing>;
+    static geometry_type geometryTypes()
+    {
+        return geometry_type::triangle | geometry_type::curve;
+    }
+    static float curveParameter(thread const isect::result_type& r)
+    {
+        return r.curve_parameter;
+    }
     static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float)
     {
         return i.intersect(r, as, mask);
@@ -479,7 +572,7 @@ static void extendImpl(
     // primitive_motion tag, so a deforming scene would need the intersector kept
     // alongside it.
     typename T::isect isect;
-    isect.assume_geometry_type(geometry_type::triangle);
+    isect.assume_geometry_type(T::geometryTypes());
     // The coverage test for cutout geometry happens in `shade`, not here -- see
     // the note above extendAlphaAnyHit's replacement for the measurement.
     isect.force_opacity(forced_opacity::opaque);
@@ -607,7 +700,13 @@ static void extendImpl(
                                  : (inst.userID + hit.geometry_id);
     rec.instanceIndex = hit.instance_id;
     rec.primitiveId = hit.primitive_id;
-    rec.barycentrics = hit.triangle_barycentric_coord;
+    // A curve hit has no barycentrics; what it has is one parameter along the
+    // segment. It rides in the same two floats rather than in a field of its own,
+    // because `shade` already has to read the geometry entry to find the
+    // material and the entry says which kind of primitive this is.
+    rec.barycentrics = (hit.type == intersection_type::curve)
+                           ? vector_float2(T::curveParameter(hit), 0.0f)
+                           : hit.triangle_barycentric_coord;
     rec.distance = hit.distance;
     hits[tid] = rec;
     queuePush(hitCounter, hitQueue, tid);
@@ -637,6 +736,8 @@ static void extendImpl(
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
 WF_EXTEND_ENTRY(wavefrontExtendStatic, StaticTraversal)
+WF_EXTEND_ENTRY(wavefrontExtendCurve, CurveMotionTraversal)
+WF_EXTEND_ENTRY(wavefrontExtendStaticCurve, CurveStaticTraversal)
 
 // Rebuild the triangle's vertex attributes from the vertex buffer.
 //
@@ -706,6 +807,92 @@ static void fetchTriangle(device const char* vertexBuffer,
             t[k] = tan;
         }
     }
+}
+
+// Rebuild a curve hit from the segment it landed on.
+//
+// A curve intersection reports the segment and one parameter along it, and
+// nothing else -- there is no vertex to interpolate and no uv authored anywhere.
+// Everything a shading point needs comes back out of the three curve buffers:
+//
+//   tangent  the segment's own direction, which for hair is the strand's;
+//   normal   the outward radial direction at the hit, which is what makes a
+//            round curve shade as a cylinder rather than as a ribbon;
+//   uv.x     where along the strand this is, root at 0 and tip at 1.
+//
+// The radius buffer is not read here at all -- it is what the intersector
+// already used to find the hit, and nothing downstream asks how thick the
+// strand was.
+//
+// uv.x is recovered from the segment index alone: strands from a particle system
+// all have the same number of segments, so `segment % segmentsPerStrand` is the
+// position within the strand and no per-point coordinate has to be stored. A set
+// with strands of differing lengths reports 0 there, which is a flat root
+// colour rather than a wrong gradient.
+//
+// The normal is derived from the hit point rather than from the parameter,
+// because the hit point is exact and the parameter is what the intersector chose
+// to report -- and at a sphere cap, where segments overlap, the two disagree.
+static void fetchCurve(device const packed_float3* curvePoints,
+                       device const uint32_t* curveSegments,
+                       GeometryEntry entry,
+                       uint32_t primitiveId,
+                       float curveParam,
+                       float3 worldHit,
+                       float4x4 objectToWorld,
+                       thread float3& outNormal,
+                       thread float3& outTangent,
+                       thread float2& outUv)
+{
+    const bool cubic = (entry.flags & GEOM_CURVE_CUBIC) != 0u;
+    const uint32_t base = curveSegments[entry.indexOffset + primitiveId];
+    const float u = saturate(curveParam);
+    // Control points are placed by the same transform as the hit, so the axis is
+    // built in world space and the radial offset needs no change of basis.
+#define WF_CURVE_CP(i) ((objectToWorld * float4(float3(curvePoints[base + (i)]), 1.0f)).xyz)
+
+    float3 axis, dAxis;
+    if (cubic)
+    {
+        // Cubic B-spline, the basis the acceleration structure was built with.
+        const float3 p0 = WF_CURVE_CP(0), p1 = WF_CURVE_CP(1);
+        const float3 p2 = WF_CURVE_CP(2), p3 = WF_CURVE_CP(3);
+        const float u2 = u * u, u3 = u2 * u;
+        const float b0 = (1.0f - 3.0f * u + 3.0f * u2 - u3) / 6.0f;
+        const float b1 = (4.0f - 6.0f * u2 + 3.0f * u3) / 6.0f;
+        const float b2 = (1.0f + 3.0f * u + 3.0f * u2 - 3.0f * u3) / 6.0f;
+        const float b3 = u3 / 6.0f;
+        const float d0 = (-1.0f + 2.0f * u - u2) * 0.5f;
+        const float d1 = (-4.0f * u + 3.0f * u2) * 0.5f;
+        const float d2 = (1.0f + 2.0f * u - 3.0f * u2) * 0.5f;
+        const float d3 = u2 * 0.5f;
+        axis = p0 * b0 + p1 * b1 + p2 * b2 + p3 * b3;
+        dAxis = p0 * d0 + p1 * d1 + p2 * d2 + p3 * d3;
+    }
+    else
+    {
+        const float3 p0 = WF_CURVE_CP(0), p1 = WF_CURVE_CP(1);
+        axis = mix(p0, p1, u);
+        dAxis = p1 - p0;
+    }
+#undef WF_CURVE_CP
+
+    outTangent = normalize(dAxis);
+    const float3 radial = worldHit - axis;
+    // Remove whatever component of the offset runs along the strand: at a
+    // spherical cap the closest axis point is not the one the parameter names,
+    // and leaving it in tilts the normal toward the tip.
+    const float3 perp = radial - outTangent * dot(radial, outTangent);
+    const float lenSq = dot(perp, perp);
+    // A hit exactly on the axis has no radial direction; anything perpendicular
+    // to the strand will do, and this is far rarer than a denormal guard.
+    outNormal = lenSq > 1e-16f ? perp * rsqrt(lenSq)
+                               : normalize(cross(outTangent, float3(0.0f, 0.0f, 1.0f)));
+
+    const uint32_t perStrand = entry.flags & GEOM_CURVE_STRAND_MASK;
+    const float alongStrand =
+        perStrand != 0u ? ((float)(primitiveId % perStrand) + u) / (float)perStrand : 0.0f;
+    outUv = float2(alongStrand, 0.0f);
 }
 
 // The same fetch, interpolated on the way out.
@@ -1074,6 +1261,12 @@ kernel void wavefrontShade(
     device const char*                                         prevFrameVertexBuffer [[buffer(23)]],
     constant MTLAccelerationStructureUserIDInstanceDescriptor* prevInstances  [[buffer(24)]],
     device SharcEntry*                                         sharcEntries   [[buffer(25)]],
+    // Curves. `extend` cannot hand over what it saw -- primitive_data is only
+    // addressable inside the kernel that ran the intersect -- so a strand hit is
+    // rebuilt here from the same buffers the acceleration structure was built
+    // from, exactly as a triangle hit is refetched from the vertex buffer.
+    device const packed_float3*                                curvePoints    [[buffer(26)]],
+    device const uint32_t*                                     curveSegments  [[buffer(27)]],
     texture2d<float>                                           envMapTexture  [[texture(0)]])
 {
     if (gid >= control[WF_CTRL_HIT_N])
@@ -1446,14 +1639,12 @@ kernel void wavefrontShade(
                                    motionTime < 1.0f && prevVertexBuffer && indexBuffer;
 
     const float2 bary = rec.barycentrics;
+    const bool isCurve = SPEC_CURVES && (entry.flags & GEOM_FLAG_CURVE) != 0u;
     float3 objectNormal, objectTangent, vertexColor, objectGeomNormal;
     float2 uv;
     float tangentSign = 1.0f;
     float3 objEdge1, objEdge2;
     float uvArea2 = 0.0f;
-    fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId,
-                         interpolateMotion, motionTime, bary, objectNormal, objectTangent, uv,
-                         vertexColor, tangentSign, objectGeomNormal, objEdge1, objEdge2, uvArea2);
 
     const auto inst = instances[rec.instanceIndex];
     const float4x4 objectToWorld = float4x4(
@@ -1464,14 +1655,41 @@ kernel void wavefrontShade(
 
     const float3 worldPosition = rayOrigin + rayDir * rec.distance;
 
-    const float3 worldNormal = normalize(transformDirection(normalize(objectNormal), objectToWorld));
-    const float3 worldTangent =
-        normalize(transformDirection(normalize(objectTangent), objectToWorld));
+    float3 shadingNormal, shadingTangent, shadingGeomNormal;
+    if (isCurve)
+    {
+        // Built in world space rather than fetched in object space and
+        // transformed out, because the radial normal is taken *from the hit
+        // point* -- and the hit point only exists in world space. Coming back the
+        // other way would need the transform's inverse, which MSL does not
+        // provide and which nothing else in this kernel wants.
+        fetchCurve(curvePoints, curveSegments, entry, rec.primitiveId, bary.x, worldPosition,
+                   objectToWorld, shadingNormal, shadingTangent, uv);
+        // A strand has no separate geometric normal: the surface *is* the
+        // cylinder, so the shading normal is the geometric one.
+        shadingGeomNormal = shadingNormal;
+        vertexColor = float3(1.0f);
+        objEdge1 = shadingTangent;
+        objEdge2 = shadingNormal;
+        uvArea2 = 0.0f; // no uv derivatives, and a strand is thinner than a texel
+    }
+    else
+    {
+        fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId,
+                             interpolateMotion, motionTime, bary, objectNormal, objectTangent, uv,
+                             vertexColor, tangentSign, objectGeomNormal, objEdge1, objEdge2, uvArea2);
+        shadingNormal = normalize(transformDirection(normalize(objectNormal), objectToWorld));
+        shadingTangent = normalize(transformDirection(normalize(objectTangent), objectToWorld));
+        shadingGeomNormal = normalize(transformDirection(objectGeomNormal, objectToWorld));
+    }
+
+    const float3 worldNormal = shadingNormal;
+    const float3 worldTangent = shadingTangent;
     // glTF TANGENT.w. Without it the bitangent points the wrong way and every
     // normal map is mirrored along it -- bumps light from the opposite side.
     const float3 worldBinormal = cross(worldNormal, worldTangent) * tangentSign;
 
-    const float3 geomNormal = normalize(transformDirection(objectGeomNormal, objectToWorld));
+    const float3 geomNormal = shadingGeomNormal;
 
     // --- Crossing the boundary of a participating medium --------------------
     //
@@ -2319,7 +2537,7 @@ static float3 mediumTransmittance(typename T::structure accelerationStructure,
         }
 
         typename T::isect isect;
-        isect.assume_geometry_type(geometry_type::triangle);
+        isect.assume_geometry_type(T::geometryTypes());
         isect.force_opacity(forced_opacity::opaque);
         isect.accept_any_intersection(false);
 
@@ -2382,7 +2600,7 @@ static void shadowImpl(
     const ShadowRay sr = shadowRays[gid];
 
     typename T::isect isect;
-    isect.assume_geometry_type(geometry_type::triangle);
+    isect.assume_geometry_type(T::geometryTypes());
 
     ray shadowRay;
     shadowRay.origin = float3(sr.origin);
@@ -2553,6 +2771,8 @@ kernel void wavefrontSharcDeposit(uint tid [[thread_position_in_grid]],
 
 WF_SHADOW_ENTRY(wavefrontShadow, MotionTraversal)
 WF_SHADOW_ENTRY(wavefrontShadowStatic, StaticTraversal)
+WF_SHADOW_ENTRY(wavefrontShadowCurve, CurveMotionTraversal)
+WF_SHADOW_ENTRY(wavefrontShadowStaticCurve, CurveStaticTraversal)
 
 // ---------------------------------------------------------------------------
 // resolve -- average the samples and fold into the accumulation buffer

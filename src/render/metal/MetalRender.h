@@ -130,6 +130,34 @@ private:
     MTL::AccelerationStructureTriangleGeometryDescriptor* createStaticGeometryDescriptor(
         const oka::Mesh& sceneMesh, MTL::Buffer* perPrimitiveBuffer, uint32_t triangleCount);
     size_t buildBlas(const std::vector<uint32_t>& sceneInstanceIds, bool skeletal);
+
+    // --- Curves ---------------------------------------------------------------
+    //
+    // Hair is the one thing in these scenes that must not be triangulated, and
+    // both the acceleration structure builder and `shade` read the same three
+    // buffers: control points, one radius per point, and the first control point
+    // of each segment. They are uploaded once for the whole scene, so a curve
+    // set is a range in them rather than a set of buffers of its own.
+    MTL::Buffer* mCurvePointBuffer = nullptr;
+    MTL::Buffer* mCurveRadiusBuffer = nullptr;
+    MTL::Buffer* mCurveSegmentBuffer = nullptr;
+    /// Per scene curve set: where its segments start in mCurveSegmentBuffer and
+    /// how many there are. Filled by buildCurveBuffers, read when its BLAS is
+    /// built.
+    struct CurveRange
+    {
+        uint32_t segmentStart = 0;
+        uint32_t segmentCount = 0;
+        uint32_t controlPointsPerSegment = 2;
+        uint32_t segmentsPerStrand = 0;
+    };
+    std::vector<CurveRange> mCurveRanges;
+    /// Whether the scene has any curve geometry at all. Drives kFeatureCurves,
+    /// so a scene without hair still compiles the triangle-only intersector --
+    /// which is the whole reason the traversal type is a compiled variant.
+    bool mSceneHasCurves = false;
+    void buildCurveBuffers();
+    size_t buildCurveBlas(uint32_t sceneInstanceId);
     struct View
     {
         oka::Camera::Matrices mCamMatrices;
@@ -330,6 +358,11 @@ private:
         // the medium's parameters costs a load in `extend`. A scene with no
         // subsurface material compiles the variant that has neither.
         kFeatureSubsurface = 1u << 9,
+        // A curve-capable intersector is a different *type*, not a different
+        // branch: the tags decide which fields the result carries, so this
+        // selects a different set of kernel entry points rather than
+        // specialising the same one.
+        kFeatureCurves = 1u << 10,
         kFeatureCount = 1u << 5,
     };
     std::map<uint32_t, WavefrontVariant> mWavefrontVariants;

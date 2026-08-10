@@ -1,5 +1,6 @@
 #include <strelka/sceneloader/gltfloader.h>
 #include <strelka/sceneloader/sceneserializer.h>
+#include <strelka/sceneloader/curve_sidecar.h>
 #include <strelka/sceneloader/light_json.h>
 
 #include <strelka/scene/camera.h>
@@ -1277,6 +1278,22 @@ void loadSkeletalData(const tinygltf::Model& model, oka::Scene& scene, const flo
 }
 
 
+// Curves ride in a binary sidecar; see curve_sidecar.h for the format and for
+// why glTF cannot carry them. Named after the model rather than scanned for,
+// unlike the light sidecar: a directory holding two converted scenes would
+// otherwise give one of them the other's hair.
+bool loadCurvesFromSidecar(const std::string& modelPath, oka::Scene& scene)
+{
+    const std::string stem = modelPath.substr(0, modelPath.rfind('.'));
+    const std::string curvePath = stem + "_curves.bin";
+    if (!fs::exists(curvePath))
+    {
+        return false;
+    }
+    STRELKA_INFO("Found curve file: {}", curvePath);
+    return curvesidecar::loadCurvesFile(curvePath, scene);
+}
+
 bool loadLightsFromJson(const std::string& modelPath, oka::Scene& scene)
 {
     // First try exact match: <modelname>_light.json
@@ -1599,6 +1616,8 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
 
     std::vector<Phase> phases;
     phases.push_back({ "materials", [&] { loadMaterials(model, scene); } });
+    // After the materials, which the sets are matched against by name.
+    phases.push_back({ "curves", [&] { loadCurvesFromSidecar(modelPath, scene); } });
     phases.push_back({ "lights", [&] { hadJsonLights = loadLightsFromJson(modelPath, scene); } });
     phases.push_back({ "cameras", [&] {
                           loadCameras(model, scene, cameraIndexMap);

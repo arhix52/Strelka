@@ -315,10 +315,20 @@ struct Triangle
 // this table instead, and the geometry index within the BLAS selects the entry.
 struct GeometryEntry
 {
-    uint32_t vbOffset;     // mesh vertex buffer offset
-    uint32_t indexOffset;  // mesh index buffer offset
+    uint32_t vbOffset;     // mesh vertex buffer offset, or first control point of a curve set
+    uint32_t indexOffset;  // mesh index buffer offset, or first segment of a curve set
     uint32_t materialId;
+    // Zero for a triangle mesh. For a curve set: GEOM_FLAG_CURVE, plus the
+    // segments per strand in the low bits, which is what lets the shader recover
+    // root-to-tip position from the segment index alone -- a strand's own
+    // parameter, for no memory at all. Zero there means the set has strands of
+    // differing lengths and the gradient is not available.
+    uint32_t flags;
 };
+
+#define GEOM_FLAG_CURVE        (1u << 31)
+#define GEOM_CURVE_CUBIC       (1u << 30)
+#define GEOM_CURVE_STRAND_MASK 0x0000FFFFu
 
 // --- Wavefront path tracing ------------------------------------------------
 //
@@ -405,6 +415,7 @@ struct PathState
 #define MEDIUM_MAX_STEPS    256u
 
 #define SHARC_NO_ENTRY 0xFFFFFFFFu
+
 
 #define PATH_FLAG_ALIVE      (1u << 8)
 #define PATH_FLAG_SPECULAR   (1u << 9)

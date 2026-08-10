@@ -40,6 +40,15 @@ struct Curve
     uint32_t mPointsCount;
     uint32_t mWidthsStart;
     uint32_t mWidthsCount;
+    // The basis the control points are meant to be read under. It used to be a
+    // parameter of createCurve that nothing stored, so every consumer had to
+    // assume one -- and the two backends assumed different ones.
+    Type mType = Type::eLinear;
+    /// Segments per strand when every strand in the set has the same count, else
+    /// 0. Hair from a particle system always does, and knowing it lets a shader
+    /// recover where along a strand a hit landed from the segment index alone --
+    /// which is the whole of what a root-to-tip gradient needs, for no memory.
+    uint32_t mSegmentsPerStrand = 0;
 };
 
 struct Instance

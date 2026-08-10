@@ -46,6 +46,7 @@ constant bool kFcAlpha [[function_constant(5)]];
 constant bool kFcFog [[function_constant(6)]];
 constant bool kFcSharc [[function_constant(7)]];
 constant bool kFcSubsurface [[function_constant(8)]];
+constant bool kFcCurves [[function_constant(9)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
 constant bool SPEC_SHARC = is_function_constant_defined(kFcSharc) ? kFcSharc : false;
@@ -60,6 +61,12 @@ constant bool SPEC_DEBUG = is_function_constant_defined(kFcDebug) ? kFcDebug : t
 // nothing for the feature -- which matters most in the shadow stage, where the
 // alternative to any-hit traversal is a loop over closest hits.
 constant bool SPEC_ALPHA = is_function_constant_defined(kFcAlpha) ? kFcAlpha : true;
+// Whether the scene has curve geometry. The traversal side of this cannot be a
+// constant -- the intersector's tags decide what its result type carries, so a
+// curve-capable traversal is a different kernel entirely -- but `shade` has no
+// intersector, only the branch that rebuilds a hit strand, and that one is worth
+// compiling out of every scene that has no hair in it.
+constant bool SPEC_CURVES = is_function_constant_defined(kFcCurves) ? kFcCurves : false;
 
 struct PerRayData
 {

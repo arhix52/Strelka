@@ -108,7 +108,15 @@ if(APPLE)
     )
 
     # -gline-tables-only/-frecord-sources keep Metal frame captures usable.
-    set(METAL_BUILD_FLAGS -Wall -std=metal3.0)
+    #
+    # metal3.1 rather than 3.0 for one feature: curve intersection. `curve_data`,
+    # `geometry_type::curve` and `intersection_result::curve_parameter` do not
+    # exist before it, and hair is the one thing in these scenes that must not be
+    # triangulated. Nothing else in the tree needs 3.1, and the Metal 4 pipelines
+    # are built from this same library either way -- MTL4::Compiler takes a
+    # metal3.x metallib, and the acceleration structures both paths traverse are
+    # built through the Metal 3 API regardless of which one submits the frame.
+    set(METAL_BUILD_FLAGS -Wall -std=metal3.1)
     # Two kernels that do the same arithmetic in a different order (the megakernel
     # and the wavefront tracer) fuse multiply-adds differently, which leaves a
     # ~1e-7 relative difference in most pixels and, through chaotic paths, a
