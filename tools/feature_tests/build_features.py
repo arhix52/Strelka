@@ -803,6 +803,100 @@ def s18_bounded_volume(tex):
     obj.data.materials.append(mat)
 
 
+def s19_env_and_light(tex):
+    """A textured environment and an area light, lighting the same surfaces.
+
+    The rung the ladder was missing, and the reason docs/open-defects.md entry 6
+    could not be settled. RIS and plain next-event estimation agree exactly on
+    every other row here, and they must: resampling among candidates is a no-op
+    when they all come from one light, and evidently faithful with three punctual
+    ones. What no other row has is *two kinds* of light at once, which is where
+    `connectToLight` splits its draw -- half the samples to the environment, half
+    to the analytic lights -- and where the two estimators can differ.
+
+    The sky is a Nishita model with the sun disc off. Off because a disc is a
+    near-delta source in an environment map: it converges slowly on both sides
+    and would make this rung measure variance rather than bias. What is left is
+    smooth and strongly non-uniform -- an order of magnitude between the bright
+    side and the dark one -- which is exactly the distribution environment
+    importance sampling exists for, and the thing a uniform sky cannot test.
+
+    Three roughnesses, because the split matters differently to a diffuse lobe
+    (which sees both lights as area) and a near-specular one (which sees the sky
+    as texture and the rect light as a highlight).
+    """
+    world = bpy.data.worlds.new("SkyWorld")
+    world.use_nodes = True
+    nt = world.node_tree
+    nt.nodes.clear()
+    out = nt.nodes.new("ShaderNodeOutputWorld")
+    bg = nt.nodes.new("ShaderNodeBackground")
+    sky = nt.nodes.new("ShaderNodeTexSky")
+    # The physical sky, whatever this Blender calls it. 5.x renamed Nishita to
+    # MULTIPLE_SCATTERING and there is no alias, so pick from what the enum
+    # actually offers rather than from what the manual said last year.
+    types = sky.bl_rna.properties["sky_type"].enum_items.keys()
+    sky.sky_type = next(t for t in ("MULTIPLE_SCATTERING", "NISHITA", "HOSEK_WILKIE") if t in types)
+    sky.sun_elevation = math.radians(28.0)
+    sky.sun_rotation = math.radians(135.0)
+    sky.sun_disc = False
+    sky.altitude = 0.0
+    sky.air_density = 1.0
+    bg.inputs["Strength"].default_value = 1.0
+    nt.links.new(sky.outputs["Color"], bg.inputs["Color"])
+    nt.links.new(bg.outputs["Background"], out.inputs["Surface"])
+    bpy.context.scene.world = world
+
+    add_stage()
+    for pos, rough in zip(row_positions(3), (0.05, 0.3, 1.0)):
+        obj = sphere("s_%.2f" % rough, pos)
+        obj.data.materials.append(
+            new_material("env_rough_%.2f" % rough, base_color=(0.5, 0.5, 0.5, 1.0),
+                         roughness=rough, metallic=0.0))
+
+
+def s20_mirror_and_floor(tex):
+    """A large mirror facing a rough textured floor.
+
+    Not a shading test -- every lobe in it is already covered by rows 03 and 04 --
+    but a *denoiser* test, and the one docs/open-defects.md entry 7 says it needs.
+    That entry measures `render.guide_primary_hit` on the bathroom, where the
+    mirrors are small, and finds it worth about a fifth at low sample counts. The
+    walk it replaces exists for the opposite case: a primary hit that *is* a
+    mirror, where taking the guides at the surface hands the denoiser a
+    featureless black albedo instead of the world being reflected.
+
+    So this is that case, deliberately: the mirror fills most of the frame, and
+    what it reflects is a rough floor with structure in it. Comparing the two
+    guide sources here against a converged Strelka render is what says whether
+    the walk should stay the default. The Cycles reference comes for free and
+    keeps the row honest about the shading underneath.
+    """
+    grey = new_material("floor_rough", base_color=(0.45, 0.42, 0.38, 1.0),
+                        roughness=0.75, metallic=0.0)
+    bpy.ops.mesh.primitive_plane_add(size=14.0, location=(0.0, 0.0, 0.0))
+    floor = bpy.context.object
+    floor.name = "Floor"
+    floor.data.materials.append(grey)
+    link_texture(grey, "base_color", tex["srgb"])
+
+    # The mirror stands where the back wall would be and is the whole background.
+    mirror = new_material("mirror", base_color=(0.95, 0.95, 0.95, 1.0),
+                          roughness=0.02, metallic=1.0)
+    bpy.ops.mesh.primitive_plane_add(size=6.0, location=(0.0, 2.6, 1.6),
+                                     rotation=(math.radians(90), 0.0, 0.0))
+    wall = bpy.context.object
+    wall.name = "Mirror"
+    wall.data.materials.append(mirror)
+
+    # Something for it to reflect that is not the floor.
+    for pos, rough in zip(row_positions(3), (0.15, 0.5, 0.9)):
+        obj = sphere("s_%.2f" % rough, pos)
+        obj.data.materials.append(
+            new_material("ball_%.2f" % rough, base_color=(0.6, 0.25, 0.2, 1.0),
+                         roughness=rough, metallic=0.0))
+
+
 # KHR_materials_clearcoat has no IOR field and Blender writes no sheen extension
 # at all, so both scenes are patched after the export. Keyed by scene name; the
 # function is handed the parsed glTF document and mutates it in place.
@@ -906,7 +1000,17 @@ SCENES = [
     ("16_iridescence",      s16_iridescence,   True),
     ("17_coated_glass",     s17_coated_glass,  True),
     ("18_bounded_volume",   s18_bounded_volume, True),
+    ("19_env_and_light",    s19_env_and_light, True),
+    ("20_mirror_and_floor", s20_mirror_and_floor, True),
 ]
+
+# Scenes whose world is not black and therefore has to reach Strelka as an
+# environment map. The world is baked to an equirectangular EXR in Strelka's own
+# convention by bake_env.py, which measures Cycles' mapping rather than assuming
+# it -- see the note there about the assumption that survived every check except
+# a render.
+ENV_BAKE = {"19_env_and_light"}
+ENV_BAKE_WIDTH = 1024
 
 
 # ---------------------------------------------------------------------------
@@ -946,7 +1050,7 @@ def export_gltf(filepath, export_lights):
     bpy.ops.export_scene.gltf(**kwargs)
 
 
-def write_light_json(path):
+def write_light_json(path, environment=None):
     data = {
         "lights": [
             {
@@ -960,8 +1064,48 @@ def write_light_json(path):
             }
         ]
     }
+    if environment is not None:
+        data["environment"] = environment
     with open(path, "w") as f:
         json.dump(data, f, indent=4)
+
+
+def bake_world_env(scene_dir, name):
+    """Bake the current scene's world to an equirectangular EXR Strelka can read.
+
+    Imported from bake_env rather than reimplemented: the mapping between
+    Cycles' panorama and Strelka's lookup is the part that is easy to get wrong
+    and hard to notice, and that module gets it by measuring a direction field
+    instead of writing the inverse down.
+    """
+    import numpy as np
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from bake_env import make_bake_scene, load_rgb, direction_field, resample_to_strelka
+
+    world = bpy.context.scene.world
+    width, height = ENV_BAKE_WIDTH, ENV_BAKE_WIDTH // 2
+    sc = make_bake_scene(world, width * 2, height * 2)
+    raw = os.path.join(scene_dir, name + "_env_raw.exr")
+    sc.render.filepath = raw
+    bpy.ops.render.render(write_still=True, scene=sc.name)
+    src, w, h = load_rgb(raw)
+    dst = resample_to_strelka(src, direction_field(w, h), width, height)
+    os.remove(raw)
+    bpy.data.scenes.remove(sc)
+
+    final = os.path.join(scene_dir, name + "_env.exr")
+    img = bpy.data.images.new(name + "_env", width=width, height=height, float_buffer=True)
+    img.colorspace_settings.name = "Non-Color"
+    rgba = np.ones((height, width, 4), dtype=np.float32)
+    rgba[:, :, :3] = dst[::-1]   # Strelka reads row 0 as v = 0; Blender is bottom-up
+    img.pixels.foreach_set(rgba.ravel())
+    img.filepath_raw = final
+    img.file_format = "OPEN_EXR"
+    img.save()
+    bpy.data.images.remove(img)
+    print("  env    -> %s  mean=%.4f max=%.3f"
+          % (os.path.basename(final), float(dst.mean()), float(dst.max())))
+    return {"texture": name + "_env.exr", "intensity": 1.0, "color": [1.0, 1.0, 1.0]}
 
 
 def write_toml(path, name, gltf_rel, out_rel):
@@ -1089,9 +1233,14 @@ def main():
         print("  glTF   -> %s" % os.path.relpath(gltf_path, out_root))
         manifest[name] = verify_export(gltf_path)
 
+        environment = None
+        if name in ENV_BAKE:
+            environment = bake_world_env(scene_dir, name)
+
         if use_sidecar:
-            write_light_json(os.path.join(scene_dir, name + "_light.json"))
-            print("  lights -> sidecar (radiance %.3f)" % KEY_RADIANCE)
+            write_light_json(os.path.join(scene_dir, name + "_light.json"), environment)
+            print("  lights -> sidecar (radiance %.3f%s)"
+                  % (KEY_RADIANCE, " + environment" if environment else ""))
         else:
             print("  lights -> KHR_lights_punctual (no sidecar)")
 

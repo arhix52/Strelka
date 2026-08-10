@@ -196,6 +196,8 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.textureLod = *v;
     if (auto v = tbl["render"]["guide_primary_hit"].value<bool>())
         cfg.guidePrimaryHit = *v;
+    if (auto v = tbl["render"]["denoise_firefly_clamp"].value<double>())
+        cfg.denoiseFireflyClamp = (float)*v;
     if (auto v = tbl["render"]["ris_candidates"].value<int64_t>())
         cfg.risCandidates = (uint32_t)*v;
     if (auto v = tbl["render"]["estimator_mode"].value<int64_t>())
@@ -325,7 +327,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/risCandidates", m_config.risCandidates);
     m_settings->setAs<uint32_t>("render/pt/jitterSign", 0);
     m_settings->setAs<uint32_t>("render/pt/denoiseDepthMode", 0);
-    m_settings->setAs<float>("render/pt/denoiseFireflyClamp", 8.0f);
+    m_settings->setAs<float>("render/pt/denoiseFireflyClamp", m_config.denoiseFireflyClamp);
     m_settings->setAs<float>("render/pt/clampIndirect", m_config.clampIndirect);
     m_settings->setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);
     m_settings->setAs<uint32_t>("render/pt/metal4", m_config.metal4);

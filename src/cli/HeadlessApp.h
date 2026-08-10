@@ -60,6 +60,12 @@ struct RenderConfig
     // Take the denoiser's material guides at the primary hit instead of walking
     // to the first rough surface. See Uniforms::guidePrimaryHit.
     bool guidePrimaryHit = false;
+    /// Luminance ceiling on what the denoiser is handed, in exposed units; 0
+    /// disables it. Configurable because it is a truncation, and a scene bright
+    /// enough to be clipped by it measures the clamp rather than the denoiser --
+    /// which is what a mirror facing a light does. See docs/open-defects.md
+    /// entry 7.
+    float denoiseFireflyClamp = 8.0f;
     // 0 = spatial scaler, 1 = temporal scaler (ignored when denoise is on).
     uint32_t upscaleMode = 0;
     uint32_t risCandidates = 1; // 1 = plain next-event estimation

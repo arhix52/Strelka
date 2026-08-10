@@ -43,8 +43,8 @@ tools/feature_tests/run_strelka.sh
 Useful flags on step 1: `--only 07` to rebuild one scene, `--no-render` to skip
 Cycles entirely (fast, when you only want to inspect the exported glTF).
 
-**StrelkaCLI is not on `arhix/wavefront`.** It lives on `bdpt_dev` as commit
-`15f2d28`; cherry-pick it and rebuild into `build/Release` before step 2.
+Step 2 needs `StrelkaCLI` in `build/Release`, which a default build produces.
+(This used to say the binary lived on another branch; it does not any more.)
 
 ## Reading the results
 
@@ -84,6 +84,32 @@ fixing, but it is not a shading bug.
 | `16_iridescence` | `KHR_materials_iridescence` thickness ramp | 0.023 / 1.010 |
 | `17_coated_glass` | transmission + clearcoat together | 0.067 / 0.994 |
 | `18_bounded_volume` | `STRELKA_materials_medium` | 0.027 / 1.000 |
+| `19_env_and_light` | an environment map *and* an area light | 0.026 / 1.000 |
+| `20_mirror_and_floor` | a mirror filling the frame (denoiser guides) | 0.034 / 1.038 |
+
+`19_env_and_light` is the only row with two kinds of light in it, and it is
+there for one question: whether resampled importance sampling and plain
+next-event estimation agree once `connectToLight` has to split its draw between
+an environment and an analytic light. Every other row has one kind, where
+resampling among candidates drawn from a single light is arithmetically a no-op.
+
+The sky is the physical sky model with the sun disc turned *off*. Off because a
+disc is a near-delta source inside an environment map: it converges slowly on
+both sides and would make the row measure variance rather than bias. What is left
+still spans an order of magnitude across the sphere, which is what environment
+importance sampling is for.
+
+The answer, at 512 spp: `ris_candidates = 1` gives 0.026 / 1.000 and
+`ris_candidates = 8` gives 0.023 / 1.000, and the two Strelka images differ from
+each other by 0.014 -- less than either differs from Cycles. See entry 6 of
+docs/open-defects.md, which this row was built to settle and did.
+
+`20_mirror_and_floor` is not a shading row -- every lobe in it is covered by 03
+and 04 -- it is there so the denoiser's guide source can be measured on the case
+it was written for. `render.guide_primary_hit` hands the denoiser the mirror's
+own albedo, which is nothing; the walk hands it the world being reflected. On
+this row the walk is 2.1x better at every sample count, which is what keeps it
+the default. See entry 7 of docs/open-defects.md.
 
 `18_bounded_volume` used to be the row that failed on purpose, first at 1.899 and
 then at 1.215. Both numbers were real and only the first was Strelka's fault.
@@ -179,9 +205,18 @@ the 4.2+ exporter infers them from the node graph:
 
 ## Not covered
 
-Curves/hair, displacement, shape keys and Sun & Sky are absent — either glTF
-cannot carry them or Strelka cannot render them, so a comparison would only
-restate what is already known.
+Displacement and shape keys are absent — either glTF cannot carry them or
+Strelka cannot render them, so a comparison would only restate what is already
+known.
+
+Curves are no longer in that list on the renderer's side: hair reaches Strelka as
+curve geometry through a sidecar (`src/sceneloader/curve_sidecar.h`). What keeps
+it off the ladder is the shading, not the geometry — a strand here is a rough
+dielectric cylinder and Cycles has a hair BSDF, so a row would measure the
+missing lobe, which docs/open-defects.md entry 8 already states. Sun & Sky *is*
+here now, inside `19_env_and_light`, though as an environment map rather than as
+a procedural sky: it is baked to an equirectangular EXR, which is the only form
+Strelka takes.
 
 Sheen, clearcoat, iridescence and bounded volumetrics are on the ladder as of
 scenes 14 to 18. Subsurface
