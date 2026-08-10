@@ -277,3 +277,57 @@ rect light together, which the ladder wants for its own sake.
 It also costs 60% more time per sample here, so there is no reason to raise it
 until this is settled. The default of 1 is plain NEE and is what every measured
 row in the ladder was recorded with.
+
+---
+
+## 7. The denoiser makes the image worse at every sample count
+
+Not a question of giving it enough samples first. Relative RMSE against a 4096
+spp reference, denoiser off against on, same spp:
+
+| spp | off | on | |
+|---|---|---|---|
+| 16 | 0.5085 | 0.5317 | 1.05x worse |
+| 64 | 0.2446 | 0.2822 | 1.15x |
+| 256 | 0.1042 | 0.1723 | 1.65x |
+| 1024 | 0.0435 | 0.1437 | 3.30x |
+
+At 16 spp a guided denoiser should be transformative and it is slightly negative;
+by 1024 it is destroying most of what the samples bought. The architecture around
+it is not the problem -- it is handed the accumulated estimate rather than one
+sample, and its guides come from a canonical extra sample, so "accumulate first,
+then denoise" is already what happens.
+
+It is spatially selective, and that is the lead. The backdrop is untouched
+(0.0127 against 0.0128 at 1024 spp); the floor tiles go 0.0319 to 0.1272. Flat
+matte surfaces survive, tiled and glossy ones do not.
+
+The guides say why. Rendered at `render.debug` 3, 5 and 6 -- diffuse albedo,
+normal, roughness -- all three are salt and pepper over exactly the floor and the
+tiled walls, and clean over the plaster, the backdrop, the tub and the plant. The
+roughness view is the clearest: those surfaces come back as a per-pixel mix of
+black and white, i.e. the guide vertex lands on a near-mirror for one pixel and
+on something rough for the next.
+
+That is the guide walk. `shade` takes guides from "the first surface that can
+actually be described", walking past anything with `roughness <= 0.05` so that a
+mirror does not hand the denoiser a featureless black albedo where a reflected
+world is. The bathroom's ceramics sit close enough to that threshold that the
+decision flips from pixel to pixel, and what the denoiser then demodulates
+against is the albedo of whatever each pixel's reflection happened to land on.
+
+Not fixed because the fix is a design choice with no measurement behind it yet.
+Hysteresis on the threshold, a roughness taken from the material rather than the
+textured value, or simply taking the guide at the primary hit whenever the camera
+is static are all plausible and all differ on the case the walk exists for, which
+is a mirror. The measurement to aim at is the table above: the denoiser has to
+beat 0.0435 at 1024 spp before it is worth turning on.
+
+Fixed on the way, because it made the above impossible to see: the AOV debug
+views could not show what the denoiser receives. Looking at a guide requires
+`debug != 0`, `debug != 0` disables denoising, and the canonical guide sample was
+tied to denoising being on -- so every guide view rendered its guides the other
+way, every sample overwriting the last into a buffer that is assigned rather than
+accumulated. The views now assemble guides the same way whether they are being
+consumed or looked at. It did not change what these three views show, which is
+how I know the speckle is real.
