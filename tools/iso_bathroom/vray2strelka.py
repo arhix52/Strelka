@@ -172,7 +172,15 @@ def idprops_to_dict(group):
         if hasattr(v, "keys"):
             out[k] = idprops_to_dict(v)
         elif hasattr(v, "__len__") and not isinstance(v, (str, bytes)):
-            out[k] = [float(x) for x in v]
+            # A V-Ray list is usually a colour or a vector, and sometimes a list
+            # of groups: an include/exclude list holds one per object it names.
+            # Recursing into those rather than forcing them through float() is
+            # what lets a scene with a light that excludes something be read at
+            # all -- the kids' bedroom has one, and it stopped the conversion
+            # dead at the first light.
+            out[k] = [idprops_to_dict(x) if hasattr(x, "keys") else x for x in v]
+            if all(isinstance(x, (int, float)) for x in out[k]):
+                out[k] = [float(x) for x in out[k]]
         else:
             out[k] = v
     return out
