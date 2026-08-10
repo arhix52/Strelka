@@ -20,11 +20,15 @@ TEST_CASE("restorePathAfterFailedLoad keeps the previous document path")
     CHECK(restorePathAfterFailedLoad("/a/b.glb") == "/a/b.glb");
 }
 
-TEST_CASE("selectMainCameraIndexAfterLoad picks the framed Main camera")
+TEST_CASE("selectCameraIndexAfterLoad prefers the camera the scene authored")
 {
-    CHECK(selectMainCameraIndexAfterLoad(0) == 0);
-    CHECK(selectMainCameraIndexAfterLoad(1) == 0);
-    CHECK(selectMainCameraIndexAfterLoad(3) == 2);
+    // No cameras at all: nothing to select but index 0.
+    CHECK(selectCameraIndexAfterLoad(0, 0) == 0);
+    // Scene brought none, so only the appended "Main" exists.
+    CHECK(selectCameraIndexAfterLoad(0, 1) == 0);
+    // Two authored cameras plus Main: open on the first authored one, which is what
+    // the renderer draws and what a click has to be traced through.
+    CHECK(selectCameraIndexAfterLoad(2, 3) == 0);
 }
 
 TEST_CASE("clampCameraIndex stays inside the camera list")

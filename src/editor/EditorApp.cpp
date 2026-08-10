@@ -118,6 +118,21 @@ void EditorApp::ensureValidCameraSelection()
 {
     const uint32_t count = m_scene ? m_scene->getCameraCount() : 0;
     m_selectedCamera = editor_document::clampCameraIndex(m_selectedCamera, count);
+
+    // The renderer takes the camera it draws from the settings, while picking, the
+    // selection box and the gizmo all read m_selectedCamera. Only the camera combo
+    // used to write the setting, so loading a scene that carries its own cameras
+    // left the frame coming from the scene's first camera while every click was
+    // traced through the fitted "Main" one: in a scene whose first camera is
+    // orthographic nothing the user clicked was where the UI thought it was.
+    if (m_settingsManager && count > 0)
+    {
+        const uint32_t selected = static_cast<uint32_t>(m_selectedCamera);
+        if (m_settingsManager->getAs<uint32_t>("render/selectedCamera") != selected)
+        {
+            m_settingsManager->setAs<uint32_t>("render/selectedCamera", selected);
+        }
+    }
 }
 
 void EditorApp::handleDeviceError()
@@ -533,6 +548,8 @@ void EditorApp::checkLoadingComplete()
 
     m_scene = std::move(new_scene);
 
+    const uint32_t authoredCameraCount = m_scene->getCameraCount();
+
     oka::Camera camera;
     camera.name = "Main";
     camera.fov = 45.0f;
@@ -541,7 +558,7 @@ void EditorApp::checkLoadingComplete()
     camera.updateViewMatrix();
     m_scene->addCamera(camera);
 
-    m_selectedCamera = editor_document::selectMainCameraIndexAfterLoad(m_scene->getCameraCount());
+    m_selectedCamera = editor_document::selectCameraIndexAfterLoad(authoredCameraCount, m_scene->getCameraCount());
     setCameraDetached(false);
 
     loadAnimSettings();
@@ -3583,7 +3600,14 @@ void EditorApp::drawUI()
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
-    ImGuizmo::SetOrthographic(false);
+    // Set before BeginFrame as well as in the viewport: the flag is global state
+    // that everything drawn this frame reads.
+    ensureValidCameraSelection();
+    const bool orthographicCamera =
+        m_scene && m_scene->getCameraCount() > 0 &&
+        m_scene->getCamera(static_cast<uint32_t>(m_selectedCamera)).projection ==
+            Camera::ProjectionType::orthographic;
+    ImGuizmo::SetOrthographic(orthographicCamera);
     ImGuizmo::BeginFrame();
 
     m_cameraController->setGizmoBlocksInput(ImGuizmo::IsOver() || ImGuizmo::IsUsing());

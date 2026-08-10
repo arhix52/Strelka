@@ -1,5 +1,7 @@
 #include "../EditorApp.h"
 
+#include "../editor_overlay.h"
+
 #include <cstring>
 
 #include "imgui.h"
@@ -40,35 +42,6 @@ Scene::PickHit EditorApp::pickAtScreenPos(const ImVec2& screenPos)
     return m_scene->pick(origin, dir);
 }
 
-// Trim a clip-space segment to the part in front of the eye. Without this a box
-// the camera sits inside of, or one that merely pokes past the near plane,
-// projects garbage or disappears entirely.
-static bool clipSegmentToEye(glm::float4& a, glm::float4& b)
-{
-    constexpr float kMinW = 1e-4f;
-    const bool aFront = a.w > kMinW;
-    const bool bFront = b.w > kMinW;
-    if (!aFront && !bFront)
-    {
-        return false;
-    }
-    if (aFront && bFront)
-    {
-        return true;
-    }
-    const float t = (kMinW - a.w) / (b.w - a.w);
-    const glm::float4 crossing = a + (b - a) * t;
-    if (aFront)
-    {
-        b = crossing;
-    }
-    else
-    {
-        a = crossing;
-    }
-    return true;
-}
-
 // Wireframe box around geometry, given bounds and the transform that maps them to
 // world. DrawCubes() would only ever draw a unit cube at the instance origin,
 // which for anything but a unit-sized mesh sits in the wrong place or inside the
@@ -81,22 +54,20 @@ void EditorApp::drawBoundsWireframe(const glm::float3& bbMin,
     // Bounds are expressed in the space the transform maps to world, so the box
     // follows the geometry's own orientation instead of being an inflated
     // world-axis-aligned hull.
-    const glm::mat4 clipFromLocal = cam.matrices.perspective * cam.matrices.view * worldFromLocal;
-    const float width = m_viewportRectMax.x - m_viewportRectMin.x;
-    const float height = m_viewportRectMax.y - m_viewportRectMin.y;
+    const glm::mat4 viewFromLocal = cam.matrices.view * worldFromLocal;
+    const glm::mat4 clipFromLocal = cam.matrices.perspective * viewFromLocal;
+    const glm::float2 rectMin(m_viewportRectMin.x, m_viewportRectMin.y);
+    const glm::float2 rectSize(m_viewportRectMax.x - m_viewportRectMin.x, m_viewportRectMax.y - m_viewportRectMin.y);
 
     glm::float4 clip[8];
+    float viewZ[8];
     for (int i = 0; i < 8; ++i)
     {
-        const glm::float3 corner((i & 1) ? bbMax.x : bbMin.x, (i & 2) ? bbMax.y : bbMin.y,
-                                 (i & 4) ? bbMax.z : bbMin.z);
-        clip[i] = clipFromLocal * glm::float4(corner, 1.0f);
+        const glm::float3 corner((i & 1) ? bbMax.x : bbMin.x, (i & 2) ? bbMax.y : bbMin.y, (i & 4) ? bbMax.z : bbMin.z);
+        const glm::float4 local(corner, 1.0f);
+        clip[i] = clipFromLocal * local;
+        viewZ[i] = (viewFromLocal * local).z;
     }
-
-    const auto toScreen = [&](const glm::float4& c) {
-        return ImVec2(m_viewportRectMin.x + (c.x / c.w * 0.5f + 0.5f) * width,
-                      m_viewportRectMin.y + (0.5f - c.y / c.w * 0.5f) * height);
-    };
 
     static const int edges[12][2] = { { 0, 1 }, { 1, 3 }, { 3, 2 }, { 2, 0 }, { 4, 5 }, { 5, 7 },
                                       { 7, 6 }, { 6, 4 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } };
@@ -106,11 +77,17 @@ void EditorApp::drawBoundsWireframe(const glm::float3& bbMin,
     {
         glm::float4 a = clip[e[0]];
         glm::float4 b = clip[e[1]];
-        if (!clipSegmentToEye(a, b))
+        if (!editor_overlay::trimSegmentToNearPlane(a, b, viewZ[e[0]], viewZ[e[1]], cam.znear))
         {
             continue;
         }
-        drawList->AddLine(toScreen(a), toScreen(b), color, 1.5f);
+        glm::float2 pa(0.0f), pb(0.0f);
+        if (!editor_overlay::clipToScreen(a, rectMin, rectSize, pa) ||
+            !editor_overlay::clipToScreen(b, rectMin, rectSize, pb))
+        {
+            continue;
+        }
+        drawList->AddLine(ImVec2(pa.x, pa.y), ImVec2(pb.x, pb.y), color, 1.5f);
     }
 }
 
@@ -120,9 +97,9 @@ void EditorApp::drawBoundsWireframe(const glm::float3& bbMin,
 // under the cursor outlines a fragment of what the user thinks is selected, and
 // boxing each of them separately is a cage, not a highlight.
 bool EditorApp::computeNodeBounds(const Scene::Node& node,
-                                 glm::float3& outMin,
-                                 glm::float3& outMax,
-                                 glm::mat4& outWorldFromLocal)
+                                  glm::float3& outMin,
+                                  glm::float3& outMax,
+                                  glm::mat4& outWorldFromLocal)
 {
     const std::vector<Instance>& instances = m_scene->getInstances();
     bool any = false;
@@ -169,8 +146,8 @@ bool EditorApp::computeNodeBounds(const Scene::Node& node,
         const glm::mat4 refFromInst = fromRef * instances[instId].transform;
         for (int i = 0; i < 8; ++i)
         {
-            const glm::float3 corner((i & 1) ? instMax.x : instMin.x, (i & 2) ? instMax.y : instMin.y,
-                                     (i & 4) ? instMax.z : instMin.z);
+            const glm::float3 corner(
+                (i & 1) ? instMax.x : instMin.x, (i & 2) ? instMax.y : instMin.y, (i & 4) ? instMax.z : instMin.z);
             const glm::float3 inRef = glm::float3(refFromInst * glm::float4(corner, 1.0f));
             outMin = glm::min(outMin, inRef);
             outMax = glm::max(outMax, inRef);
@@ -319,9 +296,9 @@ void EditorApp::drawViewportPanel()
         }
         else
         {
-            ImGui::GetWindowDrawList()->AddRectFilled(
-                topLeft, ImVec2(topLeft.x + viewportSize.x, topLeft.y + viewportSize.y),
-                ImGui::GetColorU32(ImGuiCol_FrameBg));
+            ImGui::GetWindowDrawList()->AddRectFilled(topLeft,
+                                                      ImVec2(topLeft.x + viewportSize.x, topLeft.y + viewportSize.y),
+                                                      ImGui::GetColorU32(ImGuiCol_FrameBg));
             ImGui::Dummy(viewportSize);
         }
 
@@ -329,12 +306,17 @@ void EditorApp::drawViewportPanel()
         m_viewportRectMax = ImGui::GetItemRectMax();
         const bool itemHovered = ImGui::IsItemHovered();
 
-        ImGuizmo::SetOrthographic(false);
+        Camera& cam = m_scene->getCamera(m_selectedCamera);
+
+        // ImGuizmo derives the facing of the rotation rings from the projection,
+        // and drops the whole gizmo when it reads the object as behind the eye.
+        // Both of those assume perspective, so an orthographic camera needs to say
+        // so or its gizmo comes out mirrored or missing.
+        ImGuizmo::SetOrthographic(cam.projection == Camera::ProjectionType::orthographic);
         ImGuizmo::SetDrawlist();
         ImGuizmo::SetRect(m_viewportRectMin.x, m_viewportRectMin.y, m_viewportRectMax.x - m_viewportRectMin.x,
                           m_viewportRectMax.y - m_viewportRectMin.y);
 
-        Camera& cam = m_scene->getCamera(m_selectedCamera);
         drawSelectionOverlay(cam);
         drawSelectionGizmo(cam);
 

@@ -36,14 +36,21 @@ inline std::string restorePathAfterFailedLoad(const std::string& previousPath)
     return previousPath;
 }
 
-/// Framed "Main" is appended last on load; select it so the viewport matches the fit.
-inline int selectMainCameraIndexAfterLoad(uint32_t cameraCount)
+/// Which camera a freshly loaded document opens on. The cameras the scene authored
+/// come first and the fitted "Main" is appended last, so this opens on the authored
+/// shot when the scene has one -- that is what the scene was built around and what
+/// StrelkaCLI renders for the same file -- and falls back to Main when it has none.
+inline int selectCameraIndexAfterLoad(uint32_t authoredCameraCount, uint32_t totalCameraCount)
 {
-    if (cameraCount == 0)
+    if (totalCameraCount == 0)
     {
         return 0;
     }
-    return static_cast<int>(cameraCount - 1);
+    if (authoredCameraCount > 0)
+    {
+        return 0;
+    }
+    return static_cast<int>(totalCameraCount - 1);
 }
 
 inline int clampCameraIndex(int selected, uint32_t cameraCount)

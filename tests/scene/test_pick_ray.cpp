@@ -146,3 +146,66 @@ TEST_CASE("Screen space pick selects the object under the cursor in every quadra
     // Dead centre falls between all four quads.
     CHECK_FALSE(pickAt(0.5f, 0.5f).hit);
 }
+
+Camera makeOrthoCamera(float xmag, float ymag, float aspect)
+{
+    Camera cam;
+    cam.position = glm::float3(0.0f, 0.0f, 5.0f);
+    cam.mOrientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    cam.setOrthographic(xmag, ymag, 0.1f, 1000.0f);
+    cam.updateViewMatrix();
+    cam.updateAspectRatio(aspect);
+    return cam;
+}
+
+TEST_CASE("Ortho pick ray uses aspect-adapted film extents, not raw xmag/ymag")
+{
+    // Square-authored ortho rendered at 16:9: magForAspect keeps horizontal and
+    // shrinks vertical. A pick that still used ymag would be ~1.78x too tall.
+    const float aspect = 16.0f / 9.0f;
+    const Camera cam = makeOrthoCamera(1.0f, 1.0f, aspect);
+
+    float halfW = 0.0f, halfH = 0.0f;
+    cam.magForAspect(aspect, halfW, halfH);
+    REQUIRE(halfW == doctest::Approx(1.0f));
+    REQUIRE(halfH == doctest::Approx(1.0f / aspect));
+
+    glm::float3 origin, dir;
+    generatePickRay(cam, glm::float2(1.0f, 0.5f), origin, dir);
+    CHECK(dir.z == doctest::Approx(-1.0f).epsilon(1e-4));
+    // Right edge of the film in view/world (camera at z=5 looking -Z): +halfW in x.
+    CHECK(origin.x == doctest::Approx(halfW).epsilon(1e-4));
+    CHECK(origin.y == doctest::Approx(0.0f).epsilon(1e-4));
+
+    generatePickRay(cam, glm::float2(0.5f, 0.0f), origin, dir);
+    // Top of the image is +Y; must use halfH, not the authored ymag=1.
+    CHECK(origin.y == doctest::Approx(halfH).epsilon(1e-4));
+    CHECK(origin.y != doctest::Approx(1.0f).epsilon(1e-3));
+}
+
+TEST_CASE("Ortho screen pick selects the object under the cursor")
+{
+    Scene scene;
+    const uint32_t center = addQuad(scene, glm::float3(0.0f, 0.0f, 0.0f), 0.5f);
+    const uint32_t right = addQuad(scene, glm::float3(1.5f, 0.0f, 0.0f), 0.4f);
+
+    // Film half-extent 2 covers both quads; 16:9 reframe must not break the hit.
+    const Camera cam = makeOrthoCamera(2.0f, 2.0f, 16.0f / 9.0f);
+
+    auto pickAt = [&](float u, float v) {
+        glm::float3 origin, dir;
+        generatePickRay(cam, glm::float2(u, v), origin, dir);
+        return scene.pick(origin, dir);
+    };
+
+    const Scene::PickHit mid = pickAt(0.5f, 0.5f);
+    REQUIRE(mid.hit);
+    CHECK(mid.instanceId == center);
+
+    float halfW = 0.0f, halfH = 0.0f;
+    cam.magForAspect(16.0f / 9.0f, halfW, halfH);
+    const float uRight = 0.5f + 0.5f * (1.5f / halfW);
+    const Scene::PickHit side = pickAt(uRight, 0.5f);
+    REQUIRE(side.hit);
+    CHECK(side.instanceId == right);
+}

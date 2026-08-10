@@ -349,9 +349,13 @@ void generatePickRay(const Camera& camera, const glm::float2& uv, glm::float3& o
 
     if (camera.projection == Camera::ProjectionType::orthographic)
     {
-        // The orthographic branch of generateCameraRay, in the same order: the
-        // pixel moves the origin, not the direction.
-        const glm::float3 filmPos(ndcX * camera.xmag, ndcY * camera.ymag, 0.0f);
+        // Same film extents generateCameraRay uses: MagForAspect adapted to the
+        // render aspect, already written into invPerspective by updateAspectRatio.
+        // Reading xmag/ymag here ignored that reframe, so a non-square viewport
+        // (typical editor) produced pick rays that missed what the user saw.
+        const float halfWidth = camera.matrices.invPerspective[0][0];
+        const float halfHeight = camera.matrices.invPerspective[1][1];
+        const glm::float3 filmPos(ndcX * halfWidth, ndcY * halfHeight, 0.0f);
         origin = glm::float3(viewToWorld * glm::float4(filmPos, 1.0f));
         direction = glm::normalize(glm::float3(viewToWorld * glm::float4(0.0f, 0.0f, -1.0f, 0.0f)));
         return;
