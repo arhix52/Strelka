@@ -477,6 +477,9 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", 1.0f);
     m_settingsManager->setAs<float>("render/post/tonemapper/fStop", 4.0f);
     m_settingsManager->setAs<float>("render/post/tonemapper/shutterSpeed", 100.0f);
+    // Editor UI: one f-stop drives DOF blur and photographic exposure unless the
+    // user unticks "Link DOF aperture to exposure".
+    m_settingsManager->setAs<bool>("render/post/tonemapper/linkDofFStop", true);
 
     m_settingsManager->setAs<float>("render/post/gamma", 2.4f); // 0.0f - off
     // Dev settings:

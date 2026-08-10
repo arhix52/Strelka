@@ -1,4 +1,5 @@
 #include "../EditorApp.h"
+#include "../editor_camera_exposure.h"
 
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
@@ -6,6 +7,8 @@
 #include <cfloat>
 #include <ctime>
 #include <filesystem>
+#include <algorithm>
+#include <cmath>
 
 namespace oka
 {
@@ -106,32 +109,72 @@ void EditorApp::drawRenderSettingsPanel()
         }
     }
 
-    // Camera DOF / Lens controls
-    if (ImGui::TreeNode("Camera / DOF"))
+    // Camera lens / DOF — physical units (mm, m, f-stop).
+    if (ImGui::TreeNode("Camera / lens"))
     {
         oka::Camera& cam = m_scene->getCamera(m_selectedCamera);
         bool changed = false;
+        bool linkDof = m_settingsManager->getAs<bool>("render/post/tonemapper/linkDofFStop");
+        float exposureFStop = m_settingsManager->getAs<float>("render/post/tonemapper/fStop");
+        // Keep the lens f-stop aligned with exposure whenever the link is on so
+        // lensRadius and the path tracer see the same N the exposure panel edits.
+        if (linkDof)
+        {
+            cam.fStopDof = exposureFStop;
+        }
+
+        changed |= ImGui::DragFloat("Focal length", &cam.focalLengthMm, 0.5f, 1.0f, 500.0f, "%.1f mm",
+                                    ImGuiSliderFlags_Logarithmic);
+        changed |= ImGui::DragFloat("Sensor width", &cam.sensorWidth, 0.1f, 1.0f, 100.0f, "%.1f mm");
+        changed |= ImGui::DragFloat("Sensor height", &cam.sensorHeight, 0.1f, 1.0f, 100.0f, "%.1f mm");
+        ImGui::TextDisabled("Vertical FOV %.1f deg (from lens + sensor)",
+                            editor_camera_exposure::verticalFovDegrees(cam.focalLengthMm, cam.sensorHeight));
 
         if (ImGui::Checkbox("Enable DOF", &cam.useDof))
             changed = true;
 
         if (cam.useDof)
         {
-            if (ImGui::SliderFloat("Focus Distance", &cam.focalDistance, 0.1f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic))
+            if (ImGui::SliderFloat("Focus distance", &cam.focalDistance, 0.1f, 1000.0f, "%.2f m",
+                                   ImGuiSliderFlags_Logarithmic))
                 changed = true;
-            if (ImGui::SliderFloat("F-Stop", &cam.fStopDof, 1.0f, 22.0f, "%.1f"))
+
+            float dofFStop = linkDof ? exposureFStop : cam.fStopDof;
+            if (ImGui::DragFloat(linkDof ? "F-stop (linked)" : "DOF f-stop", &dofFStop, 0.05f, 0.7f, 32.0f, "f/%.1f"))
+            {
                 changed = true;
-            if (ImGui::SliderInt("Aperture Blades", &cam.apertureBlades, 0, 8))
+                if (linkDof)
+                {
+                    exposureFStop = dofFStop;
+                    cam.fStopDof = dofFStop;
+                    m_settingsManager->setAs<float>("render/post/tonemapper/fStop", exposureFStop);
+                }
+                else
+                {
+                    cam.fStopDof = dofFStop;
+                }
+            }
+            ImGui::TextDisabled("Lens radius %.4f m",
+                                editor_camera_exposure::lensRadiusMetres(cam.focalLengthMm, cam.fStopDof));
+
+            if (ImGui::SliderInt("Aperture blades", &cam.apertureBlades, 0, 8))
                 changed = true;
-            if (ImGui::SliderFloat("Blade Rotation", &cam.bladeRotation, 0.0f, 6.2832f, "%.2f"))
+            ImGui::SameLine();
+            ImGui::TextDisabled("(0 = circular)");
+
+            float bladeDeg = editor_camera_exposure::degreesFromRadians(cam.bladeRotation);
+            if (ImGui::DragFloat("Blade rotation", &bladeDeg, 1.0f, 0.0f, 360.0f, "%.0f deg"))
+            {
+                cam.bladeRotation = editor_camera_exposure::radiansFromDegrees(bladeDeg);
                 changed = true;
-            if (ImGui::SliderFloat("Anamorphic Ratio", &cam.anamorphicRatio, 0.25f, 4.0f, "%.2f"))
+            }
+            if (ImGui::DragFloat("Anamorphic ratio", &cam.anamorphicRatio, 0.01f, 0.25f, 4.0f, "%.2f"))
                 changed = true;
         }
 
-        if (ImGui::InputFloat("Shift X", &cam.shiftX, 0.01f))
+        if (ImGui::DragFloat("Shift X", &cam.shiftX, 0.01f, -2.0f, 2.0f, "%.3f (sensor frac)"))
             changed = true;
-        if (ImGui::InputFloat("Shift Y", &cam.shiftY, 0.01f))
+        if (ImGui::DragFloat("Shift Y", &cam.shiftY, 0.01f, -2.0f, 2.0f, "%.3f (sensor frac)"))
             changed = true;
 
         if (changed)
@@ -339,102 +382,136 @@ void EditorApp::drawRenderSettingsPanel()
     ImGui::InputFloat("Camera Speed", (float*)&cameraSpeed, 0.5);
     m_settingsManager->setAs<float>("render/cameraSpeed", cameraSpeed);
 
-    const char* tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
-    // Read back rather than kept in a static, for the same reason as the sampler
-    // above: a static starts at a guess and then writes that guess over the real
-    // setting every frame, so anything the scene or a config asked for is gone by
-    // the first frame the panel is drawn.
-    int currentTonemapItemId = (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/tonemapperType"), 3u);
-    if (ImGui::BeginCombo("Tonemap", tonemapItems[currentTonemapItemId]))
-    {
-        for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
-        {
-            bool is_selected = (currentTonemapItemId == n);
-            if (ImGui::Selectable(tonemapItems[n], is_selected))
-            {
-                currentTonemapItemId = n;
-                m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", (uint32_t)n);
-            }
-            if (is_selected)
-            {
-                ImGui::SetItemDefaultFocus();
-            }
-        }
-        ImGui::EndCombo();
-    }
-
     // Exposure, the camera side of the tone curve. The renderer computes
-    //     film speed  > 0 : scale * iso / (shutter * fstop^2) / 100
-    //     film speed == 0 : scale
+    //     film speed  > 0 : cm2_factor * iso / (shutter * fstop^2) / 100
+    //     film speed == 0 : cm2_factor
     // so a zero film speed is the arbitrary-units mode, which is what a scene lit
     // in normalised rather than photometric units wants -- and what the light
     // sidecar writes. Both forms are editable here because the sidecar can carry
     // either, and a scene that opens too dark is otherwise unexplainable from
     // inside the editor.
-    if (ImGui::TreeNode("Exposure"))
+    if (ImGui::TreeNode("Photographic exposure"))
     {
         float iso = m_settingsManager->getAs<float>("render/post/tonemapper/filmIso");
         float fStop = m_settingsManager->getAs<float>("render/post/tonemapper/fStop");
         float shutter = m_settingsManager->getAs<float>("render/post/tonemapper/shutterSpeed");
-        float scale = m_settingsManager->getAs<float>("render/post/tonemapper/cm2_factor");
+        float cm2 = m_settingsManager->getAs<float>("render/post/tonemapper/cm2_factor");
+        bool linkDof = m_settingsManager->getAs<bool>("render/post/tonemapper/linkDofFStop");
         bool changed = false;
 
         int mode = iso > 0.0f ? 0 : 1;
         const char* modeItems[] = { "Photographic", "Multiplier" };
         if (ImGui::Combo("Mode", &mode, modeItems, 2))
         {
-            // Carry the current exposure across the switch: the user is changing
-            // how it is expressed, not how bright the frame is.
-            if (mode == 1)
-            {
-                scale = scale * iso / (shutter * fStop * fStop) / 100.0f;
-                iso = 0.0f;
-            }
-            else
-            {
-                iso = 100.0f;
-                fStop = 4.0f;
-                shutter = 100.0f;
-                scale = scale * (shutter * fStop * fStop) * 100.0f / iso;
-            }
+            editor_camera_exposure::carryExposureAcrossModeSwitch(mode == 1, iso, fStop, shutter, cm2);
             changed = true;
+        }
+
+        if (ImGui::Checkbox("Link DOF aperture to exposure", &linkDof))
+        {
+            m_settingsManager->setAs<bool>("render/post/tonemapper/linkDofFStop", linkDof);
+            if (linkDof)
+            {
+                // Keep film brightness: push exposure f-stop into the lens.
+                m_scene->getCamera(m_selectedCamera).fStopDof = fStop;
+                m_sharedCtx->mSubframeIndex = 0;
+            }
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("When on, one f-stop drives both DOF blur and photographic exposure.\n"
+                              "Untick to blur the lens without changing film brightness.");
         }
 
         if (mode == 0)
         {
             changed |= ImGui::DragFloat("Film ISO", &iso, 1.0f, 1.0f, 25600.0f, "%.0f",
                                         ImGuiSliderFlags_Logarithmic);
-            changed |= ImGui::DragFloat("Aperture", &fStop, 0.05f, 0.7f, 32.0f, "f/%.1f");
+            if (ImGui::DragFloat(linkDof ? "Aperture (linked)" : "Exposure f-stop", &fStop, 0.05f, 0.7f, 32.0f,
+                                 "f/%.1f"))
+            {
+                changed = true;
+                if (linkDof)
+                {
+                    m_scene->getCamera(m_selectedCamera).fStopDof = fStop;
+                }
+            }
             changed |= ImGui::DragFloat("Shutter", &shutter, 1.0f, 1.0f, 8000.0f, "1/%.0f s",
                                         ImGuiSliderFlags_Logarithmic);
+            changed |= ImGui::DragFloat("cd/m^2 factor", &cm2, 0.01f, 0.0001f, 100000.0f, "%.4f",
+                                        ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Photometric scale (candela per square metre factor).\n"
+                                  "Not a generic exposure multiplier — use Mode=Multiplier for that.");
+            }
+            const float linear = editor_camera_exposure::photographicLinearScale(iso, fStop, shutter, cm2);
+            const float ev = editor_camera_exposure::ev100(iso, fStop, shutter);
+            ImGui::TextDisabled("EV100 %.2f  |  Linear radiance x%.4f", ev, linear);
         }
-        changed |= ImGui::DragFloat(mode == 0 ? "Scale" : "Exposure", &scale, 0.01f, 0.0001f, 100000.0f, "x%.4f",
-                                    ImGuiSliderFlags_Logarithmic);
-
-        const float effective = iso > 0.0f ? scale * iso / (shutter * fStop * fStop) / 100.0f : scale;
-        ImGui::TextDisabled("Linear radiance x%.4f", effective);
+        else
+        {
+            changed |= ImGui::DragFloat("Linear multiplier", &cm2, 0.01f, 0.0001f, 100000.0f, "x%.4f",
+                                        ImGuiSliderFlags_Logarithmic);
+            ImGui::TextDisabled("Linear radiance x%.4f (photographic controls off)", cm2);
+        }
 
         if (ImGui::Button("Auto-expose"))
         {
             m_autoExposurePending = true;
         }
         ImGui::SameLine();
-        ImGui::TextDisabled("(meters the frame for middle grey)");
+        ImGui::TextDisabled("(meters frame → Multiplier mode)");
 
         if (changed)
         {
             m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", iso);
             m_settingsManager->setAs<float>("render/post/tonemapper/fStop", fStop);
             m_settingsManager->setAs<float>("render/post/tonemapper/shutterSpeed", shutter);
-            m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", scale);
+            m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", cm2);
+            m_sharedCtx->mSubframeIndex = 0;
         }
 
         ImGui::TreePop();
     }
 
-    auto gamma = m_settingsManager->getAs<float>("render/post/gamma");
-    ImGui::InputFloat("Gamma", (float*)&gamma, 0.5);
-    m_settingsManager->setAs<float>("render/post/gamma", gamma);
+    if (ImGui::TreeNode("Display tonemap"))
+    {
+        const char* tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
+        int currentTonemapItemId = (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/tonemapperType"), 3u);
+        if (ImGui::BeginCombo("Operator", tonemapItems[currentTonemapItemId]))
+        {
+            for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
+            {
+                bool is_selected = (currentTonemapItemId == n);
+                if (ImGui::Selectable(tonemapItems[n], is_selected))
+                {
+                    currentTonemapItemId = n;
+                    m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", (uint32_t)n);
+                }
+                if (is_selected)
+                {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        auto gamma = m_settingsManager->getAs<float>("render/post/gamma");
+        if (ImGui::DragFloat("Gamma", &gamma, 0.05f, 0.0f, 5.0f, "%.2f"))
+        {
+            m_settingsManager->setAs<float>("render/post/gamma", gamma);
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("0 = off; default 2.4 is an sRGB-like transfer, not a pure power.");
+        }
+
+        const float maxEdr = m_settingsManager->getAs<float>("render/post/tonemapper/maxEDR");
+        ImGui::TextDisabled("Display max EDR %.2f (from screen, Metal path does not scale by it)", maxEdr);
+
+        ImGui::TreePop();
+    }
 
     auto materialRayTmin = m_settingsManager->getAs<float>("render/pt/dev/materialRayTmin");
     ImGui::InputFloat("Material ray T min", (float*)&materialRayTmin, 0.1);
