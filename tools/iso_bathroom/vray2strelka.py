@@ -458,14 +458,51 @@ class MaterialConverter:
                 d["inputs"][s.name] = self._snap_node(s.links[0].from_node)
         return d
 
+    @staticmethod
+    def _two_sided(mat):
+        """The Mtl2Sided wrapper on this material, if there is one.
+
+        Returns (translucency, front_node, back_node) or None. The sockets on a
+        `NodeUndefined` V-Ray node are dead for *evaluation* but the links are
+        still in the tree, which is what makes "which sub-material is the front"
+        answerable at all -- without them the only way to tell the two apart
+        would be their order in the node list, and that is arbitrary.
+        """
+        for n in mat.node_tree.nodes:
+            for key in ("Mtl2Sided", "MtlTwoSided"):
+                if key not in n.keys():
+                    continue
+                params = idprops_to_dict(n[key])
+                translucency = params.get("translucency_colortex", [0.5, 0.5, 0.5])
+                front = back = None
+                for s in n.inputs:
+                    if not s.is_linked:
+                        continue
+                    if s.name == "Front":
+                        front = s.links[0].from_node
+                    elif s.name == "Back":
+                        back = s.links[0].from_node
+                return tuple(translucency), front, back
+        return None
+
     def snapshot(self, mat):
         """Copy the whole V-Ray graph to plain Python before touching the tree."""
         if mat.node_tree is None:
             return None
 
+        # A two-sided material owns whichever sub-materials hang off it, so the
+        # search for "the shader plugin" has to start at its Front. Picking the
+        # highest-priority plugin anywhere in the tree instead reads a coin flip
+        # on the one material here that has both sides authored: two BRDFVRayMtl
+        # nodes, and the front is not reliably the first of them.
+        two_sided = self._two_sided(mat)
+        search = mat.node_tree.nodes
+        if two_sided and two_sided[1] is not None:
+            search = [two_sided[1]]
+
         shader = kind = None
         best = len(SHADER_PLUGINS)
-        for n in mat.node_tree.nodes:
+        for n in search:
             for i, k in enumerate(SHADER_PLUGINS):
                 if k in n.keys() and i < best:
                     shader, kind, best = n, k, i
@@ -476,7 +513,14 @@ class MaterialConverter:
             "params": idprops_to_dict(shader[kind]),
             "inputs": {},
             "uvw": None,
+            "twoSided": None,
         }
+        if two_sided:
+            translucency, front, back = two_sided
+            snap["twoSided"] = {
+                "translucency": translucency,
+                "back": back.name if back is not None else None,
+            }
         for s in shader.inputs:
             if s.is_linked:
                 snap["inputs"][s.name] = self._snap_node(s.links[0].from_node)
@@ -1123,8 +1167,108 @@ class MaterialConverter:
             extra = self.convert_hair(mat, snap)
         else:
             extra = self.convert_light_mtl(mat, snap)
+        if snap.get("twoSided"):
+            self.apply_two_sided(mat, snap, extra)
         self.report.append({"material": mat.name, "kind": kind, "extra": extra})
         return extra
+
+    @staticmethod
+    def _base_color_mean(mat):
+        """Mean linear colour of whatever is wired into Base Color, or None.
+
+        Read off a 16x16 copy rather than the original: `pixels` on a 4K map is
+        67 million floats, and a mean does not need them. The copy is scaled and
+        dropped, so nothing the exporter later writes is touched.
+        """
+        nt = mat.node_tree
+        bsdf = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
+        if bsdf is None or "Base Color" not in bsdf.inputs:
+            return None
+        socket = bsdf.inputs["Base Color"]
+        if not socket.is_linked:
+            return None
+        node = socket.links[0].from_node
+        image = getattr(node, "image", None)
+        if image is None:
+            return None
+        small = image.copy()
+        try:
+            small.scale(16, 16)
+            buf = np.empty(16 * 16 * 4, dtype=np.float32)
+            small.pixels.foreach_get(buf)
+        except Exception:
+            bpy.data.images.remove(small)
+            return None
+        bpy.data.images.remove(small)
+        rgba = buf.reshape(-1, 4)
+        return tuple(float(c) for c in rgba[:, :3].mean(axis=0))
+
+    def apply_two_sided(self, mat, snap, extra):
+        """Mtl2Sided -> KHR_materials_diffuse_transmission on the front material.
+
+        `Mtl2Sided` is two things at once, and only one of them is exotic.
+
+        The common one is translucency: a sheet lit from behind that glows
+        through, which is what all but one of the nine in this scene are -- their
+        Back socket is empty, so V-Ray shades both faces with the front material
+        and `translucency` is the fraction that comes through. That is exactly
+        `KHR_materials_diffuse_transmission`, so it converts rather than being
+        approximated: the factor is the translucency, and the transmitted light
+        takes the front material's own colour because that is what it passed
+        through.
+
+        The exotic one is a genuinely different material behind, and the scene has
+        one of those. It is reported and dropped: the renderer has no per-side
+        material, and picking either side would be a decision made by a converter
+        that has no way to know which face the camera sees.
+
+        Two-sidedness is also a *geometry* statement -- V-Ray shades the back face
+        rather than culling it -- and the glTF exporter already writes
+        `doubleSided: true` for every material in this file, so that half needs
+        nothing.
+        """
+        info = snap["twoSided"]
+        translucency = info["translucency"]
+        factor = min(1.0, max(0.0, lum(translucency)))
+        if factor <= 0.0:
+            return
+
+        # The colour the light picks up on the way through, which the extension
+        # carries as a factor and Strelka reads as the whole transmitted tint --
+        # the lobe is `diffuse_transmission_color / pi`, not the albedo times
+        # anything, which is what the spec says and what makes this factor matter.
+        #
+        # So it has to be the front material's actual diffuse, and for the four
+        # here that are textured the plugin's constant is not it: V-Ray ignores
+        # the constant when a map is plugged in, and the constant left in the file
+        # is the default 0.5. Writing that made a backlit curtain transmit mid
+        # grey. The mean of the map is what a sheet of it transmits, and it is one
+        # number rather than a texture slot the material struct does not have.
+        colour = (1.0, 1.0, 1.0)
+        if snap["kind"] == "BRDFVRayMtl":
+            colour = self._get(snap["params"], "diffuse", VRAYMTL_DEFAULTS) or colour
+        textured = self._base_color_mean(mat)
+        if textured is not None:
+            colour = textured
+
+        extra["diffuseTransmission"] = {
+            "diffuseTransmissionFactor": factor,
+            "diffuseTransmissionColorFactor": list(colour),
+        }
+        extra["twoSided"] = {
+            "translucency": list(translucency),
+            "backMaterial": info["back"],
+            "note": ("back sub-material dropped: no per-side material in Strelka"
+                     if info["back"] else "front material on both sides, as V-Ray does"),
+        }
+
+        # Blender's Principled has the same parameter, so the .blend the exporter
+        # sees agrees with the extension that is injected afterwards.
+        nt = mat.node_tree
+        bsdf = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
+        if bsdf is not None:
+            self._set(bsdf, "Diffuse Transmission Weight", factor)
+
 
 # ---------------------------------------------------------------------------
 # Hair
