@@ -51,12 +51,25 @@ luminance per radial bin across one of the bubbles, against the wall just
 outside it. A defect with a radius is far easier to name than one with only a
 colour.
 
+`tools/iso_bathroom/patch_mean.py` is the other measurement in this file: mean
+*linear* luminance over a rectangle of a rendered PNG, across several images at
+once, so every patch row below can be reproduced by reading the command rather
+than by trusting the number. Linear because the images are display-encoded, and a
+mean of sRGB bytes weights the dark half of the range far too heavily -- which is
+why the tables that predate it are not comparable with the ones that follow it.
+
+```bash
+python3 tools/iso_bathroom/patch_mean.py /tmp/kids_ref.png /tmp/kids.png \
+    -- 920 380 30 30 right_wall  660 260 40 60 curtain
+```
+
 ---
 
 ## 1. Nested dielectrics cannot tell two objects apart
 
-**Half fixed.** The renderer can now tell two nested objects apart; it still
-cannot survive a mesh with a hole in it, and neither failure says a word.
+**Half fixed, and no longer silent.** The renderer can now tell two nested
+objects apart, and it now counts what it loses; it still cannot survive a mesh
+with a hole in it, and that part cannot be fixed here.
 
 `ior_stack_pop` now matches on the material being left and falls back to the
 priority. Priority alone could not identify anything: glTF has no way to author
@@ -113,12 +126,46 @@ So the bath is right for the wrong reason, and will stay that way until the wate
 is modelled as a volume upstream. That is a note for whoever next opens the
 .blend, not something the converter should paper over.
 
-**What is still open** is that both failures were silent. `ior_stack_push` does
-nothing when the stack is full at four entries, and `ior_stack_pop` returns
-success having found nothing. A scene can lose paths to either without a single
-warning, and this one did for as long as it has existed. Somewhere to put a
-counter -- a debug view of stack depth, or a once-per-frame tally of unmatched
-pops -- would turn the next instance into a measurement instead of a hunt.
+### The silence is fixed: they are counted now
+
+`ior_stack_push` still does nothing when the stack is full and `ior_stack_pop`
+still returns success having found nothing, because both are the right thing to
+do -- but neither is silent any more. Three counters, in a shared buffer `shade`
+and `miss` write and the host reads back once per scene:
+
+| | what it means |
+|---|---|
+| pushes onto a full stack | four nested dielectrics; wants a deeper stack |
+| pops that matched nothing | a ray *leaving* something it never entered |
+| paths that reached the environment still inside a medium | a ray that *entered* something it never left |
+
+The third one is the one this entry said could not be caught. It cannot be caught
+at an exit event -- a ray leaving through a hole crosses no surface, so there is
+no event -- but it can be caught where the path ends, and a path that reaches
+infinity while its stack still holds glass has plainly lost track.
+
+Per sample, at 1024², depth 16:
+
+| Bathroom | full-stack pushes | unmatched pops | escaped inside |
+|---|---|---|---|
+| as shipped (holes capped) | 0 | 7 | 2 |
+| `--no-close-transmissive` | 0 | 19 | 2 |
+
+Which is the measurement this entry was missing, and it says two things. The
+repair is real and does what the edge count claimed -- roughly a third of the
+unmatched pops survive it. And the residual is a handful of paths in a million,
+which is why capping the holes moved no patch of the frame by more than 0.003:
+the defect was always small, and the reason it took a hunt to find was that
+nothing counted it.
+
+The counters cost one atomic each, only on the branch where something has already
+gone wrong, plus a search over at most four entries on a path that has already
+established it is a transmission through a solid. `ior_stack_full` and
+`ior_stack_can_pop` are predicates rather than return values because the callers
+are in two renderers and a changed signature is a changed OptiX payload.
+
+**Still open**: the OptiX path calls push and pop without asking either question,
+so this measurement exists on Metal only.
 
 ---
 
@@ -251,23 +298,40 @@ By x3 the tiled wall has arrived, the floor has overshot, the backdrop is 29%
 over, and the tub rim is still 13% under. A brightness that is wrong by a
 different factor in every part of the frame is not a brightness.
 
-### Confirmed on a second scene, where it is most of the image
+### Confirmed on a second scene -- but most of what was measured there was not this
 
-The Isometric Kids Bedroom is the same defect with the volume turned up. Its
-reference is <https://documentation.chaos.com/download/attachments/117637916/Render_Camera_1280_0x008_15m.png>;
-mean luminance over patches of the 1280² render:
+**The Isometric Kids Bedroom numbers this entry used to carry were wrong, and
+they were wrong in this entry's favour.** Its walls were not dark because the
+rect lights spread their power over a hemisphere. They were dark because a
+greyscale height map was wired into `normalTexture`, and a greyscale below 0.5
+decodes to a shading normal that points *into* the surface. See "A height map is
+not a normal map" under entry 8: the right wall did not measure -58%, it measured
+0.0000 -- not dark, black -- and it now measures within 9% of the reference.
+
+What is left of this defect there, mean linear luminance over patches of the
+1280² render (`tools/iso_bathroom/patch_mean.py`; not comparable with the
+sRGB-byte means this table used to hold):
 
 | Patch | Reference | Strelka | |
 |---|---|---|---|
-| left wall | 0.465 | 0.330 | -29% |
-| right wall | 0.435 | 0.182 | **-58%** |
-| ceiling | 0.491 | 0.465 | -5% |
-| floor | 0.504 | 0.568 | +13% |
-| backdrop, outside the room | 0.205 | 0.380 | **+86%** |
+| right wall | 0.2713 | 0.2951 | +9% |
+| back wall | 0.0854 | 0.0640 | -25% |
+| left wall | 0.1355 | 0.4449 | **+228%** |
+| floor | 0.0265 | 0.0405 | +53% |
+| outer wall | 0.2344 | 0.0796 | **-66%** |
+| backdrop, outside the room | 0.0469 | 0.1278 | **+173%** |
 
-Same signature, both signs, and the reason it is worse is in the parameters:
-every rect light in that scene is strongly directional where the bathroom's were
-barely so.
+The backdrop and the outer wall still say what this entry says: light that should
+be inside the room is outside it. The interior no longer does -- one wall is
+over, one is under, one is close -- so this scene is no longer evidence that the
+room as a whole is starved, and the "both signs, one cause" claim now rests on
+the bathroom alone.
+
+The left wall at more than three times the reference is the largest single thing
+wrong with this frame, and it has no explanation here. It is the same material as
+the right wall, which is within 9%.
+
+The parameters are unchanged and still not carried:
 
 | Light | `intensity` | `directional` |
 |---|---|---|
@@ -279,8 +343,8 @@ barely so.
 
 Against the bathroom's 0.1 and 0.5. Two windows at 0.9 and 0.95 are nearly
 searchlights aimed into the room; exported as Lambertian rectangles they spread
-that over a hemisphere, which is why that room is half as bright as it should be
-and the backdrop behind it is nearly twice.
+that over a hemisphere, which is still the best account of a backdrop at nearly
+three times the reference with the room's own outer wall at two thirds of it.
 
 ### Why it is not fixed here
 
@@ -307,10 +371,9 @@ globe is dim for the same reason the rest of the room is.
 
 ## 6. RIS and plain next-event estimation converge to different images
 
-Turning up `render.ris_candidates` on the bathroom does not reduce variance -- it
-moves the answer. Both estimators converge cleanly toward *their own* result, and
-the two results are not the same. Relative RMSE, 1024 spp against a 4096 spp
-reference of the matching estimator:
+**Does not reproduce.** This entry recorded that turning up
+`render.ris_candidates` moved the answer rather than reducing variance, on the
+strength of one measurement:
 
 | | whole frame | floor tile |
 |---|---|---|
@@ -318,28 +381,59 @@ reference of the matching estimator:
 | RIS 1024 against RIS 4096 | 0.0396 | 0.0270 |
 | **NEE 4096 against RIS 4096** | **0.0490** | **0.0698** |
 
-The third row is the finding. Two converged renders of the same scene differ by
-more than either differs from its own half-converged version, and on the floor by
-five times the noise left at 4096 spp. One of them is wrong.
+The third row was the finding: two converged renders differing by more than
+either differs from its own half-converged version. The same three rows, taken
+again on the same scene, at both 1024² and 512², depth 12:
 
-The ladder cannot say which. RIS and NEE agree *exactly* where it can test them:
-`00_calibration` and `02_basecolor` come out at 1.0098 and 1.0028 against Cycles
-either way, and so does `12_lights_punctual` at 1.0020 with three lights in it.
-That is not luck -- resampling among candidates is a no-op when the candidates
-are drawn from one light, and evidently faithful with three punctual ones. What
-the bathroom has and no rung does is an environment map *and* analytic lights at
-once, which is where `connectToLight` splits its draw between the two strategies.
+| | 1024² | 512² |
+|---|---|---|
+| NEE 1024 against NEE 4096 | 0.0583 | 0.0588 |
+| RIS 1024 against RIS 4096 | 0.0561 | 0.0567 |
+| **NEE 4096 against RIS 4096** | **0.0126** | **0.0121** |
 
-So the next step is a rung, not a debugger: one scene with an environment and a
-rect light together, which the ladder wants for its own sake.
+The two self-convergence rows are close to what they were. The cross-estimator
+row is a quarter of it, and it is now *five times smaller* than the noise either
+estimator has left at 1024 spp -- the opposite conclusion, at the same resolution
+the original was taken at, and the same at half of it. Something
+between the two measurements closed it, and the most likely candidate is
+`93421cf`, which stopped `eval` building a half vector for a refraction that
+never happened on a thin wall -- the bathroom is full of thin walls, and RIS
+picks its survivor by `luminance(f)`, so a wrong `f` moves which candidate wins
+as well as what it is worth.
 
-It also costs 60% more time per sample here, so there is no reason to raise it
-until this is settled. The default of 1 is plain NEE and is what every measured
-row in the ladder was recorded with.
+### The rung this entry asked for exists, and it exonerates the split
+
+The hypothesis was that the disagreement lived in `connectToLight`'s split
+between an environment and the analytic lights, which no ladder row had.
+`scenes/feature_tests/19_env_and_light` now does: a physical sky baked to an
+equirectangular map, plus the ladder's usual area light, over three roughnesses.
+Against Cycles it is 0.026 / 1.000 at `ris_candidates = 1` and 0.023 / 1.000 at
+8, and the two Strelka images differ from each other by 0.014 -- less than either
+differs from the reference.
+
+An ablation on the bathroom says the same thing from the other end. NEE against
+RIS at 1024 spp, 512², with the sidecar's lights and its environment removed in
+turn -- mean absolute difference over mean radiance, the metric `compare.py`
+prints as `rel`, not the relative RMSE of the table above:
+
+| Lighting | NEE vs RIS |
+|---|---|
+| environment + three rect lights | 0.0178 |
+| rect lights only | 0.0223 |
+| environment only | 0.0142 |
+
+The disagreement does not need the environment at all -- it is *largest* with the
+environment removed. Whatever the residual is, it is not the split.
+
+**What is left** is a small, ordinary estimator difference at the level of the
+remaining noise, and no evidence that either is wrong. RIS still costs about 40%
+more time per sample on this scene (14.1 s against 20.0 s for 1024 spp at 512²),
+which is the honest reason to leave the default at 1; it is no longer that the
+answer moves.
 
 ---
 
-## 7. The denoiser floors out around 0.105, and the guide walk costs it a fifth
+## 7. The denoiser floors out, and the guide source is a switch rather than a default
 
 **Fixed first, because it invalidated the previous version of this entry:** the
 denoised frame never reached the file. It lands in a texture, the display path
@@ -369,10 +463,11 @@ then denoising cannot beat accumulating, because what limits the result is the
 reconstruction and not the samples. For a still at 1024 spp, plain accumulation
 is 2.4x better than the best the denoiser can produce.
 
-**`render.guide_primary_hit` is worth about a fifth where the denoiser is worth
-using at all**: -23% at 4 spp, -21% at 8, -13% at 16, nothing at 64, and +3% at
-256 and above, which is inside the floor. Taking the guides at the camera-visible
-surface removes the flicker described below.
+**`render.guide_primary_hit` is worth about a fifth on this scene**: -23% at 4
+spp, -21% at 8, -13% at 16, nothing at 64, and +3% at 256 and above, which is
+inside the floor. Taking the guides at the camera-visible surface removes the
+flicker described below. On a scene with a large mirror it costs 110% instead --
+see the rung below, which is why it is not the default.
 
 The flicker, for the record. Guides are otherwise taken from "the first surface
 that can actually be described", walking past anything with `roughness <= 0.05`
@@ -383,11 +478,41 @@ roughness guides are all salt and pepper over the floor and the tiled walls, and
 clean everywhere else. With `guide_primary_hit` they are clean everywhere except
 the mirror and the chrome, which is correct -- those have no diffuse albedo.
 
-**Still open, and why it is not simply the default.** One scene cannot settle it.
-The walk exists for the case where the primary hit *is* a mirror, and this room
-has small ones; a scene that is mostly reflective should prefer the walk, and
-nothing here measures that. What would settle it is a rung with a large mirror
-and a rough floor, at 8 and 16 spp, which the ladder wants anyway.
+**Settled: the walk stays the default.** The rung this entry asked for is built
+-- `scenes/feature_tests/20_mirror_and_floor`, a mirror filling the background
+above a textured rough floor -- and it answers the question in the direction that
+keeps the walk. Relative RMSE against a 4096 spp render of the same scene:
+
+| spp | denoiser off | on, guide walk | on, guides at the primary hit |
+|---|---|---|---|
+| 4 | 0.1299 | **0.2252** | 0.4132 |
+| 8 | 0.0910 | **0.1931** | 0.3969 |
+| 16 | 0.0688 | **0.1868** | 0.3878 |
+| 64 | 0.0327 | **0.1826** | 0.3829 |
+
+The walk is better by a factor of 2.1, at every sample count. Against that, the
+bathroom -- re-measured at 16 spp with the same reference discipline -- prefers
+the primary hit by 6%. A feature that buys 6% where it wins and costs 110% where
+it loses is not a default; it is a switch, which is what it is.
+
+The same table says something else this entry did not: **on a scene that is
+mostly mirror the denoiser is a net loss at every sample count**, including 4.
+There is nothing for a reconstruction filter to average over a specular image,
+and the floor it hits here (0.18) is well above the one the bathroom showed
+(0.105). The floor is a property of the scene, not of the denoiser.
+
+### The firefly clamp was measuring itself
+
+Found while building that rung, and worth its own line. `denoiseFireflyClamp` is
+8 in exposed units, and on a scene with a mirror pointed at a light that is not a
+conditioning term -- it is a truncation. With it on, the denoised mean came out
+21% below the reference, every value above 8 was gone, and the error at 4 spp was
+0.5566 instead of 0.2252. Both guide sources were hit equally, so the comparison
+above survived it, but the absolute numbers did not mean what they appeared to.
+
+It is now a config key (`render.denoise_firefly_clamp`, still 8 by default) so
+the harness can ask the question. On the bathroom, which has no such highlight,
+turning it off is worth 2%.
 
 There is also a smaller thing this uncovered and fixed: the AOV debug views could
 not show what the denoiser receives. Looking at a guide requires `debug != 0`,
@@ -401,49 +526,207 @@ them the same way whether they are consumed or looked at.
 ## 8. What the Isometric Kids Bedroom still needs
 
 The conversion reaches the end and the room reads. What it cannot carry, in
-descending order of how much of the frame it costs. Entry 5 is the largest thing
-wrong with this scene and is filed there rather than here.
+descending order of how much of the frame it costs.
+
+Two of the things below are now done -- the hair and the two-sided materials --
+and a third, filed here as a line item, turned out to be the largest defect in
+the scene: a height map on a normal-map socket, which had turned the walls
+black. Entry 5's account of this scene was built on measurements taken with that
+bug in, and has been corrected.
 
 ### Hair
 
-Two particle systems -- the monster at 1000 strands with 400 children each, the
-spider at 10000 with 10 -- and two `BRDFHair4` materials. Nothing about it works
-today, and the reason is not the API: Metal has
-`AccelerationStructureCurveGeometryDescriptor` with round and flat types over
-B-spline, Catmull-Rom, linear and Bezier bases, and Metal 4 has its own. OptiX
-already builds curve GAS and `Scene` already carries `mCurvePoints`.
+**Geometry done; the lobe is what is left.** The strands reach the renderer, are
+traversed as curves rather than as triangles, and shade with the pigment colour
+V-Ray authored. What they do not have is a hair BSDF, and that is now a
+measurement rather than a guess.
 
-What is missing is two things. `MetalRender` builds no curve BLAS -- `curves` is
-read once, to ask whether the scene is empty -- and nothing can put curves into a
-`Scene` from a file, because glTF has no curve primitive and the loader has no
-path for one.
+The route in was the one this entry proposed: a binary sidecar beside the glTF,
+`<stem>_curves.bin`, the way the analytic lights already ride in
+`<stem>_light.json`. Format in `src/sceneloader/curve_sidecar.h`, writer in
+`tools/iso_bathroom/curve_sidecar.py`. Binary and not JSON because the payload is
+8.4 million control points -- 139 MB packed, and around 400 MB as text.
 
-The way in is a binary sidecar beside the glTF, the way the lights already ride
-in `<stem>_light.json`. Strand points, per-strand widths and a material index is
-all the descriptor needs, and the converter can write it straight out of the
-particle system. Triangulating hair into ribbons would avoid all of it and cost
-far more memory for a worse silhouette, which is what curve primitives exist to
-avoid.
+`MetalRender` now builds one curve BLAS per set through
+`AccelerationStructureCurveGeometryDescriptor`, and `shade` rebuilds the hit from
+the same buffers the structure was built from: segment index plus the parameter
+along it gives the axis point, the tangent and the radial normal. Where along the
+strand a hit landed comes out of the segment index alone -- a particle system
+gives every strand the same segment count, so `segment % segmentsPerStrand` is
+the strand's own coordinate and no per-point attribute has to be stored.
 
-A hair BSDF is a separate question and a smaller one: a rough dielectric cylinder
-is wrong but not absurd, and nothing can be measured until the geometry arrives.
+Two things had to be a compiled variant rather than a branch. `curve_data` is an
+intersector *tag*, so a curve-capable traversal is a different type, not a
+different code path: `kFeatureCurves` selects `wavefrontExtendStaticCurve` and
+its three siblings, and a scene with no hair traverses exactly the kernels it
+did before. And the metallib moved from `-std=metal3.0` to `3.1`, which is where
+`curve_data`, `geometry_type::curve` and `curve_parameter` first exist.
+
+That last one is the only thing here that touches a scene without hair, and it
+touches it by 66 pixels in 160 000 at 32 spp -- relative RMS 5.8e-4, mean
+absolute 1.2e-6. Built with `STRELKA_METAL_STRICT_FP=ON` the bathroom and the
+bedroom are **bit-identical** before and after the whole change, which is what
+that switch is for: the difference is multiply-add contraction landing
+differently in a kernel whose registers moved, not a change in what is computed.
+
+#### What it costs and what it buys
+
+| | without the grooms | with them |
+|---|---|---|
+| frame, 128 spp at 1280² | 3.7, 4.0 s | 5.0, 5.2 s (+30%, interleaved) |
+| acceleration structures | 0.17 GB | 1.11 GB |
+| curve buffers | -- | 0.17 GB (8.4 M control points, 7.5 M segments) |
+| device total | 0.60 GB | 1.63 GB |
+
+938 644 strands, and they change 2170 pixels of a 1.6 M pixel frame. Both grooms
+are small in this shot -- the monster is forty pixels across and the spider
+twelve -- so this is a fair statement of what hair costs when it is *not* the
+subject, not of what it costs in general.
+
+Mean linear luminance over the patch each groom occupies, both sides measured
+with the normal-map fix below already in (`tools/iso_bathroom/patch_mean.py`):
+
+| Patch | Reference | Bald | With strands |
+|---|---|---|---|
+| monster | 0.0707 | 0.0663 (-6%) | 0.0407 (**-42%**) |
+| spider | 0.0721 | 0.1169 (+62%) | 0.0565 (-22%) |
+
+**Adding correct geometry makes the monster's number worse**, and that is the
+finding rather than an argument against it. A bald ball in the fur's own blue
+lands within 6% of a furry one by coincidence -- the same patch mean, a different
+object. What the strands change is the silhouette, which the reference has and a
+sphere does not, and a patch mean cannot see. What they get wrong is how much
+light comes back out, which is the lobe.
+
+The spider moves the other way, +62% to -22%, for the same reason with a
+different sign: it was a pale smooth body where the reference has dark fuzz.
+
+#### The lobe, which is now the whole of what is missing
+
+The strands shade as rough dielectric cylinders at IOR 1.55, with the colour
+derived rather than fitted: melanin and pheomelanin are pigment concentrations in
+Chiang et al. 2016's model, which is what V-Ray Hair Next exposes, so
+`exp(-sigma_a)` is what survives them and `dye_color` multiplies it. The monster's
+0.05 melanin and 0.5 pheomelanin over a blue dye give (0.185, 0.184, 0.620), and
+the spider's zero pigment leaves its grey dye alone.
+
+What a cylinder cannot do is what makes fur bright: light entering a strand,
+refracting, and leaving through a neighbour. The dropped terms are the whole
+reason V-Ray's plugin has them -- primary, secondary and transmission lobes, the
+`highlight_shift` that offsets the two specular bands, `primary_glossiness_boost`
+-- and their absence has one sign, which is the 42% above. That is a rung the
+ladder can hold: a groom, one light, and a Cycles reference.
+
+#### Smaller things the export settles
+
+- Strand resolution is `2**display_step` segments, pushed to the render setting
+  and capped by `--hair-max-step` (default 3, so 8 segments). Both systems author
+  fewer guide segments than that, so nothing is lost. Halving it moves the spider
+  by a third of its error in the direction of the reference, which is not an
+  improvement -- only a straighter strand catching light differently, and one
+  more reason to believe the residual is the lobe.
+- Child count is the render count, not the viewport's. Blender caches both, and
+  the depsgraph hands over whichever was last evaluated -- the viewport numbers
+  are an eighth of the render ones here, so reading them exports a thinner groom
+  that looks like a converter that half-worked.
+- The material comes from the particle system's slot *index* read off the
+  original object. `material_slot` on the evaluated copy answers "Default
+  Material" for every system in this file, which put both grooms on a material
+  that does not exist.
+- `Spider_Hair_Mtl` authors 2.5% transparency. Writing that as a BLEND material
+  puts the entire scene on the cutout shadow traversal for a difference nothing
+  can see, so the conversion has a floor at 5%.
 
 ### Two-sided materials
 
-`Mtl2Sided` on eleven object/material pairs: the curtains, the lampshade, the
-paper plane, the notebook pages, the ping-pong ball. Translucency itself is
-covered -- `KHR_materials_diffuse_transmission` is exactly this -- and what is
-not is a *different material* on each side, which the plugin allows and the
-extension does not.
+**Done, except for one material out of nine.** `Mtl2Sided` is two things at once,
+and the entry was written as though the exotic one were the common case. It is
+not: of the nine such materials here -- the curtains, the lampshade, the paper
+plane, the notebook pages, both ping-pong balls, the ship's sails, the sticky
+notes -- exactly one has a Back sub-material linked at all. The other eight are
+translucency and nothing else, which `KHR_materials_diffuse_transmission` carries
+exactly.
+
+The factor is V-Ray's `translucency`. The *colour* is what needed care: Strelka's
+lobe is `diffuse_transmission_color / pi` on its own, not the albedo times
+anything, so the factor colour is the whole transmitted tint. Four of the nine
+are textured, and for those the plugin's constant is the untouched default 0.5 --
+V-Ray ignores it when a map is plugged in. Writing it made a backlit curtain
+transmit mid grey. The mean of the map, taken off a 16x16 copy, is what a sheet
+of it transmits, and it is one number rather than a texture slot the material
+struct does not have.
+
+Mean linear luminance, 1280² against the reference:
+
+| Patch | Reference | Before | After |
+|---|---|---|---|
+| lampshade | 0.8727 | 0.2513 (-71%) | 0.4258 (**-51%**) |
+| curtain, lit edge | 0.1122 | 0.3102 (+176%) | 0.2590 (+131%) |
+| curtain, shaded | 0.1391 | 0.1756 (+26%) | 0.1608 (+16%) |
+
+Every patch moves toward the reference and none of them arrives, which is the
+same story as everywhere else in this scene: the curtains hang directly in front
+of the two window rect lights that entry 5 is about, so what is left of their
+error is that entry's, not this one's.
+
+Finding the front sub-material needed the links rather than the node order. The
+V-Ray nodes load as `NodeUndefined`, so their sockets are dead for evaluation --
+but the links survive in the tree, and they are the only thing that distinguishes
+front from back. `Paper_Notepad_Mtl` has two `BRDFVRayMtl` nodes and the front is
+not the first of them, so reading "the highest-priority plugin anywhere in the
+tree", which is what the converter did, was a coin flip on that one material.
+
+**What is still open** is that one material: a genuinely different shader on the
+back face, which the renderer has nowhere to put. It is reported rather than
+approximated -- picking a side would be a converter deciding something it cannot
+know.
+
+### A height map is not a normal map, and it was not harmless
+
+**Fixed, and it was the largest thing wrong with this scene.** The previous
+version of this entry filed it as a line item and said it was "harmless here only
+because the authored amount is 0.001". That was wrong twice over.
+
+V-Ray's `bump_type` 0 means the map on the bump socket is a *height field*; the
+converter wired it into a tangent-space normal map regardless. Seven of this
+scene's nine bump maps are height fields, and the walls' is the greyscale mix
+mask -- the same image that drives their colour.
+
+The amount does not save it, because glTF's `normalTexture.scale` multiplies x
+and y and leaves z alone (`shading_common.h:442`, which is what the spec says).
+A mask texel of 0 decodes to (-1, -1, -1); scaling xy by 0.001 leaves
+(0, 0, -1), and a shading normal pointing into the surface is a surface that
+faces nothing. The mask is mostly dark, so the plaster walls were mostly black.
+
+| Patch | Reference | Before | After |
+|---|---|---|---|
+| right wall | 0.2713 | **0.0000** (-100%) | 0.2951 (+9%) |
+| back wall | 0.0854 | 0.0011 (-99%) | 0.0640 (-25%) |
+| monster | 0.0707 | 0.1551 | 0.0407 |
+
+The right wall did not measure "dark". It measured zero.
+
+The conversion is the textbook one and needs no fitting: a height map spans the
+uv range in `width` texels, so `dh/du` is the central difference times the width
+times the map's repeat, and the normal is `(-amount * dh/du, -amount * dh/dv, 1)`
+normalised, with the node strength then 1 because the amount is already in the
+map. `TextureBaker.bake_height_normal`.
+
+**Left open by it**, because it is a different question: those baked maps are
+sampled at mip 0 by default (`render/pt/textureLodMode` 0), and a mask used as a
+height field has one-texel edges, so the sparse 45-degree tilts at those edges
+alias. V-Ray never sees them -- it differentiates the texture over the ray's
+actual footprint, which is many texels wide at this distance. Nothing here
+measures what that costs.
 
 ### Smaller, and each is a line rather than a project
 
-- `Leather_Nrm_Bump.tx` is an OIIO tiled texture. Blender cannot read it, so that
-  normal map is silently absent.
-- A bitmap on a Bump Map socket is converted as a tangent-space normal map. The
-  walls hand the same greyscale mix mask to both `Mix Map` and `Bump Map`, so it
-  is a height field being read as a normal. Harmless here only because the
-  authored amount is 0.001.
+- ~~`Leather_Nrm_Bump.tx` is an OIIO tiled texture Blender cannot read.~~ Stale:
+  a `.tx` is a tiled TIFF, and Blender reads this one by content rather than by
+  extension. It arrives at 1595x1537 with a mean of (0.500, 0.499, 0.980), which
+  is what a tangent-space normal map looks like, and the exporter writes it out
+  as `Leather_Nrm_Bump.tx.png`. Whatever was missing was fixed by the texture
+  path work, not by anything aimed at this.
 - `TexMulti` picks one of N textures by object ID and the list of N is not in the
   .blend at all -- five empty slots, nothing linked. The coloured pencils it
   drives come out at the plugin's default grey. Their object names say which
@@ -455,3 +738,8 @@ extension does not.
 - `BRDFCarPaint2`'s flake layer. Flakes are a spatially varying normal, not a
   colour, so the flatten in `convert_layered` takes the base colour and the coat
   gloss and reports the rest.
+- The plaster walls are the right colour family and the wrong value: with the
+  normals fixed they read a lighter, more yellow green than the reference's
+  olive. Their base colour is a baked `TexMix`, so this is a question about that
+  bake rather than about lighting -- and it is now visible, which it was not
+  while the wall was black.
