@@ -4,8 +4,22 @@ Each entry is something measured and left unfixed, with the measurement that
 found it and what has already been ruled out. They are written so that a reader
 starting cold can act without repeating the elimination.
 
-Everything below reproduces from the Isometric Bathroom conversion. Build the
-scene once:
+Most of what is below reproduces from the Isometric Bathroom conversion; entry 8,
+and the second half of entry 5, come from the Isometric Kids Bedroom, which the
+same converter reads:
+
+```bash
+/Applications/Blender.app/Contents/MacOS/Blender -b \
+    ~/Isometric_Kids_Bedroom/Iso_Kids_Room.blend --factory-startup \
+    -P tools/iso_bathroom/vray2strelka.py -- --out /tmp/kids --name kids_room \
+    --no-fog-volumes
+```
+
+Its reference is
+<https://documentation.chaos.com/download/attachments/117637916/Render_Camera_1280_0x008_15m.png>,
+at 1280 square.
+
+Build the bathroom once:
 
 ```bash
 /Applications/Blender.app/Contents/MacOS/Blender -b \
@@ -237,6 +251,37 @@ By x3 the tiled wall has arrived, the floor has overshot, the backdrop is 29%
 over, and the tub rim is still 13% under. A brightness that is wrong by a
 different factor in every part of the frame is not a brightness.
 
+### Confirmed on a second scene, where it is most of the image
+
+The Isometric Kids Bedroom is the same defect with the volume turned up. Its
+reference is <https://documentation.chaos.com/download/attachments/117637916/Render_Camera_1280_0x008_15m.png>;
+mean luminance over patches of the 1280² render:
+
+| Patch | Reference | Strelka | |
+|---|---|---|---|
+| left wall | 0.465 | 0.330 | -29% |
+| right wall | 0.435 | 0.182 | **-58%** |
+| ceiling | 0.491 | 0.465 | -5% |
+| floor | 0.504 | 0.568 | +13% |
+| backdrop, outside the room | 0.205 | 0.380 | **+86%** |
+
+Same signature, both signs, and the reason it is worse is in the parameters:
+every rect light in that scene is strongly directional where the bathroom's were
+barely so.
+
+| Light | `intensity` | `directional` |
+|---|---|---|
+| `VRayRectLight_Window_02` | 1.5 | 0.95 |
+| `VRayRectLight_Window_01` | 1.5 | 0.90 |
+| `VRayRectLight_CorridorLight_Fill` | 1.5 | 0.70 |
+| `VRayRectLight_Main` | 0.8 | 0.65 |
+| `VRayRectLight_Laptop` | 10.0 | 0.20 |
+
+Against the bathroom's 0.1 and 0.5. Two windows at 0.9 and 0.95 are nearly
+searchlights aimed into the room; exported as Lambertian rectangles they spread
+that over a hemisphere, which is why that room is half as bright as it should be
+and the backdrop behind it is nearly twice.
+
 ### Why it is not fixed here
 
 Implementing `directional` means knowing V-Ray's falloff, and Chaos documents
@@ -350,3 +395,63 @@ which disables denoising, which is what the canonical guide sample was tied to -
 so every guide view assembled its guides the other way, every sample overwriting
 the last into a buffer that is assigned and not accumulated. The views now build
 them the same way whether they are consumed or looked at.
+
+---
+
+## 8. What the Isometric Kids Bedroom still needs
+
+The conversion reaches the end and the room reads. What it cannot carry, in
+descending order of how much of the frame it costs. Entry 5 is the largest thing
+wrong with this scene and is filed there rather than here.
+
+### Hair
+
+Two particle systems -- the monster at 1000 strands with 400 children each, the
+spider at 10000 with 10 -- and two `BRDFHair4` materials. Nothing about it works
+today, and the reason is not the API: Metal has
+`AccelerationStructureCurveGeometryDescriptor` with round and flat types over
+B-spline, Catmull-Rom, linear and Bezier bases, and Metal 4 has its own. OptiX
+already builds curve GAS and `Scene` already carries `mCurvePoints`.
+
+What is missing is two things. `MetalRender` builds no curve BLAS -- `curves` is
+read once, to ask whether the scene is empty -- and nothing can put curves into a
+`Scene` from a file, because glTF has no curve primitive and the loader has no
+path for one.
+
+The way in is a binary sidecar beside the glTF, the way the lights already ride
+in `<stem>_light.json`. Strand points, per-strand widths and a material index is
+all the descriptor needs, and the converter can write it straight out of the
+particle system. Triangulating hair into ribbons would avoid all of it and cost
+far more memory for a worse silhouette, which is what curve primitives exist to
+avoid.
+
+A hair BSDF is a separate question and a smaller one: a rough dielectric cylinder
+is wrong but not absurd, and nothing can be measured until the geometry arrives.
+
+### Two-sided materials
+
+`Mtl2Sided` on eleven object/material pairs: the curtains, the lampshade, the
+paper plane, the notebook pages, the ping-pong ball. Translucency itself is
+covered -- `KHR_materials_diffuse_transmission` is exactly this -- and what is
+not is a *different material* on each side, which the plugin allows and the
+extension does not.
+
+### Smaller, and each is a line rather than a project
+
+- `Leather_Nrm_Bump.tx` is an OIIO tiled texture. Blender cannot read it, so that
+  normal map is silently absent.
+- A bitmap on a Bump Map socket is converted as a tangent-space normal map. The
+  walls hand the same greyscale mix mask to both `Mix Map` and `Bump Map`, so it
+  is a height field being read as a normal. Harmless here only because the
+  authored amount is 0.001.
+- `TexMulti` picks one of N textures by object ID and the list of N is not in the
+  .blend at all -- five empty slots, nothing linked. The coloured pencils it
+  drives come out at the plugin's default grey. Their object names say which
+  colour each was meant to be; reading them would be a guess wearing the clothes
+  of a conversion.
+- Per-light `diffuse_contribution` / `specular_contribution` and include/exclude
+  lists have no equivalent in Strelka. This scene's spot names `Terrain` and its
+  dome asks for 0.8 diffuse and 1.5 specular.
+- `BRDFCarPaint2`'s flake layer. Flakes are a spatially varying normal, not a
+  colour, so the flatten in `convert_layered` takes the base colour and the coat
+  gloss and reports the rest.
