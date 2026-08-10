@@ -280,54 +280,59 @@ row in the ladder was recorded with.
 
 ---
 
-## 7. The denoiser makes the image worse at every sample count
+## 7. The denoiser floors out around 0.105, and the guide walk costs it a fifth
 
-Not a question of giving it enough samples first. Relative RMSE against a 4096
-spp reference, denoiser off against on, same spp:
+**Fixed first, because it invalidated the previous version of this entry:** the
+denoised frame never reached the file. It lands in a texture, the display path
+consumed it, and StrelkaCLI writes from the buffer -- so a headless
+`denoise = true` wrote the estimate the denoiser had been *handed*, while still
+paying for it: a canonical guide sample it does not accumulate, frame jitter, and
+the firefly clamp. That is the whole of what this entry previously reported as a
+denoiser that damages the image. It does not.
 
-| spp | off | on | |
+Relative RMSE against a 4096 spp reference, with the output actually connected:
+
+| spp | denoiser off | on, guide walk | on, guides at the primary hit |
 |---|---|---|---|
-| 16 | 0.5085 | 0.5317 | 1.05x worse |
-| 64 | 0.2446 | 0.2822 | 1.15x |
-| 256 | 0.1042 | 0.1723 | 1.65x |
-| 1024 | 0.0435 | 0.1437 | 3.30x |
+| 4 | 1.0860 | 0.2747 | **0.2128** |
+| 8 | 0.7615 | 0.2345 | **0.1855** |
+| 16 | 0.5085 | 0.1709 | **0.1492** |
+| 64 | 0.2446 | 0.1248 | 0.1248 |
+| 256 | 0.1042 | 0.1101 | 0.1136 |
+| 1024 | 0.0435 | 0.1056 | 0.1091 |
 
-At 16 spp a guided denoiser should be transformative and it is slightly negative;
-by 1024 it is destroying most of what the samples bought. The architecture around
-it is not the problem -- it is handed the accumulated estimate rather than one
-sample, and its guides come from a canonical extra sample, so "accumulate first,
-then denoise" is already what happens.
+Two things fall out of that.
 
-It is spatially selective, and that is the lead. The backdrop is untouched
-(0.0127 against 0.0128 at 1024 spp); the floor tiles go 0.0319 to 0.1272. Flat
-matte surfaces survive, tiled and glossy ones do not.
+**The denoiser has a floor at about 0.105 and cannot go under it.** Between 256
+and 1024 spp its input improves by 2.4x and its output does not move. So it is
+worth 5x at 4 spp, 2x at 64, and nothing past roughly 200 -- accumulating and
+then denoising cannot beat accumulating, because what limits the result is the
+reconstruction and not the samples. For a still at 1024 spp, plain accumulation
+is 2.4x better than the best the denoiser can produce.
 
-The guides say why. Rendered at `render.debug` 3, 5 and 6 -- diffuse albedo,
-normal, roughness -- all three are salt and pepper over exactly the floor and the
-tiled walls, and clean over the plaster, the backdrop, the tub and the plant. The
-roughness view is the clearest: those surfaces come back as a per-pixel mix of
-black and white, i.e. the guide vertex lands on a near-mirror for one pixel and
-on something rough for the next.
+**`render.guide_primary_hit` is worth about a fifth where the denoiser is worth
+using at all**: -23% at 4 spp, -21% at 8, -13% at 16, nothing at 64, and +3% at
+256 and above, which is inside the floor. Taking the guides at the camera-visible
+surface removes the flicker described below.
 
-That is the guide walk. `shade` takes guides from "the first surface that can
-actually be described", walking past anything with `roughness <= 0.05` so that a
-mirror does not hand the denoiser a featureless black albedo where a reflected
-world is. The bathroom's ceramics sit close enough to that threshold that the
-decision flips from pixel to pixel, and what the denoiser then demodulates
-against is the albedo of whatever each pixel's reflection happened to land on.
+The flicker, for the record. Guides are otherwise taken from "the first surface
+that can actually be described", walking past anything with `roughness <= 0.05`
+so a mirror does not hand over a featureless black albedo where a reflected world
+is. The bathroom's ceramics sit close enough to that threshold that the decision
+flips per pixel: rendered at `render.debug` 3, 5 and 6, the albedo, normal and
+roughness guides are all salt and pepper over the floor and the tiled walls, and
+clean everywhere else. With `guide_primary_hit` they are clean everywhere except
+the mirror and the chrome, which is correct -- those have no diffuse albedo.
 
-Not fixed because the fix is a design choice with no measurement behind it yet.
-Hysteresis on the threshold, a roughness taken from the material rather than the
-textured value, or simply taking the guide at the primary hit whenever the camera
-is static are all plausible and all differ on the case the walk exists for, which
-is a mirror. The measurement to aim at is the table above: the denoiser has to
-beat 0.0435 at 1024 spp before it is worth turning on.
+**Still open, and why it is not simply the default.** One scene cannot settle it.
+The walk exists for the case where the primary hit *is* a mirror, and this room
+has small ones; a scene that is mostly reflective should prefer the walk, and
+nothing here measures that. What would settle it is a rung with a large mirror
+and a rough floor, at 8 and 16 spp, which the ladder wants anyway.
 
-Fixed on the way, because it made the above impossible to see: the AOV debug
-views could not show what the denoiser receives. Looking at a guide requires
-`debug != 0`, `debug != 0` disables denoising, and the canonical guide sample was
-tied to denoising being on -- so every guide view rendered its guides the other
-way, every sample overwriting the last into a buffer that is assigned rather than
-accumulated. The views now assemble guides the same way whether they are being
-consumed or looked at. It did not change what these three views show, which is
-how I know the speckle is real.
+There is also a smaller thing this uncovered and fixed: the AOV debug views could
+not show what the denoiser receives. Looking at a guide requires `debug != 0`,
+which disables denoising, which is what the canonical guide sample was tied to --
+so every guide view assembled its guides the other way, every sample overwriting
+the last into a buffer that is assigned and not accumulated. The views now build
+them the same way whether they are consumed or looked at.

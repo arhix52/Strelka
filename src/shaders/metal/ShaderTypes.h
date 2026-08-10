@@ -216,6 +216,16 @@ struct Uniforms
     /// level of detail. A switch rather than a constant because the whole point
     /// of it is a memory-pressure trade that has to be measured per scene.
     uint32_t textureLodMode;
+    /// Where the denoiser's material guides come from. 0 = walk to the first
+    /// surface rough enough to describe, so that a mirror hands over the world
+    /// it reflects rather than its own featureless albedo. 1 = the primary hit,
+    /// always.
+    ///
+    /// A switch because the two are right for different things and neither is
+    /// right for both: the walk is what makes a reflection denoisable, and it is
+    /// also what makes a glossy floor's guides flicker between the floor and
+    /// whatever it reflects, one pixel to the next.
+    uint32_t guidePrimaryHit;
 };
 
 

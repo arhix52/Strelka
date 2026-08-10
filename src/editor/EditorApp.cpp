@@ -301,6 +301,7 @@ void EditorApp::loadSettings()
 m_settingsManager->setAs<uint32_t>("render/pt/metal4", 1);
     m_settingsManager->setAs<uint32_t>("render/pt/sortRays", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/textureLod", 0);
+    m_settingsManager->setAs<uint32_t>("render/pt/guidePrimaryHit", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
     if (const char* m4 = getenv("STRELKA_METAL4"))
     {

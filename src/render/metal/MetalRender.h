@@ -426,6 +426,9 @@ private:
     MTL::ComputePipelineState* mWavefrontPrepareHitMissPSO4 = nullptr;
     MTL::ComputePipelineState* mTonemapperPSO4 = nullptr;
     MTL::ComputePipelineState* mTonemapperTexPSO = nullptr;
+    /// Denoised texture -> the buffer the headless writer reads. See
+    /// denoisedTextureToBuffer().
+    MTL::ComputePipelineState* mDenoisedToBufferPSO = nullptr;
     MTL::ComputePipelineState* mSkinningPSO4 = nullptr;
     MTL::ComputePipelineState* mTriangleUpdatePSO4 = nullptr;
 

@@ -300,6 +300,7 @@ MetalRender::~MetalRender()
         safeRelease(mTonemapperPSO);
         safeRelease(mTonemapperPSO4);
         safeRelease(mTonemapperTexPSO);
+        safeRelease(mDenoisedToBufferPSO);
         safeRelease(mSkinningPSO);
         safeRelease(mTriangleUpdatePSO);
         safeRelease(mSkinningPSO4);
@@ -2974,6 +2975,7 @@ void MetalRender::render(Buffer* output)
     pUniformData->enableAccumulation = (uint32_t)accumulationActive;
     pUniformData->risCandidates = std::max(settings.getAs<uint32_t>("render/pt/risCandidates"), 1u);
     pUniformData->textureLodMode = settings.getAs<uint32_t>("render/pt/textureLod");
+    pUniformData->guidePrimaryHit = settings.getAs<uint32_t>("render/pt/guidePrimaryHit");
     pUniformData->missColor = float3(0.0f);
     pUniformData->maxDepth = maxDepth;
     pUniformData->debug = debug;
@@ -3539,6 +3541,30 @@ void MetalRender::render(Buffer* output)
                             sizeof(in.viewToClip));
                 mResetDenoiseHistory = false;
                 mMetalFx.encodeDenoise(pCmd, in);
+
+                // And back into the buffer, which is what anything not looking at
+                // a screen reads: StrelkaCLI writes its EXR and its PNG from
+                // there, and the tone curve it applies is the host's.
+                //
+                // Without this the denoised frame existed only as a texture the
+                // display path consumed, so a headless `denoise = true` wrote the
+                // estimate the denoiser had been *handed*. It still paid for the
+                // denoiser -- a canonical guide sample it does not accumulate,
+                // frame jitter, and the firefly clamp -- which at 1024 spp cost
+                // 0.0435 relative RMSE against 0.1437. All price, no product, and
+                // it read exactly like a denoiser that damages the image.
+                if (mDenoisedToBufferPSO && mDenoisedTexture)
+                {
+                    MTL::ComputeCommandEncoder* cp = pCmd->computeCommandEncoder();
+                    cp->setComputePipelineState(mDenoisedToBufferPSO);
+                    cp->useResource(((MetalBuffer*)output)->getNativePtr(),
+                                    MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+                    cp->setBuffer(pUniformTMBuffer, 0, 0);
+                    cp->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
+                    cp->setTexture(mDenoisedTexture, 0);
+                    cp->dispatchThreads(MTL::Size(outWidth, outHeight, 1), MTL::Size(8, 8, 1));
+                    cp->endEncoding();
+                }
 
                 if (mTonemapperTexPSO)
                 {
@@ -4191,6 +4217,13 @@ void MetalRender::buildTonemapperPipeline()
         MTL::Function* fn = pComputeLibrary->newFunction(
             NS::String::string("toneMappingTextureShader", NS::UTF8StringEncoding));
         mTonemapperTexPSO = fn ? mDevice->newComputePipelineState(fn, &e2) : nullptr;
+        if (fn) fn->release();
+    }
+    {
+        NS::Error* e3 = nullptr;
+        MTL::Function* fn = pComputeLibrary->newFunction(
+            NS::String::string("denoisedTextureToBuffer", NS::UTF8StringEncoding));
+        mDenoisedToBufferPSO = fn ? mDevice->newComputePipelineState(fn, &e3) : nullptr;
         if (fn) fn->release();
     }
     if (mMetal4.isValid())

@@ -1805,7 +1805,12 @@ kernel void wavefrontShade(
     // Below this a surface reflects rather than scatters, and its own albedo is
     // not what the pixel's colour comes from.
     constexpr float kGuideRoughnessFloor = 0.05f;
-    const bool guideWorthy = si.roughness > kGuideRoughnessFloor;
+    // With guidePrimaryHit the camera-visible surface is the answer by
+    // definition, so the roughness floor -- and the flicker it causes where a
+    // material sits on top of it -- does not enter into it.
+    const bool guideWorthy = uniforms.guidePrimaryHit
+                                 ? (depth == 0u)
+                                 : (si.roughness > kGuideRoughnessFloor);
     // Never walk forever: past a couple of bounces the reflected surface has
     // little to do with this pixel, and no guides at all is worse than imperfect
     // ones.

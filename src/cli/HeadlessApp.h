@@ -57,6 +57,9 @@ struct RenderConfig
     // on is a decision about filtering rather than about performance. See the
     // note in wavefront.metal for the measurement.
     bool textureLod = false;
+    // Take the denoiser's material guides at the primary hit instead of walking
+    // to the first rough surface. See Uniforms::guidePrimaryHit.
+    bool guidePrimaryHit = false;
     // 0 = spatial scaler, 1 = temporal scaler (ignored when denoise is on).
     uint32_t upscaleMode = 0;
     uint32_t risCandidates = 1; // 1 = plain next-event estimation

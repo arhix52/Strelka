@@ -194,6 +194,8 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.sortRays = *v;
     if (auto v = tbl["render"]["texture_lod"].value<bool>())
         cfg.textureLod = *v;
+    if (auto v = tbl["render"]["guide_primary_hit"].value<bool>())
+        cfg.guidePrimaryHit = *v;
     if (auto v = tbl["render"]["ris_candidates"].value<int64_t>())
         cfg.risCandidates = (uint32_t)*v;
     if (auto v = tbl["render"]["estimator_mode"].value<int64_t>())
@@ -329,6 +331,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/metal4", m_config.metal4);
     m_settings->setAs<uint32_t>("render/pt/sortRays", m_config.sortRays ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/textureLod", m_config.textureLod ? 1u : 0u);
+    m_settings->setAs<uint32_t>("render/pt/guidePrimaryHit", m_config.guidePrimaryHit ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/staticTraversal", 1);
     m_settings->setAs<uint32_t>("render/validate/estimatorMode", m_config.estimatorMode);
     // Absorption convention for transmissive media: 0 = glTF, 1 = Cycles.
