@@ -243,3 +243,37 @@ exactly four emitters -- a dome, the two `VRayRectLight`s and one mesh light on
 `Light_Plane` -- and all four are exported. `Lamp_Bulb` is `Glass_Clear_Mtl`,
 `Lamp_Plafond` is a plain diffuse shade, and neither emits in V-Ray either. The
 globe is dim for the same reason the rest of the room is.
+
+---
+
+## 6. RIS and plain next-event estimation converge to different images
+
+Turning up `render.ris_candidates` on the bathroom does not reduce variance -- it
+moves the answer. Both estimators converge cleanly toward *their own* result, and
+the two results are not the same. Relative RMSE, 1024 spp against a 4096 spp
+reference of the matching estimator:
+
+| | whole frame | floor tile |
+|---|---|---|
+| NEE 1024 against NEE 4096 | 0.0435 | 0.0319 |
+| RIS 1024 against RIS 4096 | 0.0396 | 0.0270 |
+| **NEE 4096 against RIS 4096** | **0.0490** | **0.0698** |
+
+The third row is the finding. Two converged renders of the same scene differ by
+more than either differs from its own half-converged version, and on the floor by
+five times the noise left at 4096 spp. One of them is wrong.
+
+The ladder cannot say which. RIS and NEE agree *exactly* where it can test them:
+`00_calibration` and `02_basecolor` come out at 1.0098 and 1.0028 against Cycles
+either way, and so does `12_lights_punctual` at 1.0020 with three lights in it.
+That is not luck -- resampling among candidates is a no-op when the candidates
+are drawn from one light, and evidently faithful with three punctual ones. What
+the bathroom has and no rung does is an environment map *and* analytic lights at
+once, which is where `connectToLight` splits its draw between the two strategies.
+
+So the next step is a rung, not a debugger: one scene with an environment and a
+rect light together, which the ladder wants for its own sake.
+
+It also costs 60% more time per sample here, so there is no reason to raise it
+until this is settled. The default of 1 is plain NEE and is what every measured
+row in the ladder was recorded with.
