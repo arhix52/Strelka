@@ -431,6 +431,17 @@ private:
     MTL::Buffer* mStageStatsBuffer = nullptr; // shared copy of the control buffer, profiling only
     static constexpr uint32_t kMaxStageSamples = 256;
 
+    /// Two counters for the two ways the nested-dielectric stack loses a path:
+    /// a push onto a full stack and a pop that matched nothing. Shared memory,
+    /// written by `shade` and read back here -- both failures are otherwise
+    /// silent, and the scene that had been bleeding paths to the second of them
+    /// did so for as long as it existed. See docs/open-defects.md entry 1.
+    MTL::Buffer* mIorStatsBuffer = nullptr;
+    /// Reported once per scene, not once per frame: it is a fact about the
+    /// geometry, and a warning every frame is a warning nobody reads.
+    bool mReportedIorStats = false;
+    void reportIorStackStats();
+
     // Stage kind of each timestamp, in encode order. A stage's duration is the
     // gap to the next timestamp, so there is always one more sample than stage.
     std::vector<uint8_t> mStageKinds;

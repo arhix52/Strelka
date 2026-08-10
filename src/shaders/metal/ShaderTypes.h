@@ -416,6 +416,24 @@ struct PathState
 
 #define SHARC_NO_ENTRY 0xFFFFFFFFu
 
+// Two counters for the two ways the nested-dielectric stack loses a path, in a
+// shared buffer the host reads back after the frame. See ior_stack.h and entry 1
+// of docs/open-defects.md: both failures are silent, and a scene can bleed paths
+// to either for years without anything saying so.
+//
+// Its own tiny buffer rather than a slot in the wavefront control block, because
+// that one is device-private and reading it back needs a blit the Metal 4 path
+// does not encode. Two words of shared memory cost nothing and both submission
+// paths write them the same way.
+#define IOR_STAT_OVERFLOW  0
+#define IOR_STAT_UNMATCHED 1
+/// A path that reached the environment with a non-empty stack. The other half of
+/// the same failure: a pop that matches nothing is a ray that *left* something it
+/// never entered, and this is a ray that entered something it never left --
+/// which is what a hole in a refracting mesh produces, and the case no exit
+/// event exists to catch.
+#define IOR_STAT_ESCAPED_INSIDE 2
+#define IOR_STAT_COUNT     3
 
 #define PATH_FLAG_ALIVE      (1u << 8)
 #define PATH_FLAG_SPECULAR   (1u << 9)

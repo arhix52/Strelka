@@ -73,6 +73,42 @@ DEVICE_FUNC unsigned int ior_stack_current_material(const THREAD_REF IorStack& s
 }
 
 // ---------------------------------------------------------------------------
+// The two ways this stack loses a path, asked as questions.
+//
+// Both failures are silent by construction: push does nothing when it is full,
+// and pop returns success having found nothing. Either one leaves the path
+// carrying the wrong medium -- or none -- for the rest of its life, and the
+// absorption it applies afterwards belongs to something else. The bathroom did
+// exactly that for as long as it existed and nothing said so.
+//
+// Predicates rather than return values because the two callers are in two
+// different renderers and a changed signature is a changed OptiX payload; asking
+// first costs a loop over at most four entries, on a path that is already inside
+// "this bounce was a transmission through a solid".
+// ---------------------------------------------------------------------------
+DEVICE_FUNC bool ior_stack_full(const THREAD_REF IorStack& stack)
+{
+    return stack.top >= IOR_STACK_SIZE - 1;
+}
+
+/// Whether ior_stack_pop would find anything to remove. False means the path is
+/// leaving something it never entered.
+DEVICE_FUNC bool ior_stack_can_pop(const THREAD_REF IorStack& stack,
+                                   unsigned int priority,
+                                   unsigned int material_index)
+{
+    for (int i = stack.top; i >= 0; i--)
+    {
+        if (stack.entries[i].material_index == material_index ||
+            stack.entries[i].priority == priority)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // ior_stack_pop -- Remove the entry for the surface being left (exiting)
 //
 // Matched on the material first, and only then on the priority.

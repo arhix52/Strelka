@@ -431,7 +431,11 @@ kernel void wavefrontGenerate(
     constant uint32_t&                                         sampleIdx      [[buffer(4)]],
     device uint32_t*                                           queueOut       [[buffer(5)]],
     device uint32_t*                                           control        [[buffer(6)]],
-    device AovSample*                                          aov            [[buffer(7)]])
+    device AovSample*                                          aov            [[buffer(7)]],
+    // Zeroed here rather than on the host: `generate` already owns resetting the
+    // per-sample counters, and a host-side clear would race the frame in flight.
+    // The tally is therefore per sample, which is the rate rather than a total.
+    device uint32_t*                                           iorStats       [[buffer(9)]])
 {
     const uint32_t pixelCount = uniforms.width * uniforms.height;
     if (tid == 0u)
@@ -441,6 +445,9 @@ kernel void wavefrontGenerate(
         control[WF_CTRL_SHADOW] = 0u;
         control[WF_CTRL_HIT] = 0u;
         control[WF_CTRL_MISS] = 0u;
+        iorStats[IOR_STAT_OVERFLOW] = 0u;
+        iorStats[IOR_STAT_UNMATCHED] = 0u;
+        iorStats[IOR_STAT_ESCAPED_INSIDE] = 0u;
     }
     if (tid >= pixelCount)
     {
@@ -1114,6 +1121,12 @@ kernel void wavefrontMiss(
     device const uint32_t*  control       [[buffer(5)]],
     device AovSample*       aov           [[buffer(6)]],
     constant uint32_t&      sampleIdx     [[buffer(7)]],
+    // The escape counter's other half. A path that reaches infinity while its
+    // dielectric stack still holds something left a volume without crossing its
+    // surface -- which is exactly what a hole in a refracting mesh does, and the
+    // failure `shade` cannot see because no exit event ever happens.
+    device const IorStack*  iorStacks     [[buffer(8)]],
+    device atomic_uint*     iorStats      [[buffer(9)]],
     texture2d<float>        envMapTexture [[texture(0)]],
     texture2d<float>        envBackgroundTexture [[texture(1)]])
 {
@@ -1128,6 +1141,13 @@ kernel void wavefrontMiss(
     const uint32_t depth = pathDepth(p.depthAndFlags);
     const bool specularBounce = (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u;
     const bool neeDone = (p.depthAndFlags & PATH_FLAG_NEE_DONE) != 0u;
+
+    // Counted here because here is the only place it is visible: the path is
+    // gone and it still thinks it is inside glass. See ior_stack.h.
+    if (iorStacks[tid].top >= 0)
+    {
+        atomic_fetch_add_explicit(&iorStats[IOR_STAT_ESCAPED_INSIDE], 1u, memory_order_relaxed);
+    }
 
     // Background still needs a record, or the denoiser reads whatever the
     // previous frame left in the guides and smears the silhouette. Not only at
@@ -1267,6 +1287,9 @@ kernel void wavefrontShade(
     // from, exactly as a triangle hit is refetched from the vertex buffer.
     device const packed_float3*                                curvePoints    [[buffer(26)]],
     device const uint32_t*                                     curveSegments  [[buffer(27)]],
+    // Two counters for the ways the nested-dielectric stack loses a path; see
+    // ShaderTypes.h. Written only when one of them has already gone wrong.
+    device atomic_uint*                                        iorStats       [[buffer(28)]],
     texture2d<float>                                           envMapTexture  [[texture(0)]])
 {
     if (gid >= control[WF_CTRL_HIT_N])
@@ -2326,9 +2349,29 @@ kernel void wavefrontShade(
         if (!si.thin_walled)
         {
             if (entering)
+            {
+                // Counted, not merely survived. Both of these leave the path
+                // carrying the wrong medium and neither used to say a word; see
+                // entry 1 of docs/open-defects.md. The test is a loop over at
+                // most four entries on a path that has already established it is
+                // a transmission through a solid, and the atomic only runs when
+                // something has actually gone wrong.
+                if (ior_stack_full(iorStack))
+                {
+                    atomic_fetch_add_explicit(&iorStats[IOR_STAT_OVERFLOW], 1u,
+                                              memory_order_relaxed);
+                }
                 ior_stack_push(iorStack, si.dielectric_priority, si.ior, entry.materialId);
+            }
             else
+            {
+                if (!ior_stack_can_pop(iorStack, si.dielectric_priority, entry.materialId))
+                {
+                    atomic_fetch_add_explicit(&iorStats[IOR_STAT_UNMATCHED], 1u,
+                                              memory_order_relaxed);
+                }
                 ior_stack_pop(iorStack, si.dielectric_priority, entry.materialId);
+            }
         }
         nextOrigin = offset_ray(si.position, -faceNg);
 

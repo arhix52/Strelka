@@ -252,6 +252,7 @@ MetalRender::~MetalRender()
         safeRelease(mPrevFrameVertexBuffer);
         safeRelease(mPrevFrameInstanceBuffer);
         safeRelease(mGeometryEntryBuffer);
+        safeRelease(mIorStatsBuffer);
         safeRelease(mCurvePointBuffer);
         safeRelease(mCurveRadiusBuffer);
         safeRelease(mCurveSegmentBuffer);
@@ -1805,6 +1806,45 @@ void MetalRender::reportStageTimings()
     }
 }
 
+// What the nested-dielectric stack lost, once per scene.
+//
+// Once, not once per frame: this is a fact about the geometry and the materials,
+// not about this frame, and a warning that fires sixty times a second is a
+// warning nobody reads. The counters are per *sample*, because `generate` clears
+// them and generate runs per sample -- so the number is a rate, and comparable
+// between a 4 spp preview and a 4096 spp render.
+//
+// The two failures mean different things and are worth telling apart. An
+// overflow is four nested dielectrics, which is a scene that wants a deeper
+// stack. An unmatched pop is a ray leaving something it never entered, which is
+// almost always a mesh with a hole in it -- and that one cannot be fixed in the
+// renderer at all, because the ray left through the hole without crossing a
+// surface. See docs/open-defects.md entry 1.
+void MetalRender::reportIorStackStats()
+{
+    if (mReportedIorStats || !mIorStatsBuffer)
+    {
+        return;
+    }
+    const uint32_t* stats = static_cast<const uint32_t*>(mIorStatsBuffer->contents());
+    const uint32_t overflow = stats[IOR_STAT_OVERFLOW];
+    const uint32_t unmatched = stats[IOR_STAT_UNMATCHED];
+    const uint32_t escaped = stats[IOR_STAT_ESCAPED_INSIDE];
+    if (overflow == 0 && unmatched == 0 && escaped == 0)
+    {
+        return;
+    }
+    mReportedIorStats = true;
+    STRELKA_WARNING(
+        "Nested dielectrics lost paths, per sample: {} push(es) onto a full stack of {}, "
+        "{} pop(s) that matched nothing, {} path(s) that reached the environment still "
+        "inside a medium. The first wants a deeper stack; the other two are a mesh with a "
+        "hole in it, seen from each side -- and the third is the one no exit event can "
+        "catch, because the ray left through the hole. Each of them carries the wrong "
+        "medium, and therefore the wrong absorption, for the rest of its life.",
+        overflow, IOR_STACK_SIZE, unmatched, escaped);
+}
+
 
 // Metal 4 encode of the wavefront tracer.
 //
@@ -1839,6 +1879,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mMaterialBuffer);
     add(mLightBuffer);
     add(mGeometryEntryBuffer);
+    add(mIorStatsBuffer);
     add(mCurvePointBuffer);
     add(mCurveRadiusBuffer);
     add(mCurveSegmentBuffer);
@@ -2054,6 +2095,7 @@ void MetalRender::encodeWavefrontMetal4(MTL4::CommandBuffer* cmd, MTL4::ComputeC
         bind(mWavefrontControlBuffer, 0, 6);
         bind(mAovBuffer, 0, 7);
         bind(mPathRayBuffer, 0, 8);
+        bind(mIorStatsBuffer, 0, 9);
         enc->dispatchThreadgroups(fullGrid, tg);
         closeStage();
         barrier();
@@ -2115,6 +2157,8 @@ void MetalRender::encodeWavefrontMetal4(MTL4::CommandBuffer* cmd, MTL4::ComputeC
             bind(mWavefrontControlBuffer, 0, 5);
             bind(mAovBuffer, 0, 6);
             table->setAddress(sampleIdx, 7);
+            bind(mIorStackBuffer, 0, 8);
+            bind(mIorStatsBuffer, 0, 9);
             if (mEnvMapTexture)
             {
                 table->setTexture(mEnvMapTexture->gpuResourceID(), 0);
@@ -2157,6 +2201,7 @@ void MetalRender::encodeWavefrontMetal4(MTL4::CommandBuffer* cmd, MTL4::ComputeC
                 bind(mCurvePointBuffer, 0, 26);
                 bind(mCurveSegmentBuffer, 0, 27);
             }
+            bind(mIorStatsBuffer, 0, 28);
             enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
             closeStage();
             barrier();
@@ -2336,6 +2381,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
         enc->setBuffer(mWavefrontControlBuffer, 0, 6);
         enc->setBuffer(mAovBuffer, 0, 7);
         enc->setBuffer(mPathRayBuffer, 0, 8);
+        enc->setBuffer(mIorStatsBuffer, 0, 9);
         enc->dispatchThreads(grid, tg);
 
         for (uint32_t bounce = 0; bounce < bounceIterations; ++bounce)
@@ -2398,6 +2444,8 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
             enc->setBuffer(mWavefrontControlBuffer, 0, 5);
             enc->setBuffer(mAovBuffer, 0, 6);
             enc->setBytes(&s, sizeof(uint32_t), 7);
+            enc->setBuffer(mIorStackBuffer, 0, 8);
+            enc->setBuffer(mIorStatsBuffer, 0, 9);
             if (mEnvMapTexture)
             {
                 enc->setTexture(mEnvMapTexture, 0);
@@ -2451,6 +2499,7 @@ MTL::ComputeCommandEncoder* MetalRender::encodeWavefront(MTL::CommandBuffer* pCm
                 enc->setBuffer(mCurvePointBuffer, 0, 26);
                 enc->setBuffer(mCurveSegmentBuffer, 0, 27);
             }
+            enc->setBuffer(mIorStatsBuffer, 0, 28);
             enc->dispatchThreadgroups(mWavefrontControlBuffer, kHitArgsOffset, tg);
             enc->popDebugGroup();
 
@@ -3913,6 +3962,11 @@ void MetalRender::renderSync(Buffer* output)
         mLastCommandBuffer = nullptr;
     }
 
+    // The GPU has finished, so the counters it wrote are readable. Only here, in
+    // the synchronous path -- the async one would be reading a buffer the next
+    // frame is already clearing, and the answer is the same either way.
+    reportIorStackStats();
+
     // Managed storage needs an explicit GPU→CPU sync before the host can read.
     // On Apple silicon Managed behaves like Shared, but this keeps Intel Macs correct.
     if (output)
@@ -4259,6 +4313,14 @@ void MetalRender::ensureWavefrontBuffers(uint32_t width, uint32_t height)
     // At most one deferred connection per path per bounce.
     mShadowRayBuffer = mDevice->newBuffer(pixels * sizeof(ShadowRay), MTL::ResourceStorageModePrivate);
     mStageStatsBuffer = mDevice->newBuffer(96 * sizeof(uint32_t), MTL::ResourceStorageModeShared);
+    // Shared, so it needs no blit to read: the Metal 4 path encodes none, and
+    // two words are not worth an encoder either way.
+    if (!mIorStatsBuffer)
+    {
+        mIorStatsBuffer =
+            mDevice->newBuffer(IOR_STAT_COUNT * sizeof(uint32_t), MTL::ResourceStorageModeShared);
+        memset(mIorStatsBuffer->contents(), 0, mIorStatsBuffer->length());
+    }
     mAovBuffer = mDevice->newBuffer(pixels * sizeof(AovSample), MTL::ResourceStorageModePrivate);
     mHitQueueBuffer = mDevice->newBuffer(pixels * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
     mMissQueueBuffer = mDevice->newBuffer(pixels * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
