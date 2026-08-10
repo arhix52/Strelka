@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -391,11 +392,8 @@ void HeadlessApp::populateSettings()
 
     for (size_t i = 0; i < m_scene->getAnimations().size(); ++i)
     {
-        char key[64];
-        snprintf(key, sizeof(key), "render/animation/anim%zu/state", i);
-        m_settings->setAs<bool>(key, false);
-        snprintf(key, sizeof(key), "render/animation/anim%zu/time", i);
-        m_settings->setAs<float>(key, m_scene->getAnimations()[i].start);
+        m_settings->setAs<bool>(animationStateKey(i), false);
+        m_settings->setAs<float>(animationTimeKey(i), m_scene->getAnimations()[i].start);
     }
 }
 
@@ -473,7 +471,7 @@ void HeadlessApp::saveOutput(Buffer* buf)
             for (int k = 0; k < 4; ++k)
             {
                 const float v = std::clamp(rgba[k], 0.0f, 1.0f);
-                pixels[i * 4 + k] = static_cast<uint8_t>(v * 255.0f + 0.5f);
+                pixels[i * 4 + k] = static_cast<uint8_t>(std::lround(v * 255.0f));
             }
         }
         if (!stbi_write_png(m_config.outputPath.c_str(), static_cast<int>(w), static_cast<int>(h), 4, pixels.data(),
@@ -494,17 +492,16 @@ void HeadlessApp::printProgress(uint32_t currentSpp, uint32_t totalSpp, double l
     const float fraction = static_cast<float>(currentSpp) / static_cast<float>(std::max(1u, totalSpp));
     const int filled = static_cast<int>(fraction * barWidth);
 
-    char bar[barWidth + 1];
-    for (int i = 0; i < barWidth; ++i)
-    {
-        bar[i] = (i < filled) ? '=' : ' ';
-    }
-    bar[barWidth] = '\0';
+    const std::string bar = std::string((size_t)std::max(0, filled), '=') +
+                            std::string((size_t)(barWidth - std::clamp(filled, 0, barWidth)), ' ');
 
     const double etaSec = (currentSpp > 0) ? lastRenderMs * (totalSpp - currentSpp) / 1000.0 : 0.0;
-    fprintf(stdout, "\rRendering [%s] %u/%u spp | %.1f ms/sample | ETA: %.1fs   ", bar, currentSpp, totalSpp,
-            lastRenderMs, etaSec);
-    fflush(stdout);
+    // Written to the stream rather than logged: the bar redraws itself in place
+    // with a carriage return, and every logger line carries a timestamp and a
+    // newline that would turn it into one line of scrollback per sample.
+    std::cout << fmt::format("\rRendering [{}] {}/{} spp | {:.1f} ms/sample | ETA: {:.1f}s   ", bar, currentSpp,
+                             totalSpp, lastRenderMs, etaSec)
+              << std::flush;
 }
 
 int HeadlessApp::run()
@@ -609,8 +606,7 @@ int HeadlessApp::run()
             m_render->beginGpuCapture(m_config.capturePath);
             m_render->renderSync(outputBuf.get());
             m_render->endGpuCapture();
-            fprintf(stdout, "\ncaptured one frame -> %s\n", m_config.capturePath.c_str());
-            fflush(stdout);
+            std::cout << fmt::format("\ncaptured one frame -> {}\n", m_config.capturePath) << std::flush;
         }
         if (!announced)
         {
@@ -625,8 +621,7 @@ int HeadlessApp::run()
             // buffered when redirected: without the flush a profiler waiting on
             // this line waits forever.
             announced = true;
-            fprintf(stdout, "\nSTRELKA_RENDER_BEGIN\n");
-            fflush(stdout);
+            std::cout << "\nSTRELKA_RENDER_BEGIN\n" << std::flush;
         }
         printProgress(static_cast<uint32_t>(m_sharedCtx->mSubframeIndex), m_config.spp, m_render->getLastRenderTimeMs());
     }
@@ -636,17 +631,17 @@ int HeadlessApp::run()
     {
         // Writing the file anyway would hand back a black image that looks like a
         // lighting problem; saying so and failing is the honest outcome.
-        fprintf(stderr,
-                "\nGPU command buffer failed -- the render is not valid. The scene most likely "
-                "does not fit on the device.\nTry render.texture_downscale = 2 or "
-                "render.texture_max_dim = 2048 in the config.\n");
+        std::cout << '\n'; // close the progress line before the logger writes
+        STRELKA_ERROR(
+            "GPU command buffer failed -- the render is not valid. The scene most likely does not fit on "
+            "the device. Try render.texture_downscale = 2 or render.texture_max_dim = 2048 in the config.");
         return 2;
     }
 
     saveOutput(outputBuf.get());
 
-    fprintf(stdout, "\nDone: %u spp in %.1f s -> %s\n", m_config.spp, totalTime.count() / 1000.0,
-            m_config.outputPath.c_str());
+    std::cout << '\n'; // close the progress line before the logger writes
+    STRELKA_INFO("Done: {} spp in {:.1f} s -> {}", m_config.spp, (double)totalTime.count() / 1000.0, m_config.outputPath);
     return 0;
 }
 

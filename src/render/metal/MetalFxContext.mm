@@ -1,5 +1,6 @@
 #include "MetalFxContext.h"
 
+#include <env.h>
 #include <log.h>
 
 #import <Metal/Metal.h>
@@ -232,7 +233,7 @@ bool MetalFxContext::ensureTemporalScaler(MTL::Device* device,
         // it turns auto exposure off precisely so the scaler's normalisation does
         // not fight the application's own exposure. STRELKA_MFX_AUTOEXPOSURE=1
         // puts it back for comparison.
-        desc.autoExposureEnabled = getenv("STRELKA_MFX_AUTOEXPOSURE") ? YES : NO;
+        desc.autoExposureEnabled = envFlag("STRELKA_MFX_AUTOEXPOSURE") ? YES : NO;
         desc.requiresSynchronousInitialization = YES;
 
         id<MTLFXTemporalScaler> scaler = [desc newTemporalScalerWithDevice:nativeDevice];
@@ -370,7 +371,7 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         // Two inputs aimed at exactly what a path tracer gets wrong: a reflection
         // does not sit on the surface that reflects it, and a motion vector on a
         // mirror describes the mirror rather than the image in it.
-        desc.specularHitDistanceTextureEnabled = getenv("STRELKA_NO_SPECDIST") ? NO : YES;
+        desc.specularHitDistanceTextureEnabled = envFlag("STRELKA_NO_SPECDIST") ? NO : YES;
         desc.specularHitDistanceTextureFormat = kSpecularHitDistanceFormat;
         // On, and the aggregate metrics argue against it. They are wrong, and how
         // they are wrong is worth keeping.
@@ -390,7 +391,7 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         //
         // STRELKA_NO_REACTIVE=1 turns it off, which is the configuration those
         // numbers describe.
-        desc.reactiveMaskTextureEnabled = getenv("STRELKA_NO_REACTIVE") ? NO : YES;
+        desc.reactiveMaskTextureEnabled = envFlag("STRELKA_NO_REACTIVE") ? NO : YES;
         desc.reactiveMaskTextureFormat = kReactiveFormat;
         desc.inputWidth = inputWidth;
         desc.inputHeight = inputHeight;
@@ -411,7 +412,7 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         // it turns auto exposure off precisely so the scaler's normalisation does
         // not fight the application's own exposure. STRELKA_MFX_AUTOEXPOSURE=1
         // puts it back for comparison.
-        desc.autoExposureEnabled = getenv("STRELKA_MFX_AUTOEXPOSURE") ? YES : NO;
+        desc.autoExposureEnabled = envFlag("STRELKA_MFX_AUTOEXPOSURE") ? YES : NO;
         // Block until the graph is built. Asynchronous initialisation returns a
         // scaler whose network is still being assembled, and encoding into it
         // asserts inside MPSGraph rather than failing the creation call.

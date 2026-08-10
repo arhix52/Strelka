@@ -12,6 +12,7 @@ set(FOUNDATION_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/log/logmanager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/settings/settings.h
     ${CMAKE_CURRENT_SOURCE_DIR}/settings/settings.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/env/env.h
     ${CMAKE_CURRENT_SOURCE_DIR}/paths/paths.h
     ${CMAKE_CURRENT_SOURCE_DIR}/progress/loadprogress.h
 )
@@ -22,6 +23,7 @@ target_include_directories(strelka_foundation
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/log
         ${CMAKE_CURRENT_SOURCE_DIR}/settings
+        ${CMAKE_CURRENT_SOURCE_DIR}/env
         ${CMAKE_CURRENT_SOURCE_DIR}/paths
         ${CMAKE_CURRENT_SOURCE_DIR}/progress
 )

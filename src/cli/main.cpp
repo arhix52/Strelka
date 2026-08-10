@@ -5,6 +5,7 @@
 #include <toml++/toml.hpp>
 
 #include <filesystem>
+#include <iostream>
 #include <stdexcept>
 
 #include "HeadlessApp.h"
@@ -63,7 +64,7 @@ int main(int argc, const char* argv[])
 
     if (result.count("help"))
     {
-        fprintf(stdout, "%s\n", options.help().c_str());
+        std::cout << options.help() << '\n';
         return 0;
     }
 

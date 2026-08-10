@@ -22,15 +22,14 @@ const ImU32 kSliceColors[] = {
     IM_COL32(0xd8, 0xa0, 0x50, 0xff), IM_COL32(0x50, 0x78, 0xa8, 0xff), IM_COL32(0xa8, 0x50, 0x78, 0xff),
 };
 
-const char* humanBytes(size_t bytes, char* out, size_t outSize)
+std::string humanBytes(size_t bytes)
 {
+    const double b = (double)bytes;
     if (bytes >= 1024ull * 1024 * 1024)
-        snprintf(out, outSize, "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
-    else if (bytes >= 1024 * 1024)
-        snprintf(out, outSize, "%.0f MB", bytes / (1024.0 * 1024.0));
-    else
-        snprintf(out, outSize, "%.0f KB", bytes / 1024.0);
-    return out;
+        return fmt::format("{:.2f} GB", b / (1024.0 * 1024.0 * 1024.0));
+    if (bytes >= 1024ull * 1024)
+        return fmt::format("{:.0f} MB", b / (1024.0 * 1024.0));
+    return fmt::format("{:.0f} KB", b / 1024.0);
 }
 
 // Drawn here rather than pulled in with ImPlot. ImPlot has PlotPieChart and is
@@ -88,9 +87,8 @@ void drawBreakdown(const char* title,
     }
     const size_t total = std::max(accounted, groundTruth);
 
-    char buf[64];
     ImGui::SeparatorText(title);
-    ImGui::TextDisabled("%s: %s", groundTruthLabel, humanBytes(groundTruth, buf, sizeof(buf)));
+    ImGui::TextDisabled("%s: %s", groundTruthLabel, humanBytes(groundTruth).c_str());
 
     const float radius = 70.0f;
     drawPie(entries, total, radius);
@@ -106,7 +104,7 @@ void drawBreakdown(const char* title,
         draw->AddRectFilled(ImVec2(p.x, p.y + 2.0f), ImVec2(p.x + h - 4.0f, p.y + h - 2.0f), colour);
         ImGui::Dummy(ImVec2(h, h));
         ImGui::SameLine();
-        ImGui::Text("%-22s %9s  %4.1f%%", entries[i].name, humanBytes(entries[i].bytes, buf, sizeof(buf)),
+        ImGui::Text("%-22s %9s  %4.1f%%", entries[i].name, humanBytes(entries[i].bytes).c_str(),
                     total > 0 ? 100.0 * (double)entries[i].bytes / (double)total : 0.0);
     }
     ImGui::EndGroup();

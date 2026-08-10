@@ -2,8 +2,26 @@
 
 #include "imgui.h"
 
+#include <algorithm>
+#include <cstring>
+
 namespace oka
 {
+namespace
+{
+
+// ImGui::InputText edits a fixed char buffer in place, so the path has to be
+// copied into one. Truncates instead of overrunning: a path longer than the
+// field is the field's problem.
+template <size_t N>
+void toEditBuffer(const std::string& src, char (&dst)[N])
+{
+    const size_t n = std::min(src.size(), N - 1);
+    std::memcpy(dst, src.data(), n);
+    dst[n] = '\0';
+}
+
+} // namespace
 
 void EditorApp::drawMaterialPanel()
 {
@@ -55,7 +73,7 @@ void EditorApp::drawMaterialPanel()
     changed |= ImGui::DragFloat("IOR", &desc.params.ior, 0.01f, 1.0f, 3.0f);
 
     char pathBuf[512];
-    snprintf(pathBuf, sizeof(pathBuf), "%s", desc.baseColorTexPath.c_str());
+    toEditBuffer(desc.baseColorTexPath, pathBuf);
     if (ImGui::InputText("Base Color Tex", pathBuf, sizeof(pathBuf)))
     {
         desc.baseColorTexPath = pathBuf;
@@ -67,7 +85,7 @@ void EditorApp::drawMaterialPanel()
         Scene::EnvLightDesc env = m_scene->getEnvLight().value_or(Scene::EnvLightDesc{});
         bool envChanged = false;
         char envPath[512];
-        snprintf(envPath, sizeof(envPath), "%s", env.texturePath.c_str());
+        toEditBuffer(env.texturePath, envPath);
         if (ImGui::InputText("HDR path", envPath, sizeof(envPath)))
         {
             env.texturePath = envPath;

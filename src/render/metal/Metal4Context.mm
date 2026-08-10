@@ -107,11 +107,16 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
         return false;
     }
 
-    // One argument table shared by every stage. Buffer index 24 is the largest
-    // any kernel uses; an index past the declared count is a hard failure.
+    // One argument table shared by every stage, so it has to be as wide as the
+    // highest index any of them binds: buffer(28) is the shade stage's IOR stats
+    // and texture(8) the reactive guide (see wavefront.metal). A bind past the
+    // declared count is a hard failure, and only the debug layer says so -- these
+    // counts were left at the old maxima when the curve, IOR-stats and reactive
+    // bindings were added, and without MTL_DEBUG_LAYER the writes simply went
+    // past the end of the table.
     MTL4::ArgumentTableDescriptor* tableDesc = MTL4::ArgumentTableDescriptor::alloc()->init();
-    tableDesc->setMaxBufferBindCount(25);
-    tableDesc->setMaxTextureBindCount(8);
+    tableDesc->setMaxBufferBindCount(29);
+    tableDesc->setMaxTextureBindCount(9);
     mArgumentTable = device->newArgumentTable(tableDesc, &error);
     tableDesc->release();
     if (!mArgumentTable)

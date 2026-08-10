@@ -1,6 +1,7 @@
 #pragma once
 
 #include <log.h>
+#include <spdlog/fmt/fmt.h>
 #include <functional>
 #include <map>
 #include <string>
@@ -89,5 +90,21 @@ public:
         }
     }
 };
+
+/// The per-animation settings keys.
+///
+/// A dozen call sites -- the editor, the animation panel, the Metal renderer --
+/// build these, and getAs() treats a key that differs by one character as a
+/// missing setting: it logs, asserts, and hands back a default. Spelling them
+/// once is what keeps a writer and its reader on the same key.
+inline std::string animationStateKey(size_t index)
+{
+    return fmt::format("render/animation/anim{}/state", index);
+}
+
+inline std::string animationTimeKey(size_t index)
+{
+    return fmt::format("render/animation/anim{}/time", index);
+}
 
 } // namespace oka

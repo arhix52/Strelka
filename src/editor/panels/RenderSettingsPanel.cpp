@@ -316,10 +316,17 @@ void EditorApp::drawRenderSettingsPanel()
     if (ImGui::Button("Save Screenshot"))
     {
         // Generate default filename with timestamp
-        std::time_t now = std::time(nullptr);
-        std::tm* tm = std::localtime(&now);
-        char defaultName[64];
-        std::strftime(defaultName, sizeof(defaultName), "screenshot_%Y%m%d_%H%M%S.exr", tm);
+        const std::time_t now = std::time(nullptr);
+        const std::tm* tm = std::localtime(&now);
+        // localtime() returns null for a clock it cannot convert, and strftime()
+        // returns 0 when the result would not fit; either way the dialog still
+        // needs a name to open with.
+        std::string defaultName = "screenshot.exr";
+        char stamp[64];
+        if (tm != nullptr && std::strftime(stamp, sizeof(stamp), "screenshot_%Y%m%d_%H%M%S.exr", tm) != 0)
+        {
+            defaultName = stamp;
+        }
 
         IGFD::FileDialogConfig config;
         config.path = ".";
@@ -501,16 +508,9 @@ void EditorApp::drawLoadingOverlay()
     ImGui::TextUnformatted(std::filesystem::path(m_sceneFile).filename().string().c_str());
     ImGui::Spacing();
 
-    char label[128];
-    if (total > 0)
-    {
-        snprintf(label, sizeof(label), "%s  %u/%u", kStageNames[stage], done, total);
-    }
-    else
-    {
-        snprintf(label, sizeof(label), "%s", kStageNames[stage]);
-    }
-    ImGui::ProgressBar(fraction, ImVec2(-FLT_MIN, 0.0f), label);
+    const std::string label =
+        total > 0 ? fmt::format("{}  {}/{}", kStageNames[stage], done, total) : std::string(kStageNames[stage]);
+    ImGui::ProgressBar(fraction, ImVec2(-FLT_MIN, 0.0f), label.c_str());
 
     // Only the parse can be abandoned. The GPU build hands out buffers and
     // acceleration structures that the renderer is already holding, so stopping

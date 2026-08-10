@@ -154,7 +154,7 @@ void GlfwDisplay::resetFrame()
 float GlfwDisplay::getMaxEDR()
 {
     NSWindow *nswin = glfwGetCocoaWindow(mWindow);
-    return nswin.screen.maximumExtendedDynamicRangeColorComponentValue;
+    return static_cast<float>(nswin.screen.maximumExtendedDynamicRangeColorComponentValue);
 }
 
 void GlfwDisplay::drawFrame(ImageBuffer& result)
@@ -167,12 +167,24 @@ void GlfwDisplay::drawFrame(ImageBuffer& result)
     // A renderer that produced a texture has already done this work.
     if (result.deviceTexture)
     {
-        if (mTexture && mOwnsTexture)
+        // Retained, not borrowed. The renderer frees and recreates its display
+        // textures whenever the render resolution or the MetalFX usage flags
+        // change -- a window resize, an upscaler or the denoiser being switched on
+        // -- while this pointer stays live in ImGui's draw list until the frame is
+        // encoded, and getDisplayNativeTexure() keeps handing it out on any frame
+        // that lands no new one. Borrowing it meant that encode could retain freed
+        // memory: a segfault inside setFragmentTexture: with nothing in the log.
+        MTL::Texture* incoming = (MTL::Texture*)result.deviceTexture;
+        if (incoming != mTexture)
         {
-            mTexture->release();
+            incoming->retain();
+            if (mTexture && mOwnsTexture)
+            {
+                mTexture->release();
+            }
+            mTexture = incoming;
+            mOwnsTexture = true;
         }
-        mTexture = (MTL::Texture*)result.deviceTexture;
-        mOwnsTexture = false;
         mTexWidth = result.width;
         mTexHeight = result.height;
         return;
@@ -283,7 +295,9 @@ GlfwDisplay::~GlfwDisplay()
 {
     @autoreleasepool
     {
-        destroy();
+        // Qualified: a virtual call from a destructor would skip overrides of
+        // derived classes that no longer exist, and clang-analyzer flags it.
+        GlfwDisplay::destroy();
     }
 }
 
@@ -312,11 +326,9 @@ void GlfwDisplay::destroy()
         _pShaderLibrary->release();
         _pShaderLibrary = nullptr;
     }
-    // Only if it is ours. Since the renderer began handing over its own texture,
-    // mTexture is usually borrowed -- and the renderer is destroyed before the
-    // display, so releasing a borrowed one here sends a message to freed memory
-    // and takes the process down on exit. Every other release site already checks
-    // this; this one did not.
+    // Only if it is ours. The renderer's texture is retained on adoption, so this
+    // release is against a reference this display holds and is safe even though
+    // the renderer is destroyed first.
     if (mTexture && mOwnsTexture)
     {
         mTexture->release();

@@ -1,6 +1,7 @@
 #include "EditorApp.h"
 
 #include <strelka/sceneloader/sceneserializer.h>
+#include <env.h>
 #include <log.h>
 #include <paths.h>
 #include <chrono>
@@ -88,18 +89,42 @@ void EditorApp::beginSceneLoad(const std::string& sceneFile, const std::string& 
     m_sceneFile = sceneFile;
     m_loadProgress.reset();
 
+    if (sceneFile.empty())
+    {
+        // No document to read. The editor keeps the scene it was constructed with
+        // -- one camera, no geometry -- and renders it; starting a load of "" would
+        // only produce a loader error and a progress bar for nothing.
+        m_isLoading = false;
+        clearSelection();
+        m_documentDirty = false;
+        m_undoStack.clear();
+        m_redoStack.clear();
+        return;
+    }
+
     // The loader is captured raw because it outlives every load: ~EditorApp
     // cancels and joins before any member is destroyed.
     auto loader = m_sceneLoader.get();
     m_loadingFuture = std::async(std::launch::async, [loader, sceneFile]() -> std::unique_ptr<Scene> {
-        auto scene = std::make_unique<Scene>();
-        if (loader->loadGltf(sceneFile, *scene))
+        try
         {
-            return scene;
+            auto scene = std::make_unique<Scene>();
+            if (loader->loadGltf(sceneFile, *scene))
+            {
+                return scene;
+            }
         }
-        // Cancelled or malformed. Either way the partial scene is destroyed here,
-        // on the worker, rather than handed to a main thread that would have to
-        // know which of the two happened.
+        catch (const std::exception& e)
+        {
+            // std::async surfaces exceptions from future::get on the UI thread;
+            // treat OOM / loader throws as a failed load instead.
+            STRELKA_ERROR("Scene load of '{}' threw: {}", sceneFile, e.what());
+        }
+        catch (...)
+        {
+            STRELKA_ERROR("Scene load of '{}' threw an unknown exception", sceneFile);
+        }
+        // Cancelled, malformed, or threw. The partial scene is destroyed here.
         return nullptr;
     });
     m_isLoading = true;
@@ -294,40 +319,40 @@ void EditorApp::loadSettings()
     // Playback stays stable at shutter close unless path-traced blur is enabled;
     // render/pt/spp controls its sample count.
     m_settingsManager->setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);
-    if (const char* dn = getenv("STRELKA_DENOISE"))
+    if (envFlag("STRELKA_DENOISE"))
     {
-        m_settingsManager->setAs<bool>("render/pt/denoise", atoi(dn) != 0);
+        m_settingsManager->setAs<bool>("render/pt/denoise", envBool("STRELKA_DENOISE", false));
     }
-m_settingsManager->setAs<uint32_t>("render/pt/metal4", 1);
+    m_settingsManager->setAs<uint32_t>("render/pt/metal4", 1);
     m_settingsManager->setAs<uint32_t>("render/pt/sortRays", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/textureLod", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/guidePrimaryHit", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
-    if (const char* m4 = getenv("STRELKA_METAL4"))
+    if (envFlag("STRELKA_METAL4"))
     {
-        m_settingsManager->setAs<uint32_t>("render/pt/metal4", (uint32_t)atoi(m4));
+        m_settingsManager->setAs<uint32_t>("render/pt/metal4", envUint("STRELKA_METAL4", 1));
     }
-    if (const char* up = getenv("STRELKA_UPSCALE"))
+    if (envFlag("STRELKA_UPSCALE"))
     {
-        const float f = (float)atof(up);
+        const float f = envFloat("STRELKA_UPSCALE", 1.0f);
         m_settingsManager->setAs<bool>("render/pt/enableUpscale", f > 0.0f && f < 1.0f);
         m_settingsManager->setAs<float>("render/pt/upscaleFactor", f);
     }
-    if (const char* aovEnv = getenv("STRELKA_AOV"))
+    if (envFlag("STRELKA_AOV"))
     {
-        m_settingsManager->setAs<uint32_t>("render/pt/writeAov", (uint32_t)atoi(aovEnv));
+        m_settingsManager->setAs<uint32_t>("render/pt/writeAov", envUint("STRELKA_AOV", 0));
     }
-    if (const char* dv = getenv("STRELKA_DEBUG_VIEW"))
+    if (envFlag("STRELKA_DEBUG_VIEW"))
     {
-        m_settingsManager->setAs<uint32_t>("render/pt/debug", (uint32_t)atoi(dv));
+        m_settingsManager->setAs<uint32_t>("render/pt/debug", envUint("STRELKA_DEBUG_VIEW", 0));
     }
     // Static-geometry traversal. Forcing it off makes the wavefront traverse the
     // same structure the megakernel does, which is what the bit-identity check
     // needs: the two intersector types round intersection distances differently.
     m_settingsManager->setAs<uint32_t>("render/pt/staticTraversal", 1);
-    if (const char* st = getenv("STRELKA_STATIC"))
+    if (envFlag("STRELKA_STATIC"))
     {
-        m_settingsManager->setAs<uint32_t>("render/pt/staticTraversal", (uint32_t)atoi(st));
+        m_settingsManager->setAs<uint32_t>("render/pt/staticTraversal", envUint("STRELKA_STATIC", 1));
     }
     m_settingsManager->setAs<uint32_t>("render/validate/estimatorMode", 0);
     // Absorption convention for transmissive media: 0 = glTF, 1 = Cycles.
@@ -376,14 +401,10 @@ void EditorApp::loadAnimSettings()
     // Erase all previous per-animation settings to avoid leaking keys from old scenes
     m_settingsManager->eraseByPrefix("render/animation/anim");
 
-    char key[64];
-    for (int i = 0; i < (int)m_scene->getAnimations().size(); ++i)
+    for (size_t i = 0; i < m_scene->getAnimations().size(); ++i)
     {
-        snprintf(key, sizeof(key), "render/animation/anim%d/state", i);
-        m_settingsManager->setAs<bool>(key, false);
-
-        snprintf(key, sizeof(key), "render/animation/anim%d/time", i);
-        m_settingsManager->setAs<float>(key, m_scene->getAnimations()[i].start);
+        m_settingsManager->setAs<bool>(animationStateKey(i), false);
+        m_settingsManager->setAs<float>(animationTimeKey(i), m_scene->getAnimations()[i].start);
     }
 }
 
@@ -457,32 +478,30 @@ void EditorApp::checkLoadingComplete()
 // off so every frame does the full amount of work.
 void EditorApp::runBenchmark()
 {
-    const uint32_t frames = std::max(4, atoi(getenv("STRELKA_BENCH")));
+    const uint32_t frames = std::max(4u, envUint("STRELKA_BENCH", 4));
     const uint32_t warmup = std::max(4u, frames / 4);
 
     m_settingsManager->setAs<bool>("render/pt/enableAcc", false);
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
     // One submission per frame, so the number is the tracer's cost and not the
     // inter-band gaps of the responsiveness split.
-    if (const char* d = getenv("STRELKA_REF_DEPTH"))
+    if (envFlag("STRELKA_REF_DEPTH"))
     {
-        m_settingsManager->setAs<uint32_t>("render/pt/depth", (uint32_t)atoi(d));
+        m_settingsManager->setAs<uint32_t>("render/pt/depth", envUint("STRELKA_REF_DEPTH", 4));
     }
-    if (getenv("STRELKA_STAGES"))
+    if (envFlag("STRELKA_STAGES"))
     {
         m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 1);
     }
 
     // Playback changes the workload qualitatively — deforming geometry needs
     // two-keyframe acceleration structures — so it needs its own measurement.
-    const bool play = getenv("STRELKA_PLAY") != nullptr;
+    const bool play = envFlag("STRELKA_PLAY");
     if (play)
     {
         for (size_t i = 0; i < m_scene->getAnimations().size(); ++i)
         {
-            char key[64];
-            snprintf(key, sizeof(key), "render/animation/anim%zu/state", i);
-            m_settingsManager->setAs<bool>(key, true);
+            m_settingsManager->setAs<bool>(animationStateKey(i), true);
         }
     }
 
@@ -557,18 +576,18 @@ void EditorApp::runBenchmark()
 //            blur, so higher is better.
 void EditorApp::runJitterTest()
 {
-    const uint32_t frames = std::max(16, atoi(getenv("STRELKA_JITTER_TEST")));
+    const uint32_t frames = std::max(16u, envUint("STRELKA_JITTER_TEST", 16));
     m_settingsManager->setAs<bool>("render/pt/enableAcc", false);
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
     m_settingsManager->setAs<bool>("render/pt/denoise", true);
     m_settingsManager->setAs<bool>("render/pt/enableUpscale", true);
-    if (const char* up = getenv("STRELKA_UPSCALE"))
+    if (envFlag("STRELKA_UPSCALE"))
     {
-        m_settingsManager->setAs<float>("render/pt/upscaleFactor", (float)atof(up));
+        m_settingsManager->setAs<float>("render/pt/upscaleFactor", envFloat("STRELKA_UPSCALE", 0.5f));
     }
-    if (const char* d = getenv("STRELKA_REF_DEPTH"))
+    if (envFlag("STRELKA_REF_DEPTH"))
     {
-        m_settingsManager->setAs<uint32_t>("render/pt/depth", (uint32_t)atoi(d));
+        m_settingsManager->setAs<uint32_t>("render/pt/depth", envUint("STRELKA_REF_DEPTH", 4));
     }
 
     auto capture = [&](std::vector<float>& out, uint32_t& w, uint32_t& h) {
@@ -751,7 +770,8 @@ double auditMean(const AuditImage& img)
     double sum = 0.0;
     for (size_t i = 0; i < img.px.size(); i += 4)
         sum += img.px[i] + img.px[i + 1] + img.px[i + 2];
-    return img.px.empty() ? 0.0 : sum / (double)(img.px.size() / 4 * 3);
+    const size_t channels = img.px.size() / 4 * 3;
+    return img.px.empty() ? 0.0 : sum / (double)channels;
 }
 
 // RMSE at the best of nine one-pixel shifts, plus which shift won.
@@ -858,7 +878,8 @@ glm::float3 auditChannelMean(const AuditImage& img)
         sum.y += img.px[i + 1];
         sum.z += img.px[i + 2];
     }
-    const double pixels = img.px.empty() ? 1.0 : (double)(img.px.size() / 4);
+    const size_t pixelCount = img.px.size() / 4;
+    const double pixels = img.px.empty() ? 1.0 : (double)pixelCount;
     return glm::float3(sum / pixels);
 }
 
@@ -877,23 +898,18 @@ void EditorApp::runLightAudit()
 {
     const char* outDir = getenv("STRELKA_LIGHT_AUDIT");
     const bool saveImages = outDir && outDir[0] && strchr(outDir, '/') != nullptr;
-    const uint32_t refSpp = (uint32_t)atoi(getenv("STRELKA_AUDIT_SPP") ? getenv("STRELKA_AUDIT_SPP") : "32");
-    const uint32_t auditW = (uint32_t)atoi(getenv("STRELKA_AUDIT_W") ? getenv("STRELKA_AUDIT_W") : "512");
-    const uint32_t auditH = (uint32_t)atoi(getenv("STRELKA_AUDIT_H") ? getenv("STRELKA_AUDIT_H") : "384");
-    const double budgetSec = atof(getenv("STRELKA_AUDIT_BUDGET") ? getenv("STRELKA_AUDIT_BUDGET") : "300");
-    const double stepTimeoutSec = atof(getenv("STRELKA_AUDIT_STEP_SEC") ? getenv("STRELKA_AUDIT_STEP_SEC") : "20");
+    const uint32_t refSpp = envUint("STRELKA_AUDIT_SPP", 32);
+    const uint32_t auditW = envUint("STRELKA_AUDIT_W", 512);
+    const uint32_t auditH = envUint("STRELKA_AUDIT_H", 384);
+    const double budgetSec = envDouble("STRELKA_AUDIT_BUDGET", 300.0);
+    const double stepTimeoutSec = envDouble("STRELKA_AUDIT_STEP_SEC", 20.0);
 
     const auto auditStart = std::chrono::steady_clock::now();
     auto outOfTime = [&]() {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - auditStart).count() > budgetSec ||
                m_display->windowShouldClose();
     };
-    auto report = [&](const std::string& line) {
-        STRELKA_INFO("{}", line);
-        std::fputs(line.c_str(), stdout);
-        std::fputc('\n', stdout);
-        std::fflush(stdout);
-    };
+    auto report = [&](const std::string& line) { STRELKA_INFO("{}", line); };
 
     m_settingsManager->setAs<bool>("render/enableMotionBlur", false);
     m_settingsManager->setAs<bool>("render/isMotionBlurVisible", false);
@@ -1172,24 +1188,21 @@ void EditorApp::runDenoiseAudit()
     // The reference is bounded by samples, not by time: past a couple of hundred
     // the estimator has converged and the renderer is only re-showing the same
     // picture, so waiting longer buys nothing.
-    const uint32_t refSpp = (uint32_t)atoi(getenv("STRELKA_AUDIT_SPP") ? getenv("STRELKA_AUDIT_SPP") : "256");
-    const uint32_t frames = (uint32_t)atoi(getenv("STRELKA_AUDIT_FRAMES") ? getenv("STRELKA_AUDIT_FRAMES") : "12");
+    const uint32_t refSpp = envUint("STRELKA_AUDIT_SPP", 256);
+    const uint32_t frames = envUint("STRELKA_AUDIT_FRAMES", 12);
     // A quarter of the editor's default pixel count. Every question here is about
     // whether a guide means what the denoiser thinks it means, and none of them
     // need a big image -- while the whole audit has to fit in the time a person
     // is willing to sit in front of it.
-    const uint32_t auditW = (uint32_t)atoi(getenv("STRELKA_AUDIT_W") ? getenv("STRELKA_AUDIT_W") : "512");
-    const uint32_t auditH = (uint32_t)atoi(getenv("STRELKA_AUDIT_H") ? getenv("STRELKA_AUDIT_H") : "384");
-    const float upscale =
-        (float)atof(getenv("STRELKA_UPSCALE") ? getenv("STRELKA_UPSCALE") : "0.5");
+    const uint32_t auditW = envUint("STRELKA_AUDIT_W", 512);
+    const uint32_t auditH = envUint("STRELKA_AUDIT_H", 384);
+    const float upscale = envFloat("STRELKA_UPSCALE", 0.5f);
     // Wall-clock budgets. The audit drives the renderer through states it is not
     // known to survive -- that is the point of it -- so it must not be able to
     // wait forever on a frame that is never coming, and it must report whatever
     // it already measured when it runs out of time rather than nothing at all.
-    const double budgetSec =
-        atof(getenv("STRELKA_AUDIT_BUDGET") ? getenv("STRELKA_AUDIT_BUDGET") : "90");
-    const double stepTimeoutSec =
-        atof(getenv("STRELKA_AUDIT_STEP_SEC") ? getenv("STRELKA_AUDIT_STEP_SEC") : "10");
+    const double budgetSec = envDouble("STRELKA_AUDIT_BUDGET", 90.0);
+    const double stepTimeoutSec = envDouble("STRELKA_AUDIT_STEP_SEC", 10.0);
     const auto auditStart = std::chrono::steady_clock::now();
     auto elapsed = [&]() {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - auditStart).count();
@@ -1199,16 +1212,11 @@ void EditorApp::runDenoiseAudit()
     // the budget.
     auto outOfTime = [&]() { return elapsed() > budgetSec || m_display->windowShouldClose(); };
 
-    // Every result goes to stdout as well as the log, unbuffered. spdlog batches
-    // its writes, and a harness whose job is to walk the renderer into states
-    // that might abort has to survive one: numbers that only exist in a buffer
-    // that never got flushed are numbers that were never measured.
-    auto report = [&](const std::string& line) {
-        STRELKA_INFO("{}", line);
-        std::fputs(line.c_str(), stdout);
-        std::fputc('\n', stdout);
-        std::fflush(stdout);
-    };
+    // The logger is flushed per line (flush_on(trace) in Logmanager), which is
+    // what a harness whose job is to walk the renderer into states that might
+    // abort needs: a number that only exists in a buffer nobody flushed is a
+    // number that was never measured.
+    auto report = [&](const std::string& line) { STRELKA_INFO("{}", line); };
 
     // Deterministic conditions for everything below. Motion blur off: it makes
     // the shutter, and therefore the pose the frame is rendered at, depend on
@@ -1270,7 +1278,7 @@ void EditorApp::runDenoiseAudit()
         return m_render->readGuideTexture(g, img.px, img.w, img.h);
     };
 
-    const bool denoiseWithAcc = getenv("STRELKA_AUDIT_NO_ACC") == nullptr;
+    const bool denoiseWithAcc = !envFlag("STRELKA_AUDIT_NO_ACC");
     auto setDenoise = [&](bool on) {
         m_settingsManager->setAs<bool>("render/pt/denoise", on);
         m_settingsManager->setAs<bool>("render/pt/enableUpscale", on);
@@ -1332,12 +1340,10 @@ void EditorApp::runDenoiseAudit()
 
     const size_t animCount = m_scene->getAnimations().size();
     auto setAnimTime = [&](float t01) {
-        char key[64];
         for (size_t i = 0; i < animCount; ++i)
         {
             const auto& a = m_scene->getAnimations()[i];
-            snprintf(key, sizeof(key), "render/animation/anim%zu/time", i);
-            m_settingsManager->setAs<float>(key, a.start + (a.end - a.start) * t01);
+            m_settingsManager->setAs<float>(animationTimeKey(i), a.start + (a.end - a.start) * t01);
         }
     };
 
@@ -1369,9 +1375,10 @@ void EditorApp::runDenoiseAudit()
             std::sort(finite.begin(), finite.end());
             orbitTarget = startPos + startFront * finite[finite.size() / 2];
         }
+        const size_t depthPixels = d.px.size() / 4;
         report(fmt::format("AUDIT orbit target at {:.2f} units ({:.1f}% of frame is geometry)",
                            glm::length(orbitTarget - startPos),
-                           d.px.empty() ? 0.0 : 100.0 * (double)finite.size() / (double)(d.px.size() / 4)));
+                           d.px.empty() ? 0.0 : 100.0 * (double)finite.size() / (double)depthPixels));
         setOrbit(0.0f);
         step();
     }
@@ -1622,7 +1629,7 @@ void EditorApp::runDenoiseAudit()
     // -- with nothing moving, a correct reconstruction converges to the reference
     // and a mismatched one averages neighbouring subpixel positions forever -- so
     // the sweep scores every combination against one converged reference.
-    if (getenv("STRELKA_AUDIT_SWEEP"))
+    if (envFlag("STRELKA_AUDIT_SWEEP"))
     {
         setOrbit(0.0f);
         setAnimTime(0.0f);
@@ -1788,11 +1795,9 @@ void EditorApp::runDenoiseAudit()
             const double covBefore = coverage();
             const float extentBefore = m_render->skinnedGeometryExtent();
 
-            char key[64];
             for (size_t i = 0; i < animCount; ++i)
             {
-                snprintf(key, sizeof(key), "render/animation/anim%zu/state", i);
-                m_settingsManager->setAs<bool>(key, true);
+                m_settingsManager->setAs<bool>(animationStateKey(i), true);
             }
 
             // Driven through the editor's own playAnimations() at a realistic
@@ -1830,8 +1835,7 @@ void EditorApp::runDenoiseAudit()
             }
             for (size_t i = 0; i < animCount; ++i)
             {
-                snprintf(key, sizeof(key), "render/animation/anim%zu/state", i);
-                m_settingsManager->setAs<bool>(key, false);
+                m_settingsManager->setAs<bool>(animationStateKey(i), false);
             }
 
             // Is the character actually moving? A stable picture proves nothing
@@ -1983,7 +1987,7 @@ void EditorApp::runDenoiseAudit()
         // frame's shutter close, so every sample's vector spans a slightly
         // different interval. The editor has it on during playback, so it has to
         // be measurable here.
-        const bool mbOn = getenv("STRELKA_AUDIT_MB") != nullptr;
+        const bool mbOn = envFlag("STRELKA_AUDIT_MB");
         m_settingsManager->setAs<bool>("render/enableMotionBlur", mbOn);
         m_settingsManager->setAs<bool>("render/isMotionBlurVisible", mbOn);
 
@@ -2085,7 +2089,7 @@ void EditorApp::runDenoiseAudit()
         // With the shutter open the geometry is still sampled at a random instant
         // every frame, which a 1-spp temporal reconstruction has no way to
         // reproject -- accumulation resolves it, the denoiser cannot.
-        const bool holdTime = getenv("STRELKA_AUDIT_HOLD") != nullptr;
+        const bool holdTime = envFlag("STRELKA_AUDIT_HOLD");
         AuditImage last;
         const double swim = holdTime ? reconstruct("held", 0.0f, 0.0f, tB, tB, last)
                                      : reconstruct("moving", 0.0f, 0.0f, tA, tB, last);
@@ -2203,11 +2207,9 @@ void EditorApp::runDenoiseAudit()
         m_settingsManager->setAs<bool>("render/isMotionBlurVisible", true);
         m_render->resetTemporalHistory();
 
-        char key[64];
         for (size_t i = 0; i < animCount; ++i)
         {
-            snprintf(key, sizeof(key), "render/animation/anim%zu/state", i);
-            m_settingsManager->setAs<bool>(key, true);
+            m_settingsManager->setAs<bool>(animationStateKey(i), true);
         }
         for (int i = 0; i < 20 && !outOfTime(); ++i)
         {
@@ -2220,8 +2222,7 @@ void EditorApp::runDenoiseAudit()
         // Pause: stop advancing time, keep rendering.
         for (size_t i = 0; i < animCount; ++i)
         {
-            snprintf(key, sizeof(key), "render/animation/anim%zu/state", i);
-            m_settingsManager->setAs<bool>(key, false);
+            m_settingsManager->setAs<bool>(animationStateKey(i), false);
         }
         const size_t subframeAtPause = m_sharedCtx->mSubframeIndex;
         bool motionHeld = true;
@@ -2305,7 +2306,6 @@ void EditorApp::runDenoiseAudit()
         setOrbit(0.0f);
         setAnimTime(0.12f);
         double swimOff = -1.0, swimOn = -1.0;
-        char akey[64];
         for (int mb = 0; mb < 2 && !outOfTime(); ++mb)
         {
             m_settingsManager->setAs<bool>("render/enableMotionBlur", mb != 0);
@@ -2320,8 +2320,7 @@ void EditorApp::runDenoiseAudit()
             setDenoise(true);
             for (size_t a = 0; a < animCount; ++a)
             {
-                snprintf(akey, sizeof(akey), "render/animation/anim%zu/state", a);
-                m_settingsManager->setAs<bool>(akey, true);
+                m_settingsManager->setAs<bool>(animationStateKey(a), true);
             }
             for (int i = 0; i < 12 && !outOfTime(); ++i)
             {
@@ -2331,8 +2330,7 @@ void EditorApp::runDenoiseAudit()
             }
             for (size_t a = 0; a < animCount; ++a)
             {
-                snprintf(akey, sizeof(akey), "render/animation/anim%zu/state", a);
-                m_settingsManager->setAs<bool>(akey, false);
+                m_settingsManager->setAs<bool>(animationStateKey(a), false);
             }
             AuditImage last;
             const double swim = reconstructHeld(mb ? "shutter on" : "shutter off", last);
@@ -2488,7 +2486,7 @@ void EditorApp::runDenoiseAudit()
 void EditorApp::runReferenceCapture()
 {
     const char* outDir = getenv("STRELKA_REF");
-    const uint32_t spp = (uint32_t)atoi(getenv("STRELKA_REF_SPP") ? getenv("STRELKA_REF_SPP") : "512");
+    const uint32_t spp = envUint("STRELKA_REF_SPP", 512);
 
     struct C { const char* name; uint32_t estimator; bool analyticLights; };
     const C cases[] = {
@@ -2509,15 +2507,15 @@ void EditorApp::runReferenceCapture()
     // Full resolution unless asked otherwise: an upscaled capture is not what the
     // estimators are being compared at, and the buffer would hold a smaller image
     // than the EXR claims. The display EXR alongside it is the upscaled one.
-    if (!getenv("STRELKA_UPSCALE"))
+    if (!envFlag("STRELKA_UPSCALE"))
     {
         m_settingsManager->setAs<bool>("render/pt/enableUpscale", false);
     }
     // Same harness for both tracers, so the wavefront rewrite can be checked
     // against the megakernel's recorded numbers without touching anything else.
-    if (const char* d = getenv("STRELKA_REF_DEPTH"))
+    if (envFlag("STRELKA_REF_DEPTH"))
     {
-        m_settingsManager->setAs<uint32_t>("render/pt/depth", (uint32_t)atoi(d));
+        m_settingsManager->setAs<uint32_t>("render/pt/depth", envUint("STRELKA_REF_DEPTH", 4));
     }
 
     std::vector<std::vector<float>> images;
@@ -2547,7 +2545,8 @@ void EditorApp::runReferenceCapture()
             img.assign(px, px + n);
             for (size_t i = 0; i < n; i += 4)
                 meanLum += 0.2126*px[i] + 0.7152*px[i+1] + 0.0722*px[i+2];
-            meanLum /= (double)(n / 4);
+            const size_t pixelCount = n / 4;
+            meanLum /= (double)pixelCount;
             if (outDir)
             {
                 saveScreenshot(rb, std::string(outDir) + "/" + c.name + ".exr");
@@ -2626,33 +2625,26 @@ void EditorApp::runConvergenceSweep()
 {
     const char* outDir = getenv("STRELKA_CONV");
     const bool saveImages = outDir && strchr(outDir, '/') != nullptr;
-    const uint32_t maxSpp = (uint32_t)atoi(getenv("STRELKA_CONV_MAX") ? getenv("STRELKA_CONV_MAX") : "1024");
-    const uint32_t firstSpp = (uint32_t)atoi(getenv("STRELKA_CONV_MIN") ? getenv("STRELKA_CONV_MIN") : "16");
+    const uint32_t maxSpp = envUint("STRELKA_CONV_MAX", 1024);
+    const uint32_t firstSpp = envUint("STRELKA_CONV_MIN", 16);
     // Small on purpose. Every metric here is an average over pixels, so a
     // quarter-size image gives the same answer with four times less waiting --
     // and the whole sweep has to fit inside one run.
-    const uint32_t convW = (uint32_t)atoi(getenv("STRELKA_CONV_W") ? getenv("STRELKA_CONV_W") : "320");
-    const uint32_t convH = (uint32_t)atoi(getenv("STRELKA_CONV_H") ? getenv("STRELKA_CONV_H") : "240");
+    const uint32_t convW = envUint("STRELKA_CONV_W", 320);
+    const uint32_t convH = envUint("STRELKA_CONV_H", 240);
     // Samples per launch. Bigger is faster (fewer command buffers for the same
     // sample count) and must divide the checkpoints, so it is a power of two.
-    const uint32_t sppPerLaunch =
-        (uint32_t)atoi(getenv("STRELKA_CONV_STEP") ? getenv("STRELKA_CONV_STEP") : "8");
-    const double budgetSec =
-        atof(getenv("STRELKA_CONV_BUDGET") ? getenv("STRELKA_CONV_BUDGET") : "600");
-    const char* samplersEnv =
-        getenv("STRELKA_CONV_SAMPLERS") ? getenv("STRELKA_CONV_SAMPLERS") : "0,1,2";
+    const uint32_t sppPerLaunch = envUint("STRELKA_CONV_STEP", 8);
+    const double budgetSec = envDouble("STRELKA_CONV_BUDGET", 600.0);
+    const char* samplersEnvRaw = getenv("STRELKA_CONV_SAMPLERS");
+    const char* samplersEnv = samplersEnvRaw != nullptr ? samplersEnvRaw : "0,1,2";
 
     const auto startTime = std::chrono::steady_clock::now();
     auto elapsed = [&]() {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime).count();
     };
     auto outOfTime = [&]() { return elapsed() > budgetSec || m_display->windowShouldClose(); };
-    auto report = [&](const std::string& line) {
-        STRELKA_INFO("{}", line);
-        std::fputs(line.c_str(), stdout);
-        std::fputc('\n', stdout);
-        std::fflush(stdout);
-    };
+    auto report = [&](const std::string& line) { STRELKA_INFO("{}", line); };
 
     // Linear output and no reconstruction: a tone curve compresses exactly the
     // bright noise this is measuring, and a temporal upscaler would be the thing
@@ -2668,9 +2660,9 @@ void EditorApp::runConvergenceSweep()
     m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", maxSpp);
     m_settingsManager->setAs<uint32_t>("render/width", convW);
     m_settingsManager->setAs<uint32_t>("render/height", convH);
-    if (const char* d = getenv("STRELKA_CONV_DEPTH"))
+    if (envFlag("STRELKA_CONV_DEPTH"))
     {
-        m_settingsManager->setAs<uint32_t>("render/pt/depth", (uint32_t)atoi(d));
+        m_settingsManager->setAs<uint32_t>("render/pt/depth", envUint("STRELKA_CONV_DEPTH", 4));
     }
 
     std::vector<uint32_t> checkpoints;
@@ -2809,15 +2801,22 @@ void EditorApp::runConvergenceSweep()
                        sppPerLaunch, m_settingsManager->getAs<uint32_t>("render/pt/depth"),
                        1u));
 
-    for (const char* p = samplersEnv; p && *p;)
+    // A comma-separated list, so it is parsed here rather than through envUint.
+    for (const char* p = samplersEnv; p != nullptr && *p != '\0';)
     {
-        const uint32_t samplerType = (uint32_t)atoi(p);
-        while (*p && *p != ',')
-            ++p;
+        char* end = nullptr;
+        const long parsed = std::strtol(p, &end, 10);
+        if (end == p)
+        {
+            STRELKA_WARNING("STRELKA_CONV_SAMPLERS='{}' is not a comma-separated list of ids", samplersEnv);
+            break;
+        }
+        p = end;
         if (*p == ',')
             ++p;
-        if (samplerType > 4 || outOfTime())
+        if (parsed < 0 || parsed > 4 || outOfTime())
             continue;
+        const uint32_t samplerType = static_cast<uint32_t>(parsed);
 
         m_settingsManager->setAs<uint32_t>("render/pt/samplerType", samplerType);
         m_sharedCtx->mSubframeIndex = 0;
@@ -2958,12 +2957,36 @@ void EditorApp::waitForSceneLoad()
 void EditorApp::run()
 {
     waitForSceneLoad();
-    if (getenv("STRELKA_CONV")) { runConvergenceSweep(); return; }
-    if (getenv("STRELKA_REF")) { runReferenceCapture(); return; }
-    if (getenv("STRELKA_JITTER_TEST")) { runJitterTest(); return; }
-    if (getenv("STRELKA_DENOISE_AUDIT")) { runDenoiseAudit(); return; }
-    if (getenv("STRELKA_LIGHT_AUDIT")) { runLightAudit(); return; }
-    if (getenv("STRELKA_BENCH")) { runBenchmark(); return; }
+    if (envFlag("STRELKA_CONV"))
+    {
+        runConvergenceSweep();
+        return;
+    }
+    if (envFlag("STRELKA_REF"))
+    {
+        runReferenceCapture();
+        return;
+    }
+    if (envFlag("STRELKA_JITTER_TEST"))
+    {
+        runJitterTest();
+        return;
+    }
+    if (envFlag("STRELKA_DENOISE_AUDIT"))
+    {
+        runDenoiseAudit();
+        return;
+    }
+    if (envFlag("STRELKA_LIGHT_AUDIT"))
+    {
+        runLightAudit();
+        return;
+    }
+    if (envFlag("STRELKA_BENCH"))
+    {
+        runBenchmark();
+        return;
+    }
     auto prevTime = std::chrono::high_resolution_clock::now();
 
     while (!m_display->windowShouldClose())
@@ -3057,7 +3080,7 @@ void EditorApp::run()
             // Metal hands over the tonemapped texture directly; the buffer is
             // still there and still linear, which is what a screenshot wants.
             outputImage.deviceTexture = m_render->getReadyTexture();
-            outputImage.dataSize = readyBuf->width() * readyBuf->height() * readyBuf->getElementSize();
+            outputImage.dataSize = (size_t)readyBuf->width() * readyBuf->height() * readyBuf->getElementSize();
             m_display->drawFrame(outputImage);
         }
 
@@ -3094,10 +3117,9 @@ void EditorApp::run()
         if (std::chrono::duration<double>(currentTime - m_lastTitleUpdate).count() > 0.25)
         {
             m_lastTitleUpdate = currentTime;
-            char title[128];
-            snprintf(title, sizeof(title), "Strelka [render: %.1f ms] [%zu spp]",
-                     m_render->getLastRenderTimeMs(), m_sharedCtx->mSubframeIndex);
-            m_display->setWindowTitle(title);
+            const std::string title = fmt::format(
+                "Strelka [render: {:.1f} ms] [{} spp]", m_render->getLastRenderTimeMs(), m_sharedCtx->mSubframeIndex);
+            m_display->setWindowTitle(title.c_str());
         }
     }
 }
@@ -3106,25 +3128,24 @@ void EditorApp::playAnimations(const float deltaTime)
 {
     const float speed = m_settingsManager->getAs<float>("render/animation/speed");
     const auto& animations = m_scene->getAnimations();
-    char key[64];
-    for (int i = 0; i < (int)animations.size(); ++i)
+    for (size_t i = 0; i < animations.size(); ++i)
     {
-        snprintf(key, sizeof(key), "render/animation/anim%d/state", i);
-        const bool currAnimEnable = m_settingsManager->getAs<bool>(key);
-
-        if (currAnimEnable)
+        if (!m_settingsManager->getAs<bool>(animationStateKey(i)))
         {
-            snprintf(key, sizeof(key), "render/animation/anim%d/time", i);
-            float currAnimTime = m_settingsManager->getAs<float>(key);
-
-            const float currAnimStart = animations[i].start;
-            const float currAnimEnd = animations[i].end;
-
-            currAnimTime += deltaTime * speed;
-            if (currAnimTime > currAnimEnd) currAnimTime -= (currAnimEnd - currAnimStart);
-            if (currAnimTime < currAnimStart) currAnimTime = currAnimStart;
-            m_settingsManager->setAs<float>(key, currAnimTime);
+            continue;
         }
+        const std::string timeKey = animationTimeKey(i);
+        float currAnimTime = m_settingsManager->getAs<float>(timeKey);
+
+        const float currAnimStart = animations[i].start;
+        const float currAnimEnd = animations[i].end;
+
+        currAnimTime += deltaTime * speed;
+        if (currAnimTime > currAnimEnd)
+            currAnimTime -= (currAnimEnd - currAnimStart);
+        if (currAnimTime < currAnimStart)
+            currAnimTime = currAnimStart;
+        m_settingsManager->setAs<float>(timeKey, currAnimTime);
     }
 }
 
@@ -3154,13 +3175,14 @@ void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
     }
     else if (ext == ".png")
     {
-        std::vector<uint8_t> pixels(w * h * 4);
-        for (uint32_t i = 0; i < w * h; ++i)
+        const size_t pixelCount = (size_t)w * h;
+        std::vector<uint8_t> pixels(pixelCount * 4);
+        for (size_t i = 0; i < pixelCount; ++i)
         {
-            for (int c = 0; c < 4; ++c)
+            for (size_t c = 0; c < 4; ++c)
             {
-                float v = std::max(0.0f, std::min(1.0f, data[i * 4 + c]));
-                pixels[i * 4 + c] = static_cast<uint8_t>(v * 255.0f + 0.5f);
+                const float v = std::max(0.0f, std::min(1.0f, data[i * 4 + c]));
+                pixels[i * 4 + c] = static_cast<uint8_t>(std::lround(v * 255.0f));
             }
         }
         int ret = stbi_write_png(path.c_str(), w, h, 4, pixels.data(), w * 4);

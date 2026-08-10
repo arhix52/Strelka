@@ -27,6 +27,7 @@
 
 #include <iostream>
 #include <limits>
+#include <env.h>
 #include <log.h>
 
 namespace fs = std::filesystem;
@@ -39,7 +40,7 @@ namespace oka
 
 bool gltfDebugLoggingEnabled()
 {
-    static const bool enabled = std::getenv("STRELKA_GLTF_DEBUG") != nullptr;
+    static const bool enabled = envFlag("STRELKA_GLTF_DEBUG");
     return enabled;
 }
 

@@ -61,6 +61,28 @@ if(APPLE)
         ${RENDER_SOURCES_COMMON}
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalRender.h
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalRender.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalTextures.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalTextures.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalEnvironment.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalEnvironment.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalGeometry.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalGeometry.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalMaterials.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalMaterials.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalLights.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalLights.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalScenePreparation.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalScenePreparation.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalAccelStructure.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalAccelStructure.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalSkinning.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalSkinning.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalFrameUniforms.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalFrameUniforms.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalPostProcess.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalPostProcess.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalWavefrontIntegrator.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalWavefrontIntegrator.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalBuffer.h
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalBuffer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/Metal4Context.h

@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <vector>
 
@@ -74,8 +76,15 @@ bool loadIesProfile(const std::string& path, Scene::IesProfile& out)
         if (i + 1 >= tokens.size())
             return false;
         ++i; // lamp-to-luminaire
-        const int nTilt = std::atoi(tokens[i++].c_str());
-        i += (size_t)std::max(nTilt, 0) * 2;
+        char* end = nullptr;
+        const long nTilt = std::strtol(tokens[i].c_str(), &end, 10);
+        if (end == tokens[i].c_str() || nTilt < 0)
+        {
+            STRELKA_ERROR("IES tilt count '{}' is not a count in {}", tokens[i], path);
+            return false;
+        }
+        ++i;
+        i += (size_t)nTilt * 2;
     }
 
     auto nextFloat = [&](float& v) -> bool {
@@ -84,10 +93,21 @@ bool loadIesProfile(const std::string& path, Scene::IesProfile& out)
         v = std::strtof(tokens[i++].c_str(), nullptr);
         return true;
     };
+    // A token that is not a number reads back as 0 through atoi, and a 0 here is
+    // a grid dimension or a lamp count the rest of the parse then trusts. Say so
+    // instead: a malformed header is a file this loader cannot handle.
     auto nextInt = [&](int& v) -> bool {
         if (i >= tokens.size())
             return false;
-        v = std::atoi(tokens[i++].c_str());
+        const std::string& token = tokens[i++];
+        char* end = nullptr;
+        const long parsed = std::strtol(token.c_str(), &end, 10);
+        if (end == token.c_str() || parsed < std::numeric_limits<int>::min() || parsed > std::numeric_limits<int>::max())
+        {
+            STRELKA_ERROR("IES '{}' is not an integer in {}", token, path);
+            return false;
+        }
+        v = static_cast<int>(parsed);
         return true;
     };
 
@@ -187,14 +207,20 @@ float sampleIesCandela(const Scene::IesProfile& profile, const glm::float3& loca
         float h = horizDeg;
         const float hMax = hAng.back();
         if (hMax <= 90.0f + 1e-3f)
+        {
             h = std::fmod(h, 90.0f);
+        }
         else if (hMax <= 180.0f + 1e-3f)
         {
             if (h > 180.0f)
+            {
                 h = 360.0f - h;
+            }
         }
         else
+        {
             h = std::fmod(h, 360.0f);
+        }
         ih = std::max(0, std::min(nH - 2, lowerIndex(hAng, h)));
         const float h0 = hAng[(size_t)ih];
         const float h1 = hAng[(size_t)ih + 1];

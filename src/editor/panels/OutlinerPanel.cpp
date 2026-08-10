@@ -132,13 +132,9 @@ void EditorApp::drawOutlinerPanel()
         {
             static const char* kTypeNames[] = { "rect", "disc", "sphere", "distant", "dome", "point", "spot" };
             const char* typeName = lights[i].type >= 0 && lights[i].type < 7 ? kTypeNames[lights[i].type] : "unknown";
-            char label[128];
-            const char* name = lights[i].name.empty() ? nullptr : lights[i].name.c_str();
-            if (name)
-                snprintf(label, sizeof(label), "%s (%s)%s", name, typeName, lights[i].enabled ? "" : " [off]");
-            else
-                snprintf(label, sizeof(label), "Light %u (%s)%s", i, typeName, lights[i].enabled ? "" : " [off]");
-            if (ImGui::Selectable(label, m_selectedLightId == i))
+            const std::string name = lights[i].name.empty() ? fmt::format("Light {}", i) : lights[i].name;
+            const std::string label = fmt::format("{} ({}){}", name, typeName, lights[i].enabled ? "" : " [off]");
+            if (ImGui::Selectable(label.c_str(), m_selectedLightId == i))
             {
                 clearSelection();
                 m_selectedLightId = i;

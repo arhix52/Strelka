@@ -28,20 +28,21 @@ int main(int argc, const char* argv[])
         return 0;
     }
 
-    // check params
-    const std::string sceneFile(result["s"].as<std::string>());
-    if (sceneFile.empty())
+    // A scene on the command line is optional. Without one -- or with one that is
+    // not there -- the editor comes up on its empty document, which is a state it
+    // already supports: File > Open loads into it, and the window is up either way
+    // rather than the process exiting before anything is drawn.
+    std::string sceneFile(result["s"].as<std::string>());
+    if (!sceneFile.empty() && !std::filesystem::exists(sceneFile))
     {
-        STRELKA_FATAL("Specify scene file name");
-        return 1;
+        STRELKA_ERROR("Specified scene file: {} doesn't exist; starting with an empty scene", sceneFile.c_str());
+        sceneFile.clear();
     }
-    if (!std::filesystem::exists(sceneFile))
+    std::string resourceSearchPath;
+    if (!sceneFile.empty())
     {
-        STRELKA_FATAL("Specified scene file: {} doesn't exist", sceneFile.c_str());
-        return -1;
+        resourceSearchPath = std::filesystem::path(sceneFile).parent_path().string();
     }
-    const std::filesystem::path sceneFilePath = { sceneFile.c_str() };
-    const std::string resourceSearchPath = sceneFilePath.parent_path().string();
     STRELKA_DEBUG("Resource search path {}", resourceSearchPath);
 
     oka::EditorApp editor(sceneFile, resourceSearchPath);

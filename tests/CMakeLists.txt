@@ -6,6 +6,7 @@ find_package(imgui REQUIRED)
 find_package(imguizmo REQUIRED)
 
 add_executable(unit_tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/foundation/test_env.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_bsdf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_energy_conservation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_anisotropy.cpp
@@ -30,6 +31,16 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_gizmo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_camera_takeover.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_viewport_input.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_frame_jitter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_features.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_cache_key.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_ibl_alias_table.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_buffer_sizes.cpp
+)
+
+target_include_directories(unit_tests
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/render/metal
 )
 
 target_link_libraries(unit_tests

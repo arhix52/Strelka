@@ -69,8 +69,8 @@
         {
             "id": "sceneFile",
             "type": "promptString",
-            "description": "Path to .gltf scene file",
-            "default": "${userHome}/work/BrainStem/brainStem.gltf"
+            "description": "Path to .gltf/.glb scene file (leave empty to start with an empty scene)",
+            "default": ""
         }
     ]
 }
