@@ -3165,6 +3165,23 @@ void MetalRender::render(Buffer* output)
         pUniformData->hasEnvMap = 0;
         pUniformData->hasEnvBackground = 0;
         pUniformData->envPdfScale = 0.0f;
+        // A dome with no texture is still a light: a uniform sky of one colour,
+        // which is what a V-Ray dome with `use_dome_tex` off is, and what the
+        // kids' bedroom is lit by. It used to be nothing at all -- hasEnvMap
+        // needs a texture and missColor was hard zero -- so the scene rendered
+        // black but for the lamps.
+        //
+        // Carried on the miss colour rather than as a sampled light, and that is
+        // not a shortcut. Next-event estimation exists to importance sample a
+        // distribution the BSDF cannot see, and a constant environment has none:
+        // for a Lambertian surface the cosine-weighted BSDF sample *is* the
+        // optimal strategy, so what is left to converge is visibility alone.
+        const auto& envLight = mScene->getEnvLight();
+        if (envLight.has_value())
+        {
+            const glm::float3 c = envLight->color * envLight->intensity;
+            pUniformData->missColor = { c.x, c.y, c.z };
+        }
     }
 
     pUniformTonemap->width = width;

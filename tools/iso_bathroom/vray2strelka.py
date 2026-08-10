@@ -847,13 +847,62 @@ def light_to_sidecar(obj, vray, opts):
     euler = conv.to_3x3().normalized().to_euler("XYZ")
 
     lt = int(vray.get("light_type", 9))
-    if lt != 9:  # 9 = LightRectangle; 10 = LightDome, handled as environment
+    # 10 = LightDome, handled as the environment rather than as a light.
+    if lt == 10:
+        return None
+
+    if lt == 6:  # LightSphere
+        sph = vray.get("LightSphere", {})
+        return {
+            "name": obj.name,
+            "type": "sphere",
+            "unit": "radiance",
+            "intensity": float(sph.get("intensity", 1.0)) * opts.rect_light_gain,
+            "color": vray_light_color(sph),
+            "position": [loc.x, loc.y, loc.z],
+            "orientation": [math.degrees(euler.x), math.degrees(euler.y), math.degrees(euler.z)],
+            # A sphere emits the same in every direction, so the object's scale
+            # is the only thing that can change its size, and only uniformly.
+            "radius": float(sph.get("radius", 0.1)) * max(abs(v) for v in obj.matrix_world.to_scale()),
+            "enabled": bool(sph.get("enabled", 1)),
+            "visibleToCamera": not bool(sph.get("invisible", 0)),
+        }
+
+    if lt == 7:  # LightSpot
+        spot = vray.get("LightSpot", {})
+        # V-Ray gives the full cone and the width of the soft edge *inside* it;
+        # glTF, and Strelka with it, give the two half-angles. So the outer half
+        # angle is half the cone and the inner one is that less the penumbra --
+        # not half the penumbra, which would put the falloff outside the cone.
+        cone = float(spot.get("coneAngle", math.pi / 4.0))
+        penumbra = max(0.0, float(spot.get("penumbraAngle", 0.0)))
+        outer = 0.5 * cone
+        inner = max(0.0, outer - 0.5 * penumbra)
+        return {
+            "name": obj.name,
+            "type": "spot",
+            # V-Ray's spot `units` 3 is radiant power in watts; anything else is
+            # the same unitless multiplier the rect lights use. Only the units it
+            # states are converted, because a guess here is a light that is wrong
+            # by a factor nobody can see the size of.
+            "unit": "power" if int(spot.get("units", 0)) == 3 else "radiance",
+            "intensity": float(spot.get("intensity", 1.0)) * opts.rect_light_gain,
+            "color": vray_light_color(spot),
+            "position": [loc.x, loc.y, loc.z],
+            "orientation": [math.degrees(euler.x), math.degrees(euler.y), math.degrees(euler.z)],
+            "innerConeAngle": math.degrees(inner),
+            "outerConeAngle": math.degrees(outer),
+            "radius": float(spot.get("shadowRadius", 0.0)),
+            "enabled": bool(spot.get("enabled", 1)),
+            "visibleToCamera": not bool(spot.get("invisible", 0)),
+        }
+
+    if lt != 9:  # 9 = LightRectangle
         return None
 
     rect = vray.get("LightRectangle", {})
     intensity = float(rect.get("intensity", 1.0))
-    color = rect.get("color_colortex", [1.0, 1.0, 1.0])
-    color = [float(c) for c in color] if hasattr(color, "__len__") else [1.0, 1.0, 1.0]
+    color = vray_light_color(rect)
     enabled = bool(rect.get("enabled", 1))
     # V-Ray's "invisible": the light still lights the scene and still shows up in
     # reflections, it just is not in frame.
@@ -881,6 +930,71 @@ def light_to_sidecar(obj, vray, opts):
         "enabled": enabled,
         "visibleToCamera": visible,
     }
+
+
+def light_shape_summary(l):
+    """The one dimension a light of this type is actually described by."""
+    t = l.get("type", "rect")
+    if t == "rect":
+        return f"{l['width']:.3f}x{l['height']:.3f}"
+    if t in ("sphere", "disc"):
+        return f"r={l.get('radius', 0.0):.4f}"
+    if t == "spot":
+        return f"cone {l.get('innerConeAngle', 0.0):.0f}..{l.get('outerConeAngle', 0.0):.0f} deg"
+    return t
+
+
+def blackbody_rgb(kelvin):
+    """Colour of a blackbody at `kelvin`, as linear sRGB normalised to peak 1.
+
+    V-Ray lights can state their colour as a temperature instead of a triple --
+    the bedroom's desk and table lamps are 3800 K and its corridor spot 4800 K --
+    and the sidecar carries a colour, so the conversion happens here.
+
+    Planckian locus -> CIE XYZ by the Kim et al. cubic fit for 1667-25000 K, then
+    the Rec.709 matrix. Fitted rather than integrated because the input is a
+    number an artist typed, not a spectrum, and the fit is under a MacAdam step
+    over the range a light bulb occupies.
+
+    Normalised to a peak of 1 rather than to luminance: intensity is authored
+    separately, and dividing by luminance here would make a warm light brighter
+    than a neutral one at the same number.
+    """
+    t = max(1667.0, min(25000.0, float(kelvin)))
+    if t <= 4000.0:
+        x = (-0.2661239e9 / t**3 - 0.2343589e6 / t**2 + 0.8776956e3 / t + 0.179910)
+    else:
+        x = (-3.0258469e9 / t**3 + 2.1070379e6 / t**2 + 0.2226347e3 / t + 0.240390)
+    if t <= 2222.0:
+        y = -1.1063814 * x**3 - 1.34811020 * x**2 + 2.18555832 * x - 0.20219683
+    elif t <= 4000.0:
+        y = -0.9549476 * x**3 - 1.37418593 * x**2 + 2.09137015 * x - 0.16748867
+    else:
+        y = 3.0817580 * x**3 - 5.87338670 * x**2 + 3.75112997 * x - 0.37001483
+    if y <= 1e-6:
+        return [1.0, 1.0, 1.0]
+    Y = 1.0
+    X = x * Y / y
+    Z = (1.0 - x - y) * Y / y
+    r = 3.2404542 * X - 1.5371385 * Y - 0.4985314 * Z
+    g = -0.9692660 * X + 1.8760108 * Y + 0.0415560 * Z
+    b = 0.0556434 * X - 0.2040259 * Y + 1.0572252 * Z
+    rgb = [max(0.0, c) for c in (r, g, b)]
+    peak = max(rgb)
+    return [c / peak for c in rgb] if peak > 1e-6 else [1.0, 1.0, 1.0]
+
+
+def vray_light_color(params):
+    """A V-Ray light's colour, whichever way it was authored.
+
+    `color_mode` 1 means the colour comes from `temperature` and the stored
+    triple is whatever the UI last showed, so reading the triple regardless is
+    how two warm lamps came out white.
+    """
+    if int(params.get("color_mode", 0)) == 1 and "temperature" in params:
+        return blackbody_rgb(params["temperature"])
+    c = params.get("color_colortex", [1.0, 1.0, 1.0])
+    return [float(x) for x in c] if hasattr(c, "__len__") else [1.0, 1.0, 1.0]
 
 
 def light_mtl_plane_to_rect(obj, strength, opts):
@@ -1209,26 +1323,52 @@ def collect_fog_volumes(world, opts):
 
 
 def dome_to_environment(obj, baker, opts):
-    """VRayDomeLight -> Strelka environment block (HDRI + intensity)."""
+    """VRayDomeLight -> Strelka environment block.
+
+    A dome is not always an HDRI. `use_dome_tex` off means a plain sky of one
+    colour, and the colour can be a temperature -- which is what the kids'
+    bedroom has: 6500 K at intensity 0.2, and no texture. Requiring a bitmap
+    dropped the environment entirely and the room rendered black but for its
+    lamps, so the texture is now what is optional and the dome itself is not.
+
+    A textureless environment reaches the renderer as the miss colour, where a
+    cosine-weighted BSDF sample is already the ideal way to integrate a constant
+    sky; see the note in MetalRender.
+    """
     nt = getattr(obj.data, "node_tree", None)
+    dome = {}
     tex_path = None
-    intensity = 1.0
     if nt is not None:
         for n in nt.nodes:
             if "LightDome" in n.keys():
-                intensity = float(idprops_to_dict(n["LightDome"]).get("intensity", 1.0))
+                dome = idprops_to_dict(n["LightDome"])
             if "BitmapBuffer" in n.keys():
                 p = baker.resolve(idprops_to_dict(n["BitmapBuffer"]).get("file"))
                 if p is not None:
                     tex_path = str(p)
-    if tex_path is None:
+    if not dome:
         return None
-    return {
-        "texture": tex_path,
+
+    intensity = float(dome.get("intensity", 1.0))
+    # Deliberately not gated on `use_dome_tex`. The bathroom's dome has it off
+    # and is unmistakably lit by its HDRI, so the flag means something other than
+    # "read the bitmap node" -- and gating on it took that scene's environment
+    # away. A linked bitmap that resolves is the texture; anything else is a
+    # coloured sky. The kids' bedroom lands in the second case because the file
+    # its dome names is not in its Assets folder at all.
+
+    env = {
         "intensity": intensity * opts.env_gain,
-        "color": [1.0, 1.0, 1.0],
+        "color": vray_light_color(dome),
         "rotation": math.radians(opts.env_rotation),
     }
+    if tex_path is not None:
+        env["texture"] = tex_path
+        # A texture carries its own colour; the dome's tint would multiply it,
+        # and V-Ray's UI leaves a stale one behind whenever the mode is a
+        # temperature.
+        env["color"] = [1.0, 1.0, 1.0]
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -1469,10 +1609,12 @@ def main():
             if d:
                 lights.append(d)
     for l in lights:
-        print(f"  light : {l['name']:24s} L={l['intensity']:.2f} "
-              f"{l['width']:.3f}x{l['height']:.3f}")
+        print(f"  light : {l['name']:24s} {l['type']:6s} L={l['intensity']:.2f} "
+              f"{light_shape_summary(l)}")
     if environment:
-        print(f"  env   : {Path(environment['texture']).name}  x{environment['intensity']:.3f}")
+        where = (Path(environment["texture"]).name if "texture" in environment
+                 else "colour " + " ".join(f"{c:.2f}" for c in environment["color"]))
+        print(f"  env   : {where}  x{environment['intensity']:.3f}")
 
     # A V-Ray proxy carries no geometry Blender can read; rebuild the rug as a
     # coiled rope if asked.
@@ -1557,8 +1699,8 @@ def main():
             continue
         lights.append(desc)
         bpy.data.objects.remove(obj, do_unlink=True)
-        print(f"  light : {desc['name']:24s} L={desc['intensity']:.2f} "
-              f"{desc['width']:.3f}x{desc['height']:.3f} (from a light material)")
+        print(f"  light : {desc['name']:24s} {desc['type']:6s} L={desc['intensity']:.2f} "
+              f"{light_shape_summary(desc)} (from a light material)")
 
     scene = bpy.context.scene
     cam_obj = scene.camera
