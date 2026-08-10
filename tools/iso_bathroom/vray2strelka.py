@@ -236,8 +236,15 @@ class TextureBaker:
         self.cache[key] = img
         return img
 
-    def _pixels(self, path):
+    def _pixels(self, path, colorspace=None):
         img = bpy.data.images.load(str(path), check_existing=True)
+        if colorspace is not None:
+            # Before reading: `pixels` is decoded through whatever the image is
+            # tagged with, and a mask tagged sRGB comes back curved.
+            try:
+                img.colorspace_settings.name = colorspace
+            except Exception:
+                pass
         w, h = img.size
         buf = np.empty(w * h * 4, dtype=np.float32)
         img.pixels.foreach_get(buf)
@@ -309,6 +316,27 @@ class TextureBaker:
         c = np.clip(c, 0.0, 1.0)
         out = np.ones((h, w, 4), dtype=np.float32)
         out[..., :3] = c
+        return self._write(name, out, w, h, "sRGB")
+
+    def bake_mix(self, mask_path, color1, color2, name):
+        """V-Ray TexMix -> a texture, with the two colours folded in.
+
+        `mix(color1, color2, mask)`: colour1 where the mask is black, colour2
+        where it is white. That is the blue blanket with green stars and the
+        green one with blue stars -- the same star mask, the two colours the
+        other way round -- and the plaster on the walls.
+
+        The mask is read as data and not as a picture. It is a blend factor, and
+        decoding it through the sRGB curve would bend every value between the two
+        colours while leaving the two colours themselves right, which is the kind
+        of error that looks like a texture that is merely a bit off.
+        """
+        px, w, h = self._pixels(mask_path, colorspace="Non-Color")
+        m = px[..., :3].mean(axis=2, keepdims=True)
+        a = np.array(color1, dtype=np.float32).reshape(1, 1, 3)
+        b = np.array(color2, dtype=np.float32).reshape(1, 1, 3)
+        out = np.ones((h, w, 4), dtype=np.float32)
+        out[..., :3] = np.clip(a + (b - a) * m, 0.0, 1.0)
         return self._write(name, out, w, h, "sRGB")
 
     def bake_gradient_ramp(self, name, color_a, color_b, size=512):
@@ -435,10 +463,26 @@ class MaterialConverter:
         }
 
     def _bitmap_of(self, snapnode):
+        """The image behind a V-Ray Bitmap node, however this file stores it.
+
+        Two conventions, and one scene each. The bathroom puts the path on the
+        plugin as `BitmapBuffer.file`. The kids' bedroom leaves that key off
+        entirely and hangs the image on a Blender texture datablock named by the
+        node's `texture_name` -- a `.VRayFakeTexture@...` whose `image.filepath`
+        is the real thing. Reading only the first convention brought one image
+        out of forty-one across that scene, so nearly every texture in it was
+        silently a flat colour.
+        """
         buf = snapnode["plugins"].get("BitmapBuffer") if snapnode else None
         if not isinstance(buf, dict):
             return None, {}
-        return self.baker.resolve(buf.get("file")), buf
+        raw = buf.get("file")
+        if not raw:
+            name = snapnode["plugins"].get("texture_name")
+            tex = bpy.data.textures.get(name) if name else None
+            img = getattr(tex, "image", None)
+            raw = getattr(img, "filepath", None)
+        return self.baker.resolve(raw), buf
 
     def _new_tree(self, mat):
         nt = mat.node_tree
@@ -475,6 +519,36 @@ class MaterialConverter:
             nt.links.new(uvmap.outputs["UV"], mapping.inputs["Vector"])
             nt.links.new(mapping.outputs["Vector"], tex.inputs["Vector"])
         return tex
+
+    def _mix_image(self, mat, snapnode, approx):
+        """A TexMix, or a MultiSubTex that lost its textures on the way here."""
+        if snapnode is None:
+            return None
+        plugins = snapnode["plugins"]
+
+        if "TexMulti" in plugins:
+            # V-Ray picks one of N textures by object ID. The list of N does not
+            # survive into the .blend -- all five slots are empty and nothing is
+            # linked -- so there is no colour here to carry, only the fact that
+            # one is missing. The pencils it drives come out at the plugin's
+            # default grey, and inventing colours from their object names would
+            # be a guess in the shape of a conversion.
+            approx.append("MultiSubTex carries no textures in the .blend; "
+                          "the material keeps its flat diffuse")
+            return None
+
+        mix = plugins.get("TexMix")
+        if not isinstance(mix, dict):
+            return None
+        mask_node = snapnode["inputs"].get("Mix Map")
+        path, _ = self._bitmap_of(mask_node)
+        if path is None:
+            approx.append("TexMix with no mask texture -> flat diffuse")
+            return None
+        c1 = mix.get("color1", [0.0, 0.0, 0.0])
+        c2 = mix.get("color2", [1.0, 1.0, 1.0])
+        approx.append("TexMix baked to a texture")
+        return self.baker.bake_mix(path, c1, c2, f"{safe_name(mat.name)}_mix.png")
 
     def _image_for(self, mat, snapnode, srgb=True):
         """Follow a Bitmap / ColorCorrection chain and return a Blender image."""
@@ -645,7 +719,10 @@ class MaterialConverter:
         inputs = snap["inputs"]
         p = snap["params"]
 
-        img = self._image_for(mat, inputs.get("Diffuse Color"), srgb=True)
+        diffuse_in = inputs.get("Diffuse Color")
+        img = self._image_for(mat, diffuse_in, srgb=True)
+        if img is None:
+            img = self._mix_image(mat, diffuse_in, extra.setdefault("approx", []))
         if img is not None:
             tex = self._tex_node(nt, img, -300, 300, uvw)
             nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
