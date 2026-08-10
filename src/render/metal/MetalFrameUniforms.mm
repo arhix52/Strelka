@@ -367,6 +367,11 @@ settingsChanged |= (mPrevSettings.useDof != pUniformData->useDof);
 settingsChanged |= (mPrevSettings.focalDistance != pUniformData->focalDistance);
 settingsChanged |= (mPrevSettings.lensRadius != pUniformData->lensRadius);
 settingsChanged |= (mPrevSettings.apertureBlades != pUniformData->apertureBlades);
+// The other two aperture controls change the bokeh shape as much as the blade
+// count does, and without them an edit kept averaging into the frames taken with
+// the old aperture -- the setting looked inert until something else reset history.
+settingsChanged |= (mPrevSettings.bladeRotation != pUniformData->bladeRotation);
+settingsChanged |= (mPrevSettings.anamorphicRatio != pUniformData->anamorphicRatio);
 settingsChanged |= (mPrevSettings.shiftX != pUniformData->shiftX) || (mPrevSettings.shiftY != pUniformData->shiftY);
 settingsChanged |= (mPrevSettings.maxDepth != maxDepth);
 settingsChanged |= (mPrevSettings.debug != debug);
@@ -388,6 +393,8 @@ mPrevSettings.useDof = pUniformData->useDof;
 mPrevSettings.focalDistance = pUniformData->focalDistance;
 mPrevSettings.lensRadius = pUniformData->lensRadius;
 mPrevSettings.apertureBlades = pUniformData->apertureBlades;
+mPrevSettings.bladeRotation = pUniformData->bladeRotation;
+mPrevSettings.anamorphicRatio = pUniformData->anamorphicRatio;
 mPrevSettings.shiftX = pUniformData->shiftX;
 mPrevSettings.shiftY = pUniformData->shiftY;
 mPrevSettings.maxDepth = maxDepth;

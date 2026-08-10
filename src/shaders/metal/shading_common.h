@@ -342,9 +342,16 @@ void generateCameraRay(uint2 pixelIndex,
     // Thin lens depth of field
     if (SPEC_DOF && params.useDof && params.lensRadius > 0.0f)
     {
-        float3 camRight = float3(viewToWorld[0][0], viewToWorld[1][0], viewToWorld[2][0]);
-        float3 camUp    = float3(viewToWorld[0][1], viewToWorld[1][1], viewToWorld[2][1]);
-        float3 camFwd   = float3(-viewToWorld[0][2], -viewToWorld[1][2], -viewToWorld[2][2]);
+        // The camera basis in world space is the columns of viewToWorld. This read
+        // its rows, which transposes the rotation: both the lens offset and the axis
+        // the focal distance is measured along then point somewhere else. The visible
+        // effect is not a wrong blur but no blur at all -- past 45 degrees of yaw
+        // dot(direction, camFwd) crosses zero, the clamp below throws the focal point
+        // out to a million units, and depth of field silently stops happening for
+        // every camera that is not axis aligned.
+        float3 camRight = viewToWorld[0].xyz;
+        float3 camUp = viewToWorld[1].xyz;
+        float3 camFwd = -viewToWorld[2].xyz;
 
         float t = params.focalDistance / max(dot(direction, camFwd), 1e-6f);
         float3 focalPoint = origin + direction * t;

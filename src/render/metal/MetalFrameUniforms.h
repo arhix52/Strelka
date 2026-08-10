@@ -144,6 +144,8 @@ private:
         float focalDistance = 0.0f;
         float lensRadius = 0.0f;
         int32_t apertureBlades = 0;
+        float bladeRotation = 0.0f;
+        float anamorphicRatio = 1.0f;
         float shiftX = 0.0f;
         float shiftY = 0.0f;
         uint32_t maxDepth = 0;

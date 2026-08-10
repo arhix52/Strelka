@@ -25,6 +25,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_pick_ray.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_skinned_bounds.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_camera_animation.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_camera_basis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_transform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_lights.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_punctual_lights.cpp

@@ -1042,8 +1042,7 @@ static inline float viewDepth(constant Uniforms& uniforms, float3 worldPosition)
         // Along the camera axis, which is what a depth buffer holds before the
         // projection is applied. The third column of viewToWorld is the camera's
         // backward axis, so forward is its negation.
-        const float3 forward =
-            -float3(uniforms.viewToWorld[0][2], uniforms.viewToWorld[1][2], uniforms.viewToWorld[2][2]);
+        const float3 forward = -uniforms.viewToWorld[2].xyz;
         return dot(worldPosition - eye, forward);
     }
     return length(worldPosition - eye);
