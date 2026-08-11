@@ -508,7 +508,7 @@ void EditorApp::drawRenderSettingsPanel()
         }
 
         const float maxEdr = m_settingsManager->getAs<float>("render/post/tonemapper/maxEDR");
-        ImGui::TextDisabled("Display max EDR %.2f (from screen, Metal path does not scale by it)", maxEdr);
+        ImGui::TextDisabled("Display max EDR %.2f (tone-map shoulder follows screen headroom)", maxEdr);
 
         ImGui::TreePop();
     }

@@ -4,6 +4,33 @@
 
 using namespace metal;
 
+float3 toneMapForDisplay(const float3 color, constant UniformsTonemap& uniforms)
+{
+    float3 result;
+    const float maxOutput = max(uniforms.maxEDR, 1.0f);
+
+    switch ((ToneMapperType)uniforms.tonemapperType)
+    {
+    case ToneMapperType::eReinhard:
+        result = reinhard(color, maxOutput);
+        break;
+    case ToneMapperType::eACES:
+        result = ACESFitted(color, maxOutput);
+        break;
+    case ToneMapperType::eFilmic:
+        result = ACESFilm(color, maxOutput);
+        break;
+    case ToneMapperType::eNone:
+        result = color;
+        break;
+    }
+
+    if (uniforms.gamma > 0.0f)
+    {
+        result = srgbGamma(result, uniforms.gamma);
+    }
+    return result;
+}
 
 kernel void toneMappingComputeShader(
     uint2 tid [[thread_position_in_grid]],
@@ -23,29 +50,7 @@ kernel void toneMappingComputeShader(
 
     // Fetch the input color
     float4 inputColor = buffer[linearPixelIndex];
-    float3 result = inputColor.xyz;
-    // Apply exposure only (maxEDR is macOS HDR headroom — irrelevant for SDR/gamma output)
-    float3 exposedResult = result * uniforms.exposureValue;
-    switch ((ToneMapperType) uniforms.tonemapperType)
-    {
-    case ToneMapperType::eReinhard:
-        result = reinhard(exposedResult);
-        break;
-    case ToneMapperType::eACES:
-        result = ACESFitted(exposedResult);
-        break;
-    case ToneMapperType::eFilmic:
-        result = ACESFilm(exposedResult);
-        break;
-    case ToneMapperType::eNone:
-        result = exposedResult;
-        break;
-    }
-
-    if (uniforms.gamma > 0.0f)
-    {
-        result = srgbGamma(result, uniforms.gamma);
-    }
+    const float3 result = toneMapForDisplay(inputColor.xyz * uniforms.exposureValue, uniforms);
     displayTexture.write(float4(result, inputColor.a), tid);
 }
 
@@ -72,19 +77,7 @@ kernel void toneMappingTextureShader(
         return;
     }
     const float4 inputColor = source.read(tid);
-    float3 result = inputColor.xyz;
-    const float3 exposedResult = result * uniforms.exposureValue;
-    switch ((ToneMapperType) uniforms.tonemapperType)
-    {
-    case ToneMapperType::eReinhard: result = reinhard(exposedResult); break;
-    case ToneMapperType::eACES:     result = ACESFitted(exposedResult); break;
-    case ToneMapperType::eFilmic:   result = ACESFilm(exposedResult); break;
-    case ToneMapperType::eNone:     result = exposedResult; break;
-    }
-    if (uniforms.gamma > 0.0f)
-    {
-        result = srgbGamma(result, uniforms.gamma);
-    }
+    const float3 result = toneMapForDisplay(inputColor.xyz * uniforms.exposureValue, uniforms);
     displayTexture.write(float4(result, inputColor.a), tid);
 }
 

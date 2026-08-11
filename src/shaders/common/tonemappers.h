@@ -126,6 +126,14 @@ float3 ACESFitted(float3 color)
     return color;
 }
 
+inline float3 ACESFitted(float3 color, const float maxOutput)
+{
+    // Keep the SDR curve unchanged at maxOutput == 1 while moving its shoulder
+    // to the display peak for EDR. Scaling the result only would brighten paper
+    // white; scaling both axes preserves the curve's slope near black.
+    return ACESFitted(color / maxOutput) * maxOutput;
+}
+
 // https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
 float3 ACESFilm(float3 x)
 {
@@ -135,6 +143,11 @@ float3 ACESFilm(float3 x)
     float d = 0.59f;
     float e = 0.14f;
     return saturate((x*(a*x+b))/(x*(c*x+d)+e));
+}
+
+inline float3 ACESFilm(float3 x, const float maxOutput)
+{
+    return ACESFilm(x / maxOutput) * maxOutput;
 }
 
 // original implementation https://github.com/NVIDIAGameWorks/Falcor/blob/5236495554f57a734cc815522d95ae9a7dfe458a/Source/RenderPasses/ToneMapper/ToneMapping.ps.slang
@@ -150,28 +163,26 @@ float3 reinhard(float3 color)
     return color / (luminance + 1.0f);
 }
 
+inline float3 reinhard(float3 color, const float maxOutput)
+{
+    return reinhard(color / maxOutput) * maxOutput;
+}
+
 float gammaFloat(const float c, const float gamma)
 {
     if (isnan(c))
     {
         return 0.0f;
     }
-    if (c > 1.0f)
-    {
-        return 1.0f;
-    }
-    else if (c < 0.0f)
+    if (c < 0.0f)
     {
         return 0.0f;
     }
-    else if (c < 0.0031308f)
+    if (c < 0.0031308f)
     {
         return 12.92f * c;
     }
-    else
-    {
-        return 1.055f * pow(c, 1.0f / gamma) - 0.055f;
-    }
+    return 1.055f * pow(c, 1.0f / gamma) - 0.055f;
 }
 
 float3 srgbGamma(const float3 color, const float gamma)

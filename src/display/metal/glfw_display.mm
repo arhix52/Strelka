@@ -116,7 +116,11 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     layer->setDevice(_pDevice);
     layer->setPixelFormat(MTL::PixelFormatRGBA16Float);
     auto l = (__bridge CAMetalLayer*)layer;
-    const CFStringRef name = kCGColorSpaceExtendedDisplayP3;
+    // The renderer and its ACES output matrix produce sRGB primaries. Let
+    // ColorSync convert those to the actual panel gamut instead of labelling
+    // them as Display P3, which would oversaturate the image. The extended
+    // transfer function carries encoded values above SDR white for EDR.
+    const CFStringRef name = kCGColorSpaceExtendedSRGB;
     CGColorSpaceRef colorspace = CGColorSpaceCreateWithName(name);
     l.colorspace = colorspace;
     CGColorSpaceRelease(colorspace);
