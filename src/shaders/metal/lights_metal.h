@@ -407,6 +407,121 @@ static __inline__ float spotAttenuation(device const UniformLight& l, const floa
     return saturate((cosTheta - cosOuter) / (cosInner - cosOuter));
 }
 
+// Index of the interval containing x in the ascending table a, clamped so both
+// it and it+1 are addressable.
+static __inline__ int iesLowerIndex(device const float* a, int n, float x)
+{
+    int lo = 0;
+    int hi = n;
+    while (lo < hi)
+    {
+        const int mid = (lo + hi) / 2;
+        if (a[mid] < x)
+        {
+            lo = mid + 1;
+        }
+        else
+        {
+            hi = mid;
+        }
+    }
+    if (lo <= 0)
+    {
+        return 0;
+    }
+    if (lo >= n)
+    {
+        return max(0, n - 2);
+    }
+    return lo - 1;
+}
+
+// Bilinear sample of an IES candela table. `dirFromLight` is world-space; the
+// light's local frame is rebuilt from points[2..3] (X/Y axes) and normal (−Z),
+// the same packing Scene::updateLight writes for the CPU sampler.
+static __inline__ float sampleIesCandela(device const IesGpuBufferHeader* iesBuffer,
+                                         device const UniformLight& l,
+                                         const float3 dirFromLight)
+{
+    const int profileIdx = (int)l.points[0].y;
+    if (!iesBuffer || profileIdx < 0 || (uint32_t)profileIdx >= iesBuffer->profileCount)
+    {
+        return 1.0f;
+    }
+
+    device const IesGpuProfileHeader* headers =
+        (device const IesGpuProfileHeader*)((device const char*)iesBuffer + sizeof(IesGpuBufferHeader));
+    device const IesGpuProfileHeader& h = headers[profileIdx];
+    if (h.nVertical < 2u || h.nHorizontal < 1u)
+    {
+        return 0.0f;
+    }
+
+    device const float* floats = (device const float*)((device const char*)iesBuffer + iesBuffer->floatOffset);
+
+    // World → light local. Columns of the light's basis; −Z is the photometric
+    // axis, matching iesloader.cpp::sampleIesCandela.
+    const float3 ax = normalize(float3(l.points[2]));
+    const float3 ay = normalize(float3(l.points[3]));
+    const float3 az = normalize(float3(l.normal)); // emission −Z
+    const float3 d = normalize(dirFromLight);
+    const float3 local = float3(dot(d, ax), dot(d, ay), -dot(d, az));
+
+    const float vertDeg = acos(clamp(-local.z, -1.0f, 1.0f)) * (180.0f / M_PI_F);
+    float horizDeg = atan2(local.x, -local.y) * (180.0f / M_PI_F);
+    if (horizDeg < 0.0f)
+    {
+        horizDeg += 360.0f;
+    }
+
+    device const float* vAng = floats + h.anglesOffset;
+    device const float* hAng = floats + h.anglesOffset + h.nVertical;
+    device const float* candela = floats + h.candelaOffset;
+    const int nV = (int)h.nVertical;
+    const int nH = (int)h.nHorizontal;
+
+    const int iv = max(0, min(nV - 2, iesLowerIndex(vAng, nV, vertDeg)));
+    int ih = 0;
+    float th = 0.0f;
+    if (nH > 1)
+    {
+        float hDeg = horizDeg;
+        const float hMax = hAng[nH - 1];
+        if (hMax <= 90.0f + 1e-3f)
+        {
+            hDeg = fmod(hDeg, 90.0f);
+        }
+        else if (hMax <= 180.0f + 1e-3f)
+        {
+            if (hDeg > 180.0f)
+            {
+                hDeg = 360.0f - hDeg;
+            }
+        }
+        else
+        {
+            hDeg = fmod(hDeg, 360.0f);
+        }
+        ih = max(0, min(nH - 2, iesLowerIndex(hAng, nH, hDeg)));
+        const float h0 = hAng[ih];
+        const float h1 = hAng[ih + 1];
+        th = (h1 > h0) ? (hDeg - h0) / (h1 - h0) : 0.0f;
+    }
+
+    const float v0 = vAng[iv];
+    const float v1 = vAng[iv + 1];
+    const float tv = (v1 > v0) ? (vertDeg - v0) / (v1 - v0) : 0.0f;
+
+    const int ih1 = (nH == 1) ? 0 : ih + 1;
+    const float c00 = candela[iv + ih * nV];
+    const float c10 = candela[(iv + 1) + ih * nV];
+    const float c01 = candela[iv + ih1 * nV];
+    const float c11 = candela[(iv + 1) + ih1 * nV];
+    const float c0 = c00 * (1.0f - tv) + c10 * tv;
+    const float c1 = c01 * (1.0f - tv) + c11 * tv;
+    return c0 * (1.0f - th) + c1 * th;
+}
+
 static __inline__ float rangeWindow(device const UniformLight& l, float dist)
 {
     // KHR_lights_punctual range window: 1 at d=0, 0 at d=range.

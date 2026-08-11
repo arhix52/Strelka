@@ -91,6 +91,8 @@ fixing, but it is not a shading bug.
 | `23_diffuse_transmission` | `KHR_materials_diffuse_transmission` weight ramp | 0.012 / 1.000 |
 | `24_orthographic` | ortho twin of `00_calibration` | 0.024 / 1.009 |
 | `25_subsurface` | `STRELKA_materials_subsurface` (Van de Hulst recipe) | 0.056 / 1.009 |
+| `26_dof` | thin-lens depth of field (`_camera.json`) | 0.024 / 1.015 |
+| `27_ies` | IES point light via light sidecar | 0.028 / 1.021 |
 
 `19_env_and_light` is the only row with two kinds of light in it, and it is
 there for one question: whether resampled importance sampling and plain
@@ -276,8 +278,8 @@ a procedural sky: it is baked to an equirectangular EXR, which is the only form
 Strelka takes.
 
 Sheen, clearcoat, iridescence, bounded volumetrics, specular tint, thin-walled
-glass, diffuse transmission, orthographic framing and subsurface are on the
-ladder as of scenes 14 to 25.
+glass, diffuse transmission, orthographic framing, subsurface, depth of field
+and IES lights are on the ladder as of scenes 14 to 27.
 
 `21_specular_color` pins Specular IOR Level at 0.5 so Blender's exporter writes
 `specularColorFactor` equal to the tint; level 1.0 would bake a factor of two
@@ -307,6 +309,30 @@ isotropic are both approximations — these spheres are neither — which is whe
 the last few per cent go; see the walk-through above for the four bugs the row
 found on the way from 0.330 to 0.056, and for the furnace test that says the
 remainder is the fit rather than the walk.
+
+`26_dof` turns the thin lens on. glTF has no DOF, so the builder writes
+`26_dof_camera.json` with the focus distance of the shared camera target, f/2.0,
+and the 29 mm lens that a 45° vertical FOV on a 24 mm sensor implies. Cycles gets
+the same numbers on `cam.dof`. Three grey spheres at different depths: the middle
+one is sharp, the near and far ones measure the blur. The TOML still only carries
+pose and FOV — DOF lives entirely in the camera sidecar.
+
+`27_ies` is a point light whose angular distribution comes from a synthetic
+LM-63 file (cosine^4 hotspot, 1000 cd on axis). Cycles samples it through a
+TexIES→Emission chain; Strelka through the light sidecar's `ies` path. The GPU
+divides the candela table by 177.83 lm/W, the D65 efficacy Cycles assumes for
+the same conversion, so the row compares the angular distribution instead of two
+guesses at a scale. No rect key: the IES light is the whole of the lighting.
+
+The lamp's `energy` is set explicitly to 1 W here, and that line is load-bearing.
+Cycles renders the product of energy and whatever Emission strength the node
+graph yields, so a new lamp's default 10 W multiplies a reference that otherwise
+looks entirely reasonable. Left unset, it pushed this row to a ratio of 18, and
+the factor of ten hid comfortably inside a fitted constant (π²/177.83, within
+0.8% of the truth and derivable-looking) that made the row pass while leaving
+every IES scene outside the suite ten times too bright. The honest constant
+lands the row at 1.021 instead of 1.008; the remaining 2% is Cycles' own
+normalisation and interpolation of the table, and is worth more than a match.
 
 Volume *emission* is not compared in `18_bounded_volume`. Cycles adds it with
 its own coefficient and Strelka adds it per free-flight event; the two

@@ -515,6 +515,7 @@ struct TriangleUpdateParams
 // GPU side structure
 // pad0: spot inner cone (rad) or point soft radius.
 // pad1: KHR attenuation range (0 = infinite).
+// points[0].y for point/spot: IES profile index, or -1 when isotropic.
 struct UniformLight
 {
     vector_float4 points[4];
@@ -524,6 +525,32 @@ struct UniformLight
     float halfAngle;
     float pad0;
     float pad1;
+};
+
+// Packed IES candela tables for the GPU. MetalLights lays the buffer out as:
+//   IesGpuBufferHeader
+//   IesGpuProfileHeader[profileCount]
+//   float blob (angles then candela, offsets relative to the blob start)
+// Sampled by lights_metal.h::sampleIesCandela; intensity on the light is a
+// multiplier on top of the table, matching the editor's Load IES path.
+struct IesGpuBufferHeader
+{
+    uint32_t profileCount;
+    uint32_t floatOffset; // byte offset of the float blob from the buffer start
+    uint32_t pad0;
+    uint32_t pad1;
+};
+
+struct IesGpuProfileHeader
+{
+    uint32_t nVertical;
+    uint32_t nHorizontal;
+    uint32_t anglesOffset; // index into the float blob: vertical then horizontal
+    uint32_t candelaOffset; // index into the float blob
+    float maxCandela;
+    float pad0;
+    float pad1;
+    float pad2;
 };
 
 struct Material

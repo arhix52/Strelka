@@ -617,6 +617,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::CommandBuffer* cmd, MTL4::Comp
             enc->setComputePipelineState(variant->shade);
             bind(uniformBuffer, 0, 0);
             bind(scene.instanceBuffer, 0, 1);
+            bind(scene.iesBuffer, 0, 2);
             bind(scene.lightBuffer, 0, 3);
             bind(scene.materialBuffer, 0, 4);
             bind(mPathStateBuffer, 0, 5);
@@ -908,6 +909,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setComputePipelineState(variant->shade);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(scene.instanceBuffer, 0, 1);
+            enc->setBuffer(scene.iesBuffer, 0, 2);
             enc->setBuffer(scene.lightBuffer, 0, 3);
             enc->setBuffer(scene.materialBuffer, 0, 4);
             enc->setBuffer(mPathStateBuffer, 0, 5);

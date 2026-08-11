@@ -738,6 +738,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mAccel.instanceBuffer());
     add(mMaterials.buffer());
     add(mLights.buffer());
+    add(mLights.iesBuffer());
     add(mGeometry.geometryEntryBuffer());
     add(mGeometry.curvePointBuffer());
     add(mGeometry.curveRadiusBuffer());
@@ -814,6 +815,7 @@ metal::IntegratorSceneBindings MetalRender::integratorSceneBindings()
     b.primitiveAccelerationStructures = &mAccel.primitiveAccelerationStructures();
     b.materialBuffer = mMaterials.buffer();
     b.lightBuffer = mLights.buffer();
+    b.iesBuffer = mLights.iesBuffer();
     b.geometryEntryBuffer = mGeometry.geometryEntryBuffer();
     b.vertexBuffer = mGeometry.vertexBuffer();
     b.prevVertexBuffer = mGeometry.prevVertexBuffer();
@@ -1992,7 +1994,7 @@ MTL::Library* MetalRender::loadShaderLibrary(const char* relativePath)
 
 void MetalRender::uploadLightBuffer()
 {
-    mLights.upload(mScene->getLights());
+    mLights.upload(mScene->getLights(), mScene->getIesProfiles());
 }
 
 void MetalRender::handleSceneChanges()

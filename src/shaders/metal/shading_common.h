@@ -564,15 +564,15 @@ static LightConnection makeEmptyConnection()
     return c;
 }
 
-LightConnection connectLight(
-    constant Uniforms& uniforms,
-    thread SamplerState& samplerRnd,
-    device const UniformLight& light,
-    thread SurfaceInteraction& si,
-    // A scattering event in a medium has a position and no normal. The facing
-    // test and the cosine below are surface terms; applied to a volume they
-    // reject half of every connection and darken the other half.
-    bool volumeEvent)
+LightConnection connectLight(constant Uniforms& uniforms,
+                             thread SamplerState& samplerRnd,
+                             device const UniformLight& light,
+                             thread SurfaceInteraction& si,
+                             // A scattering event in a medium has a position and no normal. The facing
+                             // test and the cosine below are surface terms; applied to a volume they
+                             // reject half of every connection and darken the other half.
+                             bool volumeEvent,
+                             device const IesGpuBufferHeader* iesBuffer)
 {
     LightSampleData lightSampleData = {};
     const float2 uv = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType), random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
@@ -617,7 +617,15 @@ LightConnection connectLight(
     {
         const float dist = max(lightSampleData.distToLight, 1e-4f);
         Li *= rangeWindow(light, dist) / (dist * dist);
-        if (light.type == 6)
+        // IES replaces the isotropic (and, for spots, the cone) angular shape:
+        // the file is already in candela, and the light's intensity is a
+        // multiplier on top of it. No profile means the cone alone, as before.
+        const bool hasIes = light.points[0].y >= 0.0f;
+        if (hasIes)
+        {
+            Li *= sampleIesCandela(iesBuffer, light, -lightSampleData.L);
+        }
+        else if (light.type == 6)
         {
             Li *= spotAttenuation(light, -lightSampleData.L);
         }
@@ -731,15 +739,15 @@ LightConnection connectEnvLight(
 
 // Choose a strategy and build the connection. The caller decides when to test
 // visibility.
-LightConnection connectToLight(
-    constant Uniforms& uniforms,
-    const uint32_t numLights,
-    device UniformLight* lights,
-    thread SamplerState& samplerRnd,
-    thread SurfaceInteraction& si,
-    device const EnvAliasEntry* envAliasTable,
-    texture2d<float> envMapTexture,
-    bool volumeEvent = false)
+LightConnection connectToLight(constant Uniforms& uniforms,
+                               const uint32_t numLights,
+                               device UniformLight* lights,
+                               thread SamplerState& samplerRnd,
+                               thread SurfaceInteraction& si,
+                               device const EnvAliasEntry* envAliasTable,
+                               texture2d<float> envMapTexture,
+                               device const IesGpuBufferHeader* iesBuffer,
+                               bool volumeEvent = false)
 {
     if (SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
@@ -756,7 +764,7 @@ LightConnection connectToLight(
         // Sample a local light (remap u from [0, 0.5) to [0, 1)).
         const float remappedU = u * 2.0f;
         const uint32_t lightId = min((uint32_t)(numLights * remappedU), numLights - 1);
-        LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent);
+        LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent, iesBuffer);
         c.pdf *= 0.5f / numLights;
         return c;
     }
@@ -771,7 +779,7 @@ LightConnection connectToLight(
 
     const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
     const uint32_t lightId = min((uint32_t)(numLights * u), numLights - 1);
-    LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent);
+    LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent, iesBuffer);
     c.pdf *= 1.0f / numLights;
     return c;
 }

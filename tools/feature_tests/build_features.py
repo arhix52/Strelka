@@ -1086,6 +1086,113 @@ def s25_subsurface(tex):
         obj.data.materials.append(mat)
 
 
+# Focus distance from the shared camera to the stage centre. The DOF row puts
+# its middle sphere there so the in-focus plane is a known, measurable place.
+DOF_FOCUS_DISTANCE = math.sqrt(
+    (CAM_TARGET[0] - CAM_LOC[0]) ** 2
+    + (CAM_TARGET[1] - CAM_LOC[1]) ** 2
+    + (CAM_TARGET[2] - CAM_LOC[2]) ** 2
+)
+# Vertical FOV 45° on a 24 mm sensor → the lens length Strelka's thin-lens
+# radius formula wants. Blender's FOV-mode camera still carries this as cam.lens
+# once the angle is set; the sidecar writes it so both sides share one number.
+DOF_FOCAL_LENGTH_MM = 24.0 / (2.0 * math.tan(math.radians(CAM_FOV_DEG) * 0.5))
+DOF_FSTOP = 2.0
+
+
+def s26_dof(tex):
+    """Thin-lens depth of field against three grey spheres at different depths.
+
+    Same material on every sphere so the comparison is pure defocus: the middle
+    one sits on the focus plane, the near and far ones measure the blur.
+    """
+    add_stage()
+    grey = new_material("dof_grey", base_color=(0.55, 0.55, 0.55, 1.0),
+                        roughness=0.65, metallic=0.0)
+    # Depths along the camera look direction (Blender Y). The camera sits at
+    # Y=-4.6 looking at Y=0; near/mid/far are spaced so the blur is obvious at
+    # f/2 without the near sphere leaving the frame.
+    for i, (name, y) in enumerate([("near", -1.1), ("mid", 0.0), ("far", 1.4)]):
+        obj = sphere("Dof%s" % name.capitalize(), (0.0, y, 0.75), radius=0.42)
+        obj.data.materials.append(grey)
+
+    cam = bpy.context.scene.camera
+    cam.data.dof.use_dof = True
+    cam.data.dof.focus_distance = DOF_FOCUS_DISTANCE
+    cam.data.dof.aperture_fstop = DOF_FSTOP
+    cam.data.dof.aperture_blades = 0
+
+
+def write_synthetic_ies(path):
+    """Axially symmetric hotspot for the IES row: 1000 cd on axis, falling to
+    ~10 cd at 90°. One horizontal angle so the profile is a pure vertical curve,
+    which both Strelka and Cycles sample the same way.
+    """
+    vertical = [0.0, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 75.0, 90.0]
+    # Cosine^4 falloff, clipped: a clear hotspot without a hard cutoff that
+    # would look like a spot cone rather than a photometric file.
+    candela = []
+    for v in vertical:
+        c = math.cos(math.radians(v))
+        candela.append(max(10.0, 1000.0 * (c ** 4)))
+    with open(path, "w") as f:
+        f.write("IESNA:LM-63-2002\n")
+        f.write("TILT=NONE\n")
+        # lamps lumens multiplier nV nH phototype units w l h ballast unused watts
+        f.write("1 1000 1.0 %d 1 1 1 0 0 0 1 1 10\n" % len(vertical))
+        f.write(" ".join("%.1f" % v for v in vertical) + "\n")
+        f.write("0.0\n")
+        f.write(" ".join("%.3f" % c for c in candela) + "\n")
+    return candela[0]
+
+
+def s27_ies(tex):
+    """IES point light painting a photometric hotspot on the stage floor.
+
+    No rect key: the IES light is the whole of the lighting, so a mismatch in
+    the angular distribution cannot hide under a second source. Cycles gets the
+    same .ies through a TexIES node; Strelka gets it through the light sidecar.
+    """
+    add_stage()
+    probe = sphere("Probe", (0.0, 0.0, 0.55), radius=0.45)
+    probe.data.materials.append(
+        new_material("ies_probe", base_color=(0.55, 0.55, 0.55, 1.0),
+                     roughness=0.7, metallic=0.0))
+
+    # Point lamp for Cycles. Cycles renders the *product* of the lamp's energy
+    # and the Emission strength its node graph produces, so energy has to be
+    # pinned even though the IES table is what shapes the light: a new lamp
+    # defaults to 10 W, and leaving it there scales the reference by ten while
+    # every other number in the scene looks right. That is the same trap the sun
+    # strength note below the table describes, and it cost a plausible-looking
+    # fitted constant in the renderer before it was found.
+    light_data = bpy.data.lights.new("IESKey", type="POINT")
+    light_data.use_nodes = True
+    light_data.energy = 1.0
+    light_data.shadow_soft_size = 0.0
+    light = bpy.data.objects.new("IESKey", light_data)
+    bpy.context.collection.objects.link(light)
+    # Above the stage, aimed down. Point lights have no orientation in Blender,
+    # but TexIES uses the local −Z of the object; rotate so −Z points at the
+    # floor (same convention as Strelka's photometric axis).
+    light.location = (0.0, 0.0, 3.2)
+    light.rotation_euler = (0.0, 0.0, 0.0)
+
+    nt = light_data.node_tree
+    nt.nodes.clear()
+    ies = nt.nodes.new("ShaderNodeTexIES")
+    ies.mode = "EXTERNAL"
+    # filepath filled in by the main loop once the scene directory exists
+    emission = nt.nodes.new("ShaderNodeEmission")
+    emission.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+    emission.inputs["Strength"].default_value = 1.0
+    out = nt.nodes.new("ShaderNodeOutputLight")
+    nt.links.new(ies.outputs[0], emission.inputs["Strength"])
+    nt.links.new(emission.outputs[0], out.inputs[0])
+    light["strelka_ies_node"] = ies.name  # stash for the exporter step
+    return light
+
+
 # KHR_materials_clearcoat has no IOR field and Blender writes no sheen extension
 # at all, so both scenes are patched after the export. Keyed by scene name; the
 # function is handed the parsed glTF document and mutates it in place.
@@ -1303,6 +1410,8 @@ SCENES = [
     ("23_diffuse_transmission", s23_diffuse_transmission, True),
     ("24_orthographic",     s24_orthographic,  True),
     ("25_subsurface",       s25_subsurface,    True),
+    ("26_dof",              s26_dof,           True),
+    ("27_ies",              s27_ies,           "ies"),
 ]
 
 # Scenes whose world is not black and therefore has to reach Strelka as an
@@ -1313,6 +1422,9 @@ SCENES = [
 ENV_BAKE = {"19_env_and_light"}
 ENV_BAKE_WIDTH = 1024
 ORTHO_SCENES = {"24_orthographic"}
+CAMERA_JSON_SCENES = {"26_dof"}
+# Sidecar is not the default rect key: the IES row owns its own point light.
+IES_SCENES = {"27_ies"}
 
 
 # ---------------------------------------------------------------------------
@@ -1352,9 +1464,9 @@ def export_gltf(filepath, export_lights):
     bpy.ops.export_scene.gltf(**kwargs)
 
 
-def write_light_json(path, environment=None):
+def write_light_json(path, environment=None, lights=None):
     data = {
-        "lights": [
+        "lights": lights if lights is not None else [
             {
                 "type": "rect",
                 "position": blender_to_gltf(KEY_POS),
@@ -1368,6 +1480,33 @@ def write_light_json(path, environment=None):
     }
     if environment is not None:
         data["environment"] = environment
+    with open(path, "w") as f:
+        json.dump(data, f, indent=4)
+
+
+def write_camera_json(path, focus_distance, fstop, focal_length_mm):
+    """DOF and sensor extras glTF cannot carry. Matched to the exported camera
+    by name -- the builder always names it Camera.
+    """
+    data = {
+        "cameras": [
+            {
+                "name": "Camera",
+                "focal_length_mm": focal_length_mm,
+                "sensor_width": 36.0,
+                "sensor_height": 24.0,
+                "sensor_fit": "VERTICAL",
+                "dof": {
+                    "enabled": True,
+                    "focus_distance": focus_distance,
+                    "fstop": fstop,
+                    "blades": 0,
+                    "blade_rotation": 0.0,
+                    "anamorphic_ratio": 1.0,
+                },
+            }
+        ]
+    }
     with open(path, "w") as f:
         json.dump(data, f, indent=4)
 
@@ -1526,9 +1665,23 @@ def main():
 
         reset_scene()
         add_camera()
-        if use_sidecar:
+        # IES owns its light; the default rect key would drown the photometric
+        # hotspot and turn the row into a second copy of 00_calibration.
+        if use_sidecar is True:
             add_key_light()
         builder(tex)
+
+        if name in IES_SCENES:
+            ies_path = os.path.join(scene_dir, name + ".ies")
+            peak = write_synthetic_ies(ies_path)
+            # Point the Cycles TexIES node at the file we just wrote.
+            for obj in bpy.data.objects:
+                if obj.type != "LIGHT" or "strelka_ies_node" not in obj:
+                    continue
+                node = obj.data.node_tree.nodes.get(obj["strelka_ies_node"])
+                if node is not None:
+                    node.filepath = ies_path
+            print("  ies    -> %s (peak %.0f cd)" % (os.path.basename(ies_path), peak))
 
         gltf_path = os.path.join(scene_dir, name + ".gltf")
         export_gltf(gltf_path, export_lights=not use_sidecar)
@@ -1547,12 +1700,40 @@ def main():
         if name in ENV_BAKE:
             environment = bake_world_env(scene_dir, name)
 
-        if use_sidecar:
+        if use_sidecar is True:
             write_light_json(os.path.join(scene_dir, name + "_light.json"), environment)
             print("  lights -> sidecar (radiance %.3f%s)"
                   % (KEY_RADIANCE, " + environment" if environment else ""))
+        elif name in IES_SCENES:
+            # Point light above the stage. Orientation −90° X puts local −Z
+            # (photometric axis) along world −Y in the Y-up export, matching
+            # the Cycles lamp whose −Z points at the floor.
+            write_light_json(
+                os.path.join(scene_dir, name + "_light.json"),
+                lights=[{
+                    "type": "point",
+                    "name": "IESKey",
+                    "position": blender_to_gltf((0.0, 0.0, 3.2)),
+                    "orientation": [-90.0, 0.0, 0.0],
+                    "color": [1.0, 1.0, 1.0],
+                    "intensity": 1.0,
+                    "unit": "intensity",
+                    "ies": name + ".ies",
+                }],
+            )
+            print("  lights -> sidecar (IES point, intensity 1.0)")
         else:
             print("  lights -> KHR_lights_punctual (no sidecar)")
+
+        if name in CAMERA_JSON_SCENES:
+            write_camera_json(
+                os.path.join(scene_dir, name + "_camera.json"),
+                focus_distance=DOF_FOCUS_DISTANCE,
+                fstop=DOF_FSTOP,
+                focal_length_mm=DOF_FOCAL_LENGTH_MM,
+            )
+            print("  camera -> sidecar (dof f/%.1f focus %.3f m, %.2f mm)"
+                  % (DOF_FSTOP, DOF_FOCUS_DISTANCE, DOF_FOCAL_LENGTH_MM))
 
         write_toml(
             os.path.join(scene_dir, name + ".toml"),

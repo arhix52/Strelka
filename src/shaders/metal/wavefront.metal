@@ -1261,6 +1261,7 @@ kernel void wavefrontShade(
     uint                                                       gid            [[thread_position_in_grid]],
     constant Uniforms&                                         uniforms       [[buffer(0)]],
     constant MTLAccelerationStructureUserIDInstanceDescriptor* instances      [[buffer(1)]],
+    device const IesGpuBufferHeader*                           iesProfiles    [[buffer(2)]],
     device UniformLight*                                       lights         [[buffer(3)]],
     device Material*                                           materials      [[buffer(4)]],
     device PathState*                                          paths          [[buffer(5)]],
@@ -1396,7 +1397,7 @@ kernel void wavefrontShade(
         {
             const LightConnection conn =
                 connectToLight(uniforms, uniforms.numLights, lights, rng, si, envAliasTable,
-                               envMapTexture, true);
+                               envMapTexture, iesProfiles, true);
             if (conn.needsRay && conn.pdf > 0.0f)
             {
                 // dot(rayDir, toLight), not dot(-rayDir, toLight). The phase
@@ -1530,7 +1531,7 @@ kernel void wavefrontShade(
                 vsi.front_face = true;
                 const LightConnection conn =
                     connectToLight(uniforms, uniforms.numLights, lights, wrng, vsi, envAliasTable,
-                                   envMapTexture, true);
+                                   envMapTexture, iesProfiles, true);
                 if (conn.needsRay && conn.pdf > 0.0f)
                 {
                     // dot(rayDir, toLight): the phase function takes the angle
@@ -1828,7 +1829,7 @@ kernel void wavefrontShade(
             xsi.front_face = true;
             const LightConnection conn =
                 connectToLight(uniforms, uniforms.numLights, lights, xrng, xsi, envAliasTable,
-                               envMapTexture, false);
+                               envMapTexture, iesProfiles, false);
             if (conn.needsRay && conn.pdf > 0.0f)
             {
                 const float cosOut = dot(outward, conn.toLight);
@@ -2295,7 +2296,7 @@ kernel void wavefrontShade(
             }
 
             const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, crng,
-                                                        si, envAliasTable, envMapTexture);
+                                                        si, envAliasTable, envMapTexture, iesProfiles);
             const bool isNextEventValid =
                 ((dot(conn.toLight, si.shading_normal) > 0.0f) == si.front_face) && conn.pdf > 0.0f;
             if (!isNextEventValid || !conn.needsRay)
