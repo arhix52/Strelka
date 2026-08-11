@@ -640,7 +640,14 @@ static void extendImpl(
         if (medium != 0u)
         {
             const float surfaceT = (hit.type == intersection_type::none) ? 1e16f : hit.distance;
-            const float3 sigmaT = sssSigmaT(float3(materials[medium - 1u].subsurface_radius));
+            device const Material& mm = materials[medium - 1u];
+            const float3 sigmaT = sssSigmaT(float3(mm.subsurface_radius));
+            // Same albedo `shade` will weight this step with, so both ends agree
+            // on which channel was the likely one to have been drawn.
+            const float3 albedo = ((mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
+                                      ? float3(mm.diffuse_transmission_color)
+                                      : unpackMediumAlbedo(paths[tid].mediumAlbedo);
+            const float3 channelPdf = sssChannelPdf(float3(paths[tid].throughput), albedo);
             // The walk step, not the path depth, indexes the sampler: a walk can
             // take hundreds of steps at one depth, and rebuilding the sampler in
             // the same state at each of them would have every step draw the same
@@ -650,7 +657,7 @@ static void extendImpl(
                                            pathDepth(paths[tid].depthAndFlags) + step);
             float scatterT = 0.0f;
             if (step < MEDIUM_MAX_STEPS &&
-                sssSampleDistance(sigmaT, surfaceT,
+                sssSampleDistance(sigmaT, channelPdf, surfaceT,
                                   random<SampleDimension::eSssChannel>(srng, uniforms.samplerType),
                                   random<SampleDimension::eSssDistance>(srng, uniforms.samplerType),
                                   scatterT))
@@ -1309,6 +1316,11 @@ kernel void wavefrontShade(
     const float3 rayOrigin = float3(pr.origin);
     const float3 rayDir = float3(pr.direction);
     float3 throughput = float3(p.throughput);
+    // The throughput `extend` drew this segment's medium channel from. The
+    // nested-dielectric attenuation below moves `throughput` on, and weighting a
+    // free flight by a density other than the one it was sampled from is how an
+    // unbiased estimator stops being one.
+    const float3 sampledThroughput = throughput;
 
     float3 radiance = float3(0.0f);
     const HitRecord rec = hits[tid];
@@ -1484,7 +1496,8 @@ kernel void wavefrontShade(
         const float3 albedo = isBoundedMedium ? float3(mm.diffuse_transmission_color)
                                               : unpackMediumAlbedo(p.mediumAlbedo);
 
-        throughput *= sssScatterWeight(sigmaT, albedo, rec.distance);
+        throughput *=
+            sssScatterWeight(sigmaT, albedo, sssChannelPdf(sampledThroughput, albedo), rec.distance);
 
         const float3 scatterPoint = rayOrigin + rayDir * rec.distance;
         SamplerState wrng = samplerFor(uniforms, tid, sampleIdx, depth + step);
@@ -1792,7 +1805,9 @@ kernel void wavefrontShade(
         const uint32_t medium = p.medium & MEDIUM_INDEX_MASK;
         const uint32_t step = p.medium >> MEDIUM_STEP_SHIFT;
         device const Material& mm = materials[medium - 1u];
-        throughput *= sssBoundaryWeight(sssSigmaT(float3(mm.subsurface_radius)), rec.distance);
+        const float3 exitAlbedo = unpackMediumAlbedo(p.mediumAlbedo);
+        throughput *= sssBoundaryWeight(sssSigmaT(float3(mm.subsurface_radius)),
+                                        sssChannelPdf(sampledThroughput, exitAlbedo), rec.distance);
 
         // The ray is travelling outwards, so the outward normal is the one it
         // agrees with.
@@ -1822,10 +1837,17 @@ kernel void wavefrontShade(
                     // The exit is Lambertian and the medium's albedo was already
                     // paid for during the walk, so the lobe here is 1/pi and its
                     // own density is cos/pi.
+                    //
+                    // The density is for the MIS weight only. connectLight folds
+                    // the cosine into conn.radiance -- it returns what a caller
+                    // holding f alone needs -- so multiplying the estimate by the
+                    // density as well applied that cosine twice, and the exit
+                    // connection came back around 70% of its value while MIS had
+                    // already deducted the whole of it from the bounce ray.
                     const float lobePdf = cosOut * M_1_PI_F;
                     const float misWeight = conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, lobePdf);
                     const float3 weight =
-                        throughput * (conn.radiance / conn.pdf) * misWeight * lobePdf;
+                        throughput * (conn.radiance / conn.pdf) * misWeight * M_1_PI_F;
                     if (any(weight > 1e-6f))
                     {
                         ShadowRay sr;
@@ -1835,7 +1857,13 @@ kernel void wavefrontShade(
                             clampIndirectContribution(weight, depth, uniforms.clampIndirect));
                         sr.maxDistance = conn.tMax;
                         sr.pixelIndex = tid;
-                        sr.medium = p.medium & MEDIUM_INDEX_MASK;
+                        // Outside the medium: this vertex is the walk leaving it,
+                        // and the ray starts on the far side of the boundary.
+                        // Carrying the walk's medium here attenuated the whole
+                        // distance to the light by a dense extinction that nothing
+                        // ever cancelled -- the connection is what lights a
+                        // translucent object, and it was arriving at zero.
+                        sr.medium = 0u;
                         sr.rrCutoff = random<SampleDimension::eShadowRR>(xrng, uniforms.samplerType) *
                                       kShadowTransmittanceCutoff;
                         const uint32_t slot =
@@ -2339,6 +2367,13 @@ kernel void wavefrontShade(
     const float3 faceNg = (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal
                                                                   : -si.geometry_normal;
     float3 nextOrigin;
+    // Colour the diffuse-transmission lobe applied on the way into a subsurface
+    // medium, divided back out below. The walk supplies the colour itself, once
+    // per scattering event, so leaving the lobe's copy in charges the first event
+    // twice: a sphere came out at albedo x its correct reflectance, which for a
+    // deep-red medium is a third of the light it should return. Cycles divides
+    // the same factor out for the same reason.
+    float3 sssEntryTint = float3(1.0f);
     if ((sampleResult.event_type & BSDF_EVENT_TRANSMISSION) != 0)
     {
         // A thin-walled surface has no interior, so crossing it does not put the
@@ -2398,6 +2433,7 @@ kernel void wavefrontShade(
                 walkAlbedo *= si.albedo / reference;
             }
             p.mediumAlbedo = packMediumAlbedo(saturate(walkAlbedo));
+            sssEntryTint = max(float3(si.diffuse_transmission_color), float3(1e-4f));
         }
     }
     else
@@ -2407,7 +2443,7 @@ kernel void wavefrontShade(
     iorStacks[tid] = iorStack;
 
     const float3 nextDir = normalize(sampleResult.wi);
-    float3 nextThroughput = throughput * sampleResult.bsdf_over_pdf;
+    float3 nextThroughput = throughput * (float3(sampleResult.bsdf_over_pdf) / sssEntryTint);
 
     // NEE only reaches directions above the shading normal of a front face, so a
     // hit anywhere else must not be weighted against it.

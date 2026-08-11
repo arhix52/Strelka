@@ -125,7 +125,7 @@ private:
     /// not advance a path's depth cannot eat its bounce budget. See
     /// wavefrontIterations().
     static constexpr uint32_t kPassthroughIterations = 8;
-    static constexpr uint32_t kSubsurfaceIterations = 16;
+    static constexpr uint32_t kSubsurfaceIterations = 64;
     /// Iterations of the wavefront loop for one sample at this path depth.
     uint32_t wavefrontIterations(uint32_t maxDepth) const;
 

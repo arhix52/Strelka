@@ -460,8 +460,10 @@ void initSurfaceInteraction(
     }
     si.emission = emissionColor * material.emission_strength;
 
-    // Fill remaining material parameters for bsdf_init
-    MaterialParams matParams;
+    // Fill remaining material parameters for bsdf_init. Zero-initialised because
+    // that is the default bsdf_init is written against, and a field added to the
+    // struct but forgotten here would otherwise be read as stack garbage.
+    MaterialParams matParams = {};
     matParams.roughness = resolvedRoughness;
     matParams.metallic = resolvedMetallic;
     matParams.ior = material.ior;
@@ -471,6 +473,12 @@ void initSurfaceInteraction(
     matParams.anisotropy = material.anisotropy;
     matParams.specular = material.specular;
     matParams.specular_color = float3(material.specular_color);
+    // si.subsurface is what gates the random walk in shade(); leaving it out of
+    // this copy left every subsurface material behaving as plain diffuse
+    // transmission, with the mean free path having no effect on the image at all.
+    matParams.subsurface = material.subsurface;
+    matParams.subsurface_radius = float3(material.subsurface_radius);
+    matParams.subsurface_anisotropy = material.subsurface_anisotropy;
     matParams.subsurface_reference = float3(material.subsurface_reference);
     matParams.iridescence = material.iridescence;
     matParams.iridescence_ior = material.iridescence_ior;

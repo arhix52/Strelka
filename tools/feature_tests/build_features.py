@@ -45,6 +45,9 @@ EXPOSURE_SHUTTER = 1.0
 CAM_LOC = (0.0, -4.6, 1.15)
 CAM_TARGET = (0.0, 0.0, 0.75)
 CAM_FOV_DEG = 45.0
+# Vertical ortho extent that matches the perspective framing at CAM_LOC:
+# distance * 2 * tan(FOV/2) ≈ 4.617 * 2 * tan(22.5°) ≈ 3.82.
+CAM_ORTHO_SCALE = 3.82
 
 # Key light: a rect area light above the stage, in BLENDER coordinates.
 KEY_SIZE = 1.6           # square, metres
@@ -166,6 +169,7 @@ ALIASES = {
     "emission_color":    ["Emission Color", "Emission"],
     "emission_strength": ["Emission Strength"],
     "specular":          ["Specular IOR Level", "Specular"],
+    "specular_tint":     ["Specular Tint"],
     "anisotropic":       ["Anisotropic"],
     "coat":              ["Coat Weight", "Clearcoat"],
     "coat_roughness":    ["Coat Roughness", "Clearcoat Roughness"],
@@ -176,6 +180,10 @@ ALIASES = {
     "film_thickness":    ["Thin Film Thickness"],
     "film_ior":          ["Thin Film IOR"],
     "thin_wall":         ["Thin Wall"],
+    "subsurface":        ["Subsurface Weight"],
+    "subsurface_radius": ["Subsurface Radius"],
+    "subsurface_scale":  ["Subsurface Scale"],
+    "subsurface_anisotropy": ["Subsurface Anisotropy"],
 }
 
 MISSING_SOCKETS = set()
@@ -897,6 +905,187 @@ def s20_mirror_and_floor(tex):
                          roughness=rough, metallic=0.0))
 
 
+def s21_specular_color(tex):
+    """KHR_materials_specular colour ramp on a grey dielectric.
+
+    Specular IOR Level is pinned at 0.5 -- Blender's glTF exporter multiplies the
+    tint by (level / 0.5), so level 1.0 would bake a factor of two into
+    specularColorFactor and the row would measure that encoding rather than the
+    tint. With level 0.5 the exported colour is the tint itself.
+    """
+    add_stage()
+    tints = [
+        (1.0, 1.0, 1.0),
+        (1.0, 0.55, 0.35),
+        (1.0, 0.2, 0.15),
+        (0.95, 0.85, 0.2),
+        (0.25, 0.85, 0.35),
+        (0.2, 0.45, 1.0),
+        (0.75, 0.3, 0.95),
+    ]
+    for i, (pos, tint) in enumerate(zip(row_positions(len(tints)), tints)):
+        obj = sphere("Sp%d" % i, pos)
+        obj.data.materials.append(
+            new_material("spec%d" % i, base_color=(0.18, 0.18, 0.2, 1.0),
+                         roughness=0.18, metallic=0.0,
+                         specular=0.5, specular_tint=tint + (1.0,)))
+
+
+def s22_thin_walled(tex):
+    """Smooth thin-walled glass against one solid control.
+
+    Rough thin walls are deliberately absent: Strelka still transmits them as a
+    delta (docs/open-defects.md entry 2), so a roughness ramp would measure that
+    known gap rather than Thin Wall itself. The solid sphere at IOR 1.5 is the
+    control -- same material without the wall flag -- so a framing or exposure
+    shift cannot hide a missing patch.
+    """
+    add_stage()
+    # Three thin-walled IORs, then one solid glass of the middle IOR.
+    specs = [
+        ("thin0", 1.1, True),
+        ("thin1", 1.5, True),
+        ("thin2", 2.0, True),
+        ("solid1", 1.5, False),
+    ]
+    for (name, ior, thin), pos in zip(specs, row_positions(len(specs), spacing=1.15)):
+        obj = sphere(name, pos, radius=0.48)
+        obj.data.materials.append(
+            new_material(name, base_color=(1.0, 1.0, 1.0, 1.0),
+                         roughness=0.0, metallic=0.0,
+                         transmission=1.0, ior=ior, thin_wall=thin))
+
+
+def s23_diffuse_transmission(tex):
+    """Diffuse transmission weight ramp, backlit.
+
+    Principled in Blender 5.2 has no Diffuse Transmission socket, so Cycles sees
+    a Mix of Principled and Translucent BSDF. The exporter cannot write
+    KHR_materials_diffuse_transmission from that graph; the patcher does, with
+    the same weights and colours. A bright panel behind the cards is what makes
+    the lobe visible -- front lighting alone looks like a darker diffuse.
+    """
+    add_stage()
+    # Backlight panel, behind the row.
+    panel = quad("Backlight", (0.0, 1.35, 0.85), size=2.4)
+    panel.data.materials.append(
+        new_material("backlight", base_color=(0.02, 0.02, 0.02, 1.0),
+                     roughness=1.0,
+                     emission_color=(1.0, 0.95, 0.85, 1.0),
+                     emission_strength=12.0))
+
+    n = 5
+    for i, pos in enumerate(row_positions(n, spacing=0.95, z=0.85)):
+        weight = i / (n - 1)
+        # Cards face the camera (and the backlight behind them).
+        bpy.ops.mesh.primitive_plane_add(
+            size=0.7, location=(pos[0], -0.15, pos[2]),
+            rotation=(math.radians(90), 0.0, 0.0))
+        obj = bpy.context.object
+        obj.name = "DT%d" % i
+        colour = (0.55, 0.75, 0.35)
+        mat = bpy.data.materials.new("dtrans%d" % i)
+        mat.use_nodes = True
+        tree = mat.node_tree
+        tree.nodes.clear()
+        out = tree.nodes.new("ShaderNodeOutputMaterial")
+        mix = tree.nodes.new("ShaderNodeMixShader")
+        princ = tree.nodes.new("ShaderNodeBsdfPrincipled")
+        transl = tree.nodes.new("ShaderNodeBsdfTranslucent")
+        princ.inputs["Base Color"].default_value = colour + (1.0,)
+        princ.inputs["Roughness"].default_value = 1.0
+        princ.inputs["Metallic"].default_value = 0.0
+        if "Specular IOR Level" in princ.inputs:
+            princ.inputs["Specular IOR Level"].default_value = 0.0
+        transl.inputs["Color"].default_value = colour + (1.0,)
+        mix.inputs["Fac"].default_value = weight
+        tree.links.new(princ.outputs["BSDF"], mix.inputs[1])
+        tree.links.new(transl.outputs["BSDF"], mix.inputs[2])
+        tree.links.new(mix.outputs["Shader"], out.inputs["Surface"])
+        obj.data.materials.append(mat)
+
+
+def s24_orthographic(tex):
+    """Calibration twin under an orthographic camera.
+
+    Same 0.18 grey sphere and key light as 00 -- only the projection changes. If
+    this row drifts while 00 stays at ratio ≈1, the bug is in orthographic
+    extents or the ray generation, not in light units.
+    """
+    cam = bpy.context.scene.camera
+    cam.data.type = "ORTHO"
+    cam.data.ortho_scale = CAM_ORTHO_SCALE
+    add_stage()
+    obj = sphere("Grey", (0.0, 0.0, 0.6), radius=0.6)
+    obj.data.materials.append(
+        new_material("grey018", base_color=(0.18, 0.18, 0.18, 1.0),
+                     roughness=1.0, metallic=0.0, specular=0.0))
+
+
+def diffuse_to_single_scattering_albedo(a):
+    """Diffuse albedo -> single-scattering albedo (Van de Hulst inversion).
+
+    Same fit tools/iso_bathroom/vray2strelka.py uses for STRELKA_materials_subsurface:
+    a DCC subsurface colour is a diffuse albedo, and the random walk wants the
+    probability that one extinction event scatters. Feeding the diffuse value
+    straight in darkens every multi-scatter path by albedo^n.
+    """
+
+    def diffuse_albedo(alpha):
+        s = math.sqrt(max(1.0 - alpha, 0.0))
+        return (1.0 - s) * (1.0 - 0.139 * s) / (1.0 + 1.17 * s)
+
+    a = min(max(float(a), 0.0), 0.999)
+    lo, hi = 0.0, 1.0
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        if diffuse_albedo(mid) < a:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+# Mean free path in metres for the SSS row. Kept small against a ~0.5 m sphere so
+# the walk is visible at the silhouette without turning the whole ball into a
+# uniform glow; matching Cycles' Subsurface Radius * Scale.
+SSS_RADIUS = (0.05, 0.025, 0.015)
+SSS_SCALE = 1.0
+
+
+def s25_subsurface(tex):
+    """Subsurface random-walk albedo ramp, with the diffuse→σ_s recipe applied.
+
+    Cycles authors a diffuse subsurface colour; Strelka's extension carries the
+    single-scattering albedo. The patcher inverts Van de Hulst so both sides are
+    asked the same physical question. Radius is identical on both sides.
+    """
+    add_stage()
+    # Saturated and grey albedos: colour shift through the medium is half the
+    # feature, and a grey control says whether the weight itself matches.
+    albedos = [
+        (0.55, 0.22, 0.18),
+        (0.75, 0.45, 0.28),
+        (0.85, 0.75, 0.55),
+        (0.55, 0.55, 0.55),
+        (0.35, 0.55, 0.75),
+    ]
+    for i, (pos, albedo) in enumerate(zip(row_positions(len(albedos)), albedos)):
+        obj = sphere("SSS%d" % i, pos, radius=0.48)
+        mat = new_material(
+            "sss%d" % i,
+            base_color=albedo + (1.0,),
+            roughness=1.0,
+            metallic=0.0,
+            specular=0.0,
+            subsurface=1.0,
+            subsurface_radius=SSS_RADIUS,
+            subsurface_scale=SSS_SCALE,
+            subsurface_anisotropy=0.0,
+        )
+        obj.data.materials.append(mat)
+
+
 # KHR_materials_clearcoat has no IOR field and Blender writes no sheen extension
 # at all, so both scenes are patched after the export. Keyed by scene name; the
 # function is handed the parsed glTF document and mutates it in place.
@@ -972,11 +1161,118 @@ def patch_bounded_volume(doc):
     doc["extensionsUsed"] = sorted(used)
 
 
+def patch_thin_walled(doc):
+    # Strelka treats transmission as solid unless KHR_materials_volume states a
+    # thickness of zero -- Blender's Thin Wall flag is not exported. Materials
+    # named thin* get the wall; solid* keep the default (no volume extension).
+    for mat in doc.get("materials", []):
+        name = mat.get("name", "")
+        if not name.startswith("thin"):
+            continue
+        mat.setdefault("extensions", {})["KHR_materials_volume"] = {
+            "thicknessFactor": 0.0,
+        }
+        mat.setdefault("extensions", {})["KHR_materials_transmission"] = {
+            "transmissionFactor": 1.0,
+        }
+    used = set(doc.get("extensionsUsed", []))
+    used.update(("KHR_materials_volume", "KHR_materials_transmission"))
+    doc["extensionsUsed"] = sorted(used)
+
+
+def patch_specular_color(doc):
+    # White tint is the glTF default, so the exporter drops the extension on
+    # spec0. Write it back so every sphere in the ramp carries the same fields.
+    tints = [
+        [1.0, 1.0, 1.0],
+        [1.0, 0.55, 0.35],
+        [1.0, 0.2, 0.15],
+        [0.95, 0.85, 0.2],
+        [0.25, 0.85, 0.35],
+        [0.2, 0.45, 1.0],
+        [0.75, 0.3, 0.95],
+    ]
+    for mat in doc.get("materials", []):
+        name = mat.get("name", "")
+        if not name.startswith("spec"):
+            continue
+        i = int(name[len("spec"):])
+        mat.setdefault("extensions", {})["KHR_materials_specular"] = {
+            "specularFactor": 1.0,
+            "specularColorFactor": tints[i],
+        }
+    used = set(doc.get("extensionsUsed", []))
+    used.add("KHR_materials_specular")
+    doc["extensionsUsed"] = sorted(used)
+
+
+def patch_diffuse_transmission(doc):
+    # Mix(Principled, Translucent) does not survive the exporter as
+    # KHR_materials_diffuse_transmission. Rebuild the extension from the material
+    # name, which encodes the mix weight; colour matches the Translucent node.
+    colour = [0.55, 0.75, 0.35]
+    for mat in doc.get("materials", []):
+        name = mat.get("name", "")
+        if not name.startswith("dtrans"):
+            continue
+        i = int(name[len("dtrans"):])
+        weight = i / 4.0
+        # Replace whatever the exporter wrote for the Mix with a diffuse base the
+        # extension can ride on.
+        mat["pbrMetallicRoughness"] = {
+            "baseColorFactor": colour + [1.0],
+            "metallicFactor": 0.0,
+            "roughnessFactor": 1.0,
+        }
+        mat.setdefault("extensions", {})["KHR_materials_diffuse_transmission"] = {
+            "diffuseTransmissionFactor": weight,
+            "diffuseTransmissionColorFactor": colour,
+        }
+        # No leftover specular from a default Principled export.
+        mat.setdefault("extensions", {})["KHR_materials_specular"] = {
+            "specularFactor": 0.0,
+            "specularColorFactor": [1.0, 1.0, 1.0],
+        }
+    used = set(doc.get("extensionsUsed", []))
+    used.update(("KHR_materials_diffuse_transmission", "KHR_materials_specular"))
+    doc["extensionsUsed"] = sorted(used)
+
+
+def patch_subsurface(doc):
+    # Cycles authors Base Color as a diffuse subsurface colour; the extension
+    # carries the single-scattering albedo (see gltfloader.cpp). Invert Van de
+    # Hulst per channel -- the same fit tools/iso_bathroom/vray2strelka.py uses
+    # -- and keep the radius Cycles used. Cycles' own BaseColor→medium mapping is
+    # not published as this function, so the row is a regression guard on our
+    # side until that mapping is measured the way bake_env.py measured the sky.
+    radius = list(SSS_RADIUS)
+    for mat in doc.get("materials", []):
+        name = mat.get("name", "")
+        if not name.startswith("sss"):
+            continue
+        base = mat.get("pbrMetallicRoughness", {}).get("baseColorFactor", [0.5, 0.5, 0.5, 1.0])
+        scatter = [diffuse_to_single_scattering_albedo(c) for c in base[:3]]
+        mat.setdefault("extensions", {})["STRELKA_materials_subsurface"] = {
+            "subsurfaceFactor": 1.0,
+            "scatterColor": scatter,
+            "scatterRadius": radius,
+            "anisotropy": 0.0,
+            "scatterReference": list(base[:3]),
+        }
+    used = set(doc.get("extensionsUsed", []))
+    used.add("STRELKA_materials_subsurface")
+    doc["extensionsUsed"] = sorted(used)
+
+
 GLTF_PATCHERS = {
     "14_sheen": patch_sheen,
     "15_clearcoat": patch_clearcoat_ior,
     "16_iridescence": patch_iridescence,
     "18_bounded_volume": patch_bounded_volume,
+    "21_specular_color": patch_specular_color,
+    "22_thin_walled": patch_thin_walled,
+    "23_diffuse_transmission": patch_diffuse_transmission,
+    "25_subsurface": patch_subsurface,
 }
 
 
@@ -1002,6 +1298,11 @@ SCENES = [
     ("18_bounded_volume",   s18_bounded_volume, True),
     ("19_env_and_light",    s19_env_and_light, True),
     ("20_mirror_and_floor", s20_mirror_and_floor, True),
+    ("21_specular_color",   s21_specular_color, True),
+    ("22_thin_walled",      s22_thin_walled,   True),
+    ("23_diffuse_transmission", s23_diffuse_transmission, True),
+    ("24_orthographic",     s24_orthographic,  True),
+    ("25_subsurface",       s25_subsurface,    True),
 ]
 
 # Scenes whose world is not black and therefore has to reach Strelka as an
@@ -1011,6 +1312,7 @@ SCENES = [
 # a render.
 ENV_BAKE = {"19_env_and_light"}
 ENV_BAKE_WIDTH = 1024
+ORTHO_SCENES = {"24_orthographic"}
 
 
 # ---------------------------------------------------------------------------
@@ -1108,9 +1410,22 @@ def bake_world_env(scene_dir, name):
     return {"texture": name + "_env.exr", "intensity": 1.0, "color": [1.0, 1.0, 1.0]}
 
 
-def write_toml(path, name, gltf_rel, out_rel):
+def write_toml(path, name, gltf_rel, out_rel, orthographic=False):
     cam = blender_to_gltf(CAM_LOC)
     tgt = blender_to_gltf(CAM_TARGET)
+    camera_block = (
+        "[camera]\n"
+        "index = 0\n"
+        "position = [%.6f, %.6f, %.6f]\n"
+        "target = [%.6f, %.6f, %.6f]\n"
+        % (cam[0], cam[1], cam[2], tgt[0], tgt[1], tgt[2])
+    )
+    # Orthographic extents come from the glTF camera; writing a perspective fov
+    # here would only set an unused field, and omitting it keeps the config
+    # honest about what frames the image.
+    if not orthographic:
+        camera_block += "fov = %.4f\n" % CAM_FOV_DEG
+    camera_block += "\n"
     with open(path, "w") as f:
         f.write(
             "[scene]\n"
@@ -1131,11 +1446,7 @@ def write_toml(path, name, gltf_rel, out_rel):
             # the reference means naming the convention rather than inheriting a
             # default.
             'volume_model = "cycles"\n\n'
-            "[camera]\n"
-            "index = 0\n"
-            "position = [%.6f, %.6f, %.6f]\n"
-            "target = [%.6f, %.6f, %.6f]\n"
-            "fov = %.4f\n\n"
+            "%s"
             "[tonemap]\n"
             # Linear out on both sides: the comparison must not go through a
             # tone curve, or every difference gets squashed in the highlights.
@@ -1144,8 +1455,7 @@ def write_toml(path, name, gltf_rel, out_rel):
             "exposure_iso = %.4f\n"
             "exposure_fstop = %.4f\n"
             "exposure_shutter = %.4f\n"
-            % (gltf_rel, out_rel, RES, RES, STRELKA_SPP, MAX_DEPTH,
-               cam[0], cam[1], cam[2], tgt[0], tgt[1], tgt[2], CAM_FOV_DEG,
+            % (gltf_rel, out_rel, RES, RES, STRELKA_SPP, MAX_DEPTH, camera_block,
                EXPOSURE_ISO, EXPOSURE_FSTOP, EXPOSURE_SHUTTER)
         )
 
@@ -1249,6 +1559,7 @@ def main():
             name,
             gltf_rel=os.path.join(scene_dir, name + ".gltf"),
             out_rel=os.path.join(scene_dir, name + "_strelka.exr"),
+            orthographic=name in ORTHO_SCENES,
         )
 
         if not skip_render:
@@ -1273,6 +1584,10 @@ def main():
         "10_glass_absorption": "KHR_materials_volume",
         "11_emission": "KHR_materials_emissive_strength",
         "12_lights_punctual": "KHR_lights_punctual",
+        "21_specular_color": "KHR_materials_specular",
+        "22_thin_walled": "KHR_materials_volume",
+        "23_diffuse_transmission": "KHR_materials_diffuse_transmission",
+        "25_subsurface": "STRELKA_materials_subsurface",
     }
     for scene, ext in expected.items():
         info = manifest.get(scene)

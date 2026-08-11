@@ -851,7 +851,9 @@ uint32_t MetalRender::wavefrontIterations(uint32_t maxDepth) const
     // A walk step is not a pass-through and has its own, much larger, ceiling.
     // Matching MEDIUM_MAX_STEPS here would be 256 extra iterations on any scene
     // with a bar of soap in it, so this buys a walk of useful length rather than
-    // the longest one the shader will take.
+    // the longest one the shader will take. 64 is where 25_subsurface stops
+    // moving: it renders the same as 256 to within the comparison's noise and in
+    // half the time, while 16 truncates enough of the tail to lose about 2%.
     if (mMaterials.hasSubsurfaceMaterials())
     {
         iterations += kSubsurfaceIterations;

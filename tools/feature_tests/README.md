@@ -86,6 +86,11 @@ fixing, but it is not a shading bug.
 | `18_bounded_volume` | `STRELKA_materials_medium` | 0.027 / 1.000 |
 | `19_env_and_light` | an environment map *and* an area light | 0.026 / 1.000 |
 | `20_mirror_and_floor` | a mirror filling the frame (denoiser guides) | 0.034 / 1.038 |
+| `21_specular_color` | `KHR_materials_specular` tint ramp | 0.030 / 1.018 |
+| `22_thin_walled` | smooth Thin Wall glass (+ solid control) | 0.085 / 0.989 |
+| `23_diffuse_transmission` | `KHR_materials_diffuse_transmission` weight ramp | 0.012 / 1.000 |
+| `24_orthographic` | ortho twin of `00_calibration` | 0.024 / 1.009 |
+| `25_subsurface` | `STRELKA_materials_subsurface` (Van de Hulst recipe) | 0.056 / 1.009 |
 
 `19_env_and_light` is the only row with two kinds of light in it, and it is
 there for one question: whether resampled importance sampling and plain
@@ -156,6 +161,58 @@ whole-frame `ratio` hides what they are actually saying:
   the base. Cycles models that inter-reflection. The missing term is worth about
   6% at the strongest coat in the ramp.
 
+`25_subsurface` was recorded at 0.330 / 1.053 and read as a convention mismatch:
+the Van de Hulst inversion is the right encoding for our extension but is not
+Cycles' BaseColor→medium map, so the residual was written off as that. It was
+not. The row is at 0.056 / 1.009 now, and getting there was four bugs, none of
+which any other scene could see because no other scene runs a random walk.
+
+- The walk never ran. `initSurfaceInteraction` copies the material into
+  `MaterialParams` field by field, and `subsurface`, `subsurface_radius` and
+  `subsurface_anisotropy` were not among them, so `si.subsurface` — the flag that
+  gates the walk in `shade` — was whatever the stack held. Every subsurface
+  material rendered as plain diffuse transmission, and the giveaway was that the
+  mean free path did not change the image at all. That struct is now `= {}`, so
+  the next field added to it reads as zero rather than as garbage.
+- The albedo was applied twice. The diffuse-transmission lobe tints the ray on
+  the way in, and the walk applies the medium's colour again at its first
+  scattering event. A deep-red sphere came back at about a third of the light it
+  should return. The entry tint is divided back out at the point the lobe is
+  taken, which is what Cycles does at the same place.
+- Channels were chosen uniformly. In a medium whose extinction differs threefold
+  between channels the balance-heuristic weight can exceed one for whichever
+  channel suited the sampled distance, and over a walk tens of steps long those
+  compound into fireflies. The choice is now proportional to throughput times
+  albedo, and the same distribution is passed to the weights — sampling from one
+  density and weighting by another is how an unbiased estimator stops being one.
+- Exit connections were dark twice over. The shadow ray leaving the medium was
+  tagged with the medium it was leaving, so a dense extinction attenuated the
+  whole distance to the light and nothing ever cancelled it; and the estimate was
+  multiplied by the exit lobe's own density, `cos/pi`, when `connectLight` had
+  already folded the cosine into the radiance it returns. The second one cost a
+  factor of the cosine on the connection while MIS deducted the whole of it from
+  the bounce ray, which is the 25–35% deficit that outlasted the other three.
+
+What separates that from four guesses is `tools/feature_tests/sss_furnace.py`,
+which builds the sphere alone under a uniform sky of radiance 1 and reads it back
+with `sss_furnace_read.py`. A medium of single-scattering albedo 1 absorbs
+nothing, so the sphere has to render as exactly 1 whatever its density — and it
+does, 1.0004 at every mean free path from 0.06 to 1.0. Energy conservation is
+therefore not what the remaining 5.6% is. The rest is the Van de Hulst fit
+itself: driven at raw albedos, a thick sphere reads 6–8% above what the fit
+predicts, because the fit describes a plane-parallel half-space and the test
+subject is curved. That bias is the row's residual, and it is in the recipe
+rather than in the walk.
+
+`sss_probe.py` reads the row per sphere rather than per frame, and splits each
+silhouette into its lit and shadowed halves — a walk that carries light the wrong
+distance moves it between the halves while the total holds, which is a different
+fault from losing it, and the whole-frame ratio cannot tell them apart.
+
+`kSubsurfaceIterations` is 64 for the same reason. It is the point where the row
+stops moving: 64 renders the same as 256 to within the comparison's noise and in
+half the time, while 16 truncates enough of the walk's tail to lose about 2%.
+
 Re-recorded after the sheen, subsurface, clearcoat-IOR, specular-colour,
 thin-walled and iridescence work. Every row is at or better than the numbers it
 replaces; `08_alpha_blend` moved the most, from 0.051 / 1.044, and that is *not*
@@ -218,19 +275,40 @@ here now, inside `19_env_and_light`, though as an environment map rather than as
 a procedural sky: it is baked to an equirectangular EXR, which is the only form
 Strelka takes.
 
-Sheen, clearcoat, iridescence and bounded volumetrics are on the ladder as of
-scenes 14 to 18. Subsurface
-scattering, thin-film iridescence and bounded volumetrics are not, and are
-covered only by unit tests in `tests/material/`, which pin the properties those
-features exist for and the energy they are allowed to carry — a different
-question from whether they agree with another renderer.
+Sheen, clearcoat, iridescence, bounded volumetrics, specular tint, thin-walled
+glass, diffuse transmission, orthographic framing and subsurface are on the
+ladder as of scenes 14 to 25.
 
-Subsurface is the one still missing, and the awkward one to add: Cycles' random
-walk derives its scattering albedo from a diffuse colour through a fit, and
-Strelka's extension carries the single-scattering albedo directly, so a scene
-would have to invert that fit before the two could be compared at all.
+`21_specular_color` pins Specular IOR Level at 0.5 so Blender's exporter writes
+`specularColorFactor` equal to the tint; level 1.0 would bake a factor of two
+into the colour and the row would measure that encoding.
 
-Volume *emission* is not compared either, in the row that exists. Cycles adds it
-with its own coefficient and Strelka adds it per free-flight event; the two
-conventions do not line up, and `18_bounded_volume` sets emission to zero rather
-than measure the mismatch as though it were an error.
+`22_thin_walled` is smooth only. Rough thin walls still transmit as a delta on
+our side (docs/open-defects.md entry 2); a roughness ramp would restate that.
+Blender's Thin Wall flag is not exported, so the patcher writes
+`KHR_materials_volume.thicknessFactor = 0`, which is what Strelka reads as a
+wall. The fourth sphere is solid glass at the same IOR as the middle thin one.
+
+`23_diffuse_transmission` builds a Mix(Principled, Translucent) for Cycles —
+Principled 5.2 has no Diffuse Transmission socket — and the patcher writes
+`KHR_materials_diffuse_transmission` with the same weights. A backlit panel is
+required; front lighting alone looks like a darker diffuse.
+
+`24_orthographic` is `00_calibration` under an orthographic camera whose vertical
+extent matches the perspective framing. Drift here with a clean `00` means the
+projection path, not light units.
+
+`25_subsurface` is the albedo-convention bridge the ladder used to lack. Cycles
+authors a diffuse subsurface colour on Base Color; `STRELKA_materials_subsurface`
+carries the single-scattering albedo. The patcher inverts Van de Hulst's
+approximation per channel (the same fit `tools/iso_bathroom/vray2strelka.py`
+uses) and keeps the mean free path identical on both sides. Semi-infinite and
+isotropic are both approximations — these spheres are neither — which is where
+the last few per cent go; see the walk-through above for the four bugs the row
+found on the way from 0.330 to 0.056, and for the furnace test that says the
+remainder is the fit rather than the walk.
+
+Volume *emission* is not compared in `18_bounded_volume`. Cycles adds it with
+its own coefficient and Strelka adds it per free-flight event; the two
+conventions do not line up, and that row sets emission to zero rather than
+measure the mismatch as though it were an error.

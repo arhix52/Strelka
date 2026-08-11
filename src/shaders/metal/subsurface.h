@@ -31,6 +31,23 @@ static inline float3 sssSigmaT(float3 radius)
     return 1.0f / max(radius, float3(1e-5f));
 }
 
+// Which channel drives the next free flight, in proportion to what the path is
+// still carrying.
+//
+// Choosing uniformly is unbiased and unusable: in a medium whose extinction
+// differs threefold between channels, the balance-heuristic weight below can
+// exceed one for whichever channel the sampled distance happened to suit, and
+// over a walk of tens of steps those factors compound into fireflies. Weighting
+// the choice by throughput times albedo makes the dominant channel the one whose
+// distance is sampled, which is what collapses that tail. Cycles picks its
+// channel the same way, after Chiang et al.'s production subsurface paper.
+static inline float3 sssChannelPdf(float3 throughput, float3 albedo)
+{
+    const float3 w = abs(throughput * albedo);
+    const float sum = w.x + w.y + w.z;
+    return (sum > 0.0f) ? (w / sum) : float3(1.0f / 3.0f);
+}
+
 // Free flight, with one channel chosen per step.
 //
 // A single scalar extinction would lose the colour the medium is for, and
@@ -39,10 +56,19 @@ static inline float3 sssSigmaT(float3 radius)
 // all three, which is what keeps the estimator unbiased for the other two.
 //
 // Returns true when the walk scatters before reaching `surfaceT`.
-static inline bool sssSampleDistance(float3 sigmaT, float surfaceT, float uChannel, float uDist,
-                                     thread float& t)
+static inline bool sssSampleDistance(
+    float3 sigmaT, float3 channelPdf, float surfaceT, float uChannel, float uDist, thread float& t)
 {
-    const int c = min(int(uChannel * 3.0f), 2);
+    int c = 2;
+    float cdf = channelPdf.x;
+    if (uChannel < cdf)
+    {
+        c = 0;
+    }
+    else if (uChannel < (cdf += channelPdf.y))
+    {
+        c = 1;
+    }
     const float st = sigmaT[c];
     if (!(st > 0.0f))
     {
@@ -53,27 +79,28 @@ static inline bool sssSampleDistance(float3 sigmaT, float surfaceT, float uChann
 }
 
 // Throughput weight for scattering at `t`, balance-heuristic over the three
-// channels that could have produced that distance.
-static inline float3 sssScatterWeight(float3 sigmaT, float3 albedo, float t)
+// channels that could have produced that distance. `channelPdf` has to be the
+// same distribution the channel was drawn from, or the two stop cancelling.
+static inline float3 sssScatterWeight(float3 sigmaT, float3 albedo, float3 channelPdf, float t)
 {
     const float3 tr = exp(-sigmaT * t);
     const float3 pdfPerChannel = sigmaT * tr;
-    const float pdf = (pdfPerChannel.x + pdfPerChannel.y + pdfPerChannel.z) * (1.0f / 3.0f);
+    const float pdf = dot(channelPdf, pdfPerChannel);
     if (!(pdf > 0.0f))
     {
         return float3(0.0f);
     }
     // sigma_s = albedo * sigma_t: the fraction of an extinction event that
     // scatters rather than absorbs.
-    return (albedo * sigmaT * tr) / pdf;
+    return (albedo * pdfPerChannel) / pdf;
 }
 
 // Throughput weight for reaching the boundary at `t` without scattering, over
 // the same three channels.
-static inline float3 sssBoundaryWeight(float3 sigmaT, float t)
+static inline float3 sssBoundaryWeight(float3 sigmaT, float3 channelPdf, float t)
 {
     const float3 tr = exp(-sigmaT * t);
-    const float pdf = (tr.x + tr.y + tr.z) * (1.0f / 3.0f);
+    const float pdf = dot(channelPdf, tr);
     if (!(pdf > 0.0f))
     {
         return float3(0.0f);
