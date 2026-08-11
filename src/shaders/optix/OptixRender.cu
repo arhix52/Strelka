@@ -388,7 +388,9 @@ extern "C" __global__ void __closesthit__light()
             const float lightSelectionPdf = params.hasEnvMap
                 ? 0.5f / params.scene.numLights
                 : 1.0f / params.scene.numLights;
-            float lightPdf = getLightPdf(currLight, hitPoint, optixGetWorldRayOrigin()) * lightSelectionPdf;
+            float lightPdf =
+                getLightPdf(currLight, hitPoint, optixGetWorldRayOrigin(), params.rectLightSamplingMethod) *
+                lightSelectionPdf;
             const float misWeight = computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
             prd->radiance += prd->throughput * make_float3(currLight.color) * -dot(rayDir, lightNormal) * misWeight;
         }

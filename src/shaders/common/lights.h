@@ -99,21 +99,23 @@ static __inline__ __device__ void fillLightData(const UniformLight& l, const flo
 struct SphQuad
 {
     float3 o, x, y, z;
-    float z0, z0sq;
-    float x0, y0, y0sq; // rectangle coords in ’R’
-    float x1, y1, y1sq;
-    float b0, b1, b0sq, k;
+    float z0;
+    float x0, y0;
+    float x1, y1;
+    float b0, b1, b0sq;
+    float g2, g3;
     float S;
+    bool useAreaFallback;
 };
 
-// Precomputation of constants for the spherical rectangle Q.
+// Ureña / Fajardo / King EGSR 2013, Cycles-hardened (asin form). See the Metal
+// lights_metal.h comment for why acos is not used here.
 static __device__ SphQuad init(const UniformLight& l, const float3 o)
 {
     SphQuad squad;
 
     float3 ex = make_float3(l.points[1]) - make_float3(l.points[0]);
     float3 ey = make_float3(l.points[3]) - make_float3(l.points[0]);
-
     float3 s = make_float3(l.points[0]);
 
     float exl = length(ex);
@@ -124,52 +126,38 @@ static __device__ SphQuad init(const UniformLight& l, const float3 o)
     squad.y = ey / eyl;
     squad.z = cross(squad.x, squad.y);
 
-    // compute rectangle coords in local reference system
     float3 d = s - o;
     squad.z0 = dot(d, squad.z);
-
-    // flip ’z’ to make it point against ’Q’
-    if (squad.z0 > 0)
+    if (squad.z0 > 0.0f)
     {
-        squad.z *= -1;
-        squad.z0 *= -1;
+        squad.z *= -1.0f;
+        squad.z0 *= -1.0f;
     }
 
-    squad.z0sq = squad.z0 * squad.z0;
     squad.x0 = dot(d, squad.x);
     squad.y0 = dot(d, squad.y);
     squad.x1 = squad.x0 + exl;
     squad.y1 = squad.y0 + eyl;
-    squad.y0sq = squad.y0 * squad.y0;
-    squad.y1sq = squad.y1 * squad.y1;
 
-    // create vectors to four vertices
-    float3 v00 = { squad.x0, squad.y0, squad.z0 };
-    float3 v01 = { squad.x0, squad.y1, squad.z0 };
-    float3 v10 = { squad.x1, squad.y0, squad.z0 };
-    float3 v11 = { squad.x1, squad.y1, squad.z0 };
+    float4 nz = make_float4(-squad.y0, squad.x1, squad.y1, -squad.x0);
+    nz.x /= sqrtf(nz.x * nz.x + squad.z0 * squad.z0);
+    nz.y /= sqrtf(nz.y * nz.y + squad.z0 * squad.z0);
+    nz.z /= sqrtf(nz.z * nz.z + squad.z0 * squad.z0);
+    nz.w /= sqrtf(nz.w * nz.w + squad.z0 * squad.z0);
 
-    // compute normals to edges
-    float3 n0 = normalize(cross(v00, v10));
-    float3 n1 = normalize(cross(v10, v11));
-    float3 n2 = normalize(cross(v11, v01));
-    float3 n3 = normalize(cross(v01, v00));
-
-    // compute internal angles (gamma_i)
-    float g0 = acos(-dot(n0, n1));
-    float g1 = acos(-dot(n1, n2));
-    float g2 = acos(-dot(n2, n3));
-    float g3 = acos(-dot(n3, n0));
-
-    // compute predefined constants
-    squad.b0 = n0.z;
-    squad.b1 = n2.z;
+    float g0 = asinf(fminf(fmaxf(-nz.x * nz.y, -1.0f), 1.0f));
+    float g1 = asinf(fminf(fmaxf(-nz.y * nz.z, -1.0f), 1.0f));
+    float g2 = asinf(fminf(fmaxf(-nz.z * nz.w, -1.0f), 1.0f));
+    float g3 = asinf(fminf(fmaxf(-nz.w * nz.x, -1.0f), 1.0f));
+    squad.S = -(g0 + g1 + g2 + g3);
+    squad.g2 = g2;
+    squad.g3 = g3;
+    squad.b0 = nz.x;
+    squad.b1 = nz.z;
     squad.b0sq = squad.b0 * squad.b0;
-    squad.k = 2.0f * M_PIf - g2 - g3;
 
-    // compute solid angle from internal angles
-    squad.S = g0 + g1 - squad.k;
-
+    const float nzMinSq = fminf(fminf(nz.x * nz.x, nz.y * nz.y), fminf(nz.z * nz.z, nz.w * nz.w));
+    squad.useAreaFallback = (squad.S < 1e-5f) || (nzMinSq > 0.99999f);
     return squad;
 }
 
@@ -178,42 +166,61 @@ static __device__ float3 SphQuadSample(const SphQuad& squad, const float2 uv)
     float u = uv.x;
     float v = uv.y;
 
-    // 1. compute cu
-    float au = u * squad.S + squad.k;
-    float fu = (cosf(au) * squad.b0 - squad.b1) / sinf(au);
-    float cu = 1.0f / sqrtf(fu * fu + squad.b0sq) * (fu > 0.0f ? 1.0f : -1.0f);
-    cu = clamp(cu, -1.0f, 1.0f); // avoid NaNs
+    float au = u * squad.S + squad.g2 + squad.g3;
+    float sinAu = sinf(au);
+    float fu = (fabsf(sinAu) > 1e-8f) ? (cosf(au) * squad.b0 + squad.b1) / sinAu : 0.0f;
+    float cu = copysignf(1.0f / sqrtf(fu * fu + squad.b0sq), fu);
+    cu = clamp(cu, -1.0f, 1.0f);
 
-    // 2. compute xu
-    float xu = -(cu * squad.z0) / sqrtf(1.0f - cu * cu);
-    xu = clamp(xu, squad.x0, squad.x1); // avoid Infs
+    float xu = -(cu * squad.z0) / fmaxf(sqrtf(1.0f - cu * cu), 1e-7f);
+    xu = clamp(xu, squad.x0, squad.x1);
 
-    // 3. compute yv
-    float d = sqrtf(xu * xu + squad.z0sq);
-    float h0 = squad.y0 / sqrtf(d * d + squad.y0sq);
-    float h1 = squad.y1 / sqrtf(d * d + squad.y1sq);
+    float d2 = xu * xu + squad.z0 * squad.z0;
+    float h0 = squad.y0 / sqrtf(d2 + squad.y0 * squad.y0);
+    float h1 = squad.y1 / sqrtf(d2 + squad.y1 * squad.y1);
     float hv = h0 + v * (h1 - h0);
     float hv2 = hv * hv;
-    float eps = 1e-5f;
-    float yv = (hv < 1.0f - eps) ? (hv * d) / sqrtf(1 - hv2) : squad.y1;
+    float yv = (hv2 < 1.0f - 1e-6f) ? hv * sqrtf(d2 / (1.0f - hv2)) : squad.y1;
 
-    // 4. transform (xu, yv, z0) to world coords
     return (squad.o + xu * squad.x + yv * squad.y + squad.z0 * squad.z);
 }
 
-static __inline__ __device__ float getLightPdf(const UniformLight& l, const float3 hitPoint)
+// MIS needs only the solid angle. Keep the full SphQuad out of that path so the
+// sample basis and inverse-CDF constants do not consume registers on light hits.
+static __inline__ __device__ float rectSolidAngle(const UniformLight& l,
+                                                  const float3 o,
+                                                  bool& useAreaFallback)
 {
-    SphQuad quad = init(l, hitPoint);
-    if (quad.S <= 0.0f)
-    {
-        return 0.0f;
-    }
-    return 1.0f / quad.S;
+    const float3 ex = make_float3(l.points[1]) - make_float3(l.points[0]);
+    const float3 ey = make_float3(l.points[3]) - make_float3(l.points[0]);
+    const float exl = length(ex);
+    const float eyl = length(ey);
+    const float3 x = ex / exl;
+    const float3 y = ey / eyl;
+    const float3 z = cross(x, y);
+    const float3 d = make_float3(l.points[0]) - o;
+    const float z0 = fabsf(dot(d, z));
+    const float x0 = dot(d, x);
+    const float y0 = dot(d, y);
+
+    float4 nz = make_float4(-y0, x0 + exl, y0 + eyl, -x0);
+    nz.x /= sqrtf(nz.x * nz.x + z0 * z0);
+    nz.y /= sqrtf(nz.y * nz.y + z0 * z0);
+    nz.z /= sqrtf(nz.z * nz.z + z0 * z0);
+    nz.w /= sqrtf(nz.w * nz.w + z0 * z0);
+
+    const float g0 = asinf(fminf(fmaxf(-nz.x * nz.y, -1.0f), 1.0f));
+    const float g1 = asinf(fminf(fmaxf(-nz.y * nz.z, -1.0f), 1.0f));
+    const float g2 = asinf(fminf(fmaxf(-nz.z * nz.w, -1.0f), 1.0f));
+    const float g3 = asinf(fminf(fmaxf(-nz.w * nz.x, -1.0f), 1.0f));
+    const float S = -(g0 + g1 + g2 + g3);
+    const float nzMinSq =
+        fminf(fminf(nz.x * nz.x, nz.y * nz.y), fminf(nz.z * nz.z, nz.w * nz.w));
+    useAreaFallback = (S < 1e-5f) || (nzMinSq > 0.99999f);
+    return S;
 }
 
-// Area-to-solid-angle pdf of a point sampled uniformly on a flat light. Both the
-// rectangle and the disc reach it: fillLightData() already knows the shape, so
-// nothing here is specific to one.
+// Area-to-solid-angle pdf of a point sampled uniformly on a flat light.
 static __inline__ __device__ float getAreaLightPdf(const UniformLight& l, const float3 lightHitPoint, const float3 surfaceHitPoint)
 {
     LightSampleData lightSampleData {};
@@ -224,9 +231,6 @@ static __inline__ __device__ float getAreaLightPdf(const UniformLight& l, const 
     return lightSampleData.pdf;
 }
 
-// Whether a radiance carries any energy at all. Testing every channel instead
-// would drop a saturated light: a pure red one has two zero channels and still
-// lights the scene.
 static __inline__ __device__ bool emitsLight(const float3 radiance)
 {
     return radiance.x > 0.0f || radiance.y > 0.0f || radiance.z > 0.0f;
@@ -242,14 +246,37 @@ static __inline__ __device__ float getSphereLightPdf()
     return 1.0f / (4.0f * M_PIf);
 }
 
+static __inline__ __device__ float getRectLightPdf(const UniformLight& l,
+                                                   const float3 lightHitPoint,
+                                                   const float3 surfaceHitPoint,
+                                                   unsigned int rectLightSamplingMethod)
+{
+    if (rectLightSamplingMethod == 0)
+    {
+        return getAreaLightPdf(l, lightHitPoint, surfaceHitPoint);
+    }
+    bool useAreaFallback = false;
+    const float S = rectSolidAngle(l, surfaceHitPoint, useAreaFallback);
+    if (S <= 0.0f)
+    {
+        return 0.0f;
+    }
+    if (useAreaFallback)
+    {
+        return getAreaLightPdf(l, lightHitPoint, surfaceHitPoint);
+    }
+    return 1.0f / S;
+}
+
 static __inline__ __device__ float getLightPdf(const UniformLight& l,
                                                const float3 lightHitPoint,
-                                               const float3 surfaceHitPoint)
+                                               const float3 surfaceHitPoint,
+                                               unsigned int rectLightSamplingMethod = 0)
 {
     switch (l.type)
     {
     case LIGHT_TYPE_RECT:
-        return getAreaLightPdf(l, lightHitPoint, surfaceHitPoint);
+        return getRectLightPdf(l, lightHitPoint, surfaceHitPoint, rectLightSamplingMethod);
     case LIGHT_TYPE_DISC:
         return getAreaLightPdf(l, lightHitPoint, surfaceHitPoint);
     case LIGHT_TYPE_SPHERE:
@@ -282,9 +309,8 @@ static __inline__ __device__ LightSampleData SampleRectLight(const UniformLight&
         fillLightData(l, hitPoint, lightSampleData);
         return lightSampleData;
     }
-    if (quad.S < 1e-3f)
+    if (quad.useAreaFallback)
     {
-        // just use uniform, because rectangle too small
         lightSampleData.pointOnLight = make_float3(l.points[0]) + e1 * u.x + e2 * u.y;
         fillLightData(l, hitPoint, lightSampleData);
         lightSampleData.pdf = lightSampleData.distToLight * lightSampleData.distToLight /

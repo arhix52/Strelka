@@ -28,6 +28,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_camera_basis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_transform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_lights.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_rect_light_sampling.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_punctual_lights.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_gizmo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_camera_takeover.cpp

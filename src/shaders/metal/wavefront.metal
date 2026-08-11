@@ -1647,7 +1647,8 @@ kernel void wavefrontShade(
                 // this weight -- and the next-event estimate at that vertex has
                 // already claimed the rest. The two then sum to more than one.
                 const float3 misOrigin = rayOrigin - rayDir * p.misDistance;
-                const float lightPdf = getLightPdf(currLight, hitPoint, misOrigin) * lightSelectionPdf;
+                const float lightPdf =
+                    getLightPdf(currLight, hitPoint, misOrigin, uniforms.rectLightSamplingMethod) * lightSelectionPdf;
                 radiance += throughput * Le * misWeightBalance(p.lastBsdfPdf, lightPdf);
             }
         }
