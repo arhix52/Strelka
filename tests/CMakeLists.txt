@@ -62,4 +62,12 @@ target_link_libraries(unit_tests
         imguizmo::imguizmo
 )
 
+# scenes/validation is the asset root the skinned-bounds regression reads when
+# STRELKA_SKINNED_GLTF is unset. Compile it in so the test does not depend on
+# which directory ctest was launched from.
+target_compile_definitions(unit_tests
+    PRIVATE
+        STRELKA_TEST_ASSETS_DIR="${CMAKE_SOURCE_DIR}/scenes/validation"
+)
+
 add_test(NAME unit_tests COMMAND unit_tests)

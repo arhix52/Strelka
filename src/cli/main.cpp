@@ -4,6 +4,7 @@
 #include <cxxopts.hpp>
 #include <toml++/toml.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -44,6 +45,8 @@ int main(int argc, const char* argv[])
         ("bn-switch",    "Hybrid: spp before switching blue-noise -> Sobol", cxxopts::value<uint32_t>())
         ("capture",      "Capture one steady-state frame to a .gputrace for Xcode (as large as the scene on the device)", cxxopts::value<std::string>())
         ("camera",       "Camera index",                    cxxopts::value<int>())
+        ("animation-time", "Normalised animation time in [0,1] for every clip",
+                                                            cxxopts::value<float>())
         ("tonemap",      "Tonemap: none, reinhard, aces, filmic", cxxopts::value<std::string>())
         ("h,help",       "Print usage");
     // clang-format on
@@ -129,6 +132,10 @@ int main(int argc, const char* argv[])
     if (result.count("camera"))
     {
         cfg.cameraIndex = result["camera"].as<int>();
+    }
+    if (result.count("animation-time"))
+    {
+        cfg.animationTime = std::clamp(result["animation-time"].as<float>(), 0.0f, 1.0f);
     }
     if (result.count("bn-switch"))
     {

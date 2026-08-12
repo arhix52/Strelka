@@ -97,6 +97,11 @@ struct RenderConfig
     std::optional<glm::vec3> cameraPosition;
     std::optional<glm::vec3> cameraTarget;
     std::optional<float> cameraFov;
+    // Normalised time in every clip: 0 = start, 1 = end. Unset leaves each
+    // animation at its start. A value other than the loader's initial current
+    // is what makes the first frame dirty the skeleton and run skinning — a
+    // still at t=start never does, which is why the validation scene pins 0.5.
+    std::optional<float> animationTime;
 
     // 0=None, 1=Reinhard, 2=ACES, 3=Filmic
     uint32_t tonemapType = 2;

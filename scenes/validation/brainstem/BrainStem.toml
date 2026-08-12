@@ -1,0 +1,29 @@
+[scene]
+path = "BrainStem.glb"
+
+[output]
+path = "output/BrainStem.exr"
+width = 512
+height = 384
+
+[render]
+spp = 64
+spp_per_launch = 1
+max_depth = 4
+sampler = "sobol"
+# Mid-clip: rest pose alone never dirties the skeleton, so the skinning path
+# would not run and this scene would stop being a skinning regression.
+animation_time = 0.5
+
+[camera]
+index = 0
+position = [0.0, 1.2, 3.2]
+target = [0.0, 0.9, 0.0]
+fov = 35.0
+
+[tonemap]
+type = "aces"
+gamma = 0.0
+exposure_iso = 400.0
+exposure_fstop = 2.8
+exposure_shutter = 60.0

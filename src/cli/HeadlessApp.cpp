@@ -217,6 +217,10 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     {
         cfg.blueNoiseSwitchSpp = static_cast<uint32_t>(*v);
     }
+    if (auto v = tbl["render"]["animation_time"].value<double>())
+    {
+        cfg.animationTime = static_cast<float>(std::clamp(*v, 0.0, 1.0));
+    }
 
     if (auto v = tbl["camera"]["index"].value<int64_t>())
     {
@@ -390,7 +394,13 @@ void HeadlessApp::populateSettings()
     for (size_t i = 0; i < m_scene->getAnimations().size(); ++i)
     {
         m_settings->setAs<bool>(animationStateKey(i), false);
-        m_settings->setAs<float>(animationTimeKey(i), m_scene->getAnimations()[i].start);
+        const auto& anim = m_scene->getAnimations()[i];
+        float t = anim.start;
+        if (m_config.animationTime)
+        {
+            t = anim.start + (anim.end - anim.start) * (*m_config.animationTime);
+        }
+        m_settings->setAs<float>(animationTimeKey(i), t);
     }
 }
 
@@ -639,6 +649,16 @@ int HeadlessApp::run()
 
     std::cout << '\n'; // close the progress line before the logger writes
     STRELKA_INFO("Done: {} spp in {:.1f} s -> {}", m_config.spp, (double)totalTime.count() / 1000.0, m_config.outputPath);
+    // A skinned mesh collapsing to a point is invisible to mean brightness, so
+    // report the GPU extent whenever the scene has one. The validation smoke
+    // greps this line.
+    {
+        const float extent = m_render->skinnedGeometryExtent();
+        if (extent >= 0.0f)
+        {
+            STRELKA_INFO("Skinned geometry extent: {:.3f}", extent);
+        }
+    }
     return 0;
 }
 

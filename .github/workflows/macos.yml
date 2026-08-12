@@ -50,3 +50,16 @@ jobs:
           ./StrelkaCLI ../../scenes/validation/cornell_box/cornell_box.glb \
             -o /tmp/strelka_smoke.png -w 64 --height 48 --spp 4
           test -s /tmp/strelka_smoke.png
+
+      - name: Skinning smoke (BrainStem mid-pose)
+        working-directory: build/Release
+        run: |
+          # animation_time=0.5 is load-bearing: at t=start the skeleton is never
+          # dirtied and this would pass with skinning broken.
+          ./StrelkaCLI -c ../../scenes/validation/brainstem/BrainStem.toml \
+            -o /tmp/strelka_brainstem.png -w 128 --height 96 --spp 8 2>&1 | tee /tmp/strelka_brainstem.log
+          test -s /tmp/strelka_brainstem.png
+          # Extent is the diagonal of the skinned vertices on the GPU. A broken
+          # skinning submission collapses it toward zero; BrainStem mid-pose is
+          # a few units tall.
+          grep -E 'Skinned geometry extent: [1-9]' /tmp/strelka_brainstem.log

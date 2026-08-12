@@ -7,7 +7,9 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <limits>
+#include <string>
 
 using namespace oka;
 
@@ -320,15 +322,22 @@ TEST_CASE("Rotating the joint swings the bounds around the bind position")
 }
 
 // Synthetic fixtures pin down the maths; this one checks the same code against a
-// real exported character. Point STRELKA_SKINNED_GLTF at a skinned .gltf (for
-// instance BrainStem) to run it.
+// real exported character. The validation dataset ships BrainStem for that; an
+// explicit STRELKA_SKINNED_GLTF still wins when set.
 TEST_CASE("Skinned bounds on a real asset stay glued to the animated pose")
 {
-    const char* assetPath = std::getenv("STRELKA_SKINNED_GLTF");
-    if (assetPath == nullptr)
+    std::string assetPath;
+    if (const char* env = std::getenv("STRELKA_SKINNED_GLTF"))
     {
-        MESSAGE("STRELKA_SKINNED_GLTF not set, skipping real asset check");
-        return;
+        assetPath = env;
+    }
+    else
+    {
+        assetPath = std::string(STRELKA_TEST_ASSETS_DIR) + "/brainstem/BrainStem.glb";
+    }
+    if (!std::filesystem::exists(assetPath))
+    {
+        FAIL("skinned regression asset missing: " << assetPath);
     }
 
     Scene scene;
