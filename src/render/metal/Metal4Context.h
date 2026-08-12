@@ -131,6 +131,35 @@ public:
     MTL4::CommandBuffer* beginImmediate();
     void submitAndWait(MTL4::CommandBuffer* commandBuffer);
 
+    /// Per-frame skinning on its own allocator ring, committed without blocking
+    /// the CPU.
+    ///
+    /// The alternative -- beginImmediate() + submitAndWait() -- costs a full
+    /// submit-to-completion round trip in the middle of every animated frame
+    /// (measured at ~19 ms median on BrainStem), and leaves the GPU with nothing
+    /// queued for the duration. Consumers order behind this work by waiting on
+    /// skinEvent() at the value returned here, on whichever queue they use.
+    ///
+    /// The ring must be at least as deep as the frames the renderer keeps in
+    /// flight: beginSkin() resets the allocator for its slot, so a shallower ring
+    /// would overwrite commands the GPU is still reading.
+    MTL4::CommandBuffer* beginSkin(uint32_t frameIndex);
+    ConstantRing& skinConstants()
+    {
+        return mSkinConstants;
+    }
+    /// Commit without waiting. Returns the skinEvent() value that, once reached,
+    /// means the skinned vertices are visible to any other queue.
+    uint64_t submitSkin(MTL4::CommandBuffer* commandBuffer);
+    MTL::SharedEvent* skinEvent() const
+    {
+        return mSkinEvent;
+    }
+
+    /// Insert a wait/signal on the Metal 4 queue timeline (cross-queue sync).
+    void wait(MTL::SharedEvent* event, uint64_t value);
+    void signal(MTL::SharedEvent* event, uint64_t value);
+
     /// Frame-loop counterpart of submitAndWait's tail, split in two so the
     /// caller can commit, do other work, and block later -- which is what an
     /// interactive loop wants and a headless one does not.
@@ -183,6 +212,11 @@ private:
     MTL4::CommandBuffer* mImmediateBuffer = nullptr;
     MTL::SharedEvent* mImmediateEvent = nullptr;
     uint64_t mImmediateValue = 0;
+    std::vector<MTL4::CommandAllocator*> mSkinAllocators;
+    std::vector<MTL4::CommandBuffer*> mSkinBuffers;
+    MTL::SharedEvent* mSkinEvent = nullptr;
+    uint64_t mSkinValue = 0;
+    ConstantRing mSkinConstants;
     MTL::SharedEvent* mFrameEvent = nullptr;
     uint64_t mFrameValue = 0;
     ConstantRing mConstants;

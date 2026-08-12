@@ -191,6 +191,7 @@ public:
     void runBenchmark();
     void runJitterTest();
     void runDenoiseAudit();
+    void runPauseBlurCheck();
     void runLightAudit();
     void playAnimations(float deltaTime);
 

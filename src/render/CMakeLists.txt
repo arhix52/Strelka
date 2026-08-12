@@ -75,6 +75,9 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalScenePreparation.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalAccelStructure.h
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalAccelStructure.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/AccelBuildPath.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/Metal3AsPath.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/metal/Metal4AsPath.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalSkinning.h
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalSkinning.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/MetalFrameUniforms.h

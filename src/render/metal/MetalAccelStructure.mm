@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
+#include <functional>
 #include <map>
 #include <utility>
 #include <vector>
@@ -88,317 +89,68 @@ struct AsBuildState
     double phaseMs[(size_t)Phase::Done] = {};
 };
 
-namespace
-{
-
-MTL4::BufferRange bufferRange(MTL::Buffer* buffer, size_t offset = 0)
-{
-    if (!buffer || offset > buffer->length())
-    {
-        return { 0, 0 };
-    }
-    return { buffer->gpuAddress() + offset, buffer->length() - offset };
-}
-
-MTL::AccelerationStructureSizes accelerationStructureSizes(
-    MTL::Device* device, MTL4::AccelerationStructureDescriptor* descriptor)
-{
-    // Sizing has no Metal 4 counterpart -- the Metal 4 descriptors derive from
-    // the Metal 3 ones precisely so the device can still be asked, so this is an
-    // upcast rather than a reinterpretation.
-    return device->accelerationStructureSizes(descriptor);
-}
-
-} // namespace
-
-bool MetalAccelStructure::beginImmediate(MTL4::CommandBuffer*& commandBuffer,
-                                         MTL4::ComputeCommandEncoder*& encoder)
-{
-    if (!mMetal4 || !mMetal4->isValid())
-    {
-        STRELKA_ERROR("Metal 4 acceleration-structure build requested without a valid Metal4Context");
-        return false;
-    }
-    mMetal4->commitResidency();
-    commandBuffer = mMetal4->beginImmediate();
-    encoder = commandBuffer ? commandBuffer->computeCommandEncoder() : nullptr;
-    return encoder != nullptr;
-}
-
-MTL::AccelerationStructure* MetalAccelStructure::createAccelerationStructure(
-    MTL4::AccelerationStructureDescriptor* descriptor)
-{
-    NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
-
-    // Query for the sizes needed to store and build the acceleration structure.
-    const MTL::AccelerationStructureSizes accelSizes = accelerationStructureSizes(mDevice, descriptor);
-    // Allocate an acceleration structure large enough for this descriptor. This doesn't actually
-    // build the acceleration structure, it just allocates memory.
-    MTL::AccelerationStructure* accelerationStructure =
-        mDevice->newAccelerationStructure(accelSizes.accelerationStructureSize);
-    if (!accelerationStructure)
-    {
-        // newAccelerationStructure returns nil when the device cannot find the
-        // memory, and nothing downstream notices: the TLAS ends up null, every
-        // ray misses, and the result is a black frame that looks like a lighting
-        // problem. Say it here instead.
-        STRELKA_ERROR("Acceleration structure allocation failed: {:.2f} GB requested, "
-                      "{:.2f} GB max buffer. The scene does not fit -- lower "
-                      "render/texture/maxDimension or reduce geometry.",
-                      accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
-        pPool->release();
-        return nullptr;
-    }
-    // Allocate scratch space Metal uses to build the acceleration structure.
-    // Use MTLResourceStorageModePrivate for best performance because the sample
-    // doesn't need access to the buffer's contents.
-    MTL::Buffer* scratchBuffer =
-        mDevice->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate);
-    // Allocate a buffer for Metal to write the compacted accelerated structure's size into.
-    MTL::Buffer* compactedSizeBuffer = mDevice->newBuffer(sizeof(uint64_t), MTL::ResourceStorageModeShared);
-    mMetal4->addResident(accelerationStructure);
-    mMetal4->addResident(scratchBuffer);
-    mMetal4->addResident(compactedSizeBuffer);
-    addDescriptorResidency();
-    MTL4::CommandBuffer* commandBuffer = nullptr;
-    MTL4::ComputeCommandEncoder* commandEncoder = nullptr;
-    if (!beginImmediate(commandBuffer, commandEncoder))
-    {
-        mMetal4->removeResident(accelerationStructure);
-        mMetal4->removeResident(scratchBuffer);
-        mMetal4->removeResident(compactedSizeBuffer);
-        accelerationStructure->release();
-        scratchBuffer->release();
-        compactedSizeBuffer->release();
-        pPool->release();
-        return nullptr;
-    }
-    // Schedule the actual acceleration structure build.
-    commandEncoder->buildAccelerationStructure(accelerationStructure, descriptor, bufferRange(scratchBuffer));
-    // Compute and write the compacted acceleration structure size into the buffer. You
-    // need to already have a built accelerated structure because Metal determines the compacted
-    // size based on the final size of the acceleration structure. Compacting an acceleration
-    // structure can potentially reclaim significant amounts of memory because Metal must
-    // create the initial structure using a conservative approach.
-    commandEncoder->barrierAfterEncoderStages(MTL::StageAccelerationStructure, MTL::StageAccelerationStructure,
-                                              MTL4::VisibilityOptionDevice);
-    commandEncoder->writeCompactedAccelerationStructureSize(accelerationStructure, bufferRange(compactedSizeBuffer));
-    // End encoding and commit the command buffer so the GPU can start building the
-    // acceleration structure.
-    commandEncoder->endEncoding();
-    mMetal4->submitAndWait(commandBuffer);
-
-    // The sample waits for Metal to finish executing the command buffer so that it can
-    // read back the compacted size.
-
-    // Note: Don't wait for Metal to finish executing the command buffer if you aren't compacting
-    // the acceleration structure because doing so requires CPU/GPU synchronization. You don't have
-    // to compact acceleration structures, but it's helpful when creating large static acceleration
-    // structures, such as static scene geometry. Avoid compacting acceleration structures that
-    // you rebuild every frame because the synchronization cost may be significant.
-
-    const uint64_t compactedSize = *(uint64_t*)compactedSizeBuffer->contents();
-
-    // commandBuffer->release();
-    // commandEncoder->release();
-
-    // Allocate a smaller acceleration structure based on the returned size.
-    MTL::AccelerationStructure* compactedAccelerationStructure = mDevice->newAccelerationStructure(compactedSize);
-    if (!compactedAccelerationStructure)
-    {
-        STRELKA_ERROR("Compacted acceleration structure allocation failed: {:.2f} GB requested",
-                      compactedSize / 1e9);
-        mMetal4->removeResident(accelerationStructure);
-        mMetal4->removeResident(scratchBuffer);
-        mMetal4->removeResident(compactedSizeBuffer);
-        accelerationStructure->release();
-        scratchBuffer->release();
-        compactedSizeBuffer->release();
-        pPool->release();
-        return nullptr;
-    }
-
-    mMetal4->addResident(compactedAccelerationStructure);
-    if (!beginImmediate(commandBuffer, commandEncoder))
-    {
-        mMetal4->removeResident(compactedAccelerationStructure);
-        mMetal4->removeResident(accelerationStructure);
-        mMetal4->removeResident(scratchBuffer);
-        mMetal4->removeResident(compactedSizeBuffer);
-        compactedAccelerationStructure->release();
-        accelerationStructure->release();
-        scratchBuffer->release();
-        compactedSizeBuffer->release();
-        pPool->release();
-        return nullptr;
-    }
-
-    // Encode the command to copy and compact the acceleration structure into the
-    // smaller acceleration structure.
-    commandEncoder->copyAndCompactAccelerationStructure(accelerationStructure, compactedAccelerationStructure);
-
-    // End encoding and commit the command buffer. You don't need to wait for Metal to finish
-    // executing this command buffer as long as you synchronize any ray-intersection work
-    // to run after this command buffer completes. Dependency tracking covers a
-    // consumer on this queue; one on the Metal 4 queue waits on the event instead.
-    commandEncoder->endEncoding();
-    mMetal4->submitAndWait(commandBuffer);
-
-    // commandEncoder->release();
-    // commandBuffer->release();
-    mMetal4->removeResident(accelerationStructure);
-    mMetal4->removeResident(scratchBuffer);
-    mMetal4->removeResident(compactedSizeBuffer);
-    mMetal4->commitResidency();
-    accelerationStructure->release();
-    scratchBuffer->release();
-    compactedSizeBuffer->release();
-
-    pPool->release();
-
-    return compactedAccelerationStructure;
-}
-
-
-// Close the current group: end its encoder, commit, and drop the scratch the
-// group was using. submitAndWait owns the immediate allocator until every
-// reference is complete, so scratch can be released immediately afterwards.
-void MetalAccelStructure::flushAccelerationStructureGroup()
-{
-    if (!mAsGroupCommandBuffer)
-    {
-        return;
-    }
-    mAsGroupEncoder->endEncoding();
-    mMetal4->submitAndWait(mAsGroupCommandBuffer);
-    mAsGroupEncoder = nullptr;
-    mAsGroupCommandBuffer = nullptr;
-    for (MTL::Buffer* b : mAsGroupScratch)
-    {
-        mMetal4->removeResident(b);
-        b->release();
-    }
-    mAsGroupScratch.clear();
-    for (MTL4::AccelerationStructureDescriptor* descriptor : mAsGroupDescriptors)
-    {
-        descriptor->release();
-    }
-    mAsGroupDescriptors.clear();
-    mMetal4->commitResidency();
-    mAsGroupPending = 0;
-}
-
 static double sBlasSizesMs = 0.0, sBlasAllocMs = 0.0, sBlasScratchMs = 0.0, sBlasEncodeMs = 0.0;
 static uint32_t sBlasCount = 0;
 
-MTL::AccelerationStructure* MetalAccelStructure::createAccelerationStructureNoCompact(
-    MTL4::AccelerationStructureDescriptor* descriptor)
+MTL::AccelerationStructure* MetalAccelStructure::createAccelerationStructure(
+    MTL::AccelerationStructureDescriptor* descriptor)
 {
-    // The usage flags belong to the caller. This used to force Refit on
-    // everything it was handed, which silently gave static geometry a tree built
-    // to survive a vertex update -- a worse tree to traverse -- for nothing.
+    addDescriptorResidency();
+    if (mPath)
+    {
+        mPath->commitResidency();
+    }
+    return mPath ? mPath->createCompacted(descriptor) : nullptr;
+}
+
+void MetalAccelStructure::flushAccelerationStructureGroup()
+{
+    if (mPath)
+    {
+        mPath->flushBuildGroup();
+        if (mMetal4)
+        {
+            mMetal4->commitResidency();
+        }
+    }
+}
+
+MTL::AccelerationStructure* MetalAccelStructure::createAccelerationStructureNoCompact(
+    MTL::AccelerationStructureDescriptor* descriptor)
+{
     const auto tSizes = std::chrono::steady_clock::now();
-    const MTL::AccelerationStructureSizes accelSizes = accelerationStructureSizes(mDevice, descriptor);
+    addDescriptorResidency();
+    if (mPath)
+    {
+        mPath->commitResidency();
+    }
     const auto tAlloc = std::chrono::steady_clock::now();
     MTL::AccelerationStructure* accelerationStructure =
-        mDevice->newAccelerationStructure(accelSizes.accelerationStructureSize);
-    const auto tScratch = std::chrono::steady_clock::now();
-    if (!accelerationStructure)
-    {
-        // newAccelerationStructure returns nil when the device cannot find the
-        // memory, and nothing downstream notices: the TLAS ends up null, every
-        // ray misses, and the result is a black frame that looks like a lighting
-        // problem. Say it here instead.
-        STRELKA_ERROR("Acceleration structure allocation failed: {:.2f} GB requested, "
-                      "{:.2f} GB max buffer. The scene does not fit -- lower "
-                      "render/texture/maxDimension or reduce geometry.",
-                      accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
-        return nullptr;
-    }
-    MTL::Buffer* scratchBuffer =
-        mDevice->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate);
-    const auto tEncode = std::chrono::steady_clock::now();
-
-    // Builds are grouped: STRELKA_AS_GROUP structures share one encoder, each
-    // with its own scratch, and the group is committed together. Apple's guidance
-    // is that several builds in *one encoder* run in parallel on this hardware,
-    // which needs a scratch buffer per build rather than one reused -- two builds
-    // sharing scratch is a data race, not a slow path. Group size 1 is the
-    // one-per-command-buffer arrangement this replaces.
-    static const uint32_t kGroupSize = std::max(1u, envUint("STRELKA_AS_GROUP", 1));
-
-    mMetal4->addResident(accelerationStructure);
-    mMetal4->addResident(scratchBuffer);
-    addDescriptorResidency();
-    if (!mAsGroupCommandBuffer && !beginImmediate(mAsGroupCommandBuffer, mAsGroupEncoder))
-    {
-        // Both were made resident a few lines up. Freeing them while the
-        // residency set still names them leaves it pointing at dead
-        // allocations, which is a fault at the next commit rather than here.
-        mMetal4->removeResident(accelerationStructure);
-        mMetal4->removeResident(scratchBuffer);
-        accelerationStructure->release();
-        scratchBuffer->release();
-        return nullptr;
-    }
-    mAsGroupEncoder->buildAccelerationStructure(accelerationStructure, descriptor, bufferRange(scratchBuffer));
-    // Held until the group is committed: the GPU reads it for the whole build,
-    // and dropping the last reference before commit is what a race would look
-    // like if Metal did not retain committed resources.
-    mAsGroupScratch.push_back(scratchBuffer);
-    mAsGroupDescriptors.push_back(descriptor->retain());
-    if (++mAsGroupPending >= kGroupSize)
-    {
-        flushAccelerationStructureGroup();
-    }
+        mPath ? mPath->createNoCompact(descriptor) : nullptr;
+    const auto tEnd = std::chrono::steady_clock::now();
+    if (accelerationStructure)
     {
         using ms = std::chrono::duration<double, std::milli>;
-        const auto tEnd = std::chrono::steady_clock::now();
-        sBlasSizesMs += ms(tAlloc - tSizes).count();
-        sBlasAllocMs += ms(tScratch - tAlloc).count();
-        sBlasScratchMs += ms(tEncode - tScratch).count();
-        sBlasEncodeMs += ms(tEnd - tEncode).count();
+        // Sizes/alloc/scratch are inside the path; keep the encode bucket for the
+        // existing load log so totals still add up roughly.
+        sBlasSizesMs += 0.0;
+        sBlasAllocMs += 0.0;
+        sBlasScratchMs += 0.0;
+        sBlasEncodeMs += ms(tEnd - tAlloc).count();
         ++sBlasCount;
+        (void)tSizes;
     }
     return accelerationStructure;
 }
 
-MTL4::AccelerationStructureTriangleGeometryDescriptor* MetalAccelStructure::createStaticGeometryDescriptor(
-    const oka::Mesh& sceneMesh, MTL::Buffer* perPrimitiveBuffer, uint32_t triangleCount)
+MTL::AccelerationStructureUsage MetalAccelStructure::tlasUsage() const
 {
-    auto* geomDescriptor = MTL4::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
-
-    geomDescriptor->setVertexBuffer(
-        bufferRange(mGeometry->vertexBuffer(), sceneMesh.mVbOffset * sizeof(Scene::Vertex)));
-    geomDescriptor->setVertexFormat(MTL::AttributeFormatFloat3);
-    geomDescriptor->setVertexStride(sizeof(Scene::Vertex));
-    geomDescriptor->setIndexBuffer(bufferRange(mGeometry->indexBuffer(), sceneMesh.mIndex * sizeof(uint32_t)));
-    geomDescriptor->setIndexType(MTL::IndexTypeUInt32);
-    geomDescriptor->setTriangleCount(triangleCount);
-    if (perPrimitiveBuffer)
-    {
-        geomDescriptor->setPrimitiveDataBuffer(bufferRange(perPrimitiveBuffer));
-        geomDescriptor->setPrimitiveDataElementSize(sizeof(Triangle));
-        geomDescriptor->setPrimitiveDataStride(sizeof(Triangle));
-    }
-
-    return geomDescriptor;
+    static const uint32_t kTlasUsage = envUint("STRELKA_TLAS_USAGE", 3);
+    return ((kTlasUsage & 1u) ? MTL::AccelerationStructureUsageRefit : MTL::AccelerationStructureUsageNone) |
+           ((kTlasUsage & 2u) ? MTL::AccelerationStructureUsagePreferFastIntersection
+                              : MTL::AccelerationStructureUsageNone);
 }
 
-// Build one acceleration structure covering every listed instance's mesh as a
-// separate geometry, and record the per-geometry lookup entries.
-// Metal 4's flag asking the builder to trade build time and structure size for
-// traversal speed. A separate bit from Refit, so it composes with the one this
-// renderer already needs for skinning.
-//
-// On by default because it measured as a free 4.1% on the pine forest: 48.94 ms
-// against 46.92 (n=8 each, two mirrored ABBA blocks to cancel thermal drift,
-// t=3.14), with the image unchanged and the structures the same 5.46 GB -- the
-// concern that a scene this close to the buffer limit could not afford it did
-// not materialise. NVIDIA report the same order for PREFER_FAST_TRACE.
-//
-// The escape hatch is here because that is one scene on one driver, and the
-// flag is exactly the kind of hint whose sign can change with either.
 static MTL::AccelerationStructureUsage blasExtraUsage()
 {
     static const bool disabled = envFlag("STRELKA_NO_PREFER_FAST_INTERSECTION");
@@ -426,38 +178,29 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
         const oka::Mesh& mesh = meshes[meshId];
         MetalGeometry::Mesh* meshData = mGeometry->meshes()[meshId];
 
-        // Opaque unless this geometry's own material has a cutout. Leaving the
-        // instance flag alone lets this decide, and traversal then resolves a
-        // trunk or a rock without ever leaving the ray tracing unit.
-        // STRELKA_ALL_GEOM_OPAQUE=1 forces every geometry opaque -- a diagnostic
-        // for whether the alpha test is running at all, not a rendering mode.
         static const bool forceAllOpaque = envFlag("STRELKA_ALL_GEOM_OPAQUE");
         const bool isCutout = !forceAllOpaque && inst.mMaterialId < mMaterials->isCutout().size() &&
                               mMaterials->isCutout()[inst.mMaterialId] != 0;
 
-        MTL4::AccelerationStructureGeometryDescriptor* geom = nullptr;
+        NS::Object* geom = nullptr;
         if (skeletal && mBuildMotionBlas)
         {
-            geom = createMotionGeometryDescriptor(mesh, meshData->mPerPrimitiveBuffer, meshData->mTriangleCount,
-                                                  blas.mMotionVertexRangeBuffers);
+            geom = mPath->makeMotionTriangleGeometry(mDevice, mGeometry, mesh, meshData->mPerPrimitiveBuffer,
+                                                     meshData->mTriangleCount, blas.mMotionVertexRangeBuffers);
         }
         else
         {
-            geom = createStaticGeometryDescriptor(mesh, meshData->mPerPrimitiveBuffer, meshData->mTriangleCount);
+            geom = mPath->makeTriangleGeometry(mGeometry, mesh, meshData->mPerPrimitiveBuffer,
+                                               meshData->mTriangleCount);
         }
-        // STRELKA_NO_SET_OPAQUE=1 leaves the descriptor's own default in place,
-        // which is what the code did before this flag existed -- the control for
-        // telling "the alpha test changed" apart from "the alpha test started".
         static const bool leaveDefault = envFlag("STRELKA_NO_SET_OPAQUE");
         if (!leaveDefault)
         {
-            geom->setOpaque(!isCutout);
+            mPath->setGeometryOpaque(geom, !isCutout);
         }
         (isCutout ? mCutoutGeometryCount : mOpaqueGeometryCount)++;
         geomDescriptors.push_back(geom);
 
-        // The geometry index within this BLAS is the position in this list, so
-        // the material of the instance that contributed it lands in the right slot.
         GeometryEntry entry{};
         entry.vbOffset = mesh.mVbOffset;
         entry.indexOffset = mesh.mIndex;
@@ -466,23 +209,13 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
     }
 
     NS::Array* geomArray = NS::Array::array(geomDescriptors.data(), geomDescriptors.size());
-    MTL4::PrimitiveAccelerationStructureDescriptor* primDescriptor =
-        MTL4::PrimitiveAccelerationStructureDescriptor::alloc()->init();
-    primDescriptor->setGeometryDescriptors(geomArray);
+    MTL::AccelerationStructureDescriptor* primDescriptor = mPath->makePrimitiveDescriptor(
+        geomArray, skeletal, skeletal && mBuildMotionBlas,
+        MTL::AccelerationStructureUsageRefit | blasExtraUsage());
 
     if (skeletal)
     {
-        if (mBuildMotionBlas)
-        {
-            primDescriptor->setMotionKeyframeCount(2);
-            primDescriptor->setMotionStartTime(0.0f);
-            primDescriptor->setMotionEndTime(1.0f);
-            primDescriptor->setMotionStartBorderMode(MTL::MotionBorderModeClamp);
-            primDescriptor->setMotionEndBorderMode(MTL::MotionBorderModeClamp);
-        }
-        primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit | blasExtraUsage());
-
-        const MTL::AccelerationStructureSizes sizes = accelerationStructureSizes(mDevice, primDescriptor);
+        const MTL::AccelerationStructureSizes sizes = mPath->sizes(primDescriptor);
         blas.mRefitScratchSize = sizes.refitScratchBufferSize;
         blas.mBuildScratchSize = sizes.buildScratchBufferSize;
         ensureScratchBuffer(blas.mScratch, std::max(blas.mBuildScratchSize, blas.mRefitScratchSize));
@@ -492,22 +225,6 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
     }
     else
     {
-        // Refit even though nothing here is ever refitted, and no compaction.
-        //
-        // Both of those are backwards from what the flags suggest, and both are
-        // measured. Refit is meant to trade tree quality for the ability to
-        // update in place; on this driver it also halves what the builder
-        // allocates -- 4.80 GB of structures against 8.80 without, which on a
-        // 9.53 GB buffer limit is the difference between fitting and not -- and
-        // the result traverses no slower.
-        //
-        // Compaction is a loss on every axis here. It needs a
-        // round trip per structure to read the compacted size back, and with a
-        // hundred and thirty of them that was 4.9 seconds of a 13.8 second load.
-        // It did not even save memory: 4.80 GB of acceleration structures
-        // without it against 4.97 GB with. And the uncompacted trees traverse
-        // faster -- 27.9 s against 29.8 for 128 spp of the pine forest.
-        primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit | blasExtraUsage());
         blas.mAs = createAccelerationStructureNoCompact(primDescriptor);
         primDescriptor->release();
     }
@@ -532,37 +249,16 @@ size_t MetalAccelStructure::buildCurveBlas(uint32_t sceneInstanceId)
 {
     const oka::Instance& inst = mScene->getInstances()[sceneInstanceId];
     const uint32_t curveId = inst.mCurveId;
-    if (curveId >= mGeometry->curveRanges().size() || mGeometry->curveRanges()[curveId].segmentCount == 0 || !mGeometry->curvePointBuffer())
+    if (curveId >= mGeometry->curveRanges().size() || mGeometry->curveRanges()[curveId].segmentCount == 0 ||
+        !mGeometry->curvePointBuffer())
     {
         return (size_t)-1;
     }
     const MetalGeometry::CurveRange& range = mGeometry->curveRanges()[curveId];
     const oka::Curve& curve = mScene->getCurves()[curveId];
 
-    auto* geom = MTL4::AccelerationStructureCurveGeometryDescriptor::alloc()->init();
-    geom->setControlPointBuffer(bufferRange(mGeometry->curvePointBuffer()));
-    geom->setControlPointCount(mScene->getCurvesPoint().size());
-    geom->setControlPointFormat(MTL::AttributeFormatFloat3);
-    geom->setControlPointStride(sizeof(glm::float3));
-    geom->setRadiusBuffer(bufferRange(mGeometry->curveRadiusBuffer()));
-    geom->setRadiusFormat(MTL::AttributeFormatFloat);
-    geom->setRadiusStride(sizeof(float));
-    geom->setIndexBuffer(
-        bufferRange(mGeometry->curveSegmentBuffer(), range.segmentStart * sizeof(uint32_t)));
-    geom->setIndexType(MTL::IndexTypeUInt32);
-    geom->setSegmentCount(range.segmentCount);
-    geom->setSegmentControlPointCount(range.controlPointsPerSegment);
-    geom->setCurveType(MTL::CurveTypeRound);
-    geom->setCurveBasis(curve.mType == oka::Curve::Type::eLinear ? MTL::CurveBasisLinear
-                                                                 : MTL::CurveBasisBSpline);
-    // Spherical caps on a linear basis, so consecutive segments of one strand
-    // join without a notch at every control point. A B-spline is already
-    // continuous there and takes disks at the two real ends.
-    geom->setCurveEndCaps(curve.mType == oka::Curve::Type::eLinear ? MTL::CurveEndCapsSphere
-                                                                   : MTL::CurveEndCapsDisk);
-    // Hair has no alpha cutout, and leaving it non-opaque would send every curve
-    // hit through an intersection function that does not exist for curves.
-    geom->setOpaque(true);
+    NS::Object* geom =
+        mPath->makeCurveGeometry(mGeometry, curve, range, mScene->getCurvesPoint().size());
 
     Blas blas;
     blas.mIsSkeletal = false;
@@ -577,10 +273,9 @@ size_t MetalAccelStructure::buildCurveBlas(uint32_t sceneInstanceId)
     mGeometry->geometryEntries().push_back(entry);
 
     const NS::Object* geoms[] = { geom };
-    MTL4::PrimitiveAccelerationStructureDescriptor* primDescriptor =
-        MTL4::PrimitiveAccelerationStructureDescriptor::alloc()->init();
-    primDescriptor->setGeometryDescriptors(NS::Array::array(geoms, 1));
-    primDescriptor->setUsage(MTL::AccelerationStructureUsageRefit | blasExtraUsage());
+    MTL::AccelerationStructureDescriptor* primDescriptor = mPath->makePrimitiveDescriptor(
+        NS::Array::array(geoms, 1), false, false,
+        MTL::AccelerationStructureUsageRefit | blasExtraUsage());
     blas.mAs = createAccelerationStructureNoCompact(primDescriptor);
     primDescriptor->release();
     geom->release();
@@ -598,14 +293,11 @@ size_t MetalAccelStructure::buildCurveBlas(uint32_t sceneInstanceId)
 // the last frame's command buffers, hence the drain.
 void MetalAccelStructure::rebuild()
 {
-    // An empty immediate submission is ordered after every prior Metal 4 frame
-    // and submitAndWait does not return until that point has completed.
-    MTL4::CommandBuffer* drain = nullptr;
-    MTL4::ComputeCommandEncoder* drainEncoder = nullptr;
-    if (beginImmediate(drain, drainEncoder))
+    // Drain in-flight builds on whichever queue the path uses so structures
+    // about to be released are no longer referenced by prior command buffers.
+    if (mPath)
     {
-        drainEncoder->endEncoding();
-        mMetal4->submitAndWait(drain);
+        mPath->drain();
     }
 
     auto safeRelease = [](auto*& p) {
@@ -1124,32 +816,10 @@ bool MetalAccelStructure::step(double budgetMs)
     // Every BLAS must be committed before the TLAS that references them is
     // encoded, so close whatever group the last one landed in.
     flushAccelerationStructureGroup();
-    mTlasDescriptor = MTL4::InstanceAccelerationStructureDescriptor::alloc()->init();
-    MTL4::InstanceAccelerationStructureDescriptor* accelDescriptor = mTlasDescriptor;
-    accelDescriptor->setInstanceCount(mEmittedInstances.size());
-    accelDescriptor->setInstanceDescriptorBuffer(bufferRange(mInstanceBuffer));
-    accelDescriptor->setInstanceDescriptorType(
-        MTL::AccelerationStructureInstanceDescriptorTypeIndirect);
-    accelDescriptor->setInstanceDescriptorStride(
-        sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor));
-    accelDescriptor->setInstanceTransformationMatrixLayout(MTL::MatrixLayoutColumnMajor);
-    // The top level was built with no usage flags at all, which cost two things.
-    // Refit is one of them: rebuildAccelerationStructures refits this structure
-    // when an animation moves instances, and refitting one not built to be
-    // refittable is undefined -- canRefit checks the instance count and the size
-    // and never asked what it was built as. The other is that every ray goes
-    // through this structure and a million instances of it, so it wants the same
-    // fast-intersection preference the bottom level already gets.
-    //
-    // STRELKA_TLAS_USAGE selects them for measurement: 1 = Refit, 2 = prefer fast
-    // intersection, 3 = both.
-    static const uint32_t kTlasUsage = envUint("STRELKA_TLAS_USAGE", 3);
-    accelDescriptor->setUsage(
-        ((kTlasUsage & 1u) ? MTL::AccelerationStructureUsageRefit : MTL::AccelerationStructureUsageNone) |
-        ((kTlasUsage & 2u) ? MTL::AccelerationStructureUsagePreferFastIntersection
-                           : MTL::AccelerationStructureUsageNone));
+    mTlasDescriptor =
+        mPath->makeInstanceDescriptor(mInstanceBuffer, mEmittedInstances.size(), tlasUsage());
 
-    mInstanceAccelerationStructure = createAccelerationStructure(accelDescriptor);
+    mInstanceAccelerationStructure = createAccelerationStructure(mTlasDescriptor);
     if (!mInstanceAccelerationStructure)
     {
         STRELKA_ERROR("Top-level acceleration structure could not be built; every ray will miss "
@@ -1202,43 +872,6 @@ STRELKA_INFO("BLAS build CPU: sizes {:.0f} ms, alloc {:.0f} ms, scratch {:.0f} m
     return finish(true);
 }
 
-MTL4::AccelerationStructureMotionTriangleGeometryDescriptor* MetalAccelStructure::createMotionGeometryDescriptor(
-    const oka::Mesh& sceneMesh,
-    MTL::Buffer* perPrimitiveBuffer,
-    uint32_t triangleCount,
-    std::vector<MTL::Buffer*>& motionVertexRangeBuffers)
-{
-    auto* geomDescriptor =
-        MTL4::AccelerationStructureMotionTriangleGeometryDescriptor::alloc()->init();
-
-    // Metal 4 takes a GPU range containing the keyframe ranges, not an
-    // Objective-C array. The descriptor keeps only that address, so the shared
-    // buffer must live for as long as a skeletal BLAS can be rebuilt.
-    MTL::Buffer* rangesBuffer =
-        mDevice->newBuffer(2 * sizeof(MTL4::BufferRange), MTL::ResourceStorageModeShared);
-    auto* ranges = static_cast<MTL4::BufferRange*>(rangesBuffer->contents());
-    const size_t vertexOffset = sceneMesh.mVbOffset * sizeof(Scene::Vertex);
-    ranges[0] = bufferRange(mGeometry->prevVertexBuffer(), vertexOffset);
-    ranges[1] = bufferRange(mGeometry->vertexBuffer(), vertexOffset);
-    geomDescriptor->setVertexBuffers(bufferRange(rangesBuffer));
-    geomDescriptor->setVertexFormat(MTL::AttributeFormatFloat3);
-    motionVertexRangeBuffers.push_back(rangesBuffer);
-    mMetal4->addResident(rangesBuffer);
-    geomDescriptor->setVertexStride(sizeof(Scene::Vertex));
-
-    geomDescriptor->setIndexBuffer(bufferRange(mGeometry->indexBuffer(), sceneMesh.mIndex * sizeof(uint32_t)));
-    geomDescriptor->setIndexType(MTL::IndexTypeUInt32);
-    geomDescriptor->setTriangleCount(triangleCount);
-    if (perPrimitiveBuffer)
-    {
-        geomDescriptor->setPrimitiveDataBuffer(bufferRange(perPrimitiveBuffer));
-        geomDescriptor->setPrimitiveDataElementSize(sizeof(Triangle));
-        geomDescriptor->setPrimitiveDataStride(sizeof(Triangle));
-    }
-
-    return geomDescriptor;
-}
-
 void MetalAccelStructure::ensureScratchBuffer(MTL::Buffer*& buffer, size_t requiredSize)
 {
     if (requiredSize == 0)
@@ -1247,39 +880,34 @@ void MetalAccelStructure::ensureScratchBuffer(MTL::Buffer*& buffer, size_t requi
         return;
     if (buffer)
     {
-        mMetal4->removeResident(buffer);
+        if (mPath)
+        {
+            mPath->removeResident(buffer);
+        }
+        if (mMetal4)
+        {
+            mMetal4->removeResident(buffer);
+        }
         buffer->release();
     }
     buffer = mDevice->newBuffer(requiredSize, MTL::ResourceStorageModePrivate);
-    mMetal4->addResident(buffer);
+    if (mPath)
+    {
+        mPath->addResident(buffer);
+    }
+    if (mMetal4)
+    {
+        mMetal4->addResident(buffer);
+    }
 }
 
-void MetalAccelStructure::updateSkeletalBLAS()
+void MetalAccelStructure::encodeSkeletalUpdates()
 {
-    MTL4::CommandBuffer* commandBuffer = nullptr;
-    MTL4::ComputeCommandEncoder* commandEncoder = nullptr;
-    if (!beginImmediate(commandBuffer, commandEncoder))
+    if (!mPath)
     {
         return;
     }
-    encodeSkeletalBLAS(commandEncoder);
-    commandEncoder->endEncoding();
-    mMetal4->submitAndWait(commandBuffer);
-}
-
-void MetalAccelStructure::encodeSkeletalBLAS(MTL4::ComputeCommandEncoder* commandEncoder)
-{
-    if (!commandEncoder)
-    {
-        return;
-    }
-
-    // Skinning may have been encoded earlier on this queue. Metal 4 does no
-    // implicit hazard tracking, so make those vertex writes visible to the AS
-    // builder before it reads them.
-    commandEncoder->barrierAfterEncoderStages(MTL::StageDispatch | MTL::StageBlit,
-                                              MTL::StageAccelerationStructure,
-                                              MTL4::VisibilityOptionDevice);
+    mPath->barrierAfterSkinning();
 
     const size_t blasCount = mBlasList.size();
     size_t rebuiltThisFrame = 0;
@@ -1288,42 +916,140 @@ void MetalAccelStructure::encodeSkeletalBLAS(MTL4::ComputeCommandEncoder* comman
     {
         Blas& blas = mBlasList[mi];
         if (!blas.mIsSkeletal || !blas.mDescriptor)
+        {
             continue;
+        }
 
-        // The descriptor and its scratch requirements were computed once when the
-        // structure was created: they only name buffers, offsets and triangle
-        // counts, none of which change while the pose does. Rebuilding them per
-        // frame meant a pile of Objective-C allocations plus an
-        // accelerationStructureSizes() driver query describing geometry that
-        // never changes shape, only contents.
-        // The cap only exists so a scene with very many skeletal structures
-        // cannot hitch on one frame; anything it skips is refitted and rebuilt
-        // on the next.
         const bool rebuild = rebuiltThisFrame < kMaxBlasRebuildsPerFrame && mi >= mNextBlasRebuildIndex;
         if (rebuild)
         {
-            // A rebuild needs build scratch, which is the larger of the two.
             ensureScratchBuffer(blas.mScratch, std::max(blas.mBuildScratchSize, blas.mRefitScratchSize));
-            commandEncoder->buildAccelerationStructure(blas.mAs, blas.mDescriptor, bufferRange(blas.mScratch));
+            mPath->build(blas.mAs, blas.mDescriptor, blas.mScratch);
             ++rebuiltThisFrame;
             mNextBlasRebuildIndex = mi + 1;
         }
         else
         {
             ensureScratchBuffer(blas.mScratch, blas.mRefitScratchSize);
-            commandEncoder->refitAccelerationStructure(blas.mAs, blas.mDescriptor, blas.mAs,
-                                                        bufferRange(blas.mScratch));
+            mPath->refit(blas.mAs, blas.mDescriptor, blas.mScratch);
         }
     }
 
-    // Under the cap means everything eligible was covered, so start again from
-    // the top rather than from one past the last skeletal structure — which may
-    // be well short of blasCount when the scene also has static ones.
     if (rebuiltThisFrame < kMaxBlasRebuildsPerFrame)
     {
         mNextBlasRebuildIndex = 0;
     }
+}
 
+void MetalAccelStructure::encodeTlasUpdates()
+{
+    if (!mPath || !mTlasDescriptor)
+    {
+        return;
+    }
+
+    ++mTlasEncodeCount;
+    releaseRetiredInstanceStructures(kMaxFramesInFlight);
+
+    const MTL::AccelerationStructureSizes sizes = mPath->sizes(mTlasDescriptor);
+    const bool canRefit = mInstanceAccelerationStructure != nullptr &&
+                          mTlasInstanceCount == mEmittedInstances.size() &&
+                          mInstanceAccelerationStructure->size() >= sizes.accelerationStructureSize;
+
+    mPath->barrierBeforeTlas();
+    if (canRefit)
+    {
+        ensureScratchBuffer(mTlasScratchBuffer, sizes.refitScratchBufferSize);
+        mPath->refit(mInstanceAccelerationStructure, mTlasDescriptor, mTlasScratchBuffer);
+    }
+    else
+    {
+        if (mInstanceAccelerationStructure)
+        {
+            mRetiredInstanceStructures.emplace_back(mInstanceAccelerationStructure, mTlasEncodeCount);
+            mInstanceAccelerationStructure = nullptr;
+        }
+        const MTL::AccelerationStructureSizes buildSizes = mPath->sizes(mTlasDescriptor);
+        mInstanceAccelerationStructure = mDevice->newAccelerationStructure(buildSizes.accelerationStructureSize);
+        ensureScratchBuffer(mTlasScratchBuffer, buildSizes.buildScratchBufferSize);
+        if (mMetal4)
+        {
+            mMetal4->addResident(mInstanceAccelerationStructure);
+        }
+        mPath->addResident(mInstanceAccelerationStructure);
+        mPath->build(mInstanceAccelerationStructure, mTlasDescriptor, mTlasScratchBuffer);
+        mTlasInstanceCount = mEmittedInstances.size();
+    }
+
+    mPath->barrierAfterTlasBeforeDispatch();
+}
+
+void MetalAccelStructure::updateSkeletalBLAS()
+{
+    AsFrameUpdate update;
+    update.skeletal = true;
+    if (inlineWithTracer())
+    {
+        if (!mMetal4 || !mMetal4->isValid())
+        {
+            return;
+        }
+        mMetal4->commitResidency();
+        MTL4::CommandBuffer* commandBuffer = mMetal4->beginImmediate();
+        MTL4::ComputeCommandEncoder* encoder =
+            commandBuffer ? commandBuffer->computeCommandEncoder() : nullptr;
+        if (!encoder)
+        {
+            return;
+        }
+        encodeInline(encoder, update);
+        encoder->endEncoding();
+        mMetal4->submitAndWait(commandBuffer);
+    }
+    else
+    {
+        submitSide(update);
+        if (mPath && mPath->readyEvent())
+        {
+            mPath->readyEvent()->waitUntilSignaledValue(mPath->readyValue(), UINT64_MAX);
+        }
+    }
+}
+
+void MetalAccelStructure::encodeInline(MTL4::ComputeCommandEncoder* encoder, const AsFrameUpdate& update)
+{
+    if (!mPath || !mPath->inlineWithTracer() || !encoder)
+    {
+        return;
+    }
+    mPath->beginInline(encoder);
+    if (update.skeletal)
+    {
+        encodeSkeletalUpdates();
+    }
+    if (update.tlas)
+    {
+        encodeTlasUpdates();
+    }
+    mPath->endInline();
+}
+
+void MetalAccelStructure::submitSide(const AsFrameUpdate& update)
+{
+    if (!mPath || mPath->inlineWithTracer())
+    {
+        return;
+    }
+    mPath->submitSide(update, [this, update]() {
+        if (update.skeletal)
+        {
+            encodeSkeletalUpdates();
+        }
+        if (update.tlas)
+        {
+            encodeTlasUpdates();
+        }
+    });
 }
 
 void MetalAccelStructure::updateInstanceTransforms()
@@ -1346,9 +1072,9 @@ void MetalAccelStructure::updateInstanceTransforms()
     }
     writeInstanceTransforms(mInstanceBuffer);
     mInstanceTransformsChanged = true;
-    if (mTlasDescriptor)
+    if (mTlasDescriptor && mPath)
     {
-        mTlasDescriptor->setInstanceDescriptorBuffer(bufferRange(mInstanceBuffer));
+        mPath->setInstanceDescriptorBuffer(mTlasDescriptor, mInstanceBuffer);
     }
 }
 
@@ -1378,79 +1104,35 @@ void MetalAccelStructure::writeInstanceTransforms(MTL::Buffer* buffer)
 void MetalAccelStructure::rebuildTLAS()
 {
     updateInstanceTransforms();
-    MTL4::CommandBuffer* commandBuffer = nullptr;
-    MTL4::ComputeCommandEncoder* commandEncoder = nullptr;
-    if (!beginImmediate(commandBuffer, commandEncoder))
+    AsFrameUpdate update;
+    update.tlas = true;
+    if (inlineWithTracer())
     {
-        return;
-    }
-    encodeTLAS(commandEncoder);
-    commandEncoder->endEncoding();
-    mMetal4->submitAndWait(commandBuffer);
-}
-
-void MetalAccelStructure::encodeTLAS(MTL4::ComputeCommandEncoder* commandEncoder)
-{
-    if (!commandEncoder)
-    {
-        return;
-    }
-
-    ++mTlasEncodeCount;
-    releaseRetiredInstanceStructures(kMaxFramesInFlight);
-
-    MTL4::InstanceAccelerationStructureDescriptor* accelDescriptor = mTlasDescriptor;
-    if (!accelDescriptor)
-    {
-        return;
-    }
-
-    // Only the instance transforms change while an animation plays — the set of
-    // instances and the BLAS list are fixed. Refitting in place avoids allocating
-    // (and freeing) a whole acceleration structure plus a scratch buffer on every
-    // single frame, which is what the previous full rebuild did.
-    const MTL::AccelerationStructureSizes sizes = accelerationStructureSizes(mDevice, accelDescriptor);
-    const bool canRefit = mInstanceAccelerationStructure != nullptr &&
-                          mTlasInstanceCount == mEmittedInstances.size() &&
-                          mInstanceAccelerationStructure->size() >= sizes.accelerationStructureSize;
-
-    if (canRefit)
-    {
-        ensureScratchBuffer(mTlasScratchBuffer, sizes.refitScratchBufferSize);
-        // A TLAS reads every BLAS. This also orders it after skeletal builds
-        // encoded immediately before this call in the same encoder.
-        commandEncoder->barrierAfterEncoderStages(MTL::StageAccelerationStructure,
-                                                  MTL::StageAccelerationStructure,
-                                                  MTL4::VisibilityOptionDevice);
-        commandEncoder->refitAccelerationStructure(
-            mInstanceAccelerationStructure, accelDescriptor, mInstanceAccelerationStructure,
-            bufferRange(mTlasScratchBuffer));
+        if (!mMetal4 || !mMetal4->isValid())
+        {
+            return;
+        }
+        mMetal4->commitResidency();
+        MTL4::CommandBuffer* commandBuffer = mMetal4->beginImmediate();
+        MTL4::ComputeCommandEncoder* encoder =
+            commandBuffer ? commandBuffer->computeCommandEncoder() : nullptr;
+        if (!encoder)
+        {
+            return;
+        }
+        encodeInline(encoder, update);
+        encoder->endEncoding();
+        mMetal4->submitAndWait(commandBuffer);
     }
     else
     {
-        if (mInstanceAccelerationStructure)
+        submitSide(update);
+        if (mPath && mPath->readyEvent())
         {
-            mRetiredInstanceStructures.emplace_back(mInstanceAccelerationStructure, mTlasEncodeCount);
-            mInstanceAccelerationStructure = nullptr;
+            mPath->readyEvent()->waitUntilSignaledValue(mPath->readyValue(), UINT64_MAX);
         }
-        const MTL::AccelerationStructureSizes buildSizes = accelerationStructureSizes(mDevice, accelDescriptor);
-        mInstanceAccelerationStructure = mDevice->newAccelerationStructure(buildSizes.accelerationStructureSize);
-        ensureScratchBuffer(mTlasScratchBuffer, buildSizes.buildScratchBufferSize);
-        mMetal4->addResident(mInstanceAccelerationStructure);
-        commandEncoder->barrierAfterEncoderStages(MTL::StageAccelerationStructure,
-                                                  MTL::StageAccelerationStructure,
-                                                  MTL4::VisibilityOptionDevice);
-        commandEncoder->buildAccelerationStructure(mInstanceAccelerationStructure, accelDescriptor,
-                                                   bufferRange(mTlasScratchBuffer));
-        mTlasInstanceCount = mEmittedInstances.size();
     }
-
-    // Traversal is a dispatch stage in the wavefront kernels.
-    commandEncoder->barrierAfterEncoderStages(MTL::StageAccelerationStructure, MTL::StageDispatch,
-                                              MTL4::VisibilityOptionDevice);
 }
-
-
 
 MetalAccelStructure::~MetalAccelStructure()
 {
@@ -1458,16 +1140,30 @@ MetalAccelStructure::~MetalAccelStructure()
 }
 
 void MetalAccelStructure::init(MTL::Device* device,
+                               MTL::CommandQueue* queue,
                                Metal4Context* metal4,
                                MetalGeometry* geometry,
                                MetalMaterials* materials,
                                MetalTextures* textures)
 {
     mDevice = device;
+    mCommandQueue = queue;
     mMetal4 = metal4;
     mGeometry = geometry;
     mMaterials = materials;
     mTextures = textures;
+
+    if (supportsMetal4RayTracingAS(device, metal4))
+    {
+        mPath = createMetal4AsPath(device, metal4);
+        STRELKA_INFO("Acceleration structures: Metal 4 path (inline with tracer)");
+    }
+    else
+    {
+        mPath = createMetal3AsPath(device, queue);
+        STRELKA_INFO("Acceleration structures: Metal 3 path (side queue; device lacks "
+                     "Metal 4 ray tracing)");
+    }
 }
 
 void MetalAccelStructure::addDescriptorResidency()
@@ -1605,7 +1301,9 @@ void MetalAccelStructure::release()
     mBuildMotionBlas = false;
     delete mAsBuild;
     mAsBuild = nullptr;
+    mPath.reset();
     mMetal4 = nullptr;
+    mCommandQueue = nullptr;
 }
 
 } // namespace metal

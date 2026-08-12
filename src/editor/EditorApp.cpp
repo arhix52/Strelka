@@ -631,62 +631,122 @@ void EditorApp::runBenchmark()
     // Playback changes the workload qualitatively — deforming geometry needs
     // two-keyframe acceleration structures — so it needs its own measurement.
     const bool play = envFlag("STRELKA_PLAY");
-    if (play)
-    {
+    auto setPlaying = [&](bool on) {
         for (size_t i = 0; i < m_scene->getAnimations().size(); ++i)
         {
-            m_settingsManager->setAs<bool>(animationStateKey(i), true);
+            m_settingsManager->setAs<bool>(animationStateKey(i), on);
         }
-    }
+    };
 
-    std::vector<double> samples;
-    samples.reserve(frames);
-    // Wall clock too: the GPU render time excludes skinning and acceleration
-    // structure work, which is most of what changes when playback is on.
-    std::vector<double> wall;
-    wall.reserve(frames);
-    auto prevFrame = std::chrono::high_resolution_clock::now();
-    double last = -1.0;
-    for (uint32_t i = 0; i < warmup + frames && !m_display->windowShouldClose();)
+    // One block of frames in one playback state. Returns median GPU and median
+    // wall time, or {-1,-1} if the window closed before anything was measured.
+    struct Block
     {
-        m_display->pollEvents();
-        if (play)
+        double gpu = -1.0;
+        double wall = -1.0;
+        double gpuMin = -1.0;
+        double gpuMax = -1.0;
+    };
+    auto measure = [&](bool playing) -> Block {
+        setPlaying(playing);
+        std::vector<double> samples, wall;
+        samples.reserve(frames);
+        wall.reserve(frames);
+        auto prevFrame = std::chrono::high_resolution_clock::now();
+        double last = -1.0;
+        for (uint32_t i = 0; i < warmup + frames && !m_display->windowShouldClose();)
         {
-            playAnimations(1.0 / 60.0);
-        }
-        if (!m_isLoading)
-        {
-            m_render->triggerRenderIfIdle();
-        }
-        const double t = m_render->getLastRenderTimeMs();
-        if (t > 0.0 && t != last)
-        {
-            last = t;
-            const auto now = std::chrono::high_resolution_clock::now();
-            if (i >= warmup)
+            m_display->pollEvents();
+            if (playing)
             {
-                samples.push_back(t);
-                wall.push_back(std::chrono::duration<double, std::milli>(now - prevFrame).count());
+                playAnimations(1.0 / 60.0);
             }
-            prevFrame = now;
-            ++i;
+            if (!m_isLoading)
+            {
+                m_render->triggerRenderIfIdle();
+            }
+            const double t = m_render->getLastRenderTimeMs();
+            if (t > 0.0 && t != last)
+            {
+                last = t;
+                const auto now = std::chrono::high_resolution_clock::now();
+                if (i >= warmup)
+                {
+                    samples.push_back(t);
+                    wall.push_back(std::chrono::duration<double, std::milli>(now - prevFrame).count());
+                }
+                prevFrame = now;
+                ++i;
+            }
+            usleep(200);
         }
-        usleep(200);
+        std::sort(samples.begin(), samples.end());
+        std::sort(wall.begin(), wall.end());
+        Block b;
+        if (!samples.empty())
+        {
+            b.gpu = samples[samples.size() / 2];
+            b.gpuMin = samples.front();
+            b.gpuMax = samples.back();
+            b.wall = wall.empty() ? 0.0 : wall[wall.size() / 2];
+        }
+        return b;
+    };
+
+    // Both states in one process, alternating.
+    //
+    // The GPU is shared with the compositor and whatever else is on screen, and
+    // that load drifts: eight consecutive runs of the *identical* configuration
+    // measured here spanned 28.7 to 59.5 ms. Comparing a play process against a
+    // static process therefore reports the drift between two moments as if it
+    // were the cost of playback. Alternating the two states inside one process
+    // and pairing them keeps both halves of each pair in the same conditions.
+    if (envFlag("STRELKA_BENCH_PAIRS"))
+    {
+        const uint32_t pairs = std::max(1u, envUint("STRELKA_BENCH_PAIRS", 3));
+        std::vector<double> ratios, staticGpu, playGpu;
+        for (uint32_t p = 0; p < pairs && !m_display->windowShouldClose(); ++p)
+        {
+            const Block s = measure(false);
+            const Block d = measure(true);
+            if (s.gpu <= 0.0 || d.gpu <= 0.0)
+            {
+                continue;
+            }
+            staticGpu.push_back(s.gpu);
+            playGpu.push_back(d.gpu);
+            ratios.push_back(d.gpu / s.gpu);
+            // Spread as well as median: a tight band means the difference is the
+            // configuration, and a bimodal one means the process latched into a
+            // power state and neither median means anything.
+            STRELKA_INFO("BENCH  pair {}: static gpu={:.2f} [{:.0f}..{:.0f}] wall={:.2f} | "
+                         "play gpu={:.2f} [{:.0f}..{:.0f}] wall={:.2f} | ratio={:.2f}x",
+                         p, s.gpu, s.gpuMin, s.gpuMax, s.wall, d.gpu, d.gpuMin, d.gpuMax, d.wall,
+                         d.gpu / s.gpu);
+        }
+        if (ratios.empty())
+        {
+            STRELKA_INFO("BENCH  no pairs measured");
+            return;
+        }
+        std::sort(ratios.begin(), ratios.end());
+        std::sort(staticGpu.begin(), staticGpu.end());
+        std::sort(playGpu.begin(), playGpu.end());
+        STRELKA_INFO("BENCH  PAIRED static={:.2f} ms  play={:.2f} ms  ratio={:.2f}x  (median of {} pairs)",
+                     staticGpu[staticGpu.size() / 2], playGpu[playGpu.size() / 2],
+                     ratios[ratios.size() / 2], ratios.size());
+        return;
     }
 
-    std::sort(samples.begin(), samples.end());
-    std::sort(wall.begin(), wall.end());
-    if (samples.empty())
+    const Block b = measure(play);
+    if (b.gpu <= 0.0)
     {
         STRELKA_INFO("BENCH  no frames measured");
         return;
     }
-    const double median = samples[samples.size() / 2];
     STRELKA_INFO("BENCH  tracer={} depth={} frames={}  median={:.2f} ms  min={:.2f}  max={:.2f}  wall={:.2f} ms",
-                 1u,
-                 m_settingsManager->getAs<uint32_t>("render/pt/depth"),
-                 samples.size(), median, samples.front(), samples.back(),
-                 wall.empty() ? 0.0 : wall[wall.size() / 2]);
+                 1u, m_settingsManager->getAs<uint32_t>("render/pt/depth"), frames, b.gpu, b.gpuMin,
+                 b.gpuMax, b.wall);
 }
 
 // Jitter-sign measurement (STRELKA_JITTER_TEST=<frames>).
@@ -1313,6 +1373,209 @@ void EditorApp::runLightAudit()
         m_scene->setLight((uint32_t)i, original[i]);
     }
     report("LIGHTAUDIT done");
+}
+
+// Paused motion blur (STRELKA_PAUSE_BLUR=1).
+//
+// Pausing playback mid-clip should freeze a frame *of the film*, and a frame of
+// the film has motion blur in it; the estimator then keeps refining that frame.
+// Two separate claims, so two separate measurements, and the interesting one is
+// easy to miss: an image that converges proves only that the renderer is still
+// running, not that the blur survived the pause. A crisp still converges too.
+//
+//   present  -- the held frame against the same pose rendered with motion blur
+//               off. Blur smears the moving parts, so it lowers the gradient
+//               magnitude; the no-blur render of the identical pose is the
+//               control that says how sharp the frame would be without it.
+//   converge -- the displayed mean over the hold, and the RMSE between the first
+//               held frame and the last. Refining a frozen frame moves it toward
+//               its own mean; it must not empty it or keep moving forever.
+void EditorApp::runPauseBlurCheck()
+{
+    const uint32_t playFrames = envUint("STRELKA_PAUSE_BLUR_PLAY", 90);
+    const uint32_t holdFrames = envUint("STRELKA_PAUSE_BLUR_HOLD", 40);
+    const double stepTimeoutSec = envDouble("STRELKA_AUDIT_STEP_SEC", 10.0);
+    auto report = [&](const std::string& line) { STRELKA_INFO("{}", line); };
+
+    if (m_scene->getAnimations().empty())
+    {
+        report("PAUSEBLUR skipped: the scene has no animations");
+        return;
+    }
+
+    m_settingsManager->setAs<uint32_t>("render/width", 512);
+    m_settingsManager->setAs<uint32_t>("render/height", 384);
+    m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
+    m_settingsManager->setAs<bool>("render/pt/enableAcc", true);
+    m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", 4096);
+    m_settingsManager->setAs<bool>("render/pt/denoise", false);
+    m_settingsManager->setAs<bool>("render/pt/enableUpscale", false);
+
+    auto step = [&]() -> bool {
+        const size_t target = m_sharedCtx->mFrameNumber + 1;
+        bool submitted = false;
+        auto phaseStart = std::chrono::steady_clock::now();
+        while (!m_display->windowShouldClose())
+        {
+            m_display->pollEvents();
+            if (!submitted)
+            {
+                m_render->triggerRenderIfIdle();
+                if (m_sharedCtx->mFrameNumber >= target)
+                {
+                    submitted = true;
+                    phaseStart = std::chrono::steady_clock::now();
+                }
+            }
+            if (submitted && !m_render->isRenderBusy())
+            {
+                return true;
+            }
+            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - phaseStart).count() >
+                stepTimeoutSec)
+            {
+                report("PAUSEBLUR WARN frame did not land in time");
+                return false;
+            }
+            usleep(200);
+        }
+        return false;
+    };
+    auto shown = [&](AuditImage& img) { return m_render->readDisplayTexture(img.px, img.w, img.h); };
+    auto setPlaying = [&](bool on) {
+        for (size_t i = 0; i < m_scene->getAnimations().size(); ++i)
+        {
+            m_settingsManager->setAs<bool>(animationStateKey(i), on);
+        }
+    };
+
+    // --- play, then pause and hold, with motion blur on -------------------
+    m_settingsManager->setAs<bool>("render/enableMotionBlur", true);
+    m_settingsManager->setAs<bool>("render/isMotionBlurVisible", true);
+    m_render->resetTemporalHistory();
+    for (int i = 0; i < 4; ++i)
+    {
+        step();
+    }
+    setPlaying(true);
+    for (uint32_t i = 0; i < playFrames; ++i)
+    {
+        playAnimations(1.0f / 60.0f);
+        if (!step())
+        {
+            break;
+        }
+    }
+    setPlaying(false);
+
+    // The pose the hold is sitting on. Everything below has to be compared at
+    // this same time or the control is measuring a different frame.
+    std::vector<float> heldTimes;
+    for (auto& anim : m_scene->getAnimations())
+    {
+        heldTimes.push_back(anim.current);
+    }
+
+    // Convergence is the *rate* the picture is still changing, not how far it
+    // has come. The first held frame carries one sample and the last carries
+    // hundreds, so the distance between them is large precisely when the
+    // estimator is working; comparing those two would call a converging frame
+    // unstable. What has to shrink is the step between consecutive frames.
+    AuditImage firstHeld, lastHeld, prevHeld;
+    double meanFirst = -1.0, meanLast = -1.0;
+    double earlyStep = -1.0, lateStep = -1.0;
+    uint32_t heldSeen = 0;
+    std::string trace;
+    for (uint32_t i = 0; i < holdFrames; ++i)
+    {
+        if (!step())
+        {
+            break;
+        }
+        AuditImage img;
+        if (!shown(img) || !img.valid())
+        {
+            continue;
+        }
+        const double m = auditMean(img);
+        if (meanFirst < 0.0)
+        {
+            meanFirst = m;
+            firstHeld = img;
+        }
+        meanLast = m;
+        if (i % 8 == 0)
+        {
+            trace += fmt::format("{:.4f} ", m);
+        }
+        if (prevHeld.valid())
+        {
+            int sdx = 0, sdy = 0;
+            const double stepRmse = auditRmse(prevHeld, img, sdx, sdy);
+            // Second consecutive pair as the early reference: the very first
+            // step still carries the reset of the accumulator behind it.
+            if (heldSeen == 2)
+            {
+                earlyStep = stepRmse;
+            }
+            lateStep = stepRmse;
+        }
+        ++heldSeen;
+        prevHeld = img;
+        lastHeld = std::move(img);
+    }
+    const double sharpBlur = auditSharp(lastHeld);
+
+    // --- the control: same pose, motion blur off --------------------------
+    m_settingsManager->setAs<bool>("render/enableMotionBlur", false);
+    m_settingsManager->setAs<bool>("render/isMotionBlurVisible", false);
+    for (size_t i = 0; i < m_scene->getAnimations().size() && i < heldTimes.size(); ++i)
+    {
+        m_settingsManager->setAs<float>(animationTimeKey(i), heldTimes[i]);
+    }
+    m_render->resetTemporalHistory();
+    AuditImage crisp;
+    for (uint32_t i = 0; i < holdFrames; ++i)
+    {
+        if (!step())
+        {
+            break;
+        }
+        AuditImage img;
+        if (shown(img) && img.valid())
+        {
+            crisp = std::move(img);
+        }
+    }
+    const double sharpCrisp = auditSharp(crisp);
+
+    report(fmt::format("PAUSEBLUR held mean over the pause: {}", trace));
+    report(fmt::format("PAUSEBLUR mean first={:.4f} last={:.4f} ({:+.1f}%)  frame-to-frame step "
+                       "early={:.5f} late={:.5f}",
+                       meanFirst, meanLast,
+                       meanFirst > 0.0 ? 100.0 * (meanLast - meanFirst) / meanFirst : 0.0, earlyStep,
+                       lateStep));
+    report(fmt::format("PAUSEBLUR sharpness held(blur)={:.5f}  same pose(no blur)={:.5f}  ({:+.1f}%)",
+                       sharpBlur, sharpCrisp,
+                       sharpCrisp > 0.0 ? 100.0 * (sharpBlur - sharpCrisp) / sharpCrisp : 0.0));
+
+    if (meanFirst > 0.0 && meanLast > 0.0 && meanLast < meanFirst * 0.75)
+    {
+        report(fmt::format("PAUSEBLUR FAIL the held frame faded ({:.4f} -> {:.4f})", meanFirst, meanLast));
+    }
+    if (earlyStep > 0.0 && lateStep > 0.0 && lateStep >= earlyStep)
+    {
+        report(fmt::format("PAUSEBLUR FAIL the held frame is not converging: the step between "
+                           "consecutive frames did not shrink ({:.5f} -> {:.5f})",
+                           earlyStep, lateStep));
+    }
+    if (sharpBlur > 0.0 && sharpCrisp > 0.0 && sharpBlur >= sharpCrisp)
+    {
+        report(fmt::format("PAUSEBLUR FAIL the held frame is no softer than the unblurred pose "
+                           "({:.5f} vs {:.5f}) -- the blur did not survive the pause",
+                           sharpBlur, sharpCrisp));
+    }
+    report("PAUSEBLUR done");
 }
 
 void EditorApp::runDenoiseAudit()
@@ -3266,7 +3529,8 @@ void EditorApp::run()
     // enters the main loop immediately and shows the loading overlay (same as
     // File -> Open) so the window stays responsive during the initial open.
     const bool harness = envFlag("STRELKA_CONV") || envFlag("STRELKA_REF") || envFlag("STRELKA_JITTER_TEST") ||
-                         envFlag("STRELKA_DENOISE_AUDIT") || envFlag("STRELKA_LIGHT_AUDIT") || envFlag("STRELKA_BENCH");
+                         envFlag("STRELKA_DENOISE_AUDIT") || envFlag("STRELKA_LIGHT_AUDIT") ||
+                         envFlag("STRELKA_BENCH") || envFlag("STRELKA_PAUSE_BLUR");
     if (harness)
     {
         waitForSceneLoad();
@@ -3289,6 +3553,11 @@ void EditorApp::run()
     if (envFlag("STRELKA_DENOISE_AUDIT"))
     {
         runDenoiseAudit();
+        return;
+    }
+    if (envFlag("STRELKA_PAUSE_BLUR"))
+    {
+        runPauseBlurCheck();
         return;
     }
     if (envFlag("STRELKA_LIGHT_AUDIT"))

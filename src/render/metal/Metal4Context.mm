@@ -201,18 +201,38 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     // how a submission is waited on.
     mImmediateEvent = device->newSharedEvent();
     mFrameEvent = device->newSharedEvent();
-    if (!mImmediateAllocator || !mImmediateBuffer || !mImmediateEvent || !mFrameEvent)
+    mSkinEvent = device->newSharedEvent();
+    if (!mImmediateAllocator || !mImmediateBuffer || !mImmediateEvent || !mFrameEvent || !mSkinEvent)
     {
         STRELKA_ERROR("Metal 4 immediate submission objects failed");
         release();
         return false;
     }
 
+    // Skinning is committed without a CPU wait, so like the frame ring it needs
+    // one allocator per submission that can be outstanding.
+    mSkinAllocators.reserve(frameCount);
+    mSkinBuffers.reserve(frameCount);
+    for (uint32_t i = 0; i < frameCount; ++i)
+    {
+        MTL4::CommandAllocator* allocator = device->newCommandAllocator();
+        MTL4::CommandBuffer* commandBuffer = device->newCommandBuffer();
+        if (!allocator || !commandBuffer)
+        {
+            STRELKA_ERROR("Metal 4 skinning allocator/buffer creation failed");
+            release();
+            return false;
+        }
+        mSkinAllocators.push_back(allocator);
+        mSkinBuffers.push_back(commandBuffer);
+    }
+
     // Pages can also be added mid-frame when a launch needs more than one, and
     // the frame's pre-submit commitResidency() publishes those.
     ConstantRing::PageCallback residency = [this](MTL::Buffer* page) { addResident(page); };
     if (!mConstants.init(device, constantBytesPerFrame, frameCount, residency) ||
-        !mImmediateConstants.init(device, constantBytesPerFrame, 1, residency))
+        !mImmediateConstants.init(device, constantBytesPerFrame, 1, residency) ||
+        !mSkinConstants.init(device, constantBytesPerFrame, frameCount, residency))
     {
         STRELKA_ERROR("Metal 4 constant ring allocation failed");
         release();
@@ -274,6 +294,46 @@ void Metal4Context::submitAndWait(MTL4::CommandBuffer* commandBuffer)
     }
 }
 
+MTL4::CommandBuffer* Metal4Context::beginSkin(uint32_t frameIndex)
+{
+    if (mSkinBuffers.empty())
+    {
+        return nullptr;
+    }
+    const uint32_t slot = frameIndex % (uint32_t)mSkinBuffers.size();
+    mSkinConstants.beginFrame(slot);
+    mSkinAllocators[slot]->reset();
+    MTL4::CommandBuffer* commandBuffer = mSkinBuffers[slot];
+    commandBuffer->beginCommandBuffer(mSkinAllocators[slot]);
+    commandBuffer->useResidencySet(mResidencySet);
+    return commandBuffer;
+}
+
+uint64_t Metal4Context::submitSkin(MTL4::CommandBuffer* commandBuffer)
+{
+    if (!commandBuffer || !mQueue)
+    {
+        return 0;
+    }
+    commitResidency();
+    commandBuffer->endCommandBuffer();
+    const MTL4::CommandBuffer* buffers[] = { commandBuffer };
+    MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
+    options->addFeedbackHandler(MTL4::CommitFeedbackHandlerFunction([](MTL4::CommitFeedback* feedback) {
+        NS::Error* error = feedback ? feedback->error() : nullptr;
+        if (error)
+        {
+            STRELKA_ERROR("Metal 4 skinning submission failed: {}",
+                          error->localizedDescription() ? error->localizedDescription()->utf8String()
+                                                        : "unknown error");
+        }
+    }));
+    mQueue->commit(buffers, 1, options);
+    options->release();
+    mQueue->signalEvent(mSkinEvent, ++mSkinValue);
+    return mSkinValue;
+}
+
 uint64_t Metal4Context::signalFrame()
 {
     if (!mQueue || !mFrameEvent)
@@ -305,6 +365,22 @@ void Metal4Context::release()
         mFrameEvent->release();
         mFrameEvent = nullptr;
     }
+    if (mSkinEvent)
+    {
+        mSkinEvent->release();
+        mSkinEvent = nullptr;
+    }
+    mSkinConstants.release();
+    for (MTL4::CommandBuffer* commandBuffer : mSkinBuffers)
+    {
+        commandBuffer->release();
+    }
+    mSkinBuffers.clear();
+    for (MTL4::CommandAllocator* allocator : mSkinAllocators)
+    {
+        allocator->release();
+    }
+    mSkinAllocators.clear();
     if (mImmediateBuffer)
     {
         mImmediateBuffer->release();
@@ -376,6 +452,24 @@ MTL4::CommandBuffer* Metal4Context::beginFrame(uint32_t frameIndex)
     commandBuffer->beginCommandBuffer(allocator);
     commandBuffer->useResidencySet(mResidencySet);
     return commandBuffer;
+}
+
+void Metal4Context::wait(MTL::SharedEvent* event, uint64_t value)
+{
+    if (!mQueue || !event || value == 0)
+    {
+        return;
+    }
+    mQueue->wait(event, value);
+}
+
+void Metal4Context::signal(MTL::SharedEvent* event, uint64_t value)
+{
+    if (!mQueue || !event || value == 0)
+    {
+        return;
+    }
+    mQueue->signalEvent(event, value);
 }
 
 void Metal4Context::addResident(MTL::Allocation* allocation)

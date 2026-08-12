@@ -12,6 +12,7 @@
 //   MetalMaterials         GPU material table + cutout/medium/SSS scene flags
 //   MetalGeometry          VB/IB, GeometryEntry, mesh records
 //   MetalAccelStructure    BLAS/TLAS, instance buffer, motion geometry, scratch
+//                          (AccelBuildPath: Metal 4 inline vs Metal 3 side queue)
 //   MetalLights            analytic UniformLight buffer
 //   MetalEnvironment       dome/IBL texture + alias table + envPdfScale
 //   MetalSkinning          joint matrices, skin PSO, skinned VB writes
@@ -41,5 +42,15 @@
 // flags, instance options, and ray masks.
 //
 // Frame flow in MetalRender::render(): preparation → scene edits → CPU pose
-// upload → one Metal 4 encoder (skinning → accel update → integrator) → post.
-// Metal 3 remains only beyond a frame event when the MetalFX denoiser is enabled.
+// upload → Metal 4 skinning → Accel update (inline on Metal 4 when the device
+// supports Metal 4 ray tracing / Apple9+; otherwise Metal 3 AS queue + SharedEvent)
+// → integrator → post. Metal 3 remains only beyond a frame event when the
+// MetalFX denoiser is enabled, and for AS builds on pre-Apple9 GPUs.
+//
+// On the pre-Apple9 split the three stages are chained GPU-side and the CPU
+// blocks on none of them: skinning is committed with Metal4Context::submitSkin()
+// on its own allocator ring, the Metal 3 build waits on skinEvent(), and the
+// trace waits on the build's event. Retiring skinning with a blocking
+// submit-and-wait instead costs a submit-to-completion round trip inside every
+// animated frame and leaves the GPU idle across it -- 19 ms of CPU block per
+// frame on BrainStem, and playback frames of 300-600 ms rather than ~100 ms.

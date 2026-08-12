@@ -132,6 +132,7 @@ MetalRender::~MetalRender()
 
         safeRelease(mAccumulationBuffer);
         safeRelease(mPrevFrameVertexBuffer);
+        mHasPrevFramePose = false;
 
         // Queue & device (release last)
         mMetal4.release();
@@ -620,7 +621,7 @@ void MetalRender::init()
     mGeometry.init(mDevice);
     mMaterials.init(mDevice, &mTextures, getSettings());
     mLights.init(mDevice);
-    mAccel.init(mDevice, &mMetal4, &mGeometry, &mMaterials, &mTextures);
+    mAccel.init(mDevice, mCommandQueue, &mMetal4, &mGeometry, &mMaterials, &mTextures);
     mSkinning.init(mDevice, &mMetal4, &mGeometry, (uint32_t)kMaxFramesInFlight);
     mFrameUniforms.init(mDevice);
     {
@@ -1368,8 +1369,10 @@ void MetalRender::render(Buffer* output)
             // Metal 4 path. Residency has to be refreshed whenever the set of
             // allocations can have changed; ensureBuffers only does work
             // when the resolution does, so its capacity doubles as the generation.
-            // Skinning, acceleration-structure maintenance, and tracing share
-            // the Metal 4 queue. The denoiser remains a Metal 3 post-process,
+            // On Apple9+ skinning, acceleration-structure maintenance and tracing
+            // share the Metal 4 queue; on earlier GPUs the structures build on the
+            // Metal 3 queue and skinning is retired before them (see the frame
+            // encode below). The denoiser remains a Metal 3 post-process,
             // synchronized from the Metal 4 frame event after guide resolve.
             const bool useMetal4 = mMetal4.isValid() && mIntegrator.resolvePSO4() != nullptr;
             if (!useMetal4)
@@ -1437,56 +1440,118 @@ void MetalRender::render(Buffer* output)
                     mIntegrator.clearResidencyDirty();
                 }
 
-                MTL4::CommandBuffer* cmd4 = mMetal4.beginFrame((uint32_t)ctx.mFrameNumber);
-                MTL4::ComputeCommandEncoder* enc4 = cmd4->computeCommandEncoder();
-                if (capturePrevVertices)
-                {
-                    enc4->copyFromBuffer(mGeometry.vertexBuffer(), 0, mPrevFrameVertexBuffer, 0,
-                                         mGeometry.vertexBuffer()->length());
-                    enc4->barrierAfterEncoderStages(MTL::StageBlit, MTL::StageDispatch,
-                                                    MTL4::VisibilityOptionDevice);
-                }
-                if (encodeSkinOpen)
-                {
-                    mSkinning.encode(enc4, mMetal4.constants(), (uint32_t)ctx.mFrameNumber, 0);
-                }
-                if (copyVerticesAfterOpen)
-                {
+                metal::AsFrameUpdate asUpdate;
+                asUpdate.skeletal = encodeSkeletalBlas;
+                asUpdate.tlas = encodeTlas;
+                const bool asSideQueue =
+                    (encodeSkeletalBlas || encodeTlas) && !mAccel.inlineWithTracer();
+
+                // Skinning writes the vertices both the acceleration-structure
+                // build and the trace read; the copies preserve the shutter-open
+                // keyframe and the previous-frame pose. The same sequence is
+                // encoded onto whichever encoder the active path uses.
+                //
+                // The previous-pose snapshot is taken unconditionally. Skipping it
+                // while the pose is static looks free, but mHasPrevFramePose is
+                // raised elsewhere and independently, so a frame that skips the
+                // copy still tells the shader the buffer is meaningful -- and
+                // before the first skin that buffer has never been written at all.
+                const bool anySkinWork = capturePrevVertices || encodeSkinOpen || copyVerticesAfterOpen ||
+                                         encodeSkinClose || copyVerticesAfterClose;
+                auto encodeSkinningAndCopies = [&](MTL4::ComputeCommandEncoder* e, oka::ConstantRing& ring) {
+                    if (capturePrevVertices)
+                    {
+                        e->copyFromBuffer(mGeometry.vertexBuffer(), 0, mPrevFrameVertexBuffer, 0,
+                                          mGeometry.vertexBuffer()->length());
+                        e->barrierAfterEncoderStages(MTL::StageBlit, MTL::StageDispatch,
+                                                     MTL4::VisibilityOptionDevice);
+                    }
                     if (encodeSkinOpen)
                     {
-                        enc4->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageBlit,
-                                                        MTL4::VisibilityOptionDevice);
+                        mSkinning.encode(e, ring, (uint32_t)ctx.mFrameNumber, 0);
                     }
-                    mSkinning.encodeCopyVertexBufferToPrev(enc4);
-                }
-                if (encodeSkinClose)
-                {
                     if (copyVerticesAfterOpen)
                     {
-                        enc4->barrierAfterEncoderStages(MTL::StageBlit, MTL::StageDispatch,
-                                                        MTL4::VisibilityOptionDevice);
+                        if (encodeSkinOpen)
+                        {
+                            e->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageBlit,
+                                                         MTL4::VisibilityOptionDevice);
+                        }
+                        mSkinning.encodeCopyVertexBufferToPrev(e);
                     }
-                    mSkinning.encode(enc4, mMetal4.constants(), (uint32_t)ctx.mFrameNumber, 1);
-                }
-                if (copyVerticesAfterClose)
-                {
-                    if (encodeSkinOpen || encodeSkinClose)
+                    if (encodeSkinClose)
                     {
-                        enc4->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageBlit,
-                                                        MTL4::VisibilityOptionDevice);
+                        if (copyVerticesAfterOpen)
+                        {
+                            e->barrierAfterEncoderStages(MTL::StageBlit, MTL::StageDispatch,
+                                                         MTL4::VisibilityOptionDevice);
+                        }
+                        mSkinning.encode(e, ring, (uint32_t)ctx.mFrameNumber, 1);
                     }
-                    mSkinning.encodeCopyVertexBufferToPrev(enc4);
-                }
-                if (encodeSkeletalBlas)
+                    if (copyVerticesAfterClose)
+                    {
+                        if (encodeSkinOpen || encodeSkinClose)
+                        {
+                            e->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageBlit,
+                                                         MTL4::VisibilityOptionDevice);
+                        }
+                        mSkinning.encodeCopyVertexBufferToPrev(e);
+                    }
+                };
+
+                MTL4::CommandBuffer* cmd4 = nullptr;
+                MTL4::ComputeCommandEncoder* enc4 = nullptr;
+                if (asSideQueue)
                 {
-                    mAccel.encodeSkeletalBLAS(enc4);
+                    // Devices without hardware ray tracing build acceleration
+                    // structures on the Metal 3 queue, which the Metal 4 tracer
+                    // cannot share, so an animated frame spans two queues:
+                    // skinning (Metal 4) -> structures (Metal 3) -> trace (Metal 4).
+                    //
+                    // All three are chained GPU-side. Skinning used to be retired
+                    // with a blocking submit-and-wait before the build was even
+                    // encoded, which cost a full round trip in the middle of every
+                    // animated frame -- 19 ms median on BrainStem -- and left the
+                    // GPU idle across it. The ordering that costs was already
+                    // expressible: the build waits on the skinning event, the trace
+                    // waits on the build's, and the CPU waits on neither.
+                    if (anySkinWork)
+                    {
+                        MTL4::CommandBuffer* skinBuf = mMetal4.beginSkin((uint32_t)ctx.mFrameNumber);
+                        MTL4::ComputeCommandEncoder* skinEnc = skinBuf->computeCommandEncoder();
+                        encodeSkinningAndCopies(skinEnc, mMetal4.skinConstants());
+                        skinEnc->endEncoding();
+                        asUpdate.afterSkinningValue = mMetal4.submitSkin(skinBuf);
+                        asUpdate.afterSkinning = mMetal4.skinEvent();
+                    }
+                    mAccel.submitSide(asUpdate);
+                    if (encodeTlas)
+                    {
+                        sceneBind.instanceAccelerationStructure = mAccel.instanceAccelerationStructure();
+                    }
+                    mMetal4.wait(mAccel.readyEvent(), mAccel.readyValue());
+                    cmd4 = mMetal4.beginFrame((uint32_t)ctx.mFrameNumber);
+                    enc4 = cmd4->computeCommandEncoder();
                 }
-                if (encodeTlas)
+                else
                 {
-                    mAccel.encodeTLAS(enc4);
-                    sceneBind.instanceAccelerationStructure = mAccel.instanceAccelerationStructure();
+                    // Apple9+: skinning, acceleration-structure updates and the
+                    // trace all share one Metal 4 command buffer.
+                    cmd4 = mMetal4.beginFrame((uint32_t)ctx.mFrameNumber);
+                    enc4 = cmd4->computeCommandEncoder();
+                    encodeSkinningAndCopies(enc4, mMetal4.constants());
+                    if (encodeSkeletalBlas || encodeTlas)
+                    {
+                        mAccel.encodeInline(enc4, asUpdate);
+                    }
+                    if (encodeTlas)
+                    {
+                        sceneBind.instanceAccelerationStructure = mAccel.instanceAccelerationStructure();
+                    }
                 }
-                mIntegrator.encodeMetal4(cmd4, enc4, sceneBind, frameReq);
+                MTL4::CommandBuffer* cmdIntegrate = cmd4;
+
+                mIntegrator.encodeMetal4(cmdIntegrate, enc4, sceneBind, frameReq);
                 if (!denoising && mPost.tonemapperPSO4())
                 {
                     enc4->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch,
@@ -1503,10 +1568,10 @@ void MetalRender::render(Buffer* output)
                 {
                     // MetalFX encodes into the command buffer, not an encoder of
                     // ours, so this has to follow endEncoding().
-                    mPost.metalFx().encodeSpatial(cmd4, true, mPost.upscaleTexture(mWriteIndex),
+                    mPost.metalFx().encodeSpatial(cmdIntegrate, true, mPost.upscaleTexture(mWriteIndex),
                                            mPost.displayTexture(mWriteIndex), width, height);
                 }
-                cmd4->endCommandBuffer();
+                cmdIntegrate->endCommandBuffer();
                 // Per-frame TLAS growth and scratch resizing can add allocations
                 // while encoding; publish those changes before submission.
                 mMetal4.commitResidency();
@@ -1514,7 +1579,7 @@ void MetalRender::render(Buffer* output)
                 // Completion arrives through commit options rather than a
                 // handler on the command buffer, and carries the GPU interval
                 // with it, so the Metal 3 timing path needs no counterpart.
-                const MTL4::CommandBuffer* buffers[] = { cmd4 };
+                const MTL4::CommandBuffer* buffers[] = { cmdIntegrate };
                 const int writeIdx4 = mWriteIndex;
                 const bool asyncPresent = !denoising;
                 MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
