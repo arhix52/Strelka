@@ -56,12 +56,6 @@ struct RenderConfig
     // there is, since cost is per traced pixel.
     bool upscale = false;
     float upscaleFactor = 0.5f;
-    // Metal 4 submission layer. The default: wavefront tracing, both MetalFX
-    // scalers and the guide resolve all build and run through it, and it matches
-    // Metal 3 to within the renderer's own run-to-run spread. A frame falls back
-    // on its own where no Metal 4 path exists -- the denoiser, whose Metal 4
-    // constructor asserts inside MPSGraph, and the megakernel.
-    uint32_t metal4 = 1;
     // Reorder each bounce's queue by ray origin before traversing it.
     bool sortRays = false;
     // Ray-cone texture level of detail. Off by default -- not because it costs

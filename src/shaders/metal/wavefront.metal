@@ -26,6 +26,18 @@
 #include "subsurface.h"
 #include "sharc.h"
 
+// Every stage that resolves a hit reads the same instance descriptor buffer the
+// top level was built from, so its element type has to be the one the host
+// wrote -- MTLIndirectAccelerationStructureInstanceDescriptor.
+//
+// Not a choice: Metal 4's instance descriptor takes no array of bottom-level
+// structures, so an instance can only name one by resource ID, which is what
+// the indirect descriptor carries and the UserID one does not. The two differ
+// in both stride (72 against 68) and in where userID sits (60 against 64), so
+// reading one as the other silently turns userID into half a resource ID and
+// indexes the geometry table with it -- every surface comes back black, with
+// nothing for the validation layer to report.
+
 // Bit 30 of HitRecord::geomEntryIndex marks a scattering event in the
 // atmosphere: no surface was reached, the ray was stopped by the medium. Bit 31
 // is the emissive-geometry flag; both live in the same word because a fog event
@@ -146,7 +158,7 @@ static bool shadowAlphaAnyHitImpl(uint primitive_id,
                                   uint instance_id,
                                   float2 barycentric_coord,
                                   ray_data ShadowPayload& payload,
-                                  constant MTLAccelerationStructureUserIDInstanceDescriptor* instances,
+                                  constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
                                   device const Material* materials,
                                   device const GeometryEntry* geometryEntries,
                                   device const char* vertexBuffer,
@@ -195,7 +207,7 @@ static bool shadowAlphaAnyHitImpl(uint primitive_id,
     bool NAME(uint primitive_id [[primitive_id]], uint geometry_id [[geometry_id]],                  \
               uint instance_id [[instance_id]], float2 barycentric_coord [[barycentric_coord]],      \
               ray_data ShadowPayload& payload [[payload]],                                           \
-              constant MTLAccelerationStructureUserIDInstanceDescriptor* instances [[buffer(0)]],    \
+              constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(0)]],  \
               device const Material* materials [[buffer(1)]],                                        \
               device const GeometryEntry* geometryEntries [[buffer(2)]],                             \
               device const char* vertexBuffer [[buffer(3)]],                                         \
@@ -518,7 +530,7 @@ template <typename T>
 static void extendImpl(
     uint gid,
     constant Uniforms&                                         uniforms,
-    constant MTLAccelerationStructureUserIDInstanceDescriptor* instances,
+    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
     typename T::structure accelerationStructure,
     device const PathRay*                                      rays,
     device HitRecord*                                          hits,
@@ -729,7 +741,7 @@ static void extendImpl(
 
 #define WF_EXTEND_ENTRY(NAME, TRAITS)                                                                       \
     kernel void NAME(uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],       \
-                     constant MTLAccelerationStructureUserIDInstanceDescriptor* instances [[buffer(1)]],    \
+                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],  \
                      TRAITS::structure accelerationStructure [[buffer(2)]],                                 \
                      device const PathRay* rays [[buffer(3)]], device HitRecord* hits [[buffer(4)]],        \
                      constant uint32_t& sampleIdx [[buffer(5)]],                                            \
@@ -1008,7 +1020,7 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
 static inline float3 previousWorldPosition(
     device const char* prevFrameVertexBuffer,
     device const uint32_t* indexBuffer,
-    constant MTLAccelerationStructureUserIDInstanceDescriptor* prevInstances,
+    constant MTLIndirectAccelerationStructureInstanceDescriptor* prevInstances,
     GeometryEntry entry,
     uint32_t instanceIndex,
     uint32_t primitiveId,
@@ -1260,7 +1272,7 @@ kernel void wavefrontMiss(
 kernel void wavefrontShade(
     uint                                                       gid            [[thread_position_in_grid]],
     constant Uniforms&                                         uniforms       [[buffer(0)]],
-    constant MTLAccelerationStructureUserIDInstanceDescriptor* instances      [[buffer(1)]],
+    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances    [[buffer(1)]],
     device const IesGpuBufferHeader*                           iesProfiles    [[buffer(2)]],
     device UniformLight*                                       lights         [[buffer(3)]],
     device Material*                                           materials      [[buffer(4)]],
@@ -1286,7 +1298,7 @@ kernel void wavefrontShade(
     // prevVertexBuffer, which is a motion-blur shutter keyframe and is forced
     // equal to the current pose whenever motion blur is off.
     device const char*                                         prevFrameVertexBuffer [[buffer(23)]],
-    constant MTLAccelerationStructureUserIDInstanceDescriptor* prevInstances  [[buffer(24)]],
+    constant MTLIndirectAccelerationStructureInstanceDescriptor* prevInstances [[buffer(24)]],
     device SharcEntry*                                         sharcEntries   [[buffer(25)]],
     // Curves. `extend` cannot hand over what it saw -- primitive_data is only
     // addressable inside the kernel that ran the intersect -- so a strand hit is
@@ -2598,7 +2610,7 @@ template <typename T>
 static float3 mediumTransmittance(typename T::structure accelerationStructure,
                                   device const Material* materials,
                                   device const GeometryEntry* geometryEntries,
-                                  constant MTLAccelerationStructureUserIDInstanceDescriptor* instances,
+                                  constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
                                   float3 origin, float3 direction, float maxDistance,
                                   uint32_t startMedium, float motionTime)
 {
@@ -2666,7 +2678,7 @@ static void shadowImpl(
     device float4*          radianceOut,
     device const uint32_t*  control,
     constant uint32_t&      sampleIdx,
-    constant MTLAccelerationStructureUserIDInstanceDescriptor* instances,
+    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
     device const Material*  materials,
     device const GeometryEntry* geometryEntries,
     device const char*      vertexBuffer,
@@ -2836,7 +2848,7 @@ kernel void wavefrontSharcDeposit(uint tid [[thread_position_in_grid]],
                      device float4* radianceOut [[buffer(3)]],                                       \
                      device const uint32_t* control [[buffer(4)]],                                   \
                      constant uint32_t& sampleIdx [[buffer(5)]],                                     \
-                     constant MTLAccelerationStructureUserIDInstanceDescriptor* instances            \
+                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances          \
                          [[buffer(6)]],                                                              \
                      device const Material* materials [[buffer(7)]],                                 \
                      device const GeometryEntry* geometryEntries [[buffer(8)]],                      \

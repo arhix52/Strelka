@@ -21,12 +21,15 @@ MetalSkinning::~MetalSkinning()
     release();
 }
 
-void MetalSkinning::init(MTL::Device* device, MTL::CommandQueue* queue, Metal4Context* metal4, MetalGeometry* geometry)
+void MetalSkinning::init(MTL::Device* device,
+                         Metal4Context* metal4,
+                         MetalGeometry* geometry,
+                         uint32_t frameCount)
 {
     mDevice = device;
-    mCommandQueue = queue;
     mMetal4 = metal4;
     mGeometry = geometry;
+    mFrameCount = frameCount;
 }
 
 void MetalSkinning::release()
@@ -40,12 +43,12 @@ void MetalSkinning::release()
     };
     safeRelease(mSkinDataBuffer);
     safeRelease(mJointMatricesBuffer);
-    safeRelease(mSkinningPSO);
-    safeRelease(mTriangleUpdatePSO);
     safeRelease(mSkinningPSO4);
     safeRelease(mTriangleUpdatePSO4);
     mJointMatOffsets.clear();
     mJointMatScratch.clear();
+    mJointMatricesPerPose = 0;
+    mFrameCount = 0;
     mLoggedSkinningPipelineGap = false;
 }
 
@@ -61,32 +64,19 @@ void MetalSkinning::buildPipeline()
                       loadErr ? loadErr->localizedDescription()->utf8String() : "unknown error");
         return;
     }
-    NS::Error* pError = nullptr;
-
-    MTL::Function* pSkinningFn =
-        pLibrary->newFunction(NS::String::string("skinningKernel", NS::UTF8StringEncoding));
-    mSkinningPSO = mDevice->newComputePipelineState(pSkinningFn, &pError);
-    if (!mSkinningPSO)
+    if (!mMetal4 || !mMetal4->isValid())
     {
-        STRELKA_FATAL("Failed to create skinning PSO: {}", pError->localizedDescription()->utf8String());
+        STRELKA_FATAL("Metal 4 is required for skinning");
+        pLibrary->release();
+        return;
+    }
+    mSkinningPSO4 = mMetal4->newComputePipelineState(pLibrary, "skinningKernel", nullptr);
+    mTriangleUpdatePSO4 = mMetal4->newComputePipelineState(pLibrary, "updateTriangleBufferKernel", nullptr);
+    if (!mSkinningPSO4 || !mTriangleUpdatePSO4)
+    {
+        STRELKA_FATAL("Failed to create Metal 4 skinning pipelines");
         assert(false);
     }
-    pSkinningFn->release();
-
-    MTL::Function* pTriUpdateFn =
-        pLibrary->newFunction(NS::String::string("updateTriangleBufferKernel", NS::UTF8StringEncoding));
-    mTriangleUpdatePSO = mDevice->newComputePipelineState(pTriUpdateFn, &pError);
-    if (mMetal4 && mMetal4->isValid())
-    {
-        mSkinningPSO4 = mMetal4->newComputePipelineState(pLibrary, "skinningKernel", nullptr);
-        mTriangleUpdatePSO4 = mMetal4->newComputePipelineState(pLibrary, "updateTriangleBufferKernel", nullptr);
-    }
-    if (!mTriangleUpdatePSO)
-    {
-        STRELKA_FATAL("Failed to create triangle update PSO: {}", pError->localizedDescription()->utf8String());
-        assert(false);
-    }
-    pTriUpdateFn->release();
 
     pLibrary->release();
 }
@@ -117,100 +107,34 @@ void MetalSkinning::allocJointMatrices()
         }
     }
 
-    if (jointMatSize > 0)
+    mJointMatricesPerPose = jointMatSize;
+    if (jointMatSize > 0 && mFrameCount > 0)
     {
-        mJointMatricesBuffer =
-            mDevice->newBuffer(jointMatSize * sizeof(simd::float4x4), MTL::ResourceStorageModeShared);
+        // Two pose slots preserve both shutter endpoints. Frame-local slices
+        // keep an in-flight frame's matrices immutable until its allocator is
+        // recycled by Metal4Context::beginFrame().
+        const size_t poseCount = static_cast<size_t>(mFrameCount) * 2;
+        mJointMatricesBuffer = mDevice->newBuffer(
+            jointMatSize * poseCount * sizeof(simd::float4x4), MTL::ResourceStorageModeShared);
     }
 }
 
-// The same two dispatches on the Metal 3 queue. Kept as a comparison path: the
-// skinned vertices come out as exact zeros through the Metal 4 route, and the
-// only way to tell a bad kernel from a bad submission is to run the same kernel
-// through the other one.
-void MetalSkinning::applyMetal3()
+bool MetalSkinning::uploadJointMatrices(uint32_t frameIndex, uint32_t poseIndex)
 {
-    if (!mSkinningPSO || !mTriangleUpdatePSO)
+    if (!mSkinDataBuffer || !mJointMatricesBuffer || mJointMatricesPerPose == 0 ||
+        mFrameCount == 0 || poseIndex >= 2)
     {
-        return;
+        return false;
     }
-    MTL::CommandBuffer* cmd = mCommandQueue->commandBuffer();
-    cmd->retain();
-    MTL::ComputeCommandEncoder* enc = cmd->computeCommandEncoder();
 
-    int skinIndex = 0;
-    uint32_t jointMatOffset = 0;
-    for (auto& node : mScene->mNodes)
-    {
-        if (node.skin == -1 || node.type != oka::Scene::Node::NodeType::mesh)
-        {
-            continue;
-        }
-        if (skinIndex > 0)
-        {
-            jointMatOffset += mJointMatOffsets[static_cast<size_t>(skinIndex - 1)];
-        }
-        skinIndex++;
-
-        for (const auto instId : node.instanceIds)
-        {
-            auto& mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
-            const uint32_t meshId = mScene->mInstances[instId].mMeshId;
-
-            SkinningParams skinParams = {};
-            skinParams.vbOffset = mesh.mVbOffset;
-            skinParams.sbOffset = mesh.mSbOffset;
-            skinParams.jointMatOffset = jointMatOffset;
-            skinParams.vertexCount = mesh.mVertexCount;
-
-            enc->setComputePipelineState(mSkinningPSO);
-            enc->setBuffer(mGeometry->vertexBuffer(), 0, 0);
-            enc->setBuffer(mSkinDataBuffer, 0, 1);
-            enc->setBuffer(mJointMatricesBuffer, 0, 2);
-            enc->setBytes(&skinParams, sizeof(skinParams), 3);
-            enc->dispatchThreads(MTL::Size(mesh.mVertexCount, 1, 1), MTL::Size(256, 1, 1));
-
-            MetalGeometry::Mesh* metalMesh = mGeometry->meshes()[meshId];
-            if (metalMesh->mPerPrimitiveBuffer)
-            {
-                TriangleUpdateParams triParams = {};
-                triParams.triangleCount = metalMesh->mTriangleCount;
-                triParams.indexOffset = mesh.mIndex;
-                triParams.vbOffset = mesh.mVbOffset;
-
-                enc->setComputePipelineState(mTriangleUpdatePSO);
-                enc->setBuffer(metalMesh->mPerPrimitiveBuffer, 0, 0);
-                enc->setBuffer(mGeometry->vertexBuffer(), 0, 1);
-                enc->setBuffer(mGeometry->indexBuffer(), 0, 2);
-                enc->setBytes(&triParams, sizeof(triParams), 3);
-                enc->dispatchThreads(MTL::Size(metalMesh->mTriangleCount, 1, 1), MTL::Size(256, 1, 1));
-            }
-        }
-    }
-    enc->endEncoding();
-    cmd->commit();
-    cmd->waitUntilCompleted();
-    cmd->release();
-}
-
-void MetalSkinning::apply()
-{
-    // Guard the pipelines of the path actually taken. The original checked the
-    // Metal 3 pipeline while every dispatch used the Metal 4 one, so a failed
-    // Metal 4 build passed the check and then bound a null pipeline.
-    const bool haveMetal3 = mSkinningPSO != nullptr && mTriangleUpdatePSO != nullptr;
-    const bool haveMetal4 = mSkinningPSO4 != nullptr && mTriangleUpdatePSO4 != nullptr;
-    const bool haveNeeded = mSkinMetal4 ? haveMetal4 : haveMetal3;
-    if (!haveNeeded || !mSkinDataBuffer || !mJointMatricesBuffer)
+    if (!mSkinningPSO4 || !mTriangleUpdatePSO4)
     {
         if (!mLoggedSkinningPipelineGap)
         {
             mLoggedSkinningPipelineGap = true;
-            STRELKA_ERROR("Skinning disabled: metal3Pipelines={} metal4Pipelines={} skinData={} jointMats={}",
-                          haveMetal3, haveMetal4, mSkinDataBuffer != nullptr,
-                          mJointMatricesBuffer != nullptr);
+            STRELKA_ERROR("Skinning disabled: Metal 4 pipelines are unavailable");
         }
-        return;
+        return false;
     }
 
     // Compute joint matrices on CPU. mJointMatScratch is a member so the two
@@ -230,32 +154,34 @@ void MetalSkinning::apply()
     // layout, so the element-by-element conversion loop (and its temporary
     // vector) was pure overhead — copy straight into the GPU buffer.
     static_assert(sizeof(glm::mat4) == sizeof(simd::float4x4), "matrix layout mismatch");
-    const size_t uploadBytes = std::min(mJointMatScratch.size() * sizeof(glm::mat4),
-                                        (size_t)mJointMatricesBuffer->length());
+    const size_t uploadBytes =
+        std::min(mJointMatScratch.size(), mJointMatricesPerPose) * sizeof(glm::mat4);
     if (uploadBytes == 0)
-        return;
-    memcpy(mJointMatricesBuffer->contents(), mJointMatScratch.data(), uploadBytes);
-
-    if (!mSkinMetal4)
     {
-        applyMetal3();
+        return false;
+    }
+    const size_t slot = static_cast<size_t>(frameIndex % mFrameCount) * 2 + poseIndex;
+    const size_t byteOffset = slot * mJointMatricesPerPose * sizeof(simd::float4x4);
+    memcpy(static_cast<uint8_t*>(mJointMatricesBuffer->contents()) + byteOffset,
+           mJointMatScratch.data(), uploadBytes);
+    return true;
+}
+
+void MetalSkinning::encode(MTL4::ComputeCommandEncoder* pEncoder,
+                           ConstantRing& constants,
+                           uint32_t frameIndex,
+                           uint32_t poseIndex)
+{
+    if (!pEncoder || !mSkinningPSO4 || !mTriangleUpdatePSO4 ||
+        !mSkinDataBuffer || !mJointMatricesBuffer || mFrameCount == 0 || poseIndex >= 2)
+    {
         return;
     }
-
-    // The zeros this path used to produce were a missing residency declaration,
-    // not the shared argument table: the buffers below were only ever made
-    // resident as a side effect of MetalRender encoding a frame through Metal 4,
-    // so with denoising on -- which pins every frame to Metal 3 -- the skinning
-    // dispatch read and wrote memory the queue did not hold, and the character
-    // collapsed to a point. Measured on BrainStem: extent 1.469 with the frame
-    // on Metal 4, 0.000 with it on Metal 3, from the same kernel and data.
-    ensureMetal4Residency();
-
-    // Dispatch skinning + triangle update kernels
-    MTL4::CommandBuffer* pCmd = mMetal4->beginImmediate();
-    MTL4::ComputeCommandEncoder* pEncoder = pCmd->computeCommandEncoder();
     MTL4::ArgumentTable* skinTable = mMetal4->argumentTable();
     pEncoder->setArgumentTable(skinTable);
+    const size_t slot = static_cast<size_t>(frameIndex % mFrameCount) * 2 + poseIndex;
+    const MTL::GPUAddress jointAddress =
+        mJointMatricesBuffer->gpuAddress() + slot * mJointMatricesPerPose * sizeof(simd::float4x4);
 
     int skinIndex = 0;
     uint32_t jointMatOffset = 0;
@@ -284,8 +210,8 @@ void MetalSkinning::apply()
                 pEncoder->setComputePipelineState(mSkinningPSO4);
                 skinTable->setAddress(mGeometry->vertexBuffer()->gpuAddress(), 0);
                 skinTable->setAddress(mSkinDataBuffer->gpuAddress(), 1);
-                skinTable->setAddress(mJointMatricesBuffer->gpuAddress(), 2);
-                skinTable->setAddress(mMetal4->immediateConstants().push(skinParams), 3);
+                skinTable->setAddress(jointAddress, 2);
+                skinTable->setAddress(constants.push(skinParams), 3);
 
                 const uint32_t threadsPerGroup = 256;
                 const MTL::Size groupSize = MTL::Size(threadsPerGroup, 1, 1);
@@ -308,7 +234,7 @@ void MetalSkinning::apply()
                     skinTable->setAddress(metalMesh->mPerPrimitiveBuffer->gpuAddress(), 0);
                     skinTable->setAddress(mGeometry->vertexBuffer()->gpuAddress(), 1);
                     skinTable->setAddress(mGeometry->indexBuffer()->gpuAddress(), 2);
-                    skinTable->setAddress(mMetal4->immediateConstants().push(triParams), 3);
+                    skinTable->setAddress(constants.push(triParams), 3);
 
                     pEncoder->dispatchThreadgroups(
                         MTL::Size((metalMesh->mTriangleCount + 255) / 256, 1, 1), groupSize);
@@ -317,71 +243,16 @@ void MetalSkinning::apply()
         }
     }
 
-    pEncoder->endEncoding();
-    mMetal4->submitAndWait(pCmd);
 }
 
-void MetalSkinning::ensureMetal4Residency()
+void MetalSkinning::encodeCopyVertexBufferToPrev(MTL4::ComputeCommandEncoder* encoder)
 {
-    if (!mMetal4 || !mMetal4->isValid() || !mGeometry)
+    if (!encoder || !mGeometry || !mGeometry->vertexBuffer() || !mGeometry->prevVertexBuffer())
     {
         return;
     }
-    const std::vector<MetalGeometry::Mesh*>& meshes = mGeometry->meshes();
-    if (mGeometry->vertexBuffer() == mResidentVertexBuffer &&
-        mGeometry->prevVertexBuffer() == mResidentPrevVertexBuffer &&
-        mGeometry->indexBuffer() == mResidentIndexBuffer && mSkinDataBuffer == mResidentSkinDataBuffer &&
-        mJointMatricesBuffer == mResidentJointMatricesBuffer && meshes.size() == mResidentMeshCount)
-    {
-        return;
-    }
-    mResidentVertexBuffer = mGeometry->vertexBuffer();
-    mResidentPrevVertexBuffer = mGeometry->prevVertexBuffer();
-    mResidentIndexBuffer = mGeometry->indexBuffer();
-    mResidentSkinDataBuffer = mSkinDataBuffer;
-    mResidentJointMatricesBuffer = mJointMatricesBuffer;
-    mResidentMeshCount = meshes.size();
-
-    mMetal4->addResident(mResidentVertexBuffer);
-    mMetal4->addResident(mResidentPrevVertexBuffer);
-    mMetal4->addResident(mResidentIndexBuffer);
-    mMetal4->addResident(mResidentSkinDataBuffer);
-    mMetal4->addResident(mResidentJointMatricesBuffer);
-    // Written by the triangle update kernel, which runs in the same encoder.
-    for (MetalGeometry::Mesh* mesh : meshes)
-    {
-        if (mesh)
-        {
-            mMetal4->addResident(mesh->mPerPrimitiveBuffer);
-        }
-    }
-    mMetal4->commitResidency();
-}
-
-void MetalSkinning::copyVertexBufferToPrev()
-{
-    const size_t vertexDataSize = mGeometry->vertexBuffer()->length();
-    if (mMetal4 && mMetal4->isValid())
-    {
-        ensureMetal4Residency();
-        MTL4::CommandBuffer* cmd = mMetal4->beginImmediate();
-        MTL4::ComputeCommandEncoder* enc = cmd->computeCommandEncoder();
-        enc->copyFromBuffer(mGeometry->vertexBuffer(), 0, mGeometry->prevVertexBuffer(), 0, vertexDataSize);
-        enc->endEncoding();
-        // TODO: drop submitAndWait here (and in apply()). It drains the whole
-        // Metal 4 queue every animated frame and kills pipelining. Encode the
-        // copy / skinning ahead of the frame on the same queue instead, then
-        // remove the SharedEvent cross-queue wait that only exists because
-        // structure builds still live on Metal 3.
-        mMetal4->submitAndWait(cmd);
-        return;
-    }
-    MTL::CommandBuffer* cmd = mCommandQueue->commandBuffer();
-    MTL::BlitCommandEncoder* enc = cmd->blitCommandEncoder();
-    enc->copyFromBuffer(mGeometry->vertexBuffer(), 0, mGeometry->prevVertexBuffer(), 0, vertexDataSize);
-    enc->endEncoding();
-    cmd->commit();
-    cmd->waitUntilCompleted();
+    encoder->copyFromBuffer(mGeometry->vertexBuffer(), 0, mGeometry->prevVertexBuffer(), 0,
+                            mGeometry->vertexBuffer()->length());
 }
 
 

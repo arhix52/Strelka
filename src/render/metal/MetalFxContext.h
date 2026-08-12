@@ -84,6 +84,11 @@ public:
         MTL::Texture* output = nullptr;   ///< display resolution, linear
         float jitterX = 0.0f;             ///< the offset this frame was rendered with
         float jitterY = 0.0f;
+        /// The scene's exposure, the same scalar the tone curve applies later.
+        /// MetalFX weighs and clamps samples in an exposed space, so without it
+        /// path-traced radiance in the hundreds sits past the top of that space;
+        /// encodeDenoise has the measurements.
+        float exposure = 1.0f;
         bool depthReversed = true;
         bool resetHistory = false;        ///< camera cut, scene change, resize
         // The denoiser reprojects with these rather than inferring them from the
@@ -173,6 +178,8 @@ private:
     void* mDenoiser = nullptr; ///< id<MTLFXTemporalDenoisedScaler>, retained
     void* mTemporalScaler = nullptr;  ///< id<MTLFXTemporalScaler>, retained
     void* mTemporalScaler4 = nullptr; ///< id<MTL4FXTemporalScaler>, retained
+    void* mExposureTexture = nullptr; ///< id<MTLTexture>, 1x1 R16Float, retained
+    float mExposure = 0.0f;           ///< what mExposureTexture currently holds
     uint32_t mTemporalInputWidth = 0;
     uint32_t mTemporalInputHeight = 0;
     uint32_t mTemporalOutputWidth = 0;

@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
+#include <functional>
 #include <vector>
 
 namespace oka
@@ -35,18 +36,28 @@ namespace oka
 /// Shared storage, written by the CPU and read by the GPU in the same frame; the
 /// caller must not reuse a frame's ring until that frame's commit feedback has
 /// fired, which is the same rule the command allocators follow.
+///
+/// How much one frame needs is not bounded by the frame: a launch carrying many
+/// samples encodes the whole wavefront loop that many times over, and each stage
+/// of each iteration pushes its own constants. So a frame's storage is a chain of
+/// equally sized pages that grows on demand rather than one fixed buffer.
 class ConstantRing
 {
 public:
-    bool init(MTL::Device* device, size_t bytesPerFrame, uint32_t frameCount);
+    /// Called for every page allocated, at init and on growth, so the owner can
+    /// declare it resident. A page the residency set does not name is a GPU fault
+    /// at the dispatch that reads it.
+    using PageCallback = std::function<void(MTL::Buffer*)>;
+
+    bool init(MTL::Device* device, size_t bytesPerPage, uint32_t frameCount, PageCallback onPage);
     void release();
 
     /// Start of a frame: hand the ring back to the beginning.
     void beginFrame(uint32_t frameIndex);
 
-    /// Copy `size` bytes in and return the GPU address they landed at.
-    /// Returns 0 if the frame's ring is exhausted, which the caller must treat
-    /// as a bug rather than a condition to recover from.
+    /// Copy `size` bytes in and return the GPU address they landed at. Returns 0
+    /// only when `size` exceeds a whole page or the allocation fails, both of
+    /// which the caller must treat as a bug rather than recover from.
     MTL::GPUAddress push(const void* data, size_t size);
 
     template <typename T>
@@ -55,17 +66,16 @@ public:
         return push(&value, sizeof(T));
     }
 
-    /// Every buffer, so they can be added to the residency set.
-    const std::vector<MTL::Buffer*>& buffers() const
-    {
-        return mBuffers;
-    }
-
 private:
-    std::vector<MTL::Buffer*> mBuffers;
+    MTL::Device* mDevice = nullptr;
+    /// Pages per frame in flight. Kept per frame rather than shared so growth
+    /// never touches storage another frame is still reading.
+    std::vector<std::vector<MTL::Buffer*>> mPages;
+    PageCallback mOnPage;
     size_t mCapacity = 0;
     size_t mOffset = 0;
     uint32_t mFrame = 0;
+    uint32_t mPage = 0;
 };
 
 /// Owns the Metal 4 objects and nothing else: it is deliberately separable from
@@ -115,10 +125,9 @@ public:
     /// here, so the frame's previous work must already have completed.
     MTL4::CommandBuffer* beginFrame(uint32_t frameIndex);
 
-    /// One-off work outside the frame loop -- scene load, acceleration structure
-    /// builds, skinning. Uses an allocator of its own so it cannot collide with a
-    /// frame still in flight, and submitAndWait() blocks until it is done, which
-    /// is what every caller of this needs anyway.
+    /// One-off work outside the frame loop -- scene load and acceleration
+    /// structure rebuilds. Per-frame skinning and refits use beginFrame() so
+    /// they remain pipelined with tracing.
     MTL4::CommandBuffer* beginImmediate();
     void submitAndWait(MTL4::CommandBuffer* commandBuffer);
 
@@ -141,6 +150,7 @@ public:
     /// Declare a resource resident for as long as it exists. Cheap to call
     /// repeatedly; commitResidency() must follow before the next submit.
     void addResident(MTL::Allocation* allocation);
+    void removeResident(MTL::Allocation* allocation);
     void commitResidency();
 
     /// Build a pipeline through the Metal 4 compiler. Pipelines built the

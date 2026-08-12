@@ -5,59 +5,93 @@
 namespace oka
 {
 
+// Generous on purpose: the longest immediate submission is a single BLAS build,
+// and the largest structure in a heavy scene takes well under a second.
+static constexpr uint32_t kImmediateTimeoutMs = 5000;
+
 // --- ConstantRing ----------------------------------------------------------
 
-bool ConstantRing::init(MTL::Device* device, size_t bytesPerFrame, uint32_t frameCount)
+bool ConstantRing::init(MTL::Device* device, size_t bytesPerPage, uint32_t frameCount, PageCallback onPage)
 {
     release();
-    mCapacity = bytesPerFrame;
-    mBuffers.reserve(frameCount);
-    for (uint32_t i = 0; i < frameCount; ++i)
+    mDevice = device;
+    mCapacity = bytesPerPage;
+    mOnPage = std::move(onPage);
+    mPages.resize(frameCount);
+    for (std::vector<MTL::Buffer*>& pages : mPages)
     {
-        MTL::Buffer* buffer = device->newBuffer(bytesPerFrame, MTL::ResourceStorageModeShared);
-        if (!buffer)
+        MTL::Buffer* page = mDevice->newBuffer(mCapacity, MTL::ResourceStorageModeShared);
+        if (!page)
         {
             release();
             return false;
         }
-        mBuffers.push_back(buffer);
+        pages.push_back(page);
+        if (mOnPage)
+        {
+            mOnPage(page);
+        }
     }
     return true;
 }
 
 void ConstantRing::release()
 {
-    for (MTL::Buffer* buffer : mBuffers)
+    for (std::vector<MTL::Buffer*>& pages : mPages)
     {
-        buffer->release();
+        for (MTL::Buffer* page : pages)
+        {
+            page->release();
+        }
     }
-    mBuffers.clear();
+    mPages.clear();
+    mOnPage = nullptr;
     mCapacity = 0;
     mOffset = 0;
+    mPage = 0;
 }
 
 void ConstantRing::beginFrame(uint32_t frameIndex)
 {
-    mFrame = frameIndex % (uint32_t)std::max<size_t>(mBuffers.size(), 1);
+    mFrame = frameIndex % (uint32_t)std::max<size_t>(mPages.size(), 1);
     mOffset = 0;
+    mPage = 0;
 }
 
 MTL::GPUAddress ConstantRing::push(const void* data, size_t size)
 {
-    if (mBuffers.empty())
+    if (mPages.empty() || size > mCapacity)
     {
+        STRELKA_ERROR("Metal 4 constant of {} bytes does not fit a {} byte page", size, mCapacity);
         return 0;
     }
     // Metal wants argument addresses aligned; 16 covers every scalar and vector
     // type a kernel can take as a constant.
     constexpr size_t kAlign = 16;
-    const size_t offset = (mOffset + kAlign - 1) & ~(kAlign - 1);
+    size_t offset = (mOffset + kAlign - 1) & ~(kAlign - 1);
+    std::vector<MTL::Buffer*>& pages = mPages[mFrame];
     if (offset + size > mCapacity)
     {
-        STRELKA_ERROR("Metal 4 constant ring exhausted: {} + {} > {}", offset, size, mCapacity);
-        return 0;
+        // Pages already allocated for this frame are reused; only the first frame
+        // that needs a deeper chain pays for it.
+        if (mPage + 1 >= pages.size())
+        {
+            MTL::Buffer* page = mDevice->newBuffer(mCapacity, MTL::ResourceStorageModeShared);
+            if (!page)
+            {
+                STRELKA_ERROR("Metal 4 constant ring could not grow past {} pages", pages.size());
+                return 0;
+            }
+            pages.push_back(page);
+            if (mOnPage)
+            {
+                mOnPage(page);
+            }
+        }
+        ++mPage;
+        offset = 0;
     }
-    MTL::Buffer* buffer = mBuffers[mFrame];
+    MTL::Buffer* buffer = pages[mPage];
     std::memcpy(static_cast<uint8_t*>(buffer->contents()) + offset, data, size);
     mOffset = offset + size;
     return buffer->gpuAddress() + offset;
@@ -174,20 +208,15 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
         return false;
     }
 
-    if (!mConstants.init(device, constantBytesPerFrame, frameCount) ||
-        !mImmediateConstants.init(device, constantBytesPerFrame, 1))
+    // Pages can also be added mid-frame when a launch needs more than one, and
+    // the frame's pre-submit commitResidency() publishes those.
+    ConstantRing::PageCallback residency = [this](MTL::Buffer* page) { addResident(page); };
+    if (!mConstants.init(device, constantBytesPerFrame, frameCount, residency) ||
+        !mImmediateConstants.init(device, constantBytesPerFrame, 1, residency))
     {
         STRELKA_ERROR("Metal 4 constant ring allocation failed");
         release();
         return false;
-    }
-    for (MTL::Buffer* buffer : mConstants.buffers())
-    {
-        addResident(buffer);
-    }
-    for (MTL::Buffer* buffer : mImmediateConstants.buffers())
-    {
-        addResident(buffer);
     }
     commitResidency();
 
@@ -216,11 +245,33 @@ void Metal4Context::submitAndWait(MTL4::CommandBuffer* commandBuffer)
     {
         return;
     }
+    // Encoding may allocate scratch or destination resources. Residency only
+    // has to be committed before queue submission, not before encoding.
+    commitResidency();
     commandBuffer->endCommandBuffer();
     const MTL4::CommandBuffer* buffers[] = { commandBuffer };
-    mQueue->commit(buffers, 1);
+    MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
+    options->addFeedbackHandler(MTL4::CommitFeedbackHandlerFunction([](MTL4::CommitFeedback* feedback) {
+        NS::Error* error = feedback ? feedback->error() : nullptr;
+        if (error)
+        {
+            STRELKA_ERROR("Metal 4 immediate submission failed: {}",
+                          error->localizedDescription() ? error->localizedDescription()->utf8String()
+                                                       : "unknown error");
+        }
+    }));
+    mQueue->commit(buffers, 1, options);
+    options->release();
     mQueue->signalEvent(mImmediateEvent, ++mImmediateValue);
-    mImmediateEvent->waitUntilSignaledValue(mImmediateValue, 5000);
+    // Not advisory: the next beginImmediate() resets the allocator this command
+    // buffer was written into, so continuing past a timeout hands the GPU
+    // commands that are being overwritten. Say so rather than corrupt silently.
+    if (!mImmediateEvent->waitUntilSignaledValue(mImmediateValue, kImmediateTimeoutMs))
+    {
+        STRELKA_ERROR("Metal 4 immediate submission did not complete within {} ms; the GPU is still reading a "
+                      "command buffer that is about to be reused",
+                      kImmediateTimeoutMs);
+    }
 }
 
 uint64_t Metal4Context::signalFrame()
@@ -334,6 +385,16 @@ void Metal4Context::addResident(MTL::Allocation* allocation)
         return;
     }
     mResidencySet->addAllocation(allocation);
+    mResidencyDirty = true;
+}
+
+void Metal4Context::removeResident(MTL::Allocation* allocation)
+{
+    if (!mResidencySet || !allocation)
+    {
+        return;
+    }
+    mResidencySet->removeAllocation(allocation);
     mResidencyDirty = true;
 }
 

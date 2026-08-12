@@ -132,7 +132,6 @@ MetalRender::~MetalRender()
 
         safeRelease(mAccumulationBuffer);
         safeRelease(mPrevFrameVertexBuffer);
-        safeRelease(mPrevFrameInstanceBuffer);
 
         // Queue & device (release last)
         mMetal4.release();
@@ -207,37 +206,13 @@ void MetalRender::triggerRenderIfIdle()
 // Usage flags come from the denoiser for the same reason they do for the spatial
 // scaler: it validates them and a guess fails at encode time.
 
-// Snapshot the pose the previous frame was rendered with.
-//
-// Called at the top of a frame, before skinning rewrites the vertices and before
-// the animation block re-uploads the instance transforms -- so what is captured
-// is what the last frame actually used. Doing it at the end of a frame instead
-// would have to be ordered against work already in flight for no benefit.
-void MetalRender::capturePrevFramePose()
+// Prepare storage for the pose the previous frame was rendered with.
+bool MetalRender::capturePrevFramePose()
 {
     if (!mAccel.instanceBuffer())
     {
-        return;
+        return false;
     }
-    // Instance transforms are always worth keeping: a node animation moves rigid
-    // geometry without touching a single vertex. Skipping the copy for a scene
-    // with no animation and no skinning was tried on a two-million-instance
-    // forest, where it is 143 MB a sample: it measured as nothing against a
-    // 0.49 s sample, and it costs the editor a correct motion vector on the
-    // frame after something is dragged.
-    if (!mPrevFrameInstanceBuffer || mPrevFrameInstanceBuffer->length() != mAccel.instanceBuffer()->length())
-    {
-        if (mPrevFrameInstanceBuffer)
-        {
-            mPrevFrameInstanceBuffer->release();
-        }
-        mPrevFrameInstanceBuffer =
-            mDevice->newBuffer(mAccel.instanceBuffer()->length(), MTL::ResourceStorageModeShared);
-        mHasPrevFramePose = false; // a new allocation holds nothing
-    }
-    std::memcpy(mPrevFrameInstanceBuffer->contents(), mAccel.instanceBuffer()->contents(),
-                mAccel.instanceBuffer()->length());
-
     // Vertices only when something can actually rewrite them. With no skinning in
     // the scene the current buffer *is* the previous one, and the shader is given
     // it directly rather than a copy that could never differ.
@@ -254,12 +229,8 @@ void MetalRender::capturePrevFramePose()
                 mDevice->newBuffer(mGeometry.vertexBuffer()->length(), MTL::ResourceStorageModePrivate);
             mHasPrevFramePose = false;
         }
-        MTL::CommandBuffer* cmd = mCommandQueue->commandBuffer();
-        MTL::BlitCommandEncoder* blit = cmd->blitCommandEncoder();
-        blit->copyFromBuffer(mGeometry.vertexBuffer(), 0, mPrevFrameVertexBuffer, 0, mGeometry.vertexBuffer()->length());
-        blit->endEncoding();
-        cmd->commit();
     }
+    return deforming;
 }
 
 
@@ -551,7 +522,8 @@ bool MetalRender::memoryReport(MemoryReport& report) const
     }
     add("TLAS", mAccel.instanceAccelerationStructure() ? mAccel.instanceAccelerationStructure()->size() : 0);
     add("TLAS scratch", bufBytes(mAccel.tlasScratchBuffer()));
-    add("Instance descriptors", bufBytes(mAccel.instanceBuffer()) + bufBytes(mPrevFrameInstanceBuffer));
+    add("Instance descriptors",
+        bufBytes(mAccel.instanceBuffer()) + bufBytes(mAccel.previousInstanceBuffer()));
     add("Geometry table", bufBytes(mGeometry.geometryEntryBuffer()));
     add("Curves", bufBytes(mGeometry.curvePointBuffer()) + bufBytes(mGeometry.curveRadiusBuffer()) +
                       bufBytes(mGeometry.curveSegmentBuffer()));
@@ -637,19 +609,19 @@ void MetalRender::init()
     mCommandQueue = mDevice->newCommandQueue();
     // 64 KB of constants per frame is far more than the tracer's handful of
     // small values needs; the ring is cheap and running out is a hard error.
-    // STRELKA_NO_MTL4 keeps the layer out of the process entirely, which is what
-    // isolates it when a measurement looks wrong.
-    if (!envFlag("STRELKA_NO_MTL4"))
+    mMetal4.init(mDevice, (uint32_t)kMaxFramesInFlight, static_cast<size_t>(64) * 1024);
+    if (!mMetal4.isValid())
     {
-        mMetal4.init(mDevice, (uint32_t)kMaxFramesInFlight, static_cast<size_t>(64) * 1024);
+        STRELKA_FATAL("Metal 4 is required by the Metal renderer");
+        return;
     }
     mTextures.init(mDevice, mCommandQueue, getSettings());
     mEnvironment.init(mDevice, getSettings());
     mGeometry.init(mDevice);
     mMaterials.init(mDevice, &mTextures, getSettings());
     mLights.init(mDevice);
-    mAccel.init(mDevice, mCommandQueue, &mGeometry, &mMaterials, &mTextures);
-    mSkinning.init(mDevice, mCommandQueue, &mMetal4, &mGeometry);
+    mAccel.init(mDevice, &mMetal4, &mGeometry, &mMaterials, &mTextures);
+    mSkinning.init(mDevice, &mMetal4, &mGeometry, (uint32_t)kMaxFramesInFlight);
     mFrameUniforms.init(mDevice);
     {
         metal::MetalPostProcess::HostHooks hooks;
@@ -732,9 +704,9 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mGeometry.vertexBuffer());
     add(mGeometry.prevVertexBuffer());
     add(mPrevFrameVertexBuffer);
-    add(mPrevFrameInstanceBuffer);
     add(mGeometry.indexBuffer());
     add(mAccel.instanceBuffer());
+    add(mAccel.previousInstanceBuffer());
     add(mMaterials.buffer());
     add(mLights.buffer());
     add(mLights.iesBuffer());
@@ -768,6 +740,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     for (uint32_t i = 0; i < 2; ++i) add(mPost.upscaleTexture((int)i));
     for (MTL::AccelerationStructure* as : mAccel.primitiveAccelerationStructures()) add(as);
     add(mAccel.instanceAccelerationStructure());
+    for (MTL::Buffer* buffer : mAccel.accelerationStructureAuxiliaryBuffers()) add(buffer);
     for (Mesh* mesh : mGeometry.meshes())
     {
         if (mesh && mesh->mPerPrimitiveBuffer) add(mesh->mPerPrimitiveBuffer);
@@ -820,7 +793,8 @@ metal::IntegratorSceneBindings MetalRender::integratorSceneBindings()
     b.prevVertexBuffer = mGeometry.prevVertexBuffer();
     b.indexBuffer = mGeometry.indexBuffer();
     b.prevFrameVertexBuffer = mPrevFrameVertexBuffer;
-    b.prevFrameInstanceBuffer = mPrevFrameInstanceBuffer;
+    b.prevFrameInstanceBuffer =
+        mAccel.instanceTransformsChanged() ? mAccel.previousInstanceBuffer() : mAccel.instanceBuffer();
     b.curvePointBuffer = mGeometry.curvePointBuffer();
     b.curveSegmentBuffer = mGeometry.curveSegmentBuffer();
     b.sharcBuffer = mFrameUniforms.sharcBuffer();
@@ -983,9 +957,7 @@ void MetalRender::render(Buffer* output)
     const bool wantTemporal = upscaling && !denoising && upscaleMode == 1u;
     if (wantTemporal)
     {
-        void* compiler = mMetal4.isValid() && getSettings()->getAs<uint32_t>("render/pt/metal4") != 0
-                             ? (void*)mMetal4.compiler()
-                             : nullptr;
+        void* compiler = mMetal4.isValid() ? (void*)mMetal4.compiler() : nullptr;
         if (mPost.metalFx().ensureTemporalScaler(mDevice, MTL::PixelFormatRGBA16Float, MTL::PixelFormatR32Float,
                                           MTL::PixelFormatRG16Float, MTL::PixelFormatRGBA16Float, width,
                                           height, outWidth, outHeight, compiler))
@@ -998,11 +970,7 @@ void MetalRender::render(Buffer* output)
     }
     if (upscaling && !denoising && !mPost.metalFx().hasTemporalScaler())
     {
-        void* spatialCompiler =
-            mMetal4.isValid() &&
-                    getSettings()->getAs<uint32_t>("render/pt/metal4") != 0
-                ? (void*)mMetal4.compiler()
-                : nullptr;
+        void* spatialCompiler = mMetal4.isValid() ? (void*)mMetal4.compiler() : nullptr;
         mPost.metalFx().ensureSpatialScaler(mDevice, MTL::PixelFormatRGBA16Float, MTL::PixelFormatRGBA16Float, width,
                                      height, outWidth, outHeight,
                                      // The tonemapper has already applied the tone curve and gamma,
@@ -1061,9 +1029,15 @@ void MetalRender::render(Buffer* output)
     // Before anything this frame can move: skinning rewrites the vertices and the
     // animation block re-uploads the instance transforms, so this is the last
     // moment at which both still describe the frame that was just displayed.
-    capturePrevFramePose();
+    const bool capturePrevVertices = capturePrevFramePose();
 
     bool motionBlurCameraSet = false; // track if animation block sets prev camera
+    bool encodeSkinOpen = false;
+    bool encodeSkinClose = false;
+    bool copyVerticesAfterOpen = false;
+    bool copyVerticesAfterClose = false;
+    bool encodeSkeletalBlas = false;
+    bool encodeTlas = false;
 
     // Animation detection: two-pass at t_open / t_close for motion blur (CHANGED-only)
     {
@@ -1148,11 +1122,12 @@ void MetalRender::render(Buffer* output)
 
                 if (pass1Skeletal)
                 {
-                    mSkinning.apply();
+                    encodeSkinOpen = mSkinning.uploadJointMatrices((uint32_t)ctx.mFrameNumber, 0);
+                    encodeSkeletalBlas = encodeSkinOpen;
                 }
                 // Always copy current VB to prevVB — ensures prev state is consistent
                 // even when only camera (not skeleton) animation changed
-                mSkinning.copyVertexBufferToPrev();
+                copyVerticesAfterOpen = true;
 
                 // --- Pass 2: evaluate CHANGED animations at t_close ---
                 bool pass2Skeletal = false;
@@ -1170,11 +1145,12 @@ void MetalRender::render(Buffer* output)
 
                 if (pass2Skeletal)
                 {
-                    mSkinning.apply();
-                    mAccel.updateSkeletalBLAS();
+                    encodeSkinClose = mSkinning.uploadJointMatrices((uint32_t)ctx.mFrameNumber, 1);
+                    encodeSkeletalBlas = encodeSkeletalBlas || encodeSkinClose;
                 }
                 mShutterIntervalActive = true;
-                mAccel.rebuildTLAS(); // already re-uploads the instance transforms
+                mAccel.updateInstanceTransforms();
+                encodeTlas = true;
 
                 // Restore target times so next-frame EPSILON check is stable
                 for (int i = 0; i < (int)animations.size(); ++i)
@@ -1192,19 +1168,21 @@ void MetalRender::render(Buffer* output)
 
                 if (accelStructureDirty)
                 {
-                    mSkinning.apply();
+                    encodeSkinOpen = mSkinning.uploadJointMatrices((uint32_t)ctx.mFrameNumber, 0);
                     // Sync prevVB with current VB — motion BVH needs both keyframes
                     // consistent when motion blur is off (otherwise keyframe 0 is stale)
-                    mSkinning.copyVertexBufferToPrev();
-                    mAccel.updateSkeletalBLAS();
-                    mAccel.rebuildTLAS();
+                    copyVerticesAfterClose = true;
+                    encodeSkeletalBlas = encodeSkinOpen;
+                    mAccel.updateInstanceTransforms();
+                    encodeTlas = true;
                     // Both keyframes are the same pose again: nothing to blur, and
                     // the scene can go back to static structures.
                     mShutterIntervalActive = false;
                 }
                 else
                 {
-                    mAccel.rebuildTLAS(); // already re-uploads the instance transforms
+                    mAccel.updateInstanceTransforms();
+                    encodeTlas = true;
                 }
             }
             ctx.mSubframeIndex = 0;
@@ -1390,15 +1368,17 @@ void MetalRender::render(Buffer* output)
             // Metal 4 path. Residency has to be refreshed whenever the set of
             // allocations can have changed; ensureBuffers only does work
             // when the resolution does, so its capacity doubles as the generation.
-            // Denoising pins the frame to Metal 3: the denoiser has no working
-            // Metal 4 variant to encode into an MTL4 command buffer.
-            // Only the denoiser pins a frame to Metal 3, and only because its
-            // Metal 4 constructor asserts inside MPSGraph -- see the note above
-            // ensureDenoiser and tools/metalfx_mtl4_denoiser_repro.mm. The
-            // temporal and spatial scalers both build through the Metal 4
-            // compiler, so upscaling no longer forces the older path.
-            const bool useMetal4 = mMetal4.isValid() && settings.getAs<uint32_t>("render/pt/metal4") != 0 &&
-                                   mIntegrator.resolvePSO4() != nullptr && !denoising;
+            // Skinning, acceleration-structure maintenance, and tracing share
+            // the Metal 4 queue. The denoiser remains a Metal 3 post-process,
+            // synchronized from the Metal 4 frame event after guide resolve.
+            const bool useMetal4 = mMetal4.isValid() && mIntegrator.resolvePSO4() != nullptr;
+            if (!useMetal4)
+            {
+                STRELKA_FATAL("Metal 4 wavefront pipeline is required");
+                mRenderBusy.store(false, std::memory_order_release);
+                pPool->release();
+                return;
+            }
 
             const bool profileStages = settings.getAs<uint32_t>("render/pt/profileStages") != 0;
             if (profileStages)
@@ -1422,7 +1402,7 @@ void MetalRender::render(Buffer* output)
             featureIn.hasCurves = mGeometry.hasCurves();
             const uint32_t features = metal::packWavefrontFeatures(featureIn).bits();
 
-            const metal::IntegratorSceneBindings sceneBind = integratorSceneBindings();
+            metal::IntegratorSceneBindings sceneBind = integratorSceneBindings();
             metal::IntegratorFrameRequest frameReq;
             frameReq.uniformBuffer = pUniformBuffer;
             frameReq.output = output;
@@ -1457,22 +1437,57 @@ void MetalRender::render(Buffer* output)
                     mIntegrator.clearResidencyDirty();
                 }
 
-                // The structures this frame traverses were built on the Metal 3
-                // queue, which orders nothing against this one. Skinned geometry
-                // rebuilds its structures every animated frame, so without this
-                // the tracer reads them mid-write.
-                if (mAccel.buildEvent() && (mAccel.buildEvent() != mMetal4AccelWaitEvent ||
-                                            mAccel.buildValue() != mMetal4AccelWaitValue))
-                {
-                    mMetal4AccelWaitEvent = mAccel.buildEvent();
-                    mMetal4AccelWaitValue = mAccel.buildValue();
-                    mMetal4.queue()->wait(mMetal4AccelWaitEvent, mMetal4AccelWaitValue);
-                }
-
                 MTL4::CommandBuffer* cmd4 = mMetal4.beginFrame((uint32_t)ctx.mFrameNumber);
                 MTL4::ComputeCommandEncoder* enc4 = cmd4->computeCommandEncoder();
+                if (capturePrevVertices)
+                {
+                    enc4->copyFromBuffer(mGeometry.vertexBuffer(), 0, mPrevFrameVertexBuffer, 0,
+                                         mGeometry.vertexBuffer()->length());
+                    enc4->barrierAfterEncoderStages(MTL::StageBlit, MTL::StageDispatch,
+                                                    MTL4::VisibilityOptionDevice);
+                }
+                if (encodeSkinOpen)
+                {
+                    mSkinning.encode(enc4, mMetal4.constants(), (uint32_t)ctx.mFrameNumber, 0);
+                }
+                if (copyVerticesAfterOpen)
+                {
+                    if (encodeSkinOpen)
+                    {
+                        enc4->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageBlit,
+                                                        MTL4::VisibilityOptionDevice);
+                    }
+                    mSkinning.encodeCopyVertexBufferToPrev(enc4);
+                }
+                if (encodeSkinClose)
+                {
+                    if (copyVerticesAfterOpen)
+                    {
+                        enc4->barrierAfterEncoderStages(MTL::StageBlit, MTL::StageDispatch,
+                                                        MTL4::VisibilityOptionDevice);
+                    }
+                    mSkinning.encode(enc4, mMetal4.constants(), (uint32_t)ctx.mFrameNumber, 1);
+                }
+                if (copyVerticesAfterClose)
+                {
+                    if (encodeSkinOpen || encodeSkinClose)
+                    {
+                        enc4->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageBlit,
+                                                        MTL4::VisibilityOptionDevice);
+                    }
+                    mSkinning.encodeCopyVertexBufferToPrev(enc4);
+                }
+                if (encodeSkeletalBlas)
+                {
+                    mAccel.encodeSkeletalBLAS(enc4);
+                }
+                if (encodeTlas)
+                {
+                    mAccel.encodeTLAS(enc4);
+                    sceneBind.instanceAccelerationStructure = mAccel.instanceAccelerationStructure();
+                }
                 mIntegrator.encodeMetal4(cmd4, enc4, sceneBind, frameReq);
-                if (mPost.tonemapperPSO4())
+                if (!denoising && mPost.tonemapperPSO4())
                 {
                     enc4->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch,
                                                     MTL4::VisibilityOptionDevice);
@@ -1484,7 +1499,7 @@ void MetalRender::render(Buffer* output)
                                                MTL::Size(8, 8, 1));
                 }
                 enc4->endEncoding();
-                if (upscaling)
+                if (!denoising && upscaling)
                 {
                     // MetalFX encodes into the command buffer, not an encoder of
                     // ours, so this has to follow endEncoding().
@@ -1492,47 +1507,93 @@ void MetalRender::render(Buffer* output)
                                            mPost.displayTexture(mWriteIndex), width, height);
                 }
                 cmd4->endCommandBuffer();
+                // Per-frame TLAS growth and scratch resizing can add allocations
+                // while encoding; publish those changes before submission.
+                mMetal4.commitResidency();
 
                 // Completion arrives through commit options rather than a
                 // handler on the command buffer, and carries the GPU interval
                 // with it, so the Metal 3 timing path needs no counterpart.
+                const MTL4::CommandBuffer* buffers[] = { cmd4 };
                 const int writeIdx4 = mWriteIndex;
+                const bool asyncPresent = !denoising;
                 MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
                 options->addFeedbackHandler(
-                    MTL4::CommitFeedbackHandlerFunction([this, writeIdx4](MTL4::CommitFeedback* fb) {
-                        mLastRenderTimeMs.store((fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0,
-                                                std::memory_order_relaxed);
-                        mReadyIndex.store(writeIdx4);
-                        mRenderBusy.store(false, std::memory_order_release);
+                    MTL4::CommitFeedbackHandlerFunction([this, writeIdx4, asyncPresent](MTL4::CommitFeedback* fb) {
+                        // The feedback is the only place a Metal 4 frame reports
+                        // failure: there is no status() to poll afterwards the way
+                        // the Metal 3 path polls its command buffer. Without this
+                        // the sole symptom is the frame event never reaching its
+                        // value, which surfaces as a timeout and names no cause.
+                        NS::Error* error = fb ? fb->error() : nullptr;
+                        if (error)
+                        {
+                            mMetal4FrameFailed.store(true, std::memory_order_relaxed);
+                            if (!mMetal4FrameFailReported.exchange(true, std::memory_order_relaxed))
+                            {
+                                // The interval separates the two failures that
+                                // report the same code: work that really ran too
+                                // long, and work the watchdog killed while it sat
+                                // waiting on something that never arrived.
+                                STRELKA_ERROR("Metal 4 frame failed after {:.1f} ms on the GPU: {} (domain {}, "
+                                              "code {})",
+                                              (fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0,
+                                              error->localizedDescription()
+                                                  ? error->localizedDescription()->utf8String()
+                                                  : "unknown error",
+                                              error->domain() ? error->domain()->utf8String() : "?",
+                                              (long)error->code());
+                            }
+                        }
+                        if (asyncPresent)
+                        {
+                            mLastRenderTimeMs.store((fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0,
+                                                    std::memory_order_relaxed);
+                            mReadyIndex.store(writeIdx4);
+                            mRenderBusy.store(false, std::memory_order_release);
+                        }
                     }));
-                const MTL4::CommandBuffer* buffers[] = { cmd4 };
                 mMetal4.queue()->commit(buffers, 1, options);
                 options->release();
                 // Signalled on the queue after the commit, so it orders behind
                 // this frame's work. renderSync waits on it; the async loop
                 // ignores it and keeps using the feedback handler above.
                 mMetal4FrameValue = mMetal4.signalFrame();
+                mAccel.markInstanceTransformsRendered();
 
-                ctx.mSubframeIndex =
-                    accumulationActive
-                        ? ctx.mSubframeIndex + samplesThisLaunch
-                        : (effectiveAccumulation ? ctx.mSubframeIndex : 0);
-                pPool->release();
-                mPrevView = currView;
-                mHasPrevFramePose = true;
-                ctx.mFrameNumber++;
-                return;
+                if (!denoising)
+                {
+                    ctx.mSubframeIndex =
+                        accumulationActive
+                            ? ctx.mSubframeIndex + samplesThisLaunch
+                            : (effectiveAccumulation ? ctx.mSubframeIndex : 0);
+                    pPool->release();
+                    mPrevView = currView;
+                    mHasPrevFramePose = true;
+                    ctx.mFrameNumber++;
+                    return;
+                }
             }
 
             MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
+            if (useMetal4)
+            {
+                // MetalFX denoising still requires an MTLCommandBuffer. Its
+                // guide textures were produced by the Metal 4 trace above.
+                pCmd->encodeWait(mMetal4.frameEvent(), mMetal4FrameValue);
+            }
             {
                 // Numbered, so a capture names the sample a frame came from
                 // rather than "Command Buffer 0" four hundred times over.
                 const std::string label = fmt::format("sample {}", (uint32_t)ctx.mSubframeIndex);
                 pCmd->setLabel(NS::String::string(label.c_str(), NS::UTF8StringEncoding));
             }
-            MTL::ComputeCommandEncoder* enc = pCmd->computeCommandEncoder();
-            enc = mIntegrator.encode(pCmd, enc, sceneBind, frameReq);
+            MTL::ComputeCommandEncoder* enc = nullptr;
+            if (!useMetal4)
+            {
+                enc = pCmd->computeCommandEncoder();
+                enc = mIntegrator.encode(pCmd, enc, sceneBind, frameReq);
+            }
             if (profileStages)
             {
                 const double encodeMs =
@@ -1541,7 +1602,7 @@ void MetalRender::render(Buffer* output)
                 STRELKA_INFO("STAGES cpu encode {:.3f} ms", encodeMs);
             }
 
-            if (!denoising)
+            if (!useMetal4 && !denoising)
             {
                 enc->setComputePipelineState(mPost.tonemapperPSO());
                 enc->useResource(((MetalBuffer*)output)->getNativePtr(),
@@ -1552,7 +1613,7 @@ void MetalRender::render(Buffer* output)
                 enc->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
             }
             const bool temporalUpscale = upscaling && !denoising && mPost.metalFx().hasTemporalScaler();
-            if (denoising || temporalUpscale)
+            if (!useMetal4 && (denoising || temporalUpscale))
             {
                 // Spread the packed guides into the textures MetalFX reads, and
                 // hand it linear radiance: exposure and the tone curve come after
@@ -1576,7 +1637,10 @@ void MetalRender::render(Buffer* output)
                 enc->setTexture(mPost.guides().reactive, 8);
                 enc->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
             }
-            enc->endEncoding();
+            if (enc)
+            {
+                enc->endEncoding();
+            }
 
             if (denoising)
             {
@@ -1603,6 +1667,10 @@ void MetalRender::render(Buffer* output)
                 const uint32_t jitterSign = settings.getAs<uint32_t>("render/pt/jitterSign");
                 in.jitterX = (jitterSign & 1u) ? -pUniformData->jitterX : pUniformData->jitterX;
                 in.jitterY = (jitterSign & 2u) ? -pUniformData->jitterY : pUniformData->jitterY;
+                // The same scalar the tone curve applies after the denoise. The
+                // three channels only differ under a white point the renderer
+                // does not currently set, and MetalFX takes one number.
+                in.exposure = simd::reduce_max(pUniformData->exposureValue);
                 in.depthReversed =
                     pUniformData->denoiseDepthMode == kDenoiseDepthDevice;
                 // Reset when this frame has no valid predecessor to reproject
@@ -1874,13 +1942,41 @@ void MetalRender::renderSync(Buffer* output)
     {
         // Metal 4 frame. The event is signalled on the queue behind this
         // frame's work, so returning from here means the output buffer holds it.
-        if (!mMetal4.waitForFrame(mMetal4FrameValue))
+        //
+        // Waited for in slices rather than with one deadline: a launch carrying
+        // many samples runs for seconds by design, and the Metal 3 path it
+        // replaces had no deadline at all (waitUntilCompleted). A single short
+        // timeout therefore reported a healthy GPU as a device error and threw
+        // the render away. What a real failure looks like is the commit feedback
+        // firing with an error, which is what ends the wait early; the budget is
+        // only a backstop for a frame that neither completes nor reports.
+        constexpr uint32_t kFrameWaitSliceMs = 1000;
+        constexpr uint32_t kFrameWaitBudgetMs = 60000;
+        bool completed = false;
+        uint32_t waitedMs = 0;
+        while (waitedMs < kFrameWaitBudgetMs)
+        {
+            if (mMetal4.waitForFrame(mMetal4FrameValue, kFrameWaitSliceMs))
+            {
+                completed = true;
+                break;
+            }
+            if (mMetal4FrameFailed.load(std::memory_order_relaxed))
+            {
+                break;
+            }
+            waitedMs += kFrameWaitSliceMs;
+        }
+        if (!completed)
         {
             mDeviceError = true;
-            if (!mDeviceErrorReported)
+            // A frame that failed has already been described by the feedback
+            // handler, in more detail than this could manage.
+            if (!mDeviceErrorReported && !mMetal4FrameFailed.load(std::memory_order_relaxed))
             {
                 mDeviceErrorReported = true;
-                STRELKA_ERROR("Metal 4 frame did not complete within the timeout");
+                STRELKA_ERROR("Metal 4 frame did not complete in {} s and reported no error",
+                              kFrameWaitBudgetMs / 1000);
             }
         }
         if (getSettings()->getAs<uint32_t>("render/pt/profileStages") != 0)

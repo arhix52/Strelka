@@ -1,16 +1,20 @@
 #pragma once
 
 #include "MetalGeometry.h"
+#include "Metal4Context.h"
 #include "MetalMaterials.h"
 #include "MetalTextures.h"
 
 #include <Metal/Metal.hpp>
+#include <Metal/MTL4AccelerationStructure.hpp>
+#include <Metal/MTL4ComputeCommandEncoder.hpp>
 #include <settings.h>
 #include <strelka/scene/scene.h>
 
 #include <loadprogress.h>
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace oka
@@ -33,8 +37,11 @@ public:
         MTL::AccelerationStructure* mAs = nullptr;
         // Kept alive for refit. Invariant: it only names buffers, offsets and
         // triangle counts, none of which change while the pose does.
-        MTL::PrimitiveAccelerationStructureDescriptor* mDescriptor = nullptr;
+        MTL4::PrimitiveAccelerationStructureDescriptor* mDescriptor = nullptr;
         MTL::Buffer* mScratch = nullptr; // persistent, reused every refit/rebuild
+        // A motion descriptor reads an array of BufferRange values from GPU
+        // memory. Keep each array alive with the descriptor that names it.
+        std::vector<MTL::Buffer*> mMotionVertexRangeBuffers;
         size_t mRefitScratchSize = 0;
         size_t mBuildScratchSize = 0;
         bool mIsSkeletal = false;
@@ -55,7 +62,7 @@ public:
     ~MetalAccelStructure();
 
     void init(MTL::Device* device,
-              MTL::CommandQueue* queue,
+              Metal4Context* metal4,
               MetalGeometry* geometry,
               MetalMaterials* materials,
               MetalTextures* textures);
@@ -106,26 +113,29 @@ public:
     void updateInstanceTransforms();
     void rebuildTLAS();
 
-    /// Structure builds are committed to the Metal 3 queue, so anything reading
-    /// them from that same queue is ordered behind them for free. A consumer on
-    /// another queue -- the Metal 4 tracer -- has no such ordering and must wait
-    /// on this event for `buildValue()` before it traverses. Without that wait a
-    /// per-frame rebuild (the skeletal structures, while an animation plays) is
-    /// traversed while it is being written: rays miss the geometry, and once the
-    /// structure is resident on the other queue the read faults outright.
-    MTL::SharedEvent* buildEvent() const
-    {
-        return mBuildEvent;
-    }
-    /// The value the last committed build will signal. Zero until one has been.
-    uint64_t buildValue() const
-    {
-        return mBuildValue;
-    }
+    /// Encode dynamic updates into an encoder owned by the caller. These methods
+    /// neither end the encoder nor create, commit, or wait for command buffers.
+    void encodeSkeletalBLAS(MTL4::ComputeCommandEncoder* encoder);
+    void encodeTLAS(MTL4::ComputeCommandEncoder* encoder);
 
     MTL::Buffer* instanceBuffer() const
     {
         return mInstanceBuffer;
+    }
+    /// Descriptor buffer used by the preceding rendered transform state. When
+    /// no transforms changed for the current frame, current is also the honest
+    /// previous state and the renderer need not read this buffer.
+    MTL::Buffer* previousInstanceBuffer() const
+    {
+        return mPreviousInstanceBuffer;
+    }
+    bool instanceTransformsChanged() const
+    {
+        return mInstanceTransformsChanged;
+    }
+    void markInstanceTransformsRendered()
+    {
+        mInstanceTransformsChanged = false;
     }
     MTL::AccelerationStructure* instanceAccelerationStructure() const
     {
@@ -155,6 +165,7 @@ public:
     {
         return mTlasScratchBuffer;
     }
+    std::vector<MTL::Buffer*> accelerationStructureAuxiliaryBuffers() const;
 
     uint32_t opaqueGeometryCount() const
     {
@@ -166,22 +177,29 @@ public:
     }
 
 private:
-    MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);
+    MTL::AccelerationStructure* createAccelerationStructure(MTL4::AccelerationStructureDescriptor* descriptor);
     void flushAccelerationStructureGroup();
-    MTL::AccelerationStructure* createAccelerationStructureNoCompact(MTL::AccelerationStructureDescriptor* descriptor);
-    MTL::AccelerationStructureTriangleGeometryDescriptor* createStaticGeometryDescriptor(const oka::Mesh& sceneMesh,
-                                                                                         MTL::Buffer* perPrimitiveBuffer,
-                                                                                         uint32_t triangleCount);
-    MTL::AccelerationStructureMotionTriangleGeometryDescriptor* createMotionGeometryDescriptor(
-        const oka::Mesh& sceneMesh, MTL::Buffer* perPrimitiveBuffer, uint32_t triangleCount);
+    MTL::AccelerationStructure* createAccelerationStructureNoCompact(MTL4::AccelerationStructureDescriptor* descriptor);
+    MTL4::AccelerationStructureTriangleGeometryDescriptor* createStaticGeometryDescriptor(const oka::Mesh& sceneMesh,
+                                                                                          MTL::Buffer* perPrimitiveBuffer,
+                                                                                          uint32_t triangleCount);
+    MTL4::AccelerationStructureMotionTriangleGeometryDescriptor* createMotionGeometryDescriptor(
+        const oka::Mesh& sceneMesh,
+        MTL::Buffer* perPrimitiveBuffer,
+        uint32_t triangleCount,
+        std::vector<MTL::Buffer*>& motionVertexRangeBuffers);
     size_t buildBlas(const std::vector<uint32_t>& sceneInstanceIds, bool skeletal);
     size_t buildCurveBlas(uint32_t sceneInstanceId);
     void ensureScratchBuffer(MTL::Buffer*& buffer, size_t requiredSize);
-    /// Tag `commandBuffer` as the newest structure build, for cross-queue waits.
-    void signalBuild(MTL::CommandBuffer* commandBuffer);
+    void addDescriptorResidency();
+    void writeInstanceTransforms(MTL::Buffer* buffer);
+    bool beginImmediate(MTL4::CommandBuffer*& commandBuffer, MTL4::ComputeCommandEncoder*& encoder);
+    /// Free the replaced top-level structures that are at least `age` encodes
+    /// old; `age` of zero frees all of them and is only safe after a drain.
+    void releaseRetiredInstanceStructures(uint64_t age);
 
     MTL::Device* mDevice = nullptr;
-    MTL::CommandQueue* mCommandQueue = nullptr;
+    Metal4Context* mMetal4 = nullptr;
     MetalGeometry* mGeometry = nullptr;
     MetalMaterials* mMaterials = nullptr;
     MetalTextures* mTextures = nullptr;
@@ -193,13 +211,30 @@ private:
     std::vector<EmittedInstance> mEmittedInstances;
     std::vector<MTL::AccelerationStructure*> mPrimitiveAccelerationStructures;
     MTL::AccelerationStructure* mInstanceAccelerationStructure = nullptr;
+    // Reused for every TLAS refit. Its instance buffer is changed when the two
+    // descriptor buffers exchange current/previous roles. MTL4 command buffers
+    // do not retain descriptors encoded into them.
+    MTL4::InstanceAccelerationStructureDescriptor* mTlasDescriptor = nullptr;
     MTL::Buffer* mInstanceBuffer = nullptr;
+    // Two are sufficient because MetalRender submits at most one frame at a
+    // time: async rendering stays busy until commit feedback (or the Metal 3
+    // denoiser completion), and renderSync waits. If that policy changes to
+    // multiple frames in flight, this must become one buffer per frame slot.
+    MTL::Buffer* mPreviousInstanceBuffer = nullptr;
+    bool mInstanceTransformsChanged = false;
     MTL::Buffer* mTlasScratchBuffer = nullptr;
     size_t mTlasInstanceCount = 0;
+    // A top level that has to grow is replaced from inside the frame's encoder,
+    // where the structure it replaces may still be read by the frames already in
+    // flight. Freeing it there is a fault the frame after next; it waits here
+    // for as many encodes as there can be frames outstanding instead.
+    std::vector<std::pair<MTL::AccelerationStructure*, uint64_t>> mRetiredInstanceStructures;
+    uint64_t mTlasEncodeCount = 0;
 
-    MTL::CommandBuffer* mAsGroupCommandBuffer = nullptr;
-    MTL::AccelerationStructureCommandEncoder* mAsGroupEncoder = nullptr;
+    MTL4::CommandBuffer* mAsGroupCommandBuffer = nullptr;
+    MTL4::ComputeCommandEncoder* mAsGroupEncoder = nullptr;
     std::vector<MTL::Buffer*> mAsGroupScratch;
+    std::vector<MTL4::AccelerationStructureDescriptor*> mAsGroupDescriptors;
     uint32_t mAsGroupPending = 0;
 
     AsBuildState* mAsBuild = nullptr;
@@ -210,11 +245,11 @@ private:
     uint32_t mOpaqueGeometryCount = 0;
     uint32_t mCutoutGeometryCount = 0;
 
+    // Matches the renderer's frames in flight. Kept here rather than shared,
+    // because being wrong on the high side only delays a free.
+    static constexpr uint64_t kMaxFramesInFlight = 3;
     static constexpr size_t kMaxBlasRebuildsPerFrame = 8;
     size_t mNextBlasRebuildIndex = 0;
-
-    MTL::SharedEvent* mBuildEvent = nullptr;
-    uint64_t mBuildValue = 0;
 };
 
 } // namespace metal

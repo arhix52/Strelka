@@ -40,5 +40,6 @@
 // Materials::isCutout() / hasAlphaMaterials() / isMediumBoundary() for opaque
 // flags, instance options, and ray masks.
 //
-// Frame flow in MetalRender::render(): preparation → scene edits → skinning →
-// accel pose update → FrameUniforms::fill → integrator → post.
+// Frame flow in MetalRender::render(): preparation → scene edits → CPU pose
+// upload → one Metal 4 encoder (skinning → accel update → integrator) → post.
+// Metal 3 remains only beyond a frame event when the MetalFX denoiser is enabled.

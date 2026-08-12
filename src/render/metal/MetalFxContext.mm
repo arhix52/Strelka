@@ -426,6 +426,19 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
             return false;
         }
         mDenoiser = (void*)denoiser;
+
+        // Auto exposure is off, so this is the only thing that tells MetalFX what
+        // scale the radiance it is handed is in. Shared storage: a single half
+        // the CPU rewrites when the exposure changes, which is rarely.
+        MTLTextureDescriptor* exposureDesc =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float
+                                                               width:1
+                                                              height:1
+                                                           mipmapped:NO];
+        exposureDesc.usage = MTLTextureUsageShaderRead;
+        exposureDesc.storageMode = MTLStorageModeShared;
+        mExposureTexture = (void*)[nativeDevice newTextureWithDescriptor:exposureDesc];
+        mExposure = 0.0f;
     }
 
     mDenoiseInputWidth = inputWidth;
@@ -477,6 +490,34 @@ void MetalFxContext::encodeDenoise(void* commandBuffer, const DenoiseInputs& inp
     d.specularHitDistanceTexture = (__bridge id<MTLTexture>)inputs.specularHitDistance;
     d.reactiveMaskTexture = (__bridge id<MTLTexture>)inputs.reactive;
     d.outputTexture = (__bridge id<MTLTexture>)inputs.output;
+    // Hand over the scene's exposure rather than leaving MetalFX to assume 1.
+    //
+    // The colour texture is linear radiance, which on a path traced scene runs to
+    // hundreds while the tone curve that follows scales it by about a thousandth.
+    // MetalFX weighs history, clamps neighbourhoods and detects fireflies in an
+    // exposed space, so at an assumed exposure of 1 every lit pixel sits past the
+    // top of that space and those three decisions are all made on saturated
+    // values: measured on BrainStem it crushed the 99th percentile of the frame
+    // from 202 to 93 and blew a thousandth of it up to a 2047 clamp -- a black
+    // model covered in coloured sparks. With the exposure supplied the same frame
+    // reconstructs to within 25% of the converged reference.
+    //
+    // A fixed value rather than autoExposureEnabled on purpose: that estimate
+    // moves with the frame's content, so the history would be normalised
+    // differently from the frame being blended into it.
+    if (mExposureTexture)
+    {
+        if (inputs.exposure != mExposure)
+        {
+            const __fp16 half = (__fp16)inputs.exposure;
+            [(__bridge id<MTLTexture>)mExposureTexture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                                                         mipmapLevel:0
+                                                           withBytes:&half
+                                                         bytesPerRow:sizeof(half)];
+            mExposure = inputs.exposure;
+        }
+        d.exposureTexture = (__bridge id<MTLTexture>)mExposureTexture;
+    }
     d.jitterOffsetX = inputs.jitterX;
     d.jitterOffsetY = inputs.jitterY;
     // Our motion vectors are already in pixels and point from the current frame
@@ -524,6 +565,12 @@ void MetalFxContext::release()
         CFRelease(mDenoiser);
         mDenoiser = nullptr;
     }
+    if (mExposureTexture)
+    {
+        CFRelease(mExposureTexture);
+        mExposureTexture = nullptr;
+    }
+    mExposure = 0.0f;
     mDenoiseInputWidth = mDenoiseInputHeight = mDenoiseOutputWidth = mDenoiseOutputHeight = 0;
     mColorFormat = MTL::PixelFormatInvalid;
     mOutputFormat = MTL::PixelFormatInvalid;

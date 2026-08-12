@@ -8,7 +8,8 @@
 //   'Incompatible shape for parameter at index 0'
 //
 // while the Metal 3 constructor, [descriptor newTemporalDenoisedScalerWithDevice:],
-// succeeds on the byte-identical descriptor. Observed on macOS 26.5.2, Apple M1 Pro.
+// succeeds on the byte-identical descriptor. Observed on macOS 26.5.2 (25F84) on
+// both Apple M1 Pro and Apple M4 Pro, so it is not tied to one GPU generation.
 //
 // The failure is in the denoised scaler alone. Both neighbours are fine through
 // the same compiler, which is what rules out the compiler and the environment:
@@ -22,7 +23,7 @@
 // call aborts on an A17 Pro with a different symptom again
 // ("-[AGXG16XFamilyHeap baseObject]: unrecognized selector"). The recommended
 // workaround is the Metal 3 constructor. Note that supportsMetal4FX: answers YES
-// on both machines, so it cannot be used to decide.
+// on every machine above, so it cannot be used to decide.
 //
 // Ruled out by bisection, each tried on its own and in combination: every texture
 // format the descriptor accepts, input and output sizes including 1:1, autoExposure

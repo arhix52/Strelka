@@ -441,15 +441,10 @@ void EditorApp::loadSettings()
     {
         m_settingsManager->setAs<bool>("render/pt/denoise", envBool("STRELKA_DENOISE", false));
     }
-    m_settingsManager->setAs<uint32_t>("render/pt/metal4", 1);
     m_settingsManager->setAs<uint32_t>("render/pt/sortRays", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/textureLod", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/guidePrimaryHit", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
-    if (envFlag("STRELKA_METAL4"))
-    {
-        m_settingsManager->setAs<uint32_t>("render/pt/metal4", envUint("STRELKA_METAL4", 1));
-    }
     if (envFlag("STRELKA_UPSCALE"))
     {
         const float f = envFloat("STRELKA_UPSCALE", 1.0f);
@@ -1791,7 +1786,7 @@ void EditorApp::runDenoiseAudit()
             for (size_t i = 0; i < ctrl.px.size(); i += 4)
             {
                 const double d0 = (double)a0.px[i], d1 = (double)ctrl.px[i];
-                if (d0 <= 0.0 || d0 >= 1e6 || d1 >= 1e6)
+                if (d0 <= 0.0 || d0 >= 1e6 || d1 <= 0.0 || d1 >= 1e6)
                     continue;
                 floorDeltas.push_back(std::abs(d1 - d0) / d0);
             }
@@ -1801,33 +1796,61 @@ void EditorApp::runDenoiseAudit()
             floorDeltas.empty() ? 0.0 : floorDeltas[(size_t)(floorDeltas.size() * 0.99)];
         const double movedThreshold = std::max(4.0 * floorDelta, 0.01);
 
-        setAnimTime(0.08f);
+        // A step the renderer still calls playback. Animation time is normalised
+        // here, so what this costs in seconds depends on the clip -- and a jump
+        // past 5% of one is a cut, which drops the previous pose on purpose and
+        // hands back a frame with no motion vectors anywhere. At 0.08 of a
+        // 35-second clip this test was measuring the cut path.
+        setAnimTime(0.01f);
         step();
         AuditImage a1, mv;
         guide(Render::Guide::Depth, a1);
         guide(Render::Guide::Motion, mv);
-        size_t changed = 0, changedNoMv = 0;
+        // Surface pixels, not changed ones. The mesh deforms mostly across the
+        // view rather than along it, so a depth threshold selects the silhouette
+        // -- and half of the silhouette is sky in one of the two frames, where a
+        // still camera correctly writes no motion at all. Counting those reported
+        // 100% of a deforming character as missing its motion vectors on every
+        // run, on a renderer whose vectors were fine.
+        size_t surface = 0, withMv = 0, silhouette = 0, deformed = 0;
+        double sumMv = 0.0, maxMv = 0.0;
         if (a0.valid() && a1.valid() && a1.px.size() == mv.px.size())
         {
             for (size_t i = 0; i < a1.px.size(); i += 4)
             {
                 // Depth, not colour: colour also changes with the noise seed.
                 const double d0 = (double)a0.px[i], d1 = (double)a1.px[i];
-                if (d0 <= 0.0 || d0 >= 1e6 || d1 >= 1e6)
-                    continue; // background: nothing here to deform
-                if (std::abs(d1 - d0) / d0 < movedThreshold)
+                const bool geo0 = d0 > 0.0 && d0 < 1e6;
+                const bool geo1 = d1 > 0.0 && d1 < 1e6;
+                if (geo0 != geo1)
+                {
+                    ++silhouette; // the mesh moved on or off this pixel
                     continue;
-                ++changed;
-                if (std::abs((double)mv.px[i]) + std::abs((double)mv.px[i + 1]) <= 0.25)
-                    ++changedNoMv;
+                }
+                if (!geo1)
+                    continue; // background in both
+                ++surface;
+                if (std::abs(d1 - d0) / d0 >= movedThreshold)
+                    ++deformed;
+                const double m = std::abs((double)mv.px[i]) + std::abs((double)mv.px[i + 1]);
+                sumMv += m;
+                maxMv = std::max(maxMv, m);
+                if (m > 0.25)
+                    ++withMv;
             }
         }
         report(fmt::format("AUDIT motion {:22s} jitter floor={:.4f}, threshold={:.4f}", "scene moved",
                            floorDelta, movedThreshold));
-        report(fmt::format("AUDIT motion {:22s} moved={} px, of which without motion vector={} ({:.1f}%)",
-                           "scene moved", changed, changedNoMv,
-                           changed ? 100.0 * (double)changedNoMv / (double)changed : 0.0));
-        if (changed && changedNoMv * 10 > changed)
+        report(fmt::format("AUDIT motion {:22s} surface={} px, silhouette moved={} px, depth moved={} px",
+                           "scene moved", surface, silhouette, deformed));
+        report(fmt::format("AUDIT motion {:22s} with motion vector={:.1f}%  mean={:.2f} px  max={:.2f} px",
+                           "scene moved", surface ? 100.0 * (double)withMv / (double)surface : 0.0,
+                           surface ? sumMv / (double)surface : 0.0, maxMv));
+        // Nothing to carry is not the same as failing to carry it: an animation
+        // that happens to hold still over this step cannot be measured.
+        if (surface && silhouette == 0 && deformed == 0)
+            report("AUDIT motion       scene moved            the pose did not change, nothing to measure");
+        else if (surface && withMv * 2 < surface)
             report("AUDIT FAIL deforming geometry has no motion vectors");
     }
 
@@ -2001,9 +2024,19 @@ void EditorApp::runDenoiseAudit()
                 ratios.push_back(d / t);
             }
             std::sort(ratios.begin(), ratios.end());
+            const double median = ratios.empty() ? 0.0 : ratios[ratios.size() / 2];
+            const double blackShare = lit ? 100.0 * (double)nearBlack / (double)lit : 0.0;
             report(fmt::format("AUDIT {:14s} vs truth: median ratio={:.4f}  pixels below 10% of truth={:.1f}%",
-                               s.name, ratios.empty() ? 0.0 : ratios[ratios.size() / 2],
-                               lit ? 100.0 * (double)nearBlack / (double)lit : 0.0));
+                               s.name, median, blackShare));
+            // Loud, because this was the number that knew. A reconstruction that
+            // lands at half the reference's brightness with a sixth of the frame
+            // near black is not a denoise quality question, it is a broken input
+            // -- and it sat in the log as a report line for as long as MetalFX
+            // was being handed radiance with no exposure to read it by.
+            if (!ratios.empty() && (median < 0.75 || median > 1.33 || blackShare > 5.0))
+                report(fmt::format("AUDIT FAIL {} does not reproduce the reference's brightness "
+                                   "(median ratio {:.2f}, {:.1f}% near black)",
+                                   s.name, median, blackShare));
         }
         save((std::string(s.name).substr(0, 2) + "_denoised").c_str(), last);
         save((std::string(s.name).substr(0, 2) + "_truth").c_str(), truth);
@@ -2253,8 +2286,7 @@ void EditorApp::runDenoiseAudit()
         m_settingsManager->setAs<bool>("render/isMotionBlurVisible", mbOn);
 
         const float tA = 0.10f, tB = 0.16f;
-        std::vector<uint8_t> depthMask;
-        size_t depthMovedCount = 0;
+        std::vector<uint8_t> surface;
         setAnimTime(tA);
         AuditImage truthA;
         converge(truthA);
@@ -2265,7 +2297,7 @@ void EditorApp::runDenoiseAudit()
         // Geometry, not lighting. A mask built from how the *picture* changes
         // between two animation times also catches the character's shadow and the
         // light it bounces, which are not the animated mesh and denoise
-        // differently. The depth guide moves only where geometry does.
+        // differently. The depth guide says where there is a surface at all.
         {
             m_settingsManager->setAs<float>("render/pt/upscaleFactor", 1.0f);
             m_settingsManager->setAs<bool>("render/pt/enableUpscale", false);
@@ -2283,30 +2315,29 @@ void EditorApp::runDenoiseAudit()
             guide(Render::Guide::Depth, dB);
             if (dA.valid() && dB.valid() && dA.px.size() == dB.px.size())
             {
-                depthMask.assign(dA.px.size() / 4, 2);
+                surface.assign(dA.px.size() / 4, 0);
                 for (size_t i = 0, p = 0; i < dA.px.size(); i += 4, ++p)
                 {
+                    // Sky in either frame is excluded from everything below. A
+                    // pixel the mesh moved off carries the background's guides,
+                    // and on this scene the character is 5% of the frame, so
+                    // admitting the sky put its zero albedo, zero depth and zero
+                    // motion into every per-pixel number the section reports.
                     const double a = dA.px[i], b = dB.px[i];
-                    const bool bg = a <= 0.0 || a >= 1e6 || b >= 1e6;
-                    if (!bg && std::abs(b - a) / std::max(a, 1e-6) > 0.01)
-                    {
-                        depthMask[p] = 1;
-                        ++depthMovedCount;
-                    }
-                    else if (!bg)
-                    {
-                        depthMask[p] = 0;
-                    }
+                    surface[p] = (a > 0.0 && a < 1e6 && b > 0.0 && b < 1e6) ? 1 : 0;
                 }
             }
             m_settingsManager->setAs<float>("render/pt/upscaleFactor", upscale);
         }
 
-        // Self-calibrating: the strongest tenth of the change is the geometry that
-        // actually moved, the weakest half is background. An absolute threshold
-        // marks most of the frame instead, because converged references still
-        // carry a little noise and the moving character relights everything
-        // around it.
+        // Self-calibrating, and only over pixels that show a surface in both
+        // poses: the strongest tenth of the change there is the geometry that
+        // actually moved, the weakest half is the part of the model that stayed
+        // put. An absolute threshold marks most of the frame instead, because
+        // converged references still carry a little noise and the moving
+        // character relights everything around it. Ranking the whole frame is no
+        // better -- the character is a twentieth of it, so the top decile of the
+        // *frame* is mostly sky.
         std::vector<uint8_t> moving;
         size_t movingCount = 0;
         if (truthA.valid() && truthB.valid() && truthA.px.size() == truthB.px.size())
@@ -2318,20 +2349,24 @@ void EditorApp::runDenoiseAudit()
                 for (int k = 0; k < 3; ++k)
                     change[p] += std::abs((double)truthA.px[i + k] - (double)truthB.px[i + k]);
             }
-            std::vector<double> sorted = change;
-            std::sort(sorted.begin(), sorted.end());
-            const double hi = sorted[(size_t)(pixels * 0.90)];
-            const double lo = sorted[(size_t)(pixels * 0.50)];
-            moving.assign(pixels, 2); // 2 = neither, excluded from both measures
-            if (depthMask.size() == pixels)
+            const bool haveSurface = surface.size() == pixels;
+            std::vector<double> sorted;
+            sorted.reserve(pixels);
+            for (size_t p = 0; p < pixels; ++p)
             {
-                moving = depthMask;
-                movingCount = depthMovedCount;
+                if (!haveSurface || surface[p])
+                    sorted.push_back(change[p]);
             }
-            else
+            std::sort(sorted.begin(), sorted.end());
+            moving.assign(pixels, 2); // 2 = neither, excluded from both measures
+            if (!sorted.empty())
             {
+                const double hi = sorted[(size_t)(sorted.size() * 0.90)];
+                const double lo = sorted[(size_t)(sorted.size() * 0.50)];
                 for (size_t p = 0; p < pixels; ++p)
                 {
+                    if (haveSurface && !surface[p])
+                        continue;
                     if (change[p] >= hi)
                     {
                         moving[p] = 1;

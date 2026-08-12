@@ -63,7 +63,7 @@ public:
     float skinnedGeometryExtent() override;
     bool deviceError() const override
     {
-        return mDeviceError;
+        return mDeviceError || mMetal4FrameFailed.load(std::memory_order_relaxed);
     }
 
     bool motionGeometryActive() override
@@ -133,6 +133,10 @@ private:
     // instead of writing a black image and reporting success.
     bool mDeviceError = false;
     bool mDeviceErrorReported = false;
+    // Same, for Metal 4: the commit feedback runs off the render thread, so it
+    // cannot touch the two above.
+    std::atomic<bool> mMetal4FrameFailed{ false };
+    std::atomic<bool> mMetal4FrameFailReported{ false };
     uint32_t mFrameIndex = 0;
 
     // Reusable per-frame vectors (avoid heap alloc each frame)
@@ -144,15 +148,13 @@ private:
     // Deliberately not Geometry's prev VB: that one is a motion-blur shutter
     // keyframe, and when motion blur is off it is forced equal to the current
     // pose, which would make every motion vector describe a scene that never
-    // deforms. These two are snapshots taken at the top of a frame, before
-    // skinning and before the instance transforms are re-uploaded, so during
-    // frame N they hold frame N-1.
+    // deforms. Vertices still need a snapshot before skinning. Instance
+    // descriptors do not: MetalAccelStructure swaps two fully initialized
+    // buffers when transforms change, leaving the old current as previous.
     MTL::Buffer* mPrevFrameVertexBuffer = nullptr;
-    MTL::Buffer* mPrevFrameInstanceBuffer = nullptr;
     bool mHasPrevFramePose = false;
-    /// Snapshot the current pose. No-op when nothing in the scene can deform,
-    /// in which case the current vertex buffer is already the previous one.
-    void capturePrevFramePose();
+    /// Prepare previous-pose storage and snapshot deforming vertices.
+    bool capturePrevFramePose();
 
     bool mEnableMotionBlur = false;
     View mPrevMotionBlurView; // camera at T - shutter for camera motion blur
@@ -166,17 +168,12 @@ private:
     bool mPausedBlurRefine = false;
     void rebuildAccelerationStructures();
 
-    // Metal 4 submission. Created alongside the Metal 3 objects so both paths
-    // exist and can be compared; selected by render/pt/metal4.
+    // Metal 4 owns deformation, acceleration-structure maintenance and tracing.
+    // The Metal 3 queue remains for the denoiser and display/readback utilities.
     Metal4Context mMetal4;
     // Bumped when the allocation set can have changed, so residency is
     // rebuilt then and not every frame.
     uint32_t mMetal4ResidencyGeneration = 0;
-    // Last acceleration-structure build the Metal 4 queue was told to wait for.
-    // The event is tracked too: a new scene starts a new one from zero, and the
-    // value alone could match the one already waited for on the old event.
-    MTL::SharedEvent* mMetal4AccelWaitEvent = nullptr;
-    uint64_t mMetal4AccelWaitValue = 0;
     // Still owned by MetalRender: residency spans every domain (geometry, lights,
     // textures, guides), not only wavefront queues. Integrator flags dirty when
     // a new variant builds intersection tables.

@@ -189,8 +189,6 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.upscaleFactor = (float)*v;
     if (auto v = tbl["render"]["upscale_mode"].value<std::string>())
         cfg.upscaleMode = (*v == "temporal") ? 1u : 0u;
-    if (auto v = tbl["render"]["metal4"].value<bool>())
-        cfg.metal4 = *v ? 1u : 0u;
     if (auto v = tbl["render"]["sort_rays"].value<bool>())
         cfg.sortRays = *v;
     if (auto v = tbl["render"]["texture_lod"].value<bool>())
@@ -331,7 +329,6 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<float>("render/pt/denoiseFireflyClamp", m_config.denoiseFireflyClamp);
     m_settings->setAs<float>("render/pt/clampIndirect", m_config.clampIndirect);
     m_settings->setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);
-    m_settings->setAs<uint32_t>("render/pt/metal4", m_config.metal4);
     m_settings->setAs<uint32_t>("render/pt/sortRays", m_config.sortRays ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/textureLod", m_config.textureLod ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/guidePrimaryHit", m_config.guidePrimaryHit ? 1u : 0u);
