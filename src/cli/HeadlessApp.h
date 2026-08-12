@@ -28,7 +28,19 @@ struct RenderConfig
     uint32_t sppPerLaunch = 1;
     uint32_t maxDepth = 8;
     // 0=Halton, 1=PCG, 2=Sobol, 3=Sobol+BN, 4=Hybrid (BN→Sobol)
-    uint32_t samplerType = 0;
+    //
+    // Sobol, not the blue-noise variants the editor defaults to: a headless
+    // render is a still frame at a few hundred samples, which is past the count
+    // where a toroidal shift stops paying for itself.
+    //
+    // Not Halton, which this used to be. Its dimensions are told apart only by
+    // an offset into a table of 32 bases, and a depth-8 path draws 117, so
+    // dimensions 32 apart are one sequence read from two places. Measured on
+    // vespa at 320x240: its post-filter error is 38% above Sobol's at 128 spp
+    // -- roughly twice the samples for the same picture -- and worse than the
+    // plain PCG white noise at every count, with a convergence slope that
+    // stalls near zero and then jumps as the correlated dimensions come apart.
+    uint32_t samplerType = 2;
     // MetalFX denoising. Off by default: it is a temporal filter and a still
     // frame gives it one frame to work with, so whether it helps is a question
     // to be measured per scene rather than assumed.

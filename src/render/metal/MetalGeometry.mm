@@ -60,10 +60,9 @@ void MetalGeometry::uploadGeometryEntryBuffer()
     if (mGeometryEntries.empty())
         return;
     mGeometryEntryBuffer = mDevice->newBuffer(mGeometryEntries.size() * sizeof(GeometryEntry),
-                                              MTL::ResourceStorageModeManaged);
+                                              MTL::ResourceStorageModeShared);
     memcpy(mGeometryEntryBuffer->contents(), mGeometryEntries.data(),
            mGeometryEntries.size() * sizeof(GeometryEntry));
-    mGeometryEntryBuffer->didModifyRange(NS::Range::Make(0, mGeometryEntryBuffer->length()));
 }
 
 void MetalGeometry::release()
@@ -110,19 +109,25 @@ void MetalGeometry::buildBuffers(Scene* scene)
     const size_t vertexDataSize = sizeof(Scene::Vertex) * vertices.size();
     const size_t indexDataSize = sizeof(uint32_t) * indices.size();
 
+    // Shared rather than managed, and this is not a preference.
+    //
+    // Metal 4 removes the managed storage mode outright -- it exists to keep a
+    // separate CPU and GPU copy in step on discrete memory, which is not the
+    // architecture Metal 4 targets -- and it removes didModifyRange with it. A
+    // managed buffer bound into an argument table by GPU address therefore has
+    // no defined behaviour, and the GPU writing one (which is exactly what the
+    // skinning kernel does to this buffer) has nowhere to publish the result.
     MTL::Buffer* pVertexBuffer = nullptr;
     if (vertexDataSize > 0)
     {
-        pVertexBuffer = mDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeManaged);
+        pVertexBuffer = mDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeShared);
         memcpy(pVertexBuffer->contents(), vertices.data(), vertexDataSize);
-        pVertexBuffer->didModifyRange(NS::Range::Make(0, pVertexBuffer->length()));
     }
     MTL::Buffer* pIndexBuffer = nullptr;
     if (indexDataSize > 0)
     {
-        pIndexBuffer = mDevice->newBuffer(indexDataSize, MTL::ResourceStorageModeManaged);
+        pIndexBuffer = mDevice->newBuffer(indexDataSize, MTL::ResourceStorageModeShared);
         memcpy(pIndexBuffer->contents(), indices.data(), indexDataSize);
-        pIndexBuffer->didModifyRange(NS::Range::Make(0, pIndexBuffer->length()));
     }
 
     // Drop previous geometry buffers before adopting the new ones.
@@ -158,9 +163,8 @@ void MetalGeometry::buildBuffers(Scene* scene)
     }
     if (vertexDataSize > 0 && anySkeletal)
     {
-        mPrevVertexBuffer = mDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeManaged);
+        mPrevVertexBuffer = mDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeShared);
         memcpy(mPrevVertexBuffer->contents(), vertices.data(), vertexDataSize);
-        mPrevVertexBuffer->didModifyRange(NS::Range::Make(0, mPrevVertexBuffer->length()));
         mOwnsPrevVertexBuffer = true;
     }
     else
@@ -219,9 +223,8 @@ void MetalGeometry::buildCurveBuffers(Scene* scene)
     // the acceleration structure is told the stride explicitly and a mismatch
     // reads every third point as garbage.
     static_assert(sizeof(glm::float3) == 12, "curve control points are uploaded as tight float3");
-    mCurvePointBuffer = mDevice->newBuffer(points.size() * sizeof(glm::float3), MTL::ResourceStorageModeManaged);
+    mCurvePointBuffer = mDevice->newBuffer(points.size() * sizeof(glm::float3), MTL::ResourceStorageModeShared);
     memcpy(mCurvePointBuffer->contents(), points.data(), points.size() * sizeof(glm::float3));
-    mCurvePointBuffer->didModifyRange(NS::Range::Make(0, mCurvePointBuffer->length()));
 
     // A set exported without radii still has to intersect: the sidecar always
     // writes them, but Scene::createCurve allows the empty case and a zero-radius
@@ -235,13 +238,11 @@ void MetalGeometry::buildCurveBuffers(Scene* scene)
                         radii.size(), points.size());
     }
     const float* radiusSrc = radiusData.empty() ? radii.data() : radiusData.data();
-    mCurveRadiusBuffer = mDevice->newBuffer(points.size() * sizeof(float), MTL::ResourceStorageModeManaged);
+    mCurveRadiusBuffer = mDevice->newBuffer(points.size() * sizeof(float), MTL::ResourceStorageModeShared);
     memcpy(mCurveRadiusBuffer->contents(), radiusSrc, points.size() * sizeof(float));
-    mCurveRadiusBuffer->didModifyRange(NS::Range::Make(0, mCurveRadiusBuffer->length()));
 
-    mCurveSegmentBuffer = mDevice->newBuffer(segments.size() * sizeof(uint32_t), MTL::ResourceStorageModeManaged);
+    mCurveSegmentBuffer = mDevice->newBuffer(segments.size() * sizeof(uint32_t), MTL::ResourceStorageModeShared);
     memcpy(mCurveSegmentBuffer->contents(), segments.data(), segments.size() * sizeof(uint32_t));
-    mCurveSegmentBuffer->didModifyRange(NS::Range::Make(0, mCurveSegmentBuffer->length()));
 
     mSceneHasCurves = true;
     STRELKA_INFO("Curves: {} set(s), {} control points, {} segments ({:.2f} MB)", curves.size(),
@@ -307,9 +308,8 @@ void MetalGeometry::createMeshData(Scene* scene, size_t meshIndex, bool needsPri
     }
 
     result->mPerPrimitiveBuffer =
-        mDevice->newBuffer(triangleData.size() * sizeof(Triangle), MTL::ResourceStorageModeManaged);
+        mDevice->newBuffer(triangleData.size() * sizeof(Triangle), MTL::ResourceStorageModeShared);
     memcpy(result->mPerPrimitiveBuffer->contents(), triangleData.data(), sizeof(Triangle) * triangleData.size());
-    result->mPerPrimitiveBuffer->didModifyRange(NS::Range(0, result->mPerPrimitiveBuffer->length()));
 
     mMetalMeshes.push_back(result);
 }

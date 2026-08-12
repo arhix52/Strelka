@@ -57,7 +57,7 @@ void MetalEnvironment::ensurePlaceholderAliasBuffer()
 {
     if (mState.aliasBuffer || !mDevice)
         return;
-    mState.aliasBuffer = mDevice->newBuffer(sizeof(EnvAliasEntry), MTL::ResourceStorageModeManaged);
+    mState.aliasBuffer = mDevice->newBuffer(sizeof(EnvAliasEntry), MTL::ResourceStorageModeShared);
 }
 
 void MetalEnvironment::loadBackground(const std::string& texturePath)
@@ -101,7 +101,7 @@ void MetalEnvironment::loadBackground(const std::string& texturePath)
     desc->setHeight(height);
     desc->setPixelFormat(MTL::PixelFormatRGBA32Float);
     desc->setTextureType(MTL::TextureType2D);
-    desc->setStorageMode(MTL::StorageModeManaged);
+    desc->setStorageMode(MTL::StorageModeShared);
     desc->setUsage(MTL::TextureUsageShaderRead);
     mState.backgroundTexture = mDevice->newTexture(desc);
     desc->release();
@@ -165,7 +165,7 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
     pTextureDesc->setHeight(height);
     pTextureDesc->setPixelFormat(MTL::PixelFormatRGBA32Float);
     pTextureDesc->setTextureType(MTL::TextureType2D);
-    pTextureDesc->setStorageMode(MTL::StorageModeManaged);
+    pTextureDesc->setStorageMode(MTL::StorageModeShared);
     pTextureDesc->setUsage(MTL::TextureUsageShaderRead);
 
     mState.mapTexture = mDevice->newTexture(pTextureDesc);
@@ -181,7 +181,7 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
 
     mState.aliasBuffer = mDevice->newBuffer(aliasResult.alias.data(),
                                             aliasResult.alias.size() * sizeof(EnvAliasEntry),
-                                            MTL::ResourceStorageModeManaged);
+                                            MTL::ResourceStorageModeShared);
 
     if (isExr)
         free(pixelData);

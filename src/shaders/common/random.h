@@ -440,13 +440,21 @@ __device__ __inline__ float sobol(uint32_t index, uint32_t dim)
     return min(sobol_uint(index, dim) * 0x1p-32f, FloatOneMinusEpsilon);
 }
 
+// An Owen scramble needs a hash in which every output bit depends on all the
+// input bits below it and none above it. Vegdahl's variant of the Laine-Karras
+// hash (https://psychopath.io/post/2021_01_30_building_a_better_lk_hash) reaches
+// that condition much more closely than the original for the same cost: it mixes
+// the seed in multiplicatively as well as additively, so seeds that differ in
+// only their low bits no longer produce related scrambles -- which matters here
+// because the seeds are hash_combine(seed, dimension) for consecutive
+// dimensions.
 __device__ __inline__ uint32_t laine_karras_permutation(uint32_t value, uint32_t seed)
 {
+    value ^= value * 0x3d20adeau;
     value += seed;
-    value ^= value * 0x6c50b47cu;
-    value ^= value * 0xb82f1e52u;
-    value ^= value * 0xc7afe638u;
-    value ^= value * 0x8d22f6e6u;
+    value *= (seed >> 16) | 1u;
+    value ^= value * 0x05526c56u;
+    value ^= value * 0x53a22864u;
     return value;
 }
 

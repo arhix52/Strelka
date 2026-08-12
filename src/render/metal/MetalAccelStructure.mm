@@ -183,10 +183,10 @@ MTL::AccelerationStructure* MetalAccelStructure::createAccelerationStructure(MTL
 
     // End encoding and commit the command buffer. You don't need to wait for Metal to finish
     // executing this command buffer as long as you synchronize any ray-intersection work
-    // to run after this command buffer completes. The sample relies on Metal's default
-    // dependency tracking on resources to automatically synchronize access to the new
-    // compacted acceleration structure.
+    // to run after this command buffer completes. Dependency tracking covers a
+    // consumer on this queue; one on the Metal 4 queue waits on the event instead.
     commandEncoder->endEncoding();
+    signalBuild(commandBuffer);
     commandBuffer->commit();
 
     // commandEncoder->release();
@@ -211,6 +211,7 @@ void MetalAccelStructure::flushAccelerationStructureGroup()
         return;
     }
     mAsGroupEncoder->endEncoding();
+    signalBuild(mAsGroupCommandBuffer);
     mAsGroupCommandBuffer->commit();
     mAsGroupEncoder->release();
     mAsGroupCommandBuffer->release();
@@ -278,7 +279,8 @@ MTL::AccelerationStructure* MetalAccelStructure::createAccelerationStructureNoCo
         flushAccelerationStructureGroup();
     }
     // No waitUntilCompleted — Metal queue ordering guarantees subsequent
-    // command buffers on the same queue see the built AS.
+    // command buffers on the same queue see the built AS. A reader on another
+    // queue gets no such guarantee and waits on buildEvent() instead.
 
     {
         using ms = std::chrono::duration<double, std::milli>;
@@ -994,7 +996,7 @@ bool MetalAccelStructure::step(double budgetMs)
 
     mInstanceBuffer = mDevice->newBuffer(
         sizeof(MTL::AccelerationStructureUserIDInstanceDescriptor) * std::max<size_t>(mEmittedInstances.size(), 1),
-        MTL::ResourceStorageModeManaged);
+        MTL::ResourceStorageModeShared);
     auto instanceDescriptors = (MTL::AccelerationStructureUserIDInstanceDescriptor*)mInstanceBuffer->contents();
     for (size_t d = 0; d < mEmittedInstances.size(); ++d)
     {
@@ -1012,7 +1014,6 @@ bool MetalAccelStructure::step(double budgetMs)
         instanceDescriptors[d].userID = e.userID;
         instanceDescriptors[d].mask = e.mask;
     }
-    mInstanceBuffer->didModifyRange(NS::Range::Make(0, mInstanceBuffer->length()));
     updateInstanceTransforms();
 
     const NS::Array* instancedAccelerationStructures = NS::Array::array(
@@ -1205,6 +1206,7 @@ void MetalAccelStructure::updateSkeletalBLAS()
     }
 
     commandEncoder->endEncoding();
+    signalBuild(commandBuffer);
     commandBuffer->commit();
 
     // Under the cap means everything eligible was covered, so start again from
@@ -1234,7 +1236,6 @@ void MetalAccelStructure::updateInstanceTransforms()
             }
         }
     }
-    mInstanceBuffer->didModifyRange(NS::Range::Make(0, mInstanceBuffer->length()));
 }
 
 void MetalAccelStructure::rebuildTLAS()
@@ -1277,6 +1278,7 @@ void MetalAccelStructure::rebuildTLAS()
         commandEncoder->refitAccelerationStructure(
             mInstanceAccelerationStructure, accelDescriptor, mInstanceAccelerationStructure, mTlasScratchBuffer, 0UL);
         commandEncoder->endEncoding();
+        signalBuild(commandBuffer);
         commandBuffer->commit();
     }
     else
@@ -1313,6 +1315,22 @@ void MetalAccelStructure::init(MTL::Device* device,
     mTextures = textures;
 }
 
+void MetalAccelStructure::signalBuild(MTL::CommandBuffer* commandBuffer)
+{
+    if (!commandBuffer || !mDevice)
+    {
+        return;
+    }
+    // Created here rather than in init(): release() drops it with the rest of the
+    // scene, and a build that ran without one would silently leave the Metal 4
+    // tracer with nothing to wait on.
+    if (!mBuildEvent)
+    {
+        mBuildEvent = mDevice->newSharedEvent();
+    }
+    commandBuffer->encodeSignalEvent(mBuildEvent, ++mBuildValue);
+}
+
 void MetalAccelStructure::release()
 {
     auto safeRelease = [](auto*& p) {
@@ -1335,6 +1353,8 @@ void MetalAccelStructure::release()
     safeRelease(mInstanceAccelerationStructure);
     safeRelease(mInstanceBuffer);
     safeRelease(mTlasScratchBuffer);
+    safeRelease(mBuildEvent);
+    mBuildValue = 0;
     mEmittedInstances.clear();
     mTlasInstanceCount = 0;
     mOpaqueGeometryCount = 0;

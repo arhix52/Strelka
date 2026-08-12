@@ -114,10 +114,9 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
         {
             if (mLightBuffer)
                 mLightBuffer->release();
-            mLightBuffer = mDevice->newBuffer(lightBufferSize, MTL::ResourceStorageModeManaged);
+            mLightBuffer = mDevice->newBuffer(lightBufferSize, MTL::ResourceStorageModeShared);
         }
         memcpy(mLightBuffer->contents(), lightDescs.data(), lightBufferSize);
-        mLightBuffer->didModifyRange(NS::Range::Make(0, lightBufferSize));
     }
 
     const std::vector<uint8_t> packed = packIesProfiles(iesProfiles);
@@ -125,10 +124,9 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
     {
         if (mIesBuffer)
             mIesBuffer->release();
-        mIesBuffer = mDevice->newBuffer(packed.size(), MTL::ResourceStorageModeManaged);
+        mIesBuffer = mDevice->newBuffer(packed.size(), MTL::ResourceStorageModeShared);
     }
     memcpy(mIesBuffer->contents(), packed.data(), packed.size());
-    mIesBuffer->didModifyRange(NS::Range::Make(0, packed.size()));
 }
 
 } // namespace metal

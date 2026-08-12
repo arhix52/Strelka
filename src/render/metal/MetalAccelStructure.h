@@ -106,6 +106,23 @@ public:
     void updateInstanceTransforms();
     void rebuildTLAS();
 
+    /// Structure builds are committed to the Metal 3 queue, so anything reading
+    /// them from that same queue is ordered behind them for free. A consumer on
+    /// another queue -- the Metal 4 tracer -- has no such ordering and must wait
+    /// on this event for `buildValue()` before it traverses. Without that wait a
+    /// per-frame rebuild (the skeletal structures, while an animation plays) is
+    /// traversed while it is being written: rays miss the geometry, and once the
+    /// structure is resident on the other queue the read faults outright.
+    MTL::SharedEvent* buildEvent() const
+    {
+        return mBuildEvent;
+    }
+    /// The value the last committed build will signal. Zero until one has been.
+    uint64_t buildValue() const
+    {
+        return mBuildValue;
+    }
+
     MTL::Buffer* instanceBuffer() const
     {
         return mInstanceBuffer;
@@ -160,6 +177,8 @@ private:
     size_t buildBlas(const std::vector<uint32_t>& sceneInstanceIds, bool skeletal);
     size_t buildCurveBlas(uint32_t sceneInstanceId);
     void ensureScratchBuffer(MTL::Buffer*& buffer, size_t requiredSize);
+    /// Tag `commandBuffer` as the newest structure build, for cross-queue waits.
+    void signalBuild(MTL::CommandBuffer* commandBuffer);
 
     MTL::Device* mDevice = nullptr;
     MTL::CommandQueue* mCommandQueue = nullptr;
@@ -193,6 +212,9 @@ private:
 
     static constexpr size_t kMaxBlasRebuildsPerFrame = 8;
     size_t mNextBlasRebuildIndex = 0;
+
+    MTL::SharedEvent* mBuildEvent = nullptr;
+    uint64_t mBuildValue = 0;
 };
 
 } // namespace metal

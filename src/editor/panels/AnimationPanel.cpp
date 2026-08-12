@@ -101,6 +101,30 @@ void EditorApp::drawAnimationPanel()
                 float speed = m_settingsManager->getAs<float>("render/animation/speed");
                 ImGui::SliderFloat("Speed", &speed, 0.0f, 5.0f, "%.2fx");
                 m_settingsManager->setAs<float>("render/animation/speed", speed);
+
+                // Pausing partway through a clip with motion blur on leaves a
+                // motion-blurred still that keeps accumulating samples. That takes
+                // a while to converge, so say so -- otherwise the slow clean-up of
+                // the frozen frame reads as the render having stalled.
+                if (!anyPlaying && m_settingsManager->getAs<bool>("render/enableMotionBlur") &&
+                    m_settingsManager->getAs<bool>("render/isMotionBlurVisible"))
+                {
+                    bool midClip = false;
+                    for (size_t i = 0; i < animations.size(); ++i)
+                    {
+                        const float t = m_settingsManager->getAs<float>(animationTimeKey(i));
+                        if (t > animations[i].start + 1e-4f && t < animations[i].end - 1e-4f)
+                        {
+                            midClip = true;
+                            break;
+                        }
+                    }
+                    if (midClip)
+                    {
+                        ImGui::TextDisabled("Paused: refining motion-blurred frame (%u samples)",
+                                            (uint32_t)m_sharedCtx->mSubframeIndex);
+                    }
+                }
             }
 
             // Motion blur

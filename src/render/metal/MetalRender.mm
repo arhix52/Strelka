@@ -232,12 +232,11 @@ void MetalRender::capturePrevFramePose()
             mPrevFrameInstanceBuffer->release();
         }
         mPrevFrameInstanceBuffer =
-            mDevice->newBuffer(mAccel.instanceBuffer()->length(), MTL::ResourceStorageModeManaged);
+            mDevice->newBuffer(mAccel.instanceBuffer()->length(), MTL::ResourceStorageModeShared);
         mHasPrevFramePose = false; // a new allocation holds nothing
     }
     std::memcpy(mPrevFrameInstanceBuffer->contents(), mAccel.instanceBuffer()->contents(),
                 mAccel.instanceBuffer()->length());
-    mPrevFrameInstanceBuffer->didModifyRange(NS::Range::Make(0, mPrevFrameInstanceBuffer->length()));
 
     // Vertices only when something can actually rewrite them. With no skinning in
     // the scene the current buffer *is* the previous one, and the shader is given
@@ -1055,6 +1054,8 @@ void MetalRender::render(Buffer* output)
         ctx.mSubframeIndex = 0;
         mResetDenoiseHistory = true;
         mHasPrevFramePose = false;
+        // Every structure the residency set names was just freed and replaced.
+        mMetal4ResidencyGeneration = 0;
     }
 
     // Before anything this frame can move: skinning rewrites the vertices and the
@@ -1361,9 +1362,6 @@ void MetalRender::render(Buffer* output)
     {
         pUniformData->samples_per_launch = samplesThisLaunch;
 
-        pUniformBuffer->didModifyRange(NS::Range::Make(0, sizeof(Uniforms)));
-        pUniformTMBuffer->didModifyRange(NS::Range::Make(0, sizeof(UniformsTonemap)));
-
         // Environment map buffers must always be bound — the kernel declares
         // indices 10/11 unconditionally.
         // The kernel declares buffer(10) unconditionally, so it must always be bound.
@@ -1457,6 +1455,18 @@ void MetalRender::render(Buffer* output)
                     makeResourcesResidentForMetal4(output);
                     mMetal4ResidencyGeneration = mIntegrator.capacity();
                     mIntegrator.clearResidencyDirty();
+                }
+
+                // The structures this frame traverses were built on the Metal 3
+                // queue, which orders nothing against this one. Skinned geometry
+                // rebuilds its structures every animated frame, so without this
+                // the tracer reads them mid-write.
+                if (mAccel.buildEvent() && (mAccel.buildEvent() != mMetal4AccelWaitEvent ||
+                                            mAccel.buildValue() != mMetal4AccelWaitValue))
+                {
+                    mMetal4AccelWaitEvent = mAccel.buildEvent();
+                    mMetal4AccelWaitValue = mAccel.buildValue();
+                    mMetal4.queue()->wait(mMetal4AccelWaitEvent, mMetal4AccelWaitValue);
                 }
 
                 MTL4::CommandBuffer* cmd4 = mMetal4.beginFrame((uint32_t)ctx.mFrameNumber);
@@ -1968,7 +1978,7 @@ Buffer* MetalRender::createBuffer(const BufferDesc& desc)
     const size_t size =
         static_cast<size_t>(desc.height) * desc.width * Buffer::getElementSize(desc.format);
     assert(size != 0);
-    MTL::Buffer* buff = mDevice->newBuffer(size, MTL::ResourceStorageModeManaged);
+    MTL::Buffer* buff = mDevice->newBuffer(size, MTL::ResourceStorageModeShared);
     assert(buff);
     auto res = new MetalBuffer(buff, desc.format, desc.width, desc.height);
     assert(res);

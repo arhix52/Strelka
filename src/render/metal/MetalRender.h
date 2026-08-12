@@ -172,6 +172,11 @@ private:
     // Bumped when the allocation set can have changed, so residency is
     // rebuilt then and not every frame.
     uint32_t mMetal4ResidencyGeneration = 0;
+    // Last acceleration-structure build the Metal 4 queue was told to wait for.
+    // The event is tracked too: a new scene starts a new one from zero, and the
+    // value alone could match the one already waited for on the old event.
+    MTL::SharedEvent* mMetal4AccelWaitEvent = nullptr;
+    uint64_t mMetal4AccelWaitValue = 0;
     // Still owned by MetalRender: residency spans every domain (geometry, lights,
     // textures, guides), not only wavefront queues. Integrator flags dirty when
     // a new variant builds intersection tables.

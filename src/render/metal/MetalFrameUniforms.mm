@@ -49,12 +49,12 @@ void MetalFrameUniforms::allocateRings()
     for (MTL::Buffer*& uniformBuffer : mUniformBuffers)
     {
         if (!uniformBuffer)
-            uniformBuffer = mDevice->newBuffer(sizeof(Uniforms), MTL::ResourceStorageModeManaged);
+            uniformBuffer = mDevice->newBuffer(sizeof(Uniforms), MTL::ResourceStorageModeShared);
     }
     for (MTL::Buffer*& uniformBuffer : mUniformTMBuffers)
     {
         if (!uniformBuffer)
-            uniformBuffer = mDevice->newBuffer(sizeof(UniformsTonemap), MTL::ResourceStorageModeManaged);
+            uniformBuffer = mDevice->newBuffer(sizeof(UniformsTonemap), MTL::ResourceStorageModeShared);
     }
 }
 

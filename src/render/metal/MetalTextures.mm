@@ -97,7 +97,7 @@ MTL::Texture* MetalTextures::loadCached(const std::string& cachePath)
     desc->setMipmapLevelCount(header.levels);
     desc->setPixelFormat((MTL::PixelFormat)header.pixelFormat);
     desc->setTextureType(MTL::TextureType2D);
-    desc->setStorageMode(MTL::StorageModeManaged);
+    desc->setStorageMode(MTL::StorageModeShared);
     desc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
     MTL::Texture* texture = mDevice->newTexture(desc);
     desc->release();
@@ -237,7 +237,7 @@ MTL::Texture* MetalTextures::loadFromFile(const std::string& fileName, bool srgb
     pTextureDesc->setMipmapLevelCount(levels);
     pTextureDesc->setPixelFormat(format);
     pTextureDesc->setTextureType(MTL::TextureType2D);
-    pTextureDesc->setStorageMode(MTL::StorageModeManaged);
+    pTextureDesc->setStorageMode(MTL::StorageModeShared);
     pTextureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
 
     MTL::Texture* pTexture = mDevice->newTexture(pTextureDesc);

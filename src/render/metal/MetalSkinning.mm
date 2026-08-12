@@ -236,30 +236,20 @@ void MetalSkinning::apply()
         return;
     memcpy(mJointMatricesBuffer->contents(), mJointMatScratch.data(), uploadBytes);
 
-    // Skinning runs through the Metal 3 queue.
-    //
-    // The Metal 4 route below produces exact zeros for every skinned vertex --
-    // the character collapses to a point and vanishes the instant playback
-    // starts -- while the same kernel, over the same skin data and the same
-    // joint matrices, gives a correct pose through Metal 3. Measured on
-    // BrainStem: Metal 3 yields [-0.402 0.014 -0.219]..[0.459 1.137 0.215],
-    // Metal 4 yields [0 0 0]..[0 0 0]. Everything the kernel reads was verified
-    // healthy at the point of dispatch: 34274 skin records with no zero weights,
-    // 18 joint matrices with none degenerate, joint indices within range, both
-    // pipelines built, the constant ring far from exhausted, and the resources
-    // resident.
-    //
-    // The remaining difference is the submission itself, and the leading suspect
-    // is the shared argument table: it is mutated between dispatches inside one
-    // encoder (BrainStem has 59 primitives), and Metal 4 has the GPU read that
-    // table at execution time rather than capturing it at encode time. That is
-    // not proven, so the Metal 4 path is kept and selectable rather than
-    // deleted -- but it is not what runs by default until it is right.
     if (!mSkinMetal4)
     {
         applyMetal3();
         return;
     }
+
+    // The zeros this path used to produce were a missing residency declaration,
+    // not the shared argument table: the buffers below were only ever made
+    // resident as a side effect of MetalRender encoding a frame through Metal 4,
+    // so with denoising on -- which pins every frame to Metal 3 -- the skinning
+    // dispatch read and wrote memory the queue did not hold, and the character
+    // collapsed to a point. Measured on BrainStem: extent 1.469 with the frame
+    // on Metal 4, 0.000 with it on Metal 3, from the same kernel and data.
+    ensureMetal4Residency();
 
     // Dispatch skinning + triangle update kernels
     MTL4::CommandBuffer* pCmd = mMetal4->beginImmediate();
@@ -331,15 +321,58 @@ void MetalSkinning::apply()
     mMetal4->submitAndWait(pCmd);
 }
 
+void MetalSkinning::ensureMetal4Residency()
+{
+    if (!mMetal4 || !mMetal4->isValid() || !mGeometry)
+    {
+        return;
+    }
+    const std::vector<MetalGeometry::Mesh*>& meshes = mGeometry->meshes();
+    if (mGeometry->vertexBuffer() == mResidentVertexBuffer &&
+        mGeometry->prevVertexBuffer() == mResidentPrevVertexBuffer &&
+        mGeometry->indexBuffer() == mResidentIndexBuffer && mSkinDataBuffer == mResidentSkinDataBuffer &&
+        mJointMatricesBuffer == mResidentJointMatricesBuffer && meshes.size() == mResidentMeshCount)
+    {
+        return;
+    }
+    mResidentVertexBuffer = mGeometry->vertexBuffer();
+    mResidentPrevVertexBuffer = mGeometry->prevVertexBuffer();
+    mResidentIndexBuffer = mGeometry->indexBuffer();
+    mResidentSkinDataBuffer = mSkinDataBuffer;
+    mResidentJointMatricesBuffer = mJointMatricesBuffer;
+    mResidentMeshCount = meshes.size();
+
+    mMetal4->addResident(mResidentVertexBuffer);
+    mMetal4->addResident(mResidentPrevVertexBuffer);
+    mMetal4->addResident(mResidentIndexBuffer);
+    mMetal4->addResident(mResidentSkinDataBuffer);
+    mMetal4->addResident(mResidentJointMatricesBuffer);
+    // Written by the triangle update kernel, which runs in the same encoder.
+    for (MetalGeometry::Mesh* mesh : meshes)
+    {
+        if (mesh)
+        {
+            mMetal4->addResident(mesh->mPerPrimitiveBuffer);
+        }
+    }
+    mMetal4->commitResidency();
+}
+
 void MetalSkinning::copyVertexBufferToPrev()
 {
     const size_t vertexDataSize = mGeometry->vertexBuffer()->length();
     if (mMetal4 && mMetal4->isValid())
     {
+        ensureMetal4Residency();
         MTL4::CommandBuffer* cmd = mMetal4->beginImmediate();
         MTL4::ComputeCommandEncoder* enc = cmd->computeCommandEncoder();
         enc->copyFromBuffer(mGeometry->vertexBuffer(), 0, mGeometry->prevVertexBuffer(), 0, vertexDataSize);
         enc->endEncoding();
+        // TODO: drop submitAndWait here (and in apply()). It drains the whole
+        // Metal 4 queue every animated frame and kills pipelining. Encode the
+        // copy / skinning ahead of the frame on the same queue instead, then
+        // remove the SharedEvent cross-queue wait that only exists because
+        // structure builds still live on Metal 3.
         mMetal4->submitAndWait(cmd);
         return;
     }

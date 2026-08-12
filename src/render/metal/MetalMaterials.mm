@@ -202,9 +202,8 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
     }
     if (materialsDataSize > 0)
     {
-        mMaterialBuffer = mDevice->newBuffer(materialsDataSize, MTL::ResourceStorageModeManaged);
+        mMaterialBuffer = mDevice->newBuffer(materialsDataSize, MTL::ResourceStorageModeShared);
         memcpy(mMaterialBuffer->contents(), st.gpuMaterials.data(), materialsDataSize);
-        mMaterialBuffer->didModifyRange(NS::Range::Make(0, mMaterialBuffer->length()));
     }
 
     delete mBuild;

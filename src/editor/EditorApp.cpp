@@ -394,10 +394,22 @@ void EditorApp::loadSettings()
     // vespa, its error at 1024 spp was no lower than at 512.
     m_settingsManager->setAs<uint32_t>("render/pt/samplerType", 4);
     // Measured crossover on vespa: blue noise wins on post-filter error up to
-    // about 16 samples (-16% at 1 spp, -2% at 16) and loses past it (+6% at 32,
-    // +7% at 64), because a toroidal shift is a weaker randomisation than a
-    // scramble once there are enough samples for that to matter.
-    m_settingsManager->setAs<uint32_t>("render/pt/blueNoiseSwitchSpp", 16);
+    // 4 samples (-12% at 1 spp, -7% at 2, -4% at 4) and loses past it (+13% at
+    // 8, +9% at 16, +40% at 32), because a toroidal shift is a weaker
+    // randomisation than a scramble once there are enough samples for that to
+    // matter. Past the crossover the mask does not merely converge slower, it
+    // makes the error *less* blue than the plain scramble does -- lp/raw rises
+    // from 0.28 to 0.36 -- so there is nothing left to trade for.
+    //
+    // This was 16, from the same measurement taken before the Owen scramble
+    // used Vegdahl's LK hash. The old hash left the blue-noise sampler's
+    // dimensions correlated (they share a screen-wide seed and differ only in
+    // its low bits), which held that sampler back at the counts where it was
+    // still nominally winning. Fixing the hash moved the crossover to 4.
+    //
+    // Four is also where it matters: accumulation restarts whenever the camera
+    // moves, so navigating the scene means looking at 1-4 spp frames.
+    m_settingsManager->setAs<uint32_t>("render/pt/blueNoiseSwitchSpp", 4);
     m_settingsManager->setAs<bool>("render/enableValidation", false);
     m_settingsManager->setAs<uint32_t>("render/selectedCamera", 0);
     m_settingsManager->setAs<bool>("render/enableMotionBlur", true);
@@ -1434,6 +1446,10 @@ void EditorApp::runDenoiseAudit()
         return shown(img);
     };
 
+    // EXR for measuring, PNG for looking at. Every image here comes from the
+    // display texture, which is already tone mapped, so the PNG is a clamp rather
+    // than a second tone curve -- and without one there is nothing on this machine
+    // that can open the results.
     auto save = [&](const char* name, const AuditImage& img) {
         if (!saveImages || !img.valid())
             return;
@@ -1442,6 +1458,14 @@ void EditorApp::runDenoiseAudit()
                 (std::string(outDir) + "/" + name + ".exr").c_str(), &err);
         if (err)
             FreeEXRErrorMessage(err);
+        const size_t pixelCount = (size_t)img.w * img.h;
+        std::vector<uint8_t> bytes(pixelCount * 4);
+        for (size_t i = 0; i < pixelCount * 4; ++i)
+        {
+            bytes[i] = (uint8_t)std::lround(std::clamp(img.px[i], 0.0f, 1.0f) * 255.0f);
+        }
+        stbi_write_png((std::string(outDir) + "/" + name + ".png").c_str(), (int)img.w, (int)img.h, 4,
+                       bytes.data(), (int)img.w * 4);
     };
 
     // Yaw orbit about whatever the scene's own camera is already looking at.
@@ -1508,6 +1532,116 @@ void EditorApp::runDenoiseAudit()
                            d.px.empty() ? 0.0 : 100.0 * (double)finite.size() / (double)depthPixels));
         setOrbit(0.0f);
         step();
+    }
+
+    // === Play, then stop ====================================================
+    //
+    // Stopping playback should freeze a frame of the film and go on refining it.
+    // What it must not do is lose the character. The estimator folds every new
+    // sample into the accumulation buffer, so anything the held frames stop
+    // hitting does not disappear at once -- it fades over the following seconds
+    // as the running mean walks away from the frame that was on screen when the
+    // stop happened. That is why this measures the trend across the hold rather
+    // than the first frame after it, and why the two-second play matters: held
+    // from the start, the pose keyframes are identical and nothing under test is
+    // even reachable.
+    if (animCount > 0)
+    {
+        for (int denoiseOn = 0; denoiseOn < 2 && !outOfTime(); ++denoiseOn)
+        {
+            setOrbit(0.0f);
+            setAnimTime(0.0f);
+            setDenoise(denoiseOn != 0);
+            m_settingsManager->setAs<bool>("render/pt/enableAcc", true);
+            m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", refSpp);
+            m_settingsManager->setAs<bool>("render/enableMotionBlur", true);
+            m_settingsManager->setAs<bool>("render/isMotionBlurVisible", true);
+            m_render->resetTemporalHistory();
+            for (int i = 0; i < 4 && !outOfTime(); ++i)
+            {
+                step();
+            }
+
+            for (size_t i = 0; i < animCount; ++i)
+            {
+                m_settingsManager->setAs<bool>(animationStateKey(i), true);
+            }
+            for (int i = 0; i < 120 && !outOfTime(); ++i)
+            {
+                playAnimations(1.0f / 60.0f);
+                if (!step())
+                {
+                    break;
+                }
+            }
+            AuditImage playing;
+            shown(playing);
+            save(denoiseOn ? "stop_denoise_playing" : "stop_plain_playing", playing);
+            for (size_t i = 0; i < animCount; ++i)
+            {
+                m_settingsManager->setAs<bool>(animationStateKey(i), false);
+            }
+
+            // The hold. Nothing is touched from here on: not the time, not the
+            // camera, not a setting.
+            const float extentAtStop = m_render->skinnedGeometryExtent();
+            AuditImage firstHeld, lastHeld;
+            double meanFirst = -1.0;
+            double meanLast = -1.0;
+            std::string trace;
+            for (int i = 0; i < 60 && !outOfTime(); ++i)
+            {
+                if (!step())
+                {
+                    break;
+                }
+                AuditImage img;
+                if (!shown(img) || !img.valid())
+                {
+                    continue;
+                }
+                const double m = auditMean(img);
+                if (meanFirst < 0.0)
+                {
+                    meanFirst = m;
+                    firstHeld = img;
+                }
+                meanLast = m;
+                if (i % 10 == 0)
+                {
+                    trace += fmt::format("{:.3f} ", m);
+                }
+                lastHeld = std::move(img);
+            }
+            const float extentHeld = m_render->skinnedGeometryExtent();
+            int hdx = 0, hdy = 0;
+            const double drift = (firstHeld.valid() && lastHeld.valid())
+                                     ? auditRmse(firstHeld, lastHeld, hdx, hdy)
+                                     : -1.0;
+            const char* label = denoiseOn ? "stop denoise" : "stop plain  ";
+            report(fmt::format("AUDIT {} held mean across the stop: {}", label, trace));
+            report(fmt::format("AUDIT {} mean first={:.4f} last={:.4f} ({:+.1f}%)  drift={:.5f}  "
+                               "skinned extent {:.3f} -> {:.3f}",
+                               label, meanFirst, meanLast,
+                               meanFirst > 0.0 ? 100.0 * (meanLast - meanFirst) / meanFirst : 0.0,
+                               drift, extentAtStop, extentHeld));
+            save(denoiseOn ? "stop_denoise_first" : "stop_plain_first", firstHeld);
+            save(denoiseOn ? "stop_denoise_last" : "stop_plain_last", lastHeld);
+            // Refining a frozen frame moves the estimate towards its own mean. It
+            // does not empty the frame.
+            if (meanFirst > 0.0 && meanLast > 0.0 && meanLast < meanFirst * 0.75)
+            {
+                report(fmt::format("AUDIT FAIL {} the held frame faded ({:.4f} -> {:.4f})", label,
+                                   meanFirst, meanLast));
+            }
+            if (extentAtStop > 1e-3f && extentHeld < extentAtStop * 0.25f)
+            {
+                report(fmt::format("AUDIT FAIL {} skinned geometry collapsed while held ({:.3f} -> {:.3f})",
+                                   label, extentAtStop, extentHeld));
+            }
+        }
+        m_settingsManager->setAs<bool>("render/enableMotionBlur", false);
+        m_settingsManager->setAs<bool>("render/isMotionBlurVisible", false);
     }
 
     auto reportGuide = [&](const char* label, Render::Guide g, float lo, float hi, int channels) {

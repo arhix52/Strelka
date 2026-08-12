@@ -103,16 +103,6 @@ unsigned int hash(unsigned int a)
   return a;
 }
 
-uint32_t hash2(uint32_t x, uint32_t seed)
-{
-  x ^= x * 0x3d20adea;
-  x += seed;
-  x *= (seed >> 16) | 1;
-  x ^= x * 0x05526c56;
-  x ^= x * 0x53a22864;
-  return x;
-}
-
 inline uint32_t hash_combine(uint32_t seed, uint32_t v)
 {
     return seed ^ (v + (seed << 6) + (seed >> 2));
@@ -486,13 +476,30 @@ inline uint32_t sobol_uint(uint32_t index, uint32_t dim)
     return X;
 }
 
+// An Owen scramble needs a hash in which every output bit depends on all the
+// input bits below it and none above it. Vegdahl's variant of the Laine-Karras
+// hash (https://psychopath.io/post/2021_01_30_building_a_better_lk_hash) reaches
+// that condition much more closely than the original for the same cost: it mixes
+// the seed in multiplicatively as well as additively, so seeds that differ in
+// only their low bits no longer produce related scrambles -- which matters here
+// because the seeds are hash_combine(seed, dimension) for consecutive
+// dimensions.
+//
+// It is the blue-noise samplers that this changes, because they are the ones
+// whose seed is a screen-wide constant and whose dimensions therefore differ
+// only by that hash_combine. Sampler 3 used to disagree with sampler 2 at the
+// deepest sample count by more than either one's noise -- 9.7% of the median on
+// cornell_box, 1.5% on mixed_materials, i.e. correlated dimensions reading as a
+// brightness error. With this hash the two agree to 0.9% and 0.2%. Sampler 2,
+// which seeds from the pixel index and so never had related seeds, does not
+// measurably move.
 inline uint32_t laine_karras_permutation(uint32_t value, uint32_t seed)
 {
+    value ^= value * 0x3d20adeau;
     value += seed;
-    value ^= value * 0x6c50b47cu;
-    value ^= value * 0xb82f1e52u;
-    value ^= value * 0xc7afe638u;
-    value ^= value * 0x8d22f6e6u;
+    value *= (seed >> 16) | 1u;
+    value ^= value * 0x05526c56u;
+    value ^= value * 0x53a22864u;
     return value;
 }
 
@@ -680,14 +687,4 @@ uint initRNG(uint2 pixelCoords, uint2 resolution, uint frameNumber)
     uint seed = t ^ jenkinsHash(frameNumber);
     // uint seed = dot(pixelCoords, uint2(1, resolution.x)) ^ jenkinsHash(frameNumber);
     return jenkinsHash(seed);
-}
-
-uint owen_scramble_rev(uint x, uint seed)
-{
-    x ^= x * 0x3d20adea;
-    x += seed;
-    x *= (seed >> 16) | 1;
-    x ^= x * 0x05526c56;
-    x ^= x * 0x53a22864;
-    return x;
 }
