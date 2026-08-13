@@ -12,12 +12,20 @@ namespace metal
 
 // Thin BuildStage state machine for primary scene preparation.
 // Owns only the stage cursor and slice budget — GPU resources stay in domains.
+// Ordered by dependency, and beyond that by how soon each stage produces
+// something worth looking at. Environment comes second for the latter reason:
+// it is the cheapest stage and the only one that yields a complete, correct
+// picture on its own -- the sky, and the light it casts -- so the scene has
+// something on screen while the structures, which are the long pole, build into
+// it. It used to run last, which is why a scene showed nothing until all of it
+// was ready.
 enum class BuildStage : uint32_t
 {
     Buffers = 0,
+    Environment, ///< accumulation target, env map, empty top level
     Materials,
     Structures,
-    Tail, ///< accumulation buffer, skinning, environment
+    Tail, ///< skinning, memory report
     Done,
 };
 
@@ -26,6 +34,11 @@ struct SceneBuildHooks
     // Entering Buffers: reset temporal state, begin Geometry progress.
     std::function<void()> onBuffersEnter;
     std::function<void()> buildBuffers;
+
+    std::function<void()> onEnvironmentEnter;
+    /// Accumulation target, environment map, and an empty top level to trace
+    /// against until real geometry replaces it.
+    std::function<void(Buffer* output)> buildEnvironment;
 
     // Materials progress begin when build not yet active.
     std::function<void()> onMaterialsEnter;

@@ -24,6 +24,14 @@ bool MetalScenePreparation::step(SceneBuildHooks& hooks, Buffer* output)
             hooks.onBuffersEnter();
         if (hooks.buildBuffers)
             hooks.buildBuffers();
+        mStage = BuildStage::Environment;
+        break;
+
+    case BuildStage::Environment:
+        if (hooks.onEnvironmentEnter)
+            hooks.onEnvironmentEnter();
+        if (hooks.buildEnvironment)
+            hooks.buildEnvironment(output);
         mStage = BuildStage::Materials;
         break;
 
@@ -64,7 +72,7 @@ bool MetalScenePreparation::step(SceneBuildHooks& hooks, Buffer* output)
 
     if (ran != BuildStage::Done)
     {
-        static const char* kStageNames[] = { "buffers", "materials", "structures", "tail" };
+        static const char* kStageNames[] = { "buffers", "environment", "materials", "structures", "tail" };
         STRELKA_DEBUG("Scene build stage '{}' took {:.0f} ms", kStageNames[(uint32_t)ran],
                       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
     }

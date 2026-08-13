@@ -775,6 +775,13 @@ bool MetalAccelStructure::step(double budgetMs)
     // Per-geometry lookup table consumed by the kernel.
     mGeometry->uploadGeometryEntryBuffer();
 
+    // buildEmptyTopLevel may have left a one-descriptor placeholder here so the
+    // scene could be traced while it loaded. It is replaced, not appended to.
+    if (mInstanceBuffer)
+    {
+        mInstanceBuffer->release();
+        mInstanceBuffer = nullptr;
+    }
     mInstanceBuffer = mDevice->newBuffer(
         sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor) *
             std::max<size_t>(mEmittedInstances.size(), 1),
@@ -815,9 +822,22 @@ bool MetalAccelStructure::step(double budgetMs)
     // Every BLAS must be committed before the TLAS that references them is
     // encoded, so close whatever group the last one landed in.
     flushAccelerationStructureGroup();
+    if (mTlasDescriptor)
+    {
+        mTlasDescriptor->release();
+        mTlasDescriptor = nullptr;
+    }
     mTlasDescriptor =
         mPath->makeInstanceDescriptor(mInstanceBuffer, mEmittedInstances.size(), tlasUsage());
 
+    // The empty top level the load has been tracing against may still be read by
+    // a frame in flight, so it goes on the retire list rather than being freed
+    // here -- the same rule the per-frame growth path follows.
+    if (mInstanceAccelerationStructure)
+    {
+        mRetiredInstanceStructures.emplace_back(mInstanceAccelerationStructure, mTlasEncodeCount);
+        mInstanceAccelerationStructure = nullptr;
+    }
     mInstanceAccelerationStructure = createAccelerationStructure(mTlasDescriptor);
     if (!mInstanceAccelerationStructure)
     {
@@ -1098,6 +1118,43 @@ void MetalAccelStructure::writeInstanceTransforms(MTL::Buffer* buffer)
             }
         }
     }
+}
+
+void MetalAccelStructure::buildEmptyTopLevel()
+{
+    if (mInstanceAccelerationStructure || !mPath)
+    {
+        return;
+    }
+    // A one-descriptor buffer rather than none: Metal is asked for a structure
+    // over zero instances, and a null buffer alongside a zero count is a
+    // combination not worth relying on. The contents are never read.
+    if (!mInstanceBuffer)
+    {
+        mInstanceBuffer = mDevice->newBuffer(sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor),
+                                             MTL::ResourceStorageModeShared);
+        if (!mInstanceBuffer)
+        {
+            return;
+        }
+        std::memset(mInstanceBuffer->contents(), 0, mInstanceBuffer->length());
+    }
+    mTlasDescriptor = mPath->makeInstanceDescriptor(mInstanceBuffer, 0, tlasUsage());
+    mInstanceAccelerationStructure = createAccelerationStructureNoCompact(mTlasDescriptor);
+    if (!mInstanceAccelerationStructure)
+    {
+        STRELKA_ERROR("Empty top-level acceleration structure could not be built; the scene will show "
+                      "nothing until its geometry has loaded.");
+        return;
+    }
+    mTlasInstanceCount = 0;
+    if (mMetal4)
+    {
+        mMetal4->addResident(mInstanceAccelerationStructure);
+    }
+    mPath->addResident(mInstanceAccelerationStructure);
+    mPath->flushBuildGroup();
+    mPath->drain();
 }
 
 void MetalAccelStructure::rebuildTLAS()

@@ -846,18 +846,47 @@ void MetalRender::render(Buffer* output)
 
     SharedContext& ctx = getSharedContext();
 
-    if (ctx.mFrameNumber == 0)
+    if (mScenePrep.isBuilding())
     {
-        if (!stepSceneBuild(output))
+        const bool complete = stepSceneBuild(output);
+        // Each slice that moved the scene forward is one more thing worth
+        // showing; the clock decides how many of them are worth a frame.
+        mPublishClock.noteArrivals();
+
+        metal::StreamReadiness readiness;
+        readiness.hasOutputTargets = mAccumulationBuffer != nullptr;
+        readiness.hasEnvironment = mEnvironment.state().loaded;
+        readiness.hasTopLevel = mAccel.instanceAccelerationStructure() != nullptr;
+        readiness.buildComplete = complete;
+
+        const double nowMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        const double intervalMs = getSettings()->getAs<float>("render/stream/publishIntervalMs");
+        if (!canTracePartial(readiness) || !mPublishClock.shouldPublish(nowMs, intervalMs, complete))
         {
-            // Nothing to trace yet. The busy flag has to come off here: it is set
-            // by triggerRenderIfIdle before every call, and a build stage that
-            // returns without submitting anything leaves no completion handler to
-            // clear it, so the build would stall one stage in.
+            // Nothing to trace yet, or nothing new since the last frame. The busy
+            // flag has to come off here: it is set by triggerRenderIfIdle before
+            // every call, and a build stage that returns without submitting
+            // anything leaves no completion handler to clear it, so the build
+            // would stall one stage in.
             mRenderBusy.store(false, std::memory_order_release);
             pPool->release();
             return;
         }
+        mPublishClock.notePublished(nowMs);
+        // Time to first pixel is the number this whole path exists to move, so
+        // it is reported rather than inferred from watching a window.
+        if (!mReportedFirstPartialFrame)
+        {
+            mReportedFirstPartialFrame = true;
+            STRELKA_INFO("First frame shown {:.0f} ms into the scene build (stage {})", nowMs - mBuildStartMs,
+                         (uint32_t)mScenePrep.stage());
+        }
+        // The scene under the accumulated image just changed, so what has been
+        // accumulated is of a different scene.
+        ctx.mSubframeIndex = 0;
+        mResetDenoiseHistory = true;
     }
     else
     {
@@ -2302,6 +2331,10 @@ metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
 {
     metal::SceneBuildHooks hooks;
     hooks.onBuffersEnter = [this]() {
+        mBuildStartMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        mReportedFirstPartialFrame = false;
         // New scene: nothing from before relates to it.
         mResetDenoiseHistory = true;
         mHasPrevCamera = false;
@@ -2313,6 +2346,13 @@ metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
         }
     };
     hooks.buildBuffers = [this]() { buildBuffers(); };
+    hooks.onEnvironmentEnter = [this]() {
+        if (mLoadProgress)
+        {
+            mLoadProgress->beginStage(LoadProgress::Stage::Environment);
+        }
+    };
+    hooks.buildEnvironment = [this](Buffer* output) { buildSceneEnvironment(output); };
     hooks.onMaterialsEnter = [this]() {
         if (mLoadProgress && !mMaterials.buildActive())
         {
@@ -2339,30 +2379,28 @@ metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
     hooks.onTailEnter = [this]() {
         if (mLoadProgress)
         {
-            mLoadProgress->beginStage(LoadProgress::Stage::Environment);
+            mLoadProgress->beginStage(LoadProgress::Stage::Done);
         }
     };
     hooks.buildTail = [this](Buffer* output) { buildSceneTail(output); };
     return hooks;
 }
 
-void MetalRender::buildSceneTail(Buffer* output)
+// The stage that makes a scene visible before it is loaded.
+//
+// Nothing here depends on geometry or materials, and together these three
+// things are already a complete picture: somewhere to accumulate, the sky, and
+// a top level to trace against. The top level is built empty on purpose -- every
+// ray then misses and reaches the environment, so the first frame is the scene's
+// own lighting with none of its objects in it yet, and the objects appear in
+// that rather than replacing a black screen.
+void MetalRender::buildSceneEnvironment(Buffer* output)
 {
-    // create accum buffer, we don't need cpu access, make it device only
+    // Device only: nothing reads it back.
     mAccumulationBuffer = mDevice->newBuffer(
         static_cast<size_t>(output->width()) * output->height() * output->getElementSize(),
         MTL::ResourceStorageModePrivate);
 
-    // Initialize skinning pipeline if scene has skeletal data
-    if (!mScene->getVerticesSkinData().empty())
-    {
-        mSkinning.setScene(mScene);
-        mSkinning.buildPipeline();
-        mSkinning.createSkinDataBuffer();
-        mSkinning.allocJointMatrices();
-    }
-
-    // Load environment map if specified
     const auto& envLight = mScene->getEnvLight();
     if (envLight.has_value() && !envLight->texturePath.empty())
     {
@@ -2374,6 +2412,25 @@ void MetalRender::buildSceneTail(Buffer* output)
             loadEnvBackground((fs::path(resourcePathStr) / envLight->backgroundTexturePath).string());
         }
     }
+
+    mAccel.setScene(mScene);
+    mAccel.setSettings(getSettings());
+    mAccel.buildEmptyTopLevel();
+}
+
+void MetalRender::buildSceneTail(Buffer* output)
+{
+    (void)output;
+    // Initialize skinning pipeline if scene has skeletal data
+    if (!mScene->getVerticesSkinData().empty())
+    {
+        mSkinning.setScene(mScene);
+        mSkinning.buildPipeline();
+        mSkinning.createSkinDataBuffer();
+        mSkinning.allocJointMatrices();
+    }
+
+    // The environment is loaded in its own stage, long before this one.
     // Fresh scene: drop any pending edit bits from load-time createLight.
     mScene->consumeChanges();
     if (mLoadProgress)

@@ -16,6 +16,7 @@
 #include "MetalFrameUniforms.h"
 #include "MetalPostProcess.h"
 #include "MetalScenePreparation.h"
+#include "scene_stream.h"
 #include "MetalWavefrontIntegrator.h"
 #include "MetalDomainMap.h"
 #include "ShaderTypes.h" // GeometryEntry, shared with the path-trace kernel
@@ -117,6 +118,10 @@ private:
     metal::MetalFrameUniforms mFrameUniforms;
     metal::MetalPostProcess mPost;
     metal::MetalScenePreparation mScenePrep;
+    // Paces how often a scene that is still loading is republished.
+    metal::PublishClock mPublishClock;
+    double mBuildStartMs = 0.0;
+    bool mReportedFirstPartialFrame = false;
     metal::MetalWavefrontIntegrator mIntegrator;
     void generateTextureMips();
     metal::IntegratorSceneBindings integratorSceneBindings();
@@ -199,6 +204,7 @@ private:
     bool stepSceneBuild(Buffer* output);
     void finishSceneBuild(Buffer* output);
     metal::SceneBuildHooks makeSceneBuildHooks();
+    void buildSceneEnvironment(Buffer* output);
     void buildSceneTail(Buffer* output);
 
     // Async render (double-buffered output)

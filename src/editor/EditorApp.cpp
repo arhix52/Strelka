@@ -509,6 +509,11 @@ void EditorApp::loadSettings()
     // Block compression and a disk cache for the finished textures.
     // The cache holds them downscaled, mipped and compressed, so a second
     // launch skips the decode, the resample, the mip chain and the encode.
+    // How often a scene that is still loading is republished. Every snapshot
+    // restarts convergence, so this trades latency against the noise the load
+    // finishes with; twice a second reads as continuous without doing that
+    // often enough to matter.
+    m_settingsManager->setAs<float>("render/stream/publishIntervalMs", 500.0f);
     m_settingsManager->setAs<bool>("render/texture/compress", true);
     m_settingsManager->setAs<std::string>("render/texture/cachePath",
                            (std::filesystem::temp_directory_path() / "strelka_texcache").string());

@@ -358,6 +358,9 @@ void HeadlessApp::populateSettings()
     // Block compression and a disk cache for the finished textures.
     // The cache holds them downscaled, mipped and compressed, so a second
     // launch skips the decode, the resample, the mip chain and the encode.
+    // Headless renders one final image, so intermediate snapshots are pure
+    // cost: publish nothing until the scene is complete.
+    m_settings->setAs<float>("render/stream/publishIntervalMs", 0.0f);
     m_settings->setAs<bool>("render/texture/compress", true);
     m_settings->setAs<std::string>("render/texture/cachePath",
                            (std::filesystem::temp_directory_path() / "strelka_texcache").string());

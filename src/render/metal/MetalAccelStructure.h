@@ -111,6 +111,13 @@ public:
         return mPath && mPath->inlineWithTracer();
     }
 
+    /// A valid top level containing no instances, built before any geometry
+    /// exists so the scene can be traced while it loads. Every ray misses it and
+    /// reaches the environment, which is the correct picture of a scene whose
+    /// objects have not arrived. Replaced by the real one when the build
+    /// reaches it; a no-op if a top level already exists.
+    void buildEmptyTopLevel();
+
     /// Build every acceleration structure the scene needs, in one call.
     void create();
     /// Resumable build. Zero budget = no limit. Returns true when complete.

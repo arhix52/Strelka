@@ -48,6 +48,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_ibl_alias_table.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_buffer_sizes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_tonemappers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_scene_stream.cpp
 )
 
 target_include_directories(unit_tests
