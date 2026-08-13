@@ -12,6 +12,11 @@
 #include <string>
 #include <vector>
 
+/// The GPU-side material record, shared with the shaders (ShaderTypes.h). Only
+/// declared here so the table can be written and patched without this header
+/// pulling the shader types in.
+struct Material;
+
 namespace oka
 {
 namespace metal
@@ -32,10 +37,22 @@ public:
 
     // No budget: one call does the lot (headless / incremental edit path).
     void create(Scene* scene, LoadProgress* progress, const std::string& resourceSearchPath);
+    /// Writes the whole material table with no textures in it, from the scene
+    /// description alone. Cheap, and enough to shade the scene: the shader reads
+    /// a material's own factors wherever a texture handle is null. Idempotent.
+    void publishParameters(Scene* scene);
+
     // Resumable: a slice at a time against a millisecond budget. Zero = no limit.
     // Returns true when complete.
     bool step(Scene* scene, LoadProgress* progress, const std::string& resourceSearchPath, double budgetMs);
 
+private:
+    /// Writes the whole table. Called once, before any texture is opened.
+    void uploadMaterialBuffer(const std::vector<Material>& materials);
+    /// Writes one entry into the live table, for a texture that has just landed.
+    void patchMaterial(size_t index, const Material& material);
+
+public:
     bool buildActive() const
     {
         return mBuild != nullptr;

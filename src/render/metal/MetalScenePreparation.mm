@@ -32,16 +32,15 @@ bool MetalScenePreparation::step(SceneBuildHooks& hooks, Buffer* output)
             hooks.onEnvironmentEnter();
         if (hooks.buildEnvironment)
             hooks.buildEnvironment(output);
-        mStage = BuildStage::Materials;
+        mStage = BuildStage::MaterialParams;
         break;
 
-    case BuildStage::Materials:
-        if (hooks.onMaterialsEnter)
-            hooks.onMaterialsEnter();
-        if (hooks.stepMaterials && hooks.stepMaterials(kBuildSliceMs))
-        {
-            mStage = BuildStage::Structures;
-        }
+    case BuildStage::MaterialParams:
+        if (hooks.onMaterialParamsEnter)
+            hooks.onMaterialParamsEnter();
+        if (hooks.publishMaterialParams)
+            hooks.publishMaterialParams();
+        mStage = BuildStage::Structures;
         break;
 
     case BuildStage::Structures:
@@ -53,6 +52,15 @@ bool MetalScenePreparation::step(SceneBuildHooks& hooks, Buffer* output)
         // against roughly one frame's worth per slice here. The stage stays
         // current until the build says it is finished.
         if (hooks.stepStructures && hooks.stepStructures(kBuildSliceMs))
+        {
+            mStage = BuildStage::MaterialTextures;
+        }
+        break;
+
+    case BuildStage::MaterialTextures:
+        if (hooks.onMaterialTexturesEnter)
+            hooks.onMaterialTexturesEnter();
+        if (hooks.stepMaterialTextures && hooks.stepMaterialTextures(kBuildSliceMs))
         {
             mStage = BuildStage::Tail;
         }
@@ -72,7 +80,8 @@ bool MetalScenePreparation::step(SceneBuildHooks& hooks, Buffer* output)
 
     if (ran != BuildStage::Done)
     {
-        static const char* kStageNames[] = { "buffers", "environment", "materials", "structures", "tail" };
+        static const char* kStageNames[] = { "buffers",    "environment",       "material params",
+                                             "structures", "material textures", "tail" };
         STRELKA_DEBUG("Scene build stage '{}' took {:.0f} ms", kStageNames[(uint32_t)ran],
                       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
     }

@@ -31,7 +31,68 @@ struct MaterialBuildState
     // legitimately be needed both sRGB-decoded and linear.
     std::unordered_map<std::string, MTL::Texture*> textureCache;
     size_t cursor = 0;
+    /// The parameter-only table, written once before any texture is opened.
+    bool parametersPublished = false;
 };
+
+// Everything about a material that does not come out of a file. Texture
+// handles are left null, and the shader reads these factors wherever one is,
+// so a table built from this alone already shades the scene correctly -- in
+// flat colours, until the maps arrive.
+static Material makeMaterialParams(const Scene::MaterialDescription& currMatDesc)
+{
+    Material material = {};
+    const auto& p = currMatDesc.params;
+    material.base_color = packed_float3(simd_make_float3(p.base_color.x, p.base_color.y, p.base_color.z));
+    material.metallic = p.metallic;
+    material.roughness = p.roughness;
+    material.ior = p.ior;
+    material.specular = p.specular;
+    material.subsurface_reference = packed_float3(simd_make_float3(
+    p.subsurface_reference.x, p.subsurface_reference.y, p.subsurface_reference.z));
+    material.iridescence = p.iridescence;
+    material.iridescence_ior = p.iridescence_ior;
+    material.iridescence_thickness = p.iridescence_thickness;
+    material.specular_color = packed_float3(
+    simd_make_float3(p.specular_color.x, p.specular_color.y, p.specular_color.z));
+    material.clearcoat_ior = p.clearcoat_ior;
+    material.medium_flags = p.medium_flags;
+    material.medium_emission = packed_float3(
+    simd_make_float3(p.medium_emission.x, p.medium_emission.y, p.medium_emission.z));
+    material.subsurface = p.subsurface;
+    material.subsurface_anisotropy = p.subsurface_anisotropy;
+    material.subsurface_radius = packed_float3(
+    simd_make_float3(p.subsurface_radius.x, p.subsurface_radius.y, p.subsurface_radius.z));
+    material.sheen = p.sheen;
+    material.sheen_roughness = p.sheen_roughness;
+    material.sheen_color =
+    packed_float3(simd_make_float3(p.sheen_color.x, p.sheen_color.y, p.sheen_color.z));
+    material.diffuse_transmission = p.diffuse_transmission;
+    material.diffuse_transmission_color = packed_float3(simd_make_float3(
+    p.diffuse_transmission_color.x, p.diffuse_transmission_color.y, p.diffuse_transmission_color.z));
+    material.transmission = p.transmission;
+    material.clearcoat = p.clearcoat;
+    material.clearcoat_roughness = p.clearcoat_roughness;
+    material.anisotropy = p.anisotropy;
+    material.emission = packed_float3(simd_make_float3(p.emission.x, p.emission.y, p.emission.z));
+    material.emission_strength = p.emission_strength;
+    material.normal_scale = p.normal_scale;
+    material.occlusion_strength = p.occlusion_strength;
+    material.alpha_cutoff = p.alpha_cutoff;
+    material.alpha_mode = p.alpha_mode;
+    material.base_color_alpha = p.base_color_alpha;
+    material.attenuation_color = packed_float3(
+    simd_make_float3(p.attenuation_color.x, p.attenuation_color.y, p.attenuation_color.z));
+    material.attenuation_distance = p.attenuation_distance;
+    material.uv_offset = simd_make_float2(p.uv_offset_x, p.uv_offset_y);
+    material.uv_scale = simd_make_float2(p.uv_scale_x, p.uv_scale_y);
+    material.uv_rotation = p.uv_rotation;
+    material.material_type = p.material_type;
+    material.thin_walled = p.thin_walled;
+    material.dielectric_priority = p.dielectric_priority;
+
+    return material;
+}
 
 MetalMaterials::~MetalMaterials()
 {
@@ -59,6 +120,80 @@ void MetalMaterials::release()
     mSceneHasSubsurfaceMaterials = false;
     mMaterialIsMediumBoundary.clear();
     mMaterialIsCutout.clear();
+}
+
+void MetalMaterials::uploadMaterialBuffer(const std::vector<Material>& materials)
+{
+    if (mMaterialBuffer)
+    {
+        mMaterialBuffer->release();
+        mMaterialBuffer = nullptr;
+    }
+    const size_t bytes = sizeof(Material) * materials.size();
+    if (bytes == 0)
+    {
+        return;
+    }
+    // Shared storage, so a handle arriving later is a write to this pointer
+    // rather than a new buffer -- which would mean a new address for the tracer
+    // and a residency update in the middle of a frame.
+    mMaterialBuffer = mDevice->newBuffer(bytes, MTL::ResourceStorageModeShared);
+    if (mMaterialBuffer)
+    {
+        std::memcpy(mMaterialBuffer->contents(), materials.data(), bytes);
+    }
+}
+
+void MetalMaterials::patchMaterial(size_t index, const Material& material)
+{
+    if (!mMaterialBuffer || (index + 1) * sizeof(Material) > mMaterialBuffer->length())
+    {
+        return;
+    }
+    auto* table = static_cast<Material*>(mMaterialBuffer->contents());
+    table[index] = material;
+}
+
+void MetalMaterials::publishParameters(Scene* scene)
+{
+    if (!mBuild)
+    {
+        mBuild = new MaterialBuildState();
+    }
+    MaterialBuildState& st = *mBuild;
+    if (st.parametersPublished)
+    {
+        return;
+    }
+    st.parametersPublished = true;
+
+    const std::vector<Scene::MaterialDescription>& matDescs = scene->getMaterials();
+    st.gpuMaterials.clear();
+    st.gpuMaterials.reserve(matDescs.size());
+    mMaterialIsCutout.clear();
+    mMaterialIsMediumBoundary.clear();
+    mSceneHasAlphaMaterials = false;
+    mSceneHasBoundedMedium = false;
+    mSceneHasSubsurfaceMaterials = false;
+    for (const Scene::MaterialDescription& desc : matDescs)
+    {
+        const auto& p = desc.params;
+        st.gpuMaterials.push_back(makeMaterialParams(desc));
+        if (p.alpha_mode != ALPHA_MODE_OPAQUE)
+            mSceneHasAlphaMaterials = true;
+        // Both kinds of medium compile into the same free-flight path.
+        if (p.subsurface > 0.0f || (p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
+            mSceneHasSubsurfaceMaterials = true;
+        if ((p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
+            mSceneHasBoundedMedium = true;
+        mMaterialIsMediumBoundary.push_back((p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u ? 1u : 0u);
+        // Per material, so a BLAS can say which of its geometries actually need
+        // the alpha test. The scene-wide flag only answers "is there any cutout
+        // anywhere", which in a forest is always yes and drags trunks, rocks and
+        // ground into the callback with the needles.
+        mMaterialIsCutout.push_back(p.alpha_mode != ALPHA_MODE_OPAQUE ? 1u : 0u);
+    }
+    uploadMaterialBuffer(st.gpuMaterials);
 }
 
 void MetalMaterials::create(Scene* scene, LoadProgress* progress, const std::string& resourceSearchPath)
@@ -98,6 +233,19 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
         return mTextures->loadMaterialTexture(fullPath.string(), srgb, kind);
     };
 
+    // The table is published before a single file is opened.
+    //
+    // Everything except the texture handles is already known, and the shader
+    // falls back to a material's own factors wherever a handle is null, so this
+    // table shades the scene correctly from the start -- surfaces in their own
+    // base colour, sharpening into their maps as the maps arrive. The geometry
+    // no longer waits for the last texture to decode before it can be shown.
+    //
+    // It also settles the scene-wide flags from the parameters alone. Those
+    // gate which wavefront variant is compiled and whether a BLAS needs the
+    // alpha test, and they used to be complete only once every map had loaded.
+    publishParameters(scene);
+
     // Checked after every material rather than every so many: one material can
     // pull in five maps, and a map that misses the cache is a decode and an
     // upload -- far more than the clock read that guards it.
@@ -105,78 +253,21 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
     while (st.cursor < matDescs.size())
     {
         const Scene::MaterialDescription& currMatDesc = matDescs[st.cursor];
+        const size_t index = st.cursor;
         ++st.cursor;
-        Material material = {};
-        const auto& p = currMatDesc.params;
-        material.base_color = packed_float3(simd_make_float3(p.base_color.x, p.base_color.y, p.base_color.z));
-        material.metallic = p.metallic;
-        material.roughness = p.roughness;
-        material.ior = p.ior;
-        material.specular = p.specular;
-        material.subsurface_reference = packed_float3(simd_make_float3(
-            p.subsurface_reference.x, p.subsurface_reference.y, p.subsurface_reference.z));
-        material.iridescence = p.iridescence;
-        material.iridescence_ior = p.iridescence_ior;
-        material.iridescence_thickness = p.iridescence_thickness;
-        material.specular_color = packed_float3(
-            simd_make_float3(p.specular_color.x, p.specular_color.y, p.specular_color.z));
-        material.clearcoat_ior = p.clearcoat_ior;
-        material.medium_flags = p.medium_flags;
-        material.medium_emission = packed_float3(
-            simd_make_float3(p.medium_emission.x, p.medium_emission.y, p.medium_emission.z));
-        material.subsurface = p.subsurface;
-        material.subsurface_anisotropy = p.subsurface_anisotropy;
-        material.subsurface_radius = packed_float3(
-            simd_make_float3(p.subsurface_radius.x, p.subsurface_radius.y, p.subsurface_radius.z));
-        material.sheen = p.sheen;
-        material.sheen_roughness = p.sheen_roughness;
-        material.sheen_color =
-            packed_float3(simd_make_float3(p.sheen_color.x, p.sheen_color.y, p.sheen_color.z));
-        material.diffuse_transmission = p.diffuse_transmission;
-        material.diffuse_transmission_color = packed_float3(simd_make_float3(
-            p.diffuse_transmission_color.x, p.diffuse_transmission_color.y, p.diffuse_transmission_color.z));
-        material.transmission = p.transmission;
-        material.clearcoat = p.clearcoat;
-        material.clearcoat_roughness = p.clearcoat_roughness;
-        material.anisotropy = p.anisotropy;
-        material.emission = packed_float3(simd_make_float3(p.emission.x, p.emission.y, p.emission.z));
-        material.emission_strength = p.emission_strength;
-        material.normal_scale = p.normal_scale;
-        material.occlusion_strength = p.occlusion_strength;
-        material.alpha_cutoff = p.alpha_cutoff;
-        material.alpha_mode = p.alpha_mode;
-        material.base_color_alpha = p.base_color_alpha;
-        material.attenuation_color = packed_float3(
-            simd_make_float3(p.attenuation_color.x, p.attenuation_color.y, p.attenuation_color.z));
-        material.attenuation_distance = p.attenuation_distance;
-        material.uv_offset = simd_make_float2(p.uv_offset_x, p.uv_offset_y);
-        material.uv_scale = simd_make_float2(p.uv_scale_x, p.uv_scale_y);
-        material.uv_rotation = p.uv_rotation;
-        material.material_type = p.material_type;
-        material.thin_walled = p.thin_walled;
-        material.dielectric_priority = p.dielectric_priority;
 
+        // Only the handles are still missing; the flags and factors were settled
+        // when the table was published. Each is written straight into the buffer
+        // the tracer is already reading, so a map takes effect on the next
+        // published frame without the table being rebuilt.
+        Material& material = st.gpuMaterials[index];
         material.baseColorTexture = loadTex(currMatDesc.baseColorTexPath, true);
         material.metallicRoughnessTexture =
             loadTex(currMatDesc.metallicRoughnessTexPath, false, TextureKind::NonColor);
         material.normalTexture = loadTex(currMatDesc.normalTexPath, false, TextureKind::Normal);
         material.emissionTexture = loadTex(currMatDesc.emissionTexPath, true);
         material.occlusionTexture = loadTex(currMatDesc.occlusionTexPath, false, TextureKind::NonColor);
-
-        if (p.alpha_mode != ALPHA_MODE_OPAQUE)
-            mSceneHasAlphaMaterials = true;
-        // Both kinds of medium compile into the same free-flight path.
-        if (p.subsurface > 0.0f || (p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
-            mSceneHasSubsurfaceMaterials = true;
-        if ((p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
-            mSceneHasBoundedMedium = true;
-        mMaterialIsMediumBoundary.push_back((p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u ? 1u : 0u);
-        // Per material, so a BLAS can say which of its geometries actually need
-        // the alpha test. The scene-wide flag below only answers "is there any
-        // cutout anywhere", which in a forest is always yes and drags trunks,
-        // rocks and ground into the callback with the needles.
-        mMaterialIsCutout.push_back(p.alpha_mode != ALPHA_MODE_OPAQUE ? 1u : 0u);
-        st.gpuMaterials.push_back(material);
+        patchMaterial(index, material);
 
         if (budgetMs > 0.0 &&
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceStart).count() >=
@@ -204,17 +295,8 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
                      mTextures->cacheHits(), mTextures->cacheMisses(), (double)bytes / (1024.0 * 1024.0));
     }
 
-    const size_t materialsDataSize = sizeof(Material) * st.gpuMaterials.size();
-    if (mMaterialBuffer)
-    {
-        mMaterialBuffer->release();
-        mMaterialBuffer = nullptr;
-    }
-    if (materialsDataSize > 0)
-    {
-        mMaterialBuffer = mDevice->newBuffer(materialsDataSize, MTL::ResourceStorageModeShared);
-        memcpy(mMaterialBuffer->contents(), st.gpuMaterials.data(), materialsDataSize);
-    }
+    // The buffer has been live since the parameters were written, and every
+    // handle was patched into it as it arrived, so there is nothing to upload.
 
     delete mBuild;
     mBuild = nullptr;

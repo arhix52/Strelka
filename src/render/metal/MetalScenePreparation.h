@@ -22,10 +22,11 @@ namespace metal
 enum class BuildStage : uint32_t
 {
     Buffers = 0,
-    Environment, ///< accumulation target, env map, empty top level
-    Materials,
-    Structures,
-    Tail, ///< skinning, memory report
+    Environment,     ///< accumulation target, env map, empty top level
+    MaterialParams,  ///< the whole material table, with no textures in it yet
+    Structures,      ///< the long pole
+    MaterialTextures,///< maps, filled into the live table as they decode
+    Tail,            ///< skinning, memory report
     Done,
 };
 
@@ -40,9 +41,15 @@ struct SceneBuildHooks
     /// against until real geometry replaces it.
     std::function<void(Buffer* output)> buildEnvironment;
 
-    // Materials progress begin when build not yet active.
-    std::function<void()> onMaterialsEnter;
-    std::function<bool(double /*budgetMs*/)> stepMaterials;
+    // The material table without its maps: cheap, and everything the structures
+    // stage needs to know about materials comes out of it.
+    std::function<void()> onMaterialParamsEnter;
+    std::function<void()> publishMaterialParams;
+
+    // The maps. Runs after the structures so geometry is on screen, in flat
+    // material colours, while they decode.
+    std::function<void()> onMaterialTexturesEnter;
+    std::function<bool(double /*budgetMs*/)> stepMaterialTextures;
 
     std::function<void()> onStructuresEnter;
     // Called once when Structures begins: force static BLAS for load.

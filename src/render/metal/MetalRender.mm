@@ -2353,14 +2353,15 @@ metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
         }
     };
     hooks.buildEnvironment = [this](Buffer* output) { buildSceneEnvironment(output); };
-    hooks.onMaterialsEnter = [this]() {
+    hooks.publishMaterialParams = [this]() { mMaterials.publishParameters(mScene); };
+    hooks.onMaterialTexturesEnter = [this]() {
         if (mLoadProgress && !mMaterials.buildActive())
         {
             mLoadProgress->beginStage(LoadProgress::Stage::Textures,
                                       (uint32_t)mScene->getMaterials().size());
         }
     };
-    hooks.stepMaterials = [this](double budgetMs) { return stepMetalMaterials(budgetMs); };
+    hooks.stepMaterialTextures = [this](double budgetMs) { return stepMetalMaterials(budgetMs); };
     hooks.onStructuresEnter = [this]() {
         if (mLoadProgress && !mAccel.buildActive())
         {
