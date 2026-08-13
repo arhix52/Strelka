@@ -22,12 +22,12 @@ answer, or an asset/converter note that does not need Chaos.
 | ~~1~~ | ~~Clearcoat underside bounce~~ | done — see Closed | `15_clearcoat` 1.002 overall, IOR 2.2 within 1% |
 | ~~2~~ | ~~Rough thin-wall blur~~ | done — see Closed | `22_thin_walled` 0.094 / 0.966 CLOSE |
 | ~~3~~ | ~~Hair lobe (geometry is done)~~ | done — see Closed | `28_hair` 0.084 / 0.977 CLOSE |
-| 4 | Height-map mip aliasing | `render/pt/textureLodMode` | kids bedroom walls A/B lod 0 vs footprint; measure with `patch_mean.py` |
+| ~~4~~ | ~~Height-map mip aliasing~~ | done — see Closed | kids walls lod0 vs footprint ≤1%; default stays 0 |
 | 5 | OptiX ior-stack counters | OptiX push/pop path | same three counters Metal already reports; no bathroom patch change expected |
 | 6 | Two-sided different back face | material model / glTF | design first; one kids-bedroom material only |
 | 7 | Bath water is a dish, not a volume | asset, not code | remodel in Blender; bath water R/G against Chaos PNG is a check, not a driver |
 
-4–6 are smaller. 7 is not a renderer bug.
+5–6 are smaller. 7 is not a renderer bug.
 
 Build the bathroom / kids bedroom when an entry asks for it:
 
@@ -63,26 +63,6 @@ Feature-test ladder (the default verifier for 1–3):
 ```bash
 # see tools/feature_tests/README.md -- Cycles EXR refs, one feature per scene
 ```
-
----
-
-## 4. Baked height normals alias at mip 0
-
-Fixed earlier, and it was the largest thing wrong with the kids bedroom: V-Ray
-`bump_type` 0 is a height field, and the converter wired it into `normalTexture`
-regardless. Seven of nine bump maps were height fields; the walls' was the
-greyscale mix mask. A dark mask texel became a shading normal into the surface,
-and the plaster walls measured 0.0000 against the reference. Conversion is
-`TextureBaker.bake_height_normal`.
-
-**Left open**: those baked maps are sampled at mip 0 by default
-(`render/pt/textureLodMode` 0). A mask used as a height field has one-texel
-edges, so the sparse 45-degree tilts at those edges alias. Nothing here yet
-measures what that costs.
-
-**Fix / measure**: A/B `textureLodMode` 0 vs ray-footprint LOD on the kids
-bedroom walls; decide whether the default should change. **Verify**:
-`patch_mean.py` on right/back wall; no Chaos required.
 
 ---
 
@@ -138,6 +118,30 @@ nested-dielectric counters should drop on that mesh.
 ---
 
 ## Closed (kept for the measurement, not the work)
+
+### Height-map mip aliasing
+
+**Measured; default stays off.** The conversion bug (height / mix masks forced
+into `normalTexture`) was already fixed by `TextureBaker.bake_height_normal`.
+What remained was whether mip-0 sampling of those baked maps still aliases
+enough to justify flipping `render/pt/textureLod` / `textureLodMode` on by
+default.
+
+Kids bedroom, camera 0, 1280², ACES, clamp 8, sobol — lod 0 vs ray-footprint
+LOD (`texture_lod = true`):
+
+| patch | 256 spp mean Δ | 16 spp high-freq Δ |
+|---|---|---|
+| wall_left (300,300 60×60) | −1% | −0.6% |
+| wall_right (820,300 60×60) | −1% | −0.7% |
+| right_wall (1150,475 40×40) | 0% | −0.1% |
+
+Plaster normals after the bake sit at scale ~0.001, so there is almost nothing
+left to alias. The wall mean gap vs the Chaos PNG is lighting / conversion, not
+mip selection — footprint LOD does not close it. The shader comment already
+says the right thing: at high spp supersampling hides minification, and an
+offline render should leave mip 0 alone so the estimate converges to the
+unfiltered texture. Interactive 1 spp can opt in via TOML / settings.
 
 ### Hair Chiang lobe
 
