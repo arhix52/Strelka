@@ -442,11 +442,17 @@ void initSurfaceInteraction(
         resolvedMetallic *= mrTex.b;
     }
 
-    // Sample normal map
+    // Sample normal map. Z comes from X and Y rather than from the texture: a
+    // normal map is BC5 when compression is on, which stores two channels only.
+    // For a unit-length tangent-space normal this is the value that was dropped,
+    // and reading it the same way whether or not the texture was compressed
+    // keeps the two paths from disagreeing.
     if (!is_null_texture(material.normalTexture))
     {
-        float3 bumpNormal = (hasLod ? material.normalTexture.sample(texSamplerMip, tuv, level(texLod(material.normalTexture, lodBase, hasLod))) : material.normalTexture.sample(texSampler, tuv)).xyz * 2.0f - 1.0f;
-        bumpNormal.xy *= material.normal_scale;
+        float2 bumpXY = (hasLod ? material.normalTexture.sample(texSamplerMip, tuv, level(texLod(material.normalTexture, lodBase, hasLod))) : material.normalTexture.sample(texSampler, tuv)).xy * 2.0f - 1.0f;
+        // glTF scales X and Y and leaves Z, so Z is rebuilt before the scale.
+        const float bumpZ = sqrt(saturate(1.0f - dot(bumpXY, bumpXY)));
+        float3 bumpNormal = float3(bumpXY * material.normal_scale, bumpZ);
         float3x3 TBN = float3x3(worldTangent, worldBinormal, worldNormal);
         si.shading_normal = normalize(TBN * bumpNormal);
     }

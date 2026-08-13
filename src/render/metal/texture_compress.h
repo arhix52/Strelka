@@ -1,22 +1,29 @@
 #pragma once
 
 // Block compression for the texture cache: BC1 for opaque colour, BC3 where
-// alpha carries something.
+// alpha carries something, BC5 for normal maps.
 //
 // Why these and not BC7, which is better: BC7 is a search over eight block modes
-// and takes long enough that it wants a GPU encoder or a build step. BC1 and BC3
-// are a range fit over a 4x4 block -- a few hundred instructions -- and they are
-// what makes the difference between a scene fitting in memory and not. The
-// results are cached, so the encode is paid once per texture per setting rather
-// than once per launch.
+// and takes long enough that it wants a GPU encoder or a build step. BC1, BC3
+// and BC5 are a range fit over a 4x4 block -- a few hundred instructions -- and
+// they are what makes the difference between a scene fitting in memory and not.
+// The results are cached, so the encode is paid once per texture per setting
+// rather than once per launch.
 //
 // What they cost: BC1 quantises colour to 5:6:5 endpoints and four interpolated
 // levels, which is visible on smooth gradients and invisible on the bark, moss
-// and foliage that fill a scene like this. Normal maps are deliberately left
-// uncompressed -- a two-bit index along a line through 5:6:5 space is not enough
-// for a direction, and the banding shows up as facets on every curved surface.
+// and foliage that fill a scene like this.
+//
+// Normal maps go through BC5 rather than BC1 because a direction does not
+// survive BC1: three channels share one line through 5:6:5 space and two bits of
+// index, and the result facets every curved surface. BC5 is two independent BC4
+// blocks -- 8-bit endpoints, three bits of index -- one for X and one for Y, at
+// the same 8 bits per pixel. Z is not stored; the shader rebuilds it from X and
+// Y, which is exact for a unit-length tangent-space normal and is also what
+// Apple recommends for normal data on Metal.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -116,9 +123,10 @@ inline void compressBlockBC1(const uint8_t* src, int width, int height, int x0, 
     std::memcpy(out + 4, &indices, 4);
 }
 
-/// One 4x4 BC4 alpha block, 8 bytes: two endpoints and three bits per pixel.
-inline void compressBlockAlpha(const uint8_t* src, int width, int height, int x0, int y0,
-                               size_t stride, uint8_t out[8])
+/// One 4x4 BC4 block, 8 bytes: two endpoints and three bits per pixel, over one
+/// channel of an RGBA8 image. BC3 uses it for alpha, BC5 twice for X and Y.
+inline void compressBlockBC4(const uint8_t* src, int width, int height, int x0, int y0,
+                             size_t stride, int channel, uint8_t out[8])
 {
     uint8_t values[16];
     int lo = 255, hi = 0;
@@ -128,7 +136,7 @@ inline void compressBlockAlpha(const uint8_t* src, int width, int height, int x0
         {
             const int sx = std::min(x0 + x, width - 1);
             const int sy = std::min(y0 + y, height - 1);
-            const uint8_t a = src[(size_t)sy * stride + (size_t)sx * 4 + 3];
+            const uint8_t a = src[(size_t)sy * stride + (size_t)sx * 4 + channel];
             values[y * 4 + x] = a;
             lo = std::min(lo, (int)a);
             hi = std::max(hi, (int)a);
@@ -176,6 +184,51 @@ inline void compressBlockAlpha(const uint8_t* src, int width, int height, int x0
         out[2 + b] = (uint8_t)((indices >> (8 * b)) & 0xFF);
 }
 
+/// Rewrite an RGBA8 normal map in place so every texel is a unit vector, which
+/// is what makes dropping Z lossless: the shader rebuilds it as
+/// sqrt(1 - x^2 - y^2), and that is only the Z that was there if the source had
+/// unit length to begin with.
+///
+/// Real assets do not. Normal maps arrive off a lossy encoder, so a texel is
+/// typically a percent off, and a mip level is an average of unit vectors and so
+/// is shorter still. Worse, a glTF sometimes points normalTexture at a
+/// displacement map, where the three channels are one grey value and the vector
+/// is nowhere near unit -- reconstructing Z from that without this pass turns a
+/// 70-degree error loose on the material.
+///
+/// Normalising does not change what is shaded: the shader normalises after the
+/// tangent transform anyway, and glTF's normal scale applies to X and Y only, so
+/// scaling a unit normal and scaling the original give the same direction.
+inline void normalizeNormalMap(uint8_t* rgba, int width, int height)
+{
+    const size_t count = (size_t)width * height;
+    for (size_t i = 0; i < count; ++i)
+    {
+        uint8_t* p = rgba + i * 4;
+        const float x = p[0] / 255.0f * 2.0f - 1.0f;
+        const float y = p[1] / 255.0f * 2.0f - 1.0f;
+        const float z = p[2] / 255.0f * 2.0f - 1.0f;
+        const float len = std::sqrt(x * x + y * y + z * z);
+        if (len < 1e-6f)
+        {
+            // Guards the divide only: no 8-bit triple encodes an exactly zero
+            // vector, and a mid-grey texel -- the closest there is -- keeps the
+            // tilt the shader has always read out of it.
+            p[0] = 128;
+            p[1] = 128;
+            p[2] = 255;
+            continue;
+        }
+        const auto encode = [](float v) {
+            const float t = (v * 0.5f + 0.5f) * 255.0f;
+            return (uint8_t)std::lround(std::clamp(t, 0.0f, 255.0f));
+        };
+        p[0] = encode(x / len);
+        p[1] = encode(y / len);
+        p[2] = encode(z / len);
+    }
+}
+
 /// Whether any pixel's alpha is not fully opaque, which decides BC1 against BC3.
 inline bool hasAlpha(const uint8_t* rgba, int width, int height)
 {
@@ -188,40 +241,51 @@ inline bool hasAlpha(const uint8_t* rgba, int width, int height)
     return false;
 }
 
-/// Compress an RGBA8 image. `blockBytes` is 8 for BC1, 16 for BC3.
+enum class Format
+{
+    BC1, ///< RGB, 8 bytes per block.
+    BC3, ///< RGB + alpha, 16 bytes per block.
+    BC5, ///< Two channels, 16 bytes per block. X and Y of a normal.
+};
+
+inline size_t blockBytes(Format format)
+{
+    return format == Format::BC1 ? 8u : 16u;
+}
+
+/// Compress an RGBA8 image into 4x4 blocks of `format`.
 // compressImage, not compress: miniz -- pulled in by tinyexr -- takes that name
 // as a macro, and the collision is reported at the call site rather than here.
-inline std::vector<uint8_t> compressImage(const uint8_t* rgba, int width, int height, bool withAlpha)
+inline std::vector<uint8_t> compressImage(const uint8_t* rgba, int width, int height, Format format)
 {
     const int blocksX = (width + 3) / 4;
     const int blocksY = (height + 3) / 4;
-    const int blockBytes = withAlpha ? 16 : 8;
-    std::vector<uint8_t> out((size_t)blocksX * blocksY * blockBytes);
+    const size_t blockSize = blockBytes(format);
+    std::vector<uint8_t> out((size_t)blocksX * blocksY * blockSize);
     const size_t stride = (size_t)width * 4;
 
     for (int by = 0; by < blocksY; ++by)
     {
         for (int bx = 0; bx < blocksX; ++bx)
         {
-            uint8_t* dst = out.data() + ((size_t)by * blocksX + bx) * blockBytes;
-            if (withAlpha)
+            uint8_t* dst = out.data() + ((size_t)by * blocksX + bx) * blockSize;
+            switch (format)
             {
-                compressBlockAlpha(rgba, width, height, bx * 4, by * 4, stride, dst);
-                compressBlockBC1(rgba, width, height, bx * 4, by * 4, stride, dst + 8);
-            }
-            else
-            {
+            case Format::BC1:
                 compressBlockBC1(rgba, width, height, bx * 4, by * 4, stride, dst);
+                break;
+            case Format::BC3:
+                compressBlockBC4(rgba, width, height, bx * 4, by * 4, stride, 3, dst);
+                compressBlockBC1(rgba, width, height, bx * 4, by * 4, stride, dst + 8);
+                break;
+            case Format::BC5:
+                compressBlockBC4(rgba, width, height, bx * 4, by * 4, stride, 0, dst);
+                compressBlockBC4(rgba, width, height, bx * 4, by * 4, stride, 1, dst + 8);
+                break;
             }
         }
     }
     return out;
-}
-
-/// Bytes per row of blocks, which is what Metal wants for a compressed level.
-inline size_t bytesPerRow(int width, bool withAlpha)
-{
-    return (size_t)((width + 3) / 4) * (withAlpha ? 16 : 8);
 }
 
 } // namespace oka::bc

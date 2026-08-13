@@ -9,7 +9,7 @@ namespace metal
 {
 
 // Bumped whenever the .btex cache layout or encoder changes.
-inline constexpr uint32_t kTextureCacheVersion = 1;
+inline constexpr uint32_t kTextureCacheVersion = 2;
 
 enum class TextureKind : int
 {

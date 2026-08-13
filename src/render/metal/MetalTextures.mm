@@ -208,16 +208,42 @@ MTL::Texture* MetalTextures::loadFromFile(const std::string& fileName, bool srgb
         chain.push_back(std::move(next));
     }
 
-    const bool canCompress = kind != TextureKind::Normal && mDevice->supportsBCTextureCompression() &&
+    // A normal map tagged sRGB is neither compressed nor normalised: BC5 has no
+    // sRGB variant, and both the encode and the Z reconstruction need the values
+    // linear. It does not happen -- the material build asks for normal maps
+    // linear -- but silently dropping the transfer function would be worse than
+    // leaving such a texture as it was.
+    const bool srgbNormal = kind == TextureKind::Normal && srgb;
+    const bool normalMap = kind == TextureKind::Normal && !srgb;
+    const bool canCompress = !srgbNormal && mDevice->supportsBCTextureCompression() &&
                              mSettings->getAs<bool>("render/texture/compress");
-    const bool withAlpha = canCompress && oka::bc::hasAlpha(chain[0].data(), texWidth, texHeight);
+    oka::bc::Format bcFormat = oka::bc::Format::BC1;
+    if (normalMap)
+        bcFormat = oka::bc::Format::BC5;
+    else if (canCompress && oka::bc::hasAlpha(chain[0].data(), texWidth, texHeight))
+        bcFormat = oka::bc::Format::BC3;
+
     MTL::PixelFormat format;
     if (!canCompress)
         format = srgb ? MTL::PixelFormatRGBA8Unorm_sRGB : MTL::PixelFormatRGBA8Unorm;
-    else if (withAlpha)
+    else if (bcFormat == oka::bc::Format::BC5)
+        format = MTL::PixelFormatBC5_RGUnorm;
+    else if (bcFormat == oka::bc::Format::BC3)
         format = srgb ? MTL::PixelFormatBC3_RGBA_sRGB : MTL::PixelFormatBC3_RGBA;
     else
         format = srgb ? MTL::PixelFormatBC1_RGBA_sRGB : MTL::PixelFormatBC1_RGBA;
+
+    // Every mip level, not just the base: the box filter above averages unit
+    // vectors, which shortens them, and the shader rebuilds Z on the assumption
+    // that they are unit. Done whether or not the texture ends up compressed, so
+    // the two paths shade the same.
+    if (normalMap)
+    {
+        for (uint32_t l = 0; l < levels; ++l)
+        {
+            oka::bc::normalizeNormalMap(chain[l].data(), std::max(1, texWidth >> l), std::max(1, texHeight >> l));
+        }
+    }
 
     std::vector<std::vector<uint8_t>> payload;
     payload.reserve(levels);
@@ -225,7 +251,7 @@ MTL::Texture* MetalTextures::loadFromFile(const std::string& fileName, bool srgb
     {
         const int w = std::max(1, texWidth >> l);
         const int h = std::max(1, texHeight >> l);
-        payload.push_back(canCompress ? oka::bc::compressImage(chain[l].data(), w, h, withAlpha)
+        payload.push_back(canCompress ? oka::bc::compressImage(chain[l].data(), w, h, bcFormat)
                                       : std::move(chain[l]));
     }
     chain.clear();
@@ -245,7 +271,7 @@ MTL::Texture* MetalTextures::loadFromFile(const std::string& fileName, bool srgb
     if (!pTexture)
         return nullptr;
 
-    const uint32_t blockBytes = canCompress ? (withAlpha ? 16u : 8u) : 0u;
+    const uint32_t blockBytes = canCompress ? (uint32_t)oka::bc::blockBytes(bcFormat) : 0u;
     for (uint32_t l = 0; l < levels; ++l)
     {
         const uint32_t w = std::max(1, texWidth >> l);

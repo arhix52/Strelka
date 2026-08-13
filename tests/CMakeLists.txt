@@ -39,6 +39,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_frame_jitter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_features.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_cache_key.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_compress.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_ibl_alias_table.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_buffer_sizes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_tonemappers.cpp

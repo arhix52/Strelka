@@ -192,7 +192,17 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
     }
 
     mTextures->generateMips();
-    STRELKA_INFO("Textures: {} from cache, {} built and cached", mTextures->cacheHits(), mTextures->cacheMisses());
+    {
+        // What the texture set costs on the device, since which formats the
+        // encoder picked is otherwise only visible in the editor's memory panel.
+        size_t bytes = 0;
+        for (MTL::Texture* t : mTextures->materialTextures())
+        {
+            bytes += t ? t->allocatedSize() : 0;
+        }
+        STRELKA_INFO("Textures: {} from cache, {} built and cached, {:.1f} MB on device",
+                     mTextures->cacheHits(), mTextures->cacheMisses(), (double)bytes / (1024.0 * 1024.0));
+    }
 
     const size_t materialsDataSize = sizeof(Material) * st.gpuMaterials.size();
     if (mMaterialBuffer)
