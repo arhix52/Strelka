@@ -2430,6 +2430,19 @@ void MetalRender::buildSceneEnvironment(Buffer* output)
         }
     }
 
+    // Before the first published frame, not in the last stage. Frames are now
+    // traced from this stage onwards, and each one runs the animation block; a
+    // frame that found no skinning pipeline would consume the pose it was asked
+    // for and dispatch nothing, leaving the character in whatever pose the
+    // vertex buffer happened to hold, with nothing left to mark dirty.
+    if (!mScene->getVerticesSkinData().empty())
+    {
+        mSkinning.setScene(mScene);
+        mSkinning.buildPipeline();
+        mSkinning.createSkinDataBuffer();
+        mSkinning.allocJointMatrices();
+    }
+
     mAccel.setScene(mScene);
     mAccel.setSettings(getSettings());
     mAccel.buildEmptyTopLevel();
@@ -2438,14 +2451,6 @@ void MetalRender::buildSceneEnvironment(Buffer* output)
 void MetalRender::buildSceneTail(Buffer* output)
 {
     (void)output;
-    // Initialize skinning pipeline if scene has skeletal data
-    if (!mScene->getVerticesSkinData().empty())
-    {
-        mSkinning.setScene(mScene);
-        mSkinning.buildPipeline();
-        mSkinning.createSkinDataBuffer();
-        mSkinning.allocJointMatrices();
-    }
 
     // The environment is loaded in its own stage, long before this one.
     // Fresh scene: drop any pending edit bits from load-time createLight.
