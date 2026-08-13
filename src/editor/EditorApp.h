@@ -96,6 +96,11 @@ private:
 
     // No exposure in the light sidecar: measure it from the first frame instead.
     bool m_autoExposurePending = false;
+    /// Frames displayed since the scene finished building. Independent of the
+    /// accumulator, which resets on camera moves and is off entirely in some
+    /// configurations.
+    uint32_t m_framesSinceSceneReady = 0;
+    size_t m_lastExposureFrameSeen = (size_t)-1;
     void applyAutoExposure(oka::Buffer* buf);
     bool m_pendingSaveAs = false;
 

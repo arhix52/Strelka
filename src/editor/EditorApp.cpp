@@ -380,6 +380,8 @@ void EditorApp::applySceneExposure()
     else
     {
         m_autoExposurePending = true;
+        // A new scene has its own frames to settle over.
+        m_framesSinceSceneReady = 0;
     }
 }
 
@@ -3707,9 +3709,32 @@ void EditorApp::run()
         // part way through it is missing geometry that has not been handed to
         // the tracer yet -- and until enough samples have landed that the mean
         // is a property of the scene rather than of the noise.
-        static constexpr uint32_t kExposureSettleSamples = 8;
-        if (readyBuf && m_autoExposurePending && !m_render->isBuildingScene() && !m_isLoading &&
-            m_sharedCtx->mSubframeIndex >= kExposureSettleSamples)
+        //
+        // Counted here rather than read from the accumulator. mSubframeIndex is
+        // the accumulator's own counter: it returns to zero on every camera move
+        // and never leaves zero at all when accumulation is switched off, so
+        // gating on it means a scene that is being flown through, or that has
+        // accumulation off, never gets an exposure and renders the whole session
+        // at the default one.
+        // Counted on the renderer's frame number, not on passes through this
+        // loop. The UI runs at vsync and a traced frame takes many times longer,
+        // so counting loop iterations counts the same finished frame over and
+        // over -- and the frame still standing right after the build is one of
+        // the partial ones published during it. Measured off an environment-only
+        // frame that way, the pine forest read 0.596 instead of 0.089 and the
+        // scene came out six times too dark.
+        static constexpr uint32_t kExposureSettleFrames = 8;
+        const bool sceneReady = !m_render->isBuildingScene() && !m_isLoading;
+        if (readyBuf && sceneReady && m_sharedCtx->mFrameNumber != m_lastExposureFrameSeen)
+        {
+            m_lastExposureFrameSeen = m_sharedCtx->mFrameNumber;
+            if (m_framesSinceSceneReady < kExposureSettleFrames)
+            {
+                ++m_framesSinceSceneReady;
+            }
+        }
+        if (readyBuf && m_autoExposurePending && sceneReady &&
+            m_framesSinceSceneReady >= kExposureSettleFrames)
         {
             applyAutoExposure(readyBuf);
         }
