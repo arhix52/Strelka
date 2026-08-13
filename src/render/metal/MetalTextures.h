@@ -40,7 +40,10 @@ public:
     /// and it ran on one core while the rest of the machine sat idle. What it
     /// produces is held until loadFromFile() asks, which then only has the Metal
     /// calls left to make.
-    void prewarm(const std::vector<Request>& requests);
+    /// Returns true when every request has been decoded. Runs batches until the
+    /// budget is spent, so the caller keeps publishing frames while it works;
+    /// zero budget means run it all in one call.
+    bool prewarmStep(const std::vector<Request>& requests, double budgetMs);
 
     // Deduped load for material build. Tracks ownership in materialTextures().
     MTL::ResourceID loadMaterialTexture(const std::string& absolutePath, bool srgb, TextureKind kind = TextureKind::Color);
@@ -105,6 +108,11 @@ private:
     std::unordered_map<std::string, MTL::Texture*> mDedupCache;
     /// Payloads produced by prewarm(), keyed by cache key, consumed by loadFromFile().
     std::unordered_map<std::string, Payload> mPrewarmed;
+    /// Deduplicated request list and how far through it the fan-out has got.
+    std::vector<Request> mPrewarmQueue;
+    std::vector<std::string> mPrewarmKeys;
+    size_t mPrewarmCursor = 0;
+    bool mPrewarmPrepared = false;
     uint32_t mCacheHits = 0;
     uint32_t mCacheMisses = 0;
 };

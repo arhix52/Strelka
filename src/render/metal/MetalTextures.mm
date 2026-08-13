@@ -5,6 +5,8 @@
 
 #include <dispatch/dispatch.h>
 
+#include <thread>
+
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -51,6 +53,10 @@ void MetalTextures::init(MTL::Device* device, MTL::CommandQueue* queue, Settings
 
 void MetalTextures::beginMaterialPass()
 {
+    mPrewarmPrepared = false;
+    mPrewarmQueue.clear();
+    mPrewarmKeys.clear();
+    mPrewarmCursor = 0;
     mDedupCache.clear();
 }
 
@@ -373,21 +379,17 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
     return out;
 }
 
-void MetalTextures::prewarm(const std::vector<Request>& requests)
+bool MetalTextures::prewarmStep(const std::vector<Request>& requests, double budgetMs)
 {
-    if (requests.empty())
+    if (!mPrewarmPrepared)
     {
-        return;
-    }
-    const fs::path cacheDir = mSettings->getAs<std::string>("render/texture/cachePath");
-    const DecodeParams params = readDecodeParams();
-
-    // Deduplicated first: a scene routinely uses one map in several materials,
-    // and decoding it once per use would spend the cores undoing the saving the
-    // dedup cache exists to make.
-    std::vector<Request> unique;
-    std::vector<std::string> keys;
-    {
+        mPrewarmPrepared = true;
+        mPrewarmQueue.clear();
+        mPrewarmKeys.clear();
+        mPrewarmCursor = 0;
+        // Deduplicated first: a scene routinely uses one map in several
+        // materials, and decoding it once per use would spend the cores undoing
+        // the saving the dedup cache exists to make.
         std::unordered_map<std::string, size_t> seen;
         for (const Request& r : requests)
         {
@@ -396,33 +398,54 @@ void MetalTextures::prewarm(const std::vector<Request>& requests)
             std::string key = cacheKey(r.path, r.srgb, r.kind);
             if (seen.count(key) != 0)
                 continue;
-            seen.emplace(key, unique.size());
-            unique.push_back(r);
-            keys.push_back(std::move(key));
+            seen.emplace(key, mPrewarmQueue.size());
+            mPrewarmQueue.push_back(r);
+            mPrewarmKeys.push_back(std::move(key));
         }
     }
-    if (unique.empty())
+    if (mPrewarmCursor >= mPrewarmQueue.size())
     {
-        return;
+        return true;
     }
 
-    std::vector<Payload> results(unique.size());
-    // Written through a pointer: a block captures by const value, and each index
-    // is touched by exactly one iteration, so no locking is needed.
-    Payload* out = results.data();
-    dispatch_apply(unique.size(), DISPATCH_APPLY_AUTO, ^(size_t i) {
-        const Request& r = unique[i];
-        const std::string cacheFile = cacheDir.empty() ? std::string() : (cacheDir / keys[i]).string();
-        out[i] = decodeToPayload(r.path, r.srgb, r.kind, cacheFile, params);
-    });
+    const fs::path cacheDir = mSettings->getAs<std::string>("render/texture/cachePath");
+    const DecodeParams params = readDecodeParams();
 
-    for (size_t i = 0; i < unique.size(); ++i)
+    // A batch wide enough to fill the machine, short enough to hand control back
+    // between them. One texture can be a second on its own, so the budget is
+    // checked per batch rather than relied on to cut one short.
+    const size_t batch = std::max<size_t>(1, (size_t)std::thread::hardware_concurrency());
+    const auto sliceStart = std::chrono::steady_clock::now();
+    do
     {
-        if (results[i].valid)
+        const size_t begin = mPrewarmCursor;
+        const size_t count = std::min(batch, mPrewarmQueue.size() - begin);
+        std::vector<Payload> results(count);
+        // Written through a pointer: a block captures by const value, and each
+        // index is touched by exactly one iteration, so no locking is needed.
+        Payload* out = results.data();
+        const Request* queue = mPrewarmQueue.data();
+        const std::string* keys = mPrewarmKeys.data();
+        dispatch_apply(count, DISPATCH_APPLY_AUTO, ^(size_t i) {
+            const Request& r = queue[begin + i];
+            const std::string cacheFile =
+                cacheDir.empty() ? std::string() : (cacheDir / keys[begin + i]).string();
+            out[i] = decodeToPayload(r.path, r.srgb, r.kind, cacheFile, params);
+        });
+        for (size_t i = 0; i < count; ++i)
         {
-            mPrewarmed.emplace(keys[i], std::move(results[i]));
+            if (results[i].valid)
+            {
+                mPrewarmed.emplace(mPrewarmKeys[begin + i], std::move(results[i]));
+            }
         }
-    }
+        mPrewarmCursor += count;
+    } while (mPrewarmCursor < mPrewarmQueue.size() &&
+             (budgetMs <= 0.0 ||
+              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceStart).count() <
+                  budgetMs));
+
+    return mPrewarmCursor >= mPrewarmQueue.size();
 }
 
 MTL::Texture* MetalTextures::loadFromFile(const std::string& fileName, bool srgb, TextureKind kind)

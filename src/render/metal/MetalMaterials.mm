@@ -33,6 +33,8 @@ struct MaterialBuildState
     size_t cursor = 0;
     /// The parameter-only table, written once before any texture is opened.
     bool parametersPublished = false;
+    /// beginMaterialPass has run and the prewarm queue belongs to this build.
+    bool prewarmStarted = false;
 };
 
 // Everything about a material that does not come out of a file. Texture
@@ -225,10 +227,16 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
 
     if (st.cursor == 0)
     {
-        mTextures->beginMaterialPass();
+        if (!st.prewarmStarted)
+        {
+            st.prewarmStarted = true;
+            mTextures->beginMaterialPass();
+        }
         // Every map the scene will ask for, decoded across all cores before the
-        // loop below asks for them one at a time. Each call it makes then has
-        // only the Metal calls left to do.
+        // loop below asks for them one at a time -- but a batch at a time, so
+        // the frame the renderer publishes between slices keeps arriving. Doing
+        // the whole set in one call is faster on paper and freezes the window
+        // for as long as it takes.
         std::vector<MetalTextures::Request> requests;
         requests.reserve(matDescs.size() * 5);
         auto want = [&](const std::string& path, bool srgb, TextureKind kind) {
@@ -243,11 +251,10 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
             want(d.emissionTexPath, true, TextureKind::Color);
             want(d.occlusionTexPath, false, TextureKind::NonColor);
         }
-        const auto tPrewarm = std::chrono::steady_clock::now();
-        mTextures->prewarm(requests);
-        STRELKA_INFO("Textures prewarmed: {} requests in {:.0f} ms",
-                     requests.size(),
-                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tPrewarm).count());
+        if (!mTextures->prewarmStep(requests, budgetMs))
+        {
+            return false;
+        }
     }
     auto loadTex = [&](const std::string& path, bool srgb,
                        TextureKind kind = TextureKind::Color) -> MTL::ResourceID {
