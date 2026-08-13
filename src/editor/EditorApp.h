@@ -80,6 +80,12 @@ private:
     std::string m_attemptedSceneFile;
     std::chrono::steady_clock::time_point m_loadStartedAt{};
 
+    // File → Open Recent. Persisted next to imgui.ini so a rebuild does not
+    // wipe the working set, and capped by editor_document::kRecentScenesCapacity.
+    std::vector<std::string> m_recentScenes;
+    void rememberRecentScene(const std::string& sceneFile);
+    void persistRecentScenes();
+
     // One-shot ImGui modal for open/save/device failures (no toast system).
     std::string m_alertMessage;
     bool m_alertOpen = false;

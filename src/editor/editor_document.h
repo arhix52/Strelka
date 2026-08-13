@@ -1,8 +1,11 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <vector>
 
 #include <fmt/format.h>
 
@@ -68,6 +71,111 @@ inline int clampCameraIndex(int selected, uint32_t cameraCount)
         return static_cast<int>(cameraCount - 1);
     }
     return selected;
+}
+
+/// How many File → Open Recent entries the editor keeps. Ten is enough to cover
+/// a working set without turning the submenu into a file browser.
+inline constexpr size_t kRecentScenesCapacity = 10;
+
+/// Absolute, weakly-canonical form so "/a/../b.glb" and "/b.glb" collide in the
+/// recent list. Falls back to the input when the path cannot be resolved yet
+/// (a file that has not been written, a missing drive), because the caller still
+/// wants that string remembered.
+inline std::string normalizeRecentPath(const std::string& path)
+{
+    if (path.empty())
+    {
+        return {};
+    }
+    std::error_code ec;
+    std::filesystem::path resolved = std::filesystem::weakly_canonical(path, ec);
+    if (ec)
+    {
+        ec.clear();
+        resolved = std::filesystem::absolute(path, ec);
+    }
+    if (ec)
+    {
+        return path;
+    }
+    return resolved.string();
+}
+
+/// Move `path` to the front of `recent`, drop earlier duplicates of the same
+/// file, and trim to `capacity`. Empty paths are ignored: an empty document is
+/// not a scene that was opened.
+inline void pushRecentScene(std::vector<std::string>& recent, const std::string& path,
+                            size_t capacity = kRecentScenesCapacity)
+{
+    const std::string norm = normalizeRecentPath(path);
+    if (norm.empty() || capacity == 0)
+    {
+        return;
+    }
+    recent.erase(std::remove_if(recent.begin(), recent.end(),
+                                [&](const std::string& existing) {
+                                    return normalizeRecentPath(existing) == norm;
+                                }),
+                 recent.end());
+    recent.insert(recent.begin(), norm);
+    if (recent.size() > capacity)
+    {
+        recent.resize(capacity);
+    }
+}
+
+/// One absolute path per line, most-recent first. Blank lines and entries that
+/// normalize to empty are skipped so a hand-edited file cannot poison the menu.
+/// Duplicates keep the earlier (more recent) line.
+inline std::vector<std::string> loadRecentScenes(const std::filesystem::path& file,
+                                                 size_t capacity = kRecentScenesCapacity)
+{
+    std::vector<std::string> recent;
+    std::ifstream in(file);
+    if (!in)
+    {
+        return recent;
+    }
+    std::string line;
+    while (std::getline(in, line))
+    {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+        {
+            line.pop_back();
+        }
+        const std::string norm = normalizeRecentPath(line);
+        if (norm.empty())
+        {
+            continue;
+        }
+        const bool already = std::any_of(recent.begin(), recent.end(), [&](const std::string& existing) {
+            return normalizeRecentPath(existing) == norm;
+        });
+        if (already)
+        {
+            continue;
+        }
+        recent.push_back(norm);
+        if (recent.size() >= capacity)
+        {
+            break;
+        }
+    }
+    return recent;
+}
+
+inline bool saveRecentScenes(const std::filesystem::path& file, const std::vector<std::string>& recent)
+{
+    std::ofstream out(file, std::ios::trunc);
+    if (!out)
+    {
+        return false;
+    }
+    for (const std::string& path : recent)
+    {
+        out << path << '\n';
+    }
+    return static_cast<bool>(out);
 }
 
 } // namespace editor_document

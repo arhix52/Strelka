@@ -76,6 +76,10 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     m_cameraController = std::make_unique<CameraController>(m_scene->getCamera(m_selectedCamera), true);
     m_display->setInputHandler(m_cameraController.get());
 
+    // Same directory as imgui.ini: next to the binary, so the working set
+    // survives a rebuild and does not depend on which directory launched us.
+    m_recentScenes = editor_document::loadRecentScenes(getExecutableDir() / "recent_scenes.txt");
+
     // Keep m_sceneFile empty until a load succeeds, so a failed startup open
     // restores to an empty document instead of pointing Save at a never-loaded path.
     beginSceneLoad(sceneFile, resourceSearchPath);
@@ -174,6 +178,24 @@ void EditorApp::restoreDocumentAfterFailedLoad(const char* reason)
         STRELKA_INFO("ACTION open_fail path={} reason={}", attempted, reason);
         STRELKA_ERROR("Scene open failed ({}): {}", reason, attempted);
         showAlert(fmt::format("Failed to open scene:\n{}\n({})", attempted, reason));
+    }
+}
+
+void EditorApp::rememberRecentScene(const std::string& sceneFile)
+{
+    if (sceneFile.empty())
+    {
+        return;
+    }
+    editor_document::pushRecentScene(m_recentScenes, sceneFile);
+    persistRecentScenes();
+}
+
+void EditorApp::persistRecentScenes()
+{
+    if (!editor_document::saveRecentScenes(getExecutableDir() / "recent_scenes.txt", m_recentScenes))
+    {
+        STRELKA_WARNING("Could not write recent scenes list");
     }
 }
 
@@ -601,6 +623,7 @@ void EditorApp::checkLoadingComplete()
     // was the scene's intent.
     applySceneExposure();
 
+    rememberRecentScene(m_sceneFile);
     STRELKA_INFO("ACTION open_ok path={}", m_sceneFile);
 }
 
@@ -4107,6 +4130,42 @@ void EditorApp::drawUI()
             IGFD::FileDialogConfig config;
             config.path = ".";
             ImGuiFileDialog::Instance()->OpenDialog("ChooseFileDlgKey", "Choose File", ".gltf,.glb", config);
+        }
+        if (ImGui::BeginMenu("Open Recent", !m_isLoading))
+        {
+            if (m_recentScenes.empty())
+            {
+                ImGui::MenuItem("(empty)", nullptr, false, false);
+            }
+            else
+            {
+                for (size_t i = 0; i < m_recentScenes.size(); ++i)
+                {
+                    const std::string& path = m_recentScenes[i];
+                    std::error_code ec;
+                    const bool exists = std::filesystem::exists(path, ec) && !ec;
+                    const std::string label = std::filesystem::path(path).filename().string();
+                    // PushID so two scenes that share a basename do not collide
+                    // in ImGui's id stack and steal each other's clicks.
+                    ImGui::PushID(static_cast<int>(i));
+                    if (ImGui::MenuItem(label.c_str(), nullptr, false, exists))
+                    {
+                        beginSceneLoad(path, std::filesystem::path(path).parent_path().string());
+                    }
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    {
+                        ImGui::SetTooltip("%s", path.c_str());
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Clear Recent"))
+                {
+                    m_recentScenes.clear();
+                    persistRecentScenes();
+                }
+            }
+            ImGui::EndMenu();
         }
         if (ImGui::MenuItem("Save", "Ctrl+S", false, !m_isLoading && !m_sceneFile.empty()))
             saveDocument(false);
