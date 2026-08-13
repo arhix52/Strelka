@@ -8,7 +8,9 @@ on:
 
 jobs:
   build-test-smoke:
-    runs-on: macos-14
+    # macOS 26, not 14: the renderer is Metal 4 only, and MetalFxContext.mm names
+    # MTL4FXSpatialScaler / MTL4FXTemporalScaler, which no earlier SDK declares.
+    runs-on: macos-26
     timeout-minutes: 90
 
     steps:
@@ -20,11 +22,16 @@ jobs:
       - name: Install tools
         run: |
           brew install ninja
-          python3 -m pip install --user "conan>=2,<3"
-          echo "$HOME/Library/Python/"*/bin | tr ' ' '\n' >> "$GITHUB_PATH"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          which conan
-          conan --version
+          # The runner's python3 is Homebrew's, which refuses to install into
+          # itself (PEP 668) -- including with --user, since that flag does not
+          # opt out of the check. A virtual environment is the supported way in,
+          # and putting its bin on PATH keeps `conan` spelled the same
+          # everywhere, including inside build.sh.
+          python3 -m venv "$HOME/conan-venv"
+          "$HOME/conan-venv/bin/python" -m pip install --upgrade pip
+          "$HOME/conan-venv/bin/python" -m pip install "conan>=2,<3"
+          echo "$HOME/conan-venv/bin" >> "$GITHUB_PATH"
+          "$HOME/conan-venv/bin/conan" --version
 
       - name: Metal toolchain
         run: |
