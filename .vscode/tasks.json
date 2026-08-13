@@ -166,6 +166,35 @@
                 "${file}"
             ],
             "problemMatcher": []
+        },
+        {
+            "label": "Pre-commit check",
+            "type": "process",
+            "command": "bash",
+            "args": [
+                "${workspaceFolder}/tools/precommit.sh"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test",
+            "problemMatcher": {
+                "owner": "clang-tidy",
+                "fileLocation": [
+                    "relative",
+                    "${workspaceFolder}"
+                ],
+                "pattern": {
+                    "regexp": "^(.*):(\\d+):(\\d+):\\s+(error|warning|note):\\s+(.*)\\s+\\[(.+?)\\]$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "severity": 4,
+                    "message": 5,
+                    "code": 6
+                }
+            },
+            "detail": "Same as the git pre-commit hook: clang-tidy on staged src/*.cpp, src/*.mm, tests/*.cpp. Stage files first (git add). Requires compile_commands.json."
         }
     ]
 }
