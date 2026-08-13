@@ -710,6 +710,26 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     MaterialParams& p = desc.params;
     p.material_type = MATERIAL_TYPE_STANDARD_PBR;
 
+    // STRELKA_materials_hair: Chiang lobe on curve geometry. Absent from glTF,
+    // so the converter / feature-test patcher writes it. Without it a strand is
+    // a rough dielectric cylinder and the kids-bedroom monster goes dark.
+    {
+        const auto hit = material.extensions.find("STRELKA_materials_hair");
+        if (hit != material.extensions.end())
+        {
+            p.material_type = MATERIAL_TYPE_HAIR;
+            // Radial roughness rides in anisotropy (unused for hair GGX). Coat
+            // weight rides in clearcoat -- same mapping hair_chiang_prepare reads.
+            if (hit->second.IsObject())
+            {
+                if (hit->second.Has("radialRoughness"))
+                    p.anisotropy = (float)hit->second.Get("radialRoughness").GetNumberAsDouble();
+                if (hit->second.Has("coat"))
+                    p.clearcoat = (float)hit->second.Get("coat").GetNumberAsDouble();
+            }
+        }
+    }
+
     // Base color
     const auto& bcf = material.pbrMetallicRoughness.baseColorFactor;
     p.base_color = {(float)bcf[0], (float)bcf[1], (float)bcf[2]};

@@ -27,6 +27,7 @@
 #include "bxdfs/conductor.h"
 #include "bxdfs/dielectric.h"
 #include "bxdfs/standard_pbr.h"
+#include "bxdfs/hair_chiang.h"
 
 // ---------------------------------------------------------------------------
 // bsdf_init -- Resolve material parameters and textures into the
@@ -214,6 +215,9 @@ DEVICE_FUNC BsdfSampleResult bsdf_sample(const THREAD_REF SurfaceInteraction& si
     case MATERIAL_TYPE_DIELECTRIC:
         return dielectric_sample(si, xi.x, xi.y, xi.z);
 
+    case MATERIAL_TYPE_HAIR:
+        return hair_chiang_sample(si, xi.x, xi.y, xi.z);
+
     case MATERIAL_TYPE_STANDARD_PBR:
     default:
         return standard_pbr_sample(si, xi.x, xi.y, xi.z, xi.w);
@@ -237,6 +241,9 @@ DEVICE_FUNC BsdfEvalResult bsdf_eval(const THREAD_REF SurfaceInteraction& si,
     case MATERIAL_TYPE_DIELECTRIC:
         return dielectric_eval(si, wi);
 
+    case MATERIAL_TYPE_HAIR:
+        return hair_chiang_eval(si, wi);
+
     case MATERIAL_TYPE_STANDARD_PBR:
     default:
         return standard_pbr_eval(si, wi);
@@ -259,6 +266,9 @@ DEVICE_FUNC float bsdf_pdf(const THREAD_REF SurfaceInteraction& si,
 
     case MATERIAL_TYPE_DIELECTRIC:
         return dielectric_pdf(si, wi);
+
+    case MATERIAL_TYPE_HAIR:
+        return hair_chiang_pdf(si, wi);
 
     case MATERIAL_TYPE_STANDARD_PBR:
     default:

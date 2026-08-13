@@ -45,6 +45,7 @@ enum MaterialType : unsigned int
     MATERIAL_TYPE_CONDUCTOR     = 1,
     MATERIAL_TYPE_DIELECTRIC    = 2,
     MATERIAL_TYPE_STANDARD_PBR  = 3,
+    MATERIAL_TYPE_HAIR          = 4, // Chiang et al. 2016; curves only in practice
     MATERIAL_TYPE_COUNT
 };
 

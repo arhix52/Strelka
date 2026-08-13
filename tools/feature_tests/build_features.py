@@ -1214,6 +1214,144 @@ def s27_ies(tex):
     return light
 
 
+HAIR_COLOR = (0.42, 0.22, 0.10, 1.0)
+HAIR_ROUGHNESS = 0.35
+HAIR_RADIAL = 0.35
+
+
+def new_hair_material(name, color=HAIR_COLOR, roughness=HAIR_ROUGHNESS, radial=HAIR_RADIAL):
+    """Principled Hair (Chiang, Direct Coloring) for the Cycles reference.
+
+    The glTF export still sees a Principled BSDF stand-in so the pigment colour
+    and roughness reach the file; STRELKA_materials_hair is patched on afterwards
+    and is what flips Strelka onto the Chiang lobe.
+    """
+    # Stand-in the exporter understands: pigment + roughness + IOR 1.55.
+    mat = new_material(name, base_color=color, roughness=roughness, metallic=0.0,
+                       ior=1.55, specular=0.5)
+    # Cycles reference: replace the tree with Principled Hair.
+    tree = mat.node_tree
+    tree.nodes.clear()
+    out = tree.nodes.new("ShaderNodeOutputMaterial")
+    hair = tree.nodes.new("ShaderNodeBsdfHairPrincipled")
+    hair.model = "CHIANG"
+    hair.parametrization = "COLOR"
+    hair.inputs["Color"].default_value = color
+    hair.inputs["Roughness"].default_value = roughness
+    hair.inputs["Radial Roughness"].default_value = radial
+    hair.inputs["IOR"].default_value = 1.55
+    hair.inputs["Coat"].default_value = 0.0
+    tree.links.new(hair.outputs[0], out.inputs[0])
+    return mat
+
+
+def s28_hair(tex):
+    """A short Chiang groom on a grey scalp, vs one bald control.
+
+    Geometry is a particle system exported to the curve sidecar; shading on our
+    side is STRELKA_materials_hair. The bald sphere is the same pigment as a
+    standard dielectric so a framing shift cannot hide a missing lobe. Strand
+    count is kept modest so the row measures the BSDF, not variance.
+    """
+    add_stage()
+    scalp = new_material("scalp", base_color=(0.35, 0.32, 0.30, 1.0),
+                         roughness=0.85, metallic=0.0, specular=0.0)
+    hair_mat = new_hair_material("hair0")
+
+    bald = sphere("Bald", (-0.85, 0.0, 0.7), radius=0.48)
+    bald.data.materials.append(scalp)
+    bald.data.materials.append(hair_mat)  # unused; keeps the material in the file
+
+    fur = sphere("Fur", (0.85, 0.0, 0.7), radius=0.48)
+    fur.data.materials.clear()
+    fur.data.materials.append(hair_mat)
+
+    mod = fur.modifiers.new("Hair", type="PARTICLE_SYSTEM")
+    psys = fur.particle_systems[0]
+    s = psys.settings
+    s.type = "HAIR"
+    s.use_advanced_hair = True
+    s.count = 1200
+    s.hair_length = 0.28
+    s.hair_step = 5
+    s.display_step = 3
+    s.render_step = 3
+    s.root_radius = 0.004
+    s.tip_radius = 0.0015
+    s.radius_scale = 1.0
+    s.child_type = "NONE"
+    s.material = 1  # 1-based slot -> hair0
+    # Cycles needs the particle system rendered as path.
+    s.use_rotations = False
+    return fur
+
+
+def export_feature_hair(scene_dir, name):
+    """Write <name>_curves.bin from every HAIR particle system in the scene."""
+    # Import beside the iso_bathroom writer so the format stays one module.
+    repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    sys.path.insert(0, os.path.join(repo, "tools", "iso_bathroom"))
+    from curve_sidecar import CurveSet, write_curve_sidecar, BASIS_LINEAR  # noqa: E402
+    from mathutils import Matrix
+
+    axis_conv = Matrix.Rotation(-math.pi / 2, 4, "X")
+    # Push display to render resolution, then evaluate once.
+    touched = []
+    for obj in bpy.data.objects:
+        for psys in obj.particle_systems:
+            st = psys.settings
+            if st.type != "HAIR":
+                continue
+            touched.append((st, st.display_step))
+            st.display_step = st.render_step
+    if not touched:
+        return 0, 0
+    bpy.context.view_layer.update()
+    dg = bpy.context.evaluated_depsgraph_get()
+    dg.update()
+
+    sets = []
+    for obj in bpy.data.objects:
+        if not obj.particle_systems or not obj.visible_get():
+            continue
+        ev = obj.evaluated_get(dg)
+        for psys in ev.particle_systems:
+            st = psys.settings
+            if st.type != "HAIR":
+                continue
+            slots = [m.name if m else "" for m in obj.data.materials]
+            slot = int(st.material) - 1
+            material = slots[slot] if 0 <= slot < len(slots) else (slots[0] if slots else "")
+            n_strands = len(psys.particles) + len(psys.child_particles)
+            if n_strands == 0:
+                continue
+            n_points = (1 << st.display_step) + 1
+            root = st.root_radius * st.radius_scale
+            tip = st.tip_radius * st.radius_scale
+            co = psys.co_hair
+            strands = []
+            for i in range(n_strands):
+                pts = []
+                for k in range(n_points):
+                    c = axis_conv @ co(ev, particle_no=i, step=k)
+                    t = k / (n_points - 1)
+                    pts.append((c.x, c.y, c.z, root + (tip - root) * t))
+                if pts[0][:3] == pts[-1][:3]:
+                    continue
+                strands.append(pts)
+            if strands:
+                sets.append(CurveSet(material, strands, BASIS_LINEAR))
+
+    for st, display_step in touched:
+        st.display_step = display_step
+
+    path = os.path.join(scene_dir, name + "_curves.bin")
+    n_strands, n_points = write_curve_sidecar(path, sets)
+    print("  curves -> %s (%d strands, %d points)"
+          % (os.path.relpath(path, os.path.dirname(scene_dir)), n_strands, n_points))
+    return n_strands, n_points
+
+
 # KHR_materials_clearcoat has no IOR field and Blender writes no sheen extension
 # at all, so both scenes are patched after the export. Keyed by scene name; the
 # function is handed the parsed glTF document and mutates it in place.
@@ -1392,6 +1530,29 @@ def patch_subsurface(doc):
     doc["extensionsUsed"] = sorted(used)
 
 
+def patch_hair(doc):
+    # Principled Hair does not survive the glTF exporter as anything useful.
+    # Rewrite hair* materials to the pigment + roughness the Chiang lobe reads,
+    # and mark them with STRELKA_materials_hair so the loader picks MATERIAL_TYPE_HAIR.
+    for mat in doc.get("materials", []):
+        name = mat.get("name", "")
+        if not name.startswith("hair"):
+            continue
+        mat["pbrMetallicRoughness"] = {
+            "baseColorFactor": list(HAIR_COLOR),
+            "metallicFactor": 0.0,
+            "roughnessFactor": HAIR_ROUGHNESS,
+        }
+        mat.setdefault("extensions", {})["KHR_materials_ior"] = {"ior": 1.55}
+        mat["extensions"]["STRELKA_materials_hair"] = {
+            "radialRoughness": HAIR_RADIAL,
+            "coat": 0.0,
+        }
+    used = set(doc.get("extensionsUsed", []))
+    used.update(("KHR_materials_ior", "STRELKA_materials_hair"))
+    doc["extensionsUsed"] = sorted(used)
+
+
 GLTF_PATCHERS = {
     "14_sheen": patch_sheen,
     "15_clearcoat": patch_clearcoat_ior,
@@ -1401,6 +1562,7 @@ GLTF_PATCHERS = {
     "22_thin_walled": patch_thin_walled,
     "23_diffuse_transmission": patch_diffuse_transmission,
     "25_subsurface": patch_subsurface,
+    "28_hair": patch_hair,
 }
 
 
@@ -1433,6 +1595,7 @@ SCENES = [
     ("25_subsurface",       s25_subsurface,    True),
     ("26_dof",              s26_dof,           True),
     ("27_ies",              s27_ies,           "ies"),
+    ("28_hair",             s28_hair,          True),
 ]
 
 # Scenes whose world is not black and therefore has to reach Strelka as an
@@ -1445,6 +1608,7 @@ ENV_BAKE_WIDTH = 1024
 ORTHO_SCENES = {"24_orthographic"}
 CAMERA_JSON_SCENES = {"26_dof"}
 # Sidecar is not the default rect key: the IES row owns its own point light.
+HAIR_SCENES = {"28_hair"}
 IES_SCENES = {"27_ies"}
 
 
@@ -1717,6 +1881,9 @@ def main():
         print("  glTF   -> %s" % os.path.relpath(gltf_path, out_root))
         manifest[name] = verify_export(gltf_path)
 
+        if name in HAIR_SCENES:
+            export_feature_hair(scene_dir, name)
+
         environment = None
         if name in ENV_BAKE:
             environment = bake_world_env(scene_dir, name)
@@ -1790,6 +1957,7 @@ def main():
         "22_thin_walled": "KHR_materials_volume",
         "23_diffuse_transmission": "KHR_materials_diffuse_transmission",
         "25_subsurface": "STRELKA_materials_subsurface",
+        "28_hair": "STRELKA_materials_hair",
     }
     for scene, ext in expected.items():
         info = manifest.get(scene)

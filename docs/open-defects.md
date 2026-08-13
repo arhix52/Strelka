@@ -21,14 +21,13 @@ answer, or an asset/converter note that does not need Chaos.
 |---|---|---|---|
 | ~~1~~ | ~~Clearcoat underside bounce~~ | done — see Closed | `15_clearcoat` 1.002 overall, IOR 2.2 within 1% |
 | ~~2~~ | ~~Rough thin-wall blur~~ | done — see Closed | `22_thin_walled` 0.094 / 0.966 CLOSE |
-| 3 | Hair lobe (geometry is done) | BSDF + `kFeatureCurves` shade path | new groom rung vs Cycles; kids-bedroom monster/spider patches via `patch_mean.py` |
+| ~~3~~ | ~~Hair lobe (geometry is done)~~ | done — see Closed | `28_hair` 0.084 / 0.977 CLOSE |
 | 4 | Height-map mip aliasing | `render/pt/textureLodMode` | kids bedroom walls A/B lod 0 vs footprint; measure with `patch_mean.py` |
 | 5 | OptiX ior-stack counters | OptiX push/pop path | same three counters Metal already reports; no bathroom patch change expected |
 | 6 | Two-sided different back face | material model / glTF | design first; one kids-bedroom material only |
 | 7 | Bath water is a dish, not a volume | asset, not code | remodel in Blender; bath water R/G against Chaos PNG is a check, not a driver |
 
-3 is the largest remaining visual miss on the kids bedroom and has a clear
-Cycles path. 4–6 are smaller. 7 is not a renderer bug.
+4–6 are smaller. 7 is not a renderer bug.
 
 Build the bathroom / kids bedroom when an entry asks for it:
 
@@ -64,39 +63,6 @@ Feature-test ladder (the default verifier for 1–3):
 ```bash
 # see tools/feature_tests/README.md -- Cycles EXR refs, one feature per scene
 ```
-
----
-
-## 3. Hair geometry is done; the lobe is not
-
-The strands reach the renderer, are traversed as curves, and shade with the
-pigment colour V-Ray authored. Format in `src/sceneloader/curve_sidecar.h`,
-writer in `tools/iso_bathroom/curve_sidecar.py`. `kFeatureCurves` selects a
-different set of kernel entry points because `curve_data` is an intersector tag.
-
-What they shade as today is a rough dielectric cylinder at IOR 1.55. What a
-cylinder cannot do is what makes fur bright: light entering a strand, refracting,
-and leaving through a neighbour. Mean linear luminance over the kids-bedroom
-groom patches (`patch_mean.py`, normals already fixed):
-
-| Patch | Reference | Bald | With strands |
-|---|---|---|---|
-| monster | 0.0707 | 0.0663 (-6%) | 0.0407 (**-42%**) |
-| spider | 0.0721 | 0.1169 (+62%) | 0.0565 (-22%) |
-
-Adding correct geometry makes the monster's number worse, and that is the finding:
-a bald ball in the fur's own blue lands near a furry one by coincidence. The
-silhouette is right; the lobe is dark. Primary / secondary / transmission lobes
-(Chiang / Hair BSDF) are the missing term, and their absence has one sign.
-
-**Fix**: hair BSDF (Chiang or equivalent) on the curve shade path. **Verify**: a
-feature-test groom vs Cycles first; then kids-bedroom monster/spider patches.
-Built with `STRELKA_METAL_STRICT_FP=ON`, scenes without hair must stay bit-
-identical.
-
-Cost reminder (not a defect): 938k strands change 2170 pixels of a 1.6 M frame
-in this shot, +30% frame time, +1 GB AS. Fair statement of hair when it is *not*
-the subject.
 
 ---
 
@@ -172,6 +138,20 @@ nested-dielectric counters should drop on that mesh.
 ---
 
 ## Closed (kept for the measurement, not the work)
+
+### Hair Chiang lobe
+
+**Fixed.** Curves used to shade as a rough dielectric cylinder at IOR 1.55 --
+silhouette right, lobe dark. `MATERIAL_TYPE_HAIR` now runs Chiang et al. 2016
+(R / TT / TRT / TRRT+) on the curve shade path, ported from Cycles' Principled
+Hair. `STRELKA_materials_hair` marks the material; pigment colour is Direct
+Coloring reflectance, roughness is longitudinal, `radialRoughness` / `coat` ride
+in the extension. Non-hair scenes stay on the triangle kernels
+(`kFeatureCurves`).
+
+`scenes/feature_tests/28_hair`: short groom vs bald control, 0.084 / 0.977 CLOSE.
+Kids-bedroom monster/spider still want a re-export so the converter writes the
+extension; the lobe is what those patches were waiting for.
 
 ### Rough thin-wall blur
 

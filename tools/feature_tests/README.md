@@ -93,6 +93,7 @@ fixing, but it is not a shading bug.
 | `25_subsurface` | `STRELKA_materials_subsurface` (Van de Hulst recipe) | 0.056 / 1.009 |
 | `26_dof` | thin-lens depth of field (`_camera.json`) | 0.024 / 1.015 |
 | `27_ies` | IES point light via light sidecar | 0.028 / 1.021 |
+| `28_hair` | Chiang hair groom (`STRELKA_materials_hair`) | 0.084 / 0.977 |
 
 `19_env_and_light` is the only row with two kinds of light in it, and it is
 there for one question: whether resampled importance sampling and plain
@@ -266,18 +267,13 @@ Displacement and shape keys are absent — either glTF cannot carry them or
 Strelka cannot render them, so a comparison would only restate what is already
 known.
 
-Curves are no longer in that list on the renderer's side: hair reaches Strelka as
-curve geometry through a sidecar (`src/sceneloader/curve_sidecar.h`). What keeps
-it off the ladder is the shading, not the geometry — a strand here is a rough
-dielectric cylinder and Cycles has a hair BSDF, so a row would measure the
-missing lobe, which docs/open-defects.md entry 8 already states. Sun & Sky *is*
-here now, inside `19_env_and_light`, though as an environment map rather than as
-a procedural sky: it is baked to an equirectangular EXR, which is the only form
+Sun & Sky is inside `19_env_and_light` as an environment map rather than as a
+procedural sky: it is baked to an equirectangular EXR, which is the only form
 Strelka takes.
 
 Sheen, clearcoat, iridescence, bounded volumetrics, specular tint, thin-walled
-glass, diffuse transmission, orthographic framing, subsurface, depth of field
-and IES lights are on the ladder as of scenes 14 to 27.
+glass, diffuse transmission, orthographic framing, subsurface, depth of field,
+IES lights and Chiang hair are on the ladder as of scenes 14 to 28.
 
 `21_specular_color` pins Specular IOR Level at 0.5 so Blender's exporter writes
 `specularColorFactor` equal to the tint; level 1.0 would bake a factor of two
@@ -334,6 +330,12 @@ the factor of ten hid comfortably inside a fitted constant (π²/177.83, within
 every IES scene outside the suite ten times too bright. The honest constant
 lands the row at 1.021 instead of 1.008; the remaining 2% is Cycles' own
 normalisation and interpolation of the table, and is worth more than a match.
+
+`28_hair` is a short particle groom on one sphere against a bald control of the
+same pigment. Cycles shades with Principled Hair (Chiang, Direct Coloring);
+Strelka gets the strands from `28_hair_curves.bin` and
+`STRELKA_materials_hair`. The bald sphere is what keeps a framing or exposure
+shift from looking like a lobe win.
 
 Volume *emission* is not compared in `18_bounded_volume`. Cycles adds it with
 its own coefficient and Strelka adds it per free-flight event; the two

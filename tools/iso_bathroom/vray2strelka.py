@@ -1028,24 +1028,12 @@ class MaterialConverter:
         return {"emissiveStrength": strength}
 
     def convert_hair(self, mat, snap):
-        """V-Ray Hair Next (BRDFHair4) -> a colour, and an honest note.
+        """V-Ray Hair Next (BRDFHair4) -> pigment colour + Chiang hair marker.
 
-        There is no hair BSDF in Strelka, so what this carries is the *colour*
-        and nothing else. That is deliberate rather than lazy: the colour is
-        what the frame shows at this scale -- the monster is forty pixels across
-        -- and it can be derived rather than fitted, where the lobe structure
-        cannot.
-
-        The derivation is the pigment model V-Ray exposes, from Chiang et al.
-        2016: melanin and pheomelanin are concentrations of two pigments with
-        known absorption, and `exp(-sigma_a)` is the fraction that survives one
-        unit of it. `dye_color` multiplies that, which is what a dye does.
-
-        Everything else in the plugin is reported and dropped, and it is a long
-        list: the primary/secondary/transmission lobes, the highlight shift that
-        gives hair its two offset specular bands, and the glossiness boost. A
-        rough dielectric cylinder is wrong here, but it is not absurd, and it is
-        what a curve with a standard material is.
+        Melanin / pheomelanin become a Direct Coloring reflectance the Chiang
+        lobe turns back into sigma_a. The primary/secondary/transmission lobes,
+        highlight shift and gloss boost are what STRELKA_materials_hair now
+        carries -- they used to be dropped because the renderer had no hair BSDF.
         """
         p = snap["params"]
         melanin = float(p.get("melanin", 0.0))
@@ -1080,13 +1068,16 @@ class MaterialConverter:
 
         return {
             "hair": True,
+            "hairExt": {
+                "radialRoughness": gloss_to_rough(gloss),
+                "coat": 0.0,
+            },
             "baseColor": base,
             "melanin": melanin,
             "pheomelanin": pheomelanin,
-            "dropped": ["primary/secondary/transmission lobes", "highlight_shift",
-                        "primary_glossiness_boost", "secondary_tint",
-                        "transmission_tint"],
-            "note": "BRDFHair4 reduced to its pigment colour; Strelka has no hair BSDF",
+            "dropped": ["highlight_shift", "primary_glossiness_boost",
+                        "secondary_tint", "transmission_tint"],
+            "note": "BRDFHair4 pigment + STRELKA_materials_hair (Chiang lobe)",
         }
 
     # -- entry point ------------------------------------------------------
@@ -2025,6 +2016,7 @@ EXT_MAP = {
     "iridescence": "KHR_materials_iridescence",
     "diffuseTransmission": "KHR_materials_diffuse_transmission",
     "subsurface": "STRELKA_materials_subsurface",
+    "hairExt": "STRELKA_materials_hair",
 }
 
 
@@ -2033,8 +2025,8 @@ def patch_gltf(gltf_path, per_material, camera_info, report_path, baker):
     Inject what the Blender exporter drops.
 
     Blender writes KHR_materials_ior / _transmission / _volume / _specular /
-    _anisotropy / _emissive_strength / _clearcoat, but not sheen, iridescence or
-    anything subsurface -- so those are added here, keyed by material name.
+    _anisotropy / _emissive_strength / _clearcoat, but not sheen, iridescence,
+    subsurface or hair -- so those are added here, keyed by material name.
     """
     with open(gltf_path) as f:
         doc = json.load(f)
