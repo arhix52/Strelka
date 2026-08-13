@@ -54,9 +54,9 @@ float Camera::getFarClip() const
     return zfar;
 }
 
-void Camera::setFov(float fov)
+void Camera::setFov(float newFov)
 {
-    this->fov = fov;
+    fov = newFov;
 }
 
 // original implementation: https://vincent-p.github.io/notes/20201216234910-the_projection_matrix_in_vulkan/

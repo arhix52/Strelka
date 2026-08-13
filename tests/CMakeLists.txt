@@ -50,6 +50,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_tonemappers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_scene_stream.cpp
 )
+strelka_apply_warnings(unit_tests)
 
 target_include_directories(unit_tests
     PRIVATE

@@ -18,6 +18,7 @@ set(FOUNDATION_SOURCES
 )
 
 add_library(strelka_foundation STATIC ${FOUNDATION_SOURCES})
+strelka_apply_warnings(strelka_foundation)
 
 target_include_directories(strelka_foundation
     PUBLIC

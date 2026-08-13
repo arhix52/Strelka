@@ -16,10 +16,19 @@ set(EDITOR_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/OutlinerPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/MaterialPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/MemoryPanel.cpp
-    ${ROOT_HOME}/third_party/imgui_file_dialog/ImGuiFileDialog.cpp
 )
 
+add_library(strelka_vendor_file_dialog OBJECT
+    ${ROOT_HOME}/third_party/imgui_file_dialog/ImGuiFileDialog.cpp
+)
+strelka_apply_vendor_warnings(strelka_vendor_file_dialog)
+target_include_directories(strelka_vendor_file_dialog PRIVATE
+    ${ROOT_HOME}/third_party/imgui_file_dialog
+)
+target_link_libraries(strelka_vendor_file_dialog PRIVATE imgui::imgui)
+
 add_executable(StrelkaEditor ${EDITOR_SOURCES})
+strelka_apply_warnings(StrelkaEditor)
 
 # Ship the default docking layout next to the binary. On first run the editor
 # copies it to its own imgui.ini, so a fresh checkout starts with the panels
@@ -37,7 +46,7 @@ add_dependencies(StrelkaEditor strelka_editor_layout)
 
 set_target_properties(StrelkaEditor PROPERTIES
     LINKER_LANGUAGE CXX
-    CXX_STANDARD 17
+    CXX_STANDARD 20
     CXX_STANDARD_REQUIRED TRUE
     CXX_EXTENSIONS OFF
 )
@@ -68,10 +77,10 @@ set(EDITOR_LINK_LIBS
 if(APPLE)
     # On Apple, strelka_shaders is a custom_target (metallib compilation), not a
     # library. Use add_dependencies for build ordering; no link needed.
-    target_link_libraries(StrelkaEditor PRIVATE ${EDITOR_LINK_LIBS})
+    target_link_libraries(StrelkaEditor PRIVATE ${EDITOR_LINK_LIBS} strelka_vendor_file_dialog)
     add_dependencies(StrelkaEditor strelka_shaders)
 else()
-    target_link_libraries(StrelkaEditor PRIVATE ${EDITOR_LINK_LIBS} strelka_shaders)
+    target_link_libraries(StrelkaEditor PRIVATE ${EDITOR_LINK_LIBS} strelka_vendor_file_dialog strelka_shaders)
 endif()
 
 if(APPLE)

@@ -1,0 +1,2 @@
+# Conan-copied imgui bindings — do not run clang-tidy here.
+Checks: '-*'

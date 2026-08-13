@@ -19,7 +19,7 @@ private:
 
     // std::less<> is a transparent comparator, so find() accepts a std::string_view
     // (and thus a raw `const char*`) directly. std::unordered_map only gained
-    // heterogeneous lookup in C++20, and this project targets C++17 — with the
+    // heterogeneous lookup in C++20 — with the
     // hash map every get/set had to materialise a std::string key, which heap
     // allocates for any key longer than the SSO buffer (e.g.
     // "render/post/tonemapper/shutterSpeed"). The UI issues dozens of those per

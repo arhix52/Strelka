@@ -257,7 +257,6 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
         sb.reserve(vertexCount);
     }
 
-    glm::float3 sum = glm::float3(0.0f, 0.0f, 0.0f);
     std::vector<oka::Scene::Vertex> vertices;
     vertices.reserve(vertexCount);
     for (uint32_t v = 0; v < vertexCount; ++v)
@@ -304,7 +303,6 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
             vertex.tangent = packTangent(lenSq > 1e-12f ? tan * glm::inversesqrt(lenSq) : glm::float3(0, 0, 1), t[3]);
         }
         vertices.push_back(vertex);
-        sum += vertex.pos;
 
         if (hasJoints)
         {
@@ -352,8 +350,6 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
             sb.push_back(skinData);
         }
     }
-    const glm::float3 massCenter = sum / (float)vertexCount;
-
     uint32_t indexCount = 0;
     std::vector<uint32_t> indices;
     const bool hasIndices = (primitive.indices != -1);
@@ -1294,7 +1290,7 @@ void loadNodes(const tinygltf::Model& model, oka::Scene& scene, const float glob
     }
 }
 
-void loadSkeletalData(const tinygltf::Model& model, oka::Scene& scene, const float globalScale = 1.0f)
+void loadSkeletalData(const tinygltf::Model& model, oka::Scene& scene, const float /*globalScale*/ = 1.0f)
 {
     for (const auto& skin : model.skins)
     {

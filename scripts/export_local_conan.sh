@@ -67,12 +67,14 @@ else
         curl -fsSL -o "${gizmo_dir}/CMakeLists.txt" \
             https://raw.githubusercontent.com/conan-io/conan-center-index/master/recipes/imguizmo/all/CMakeLists.txt
     fi
-    GIZMO_CMAKE="${gizmo_dir}/CMakeLists.txt" GIZMO_CONANDATA="${gizmo_dir}/conandata.yml" python3 - <<'PY'
+    GIZMO_CMAKE="${gizmo_dir}/CMakeLists.txt" GIZMO_CONANDATA="${gizmo_dir}/conandata.yml" GIZMO_CONANFILE="${gizmo_dir}/conanfile.py" python3 - <<'PY'
 import os
+import re
 from pathlib import Path
 
 cmake = Path(os.environ["GIZMO_CMAKE"])
 cdata = Path(os.environ["GIZMO_CONANDATA"])
+conanfile = Path(os.environ["GIZMO_CONANFILE"])
 
 cm = cmake.read_text()
 if "set(SOURCE_DIR src/src)" not in cm:
@@ -80,9 +82,22 @@ if "set(SOURCE_DIR src/src)" not in cm:
         cm = cm.replace("set(SOURCE_DIR src)", "set(SOURCE_DIR src/src)", 1)
     else:
         cm = "set(SOURCE_DIR src/src)\n" + cm
-if "CMAKE_CXX_STANDARD" not in cm:
-    cm = "set(CMAKE_CXX_STANDARD 17)\n" + cm
+# CCI ships C++11; ImVectorEditor.cpp needs brace-init assignment (C++17+).
+if re.search(r"set\(CMAKE_CXX_STANDARD\s+\d+\)", cm):
+    cm = re.sub(r"set\(CMAKE_CXX_STANDARD\s+\d+\)", "set(CMAKE_CXX_STANDARD 20)", cm)
+elif "CMAKE_CXX_STANDARD" not in cm:
+    cm = "set(CMAKE_CXX_STANDARD 20)\n" + cm
 cmake.write_text(cm)
+
+cf = conanfile.read_text()
+needle = 'tc = CMakeToolchain(self)'
+if needle in cf and "CMAKE_CXX_STANDARD" not in cf:
+    cf = cf.replace(
+        needle,
+        needle + '\n        tc.variables["CMAKE_CXX_STANDARD"] = "20"',
+        1,
+    )
+    conanfile.write_text(cf)
 
 text = cdata.read_text()
 entry = """  cci.20260729:

@@ -15,6 +15,7 @@ set(SCENELOADER_SOURCES
 )
 
 add_library(strelka_sceneloader STATIC ${SCENELOADER_SOURCES})
+strelka_apply_warnings(strelka_sceneloader)
 
 target_include_directories(strelka_sceneloader
     PUBLIC

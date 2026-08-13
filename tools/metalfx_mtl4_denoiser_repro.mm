@@ -32,7 +32,7 @@
 // first from the same descriptor. All three descriptors report supportsDevice = YES.
 //
 // Build and run:
-//   clang++ -std=c++17 -fobjc-arc -framework Metal -framework MetalFX \
+//   clang++ -std=c++20 -fobjc-arc -framework Metal -framework MetalFX \
 //           -framework Foundation tools/metalfx_mtl4_denoiser_repro.mm -o /tmp/repro
 //   /tmp/repro
 //

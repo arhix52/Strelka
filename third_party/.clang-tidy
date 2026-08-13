@@ -1,0 +1,2 @@
+# Vendor tree — do not run clang-tidy here.
+Checks: '-*'

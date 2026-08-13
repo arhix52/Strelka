@@ -18,11 +18,6 @@ RectCorners ceilingLight(float width = 2.0f, float height = 1.0f, float y = 2.0f
     return fromWidthHeight(glm::float3(0.0f, y, 0.0f), width, height);
 }
 
-glm::float3 onPlanePoint(const RectCorners& c, float u, float v)
-{
-    return c.p0 + (c.p1 - c.p0) * u + (c.p3 - c.p0) * v;
-}
-
 bool pointOnRect(const RectCorners& c, const glm::float3& p, float eps = 1e-4f)
 {
     const glm::float3 e1 = c.p1 - c.p0;

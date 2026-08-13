@@ -11,6 +11,7 @@ set(SCENE_SOURCES
 )
 
 add_library(strelka_scene STATIC ${SCENE_SOURCES})
+strelka_apply_warnings(strelka_scene)
 
 target_include_directories(strelka_scene
     PUBLIC

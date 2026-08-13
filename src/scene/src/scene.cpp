@@ -544,7 +544,7 @@ bool Scene::updateNode(const uint32_t nodeId)
 
 uint32_t Scene::createRectLightMesh()
 {
-    if (mRectLightMeshId != -1)
+    if (mRectLightMeshId != static_cast<uint32_t>(-1))
     {
         return mRectLightMeshId;
     }
@@ -571,7 +571,7 @@ uint32_t Scene::createRectLightMesh()
 
 uint32_t Scene::createSphereLightMesh()
 {
-    if (mSphereLightMeshId != -1)
+    if (mSphereLightMeshId != static_cast<uint32_t>(-1))
     {
         return mSphereLightMeshId;
     }
@@ -601,7 +601,7 @@ uint32_t Scene::createSphereLightMesh()
             glm::float3 pos = { radius * x, radius * y, radius * z };
             glm::float3 normal = { x, y, z };
 
-            vertices.push_back(Scene::Vertex{ pos, 0, packNormal(normal) });
+            vertices.push_back(Scene::Vertex{ pos, 0, packNormal(normal), 0 });
         }
     }
     // Generate indices
@@ -631,7 +631,7 @@ uint32_t Scene::createSphereLightMesh()
 
 uint32_t Scene::createDiscLightMesh()
 {
-    if (mDiskLightMeshId != -1)
+    if (mDiskLightMeshId != static_cast<uint32_t>(-1))
     {
         return mDiskLightMeshId;
     }
@@ -1343,12 +1343,12 @@ void Scene::removeMaterial(const uint32_t materialId)
     mDelMaterial.push(materialId); // marked as removed
 }
 
-std::vector<uint32_t>& Scene::getOpaqueInstancesToRender(const glm::float3& camPos)
+std::vector<uint32_t>& Scene::getOpaqueInstancesToRender(const glm::float3& /*camPos*/)
 {
     return mOpaqueInstances;
 }
 
-std::vector<uint32_t>& Scene::getTransparentInstancesToRender(const glm::float3& camPos)
+std::vector<uint32_t>& Scene::getTransparentInstancesToRender(const glm::float3& /*camPos*/)
 {
     return mTransparentInstances;
 }

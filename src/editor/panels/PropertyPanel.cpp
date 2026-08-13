@@ -135,7 +135,6 @@ void EditorApp::drawPropertyPanel()
         else if (desc.type == LIGHT_TYPE_SPOT)
         {
             float outerDeg = desc.outerConeAngle * (180.0f / float(M_PI));
-            float innerDeg = desc.innerConeAngle * (180.0f / float(M_PI));
             if (ImGui::DragFloat("Spot Size", &outerDeg, 0.5f, 0.1f, 90.0f))
             {
                 desc.outerConeAngle = outerDeg * (float(M_PI) / 180.0f);

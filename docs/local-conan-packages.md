@@ -52,7 +52,7 @@ mkdir imguizmo_recipe && cd imguizmo_recipe
 cp "$recipe"/{conanfile.py,conandata.yml} .
 # Edit CMakeLists.txt:
 #   set(SOURCE_DIR src/src)   # sources live under src/ after strip_root
-#   set(CMAKE_CXX_STANDARD 17)
+#   set(CMAKE_CXX_STANDARD 20)
 # Add under sources: in conandata.yml:
 #   cci.20260729:
 #     sha256: cb59df243ba49c4183454d8f9fafb15ffb1a1c74a1a1e718f0b852f1345b9354

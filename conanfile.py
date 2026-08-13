@@ -12,7 +12,7 @@ class StrelkaRecipe(ConanFile):
     def requirements(self):
         # Foundation
         self.requires("glm/cci.20230113")
-        self.requires("spdlog/1.14.1")
+        self.requires("spdlog/1.17.0")
         self.requires("tomlplusplus/3.4.0")
 
         # Scene loading

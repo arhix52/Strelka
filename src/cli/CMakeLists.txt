@@ -10,10 +10,11 @@ add_executable(StrelkaCLI
     ${CMAKE_CURRENT_SOURCE_DIR}/HeadlessApp.h
     ${CMAKE_CURRENT_SOURCE_DIR}/HeadlessApp.cpp
 )
+strelka_apply_warnings(StrelkaCLI)
 
 set_target_properties(StrelkaCLI PROPERTIES
     LINKER_LANGUAGE CXX
-    CXX_STANDARD 17
+    CXX_STANDARD 20
     CXX_STANDARD_REQUIRED TRUE
     CXX_EXTENSIONS OFF
 )

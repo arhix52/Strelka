@@ -15,11 +15,9 @@ if(WIN32 OR LINUX)
     find_package(glad REQUIRED)
     find_package(CUDAToolkit REQUIRED)
 
-    set(IMGUI_SOURCES
+    set(IMGUI_IMPL_SOURCES
         ${ROOT_HOME}/external/imgui/imgui_impl_glfw.cpp
         ${ROOT_HOME}/external/imgui/imgui_impl_opengl3.cpp
-        ${ROOT_HOME}/external/imgui/imgui_impl_glfw.h
-        ${ROOT_HOME}/external/imgui/imgui_impl_opengl3.h
     )
 
     set(DISPLAY_SOURCES
@@ -28,7 +26,13 @@ if(WIN32 OR LINUX)
         ${CMAKE_CURRENT_SOURCE_DIR}/opengl/glfw_display.cpp
     )
 
-    add_library(strelka_display STATIC ${DISPLAY_SOURCES} ${IMGUI_SOURCES})
+    add_library(strelka_vendor_imgui OBJECT ${IMGUI_IMPL_SOURCES})
+    strelka_apply_vendor_warnings(strelka_vendor_imgui)
+    target_include_directories(strelka_vendor_imgui PRIVATE ${ROOT_HOME}/external/imgui/)
+    target_link_libraries(strelka_vendor_imgui PRIVATE imgui::imgui glfw)
+
+    add_library(strelka_display STATIC ${DISPLAY_SOURCES})
+    strelka_apply_warnings(strelka_display)
 
     target_include_directories(strelka_display
         PUBLIC
@@ -40,6 +44,8 @@ if(WIN32 OR LINUX)
     )
 
     target_link_libraries(strelka_display
+        PRIVATE
+            strelka_vendor_imgui
         PUBLIC
             ${OPENGL_LIBRARIES}
             strelka_foundation
@@ -53,11 +59,9 @@ if(WIN32 OR LINUX)
 endif()
 
 if(APPLE)
-    set(IMGUI_SOURCES
+    set(IMGUI_IMPL_SOURCES
         ${ROOT_HOME}/external/imgui/imgui_impl_glfw.cpp
         ${ROOT_HOME}/external/imgui/imgui_impl_metal.mm
-        ${ROOT_HOME}/external/imgui/imgui_impl_glfw.h
-        ${ROOT_HOME}/external/imgui/imgui_impl_metal.h
     )
 
     set(DISPLAY_SOURCES
@@ -66,19 +70,29 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/metal/glfw_display.mm
     )
 
-    add_library(strelka_display STATIC ${DISPLAY_SOURCES} ${IMGUI_SOURCES})
+    add_library(strelka_vendor_imgui OBJECT ${IMGUI_IMPL_SOURCES})
+    strelka_apply_vendor_warnings(strelka_vendor_imgui)
+    target_include_directories(strelka_vendor_imgui PRIVATE ${ROOT_HOME}/external/imgui/)
+    target_link_libraries(strelka_vendor_imgui PRIVATE imgui::imgui glfw)
+
+    add_library(strelka_display STATIC ${DISPLAY_SOURCES})
+    strelka_apply_warnings(strelka_display)
 
     target_include_directories(strelka_display
         PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${ROOT_HOME}/external/imgui/
-            ${ROOT_HOME}/third_party/metal_cpp/
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_include_directories(strelka_display
+        SYSTEM PUBLIC
+            ${ROOT_HOME}/third_party/metal_cpp/
     )
 
     target_link_libraries(strelka_display
         PRIVATE
+            strelka_vendor_imgui
             "-framework Foundation"
             "-framework QuartzCore"
             "-framework CoreGraphics"

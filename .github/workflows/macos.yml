@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-test-smoke:
     # macOS 26, not 14: the renderer is Metal 4 only, and MetalFxContext.mm names
@@ -15,7 +19,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -39,6 +43,12 @@ jobs:
           xcrun -sdk macosx --find metallib
           xcodebuild -version
 
+      - name: Cache Conan packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.conan2
+          key: conan-macos-${{ hashFiles('conanfile.py', 'scripts/export_local_conan.sh') }}
+
       - name: Conan profile
         run: |
           conan profile detect --force
@@ -46,6 +56,13 @@ jobs:
 
       - name: Build Release
         run: ./build.sh Release
+
+      - name: Verify metallibs
+        working-directory: build/Release
+        run: |
+          for lib in wavefront tonemapper skinning; do
+            test -s "metal/shaders/${lib}.metallib"
+          done
 
       - name: Unit tests
         working-directory: build/Release

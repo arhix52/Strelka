@@ -437,7 +437,7 @@ void GlfwDisplay::onEndFrame()
     mCommandBuffer->presentDrawable(drawable);
 
     dispatch_semaphore_t sem = _semaphore;
-    mCommandBuffer->addCompletedHandler(^void(MTL::CommandBuffer* cb) {
+    mCommandBuffer->addCompletedHandler(^void(MTL::CommandBuffer* /*cb*/) {
         dispatch_semaphore_signal(sem);
     });
 

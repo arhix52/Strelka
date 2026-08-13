@@ -279,9 +279,8 @@ pUniformData->projectionType = (uint32_t)camera.projection;
     pUniformData->fogSigmaT = on ? atmosphere->density : 0.0f;
     pUniformData->fogAnisotropy = on ? atmosphere->anisotropy : 0.0f;
     pUniformData->fogHeight = on ? atmosphere->height : 0.0f;
-    pUniformData->fogAlbedo = on ? (vector_float3){ atmosphere->color.x, atmosphere->color.y,
-                                                    atmosphere->color.z }
-                                 : (vector_float3){ 0.0f, 0.0f, 0.0f };
+    pUniformData->fogAlbedo = on ? vector_float3{ atmosphere->color.x, atmosphere->color.y, atmosphere->color.z }
+                                 : vector_float3{ 0.0f, 0.0f, 0.0f };
 }
 
 // Environment map

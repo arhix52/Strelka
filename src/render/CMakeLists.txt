@@ -29,6 +29,7 @@ if(WIN32 OR LINUX)
     )
 
     add_library(strelka_render STATIC ${RENDER_SOURCES})
+    strelka_apply_warnings(strelka_render)
 
     target_include_directories(strelka_render
         PUBLIC
@@ -95,9 +96,10 @@ if(APPLE)
     )
 
     add_library(strelka_render STATIC ${RENDER_SOURCES})
+    strelka_apply_warnings(strelka_render)
 
     target_include_directories(strelka_render
-        PRIVATE
+        SYSTEM PRIVATE
             ${ROOT_HOME}/third_party/metal_cpp/
             ${ROOT_HOME}/third_party/metal_cpp_extensions/
         PUBLIC
