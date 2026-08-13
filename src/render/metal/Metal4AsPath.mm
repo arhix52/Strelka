@@ -136,11 +136,13 @@ public:
                                   size_t controlPointCount) override
     {
         auto* geom = MTL4::AccelerationStructureCurveGeometryDescriptor::alloc()->init();
-        geom->setControlPointBuffer(bufferRange(geometry->curvePointBuffer()));
+        geom->setControlPointBuffer(
+            bufferRange(geometry->curvePointBuffer(), curve.mPointsStart * sizeof(glm::float3)));
         geom->setControlPointCount(controlPointCount);
         geom->setControlPointFormat(MTL::AttributeFormatFloat3);
         geom->setControlPointStride(sizeof(glm::float3));
-        geom->setRadiusBuffer(bufferRange(geometry->curveRadiusBuffer()));
+        geom->setRadiusBuffer(
+            bufferRange(geometry->curveRadiusBuffer(), curve.mWidthsStart * sizeof(float)));
         geom->setRadiusFormat(MTL::AttributeFormatFloat);
         geom->setRadiusStride(sizeof(float));
         geom->setIndexBuffer(

@@ -206,7 +206,11 @@ void MetalGeometry::buildCurveBuffers(Scene* scene)
             // an index that runs off the end of the point array.
             for (uint32_t seg = 0; seg + perSegment <= n; ++seg)
             {
-                segments.push_back(pointCursor + seg);
+                // Metal's curve descriptor sees only this set's control-point
+                // range, so its segment indices are relative to that range. The
+                // shader adds mPointsStart back when it refetches the same points
+                // from the scene-wide buffer.
+                segments.push_back(pointCursor - curve.mPointsStart + seg);
             }
             pointCursor += n;
         }

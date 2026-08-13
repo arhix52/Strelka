@@ -1,4 +1,5 @@
 #include "EditorApp.h"
+#include "editor_camera_framing.h"
 #include "editor_document.h"
 
 #include <strelka/sceneloader/sceneserializer.h>
@@ -3634,6 +3635,12 @@ void EditorApp::run()
             auto& ctrlCam = m_cameraController->getCamera();
             selectedCam.position = ctrlCam.position;
             selectedCam.mOrientation = ctrlCam.mOrientation;
+            // An orthographic camera zooms by its film extents rather than its
+            // pose, and updateAspectRatio below rebuilds the projection from the
+            // extents of *this* camera -- so a sync that carried only the pose
+            // would hand the renderer the zoom the user just left behind.
+            selectedCam.xmag = ctrlCam.xmag;
+            selectedCam.ymag = ctrlCam.ymag;
             selectedCam.matrices = ctrlCam.matrices;
             selectedCam.updated = ctrlCam.updated;
             selectedCam.isDirty = ctrlCam.isDirty;
@@ -3851,6 +3858,92 @@ void EditorApp::setCameraDetached(bool detached)
     {
         m_scene->getCamera(m_selectedCamera).manualControl = true;
     }
+}
+
+bool EditorApp::computeSelectionWorldBounds(glm::float3& outMin, glm::float3& outMax)
+{
+    const std::vector<Scene::Node>& nodes = m_scene->getNodes();
+    glm::float3 localMin(0.0f);
+    glm::float3 localMax(0.0f);
+    glm::mat4 worldFromLocal(1.0f);
+
+    // Same priority as the selection overlay: a node union first (so a multi-
+    // primitive mesh frames as one object), then a lone instance, then a light.
+    if (m_selectedNodeId != (uint32_t)-1 && m_selectedNodeId < nodes.size() &&
+        !nodes[m_selectedNodeId].instanceIds.empty())
+    {
+        if (computeNodeBounds(nodes[m_selectedNodeId], localMin, localMax, worldFromLocal))
+        {
+            editor_camera_framing::worldAabbFromLocalBox(localMin, localMax, worldFromLocal, outMin, outMax);
+            return true;
+        }
+    }
+
+    const std::vector<Instance>& instances = m_scene->getInstances();
+    if (m_selectedInstanceId != (uint32_t)-1 && m_selectedInstanceId < instances.size() &&
+        m_scene->computeInstanceBounds(m_selectedInstanceId, localMin, localMax))
+    {
+        editor_camera_framing::worldAabbFromLocalBox(
+            localMin, localMax, instances[m_selectedInstanceId].transform, outMin, outMax);
+        return true;
+    }
+
+    if (m_selectedLightId != (uint32_t)-1 && m_selectedLightId < m_scene->getLightsDesc().size())
+    {
+        // Lights have no mesh AABB. Frame a box around the emitter so a rect /
+        // disc lands in view at a readable size and a point light is still
+        // findable — 25 cm floor so a zero-radius punctual is not a singularity.
+        const Scene::UniformLightDesc& light = m_scene->getLightsDesc()[m_selectedLightId];
+        const float radius = std::max({ 0.25f, light.width * 0.5f, light.height * 0.5f, light.radius });
+        outMin = light.position - glm::float3(radius);
+        outMax = light.position + glm::float3(radius);
+        return true;
+    }
+
+    return false;
+}
+
+void EditorApp::frameSelectionInView()
+{
+    glm::float3 worldMin(0.0f);
+    glm::float3 worldMax(0.0f);
+    if (!computeSelectionWorldBounds(worldMin, worldMax))
+    {
+        return;
+    }
+
+    const uint32_t renderWidth = m_settingsManager->getAs<uint32_t>("render/width");
+    const uint32_t renderHeight = m_settingsManager->getAs<uint32_t>("render/height");
+    if (renderHeight == 0)
+    {
+        return;
+    }
+    const float aspect = (float)renderWidth / (float)renderHeight;
+
+    // Framing is the user driving the camera, same as WASD: take a glTF camera
+    // over so animation does not pose the frame back on the next tick.
+    setCameraDetached(true);
+
+    Camera& ctrlCam = m_cameraController->getCamera();
+    editor_camera_framing::frameCamera(ctrlCam, worldMin, worldMax, aspect);
+    ctrlCam.updateAspectRatio(aspect);
+
+    Camera& selectedCam = m_scene->getCamera(m_selectedCamera);
+    selectedCam.position = ctrlCam.position;
+    selectedCam.mOrientation = ctrlCam.mOrientation;
+    selectedCam.xmag = ctrlCam.xmag;
+    selectedCam.ymag = ctrlCam.ymag;
+    selectedCam.authoredAspect = ctrlCam.authoredAspect;
+    selectedCam.matrices = ctrlCam.matrices;
+    selectedCam.updateAspectRatio(aspect);
+
+    if (m_sharedCtx)
+    {
+        m_sharedCtx->mSubframeIndex = 0;
+    }
+
+    STRELKA_INFO("ACTION frame_selection camera={} projection={}", m_selectedCamera,
+                 selectedCam.projection == Camera::ProjectionType::orthographic ? "ortho" : "persp");
 }
 
 void EditorApp::clearSelection()
@@ -4101,6 +4194,14 @@ void EditorApp::drawUI()
             }
             clearSelection();
         }
+        // Frame Selection (F): Blender/Maya convention. Not viewport-gated — framing
+        // from the outliner after a click is the usual path, and F does not collide
+        // with WASD or the gizmo bindings.
+        const bool canFrameSelection = m_selectedNodeId != (uint32_t)-1 ||
+                                       m_selectedInstanceId != (uint32_t)-1 ||
+                                       m_selectedLightId != (uint32_t)-1;
+        if (canFrameSelection && ImGui::IsKeyPressed(ImGuiKey_F))
+            frameSelectionInView();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
             saveDocument(io.KeyShift);
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z))
@@ -4185,6 +4286,15 @@ void EditorApp::drawUI()
             undo();
         if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !m_redoStack.empty()))
             redo();
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("View"))
+    {
+        const bool canFrameSelection = m_selectedNodeId != (uint32_t)-1 ||
+                                       m_selectedInstanceId != (uint32_t)-1 ||
+                                       m_selectedLightId != (uint32_t)-1;
+        if (ImGui::MenuItem("Frame Selection", "F", false, canFrameSelection && !m_isLoading))
+            frameSelectionInView();
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Window"))

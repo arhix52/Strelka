@@ -14,6 +14,9 @@ class CameraController : public oka::InputHandler
     float rotationSpeed = 0.025f;
     float movementSpeed = 1.0f;
     float keyRotationSpeed = 60.0f; // degrees per second for arrow key rotation
+    // E-folds of orthographic zoom per wheel notch: ~16% of the frame per click,
+    // and it composes smoothly with the fractional deltas a trackpad sends.
+    static constexpr float kWheelZoomRate = 0.15f;
 
     bool mIsViewportHovered = false;
     bool mGizmoBlocksInput = false;
@@ -130,7 +133,7 @@ public:
         mCam = cam;
     }
 
-    void keyCallback(int key, [[maybe_unused]] int scancode, int action, [[maybe_unused]] int mods)
+    void keyCallback(int key, [[maybe_unused]] int scancode, int action, [[maybe_unused]] int mods) override
     {
         const bool keyState = ((GLFW_REPEAT == action) || (GLFW_PRESS == action)) ? true : false;
         switch (key)
@@ -180,7 +183,7 @@ public:
         }
     }
 
-    void mouseButtonCallback(int button, int action, [[maybe_unused]] int mods, bool viewPortHovered)
+    void mouseButtonCallback(int button, int action, [[maybe_unused]] int mods, bool viewPortHovered) override
     {
         if (mGizmoBlocksInput)
         {
@@ -221,7 +224,21 @@ public:
         }
     }
 
-    void handleMouseMoveCallback([[maybe_unused]] double xpos, [[maybe_unused]] double ypos)
+    // Only an orthographic camera zooms on the wheel. A perspective one zooms by
+    // moving, which the left-drag dolly and the movement keys already do, and
+    // taking the wheel over for a second way to do it would change a control that
+    // every existing scene is driven with.
+    void scrollCallback([[maybe_unused]] double xoffset, double yoffset) override
+    {
+        if (mGizmoBlocksInput || yoffset == 0.0 || mCam.projection != Camera::ProjectionType::orthographic)
+        {
+            return;
+        }
+        mUserMovedCamera = true;
+        mCam.zoomOrthographic(std::exp(-kWheelZoomRate * (float)yoffset));
+    }
+
+    void handleMouseMoveCallback([[maybe_unused]] double xpos, [[maybe_unused]] double ypos) override
     {
         if (mGizmoBlocksInput)
         {

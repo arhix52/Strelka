@@ -133,10 +133,12 @@ public:
     {
         auto* geom = MTL::AccelerationStructureCurveGeometryDescriptor::alloc()->init();
         geom->setControlPointBuffer(geometry->curvePointBuffer());
+        geom->setControlPointBufferOffset(curve.mPointsStart * sizeof(glm::float3));
         geom->setControlPointCount(controlPointCount);
         geom->setControlPointFormat(MTL::AttributeFormatFloat3);
         geom->setControlPointStride(sizeof(glm::float3));
         geom->setRadiusBuffer(geometry->curveRadiusBuffer());
+        geom->setRadiusBufferOffset(curve.mWidthsStart * sizeof(float));
         geom->setRadiusFormat(MTL::AttributeFormatFloat);
         geom->setRadiusStride(sizeof(float));
         geom->setIndexBuffer(geometry->curveSegmentBuffer());

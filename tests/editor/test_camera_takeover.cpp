@@ -96,6 +96,56 @@ TEST_CASE("movement keys take the camera over")
     CHECK(controller.consumeUserMovedCamera());
 }
 
+// The wheel used to reach nothing at all -- Display::scrollCallback asserted its
+// window and returned -- which left an orthographic camera with no zoom control of
+// any kind, since its framing is xmag/ymag rather than its position.
+TEST_CASE("the wheel zooms an orthographic camera")
+{
+    Camera cam;
+    cam.setOrthographic(0.45f, 0.45f, 0.001f, 1000.0f);
+    CameraController controller(cam, true);
+
+    const float startMag = controller.getCamera().xmag;
+    controller.scrollCallback(0.0, 1.0);
+    CHECK(controller.getCamera().xmag < startMag);
+    // A zoom is the user driving the camera, so it has to take a glTF camera over
+    // exactly as a movement key does -- otherwise animation poses it back and the
+    // zoom the user asked for is the one thing that does not survive the frame.
+    CHECK(controller.consumeUserMovedCamera());
+
+    controller.scrollCallback(0.0, -1.0);
+    CHECK(controller.getCamera().xmag == doctest::Approx(startMag).epsilon(1e-5));
+
+    // Trackpads send fractional deltas in a stream; they compose the same way.
+    controller.scrollCallback(0.0, 0.25);
+    controller.scrollCallback(0.0, 0.75);
+    const float trackpad = controller.getCamera().xmag;
+    controller.scrollCallback(0.0, -1.0);
+    CHECK(trackpad < startMag);
+    CHECK(controller.getCamera().xmag == doctest::Approx(startMag).epsilon(1e-5));
+}
+
+TEST_CASE("the wheel leaves a perspective camera and a gizmo drag alone")
+{
+    Camera cam;
+    CameraController controller(cam, true);
+    const float startMag = controller.getCamera().xmag;
+    const glm::float3 startPos = controller.getCamera().position;
+
+    controller.scrollCallback(0.0, 1.0);
+    CHECK(controller.getCamera().xmag == startMag);
+    CHECK(controller.getCamera().position == startPos);
+    CHECK_FALSE(controller.consumeUserMovedCamera());
+
+    Camera ortho;
+    ortho.setOrthographic(0.45f, 0.45f, 0.001f, 1000.0f);
+    CameraController orthoController(ortho, true);
+    orthoController.setGizmoBlocksInput(true);
+    orthoController.scrollCallback(0.0, 1.0);
+    CHECK(orthoController.getCamera().xmag == doctest::Approx(0.45f).epsilon(1e-5));
+    CHECK_FALSE(orthoController.consumeUserMovedCamera());
+}
+
 TEST_CASE("a click the gizmo swallowed is not a takeover")
 {
     Camera cam;

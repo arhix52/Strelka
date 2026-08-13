@@ -134,6 +134,9 @@ public:
     /// Orthographic half-extents to render `aspect` with, given what the camera
     /// was authored for. Mirrors fovForAspect: the wider axis is the one held.
     void magForAspect(float aspect, float& halfWidth, float& halfHeight) const;
+    /// Zoom an orthographic camera by scaling its film extents. `factor` below 1
+    /// moves in. No-op on a perspective camera, which zooms by moving.
+    void zoomOrthographic(float factor);
     void setWorldUp(const glm::float3 up);
     glm::float3 getWorldUp();
     void setWorldForward(const glm::float3 forward);

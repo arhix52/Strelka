@@ -4,6 +4,8 @@
 
 #include <strelka/scene/glm_wrapper.hpp>
 
+#include <cmath>
+
 namespace oka
 {
 
@@ -194,6 +196,36 @@ void Camera::magForAspect(float aspect, float& halfWidth, float& halfHeight) con
     }
 }
 
+// Zooming a parallel projection is a change of film extent, not of position.
+//
+// An orthographic camera has no centre of projection, so translating it along the
+// view direction slides the film plane through the scene and leaves the image
+// exactly as it was: the bundle of rays has moved along itself. "Closer" here can
+// only mean a smaller film rectangle, which is xmag / ymag.
+//
+// Multiplicative, so one wheel notch is the same proportion of the frame at every
+// scale, and no amount of zooming out can walk an extent down through zero into a
+// mirrored frame. Both axes take the same factor, which leaves xmag/ymag -- and so
+// authoredAspect and the reframe in magForAspect -- unchanged.
+//
+// The projection is rebuilt from the raw extents, as setOrthographic does; the
+// aspect-adapted one follows from updateAspectRatio, which the editor and the
+// renderer both call every frame.
+void Camera::zoomOrthographic(float factor)
+{
+    if (projection != ProjectionType::orthographic || !(factor > 0.0f))
+    {
+        return;
+    }
+    // Wide enough for any scene that fits in float, narrow enough that a held key
+    // cannot collapse the frame to a point it can never zoom back out of.
+    constexpr float kMinMag = 1e-4f;
+    constexpr float kMaxMag = 1e6f;
+    xmag = glm::clamp(xmag * factor, kMinMag, kMaxMag);
+    ymag = glm::clamp(ymag * factor, kMinMag, kMaxMag);
+    matrices.perspective = orthographic(xmag, ymag, znear, zfar, &matrices.invPerspective);
+}
+
 void Camera::setWorldUp(const glm::float3 up)
 {
     mWorldUp = up;
@@ -313,6 +345,11 @@ void Camera::translate(glm::float3 delta)
     updateViewMatrix();
 }
 
+// E-folds of orthographic zoom per second of held key, before cameraSpeed scales
+// it. Chosen so a room-framing extent reaches a single object in a couple of
+// seconds, which is the same order as the walk speed does for a perspective camera.
+static constexpr float kOrthoKeyZoomRate = 1.0f;
+
 void Camera::update(float deltaTime)
 {
     updated = false;
@@ -329,10 +366,23 @@ void Camera::update(float deltaTime)
                 position -= getRight() * moveSpeed;
             if (keys.right)
                 position += getRight() * moveSpeed;
-            if (keys.forward)
-                position += getFront() * moveSpeed;
-            if (keys.back)
-                position -= getFront() * moveSpeed;
+            // Forward and back are the two that a parallel projection cannot honour
+            // by moving: see zoomOrthographic. Panning across the film still works
+            // the same way for both, which is why only these two branch.
+            if (projection == ProjectionType::orthographic)
+            {
+                if (keys.forward)
+                    zoomOrthographic(std::exp(-kOrthoKeyZoomRate * moveSpeed));
+                if (keys.back)
+                    zoomOrthographic(std::exp(kOrthoKeyZoomRate * moveSpeed));
+            }
+            else
+            {
+                if (keys.forward)
+                    position += getFront() * moveSpeed;
+                if (keys.back)
+                    position -= getFront() * moveSpeed;
+            }
             updateViewMatrix();
         }
     }

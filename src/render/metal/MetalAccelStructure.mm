@@ -257,8 +257,7 @@ size_t MetalAccelStructure::buildCurveBlas(uint32_t sceneInstanceId)
     const MetalGeometry::CurveRange& range = mGeometry->curveRanges()[curveId];
     const oka::Curve& curve = mScene->getCurves()[curveId];
 
-    NS::Object* geom =
-        mPath->makeCurveGeometry(mGeometry, curve, range, mScene->getCurvesPoint().size());
+    NS::Object* geom = mPath->makeCurveGeometry(mGeometry, curve, range, curve.mPointsCount);
 
     Blas blas;
     blas.mIsSkeletal = false;

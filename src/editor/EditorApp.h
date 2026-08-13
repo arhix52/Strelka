@@ -155,6 +155,11 @@ private:
                            glm::float3& outMin,
                            glm::float3& outMax,
                            glm::mat4& outWorldFromLocal);
+    /// World AABB of the current selection (node, instance, or light). False when
+    /// nothing selectable is selected, or the selection has no geometry to frame.
+    bool computeSelectionWorldBounds(glm::float3& outMin, glm::float3& outMax);
+    /// Dolly / resize the active camera so the selection fills the frame.
+    void frameSelectionInView();
     void drawSelectionGizmo(Camera& cam);
     void drawLoadingOverlay();
     void showAlert(const std::string& message);

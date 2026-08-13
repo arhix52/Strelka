@@ -566,7 +566,11 @@ static void extendImpl(
     const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
 
     ray r;
-    r.min_distance = 0.0f;
+    // Match Apple's curve sample: an offset origin and a positive lower bound
+    // solve different halves of self-intersection. Round curves can still report
+    // the surface the secondary ray just left at an almost-zero t after several
+    // fibre crossings.
+    r.min_distance = pathDepth(paths[tid].depthAndFlags) == 0u ? 0.0f : 1e-6f;
     r.max_distance = INFINITY;
     r.origin = float3(pr.origin);
     r.direction = float3(pr.direction);
@@ -873,7 +877,10 @@ static void fetchCurve(device const packed_float3* curvePoints,
                        thread float& outRadius)
 {
     const bool cubic = (entry.flags & GEOM_CURVE_CUBIC) != 0u;
-    const uint32_t base = curveSegments[entry.indexOffset + primitiveId];
+    // Segment indices are local to the curve set, matching the range exposed to
+    // its Metal geometry descriptor. Add the set's scene-wide point offset only
+    // when refetching from the shared shader buffer.
+    const uint32_t base = entry.vbOffset + curveSegments[entry.indexOffset + primitiveId];
     const float u = saturate(curveParam);
     // Control points are placed by the same transform as the hit, so the axis is
     // built in world space and the radial offset needs no change of basis.

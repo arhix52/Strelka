@@ -28,6 +28,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_skinned_bounds.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_camera_animation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_camera_basis.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_camera_ortho_zoom.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_transform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_lights.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_rect_light_sampling.cpp
@@ -37,6 +38,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_viewport_input.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_document.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_camera_exposure.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_camera_framing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_overlay.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_frame_jitter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_features.cpp

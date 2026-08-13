@@ -26,6 +26,10 @@ scenes/feature_tests/
 # buffers and baked textures.
 scenes/iso_bathroom/
 
+# And for the Isometric Kids Bedroom, the second conversion the same script
+# produces -- ~65 MB of buffer alone, plus baked textures and the hair sidecar.
+scenes/kids_room/
+
 # Scene exports written in the repository root are local test artifacts.
 /*.gltf
 /*.glb
