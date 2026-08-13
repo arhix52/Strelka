@@ -204,6 +204,10 @@ private:
     // Async render (double-buffered output)
     Buffer* mAsyncOutputBuffers[2] = { nullptr, nullptr };
     bool mResetDenoiseHistory = true;
+    /// A denoised frame is present in mPost.denoisedTexture() and belongs to the
+    /// scene and camera as they stand. What the sample budget freezes is that
+    /// texture, so a post-only frame needs to know it exists.
+    bool mHasDenoisedFrame = false;
     // Enough of the previous camera to tell a cut from a pan.
     glm::float3 mPrevCameraPos{ 0.0f };
     glm::float3 mPrevCameraForward{ 0.0f, 0.0f, -1.0f };

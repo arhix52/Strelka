@@ -455,10 +455,16 @@ pUniformData->exposureValue = exposureValue; // need for proper accumulation
     out.jitterY = pUniformData->jitterY;
     out.settingsChanged = settingsChanged;
     const auto samplesPerLaunch = pUniformData->samples_per_launch;
-    out.samplesThisLaunch =
-        accumulationActive
-            ? std::min(samplesPerLaunch, remainingSamples)
-            : (effectiveAccumulation && !denoising ? 0u : samplesPerLaunch);
+    // Nothing to trace once the budget is spent: the accumulated estimate is the
+    // final one and the frames after it only re-run the display transform.
+    //
+    // That includes the denoised path, which used to keep tracing a sample per
+    // frame forever. Its output is a texture the tone curve reads, so the frame
+    // it produced at the last sample can be re-tonemapped as it stands -- which
+    // is what makes exposure and the tone curve still respond after the estimator
+    // has stopped, at the price of one dispatch rather than a whole re-render.
+    out.samplesThisLaunch = accumulationActive ? std::min(samplesPerLaunch, remainingSamples)
+                                              : (effectiveAccumulation ? 0u : samplesPerLaunch);
     return out;
 }
 

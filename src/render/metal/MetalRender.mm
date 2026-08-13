@@ -948,6 +948,7 @@ void MetalRender::render(Buffer* output)
     if (!denoising && mPost.guides().color)
     {
         mPost.releaseGuideTextures();
+        mHasDenoisedFrame = false;
     }
     // Three ways to get from render resolution to output resolution, and the
     // choice matters most at one sample: the spatial scaler has no history and
@@ -1335,8 +1336,26 @@ void MetalRender::render(Buffer* output)
     const bool accumulationActive = filled.accumulationActive;
     const bool effectiveAccumulation = filled.effectiveAccumulation;
 
-    // Sample limit stops the estimator, not the denoiser (see MetalFrameUniforms::fill).
+    // Whether the denoised frame already on hand describes this scene and this
+    // camera. Everything that invalidates it -- the denoiser switched on, a
+    // scaler recreated at another resolution, a camera cut -- asks for a history
+    // reset, and the frame that denoises is the one that clears that ask.
+    const bool denoisedFrameUsable =
+        denoising && mHasDenoisedFrame && !mResetDenoiseHistory && mPost.denoisedTexture() != nullptr;
+
+    // The sample limit stops the estimator, and with it the denoiser: its output
+    // is a texture, so the frame it produced at the last sample is what the post
+    // path re-tonemaps (see MetalFrameUniforms::fill).
     uint32_t samplesThisLaunch = filled.samplesThisLaunch;
+    // Unless there is no such frame to freeze -- the denoiser was switched on
+    // after the last sample, or its history was dropped since. One more traced
+    // sample hands it the accumulated estimate and the guides that go with it.
+    // The accumulation buffer is not written at the cap, so that sample cannot
+    // disturb what has already converged.
+    if (samplesThisLaunch == 0 && denoising && !denoisedFrameUsable)
+    {
+        samplesThisLaunch = std::max(spp, 1u);
+    }
     if (samplesThisLaunch != 0 && mAccel.instanceBuffer() != nullptr)
     {
         pUniformData->samples_per_launch = samplesThisLaunch;
@@ -1750,6 +1769,7 @@ void MetalRender::render(Buffer* output)
                             sizeof(in.viewToClip));
                 mResetDenoiseHistory = false;
                 mPost.metalFx().encodeDenoise(pCmd, in);
+                mHasDenoisedFrame = true;
 
                 // And back into the buffer, which is what anything not looking at
                 // a screen reads: StrelkaCLI writes its EXR and its PNG from
@@ -1858,6 +1878,14 @@ void MetalRender::render(Buffer* output)
     }
     else
     {
+        // Post-only frame. The estimator has spent its sample budget, so the
+        // picture behind it is final and the only thing still worth running is
+        // what turns radiance into pixels: exposure, the tone curve, gamma. Those
+        // read the frame rather than produce it, so they keep responding at the
+        // price of a dispatch or two instead of a re-render -- which is the point,
+        // and holds with MetalFX in the pipeline as much as without it. What
+        // differs there is the frame they read: the denoised texture, kept from
+        // the last traced sample, or the accumulation buffer re-upscaled.
         MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
         {
             // Numbered, so a capture names the frame it came from rather than
@@ -1871,32 +1899,72 @@ void MetalRender::render(Buffer* output)
         // trace against -- so the tonemapper would be handed a nil texture and the
         // display a frame that was never written.
         mPost.ensureDisplayTextures(outWidth, outHeight);
-        if (upscaling)
+        const bool frozenDenoised = denoisedFrameUsable && mPost.tonemapperTexPSO() != nullptr;
+        if (upscaling && !frozenDenoised)
         {
             mPost.ensureUpscaleTextures(width, height);
         }
 
-        MTL::BlitCommandEncoder* pBlitEncoder = pCmd->blitCommandEncoder();
-        pBlitEncoder->copyFromBuffer(
-            mAccumulationBuffer, 0, ((MetalBuffer*)output)->getNativePtr(), 0,
-            static_cast<NS::UInteger>(width) * height * sizeof(float4));
-        pBlitEncoder->endEncoding();
-
+        if (frozenDenoised)
         {
-            MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
-
-            pComputeEncoder->setComputePipelineState(mPost.tonemapperPSO());
-            pComputeEncoder->useResource(
-                ((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
-            pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
-            pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
-            pComputeEncoder->setTexture(mPost.tonemapTarget(upscaling), 0);
+            // Linear denoised radiance back into the output buffer, for the same
+            // readers the traced path writes it for: a screenshot taken while the
+            // frame is frozen has to hold what is on the screen.
+            if (mPost.denoisedToBufferPSO())
             {
-                const MTL::Size gridSize = MTL::Size(width, height, 1);
-                const MTL::Size threadgroupSize(8, 8, 1);
-                pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+                MTL::ComputeCommandEncoder* cp = pCmd->computeCommandEncoder();
+                cp->setComputePipelineState(mPost.denoisedToBufferPSO());
+                cp->useResource(((MetalBuffer*)output)->getNativePtr(),
+                                MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+                cp->setBuffer(pUniformTMBuffer, 0, 0);
+                cp->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
+                cp->setTexture(mPost.denoisedTexture(), 0);
+                cp->dispatchThreads(MTL::Size(outWidth, outHeight, 1), MTL::Size(8, 8, 1));
+                cp->endEncoding();
             }
-            pComputeEncoder->endEncoding();
+
+            MTL::ComputeCommandEncoder* tm = pCmd->computeCommandEncoder();
+            tm->setComputePipelineState(mPost.tonemapperTexPSO());
+            tm->setBuffer(pUniformTMBuffer, 0, 0);
+            tm->setTexture(mPost.displayTexture(mWriteIndex), 0);
+            tm->setTexture(mPost.denoisedTexture(), 1);
+            tm->dispatchThreads(MTL::Size(outWidth, outHeight, 1), MTL::Size(8, 8, 1));
+            tm->endEncoding();
+        }
+        else
+        {
+            MTL::BlitCommandEncoder* pBlitEncoder = pCmd->blitCommandEncoder();
+            pBlitEncoder->copyFromBuffer(
+                mAccumulationBuffer, 0, ((MetalBuffer*)output)->getNativePtr(), 0,
+                static_cast<NS::UInteger>(width) * height * sizeof(float4));
+            pBlitEncoder->endEncoding();
+
+            {
+                MTL::ComputeCommandEncoder* pComputeEncoder = pCmd->computeCommandEncoder();
+
+                pComputeEncoder->setComputePipelineState(mPost.tonemapperPSO());
+                pComputeEncoder->useResource(
+                    ((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+                pComputeEncoder->setBuffer(pUniformTMBuffer, 0, 0);
+                pComputeEncoder->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
+                pComputeEncoder->setTexture(mPost.tonemapTarget(upscaling), 0);
+                {
+                    const MTL::Size gridSize = MTL::Size(width, height, 1);
+                    const MTL::Size threadgroupSize(8, 8, 1);
+                    pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+                }
+                pComputeEncoder->endEncoding();
+            }
+
+            // The spatial scaler takes a display-referred frame, so the tone curve
+            // runs before it and re-tonemapping means re-upscaling. Left out, a
+            // tonemap edit at the sample cap wrote a texture nothing sampled and
+            // the display kept the last traced frame: the control looked inert.
+            if (upscaling && mPost.metalFx().hasSpatialScaler())
+            {
+                mPost.metalFx().encodeSpatial(pCmd, false, mPost.upscaleTexture(mWriteIndex),
+                                              mPost.displayTexture(mWriteIndex), width, height);
+            }
         }
 
         // Completion handler for async double-buffered output. It must be
