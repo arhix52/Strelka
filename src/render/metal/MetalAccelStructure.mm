@@ -1157,6 +1157,85 @@ void MetalAccelStructure::buildEmptyTopLevel()
     mPath->drain();
 }
 
+void MetalAccelStructure::publishPartialTopLevel()
+{
+    if (!mPath || mEmittedInstances.empty())
+    {
+        return;
+    }
+    // A top level may not reference a structure whose build has not been
+    // submitted, and BLAS builds are batched, so close the open group first.
+    flushAccelerationStructureGroup();
+
+    const size_t count = mEmittedInstances.size();
+    const size_t bytes = sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor) * count;
+    // Grown, not reallocated per publish: on a scene of a million instances this
+    // buffer is tens of megabytes and the load publishes repeatedly.
+    if (!mInstanceBuffer || mInstanceBuffer->length() < bytes)
+    {
+        if (mInstanceBuffer)
+        {
+            mInstanceBuffer->release();
+        }
+        mInstanceBuffer = mDevice->newBuffer(bytes, MTL::ResourceStorageModeShared);
+        if (!mInstanceBuffer)
+        {
+            return;
+        }
+    }
+
+    auto* descriptors =
+        static_cast<MTL::IndirectAccelerationStructureInstanceDescriptor*>(mInstanceBuffer->contents());
+    for (size_t d = 0; d < count; ++d)
+    {
+        const EmittedInstance& e = mEmittedInstances[d];
+        if (e.asIndex >= mBlasList.size() || !mBlasList[e.asIndex].mAs)
+        {
+            // Emitted ahead of its structure. Nothing partial is worth a
+            // dangling reference, so leave the previous top level in place.
+            return;
+        }
+        descriptors[d].accelerationStructureID = mBlasList[e.asIndex].mAs->gpuResourceID();
+        descriptors[d].options = mMaterials->hasAlphaMaterials()
+                                     ? MTL::AccelerationStructureInstanceOptionNone
+                                     : MTL::AccelerationStructureInstanceOptionOpaque;
+        descriptors[d].intersectionFunctionTableOffset = 0;
+        descriptors[d].userID = e.userID;
+        descriptors[d].mask = e.mask;
+    }
+    writeInstanceTransforms(mInstanceBuffer);
+
+    if (mTlasDescriptor)
+    {
+        mTlasDescriptor->release();
+        mTlasDescriptor = nullptr;
+    }
+    mTlasDescriptor = mPath->makeInstanceDescriptor(mInstanceBuffer, count, tlasUsage());
+
+    // The structure being replaced is the one the frames in flight are tracing
+    // against, so it is retired rather than freed here.
+    if (mInstanceAccelerationStructure)
+    {
+        mRetiredInstanceStructures.emplace_back(mInstanceAccelerationStructure, mTlasEncodeCount);
+        mInstanceAccelerationStructure = nullptr;
+    }
+    // Uncompacted: this structure lives until the next publish replaces it, and
+    // compaction costs a second build and a round trip for no lasting benefit.
+    mInstanceAccelerationStructure = createAccelerationStructureNoCompact(mTlasDescriptor);
+    if (!mInstanceAccelerationStructure)
+    {
+        return;
+    }
+    mTlasInstanceCount = count;
+    if (mMetal4)
+    {
+        mMetal4->addResident(mInstanceAccelerationStructure);
+    }
+    mPath->addResident(mInstanceAccelerationStructure);
+    mPath->flushBuildGroup();
+    mPath->drain();
+}
+
 void MetalAccelStructure::rebuildTLAS()
 {
     updateInstanceTransforms();

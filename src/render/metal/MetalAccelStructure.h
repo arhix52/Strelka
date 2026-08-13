@@ -118,6 +118,12 @@ public:
     /// reaches it; a no-op if a top level already exists.
     void buildEmptyTopLevel();
 
+    /// A top level over the instances built so far, so a scene appears as it
+    /// loads instead of arriving whole when the last structure lands. Safe at any
+    /// slice boundary: an instance is emitted only once its BLAS exists. Replaced
+    /// by the complete one when the build finishes.
+    void publishPartialTopLevel();
+
     /// Build every acceleration structure the scene needs, in one call.
     void create();
     /// Resumable build. Zero budget = no limit. Returns true when complete.

@@ -874,6 +874,13 @@ void MetalRender::render(Buffer* output)
             pPool->release();
             return;
         }
+        // Geometry that exists now, rather than all of it when the last structure
+        // lands. Only while the structures stage is running: before it there is
+        // nothing to show, and after it the complete top level is already built.
+        if (mScenePrep.stage() == metal::BuildStage::Structures)
+        {
+            mAccel.publishPartialTopLevel();
+        }
         mPublishClock.notePublished(nowMs);
         // Every slice creates resources the last one did not have: the vertex and
         // index buffers, the material table, each acceleration structure, and the
