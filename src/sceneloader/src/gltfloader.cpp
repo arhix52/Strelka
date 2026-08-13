@@ -1,6 +1,7 @@
 #include <strelka/sceneloader/gltfloader.h>
 #include <strelka/sceneloader/sceneserializer.h>
 #include <strelka/sceneloader/curve_sidecar.h>
+#include <strelka/sceneloader/lod_filter.h>
 #include <strelka/sceneloader/light_json.h>
 
 #include <strelka/scene/camera.h>
@@ -44,22 +45,9 @@ bool gltfDebugLoggingEnabled()
     return enabled;
 }
 
-// Detail levels and proxy stand-ins, which glTF has no standard way to express.
-//
-// MSFT_lod would say which of a set of alternatives to draw; scenes exported
-// from Blender carry no such thing, and encode the choice in node names instead
-// -- cover_01_lod0 beside cover_01_lod1, rock_proxy beside the detailed rock. A
-// loader that takes every node at face value draws them all, stacked in the same
-// space. That is not merely wasted work: the alternatives are near-coincident,
-// so which surface a ray reaches first is decided by numerical accident, and a
-// proxy is a flat untextured hull. On the pine forest, two rock_proxy nodes
-// (baseColorFactor 0.8, no texture) sit inside 82 textured rocks, and where the
-// hull wins the picture shows a bright grey patch where the rocks should be --
-// intermittently, because anything that perturbs the acceleration structure
-// flips which one is in front.
-//
-// Only the mesh is dropped. The node still exists and its children are still
-// walked, so the hierarchy, cameras and skins are unaffected.
+// Only the mesh is dropped when a node is filtered. The node still exists and
+// its children are still walked, so the hierarchy, cameras and skins are
+// unaffected. The rule itself is in lod_filter.h, where it can be tested.
 bool lodFilterEnabled()
 {
     static const bool enabled = !envFlag("STRELKA_NO_LOD_FILTER");
@@ -77,42 +65,6 @@ uint32_t& lodSkipCounter()
 }
 } // namespace
 
-bool isProxyOrLowerLod(const std::string& name)
-{
-    std::string lower(name.size(), '\0');
-    std::transform(name.begin(), name.end(), lower.begin(),
-                   [](unsigned char c) { return (char)std::tolower(c); });
-
-    if (lower.find("proxy") != std::string::npos)
-    {
-        return true;
-    }
-    // "lod0" / "lod_0" is the level to keep; anything above it is an alternative
-    // to the same geometry. A trailing "lod" with no digit names nothing in
-    // particular and is left alone.
-    for (size_t pos = lower.find("lod"); pos != std::string::npos; pos = lower.find("lod", pos + 3))
-    {
-        size_t d = pos + 3;
-        if (d < lower.size() && lower[d] == '_')
-        {
-            ++d;
-        }
-        if (d >= lower.size() || std::isdigit((unsigned char)lower[d]) == 0)
-        {
-            continue;
-        }
-        size_t end = d;
-        while (end < lower.size() && std::isdigit((unsigned char)lower[end]) != 0)
-        {
-            ++end;
-        }
-        if (lower.substr(d, end - d).find_first_not_of('0') != std::string::npos)
-        {
-            return true;
-        }
-    }
-    return false;
-}
 
 // packNormal(), packUV(), unpackNormal(), unpackUV() provided by <strelka/scene/vertex_packing.h>
 // packTangent uses same format as packNormal (tangents are unit vectors in [-1,1])

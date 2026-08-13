@@ -24,6 +24,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_scene.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_light_json.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_curve_sidecar.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_lod_filter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_pick_ray.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_skinned_bounds.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_camera_animation.cpp
