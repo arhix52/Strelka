@@ -3693,7 +3693,18 @@ void EditorApp::run()
         m_display->onBeginFrame();
 
         oka::Buffer* readyBuf = m_render->getReadyBuffer();
-        if (readyBuf && m_autoExposurePending)
+        // Not the first frame that happens to be ready. Exposure is measured
+        // once and then multiplies every pixel for the rest of the session, so
+        // measuring it off an arbitrary frame makes the whole picture depend on
+        // load timing: the same scene opened twice came out at x1.8, x1.9 and
+        // x2.1 here, which is plainly visible when two saved images are
+        // compared. Wait until the scene has finished building -- a frame drawn
+        // part way through it is missing geometry that has not been handed to
+        // the tracer yet -- and until enough samples have landed that the mean
+        // is a property of the scene rather than of the noise.
+        static constexpr uint32_t kExposureSettleSamples = 8;
+        if (readyBuf && m_autoExposurePending && !m_render->isBuildingScene() && !m_isLoading &&
+            m_sharedCtx->mSubframeIndex >= kExposureSettleSamples)
         {
             applyAutoExposure(readyBuf);
         }
