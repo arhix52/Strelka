@@ -3,6 +3,8 @@
 
 #include <log.h>
 
+#include <dispatch/dispatch.h>
+
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -80,6 +82,95 @@ std::string MetalTextures::cacheKey(const std::string& fileName, bool srgb, Text
     return textureCacheKey(in);
 }
 
+MetalTextures::Payload MetalTextures::readCachedPayload(const std::string& cachePath)
+{
+    Payload payload;
+    std::ifstream in(cachePath, std::ios::binary);
+    if (!in)
+        return payload;
+    CachedTextureHeader header{};
+    in.read(reinterpret_cast<char*>(&header), sizeof(header));
+    if (!in || std::memcmp(header.magic, "BTEX", 4) != 0 || header.version != kTextureCacheVersion)
+        return payload;
+    payload.width = (int)header.width;
+    payload.height = (int)header.height;
+    payload.levels = header.levels;
+    payload.pixelFormat = header.pixelFormat;
+    payload.blockBytes = header.blockBytes;
+    payload.data.reserve(header.levels);
+    for (uint32_t l = 0; l < header.levels; ++l)
+    {
+        uint32_t byteLength = 0;
+        in.read(reinterpret_cast<char*>(&byteLength), sizeof(byteLength));
+        if (!in || byteLength == 0)
+            return Payload{};
+        std::vector<uint8_t> level(byteLength);
+        in.read(reinterpret_cast<char*>(level.data()), byteLength);
+        if (!in)
+            return Payload{};
+        payload.data.push_back(std::move(level));
+    }
+    payload.fromCache = true;
+    payload.valid = true;
+    return payload;
+}
+
+MTL::Texture* MetalTextures::createFromPayload(const Payload& payload, const std::string& cacheFileToWrite)
+{
+    if (!payload.valid || payload.data.empty())
+        return nullptr;
+    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
+    desc->setWidth(payload.width);
+    desc->setHeight(payload.height);
+    desc->setMipmapLevelCount(payload.levels);
+    desc->setPixelFormat((MTL::PixelFormat)payload.pixelFormat);
+    desc->setTextureType(MTL::TextureType2D);
+    desc->setStorageMode(MTL::StorageModeShared);
+    desc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
+    MTL::Texture* texture = mDevice->newTexture(desc);
+    desc->release();
+    if (!texture)
+        return nullptr;
+    for (uint32_t l = 0; l < payload.levels && l < payload.data.size(); ++l)
+    {
+        const uint32_t w = std::max(1, payload.width >> l);
+        const uint32_t h = std::max(1, payload.height >> l);
+        const size_t rowBytes =
+            payload.blockBytes ? (size_t)((w + 3) / 4) * payload.blockBytes : (size_t)w * 4;
+        texture->replaceRegion(MTL::Region::Make3D(0, 0, 0, w, h, 1), l, payload.data[l].data(), rowBytes);
+    }
+    if (!cacheFileToWrite.empty())
+    {
+        std::error_code ec;
+        fs::create_directories(fs::path(cacheFileToWrite).parent_path(), ec);
+        // Written on one thread only: two decoders racing the same .tmp would
+        // interleave into a file that reads back as a valid header and rubbish.
+        const std::string tmp = cacheFileToWrite + ".tmp";
+        std::ofstream out(tmp, std::ios::binary);
+        if (out)
+        {
+            CachedTextureHeader header{};
+            std::memcpy(header.magic, "BTEX", 4);
+            header.version = kTextureCacheVersion;
+            header.width = (uint32_t)payload.width;
+            header.height = (uint32_t)payload.height;
+            header.levels = payload.levels;
+            header.pixelFormat = payload.pixelFormat;
+            header.blockBytes = payload.blockBytes;
+            out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+            for (uint32_t l = 0; l < payload.levels && l < payload.data.size(); ++l)
+            {
+                const uint32_t byteLength = (uint32_t)payload.data[l].size();
+                out.write(reinterpret_cast<const char*>(&byteLength), sizeof(byteLength));
+                out.write(reinterpret_cast<const char*>(payload.data[l].data()), byteLength);
+            }
+            out.close();
+            fs::rename(tmp, cacheFileToWrite, ec);
+        }
+    }
+    return texture;
+}
+
 MTL::Texture* MetalTextures::loadCached(const std::string& cachePath)
 {
     std::ifstream in(cachePath, std::ios::binary);
@@ -130,16 +221,30 @@ MTL::Texture* MetalTextures::loadCached(const std::string& cachePath)
     return texture;
 }
 
-MTL::Texture* MetalTextures::loadFromFile(const std::string& fileName, bool srgb, TextureKind kind)
+MetalTextures::DecodeParams MetalTextures::readDecodeParams() const
 {
-    const fs::path cacheDir = mSettings->getAs<std::string>("render/texture/cachePath");
-    std::string cacheFile;
-    if (!cacheDir.empty())
+    DecodeParams params;
+    params.maxDimension = mSettings->getAs<uint32_t>("render/texture/maxDimension");
+    params.downscale = std::max(1u, mSettings->getAs<uint32_t>("render/texture/downscale"));
+    params.compress = mSettings->getAs<bool>("render/texture/compress");
+    params.deviceSupportsBC = mDevice->supportsBCTextureCompression();
+    return params;
+}
+
+// Everything a texture needs that does not involve Metal: read the cache, or
+// decode, resample, build the mip chain and encode. No shared state and no
+// settings lookups, so any number of these can run at once.
+MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileName,
+                                                      bool srgb,
+                                                      TextureKind kind,
+                                                      const std::string& cacheFile,
+                                                      const DecodeParams& params) const
+{
+    if (!cacheFile.empty())
     {
-        cacheFile = (cacheDir / cacheKey(fileName, srgb, kind)).string();
-        if (MTL::Texture* cached = loadCached(cacheFile))
+        Payload cached = readCachedPayload(cacheFile);
+        if (cached.valid)
         {
-            ++mCacheHits;
             return cached;
         }
     }
@@ -151,11 +256,11 @@ MTL::Texture* MetalTextures::loadFromFile(const std::string& fileName, bool srgb
     if (data == nullptr)
     {
         STRELKA_ERROR("Unable to load texture from file: {}", fileName.c_str());
-        return nullptr;
+        return Payload{};
     }
 
-    const uint32_t maxDim = mSettings->getAs<uint32_t>("render/texture/maxDimension");
-    const uint32_t divisor = std::max(1u, mSettings->getAs<uint32_t>("render/texture/downscale"));
+    const uint32_t maxDim = params.maxDimension;
+    const uint32_t divisor = std::max(1u, params.downscale);
     if ((maxDim > 0 && (uint32_t)std::max(texWidth, texHeight) > maxDim) || divisor > 1)
     {
         int dstW = std::max(1, texWidth / (int)divisor);
@@ -215,8 +320,7 @@ MTL::Texture* MetalTextures::loadFromFile(const std::string& fileName, bool srgb
     // leaving such a texture as it was.
     const bool srgbNormal = kind == TextureKind::Normal && srgb;
     const bool normalMap = kind == TextureKind::Normal && !srgb;
-    const bool canCompress = !srgbNormal && mDevice->supportsBCTextureCompression() &&
-                             mSettings->getAs<bool>("render/texture/compress");
+    const bool canCompress = !srgbNormal && params.deviceSupportsBC && params.compress;
     oka::bc::Format bcFormat = oka::bc::Format::BC1;
     if (normalMap)
         bcFormat = oka::bc::Format::BC5;
@@ -257,59 +361,94 @@ MTL::Texture* MetalTextures::loadFromFile(const std::string& fileName, bool srgb
     chain.clear();
     chain.shrink_to_fit();
 
-    MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
-    pTextureDesc->setWidth(texWidth);
-    pTextureDesc->setHeight(texHeight);
-    pTextureDesc->setMipmapLevelCount(levels);
-    pTextureDesc->setPixelFormat(format);
-    pTextureDesc->setTextureType(MTL::TextureType2D);
-    pTextureDesc->setStorageMode(MTL::StorageModeShared);
-    pTextureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
+    Payload out;
+    out.width = texWidth;
+    out.height = texHeight;
+    out.levels = levels;
+    out.pixelFormat = (uint32_t)format;
+    out.blockBytes = canCompress ? (uint32_t)oka::bc::blockBytes(bcFormat) : 0u;
+    out.data = std::move(payload);
+    out.fromCache = false;
+    out.valid = true;
+    return out;
+}
 
-    MTL::Texture* pTexture = mDevice->newTexture(pTextureDesc);
-    pTextureDesc->release();
-    if (!pTexture)
-        return nullptr;
-
-    const uint32_t blockBytes = canCompress ? (uint32_t)oka::bc::blockBytes(bcFormat) : 0u;
-    for (uint32_t l = 0; l < levels; ++l)
+void MetalTextures::prewarm(const std::vector<Request>& requests)
+{
+    if (requests.empty())
     {
-        const uint32_t w = std::max(1, texWidth >> l);
-        const uint32_t h = std::max(1, texHeight >> l);
-        const size_t rowBytes = blockBytes ? (size_t)((w + 3) / 4) * blockBytes : (size_t)w * 4;
-        pTexture->replaceRegion(MTL::Region::Make3D(0, 0, 0, w, h, 1), l, payload[l].data(), rowBytes);
+        return;
     }
+    const fs::path cacheDir = mSettings->getAs<std::string>("render/texture/cachePath");
+    const DecodeParams params = readDecodeParams();
 
-    if (!cacheFile.empty())
+    // Deduplicated first: a scene routinely uses one map in several materials,
+    // and decoding it once per use would spend the cores undoing the saving the
+    // dedup cache exists to make.
+    std::vector<Request> unique;
+    std::vector<std::string> keys;
     {
-        std::error_code ec;
-        fs::create_directories(cacheDir, ec);
-        const std::string tmp = cacheFile + ".tmp";
-        std::ofstream out(tmp, std::ios::binary);
-        if (out)
+        std::unordered_map<std::string, size_t> seen;
+        for (const Request& r : requests)
         {
-            CachedTextureHeader header{};
-            std::memcpy(header.magic, "BTEX", 4);
-            header.version = kTextureCacheVersion;
-            header.width = (uint32_t)texWidth;
-            header.height = (uint32_t)texHeight;
-            header.levels = levels;
-            header.pixelFormat = (uint32_t)format;
-            header.blockBytes = blockBytes;
-            out.write(reinterpret_cast<const char*>(&header), sizeof(header));
-            for (uint32_t l = 0; l < levels; ++l)
-            {
-                const uint32_t byteLength = (uint32_t)payload[l].size();
-                out.write(reinterpret_cast<const char*>(&byteLength), sizeof(byteLength));
-                out.write(reinterpret_cast<const char*>(payload[l].data()), byteLength);
-            }
-            out.close();
-            fs::rename(tmp, cacheFile, ec);
+            if (r.path.empty())
+                continue;
+            std::string key = cacheKey(r.path, r.srgb, r.kind);
+            if (seen.count(key) != 0)
+                continue;
+            seen.emplace(key, unique.size());
+            unique.push_back(r);
+            keys.push_back(std::move(key));
         }
     }
+    if (unique.empty())
+    {
+        return;
+    }
 
-    ++mCacheMisses;
-    return pTexture;
+    std::vector<Payload> results(unique.size());
+    // Written through a pointer: a block captures by const value, and each index
+    // is touched by exactly one iteration, so no locking is needed.
+    Payload* out = results.data();
+    dispatch_apply(unique.size(), DISPATCH_APPLY_AUTO, ^(size_t i) {
+        const Request& r = unique[i];
+        const std::string cacheFile = cacheDir.empty() ? std::string() : (cacheDir / keys[i]).string();
+        out[i] = decodeToPayload(r.path, r.srgb, r.kind, cacheFile, params);
+    });
+
+    for (size_t i = 0; i < unique.size(); ++i)
+    {
+        if (results[i].valid)
+        {
+            mPrewarmed.emplace(keys[i], std::move(results[i]));
+        }
+    }
+}
+
+MTL::Texture* MetalTextures::loadFromFile(const std::string& fileName, bool srgb, TextureKind kind)
+{
+    const fs::path cacheDir = mSettings->getAs<std::string>("render/texture/cachePath");
+    const std::string key = cacheKey(fileName, srgb, kind);
+    const std::string cacheFile = cacheDir.empty() ? std::string() : (cacheDir / key).string();
+
+    // prewarm() may already have done everything except the Metal calls.
+    Payload payload;
+    if (auto it = mPrewarmed.find(key); it != mPrewarmed.end())
+    {
+        payload = std::move(it->second);
+        mPrewarmed.erase(it);
+    }
+    else
+    {
+        payload = decodeToPayload(fileName, srgb, kind, cacheFile, readDecodeParams());
+    }
+    if (!payload.valid)
+    {
+        STRELKA_ERROR("Unable to load texture from file: {}", fileName.c_str());
+        return nullptr;
+    }
+    (payload.fromCache ? mCacheHits : mCacheMisses)++;
+    return createFromPayload(payload, payload.fromCache ? std::string() : cacheFile);
 }
 
 MTL::ResourceID MetalTextures::loadMaterialTexture(const std::string& absolutePath, bool srgb, TextureKind kind)

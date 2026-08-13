@@ -224,7 +224,31 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
     MaterialBuildState& st = *mBuild;
 
     if (st.cursor == 0)
+    {
         mTextures->beginMaterialPass();
+        // Every map the scene will ask for, decoded across all cores before the
+        // loop below asks for them one at a time. Each call it makes then has
+        // only the Metal calls left to do.
+        std::vector<MetalTextures::Request> requests;
+        requests.reserve(matDescs.size() * 5);
+        auto want = [&](const std::string& path, bool srgb, TextureKind kind) {
+            if (!path.empty())
+                requests.push_back({ (resourcePath / path).string(), srgb, kind });
+        };
+        for (const Scene::MaterialDescription& d : matDescs)
+        {
+            want(d.baseColorTexPath, true, TextureKind::Color);
+            want(d.metallicRoughnessTexPath, false, TextureKind::NonColor);
+            want(d.normalTexPath, false, TextureKind::Normal);
+            want(d.emissionTexPath, true, TextureKind::Color);
+            want(d.occlusionTexPath, false, TextureKind::NonColor);
+        }
+        const auto tPrewarm = std::chrono::steady_clock::now();
+        mTextures->prewarm(requests);
+        STRELKA_INFO("Textures prewarmed: {} requests in {:.0f} ms",
+                     requests.size(),
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tPrewarm).count());
+    }
     auto loadTex = [&](const std::string& path, bool srgb,
                        TextureKind kind = TextureKind::Color) -> MTL::ResourceID {
         if (path.empty())
