@@ -20,16 +20,15 @@ answer, or an asset/converter note that does not need Chaos.
 | # | What | Where it lives | How we know it is done |
 |---|---|---|---|
 | ~~1~~ | ~~Clearcoat underside bounce~~ | done — see Closed | `15_clearcoat` 1.002 overall, IOR 2.2 within 1% |
-| 2 | Rough thin-wall blur | thin-walled transmission lobe | new rung next to `22_thin_walled`, vs Cycles; soap bubbles stay bit-identical |
+| ~~2~~ | ~~Rough thin-wall blur~~ | done — see Closed | `22_thin_walled` 0.094 / 0.966 CLOSE |
 | 3 | Hair lobe (geometry is done) | BSDF + `kFeatureCurves` shade path | new groom rung vs Cycles; kids-bedroom monster/spider patches via `patch_mean.py` |
 | 4 | Height-map mip aliasing | `render/pt/textureLodMode` | kids bedroom walls A/B lod 0 vs footprint; measure with `patch_mean.py` |
 | 5 | OptiX ior-stack counters | OptiX push/pop path | same three counters Metal already reports; no bathroom patch change expected |
 | 6 | Two-sided different back face | material model / glTF | design first; one kids-bedroom material only |
 | 7 | Bath water is a dish, not a volume | asset, not code | remodel in Blender; bath water R/G against Chaos PNG is a check, not a driver |
 
-2 is pure BSDF work with a ladder already waiting. 3 is the largest remaining
-visual miss on the kids bedroom and has a clear Cycles path. 4–6 are smaller.
-7 is not a renderer bug.
+3 is the largest remaining visual miss on the kids bedroom and has a clear
+Cycles path. 4–6 are smaller. 7 is not a renderer bug.
 
 Build the bathroom / kids bedroom when an entry asks for it:
 
@@ -65,29 +64,6 @@ Feature-test ladder (the default verifier for 1–3):
 ```bash
 # see tools/feature_tests/README.md -- Cycles EXR refs, one feature per scene
 ```
-
----
-
-## 2. A thin wall does not blur what is behind it
-
-The consistency half is fixed: thin-walled transmission returns exactly `-V` at
-every roughness, and reports itself as the delta it is. `eval` returns zero for
-it instead of building a half vector for a refraction that never happened.
-Measured before the fix, over 50k samples: at roughness 0.1 every transmitted
-sample landed on one direction carrying a pdf of 48.9.
-
-What is left is that a frosted thin sheet ought to blur what is behind it and
-does not. Modelling that means refracting through the microfacet and back at the
-second interface. `scenes/feature_tests/22_thin_walled` exists but does not cover
-roughness > 0 against a patterned backdrop, so there is nothing to build a rung
-from yet. A lobe written against no measurement is how the clearcoat term was
-rejected twice before it was derived.
-
-The soap bubbles are at roughness 0 and are unaffected either way.
-
-**Fix**: microfacet thin-wall transmission; add a rough frosted-sheet rung beside
-`22_thin_walled`. **Verify**: new rung vs Cycles; bathroom with bubbles bit-
-identical to today.
 
 ---
 
@@ -196,6 +172,21 @@ nested-dielectric counters should drop on that mesh.
 ---
 
 ## Closed (kept for the measurement, not the work)
+
+### Rough thin-wall blur
+
+**Fixed.** Smooth thin walls stay a delta at `-V`. Rough ones are a GGX
+reflection of the view mirrored through the surface, with Kulla–Conty
+transmission roughness (`α √(3.4 (η-1)(η-0.5)²/η³)`), matching Cycles /
+OpenPBR. Fresnel for the reflect/transmit split is taken at the shading
+normal once, the same way Cycles bakes weights into its two closures; a
+microfacet F made the coin flip track the reflection distribution instead.
+
+`scenes/feature_tests/22_thin_walled` is now a roughness ramp (0 → 0.45) plus a
+solid control, with a striped card behind so the blur is visible. Measured
+0.094 / 0.966 CLOSE. Above ~0.45 Cycles' multiscatter GGX and our single-
+scatter disagree on energy more than on blur, so the ramp stops there. Smooth
+(roughness 0) is unchanged -- soap bubbles stay bit-identical.
 
 ### Clearcoat underside bounce
 

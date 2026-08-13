@@ -200,12 +200,12 @@ TEST_CASE("neither wall of a bubble creates or destroys energy")
     }
 }
 
-TEST_CASE("a thin wall transmits as a delta at every roughness, and says so")
+TEST_CASE("a smooth thin wall transmits as a delta, and says so")
 {
-    // The direction was always this; only the label and the density disagreed
-    // with it. A pdf of 48.9 on a lobe whose every sample lands on one direction
-    // is a density MIS cannot weigh against anything.
-    for (float rough : { 0.0f, 0.1f, 0.3f, 0.6f, 1.0f })
+    // Rough thin walls are a real GGX lobe (OpenPBR / Cycles); only the smooth
+    // case -- and the transmission roughness that collapses to smooth -- is a
+    // delta at exactly -V.
+    for (float rough : { 0.0f, 0.001f })
     {
         SurfaceInteraction si = wall_si(35.0f, /*front=*/true, rough);
         int transmitted = 0;
@@ -216,7 +216,6 @@ TEST_CASE("a thin wall transmits as a delta at every roughness, and says so")
             if ((r.event_type & BSDF_EVENT_TRANSMISSION) == 0) continue;
             ++transmitted;
             CAPTURE(rough);
-            // Straight through, and reported as the delta that is.
             const float3 d = r.wi - (make_float3(0.0f) - si.wo);
             CHECK(dot(d, d) == doctest::Approx(0.0f).epsilon(1e-6));
             CHECK(r.event_type == BSDF_EVENT_SPECULAR_TRANSMISSION);
@@ -225,24 +224,77 @@ TEST_CASE("a thin wall transmits as a delta at every roughness, and says so")
     }
 }
 
-TEST_CASE("a thin wall cannot be evaluated in transmission")
+TEST_CASE("a rough thin wall blurs transmission around -V")
 {
-    // eval() used to build a half vector for a refraction that never happens and
-    // return a BTDF over directions the sampler cannot reach. Anything a light
-    // connection asks about on the far side has to come back zero.
-    for (float rough : { 0.0f, 0.4f })
+    // Every sample used to land on exactly -V. With the mirrored-GGX lobe the
+    // mean stays on -V and the variance grows with roughness -- that is the
+    // blur a frosted sheet has to have.
+    SurfaceInteraction si = wall_si(20.0f, /*front=*/true, /*roughness=*/0.4f);
+    float3 mean = make_float3(0.0f);
+    float var = 0.0f;
+    int transmitted = 0;
+    const float3 through = make_float3(0.0f) - si.wo;
+    for (int i = 0; i < 2048; ++i)
     {
-        SurfaceInteraction si = wall_si(35.0f, /*front=*/true, rough);
-        // Straight through, and a spread of directions around it.
-        for (float tilt : { 0.0f, 0.15f, 0.4f })
-        {
-            const float3 wi = safe_normalize(make_float3(-si.wo.x + tilt, tilt, -si.wo.z));
-            BsdfEvalResult e = bsdf_eval(si, wi);
-            CAPTURE(rough);
-            CAPTURE(tilt);
-            CHECK(dot(e.bsdf, e.bsdf) == doctest::Approx(0.0f));
-        }
+        const float u = (i + 0.5f) / 2048.0f;
+        const float u1 = ((i * 7) % 2048 + 0.5f) / 2048.0f;
+        const float u2 = ((i * 13) % 2048 + 0.5f) / 2048.0f;
+        BsdfSampleResult r = bsdf_sample(si, make_float4(u1, u2, 0.25f, u));
+        if ((r.event_type & BSDF_EVENT_TRANSMISSION) == 0) continue;
+        ++transmitted;
+        CHECK(r.event_type == BSDF_EVENT_GLOSSY_TRANSMISSION);
+        mean = mean + r.wi;
+        const float3 d = r.wi - through;
+        var += dot(d, d);
     }
+    REQUIRE(transmitted > 100);
+    mean = mean * (1.0f / (float)transmitted);
+    var /= (float)transmitted;
+    // Mean within ~10 degrees of straight through.
+    CHECK(dot(safe_normalize(mean), through) > 0.98f);
+    CHECK(var > 0.01f); // not a delta
+}
+
+TEST_CASE("a smooth thin wall cannot be evaluated in transmission")
+{
+    // eval() on a delta returns zero; a light connection through a smooth wall
+    // has nothing to land on. Rough walls are evaluable -- see the next case.
+    SurfaceInteraction si = wall_si(35.0f, /*front=*/true, 0.0f);
+    for (float tilt : { 0.0f, 0.15f, 0.4f })
+    {
+        const float3 wi = safe_normalize(make_float3(-si.wo.x + tilt, tilt, -si.wo.z));
+        BsdfEvalResult e = bsdf_eval(si, wi);
+        CAPTURE(tilt);
+        CHECK(dot(e.bsdf, e.bsdf) == doctest::Approx(0.0f));
+    }
+}
+
+TEST_CASE("a rough thin wall is evaluable in transmission and agrees with sample")
+{
+    SurfaceInteraction si = wall_si(25.0f, /*front=*/true, 0.35f);
+    int checked = 0;
+    for (int i = 0; i < 800 && checked < 40; ++i)
+    {
+        const float u = (i + 0.5f) / 800.0f;
+        const float u1 = ((i * 3) % 800 + 0.5f) / 800.0f;
+        const float u2 = ((i * 11) % 800 + 0.5f) / 800.0f;
+        BsdfSampleResult s = bsdf_sample(si, make_float4(u1, u2, 0.25f, u));
+        if ((s.event_type & BSDF_EVENT_TRANSMISSION) == 0) continue;
+        if ((s.event_type & BSDF_EVENT_SPECULAR) != 0) continue;
+
+        BsdfEvalResult e = bsdf_eval(si, s.wi);
+        CAPTURE(s.pdf);
+        CAPTURE(e.pdf);
+        CHECK(e.pdf == doctest::Approx(s.pdf).epsilon(0.05));
+        // bsdf_over_pdf * pdf ~= bsdf * |cos| for the reflection-mapped lobe;
+        // compare the throughput sample reported against eval's bsdf/pdf.
+        const float3 wi_r = s.wi - si.shading_normal * (2.0f * dot(s.wi, si.shading_normal));
+        const float cosL = std::fabs(dot(wi_r, si.shading_normal));
+        const float expected = e.bsdf.x * cosL / std::max(e.pdf, 1e-10f);
+        CHECK(s.bsdf_over_pdf.x == doctest::Approx(expected).epsilon(0.08));
+        ++checked;
+    }
+    CHECK(checked > 0);
 }
 
 TEST_CASE("solid glass still total-internally-reflects")

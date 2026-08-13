@@ -87,7 +87,7 @@ fixing, but it is not a shading bug.
 | `19_env_and_light` | an environment map *and* an area light | 0.026 / 1.000 |
 | `20_mirror_and_floor` | a mirror filling the frame (denoiser guides) | 0.034 / 1.038 |
 | `21_specular_color` | `KHR_materials_specular` tint ramp | 0.030 / 1.018 |
-| `22_thin_walled` | smooth Thin Wall glass (+ solid control) | 0.085 / 0.989 |
+| `22_thin_walled` | Thin Wall roughness ramp (+ solid) | 0.094 / 0.966 |
 | `23_diffuse_transmission` | `KHR_materials_diffuse_transmission` weight ramp | 0.012 / 1.000 |
 | `24_orthographic` | ortho twin of `00_calibration` | 0.024 / 1.009 |
 | `25_subsurface` | `STRELKA_materials_subsurface` (Van de Hulst recipe) | 0.056 / 1.009 |
@@ -283,11 +283,14 @@ and IES lights are on the ladder as of scenes 14 to 27.
 `specularColorFactor` equal to the tint; level 1.0 would bake a factor of two
 into the colour and the row would measure that encoding.
 
-`22_thin_walled` is smooth only. Rough thin walls still transmit as a delta on
-our side (docs/open-defects.md entry 2); a roughness ramp would restate that.
-Blender's Thin Wall flag is not exported, so the patcher writes
-`KHR_materials_volume.thicknessFactor = 0`, which is what Strelka reads as a
-wall. The fourth sphere is solid glass at the same IOR as the middle thin one.
+`22_thin_walled` is a thin roughness ramp at IOR 1.5 (0 → 0.45) plus a solid
+control of the same IOR. A low-frequency striped card behind the row gives the
+frosted spheres structure to blur. Blender's Thin Wall flag is not exported, so
+the patcher writes `KHR_materials_volume.thicknessFactor = 0`, which is what
+Strelka reads as a wall. Rough transmission follows Cycles / OpenPBR: a GGX
+reflection of the view mirrored through the surface, with Kulla–Conty roughness
+for the two interfaces. The ramp stops at 0.45 because above that Cycles'
+multiscatter GGX and our single-scatter disagree on energy more than on blur.
 
 `23_diffuse_transmission` builds a Mix(Principled, Translucent) for Cycles —
 Principled 5.2 has no Diffuse Transmission socket — and the patcher writes

@@ -932,28 +932,49 @@ def s21_specular_color(tex):
 
 
 def s22_thin_walled(tex):
-    """Smooth thin-walled glass against one solid control.
+    """Thin-walled glass: smooth + roughness ramp, vs one solid control.
 
-    Rough thin walls are deliberately absent: Strelka still transmits them as a
-    delta (docs/open-defects.md entry 2), so a roughness ramp would measure that
-    known gap rather than Thin Wall itself. The solid sphere at IOR 1.5 is the
-    control -- same material without the wall flag -- so a framing or exposure
-    shift cannot hide a missing patch.
+    A low-frequency striped card sits behind the row so frosted sheets have
+    structure to smear; the full-wall sRGB probe was too fine and made every
+    column look worse than the blur itself. The ramp stops at 0.45: above that
+    Cycles' multiscatter GGX and our single-scatter diverge on energy. The
+    solid sphere at IOR 1.5 is the control -- same material without the wall
+    flag -- so a framing or exposure shift cannot hide a missing patch.
     """
     add_stage()
-    # Three thin-walled IORs, then one solid glass of the middle IOR.
-    specs = [
-        ("thin0", 1.1, True),
-        ("thin1", 1.5, True),
-        ("thin2", 2.0, True),
-        ("solid1", 1.5, False),
+    # Soft vertical bands behind the spheres. High-frequency texture on the
+    # whole back wall made relative error measure registration noise instead of
+    # the lobe.
+    colours = [
+        (0.75, 0.15, 0.12),
+        (0.85, 0.85, 0.80),
+        (0.12, 0.45, 0.75),
+        (0.85, 0.85, 0.80),
+        (0.15, 0.65, 0.25),
     ]
-    for (name, ior, thin), pos in zip(specs, row_positions(len(specs), spacing=1.15)):
-        obj = sphere(name, pos, radius=0.48)
+    span = 3.6
+    strip_w = span / len(colours)
+    for i, col in enumerate(colours):
+        x = -span / 2 + strip_w * (i + 0.5)
+        strip = quad("Stripe%d" % i, (x, 2.4, 0.9), size=1.0)
+        strip.scale = (strip_w * 0.98, 1.6, 1.0)
+        strip.data.materials.append(
+            new_material("stripe%d" % i, base_color=col + (1.0,),
+                         roughness=1.0, metallic=0.0, specular=0.0))
+
+    specs = [
+        ("thin0", 0.0, True),
+        ("thin1", 0.15, True),
+        ("thin2", 0.3, True),
+        ("thin3", 0.45, True),
+        ("solid1", 0.0, False),
+    ]
+    for (name, rough, thin), pos in zip(specs, row_positions(len(specs), spacing=1.05)):
+        obj = sphere(name, pos, radius=0.42)
         obj.data.materials.append(
             new_material(name, base_color=(1.0, 1.0, 1.0, 1.0),
-                         roughness=0.0, metallic=0.0,
-                         transmission=1.0, ior=ior, thin_wall=thin))
+                         roughness=rough, metallic=0.0,
+                         transmission=1.0, ior=1.5, thin_wall=thin))
 
 
 def s23_diffuse_transmission(tex):

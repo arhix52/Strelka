@@ -172,6 +172,25 @@ DEVICE_FUNC float3 clearcoat_base_scale(const THREAD_REF SurfaceInteraction& si,
                        fminf(single / fmaxf(1.0f - F_ms * rho.z, 1e-5f), ceiling));
 }
 
+// OpenPBR / Cycles thin-glass transmission roughness. Two refraction events
+// widen the lobe; the scale is from Kulla Conty (Imageworks 2017, p.40 -- the
+// slides say 3.7, the Cycles port and the algebra say 3.4). `eta` is n_glass /
+// n_air, at least one.
+DEVICE_FUNC float thin_glass_transmission_alpha(float alpha, float eta)
+{
+    eta = fmaxf(eta, 1.0f);
+    const float t = (eta - 1.0f) * sqr(eta - 0.5f) / (eta * eta * eta);
+    return saturate(alpha * sqrtf(3.4f * t));
+}
+
+// Mirror a direction through the macroscopic surface: (x, y, z) -> (x, y, -z)
+// in the frame of `n`. Used to turn a reflection sample into a thin-wall
+// transmission sample (Cycles / OpenPBR).
+DEVICE_FUNC float3 flip_through_surface(float3 w, float3 n)
+{
+    return w - n * (2.0f * dot(w, n));
+}
+
 // How much of the base layer survives under the sheen, per KHR_materials_sheen.
 // What the fabric reflected is not available to the lobes beneath it; leaving
 // this out is what made an additive sheen measure 1.40 directional albedo on a
@@ -512,6 +531,99 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
                                                      : (si.ior / si.exterior_ior);
         bool is_smooth = (alpha < 0.001f);
 
+        // Thin wall: Cycles / OpenPBR split Fresnel at the shading normal once,
+        // then run a reflection lobe at `alpha` and a transmission lobe at the
+        // Kulla-Conty-raised alpha. Using a microfacet F here made the coin flip
+        // track the reflection distribution instead of the wall, and disagreed
+        // with the weight Cycles bakes into its two closures.
+        if (si.thin_walled)
+        {
+            const float NdotV_abs = fabsf(NdotV);
+            const float F_val = fresnel_dielectric(NdotV_abs, eta);
+            const float3 F_film = transmission_fresnel(si, NdotV_abs, eta);
+            const float3 reflectTint = F_film / fmaxf(F_val, 1e-4f);
+            const float3 refractTint =
+                (make_float3(1.0f) - F_film) / fmaxf(1.0f - F_val, 1e-4f);
+
+            if (u_fresnel < F_val)
+            {
+                float3 H = Nf;
+                if (!is_smooth)
+                {
+                    float3 V_local = world_to_local(V, T, B, Nf);
+                    float3 H_local = ggx_vndf_sample(V_local, alpha, u1, u2);
+                    H = local_to_world(H_local, T, B, Nf);
+                }
+                const float VdotH = dot(V, H);
+                if (VdotH <= 0.0f)
+                    return result;
+
+                result.wi = reflect_dir(-V, H);
+                const float NdotL = dot(Nf, result.wi);
+                if (NdotL <= 0.0f)
+                    return result;
+
+                if (is_smooth)
+                {
+                    result.bsdf_over_pdf = si.albedo * reflectTint;
+                    result.pdf           = p_trans_eff * F_val;
+                    result.event_type    = BSDF_EVENT_SPECULAR_REFLECTION;
+                }
+                else
+                {
+                    const float NdotH = dot(Nf, H);
+                    const float G2 = ggx_smith_g2(alpha, NdotV_abs, NdotL);
+                    const float G1 = ggx_smith_g1(alpha, NdotV_abs);
+                    result.bsdf_over_pdf = si.albedo * reflectTint * (G2 / (G1 + 1e-10f));
+                    result.pdf = p_trans_eff * F_val *
+                                 ggx_vndf_pdf(alpha, NdotH, NdotV_abs, VdotH);
+                    result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
+                }
+                return result;
+            }
+
+            // Transmission: smooth is exactly -V; rough is a GGX reflection of
+            // the view mirrored through the surface (Cycles / OpenPBR).
+            const float eta_rel = fmaxf(si.ior / fmaxf(si.exterior_ior, 1e-4f), 1.0f);
+            const float alpha_t = thin_glass_transmission_alpha(alpha, eta_rel);
+            const bool t_smooth = (alpha_t < 0.001f);
+
+            float3 H_t = Nf;
+            if (!t_smooth)
+            {
+                float3 V_local_t = world_to_local(V, T, B, Nf);
+                float3 H_local_t = ggx_vndf_sample(V_local_t, alpha_t, u1, u2);
+                H_t = local_to_world(H_local_t, T, B, Nf);
+                if (dot(V, H_t) <= 0.0f)
+                    return result;
+            }
+
+            const float3 wi_r = reflect_dir(-V, H_t);
+            result.wi = flip_through_surface(wi_r, Nf);
+
+            if (t_smooth)
+            {
+                result.bsdf_over_pdf = si.albedo * refractTint;
+                result.pdf           = p_trans_eff * (1.0f - F_val);
+                result.event_type    = BSDF_EVENT_SPECULAR_TRANSMISSION;
+            }
+            else
+            {
+                const float NdotH_t = dot(Nf, H_t);
+                const float NdotL_r = dot(Nf, wi_r);
+                if (NdotL_r <= 0.0f)
+                    return result;
+                const float VdotH_t = dot(V, H_t);
+                const float G2_t = ggx_smith_g2(alpha_t, NdotV_abs, NdotL_r);
+                const float G1_t = ggx_smith_g1(alpha_t, NdotV_abs);
+                result.bsdf_over_pdf = si.albedo * refractTint * (G2_t / (G1_t + 1e-10f));
+                result.pdf = p_trans_eff * (1.0f - F_val) *
+                             ggx_vndf_pdf(alpha_t, NdotH_t, NdotV_abs, VdotH_t);
+                result.event_type = BSDF_EVENT_GLOSSY_TRANSMISSION;
+            }
+            return result;
+        }
+
         float3 H;
         if (is_smooth)
         {
@@ -560,15 +672,10 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         }
         else
         {
-            // Refraction
+            // Solid refraction
             float3 wi_refracted;
             const bool valid = refract_dir(-V, H, eta, wi_refracted);
-            // A thin-walled surface cannot total-internally-reflect: there is no
-            // interior for the light to be trapped in. With eta taken from the
-            // entering side above this is unreachable for one -- refraction into
-            // a denser medium always succeeds -- and it stays because the guard
-            // is what states the invariant, not what enforces it.
-            if (!valid && !si.thin_walled)
+            if (!valid)
             {
                 // Total internal reflection
                 result.wi            = reflect_dir(-V, H);
@@ -578,25 +685,11 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
                 return result;
             }
 
-            result.wi = si.thin_walled ? safe_normalize(-V) : safe_normalize(wi_refracted);
+            result.wi = safe_normalize(wi_refracted);
 
-            // A thin wall passes light straight through at every roughness --
-            // `wi` is exactly `-V` above, and it was still being reported as a
-            // spread lobe with a finite microfacet density behind it. Measured:
-            // at roughness 0.1 every transmitted sample came back at exactly
-            // `-V` carrying a pdf of 48.9. MIS then weighed a delta against a
-            // density describing a surface that was never sampled.
-            //
-            // Reported as the delta it is, which costs nothing and is at least
-            // self-consistent. What it is *not* is the physics: a frosted sheet
-            // does blur what is behind it, and modelling that means refracting
-            // through the microfacet and back at the second interface. That
-            // needs a rung on the Cycles ladder to check against, and there is
-            // no rough thin-walled material in the tree to build one from -- so
-            // the approximation is stated rather than guessed at.
-            if (is_smooth || si.thin_walled)
+            if (is_smooth)
             {
-                float factor = si.thin_walled ? 1.0f : (eta * eta);
+                float factor = eta * eta;
                 result.bsdf_over_pdf = si.albedo * refractTint * factor;
                 result.pdf           = p_trans_eff * (1.0f - F_val);
                 result.event_type    = BSDF_EVENT_SPECULAR_TRANSMISSION;
@@ -608,7 +701,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
                 float LdotH   = fabsf(dot(result.wi, H));
                 float G2      = ggx_smith_g2(alpha, fabsf(NdotV), fmaxf(NdotL, 0.001f));
                 float G1      = ggx_smith_g1(alpha, fabsf(NdotV));
-                float factor  = si.thin_walled ? 1.0f : (eta * eta);
+                float factor  = eta * eta;
 
                 result.bsdf_over_pdf = si.albedo * factor * (G2 / (G1 + 1e-10f));
 
@@ -814,12 +907,13 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
             }
         }
 
-        // Delta transmission cannot be evaluated, and a thin wall is delta at
-        // every roughness -- sample() returns exactly -V there. Falling through
-        // built the half vector as normalize(V + eta * wi), a refraction that
-        // never happened, and returned a BTDF over directions the sampler
-        // cannot produce. NEE through a frosted sheet was weighed against it.
-        if (alpha < 0.001f || si.thin_walled)
+        // Delta transmission cannot be evaluated. A smooth thin wall is still a
+        // delta (exactly -V); a rough one is a GGX lobe about the mirrored view
+        // and is evaluated below the same way sample() produces it.
+        const float eta_rel_eval = fmaxf(si.ior / fmaxf(si.exterior_ior, 1e-4f), 1.0f);
+        const float alpha_t_eval = si.thin_walled ? thin_glass_transmission_alpha(alpha, eta_rel_eval)
+                                                  : alpha;
+        if (alpha < 0.001f || (si.thin_walled && alpha_t_eval < 0.001f))
             return result;
 
         if (si.transmission <= 0.0f)
@@ -834,6 +928,37 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
         // have to read the interface the same way or the weights do not sum.
         float eta       = (entering || si.thin_walled) ? (si.exterior_ior / si.ior)
                                                        : (si.ior / si.exterior_ior);
+
+        if (si.thin_walled)
+        {
+            // Map wi back to the reflection hemisphere and evaluate the GGX
+            // BRDF sample() used, with the transmission roughness. Fresnel is
+            // the same macro split sample() used, not a microfacet F.
+            const float3 wi_r = flip_through_surface(wi, Nf);
+            const float NdotL_r = dot(Nf, wi_r);
+            if (NdotL_r <= 0.0f)
+                return result;
+
+            const float3 H = safe_normalize(V + wi_r);
+            const float NdotH = dot(Nf, H);
+            const float VdotH = dot(V, H);
+            if (NdotH <= 0.0f || VdotH <= 0.0f)
+                return result;
+
+            const float F_val = fresnel_dielectric(NdotV_abs, eta);
+            const float3 F_film = transmission_fresnel(si, NdotV_abs, eta);
+            const float D = ggx_ndf(alpha_t_eval, NdotH);
+            const float G2 = ggx_smith_g2(alpha_t_eval, NdotV_abs, NdotL_r);
+            const float3 brdf = (make_float3(1.0f) - F_film) *
+                                (D * G2 / (4.0f * NdotV_abs * NdotL_r + 1e-10f));
+            result.bsdf = result.bsdf +
+                          si.albedo * make_float3(fmaxf(brdf.x, 0.0f), fmaxf(brdf.y, 0.0f),
+                                                  fmaxf(brdf.z, 0.0f)) *
+                              (1.0f - si.metallic) * si.transmission;
+            result.pdf = result.pdf + p_trans_eff * (1.0f - F_val) *
+                                          ggx_vndf_pdf(alpha_t_eval, NdotH, NdotV_abs, VdotH);
+            return result;
+        }
 
         float3 H = safe_normalize(V + eta * wi);
         if (dot(Nf, H) < 0.0f) H = -H;
