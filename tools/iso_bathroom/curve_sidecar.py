@@ -18,6 +18,73 @@ MAGIC = b"STRKCRV1"
 BASIS_LINEAR = 0
 BASIS_BSPLINE = 1
 
+# Blender's particle hair properties named ``root_radius`` and ``tip_radius`` are
+# *diameters*: the UI labels them "Diameter Root" / "Diameter Tip", and Cycles
+# halves them when it builds the curve (``blender_curves.cpp`` folds a 0.5 into
+# ``radius_scale``). Passing the raw property through as a radius therefore makes
+# every strand twice as thick as the Cycles render it gets compared against.
+#
+# That is not only a silhouette error. Doubling the radius doubles the chord a
+# ray crosses inside a strand, so the Chiang lobe absorbs over twice the path and
+# the groom shifts toward the pigment's dominant channel. On 28_hair it read as a
+# warm tilt worth 7% in blue, and reading it as a BSDF absorption bug is the trap
+# this constant exists to close.
+DIAMETER_TO_RADIUS = 0.5
+
+
+def hair_radii(settings, gain=1.0):
+    """``(root, tip)`` strand radii for a Blender HAIR particle system.
+
+    ``settings`` is a ``ParticleSettings`` (only three float attributes are
+    read, so any object carrying them works). ``gain`` is an author-facing
+    multiplier for converters that need to fatten a groom deliberately.
+    """
+    scale = settings.radius_scale * DIAMETER_TO_RADIUS * gain
+    return settings.root_radius * scale, settings.tip_radius * scale
+
+
+def hair_strand_radii(settings, count, gain=1.0):
+    """Per-control-point radii for one strand of ``count`` points.
+
+    Four properties shape a strand and all four have to be read together, or the
+    groom is the wrong thickness somewhere along its length. Every number below
+    was measured against Cycles rather than read out of its source: one strand of
+    a known property value, an orthographic camera, and the silhouette's width in
+    pixels off the alpha channel.
+
+    ``root_radius`` / ``tip_radius`` are diameters -- see ``hair_radii``.
+
+    ``shape`` bends the root-to-tip interpolation:
+    ``r(t) = (1 - t)**p * (root - tip) + tip``, with ``p = 1 + shape`` below zero
+    and ``p = 1 / (1 - shape)`` above it. Measured at shape -0.5, 0 and +0.5, the
+    formula holds to under a percent at every t.
+
+    ``use_close_tip`` is on by default and forces the *last* control point to
+    zero, so a strand ends in a point rather than a flat cap. It is the one that
+    is easy to miss and it is not small: the taper lands entirely in the last
+    segment, which for 28_hair is about 3% of the groom's projected area and all
+    of it in the outer ring -- exactly where a hair comparison is most sensitive,
+    and the ring that read 5% bright before this was applied.
+    """
+    root, tip = hair_radii(settings, gain)
+    shape = float(settings.shape)
+    if shape < 0.0:
+        power = 1.0 + shape
+    elif shape > 0.0:
+        power = 1.0 / (1.0 - shape)
+    else:
+        power = 1.0
+
+    radii = []
+    for i in range(count):
+        t = i / (count - 1) if count > 1 else 0.0
+        radii.append(((1.0 - t) ** power) * (root - tip) + tip)
+    # A one-point strand is not a curve, and zeroing its only radius would make
+    # it invisible rather than pointed.
+    if settings.use_close_tip and count > 1:
+        radii[-1] = 0.0
+    return radii
+
 
 class CurveSet:
     """One material's worth of strands.

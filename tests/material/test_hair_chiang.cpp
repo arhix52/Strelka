@@ -118,3 +118,59 @@ TEST_CASE("hair Chiang is brighter in transmission than a dielectric cylinder")
     // energy the cylinder was swallowing.
     CHECK(hair_fwd > cyl_fwd * 1.2f);
 }
+
+TEST_CASE("hair Chiang scatters over the whole sphere, not a hemisphere")
+{
+    // Why this is worth asserting: a renderer that treats hair as a surface BRDF
+    // will test the shading hemisphere before connecting to a light, and will
+    // offset a transmitted bounce into the strand's interior. Both are wrong here
+    // and neither is visible in an aggregate image metric -- they cancel, one
+    // darkening the groom and the other adding a second whole-fibre event on the
+    // far wall. What makes them wrong is the property below: most of this lobe's
+    // energy leaves on the far side of the shading normal, because TT is the
+    // dominant term of a bright fibre. See docs/open-defects.md entry 3.
+    SurfaceInteraction si = hair_si(20.0f, 0.35f);
+    si.albedo = make_float3(0.42f, 0.22f, 0.10f);
+
+    float below = 0.0f, above = 0.0f;
+    int below_n = 0;
+    const int kSamples = 4096;
+    for (int i = 0; i < kSamples; ++i)
+    {
+        const float u1 = ((i * 3) % kSamples + 0.5f) / kSamples;
+        const float u2 = ((i * 7) % kSamples + 0.5f) / kSamples;
+        const float u3 = ((i * 13) % kSamples + 0.5f) / kSamples;
+        BsdfSampleResult s = bsdf_sample(si, make_float4(u1, u2, u3, 0.0f));
+        if (s.event_type == BSDF_EVENT_ABSORB)
+            continue;
+        const float w = luminance(s.bsdf_over_pdf);
+        if (dot(si.shading_normal, s.wi) < 0.0f)
+        {
+            below += w;
+            ++below_n;
+        }
+        else
+        {
+            above += w;
+        }
+    }
+    REQUIRE(below_n > 100);
+    CHECK(below > above);
+
+    // And eval() has to agree with sample() there: a direction on the far side is
+    // a real one to ask about, not a zero. Its pdf being positive is what lets
+    // next-event estimation reach it and what makes the MIS weights add to one.
+    int nonzero = 0;
+    for (int i = 0; i < 64; ++i)
+    {
+        const float phi = (float)(2.0 * M_PI * (i + 0.5) / 64.0);
+        // Around the fibre, on the far side of the shading normal.
+        const float3 wi = safe_normalize(make_float3(0.35f * std::cos(phi),
+                                                     0.35f * std::sin(phi), -1.0f));
+        REQUIRE(dot(si.shading_normal, wi) < 0.0f);
+        BsdfEvalResult e = bsdf_eval(si, wi);
+        if (e.pdf > 0.0f && luminance(e.bsdf) > 0.0f)
+            ++nonzero;
+    }
+    CHECK(nonzero == 64);
+}

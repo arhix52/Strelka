@@ -570,6 +570,32 @@ static LightConnection makeEmptyConnection()
     return c;
 }
 
+// A strand is not a surface with a lit side and a dark side. The Chiang lobe's TT
+// and TRT terms describe light that entered one side of the fibre and left the
+// other, and on a bright groom TT alone holds about four fifths of the albedo.
+// Testing the shading hemisphere the way a surface does discards every one of
+// those connections, leaving the dominant lobe to be found only by chance through
+// multi-bounce paths: on an isolated strand that lost 46% of the light at two
+// bounces, and what came back at eight arrived as noise.
+static inline bool scattersThroughFibre(thread SurfaceInteraction& si)
+{
+    return si.material_type == MATERIAL_TYPE_HAIR;
+}
+
+static inline bool lightReachesShadingPoint(thread SurfaceInteraction& si, float3 L)
+{
+    return scattersThroughFibre(si) || dot(si.shading_normal, L) > 0.0f;
+}
+
+// The factor that cancels the one hair_chiang_eval() divides by. It has to be the
+// same |n.wi| and never a clamp to zero, or the two do not cancel and the fibre's
+// far side comes back either black or blown out.
+static inline float shadingCosine(thread SurfaceInteraction& si, float3 L)
+{
+    return scattersThroughFibre(si) ? abs(dot(si.shading_normal, L))
+                                    : saturate(dot(si.shading_normal, L));
+}
+
 LightConnection connectLight(constant Uniforms& uniforms,
                              thread SamplerState& samplerRnd,
                              device const UniformLight& light,
@@ -639,21 +665,21 @@ LightConnection connectLight(constant Uniforms& uniforms,
 
     // For area lights the facing test uses the light's surface normal; for a
     // sharp point the "normal" is -L, so -dot(L, normal) = 1 always.
+    const bool lit = lightReachesShadingPoint(si, lightSampleData.L);
     const bool facing =
         volumeEvent
             ? (emitsLight(Li) &&
                (light.type == 5 || light.type == 6 ||
                 -dot(lightSampleData.L, lightSampleData.normal) > 0.001f))
         : (light.type == 5 || light.type == 6)
-            ? (dot(si.shading_normal, lightSampleData.L) > 0.0f && emitsLight(Li))
-            : (dot(si.shading_normal, lightSampleData.L) > 0.0f &&
-               -dot(lightSampleData.L, lightSampleData.normal) > 0.001f && emitsLight(Li));
+            ? (lit && emitsLight(Li))
+            : (lit && -dot(lightSampleData.L, lightSampleData.normal) > 0.001f && emitsLight(Li));
     if (facing)
     {
         // The cosine belongs here because bsdf_eval() returns f alone, unlike
         // bsdf_sample()'s bsdf_over_pdf which already carries it. See the note on
         // both result structs in bsdf_types.h.
-        c.radiance = volumeEvent ? Li : Li * saturate(dot(si.shading_normal, lightSampleData.L));
+        c.radiance = volumeEvent ? Li : Li * shadingCosine(si, lightSampleData.L);
         c.origin = si.position;
         c.pdf = lightSampleData.pdf;
         c.tMin = 0.001f;
@@ -718,7 +744,7 @@ LightConnection connectEnvLight(
     if (envPdf <= 0.0f)
         return c;
 
-    if (!volumeEvent && dot(si.shading_normal, dir) <= 0.0f)
+    if (!volumeEvent && !lightReachesShadingPoint(si, dir))
         return c;
 
     constexpr sampler envSampler(mag_filter::linear, min_filter::linear, address::repeat, coord::normalized);
@@ -728,7 +754,7 @@ LightConnection connectEnvLight(
     Li *= uniforms.envMapIntensity * float3(uniforms.envMapColorTint);
 
     // Cosine folded in here for the same reason as in connectLight().
-    c.radiance = volumeEvent ? Li : Li * max(dot(si.shading_normal, dir), 0.0f);
+    c.radiance = volumeEvent ? Li : Li * shadingCosine(si, dir);
     // Offset along the face the shadow ray actually leaves from. The raw
     // geometry normal points to a fixed side of the triangle, so on a back-face
     // hit it pushes the origin *into* the surface and the ray immediately hits

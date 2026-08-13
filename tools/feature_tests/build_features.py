@@ -33,6 +33,20 @@ CYCLES_SAMPLES = 256
 MAX_DEPTH = 8
 STRELKA_SPP = 512
 
+# Per-scene reference sample overrides. A groom is by far the noisiest subject in
+# the ladder: at 256 samples the 28_hair reference carries rel 0.074 of its own
+# variance on the hair sphere, measured against the same scene at 2048 -- which
+# was most of what that row used to report as disagreement with Strelka. A row
+# cannot measure a lobe through a reference noisier than the effect. Converging
+# this one costs about a minute.
+SCENE_SAMPLES = {"28_hair": 2048}
+
+# The same argument applies to our side of the comparison, and it is cheap here:
+# Strelka renders this scene in seconds. At 512 spp its own variance is rel 0.019
+# on the hair half, which is half of what the row then reports as disagreement --
+# the mean ratio does not move between 512 and 2048, only the noise does.
+STRELKA_SCENE_SPP = {"28_hair": 2048}
+
 # Strelka exposure: exposureValue = cm2_factor * iso / (shutter * fstop^2) / 100
 # with cm2_factor pinned to 1.0 in headless mode (HeadlessApp.cpp).
 # iso=100, shutter=1, fstop=1 -> exactly 1.0, i.e. no exposure scaling at all.
@@ -45,6 +59,13 @@ EXPOSURE_SHUTTER = 1.0
 CAM_LOC = (0.0, -4.6, 1.15)
 CAM_TARGET = (0.0, 0.0, 0.75)
 CAM_FOV_DEG = 45.0
+# A feature scene may override framing when the default two-subject stage makes
+# the feature too small to inspect. 28_hair is deliberately a close-up: the old
+# bald control duplicated 00_calibration, occupied half the frame, and diluted
+# the groom's error below the row's threshold.
+SCENE_CAMERAS = {
+    "28_hair": ((0.0, -3.0, 1.05), (0.0, 0.0, 0.70), 45.0),
+}
 # Vertical ortho extent that matches the perspective framing at CAM_LOC:
 # distance * 2 * tan(FOV/2) ≈ 4.617 * 2 * tan(22.5°) ≈ 3.82.
 CAM_ORTHO_SCALE = 3.82
@@ -394,19 +415,24 @@ def reset_scene():
     return scene
 
 
-def add_camera():
+def camera_for_scene(name):
+    return SCENE_CAMERAS.get(name, (CAM_LOC, CAM_TARGET, CAM_FOV_DEG))
+
+
+def add_camera(name=None):
+    location, target, fov = camera_for_scene(name)
     cam_data = bpy.data.cameras.new("Camera")
     cam_data.sensor_fit = "VERTICAL"
     cam_data.lens_unit = "FOV"
-    cam_data.angle = math.radians(CAM_FOV_DEG)
+    cam_data.angle = math.radians(fov)
     cam = bpy.data.objects.new("Camera", cam_data)
     bpy.context.collection.objects.link(cam)
-    cam.location = CAM_LOC
+    cam.location = location
 
     direction = (
-        CAM_TARGET[0] - CAM_LOC[0],
-        CAM_TARGET[1] - CAM_LOC[1],
-        CAM_TARGET[2] - CAM_LOC[2],
+        target[0] - location[0],
+        target[1] - location[1],
+        target[2] - location[2],
     )
     from mathutils import Vector
     cam.rotation_euler = Vector(direction).to_track_quat("-Z", "Y").to_euler()
@@ -1246,24 +1272,30 @@ def new_hair_material(name, color=HAIR_COLOR, roughness=HAIR_ROUGHNESS, radial=H
 
 
 def s28_hair(tex):
-    """A short Chiang groom on a grey scalp, vs one bald control.
+    """A close-up Chiang groom on a grey scalp.
 
     Geometry is a particle system exported to the curve sidecar; shading on our
-    side is STRELKA_materials_hair. The bald sphere is the same pigment as a
-    standard dielectric so a framing shift cannot hide a missing lobe. Strand
-    count is kept modest so the row measures the BSDF, not variance.
+    side is STRELKA_materials_hair. This row used to spend half its pixels on a
+    bald control, but 00_calibration already owns exposure and framing; here that
+    control only diluted a strand error and made individual curves hard to see.
+    Strand count is kept modest so the row measures the BSDF, not variance.
     """
     add_stage()
     scalp = new_material("scalp", base_color=(0.35, 0.32, 0.30, 1.0),
                          roughness=0.85, metallic=0.0, specular=0.0)
     hair_mat = new_hair_material("hair0")
 
-    bald = sphere("Bald", (-0.85, 0.0, 0.7), radius=0.48)
-    bald.data.materials.append(scalp)
-    bald.data.materials.append(hair_mat)  # unused; keeps the material in the file
-
-    fur = sphere("Fur", (0.85, 0.0, 0.7), radius=0.48)
+    fur = sphere("Fur", (0.0, 0.0, 0.7), radius=0.48)
     fur.data.materials.clear()
+    # The scalp is a grey dielectric, the same one the bald control wears. It used
+    # to carry hair_mat, which put a Chiang lobe on a triangle sphere -- a lobe
+    # parameterised on a cylinder's tangent frame and azimuth, evaluated on
+    # geometry that has neither, so each renderer invented a tangent and the row
+    # measured that invention rather than the strands. It was worth more than half
+    # the scene's disagreement: the scalp disc alone read 0.809 of the reference,
+    # and dropping it took the hair half from rel 0.098 to 0.046 with the mean
+    # ratio landing on 1.006.
+    fur.data.materials.append(scalp)
     fur.data.materials.append(hair_mat)
 
     mod = fur.modifiers.new("Hair", type="PARTICLE_SYSTEM")
@@ -1279,10 +1311,19 @@ def s28_hair(tex):
     s.root_radius = 0.004
     s.tip_radius = 0.0015
     s.radius_scale = 1.0
+    s.shape = 0.0
+    s.use_close_tip = True
     s.child_type = "NONE"
-    s.material = 1  # 1-based slot -> hair0
+    s.material = 2  # 1-based slot -> hair0, which is slot 2 now that scalp is 1
     # Cycles needs the particle system rendered as path.
     s.use_rotations = False
+
+    # Compare the same primitive on both sides. Cycles defaults to camera-facing
+    # ribbons subdivided twice; Strelka receives linear round curves from the
+    # sidecar, so leaving either default made the row a comparison of different
+    # geometry even when the aggregate means happened to be close.
+    bpy.context.scene.cycles_curves.shape = "THICK"
+    bpy.context.scene.cycles_curves.subdivisions = 0
     return fur
 
 
@@ -1291,7 +1332,8 @@ def export_feature_hair(scene_dir, name):
     # Import beside the iso_bathroom writer so the format stays one module.
     repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     sys.path.insert(0, os.path.join(repo, "tools", "iso_bathroom"))
-    from curve_sidecar import CurveSet, write_curve_sidecar, BASIS_LINEAR  # noqa: E402
+    from curve_sidecar import (  # noqa: E402
+        CurveSet, write_curve_sidecar, BASIS_LINEAR, hair_strand_radii)
     from mathutils import Matrix
 
     axis_conv = Matrix.Rotation(-math.pi / 2, 4, "X")
@@ -1326,16 +1368,14 @@ def export_feature_hair(scene_dir, name):
             if n_strands == 0:
                 continue
             n_points = (1 << st.display_step) + 1
-            root = st.root_radius * st.radius_scale
-            tip = st.tip_radius * st.radius_scale
+            radii = hair_strand_radii(st, n_points)
             co = psys.co_hair
             strands = []
             for i in range(n_strands):
                 pts = []
                 for k in range(n_points):
                     c = axis_conv @ co(ev, particle_no=i, step=k)
-                    t = k / (n_points - 1)
-                    pts.append((c.x, c.y, c.z, root + (tip - root) * t))
+                    pts.append((c.x, c.y, c.z, radii[k]))
                 if pts[0][:3] == pts[-1][:3]:
                     continue
                 strands.append(pts)
@@ -1531,6 +1571,15 @@ def patch_subsurface(doc):
 
 
 def patch_hair(doc):
+    # The strands' material has to exist in the glTF even though no triangle wears
+    # it. The exporter drops materials nothing references, and the curve sidecar
+    # binds by name against what it finds, so with the scalp shaded grey the
+    # strands fell through to material 0 -- they rendered as stage grey behind one
+    # warning in the log, and the row still produced a plausible-looking number.
+    mats = doc.setdefault("materials", [])
+    if not any(m.get("name", "").startswith("hair") for m in mats):
+        mats.append({"name": "hair0", "doubleSided": True})
+
     # Principled Hair does not survive the glTF exporter as anything useful.
     # Rewrite hair* materials to the pigment + roughness the Chiang lobe reads,
     # and mark them with STRELKA_materials_hair so the loader picks MATERIAL_TYPE_HAIR.
@@ -1735,8 +1784,9 @@ def bake_world_env(scene_dir, name):
 
 
 def write_toml(path, name, gltf_rel, out_rel, orthographic=False):
-    cam = blender_to_gltf(CAM_LOC)
-    tgt = blender_to_gltf(CAM_TARGET)
+    location, target, fov = camera_for_scene(name)
+    cam = blender_to_gltf(location)
+    tgt = blender_to_gltf(target)
     camera_block = (
         "[camera]\n"
         "index = 0\n"
@@ -1748,7 +1798,7 @@ def write_toml(path, name, gltf_rel, out_rel, orthographic=False):
     # here would only set an unused field, and omitting it keeps the config
     # honest about what frames the image.
     if not orthographic:
-        camera_block += "fov = %.4f\n" % CAM_FOV_DEG
+        camera_block += "fov = %.4f\n" % fov
     camera_block += "\n"
     with open(path, "w") as f:
         f.write(
@@ -1779,7 +1829,8 @@ def write_toml(path, name, gltf_rel, out_rel, orthographic=False):
             "exposure_iso = %.4f\n"
             "exposure_fstop = %.4f\n"
             "exposure_shutter = %.4f\n"
-            % (gltf_rel, out_rel, RES, RES, STRELKA_SPP, MAX_DEPTH, camera_block,
+            % (gltf_rel, out_rel, RES, RES, STRELKA_SCENE_SPP.get(name, STRELKA_SPP),
+               MAX_DEPTH, camera_block,
                EXPOSURE_ISO, EXPOSURE_FSTOP, EXPOSURE_SHUTTER)
         )
 
@@ -1794,7 +1845,29 @@ def verify_export(gltf_path):
     with open(gltf_path) as f:
         doc = json.load(f)
 
-    exts = sorted(doc.get("extensionsUsed", []))
+    # Report what some material or mesh actually carries, not what extensionsUsed
+    # claims. The patchers append to that list unconditionally, so a scene whose
+    # material vanished from the export -- the glTF exporter drops materials no
+    # triangle references -- still declared its extension and read as a pass while
+    # the geometry silently fell back to material 0.
+    declared = set(doc.get("extensionsUsed", []))
+
+    def carried_by(node):
+        found = set()
+        if isinstance(node, dict):
+            found |= set(node.get("extensions", {}) or {})
+            for key, value in node.items():
+                if key not in ("extensionsUsed", "extensionsRequired"):
+                    found |= carried_by(value)
+        elif isinstance(node, list):
+            for item in node:
+                found |= carried_by(item)
+        return found
+
+    carried = carried_by(doc)
+    exts = sorted(carried)
+    orphaned = sorted(declared - carried)
+
     attrs = set()
     for mesh in doc.get("meshes", []):
         for prim in mesh["primitives"]:
@@ -1802,6 +1875,8 @@ def verify_export(gltf_path):
     modes = sorted({m.get("alphaMode", "OPAQUE") for m in doc.get("materials", [])})
 
     print("  exts   : %s" % (", ".join(exts) if exts else "(none)"))
+    if orphaned:
+        print("  WARNING: declared but on no material: %s" % ", ".join(orphaned))
     print("  attrs  : %s" % ", ".join(sorted(attrs)))
     print("  alpha  : %s" % ", ".join(modes))
     return {"extensions": exts, "attributes": sorted(attrs), "alphaModes": modes}
@@ -1849,7 +1924,8 @@ def main():
         os.makedirs(scene_dir, exist_ok=True)
 
         reset_scene()
-        add_camera()
+        bpy.context.scene.cycles.samples = SCENE_SAMPLES.get(name, CYCLES_SAMPLES)
+        add_camera(name)
         # IES owns its light; the default rect key would drown the photometric
         # hotspot and turn the row into a second copy of 00_calibration.
         if use_sidecar is True:

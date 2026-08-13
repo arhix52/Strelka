@@ -43,6 +43,15 @@ tools/feature_tests/run_strelka.sh
 Useful flags on step 1: `--only 07` to rebuild one scene, `--no-render` to skip
 Cycles entirely (fast, when you only want to inspect the exported glTF).
 
+Hair has a second, narrower instrument beside the ladder, because a groom hides its
+own errors -- see `28_hair` below for why:
+
+```bash
+/Applications/Blender.app/Contents/MacOS/Blender -b -P tools/feature_tests/strand_probe.py
+cd build/Release && for d in 1 2 3 4 8; do ./StrelkaCLI -c /tmp/strand_probe/strand_d$d.toml; done
+cd ../.. && /Applications/Blender.app/Contents/MacOS/Blender -b -P tools/feature_tests/strand_measure.py
+```
+
 Step 2 needs `StrelkaCLI` in `build/Release`, which a default build produces.
 (This used to say the binary lived on another branch; it does not any more.)
 
@@ -93,7 +102,7 @@ fixing, but it is not a shading bug.
 | `25_subsurface` | `STRELKA_materials_subsurface` (Van de Hulst recipe) | 0.056 / 1.009 |
 | `26_dof` | thin-lens depth of field (`_camera.json`) | 0.024 / 1.015 |
 | `27_ies` | IES point light via light sidecar | 0.028 / 1.021 |
-| `28_hair` | Chiang hair groom (`STRELKA_materials_hair`) | 0.084 / 0.977 |
+| `28_hair` | close-up round linear Chiang groom (`STRELKA_materials_hair`) | 0.033 / 1.012 |
 
 `19_env_and_light` is the only row with two kinds of light in it, and it is
 there for one question: whether resampled importance sampling and plain
@@ -331,11 +340,65 @@ every IES scene outside the suite ten times too bright. The honest constant
 lands the row at 1.021 instead of 1.008; the remaining 2% is Cycles' own
 normalisation and interpolation of the table, and is worth more than a match.
 
-`28_hair` is a short particle groom on one sphere against a bald control of the
-same pigment. Cycles shades with Principled Hair (Chiang, Direct Coloring);
-Strelka gets the strands from `28_hair_curves.bin` and
-`STRELKA_materials_hair`. The bald sphere is what keeps a framing or exposure
-shift from looking like a lobe win.
+`28_hair` is one close-up particle groom on a grey scalp. There is deliberately
+no bald control anymore: `00_calibration` already checks exposure and framing,
+while a second sphere took half this row's pixels, made individual strands hard
+to inspect, and once diluted a hair-only `rel 0.138` into a whole-frame `0.084`
+that passed. The scene-specific camera puts the hair tips at roughly 155 px from
+the image centre, so the groom occupies about 60% of the frame width.
+
+The two renderers now receive the same geometry features explicitly. Cycles is
+set to `cycles_curves.shape = "THICK"` and `subdivisions = 0`, matching the round
+linear curves in the sidecar; its defaults are camera-facing `RIBBONS` subdivided
+twice. `shape = 0` and `use_close_tip = true` are explicit too. Ribbons versus
+thick happened to move this groom's mean by only 0.1%, and subdivisions 0 versus
+2 by under 1% in every ring, but close aggregate numbers are not permission to
+compare different primitives.
+
+The radius convention is measured, not inferred. An isolated strand authored
+with Blender diameter 0.04, viewed with a 1.5-unit orthographic frame at 512 px,
+has a predicted diameter of 13.65 px; both Cycles and Strelka cover 14 px. That
+rules out the visual impression that Strelka's curves are twice as thick.
+
+**Do not debug hair on this scene.** A groom is optically dense, so most of what
+leaves it has scattered off several strands, and two opposite errors in there cancel
+in every number this harness prints -- for several passes the row read `0.042 / 1.001`
+while its shell was 4.5% bright against a scalp 2.6% dark, and the mean said nothing.
+Use `strand_probe.py` / `strand_measure.py` instead: one strand, no floor, same key
+light and same sidecar path, so the lobe is measured with the transport removed. Read
+two things off it -- the integrated cross-section against Cycles, which should agree
+to about a percent, and that same number against `max_depth`, which *must* go flat
+after the second bounce because a single convex fibre in an empty room has nothing to
+scatter off twice. A row that keeps climbing means transmitted rays are re-entering
+the strand they just left. That is exactly how the defect in entry 3 of
+`docs/open-defects.md` was cornered, after the groom's aggregates had hidden it
+through half a dozen hypotheses.
+
+`curve_sidecar.hair_strand_radii` carries Blender's whole profile: its
+`root_radius` / `tip_radius` properties are diameters, `shape` bends the
+interpolation, and `use_close_tip` zeroes the last control point. The latter took
+the outer ring from 1.049 to 1.041; it was real but not the remaining cause.
+Those behaviours are pinned by the stdlib Python tests using values measured from
+single-strand Cycles renders.
+
+The scalp must stay on `scalp`, not `hair0`. Chiang's lobe is parameterised on a
+cylinder's tangent and azimuth; putting it on the triangle emitter sphere made
+each renderer invent a frame and was worth more than half the old disagreement.
+The strands take `s.material` as a 1-based slot index, and `patch_hair` must
+create `hair0` in the glTF because Blender drops materials no triangle
+references. Without that, curves fall back to material 0 behind one warning.
+
+Both sides use 2048 spp for this row. It reads `0.033 / 1.012`; in geometric rings
+Strelka/reference is 0.989 on the scalp, 1.010 on the inner hair shell, 1.013 on the
+outer shell, and 1.017 beyond the tips. Read those rings and not the whole-frame
+mean: the mean is what hid a shell/scalp error of opposite signs for so long.
+
+`rel` is spent on this row, in both directions. Cycles against itself at a second
+seed scores **0.0506**, worse than Strelka's 0.0332 -- thousands of sub-pixel strands
+at 2048 samples, where half a pixel of disagreement per strand costs more than any
+shading term. The residual `1.012` mean is the ladder's own baseline, since
+`00_calibration` reads `1.010`. Going further needs a converged reference and a metric
+that tolerates sub-pixel placement, not another shading change.
 
 Volume *emission* is not compared in `18_bounded_volume`. Cycles adds it with
 its own coefficient and Strelka adds it per free-flight event; the two

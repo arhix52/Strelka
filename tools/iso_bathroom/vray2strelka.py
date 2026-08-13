@@ -34,7 +34,8 @@ from mathutils import Matrix, Vector  # type: ignore
 # Blender runs `-P script.py` without putting the script's directory on the
 # path, so a sibling module is not importable unless it is added here.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from curve_sidecar import CurveSet, BASIS_LINEAR, write_curve_sidecar  # noqa: E402
+from curve_sidecar import (  # noqa: E402
+    CurveSet, BASIS_LINEAR, write_curve_sidecar, hair_strand_radii)
 
 
 # ---------------------------------------------------------------------------
@@ -1334,9 +1335,13 @@ def collect_hair(opts):
     * **The axis convention.** The glTF export writes Y-up; `co_hair` returns
       Blender's Z-up world space. Same -90 degree X rotation the lights take.
 
-    * **The radius.** Blender authors a root and a tip radius and a separate
-      scale that multiplies both; Cycles renders `radius_scale * radius`, and
-      that product is what Metal and OptiX both want.
+    * **The radius, and the whole profile along the strand.** Blender's
+      `root_radius` / `tip_radius` are diameters, `shape` bends the interpolation
+      between them, and `use_close_tip` -- on by default -- ends the strand in a
+      point by zeroing its last control point. `hair_strand_radii` is all four
+      together; taking the two radii alone exported every groom twice as thick
+      with blunt tips, which reads as a warm shading error rather than as the
+      geometry error it is.
 
     What it cannot do is carry the strand's own shading: the material comes out
     of the particle system's material slot and is whatever `convert_hair` made
@@ -1389,8 +1394,7 @@ def collect_hair(opts):
                 continue
             # The cached path has 2**display_step segments, so one more point.
             n_points = (1 << s.display_step) + 1
-            root = s.root_radius * s.radius_scale * opts.hair_radius_gain
-            tip = s.tip_radius * s.radius_scale * opts.hair_radius_gain
+            radii = hair_strand_radii(s, n_points, opts.hair_radius_gain)
 
             strands = []
             co = psys.co_hair
@@ -1398,8 +1402,7 @@ def collect_hair(opts):
                 pts = []
                 for k in range(n_points):
                     c = axis_conv @ co(ev, particle_no=i, step=k)
-                    t = k / (n_points - 1)
-                    pts.append((c.x, c.y, c.z, root + (tip - root) * t))
+                    pts.append((c.x, c.y, c.z, radii[k]))
                 # A strand whose cache never filled comes back as the origin
                 # repeated; exporting it puts a spike through the scene.
                 if pts[0][:3] == pts[-1][:3]:
@@ -1411,7 +1414,7 @@ def collect_hair(opts):
                 continue
             sets.append(CurveSet(material, strands, BASIS_LINEAR))
             notes.append(f"{obj.name}::{psys.name} -> {material}: {len(strands)} strands "
-                         f"x {n_points} points, radius {root:.6f}..{tip:.6f}")
+                         f"x {n_points} points, radius {radii[0]:.6f}..{radii[-1]:.6f}")
 
     for s, child_percent, display_step in touched:
         s.child_percent = child_percent

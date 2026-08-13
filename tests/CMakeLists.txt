@@ -23,6 +23,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_light_units.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_scene.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_light_json.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_curve_sidecar.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_pick_ray.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_skinned_bounds.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_camera_animation.cpp
@@ -73,3 +74,17 @@ target_compile_definitions(unit_tests
 )
 
 add_test(NAME unit_tests COMMAND unit_tests)
+
+# The curve sidecar has a writer as well as a reader, and the writer is Python
+# that Blender runs -- which is where the diameter/radius convention actually
+# went wrong. The C++ suite cannot reach it, so the other end of that contract is
+# a stdlib unittest module with no Blender and no pytest dependency. Optional
+# only because a build host without a Python interpreter should still build.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME curve_sidecar_writer
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_SOURCE_DIR}/tools/iso_bathroom/test_curve_sidecar.py)
+else()
+    message(STATUS "No Python3 interpreter: skipping the curve sidecar writer test")
+endif()

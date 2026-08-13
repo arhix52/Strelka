@@ -846,9 +846,10 @@ static void fetchTriangle(device const char* vertexBuffer,
 //            round curve shade as a cylinder rather than as a ribbon;
 //   uv.x     where along the strand this is, root at 0 and tip at 1.
 //
-// The radius buffer is not read here at all -- it is what the intersector
-// already used to find the hit, and nothing downstream asks how thick the
-// strand was.
+// The radius buffer is not read here at all: the distance from the hit to the
+// axis is the radius the intersector used, so the one thing downstream does ask
+// about thickness -- where a ray that scatters through the strand comes out --
+// costs a square root of a quantity already in hand.
 //
 // uv.x is recovered from the segment index alone: strands from a particle system
 // all have the same number of segments, so `segment % segmentsPerStrand` is the
@@ -868,7 +869,8 @@ static void fetchCurve(device const packed_float3* curvePoints,
                        float4x4 objectToWorld,
                        thread float3& outNormal,
                        thread float3& outTangent,
-                       thread float2& outUv)
+                       thread float2& outUv,
+                       thread float& outRadius)
 {
     const bool cubic = (entry.flags & GEOM_CURVE_CUBIC) != 0u;
     const uint32_t base = curveSegments[entry.indexOffset + primitiveId];
@@ -914,11 +916,51 @@ static void fetchCurve(device const packed_float3* curvePoints,
     // to the strand will do, and this is far rarer than a denormal guard.
     outNormal = lenSq > 1e-16f ? perp * rsqrt(lenSq)
                                : normalize(cross(outTangent, float3(0.0f, 0.0f, 1.0f)));
+    outRadius = sqrt(lenSq);
 
     const uint32_t perStrand = entry.flags & GEOM_CURVE_STRAND_MASK;
     const float alongStrand =
         perStrand != 0u ? ((float)(primitiveId % perStrand) + u) / (float)perStrand : 0.0f;
     outUv = float2(alongStrand, 0.0f);
+}
+
+// Where a ray that scattered through a strand has to start.
+//
+// The Chiang lobe is a whole-fibre model: its T factor is the absorption over the
+// chord *inside* the strand, so a direction leaving on the far side has already
+// paid for the crossing. Start such a ray on the surface it came from and the
+// strand is in its way -- a shadow ray dies on its own fibre, and a bounce ray
+// hits the far wall and buys a second whole-fibre event that the first one already
+// contains. On one isolated strand that second event is what put the rendered
+// cross-section 29% over Cycles and kept it climbing with every extra bounce
+// instead of converging.
+//
+// The strand is a cylinder of radius r about `tangent` and the hit sits on its
+// surface along `normal`. In the plane across the axis the chord from that point
+// along the ray is -2r(n.u); the distance travelled to cover it is that over the
+// length the direction itself has in the plane.
+static inline float3 fibreExitOrigin(float3 position, float3 tangent, float3 normal,
+                                     float radius, float3 dir)
+{
+    const float3 dPerp = dir - tangent * dot(dir, tangent);
+    const float m2 = dot(dPerp, dPerp);
+    // Straight along the strand there is no far wall, and the chord below would
+    // divide by zero on the way to saying so.
+    if (m2 < 1e-8f || radius <= 0.0f)
+    {
+        return offset_ray(position, normal);
+    }
+    const float m = sqrt(m2);
+    const float3 u = dPerp / m;
+    const float chord = -2.0f * radius * dot(normal, u);
+    // Leaving on the side it arrived from: an ordinary surface offset is enough.
+    if (chord <= 0.0f)
+    {
+        return offset_ray(position, normal);
+    }
+    // Offset along the outward normal at the exit, not at the entry: they point
+    // to opposite sides of the strand.
+    return offset_ray(position + dir * (chord / m), normalize(normal * radius + u * chord));
 }
 
 // The same fetch, interpolated on the way out.
@@ -1694,6 +1736,8 @@ kernel void wavefrontShade(
     float tangentSign = 1.0f;
     float3 objEdge1, objEdge2;
     float uvArea2 = 0.0f;
+    // Only a curve hit has one, and only the fibre paths below read it.
+    float curveRadius = 0.0f;
 
     const auto inst = instances[rec.instanceIndex];
     const float4x4 objectToWorld = float4x4(
@@ -1713,7 +1757,7 @@ kernel void wavefrontShade(
         // other way would need the transform's inverse, which MSL does not
         // provide and which nothing else in this kernel wants.
         fetchCurve(curvePoints, curveSegments, entry, rec.primitiveId, bary.x, worldPosition,
-                   objectToWorld, shadingNormal, shadingTangent, uv);
+                   objectToWorld, shadingNormal, shadingTangent, uv, curveRadius);
         // A strand has no separate geometric normal: the surface *is* the
         // cylinder, so the shading normal is the geometric one.
         shadingGeomNormal = shadingNormal;
@@ -1981,6 +2025,12 @@ kernel void wavefrontShade(
     initSurfaceInteraction(si, materials[entry.materialId],
                            worldPosition, worldNormal, geomNormal,
                            worldTangent, worldBinormal, uv, rayDir, vertexColor, lodBase);
+
+    // A strand shaded by the whole-fibre lobe: light crosses it in one event, so
+    // neither the hemisphere tests nor the ray offsets below apply. Gated on the
+    // geometry as well as the material because the chord needs a radius, and only
+    // a curve hit has one.
+    const bool isFibre = isCurve && scattersThroughFibre(si);
 
     // 0xFFFFFF words is 64 MB of chase, past any cache on this part; the earlier
     // version walked a 3.7 MB queue and was measuring cache hits, not memory.
@@ -2309,8 +2359,10 @@ kernel void wavefrontShade(
 
             const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, crng,
                                                         si, envAliasTable, envMapTexture, iesProfiles);
+            // A fibre has no back side to reject: see scattersThroughFibre().
             const bool isNextEventValid =
-                ((dot(conn.toLight, si.shading_normal) > 0.0f) == si.front_face) && conn.pdf > 0.0f;
+                (isFibre || (dot(conn.toLight, si.shading_normal) > 0.0f) == si.front_face) &&
+                conn.pdf > 0.0f;
             if (!isNextEventValid || !conn.needsRay)
             {
                 continue;
@@ -2361,7 +2413,13 @@ kernel void wavefrontShade(
             if (any(weight != 0.0f))
             {
                 ShadowRay sr;
-                sr.origin = packed_float3(bestConn.origin);
+                // Past the strand when the connection leaves through it: the lobe
+                // has already charged for the crossing, so the fibre must not
+                // shadow itself.
+                sr.origin = packed_float3(
+                    isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal,
+                                              curveRadius, bestConn.toLight)
+                            : bestConn.origin);
                 sr.direction = packed_float3(bestConn.toLight);
                 sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
                 sr.maxDistance = bestConn.tMax;
@@ -2387,7 +2445,11 @@ kernel void wavefrontShade(
     // deep-red medium is a third of the light it should return. Cycles divides
     // the same factor out for the same reason.
     float3 sssEntryTint = float3(1.0f);
-    if ((sampleResult.event_type & BSDF_EVENT_TRANSMISSION) != 0)
+    // A fibre's transmission lobes do not put the path inside anything: the strand
+    // is crossed within the one event, so there is no medium to enter and no entry
+    // to match with an exit. Pushing the IOR stack here left every transmitted hair
+    // path one level deeper than it came in, and a groom is thousands of hairs deep.
+    if ((sampleResult.event_type & BSDF_EVENT_TRANSMISSION) != 0 && !isFibre)
     {
         // A thin-walled surface has no interior, so crossing it does not put the
         // path inside anything. Pushing the stack anyway left a ray that had gone
@@ -2456,11 +2518,20 @@ kernel void wavefrontShade(
     iorStacks[tid] = iorStack;
 
     const float3 nextDir = normalize(sampleResult.wi);
+    if (isFibre)
+    {
+        // Both branches above assume a surface with an inside and an outside. A
+        // strand has neither: the bounce leaves from wherever the crossing the lobe
+        // already accounted for comes out.
+        nextOrigin = fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius,
+                                     nextDir);
+    }
     float3 nextThroughput = throughput * (float3(sampleResult.bsdf_over_pdf) / sssEntryTint);
 
     // NEE only reaches directions above the shading normal of a front face, so a
-    // hit anywhere else must not be weighted against it.
-    didNee = didNee && si.front_face && dot(si.shading_normal, nextDir) > 0.0f;
+    // hit anywhere else must not be weighted against it. On a fibre it reaches all
+    // of them, and withholding the weight there would count the light twice.
+    didNee = didNee && (isFibre || (si.front_face && dot(si.shading_normal, nextDir) > 0.0f));
 
     radianceOut[tid] += float4(radiance, 0.0f);
 
