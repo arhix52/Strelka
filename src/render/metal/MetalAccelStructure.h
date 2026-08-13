@@ -263,11 +263,26 @@ private:
     bool mBuildMotionBlas = false;
     uint32_t mOpaqueGeometryCount = 0;
     uint32_t mCutoutGeometryCount = 0;
+    // What the bottom-level builds cost this scene. Reset when a build starts.
+    double mBlasEncodeMs = 0.0;
+    uint32_t mBlasCount = 0;
 
     // Matches the renderer's frames in flight. Kept here rather than shared,
     // because being wrong on the high side only delays a free.
     static constexpr uint64_t kMaxFramesInFlight = 3;
     static constexpr size_t kMaxBlasRebuildsPerFrame = 8;
+    /// How many geometries one bottom level may hold.
+    ///
+    /// Past a certain width, a structure built with AccelerationStructureUsageRefit
+    /// returns no intersections at all on this driver -- it builds without error,
+    /// reports a sane size, and every ray misses it. Measured on BrainStem in a
+    /// studio set: the character's 59 primitives merge into one bottom level and it
+    /// is invisible; split at 58 and it renders, and it renders at 59 with the refit
+    /// flag dropped. The flag cannot be dropped -- it is what halves what the builder
+    /// allocates, which is the difference between the pine forest fitting in memory
+    /// and not -- so the width is capped instead, well short of where it was seen to
+    /// fail. Splitting costs one more instance in the top level per 32 primitives.
+    static constexpr size_t kMaxGeometriesPerBlas = 32;
     size_t mNextBlasRebuildIndex = 0;
 };
 

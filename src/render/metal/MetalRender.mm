@@ -64,7 +64,9 @@ namespace fs = std::filesystem;
 // What the OS charges this process, which on unified memory includes everything
 // the device allocated. `phys_footprint` is the number Activity Monitor shows;
 // resident size is not, and undercounts GPU allocations badly.
-static size_t processFootprintBytes()
+namespace
+{
+size_t processFootprintBytes()
 {
     task_vm_info_data_t info{};
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
@@ -74,9 +76,7 @@ static size_t processFootprintBytes()
     }
     return (size_t)info.phys_footprint;
 }
-
-
-
+} // namespace
 
 MetalRender::MetalRender(/* args */) = default;
 
@@ -150,7 +150,7 @@ void MetalRender::triggerRenderIfIdle()
     const uint32_t h = getSettings()->getAs<uint32_t>("render/height");
 
     // Pick the buffer that is NOT currently being displayed
-    int ri = mReadyIndex.load();
+    const int ri = mReadyIndex.load();
     mWriteIndex = (ri >= 0) ? (1 - ri) : 0;
 
     // Create or resize the write buffer
@@ -169,7 +169,7 @@ void MetalRender::triggerRenderIfIdle()
     }
 
     // Also ensure the other buffer exists (display may need it)
-    int otherIdx = 1 - mWriteIndex;
+    const int otherIdx = 1 - mWriteIndex;
     if (!mAsyncOutputBuffers[otherIdx])
     {
         BufferDesc desc{};
@@ -238,12 +238,14 @@ bool MetalRender::capturePrevFramePose()
 
 // Half to float by hand: the alternative is pulling in a conversion library for
 // a readback path that only debug and validation code takes.
-static float halfToFloat(uint16_t h)
+namespace
+{
+float halfToFloat(uint16_t h)
 {
     const uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
     const int32_t exponent = (h >> 10) & 0x1F;
     const uint32_t mantissa = h & 0x3FF;
-    uint32_t bits;
+    uint32_t bits = 0;
     if (exponent == 0)
     {
         bits = sign; // zero or subnormal, close enough for a preview
@@ -256,10 +258,11 @@ static float halfToFloat(uint16_t h)
     {
         bits = sign | ((uint32_t)(exponent - 15 + 127) << 23) | (mantissa << 13);
     }
-    float f;
+    float f = 0.0f;
     std::memcpy(&f, &bits, sizeof(f));
     return f;
 }
+} // namespace
 
 // Read the display texture back to the CPU.
 //
@@ -274,7 +277,7 @@ bool MetalRender::readDisplayTexture(std::vector<float>& rgba, uint32_t& width, 
     {
         return false;
     }
-    MTL::Texture* tex = mPost.displayTexture(ri);
+    const MTL::Texture* tex = mPost.displayTexture(ri);
     width = (uint32_t)tex->width();
     height = (uint32_t)tex->height();
 
@@ -364,7 +367,7 @@ float MetalRender::skinnedGeometryExtent()
 
 bool MetalRender::readGuideTexture(Guide guide, std::vector<float>& rgba, uint32_t& width, uint32_t& height)
 {
-    MTL::Texture* tex = nullptr;
+    const MTL::Texture* tex = nullptr;
     switch (guide)
     {
     case Guide::Color:          tex = mPost.guides().color; break;
@@ -463,7 +466,7 @@ void* MetalRender::getReadyTexture()
 
 Buffer* MetalRender::getReadyBuffer()
 {
-    int ri = mReadyIndex.load();
+    const int ri = mReadyIndex.load();
     if (ri < 0)
         return nullptr;
     return mAsyncOutputBuffers[ri];
@@ -742,7 +745,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     for (MTL::AccelerationStructure* as : mAccel.primitiveAccelerationStructures()) add(as);
     add(mAccel.instanceAccelerationStructure());
     for (MTL::Buffer* buffer : mAccel.accelerationStructureAuxiliaryBuffers()) add(buffer);
-    for (Mesh* mesh : mGeometry.meshes())
+    for (const Mesh* mesh : mGeometry.meshes())
     {
         if (mesh && mesh->mPerPrimitiveBuffer) add(mesh->mPerPrimitiveBuffer);
     }
@@ -1111,6 +1114,22 @@ void MetalRender::render(Buffer* output)
             }
         }
 
+        // A scene that has just been built has never been posed, and no time has
+        // changed to say so: the loader sets each animation's current time to its
+        // start and the editor asks for that same start, so every comparison
+        // above is equal and the block below would do nothing. What is left on
+        // screen is the bind pose the loader uploaded -- for a character, a shape
+        // nobody framed a camera on, and often not in the shot at all.
+        //
+        // Deferred to the first frame past the build rather than taken during it:
+        // skinning indexes the per-mesh records, and those are created in the
+        // structures stage, several published frames after the first.
+        if (mNeedsInitialPose && !mScenePrep.isBuilding())
+        {
+            mNeedsInitialPose = false;
+            animStateChanged = true;
+        }
+
         // A jump in animation time is a cut: the frame after it has no valid
         // predecessor to reproject from. Playback advances a sixtieth of a second
         // at a time, so a fraction of the clip length separates the two cases by a
@@ -1324,9 +1343,9 @@ void MetalRender::render(Buffer* output)
     const bool enableCameraMotionBlur = settings.getAs<bool>("render/enableCameraMotionBlur");
     // shutter / playback-blur settings are read inside MetalFrameUniforms::fill;
     // they used to be cached here before that extraction and are dead if left.
-    metal::MetalFrameUniforms::CameraView currCamView{ currView.mCamMatrices };
-    metal::MetalFrameUniforms::CameraView prevCamView{ mPrevView.mCamMatrices };
-    metal::MetalFrameUniforms::CameraView prevMbView{ mPrevMotionBlurView.mCamMatrices };
+    const metal::MetalFrameUniforms::CameraView currCamView{ currView.mCamMatrices };
+    const metal::MetalFrameUniforms::CameraView prevCamView{ mPrevView.mCamMatrices };
+    const metal::MetalFrameUniforms::CameraView prevMbView{ mPrevMotionBlurView.mCamMatrices };
 
     metal::MetalFrameUniforms::FillInput fin{};
     fin.settings = getSettings();
@@ -1376,7 +1395,7 @@ void MetalRender::render(Buffer* output)
     }
 
     MTL::Buffer* pUniformBuffer = filled.uniformBuffer;
-    MTL::Buffer* pUniformTMBuffer = filled.tonemapBuffer;
+    const MTL::Buffer* pUniformTMBuffer = filled.tonemapBuffer;
     auto* pUniformData = filled.uniforms;
     const bool accumulationActive = filled.accumulationActive;
     const bool effectiveAccumulation = filled.effectiveAccumulation;
@@ -1643,7 +1662,7 @@ void MetalRender::render(Buffer* output)
                 // Completion arrives through commit options rather than a
                 // handler on the command buffer, and carries the GPU interval
                 // with it, so the Metal 3 timing path needs no counterpart.
-                const MTL4::CommandBuffer* buffers[] = { cmdIntegrate };
+                const MTL4::CommandBuffer* const buffers[] = { cmdIntegrate };
                 const int writeIdx4 = mWriteIndex;
                 const bool asyncPresent = !denoising;
                 MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
@@ -1654,7 +1673,7 @@ void MetalRender::render(Buffer* output)
                         // the Metal 3 path polls its command buffer. Without this
                         // the sole symptom is the frame event never reaching its
                         // value, which surfaces as a timeout and names no cause.
-                        NS::Error* error = fb ? fb->error() : nullptr;
+                        const NS::Error* error = fb ? fb->error() : nullptr;
                         if (error)
                         {
                             mMetal4FrameFailed.store(true, std::memory_order_relaxed);
@@ -1676,8 +1695,16 @@ void MetalRender::render(Buffer* output)
                         }
                         if (asyncPresent)
                         {
-                            mLastRenderTimeMs.store((fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0,
-                                                    std::memory_order_relaxed);
+                            // The null check above is not decoration: feedback
+                            // without a payload is possible, and only the timing
+                            // needs one. Publishing the frame does not, and must
+                            // happen regardless -- a busy flag left raised is a
+                            // renderer that never submits again.
+                            if (fb)
+                            {
+                                mLastRenderTimeMs.store((fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0,
+                                                        std::memory_order_relaxed);
+                            }
                             mReadyIndex.store(writeIdx4);
                             mRenderBusy.store(false, std::memory_order_release);
                         }
@@ -2203,7 +2230,7 @@ void MetalRender::renderSync(Buffer* output)
             // all fit on the device at once -- acceleration structures, vertex
             // and index buffers and textures are all needed resident -- and the
             // failure is otherwise completely silent.
-            NS::Error* err = mLastCommandBuffer->error();
+            const NS::Error* err = mLastCommandBuffer->error();
             STRELKA_ERROR("Render command buffer failed: {}. The scene may not fit on the device; "
                           "try render/texture/maxDimension.",
                           err && err->localizedDescription()
@@ -2227,7 +2254,7 @@ void MetalRender::renderSync(Buffer* output)
     // On Apple silicon Managed behaves like Shared, but this keeps Intel Macs correct.
     if (output)
     {
-        MTL::Buffer* native = ((MetalBuffer*)output)->getNativePtr();
+        const MTL::Buffer* native = ((MetalBuffer*)output)->getNativePtr();
         if (native && native->storageMode() == MTL::StorageModeManaged)
         {
             MTL::CommandBuffer* syncCmd = mCommandQueue->commandBuffer();
@@ -2356,6 +2383,7 @@ metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
         mHasPrevCamera = false;
         mHasPrevFramePose = false;
         mShutterIntervalActive = false;
+        mNeedsInitialPose = !mScene->getAnimations().empty();
         if (mLoadProgress)
         {
             mLoadProgress->beginStage(LoadProgress::Stage::Geometry);

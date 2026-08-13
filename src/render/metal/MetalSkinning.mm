@@ -198,7 +198,7 @@ void MetalSkinning::encode(MTL4::ComputeCommandEncoder* pEncoder,
             for (const auto instId : node.instanceIds)
             {
                 auto& mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
-                uint32_t meshId = mScene->mInstances[instId].mMeshId;
+                const uint32_t meshId = mScene->mInstances[instId].mMeshId;
 
                 // Dispatch skinning kernel
                 SkinningParams skinParams = {};
@@ -218,8 +218,16 @@ void MetalSkinning::encode(MTL4::ComputeCommandEncoder* pEncoder,
                 pEncoder->dispatchThreadgroups(
                     MTL::Size((mesh.mVertexCount + threadsPerGroup - 1) / threadsPerGroup, 1, 1), groupSize);
 
-                // Dispatch triangle update kernel
-                MetalGeometry::Mesh* metalMesh = mGeometry->meshes()[meshId];
+                // Dispatch triangle update kernel. The per-mesh records are
+                // created in the structures stage, and frames are published from
+                // the environment stage onwards -- so a frame that poses a
+                // streaming scene can arrive before they exist, and indexing an
+                // empty vector here is a read through null.
+                if (meshId >= mGeometry->meshes().size())
+                {
+                    continue;
+                }
+                const MetalGeometry::Mesh* metalMesh = mGeometry->meshes()[meshId];
                 if (metalMesh->mPerPrimitiveBuffer)
                 {
                     TriangleUpdateParams triParams = {};

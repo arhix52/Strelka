@@ -89,9 +89,6 @@ struct AsBuildState
     double phaseMs[(size_t)Phase::Done] = {};
 };
 
-static double sBlasSizesMs = 0.0, sBlasAllocMs = 0.0, sBlasScratchMs = 0.0, sBlasEncodeMs = 0.0;
-static uint32_t sBlasCount = 0;
-
 MTL::AccelerationStructure* MetalAccelStructure::createAccelerationStructure(
     MTL::AccelerationStructureDescriptor* descriptor)
 {
@@ -130,14 +127,12 @@ MTL::AccelerationStructure* MetalAccelStructure::createAccelerationStructureNoCo
     const auto tEnd = std::chrono::steady_clock::now();
     if (accelerationStructure)
     {
+        // Only the encode is timed here; sizing, allocation and scratch all
+        // happen inside the path. They used to have buckets of their own that
+        // were only ever incremented by zero, so the log reported three noughts.
         using ms = std::chrono::duration<double, std::milli>;
-        // Sizes/alloc/scratch are inside the path; keep the encode bucket for the
-        // existing load log so totals still add up roughly.
-        sBlasSizesMs += 0.0;
-        sBlasAllocMs += 0.0;
-        sBlasScratchMs += 0.0;
-        sBlasEncodeMs += ms(tEnd - tAlloc).count();
-        ++sBlasCount;
+        mBlasEncodeMs += ms(tEnd - tAlloc).count();
+        ++mBlasCount;
         (void)tSizes;
     }
     return accelerationStructure;
@@ -151,12 +146,15 @@ MTL::AccelerationStructureUsage MetalAccelStructure::tlasUsage() const
                               : MTL::AccelerationStructureUsageNone);
 }
 
-static MTL::AccelerationStructureUsage blasExtraUsage()
+namespace
+{
+MTL::AccelerationStructureUsage blasExtraUsage()
 {
     static const bool disabled = envFlag("STRELKA_NO_PREFER_FAST_INTERSECTION");
     return disabled ? MTL::AccelerationStructureUsageNone
                     : MTL::AccelerationStructureUsagePreferFastIntersection;
 }
+} // namespace
 
 
 size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, bool skeletal)
@@ -176,7 +174,7 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
         const oka::Instance& inst = instances[instId];
         const uint32_t meshId = inst.mMeshId;
         const oka::Mesh& mesh = meshes[meshId];
-        MetalGeometry::Mesh* meshData = mGeometry->meshes()[meshId];
+        const MetalGeometry::Mesh* meshData = mGeometry->meshes()[meshId];
 
         static const bool forceAllOpaque = envFlag("STRELKA_ALL_GEOM_OPAQUE");
         const bool isCutout = !forceAllOpaque && inst.mMaterialId < mMaterials->isCutout().size() &&
@@ -271,7 +269,7 @@ size_t MetalAccelStructure::buildCurveBlas(uint32_t sceneInstanceId)
                   (curve.mType == oka::Curve::Type::eLinear ? 0u : GEOM_CURVE_CUBIC);
     mGeometry->geometryEntries().push_back(entry);
 
-    const NS::Object* geoms[] = { geom };
+    const NS::Object* const geoms[] = { geom };
     MTL::AccelerationStructureDescriptor* primDescriptor = mPath->makePrimitiveDescriptor(
         NS::Array::array(geoms, 1), false, false,
         MTL::AccelerationStructureUsageRefit | blasExtraUsage());
@@ -381,6 +379,11 @@ bool MetalAccelStructure::step(double budgetMs)
         mAsBuild = new AsBuildState();
         mOpaqueGeometryCount = 0;
         mCutoutGeometryCount = 0;
+        // Per build, not per process: as file-scope counters these accumulated
+        // across every scene the session opened, so the second load reported the
+        // first one's structures as well as its own.
+        mBlasEncodeMs = 0.0;
+        mBlasCount = 0;
     }
     AsBuildState& st = *mAsBuild;
 
@@ -528,12 +531,20 @@ bool MetalAccelStructure::step(double budgetMs)
                 // Component equality, not memcmp: glm::mat4 has no unique object
                 // representation (padding / signalling NaNs), and tidy flags the
                 // byte compare for that reason.
-                else if (instances[st.groups[it->second].front()].transform == curr.transform)
+                else if (instances[st.groups[it->second].front()].transform == curr.transform &&
+                         st.groups[it->second].size() < kMaxGeometriesPerBlas)
                 {
                     st.groups[it->second].push_back((uint32_t)i);
                 }
                 else
                 {
+                    // A full group is closed rather than abandoned: the key now
+                    // names the group being filled, so the rest of the node's
+                    // primitives still merge with each other.
+                    if (st.groups[it->second].size() >= kMaxGeometriesPerBlas)
+                    {
+                        it->second = st.groups.size();
+                    }
                     st.groups.push_back({ (uint32_t)i });
                     st.groupSkeletal.push_back(skeletal);
                 }
@@ -579,7 +590,7 @@ bool MetalAccelStructure::step(double budgetMs)
                 signature.push_back(((uint64_t)instances[id].mMeshId << 32) | instances[id].mMaterialId);
             }
 
-            size_t blasIdx;
+            size_t blasIdx = 0;
             auto shared = st.groupSkeletal[g] ? st.blasOfSignature.end() : st.blasOfSignature.find(signature);
             const bool built = shared == st.blasOfSignature.end();
             if (!built)
@@ -751,7 +762,7 @@ bool MetalAccelStructure::step(double budgetMs)
     // -- so state it rather than leave it to Activity Monitor.
     {
         size_t texBytes = 0;
-        for (MTL::Texture* t : mTextures->materialTextures())
+        for (const MTL::Texture* t : mTextures->materialTextures())
         {
             if (!t)
                 continue;
@@ -871,8 +882,7 @@ bool MetalAccelStructure::step(double budgetMs)
                              bySize[k].first / 1e9, mBlasList[bySize[k].second].mGeometryBase);
             }
         }
-STRELKA_INFO("BLAS build CPU: sizes {:.0f} ms, alloc {:.0f} ms, scratch {:.0f} ms, encode {:.0f} ms ({} structures)",
-                 sBlasSizesMs, sBlasAllocMs, sBlasScratchMs, sBlasEncodeMs, sBlasCount);
+    STRELKA_INFO("BLAS build CPU: encode {:.0f} ms ({} structures)", mBlasEncodeMs, mBlasCount);
     STRELKA_INFO("Structures: BLAS {:.2f} GB ({} failed), TLAS {:.3f} GB, device max buffer {:.2f} GB",
                      asBytes / 1e9, nullAs,
                      mInstanceAccelerationStructure ? mInstanceAccelerationStructure->size() / 1e9 : 0.0,
@@ -1315,7 +1325,7 @@ void MetalAccelStructure::addDescriptorResidency()
     mMetal4->addResident(mGeometry->curveSegmentBuffer());
     mMetal4->addResident(mInstanceBuffer);
     mMetal4->addResident(mPreviousInstanceBuffer);
-    for (MetalGeometry::Mesh* mesh : mGeometry->meshes())
+    for (const MetalGeometry::Mesh* mesh : mGeometry->meshes())
     {
         if (mesh)
         {

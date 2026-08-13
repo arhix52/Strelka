@@ -170,6 +170,12 @@ private:
     /// a real interval and the frame has motion blur in it -- true across a pause.
     bool mShutterIntervalActive = false;
     bool mWasAnimationPlaying = false;
+    /// A freshly built scene has never been posed: the vertex buffer holds the
+    /// bind pose the loader uploaded, and the animation block only acts on a
+    /// change of time -- which a load does not produce, because the loader sets
+    /// each animation's current time to its start and the editor asks for that
+    /// same start. Raised by the build so the first frame past it poses once.
+    bool mNeedsInitialPose = false;
     bool mPausedBlurRefine = false;
     void rebuildAccelerationStructures();
 
