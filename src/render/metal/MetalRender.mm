@@ -875,6 +875,15 @@ void MetalRender::render(Buffer* output)
             return;
         }
         mPublishClock.notePublished(nowMs);
+        // Every slice creates resources the last one did not have: the vertex and
+        // index buffers, the material table, each acceleration structure, and the
+        // top level that replaces the empty one. Metal 4 has no useResource to
+        // fall back on, so anything the residency set does not name is simply not
+        // there for the tracer -- and the set is otherwise only refreshed when the
+        // integrator's capacity changes, which a loading scene never does. Left
+        // alone, the set keeps naming the empty top level for the whole session
+        // and every ray reaches the environment: a sky, and no scene in it.
+        mMetal4ResidencyGeneration = 0;
         // Time to first pixel is the number this whole path exists to move, so
         // it is reported rather than inferred from watching a window.
         if (!mReportedFirstPartialFrame)
