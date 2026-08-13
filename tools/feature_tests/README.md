@@ -80,7 +80,7 @@ fixing, but it is not a shading bug.
 | `12_lights_punctual` | point / spot / sun via KHR | 0.031 / 1.002 |
 | `13_uv2_vcol` | `TEXCOORD_1`, `COLOR_0` | 0.024 / 1.010 |
 | `14_sheen` | `KHR_materials_sheen` roughness ramp | 0.053 / 1.016 |
-| `15_clearcoat` | `KHR_materials_clearcoat` + IOR ramp | 0.038 / 0.995 |
+| `15_clearcoat` | `KHR_materials_clearcoat` + IOR ramp | 0.037 / 1.002 |
 | `16_iridescence` | `KHR_materials_iridescence` thickness ramp | 0.023 / 1.010 |
 | `17_coated_glass` | transmission + clearcoat together | 0.067 / 0.994 |
 | `18_bounded_volume` | `STRELKA_materials_medium` | 0.027 / 1.000 |
@@ -155,13 +155,11 @@ whole-frame `ratio` hides what they are actually saying:
   around 0.6 — so the aggregate ratio of 1.016 is two errors cancelling, not two
   renderers agreeing. Treat the row as a regression guard: if it moves, something
   on our side changed.
-- **`15_clearcoat` is an agreement check**, and it finds a real approximation.
-  The IOR 1.0 sphere — where the coat's F0 is zero and the layer has to vanish —
-  matches at 1.003, so the layering itself is right. From there the ratio falls
-  to 0.94 by IOR 2.2: our coat takes energy out of the base for the way in and
-  the way out, and never gives back what bounces between the coat's underside and
-  the base. Cycles models that inter-reflection. The missing term is worth about
-  6% at the strongest coat in the ramp.
+- **`15_clearcoat` is an agreement check.** The IOR 1.0 sphere — where the coat's
+  F0 is zero and the layer has to vanish — matches at ~1.01, and the strong end
+  of the ramp (IOR 2.2) is within 1% of Cycles. The underside geometric series in
+  `clearcoat_base_scale` is what closed the previous 6% hole there; see
+  `docs/open-defects.md` (Closed).
 
 `25_subsurface` was recorded at 0.330 / 1.053 and read as a convention mismatch:
 the Van de Hulst inversion is the right encoding for our extension but is not

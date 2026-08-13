@@ -132,50 +132,44 @@ DEVICE_FUNC float clearcoat_f0(const THREAD_REF SurfaceInteraction& si)
     return f0_from_ior(fmaxf(si.clearcoat_ior, 1.0f));
 }
 
-// What survives under the coat.
+// What survives under the coat: enter, bounce on the base, leave -- and the
+// geometric series of bounces between the base and the coat's underside.
 //
 // The coat used to be added on top with nothing taken away, which makes a glazed
-// ceramic brighter than the light falling on it -- the same defect the sheen
-// layer had, and it is easier to see here because the coat sits over a white
-// diffuse base rather than over fabric. A directional-albedo table would be more
-// accurate; the split approximation below costs nothing and is what the glTF
-// sample viewer uses for the same layer.
-DEVICE_FUNC float clearcoat_base_scale(const THREAD_REF SurfaceInteraction& si, float n_dot_v,
-                                       float n_dot_l)
+// ceramic brighter than the light falling on it. Taking (1-F_L)*(1-F_V) out
+// without giving the series back then left scenes/feature_tests/15_clearcoat
+// 6% dark at IOR 2.2 while matching at IOR 1.0 -- the signature of a missing
+// term that scales with the coat's reflectance.
+//
+// Per channel, against ½(F_L+F_V). A hemispherical F_avg is larger than F at
+// normal incidence, so dividing (1-F0)^2 by (1-F_avg ρ) is what pushed a white
+// ceramic to 1.02; the internal average (~0.6 with TIR) pushed it to 2.43.
+// Both are the wrong Fresnel for a model that never refracts L and V into the
+// coat. The ceiling at (1-F_ms) is what keeps a base whose albedo we have
+// under-counted -- specular sits under the coat too -- from climbing past one.
+DEVICE_FUNC float3 clearcoat_base_scale(const THREAD_REF SurfaceInteraction& si, float n_dot_v,
+                                        float n_dot_l)
 {
     if (si.clearcoat <= 0.0f)
     {
-        return 1.0f;
+        return make_float3(1.0f);
     }
     const float f0 = clearcoat_f0(si);
+    const float w = si.clearcoat;
     // Twice, because the light crosses the coat twice: in along L and out along
     // V. Scaling by the view-side Fresnel alone -- which is what the glTF sample
     // viewer does -- still let a glazed white ceramic reach 1.06 directional
     // albedo, measured in tests/material/test_clearcoat.cpp.
-    const float down = 1.0f - si.clearcoat * fresnel_schlick_scalar(f0, fabsf(n_dot_l));
-    const float up = 1.0f - si.clearcoat * fresnel_schlick_scalar(f0, fabsf(n_dot_v));
-    return down * up;
+    const float F_L = w * fresnel_schlick_scalar(f0, fabsf(n_dot_l));
+    const float F_V = w * fresnel_schlick_scalar(f0, fabsf(n_dot_v));
+    const float single = (1.0f - F_L) * (1.0f - F_V);
+    const float F_ms = 0.5f * (F_L + F_V);
+    const float ceiling = 1.0f - F_ms;
 
-    // What is deliberately *not* here: the light that goes through the coat, off
-    // the base, and back down off the coat's underside, round and round. Cycles
-    // models it, and scenes/feature_tests/15_clearcoat measures its absence --
-    // 6% dark at the strong end of the IOR ramp, matching exactly at IOR 1.0,
-    // which is the signature of a missing term scaling with the coat's
-    // reflectance.
-    //
-    // Two formulations were tried and both were measurably worse than the gap
-    // they were closing. Summed against the coat's internal hemispherical
-    // reflectance -- around 60% for ordinary lacquer, because everything past the
-    // critical angle is trapped -- a glazed white ceramic reached 2.43
-    // directional albedo. Summed against the external average instead, 1.02.
-    // The round trip carries a 1/eta^2 radiance compression on the way back out
-    // that does not separate cleanly from the reflectance when what sits under
-    // the coat is a full BSDF rather than a Lambertian, and guessing at where it
-    // goes produced a material brighter than the light falling on it both times.
-    //
-    // A documented 6% beats an energy violation, so the term stays out until it
-    // can be derived rather than fitted. tests/material/test_clearcoat.cpp is
-    // what caught both attempts.
+    const float3 rho = make_float3(saturate(si.albedo.x), saturate(si.albedo.y), saturate(si.albedo.z));
+    return make_float3(fminf(single / fmaxf(1.0f - F_ms * rho.x, 1e-5f), ceiling),
+                       fminf(single / fmaxf(1.0f - F_ms * rho.y, 1e-5f), ceiling),
+                       fminf(single / fmaxf(1.0f - F_ms * rho.z, 1e-5f), ceiling));
 }
 
 // How much of the base layer survives under the sheen, per KHR_materials_sheen.

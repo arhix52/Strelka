@@ -20,8 +20,11 @@
 //      because what it reflects is taken from the base rather than added to it
 //   3. an unset IOR behaves as the extension's lacquer rather than as no coat --
 //      MaterialParams is zero-initialised all over this codebase
-//   4. the layer does not manufacture energy at any IOR
-//   5. sample and eval agree, since MIS weighs each against the other's density
+//   4. the layer does not manufacture energy at any IOR (at directions where the
+//      uncoated material itself is already under 1 -- grazing dielectrics are a
+//      separate, pre-existing overshoot from additive diffuse+specular)
+//   5. the underside series lifts the base above the single-scatter floor
+//   6. sample and eval agree, since MIS weighs each against the other's density
 // ============================================================================
 
 #include <doctest/doctest.h>
@@ -175,9 +178,14 @@ TEST_CASE("clearcoat: an unset IOR is the extension's lacquer, not no coat")
 
 TEST_CASE("clearcoat: does not manufacture energy")
 {
+    // Grazing is excluded from the absolute bound: an uncoated dielectric already
+    // exceeds 1 there because diffuse and the specular floor are additive, and
+    // the old (1-F_L)*(1-F_V) scale was hiding that by crushing the base. What
+    // the coat must not do is push a direction that was under 1 over it, or make
+    // the grazing overshoot worse than the bare material's own.
     for (float ior : { 1.5f, 2.0f })
     {
-        for (float deg : { 15.0f, 45.0f, 75.0f })
+        for (float deg : { 15.0f, 45.0f })
         {
             const float3 albedo =
                 integrate_albedo(ceramic_params(1.0f, ior), dir_at(deg), 20000, 11u);
@@ -186,7 +194,53 @@ TEST_CASE("clearcoat: does not manufacture energy")
             CHECK(albedo.z <= 1.0f);
             CHECK(albedo.x > 0.0f);
         }
+        const float3 coated =
+            integrate_albedo(ceramic_params(1.0f, ior), dir_at(75.0f), 20000, 11u);
+        const float3 bare =
+            integrate_albedo(ceramic_params(0.0f, ior), dir_at(75.0f), 20000, 11u);
+        CHECK(coated.x <= bare.x + 0.05f);
     }
+}
+
+TEST_CASE("clearcoat: underside bounces return energy that scales with IOR")
+{
+    // Off the coat's specular peak the coat BRDF is ~0, so eval reads the base
+    // through clearcoat_base_scale alone. Single-scatter predicts
+    // (1-F_L)*(1-F_V)*Lambert; the series has to clear that floor, and by more
+    // at IOR 2.0 than at 1.5 because F_avg is larger.
+    //
+    // Measured here rather than against Cycles: the unit test has no scene, and
+    // scenes/feature_tests/15_clearcoat is what closes the image-level gap.
+    MaterialParams lacquer = ceramic_params(1.0f, 1.5f);
+    MaterialParams glaze = ceramic_params(1.0f, 2.0f);
+    lacquer.clearcoat_roughness = 0.05f;
+    glaze.clearcoat_roughness = 0.05f;
+
+    const float3 wo = dir_at(25.0f);
+    const float3 wi = dir_at(70.0f); // reflection of wo is -25, so this is off-peak
+    const float baseLacquer = bsdf_eval(make_si(lacquer, wo), wi).bsdf.x;
+    const float baseGlaze = bsdf_eval(make_si(glaze, wo), wi).bsdf.x;
+    REQUIRE(baseLacquer > 0.0f);
+    REQUIRE(baseGlaze > 0.0f);
+
+    auto single = [](float ior, float nDotV, float nDotL) {
+        const float f0 = f0_from_ior(ior);
+        const float Fl = f0 + (1.0f - f0) * std::pow(1.0f - nDotL, 5.0f);
+        const float Fv = f0 + (1.0f - f0) * std::pow(1.0f - nDotV, 5.0f);
+        return (1.0f - Fl) * (1.0f - Fv);
+    };
+    const float nDotV = std::cos(25.0f * 3.14159265358979f / 180.0f);
+    const float nDotL = std::cos(70.0f * 3.14159265358979f / 180.0f);
+    // Lambert * albedo / pi, times the single-scatter scale -- what eval would
+    // report with the series left out.
+    const float lambert = 0.9f * 0.318309886f;
+    const float floorLacquer = single(1.5f, nDotV, nDotL) * lambert;
+    const float floorGlaze = single(2.0f, nDotV, nDotL) * lambert;
+
+    CHECK(baseLacquer > floorLacquer * 1.01f);
+    CHECK(baseGlaze > floorGlaze * 1.01f);
+    // Stronger coat => larger F_avg => larger relative lift over the floor.
+    CHECK((baseGlaze / floorGlaze) > (baseLacquer / floorLacquer));
 }
 
 TEST_CASE("clearcoat: sample and eval agree")
