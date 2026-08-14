@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "headless_imgui.h"
+#include "editor_viewport_layout.h"
 
 using oka::test::HeadlessImGui;
 
@@ -99,4 +100,27 @@ TEST_CASE("an interactive viewport frame also stays hovered")
     CHECK(trace.onPress);
     CHECK(trace.whileHeld);
     CHECK(trace.onRelease);
+}
+
+TEST_CASE("letterbox bars do not hover the rendered image")
+{
+    HeadlessImGui ctx;
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMousePosEvent(100.0f, 20.0f);
+
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(800.0f, 600.0f));
+    ImGui::Begin("Viewport", nullptr, ImGuiWindowFlags_NoTitleBar);
+    const oka::editor_viewport::Layout layout =
+        oka::editor_viewport::computeLayout({ { 0.0f, 0.0f }, { 800.0f, 600.0f } },
+                                            960,
+                                            540,
+                                            { 1.0f, 1.0f },
+                                            oka::editor_viewport::PresentationMode::Fit);
+    ImGui::SetCursorScreenPos(ImVec2(layout.imageRect.min.x, layout.imageRect.min.y));
+    ImGui::Image((ImTextureID)1, ImVec2(layout.imageRect.width(), layout.imageRect.height()));
+    CHECK_FALSE(ImGui::IsItemHovered());
+    ImGui::End();
+    ImGui::Render();
 }

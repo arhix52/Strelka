@@ -37,6 +37,9 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_gizmo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_camera_takeover.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_viewport_input.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_viewport_layout.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_screenshot_semantics.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_metal_fx_ui.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_document.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_camera_exposure.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_camera_framing.cpp
@@ -47,6 +50,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_compress.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_ibl_alias_table.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_buffer_sizes.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_render_resolution.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_tonemappers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_scene_stream.cpp
 )

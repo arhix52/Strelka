@@ -6,6 +6,8 @@
 #include <strelka/render/render.h>
 
 #include "CameraController.h"
+#include "editor_metal_fx.h"
+#include "editor_viewport_layout.h"
 
 #include <glm/glm.hpp>
 #include <glm/mat4x3.hpp>
@@ -17,15 +19,11 @@
 #include <future>
 #include <string>
 #include <vector>
-#include <variant>
 
 #include <strelka/sceneloader/gltfloader.h>
 
 #include "imgui.h"
-#include "imgui_internal.h" // DockBuilder / window settings lookup
-#include "imgui_impl_glfw.h"
 #include "ImGuizmo.h"
-#include "ImGuiFileDialog.h"
 
 namespace oka
 {
@@ -33,7 +31,6 @@ namespace oka
 class EditorApp : public ResizeHandler
 {
 private:
-    bool m_resized = false;
     std::unique_ptr<Display> m_display;
     std::unique_ptr<SettingsManager> m_settingsManager;
     std::unique_ptr<GltfLoader> m_sceneLoader;
@@ -71,6 +68,12 @@ private:
     // after the panel has already been closed.
     ImVec2 m_viewportRectMin{ 0, 0 };
     ImVec2 m_viewportRectMax{ 0, 0 };
+    editor_viewport::Layout m_viewportLayout;
+    editor_viewport::PresentationMode m_viewportPresentation = editor_viewport::PresentationMode::Fit;
+    uint32_t mPresentedPreviewWidth = 0;
+    uint32_t mPresentedPreviewHeight = 0;
+    editor_metal_fx::Mode mMetalFxMode = editor_metal_fx::Mode::Off;
+    bool mMetalFxModeInitialized = false;
 
     bool m_documentDirty = false;
     // Snapshot taken at beginSceneLoad so a failed/cancelled open can restore
@@ -111,7 +114,7 @@ private:
             Light,
             Node,
             Material
-        } kind;
+        } kind = Kind::Light;
         uint32_t id = 0;
         Scene::UniformLightDesc light{};
         glm::float3 translation{ 0 };
@@ -172,6 +175,7 @@ private:
     void ensureValidCameraSelection();
     void handleDeviceError();
     void restoreDocumentAfterFailedLoad(const char* reason);
+    void applyPreviewResolution(uint32_t width, uint32_t height);
 
 public:
     EditorApp(const std::string& sceneFile, const std::string& resourceSearchPath);

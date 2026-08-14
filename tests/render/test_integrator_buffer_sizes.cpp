@@ -37,3 +37,25 @@ TEST_CASE("wavefrontBufferLayout scales with pixel count")
     CHECK(b.pathStateBytes == 4 * a.pathStateBytes);
     CHECK(b.controlBytes == a.controlBytes);
 }
+
+TEST_CASE("preview presets make wavefront memory growth explicit")
+{
+    WavefrontElementSizes sz;
+    sz.pathState = 60;
+    sz.pathRay = 24;
+    sz.hitRecord = 32;
+    sz.iorStack = 52;
+    sz.radiance = 16;
+    sz.shadowRay = 48;
+    sz.aovSample = 64;
+
+    const auto preview = wavefrontBufferLayout(960, 540, sz);
+    const auto fullHd = wavefrontBufferLayout(1920, 1080, sz);
+
+    CHECK(preview.pixels == 518400);
+    CHECK(fullHd.pixels == 4 * preview.pixels);
+    CHECK(fullHd.pathStateBytes == 4 * preview.pathStateBytes);
+    CHECK(fullHd.shadowRayBytes == 4 * preview.shadowRayBytes);
+    CHECK(fullHd.aovBytes == 4 * preview.aovBytes);
+    CHECK(fullHd.controlBytes == preview.controlBytes);
+}

@@ -10,6 +10,7 @@
 #include "MetalRender.h"
 
 #include <chrono>
+#include <cstring>
 #include <thread>
 #include "MetalBuffer.h"
 #include "MetalTextures.h"
@@ -27,6 +28,7 @@
 #include "texture_compress.h"
 #include "sampling_math.h"
 #include "integrator_features.h"
+#include "render_resolution.h"
 #include "texture_cache_key.h"
 #include "ibl_alias_table.h"
 #include "integrator_buffer_sizes.h"
@@ -168,24 +170,6 @@ void MetalRender::triggerRenderIfIdle()
         mAsyncOutputBuffers[mWriteIndex]->resize(w, h);
     }
 
-    // Also ensure the other buffer exists (display may need it)
-    const int otherIdx = 1 - mWriteIndex;
-    if (!mAsyncOutputBuffers[otherIdx])
-    {
-        BufferDesc desc{};
-        desc.format = BufferFormat::FLOAT4;
-        desc.width = w;
-        desc.height = h;
-        mAsyncOutputBuffers[otherIdx] = createBuffer(desc);
-    }
-    else if (mAsyncOutputBuffers[otherIdx]->width() != w ||
-             mAsyncOutputBuffers[otherIdx]->height() != h)
-    {
-        // Resize ready buffer too — display will pick up new size next frame
-        mAsyncOutputBuffers[otherIdx]->resize(w, h);
-        mReadyIndex.store(-1); // invalidate since we resized
-    }
-
     mRenderBusy.store(true);
     render(mAsyncOutputBuffers[mWriteIndex]);
 
@@ -298,11 +282,12 @@ bool MetalRender::readDisplayTexture(std::vector<float>& rgba, uint32_t& width, 
     rgba.resize((size_t)width * height * 4);
     for (size_t y = 0; y < height; ++y)
     {
-        const uint16_t* src = reinterpret_cast<const uint16_t*>(
-            static_cast<const uint8_t*>(staging->contents()) + y * rowBytes);
+        const uint8_t* src = static_cast<const uint8_t*>(staging->contents()) + y * rowBytes;
         for (size_t x = 0; x < (size_t)width * 4; ++x)
         {
-            rgba[(y * width * 4) + x] = halfToFloat(src[x]);
+            uint16_t half = 0;
+            std::memcpy(&half, src + x * sizeof(half), sizeof(half));
+            rgba[(y * width * 4) + x] = halfToFloat(half);
         }
     }
     staging->release();
@@ -435,8 +420,9 @@ bool MetalRender::readGuideTexture(Guide guide, std::vector<float>& rgba, uint32
                 const size_t si = x * channels + c;
                 if (isHalf)
                 {
-                    rgba[t * 4 + c] =
-                        halfToFloat(reinterpret_cast<const uint16_t*>(row)[si]);
+                    uint16_t half = 0;
+                    std::memcpy(&half, row + si * sizeof(half), sizeof(half));
+                    rgba[t * 4 + c] = halfToFloat(half);
                 }
                 else if (isUnorm8)
                 {
@@ -444,8 +430,9 @@ bool MetalRender::readGuideTexture(Guide guide, std::vector<float>& rgba, uint32
                 }
                 else
                 {
-                    rgba[t * 4 + c] =
-                        reinterpret_cast<const float*>(row)[si];
+                    float value = 0.0f;
+                    std::memcpy(&value, row + si * sizeof(value), sizeof(value));
+                    rgba[t * 4 + c] = value;
                 }
             }
         }
@@ -657,8 +644,8 @@ std::string MetalRender::textureCacheKey(const std::string& fileName, bool srgb,
     in.fileName = fileName;
     in.fileSize = ec ? 0 : (uint64_t)size;
     in.writeTimeCount = ec ? 0 : (int64_t)stamp;
-    in.maxDimension = const_cast<MetalRender*>(this)->getSettings()->getAs<uint32_t>("render/texture/maxDimension");
-    in.downscale = const_cast<MetalRender*>(this)->getSettings()->getAs<uint32_t>("render/texture/downscale");
+    in.maxDimension = getSettings()->getAs<uint32_t>("render/texture/maxDimension");
+    in.downscale = getSettings()->getAs<uint32_t>("render/texture/downscale");
     in.srgb = srgb;
     in.kind = static_cast<metal::TextureKind>((int)kind);
     return metal::textureCacheKey(in);
@@ -921,32 +908,37 @@ void MetalRender::render(Buffer* output)
     const uint32_t outWidth = output->width();
     const uint32_t outHeight = output->height();
     const bool wantUpscale = getSettings()->getAs<bool>("render/pt/enableUpscale");
-    float upscaleFactor =
-        wantUpscale ? std::clamp(getSettings()->getAs<float>("render/pt/upscaleFactor"), 0.25f, 1.0f) : 1.0f;
+    const render_resolution::Resolution resolution =
+        render_resolution::resolve(outWidth, outHeight, wantUpscale,
+                                   getSettings()->getAs<float>("render/pt/upscaleFactor"));
+    const uint32_t width = resolution.pathTraceWidth;
+    const uint32_t height = resolution.pathTraceHeight;
+    const bool upscaling = resolution.upscaling;
+    bool denoiserScaleSupported = true;
     // MetalFX publishes the range of output/input ratios it can actually do, and
     // going outside it is not refused -- the scaler is created and then produces
-    // NaN. Measured: at a factor of 0.25 (a 4x ratio) the denoised frame comes
-    // back entirely non-finite. So the request is clamped to what the device says
-    // it supports rather than to a number chosen by hand.
+    // NaN. Do not silently raise the PT resolution to satisfy it: curve-heavy
+    // scenes need the quarter-resolution preview to stay below the Metal command
+    // queue watchdog. Spatial scaling is the safe fallback at that resolution.
     if (wantUpscale && getSettings()->getAs<bool>("render/pt/denoise"))
     {
         float minScale = 1.0f, maxScale = 2.0f;
         MetalFxContext::denoiserScaleRange(mDevice, minScale, maxScale);
-        const float lowest = maxScale > 0.0f ? 1.0f / maxScale : 0.5f;
-        if (upscaleFactor < lowest)
+        const render_resolution::DenoiserPolicy policy =
+            render_resolution::resolveDenoiserPolicy(true, resolution, maxScale);
+        if (policy.useSpatialFallback)
         {
             if (!mPost.loggedUpscaleClamp())
             {
                 mPost.loggedUpscaleClamp() = true;
-                STRELKA_WARNING("MetalFX denoiser supports {:.2f}x-{:.2f}x; clamping render scale {:.2f} to {:.2f}",
-                                minScale, maxScale, upscaleFactor, lowest);
+                STRELKA_WARNING("MetalFX denoiser supports {:.2f}x-{:.2f}x; render scale {:.2f} needs at least "
+                                "{:.2f}, using spatial upscale instead",
+                                minScale, maxScale, resolution.appliedScale, policy.lowestSupportedScale);
             }
-            upscaleFactor = lowest;
+            denoiserScaleSupported = false;
         }
     }
-    const uint32_t width = std::max(1u, static_cast<uint32_t>(static_cast<float>(outWidth) * upscaleFactor));
-    const uint32_t height = std::max(1u, static_cast<uint32_t>(static_cast<float>(outHeight) * upscaleFactor));
-    const bool upscaling = (width != outWidth || height != outHeight);
+    mDenoiserFallbackActive.store(!denoiserScaleSupported, std::memory_order_relaxed);
 
     // Temporal denoising subsumes upscaling: the denoised scaler takes the
     // reduced-resolution frame and produces the display-resolution one, so the
@@ -958,7 +950,8 @@ void MetalRender::render(Buffer* output)
     const uint32_t debug = getSettings()->getAs<uint32_t>("render/pt/debug");
     // Debug views are final outputs. Sending them through MetalFX would alter
     // their values, while the debug path deliberately skips the final tonemap.
-    bool denoising = getSettings()->getAs<bool>("render/pt/denoise") && useWavefrontTracer && debug == 0;
+    bool denoising = getSettings()->getAs<bool>("render/pt/denoise") && denoiserScaleSupported &&
+                     useWavefrontTracer && debug == 0;
     const bool shaderValidation = envUint("MTL_SHADER_VALIDATION", 0) != 0;
     if (denoising && shaderValidation)
     {
@@ -1004,7 +997,7 @@ void MetalRender::render(Buffer* output)
     // the denoiser does that plus a guided denoise -- at the price of a second
     // traced sample for clean guides.
     const uint32_t upscaleMode = getSettings()->getAs<uint32_t>("render/pt/upscaleMode");
-    const bool wantTemporal = upscaling && !denoising && upscaleMode == 1u;
+    const bool wantTemporal = upscaling && !denoising && denoiserScaleSupported && upscaleMode == 1u;
     if (wantTemporal)
     {
         void* compiler = mMetal4.isValid() ? (void*)mMetal4.compiler() : nullptr;
@@ -1018,7 +1011,8 @@ void MetalRender::render(Buffer* output)
             mPost.ensureGuideTextures(width, height, outWidth, outHeight);
         }
     }
-    if (upscaling && !denoising && !mPost.metalFx().hasTemporalScaler())
+    if (upscaling && !denoising &&
+        (!mPost.metalFx().hasTemporalScaler() || !denoiserScaleSupported))
     {
         void* spatialCompiler = mMetal4.isValid() ? (void*)mMetal4.compiler() : nullptr;
         mPost.metalFx().ensureSpatialScaler(mDevice, MTL::PixelFormatRGBA16Float, MTL::PixelFormatRGBA16Float, width,
@@ -1091,7 +1085,7 @@ void MetalRender::render(Buffer* output)
 
     // Animation detection: two-pass at t_open / t_close for motion blur (CHANGED-only)
     {
-        SettingsManager& animSettings = *getSettings();
+        const SettingsManager& animSettings = *getSettings();
         std::vector<oka::Scene::Animation>& animations = mScene->getAnimations();
 
         // Collect target times and detect which animations actually changed
@@ -1267,7 +1261,7 @@ void MetalRender::render(Buffer* output)
     }
     mWasAnimationPlaying = anyAnimationPlaying;
 
-    SettingsManager& settings = *getSettings();
+    const SettingsManager& settings = *getSettings();
 
     const uint32_t selectedCamera = settings.getAs<uint32_t>("render/selectedCamera");
     oka::Camera& camera = mScene->getCamera(selectedCamera);
@@ -1665,9 +1659,11 @@ void MetalRender::render(Buffer* output)
                 const MTL4::CommandBuffer* const buffers[] = { cmdIntegrate };
                 const int writeIdx4 = mWriteIndex;
                 const bool asyncPresent = !denoising;
+                const auto commitStartedAt = std::chrono::steady_clock::now();
                 MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
                 options->addFeedbackHandler(
-                    MTL4::CommitFeedbackHandlerFunction([this, writeIdx4, asyncPresent](MTL4::CommitFeedback* fb) {
+                    MTL4::CommitFeedbackHandlerFunction(
+                        [this, writeIdx4, asyncPresent, commitStartedAt](MTL4::CommitFeedback* fb) {
                         // The feedback is the only place a Metal 4 frame reports
                         // failure: there is no status() to poll afterwards the way
                         // the Metal 3 path polls its command buffer. Without this
@@ -1679,13 +1675,15 @@ void MetalRender::render(Buffer* output)
                             mMetal4FrameFailed.store(true, std::memory_order_relaxed);
                             if (!mMetal4FrameFailReported.exchange(true, std::memory_order_relaxed))
                             {
-                                // The interval separates the two failures that
-                                // report the same code: work that really ran too
-                                // long, and work the watchdog killed while it sat
-                                // waiting on something that never arrived.
-                                STRELKA_ERROR("Metal 4 frame failed after {:.1f} ms on the GPU: {} (domain {}, "
-                                              "code {})",
-                                              (fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0,
+                                const double wallMs = std::chrono::duration<double, std::milli>(
+                                                          std::chrono::steady_clock::now() - commitStartedAt)
+                                                          .count();
+                                // A killed command buffer can report only its last
+                                // short execution interval. Wall time says how long
+                                // the queue actually spent executing or waiting.
+                                STRELKA_ERROR("Metal 4 frame failed after {:.1f} ms wall / {:.1f} ms GPU: {} "
+                                              "(domain {}, code {})",
+                                              wallMs, (fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0,
                                               error->localizedDescription()
                                                   ? error->localizedDescription()->utf8String()
                                                   : "unknown error",
@@ -1695,17 +1693,19 @@ void MetalRender::render(Buffer* output)
                         }
                         if (asyncPresent)
                         {
-                            // The null check above is not decoration: feedback
-                            // without a payload is possible, and only the timing
-                            // needs one. Publishing the frame does not, and must
-                            // happen regardless -- a busy flag left raised is a
-                            // renderer that never submits again.
-                            if (fb)
+                            // A failed command buffer may have written only part
+                            // of its output. Keep the last good slot visible, but
+                            // always clear busy so shutdown and error handling do
+                            // not wait forever for a frame that cannot complete.
+                            if (!error)
                             {
-                                mLastRenderTimeMs.store((fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0,
-                                                        std::memory_order_relaxed);
+                                if (fb)
+                                {
+                                    mLastRenderTimeMs.store((fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0,
+                                                            std::memory_order_relaxed);
+                                }
+                                mReadyIndex.store(writeIdx4);
                             }
-                            mReadyIndex.store(writeIdx4);
                             mRenderBusy.store(false, std::memory_order_release);
                         }
                     }));

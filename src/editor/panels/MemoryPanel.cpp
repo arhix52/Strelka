@@ -3,7 +3,6 @@
 #include "imgui.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 
 namespace oka
@@ -21,6 +20,7 @@ const ImU32 kSliceColors[] = {
     IM_COL32(0x4a, 0xc0, 0xc8, 0xff), IM_COL32(0x86, 0x6f, 0xb0, 0xff), IM_COL32(0x6f, 0x8f, 0x4a, 0xff),
     IM_COL32(0xd8, 0xa0, 0x50, 0xff), IM_COL32(0x50, 0x78, 0xa8, 0xff), IM_COL32(0xa8, 0x50, 0x78, 0xff),
 };
+constexpr float kPi = 3.14159265358979323846f;
 
 std::string humanBytes(size_t bytes)
 {
@@ -42,10 +42,11 @@ void drawPie(const std::vector<Render::MemoryReport::Entry>& entries, size_t tot
     const ImVec2 topLeft = ImGui::GetCursorScreenPos();
     const ImVec2 centre(topLeft.x + radius, topLeft.y + radius);
 
-    float angle = -IM_PI * 0.5f; // start at twelve o'clock
+    float angle = -kPi * 0.5f; // start at twelve o'clock
     for (size_t i = 0; i < entries.size() && total > 0; ++i)
     {
-        const float sweep = 2.0f * IM_PI * (float)((double)entries[i].bytes / (double)total);
+        const float sweep = 2.0f * kPi * static_cast<float>(static_cast<double>(entries[i].bytes) /
+                                                            static_cast<double>(total));
         // Under about a degree the arc degenerates and the fill draws nothing,
         // which would silently drop the slice. Skipping it explicitly at least
         // keeps the colours aligned with the legend.

@@ -46,8 +46,21 @@ public:
     {
         return mRenderBusy.load(std::memory_order_acquire);
     }
+    bool denoiserFallbackActive() const override
+    {
+        return mDenoiserFallbackActive.load(std::memory_order_relaxed);
+    }
     Buffer* getReadyBuffer() override;
     void* getReadyTexture() override;
+    ReadyFrame getReadyFrame() override
+    {
+        const int readyIndex = mReadyIndex.load(std::memory_order_acquire);
+        if (readyIndex < 0 || readyIndex > 1)
+        {
+            return {};
+        }
+        return { mAsyncOutputBuffers[readyIndex], mPost.displayTexture(readyIndex) };
+    }
 
     bool memoryReport(MemoryReport& report) const override;
 
@@ -231,6 +244,7 @@ private:
     const bool mNoAccumColor = envFlag("STRELKA_NO_ACCUM_COLOR");
     std::atomic<int> mReadyIndex{ -1 };
     std::atomic<bool> mRenderBusy{ false };
+    std::atomic<bool> mDenoiserFallbackActive{ false };
     int mWriteIndex = 0;
 
     // Sync mode (headless CLI): retain the last committed buffer and wait on it.

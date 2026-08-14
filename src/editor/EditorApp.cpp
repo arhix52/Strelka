@@ -1,6 +1,11 @@
 #include "EditorApp.h"
 #include "editor_camera_framing.h"
 #include "editor_document.h"
+#include "editor_screenshot.h"
+
+#include "imgui_impl_glfw.h"
+#include "imgui_internal.h" // DockBuilder / window settings lookup
+#include "ImGuiFileDialog.h"
 
 #include <strelka/sceneloader/sceneserializer.h>
 #include <env.h>
@@ -12,6 +17,7 @@
 #include <limits>
 #include <cmath>
 #include <ctime>
+#include <optional>
 #include <vector>
 #include <unistd.h>
 
@@ -24,6 +30,15 @@ namespace oka
 namespace
 {
 constexpr double kInteractiveLoadTimeoutSec = 300.0;
+
+std::optional<std::string> environmentValue(const char* name)
+{
+    // Environment overrides are immutable after startup. Copy the value at the
+    // read boundary so no caller retains getenv's process-global storage.
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::optional<std::string>(value) : std::nullopt;
+}
 }
 
 EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSearchPath)
@@ -72,7 +87,6 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     camera.mOrientation = glm::quat(glm::vec3(0, 0, 0));
     camera.updateViewMatrix();
     m_scene->addCamera(camera);
-    m_selectedCamera = 0;
     setCameraDetached(false);
     m_cameraController = std::make_unique<CameraController>(m_scene->getCamera(m_selectedCamera), true);
     m_display->setInputHandler(m_cameraController.get());
@@ -265,9 +279,25 @@ void EditorApp::beginSceneLoad(const std::string& sceneFile, const std::string& 
 
 void EditorApp::framebufferResize(int newWidth, int newHeight)
 {
-    m_settingsManager->setAs<uint32_t>("render/width", static_cast<uint32_t>(newWidth));
-    m_settingsManager->setAs<uint32_t>("render/height", static_cast<uint32_t>(newHeight));
-    m_resized = true;
+    // Preview resolution is fixed by Render Settings. Window and dockspace
+    // resizes only change how ImGui presents that texture.
+    (void)newWidth;
+    (void)newHeight;
+}
+
+void EditorApp::applyPreviewResolution(uint32_t width, uint32_t height)
+{
+    width = std::clamp(width, editor_viewport::kMinPreviewDimension, editor_viewport::kMaxPreviewDimension);
+    height = std::clamp(height, editor_viewport::kMinPreviewDimension, editor_viewport::kMaxPreviewDimension);
+    if (m_settingsManager->getAs<uint32_t>("render/width") == width &&
+        m_settingsManager->getAs<uint32_t>("render/height") == height)
+    {
+        return;
+    }
+    m_settingsManager->setAs<uint32_t>("render/width", width);
+    m_settingsManager->setAs<uint32_t>("render/height", height);
+    m_sharedCtx->mSubframeIndex = 0;
+    m_render->resetTemporalHistory();
 }
 
 glm::vec3 EditorApp::computeSceneFitPosition(float fovDegrees) const
@@ -285,14 +315,14 @@ glm::vec3 EditorApp::computeSceneFitPosition(float fovDegrees) const
         aabbMax = glm::max(aabbMax, v.pos);
     }
 
-    glm::vec3 center = (aabbMin + aabbMax) * 0.5f;
+    const glm::vec3 center = (aabbMin + aabbMax) * 0.5f;
     float radius = glm::length(aabbMax - center);
     if (radius < 1e-6f)
         radius = 1.0f;
 
     // Distance so the bounding sphere fits in the vertical FOV
-    float halfFovRad = glm::radians(fovDegrees * 0.5f);
-    float distance = radius / std::tan(halfFovRad);
+    const float halfFovRad = glm::radians(fovDegrees * 0.5f);
+    const float distance = radius / std::tan(halfFovRad);
 
     // Position camera along -Z looking at center (worldForward = (0,0,-1))
     return center + glm::vec3(0.0f, 0.0f, distance);
@@ -389,8 +419,8 @@ void EditorApp::loadSettings()
 {
     STRELKA_DEBUG("Resource search path {}", m_resourceSearchPath);
 
-    const uint32_t imageWidth = 1024;
-    const uint32_t imageHeight = 768;
+    const uint32_t imageWidth = editor_viewport::kDefaultPreviewWidth;
+    const uint32_t imageHeight = editor_viewport::kDefaultPreviewHeight;
 
     m_settingsManager->setAs<uint32_t>("render/width", imageWidth);
     m_settingsManager->setAs<uint32_t>("render/height", imageHeight);
@@ -403,7 +433,8 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/debug", 0); // 0 - none, 1 - normals
     m_settingsManager->setAs<float>("render/cameraSpeed", 1.0f);
     m_settingsManager->setAs<float>("render/pt/upscaleFactor", 0.5f);
-    // MetalFX is opt-in; keep native-resolution output as the default.
+    // Preview resolution itself bounds interactive work. MetalFX remains an
+    // explicit quality/performance choice inside that fixed output.
     m_settingsManager->setAs<bool>("render/pt/enableUpscale", false);
     m_settingsManager->setAs<bool>("render/pt/enableAcc", true);
     m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
@@ -858,7 +889,7 @@ void EditorApp::runJitterTest()
         m_settingsManager->setAs<bool>("render/pt/enableAcc", false);
     }
 
-    const char* names[4] = { "(+x,+y)", "(-x,+y)", "(+x,-y)", "(-x,-y)" };
+    const char* const names[4] = { "(+x,+y)", "(-x,+y)", "(+x,-y)", "(-x,-y)" };
     for (uint32_t sign = 0; sign < 4; ++sign)
     {
         m_settingsManager->setAs<uint32_t>("render/pt/jitterSign", sign);
@@ -1084,7 +1115,7 @@ double auditSharp(const AuditImage& img)
 
 bool auditFinite(const AuditImage& img)
 {
-    for (float v : img.px)
+    for (const float v : img.px)
     {
         if (!std::isfinite(v))
             return false;
@@ -1121,8 +1152,8 @@ glm::float3 auditChannelMean(const AuditImage& img)
 // screen shows.
 void EditorApp::runLightAudit()
 {
-    const char* outDir = getenv("STRELKA_LIGHT_AUDIT");
-    const bool saveImages = outDir && outDir[0] && strchr(outDir, '/') != nullptr;
+    const std::optional<std::string> outDir = environmentValue("STRELKA_LIGHT_AUDIT");
+    const bool saveImages = outDir.has_value() && !outDir->empty() && outDir->find('/') != std::string::npos;
     const uint32_t refSpp = envUint("STRELKA_AUDIT_SPP", 32);
     const uint32_t auditW = envUint("STRELKA_AUDIT_W", 512);
     const uint32_t auditH = envUint("STRELKA_AUDIT_H", 384);
@@ -1196,7 +1227,7 @@ void EditorApp::runLightAudit()
         if (!saveImages || !img.valid())
             return;
         const char* err = nullptr;
-        SaveEXR(img.px.data(), (int)img.w, (int)img.h, 4, 0, (std::string(outDir) + "/" + name + ".exr").c_str(), &err);
+        SaveEXR(img.px.data(), (int)img.w, (int)img.h, 4, 0, (*outDir + "/" + name + ".exr").c_str(), &err);
         if (err)
             FreeEXRErrorMessage(err);
     };
@@ -1611,8 +1642,8 @@ void EditorApp::runPauseBlurCheck()
 
 void EditorApp::runDenoiseAudit()
 {
-    const char* outDir = getenv("STRELKA_DENOISE_AUDIT");
-    const bool saveImages = outDir && outDir[0] && strchr(outDir, '/') != nullptr;
+    const std::optional<std::string> outDir = environmentValue("STRELKA_DENOISE_AUDIT");
+    const bool saveImages = outDir.has_value() && !outDir->empty() && outDir->find('/') != std::string::npos;
     // The reference is bounded by samples, not by time: past a couple of hundred
     // the estimator has converged and the renderer is only re-showing the same
     // picture, so waiting longer buys nothing.
@@ -1744,7 +1775,7 @@ void EditorApp::runDenoiseAudit()
             return;
         const char* err = nullptr;
         SaveEXR(img.px.data(), (int)img.w, (int)img.h, 4, 0,
-                (std::string(outDir) + "/" + name + ".exr").c_str(), &err);
+                (*outDir + "/" + name + ".exr").c_str(), &err);
         if (err)
             FreeEXRErrorMessage(err);
         const size_t pixelCount = (size_t)img.w * img.h;
@@ -1753,7 +1784,7 @@ void EditorApp::runDenoiseAudit()
         {
             bytes[i] = (uint8_t)std::lround(std::clamp(img.px[i], 0.0f, 1.0f) * 255.0f);
         }
-        stbi_write_png((std::string(outDir) + "/" + name + ".png").c_str(), (int)img.w, (int)img.h, 4,
+        stbi_write_png((*outDir + "/" + name + ".png").c_str(), (int)img.w, (int)img.h, 4,
                        bytes.data(), (int)img.w * 4);
     };
 
@@ -2087,7 +2118,9 @@ void EditorApp::runDenoiseAudit()
             std::sort(floorDeltas.begin(), floorDeltas.end());
         }
         const double floorDelta =
-            floorDeltas.empty() ? 0.0 : floorDeltas[(size_t)(floorDeltas.size() * 0.99)];
+            floorDeltas.empty()
+                ? 0.0
+                : floorDeltas[static_cast<size_t>(static_cast<double>(floorDeltas.size()) * 0.99)];
         const double movedThreshold = std::max(4.0 * floorDelta, 0.01);
 
         // A step the renderer still calls playback. Animation time is normalised
@@ -2226,8 +2259,8 @@ void EditorApp::runDenoiseAudit()
                 const double swim = reconstruct("sweep", 0.0f, 0.0f, 0.0f, 0.0f, last);
                 int dx = 0, dy = 0;
                 const double rmse = auditRmse(last, truth, dx, dy);
-                static const char* kDepthNames[3] = { "device", "viewZ", "radial" };
-                static const char* kSignNames[4] = { "(+x,+y)", "(-x,+y)", "(+x,-y)", "(-x,-y)" };
+                static const char* const kDepthNames[3] = { "device", "viewZ", "radial" };
+                static const char* const kSignNames[4] = { "(+x,+y)", "(-x,+y)", "(+x,-y)", "(-x,-y)" };
                 report(fmt::format(
                     "AUDIT sweep depth={:6s} jitter={:7s} rmse={:.5f} shift({},{}) swim={:.5f} sharp={:.5f}",
                     kDepthNames[depthMode], kSignNames[sign], rmse, dx, dy, swim, auditSharp(last)));
@@ -2544,9 +2577,11 @@ void EditorApp::runDenoiseAudit()
             const double pct = moved ? 100.0 / (double)moved : 0.0;
             report(fmt::format("AUDIT motioncheck camera {} : n={} ignoring={:.1f}%  (+x,+y)={:.1f}%  "
                                "(-x,+y)={:.1f}%  (+x,-y)={:.1f}%  (-x,-y)={:.1f}%",
-                               axis == 0 ? "right" : "up   ", moved, hitWithout * pct,
-                               hitVariant[0] * pct, hitVariant[1] * pct, hitVariant[2] * pct,
-                               hitVariant[3] * pct));
+                               axis == 0 ? "right" : "up   ", moved, static_cast<double>(hitWithout) * pct,
+                               static_cast<double>(hitVariant[0]) * pct,
+                               static_cast<double>(hitVariant[1]) * pct,
+                               static_cast<double>(hitVariant[2]) * pct,
+                               static_cast<double>(hitVariant[3]) * pct));
             if (moved > 100 && hitVariant[0] <= hitWithout)
                 report(fmt::format("AUDIT FAIL motion vectors ({} move) are no better than assuming "
                                    "nothing moved",
@@ -2655,8 +2690,8 @@ void EditorApp::runDenoiseAudit()
             moving.assign(pixels, 2); // 2 = neither, excluded from both measures
             if (!sorted.empty())
             {
-                const double hi = sorted[(size_t)(sorted.size() * 0.90)];
-                const double lo = sorted[(size_t)(sorted.size() * 0.50)];
+                const double hi = sorted[static_cast<size_t>(static_cast<double>(sorted.size()) * 0.90)];
+                const double lo = sorted[static_cast<size_t>(static_cast<double>(sorted.size()) * 0.50)];
                 for (size_t p = 0; p < pixels; ++p)
                 {
                     if (haveSurface && !surface[p])
@@ -2738,8 +2773,10 @@ void EditorApp::runDenoiseAudit()
                 }
                 report(fmt::format("AUDIT guide-on-mesh {:14s} mesh len={:.4f} sum|v|={:.4f} | rest len={:.4f} "
                                    "sum|v|={:.4f}",
-                                   name, nMesh ? sumMesh / nMesh : -1.0, nMesh ? magMesh / nMesh : -1.0,
-                                   nRest ? sumRest / nRest : -1.0, nRest ? magRest / nRest : -1.0));
+                                   name, nMesh ? sumMesh / static_cast<double>(nMesh) : -1.0,
+                                   nMesh ? magMesh / static_cast<double>(nMesh) : -1.0,
+                                   nRest ? sumRest / static_cast<double>(nRest) : -1.0,
+                                   nRest ? magRest / static_cast<double>(nRest) : -1.0));
             };
             guideStats("normal", Render::Guide::Normal, 3);
             guideStats("diffuseAlbedo", Render::Guide::DiffuseAlbedo, 3);
@@ -3075,7 +3112,7 @@ void EditorApp::runDenoiseAudit()
 // Reference capture / estimator self-consistency check (STRELKA_REF=<dir>).
 void EditorApp::runReferenceCapture()
 {
-    const char* outDir = getenv("STRELKA_REF");
+    const std::optional<std::string> outDir = environmentValue("STRELKA_REF");
     const uint32_t spp = envUint("STRELKA_REF_SPP", 512);
 
     struct C { const char* name; uint32_t estimator; bool analyticLights; };
@@ -3137,19 +3174,19 @@ void EditorApp::runReferenceCapture()
                 meanLum += 0.2126*px[i] + 0.7152*px[i+1] + 0.0722*px[i+2];
             const size_t pixelCount = n / 4;
             meanLum /= (double)pixelCount;
-            if (outDir)
+            if (outDir.has_value())
             {
-                saveScreenshot(rb, std::string(outDir) + "/" + c.name + ".exr");
+                saveScreenshot(rb, *outDir + "/" + c.name + ".exr");
             }
             // ...and what the screen actually shows, which after MetalFX is a
             // different image at a different resolution.
             std::vector<float> shown;
             uint32_t sw = 0, sh = 0;
-            if (outDir && m_render->readDisplayTexture(shown, sw, sh))
+            if (outDir.has_value() && m_render->readDisplayTexture(shown, sw, sh))
             {
                 const char* err = nullptr;
                 SaveEXR(shown.data(), (int)sw, (int)sh, 4, 0,
-                        (std::string(outDir) + "/" + c.name + "_display.exr").c_str(), &err);
+                        (*outDir + "/" + c.name + "_display.exr").c_str(), &err);
             }
         }
         images.push_back(std::move(img));
@@ -3213,8 +3250,8 @@ void EditorApp::runReferenceCapture()
 // ---------------------------------------------------------------------------
 void EditorApp::runConvergenceSweep()
 {
-    const char* outDir = getenv("STRELKA_CONV");
-    const bool saveImages = outDir && strchr(outDir, '/') != nullptr;
+    const std::optional<std::string> outDir = environmentValue("STRELKA_CONV");
+    const bool saveImages = outDir.has_value() && outDir->find('/') != std::string::npos;
     const uint32_t maxSpp = envUint("STRELKA_CONV_MAX", 1024);
     const uint32_t firstSpp = envUint("STRELKA_CONV_MIN", 16);
     // Small on purpose. Every metric here is an average over pixels, so a
@@ -3226,8 +3263,8 @@ void EditorApp::runConvergenceSweep()
     // sample count) and must divide the checkpoints, so it is a power of two.
     const uint32_t sppPerLaunch = envUint("STRELKA_CONV_STEP", 8);
     const double budgetSec = envDouble("STRELKA_CONV_BUDGET", 600.0);
-    const char* samplersEnvRaw = getenv("STRELKA_CONV_SAMPLERS");
-    const char* samplersEnv = samplersEnvRaw != nullptr ? samplersEnvRaw : "0,1,2";
+    const std::optional<std::string> samplersEnvValue = environmentValue("STRELKA_CONV_SAMPLERS");
+    const std::string samplersEnv = samplersEnvValue.value_or("0,1,2");
 
     const auto startTime = std::chrono::steady_clock::now();
     auto elapsed = [&]() {
@@ -3334,7 +3371,8 @@ void EditorApp::runConvergenceSweep()
             l.push_back(0.2126 * a[i] + 0.7152 * a[i + 1] + 0.0722 * a[i + 2]);
         if (l.empty())
             return 0.0;
-        std::nth_element(l.begin(), l.begin() + l.size() / 2, l.end());
+        const auto middle = static_cast<std::vector<double>::difference_type>(l.size() / 2);
+        std::nth_element(l.begin(), l.begin() + middle, l.end());
         return l[l.size() / 2];
     };
 
@@ -3382,7 +3420,7 @@ void EditorApp::runConvergenceSweep()
         return std::sqrt(se / (double)((size_t)w * h * 3));
     };
 
-    static const char* kSamplerNames[] = { "Halton", "PCG", "Sobol", "SobolBN", "Hybrid" };
+    static const char* const kSamplerNames[] = { "Halton", "PCG", "Sobol", "SobolBN", "Hybrid" };
     // Deepest snapshot per sampler, kept for the cross-check at the end.
     std::vector<float> deepest[5];
     uint32_t deepestSpp[5] = { 0, 0, 0, 0, 0 };
@@ -3392,7 +3430,7 @@ void EditorApp::runConvergenceSweep()
                        1u));
 
     // A comma-separated list, so it is parsed here rather than through envUint.
-    for (const char* p = samplersEnv; p != nullptr && *p != '\0';)
+    for (const char* p = samplersEnv.c_str(); p != nullptr && *p != '\0';)
     {
         char* end = nullptr;
         const long parsed = std::strtol(p, &end, 10);
@@ -3439,7 +3477,7 @@ void EditorApp::runConvergenceSweep()
             {
                 const char* err = nullptr;
                 SaveEXR(snaps[c].data(), (int)convW, (int)convH, 4, 0,
-                        fmt::format("{}/{}_{:05d}.exr", outDir, kSamplerNames[samplerType], checkpoints[c])
+                        fmt::format("{}/{}_{:05d}.exr", *outDir, kSamplerNames[samplerType], checkpoints[c])
                             .c_str(),
                         &err);
             }
@@ -3614,7 +3652,7 @@ void EditorApp::run()
         m_cameraController->update(deltaTime, cameraSpeed);
         prevTime = currentTime;
 
-        playAnimations(deltaTime);
+        playAnimations(static_cast<float>(deltaTime));
 
         // Consumed every frame so a gesture cannot be acted on twice.
         const bool userMovedCamera = m_cameraController->consumeUserMovedCamera();
@@ -3681,12 +3719,6 @@ void EditorApp::run()
         checkLoadingComplete();
         handleDeviceError();
 
-        if (m_resized)
-        {
-            m_resized = false;
-            m_sharedCtx->mSubframeIndex = 0;
-        }
-
         // getMaxEDR() crosses into AppKit; the value only changes when the window
         // moves between displays, so poll it a few times a second instead of
         // every frame.
@@ -3699,7 +3731,8 @@ void EditorApp::run()
         // Display: always runs at vsync, independent of render
         m_display->onBeginFrame();
 
-        oka::Buffer* readyBuf = m_render->getReadyBuffer();
+        const Render::ReadyFrame readyFrame = m_render->getReadyFrame();
+        oka::Buffer* readyBuf = readyFrame.buffer;
         // Not the first frame that happens to be ready. Exposure is measured
         // once and then multiplies every pixel for the rest of the session, so
         // measuring it off an arbitrary frame makes the whole picture depend on
@@ -3747,9 +3780,13 @@ void EditorApp::run()
             outputImage.pixel_format = oka::BufferFormat::FLOAT4;
             // Metal hands over the tonemapped texture directly; the buffer is
             // still there and still linear, which is what a screenshot wants.
-            outputImage.deviceTexture = m_render->getReadyTexture();
+            outputImage.deviceTexture = readyFrame.texture;
             outputImage.dataSize = (size_t)readyBuf->width() * readyBuf->height() * readyBuf->getElementSize();
             m_display->drawFrame(outputImage);
+            // Viewport layout must describe the exact texture adopted above,
+            // even if another render slot completes before ImGui is encoded.
+            mPresentedPreviewWidth = readyBuf->width();
+            mPresentedPreviewHeight = readyBuf->height();
         }
 
         // Match the Metal backend: when minimised / no drawable, skip ImGui so
@@ -3791,7 +3828,8 @@ void EditorApp::run()
         {
             m_lastTitleUpdate = currentTime;
             const std::string title = editor_document::formatWindowTitle(
-                m_documentDirty, m_sceneFile, m_render->getLastRenderTimeMs(), m_sharedCtx->mSubframeIndex);
+                m_documentDirty, m_sceneFile, static_cast<float>(m_render->getLastRenderTimeMs()),
+                m_sharedCtx->mSubframeIndex);
             m_display->setWindowTitle(title.c_str());
         }
     }
@@ -3826,17 +3864,29 @@ void EditorApp::playAnimations(const float deltaTime)
 
 void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
 {
-    const uint32_t w = buf->width();
-    const uint32_t h = buf->height();
-    const float* data = static_cast<const float*>(buf->getHostPointer());
-
     auto dotPos = path.find_last_of('.');
     std::string ext = (dotPos != std::string::npos) ? path.substr(dotPos) : "";
+    uint32_t w = buf->width();
+    uint32_t h = buf->height();
+    const float* data = static_cast<const float*>(buf->getHostPointer());
+    std::vector<float> displayPixels;
+    if (editor_screenshot::sourceForExtension(ext) == editor_screenshot::Source::DisplayPreview)
+    {
+        uint32_t displayWidth = 0;
+        uint32_t displayHeight = 0;
+        if (m_render->readDisplayTexture(displayPixels, displayWidth, displayHeight) && !displayPixels.empty())
+        {
+            w = displayWidth;
+            h = displayHeight;
+            data = displayPixels.data();
+        }
+    }
 
     if (ext == ".exr")
     {
         const char* err = nullptr;
-        int ret = SaveEXR(data, w, h, 4, 0, path.c_str(), &err);
+        const int ret =
+            SaveEXR(data, static_cast<int>(w), static_cast<int>(h), 4, 0, path.c_str(), &err);
         if (ret != TINYEXR_SUCCESS)
         {
             STRELKA_INFO("ACTION screenshot path={} ok=false", path);
@@ -3863,7 +3913,8 @@ void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
                 pixels[i * 4 + c] = static_cast<uint8_t>(std::lround(v * 255.0f));
             }
         }
-        int ret = stbi_write_png(path.c_str(), w, h, 4, pixels.data(), w * 4);
+        const int ret = stbi_write_png(path.c_str(), static_cast<int>(w), static_cast<int>(h), 4, pixels.data(),
+                                       static_cast<int>(w * 4));
         if (!ret)
         {
             STRELKA_INFO("ACTION screenshot path={} ok=false", path);
@@ -4207,7 +4258,7 @@ void EditorApp::drawUI()
 
     m_cameraController->setGizmoBlocksInput(ImGuizmo::IsOver() || ImGuizmo::IsUsing());
 
-    ImGuiIO& io = ImGui::GetIO();
+    const ImGuiIO& io = ImGui::GetIO();
 
     // Hotkeys
     if (!io.WantTextInput)

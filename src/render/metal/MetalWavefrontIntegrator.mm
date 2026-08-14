@@ -159,11 +159,13 @@ void MetalWavefrontIntegrator::createStageTimestampBuffer()
         STRELKA_WARNING("stage profiling unavailable: no counter sampling at encoder boundaries");
         return;
     }
-    MTL::CounterSet* timestampSet = nullptr;
-    NS::Array* sets = mDevice->counterSets();
+    const MTL::CounterSet* timestampSet = nullptr;
+    const NS::Array* sets = mDevice->counterSets();
     for (NS::UInteger i = 0; sets && i < sets->count(); ++i)
     {
-        MTL::CounterSet* set = static_cast<MTL::CounterSet*>(sets->object(i));
+        // metal-cpp exposes this framework-owned collection as NS::Object.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
+        const MTL::CounterSet* set = static_cast<MTL::CounterSet*>(sets->object(i));
         if (set->name()->isEqualToString(MTL::CommonCounterSetTimestamp))
         {
             timestampSet = set;
@@ -222,7 +224,7 @@ void MetalWavefrontIntegrator::reportStageTimingsMetal4(double lastRenderTimeMs)
         return;
     }
     const NS::UInteger n = mStageKinds.size() + 1;
-    NS::Data* data = mStageCounterHeap->resolveCounterRange(NS::Range::Make(0, n));
+    const NS::Data* data = mStageCounterHeap->resolveCounterRange(NS::Range::Make(0, n));
     if (!data)
     {
         return;
@@ -322,7 +324,7 @@ void MetalWavefrontIntegrator::reportStageTimings()
         return;
     }
     const NS::UInteger n = 2 * mStageKinds.size();
-    NS::Data* data = mStageTimestampBuffer->resolveCounterRange(NS::Range::Make(0, n));
+    const NS::Data* data = mStageTimestampBuffer->resolveCounterRange(NS::Range::Make(0, n));
     if (!data)
     {
         return;
@@ -445,7 +447,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::CommandBuffer* cmd, MTL4::Comp
     const uint32_t pixels = width * height;
     const uint32_t bounceIterations = frame.bounceIterations;
     MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
-    const auto* uniforms = reinterpret_cast<const Uniforms*>(uniformBuffer->contents());
+    const auto* uniforms = static_cast<const Uniforms*>(uniformBuffer->contents());
     const uint32_t dispatchSampleCount = sampleCount + (uniforms->canonicalGuideSample ? 1u : 0u);
 
     MTL4::ArgumentTable* table = mMetal4->argumentTable();
@@ -625,7 +627,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::CommandBuffer* cmd, MTL4::Comp
             bind(sampleRadiance, 0, 7);
             bind(mIorStackBuffer, 0, 8);
             bind(scene.geometryEntryBuffer, 0, 9);
-            bind(scene.environment->state().aliasBuffer, 0, 10);
+            bind(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 10);
             bind(scene.vertexBuffer, 0, 11);
             bind(scene.prevVertexBuffer, 0, 12);
             bind(scene.indexBuffer, 0, 13);
@@ -740,8 +742,8 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     const uint32_t pixels = width * height;
     const WavefrontVariant* variant = variantFor(features);
     const uint32_t bounceIterations = frame.bounceIterations;
-    MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
-    const auto* uniforms = reinterpret_cast<const Uniforms*>(uniformBuffer->contents());
+    const MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
+    const auto* uniforms = static_cast<const Uniforms*>(uniformBuffer->contents());
     const uint32_t dispatchSampleCount = sampleCount + (uniforms->canonicalGuideSample ? 1u : 0u);
 
     // Textures are reached through resource IDs inside the Material struct, so
@@ -750,11 +752,16 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     auto declareResidency = [&](MTL::ComputeCommandEncoder* e) {
         if (scene.textures && !scene.textures->materialTextures().empty())
         {
+            // Metal's batched residency API accepts Resource pointers, while
+            // metal-cpp exposes the same Objective-C objects as Texture pointers.
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
             e->useResources(reinterpret_cast<const MTL::Resource* const*>(scene.textures->materialTextures().data()),
                             scene.textures->materialTextures().size(), MTL::ResourceUsageRead);
         }
         if (scene.primitiveAccelerationStructures && !scene.primitiveAccelerationStructures->empty())
         {
+            // See the Texture batch above; these are also Resource objects in Metal.
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
             e->useResources(reinterpret_cast<const MTL::Resource* const*>(scene.primitiveAccelerationStructures->data()),
                             scene.primitiveAccelerationStructures->size(), MTL::ResourceUsageRead);
         }
@@ -802,7 +809,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             return;
         }
         enc->endEncoding();
-        MTL::ComputePassDescriptor* desc = MTL::ComputePassDescriptor::computePassDescriptor();
+        const MTL::ComputePassDescriptor* desc = MTL::ComputePassDescriptor::computePassDescriptor();
         MTL::ComputePassSampleBufferAttachmentDescriptor* att =
             desc->sampleBufferAttachments()->object(0);
         att->setSampleBuffer(mStageTimestampBuffer);
@@ -819,7 +826,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
 
     for (uint32_t s = 0; s < dispatchSampleCount; ++s)
     {
-        MTL::Buffer* sampleRadiance =
+        const MTL::Buffer* sampleRadiance =
             (uniforms->canonicalGuideSample && s == 0u) ? mGuideRadianceBuffer : mRadianceBuffer;
         stamp(kStageGenerate);
         enc->setComputePipelineState(variant->generate);
@@ -917,7 +924,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBuffer(sampleRadiance, 0, 7);
             enc->setBuffer(mIorStackBuffer, 0, 8);
             enc->setBuffer(scene.geometryEntryBuffer, 0, 9);
-            enc->setBuffer(scene.environment->state().aliasBuffer, 0, 10);
+            enc->setBuffer(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 10);
             enc->setBuffer(scene.vertexBuffer, 0, 11);
             enc->setBuffer(scene.prevVertexBuffer, 0, 12);
             enc->setBuffer(scene.indexBuffer, 0, 13);
@@ -1126,7 +1133,7 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
             NS::String::string(anyHitName.c_str(), NS::UTF8StringEncoding), values, &err);
         if (anyHitFn)
         {
-            const NS::Object* fns[] = { anyHitFn };
+            const NS::Object* const fns[] = { anyHitFn };
             linked = MTL::LinkedFunctions::alloc()->init();
             linked->setFunctions(NS::Array::array(fns, 1));
         }
@@ -1198,7 +1205,7 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
                 return nullptr;
             // By name on the Metal 4 path: linking there is stated with
             // descriptors, so there is no MTL::Function to ask for a handle.
-            MTL::FunctionHandle* handle =
+            const MTL::FunctionHandle* handle =
                 anyHitFn ? pso->functionHandle(anyHitFn)
                          : pso->functionHandle(
                                NS::String::string(anyHitName.c_str(), NS::UTF8StringEncoding));
@@ -1364,6 +1371,5 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height)
     mCapacity = pixels;
 
     STRELKA_INFO("wavefront buffers for {}x{}: {:.1f} MB total", width, height,
-                 (pixels * (sizeof(PathState) + sizeof(HitRecord) + sizeof(IorStack) + sizeof(simd::float4)))
-                     / (1024.0 * 1024.0));
+                 queueBytes() / (1024.0 * 1024.0));
 }

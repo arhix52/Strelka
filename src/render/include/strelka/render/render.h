@@ -26,6 +26,12 @@ enum class RenderType : int
 class Render
 {
 public:
+    struct ReadyFrame
+    {
+        Buffer* buffer = nullptr;
+        void* texture = nullptr;
+    };
+
     virtual ~Render() = default;
 
     virtual void init() = 0;
@@ -60,17 +66,30 @@ public:
     /// the offline `metal` compiler produces AIR, where registers are still
     /// virtual. Requires MTL_CAPTURE_ENABLED=1 in the environment *before* the
     /// device is created -- main() sets it when the flag is given.
-    virtual void beginGpuCapture(const std::string&) {}
-    virtual void endGpuCapture() {}
+    virtual void beginGpuCapture(const std::string&)
+    {
+    }
+    virtual void endGpuCapture()
+    {
+    }
 
     /// Start a render pass if the GPU is idle. Non-blocking.
-    virtual void triggerRenderIfIdle() {}
+    virtual void triggerRenderIfIdle()
+    {
+    }
 
     /// True while a submitted frame has not finished on the GPU. The interactive
     /// loop does not need this -- it just draws whatever is ready -- but anything
     /// measuring a frame has to know when that frame is actually there, and
     /// sleeping a guessed interval instead makes the measurement a race.
-    virtual bool isRenderBusy() const { return false; }
+    virtual bool isRenderBusy() const
+    {
+        return false;
+    }
+    virtual bool denoiserFallbackActive() const
+    {
+        return false;
+    }
 
     /// Return the last completed output buffer, or nullptr if none ready yet.
     /// The finished frame as a texture, when the backend can produce one.
@@ -136,7 +155,14 @@ public:
         return false;
     }
 
-    virtual Buffer* getReadyBuffer() { return nullptr; }
+    virtual Buffer* getReadyBuffer()
+    {
+        return nullptr;
+    }
+    virtual ReadyFrame getReadyFrame()
+    {
+        return { getReadyBuffer(), getReadyTexture() };
+    }
 
     /// Where the memory went, measured rather than estimated.
     ///
@@ -150,12 +176,12 @@ public:
     {
         struct Entry
         {
-            const char* name;
-            size_t bytes;
+            const char* name = nullptr;
+            size_t bytes = 0;
         };
-        std::vector<Entry> gpu;
-        std::vector<Entry> cpu;
-        size_t deviceAllocated = 0;  ///< the backend's own total, 0 if it cannot say
+        std::vector<Entry> gpu{};
+        std::vector<Entry> cpu{};
+        size_t deviceAllocated = 0; ///< the backend's own total, 0 if it cannot say
         size_t processFootprint = 0; ///< what the OS charges this process
     };
     virtual bool memoryReport(MemoryReport&) const
@@ -181,7 +207,10 @@ public:
     }
 
     /// Last completed render frame time in milliseconds (GPU time).
-    double getLastRenderTimeMs() const { return mLastRenderTimeMs.load(std::memory_order_relaxed); }
+    double getLastRenderTimeMs() const
+    {
+        return mLastRenderTimeMs.load(std::memory_order_relaxed);
+    }
 
     virtual void* getNativeDevicePtr()
     {
@@ -228,6 +257,10 @@ public:
     {
         return mSettingsManager;
     }
+    const SettingsManager* getSettings() const
+    {
+        return mSettingsManager;
+    }
 
     void setScene(Scene* scene)
     {
@@ -242,10 +275,10 @@ public:
 protected:
     /// Null unless a caller asked for progress; every use is guarded.
     LoadProgress* mLoadProgress = nullptr;
-    SettingsManager* mSettingsManager;
+    SettingsManager* mSettingsManager = nullptr;
     SharedContext* mSharedCtx = nullptr;
     oka::Scene* mScene = nullptr;
-    std::atomic<double> mLastRenderTimeMs{0.0};
+    std::atomic<double> mLastRenderTimeMs{ 0.0 };
 };
 
 class RenderFactory

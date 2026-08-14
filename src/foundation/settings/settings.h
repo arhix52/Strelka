@@ -46,7 +46,7 @@ public:
     /// default-constructed value rather than inserting a bogus entry (the old
     /// `mMap[name]` did) or throwing std::bad_variant_access from the render loop.
     template <typename T>
-    T getAs(std::string_view name)
+    T getAs(std::string_view name) const
     {
         const auto it = mMap.find(name);
         if (it == mMap.end())

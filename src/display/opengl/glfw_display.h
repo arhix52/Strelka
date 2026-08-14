@@ -14,14 +14,16 @@ class GlfwDisplay : public Display
 {
 private:
     // OpenGL texture for CUDA rendering
-    cudaGraphicsResource* cudaResource;
+    cudaGraphicsResource* cudaResource = nullptr;
     GLuint m_render_tex = 0u;
+    uint32_t mRenderTextureWidth = 0;
+    uint32_t mRenderTextureHeight = 0;
 
 public:
     GlfwDisplay();
     ~GlfwDisplay() override;
 
-    virtual void init(int width, int height, SettingsManager* settings) override;
+    void init(int width, int height, SettingsManager* settings) override;
     void destroy() override;
 
     void onBeginFrame() override;

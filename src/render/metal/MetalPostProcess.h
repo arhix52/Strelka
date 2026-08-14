@@ -141,9 +141,9 @@ private:
     MTL::ComputePipelineState* mDenoisedToBufferPSO = nullptr;
 
     MTL::Texture* mDisplayTextures[2] = { nullptr, nullptr };
-    uint32_t mDisplayTextureWidth = 0;
-    uint32_t mDisplayTextureHeight = 0;
-    MTL::TextureUsage mDisplayTextureUsage = 0;
+    uint32_t mDisplayTextureWidth[2] = { 0, 0 };
+    uint32_t mDisplayTextureHeight[2] = { 0, 0 };
+    MTL::TextureUsage mDisplayTextureUsage[2] = { 0, 0 };
 
     MTL::Texture* mUpscaleTextures[2] = { nullptr, nullptr };
     uint32_t mUpscaleTextureWidth = 0;

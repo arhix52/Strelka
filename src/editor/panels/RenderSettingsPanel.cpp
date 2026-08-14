@@ -1,5 +1,6 @@
 #include "../EditorApp.h"
 #include "../editor_camera_exposure.h"
+#include "../../render/metal/render_resolution.h"
 
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
@@ -27,16 +28,16 @@ void EditorApp::drawRenderSettingsPanel()
     }
 
     // Must match DebugMode in ShaderTypes.h, in order.
-    const char* debugViewOptions[] = { "None",           "Normals",        "Motion Blur",
-                                       "AOV: diffuse",   "AOV: specular",  "AOV: normal",
-                                       "AOV: roughness", "AOV: depth",     "AOV: motion",
-                                       "AOV: reactive",  "AOV: spec hit distance" };
+    const char* const debugViewOptions[] = { "None",           "Normals",        "Motion Blur",
+                                             "AOV: diffuse",   "AOV: specular",  "AOV: normal",
+                                             "AOV: roughness", "AOV: depth",     "AOV: motion",
+                                             "AOV: reactive",  "AOV: spec hit distance" };
     static int currentDebugViewOption = 0;
     if (ImGui::BeginCombo("Debug view", debugViewOptions[currentDebugViewOption]))
     {
         for (int n = 0; n < IM_ARRAYSIZE(debugViewOptions); n++)
         {
-            bool is_selected = (currentDebugViewOption == n);
+            const bool is_selected = (currentDebugViewOption == n);
             if (ImGui::Selectable(debugViewOptions[n], is_selected))
             {
                 if (currentDebugViewOption != n)
@@ -56,7 +57,7 @@ void EditorApp::drawRenderSettingsPanel()
     // Camera selection
     {
         const auto& cameras = m_scene->getCameras();
-        int cameraCount = (int)cameras.size();
+        const int cameraCount = static_cast<int>(cameras.size());
         if (cameraCount > 0)
         {
             const char* previewName = cameras[m_selectedCamera].name.c_str();
@@ -64,7 +65,7 @@ void EditorApp::drawRenderSettingsPanel()
             {
                 for (int n = 0; n < cameraCount; n++)
                 {
-                    bool is_selected = (m_selectedCamera == n);
+                    const bool is_selected = (m_selectedCamera == n);
                     if (ImGui::Selectable(cameras[n].name.c_str(), is_selected))
                     {
                         if (m_selectedCamera != n)
@@ -114,7 +115,7 @@ void EditorApp::drawRenderSettingsPanel()
     {
         oka::Camera& cam = m_scene->getCamera(m_selectedCamera);
         bool changed = false;
-        bool linkDof = m_settingsManager->getAs<bool>("render/post/tonemapper/linkDofFStop");
+        const bool linkDof = m_settingsManager->getAs<bool>("render/post/tonemapper/linkDofFStop");
         float exposureFStop = m_settingsManager->getAs<float>("render/post/tonemapper/fStop");
         // Keep the lens f-stop aligned with exposure whenever the link is on so
         // lensRadius and the path tracer see the same N the exposure panel edits.
@@ -183,6 +184,73 @@ void EditorApp::drawRenderSettingsPanel()
         ImGui::TreePop();
     }
 
+    if (ImGui::TreeNodeEx("Preview Resolution", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        uint32_t previewWidth = m_settingsManager->getAs<uint32_t>("render/width");
+        uint32_t previewHeight = m_settingsManager->getAs<uint32_t>("render/height");
+        const int preset = editor_viewport::findPreset(previewWidth, previewHeight);
+        static bool customSelected = false;
+        int selectedPreset =
+            !customSelected && preset >= 0 ? preset : static_cast<int>(editor_viewport::kPreviewPresets.size());
+        const char* const presetNames[] = {
+            editor_viewport::kPreviewPresets[0].label,
+            editor_viewport::kPreviewPresets[1].label,
+            editor_viewport::kPreviewPresets[2].label,
+            editor_viewport::kPreviewPresets[3].label,
+            "Custom",
+        };
+        if (ImGui::Combo("Preset", &selectedPreset, presetNames, IM_ARRAYSIZE(presetNames)))
+        {
+            customSelected = selectedPreset == static_cast<int>(editor_viewport::kPreviewPresets.size());
+            if (!customSelected && selectedPreset >= 0 &&
+                selectedPreset < static_cast<int>(editor_viewport::kPreviewPresets.size()))
+            {
+                const editor_viewport::PreviewPreset& selected = editor_viewport::kPreviewPresets[selectedPreset];
+                applyPreviewResolution(selected.width, selected.height);
+                previewWidth = selected.width;
+                previewHeight = selected.height;
+            }
+        }
+
+        if (customSelected)
+        {
+            static bool lockAspect = true;
+            int customWidth = static_cast<int>(previewWidth);
+            int customHeight = static_cast<int>(previewHeight);
+            const float aspect =
+                previewHeight > 0 ? static_cast<float>(previewWidth) / static_cast<float>(previewHeight) : 1.0f;
+            if (ImGui::InputInt("Width", &customWidth))
+            {
+                const uint32_t width = editor_viewport::clampPreviewDimension(customWidth);
+                const uint32_t height =
+                    lockAspect
+                        ? editor_viewport::clampPreviewDimension(
+                              static_cast<int>(std::lround(static_cast<float>(width) / aspect)))
+                               : previewHeight;
+                applyPreviewResolution(width, height);
+            }
+            if (ImGui::InputInt("Height", &customHeight))
+            {
+                const uint32_t height = editor_viewport::clampPreviewDimension(customHeight);
+                const uint32_t width =
+                    lockAspect
+                        ? editor_viewport::clampPreviewDimension(
+                              static_cast<int>(std::lround(static_cast<float>(height) * aspect)))
+                               : previewWidth;
+                applyPreviewResolution(width, height);
+            }
+            ImGui::Checkbox("Lock aspect ratio", &lockAspect);
+            ImGui::SameLine();
+            if (ImGui::Button("Swap"))
+            {
+                applyPreviewResolution(previewHeight, previewWidth);
+            }
+        }
+
+        ImGui::TextDisabled("Viewport resize changes presentation only");
+        ImGui::TreePop();
+    }
+
     if (ImGui::TreeNode("Path Tracer"))
     {
         const char* rectlightSamplingMethodItems[] = { "Uniform", "Advanced" };
@@ -191,10 +259,12 @@ void EditorApp::drawRenderSettingsPanel()
         {
             for (const auto& item : rectlightSamplingMethodItems)
             {
-                bool is_selected = (item == rectlightSamplingMethodItems[currentRectlightSamplingMethodItemId]);
+                const bool is_selected =
+                    (item == rectlightSamplingMethodItems[currentRectlightSamplingMethodItemId]);
                 if (ImGui::Selectable(item, is_selected))
                 {
-                    currentRectlightSamplingMethodItemId = &item - rectlightSamplingMethodItems;
+                    currentRectlightSamplingMethodItemId =
+                        static_cast<int>(&item - rectlightSamplingMethodItems);
                 }
                 if (is_selected)
                 {
@@ -216,7 +286,7 @@ void EditorApp::drawRenderSettingsPanel()
         {
             for (const auto& item : samplerTypeItems)
             {
-                bool is_selected = (item == samplerTypeItems[currentSamplerTypeId]);
+                const bool is_selected = (item == samplerTypeItems[currentSamplerTypeId]);
                 if (ImGui::Selectable(item, is_selected))
                 {
                     currentSamplerTypeId = (int)(&item - samplerTypeItems);
@@ -274,17 +344,24 @@ void EditorApp::drawRenderSettingsPanel()
         }
         const bool denoiseSetting = m_settingsManager->getAs<bool>("render/pt/denoise");
         const bool upscaleSetting = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
-        int fxMode = denoiseSetting ? 2 : (upscaleSetting ? 1 : 0);
-        const char* fxItems[] = { "Off", "Spatial upscale", "Temporal denoise" };
+        if (!mMetalFxModeInitialized)
+        {
+            mMetalFxMode = editor_metal_fx::modeFromSettings(denoiseSetting, upscaleSetting);
+            mMetalFxModeInitialized = true;
+        }
+        int fxMode = static_cast<int>(mMetalFxMode);
+        const char* const fxItems[] = { "Off", "Spatial upscale", "Temporal denoise" };
         const int fxItemCount = denoiseAvailable ? 3 : 2;
         if (ImGui::Combo("MetalFX", &fxMode, fxItems, fxItemCount))
         {
-            const bool wantDenoise = (fxMode == 2);
+            mMetalFxMode = static_cast<editor_metal_fx::Mode>(fxMode);
+            const bool wantDenoise = mMetalFxMode == editor_metal_fx::Mode::TemporalDenoise;
             m_settingsManager->setAs<bool>("render/pt/denoise", wantDenoise);
             // The denoiser is a scaler too: it needs the reduced-resolution render
             // whenever the scale asks for one, and nothing else does.
             const float factor = m_settingsManager->getAs<float>("render/pt/upscaleFactor");
-            m_settingsManager->setAs<bool>("render/pt/enableUpscale", fxMode != 0 && factor < 1.0f);
+            m_settingsManager->setAs<bool>("render/pt/enableUpscale",
+                                          editor_metal_fx::shouldUpscale(mMetalFxMode, factor));
             m_render->resetTemporalHistory();
         }
         if (!denoiseAvailable)
@@ -316,17 +393,36 @@ void EditorApp::drawRenderSettingsPanel()
         if (fxMode != 0)
         {
             auto factor = m_settingsManager->getAs<float>("render/pt/upscaleFactor");
-            if (ImGui::SliderFloat("Render scale", &factor, 0.25f, 1.0f, "%.2f"))
+            if (ImGui::SliderFloat("PT scale inside preview", &factor, 0.25f, 1.0f, "%.2f"))
             {
                 m_settingsManager->setAs<float>("render/pt/upscaleFactor", factor);
-                m_settingsManager->setAs<bool>("render/pt/enableUpscale", factor < 1.0f);
+                m_settingsManager->setAs<bool>("render/pt/enableUpscale",
+                                              editor_metal_fx::shouldUpscale(mMetalFxMode, factor));
                 m_render->resetTemporalHistory();
             }
             ImGui::SameLine();
             ImGui::BeginDisabled();
-            ImGui::TextUnformatted(
-                factor < 1.0f ? "(rendering below display resolution)" : "(1:1)");
+            const char* const scaleStatus = factor < 1.0f
+                                                ? "(rendering below display resolution)"
+                                                : (mMetalFxMode == editor_metal_fx::Mode::Spatial
+                                                       ? "(inactive at 1:1; lower scale to enable)"
+                                                       : "(denoising at 1:1)");
+            ImGui::TextUnformatted(scaleStatus);
             ImGui::EndDisabled();
+        }
+
+        const uint32_t displayWidth = m_settingsManager->getAs<uint32_t>("render/width");
+        const uint32_t displayHeight = m_settingsManager->getAs<uint32_t>("render/height");
+        const bool resolutionUpscale = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
+        const render_resolution::Resolution resolution =
+            render_resolution::resolve(displayWidth, displayHeight, resolutionUpscale,
+                                       m_settingsManager->getAs<float>("render/pt/upscaleFactor"));
+        ImGui::TextDisabled("PT internal: %u x %u", resolution.pathTraceWidth, resolution.pathTraceHeight);
+        ImGui::TextDisabled("Preview output: %u x %u", resolution.outputWidth, resolution.outputHeight);
+        if (m_render->denoiserFallbackActive())
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
+                               "Temporal denoiser ratio unsupported; using spatial upscale");
         }
 
         auto maxDepth = m_settingsManager->getAs<uint32_t>("render/pt/depth");
@@ -356,11 +452,12 @@ void EditorApp::drawRenderSettingsPanel()
         ImGui::TreePop();
     }
 
-    if (ImGui::Button("Save Screenshot"))
+    if (ImGui::Button("Save Preview Screenshot"))
     {
         // Generate default filename with timestamp
         const std::time_t now = std::time(nullptr);
-        const std::tm* tm = std::localtime(&now);
+        std::tm localTime{};
+        const std::tm* tm = localtime_r(&now, &localTime);
         // localtime() returns null for a clock it cannot convert, and strftime()
         // returns 0 when the result would not fit; either way the dialog still
         // needs a name to open with.
@@ -371,7 +468,7 @@ void EditorApp::drawRenderSettingsPanel()
             defaultName = stamp;
         }
 
-        IGFD::FileDialogConfig config;
+        IGFD::FileDialogConfig config{};
         config.path = ".";
         config.fileName = defaultName;
         ImGuiFileDialog::Instance()->OpenDialog(
@@ -400,7 +497,7 @@ void EditorApp::drawRenderSettingsPanel()
         bool changed = false;
 
         int mode = iso > 0.0f ? 0 : 1;
-        const char* modeItems[] = { "Photographic", "Multiplier" };
+        const char* const modeItems[] = { "Photographic", "Multiplier" };
         if (ImGui::Combo("Mode", &mode, modeItems, 2))
         {
             editor_camera_exposure::carryExposureAcrossModeSwitch(mode == 1, iso, fStop, shutter, cm2);
@@ -477,13 +574,13 @@ void EditorApp::drawRenderSettingsPanel()
 
     if (ImGui::TreeNode("Display tonemap"))
     {
-        const char* tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
+        const char* const tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
         int currentTonemapItemId = (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/tonemapperType"), 3u);
         if (ImGui::BeginCombo("Operator", tonemapItems[currentTonemapItemId]))
         {
             for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
             {
-                bool is_selected = (currentTonemapItemId == n);
+                const bool is_selected = (currentTonemapItemId == n);
                 if (ImGui::Selectable(tonemapItems[n], is_selected))
                 {
                     currentTonemapItemId = n;
@@ -550,7 +647,7 @@ void EditorApp::drawLoadingOverlay()
         0.04f, // Environment
         0.00f, // Done
     };
-    static const char* kStageNames[(size_t)LoadProgress::Stage::Count] = {
+    static const char* const kStageNames[(size_t)LoadProgress::Stage::Count] = {
         "Starting", "Reading file",   "Parsing scene", "Uploading geometry",
         "Loading textures", "Building acceleration structures", "Environment", "Finishing",
     };
@@ -561,7 +658,7 @@ void EditorApp::drawLoadingOverlay()
     const uint32_t total = m_loadProgress.total.load(std::memory_order_relaxed);
 
     float totalWeight = 0.0f;
-    for (float w : kStageWeights)
+    for (const float w : kStageWeights)
     {
         totalWeight += w;
     }

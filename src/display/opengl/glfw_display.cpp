@@ -1,5 +1,7 @@
 #include "glfw_display.h"
 
+#include <cstdint>
+#include <cstring>
 #include <sstream>
 
 #include "imgui.h"
@@ -9,7 +11,9 @@
 
 using namespace oka;
 
-inline const char* getGLErrorString(GLenum error)
+namespace
+{
+const char* getGLErrorString(GLenum error)
 {
     switch (error)
     {
@@ -31,9 +35,9 @@ inline const char* getGLErrorString(GLenum error)
     }
 }
 
-inline void glCheck(const char* call, const char* file, unsigned int line)
+void glCheck(const char* call, const char* file, unsigned int line)
 {
-    GLenum err = glGetError();
+    const GLenum err = glGetError();
     if (err != GL_NO_ERROR)
     {
         std::stringstream ss;
@@ -42,6 +46,7 @@ inline void glCheck(const char* call, const char* file, unsigned int line)
         assert(0);
     }
 }
+} // namespace
 
 #define GL_CHECK(call)                                                                                                 \
     do                                                                                                                 \
@@ -108,7 +113,7 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     (void)io;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // Enable Keyboard Controls
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     // A drag over a panel's body is content interaction, not a window move: the
     // viewport spends every drag on the camera or a gizmo, and an undocked one
@@ -126,7 +131,11 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
 
 void* GlfwDisplay::getDisplayNativeTexure()
 {
-    return reinterpret_cast<void*>(m_render_tex);
+    const uintptr_t textureHandle = static_cast<uintptr_t>(m_render_tex);
+    void* texture = nullptr;
+    static_assert(sizeof(texture) == sizeof(textureHandle));
+    std::memcpy(static_cast<void*>(&texture), static_cast<const void*>(&textureHandle), sizeof(texture));
+    return texture;
 }
 
 float GlfwDisplay::getMaxEDR()
@@ -140,29 +149,68 @@ void GlfwDisplay::drawFrame(ImageBuffer& result)
     int framebuf_res_x = 0, framebuf_res_y = 0;
     glfwGetFramebufferSize(mWindow, &framebuf_res_x, &framebuf_res_y);
 
-    // TODO: add resize checking
-    if (m_render_tex == 0)
+    if (m_render_tex == 0 || mRenderTextureWidth != result.width || mRenderTextureHeight != result.height)
     {
+        if (cudaResource)
+        {
+            cudaGraphicsUnregisterResource(cudaResource);
+            cudaResource = nullptr;
+        }
+        if (m_render_tex != 0)
+        {
+            glDeleteTextures(1, &m_render_tex);
+            m_render_tex = 0;
+        }
         glGenTextures(1, &m_render_tex);
         glBindTexture(GL_TEXTURE_2D, m_render_tex);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, result.width, result.height, 0, GL_RGBA, GL_FLOAT, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        cudaError_t st = cudaGraphicsGLRegisterImage(&cudaResource, m_render_tex, GL_TEXTURE_2D, cudaGraphicsRegisterFlagsWriteDiscard);
+        const cudaError_t registerStatus = cudaGraphicsGLRegisterImage(
+            &cudaResource, m_render_tex, GL_TEXTURE_2D, cudaGraphicsRegisterFlagsWriteDiscard);
+        if (registerStatus != cudaSuccess)
+        {
+            cudaResource = nullptr;
+            mRenderTextureWidth = 0;
+            mRenderTextureHeight = 0;
+            return;
+        }
+        mRenderTextureWidth = result.width;
+        mRenderTextureHeight = result.height;
     }
 
-    cudaArray_t array;
-    cudaGraphicsMapResources(1, &cudaResource);
-    cudaGraphicsSubResourceGetMappedArray(&array, cudaResource, 0, 0);
+    cudaArray_t array = nullptr;
+    if (!cudaResource || cudaGraphicsMapResources(1, &cudaResource) != cudaSuccess)
+    {
+        return;
+    }
+    if (cudaGraphicsSubResourceGetMappedArray(&array, cudaResource, 0, 0) != cudaSuccess)
+    {
+        cudaGraphicsUnmapResources(1, &cudaResource);
+        return;
+    }
 
     // cudaMemcpyToArray(array, 0, 0, result.deviceData, result.dataSize, cudaMemcpyDeviceToDevice);
-    cudaMemcpy2DToArray(array, 0, 0, result.deviceData, result.width * 4 * sizeof(float), result.width* 4 * sizeof(float), result.height, cudaMemcpyDeviceToDevice);
+    const size_t rowBytes = static_cast<size_t>(result.width) * 4U * sizeof(float);
+    cudaMemcpy2DToArray(array, 0, 0, result.deviceData, rowBytes, rowBytes, result.height, cudaMemcpyDeviceToDevice);
 
     cudaGraphicsUnmapResources(1, &cudaResource);
 }
 
 void GlfwDisplay::destroy()
 {
+    if (cudaResource)
+    {
+        cudaGraphicsUnregisterResource(cudaResource);
+        cudaResource = nullptr;
+    }
+    if (m_render_tex != 0)
+    {
+        glDeleteTextures(1, &m_render_tex);
+        m_render_tex = 0;
+    }
+    mRenderTextureWidth = 0;
+    mRenderTextureHeight = 0;
 }
 
 void GlfwDisplay::onBeginFrame()
@@ -177,7 +225,8 @@ void GlfwDisplay::onEndFrame()
 
 void GlfwDisplay::drawUI()
 {
-    int display_w, display_h;
+    int display_w = 0;
+    int display_h = 0;
     glfwGetFramebufferSize(mWindow, &display_w, &display_h);
     glViewport(0, 0, display_w, display_h);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());

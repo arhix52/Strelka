@@ -22,6 +22,23 @@
 
 using namespace oka;
 
+namespace
+{
+bool readSourceFile(std::string& str, const std::string& filename)
+{
+    // Try to open file
+    std::ifstream file(filename.c_str(), std::ios::binary);
+    if (file.good())
+    {
+        // Found usable source file
+        std::vector<unsigned char> buffer = std::vector<unsigned char>(std::istreambuf_iterator<char>(file), {});
+        str.assign(buffer.begin(), buffer.end());
+        return true;
+    }
+    return false;
+}
+} // namespace
+
 void GlfwDisplay::setNativeDevice(void* device)
 {
     _pDevice = (MTL::Device*) device;
@@ -107,7 +124,7 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     ImGui_ImplGlfw_InitForOpenGL(mWindow, true);
     ImGui_ImplMetal_Init((__bridge id<MTLDevice>)(_pDevice));
 
-    NSWindow *nswin = glfwGetCocoaWindow(mWindow);
+    NSWindow *const nswin = glfwGetCocoaWindow(mWindow);
     // CA::MetalLayer::layer() and RenderPassDescriptor::renderPassDescriptor()
     // below are autoreleased factories. Both are stored as members and used for
     // the whole process lifetime, so they must be retained explicitly — they only
@@ -157,7 +174,7 @@ void GlfwDisplay::resetFrame()
 
 float GlfwDisplay::getMaxEDR()
 {
-    NSWindow *nswin = glfwGetCocoaWindow(mWindow);
+    NSWindow *const nswin = glfwGetCocoaWindow(mWindow);
     return static_cast<float>(nswin.screen.maximumExtendedDynamicRangeColorComponentValue);
 }
 
@@ -235,20 +252,6 @@ MTL::Texture* GlfwDisplay::buildTexture(uint32_t width, uint32_t heigth)
     pTextureDesc->release();
 
     return pTexture;
-}
-
-static bool readSourceFile(std::string& str, const std::string& filename)
-{
-    // Try to open file
-    std::ifstream file(filename.c_str(), std::ios::binary);
-    if (file.good())
-    {
-        // Found usable source file
-        std::vector<unsigned char> buffer = std::vector<unsigned char>(std::istreambuf_iterator<char>(file), {});
-        str.assign(buffer.begin(), buffer.end());
-        return true;
-    }
-    return false;
 }
 
 void GlfwDisplay::buildShaders()
@@ -360,7 +363,7 @@ void GlfwDisplay::onBeginFrame()
 {
     // Bounded like Metal4's 5s waits: a forever wait here freezes the whole
     // editor if a completed-handler never runs (GPU hang / lost device).
-    constexpr int64_t kFrameWaitNs = 5ll * 1000ll * 1000ll * 1000ll;
+    constexpr int64_t kFrameWaitNs = 5LL * 1000LL * 1000LL * 1000LL;
     const dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, kFrameWaitNs);
     if (dispatch_semaphore_wait(_semaphore, deadline) != 0)
     {
@@ -372,7 +375,8 @@ void GlfwDisplay::onBeginFrame()
     mFramePool = NS::AutoreleasePool::alloc()->init();
     mFrameValid = false;
 
-    int width, height;
+    int width = 0;
+    int height = 0;
     glfwGetFramebufferSize(mWindow, &width, &height);
     // A minimised window reports a 0x0 framebuffer; asking CAMetalLayer for a
     // zero-sized drawable is invalid.
@@ -396,16 +400,20 @@ void GlfwDisplay::onBeginFrame()
         return;
     }
 
-    float clear_color[4] = {0.45f, 0.55f, 0.60f, 1.00f};
+    const float clear_color[4] = {0.45f, 0.55f, 0.60f, 1.00f};
 
     mCommandBuffer = _pCommandQueue->commandBuffer();
     // Wait for the frame the renderer produced, when it produced it on another
-    // queue. Metal orders work inside a queue and not between two, so with the
-    // renderer on the Metal 4 queue and this display on a Metal 3 one, sampling
-    // its texture without waiting reads whatever happens to be there: a black
-    // viewport, or a half-written one that a screenshot catches mid-flight.
-    // Returns null when both share a queue, where the ordering is implicit.
-    if (mRender)
+    // queue. While a new trace is in flight the display still owns the other
+    // double-buffered slot, which is already complete and needs no wait. Waiting
+    // for the new slot here would put every UI command buffer behind a 500 ms
+    // trace, exhaust the display semaphore, and freeze the editor while showing
+    // pixels that did not depend on that trace.
+    //
+    // Once the renderer publishes the new slot, Metal orders its visibility
+    // across the Metal 4 render queue and this Metal 3 display queue with the
+    // completed frame event. Returns null when both share a queue.
+    if (mRender && !mRender->isRenderBusy())
     {
         if (auto* ev = (MTL::Event*)mRender->getNativeFrameEvent())
         {
@@ -436,7 +444,7 @@ void GlfwDisplay::onEndFrame()
 
     mCommandBuffer->presentDrawable(drawable);
 
-    dispatch_semaphore_t sem = _semaphore;
+    const dispatch_semaphore_t sem = _semaphore;
     mCommandBuffer->addCompletedHandler(^void(MTL::CommandBuffer* /*cb*/) {
         dispatch_semaphore_signal(sem);
     });

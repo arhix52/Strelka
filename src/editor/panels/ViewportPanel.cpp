@@ -2,8 +2,6 @@
 
 #include "../editor_overlay.h"
 
-#include <cstring>
-
 #include "imgui.h"
 #include "ImGuizmo.h"
 
@@ -22,22 +20,20 @@ namespace oka
 // CPU pick lands on whatever the user sees under the cursor.
 Scene::PickHit EditorApp::pickAtScreenPos(const ImVec2& screenPos)
 {
-    const float width = m_viewportRectMax.x - m_viewportRectMin.x;
-    const float height = m_viewportRectMax.y - m_viewportRectMin.y;
-    if (width <= 0.0f || height <= 0.0f)
+    const std::optional<editor_viewport::Point> uv =
+        editor_viewport::screenToImageUv({ screenPos.x, screenPos.y }, m_viewportLayout);
+    if (!uv)
     {
         return {};
     }
 
-    const float u = (screenPos.x - m_viewportRectMin.x) / width;
-    const float v = (screenPos.y - m_viewportRectMin.y) / height;
-    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f)
+    Camera camera = m_scene->getCamera(m_selectedCamera);
+    if (mPresentedPreviewHeight > 0)
     {
-        return {};
+        camera.updateAspectRatio(static_cast<float>(mPresentedPreviewWidth) / static_cast<float>(mPresentedPreviewHeight));
     }
-
     glm::float3 origin, dir;
-    generatePickRay(m_scene->getCamera(m_selectedCamera), glm::float2(u, v), origin, dir);
+    generatePickRay(camera, glm::float2(uv->x, uv->y), origin, dir);
 
     return m_scene->pick(origin, dir);
 }
@@ -126,7 +122,7 @@ bool EditorApp::computeNodeBounds(const Scene::Node& node,
         {
             continue;
         }
-        if (selectedXform && memcmp(selectedXform, &instances[instId].transform, sizeof(glm::mat4)) != 0)
+        if (selectedXform && *selectedXform != instances[instId].transform)
         {
             continue;
         }
@@ -253,42 +249,39 @@ void EditorApp::drawViewportPanel()
     bool thisFrameHovered = false;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    if (ImGui::Begin("Viewport"))
+    if (ImGui::Begin("Viewport", nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
     {
         const ImVec2 availableSize = ImGui::GetContentRegionAvail();
-
-        auto calculateAspectRatioSize = [](ImVec2 availableSize, int fixedWidth, int fixedHeight) {
-            float aspectRatio = static_cast<float>(fixedWidth) / static_cast<float>(fixedHeight);
-            float width = availableSize.x;
-            float height = availableSize.x / aspectRatio;
-            if (height > availableSize.y)
-            {
-                height = availableSize.y;
-                width = height * aspectRatio;
-            }
-            return ImVec2(width, height);
+        const ImVec2 panelMin = ImGui::GetCursorScreenPos();
+        const ImVec2 panelMax(panelMin.x + availableSize.x, panelMin.y + availableSize.y);
+        const ImVec2 framebufferScale = ImGui::GetIO().DisplayFramebufferScale;
+        const uint32_t renderWidth = m_settingsManager->getAs<uint32_t>("render/width");
+        const uint32_t renderHeight = m_settingsManager->getAs<uint32_t>("render/height");
+        const uint32_t presentationWidth = mPresentedPreviewWidth > 0 ? mPresentedPreviewWidth : renderWidth;
+        const uint32_t presentationHeight = mPresentedPreviewHeight > 0 ? mPresentedPreviewHeight : renderHeight;
+        const editor_viewport::Rect panelRect = {
+            { panelMin.x, panelMin.y },
+            { panelMax.x, panelMax.y },
         };
+        m_viewportLayout =
+            editor_viewport::computeLayout(panelRect, presentationWidth, presentationHeight,
+                                           { framebufferScale.x, framebufferScale.y }, m_viewportPresentation);
+        m_viewportRectMin = ImVec2(m_viewportLayout.imageRect.min.x, m_viewportLayout.imageRect.min.y);
+        m_viewportRectMax = ImVec2(m_viewportLayout.imageRect.max.x, m_viewportLayout.imageRect.max.y);
+        const ImVec2 viewportSize(m_viewportLayout.imageRect.width(), m_viewportLayout.imageRect.height());
 
-        auto calculateVerticalPadding = [](ImVec2 availableSize, float renderedHeight) {
-            return (availableSize.y - renderedHeight) / 2.0f;
-        };
-
-        const uint32_t renderW = m_settingsManager->getAs<uint32_t>("render/width");
-        const uint32_t renderH = m_settingsManager->getAs<uint32_t>("render/height");
-        ImVec2 viewportSize = calculateAspectRatioSize(availableSize, renderW, renderH);
-        float verticalPadding = calculateVerticalPadding(availableSize, viewportSize.y);
-        const float horizontalPadding = (availableSize.x - viewportSize.x) * 0.5f;
+        // The panel is deliberately black outside the image so Fit mode reads as
+        // a camera frame rather than as empty editor chrome.
+        ImGui::GetWindowDrawList()->AddRectFilled(panelMin, panelMax, IM_COL32_BLACK);
 
         ImGui::PushStyleVar(ImGuiStyleVar_ImageBorderSize, 0.0f);
-
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + verticalPadding);
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + horizontalPadding);
+        ImGui::SetCursorScreenPos(m_viewportRectMin);
 
         // The frame is shown through items that claim no ID. ImGuizmo starts a
         // drag only while ImGui reports nothing hovered and nothing active, so an
         // ImageButton spanning the viewport leaves the handles drawn but dead:
         // the cursor is always over it whenever it is over a handle.
-        void* viewportTexture = m_display->getDisplayNativeTexure();
+        const void* viewportTexture = m_display->getDisplayNativeTexure();
         const ImVec2 topLeft = ImGui::GetCursorScreenPos();
         if (viewportTexture != nullptr)
         {
@@ -302,11 +295,13 @@ void EditorApp::drawViewportPanel()
             ImGui::Dummy(viewportSize);
         }
 
-        m_viewportRectMin = ImGui::GetItemRectMin();
-        m_viewportRectMax = ImGui::GetItemRectMax();
-        const bool itemHovered = ImGui::IsItemHovered();
+        bool itemHovered = ImGui::IsItemHovered();
 
-        Camera& cam = m_scene->getCamera(m_selectedCamera);
+        Camera cam = m_scene->getCamera(m_selectedCamera);
+        if (presentationHeight > 0)
+        {
+            cam.updateAspectRatio(static_cast<float>(presentationWidth) / static_cast<float>(presentationHeight));
+        }
 
         // ImGuizmo derives the facing of the rotation rings from the projection,
         // and drops the whole gizmo when it reads the object as behind the eye.
@@ -321,6 +316,21 @@ void EditorApp::drawViewportPanel()
         drawSelectionGizmo(cam);
 
         ImGui::PopStyleVar();
+
+        // Presentation affects only this quad; it never reallocates renderer
+        // resources or resets accumulation.
+        const char* const modeNames[] = { "Fit", "1:1", "Fill" };
+        ImGui::SetCursorScreenPos(ImVec2(panelMax.x - 112.0f, panelMin.y + 8.0f));
+        ImGui::SetNextItemWidth(104.0f);
+        int presentation = static_cast<int>(m_viewportPresentation);
+        if (ImGui::Combo("##viewportPresentation", &presentation, modeNames, IM_ARRAYSIZE(modeNames)))
+        {
+            m_viewportPresentation = static_cast<editor_viewport::PresentationMode>(presentation);
+        }
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+        {
+            itemHovered = false;
+        }
 
         if (itemHovered)
         {
@@ -343,7 +353,7 @@ void EditorApp::drawViewportPanel()
         }
 
         // Selection readout: the only in-viewport confirmation that a click landed.
-        ImGui::SetCursorScreenPos(ImVec2(m_viewportRectMin.x + 8.0f, m_viewportRectMin.y + 8.0f));
+        ImGui::SetCursorScreenPos(ImVec2(panelMin.x + 8.0f, panelMin.y + 8.0f));
         if (m_selectedLightId != (uint32_t)-1)
         {
             ImGui::Text("Selected: light %u", m_selectedLightId);

@@ -55,8 +55,12 @@ void MetalPostProcess::release()
     safeRelease(mTonemapperPSO4);
     safeRelease(mTonemapperTexPSO);
     safeRelease(mDenoisedToBufferPSO);
-    mDisplayTextureWidth = mDisplayTextureHeight = 0;
-    mDisplayTextureUsage = 0;
+    for (int i = 0; i < 2; ++i)
+    {
+        mDisplayTextureWidth[i] = 0;
+        mDisplayTextureHeight[i] = 0;
+        mDisplayTextureUsage[i] = 0;
+    }
     mUpscaleTextureWidth = mUpscaleTextureHeight = 0;
 }
 
@@ -168,7 +172,9 @@ void MetalPostProcess::ensureUpscaleTextures(uint32_t width, uint32_t height)
 
     mUpscaleTextureWidth = width;
     mUpscaleTextureHeight = height;
-    markTexturesDirty(true);
+    // These are write-only intermediates. Recreating them must not hide the
+    // completed display slot while the replacement frame is in flight.
+    markTexturesDirty(false);
 }
 
 MTL::Texture* MetalPostProcess::tonemapTarget(bool upscaling) const
@@ -179,21 +185,19 @@ MTL::Texture* MetalPostProcess::tonemapTarget(bool upscaling) const
 
 void MetalPostProcess::ensureDisplayTextures(uint32_t width, uint32_t height)
 {
+    const int wi = mHooks.writeIndex ? *mHooks.writeIndex : 0;
     const MTL::TextureUsage usage =
         MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite | mMetalFx.requiredOutputUsage();
-    if (width == mDisplayTextureWidth && height == mDisplayTextureHeight && mDisplayTextures[0] &&
-        usage == mDisplayTextureUsage)
+    if (width == mDisplayTextureWidth[wi] && height == mDisplayTextureHeight[wi] && mDisplayTextures[wi] &&
+        usage == mDisplayTextureUsage[wi])
     {
         return;
     }
-    mDisplayTextureUsage = usage;
-    for (MTL::Texture*& tex : mDisplayTextures)
+    mDisplayTextureUsage[wi] = usage;
+    if (mDisplayTextures[wi])
     {
-        if (tex)
-        {
-            tex->release();
-            tex = nullptr;
-        }
+        mDisplayTextures[wi]->release();
+        mDisplayTextures[wi] = nullptr;
     }
 
     MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
@@ -203,15 +207,14 @@ void MetalPostProcess::ensureDisplayTextures(uint32_t width, uint32_t height)
     desc->setTextureType(MTL::TextureType2D);
     desc->setStorageMode(MTL::StorageModePrivate);
     desc->setUsage(usage);
-    for (MTL::Texture*& tex : mDisplayTextures)
-    {
-        tex = mDevice->newTexture(desc);
-    }
+    mDisplayTextures[wi] = mDevice->newTexture(desc);
     desc->release();
 
-    mDisplayTextureWidth = width;
-    mDisplayTextureHeight = height;
-    markTexturesDirty(true);
+    mDisplayTextureWidth[wi] = width;
+    mDisplayTextureHeight[wi] = height;
+    // The other slot may still be displayed. Keep its index and retained
+    // texture valid until this slot finishes and is published.
+    markTexturesDirty(false);
 }
 
 void MetalPostProcess::buildTonemapperPipeline()
