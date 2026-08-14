@@ -312,7 +312,14 @@ void EditorApp::drawViewportPanel()
         ImGuizmo::SetRect(m_viewportRectMin.x, m_viewportRectMin.y, m_viewportRectMax.x - m_viewportRectMin.x,
                           m_viewportRectMax.y - m_viewportRectMin.y);
 
+        // Selection geometry belongs to the rendered camera image. In Fit mode
+        // the surrounding pixels are letterbox bars, while Fill and 1:1 can crop
+        // the image at the panel edge; neither area should receive outline lines.
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        drawList->PushClipRect(ImVec2(m_viewportLayout.visibleRect.min.x, m_viewportLayout.visibleRect.min.y),
+                               ImVec2(m_viewportLayout.visibleRect.max.x, m_viewportLayout.visibleRect.max.y), true);
         drawSelectionOverlay(cam);
+        drawList->PopClipRect();
         drawSelectionGizmo(cam);
 
         ImGui::PopStyleVar();
