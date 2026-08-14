@@ -118,6 +118,7 @@ public:
     void createStageCounterHeap();
     void reportStageTimings();
     void reportStageTimingsMetal4(double lastRenderTimeMs);
+    void reportStageFailureMetal4();
     void reportIorStackStats();
 
     // Wavefront allocations + shadow tables for Metal 4 residency.

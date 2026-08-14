@@ -2,6 +2,7 @@
 
 #include "MetalBuffer.h"
 #include "integrator_buffer_sizes.h"
+#include "wavefront_stage_diagnostic.h"
 
 #include <algorithm>
 #include <cstring>
@@ -315,6 +316,44 @@ void MetalWavefrontIntegrator::reportStageTimingsMetal4(double lastRenderTimeMs)
     STRELKA_INFO("STAGES total {:.2f}ms  {}", sum, line);
     STRELKA_INFO("STAGES per bounce: extend [{}] shade [{}] shadow [{}]", perBounce[kStageExtend],
                  perBounce[kStageShade], perBounce[kStageShadow]);
+}
+
+void MetalWavefrontIntegrator::reportStageFailureMetal4()
+{
+    if (!mStageCounterHeap || mStageKinds.empty())
+    {
+        STRELKA_ERROR("Metal 4 stage diagnosis unavailable; reproduce with STRELKA_STAGES=1");
+        return;
+    }
+
+    const NS::UInteger markCount = mStageKinds.size() + 1;
+    const NS::Data* data = mStageCounterHeap->resolveCounterRange(NS::Range::Make(0, markCount));
+    if (!data)
+    {
+        STRELKA_ERROR("Metal 4 stage diagnosis failed to resolve timestamp counters");
+        return;
+    }
+
+    const auto* entries = static_cast<const MTL4::TimestampHeapEntry*>(data->bytes());
+    std::vector<uint64_t> timestamps(markCount);
+    for (NS::UInteger i = 0; i < markCount; ++i)
+    {
+        timestamps[i] = entries[i].timestamp;
+    }
+    const WavefrontStageFailure failure = inferWavefrontStageFailure(timestamps, mStageKinds.size());
+
+    if (failure.validMarks == 0)
+    {
+        STRELKA_ERROR("Metal 4 stage diagnosis: no wavefront stage reached its opening timestamp");
+        return;
+    }
+
+    const char* lastCompleted =
+        failure.lastCompletedStage >= 0 ? kStageNames[mStageKinds[failure.lastCompletedStage]] : "none";
+    const char* suspected =
+        failure.postIntegrator ? "post-integrator" : kStageNames[mStageKinds[failure.suspectedStage]];
+    STRELKA_ERROR("Metal 4 stage diagnosis: last_completed={} suspected={} marks={}/{}", lastCompleted, suspected,
+                  failure.validMarks, markCount);
 }
 
 void MetalWavefrontIntegrator::reportStageTimings()

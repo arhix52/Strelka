@@ -181,6 +181,8 @@ public:
     void addResident(MTL::Allocation* allocation);
     void removeResident(MTL::Allocation* allocation);
     void commitResidency();
+    NS::UInteger residencyAllocationCount() const;
+    uint64_t residencyAllocatedSize() const;
 
     /// Build a pipeline through the Metal 4 compiler. Pipelines built the
     /// Metal 3 way are not usable with an argument table.

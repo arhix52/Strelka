@@ -29,6 +29,7 @@
 #include "sampling_math.h"
 #include "integrator_features.h"
 #include "render_resolution.h"
+#include "residency_set_diff.h"
 #include "texture_cache_key.h"
 #include "ibl_alias_table.h"
 #include "integrator_buffer_sizes.h"
@@ -145,7 +146,7 @@ MetalRender::~MetalRender()
 
 void MetalRender::triggerRenderIfIdle()
 {
-    if (mRenderBusy.load())
+    if (mRenderBusy.load() || deviceError())
         return;
 
     const uint32_t w = getSettings()->getAs<uint32_t>("render/width");
@@ -688,7 +689,13 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     {
         return;
     }
-    auto add = [&](MTL::Allocation* a) { mMetal4.addResident(a); };
+    std::unordered_set<MTL::Allocation*> currentResidents;
+    auto add = [&](MTL::Allocation* allocation) {
+        if (allocation)
+        {
+            currentResidents.insert(allocation);
+        }
+    };
 
     for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) add(mFrameUniforms.uniformBuffer(i));
     for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) add(mFrameUniforms.tonemapBuffer(i));
@@ -751,7 +758,28 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     {
         add(((MetalBuffer*)output)->getNativePtr());
     }
+
+    const std::vector<MTL::Allocation*> retired =
+        metal::retiredResidencyAllocations(mMetal4FrameResidents, currentResidents);
+    for (MTL::Allocation* allocation : retired)
+    {
+        mMetal4.removeResident(allocation);
+    }
+    // Add all current pointers, not only the apparent set difference. Some
+    // domains (notably acceleration structures) also manage residency directly,
+    // and an allocator may reuse an address after that owner removed it.
+    // Residency is a mathematical set; insertion order cannot affect command
+    // execution or resource lifetime.
+    // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
+    for (MTL::Allocation* allocation : currentResidents)
+    {
+        mMetal4.addResident(allocation);
+    }
     mMetal4.commitResidency();
+    STRELKA_DEBUG("Metal 4 residency refreshed: {} current, {} retired, {} total allocations ({:.2f} GB)",
+                  currentResidents.size(), retired.size(), mMetal4.residencyAllocationCount(),
+                  static_cast<double>(mMetal4.residencyAllocatedSize()) / 1073741824.0);
+    mMetal4FrameResidents = std::move(currentResidents);
 }
 
 // How many extend/shade iterations one sample needs to reach `maxDepth` bounces.
@@ -1410,6 +1438,7 @@ void MetalRender::render(Buffer* output)
     // sample hands it the accumulated estimate and the guides that go with it.
     // The accumulation buffer is not written at the cap, so that sample cannot
     // disturb what has already converged.
+    const bool traceUsesMetal4 = mMetal4.isValid();
     if (samplesThisLaunch == 0 && denoising && !denoisedFrameUsable)
     {
         samplesThisLaunch = std::max(spp, 1u);
@@ -1663,7 +1692,8 @@ void MetalRender::render(Buffer* output)
                 MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
                 options->addFeedbackHandler(
                     MTL4::CommitFeedbackHandlerFunction(
-                        [this, writeIdx4, asyncPresent, commitStartedAt](MTL4::CommitFeedback* fb) {
+                        [this, writeIdx4, asyncPresent, commitStartedAt, profileStages, width, height, maxDepth,
+                         samplesThisLaunch, features](MTL4::CommitFeedback* fb) {
                         // The feedback is the only place a Metal 4 frame reports
                         // failure: there is no status() to poll afterwards the way
                         // the Metal 3 path polls its command buffer. Without this
@@ -1689,24 +1719,39 @@ void MetalRender::render(Buffer* output)
                                                   : "unknown error",
                                               error->domain() ? error->domain()->utf8String() : "?",
                                               (long)error->code());
+                                STRELKA_ERROR("Metal 4 failed workload: PT={}x{} spp={} depth={} features=0x{:x}",
+                                              width, height, samplesThisLaunch, maxDepth, features);
+                                if (profileStages)
+                                {
+                                    mIntegrator.reportStageFailureMetal4();
+                                }
+                                else
+                                {
+                                    STRELKA_ERROR(
+                                        "Metal 4 stage diagnosis disabled; reproduce with STRELKA_STAGES=1");
+                                }
                             }
                         }
-                        if (asyncPresent)
+                        if (error)
                         {
-                            // A failed command buffer may have written only part
-                            // of its output. Keep the last good slot visible, but
-                            // always clear busy so shutdown and error handling do
-                            // not wait forever for a frame that cannot complete.
-                            if (!error)
-                            {
-                                if (fb)
-                                {
-                                    mLastRenderTimeMs.store((fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0,
-                                                            std::memory_order_relaxed);
-                                }
-                                mReadyIndex.store(writeIdx4);
-                            }
                             mRenderBusy.store(false, std::memory_order_release);
+                        }
+                        else
+                        {
+                            if (fb)
+                            {
+                                const double gpuMs = (fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0;
+                                mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
+                                if (profileStages && !mSyncMode)
+                                {
+                                    mIntegrator.reportStageTimingsMetal4(gpuMs);
+                                }
+                            }
+                            if (asyncPresent)
+                            {
+                                mReadyIndex.store(writeIdx4);
+                                mRenderBusy.store(false, std::memory_order_release);
+                            }
                         }
                     }));
                 mMetal4.queue()->commit(buffers, 1, options);
@@ -1916,14 +1961,21 @@ void MetalRender::render(Buffer* output)
             const int writeIdxWf = mWriteIndex;
             if (!mSyncMode)
             {
-                pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdxWf, profileStages](MTL::CommandBuffer* cb) {
-                    mLastRenderTimeMs.store((cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0,
-                                            std::memory_order_relaxed);
-                    if (profileStages)
+                pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdxWf](MTL::CommandBuffer* cb) {
+                    if (cb->status() == MTL::CommandBufferStatusCompleted &&
+                        !mMetal4FrameFailed.load(std::memory_order_relaxed))
                     {
-                        mIntegrator.reportStageTimings();
+                        mReadyIndex.store(writeIdxWf);
                     }
-                    mReadyIndex.store(writeIdxWf);
+                    else if (!mMetal4FrameFailed.load(std::memory_order_relaxed))
+                    {
+                        mMetal4FrameFailed.store(true, std::memory_order_relaxed);
+                        const NS::Error* error = cb->error();
+                        STRELKA_ERROR("Metal denoise frame failed: {}",
+                                      error && error->localizedDescription()
+                                          ? error->localizedDescription()->utf8String()
+                                          : "unknown error");
+                    }
                     mRenderBusy.store(false, std::memory_order_release);
                 }));
             }
@@ -2045,10 +2097,26 @@ void MetalRender::render(Buffer* output)
         const int writeIdx = mWriteIndex;
         if (!mSyncMode)
         {
-            pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdx](MTL::CommandBuffer* cb) {
-                const double gpuMs = (cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0;
-                mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
-                mReadyIndex.store(writeIdx);
+            pCmd->addCompletedHandler(MTL::HandlerFunction([this, writeIdx, traceUsesMetal4](MTL::CommandBuffer* cb) {
+                if (cb->status() == MTL::CommandBufferStatusCompleted &&
+                    !mMetal4FrameFailed.load(std::memory_order_relaxed))
+                {
+                    if (!traceUsesMetal4)
+                    {
+                        const double gpuMs = (cb->GPUEndTime() - cb->GPUStartTime()) * 1000.0;
+                        mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
+                    }
+                    mReadyIndex.store(writeIdx);
+                }
+                else if (!mMetal4FrameFailed.load(std::memory_order_relaxed))
+                {
+                    mMetal4FrameFailed.store(true, std::memory_order_relaxed);
+                    const NS::Error* error = cb->error();
+                    STRELKA_ERROR("Metal post-process frame failed: {}",
+                                  error && error->localizedDescription()
+                                      ? error->localizedDescription()->utf8String()
+                                      : "unknown error");
+                }
                 mRenderBusy.store(false, std::memory_order_release);
             }));
         }

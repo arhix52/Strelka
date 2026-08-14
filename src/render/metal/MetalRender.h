@@ -21,6 +21,7 @@
 #include "MetalDomainMap.h"
 #include "ShaderTypes.h" // GeometryEntry, shared with the path-trace kernel
 #include <atomic>
+#include <unordered_set>
 #include <vector>
 
 namespace oka
@@ -198,6 +199,11 @@ private:
     // Bumped when the allocation set can have changed, so residency is
     // rebuilt then and not every frame.
     uint32_t mMetal4ResidencyGeneration = 0;
+    // Resources added by makeResourcesResidentForMetal4. A residency set retains
+    // its allocations independently of the C++ owner, so every replacement must
+    // remove the previous generation or resolution changes accumulate old GPU
+    // buffers indefinitely.
+    std::unordered_set<MTL::Allocation*> mMetal4FrameResidents;
     // Still owned by MetalRender: residency spans every domain (geometry, lights,
     // textures, guides), not only wavefront queues. Integrator flags dirty when
     // a new variant builds intersection tables.

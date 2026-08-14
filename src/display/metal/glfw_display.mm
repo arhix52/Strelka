@@ -413,7 +413,7 @@ void GlfwDisplay::onBeginFrame()
     // Once the renderer publishes the new slot, Metal orders its visibility
     // across the Metal 4 render queue and this Metal 3 display queue with the
     // completed frame event. Returns null when both share a queue.
-    if (mRender && !mRender->isRenderBusy())
+    if (mRender && !mRender->isRenderBusy() && !mRender->deviceError())
     {
         if (auto* ev = (MTL::Event*)mRender->getNativeFrameEvent())
         {

@@ -37,7 +37,7 @@ bool ConstantRing::init(MTL::Device* device, size_t bytesPerPage, uint32_t frame
 
 void ConstantRing::release()
 {
-    for (std::vector<MTL::Buffer*>& pages : mPages)
+    for (const std::vector<MTL::Buffer*>& pages : mPages)
     {
         for (MTL::Buffer* page : pages)
         {
@@ -183,7 +183,10 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     mCommandBuffers.reserve(frameCount);
     for (uint32_t i = 0; i < frameCount; ++i)
     {
+        // These newly owned objects are intentionally stored as mutable pointers.
+        // NOLINTNEXTLINE(misc-const-correctness)
         MTL4::CommandAllocator* allocator = device->newCommandAllocator();
+        // NOLINTNEXTLINE(misc-const-correctness)
         MTL4::CommandBuffer* commandBuffer = device->newCommandBuffer();
         if (!allocator || !commandBuffer)
         {
@@ -215,7 +218,10 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     mSkinBuffers.reserve(frameCount);
     for (uint32_t i = 0; i < frameCount; ++i)
     {
+        // These newly owned objects are intentionally stored as mutable pointers.
+        // NOLINTNEXTLINE(misc-const-correctness)
         MTL4::CommandAllocator* allocator = device->newCommandAllocator();
+        // NOLINTNEXTLINE(misc-const-correctness)
         MTL4::CommandBuffer* commandBuffer = device->newCommandBuffer();
         if (!allocator || !commandBuffer)
         {
@@ -229,7 +235,7 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
 
     // Pages can also be added mid-frame when a launch needs more than one, and
     // the frame's pre-submit commitResidency() publishes those.
-    ConstantRing::PageCallback residency = [this](MTL::Buffer* page) { addResident(page); };
+    const ConstantRing::PageCallback residency = [this](MTL::Buffer* page) { addResident(page); };
     if (!mConstants.init(device, constantBytesPerFrame, frameCount, residency) ||
         !mImmediateConstants.init(device, constantBytesPerFrame, 1, residency) ||
         !mSkinConstants.init(device, constantBytesPerFrame, frameCount, residency))
@@ -269,10 +275,10 @@ void Metal4Context::submitAndWait(MTL4::CommandBuffer* commandBuffer)
     // has to be committed before queue submission, not before encoding.
     commitResidency();
     commandBuffer->endCommandBuffer();
-    const MTL4::CommandBuffer* buffers[] = { commandBuffer };
+    const MTL4::CommandBuffer* const buffers[] = { commandBuffer };
     MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
     options->addFeedbackHandler(MTL4::CommitFeedbackHandlerFunction([](MTL4::CommitFeedback* feedback) {
-        NS::Error* error = feedback ? feedback->error() : nullptr;
+        const NS::Error* const error = feedback ? feedback->error() : nullptr;
         if (error)
         {
             STRELKA_ERROR("Metal 4 immediate submission failed: {}",
@@ -317,10 +323,10 @@ uint64_t Metal4Context::submitSkin(MTL4::CommandBuffer* commandBuffer)
     }
     commitResidency();
     commandBuffer->endCommandBuffer();
-    const MTL4::CommandBuffer* buffers[] = { commandBuffer };
+    const MTL4::CommandBuffer* const buffers[] = { commandBuffer };
     MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
     options->addFeedbackHandler(MTL4::CommitFeedbackHandlerFunction([](MTL4::CommitFeedback* feedback) {
-        NS::Error* error = feedback ? feedback->error() : nullptr;
+        const NS::Error* const error = feedback ? feedback->error() : nullptr;
         if (error)
         {
             STRELKA_ERROR("Metal 4 skinning submission failed: {}",
@@ -503,6 +509,16 @@ void Metal4Context::commitResidency()
     mResidencyDirty = false;
 }
 
+NS::UInteger Metal4Context::residencyAllocationCount() const
+{
+    return mResidencySet ? mResidencySet->allocationCount() : 0;
+}
+
+uint64_t Metal4Context::residencyAllocatedSize() const
+{
+    return mResidencySet ? mResidencySet->allocatedSize() : 0;
+}
+
 MTL::ComputePipelineState* Metal4Context::newComputePipelineState(MTL::Library* library,
                                                                   const char* functionName,
                                                                   MTL::FunctionConstantValues* constants)
@@ -559,7 +575,7 @@ MTL::ComputePipelineState* Metal4Context::newComputePipelineStateLinked(
     }
     NS::Error* error = nullptr;
 
-    auto describe = [&](const char* name) -> NS::Object* {
+    auto describe = [&](const char* name) -> MTL4::FunctionDescriptor* {
         MTL4::LibraryFunctionDescriptor* fd = MTL4::LibraryFunctionDescriptor::alloc()->init();
         fd->setLibrary(library);
         fd->setName(NS::String::string(name, NS::UTF8StringEncoding));
@@ -577,13 +593,13 @@ MTL::ComputePipelineState* Metal4Context::newComputePipelineStateLinked(
         return sd;
     };
 
-    NS::Object* computeDesc = describe(functionName);
-    NS::Object* linkedDesc = describe(linkedFunctionName);
+    MTL4::FunctionDescriptor* computeDesc = describe(functionName);
+    MTL4::FunctionDescriptor* linkedDesc = describe(linkedFunctionName);
 
     MTL4::ComputePipelineDescriptor* pipelineDesc = MTL4::ComputePipelineDescriptor::alloc()->init();
-    pipelineDesc->setComputeFunctionDescriptor(static_cast<MTL4::FunctionDescriptor*>(computeDesc));
+    pipelineDesc->setComputeFunctionDescriptor(computeDesc);
 
-    const NS::Object* fns[] = { linkedDesc };
+    const NS::Object* const fns[] = { linkedDesc };
     MTL4::StaticLinkingDescriptor* linking = MTL4::StaticLinkingDescriptor::alloc()->init();
     linking->setFunctionDescriptors(NS::Array::array(fns, 1));
     pipelineDesc->setStaticLinkingDescriptor(linking);

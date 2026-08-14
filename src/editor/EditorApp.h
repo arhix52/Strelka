@@ -92,6 +92,13 @@ private:
     // One-shot ImGui modal for open/save/device failures (no toast system).
     std::string m_alertMessage;
     bool m_alertOpen = false;
+    bool m_alertOffersRendererRestart = false;
+    bool m_rendererRestartRequested = false;
+    bool m_frameBudgetConfirmOpen = false;
+    uint32_t m_pendingPreviewWidth = 0;
+    uint32_t m_pendingPreviewHeight = 0;
+    double m_pendingPredictedGpuMs = 0.0;
+    float m_pendingRecommendedScale = 0.5f;
 
     // After Render::deviceError(), stop submitting and show the alert once.
     bool m_deviceErrorLatched = false;
@@ -172,10 +179,14 @@ private:
     void drawLoadingOverlay();
     void showAlert(const std::string& message);
     void drawAlertModal();
+    void drawFrameBudgetModal();
     void ensureValidCameraSelection();
     void handleDeviceError();
+    void initializeRendererForCurrentScene();
+    void restartRendererAtSafeScale();
     void restoreDocumentAfterFailedLoad(const char* reason);
     void applyPreviewResolution(uint32_t width, uint32_t height);
+    void requestPreviewResolution(uint32_t width, uint32_t height);
 
 public:
     EditorApp(const std::string& sceneFile, const std::string& resourceSearchPath);

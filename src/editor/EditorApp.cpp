@@ -1,4 +1,5 @@
 #include "EditorApp.h"
+#include "editor_frame_budget.h"
 #include "editor_camera_framing.h"
 #include "editor_document.h"
 #include "editor_screenshot.h"
@@ -113,6 +114,7 @@ void EditorApp::showAlert(const std::string& message)
 {
     m_alertMessage = message;
     m_alertOpen = true;
+    m_alertOffersRendererRestart = false;
 }
 
 void EditorApp::drawAlertModal()
@@ -124,9 +126,65 @@ void EditorApp::drawAlertModal()
     if (ImGui::BeginPopupModal("EditorAlert", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
         ImGui::TextWrapped("%s", m_alertMessage.c_str());
+        if (m_alertOffersRendererRestart &&
+            ImGui::Button("Restart renderer at 0.25 PT scale", ImVec2(260, 0)))
+        {
+            m_rendererRestartRequested = true;
+            m_alertOpen = false;
+            m_alertOffersRendererRestart = false;
+            ImGui::CloseCurrentPopup();
+        }
+        if (m_alertOffersRendererRestart)
+        {
+            ImGui::SameLine();
+        }
         if (ImGui::Button("OK", ImVec2(120, 0)))
         {
             m_alertOpen = false;
+            m_alertOffersRendererRestart = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void EditorApp::drawFrameBudgetModal()
+{
+    if (m_frameBudgetConfirmOpen)
+    {
+        ImGui::OpenPopup("FrameBudgetWarning");
+    }
+    if (ImGui::BeginPopupModal("FrameBudgetWarning", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::TextWrapped("This preview is estimated at %.0f ms per PT frame, above the %.0f ms "
+                           "interactive budget.",
+                           m_pendingPredictedGpuMs, editor_frame_budget::kInteractiveBudgetMs);
+        ImGui::TextWrapped("Lower PT scale to keep the editor responsive?");
+
+        const std::string recommendedLabel = fmt::format("Use {:.2f} PT scale", m_pendingRecommendedScale);
+        if (ImGui::Button(recommendedLabel.c_str(), ImVec2(170, 0)))
+        {
+            m_settingsManager->setAs<bool>("render/pt/denoise", false);
+            m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
+            m_settingsManager->setAs<float>("render/pt/upscaleFactor", m_pendingRecommendedScale);
+            m_settingsManager->setAs<bool>("render/pt/enableUpscale", true);
+            mMetalFxMode = editor_metal_fx::Mode::Spatial;
+            mMetalFxModeInitialized = true;
+            applyPreviewResolution(m_pendingPreviewWidth, m_pendingPreviewHeight);
+            m_frameBudgetConfirmOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Apply anyway", ImVec2(120, 0)))
+        {
+            applyPreviewResolution(m_pendingPreviewWidth, m_pendingPreviewHeight);
+            m_frameBudgetConfirmOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(90, 0)))
+        {
+            m_frameBudgetConfirmOpen = false;
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -166,9 +224,12 @@ void EditorApp::handleDeviceError()
         return;
     }
     m_deviceErrorLatched = true;
+    m_frameBudgetConfirmOpen = false;
     STRELKA_INFO("ACTION device_error");
     STRELKA_ERROR("GPU device error — render submissions stopped");
-    showAlert("GPU device error.\nRender submissions have been stopped.\nCheck the log for details.");
+    showAlert("GPU device error.\nRender submissions have been stopped.\n"
+              "You can rebuild the renderer at a safe PT scale or keep the last good frame.");
+    m_alertOffersRendererRestart = true;
 }
 
 void EditorApp::restoreDocumentAfterFailedLoad(const char* reason)
@@ -298,6 +359,36 @@ void EditorApp::applyPreviewResolution(uint32_t width, uint32_t height)
     m_settingsManager->setAs<uint32_t>("render/height", height);
     m_sharedCtx->mSubframeIndex = 0;
     m_render->resetTemporalHistory();
+}
+
+void EditorApp::requestPreviewResolution(uint32_t width, uint32_t height)
+{
+    const uint32_t currentWidth = m_settingsManager->getAs<uint32_t>("render/width");
+    const uint32_t currentHeight = m_settingsManager->getAs<uint32_t>("render/height");
+    if (currentWidth == width && currentHeight == height)
+    {
+        return;
+    }
+
+    const bool enableUpscale = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
+    const float upscaleFactor = m_settingsManager->getAs<float>("render/pt/upscaleFactor");
+    const editor_frame_budget::RenderSettingsSnapshot current{ currentWidth, currentHeight, enableUpscale,
+                                                                upscaleFactor };
+    const editor_frame_budget::FrameSample sample =
+        editor_frame_budget::sampleFrom(m_render->getLastRenderTimeMs(), current);
+    const editor_frame_budget::RenderSettingsSnapshot proposed{ width, height, enableUpscale, upscaleFactor };
+    const editor_frame_budget::Assessment assessment = editor_frame_budget::assess(sample, proposed);
+    if (!assessment.exceedsBudget)
+    {
+        applyPreviewResolution(width, height);
+        return;
+    }
+
+    m_pendingPreviewWidth = width;
+    m_pendingPreviewHeight = height;
+    m_pendingPredictedGpuMs = assessment.predictedGpuTimeMs;
+    m_pendingRecommendedScale = editor_frame_budget::recommendedScale(sample, width, height);
+    m_frameBudgetConfirmOpen = true;
 }
 
 glm::vec3 EditorApp::computeSceneFitPosition(float fovDegrees) const
@@ -585,6 +676,53 @@ void EditorApp::loadAnimSettings()
     }
 }
 
+void EditorApp::initializeRendererForCurrentScene()
+{
+    m_render = std::unique_ptr<Render>(RenderFactory::createRender());
+    m_render->setSettingsManager(m_settingsManager.get());
+    m_render->setSharedContext(m_sharedCtx.get());
+    m_render->setScene(m_scene.get());
+    m_render->setLoadProgress(&m_loadProgress);
+    m_render->init();
+    m_display->setRender(m_render.get());
+}
+
+void EditorApp::restartRendererAtSafeScale()
+{
+    if (!m_render || m_isLoading)
+    {
+        return;
+    }
+
+    STRELKA_INFO("ACTION renderer_restart scale=0.25");
+    m_renderSubmissionsBlocked = true;
+    m_settingsManager->setAs<bool>("render/pt/denoise", false);
+    m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
+    m_settingsManager->setAs<float>("render/pt/upscaleFactor", 0.25f);
+    m_settingsManager->setAs<bool>("render/pt/enableUpscale", true);
+    mMetalFxMode = editor_metal_fx::Mode::Spatial;
+    mMetalFxModeInitialized = true;
+
+    // Drop every raw pointer and retained frame before destroying the failed
+    // renderer. The commit feedback has already completed, so the destructor can
+    // drain the unaffected Metal 3 queue and release the old submission domain.
+    m_display->resetFrame();
+    m_display->setRender(nullptr);
+    m_render.reset();
+
+    m_sharedCtx = std::make_unique<SharedContext>();
+    initializeRendererForCurrentScene();
+    mPresentedPreviewWidth = 0;
+    mPresentedPreviewHeight = 0;
+    m_framesSinceSceneReady = 0;
+    m_lastExposureFrameSeen = static_cast<size_t>(-1);
+    m_deviceErrorLatched = false;
+    m_renderSubmissionsBlocked = false;
+    m_rendererRestartRequested = false;
+    m_render->resetTemporalHistory();
+    STRELKA_INFO("ACTION renderer_restart_ok scale=0.25");
+}
+
 void EditorApp::checkLoadingComplete()
 {
     if (!m_isLoading)
@@ -633,16 +771,7 @@ void EditorApp::checkLoadingComplete()
 
     m_sharedCtx = std::make_unique<SharedContext>();
 
-    m_render = std::unique_ptr<Render>(RenderFactory::createRender());
-    m_render->setSettingsManager(m_settingsManager.get());
-    m_render->setSharedContext(m_sharedCtx.get());
-    m_render->setScene(m_scene.get());
-    m_render->setLoadProgress(&m_loadProgress);
-    m_render->init();
-    // The display keeps a raw Render* to wait on that render's frame event, and
-    // the assignment above destroyed the one it was given at construction. Left
-    // stale it is a use-after-free on the first frame after any scene open.
-    m_display->setRender(m_render.get());
+    initializeRendererForCurrentScene();
 
     m_resourceSearchPath = m_pendingResourcePath;
     m_documentDirty = false;
@@ -676,6 +805,24 @@ void EditorApp::runBenchmark()
 {
     const uint32_t frames = std::max(4u, envUint("STRELKA_BENCH", 4));
     const uint32_t warmup = std::max(4u, frames / 4);
+    const bool residencyStress = envFlag("STRELKA_RESIDENCY_STRESS");
+
+    if (envFlag("STRELKA_BENCH_W") || envFlag("STRELKA_BENCH_H"))
+    {
+        applyPreviewResolution(
+            envUint("STRELKA_BENCH_W", m_settingsManager->getAs<uint32_t>("render/width")),
+            envUint("STRELKA_BENCH_H", m_settingsManager->getAs<uint32_t>("render/height")));
+    }
+    if (envFlag("STRELKA_BENCH_SCALE"))
+    {
+        const float scale = std::clamp(envFloat("STRELKA_BENCH_SCALE", 1.0f), 0.25f, 1.0f);
+        m_settingsManager->setAs<float>("render/pt/upscaleFactor", scale);
+        m_settingsManager->setAs<bool>("render/pt/enableUpscale", scale < 1.0f);
+    }
+    if (envFlag("STRELKA_BENCH_DENOISE"))
+    {
+        m_settingsManager->setAs<bool>("render/pt/denoise", envUint("STRELKA_BENCH_DENOISE", 0) != 0);
+    }
 
     m_settingsManager->setAs<bool>("render/pt/enableAcc", false);
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
@@ -719,6 +866,11 @@ void EditorApp::runBenchmark()
         for (uint32_t i = 0; i < warmup + frames && !m_display->windowShouldClose();)
         {
             m_display->pollEvents();
+            if (m_render->deviceError())
+            {
+                STRELKA_ERROR("BENCH aborted after GPU device error");
+                break;
+            }
             if (playing)
             {
                 playAnimations(1.0 / 60.0);
@@ -739,6 +891,17 @@ void EditorApp::runBenchmark()
                 }
                 prevFrame = now;
                 ++i;
+                if (residencyStress)
+                {
+                    const uint32_t phase = i % 4;
+                    const bool temporal = phase == 1;
+                    const bool spatial = phase == 2 || phase == 3;
+                    const float scale = phase == 0 ? 1.0f : 0.5f;
+                    m_settingsManager->setAs<bool>("render/pt/denoise", temporal);
+                    m_settingsManager->setAs<float>("render/pt/upscaleFactor", scale);
+                    m_settingsManager->setAs<bool>("render/pt/enableUpscale", temporal || spatial);
+                    applyPreviewResolution(phase == 3 ? 1280u : 1920u, phase == 3 ? 720u : 1080u);
+                }
             }
             usleep(200);
         }
@@ -3718,6 +3881,10 @@ void EditorApp::run()
 
         checkLoadingComplete();
         handleDeviceError();
+        if (m_rendererRestartRequested)
+        {
+            restartRendererAtSafeScale();
+        }
 
         // getMaxEDR() crosses into AppKit; the value only changes when the window
         // moves between displays, so poll it a few times a second instead of
@@ -4443,6 +4610,7 @@ void EditorApp::drawUI()
 
     drawLoadingOverlay();
     drawAlertModal();
+    drawFrameBudgetModal();
 
     // --- Panel draw calls (implementations in panels/*.cpp) ---
     drawViewportPanel();

@@ -1,5 +1,6 @@
 #include "../EditorApp.h"
 #include "../editor_camera_exposure.h"
+#include "../editor_frame_budget.h"
 #include "../../render/metal/render_resolution.h"
 
 #include "imgui.h"
@@ -206,7 +207,7 @@ void EditorApp::drawRenderSettingsPanel()
                 selectedPreset < static_cast<int>(editor_viewport::kPreviewPresets.size()))
             {
                 const editor_viewport::PreviewPreset& selected = editor_viewport::kPreviewPresets[selectedPreset];
-                applyPreviewResolution(selected.width, selected.height);
+                requestPreviewResolution(selected.width, selected.height);
                 previewWidth = selected.width;
                 previewHeight = selected.height;
             }
@@ -227,7 +228,7 @@ void EditorApp::drawRenderSettingsPanel()
                         ? editor_viewport::clampPreviewDimension(
                               static_cast<int>(std::lround(static_cast<float>(width) / aspect)))
                                : previewHeight;
-                applyPreviewResolution(width, height);
+                requestPreviewResolution(width, height);
             }
             if (ImGui::InputInt("Height", &customHeight))
             {
@@ -237,13 +238,13 @@ void EditorApp::drawRenderSettingsPanel()
                         ? editor_viewport::clampPreviewDimension(
                               static_cast<int>(std::lround(static_cast<float>(height) * aspect)))
                                : previewWidth;
-                applyPreviewResolution(width, height);
+                requestPreviewResolution(width, height);
             }
             ImGui::Checkbox("Lock aspect ratio", &lockAspect);
             ImGui::SameLine();
             if (ImGui::Button("Swap"))
             {
-                applyPreviewResolution(previewHeight, previewWidth);
+                requestPreviewResolution(previewHeight, previewWidth);
             }
         }
 
@@ -423,6 +424,32 @@ void EditorApp::drawRenderSettingsPanel()
         {
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
                                "Temporal denoiser ratio unsupported; using spatial upscale");
+        }
+        const double lastGpuMs = m_render->getLastRenderTimeMs();
+        if (lastGpuMs > editor_frame_budget::kInteractiveBudgetMs)
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
+                               "Last PT frame: %.0f ms (interactive budget: %.0f ms)", lastGpuMs,
+                               editor_frame_budget::kInteractiveBudgetMs);
+            const editor_frame_budget::RenderSettingsSnapshot current{
+                displayWidth,
+                displayHeight,
+                resolutionUpscale,
+                m_settingsManager->getAs<float>("render/pt/upscaleFactor"),
+            };
+            const editor_frame_budget::FrameSample sample = editor_frame_budget::sampleFrom(lastGpuMs, current);
+            const float suggestedScale = editor_frame_budget::recommendedScale(sample, displayWidth, displayHeight);
+            const std::string label = fmt::format("Lower PT scale to {:.2f}", suggestedScale);
+            if (ImGui::Button(label.c_str()))
+            {
+                m_settingsManager->setAs<bool>("render/pt/denoise", false);
+                m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
+                m_settingsManager->setAs<float>("render/pt/upscaleFactor", suggestedScale);
+                m_settingsManager->setAs<bool>("render/pt/enableUpscale", true);
+                mMetalFxMode = editor_metal_fx::Mode::Spatial;
+                mMetalFxModeInitialized = true;
+                m_render->resetTemporalHistory();
+            }
         }
 
         auto maxDepth = m_settingsManager->getAs<uint32_t>("render/pt/depth");
