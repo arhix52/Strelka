@@ -89,10 +89,21 @@ static inline float3 unpackMediumAlbedo(uint32_t v)
 #define WF_CTRL_MISS       16
 #define WF_CTRL_MISS_N     17
 #define WF_CTRL_MISS_DIS   18
+#define WF_CTRL_CAPACITY   24
 // Profiling only: live path count and shadow ray count per bounce, so the
 // per-stage timings can be read as a cost per ray rather than a cost per stage.
 #define WF_CTRL_STATS_PATHS  32
 #define WF_CTRL_STATS_SHADOW 64
+
+// Shared pre-traversal breadcrumbs. The prepare dispatch completes before
+// extend starts, so these survive even when one of the first few rays wedges in
+// the ray tracing unit and the command buffer is terminated by the watchdog.
+#define WF_DIAG_BOUNCES    96
+#define WF_DIAG_LANES      4
+#define WF_DIAG_LANE_WORDS 11
+#define WF_DIAG_STRIDE     (1 + WF_DIAG_LANES * WF_DIAG_LANE_WORDS)
+#define WF_STAGE_BREADCRUMB 96
+#define WF_DIAG_BASE       97
 
 // Reserve a run of output slots for the active lanes of one simdgroup. Every
 // lane that reaches a call site belongs in that queue -- the others already
@@ -243,6 +254,7 @@ struct MotionTraversal
 {
     using structure = acceleration_structure<instancing, primitive_motion>;
     using isect = intersector<triangle_data, instancing, primitive_motion>;
+    using volume_isect = isect;
     using table = intersection_function_table<triangle_data, instancing, primitive_motion>;
     static geometry_type geometryTypes()
     {
@@ -253,6 +265,11 @@ struct MotionTraversal
         return 0.0f;
     }
     static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float time)
+    {
+        return i.intersect(r, as, mask, time);
+    }
+    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as,
+                                                  uint32_t mask, float time)
     {
         return i.intersect(r, as, mask, time);
     }
@@ -267,6 +284,7 @@ struct StaticTraversal
 {
     using structure = acceleration_structure<instancing>;
     using isect = intersector<triangle_data, instancing>;
+    using volume_isect = isect;
     using table = intersection_function_table<triangle_data, instancing>;
     static geometry_type geometryTypes()
     {
@@ -277,6 +295,11 @@ struct StaticTraversal
         return 0.0f;
     }
     static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float)
+    {
+        return i.intersect(r, as, mask);
+    }
+    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as,
+                                                  uint32_t mask, float)
     {
         return i.intersect(r, as, mask);
     }
@@ -299,6 +322,7 @@ struct CurveMotionTraversal
 {
     using structure = acceleration_structure<instancing, primitive_motion>;
     using isect = intersector<triangle_data, curve_data, instancing, primitive_motion>;
+    using volume_isect = intersector<triangle_data, instancing, primitive_motion>;
     using table = intersection_function_table<triangle_data, curve_data, instancing, primitive_motion>;
     static geometry_type geometryTypes()
     {
@@ -309,6 +333,11 @@ struct CurveMotionTraversal
         return r.curve_parameter;
     }
     static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float time)
+    {
+        return i.intersect(r, as, mask, time);
+    }
+    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as,
+                                                  uint32_t mask, float time)
     {
         return i.intersect(r, as, mask, time);
     }
@@ -323,6 +352,7 @@ struct CurveStaticTraversal
 {
     using structure = acceleration_structure<instancing>;
     using isect = intersector<triangle_data, curve_data, instancing>;
+    using volume_isect = intersector<triangle_data, instancing>;
     using table = intersection_function_table<triangle_data, curve_data, instancing>;
     static geometry_type geometryTypes()
     {
@@ -336,12 +366,61 @@ struct CurveStaticTraversal
     {
         return i.intersect(r, as, mask);
     }
+    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as,
+                                                  uint32_t mask, float)
+    {
+        return i.intersect(r, as, mask);
+    }
     static isect::result_type traceAnyHit(thread isect& i, ray r, structure as, uint32_t mask,
                                           float, table t, thread ShadowPayload& payload)
     {
         return i.intersect(r, as, mask, t, payload);
     }
 };
+
+// The curve and triangle intersectors return different result types even though
+// extend consumes the same common fields. Copy those fields into one small
+// value so an SSS lane can use a genuinely triangle-only intersector while the
+// other lanes keep the curve-capable one.
+struct ExtendIntersection
+{
+    intersection_type type;
+    uint32_t instanceId;
+    uint32_t geometryId;
+    uint32_t primitiveId;
+    float distance;
+    float2 barycentrics;
+    float curveParameter;
+};
+
+template <typename R>
+static inline ExtendIntersection captureExtendIntersection(thread const R& r, float curveParameter)
+{
+    ExtendIntersection out;
+    out.type = r.type;
+    out.instanceId = 0u;
+    out.geometryId = 0u;
+    out.primitiveId = 0u;
+    out.distance = INFINITY;
+    out.barycentrics = float2(0.0f);
+    out.curveParameter = 0.0f;
+    if (r.type != intersection_type::none)
+    {
+        out.instanceId = r.instance_id;
+        out.geometryId = r.geometry_id;
+        out.primitiveId = r.primitive_id;
+        out.distance = r.distance;
+        if (r.type == intersection_type::triangle)
+        {
+            out.barycentrics = r.triangle_barycentric_coord;
+        }
+        else if (r.type == intersection_type::curve)
+        {
+            out.curveParameter = curveParameter;
+        }
+    }
+    return out;
+}
 
 static inline uint32_t pathDepth(uint32_t depthAndFlags)
 {
@@ -457,6 +536,7 @@ kernel void wavefrontGenerate(
         control[WF_CTRL_SHADOW] = 0u;
         control[WF_CTRL_HIT] = 0u;
         control[WF_CTRL_MISS] = 0u;
+        control[WF_CTRL_CAPACITY] = pixelCount;
         iorStats[IOR_STAT_OVERFLOW] = 0u;
         iorStats[IOR_STAT_UNMATCHED] = 0u;
         iorStats[IOR_STAT_ESCAPED_INSIDE] = 0u;
@@ -532,6 +612,7 @@ static void extendImpl(
     constant Uniforms&                                         uniforms,
     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
     typename T::structure accelerationStructure,
+    typename T::structure volumeAccelerationStructure,
     device const PathRay*                                      rays,
     device HitRecord*                                          hits,
     constant uint32_t&                                         sampleIdx,
@@ -561,6 +642,13 @@ static void extendImpl(
         return;
     }
     const uint32_t tid = queue[gid];
+    // A corrupted append count must not turn into an out-of-bounds PathRay load
+    // and then an invalid hardware traversal. This is cold-path protection: a
+    // valid queue always contains the pixel slot its path owns.
+    if (tid >= uniforms.width * uniforms.height)
+    {
+        return;
+    }
     const PathRay pr = rays[tid];
 
     const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
@@ -574,6 +662,77 @@ static void extendImpl(
     r.max_distance = INFINITY;
     r.origin = float3(pr.origin);
     r.direction = float3(pr.direction);
+
+    // Never hand NaN, infinity, or a collapsed direction to the ray tracing
+    // unit. Such a path cannot produce a finite contribution, while curve
+    // traversal on malformed rays can fail to make progress and trip the GPU
+    // watchdog instead of merely returning no intersection.
+    const float directionLength2 = dot(r.direction, r.direction);
+    if (!all(isfinite(r.origin)) || !all(isfinite(r.direction)) ||
+        !(directionLength2 > 0.25f && directionLength2 < 4.0f))
+    {
+        return;
+    }
+
+    // Draw a participating-medium event before traversal and use it as the
+    // ray's upper bound. The old order traced to the closest surface first and
+    // only then discovered that a sub-millimetre SSS free flight should have
+    // stopped the ray. That is equivalent statistically, but catastrophically
+    // more work in a curve-heavy scene: a single late random-walk ray could walk
+    // the entire multi-million-segment AS and hold one dispatch past the GPU
+    // watchdog. The same bound helps a fog ray in a large instanced scene.
+    //
+    // A surface at or before the sampled distance still wins below, so this is
+    // only a scheduling bound; it does not change which event the path sees.
+    bool insideSss = false;
+    uint32_t mediumHitBit = 0u;
+    float mediumScatterT = 0.0f;
+    if (SPEC_SSS)
+    {
+        const uint32_t sss = paths[tid].medium;
+        const uint32_t medium = sss & MEDIUM_INDEX_MASK;
+        insideSss = medium != 0u;
+        if (insideSss)
+        {
+            const uint32_t step = sss >> MEDIUM_STEP_SHIFT;
+            if (step < MEDIUM_MAX_STEPS)
+            {
+                device const Material& mm = materials[medium - 1u];
+                const float3 sigmaT = sssSigmaT(float3(mm.subsurface_radius));
+                const float3 albedo = ((mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
+                                          ? float3(mm.diffuse_transmission_color)
+                                          : unpackMediumAlbedo(paths[tid].mediumAlbedo);
+                const float3 channelPdf = sssChannelPdf(float3(paths[tid].throughput), albedo);
+                SamplerState srng = samplerFor(uniforms, tid, sampleIdx,
+                                               pathDepth(paths[tid].depthAndFlags) + step);
+                if (sssSampleDistance(sigmaT, channelPdf, 1e16f,
+                                      random<SampleDimension::eSssChannel>(srng, uniforms.samplerType),
+                                      random<SampleDimension::eSssDistance>(srng, uniforms.samplerType),
+                                      mediumScatterT))
+                {
+                    mediumHitBit = HIT_SSS_BIT;
+                }
+            }
+        }
+    }
+    if (SPEC_FOG && uniforms.hasFog && !insideSss)
+    {
+        SamplerState frng = samplerFor(uniforms, tid, sampleIdx,
+                                      pathDepth(paths[tid].depthAndFlags));
+        if (fogSampleDistance(r.origin, r.direction, 1e16f, uniforms.fogHeight, uniforms.fogSigmaT,
+                              random<SampleDimension::eFogDistance>(frng, uniforms.samplerType),
+                              mediumScatterT))
+        {
+            mediumHitBit = HIT_FOG_BIT;
+        }
+    }
+    if (mediumHitBit != 0u)
+    {
+        // Keep max >= min even for a legitimate zero-valued random draw. Any
+        // surface in this tiny padded interval is compared with the actual
+        // sampled distance after traversal.
+        r.max_distance = max(mediumScatterT, r.min_distance + 1e-6f);
+    }
 
     // Measured and not kept: `intersection_query`, Metal's inline traversal, in
     // place of the intersector object.
@@ -594,15 +753,40 @@ static void extendImpl(
     // It also cannot serve the whole renderer: `intersection_query` rejects the
     // primitive_motion tag, so a deforming scene would need the intersector kept
     // alongside it.
-    typename T::isect isect;
-    isect.assume_geometry_type(T::geometryTypes());
-    // The coverage test for cutout geometry happens in `shade`, not here -- see
-    // the note above extendAlphaAnyHit's replacement for the measurement.
-    isect.force_opacity(forced_opacity::opaque);
-    isect.accept_any_intersection(false);
-
-    const typename T::isect::result_type hit =
-        T::trace(isect, r, accelerationStructure, rayMask, motionTime);
+    // SSS random walks only need the closed triangle boundary of their volume.
+    // Curves are fibre primitives, not volume boundaries. An instance mask was
+    // not sufficient here: the curve-capable intersector still entered Metal's
+    // pathological traversal mode for a handful of deep random-walk rays. Use
+    // a triangle-only intersector type for those lanes, so curve intersection
+    // code is absent from the operation rather than merely unable to return a
+    // candidate.
+    ExtendIntersection hit;
+    if (insideSss)
+    {
+        typename T::volume_isect volumeIsect;
+        volumeIsect.assume_geometry_type(geometry_type::triangle);
+        volumeIsect.force_opacity(forced_opacity::opaque);
+        volumeIsect.accept_any_intersection(false);
+        const typename T::volume_isect::result_type volumeHit =
+            T::traceVolume(volumeIsect, r, volumeAccelerationStructure,
+                           rayMask & ~GEOMETRY_MASK_CURVE, motionTime);
+        hit = captureExtendIntersection(volumeHit, 0.0f);
+    }
+    else
+    {
+        typename T::isect isect;
+        isect.assume_geometry_type(T::geometryTypes());
+        // The coverage test for cutout geometry happens in `shade`, not here --
+        // see the note above extendAlphaAnyHit's replacement for the measurement.
+        isect.force_opacity(forced_opacity::opaque);
+        isect.accept_any_intersection(false);
+        const typename T::isect::result_type surfaceHit =
+            T::trace(isect, r, accelerationStructure, rayMask, motionTime);
+        const float curveParameter = surfaceHit.type == intersection_type::curve
+                                         ? T::curveParameter(surfaceHit)
+                                         : 0.0f;
+        hit = captureExtendIntersection(surfaceHit, curveParameter);
+    }
 
     // Chased through the ray buffer -- 22 MB at 720p, past the caches -- because
     // the queue this used to walk is 3.7 MB and fits in them, which made the
@@ -612,10 +796,10 @@ static void extendImpl(
     // straight to the miss stage: no hit record is written and the path never
     // enters `shade`. On a scene with an open background that is most of the
     // secondary rays, and it was the whole cost of the bounce.
-    // Atmospheric scattering, decided here because this is the one kernel that
-    // knows both where the ray ended and whether it ended at all. A ray that
-    // scatters never reaches its surface, and one that escapes can still scatter
-    // on the way out -- so the miss branch is inside this test, not before it.
+    // Atmospheric and subsurface scattering are decided here because this is
+    // the one kernel that knows whether a surface precedes the sampled event.
+    // A ray that scatters never reaches that surface, and one that would escape
+    // can still scatter on the way out -- so the miss branch remains below.
     // Everything below this line is on the wrong side of a register cliff, and
     // the cliff is the only lever the hardware counters leave.
     //
@@ -646,73 +830,18 @@ static void extendImpl(
     // this renderer has already measured that dispatch boundaries are not free
     // (see the acceleration structure batching note). Not attempted.
     //
-    // Inside a subsurface medium the path is inside a solid object, so the
-    // atmosphere does not apply and this runs instead of the fog test rather
-    // than alongside it.
-    if (SPEC_SSS)
+    if (mediumHitBit != 0u &&
+        (hit.type == intersection_type::none || mediumScatterT < hit.distance))
     {
-        const uint32_t sss = paths[tid].medium;
-        const uint32_t medium = sss & MEDIUM_INDEX_MASK;
-        if (medium != 0u)
-        {
-            const float surfaceT = (hit.type == intersection_type::none) ? 1e16f : hit.distance;
-            device const Material& mm = materials[medium - 1u];
-            const float3 sigmaT = sssSigmaT(float3(mm.subsurface_radius));
-            // Same albedo `shade` will weight this step with, so both ends agree
-            // on which channel was the likely one to have been drawn.
-            const float3 albedo = ((mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
-                                      ? float3(mm.diffuse_transmission_color)
-                                      : unpackMediumAlbedo(paths[tid].mediumAlbedo);
-            const float3 channelPdf = sssChannelPdf(float3(paths[tid].throughput), albedo);
-            // The walk step, not the path depth, indexes the sampler: a walk can
-            // take hundreds of steps at one depth, and rebuilding the sampler in
-            // the same state at each of them would have every step draw the same
-            // distance and turn the same way.
-            const uint32_t step = sss >> MEDIUM_STEP_SHIFT;
-            SamplerState srng = samplerFor(uniforms, tid, sampleIdx,
-                                           pathDepth(paths[tid].depthAndFlags) + step);
-            float scatterT = 0.0f;
-            if (step < MEDIUM_MAX_STEPS &&
-                sssSampleDistance(sigmaT, channelPdf, surfaceT,
-                                  random<SampleDimension::eSssChannel>(srng, uniforms.samplerType),
-                                  random<SampleDimension::eSssDistance>(srng, uniforms.samplerType),
-                                  scatterT))
-            {
-                HitRecord sssRec;
-                sssRec.geomEntryIndex = HIT_SSS_BIT;
-                sssRec.instanceIndex = 0u;
-                sssRec.primitiveId = 0u;
-                sssRec.barycentrics = vector_float2(0.0f, 0.0f);
-                sssRec.distance = scatterT;
-                hits[tid] = sssRec;
-                queuePush(hitCounter, hitQueue, tid);
-                return;
-            }
-        }
-    }
-
-    // A scene without fog already gets 704: SPEC_FOG is a function constant.
-    if (SPEC_FOG && uniforms.hasFog && !(SPEC_SSS && (paths[tid].medium & MEDIUM_INDEX_MASK) != 0u))
-    {
-        const float surfaceT =
-            (hit.type == intersection_type::none) ? 1e16f : hit.distance;
-        SamplerState frng =
-            samplerFor(uniforms, tid, sampleIdx, pathDepth(paths[tid].depthAndFlags));
-        float scatterT = 0.0f;
-        if (fogSampleDistance(r.origin, r.direction, surfaceT, uniforms.fogHeight, uniforms.fogSigmaT,
-                              random<SampleDimension::eFogDistance>(frng, uniforms.samplerType),
-                              scatterT))
-        {
-            HitRecord fogRec;
-            fogRec.geomEntryIndex = HIT_FOG_BIT;
-            fogRec.instanceIndex = 0u;
-            fogRec.primitiveId = 0u;
-            fogRec.barycentrics = vector_float2(0.0f, 0.0f);
-            fogRec.distance = scatterT;
-            hits[tid] = fogRec;
-            queuePush(hitCounter, hitQueue, tid);
-            return;
-        }
+        HitRecord mediumRec;
+        mediumRec.geomEntryIndex = mediumHitBit;
+        mediumRec.instanceIndex = 0u;
+        mediumRec.primitiveId = 0u;
+        mediumRec.barycentrics = vector_float2(0.0f, 0.0f);
+        mediumRec.distance = mediumScatterT;
+        hits[tid] = mediumRec;
+        queuePush(hitCounter, hitQueue, tid);
+        return;
     }
 
     if (hit.type == intersection_type::none)
@@ -721,22 +850,22 @@ static void extendImpl(
         return;
     }
 
-    const auto inst = instances[hit.instance_id];
+    const auto inst = instances[hit.instanceId];
     const bool isLight = (inst.mask == GEOMETRY_MASK_LIGHT || inst.mask == GEOMETRY_MASK_LIGHT_HIDDEN);
     // For emissive geometry userID indexes the light table, not the geometry
     // table; the flag bit tells `shade` which one it is.
     HitRecord rec;
     rec.geomEntryIndex = isLight ? (HIT_LIGHT_BIT | inst.userID)
-                                 : (inst.userID + hit.geometry_id);
-    rec.instanceIndex = hit.instance_id;
-    rec.primitiveId = hit.primitive_id;
+                                 : (inst.userID + hit.geometryId);
+    rec.instanceIndex = hit.instanceId;
+    rec.primitiveId = hit.primitiveId;
     // A curve hit has no barycentrics; what it has is one parameter along the
     // segment. It rides in the same two floats rather than in a field of its own,
     // because `shade` already has to read the geometry entry to find the
     // material and the entry says which kind of primitive this is.
     rec.barycentrics = (hit.type == intersection_type::curve)
-                           ? vector_float2(T::curveParameter(hit), 0.0f)
-                           : hit.triangle_barycentric_coord;
+                           ? vector_float2(hit.curveParameter, 0.0f)
+                           : hit.barycentrics;
     rec.distance = hit.distance;
     hits[tid] = rec;
     queuePush(hitCounter, hitQueue, tid);
@@ -757,11 +886,14 @@ static void extendImpl(
                      device atomic_uint* missCounter [[buffer(11)]],                                        \
                      device const PathState* paths [[buffer(12)]],                                          \
                      device const Material* materials [[buffer(13)]],                                       \
-                     constant uint32_t& rayMask [[buffer(14)]])                                            \
+                     constant uint32_t& rayMask [[buffer(14)]],                                            \
+                     TRAITS::structure volumeAccelerationStructure [[buffer(15)]],                         \
+                     constant uint32_t& queueOffset [[buffer(16)]])                                        \
     {                                                                                                       \
-        extendImpl<TRAITS>(gid, uniforms, instances, accelerationStructure, rays, hits, sampleIdx, queue,    \
-                           control, hitQueue, hitCounter, missQueue, missCounter, paths, materials,       \
-                           rayMask);                                                                        \
+        extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure,                   \
+                           volumeAccelerationStructure,                                                     \
+                           rays, hits, sampleIdx, queue, control, hitQueue, hitCounter, missQueue,           \
+                           missCounter, paths, materials, rayMask);                                         \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
@@ -2224,6 +2356,23 @@ kernel void wavefrontShade(
         aov[tid].specularHitDistance = rec.distance;
     }
 
+    // The canonical sample exists only to produce deterministic MetalFX
+    // guides. Its radiance is written to a throw-away side buffer, yet it used
+    // to keep evaluating emission, direct lighting and every remaining bounce
+    // after the guide had already been completed. At 1 spp that made temporal
+    // denoising nearly double the path-tracing cost, and a close-up groom kept
+    // millions of those useless paths inside the curve AS for several bounces.
+    //
+    // A smooth primary surface deliberately leaves AOV_DONE clear so the guide
+    // walk can reach the first rough surface. The secondary hit distance above
+    // is recorded before stopping, so mirror/glass reprojection keeps the same
+    // data as the full walk did. guideLastChance bounds this to depth two.
+    if (uniforms.canonicalGuideSample && sampleIdx == 0u &&
+        (p.depthAndFlags & PATH_FLAG_AOV_DONE) != 0u)
+    {
+        return;
+    }
+
     if (si.emission.x > 0.0f || si.emission.y > 0.0f || si.emission.z > 0.0f)
     {
         radiance += throughput * si.emission;
@@ -2593,19 +2742,90 @@ kernel void wavefrontShade(
 // the CPU would put a round trip in the middle of every bounce, which costs far
 // more than the empty threadgroups an indirect dispatch occasionally launches.
 // ---------------------------------------------------------------------------
+// A timestamp query is surprisingly invasive on Metal 4: precise timestamps
+// may split a compute pass internally, and hundreds of them made a healthy long
+// frame trip the GPU watchdog. This one-word breadcrumb identifies the stage
+// that was entered without using the counter-sampling path at all.
+kernel void wavefrontStageBreadcrumb(
+    device atomic_uint* stage     [[buffer(0)]],
+    constant uint32_t&  stageIndex [[buffer(1)]])
+{
+    atomic_store_explicit(stage, stageIndex, memory_order_relaxed);
+}
+
+static inline void prepareTraversalDispatches(
+    device uint32_t* args,
+    uint32_t active,
+    uint32_t threadsPerGroup,
+    uint32_t batchThreads,
+    uint32_t batchCount)
+{
+    for (uint32_t batch = 0u; batch < batchCount; ++batch)
+    {
+        const uint32_t offset = batch * batchThreads;
+        const uint32_t n = active > offset ? min(active - offset, batchThreads) : 0u;
+        args[batch * 3u + 0u] = (n + threadsPerGroup - 1u) / threadsPerGroup;
+        args[batch * 3u + 1u] = 1u;
+        args[batch * 3u + 2u] = 1u;
+    }
+}
+
 kernel void wavefrontPrepare(
     device uint32_t&        controlRef    [[buffer(0)]],
     constant uint32_t&      srcIdx        [[buffer(1)]],
     constant uint32_t&      threadsPerGroup [[buffer(2)]],
-    constant uint32_t&      bounceIdx       [[buffer(3)]])
+    constant uint32_t&      bounceIdx       [[buffer(3)]],
+    device uint32_t*        stageStats      [[buffer(4)]],
+    device const PathState* paths           [[buffer(5)]],
+    device const PathRay*   rays            [[buffer(6)]],
+    device const uint32_t*  queue           [[buffer(7)]],
+    constant uint32_t&      diagnosticsEnabled [[buffer(8)]],
+    device uint32_t*        traversalDispatches [[buffer(9)]],
+    constant uint32_t&      traversalBatchThreads [[buffer(10)]],
+    constant uint32_t&      traversalBatchCount [[buffer(11)]])
 {
     device uint32_t* control = &controlRef;
-    const uint32_t n = control[srcIdx];
+    const uint32_t n = min(control[srcIdx], control[WF_CTRL_CAPACITY]);
+    if (diagnosticsEnabled != 0u)
+    {
+        const uint32_t diagBase = WF_DIAG_BASE +
+                                  min(bounceIdx, WF_DIAG_BOUNCES - 1u) * WF_DIAG_STRIDE;
+        stageStats[diagBase] = n;
+        for (uint32_t lane = 0u; lane < min(n, (uint32_t)WF_DIAG_LANES); ++lane)
+        {
+            const uint32_t laneBase = diagBase + 1u + lane * WF_DIAG_LANE_WORDS;
+            const uint32_t tid = queue[lane];
+            stageStats[laneBase] = tid;
+            if (tid >= control[WF_CTRL_CAPACITY])
+            {
+                stageStats[laneBase + 1u] = 0xffffffffu;
+                continue;
+            }
+            const PathState p = paths[tid];
+            const PathRay r = rays[tid];
+            const float3 origin = float3(r.origin);
+            const float3 direction = float3(r.direction);
+            stageStats[laneBase + 1u] = p.medium;
+            stageStats[laneBase + 2u] = p.depthAndFlags;
+            stageStats[laneBase + 3u] = as_type<uint32_t>(origin.x);
+            stageStats[laneBase + 4u] = as_type<uint32_t>(origin.y);
+            stageStats[laneBase + 5u] = as_type<uint32_t>(origin.z);
+            stageStats[laneBase + 6u] = as_type<uint32_t>(direction.x);
+            stageStats[laneBase + 7u] = as_type<uint32_t>(direction.y);
+            stageStats[laneBase + 8u] = as_type<uint32_t>(direction.z);
+            stageStats[laneBase + 9u] = as_type<uint32_t>(dot(direction, direction));
+            stageStats[laneBase + 10u] = as_type<uint32_t>(max(max(float3(p.throughput).x,
+                                                                   float3(p.throughput).y),
+                                                               float3(p.throughput).z));
+        }
+        control[WF_CTRL_STATS_PATHS + min(bounceIdx, 31u)] = n;
+    }
     control[WF_CTRL_ACTIVE] = n;
-    control[WF_CTRL_STATS_PATHS + min(bounceIdx, 31u)] = n;
     control[WF_CTRL_DISPATCH + 0] = (n + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_DISPATCH + 1] = 1u;
     control[WF_CTRL_DISPATCH + 2] = 1u;
+    prepareTraversalDispatches(traversalDispatches, n, threadsPerGroup,
+                               traversalBatchThreads, traversalBatchCount);
     // The stages about to run append into these, so clear their counts before
     // anything can add to them.
     control[1u - srcIdx] = 0u;
@@ -2659,7 +2879,10 @@ kernel void wavefrontPrepareHitMiss(
 kernel void wavefrontPrepareShadow(
     device uint32_t&        controlRef      [[buffer(0)]],
     constant uint32_t&      threadsPerGroup [[buffer(1)]],
-    constant uint32_t&      bounceIdx       [[buffer(2)]])
+    constant uint32_t&      bounceIdx       [[buffer(2)]],
+    device uint32_t*        traversalDispatches [[buffer(3)]],
+    constant uint32_t&      traversalBatchThreads [[buffer(4)]],
+    constant uint32_t&      traversalBatchCount [[buffer(5)]])
 {
     device uint32_t* control = &controlRef;
     const uint32_t n = control[WF_CTRL_SHADOW];
@@ -2668,6 +2891,8 @@ kernel void wavefrontPrepareShadow(
     control[WF_CTRL_SHADOW_DIS + 0] = (n + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_SHADOW_DIS + 1] = 1u;
     control[WF_CTRL_SHADOW_DIS + 2] = 1u;
+    prepareTraversalDispatches(traversalDispatches, n, threadsPerGroup,
+                               traversalBatchThreads, traversalBatchCount);
 }
 
 // Transmittance of a shadow ray through whatever bounded media it crosses.
@@ -2932,9 +3157,11 @@ kernel void wavefrontSharcDeposit(uint tid [[thread_position_in_grid]],
                      device const GeometryEntry* geometryEntries [[buffer(8)]],                      \
                      device const char* vertexBuffer [[buffer(9)]],                                  \
                      device const uint32_t* indexBuffer [[buffer(10)]],                             \
-                     TRAITS::table functionTable [[buffer(11)]])                                     \
+                     TRAITS::table functionTable [[buffer(11)]],                                    \
+                     constant uint32_t& queueOffset [[buffer(12)]])                                 \
     {                                                                                                \
-        shadowImpl<TRAITS>(gid, uniforms, accelerationStructure, shadowRays, radianceOut, control,    \
+        shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, shadowRays,            \
+                           radianceOut, control,                                                      \
                            sampleIdx, instances, materials, geometryEntries, vertexBuffer,           \
                            indexBuffer, functionTable);                                              \
     }

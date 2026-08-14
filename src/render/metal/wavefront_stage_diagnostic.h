@@ -2,7 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <vector>
+#include <limits>
 
 namespace oka
 {
@@ -11,39 +11,37 @@ namespace metal
 
 struct WavefrontStageFailure
 {
-    size_t validMarks = 0;
     int32_t lastCompletedStage = -1;
     int32_t suspectedStage = -1;
     bool postIntegrator = false;
 };
 
-inline WavefrontStageFailure inferWavefrontStageFailure(const std::vector<uint64_t>& timestamps,
-                                                        size_t stageCount)
+inline constexpr uint32_t kWavefrontStageNotStarted = std::numeric_limits<uint32_t>::max();
+
+// The GPU writes a stage index immediately before entering that stage. A value
+// equal to stageCount is the closing breadcrumb written after the integrator.
+inline WavefrontStageFailure inferWavefrontStageFailure(uint32_t enteredStage, size_t stageCount)
 {
     WavefrontStageFailure result;
-    uint64_t previous = 0;
-    while (result.validMarks < timestamps.size())
+    if (stageCount == 0)
     {
-        const uint64_t timestamp = timestamps[result.validMarks];
-        if (timestamp == 0 || (result.validMarks > 0 && timestamp < previous))
-        {
-            break;
-        }
-        previous = timestamp;
-        ++result.validMarks;
+        result.postIntegrator = enteredStage != kWavefrontStageNotStarted;
+        return result;
     }
-
-    if (result.validMarks >= 2)
+    if (enteredStage == kWavefrontStageNotStarted)
     {
-        result.lastCompletedStage = static_cast<int32_t>(result.validMarks - 2);
+        result.suspectedStage = 0;
+        return result;
     }
-    if (result.validMarks > stageCount)
+    if (enteredStage >= stageCount)
     {
+        result.lastCompletedStage = static_cast<int32_t>(stageCount - 1);
         result.postIntegrator = true;
     }
-    else if (result.validMarks > 0)
+    else
     {
-        result.suspectedStage = static_cast<int32_t>(result.validMarks - 1);
+        result.lastCompletedStage = static_cast<int32_t>(enteredStage) - 1;
+        result.suspectedStage = static_cast<int32_t>(enteredStage);
     }
     return result;
 }

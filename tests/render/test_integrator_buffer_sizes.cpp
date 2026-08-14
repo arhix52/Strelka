@@ -3,7 +3,13 @@
 #include "integrator_buffer_sizes.h"
 
 using oka::metal::kWavefrontControlUints;
+using oka::metal::kWavefrontStageDiagnosticBase;
+using oka::metal::kWavefrontStageDiagnosticBounces;
+using oka::metal::kWavefrontStageDiagnosticStride;
+using oka::metal::kWavefrontStageStatsUints;
+using oka::metal::kWavefrontTraversalBatchThreads;
 using oka::metal::wavefrontBufferLayout;
+using oka::metal::wavefrontTraversalBatchCount;
 using oka::metal::WavefrontElementSizes;
 
 TEST_CASE("wavefrontBufferLayout scales with pixel count")
@@ -27,6 +33,12 @@ TEST_CASE("wavefrontBufferLayout scales with pixel count")
     CHECK(a.guideRadianceBytes == a.radianceBytes);
     CHECK(a.pathQueueBytes == (size_t)a.pixels * sizeof(uint32_t));
     CHECK(a.controlBytes == (size_t)kWavefrontControlUints * sizeof(uint32_t));
+    CHECK(a.traversalDispatchBytes ==
+          (size_t)wavefrontTraversalBatchCount(a.pixels) * 3 * sizeof(uint32_t));
+    CHECK(a.stageStatsBytes == (size_t)kWavefrontStageStatsUints * sizeof(uint32_t));
+    CHECK(kWavefrontStageStatsUints ==
+          kWavefrontStageDiagnosticBase +
+              kWavefrontStageDiagnosticBounces * kWavefrontStageDiagnosticStride);
     CHECK(a.shadowRayBytes == (size_t)a.pixels * 40);
     CHECK(a.aovBytes == (size_t)a.pixels * 80);
     CHECK(a.hitQueueBytes == a.pathQueueBytes);
@@ -36,6 +48,8 @@ TEST_CASE("wavefrontBufferLayout scales with pixel count")
     CHECK(b.pixels == 4 * a.pixels);
     CHECK(b.pathStateBytes == 4 * a.pathStateBytes);
     CHECK(b.controlBytes == a.controlBytes);
+    CHECK(b.traversalDispatchBytes == a.traversalDispatchBytes);
+    CHECK(b.stageStatsBytes == a.stageStatsBytes);
 }
 
 TEST_CASE("preview presets make wavefront memory growth explicit")
@@ -58,4 +72,16 @@ TEST_CASE("preview presets make wavefront memory growth explicit")
     CHECK(fullHd.shadowRayBytes == 4 * preview.shadowRayBytes);
     CHECK(fullHd.aovBytes == 4 * preview.aovBytes);
     CHECK(fullHd.controlBytes == preview.controlBytes);
+    CHECK(preview.traversalDispatchBytes == 2 * 3 * sizeof(uint32_t));
+    CHECK(fullHd.traversalDispatchBytes == 8 * 3 * sizeof(uint32_t));
+    CHECK(fullHd.stageStatsBytes == preview.stageStatsBytes);
+}
+
+TEST_CASE("wavefront traversal batches cap one hardware dispatch")
+{
+    CHECK(wavefrontTraversalBatchCount(0) == 1);
+    CHECK(wavefrontTraversalBatchCount(kWavefrontTraversalBatchThreads) == 1);
+    CHECK(wavefrontTraversalBatchCount(kWavefrontTraversalBatchThreads + 1) == 2);
+    CHECK(wavefrontTraversalBatchCount(1440 * 810) == 5);
+    CHECK(wavefrontTraversalBatchCount(1920 * 1080) == 8);
 }

@@ -142,7 +142,7 @@ public:
         geom->setControlPointFormat(MTL::AttributeFormatFloat3);
         geom->setControlPointStride(sizeof(glm::float3));
         geom->setRadiusBuffer(
-            bufferRange(geometry->curveRadiusBuffer(), curve.mWidthsStart * sizeof(float)));
+            bufferRange(geometry->curveRadiusBuffer(), curve.mPointsStart * sizeof(float)));
         geom->setRadiusFormat(MTL::AttributeFormatFloat);
         geom->setRadiusStride(sizeof(float));
         geom->setIndexBuffer(

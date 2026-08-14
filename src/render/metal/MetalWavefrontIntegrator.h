@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Metal4Context.h"
+#include "wavefront_chunk_plan.h"
 #include "MetalEnvironment.h"
 #include "MetalTextures.h"
 #include "integrator_features.h"
@@ -44,6 +45,7 @@ struct IntegratorSceneBindings
 {
     MTL::Buffer* instanceBuffer = nullptr;
     MTL::AccelerationStructure* instanceAccelerationStructure = nullptr;
+    MTL::AccelerationStructure* volumeAccelerationStructure = nullptr;
     const std::vector<MTL::AccelerationStructure*>* primitiveAccelerationStructures = nullptr;
     MTL::Buffer* materialBuffer = nullptr;
     MTL::Buffer* lightBuffer = nullptr;
@@ -91,7 +93,10 @@ struct IntegratorFrameRequest
 class MetalWavefrontIntegrator
 {
 public:
-    static constexpr uint32_t kMaxStageSamples = 256;
+    // One breadcrumb per profiled stage plus the closing mark. A depth-8 scene with
+    // alpha and the SSS tail encodes 80 iterations (321 stages), so 256 made a
+    // late failure look like "post-integrator" simply because profiling stopped.
+    static constexpr uint32_t kMaxStageSamples = 512;
 
     MetalWavefrontIntegrator() = default;
     ~MetalWavefrontIntegrator();
@@ -109,15 +114,14 @@ public:
                                        MTL::ComputeCommandEncoder* enc,
                                        const IntegratorSceneBindings& scene,
                                        const IntegratorFrameRequest& frame);
-    void encodeMetal4(MTL4::CommandBuffer* cmd,
-                      MTL4::ComputeCommandEncoder*& enc,
+    void encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                       const IntegratorSceneBindings& scene,
-                      const IntegratorFrameRequest& frame);
+                      const IntegratorFrameRequest& frame,
+                      const WavefrontChunk& chunk);
+    void resetStageProfilingMetal4();
 
     void createStageTimestampBuffer();
-    void createStageCounterHeap();
     void reportStageTimings();
-    void reportStageTimingsMetal4(double lastRenderTimeMs);
     void reportStageFailureMetal4();
     void reportIorStackStats();
 
@@ -167,10 +171,6 @@ public:
     {
         return mResolvePSO4;
     }
-    MTL4::CounterHeap* stageCounterHeap() const
-    {
-        return mStageCounterHeap;
-    }
     std::vector<uint8_t>& stageKinds()
     {
         return mStageKinds;
@@ -193,6 +193,7 @@ private:
     MTL::ComputePipelineState* mPreparePSO4 = nullptr;
     MTL::ComputePipelineState* mPrepareShadowPSO4 = nullptr;
     MTL::ComputePipelineState* mPrepareHitMissPSO4 = nullptr;
+    MTL::ComputePipelineState* mStageBreadcrumbPSO4 = nullptr;
     MTL::ComputePipelineState* mAovResolvePSO4 = nullptr;
 
     MTL::Buffer* mPathStateBuffer = nullptr;
@@ -203,14 +204,13 @@ private:
     MTL::Buffer* mGuideRadianceBuffer = nullptr;
     MTL::Buffer* mPathQueueBuffer[2] = { nullptr, nullptr };
     MTL::Buffer* mControlBuffer = nullptr;
+    MTL::Buffer* mTraversalDispatchBuffer = nullptr;
     MTL::Buffer* mShadowRayBuffer = nullptr;
     MTL::Buffer* mHitQueueBuffer = nullptr;
     MTL::Buffer* mMissQueueBuffer = nullptr;
     MTL::Buffer* mAovBuffer = nullptr;
 
     MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
-    MTL4::CounterHeap* mStageCounterHeap = nullptr;
-    double mGpuTicksToMs = 0.0;
     MTL::Buffer* mStageStatsBuffer = nullptr;
     MTL::Buffer* mIorStatsBuffer = nullptr;
     bool mReportedIorStats = false;

@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <memory>
 #include <thread>
 #include "MetalBuffer.h"
 #include "MetalTextures.h"
@@ -69,6 +70,18 @@ namespace fs = std::filesystem;
 // resident size is not, and undercounts GPU allocations badly.
 namespace
 {
+struct Metal4FrameFeedbackState
+{
+    // Commit feedback is delivered on Metal4Context's serial feedback queue.
+    double gpuMs = 0.0;
+    double slowestGroupGpuMs = 0.0;
+    size_t slowestGroup = 0;
+    std::vector<const MTL4::CommandBuffer*> buffers;
+    std::vector<metal::WavefrontChunk> chunks;
+    std::vector<metal::WavefrontChunkGroup> groups;
+    std::function<void(size_t)> submit;
+};
+
 size_t processFootprintBytes()
 {
     task_vm_info_data_t info{};
@@ -134,6 +147,7 @@ MetalRender::~MetalRender()
         mIntegrator.release();
 
         safeRelease(mAccumulationBuffer);
+        safeRelease(mSceneTablePlaceholder);
         safeRelease(mPrevFrameVertexBuffer);
         mHasPrevFramePose = false;
 
@@ -599,6 +613,14 @@ void MetalRender::init()
         return;
     }
     mCommandQueue = mDevice->newCommandQueue();
+    mSceneTablePlaceholder = mDevice->newBuffer(
+        std::max(sizeof(Material), sizeof(GeometryEntry)), MTL::ResourceStorageModeShared);
+    if (!mSceneTablePlaceholder)
+    {
+        STRELKA_FATAL("Failed to allocate the Metal scene-table placeholder");
+        return;
+    }
+    std::memset(mSceneTablePlaceholder->contents(), 0, mSceneTablePlaceholder->length());
     // 64 KB of constants per frame is far more than the tracer's handful of
     // small values needs; the ring is cheap and running out is a hard error.
     mMetal4.init(mDevice, (uint32_t)kMaxFramesInFlight, static_cast<size_t>(64) * 1024);
@@ -709,6 +731,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mLights.buffer());
     add(mLights.iesBuffer());
     add(mGeometry.geometryEntryBuffer());
+    add(mSceneTablePlaceholder);
     add(mGeometry.curvePointBuffer());
     add(mGeometry.curveRadiusBuffer());
     add(mGeometry.curveSegmentBuffer());
@@ -738,6 +761,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     for (uint32_t i = 0; i < 2; ++i) add(mPost.upscaleTexture((int)i));
     for (MTL::AccelerationStructure* as : mAccel.primitiveAccelerationStructures()) add(as);
     add(mAccel.instanceAccelerationStructure());
+    add(mAccel.volumeAccelerationStructure());
     for (MTL::Buffer* buffer : mAccel.accelerationStructureAuxiliaryBuffers()) add(buffer);
     for (const Mesh* mesh : mGeometry.meshes())
     {
@@ -803,11 +827,13 @@ metal::IntegratorSceneBindings MetalRender::integratorSceneBindings()
     metal::IntegratorSceneBindings b;
     b.instanceBuffer = mAccel.instanceBuffer();
     b.instanceAccelerationStructure = mAccel.instanceAccelerationStructure();
+    b.volumeAccelerationStructure = mAccel.volumeAccelerationStructure();
     b.primitiveAccelerationStructures = &mAccel.primitiveAccelerationStructures();
-    b.materialBuffer = mMaterials.buffer();
+    b.materialBuffer = mMaterials.buffer() ? mMaterials.buffer() : mSceneTablePlaceholder;
     b.lightBuffer = mLights.buffer();
     b.iesBuffer = mLights.iesBuffer();
-    b.geometryEntryBuffer = mGeometry.geometryEntryBuffer();
+    b.geometryEntryBuffer =
+        mGeometry.geometryEntryBuffer() ? mGeometry.geometryEntryBuffer() : mSceneTablePlaceholder;
     b.vertexBuffer = mGeometry.vertexBuffer();
     b.prevVertexBuffer = mGeometry.prevVertexBuffer();
     b.indexBuffer = mGeometry.indexBuffer();
@@ -892,10 +918,15 @@ void MetalRender::render(Buffer* output)
             pPool->release();
             return;
         }
-        // Geometry that exists now, rather than all of it when the last structure
-        // lands. Only while the structures stage is running: before it there is
-        // nothing to show, and after it the complete top level is already built.
-        if (mScenePrep.stage() == metal::BuildStage::Structures)
+        // Geometry can be published only together with the lookup tables shade
+        // uses for every hit. The structure builder currently uploads the
+        // geometry table with the completed TLAS; publishing an earlier partial
+        // TLAS would expose real hits while geometryEntries is still null and
+        // Metal Shader Validation correctly reports out-of-bounds device loads.
+        // Until then the already-published empty TLAS safely shows the scene's
+        // environment.
+        if (mScenePrep.stage() == metal::BuildStage::Structures &&
+            mMaterials.buffer() != nullptr && mGeometry.geometryEntryBuffer() != nullptr)
         {
             mAccel.publishPartialTopLevel();
         }
@@ -1490,7 +1521,7 @@ void MetalRender::render(Buffer* output)
             }
 
             const bool profileStages = settings.getAs<uint32_t>("render/pt/profileStages") != 0;
-            if (profileStages)
+            if (profileStages && !useMetal4)
             {
                 mIntegrator.createStageTimestampBuffer();
             }
@@ -1523,21 +1554,25 @@ void MetalRender::render(Buffer* output)
             frameReq.motionBlasBuilt = mAccel.motionBlasBuilt();
             frameReq.profileStages = profileStages;
             frameReq.settings = getSettings();
+            const uint32_t dispatchSampleCount =
+                samplesThisLaunch + (pUniformData->canonicalGuideSample ? 1u : 0u);
+            const uint32_t iterationsPerChunk = metal::wavefrontChunkIterations(width, height);
+            const std::vector<metal::WavefrontChunk> logicalWavefrontChunks =
+                metal::makeWavefrontChunkPlan(dispatchSampleCount, frameReq.bounceIterations, iterationsPerChunk);
+            const uint32_t traversalBatchCount =
+                metal::wavefrontTraversalBatchCount(width * height);
+            const std::vector<metal::WavefrontChunk> wavefrontChunks =
+                metal::makeMetal4WavefrontChunkPlan(
+                    logicalWavefrontChunks, traversalBatchCount,
+                    metal::kWavefrontTraversalBatchesPerCommandBuffer,
+                    std::min(maxDepth, 16u), featureIn.hasCurves);
 
             if (useMetal4)
             {
                 // Build the variant first: its intersection function tables are
                 // allocations, and residency has to name every allocation the
                 // frame will touch before the frame is committed.
-                if (profileStages)
-                {
-                    mIntegrator.createStageCounterHeap();
-                    if (MTL4::CounterHeap* heap = mIntegrator.stageCounterHeap())
-                    {
-                        heap->invalidateCounterRange(NS::Range::Make(0, heap->count()));
-                    }
-                }
-                mIntegrator.stageKinds().clear();
+                mIntegrator.resetStageProfilingMetal4();
                 mIntegrator.variantFor(features | metal::WavefrontFeatures::kMetal4);
                 if (mMetal4ResidencyGeneration != mIntegrator.capacity() || mIntegrator.residencyDirty())
                 {
@@ -1634,6 +1669,7 @@ void MetalRender::render(Buffer* output)
                     if (encodeTlas)
                     {
                         sceneBind.instanceAccelerationStructure = mAccel.instanceAccelerationStructure();
+                        sceneBind.volumeAccelerationStructure = mAccel.volumeAccelerationStructure();
                     }
                     mMetal4.wait(mAccel.readyEvent(), mAccel.readyValue());
                     cmd4 = mMetal4.beginFrame((uint32_t)ctx.mFrameNumber);
@@ -1653,11 +1689,45 @@ void MetalRender::render(Buffer* output)
                     if (encodeTlas)
                     {
                         sceneBind.instanceAccelerationStructure = mAccel.instanceAccelerationStructure();
+                        sceneBind.volumeAccelerationStructure = mAccel.volumeAccelerationStructure();
                     }
                 }
+                std::vector<const MTL4::CommandBuffer*> integrateBuffers;
+                integrateBuffers.reserve(wavefrontChunks.size());
+                for (size_t chunkIndex = 0; chunkIndex < wavefrontChunks.size(); ++chunkIndex)
+                {
+                    if (chunkIndex > 0)
+                    {
+                        // Encoder barriers do not cross a Metal 4 command-buffer
+                        // boundary. Publish the queue and indirect arguments the
+                        // next bounce chunk consumes before closing this one.
+                        // Publish this chunk's queue writes to command encoders
+                        // that follow it on the Metal 4 queue. A consumer
+                        // barrier (`barrierAfterQueueStages`) belongs in the
+                        // *next* encoder; placed here at the end of the producer
+                        // it waited for prior encoders and ordered nothing.
+                        // Tail command buffers are committed as one batch, so
+                        // that mistake let adjacent bounce chunks race over the
+                        // ping-pong queues and indirect arguments.
+                        enc4->barrierAfterStages(MTL::StageDispatch, MTL::StageDispatch,
+                                                MTL4::VisibilityOptionDevice);
+                        enc4->endEncoding();
+                        cmd4->endCommandBuffer();
+                        integrateBuffers.push_back(cmd4);
+                        cmd4 = mMetal4.continueFrame((uint32_t)ctx.mFrameNumber,
+                                                     static_cast<uint32_t>(chunkIndex - 1));
+                        if (!cmd4)
+                        {
+                            STRELKA_FATAL("Metal 4 continuation command buffer allocation failed");
+                            mRenderBusy.store(false, std::memory_order_release);
+                            pPool->release();
+                            return;
+                        }
+                        enc4 = cmd4->computeCommandEncoder();
+                    }
+                    mIntegrator.encodeMetal4(enc4, sceneBind, frameReq, wavefrontChunks[chunkIndex]);
+                }
                 MTL4::CommandBuffer* cmdIntegrate = cmd4;
-
-                mIntegrator.encodeMetal4(cmdIntegrate, enc4, sceneBind, frameReq);
                 if (!denoising && mPost.tonemapperPSO4())
                 {
                     enc4->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch,
@@ -1678,6 +1748,7 @@ void MetalRender::render(Buffer* output)
                                            mPost.displayTexture(mWriteIndex), width, height);
                 }
                 cmdIntegrate->endCommandBuffer();
+                integrateBuffers.push_back(cmdIntegrate);
                 // Per-frame TLAS growth and scratch resizing can add allocations
                 // while encoding; publish those changes before submission.
                 mMetal4.commitResidency();
@@ -1685,21 +1756,47 @@ void MetalRender::render(Buffer* output)
                 // Completion arrives through commit options rather than a
                 // handler on the command buffer, and carries the GPU interval
                 // with it, so the Metal 3 timing path needs no counterpart.
-                const MTL4::CommandBuffer* const buffers[] = { cmdIntegrate };
                 const int writeIdx4 = mWriteIndex;
                 const bool asyncPresent = !denoising;
                 const auto commitStartedAt = std::chrono::steady_clock::now();
-                MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
-                options->addFeedbackHandler(
-                    MTL4::CommitFeedbackHandlerFunction(
-                        [this, writeIdx4, asyncPresent, commitStartedAt, profileStages, width, height, maxDepth,
-                         samplesThisLaunch, features](MTL4::CommitFeedback* fb) {
+                auto feedbackState = std::make_shared<Metal4FrameFeedbackState>();
+                feedbackState->buffers = std::move(integrateBuffers);
+                feedbackState->chunks = wavefrontChunks;
+                feedbackState->groups = metal::makeWavefrontChunkGroups(wavefrontChunks);
+                mMetal4FrameValue = mMetal4.reserveFrameSignal();
+                const uint64_t frameSignalValue = mMetal4FrameValue;
+                const std::weak_ptr<Metal4FrameFeedbackState> weakFeedbackState = feedbackState;
+                feedbackState->submit =
+                    [this, weakFeedbackState, writeIdx4, asyncPresent, commitStartedAt, profileStages, width,
+                     height, maxDepth, samplesThisLaunch, features, frameSignalValue](size_t groupIndex) {
+                    const std::shared_ptr<Metal4FrameFeedbackState> state = weakFeedbackState.lock();
+                    if (!state)
+                    {
+                        return;
+                    }
+                    MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
+                    options->addFeedbackHandler(
+                        MTL4::CommitFeedbackHandlerFunction(
+                            [this, state, writeIdx4, asyncPresent, commitStartedAt, profileStages, width,
+                             height, maxDepth, samplesThisLaunch, features, groupIndex,
+                             frameSignalValue](MTL4::CommitFeedback* fb) {
                         // The feedback is the only place a Metal 4 frame reports
                         // failure: there is no status() to poll afterwards the way
                         // the Metal 3 path polls its command buffer. Without this
                         // the sole symptom is the frame event never reaching its
                         // value, which surfaces as a timeout and names no cause.
                         const NS::Error* error = fb ? fb->error() : nullptr;
+                        double chunkGpuMs = 0.0;
+                        if (fb && fb->GPUEndTime() >= fb->GPUStartTime())
+                        {
+                            chunkGpuMs = (fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0;
+                            state->gpuMs += chunkGpuMs;
+                            if (chunkGpuMs > state->slowestGroupGpuMs)
+                            {
+                                state->slowestGroupGpuMs = chunkGpuMs;
+                                state->slowestGroup = groupIndex;
+                            }
+                        }
                         if (error)
                         {
                             mMetal4FrameFailed.store(true, std::memory_order_relaxed);
@@ -1711,9 +1808,9 @@ void MetalRender::render(Buffer* output)
                                 // A killed command buffer can report only its last
                                 // short execution interval. Wall time says how long
                                 // the queue actually spent executing or waiting.
-                                STRELKA_ERROR("Metal 4 frame failed after {:.1f} ms wall / {:.1f} ms GPU: {} "
-                                              "(domain {}, code {})",
-                                              wallMs, (fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0,
+                                STRELKA_ERROR("Metal 4 frame chunk group {}/{} failed after {:.1f} ms wall / "
+                                              "{:.1f} ms group GPU: {} (domain {}, code {})",
+                                              groupIndex + 1, state->groups.size(), wallMs, chunkGpuMs,
                                               error->localizedDescription()
                                                   ? error->localizedDescription()->utf8String()
                                                   : "unknown error",
@@ -1721,6 +1818,22 @@ void MetalRender::render(Buffer* output)
                                               (long)error->code());
                                 STRELKA_ERROR("Metal 4 failed workload: PT={}x{} spp={} depth={} features=0x{:x}",
                                               width, height, samplesThisLaunch, maxDepth, features);
+                                if (groupIndex < state->groups.size())
+                                {
+                                    const metal::WavefrontChunkGroup& failedGroup = state->groups[groupIndex];
+                                    if (failedGroup.begin < failedGroup.end &&
+                                        failedGroup.end <= state->chunks.size())
+                                    {
+                                        const metal::WavefrontChunk& first = state->chunks[failedGroup.begin];
+                                        const metal::WavefrontChunk& last = state->chunks[failedGroup.end - 1];
+                                        STRELKA_ERROR(
+                                            "Metal 4 failed chunk: sample={}..{} bounce={}..{} phase={} "
+                                            "traversal_batches={}..{}",
+                                            first.sampleIndex, last.sampleIndex, first.bounceBegin,
+                                            last.bounceEnd, metal::wavefrontChunkPhaseName(first.phase),
+                                            first.traversalBatchBegin, last.traversalBatchEnd);
+                                    }
+                                }
                                 if (profileStages)
                                 {
                                     mIntegrator.reportStageFailureMetal4();
@@ -1731,35 +1844,58 @@ void MetalRender::render(Buffer* output)
                                         "Metal 4 stage diagnosis disabled; reproduce with STRELKA_STAGES=1");
                                 }
                             }
+                            mMetal4.signalFrame(frameSignalValue);
+                            mRenderBusy.store(false, std::memory_order_release);
+                            return;
                         }
-                        if (error)
+
+                        if (groupIndex + 1 < state->groups.size())
                         {
+                            // Do not recursively commit from a Metal feedback
+                            // handler. The completed workload is not fully
+                            // retired until the handler returns, so recursive
+                            // commits turn nominally separate bounce buffers
+                            // into one watchdog-scale scheduler residency.
+                            mMetal4.afterFeedback([state, groupIndex]() {
+                                state->submit(groupIndex + 1);
+                            });
+                            return;
+                        }
+
+                        mMetal4.signalFrame(frameSignalValue);
+                        const double frameGpuMs = state->gpuMs;
+                        mLastRenderTimeMs.store(frameGpuMs, std::memory_order_relaxed);
+                        if (profileStages && state->slowestGroup < state->groups.size())
+                        {
+                            const metal::WavefrontChunkGroup& slowGroup =
+                                state->groups[state->slowestGroup];
+                            if (slowGroup.begin < slowGroup.end && slowGroup.end <= state->chunks.size())
+                            {
+                                const metal::WavefrontChunk& first = state->chunks[slowGroup.begin];
+                                const metal::WavefrontChunk& last = state->chunks[slowGroup.end - 1];
+                                STRELKA_INFO(
+                                    "STAGES Metal4 slowest group {}/{}: sample={}..{} bounce={}..{} "
+                                    "phase={} traversal_batches={}..{} GPU={:.2f} ms, "
+                                    "frame chunks={:.2f} ms",
+                                    state->slowestGroup + 1, state->groups.size(), first.sampleIndex,
+                                    last.sampleIndex, first.bounceBegin, last.bounceEnd,
+                                    metal::wavefrontChunkPhaseName(first.phase),
+                                    first.traversalBatchBegin, last.traversalBatchEnd,
+                                    state->slowestGroupGpuMs, frameGpuMs);
+                            }
+                        }
+                        if (asyncPresent)
+                        {
+                            mReadyIndex.store(writeIdx4);
                             mRenderBusy.store(false, std::memory_order_release);
                         }
-                        else
-                        {
-                            if (fb)
-                            {
-                                const double gpuMs = (fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0;
-                                mLastRenderTimeMs.store(gpuMs, std::memory_order_relaxed);
-                                if (profileStages && !mSyncMode)
-                                {
-                                    mIntegrator.reportStageTimingsMetal4(gpuMs);
-                                }
-                            }
-                            if (asyncPresent)
-                            {
-                                mReadyIndex.store(writeIdx4);
-                                mRenderBusy.store(false, std::memory_order_release);
-                            }
-                        }
                     }));
-                mMetal4.queue()->commit(buffers, 1, options);
-                options->release();
-                // Signalled on the queue after the commit, so it orders behind
-                // this frame's work. renderSync waits on it; the async loop
-                // ignores it and keeps using the feedback handler above.
-                mMetal4FrameValue = mMetal4.signalFrame();
+                    const metal::WavefrontChunkGroup& group = state->groups[groupIndex];
+                    mMetal4.queue()->commit(state->buffers.data() + group.begin,
+                                            static_cast<NS::UInteger>(group.end - group.begin), options);
+                    options->release();
+                };
+                feedbackState->submit(0);
                 mAccel.markInstanceTransformsRendered();
 
                 if (!denoising)
@@ -2261,7 +2397,6 @@ void MetalRender::renderSync(Buffer* output)
             // The commit feedback carries the GPU interval, so this is the same
             // number the Metal 3 path reads off its command buffer.
             STRELKA_INFO("CMDBUF gpu {:.1f} ms (metal4)", getLastRenderTimeMs());
-            mIntegrator.reportStageTimingsMetal4(getLastRenderTimeMs());
         }
     }
     else if (mLastCommandBuffer)

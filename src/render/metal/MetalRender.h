@@ -120,6 +120,11 @@ private:
     MTL::CommandQueue* mCommandQueue = nullptr;
 
     MTL::Buffer* mAccumulationBuffer = nullptr;
+    // Metal validates every declared kernel binding even when an indirect
+    // dispatch has zero threadgroups. The streaming loader traces an empty TLAS
+    // before material and geometry tables exist, so bind a zero record until
+    // the real tables arrive rather than passing null GPU addresses.
+    MTL::Buffer* mSceneTablePlaceholder = nullptr;
 
     // Domain-owned resources (see MetalDomainMap.h).
     metal::MetalTextures mTextures;

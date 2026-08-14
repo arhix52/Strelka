@@ -2,6 +2,8 @@
 
 #include <log.h>
 
+#include <memory>
+
 namespace oka
 {
 
@@ -181,6 +183,7 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     // in flight rather than one shared.
     mAllocators.reserve(frameCount);
     mCommandBuffers.reserve(frameCount);
+    mContinuationBuffers.resize(frameCount);
     for (uint32_t i = 0; i < frameCount; ++i)
     {
         // These newly owned objects are intentionally stored as mutable pointers.
@@ -249,6 +252,28 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     STRELKA_INFO("Metal 4 submission layer ready: {} frames in flight, {} KB of constants per frame",
                  frameCount, constantBytesPerFrame / 1024);
     return true;
+}
+
+void Metal4Context::afterFeedback(std::function<void()> work)
+{
+    if (!work)
+    {
+        return;
+    }
+    if (!mFeedbackQueue)
+    {
+        work();
+        return;
+    }
+
+    // The queue is serial and is also where Metal invokes commit feedback. A
+    // block enqueued from a handler cannot run until that handler returns,
+    // giving the driver a chance to retire the completed scheduler workload
+    // before the next command buffer is committed.
+    auto deferred = std::make_shared<std::function<void()>>(std::move(work));
+    dispatch_async(mFeedbackQueue, ^{
+        (*deferred)();
+    });
 }
 
 MTL4::CommandBuffer* Metal4Context::beginImmediate()
@@ -342,12 +367,26 @@ uint64_t Metal4Context::submitSkin(MTL4::CommandBuffer* commandBuffer)
 
 uint64_t Metal4Context::signalFrame()
 {
-    if (!mQueue || !mFrameEvent)
+    const uint64_t value = reserveFrameSignal();
+    signalFrame(value);
+    return value;
+}
+
+uint64_t Metal4Context::reserveFrameSignal()
+{
+    if (!mFrameEvent)
     {
         return 0;
     }
-    mQueue->signalEvent(mFrameEvent, ++mFrameValue);
-    return mFrameValue;
+    return ++mFrameValue;
+}
+
+void Metal4Context::signalFrame(uint64_t value)
+{
+    if (mQueue && mFrameEvent && value != 0)
+    {
+        mQueue->signalEvent(mFrameEvent, value);
+    }
 }
 
 bool Metal4Context::waitForFrame(uint64_t value, uint32_t timeoutMs)
@@ -404,6 +443,15 @@ void Metal4Context::release()
         commandBuffer->release();
     }
     mCommandBuffers.clear();
+    for (std::vector<FrameContinuation>& continuations : mContinuationBuffers)
+    {
+        for (FrameContinuation& continuation : continuations)
+        {
+            continuation.commandBuffer->release();
+            continuation.allocator->release();
+        }
+    }
+    mContinuationBuffers.clear();
     for (MTL4::CommandAllocator* allocator : mAllocators)
     {
         allocator->release();
@@ -456,6 +504,41 @@ MTL4::CommandBuffer* Metal4Context::beginFrame(uint32_t frameIndex)
 
     MTL4::CommandBuffer* commandBuffer = mCommandBuffers[slot];
     commandBuffer->beginCommandBuffer(allocator);
+    commandBuffer->useResidencySet(mResidencySet);
+    return commandBuffer;
+}
+
+MTL4::CommandBuffer* Metal4Context::continueFrame(uint32_t frameIndex, uint32_t continuationIndex)
+{
+    if (mAllocators.empty())
+    {
+        return nullptr;
+    }
+    const uint32_t slot = frameIndex % static_cast<uint32_t>(mAllocators.size());
+    std::vector<FrameContinuation>& continuations = mContinuationBuffers[slot];
+    while (continuations.size() <= continuationIndex)
+    {
+        MTL4::CommandAllocator* allocator = mDevice->newCommandAllocator();
+        MTL4::CommandBuffer* commandBuffer = mDevice->newCommandBuffer();
+        if (!allocator || !commandBuffer)
+        {
+            if (allocator)
+            {
+                allocator->release();
+            }
+            if (commandBuffer)
+            {
+                commandBuffer->release();
+            }
+            return nullptr;
+        }
+        continuations.push_back({ allocator, commandBuffer });
+    }
+
+    FrameContinuation& continuation = continuations[continuationIndex];
+    continuation.allocator->reset();
+    MTL4::CommandBuffer* commandBuffer = continuation.commandBuffer;
+    commandBuffer->beginCommandBuffer(continuation.allocator);
     commandBuffer->useResidencySet(mResidencySet);
     return commandBuffer;
 }

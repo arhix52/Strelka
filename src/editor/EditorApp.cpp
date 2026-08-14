@@ -823,6 +823,12 @@ void EditorApp::runBenchmark()
     {
         m_settingsManager->setAs<bool>("render/pt/denoise", envUint("STRELKA_BENCH_DENOISE", 0) != 0);
     }
+    if (envFlag("STRELKA_BENCH_FRAME_NODE"))
+    {
+        m_selectedNodeId = envUint("STRELKA_BENCH_FRAME_NODE", static_cast<uint32_t>(-1));
+        m_selectedInstanceId = envUint("STRELKA_BENCH_FRAME_INSTANCE", static_cast<uint32_t>(-1));
+        frameSelectionInView();
+    }
 
     m_settingsManager->setAs<bool>("render/pt/enableAcc", false);
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);

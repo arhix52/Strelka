@@ -5,6 +5,7 @@
 #include "wavefront_stage_diagnostic.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <string>
 
@@ -52,6 +53,7 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mPathQueueBuffer[0]);
     safeRelease(mPathQueueBuffer[1]);
     safeRelease(mControlBuffer);
+    safeRelease(mTraversalDispatchBuffer);
     safeRelease(mShadowRayBuffer);
     safeRelease(mHitQueueBuffer);
     safeRelease(mAovBuffer);
@@ -76,16 +78,15 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mPreparePSO4);
     safeRelease(mPrepareShadowPSO4);
     safeRelease(mPrepareHitMissPSO4);
+    safeRelease(mStageBreadcrumbPSO4);
     safeRelease(mAovResolvePSO);
     safeRelease(mAovResolvePSO4);
     safeRelease(mStageTimestampBuffer);
     safeRelease(mStageStatsBuffer);
     safeRelease(mIorStatsBuffer);
-    safeRelease(mStageCounterHeap);
     mCapacity = 0;
     mResidencyDirty = true;
     mReportedIorStats = false;
-    mGpuTicksToMs = 0.0;
     mStageKinds.clear();
 }
 
@@ -105,6 +106,8 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
     add(mShadowRayBuffer);
     add(mAovBuffer);
     add(mControlBuffer);
+    add(mTraversalDispatchBuffer);
+    add(mStageStatsBuffer);
     for (const auto& entry : mVariants)
     {
         add(entry.second.shadowTableMotion);
@@ -118,6 +121,7 @@ size_t MetalWavefrontIntegrator::queueBytes() const
     return bufBytes(mPathStateBuffer) + bufBytes(mPathRayBuffer) + bufBytes(mHitBuffer) +
            bufBytes(mIorStackBuffer) + bufBytes(mRadianceBuffer) + bufBytes(mGuideRadianceBuffer) +
            bufBytes(mPathQueueBuffer[0]) + bufBytes(mPathQueueBuffer[1]) + bufBytes(mControlBuffer) +
+           bufBytes(mTraversalDispatchBuffer) +
            bufBytes(mShadowRayBuffer) + bufBytes(mHitQueueBuffer) + bufBytes(mMissQueueBuffer) +
            bufBytes(mAovBuffer) + bufBytes(mStageStatsBuffer);
 }
@@ -192,168 +196,61 @@ void MetalWavefrontIntegrator::createStageTimestampBuffer()
     }
 }
 
-// Resolve the timestamps and print the per-stage breakdown. GPU timestamps are
-// in nanoseconds on Apple Silicon; a sample can come back as MTLCounterErrorValue
-// when the GPU dropped it, and those gaps are skipped rather than counted as
-// enormous durations.
-void MetalWavefrontIntegrator::createStageCounterHeap()
-{
-    if (mStageCounterHeap || !mMetal4 || !mMetal4->isValid())
-    {
-        return;
-    }
-    MTL4::CounterHeapDescriptor* d = MTL4::CounterHeapDescriptor::alloc()->init();
-    d->setType(MTL4::CounterHeapTypeTimestamp);
-    d->setCount(static_cast<NS::UInteger>(kMaxStageSamples) * 2);
-    NS::Error* err = nullptr;
-    mStageCounterHeap = mDevice->newCounterHeap(d, &err);
-    d->release();
-    if (!mStageCounterHeap)
-    {
-        STRELKA_WARNING("Metal 4 counter heap unavailable: {}",
-                        err && err->localizedDescription() ? err->localizedDescription()->utf8String()
-                                                           : "unknown error");
-    }
-}
-
-// Same report as the Metal 3 path, from timestamps written inline rather than at
-// encoder boundaries. Stage kinds are recorded in encode order, one pair each.
-void MetalWavefrontIntegrator::reportStageTimingsMetal4(double lastRenderTimeMs)
-{
-    if (!mStageCounterHeap || mStageKinds.empty())
-    {
-        return;
-    }
-    const NS::UInteger n = mStageKinds.size() + 1;
-    const NS::Data* data = mStageCounterHeap->resolveCounterRange(NS::Range::Make(0, n));
-    if (!data)
-    {
-        return;
-    }
-    const MTL4::TimestampHeapEntry* ts = static_cast<const MTL4::TimestampHeapEntry*>(data->bytes());
-
-    // Anchor the tick scale once, against the frame this heap just timed.
-    //
-    // The obvious calibration -- MTLDevice::sampleTimestamps, which pairs a CPU
-    // clock with a GPU one -- does not apply: it reports the GPU side in
-    // nanoseconds, while the counter heap ticks at its own rate (about 24 MHz on
-    // this part, so ~42 ns each). Calibrating against it returned a factor of
-    // exactly 1 ns/tick and a report forty times too small. The command buffer's
-    // measured GPU time is the one number known to be in milliseconds and to
-    // cover the same work, so the marks are scaled to it.
-    //
-    // Everything outside the marks -- the resolve and the tonemapper, together
-    // well under a millisecond -- is folded into the factor, which biases it by
-    // under a percent and only once.
-    // A mark that was never written reads back as zero, and a run that wrote
-    // fewer marks than the last one leaves the tail stale. Anchoring on either
-    // gives a span orders of magnitude too large and a scale that rounds every
-    // stage to nothing -- which is how this first presented.
-    bool marksValid = ts[0].timestamp != 0;
-    for (NS::UInteger i = 0; marksValid && i < mStageKinds.size(); ++i)
-    {
-        marksValid = ts[i + 1].timestamp >= ts[i].timestamp && ts[i + 1].timestamp != 0;
-    }
-    if (!marksValid)
-    {
-        return;
-    }
-
-    const uint64_t spanTicks = ts[mStageKinds.size()].timestamp - ts[0].timestamp;
-    if (mGpuTicksToMs == 0.0 && spanTicks > 0)
-    {
-        const double frameMs = lastRenderTimeMs;
-        if (frameMs > 0.0)
-        {
-            mGpuTicksToMs = frameMs / double(spanTicks);
-            STRELKA_INFO("GPU timestamp scale anchored: 1 tick = {:.2f} ns ({} ticks over {:.2f} ms)",
-                         mGpuTicksToMs * 1e6, spanTicks, frameMs);
-        }
-    }
-    if (mGpuTicksToMs == 0.0)
-    {
-        return;
-    }
-
-    double totals[kStageCount] = {};
-    uint32_t counts[kStageCount] = {};
-    std::string perBounce[kStageCount];
-    for (NS::UInteger i = 0; i < mStageKinds.size(); ++i)
-    {
-        const uint64_t a = ts[i].timestamp;
-        const uint64_t b = ts[i + 1].timestamp;
-        if (a == 0 || b <= a)
-        {
-            continue;
-        }
-        const uint8_t kind = mStageKinds[i];
-        const double ms = double(b - a) * mGpuTicksToMs;
-        totals[kind] += ms;
-        ++counts[kind];
-        if (kind == kStageExtend || kind == kStageShade || kind == kStageShadow)
-        {
-            perBounce[kind] += fmt::format("{:.2f} ", ms);
-        }
-    }
-    double sum = 0.0;
-    for (uint32_t k = 0; k < kStageCount; ++k)
-    {
-        sum += totals[k];
-    }
-    std::string line;
-    for (uint32_t k = 0; k < kStageCount; ++k)
-    {
-        if (counts[k] == 0)
-        {
-            continue;
-        }
-        line += fmt::format("{} {:.2f}ms({:.0f}%, n={})  ", kStageNames[k], totals[k],
-                            sum > 0.0 ? 100.0 * totals[k] / sum : 0.0, counts[k]);
-    }
-    // Diagnostic: the span between the first and last mark against the command
-    // buffer's own GPU time. If the span matches and the gaps do not, the marks
-    // are misplaced; if neither matches, the clock is not the one being assumed.
-    STRELKA_INFO("STAGES total {:.2f}ms  {}", sum, line);
-    STRELKA_INFO("STAGES per bounce: extend [{}] shade [{}] shadow [{}]", perBounce[kStageExtend],
-                 perBounce[kStageShade], perBounce[kStageShadow]);
-}
-
 void MetalWavefrontIntegrator::reportStageFailureMetal4()
 {
-    if (!mStageCounterHeap || mStageKinds.empty())
+    if (!mStageStatsBuffer || mStageKinds.empty())
     {
         STRELKA_ERROR("Metal 4 stage diagnosis unavailable; reproduce with STRELKA_STAGES=1");
         return;
     }
 
-    const NS::UInteger markCount = mStageKinds.size() + 1;
-    const NS::Data* data = mStageCounterHeap->resolveCounterRange(NS::Range::Make(0, markCount));
-    if (!data)
-    {
-        STRELKA_ERROR("Metal 4 stage diagnosis failed to resolve timestamp counters");
-        return;
-    }
-
-    const auto* entries = static_cast<const MTL4::TimestampHeapEntry*>(data->bytes());
-    std::vector<uint64_t> timestamps(markCount);
-    for (NS::UInteger i = 0; i < markCount; ++i)
-    {
-        timestamps[i] = entries[i].timestamp;
-    }
-    const WavefrontStageFailure failure = inferWavefrontStageFailure(timestamps, mStageKinds.size());
-
-    if (failure.validMarks == 0)
-    {
-        STRELKA_ERROR("Metal 4 stage diagnosis: no wavefront stage reached its opening timestamp");
-        return;
-    }
+    const auto* stats = static_cast<const uint32_t*>(mStageStatsBuffer->contents());
+    const uint32_t enteredStage = stats[kWavefrontStageBreadcrumbOffset];
+    const WavefrontStageFailure failure = inferWavefrontStageFailure(enteredStage, mStageKinds.size());
 
     const char* lastCompleted =
         failure.lastCompletedStage >= 0 ? kStageNames[mStageKinds[failure.lastCompletedStage]] : "none";
     const char* suspected =
         failure.postIntegrator ? "post-integrator" : kStageNames[mStageKinds[failure.suspectedStage]];
-    STRELKA_ERROR("Metal 4 stage diagnosis: last_completed={} suspected={} marks={}/{}", lastCompleted, suspected,
-                  failure.validMarks, markCount);
+    STRELKA_ERROR("Metal 4 stage diagnosis: last_completed={} suspected={} breadcrumb={}/{}", lastCompleted,
+                  suspected, enteredStage, mStageKinds.size());
+    if (!failure.postIntegrator && failure.suspectedStage >= 0 && mStageStatsBuffer)
+    {
+        int32_t bounce = -1;
+        for (int32_t i = 0; i <= failure.suspectedStage; ++i)
+        {
+            if (mStageKinds[i] == kStageGenerate)
+            {
+                bounce = -1;
+            }
+            else if (mStageKinds[i] == kStageExtend)
+            {
+                ++bounce;
+            }
+        }
+        if (bounce >= 0 && bounce < static_cast<int32_t>(kWavefrontStageDiagnosticBounces))
+        {
+            const uint32_t base = kWavefrontStageDiagnosticBase +
+                                  static_cast<uint32_t>(bounce) * kWavefrontStageDiagnosticStride;
+            const uint32_t active = stats[base];
+            STRELKA_ERROR("Metal 4 stage diagnosis: bounce={} active_paths={}", bounce, active);
+            const uint32_t lanes = std::min(active, kWavefrontStageDiagnosticLanes);
+            for (uint32_t lane = 0; lane < lanes; ++lane)
+            {
+                const uint32_t* d = stats + base + 1 + lane * kWavefrontStageDiagnosticLaneUints;
+                const uint32_t medium = d[1];
+                STRELKA_ERROR(
+                    "Metal 4 pending ray {}: tid={} medium=0x{:x} depth_flags=0x{:x} "
+                    "origin=({:.6g},{:.6g},{:.6g}) direction=({:.6g},{:.6g},{:.6g}) "
+                    "dir_len2={:.6g} throughput_max={:.6g}",
+                    lane, d[0], medium, d[2], std::bit_cast<float>(d[3]),
+                    std::bit_cast<float>(d[4]), std::bit_cast<float>(d[5]),
+                    std::bit_cast<float>(d[6]), std::bit_cast<float>(d[7]),
+                    std::bit_cast<float>(d[8]), std::bit_cast<float>(d[9]),
+                    std::bit_cast<float>(d[10]));
+            }
+        }
+    }
 }
 
 void MetalWavefrontIntegrator::reportStageTimings()
@@ -467,9 +364,20 @@ void MetalWavefrontIntegrator::reportIorStackStats()
         overflow, IOR_STACK_SIZE, unmatched, escaped);
 }
 
-void MetalWavefrontIntegrator::encodeMetal4(MTL4::CommandBuffer* cmd, MTL4::ComputeCommandEncoder*& enc,
+void MetalWavefrontIntegrator::resetStageProfilingMetal4()
+{
+    mStageKinds.clear();
+    if (mStageStatsBuffer)
+    {
+        auto* stats = static_cast<uint32_t*>(mStageStatsBuffer->contents());
+        stats[kWavefrontStageBreadcrumbOffset] = kWavefrontStageNotStarted;
+    }
+}
+
+void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                                             const IntegratorSceneBindings& scene,
-                                            const IntegratorFrameRequest& frame)
+                                            const IntegratorFrameRequest& frame,
+                                            const WavefrontChunk& chunk)
 {
     const uint32_t features = frame.features;
     const uint32_t width = frame.width;
@@ -484,10 +392,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::CommandBuffer* cmd, MTL4::Comp
         return;
     }
     const uint32_t pixels = width * height;
-    const uint32_t bounceIterations = frame.bounceIterations;
     MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
     const auto* uniforms = static_cast<const Uniforms*>(uniformBuffer->contents());
-    const uint32_t dispatchSampleCount = sampleCount + (uniforms->canonicalGuideSample ? 1u : 0u);
 
     MTL4::ArgumentTable* table = mMetal4->argumentTable();
     ConstantRing& ring = mMetal4->constants();
@@ -497,78 +403,68 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::CommandBuffer* cmd, MTL4::Comp
     const MTL::Size tg = MTL::Size(kThreadsPerGroup, 1, 1);
     const MTL::Size fullGrid = MTL::Size((pixels + kThreadsPerGroup - 1) / kThreadsPerGroup, 1, 1);
     const MTL::GPUAddress control = mControlBuffer->gpuAddress();
-    const NS::UInteger kDispatchArgsOffset = 2 * sizeof(uint32_t);
-    const NS::UInteger kShadowArgsOffset = 8 * sizeof(uint32_t);
+    const MTL::GPUAddress traversalDispatches = mTraversalDispatchBuffer->gpuAddress();
     const NS::UInteger kShadowCounterOffset = 6 * sizeof(uint32_t);
     const NS::UInteger kHitArgsOffset = 13 * sizeof(uint32_t);
     const NS::UInteger kHitCounterOffset = 11 * sizeof(uint32_t);
     const NS::UInteger kMissArgsOffset = 18 * sizeof(uint32_t);
     const NS::UInteger kMissCounterOffset = 16 * sizeof(uint32_t);
+    const uint32_t traversalBatchThreads = kWavefrontTraversalBatchThreads;
+    const uint32_t traversalBatchCount = wavefrontTraversalBatchCount(pixels);
+    const MTL::GPUAddress traversalBatchThreadsAddress = ring.push(traversalBatchThreads);
+    const MTL::GPUAddress traversalBatchCountAddress = ring.push(traversalBatchCount);
 
     const bool useMotion = frame.motionBlasBuilt || variant->extendStatic == nullptr ||
                            frame.settings->getAs<uint32_t>("render/pt/staticTraversal") == 0;
-
-    // One timestamp per stage boundary. Each mark is written in the *same*
-    // encoder as the work it closes, immediately after a queue-scoped barrier
-    // that waits for that work -- not at the start of the next encoder, which is
-    // where the first working version put it and which attributed each stage's
-    // wait to its successor (extend and shadow swapped places against Metal 3).
-    //
-    // The barrier has to be queue-scoped: barrierAfterEncoderStages, which every
-    // stage below uses, orders only within one encoder, so a split without it
-    // left stages reading indirect arguments the previous one had not finished
-    // writing and the frame collapsed to a tenth of its work.
-    //
-    // A stage's duration is the gap to the next mark, so there is one more mark
-    // than stage. This reshapes the frame exactly as the Metal 3 path does -- a
-    // measurement mode, not something to leave on.
-    const bool profile = frame.profileStages && mStageCounterHeap != nullptr;
-    uint32_t markIndex = 0;
-    auto writeMark = [&]() {
-        enc->barrierAfterQueueStages(MTL::StageDispatch, MTL::StageDispatch, MTL4::VisibilityOptionDevice);
-        enc->writeTimestamp(MTL4::TimestampGranularityPrecise, mStageCounterHeap, markIndex++);
-        enc->endEncoding();
-        enc = cmd->computeCommandEncoder();
-        enc->setArgumentTable(table);
-    };
-    auto mark = [&](uint8_t kind) {
-        if (!profile || mStageKinds.size() + 1 >= kMaxStageSamples)
-        {
-            return;
-        }
-        // The opening mark rides in the encoder that carries the first stage's
-        // work. On its own, in an encoder holding nothing else, it never lands:
-        // the timestamp reads back zero and the whole run is discarded. Nothing
-        // precedes it, so it needs no barrier either.
-        if (markIndex == 0)
-        {
-            enc->writeTimestamp(MTL4::TimestampGranularityPrecise, mStageCounterHeap, markIndex++);
-        }
-        mStageKinds.push_back(kind);
-    };
-    auto closeStage = [&]() {
-        if (!profile || mStageKinds.empty())
-        {
-            return;
-        }
-        writeMark();
-    };
 
     // Every dispatch here reads what the one before it wrote. Metal 4 does not
     // work that out, so say it: dispatch-to-dispatch, visible device-wide.
     auto barrier = [&]() {
         enc->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch, MTL4::VisibilityOptionDevice);
     };
+    auto traversalBatchBarrier = [&]() {
+        // This is an execution boundary only. Intermediate traversal batches
+        // append through atomics and consume none of each other's ordinary
+        // writes; the device-wide visibility barrier after the final batch
+        // publishes their combined queues to the next stage.
+        enc->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch,
+                                       MTL4::VisibilityOptionNone);
+    };
     auto bind = [&](MTL::Buffer* buffer, NS::UInteger offset, NS::UInteger index) {
         table->setAddress(buffer ? buffer->gpuAddress() + offset : 0, index);
     };
 
-    for (uint32_t s = 0; s < dispatchSampleCount; ++s)
-    {
-        const MTL::GPUAddress sampleIdx = ring.push(s);
-        MTL::Buffer* sampleRadiance =
-            (uniforms->canonicalGuideSample && s == 0u) ? mGuideRadianceBuffer : mRadianceBuffer;
+    // Precise MTL4 timestamps are not passive validation. Apple documents that
+    // they can affect runtime performance, and on this workload hundreds of
+    // them turn an otherwise stable frame into a watchdog reset. Record only
+    // the stage being entered with a one-thread dispatch instead. The barrier
+    // after it makes the breadcrumb visible before the diagnosed stage starts.
+    const bool diagnose = frame.profileStages && mStageBreadcrumbPSO4 && mStageStatsBuffer;
+    auto writeBreadcrumb = [&](uint32_t stageIndex) {
+        enc->setComputePipelineState(mStageBreadcrumbPSO4);
+        bind(mStageStatsBuffer, kWavefrontStageBreadcrumbOffset * sizeof(uint32_t), 0);
+        table->setAddress(ring.push(stageIndex), 1);
+        enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
+        barrier();
+    };
+    auto mark = [&](uint8_t kind) {
+        if (!diagnose || mStageKinds.size() + 1 >= kMaxStageSamples)
+        {
+            return;
+        }
+        const uint32_t stageIndex = static_cast<uint32_t>(mStageKinds.size());
+        mStageKinds.push_back(kind);
+        writeBreadcrumb(stageIndex);
+    };
 
+    const uint32_t s = chunk.sampleIndex;
+    const MTL::GPUAddress sampleIdx = ring.push(s);
+    const MTL::GPUAddress diagnosticsEnabled = ring.push(diagnose ? 1u : 0u);
+    MTL::Buffer* sampleRadiance =
+        (uniforms->canonicalGuideSample && s == 0u) ? mGuideRadianceBuffer : mRadianceBuffer;
+
+    if (chunk.generate)
+    {
         mark(kStageGenerate);
         enc->setComputePipelineState(variant->generate);
         bind(uniformBuffer, 0, 0);
@@ -582,26 +478,46 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::CommandBuffer* cmd, MTL4::Comp
         bind(mPathRayBuffer, 0, 8);
         bind(mIorStatsBuffer, 0, 9);
         enc->dispatchThreadgroups(fullGrid, tg);
-        closeStage();
         barrier();
+    }
 
-        for (uint32_t bounce = 0; bounce < bounceIterations; ++bounce)
+    for (uint32_t bounce = chunk.bounceBegin; bounce < chunk.bounceEnd; ++bounce)
+    {
+        const uint32_t src = bounce & 1u;
+        const uint32_t dst = src ^ 1u;
+        const MTL::GPUAddress srcIdx = ring.push(src);
+        const MTL::GPUAddress groupSize = ring.push(kThreadsPerGroup);
+        const MTL::GPUAddress bounceIdx = ring.push(bounce);
+        const bool encodeExtend = chunk.phase != WavefrontChunkPhase::Finish;
+        const bool finishBounce = chunk.phase != WavefrontChunkPhase::Extend;
+        const bool beginExtend =
+            chunk.phase == WavefrontChunkPhase::Complete || chunk.traversalBatchBegin == 0u;
+
+        if (encodeExtend)
         {
-            const uint32_t src = bounce & 1u;
-            const uint32_t dst = src ^ 1u;
-            const MTL::GPUAddress srcIdx = ring.push(src);
-            const MTL::GPUAddress groupSize = ring.push(kThreadsPerGroup);
-            const MTL::GPUAddress bounceIdx = ring.push(bounce);
+            // Prepare owns clearing the append counters, so only the first
+            // partial extend workload may run it. Later workloads append another
+            // disjoint range of the source queue into the same hit/miss queues.
+            if (beginExtend)
+            {
+                enc->setComputePipelineState(mPreparePSO4);
+                bind(mControlBuffer, 0, 0);
+                table->setAddress(srcIdx, 1);
+                table->setAddress(groupSize, 2);
+                table->setAddress(bounceIdx, 3);
+                bind(mStageStatsBuffer, 0, 4);
+                bind(mPathStateBuffer, 0, 5);
+                bind(mPathRayBuffer, 0, 6);
+                bind(mPathQueueBuffer[src], 0, 7);
+                table->setAddress(diagnosticsEnabled, 8);
+                bind(mTraversalDispatchBuffer, 0, 9);
+                table->setAddress(traversalBatchThreadsAddress, 10);
+                table->setAddress(traversalBatchCountAddress, 11);
+                enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
+                barrier();
+                mark(kStageExtend);
+            }
 
-            enc->setComputePipelineState(mPreparePSO4);
-            bind(mControlBuffer, 0, 0);
-            table->setAddress(srcIdx, 1);
-            table->setAddress(groupSize, 2);
-            table->setAddress(bounceIdx, 3);
-            enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
-            barrier();
-
-            mark(kStageExtend);
             enc->setComputePipelineState(useMotion ? variant->extendMotion : variant->extendStatic);
             bind(uniformBuffer, 0, 0);
             bind(scene.instanceBuffer, 0, 1);
@@ -622,10 +538,27 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::CommandBuffer* cmd, MTL4::Comp
                 (bounce == 0) ? uniforms->primaryRayMask
                               : (uniforms->primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN);
             table->setAddress(ring.push(extendMask), 14);
-            enc->dispatchThreadgroups(control + kDispatchArgsOffset, tg);
-            closeStage();
+            table->setResource(scene.volumeAccelerationStructure->gpuResourceID(), 15);
+            const uint32_t batchBegin = chunk.phase == WavefrontChunkPhase::Complete
+                                            ? 0u
+                                            : chunk.traversalBatchBegin;
+            const uint32_t batchEnd = chunk.phase == WavefrontChunkPhase::Complete
+                                          ? traversalBatchCount
+                                          : std::min(chunk.traversalBatchEnd, traversalBatchCount);
+            for (uint32_t batch = batchBegin; batch < batchEnd; ++batch)
+            {
+                table->setAddress(ring.push(batch * traversalBatchThreads), 16);
+                enc->dispatchThreadgroups(traversalDispatches + batch * 3 * sizeof(uint32_t), tg);
+                if (batch + 1 < batchEnd)
+                {
+                    traversalBatchBarrier();
+                }
+            }
             barrier();
+        }
 
+        if (finishBounce)
+        {
             enc->setComputePipelineState(mPrepareHitMissPSO4);
             bind(mControlBuffer, 0, 0);
             table->setAddress(groupSize, 1);
@@ -652,7 +585,14 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::CommandBuffer* cmd, MTL4::Comp
                                   1);
             }
             enc->dispatchThreadgroups(control + kMissArgsOffset, tg);
-            closeStage();
+
+            // Miss and shade touch disjoint queue entries, so production does
+            // not need a barrier between them. Diagnosis does: seeing the shade
+            // breadcrumb must prove that miss completed, not merely overlapped.
+            if (diagnose)
+            {
+                barrier();
+            }
 
             mark(kStageShade);
             enc->setComputePipelineState(variant->shade);
@@ -689,13 +629,15 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::CommandBuffer* cmd, MTL4::Comp
             }
             bind(mIorStatsBuffer, 0, 28);
             enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
-            closeStage();
             barrier();
 
             enc->setComputePipelineState(mPrepareShadowPSO4);
             bind(mControlBuffer, 0, 0);
             table->setAddress(groupSize, 1);
             table->setAddress(bounceIdx, 2);
+            bind(mTraversalDispatchBuffer, 0, 3);
+            table->setAddress(traversalBatchThreadsAddress, 4);
+            table->setAddress(traversalBatchCountAddress, 5);
             enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
             barrier();
 
@@ -726,12 +668,25 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::CommandBuffer* cmd, MTL4::Comp
                 shadowTable->setBuffer(scene.indexBuffer, 0, 4);
                 table->setResource(shadowTable->gpuResourceID(), 11);
             }
-            enc->dispatchThreadgroups(control + kShadowArgsOffset, tg);
-            closeStage();
+            for (uint32_t batch = 0; batch < traversalBatchCount; ++batch)
+            {
+                table->setAddress(ring.push(batch * traversalBatchThreads), 12);
+                enc->dispatchThreadgroups(traversalDispatches + batch * 3 * sizeof(uint32_t), tg);
+                if (batch + 1 < traversalBatchCount)
+                {
+                    traversalBatchBarrier();
+                }
+            }
             barrier();
         }
     }
 
+    if (!chunk.resolve)
+    {
+        return;
+    }
+
+    mark(kStageResolve);
     enc->setComputePipelineState(mResolvePSO4);
     bind(uniformBuffer, 0, 0);
     bind(mRadianceBuffer, 0, 1);
@@ -763,6 +718,13 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::CommandBuffer* cmd, MTL4::Comp
         table->setTexture(scene.guideSpecularHitDistance->gpuResourceID(), 7);
         table->setTexture(scene.guideReactive->gpuResourceID(), 8);
         enc->dispatchThreadgroups(MTL::Size((width + 7) / 8, (height + 7) / 8, 1), MTL::Size(8, 8, 1));
+    }
+
+    if (diagnose)
+    {
+        // stageCount is the post-integrator sentinel understood by the CPU.
+        barrier();
+        writeBreadcrumb(static_cast<uint32_t>(mStageKinds.size()));
     }
 }
 
@@ -808,6 +770,11 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         {
             e->useResource(scene.instanceAccelerationStructure, MTL::ResourceUsageRead);
         }
+        if (scene.volumeAccelerationStructure &&
+            scene.volumeAccelerationStructure != scene.instanceAccelerationStructure)
+        {
+            e->useResource(scene.volumeAccelerationStructure, MTL::ResourceUsageRead);
+        }
         if (scene.environment && scene.environment->state().mapTexture)
         {
             e->useResource(scene.environment->state().mapTexture, MTL::ResourceUsageRead);
@@ -827,6 +794,9 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     const NS::UInteger kHitCounterOffset = 11 * sizeof(uint32_t);
     const NS::UInteger kMissArgsOffset = 18 * sizeof(uint32_t);
     const NS::UInteger kMissCounterOffset = 16 * sizeof(uint32_t);
+    const uint32_t traversalBatchThreads = kWavefrontTraversalBatchThreads;
+    const uint32_t traversalBatchCount = wavefrontTraversalBatchCount(pixels);
+    const uint32_t traversalQueueOffset = 0;
     // Nothing in the scene deforms -> traverse it as a static structure. Every ray
     // was otherwise paying for motion-BVH traversal it could not use.
     const bool useMotion = frame.motionBlasBuilt || !variant || variant->extendStatic == nullptr ||
@@ -842,6 +812,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     // a measurement mode and not something to leave on.
     mStageKinds.clear();
     const bool profile = frame.profileStages && mStageTimestampBuffer != nullptr;
+    const uint32_t diagnosticsEnabled = profile ? 1u : 0u;
     auto stamp = [&](uint8_t kind) {
         if (!profile || mStageKinds.size() >= kMaxStageSamples)
         {
@@ -894,6 +865,14 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBytes(&src, sizeof(uint32_t), 1);
             enc->setBytes(&kThreadsPerGroup, sizeof(uint32_t), 2);
             enc->setBytes(&bounce, sizeof(uint32_t), 3);
+            enc->setBuffer(mStageStatsBuffer, 0, 4);
+            enc->setBuffer(mPathStateBuffer, 0, 5);
+            enc->setBuffer(mPathRayBuffer, 0, 6);
+            enc->setBuffer(mPathQueueBuffer[src], 0, 7);
+            enc->setBytes(&diagnosticsEnabled, sizeof(diagnosticsEnabled), 8);
+            enc->setBuffer(mTraversalDispatchBuffer, 0, 9);
+            enc->setBytes(&traversalBatchThreads, sizeof(traversalBatchThreads), 10);
+            enc->setBytes(&traversalBatchCount, sizeof(traversalBatchCount), 11);
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
             // Sort the queue this bounce is about to traverse. Bounce 0 is the
@@ -923,6 +902,8 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
                 (bounce == 0) ? uniforms->primaryRayMask
                               : (uniforms->primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN);
             enc->setBytes(&extendMask, sizeof(uint32_t), 14);
+            enc->setAccelerationStructure(scene.volumeAccelerationStructure, 15);
+            enc->setBytes(&traversalQueueOffset, sizeof(traversalQueueOffset), 16);
             enc->dispatchThreadgroups(mControlBuffer, kDispatchArgsOffset, tg);
             enc->popDebugGroup();
 
@@ -1010,6 +991,9 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBuffer(mControlBuffer, 0, 0);
             enc->setBytes(&kThreadsPerGroup, sizeof(uint32_t), 1);
             enc->setBytes(&bounce, sizeof(uint32_t), 2);
+            enc->setBuffer(mTraversalDispatchBuffer, 0, 3);
+            enc->setBytes(&traversalBatchThreads, sizeof(traversalBatchThreads), 4);
+            enc->setBytes(&traversalBatchCount, sizeof(traversalBatchCount), 5);
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
             stamp(kStageShadow);
@@ -1040,6 +1024,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
                 enc->setIntersectionFunctionTable(shadowTable, 11);
                 enc->useResource(shadowTable, MTL::ResourceUsageRead);
             }
+            enc->setBytes(&traversalQueueOffset, sizeof(traversalQueueOffset), 12);
             enc->dispatchThreadgroups(mControlBuffer, kShadowArgsOffset, tg);
 
         }
@@ -1077,7 +1062,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     {
         enc->endEncoding();
         MTL::BlitCommandEncoder* blit = pCmd->blitCommandEncoder();
-        blit->copyFromBuffer(mControlBuffer, 0, mStageStatsBuffer, 0, mStageStatsBuffer->length());
+        blit->copyFromBuffer(mControlBuffer, 0, mStageStatsBuffer, 0, mControlBuffer->length());
         blit->endEncoding();
         enc = pCmd->computeCommandEncoder();
         enc->setLabel(NS::String::string("stats readback", NS::UTF8StringEncoding));
@@ -1341,6 +1326,8 @@ void MetalWavefrontIntegrator::buildPipelines()
         mPreparePSO4 = mMetal4->newComputePipelineState(lib, "wavefrontPrepare", nullptr);
         mPrepareShadowPSO4 = mMetal4->newComputePipelineState(lib, "wavefrontPrepareShadow", nullptr);
         mPrepareHitMissPSO4 = mMetal4->newComputePipelineState(lib, "wavefrontPrepareHitMiss", nullptr);
+        mStageBreadcrumbPSO4 =
+            mMetal4->newComputePipelineState(lib, "wavefrontStageBreadcrumb", nullptr);
         // The guide resolve too: without it the Metal 4 path cannot feed either
         // MetalFX mode, both of which read depth and motion from these textures.
         mAovResolvePSO4 = mMetal4->newComputePipelineState(lib, "wavefrontAovResolve", nullptr);
@@ -1365,6 +1352,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height)
     release(mPathQueueBuffer[0]);
     release(mPathQueueBuffer[1]);
     release(mControlBuffer);
+    release(mTraversalDispatchBuffer);
     release(mShadowRayBuffer);
     release(mStageStatsBuffer);
     release(mHitQueueBuffer);
@@ -1392,6 +1380,10 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height)
     mPathQueueBuffer[1] = mDevice->newBuffer(layout.pathQueueBytes, MTL::ResourceStorageModePrivate);
     // Queue counters, active counts, and two sets of indirect dispatch arguments.
     mControlBuffer = mDevice->newBuffer(layout.controlBytes, MTL::ResourceStorageModePrivate);
+    // Reused within a bounce: prepare fills it for extend, then prepareShadow
+    // overwrites it after extend has completed.
+    mTraversalDispatchBuffer =
+        mDevice->newBuffer(layout.traversalDispatchBytes, MTL::ResourceStorageModePrivate);
     // At most one deferred connection per path per bounce.
     mShadowRayBuffer = mDevice->newBuffer(layout.shadowRayBytes, MTL::ResourceStorageModePrivate);
     mStageStatsBuffer = mDevice->newBuffer(layout.stageStatsBytes, MTL::ResourceStorageModeShared);

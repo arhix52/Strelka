@@ -187,6 +187,24 @@ void MetalGeometry::buildCurveBuffers(Scene* scene)
     const std::vector<float>& radii = scene->getCurvesWidths();
     const std::vector<uint32_t>& vertexCounts = scene->getCurvesVertexCounts();
 
+    // Curve widths are stored per set and need not share the point stream's
+    // offsets. Expand them into point-aligned storage so every descriptor can
+    // use the same base offset as its control points.
+    std::vector<float> radiusData(points.size(), 0.001f);
+    for (const oka::Curve& curve : curves)
+    {
+        if (curve.mWidthsCount == static_cast<uint32_t>(-1))
+        {
+            continue;
+        }
+        const size_t count = std::min<size_t>(curve.mWidthsCount, curve.mPointsCount);
+        if (curve.mWidthsStart + count <= radii.size() && curve.mPointsStart + count <= radiusData.size())
+        {
+            std::copy_n(radii.begin() + curve.mWidthsStart, count,
+                        radiusData.begin() + curve.mPointsStart);
+        }
+    }
+
     mCurveRanges.assign(curves.size(), CurveRange{});
     std::vector<uint32_t> segments;
     for (size_t c = 0; c < curves.size(); ++c)
@@ -207,9 +225,8 @@ void MetalGeometry::buildCurveBuffers(Scene* scene)
             for (uint32_t seg = 0; seg + perSegment <= n; ++seg)
             {
                 // Metal's curve descriptor sees only this set's control-point
-                // range, so its segment indices are relative to that range. The
-                // shader adds mPointsStart back when it refetches the same points
-                // from the scene-wide buffer.
+                // range, so its indices are relative to that range. The shader
+                // adds mPointsStart back when refetching the same points.
                 segments.push_back(pointCursor - curve.mPointsStart + seg);
             }
             pointCursor += n;
@@ -230,20 +247,8 @@ void MetalGeometry::buildCurveBuffers(Scene* scene)
     mCurvePointBuffer = mDevice->newBuffer(points.size() * sizeof(glm::float3), MTL::ResourceStorageModeShared);
     memcpy(mCurvePointBuffer->contents(), points.data(), points.size() * sizeof(glm::float3));
 
-    // A set exported without radii still has to intersect: the sidecar always
-    // writes them, but Scene::createCurve allows the empty case and a zero-radius
-    // curve is invisible rather than wrong-looking.
-    std::vector<float> radiusData;
-    if (radii.size() < points.size())
-    {
-        radiusData.assign(points.size(), 0.001f);
-        std::copy(radii.begin(), radii.end(), radiusData.begin());
-        STRELKA_WARNING("Curve sets carry {} radii for {} control points; the rest default to 1 mm",
-                        radii.size(), points.size());
-    }
-    const float* radiusSrc = radiusData.empty() ? radii.data() : radiusData.data();
     mCurveRadiusBuffer = mDevice->newBuffer(points.size() * sizeof(float), MTL::ResourceStorageModeShared);
-    memcpy(mCurveRadiusBuffer->contents(), radiusSrc, points.size() * sizeof(float));
+    memcpy(mCurveRadiusBuffer->contents(), radiusData.data(), points.size() * sizeof(float));
 
     mCurveSegmentBuffer = mDevice->newBuffer(segments.size() * sizeof(uint32_t), MTL::ResourceStorageModeShared);
     memcpy(mCurveSegmentBuffer->contents(), segments.data(), segments.size() * sizeof(uint32_t));

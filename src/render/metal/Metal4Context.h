@@ -16,8 +16,8 @@
 //   * Residency is declared once for the whole queue with a residency set rather
 //     than per encoder with useResource.
 //
-// Command allocators own the memory an encoder writes into, so one per frame in
-// flight, reset only once that frame's work has actually completed.
+// Command allocators own the memory an encoder writes into, so every in-flight
+// command buffer needs distinct allocator storage until its work completes.
 
 #include <Metal/Metal.hpp>
 #include <dispatch/dispatch.h>
@@ -98,6 +98,11 @@ public:
     {
         return mQueue;
     }
+    /// Schedule work on the serial feedback queue after the currently running
+    /// feedback handler has returned. A commit made recursively from its own
+    /// feedback callback can remain one continuously resident scheduler
+    /// workload even when every command buffer is submitted separately.
+    void afterFeedback(std::function<void()> work);
     MTL4::Compiler* compiler() const
     {
         return mCompiler;
@@ -124,6 +129,9 @@ public:
     /// Begin recording into the given frame's allocator. The allocator is reset
     /// here, so the frame's previous work must already have completed.
     MTL4::CommandBuffer* beginFrame(uint32_t frameIndex);
+    /// Continue the same frame in another command buffer with its own allocator.
+    /// Allocator storage remains live until the GPU finishes that chunk.
+    MTL4::CommandBuffer* continueFrame(uint32_t frameIndex, uint32_t continuationIndex);
 
     /// One-off work outside the frame loop -- scene load and acceleration
     /// structure rebuilds. Per-frame skinning and refits use beginFrame() so
@@ -169,6 +177,8 @@ public:
     /// waitUntilCompleted to call. A queue-signalled shared event is the only
     /// thing a caller can block on.
     uint64_t signalFrame();
+    uint64_t reserveFrameSignal();
+    void signalFrame(uint64_t value);
     /// The event signalFrame() signals, for a consumer on another queue to wait on.
     MTL::SharedEvent* frameEvent() const
     {
@@ -201,6 +211,12 @@ public:
                                                              MTL::FunctionConstantValues* constants);
 
 private:
+    struct FrameContinuation
+    {
+        MTL4::CommandAllocator* allocator = nullptr;
+        MTL4::CommandBuffer* commandBuffer = nullptr;
+    };
+
     MTL::Device* mDevice = nullptr;
     MTL4::CommandQueue* mQueue = nullptr;
     // Commit feedback is delivered here; a queue built without one delivers none.
@@ -210,6 +226,7 @@ private:
     MTL::ResidencySet* mResidencySet = nullptr;
     std::vector<MTL4::CommandAllocator*> mAllocators;
     std::vector<MTL4::CommandBuffer*> mCommandBuffers;
+    std::vector<std::vector<FrameContinuation>> mContinuationBuffers;
     MTL4::CommandAllocator* mImmediateAllocator = nullptr;
     MTL4::CommandBuffer* mImmediateBuffer = nullptr;
     MTL::SharedEvent* mImmediateEvent = nullptr;

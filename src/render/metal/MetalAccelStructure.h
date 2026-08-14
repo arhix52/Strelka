@@ -174,6 +174,19 @@ public:
     {
         return mInstanceAccelerationStructure;
     }
+    /// Triangle-only top level used by bounded-medium random walks. Curve BLAS
+    /// are deliberately absent, rather than merely rejected by a ray mask: on
+    /// current Metal 4 drivers a handful of deep rays can still spend watchdog-
+    /// scale time traversing a mixed TLAS. Scenes without curves reuse the main
+    /// top level.
+    MTL::AccelerationStructure* volumeAccelerationStructure() const
+    {
+        if (mVolumeInstanceAccelerationStructure)
+        {
+            return mVolumeInstanceAccelerationStructure;
+        }
+        return mInstanceAccelerationStructure;
+    }
     const std::vector<MTL::AccelerationStructure*>& primitiveAccelerationStructures() const
     {
         return mPrimitiveAccelerationStructures;
@@ -238,8 +251,10 @@ private:
     std::vector<EmittedInstance> mEmittedInstances;
     std::vector<MTL::AccelerationStructure*> mPrimitiveAccelerationStructures;
     MTL::AccelerationStructure* mInstanceAccelerationStructure = nullptr;
+    MTL::AccelerationStructure* mVolumeInstanceAccelerationStructure = nullptr;
     // Reused for every TLAS refit. Path-owned descriptor type (MTL3 or MTL4).
     MTL::AccelerationStructureDescriptor* mTlasDescriptor = nullptr;
+    MTL::AccelerationStructureDescriptor* mVolumeTlasDescriptor = nullptr;
     MTL::Buffer* mInstanceBuffer = nullptr;
     // Two are sufficient because MetalRender submits at most one frame at a
     // time: async rendering stays busy until commit feedback (or the Metal 3
@@ -248,7 +263,9 @@ private:
     MTL::Buffer* mPreviousInstanceBuffer = nullptr;
     bool mInstanceTransformsChanged = false;
     MTL::Buffer* mTlasScratchBuffer = nullptr;
+    MTL::Buffer* mVolumeTlasScratchBuffer = nullptr;
     size_t mTlasInstanceCount = 0;
+    size_t mVolumeTlasInstanceCount = 0;
     // A top level that has to grow is replaced from inside the frame's encoder,
     // where the structure it replaces may still be read by the frames already in
     // flight. Freeing it there is a fault the frame after next; it waits here

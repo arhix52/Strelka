@@ -79,8 +79,7 @@ struct AsBuildState
     size_t lightCursor = 0;
 
     // Curve instances. One BLAS per curve set, shared between instances that
-    // place the same set -- which the sidecar does not yet produce, but a
-    // groomed character with two eyebrows would.
+    // place the same set.
     std::map<uint32_t, size_t> curveBlasOfSet;
     size_t curveCursor = 0;
 
@@ -328,7 +327,10 @@ void MetalAccelStructure::rebuild()
     mPrimitiveAccelerationStructures.clear();
     mMetal4->removeResident(mInstanceAccelerationStructure);
     safeRelease(mInstanceAccelerationStructure);
+    mMetal4->removeResident(mVolumeInstanceAccelerationStructure);
+    safeRelease(mVolumeInstanceAccelerationStructure);
     safeRelease(mTlasDescriptor);
+    safeRelease(mVolumeTlasDescriptor);
     mMetal4->removeResident(mInstanceBuffer);
     safeRelease(mInstanceBuffer);
     mMetal4->removeResident(mPreviousInstanceBuffer);
@@ -337,6 +339,8 @@ void MetalAccelStructure::rebuild()
     mGeometry->clearGeometryEntries();
     mMetal4->removeResident(mTlasScratchBuffer);
     safeRelease(mTlasScratchBuffer);
+    mMetal4->removeResident(mVolumeTlasScratchBuffer);
+    safeRelease(mVolumeTlasScratchBuffer);
     mMetal4->commitResidency();
 
     const auto rebuildStart = std::chrono::high_resolution_clock::now();
@@ -855,6 +859,38 @@ bool MetalAccelStructure::step(double budgetMs)
         STRELKA_ERROR("Top-level acceleration structure could not be built; every ray will miss "
                       "and the image will be black.");
     }
+
+    // A ray mask prevents a curve hit from being returned, but it does not make
+    // the curve BLAS disappear from a mixed top level. On Metal 4, rare deep SSS
+    // rays were observed spending 120+ ms inside traversal even with a triangle-
+    // only intersector and the curve mask cleared. Build a second, tiny TLAS over
+    // the mesh-instance prefix so those rays cannot enter either giant curve BLAS
+    // at all. The bottom levels and descriptor buffer are shared; only the top-
+    // level hierarchy is duplicated.
+    const auto firstCurve = std::find_if(mEmittedInstances.begin(), mEmittedInstances.end(),
+                                         [](const EmittedInstance& e) {
+                                             return e.mask == GEOMETRY_MASK_CURVE;
+                                         });
+    mVolumeTlasInstanceCount = firstCurve != mEmittedInstances.end()
+                                   ? static_cast<size_t>(firstCurve - mEmittedInstances.begin())
+                                   : 0;
+    if (firstCurve != mEmittedInstances.end() && mVolumeTlasInstanceCount > 0)
+    {
+        mVolumeTlasDescriptor =
+            mPath->makeInstanceDescriptor(mInstanceBuffer, mVolumeTlasInstanceCount, tlasUsage());
+        mVolumeInstanceAccelerationStructure = createAccelerationStructure(mVolumeTlasDescriptor);
+        if (mVolumeInstanceAccelerationStructure)
+        {
+            STRELKA_INFO("Volume TLAS: {} triangle instances, curve BLAS excluded ({:.3f} MB)",
+                         mVolumeTlasInstanceCount,
+                         mVolumeInstanceAccelerationStructure->size() / 1e6);
+        }
+        else
+        {
+            STRELKA_ERROR("Triangle-only volume TLAS could not be built; bounded-medium traversal "
+                          "will fall back to the main top level");
+        }
+    }
     {
         size_t asBytes = 0;
         size_t nullAs = 0;
@@ -980,35 +1016,50 @@ void MetalAccelStructure::encodeTlasUpdates()
     ++mTlasEncodeCount;
     releaseRetiredInstanceStructures(kMaxFramesInFlight);
 
-    const MTL::AccelerationStructureSizes sizes = mPath->sizes(mTlasDescriptor);
-    const bool canRefit = mInstanceAccelerationStructure != nullptr &&
-                          mTlasInstanceCount == mEmittedInstances.size() &&
-                          mInstanceAccelerationStructure->size() >= sizes.accelerationStructureSize;
-
     mPath->barrierBeforeTlas();
-    if (canRefit)
-    {
-        ensureScratchBuffer(mTlasScratchBuffer, sizes.refitScratchBufferSize);
-        mPath->refit(mInstanceAccelerationStructure, mTlasDescriptor, mTlasScratchBuffer);
-    }
-    else
-    {
-        if (mInstanceAccelerationStructure)
+    auto update = [&](MTL::AccelerationStructure*& structure,
+                      MTL::AccelerationStructureDescriptor* descriptor,
+                      MTL::Buffer*& scratch,
+                      bool countUnchanged) {
+        if (!descriptor)
         {
-            mRetiredInstanceStructures.emplace_back(mInstanceAccelerationStructure, mTlasEncodeCount);
-            mInstanceAccelerationStructure = nullptr;
+            return;
         }
-        const MTL::AccelerationStructureSizes buildSizes = mPath->sizes(mTlasDescriptor);
-        mInstanceAccelerationStructure = mDevice->newAccelerationStructure(buildSizes.accelerationStructureSize);
-        ensureScratchBuffer(mTlasScratchBuffer, buildSizes.buildScratchBufferSize);
+        const MTL::AccelerationStructureSizes sizes = mPath->sizes(descriptor);
+        const bool canRefit = structure && countUnchanged &&
+                              structure->size() >= sizes.accelerationStructureSize;
+        if (canRefit)
+        {
+            ensureScratchBuffer(scratch, sizes.refitScratchBufferSize);
+            mPath->refit(structure, descriptor, scratch);
+            return;
+        }
+
+        if (structure)
+        {
+            mRetiredInstanceStructures.emplace_back(structure, mTlasEncodeCount);
+            structure = nullptr;
+        }
+        structure = mDevice->newAccelerationStructure(sizes.accelerationStructureSize);
+        if (!structure)
+        {
+            STRELKA_ERROR("Top-level acceleration structure allocation failed during update");
+            return;
+        }
+        ensureScratchBuffer(scratch, sizes.buildScratchBufferSize);
         if (mMetal4)
         {
-            mMetal4->addResident(mInstanceAccelerationStructure);
+            mMetal4->addResident(structure);
         }
-        mPath->addResident(mInstanceAccelerationStructure);
-        mPath->build(mInstanceAccelerationStructure, mTlasDescriptor, mTlasScratchBuffer);
-        mTlasInstanceCount = mEmittedInstances.size();
-    }
+        mPath->addResident(structure);
+        mPath->build(structure, descriptor, scratch);
+    };
+
+    update(mInstanceAccelerationStructure, mTlasDescriptor, mTlasScratchBuffer,
+           mTlasInstanceCount == mEmittedInstances.size());
+    mTlasInstanceCount = mEmittedInstances.size();
+    update(mVolumeInstanceAccelerationStructure, mVolumeTlasDescriptor,
+           mVolumeTlasScratchBuffer, true);
 
     mPath->barrierAfterTlasBeforeDispatch();
 }
@@ -1104,6 +1155,10 @@ void MetalAccelStructure::updateInstanceTransforms()
     if (mTlasDescriptor && mPath)
     {
         mPath->setInstanceDescriptorBuffer(mTlasDescriptor, mInstanceBuffer);
+    }
+    if (mVolumeTlasDescriptor && mPath)
+    {
+        mPath->setInstanceDescriptorBuffer(mVolumeTlasDescriptor, mInstanceBuffer);
     }
 }
 
@@ -1342,7 +1397,9 @@ void MetalAccelStructure::addDescriptorResidency()
         }
     }
     mMetal4->addResident(mInstanceAccelerationStructure);
+    mMetal4->addResident(mVolumeInstanceAccelerationStructure);
     mMetal4->addResident(mTlasScratchBuffer);
+    mMetal4->addResident(mVolumeTlasScratchBuffer);
 }
 
 void MetalAccelStructure::releaseRetiredInstanceStructures(uint64_t age)
@@ -1373,6 +1430,10 @@ std::vector<MTL::Buffer*> MetalAccelStructure::accelerationStructureAuxiliaryBuf
     if (mTlasScratchBuffer)
     {
         buffers.push_back(mTlasScratchBuffer);
+    }
+    if (mVolumeTlasScratchBuffer)
+    {
+        buffers.push_back(mVolumeTlasScratchBuffer);
     }
     for (const Blas& blas : mBlasList)
     {
@@ -1424,7 +1485,10 @@ void MetalAccelStructure::release()
     mPrimitiveAccelerationStructures.clear();
     removeResident(mInstanceAccelerationStructure);
     safeRelease(mInstanceAccelerationStructure);
+    removeResident(mVolumeInstanceAccelerationStructure);
+    safeRelease(mVolumeInstanceAccelerationStructure);
     safeRelease(mTlasDescriptor);
+    safeRelease(mVolumeTlasDescriptor);
     removeResident(mInstanceBuffer);
     safeRelease(mInstanceBuffer);
     removeResident(mPreviousInstanceBuffer);
@@ -1432,12 +1496,15 @@ void MetalAccelStructure::release()
     mInstanceTransformsChanged = false;
     removeResident(mTlasScratchBuffer);
     safeRelease(mTlasScratchBuffer);
+    removeResident(mVolumeTlasScratchBuffer);
+    safeRelease(mVolumeTlasScratchBuffer);
     if (mMetal4)
     {
         mMetal4->commitResidency();
     }
     mEmittedInstances.clear();
     mTlasInstanceCount = 0;
+    mVolumeTlasInstanceCount = 0;
     mOpaqueGeometryCount = 0;
     mCutoutGeometryCount = 0;
     mNextBlasRebuildIndex = 0;
