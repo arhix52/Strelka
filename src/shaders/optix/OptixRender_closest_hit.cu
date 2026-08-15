@@ -16,8 +16,10 @@
 #include <env_light.h>
 
 #include <strelka/material/bsdf.h>
+#include <strelka/material/volume.h>
 
 #include "optix_device_utils.h"
+#include "shading/shading_common.h"
 
 extern "C"
 {
@@ -52,9 +54,29 @@ static __forceinline__ __device__ uint32_t selectLightIndex(float u, uint32_t nu
     return (index < numLights) ? index : (numLights - 1);
 }
 
+/// Where a next-event connection leaves from.
+///
+/// A surface offsets along the face the shadow ray actually departs through. A
+/// fibre does not have one: the Chiang lobe has already paid for the crossing,
+/// so a connection leaving through the strand has to start past it or the fibre
+/// occludes itself and the dominant lobe is never connected to at all.
+static __forceinline__ __device__ float3 shadowOrigin(const SurfaceInteraction& si,
+                                                      float curveRadius,
+                                                      float3 toLight)
+{
+    if (scattersThroughFibre(si) && curveRadius > 0.0f)
+    {
+        return fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, toLight);
+    }
+    const float3 offsetNg =
+        (dot(si.geometry_normal, toLight) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
+    return offset_ray(si.position, offsetNg);
+}
+
 static __device__ float3 sampleLight(SamplerState& sampler,
                                          const UniformLight& light,
                                          const SurfaceInteraction& si,
+                                         float curveRadius,
                                          float3& toLight,
                                          float& lightPdf)
 {
@@ -100,14 +122,19 @@ static __device__ float3 sampleLight(SamplerState& sampler,
         }
     }
 
+    // lightReachesShadingPoint() is `dot(N, L) > 0` for everything except a
+    // fibre, where the hemisphere test is the wrong question -- see the note on
+    // it in shading/shading_common.h.
+    const bool lit = lightReachesShadingPoint(si, lightSampleData.L);
     const bool facing = (light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT)
-                            ? (dot(si.shading_normal, lightSampleData.L) > 0.0f && emitsLight(Li))
-                            : (dot(si.shading_normal, lightSampleData.L) > 0.0f &&
-                               -dot(lightSampleData.L, lightSampleData.normal) > 0.0f && emitsLight(Li));
+                            ? (lit && emitsLight(Li))
+                            : (lit && -dot(lightSampleData.L, lightSampleData.normal) > 0.0f &&
+                               emitsLight(Li));
     if (facing)
     {
         const bool occluded =
-            traceOcclusion(params.handle, offset_ray(si.position, si.geometry_normal), lightSampleData.L,
+            traceOcclusion(params.handle, shadowOrigin(si, curveRadius, lightSampleData.L),
+                           lightSampleData.L,
                            params.shadowRayTmin, // tmin
                            lightSampleData.distToLight // tmax
             );
@@ -116,7 +143,7 @@ static __device__ float3 sampleLight(SamplerState& sampler,
         // The cosine belongs here because bsdf_eval() returns f alone, unlike
         // bsdf_sample()'s bsdf_over_pdf which already carries it. See the note on
         // both result structs in bsdf_types.h.
-        return visibility * Li * saturate(dot(si.shading_normal, lightSampleData.L));
+        return visibility * Li * shadingCosine(si, lightSampleData.L);
     }
 
     return make_float3(0.0f);
@@ -124,6 +151,7 @@ static __device__ float3 sampleLight(SamplerState& sampler,
 
 static __device__ float3 sampleEnvLightNEE(SamplerState& sampler,
                                             const SurfaceInteraction& si,
+                                            float curveRadius,
                                             float3& toLight,
                                             float& lightPdf)
 {
@@ -144,14 +172,15 @@ static __device__ float3 sampleEnvLightNEE(SamplerState& sampler,
     if (envPdf <= 0.0f)
         return make_float3(0.0f);
 
-    // Check if direction is above the surface
-    if (dot(si.shading_normal, dir) <= 0.0f)
+    // Check if direction is above the surface -- an identity for everything but
+    // a fibre, which has no dark side.
+    if (!lightReachesShadingPoint(si, dir))
         return make_float3(0.0f);
 
     // Trace shadow ray to infinity
     const bool occluded = traceOcclusion(
         params.handle,
-        offset_ray(si.position, si.geometry_normal),
+        shadowOrigin(si, curveRadius, dir),
         dir,
         params.shadowRayTmin,
         1e16f);
@@ -165,11 +194,12 @@ static __device__ float3 sampleEnvLightNEE(SamplerState& sampler,
     float3 Li = make_float3(envSample.x, envSample.y, envSample.z);
     Li *= params.envMapIntensity * params.envMapColorTint;
 
-    return Li * fmaxf(dot(si.shading_normal, dir), 0.0f);
+    return Li * shadingCosine(si, dir);
 }
 
 __device__ float3 estimateDirectLighting(SamplerState& sampler,
                                          const SurfaceInteraction& si,
+                                         float curveRadius,
                                          float3& toLight,
                                          float& lightPdf)
 {
@@ -181,7 +211,7 @@ __device__ float3 estimateDirectLighting(SamplerState& sampler,
         {
             // Sample environment map
             const float selectionPdf = (params.scene.numLights > 0) ? 0.5f : 1.0f;
-            const float3 r = sampleEnvLightNEE(sampler, si, toLight, lightPdf);
+            const float3 r = sampleEnvLightNEE(sampler, si, curveRadius, toLight, lightPdf);
             lightPdf *= selectionPdf;
             return r;
         }
@@ -192,7 +222,7 @@ __device__ float3 estimateDirectLighting(SamplerState& sampler,
             const uint32_t lightId = selectLightIndex(remappedU, params.scene.numLights);
             const float lightSelectionPdf = 0.5f / params.scene.numLights;
             const UniformLight& currLight = params.scene.lights[lightId];
-            const float3 r = sampleLight(sampler, currLight, si, toLight, lightPdf);
+            const float3 r = sampleLight(sampler, currLight, si, curveRadius, toLight, lightPdf);
             lightPdf *= lightSelectionPdf;
             return r;
         }
@@ -215,7 +245,7 @@ __device__ float3 estimateDirectLighting(SamplerState& sampler,
         const uint32_t lightId = selectLightIndex(u, params.scene.numLights);
         const float lightSelectionPdf = 1.0f / params.scene.numLights;
         const UniformLight& currLight = params.scene.lights[lightId];
-        const float3 r = sampleLight(sampler, currLight, si, toLight, lightPdf);
+        const float3 r = sampleLight(sampler, currLight, si, curveRadius, toLight, lightPdf);
         lightPdf *= lightSelectionPdf;
         return r;
     }
@@ -258,7 +288,25 @@ struct SurfaceHitData
     float2 uv;
     float3 worldTangent;
     float3 worldBinormal;
+    /// glTF COLOR_0, interpolated. White when the mesh carries no colour set.
+    float3 vertexColor;
+    /// World-space radius of the strand at the hit. Zero for a triangle, and the
+    /// one thing the fibre chord needs that a curve hit does not hand back.
+    float curveRadius;
 };
+
+/// glTF COLOR_0 out of oka::Scene::Vertex.
+///
+/// The device-side `Vertex` in OptixRenderParams.h spells the last eight bytes
+/// `pad0` / `pad1`, but the buffer it aliases is oka::Scene::Vertex, whose last
+/// two words are `uv1` and `color`. Both structs are 32 bytes with the same
+/// field offsets, and OptiXRender::createVertexBuffer uploads the scene struct
+/// whole, so the colour really is there -- it is only spelled as padding.
+/// Renaming those two fields is a hand-off; reading the bits is not.
+static __forceinline__ __device__ float3 vertexColorOf(const Vertex& v)
+{
+    return unpack_vertex_color(__float_as_uint(v.pad1));
+}
 
 static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitGroupData* hit_data)
 {
@@ -272,6 +320,11 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
 
     float3 p0, p1, p2, n0, n1, n2, t0, t1, t2;
     float2 uv0, uv1, uv2;
+    float3 c0, c1, c2;
+    // glTF TANGENT.w rides in bit 30 of the packed tangent. Handedness is a
+    // per-mesh property in every exporter that writes it, so one vertex settles
+    // it -- there is nothing sensible to interpolate.
+    float tangentSign = 1.0f;
 
     if (params.enableMotionBlur)
     {
@@ -303,6 +356,13 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
         uv0 = lerp(unpackUV(v0_0.uv), unpackUV(v0_1.uv), t);
         uv1 = lerp(unpackUV(v1_0.uv), unpackUV(v1_1.uv), t);
         uv2 = lerp(unpackUV(v2_0.uv), unpackUV(v2_1.uv), t);
+
+        // Vertex colour is not skinned and does not animate, so it is read from
+        // the current frame even when the rest is motion-interpolated.
+        c0 = vertexColorOf(v0_1);
+        c1 = vertexColorOf(v1_1);
+        c2 = vertexColorOf(v2_1);
+        tangentSign = unpackTangentSign(v0_1.tangent);
     }
     else
     {
@@ -324,6 +384,11 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
         uv0 = unpackUV(v0.uv);
         uv1 = unpackUV(v1.uv);
         uv2 = unpackUV(v2.uv);
+
+        c0 = vertexColorOf(v0);
+        c1 = vertexColorOf(v1);
+        c2 = vertexColorOf(v2);
+        tangentSign = unpackTangentSign(v0.tangent);
     }
 
     const float2 uvCoord = interpolateAttrib(uv0, uv1, uv2, barycentrics);
@@ -335,7 +400,9 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
     geomNormal = normalize(optixTransformNormalFromObjectToWorldSpace(geomNormal));
     const float3 worldTangent =
         normalize(optixTransformNormalFromObjectToWorldSpace(interpolateAttrib(t0, t1, t2, barycentrics)));
-    const float3 worldBinormal = cross(worldNormal, worldTangent);
+    // Without TANGENT.w the bitangent points the wrong way and every normal map
+    // is mirrored along it -- bumps light from the opposite side.
+    const float3 worldBinormal = cross(worldNormal, worldTangent) * tangentSign;
 
     SurfaceHitData res;
     res.normal = worldNormal;
@@ -344,6 +411,8 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
     res.uv = uvCoord;
     res.worldTangent = worldTangent;
     res.worldBinormal = worldBinormal;
+    res.vertexColor = interpolateAttrib(c0, c1, c2, barycentrics);
+    res.curveRadius = 0.0f;
     return res;
 }
 
@@ -356,13 +425,14 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     optixGetCubicBSplineVertexData(gas, primitiveIndex, gasSbtIndex, 0.0f, controlPoints);
     CubicInterpolator interpolator;
     interpolator.initializeFromBSpline(controlPoints);
+    const float u = optixGetCurveParameter();
     float3 hitPoint = getHitPoint();
     // interpolators work in object space
     hitPoint = optixTransformPointFromWorldToObjectSpace(hitPoint); // interpolators work in object space
-    float3 worldNormal = normalize(
-        optixTransformNormalFromObjectToWorldSpace(surfaceNormal(interpolator, optixGetCurveParameter(), hitPoint)));
+    const float3 objectNormal = surfaceNormal(interpolator, u, hitPoint);
+    float3 worldNormal = normalize(optixTransformNormalFromObjectToWorldSpace(objectNormal));
     const float3 worldTangent =
-        normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, optixGetCurveParameter())));
+        normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, u)));
     const float3 worldBinormal = cross(worldNormal, worldTangent);
     const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(hitPoint);
     SurfaceHitData res;
@@ -372,6 +442,15 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     res.uv = make_float2(0.5f, 0.5f);
     res.worldTangent = worldTangent;
     res.worldBinormal = worldBinormal;
+    res.vertexColor = make_float3(1.0f);
+    // The chord across the strand is measured in world units, and the
+    // interpolator's radius is in object ones. Carrying the radial *vector*
+    // through the transform rather than the scalar is what makes that survive an
+    // instance transform with a scale on it -- and the object normal is already
+    // the radial direction everywhere except the two flat endcaps, where the
+    // chord degenerates to zero and fibre_exit() falls back to a surface offset.
+    res.curveRadius =
+        length(optixTransformVectorFromObjectToWorldSpace(objectNormal * interpolator.radius(u)));
 
     return res;
 }
@@ -384,32 +463,57 @@ extern "C" __global__ void __closesthit__radiance()
     HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
     const float3 ray_dir = optixGetWorldRayDirection();
 
-    SurfaceHitData surfaceHit;
+    SurfaceHitData surfaceHit = {};
+    const bool isCurveHit = (primType == OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE);
     if (primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE)
     {
         surfaceHit = fillTriangleGeomData(hit_data);
     }
-    else if (primType == OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE)
+    else if (isCurveHit)
     {
         surfaceHit = fillCurveGeomData(hit_data);
     }
-
-    // Fill SurfaceInteraction from hit data
-    SurfaceInteraction si;
-    si.position = surfaceHit.position;
-    si.shading_normal = surfaceHit.normal;
-    si.geometry_normal = surfaceHit.geom_normal;
-    si.tangent = surfaceHit.worldTangent;
-    si.bitangent = surfaceHit.worldBinormal;
-    si.uv = surfaceHit.uv;
-    si.wo = -ray_dir;
-    si.front_face = dot(surfaceHit.geom_normal, -ray_dir) > 0.0f;
 
     // Look up material from device buffer (indexed by materialId)
     const int32_t matId = hit_data->materialId;
     const MaterialParams& matParams = params.materials[matId];
     const cudaTextureObject_t* textures = &params.materialTextures[matId * MAX_MATERIAL_TEXTURES];
-    bsdf_init(si, matParams, textures);
+
+    // --- Absorption over the segment just travelled -------------------------
+    //
+    // The IOR stack already knows which medium the path is inside; it also
+    // carries the material that medium came from, so the extinction is looked up
+    // here rather than threaded through the payload. It has to happen before the
+    // pop at the bottom of this program, and before emission and next-event
+    // estimation, or everything seen through a dense medium keeps its own colour.
+    //
+    // volume.h was included by no .cu file at all before this, so the OptiX path
+    // had no volumetric attenuation of any kind.
+    {
+        const unsigned int inside = ior_stack_current_material(prd->iorStack);
+        if (inside != 0xFFFFFFFFu)
+        {
+            const MaterialParams& im = params.materials[inside];
+            const float3 sigma_t = volume_extinction(im.attenuation_color, im.attenuation_distance,
+                                                     kOptixVolumeModel);
+            prd->throughput *= beer_lambert_transmittance(sigma_t, optixGetRayTmax());
+        }
+    }
+
+    // Fill SurfaceInteraction from hit data, resolving textures, the uv
+    // transform, the normal map, vertex colour and coverage on the way.
+    SurfaceInteraction si;
+    initSurfaceInteraction(si, matParams, textures, surfaceHit.position, surfaceHit.normal,
+                           surfaceHit.geom_normal, surfaceHit.worldTangent,
+                           surfaceHit.worldBinormal, surfaceHit.uv, ray_dir,
+                           surfaceHit.vertexColor);
+
+    // A strand shaded by the whole-fibre lobe: light crosses it in one event, so
+    // neither the hemisphere tests nor the ray offsets below apply. Gated on the
+    // geometry as well as the material because the chord needs a radius, and only
+    // a curve hit has one.
+    const bool isFibre = isCurveHit && scattersThroughFibre(si) && surfaceHit.curveRadius > 0.0f;
+    const float curveRadius = isFibre ? surfaceHit.curveRadius : 0.0f;
 
     if (params.debug == 1)
     {
@@ -470,7 +574,8 @@ extern "C" __global__ void __closesthit__radiance()
     {
         float3 toLight; // return value for estimateDirectLighting()
         float lightPdf = 0.0f; // return value for estimateDirectLighting()
-        const float3 radiance = estimateDirectLighting(prd->sampler, si, toLight, lightPdf);
+        const float3 radiance =
+            estimateDirectLighting(prd->sampler, si, curveRadius, toLight, lightPdf);
         if (isnan(radiance) || isnan(lightPdf))
         {
             // ERROR, terminate tracing
@@ -479,7 +584,12 @@ extern "C" __global__ void __closesthit__radiance()
             return;
         }
 
-        const bool isNextEventValid = ((dot(toLight, si.shading_normal) > 0.0f) == si.front_face) && (lightPdf != 0.0f);
+        // A fibre has no back side to reject: the Chiang lobe's TT term is light
+        // that entered one side and left the other, and on a bright groom it is
+        // four fifths of the albedo.
+        const bool isNextEventValid =
+            (isFibre || ((dot(toLight, si.shading_normal) > 0.0f) == si.front_face)) &&
+            (lightPdf != 0.0f);
         if (isNextEventValid)
         {
             BsdfEvalResult evalData = bsdf_eval(si, toLight);
@@ -506,20 +616,45 @@ extern "C" __global__ void __closesthit__radiance()
     // Face normal oriented toward the incoming ray (wo)
     float3 faceNg = (dot(si.geometry_normal, si.wo) > 0.0f)
                   ? si.geometry_normal : -si.geometry_normal;
-    // Update IOR stack on transmission
-    if ((sample_data.event_type & BSDF_EVENT_TRANSMISSION) != 0)
+    // Update IOR stack on transmission.
+    //
+    // A fibre's transmission lobes do not put the path inside anything: the
+    // strand is crossed within the one event, so there is no medium to enter and
+    // no entry to match with an exit. Pushing here left every transmitted hair
+    // path one level deeper than it came in, and a groom is thousands of hairs
+    // deep.
+    if ((sample_data.event_type & BSDF_EVENT_TRANSMISSION) != 0 && !isFibre)
     {
-        if (entering)
-            ior_stack_push(prd->iorStack, si.dielectric_priority, si.ior, (unsigned int)matId);
-        else
-            ior_stack_pop(prd->iorStack, si.dielectric_priority, (unsigned int)matId);
+        // A thin-walled surface has no interior either, so crossing it does not
+        // put the path inside anything. Pushing the stack anyway left a ray that
+        // had gone through the front of a bubble believing it was inside glass,
+        // so the far side read as an exit from a dense medium -- and every
+        // grazing angle there is past the critical angle.
+        if (!si.thin_walled)
+        {
+            if (entering)
+                ior_stack_push(prd->iorStack, si.dielectric_priority, si.ior, (unsigned int)matId);
+            else
+                ior_stack_pop(prd->iorStack, si.dielectric_priority, (unsigned int)matId);
+        }
         prd->origin = offset_ray(si.position, -faceNg);
     }
     else
     {
         prd->origin = offset_ray(si.position, faceNg);
     }
-    prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
     prd->dir = sample_data.wi;
+    if (isFibre)
+    {
+        // Both branches above assume a surface with an inside and an outside. A
+        // strand has neither: the bounce leaves from wherever the crossing the
+        // lobe has already accounted for comes out. Without this the ray hits the
+        // far wall and buys a second whole-fibre event -- and a third, which is
+        // what made an isolated strand's cross-section climb with depth instead
+        // of going flat.
+        prd->origin = fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius,
+                                      normalize(prd->dir));
+    }
+    prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
     prd->throughput *= sample_data.bsdf_over_pdf;
 }

@@ -57,13 +57,44 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_wavefront_stage_diagnostic.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_tonemappers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_scene_stream.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_fibre_chord.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_transform.cpp
 )
 strelka_apply_warnings(unit_tests)
+
+# GCC 15.2 miscompiles `float x = fabsf(<a glm::dot prvalue>)` to a literal 0.0f.
+#
+# It is the unqualified C spelling only -- `std::fabs` is right, and binding the
+# dot product to a named float before taking its magnitude is right, which is
+# exactly why nobody saw it: the wrong form appears inside one expression. Only
+# `fabsf` of the C math builtins misbehaves; fmaxf, sqrtf, powf and the rest all
+# return the correct value on the same argument. clang 12 is correct at every
+# optimisation level, and so is GCC with this flag, so it is the compiler and not
+# the model. scratch-free reproduction, no Strelka headers involved:
+#
+#     glm::vec3 a(0,-1,0), b(0.063,-0.995,0.082);
+#     float u = fabsf(glm::dot(a, b));   // GCC 15.2: 0.0   clang: 0.994658
+#
+# The BSDF headers spell it `fabsf(dot(...))` in dozens of places -- the rough
+# transmission pdf is built out of three of them -- so on this compiler the host
+# build of the material model was returning a zero pdf for directions its own
+# sampler had just produced, and `tests/material/test_dielectric_exit.cpp` and
+# `test_diffuse_transmission.cpp` were reporting that as a model defect.
+#
+# Scoped to this target because unit_tests is the only host consumer of the BSDF
+# headers; the device builds are unaffected, since neither the CUDA nor the Metal
+# branch of material_math.h uses GLM's vector types. Guarded on GNU so an
+# AppleClang build of the same tests is untouched.
+target_compile_options(unit_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-fno-builtin-fabsf>)
 
 target_include_directories(unit_tests
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src/render/metal
         ${CMAKE_SOURCE_DIR}/src/editor
+        # <shading/...> -- the two OptiX shading headers that carry no CUDA at
+        # all, so the closest-hit program and these tests compile the same code.
+        ${CMAKE_SOURCE_DIR}/src/shaders/optix
 )
 
 target_link_libraries(unit_tests
