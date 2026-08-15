@@ -1416,6 +1416,68 @@ extern "C" __global__ void __closesthit__radiance()
         si.exterior_ior = ior_stack_peek_after_pop(prd->iorStack, si.dielectric_priority);
     }
 
+    // --- Radiance cache ------------------------------------------------------
+    //
+    // Read only past the first few bounces and only off a rough surface: the
+    // camera ray and the first bounce carry the detail a voxel average would
+    // blur, and a mirror reflects a direction rather than a place.
+    //
+    // Placed here, after emission and the IOR stack and before the BSDF sample,
+    // for the same reason Metal places it here: the snapshot has to exclude this
+    // vertex's own emission (which the cache's readers add for themselves when
+    // they land on the same surface) and include this vertex's direct lighting
+    // (which is part of what leaves the point).
+    //
+    // A path that has already recorded a voxel is done with the cache -- it owes
+    // that voxel an honest estimate of the rest of itself, so it may not read,
+    // and it has nowhere left to record -- which is what `sharcIndex` being set
+    // means and why it is part of the guard rather than checked inside.
+    if (params.sharcCapacity != 0u && prd->sharcIndex == SHARC_NO_ENTRY &&
+        prd->depth >= params.sharcDepth && si.roughness > oka::sharc::kMinRoughness)
+    {
+        const float3 cameraPosition =
+            make_float3(params.viewToWorld[3], params.viewToWorld[7], params.viewToWorld[11]);
+        uint32_t voxelHash = 0u, voxelKey = 0u;
+        sharcVoxel(si.position, si.shading_normal, cameraPosition, params.sharcBaseSize, voxelHash, voxelKey);
+
+        // A fixed share of paths never read and always trace to the end, so the
+        // cache keeps converging instead of freezing at whatever the first few
+        // paths through a voxel happened to find. They are also the only paths
+        // whose deposits are unconditioned on the cache's own output, which is
+        // the loop that would amplify whatever error it starts with -- Metal saw
+        // it as a classroom 11% bright with no single step being wrong.
+        const bool updatePath = oka::sharc::isUpdatePath(prd->linearPixelIndex, prd->sampleIndex);
+        uint32_t slot = 0u;
+        // Inserting, because this path is here to fill the slot in; a read that
+        // misses simply carries on tracing.
+        if (sharcFind(params.sharcEntries, params.sharcCapacity, voxelHash, voxelKey, true, slot))
+        {
+            uint32_t cachedCount = 0u;
+            const float3 cached = sharcRead(params.sharcEntries, slot, cachedCount);
+            if (!updatePath && cachedCount >= params.sharcMinSamples)
+            {
+                // The rest of this path is what the cache already knows.
+                prd->radiance += prd->throughput * cached;
+                prd->throughput = make_float3(0.0f);
+                prd->depth = params.max_depth; // the raygen loop stops here
+                return;
+            }
+            // Recorded only while the throughput is worth dividing by. The
+            // deposit is what the path gathers from here on divided by its
+            // throughput here, and at a throughput of a thousandth that
+            // estimator has a variance to match.
+            if (luminance(prd->throughput) > oka::sharc::kMinRecordThroughput)
+            {
+                const float floorT = oka::sharc::kThroughputFloor;
+                prd->sharcIndex = slot;
+                prd->sharcRadianceAtVisit = prd->radiance;
+                prd->sharcInvThroughput = make_float3(1.0f / fmaxf(prd->throughput.x, floorT),
+                                                      1.0f / fmaxf(prd->throughput.y, floorT),
+                                                      1.0f / fmaxf(prd->throughput.z, floorT));
+            }
+        }
+    }
+
     const float z1 = random<SampleDimension::eBSDF0>(prd->sampler);
     const float z2 = random<SampleDimension::eBSDF1>(prd->sampler);
     const float z3 = random<SampleDimension::eBSDF2>(prd->sampler);

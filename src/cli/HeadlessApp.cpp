@@ -215,6 +215,8 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.sharcMinSamples = (uint32_t)*v;
     if (auto v = tbl["render"]["sharc_base_size"].value<double>())
         cfg.sharcBaseSize = (float)*v;
+    if (auto v = tbl["render"]["opacity_micromaps"].value<bool>())
+        cfg.opacityMicromaps = *v;
     if (auto v = tbl["render"]["sampler"].value<std::string>())
     {
         cfg.samplerType = parseEnumOrDefault(*v, parseSamplerName, 0, "sampler");
@@ -414,6 +416,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/sharcMinSamples", m_config.sharcMinSamples);
     m_settings->setAs<uint32_t>("render/pt/sharcDepth", m_config.sharcDepth);
     m_settings->setAs<float>("render/pt/sharcVoxelPixels", m_config.sharcBaseSize);
+    m_settings->setAs<bool>("render/pt/opacityMicromaps", m_config.opacityMicromaps);
     // Block compression and a disk cache for the finished textures.
     // The cache holds them downscaled, mipped and compressed, so a second
     // launch skips the decode, the resample, the mip chain and the encode.
