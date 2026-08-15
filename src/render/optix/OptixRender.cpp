@@ -1393,8 +1393,22 @@ void OptiXRender::createSbt()
             const uint32_t material_idx = (instance.mMaterialId == (uint32_t)-1) ? 0u : instance.mMaterialId;
             // A linear curve set needs the linear intersector; everything else,
             // triangles included, keeps the cubic one it has always had.
-            const bool linearCurve = instance.type == oka::Instance::Type::eCurve &&
-                                     mOptixCurves[instance.mCurveId]->isLinear;
+            //
+            // The scene is built in slices, and the environment stage runs before
+            // the structures stage so a sky is on screen while the acceleration
+            // structures build. That means this can run with the instance list
+            // already populated and mOptixCurves still empty -- reading it then is
+            // a segfault, which is what 28_hair did. Fall back to the cubic group
+            // and mark the table dirty; render() rebuilds it once the curves exist,
+            // and no ray is traced against a curve before they do.
+            const bool curveReady = instance.type == oka::Instance::Type::eCurve &&
+                                    instance.mCurveId < mOptixCurves.size() &&
+                                    mOptixCurves[instance.mCurveId] != nullptr;
+            if (instance.type == oka::Instance::Type::eCurve && !curveReady)
+            {
+                mSbtDirty = true;
+            }
+            const bool linearCurve = curveReady && mOptixCurves[instance.mCurveId]->isLinear;
 
             // Radiance hit group
             HitGroupSbtRecord& radiance_hit = hit_groups[i * RAY_TYPE_COUNT + RAY_TYPE_RADIANCE];
@@ -1425,7 +1439,10 @@ void OptiXRender::createSbt()
             }
             else if (instance.type == oka::Instance::Type::eCurve)
             {
-                radiance_hit.data.curveSegmentsPerStrand = mOptixCurves[instance.mCurveId]->segmentsPerStrand;
+                // Same staging caveat as the intersector choice above: zero until
+                // the curve set exists, and the table is rebuilt when it does.
+                radiance_hit.data.curveSegmentsPerStrand =
+                    curveReady ? mOptixCurves[instance.mCurveId]->segmentsPerStrand : 0u;
             }
 
             // Occlusion hit group. It carries the same payload as the radiance
