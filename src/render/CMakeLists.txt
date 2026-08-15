@@ -25,6 +25,9 @@ if(WIN32 OR LINUX)
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/OptixRender.h
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/OptixRender.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/OptixRenderParams.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/optix/OptixDenoiser.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/optix/OptixDenoiser.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/optix/optix_denoise_plan.h
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/cuda_checks.h
     )
 

@@ -38,6 +38,66 @@ struct SceneData
     uint32_t numLights;
 };
 
+/// How `AovSample::depth` is encoded. Mirrors kDenoiseDepth* in the Metal
+/// ShaderTypes.h, value for value, so a guide dumped from either backend means
+/// the same thing.
+#define STRELKA_DENOISE_DEPTH_DEVICE 0u ///< clip z / w, the value a depth buffer holds
+#define STRELKA_DENOISE_DEPTH_VIEWZ 1u ///< distance along the camera's forward axis
+#define STRELKA_DENOISE_DEPTH_RADIAL 2u ///< distance to the eye
+
+/// Debug visualisations, in the order the editor's combo box lists them.
+///
+/// This is Metal's DebugMode from ShaderTypes.h, unchanged. It was already the
+/// numbering the editor sent -- `RenderSettingsPanel` builds its list from that
+/// enum for both backends -- while OptiX read 2 and 3 as "diffuse split" and
+/// "specular split", so every AOV entry in that menu selected something else on
+/// this backend.
+enum class DebugMode : uint32_t
+{
+    eNone = 0,
+    eNormal,
+    eMotionBlur,
+    // Denoiser guides. Selecting one of these turns guide production on for the
+    // frame, so they cost nothing when nobody is looking at them.
+    eAovDiffuseAlbedo,
+    eAovSpecularAlbedo,
+    eAovNormal,
+    eAovRoughness,
+    eAovDepth,
+    eAovMotion,
+    eAovReactive,
+    eAovSpecularHitDistance,
+};
+
+#define DEBUG_MODE_FIRST_AOV 3u
+
+/// What a denoiser needs to know about the primary hit, written once per pixel
+/// by the program that shades it (or by the miss program, for background).
+///
+/// Field for field the Metal backend's AovSample, including the padding, so the
+/// two backends' guides are the same 64 bytes and can be compared directly. The
+/// packing differs only in spelling: Metal needs `packed_float3` because its
+/// float3 is 16 bytes, CUDA's is already 12.
+struct AovSample
+{
+    float3 diffuseAlbedo;
+    float depth; ///< encoding selected by Params::denoiseDepthMode
+    float3 specularAlbedo;
+    float roughness;
+    float3 normal; ///< world space
+    float motionX; ///< previous-frame screen position minus current, in pixels
+    float motionY;
+    /// Distance from the primary hit to what its specular lobe sees, so a
+    /// reflection reprojects at the depth of the thing being reflected rather
+    /// than at the mirror's own. Zero when the surface is not specular.
+    float specularHitDistance;
+    /// 0 = trust the history here, 1 = ignore it. Raised where the motion vector
+    /// is known to be a lie: mirrors, glass, and anything whose previous position
+    /// could not be established.
+    float reactive;
+    float pad2;
+};
+
 struct Params
 {
     uint32_t subframe_index;
@@ -59,6 +119,12 @@ struct Params
     float3 exposure;
     float clipToView[16];
     float viewToWorld[16];
+    /// Projection of a world point onto this frame's and the previous frame's
+    /// screen. The second is what a motion vector is measured against; without it
+    /// a temporal denoiser has to assume the camera did not move, which is the
+    /// one thing that is never true while anybody is looking at the image.
+    float worldToClip[16];
+    float prevWorldToClip[16];
 
     OptixTraversableHandle handle;
     SceneData scene;
@@ -99,6 +165,22 @@ struct Params
     // Lens shift
     float shiftX;
     float shiftY;
+
+    // --- Denoiser guides -------------------------------------------------
+    /// One record per pixel; null when guides are not being produced.
+    AovSample* aov;
+    /// Whether this launch writes guides at all. Raised by the denoiser, by the
+    /// upscaler, and by any of the AOV debug views.
+    bool writeAov;
+    /// Take the material guides at the camera-visible surface instead of walking
+    /// on to the first rough one. A switch rather than a default because the two
+    /// answers differ by more than noise on a mirror; see
+    /// tools/feature_tests/README.md, 20_mirror_and_floor.
+    bool guidePrimaryHit;
+    /// True when the previous frame's camera is meaningful, i.e. not the first
+    /// frame and not just after a history reset.
+    bool hasPrevFramePose;
+    uint32_t denoiseDepthMode;
 };
 
 enum class EventType: uint8_t
@@ -124,6 +206,17 @@ struct PerRayData
     bool specularBounce;
     float lastBsdfPdf;
     EventType firstEventType;
+    /// Where in the image this path's camera ray actually went, y down and in
+    /// pixels, jitter included. A motion vector is the difference between this
+    /// and where the same surface point sat last frame; differencing against the
+    /// pixel centre instead leaves the jitter inside every vector, which is a
+    /// subpixel wobble on every pixel of a perfectly still image.
+    float2 pixelSample;
+    /// Whether this path is the one that writes the pixel's guide record.
+    bool writeAov;
+    /// Set once the guide record for this pixel has been written, so the bounce
+    /// after the first describable surface cannot overwrite it.
+    bool aovDone;
 };
 
 enum RayType

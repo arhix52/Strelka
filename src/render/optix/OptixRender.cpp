@@ -39,6 +39,7 @@
 #include <paths.h>
 
 #include <postprocessing/Tonemappers.h>
+#include <postprocessing/DenoiseGuides.h>
 #include <skinning/skinning.h>
 #include <env_cdf.h>
 
@@ -1097,6 +1098,163 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
     }
 }
 
+// The production sizes the plan is told about have to be the sizes the device
+// actually uses, or the buffers are allocated for a struct that is not the one
+// being written. Same discipline as src/render/metal/integrator_buffer_sizes.h.
+static_assert(sizeof(AovSample) == 64, "AovSample is written once per pixel per frame; keep an eye on the size");
+static_assert(sizeof(AovSample) == sizeof(float) * 16, "AovSample must stay a whole number of floats to read back");
+
+void OptiXRender::updateGuideBuffers(const DenoisePlan& plan)
+{
+    const bool wantGuides = plan.writeAov;
+    if (!wantGuides)
+    {
+        // Held rather than freed only while they are in use: a scene that is not
+        // denoising should not pay for a per-pixel record it never reads.
+        mAovBuffer.reset();
+        mDenoiseColorBuffer.reset();
+        mDenoiseAlbedoBuffer.reset();
+        mDenoiseNormalBuffer.reset();
+        mDenoiseFlowBuffer.reset();
+        mRenderImageBuffer.reset();
+        return;
+    }
+
+    const DenoiseBufferLayout layout = denoiseBufferLayout(plan, sizeof(AovSample));
+
+    auto ensure = [](std::unique_ptr<OptixBuffer>& buffer, size_t bytes) {
+        if (!buffer || buffer->size() != bytes)
+        {
+            buffer = std::make_unique<OptixBuffer>(bytes);
+        }
+    };
+
+    ensure(mAovBuffer, layout.aovBytes);
+    ensure(mDenoiseColorBuffer, layout.colorBytes);
+    ensure(mDenoiseAlbedoBuffer, layout.albedoBytes);
+    ensure(mDenoiseNormalBuffer, layout.normalBytes);
+    ensure(mDenoiseFlowBuffer, layout.flowBytes);
+    if (plan.upscale)
+    {
+        ensure(mRenderImageBuffer, layout.colorBytes);
+    }
+    else
+    {
+        mRenderImageBuffer.reset();
+    }
+}
+
+bool OptiXRender::readDisplayTexture(std::vector<float>& out, uint32_t& width, uint32_t& height)
+{
+    if (mDisplayImage == nullptr || mDisplayWidth == 0 || mDisplayHeight == 0)
+    {
+        return false;
+    }
+    width = mDisplayWidth;
+    height = mDisplayHeight;
+    out.resize(static_cast<size_t>(width) * height * 4);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(out.data(), mDisplayImage, out.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    return true;
+}
+
+bool OptiXRender::readGuideTexture(Guide guide, std::vector<float>& out, uint32_t& width, uint32_t& height)
+{
+    // Unpacked on the host rather than by a kernel per guide. This is an
+    // inspection path -- a few frames, by hand or by a test -- and a kernel per
+    // channel would be nine more places for the packing to be got wrong.
+    const uint32_t w = mDenoisePlan.renderWidth;
+    const uint32_t h = mDenoisePlan.renderHeight;
+
+    if (guide == Guide::Denoised)
+    {
+        if (!mDenoiser.hasOutput())
+        {
+            return false;
+        }
+        width = mDenoiser.outputWidth();
+        height = mDenoiser.outputHeight();
+        out.resize(static_cast<size_t>(width) * height * 4);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(out.data(), reinterpret_cast<const void*>(mDenoiser.output()),
+                              out.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        return true;
+    }
+
+    if (guide == Guide::Color)
+    {
+        if (!mDenoiseColorBuffer || w == 0 || h == 0)
+        {
+            return false;
+        }
+        width = w;
+        height = h;
+        out.resize(static_cast<size_t>(w) * h * 4);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(out.data(), mDenoiseColorBuffer->getNativePtr(), out.size() * sizeof(float),
+                              cudaMemcpyDeviceToHost));
+        return true;
+    }
+
+    if (!mAovBuffer || w == 0 || h == 0)
+    {
+        return false;
+    }
+
+    std::vector<AovSample> records(static_cast<size_t>(w) * h);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(records.data(), mAovBuffer->getNativePtr(), records.size() * sizeof(AovSample),
+                          cudaMemcpyDeviceToHost));
+
+    width = w;
+    height = h;
+    out.assign(static_cast<size_t>(w) * h * 4, 0.0f);
+    for (size_t i = 0; i < records.size(); ++i)
+    {
+        const AovSample& a = records[i];
+        float* px = out.data() + i * 4;
+        switch (guide)
+        {
+        case Guide::Depth:
+            px[0] = a.depth;
+            break;
+        case Guide::Motion:
+            px[0] = a.motionX;
+            px[1] = a.motionY;
+            break;
+        case Guide::DiffuseAlbedo:
+            px[0] = a.diffuseAlbedo.x;
+            px[1] = a.diffuseAlbedo.y;
+            px[2] = a.diffuseAlbedo.z;
+            px[3] = 1.0f;
+            break;
+        case Guide::SpecularAlbedo:
+            px[0] = a.specularAlbedo.x;
+            px[1] = a.specularAlbedo.y;
+            px[2] = a.specularAlbedo.z;
+            px[3] = 1.0f;
+            break;
+        case Guide::Normal:
+            px[0] = a.normal.x;
+            px[1] = a.normal.y;
+            px[2] = a.normal.z;
+            break;
+        case Guide::Roughness:
+            px[0] = a.roughness;
+            break;
+        case Guide::SpecularHitDistance:
+            px[0] = a.specularHitDistance;
+            break;
+        case Guide::Reactive:
+            px[0] = a.reactive;
+            break;
+        default:
+            return false;
+        }
+    }
+    return true;
+}
+
 void OptiXRender::applySkinning()
 {
     // joint matrices
@@ -1292,14 +1450,32 @@ void OptiXRender::render(Buffer* output)
         }
     }
 
-    const uint32_t width = output->width();
-    const uint32_t height = output->height();
+    const uint32_t outputWidth = output->width();
+    const uint32_t outputHeight = output->height();
+
+    // What the frame is asked to produce, resolved before anything is sized:
+    // upscaling renders at half the caller's resolution and lets the 2x model
+    // put the missing pixels back, so the launch dimensions, the accumulation
+    // buffers and the guides all follow from this rather than from the output.
+    const uint32_t debugMode = settings.getAs<uint32_t>("render/pt/debug");
+    const DenoisePlan plan = denoisePlan(settings.getAs<bool>("render/pt/denoise"),
+                                         settings.getAs<bool>("render/pt/enableUpscale"),
+                                         settings.getAs<uint32_t>("render/pt/upscaleMode"), debugMode, outputWidth,
+                                         outputHeight);
+    const bool planChanged = plan.kind != mDenoisePlan.kind || plan.renderWidth != mDenoisePlan.renderWidth ||
+                             plan.renderHeight != mDenoisePlan.renderHeight || plan.writeAov != mDenoisePlan.writeAov;
+    settingsChanged |= planChanged;
+    mDenoisePlan = plan;
+
+    const uint32_t width = plan.renderWidth;
+    const uint32_t height = plan.renderHeight;
 
     updatePathtracerParams(width, height);
+    updateGuideBuffers(plan);
 
     const uint32_t selectedCameraIdx = settings.getAs<uint32_t>("render/selectedCamera");
     oka::Camera& camera = mScene->getCamera(selectedCameraIdx < mScene->getCameraCount() ? selectedCameraIdx : 0);
-    camera.updateAspectRatio(width / (float)height);
+    camera.updateAspectRatio(outputWidth / (float)outputHeight);
     camera.updateViewMatrix();
 
     View currView = {};
@@ -1346,7 +1522,11 @@ void OptiXRender::render(Buffer* output)
     params.scene.lights = (UniformLight*)mLightBuffer->getPtr();
     params.scene.numLights = mScene->getLights().size();
 
-    params.image = (float4*)((OptixBuffer*)output)->getNativePtr();
+    // When the 2x model is upscaling, the caller's buffer is twice the size the
+    // path tracer runs at, so the tracer writes into its own buffer and the
+    // denoiser is what fills the caller's.
+    params.image = plan.upscale ? (float4*)mRenderImageBuffer->getNativePtr() :
+                                  (float4*)((OptixBuffer*)output)->getNativePtr();
     params.samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
     params.handle = mState.ias_handle;
     params.max_depth = settings.getAs<uint32_t>("render/pt/depth");
@@ -1361,6 +1541,32 @@ void OptiXRender::render(Buffer* output)
     memcpy(params.viewToWorld, glm::value_ptr(glm::transpose(glm::inverse(camera.matrices.view))),
            sizeof(params.viewToWorld));
     memcpy(params.clipToView, glm::value_ptr(glm::transpose(camera.matrices.invPerspective)), sizeof(params.clipToView));
+
+    // World to clip, this frame's and the previous frame's. sutil::Matrix4x4 is
+    // row major and glm is column major, hence the transpose -- the same one the
+    // two matrices above take.
+    const glm::mat4 worldToClip = camera.matrices.perspective * camera.matrices.view;
+    const glm::mat4 prevWorldToClip = mPrevView.mCamMatrices.perspective * mPrevView.mCamMatrices.view;
+    memcpy(params.worldToClip, glm::value_ptr(glm::transpose(worldToClip)), sizeof(params.worldToClip));
+    memcpy(params.prevWorldToClip, glm::value_ptr(glm::transpose(prevWorldToClip)), sizeof(params.prevWorldToClip));
+
+    // --- Guides ----------------------------------------------------------
+    params.aov = mAovBuffer ? (AovSample*)mAovBuffer->getNativePtr() : nullptr;
+    params.writeAov = plan.writeAov && params.aov != nullptr;
+    const bool guidePrimaryHit = settings.getAs<uint32_t>("render/pt/guidePrimaryHit") != 0;
+    if (mPrevGuidePrimaryHit != guidePrimaryHit)
+    {
+        // The reset check upstream has already run for this frame, so this one
+        // resets directly rather than feeding a flag that nothing will read.
+        getSharedContext().mSubframeIndex = 0;
+        mPrevGuidePrimaryHit = guidePrimaryHit;
+    }
+    params.guidePrimaryHit = guidePrimaryHit;
+    params.denoiseDepthMode = settings.getAs<uint32_t>("render/pt/denoiseDepthMode");
+    // The first frame has no predecessor, and neither does the frame after a cut.
+    // Telling the denoiser otherwise makes it reproject from an image that has
+    // nothing to do with this one.
+    params.hasPrevFramePose = !mResetTemporalHistory && getSharedContext().mFrameNumber > 0;
 
     // Depth of field params
     params.useDof = camera.useDof ? 1 : 0;
@@ -1417,10 +1623,20 @@ void OptiXRender::render(Buffer* output)
         samplesThisLaunch = 0;
     }
 
-    if (params.debug == 1)
+    // The two single-hit debug views describe one surface, so one sample of it
+    // is the whole answer and accumulating it says nothing new.
+    if (params.debug == (uint32_t)DebugMode::eNormal || params.debug == (uint32_t)DebugMode::eMotionBlur)
     {
         samplesThisLaunch = 1;
         enableAccumulation = false;
+    }
+    // A guide view needs the guides written this frame, and they are only
+    // written by a launch. Without this the view freezes at whatever the last
+    // launch before convergence produced -- which looks exactly like a correct
+    // static guide, and is how a stale record goes unnoticed.
+    if (params.debug >= DEBUG_MODE_FIRST_AOV && samplesThisLaunch == 0 && !mScene->getIndices().empty())
+    {
+        samplesThisLaunch = 1;
     }
 
     params.samples_per_launch = samplesThisLaunch;
@@ -1443,37 +1659,82 @@ void OptiXRender::render(Buffer* output)
     }
     else
     {
-        // Copy accumulated buffer to output image
-        const size_t imageSize = mState.params.image_width * mState.params.image_height * sizeof(float4);
-        const void* srcBuffer = nullptr;
-
-        // Select source buffer based on debug mode
-        switch (params.debug)
+        // Nothing was traced this frame -- the render has converged, or the scene
+        // is empty. Re-present the accumulated image so the caller still gets a
+        // picture rather than whatever was in its buffer.
+        if (params.debug == 0)
         {
-        case 0:
-            srcBuffer = params.accum;
-            break;
-        case 2:
-            srcBuffer = params.diffuse;
-            break;
-        case 3:
-            srcBuffer = params.specular;
-            break;
-        }
-
-        if (srcBuffer)
-        {
-            CUDA_CHECK(cudaMemcpy(params.image, srcBuffer, imageSize, cudaMemcpyDeviceToDevice));
+            const size_t imageSize = mState.params.image_width * mState.params.image_height * sizeof(float4);
+            CUDA_CHECK(cudaMemcpy(params.image, params.accum, imageSize, cudaMemcpyDeviceToDevice));
         }
     }
 
-    // Apply tonemapping except for debug mode 1
-    if (params.debug != 1)
+    // --- Denoise ---------------------------------------------------------
+    //
+    // Before tonemapping, on linear radiance: the network was trained on light
+    // rather than on a display curve, and exposure is a viewing decision that
+    // comes after it. The result goes back into the image the display and the
+    // EXR writer read, which is what makes `render.denoise = true` mean
+    // something in a headless run.
+    float4* displayImage = (float4*)((OptixBuffer*)output)->getNativePtr();
+    mDenoiserFallback = false;
+    // A guide view is looked at instead of the denoised image, not through it,
+    // so the network is not run -- and the plan handed over is the empty one, so
+    // its state and scratch memory go back to the device while it is not needed.
+    const bool runDenoiser = plan.enabled() && params.debug < DEBUG_MODE_FIRST_AOV;
+    {
+        const bool ready = mDenoiser.configure(mState.context, mState.stream, runDenoiser ? plan : DenoisePlan{});
+        if (runDenoiser && ready)
+        {
+            if (mResetTemporalHistory)
+            {
+                mDenoiser.resetHistory();
+            }
+            resolveDenoiseGuides((const AovSample*)mAovBuffer->getNativePtr(), params.image, width, height,
+                                 params.exposure, settings.getAs<float>("render/pt/denoiseFireflyClamp"),
+                                 (float4*)mDenoiseColorBuffer->getNativePtr(),
+                                 (float4*)mDenoiseAlbedoBuffer->getNativePtr(),
+                                 (float4*)mDenoiseNormalBuffer->getNativePtr(),
+                                 (float2*)mDenoiseFlowBuffer->getNativePtr());
+            const bool denoised =
+                mDenoiser.denoise(mState.stream, mDenoiseColorBuffer->getPtr(), mDenoiseAlbedoBuffer->getPtr(),
+                                  mDenoiseNormalBuffer->getPtr(), mDenoiseFlowBuffer->getPtr());
+            if (denoised)
+            {
+                copyDenoisedToImage((const float4*)mDenoiser.output(), displayImage, outputWidth, outputHeight);
+            }
+            else
+            {
+                mDenoiserFallback = true;
+            }
+        }
+        else if (runDenoiser)
+        {
+            mDenoiserFallback = true;
+        }
+    }
+    // An upscaling plan that could not run leaves the caller's buffer holding
+    // nothing at all, since the tracer wrote a half-size image somewhere else.
+    // A nearest-neighbour blow-up is not a good picture, but it is a picture of
+    // the right scene at the right size, which a black frame is not.
+    if (plan.upscale && (mDenoiserFallback || params.debug >= DEBUG_MODE_FIRST_AOV))
+    {
+        upscalePointSample(params.image, width, height, displayImage, outputWidth, outputHeight);
+    }
+    mResetTemporalHistory = false;
+
+    // Apply tonemapping except for the single-hit debug views, which are already
+    // in display units and would only be crushed by a curve.
+    if (params.debug != (uint32_t)DebugMode::eNormal && params.debug != (uint32_t)DebugMode::eMotionBlur)
     {
         float maxEDR = settings.getAs<float>("render/post/tonemapper/maxEDR");
         exposureValue *= maxEDR;
-        tonemap(tonemapperType, exposureValue, gamma, params.image, width, height);
+        tonemap(tonemapperType, exposureValue, gamma, displayImage, outputWidth, outputHeight);
     }
+
+    mDisplayImage = displayImage;
+    mDisplayWidth = outputWidth;
+    mDisplayHeight = outputHeight;
 
     getSharedContext().mFrameNumber++;
 

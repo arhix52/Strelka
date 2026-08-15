@@ -7,7 +7,7 @@
 #include <sutil/vec_math.h>
 #include <sutil/Matrix.h>
 
-#include <postprocessing/Utils.h>
+#include <postprocessing/Guides.h>
 #include <env_light.h>
 
 #include "optix_device_utils.h"
@@ -92,12 +92,18 @@ __device__ float2 sampleAperture(SamplerState& sampler)
 }
 
 __device__ void generateCameraRay(
-    const uint2 pixelIndex, SamplerState& sampler, float3& origin, float3& direction)
+    const uint2 pixelIndex, SamplerState& sampler, float3& origin, float3& direction, float2& screenSample)
 {
     float2 subpixel_jitter =
         make_float2(random<SampleDimension::ePixelX>(sampler), random<SampleDimension::ePixelY>(sampler));
 
     float2 pixelPos = make_float2(pixelIndex.x + subpixel_jitter.x, pixelIndex.y + subpixel_jitter.y);
+
+    // The same position expressed the way a screen-space motion vector needs it:
+    // y down, origin at the top-left of the image. `pixelIndex.y` arrives already
+    // flipped (the caller passes height - y), so the flip has to be undone here
+    // rather than guessed at by whoever consumes it.
+    screenSample = make_float2(pixelPos.x, (float)params.image_height - pixelPos.y);
 
     float2 dimension = make_float2(params.image_width, params.image_height);
     float2 pixelNDC = (pixelPos / dimension) * 2.0f - 1.0f;
@@ -135,24 +141,72 @@ __device__ void generateCameraRay(
     }
 }
 
+/// Fold `value` -- the mean of `newSampleCount` fresh samples -- into a running
+/// mean that already holds `prevSampleCount` of them.
+///
+/// Linearly, in radiance. This used to lerp in tone-mapped space and invert the
+/// curve afterwards, which is not an average of the samples but an average of
+/// `c/(c+1)` mapped back, and the two differ by Jensen's inequality: the
+/// tone-mapped mean is always the darker one, by an amount that grows with the
+/// variance among the samples. The whole ladder was low because of it --
+/// 00_calibration at ratio 0.973 where Metal reads 1.010 -- and the mirror scene,
+/// which has the most per-sample variance of any row, was 0.779. The inverse
+/// also diverges: `c / (exposure - c*exposure)` goes to infinity as the
+/// tone-mapped value approaches 1, so a bright pixel's history was one rounding
+/// error away from an infinity.
+///
+/// The weight is the new samples' share of the total, not `1/(n+1)`: with more
+/// than one sample per launch the old form counted a whole launch as a single
+/// sample and left the first launch permanently over-weighted. Byte for byte
+/// what wavefrontResolve does on Metal.
 __device__ float4 accumulate(float4* history,
                              const float3 value,
                              const uint32_t linearPixelIndex,
-                             const float3 exposure,
-                             const uint32_t subFrameIndex)
+                             const uint32_t prevSampleCount,
+                             const uint32_t newSampleCount)
 {
-    // Accumulation
     float3 accumColor = value;
-    if (subFrameIndex > 0)
+    if (prevSampleCount > 0 && newSampleCount > 0)
     {
-        const float a = 1.0f / static_cast<float>(subFrameIndex + 1);
-        const float3 accumColorPrev = make_float3(history[linearPixelIndex]);
-        const float3 exposure = params.exposure;
-        // perform lerp in ldr and back to hdr back
-        accumColor = inverseTonemap(lerp(tonemap(accumColorPrev, exposure), tonemap(accumColor, exposure), a), exposure);
+        const float a = static_cast<float>(newSampleCount) / static_cast<float>(prevSampleCount + newSampleCount);
+        accumColor = lerp(make_float3(history[linearPixelIndex]), value, a);
     }
     history[linearPixelIndex] = make_float4(accumColor, 1.0f);
     return make_float4(accumColor, 1.0f);
+}
+
+/// The guide views, drawn from the record the shading programs wrote.
+///
+/// A denoiser fed a broken guide degrades quietly, so every guide has to be
+/// something you can look at. Same encodings as the Metal resolve pass.
+__device__ float3 visualiseGuide(const AovSample& a, const uint32_t debugMode)
+{
+    switch ((DebugMode)debugMode)
+    {
+    case DebugMode::eAovDiffuseAlbedo:
+        return a.diffuseAlbedo;
+    case DebugMode::eAovSpecularAlbedo:
+        return a.specularAlbedo;
+    case DebugMode::eAovNormal:
+        return a.normal * 0.5f + make_float3(0.5f);
+    case DebugMode::eAovRoughness:
+        return make_float3(a.roughness);
+    // d/(1+d): monotonic and scale-free, so a scene of any size is readable and
+    // nothing crosses zero the way a logarithm does at d == 1.
+    case DebugMode::eAovDepth:
+        return make_float3(a.depth / (1.0f + a.depth));
+    // Red/green for the two axes, scaled so a few pixels of motion is visible.
+    case DebugMode::eAovMotion:
+        return make_float3(a.motionX, a.motionY, 0.0f) * 0.05f + make_float3(0.5f);
+    // Red where the denoiser is being told to distrust its history, so the extent
+    // of the mask is a thing you can look at rather than infer.
+    case DebugMode::eAovReactive:
+        return make_float3(a.reactive, 0.0f, 0.0f);
+    case DebugMode::eAovSpecularHitDistance:
+        return make_float3(a.specularHitDistance / (1.0f + a.specularHitDistance));
+    default:
+        return make_float3(0.0f);
+    }
 }
 
 extern "C" __global__ void __raygen__rg()
@@ -184,11 +238,36 @@ extern "C" __global__ void __raygen__rg()
         prd.depth = 0;
         prd.specularBounce = false;
         prd.lastBsdfPdf = 0.0f;
+        // Guides describe a pixel, not a sample, so only the first sample of a
+        // launch writes them; the rest would rewrite the same record through a
+        // different jitter and pay the memory traffic for nothing.
+        prd.writeAov = params.writeAov && sampleIdx == 0;
+        prd.aovDone = false;
 
         float3 ray_origin, ray_direction;
 
         const uint2 pixelCoord = make_uint2(launch_index.x, params.image_height - launch_index.y);
-        generateCameraRay(pixelCoord, prd.sampler, ray_origin, ray_direction);
+        generateCameraRay(pixelCoord, prd.sampler, ray_origin, ray_direction, prd.pixelSample);
+
+        if (prd.writeAov && params.aov != nullptr)
+        {
+            // Start from a complete record, so that a path which never reaches a
+            // surface it can describe leaves defined values in every field
+            // rather than last frame's. The shading and miss programs overwrite
+            // whichever parts they can speak for.
+            AovSample a;
+            a.diffuseAlbedo = make_float3(0.0f);
+            a.specularAlbedo = make_float3(0.0f);
+            a.normal = -ray_direction;
+            a.roughness = 1.0f;
+            a.depth = oka::guides::backgroundDepth(params.denoiseDepthMode);
+            a.motionX = 0.0f;
+            a.motionY = 0.0f;
+            a.specularHitDistance = 0.0f;
+            a.reactive = 1.0f;
+            a.pad2 = 0.0f;
+            params.aov[linearPixelIndex] = a;
+        }
 
         unsigned int payload0, payload1;
         packPointer(&prd, payload0, payload1);
@@ -230,7 +309,9 @@ extern "C" __global__ void __raygen__rg()
 
             ++prd.depth;
 
-            if (params.debug == 1)
+            // The two single-hit views describe the first surface and nothing
+            // past it, so there is no reason to keep tracing.
+            if (params.debug == (uint32_t)DebugMode::eNormal || params.debug == (uint32_t)DebugMode::eMotionBlur)
                 break;
             prd.sampler.depth++;
         }
@@ -253,7 +334,7 @@ extern "C" __global__ void __raygen__rg()
     {
         diffuse /= static_cast<float>(diffuseSamples);
         uint32_t prevSamplesCount = params.subframe_index > 0 ? params.diffuseCounter[linearPixelIndex] : 0;
-        diffuseOut = accumulate(params.diffuse, diffuse, linearPixelIndex, params.exposure, prevSamplesCount);
+        diffuseOut = accumulate(params.diffuse, diffuse, linearPixelIndex, prevSamplesCount, diffuseSamples);
         params.diffuseCounter[linearPixelIndex] = uint16_t(prevSamplesCount + diffuseSamples);
     }
     else
@@ -270,7 +351,7 @@ extern "C" __global__ void __raygen__rg()
     {
         specular /= static_cast<float>(specularSamples);
         uint32_t prevSamplesCount = params.subframe_index > 0 ? params.specularCounter[linearPixelIndex] : 0;
-        specularOut = accumulate(params.specular, specular, linearPixelIndex, params.exposure, prevSamplesCount);
+        specularOut = accumulate(params.specular, specular, linearPixelIndex, prevSamplesCount, specularSamples);
         params.specularCounter[linearPixelIndex] = uint16_t(prevSamplesCount + specularSamples);
     }
     else
@@ -291,21 +372,25 @@ extern "C" __global__ void __raygen__rg()
         }
     }
 
-    if (params.debug == 2)
+    // The diffuse/specular split is still accumulated -- it is what a caller
+    // asking for those two images reads -- but it no longer owns debug slots 2
+    // and 3. Those are DebugMode::eMotionBlur and the first guide view, which is
+    // what the editor's menu and the headless `render.debug` key have always
+    // meant by them.
+    (void)diffuseOut;
+    (void)specularOut;
+
+    if (params.debug >= DEBUG_MODE_FIRST_AOV && params.aov != nullptr)
     {
-        params.image[linearPixelIndex] = diffuseOut;
-        return;
-    }
-    if (params.debug == 3)
-    {
-        params.image[linearPixelIndex] = specularOut;
+        params.image[linearPixelIndex] = make_float4(visualiseGuide(params.aov[linearPixelIndex], params.debug), 1.0f);
         return;
     }
 
     if (params.enableAccumulation && params.debug == 0)
     {
         // Accumulation
-        params.image[linearPixelIndex] = accumulate(params.accum, result, linearPixelIndex, params.exposure, params.subframe_index);
+        params.image[linearPixelIndex] =
+            accumulate(params.accum, result, linearPixelIndex, params.subframe_index, params.samples_per_launch);
     }
     else
     {
@@ -316,6 +401,14 @@ extern "C" __global__ void __raygen__rg()
 extern "C" __global__ void __miss__ms()
 {
     PerRayData* prd = getPRD();
+
+    // Background still needs a guide record, or the denoiser reads whatever the
+    // previous frame left there and smears the silhouette across the sky.
+    if (prd->writeAov && !prd->aovDone && params.aov != nullptr)
+    {
+        writeBackgroundGuide(params, prd->linearPixelIndex, optixGetWorldRayDirection(), prd->depth, prd->pixelSample);
+        prd->aovDone = true;
+    }
 
     if (params.hasEnvMap)
     {
@@ -376,6 +469,42 @@ extern "C" __global__ void __closesthit__light()
     const float3 rayDir = optixGetWorldRayDirection();
     const float3 hitPoint = optixGetWorldRayOrigin() + optixGetRayTmax() * rayDir;
     const float3 lightNormal = calcLightNormal(currLight, hitPoint);
+
+    // An emitter the camera can see is a surface like any other as far as the
+    // guides are concerned; leaving it out puts a hole in the albedo and normal
+    // buffers exactly where the brightest thing in the frame is.
+    if (prd->writeAov && !prd->aovDone && params.aov != nullptr)
+    {
+        AovSample a;
+        // An albedo guide is a reflectance, so an emitter's radiance cannot go
+        // in it directly -- a 20 W/sr light would hand the network an albedo of
+        // 20. Normalised by its own largest channel, which keeps the light's
+        // hue and lands in the [0, 1] an albedo lives in.
+        const float3 lightColor = make_float3(currLight.color);
+        const float peak = fmaxf(fmaxf(lightColor.x, lightColor.y), fmaxf(lightColor.z, 1e-6f));
+        a.diffuseAlbedo = lightColor / peak;
+        a.specularAlbedo = make_float3(0.0f);
+        a.normal = lightNormal;
+        a.roughness = 1.0f;
+        a.depth = prd->depth == 0 ? guideViewDepth(params, hitPoint) : params.aov[prd->linearPixelIndex].depth;
+        if (prd->depth == 0)
+        {
+            const float2 motion = guideScreenMotion(params, make_float4(hitPoint, 1.0f), prd->pixelSample);
+            a.motionX = motion.x;
+            a.motionY = motion.y;
+        }
+        else
+        {
+            a.motionX = params.aov[prd->linearPixelIndex].motionX;
+            a.motionY = params.aov[prd->linearPixelIndex].motionY;
+        }
+        a.specularHitDistance = 0.0f;
+        a.reactive = oka::guides::reactiveFor(prd->depth);
+        a.pad2 = 0.0f;
+        params.aov[prd->linearPixelIndex] = a;
+        prd->aovDone = true;
+    }
+
     if (-dot(rayDir, lightNormal) > 0.0f)
     {
         if (prd->depth == 0 || prd->specularBounce)

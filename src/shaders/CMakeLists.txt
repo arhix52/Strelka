@@ -44,6 +44,9 @@ if(WIN32 OR LINUX)
     cuda_compile(compiled_env_cdf_files
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/env_cdf.cu
     )
+    cuda_compile(compiled_denoise_guide_files
+        ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/DenoiseGuides.cu
+    )
 
     add_library(strelka_shaders STATIC
         ${generated_optix_files}
@@ -51,7 +54,10 @@ if(WIN32 OR LINUX)
         ${compiled_tonemap_files}
         ${compiled_skinning_files}
         ${compiled_env_cdf_files}
+        ${compiled_denoise_guide_files}
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/Tonemappers.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/DenoiseGuides.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/Guides.h
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/skinning/skinning.h
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/env_cdf.h
     )
