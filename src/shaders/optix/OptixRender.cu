@@ -363,7 +363,11 @@ extern "C" __global__ void __raygen__rg()
                           params.materialRayTmin, // Min intersection distance
                           1e16f, // Max intersection distance
                           time, // rayTime -- used for motion blur
-                          OptixVisibilityMask(255), // Specify always visible
+                          // Camera rays see what the camera should see; every
+                          // bounce after also sees the emitters marked hidden, so
+                          // a light authored out of frame still balances the MIS
+                          // estimate it is deducted for.
+                          OptixVisibilityMask(prd.depth == 0 ? RAY_MASK_PRIMARY : RAY_MASK_SECONDARY),
                           OPTIX_RAY_FLAG_NONE,
                           RAY_TYPE_RADIANCE, // SBT offset   -- See SBT discussion
                           RAY_TYPE_COUNT, // SBT stride   -- See SBT discussion

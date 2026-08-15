@@ -14,18 +14,22 @@
 #define GEOMETRY_MASK_TRIANGLE 1
 #define GEOMETRY_MASK_CURVE 2
 #define GEOMETRY_MASK_LIGHT 4
+// An emitter the camera must not see, but a bounce must. A light authored with
+// visibleToCamera off still lights the scene and still has to be hit by a BSDF
+// ray for the MIS estimate to balance -- it simply must not appear as a shape in
+// the frame. Same value as Metal's GEOMETRY_MASK_LIGHT_HIDDEN.
+#define GEOMETRY_MASK_LIGHT_HIDDEN 8
 // The boundary of a participating medium. Its own bit because a shadow ray must
 // not be stopped by it -- RAY_MASK_SHADOW is the geometry bits alone, so a fog
 // gizmo left on the triangle mask blacks out everything it encloses. Same value
-// as Metal's GEOMETRY_MASK_MEDIUM, and 8 is skipped for the same reason: that
-// is Metal's GEOMETRY_MASK_LIGHT_HIDDEN, which OptiX does not have yet.
+// as Metal's GEOMETRY_MASK_MEDIUM.
 #define GEOMETRY_MASK_MEDIUM 16
 
 #define GEOMETRY_MASK_GEOMETRY (GEOMETRY_MASK_TRIANGLE | GEOMETRY_MASK_CURVE)
 
 #define RAY_MASK_PRIMARY (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_MEDIUM)
 #define RAY_MASK_SHADOW GEOMETRY_MASK_GEOMETRY
-#define RAY_MASK_SECONDARY (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_MEDIUM)
+#define RAY_MASK_SECONDARY (RAY_MASK_PRIMARY | GEOMETRY_MASK_LIGHT_HIDDEN)
 
 // Params::projectionType. Mirrors oka::Camera::ProjectionType, which device code
 // cannot include, and the identically-named constants in the Metal ShaderTypes.h.

@@ -1483,9 +1483,34 @@ void OptiXRender::resolveInstanceGeometry(OptixInstance& oi, const oka::Instance
         oi.visibilityMask = GEOMETRY_MASK_CURVE;
         break;
     case oka::Instance::Type::eLight:
+    {
         oi.traversableHandle = mOptixMeshes[instance.mMeshId]->gas_handle;
-        oi.visibilityMask = GEOMETRY_MASK_LIGHT;
+        // A light's proxy mesh is how the light is picked in the editor and how a
+        // BSDF ray finds an emitter for MIS. It is not always something to look at.
+        //
+        // A point or a spot has no shape: the proxy is a placeholder sphere that
+        // emits nothing, so leaving it visible put a black dot in the frame where
+        // the lamp is. That cost 4.4% of 12_lights_punctual and 3.4% of 27_ies.
+        // A disabled light is not there at all, and one authored with
+        // visibleToCamera off still lights the scene and still has to be hit by a
+        // bounce -- otherwise the MIS estimate is missing the strategy it deducts
+        // for -- but must not appear in the image. Same three rules Metal applies
+        // in MetalAccelStructure.
+        const auto& descs = mScene->getLightsDesc();
+        const bool known = instance.mLightId < descs.size();
+        const bool enabled = known ? descs[instance.mLightId].enabled : true;
+        const bool visibleToCamera = known ? descs[instance.mLightId].visibleToCamera : true;
+        const uint32_t lightType = known ? descs[instance.mLightId].type : (uint32_t)LIGHT_TYPE_RECT;
+        if (!enabled || lightType == LIGHT_TYPE_POINT || lightType == LIGHT_TYPE_SPOT)
+        {
+            oi.visibilityMask = 0;
+        }
+        else
+        {
+            oi.visibilityMask = visibleToCamera ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_LIGHT_HIDDEN;
+        }
         break;
+    }
     default:
         STRELKA_ERROR("Unknown instance type");
         std::abort();
