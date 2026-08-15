@@ -18,6 +18,11 @@
 #define RAY_MASK_SHADOW GEOMETRY_MASK_GEOMETRY
 #define RAY_MASK_SECONDARY GEOMETRY_MASK_GEOMETRY
 
+// Params::projectionType. Mirrors oka::Camera::ProjectionType, which device code
+// cannot include, and the identically-named constants in the Metal ShaderTypes.h.
+#define PROJECTION_PERSPECTIVE 0u
+#define PROJECTION_ORTHOGRAPHIC 1u
+
 struct Vertex
 {
     float3 position;
@@ -59,6 +64,15 @@ struct Params
     float3 exposure;
     float clipToView[16];
     float viewToWorld[16];
+
+    // Which projection generates the primary ray. An orthographic camera has no
+    // centre of projection -- every ray runs down the view axis and the pixel
+    // chooses where on the film it starts -- so it is a branch in ray generation
+    // rather than a different matrix, and the half-extents have to come across
+    // separately. Mirrors Uniforms::projectionType on the Metal side.
+    uint32_t projectionType;
+    float orthoHalfWidth;
+    float orthoHalfHeight;
 
     OptixTraversableHandle handle;
     SceneData scene;

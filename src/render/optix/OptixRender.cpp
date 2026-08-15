@@ -1362,6 +1362,21 @@ void OptiXRender::render(Buffer* output)
            sizeof(params.viewToWorld));
     memcpy(params.clipToView, glm::value_ptr(glm::transpose(camera.matrices.invPerspective)), sizeof(params.clipToView));
 
+    // Projection. The half-extents are adapted to the render aspect the same way
+    // the perspective fov is (Camera::magForAspect), so a camera authored square
+    // and rendered wide keeps its framing instead of stretching -- otherwise a
+    // whole-frame comparison measures the reframe rather than the feature.
+    params.projectionType = (uint32_t)camera.projection;
+    {
+        float halfWidth = camera.xmag;
+        float halfHeight = camera.ymag;
+        const float aspect =
+            (params.image_height > 0) ? (float)params.image_width / (float)params.image_height : 1.0f;
+        camera.magForAspect(aspect, halfWidth, halfHeight);
+        params.orthoHalfWidth = halfWidth;
+        params.orthoHalfHeight = halfHeight;
+    }
+
     // Depth of field params
     params.useDof = camera.useDof ? 1 : 0;
     params.focalDistance = camera.focalDistance;
