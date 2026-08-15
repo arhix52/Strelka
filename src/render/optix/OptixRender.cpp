@@ -2025,7 +2025,7 @@ void OptiXRender::createSbt()
 
     // Radiance miss record
     MissSbtRecord& radiance_miss = miss_records[RAY_TYPE_RADIANCE];
-    radiance_miss.data.bg_color = { 0.0f, 0.0f, 0.0f };
+    radiance_miss.data.bg_color = mMissColor;
     OPTIX_CHECK(optixSbtRecordPackHeader(mState.radiance_miss_group, &radiance_miss));
 
     // Occlusion miss record
@@ -3283,6 +3283,26 @@ void OptiXRender::buildSceneEnvironment(Buffer* output)
     updatePathtracerParams(output->width(), output->height());
 
     const auto& envLight = mScene->getEnvLight();
+    // A dome with no texture is still a light: a uniform sky of one colour, which
+    // is what a V-Ray dome with use_dome_tex off is, and what a furnace test is.
+    // Without this a sidecar of the form {"environment": {"color": [1,1,1]}} lit
+    // nothing at all -- hasEnvMap needs a texture and the miss colour was a hard
+    // zero -- so such a scene rendered black but for its lamps.
+    //
+    // Carried on the miss colour rather than as a sampled light, which is not a
+    // shortcut: next-event estimation exists to importance sample a distribution
+    // the BSDF cannot see, and a constant environment has none. For a Lambertian
+    // surface the cosine-weighted BSDF sample IS the optimal strategy, so what is
+    // left to converge is visibility alone. Same reasoning, and the same place to
+    // put it, as MetalFrameUniforms.
+    mMissColor = make_float3(0.0f);
+    if (envLight.has_value() && envLight->texturePath.empty())
+    {
+        const glm::float3 c = envLight->color * envLight->intensity;
+        mMissColor = make_float3(c.x, c.y, c.z);
+    }
+    mSbtDirty = true; // the miss record carries it
+
     if (envLight.has_value() && !envLight->texturePath.empty())
     {
         const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");

@@ -300,6 +300,10 @@ private:
     std::vector<cudaArray_t> mTextureArrays;
     std::vector<cudaMipmappedArray_t> mTextureMipmappedArrays;
     std::vector<cudaTextureObject_t> mTextureObjects;
+    /// A textureless dome's colour, carried to the miss program. See
+    /// buildSceneEnvironment for why a constant sky is a miss colour rather than
+    /// a sampled light.
+    float3 mMissColor = make_float3(0.0f);
     uint32_t mTextureCacheHits = 0;
     uint32_t mTextureCacheMisses = 0;
     std::vector<cudaArray_t> mMaterialTextureArrays;
