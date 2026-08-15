@@ -57,12 +57,14 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_wavefront_stage_diagnostic.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_tonemappers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_scene_stream.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_upload_plan.cpp
 )
 strelka_apply_warnings(unit_tests)
 
 target_include_directories(unit_tests
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src/render/metal
+        ${CMAKE_SOURCE_DIR}/src/render/optix
         ${CMAKE_SOURCE_DIR}/src/editor
 )
 

@@ -11,6 +11,7 @@
 #include "cuda_checks.h"
 #include <strelka/render/common.h>
 #include "OptixBuffer.h"
+#include "texture_upload_plan.h"
 
 struct Texture;
 
@@ -159,7 +160,8 @@ private:
 
     void createLightBuffer();
 
-    Texture loadTextureFromFile(const std::string& fileName);
+    oka::optix_tex::DecodeSettings textureDecodeSettings() const;
+    Texture loadTextureFromFile(const std::string& fileName, oka::optix_tex::Kind kind);
     void loadEnvMap(const std::string& texturePath);
 
     bool createOptixMaterials();
@@ -169,7 +171,10 @@ private:
 
     // Texture resource tracking for cleanup
     std::vector<cudaArray_t> mTextureArrays;
+    std::vector<cudaMipmappedArray_t> mTextureMipmappedArrays;
     std::vector<cudaTextureObject_t> mTextureObjects;
+    uint32_t mTextureCacheHits = 0;
+    uint32_t mTextureCacheMisses = 0;
 
     // Environment map resources
     std::unique_ptr<OptixBuffer> mEnvCdfXBuffer;   // conditional CDF
