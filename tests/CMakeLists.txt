@@ -55,6 +55,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_residency_set_diff.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_wavefront_chunk_plan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_wavefront_stage_diagnostic.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_optix_denoise_plan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_tonemappers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_scene_stream.cpp
 )
@@ -63,6 +64,10 @@ strelka_apply_warnings(unit_tests)
 target_include_directories(unit_tests
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src/render/metal
+        # optix_denoise_plan.h is deliberately CUDA-free so the denoiser's
+        # decisions can be tested on a machine without one -- including this
+        # directory here does not pull any OptiX header in.
+        ${CMAKE_SOURCE_DIR}/src/render/optix
         ${CMAKE_SOURCE_DIR}/src/editor
 )
 

@@ -17,6 +17,8 @@
 
 #include <strelka/material/bsdf.h>
 
+#include <postprocessing/Guides.h>
+
 #include "optix_device_utils.h"
 
 extern "C"
@@ -376,6 +378,96 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     return res;
 }
 
+/// Where this triangle hit was in the world one frame ago.
+///
+/// `vb_prev` is the previous frame's vertex buffer -- the same data motion blur
+/// uses as its first key -- so a deforming or skinned mesh reprojects correctly.
+/// What it does *not* carry is a rigid instance transform that moved between
+/// frames: the previous frame's instance matrices are not on the device, so the
+/// previous object-space position is put through the current transform. Camera
+/// motion is exact either way, and camera motion is what a still scene's guides
+/// are made of. Returns false when there is nothing better than "it did not
+/// move" to say.
+static __forceinline__ __device__ bool previousTriangleWorldPosition(const HitGroupData* hit_data, float3& outPosition)
+{
+    if (params.scene.vb_prev == nullptr)
+    {
+        return false;
+    }
+    const float2 barycentrics = optixGetTriangleBarycentrics();
+    const unsigned int primitiveId = optixGetPrimitiveIndex();
+    const uint32_t i0 = params.scene.ib[(hit_data->indexOffset + primitiveId * 3 + 0)];
+    const uint32_t i1 = params.scene.ib[(hit_data->indexOffset + primitiveId * 3 + 1)];
+    const uint32_t i2 = params.scene.ib[(hit_data->indexOffset + primitiveId * 3 + 2)];
+    const uint32_t base = hit_data->vertexOffset;
+    const float3 objectPos = interpolateAttrib(params.scene.vb_prev[base + i0].position,
+                                               params.scene.vb_prev[base + i1].position,
+                                               params.scene.vb_prev[base + i2].position, barycentrics);
+    outPosition = optixTransformPointFromObjectToWorldSpace(objectPos);
+    return true;
+}
+
+/// Fill in the pixel's guide record from the surface being shaded.
+///
+/// Depth and motion are written first and separately, because unlike albedo or
+/// roughness they belong to the pixel rather than to whatever surface the
+/// material guides were eventually taken from. A specular primary hit hands its
+/// material guides to the surface it reflects, and that surface sits somewhere
+/// else on screen -- reprojecting the pixel by *its* motion is not a small
+/// error.
+static __forceinline__ __device__ void writeSurfaceGuide(const HitGroupData* hit_data,
+                                                         PerRayData* prd,
+                                                         const SurfaceInteraction& si,
+                                                         const float3 worldPosition,
+                                                         const bool isTriangle)
+{
+    const uint32_t pixelIndex = prd->linearPixelIndex;
+    if (prd->depth == 0)
+    {
+        float3 prevPosition = worldPosition;
+        if (isTriangle)
+        {
+            previousTriangleWorldPosition(hit_data, prevPosition);
+        }
+        const float2 motion = guideScreenMotion(params, make_float4(prevPosition, 1.0f), prd->pixelSample);
+        params.aov[pixelIndex].depth = guideViewDepth(params, worldPosition);
+        params.aov[pixelIndex].motionX = motion.x;
+        params.aov[pixelIndex].motionY = motion.y;
+    }
+
+    if (oka::guides::shouldWriteGuide(true, prd->aovDone, params.guidePrimaryHit, prd->depth, si.roughness))
+    {
+        const AovSample previous = params.aov[pixelIndex];
+        AovSample a;
+        // Metals put their colour in the specular lobe and have no diffuse one.
+        const float3 base = si.albedo;
+        a.diffuseAlbedo = base * (1.0f - si.metallic);
+        a.specularAlbedo = lerp(make_float3(0.04f), base, si.metallic);
+        a.normal = si.shading_normal;
+        a.roughness = si.roughness;
+        // Taken from the block above, which wrote them for the primary surface
+        // whatever this one is.
+        a.depth = previous.depth;
+        a.motionX = previous.motionX;
+        a.motionY = previous.motionY;
+        a.specularHitDistance = 0.0f;
+        a.reactive = oka::guides::reactiveFor(prd->depth);
+        a.pad2 = 0.0f;
+        params.aov[pixelIndex] = a;
+        prd->aovDone = true;
+    }
+
+    // What the specular lobe of the primary hit is looking at. A denoiser takes
+    // this separately so it can reproject a reflection at the depth of the thing
+    // being reflected rather than at the mirror's own. `specularBounce` still
+    // describes the previous bounce here -- this program has not overwritten it
+    // yet -- which is exactly the question being asked.
+    if (prd->depth == 1 && prd->specularBounce)
+    {
+        params.aov[pixelIndex].specularHitDistance = optixGetRayTmax();
+    }
+}
+
 extern "C" __global__ void __closesthit__radiance()
 {
     OptixPrimitiveType primType = optixGetPrimitiveType();
@@ -411,9 +503,26 @@ extern "C" __global__ void __closesthit__radiance()
     const cudaTextureObject_t* textures = &params.materialTextures[matId * MAX_MATERIAL_TEXTURES];
     bsdf_init(si, matParams, textures);
 
-    if (params.debug == 1)
+    if (prd->writeAov && params.aov != nullptr)
+    {
+        writeSurfaceGuide(hit_data, prd, si, surfaceHit.position, primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE);
+    }
+
+    if (params.debug == (uint32_t)DebugMode::eNormal)
     {
         prd->radiance = (si.geometry_normal + make_float3(1.0f)) * 0.5f;
+        return;
+    }
+    if (params.debug == (uint32_t)DebugMode::eMotionBlur)
+    {
+        // Red is where in the shutter this path was sampled; green is how far
+        // this vertex moved between the two motion keys, so a mesh that deforms
+        // and a mesh that only translates look different.
+        float3 prevPosition = surfaceHit.position;
+        const bool moved = (primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE) &&
+                           previousTriangleWorldPosition(hit_data, prevPosition);
+        prd->radiance = make_float3(
+            optixGetRayTime(), moved ? saturate(length(surfaceHit.position - prevPosition) * 10.0f) : 0.0f, 0.0f);
         return;
     }
 

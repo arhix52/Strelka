@@ -11,6 +11,8 @@
 #include "cuda_checks.h"
 #include <strelka/render/common.h>
 #include "OptixBuffer.h"
+#include "OptixDenoiser.h"
+#include "optix_denoise_plan.h"
 
 struct Texture;
 
@@ -180,6 +182,38 @@ private:
 
     void updatePathtracerParams(const uint32_t width, const uint32_t height);
 
+    // --- Denoiser / guides -----------------------------------------------
+    OptixDenoiserContext mDenoiser;
+    DenoisePlan mDenoisePlan{};
+    /// Guide records, one per pixel at render resolution.
+    std::unique_ptr<OptixBuffer> mAovBuffer;
+    /// The four images the denoiser reads, kept apart from the packed records
+    /// because the network wants them in its own formats.
+    std::unique_ptr<OptixBuffer> mDenoiseColorBuffer;
+    std::unique_ptr<OptixBuffer> mDenoiseAlbedoBuffer;
+    std::unique_ptr<OptixBuffer> mDenoiseNormalBuffer;
+    std::unique_ptr<OptixBuffer> mDenoiseFlowBuffer;
+    /// How far the flow vector at each pixel is to be believed -- the reactive
+    /// mask, inverted. OptiX reads this as a single float per pixel.
+    std::unique_ptr<OptixBuffer> mDenoiseFlowTrustBuffer;
+    /// Radiance at render resolution when that is not the output resolution,
+    /// i.e. when the 2x model is upscaling into the caller's buffer.
+    std::unique_ptr<OptixBuffer> mRenderImageBuffer;
+    /// The buffer the caller last got, so readDisplayTexture() can hand back the
+    /// same pixels the screen is showing rather than an intermediate.
+    void* mDisplayImage = nullptr;
+    uint32_t mDisplayWidth = 0;
+    uint32_t mDisplayHeight = 0;
+    /// Raised by resetTemporalHistory() and consumed by the next render().
+    bool mResetTemporalHistory = true;
+    /// True when denoising was asked for and could not be provided.
+    bool mDenoiserFallback = false;
+    bool mPrevGuidePrimaryHit = false;
+
+    /// Size the guide and denoiser buffers for a plan, reallocating only what
+    /// changed.
+    void updateGuideBuffers(const DenoisePlan& plan);
+
 public:
     OptiXRender(/* args */);
     ~OptiXRender();
@@ -187,6 +221,24 @@ public:
     void init() override;
     void render(Buffer* output_buffer) override;
     Buffer* createBuffer(const BufferDesc& desc) override;
+
+    void resetTemporalHistory() override
+    {
+        mResetTemporalHistory = true;
+    }
+
+    bool denoiserFallbackActive() const override
+    {
+        return mDenoiserFallback;
+    }
+
+    /// The finished frame, after tonemapping, exactly as the display shows it.
+    bool readDisplayTexture(std::vector<float>& out, uint32_t& width, uint32_t& height) override;
+
+    /// One guide, as RGBA floats with unused channels zeroed. These are the
+    /// bytes the denoiser consumes, which is the only way to check a guide
+    /// without also testing everything downstream of it.
+    bool readGuideTexture(Guide guide, std::vector<float>& out, uint32_t& width, uint32_t& height) override;
 
     void applySkinning();
     void createContext();
