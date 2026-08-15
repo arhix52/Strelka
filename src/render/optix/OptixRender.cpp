@@ -1068,6 +1068,12 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
         needRealloc = true;
         // reset rendering
         getSharedContext().mSubframeIndex = 0;
+        // The caller's buffer is the display image, and a resolution change is
+        // exactly when the caller replaces it. Holding the old pointer would
+        // have readDisplayTexture() read a freed allocation.
+        mDisplayImage = nullptr;
+        mDisplayWidth = 0;
+        mDisplayHeight = 0;
     }
     mState.params.image_width = width;
     mState.params.image_height = height;
