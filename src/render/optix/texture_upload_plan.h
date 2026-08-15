@@ -225,6 +225,15 @@ struct Plan
 ///  * Normal maps take BC5 when compressed, which stores X and Y only, and are
 ///    re-normalised at every level whether compressed or not so the two paths
 ///    shade alike. This is the same rule MetalTextures applies.
+///
+///    READ THIS BEFORE SAMPLING SLOT 2. A BC5 texture returns z = 0. Whoever
+///    wires normal mapping into the OptiX closest-hit program must rebuild Z
+///    from X and Y -- `sqrt(saturate(1 - dot(xy, xy)))`, before the glTF
+///    normal scale is applied to X and Y -- exactly as
+///    src/shaders/metal/shading_common.h does. Reading .xyz straight out of the
+///    texture gives a flat normal on every compressed map and a correct one on
+///    every uncompressed map, which is the kind of difference that gets blamed
+///    on the tangent frame.
 inline Plan planTexture(const PlanInputs& in)
 {
     Plan plan;
