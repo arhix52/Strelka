@@ -36,13 +36,8 @@
 //
 // volume.h documents the two, and they disagree by a lot -- at an attenuation
 // colour of 0.5 the glTF form gives sigma_t = 0.69/d and the Cycles form 0.5/d.
-// Metal takes it from `render/material/volumeModel`, which the CLI drives from
-// the scene's `volume_model` key; the OptiX launch Params carry no such field, so
-// this is pinned to the spec's own reading -- which is also the application's
-// default -- until one is added. `10_glass_absorption` and `18_bounded_volume`
-// both set `volume_model = "cycles"`, so both currently measure the wrong
-// density on this backend; see the hand-off note in the stream report.
-static const unsigned int kOptixVolumeModel = VOLUME_MODEL_GLTF;
+// Taken from `render/material/volumeModel`, the same setting Metal reads, which
+// the CLI drives from the scene's `volume_model` key.
 
 // ---------------------------------------------------------------------------
 // Fibre semantics.

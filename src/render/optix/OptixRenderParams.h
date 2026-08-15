@@ -157,6 +157,11 @@ struct Params
     float shadowRayTmin;
     float materialRayTmin;
     uint32_t misHeuristic; // 0 = balance, 1 = power
+    /// Which reading of KHR_materials_volume the shading path uses: 0 = glTF
+    /// (sigma_t = -ln(C)/d), 1 = Cycles ((1-C)/d). They disagree by a lot -- at an
+    /// attenuation colour of 0.5, 0.69/d against 0.5/d -- and every ladder scene
+    /// asks for the Cycles form, so pinning it was measuring the wrong density.
+    uint32_t volumeModel;
 
     /// Whether this device's optixReorder() actually reorders. Queried once via
     /// OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING; on hardware without

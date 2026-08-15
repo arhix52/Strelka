@@ -2095,6 +2095,7 @@ void OptiXRender::render(Buffer* output)
     params.shadowRayTmin = settings.getAs<float>("render/pt/dev/shadowRayTmin");
     params.materialRayTmin = settings.getAs<float>("render/pt/dev/materialRayTmin");
     params.misHeuristic = settings.getAs<uint32_t>("render/pt/misHeuristic");
+    params.volumeModel = settings.getAs<uint32_t>("render/material/volumeModel");
     // A kill switch on top of the capability: reordering cannot change an
     // image, so the only reason to turn it off on hardware that has it is to
     // measure what it is worth.

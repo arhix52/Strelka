@@ -843,7 +843,7 @@ extern "C" __global__ void __closesthit__radiance()
         {
             const MaterialParams& im = params.materials[inside];
             const float3 sigma_t = volume_extinction(im.attenuation_color, im.attenuation_distance,
-                                                     kOptixVolumeModel);
+                                                     params.volumeModel);
             prd->throughput *= beer_lambert_transmittance(sigma_t, optixGetRayTmax());
         }
     }
