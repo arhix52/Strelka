@@ -29,6 +29,17 @@
 #include <sutil/Matrix.h>
 
 #include "texture_support_cuda.h"
+#include "accel_build_policy.h"
+
+// accel_build_policy.h mirrors OptixBuildFlags so that it -- and its tests --
+// need no OptiX SDK. This is where the mirror is held to the original.
+static_assert((uint32_t)oka::optix_accel::kFlagNone == (uint32_t)OPTIX_BUILD_FLAG_NONE);
+static_assert((uint32_t)oka::optix_accel::kFlagAllowUpdate == (uint32_t)OPTIX_BUILD_FLAG_ALLOW_UPDATE);
+static_assert((uint32_t)oka::optix_accel::kFlagAllowCompaction == (uint32_t)OPTIX_BUILD_FLAG_ALLOW_COMPACTION);
+static_assert((uint32_t)oka::optix_accel::kFlagPreferFastTrace == (uint32_t)OPTIX_BUILD_FLAG_PREFER_FAST_TRACE);
+static_assert((uint32_t)oka::optix_accel::kFlagPreferFastBuild == (uint32_t)OPTIX_BUILD_FLAG_PREFER_FAST_BUILD);
+static_assert((uint32_t)oka::optix_accel::kFlagAllowRandomVertexAccess ==
+              (uint32_t)OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS);
 
 #include <filesystem>
 #include <array>
@@ -228,6 +239,17 @@ void OptiXRender::createContext()
     CUcontext cu_ctx = 0; // zero means take the current context
     OPTIX_CHECK(optixDeviceContextCreate(cu_ctx, &options, &mState.context));
 
+    // Ask whether optixReorder() does anything here before paying for its
+    // coherence key. The call is documented as a no-op on hardware without the
+    // sorting unit, so this is not a correctness gate -- it is what keeps two
+    // dependent loads per bounce off a machine that cannot spend them.
+    unsigned int reorderFlags = 0;
+    OPTIX_CHECK(optixDeviceContextGetProperty(mState.context,
+                                              OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING,
+                                              &reorderFlags, sizeof(reorderFlags)));
+    mShaderReorderSupported = (reorderFlags & OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING_FLAG_STANDARD) != 0;
+    STRELKA_INFO("Shader execution reordering: {}", mShaderReorderSupported ? "supported" : "not available");
+
     mState.mParamsBuffer.reset(new OptixBuffer(sizeof(Params)));
 }
 
@@ -264,8 +286,7 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
 {
     auto rcurve = std::make_unique<Curve>();
     OptixAccelBuildOptions accel_options = {};
-    accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS |
-                               OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    accel_options.buildFlags = oka::optix_accel::buildFlags(oka::optix_accel::Geometry::Curve);
     accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
 
     const uint32_t pointsCount = mScene->getCurvesPoint().size(); // total points count in points buffer
@@ -369,11 +390,17 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
     OptixTraversableHandle gas_handle;
     CUdeviceptr d_gas_output_buffer;
 
+    // A static mesh no longer asks for ALLOW_UPDATE. Nothing refits one --
+    // updateBottomLevelAccelerationStructures() skips every mesh that is not
+    // skeletal -- and a refittable structure is built with a topology that
+    // survives being moved rather than one built to be traced, which costs both
+    // memory and traversal for a capability this class of geometry never uses.
+    const oka::optix_accel::Geometry geometryClass =
+        isSkeletal ? oka::optix_accel::Geometry::SkinnedMesh : oka::optix_accel::Geometry::StaticMesh;
+
     OptixAccelBuildOptions accel_options = {};
     accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
-    accel_options.buildFlags = isSkeletal ?
-        (OPTIX_BUILD_FLAG_PREFER_FAST_BUILD | OPTIX_BUILD_FLAG_ALLOW_UPDATE) :
-        (OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_UPDATE);
+    accel_options.buildFlags = oka::optix_accel::buildFlags(geometryClass);
 
     constexpr int PREV_VB = 0;
     constexpr int CURR_VB = 1;
@@ -437,7 +464,7 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
 
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
 
-    if (isSkeletal)
+    if (!oka::optix_accel::shouldCompact(geometryClass))
     {
         OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &triangle_input, 1,
                                     mTempAccelBuffer->getPtr(), gas_buffer_sizes.tempSizeInBytes, d_gas_output_buffer,
@@ -493,9 +520,11 @@ void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
     OptixTraversableHandle& gas_handle = mOptixMeshes[optixMeshesId]->gas_handle;
     CUdeviceptr& d_gas_output_buffer = mOptixMeshes[optixMeshesId]->d_gas_output_buffer;
 
-    // Configure acceleration structure build options
+    // The same flags the structure was built with. An update reads its output
+    // buffer as the result of a build with exactly these; spelling them a second
+    // time here is how they came to disagree.
     OptixAccelBuildOptions accel_options = {};
-    accel_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_BUILD | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    accel_options.buildFlags = oka::optix_accel::updateFlags(oka::optix_accel::Geometry::SkinnedMesh);
     accel_options.operation = OPTIX_BUILD_OPERATION_UPDATE;
 
     const CUdeviceptr vertexBuffer = mVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
@@ -520,8 +549,16 @@ void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
     OptixAccelBufferSizes gas_buffer_sizes;
     OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &accel_options, &triangle_input, 1, &gas_buffer_sizes));
 
+    // An update has its own scratch requirement, which is the one to honour
+    // here; tempSizeInBytes is what a full build of the same input would need.
+    const size_t updateTempSize = gas_buffer_sizes.tempUpdateSizeInBytes;
+    if (!mTempAccelBuffer || mTempAccelBuffer->size() < updateTempSize)
+    {
+        mTempAccelBuffer.reset(new OptixBuffer(updateTempSize));
+    }
+
     OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &triangle_input, 1,
-                                mTempAccelBuffer->getPtr(), gas_buffer_sizes.tempSizeInBytes, d_gas_output_buffer,
+                                mTempAccelBuffer->getPtr(), updateTempSize, d_gas_output_buffer,
                                 gas_buffer_sizes.outputSizeInBytes, &gas_handle, nullptr, 0));
 }
 
@@ -645,13 +682,18 @@ void OptiXRender::createTopLevelAccelerationStructure()
     iasInput.instanceArray.instances = mState.d_instances;
     iasInput.instanceArray.numInstances = static_cast<int>(optixInstances.size());
 
-    // Setup IAS build options
+    // With motion blur on, the instance structure is rebuilt every frame rather
+    // than refit -- the motion transforms it points at are rewritten -- so it
+    // takes the static flags and is compacted. Without it, the structure is refit
+    // as transforms move, and a refittable structure must not be compacted: an
+    // update reads its output buffer as the build's own output, at the build's
+    // own size, and optixAccelCompact replaces both. That is what this code used
+    // to do, and it then refit the compacted copy in place.
+    const oka::optix_accel::Geometry tlasClass =
+        mEnableMotionBlur ? oka::optix_accel::Geometry::StaticTlas : oka::optix_accel::Geometry::RefittableTlas;
+
     OptixAccelBuildOptions iasOptions = {};
-    if (mEnableMotionBlur)
-        iasOptions.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
-    else
-        iasOptions.buildFlags =
-            OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    iasOptions.buildFlags = oka::optix_accel::buildFlags(tlasClass);
     iasOptions.motionOptions.numKeys = 1;
     iasOptions.operation = OPTIX_BUILD_OPERATION_BUILD;
 
@@ -676,6 +718,8 @@ void OptiXRender::createTopLevelAccelerationStructure()
         mCompactedSizeBuffer.reset(new OptixBuffer(sizeof(uint64_t)));
     }
 
+    const bool compactTlas = oka::optix_accel::shouldCompact(tlasClass);
+
     // Setup compaction property
     OptixAccelEmitDesc property = {};
     property.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
@@ -685,9 +729,18 @@ void OptiXRender::createTopLevelAccelerationStructure()
     OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &iasOptions, &iasInput,
                                 1, // num build inputs
                                 mTempAccelBuffer->getPtr(), iasBufferSizes.tempSizeInBytes, mTlasBuffer->getPtr(),
-                                outputBufferSize, &mState.ias_handle, &property,
-                                1 // num emitted properties
+                                outputBufferSize, &mState.ias_handle, compactTlas ? &property : nullptr,
+                                compactTlas ? 1 : 0 // num emitted properties
                                 ));
+
+    if (!compactTlas)
+    {
+        // The refittable case. mTlasBuffer holds the build's own output at the
+        // build's own size, which is what updateTopLevelAccelerationStructure()
+        // needs to find there.
+        mTlasOutputSize = outputBufferSize;
+        return;
+    }
 
     // Compact acceleration structure
     size_t compactedSize;
@@ -705,7 +758,9 @@ void OptiXRender::createTopLevelAccelerationStructure()
 
         // Replace old buffer with compacted one
         mTlasBuffer = std::move(compactedBuffer);
+        outputBufferSize = compactedSize;
     }
+    mTlasOutputSize = outputBufferSize;
 }
 
 void oka::OptiXRender::updateTopLevelAccelerationStructure()
@@ -733,9 +788,12 @@ void oka::OptiXRender::updateTopLevelAccelerationStructure()
     iasInput.instanceArray.instances = mState.d_instances;
     iasInput.instanceArray.numInstances = static_cast<int>(optixInstances.size());
 
-    // Setup IAS build (refit) options
+    // The flags the refittable structure was built with -- not a second guess at
+    // them. They used to read PREFER_FAST_BUILD here against a build that said
+    // PREFER_FAST_TRACE | ALLOW_COMPACTION, and an update is documented against
+    // the build's own flags.
     OptixAccelBuildOptions iasOptions = {};
-    iasOptions.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_BUILD | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    iasOptions.buildFlags = oka::optix_accel::updateFlags(oka::optix_accel::Geometry::RefittableTlas);
     iasOptions.motionOptions.numKeys = 1;
     iasOptions.operation = OPTIX_BUILD_OPERATION_UPDATE;
 
@@ -743,17 +801,22 @@ void oka::OptiXRender::updateTopLevelAccelerationStructure()
     OptixAccelBufferSizes iasBufferSizes;
     OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &iasOptions, &iasInput, 1, &iasBufferSizes));
 
-    // Reuse temporary buffers if large enough, otherwise allocate new ones
-    if (!mTempAccelBuffer || mTempAccelBuffer->size() < iasBufferSizes.tempSizeInBytes)
+    // Reuse temporary buffers if large enough, otherwise allocate new ones.
+    // An update has its own scratch requirement; tempSizeInBytes is a full
+    // build's.
+    const size_t updateTempSize = iasBufferSizes.tempUpdateSizeInBytes;
+    if (!mTempAccelBuffer || mTempAccelBuffer->size() < updateTempSize)
     {
-        mTempAccelBuffer.reset(new OptixBuffer(iasBufferSizes.tempSizeInBytes));
+        mTempAccelBuffer.reset(new OptixBuffer(updateTempSize));
     }
 
-    // Build (refit) IAS
+    // Build (refit) IAS. The output size is the size the build wrote, which is
+    // not mTlasBuffer->size(): that buffer is reused across scenes and only ever
+    // grows.
     OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &iasOptions, &iasInput,
                                 1, // num build inputs
-                                mTempAccelBuffer->getPtr(), iasBufferSizes.tempSizeInBytes, mTlasBuffer->getPtr(),
-                                mTlasBuffer->size(), &mState.ias_handle, nullptr,
+                                mTempAccelBuffer->getPtr(), updateTempSize, mTlasBuffer->getPtr(),
+                                mTlasOutputSize, &mState.ias_handle, nullptr,
                                 0 // num emitted properties
                                 ));
 }
@@ -1359,6 +1422,12 @@ void OptiXRender::render(Buffer* output)
     params.shadowRayTmin = settings.getAs<float>("render/pt/dev/shadowRayTmin");
     params.materialRayTmin = settings.getAs<float>("render/pt/dev/materialRayTmin");
     params.misHeuristic = settings.getAs<uint32_t>("render/pt/misHeuristic");
+    // A kill switch on top of the capability: reordering cannot change an
+    // image, so the only reason to turn it off on hardware that has it is to
+    // measure what it is worth.
+    params.enableShaderReorder =
+        mShaderReorderSupported &&
+        (!settings.contains("render/pt/shaderReorder") || settings.getAs<bool>("render/pt/shaderReorder"));
 
     memcpy(params.viewToWorld, glm::value_ptr(glm::transpose(glm::inverse(camera.matrices.view))),
            sizeof(params.viewToWorld));

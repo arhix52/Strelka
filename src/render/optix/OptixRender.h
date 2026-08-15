@@ -107,6 +107,7 @@ private:
     PathTracerState mState;
     bool mEnableValidation;
     bool mEnableMotionBlur;
+    bool mShaderReorderSupported = false;
 
     // Previous-frame settings for change detection (replaces static locals in render())
     uint32_t mPrevRectLightSamplingMethod = 0;
@@ -139,6 +140,10 @@ private:
     std::vector<std::shared_ptr<OptixBuffer>> mMotionTransformBuffers; // used for motion blur
 
     std::unique_ptr<OptixBuffer> mTlasBuffer;
+    // Bytes the last instance-structure build actually wrote. Not the same as
+    // mTlasBuffer->size(): that buffer is reused across scenes and only grows,
+    // and a refit has to be told the size of the structure inside it.
+    size_t mTlasOutputSize = 0;
 
     std::unique_ptr<OptixBuffer> mTexturesDataBuffer; // Consolidated GPU texture object array
 

@@ -155,6 +155,41 @@ __device__ float4 accumulate(float4* history,
     return make_float4(accumColor, 1.0f);
 }
 
+// The coherence key handed to optixReorder, read off the hit object between
+// traversal and shading.
+//
+// What it sorts on, least significant bit first, because that is the order the
+// sorting unit weights them in:
+//
+//   bit 0    hit / miss. The largest divergence in the loop: a miss runs an
+//            environment lookup and ends the path, a hit runs a BSDF.
+//   bit 1    the hit is an emitter. Light geometry has its own hit group, adds
+//            emission and stops; it shares no code with a surface.
+//   bits 2-4 MaterialType. Diffuse, conductor, dielectric, standard PBR and
+//            hair are five different sets of lobes, and which one a warp is
+//            running is what decides how much of it is idle.
+//
+// Instance or primitive identity is deliberately not in here. It sorts rays
+// that shade identically into different buckets, and the hardware has only a
+// few bits to spend.
+static __forceinline__ __device__ unsigned int reorderCoherenceHint()
+{
+    if (!optixHitObjectIsHit())
+        return 0u;
+
+    const HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixHitObjectGetSbtDataPointer());
+    unsigned int hint = 1u;
+    if (hit_data->lightId >= 0)
+        return hint | 2u;
+
+    const int32_t matId = hit_data->materialId;
+    if (matId >= 0)
+        hint |= (params.materials[matId].material_type & 0x7u) << 2;
+    return hint;
+}
+
+static constexpr unsigned int kReorderHintBits = 5;
+
 extern "C" __global__ void __raygen__rg()
 {
     const uint3 launch_index = optixGetLaunchIndex();
@@ -198,16 +233,31 @@ extern "C" __global__ void __raygen__rg()
 
         while (prd.depth < params.max_depth)
         {
-            optixTrace(params.handle, ray_origin, ray_direction,
-                       params.materialRayTmin, // Min intersection distance
-                       1e16f, // Max intersection distance
-                       time, // rayTime -- used for motion blur
-                       OptixVisibilityMask(255), // Specify always visible
-                       OPTIX_RAY_FLAG_NONE,
-                       RAY_TYPE_RADIANCE, // SBT offset   -- See SBT discussion
-                       RAY_TYPE_COUNT, // SBT stride   -- See SBT discussion
-                       RAY_TYPE_RADIANCE, // missSBTIndex -- See SBT discussion
-                       payload0, payload1);
+            // Traversal and shading are split so that the warp can be sorted
+            // between them. optixTraverse leaves a hit object behind without
+            // running a program; optixReorder regroups the threads by what that
+            // hit object says they are about to shade; optixInvoke then runs the
+            // closest-hit or miss program on a warp whose threads mostly agree.
+            //
+            // Together they are exactly equivalent to the optixTrace this
+            // replaces -- same payloads, same programs, same results. The payload
+            // pair is a packed pointer to PerRayData in local memory, so nothing
+            // rides in the registers that the split could drop.
+            optixTraverse(params.handle, ray_origin, ray_direction,
+                          params.materialRayTmin, // Min intersection distance
+                          1e16f, // Max intersection distance
+                          time, // rayTime -- used for motion blur
+                          OptixVisibilityMask(255), // Specify always visible
+                          OPTIX_RAY_FLAG_NONE,
+                          RAY_TYPE_RADIANCE, // SBT offset   -- See SBT discussion
+                          RAY_TYPE_COUNT, // SBT stride   -- See SBT discussion
+                          RAY_TYPE_RADIANCE, // missSBTIndex -- See SBT discussion
+                          payload0, payload1);
+            if (params.enableShaderReorder)
+            {
+                optixReorder(reorderCoherenceHint(), kReorderHintBits);
+            }
+            optixInvoke(payload0, payload1);
 
             ray_origin = prd.origin;
             ray_direction = prd.dir;

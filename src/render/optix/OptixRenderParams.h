@@ -76,6 +76,13 @@ struct Params
     float materialRayTmin;
     uint32_t misHeuristic; // 0 = balance, 1 = power
 
+    /// Whether this device's optixReorder() actually reorders. Queried once via
+    /// OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING; on hardware without
+    /// the sorting unit the call is a documented no-op, and skipping it there
+    /// keeps the coherence key -- two dependent loads to reach material_type --
+    /// off the critical path of a machine that cannot use it.
+    bool enableShaderReorder;
+
     // Environment map (dome light)
     bool hasEnvMap;
     cudaTextureObject_t envMapTexture;
