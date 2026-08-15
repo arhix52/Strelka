@@ -286,6 +286,8 @@ extern "C" __global__ void __raygen__rg()
         prd.throughput = make_float3(1.0f);
         ior_stack_init(prd.iorStack);
         prd.depth = 0;
+        prd.passthrough = 0;
+        prd.passedThrough = false;
         prd.specularBounce = false;
         prd.neeDone = false;
         prd.lastBsdfPdf = 0.0f;
@@ -356,6 +358,18 @@ extern "C" __global__ void __raygen__rg()
 
             ray_origin = prd.origin;
             ray_direction = prd.dir;
+
+            // A cutout the path slipped through is coverage, not scattering: the
+            // segment carries on in the same direction with the same throughput.
+            // It deliberately does not spend a bounce -- a hedge of alpha-tested
+            // leaves would otherwise exhaust max_depth before any light
+            // transport happened -- and is bounded instead by
+            // PATH_PASSTHROUGH_MAX, which the closest hit enforces.
+            if (prd.passedThrough)
+            {
+                prd.passedThrough = false;
+                continue;
+            }
 
             if (prd.depth > 3)
             {
@@ -535,14 +549,13 @@ extern "C" __global__ void __miss__ms()
     prd->depth = params.max_depth;
 }
 
-static __forceinline__ __device__ void setPayloadOcclusion(bool occluded)
-{
-    optixSetPayload_0(static_cast<unsigned int>(occluded));
-}
-
+// Reached only for a hit the any-hit program accepted, which is an opaque one:
+// nothing gets through, so the surviving fraction of the light is zero. The
+// payload carries that fraction as a float, not a boolean, because a shadow ray
+// can now cross several cutout surfaces and arrive dimmed rather than blocked.
 extern "C" __global__ void __closesthit__occlusion()
 {
-    setPayloadOcclusion(true);
+    optixSetPayload_0(__float_as_uint(0.0f));
 }
 
 extern "C" __global__ void __closesthit__light()

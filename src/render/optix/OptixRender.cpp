@@ -40,6 +40,7 @@ static_assert((uint32_t)oka::optix_accel::kFlagPreferFastTrace == (uint32_t)OPTI
 static_assert((uint32_t)oka::optix_accel::kFlagPreferFastBuild == (uint32_t)OPTIX_BUILD_FLAG_PREFER_FAST_BUILD);
 static_assert((uint32_t)oka::optix_accel::kFlagAllowRandomVertexAccess ==
               (uint32_t)OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS);
+#include "curve_layout.h"
 
 #include <filesystem>
 #include <array>
@@ -181,10 +182,14 @@ OptiXRender::~OptiXRender()
         optixProgramGroupDestroy(mState.occlusion_miss_group);
     if (mState.radiance_default_hit_group)
         optixProgramGroupDestroy(mState.radiance_default_hit_group);
+    if (mState.radiance_linear_curve_hit_group)
+        optixProgramGroupDestroy(mState.radiance_linear_curve_hit_group);
     for (auto& pg : mState.radiance_hit_groups)
         if (pg) optixProgramGroupDestroy(pg);
     if (mState.occlusion_hit_group)
         optixProgramGroupDestroy(mState.occlusion_hit_group);
+    if (mState.occlusion_linear_curve_hit_group)
+        optixProgramGroupDestroy(mState.occlusion_linear_curve_hit_group);
     if (mState.light_hit_group)
         optixProgramGroupDestroy(mState.light_hit_group);
 
@@ -195,6 +200,8 @@ OptiXRender::~OptiXRender()
         optixModuleDestroy(mState.closest_hit_module);
     if (mState.m_catromCurveModule)
         optixModuleDestroy(mState.m_catromCurveModule);
+    if (mState.m_linearCurveModule)
+        optixModuleDestroy(mState.m_linearCurveModule);
 
     // Free raw device pointers in Params
     if (mState.params.accum)
@@ -294,22 +301,37 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
     accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
 
     const uint32_t pointsCount = mScene->getCurvesPoint().size(); // total points count in points buffer
-    const int degree = 3;
-    const uint32_t numCurves = curve.mVertexCountsCount;
+    // The sidecar carries the basis; it is not a property of the renderer. Every
+    // particle groom in the tree is linear, and this used to be hardcoded to 3 --
+    // so those strands were built as cubic B-splines over the same control
+    // points, which is a different curve (a B-spline does not pass through its
+    // control points) and one segment shorter per strand at each end.
+    const bool isLinear = (curve.mType == oka::Curve::Type::eLinear);
 
-    std::vector<int> segmentIndices;
-    uint32_t offsetInsideCurveArray = 0;
-    for (uint32_t curveIndex = 0; curveIndex < numCurves; ++curveIndex)
+    rcurve->isLinear = isLinear;
+    rcurve->segmentsPerStrand = curve.mSegmentsPerStrand;
+
+    const std::vector<uint32_t>& vertexCounts = mScene->getCurvesVertexCounts();
+    // The sidecar reader computes this too. Checking rather than trusting it
+    // costs one pass over the strand counts at load, and the failure it catches
+    // -- a strand coordinate that walks off the end of a strand -- is otherwise
+    // a subtle shading gradient rather than anything that looks like a bug.
+    const uint32_t recomputed = oka::curve_layout::segmentsPerStrand(
+        vertexCounts, curve.mVertexCountsStart, curve.mVertexCountsCount, isLinear);
+    if (recomputed != curve.mSegmentsPerStrand)
     {
-        const std::vector<uint32_t>& vertexCounts = mScene->getCurvesVertexCounts();
-        const uint32_t numControlPoints = vertexCounts[curve.mVertexCountsStart + curveIndex];
-        const int segmentsCount = numControlPoints - degree;
-        for (int i = 0; i < segmentsCount; ++i)
-        {
-            int index = curve.mPointsStart + offsetInsideCurveArray + i;
-            segmentIndices.push_back(index);
-        }
-        offsetInsideCurveArray += numControlPoints;
+        STRELKA_WARNING("Curve set reports {} segments per strand but its counts imply {}; using the counts",
+                        curve.mSegmentsPerStrand, recomputed);
+        rcurve->segmentsPerStrand = recomputed;
+    }
+
+    const std::vector<int> segmentIndices = oka::curve_layout::segmentIndices(
+        vertexCounts, curve.mVertexCountsStart, curve.mVertexCountsCount, curve.mPointsStart, isLinear);
+
+    if (segmentIndices.empty())
+    {
+        STRELKA_WARNING("Curve set has no segment long enough to build");
+        return rcurve;
     }
 
     const size_t segmentIndicesSize = sizeof(int) * segmentIndices.size();
@@ -323,18 +345,12 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
 
     OptixBuildInput curve_input = {};
     curve_input.type = OPTIX_BUILD_INPUT_TYPE_CURVES;
-    switch (degree)
-    {
-    case 1:
-        curve_input.curveArray.curveType = OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR;
-        break;
-    case 2:
-        curve_input.curveArray.curveType = OPTIX_PRIMITIVE_TYPE_ROUND_QUADRATIC_BSPLINE;
-        break;
-    case 3:
-        curve_input.curveArray.curveType = OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE;
-        break;
-    }
+    curve_input.curveArray.curveType =
+        isLinear ? OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR : OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE;
+    // Spherical caps on linear strands, matching Metal (CurveEndCapsSphere) and
+    // Cycles' thick round curves: without them a strand is an open tube and a
+    // ray down its axis goes straight through the tip.
+    curve_input.curveArray.endcapFlags = isLinear ? OPTIX_CURVE_ENDCAP_ON : OPTIX_CURVE_ENDCAP_DEFAULT;
 
     curve_input.curveArray.numPrimitives = segmentIndices.size();
     CUdeviceptr vertexBuffers[] = { mPointsBuffer->getPtr() };
@@ -566,23 +582,127 @@ void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
                                 gas_buffer_sizes.outputSizeInBytes, &gas_handle, nullptr, 0));
 }
 
-void OptiXRender::updateBottomLevelAccelerationStructures()
+/// Rebuild one skeletal BLAS from scratch, into the storage it already has.
+///
+/// A refit keeps the tree the mesh had when it was built and only moves the
+/// bounds, so a character that walks far enough from its bind pose ends up
+/// traversing a tree that no longer fits it. A rebuild restores the quality,
+/// and the input has not changed shape -- same vertex and index counts, same
+/// flags -- so it produces a structure of exactly the same size and can go
+/// straight back into the same buffer, with no allocation and no free.
+///
+/// The handle is returned by the build and is compared rather than assumed: a
+/// GAS handle that moved invalidates every instance that names it, which is a
+/// TLAS rebuild rather than a refit.
+bool OptiXRender::rebuildMesh(const oka::Mesh& mesh, int optixMeshesId)
 {
-    // update BLAS for meshes
-    const auto& meshes = mScene->getMeshes();
-    int index = 0;
-    for (const auto& mesh : meshes)
+    OptixTraversableHandle& gas_handle = mOptixMeshes[optixMeshesId]->gas_handle;
+    CUdeviceptr d_gas_output_buffer = mOptixMeshes[optixMeshesId]->d_gas_output_buffer;
+
+    OptixAccelBuildOptions accel_options = {};
+    accel_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_BUILD | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
+
+    const CUdeviceptr vertexBuffer = mVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
+    const CUdeviceptr indexBuffer = mIndexBuffer->getPtr() + mesh.mIndex * sizeof(uint32_t);
+
+    const uint32_t triangle_input_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+    OptixBuildInput triangle_input = {};
+    triangle_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+    triangle_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
+    triangle_input.triangleArray.numVertices = mesh.mVertexCount;
+    triangle_input.triangleArray.vertexBuffers = &vertexBuffer;
+    triangle_input.triangleArray.vertexStrideInBytes = sizeof(oka::Scene::Vertex);
+    triangle_input.triangleArray.indexBuffer = indexBuffer;
+    triangle_input.triangleArray.indexFormat = OptixIndicesFormat::OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+    triangle_input.triangleArray.indexStrideInBytes = sizeof(uint32_t) * 3;
+    triangle_input.triangleArray.numIndexTriplets = mesh.mCount / 3;
+    triangle_input.triangleArray.flags = triangle_input_flags;
+    triangle_input.triangleArray.numSbtRecords = 1;
+
+    OptixAccelBufferSizes gas_buffer_sizes;
+    OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &accel_options, &triangle_input, 1, &gas_buffer_sizes));
+
+    if (!mTempAccelBuffer || mTempAccelBuffer->size() < gas_buffer_sizes.tempSizeInBytes)
     {
-        if (mesh.isSkeletal)
-        {
-            updateMesh(mesh, index);
-        }
-        ++index;
+        mTempAccelBuffer.reset(new OptixBuffer(gas_buffer_sizes.tempSizeInBytes));
     }
+
+    const OptixTraversableHandle before = gas_handle;
+    OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &triangle_input, 1,
+                                mTempAccelBuffer->getPtr(), gas_buffer_sizes.tempSizeInBytes, d_gas_output_buffer,
+                                gas_buffer_sizes.outputSizeInBytes, &gas_handle, nullptr, 0));
+    return gas_handle != before;
+}
+
+/// Refit every skeletal BLAS, and fully rebuild a bounded slice of them.
+///
+/// The policy this replaces was a blanket rebuild of *every* acceleration
+/// structure in the scene -- static geometry included, which never moves --
+/// on every tenth animation update. That is a stall proportional to the whole
+/// scene once every ten frames, to fix drift in a handful of skinned meshes,
+/// and the counter it was driven by measured update count rather than anything
+/// about the geometry.
+///
+/// Instead, the same round-robin Metal uses: the rebuild budget moves through
+/// the skeletal meshes a few per frame, so every one of them is rebuilt within
+/// a bounded number of frames and no single frame pays for all of them.
+///
+/// Returns whether any BLAS handle moved, which the caller needs because an
+/// instance naming a stale handle cannot be fixed by refitting the TLAS.
+bool OptiXRender::updateBottomLevelAccelerationStructures()
+{
+    const auto& meshes = mScene->getMeshes();
+    size_t rebuiltThisFrame = 0;
+    bool handlesChanged = false;
+
+    for (size_t index = 0; index < meshes.size(); ++index)
+    {
+        if (!meshes[index].isSkeletal)
+        {
+            continue;
+        }
+        if (rebuiltThisFrame < kMaxBlasRebuildsPerFrame && index >= mNextBlasRebuildIndex)
+        {
+            handlesChanged |= rebuildMesh(meshes[index], static_cast<int>(index));
+            ++rebuiltThisFrame;
+            mNextBlasRebuildIndex = index + 1;
+        }
+        else
+        {
+            updateMesh(meshes[index], static_cast<int>(index));
+        }
+    }
+
+    // The pass ran out of meshes before it ran out of budget, so the next one
+    // starts over at the front.
+    if (rebuiltThisFrame < kMaxBlasRebuildsPerFrame)
+    {
+        mNextBlasRebuildIndex = 0;
+    }
+    return handlesChanged;
 }
 
 void OptiXRender::resolveInstanceGeometry(OptixInstance& oi, const oka::Instance& instance) const
 {
+    // Whether this instance can skip the shadow any-hit entirely.
+    //
+    // Per instance rather than scene-wide, because the scene-wide question
+    // ("is there a cutout anywhere") is always yes in a forest and would drag
+    // trunks, rocks and ground into the alpha callback with the needles. Curves
+    // are always opaque: a strand has no uv to test.
+    bool opaque = true;
+    if (instance.type == oka::Instance::Type::eMesh)
+    {
+        const auto& materials = mScene->getMaterials();
+        const uint32_t materialId = (instance.mMaterialId == (uint32_t)-1) ? 0u : instance.mMaterialId;
+        if (materialId < materials.size())
+        {
+            opaque = materials[materialId].params.alpha_mode == ALPHA_MODE_OPAQUE;
+        }
+    }
+    oi.flags = opaque ? OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT : OPTIX_INSTANCE_FLAG_NONE;
+
     switch (instance.type)
     {
     case oka::Instance::Type::eMesh:
@@ -622,7 +742,23 @@ void OptiXRender::uploadInstancesToDevice(const std::vector<OptixInstance>& opti
 
 void OptiXRender::createTopLevelAccelerationStructure()
 {
-    mMotionTransformBuffers.clear();
+    // A full rebuild can change the instance count, and the SBT is indexed by
+    // instance -- `sbtOffset = index * RAY_TYPE_COUNT` -- so every record after
+    // the change points at the wrong geometry, and any beyond the end of the
+    // table is read out of bounds. The SBT was built once at frame 0 and never
+    // again, so this was live for every scene that adds or removes an instance.
+    // A refit cannot change the count, which is why updateTopLevelAcceleration-
+    // Structure() does not set this.
+    mSbtDirty = true;
+
+    // The motion transforms are pooled rather than reallocated. Each animated
+    // instance needs one OptixMatrixMotionTransform of device memory, and this
+    // used to cudaMalloc a fresh one per instance on every rebuild and free the
+    // previous set -- an allocation and a free per animated instance per frame,
+    // on a path that already runs once per frame while an animation plays. The
+    // buffers are all the same size and their contents are overwritten anyway,
+    // so the pool only ever grows to the largest frame's instance count.
+    size_t motionTransformCursor = 0;
 
     const std::vector<oka::Instance>& instances = mScene->getInstances();
 
@@ -653,15 +789,19 @@ void OptiXRender::createTopLevelAccelerationStructure()
             memcpy(matrixMotionTransform.transform[1],
                    glm::value_ptr(glm::float3x4(glm::rowMajor4(instance.transform))), sizeof(float) * 12);
 
-            auto motionTransformBuffer = std::make_shared<OptixBuffer>(sizeof(OptixMatrixMotionTransform));
+            if (motionTransformCursor >= mMotionTransformBuffers.size())
+            {
+                mMotionTransformBuffers.push_back(
+                    std::make_shared<OptixBuffer>(sizeof(OptixMatrixMotionTransform)));
+            }
+            const std::shared_ptr<OptixBuffer>& motionTransformBuffer =
+                mMotionTransformBuffers[motionTransformCursor++];
             CUDA_CHECK(cudaMemcpy(motionTransformBuffer->getNativePtr(), &matrixMotionTransform,
                                   sizeof(OptixMatrixMotionTransform), cudaMemcpyHostToDevice));
 
             OPTIX_CHECK(optixConvertPointerToTraversableHandle(mState.context, motionTransformBuffer->getPtr(),
                                                                OPTIX_TRAVERSABLE_TYPE_MATRIX_MOTION_TRANSFORM,
                                                                &matrixMotionTransformHandle));
-
-            mMotionTransformBuffers.push_back(motionTransformBuffer);
 
             // No transform on the instance - the motion transform handles it
             const float trafoIdentity[12] = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
@@ -679,6 +819,7 @@ void OptiXRender::createTopLevelAccelerationStructure()
     }
 
     uploadInstancesToDevice(optixInstances);
+    mTlasInstanceCount = optixInstances.size();
 
     // Setup IAS build input
     OptixBuildInput iasInput = {};
@@ -853,8 +994,9 @@ void OptiXRender::createModule()
             (OPTIX_EXCEPTION_FLAG_USER | OPTIX_EXCEPTION_FLAG_TRACE_DEPTH | OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW) :
             OPTIX_EXCEPTION_FLAG_NONE;
     pipelineOptions.pipelineLaunchParamsVariableName = "params";
-    pipelineOptions.usesPrimitiveTypeFlags =
-        OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE | OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BSPLINE;
+    pipelineOptions.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE |
+                                             OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BSPLINE |
+                                             OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_LINEAR;
     pipelineOptions.pipelineLaunchParamsSizeInBytes = sizeof(Params);
 
     // Load and create main module (raygen, miss, occlusion, light hit).
@@ -888,13 +1030,22 @@ void OptiXRender::createModule()
     mState.pipeline_compile_options = pipelineOptions;
     mState.module_compile_options = moduleOptions;
 
-    // Create curve module
+    // Create curve modules. One intersector per basis: the basis is compiled
+    // into the built-in intersection program, so a scene that mixes linear and
+    // cubic strands needs both, selected per instance in the SBT.
     OptixBuiltinISOptions builtinOptions = {};
     builtinOptions.buildFlags = OPTIX_BUILD_FLAG_NONE;
     builtinOptions.builtinISModuleType = OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE;
 
     OPTIX_CHECK(optixBuiltinISModuleGet(
         mState.context, &moduleOptions, &pipelineOptions, &builtinOptions, &mState.m_catromCurveModule));
+
+    builtinOptions.builtinISModuleType = OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR;
+    // The intersector has to know the strands were built with end caps, or it
+    // will not test them and every strand loses its tip.
+    builtinOptions.curveEndcapFlags = OPTIX_CURVE_ENDCAP_ON;
+    OPTIX_CHECK(optixBuiltinISModuleGet(
+        mState.context, &moduleOptions, &pipelineOptions, &builtinOptions, &mState.m_linearCurveModule));
 }
 
 void OptiXRender::createProgramGroups()
@@ -942,6 +1093,14 @@ void OptiXRender::createProgramGroups()
                                             &program_group_options, log, &sizeof_log, &radiance_hit_group));
     mState.radiance_default_hit_group = radiance_hit_group;
 
+    // Same closest hit, the linear intersector.
+    hit_prog_group_desc.hitgroup.moduleIS = mState.m_linearCurveModule;
+    sizeof_log = sizeof(log);
+    OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &hit_prog_group_desc,
+                                            1, // num program groups
+                                            &program_group_options, log, &sizeof_log,
+                                            &mState.radiance_linear_curve_hit_group));
+
     OptixProgramGroupDesc light_hit_prog_group_desc = {};
     light_hit_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     light_hit_prog_group_desc.hitgroup.moduleCH = mState.ptx_module;
@@ -957,14 +1116,29 @@ void OptiXRender::createProgramGroups()
     hit_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     hit_prog_group_desc.hitgroup.moduleCH = mState.ptx_module;
     hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__occlusion";
+    // The alpha test for shadow rays. It lives beside the material lookup in the
+    // closest-hit module rather than with the occlusion closest hit, which is
+    // the whole point of a hit group being able to mix modules. Instances whose
+    // material is opaque carry OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT and never
+    // reach it, so a forest floor is not dragged into the callback with the
+    // leaves.
+    hit_prog_group_desc.hitgroup.moduleAH = mState.closest_hit_module;
+    hit_prog_group_desc.hitgroup.entryFunctionNameAH = "__anyhit__occlusion";
 
     hit_prog_group_desc.hitgroup.moduleIS = mState.m_catromCurveModule;
     hit_prog_group_desc.hitgroup.entryFunctionNameIS = 0; // automatically supplied for built-in module
 
     sizeof_log = sizeof(log);
-    OPTIX_CHECK(optixProgramGroupCreate(mState.context, &hit_prog_group_desc,
-                                        1, // num program groups
-                                        &program_group_options, log, &sizeof_log, &mState.occlusion_hit_group));
+    OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &hit_prog_group_desc,
+                                            1, // num program groups
+                                            &program_group_options, log, &sizeof_log, &mState.occlusion_hit_group));
+
+    hit_prog_group_desc.hitgroup.moduleIS = mState.m_linearCurveModule;
+    sizeof_log = sizeof(log);
+    OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &hit_prog_group_desc,
+                                            1, // num program groups
+                                            &program_group_options, log, &sizeof_log,
+                                            &mState.occlusion_linear_curve_hit_group));
 }
 
 void OptiXRender::createPipeline()
@@ -976,8 +1150,10 @@ void OptiXRender::createPipeline()
     program_groups.push_back(mState.raygen_prog_group);
     program_groups.push_back(mState.radiance_miss_group);
     program_groups.push_back(mState.radiance_default_hit_group);
+    program_groups.push_back(mState.radiance_linear_curve_hit_group);
     program_groups.push_back(mState.occlusion_miss_group);
     program_groups.push_back(mState.occlusion_hit_group);
+    program_groups.push_back(mState.occlusion_linear_curve_hit_group);
     program_groups.push_back(mState.light_hit_group);
 
     OptixPipelineLinkOptions pipeline_link_options = {};
@@ -1019,6 +1195,7 @@ void OptiXRender::createSbt()
     if (mState.sbt.hitgroupRecordBase)
         CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mState.sbt.hitgroupRecordBase)));
     mState.sbt = {};
+    mSbtDirty = false;
 
     // Create raygen record
     CUdeviceptr raygen_record;
@@ -1078,6 +1255,10 @@ void OptiXRender::createSbt()
         {
             const oka::Instance& instance = instances[i];
             const uint32_t material_idx = (instance.mMaterialId == (uint32_t)-1) ? 0u : instance.mMaterialId;
+            // A linear curve set needs the linear intersector; everything else,
+            // triangles included, keeps the cubic one it has always had.
+            const bool linearCurve = instance.type == oka::Instance::Type::eCurve &&
+                                     mOptixCurves[instance.mCurveId]->isLinear;
 
             // Radiance hit group
             HitGroupSbtRecord& radiance_hit = hit_groups[i * RAY_TYPE_COUNT + RAY_TYPE_RADIANCE];
@@ -1089,7 +1270,9 @@ void OptiXRender::createSbt()
             }
             else
             {
-                OPTIX_CHECK(optixSbtRecordPackHeader(mState.radiance_default_hit_group, &radiance_hit));
+                OPTIX_CHECK(optixSbtRecordPackHeader(
+                    linearCurve ? mState.radiance_linear_curve_hit_group : mState.radiance_default_hit_group,
+                    &radiance_hit));
                 radiance_hit.data.lightId = -1;
             }
 
@@ -1104,10 +1287,22 @@ void OptiXRender::createSbt()
                 radiance_hit.data.indexOffset = mesh.mIndex;
                 radiance_hit.data.vertexOffset = mesh.mVbOffset;
             }
+            else if (instance.type == oka::Instance::Type::eCurve)
+            {
+                radiance_hit.data.curveSegmentsPerStrand = mOptixCurves[instance.mCurveId]->segmentsPerStrand;
+            }
 
-            // Occlusion hit group
+            // Occlusion hit group. It carries the same payload as the radiance
+            // one, which it did not use to: the shadow any-hit needs the
+            // material to know whether the surface is a cutout, and the index
+            // and vertex offsets to find the uv it must test. Left at zero, a
+            // cutout shadow ray read triangle 0 of mesh 0 for every hit.
             HitGroupSbtRecord& occlusion_hit = hit_groups[i * RAY_TYPE_COUNT + RAY_TYPE_OCCLUSION];
-            OPTIX_CHECK(optixSbtRecordPackHeader(mState.occlusion_hit_group, &occlusion_hit));
+            OPTIX_CHECK(optixSbtRecordPackHeader(
+                linearCurve ? mState.occlusion_linear_curve_hit_group : mState.occlusion_hit_group,
+                &occlusion_hit));
+            occlusion_hit.data = radiance_hit.data;
+            occlusion_hit.data.lightId = -1;
         }
     }
 
@@ -1386,6 +1581,63 @@ void OptiXRender::applySkinning()
     }
 }
 
+// Bounding-box diagonal of the skinned vertices, read back from the GPU.
+//
+// It exists because a character collapsing to a point is invisible to every
+// whole-frame metric: a skeleton that never got its joint matrices renders as a
+// speck at the origin, which is small next to its surroundings, so coverage and
+// mean brightness barely move. The CI smoke test greps the line the CLI prints
+// from this, so it has to fail loudly rather than return something plausible.
+//
+// -1 when nothing in the scene is skinned, which is the base class's "cannot
+// answer"; -2 when a skinned position came back non-finite, because a NaN in
+// the vertex buffer is a different fault from a collapse and reporting it as a
+// zero extent would send the reader after the wrong one.
+float OptiXRender::skinnedGeometryExtent()
+{
+    size_t first = SIZE_MAX, last = 0;
+    for (const auto& m : mScene->getMeshes())
+    {
+        if (!m.isSkeletal)
+            continue;
+        first = std::min(first, (size_t)m.mVbOffset);
+        last = std::max(last, (size_t)m.mVbOffset + (size_t)m.mVertexCount);
+    }
+    if (first == SIZE_MAX || !mVertexBuffer)
+    {
+        return -1.0f;
+    }
+
+    // The skinning kernel writes into whichever buffer is current, and with
+    // motion blur on applySkinning() swaps the two every frame -- so reading
+    // mVertexBuffer unconditionally is right, and reading the other one would
+    // report the previous pose half the time.
+    const size_t count = last - first;
+    const size_t bytes = count * sizeof(oka::Scene::Vertex);
+    if (count == 0 || mVertexBuffer->size() < (first + count) * sizeof(oka::Scene::Vertex))
+    {
+        return -1.0f;
+    }
+
+    std::vector<oka::Scene::Vertex> host(count);
+    CUDA_CHECK(cudaMemcpy(host.data(),
+                          reinterpret_cast<const void*>(mVertexBuffer->getPtr() +
+                                                        first * sizeof(oka::Scene::Vertex)),
+                          bytes, cudaMemcpyDeviceToHost));
+
+    glm::float3 lo(1e30f), hi(-1e30f);
+    for (const auto& v : host)
+    {
+        if (!std::isfinite(v.pos.x) || !std::isfinite(v.pos.y) || !std::isfinite(v.pos.z))
+        {
+            return -2.0f; // non-finite: a different fault from a collapse
+        }
+        lo = glm::min(lo, v.pos);
+        hi = glm::max(hi, v.pos);
+    }
+    return glm::length(hi - lo);
+}
+
 void OptiXRender::allocJointMatrices()
 {
     size_t jointMatSize = 0;
@@ -1464,6 +1716,16 @@ void OptiXRender::render(Buffer* output)
         // Instance transforms changed outside the animation path
         createTopLevelAccelerationStructure();
     }
+    if (any(changes & ChangeBits::Materials))
+    {
+        // The bit was consumed and nothing acted on it, so every material edit
+        // made after load -- everything the editor's material panel does -- was
+        // dropped on the floor: the device-side MaterialParams array is only
+        // ever written by createOptixMaterials(), which ran once at frame 0.
+        // Instance flags are derived from alpha_mode, so the TLAS has to follow.
+        createOptixMaterials();
+        createTopLevelAccelerationStructure();
+    }
     if (any(changes & (ChangeBits::Lights | ChangeBits::Transforms | ChangeBits::Materials)))
     {
         mScene->consumeChanges();
@@ -1494,46 +1756,50 @@ void OptiXRender::render(Buffer* output)
         }
     }
 
-    // AS refit/reduild
+    // Acceleration structure refit / rebuild.
+    //
+    // What decides between them is now a property of the structure rather than
+    // a frame counter: a BLAS is refit unless it is this frame's turn in the
+    // round-robin, and the TLAS is refit unless something a refit cannot express
+    // has changed -- an instance count, or a child handle that moved under it.
+    //
+    // Motion blur is the exception on both. A motion GAS is built from two
+    // vertex buffers and OPTIX_BUILD_OPERATION_UPDATE would have to be given the
+    // same motion options and both buffers again; a motion IAS is built without
+    // ALLOW_UPDATE at all. Both are rebuilt outright, which is what they already
+    // did and why this branch is kept rather than merged.
     if (animStateChanged)
     {
+        bool tlasNeedsRebuild = mEnableMotionBlur;
         if (accelStructureDirty)
         {
-            // blas refit/reduild + tlas rebuild
             applySkinning();
-            if (mScene->blasUpdateCount < 10)
+            if (mEnableMotionBlur)
             {
-                if (mEnableMotionBlur)
-                    createBottomLevelAccelerationStructures();
-                else
-                    updateBottomLevelAccelerationStructures();
-                mScene->blasUpdateCount++;
+                createBottomLevelAccelerationStructures();
             }
             else
             {
-                createBottomLevelAccelerationStructures();
-                mScene->blasUpdateCount = 0;
+                tlasNeedsRebuild |= updateBottomLevelAccelerationStructures();
             }
+        }
+
+        // An instance the TLAS does not have yet cannot be refit into it.
+        tlasNeedsRebuild |= mScene->getInstances().size() != mTlasInstanceCount;
+
+        if (tlasNeedsRebuild)
+        {
             createTopLevelAccelerationStructure();
-            mScene->tlasUpdateCount = 0;
         }
         else
         {
-            // tlas refit/reduild, blas untouched
-            if (mScene->tlasUpdateCount < 10)
-            {
-                if (mEnableMotionBlur)
-                    createTopLevelAccelerationStructure();
-                else
-                    updateTopLevelAccelerationStructure();
-                mScene->tlasUpdateCount++;
-            }
-            else
-            {
-                createTopLevelAccelerationStructure();
-                mScene->tlasUpdateCount = 0;
-            }
+            updateTopLevelAccelerationStructure();
         }
+    }
+
+    if (mSbtDirty)
+    {
+        createSbt();
     }
 
     const uint32_t outputWidth = output->width();
@@ -2061,12 +2327,15 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName, oka::optix
         }
     }
 
-    // Track resources for cleanup
+    // Tracked in the *material* set, not the general one: these are released and
+    // reloaded whenever createOptixMaterials() runs again, which is what makes an
+    // edited material reach the GPU. The general set holds the environment, which
+    // a material reload must not free.
     if (res.array)
-        mTextureArrays.push_back(res.array);
+        mMaterialTextureArrays.push_back(res.array);
     if (res.mipmapped)
-        mTextureMipmappedArrays.push_back(res.mipmapped);
-    mTextureObjects.push_back(res.object);
+        mMaterialTextureMipmappedArrays.push_back(res.mipmapped);
+    mMaterialTextureObjects.push_back(res.object);
 
     return Texture(res.object,
                    make_uint3((uint32_t)payload.plan.extent.width, (uint32_t)payload.plan.extent.height, 1),
@@ -2262,8 +2531,25 @@ void OptiXRender::loadEnvBackground(const std::string& texturePath)
     STRELKA_INFO("Loaded env background: {} ({}x{})", texturePath, width, height);
 }
 
+void OptiXRender::destroyMaterialTextures()
+{
+    for (auto obj : mMaterialTextureObjects)
+        if (obj) cudaDestroyTextureObject(obj);
+    mMaterialTextureObjects.clear();
+
+    for (auto arr : mMaterialTextureArrays)
+        if (arr) cudaFreeArray(arr);
+    mMaterialTextureArrays.clear();
+
+    for (auto arr : mMaterialTextureMipmappedArrays)
+        if (arr) cudaFreeMipmappedArray(arr);
+    mMaterialTextureMipmappedArrays.clear();
+}
+
 void OptiXRender::destroyTextures()
 {
+    destroyMaterialTextures();
+
     for (auto obj : mTextureObjects)
         if (obj) cudaDestroyTextureObject(obj);
     mTextureObjects.clear();
@@ -2285,6 +2571,11 @@ bool OptiXRender::createOptixMaterials()
         STRELKA_WARNING("No materials in scene");
         return true;
     }
+
+    // Every texture this function loads is loaded again below, so the previous
+    // set is released first. Without this a material edit -- which now really
+    // does re-run this -- leaks a full copy of the scene's textures each time.
+    destroyMaterialTextures();
 
     const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");
     const fs::path resourcePath(resourcePathStr);

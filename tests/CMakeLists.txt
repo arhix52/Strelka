@@ -63,6 +63,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_transform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_upload_plan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_accel_build_policy.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_curve_layout.cpp
 )
 strelka_apply_warnings(unit_tests)
 
