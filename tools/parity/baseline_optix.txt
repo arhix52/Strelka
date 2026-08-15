@@ -1,0 +1,41 @@
+scene                    vs Cycles rel/ratio   vs Metal rel     recorded
+------------------------------------------------------------------------------
+00_calibration           0.035 / 0.973         0.040            0.021 / 1.010
+01_srgb_texture          0.163 / 1.120         0.170            0.026 / 1.004
+02_basecolor             0.057 / 0.952         0.056            0.022 / 1.003
+03_roughness             0.045 / 0.971         0.049            0.024 / 1.015
+04_metal                 0.166 / 0.842         0.151            0.055 / 0.986
+05_anisotropy            0.237 / 0.772         0.239            0.061 / 1.007
+06_normalmap             0.108 / 0.962         0.144            0.071 / 1.061
+07_alpha_clip            0.287 / 1.221         0.278            0.025 / 1.018
+08_alpha_blend           0.154 / 1.050         0.150            0.024 / 1.016
+09_glass_ior             0.142 / 0.869         0.147            0.059 / 1.012
+10_glass_absorption      0.144 / 1.004         0.148            0.038 / 1.012
+11_emission              0.086 / 0.924         0.089            0.017 / 1.004
+12_lights_punctual       0.392 / 0.608         0.393            0.031 / 1.002
+13_uv2_vcol              0.131 / 1.083         0.133            0.024 / 1.010
+14_sheen                 0.070 / 0.974         0.050            0.053 / 1.016
+15_clearcoat             0.070 / 0.942         0.067            0.037 / 1.002
+16_iridescence           0.050 / 0.964         0.053            0.023 / 1.010
+17_coated_glass          0.150 / 0.860         0.141            0.067 / 0.994
+18_bounded_volume        0.249 / 0.759         0.254            0.027 / 1.000
+19_env_and_light         8.774 / 9.774         8.778            0.026 / 1.000
+20_mirror_and_floor      0.444 / 0.779         0.413            0.034 / 1.038
+21_specular_color        0.051 / 0.971         0.052            0.030 / 1.018
+22_thin_walled           0.167 / 0.838         0.137            0.094 / 0.966
+23_diffuse_transmission  0.158 / 0.851         0.158            0.012 / 1.000
+24_orthographic          1.028 / 0.279         1.025            0.024 / 1.009
+25_subsurface            0.352 / 0.653         0.357            0.056 / 1.009
+26_dof                   0.053 / 0.956         0.062            0.024 / 1.015
+27_ies                   0.786 / 0.407         0.780            0.028 / 1.021
+28_hair                  0.105 / 0.904         0.117            0.033 / 1.012
+
+29 graded, 0 failed
+
+Recorded on the revived OptiX backend at commit 402e9c7, RTX 4090 / OptiX 9.1 /
+CUDA 13.3, at 64 spp rather than each scene's own budget -- so part of every `rel`
+here is sampling noise, and the ratios are the trustworthy column.
+
+Read 00_calibration first: 0.973 against a recorded 1.010 means this backend is
+about 4% dark before any feature is considered, and that offset is inside every
+other row below.
