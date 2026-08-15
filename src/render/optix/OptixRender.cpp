@@ -16,6 +16,8 @@
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include <stb_image_resize.h>
 
 #define TINYEXR_IMPLEMENTATION
 #include <tinyexr.h>
@@ -27,6 +29,17 @@
 #include <sutil/Matrix.h>
 
 #include "texture_support_cuda.h"
+#include "accel_build_policy.h"
+
+// accel_build_policy.h mirrors OptixBuildFlags so that it -- and its tests --
+// need no OptiX SDK. This is where the mirror is held to the original.
+static_assert((uint32_t)oka::optix_accel::kFlagNone == (uint32_t)OPTIX_BUILD_FLAG_NONE);
+static_assert((uint32_t)oka::optix_accel::kFlagAllowUpdate == (uint32_t)OPTIX_BUILD_FLAG_ALLOW_UPDATE);
+static_assert((uint32_t)oka::optix_accel::kFlagAllowCompaction == (uint32_t)OPTIX_BUILD_FLAG_ALLOW_COMPACTION);
+static_assert((uint32_t)oka::optix_accel::kFlagPreferFastTrace == (uint32_t)OPTIX_BUILD_FLAG_PREFER_FAST_TRACE);
+static_assert((uint32_t)oka::optix_accel::kFlagPreferFastBuild == (uint32_t)OPTIX_BUILD_FLAG_PREFER_FAST_BUILD);
+static_assert((uint32_t)oka::optix_accel::kFlagAllowRandomVertexAccess ==
+              (uint32_t)OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS);
 
 #include <filesystem>
 #include <array>
@@ -230,6 +243,17 @@ void OptiXRender::createContext()
     CUcontext cu_ctx = 0; // zero means take the current context
     OPTIX_CHECK(optixDeviceContextCreate(cu_ctx, &options, &mState.context));
 
+    // Ask whether optixReorder() does anything here before paying for its
+    // coherence key. The call is documented as a no-op on hardware without the
+    // sorting unit, so this is not a correctness gate -- it is what keeps two
+    // dependent loads per bounce off a machine that cannot spend them.
+    unsigned int reorderFlags = 0;
+    OPTIX_CHECK(optixDeviceContextGetProperty(mState.context,
+                                              OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING,
+                                              &reorderFlags, sizeof(reorderFlags)));
+    mShaderReorderSupported = (reorderFlags & OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING_FLAG_STANDARD) != 0;
+    STRELKA_INFO("Shader execution reordering: {}", mShaderReorderSupported ? "supported" : "not available");
+
     mState.mParamsBuffer.reset(new OptixBuffer(sizeof(Params)));
 }
 
@@ -266,8 +290,7 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
 {
     auto rcurve = std::make_unique<Curve>();
     OptixAccelBuildOptions accel_options = {};
-    accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS |
-                               OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    accel_options.buildFlags = oka::optix_accel::buildFlags(oka::optix_accel::Geometry::Curve);
     accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
 
     const uint32_t pointsCount = mScene->getCurvesPoint().size(); // total points count in points buffer
@@ -371,11 +394,17 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
     OptixTraversableHandle gas_handle;
     CUdeviceptr d_gas_output_buffer;
 
+    // A static mesh no longer asks for ALLOW_UPDATE. Nothing refits one --
+    // updateBottomLevelAccelerationStructures() skips every mesh that is not
+    // skeletal -- and a refittable structure is built with a topology that
+    // survives being moved rather than one built to be traced, which costs both
+    // memory and traversal for a capability this class of geometry never uses.
+    const oka::optix_accel::Geometry geometryClass =
+        isSkeletal ? oka::optix_accel::Geometry::SkinnedMesh : oka::optix_accel::Geometry::StaticMesh;
+
     OptixAccelBuildOptions accel_options = {};
     accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
-    accel_options.buildFlags = isSkeletal ?
-        (OPTIX_BUILD_FLAG_PREFER_FAST_BUILD | OPTIX_BUILD_FLAG_ALLOW_UPDATE) :
-        (OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_UPDATE);
+    accel_options.buildFlags = oka::optix_accel::buildFlags(geometryClass);
 
     constexpr int PREV_VB = 0;
     constexpr int CURR_VB = 1;
@@ -439,7 +468,7 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
 
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
 
-    if (isSkeletal)
+    if (!oka::optix_accel::shouldCompact(geometryClass))
     {
         OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &triangle_input, 1,
                                     mTempAccelBuffer->getPtr(), gas_buffer_sizes.tempSizeInBytes, d_gas_output_buffer,
@@ -495,9 +524,11 @@ void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
     OptixTraversableHandle& gas_handle = mOptixMeshes[optixMeshesId]->gas_handle;
     CUdeviceptr& d_gas_output_buffer = mOptixMeshes[optixMeshesId]->d_gas_output_buffer;
 
-    // Configure acceleration structure build options
+    // The same flags the structure was built with. An update reads its output
+    // buffer as the result of a build with exactly these; spelling them a second
+    // time here is how they came to disagree.
     OptixAccelBuildOptions accel_options = {};
-    accel_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_BUILD | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    accel_options.buildFlags = oka::optix_accel::updateFlags(oka::optix_accel::Geometry::SkinnedMesh);
     accel_options.operation = OPTIX_BUILD_OPERATION_UPDATE;
 
     const CUdeviceptr vertexBuffer = mVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
@@ -522,8 +553,16 @@ void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
     OptixAccelBufferSizes gas_buffer_sizes;
     OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &accel_options, &triangle_input, 1, &gas_buffer_sizes));
 
+    // An update has its own scratch requirement, which is the one to honour
+    // here; tempSizeInBytes is what a full build of the same input would need.
+    const size_t updateTempSize = gas_buffer_sizes.tempUpdateSizeInBytes;
+    if (!mTempAccelBuffer || mTempAccelBuffer->size() < updateTempSize)
+    {
+        mTempAccelBuffer.reset(new OptixBuffer(updateTempSize));
+    }
+
     OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &triangle_input, 1,
-                                mTempAccelBuffer->getPtr(), gas_buffer_sizes.tempSizeInBytes, d_gas_output_buffer,
+                                mTempAccelBuffer->getPtr(), updateTempSize, d_gas_output_buffer,
                                 gas_buffer_sizes.outputSizeInBytes, &gas_handle, nullptr, 0));
 }
 
@@ -647,13 +686,18 @@ void OptiXRender::createTopLevelAccelerationStructure()
     iasInput.instanceArray.instances = mState.d_instances;
     iasInput.instanceArray.numInstances = static_cast<int>(optixInstances.size());
 
-    // Setup IAS build options
+    // With motion blur on, the instance structure is rebuilt every frame rather
+    // than refit -- the motion transforms it points at are rewritten -- so it
+    // takes the static flags and is compacted. Without it, the structure is refit
+    // as transforms move, and a refittable structure must not be compacted: an
+    // update reads its output buffer as the build's own output, at the build's
+    // own size, and optixAccelCompact replaces both. That is what this code used
+    // to do, and it then refit the compacted copy in place.
+    const oka::optix_accel::Geometry tlasClass =
+        mEnableMotionBlur ? oka::optix_accel::Geometry::StaticTlas : oka::optix_accel::Geometry::RefittableTlas;
+
     OptixAccelBuildOptions iasOptions = {};
-    if (mEnableMotionBlur)
-        iasOptions.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
-    else
-        iasOptions.buildFlags =
-            OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    iasOptions.buildFlags = oka::optix_accel::buildFlags(tlasClass);
     iasOptions.motionOptions.numKeys = 1;
     iasOptions.operation = OPTIX_BUILD_OPERATION_BUILD;
 
@@ -678,6 +722,8 @@ void OptiXRender::createTopLevelAccelerationStructure()
         mCompactedSizeBuffer.reset(new OptixBuffer(sizeof(uint64_t)));
     }
 
+    const bool compactTlas = oka::optix_accel::shouldCompact(tlasClass);
+
     // Setup compaction property
     OptixAccelEmitDesc property = {};
     property.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
@@ -687,9 +733,18 @@ void OptiXRender::createTopLevelAccelerationStructure()
     OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &iasOptions, &iasInput,
                                 1, // num build inputs
                                 mTempAccelBuffer->getPtr(), iasBufferSizes.tempSizeInBytes, mTlasBuffer->getPtr(),
-                                outputBufferSize, &mState.ias_handle, &property,
-                                1 // num emitted properties
+                                outputBufferSize, &mState.ias_handle, compactTlas ? &property : nullptr,
+                                compactTlas ? 1 : 0 // num emitted properties
                                 ));
+
+    if (!compactTlas)
+    {
+        // The refittable case. mTlasBuffer holds the build's own output at the
+        // build's own size, which is what updateTopLevelAccelerationStructure()
+        // needs to find there.
+        mTlasOutputSize = outputBufferSize;
+        return;
+    }
 
     // Compact acceleration structure
     size_t compactedSize;
@@ -707,7 +762,9 @@ void OptiXRender::createTopLevelAccelerationStructure()
 
         // Replace old buffer with compacted one
         mTlasBuffer = std::move(compactedBuffer);
+        outputBufferSize = compactedSize;
     }
+    mTlasOutputSize = outputBufferSize;
 }
 
 void oka::OptiXRender::updateTopLevelAccelerationStructure()
@@ -735,9 +792,12 @@ void oka::OptiXRender::updateTopLevelAccelerationStructure()
     iasInput.instanceArray.instances = mState.d_instances;
     iasInput.instanceArray.numInstances = static_cast<int>(optixInstances.size());
 
-    // Setup IAS build (refit) options
+    // The flags the refittable structure was built with -- not a second guess at
+    // them. They used to read PREFER_FAST_BUILD here against a build that said
+    // PREFER_FAST_TRACE | ALLOW_COMPACTION, and an update is documented against
+    // the build's own flags.
     OptixAccelBuildOptions iasOptions = {};
-    iasOptions.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_BUILD | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    iasOptions.buildFlags = oka::optix_accel::updateFlags(oka::optix_accel::Geometry::RefittableTlas);
     iasOptions.motionOptions.numKeys = 1;
     iasOptions.operation = OPTIX_BUILD_OPERATION_UPDATE;
 
@@ -745,17 +805,22 @@ void oka::OptiXRender::updateTopLevelAccelerationStructure()
     OptixAccelBufferSizes iasBufferSizes;
     OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &iasOptions, &iasInput, 1, &iasBufferSizes));
 
-    // Reuse temporary buffers if large enough, otherwise allocate new ones
-    if (!mTempAccelBuffer || mTempAccelBuffer->size() < iasBufferSizes.tempSizeInBytes)
+    // Reuse temporary buffers if large enough, otherwise allocate new ones.
+    // An update has its own scratch requirement; tempSizeInBytes is a full
+    // build's.
+    const size_t updateTempSize = iasBufferSizes.tempUpdateSizeInBytes;
+    if (!mTempAccelBuffer || mTempAccelBuffer->size() < updateTempSize)
     {
-        mTempAccelBuffer.reset(new OptixBuffer(iasBufferSizes.tempSizeInBytes));
+        mTempAccelBuffer.reset(new OptixBuffer(updateTempSize));
     }
 
-    // Build (refit) IAS
+    // Build (refit) IAS. The output size is the size the build wrote, which is
+    // not mTlasBuffer->size(): that buffer is reused across scenes and only ever
+    // grows.
     OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &iasOptions, &iasInput,
                                 1, // num build inputs
-                                mTempAccelBuffer->getPtr(), iasBufferSizes.tempSizeInBytes, mTlasBuffer->getPtr(),
-                                mTlasBuffer->size(), &mState.ias_handle, nullptr,
+                                mTempAccelBuffer->getPtr(), updateTempSize, mTlasBuffer->getPtr(),
+                                mTlasOutputSize, &mState.ias_handle, nullptr,
                                 0 // num emitted properties
                                 ));
 }
@@ -1558,6 +1623,12 @@ void OptiXRender::render(Buffer* output)
     params.shadowRayTmin = settings.getAs<float>("render/pt/dev/shadowRayTmin");
     params.materialRayTmin = settings.getAs<float>("render/pt/dev/materialRayTmin");
     params.misHeuristic = settings.getAs<uint32_t>("render/pt/misHeuristic");
+    // A kill switch on top of the capability: reordering cannot change an
+    // image, so the only reason to turn it off on hardware that has it is to
+    // measure what it is worth.
+    params.enableShaderReorder =
+        mShaderReorderSupported &&
+        (!settings.contains("render/pt/shaderReorder") || settings.getAs<bool>("render/pt/shaderReorder"));
 
     // Estimator controls. Each one resets accumulation when it moves, because the
     // frames before and after are estimates of different things (estimatorMode,
@@ -1918,71 +1989,88 @@ void OptiXRender::createLightBuffer()
     createOrUpdateBuffer(mLightBuffer, mScene->getLights());
 }
 
-Texture OptiXRender::loadTextureFromFile(const std::string& fileName)
+oka::optix_tex::DecodeSettings OptiXRender::textureDecodeSettings() const
 {
-    int texWidth, texHeight, texChannels;
-    stbi_uc* data = stbi_load(fileName.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-    if (!data)
+    // Read through contains(): getAs() on a key nobody set logs an error and
+    // asserts, and these four are optional -- a host that never sets them should
+    // get the documented default, not a diagnostic per texture.
+    const SettingsManager* s = getSettings();
+    oka::optix_tex::DecodeSettings settings;
+    if (s->contains("render/texture/maxDimension"))
+        settings.maxDimension = s->getAs<uint32_t>("render/texture/maxDimension");
+    if (s->contains("render/texture/downscale"))
+        settings.downscale = std::max(1u, s->getAs<uint32_t>("render/texture/downscale"));
+    if (s->contains("render/texture/compress"))
+        settings.blockCompress = s->getAs<bool>("render/texture/compress");
+    // Mip chains cost a third of the texture memory and buy nothing until a
+    // level is selected: `tex2D` from a ray tracing program has no derivatives,
+    // so it reads level 0. Off until ray-cone LOD asks for them, which is what
+    // `render/texture/mips` is for.
+    if (s->contains("render/texture/mips"))
+        settings.wantMips = s->getAs<bool>("render/texture/mips");
+    return settings;
+}
+
+Texture OptiXRender::loadTextureFromFile(const std::string& fileName, oka::optix_tex::Kind kind)
+{
+    namespace tex = oka::optix_tex;
+
+    const tex::DecodeSettings settings = textureDecodeSettings();
+    const std::string cacheDir = getSettings()->contains("render/texture/cachePath") ?
+                                     getSettings()->getAs<std::string>("render/texture/cachePath") :
+                                     std::string();
+    const std::string cacheFile =
+        cacheDir.empty() ?
+            std::string() :
+            (fs::path(cacheDir) /
+             tex::cacheKey(fileName, kind, settings.maxDimension, settings.downscale, settings.blockCompress,
+                           settings.wantMips))
+                .string();
+
+    tex::Payload payload = tex::readCachedPayload(cacheFile);
+    if (!payload.valid)
     {
-        STRELKA_ERROR("Unable to load texture from file: {}", fileName.c_str());
-        return Texture();
+        payload = tex::decodeToPayload(fileName, kind, settings);
+        if (!payload.valid)
+        {
+            STRELKA_ERROR("Unable to load texture from file: {}", fileName.c_str());
+            return Texture();
+        }
+        writeCachedPayload(payload, cacheFile);
     }
-    // TODO: add compression here to save gpu mem
+    (payload.fromCache ? mTextureCacheHits : mTextureCacheMisses)++;
 
-    const void* dataPtr = data;
-
-    cudaChannelFormatDesc channel_desc = cudaCreateChannelDesc<uchar4>();
-    cudaResourceDesc res_desc{};
-    memset(&res_desc, 0, sizeof(res_desc));
-
-    cudaArray_t device_tex_array;
-    CUDA_CHECK(cudaMallocArray(&device_tex_array, &channel_desc, texWidth, texHeight));
-
-    CUDA_CHECK(cudaMemcpy2DToArray(device_tex_array, 0, 0, dataPtr, texWidth * sizeof(char) * 4,
-                                   texWidth * sizeof(char) * 4, texHeight, cudaMemcpyHostToDevice));
-
-    res_desc.resType = cudaResourceTypeArray;
-    res_desc.res.array.array = device_tex_array;
-
-    // Create filtered texture object
-    cudaTextureDesc tex_desc;
-    memset(&tex_desc, 0, sizeof(tex_desc));
-    cudaTextureAddressMode addr_mode = cudaAddressModeWrap;
-    tex_desc.addressMode[0] = addr_mode;
-    tex_desc.addressMode[1] = addr_mode;
-    tex_desc.addressMode[2] = addr_mode;
-    tex_desc.filterMode = cudaFilterModeLinear;
-    tex_desc.readMode = cudaReadModeNormalizedFloat;
-    tex_desc.normalizedCoords = 1;
-    if (res_desc.resType == cudaResourceTypeMipmappedArray)
+    tex::TextureResources res = tex::createTexture(payload);
+    if (res.object == 0)
     {
-        tex_desc.mipmapFilterMode = cudaFilterModeLinear;
-        tex_desc.maxAnisotropy = 16;
-        tex_desc.minMipmapLevelClamp = 0.f;
-        tex_desc.maxMipmapLevelClamp = 1000.f; // default value in OpenGL
+        // A compressed upload that the driver refuses should cost this texture
+        // its compression, not the render. Retry once, uncompressed, so that a
+        // scene still shades rather than losing a map to a format decision.
+        if (isCompressed(payload.plan.format) && settings.blockCompress)
+        {
+            STRELKA_WARNING("Block-compressed upload failed for {}, retrying uncompressed", fileName.c_str());
+            tex::DecodeSettings fallback = settings;
+            fallback.blockCompress = false;
+            payload = tex::decodeToPayload(fileName, kind, fallback);
+            res = tex::createTexture(payload);
+        }
+        if (res.object == 0)
+        {
+            STRELKA_ERROR("Unable to upload texture: {}", fileName.c_str());
+            return Texture();
+        }
     }
-    cudaTextureObject_t tex_obj = 0;
-    CUDA_CHECK(cudaCreateTextureObject(&tex_obj, &res_desc, &tex_desc, nullptr));
-    // Create unfiltered texture object if necessary (cube textures have no texel functions)
-    cudaTextureObject_t tex_obj_unfilt = 0;
-    // if (texture_shape != mi::neuraylib::ITarget_code::Texture_shape_cube)
-    {
-        // Use a black border for access outside of the texture
-        tex_desc.addressMode[0] = cudaAddressModeBorder;
-        tex_desc.addressMode[1] = cudaAddressModeBorder;
-        tex_desc.addressMode[2] = cudaAddressModeBorder;
-        tex_desc.filterMode = cudaFilterModePoint;
-
-        CUDA_CHECK(cudaCreateTextureObject(&tex_obj_unfilt, &res_desc, &tex_desc, nullptr));
-    }
-    stbi_image_free(data);
 
     // Track resources for cleanup
-    mTextureArrays.push_back(device_tex_array);
-    mTextureObjects.push_back(tex_obj);
-    mTextureObjects.push_back(tex_obj_unfilt);
+    if (res.array)
+        mTextureArrays.push_back(res.array);
+    if (res.mipmapped)
+        mTextureMipmappedArrays.push_back(res.mipmapped);
+    mTextureObjects.push_back(res.object);
 
-    return Texture(tex_obj, tex_obj_unfilt, make_uint3(texWidth, texHeight, 1));
+    return Texture(res.object,
+                   make_uint3((uint32_t)payload.plan.extent.width, (uint32_t)payload.plan.extent.height, 1),
+                   payload.plan.levels);
 }
 
 void OptiXRender::loadEnvMap(const std::string& texturePath)
@@ -2183,6 +2271,10 @@ void OptiXRender::destroyTextures()
     for (auto arr : mTextureArrays)
         if (arr) cudaFreeArray(arr);
     mTextureArrays.clear();
+
+    for (auto arr : mTextureMipmappedArrays)
+        if (arr) cudaFreeMipmappedArray(arr);
+    mTextureMipmappedArrays.clear();
 }
 
 bool OptiXRender::createOptixMaterials()
@@ -2200,24 +2292,26 @@ bool OptiXRender::createOptixMaterials()
     // Host-side storage for all texture objects (flat array: mat[0].tex[0..5], mat[1].tex[0..5], ...)
     std::vector<cudaTextureObject_t> allTexObjects(matDescs.size() * MAX_MATERIAL_TEXTURES, 0);
 
-    // Cache: file path -> texture object (avoid loading the same file twice)
+    // Cache: file path + how it is read -> texture object. The kind is part of
+    // the key: the same file used as a base colour and as a roughness map is two
+    // different textures, because only one of them is sRGB encoded.
     std::unordered_map<std::string, cudaTextureObject_t> texCache;
 
-    auto loadOrCacheTex = [&](const std::string& relPath) -> cudaTextureObject_t {
+    auto loadOrCacheTex = [&](const std::string& relPath, oka::optix_tex::Kind kind) -> cudaTextureObject_t {
         if (relPath.empty())
             return 0;
         fs::path fullPath = resourcePath / relPath;
-        std::string key = fullPath.string();
+        std::string key = fullPath.string() + "|" + std::to_string((int)kind);
         auto it = texCache.find(key);
         if (it != texCache.end())
             return it->second;
         if (!fs::exists(fullPath))
         {
-            STRELKA_WARNING("Texture not found: {}", key);
+            STRELKA_WARNING("Texture not found: {}", fullPath.string());
             texCache[key] = 0;
             return 0;
         }
-        ::Texture tex = loadTextureFromFile(key);
+        ::Texture tex = loadTextureFromFile(fullPath.string(), kind);
         cudaTextureObject_t obj = tex.filtered_object;
         texCache[key] = obj;
         return obj;
@@ -2233,23 +2327,28 @@ bool OptiXRender::createOptixMaterials()
         // Copy material params (we'll update texture indices)
         MaterialParams params = desc.params;
 
-        // Load textures from file paths, assign slots
-        texSlots[0] = loadOrCacheTex(desc.baseColorTexPath);
+        // Load textures from file paths, assign slots. The kind per slot is the
+        // same split the Metal backend makes: base colour and emission are sRGB
+        // encoded, everything else is linear data that a transfer function would
+        // corrupt, and a normal map is a direction rather than a colour at all.
+        texSlots[0] = loadOrCacheTex(desc.baseColorTexPath, oka::optix_tex::Kind::Color);
         params.base_color_tex = texSlots[0] ? 0 : -1;
 
-        texSlots[1] = loadOrCacheTex(desc.metallicRoughnessTexPath);
+        texSlots[1] = loadOrCacheTex(desc.metallicRoughnessTexPath, oka::optix_tex::Kind::NonColor);
         params.metallic_roughness_tex = texSlots[1] ? 1 : -1;
 
-        texSlots[2] = loadOrCacheTex(desc.normalTexPath);
+        texSlots[2] = loadOrCacheTex(desc.normalTexPath, oka::optix_tex::Kind::Normal);
         params.normal_tex = texSlots[2] ? 2 : -1;
 
-        texSlots[3] = loadOrCacheTex(desc.emissionTexPath);
+        texSlots[3] = loadOrCacheTex(desc.emissionTexPath, oka::optix_tex::Kind::Color);
         params.emission_tex = texSlots[3] ? 3 : -1;
 
-        texSlots[4] = loadOrCacheTex(desc.occlusionTexPath);
+        texSlots[4] = loadOrCacheTex(desc.occlusionTexPath, oka::optix_tex::Kind::NonColor);
         params.occlusion_tex = texSlots[4] ? 4 : -1;
 
-        // Slot 5 reserved for transmission texture (not yet populated by gltf loader)
+        // Slot 5 is the transmission texture. Scene::MaterialDescription has no
+        // field for it, so the glTF loader has nothing to hand over and the slot
+        // stays empty; adding it is a loader change, reported as a hand-off.
         params.transmission_tex = -1;
 
         mMaterials[i].params = params;
@@ -2277,6 +2376,7 @@ bool OptiXRender::createOptixMaterials()
     mState.params.materials = (MaterialParams*)mMaterialParamsBuffer->getPtr();
     mState.params.materialTextures = (cudaTextureObject_t*)mTexturesDataBuffer->getPtr();
 
-    STRELKA_INFO("Loaded {} materials ({} unique textures cached)", matDescs.size(), texCache.size());
+    STRELKA_INFO("Loaded {} materials ({} unique textures, {} cache hits, {} decoded)", matDescs.size(),
+                 texCache.size(), mTextureCacheHits, mTextureCacheMisses);
     return true;
 }

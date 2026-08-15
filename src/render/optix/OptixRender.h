@@ -13,6 +13,7 @@
 #include "OptixBuffer.h"
 #include "OptixDenoiser.h"
 #include "optix_denoise_plan.h"
+#include "texture_upload_plan.h"
 
 struct Texture;
 
@@ -108,6 +109,7 @@ private:
     PathTracerState mState;
     bool mEnableValidation;
     bool mEnableMotionBlur;
+    bool mShaderReorderSupported = false;
 
     // Previous-frame settings for change detection (replaces static locals in render())
     uint32_t mPrevRectLightSamplingMethod = 0;
@@ -140,6 +142,10 @@ private:
     std::vector<std::shared_ptr<OptixBuffer>> mMotionTransformBuffers; // used for motion blur
 
     std::unique_ptr<OptixBuffer> mTlasBuffer;
+    // Bytes the last instance-structure build actually wrote. Not the same as
+    // mTlasBuffer->size(): that buffer is reused across scenes and only grows,
+    // and a refit has to be told the size of the structure inside it.
+    size_t mTlasOutputSize = 0;
 
     std::unique_ptr<OptixBuffer> mTexturesDataBuffer; // Consolidated GPU texture object array
 
@@ -161,7 +167,8 @@ private:
 
     void createLightBuffer();
 
-    Texture loadTextureFromFile(const std::string& fileName);
+    oka::optix_tex::DecodeSettings textureDecodeSettings() const;
+    Texture loadTextureFromFile(const std::string& fileName, oka::optix_tex::Kind kind);
     void loadEnvMap(const std::string& texturePath);
     void loadEnvBackground(const std::string& texturePath);
 
@@ -172,7 +179,10 @@ private:
 
     // Texture resource tracking for cleanup
     std::vector<cudaArray_t> mTextureArrays;
+    std::vector<cudaMipmappedArray_t> mTextureMipmappedArrays;
     std::vector<cudaTextureObject_t> mTextureObjects;
+    uint32_t mTextureCacheHits = 0;
+    uint32_t mTextureCacheMisses = 0;
 
     // Environment map resources
     std::unique_ptr<OptixBuffer> mEnvAliasBuffer; // Walker/Vose alias table, one entry per texel
