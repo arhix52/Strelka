@@ -33,7 +33,8 @@ jobs:
           # everywhere, including inside build.sh.
           python3 -m venv "$HOME/conan-venv"
           "$HOME/conan-venv/bin/python" -m pip install --upgrade pip
-          "$HOME/conan-venv/bin/python" -m pip install "conan>=2,<3"
+          # numpy is for the smoke check below, which reads the rendered EXR back.
+          "$HOME/conan-venv/bin/python" -m pip install "conan>=2,<3" numpy
           echo "$HOME/conan-venv/bin" >> "$GITHUB_PATH"
           "$HOME/conan-venv/bin/conan" --version
 
@@ -71,9 +72,26 @@ jobs:
       - name: CLI smoke (no golden images)
         working-directory: build/Release
         run: |
+          # Exposure is stated rather than defaulted, and the output is an EXR
+          # that gets read back. The old form rendered at the default
+          # ISO 100 / f4 / 1/100s through the ACES curve, which underflows this
+          # scene to exactly zero in 8-bit, and then asserted only that the file
+          # was non-empty -- so it passed on an entirely black image, and would
+          # have gone on passing if the renderer stopped tracing altogether.
           ./StrelkaCLI ../../scenes/validation/cornell_box/cornell_box.glb \
-            -o /tmp/strelka_smoke.png -w 64 --height 48 --spp 4
-          test -s /tmp/strelka_smoke.png
+            -o /tmp/strelka_smoke.exr -w 64 --height 48 --spp 16 \
+            --tonemap none --exposure-iso 100
+          test -s /tmp/strelka_smoke.exr
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, "../../tools/feature_tests")
+          from exr_io import load_exr
+          a = load_exr("/tmp/strelka_smoke.exr")
+          lit = 100.0 * (a.sum(-1) > 1e-6).mean()
+          print("smoke: mean %.5f  max %.4f  lit %.1f%%" % (a.mean(), a.max(), lit))
+          if a.mean() <= 1e-4:
+              sys.exit("the cornell box came out black")
+          PY
 
       - name: Skinning smoke (BrainStem mid-pose)
         working-directory: build/Release
