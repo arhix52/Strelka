@@ -34,6 +34,12 @@ if(WIN32 OR LINUX)
     add_library(strelka_display STATIC ${DISPLAY_SOURCES})
     strelka_apply_warnings(strelka_display)
 
+    # The OpenGL display does CUDA graphics interop, so its translation units see
+    # CUDA's vector types alongside the shared material headers. The two have to
+    # agree on which float3 they mean -- see the note in material_params.h. PRIVATE
+    # so it does not leak to unit_tests, which links this library but wants GLM.
+    target_compile_definitions(strelka_display PRIVATE STRELKA_MATERIAL_CUDA_HOST)
+
     target_include_directories(strelka_display
         PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/include

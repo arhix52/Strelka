@@ -99,10 +99,23 @@ SUTIL_INLINE SUTIL_HOSTDEVICE float min(const float a, const float b)
 }
 
 /** lerp */
+// libstdc++'s <math.h> hoists std::lerp into the global namespace in C++20, so on
+// a host compiler this declaration is a hard redeclaration conflict rather than
+// an overload -- which is what stopped the OptiX backend building with GCC 15.
+// std::lerp computes the same thing, so where it exists, defer to it. Device
+// code still needs this definition: nvcc has no std::lerp.
+#if defined(__CUDACC__) || !defined(__cpp_lib_interpolate)
 SUTIL_INLINE SUTIL_HOSTDEVICE float lerp(const float a, const float b, const float t)
 {
   return a + t*(b-a);
 }
+#else
+// Bring the standard one into this namespace so bilerp() and callers below keep
+// resolving unqualified `lerp`. Repeating the using-declaration <math.h> already
+// performs is well-formed; declaring a second function with the same signature,
+// which is what used to happen here, is not.
+using std::lerp;
+#endif
 
 /** bilerp */
 SUTIL_INLINE SUTIL_HOSTDEVICE float bilerp(const float x00, const float x10, const float x01, const float x11,

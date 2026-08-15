@@ -452,6 +452,18 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<float>("render/post/tonemapper/maxEDR", 1.0f);
     m_settings->setAs<float>("render/post/gamma", m_config.gamma);
 
+    // Keys the OptiX backend reads that only EditorApp::loadSettings() used to
+    // write. getAs() on a missing key logs, asserts and returns a default, so
+    // headless renders were silently taking whatever zero happened to mean while
+    // printing three errors per sample. Same values the editor uses.
+    m_settings->setAs<uint32_t>("render/pt/misHeuristic", 0); // 0 = balance, 1 = power
+    m_settings->setAs<float>("render/pt/dev/shadowRayTmin", 0.0f);
+    m_settings->setAs<float>("render/pt/dev/materialRayTmin", 0.0f);
+    // Read once in OptiXRender::init(). Off for a headless render: OptiX
+    // validation mode drops the optimisation level and is a debugging tool.
+    m_settings->setAs<bool>("render/enableValidation", false);
+    m_settings->setAs<bool>("render/enableMotionBlur", false);
+
     for (size_t i = 0; i < m_scene->getAnimations().size(); ++i)
     {
         m_settings->setAs<bool>(animationStateKey(i), false);
@@ -516,7 +528,7 @@ void HeadlessApp::saveOutput(Buffer* buf)
         std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4);
         for (uint32_t i = 0; i < w * h; ++i)
         {
-            oka::tonemap::float3 c = simd_make_float3(data[i * 4 + 0], data[i * 4 + 1], data[i * 4 + 2]) * exposure;
+            oka::tonemap::float3 c = oka::tonemap::make_float3(data[i * 4 + 0], data[i * 4 + 1], data[i * 4 + 2]) * exposure;
             switch (static_cast<oka::tonemap::ToneMapperType>(curve))
             {
             case oka::tonemap::ToneMapperType::eReinhard:

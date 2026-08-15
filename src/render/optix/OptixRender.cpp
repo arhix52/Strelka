@@ -36,6 +36,7 @@
 #include <cstdlib>
 
 #include <log.h>
+#include <paths.h>
 
 #include <postprocessing/Tonemappers.h>
 #include <skinning/skinning.h>
@@ -87,7 +88,13 @@ static inline void optixCheckLog(OptixResult res,
     {
         const char* errorName = optixGetErrorName(res);
         const char* errorString = optixGetErrorString(res);
-        STRELKA_FATAL("OptiX call {0} failed: {1}:{2} : result={3} ({4}) log={5}", call, file, line, errorName, errorString, log);
+        // OptiX reports how much log it wanted to write. Saying so matters here:
+        // a module that fails to compile produces far more than the 16 KB buffer
+        // holds, and silently printing the first 16 KB has sent people looking at
+        // the wrong error more than once.
+        const char* truncated = (sizeof_log_returned > sizeof_log) ? " [log truncated]" : "";
+        STRELKA_FATAL("OptiX call {0} failed: {1}:{2} : result={3} ({4}) log={5}{6}", call, file, line, errorName,
+                      errorString, log, truncated);
         std::abort();
     }
 }
@@ -265,7 +272,7 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
 
     std::vector<int> segmentIndices;
     uint32_t offsetInsideCurveArray = 0;
-    for (int curveIndex = 0; curveIndex < numCurves; ++curveIndex)
+    for (uint32_t curveIndex = 0; curveIndex < numCurves; ++curveIndex)
     {
         const std::vector<uint32_t>& vertexCounts = mScene->getCurvesVertexCounts();
         const uint32_t numControlPoints = vertexCounts[curve.mVertexCountsStart + curveIndex];
@@ -580,7 +587,7 @@ void OptiXRender::createTopLevelAccelerationStructure()
     std::vector<OptixInstance> optixInstances;
     optixInstances.reserve(instances.size());
 
-    for (int instID = 0; instID < instances.size(); ++instID)
+    for (size_t instID = 0; instID < instances.size(); ++instID)
     {
         const auto& instance = instances[instID];
         OptixInstance oi = {};
@@ -781,8 +788,15 @@ void OptiXRender::createModule()
         OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE | OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BSPLINE;
     pipelineOptions.pipelineLaunchParamsSizeInBytes = sizeof(Params);
 
-    // Load and create main module (raygen, miss, occlusion, light hit)
-    const fs::path optixPath = fs::current_path() / "optix/strelka_shaders_generated_OptixRender.cu.optixir";
+    // Load and create main module (raygen, miss, occlusion, light hit).
+    //
+    // Resolved against the executable, not the working directory: the build system
+    // drops the OPTIXIR next to the binary (see CMAKE_RUNTIME_OUTPUT_DIRECTORY in
+    // the root CMakeLists), and resolving against the CWD meant the renderer only
+    // started when launched from the build root -- so a debugger, Finder, or any
+    // harness that cd'd elsewhere got an unexplained "failed to open" instead.
+    // This is the same resolveResourcePath() the Metal backend uses for metallibs.
+    const fs::path optixPath = oka::resolveResourcePath("optix/strelka_shaders_generated_OptixRender.cu.optixir");
     std::string optixSource;
     readSourceFile(optixSource, optixPath);
 
@@ -792,7 +806,8 @@ void OptiXRender::createModule()
                                       optixSource.size(), log, &sizeof_log, &mState.ptx_module));
 
     // Load closest-hit module (radiance closest hit with BSDF evaluation)
-    const fs::path closestHitPath = fs::current_path() / "optix/strelka_shaders_generated_OptixRender_closest_hit.cu.optixir";
+    const fs::path closestHitPath =
+        oka::resolveResourcePath("optix/strelka_shaders_generated_OptixRender_closest_hit.cu.optixir");
     std::string closestHitSource;
     readSourceFile(closestHitSource, closestHitPath);
 
@@ -959,7 +974,9 @@ void OptiXRender::createSbt()
 
     // Occlusion miss record
     MissSbtRecord& occlusion_miss = miss_records[RAY_TYPE_OCCLUSION];
-    occlusion_miss.data = { 0.0f, 0.0f, 0.0f };
+    // Named rather than brace-initialised: MissData wraps a float3, so `{0,0,0}`
+    // needs a nested brace and only ever compiled by accident.
+    occlusion_miss.data.bg_color = make_float3(0.0f);
     OPTIX_CHECK(optixSbtRecordPackHeader(mState.occlusion_miss_group, &occlusion_miss));
 
     CUDA_CHECK(cudaMemcpy(
@@ -991,7 +1008,7 @@ void OptiXRender::createSbt()
         for (size_t i = 0; i < instances.size(); i++)
         {
             const oka::Instance& instance = instances[i];
-            const int material_idx = instance.mMaterialId == -1 ? 0 : instance.mMaterialId;
+            const uint32_t material_idx = (instance.mMaterialId == (uint32_t)-1) ? 0u : instance.mMaterialId;
 
             // Radiance hit group
             HitGroupSbtRecord& radiance_hit = hit_groups[i * RAY_TYPE_COUNT + RAY_TYPE_RADIANCE];
@@ -1217,7 +1234,7 @@ void OptiXRender::render(Buffer* output)
     bool accelStructureDirty = false;
     if (mEnableMotionBlur)
         mPrevInstances.swap(mScene->getInstances());
-    for (int i = 0; i < animations.size(); ++i)
+    for (size_t i = 0; i < animations.size(); ++i)
     {
         const std::string scrollNameStr = "render/animation/anim" + std::to_string(i) + "/time";
         const char* scrollName = scrollNameStr.c_str();

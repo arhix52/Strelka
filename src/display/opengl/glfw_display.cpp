@@ -35,7 +35,11 @@ const char* getGLErrorString(GLenum error)
     }
 }
 
-void glCheck(const char* call, const char* file, unsigned int line)
+// Reachable only through GL_CHECK below, which nothing wraps a call in yet --
+// the macro is here for when the OpenGL display starts being exercised on Linux.
+// Marked rather than deleted so the diagnostic survives until then; -Werror
+// otherwise makes an unused static function fatal on GCC.
+[[maybe_unused]] void glCheck(const char* call, const char* file, unsigned int line)
 {
     const GLenum err = glGetError();
     if (err != GL_NO_ERROR)

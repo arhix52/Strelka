@@ -10,20 +10,44 @@
 // material_math.h because that conflicts with CUDA's vector_types.h on host.
 // Consumers that need math utilities should include material_math.h separately.
 
-// Ensure float3 is available on every platform:
+// Ensure float3 is available on every platform.
+//
+// The host uses GLM whether or not CUDA happens to be installed. This used to
+// branch on __has_include(<cuda_runtime.h>) and pull in CUDA's vector_types.h
+// for "CUDA host code", which made the *same* host translation unit see two
+// different float3: material_math.h's CPU branch typedefs glm::vec3, and then
+// this header re-declared it as CUDA's struct. On macOS there is no CUDA header
+// to find, so the contradiction was invisible; on Linux it broke every
+// translation unit that included both -- all of tests/material, test_scene and
+// test_light_json -- with "using typedef-name after struct".
+//
+// The one host translation unit set that genuinely wants CUDA's float3 is the
+// OptiX backend's own .cpp files, which also include sutil and build the launch
+// Params out of make_float3. Those opt in explicitly with
+// STRELKA_MATERIAL_CUDA_HOST, set on the strelka_render target. Detecting it by
+// probing for the header instead meant the choice depended on whether CUDA
+// happened to be installed, which is why this was correct on macOS and broken on
+// every Linux box.
+//
+// MaterialParams is copied between host and device as a whole struct (see
+// OptiXRender::createOptixMaterials), never field by field, and glm::vec3 and
+// CUDA's float3 are both three unpadded floats at alignment 4 -- so both spellings
+// produce the layout the GPU reads.
 #if defined(__CUDA_ARCH__) || defined(__CUDACC__)
-    // CUDA: float3 comes from vector_types.h (included by cuda_runtime.h)
+    // CUDA device code: float3 comes from vector_types.h (via cuda_runtime.h)
 #elif defined(__METAL_VERSION__)
     // Metal: float3 is a built-in type
-#elif __has_include(<cuda_runtime.h>)
-    // CUDA host code (g++ with CUDA in include path): use CUDA's float3
+#elif defined(STRELKA_MATERIAL_CUDA_HOST)
+    // OptiX backend host code: match the device types it interoperates with.
     #include <vector_types.h>
 #else
-    // Pure CPU (tests): use GLM
+    // Everything else (tests, loaders, the Metal backend's host side): GLM
     #include <glm/glm.hpp>
     #ifndef STRELKA_MATERIAL_FLOAT_TYPES
     #define STRELKA_MATERIAL_FLOAT_TYPES
+    using float2 = glm::vec2;
     using float3 = glm::vec3;
+    using float4 = glm::vec4;
     #endif
 #endif
 

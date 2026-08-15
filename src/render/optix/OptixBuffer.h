@@ -34,6 +34,19 @@ public:
     void* map() override;
     void unmap() override;
 
+    /// Device-to-host copy, then the host copy.
+    ///
+    /// The base class hands back mHostData.data() unconditionally, which on Metal
+    /// is right -- there the buffer is shared memory and the pointer is always
+    /// live. Here mHostData stays empty until something calls map(), so a caller
+    /// that only ever asked for getHostPointer() -- HeadlessApp::saveOutput, and
+    /// therefore every headless render -- read from an empty vector and crashed
+    /// on the way out with the image already computed.
+    void* getHostPointer() override
+    {
+        return map();
+    }
+
     void* getNativePtr()
     {
         return mDeviceData;

@@ -517,6 +517,7 @@ bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType target
     {
     case AnimationChannel::PathType::TRANSLATION:
         STRELKA_DEBUG("Invalid value to animate TRANSLATION, use 1st definition");
+        break;
 
     case AnimationChannel::PathType::SCALE:
         STRELKA_DEBUG("Invalid value to animate SCALE, use 1st definition");
@@ -525,7 +526,6 @@ bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType target
     case AnimationChannel::PathType::ROTATION:
         mNodes[nodeId].rotation = newValue;
         return updateNode(nodeId);
-        break;
 
     default:
         break;

@@ -5,15 +5,34 @@
 // material_math.h -- Cross-platform math primitives for CUDA, Metal, and CPU
 // ============================================================================
 
-#if defined(__CUDA_ARCH__) || defined(__CUDACC__)
-// ---- CUDA (device code and nvcc host pass) ---------------------------------
+// STRELKA_MATERIAL_CUDA_HOST selects this branch for the OptiX backend's plain
+// g++ translation units. They are host code, but they interoperate with device
+// structs and already include CUDA's vector types and sutil, so they need the
+// same spellings the device gets -- not the GLM ones the CPU branch installs.
+// Taking the CPU branch there redefined make_float3/clamp/saturate on top of
+// CUDA's and sutil's, which is what broke the Linux build.
+#if defined(__CUDA_ARCH__) || defined(__CUDACC__) || defined(STRELKA_MATERIAL_CUDA_HOST)
+// ---- CUDA (device code, nvcc host pass, and OptiX host code) ---------------
     #ifdef __CUDA_ARCH__
     #define DEVICE_FUNC   __device__ __forceinline__
     #else
     #define DEVICE_FUNC   inline
     #endif
     // Storage class for a module-scope constant table; see sheen_albedo_lut.h.
+    //
+    // Under nvcc the table has to carry __device__ or it lands in host memory and
+    // every device function referencing it fails to resolve -- which is exactly
+    // what "identifier kSheenAlbedoLut is undefined" meant when the closest-hit
+    // module was compiled. `static` keeps it internal to the translation unit, so
+    // relocatable device code does not end up with duplicate definitions.
+    //
+    // Plain g++ building the OptiX host side reaches this branch too (see
+    // STRELKA_MATERIAL_CUDA_HOST) and does not know __device__, hence the split.
+    #if defined(__CUDACC__)
+    #define DEVICE_CONST  static __device__ const
+    #else
     #define DEVICE_CONST  static const
+    #endif
     #define THREAD_REF
     #define M_PI_F        3.14159265358979323846f
     #define M_1_PI_F      0.31830988618379067154f
@@ -132,9 +151,16 @@
     #include <cmath>
     #include <algorithm>
 
+    // Guarded with the same macro material_params.h uses, so whichever of the two
+    // is included first wins and the other is a no-op. They must agree on GLM --
+    // see the note at the top of material_params.h for what happens when they do
+    // not.
+    #ifndef STRELKA_MATERIAL_FLOAT_TYPES
+    #define STRELKA_MATERIAL_FLOAT_TYPES
     using float2 = glm::vec2;
     using float3 = glm::vec3;
     using float4 = glm::vec4;
+    #endif
 
     inline float3 make_float3(float x, float y, float z) { return float3(x, y, z); }
     inline float3 make_float3(float v)                    { return float3(v); }

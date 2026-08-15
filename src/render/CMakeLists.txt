@@ -31,12 +31,23 @@ if(WIN32 OR LINUX)
     add_library(strelka_render STATIC ${RENDER_SOURCES})
     strelka_apply_warnings(strelka_render)
 
+    # These .cpp files are host code that interoperates with device structs: they
+    # include CUDA's vector types and sutil, and build the launch Params out of
+    # make_float3. Tell the shared material headers to use the CUDA spellings here
+    # rather than the GLM ones every other host target gets.
+    target_compile_definitions(strelka_render PRIVATE STRELKA_MATERIAL_CUDA_HOST)
+
+    # SYSTEM for the trees we do not own or that are written for nvcc: sutil trips
+    # CUDA 13's longlong4 deprecation, and shaders/common is device code that a
+    # host TU necessarily leaves parts of unused. Neither is actionable here, and
+    # with -Werror on they are otherwise fatal.
     target_include_directories(strelka_render
-        PUBLIC
+        SYSTEM PUBLIC
             ${OptiX_INCLUDE}
             ${CUDAToolkit_INCLUDE_DIRS}
             ${CMAKE_SOURCE_DIR}/third_party
             ${CMAKE_SOURCE_DIR}/src/shaders/common
+        PUBLIC
             ${CMAKE_SOURCE_DIR}/src/shaders/optix
     )
 
@@ -46,6 +57,14 @@ if(WIN32 OR LINUX)
         PUBLIC
             CUDA::cudart
             CUDA::cuda_driver
+            # OptixRender.cpp calls tonemap(), cuApplySkinning() and
+            # buildEnvMapCdf(), which live in the CUDA objects archived into
+            # strelka_shaders. Linking it here rather than in each app is what
+            # makes StrelkaCLI link at all on Linux -- it never named the library,
+            # so the CUDA kernels came out undefined. On Apple strelka_shaders is
+            # a custom target instead, which is why that branch uses
+            # add_dependencies.
+            strelka_shaders
             strelka_foundation
             strelka_scene
             strelka_material

@@ -1,7 +1,5 @@
 #pragma once
 
-#include <simd/simd.h>
-
 // Compiled by the Metal compiler and by the host C++ compiler both.
 //
 // The host needs the curve because a display image has to go through it, and the
@@ -22,12 +20,31 @@ using namespace metal;
 #include <cmath>
 #include <algorithm>
 
+// The host vector type.
+//
+// Apple's simd is kept on macOS so the shipping tone curve stays bit-for-bit what
+// it has always been. Everywhere else <simd/simd.h> does not exist, and this
+// header sitting in shaders/common while being unbuildable off Apple is what kept
+// StrelkaCLI and test_tonemappers from compiling on Linux at all.
+//
+// GLM is the substitute rather than a hand-rolled vector because it is already a
+// dependency of every target that includes this, and because the operations used
+// below -- vec*vec, vec*scalar, vec+scalar, vec/vec -- are exactly the ones a
+// hand-rolled type would get subtly wrong. The arithmetic is the same scalar IEEE
+// arithmetic either way; only the storage type differs.
+#if defined(__APPLE__)
+#include <simd/simd.h>
+#define MAKE_FLOAT3(a, b, c) simd_make_float3(a, b, c)
+#else
+#include <glm/glm.hpp>
+#define MAKE_FLOAT3(a, b, c) ::oka::tonemap::float3(a, b, c)
+#endif
+
 // Namespaced on the host, unqualified on the GPU where there is nothing to
 // collide with. `float3` is already taken in this codebase -- glm has one -- so
 // injecting simd's into the global namespace turns every translation unit that
 // includes both into a pile of ambiguity errors.
 #define TONEMAP_CONST const
-#define MAKE_FLOAT3(a, b, c) simd_make_float3(a, b, c)
 #define TONEMAP_NS_BEGIN namespace oka { namespace tonemap {
 #define TONEMAP_NS_END } }
 
@@ -35,7 +52,11 @@ namespace oka
 {
 namespace tonemap
 {
+#if defined(__APPLE__)
 using float3 = simd_float3;
+#else
+using float3 = glm::vec3;
+#endif
 
 // Three columns, in the order Metal's float3x3 stores them, so `transpose(M) * v`
 // means the same thing on both sides.
@@ -48,13 +69,22 @@ struct float3x3
 
 inline float3x3 transpose(const float3x3& m)
 {
-    return { simd_make_float3(m.c0.x, m.c1.x, m.c2.x), simd_make_float3(m.c0.y, m.c1.y, m.c2.y),
-             simd_make_float3(m.c0.z, m.c1.z, m.c2.z) };
+    return { MAKE_FLOAT3(m.c0.x, m.c1.x, m.c2.x), MAKE_FLOAT3(m.c0.y, m.c1.y, m.c2.y),
+             MAKE_FLOAT3(m.c0.z, m.c1.z, m.c2.z) };
 }
 
 inline float3 operator*(const float3x3& m, const float3& v)
 {
     return m.c0 * v.x + m.c1 * v.y + m.c2 * v.z;
+}
+
+/// Build a host float3 without naming the underlying vector library.
+///
+/// Callers used to spell this `simd_make_float3`, which compiled only on Apple
+/// and is why the headless PNG path and test_tonemappers were macOS-only.
+inline float3 make_float3(float x, float y, float z)
+{
+    return MAKE_FLOAT3(x, y, z);
 }
 
 inline float saturate(float v)
@@ -63,7 +93,7 @@ inline float saturate(float v)
 }
 inline float3 saturate(const float3& v)
 {
-    return simd_make_float3(saturate(v.x), saturate(v.y), saturate(v.z));
+    return MAKE_FLOAT3(saturate(v.x), saturate(v.y), saturate(v.z));
 }
 inline bool isnan(float v)
 {
@@ -75,7 +105,11 @@ inline float pow(float a, float b)
 }
 inline float dot(const float3& a, const float3& b)
 {
+#if defined(__APPLE__)
     return simd_dot(a, b);
+#else
+    return glm::dot(a, b);
+#endif
 }
 } // namespace tonemap
 } // namespace oka

@@ -475,14 +475,18 @@ static __inline__ __device__ float spotAttenuation(const UniformLight& l, const 
         return 0.0f;
     if (cosInner <= cosOuter)
         return 1.0f;
-    return saturate((cosTheta - cosOuter) / (cosInner - cosOuter));
+    // clamp(), not saturate(): saturate lives in sutil/vec_math_adv.h, which is
+    // written for nvcc and does not compile in a plain host translation unit --
+    // and this header is reached from host code through OptixRenderParams.h.
+    // clamp() comes from vec_math.h, which is already included above.
+    return clamp((cosTheta - cosOuter) / (cosInner - cosOuter), 0.0f, 1.0f);
 }
 
 static __inline__ __device__ float rangeWindow(const UniformLight& l, float dist)
 {
     if (l.pad1 <= 0.0f)
         return 1.0f;
-    const float x = saturate(dist / l.pad1);
+    const float x = clamp(dist / l.pad1, 0.0f, 1.0f);
     const float y = 1.0f - x * x * x * x;
     return y * y;
 }

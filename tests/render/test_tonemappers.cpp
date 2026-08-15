@@ -14,7 +14,7 @@ void checkColor(const oka::tonemap::float3& actual, const oka::tonemap::float3& 
 
 TEST_CASE("EDR tone mappers retain their SDR curves at unit headroom")
 {
-    const oka::tonemap::float3 color = simd_make_float3(0.25f, 1.0f, 8.0f);
+    const oka::tonemap::float3 color = oka::tonemap::make_float3(0.25f, 1.0f, 8.0f);
 
     checkColor(oka::tonemap::reinhard(color, 1.0f), oka::tonemap::reinhard(color));
     checkColor(oka::tonemap::ACESFitted(color, 1.0f), oka::tonemap::ACESFitted(color));
@@ -24,7 +24,7 @@ TEST_CASE("EDR tone mappers retain their SDR curves at unit headroom")
 TEST_CASE("EDR tone mappers move the shoulder to display headroom")
 {
     const float headroom = 4.0f;
-    const oka::tonemap::float3 color = simd_make_float3(0.25f, 1.0f, 8.0f);
+    const oka::tonemap::float3 color = oka::tonemap::make_float3(0.25f, 1.0f, 8.0f);
     const oka::tonemap::float3 scaledColor = color * headroom;
 
     checkColor(oka::tonemap::reinhard(scaledColor, headroom), oka::tonemap::reinhard(color) * headroom);

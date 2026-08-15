@@ -40,6 +40,18 @@ static __forceinline__ __device__ bool traceOcclusion(
     return occluded;
 }
 
+/// Uniform light choice from a canonical sample, clamped to the last light.
+///
+/// The clamp is not defensive noise: u is drawn from [0, 1) but the env-map branch
+/// feeds it u*2 from a u already known to be below 0.5, and that product rounds to
+/// exactly 1.0f for the largest such u. Without the clamp that one sample indexes
+/// one past the end of the light buffer.
+static __forceinline__ __device__ uint32_t selectLightIndex(float u, uint32_t numLights)
+{
+    const uint32_t index = (uint32_t)(numLights * u);
+    return (index < numLights) ? index : (numLights - 1);
+}
+
 static __device__ float3 sampleLight(SamplerState& sampler,
                                          const UniformLight& light,
                                          const SurfaceInteraction& si,
@@ -177,7 +189,7 @@ __device__ float3 estimateDirectLighting(SamplerState& sampler,
         {
             // Sample local light (remap u from [0, 0.5) to [0, 1))
             const float remappedU = u * 2.0f;
-            const uint32_t lightId = (uint32_t)(params.scene.numLights * remappedU);
+            const uint32_t lightId = selectLightIndex(remappedU, params.scene.numLights);
             const float lightSelectionPdf = 0.5f / params.scene.numLights;
             const UniformLight& currLight = params.scene.lights[lightId];
             const float3 r = sampleLight(sampler, currLight, si, toLight, lightPdf);
@@ -187,8 +199,20 @@ __device__ float3 estimateDirectLighting(SamplerState& sampler,
     }
     else
     {
+        // A scene with neither an environment nor an analytic light has nothing to
+        // connect to. This used to fall through and divide by numLights == 0, then
+        // read lights[0] off a null device pointer -- mLightBuffer is constructed
+        // empty, so the pointer really is null rather than merely unpopulated.
+        // Returning a zero contribution with a zero pdf is what the caller already
+        // handles for a light that happens to face away.
+        if (params.scene.numLights == 0)
+        {
+            toLight = make_float3(0.0f);
+            lightPdf = 0.0f;
+            return make_float3(0.0f);
+        }
         const float u = random<SampleDimension::eLightId>(sampler);
-        const uint32_t lightId = (uint32_t)(params.scene.numLights * u);
+        const uint32_t lightId = selectLightIndex(u, params.scene.numLights);
         const float lightSelectionPdf = 1.0f / params.scene.numLights;
         const UniformLight& currLight = params.scene.lights[lightId];
         const float3 r = sampleLight(sampler, currLight, si, toLight, lightPdf);
@@ -486,9 +510,9 @@ extern "C" __global__ void __closesthit__radiance()
     if ((sample_data.event_type & BSDF_EVENT_TRANSMISSION) != 0)
     {
         if (entering)
-            ior_stack_push(prd->iorStack, si.dielectric_priority, si.ior, materialId);
+            ior_stack_push(prd->iorStack, si.dielectric_priority, si.ior, (unsigned int)matId);
         else
-            ior_stack_pop(prd->iorStack, si.dielectric_priority, materialId);
+            ior_stack_pop(prd->iorStack, si.dielectric_priority, (unsigned int)matId);
         prd->origin = offset_ray(si.position, -faceNg);
     }
     else

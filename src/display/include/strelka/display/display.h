@@ -49,15 +49,21 @@ public:
 #ifdef __APPLE__
     virtual void setNativeDevice(void* device) = 0;
     virtual void setCommandQueue(void* queue) = 0;
+#endif
 
     /// The renderer whose output this display samples. Needed only so the
     /// display can wait on the frame event when the two are on different queues;
     /// a backend that shares a queue can ignore it.
+    ///
+    /// Not inside the __APPLE__ guard above: `mRender` is declared
+    /// unconditionally and EditorApp calls this unconditionally, so guarding it
+    /// only meant the editor did not compile off Apple. The Metal-specific part
+    /// is the device/queue interop, not the pointer.
     void setRender(Render* render)
     {
         mRender = render;
     }
-#endif
+
     void setWindowTitle(const char* title)
     {
         glfwSetWindowTitle(mWindow, title);
