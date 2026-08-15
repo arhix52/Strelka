@@ -40,7 +40,10 @@
 
 #include <postprocessing/Tonemappers.h>
 #include <skinning/skinning.h>
-#include <env_cdf.h>
+
+// Backend-neutral: no Metal headers, and the same table both backends sample
+// from. See the note in loadEnvMap().
+#include "../metal/ibl_alias_table.h"
 
 #include <strelka/render/Camera.h>
 
@@ -1186,10 +1189,20 @@ void OptiXRender::render(Buffer* output)
             mState.params.envMapIntensity = mEnvMapAutoScale * envLight->intensity;
             mState.params.envMapRotation = envLight->rotationY * (M_PI / 180.0f);
             mState.params.envMapColorTint = make_float3(envLight->color.x, envLight->color.y, envLight->color.z);
+            // A backdrop the camera sees instead of the lighting environment. The
+            // intensity is the backdrop's own; the auto-calibration scale above is
+            // not applied to it, because it exists to reconcile the *lighting*
+            // map's units with the analytic lights and the backdrop lights nothing.
+            if (!envLight->backgroundTexturePath.empty())
+            {
+                loadEnvBackground((fs::path(resourcePathStr) / envLight->backgroundTexturePath).string());
+                mState.params.envBackgroundIntensity = envLight->backgroundIntensity;
+            }
         }
         else
         {
             mState.params.hasEnvMap = false;
+            mState.params.hasEnvBackground = false;
         }
 
         createVertexBuffer();
@@ -1357,6 +1370,22 @@ void OptiXRender::render(Buffer* output)
     params.shadowRayTmin = settings.getAs<float>("render/pt/dev/shadowRayTmin");
     params.materialRayTmin = settings.getAs<float>("render/pt/dev/materialRayTmin");
     params.misHeuristic = settings.getAs<uint32_t>("render/pt/misHeuristic");
+
+    // Estimator controls. Each one resets accumulation when it moves, because the
+    // frames before and after are estimates of different things (estimatorMode,
+    // clampIndirect) or drawn from different densities (risCandidates), and
+    // averaging them together hides the very difference they exist to show.
+    const uint32_t risCandidates = std::max(settings.getAs<uint32_t>("render/pt/risCandidates"), 1u);
+    const uint32_t estimatorMode = settings.getAs<uint32_t>("render/validate/estimatorMode");
+    const float clampIndirect = settings.getAs<float>("render/pt/clampIndirect");
+    if (params.risCandidates != risCandidates || params.estimatorMode != estimatorMode ||
+        params.clampIndirect != clampIndirect)
+    {
+        getSharedContext().mSubframeIndex = 0;
+    }
+    params.risCandidates = risCandidates;
+    params.estimatorMode = estimatorMode;
+    params.clampIndirect = clampIndirect;
 
     memcpy(params.viewToWorld, glm::value_ptr(glm::transpose(glm::inverse(camera.matrices.view))),
            sizeof(params.viewToWorld));
@@ -1715,14 +1744,38 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     cudaTextureObject_t envTexObj = 0;
     CUDA_CHECK(cudaCreateTextureObject(&envTexObj, &resDesc, &texDesc, nullptr));
 
+    // A second view of the same array, point-sampled in texel coordinates. The
+    // alias table is built from unfiltered texels on the host, so the sampler and
+    // the pdf have to read unfiltered texels too; a bilinear tap there makes the
+    // density the sampler draws from and the density MIS divides by disagree
+    // along every luminance edge in the map. No extra storage -- the array is
+    // shared with the filtered object above.
+    cudaTextureDesc pointDesc{};
+    pointDesc.addressMode[0] = cudaAddressModeWrap;
+    pointDesc.addressMode[1] = cudaAddressModeClamp;
+    pointDesc.filterMode = cudaFilterModePoint;
+    pointDesc.readMode = cudaReadModeElementType;
+    pointDesc.normalizedCoords = 0;
+
+    cudaTextureObject_t envTexPointObj = 0;
+    CUDA_CHECK(cudaCreateTextureObject(&envTexPointObj, &resDesc, &pointDesc, nullptr));
+
     // Track for cleanup
     mTextureArrays.push_back(envArray);
     mTextureObjects.push_back(envTexObj);
+    mTextureObjects.push_back(envTexPointObj);
 
-    // Upload raw pixel data to device for CDF construction
-    const size_t rawDataSize = (size_t)width * height * 4 * sizeof(float);
-    mEnvRawDataBuffer.reset(new OptixBuffer(rawDataSize));
-    CUDA_CHECK(cudaMemcpy((void*)mEnvRawDataBuffer->getPtr(), pixelData, rawDataSize, cudaMemcpyHostToDevice));
+    // The alias table comes from the shared host builder in
+    // render/metal/ibl_alias_table.h. It is backend-neutral (no Metal headers) and
+    // already has a unit test; reusing it rather than writing a second
+    // implementation is what makes the two backends importance-sample the same
+    // HDRI from the same distribution, which is the only way their EXRs can be
+    // compared texel for texel.
+    const auto aliasResult = metal::buildIblAliasTable(pixelData, width, height);
+    static_assert(sizeof(EnvAliasEntry) == sizeof(metal::EnvAliasEntry),
+                  "device EnvAliasEntry must match the host builder's entry");
+    static_assert(alignof(EnvAliasEntry) == alignof(metal::EnvAliasEntry),
+                  "device EnvAliasEntry must match the host builder's entry");
 
     // Free host pixel data
     if (ext == ".exr" || ext == ".EXR")
@@ -1730,44 +1783,100 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     else
         stbi_image_free(pixelData);
 
-    // Allocate CDF buffers
-    mEnvCdfXBuffer.reset(new OptixBuffer((size_t)width * height * sizeof(float)));
-    mEnvCdfYBuffer.reset(new OptixBuffer((size_t)height * sizeof(float)));
-
-    // Build CDF on GPU
-    float totalPower = 0.0f;
-    buildEnvMapCdf(
-        (const float*)mEnvRawDataBuffer->getPtr(),
-        width, height,
-        (float*)mEnvCdfXBuffer->getPtr(),
-        (float*)mEnvCdfYBuffer->getPtr(),
-        &totalPower);
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    // Free raw data buffer (no longer needed after CDF build)
-    mEnvRawDataBuffer.reset();
+    const size_t aliasBytes = aliasResult.alias.size() * sizeof(metal::EnvAliasEntry);
+    mEnvAliasBuffer.reset(new OptixBuffer(aliasBytes));
+    CUDA_CHECK(cudaMemcpy((void*)mEnvAliasBuffer->getPtr(), aliasResult.alias.data(), aliasBytes,
+                          cudaMemcpyHostToDevice));
 
     // Store env map params
     mState.params.envMapTexture = envTexObj;
-    mState.params.envCdfX = (float*)mEnvCdfXBuffer->getPtr();
-    mState.params.envCdfY = (float*)mEnvCdfYBuffer->getPtr();
+    mState.params.envMapTexturePoint = envTexPointObj;
+    mState.params.envAliasTable = (const EnvAliasEntry*)mEnvAliasBuffer->getPtr();
+    mState.params.envPdfScale = aliasResult.envPdfScale;
     mState.params.envMapWidth = width;
     mState.params.envMapHeight = height;
-    mState.params.envMapTotalPower = totalPower;
     mState.params.hasEnvMap = true;
     mEnvMapLoaded = true;
 
-    // Auto-calibrate env map to renderer's internal radiance scale.
-    // Uncalibrated HDRIs have pixel values ~0.1-100 while the renderer's
-    // light system uses intensities ~1000-10000. Scale the env map so its
-    // average weighted luminance maps to a reference that produces correct
-    // exposure with the photographic camera model.
-    const float avgWeightedLum = totalPower / (float)(width * height);
+    // Reconcile an HDRI's units with the analytic lights' units, but only when
+    // asked. The constant is arbitrary -- it maps the map's mean weighted
+    // luminance onto 1000 -- so applying it unconditionally means every scene
+    // with an environment renders at a brightness that depends on the *content*
+    // of the HDRI rather than on anything authored. On 19_env_and_light, where
+    // Blender's sky and the rect light are already in the same physical units,
+    // that put the frame 9.8x too bright. Metal drives the same constant from
+    // render/env/autoCalibrate and both headless and editor default it off.
+    const float avgWeightedLum = (float)(aliasResult.totalPower / (double)(width * height));
+    const bool autoCalibrate = getSettings()->getAs<bool>("render/env/autoCalibrate");
     const float kCalibrationTarget = 1000.0f;
-    mEnvMapAutoScale = (avgWeightedLum > 1e-6f) ? kCalibrationTarget / avgWeightedLum : 1.0f;
+    mEnvMapAutoScale = (autoCalibrate && avgWeightedLum > 1e-6f) ? kCalibrationTarget / avgWeightedLum : 1.0f;
 
-    STRELKA_INFO("Env map CDF built, total power: {}, avgLum: {:.4f}, autoScale: {:.1f}",
-                 totalPower, avgWeightedLum, mEnvMapAutoScale);
+    STRELKA_INFO(
+        "Env map alias table built: {} texels ({:.1f} MB), total power: {:.1f}, avgLum: {:.4f}, autoScale: {:.1f}",
+        aliasResult.alias.size(), aliasBytes / (1024.0 * 1024.0), aliasResult.totalPower, avgWeightedLum,
+        mEnvMapAutoScale);
+}
+
+void OptiXRender::loadEnvBackground(const std::string& texturePath)
+{
+    int width = 0, height = 0;
+    float* pixelData = nullptr;
+
+    const std::string ext = fs::path(texturePath).extension().string();
+    if (ext == ".exr" || ext == ".EXR")
+    {
+        const char* err = nullptr;
+        if (LoadEXR(&pixelData, &width, &height, texturePath.c_str(), &err) != TINYEXR_SUCCESS)
+        {
+            STRELKA_ERROR("Failed to load EXR env background: {} ({})", texturePath, err ? err : "unknown");
+            if (err)
+                FreeEXRErrorMessage(err);
+            return;
+        }
+    }
+    else
+    {
+        int channels = 0;
+        pixelData = stbi_loadf(texturePath.c_str(), &width, &height, &channels, 4);
+        if (!pixelData)
+        {
+            STRELKA_ERROR("Failed to load env background: {}", texturePath);
+            return;
+        }
+    }
+
+    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
+    cudaArray_t bgArray = nullptr;
+    CUDA_CHECK(cudaMallocArray(&bgArray, &channelDesc, width, height));
+    CUDA_CHECK(cudaMemcpy2DToArray(bgArray, 0, 0, pixelData, width * sizeof(float4), width * sizeof(float4), height,
+                                   cudaMemcpyHostToDevice));
+
+    if (ext == ".exr" || ext == ".EXR")
+        free(pixelData);
+    else
+        stbi_image_free(pixelData);
+
+    cudaResourceDesc resDesc{};
+    resDesc.resType = cudaResourceTypeArray;
+    resDesc.res.array.array = bgArray;
+
+    cudaTextureDesc texDesc{};
+    texDesc.addressMode[0] = cudaAddressModeWrap;
+    texDesc.addressMode[1] = cudaAddressModeClamp;
+    texDesc.filterMode = cudaFilterModeLinear;
+    texDesc.readMode = cudaReadModeElementType;
+    texDesc.normalizedCoords = 1;
+
+    cudaTextureObject_t bgTexObj = 0;
+    CUDA_CHECK(cudaCreateTextureObject(&bgTexObj, &resDesc, &texDesc, nullptr));
+
+    mTextureArrays.push_back(bgArray);
+    mTextureObjects.push_back(bgTexObj);
+
+    mState.params.envBackgroundTexture = bgTexObj;
+    mState.params.hasEnvBackground = true;
+
+    STRELKA_INFO("Loaded env background: {} ({}x{})", texturePath, width, height);
 }
 
 void OptiXRender::destroyTextures()

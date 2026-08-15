@@ -1,9 +1,16 @@
 #pragma once
 // Environment map (dome light) sampling utilities for OptiX shaders.
-// Provides equirectangular mapping, importance sampling via 2D CDF, and PDF evaluation.
+//
+// CUDA only, despite living under shaders/common: Metal keeps its own copy in
+// src/shaders/metal/env_light_metal.h. The two must stay behaviourally identical
+// -- both now sample from the alias table that src/render/metal/ibl_alias_table.h
+// builds on the host -- but they are separate translation units and nothing here
+// is compiled for Metal.
 
 #include <vector_types.h>
 #include <sutil/vec_math.h>
+
+#include <OptixRenderParams.h>
 
 #ifndef M_PIf
 #define M_PIf 3.14159265358979323846f
@@ -51,103 +58,95 @@ static __forceinline__ __device__ float3 envUVToDir(const float2& uv, float rota
     return make_float3(rx, y, rz);
 }
 
-// Binary search in a CDF array. Returns index i such that cdf[i-1] < xi <= cdf[i].
-// cdf: CDF array of length n (cdf[n-1] == 1.0)
-static __forceinline__ __device__ int binarySearchCdf(const float* cdf, int n, float xi)
+// Luminance used to build the sampling distribution. Must match the host weight
+// in buildIblAliasTable() exactly, or sampling and pdf disagree.
+static __forceinline__ __device__ float envLuminance(const float3& rgb)
 {
-    int lo = 0;
-    int hi = n - 1;
-    while (lo < hi)
-    {
-        int mid = (lo + hi) >> 1;
-        if (cdf[mid] < xi)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    return lo;
+    return 0.2126f * rgb.x + 0.7152f * rgb.y + 0.0722f * rgb.z;
 }
 
-// Sample the environment map using the 2D CDF.
-// xi: two uniform random numbers in [0, 1)
-// Returns: world-space direction, writes pdf.
-// Forward-declared Params struct is expected to contain env map fields.
-struct Params; // forward decl (already defined in OptixRenderParams.h)
+// Solid-angle pdf of the texel a direction falls into.
+//
+// The discrete probability of texel i is  w_i / W  with  w_i = lum_i * sin(theta_row),
+// and the texel subtends  dOmega = 2*pi^2 * sin(theta_row) / (w*h).
+// Dividing them cancels sin(theta) outright, so the whole pdf collapses to the
+// texel luminance times one precomputed constant:
+//     envPdfScale = (w*h) / (2*pi^2 * totalPower)
+// That is why no CDF or per-texel pdf array has to be stored or searched.
+static __forceinline__ __device__ float envTexelPdf(const float3& radiance, float envPdfScale)
+{
+    return envLuminance(radiance) * envPdfScale;
+}
 
+// Point fetch of one texel. The sampling distribution is built from unfiltered
+// texels on the host, so sampling and pdf have to read unfiltered texels too --
+// a bilinear tap here makes the two disagree along every luminance edge.
+static __forceinline__ __device__ float3 envTexelFetch(cudaTextureObject_t pointTex, int x, int y)
+{
+    const float4 t = tex2D<float4>(pointTex, (float)x + 0.5f, (float)y + 0.5f);
+    return make_float3(t.x, t.y, t.z);
+}
+
+// Sample the environment map with an alias table (Walker/Vose).
+//
+// The 2D-CDF sampler this replaces needed two binary searches per sample: ~11
+// dependent loads in the marginal CDF plus ~11 scattered dependent loads into
+// the conditional CDF, which for a 2K map is an 8 MB buffer -- 22 cache-missing
+// round trips, all serialised, for every NEE sample at every bounce. An alias
+// table answers the same query with a single 8-byte load, and it is the same
+// table and the same host builder Metal uses, so the two backends now draw their
+// environment samples from one distribution rather than two.
+//
+// xi: two uniform random numbers in [0, 1). Returns a world-space direction and
+// writes the solid-angle pdf.
 static __forceinline__ __device__ float3 sampleEnvMap(
     const float2& xi,
-    const float* cdfX,
-    const float* cdfY,
+    const EnvAliasEntry* aliasTable,
+    cudaTextureObject_t envMapPointTexture,
     uint32_t envMapWidth,
     uint32_t envMapHeight,
     float envMapRotation,
+    float envPdfScale,
     float& pdf)
 {
-    const int w = (int)envMapWidth;
-    const int h = (int)envMapHeight;
+    const uint32_t w = envMapWidth;
+    const uint32_t h = envMapHeight;
 
-    // Sample marginal CDF to get row y
-    const int y = binarySearchCdf(cdfY, h, xi.y);
+    // Shared with the host: see src/render/optix/env_alias_sampling.h, which
+    // tests/render/test_env_alias_sampling.cpp exercises without a GPU.
+    const EnvAliasDraw draw = envAliasDraw(aliasTable, w * h, xi.x);
 
-    // Sample conditional CDF for row y to get column x
-    const int x = binarySearchCdf(&cdfX[y * w], w, xi.x);
+    const uint32_t x = draw.texel % w;
+    const uint32_t y = draw.texel / w;
 
-    // Compute continuous UV with sub-pixel offset
-    // PDF of selecting this pixel = p_y * p_x
-    float pdfY = (y == 0) ? cdfY[0] : (cdfY[y] - cdfY[y - 1]);
-    float pdfX = (x == 0) ? cdfX[y * w] : (cdfX[y * w + x] - cdfX[y * w + x - 1]);
+    // Jitter inside the texel, on the variate the alias draw handed back.
+    const float u = ((float)x + draw.frac) / (float)w;
+    const float v = ((float)y + xi.y) / (float)h;
 
-    // UV at pixel center
-    float u = ((float)x + 0.5f) / (float)w;
-    float v = ((float)y + 0.5f) / (float)h;
+    const float3 dir = envUVToDir(make_float2(u, v), envMapRotation);
 
-    float3 dir = envUVToDir(make_float2(u, v), envMapRotation);
-
-    // sin(theta) for Jacobian
-    float theta = v * M_PIf;
-    float sinTheta = sinf(theta);
-
-    // PDF: pdfX * pdfY * (w * h) / (2 * pi^2 * sinTheta)
-    if (sinTheta > 1e-6f && pdfX > 0.0f && pdfY > 0.0f)
-    {
-        pdf = (pdfX * pdfY * (float)(w * h)) / (2.0f * M_PIf * M_PIf * sinTheta);
-    }
-    else
-    {
-        pdf = 0.0f;
-    }
+    const float3 radiance = envTexelFetch(envMapPointTexture, (int)x, (int)y);
+    pdf = envTexelPdf(radiance, envPdfScale);
 
     return dir;
 }
 
-// Evaluate PDF for a given world-space direction against the env map CDF.
+// Evaluate the solid-angle pdf for a direction -- used for MIS against BSDF
+// sampling. One texel fetch, no search.
 static __forceinline__ __device__ float envMapPdf(
     const float3& dir,
-    const float* cdfX,
-    const float* cdfY,
+    cudaTextureObject_t envMapPointTexture,
     uint32_t envMapWidth,
     uint32_t envMapHeight,
-    float envMapRotation)
+    float envMapRotation,
+    float envPdfScale)
 {
+    const float2 uv = dirToEnvUV(dir, envMapRotation);
+
     const int w = (int)envMapWidth;
     const int h = (int)envMapHeight;
+    const int x = max(0, min((int)(uv.x * (float)w), w - 1));
+    const int y = max(0, min((int)(uv.y * (float)h), h - 1));
 
-    float2 uv = dirToEnvUV(dir, envMapRotation);
-
-    int x = (int)(uv.x * w);
-    int y = (int)(uv.y * h);
-    x = max(0, min(x, w - 1));
-    y = max(0, min(y, h - 1));
-
-    float pdfY = (y == 0) ? cdfY[0] : (cdfY[y] - cdfY[y - 1]);
-    float pdfX = (x == 0) ? cdfX[y * w] : (cdfX[y * w + x] - cdfX[y * w + x - 1]);
-
-    float theta = uv.y * M_PIf;
-    float sinTheta = sinf(theta);
-
-    if (sinTheta > 1e-6f && pdfX > 0.0f && pdfY > 0.0f)
-    {
-        return (pdfX * pdfY * (float)(w * h)) / (2.0f * M_PIf * M_PIf * sinTheta);
-    }
-    return 0.0f;
+    return envTexelPdf(envTexelFetch(envMapPointTexture, x, y), envPdfScale);
 }

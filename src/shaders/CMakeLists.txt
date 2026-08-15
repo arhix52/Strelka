@@ -34,15 +34,12 @@ if(WIN32 OR LINUX)
         OPTIONS ${OPTIX_NVCC_FLAGS} ${options}
     )
 
-    # Utility CUDA kernels (tonemappers, skinning, env CDF) — compiled to object files
+    # Utility CUDA kernels (tonemappers, skinning) — compiled to object files
     cuda_compile(compiled_tonemap_files
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/Tonemappers.cu
     )
     cuda_compile(compiled_skinning_files
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/skinning/skinning.cu
-    )
-    cuda_compile(compiled_env_cdf_files
-        ${CMAKE_CURRENT_SOURCE_DIR}/optix/env_cdf.cu
     )
 
     add_library(strelka_shaders STATIC
@@ -50,10 +47,8 @@ if(WIN32 OR LINUX)
         ${generated_hit_files}
         ${compiled_tonemap_files}
         ${compiled_skinning_files}
-        ${compiled_env_cdf_files}
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/Tonemappers.h
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/skinning/skinning.h
-        ${CMAKE_CURRENT_SOURCE_DIR}/optix/env_cdf.h
     )
     set_target_properties(strelka_shaders PROPERTIES LINKER_LANGUAGE CXX)
 

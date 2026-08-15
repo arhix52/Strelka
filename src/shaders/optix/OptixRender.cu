@@ -183,6 +183,7 @@ extern "C" __global__ void __raygen__rg()
         ior_stack_init(prd.iorStack);
         prd.depth = 0;
         prd.specularBounce = false;
+        prd.neeDone = false;
         prd.lastBsdfPdf = 0.0f;
 
         float3 ray_origin, ray_direction;
@@ -317,6 +318,7 @@ extern "C" __global__ void __miss__ms()
 {
     PerRayData* prd = getPRD();
 
+    float3 radiance = make_float3(0.0f);
     if (params.hasEnvMap)
     {
         const float3 ray_dir = optixGetWorldRayDirection();
@@ -325,33 +327,51 @@ extern "C" __global__ void __miss__ms()
         float3 envColor = make_float3(envSample.x, envSample.y, envSample.z);
         envColor *= params.envMapIntensity * params.envMapColorTint;
 
-        if (prd->depth == 0 || prd->specularBounce)
+        if (prd->depth == 0 || prd->specularBounce || !prd->neeDone)
         {
-            // Direct camera ray or specular bounce: add full env contribution
-            prd->radiance += prd->throughput * envColor;
+            // A camera ray, a specular bounce, or a vertex that made no next-event
+            // estimate: the BSDF strategy owns the whole contribution here, so no
+            // MIS weight. That third case is what estimatorMode 1 needs -- weighting
+            // against an estimate that was never made loses the difference.
+            if (params.hasEnvBackground && prd->depth == 0)
+            {
+                // The backdrop is what the camera sees; the map above is what lights
+                // the scene, and the MIS branch below stays on it because that is the
+                // one that was importance sampled.
+                const float4 bgSample = tex2D<float4>(params.envBackgroundTexture, uv.x, uv.y);
+                envColor = make_float3(bgSample.x, bgSample.y, bgSample.z) *
+                           params.envBackgroundIntensity * params.envMapColorTint;
+            }
+            radiance = prd->throughput * envColor;
         }
         else
         {
             // MIS weight with BSDF sampling vs env map PDF
             const float envPdf = envMapPdf(ray_dir,
-                                           params.envCdfX, params.envCdfY,
+                                           params.envMapTexturePoint,
                                            params.envMapWidth, params.envMapHeight,
-                                           params.envMapRotation);
+                                           params.envMapRotation, params.envPdfScale);
             // Account for 50% selection probability when local lights exist
             const float envSelectionPdf = (params.scene.numLights > 0) ? 0.5f : 1.0f;
             const float effectiveEnvPdf = envPdf * envSelectionPdf;
-            if (effectiveEnvPdf > 0.0f)
-            {
-                const float misWeight = computeMisWeight(prd->lastBsdfPdf, effectiveEnvPdf, params.misHeuristic);
-                prd->radiance += prd->throughput * envColor * misWeight;
-            }
+            // A texel of zero luminance has zero sampling density, so light sampling
+            // could never have produced this direction and the BSDF strategy owns it
+            // outright. Dropping the contribution instead -- which this guard used to
+            // do -- loses energy exactly along the edges of dark regions, where the
+            // bilinear radiance is still non-zero.
+            const float misWeight = (effectiveEnvPdf > 0.0f)
+                                        ? computeMisWeight(prd->lastBsdfPdf, effectiveEnvPdf, params.misHeuristic)
+                                        : 1.0f;
+            radiance = prd->throughput * envColor * misWeight;
         }
     }
     else
     {
         MissData* miss_data = reinterpret_cast<MissData*>(optixGetSbtDataPointer());
-        prd->radiance += prd->throughput * miss_data->bg_color;
+        radiance = prd->throughput * miss_data->bg_color;
     }
+
+    prd->radiance += clampIndirectContribution(radiance, prd->depth, params.clampIndirect);
 
     prd->throughput = make_float3(0.0f);
     prd->depth = params.max_depth;
@@ -378,9 +398,18 @@ extern "C" __global__ void __closesthit__light()
     const float3 lightNormal = calcLightNormal(currLight, hitPoint);
     if (-dot(rayDir, lightNormal) > 0.0f)
     {
-        if (prd->depth == 0 || prd->specularBounce)
+        // `color` is radiance, and radiance along a ray does not fall off with the
+        // angle it leaves the emitter at: the cosine at the light belongs in the
+        // area-to-solid-angle Jacobian that next-event estimation already applies,
+        // not here. Multiplying by it a second time made the BSDF strategy darken
+        // every emitter it hit off-axis while the next-event strategy did not, so
+        // the two disagreed by exactly cos at every vertex. Metal's light hit has
+        // never had the factor.
+        const float3 Le = make_float3(currLight.color);
+        float3 radiance;
+        if (prd->depth == 0 || prd->specularBounce || !prd->neeDone)
         {
-            prd->radiance += prd->throughput * make_float3(currLight.color) * -dot(rayDir, lightNormal);
+            radiance = prd->throughput * Le;
         }
         else
         {
@@ -392,8 +421,9 @@ extern "C" __global__ void __closesthit__light()
                 getLightPdf(currLight, hitPoint, optixGetWorldRayOrigin(), params.rectLightSamplingMethod) *
                 lightSelectionPdf;
             const float misWeight = computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
-            prd->radiance += prd->throughput * make_float3(currLight.color) * -dot(rayDir, lightNormal) * misWeight;
+            radiance = prd->throughput * Le * misWeight;
         }
+        prd->radiance += clampIndirectContribution(radiance, prd->depth, params.clampIndirect);
     }
     prd->throughput = make_float3(0.0f);
     // stop tracing
