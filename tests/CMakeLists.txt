@@ -57,12 +57,18 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_wavefront_stage_diagnostic.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_tonemappers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_scene_stream.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_optix_scene_preparation.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_gpu_stage_breadcrumb.cpp
 )
 strelka_apply_warnings(unit_tests)
 
 target_include_directories(unit_tests
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src/render/metal
+        # The two OptiX headers reachable from here are pure host logic and
+        # include nothing from CUDA or OptiX, which is what lets the scene-build
+        # order and the fault decode be tested on a machine with neither.
+        ${CMAKE_SOURCE_DIR}/src/render/optix
         ${CMAKE_SOURCE_DIR}/src/editor
 )
 

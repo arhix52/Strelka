@@ -12,6 +12,21 @@
 #include <strelka/render/common.h>
 #include "OptixBuffer.h"
 
+#include "OptixScenePreparation.h"
+#include "gpu_stage_breadcrumb.h"
+// Host-side and backend-neutral despite living under metal/: it decides whether
+// a half-built scene can be traced at all and how often the partial picture may
+// be republished, and neither question has anything Metal in it. Duplicating it
+// here would mean two answers to one question, and the copy that has the test
+// would be the one that stayed right.
+#include <metal/scene_stream.h>
+
+#include <cuda_runtime.h>
+
+#include <atomic>
+#include <string>
+#include <unordered_map>
+
 struct Texture;
 
 namespace oka
@@ -55,6 +70,11 @@ private:
     {
         OptixTraversableHandle gas_handle = 0;
         CUdeviceptr d_gas_output_buffer = 0;
+        /// What the structure actually occupies, after compaction if it happened.
+        /// Recorded rather than recomputed: the memory report has no other way to
+        /// ask a bare CUdeviceptr how big it is, and an estimate made from the
+        /// triangle count would be the thing the report exists to avoid.
+        size_t gas_bytes = 0;
         ~Mesh()
         {
             CUDA_CHECK(cudaFree((void*)d_gas_output_buffer));
@@ -65,6 +85,7 @@ private:
     {
         OptixTraversableHandle gas_handle = 0;
         CUdeviceptr d_gas_output_buffer = 0;
+        size_t gas_bytes = 0;
         ~Curve()
         {
             CUDA_CHECK(cudaFree((void*)d_gas_output_buffer));
@@ -90,6 +111,7 @@ private:
     struct DeviceSkinningPtrs
     {
         sutil::Matrix4x4* d_jointMats = nullptr;
+        size_t bytes = 0;
         ~DeviceSkinningPtrs()
         {
             if (d_jointMats)
@@ -120,7 +142,7 @@ private:
     std::unique_ptr<Mesh> createMesh(const oka::Mesh& mesh);
     void updateMesh(const oka::Mesh& mesh, int optixMeshesId);
     std::unique_ptr<Curve> createCurve(const oka::Curve& curve);
-    bool compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes);
+    size_t compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes);
 
     std::vector<std::unique_ptr<Mesh>> mOptixMeshes;
     std::vector<std::unique_ptr<Curve>> mOptixCurves;
@@ -162,7 +184,6 @@ private:
     Texture loadTextureFromFile(const std::string& fileName);
     void loadEnvMap(const std::string& texturePath);
 
-    bool createOptixMaterials();
     void destroyTextures();
 
     std::vector<Material> mMaterials;
@@ -180,13 +201,120 @@ private:
 
     void updatePathtracerParams(const uint32_t width, const uint32_t height);
 
+    // ---------------------------------------------------------------- timing --
+    // A frame is several asynchronous submissions on one stream, so wall clock
+    // around render() measures how long it took to *enqueue* them, which on this
+    // backend is microseconds however long the GPU then works. Events are the
+    // only thing that answers the question the editor's title bar is asking.
+    cudaEvent_t mFrameStartEvent = nullptr;
+    cudaEvent_t mFrameStopEvent = nullptr;
+    /// A pair of events has been recorded and not yet read back.
+    bool mFrameTimingPending = false;
+    void createTimingEvents();
+    /// Reads the recorded pair into mLastRenderTimeMs. `wait` blocks until the
+    /// stop event has passed; without it the read is skipped when the frame is
+    /// still running, and the previous frame's number stands.
+    void collectFrameTiming(bool wait);
+
+    // ----------------------------------------------------------- device error --
+    // Latched rather than fatal. An abort inside the renderer takes the editor
+    // and the harness down with it and leaves nothing to inspect; a latch lets
+    // StrelkaCLI exit non-zero instead of writing a black EXR that reads as a
+    // lighting bug, which is the logic it already has and never saw an error to
+    // trigger.
+    bool mDeviceError = false;
+    bool mDeviceErrorReported = false;
+    /// Latches and reports. Returns true when `err` was a failure.
+    bool latchCudaError(cudaError_t err, const char* what);
+    /// Synchronises the frame's work and latches whatever it reports.
+    void syncFrameAndLatchErrors();
+
+    // ------------------------------------------------------------ breadcrumbs --
+    /// One byte per GpuStage, written by the device in stream order after that
+    /// stage's work. Read back only when something failed.
+    std::unique_ptr<OptixBuffer> mStageMarkBuffer;
+    uint8_t mStageSubmitted[optix::kGpuStageCount] = {};
+    void beginFrameBreadcrumbs();
+    /// Enqueues stage `stage`'s completion mark behind the work just submitted.
+    void markStageSubmitted(optix::GpuStage stage, CUstream stream);
+    void reportGpuStageFailure();
+
+    // ------------------------------------------------------------- scene build --
+    optix::OptixScenePreparation mScenePrep;
+    metal::PublishClock mPublishClock;
+    double mBuildStartMs = 0.0;
+    bool mReportedFirstPartialFrame = false;
+    /// Where the sliced stages left off.
+    size_t mBlasMeshCursor = 0;
+    size_t mBlasCurveCursor = 0;
+    bool mTopLevelBuilt = false;
+    size_t mMaterialTextureCursor = 0;
+    /// Host mirror of the flat texture-object table, so a slice can rewrite one
+    /// material's block without re-reading the device.
+    std::vector<cudaTextureObject_t> mHostMaterialTextures;
+    std::unordered_map<std::string, cudaTextureObject_t> mTextureCache;
+
+    optix::SceneBuildHooks makeSceneBuildHooks();
+    void buildSceneBuffers();
+    void buildSceneEnvironment(Buffer* output);
+    void publishMaterialParams();
+    bool stepStructures(double budgetMs);
+    bool stepMaterialTextures(double budgetMs);
+    void buildSceneTail(Buffer* output);
+    /// A top level with no instances in it. Every ray then misses and reaches
+    /// the environment, which is a correct picture of a scene whose geometry has
+    /// not arrived yet rather than a broken one.
+    void buildEmptyTopLevel();
+    bool stepSceneBuild(Buffer* output);
+    void finishSceneBuild(Buffer* output);
+
+    // ------------------------------------------------------------ async output --
+    // Two buffers so the frame being displayed is never the one being written.
+    std::atomic<bool> mRenderBusy{ false };
+    std::atomic<int> mReadyIndex{ -1 };
+    int mWriteIndex = 0;
+    Buffer* mAsyncOutputBuffers[2] = { nullptr, nullptr };
+
+    // ---------------------------------------------------------------- capture --
+    bool mCaptureActive = false;
+
+    // --------------------------------------------------------- memory tracking --
+    /// Sizes of allocations the report cannot otherwise ask about, recorded where
+    /// they are made. Everything with an OptixBuffer behind it is measured from
+    /// the object instead.
+    size_t mSbtBytes = 0;
+
 public:
     OptiXRender(/* args */);
     ~OptiXRender();
 
     void init() override;
     void render(Buffer* output_buffer) override;
+    void renderSync(Buffer* output) override;
     Buffer* createBuffer(const BufferDesc& desc) override;
+
+    bool deviceError() const override
+    {
+        return mDeviceError;
+    }
+
+    bool isBuildingScene() const override
+    {
+        return mScenePrep.isBuilding();
+    }
+
+    bool isRenderBusy() const override
+    {
+        return mRenderBusy.load(std::memory_order_acquire);
+    }
+
+    void triggerRenderIfIdle() override;
+    Buffer* getReadyBuffer() override;
+
+    bool memoryReport(MemoryReport& report) const override;
+
+    void beginGpuCapture(const std::string& path) override;
+    void endGpuCapture() override;
 
     void applySkinning();
     void createContext();

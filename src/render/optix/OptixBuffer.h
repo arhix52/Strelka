@@ -17,12 +17,15 @@ public:
     OptixBuffer(void* devicePtr, BufferFormat format, uint32_t width, uint32_t height);
     virtual ~OptixBuffer();
 
-    size_t size()
+    /// Const because the memory report walks every buffer the renderer owns from
+    /// a const method, and a size that cannot be read without permission to
+    /// modify is a size nobody can report.
+    size_t size() const
     {
         return mSizeInBytes;
     }
 
-    bool empty()
+    bool empty() const
     {
         return mSizeInBytes == 0;
     }
