@@ -60,6 +60,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_tonemappers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_scene_stream.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_fibre_chord.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_nee_pairing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_transform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_upload_plan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_accel_build_policy.cpp
