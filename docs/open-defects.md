@@ -26,7 +26,7 @@ answer, or an asset/converter note that does not need Chaos.
 | 5 | OptiX ior-stack counters | OptiX push/pop path | same three counters Metal already reports; no bathroom patch change expected |
 | 6 | Two-sided different back face | material model / glTF | design first; one kids-bedroom material only |
 | 7 | Bath water is a dish, not a volume | asset, not code | remodel in Blender; bath water R/G against Chaos PNG is a check, not a driver |
-| 8 | OptiX loses energy per light type | OptiX light path | `00_calibration` back to ~1.01; the deficit is a scale, so it moves the whole ladder |
+| 8 | OptiX accumulates in tonemapped space | `accumulate()` in `OptixRender.cu` | every row at `spp_per_launch = 1` matches its own single-launch number |
 
 5–6 are smaller. 7 is not a renderer bug.
 
@@ -118,44 +118,46 @@ nested-dielectric counters should drop on that mesh.
 
 ---
 
-## 8. OptiX loses energy, and how much depends on the light type
+## 8. OptiX accumulates in tonemapped space, so the ladder measures the accumulator
 
-The OptiX backend renders every ladder row dark. `00_calibration` -- a 0.18 grey
-sphere under one rect light, tone curve off, exposure pinned to exactly 1.0 --
-reads **0.973** where Metal reads 1.010. Read that row first, as the feature-test
-README says: this offset sits inside every other row, so any OptiX number below is
-its own feature's error *plus* this one.
+`accumulate()` in `src/shaders/optix/OptixRender.cu` blends the new sample into the
+history as `inverseTonemap(lerp(tonemap(prev), tonemap(new), a))`, and
+`inverseTonemap` (`postprocessing/Utils.h`) is `c / (exposure - c * exposure)`,
+which diverges as its argument approaches 1. Every launch pays that round trip, so
+the bias compounds with the number of launches rather than the number of samples.
 
-What has been ruled out:
+`RenderConfig::sppPerLaunch` defaults to 1 and **every ladder toml ships
+`spp_per_launch = 1`**, which is the worst case: 512 spp is 512 round trips.
+Measured on `00_calibration` -- a 0.18 grey sphere, tone curve off, exposure pinned
+to exactly 1.0 -- at a fixed 512 total samples, varying only the split:
 
-- **Not variance.** At the scene's native 512 spp the ratio is 0.973; at 64 spp it
-  is also 0.973. Only `rel` moves (0.029 vs 0.035), which is the noise leaving.
-  A deficit that survives an eightfold sample increase unchanged is bias.
-- **Not exposure.** The photometric block in `OptiXRender::render()` is line-for-line
-  the same computation as `MetalFrameUniforms`, and this scene pins
-  iso=100 / fstop=1 / shutter=1 so both come out at exactly 1.0.
-- **Not the BRDF, and not an angular term.** Split the lit pixels into brightness
-  bands and the OptiX/Metal ratio is flat across all of them -- 0.952, 0.969, 0.961,
-  0.961, 0.967. A shading or geometry-term error would vary with the band; a scale
-  does not.
-
-What it is instead: a per-light-type factor. Measured against Cycles, at each
-scene's own sample budget:
-
-| lit by | scene | ratio |
+| `spp_per_launch` | ratio | rel |
 |---|---|---|
-| rect area light | `00_calibration` | 0.973 |
-| rect area light | `02_basecolor` | 0.951 |
-| emissive geometry | `11_emission` | 0.924 |
-| point / spot / sun | `12_lights_punctual` | 0.608 |
+| 1 | 0.9728 | 0.0286 |
+| 8 | 1.0011 | 0.0462 |
+| 64 | 1.0023 | 0.0265 |
+| 512 (one launch, accumulator never runs) | **1.0023** | **0.0195** |
 
-Three different deficits for three different paths says the error is in how each
-light's contribution is formed -- unit conversion, sampling pdf, or the MIS weight
-on the BSDF-sampling branch that hits the light -- not in one global constant.
+So the backend's light units and exposure are right: at one launch the row reads
+0.0195 / 1.0023 against a recorded 0.021 / 1.010, i.e. slightly *better* than the
+number Metal set. What the ladder was reporting was the accumulator.
 
-**Fix**: start with `12_lights_punctual`, where the error is largest and therefore
-easiest to see. **Verify**: `00_calibration` back to about 1.01, and then re-read
-the whole ladder, because every row moves with it.
+This is worth stating because a first pass at this entry read the same evidence
+the other way. The deficit is flat across brightness bands (0.952, 0.969, 0.961,
+0.961, 0.967 by decile) and identical at 64 and 512 spp, and the photometric block
+matches `MetalFrameUniforms` line for line -- which correctly rules out variance,
+exposure and the BRDF, and looks exactly like a per-light-type scale, because
+scenes of different brightness are compressed by different amounts. Splitting the
+sample budget instead of the sample count is what separates the two hypotheses,
+and nothing in the per-scene table does.
+
+It also inflates how bad other defects look, and by a lot: the environment
+auto-scale error reads 8.7x through this accumulator and 500x without it.
+
+**Fix**: accumulate linearly, the way `wavefrontResolve` does on Metal (a running
+mean with weight `m/(n+m)`). **Verify**: every row at `spp_per_launch = 1` matches
+the same row rendered in a single launch. Until then, quote ladder numbers with the
+launch split stated, because the two configurations do not measure the same thing.
 
 ---
 
