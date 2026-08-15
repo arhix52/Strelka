@@ -440,7 +440,14 @@ static __forceinline__ __device__ void writeSurfaceGuide(const HitGroupData* hit
         const AovSample previous = params.aov[pixelIndex];
         AovSample a;
         // Metals put their colour in the specular lobe and have no diffuse one.
-        const float3 base = si.albedo;
+        //
+        // Clamped because an albedo guide is a reflectance and the denoiser reads
+        // it as one: it divides the colour through by this and multiplies back
+        // afterwards, so a value above 1 tells it a surface returns more light
+        // than fell on it and it under-filters that pixel. si.albedo is the raw
+        // base colour and an emissive material can carry any magnitude there --
+        // measured up to 25.5 on 20_mirror_and_floor, 1.8% of the frame.
+        const float3 base = saturate(si.albedo);
         a.diffuseAlbedo = base * (1.0f - si.metallic);
         a.specularAlbedo = lerp(make_float3(0.04f), base, si.metallic);
         a.normal = si.shading_normal;

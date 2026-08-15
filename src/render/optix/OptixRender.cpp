@@ -1676,9 +1676,18 @@ void OptiXRender::render(Buffer* output)
                                 &mState.sbt, width, height,
                                 /*depth=*/1));
 
-        // Update subframe index for accumulation
+        // Update subframe index for accumulation.
+        //
+        // A non-accumulating launch is finished the moment it returns -- there is
+        // nothing further to converge -- so it reports the full budget rather than
+        // zero. Reporting zero is what hung StrelkaCLI forever on the single-hit
+        // debug views (`render.debug` 1 and 2 disable accumulation): the headless
+        // loop is `while (mSubframeIndex < spp)`, so an index that resets every
+        // frame never lets it exit. The interactive path is unaffected, because
+        // samplesThisLaunch is computed from samplesPerLaunch and ignores the
+        // remaining budget entirely when accumulation is off.
         getSharedContext().mSubframeIndex =
-            enableAccumulation ? getSharedContext().mSubframeIndex + samplesThisLaunch : 0;
+            enableAccumulation ? getSharedContext().mSubframeIndex + samplesThisLaunch : totalSpp;
     }
     else
     {
