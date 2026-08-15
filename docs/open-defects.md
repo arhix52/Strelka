@@ -26,6 +26,7 @@ answer, or an asset/converter note that does not need Chaos.
 | 5 | OptiX ior-stack counters | OptiX push/pop path | same three counters Metal already reports; no bathroom patch change expected |
 | 6 | Two-sided different back face | material model / glTF | design first; one kids-bedroom material only |
 | 7 | Bath water is a dish, not a volume | asset, not code | remodel in Blender; bath water R/G against Chaos PNG is a check, not a driver |
+| 8 | OptiX loses energy per light type | OptiX light path | `00_calibration` back to ~1.01; the deficit is a scale, so it moves the whole ladder |
 
 5–6 are smaller. 7 is not a renderer bug.
 
@@ -114,6 +115,47 @@ Needs a real water volume upstream in the .blend.
 
 **Verify after remodel**: bath water R/G via `bubble_profile.py` / patch means;
 nested-dielectric counters should drop on that mesh.
+
+---
+
+## 8. OptiX loses energy, and how much depends on the light type
+
+The OptiX backend renders every ladder row dark. `00_calibration` -- a 0.18 grey
+sphere under one rect light, tone curve off, exposure pinned to exactly 1.0 --
+reads **0.973** where Metal reads 1.010. Read that row first, as the feature-test
+README says: this offset sits inside every other row, so any OptiX number below is
+its own feature's error *plus* this one.
+
+What has been ruled out:
+
+- **Not variance.** At the scene's native 512 spp the ratio is 0.973; at 64 spp it
+  is also 0.973. Only `rel` moves (0.029 vs 0.035), which is the noise leaving.
+  A deficit that survives an eightfold sample increase unchanged is bias.
+- **Not exposure.** The photometric block in `OptiXRender::render()` is line-for-line
+  the same computation as `MetalFrameUniforms`, and this scene pins
+  iso=100 / fstop=1 / shutter=1 so both come out at exactly 1.0.
+- **Not the BRDF, and not an angular term.** Split the lit pixels into brightness
+  bands and the OptiX/Metal ratio is flat across all of them -- 0.952, 0.969, 0.961,
+  0.961, 0.967. A shading or geometry-term error would vary with the band; a scale
+  does not.
+
+What it is instead: a per-light-type factor. Measured against Cycles, at each
+scene's own sample budget:
+
+| lit by | scene | ratio |
+|---|---|---|
+| rect area light | `00_calibration` | 0.973 |
+| rect area light | `02_basecolor` | 0.951 |
+| emissive geometry | `11_emission` | 0.924 |
+| point / spot / sun | `12_lights_punctual` | 0.608 |
+
+Three different deficits for three different paths says the error is in how each
+light's contribution is formed -- unit conversion, sampling pdf, or the MIS weight
+on the BSDF-sampling branch that hits the light -- not in one global constant.
+
+**Fix**: start with `12_lights_punctual`, where the error is largest and therefore
+easiest to see. **Verify**: `00_calibration` back to about 1.01, and then re-read
+the whole ladder, because every row moves with it.
 
 ---
 
