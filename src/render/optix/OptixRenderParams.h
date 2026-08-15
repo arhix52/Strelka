@@ -43,6 +43,10 @@ struct SceneData
     uint32_t* ib;
     UniformLight* lights;
     uint32_t numLights;
+    /// Packed IES candela tables, indexed by each light's points[0].y. Never
+    /// null once the scene is built -- a scene with no profile still gets a
+    /// zero-count header, so sampleIesCandela() needs no null check per light.
+    const IesGpuBufferHeader* iesProfiles;
 };
 
 /// How `AovSample::depth` is encoded. Mirrors kDenoiseDepth* in the Metal

@@ -185,6 +185,9 @@ private:
     std::unique_ptr<OptixBuffer> mVertexSkinDataBuffer;
     std::unique_ptr<OptixBuffer> mIndexBuffer;
     std::unique_ptr<OptixBuffer> mLightBuffer;
+    /// Packed IES candela tables for every profile the scene loaded, indexed by
+    /// each light's points[0].y. Rebuilt with the light buffer.
+    std::unique_ptr<OptixBuffer> mIesBuffer;
     // TODO: move to raii buffers
     std::unique_ptr<OptixBuffer> mPointsBuffer;
     std::unique_ptr<OptixBuffer> mWidthsBuffer;
@@ -216,6 +219,7 @@ private:
     void createWidthsBuffer();
 
     void createLightBuffer();
+    void createIesBuffer();
 
     oka::optix_tex::DecodeSettings textureDecodeSettings() const;
     Texture loadTextureFromFile(const std::string& fileName, oka::optix_tex::Kind kind);

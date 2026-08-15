@@ -217,7 +217,17 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
     {
         const float dist = fmaxf(lightSampleData.distToLight, 1e-4f);
         Li *= rangeWindow(light, dist) / (dist * dist);
-        if (light.type == LIGHT_TYPE_SPOT)
+        // IES replaces the isotropic (and, for spots, the cone) angular shape:
+        // the table is the whole distribution, and the light's own intensity is
+        // a multiplier on top of it. No profile means the cone alone, as before.
+        // Applying the cone as well would count the luminaire's aperture twice,
+        // once from the file and once from the sidecar's outer angle.
+        const bool hasIes = light.points[0].y >= 0.0f;
+        if (hasIes)
+        {
+            Li *= sampleIesCandela(params.scene.iesProfiles, light, -lightSampleData.L);
+        }
+        else if (light.type == LIGHT_TYPE_SPOT)
         {
             Li *= spotAttenuation(light, -lightSampleData.L);
         }

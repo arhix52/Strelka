@@ -3,6 +3,10 @@
 #include <sutil/vec_math.h>
 #include <light_types.h>
 
+// GPU side structure
+// pad0: spot inner cone (rad) or point soft radius.
+// pad1: KHR attenuation range (0 = infinite).
+// points[0].y for point/spot: IES profile index, or -1 when isotropic.
 struct UniformLight
 {
     float4 points[4];
@@ -12,6 +16,34 @@ struct UniformLight
     float halfAngle;
     float pad0;
     float pad1;
+};
+
+// Packed IES candela tables for the GPU. OptiXRender::createIesBuffer lays the
+// buffer out as:
+//   IesGpuBufferHeader
+//   IesGpuProfileHeader[profileCount]
+//   float blob (angles then candela, offsets relative to the blob start)
+// Sampled by sampleIesCandela() below; intensity on the light is a multiplier
+// on top of the table. Field for field this is the Metal ShaderTypes.h pair, so
+// a profile packed by either backend reads the same on the other.
+struct IesGpuBufferHeader
+{
+    unsigned int profileCount;
+    unsigned int floatOffset; // byte offset of the float blob from the buffer start
+    unsigned int pad0;
+    unsigned int pad1;
+};
+
+struct IesGpuProfileHeader
+{
+    unsigned int nVertical;
+    unsigned int nHorizontal;
+    unsigned int anglesOffset;  // index into the float blob: vertical then horizontal
+    unsigned int candelaOffset; // index into the float blob
+    float maxCandela;
+    float pad0;
+    float pad1;
+    float pad2;
 };
 
 struct LightSampleData
@@ -524,4 +556,125 @@ static __inline__ __device__ float rangeWindow(const UniformLight& l, float dist
     const float x = clamp(dist / l.pad1, 0.0f, 1.0f);
     const float y = 1.0f - x * x * x * x;
     return y * y;
+}
+
+// Index of the interval containing x in the ascending table a, clamped so both
+// it and it+1 are addressable. Binary search rather than a linear scan because a
+// real luminaire's vertical table runs to 181 entries and this is evaluated once
+// per shadow connection.
+static __inline__ __device__ int iesLowerIndex(const float* a, int n, float x)
+{
+    int lo = 0;
+    int hi = n;
+    while (lo < hi)
+    {
+        const int mid = (lo + hi) / 2;
+        if (a[mid] < x)
+        {
+            lo = mid + 1;
+        }
+        else
+        {
+            hi = mid;
+        }
+    }
+    if (lo <= 0)
+    {
+        return 0;
+    }
+    if (lo >= n)
+    {
+        return max(0, n - 2);
+    }
+    return lo - 1;
+}
+
+// Bilinear sample of an IES candela table. `dirFromLight` is world-space; the
+// light's local frame is rebuilt from points[2..3] (X/Y axes) and normal (-Z),
+// the same packing Scene::updateLight writes for the CPU sampler in
+// iesloader.cpp. Returns 1.0 when the light carries no profile, so the caller
+// can multiply unconditionally.
+static __inline__ __device__ float sampleIesCandela(const IesGpuBufferHeader* iesBuffer,
+                                                    const UniformLight& l,
+                                                    const float3 dirFromLight)
+{
+    const int profileIdx = (int)l.points[0].y;
+    if (!iesBuffer || profileIdx < 0 || (unsigned int)profileIdx >= iesBuffer->profileCount)
+    {
+        return 1.0f;
+    }
+
+    const IesGpuProfileHeader* headers =
+        (const IesGpuProfileHeader*)((const char*)iesBuffer + sizeof(IesGpuBufferHeader));
+    const IesGpuProfileHeader& h = headers[profileIdx];
+    if (h.nVertical < 2u || h.nHorizontal < 1u)
+    {
+        return 0.0f;
+    }
+
+    const float* floats = (const float*)((const char*)iesBuffer + iesBuffer->floatOffset);
+
+    // World -> light local. Columns of the light's basis; -Z is the photometric
+    // axis, matching iesloader.cpp::sampleIesCandela.
+    const float3 ax = normalize(make_float3(l.points[2]));
+    const float3 ay = normalize(make_float3(l.points[3]));
+    const float3 az = normalize(make_float3(l.normal)); // emission -Z
+    const float3 d = normalize(dirFromLight);
+    const float3 local = make_float3(dot(d, ax), dot(d, ay), -dot(d, az));
+
+    const float vertDeg = acosf(clamp(-local.z, -1.0f, 1.0f)) * (180.0f / M_PIf);
+    float horizDeg = atan2f(local.x, -local.y) * (180.0f / M_PIf);
+    if (horizDeg < 0.0f)
+    {
+        horizDeg += 360.0f;
+    }
+
+    const float* vAng = floats + h.anglesOffset;
+    const float* hAng = floats + h.anglesOffset + h.nVertical;
+    const float* candela = floats + h.candelaOffset;
+    const int nV = (int)h.nVertical;
+    const int nH = (int)h.nHorizontal;
+
+    const int iv = max(0, min(nV - 2, iesLowerIndex(vAng, nV, vertDeg)));
+    int ih = 0;
+    float th = 0.0f;
+    if (nH > 1)
+    {
+        // A table that stops at 90 or 180 degrees is stored for one symmetric
+        // quadrant or half; fold the azimuth back into the range it covers.
+        float hDeg = horizDeg;
+        const float hMax = hAng[nH - 1];
+        if (hMax <= 90.0f + 1e-3f)
+        {
+            hDeg = fmodf(hDeg, 90.0f);
+        }
+        else if (hMax <= 180.0f + 1e-3f)
+        {
+            if (hDeg > 180.0f)
+            {
+                hDeg = 360.0f - hDeg;
+            }
+        }
+        else
+        {
+            hDeg = fmodf(hDeg, 360.0f);
+        }
+        ih = max(0, min(nH - 2, iesLowerIndex(hAng, nH, hDeg)));
+        const float h0 = hAng[ih];
+        const float h1 = hAng[ih + 1];
+        th = (h1 > h0) ? (hDeg - h0) / (h1 - h0) : 0.0f;
+    }
+
+    const float v0 = vAng[iv];
+    const float v1 = vAng[iv + 1];
+    const float tv = (v1 > v0) ? (vertDeg - v0) / (v1 - v0) : 0.0f;
+
+    const int ih1 = (nH == 1) ? 0 : ih + 1;
+    const float c00 = candela[iv + ih * nV];
+    const float c10 = candela[(iv + 1) + ih * nV];
+    const float c01 = candela[iv + ih1 * nV];
+    const float c11 = candela[(iv + 1) + ih1 * nV];
+    const float c0 = c00 * (1.0f - tv) + c10 * tv;
+    const float c1 = c01 * (1.0f - tv) + c11 * tv;
+    return c0 * (1.0f - th) + c1 * th;
 }
