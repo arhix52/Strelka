@@ -193,6 +193,9 @@ private:
     std::unique_ptr<OptixBuffer> mDenoiseAlbedoBuffer;
     std::unique_ptr<OptixBuffer> mDenoiseNormalBuffer;
     std::unique_ptr<OptixBuffer> mDenoiseFlowBuffer;
+    /// How far the flow vector at each pixel is to be believed -- the reactive
+    /// mask, inverted. OptiX reads this as a single float per pixel.
+    std::unique_ptr<OptixBuffer> mDenoiseFlowTrustBuffer;
     /// Radiance at render resolution when that is not the output resolution,
     /// i.e. when the 2x model is upscaling into the caller's buffer.
     std::unique_ptr<OptixBuffer> mRenderImageBuffer;

@@ -88,6 +88,8 @@ TEST_CASE("buffer layout follows the render resolution, not the output one")
     CHECK(layout.albedoBytes == layout.colorBytes);
     CHECK(layout.normalBytes == layout.colorBytes);
     CHECK(layout.flowBytes == (size_t)256 * 256 * 8);
+    // Flow trustworthiness is one float per pixel, not four.
+    CHECK(layout.flowTrustBytes == (size_t)256 * 256 * 4);
     // The denoised image is the one the caller receives, so it is full size.
     CHECK(layout.denoisedBytes == (size_t)512 * 512 * 16);
 }

@@ -69,6 +69,9 @@ OptixImage2D OptixDenoiserContext::makeImage(CUdeviceptr data, uint32_t width, u
     unsigned int pixelStride = 0;
     switch (format)
     {
+    case OPTIX_PIXEL_FORMAT_FLOAT1:
+        pixelStride = sizeof(float);
+        break;
     case OPTIX_PIXEL_FORMAT_FLOAT2:
         pixelStride = 2 * sizeof(float);
         break;
@@ -214,8 +217,12 @@ bool OptixDenoiserContext::configure(OptixDeviceContext context, CUstream stream
     return true;
 }
 
-bool OptixDenoiserContext::denoise(
-    CUstream stream, CUdeviceptr color, CUdeviceptr albedo, CUdeviceptr normal, CUdeviceptr flow)
+bool OptixDenoiserContext::denoise(CUstream stream,
+                                   CUdeviceptr color,
+                                   CUdeviceptr albedo,
+                                   CUdeviceptr normal,
+                                   CUdeviceptr flow,
+                                   CUdeviceptr flowTrust)
 {
     if (!mDenoiser || color == 0)
     {
@@ -231,6 +238,14 @@ bool OptixDenoiserContext::denoise(
     if (flow != 0)
     {
         guideLayer.flow = makeImage(flow, w, h, OPTIX_PIXEL_FORMAT_FLOAT2);
+        // Where the motion vector is known to be a lie -- a mirror, a pane of
+        // glass, anything whose guides describe a surface the camera cannot see
+        // directly -- the reactive mask says so, and this is the input that acts
+        // on it. Only meaningful alongside a flow layer.
+        if (flowTrust != 0)
+        {
+            guideLayer.flowTrustworthiness = makeImage(flowTrust, w, h, OPTIX_PIXEL_FORMAT_FLOAT1);
+        }
     }
     if (mPlan.temporal)
     {

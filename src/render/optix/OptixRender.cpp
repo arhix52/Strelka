@@ -1122,6 +1122,7 @@ void OptiXRender::updateGuideBuffers(const DenoisePlan& plan)
         mDenoiseAlbedoBuffer.reset();
         mDenoiseNormalBuffer.reset();
         mDenoiseFlowBuffer.reset();
+        mDenoiseFlowTrustBuffer.reset();
         mRenderImageBuffer.reset();
         return;
     }
@@ -1140,6 +1141,7 @@ void OptiXRender::updateGuideBuffers(const DenoisePlan& plan)
     ensure(mDenoiseAlbedoBuffer, layout.albedoBytes);
     ensure(mDenoiseNormalBuffer, layout.normalBytes);
     ensure(mDenoiseFlowBuffer, layout.flowBytes);
+    ensure(mDenoiseFlowTrustBuffer, layout.flowTrustBytes);
     if (plan.upscale)
     {
         ensure(mRenderImageBuffer, layout.colorBytes);
@@ -1701,10 +1703,12 @@ void OptiXRender::render(Buffer* output)
                                  (float4*)mDenoiseColorBuffer->getNativePtr(),
                                  (float4*)mDenoiseAlbedoBuffer->getNativePtr(),
                                  (float4*)mDenoiseNormalBuffer->getNativePtr(),
-                                 (float2*)mDenoiseFlowBuffer->getNativePtr());
+                                 (float2*)mDenoiseFlowBuffer->getNativePtr(),
+                                 (float*)mDenoiseFlowTrustBuffer->getNativePtr());
             const bool denoised =
                 mDenoiser.denoise(mState.stream, mDenoiseColorBuffer->getPtr(), mDenoiseAlbedoBuffer->getPtr(),
-                                  mDenoiseNormalBuffer->getPtr(), mDenoiseFlowBuffer->getPtr());
+                                  mDenoiseNormalBuffer->getPtr(), mDenoiseFlowBuffer->getPtr(),
+                                  mDenoiseFlowTrustBuffer->getPtr());
             if (denoised)
             {
                 copyDenoisedToImage((const float4*)mDenoiser.output(), displayImage, outputWidth, outputHeight);

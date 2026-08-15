@@ -13,7 +13,8 @@ __global__ void resolveDenoiseGuidesKernel(const AovSample* __restrict__ aov,
                                            float4* __restrict__ outColor,
                                            float4* __restrict__ outAlbedo,
                                            float4* __restrict__ outNormal,
-                                           float2* __restrict__ outFlow)
+                                           float2* __restrict__ outFlow,
+                                           float* __restrict__ outFlowTrust)
 {
     const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= width * height)
@@ -44,6 +45,14 @@ __global__ void resolveDenoiseGuidesKernel(const AovSample* __restrict__ aov,
     // World space, which is what every model but the two deprecated ones wants.
     outNormal[i] = make_float4(a.normal, 0.0f);
     outFlow[i] = make_float2(a.motionX, a.motionY);
+
+    // The reactive mask, inverted, is exactly what OptiX calls flow
+    // trustworthiness: 0 means "do not believe the motion vector here". The mask
+    // is raised where the guides describe a surface other than the one the
+    // camera sees -- a mirror, a pane of glass -- which is precisely where the
+    // pixel's own motion says nothing about what is drawn in it. Without this
+    // the mask is produced, inspectable, and consumed by nothing.
+    outFlowTrust[i] = 1.0f - clamp(a.reactive, 0.0f, 1.0f);
 }
 
 __global__ void copyDenoisedToImageKernel(const float4* __restrict__ denoised,
@@ -69,13 +78,14 @@ extern "C" void resolveDenoiseGuides(const AovSample* aov,
                                      float4* outColor,
                                      float4* outAlbedo,
                                      float4* outNormal,
-                                     float2* outFlow)
+                                     float2* outFlow,
+                                     float* outFlowTrust)
 {
     const uint32_t pixels = width * height;
     const dim3 blockSize(256, 1, 1);
     const dim3 gridSize((pixels + 255) / 256, 1, 1);
     resolveDenoiseGuidesKernel<<<gridSize, blockSize, 0>>>(
-        aov, color, width, height, exposure, fireflyClamp, outColor, outAlbedo, outNormal, outFlow);
+        aov, color, width, height, exposure, fireflyClamp, outColor, outAlbedo, outNormal, outFlow, outFlowTrust);
 }
 
 extern "C" void copyDenoisedToImage(const float4* denoised, float4* image, uint32_t width, uint32_t height)

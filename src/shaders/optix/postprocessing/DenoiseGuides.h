@@ -28,7 +28,8 @@ extern "C" void resolveDenoiseGuides(const AovSample* aov,
                                      float4* outColor,
                                      float4* outAlbedo,
                                      float4* outNormal,
-                                     float2* outFlow);
+                                     float2* outFlow,
+                                     float* outFlowTrust);
 
 /// Copy an RGB image into a float4 buffer of the same size, alpha 1. Used to put
 /// the denoised result back where the display and the EXR writer look for it.

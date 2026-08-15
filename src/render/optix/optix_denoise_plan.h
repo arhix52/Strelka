@@ -238,6 +238,7 @@ struct DenoiseBufferLayout
     size_t albedoBytes = 0;
     size_t normalBytes = 0;
     size_t flowBytes = 0;
+    size_t flowTrustBytes = 0;
     size_t denoisedBytes = 0;
     uint32_t renderPixels = 0;
     uint32_t outputPixels = 0;
@@ -256,6 +257,8 @@ inline DenoiseBufferLayout denoiseBufferLayout(const DenoisePlan& plan, size_t a
     out.normalBytes = out.colorBytes;
     // Flow is two components, and OptiX reads it at that stride.
     out.flowBytes = static_cast<size_t>(out.renderPixels) * 2 * sizeof(float);
+    // How far the flow vector at each pixel is to be believed: one component.
+    out.flowTrustBytes = static_cast<size_t>(out.renderPixels) * sizeof(float);
     out.denoisedBytes = static_cast<size_t>(out.outputPixels) * 4 * sizeof(float);
     return out;
 }

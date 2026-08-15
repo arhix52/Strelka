@@ -46,7 +46,12 @@ public:
 
     /// Run the network. All four inputs are at the plan's render resolution;
     /// `flow` may be null when there is no motion to report.
-    bool denoise(CUstream stream, CUdeviceptr color, CUdeviceptr albedo, CUdeviceptr normal, CUdeviceptr flow);
+    bool denoise(CUstream stream,
+                 CUdeviceptr color,
+                 CUdeviceptr albedo,
+                 CUdeviceptr normal,
+                 CUdeviceptr flow,
+                 CUdeviceptr flowTrust);
 
     /// The denoised image, at the plan's *output* resolution. Zero until
     /// denoise() has run at least once.
