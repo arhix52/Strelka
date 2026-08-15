@@ -490,6 +490,18 @@ __device__ __inline__ float sobol_scramble(uint32_t index, uint32_t dim, uint32_
 template <SampleDimension Dim>
 __device__ __inline__ float random(SamplerState& state)
 {
-    const uint32_t dimension = (uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS)) % 5;
-    return sobol_scramble(state.sampleIdx, dimension, state.seed + state.depth);
+    const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
+    // 256 matrices are tabulated above, so dimensions only alias 256 apart --
+    // past fourteen bounces of eNUM_DIMENSIONS each.
+    //
+    // This read `% 5` while the table already held 256. Dimensions five apart
+    // then selected the same matrix, and because they also scrambled the sample
+    // index identically they produced the *same value*: Owen scrambling leaves
+    // each of the pair uniform on its own and the pair a bijection, so their 2D
+    // projection is a diagonal rather than a point set. Nothing notices until
+    // something takes a decision from one of the two -- eOpacity is 11 and
+    // eBSDF0 is 6, so whether to shade a blended surface and where to scatter
+    // off it were the same number. Metal measured that as a plane 7.5% too
+    // bright and 2% over the frame before fixing it the same way.
+    return sobol_scramble(state.sampleIdx, dimension % 256u, state.seed + state.depth);
 }
