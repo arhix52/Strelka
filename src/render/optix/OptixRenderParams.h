@@ -110,18 +110,34 @@ enum class EventType: uint8_t
     eLast,
 };
 
+/// How many cutout surfaces one path may slip through before it is given up on.
+/// A hedge of alpha-tested leaves would otherwise let a path bounce forever:
+/// passing through deliberately does not spend a bounce (see PerRayData::
+/// passthrough), so `max_depth` cannot bound it. Same value as Metal's
+/// PATH_PASSTHROUGH_MAX, for the same reason.
+#define PATH_PASSTHROUGH_MAX 32u
+
 struct PerRayData
 {
     SamplerState sampler;
     uint32_t linearPixelIndex;
     uint32_t sampleIndex;
     uint32_t depth; // bounce
+    /// How many transparent surfaces this path has already passed straight
+    /// through. Counted separately from `depth` because a cutout is coverage,
+    /// not scattering -- charging it a bounce empties the path budget on a
+    /// canopy before any light transport happens.
+    uint32_t passthrough;
     float3 radiance;
     float3 throughput;
     float3 origin;
     float3 dir;
     IorStack iorStack;
     bool specularBounce;
+    /// Set by the closest hit when the ray went straight through the surface it
+    /// hit. The raygen loop reads it to decide whether the segment counted as a
+    /// bounce, and clears it before the next trace.
+    bool passedThrough;
     float lastBsdfPdf;
     EventType firstEventType;
 };
@@ -152,4 +168,8 @@ struct HitGroupData
     int32_t vertexOffset;
     int32_t lightId;     // only for lights. -1 for others
     int32_t materialId;  // index into params.materials[] and params.materialTextures[]
+    /// Segments per strand for a curve set, or 0 when the strands differ in
+    /// length. It is the whole of what a root-to-tip UV needs: the segment index
+    /// modulo this is where along the strand a hit landed, for no extra memory.
+    uint32_t curveSegmentsPerStrand;
 };

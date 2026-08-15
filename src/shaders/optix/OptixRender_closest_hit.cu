@@ -18,26 +18,79 @@
 #include <strelka/material/bsdf.h>
 
 #include "optix_device_utils.h"
+#include "alpha.h"
+#include <curve_layout.h>
 
 extern "C"
 {
     __constant__ Params params;
 }
 
-static __forceinline__ __device__ bool traceOcclusion(
+/// Fraction of the light that survives the segment: 1 when nothing is in the
+/// way, 0 when an opaque surface is, and the product of (1 - opacity) over the
+/// cutout surfaces crossed otherwise.
+///
+/// The payload is one word holding that fraction as a float. It starts at 1;
+/// `__anyhit__occlusion` multiplies it down and ignores the intersection so
+/// traversal carries on, and only an opaque hit is accepted -- which with
+/// TERMINATE_ON_FIRST_HIT ends the ray and lets `__closesthit__occlusion` write
+/// the zero.
+static __forceinline__ __device__ float traceOcclusion(
     OptixTraversableHandle handle, float3 ray_origin, float3 ray_direction, float tmin, float tmax)
 {
     const float time = optixGetRayTime();
 
-    unsigned int occluded = 0u;
+    unsigned int transmittance = __float_as_uint(1.0f);
     optixTrace(handle, ray_origin, ray_direction, tmin, tmax,
                time, // rayTime
                OptixVisibilityMask(RAY_MASK_SHADOW), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
                RAY_TYPE_OCCLUSION, // SBT offset
                RAY_TYPE_COUNT, // SBT stride
                RAY_TYPE_OCCLUSION, // missSBTIndex
-               occluded);
-    return occluded;
+               transmittance);
+    return __uint_as_float(transmittance);
+}
+
+/// Any-hit for shadow rays. Only bound on instances whose material is not
+/// opaque -- everything else carries OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT, so a
+/// trunk or a rock never enters this program alongside the leaves.
+extern "C" __global__ void __anyhit__occlusion()
+{
+    // A curve has no uv and is always built opaque, so it blocks outright. This
+    // is reachable because the shadow hit group is shared with curve geometry.
+    if (optixGetPrimitiveType() != OPTIX_PRIMITIVE_TYPE_TRIANGLE)
+    {
+        return;
+    }
+
+    const HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
+    const int32_t matId = hit_data->materialId;
+    const MaterialParams& material = params.materials[matId];
+    if (material.alpha_mode == ALPHA_MODE_OPAQUE)
+    {
+        return; // accepted; TERMINATE_ON_FIRST_HIT ends the ray here
+    }
+
+    const unsigned int primitiveId = optixGetPrimitiveIndex();
+    const uint32_t i0 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 0];
+    const uint32_t i1 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 1];
+    const uint32_t i2 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 2];
+    const uint32_t baseVbOffset = hit_data->vertexOffset;
+    const float2 uv = interpolateAttrib(unpackUV(params.scene.vb[baseVbOffset + i0].uv),
+                                        unpackUV(params.scene.vb[baseVbOffset + i1].uv),
+                                        unpackUV(params.scene.vb[baseVbOffset + i2].uv),
+                                        optixGetTriangleBarycentrics());
+
+    const cudaTextureObject_t* textures = &params.materialTextures[matId * MAX_MATERIAL_TEXTURES];
+    const float opacity = resolveOpacity(material, textures, uv);
+
+    const float transmittance = __uint_as_float(optixGetPayload_0()) * (1.0f - opacity);
+    if (transmittance <= SHADOW_TRANSMITTANCE_CUTOFF)
+    {
+        return; // nothing measurable gets through; accept and stop traversing
+    }
+    optixSetPayload_0(__float_as_uint(transmittance));
+    optixIgnoreIntersection();
 }
 
 /// Uniform light choice from a canonical sample, clamped to the last light.
@@ -106,12 +159,11 @@ static __device__ float3 sampleLight(SamplerState& sampler,
                                -dot(lightSampleData.L, lightSampleData.normal) > 0.0f && emitsLight(Li));
     if (facing)
     {
-        const bool occluded =
+        const float visibility =
             traceOcclusion(params.handle, offset_ray(si.position, si.geometry_normal), lightSampleData.L,
                            params.shadowRayTmin, // tmin
                            lightSampleData.distToLight // tmax
             );
-        float visibility = occluded ? 0.0f : 1.0f;
         lightPdf = lightSampleData.pdf;
         // The cosine belongs here because bsdf_eval() returns f alone, unlike
         // bsdf_sample()'s bsdf_over_pdf which already carries it. See the note on
@@ -149,14 +201,14 @@ static __device__ float3 sampleEnvLightNEE(SamplerState& sampler,
         return make_float3(0.0f);
 
     // Trace shadow ray to infinity
-    const bool occluded = traceOcclusion(
+    const float visibility = traceOcclusion(
         params.handle,
         offset_ray(si.position, si.geometry_normal),
         dir,
         params.shadowRayTmin,
         1e16f);
 
-    if (occluded)
+    if (visibility <= 0.0f)
         return make_float3(0.0f);
 
     // Evaluate env map radiance at sampled direction
@@ -165,7 +217,7 @@ static __device__ float3 sampleEnvLightNEE(SamplerState& sampler,
     float3 Li = make_float3(envSample.x, envSample.y, envSample.z);
     Li *= params.envMapIntensity * params.envMapColorTint;
 
-    return Li * fmaxf(dot(si.shading_normal, dir), 0.0f);
+    return visibility * Li * fmaxf(dot(si.shading_normal, dir), 0.0f);
 }
 
 __device__ float3 estimateDirectLighting(SamplerState& sampler,
@@ -231,24 +283,10 @@ static __forceinline__ __device__ float3 getHitPoint()
     return rayOrigin + t * rayDirection;
 }
 
-// Compute surface normal of cubic primitive in world space.
-static __forceinline__ __device__ float3 normalCubic(const int primitiveIndex)
-{
-    const OptixTraversableHandle gas = optixGetGASTraversableHandle();
-    const unsigned int gasSbtIndex = optixGetSbtGASIndex();
-    float4 controlPoints[4];
-
-    optixGetCubicBSplineVertexData(gas, primitiveIndex, gasSbtIndex, 0.0f, controlPoints);
-
-    CubicInterpolator interpolator;
-    interpolator.initializeFromBSpline(controlPoints);
-
-    float3 hitPoint = getHitPoint();
-    // interpolators work in object space
-    hitPoint = optixTransformPointFromWorldToObjectSpace(hitPoint);
-    const float3 normal = surfaceNormal(interpolator, optixGetCurveParameter(), hitPoint);
-    return optixTransformNormalFromObjectToWorldSpace(normal);
-}
+// (normalCubic() used to sit here: a second, unreferenced copy of what
+// fillCubicCurveGeomData() does. Removed rather than left as a warning, because
+// the next person adding a curve basis would have had two places to change and
+// only one of them would have mattered.)
 
 struct SurfaceHitData
 {
@@ -347,7 +385,26 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
     return res;
 }
 
-static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGroupData* hit_data)
+/// Where along its strand a curve hit landed, as a uv.
+///
+/// Segments of one set are laid out strand after strand, so with a uniform
+/// segment count the index modulo that count is the segment's position within
+/// its strand and the curve parameter interpolates inside it. A set whose
+/// strands differ in length carries 0 and gets the strand root, which is what a
+/// root-to-tip ramp reads as "no gradient" rather than as garbage.
+///
+/// The second coordinate is 0: a strand is a fibre, not a sheet, and there is
+/// no meaningful coordinate around it. This is the same (alongStrand, 0) Metal
+/// hands its curve hits.
+static __forceinline__ __device__ float2 curveStrandUV(const HitGroupData* hit_data,
+                                                       unsigned int primitiveIndex,
+                                                       float u)
+{
+    return make_float2(
+        oka::curve_layout::strandCoordinate(primitiveIndex, hit_data->curveSegmentsPerStrand, u), 0.0f);
+}
+
+static __forceinline__ __device__ SurfaceHitData fillCubicCurveGeomData(const HitGroupData* hit_data)
 {
     const unsigned int primitiveIndex = optixGetPrimitiveIndex();
     const OptixTraversableHandle gas = optixGetGASTraversableHandle();
@@ -356,20 +413,58 @@ static __forceinline__ __device__ SurfaceHitData fillCurveGeomData(const HitGrou
     optixGetCubicBSplineVertexData(gas, primitiveIndex, gasSbtIndex, 0.0f, controlPoints);
     CubicInterpolator interpolator;
     interpolator.initializeFromBSpline(controlPoints);
+    const float u = optixGetCurveParameter();
     float3 hitPoint = getHitPoint();
     // interpolators work in object space
     hitPoint = optixTransformPointFromWorldToObjectSpace(hitPoint); // interpolators work in object space
-    float3 worldNormal = normalize(
-        optixTransformNormalFromObjectToWorldSpace(surfaceNormal(interpolator, optixGetCurveParameter(), hitPoint)));
+    float3 worldNormal =
+        normalize(optixTransformNormalFromObjectToWorldSpace(surfaceNormal(interpolator, u, hitPoint)));
     const float3 worldTangent =
-        normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, optixGetCurveParameter())));
+        normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, u)));
     const float3 worldBinormal = cross(worldNormal, worldTangent);
     const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(hitPoint);
     SurfaceHitData res;
     res.normal = worldNormal;
     res.geom_normal = worldNormal;
     res.position = worldPosition;
-    res.uv = make_float2(0.5f, 0.5f);
+    res.uv = curveStrandUV(hit_data, primitiveIndex, u);
+    res.worldTangent = worldTangent;
+    res.worldBinormal = worldBinormal;
+
+    return res;
+}
+
+/// Round linear curves: two control points, a cylinder with spherical caps.
+///
+/// This arm used to be unreachable. `createCurve` hardcoded degree 3, so a
+/// linear sidecar -- which is what every particle groom in the tree writes, and
+/// what `28_hair` is -- was built and fetched as a cubic B-spline over the same
+/// points. A B-spline does not interpolate its control points, so the strands
+/// were built along a curve that ran inside the one the sidecar described, three
+/// control points short at every strand.
+static __forceinline__ __device__ SurfaceHitData fillLinearCurveGeomData(const HitGroupData* hit_data)
+{
+    const unsigned int primitiveIndex = optixGetPrimitiveIndex();
+    const OptixTraversableHandle gas = optixGetGASTraversableHandle();
+    const unsigned int gasSbtIndex = optixGetSbtGASIndex();
+    float4 controlPoints[2];
+    optixGetLinearCurveVertexData(gas, primitiveIndex, gasSbtIndex, 0.0f, controlPoints);
+    LinearInterpolator interpolator;
+    interpolator.initialize(controlPoints);
+    const float u = optixGetCurveParameter();
+    float3 hitPoint = getHitPoint();
+    hitPoint = optixTransformPointFromWorldToObjectSpace(hitPoint);
+    float3 worldNormal =
+        normalize(optixTransformNormalFromObjectToWorldSpace(surfaceNormal(interpolator, u, hitPoint)));
+    const float3 worldTangent =
+        normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, u)));
+    const float3 worldBinormal = cross(worldNormal, worldTangent);
+    const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(hitPoint);
+    SurfaceHitData res;
+    res.normal = worldNormal;
+    res.geom_normal = worldNormal;
+    res.position = worldPosition;
+    res.uv = curveStrandUV(hit_data, primitiveIndex, u);
     res.worldTangent = worldTangent;
     res.worldBinormal = worldBinormal;
 
@@ -391,7 +486,11 @@ extern "C" __global__ void __closesthit__radiance()
     }
     else if (primType == OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE)
     {
-        surfaceHit = fillCurveGeomData(hit_data);
+        surfaceHit = fillCubicCurveGeomData(hit_data);
+    }
+    else if (primType == OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR)
+    {
+        surfaceHit = fillLinearCurveGeomData(hit_data);
     }
 
     // Fill SurfaceInteraction from hit data
@@ -415,6 +514,29 @@ extern "C" __global__ void __closesthit__radiance()
     {
         prd->radiance = (si.geometry_normal + make_float3(1.0f)) * 0.5f;
         return;
+    }
+
+    // Coverage. MASK resolves to 0 or 1 and BLEND to its alpha, so one
+    // stochastic test covers both: with probability (1 - opacity) the path
+    // continues straight through, unchanged and unshaded. Nothing else about
+    // the path moves -- not the throughput, not `specularBounce`, not
+    // `lastBsdfPdf` -- so a light or an environment seen through a cutout is
+    // still weighted against the bounce that actually produced the direction.
+    const float opacity = resolveOpacity(matParams, textures, si.uv);
+    if (opacity < 1.0f && prd->passthrough < PATH_PASSTHROUGH_MAX)
+    {
+        if (opacitySample(prd->sampleIndex, prd->linearPixelIndex, prd->passthrough) >= opacity)
+        {
+            // Step off on the side the ray was travelling, so the next trace
+            // cannot re-hit the surface it just passed through.
+            const float3 faceNg =
+                (dot(si.geometry_normal, ray_dir) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
+            prd->origin = offset_ray(si.position, faceNg);
+            prd->dir = ray_dir;
+            ++prd->passthrough;
+            prd->passedThrough = true;
+            return;
+        }
     }
 
     // Add emission

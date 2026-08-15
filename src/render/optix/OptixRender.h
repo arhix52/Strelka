@@ -31,13 +31,19 @@ struct PathTracerState
     OptixPipelineCompileOptions pipeline_compile_options = {};
     OptixPipeline pipeline = 0;
     OptixModule m_catromCurveModule = 0;
+    /// Built-in intersector for round *linear* curves. A separate module from
+    /// the cubic one because the basis is baked into the intersector, so a
+    /// scene with both kinds of strand needs both hit groups.
+    OptixModule m_linearCurveModule = 0;
 
     OptixProgramGroup raygen_prog_group = 0;
     OptixProgramGroup radiance_miss_group = 0;
     OptixProgramGroup occlusion_miss_group = 0;
     OptixProgramGroup radiance_default_hit_group = 0;
+    OptixProgramGroup radiance_linear_curve_hit_group = 0;
     std::vector<OptixProgramGroup> radiance_hit_groups;
     OptixProgramGroup occlusion_hit_group = 0;
+    OptixProgramGroup occlusion_linear_curve_hit_group = 0;
     OptixProgramGroup light_hit_group = 0;
     CUstream stream = 0;
     Params params = {};
@@ -65,6 +71,12 @@ private:
     {
         OptixTraversableHandle gas_handle = 0;
         CUdeviceptr d_gas_output_buffer = 0;
+        /// Which basis this set was built under. The hit group has to match:
+        /// fetching a linear segment with the cubic accessor reads four control
+        /// points where two were stored.
+        bool isLinear = true;
+        /// Segments per strand, or 0 when the set's strands differ in length.
+        uint32_t segmentsPerStrand = 0;
         ~Curve()
         {
             CUDA_CHECK(cudaFree((void*)d_gas_output_buffer));
@@ -107,6 +119,21 @@ private:
     bool mEnableValidation;
     bool mEnableMotionBlur;
 
+    /// Set whenever the TLAS is rebuilt from scratch. The SBT is indexed by
+    /// instance, so it has to be rebuilt with it; a refit leaves it alone.
+    bool mSbtDirty = false;
+
+    /// How many skeletal BLASes may be rebuilt from scratch in one frame, and
+    /// where the next frame's round-robin picks up. Bounded so that no single
+    /// frame pays for the whole cast; the same shape as Metal's
+    /// kMaxBlasRebuildsPerFrame.
+    static constexpr size_t kMaxBlasRebuildsPerFrame = 8;
+    size_t mNextBlasRebuildIndex = 0;
+
+    /// Instance count the current TLAS was built for. A refit cannot change it,
+    /// so a different one is what forces a rebuild.
+    size_t mTlasInstanceCount = 0;
+
     // Previous-frame settings for change detection (replaces static locals in render())
     uint32_t mPrevRectLightSamplingMethod = 0;
     bool mPrevEnableAccumulation = false;
@@ -119,6 +146,7 @@ private:
     void allocJointMatrices();
     std::unique_ptr<Mesh> createMesh(const oka::Mesh& mesh);
     void updateMesh(const oka::Mesh& mesh, int optixMeshesId);
+    bool rebuildMesh(const oka::Mesh& mesh, int optixMeshesId);
     std::unique_ptr<Curve> createCurve(const oka::Curve& curve);
     bool compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes);
 
@@ -164,12 +192,19 @@ private:
 
     bool createOptixMaterials();
     void destroyTextures();
+    void destroyMaterialTextures();
 
     std::vector<Material> mMaterials;
 
-    // Texture resource tracking for cleanup
+    // Texture resource tracking for cleanup. Material textures are tracked
+    // apart from the environment map's because createOptixMaterials() now runs
+    // again whenever a material changes, and it has to be able to release the
+    // set it loaded last time without taking the env map -- whose texture object
+    // is already sitting in Params -- with it.
     std::vector<cudaArray_t> mTextureArrays;
     std::vector<cudaTextureObject_t> mTextureObjects;
+    std::vector<cudaArray_t> mMaterialTextureArrays;
+    std::vector<cudaTextureObject_t> mMaterialTextureObjects;
 
     // Environment map resources
     std::unique_ptr<OptixBuffer> mEnvCdfXBuffer;   // conditional CDF
@@ -187,11 +222,12 @@ public:
     void init() override;
     void render(Buffer* output_buffer) override;
     Buffer* createBuffer(const BufferDesc& desc) override;
+    float skinnedGeometryExtent() override;
 
     void applySkinning();
     void createContext();
     void createBottomLevelAccelerationStructures();
-    void updateBottomLevelAccelerationStructures();
+    bool updateBottomLevelAccelerationStructures();
     void createTopLevelAccelerationStructure();
     void updateTopLevelAccelerationStructure();
     void resolveInstanceGeometry(OptixInstance& oi, const oka::Instance& instance) const;
