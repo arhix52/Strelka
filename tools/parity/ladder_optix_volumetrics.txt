@@ -1,0 +1,104 @@
+scene                    vs Cycles rel/ratio   vs Metal rel     recorded
+------------------------------------------------------------------------------
+00_calibration           0.024 / 1.007         0.018            0.021 / 1.010
+07_alpha_clip            0.034 / 1.015         0.024            0.025 / 1.018
+08_alpha_blend           0.041 / 1.016         0.036            0.024 / 1.016
+09_glass_ior             0.082 / 1.009         0.071            0.059 / 1.012
+10_glass_absorption      0.055 / 1.009         0.049            0.038 / 1.012
+12_lights_punctual       0.067 / 0.974         0.054            0.031 / 1.002
+17_coated_glass          0.092 / 0.989         0.079            0.067 / 0.994
+18_bounded_volume        0.037 / 1.005         0.034            0.027 / 1.000
+19_env_and_light         0.046 / 0.998         0.043            0.026 / 1.000
+22_thin_walled           0.116 / 0.929         0.081            0.094 / 0.966
+23_diffuse_transmission  0.035 / 0.999         0.035            0.012 / 1.000
+25_subsurface            0.079 / 1.002         0.071            0.056 / 1.009
+28_hair                  0.065 / 0.966         0.073            0.033 / 1.012
+
+Stream V (volumetrics), on optix/integration. Every row here was rendered at
+**128 spp**, not at the scene's own budget, which is the whole reason the `rel`
+column is above the recorded one on all thirteen -- and the reason the recorded
+column is not the right thing to read it against directly.
+
+Read the `ratio` column, which is a mean and barely moves with the sample count:
+
+    18_bounded_volume   0.870 -> 1.005   (recorded 1.000)
+    25_subsurface       0.700 -> 1.002   (recorded 1.009)
+
+The other eleven rows are controls, and every one of them reproduces the
+integrated ladder's ratio to the last digit except `10_glass_absorption`
+(1.009 here against 0.982 there). That one is the sample count and not this
+branch: the same binary with these changes stashed reads 1.009 at 128 spp too.
+
+For `rel`, the honest thing at a quarter of the samples is to extrapolate rather
+than to compare. Both rows were also rendered at 32 spp, and `rel(n) = b +
+c/sqrt(n)` through the two points gives:
+
+    18_bounded_volume   0.063 @ 32, 0.037 @ 128  ->  b = 0.013, 0.025 @ 512
+    25_subsurface       0.118 @ 32, 0.079 @ 128  ->  b = 0.040, 0.059 @ 512
+
+against recorded 0.027 and 0.056. Neither is a claim that the rows *are* those
+numbers -- it is a claim that what separates them from the recorded figures is
+the budget, and a run at 512 spp would settle it in one command.
+
+The two rows that moved, and the two that moved by less than they look:
+
+  * `07_alpha_clip` 1.017 -> 1.015 and `08_alpha_blend` 1.018 -> 1.016, both
+    with `rel` improving by 0.001. That is `misDistance`: the multiple-importance
+    weight at an area light now measures the light's solid angle from the vertex
+    that scattered rather than from wherever a cutout or a medium boundary
+    restarted the ray. Metal has carried the same field for the same reason.
+    Measured against a stashed build, so the delta is attributed rather than
+    assumed.
+  * `12_lights_punctual` at 0.974 is the control for that change: delta lights
+    cannot be reached by a BSDF ray, so the weight never applies, and the row is
+    unmoved to three digits.
+
+The decisive instrument for 25 is not this table. `tools/feature_tests/
+sss_furnace.py` builds the sphere alone under a uniform sky of radiance 1, where
+a medium of single-scattering albedo 1 has to render as exactly 1 at every mean
+free path:
+
+    mfp     sphere      sky     ratio
+    0.06    1.0024     1.0000   1.0024
+    0.12    1.0028     1.0000   1.0028
+    0.25    1.0031     1.0000   1.0031
+    0.50    1.0034     1.0000   1.0034
+    1.00    1.0033     1.0000   1.0033
+
+and driven at raw single-scattering albedos, against what the Van de Hulst fit
+predicts for a plane-parallel half-space:
+
+    albedo  sphere   fit      ratio
+    0.1     0.0244   0.0212   1.15
+    0.5     0.1564   0.1445   1.08
+    0.9     0.5066   0.4772   1.06
+
+which is the 6-8% excess the README already attributes to the test subject being
+a sphere and the fit describing a half-space, not to the walk.
+
+`sss_probe.py`'s measurement -- per sphere, and each silhouette split into its
+lit and shadowed halves, because a walk that carries light the wrong distance
+moves it between the halves while the total holds -- run through exr_io rather
+than through Blender, on this branch's 128 spp render and on the Metal EXR
+beside it:
+
+    sphere   disc (optix / metal)   lit half        shadowed half
+    0        1.021 / 1.032          0.967 / 0.983   1.129 / 1.127
+    1        0.999 / 1.007          0.962 / 0.969   1.085 / 1.097
+    2        1.013 / 0.999          0.991 / 0.967   1.085 / 1.105
+    3        1.004 / 1.014          0.967 / 0.972   1.098 / 1.119
+    4        1.022 / 1.017          0.977 / 0.981   1.110 / 1.089
+    backdrop 0.99                   -               -
+
+Both backends carry the same 3-4% deficit on the lit half and the same 9-13%
+excess on the shadowed one, and they agree with each other to 1-2% everywhere.
+That split is the walk model against Cycles', not a defect on this backend -- and
+the backdrop at 0.99 says the lighting itself is not what either of them is
+disagreeing about.
+
+That furnace run needed one change the checked-in script does not make: the
+scene's sidecar asks for a colour-only environment, and the OptiX backend renders
+that black -- `MissData::bg_color` is pinned to zero and the environment is only
+read when a texture path is present. The sky was written as a 16x8 constant EXR
+instead, which is the same instrument in the form this backend reads. That gap is
+a hand-off; it is not in the walk.

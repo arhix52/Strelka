@@ -328,8 +328,24 @@ extern "C" __global__ void __raygen__rg()
         float time = params.enableMotionBlur ? random<SampleDimension::eTime>(prd.sampler) : 0.0f;
         if (params.enableMotionBlur && !params.isMotionBlurVisible) time = 1.0f;
 
-        while (prd.depth < params.max_depth)
+        // Segments, not bounces. A cutout the path slips through, a medium
+        // boundary it crosses and a step of a subsurface walk each take a
+        // traversal and deliberately spend no depth, so `max_depth` alone does
+        // not bound this loop.
+        //
+        // The budget is Metal's, arrived at from the other side: the wavefront
+        // encodes `maxDepth + PATH_PASSTHROUGH_MAX + subsurfaceIterations`
+        // dispatch iterations and drops whatever paths are still alive when they
+        // run out. A per-path cap of the same size drops exactly the same paths,
+        // and it is the difference between a dim pixel and a GPU hang if a walk
+        // ever fails to terminate.
+        const uint32_t maxSegments =
+            params.max_depth + PATH_PASSTHROUGH_MAX + min(params.subsurfaceIterations, MEDIUM_MAX_STEPS);
+        uint32_t segments = 0;
+
+        while (prd.depth < params.max_depth && segments < maxSegments)
         {
+            ++segments;
             // Traversal and shading are split so that the warp can be sorted
             // between them. optixTraverse leaves a hit object behind without
             // running a program; optixReorder regroups the threads by what that
@@ -482,6 +498,17 @@ extern "C" __global__ void __miss__ms()
 {
     PerRayData* prd = getPRD();
 
+    // A path that reached the environment still inside a medium. Counted here
+    // because here is the only place it is visible: the path is gone and it
+    // still thinks it is inside glass, so every segment it travelled after the
+    // exit it never had carried the wrong absorption. No exit event can catch
+    // this one -- the ray left through a hole in the mesh. See ior_stack.h and
+    // entry 5 of docs/open-defects.md.
+    if (params.iorStats != nullptr && prd->iorStack.top >= 0)
+    {
+        atomicAdd(&params.iorStats[IOR_STAT_ESCAPED_INSIDE], 1u);
+    }
+
     // Background still needs a guide record, or the denoiser reads whatever the
     // previous frame left there and smears the silhouette across the sky.
     if (prd->writeAov && !prd->aovDone && params.aov != nullptr)
@@ -624,8 +651,16 @@ extern "C" __global__ void __closesthit__light()
             const float lightSelectionPdf = params.hasEnvMap
                 ? 0.5f / params.scene.numLights
                 : 1.0f / params.scene.numLights;
+            // From the vertex that scattered, which is not the ray's origin once
+            // it has passed through a cutout or crossed a medium's boundary on
+            // the way here. Using the origin makes the light look nearer than the
+            // scattering vertex saw it, which shrinks its solid-angle density,
+            // which inflates this weight -- and the next-event estimate at that
+            // vertex has already claimed the rest, so the two sum to more than
+            // one.
+            const float3 misOrigin = optixGetWorldRayOrigin() - rayDir * prd->misDistance;
             float lightPdf =
-                getLightPdf(currLight, hitPoint, optixGetWorldRayOrigin(), params.rectLightSamplingMethod) *
+                getLightPdf(currLight, hitPoint, misOrigin, params.rectLightSamplingMethod) *
                 lightSelectionPdf;
             const float misWeight = computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
             radiance = prd->throughput * Le * misWeight;
