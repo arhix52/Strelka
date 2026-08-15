@@ -9,6 +9,7 @@
 #include <strelka/material/ior_stack.h>
 
 #include "env_alias_sampling.h"
+#include <sharc.h>
 
 #define GEOMETRY_MASK_TRIANGLE 1
 #define GEOMETRY_MASK_CURVE 2
@@ -200,6 +201,21 @@ struct Params
     /// Upper bound on what one indirect path may contribute; 0 disables it.
     float clampIndirect;
 
+    // --- Radiance cache --------------------------------------------------
+    //
+    // Mirrors the four sharc* fields of Metal's Uniforms, and means the same
+    // things. `sharcCapacity == 0` disables the cache outright, and nothing else
+    // here is read when it is zero -- which is what makes the default a
+    // byte-for-byte no-op rather than a path that happens to agree.
+    SharcEntry* sharcEntries;
+    uint32_t sharcCapacity; ///< entries; a power of two, 0 = off
+    uint32_t sharcMinSamples; ///< deposits a voxel needs before it may be read
+    uint32_t sharcDepth; ///< first bounce allowed to read the cache
+    /// World size of one pixel at unit distance times the pixels a voxel should
+    /// span, so the setting behind it means the same thing at any resolution or
+    /// field of view. See sharc_grid.h.
+    float sharcBaseSize;
+
     // Depth of field
     int   useDof;
     float focalDistance;
@@ -285,6 +301,22 @@ struct PerRayData
     /// Set once the guide record for this pixel has been written, so the bounce
     /// after the first describable surface cannot overwrite it.
     bool aovDone;
+
+    // --- Radiance cache bookkeeping --------------------------------------
+    //
+    // One visit per path, at most. What the path gathers after the visit,
+    // divided by its throughput there, is this vertex's outgoing radiance, and
+    // that is what the deposit at the end of the raygen loop hands the cache.
+    // Metal keeps the same three fields in a SharcPathState buffer because its
+    // shade kernel and its deposit kernel are different dispatches; here the
+    // path lives across the whole loop and they are payload.
+    /// SHARC_NO_ENTRY until this path visits a voxel.
+    uint32_t sharcIndex;
+    /// prd.radiance at the moment of the visit, so the difference at the end of
+    /// the path is what the path gathered *after* it.
+    float3 sharcRadianceAtVisit;
+    /// 1 / throughput at the visit, floored per channel.
+    float3 sharcInvThroughput;
 };
 
 enum RayType

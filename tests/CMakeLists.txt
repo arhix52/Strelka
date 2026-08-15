@@ -64,6 +64,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_upload_plan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_accel_build_policy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_opacity_micromap_policy.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_sharc_grid.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_curve_layout.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_optix_scene_preparation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_gpu_stage_breadcrumb.cpp

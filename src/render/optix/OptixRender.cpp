@@ -2085,6 +2085,90 @@ void OptiXRender::createSbt()
     mSbtBytes = raygen_record_size + miss_record_size + hit_group_size;
 }
 
+/// Size the radiance cache, decide whether it needs clearing, and hand the
+/// device the four numbers that drive it.
+///
+/// Off is `sharcCapacity == 0`, and the device code reads that before it reads
+/// anything else in the group, so every other field is free to be stale when the
+/// feature is off. That is what makes the default a byte-for-byte no-op instead
+/// of a second code path that happens to agree.
+void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, uint32_t height)
+{
+    const SettingsManager& settings = *getSettings();
+    Params& params = mState.params;
+
+    const bool want = settings.contains("render/pt/sharc") && settings.getAs<bool>("render/pt/sharc");
+    uint32_t capacity = 0;
+    if (want)
+    {
+        capacity = settings.contains("render/pt/sharcCapacity") ?
+                       settings.getAs<uint32_t>("render/pt/sharcCapacity") :
+                       (1u << 22);
+        capacity = std::max(oka::sharc::kMinCapacity, capacity);
+        // The probe run masks rather than divides, so the table has to be a
+        // power of two. Rounded down: a capacity somebody typed is a memory
+        // budget, and rounding up could double it.
+        while ((capacity & (capacity - 1u)) != 0u)
+        {
+            capacity &= capacity - 1u;
+        }
+    }
+
+    if (capacity != mSharcCapacity)
+    {
+        mSharcBuffer.reset();
+        mSharcCapacity = 0;
+        if (capacity != 0)
+        {
+            mSharcBuffer.reset(new OptixBuffer((size_t)capacity * sizeof(SharcEntry)));
+            mSharcCapacity = capacity;
+            mSharcClearPending = true;
+            STRELKA_INFO("Radiance cache: {} entries ({:.1f} MB)", capacity,
+                         (double)capacity * sizeof(SharcEntry) / 1e6);
+        }
+    }
+
+    params.sharcCapacity = mSharcCapacity;
+    params.sharcEntries = mSharcCapacity ? (SharcEntry*)mSharcBuffer->getNativePtr() : nullptr;
+    if (mSharcCapacity == 0)
+    {
+        return;
+    }
+
+    params.sharcMinSamples =
+        settings.contains("render/pt/sharcMinSamples") ? settings.getAs<uint32_t>("render/pt/sharcMinSamples") : 8u;
+    params.sharcDepth = settings.contains("render/pt/sharcDepth") ? settings.getAs<uint32_t>("render/pt/sharcDepth") : 1u;
+
+    // The world size of one pixel at unit distance, times the pixels a voxel
+    // should span. Everything scene-dependent -- field of view, resolution -- is
+    // folded in here so that the setting itself is not. Same expression the
+    // Metal backend fills its sharcBaseSize with.
+    const float aspect = height > 0 ? (float)width / (float)height : 1.0f;
+    const float tanHalfFov = std::tan(glm::radians(camera.fovForAspect(aspect)) * 0.5f);
+    const float pixelAngle = height > 0 ? 2.0f * tanHalfFov / (float)height : 1.0f;
+    const float voxelPixels = settings.contains("render/pt/sharcVoxelPixels") ?
+                                  settings.getAs<float>("render/pt/sharcVoxelPixels") :
+                                  4.0f;
+    params.sharcBaseSize = pixelAngle * std::max(1.0f, voxelPixels);
+
+    // A cache filled under a camera that has since moved describes voxels that
+    // are no longer where it thinks they are: the level follows the distance to
+    // the eye, so the same point quantises differently once the eye moves. The
+    // accumulator's own restart is exactly the moment the renderer declares the
+    // previous frames not to describe this one, so it is the moment to drop the
+    // cache too.
+    if (getSharedContext().mSubframeIndex == 0)
+    {
+        mSharcClearPending = true;
+    }
+    if (mSharcClearPending)
+    {
+        CUDA_CHECK(cudaMemsetAsync(reinterpret_cast<void*>(mSharcBuffer->getPtr()), 0,
+                                   (size_t)mSharcCapacity * sizeof(SharcEntry), mState.stream));
+        mSharcClearPending = false;
+    }
+}
+
 void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t height)
 {
     bool needRealloc = false;
@@ -2727,6 +2811,8 @@ void OptiXRender::render(Buffer* output)
     params.risCandidates = risCandidates;
     params.estimatorMode = estimatorMode;
     params.clampIndirect = clampIndirect;
+
+    updateSharcParams(camera, params.image_width, params.image_height);
 
     memcpy(params.viewToWorld, glm::value_ptr(glm::transpose(glm::inverse(camera.matrices.view))),
            sizeof(params.viewToWorld));

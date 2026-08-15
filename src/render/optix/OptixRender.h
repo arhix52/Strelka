@@ -309,6 +309,20 @@ private:
 
     void updatePathtracerParams(const uint32_t width, const uint32_t height);
 
+    // --- Radiance cache ----------------------------------------------------
+    //
+    // Off by default, and off means `Params::sharcCapacity == 0`, which the
+    // device code reads before anything else -- so the default is a
+    // byte-for-byte no-op rather than a path that happens to agree.
+    std::unique_ptr<OptixBuffer> mSharcBuffer;
+    uint32_t mSharcCapacity = 0;
+    /// Whether the table has to be cleared before the next launch. Raised when
+    /// it is allocated and whenever accumulation restarts, because a cache
+    /// filled under a camera that has since moved describes voxels that are no
+    /// longer where it thinks they are.
+    bool mSharcClearPending = false;
+    void updateSharcParams(const oka::Camera& camera, uint32_t width, uint32_t height);
+
     // --- Denoiser / guides -----------------------------------------------
     OptixDenoiserContext mDenoiser;
     DenoisePlan mDenoisePlan{};

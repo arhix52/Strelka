@@ -296,6 +296,9 @@ extern "C" __global__ void __raygen__rg()
         // different jitter and pay the memory traffic for nothing.
         prd.writeAov = params.writeAov && sampleIdx == 0;
         prd.aovDone = false;
+        // Not zero: zero is a valid slot. The `= {}` above would otherwise leave
+        // every path claiming to have visited entry 0.
+        prd.sharcIndex = SHARC_NO_ENTRY;
 
         float3 ray_origin, ray_direction;
 
@@ -395,6 +398,27 @@ extern "C" __global__ void __raygen__rg()
                 break;
             prd.sampler.depth++;
         }
+
+        // The path is over, so what it gathered after the cache visit is known.
+        // Divided by the throughput it carried there, that is the outgoing
+        // radiance of the visited point -- which is what the cache stores.
+        //
+        // Here rather than at each of the half-dozen places a path can end,
+        // which is the same reason Metal spends a whole dispatch on it: the
+        // alternative is six scattered edits that would each have to stay
+        // correct.
+        if (params.sharcCapacity != 0u && prd.sharcIndex != SHARC_NO_ENTRY)
+        {
+            const float3 gathered = (prd.radiance - prd.sharcRadianceAtVisit) * prd.sharcInvThroughput;
+            // A negative component means the difference is not what it claims --
+            // a clamp or a NaN guard fired between the visit and here -- and a
+            // negative deposit would wrap the unsigned accumulator.
+            if (gathered.x >= 0.0f && gathered.y >= 0.0f && gathered.z >= 0.0f)
+            {
+                sharcWrite(params.sharcEntries, prd.sharcIndex, gathered);
+            }
+        }
+
         result += prd.radiance;
 
         if (prd.firstEventType == EventType::eDiffuse)
