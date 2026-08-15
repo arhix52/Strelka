@@ -42,6 +42,14 @@ static_assert((uint32_t)oka::optix_accel::kFlagAllowRandomVertexAccess ==
               (uint32_t)OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS);
 #include "curve_layout.h"
 
+#include <cuda_profiler_api.h>
+
+#include <dlfcn.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <chrono>
+#include <limits>
 #include <filesystem>
 #include <array>
 #include <string>
@@ -128,6 +136,115 @@ static inline void optixCheckLog(OptixResult res,
 
 using namespace oka;
 namespace fs = std::filesystem;
+
+namespace
+{
+
+double nowMilliseconds()
+{
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+/// What this process has on the device, as the driver accounts for it.
+///
+/// The counterpart of Metal's `MTLDevice::currentAllocatedSize`, and CUDA has no
+/// equivalent in the runtime API: `cudaMemGetInfo` reports the whole board,
+/// which on a machine that is running anything else is a number about that
+/// machine rather than about this renderer. NVML does answer per process, so it
+/// is loaded by name at runtime -- an optional diagnostic must not become a link
+/// dependency, and a box without the management library still has to render.
+///
+/// Zero means "cannot say", which the Memory panel already understands: it
+/// stops drawing the unaccounted slice rather than inventing one.
+size_t deviceAllocatedBytes()
+{
+    // The v2 process record, which is what nvmlDeviceGetComputeRunningProcesses_v3
+    // fills. Declared here rather than by including nvml.h so this stays a
+    // runtime lookup with no build-time dependency at all.
+    struct NvmlProcessInfoV2
+    {
+        unsigned int pid;
+        unsigned long long usedGpuMemory;
+        unsigned int gpuInstanceId;
+        unsigned int computeInstanceId;
+    };
+
+    static void* handle = dlopen("libnvidia-ml.so.1", RTLD_LAZY | RTLD_LOCAL);
+    if (!handle)
+    {
+        return 0;
+    }
+
+    using InitFn = int (*)();
+    using HandleFn = int (*)(unsigned int, void**);
+    using ProcFn = int (*)(void*, unsigned int*, NvmlProcessInfoV2*);
+
+    static auto nvmlInit = reinterpret_cast<InitFn>(dlsym(handle, "nvmlInit_v2"));
+    static auto nvmlGetHandle = reinterpret_cast<HandleFn>(dlsym(handle, "nvmlDeviceGetHandleByIndex_v2"));
+    static auto nvmlGetProcs = reinterpret_cast<ProcFn>(dlsym(handle, "nvmlDeviceGetComputeRunningProcesses_v3"));
+    if (!nvmlInit || !nvmlGetHandle || !nvmlGetProcs)
+    {
+        return 0;
+    }
+
+    static const bool initialised = (nvmlInit() == 0);
+    if (!initialised)
+    {
+        return 0;
+    }
+
+    int cudaDevice = 0;
+    if (cudaGetDevice(&cudaDevice) != cudaSuccess)
+    {
+        return 0;
+    }
+    void* device = nullptr;
+    if (nvmlGetHandle(static_cast<unsigned int>(cudaDevice), &device) != 0)
+    {
+        return 0;
+    }
+
+    NvmlProcessInfoV2 procs[64] = {};
+    unsigned int count = 64;
+    if (nvmlGetProcs(device, &count, procs) != 0)
+    {
+        return 0;
+    }
+    const unsigned int self = static_cast<unsigned int>(getpid());
+    for (unsigned int i = 0; i < count && i < 64; ++i)
+    {
+        if (procs[i].pid == self)
+        {
+            return static_cast<size_t>(procs[i].usedGpuMemory);
+        }
+    }
+    return 0;
+}
+
+/// What the OS charges this process. VmRSS rather than VmSize: the mapped size
+/// includes the whole device address space the driver reserves, which is
+/// hundreds of gigabytes and says nothing about memory anybody is using.
+size_t processFootprintBytes()
+{
+    std::ifstream status("/proc/self/status");
+    std::string key;
+    while (status >> key)
+    {
+        if (key == "VmRSS:")
+        {
+            size_t kb = 0;
+            if (status >> kb)
+            {
+                return kb * 1024;
+            }
+            return 0;
+        }
+        status.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    }
+    return 0;
+}
+
+} // namespace
 
 template <typename T>
 struct SbtRecord
@@ -219,6 +336,16 @@ OptiXRender::~OptiXRender()
     if (mState.d_instances)
         cudaFree(reinterpret_cast<void*>(mState.d_instances));
 
+    if (mFrameStartEvent)
+        cudaEventDestroy(mFrameStartEvent);
+    if (mFrameStopEvent)
+        cudaEventDestroy(mFrameStopEvent);
+
+    // The editor's two output slots. Owned here because triggerRenderIfIdle
+    // created them; the caller only ever borrows the ready one.
+    delete mAsyncOutputBuffers[0];
+    delete mAsyncOutputBuffers[1];
+
     // Destroy CUDA stream
     if (mState.stream)
         cudaStreamDestroy(mState.stream);
@@ -264,10 +391,14 @@ void OptiXRender::createContext()
     mState.mParamsBuffer.reset(new OptixBuffer(sizeof(Params)));
 }
 
-bool OptiXRender::compactAccel(CUdeviceptr& buffer,
-                               OptixTraversableHandle& handle,
-                               CUdeviceptr result,
-                               size_t outputSizeInBytes)
+// Returns what the structure occupies afterwards -- the compacted size when
+// compaction happened, the original otherwise. The caller records it, because a
+// bare CUdeviceptr cannot be asked how big it is and the memory report refuses
+// to estimate.
+size_t OptiXRender::compactAccel(CUdeviceptr& buffer,
+                                 OptixTraversableHandle& handle,
+                                 CUdeviceptr result,
+                                 size_t outputSizeInBytes)
 {
     // Get compacted size from device
     size_t compactedSize;
@@ -276,7 +407,7 @@ bool OptiXRender::compactAccel(CUdeviceptr& buffer,
     // Only compact if it saves space
     if (compactedSize >= outputSizeInBytes)
     {
-        return false;
+        return outputSizeInBytes;
     }
 
     // Allocate compacted buffer
@@ -290,7 +421,7 @@ bool OptiXRender::compactAccel(CUdeviceptr& buffer,
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(buffer)));
     buffer = compactedBuffer;
 
-    return true;
+    return compactedSize;
 }
 
 std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& curve)
@@ -397,7 +528,8 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
                                 &property, // emitted property list
                                 1)); // num emitted properties
 
-    compactAccel(d_gas_output_buffer, rcurve->gas_handle, property.result, gas_buffer_sizes.outputSizeInBytes);
+    rcurve->gas_bytes =
+        compactAccel(d_gas_output_buffer, rcurve->gas_handle, property.result, gas_buffer_sizes.outputSizeInBytes);
 
     rcurve->d_gas_output_buffer = d_gas_output_buffer;
     return rcurve;
@@ -484,6 +616,9 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
 
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
 
+    // What the structure costs before compaction, for the memory report. The
+    // compacted size, when there is one, overwrites it below.
+    size_t gasBytes = gas_buffer_sizes.outputSizeInBytes;
     if (!oka::optix_accel::shouldCompact(geometryClass))
     {
         OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &triangle_input, 1,
@@ -503,12 +638,13 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
                                     &property, // emitted property list
                                     1)); // num emitted properties
 
-        compactAccel(d_gas_output_buffer, gas_handle, property.result, gas_buffer_sizes.outputSizeInBytes);
+        gasBytes = compactAccel(d_gas_output_buffer, gas_handle, property.result, gas_buffer_sizes.outputSizeInBytes);
     }
 
     auto rmesh = std::make_unique<Mesh>();
     rmesh->d_gas_output_buffer = d_gas_output_buffer;
     rmesh->gas_handle = gas_handle;
+    rmesh->gas_bytes = gasBytes;
     return rmesh;
 }
 
@@ -1320,6 +1456,7 @@ void OptiXRender::createSbt()
     sbt.hitgroupRecordCount = hit_group_count;
 
     mState.sbt = sbt;
+    mSbtBytes = raygen_record_size + miss_record_size + hit_group_size;
 }
 
 void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t height)
@@ -1579,6 +1716,10 @@ void OptiXRender::applySkinning()
             }
         }
     }
+    // One mark for the whole set. A per-mesh breadcrumb would say which mesh's
+    // dispatch died, but the kernel is the same one for all of them and the
+    // memset would cost more than the dispatch it follows.
+    markStageSubmitted(optix::GpuStage::Skinning, 0);
 }
 
 // Bounding-box diagonal of the skinned vertices, read back from the GPU.
@@ -1653,59 +1794,81 @@ void OptiXRender::allocJointMatrices()
             mJointMatOffsets.push_back(currJointMats.size());
         }
     }
-    CUDA_CHECK(cudaMalloc(&mSkinningPtrs.d_jointMats, jointMatSize * sizeof(sutil::Matrix4x4)));
+    mSkinningPtrs.bytes = jointMatSize * sizeof(sutil::Matrix4x4);
+    CUDA_CHECK(cudaMalloc(&mSkinningPtrs.d_jointMats, mSkinningPtrs.bytes));
 }
 
 void OptiXRender::render(Buffer* output)
 {
-    if (getSharedContext().mFrameNumber == 0)
+    // Last frame's pair, if it has landed. Read here rather than at the end of
+    // the frame that recorded it: at that point the work has only been enqueued,
+    // so a read would either block -- turning an asynchronous submission into a
+    // synchronous one -- or find nothing and leave the number at zero forever,
+    // which is what it did.
+    collectFrameTiming(false);
+
+    // Before the build stages, not after them. They enqueue acceleration builds
+    // and the environment CDF, and clearing the marks in between would wipe the
+    // record of exactly the submissions a loading scene is most likely to fault
+    // in.
+    beginFrameBreadcrumbs();
+
+    if (mScenePrep.isBuilding())
     {
-        createOptixMaterials();
+        const bool complete = stepSceneBuild(output);
+        // Each slice that moved the scene forward is one more thing worth
+        // showing; the clock decides how many of them are worth a frame.
+        mPublishClock.noteArrivals();
 
-        // Load environment map if specified
-        const auto& envLight = mScene->getEnvLight();
-        if (envLight.has_value() && !envLight->texturePath.empty())
-        {
-            const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");
-            const fs::path envTexPath = fs::path(resourcePathStr) / envLight->texturePath;
-            loadEnvMap(envTexPath.string());
-            mState.params.envMapIntensity = mEnvMapAutoScale * envLight->intensity;
-            mState.params.envMapRotation = envLight->rotationY * (M_PI / 180.0f);
-            mState.params.envMapColorTint = make_float3(envLight->color.x, envLight->color.y, envLight->color.z);
-            // A backdrop the camera sees instead of the lighting environment. The
-            // intensity is the backdrop's own; the auto-calibration scale above is
-            // not applied to it, because it exists to reconcile the *lighting*
-            // map's units with the analytic lights and the backdrop lights nothing.
-            if (!envLight->backgroundTexturePath.empty())
-            {
-                loadEnvBackground((fs::path(resourcePathStr) / envLight->backgroundTexturePath).string());
-                mState.params.envBackgroundIntensity = envLight->backgroundIntensity;
-            }
-        }
-        else
-        {
-            mState.params.hasEnvMap = false;
-            mState.params.hasEnvBackground = false;
-        }
+        // The environment -- the lighting map and the separate backdrop both --
+        // is loaded by the build's own Environment stage, in
+        // buildSceneEnvironment(), rather than here: it is one of the stages the
+        // slice above is stepping through. What is left to do here is say how
+        // much of the scene has arrived.
+        metal::StreamReadiness readiness;
+        readiness.hasOutputTargets = mState.params.accum != nullptr;
+        readiness.hasEnvironment = mEnvMapLoaded || !mScene->getEnvLight().has_value();
+        readiness.hasTopLevel = mState.ias_handle != 0;
+        readiness.buildComplete = complete;
 
-        createVertexBuffer();
-        if (mEnableMotionBlur)
+        const double nowMs = nowMilliseconds();
+        const double intervalMs = getSettings()->getAs<float>("render/stream/publishIntervalMs");
+        if (!canTracePartial(readiness) || !mPublishClock.shouldPublish(nowMs, intervalMs, complete))
         {
-            createPrevBuffers();
+            // Nothing to trace yet, or nothing new since the last frame. The busy
+            // flag has to come off here: triggerRenderIfIdle sets it before every
+            // call, and a build stage that returns without submitting anything
+            // leaves nothing behind to clear it, so the build would stall one
+            // stage in.
+            mRenderBusy.store(false, std::memory_order_release);
+            return;
         }
-        createIndexBuffer();
-        createVertexSkinDataBuffer();
-        allocJointMatrices();
-        // upload all curve data
-        createPointsBuffer();
-        createWidthsBuffer();
-        createBottomLevelAccelerationStructures();
-        createTopLevelAccelerationStructure();
-        createSbt();
-        createLightBuffer();
+        mPublishClock.notePublished(nowMs);
+        // Time to first pixel is the number this whole path exists to move, so it
+        // is reported rather than inferred from watching a window.
+        if (!mReportedFirstPartialFrame)
+        {
+            mReportedFirstPartialFrame = true;
+            STRELKA_INFO("First frame shown {:.0f} ms into the scene build (stage {})", nowMs - mBuildStartMs,
+                         optix::buildStageName(mScenePrep.stage()));
+        }
+        // The scene under the accumulated image just changed, so what has been
+        // accumulated is of a different scene.
+        getSharedContext().mSubframeIndex = 0;
     }
 
-    const ChangeBits changes = mScene->peekChanges();
+    // Edits and animation are only meaningful once the scene is on the device.
+    //
+    // Both paths below rebuild the top level, and the top level resolves every
+    // instance to the bottom level it names -- which, mid-build, is a bottom
+    // level that does not exist yet. The load-time `createLight` alone leaves the
+    // Lights bit set, so the very first partial frame of every scene went
+    // straight into resolveInstanceGeometry with an empty mesh list and took the
+    // editor down with it. The build's own Tail stage consumes these bits, so
+    // nothing is dropped by waiting.
+    const bool sceneOnDevice = !mScenePrep.isBuilding();
+
+    const ChangeBits changes = sceneOnDevice ? mScene->peekChanges() : ChangeBits::None;
     if (any(changes & ChangeBits::Lights))
     {
         createLightBuffer();
@@ -1721,9 +1884,28 @@ void OptiXRender::render(Buffer* output)
         // The bit was consumed and nothing acted on it, so every material edit
         // made after load -- everything the editor's material panel does -- was
         // dropped on the floor: the device-side MaterialParams array is only
-        // ever written by createOptixMaterials(), which ran once at frame 0.
-        // Instance flags are derived from alpha_mode, so the TLAS has to follow.
-        createOptixMaterials();
+        // ever written by the build's material stages, which ran once while the
+        // scene was streaming in.
+        //
+        // Both halves of that pair have to run: publishMaterialParams() releases
+        // the old texture set and rewrites the parameter table with every slot
+        // empty, and the texture stage is what fills the slots back in. An edit
+        // is not a load -- it happens between two frames rather than across a
+        // build -- so the slices are run to completion here instead of being
+        // spread over frames. Instance flags are derived from alpha_mode, so the
+        // TLAS has to follow.
+        //
+        // The progress sink is put aside for the duration: it belongs to a load,
+        // and its cancellation flag stays set after an abandoned one, which would
+        // otherwise stop this loop after a single material and leave the rest of
+        // the scene's maps unloaded for the life of the session.
+        LoadProgress* const progress = mLoadProgress;
+        mLoadProgress = nullptr;
+        publishMaterialParams();
+        while (!stepMaterialTextures(std::numeric_limits<double>::max()))
+        {
+        }
+        mLoadProgress = progress;
         createTopLevelAccelerationStructure();
     }
     if (any(changes & (ChangeBits::Lights | ChangeBits::Transforms | ChangeBits::Materials)))
@@ -1738,9 +1920,9 @@ void OptiXRender::render(Buffer* output)
     // Animation changes
     std::vector<oka::Scene::Animation>& animations = mScene->getAnimations();
     bool accelStructureDirty = false;
-    if (mEnableMotionBlur)
+    if (mEnableMotionBlur && sceneOnDevice)
         mPrevInstances.swap(mScene->getInstances());
-    for (size_t i = 0; i < animations.size(); ++i)
+    for (size_t i = 0; sceneOnDevice && i < animations.size(); ++i)
     {
         const std::string scrollNameStr = "render/animation/anim" + std::to_string(i) + "/time";
         const char* scrollName = scrollNameStr.c_str();
@@ -1840,6 +2022,13 @@ void OptiXRender::render(Buffer* output)
         // need reset
         getSharedContext().mSubframeIndex = 0;
     }
+    // Latched here, where it is read, rather than at the end of the function. A
+    // frame that returns early -- and there is now more than one way to, all of
+    // them failures -- would otherwise leave the previous pose at whatever it
+    // was before, so the next frame compares against a stale camera, calls it a
+    // cut and resets the accumulator. The visible symptom was a render pinned at
+    // one sample: every attempt reset, incremented, and failed again.
+    mPrevView = currView;
 
     const uint32_t rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
     settingsChanged |= (mPrevRectLightSamplingMethod != rectLightSamplingMethod);
@@ -2032,15 +2221,52 @@ void OptiXRender::render(Buffer* output)
     params.enableAccumulation = enableAccumulation;
     params.maxSampleCount = totalSpp;
 
-    CUDA_CHECK(cudaMemcpy(
-        reinterpret_cast<void*>(mState.mParamsBuffer->getPtr()), &params, sizeof(params), cudaMemcpyHostToDevice));
+    if (mFrameStartEvent)
+    {
+        // The legacy default stream, which cudaStreamCreate's blocking streams
+        // synchronise against -- so a pair recorded here brackets the launch on
+        // mState.stream as well as the post kernels on this one, and the number
+        // is the whole frame rather than the part of it that happens to share a
+        // stream with the events.
+        latchCudaError(cudaEventRecord(mFrameStartEvent, 0), "record the frame start event");
+    }
+
+    if (latchCudaError(cudaMemcpy(reinterpret_cast<void*>(mState.mParamsBuffer->getPtr()), &params, sizeof(params),
+                                  cudaMemcpyHostToDevice),
+                       "upload the launch parameters"))
+    {
+        return;
+    }
+    markStageSubmitted(optix::GpuStage::ParamsUpload, 0);
 
     if (samplesThisLaunch != 0)
     {
-        // Launch OptiX path tracer
-        OPTIX_CHECK(optixLaunch(mState.pipeline, mState.stream, mState.mParamsBuffer->getPtr(), sizeof(Params),
-                                &mState.sbt, width, height,
-                                /*depth=*/1));
+        // Launch OptiX path tracer.
+        //
+        // Checked rather than OPTIX_CHECK'd: an abort here takes the editor down
+        // with the scene still on the device and leaves the harness nothing to
+        // report. A latch lets StrelkaCLI say the image is not valid and exit
+        // non-zero, which is the logic it has always had and never saw an error
+        // to trigger.
+        const OptixResult launchResult =
+            optixLaunch(mState.pipeline, mState.stream, mState.mParamsBuffer->getPtr(), sizeof(Params), &mState.sbt,
+                        width, height,
+                        /*depth=*/1);
+        if (launchResult != OPTIX_SUCCESS)
+        {
+            mDeviceError = true;
+            if (!mDeviceErrorReported)
+            {
+                mDeviceErrorReported = true;
+                STRELKA_ERROR("optixLaunch failed: [{}] {}", optixGetErrorName(launchResult),
+                              optixGetErrorString(launchResult));
+                reportGpuStageFailure();
+            }
+        }
+        else
+        {
+            markStageSubmitted(optix::GpuStage::PathTrace, mState.stream);
+        }
 
         // Update subframe index for accumulation.
         //
@@ -2052,8 +2278,21 @@ void OptiXRender::render(Buffer* output)
         // frame never lets it exit. The interactive path is unaffected, because
         // samplesThisLaunch is computed from samplesPerLaunch and ignores the
         // remaining budget entirely when accumulation is off.
+        //
+        // Advanced whether or not the launch took, which is deliberate and is
+        // what Metal does -- it counts at encode time and asks about validity
+        // separately. The counter says how many samples have been *submitted*;
+        // deviceError() says whether they are worth anything. A counter that
+        // stalled on failure would leave every caller that loops until it
+        // reaches its target -- StrelkaCLI, and the editor's audit modes --
+        // spinning forever on a GPU that will never produce another sample, and
+        // never reaching the check they already have for exactly this.
         getSharedContext().mSubframeIndex =
             enableAccumulation ? getSharedContext().mSubframeIndex + samplesThisLaunch : totalSpp;
+        if (mDeviceError)
+        {
+            return;
+        }
     }
     else
     {
@@ -2130,6 +2369,12 @@ void OptiXRender::render(Buffer* output)
         float maxEDR = settings.getAs<float>("render/post/tonemapper/maxEDR");
         exposureValue *= maxEDR;
         tonemap(tonemapperType, exposureValue, gamma, displayImage, outputWidth, outputHeight);
+        markStageSubmitted(optix::GpuStage::Tonemap, 0);
+    }
+
+    if (mFrameStopEvent && !latchCudaError(cudaEventRecord(mFrameStopEvent, 0), "record the frame stop event"))
+    {
+        mFrameTimingPending = true;
     }
 
     mDisplayImage = displayImage;
@@ -2138,8 +2383,404 @@ void OptiXRender::render(Buffer* output)
 
     getSharedContext().mFrameNumber++;
 
-    mPrevView = currView;
     mState.prevParams = mState.params;
+}
+
+// ---------------------------------------------------------------------------
+// The sliced scene build
+// ---------------------------------------------------------------------------
+
+optix::SceneBuildHooks OptiXRender::makeSceneBuildHooks()
+{
+    optix::SceneBuildHooks hooks;
+    hooks.nowMs = []() { return nowMilliseconds(); };
+    hooks.onStageTimed = [](optix::BuildStage stage, double elapsedMs) {
+        STRELKA_DEBUG("Scene build stage '{}' took {:.0f} ms", optix::buildStageName(stage), elapsedMs);
+    };
+    hooks.onBuffersEnter = [this]() {
+        mBuildStartMs = nowMilliseconds();
+        mReportedFirstPartialFrame = false;
+        if (mLoadProgress)
+        {
+            mLoadProgress->beginStage(LoadProgress::Stage::Geometry);
+        }
+    };
+    hooks.buildBuffers = [this]() { buildSceneBuffers(); };
+    hooks.onEnvironmentEnter = [this]() {
+        if (mLoadProgress)
+        {
+            mLoadProgress->beginStage(LoadProgress::Stage::Environment);
+        }
+    };
+    hooks.buildEnvironment = [this](Buffer* output) { buildSceneEnvironment(output); };
+    hooks.publishMaterialParams = [this]() { publishMaterialParams(); };
+    hooks.onStructuresEnter = [this]() {
+        if (mLoadProgress && mBlasMeshCursor == 0 && mBlasCurveCursor == 0)
+        {
+            mLoadProgress->beginStage(LoadProgress::Stage::Structures,
+                                      static_cast<uint32_t>(mScene->getMeshes().size() + mScene->getCurves().size()));
+        }
+    };
+    hooks.stepStructures = [this](double budgetMs) { return stepStructures(budgetMs); };
+    hooks.onMaterialTexturesEnter = [this]() {
+        if (mLoadProgress && mMaterialTextureCursor == 0)
+        {
+            mLoadProgress->beginStage(LoadProgress::Stage::Textures,
+                                      static_cast<uint32_t>(mScene->getMaterials().size()));
+        }
+    };
+    hooks.stepMaterialTextures = [this](double budgetMs) { return stepMaterialTextures(budgetMs); };
+    hooks.onTailEnter = [this]() {
+        if (mLoadProgress)
+        {
+            mLoadProgress->beginStage(LoadProgress::Stage::Done);
+        }
+    };
+    hooks.buildTail = [this](Buffer* output) { buildSceneTail(output); };
+    return hooks;
+}
+
+bool OptiXRender::stepSceneBuild(Buffer* output)
+{
+    optix::SceneBuildHooks hooks = makeSceneBuildHooks();
+    return mScenePrep.step(hooks, output);
+}
+
+void OptiXRender::finishSceneBuild(Buffer* output)
+{
+    optix::SceneBuildHooks hooks = makeSceneBuildHooks();
+    mScenePrep.finish(hooks, output);
+}
+
+void OptiXRender::buildSceneBuffers()
+{
+    createVertexBuffer();
+    if (mEnableMotionBlur)
+    {
+        createPrevBuffers();
+    }
+    createIndexBuffer();
+    createVertexSkinDataBuffer();
+    allocJointMatrices();
+    // upload all curve data
+    createPointsBuffer();
+    createWidthsBuffer();
+}
+
+// The stage that makes a scene visible before it is loaded.
+//
+// Nothing here depends on geometry or on materials, and together these are
+// already a complete picture: somewhere to accumulate, the sky, the lights, a
+// shader binding table, and a top level to trace against. The top level is built
+// empty on purpose -- every ray then misses and reaches the environment, so the
+// first frame is the scene's own lighting with none of its objects in it yet,
+// and the objects appear in that rather than replacing a black screen.
+void OptiXRender::buildSceneEnvironment(Buffer* output)
+{
+    updatePathtracerParams(output->width(), output->height());
+
+    const auto& envLight = mScene->getEnvLight();
+    if (envLight.has_value() && !envLight->texturePath.empty())
+    {
+        const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");
+        const fs::path envTexPath = fs::path(resourcePathStr) / envLight->texturePath;
+        loadEnvMap(envTexPath.string());
+        mState.params.envMapIntensity = mEnvMapAutoScale * envLight->intensity;
+        mState.params.envMapRotation = envLight->rotationY * (M_PI / 180.0f);
+        mState.params.envMapColorTint = make_float3(envLight->color.x, envLight->color.y, envLight->color.z);
+        // A backdrop the camera sees instead of the lighting environment. The
+        // intensity is the backdrop's own; the auto-calibration scale above is
+        // not applied to it, because it exists to reconcile the *lighting*
+        // map's units with the analytic lights and the backdrop lights nothing.
+        if (!envLight->backgroundTexturePath.empty())
+        {
+            loadEnvBackground((fs::path(resourcePathStr) / envLight->backgroundTexturePath).string());
+            mState.params.envBackgroundIntensity = envLight->backgroundIntensity;
+        }
+    }
+    else
+    {
+        mState.params.hasEnvMap = false;
+        mState.params.hasEnvBackground = false;
+    }
+
+    createLightBuffer();
+    // Built here rather than with the structures because it does not depend on
+    // them: the records are packed per instance in the same order the top level
+    // will use, so the table the empty top level never reaches is already the one
+    // the real top level wants.
+    createSbt();
+    buildEmptyTopLevel();
+}
+
+void OptiXRender::buildEmptyTopLevel()
+{
+    uploadInstancesToDevice({});
+
+    OptixBuildInput iasInput = {};
+    iasInput.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
+    iasInput.instanceArray.instances = mState.d_instances;
+    iasInput.instanceArray.numInstances = 0;
+
+    OptixAccelBuildOptions iasOptions = {};
+    iasOptions.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    iasOptions.motionOptions.numKeys = 1;
+    iasOptions.operation = OPTIX_BUILD_OPERATION_BUILD;
+
+    OptixAccelBufferSizes iasBufferSizes;
+    OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &iasOptions, &iasInput, 1, &iasBufferSizes));
+
+    // Straight into the member the real top level will overwrite. It is a few
+    // hundred bytes, and createTopLevelAccelerationStructure reallocates when it
+    // needs more, so nothing is leaked by handing it a buffer sized for nothing.
+    mTlasBuffer.reset(new OptixBuffer(std::max<size_t>(iasBufferSizes.outputSizeInBytes, 1)));
+    if (!mTempAccelBuffer || mTempAccelBuffer->size() < iasBufferSizes.tempSizeInBytes)
+    {
+        mTempAccelBuffer.reset(new OptixBuffer(std::max<size_t>(iasBufferSizes.tempSizeInBytes, 1)));
+    }
+
+    OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &iasOptions, &iasInput, 1, mTempAccelBuffer->getPtr(),
+                                iasBufferSizes.tempSizeInBytes, mTlasBuffer->getPtr(),
+                                iasBufferSizes.outputSizeInBytes, &mState.ias_handle, nullptr, 0));
+    markStageSubmitted(optix::GpuStage::AccelBuild, mState.stream);
+}
+
+// One slice of the long pole. Returns true when every structure is on the device
+// and the real top level has replaced the empty one.
+bool OptiXRender::stepStructures(double budgetMs)
+{
+    const auto& meshes = mScene->getMeshes();
+    const auto& curves = mScene->getCurves();
+
+    if (mBlasMeshCursor == 0 && mBlasCurveCursor == 0)
+    {
+        mOptixMeshes.clear();
+        mOptixCurves.clear();
+        mOptixMeshes.reserve(meshes.size());
+        mOptixCurves.reserve(curves.size());
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    auto overBudget = [&]() {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count() >=
+               budgetMs;
+    };
+
+    while (mBlasMeshCursor < meshes.size())
+    {
+        mOptixMeshes.emplace_back(createMesh(meshes[mBlasMeshCursor]));
+        ++mBlasMeshCursor;
+        if (mLoadProgress)
+        {
+            mLoadProgress->step();
+        }
+        if (overBudget())
+        {
+            return false;
+        }
+    }
+    while (mBlasCurveCursor < curves.size())
+    {
+        mOptixCurves.emplace_back(createCurve(curves[mBlasCurveCursor]));
+        ++mBlasCurveCursor;
+        if (mLoadProgress)
+        {
+            mLoadProgress->step();
+        }
+        if (overBudget())
+        {
+            return false;
+        }
+    }
+
+    if (!mTopLevelBuilt)
+    {
+        // Not sliced. A top level is one build over the instance list, and there
+        // is no partial one that is safe to trace: an instance whose bottom level
+        // is not built yet is a null traversable, not a missing object.
+        createTopLevelAccelerationStructure();
+        markStageSubmitted(optix::GpuStage::AccelBuild, mState.stream);
+        mTopLevelBuilt = true;
+    }
+    return true;
+}
+
+void OptiXRender::buildSceneTail(Buffer* output)
+{
+    (void)output;
+    // Fresh scene: drop the edit bits the loader left behind, so the frame after
+    // this one does not rebuild the top level it has just finished building.
+    mScene->consumeChanges();
+
+    // What the scene actually cost, once, from the sizes the objects report
+    // rather than from a tally kept at the allocation sites.
+    MemoryReport report;
+    if (memoryReport(report))
+    {
+        std::sort(report.gpu.begin(), report.gpu.end(),
+                  [](const MemoryReport::Entry& a, const MemoryReport::Entry& b) { return a.bytes > b.bytes; });
+        std::string top;
+        for (size_t i = 0; i < std::min<size_t>(4, report.gpu.size()); ++i)
+        {
+            top += fmt::format("{}{} {:.2f} GB", i ? ", " : "", report.gpu[i].name,
+                               static_cast<double>(report.gpu[i].bytes) / 1073741824.0);
+        }
+        STRELKA_INFO("Memory: device {:.2f} GB, process {:.2f} GB; largest: {}",
+                     static_cast<double>(report.deviceAllocated) / 1073741824.0,
+                     static_cast<double>(report.processFootprint) / 1073741824.0, top);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Memory report
+// ---------------------------------------------------------------------------
+
+// Deliberately not a running tally kept at the allocation sites: those drift the
+// moment someone adds a cudaMalloc and forgets the counter, and the first symptom
+// is a total that no longer matches the device's. Every figure below is either
+// the size an OptixBuffer was created with, a size CUDA is asked for by handle,
+// or a size recorded at the one place a bare CUdeviceptr is produced -- and
+// whatever is missed shows up as the unaccounted remainder between the sum and
+// the two totals rather than vanishing.
+bool OptiXRender::memoryReport(MemoryReport& report) const
+{
+    report.gpu.clear();
+    report.cpu.clear();
+
+    auto add = [&report](const char* name, size_t bytes) {
+        if (bytes > 0)
+        {
+            report.gpu.push_back({ name, bytes });
+        }
+    };
+    auto bufBytes = [](const std::unique_ptr<OptixBuffer>& b) { return b ? b->size() : 0; };
+
+    add("Vertices", bufBytes(mVertexBuffer));
+    add("Vertices (previous)", bufBytes(mPrevVertexBuffer));
+    add("Indices", bufBytes(mIndexBuffer));
+    add("Curves", bufBytes(mPointsBuffer) + bufBytes(mWidthsBuffer) + bufBytes(mSegmentIndicesBuffer));
+
+    {
+        // cudaArrayGetInfo asks the array itself for its extent and format, so
+        // this is the texture's own answer rather than a replay of the arguments
+        // it was created with.
+        auto arrayBytes = [](cudaArray_t array) -> size_t {
+            cudaChannelFormatDesc desc{};
+            cudaExtent extent{};
+            unsigned int flags = 0;
+            if (!array || cudaArrayGetInfo(&desc, &extent, &flags, array) != cudaSuccess)
+            {
+                return 0;
+            }
+            const size_t texels = std::max<size_t>(extent.width, 1) * std::max<size_t>(extent.height, 1) *
+                                  std::max<size_t>(extent.depth, 1);
+            return texels * ((desc.x + desc.y + desc.z + desc.w) / 8);
+        };
+        // A mipmapped array only answers per level, so its levels are walked
+        // until the driver says there are no more.
+        auto mipmappedBytes = [&arrayBytes](cudaMipmappedArray_t mipmapped) -> size_t {
+            size_t bytes = 0;
+            for (uint32_t level = 0; mipmapped; ++level)
+            {
+                cudaArray_t levelArray = nullptr;
+                if (cudaGetMipmappedArrayLevel(&levelArray, mipmapped, level) != cudaSuccess)
+                {
+                    cudaGetLastError();
+                    break;
+                }
+                bytes += arrayBytes(levelArray);
+            }
+            return bytes;
+        };
+
+        // Both sets: the general one holds the environment, the material one
+        // holds everything the maps decoded into, and the report is about the
+        // device rather than about which of them owns what.
+        size_t bytes = 0;
+        for (cudaArray_t array : mTextureArrays)
+            bytes += arrayBytes(array);
+        for (cudaArray_t array : mMaterialTextureArrays)
+            bytes += arrayBytes(array);
+        for (cudaMipmappedArray_t mipmapped : mTextureMipmappedArrays)
+            bytes += mipmappedBytes(mipmapped);
+        for (cudaMipmappedArray_t mipmapped : mMaterialTextureMipmappedArrays)
+            bytes += mipmappedBytes(mipmapped);
+        add("Textures", bytes);
+    }
+    add("Texture table", bufBytes(mTexturesDataBuffer));
+    // The alias table replaced the 2D CDF and its raw-radiance staging buffer,
+    // so it is what the environment now costs beyond its texture arrays.
+    add("Environment", bufBytes(mEnvAliasBuffer));
+
+    {
+        size_t bytes = 0;
+        for (const std::unique_ptr<Mesh>& mesh : mOptixMeshes)
+        {
+            bytes += mesh ? mesh->gas_bytes : 0;
+        }
+        for (const std::unique_ptr<Curve>& curve : mOptixCurves)
+        {
+            bytes += curve ? curve->gas_bytes : 0;
+        }
+        add("BLAS", bytes);
+    }
+    add("TLAS", bufBytes(mTlasBuffer));
+    // Kept for the lifetime of the renderer so a refit needs no allocation.
+    add("Accel scratch", bufBytes(mTempAccelBuffer) + bufBytes(mCompactedSizeBuffer));
+    add("Instance descriptors", mState.d_instances_size);
+    {
+        size_t bytes = 0;
+        for (const std::shared_ptr<OptixBuffer>& b : mMotionTransformBuffers)
+        {
+            bytes += b ? b->size() : 0;
+        }
+        add("Motion transforms", bytes);
+    }
+    add("Shader binding table", mSbtBytes);
+    add("Materials", bufBytes(mMaterialParamsBuffer));
+    add("Lights", bufBytes(mLightBuffer));
+    add("Skinning", bufBytes(mVertexSkinDataBuffer) + mSkinningPtrs.bytes);
+
+    {
+        // Per pixel rather than per scene, which is why a render at a larger
+        // resolution costs more before a ray is cast.
+        const size_t pixels = static_cast<size_t>(mState.params.image_width) * mState.params.image_height;
+        size_t bytes = 0;
+        if (mState.params.accum)
+            bytes += pixels * sizeof(float4);
+        if (mState.params.diffuse)
+            bytes += pixels * sizeof(float4);
+        if (mState.params.specular)
+            bytes += pixels * sizeof(float4);
+        if (mState.params.diffuseCounter)
+            bytes += pixels * sizeof(uint16_t);
+        if (mState.params.specularCounter)
+            bytes += pixels * sizeof(uint16_t);
+        add("Accumulation & AOVs", bytes);
+    }
+    {
+        size_t bytes = bufBytes(mState.mParamsBuffer) + bufBytes(mStageMarkBuffer);
+        for (const Buffer* b : mAsyncOutputBuffers)
+        {
+            bytes += b ? static_cast<size_t>(b->width()) * b->height() * Buffer::getElementSize(b->getFormat()) : 0;
+        }
+        add("Uniforms & output", bytes);
+    }
+
+    // The host arrays the editor keeps so Scene::pick() can walk them.
+    if (mScene)
+    {
+        const size_t hostBytes = mScene->getVertices().size() * sizeof(oka::Scene::Vertex) +
+                                 mScene->getIndices().size() * sizeof(uint32_t);
+        if (hostBytes > 0)
+        {
+            report.cpu.push_back({ "Host geometry (picking)", hostBytes });
+        }
+    }
+
+    report.deviceAllocated = deviceAllocatedBytes();
+    report.processFootprint = processFootprintBytes();
+    return true;
 }
 
 void OptiXRender::init()
@@ -2170,9 +2811,316 @@ void OptiXRender::init()
     }
 
     createContext();
+    createTimingEvents();
     createModule();
     createProgramGroups();
     createPipeline();
+
+    // Arm the deferred scene build. The first render() call picks it up a stage
+    // at a time; a synchronous caller drives it to the end through renderSync.
+    //
+    // Here rather than on the first render() so isBuildingScene() is true the
+    // moment init() returns. The editor waits on it before it measures auto
+    // exposure and before it calls the scene ready, and a flag that only became
+    // true after the first frame would let both of those happen against a scene
+    // with nothing in it.
+    mScenePrep.begin();
+}
+
+// ---------------------------------------------------------------------------
+// Frame timing
+// ---------------------------------------------------------------------------
+
+void OptiXRender::createTimingEvents()
+{
+    // Default flags, not cudaEventDisableTiming -- the timing is the point.
+    if (latchCudaError(cudaEventCreate(&mFrameStartEvent), "create the frame start event") ||
+        latchCudaError(cudaEventCreate(&mFrameStopEvent), "create the frame stop event"))
+    {
+        mFrameStartEvent = nullptr;
+        mFrameStopEvent = nullptr;
+    }
+
+    // One byte per stage. Allocated once and reset per frame, so the fault path
+    // costs a single small memset in the steady state and nothing at all when
+    // nothing fails.
+    mStageMarkBuffer.reset(new OptixBuffer(optix::kGpuStageCount));
+}
+
+void OptiXRender::collectFrameTiming(bool wait)
+{
+    if (!mFrameTimingPending || !mFrameStartEvent || !mFrameStopEvent)
+    {
+        return;
+    }
+    if (!wait)
+    {
+        const cudaError_t query = cudaEventQuery(mFrameStopEvent);
+        if (query == cudaErrorNotReady)
+        {
+            // Still running. The previous frame's number stands, which is what
+            // the title bar and the progress line want -- a zero here would read
+            // as "instant" rather than "not known yet".
+            return;
+        }
+        if (query != cudaSuccess)
+        {
+            latchCudaError(query, "query the frame stop event");
+            mFrameTimingPending = false;
+            return;
+        }
+    }
+    else if (latchCudaError(cudaEventSynchronize(mFrameStopEvent), "wait for the frame stop event"))
+    {
+        mFrameTimingPending = false;
+        return;
+    }
+
+    float elapsedMs = 0.0f;
+    if (!latchCudaError(cudaEventElapsedTime(&elapsedMs, mFrameStartEvent, mFrameStopEvent), "read the frame time"))
+    {
+        mLastRenderTimeMs.store(static_cast<double>(elapsedMs), std::memory_order_relaxed);
+    }
+    mFrameTimingPending = false;
+}
+
+// ---------------------------------------------------------------------------
+// Device errors and the breadcrumb that says which stage was running
+// ---------------------------------------------------------------------------
+
+bool OptiXRender::latchCudaError(cudaError_t err, const char* what)
+{
+    if (err == cudaSuccess)
+    {
+        return false;
+    }
+    mDeviceError = true;
+    if (!mDeviceErrorReported)
+    {
+        mDeviceErrorReported = true;
+        STRELKA_ERROR("CUDA failed to {}: {} ({})", what, cudaGetErrorString(err), cudaGetErrorName(err));
+        reportGpuStageFailure();
+    }
+    return true;
+}
+
+void OptiXRender::beginFrameBreadcrumbs()
+{
+    if (!mStageMarkBuffer || mDeviceError)
+    {
+        return;
+    }
+    std::fill(std::begin(mStageSubmitted), std::end(mStageSubmitted), static_cast<uint8_t>(0));
+    // On the legacy stream, so it is ordered before everything this frame
+    // enqueues on either stream.
+    cudaMemsetAsync(reinterpret_cast<void*>(mStageMarkBuffer->getPtr()), 0, optix::kGpuStageCount, 0);
+}
+
+void OptiXRender::markStageSubmitted(optix::GpuStage stage, CUstream stream)
+{
+    const size_t index = static_cast<size_t>(stage);
+    if (index >= optix::kGpuStageCount)
+    {
+        return;
+    }
+    mStageSubmitted[index] = 1;
+    if (!mStageMarkBuffer)
+    {
+        return;
+    }
+    // Enqueued behind the work it follows, on the same stream, so the byte lands
+    // only if that work ran to completion. A fault takes the stream down with
+    // the memset still in it, which is exactly what makes the absent mark
+    // meaningful.
+    cudaMemsetAsync(reinterpret_cast<uint8_t*>(mStageMarkBuffer->getPtr()) + index, 1, 1, stream);
+}
+
+void OptiXRender::reportGpuStageFailure()
+{
+    if (!mStageMarkBuffer)
+    {
+        return;
+    }
+    uint8_t completed[optix::kGpuStageCount] = {};
+    // Deliberately unchecked: the device has already failed, and a second error
+    // out of this copy would say nothing the first one did not.
+    if (cudaMemcpy(completed, reinterpret_cast<void*>(mStageMarkBuffer->getPtr()), optix::kGpuStageCount,
+                   cudaMemcpyDeviceToHost) != cudaSuccess)
+    {
+        STRELKA_ERROR("GPU fault: the stage breadcrumbs could not be read back either");
+        return;
+    }
+
+    const optix::GpuStageFailure failure =
+        optix::inferGpuStageFailure(completed, mStageSubmitted, optix::kGpuStageCount);
+    if (failure.suspectedStage >= 0)
+    {
+        STRELKA_ERROR("GPU fault while running '{}' (last completed: {})",
+                      optix::gpuStageName(static_cast<optix::GpuStage>(failure.suspectedStage)),
+                      failure.lastCompletedStage >= 0 ?
+                          optix::gpuStageName(static_cast<optix::GpuStage>(failure.lastCompletedStage)) :
+                          "nothing");
+    }
+    else if (failure.allSubmittedCompleted)
+    {
+        // Everything this frame submitted also finished, so the error came from
+        // outside it. Said out loud because the alternative is blaming whichever
+        // stage happened to be last, which is how an earlier asynchronous fault
+        // gets attributed to the tonemap.
+        STRELKA_ERROR("GPU fault: every stage this frame submitted completed; the error is from outside this frame");
+    }
+    if (mScenePrep.isBuilding())
+    {
+        STRELKA_ERROR("The scene build was in its '{}' stage", optix::buildStageName(mScenePrep.stage()));
+    }
+}
+
+void OptiXRender::syncFrameAndLatchErrors()
+{
+    if (mDeviceError)
+    {
+        return;
+    }
+    // Both, and in this order. The launch runs on mState.stream; the post
+    // kernels run on the legacy stream, which the launch's blocking stream
+    // orders against but which has its own errors to report.
+    if (mState.stream && latchCudaError(cudaStreamSynchronize(mState.stream), "finish the render stream"))
+    {
+        return;
+    }
+    if (latchCudaError(cudaDeviceSynchronize(), "finish the frame"))
+    {
+        return;
+    }
+    // A kernel launch that failed to *start* reports here rather than at the
+    // synchronise, and nothing else in this backend would ever look.
+    latchCudaError(cudaGetLastError(), "launch this frame's kernels");
+}
+
+void OptiXRender::renderSync(Buffer* output)
+{
+    // A synchronous caller wants the frame, not a responsive window, so the
+    // build runs to completion here rather than one stage per call.
+    finishSceneBuild(output);
+    render(output);
+    syncFrameAndLatchErrors();
+    // Blocking, because a caller that has just waited for the frame is entitled
+    // to the frame's time rather than the previous one's.
+    collectFrameTiming(true);
+}
+
+// ---------------------------------------------------------------------------
+// Non-blocking editor loop
+// ---------------------------------------------------------------------------
+
+// Submits a frame and waits for it, which reads as a contradiction next to
+// Metal's version and is not one. Metal hands the frame to a completion handler
+// and returns; OptiX has no such callback, and the alternatives are polling an
+// event from the UI thread -- a second loop that has to be kept in step with
+// this one -- or lying about when the frame landed. Everything measuring a frame
+// reads isRenderBusy() as "the frame is there", and returning before it is turns
+// every one of those measurements into a race. The wait is one launch, which at
+// the interactive samples-per-launch this path uses is milliseconds.
+void OptiXRender::triggerRenderIfIdle()
+{
+    if (mRenderBusy.load(std::memory_order_acquire) || deviceError())
+    {
+        return;
+    }
+
+    const uint32_t w = getSettings()->getAs<uint32_t>("render/width");
+    const uint32_t h = getSettings()->getAs<uint32_t>("render/height");
+    if (w == 0 || h == 0)
+    {
+        return;
+    }
+
+    // The buffer that is not the one being displayed.
+    const int ready = mReadyIndex.load(std::memory_order_acquire);
+    mWriteIndex = (ready >= 0) ? (1 - ready) : 0;
+
+    if (!mAsyncOutputBuffers[mWriteIndex])
+    {
+        BufferDesc desc{};
+        desc.format = BufferFormat::FLOAT4;
+        desc.width = w;
+        desc.height = h;
+        mAsyncOutputBuffers[mWriteIndex] = createBuffer(desc);
+    }
+    else if (mAsyncOutputBuffers[mWriteIndex]->width() != w || mAsyncOutputBuffers[mWriteIndex]->height() != h)
+    {
+        mAsyncOutputBuffers[mWriteIndex]->resize(w, h);
+    }
+
+    mRenderBusy.store(true, std::memory_order_release);
+    render(mAsyncOutputBuffers[mWriteIndex]);
+    // A build stage that published nothing has already cleared the flag and
+    // produced no image; publishing the slot then would show the caller a buffer
+    // this frame never wrote.
+    if (mRenderBusy.load(std::memory_order_acquire))
+    {
+        syncFrameAndLatchErrors();
+        collectFrameTiming(true);
+        // A failed frame is not published. Its buffer holds whatever was in it
+        // before, and showing that is how a GPU fault comes out looking like a
+        // lighting bug; the last good frame stays on screen and the editor's
+        // alert says why it stopped moving.
+        if (!mDeviceError)
+        {
+            mReadyIndex.store(mWriteIndex, std::memory_order_release);
+        }
+        mRenderBusy.store(false, std::memory_order_release);
+    }
+}
+
+Buffer* OptiXRender::getReadyBuffer()
+{
+    const int ready = mReadyIndex.load(std::memory_order_acquire);
+    return ready >= 0 ? mAsyncOutputBuffers[ready] : nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// GPU capture
+// ---------------------------------------------------------------------------
+
+// Nsight rather than Xcode, and a range rather than a file.
+//
+// The CUDA analogue of Metal's .gputrace is the profiler's capture range:
+// launch under `nsys profile --capture-range=cudaProfilerApi` (or
+// `ncu --profile-from-start off`) and these two calls bracket exactly the frame
+// that would otherwise have been averaged together with the acceleration
+// structure build. The path is where the *profiler* was told to write, not
+// something this can choose, so it is reported rather than used -- saying so is
+// what stops the next reader assuming a file appeared and going looking for it.
+void OptiXRender::beginGpuCapture(const std::string& path)
+{
+    if (mCaptureActive)
+    {
+        return;
+    }
+    const cudaError_t started = cudaProfilerStart();
+    if (started != cudaSuccess)
+    {
+        STRELKA_ERROR("GPU capture failed to start: {}. Run under `nsys profile "
+                      "--capture-range=cudaProfilerApi` or `ncu --profile-from-start off`.",
+                      cudaGetErrorString(started));
+        return;
+    }
+    mCaptureActive = true;
+    STRELKA_INFO("GPU capture range open; the profiler writes it, not Strelka (asked for '{}')", path);
+}
+
+void OptiXRender::endGpuCapture()
+{
+    if (!mCaptureActive)
+    {
+        return;
+    }
+    mCaptureActive = false;
+    // Everything in the range has to have finished before the range closes, or
+    // the profiler attributes this frame's launch to whatever comes next.
+    cudaDeviceSynchronize();
+    cudaProfilerStop();
 }
 
 Buffer* OptiXRender::createBuffer(const BufferDesc& desc)
@@ -2439,6 +3387,11 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     mEnvAliasBuffer.reset(new OptixBuffer(aliasBytes));
     CUDA_CHECK(cudaMemcpy((void*)mEnvAliasBuffer->getPtr(), aliasResult.alias.data(), aliasBytes,
                           cudaMemcpyHostToDevice));
+    // The stage the breadcrumbs know as EnvCdf is now the alias table: the CDF
+    // kernel it was named for is gone, but it is still the same point in the
+    // frame -- the environment's sampling distribution reaching the device -- so
+    // a fault there is still reported against it.
+    markStageSubmitted(optix::GpuStage::EnvCdf, 0);
 
     // Store env map params
     mState.params.envMapTexture = envTexObj;
@@ -2563,95 +3516,53 @@ void OptiXRender::destroyTextures()
     mTextureMipmappedArrays.clear();
 }
 
-bool OptiXRender::createOptixMaterials()
+// The material table, without a single texture in it.
+//
+// Split from the maps on purpose, and the split is what makes a scene appear
+// before it has finished loading: this is a few kilobytes of struct copies and
+// everything the acceleration structures need to know about materials comes out
+// of it, while decoding the maps is minutes of PNG on a large scene. Geometry
+// therefore reaches the screen in flat material colours and the maps fill into
+// the live table behind it, rather than the whole scene waiting on the last JPEG.
+void OptiXRender::publishMaterialParams()
 {
     const auto& matDescs = mScene->getMaterials();
     if (matDescs.empty())
     {
         STRELKA_WARNING("No materials in scene");
-        return true;
+        return;
     }
 
-    // Every texture this function loads is loaded again below, so the previous
-    // set is released first. Without this a material edit -- which now really
-    // does re-run this -- leaks a full copy of the scene's textures each time.
+    // Every texture the texture stage below loads is loaded again when this runs
+    // again, so the previous set is released first. Without this a material edit
+    // -- which now really does re-run this -- leaks a full copy of the scene's
+    // textures each time.
     destroyMaterialTextures();
 
-    const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");
-    const fs::path resourcePath(resourcePathStr);
-
-    // Host-side storage for all texture objects (flat array: mat[0].tex[0..5], mat[1].tex[0..5], ...)
-    std::vector<cudaTextureObject_t> allTexObjects(matDescs.size() * MAX_MATERIAL_TEXTURES, 0);
-
-    // Cache: file path + how it is read -> texture object. The kind is part of
-    // the key: the same file used as a base colour and as a roughness map is two
-    // different textures, because only one of them is sRGB encoded.
-    std::unordered_map<std::string, cudaTextureObject_t> texCache;
-
-    auto loadOrCacheTex = [&](const std::string& relPath, oka::optix_tex::Kind kind) -> cudaTextureObject_t {
-        if (relPath.empty())
-            return 0;
-        fs::path fullPath = resourcePath / relPath;
-        std::string key = fullPath.string() + "|" + std::to_string((int)kind);
-        auto it = texCache.find(key);
-        if (it != texCache.end())
-            return it->second;
-        if (!fs::exists(fullPath))
-        {
-            STRELKA_WARNING("Texture not found: {}", fullPath.string());
-            texCache[key] = 0;
-            return 0;
-        }
-        ::Texture tex = loadTextureFromFile(fullPath.string(), kind);
-        cudaTextureObject_t obj = tex.filtered_object;
-        texCache[key] = obj;
-        return obj;
-    };
-
     mMaterials.resize(matDescs.size());
-
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
-        const auto& desc = matDescs[i];
-        cudaTextureObject_t* texSlots = &allTexObjects[i * MAX_MATERIAL_TEXTURES];
-
-        // Copy material params (we'll update texture indices)
-        MaterialParams params = desc.params;
-
-        // Load textures from file paths, assign slots. The kind per slot is the
-        // same split the Metal backend makes: base colour and emission are sRGB
-        // encoded, everything else is linear data that a transfer function would
-        // corrupt, and a normal map is a direction rather than a colour at all.
-        texSlots[0] = loadOrCacheTex(desc.baseColorTexPath, oka::optix_tex::Kind::Color);
-        params.base_color_tex = texSlots[0] ? 0 : -1;
-
-        texSlots[1] = loadOrCacheTex(desc.metallicRoughnessTexPath, oka::optix_tex::Kind::NonColor);
-        params.metallic_roughness_tex = texSlots[1] ? 1 : -1;
-
-        texSlots[2] = loadOrCacheTex(desc.normalTexPath, oka::optix_tex::Kind::Normal);
-        params.normal_tex = texSlots[2] ? 2 : -1;
-
-        texSlots[3] = loadOrCacheTex(desc.emissionTexPath, oka::optix_tex::Kind::Color);
-        params.emission_tex = texSlots[3] ? 3 : -1;
-
-        texSlots[4] = loadOrCacheTex(desc.occlusionTexPath, oka::optix_tex::Kind::NonColor);
-        params.occlusion_tex = texSlots[4] ? 4 : -1;
-
+        MaterialParams params = matDescs[i].params;
+        // Every slot empty until its stage runs. A -1 is what the shader reads as
+        // "no map", so a material published now shades with its factors alone
+        // rather than sampling a texture object that is still zero.
+        params.base_color_tex = -1;
+        params.metallic_roughness_tex = -1;
+        params.normal_tex = -1;
+        params.emission_tex = -1;
+        params.occlusion_tex = -1;
         // Slot 5 is the transmission texture. Scene::MaterialDescription has no
         // field for it, so the glTF loader has nothing to hand over and the slot
         // stays empty; adding it is a loader change, reported as a hand-off.
         params.transmission_tex = -1;
-
         mMaterials[i].params = params;
     }
 
-    // Upload all texture objects to GPU in one contiguous buffer
-    const size_t totalTexSize = allTexObjects.size() * sizeof(cudaTextureObject_t);
+    mHostMaterialTextures.assign(matDescs.size() * MAX_MATERIAL_TEXTURES, 0);
+    const size_t totalTexSize = mHostMaterialTextures.size() * sizeof(cudaTextureObject_t);
     mTexturesDataBuffer.reset(new OptixBuffer(totalTexSize));
-    CUDA_CHECK(cudaMemcpy(
-        (void*)mTexturesDataBuffer->getPtr(), allTexObjects.data(), totalTexSize, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(reinterpret_cast<void*>(mTexturesDataBuffer->getPtr()), 0, totalTexSize));
 
-    // Upload MaterialParams to a device buffer (indexed by materialId)
     std::vector<MaterialParams> allParams(matDescs.size());
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
@@ -2659,15 +3570,111 @@ bool OptiXRender::createOptixMaterials()
     }
     const size_t paramsSize = allParams.size() * sizeof(MaterialParams);
     mMaterialParamsBuffer.reset(new OptixBuffer(paramsSize));
-    CUDA_CHECK(cudaMemcpy(
-        (void*)mMaterialParamsBuffer->getPtr(), allParams.data(), paramsSize, cudaMemcpyHostToDevice));
+    CUDA_CHECK(
+        cudaMemcpy((void*)mMaterialParamsBuffer->getPtr(), allParams.data(), paramsSize, cudaMemcpyHostToDevice));
     mMaterialCount = matDescs.size();
 
-    // Set device pointers in Params (will be uploaded each frame)
     mState.params.materials = (MaterialParams*)mMaterialParamsBuffer->getPtr();
     mState.params.materialTextures = (cudaTextureObject_t*)mTexturesDataBuffer->getPtr();
 
+    mMaterialTextureCursor = 0;
+    mTextureCache.clear();
+}
+
+// One slice of texture decoding. Returns true when every material has its maps.
+//
+// Each material is patched into the live device table as it finishes -- its six
+// texture-object slots and its own MaterialParams entry, both at their offsets --
+// so a frame traced between two slices is correct for the materials that have
+// arrived and correct-without-maps for the ones that have not. Nothing is ever
+// half-written: the parameters naming a slot go up after the slot holds the
+// object.
+bool OptiXRender::stepMaterialTextures(double budgetMs)
+{
+    const auto& matDescs = mScene->getMaterials();
+    if (matDescs.empty() || !mMaterialParamsBuffer || !mTexturesDataBuffer)
+    {
+        return true;
+    }
+
+    const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");
+    const fs::path resourcePath(resourcePathStr);
+
+    // Cache: file path + how it is read -> texture object. The kind is part of
+    // the key: the same file used as a base colour and as a roughness map is two
+    // different textures, because only one of them is sRGB encoded.
+    auto loadOrCacheTex = [&](const std::string& relPath, oka::optix_tex::Kind kind) -> cudaTextureObject_t {
+        if (relPath.empty())
+            return 0;
+        const fs::path fullPath = resourcePath / relPath;
+        const std::string key = fullPath.string() + "|" + std::to_string((int)kind);
+        auto it = mTextureCache.find(key);
+        if (it != mTextureCache.end())
+            return it->second;
+        if (!fs::exists(fullPath))
+        {
+            STRELKA_WARNING("Texture not found: {}", fullPath.string());
+            mTextureCache[key] = 0;
+            return 0;
+        }
+        const ::Texture tex = loadTextureFromFile(fullPath.string(), kind);
+        mTextureCache[key] = tex.filtered_object;
+        return tex.filtered_object;
+    };
+
+    const auto started = std::chrono::steady_clock::now();
+    while (mMaterialTextureCursor < matDescs.size())
+    {
+        const size_t i = mMaterialTextureCursor;
+        const auto& desc = matDescs[i];
+        cudaTextureObject_t* texSlots = &mHostMaterialTextures[i * MAX_MATERIAL_TEXTURES];
+        MaterialParams& params = mMaterials[i].params;
+
+        // The kind per slot is the same split the Metal backend makes: base
+        // colour and emission are sRGB encoded, everything else is linear data
+        // that a transfer function would corrupt, and a normal map is a
+        // direction rather than a colour at all.
+        texSlots[0] = loadOrCacheTex(desc.baseColorTexPath, oka::optix_tex::Kind::Color);
+        texSlots[1] = loadOrCacheTex(desc.metallicRoughnessTexPath, oka::optix_tex::Kind::NonColor);
+        texSlots[2] = loadOrCacheTex(desc.normalTexPath, oka::optix_tex::Kind::Normal);
+        texSlots[3] = loadOrCacheTex(desc.emissionTexPath, oka::optix_tex::Kind::Color);
+        texSlots[4] = loadOrCacheTex(desc.occlusionTexPath, oka::optix_tex::Kind::NonColor);
+        // Slot 5 is the transmission texture. Scene::MaterialDescription has no
+        // field for it, so the glTF loader has nothing to hand over and the slot
+        // stays empty; adding it is a loader change, reported as a hand-off.
+        texSlots[5] = 0;
+
+        params.base_color_tex = texSlots[0] ? 0 : -1;
+        params.metallic_roughness_tex = texSlots[1] ? 1 : -1;
+        params.normal_tex = texSlots[2] ? 2 : -1;
+        params.emission_tex = texSlots[3] ? 3 : -1;
+        params.occlusion_tex = texSlots[4] ? 4 : -1;
+        params.transmission_tex = -1;
+
+        // Objects first, then the parameters that name them.
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<cudaTextureObject_t*>(mTexturesDataBuffer->getPtr()) +
+                                  i * MAX_MATERIAL_TEXTURES,
+                              texSlots, MAX_MATERIAL_TEXTURES * sizeof(cudaTextureObject_t),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<MaterialParams*>(mMaterialParamsBuffer->getPtr()) + i, &params,
+                              sizeof(MaterialParams), cudaMemcpyHostToDevice));
+
+        ++mMaterialTextureCursor;
+        if (mLoadProgress)
+        {
+            mLoadProgress->step();
+            if (mLoadProgress->isCancelled())
+            {
+                break;
+            }
+        }
+        if (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count() >= budgetMs)
+        {
+            return mMaterialTextureCursor >= matDescs.size();
+        }
+    }
+
     STRELKA_INFO("Loaded {} materials ({} unique textures, {} cache hits, {} decoded)", matDescs.size(),
-                 texCache.size(), mTextureCacheHits, mTextureCacheMisses);
+                 mTextureCache.size(), mTextureCacheHits, mTextureCacheMisses);
     return true;
 }
