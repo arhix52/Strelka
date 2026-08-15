@@ -22,6 +22,7 @@
 
 #include "optix_device_utils.h"
 #include "shading/shading_common.h"
+#include "shading/medium.h"
 #include "alpha.h"
 #include <curve_layout.h>
 
@@ -53,6 +54,74 @@ static __forceinline__ __device__ float traceOcclusion(
                RAY_TYPE_OCCLUSION, // missSBTIndex
                transmittance);
     return __uint_as_float(transmittance);
+}
+
+/// Optical depth a shadow ray picks up crossing the boundaries of bounded media.
+///
+/// The boundary of a medium is not on the shadow mask -- a fog gizmo left there
+/// would black out everything it encloses -- so the segments inside it have to
+/// be found with a traversal of their own. That is the second traversal this
+/// feature costs, which is why it is gated on the scene having a bounded medium
+/// at all and why it walks a bounded number of crossings rather than to
+/// completion.
+///
+/// Alternating closest hits rather than an any-hit sweep: a convex volume
+/// answers in two, and the alternative is a payload that sorts an unbounded set
+/// of distances. `startMedium` is the one thing the ray cannot work out for
+/// itself -- whether it began inside. A vertex within a fog volume and one just
+/// outside it produce the same origin and direction.
+///
+/// optixTraverse without optixInvoke, so this costs a traversal and not a
+/// program launch: the hit object carries the distance and the SBT record, and
+/// those are the whole of what is wanted.
+static __forceinline__ __device__ float3 mediumTransmittance(
+    float3 origin, float3 direction, float maxDistance, uint32_t startMedium)
+{
+    constexpr uint32_t kMaxCrossings = 8u;
+    const float time = optixGetRayTime();
+
+    float3 optical = make_float3(0.0f);
+    float travelled = 0.0f;
+    uint32_t medium = startMedium;
+
+    for (uint32_t i = 0; i < kMaxCrossings; ++i)
+    {
+        const float remaining = maxDistance - travelled;
+        if (remaining <= 1e-5f)
+        {
+            break;
+        }
+
+        optixTraverse(params.handle, origin + direction * travelled, direction,
+                      1e-4f, remaining, time,
+                      OptixVisibilityMask(GEOMETRY_MASK_MEDIUM), OPTIX_RAY_FLAG_DISABLE_ANYHIT,
+                      RAY_TYPE_OCCLUSION, RAY_TYPE_COUNT, RAY_TYPE_OCCLUSION);
+
+        const bool escaped = !optixHitObjectIsHit();
+        const float segment = escaped ? remaining : optixHitObjectGetRayTmax();
+
+        if (medium != 0u)
+        {
+            const MaterialParams& mm = params.materials[medium - 1u];
+            optical += fromSpectrum(oka::medium::sigmaTFromRadius(toSpectrum(mm.subsurface_radius))) *
+                       segment;
+        }
+        if (escaped)
+        {
+            break;
+        }
+
+        // The same toggle the crossing in __closesthit__radiance uses, and for
+        // the same reason: a gizmo's winding is arbitrary, so the normal cannot
+        // say which way the ray is going.
+        const HitGroupData* hd = reinterpret_cast<HitGroupData*>(optixHitObjectGetSbtDataPointer());
+        const uint32_t here = static_cast<uint32_t>(hd->materialId) + 1u;
+        medium = (medium == here) ? 0u : here;
+
+        travelled += segment + 1e-4f;
+    }
+
+    return make_float3(expf(-optical.x), expf(-optical.y), expf(-optical.z));
 }
 
 /// Any-hit for shadow rays. Only bound on instances whose material is not
@@ -170,7 +239,12 @@ static __forceinline__ __device__ float3 shadowOrigin(const SurfaceInteraction& 
 static __device__ LightConnection connectLight(SamplerState& sampler,
                                                const UniformLight& light,
                                                const SurfaceInteraction& si,
-                                               float curveRadius)
+                                               float curveRadius,
+                                               // A scattering event in a medium has a position and
+                                               // no normal. The hemisphere test and the cosine below
+                                               // are surface terms; applied to a volume they reject
+                                               // half of every connection and darken the other half.
+                                               bool volumeEvent = false)
 {
     LightSampleData lightSampleData = {};
     const float2 uv =
@@ -226,7 +300,7 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
     // lightReachesShadingPoint() is `dot(N, L) > 0` for everything except a
     // fibre, where the hemisphere test is the wrong question -- see the note on
     // it in shading/shading_common.h.
-    const bool lit = lightReachesShadingPoint(si, lightSampleData.L);
+    const bool lit = volumeEvent || lightReachesShadingPoint(si, lightSampleData.L);
     const bool facing = (light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT)
                             ? (lit && emitsLight(Li))
                             : (lit && -dot(lightSampleData.L, lightSampleData.normal) > 0.0f &&
@@ -236,8 +310,9 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
         // The cosine belongs here because bsdf_eval() returns f alone, unlike
         // bsdf_sample()'s bsdf_over_pdf which already carries it. See the note on
         // both result structs in bsdf_types.h. shadingCosine() is
-        // saturate(dot(N, L)) for everything but a fibre.
-        c.radiance = Li * shadingCosine(si, lightSampleData.L);
+        // saturate(dot(N, L)) for everything but a fibre -- and nothing at all
+        // for a medium, which has no normal to take it against.
+        c.radiance = volumeEvent ? Li : Li * shadingCosine(si, lightSampleData.L);
         c.pdf = lightSampleData.pdf;
         c.tMax = lightSampleData.distToLight;
         c.needsRay = true;
@@ -247,7 +322,8 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
 
 static __device__ LightConnection connectEnvLight(SamplerState& sampler,
                                                   const SurfaceInteraction& si,
-                                                  float curveRadius)
+                                                  float curveRadius,
+                                                  bool volumeEvent = false)
 {
     const float2 xi = make_float2(
         random<SampleDimension::eLightPointX>(sampler),
@@ -268,8 +344,8 @@ static __device__ LightConnection connectEnvLight(SamplerState& sampler,
         return c;
 
     // Check if direction is above the surface -- an identity for everything but
-    // a fibre, which has no dark side.
-    if (!lightReachesShadingPoint(si, dir))
+    // a fibre, which has no dark side, and for a medium, which has no side.
+    if (!volumeEvent && !lightReachesShadingPoint(si, dir))
         return c;
 
     // Bilinear for the radiance carried down the ray; the point fetch inside
@@ -280,7 +356,9 @@ static __device__ LightConnection connectEnvLight(SamplerState& sampler,
     float3 Li = make_float3(envSample.x, envSample.y, envSample.z);
     Li *= params.envMapIntensity * params.envMapColorTint;
 
-    c.radiance = Li * shadingCosine(si, dir);
+    // Cosine folded in here for the same reason as in connectLight(), and left
+    // out for a medium for the same reason.
+    c.radiance = volumeEvent ? Li : Li * shadingCosine(si, dir);
     c.tMax = 1e16f;
     c.needsRay = true;
     return c;
@@ -289,7 +367,8 @@ static __device__ LightConnection connectEnvLight(SamplerState& sampler,
 /// Choose a strategy and build the connection. Visibility is the caller's job.
 static __device__ LightConnection connectToLight(SamplerState& sampler,
                                                  const SurfaceInteraction& si,
-                                                 float curveRadius)
+                                                 float curveRadius,
+                                                 bool volumeEvent = false)
 {
     if (params.hasEnvMap)
     {
@@ -299,13 +378,14 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
         {
             // Sample environment map
             const float selectionPdf = (params.scene.numLights > 0) ? 0.5f : 1.0f;
-            LightConnection c = connectEnvLight(sampler, si, curveRadius);
+            LightConnection c = connectEnvLight(sampler, si, curveRadius, volumeEvent);
             c.pdf *= selectionPdf;
             return c;
         }
         // Sample local light (remap u from [0, 0.5) to [0, 1))
         const uint32_t lightId = selectLightIndex(u * 2.0f, params.scene.numLights);
-        LightConnection c = connectLight(sampler, params.scene.lights[lightId], si, curveRadius);
+        LightConnection c =
+            connectLight(sampler, params.scene.lights[lightId], si, curveRadius, volumeEvent);
         c.pdf *= 0.5f / params.scene.numLights;
         return c;
     }
@@ -321,7 +401,8 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
 
     const float u = random<SampleDimension::eLightId>(sampler);
     const uint32_t lightId = selectLightIndex(u, params.scene.numLights);
-    LightConnection c = connectLight(sampler, params.scene.lights[lightId], si, curveRadius);
+    LightConnection c =
+        connectLight(sampler, params.scene.lights[lightId], si, curveRadius, volumeEvent);
     c.pdf *= 1.0f / params.scene.numLights;
     return c;
 }
@@ -448,7 +529,18 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
     {
         return make_float3(0.0f);
     }
-    return clampIndirectContribution(weight * transmittance, prd->depth, params.clampIndirect);
+    // Whatever survived the geometry still has to cross whatever bounded media
+    // stand between this vertex and the light. Without it a shadow ray is a hole
+    // in the fog, and every light reads as if the volume were not there -- which
+    // is the term that made 18_bounded_volume 1.9x too bright on the backend
+    // that had it first.
+    float3 survived = make_float3(transmittance);
+    if (params.hasBoundedMedium)
+    {
+        survived *= mediumTransmittance(shadowOrigin(si, curveRadius, bestConn.toLight),
+                                        bestConn.toLight, bestConn.tMax, prd->medium);
+    }
+    return clampIndirectContribution(weight * survived, prd->depth, params.clampIndirect);
 }
 
 // Get curve hit-point in world coordinates.
@@ -799,6 +891,248 @@ static __forceinline__ __device__ void writeSurfaceGuide(const HitGroupData* hit
     }
 }
 
+/// A scattering event inside a participating medium.
+///
+/// Shaped like a surface vertex and different from one in two ways: there is no
+/// normal, so the phase function stands in for the BSDF and is its own density;
+/// and next-event estimation only runs for a bounded volume. A bounded volume is
+/// the one kind of medium worth connecting to a light from -- it is thin, it is
+/// lit from outside, and the shafts and the glow are single scattering. A
+/// subsurface walk gets neither: its boundary occludes almost every shadow ray
+/// it would spawn, so the cost is real and the contribution is not. Cycles'
+/// random walk makes the same call, and light still gets in and out through the
+/// surface, where next-event estimation does run.
+static __device__ void scatterInMedium(PerRayData* prd,
+                                       const MaterialParams& mm,
+                                       const MediumSample& m,
+                                       const float3 rayOrigin,
+                                       const float3 rayDir,
+                                       const bool isBounded)
+{
+    prd->throughput *= mediumScatterWeight(m, m.t);
+    const float3 scatterPoint = rayOrigin + rayDir * m.t;
+    SamplerState mrng = mediumSampler(prd->sampler, prd->mediumStep + 1u);
+
+    // Whether this vertex made a next-event estimate at all -- the question the
+    // miss and light-hit programs need answered, and not the same question as
+    // whether the estimate came back with anything. A vertex that drew a light
+    // sample pointing the wrong way still had the light strategy available for
+    // the direction the phase function eventually took, so the MIS weight there
+    // is still owed. Deciding it from the outcome instead hands the bounce ray
+    // the whole contribution on exactly the draws where the connection failed,
+    // and the two strategies stop summing to one: it put the white-furnace
+    // sphere 15% over unity, uniformly at every mean free path.
+    bool didNee = (params.estimatorMode == 0) && (params.scene.numLights > 0 || params.hasEnvMap);
+    if (isBounded)
+    {
+        // Volumetric emission: what makes bath water glow rather than merely
+        // tint what is behind it. Clamped like every other contribution --
+        // emission reached through a glass or specular chain arrives with a
+        // throughput well above one, and adding that unclamped puts fireflies
+        // over the whole frame.
+        const float3 Le = mm.medium_emission;
+        if (Le.x > 0.0f || Le.y > 0.0f || Le.z > 0.0f)
+        {
+            prd->radiance +=
+                clampIndirectContribution(prd->throughput * Le, prd->depth, params.clampIndirect);
+        }
+
+        if (didNee)
+        {
+            SurfaceInteraction vsi = {};
+            vsi.position = scatterPoint;
+            vsi.shading_normal = -rayDir;
+            vsi.geometry_normal = -rayDir;
+            vsi.wo = -rayDir;
+            vsi.front_face = true;
+            const LightConnection conn = connectToLight(mrng, vsi, 0.0f, true);
+            if (conn.needsRay && conn.pdf > 0.0f)
+            {
+                // dot(rayDir, toLight), not dot(-rayDir, toLight). The phase
+                // function takes the angle between the two directions of
+                // *travel*: light arrives along -toLight and leaves toward the
+                // camera along -rayDir, so their cosine is dot(rayDir, toLight).
+                // Negated, a forward-scattering medium becomes a backward-
+                // scattering one.
+                const float phase =
+                    hgPhaseFunction(dot(rayDir, conn.toLight), mm.subsurface_anisotropy);
+                // The phase function is the medium's BSDF and its own pdf, so MIS
+                // pairs it against the light density exactly as a surface lobe
+                // would.
+                const float misWeight =
+                    conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, phase, params.misHeuristic);
+                const float3 weight =
+                    prd->throughput * (conn.radiance / conn.pdf) * misWeight * phase;
+                if (weight.x > 1e-6f || weight.y > 1e-6f || weight.z > 1e-6f)
+                {
+                    const float visible = traceOcclusion(params.handle, scatterPoint, conn.toLight,
+                                                         params.shadowRayTmin, conn.tMax);
+                    if (visible > 0.0f)
+                    {
+                        // Starts inside this medium, so the optical depth begins
+                        // accumulating immediately rather than at the first
+                        // boundary the ray crosses on the way out.
+                        float3 survived = make_float3(visible);
+                        if (params.hasBoundedMedium)
+                        {
+                            survived *= mediumTransmittance(scatterPoint, conn.toLight, conn.tMax,
+                                                            prd->medium);
+                        }
+                        prd->radiance += clampIndirectContribution(weight * survived, prd->depth,
+                                                                   params.clampIndirect);
+                    }
+                }
+            }
+        }
+    }
+
+    float phasePdf = 0.0f;
+    const float3 nextDir =
+        hgSampleDirection(-rayDir, mm.subsurface_anisotropy, random<SampleDimension::eBSDF0>(mrng),
+                          random<SampleDimension::eBSDF1>(mrng), phasePdf);
+
+    prd->origin = scatterPoint;
+    prd->dir = nextDir;
+    prd->lastBsdfPdf = phasePdf;
+    prd->misDistance = 0.0f;
+    prd->specularBounce = false;
+    prd->neeDone = didNee;
+    ++prd->mediumStep;
+
+    if (isBounded)
+    {
+        // A bounded volume's scattering event is a bounce like any other: the
+        // raygen loop charges it a depth, rolls the dice on it and advances the
+        // sampler. A medium with no depth budget of its own is a path that
+        // wanders forever.
+        return;
+    }
+
+    // A subsurface walk keeps its depth -- the whole walk is one scattering
+    // event as far as the path budget is concerned, and charging it per step
+    // would make a translucent object go black at any sane max_depth -- so it
+    // reuses the pass-through exit, which is the one that does not spend a
+    // bounce, and rolls its own roulette on what the walk has left. The step
+    // ceiling is a backstop for a medium dense enough that roulette alone would
+    // take thousands of steps to end; this is what actually terminates the walk.
+    const float survive = clamp(
+        fmaxf(prd->throughput.x, fmaxf(prd->throughput.y, prd->throughput.z)), 0.05f, 1.0f);
+    if (random<SampleDimension::eRussianRoulette>(mrng) >= survive)
+    {
+        prd->throughput = make_float3(0.0f);
+        prd->depth = params.max_depth;
+        return;
+    }
+    prd->throughput /= survive;
+    prd->passedThrough = true;
+}
+
+/// The walk reached the boundary of a subsurface medium.
+///
+/// Everything the surface path does below -- the material, the BSDF, the cutout
+/// test -- describes what happens to a ray arriving from outside, and none of it
+/// applies to one on its way out, so the exit is handled here and the rest is
+/// skipped.
+///
+/// Whatever surface the walk hit is treated as the boundary, not only the object
+/// it entered. For the closed shapes this serves that is the same surface; for
+/// geometry that interpenetrates it is a simplification, and the alternative is
+/// carrying the entry instance and rejecting hits on anything else -- which
+/// turns an open mesh into a light leak instead.
+static __device__ void exitMedium(PerRayData* prd,
+                                  const float3 worldPosition,
+                                  const float3 geomNormal,
+                                  const float3 rayDir)
+{
+    // The ray is travelling outwards, so the outward normal is the one it agrees
+    // with.
+    const float3 outward = (dot(geomNormal, rayDir) > 0.0f) ? geomNormal : -geomNormal;
+    const float3 exitOrigin = offset_ray(worldPosition, outward);
+    SamplerState xrng = mediumSampler(prd->sampler, prd->mediumStep + 1u);
+    const float invPi = 1.0f / M_PIf;
+
+    // Attempted, not succeeded -- see the note on the same flag in
+    // scatterInMedium(). The exit lobe covers the whole outward hemisphere and
+    // so does the light strategy, so the MIS weight is owed on every draw,
+    // including the ones where the light sample landed below the boundary.
+    bool didNee = (params.estimatorMode == 0) && (params.scene.numLights > 0 || params.hasEnvMap);
+    if (didNee)
+    {
+        // Next-event estimation here and not inside the walk: this is the vertex
+        // light can actually reach, and leaving it to BSDF sampling alone is what
+        // makes a translucent object the noisiest thing in a frame.
+        SurfaceInteraction xsi = {};
+        xsi.position = worldPosition;
+        xsi.shading_normal = outward;
+        xsi.geometry_normal = outward;
+        xsi.wo = -rayDir;
+        xsi.front_face = true;
+        const LightConnection conn = connectToLight(xrng, xsi, 0.0f);
+        if (conn.needsRay && conn.pdf > 0.0f)
+        {
+            const float cosOut = dot(outward, conn.toLight);
+            if (cosOut > 0.0f)
+            {
+                // The exit is Lambertian and the medium's albedo was already paid
+                // for during the walk, so the lobe here is 1/pi and its own
+                // density is cos/pi.
+                //
+                // The density is for the MIS weight only. connectLight folds the
+                // cosine into conn.radiance -- it returns what a caller holding f
+                // alone needs -- so multiplying the estimate by the density as
+                // well applies that cosine twice: the exit connection comes back
+                // at around 70% of its value while MIS has already deducted the
+                // whole of it from the bounce ray.
+                const float lobePdf = cosOut * invPi;
+                const float misWeight =
+                    conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, lobePdf, params.misHeuristic);
+                const float3 weight = prd->throughput * (conn.radiance / conn.pdf) * misWeight * invPi;
+                if (weight.x > 1e-6f || weight.y > 1e-6f || weight.z > 1e-6f)
+                {
+                    const float visible = traceOcclusion(params.handle, exitOrigin, conn.toLight,
+                                                         params.shadowRayTmin, conn.tMax);
+                    if (visible > 0.0f)
+                    {
+                        // Outside the medium: this vertex is the walk leaving it,
+                        // and the ray starts on the far side of the boundary.
+                        // Tagging it with the walk's own medium attenuates the
+                        // whole distance to the light by a dense extinction that
+                        // nothing ever cancels -- and this connection is what
+                        // lights a translucent object, so it arrives at zero.
+                        float3 survived = make_float3(visible);
+                        if (params.hasBoundedMedium)
+                        {
+                            survived *=
+                                mediumTransmittance(exitOrigin, conn.toLight, conn.tMax, 0u);
+                        }
+                        prd->radiance += clampIndirectContribution(weight * survived, prd->depth,
+                                                                   params.clampIndirect);
+                    }
+                }
+            }
+        }
+    }
+
+    const float3 exitDir = mediumCosineDirection(outward, random<SampleDimension::eBSDF0>(xrng),
+                                                 random<SampleDimension::eBSDF1>(xrng));
+
+    prd->origin = exitOrigin;
+    prd->dir = exitDir;
+    // Cosine-sampled from a 1/pi lobe: f * cos / pdf is exactly one, so the
+    // throughput is untouched here. What the medium took, it took during the
+    // walk.
+    prd->lastBsdfPdf = fmaxf(dot(outward, exitDir), 0.0f) * invPi;
+    prd->misDistance = 0.0f;
+    prd->specularBounce = false;
+    prd->neeDone = didNee;
+    prd->medium = 0u;
+    prd->mediumStep = 0u;
+    // Depth advances once for the whole walk, here rather than at the entry:
+    // charging it at both ends would cost a translucent surface two bounces to
+    // do what an opaque one does in one. The raygen loop does the increment,
+    // because this exit is a bounce.
+}
+
 extern "C" __global__ void __closesthit__radiance()
 {
     OptixPrimitiveType primType = optixGetPrimitiveType();
@@ -827,6 +1161,50 @@ extern "C" __global__ void __closesthit__radiance()
     const MaterialParams& matParams = params.materials[matId];
     const cudaTextureObject_t* textures = &params.materialTextures[matId * MAX_MATERIAL_TEXTURES];
 
+    // --- Free flight through a participating medium -------------------------
+    //
+    // Drawn before anything else, because the segment the path just travelled
+    // ends at whichever comes first -- a scattering event inside the medium or
+    // this surface -- and everything below describes a vertex that only exists
+    // if the surface won.
+    //
+    // The distance is sampled here rather than as a bound on the ray, which is
+    // where Metal's `extend` puts it. The two are statistically identical: a
+    // surface at or before the sampled distance wins either way, and the bound
+    // is only a scheduling decision about how far traversal is allowed to run.
+    const float surfaceT = optixGetRayTmax();
+    float segment = surfaceT;
+    MediumSample medium = {};
+    bool insideMedium = false;
+    bool mediumIsBounded = false;
+    bool sampledFreeFlight = false;
+    if (prd->medium != 0u)
+    {
+        const MaterialParams& mm = params.materials[prd->medium - 1u];
+        insideMedium = true;
+        mediumIsBounded = (mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u;
+        // A bounded volume has no entry surface to have textured, so it keeps the
+        // material's constant; a subsurface walk takes what the boundary resolved.
+        const float3 mediumAlbedo =
+            mediumIsBounded ? mm.diffuse_transmission_color : prd->mediumAlbedo;
+        const uint32_t stepCeiling = min(params.subsurfaceIterations, MEDIUM_MAX_STEPS);
+        // Past the ceiling the walk stops drawing free flights, so the next
+        // surface is its boundary and the path leaves rather than hanging.
+        if (prd->mediumStep < stepCeiling)
+        {
+            SamplerState mrng = mediumSampler(prd->sampler, prd->mediumStep);
+            medium = sampleMedium(
+                fromSpectrum(oka::medium::sigmaTFromRadius(toSpectrum(mm.subsurface_radius))),
+                mediumAlbedo, prd->throughput, surfaceT,
+                random<SampleDimension::eBSDF2>(mrng), random<SampleDimension::eBSDF3>(mrng));
+            sampledFreeFlight = true;
+            if (medium.scattered)
+            {
+                segment = medium.t;
+            }
+        }
+    }
+
     // --- Absorption over the segment just travelled -------------------------
     //
     // The IOR stack already knows which medium the path is inside; it also
@@ -837,6 +1215,13 @@ extern "C" __global__ void __closesthit__radiance()
     //
     // volume.h was included by no .cu file at all before this, so the OptiX path
     // had no volumetric attenuation of any kind.
+    //
+    // Skipped inside a subsurface walk, which is a different medium model:
+    // mediumScatterWeight already carries that medium's extinction, and a
+    // material carrying both extensions would otherwise be attenuated twice for
+    // one interior. A bounded volume is not skipped -- being inside a fog gizmo
+    // says nothing about whether the path is also inside glass.
+    if (!insideMedium || mediumIsBounded)
     {
         const unsigned int inside = ior_stack_current_material(prd->iorStack);
         if (inside != 0xFFFFFFFFu)
@@ -844,8 +1229,77 @@ extern "C" __global__ void __closesthit__radiance()
             const MaterialParams& im = params.materials[inside];
             const float3 sigma_t = volume_extinction(im.attenuation_color, im.attenuation_distance,
                                                      params.volumeModel);
-            prd->throughput *= beer_lambert_transmittance(sigma_t, optixGetRayTmax());
+            prd->throughput *= beer_lambert_transmittance(sigma_t, segment);
         }
+    }
+
+    if (medium.scattered)
+    {
+        scatterInMedium(prd, params.materials[prd->medium - 1u], medium, optixGetWorldRayOrigin(),
+                        ray_dir, mediumIsBounded);
+        return;
+    }
+    if (sampledFreeFlight)
+    {
+        // The other half of the analog estimator: the path reached a boundary
+        // without scattering, and the weight for that is the transmittance over
+        // the density of having drawn a distance at least this long. Exactly one
+        // for a grey extinction, which is why a fog gizmo of uniform density
+        // never notices it is here -- and not one at all for 25_subsurface,
+        // whose three mean free paths differ by more than threefold.
+        prd->throughput *= mediumBoundaryWeight(medium, segment);
+    }
+
+    // --- Crossing the boundary of a participating medium --------------------
+    //
+    // The gizmo of a bounded volume is not a surface: it is where the medium
+    // starts and stops. A ray through it toggles which medium it is in and
+    // carries on with the same direction and throughput -- unshaded, and without
+    // spending a bounce, because a volume the light passes through twice would
+    // otherwise cost two of them.
+    if ((matParams.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
+    {
+        // Bounded by the same counter the cutout pass-through uses, and for the
+        // same reason: neither advances `depth`, so neither has a natural end. A
+        // boundary the ray re-hits through a self-intersection would otherwise
+        // toggle the medium forever and the path would never terminate.
+        if (prd->passthrough >= PATH_PASSTHROUGH_MAX)
+        {
+            prd->throughput = make_float3(0.0f);
+            return;
+        }
+        ++prd->passthrough;
+
+        // Toggle, rather than deciding from the normal.
+        //
+        // A gizmo's winding is arbitrary: a DCC decides inside from an
+        // inside/outside test and never looks at the normal, so a box exported
+        // from one may be wound either way. Reading `entering` off
+        // dot(rayDir, geomNormal) inverts such a volume -- and an inverted volume
+        // is not a subtle error, it is a medium that fills all of space except
+        // the gizmo.
+        const uint32_t here = static_cast<uint32_t>(matId) + 1u;
+        const bool leaving = (prd->medium == here);
+        prd->medium = leaving ? 0u : here;
+        prd->mediumStep = 0u;
+
+        // Push past the surface on the side the ray is heading, which needs the
+        // sign of the normal and not its direction.
+        const float3 exitSide = (dot(ray_dir, surfaceHit.geom_normal) > 0.0f)
+                                    ? surfaceHit.geom_normal
+                                    : -surfaceHit.geom_normal;
+        prd->origin = offset_ray(surfaceHit.position, exitSide);
+        prd->dir = ray_dir;
+        // The MIS distance keeps counting: as far as the light at the end of
+        // this ray is concerned, the scattering vertex is still the one before
+        // the boundary.
+        prd->misDistance += segment;
+        // Nothing else about the path moves -- not the throughput, not
+        // `specularBounce`, not `lastBsdfPdf` -- so a light or an environment
+        // beyond the gizmo is still weighted against the bounce that actually
+        // produced the direction.
+        prd->passedThrough = true;
+        return;
     }
 
     // Fill SurfaceInteraction from hit data, resolving textures, the uv
@@ -862,6 +1316,16 @@ extern "C" __global__ void __closesthit__radiance()
     // a curve hit has one.
     const bool isFibre = isCurveHit && scattersThroughFibre(si) && surfaceHit.curveRadius > 0.0f;
     const float curveRadius = isFibre ? surfaceHit.curveRadius : 0.0f;
+
+    // --- Leaving a subsurface medium ----------------------------------------
+    //
+    // Before the guides, the cutout test, emission and the BSDF, all of which
+    // describe a ray arriving from outside. This one is on its way out.
+    if (insideMedium && !mediumIsBounded)
+    {
+        exitMedium(prd, surfaceHit.position, surfaceHit.geom_normal, ray_dir);
+        return;
+    }
 
     if (prd->writeAov && params.aov != nullptr)
     {
@@ -903,6 +1367,7 @@ extern "C" __global__ void __closesthit__radiance()
                 (dot(si.geometry_normal, ray_dir) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
             prd->origin = offset_ray(si.position, faceNg);
             prd->dir = ray_dir;
+            prd->misDistance += segment;
             ++prd->passthrough;
             prd->passedThrough = true;
             return;
@@ -988,6 +1453,13 @@ extern "C" __global__ void __closesthit__radiance()
     // no entry to match with an exit. Pushing here left every transmitted hair
     // path one level deeper than it came in, and a groom is thousands of hairs
     // deep.
+    // Colour the diffuse-transmission lobe applies on the way into a subsurface
+    // medium, divided back out below. The walk supplies the colour itself, once
+    // per scattering event, so leaving the lobe's copy in charges the first event
+    // twice: a sphere comes out at albedo times its correct reflectance, which
+    // for a deep-red medium is about a third of the light it should return.
+    // Cycles divides the same factor out at the same place.
+    float3 sssEntryTint = make_float3(1.0f);
     if ((sample_data.event_type & BSDF_EVENT_TRANSMISSION) != 0 && !isFibre)
     {
         // A thin-walled surface has no interior either, so crossing it does not
@@ -998,11 +1470,57 @@ extern "C" __global__ void __closesthit__radiance()
         if (!si.thin_walled)
         {
             if (entering)
+            {
+                // Counted, not merely survived. Both of these leave the path
+                // carrying the wrong medium and neither used to say a word on
+                // this backend; see entry 5 of docs/open-defects.md. The test is
+                // a loop over at most four entries on a path that has already
+                // established it is a transmission through a solid, and the
+                // atomic only runs when something has actually gone wrong.
+                if (params.iorStats != nullptr && ior_stack_full(prd->iorStack))
+                {
+                    atomicAdd(&params.iorStats[IOR_STAT_OVERFLOW], 1u);
+                }
                 ior_stack_push(prd->iorStack, si.dielectric_priority, si.ior, (unsigned int)matId);
+            }
             else
+            {
+                if (params.iorStats != nullptr &&
+                    !ior_stack_can_pop(prd->iorStack, si.dielectric_priority, (unsigned int)matId))
+                {
+                    atomicAdd(&params.iorStats[IOR_STAT_UNMATCHED], 1u);
+                }
                 ior_stack_pop(prd->iorStack, si.dielectric_priority, (unsigned int)matId);
+            }
         }
         prd->origin = offset_ray(si.position, -faceNg);
+
+        // Entering a subsurface medium. The lobe that got here is the diffuse
+        // transmission one, which on its own puts the light straight out the far
+        // side; what this adds is that it random-walks on the way. From here the
+        // path is inside, and the next closest hit samples a free flight instead
+        // of shading whatever it reaches.
+        if (si.subsurface > 0.0f &&
+            (sample_data.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION) != 0)
+        {
+            prd->medium = static_cast<uint32_t>(matId) + 1u;
+            prd->mediumStep = 0u;
+
+            // The walk's albedo, resolved here because this is the last place a
+            // texture exists: inside the medium there is no surface to sample.
+            // Scaled by how far this point's albedo departs from the one the
+            // material's scatter colour was derived from, so a flat material
+            // takes the ratio 1 and is unchanged, and marble carries its veining
+            // in.
+            float3 walkAlbedo = matParams.diffuse_transmission_color;
+            const float3 reference = matParams.subsurface_reference;
+            if (reference.x > 1e-4f && reference.y > 1e-4f && reference.z > 1e-4f)
+            {
+                walkAlbedo *= si.albedo / reference;
+            }
+            prd->mediumAlbedo = saturate(walkAlbedo);
+            sssEntryTint = fmaxf(si.diffuse_transmission_color, make_float3(1e-4f));
+        }
     }
     else
     {
@@ -1021,5 +1539,6 @@ extern "C" __global__ void __closesthit__radiance()
                                       normalize(prd->dir));
     }
     prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
-    prd->throughput *= sample_data.bsdf_over_pdf;
+    prd->misDistance = 0.0f;
+    prd->throughput *= sample_data.bsdf_over_pdf / sssEntryTint;
 }

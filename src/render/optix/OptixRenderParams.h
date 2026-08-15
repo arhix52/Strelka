@@ -13,12 +13,18 @@
 #define GEOMETRY_MASK_TRIANGLE 1
 #define GEOMETRY_MASK_CURVE 2
 #define GEOMETRY_MASK_LIGHT 4
+// The boundary of a participating medium. Its own bit because a shadow ray must
+// not be stopped by it -- RAY_MASK_SHADOW is the geometry bits alone, so a fog
+// gizmo left on the triangle mask blacks out everything it encloses. Same value
+// as Metal's GEOMETRY_MASK_MEDIUM, and 8 is skipped for the same reason: that
+// is Metal's GEOMETRY_MASK_LIGHT_HIDDEN, which OptiX does not have yet.
+#define GEOMETRY_MASK_MEDIUM 16
 
 #define GEOMETRY_MASK_GEOMETRY (GEOMETRY_MASK_TRIANGLE | GEOMETRY_MASK_CURVE)
 
-#define RAY_MASK_PRIMARY (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT)
+#define RAY_MASK_PRIMARY (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_MEDIUM)
 #define RAY_MASK_SHADOW GEOMETRY_MASK_GEOMETRY
-#define RAY_MASK_SECONDARY GEOMETRY_MASK_GEOMETRY
+#define RAY_MASK_SECONDARY (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_MEDIUM)
 
 // Params::projectionType. Mirrors oka::Camera::ProjectionType, which device code
 // cannot include, and the identically-named constants in the Metal ShaderTypes.h.
@@ -200,6 +206,26 @@ struct Params
     /// Upper bound on what one indirect path may contribute; 0 disables it.
     float clampIndirect;
 
+    // --- Participating media ---------------------------------------------
+    /// Ceiling on the steps of one random walk. A dense medium is a long walk
+    /// that Russian roulette alone terminates slowly, and a path that never ends
+    /// is a hang rather than a dim pixel. Drawn from
+    /// `render/pt/subsurfaceIterations`, the same setting that sizes the Metal
+    /// wavefront's extra dispatch iterations, so the two backends give a walk
+    /// the same budget. 64 is where 25_subsurface stops moving.
+    uint32_t subsurfaceIterations;
+    /// Whether any material in the scene is a medium boundary. Gates the second
+    /// traversal a shadow ray needs to accumulate optical depth across those
+    /// boundaries, which is pure cost in the scenes that have none.
+    bool hasBoundedMedium;
+
+    /// The three ways the nested-dielectric stack loses a path, counted per
+    /// launch: see IOR_STAT_* below. Null when the buffer has not been
+    /// allocated, and then the counting is skipped rather than guessed at.
+    /// Metal has reported these since its pop learned to match on the material
+    /// being left; this is the other half of entry 5 of docs/open-defects.md.
+    uint32_t* iorStats;
+
     // Depth of field
     int   useDof;
     float focalDistance;
@@ -245,6 +271,23 @@ enum class EventType: uint8_t
 /// PATH_PASSTHROUGH_MAX, for the same reason.
 #define PATH_PASSTHROUGH_MAX 32u
 
+/// Hard ceiling on a walk, whatever `Params::subsurfaceIterations` asks for.
+/// Metal's MEDIUM_MAX_STEPS, for the same reason.
+#define MEDIUM_MAX_STEPS 256u
+
+// The three ways the nested-dielectric stack loses a path, in the order Metal's
+// ShaderTypes.h numbers them so the two backends' reports read the same.
+//
+// A push onto a full stack wants a deeper stack. An unmatched pop and a path
+// that reaches the environment still inside a medium are both a mesh with a
+// hole in it, seen from each side -- and the third is the one no exit event can
+// catch, because the ray left through the hole. Each of them carries the wrong
+// medium, and therefore the wrong absorption, for the rest of its life.
+#define IOR_STAT_OVERFLOW 0
+#define IOR_STAT_UNMATCHED 1
+#define IOR_STAT_ESCAPED_INSIDE 2
+#define IOR_STAT_COUNT 3
+
 struct PerRayData
 {
     SamplerState sampler;
@@ -273,6 +316,17 @@ struct PerRayData
     /// bounce, and clears it before the next trace.
     bool passedThrough;
     float lastBsdfPdf;
+    /// How far the ray has travelled since the vertex `lastBsdfPdf` was measured
+    /// at. Zero for every path that has not passed through anything.
+    ///
+    /// Passing through a cutout, or crossing the boundary of a medium, restarts
+    /// the ray at the surface it slipped past, and the multiple-importance weight
+    /// at an area light needs the distance from the vertex that *scattered*, not
+    /// from wherever the ray was last restarted. The direction does not change
+    /// across either, so one number recovers that vertex:
+    /// origin - direction * this. Metal's PathState carries the same field for
+    /// the same reason.
+    float misDistance;
     EventType firstEventType;
     /// Where in the image this path's camera ray actually went, y down and in
     /// pixels, jitter included. A motion vector is the difference between this
@@ -285,6 +339,23 @@ struct PerRayData
     /// Set once the guide record for this pixel has been written, so the bounce
     /// after the first describable surface cannot overwrite it.
     bool aovDone;
+
+    // --- Participating media ---------------------------------------------
+    /// Which medium the path is inside: 0 for none, otherwise the material index
+    /// plus one. Same encoding as the low bits of Metal's PathState::medium.
+    ///
+    /// A camera that starts inside a translucent object is not handled -- there
+    /// is nothing to tell the path which medium it is in.
+    uint32_t medium;
+    /// Steps the current walk has taken. Reset when a medium is entered, and
+    /// bounded by Params::subsurfaceIterations; past that the walk stops drawing
+    /// free flights and the next surface is its boundary.
+    uint32_t mediumStep;
+    /// The walk's single-scattering albedo, resolved at the boundary the path
+    /// entered through, because that is the last place a texture exists: inside
+    /// the medium there is no surface to sample. A bounded volume has no entry
+    /// surface to have textured and keeps the material's constant instead.
+    float3 mediumAlbedo;
 };
 
 enum RayType

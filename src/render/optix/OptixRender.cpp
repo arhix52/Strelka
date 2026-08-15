@@ -828,6 +828,12 @@ void OptiXRender::resolveInstanceGeometry(OptixInstance& oi, const oka::Instance
     // trunks, rocks and ground into the alpha callback with the needles. Curves
     // are always opaque: a strand has no uv to test.
     bool opaque = true;
+    // Whether this instance is the boundary of a participating medium rather
+    // than a surface. It goes on its own visibility bit, because a shadow ray
+    // must not be stopped by a fog gizmo -- RAY_MASK_SHADOW is the geometry bits
+    // alone -- and because the transmittance walk needs a traversal that finds
+    // the boundaries and nothing else.
+    bool mediumBoundary = false;
     if (instance.type == oka::Instance::Type::eMesh)
     {
         const auto& materials = mScene->getMaterials();
@@ -835,6 +841,7 @@ void OptiXRender::resolveInstanceGeometry(OptixInstance& oi, const oka::Instance
         if (materialId < materials.size())
         {
             opaque = materials[materialId].params.alpha_mode == ALPHA_MODE_OPAQUE;
+            mediumBoundary = (materials[materialId].params.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u;
         }
     }
     oi.flags = opaque ? OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT : OPTIX_INSTANCE_FLAG_NONE;
@@ -843,7 +850,7 @@ void OptiXRender::resolveInstanceGeometry(OptixInstance& oi, const oka::Instance
     {
     case oka::Instance::Type::eMesh:
         oi.traversableHandle = mOptixMeshes[instance.mMeshId]->gas_handle;
-        oi.visibilityMask = GEOMETRY_MASK_TRIANGLE;
+        oi.visibilityMask = mediumBoundary ? GEOMETRY_MASK_MEDIUM : GEOMETRY_MASK_TRIANGLE;
         break;
     case oka::Instance::Type::eCurve:
         oi.traversableHandle = mOptixCurves[instance.mCurveId]->gas_handle;
@@ -858,6 +865,22 @@ void OptiXRender::resolveInstanceGeometry(OptixInstance& oi, const oka::Instance
         std::abort();
         break;
     }
+}
+
+bool OptiXRender::sceneHasBoundedMedium() const
+{
+    if (!mScene)
+    {
+        return false;
+    }
+    for (const auto& material : mScene->getMaterials())
+    {
+        if ((material.params.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 void OptiXRender::uploadInstancesToDevice(const std::vector<OptixInstance>& optixInstances)
@@ -2119,6 +2142,22 @@ void OptiXRender::render(Buffer* output)
     params.estimatorMode = estimatorMode;
     params.clampIndirect = clampIndirect;
 
+    // How long one random walk may be, and whether any walk can happen at all.
+    // The step ceiling is the same setting that sizes the Metal wavefront's
+    // extra dispatch iterations, so a walk gets the same budget on both
+    // backends; `hasBoundedMedium` gates the second traversal a shadow ray takes
+    // to accumulate optical depth, which is pure cost in a scene with no gizmo.
+    params.subsurfaceIterations =
+        settings.contains("render/pt/subsurfaceIterations")
+            ? std::min(settings.getAs<uint32_t>("render/pt/subsurfaceIterations"), 256u)
+            : 64u;
+    params.hasBoundedMedium = sceneHasBoundedMedium();
+    // Dropped once the numbers have been reported, so the steady state pays
+    // neither the memset nor the three atomics' guard.
+    params.iorStats = (mIorStatsBuffer && !mReportedIorStats)
+                          ? reinterpret_cast<uint32_t*>(mIorStatsBuffer->getPtr())
+                          : nullptr;
+
     memcpy(params.viewToWorld, glm::value_ptr(glm::transpose(glm::inverse(camera.matrices.view))),
            sizeof(params.viewToWorld));
     memcpy(params.clipToView, glm::value_ptr(glm::transpose(camera.matrices.invPerspective)), sizeof(params.clipToView));
@@ -2259,6 +2298,12 @@ void OptiXRender::render(Buffer* output)
 
     if (samplesThisLaunch != 0)
     {
+        // Per launch, so the report reads "per sample" the way Metal's does.
+        if (params.iorStats != nullptr)
+        {
+            cudaMemsetAsync(params.iorStats, 0, IOR_STAT_COUNT * sizeof(uint32_t), mState.stream);
+        }
+
         // Launch OptiX path tracer.
         //
         // Checked rather than OPTIX_CHECK'd: an abort here takes the editor down
@@ -2863,6 +2908,44 @@ void OptiXRender::createTimingEvents()
     // costs a single small memset in the steady state and nothing at all when
     // nothing fails.
     mStageMarkBuffer.reset(new OptixBuffer(optix::kGpuStageCount));
+
+    // Three words, allocated once. The counting on the device is guarded on this
+    // pointer being non-null, so a failed allocation costs the report and
+    // nothing else.
+    mIorStatsBuffer.reset(new OptixBuffer(IOR_STAT_COUNT * sizeof(uint32_t)));
+}
+
+void OptiXRender::reportIorStackStats()
+{
+    if (mReportedIorStats || !mIorStatsBuffer || mDeviceError)
+    {
+        return;
+    }
+    uint32_t stats[IOR_STAT_COUNT] = {};
+    if (cudaMemcpy(stats, reinterpret_cast<void*>(mIorStatsBuffer->getPtr()), sizeof(stats),
+                   cudaMemcpyDeviceToHost) != cudaSuccess)
+    {
+        cudaGetLastError();
+        return;
+    }
+    const uint32_t overflow = stats[IOR_STAT_OVERFLOW];
+    const uint32_t unmatched = stats[IOR_STAT_UNMATCHED];
+    const uint32_t escaped = stats[IOR_STAT_ESCAPED_INSIDE];
+    if (overflow == 0 && unmatched == 0 && escaped == 0)
+    {
+        return;
+    }
+    // Once. These are a property of the asset, not of the frame, and a warning
+    // per frame would bury everything else in an interactive session.
+    mReportedIorStats = true;
+    STRELKA_WARNING(
+        "Nested dielectrics lost paths, per sample: {} push(es) onto a full stack of {}, "
+        "{} pop(s) that matched nothing, {} path(s) that reached the environment still "
+        "inside a medium. The first wants a deeper stack; the other two are a mesh with a "
+        "hole in it, seen from each side -- and the third is the one no exit event can "
+        "catch, because the ray left through the hole. Each of them carries the wrong "
+        "medium, and therefore the wrong absorption, for the rest of its life.",
+        overflow, IOR_STACK_SIZE, unmatched, escaped);
 }
 
 void OptiXRender::collectFrameTiming(bool wait)
@@ -3013,6 +3096,10 @@ void OptiXRender::syncFrameAndLatchErrors()
     // A kernel launch that failed to *start* reports here rather than at the
     // synchronise, and nothing else in this backend would ever look.
     latchCudaError(cudaGetLastError(), "launch this frame's kernels");
+
+    // The device is idle and the counters are settled, which is the one point in
+    // the frame where reading them back costs nothing extra.
+    reportIorStackStats();
 }
 
 void OptiXRender::renderSync(Buffer* output)

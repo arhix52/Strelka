@@ -23,12 +23,12 @@ answer, or an asset/converter note that does not need Chaos.
 | ~~2~~ | ~~Rough thin-wall blur~~ | done — see Closed | `22_thin_walled` 0.094 / 0.966 CLOSE |
 | ~~3~~ | ~~Hair: strand width, then a fibre traced as a surface~~ | done — see Closed | `28_hair` 0.033 / 1.012, under the reference's own seed noise (0.051); isolated strand flat over depth |
 | ~~4~~ | ~~Height-map mip aliasing~~ | done — see Closed | kids walls lod0 vs footprint ≤1%; default stays 0 |
-| 5 | OptiX ior-stack counters | OptiX push/pop path | same three counters Metal already reports; no bathroom patch change expected |
+| ~~5~~ | ~~OptiX ior-stack counters~~ | done — see Closed | bathroom reports 15 / 6 / 693 per sample at 256² depth 16; shading untouched |
 | 6 | Two-sided different back face | material model / glTF | design first; one kids-bedroom material only |
 | 7 | Bath water is a dish, not a volume | asset, not code | remodel in Blender; bath water R/G against Chaos PNG is a check, not a driver |
 | 8 | OptiX accumulates in tonemapped space | `accumulate()` in `OptixRender.cu` | every row at `spp_per_launch = 1` matches its own single-launch number |
 
-5–6 are smaller. 7 is not a renderer bug.
+6 is smaller. 7 is not a renderer bug.
 
 Build the bathroom / kids bedroom when an entry asks for it:
 
@@ -64,29 +64,6 @@ Feature-test ladder (the default verifier for 1–3):
 ```bash
 # see tools/feature_tests/README.md -- Cycles EXR refs, one feature per scene
 ```
-
----
-
-## 5. Nested dielectrics: Metal counts losses, OptiX does not
-
-**Half fixed on Metal.** `ior_stack_pop` matches on the material being left.
-`tests/material/test_ior_stack.cpp` pins it. Three counters report pushes onto a
-full stack, unmatched pops, and paths that reach the environment still inside a
-medium. Per sample at 1024² / depth 16 on the bathroom: 0 / 7 / 2 with holes
-capped, 0 / 19 / 2 without. Residual is a handful of paths in a million; capping
-holes moved no patch by more than 0.003.
-
-**Still open**: the OptiX path calls push and pop without asking either question,
-so the measurement exists on Metal only.
-
-What cannot be fixed in the renderer: a ray leaving an open mesh goes out through
-a hole with no exit event. The converter caps flat, small loops (`Brush_Fibers`);
-it correctly leaves foam and water open -- capping the bath water is
-arithmetically the best patch mean and plainly wrong on screen, because the water
-is a 2 mm dish. See entry 7.
-
-**Fix**: wire the same three counters into OptiX. **Verify**: counters non-zero
-on a known-open mesh; bathroom patch means unchanged.
 
 ---
 
@@ -162,6 +139,34 @@ launch split stated, because the two configurations do not measure the same thin
 ---
 
 ## Closed (kept for the measurement, not the work)
+
+### Nested dielectrics: both backends count losses now
+
+`ior_stack_pop` matches on the material being left, on both backends, and
+`tests/material/test_ior_stack.cpp` pins it. What was missing was the
+measurement: Metal reported three counters -- pushes onto a full stack, pops
+that matched nothing, and paths that reached the environment still inside a
+medium -- and OptiX called push and pop without asking either question, so an
+asset could lose paths on one backend and be silent on the other.
+
+OptiX now raises the same three, into a three-word device buffer zeroed per
+launch and read back once per scene at the frame's existing synchronisation
+point. The report is Metal's `reportIorStackStats`, word for word. On the
+unpatched bathroom at 256² / depth 16 it says 15 / 6 / 693 per sample; Metal at
+1024² / depth 16 with the converter's holes capped says 0 / 7 / 2, and without
+0 / 19 / 2. The third counter is the largest here because it is the one no exit
+event can catch -- the ray left through the hole -- and because this render had
+neither the capping nor the resolution the Metal numbers were taken at.
+
+Nothing about shading moved: the counters are pure observation, guarded on the
+buffer pointer being non-null, and the ladder is bit-identical either side of
+them.
+
+What still cannot be fixed in the renderer: a ray leaving an open mesh goes out
+through a hole with no exit event. The converter caps flat, small loops
+(`Brush_Fibers`); it correctly leaves foam and water open -- capping the bath
+water is arithmetically the best patch mean and plainly wrong on screen, because
+the water is a 2 mm dish. See entry 7.
 
 ### Height-map mip aliasing
 

@@ -317,6 +317,18 @@ private:
     void markStageSubmitted(optix::GpuStage stage, CUstream stream);
     void reportGpuStageFailure();
 
+    // -------------------------------------------------- nested-dielectric losses --
+    /// Three counters the shading path raises when the IOR stack loses a path:
+    /// a push onto a full stack, a pop that matched nothing, and a path that
+    /// reached the environment still inside a medium. Zeroed before each launch
+    /// and read back once per scene, because the numbers are a property of the
+    /// asset rather than of the frame. Metal's MetalWavefrontIntegrator reports
+    /// the same three; see entry 5 of docs/open-defects.md.
+    std::unique_ptr<OptixBuffer> mIorStatsBuffer;
+    bool mReportedIorStats = false;
+    /// Reads the counters back and warns once, if any of them fired.
+    void reportIorStackStats();
+
     // ------------------------------------------------------------- scene build --
     optix::OptixScenePreparation mScenePrep;
     metal::PublishClock mPublishClock;
@@ -420,6 +432,11 @@ public:
     void createTopLevelAccelerationStructure();
     void updateTopLevelAccelerationStructure();
     void resolveInstanceGeometry(OptixInstance& oi, const oka::Instance& instance) const;
+
+    /// Whether any material in the scene is the boundary of a participating
+    /// medium. Gates the second traversal every shadow ray would otherwise take
+    /// to accumulate optical depth across those boundaries.
+    bool sceneHasBoundedMedium() const;
     void uploadInstancesToDevice(const std::vector<OptixInstance>& optixInstances);
     void createModule();
     void createProgramGroups();
