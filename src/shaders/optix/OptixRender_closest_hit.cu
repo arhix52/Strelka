@@ -454,8 +454,12 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
         }
 
         const LightConnection conn = connectToLight(crng, si, curveRadius);
+        // The set of directions this half of the estimate is willing to offer.
+        // Stated once, in shading/nee_pairing.h, because the bounce ray at the
+        // bottom of __closesthit__radiance has to deduct a MIS share against
+        // exactly this set and no other.
         const bool isNextEventValid =
-            (isFibre || ((dot(conn.toLight, si.shading_normal) > 0.0f) == si.front_face)) &&
+            neeProposesDirection(isFibre, si.front_face, dot(si.shading_normal, conn.toLight)) &&
             (conn.pdf > 0.0f);
         if (!isNextEventValid || !conn.needsRay)
         {
@@ -1142,12 +1146,22 @@ extern "C" __global__ void __closesthit__radiance()
     const float3 ray_dir = optixGetWorldRayDirection();
 
     SurfaceHitData surfaceHit = {};
-    const bool isCurveHit = (primType == OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE);
+    // Two separate questions, and conflating them is what kept every fibre rule
+    // below off the only curve basis the tree actually exports. `isCubicCurve`
+    // picks which vertex fetch to run; `isCurveHit` says the hit is on a strand at
+    // all, which is what the fibre semantics are gated on. A round *linear* curve
+    // -- what every particle groom writes, and what `28_hair` is -- answered no to
+    // the second one for as long as the two were the same variable, so its shadow
+    // rays offset into the strand, its far-side connections were rejected as
+    // back-facing, and its transmitted bounces re-entered the fibre they had just
+    // crossed.
+    const bool isCubicCurve = (primType == OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE);
+    const bool isCurveHit = isCubicCurve || (primType == OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR);
     if (primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE)
     {
         surfaceHit = fillTriangleGeomData(hit_data);
     }
-    else if (isCurveHit)
+    else if (isCubicCurve)
     {
         surfaceHit = fillCubicCurveGeomData(hit_data);
     }
@@ -1440,7 +1454,6 @@ extern "C" __global__ void __closesthit__radiance()
             return;
         }
     }
-    prd->neeDone = didNee;
 
     // setup next path segment
     // Face normal oriented toward the incoming ray (wo)
@@ -1538,6 +1551,24 @@ extern "C" __global__ void __closesthit__radiance()
         prd->origin = fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius,
                                       normalize(prd->dir));
     }
+    // What the next vertex is allowed to weight its light hit against.
+    //
+    // Next-event estimation here only ever proposed directions on the side of the
+    // shading normal that `estimateDirectLighting` accepts -- above it on a front
+    // face, and nothing at all through a back one. So a bounce that leaves in any
+    // other direction is a direction the light-sampling strategy could not have
+    // produced, and the balance heuristic must not deduct a share for it: the
+    // deduction is real and the delivery never happens. Recording `didNee` before
+    // the direction was known charged rough transmission for an estimate that had
+    // already rejected the whole transmitted hemisphere, which is why the frosted
+    // end of `22_thin_walled` was dark while its smooth control -- a specular
+    // event, and already exempt through `specularBounce` -- was not.
+    //
+    // A fibre is the exception: its connections reach the far side of the strand,
+    // so withholding the weight there would count the light twice. This is the
+    // same expression Metal's `wavefrontShade` applies at the same point.
+    prd->neeDone =
+        neePairsWithBounce(didNee, isFibre, si.front_face, dot(si.shading_normal, prd->dir));
     prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
     prd->misDistance = 0.0f;
     prd->throughput *= sample_data.bsdf_over_pdf / sssEntryTint;

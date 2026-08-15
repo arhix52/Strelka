@@ -30,6 +30,7 @@
 
 #include "../optix_device_utils.h"
 #include "fibre_geometry.h"
+#include "nee_pairing.h"
 #include "texture_transform.h"
 
 // Which reading of KHR_materials_volume the OptiX path uses.
