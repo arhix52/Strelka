@@ -54,11 +54,42 @@ static __forceinline__ __device__ uint32_t selectLightIndex(float u, uint32_t nu
     return (index < numLights) ? index : (numLights - 1);
 }
 
-static __device__ float3 sampleLight(SamplerState& sampler,
-                                         const UniformLight& light,
-                                         const SurfaceInteraction& si,
-                                         float3& toLight,
-                                         float& lightPdf)
+/// One proposed connection to a light, before visibility is known.
+///
+/// Separating the proposal from the shadow ray is what makes resampling possible:
+/// several candidates can be drawn and weighted by what they would contribute,
+/// and only the survivor costs a ray. It also fixes an ordering problem the old
+/// code had -- it traced occlusion inside the light sampler, so a candidate that
+/// loses the resampling draw would still have paid for a ray.
+struct LightConnection
+{
+    float3 radiance; // Li times the shading cosine, unshadowed
+    float3 toLight;
+    float pdf; // solid-angle density, including the light-selection probability
+    float tMax;
+    bool needsRay;
+    /// A sharp point or spot cannot be hit by a BSDF ray, so no other strategy
+    /// can produce this direction and its MIS weight is exactly one. Weighting it
+    /// against the BSDF pdf -- which is what this code used to do -- discards the
+    /// share of the light the BSDF strategy is credited with and never delivers.
+    bool isDelta;
+};
+
+static __forceinline__ __device__ LightConnection makeEmptyConnection()
+{
+    LightConnection c;
+    c.radiance = make_float3(0.0f);
+    c.toLight = make_float3(0.0f);
+    c.pdf = 0.0f;
+    c.tMax = 0.0f;
+    c.needsRay = false;
+    c.isDelta = false;
+    return c;
+}
+
+static __device__ LightConnection connectLight(SamplerState& sampler,
+                                               const UniformLight& light,
+                                               const SurfaceInteraction& si)
 {
     LightSampleData lightSampleData = {};
     const float2 uv =
@@ -84,13 +115,22 @@ static __device__ float3 sampleLight(SamplerState& sampler,
     case LIGHT_TYPE_DISTANT:
         lightSampleData = SampleDistantLight(light, uv, si.position);
         break;
+    case LIGHT_TYPE_DOME:
+        lightSampleData = SampleDomeLight(light, uv, si.position);
+        break;
     case LIGHT_TYPE_POINT:
     case LIGHT_TYPE_SPOT:
         lightSampleData = SamplePointLight(light, uv, si.position);
         break;
     }
 
-    toLight = lightSampleData.L;
+    LightConnection c = makeEmptyConnection();
+    c.toLight = lightSampleData.L;
+    // Sharp point/spot only: give one a radius and it is sampled as a sphere,
+    // which BSDF rays can hit and which therefore does need MIS.
+    c.isDelta = (light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT) &&
+                !(light.points[0].x > 1e-4f);
+
     float3 Li = make_float3(light.color);
     if (light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT)
     {
@@ -108,72 +148,57 @@ static __device__ float3 sampleLight(SamplerState& sampler,
                                -dot(lightSampleData.L, lightSampleData.normal) > 0.0f && emitsLight(Li));
     if (facing)
     {
-        const bool occluded =
-            traceOcclusion(params.handle, offset_ray(si.position, si.geometry_normal), lightSampleData.L,
-                           params.shadowRayTmin, // tmin
-                           lightSampleData.distToLight // tmax
-            );
-        float visibility = occluded ? 0.0f : 1.0f;
-        lightPdf = lightSampleData.pdf;
         // The cosine belongs here because bsdf_eval() returns f alone, unlike
         // bsdf_sample()'s bsdf_over_pdf which already carries it. See the note on
         // both result structs in bsdf_types.h.
-        return visibility * Li * saturate(dot(si.shading_normal, lightSampleData.L));
+        c.radiance = Li * saturate(dot(si.shading_normal, lightSampleData.L));
+        c.pdf = lightSampleData.pdf;
+        c.tMax = lightSampleData.distToLight;
+        c.needsRay = true;
     }
-
-    return make_float3(0.0f);
+    return c;
 }
 
-static __device__ float3 sampleEnvLightNEE(SamplerState& sampler,
-                                            const SurfaceInteraction& si,
-                                            float3& toLight,
-                                            float& lightPdf)
+static __device__ LightConnection connectEnvLight(SamplerState& sampler, const SurfaceInteraction& si)
 {
     const float2 xi = make_float2(
         random<SampleDimension::eLightPointX>(sampler),
         random<SampleDimension::eLightPointY>(sampler));
 
     float envPdf = 0.0f;
-    float3 dir = sampleEnvMap(xi,
-                              params.envCdfX, params.envCdfY,
-                              params.envMapWidth, params.envMapHeight,
-                              params.envMapRotation,
-                              envPdf);
+    const float3 dir = sampleEnvMap(xi,
+                                    params.envAliasTable, params.envMapTexturePoint,
+                                    params.envMapWidth, params.envMapHeight,
+                                    params.envMapRotation, params.envPdfScale,
+                                    envPdf);
 
-    toLight = dir;
-    lightPdf = envPdf;
+    LightConnection c = makeEmptyConnection();
+    c.toLight = dir;
+    c.pdf = envPdf;
 
     if (envPdf <= 0.0f)
-        return make_float3(0.0f);
+        return c;
 
     // Check if direction is above the surface
     if (dot(si.shading_normal, dir) <= 0.0f)
-        return make_float3(0.0f);
+        return c;
 
-    // Trace shadow ray to infinity
-    const bool occluded = traceOcclusion(
-        params.handle,
-        offset_ray(si.position, si.geometry_normal),
-        dir,
-        params.shadowRayTmin,
-        1e16f);
-
-    if (occluded)
-        return make_float3(0.0f);
-
-    // Evaluate env map radiance at sampled direction
+    // Bilinear for the radiance carried down the ray; the point fetch inside
+    // sampleEnvMap is for the sampling density only, and using it here would
+    // quantise the lighting to the map's texels.
     const float2 uv = dirToEnvUV(dir, params.envMapRotation);
     const float4 envSample = tex2D<float4>(params.envMapTexture, uv.x, uv.y);
     float3 Li = make_float3(envSample.x, envSample.y, envSample.z);
     Li *= params.envMapIntensity * params.envMapColorTint;
 
-    return Li * fmaxf(dot(si.shading_normal, dir), 0.0f);
+    c.radiance = Li * fmaxf(dot(si.shading_normal, dir), 0.0f);
+    c.tMax = 1e16f;
+    c.needsRay = true;
+    return c;
 }
 
-__device__ float3 estimateDirectLighting(SamplerState& sampler,
-                                         const SurfaceInteraction& si,
-                                         float3& toLight,
-                                         float& lightPdf)
+/// Choose a strategy and build the connection. Visibility is the caller's job.
+static __device__ LightConnection connectToLight(SamplerState& sampler, const SurfaceInteraction& si)
 {
     if (params.hasEnvMap)
     {
@@ -183,44 +208,148 @@ __device__ float3 estimateDirectLighting(SamplerState& sampler,
         {
             // Sample environment map
             const float selectionPdf = (params.scene.numLights > 0) ? 0.5f : 1.0f;
-            const float3 r = sampleEnvLightNEE(sampler, si, toLight, lightPdf);
-            lightPdf *= selectionPdf;
-            return r;
+            LightConnection c = connectEnvLight(sampler, si);
+            c.pdf *= selectionPdf;
+            return c;
         }
-        else
-        {
-            // Sample local light (remap u from [0, 0.5) to [0, 1))
-            const float remappedU = u * 2.0f;
-            const uint32_t lightId = selectLightIndex(remappedU, params.scene.numLights);
-            const float lightSelectionPdf = 0.5f / params.scene.numLights;
-            const UniformLight& currLight = params.scene.lights[lightId];
-            const float3 r = sampleLight(sampler, currLight, si, toLight, lightPdf);
-            lightPdf *= lightSelectionPdf;
-            return r;
-        }
+        // Sample local light (remap u from [0, 0.5) to [0, 1))
+        const uint32_t lightId = selectLightIndex(u * 2.0f, params.scene.numLights);
+        LightConnection c = connectLight(sampler, params.scene.lights[lightId], si);
+        c.pdf *= 0.5f / params.scene.numLights;
+        return c;
     }
-    else
+
+    // A scene with neither an environment nor an analytic light has nothing to
+    // connect to. This used to fall through and divide by numLights == 0, then
+    // read lights[0] off a null device pointer -- mLightBuffer is constructed
+    // empty, so the pointer really is null rather than merely unpopulated.
+    if (params.scene.numLights == 0)
     {
-        // A scene with neither an environment nor an analytic light has nothing to
-        // connect to. This used to fall through and divide by numLights == 0, then
-        // read lights[0] off a null device pointer -- mLightBuffer is constructed
-        // empty, so the pointer really is null rather than merely unpopulated.
-        // Returning a zero contribution with a zero pdf is what the caller already
-        // handles for a light that happens to face away.
-        if (params.scene.numLights == 0)
+        return makeEmptyConnection();
+    }
+
+    const float u = random<SampleDimension::eLightId>(sampler);
+    const uint32_t lightId = selectLightIndex(u, params.scene.numLights);
+    LightConnection c = connectLight(sampler, params.scene.lights[lightId], si);
+    c.pdf *= 1.0f / params.scene.numLights;
+    return c;
+}
+
+/// Next-event estimation, with resampled importance sampling over the candidates.
+///
+/// Draw M candidates from the light-sampling density, weight each by what it
+/// would actually contribute -- BSDF, cosine and MIS weight included, none of
+/// which the light's own density knows about -- and keep one. The shadow ray
+/// count does not change: one candidate survives and one ray is traced.
+///
+/// The target is the luminance of the *unshadowed* contribution with the MIS
+/// weight already folded in. Folding it in is what keeps this unbiased against
+/// the BSDF strategy: the two weights still sum to one in every direction, so
+/// resampling only improves the next-event half and leaves the other alone.
+/// Resampling cannot help with visibility, by construction -- the target does not
+/// know it.
+///
+/// The default of one candidate reduces every line below to plain next-event
+/// estimation, bit for bit: the first candidate uses the sampler unmodified.
+///
+/// Returns the radiance to add at this vertex, already multiplied by throughput
+/// and clamped, or zero.
+static __device__ float3 estimateDirectLighting(PerRayData* prd, const SurfaceInteraction& si)
+{
+    const uint32_t candidates = max(params.risCandidates, 1u);
+
+    LightConnection bestConn = makeEmptyConnection();
+    float3 bestF = make_float3(0.0f);
+    float bestTarget = 0.0f;
+    float weightSum = 0.0f;
+
+    for (uint32_t i = 0; i < candidates; ++i)
+    {
+        // Candidates differ by their scramble, not by their dimension: each one
+        // stays a stratified sequence across samples, and the first is the
+        // sequence this code drew before RIS existed.
+        SamplerState crng = prd->sampler;
+        if (i != 0u)
         {
-            toLight = make_float3(0.0f);
-            lightPdf = 0.0f;
+            crng.seed = hash_combine(prd->sampler.seed, i * 0x9E3779B9u);
+        }
+
+        const LightConnection conn = connectToLight(crng, si);
+        const bool isNextEventValid =
+            ((dot(conn.toLight, si.shading_normal) > 0.0f) == si.front_face) && (conn.pdf > 0.0f);
+        if (!isNextEventValid || !conn.needsRay)
+        {
+            continue;
+        }
+
+        const BsdfEvalResult evalData = bsdf_eval(si, conn.toLight);
+        if (isnan(conn.radiance) || isnan(conn.pdf) || isnan(evalData.bsdf) || isnan(evalData.pdf))
+        {
+            // ERROR, terminate tracing
+            prd->radiance = make_float3(10000.0f, 0.0f, 0.0f);
+            prd->throughput = make_float3(0.0f);
             return make_float3(0.0f);
         }
-        const float u = random<SampleDimension::eLightId>(sampler);
-        const uint32_t lightId = selectLightIndex(u, params.scene.numLights);
-        const float lightSelectionPdf = 1.0f / params.scene.numLights;
-        const UniformLight& currLight = params.scene.lights[lightId];
-        const float3 r = sampleLight(sampler, currLight, si, toLight, lightPdf);
-        lightPdf *= lightSelectionPdf;
-        return r;
+        if (!(evalData.pdf > 0.0f))
+        {
+            continue;
+        }
+
+        const float misWeight =
+            conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, evalData.pdf, params.misHeuristic);
+        const float3 f = conn.radiance * evalData.bsdf * misWeight;
+        const float target = dot(f, make_float3(0.2126f, 0.7152f, 0.0722f));
+        if (!(target > 0.0f))
+        {
+            continue;
+        }
+
+        const float w = target / conn.pdf;
+        weightSum += w;
+        // The acceptance draw reuses eLightId under a different scramble rather
+        // than taking a dimension of its own: adding one to the enum shifts every
+        // dimension index above it.
+        SamplerState arng = crng;
+        arng.seed = hash_combine(crng.seed, 0x51633e2du);
+        if (random<SampleDimension::eLightId>(arng) * weightSum <= w)
+        {
+            bestConn = conn;
+            bestF = f;
+            bestTarget = target;
+        }
     }
+
+    if (!(bestTarget > 0.0f))
+    {
+        return make_float3(0.0f);
+    }
+
+    // The reservoir's contribution weight: the mean candidate weight over the
+    // target the survivor was kept for. At one candidate it is 1 / pdf and every
+    // line here is the arithmetic this code had.
+    const float W = (weightSum / (float)candidates) / bestTarget;
+    const float3 weight = prd->throughput * bestF * W;
+    if (weight.x == 0.0f && weight.y == 0.0f && weight.z == 0.0f)
+    {
+        return make_float3(0.0f);
+    }
+
+    // Offset along the face the shadow ray actually leaves from. The raw geometry
+    // normal points to a fixed side of the triangle, so on a back-face hit it
+    // pushes the origin *into* the surface and the ray immediately hits the
+    // geometry it started on -- next-event estimation then reports occlusion the
+    // BSDF strategy does not see, and the two halves of the MIS estimate stop
+    // summing to the integral. The bounce ray below already orients its offset
+    // this way; this is the same fix Metal's connectEnvLight carries.
+    const float3 offsetNg = (dot(si.geometry_normal, bestConn.toLight) > 0.0f) ? si.geometry_normal
+                                                                              : -si.geometry_normal;
+    const bool occluded = traceOcclusion(params.handle, offset_ray(si.position, offsetNg), bestConn.toLight,
+                                         params.shadowRayTmin, bestConn.tMax);
+    if (occluded)
+    {
+        return make_float3(0.0f);
+    }
+    return clampIndirectContribution(weight, prd->depth, params.clampIndirect);
 }
 
 // Get curve hit-point in world coordinates.
@@ -536,7 +665,8 @@ extern "C" __global__ void __closesthit__radiance()
     // Add emission
     if (si.emission.x > 0.0f || si.emission.y > 0.0f || si.emission.z > 0.0f)
     {
-        prd->radiance += prd->throughput * si.emission;
+        prd->radiance +=
+            clampIndirectContribution(prd->throughput * si.emission, prd->depth, params.clampIndirect);
     }
 
     // Set exterior IOR from the IOR stack for nested dielectrics
@@ -582,41 +712,23 @@ extern "C" __global__ void __closesthit__radiance()
         }
     }
 
-    if (sample_data.event_type & (BSDF_EVENT_DIFFUSE | BSDF_EVENT_GLOSSY))
+    // estimatorMode 1 drops next-event estimation entirely and lets BSDF sampling
+    // carry the whole integral. The two are independent unbiased estimators, so at
+    // convergence they must agree; the difference between them measures estimator
+    // inconsistency directly, which is the only reason the switch exists.
+    const bool didNee = (params.estimatorMode == 0) &&
+                        ((sample_data.event_type & (BSDF_EVENT_DIFFUSE | BSDF_EVENT_GLOSSY)) != 0) &&
+                        (params.scene.numLights > 0 || params.hasEnvMap);
+    if (didNee)
     {
-        float3 toLight; // return value for estimateDirectLighting()
-        float lightPdf = 0.0f; // return value for estimateDirectLighting()
-        const float3 radiance = estimateDirectLighting(prd->sampler, si, toLight, lightPdf);
-        if (isnan(radiance) || isnan(lightPdf))
+        prd->radiance += estimateDirectLighting(prd, si);
+        if (prd->throughput.x == 0.0f && prd->throughput.y == 0.0f && prd->throughput.z == 0.0f)
         {
-            // ERROR, terminate tracing
-            prd->radiance = make_float3(10000.0f, 0.0f, 0.0f);
-            prd->throughput = make_float3(0.0f);
+            // estimateDirectLighting() found a NaN and painted the pixel.
             return;
         }
-
-        const bool isNextEventValid = ((dot(toLight, si.shading_normal) > 0.0f) == si.front_face) && (lightPdf != 0.0f);
-        if (isNextEventValid)
-        {
-            BsdfEvalResult evalData = bsdf_eval(si, toLight);
-
-            if (isnan(evalData.bsdf) || isnan(evalData.pdf))
-            {
-                // ERROR, terminate tracing
-                prd->radiance = make_float3(10000.0f, 0.0f, 0.0f);
-                prd->throughput = make_float3(0.0f);
-                return;
-            }
-
-            // compute lighting for this light
-            if (evalData.pdf > 0.0f)
-            {
-                const float3 radianceOverPdf = radiance / lightPdf;
-                const float misWeight = computeMisWeight(lightPdf, evalData.pdf, params.misHeuristic);
-                prd->radiance += prd->throughput * radianceOverPdf * misWeight * evalData.bsdf;
-            }
-        }
     }
+    prd->neeDone = didNee;
 
     // setup next path segment
     // Face normal oriented toward the incoming ray (wo)

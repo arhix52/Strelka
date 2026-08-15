@@ -50,6 +50,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_cache_key.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_compress.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_ibl_alias_table.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_env_alias_sampling.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_buffer_sizes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_render_resolution.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_residency_set_diff.cpp
@@ -64,9 +65,11 @@ strelka_apply_warnings(unit_tests)
 target_include_directories(unit_tests
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src/render/metal
-        # optix_denoise_plan.h is deliberately CUDA-free so the denoiser's
-        # decisions can be tested on a machine without one -- including this
-        # directory here does not pull any OptiX header in.
+        # Deliberately CUDA-free headers only, so the logic they hold can be
+        # tested on a machine without a GPU: optix_denoise_plan.h (the denoiser's
+        # decisions) and env_alias_sampling.h (compiled here for the host and by
+        # nvcc for the device, so both run one copy). Including this directory
+        # pulls no OptiX header in.
         ${CMAKE_SOURCE_DIR}/src/render/optix
         ${CMAKE_SOURCE_DIR}/src/editor
 )

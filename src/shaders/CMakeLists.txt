@@ -34,16 +34,15 @@ if(WIN32 OR LINUX)
         OPTIONS ${OPTIX_NVCC_FLAGS} ${options}
     )
 
-    # Utility CUDA kernels (tonemappers, skinning, env CDF) — compiled to object files
+    # Utility CUDA kernels (tonemappers, skinning) — compiled to object files
     cuda_compile(compiled_tonemap_files
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/Tonemappers.cu
     )
     cuda_compile(compiled_skinning_files
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/skinning/skinning.cu
     )
-    cuda_compile(compiled_env_cdf_files
-        ${CMAKE_CURRENT_SOURCE_DIR}/optix/env_cdf.cu
-    )
+    # env_cdf.cu is gone: the environment is sampled from the alias table the
+    # Metal backend already uses, built on the host.
     cuda_compile(compiled_denoise_guide_files
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/DenoiseGuides.cu
     )
@@ -53,13 +52,11 @@ if(WIN32 OR LINUX)
         ${generated_hit_files}
         ${compiled_tonemap_files}
         ${compiled_skinning_files}
-        ${compiled_env_cdf_files}
         ${compiled_denoise_guide_files}
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/Tonemappers.h
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/DenoiseGuides.h
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/Guides.h
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/skinning/skinning.h
-        ${CMAKE_CURRENT_SOURCE_DIR}/optix/env_cdf.h
     )
     set_target_properties(strelka_shaders PROPERTIES LINKER_LANGUAGE CXX)
 

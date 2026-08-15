@@ -4,6 +4,26 @@
 #include <optix.h>
 #include <OptixRenderParams.h>
 
+// ---- Firefly bound on indirect paths ---------------------------------------
+//
+// A firefly is a sample with an enormous weight and a tiny probability -- a
+// caustic that found the light through a specular chain. Averaging it in is
+// unbiased and does converge; the estimator is correct and the sample budget is
+// not. Clamping trades that for bias, so it is off by default and applied only
+// past the first bounce, where those paths live: clamping depth 0 as well would
+// dim every directly visible emitter and the environment behind it.
+static __forceinline__ __device__ float3 clampIndirectContribution(const float3 radiance,
+                                                                   unsigned int depth,
+                                                                   float limit)
+{
+    if (limit <= 0.0f || depth == 0u)
+    {
+        return radiance;
+    }
+    const float m = fmaxf(radiance.x, fmaxf(radiance.y, radiance.z));
+    return (m > limit) ? radiance * (limit / m) : radiance;
+}
+
 // ---- Pointer packing for payload transport ---------------------------------
 
 static __forceinline__ __device__ void* unpackPointer(unsigned int i0, unsigned int i1)

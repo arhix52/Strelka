@@ -283,6 +283,8 @@ static __inline__ __device__ float getLightPdf(const UniformLight& l,
         return getSphereLightPdf();
     case LIGHT_TYPE_DISTANT:
         return getDirectLightPdf(l.halfAngle);
+    case LIGHT_TYPE_DOME:
+        return getSphereLightPdf();
     case LIGHT_TYPE_POINT:
     case LIGHT_TYPE_SPOT:
         if (l.points[0].x > 1e-4f)
@@ -440,6 +442,39 @@ static __inline__ __device__ LightSampleData SampleSphereLight(const UniformLigh
     lightSampleData.normal = sphereDirection;
     lightSampleData.pdf = 1.0f / (4.0f * M_PIf);
     lightSampleData.pointOnLight = lightPoint;
+
+    return lightSampleData;
+}
+
+/// An infinitely distant, uniform-radiance dome.
+///
+/// Uniform over the whole sphere rather than the upper hemisphere: a dome is the
+/// analytic form of an environment, and an environment lights a surface from
+/// below as well as above once anything reflects. `color` is radiance, so there
+/// is no distance falloff and no area -- the pdf is the constant 1/4pi, which is
+/// what getLightPdf() returns for this type so that MIS against a BSDF ray that
+/// misses the scene agrees with what was sampled here.
+///
+/// Without this case the switch in sampleLight fell through, leaving a
+/// zero-initialised LightSampleData: direction (0,0,0), pdf 0. The facing test
+/// then rejected it, so a dome light contributed exactly nothing and did so
+/// silently -- no NaN, no red pixel, just an unlit scene.
+static __inline__ __device__ LightSampleData SampleDomeLight(const UniformLight& l, const float2 u, const float3 hitPoint)
+{
+    LightSampleData lightSampleData;
+
+    const float cosTheta = 1.0f - 2.0f * u.x; // uniform on [-1, 1]
+    const float sinTheta = sqrtf(fmaxf(1.0f - cosTheta * cosTheta, 0.0f));
+    const float phi = 2.0f * M_PIf * u.y;
+
+    lightSampleData.L = make_float3(sinTheta * cosf(phi), cosTheta, sinTheta * sinf(phi));
+    lightSampleData.distToLight = 1e9f;
+    lightSampleData.area = 0.0f;
+    // Faces the shading point by construction, so the caller's -dot(L, normal)
+    // test passes for every sampled direction.
+    lightSampleData.normal = -lightSampleData.L;
+    lightSampleData.pdf = 1.0f / (4.0f * M_PIf);
+    lightSampleData.pointOnLight = hitPoint + lightSampleData.L * lightSampleData.distToLight;
 
     return lightSampleData;
 }

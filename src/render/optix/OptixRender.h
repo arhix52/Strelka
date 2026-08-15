@@ -163,6 +163,7 @@ private:
 
     Texture loadTextureFromFile(const std::string& fileName);
     void loadEnvMap(const std::string& texturePath);
+    void loadEnvBackground(const std::string& texturePath);
 
     bool createOptixMaterials();
     void destroyTextures();
@@ -174,11 +175,9 @@ private:
     std::vector<cudaTextureObject_t> mTextureObjects;
 
     // Environment map resources
-    std::unique_ptr<OptixBuffer> mEnvCdfXBuffer;   // conditional CDF
-    std::unique_ptr<OptixBuffer> mEnvCdfYBuffer;   // marginal CDF
-    std::unique_ptr<OptixBuffer> mEnvRawDataBuffer; // raw float4 data on device for CDF kernel
+    std::unique_ptr<OptixBuffer> mEnvAliasBuffer; // Walker/Vose alias table, one entry per texel
     bool mEnvMapLoaded = false;
-    float mEnvMapAutoScale = 1.0f;   // auto-calibration factor for HDRI brightness
+    float mEnvMapAutoScale = 1.0f; // opt-in HDRI unit reconciliation; 1 unless render/env/autoCalibrate
 
     void updatePathtracerParams(const uint32_t width, const uint32_t height);
 
