@@ -568,6 +568,7 @@ void EditorApp::loadSettings()
     // Wavefront by default: bit-identical output, 2.6x faster at depth 8. The
     // megakernel stays selectable so any change can still be A/B'd against it.
     m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 0);
+    m_settingsManager->setAs<uint32_t>("render/pt/subsurfaceIterations", 64);
     m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", 1u);
     m_settingsManager->setAs<uint32_t>("render/pt/writeAov", 0);
     m_settingsManager->setAs<bool>("render/pt/denoise", false);

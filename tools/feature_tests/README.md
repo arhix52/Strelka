@@ -219,7 +219,7 @@ silhouette into its lit and shadowed halves — a walk that carries light the wr
 distance moves it between the halves while the total holds, which is a different
 fault from losing it, and the whole-frame ratio cannot tell them apart.
 
-`kSubsurfaceIterations` is 64 for the same reason. It is the point where the row
+`render.subsurface_iterations` defaults to 64 for the same reason. It is the point where the row
 stops moving: 64 renders the same as 256 to within the comparison's noise and in
 half the time, while 16 truncates enough of the walk's tail to lose about 2%.
 

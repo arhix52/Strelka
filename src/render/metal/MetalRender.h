@@ -149,9 +149,8 @@ private:
     /// not advance a path's depth cannot eat its bounce budget. See
     /// wavefrontIterations().
     static constexpr uint32_t kPassthroughIterations = 8;
-    static constexpr uint32_t kSubsurfaceIterations = 64;
     /// Iterations of the wavefront loop for one sample at this path depth.
-    uint32_t wavefrontIterations(uint32_t maxDepth) const;
+    uint32_t wavefrontIterations(uint32_t maxDepth, uint32_t subsurfaceIterations) const;
 
     // A GPU command buffer failed. Kept so a headless run can exit non-zero
     // instead of writing a black image and reporting success.

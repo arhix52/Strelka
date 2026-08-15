@@ -584,18 +584,15 @@ bool MetalRender::memoryReport(MemoryReport& report) const
 void MetalRender::init()
 {
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
-    // 48 rather than 20: the radiance cache adds a slot index, the pixel's
-    // radiance at the moment the path passed through it, and the reciprocal
-    // throughput there. Read and written for every live path on every bounce, so
-    // worth watching.
-    // 60 rather than 52: the subsurface walk adds two words. One holds which
+    // 32 rather than 24: the subsurface walk adds two words. One holds which
     // medium the path is inside and how far into the walk it is -- not the
     // medium's parameters, which would be 28 more bytes per pixel to avoid a load
     // from a material table that fits in cache. The other holds the walk's
     // albedo, packed RGBA8, which cannot come from the material because it is
     // textured and the texture only exists on the boundary the walk entered
     // through.
-    static_assert(sizeof(PathState) == 60, "PathState is read and written for every live path on every bounce");
+    static_assert(sizeof(PathState) == 32, "PathState is read and written for every live path on every bounce");
+    static_assert(sizeof(SharcPathState) == 28, "SHARC state is a cold side table, not part of PathState");
     // 32 rather than 24: the hit now carries the TLAS instance, because a shared
     // BLAS belongs to no single one. One extra word per live path.
     static_assert(sizeof(HitRecord) == 32, "HitRecord size changed");
@@ -858,7 +855,7 @@ metal::IntegratorSceneBindings MetalRender::integratorSceneBindings()
     return b;
 }
 
-uint32_t MetalRender::wavefrontIterations(uint32_t maxDepth) const
+uint32_t MetalRender::wavefrontIterations(uint32_t maxDepth, uint32_t subsurfaceIterations) const
 {
     uint32_t iterations = maxDepth;
     // Cutouts and medium boundaries share PATH_PASSTHROUGH_MAX, so one budget
@@ -876,7 +873,7 @@ uint32_t MetalRender::wavefrontIterations(uint32_t maxDepth) const
     // half the time, while 16 truncates enough of the tail to lose about 2%.
     if (mMaterials.hasSubsurfaceMaterials())
     {
-        iterations += kSubsurfaceIterations;
+        iterations += std::min(subsurfaceIterations, 256u);
     }
     return iterations;
 }
@@ -1388,6 +1385,7 @@ void MetalRender::render(Buffer* output)
     const uint32_t spp = settings.getAs<uint32_t>("render/pt/spp");
     const bool enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
     const uint32_t maxDepth = settings.getAs<uint32_t>("render/pt/depth");
+    const uint32_t subsurfaceIterations = settings.getAs<uint32_t>("render/pt/subsurfaceIterations");
     const uint32_t rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
     const uint32_t samplerType = settings.getAs<uint32_t>("render/pt/samplerType");
     const uint32_t blueNoiseSwitchSpp = settings.getAs<uint32_t>("render/pt/blueNoiseSwitchSpp");
@@ -1550,7 +1548,7 @@ void MetalRender::render(Buffer* output)
             frameReq.height = height;
             frameReq.sampleCount = samplesThisLaunch;
             frameReq.features = features;
-            frameReq.bounceIterations = wavefrontIterations(maxDepth);
+            frameReq.bounceIterations = wavefrontIterations(maxDepth, subsurfaceIterations);
             frameReq.motionBlasBuilt = mAccel.motionBlasBuilt();
             frameReq.profileStages = profileStages;
             frameReq.settings = getSettings();
@@ -1559,12 +1557,39 @@ void MetalRender::render(Buffer* output)
             const uint32_t iterationsPerChunk = metal::wavefrontChunkIterations(width, height);
             const std::vector<metal::WavefrontChunk> logicalWavefrontChunks =
                 metal::makeWavefrontChunkPlan(dispatchSampleCount, frameReq.bounceIterations, iterationsPerChunk);
+            uint32_t traversalBatchThreads =
+                useMetal4 && !featureIn.hasCurves ? metal::kWavefrontTriangleTraversalBatchThreads
+                                                  : metal::kWavefrontTraversalBatchThreads;
+            uint32_t traversalBatchesPerGroup = metal::kWavefrontTraversalBatchesPerCommandBuffer;
+            if (useMetal4 && featureIn.hasCurves)
+            {
+                // Keep extend independent of the shadow batches: curve closest-
+                // hit traversal needs the lower tested hardware-dispatch ceiling,
+                // while shadow any-hit remained stable at the throughput size.
+                traversalBatchThreads = envUint("STRELKA_CURVE_BATCH_THREADS",
+                                                metal::kWavefrontCurveTraversalBatchThreads);
+                traversalBatchThreads = std::clamp(traversalBatchThreads,
+                                                   metal::kWavefrontMinDiagnosticTraversalBatchThreads,
+                                                   metal::kWavefrontTraversalBatchThreads);
+                traversalBatchThreads -= traversalBatchThreads % 64u;
+                traversalBatchesPerGroup = std::max(
+                    1u, envUint("STRELKA_CURVE_BATCHES_PER_GROUP",
+                                metal::kWavefrontCurveTraversalBatchesPerGroup));
+                static bool loggedCurveBatchPolicy = false;
+                if (!loggedCurveBatchPolicy)
+                {
+                    STRELKA_INFO("Curve traversal batches: {} threads/dispatch, {} dispatches/group",
+                                 traversalBatchThreads, traversalBatchesPerGroup);
+                    loggedCurveBatchPolicy = true;
+                }
+            }
+            frameReq.traversalBatchThreads = traversalBatchThreads;
             const uint32_t traversalBatchCount =
-                metal::wavefrontTraversalBatchCount(width * height);
+                metal::wavefrontTraversalBatchCount(width * height, traversalBatchThreads);
             const std::vector<metal::WavefrontChunk> wavefrontChunks =
                 metal::makeMetal4WavefrontChunkPlan(
                     logicalWavefrontChunks, traversalBatchCount,
-                    metal::kWavefrontTraversalBatchesPerCommandBuffer,
+                    traversalBatchesPerGroup,
                     std::min(maxDepth, 16u), featureIn.hasCurves);
 
             if (useMetal4)
@@ -1768,7 +1793,8 @@ void MetalRender::render(Buffer* output)
                 const std::weak_ptr<Metal4FrameFeedbackState> weakFeedbackState = feedbackState;
                 feedbackState->submit =
                     [this, weakFeedbackState, writeIdx4, asyncPresent, commitStartedAt, profileStages, width,
-                     height, maxDepth, samplesThisLaunch, features, frameSignalValue](size_t groupIndex) {
+                     height, maxDepth, samplesThisLaunch, features, traversalBatchThreads,
+                     frameSignalValue](size_t groupIndex) {
                     const std::shared_ptr<Metal4FrameFeedbackState> state = weakFeedbackState.lock();
                     if (!state)
                     {
@@ -1778,7 +1804,7 @@ void MetalRender::render(Buffer* output)
                     options->addFeedbackHandler(
                         MTL4::CommitFeedbackHandlerFunction(
                             [this, state, writeIdx4, asyncPresent, commitStartedAt, profileStages, width,
-                             height, maxDepth, samplesThisLaunch, features, groupIndex,
+                             height, maxDepth, samplesThisLaunch, features, traversalBatchThreads, groupIndex,
                              frameSignalValue](MTL4::CommitFeedback* fb) {
                         // The feedback is the only place a Metal 4 frame reports
                         // failure: there is no status() to poll afterwards the way
@@ -1832,6 +1858,13 @@ void MetalRender::render(Buffer* output)
                                             first.sampleIndex, last.sampleIndex, first.bounceBegin,
                                             last.bounceEnd, metal::wavefrontChunkPhaseName(first.phase),
                                             first.traversalBatchBegin, last.traversalBatchEnd);
+                                        if (first.phase == metal::WavefrontChunkPhase::Extend)
+                                        {
+                                            STRELKA_ERROR("Metal 4 failed traversal queue gids={}..{}",
+                                                          first.traversalBatchBegin * traversalBatchThreads,
+                                                          std::min(last.traversalBatchEnd * traversalBatchThreads,
+                                                                   width * height));
+                                        }
                                     }
                                 }
                                 if (profileStages)

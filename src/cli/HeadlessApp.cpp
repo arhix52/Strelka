@@ -1,4 +1,5 @@
 #include "HeadlessApp.h"
+#include "editor_camera_framing.h"
 
 #include <tonemappers.h>
 
@@ -68,8 +69,7 @@ uint32_t parseSamplerName(const std::string& name)
     {
         return 4;
     }
-    throw std::invalid_argument(
-        "Unknown sampler: " + name + " (halton|pcg|sobol|sobol_bn|hybrid)");
+    throw std::invalid_argument("Unknown sampler: " + name + " (halton|pcg|sobol|sobol_bn|hybrid)");
 }
 
 uint32_t parseTonemapName(const std::string& name)
@@ -93,7 +93,9 @@ uint32_t parseTonemapName(const std::string& name)
     throw std::invalid_argument("Unknown tonemap: " + name);
 }
 
-static uint32_t parseEnumOrDefault(const std::string& name, uint32_t (*parse)(const std::string&), uint32_t fallback,
+static uint32_t parseEnumOrDefault(const std::string& name,
+                                   uint32_t (*parse)(const std::string&),
+                                   uint32_t fallback,
                                    const char* label)
 {
     try
@@ -164,6 +166,10 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     {
         cfg.maxDepth = static_cast<uint32_t>(*v);
     }
+    if (auto v = tbl["render"]["subsurface_iterations"].value<int64_t>())
+    {
+        cfg.subsurfaceIterations = static_cast<uint32_t>(std::clamp<int64_t>(*v, 0, 256));
+    }
     if (auto v = tbl["render"]["clamp_indirect"].value<double>())
     {
         cfg.clampIndirect = static_cast<float>(*v);
@@ -226,20 +232,28 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     {
         cfg.cameraIndex = static_cast<int>(*v);
     }
+    if (auto v = tbl["camera"]["frame_node"].value<int64_t>(); v && *v >= 0)
+    {
+        cfg.frameNode = static_cast<uint32_t>(*v);
+    }
+    if (auto v = tbl["camera"]["frame_instance"].value<int64_t>(); v && *v >= 0)
+    {
+        cfg.frameInstance = static_cast<uint32_t>(*v);
+    }
     if (auto* arr = tbl["camera"]["position"].as_array())
     {
         if (arr->size() == 3)
         {
-            cfg.cameraPosition = glm::vec3(arr->get(0)->value_or(0.0), arr->get(1)->value_or(0.0),
-                                           arr->get(2)->value_or(0.0));
+            cfg.cameraPosition =
+                glm::vec3(arr->get(0)->value_or(0.0), arr->get(1)->value_or(0.0), arr->get(2)->value_or(0.0));
         }
     }
     if (auto* arr = tbl["camera"]["target"].as_array())
     {
         if (arr->size() == 3)
         {
-            cfg.cameraTarget = glm::vec3(arr->get(0)->value_or(0.0), arr->get(1)->value_or(0.0),
-                                         arr->get(2)->value_or(0.0));
+            cfg.cameraTarget =
+                glm::vec3(arr->get(0)->value_or(0.0), arr->get(1)->value_or(0.0), arr->get(2)->value_or(0.0));
         }
     }
     if (auto v = tbl["camera"]["fov"].value<double>())
@@ -274,8 +288,7 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     return cfg;
 }
 
-HeadlessApp::HeadlessApp(const RenderConfig& config)
-    : m_config(config)
+HeadlessApp::HeadlessApp(const RenderConfig& config) : m_config(config)
 {
     m_settings = std::make_unique<SettingsManager>();
     m_scene = std::make_unique<Scene>();
@@ -285,6 +298,51 @@ HeadlessApp::HeadlessApp(const RenderConfig& config)
     m_render->setScene(m_scene.get());
     m_render->setSettingsManager(m_settings.get());
     m_render->setSharedContext(m_sharedCtx.get());
+}
+
+static bool computeNodeWorldBounds(Scene& scene,
+                                   uint32_t nodeId,
+                                   const std::optional<uint32_t>& selectedInstance,
+                                   glm::float3& worldMin,
+                                   glm::float3& worldMax)
+{
+    const std::vector<Scene::Node>& nodes = scene.getNodes();
+    const std::vector<Instance>& instances = scene.getInstances();
+    if (nodeId >= nodes.size())
+    {
+        return false;
+    }
+
+    const glm::mat4* selectedTransform = nullptr;
+    if (selectedInstance && *selectedInstance < instances.size())
+    {
+        selectedTransform = &instances[*selectedInstance].transform;
+    }
+
+    bool any = false;
+    worldMin = glm::float3(std::numeric_limits<float>::max());
+    worldMax = glm::float3(std::numeric_limits<float>::lowest());
+    for (const uint32_t instId : nodes[nodeId].instanceIds)
+    {
+        if (instId >= instances.size() || (selectedTransform && instances[instId].transform != *selectedTransform))
+        {
+            continue;
+        }
+        glm::float3 localMin(0.0f);
+        glm::float3 localMax(0.0f);
+        if (!scene.computeInstanceBounds(instId, localMin, localMax))
+        {
+            continue;
+        }
+        glm::float3 instanceWorldMin(0.0f);
+        glm::float3 instanceWorldMax(0.0f);
+        editor_camera_framing::worldAabbFromLocalBox(
+            localMin, localMax, instances[instId].transform, instanceWorldMin, instanceWorldMax);
+        worldMin = glm::min(worldMin, instanceWorldMin);
+        worldMax = glm::max(worldMax, instanceWorldMax);
+        any = true;
+    }
+    return any;
 }
 
 void HeadlessApp::populateSettings()
@@ -302,6 +360,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/width", m_config.width);
     m_settings->setAs<uint32_t>("render/height", m_config.height);
     m_settings->setAs<uint32_t>("render/pt/depth", m_config.maxDepth);
+    m_settings->setAs<uint32_t>("render/pt/subsurfaceIterations", m_config.subsurfaceIterations);
     m_settings->setAs<uint32_t>("render/pt/sppTotal", m_config.spp);
     m_settings->setAs<uint32_t>("render/pt/spp", m_config.sppPerLaunch);
     m_settings->setAs<uint32_t>("render/pt/tonemapperType", m_config.tonemapType);
@@ -362,8 +421,8 @@ void HeadlessApp::populateSettings()
     // cost: publish nothing until the scene is complete.
     m_settings->setAs<float>("render/stream/publishIntervalMs", 0.0f);
     m_settings->setAs<bool>("render/texture/compress", true);
-    m_settings->setAs<std::string>("render/texture/cachePath",
-                           (std::filesystem::temp_directory_path() / "strelka_texcache").string());
+    m_settings->setAs<std::string>(
+        "render/texture/cachePath", (std::filesystem::temp_directory_path() / "strelka_texcache").string());
     m_settings->setAs<bool>("render/validate/analyticLights", true);
 
     // A scene may state its own exposure in the light sidecar, and when it does
@@ -383,8 +442,7 @@ void HeadlessApp::populateSettings()
             fStop = exp->fStop;
             shutterSpeed = exp->shutterSpeed;
             cm2Factor = exp->cm2Factor;
-            STRELKA_INFO("Exposure from scene: iso={} fstop={} shutter={}", filmIso, fStop,
-                         shutterSpeed);
+            STRELKA_INFO("Exposure from scene: iso={} fstop={} shutter={}", filmIso, fStop, shutterSpeed);
         }
     }
     m_settings->setAs<float>("render/post/tonemapper/filmIso", filmIso);
@@ -577,6 +635,28 @@ int HeadlessApp::run()
             cam.mOrientation = glm::normalize(glm::quat_cast(glm::mat3(view)));
         }
         cam.updateViewMatrix();
+
+        if (m_config.frameNode)
+        {
+            glm::float3 worldMin(0.0f);
+            glm::float3 worldMax(0.0f);
+            if (computeNodeWorldBounds(*m_scene, *m_config.frameNode, m_config.frameInstance, worldMin, worldMax))
+            {
+                const float aspect = m_config.height != 0 ?
+                                         static_cast<float>(m_config.width) / static_cast<float>(m_config.height) :
+                                         1.0f;
+                editor_camera_framing::frameCamera(cam, worldMin, worldMax, aspect);
+                cam.updateAspectRatio(aspect);
+                STRELKA_INFO("ACTION frame_selection node={} instance={} camera={} projection={}", *m_config.frameNode,
+                             m_config.frameInstance.value_or(static_cast<uint32_t>(-1)), m_config.cameraIndex,
+                             cam.projection == Camera::ProjectionType::orthographic ? "ortho" : "persp");
+            }
+            else
+            {
+                STRELKA_WARNING("Cannot frame node {} instance {}: selection has no renderable bounds",
+                                *m_config.frameNode, m_config.frameInstance.value_or(static_cast<uint32_t>(-1)));
+            }
+        }
     }
 
     populateSettings();

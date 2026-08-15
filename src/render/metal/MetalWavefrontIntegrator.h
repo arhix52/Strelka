@@ -5,6 +5,7 @@
 #include "MetalEnvironment.h"
 #include "MetalTextures.h"
 #include "integrator_features.h"
+#include "integrator_buffer_sizes.h"
 
 #include <strelka/render/buffer.h>
 #include <settings.h>
@@ -83,6 +84,7 @@ struct IntegratorFrameRequest
     uint32_t sampleCount = 0;
     uint32_t features = 0;
     uint32_t bounceIterations = 0;
+    uint32_t traversalBatchThreads = kWavefrontTraversalBatchThreads;
     bool motionBlasBuilt = false;
     bool profileStages = false;
     SettingsManager* settings = nullptr;
@@ -197,6 +199,7 @@ private:
     MTL::ComputePipelineState* mAovResolvePSO4 = nullptr;
 
     MTL::Buffer* mPathStateBuffer = nullptr;
+    MTL::Buffer* mSharcPathStateBuffer = nullptr;
     MTL::Buffer* mPathRayBuffer = nullptr;
     MTL::Buffer* mHitBuffer = nullptr;
     MTL::Buffer* mIorStackBuffer = nullptr;

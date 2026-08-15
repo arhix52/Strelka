@@ -45,6 +45,7 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mPreparePSO);
     safeRelease(mPrepareShadowPSO);
     safeRelease(mPathStateBuffer);
+    safeRelease(mSharcPathStateBuffer);
     safeRelease(mPathRayBuffer);
     safeRelease(mHitBuffer);
     safeRelease(mIorStackBuffer);
@@ -94,6 +95,7 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
 {
     add(mIorStatsBuffer);
     add(mPathStateBuffer);
+    add(mSharcPathStateBuffer);
     add(mPathRayBuffer);
     add(mHitBuffer);
     add(mIorStackBuffer);
@@ -118,7 +120,8 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
 size_t MetalWavefrontIntegrator::queueBytes() const
 {
     auto bufBytes = [](MTL::Buffer* b) { return b ? b->length() : 0; };
-    return bufBytes(mPathStateBuffer) + bufBytes(mPathRayBuffer) + bufBytes(mHitBuffer) +
+    return bufBytes(mPathStateBuffer) + bufBytes(mSharcPathStateBuffer) +
+           bufBytes(mPathRayBuffer) + bufBytes(mHitBuffer) +
            bufBytes(mIorStackBuffer) + bufBytes(mRadianceBuffer) + bufBytes(mGuideRadianceBuffer) +
            bufBytes(mPathQueueBuffer[0]) + bufBytes(mPathQueueBuffer[1]) + bufBytes(mControlBuffer) +
            bufBytes(mTraversalDispatchBuffer) +
@@ -409,8 +412,12 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const NS::UInteger kHitCounterOffset = 11 * sizeof(uint32_t);
     const NS::UInteger kMissArgsOffset = 18 * sizeof(uint32_t);
     const NS::UInteger kMissCounterOffset = 16 * sizeof(uint32_t);
-    const uint32_t traversalBatchThreads = kWavefrontTraversalBatchThreads;
-    const uint32_t traversalBatchCount = wavefrontTraversalBatchCount(pixels);
+    const uint32_t traversalBatchThreads = frame.traversalBatchThreads;
+    const uint32_t traversalBatchCount = wavefrontTraversalBatchCount(pixels, traversalBatchThreads);
+    const uint32_t shadowBatchThreads = (features & WavefrontFeatures::kCurves) != 0
+                                            ? kWavefrontTraversalBatchThreads
+                                            : kWavefrontTriangleTraversalBatchThreads;
+    const uint32_t shadowBatchCount = wavefrontTraversalBatchCount(pixels, shadowBatchThreads);
     const MTL::GPUAddress traversalBatchThreadsAddress = ring.push(traversalBatchThreads);
     const MTL::GPUAddress traversalBatchCountAddress = ring.push(traversalBatchCount);
 
@@ -477,6 +484,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         bind(mAovBuffer, 0, 7);
         bind(mPathRayBuffer, 0, 8);
         bind(mIorStatsBuffer, 0, 9);
+        bind(mSharcPathStateBuffer, 0, 10);
         enc->dispatchThreadgroups(fullGrid, tg);
         barrier();
     }
@@ -621,6 +629,10 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(mAovBuffer, 0, 22);
             bind(scene.prevFrameVertexBuffer ? scene.prevFrameVertexBuffer : scene.vertexBuffer, 0, 23);
             bind(scene.prevFrameInstanceBuffer ? scene.prevFrameInstanceBuffer : scene.instanceBuffer, 0, 24);
+            if (scene.sharcBuffer)
+            {
+                bind(scene.sharcBuffer, 0, 25);
+            }
             // See the Metal 3 path: a curve hit is rebuilt from these, not carried.
             if (scene.curvePointBuffer)
             {
@@ -628,6 +640,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 bind(scene.curveSegmentBuffer, 0, 27);
             }
             bind(mIorStatsBuffer, 0, 28);
+            bind(mSharcPathStateBuffer, 0, 29);
             enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
             barrier();
 
@@ -636,8 +649,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             table->setAddress(groupSize, 1);
             table->setAddress(bounceIdx, 2);
             bind(mTraversalDispatchBuffer, 0, 3);
-            table->setAddress(traversalBatchThreadsAddress, 4);
-            table->setAddress(traversalBatchCountAddress, 5);
+            table->setAddress(ring.push(shadowBatchThreads), 4);
+            table->setAddress(ring.push(shadowBatchCount), 5);
             enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
             barrier();
 
@@ -668,17 +681,31 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 shadowTable->setBuffer(scene.indexBuffer, 0, 4);
                 table->setResource(shadowTable->gpuResourceID(), 11);
             }
-            for (uint32_t batch = 0; batch < traversalBatchCount; ++batch)
+            for (uint32_t batch = 0; batch < shadowBatchCount; ++batch)
             {
-                table->setAddress(ring.push(batch * traversalBatchThreads), 12);
+                table->setAddress(ring.push(batch * shadowBatchThreads), 12);
                 enc->dispatchThreadgroups(traversalDispatches + batch * 3 * sizeof(uint32_t), tg);
-                if (batch + 1 < traversalBatchCount)
+                if (batch + 1 < shadowBatchCount)
                 {
                     traversalBatchBarrier();
                 }
             }
             barrier();
         }
+    }
+
+    // Deposit once after this sample's final bounce chunk. The state sits in a
+    // cold side table so cache-disabled frames never stream it through shade.
+    if (scene.sharcBuffer && variant->sharcDeposit &&
+        chunk.bounceEnd == frame.bounceIterations &&
+        chunk.phase != WavefrontChunkPhase::Extend)
+    {
+        enc->setComputePipelineState(variant->sharcDeposit);
+        bind(uniformBuffer, 0, 0);
+        bind(mSharcPathStateBuffer, 0, 1);
+        bind(sampleRadiance, 0, 2);
+        bind(scene.sharcBuffer, 0, 3);
+        enc->dispatchThreadgroups(fullGrid, tg);
     }
 
     if (!chunk.resolve)
@@ -850,6 +877,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         enc->setBuffer(mAovBuffer, 0, 7);
         enc->setBuffer(mPathRayBuffer, 0, 8);
         enc->setBuffer(mIorStatsBuffer, 0, 9);
+        enc->setBuffer(mSharcPathStateBuffer, 0, 10);
         enc->dispatchThreads(grid, tg);
 
         for (uint32_t bounce = 0; bounce < bounceIterations; ++bounce)
@@ -979,6 +1007,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
                 enc->setBuffer(scene.curveSegmentBuffer, 0, 27);
             }
             enc->setBuffer(mIorStatsBuffer, 0, 28);
+            enc->setBuffer(mSharcPathStateBuffer, 0, 29);
             enc->dispatchThreadgroups(mControlBuffer, kHitArgsOffset, tg);
             enc->popDebugGroup();
 
@@ -1036,7 +1065,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         {
             enc->setComputePipelineState(variant->sharcDeposit);
             enc->setBuffer(uniformBuffer, 0, 0);
-            enc->setBuffer(mPathStateBuffer, 0, 1);
+            enc->setBuffer(mSharcPathStateBuffer, 0, 1);
             enc->setBuffer(sampleRadiance, 0, 2);
             enc->setBuffer(scene.sharcBuffer, 0, 3);
             const MTL::Size depositTg = MTL::Size::Make(
@@ -1344,6 +1373,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height)
     }
     auto release = [](MTL::Buffer*& b) { if (b) { b->release(); b = nullptr; } };
     release(mPathStateBuffer);
+    release(mSharcPathStateBuffer);
     release(mPathRayBuffer);
     release(mHitBuffer);
     release(mIorStackBuffer);
@@ -1361,6 +1391,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height)
 
     metal::WavefrontElementSizes sz;
     sz.pathState = sizeof(PathState);
+    sz.sharcPathState = sizeof(SharcPathState);
     sz.pathRay = sizeof(PathRay);
     sz.hitRecord = sizeof(HitRecord);
     sz.iorStack = sizeof(IorStack);
@@ -1371,6 +1402,8 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height)
 
     // Private storage: these never leave the GPU.
     mPathStateBuffer = mDevice->newBuffer(layout.pathStateBytes, MTL::ResourceStorageModePrivate);
+    mSharcPathStateBuffer =
+        mDevice->newBuffer(layout.sharcPathStateBytes, MTL::ResourceStorageModePrivate);
     mPathRayBuffer = mDevice->newBuffer(layout.pathRayBytes, MTL::ResourceStorageModePrivate);
     mHitBuffer = mDevice->newBuffer(layout.hitBytes, MTL::ResourceStorageModePrivate);
     mIorStackBuffer = mDevice->newBuffer(layout.iorStackBytes, MTL::ResourceStorageModePrivate);

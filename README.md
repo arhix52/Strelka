@@ -98,6 +98,11 @@ ctest
 Image-level feature tests vs Blender Cycles live under `tools/feature_tests/`
 and are run manually — they are not part of CI (no golden images in the repo).
 
+## GPU profiling
+
+The working Xcode/Instruments counter preset, command-line capture workflow, and
+idle-baseline rules are documented in [docs/gpu-counters.md](docs/gpu-counters.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Third-party trees keep their own licenses.

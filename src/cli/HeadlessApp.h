@@ -27,6 +27,10 @@ struct RenderConfig
     uint32_t spp = 256;
     uint32_t sppPerLaunch = 1;
     uint32_t maxDepth = 8;
+    // Extra wavefront iterations reserved for subsurface random walks. The
+    // conservative default preserves the reference image; performance runs can
+    // measure a shorter tail explicitly.
+    uint32_t subsurfaceIterations = 64;
     // 0=Halton, 1=PCG, 2=Sobol, 3=Sobol+BN, 4=Hybrid (BN→Sobol)
     //
     // Sobol, not the blue-noise variants the editor defaults to: a headless
@@ -94,6 +98,11 @@ struct RenderConfig
     float clampIndirect = 0.0f;
 
     int cameraIndex = 0;
+    // Frame this scene node exactly like the editor's F command. The optional
+    // instance disambiguates EXT_mesh_gpu_instancing while keeping all sibling
+    // primitives at that placement in the bounds.
+    std::optional<uint32_t> frameNode;
+    std::optional<uint32_t> frameInstance;
     std::optional<glm::vec3> cameraPosition;
     std::optional<glm::vec3> cameraTarget;
     std::optional<float> cameraFov;

@@ -24,6 +24,7 @@ set_target_properties(StrelkaCLI PROPERTIES
 target_include_directories(StrelkaCLI
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src/shaders/common
+        ${CMAKE_SOURCE_DIR}/src/editor
 )
 
 target_link_libraries(StrelkaCLI

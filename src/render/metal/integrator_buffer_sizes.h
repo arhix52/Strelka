@@ -15,6 +15,7 @@ namespace metal
 struct WavefrontElementSizes
 {
     size_t pathState = 0;
+    size_t sharcPathState = 0;
     size_t pathRay = 0;
     size_t hitRecord = 0;
     size_t iorStack = 0;
@@ -26,6 +27,7 @@ struct WavefrontElementSizes
 struct WavefrontBufferLayout
 {
     size_t pathStateBytes = 0;
+    size_t sharcPathStateBytes = 0;
     size_t pathRayBytes = 0;
     size_t hitBytes = 0;
     size_t iorStackBytes = 0;
@@ -47,16 +49,31 @@ inline constexpr uint32_t kWavefrontControlUints = 96;
 // trip the Metal watchdog. Prepare writes one indirect argument triplet per
 // batch, so inactive tail batches remain true zero-work dispatches.
 inline constexpr uint32_t kWavefrontTraversalBatchThreads = 256 * 1024;
+// Triangle traversal is preemptible enough on Apple silicon to amortise the
+// launch with a larger batch. Curves retain the conservative size above: those
+// were the workloads that originally hit the watchdog.
+inline constexpr uint32_t kWavefrontTriangleTraversalBatchThreads = 512 * 1024;
+// Diagnostic subdivision may reduce a traversal dispatch to this size. Keeping
+// the indirect-argument buffer large enough costs less than 7 KB at 1080p and
+// lets a reproducer narrow a hang without reallocating the wavefront queues.
+inline constexpr uint32_t kWavefrontMinDiagnosticTraversalBatchThreads = 4 * 1024;
+// Curve traversal needs a lower non-preemptible hardware-dispatch ceiling than
+// triangle traversal. 256K curve dispatches repeatedly hung on kids_room's
+// 7.5M-segment AS; 128K dispatches completed 280 consecutive full frames. Two
+// dispatches per scheduler group retain launch efficiency while keeping a 2x
+// safety margin at the hardware boundary.
+inline constexpr uint32_t kWavefrontCurveTraversalBatchThreads = 128 * 1024;
+inline constexpr uint32_t kWavefrontCurveTraversalBatchesPerGroup = 2;
 // A Metal 4 command buffer may contain this many traversal dispatches before it
 // is retired. Four batches cap one curve-extend scheduler workload at roughly a
 // megapath; the remaining batches append into the same hit/miss queues from the
 // following command buffer.
 inline constexpr uint32_t kWavefrontTraversalBatchesPerCommandBuffer = 4;
 
-inline constexpr uint32_t wavefrontTraversalBatchCount(uint32_t pixels)
+inline constexpr uint32_t wavefrontTraversalBatchCount(
+    uint32_t pixels, uint32_t batchThreads = kWavefrontTraversalBatchThreads)
 {
-    return std::max(1u, (pixels + kWavefrontTraversalBatchThreads - 1u) /
-                            kWavefrontTraversalBatchThreads);
+    return std::max(1u, (pixels + batchThreads - 1u) / batchThreads);
 }
 // Metal 4 fault diagnosis writes the stage it is about to enter here. Keep it
 // outside the Metal 3 control-buffer snapshot at the start of stageStats.
@@ -76,6 +93,7 @@ inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width, uint32_t heig
     WavefrontBufferLayout layout;
     layout.pixels = pixels;
     layout.pathStateBytes = (size_t)pixels * sz.pathState;
+    layout.sharcPathStateBytes = (size_t)pixels * sz.sharcPathState;
     layout.pathRayBytes = (size_t)pixels * sz.pathRay;
     layout.hitBytes = (size_t)pixels * sz.hitRecord;
     layout.iorStackBytes = (size_t)pixels * sz.iorStack;
@@ -84,7 +102,8 @@ inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width, uint32_t heig
     layout.pathQueueBytes = (size_t)pixels * sizeof(uint32_t);
     layout.controlBytes = (size_t)kWavefrontControlUints * sizeof(uint32_t);
     layout.traversalDispatchBytes =
-        (size_t)wavefrontTraversalBatchCount(pixels) * 3 * sizeof(uint32_t);
+        (size_t)wavefrontTraversalBatchCount(pixels, kWavefrontMinDiagnosticTraversalBatchThreads) *
+        3 * sizeof(uint32_t);
     layout.shadowRayBytes = (size_t)pixels * sz.shadowRay;
     // The first control-sized block is the Metal 3 profiling snapshot. Fault
     // breadcrumbs follow it so that copying the snapshot cannot overwrite them.

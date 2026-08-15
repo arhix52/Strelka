@@ -144,14 +144,14 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     }
 
     // One argument table shared by every stage, so it has to be as wide as the
-    // highest index any of them binds: buffer(28) is the shade stage's IOR stats
-    // and texture(8) the reactive guide (see wavefront.metal). A bind past the
+    // highest index any of them binds: buffer(29) is the shade stage's cold SHARC
+    // state and texture(8) the reactive guide (see wavefront.metal). A bind past the
     // declared count is a hard failure, and only the debug layer says so -- these
     // counts were left at the old maxima when the curve, IOR-stats and reactive
     // bindings were added, and without MTL_DEBUG_LAYER the writes simply went
     // past the end of the table.
     MTL4::ArgumentTableDescriptor* tableDesc = MTL4::ArgumentTableDescriptor::alloc()->init();
-    tableDesc->setMaxBufferBindCount(29);
+    tableDesc->setMaxBufferBindCount(30);
     tableDesc->setMaxTextureBindCount(9);
     mArgumentTable = device->newArgumentTable(tableDesc, &error);
     tableDesc->release();

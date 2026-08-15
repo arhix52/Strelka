@@ -526,7 +526,8 @@ kernel void wavefrontGenerate(
     // Zeroed here rather than on the host: `generate` already owns resetting the
     // per-sample counters, and a host-side clear would race the frame in flight.
     // The tally is therefore per sample, which is the rate rather than a total.
-    device uint32_t*                                           iorStats       [[buffer(9)]])
+    device uint32_t*                                           iorStats       [[buffer(9)]],
+    device SharcPathState*                                     sharcPaths     [[buffer(10)]])
 {
     const uint32_t pixelCount = uniforms.width * uniforms.height;
     if (tid == 0u)
@@ -588,9 +589,14 @@ kernel void wavefrontGenerate(
     p.depthAndFlags = PATH_FLAG_ALIVE; // depth 0, not specular, NEE not done
     p.lastBsdfPdf = 0.0f;
     p.misDistance = 0.0f;
-    p.sharcIndex = SHARC_NO_ENTRY;
-    p.sharcRadianceAtVisit = packed_float3(0.0f);
-    p.sharcInvThroughput = packed_float3(0.0f);
+    if (SPEC_SHARC)
+    {
+        SharcPathState sharc;
+        sharc.index = SHARC_NO_ENTRY;
+        sharc.radianceAtVisit = packed_float3(0.0f);
+        sharc.invThroughput = packed_float3(0.0f);
+        sharcPaths[tid] = sharc;
+    }
     // Outside every medium. A camera that starts inside a translucent object is
     // not handled -- there is nothing to tell the path which medium it is in.
     p.medium = 0u;
@@ -1490,6 +1496,7 @@ kernel void wavefrontShade(
     // Two counters for the ways the nested-dielectric stack loses a path; see
     // ShaderTypes.h. Written only when one of them has already gone wrong.
     device atomic_uint*                                        iorStats       [[buffer(28)]],
+    device SharcPathState*                                     sharcPaths     [[buffer(29)]],
     texture2d<float>                                           envMapTexture  [[texture(0)]])
 {
     if (gid >= control[WF_CTRL_HIT_N])
@@ -2140,7 +2147,7 @@ kernel void wavefrontShade(
     // should leave this alone; at a genuine 1 spp there is nothing to hide it.
     //
     // The cone is derived rather than carried. PathState is read and written for
-    // every live path on every bounce and is guarded at 52 bytes, so two floats
+    // every live path on every bounce and is guarded at 32 bytes, so two floats
     // there would cost more memory traffic than the mips they buy back.
     //
     // What the width needs is the spread times the segment, and past the primary
@@ -2391,6 +2398,7 @@ kernel void wavefrontShade(
     if (SPEC_SHARC && uniforms.sharcCapacity != 0u && depth >= uniforms.sharcDepth &&
         si.roughness > 0.3f)
     {
+        SharcPathState sharc = sharcPaths[tid];
         uint32_t voxelHash = 0u, voxelKey = 0u;
         sharcVoxel(si.position, si.shading_normal, uniforms.viewToWorld[3].xyz, uniforms.sharcBaseSize,
                    voxelHash, voxelKey);
@@ -2398,7 +2406,7 @@ kernel void wavefrontShade(
         uint32_t slot = 0u;
         // Insert only when this path is going to fill it in; a read that misses
         // simply carries on tracing.
-        const bool wantVisit = (p.sharcIndex == SHARC_NO_ENTRY);
+        const bool wantVisit = (sharc.index == SHARC_NO_ENTRY);
         // A fixed share of paths never read and always trace to the end, so the
         // cache keeps converging instead of freezing at whatever the first few
         // paths through a voxel happened to find. This is what SHARC gives its
@@ -2414,13 +2422,12 @@ kernel void wavefrontShade(
             // cached read inside that estimate feeds the cache its own output --
             // a loop that amplifies whatever error it starts with. It showed as
             // a classroom 11% bright with no single step being wrong.
-            if (!updatePath && p.sharcIndex == SHARC_NO_ENTRY &&
+            if (!updatePath && sharc.index == SHARC_NO_ENTRY &&
                 cachedCount >= uniforms.sharcMinSamples)
             {
                 // The rest of this path is what the cache already knows.
                 radiance += throughput * cached;
                 radianceOut[tid] += float4(radiance, 0.0f);
-                p.sharcIndex = SHARC_NO_ENTRY;
                 paths[tid] = p;
                 return;
             }
@@ -2431,9 +2438,10 @@ kernel void wavefrontShade(
             // bright. Below the threshold the path simply carries on untracked.
             if (wantVisit && luminance(throughput) > 0.05f)
             {
-                p.sharcIndex = slot;
-                p.sharcRadianceAtVisit = packed_float3(float3(radianceOut[tid].xyz) + radiance);
-                p.sharcInvThroughput = packed_float3(1.0f / max(throughput, float3(0.02f)));
+                sharc.index = slot;
+                sharc.radianceAtVisit = packed_float3(float3(radianceOut[tid].xyz) + radiance);
+                sharc.invThroughput = packed_float3(1.0f / max(throughput, float3(0.02f)));
+                sharcPaths[tid] = sharc;
             }
         }
     }
@@ -3121,7 +3129,7 @@ static void shadowImpl(
 // of six scattered edits that would each have to stay correct.
 kernel void wavefrontSharcDeposit(uint tid [[thread_position_in_grid]],
                                   constant Uniforms& uniforms [[buffer(0)]],
-                                  device PathState* paths [[buffer(1)]],
+                                  device SharcPathState* sharcPaths [[buffer(1)]],
                                   device const float4* radianceOut [[buffer(2)]],
                                   device SharcEntry* sharcEntries [[buffer(3)]])
 {
@@ -3129,19 +3137,19 @@ kernel void wavefrontSharcDeposit(uint tid [[thread_position_in_grid]],
     {
         return;
     }
-    PathState p = paths[tid];
-    if (p.sharcIndex == SHARC_NO_ENTRY)
+    SharcPathState sharc = sharcPaths[tid];
+    if (sharc.index == SHARC_NO_ENTRY)
     {
         return;
     }
     const float3 gathered =
-        (float3(radianceOut[tid].xyz) - float3(p.sharcRadianceAtVisit)) * float3(p.sharcInvThroughput);
+        (float3(radianceOut[tid].xyz) - float3(sharc.radianceAtVisit)) * float3(sharc.invThroughput);
     if (all(gathered >= 0.0f))
     {
-        sharcWrite(sharcEntries, p.sharcIndex, gathered);
+        sharcWrite(sharcEntries, sharc.index, gathered);
     }
-    p.sharcIndex = SHARC_NO_ENTRY;
-    paths[tid] = p;
+    sharc.index = SHARC_NO_ENTRY;
+    sharcPaths[tid] = sharc;
 }
 
 #define WF_SHADOW_ENTRY(NAME, TRAITS)                                                                \

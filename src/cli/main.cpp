@@ -37,6 +37,8 @@ int main(int argc, const char* argv[])
         ("height",       "Render height",                   cxxopts::value<uint32_t>())
         ("spp",          "Samples per pixel",               cxxopts::value<uint32_t>())
         ("depth",        "Max ray depth",                   cxxopts::value<uint32_t>())
+        ("sss-iterations", "Extra subsurface walk iterations (0..256)",
+                                                            cxxopts::value<uint32_t>())
         ("exposure-iso", "Film ISO; overrides the scene's own exposure",
                                                             cxxopts::value<float>())
         ("clamp",        "Clamp each indirect path's contribution (0 = off)",
@@ -45,6 +47,9 @@ int main(int argc, const char* argv[])
         ("bn-switch",    "Hybrid: spp before switching blue-noise -> Sobol", cxxopts::value<uint32_t>())
         ("capture",      "Capture one steady-state frame to a .gputrace for Xcode (as large as the scene on the device)", cxxopts::value<std::string>())
         ("camera",       "Camera index",                    cxxopts::value<int>())
+        ("frame-node",    "Frame scene node like editor F",  cxxopts::value<uint32_t>())
+        ("frame-instance", "Instance used to disambiguate an instanced node",
+                                                            cxxopts::value<uint32_t>())
         ("animation-time", "Normalised animation time in [0,1] for every clip",
                                                             cxxopts::value<float>())
         ("tonemap",      "Tonemap: none, reinhard, aces, filmic", cxxopts::value<std::string>())
@@ -120,6 +125,10 @@ int main(int argc, const char* argv[])
     {
         cfg.maxDepth = result["depth"].as<uint32_t>();
     }
+    if (result.count("sss-iterations"))
+    {
+        cfg.subsurfaceIterations = std::min(result["sss-iterations"].as<uint32_t>(), 256u);
+    }
     if (result.count("exposure-iso"))
     {
         cfg.filmIso = result["exposure-iso"].as<float>();
@@ -132,6 +141,14 @@ int main(int argc, const char* argv[])
     if (result.count("camera"))
     {
         cfg.cameraIndex = result["camera"].as<int>();
+    }
+    if (result.count("frame-node"))
+    {
+        cfg.frameNode = result["frame-node"].as<uint32_t>();
+    }
+    if (result.count("frame-instance"))
+    {
+        cfg.frameInstance = result["frame-instance"].as<uint32_t>();
     }
     if (result.count("animation-time"))
     {
@@ -174,8 +191,8 @@ int main(int argc, const char* argv[])
         return 1;
     }
 
-    STRELKA_INFO("StrelkaCLI: scene={}, output={}, {}x{}, {} spp", cfg.scenePath, cfg.outputPath, cfg.width,
-                 cfg.height, cfg.spp);
+    STRELKA_INFO("StrelkaCLI: scene={}, output={}, {}x{}, {} spp", cfg.scenePath, cfg.outputPath, cfg.width, cfg.height,
+                 cfg.spp);
 
     oka::HeadlessApp app(cfg);
     return app.run();

@@ -336,13 +336,15 @@ struct GeometryEntry
 // every lane of a simdgroup to wait for the longest-lived path in it. The
 // wavefront tracer trades that for explicit state in memory, so each stage only
 // runs over paths that are still alive. Memory traffic is therefore the design
-// constraint, and this struct is deliberately kept at 48 bytes.
+// constraint, and this struct is deliberately kept at 32 bytes.
 //
-// Two things are *not* stored:
+// Three things are *not* stored:
 //   - the sampler, because it is a pure function of
 //     (pixelIndex, sampleIndex, depth) and is cheaper to recompute than to load;
-//   - the IOR stack (36 B), which only matters to paths currently inside a
-//     dielectric and lives in a side table indexed by path slot.
+//   - the IOR stack (52 B), which only matters to paths currently inside a
+//     dielectric and lives in a side table indexed by path slot;
+//   - SHARC bookkeeping, which only cache-enabled shade/deposit kernels touch
+//     and likewise lives in a side table.
 // The ray is separate from the rest of the state because `extend` reads only
 // the ray and is the most traffic-sensitive stage: keeping them together made it
 // pull 48 bytes per path to use 24. `shade` reads both, so nothing is read twice.
@@ -370,18 +372,6 @@ struct PathState
     // one number recovers that vertex: origin - direction * this.
     float misDistance;
 
-    // Radiance cache bookkeeping. A path that passes through a cache voxel
-    // remembers the slot, what the pixel had already gathered at that moment and
-    // the reciprocal of its throughput there; when the path ends, the difference
-    // over that throughput is what the rest of the path was worth from that
-    // voxel, and that is what the cache stores.
-    //
-    // Costs 28 bytes on every live path and buys the whole tail of the path, so
-    // it is only allocated when the cache is on.
-    uint32_t sharcIndex;
-    packed_float3 sharcRadianceAtVisit;
-    packed_float3 sharcInvThroughput;
-
     /// Which participating medium the path is inside, and how many scattering
     /// events it has had there: material index + 1 in the low 16 bits, step count
     /// in the high 16. Zero means the path is outside every medium.
@@ -405,6 +395,17 @@ struct PathState
     /// through. Packed to one word -- a scattering albedo has nothing like eight
     /// bits of meaningful precision, and this is per pixel.
     uint32_t mediumAlbedo;
+};
+
+// Radiance-cache bookkeeping lives apart from PathState because every stage
+// streams PathState on every bounce, while only SHARC-enabled shade/deposit
+// kernels touch these values. Keeping 28 cold bytes in the hot record made a
+// cache-disabled path 60 bytes wide instead of 32.
+struct SharcPathState
+{
+    uint32_t index;
+    packed_float3 radianceAtVisit;
+    packed_float3 invThroughput;
 };
 
 #define MEDIUM_INDEX_MASK  0xFFFFu
