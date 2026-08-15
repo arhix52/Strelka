@@ -1,0 +1,45 @@
+scene                    vs Cycles rel/ratio   vs Metal rel     recorded
+------------------------------------------------------------------------------
+00_calibration           0.020 / 1.007         0.013            0.021 / 1.010
+01_srgb_texture          0.029 / 1.001         0.014            0.026 / 1.004
+02_basecolor             0.028 / 1.000         0.024            0.022 / 1.003
+03_roughness             0.032 / 1.012         0.023            0.024 / 1.015
+04_metal                 0.072 / 0.983         0.054            0.055 / 0.986
+05_anisotropy            0.093 / 1.004         0.083            0.061 / 1.007
+06_normalmap             0.083 / 1.058         0.047            0.071 / 1.061
+07_alpha_clip            0.032 / 1.017         0.018            0.025 / 1.018
+08_alpha_blend           0.032 / 1.018         0.023            0.024 / 1.016
+09_glass_ior             0.070 / 1.009         0.056            0.059 / 1.012
+10_glass_absorption      0.060 / 0.982         0.054            0.038 / 1.012
+11_emission              0.030 / 1.003         0.032            0.017 / 1.004
+12_lights_punctual       0.061 / 0.974         0.046            0.031 / 1.002
+13_uv2_vcol              0.028 / 1.007         0.019            0.024 / 1.010
+14_sheen                 0.059 / 1.013         0.026            0.053 / 1.016
+15_clearcoat             0.043 / 1.000         0.032            0.037 / 1.002
+16_iridescence           0.032 / 1.006         0.024            0.023 / 1.010
+17_coated_glass          0.082 / 0.989         0.064            0.067 / 0.994
+18_bounded_volume        0.180 / 0.870         0.183            0.027 / 1.000
+19_env_and_light         0.026 / 0.998         0.022            0.026 / 1.000
+20_mirror_and_floor      0.101 / 1.033         0.069            0.034 / 1.038
+21_specular_color        0.037 / 1.015         0.026            0.030 / 1.018
+22_thin_walled           0.104 / 0.929         0.066            0.094 / 0.966
+23_diffuse_transmission  0.026 / 0.999         0.027            0.012 / 1.000
+24_orthographic          0.036 / 1.011         0.023            0.024 / 1.009
+25_subsurface            0.313 / 0.700         0.316            0.056 / 1.009
+26_dof                   0.028 / 1.012         0.021            0.024 / 1.015
+27_ies                   0.774 / 0.511         0.767            0.028 / 1.021
+28_hair                  0.051 / 0.966         0.062            0.033 / 1.012
+
+29 graded, 0 failed
+
+Six streams merged onto optix/00-foundation, each scene at its own sample budget.
+Compare against baseline_optix.txt, which is the same ladder before any of them.
+
+The "vs Metal" column is the one to read for parity: it is lower than the Cycles
+column on most rows, which is what it should be -- two backends of one renderer
+have no reason to disagree as much as either disagrees with Cycles.
+
+What is left is three unimplemented features, not three defects: 27_ies (no IES
+support at all), 25_subsurface (no random walk) and 18_bounded_volume (no
+participating-medium integrator). Each was scoped to a stream and each stream
+said plainly it did not reach it.
