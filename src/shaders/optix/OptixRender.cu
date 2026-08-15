@@ -106,15 +106,31 @@ __device__ void generateCameraRay(
     pixelNDC.x += params.shiftX * 2.0f;
     pixelNDC.y += params.shiftY * 2.0f;
 
-    float4 clip{ pixelNDC.x, pixelNDC.y, 1.0f, 1.0f };
-    const sutil::Matrix4x4 clipToView(params.clipToView);
-    float4 viewSpace = clipToView * clip;
-
     const sutil::Matrix4x4 viewToWorld(params.viewToWorld);
-    float4 wdir = viewToWorld * make_float4(viewSpace.x, viewSpace.y, viewSpace.z, 0.0f);
 
-    origin = make_float3(viewToWorld * make_float4(0.0f, 0.0f, 0.0f, 1.0f));
-    direction = normalize(make_float3(wdir));
+    if (params.projectionType == PROJECTION_ORTHOGRAPHIC)
+    {
+        // No centre of projection: every ray runs down the view axis and the pixel
+        // picks where on the film it starts. clipToView is deliberately unused --
+        // for an orthographic frame it is a scale, and going through it would only
+        // re-derive the half-extents that are already here. Same derivation as the
+        // Metal path in shading_common.h, so the two backends frame identically.
+        const float3 filmPos =
+            make_float3(pixelNDC.x * params.orthoHalfWidth, pixelNDC.y * params.orthoHalfHeight, 0.0f);
+        origin = make_float3(viewToWorld * make_float4(filmPos.x, filmPos.y, filmPos.z, 1.0f));
+        direction = normalize(make_float3(viewToWorld * make_float4(0.0f, 0.0f, -1.0f, 0.0f)));
+    }
+    else
+    {
+        float4 clip{ pixelNDC.x, pixelNDC.y, 1.0f, 1.0f };
+        const sutil::Matrix4x4 clipToView(params.clipToView);
+        float4 viewSpace = clipToView * clip;
+
+        float4 wdir = viewToWorld * make_float4(viewSpace.x, viewSpace.y, viewSpace.z, 0.0f);
+
+        origin = make_float3(viewToWorld * make_float4(0.0f, 0.0f, 0.0f, 1.0f));
+        direction = normalize(make_float3(wdir));
+    }
 
     // Thin lens DOF
     if (params.useDof && params.lensRadius > 0.0f)
