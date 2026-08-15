@@ -84,9 +84,21 @@ private:
         /// ask a bare CUdeviceptr how big it is, and an estimate made from the
         /// triangle count would be the thing the report exists to avoid.
         size_t gas_bytes = 0;
+        /// This mesh's opacity micromap array, or 0 when it has none.
+        ///
+        /// Owned here because the structure references it: an acceleration
+        /// structure built with micromaps reads them during traversal, which is
+        /// why optixAccelRelocate has an input for relocating them. Freeing it
+        /// after the build would leave the GAS pointing at nothing.
+        CUdeviceptr d_omm_array = 0;
+        size_t omm_bytes = 0;
         ~Mesh()
         {
             CUDA_CHECK(cudaFree((void*)d_gas_output_buffer));
+            if (d_omm_array)
+            {
+                CUDA_CHECK(cudaFree((void*)d_omm_array));
+            }
         }
     };
 
@@ -170,11 +182,60 @@ private:
     uint32_t mMaterialCount = 0;
 
     void allocJointMatrices();
-    std::unique_ptr<Mesh> createMesh(const oka::Mesh& mesh);
+    std::unique_ptr<Mesh> createMesh(const oka::Mesh& mesh, size_t meshIndex);
     void updateMesh(const oka::Mesh& mesh, int optixMeshesId);
     bool rebuildMesh(const oka::Mesh& mesh, int optixMeshesId);
     std::unique_ptr<Curve> createCurve(const oka::Curve& curve);
     size_t compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes);
+
+    // --- Opacity micromaps ---------------------------------------------------
+    //
+    // Off by default. What they buy is traversal that resolves the wholly-opaque
+    // and wholly-cut-away parts of an alpha cutout without entering a shader;
+    // what they must not do is change what any surviving hit shades. See
+    // opacity_micromap_policy.h for the two rules that keep that true.
+
+    /// The base-colour alpha channel of one material, as the *device* texture
+    /// holds it: decoded through the same plan the upload used, block
+    /// compression included. Alpha read off the source file instead would
+    /// describe a texture the renderer does not have.
+    struct OmmAlphaImage
+    {
+        int width = 0;
+        int height = 0;
+        std::vector<float> alpha;
+        /// How far a value here may sit from what the sampler returns.
+        float tolerance = 0.0f;
+        /// False when the uploaded format is one this cannot read back exactly,
+        /// which means no micromap rather than a guessed one.
+        bool usable = false;
+    };
+
+    /// Which material each mesh is drawn with, or -1 when no instance names it,
+    /// or when two instances name different ones. A micromap belongs to the
+    /// geometry, so a mesh instanced under two different cutouts cannot have one.
+    std::vector<int32_t> mMeshMaterialIds;
+    std::unordered_map<int32_t, OmmAlphaImage> mOmmAlphaCache;
+    bool mOpacityMicromapsEnabled = false;
+    size_t mOmmTotalBytes = 0;
+
+    /// Everything one mesh's micromaps need to survive until the GAS build
+    /// reads them. `array` outlives the build; the rest does not.
+    struct MeshOpacityMicromap
+    {
+        CUdeviceptr array = 0;
+        size_t arrayBytes = 0;
+        CUdeviceptr indices = 0;
+        std::vector<OptixOpacityMicromapUsageCount> usage;
+        bool valid = false;
+    };
+
+    void beginOpacityMicromaps();
+    void endOpacityMicromaps();
+    void resolveMeshMaterials();
+    const OmmAlphaImage* ommAlphaImage(int32_t materialId);
+    MeshOpacityMicromap buildMeshOpacityMicromap(const oka::Mesh& mesh, size_t meshIndex);
+    void releaseOpacityMicromapScratch(MeshOpacityMicromap& omm);
 
     std::vector<std::unique_ptr<Mesh>> mOptixMeshes;
     std::vector<std::unique_ptr<Curve>> mOptixCurves;

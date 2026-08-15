@@ -40,6 +40,34 @@ static_assert((uint32_t)oka::optix_accel::kFlagPreferFastTrace == (uint32_t)OPTI
 static_assert((uint32_t)oka::optix_accel::kFlagPreferFastBuild == (uint32_t)OPTIX_BUILD_FLAG_PREFER_FAST_BUILD);
 static_assert((uint32_t)oka::optix_accel::kFlagAllowRandomVertexAccess ==
               (uint32_t)OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS);
+
+#include "opacity_micromap_policy.h"
+#include <optix_micromap.h>
+// The uv the micromap classifies has to be the uv the shader tests, and both
+// come out of this: 14 bits a component over [-10, 10], unpacked by the same
+// expression on the host and on the device.
+#include <strelka/scene/vertex_packing.h>
+
+// The same treatment for the micromap mirrors. A state written with the wrong
+// value would not fail to build; it would quietly mark cut-away geometry opaque.
+static_assert((uint32_t)oka::optix_omm::kStateTransparent == (uint32_t)OPTIX_OPACITY_MICROMAP_STATE_TRANSPARENT);
+static_assert((uint32_t)oka::optix_omm::kStateOpaque == (uint32_t)OPTIX_OPACITY_MICROMAP_STATE_OPAQUE);
+static_assert((uint32_t)oka::optix_omm::kStateUnknownTransparent ==
+              (uint32_t)OPTIX_OPACITY_MICROMAP_STATE_UNKNOWN_TRANSPARENT);
+static_assert((uint32_t)oka::optix_omm::kStateUnknownOpaque == (uint32_t)OPTIX_OPACITY_MICROMAP_STATE_UNKNOWN_OPAQUE);
+static_assert((int32_t)oka::optix_omm::kIndexFullyTransparent ==
+              (int32_t)OPTIX_OPACITY_MICROMAP_PREDEFINED_INDEX_FULLY_TRANSPARENT);
+static_assert((int32_t)oka::optix_omm::kIndexFullyOpaque ==
+              (int32_t)OPTIX_OPACITY_MICROMAP_PREDEFINED_INDEX_FULLY_OPAQUE);
+static_assert((int32_t)oka::optix_omm::kIndexFullyUnknownTransparent ==
+              (int32_t)OPTIX_OPACITY_MICROMAP_PREDEFINED_INDEX_FULLY_UNKNOWN_TRANSPARENT);
+static_assert((int32_t)oka::optix_omm::kIndexFullyUnknownOpaque ==
+              (int32_t)OPTIX_OPACITY_MICROMAP_PREDEFINED_INDEX_FULLY_UNKNOWN_OPAQUE);
+static_assert(oka::optix_omm::kMaxSubdivisionLevel == OPTIX_OPACITY_MICROMAP_MAX_SUBDIVISION_LEVEL);
+static_assert((uint32_t)oka::optix_omm::kAlphaOpaque == (uint32_t)ALPHA_MODE_OPAQUE);
+static_assert((uint32_t)oka::optix_omm::kAlphaMask == (uint32_t)ALPHA_MODE_MASK);
+static_assert((uint32_t)oka::optix_omm::kAlphaBlend == (uint32_t)ALPHA_MODE_BLEND);
+
 #include "curve_layout.h"
 
 #include <cuda_profiler_api.h>
@@ -535,7 +563,530 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
     return rcurve;
 }
 
-std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh)
+// ---------------------------------------------------------------------------
+// Opacity micromaps
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+/// Level 4 -- 256 microtriangles, 64 bytes -- is the finest a triangle is given.
+/// Past that the array costs more memory than the traversal it saves, and the
+/// classifier's texel scan grows with it while the cutout edge it is resolving
+/// does not.
+constexpr uint32_t kOmmMaxSubdivisionLevel = 4u;
+
+/// What all of one mesh's micromaps may occupy. A cutout card is two triangles
+/// and a forest floor is millions; the level follows the budget rather than the
+/// other way round.
+constexpr size_t kOmmBytesPerMesh = 64ull << 20;
+
+/// The most texels one microtriangle's classification will look at before it
+/// gives up and says unknown. A microtriangle whose uv footprint covers a
+/// megatexel is not a cutout edge -- it is a texture mapped so coarsely that the
+/// micromap could not resolve it anyway -- and scanning it would turn a scene
+/// load into a stall.
+constexpr int64_t kOmmMaxTexelsPerMicroTriangle = 4096;
+
+/// Absorbs the difference between the host's evaluation of the barycentric
+/// interpolation and the device's. They are the same expression, not the same
+/// instruction sequence, and a uv landing exactly on a texel boundary must not
+/// turn on which way the last bit went. One part in ten thousand of the uv
+/// range, which at 4k is a twentieth of a texel.
+constexpr float kOmmUvPad = 1e-4f;
+
+struct Uv
+{
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+Uv unpackUvHost(uint32_t packed)
+{
+    const glm::float2 uv = oka::unpackUV(packed);
+    return Uv{ uv.x, uv.y };
+}
+
+Uv barycentricUv(const Uv& a, const Uv& b, const Uv& c, float2 bary)
+{
+    // interpolateAttrib(): a + bary.x * (b - a) + bary.y * (c - a).
+    return Uv{ a.x + bary.x * (b.x - a.x) + bary.y * (c.x - a.x),
+               a.y + bary.x * (b.y - a.y) + bary.y * (c.y - a.y) };
+}
+
+} // namespace
+
+/// The alpha channel of a material's base-colour texture, as uploaded.
+///
+/// Decoded through `decodeToPayload` with this render's own texture settings, so
+/// the extent, the resampling and the block compression are the ones the device
+/// texture went through. Anything else would be describing a different texture:
+/// a downscale alone moves an eighth of a dotted mask's texels across a cutoff.
+///
+/// Returns nullptr when the material has no base-colour texture, which the
+/// caller reads as a constant alpha of 1.
+const OptiXRender::OmmAlphaImage* OptiXRender::ommAlphaImage(int32_t materialId)
+{
+    namespace tex = oka::optix_tex;
+    namespace omm = oka::optix_omm;
+
+    const auto cached = mOmmAlphaCache.find(materialId);
+    if (cached != mOmmAlphaCache.end())
+    {
+        return &cached->second;
+    }
+
+    OmmAlphaImage image;
+    const auto& descs = mScene->getMaterials();
+    if (materialId < 0 || (size_t)materialId >= descs.size() || descs[materialId].baseColorTexPath.empty())
+    {
+        return nullptr;
+    }
+
+    const fs::path fullPath =
+        fs::path(getSettings()->getAs<std::string>("resource/searchPath")) / descs[materialId].baseColorTexPath;
+    if (!fs::exists(fullPath))
+    {
+        mOmmAlphaCache.emplace(materialId, image); // unusable, and stays that way
+        return &mOmmAlphaCache.at(materialId);
+    }
+
+    const tex::Payload payload = tex::decodeToPayload(fullPath.string(), tex::Kind::Color, textureDecodeSettings());
+    if (!payload.valid || payload.levels.empty())
+    {
+        mOmmAlphaCache.emplace(materialId, image);
+        return &mOmmAlphaCache.at(materialId);
+    }
+
+    const int width = payload.plan.extent.width;
+    const int height = payload.plan.extent.height;
+    const std::vector<uint8_t>& level0 = payload.levels[0];
+    const size_t texels = (size_t)width * (size_t)height;
+    if (width <= 0 || height <= 0)
+    {
+        mOmmAlphaCache.emplace(materialId, image);
+        return &mOmmAlphaCache.at(materialId);
+    }
+
+    switch (payload.plan.format)
+    {
+    case tex::Format::RGBA8:
+        if (level0.size() >= texels * 4)
+        {
+            image.alpha.resize(texels);
+            for (size_t i = 0; i < texels; ++i)
+                image.alpha[i] = (float)level0[i * 4 + 3] / 255.0f;
+            image.usable = true;
+            image.tolerance = omm::kExactAlphaTolerance;
+        }
+        break;
+    case tex::Format::RGBA16:
+        if (level0.size() >= texels * 8)
+        {
+            const uint16_t* src = reinterpret_cast<const uint16_t*>(level0.data());
+            image.alpha.resize(texels);
+            for (size_t i = 0; i < texels; ++i)
+                image.alpha[i] = (float)src[i * 4 + 3] / 65535.0f;
+            image.usable = true;
+            image.tolerance = omm::kExactAlphaTolerance;
+        }
+        break;
+    case tex::Format::RGBA32F:
+        if (level0.size() >= texels * 16)
+        {
+            const float* src = reinterpret_cast<const float*>(level0.data());
+            image.alpha.resize(texels);
+            for (size_t i = 0; i < texels; ++i)
+                image.alpha[i] = src[i * 4 + 3];
+            image.usable = true;
+            image.tolerance = omm::kExactAlphaTolerance;
+        }
+        break;
+    case tex::Format::BC3:
+    {
+        // Sixteen bytes a block, the first eight being the BC4-coded alpha. The
+        // palette is decoded rather than approximated because a cutout mask goes
+        // through it and comes back with edge texels the source never had.
+        const int blocksX = (width + 3) / 4;
+        const int blocksY = (height + 3) / 4;
+        if (level0.size() >= (size_t)blocksX * blocksY * 16)
+        {
+            image.alpha.assign(texels, 0.0f);
+            uint8_t decoded[16];
+            for (int by = 0; by < blocksY; ++by)
+            {
+                for (int bx = 0; bx < blocksX; ++bx)
+                {
+                    const uint8_t* block = level0.data() + ((size_t)by * blocksX + bx) * 16;
+                    omm::decodeBc4AlphaBlock(block, decoded);
+                    for (int y = 0; y < 4; ++y)
+                    {
+                        const int ty = by * 4 + y;
+                        if (ty >= height)
+                            break;
+                        for (int x = 0; x < 4; ++x)
+                        {
+                            const int tx = bx * 4 + x;
+                            if (tx >= width)
+                                break;
+                            image.alpha[(size_t)ty * width + tx] = (float)decoded[y * 4 + x] / 255.0f;
+                        }
+                    }
+                }
+            }
+            image.usable = true;
+            image.tolerance = omm::kBlockCompressedAlphaTolerance;
+        }
+        break;
+    }
+    case tex::Format::BC1:
+    case tex::Format::BC5:
+        // BC1 carries either no alpha or a punch-through bit whose reading
+        // depends on the endpoint order, and BC5 has two channels and no alpha
+        // at all. Neither can be read back as the number the sampler returns, so
+        // neither gets a micromap -- the any-hit path answers instead, which is
+        // exactly what happens today.
+        break;
+    }
+
+    if (image.usable)
+    {
+        image.width = width;
+        image.height = height;
+    }
+    else
+    {
+        STRELKA_WARNING("No opacity micromap for material {}: base colour uploads in a format its alpha cannot be "
+                        "read back from exactly",
+                        materialId);
+    }
+    mOmmAlphaCache.emplace(materialId, std::move(image));
+    return &mOmmAlphaCache.at(materialId);
+}
+
+/// Which material each mesh is drawn with.
+///
+/// A micromap is attached to the geometry, and the material is on the instance,
+/// so the two only line up when every instance of a mesh names the same
+/// material. Where they do not, the mesh gets no micromap: describing one
+/// cutout while a second instance draws a different one is the one way this
+/// feature could change an image.
+void OptiXRender::resolveMeshMaterials()
+{
+    const auto& meshes = mScene->getMeshes();
+    mMeshMaterialIds.assign(meshes.size(), -1);
+    std::vector<bool> conflicted(meshes.size(), false);
+
+    for (const oka::Instance& instance : mScene->getInstances())
+    {
+        if (instance.type != oka::Instance::Type::eMesh)
+        {
+            continue;
+        }
+        if (instance.mMeshId >= mMeshMaterialIds.size())
+        {
+            continue;
+        }
+        const int32_t materialId = (instance.mMaterialId == (uint32_t)-1) ? 0 : (int32_t)instance.mMaterialId;
+        int32_t& slot = mMeshMaterialIds[instance.mMeshId];
+        if (slot < 0 && !conflicted[instance.mMeshId])
+        {
+            slot = materialId;
+        }
+        else if (slot != materialId)
+        {
+            slot = -1;
+            conflicted[instance.mMeshId] = true;
+        }
+    }
+}
+
+/// Classify one mesh's triangles against its material's alpha test and build the
+/// micromap array that says so.
+///
+/// Every triangle gets an entry in the index buffer. Most of them are one of the
+/// four predefined indices -- a whole triangle inside the cutout, or outside it,
+/// or unresolvable -- and cost four bytes. Only a triangle the cutout edge
+/// actually crosses gets a micromap of its own.
+OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka::Mesh& mesh, size_t meshIndex)
+{
+    namespace omm = oka::optix_omm;
+    MeshOpacityMicromap out;
+
+    if (!mOpacityMicromapsEnabled || meshIndex >= mMeshMaterialIds.size())
+    {
+        return out;
+    }
+    if (mesh.isSkeletal)
+    {
+        // A skeletal mesh is refit every frame and rebuilt every so often, and an
+        // update reads its build input back -- micromaps included, under rules
+        // that need ALLOW_OPACITY_MICROMAP_UPDATE to relax. The uv does not move
+        // under a skeleton, so the micromap would still be right; the update path
+        // is what is not worth getting wrong for a cutout nobody skins.
+        return out;
+    }
+    const int32_t materialId = mMeshMaterialIds[meshIndex];
+    const auto& descs = mScene->getMaterials();
+    if (materialId < 0 || (size_t)materialId >= descs.size())
+    {
+        return out;
+    }
+
+    const MaterialParams& material = descs[materialId].params;
+    omm::AlphaRule rule;
+    rule.alphaMode = (uint32_t)material.alpha_mode;
+    rule.baseAlpha = material.base_color_alpha;
+    rule.cutoff = material.alpha_cutoff;
+    if (rule.alphaMode == omm::kAlphaOpaque)
+    {
+        // The instance already carries OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT, so
+        // there is no shader to skip and nothing for a micromap to buy.
+        return out;
+    }
+
+    const OmmAlphaImage* image = ommAlphaImage(materialId);
+    if (image != nullptr && !image->usable)
+    {
+        return out;
+    }
+    rule.hasTexture = image != nullptr;
+    const float tolerance = image != nullptr ? image->tolerance : omm::kExactAlphaTolerance;
+
+    const size_t triangleCount = mesh.mCount / 3;
+    if (triangleCount == 0)
+    {
+        return out;
+    }
+
+    const std::vector<uint32_t>& indices = mScene->getIndices();
+    const std::vector<oka::Scene::Vertex>& vertices = mScene->getVertices();
+
+    /// Bound the base-colour alpha over everything a bilinear fetch inside a uv
+    /// box could read, and hand that to the classifier. Returns Mixed rather
+    /// than a bound whenever the box is too big to scan, which is the safe
+    /// answer to a question this cannot afford to ask.
+    auto classifyUvBox = [&](float u0, float u1, float v0, float v1) -> omm::Coverage {
+        if (image == nullptr)
+        {
+            return omm::classifyCoverage(rule, 1.0f, 1.0f, tolerance);
+        }
+        const omm::TexelSpan xs = omm::bilinearTexelSpan(u0, u1, image->width, kOmmUvPad);
+        const omm::TexelSpan ys = omm::bilinearTexelSpan(v0, v1, image->height, kOmmUvPad);
+        const int64_t xCount = xs.full ? image->width : xs.count();
+        const int64_t yCount = ys.full ? image->height : ys.count();
+        if (xCount * yCount > kOmmMaxTexelsPerMicroTriangle)
+        {
+            return omm::Coverage::Mixed;
+        }
+        float minAlpha = 1.0f;
+        float maxAlpha = 0.0f;
+        const int xBegin = xs.full ? 0 : xs.lo;
+        const int yBegin = ys.full ? 0 : ys.lo;
+        for (int64_t y = 0; y < yCount; ++y)
+        {
+            const int ty = omm::wrapTexel((int)(yBegin + y), image->height);
+            const float* row = image->alpha.data() + (size_t)ty * image->width;
+            for (int64_t x = 0; x < xCount; ++x)
+            {
+                const float a = row[omm::wrapTexel((int)(xBegin + x), image->width)];
+                minAlpha = std::min(minAlpha, a);
+                maxAlpha = std::max(maxAlpha, a);
+            }
+        }
+        return omm::classifyCoverage(rule, minAlpha, maxAlpha, tolerance);
+    };
+
+    const uint32_t level = omm::chooseSubdivisionLevel(triangleCount, kOmmBytesPerMesh, kOmmMaxSubdivisionLevel);
+    const bool subdivide = level != omm::kNoSubdivision;
+    const uint32_t microCount = subdivide ? omm::microTriangleCount(level) : 0u;
+    const size_t microBytes = subdivide ? omm::microMapBytes(level) : 0u;
+
+    std::vector<int32_t> triangleIndices(triangleCount, omm::kIndexFullyUnknownOpaque);
+    std::vector<uint8_t> micromapData;
+    std::vector<OptixOpacityMicromapDesc> micromapDescs;
+    std::vector<uint8_t> scratch(microBytes, 0u);
+    omm::BuildSummary summary;
+    summary.triangles = triangleCount;
+    summary.subdivisionLevel = subdivide ? level : 0u;
+
+    for (size_t tri = 0; tri < triangleCount; ++tri)
+    {
+        const size_t base = mesh.mIndex + tri * 3;
+        if (base + 2 >= indices.size())
+        {
+            break;
+        }
+        const size_t v0 = (size_t)mesh.mVbOffset + indices[base + 0];
+        const size_t v1 = (size_t)mesh.mVbOffset + indices[base + 1];
+        const size_t v2 = (size_t)mesh.mVbOffset + indices[base + 2];
+        if (v0 >= vertices.size() || v1 >= vertices.size() || v2 >= vertices.size())
+        {
+            break;
+        }
+        const Uv uv0 = unpackUvHost(vertices[v0].uv);
+        const Uv uv1 = unpackUvHost(vertices[v1].uv);
+        const Uv uv2 = unpackUvHost(vertices[v2].uv);
+
+        // The whole triangle first. A cutout is mostly leaf and mostly gap, and
+        // both answer here for four bytes instead of sixty-four.
+        const float triU0 = std::min(uv0.x, std::min(uv1.x, uv2.x));
+        const float triU1 = std::max(uv0.x, std::max(uv1.x, uv2.x));
+        const float triV0 = std::min(uv0.y, std::min(uv1.y, uv2.y));
+        const float triV1 = std::max(uv0.y, std::max(uv1.y, uv2.y));
+        const omm::Coverage whole = classifyUvBox(triU0, triU1, triV0, triV1);
+        if (whole != omm::Coverage::Mixed || !subdivide)
+        {
+            triangleIndices[tri] = omm::predefinedIndexFor(whole);
+            if (whole == omm::Coverage::Opaque)
+                ++summary.uniformOpaque;
+            else if (whole == omm::Coverage::Transparent)
+                ++summary.uniformTransparent;
+            else
+                ++summary.uniformUnknown;
+            continue;
+        }
+
+        std::fill(scratch.begin(), scratch.end(), (uint8_t)0);
+        uint32_t firstState = 0xFFFFFFFFu;
+        bool uniform = true;
+        for (uint32_t micro = 0; micro < microCount; ++micro)
+        {
+            float2 b0, b1, b2;
+            optixMicromapIndexToBaseBarycentrics(micro, level, b0, b1, b2);
+            const Uv m0 = barycentricUv(uv0, uv1, uv2, b0);
+            const Uv m1 = barycentricUv(uv0, uv1, uv2, b1);
+            const Uv m2 = barycentricUv(uv0, uv1, uv2, b2);
+            // uv is affine in the barycentrics, so the corners' box is the
+            // microtriangle's box exactly -- no sampling and nothing missed
+            // between the corners.
+            const omm::Coverage coverage = classifyUvBox(std::min(m0.x, std::min(m1.x, m2.x)),
+                                                         std::max(m0.x, std::max(m1.x, m2.x)),
+                                                         std::min(m0.y, std::min(m1.y, m2.y)),
+                                                         std::max(m0.y, std::max(m1.y, m2.y)));
+            const uint32_t state = omm::microStateFor(coverage);
+            omm::setMicroState(scratch.data(), micro, state);
+            ++summary.microTriangles;
+            if (coverage != omm::Coverage::Mixed)
+            {
+                ++summary.microResolved;
+            }
+            if (firstState == 0xFFFFFFFFu)
+                firstState = state;
+            else if (state != firstState)
+                uniform = false;
+        }
+
+        if (uniform)
+        {
+            // Subdividing found what the whole-triangle box could not prove, or
+            // nothing at all. Either way one index says it.
+            const omm::Coverage collapsed = firstState == omm::kStateOpaque      ? omm::Coverage::Opaque :
+                                            firstState == omm::kStateTransparent ? omm::Coverage::Transparent :
+                                                                                   omm::Coverage::Mixed;
+            triangleIndices[tri] = omm::predefinedIndexFor(collapsed);
+            if (collapsed == omm::Coverage::Opaque)
+                ++summary.uniformOpaque;
+            else if (collapsed == omm::Coverage::Transparent)
+                ++summary.uniformTransparent;
+            else
+                ++summary.uniformUnknown;
+            continue;
+        }
+
+        OptixOpacityMicromapDesc desc = {};
+        desc.byteOffset = (unsigned int)micromapData.size();
+        desc.subdivisionLevel = (unsigned short)level;
+        desc.format = (unsigned short)OPTIX_OPACITY_MICROMAP_FORMAT_4_STATE;
+        triangleIndices[tri] = (int32_t)micromapDescs.size();
+        micromapDescs.push_back(desc);
+        micromapData.insert(micromapData.end(), scratch.begin(), scratch.end());
+        ++summary.subdivided;
+    }
+
+    if (summary.isPointless())
+    {
+        STRELKA_DEBUG("Mesh {}: opacity micromap resolves nothing, skipped", meshIndex);
+        return out;
+    }
+
+    // The array, when any triangle needed one of its own.
+    if (!micromapDescs.empty())
+    {
+        CUdeviceptr d_input = 0;
+        CUdeviceptr d_descs = 0;
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_input), micromapData.size()));
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(d_input), micromapData.data(), micromapData.size(),
+                              cudaMemcpyHostToDevice));
+        const size_t descBytes = micromapDescs.size() * sizeof(OptixOpacityMicromapDesc);
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_descs), descBytes));
+        CUDA_CHECK(
+            cudaMemcpy(reinterpret_cast<void*>(d_descs), micromapDescs.data(), descBytes, cudaMemcpyHostToDevice));
+
+        OptixOpacityMicromapHistogramEntry histogram = {};
+        histogram.count = (unsigned int)micromapDescs.size();
+        histogram.format = OPTIX_OPACITY_MICROMAP_FORMAT_4_STATE;
+        histogram.subdivisionLevel = level;
+
+        OptixOpacityMicromapArrayBuildInput arrayInput = {};
+        arrayInput.flags = OPTIX_OPACITY_MICROMAP_FLAG_NONE;
+        arrayInput.inputBuffer = d_input;
+        arrayInput.perMicromapDescBuffer = d_descs;
+        arrayInput.numMicromapHistogramEntries = 1;
+        arrayInput.micromapHistogramEntries = &histogram;
+
+        OptixMicromapBufferSizes sizes = {};
+        OPTIX_CHECK(optixOpacityMicromapArrayComputeMemoryUsage(mState.context, &arrayInput, &sizes));
+
+        CUdeviceptr d_temp = 0;
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&out.array), sizes.outputSizeInBytes));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_temp), std::max<size_t>(sizes.tempSizeInBytes, 1)));
+
+        OptixMicromapBuffers buffers = {};
+        buffers.output = out.array;
+        buffers.outputSizeInBytes = sizes.outputSizeInBytes;
+        buffers.temp = d_temp;
+        buffers.tempSizeInBytes = sizes.tempSizeInBytes;
+        OPTIX_CHECK(optixOpacityMicromapArrayBuild(mState.context, mState.stream, &arrayInput, &buffers));
+        CUDA_CHECK(cudaStreamSynchronize(mState.stream));
+
+        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_temp)));
+        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_input)));
+        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_descs)));
+        out.arrayBytes = sizes.outputSizeInBytes;
+
+        out.usage.push_back(
+            OptixOpacityMicromapUsageCount{ (unsigned int)summary.subdivided, level,
+                                            OPTIX_OPACITY_MICROMAP_FORMAT_4_STATE });
+    }
+
+    const size_t indexBytes = triangleIndices.size() * sizeof(int32_t);
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&out.indices), indexBytes));
+    CUDA_CHECK(
+        cudaMemcpy(reinterpret_cast<void*>(out.indices), triangleIndices.data(), indexBytes, cudaMemcpyHostToDevice));
+    out.valid = true;
+    mOmmTotalBytes += out.arrayBytes;
+
+    STRELKA_DEBUG("Mesh {}: opacity micromap level {} -- {} triangles, {} opaque, {} cut away, {} left to the "
+                  "shader, {} subdivided; {}/{} microtriangles resolved ({} KB)",
+                  meshIndex, summary.subdivisionLevel, summary.triangles, summary.uniformOpaque,
+                  summary.uniformTransparent, summary.uniformUnknown, summary.subdivided, summary.microResolved,
+                  summary.microTriangles, out.arrayBytes / 1024);
+    return out;
+}
+
+void OptiXRender::releaseOpacityMicromapScratch(MeshOpacityMicromap& omm)
+{
+    // The index buffer is read by the build and never again; the array is read
+    // during traversal and belongs to the Mesh.
+    if (omm.indices)
+    {
+        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(omm.indices)));
+        omm.indices = 0;
+    }
+}
+
+std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh, size_t meshIndex)
 {
     bool isSkeletal = mesh.isSkeletal;
 
@@ -582,6 +1133,25 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
     triangle_input.triangleArray.numIndexTriplets = mesh.mCount / 3;
     triangle_input.triangleArray.flags = triangle_input_flags;
     triangle_input.triangleArray.numSbtRecords = 1;
+
+    // Opacity micromaps, when this mesh is an alpha cutout and the feature is on.
+    // Built before the memory usage is asked for, because attaching them changes
+    // what the structure costs.
+    MeshOpacityMicromap omm = buildMeshOpacityMicromap(mesh, meshIndex);
+    if (omm.valid)
+    {
+        triangle_input.triangleArray.opacityMicromap.indexingMode =
+            OPTIX_OPACITY_MICROMAP_ARRAY_INDEXING_MODE_INDEXED;
+        triangle_input.triangleArray.opacityMicromap.opacityMicromapArray = omm.array;
+        triangle_input.triangleArray.opacityMicromap.indexBuffer = omm.indices;
+        // 32-bit indices: the four predefined states are negative, and a mesh
+        // may hold more micromaps than a signed 16-bit index can name. Four
+        // bytes a triangle next to the sixty-four a micromap costs is not the
+        // place to economise.
+        triangle_input.triangleArray.opacityMicromap.indexSizeInBytes = 4;
+        triangle_input.triangleArray.opacityMicromap.numMicromapUsageCounts = (unsigned int)omm.usage.size();
+        triangle_input.triangleArray.opacityMicromap.micromapUsageCounts = omm.usage.empty() ? nullptr : omm.usage.data();
+    }
 
     if (mEnableMotionBlur && isSkeletal)
     {
@@ -641,10 +1211,16 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
         gasBytes = compactAccel(d_gas_output_buffer, gas_handle, property.result, gas_buffer_sizes.outputSizeInBytes);
     }
 
+    releaseOpacityMicromapScratch(omm);
+
     auto rmesh = std::make_unique<Mesh>();
     rmesh->d_gas_output_buffer = d_gas_output_buffer;
     rmesh->gas_handle = gas_handle;
     rmesh->gas_bytes = gasBytes;
+    // Taken over even when the build did not use it, so nothing leaks on a path
+    // that returned early.
+    rmesh->d_omm_array = omm.array;
+    rmesh->omm_bytes = omm.arrayBytes;
     return rmesh;
 }
 
@@ -653,14 +1229,16 @@ void OptiXRender::createBottomLevelAccelerationStructures()
     // Clear existing acceleration structures
     mOptixMeshes.clear();
     mOptixCurves.clear();
+    beginOpacityMicromaps();
 
     // Create BLAS for meshes
     const auto& meshes = mScene->getMeshes();
     mOptixMeshes.reserve(mScene->getMeshes().size());
-    for (const auto& mesh : meshes)
+    for (size_t i = 0; i < meshes.size(); ++i)
     {
-        mOptixMeshes.emplace_back(createMesh(mesh));
+        mOptixMeshes.emplace_back(createMesh(meshes[i], i));
     }
+    endOpacityMicromaps();
 
     // Create BLAS for curves
     const auto& curves = mScene->getCurves();
@@ -668,6 +1246,37 @@ void OptiXRender::createBottomLevelAccelerationStructures()
     for (const auto& curve : curves)
     {
         mOptixCurves.emplace_back(createCurve(curve));
+    }
+}
+
+/// Read the setting once and work out what each mesh is drawn with, before any
+/// structure is built.
+///
+/// Read through contains() because nothing is obliged to set it: a host that
+/// never heard of the feature gets it off, which is the default, rather than the
+/// error getAs() logs for a key nobody wrote.
+void OptiXRender::beginOpacityMicromaps()
+{
+    const SettingsManager* settings = getSettings();
+    mOpacityMicromapsEnabled = settings->contains("render/pt/opacityMicromaps") &&
+                               settings->getAs<bool>("render/pt/opacityMicromaps");
+    mOmmTotalBytes = 0;
+    mOmmAlphaCache.clear();
+    mMeshMaterialIds.clear();
+    if (mOpacityMicromapsEnabled)
+    {
+        resolveMeshMaterials();
+    }
+}
+
+void OptiXRender::endOpacityMicromaps()
+{
+    // The decoded alpha channels are build-time scratch; a cutout atlas is tens
+    // of megabytes and there is nothing to read it again for.
+    mOmmAlphaCache.clear();
+    if (mOpacityMicromapsEnabled && mOmmTotalBytes > 0)
+    {
+        STRELKA_INFO("Opacity micromaps: {} KB across {} meshes", mOmmTotalBytes / 1024, mOptixMeshes.size());
     }
 }
 
@@ -2576,6 +3185,7 @@ bool OptiXRender::stepStructures(double budgetMs)
         mOptixCurves.clear();
         mOptixMeshes.reserve(meshes.size());
         mOptixCurves.reserve(curves.size());
+        beginOpacityMicromaps();
     }
 
     const auto started = std::chrono::steady_clock::now();
@@ -2586,7 +3196,7 @@ bool OptiXRender::stepStructures(double budgetMs)
 
     while (mBlasMeshCursor < meshes.size())
     {
-        mOptixMeshes.emplace_back(createMesh(meshes[mBlasMeshCursor]));
+        mOptixMeshes.emplace_back(createMesh(meshes[mBlasMeshCursor], mBlasMeshCursor));
         ++mBlasMeshCursor;
         if (mLoadProgress)
         {
@@ -2597,6 +3207,7 @@ bool OptiXRender::stepStructures(double budgetMs)
             return false;
         }
     }
+    endOpacityMicromaps();
     while (mBlasCurveCursor < curves.size())
     {
         mOptixCurves.emplace_back(createCurve(curves[mBlasCurveCursor]));
@@ -2741,6 +3352,17 @@ bool OptiXRender::memoryReport(MemoryReport& report) const
             bytes += curve ? curve->gas_bytes : 0;
         }
         add("BLAS", bytes);
+    }
+    {
+        // Reported apart from the BLAS it belongs to: a micromap is the one part
+        // of the acceleration structure a setting turns on, so seeing what it
+        // costs is what makes the setting a decision rather than a guess.
+        size_t bytes = 0;
+        for (const std::unique_ptr<Mesh>& mesh : mOptixMeshes)
+        {
+            bytes += mesh ? mesh->omm_bytes : 0;
+        }
+        add("Opacity micromaps", bytes);
     }
     add("TLAS", bufBytes(mTlasBuffer));
     // Kept for the lifetime of the renderer so a refit needs no allocation.

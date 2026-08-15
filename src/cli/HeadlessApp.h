@@ -84,6 +84,11 @@ struct RenderConfig
     uint32_t sharcDepth = 1;
     uint32_t sharcMinSamples = 8;
     float sharcBaseSize = 4.0f; // voxel width in pixels
+    /// Resolve alpha cutouts in the traversal hardware where the answer is
+    /// uniform, and enter the shader only where it is not. Off by default: it is
+    /// an acceleration, and one that has to be measured on a machine that can
+    /// build it before it becomes anybody's default.
+    bool opacityMicromaps = false;
     // 0 = glTF (-ln(C)/d), 1 = Cycles ((1-C)/d)
     uint32_t volumeModel = 0;
     // Longest side a texture is allowed on load; 0 = no limit.
