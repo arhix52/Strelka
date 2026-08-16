@@ -97,12 +97,25 @@ __device__ void generateCameraRay(
     float2 subpixel_jitter =
         make_float2(random<SampleDimension::ePixelX>(sampler), random<SampleDimension::ePixelY>(sampler));
 
-    float2 pixelPos = make_float2(pixelIndex.x + subpixel_jitter.x, pixelIndex.y + subpixel_jitter.y);
+    // Film position, y up, from a launch index that counts down. The flip has to
+    // take the jitter with it -- `height - (y + j)` -- and not be applied to the
+    // integer alone. `height - y` then `+ j` is the same expression one row out:
+    // row 0 samples the band [height, height+1), which is off the film entirely,
+    // and every row lands one pixel from where Metal puts it.
+    //
+    // That was measurable and was being read as noise. Fitting the offset between
+    // the two backends' ladder renders gives dy = +1.00 on every scene with an
+    // edge in it (00 +0.91, 02 +0.98, 20 +1.00, 24 +1.02, 28 +1.04) and dx = 0.
+    // A one-row displacement puts a full-contrast residual on every silhouette,
+    // so `rel` against Cycles ran ~1.3x Metal's while the two backends' per-sample
+    // variance, measured where the reference is locally flat, was the same to 2%.
+    // tools/parity/noise_check.py is that measurement.
+    float2 pixelPos = make_float2(pixelIndex.x + subpixel_jitter.x,
+                                  (float)params.image_height - (pixelIndex.y + subpixel_jitter.y));
 
     // The same position expressed the way a screen-space motion vector needs it:
-    // y down, origin at the top-left of the image. `pixelIndex.y` arrives already
-    // flipped (the caller passes height - y), so the flip has to be undone here
-    // rather than guessed at by whoever consumes it.
+    // y down, origin at the top-left of the image -- so, undoing the flip above,
+    // the jittered sample position in launch order.
     screenSample = make_float2(pixelPos.x, (float)params.image_height - pixelPos.y);
 
     float2 dimension = make_float2(params.image_width, params.image_height);
@@ -280,7 +293,12 @@ extern "C" __global__ void __raygen__rg()
         prd.linearPixelIndex = linearPixelIndex;
         prd.sampleIndex = params.subframe_index + sampleIdx;
 
-        prd.sampler = initSampler(launch_index.x, params.image_height - launch_index.y, prd.linearPixelIndex, prd.sampleIndex, params.maxSampleCount, 52u);
+        // Launch coordinates as they are. The Morton code only decides which block
+        // of the sequence this pixel draws from, so a flipped y was never wrong
+        // here -- but it passed `height` for row 0, and having one expression for
+        // "this pixel" is what keeps the film flip in generateCameraRay, where it
+        // has to take the jitter with it.
+        prd.sampler = initSampler(launch_index.x, launch_index.y, prd.linearPixelIndex, prd.sampleIndex, params.maxSampleCount, 52u);
 
         prd.radiance = make_float3(0.0f);
         prd.throughput = make_float3(1.0f);
@@ -302,7 +320,7 @@ extern "C" __global__ void __raygen__rg()
 
         float3 ray_origin, ray_direction;
 
-        const uint2 pixelCoord = make_uint2(launch_index.x, params.image_height - launch_index.y);
+        const uint2 pixelCoord = make_uint2(launch_index.x, launch_index.y);
         generateCameraRay(pixelCoord, prd.sampler, ray_origin, ray_direction, prd.pixelSample);
 
         if (prd.writeAov && params.aov != nullptr)
