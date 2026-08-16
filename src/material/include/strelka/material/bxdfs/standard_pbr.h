@@ -24,6 +24,7 @@
 #include "../microfacet.h"
 #include "../sheen_albedo_lut.h"
 #include "../iridescence.h"
+#include "../shading_frame.h"
 
 // ---------------------------------------------------------------------------
 // Internal: compute lobe weights for stochastic lobe selection
@@ -293,6 +294,14 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
 
     float3 N = si.shading_normal;
     float3 V = si.wo;
+    // An opaque surface hit from behind is the same surface seen from the front,
+    // and is shaded as such rather than absorbed. See shading_frame.h -- the
+    // identical call in standard_pbr_eval() is what keeps the two describing one
+    // BRDF.
+    if (opaqueBackHitFlipsFrame(si.front_face, dot(N, V), si.transmission, si.diffuse_transmission))
+    {
+        N = -N;
+    }
     float NdotV = dot(N, V);
     // A ray leaving a dielectric hits the far wall from behind, so the shading
     // normal points away from it. That is not a degenerate hit -- it is how
@@ -782,6 +791,13 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
 
     float3 N = si.shading_normal;
     float3 V = si.wo;
+    // Same flip as standard_pbr_sample(), from the same predicate, before either
+    // cosine is taken -- so NdotV and NdotL are both measured against the frame
+    // that was actually shaded.
+    if (opaqueBackHitFlipsFrame(si.front_face, dot(N, V), si.transmission, si.diffuse_transmission))
+    {
+        N = -N;
+    }
 
     float NdotV = dot(N, V);
     float NdotL = dot(N, wi);

@@ -141,16 +141,30 @@ TEST_CASE("total internal reflection still reflects rather than absorbing")
     CHECK(r.pdf > 0.0f);
 }
 
-TEST_CASE("an opaque material still absorbs on a back face")
+TEST_CASE("an opaque material takes a back face as its own underside, not as an exit")
 {
-    // The guard exists for a reason -- a back-face hit on something with no
-    // transmission lobe has nothing to evaluate. Loosening it for dielectrics
-    // must not loosen it for everything.
+    // This case used to assert the opposite -- that an opaque back hit absorbs --
+    // and it was written to stop the dielectric loosening above from leaking
+    // into every material. The scoping is still the point; the expectation is
+    // not, and it was inverted deliberately rather than worked around.
+    //
+    // A back-face hit on an opaque material is not a ray on its way out of
+    // anything: nothing culls back faces here, so it is a leaf card seen from
+    // underneath, an inverted winding, or a normal map tipped past the viewer.
+    // Absorbing it cost 13.2% of a pine forest frame, and cost it as exactly
+    // black pixels rather than dark ones, because the closest-hit program
+    // terminated on absorb before next-event estimation could run.
+    //
+    // What must still hold is the distinction this file exists for: the same
+    // negative dot(N, wo) means "flip me" here and "refract me" for glass. The
+    // opaque side of that is owned by tests/material/test_opaque_back_face.cpp.
     SurfaceInteraction si = exiting_si(0.3f);
     si.transmission = 0.0f;
 
     BsdfSampleResult r = bsdf_sample(si, make_float4(0.4f, 0.6f, 0.5f, 0.5f));
-    CHECK(r.event_type == BSDF_EVENT_ABSORB);
+    CHECK(r.event_type != BSDF_EVENT_ABSORB);
+    // Shaded on the side it was hit from -- it did not refract through.
+    CHECK(dot(si.shading_normal, r.wi) < 0.0f);
 }
 
 TEST_CASE("eval agrees with sample on the exit surface")

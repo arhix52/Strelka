@@ -484,8 +484,15 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
         // Stated once, in shading/nee_pairing.h, because the bounce ray at the
         // bottom of __closesthit__radiance has to deduct a MIS share against
         // exactly this set and no other.
+        // Against the frame the BSDF shaded in. An opaque back hit is flipped
+        // before the lobes see it (shading_frame.h), so the hemisphere it
+        // scatters into is the one below the raw shading normal, and both halves
+        // of the estimate have to be told the same thing about that.
+        const ShadedFrame frame = shadedFrame(si.front_face, dot(si.shading_normal, si.wo),
+                                              si.transmission, si.diffuse_transmission);
         const bool isNextEventValid =
-            neeProposesDirection(isFibre, si.front_face, dot(si.shading_normal, conn.toLight)) &&
+            neeProposesDirection(isFibre, frame.frontFace,
+                                 frame.normalSign * dot(si.shading_normal, conn.toLight)) &&
             (conn.pdf > 0.0f);
         if (!isNextEventValid || !conn.needsRay)
         {
@@ -1916,8 +1923,16 @@ extern "C" __global__ void __closesthit__radiance()
     // A fibre is the exception: its connections reach the far side of the strand,
     // so withholding the weight there would count the light twice. This is the
     // same expression Metal's `wavefrontShade` applies at the same point.
-    prd->neeDone =
-        neePairsWithBounce(didNee, isFibre, si.front_face, dot(si.shading_normal, prd->dir));
+    //
+    // Against the shaded frame, for the reason given at the proposal above. An
+    // opaque back hit used to absorb, so it had no bounce to weight at all;
+    // now that it has one, passing the raw front_face would withhold the weight
+    // from a direction next-event estimation did offer, and the light would land
+    // about twice.
+    const ShadedFrame bounceFrame = shadedFrame(si.front_face, dot(si.shading_normal, si.wo),
+                                                si.transmission, si.diffuse_transmission);
+    prd->neeDone = neePairsWithBounce(didNee, isFibre, bounceFrame.frontFace,
+                                      bounceFrame.normalSign * dot(si.shading_normal, prd->dir));
     prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
     prd->misDistance = 0.0f;
     prd->throughput *= sample_data.bsdf_over_pdf / sssEntryTint;
