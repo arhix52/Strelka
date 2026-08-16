@@ -26,7 +26,7 @@ answer, or an asset/converter note that does not need Chaos.
 | ~~5~~ | ~~OptiX ior-stack counters~~ | done — see Closed | bathroom reports 15 / 6 / 693 per sample at 256² depth 16; shading untouched |
 | 6 | Two-sided different back face | material model / glTF | design first; one kids-bedroom material only |
 | 7 | Bath water is a dish, not a volume | asset, not code | remodel in Blender; bath water R/G against Chaos PNG is a check, not a driver |
-| 8 | OptiX accumulates in tonemapped space | `accumulate()` in `OptixRender.cu` | every row at `spp_per_launch = 1` matches its own single-launch number |
+| ~~8~~ | ~~OptiX accumulates in tonemapped space~~ | done — see Closed | `00_calibration` bit-identical at `spp_per_launch` 1 and 512 |
 
 6 is smaller. 7 is not a renderer bug.
 
@@ -95,9 +95,50 @@ nested-dielectric counters should drop on that mesh.
 
 ---
 
-## 8. OptiX accumulates in tonemapped space, so the ladder measures the accumulator
+## Closed (kept for the measurement, not the work)
 
-`accumulate()` in `src/shaders/optix/OptixRender.cu` blends the new sample into the
+### "OptiX is noisier per sample than Metal" was a one-row film offset
+
+**Fixed, and it was never noise.** The ladder's `rel` ran about 1.3x the recorded
+column on every row at once, which reads as variance and was written up as
+variance. It was the camera: Metal builds the film position as
+`height - (y + jitter)` and OptiX flipped the integer before adding the jitter,
+`(height - y) + jitter` -- the same band one row out, with row 0 sampling off the
+film entirely. A one-pixel displacement puts a full-contrast residual on every
+silhouette and nothing anywhere else.
+
+What separates the two hypotheses is *where* the residual lives, and no per-scene
+`rel` can say. `tools/parity/noise_check.py` grades against a converged render of
+the same backend and splits the residual by a 5x5 box -- what a blur destroys is
+per-pixel noise, what it keeps is bias -- and can restrict that to pixels where
+the reference is locally flat. Restricted to the three quarters of the frame with
+no edge under them, the two backends read **1.02x**; whole-frame, 2.36x. All of
+the excess sat on the edges.
+
+Fitting the sub-pixel shift between the two backends' renders then names it
+outright: dy = +1.00 against Metal on every scene with an edge in it, dx = 0, and
+Metal aligned with Cycles. With it fixed, 27 of 29 rows reproduce Metal's recorded
+`rel` *and* `ratio` to three digits, and per-sample noise is 0.98x over the ladder.
+
+`08_alpha_blend` was the one row that really was noise, at 1.57x, and a different
+cause: the coverage draw came from a standalone radical inverse instead of the
+Sobol table, so it was stratified across a pixel's samples but not *jointly* with
+the pixel jitter, which is what a continuous coverage test needs. `07_alpha_clip`
+never showed it because MASK resolves to 0 or 1. Full write-up, both fixes and the
+three pass-bar rows that do not match the artefact they were taken from:
+`tools/parity/ladder_optix_aligned.txt`.
+
+### OptiX accumulated in tonemapped space, so the ladder measured the accumulator
+
+**Fixed.** `accumulate()` folds the launch into the history linearly, in
+radiance, weighted `m/(n+m)` -- byte for byte what `wavefrontResolve` does on
+Metal. The verify condition below is met: `00_calibration` at 512 total samples
+renders **bit-identical** at `spp_per_launch = 1` and at `spp_per_launch = 512`
+(`rel` between the two images is 0.00000, both 0.0209 / 1.0098 against Cycles),
+so the launch split no longer names two different measurements. The evidence
+that found it is kept below.
+
+`accumulate()` in `src/shaders/optix/OptixRender.cu` used to blend the new sample into the
 history as `inverseTonemap(lerp(tonemap(prev), tonemap(new), a))`, and
 `inverseTonemap` (`postprocessing/Utils.h`) is `c / (exposure - c * exposure)`,
 which diverges as its argument approaches 1. Every launch pays that round trip, so
@@ -131,14 +172,13 @@ and nothing in the per-scene table does.
 It also inflates how bad other defects look, and by a lot: the environment
 auto-scale error reads 8.7x through this accumulator and 500x without it.
 
-**Fix**: accumulate linearly, the way `wavefrontResolve` does on Metal (a running
-mean with weight `m/(n+m)`). **Verify**: every row at `spp_per_launch = 1` matches
-the same row rendered in a single launch. Until then, quote ladder numbers with the
-launch split stated, because the two configurations do not measure the same thing.
+One thing the fix does not carry over: the 0.0195 / 1.0023 in the table above was
+this backend beating the number Metal set, and it is not what the row reads now.
+It was measured against a film position one row off, which biases the mean as well
+as the edges -- `00_calibration` reads 0.021 / 1.010 today, which is Metal's number
+exactly. See `tools/parity/ladder_optix_aligned.txt`.
 
 ---
-
-## Closed (kept for the measurement, not the work)
 
 ### Nested dielectrics: both backends count losses now
 

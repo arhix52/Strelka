@@ -43,3 +43,8 @@ Every row's ratio is now within 1% of the number Metal recorded. What is left is
 rel, and it runs about 1.3x the recorded column across the board rather than
 failing on any one row -- this backend is noisier per sample than Metal, not
 biased against it.
+
+That last sentence is wrong, and ladder_optix_aligned.txt beside this file is the
+measurement that says so: the 1.3x was a one-row offset in the film position, and
+the two backends' per-sample variance agrees to 2%. The numbers above stand as
+what this ladder read at the time; the conclusion drawn from them does not.

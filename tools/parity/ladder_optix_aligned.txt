@@ -1,0 +1,144 @@
+scene                    vs Cycles rel/ratio   vs Metal rel     recorded
+------------------------------------------------------------------------------
+00_calibration           0.021 / 1.010         0.008            0.021 / 1.010
+01_srgb_texture          0.026 / 1.004         0.008            0.026 / 1.004
+02_basecolor             0.022 / 1.003         0.010            0.022 / 1.003
+03_roughness             0.024 / 1.015         0.011            0.024 / 1.015
+04_metal                 0.055 / 0.985         0.029            0.055 / 0.986
+05_anisotropy            0.060 / 1.007         0.045            0.061 / 1.007
+06_normalmap             0.071 / 1.061         0.013            0.071 / 1.061
+07_alpha_clip            0.025 / 1.018         0.008            0.025 / 1.018
+08_alpha_blend           0.023 / 1.016         0.013            0.024 / 1.016
+09_glass_ior             0.058 / 1.012         0.040            0.059 / 1.012
+10_glass_absorption      0.037 / 1.012         0.025            0.038 / 1.012
+11_emission              0.016 / 1.004         0.016            0.017 / 1.004
+12_lights_punctual       0.031 / 1.002         0.012            0.031 / 1.002
+13_uv2_vcol              0.024 / 1.010         0.011            0.024 / 1.010
+14_sheen                 0.053 / 1.016         0.009            0.053 / 1.016
+15_clearcoat             0.037 / 1.002         0.018            0.037 / 1.002
+16_iridescence           0.023 / 1.010         0.013            0.023 / 1.010
+17_coated_glass          0.067 / 0.995         0.043            0.067 / 0.994
+18_bounded_volume        0.026 / 1.007         0.019            0.027 / 1.000
+19_env_and_light         0.025 / 1.000         0.020            0.026 / 1.000
+20_mirror_and_floor      0.059 / 1.038         0.021            0.034 / 1.038
+21_specular_color        0.030 / 1.018         0.015            0.030 / 1.018
+22_thin_walled           0.094 / 0.966         0.055            0.094 / 0.966
+23_diffuse_transmission  0.012 / 1.000         0.011            0.012 / 1.000
+24_orthographic          0.030 / 1.010         0.008            0.024 / 1.009
+25_subsurface            0.051 / 1.005         0.042            0.056 / 1.009
+26_dof                   0.024 / 1.015         0.011            0.024 / 1.015
+27_ies                   0.028 / 1.022         0.009            0.028 / 1.021
+28_hair                  0.030 / 1.010         0.021            0.033 / 1.012
+
+29 graded, 0 failed
+
+512x512, each scene at its own budget (512 spp, 2048 for 28), spp_per_launch = 1,
+sobol, depth 8. ladder_optix_integrated.txt beside this file is the same ladder
+before the two fixes below.
+
+That file closes by saying this backend is noisier per sample than Metal, on the
+evidence that `rel` ran about 1.3x the recorded column across every row. That
+reading was wrong, and the way to tell is to stop measuring noise and bias in one
+number. tools/parity/noise_check.py grades a render against a *converged* render
+of the same backend and splits the residual by a 5x5 box: what a blur destroys is
+per-pixel noise, what it keeps is bias.
+
+Split that way, at 512 spp against a 4096-spp OptiX convergence:
+
+    mean over 29 scenes     noise      bias
+    OptiX  512 spp          0.0265    0.0001
+    Metal  512 spp          0.0272    0.0018
+
+0.98x. Twenty-five of the 29 rows agree to within 2%, which is the answer to the
+question the old file asked: the two backends have the same per-sample variance,
+and always did.
+
+
+What the 1.3x actually was
+--------------------------
+
+A one-row vertical offset in the film position, which puts a full-contrast
+residual on every silhouette in the frame and none anywhere else.
+
+The measurement that isolates it. Grade both backends against the same Cycles
+reference (`noise_check.py --ref cycles`), read the high-frequency column, and
+restrict it to the three quarters of the pixels with no edge under them
+(`--mask`): the two read **1.02x**, row by row, and mean noise 0.0208 against
+0.0203. Drop the mask and the same comparison reads **2.36x**. Every bit of the
+excess is in the quarter of the frame that has an edge in it -- which no amount of
+sampling variance can do, because variance does not know where the edges are.
+
+Fitting the offset between the two backends' renders confirms it directly. Each
+row is the sub-pixel shift that minimises `rel`:
+
+    scene                optix -> metal      metal -> cycles
+    00_calibration       dy +0.91  dx +0.35  dy -0.46  dx +0.27
+    02_basecolor         dy +0.98  dx +0.10  dy -0.21  dx +0.13
+    20_mirror_and_floor  dy +1.00  dx +0.04  dy -0.04  dx -0.06
+    24_orthographic      dy +1.02  dx -0.33  dy +0.11  dx +0.25
+    28_hair              dy +1.04  dx -0.02  dy -0.19  dx +0.15
+
+dy = +1.00 against Metal on every scene with an edge in it, and Metal aligned
+with Cycles. Applying the fitted shift cut `rel` against Metal by 2-3x, which is
+what says the residual was displacement and not disagreement.
+
+The cause is one expression. Metal builds the film position as
+`height - (y + jitter)`; OptiX flipped the integer first and added the jitter
+after, `(height - y) + jitter`, which is the same band one row out -- and row 0
+sampled `[height, height+1)`, off the film entirely. Fixed in generateCameraRay
+(`OptixRender.cu`); the same expression feeds `screenSample`, so the motion
+vectors were carrying the jitter with the wrong sign too.
+
+After it, 27 of 29 rows reproduce the number Metal recorded to three digits in
+both `rel` and `ratio`, and the vs-Metal column roughly halves.
+
+
+The one row that was noise
+--------------------------
+
+`08_alpha_blend` was the only row still disagreeing, at 0.0287 noise against
+Metal's 0.0183, and it is a sampler difference: the coverage draw came from a
+standalone radical inverse rather than the Sobol table, on the argument that
+adding a `SampleDimension` shifts every other draw in the renderer.
+
+Being stratified across the samples of a pixel is not enough for a continuous
+coverage test -- it has to be stratified *jointly* with where in the pixel the ray
+went, and the Sobol index is scrambled per pixel, so pairing sample i's jitter
+with the i-th radical inverse pairs a stratum with a shuffled one. `07_alpha_clip`
+was never affected and says why: MASK resolves to 0 or 1, so the draw decides
+nothing a neighbouring sample would decide differently.
+
+With `eOpacity` added in the position Metal has it, the row reads 0.023 / 1.016 --
+Metal's own number -- and noise 0.0161 against Metal's 0.0164. The dimension shift
+cost nothing: every other row is unchanged to three digits.
+
+
+What is left, and it is not noise
+---------------------------------
+
+    scene              OptiX noise   Metal noise   bias between them
+    19_env_and_light      0.0179        0.0204          0.0000
+    25_subsurface         0.0540        0.0660          0.0261
+    28_hair               0.0276        0.0330          0.0133
+
+OptiX is the quieter one on all three. 25 and 28 carry a real disagreement in what
+the two converge to, worth a look on its own terms; 19 is variance only, and in
+OptiX's favour.
+
+
+Three rows of the pass bar do not match the artefact they were taken from
+------------------------------------------------------------------------
+
+`recorded` in this table is tools/feature_tests/README.md, which records what
+Metal measured. Grading Metal's own checked-in `_strelka.exr` against the same
+Cycles reference does not reproduce three of its entries:
+
+    scene                 README        metal EXR, measured    OptiX now
+    18_bounded_volume     0.027 / 1.000   0.026 / 1.007        0.026 / 1.007
+    20_mirror_and_floor   0.034 / 1.038   0.059 / 1.038        0.059 / 1.038
+    24_orthographic       0.024 / 1.009   0.030 / 1.010        0.030 / 1.010
+
+OptiX matches the artefact exactly on all three, so nothing here is a backend
+gap. Either the EXRs were re-rendered after the table was written or the table is
+stale, and telling which needs the Metal binary. Until someone does, read those
+three rows against the `_strelka.exr` beside them rather than against the README.
