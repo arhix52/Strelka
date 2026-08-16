@@ -3163,7 +3163,17 @@ void OptiXRender::render(Buffer* output)
     // A guide view is looked at instead of the denoised image, not through it,
     // so the network is not run -- and the plan handed over is the empty one, so
     // its state and scratch memory go back to the device while it is not needed.
-    const bool runDenoiser = plan.enabled() && params.debug < DEBUG_MODE_FIRST_AOV;
+    //
+    // That includes the single-hit views (eNormal, eMotionBlur), not only the
+    // AOV ones: `< DEBUG_MODE_FIRST_AOV` let debug values 1 and 2 through, so
+    // the temporal denoiser ran its reprojection on a buffer holding an
+    // encoded normal instead of radiance, blending it against history from
+    // whatever debug view (or none) the previous frame happened to be in.
+    // Wrong-domain history at a disocclusion or an invalid motion vector reads
+    // as a network-shaped blotch with no relation to the scene under it --
+    // fixed to the screen rather than to any surface, because the denoiser
+    // runs in screen space.
+    const bool runDenoiser = plan.enabled() && params.debug == (uint32_t)DebugMode::eNone;
     {
         const bool ready = mDenoiser.configure(mState.context, mState.stream, runDenoiser ? plan : DenoisePlan{});
         if (runDenoiser && ready)
@@ -3200,8 +3210,11 @@ void OptiXRender::render(Buffer* output)
     // An upscaling plan that could not run leaves the caller's buffer holding
     // nothing at all, since the tracer wrote a half-size image somewhere else.
     // A nearest-neighbour blow-up is not a good picture, but it is a picture of
-    // the right scene at the right size, which a black frame is not.
-    if (plan.upscale && (mDenoiserFallback || params.debug >= DEBUG_MODE_FIRST_AOV))
+    // the right scene at the right size, which a black frame is not. Every
+    // debug view falls in here now that runDenoiser is eNone-only above --
+    // single-hit views (1, 2) need the same point-sample fallback the AOV
+    // views (>= 3) always did, or a half-size render stays half the display.
+    if (plan.upscale && (mDenoiserFallback || params.debug != (uint32_t)DebugMode::eNone))
     {
         upscalePointSample(params.image, width, height, displayImage, outputWidth, outputHeight);
     }
