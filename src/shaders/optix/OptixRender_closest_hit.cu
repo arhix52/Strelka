@@ -1383,7 +1383,7 @@ extern "C" __global__ void __closesthit__radiance()
     const float opacity = resolveOpacity(matParams, textures, si.uv);
     if (opacity < 1.0f && prd->passthrough < PATH_PASSTHROUGH_MAX)
     {
-        if (opacitySample(prd->sampleIndex, prd->linearPixelIndex, prd->passthrough) >= opacity)
+        if (opacitySample(prd->sampler, prd->linearPixelIndex, prd->passthrough) >= opacity)
         {
             // Step off on the side the ray was travelling, so the next trace
             // cannot re-hit the surface it just passed through.

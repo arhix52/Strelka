@@ -23,6 +23,10 @@ enum struct SampleDimension : uint32_t
     eBSDF2,
     eBSDF3,
     eRussianRoulette,
+    // Coverage test for MASK/BLEND surfaces. Its own dimension, in the position
+    // Metal has it, so a transparent hit does not consume or correlate with the
+    // BSDF or roulette draws.
+    eOpacity,
     eLensU,
     eLensV,
     eNUM_DIMENSIONS

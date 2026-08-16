@@ -61,29 +61,43 @@ static __forceinline__ __device__ float resolveOpacity(const MaterialParams& mat
     return __saturatef(alpha);
 }
 
-/// A uniform draw for the coverage test, stratified over the sample index and
-/// decorrelated per pixel and per cutout layer.
+/// A uniform draw for the coverage test, from the sampler's own `eOpacity`
+/// dimension, rotated per cutout layer.
 ///
-/// It does not come from the Sobol table the rest of the integrator uses. That
-/// table is indexed by `SampleDimension`, and adding a dimension to it changes
-/// `eNUM_DIMENSIONS`, which shifts the dimension every *other* draw in the
-/// renderer lands on -- every row of the parity ladder would move to buy one
-/// number. A radical inverse costs two instructions and is stratified in the
-/// only direction that matters here, across samples of the same pixel.
+/// This used to be a standalone radical inverse on the sample index, rotated per
+/// pixel, on the argument that adding a dimension shifts every other draw in the
+/// renderer and moves every row of the ladder to buy one number. It is stratified
+/// across the samples of a pixel, which is the direction that argument cared
+/// about, and it still cost measurable variance: BLEND coverage is a continuous
+/// test, so what matters is not that the coverage draw is stratified on its own
+/// but that it is stratified *jointly* with where in the pixel the ray went. The
+/// Sobol index is scrambled per pixel, so pairing sample i's jitter with the i-th
+/// radical inverse pairs a stratum with a shuffled one, and the pair is random.
+/// Measured on `08_alpha_blend` against a converged render of this backend --
+/// noise 0.0287 the old way against Metal's 0.0183 on the same scene, the only
+/// row of 29 where the two disagreed once the film offset was fixed.
+///
+/// `07_alpha_clip` was never affected and says why: MASK resolves to 0 or 1, so
+/// the draw decides nothing that a neighbouring sample would decide differently.
 ///
 /// The per-layer rotation is what makes a stack of cutouts behave like a stack.
 /// Passing through does not advance the sampler, so without it two leaves of
 /// the same alpha make the same decision and a canopy that should pass a^2 of
-/// what reaches it passes a.
-static __forceinline__ __device__ float opacitySample(uint32_t sampleIndex,
+/// what reaches it passes a. A rotation rather than a fresh hash, so that each
+/// layer on its own stays stratified across samples. Same shape as Metal's.
+static __forceinline__ __device__ float opacitySample(SamplerState& sampler,
                                                       uint32_t pixelIndex,
                                                       uint32_t layer)
 {
-    constexpr float kInv2p32 = 2.3283064365386963e-10f; // 1 / 2^32
-    const float vdc = (float)__brev(sampleIndex) * kInv2p32;
-    const float rot = (float)pcg_hash(pixelIndex * 2654435761u + layer * 2246822519u + 0x9e3779b9u) * kInv2p32;
-    const float u = vdc + rot;
-    return u - floorf(u);
+    float u = random<SampleDimension::eOpacity>(sampler);
+    if (layer != 0u)
+    {
+        constexpr float kInv2p32 = 2.3283064365386963e-10f; // 1 / 2^32
+        const float rot = (float)pcg_hash(layer * 2654435761u + pixelIndex * 2246822519u) * kInv2p32;
+        u += rot;
+        u -= floorf(u);
+    }
+    return u;
 }
 
 /// Below this fraction of the light a shadow ray is treated as blocked.
