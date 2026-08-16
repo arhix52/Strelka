@@ -428,6 +428,7 @@ void initSurfaceInteraction(
     // side that suppressed the diffuse lobe over a whole frame before it was
     // caught -- 00_calibration came back at ratio 0.045.
     si.diffuse_faces_away = false;
+    si.bump_normal = si.shading_normal;
 
     // Sample base color texture. glTF composes base colour as
     // baseColorFactor * baseColorTexture * COLOR_0, all three multiplicative.
@@ -462,6 +463,10 @@ void initSurfaceInteraction(
         float3 bumpNormal = float3(bumpXY * material.normal_scale, bumpZ);
         float3x3 TBN = float3x3(worldTangent, worldBinormal, worldNormal);
         si.shading_normal = normalize(TBN * bumpNormal);
+        // What the map asked for, kept before anything bends it: the test in
+        // standard_pbr_eval compares the two, and comparing against the
+        // pre-bump normal instead would reject directions no map ever moved.
+        si.bump_normal = si.shading_normal;
 
         // At a grazing angle the map can turn the normal past the viewer, which
         // no lobe can answer: standard_pbr reads dot(N, wo) <= 0 as a dielectric

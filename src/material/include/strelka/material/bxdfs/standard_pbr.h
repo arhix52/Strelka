@@ -815,6 +815,25 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
         N = -N;
     }
 
+    // Cycles' opening test in bump_shadowing_term, which applies to evaluation
+    // whatever the lobe: when the normal the map asked for and the one that was
+    // shaded disagree about which side the viewer is on, there is nothing to
+    // evaluate. Such a hit is lit by its bounce alone and takes no next-event
+    // estimate, which is exactly why Cycles renders these pixels dimmer than a
+    // renderer that just shades them with the corrected normal.
+    //
+    // A no-op wherever nothing was corrected: bump_normal is shading_normal
+    // there, and the product reduces to a square.
+    {
+        const float cosNsI = dot(si.bump_normal, V);
+        const float cosNsN = dot(si.bump_normal, N);
+        const float cosNI = dot(N, V);
+        if (cosNsI * cosNsN * cosNI < 0.0f)
+        {
+            return result;
+        }
+    }
+
     float NdotV = dot(N, V);
     float NdotL = dot(N, wi);
 

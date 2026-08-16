@@ -106,6 +106,23 @@ struct SurfaceInteraction
     /// them -- and false is what zero-initialisation gives, so a caller that
     /// does not know about this field gets the behaviour it had before.
     bool    diffuse_faces_away;
+
+    /// The normal the map actually asked for, before valid_reflection.h bent it
+    /// to keep the reflection above the surface. Equal to `shading_normal`
+    /// wherever nothing was corrected, which is nearly everywhere.
+    ///
+    /// Kept because the correction has to stay honest about what it hid.
+    /// Cycles' bump_shadowing_term opens with
+    ///
+    ///     cosNsI * cosNsN * cosNI < 0 && (is_eval || is_diffuse) -> 0
+    ///
+    /// -- if the map's own normal and the corrected one disagree about which
+    /// side the viewer is on, evaluation returns nothing at all, glossy
+    /// included. So those pixels get no next-event estimate in Cycles and are
+    /// lit by the bounce alone, which is why they are dimmer there than a
+    /// renderer that simply shades them with the corrected normal. That
+    /// difference is worth 1.4% of 06_normalmap.
+    float3  bump_normal;
 };
 
 #endif // STRELKA_SURFACE_INTERACTION_H

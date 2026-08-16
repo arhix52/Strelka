@@ -43,109 +43,49 @@
 /// surface, and `geometricNormal` is expected to have been flipped to agree with
 /// it already. Returns `shadingNormal` untouched whenever the mirror direction
 /// already clears the surface, which is almost every shading point in a frame.
-DEVICE_FUNC float3 ensureValidSpecularReflection(float3 geometricNormal, float3 wo, float3 shadingNormal)
+DEVICE_FUNC float3 ensureValidSpecularReflection(float3 Ng, float3 I, float3 N)
 {
-    const float3 R = 2.0f * dot(shadingNormal, wo) * shadingNormal - wo;
+    const float3 R = 2.0f * dot(N, I) * N - I;
 
-    const float Iz = dot(wo, geometricNormal);
+    const float Iz = dot(I, Ng);
     if (Iz <= 0.0f)
     {
-        // The view ray is behind the geometry the caller said it was in front
-        // of. Nothing here can be trusted, and the geometric normal is the one
-        // answer that cannot be worse than the input.
-        return geometricNormal;
+        // Cycles asserts this away -- it only calls the function with a
+        // geometric normal already turned to face the ray. Guarded rather than
+        // assumed because the callers here are two backends, and the geometric
+        // normal is the one answer that cannot be worse than the input.
+        return Ng;
     }
 
-    // How shallow a reflection is still allowed to be. Cycles' bound: a
-    // reflection may always be at least as grazing as the ray that produced it,
-    // capped so that a head-on view still admits a nearly tangent one.
+    // A reflection may always be at least as grazing as the ray that produced
+    // it, capped so a head-on view still admits a nearly tangent one.
     const float threshold = fminf(0.9f * Iz, 0.01f);
-    if (dot(geometricNormal, R) >= threshold)
+    if (dot(Ng, R) >= threshold)
     {
-        return shadingNormal;
+        return N;
     }
 
-    // Work in the plane the correction has to happen in: geometricNormal as z,
-    // and the part of the shading normal perpendicular to it as x. The rotation
-    // is then two numbers instead of a quaternion.
-    const float NdotNg = dot(shadingNormal, geometricNormal);
-    const float3 tangentAxis = shadingNormal - NdotNg * geometricNormal;
-    const float tangentLen = length(tangentAxis);
-    if (tangentLen < 1e-8f)
-    {
-        // The shading normal is parallel to the geometric one, so there is no
-        // plane to rotate in -- and nothing to correct either.
-        return geometricNormal;
-    }
-    const float3 X = tangentAxis / tangentLen;
+    // The plane the correction happens in: Ng as z, and the part of N
+    // perpendicular to it as x, so the rotation is two numbers.
+    const float3 Xv = N - dot(N, Ng) * Ng;
+    const float xLen = length(Xv);
+    const float3 X = (xLen > 1e-8f) ? (Xv / xLen) : N;
 
-    const float Ix = dot(wo, X);
-    const float Ix2 = Ix * Ix;
-    const float Iz2 = Iz * Iz;
-    const float a = Ix2 + Iz2;
+    const float Ix = dot(I, X);
 
-    const float b2 = Ix2 * (a - threshold * threshold);
-    const float b = (b2 > 0.0f) ? sqrtf(b2) : 0.0f;
-    const float c = Iz * threshold + a;
+    const float a = Ix * Ix + Iz * Iz;
+    const float b = 2.0f * (a + Iz * threshold);
+    const float c = (threshold + Iz) * (threshold + Iz);
 
-    // The two normals whose reflection lands exactly on the threshold. Both are
-    // expressed by the square of their z component in the frame above.
-    const float fac = 0.5f / a;
-    const float N1_z2 = fac * (b + c);
-    const float N2_z2 = fac * (-b + c);
-    bool valid1 = (N1_z2 > 1e-5f) && (N1_z2 <= 1.0f + 1e-5f);
-    bool valid2 = (N2_z2 > 1e-5f) && (N2_z2 <= 1.0f + 1e-5f);
+    // The root that turns N the shorter way, which is the smaller correction.
+    const float disc = b * b - 4.0f * a * c;
+    const float root = (disc > 0.0f) ? sqrtf(disc) : 0.0f;
+    const float Nz2 = (Ix < 0.0f) ? 0.25f * (b + root) / a : 0.25f * (b - root) / a;
 
-    float Nx = 0.0f;
-    float Nz = 0.0f;
-    if (valid1 && valid2)
-    {
-        // Both are geometrically possible, so pick by what they do to the
-        // reflection rather than by which root came first.
-        const float N1x = sqrtf(fmaxf(0.0f, 1.0f - N1_z2));
-        const float N1z = sqrtf(fmaxf(0.0f, N1_z2));
-        const float N2x = sqrtf(fmaxf(0.0f, 1.0f - N2_z2));
-        const float N2z = sqrtf(fmaxf(0.0f, N2_z2));
+    const float Nx = sqrtf(fmaxf(0.0f, 1.0f - Nz2));
+    const float Nz = sqrtf(fmaxf(0.0f, Nz2));
 
-        const float R1 = 2.0f * (N1x * Ix + N1z * Iz) * N1z - Iz;
-        const float R2 = 2.0f * (N2x * Ix + N2z * Iz) * N2z - Iz;
-
-        valid1 = (R1 >= 1e-5f);
-        valid2 = (R2 >= 1e-5f);
-        if (valid1 && valid2)
-        {
-            // The shallower of the two is the smaller correction.
-            const bool takeFirst = (R1 < R2);
-            Nx = takeFirst ? N1x : N2x;
-            Nz = takeFirst ? N1z : N2z;
-        }
-        else if (valid1)
-        {
-            Nx = N1x;
-            Nz = N1z;
-        }
-        else if (valid2)
-        {
-            Nx = N2x;
-            Nz = N2z;
-        }
-        else
-        {
-            return geometricNormal;
-        }
-    }
-    else if (valid1 || valid2)
-    {
-        const float Nz2 = valid1 ? N1_z2 : N2_z2;
-        Nx = sqrtf(fmaxf(0.0f, 1.0f - Nz2));
-        Nz = sqrtf(fmaxf(0.0f, Nz2));
-    }
-    else
-    {
-        return geometricNormal;
-    }
-
-    return Nx * X + Nz * geometricNormal;
+    return Nx * X + Nz * Ng;
 }
 
 #endif // STRELKA_MATERIAL_VALID_REFLECTION_H

@@ -122,6 +122,7 @@ static __forceinline__ __device__ void initSurfaceInteraction(
     // Left to the normal-map branch alone it suppressed the diffuse lobe over
     // the whole frame -- 00_calibration came back at ratio 0.045.
     si.diffuse_faces_away = false;
+    si.bump_normal = si.shading_normal;
 
     // One transform for every slot of the material -- Blender drives every slot
     // from the same Mapping node, and the loader reads it that way.
@@ -154,6 +155,10 @@ static __forceinline__ __device__ void initSurfaceInteraction(
         const float3 bump =
             worldTangent * (bumpXY.x * scale) + worldBinormal * (bumpXY.y * scale) + worldNormal * bumpZ;
         si.shading_normal = safe_normalize(bump);
+        // What the map asked for, kept before anything bends it: the test in
+        // standard_pbr_eval compares the two, and comparing against the
+        // pre-bump normal instead would reject directions no map ever moved.
+        si.bump_normal = si.shading_normal;
 
         // At a grazing angle the map can turn the normal past the viewer, and a
         // surface facing away from the camera is one no lobe can answer:
