@@ -2794,6 +2794,22 @@ void OptiXRender::render(Buffer* output)
 
     currView.mCamMatrices = camera.matrices;
 
+    // The pose the previous frame actually rendered with, taken before the latch
+    // below overwrites it.
+    //
+    // Reprojection reads it a few hundred lines further down, to build
+    // params.prevWorldToClip. Reading mPrevView *there* gets this frame's own
+    // camera, because the latch has already run -- so prevWorldToClip equalled
+    // worldToClip on every frame and every motion vector came out zero. A
+    // temporal denoiser then reprojects a moving camera onto itself: the history
+    // it blends in belongs to a different part of the scene.
+    //
+    // STRELKA_DENOISE_AUDIT measured it directly, and had been failing on it:
+    // after an orbit step, "motion camera moved nonzero=0.0% max=0.00 px" and
+    // "AUDIT FAIL camera motion missing from motion vectors". The same step now
+    // reports 100% of pixels carrying motion, max 11.48 px.
+    const View prevView = mPrevView;
+
     if (glm::any(glm::notEqual(currView.mCamMatrices.perspective, mPrevView.mCamMatrices.perspective)) ||
         glm::any(glm::notEqual(currView.mCamMatrices.view, mPrevView.mCamMatrices.view)))
     {
@@ -2940,7 +2956,7 @@ void OptiXRender::render(Buffer* output)
     // row major and glm is column major, hence the transpose -- the same one the
     // two matrices above take.
     const glm::mat4 worldToClip = camera.matrices.perspective * camera.matrices.view;
-    const glm::mat4 prevWorldToClip = mPrevView.mCamMatrices.perspective * mPrevView.mCamMatrices.view;
+    const glm::mat4 prevWorldToClip = prevView.mCamMatrices.perspective * prevView.mCamMatrices.view;
     memcpy(params.worldToClip, glm::value_ptr(glm::transpose(worldToClip)), sizeof(params.worldToClip));
     memcpy(params.prevWorldToClip, glm::value_ptr(glm::transpose(prevWorldToClip)), sizeof(params.prevWorldToClip));
 

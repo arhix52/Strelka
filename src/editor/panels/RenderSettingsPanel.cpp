@@ -1,7 +1,7 @@
 #include "../EditorApp.h"
 #include "../editor_camera_exposure.h"
+#include "../editor_denoiser_ui.h"
 #include "../editor_frame_budget.h"
-#include "../../render/metal/render_resolution.h"
 
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
@@ -321,109 +321,141 @@ void EditorApp::drawRenderSettingsPanel()
             }
         }
 
-        // One choice, not two checkboxes.
+        // One choice, not two checkboxes -- and this backend's choices, not the
+        // other backend's.
         //
-        // The two effects are alternatives -- MetalFX has a spatial scaler and a
-        // temporal denoised scaler, and a frame goes through one or the other --
-        // but as separate toggles they offered four states, two of which meant the
-        // same thing and none of which said so. The render scale stays a separate
-        // control because it applies to both: at 1.00 the denoiser only denoises.
+        // Denoising and upscaling are alternatives on both: MetalFX sends a frame
+        // through the spatial scaler or the temporal denoised one, and the OptiX
+        // plan has upscaling imply denoising because nothing in it scales without
+        // also running the network. As separate toggles they offered four states,
+        // two of which meant the same thing and none of which said so.
         //
-        // Always available now: the wavefront tracer writes the guides the
-        // denoiser reads, and it is the only tracer.
-        const bool denoiseAvailable = true;
-        // Keep the setting and the list in step. Selecting the megakernel while
-        // denoising left the mode index pointing past the end of a now shorter
-        // list -- the combo showed whatever happened to be there, the next click
-        // picked something the user did not ask for, and the setting stayed on
-        // while the renderer ignored it. Turning it off here means the control and
-        // the renderer always agree about what is running.
-        if (!denoiseAvailable && m_settingsManager->getAs<bool>("render/pt/denoise"))
-        {
-            m_settingsManager->setAs<bool>("render/pt/denoise", false);
-            m_render->resetTemporalHistory();
-        }
+        // Which states exist, what they are called, whether the render scale is a
+        // slider or follows from the mode, and what the fallback warning means
+        // are all the backend's answer to give -- see editor_denoiser_ui.h. This
+        // panel used to hard-code MetalFX's answers and show them over OptiX,
+        // where the name was wrong and the scale slider did nothing.
+        const editor_denoiser::Ui fx = editor_denoiser::uiFor(m_render->denoiserKind());
+        const float requestedScale = m_settingsManager->getAs<float>("render/pt/upscaleFactor");
         const bool denoiseSetting = m_settingsManager->getAs<bool>("render/pt/denoise");
         const bool upscaleSetting = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
-        if (!mMetalFxModeInitialized)
+        // Keep the remembered index and what is actually running in step, every
+        // frame rather than once. A mode index outliving the list it indexed is
+        // how the combo came to show one thing while the renderer ran another: it
+        // displayed whatever sat at that index, and the next click picked
+        // something nobody asked for. The settings move without the panel too --
+        // the frame-budget button, the benchmark drivers, STRELKA_DENOISE.
+        if (fx.modeCount > 0 &&
+            (!mDenoiseModeInitialized || mDenoiseModeIndex >= fx.modeCount ||
+             !editor_denoiser::settingsMatchMode(fx, mDenoiseModeIndex, denoiseSetting, upscaleSetting,
+                                                 requestedScale)))
         {
-            mMetalFxMode = editor_metal_fx::modeFromSettings(denoiseSetting, upscaleSetting);
-            mMetalFxModeInitialized = true;
-        }
-        int fxMode = static_cast<int>(mMetalFxMode);
-        const char* const fxItems[] = { "Off", "Spatial upscale", "Temporal denoise" };
-        const int fxItemCount = denoiseAvailable ? 3 : 2;
-        if (ImGui::Combo("MetalFX", &fxMode, fxItems, fxItemCount))
-        {
-            mMetalFxMode = static_cast<editor_metal_fx::Mode>(fxMode);
-            const bool wantDenoise = mMetalFxMode == editor_metal_fx::Mode::TemporalDenoise;
-            m_settingsManager->setAs<bool>("render/pt/denoise", wantDenoise);
-            // The denoiser is a scaler too: it needs the reduced-resolution render
-            // whenever the scale asks for one, and nothing else does.
-            const float factor = m_settingsManager->getAs<float>("render/pt/upscaleFactor");
-            m_settingsManager->setAs<bool>("render/pt/enableUpscale",
-                                          editor_metal_fx::shouldUpscale(mMetalFxMode, factor));
-            m_render->resetTemporalHistory();
-        }
-        if (!denoiseAvailable)
-        {
-            ImGui::SameLine();
-            ImGui::BeginDisabled();
-            ImGui::TextUnformatted("(denoise needs the wavefront tracer)");
-            ImGui::EndDisabled();
+            mDenoiseModeIndex = editor_denoiser::modeIndexFromSettings(fx, denoiseSetting, upscaleSetting);
+            mDenoiseModeInitialized = true;
         }
 
-        if (fxMode == 2)
+        if (!editor_denoiser::hasDenoiser(fx))
         {
-            bool playbackBlur =
-                m_settingsManager->getAs<bool>(
-                    "render/pt/denoisePlaybackMotionBlur");
-            if (ImGui::Checkbox("Path-traced playback blur", &playbackBlur))
-            {
-                m_settingsManager->setAs<bool>(
-                    "render/pt/denoisePlaybackMotionBlur", playbackBlur);
-                m_render->resetTemporalHistory();
-            }
-            ImGui::SameLine();
-            ImGui::BeginDisabled();
-            ImGui::TextUnformatted(
-                playbackBlur ? "(uses SPP per frame)" : "(stable shutter-close guides)");
-            ImGui::EndDisabled();
+            ImGui::TextDisabled("This backend has no denoiser");
         }
-
-        if (fxMode != 0)
+        else
         {
-            auto factor = m_settingsManager->getAs<float>("render/pt/upscaleFactor");
-            if (ImGui::SliderFloat("PT scale inside preview", &factor, 0.25f, 1.0f, "%.2f"))
+            if (ImGui::BeginCombo(fx.title, editor_denoiser::modeAt(fx, mDenoiseModeIndex).label))
             {
-                m_settingsManager->setAs<float>("render/pt/upscaleFactor", factor);
-                m_settingsManager->setAs<bool>("render/pt/enableUpscale",
-                                              editor_metal_fx::shouldUpscale(mMetalFxMode, factor));
-                m_render->resetTemporalHistory();
+                for (int n = 0; n < fx.modeCount; n++)
+                {
+                    const bool is_selected = (mDenoiseModeIndex == n);
+                    if (ImGui::Selectable(fx.modes[n].label, is_selected) && mDenoiseModeIndex != n)
+                    {
+                        mDenoiseModeIndex = n;
+                        m_settingsManager->setAs<bool>("render/pt/denoise", fx.modes[n].denoise);
+                        // The denoiser is a scaler too: it needs the reduced-
+                        // resolution render whenever the mode asks for one, and
+                        // nothing else does.
+                        m_settingsManager->setAs<bool>(
+                            "render/pt/enableUpscale", editor_denoiser::shouldUpscale(fx, n, requestedScale));
+                        m_render->resetTemporalHistory();
+                    }
+                    if (is_selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
             }
-            ImGui::SameLine();
-            ImGui::BeginDisabled();
-            const char* const scaleStatus = factor < 1.0f
-                                                ? "(rendering below display resolution)"
-                                                : (mMetalFxMode == editor_metal_fx::Mode::Spatial
-                                                       ? "(inactive at 1:1; lower scale to enable)"
-                                                       : "(denoising at 1:1)");
-            ImGui::TextUnformatted(scaleStatus);
-            ImGui::EndDisabled();
+
+            const editor_denoiser::Mode fxMode = editor_denoiser::modeAt(fx, mDenoiseModeIndex);
+            const bool denoiserOn = fxMode.denoise || fxMode.upscale;
+            if (denoiserOn && fx.modeHint != nullptr)
+            {
+                ImGui::TextDisabled("%s", fx.modeHint);
+            }
+
+            // Temporal is a property of the network on OptiX rather than a mode of
+            // its own: both the denoise-only and the 2x model have a temporal
+            // variant, so it is one switch instead of a doubled list.
+            if (fx.temporalToggle && denoiserOn)
+            {
+                bool temporal = m_settingsManager->getAs<uint32_t>("render/pt/upscaleMode") == 1u;
+                if (ImGui::Checkbox("Temporal", &temporal))
+                {
+                    m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", temporal ? 1u : 0u);
+                    m_render->resetTemporalHistory();
+                }
+                ImGui::SameLine();
+                ImGui::BeginDisabled();
+                ImGui::TextUnformatted(temporal ? "(reprojects the previous frame)" : "(each frame denoised alone)");
+                ImGui::EndDisabled();
+            }
+
+            if (fx.playbackMotionBlurToggle && fxMode.denoise)
+            {
+                bool playbackBlur =
+                    m_settingsManager->getAs<bool>(
+                        "render/pt/denoisePlaybackMotionBlur");
+                if (ImGui::Checkbox("Path-traced playback blur", &playbackBlur))
+                {
+                    m_settingsManager->setAs<bool>(
+                        "render/pt/denoisePlaybackMotionBlur", playbackBlur);
+                    m_render->resetTemporalHistory();
+                }
+                ImGui::SameLine();
+                ImGui::BeginDisabled();
+                ImGui::TextUnformatted(
+                    playbackBlur ? "(uses SPP per frame)" : "(stable shutter-close guides)");
+                ImGui::EndDisabled();
+            }
+
+            if (denoiserOn && fx.freeRenderScale)
+            {
+                float factor = requestedScale;
+                if (ImGui::SliderFloat("PT scale inside preview", &factor, 0.25f, 1.0f, "%.2f"))
+                {
+                    m_settingsManager->setAs<float>("render/pt/upscaleFactor", factor);
+                    m_settingsManager->setAs<bool>(
+                        "render/pt/enableUpscale", editor_denoiser::shouldUpscale(fx, mDenoiseModeIndex, factor));
+                    m_render->resetTemporalHistory();
+                }
+                ImGui::SameLine();
+                ImGui::BeginDisabled();
+                const char* const scaleStatus = factor < 1.0f
+                                                    ? "(rendering below display resolution)"
+                                                    : (fxMode.denoise ? "(denoising at 1:1)"
+                                                                      : "(inactive at 1:1; lower scale to enable)");
+                ImGui::TextUnformatted(scaleStatus);
+                ImGui::EndDisabled();
+            }
         }
 
         const uint32_t displayWidth = m_settingsManager->getAs<uint32_t>("render/width");
         const uint32_t displayHeight = m_settingsManager->getAs<uint32_t>("render/height");
-        const bool resolutionUpscale = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
-        const render_resolution::Resolution resolution =
-            render_resolution::resolve(displayWidth, displayHeight, resolutionUpscale,
-                                       m_settingsManager->getAs<float>("render/pt/upscaleFactor"));
-        ImGui::TextDisabled("PT internal: %u x %u", resolution.pathTraceWidth, resolution.pathTraceHeight);
-        ImGui::TextDisabled("Preview output: %u x %u", resolution.outputWidth, resolution.outputHeight);
+        const editor_denoiser::Resolution previewRes =
+            editor_denoiser::resolution(fx, mDenoiseModeIndex, requestedScale, displayWidth, displayHeight);
+        ImGui::TextDisabled("PT internal: %u x %u", previewRes.pathTraceWidth, previewRes.pathTraceHeight);
+        ImGui::TextDisabled("Preview output: %u x %u", previewRes.outputWidth, previewRes.outputHeight);
         if (m_render->denoiserFallbackActive())
         {
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
-                               "Temporal denoiser ratio unsupported; using spatial upscale");
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "%s", fx.fallbackMessage);
         }
         const double lastGpuMs = m_render->getLastRenderTimeMs();
         if (lastGpuMs > editor_frame_budget::kInteractiveBudgetMs)
@@ -431,24 +463,54 @@ void EditorApp::drawRenderSettingsPanel()
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
                                "Last PT frame: %.0f ms (interactive budget: %.0f ms)", lastGpuMs,
                                editor_frame_budget::kInteractiveBudgetMs);
+            // The scale the frame was *actually* traced at, not the one the
+            // slider holds: the budget divides a measured GPU time by a pixel
+            // count, and on a fixed-ratio backend the slider is not that count.
+            const float tracedScale = editor_denoiser::appliedScale(fx, mDenoiseModeIndex, requestedScale);
             const editor_frame_budget::RenderSettingsSnapshot current{
                 displayWidth,
                 displayHeight,
-                resolutionUpscale,
-                m_settingsManager->getAs<float>("render/pt/upscaleFactor"),
+                tracedScale < 1.0f,
+                tracedScale,
             };
             const editor_frame_budget::FrameSample sample = editor_frame_budget::sampleFrom(lastGpuMs, current);
-            const float suggestedScale = editor_frame_budget::recommendedScale(sample, displayWidth, displayHeight);
-            const std::string label = fmt::format("Lower PT scale to {:.2f}", suggestedScale);
-            if (ImGui::Button(label.c_str()))
+            if (fx.freeRenderScale)
             {
-                m_settingsManager->setAs<bool>("render/pt/denoise", false);
-                m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
-                m_settingsManager->setAs<float>("render/pt/upscaleFactor", suggestedScale);
-                m_settingsManager->setAs<bool>("render/pt/enableUpscale", true);
-                mMetalFxMode = editor_metal_fx::Mode::Spatial;
-                mMetalFxModeInitialized = true;
-                m_render->resetTemporalHistory();
+                const float suggestedScale = editor_frame_budget::recommendedScale(sample, displayWidth, displayHeight);
+                // Scaling, not denoising: the cheapest way to buy frame time, and
+                // the one that does not depend on a history the camera is about to
+                // invalidate anyway.
+                const int scalingMode = editor_denoiser::modeIndexFromSettings(fx, false, true);
+                const std::string label = fmt::format("Lower PT scale to {:.2f}", suggestedScale);
+                if (ImGui::Button(label.c_str()))
+                {
+                    m_settingsManager->setAs<bool>("render/pt/denoise", fx.modes[scalingMode].denoise);
+                    m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
+                    m_settingsManager->setAs<float>("render/pt/upscaleFactor", suggestedScale);
+                    m_settingsManager->setAs<bool>(
+                        "render/pt/enableUpscale", editor_denoiser::shouldUpscale(fx, scalingMode, suggestedScale));
+                    mDenoiseModeIndex = scalingMode;
+                    mDenoiseModeInitialized = true;
+                    m_render->resetTemporalHistory();
+                }
+            }
+            else if (editor_denoiser::hasDenoiser(fx))
+            {
+                // Nothing to lower: this backend's only lever is its fixed ratio,
+                // so the offer is to switch it on rather than to pick a number.
+                const int scalingMode = editor_denoiser::modeIndexFromSettings(fx, true, true);
+                const std::string label = fmt::format("Switch to \"{}\"", fx.modes[scalingMode].label);
+                ImGui::BeginDisabled(mDenoiseModeIndex == scalingMode);
+                if (ImGui::Button(label.c_str()))
+                {
+                    m_settingsManager->setAs<bool>("render/pt/denoise", fx.modes[scalingMode].denoise);
+                    m_settingsManager->setAs<bool>(
+                        "render/pt/enableUpscale", editor_denoiser::shouldUpscale(fx, scalingMode, requestedScale));
+                    mDenoiseModeIndex = scalingMode;
+                    mDenoiseModeInitialized = true;
+                    m_render->resetTemporalHistory();
+                }
+                ImGui::EndDisabled();
             }
         }
 

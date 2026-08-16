@@ -1,4 +1,5 @@
 #include "EditorApp.h"
+#include "editor_denoiser_ui.h"
 #include "editor_frame_budget.h"
 #include "editor_camera_framing.h"
 #include "editor_document.h"
@@ -168,8 +169,9 @@ void EditorApp::drawFrameBudgetModal()
             m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
             m_settingsManager->setAs<float>("render/pt/upscaleFactor", m_pendingRecommendedScale);
             m_settingsManager->setAs<bool>("render/pt/enableUpscale", true);
-            mMetalFxMode = editor_metal_fx::Mode::Spatial;
-            mMetalFxModeInitialized = true;
+            // Which entry of the denoiser combo that is depends on the backend;
+            // let the panel work it back out from the settings just written.
+            mDenoiseModeInitialized = false;
             applyPreviewResolution(m_pendingPreviewWidth, m_pendingPreviewHeight);
             m_frameBudgetConfirmOpen = false;
             ImGui::CloseCurrentPopup();
@@ -370,13 +372,21 @@ void EditorApp::requestPreviewResolution(uint32_t width, uint32_t height)
         return;
     }
 
+    // The fraction of the output the tracer is really launching at, which is not
+    // the upscale factor on a backend whose upscaler has one fixed ratio: OptiX
+    // reads the enable bit and takes exactly half. Dividing a measured frame time
+    // by the wrong pixel count mispredicts the next one by that ratio squared.
     const bool enableUpscale = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
-    const float upscaleFactor = m_settingsManager->getAs<float>("render/pt/upscaleFactor");
-    const editor_frame_budget::RenderSettingsSnapshot current{ currentWidth, currentHeight, enableUpscale,
-                                                                upscaleFactor };
+    const editor_denoiser::Ui fx = editor_denoiser::uiFor(m_render->denoiserKind());
+    const int denoiseMode = editor_denoiser::modeIndexFromSettings(
+        fx, m_settingsManager->getAs<bool>("render/pt/denoise"), enableUpscale);
+    const float tracedScale = editor_denoiser::appliedScale(
+        fx, denoiseMode, m_settingsManager->getAs<float>("render/pt/upscaleFactor"));
+    const editor_frame_budget::RenderSettingsSnapshot current{ currentWidth, currentHeight, tracedScale < 1.0f,
+                                                                tracedScale };
     const editor_frame_budget::FrameSample sample =
         editor_frame_budget::sampleFrom(m_render->getLastRenderTimeMs(), current);
-    const editor_frame_budget::RenderSettingsSnapshot proposed{ width, height, enableUpscale, upscaleFactor };
+    const editor_frame_budget::RenderSettingsSnapshot proposed{ width, height, tracedScale < 1.0f, tracedScale };
     const editor_frame_budget::Assessment assessment = editor_frame_budget::assess(sample, proposed);
     if (!assessment.exceedsBudget)
     {
@@ -592,7 +602,14 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/sortRays", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/textureLod", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/guidePrimaryHit", 0);
-    m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
+    // 0 = the single-image model, 1 = the temporally stable one. Off by default:
+    // a temporal model reusing a history it has no motion vectors for produces a
+    // smear. Overridable from the environment because it is the switch the
+    // denoise audit has to flip to measure reprojection at all -- with no way to
+    // turn it on headlessly, the motion vectors it grades feed nothing, which is
+    // how they stayed identically zero through several audit runs.
+    m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode",
+                                       envUint("STRELKA_UPSCALE_MODE", 0) != 0 ? 1u : 0u);
     if (envFlag("STRELKA_UPSCALE"))
     {
         const float f = envFloat("STRELKA_UPSCALE", 1.0f);
@@ -701,8 +718,7 @@ void EditorApp::restartRendererAtSafeScale()
     m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
     m_settingsManager->setAs<float>("render/pt/upscaleFactor", 0.25f);
     m_settingsManager->setAs<bool>("render/pt/enableUpscale", true);
-    mMetalFxMode = editor_metal_fx::Mode::Spatial;
-    mMetalFxModeInitialized = true;
+    mDenoiseModeInitialized = false;
 
     // Drop every raw pointer and retained frame before destroying the failed
     // renderer. The commit feedback has already completed, so the destructor can
@@ -3246,10 +3262,17 @@ void EditorApp::runDenoiseAudit()
         // and the display is still showing the last one. That reads as a pass on
         // every other check, and it is exactly what a path that forgets to encode
         // its scaler looks like.
-        // Compared only against a mode that should look different.
+        // Compared only against a mode that should look different -- and what
+        // "different" means is the backend's answer, not the request's. OptiX's
+        // upscaling model has exactly one ratio, so 0.25, 0.50 and 0.75 all trace
+        // at half and hand back byte-identical frames; keyed on the requested
+        // factor that read as "this mode wrote nothing" and put two permanent
+        // failures in an audit whose value depends on having none.
+        const editor_denoiser::Ui fx = editor_denoiser::uiFor(m_render->denoiserKind());
+        const int fxMode = editor_denoiser::modeIndexFromSettings(fx, m.denoise, m.upscale);
         const std::string modeKey =
-            fmt::format("{}|{}|{:.2f}|{}x{}", m.tracer, (int)m.denoise,
-                        m.upscale ? m.factor : 1.0f, m.w, m.h);
+            fmt::format("{}|{}|{:.2f}|{}x{}", m.tracer, (int)editor_denoiser::modeAt(fx, fxMode).denoise,
+                        editor_denoiser::appliedScale(fx, fxMode, m.factor), m.w, m.h);
         const bool stale = got && prevModeImage.valid() && modeKey != prevModeKey &&
                            prevModeImage.px.size() == img.px.size() &&
                            std::memcmp(prevModeImage.px.data(), img.px.data(),

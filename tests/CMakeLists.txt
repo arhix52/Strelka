@@ -39,7 +39,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_viewport_input.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_viewport_layout.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_screenshot_semantics.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_metal_fx_ui.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_denoiser_ui.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_frame_budget.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_document.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_camera_exposure.cpp

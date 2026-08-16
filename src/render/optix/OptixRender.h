@@ -472,6 +472,11 @@ public:
         mResetTemporalHistory = true;
     }
 
+    DenoiserKind denoiserKind() const override
+    {
+        return DenoiserKind::eOptixAi;
+    }
+
     bool denoiserFallbackActive() const override
     {
         return mDenoiserFallback;

@@ -86,6 +86,27 @@ public:
     {
         return false;
     }
+    /// Which denoiser this backend actually has.
+    ///
+    /// Not a detail the renderer needs -- each backend only ever runs its own --
+    /// but the editor has one panel for both, and a panel that cannot ask ends up
+    /// naming whichever backend was written first. It named MetalFX on OptiX, and
+    /// offered MetalFX's free render-scale slider for a model that has exactly
+    /// two ratios.
+    enum class DenoiserKind : uint32_t
+    {
+        eNone = 0, ///< this backend denoises nothing
+        eMetalFx, ///< MetalFX spatial / temporal scalers
+        eOptixAi ///< the OptiX AI denoiser, see optix_denoise_plan.h
+    };
+    virtual DenoiserKind denoiserKind() const
+    {
+        return DenoiserKind::eNone;
+    }
+
+    /// True when the denoiser the settings asked for could not run and the frame
+    /// fell back to something else. What "something else" is differs by backend,
+    /// so the message belongs to whoever is drawing it.
     virtual bool denoiserFallbackActive() const
     {
         return false;

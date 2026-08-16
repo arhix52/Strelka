@@ -6,7 +6,6 @@
 #include <strelka/render/render.h>
 
 #include "CameraController.h"
-#include "editor_metal_fx.h"
 #include "editor_viewport_layout.h"
 
 #include <glm/glm.hpp>
@@ -72,8 +71,13 @@ private:
     editor_viewport::PresentationMode m_viewportPresentation = editor_viewport::PresentationMode::Fit;
     uint32_t mPresentedPreviewWidth = 0;
     uint32_t mPresentedPreviewHeight = 0;
-    editor_metal_fx::Mode mMetalFxMode = editor_metal_fx::Mode::Off;
-    bool mMetalFxModeInitialized = false;
+    /// Which entry of the *current backend's* denoiser list is selected. The list
+    /// is not the same on both backends, so this is only meaningful next to the
+    /// Ui it was resolved against; clearing the flag makes the panel re-derive it
+    /// from settings, which is what everything outside the panel does after
+    /// writing those settings itself.
+    int mDenoiseModeIndex = 0;
+    bool mDenoiseModeInitialized = false;
 
     bool m_documentDirty = false;
     // Snapshot taken at beginSceneLoad so a failed/cancelled open can restore
