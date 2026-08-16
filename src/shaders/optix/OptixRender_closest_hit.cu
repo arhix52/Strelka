@@ -704,8 +704,13 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
     const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(interpolateAttrib(p0, p1, p2, barycentrics));
     const float3 object_normal = interpolateAttrib(n0, n1, n2, barycentrics);
     float3 worldNormal = normalize(optixTransformNormalFromObjectToWorldSpace(object_normal));
+    // safe_normalize, not normalize: a zero/near-zero-area triangle (a thin
+    // cutout leaf/needle card collapsed by an exporter or LOD) makes cross()
+    // return (0,0,0), and normalize((0,0,0)) is NaN -- which the eNormal
+    // debug view writes straight to the display buffer with no guard, as
+    // isolated black dots on foliage.
     float3 geomNormal = cross(p1 - p0, p2 - p0);
-    geomNormal = normalize(optixTransformNormalFromObjectToWorldSpace(geomNormal));
+    geomNormal = safe_normalize(optixTransformNormalFromObjectToWorldSpace(geomNormal));
     const float3 worldTangent =
         normalize(optixTransformNormalFromObjectToWorldSpace(interpolateAttrib(t0, t1, t2, barycentrics)));
     // Without TANGENT.w the bitangent points the wrong way and every normal map
@@ -757,7 +762,11 @@ static __forceinline__ __device__ SurfaceHitData fillCubicCurveGeomData(const Hi
     // interpolators work in object space
     hitPoint = optixTransformPointFromWorldToObjectSpace(hitPoint); // interpolators work in object space
     const float3 objectNormal = surfaceNormal(interpolator, u, hitPoint);
-    float3 worldNormal = normalize(optixTransformNormalFromObjectToWorldSpace(objectNormal));
+    // safe_normalize: a tapered strand tip (radius -> 0) or a near-axial ray
+    // collapses surfaceNormal()'s radial vector toward (0,0,0), and
+    // normalize((0,0,0)) is NaN -- exactly the failure mode a groom hits far
+    // more often than a triangle mesh does.
+    float3 worldNormal = safe_normalize(optixTransformNormalFromObjectToWorldSpace(objectNormal));
     const float3 worldTangent =
         normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, u)));
     const float3 worldBinormal = cross(worldNormal, worldTangent);
@@ -799,7 +808,9 @@ static __forceinline__ __device__ SurfaceHitData fillLinearCurveGeomData(const H
     float3 hitPoint = getHitPoint();
     hitPoint = optixTransformPointFromWorldToObjectSpace(hitPoint);
     const float3 objectNormal = surfaceNormal(interpolator, u, hitPoint);
-    float3 worldNormal = normalize(optixTransformNormalFromObjectToWorldSpace(objectNormal));
+    // safe_normalize: see fillCubicCurveGeomData -- a tapered/near-axial hit
+    // collapses this to (0,0,0), and normalize((0,0,0)) is NaN.
+    float3 worldNormal = safe_normalize(optixTransformNormalFromObjectToWorldSpace(objectNormal));
     const float3 worldTangent =
         normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, u)));
     const float3 worldBinormal = cross(worldNormal, worldTangent);
