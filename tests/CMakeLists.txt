@@ -46,6 +46,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_camera_exposure.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_camera_framing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_overlay.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_camera_dump.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_frame_jitter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_features.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_cache_key.cpp

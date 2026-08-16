@@ -180,6 +180,10 @@ private:
     /// Dolly / resize the active camera so the selection fills the frame.
     void frameSelectionInView();
     void drawSelectionGizmo(Camera& cam);
+    /// Print the viewport as a StrelkaCLI config, so an angle that shows a
+    /// defect can be handed to someone else and re-rendered rather than
+    /// described. See camera_dump.h.
+    void dumpCameraSettings();
     void drawLoadingOverlay();
     void showAlert(const std::string& message);
     void drawAlertModal();

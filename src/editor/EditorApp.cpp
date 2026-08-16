@@ -4,6 +4,7 @@
 #include "editor_camera_framing.h"
 #include "editor_document.h"
 #include "editor_screenshot.h"
+#include "camera_dump.h"
 
 #include "imgui_impl_glfw.h"
 #include "imgui_internal.h" // DockBuilder / window settings lookup
@@ -4192,6 +4193,75 @@ bool EditorApp::computeSelectionWorldBounds(glm::float3& outMin, glm::float3& ou
     return false;
 }
 
+void EditorApp::dumpCameraSettings()
+{
+    if (!m_scene || m_scene->getCameraCount() == 0)
+    {
+        STRELKA_WARNING("Nothing to dump: no scene camera");
+        return;
+    }
+
+    oka::Camera& cam = m_scene->getCamera(m_selectedCamera);
+
+    oka::CameraDumpState s;
+    s.scenePath = m_sceneFile;
+    s.cameraIndex = static_cast<int>(m_selectedCamera);
+    s.width = m_settingsManager->getAs<uint32_t>("render/width");
+    s.height = m_settingsManager->getAs<uint32_t>("render/height");
+
+    // A target one unit down the view axis. The CLI turns position and target
+    // back into a view matrix, and any distance along the same ray gives the
+    // same one, so the nearest is also the one that keeps the most digits.
+    const glm::float3 front = cam.getFront();
+    const glm::float3 target = cam.position + front;
+    const glm::float3 up = cam.getUp();
+    for (int i = 0; i < 3; ++i)
+    {
+        s.position[i] = cam.position[i];
+        s.target[i] = target[i];
+        s.up[i] = up[i];
+    }
+    s.orientation[0] = cam.mOrientation.x;
+    s.orientation[1] = cam.mOrientation.y;
+    s.orientation[2] = cam.mOrientation.z;
+    s.orientation[3] = cam.mOrientation.w;
+
+    s.orthographic = (cam.projection == oka::Camera::ProjectionType::orthographic);
+    s.fov = cam.fov;
+    s.xmag = cam.xmag;
+    s.ymag = cam.ymag;
+    s.znear = cam.znear;
+    s.zfar = cam.zfar;
+    s.useDof = cam.useDof;
+    s.focalDistance = cam.focalDistance;
+    s.fStopDof = cam.fStopDof;
+
+    s.spp = m_settingsManager->getAs<uint32_t>("render/pt/sppTotal");
+    s.sppPerLaunch = m_settingsManager->getAs<uint32_t>("render/pt/spp");
+    s.maxDepth = m_settingsManager->getAs<uint32_t>("render/pt/depth");
+    s.samplerType = m_settingsManager->getAs<uint32_t>("render/pt/samplerType");
+    s.debugView = m_settingsManager->getAs<uint32_t>("render/pt/debug");
+    s.denoise = m_settingsManager->getAs<bool>("render/pt/denoise");
+    s.upscale = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
+    s.textureDownscale = m_settingsManager->getAs<uint32_t>("render/texture/downscale");
+
+    s.tonemapperType = m_settingsManager->getAs<uint32_t>("render/pt/tonemapperType");
+    s.gamma = m_settingsManager->getAs<float>("render/post/gamma");
+    s.filmIso = m_settingsManager->getAs<float>("render/post/tonemapper/filmIso");
+    s.fStop = m_settingsManager->getAs<float>("render/post/tonemapper/fStop");
+    s.shutterSpeed = m_settingsManager->getAs<float>("render/post/tonemapper/shutterSpeed");
+
+    const std::string dump = oka::formatCameraDump(s);
+    // Straight to stdout as well as to the log: the point is to be copied out of
+    // a terminal, and the log's prefixes land on every line of the block.
+    std::fputs(dump.c_str(), stdout);
+    std::fflush(stdout);
+    ImGui::SetClipboardText(dump.c_str());
+
+    STRELKA_INFO("ACTION dump_camera camera={} pos=[{} {} {}] fov={}", m_selectedCamera, cam.position.x,
+                 cam.position.y, cam.position.z, cam.fov);
+}
+
 void EditorApp::frameSelectionInView()
 {
     glm::float3 worldMin(0.0f);
@@ -4584,6 +4654,18 @@ void EditorApp::drawUI()
                                        m_selectedLightId != (uint32_t)-1;
         if (ImGui::MenuItem("Frame Selection", "F", false, canFrameSelection && !m_isLoading))
             frameSelectionInView();
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Debug"))
+    {
+        if (ImGui::MenuItem("Dump camera settings", nullptr, false, !m_isLoading))
+            dumpCameraSettings();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        {
+            ImGui::SetTooltip("Print this viewport to the console as a StrelkaCLI .toml,\n"
+                              "and copy it to the clipboard, so the exact frame can be\n"
+                              "re-rendered headlessly.");
+        }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Window"))
