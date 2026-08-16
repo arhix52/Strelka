@@ -412,10 +412,45 @@ extern "C" __global__ void __raygen__rg()
                 continue;
             }
 
+            // Russian roulette on the largest channel the path still carries,
+            // capped at one. Metal's `q`, arrived at from the other side.
+            //
+            // This used to be `clamp(luminance, 0.05, 0.95)`, and both ends of
+            // that were paying for themselves in variance:
+            //
+            //   * The ceiling killed strong paths. A path whose throughput is at
+            //     or above one -- which after four bounces in a bright interior
+            //     is most of what is left -- was killed 5% of the time anyway and
+            //     the survivors scaled by 1/0.95. Unbiased, and pure added
+            //     variance, charged again at every bounce: over the twelve
+            //     remaining at depth 16, 46% of such paths die and the survivors
+            //     come back carrying 1.85x. That is a firefly generator with no
+            //     upside, and `q = min(max_component, 1)` never kills a path that
+            //     carries a full unit of light.
+            //
+            //   * Luminance is the wrong norm for a coloured path. A throughput
+            //     of (0, 0, 5) -- what a blue-tinted glass leaves -- has
+            //     luminance 0.36, so it was killed 64% of the time and the
+            //     survivors multiplied by 2.8, while carrying five units of blue.
+            //     That is where the bathroom's *coloured* speckle came from, and
+            //     why clamp_indirect = 8 halved the frame's variance.
+            //
+            // Measured on the iso bathroom at 256 spp, graded against a 4096-spp
+            // render of this backend on the pixels where it is locally flat:
+            // relative noise 0.184 before, 0.175 after, converged mean unmoved at
+            // 0.2169. So it is worth having and it is not what makes that scene
+            // noisy -- half of that frame's variance is in samples above 8, which
+            // `clamp_indirect = 8` removes at the cost of 6.5% of the mean, and
+            // the roulette is not where they come from. See docs/open-defects.md.
+            // The floor is kept -- Metal has none -- because without it a path
+            // whose largest channel is 1e-6 survives one time in a million
+            // carrying 1e6, and at 0.05 the same path survives one time in twenty
+            // carrying 20. Both are unbiased; the second has a variance.
             if (prd.depth > 3)
             {
-                const float lum = dot(prd.throughput, make_float3(0.2126f, 0.7152f, 0.0722f));
-                const float p = clamp(lum, 0.05f, 0.95f);
+                const float maxChannel =
+                    fmaxf(prd.throughput.x, fmaxf(prd.throughput.y, prd.throughput.z));
+                const float p = clamp(maxChannel, 0.05f, 1.0f);
                 if (random<SampleDimension::eRussianRoulette>(prd.sampler) > p)
                 {
                     break;
