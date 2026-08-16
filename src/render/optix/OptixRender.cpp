@@ -3024,7 +3024,14 @@ void OptiXRender::render(Buffer* output)
 
     const uint32_t totalSpp = settings.getAs<uint32_t>("render/pt/sppTotal");
     const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");
-    const int32_t leftSpp = totalSpp - getSharedContext().mSubframeIndex;
+    // Clamped to zero rather than left negative: an AOV debug view forces a
+    // launch even once mSubframeIndex has reached totalSpp (see below), which
+    // pushes mSubframeIndex one step past totalSpp every frame it stays
+    // selected. Left signed, that makes leftSpp negative and samplesThisLaunch
+    // -- stored into a uint32_t -- wraps to ~4.29 billion, which becomes the
+    // raygen's per-pixel sample-loop trip count and hangs the launch (and the
+    // editor, which synchronizes on it every frame).
+    const int32_t leftSpp = std::max<int32_t>(0, totalSpp - getSharedContext().mSubframeIndex);
     // if accumulation is off then launch selected samples per pixel
     uint32_t samplesThisLaunch = enableAccumulation ? std::min((int32_t)samplesPerLaunch, leftSpp) : samplesPerLaunch;
     // not to trace rays if there is no geometry
