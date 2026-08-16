@@ -27,8 +27,13 @@ answer, or an asset/converter note that does not need Chaos.
 | 6 | Two-sided different back face | material model / glTF | design first; one kids-bedroom material only |
 | 7 | Bath water is a dish, not a volume | asset, not code | remodel in Blender; bath water R/G against Chaos PNG is a check, not a driver |
 | ~~8~~ | ~~OptiX accumulates in tonemapped space~~ | done — see Closed | `00_calibration` bit-identical at `spp_per_launch` 1 and 512 |
+| ~~9~~ | ~~OptiX had no atmospheric scattering at all~~ | done — see Closed | `fog_check.py` both directions within 1% of Cycles at matched depth |
+| 10 | A volume vertex costs a bounce Cycles does not charge | `OptixRender.cu` raygen loop / `wavefront.metal`; both backends | the fog probe reads 1.00 at `max_depth` 2, not 3, against a `max_bounces` 2 reference |
+| 11 | The iso bathroom's firefly tail | estimator, and an asset the machine does not have | 256 spp noise near the ladder's rows rather than 4x them |
 
-6 is smaller. 7 is not a renderer bug.
+6 is smaller. 7 is not a renderer bug. 10 is a convention to settle, not a bug to
+find: it is measured, it is the same on both backends, and picking a side changes
+every volumetric render.
 
 Build the bathroom / kids bedroom when an entry asks for it:
 
@@ -95,7 +100,150 @@ nested-dielectric counters should drop on that mesh.
 
 ---
 
+## 10. A volume vertex costs a bounce Cycles does not charge
+
+Both backends charge a scattering event inside a medium a unit of `max_depth` --
+Metal's comment says why ("a medium with no depth budget of its own is a path
+that wanders forever") and the OptiX port follows it. Cycles, with the same
+number in `max_bounces`, gets one more vertex out of the path.
+
+Measured on `tools/feature_tests/fog_check.py`, which is a box of fog, a low sun
+and a grey floor, rendered twice -- once looking into the sun and once away from
+it, because an inverted phase function is too dim in the first and far too bright
+in the second and either alone reads as a brightness mistake. Cycles reference at
+`max_bounces = volume_bounces = 2`, Strelka at 512 spp:
+
+| `max_depth` | into the sun | away from it |
+|---|---|---|
+| 2 | 0.925 | 0.694 |
+| **3** | **1.009** | **1.001** |
+| 4 | 1.036 | 1.169 |
+
+Both directions land on the reference at 3, and the offset is exactly one vertex
+rather than a weight: the same probe with the medium removed reads 0.973 at
+`max_depth` 2, so with no volume in the path the two conventions already agree.
+
+This is why it is an entry and not a fix: the depth budget is the contract
+between the two backends and every scene's TOML, so moving it re-times and
+re-grades every volumetric render in the tree. What is not in doubt is the
+transport -- at matched depth the fog agrees with Cycles to 1% in both
+directions, which is the thing the probe was built to answer.
+
+**Decide**: whether `max_depth` counts vertices or scattering events, on both
+backends at once. **Verify**: the table above collapses to one column.
+
+---
+
+## 11. The iso bathroom carries a firefly tail, and this machine cannot finish the comparison
+
+Reported as "even Metal is cleaner by 256 samples". Measured on OptiX at 1024²,
+depth 16, 256 spp, graded against a 4096-spp render of the same backend on the
+pixels where it is locally flat (`tools/parity/noise_check.py`): relative noise
+**0.175**, against 0.084 for the ladder's noisiest row at twice the samples. It
+is a real complaint.
+
+What it is not: one broken mechanism. Sweeping `clamp_indirect` moves it smoothly,
+with no knee anywhere --
+
+| `clamp_indirect` | off | 128 | 64 | 32 | 16 | 8 | 4 |
+|---|---|---|---|---|---|---|---|
+| noise | 0.175 | 0.145 | 0.134 | 0.119 | 0.103 | 0.087 | 0.074 |
+| mean / converged | 1.000 | 0.998 | 0.994 | 0.984 | 0.965 | 0.939 | 0.904 |
+
+-- so samples above 128 carry 0.2% of the frame's energy and 15% of its variance,
+and it keeps going all the way down. That is a broad heavy tail, which is what a
+room of twelve transmissive materials, twelve bounded volumes and nine subsurface
+walks lit by three small rect lights produces. Ablations rule out the obvious
+suspects individually: `subsurface_iterations = 0` makes it slightly worse,
+`ris_candidates = 8` moves it 1%, `estimator_mode = 1` (no NEE) makes it 2.6x
+worse.
+
+One real cause was found and fixed -- the Russian roulette differed from Metal's
+in two ways that both manufacture fireflies (see Closed). It was worth 0.184 ->
+0.175, which is to say it is not the answer here.
+
+**Why this entry cannot be closed on Linux.** The scene's environment is
+`abandoned_hall_01_4k.exr` at a `/Users/ikryukov/...` path, and there is no copy
+on this machine, so every measurement above was taken on a bathroom lit by three
+rect lights and no environment -- which is not the render the report is about. A
+stand-in environment at the same intensity puts the noise at 0.139. There is no
+Metal here to compare against and no `.blend` to build a Cycles reference from.
+
+**Verify, on a machine that has the assets**: the same `noise_check.py` split run
+on both backends at 256 spp against a converged render of each, so the claim
+becomes a number rather than a look. If OptiX is genuinely the noisier one, the
+next thing to read is `connectToLight`'s solid-angle pdf against Metal's on a
+grazing rect light, which is the one estimator this scene leans on hardest and
+the ladder's single-light rows are too easy to expose.
+
+---
+
 ## Closed (kept for the measurement, not the work)
+
+### OptiX rendered the pine forest with no atmosphere at all
+
+**Fixed.** `atmosphere` -- the sidecar block carrying a homogeneous haze, which
+`oka::Scene` has loaded all along -- was read by `MetalFrameUniforms.mm` and by
+nothing on the OptiX side. Not degraded, not approximated: `grep -rl atmosphere
+src/` returned Metal, the scene container and the loader, and no CUDA at all. The
+pine forest rendered with a hard, dark treeline where the reference has haze.
+
+Ported from `src/shaders/metal/fog.h` as `src/shaders/optix/fog.h` -- a slab
+rather than a bounded volume, for the reason that file gives -- with three
+integration points: a free-flight draw against the segment in
+`__closesthit__radiance`, the same draw in `__miss__ms` for the ray that was on
+its way to the sky, and the haze's transmittance folded into `traceOcclusion` so
+a shadow ray is not a hole in the fog. `__miss__ms` moved into the closest-hit
+translation unit to get there: a scattering event needs next-event estimation, and
+OptiX modules do not share device functions.
+
+Validated three ways rather than by looking at it:
+
+* `tools/feature_tests/fog_check.py`, the controlled probe -- 1.009 into the sun
+  and 1.001 away from it against Cycles, at the matched depth entry 10 explains.
+  Both directions matters: an inverted phase function passes one and fails the
+  other, and at g = 0.8 the forward lobe is 730x the backward one.
+* The pine forest against the Metal render of the same TOML, by horizontal band:
+  OptiX / Metal is 0.999 in the sky and 1.006 in the treeline, which is where the
+  haze does its work. Against the Cycles render of the original, OptiX reads 0.696
+  and 0.683 in those bands and Metal 0.697 and 0.679 -- the two backends agree
+  with each other far more tightly than either agrees with Cycles, which is the
+  shape a correct port has.
+* The original `.blend` in Blender 5.2, which is where the sidecar's numbers were
+  checked rather than assumed. The fog box is 208.82 x 208.82 x 29.15 with a
+  world-space ceiling at y = 14.576, and Cycles' Volume Scatter has no absorption
+  -- its extinction is Density x Color and every event scatters. So density
+  0.004 x colour 0.8 = the sidecar's 0.0032 with albedo 1, and `height` 14.576 is
+  the box's ceiling and not, as it looks, half of its 29.15. `collect_atmosphere`
+  in `export_scene.py` is right.
+
+What the pine forest still does not agree with Cycles about is a whole-image
+factor: 0.696 in the sky and 0.683 in the treeline, and Metal reads 0.697 and
+0.679 there. Both backends, equally, so it is the environment bake or the exposure
+block rather than the renderer. In the dark understory OptiX is the closer of the
+two (0.815 against Metal's 0.611).
+
+### Russian roulette differed from Metal's, in the direction that makes fireflies
+
+**Fixed.** OptiX rolled `p = clamp(luminance(throughput), 0.05, 0.95)`; Metal
+rolls `q = min(max_component(throughput), 1)`. Two differences, both paying in
+variance:
+
+* The 0.95 ceiling killed strong paths. A throughput at or above one -- most of
+  what survives four bounces in a bright interior -- was killed 5% of the time
+  anyway and the survivors scaled by 1/0.95. Unbiased, pure added variance, and
+  charged again at every bounce: over the twelve remaining at depth 16, 46% of
+  such paths die and the survivors come back carrying 1.85x.
+* Luminance is the wrong norm for a coloured path. A throughput of (0, 0, 5) --
+  what blue-tinted glass leaves -- has luminance 0.36, so it was killed 64% of
+  the time and the survivors multiplied by 2.8 while carrying five units of blue.
+  That is where the bathroom's *coloured* speckle came from.
+
+Worth 0.184 -> 0.175 on the bathroom with the converged mean unmoved at 0.2169,
+and nothing on the feature ladder, which has no path long enough to reach the
+roulette with a coloured throughput. Kept from the old form: the 0.05 floor, which
+Metal does not have, because without it a path whose largest channel is 1e-6
+survives one time in a million carrying 1e6.
 
 ### "OptiX is noisier per sample than Metal" was a one-row film offset
 
