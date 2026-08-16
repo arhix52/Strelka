@@ -26,6 +26,7 @@
 #include <sutil/vec_math_adv.h>
 
 #include <strelka/material/bsdf.h>
+#include <strelka/material/valid_reflection.h>
 #include <strelka/material/volume.h>
 
 #include "../optix_device_utils.h"
@@ -115,6 +116,12 @@ static __forceinline__ __device__ void initSurfaceInteraction(
     si.bitangent = worldBinormal;
     si.wo = -rayDir;
     si.front_face = dot(geomNormal, -rayDir) > 0.0f;
+    // Set here rather than only where it becomes true: the closest-hit program
+    // declares its SurfaceInteraction without an initialiser, so a field this
+    // function does not write on every path is read as whatever the stack held.
+    // Left to the normal-map branch alone it suppressed the diffuse lobe over
+    // the whole frame -- 00_calibration came back at ratio 0.045.
+    si.diffuse_faces_away = false;
 
     // One transform for every slot of the material -- Blender drives every slot
     // from the same Mapping node, and the loader reads it that way.
@@ -147,6 +154,30 @@ static __forceinline__ __device__ void initSurfaceInteraction(
         const float3 bump =
             worldTangent * (bumpXY.x * scale) + worldBinormal * (bumpXY.y * scale) + worldNormal * bumpZ;
         si.shading_normal = safe_normalize(bump);
+
+        // At a grazing angle the map can turn the normal past the viewer, and a
+        // surface facing away from the camera is one no lobe can answer:
+        // standard_pbr reads dot(N, wo) <= 0 as a dielectric exit, an opaque
+        // material has no such lobe, and the hit absorbs into a black pixel that
+        // has lost its direct lighting as well, because the closest-hit program
+        // terminates on absorb above next-event estimation. On the pine forest's
+        // mossy rock that is 2.4% of the frame in solid patches.
+        //
+        // Corrected here, at the one place the shading normal is produced, so
+        // bsdf_sample and bsdf_eval cannot be handed different normals -- and
+        // the diffuse lobe is switched off with it, because the correction is
+        // for the lobes that reflect. See SurfaceInteraction::diffuse_faces_away.
+        //
+        // Against the geometric normal turned to agree with the view ray: the
+        // correction is about the surface the reflection has to clear, and on a
+        // back-face hit that surface is the side being looked at.
+        if (dot(si.shading_normal, si.wo) <= 0.0f)
+        {
+            const float3 facingGeom =
+                (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
+            si.shading_normal = ensureValidSpecularReflection(facingGeom, si.wo, si.shading_normal);
+            si.diffuse_faces_away = true;
+        }
     }
 
     // Coverage. The base-colour texture's alpha channel is linear even when its

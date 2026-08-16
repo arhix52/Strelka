@@ -88,6 +88,24 @@ struct SurfaceInteraction
 
     // -- Flags / state ------------------------------------------------------
     bool    front_face;         // True when the ray hit the front face
+
+    /// True when the normal map turned the shading normal past the viewer and
+    /// `shading_normal` is the corrected one rather than the one the map asked
+    /// for. See valid_reflection.h.
+    ///
+    /// Carried because the correction is only meant for the lobes that reflect.
+    /// Cycles applies it to its glossy closures alone and leaves the diffuse
+    /// closure on the map's own normal, where dot(N, wo) < 0 makes it evaluate
+    /// to nothing; this renderer has one shading normal for every lobe, so the
+    /// same outcome is reached by suppressing the diffuse response instead.
+    /// Correcting the normal for the diffuse lobe as well is not a small
+    /// difference: it lights the whole surface rather than only its highlight,
+    /// and took 06_normalmap from 1.061 to 1.091 against Cycles.
+    ///
+    /// False on every hit that did not need correcting, which is nearly all of
+    /// them -- and false is what zero-initialisation gives, so a caller that
+    /// does not know about this field gets the behaviour it had before.
+    bool    diffuse_faces_away;
 };
 
 #endif // STRELKA_SURFACE_INTERACTION_H

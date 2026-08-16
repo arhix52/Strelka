@@ -12,6 +12,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_anisotropy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_dielectric_exit.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_opaque_back_face.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_valid_reflection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_thin_walled.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_hair_chiang.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_ior_stack.cpp

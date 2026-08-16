@@ -79,6 +79,22 @@ DEVICE_FUNC float specular_lobe_scale(const THREAD_REF SurfaceInteraction& si)
     return 1.0f - si.transmission * (1.0f - si.metallic);
 }
 
+// Whether the diffuse lobe has a response to give at all.
+//
+// Zero once the normal map has turned the shading normal past the viewer and
+// valid_reflection.h has corrected it: the correction exists for the lobes that
+// reflect, and the diffuse one is defined by the normal the map asked for, which
+// faces away. Cycles reaches the same place from the other side -- it corrects
+// its glossy closures only, and its diffuse closure returns nothing for a normal
+// behind the view ray.
+//
+// Exactly one on every hit that needed no correction, so this is a no-op for all
+// but a handful of grazing pixels, and the ladder does not move for it.
+DEVICE_FUNC float diffuse_lobe_scale(const THREAD_REF SurfaceInteraction& si)
+{
+    return si.diffuse_faces_away ? 0.0f : 1.0f;
+}
+
 // Reflectance at a transmissive interface, coloured when a thin film sits on it.
 //
 // The film is applied in the specular lobe, and a transmissive material does not
@@ -220,7 +236,7 @@ DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const THREAD_REF SurfaceInteraction&
     const float dt = saturate(si.diffuse_transmission);
     const float diffuse_base = dielectric_weight * (1.0f - si.transmission);
 
-    w.diffuse      = diffuse_base * (1.0f - dt) * luminance(si.albedo);
+    w.diffuse      = diffuse_base * (1.0f - dt) * luminance(si.albedo) * diffuse_lobe_scale(si);
     w.diffuse      = fmaxf(w.diffuse, 0.0f);
 
     // Sheen rides the cosine-sampled lobe instead of getting one of its own.
@@ -230,7 +246,7 @@ DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const THREAD_REF SurfaceInteraction&
     // require is that the lobe stays reachable on a dark fabric, which the max
     // guarantees; for a material without sheen this is exactly a no-op.
     const float sheen_lum = si.sheen * luminance(si.sheen_color);
-    w.diffuse = fmaxf(w.diffuse, diffuse_base * (1.0f - dt) * sheen_lum);
+    w.diffuse = fmaxf(w.diffuse, diffuse_base * (1.0f - dt) * sheen_lum * diffuse_lobe_scale(si));
 
     w.diffuse_transmission = diffuse_base * dt * luminance(si.diffuse_transmission_color);
     w.diffuse_transmission = fmaxf(w.diffuse_transmission, 0.0f);
@@ -369,7 +385,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
 
         // Evaluate all lobes for the sampled direction (MIS)
         // Diffuse contribution
-        float3 f_diffuse = si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) *
+        float3 f_diffuse = diffuse_lobe_scale(si) * si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) *
                            (1.0f - saturate(si.diffuse_transmission));
 
         // Specular contribution
@@ -481,7 +497,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         float3 f_spec = F * (D * G2 / (4.0f * NdotV * NdotL + 1e-10f)) *
                         ggx_energy_compensation(F0, si.roughness, NdotV);
 
-        float3 f_diffuse = si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) *
+        float3 f_diffuse = diffuse_lobe_scale(si) * si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) *
                            (1.0f - saturate(si.diffuse_transmission));
 
         float3 f_cc  = make_float3(0.0f);
@@ -745,7 +761,7 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInterac
         float3 f_spec = F * (D * G2_main / (4.0f * NdotV * NdotL + 1e-10f)) *
                         ggx_energy_compensation(F0, si.roughness, NdotV);
 
-        float3 f_diffuse = si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) *
+        float3 f_diffuse = diffuse_lobe_scale(si) * si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) *
                            (1.0f - saturate(si.diffuse_transmission));
 
         float D_cc    = ggx_ndf(alpha_cc, NdotH);
@@ -861,7 +877,7 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
             return result;
 
         // Diffuse
-        float3 f_diffuse = si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) *
+        float3 f_diffuse = diffuse_lobe_scale(si) * si.albedo * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) *
                            (1.0f - saturate(si.diffuse_transmission));
 
         // Specular

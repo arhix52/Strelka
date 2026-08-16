@@ -18,6 +18,7 @@
 #include <strelka/material/ior_stack.h>
 #include <strelka/material/volume.h>
 #include <strelka/material/bsdf.h>
+#include <strelka/material/valid_reflection.h>
 
 using namespace metal;
 using namespace raytracing;
@@ -421,6 +422,12 @@ void initSurfaceInteraction(
     const float2 tuv = applyTextureTransform(uv, material);
     si.wo             = -rayDir;
     si.front_face     = dot(geomNormal, -rayDir) > 0.0f;
+    // Written on every path, not only where it becomes true: wavefront.metal
+    // declares its SurfaceInteraction without an initialiser, and a field this
+    // function leaves alone is read as whatever the stack held. On the OptiX
+    // side that suppressed the diffuse lobe over a whole frame before it was
+    // caught -- 00_calibration came back at ratio 0.045.
+    si.diffuse_faces_away = false;
 
     // Sample base color texture. glTF composes base colour as
     // baseColorFactor * baseColorTexture * COLOR_0, all three multiplicative.
@@ -455,6 +462,20 @@ void initSurfaceInteraction(
         float3 bumpNormal = float3(bumpXY * material.normal_scale, bumpZ);
         float3x3 TBN = float3x3(worldTangent, worldBinormal, worldNormal);
         si.shading_normal = normalize(TBN * bumpNormal);
+
+        // At a grazing angle the map can turn the normal past the viewer, which
+        // no lobe can answer: standard_pbr reads dot(N, wo) <= 0 as a dielectric
+        // exit and an opaque material has no such lobe, so the hit absorbs into
+        // a black pixel. The same correction and the same diffuse suppression as
+        // the OptiX path, from the same header, so the two backends do not
+        // disagree about a surface. See valid_reflection.h.
+        if (dot(si.shading_normal, si.wo) <= 0.0f)
+        {
+            const float3 facingGeom =
+                (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
+            si.shading_normal = ensureValidSpecularReflection(facingGeom, si.wo, si.shading_normal);
+            si.diffuse_faces_away = true;
+        }
     }
 
     // Sample emission texture
