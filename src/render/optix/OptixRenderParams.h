@@ -128,6 +128,28 @@ struct AovSample
     float pad2;
 };
 
+/// One path's radiance-cache bookkeeping, held per pixel rather than per path.
+///
+/// One visit per path, at most. What the path gathers after the visit, divided
+/// by its throughput there, is that vertex's outgoing radiance, and that is what
+/// the deposit at the end of the raygen loop hands the cache.
+///
+/// It sits in its own buffer, allocated only when the cache is on, because in
+/// PerRayData it was 28 bytes of continuation stack on every path in every
+/// scene -- including the great majority that never turn the cache on at all.
+/// Metal has always kept these three fields in a SharcPathState buffer, for a
+/// different reason: its shade and deposit kernels are separate dispatches.
+struct SharcPathState
+{
+    /// prd.radiance at the moment of the visit, so the difference at the end of
+    /// the path is what the path gathered *after* it.
+    float3 radianceAtVisit;
+    /// 1 / throughput at the visit, floored per channel.
+    float3 invThroughput;
+    /// SHARC_NO_ENTRY until this path visits a voxel.
+    uint32_t index;
+};
+
 struct Params
 {
     uint32_t subframe_index;
@@ -135,10 +157,22 @@ struct Params
     uint32_t maxSampleCount;
     float4* image;
     float4* accum;
+    /// The first-event split. Null unless somebody asked for it -- see
+    /// Params::writeSplitAov.
     float4* diffuse;
     uint16_t* diffuseCounter;
     float4* specular;
     uint16_t* specularCounter;
+    /// Whether to accumulate the diffuse/specular split of the first event.
+    ///
+    /// Off by default, and the buffers are not allocated when it is: the raygen
+    /// used to write four scattered records per pixel per launch -- two float4s
+    /// and two counters -- that nothing on the host ever read back. Measured on
+    /// the iso bathroom, that is a fifth of the launch's global store traffic
+    /// spent on an image no caller asks for, and those stores are the ones that
+    /// come back at 19 sectors per request because shader reordering has already
+    /// scattered the lanes across the film. See docs/open-perf.md.
+    bool writeSplitAov;
     uint32_t image_width;
     uint32_t image_height;
 
@@ -261,6 +295,9 @@ struct Params
     // here is read when it is zero -- which is what makes the default a
     // byte-for-byte no-op rather than a path that happens to agree.
     SharcEntry* sharcEntries;
+    /// One record per pixel. Null, and never touched, when sharcCapacity is 0 --
+    /// which is a compile-time constant, so the whole cache path folds away.
+    SharcPathState* sharcPath;
     uint32_t sharcCapacity; ///< entries; a power of two, 0 = off
     uint32_t sharcMinSamples; ///< deposits a voxel needs before it may be read
     uint32_t sharcDepth; ///< first bounce allowed to read the cache
@@ -331,33 +368,66 @@ enum class EventType: uint8_t
 #define IOR_STAT_ESCAPED_INSIDE 2
 #define IOR_STAT_COUNT 3
 
+/// Everything one path carries between traversals.
+///
+/// The raygen holds it across `optixInvoke`, so it is what sizes the pipeline's
+/// continuation stack -- byte for byte, measured: 208 bytes of this gave a
+/// 576-byte stack, 464 gave 832. That stack is per thread and it is local
+/// memory, so this struct's size sets the whole launch's local working set, and
+/// it is the steepest cost curve in the backend: 256 bytes of ballast the path
+/// never reads measured 39-61% slower across the three scenes in
+/// docs/open-perf.md.
+///
+/// Hence the layout. The small fields are the smallest type that holds their
+/// documented bound and they sit together rather than between the float3s, which
+/// is worth more than it looks: interleaved, each one cost four bytes plus its
+/// own padding.
+/// How many payload registers the pipeline is compiled with. Two, holding a
+/// packed pointer to PerRayData -- everything else the path carries is behind
+/// that pointer.
+///
+/// It is tempting to raise this and carry the hot state in the payload instead,
+/// on the reading that payload values are registers. They are not, across a
+/// traversal: OptiX preserves them in the continuation stack, so fifteen extra
+/// words measured as sixty-four *more* bytes of stack rather than sixty-four
+/// fewer, and 2.5-7.7% slower. Measured, reverted, written down. See
+/// docs/open-perf.md.
+#define STRELKA_PAYLOAD_COUNT 2
+
+/// Everything one path carries between traversals.
+///
+/// The raygen holds it across `optixInvoke`, so it is what sizes the pipeline's
+/// continuation stack -- byte for byte, measured: 208 bytes of it gave a
+/// 576-byte stack, 464 gave 832. That stack is per thread and it is local
+/// memory, so this struct's size sets the whole launch's local working set, and
+/// it is the steepest cost curve in the backend. At 1920x1080 and depth 8, 64
+/// bytes of ballast the path never reads measured 1.2% slower on the iso
+/// bathroom, 3.4% on the kids bedroom and 6.0% on the pine forest.
+///
+/// It is *not* worth moving the hot half of this into payload registers. That
+/// was built and measured: fifteen payload words in place of 64 bytes of struct
+/// grew the continuation stack from 480 to 544 bytes and cost 2.5 / 3.4 / 7.7%.
+/// OptiX preserves payload across a traversal by putting it in that same stack,
+/// so the move relocates the bytes rather than removing them, and adds the
+/// packing. See docs/open-perf.md.
+///
+/// Hence the layout. The small fields are bit fields in one word and they sit
+/// together rather than between the float3s, which is worth more than it looks:
+/// interleaved, each one cost four bytes plus its own padding.
+///
+/// Two things are deliberately *not* here. `sampler.sampleIdx` is the path's
+/// sample index, so nothing duplicates it; and which pixel the path belongs to
+/// is answered by launchPixelIndex(), because every program runs under the
+/// launch index of the ray that started it.
 struct PerRayData
 {
-    SamplerState sampler;
-    uint32_t linearPixelIndex;
-    uint32_t sampleIndex;
-    uint32_t depth; // bounce
-    /// How many transparent surfaces this path has already passed straight
-    /// through. Counted separately from `depth` because a cutout is coverage,
-    /// not scattering -- charging it a bounce empties the path budget on a
-    /// canopy before any light transport happens.
-    uint32_t passthrough;
+    // --- Touched every bounce --------------------------------------------
     float3 radiance;
     float3 throughput;
+    /// The *next* ray, written by the shading program and read by the raygen
+    /// loop. Not the current one -- that is optixGetWorldRayOrigin/Direction.
     float3 origin;
     float3 dir;
-    IorStack iorStack;
-    bool specularBounce;
-    /// Whether the vertex this ray left performed a next-event estimate. False
-    /// under estimatorMode 1, and false when the scene has nothing to connect to;
-    /// in both cases the BSDF strategy owns the whole contribution and the miss /
-    /// light-hit shaders must not apply a MIS weight against an estimate that was
-    /// never made.
-    bool neeDone;
-    /// Set by the closest hit when the ray went straight through the surface it
-    /// hit. The raygen loop reads it to decide whether the segment counted as a
-    /// bounce, and clears it before the next trace.
-    bool passedThrough;
     float lastBsdfPdf;
     /// How far the ray has travelled since the vertex `lastBsdfPdf` was measured
     /// at. Zero for every path that has not passed through anything.
@@ -370,18 +440,63 @@ struct PerRayData
     /// origin - direction * this. Metal's PathState carries the same field for
     /// the same reason.
     float misDistance;
-    EventType firstEventType;
+
+    // --- Counters and flags: one word ------------------------------------
+    //
+    // Bit fields rather than nine separate members. Laid out as bytes and bools
+    // these cost twelve bytes of the record and its padding; the widths below
+    // are each field's documented bound and they add to exactly 32 bits. The
+    // mask-and-shift this compiles to is free here -- the launch runs at 14% of
+    // SM throughput, so instructions are not what it is short of.
+    /// Bounce. `params.max_depth` is clamped to 255 so that the closest hit's
+    /// "stop this path" idiom -- setting depth to max_depth, which the raygen
+    /// then increments once more -- cannot overflow nine bits.
+    uint32_t depth : 9;
+    /// Steps the current walk has taken. Reset when a medium is entered, and
+    /// bounded by Params::subsurfaceIterations, itself clamped to
+    /// MEDIUM_MAX_STEPS (256).
+    uint32_t mediumStep : 9;
+    /// How many transparent surfaces this path has already passed straight
+    /// through. Counted separately from `depth` because a cutout is coverage,
+    /// not scattering -- charging it a bounce empties the path budget on a
+    /// canopy before any light transport happens. Bounded by
+    /// PATH_PASSTHROUGH_MAX (32), so six bits.
+    uint32_t passthrough : 6;
+    /// An EventType, held as bits because a bit field of enum type is not one
+    /// storage unit with the rest on every compiler this builds under. Read and
+    /// written through firstEventType() / setFirstEventType().
+    uint32_t firstEventBits : 3;
+    uint32_t specularBounce : 1;
+    /// Whether the vertex this ray left performed a next-event estimate. False
+    /// under estimatorMode 1, and false when the scene has nothing to connect to;
+    /// in both cases the BSDF strategy owns the whole contribution and the miss /
+    /// light-hit shaders must not apply a MIS weight against an estimate that was
+    /// never made.
+    uint32_t neeDone : 1;
+    /// Set by the closest hit when the ray went straight through the surface it
+    /// hit. The raygen loop reads it to decide whether the segment counted as a
+    /// bounce, and clears it before the next trace.
+    uint32_t passedThrough : 1;
+    /// Whether this path is the one that writes the pixel's guide record.
+    uint32_t writeAov : 1;
+    /// Set once the guide record for this pixel has been written, so the bounce
+    /// after the first describable surface cannot overwrite it.
+    uint32_t aovDone : 1;
+
+    // --- Sampling ---------------------------------------------------------
+    //
+    /// `sampler.depth` is the sampler's dimension offset. It is not `depth`
+    /// above: the closest hit overloads that one as the path's stop signal, and
+    /// unifying them would move the sampler's dimension when a path terminates.
+    SamplerState sampler;
     /// Where in the image this path's camera ray actually went, y down and in
     /// pixels, jitter included. A motion vector is the difference between this
     /// and where the same surface point sat last frame; differencing against the
     /// pixel centre instead leaves the jitter inside every vector, which is a
     /// subpixel wobble on every pixel of a perfectly still image.
     float2 pixelSample;
-    /// Whether this path is the one that writes the pixel's guide record.
-    bool writeAov;
-    /// Set once the guide record for this pixel has been written, so the bounce
-    /// after the first describable surface cannot overwrite it.
-    bool aovDone;
+
+    IorStack iorStack;
 
     // --- Participating media ---------------------------------------------
     /// Which medium the path is inside: 0 for none, otherwise the material index
@@ -390,31 +505,26 @@ struct PerRayData
     /// A camera that starts inside a translucent object is not handled -- there
     /// is nothing to tell the path which medium it is in.
     uint32_t medium;
-    /// Steps the current walk has taken. Reset when a medium is entered, and
-    /// bounded by Params::subsurfaceIterations; past that the walk stops drawing
-    /// free flights and the next surface is its boundary.
-    uint32_t mediumStep;
     /// The walk's single-scattering albedo, resolved at the boundary the path
     /// entered through, because that is the last place a texture exists: inside
     /// the medium there is no surface to sample. A bounded volume has no entry
     /// surface to have textured and keeps the material's constant instead.
     float3 mediumAlbedo;
-    // --- Radiance cache bookkeeping --------------------------------------
-    //
-    // One visit per path, at most. What the path gathers after the visit,
-    // divided by its throughput there, is this vertex's outgoing radiance, and
-    // that is what the deposit at the end of the raygen loop hands the cache.
-    // Metal keeps the same three fields in a SharcPathState buffer because its
-    // shade kernel and its deposit kernel are different dispatches; here the
-    // path lives across the whole loop and they are payload.
-    /// SHARC_NO_ENTRY until this path visits a voxel.
-    uint32_t sharcIndex;
-    /// prd.radiance at the moment of the visit, so the difference at the end of
-    /// the path is what the path gathered *after* it.
-    float3 sharcRadianceAtVisit;
-    /// 1 / throughput at the visit, floored per channel.
-    float3 sharcInvThroughput;
+
+    DEVICE_FUNC EventType firstEventType() const
+    {
+        return (EventType)firstEventBits;
+    }
+    DEVICE_FUNC void setFirstEventType(EventType e)
+    {
+        firstEventBits = (uint32_t)e;
+    }
 };
+
+/// The size is the point, so it is asserted rather than left to be rediscovered.
+/// A field added here is not free -- read the measurement above before adding
+/// one.
+static_assert(sizeof(PerRayData) == 136, "PerRayData sizes the continuation stack; see docs/open-perf.md");
 
 enum RayType
 {

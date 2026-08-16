@@ -207,6 +207,8 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.risCandidates = (uint32_t)*v;
     if (auto v = tbl["render"]["estimator_mode"].value<int64_t>())
         cfg.estimatorMode = (uint32_t)*v;
+    if (auto v = tbl["render"]["split_aov"].value<bool>())
+        cfg.splitAov = *v;
     if (auto v = tbl["render"]["sharc"].value<bool>())
         cfg.sharc = *v;
     if (auto v = tbl["render"]["sharc_depth"].value<int64_t>())
@@ -409,6 +411,10 @@ void HeadlessApp::populateSettings()
     // An HDRI carries radiance; normalising it away makes physical parity
     // impossible. See loadEnvMap().
     m_settings->setAs<bool>("render/env/autoCalibrate", false);
+    // The diffuse/specular split of the first event. Off by default: nothing
+    // reads it back, and writing it costs four scattered records per pixel per
+    // launch. See docs/open-perf.md.
+    m_settings->setAs<bool>("render/pt/splitAov", m_config.splitAov);
     // Spatially hashed radiance cache. Off by default: it trades a little
     // bias for a large cut in path length, which is a choice a scene makes.
     m_settings->setAs<bool>("render/pt/sharc", m_config.sharc);

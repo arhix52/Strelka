@@ -46,7 +46,7 @@ TEST_CASE("leaving one of two equal-priority media removes that one")
     ior_stack_pop(s, kShared, /*water*/ 3u);
 
     CHECK(s.top == 0);
-    CHECK(s.entries[0].material_index == 7u);
+    CHECK(ior_entry_material(s.entries[0]) == 7u);
     CHECK(ior_stack_current_material(s) == 7u);
     CHECK(ior_stack_current_ior(s) == doctest::Approx(1.60f));
 }
@@ -71,14 +71,14 @@ TEST_CASE("popping by priority alone would take the wrong one")
     int topmost_by_priority = -1;
     for (int i = s.top; i >= 0; --i)
     {
-        if (s.entries[i].priority == kShared)
+        if (ior_entry_priority(s.entries[i]) == kShared)
         {
             topmost_by_priority = i;
             break;
         }
     }
     REQUIRE(topmost_by_priority == 1);
-    CHECK(s.entries[topmost_by_priority].material_index != 3u);
+    CHECK(ior_entry_material(s.entries[topmost_by_priority]) != 3u);
 }
 
 TEST_CASE("an exit with nothing on the stack leaves it empty rather than negative")
@@ -119,4 +119,30 @@ TEST_CASE("a full stack drops the innermost push rather than corrupting itself")
     }
     CHECK(s.top == IOR_STACK_SIZE - 1);
     CHECK(ior_stack_current_material(s) == IOR_STACK_SIZE - 1u);
+}
+
+// The stack is carried per path on both backends -- inside OptiX's PerRayData,
+// where every byte is a byte of per-thread continuation stack, and in Metal's
+// per-pixel side table, which is sized from sizeof(IorStack) at run time. The
+// packing that makes an entry eight bytes instead of twelve is therefore a
+// layout contract, not an implementation detail, and these are the two things it
+// has to keep true.
+TEST_CASE("packed entries are eight bytes and round-trip both fields")
+{
+    CHECK(sizeof(IorStackEntry) == 8u);
+    CHECK(sizeof(IorStack) == 8u * IOR_STACK_SIZE + sizeof(int));
+
+    IorStack s;
+    ior_stack_init(s);
+    // The extremes of each field: the largest priority the top eight bits hold
+    // and the largest material index the bottom twenty-four do.
+    ior_stack_push(s, 255u, 1.42f, IOR_ENTRY_MATERIAL_MASK);
+    CHECK(ior_entry_priority(s.entries[0]) == 255u);
+    CHECK(ior_entry_material(s.entries[0]) == IOR_ENTRY_MATERIAL_MASK);
+    CHECK(s.entries[0].ior == doctest::Approx(1.42f));
+
+    // A priority does not bleed into the material index it shares a word with.
+    ior_stack_push(s, 10u, 1.33f, 7u);
+    CHECK(ior_entry_priority(s.entries[1]) == 10u);
+    CHECK(ior_entry_material(s.entries[1]) == 7u);
 }

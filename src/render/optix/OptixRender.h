@@ -157,6 +157,47 @@ private:
     bool mEnableMotionBlur;
     bool mShaderReorderSupported = false;
 
+    /// The launch-parameter fields the modules are compiled against as
+    /// constants, so the branches they gate are not in the binary at all.
+    ///
+    /// Every one of these is a whole feature the mega-kernel carries whether or
+    /// not the scene uses it, and the cost of carrying it is not the branch --
+    /// it is the instruction cache. On the three measured scenes `no_instruction`
+    /// is 12--13.5 cycles per issued instruction, roughly half of all stall, and
+    /// folding these away is worth 15--35% of the frame. See docs/open-perf.md.
+    ///
+    /// What is *not* here matters as much. `max_depth` is a slider, and a
+    /// recompile is a visible hitch; anything a user drags has to stay a
+    /// runtime read.
+    struct PipelineSpec
+    {
+        uint32_t sharcCapacity = 0;
+        uint32_t debug = 0;
+        uint32_t estimatorMode = 0;
+        uint32_t volumeModel = 0;
+        uint32_t misHeuristic = 0;
+        uint32_t subsurfaceIterations = 0;
+        uint32_t risCandidates = 1;
+        uint32_t denoiseDepthMode = 0;
+        bool hasBoundedMedium = false;
+        bool hasFog = false;
+        bool enableMotionBlur = false;
+        bool writeAov = false;
+        bool writeSplitAov = false;
+        bool guidePrimaryHit = false;
+        bool hasEnvMap = false;
+        bool hasEnvBackground = false;
+        bool enableShaderReorder = false;
+
+        bool operator==(const PipelineSpec& other) const = default;
+    };
+    /// What the currently linked pipeline was compiled for. Compared against the
+    /// frame's own values before every launch; a difference is a recompile.
+    PipelineSpec mPipelineSpec;
+    /// False until the first createModule(), so the initial build is not read as
+    /// a respecialisation.
+    bool mPipelineSpecValid = false;
+
     /// Set whenever the TLAS is rebuilt from scratch. The SBT is indexed by
     /// instance, so it has to be rebuilt with it; a refit leaves it alone.
     bool mSbtDirty = false;
@@ -323,6 +364,9 @@ private:
     // device code reads before anything else -- so the default is a
     // byte-for-byte no-op rather than a path that happens to agree.
     std::unique_ptr<OptixBuffer> mSharcBuffer;
+    /// One SharcPathState per pixel, allocated only while the cache is on.
+    std::unique_ptr<OptixBuffer> mSharcPathBuffer;
+    size_t mSharcPathStateCount = 0;
     uint32_t mSharcCapacity = 0;
     /// Whether the table has to be cleared before the next launch. Raised when
     /// it is allocated and whenever accumulation restarts, because a cache
@@ -530,6 +574,17 @@ public:
     void createProgramGroups();
     void createPipeline();
     void createSbt();
+
+    /// The specialisation this frame's launch parameters ask for.
+    PipelineSpec specFor(const Params& params) const;
+    /// Recompile the modules and relink the pipeline when the frame asks for a
+    /// specialisation the linked one was not built with. A no-op otherwise,
+    /// which is every frame after the first.
+    void ensurePipelineSpecialization(const Params& params);
+    /// Tear the pipeline, its program groups and its modules down, in that
+    /// order. Leaves the handles null so a failed rebuild cannot launch against
+    /// a destroyed pipeline.
+    void destroyPipeline();
 
 };
 

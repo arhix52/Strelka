@@ -15,22 +15,52 @@
 // ---------------------------------------------------------------------------
 // Stack entry and stack struct
 // ---------------------------------------------------------------------------
+/// Priority and material index share one word: the priority in the top 8 bits,
+/// the material index in the bottom 24.
+///
+/// Neither needs more. The priority says which surface wins where two
+/// dielectrics overlap and the loader authors it as 0 or 10; a scene with more
+/// than sixteen million materials has run out of other things first. Packing
+/// them takes the entry from 12 bytes to 8 and the stack from 52 to 36, and this
+/// stack is carried per path on both backends -- inside OptiX's PerRayData,
+/// where every byte is a byte of continuation stack, and in Metal's per-pixel
+/// side table. See docs/open-perf.md for what a byte of PerRayData costs.
+#define IOR_ENTRY_MATERIAL_BITS 24u
+#define IOR_ENTRY_MATERIAL_MASK ((1u << IOR_ENTRY_MATERIAL_BITS) - 1u)
+
 struct IorStackEntry
 {
-    unsigned int priority;
     float ior;
-    // Which material this medium came from. Absorption is a property of the
-    // volume, so a path inside one has to be able to look its coefficients back
-    // up; carrying the index is cheaper than carrying a float3 sigma_t, and the
-    // stack sits in the OptiX payload and in a per-pixel device buffer.
-    unsigned int material_index;
+    // Which material this medium came from, and at what priority. Absorption is
+    // a property of the volume, so a path inside one has to be able to look its
+    // coefficients back up; carrying the index is cheaper than carrying a float3
+    // sigma_t.
+    unsigned int packed;
 };
+
+DEVICE_FUNC unsigned int ior_entry_priority(const THREAD_REF IorStackEntry& e)
+{
+    return e.packed >> IOR_ENTRY_MATERIAL_BITS;
+}
+
+DEVICE_FUNC unsigned int ior_entry_material(const THREAD_REF IorStackEntry& e)
+{
+    return e.packed & IOR_ENTRY_MATERIAL_MASK;
+}
+
+/// Both fields are masked rather than asserted: this runs on three compilers,
+/// two of which have no way to complain, and a priority that overflowed into the
+/// material index would be a wrong medium rather than a loud failure.
+DEVICE_FUNC unsigned int ior_entry_pack(unsigned int priority, unsigned int material_index)
+{
+    return ((priority & 0xFFu) << IOR_ENTRY_MATERIAL_BITS) | (material_index & IOR_ENTRY_MATERIAL_MASK);
+}
 
 #define IOR_STACK_SIZE 4
 
 struct IorStack
 {
-    IorStackEntry entries[IOR_STACK_SIZE]; // 48 bytes
+    IorStackEntry entries[IOR_STACK_SIZE]; // 32 bytes
     int top;                               //  4 bytes (-1 = empty = air)
 };
 
@@ -60,16 +90,15 @@ DEVICE_FUNC void ior_stack_push(THREAD_REF IorStack& stack,
     if (stack.top < IOR_STACK_SIZE - 1)
     {
         stack.top++;
-        stack.entries[stack.top].priority = priority;
         stack.entries[stack.top].ior = ior;
-        stack.entries[stack.top].material_index = material_index;
+        stack.entries[stack.top].packed = ior_entry_pack(priority, material_index);
     }
 }
 
 // Which material's volume the ray is currently inside, or 0xFFFFFFFF for air.
 DEVICE_FUNC unsigned int ior_stack_current_material(const THREAD_REF IorStack& stack)
 {
-    return (stack.top >= 0) ? stack.entries[stack.top].material_index : 0xFFFFFFFFu;
+    return (stack.top >= 0) ? ior_entry_material(stack.entries[stack.top]) : 0xFFFFFFFFu;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,8 +128,8 @@ DEVICE_FUNC bool ior_stack_can_pop(const THREAD_REF IorStack& stack,
 {
     for (int i = stack.top; i >= 0; i--)
     {
-        if (stack.entries[i].material_index == material_index ||
-            stack.entries[i].priority == priority)
+        if (ior_entry_material(stack.entries[i]) == (material_index & IOR_ENTRY_MATERIAL_MASK) ||
+            ior_entry_priority(stack.entries[i]) == (priority & 0xFFu))
         {
             return true;
         }
@@ -136,7 +165,7 @@ DEVICE_FUNC float ior_stack_pop(THREAD_REF IorStack& stack,
     // The surface this exit belongs to, if the path ever entered it.
     for (int i = stack.top; i >= 0; i--)
     {
-        if (stack.entries[i].material_index == material_index)
+        if (ior_entry_material(stack.entries[i]) == (material_index & IOR_ENTRY_MATERIAL_MASK))
         {
             for (int j = i; j < stack.top; j++)
             {
@@ -149,7 +178,7 @@ DEVICE_FUNC float ior_stack_pop(THREAD_REF IorStack& stack,
     // Find the entry with matching priority (search from top)
     for (int i = stack.top; i >= 0; i--)
     {
-        if (stack.entries[i].priority == priority)
+        if (ior_entry_priority(stack.entries[i]) == (priority & 0xFFu))
         {
             // Shift entries above the removed one down
             for (int j = i; j < stack.top; j++)
@@ -178,7 +207,7 @@ DEVICE_FUNC float ior_stack_peek_after_pop(const THREAD_REF IorStack& stack,
     int found = -1;
     for (int i = stack.top; i >= 0; i--)
     {
-        if (stack.entries[i].priority == priority)
+        if (ior_entry_priority(stack.entries[i]) == (priority & 0xFFu))
         {
             found = i;
             break;

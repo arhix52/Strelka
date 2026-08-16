@@ -80,6 +80,11 @@ struct RenderConfig
     uint32_t upscaleMode = 0;
     uint32_t risCandidates = 1; // 1 = plain next-event estimation
     uint32_t estimatorMode = 0; // 0 = NEE + MIS, 1 = BSDF sampling only
+    /// Accumulate the diffuse/specular split of the first event into two extra
+    /// images. Off because nothing reads them: the raygen wrote four scattered
+    /// records per pixel per launch for an output no caller ever asked the
+    /// backend for. See docs/open-perf.md.
+    bool splitAov = false;
     bool sharc = false;
     uint32_t sharcDepth = 1;
     uint32_t sharcMinSamples = 8;

@@ -114,3 +114,18 @@ static __forceinline__ __device__ float3 offset_ray(const float3 p, const float3
                        fabs(p.y) < origin ? p.y + float_scale * n.y : p_i.y,
                        fabs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
 }
+
+// ---- This launch thread's pixel --------------------------------------------
+//
+// Every program in the pipeline runs under the launch index of the ray that
+// started it, so nothing has to be carried in the payload to answer "which
+// pixel is this". It used to be, and the four bytes it cost were four bytes of
+// continuation stack on every path in the launch -- see the note on PerRayData.
+//
+// Note this is unaffected by optixReorder(): reordering moves which thread runs
+// which program, and the launch index moves with it.
+static __forceinline__ __device__ uint32_t launchPixelIndex(const Params& p)
+{
+    const uint3 idx = optixGetLaunchIndex();
+    return idx.y * p.image_width + idx.x;
+}

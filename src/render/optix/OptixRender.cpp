@@ -2,6 +2,8 @@
 
 #include "OptixBuffer.h"
 
+#include <env.h>
+
 #include <optix_function_table_definition.h>
 #include <optix_stubs.h>
 #include <optix_stack_size.h>
@@ -1791,13 +1793,68 @@ void OptiXRender::createModule()
         moduleOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
     }
 
+    // A ceiling on registers, which is a ceiling on how much of the path state
+    // can stay in them and therefore a floor on how much spills to local memory.
+    // Zero -- OptiX's own default -- means no limit, and the mega-kernel then
+    // takes all 255, which caps occupancy at eight warps per SM.
+    //
+    // Left at no limit, because that is what measured fastest. On a 4090 at
+    // 1280x720 depth 4, best of three, ms/sample:
+    //
+    //     limit    iso    kids    pine    pine occupancy
+    //       0     4.10    4.70   10.90        32.9%
+    //     128     4.00    4.70   10.90        32.9%
+    //      96     4.80    5.40   12.10        41.0%
+    //      64     7.30    8.00   14.90          --
+    //
+    // 128 does not bind -- same time, same occupancy, so no program was over it.
+    // 96 does, and it is the measurement worth keeping: occupancy rises a
+    // quarter and the launch gets 11% *slower*, because every register taken
+    // away comes back as local-memory traffic in a launch that is already memory
+    // bound rather than latency starved. More warps in flight only buys more
+    // spilling to wait on.
+    //
+    // The knob stays so this can be re-measured once the path state shrinks --
+    // that is the change that would make a lower ceiling free. See
+    // docs/open-perf.md.
+    moduleOptions.maxRegisterCount = static_cast<int>(envUint("STRELKA_OPTIX_MAX_REGISTERS", 0));
+
+    // Compile the launch parameters that select whole features in as constants,
+    // so the branches they gate -- and everything under those branches -- are
+    // dead code the compiler removes rather than instructions the kernel carries
+    // past. See PipelineSpec for what is bound and, more importantly, what is
+    // deliberately not.
+    //
+    // The values have to outlive optixModuleCreate, which is why they are named
+    // locals rather than temporaries in the initialiser list.
+    const PipelineSpec& spec = mPipelineSpec;
+    const OptixModuleCompileBoundValueEntry boundValues[] = {
+#define STRELKA_BOUND_VALUE(field)                                                                                     \
+    OptixModuleCompileBoundValueEntry                                                                                  \
+    {                                                                                                                  \
+        offsetof(Params, field), sizeof(Params::field), &spec.field, "params." #field                                  \
+    }
+        STRELKA_BOUND_VALUE(sharcCapacity),      STRELKA_BOUND_VALUE(debug),
+        STRELKA_BOUND_VALUE(estimatorMode),      STRELKA_BOUND_VALUE(volumeModel),
+        STRELKA_BOUND_VALUE(misHeuristic),       STRELKA_BOUND_VALUE(subsurfaceIterations),
+        STRELKA_BOUND_VALUE(risCandidates),      STRELKA_BOUND_VALUE(denoiseDepthMode),
+        STRELKA_BOUND_VALUE(hasBoundedMedium),   STRELKA_BOUND_VALUE(hasFog),
+        STRELKA_BOUND_VALUE(enableMotionBlur),   STRELKA_BOUND_VALUE(writeAov),
+        STRELKA_BOUND_VALUE(writeSplitAov),      STRELKA_BOUND_VALUE(guidePrimaryHit),
+        STRELKA_BOUND_VALUE(hasEnvMap),          STRELKA_BOUND_VALUE(hasEnvBackground),
+        STRELKA_BOUND_VALUE(enableShaderReorder),
+#undef STRELKA_BOUND_VALUE
+    };
+    moduleOptions.boundValues = boundValues;
+    moduleOptions.numBoundValues = static_cast<unsigned int>(std::size(boundValues));
+
     // Setup pipeline compilation options
     OptixPipelineCompileOptions pipelineOptions = {};
     pipelineOptions.usesMotionBlur = mEnableMotionBlur;
     pipelineOptions.traversableGraphFlags = mEnableMotionBlur ?
                                                 OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_ANY :
                                                 OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
-    pipelineOptions.numPayloadValues = 2;
+    pipelineOptions.numPayloadValues = STRELKA_PAYLOAD_COUNT;
     pipelineOptions.numAttributeValues = 2;
     pipelineOptions.exceptionFlags =
         mEnableValidation ?
@@ -1836,9 +1893,16 @@ void OptiXRender::createModule()
     OPTIX_CHECK_LOG(optixModuleCreate(mState.context, &moduleOptions, &pipelineOptions, closestHitSource.c_str(),
                                       closestHitSource.size(), log, &sizeof_log, &mState.closest_hit_module));
 
-    // Store options for later use
+    // Store options for later use. The bound-value table is a local, so the copy
+    // that outlives this function must not keep pointing at it -- nothing reads
+    // the stored options to compile with, and a dangling pointer that is only
+    // dereferenced by a future caller is the kind that stays hidden.
     mState.pipeline_compile_options = pipelineOptions;
     mState.module_compile_options = moduleOptions;
+    mState.module_compile_options.boundValues = nullptr;
+    mState.module_compile_options.numBoundValues = 0;
+
+    mPipelineSpecValid = true;
 
     // Create curve modules. One intersector per basis: the basis is compiled
     // into the built-in intersection program, so a scene that mixes linear and
@@ -1995,7 +2059,110 @@ void OptiXRender::createPipeline()
     OPTIX_CHECK(optixPipelineSetStackSize(pipeline, direct_callable_stack_size_from_traversal,
                                           direct_callable_stack_size_from_state, continuation_stack_size,
                                           maxTraversableDepth));
+    // The continuation stack is per thread and it is local memory, so it is the
+    // number that decides how much of the launch fits on the machine. It follows
+    // the live state the raygen holds across optixInvoke -- which is
+    // sizeof(PerRayData) plus whatever the shading programs need -- and it is
+    // logged because that relationship is the least visible thing about this
+    // backend's cost: 256 bytes of ballast added to PerRayData and never read
+    // measured 39-61% slower. See docs/open-perf.md.
+    STRELKA_DEBUG("Pipeline stack: continuation={} B, dc_from_traversal={} B, dc_from_state={} B, PerRayData={} B",
+                  continuation_stack_size, direct_callable_stack_size_from_traversal,
+                  direct_callable_stack_size_from_state, sizeof(PerRayData));
     mState.pipeline = pipeline;
+}
+
+OptiXRender::PipelineSpec OptiXRender::specFor(const Params& params) const
+{
+    PipelineSpec spec;
+    spec.sharcCapacity = params.sharcCapacity;
+    spec.debug = params.debug;
+    spec.estimatorMode = params.estimatorMode;
+    spec.volumeModel = params.volumeModel;
+    spec.misHeuristic = params.misHeuristic;
+    spec.subsurfaceIterations = params.subsurfaceIterations;
+    spec.risCandidates = params.risCandidates;
+    spec.denoiseDepthMode = params.denoiseDepthMode;
+    spec.hasBoundedMedium = params.hasBoundedMedium;
+    spec.hasFog = params.hasFog;
+    spec.enableMotionBlur = params.enableMotionBlur;
+    spec.writeAov = params.writeAov;
+    spec.writeSplitAov = params.writeSplitAov;
+    spec.guidePrimaryHit = params.guidePrimaryHit;
+    spec.hasEnvMap = params.hasEnvMap;
+    spec.hasEnvBackground = params.hasEnvBackground;
+    spec.enableShaderReorder = params.enableShaderReorder;
+    return spec;
+}
+
+void OptiXRender::destroyPipeline()
+{
+    // Pipeline first, then the groups it links, then the modules they name.
+    // Handles are cleared as they go: a rebuild that throws half way must not
+    // leave the launch path holding a destroyed pipeline.
+    if (mState.pipeline)
+    {
+        OPTIX_CHECK(optixPipelineDestroy(mState.pipeline));
+        mState.pipeline = nullptr;
+    }
+    for (OptixProgramGroup* group : { &mState.raygen_prog_group, &mState.radiance_miss_group,
+                                      &mState.radiance_default_hit_group, &mState.radiance_linear_curve_hit_group,
+                                      &mState.occlusion_miss_group, &mState.occlusion_hit_group,
+                                      &mState.occlusion_linear_curve_hit_group, &mState.light_hit_group })
+    {
+        if (*group)
+        {
+            OPTIX_CHECK(optixProgramGroupDestroy(*group));
+            *group = nullptr;
+        }
+    }
+    for (OptixModule* module : { &mState.ptx_module, &mState.closest_hit_module, &mState.m_catromCurveModule,
+                                 &mState.m_linearCurveModule })
+    {
+        if (*module)
+        {
+            OPTIX_CHECK(optixModuleDestroy(*module));
+            *module = nullptr;
+        }
+    }
+}
+
+void OptiXRender::ensurePipelineSpecialization(const Params& params)
+{
+    const PipelineSpec wanted = specFor(params);
+    if (mPipelineSpecValid && wanted == mPipelineSpec)
+    {
+        return;
+    }
+
+    // A recompile is seconds of driver work, and it invalidates every handle the
+    // in-flight launch is using. Nothing may still be running against the
+    // pipeline about to be destroyed.
+    if (mState.stream)
+    {
+        latchCudaError(cudaStreamSynchronize(mState.stream), "drain the stream before respecialising the pipeline");
+    }
+    latchCudaError(cudaDeviceSynchronize(), "drain the device before respecialising the pipeline");
+
+    const bool firstBuild = !mPipelineSpecValid;
+    mPipelineSpec = wanted;
+
+    const auto begin = std::chrono::steady_clock::now();
+    destroyPipeline();
+    createModule();
+    createProgramGroups();
+    createPipeline();
+    // The SBT holds program group headers, and every one of them just moved.
+    createSbt();
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
+
+    // Logged rather than silent: this is the one thing in the frame that can
+    // cost a second, and a scene or a setting that makes it happen every frame
+    // would otherwise read as "the renderer became slow".
+    STRELKA_INFO("ACTION pipeline_specialize reason={} took_ms={} sharc={} medium={} fog={} motion={} aov={} debug={}",
+                 firstBuild ? "first_build" : "spec_changed", ms, wanted.sharcCapacity != 0u, wanted.hasBoundedMedium,
+                 wanted.hasFog, wanted.enableMotionBlur, wanted.writeAov, wanted.debug);
 }
 
 void OptiXRender::createSbt()
@@ -2196,8 +2363,24 @@ void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, u
         }
     }
 
+    // One record per pixel for the visit each path is allowed. Sized here rather
+    // than carried in the payload: in PerRayData it was 28 bytes of continuation
+    // stack on every path of every scene, cache or no cache. See SharcPathState.
+    const size_t pathStateCount = (size_t)params.image_width * params.image_height;
+    if (mSharcCapacity != 0 && (!mSharcPathBuffer || mSharcPathStateCount != pathStateCount))
+    {
+        mSharcPathBuffer.reset(new OptixBuffer(pathStateCount * sizeof(SharcPathState)));
+        mSharcPathStateCount = pathStateCount;
+    }
+    else if (mSharcCapacity == 0 && mSharcPathBuffer)
+    {
+        mSharcPathBuffer.reset();
+        mSharcPathStateCount = 0;
+    }
+
     params.sharcCapacity = mSharcCapacity;
     params.sharcEntries = mSharcCapacity ? (SharcEntry*)mSharcBuffer->getNativePtr() : nullptr;
+    params.sharcPath = mSharcPathBuffer ? (SharcPathState*)mSharcPathBuffer->getNativePtr() : nullptr;
     if (mSharcCapacity == 0)
     {
         return;
@@ -2239,7 +2422,11 @@ void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, u
 
 void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t height)
 {
-    bool needRealloc = false;
+    // The split buffers exist only while somebody is asking for them, so a
+    // flipped Params::writeSplitAov is a reallocation the same way a resolution
+    // change is.
+    const bool splitAllocated = mState.params.diffuse != nullptr;
+    bool needRealloc = splitAllocated != mState.params.writeSplitAov;
     if (mState.params.image_width != width || mState.params.image_height != height)
     {
         // new dimensions!
@@ -2267,18 +2454,27 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
             CUDA_CHECK(cudaFree((void*)mState.params.specular));
         if (mState.params.specularCounter)
             CUDA_CHECK(cudaFree((void*)mState.params.specularCounter));
+        mState.params.diffuse = nullptr;
+        mState.params.diffuseCounter = nullptr;
+        mState.params.specular = nullptr;
+        mState.params.specularCounter = nullptr;
         const size_t frameSize = mState.params.image_width * mState.params.image_height;
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.accum), frameSize * sizeof(float4)));
 
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.diffuse), frameSize * sizeof(float4)));
-        CUDA_CHECK(cudaMemset(mState.params.diffuse, 0, frameSize * sizeof(float4)));
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.diffuseCounter), frameSize * sizeof(uint16_t)));
-        CUDA_CHECK(cudaMemset(mState.params.diffuseCounter, 0, frameSize * sizeof(uint16_t)));
+        if (mState.params.writeSplitAov)
+        {
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.diffuse), frameSize * sizeof(float4)));
+            CUDA_CHECK(cudaMemset(mState.params.diffuse, 0, frameSize * sizeof(float4)));
+            CUDA_CHECK(
+                cudaMalloc(reinterpret_cast<void**>(&mState.params.diffuseCounter), frameSize * sizeof(uint16_t)));
+            CUDA_CHECK(cudaMemset(mState.params.diffuseCounter, 0, frameSize * sizeof(uint16_t)));
 
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.specular), frameSize * sizeof(float4)));
-        CUDA_CHECK(cudaMemset(mState.params.specular, 0, frameSize * sizeof(float4)));
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.specularCounter), frameSize * sizeof(uint16_t)));
-        CUDA_CHECK(cudaMemset(mState.params.specularCounter, 0, frameSize * sizeof(uint16_t)));
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.specular), frameSize * sizeof(float4)));
+            CUDA_CHECK(cudaMemset(mState.params.specular, 0, frameSize * sizeof(float4)));
+            CUDA_CHECK(
+                cudaMalloc(reinterpret_cast<void**>(&mState.params.specularCounter), frameSize * sizeof(uint16_t)));
+            CUDA_CHECK(cudaMemset(mState.params.specularCounter, 0, frameSize * sizeof(uint16_t)));
+        }
     }
 }
 
@@ -2782,6 +2978,16 @@ void OptiXRender::render(Buffer* output)
     const uint32_t width = plan.renderWidth;
     const uint32_t height = plan.renderHeight;
 
+    // Resolved before the buffers are sized, because it decides whether two of
+    // them exist at all. Turning it on mid-render restarts accumulation: the
+    // split's history is memset by the allocation below, and only subframe 0
+    // resets it in the raygen, so the frames before the switch would be missing
+    // from it while the beauty image counted them.
+    const bool writeSplitAov =
+        settings.contains("render/pt/splitAov") && settings.getAs<bool>("render/pt/splitAov");
+    settingsChanged |= writeSplitAov != mState.params.writeSplitAov;
+    mState.params.writeSplitAov = writeSplitAov;
+
     updatePathtracerParams(width, height);
     updateGuideBuffers(plan);
 
@@ -2868,7 +3074,14 @@ void OptiXRender::render(Buffer* output)
                                   (float4*)((OptixBuffer*)output)->getNativePtr();
     params.samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
     params.handle = mState.ias_handle;
-    params.max_depth = settings.getAs<uint32_t>("render/pt/depth");
+    // Clamped to what PerRayData::depth counts to. That field is nine bits of a
+    // packed word rather than a whole one (see the note on PerRayData), and the
+    // closest hit stops a path by setting it *to* max_depth, which the raygen
+    // then increments once more -- so the ceiling is 255, not 511. The clamp is
+    // here so the narrowing is a bound the renderer states rather than a wrap a
+    // caller discovers; no scene asks for a path 255 bounces long, and the
+    // ladder's deepest row is 16.
+    params.max_depth = std::min(settings.getAs<uint32_t>("render/pt/depth"), 255u);
 
     params.rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
     params.enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
@@ -3059,6 +3272,10 @@ void OptiXRender::render(Buffer* output)
     params.samples_per_launch = samplesThisLaunch;
     params.enableAccumulation = enableAccumulation;
     params.maxSampleCount = totalSpp;
+
+    // Last, because it reads the finished parameters: everything the modules are
+    // compiled against has to be settled before they are compiled against it.
+    ensurePipelineSpecialization(params);
 
     if (mFrameStartEvent)
     {
@@ -3632,6 +3849,11 @@ bool OptiXRender::memoryReport(MemoryReport& report) const
     add("Lights", bufBytes(mLightBuffer));
     add("IES profiles", bufBytes(mIesBuffer));
     add("Skinning", bufBytes(mVertexSkinDataBuffer) + mSkinningPtrs.bytes);
+    // The hash table and the per-pixel visit records. Both are zero unless the
+    // cache is on, and neither was in this report before the second one existed
+    // -- a per-pixel allocation that the memory report does not know about is
+    // exactly the kind this report is for.
+    add("Radiance cache", bufBytes(mSharcBuffer) + bufBytes(mSharcPathBuffer));
 
     {
         // Per pixel rather than per scene, which is why a render at a larger

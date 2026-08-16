@@ -885,7 +885,7 @@ static __forceinline__ __device__ void writeSurfaceGuide(const HitGroupData* hit
                                                          const float3 worldPosition,
                                                          const bool isTriangle)
 {
-    const uint32_t pixelIndex = prd->linearPixelIndex;
+    const uint32_t pixelIndex = launchPixelIndex(params);
     if (prd->depth == 0)
     {
         float3 prevPosition = worldPosition;
@@ -1346,7 +1346,7 @@ extern "C" __global__ void __miss__ms()
     // previous frame left there and smears the silhouette across the sky.
     if (prd->writeAov && !prd->aovDone && params.aov != nullptr)
     {
-        writeBackgroundGuide(params, prd->linearPixelIndex, ray_dir, prd->depth, prd->pixelSample);
+        writeBackgroundGuide(params, launchPixelIndex(params), ray_dir, prd->depth, prd->pixelSample);
         prd->aovDone = true;
     }
 
@@ -1667,7 +1667,7 @@ extern "C" __global__ void __closesthit__radiance()
     const float opacity = resolveOpacity(matParams, textures, si.uv);
     if (opacity < 1.0f && prd->passthrough < PATH_PASSTHROUGH_MAX)
     {
-        if (opacitySample(prd->sampler, prd->linearPixelIndex, prd->passthrough) >= opacity)
+        if (opacitySample(prd->sampler, launchPixelIndex(params), prd->passthrough) >= opacity)
         {
             // Step off on the side the ray was travelling, so the next trace
             // cannot re-hit the surface it just passed through.
@@ -1714,9 +1714,10 @@ extern "C" __global__ void __closesthit__radiance()
     //
     // A path that has already recorded a voxel is done with the cache -- it owes
     // that voxel an honest estimate of the rest of itself, so it may not read,
-    // and it has nowhere left to record -- which is what `sharcIndex` being set
-    // means and why it is part of the guard rather than checked inside.
-    if (params.sharcCapacity != 0u && prd->sharcIndex == SHARC_NO_ENTRY &&
+    // and it has nowhere left to record -- which is what this pixel's
+    // SharcPathState::index being set means, and why it is part of the guard
+    // rather than checked inside.
+    if (params.sharcCapacity != 0u && params.sharcPath[launchPixelIndex(params)].index == SHARC_NO_ENTRY &&
         prd->depth >= params.sharcDepth && si.roughness > oka::sharc::kMinRoughness)
     {
         const float3 cameraPosition =
@@ -1730,7 +1731,7 @@ extern "C" __global__ void __closesthit__radiance()
         // whose deposits are unconditioned on the cache's own output, which is
         // the loop that would amplify whatever error it starts with -- Metal saw
         // it as a classroom 11% bright with no single step being wrong.
-        const bool updatePath = oka::sharc::isUpdatePath(prd->linearPixelIndex, prd->sampleIndex);
+        const bool updatePath = oka::sharc::isUpdatePath(launchPixelIndex(params), prd->sampler.sampleIdx);
         uint32_t slot = 0u;
         // Inserting, because this path is here to fill the slot in; a read that
         // misses simply carries on tracing.
@@ -1753,11 +1754,13 @@ extern "C" __global__ void __closesthit__radiance()
             if (luminance(prd->throughput) > oka::sharc::kMinRecordThroughput)
             {
                 const float floorT = oka::sharc::kThroughputFloor;
-                prd->sharcIndex = slot;
-                prd->sharcRadianceAtVisit = prd->radiance;
-                prd->sharcInvThroughput = make_float3(1.0f / fmaxf(prd->throughput.x, floorT),
-                                                      1.0f / fmaxf(prd->throughput.y, floorT),
-                                                      1.0f / fmaxf(prd->throughput.z, floorT));
+                SharcPathState visit;
+                visit.index = slot;
+                visit.radianceAtVisit = prd->radiance;
+                visit.invThroughput = make_float3(1.0f / fmaxf(prd->throughput.x, floorT),
+                                                  1.0f / fmaxf(prd->throughput.y, floorT),
+                                                  1.0f / fmaxf(prd->throughput.z, floorT));
+                params.sharcPath[launchPixelIndex(params)] = visit;
             }
         }
     }
@@ -1774,7 +1777,7 @@ extern "C" __global__ void __closesthit__radiance()
     {
         if (prd->depth == 0)
         {
-            prd->firstEventType = EventType::eAbsorb;
+            prd->setFirstEventType(EventType::eAbsorb);
         }
         // stop on absorb
         prd->throughput = make_float3(0.0f);
@@ -1786,11 +1789,11 @@ extern "C" __global__ void __closesthit__radiance()
     {
         if (sample_data.event_type & BSDF_EVENT_DIFFUSE)
         {
-            prd->firstEventType = EventType::eDiffuse;
+            prd->setFirstEventType(EventType::eDiffuse);
         }
         if (sample_data.event_type & BSDF_EVENT_GLOSSY)
         {
-            prd->firstEventType = EventType::eSpecular;
+            prd->setFirstEventType(EventType::eSpecular);
         }
     }
 

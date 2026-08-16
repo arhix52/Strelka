@@ -288,17 +288,27 @@ extern "C" __global__ void __raygen__rg()
 
     for (uint32_t sampleIdx = 0; sampleIdx < params.samples_per_launch; ++sampleIdx)
     {
+        // Zero-initialised, which was measured: 256 bytes of ballast added to
+        // this record and never read cost 52% of the frame on the iso bathroom,
+        // and removing the `= {}` with that ballast still in place gave none of
+        // it back. So the size is what costs, not the zeroing, and this keeps a
+        // field added later from being read before it is written.
+        //
+        // What the size costs is the continuation stack, which is per thread and
+        // is local memory: it tracks sizeof(PerRayData) byte for byte. See
+        // docs/open-perf.md, including why the hot half of this is *not* in
+        // payload registers -- that was tried and it is slower.
         PerRayData prd = {};
-        prd.firstEventType = EventType::eUndef;
-        prd.linearPixelIndex = linearPixelIndex;
-        prd.sampleIndex = params.subframe_index + sampleIdx;
+        prd.setFirstEventType(EventType::eUndef);
+        const uint32_t sampleIndex = params.subframe_index + sampleIdx;
 
         // Launch coordinates as they are. The Morton code only decides which block
         // of the sequence this pixel draws from, so a flipped y was never wrong
         // here -- but it passed `height` for row 0, and having one expression for
         // "this pixel" is what keeps the film flip in generateCameraRay, where it
         // has to take the jitter with it.
-        prd.sampler = initSampler(launch_index.x, launch_index.y, prd.linearPixelIndex, prd.sampleIndex, params.maxSampleCount, 52u);
+        prd.sampler =
+            initSampler(launch_index.x, launch_index.y, linearPixelIndex, sampleIndex, params.maxSampleCount, 52u);
 
         prd.radiance = make_float3(0.0f);
         prd.throughput = make_float3(1.0f);
@@ -314,9 +324,14 @@ extern "C" __global__ void __raygen__rg()
         // different jitter and pay the memory traffic for nothing.
         prd.writeAov = params.writeAov && sampleIdx == 0;
         prd.aovDone = false;
-        // Not zero: zero is a valid slot. The `= {}` above would otherwise leave
-        // every path claiming to have visited entry 0.
-        prd.sharcIndex = SHARC_NO_ENTRY;
+        // Not zero: zero is a valid slot, so a record left zeroed would have
+        // every path claiming to have visited entry 0. Written to the per-pixel
+        // side buffer rather than into the payload -- see SharcPathState -- and
+        // only when the cache exists, which is a compile-time constant.
+        if (params.sharcCapacity != 0u)
+        {
+            params.sharcPath[linearPixelIndex].index = SHARC_NO_ENTRY;
+        }
 
         float3 ray_origin, ray_direction;
 
@@ -480,80 +495,92 @@ extern "C" __global__ void __raygen__rg()
         // which is the same reason Metal spends a whole dispatch on it: the
         // alternative is six scattered edits that would each have to stay
         // correct.
-        if (params.sharcCapacity != 0u && prd.sharcIndex != SHARC_NO_ENTRY)
+        if (params.sharcCapacity != 0u)
         {
-            const float3 gathered = (prd.radiance - prd.sharcRadianceAtVisit) * prd.sharcInvThroughput;
-            // A negative component means the difference is not what it claims --
-            // a clamp or a NaN guard fired between the visit and here -- and a
-            // negative deposit would wrap the unsigned accumulator.
-            if (gathered.x >= 0.0f && gathered.y >= 0.0f && gathered.z >= 0.0f)
+            const SharcPathState visit = params.sharcPath[linearPixelIndex];
+            if (visit.index != SHARC_NO_ENTRY)
             {
-                sharcWrite(params.sharcEntries, prd.sharcIndex, gathered);
+                const float3 gathered = (prd.radiance - visit.radianceAtVisit) * visit.invThroughput;
+                // A negative component means the difference is not what it
+                // claims -- a clamp or a NaN guard fired between the visit and
+                // here -- and a negative deposit would wrap the unsigned
+                // accumulator.
+                if (gathered.x >= 0.0f && gathered.y >= 0.0f && gathered.z >= 0.0f)
+                {
+                    sharcWrite(params.sharcEntries, visit.index, gathered);
+                }
             }
         }
 
         result += prd.radiance;
 
-        if (prd.firstEventType == EventType::eDiffuse)
+        if (params.writeSplitAov)
         {
-            diffuse += prd.radiance;
-            ++diffuseSamples;
-        }
-        if (prd.firstEventType == EventType::eSpecular)
-        {
-            specular += prd.radiance;
-            ++specularSamples;
+            if (prd.firstEventType() == EventType::eDiffuse)
+            {
+                diffuse += prd.radiance;
+                ++diffuseSamples;
+            }
+            if (prd.firstEventType() == EventType::eSpecular)
+            {
+                specular += prd.radiance;
+                ++specularSamples;
+            }
         }
     }
 
     result /= static_cast<float>(params.samples_per_launch);
-    if (diffuseSamples > 0)
+
+    // The diffuse/specular split of the first event. Four scattered records per
+    // pixel per launch, and nothing on the host reads them back -- so they are
+    // written only when asked for, and the buffers do not exist otherwise. The
+    // split no longer owns debug slots 2 and 3 either; those are
+    // DebugMode::eMotionBlur and the first guide view, which is what the editor's
+    // menu and the headless `render.debug` key have always meant by them.
+    if (params.writeSplitAov)
     {
-        diffuse /= static_cast<float>(diffuseSamples);
-        uint32_t prevSamplesCount = params.subframe_index > 0 ? params.diffuseCounter[linearPixelIndex] : 0;
-        diffuseOut = accumulate(params.diffuse, diffuse, linearPixelIndex, prevSamplesCount, diffuseSamples);
-        params.diffuseCounter[linearPixelIndex] = uint16_t(prevSamplesCount + diffuseSamples);
-    }
-    else
-    {
-        if (params.subframe_index == 0)
+        if (diffuseSamples > 0)
         {
-            // need to reset history
-            params.diffuse[linearPixelIndex] = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
-            params.diffuseCounter[linearPixelIndex] = 0;
-        }
-        diffuseOut = params.diffuse[linearPixelIndex];
-    }
-    if (specularSamples > 0)
-    {
-        specular /= static_cast<float>(specularSamples);
-        uint32_t prevSamplesCount = params.subframe_index > 0 ? params.specularCounter[linearPixelIndex] : 0;
-        specularOut = accumulate(params.specular, specular, linearPixelIndex, prevSamplesCount, specularSamples);
-        params.specularCounter[linearPixelIndex] = uint16_t(prevSamplesCount + specularSamples);
-    }
-    else
-    {
-        if (params.subframe_index == 0)
-        {
-            // need to reset history
-            params.specular[linearPixelIndex] = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
-            params.specularCounter[linearPixelIndex] = 0;
-        }
-        if (params.specularCounter[linearPixelIndex] > 0)
-        {
-            specularOut = params.specular[linearPixelIndex];
+            diffuse /= static_cast<float>(diffuseSamples);
+            uint32_t prevSamplesCount = params.subframe_index > 0 ? params.diffuseCounter[linearPixelIndex] : 0;
+            diffuseOut = accumulate(params.diffuse, diffuse, linearPixelIndex, prevSamplesCount, diffuseSamples);
+            params.diffuseCounter[linearPixelIndex] = uint16_t(prevSamplesCount + diffuseSamples);
         }
         else
         {
-            specularOut = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+            if (params.subframe_index == 0)
+            {
+                // need to reset history
+                params.diffuse[linearPixelIndex] = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+                params.diffuseCounter[linearPixelIndex] = 0;
+            }
+            diffuseOut = params.diffuse[linearPixelIndex];
+        }
+        if (specularSamples > 0)
+        {
+            specular /= static_cast<float>(specularSamples);
+            uint32_t prevSamplesCount = params.subframe_index > 0 ? params.specularCounter[linearPixelIndex] : 0;
+            specularOut = accumulate(params.specular, specular, linearPixelIndex, prevSamplesCount, specularSamples);
+            params.specularCounter[linearPixelIndex] = uint16_t(prevSamplesCount + specularSamples);
+        }
+        else
+        {
+            if (params.subframe_index == 0)
+            {
+                // need to reset history
+                params.specular[linearPixelIndex] = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+                params.specularCounter[linearPixelIndex] = 0;
+            }
+            if (params.specularCounter[linearPixelIndex] > 0)
+            {
+                specularOut = params.specular[linearPixelIndex];
+            }
+            else
+            {
+                specularOut = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+            }
         }
     }
-
-    // The diffuse/specular split is still accumulated -- it is what a caller
-    // asking for those two images reads -- but it no longer owns debug slots 2
-    // and 3. Those are DebugMode::eMotionBlur and the first guide view, which is
-    // what the editor's menu and the headless `render.debug` key have always
-    // meant by them.
     (void)diffuseOut;
     (void)specularOut;
 
@@ -619,7 +646,7 @@ extern "C" __global__ void __closesthit__light()
         a.specularAlbedo = make_float3(0.0f);
         a.normal = lightNormal;
         a.roughness = 1.0f;
-        a.depth = prd->depth == 0 ? guideViewDepth(params, hitPoint) : params.aov[prd->linearPixelIndex].depth;
+        a.depth = prd->depth == 0 ? guideViewDepth(params, hitPoint) : params.aov[launchPixelIndex(params)].depth;
         if (prd->depth == 0)
         {
             const float2 motion = guideScreenMotion(params, make_float4(hitPoint, 1.0f), prd->pixelSample);
@@ -628,13 +655,13 @@ extern "C" __global__ void __closesthit__light()
         }
         else
         {
-            a.motionX = params.aov[prd->linearPixelIndex].motionX;
-            a.motionY = params.aov[prd->linearPixelIndex].motionY;
+            a.motionX = params.aov[launchPixelIndex(params)].motionX;
+            a.motionY = params.aov[launchPixelIndex(params)].motionY;
         }
         a.specularHitDistance = 0.0f;
         a.reactive = oka::guides::reactiveFor(prd->depth);
         a.pad2 = 0.0f;
-        params.aov[prd->linearPixelIndex] = a;
+        params.aov[launchPixelIndex(params)] = a;
         prd->aovDone = true;
     }
 

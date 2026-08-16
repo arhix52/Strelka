@@ -641,6 +641,11 @@ void EditorApp::loadSettings()
     // An HDRI carries radiance; normalising it away makes physical parity
     // impossible. See loadEnvMap().
     m_settingsManager->setAs<bool>("render/env/autoCalibrate", false);
+    // The diffuse/specular split of the first event, accumulated into two extra
+    // images. Off by default: nothing in either app reads them back, and writing
+    // them costs four scattered records per pixel per launch. See
+    // docs/open-perf.md.
+    m_settingsManager->setAs<bool>("render/pt/splitAov", false);
     // Spatially hashed radiance cache. Off by default: it trades a little
     // bias for a large cut in path length, which is a choice a scene makes.
     m_settingsManager->setAs<bool>("render/pt/sharc", false);
