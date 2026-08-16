@@ -228,6 +228,18 @@ struct Params
     /// boundaries, which is pure cost in the scenes that have none.
     bool hasBoundedMedium;
 
+    // --- Atmosphere ------------------------------------------------------
+    //
+    // The scene's `atmosphere` sidecar block, which until now only the Metal
+    // backend read: a homogeneous slab below `fogHeight`. Same five fields and
+    // the same meanings as MetalFrameUniforms sets, so a scene hazes identically
+    // on both. See `src/shaders/optix/fog.h` for why a slab and not a volume.
+    bool hasFog;
+    float fogSigmaT; ///< extinction, per world unit
+    float fogAnisotropy; ///< Henyey-Greenstein g; > 0 scatters forward
+    float fogHeight; ///< the medium fills everything below this y
+    float3 fogAlbedo; ///< single-scattering albedo: what an event scatters rather than absorbs
+
     /// The three ways the nested-dielectric stack loses a path, counted per
     /// launch: see IOR_STAT_* below. Null when the buffer has not been
     /// allocated, and then the counting is skipped rather than guessed at.

@@ -1874,7 +1874,10 @@ void OptiXRender::createProgramGroups()
 
     OptixProgramGroupDesc miss_prog_group_desc = {};
     miss_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
-    miss_prog_group_desc.miss.module = mState.ptx_module;
+    // The closest-hit module, not the raygen one: the miss program has to make a
+    // next-event estimate when the atmosphere scatters the ray that was on its
+    // way to the sky, and connectToLight is defined there.
+    miss_prog_group_desc.miss.module = mState.closest_hit_module;
     miss_prog_group_desc.miss.entryFunctionName = "__miss__ms";
     sizeof_log = sizeof(log);
     OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &miss_prog_group_desc,
@@ -2891,6 +2894,22 @@ void OptiXRender::render(Buffer* output)
             ? std::min(settings.getAs<uint32_t>("render/pt/subsurfaceIterations"), 256u)
             : 64u;
     params.hasBoundedMedium = sceneHasBoundedMedium();
+
+    // The atmosphere, from the same place and with the same on/off test Metal
+    // uses (MetalFrameUniforms.mm), so a scene with an `atmosphere` sidecar
+    // block hazes identically on the two backends. Density is the switch: a
+    // block that is present and zero is a scene that turned the haze off, and
+    // paying a free-flight draw per segment for it is not free.
+    {
+        const auto& atmosphere = mScene->getAtmosphere();
+        const bool on = atmosphere.has_value() && atmosphere->density > 0.0f;
+        params.hasFog = on;
+        params.fogSigmaT = on ? atmosphere->density : 0.0f;
+        params.fogAnisotropy = on ? atmosphere->anisotropy : 0.0f;
+        params.fogHeight = on ? atmosphere->height : 0.0f;
+        params.fogAlbedo = on ? make_float3(atmosphere->color.x, atmosphere->color.y, atmosphere->color.z)
+                              : make_float3(0.0f);
+    }
     // Dropped once the numbers have been reported, so the steady state pays
     // neither the memset nor the three atomics' guard.
     params.iorStats = (mIorStatsBuffer && !mReportedIorStats)

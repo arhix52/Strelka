@@ -24,6 +24,7 @@
 #include "shading/shading_common.h"
 #include "shading/medium.h"
 #include "alpha.h"
+#include "fog.h"
 #include <curve_layout.h>
 
 extern "C"
@@ -53,7 +54,22 @@ static __forceinline__ __device__ float traceOcclusion(
                RAY_TYPE_COUNT, // SBT stride
                RAY_TYPE_OCCLUSION, // missSBTIndex
                transmittance);
-    return __uint_as_float(transmittance);
+    float visible = __uint_as_float(transmittance);
+
+    // The atmosphere dims every shadow ray, including the ones that reach the
+    // light unobstructed. Without this a shadow ray is a hole in the haze and
+    // every light reads as if the medium were not there -- which is the same
+    // note Metal's shadow kernel carries, in the same place.
+    if (visible > 0.0f && params.hasFog)
+    {
+        const float tau = fogOpticalDepth(ray_origin, ray_direction, tmax, params.fogHeight,
+                                          params.fogSigmaT);
+        if (tau > 0.0f)
+        {
+            visible *= expf(-tau);
+        }
+    }
+    return visible;
 }
 
 /// Optical depth a shadow ray picks up crossing the boundaries of bounded media.
@@ -1041,6 +1057,115 @@ static __device__ void scatterInMedium(PerRayData* prd,
     prd->passedThrough = true;
 }
 
+/// An atmospheric scattering event: the segment the ray was travelling ended in
+/// the haze rather than on the surface it was heading for.
+///
+/// Shaped like scatterInMedium's bounded branch and kept separate from it,
+/// because the atmosphere has no material behind it -- no boundary to have been
+/// entered through, no extinction to look up, no emission -- and threading a
+/// synthetic MaterialParams through that function to say so is how the two
+/// models start sharing a bug.
+///
+/// Free-flight sampling was analog, so the only weight is the single-scattering
+/// albedo: the fraction of an extinction event that scatters rather than absorbs.
+static __device__ void scatterInFog(PerRayData* prd,
+                                    const float3 rayOrigin,
+                                    const float3 rayDir,
+                                    const float t)
+{
+    prd->throughput *= params.fogAlbedo;
+    const float3 scatterPoint = rayOrigin + rayDir * t;
+
+    // Whether this vertex made a next-event estimate at all, which is the
+    // question the miss and light-hit programs need answered and not the same as
+    // whether the estimate came back with anything. Same reasoning, and the same
+    // failure if it is decided from the outcome, as scatterInMedium records.
+    const bool didNee = (params.estimatorMode == 0) && (params.scene.numLights > 0 || params.hasEnvMap);
+    if (didNee)
+    {
+        // A medium event has a position and no normal. Facing the ray back the
+        // way it came is what tells the light connection this is a volume vertex
+        // and stops it applying a surface cosine.
+        SurfaceInteraction vsi = {};
+        vsi.position = scatterPoint;
+        vsi.shading_normal = -rayDir;
+        vsi.geometry_normal = -rayDir;
+        vsi.wo = -rayDir;
+        vsi.front_face = true;
+        const LightConnection conn = connectToLight(prd->sampler, vsi, 0.0f, true);
+        if (conn.needsRay && conn.pdf > 0.0f)
+        {
+            // dot(rayDir, toLight), not dot(-rayDir, toLight). The phase function
+            // takes the angle between the two directions of *travel*: light
+            // arrives along -toLight and leaves toward the camera along -rayDir,
+            // so their cosine is dot(rayDir, toLight). Negated, a forward-
+            // scattering haze becomes a backward-scattering one -- and at the
+            // pine forest's g = 0.8 that is the difference between a glow around
+            // the sun and a uniform wash.
+            const float phase = hgPhaseFunction(dot(rayDir, conn.toLight), params.fogAnisotropy);
+            // The phase function is the medium's BSDF and its own pdf, so MIS
+            // pairs it against the light density exactly as a surface lobe would.
+            const float misWeight =
+                conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, phase, params.misHeuristic);
+            const float3 weight = prd->throughput * (conn.radiance / conn.pdf) * misWeight * phase;
+            if (weight.x > 1e-6f || weight.y > 1e-6f || weight.z > 1e-6f)
+            {
+                // traceOcclusion carries the haze's own transmittance along this
+                // ray, so the connection is dimmed by the medium it starts in.
+                const float visible = traceOcclusion(params.handle, scatterPoint, conn.toLight,
+                                                     params.shadowRayTmin, conn.tMax);
+                if (visible > 0.0f)
+                {
+                    prd->radiance += clampIndirectContribution(weight * visible, prd->depth,
+                                                               params.clampIndirect);
+                }
+            }
+        }
+    }
+
+    float phasePdf = 0.0f;
+    const float3 nextDir = hgSampleDirection(-rayDir, params.fogAnisotropy,
+                                             random<SampleDimension::eFogPhaseU>(prd->sampler),
+                                             random<SampleDimension::eFogPhaseV>(prd->sampler),
+                                             phasePdf);
+
+    prd->origin = scatterPoint;
+    prd->dir = nextDir;
+    prd->lastBsdfPdf = phasePdf;
+    prd->misDistance = 0.0f;
+    prd->specularBounce = false;
+    prd->neeDone = didNee;
+    // No passedThrough: an atmospheric scattering event is a bounce like any
+    // other, so the raygen loop charges it a depth and rolls roulette on it. A
+    // medium with no depth budget of its own is a path that wanders forever.
+}
+
+/// Whether the atmosphere scatters this segment before `tMax`, and where.
+///
+/// Gated on the path not being inside a participating medium. The atmosphere is
+/// what is outside things, and a path partway through a subsurface walk or a fog
+/// gizmo is not in it. Metal gates on the subsurface case alone; the difference
+/// only shows in a scene that puts a bounded volume inside atmospheric haze,
+/// where two free flights would otherwise be drawn for one segment and the
+/// nearer one silently discarded.
+///
+/// What neither backend does: notice that the path is inside *glass*. The IOR
+/// stack knows, and a ray crossing a windowpane will pick up haze it should not.
+/// Left matching Metal rather than fixed on one side.
+static __forceinline__ __device__ bool fogScatters(PerRayData* prd,
+                                                   const float3 rayOrigin,
+                                                   const float3 rayDir,
+                                                   const float tMax,
+                                                   float& t)
+{
+    if (!params.hasFog || prd->medium != 0u)
+    {
+        return false;
+    }
+    return fogSampleDistance(rayOrigin, rayDir, tMax, params.fogHeight, params.fogSigmaT,
+                             random<SampleDimension::eFogDistance>(prd->sampler), t);
+}
+
 /// The walk reached the boundary of a subsurface medium.
 ///
 /// Everything the surface path does below -- the material, the BSDF, the cutout
@@ -1147,6 +1272,105 @@ static __device__ void exitMedium(PerRayData* prd,
     // because this exit is a bounce.
 }
 
+/// The ray reached the environment -- or would have, if the atmosphere lets it.
+///
+/// Lives here rather than beside the raygen program because of that first
+/// clause: a segment on its way to the sky is as long as segments get, so it is
+/// the one the haze is most likely to stop, and stopping it means a next-event
+/// estimate. OptiX modules do not share device functions, and connectToLight is
+/// in this one. createProgramGroups() points the miss group at this module.
+extern "C" __global__ void __miss__ms()
+{
+    PerRayData* prd = getPRD();
+    const float3 ray_dir = optixGetWorldRayDirection();
+
+    // Before everything else, including the counters and the guide: if the haze
+    // scatters, this path did not reach the environment and nothing below is
+    // true of it.
+    float fogT = 0.0f;
+    if (fogScatters(prd, optixGetWorldRayOrigin(), ray_dir, 1e16f, fogT))
+    {
+        scatterInFog(prd, optixGetWorldRayOrigin(), ray_dir, fogT);
+        return;
+    }
+
+    // A path that reached the environment still inside a medium. Counted here
+    // because here is the only place it is visible: the path is gone and it
+    // still thinks it is inside glass, so every segment it travelled after the
+    // exit it never had carried the wrong absorption. No exit event can catch
+    // this one -- the ray left through a hole in the mesh. See ior_stack.h and
+    // entry 5 of docs/open-defects.md.
+    if (params.iorStats != nullptr && prd->iorStack.top >= 0)
+    {
+        atomicAdd(&params.iorStats[IOR_STAT_ESCAPED_INSIDE], 1u);
+    }
+
+    // Background still needs a guide record, or the denoiser reads whatever the
+    // previous frame left there and smears the silhouette across the sky.
+    if (prd->writeAov && !prd->aovDone && params.aov != nullptr)
+    {
+        writeBackgroundGuide(params, prd->linearPixelIndex, ray_dir, prd->depth, prd->pixelSample);
+        prd->aovDone = true;
+    }
+
+    float3 radiance = make_float3(0.0f);
+    if (params.hasEnvMap)
+    {
+        const float2 uv = dirToEnvUV(ray_dir, params.envMapRotation);
+        const float4 envSample = tex2D<float4>(params.envMapTexture, uv.x, uv.y);
+        float3 envColor = make_float3(envSample.x, envSample.y, envSample.z);
+        envColor *= params.envMapIntensity * params.envMapColorTint;
+
+        if (prd->depth == 0 || prd->specularBounce || !prd->neeDone)
+        {
+            // A camera ray, a specular bounce, or a vertex that made no next-event
+            // estimate: the BSDF strategy owns the whole contribution here, so no
+            // MIS weight. That third case is what estimatorMode 1 needs -- weighting
+            // against an estimate that was never made loses the difference.
+            if (params.hasEnvBackground && prd->depth == 0)
+            {
+                // The backdrop is what the camera sees; the map above is what lights
+                // the scene, and the MIS branch below stays on it because that is the
+                // one that was importance sampled.
+                const float4 bgSample = tex2D<float4>(params.envBackgroundTexture, uv.x, uv.y);
+                envColor = make_float3(bgSample.x, bgSample.y, bgSample.z) *
+                           params.envBackgroundIntensity * params.envMapColorTint;
+            }
+            radiance = prd->throughput * envColor;
+        }
+        else
+        {
+            // MIS weight with BSDF sampling vs env map PDF
+            const float envPdf = envMapPdf(ray_dir,
+                                           params.envMapTexturePoint,
+                                           params.envMapWidth, params.envMapHeight,
+                                           params.envMapRotation, params.envPdfScale);
+            // Account for 50% selection probability when local lights exist
+            const float envSelectionPdf = (params.scene.numLights > 0) ? 0.5f : 1.0f;
+            const float effectiveEnvPdf = envPdf * envSelectionPdf;
+            // A texel of zero luminance has zero sampling density, so light sampling
+            // could never have produced this direction and the BSDF strategy owns it
+            // outright. Dropping the contribution instead -- which this guard used to
+            // do -- loses energy exactly along the edges of dark regions, where the
+            // bilinear radiance is still non-zero.
+            const float misWeight = (effectiveEnvPdf > 0.0f)
+                                        ? computeMisWeight(prd->lastBsdfPdf, effectiveEnvPdf, params.misHeuristic)
+                                        : 1.0f;
+            radiance = prd->throughput * envColor * misWeight;
+        }
+    }
+    else
+    {
+        MissData* miss_data = reinterpret_cast<MissData*>(optixGetSbtDataPointer());
+        radiance = prd->throughput * miss_data->bg_color;
+    }
+
+    prd->radiance += clampIndirectContribution(radiance, prd->depth, params.clampIndirect);
+
+    prd->throughput = make_float3(0.0f);
+    prd->depth = params.max_depth;
+}
+
 extern "C" __global__ void __closesthit__radiance()
 {
     OptixPrimitiveType primType = optixGetPrimitiveType();
@@ -1229,6 +1453,20 @@ extern "C" __global__ void __closesthit__radiance()
         }
     }
 
+    // --- Free flight through the atmosphere ---------------------------------
+    //
+    // Drawn against whatever the segment has already been shortened to, so a
+    // bounded medium that scattered nearer keeps the vertex and the haze does
+    // not overwrite it. In practice the two are mutually exclusive -- fogScatters
+    // declines while the path is inside a medium at all -- and this is what makes
+    // that safe rather than merely true today.
+    float fogT = 0.0f;
+    const bool fogScattered = fogScatters(prd, optixGetWorldRayOrigin(), ray_dir, segment, fogT);
+    if (fogScattered)
+    {
+        segment = fogT;
+    }
+
     // --- Absorption over the segment just travelled -------------------------
     //
     // The IOR stack already knows which medium the path is inside; it also
@@ -1255,6 +1493,15 @@ extern "C" __global__ void __closesthit__radiance()
                                                      params.volumeModel);
             prd->throughput *= beer_lambert_transmittance(sigma_t, segment);
         }
+    }
+
+    if (fogScattered)
+    {
+        // The surface below this point never happened: the path stopped in the
+        // haze short of it, and everything from the material lookup down
+        // describes a vertex that only exists if the surface won.
+        scatterInFog(prd, optixGetWorldRayOrigin(), ray_dir, fogT);
+        return;
     }
 
     if (medium.scattered)

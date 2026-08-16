@@ -540,87 +540,14 @@ extern "C" __global__ void __raygen__rg()
     }
 }
 
-extern "C" __global__ void __miss__ms()
-{
-    PerRayData* prd = getPRD();
-
-    // A path that reached the environment still inside a medium. Counted here
-    // because here is the only place it is visible: the path is gone and it
-    // still thinks it is inside glass, so every segment it travelled after the
-    // exit it never had carried the wrong absorption. No exit event can catch
-    // this one -- the ray left through a hole in the mesh. See ior_stack.h and
-    // entry 5 of docs/open-defects.md.
-    if (params.iorStats != nullptr && prd->iorStack.top >= 0)
-    {
-        atomicAdd(&params.iorStats[IOR_STAT_ESCAPED_INSIDE], 1u);
-    }
-
-    // Background still needs a guide record, or the denoiser reads whatever the
-    // previous frame left there and smears the silhouette across the sky.
-    if (prd->writeAov && !prd->aovDone && params.aov != nullptr)
-    {
-        writeBackgroundGuide(params, prd->linearPixelIndex, optixGetWorldRayDirection(), prd->depth, prd->pixelSample);
-        prd->aovDone = true;
-    }
-
-    float3 radiance = make_float3(0.0f);
-    if (params.hasEnvMap)
-    {
-        const float3 ray_dir = optixGetWorldRayDirection();
-        const float2 uv = dirToEnvUV(ray_dir, params.envMapRotation);
-        const float4 envSample = tex2D<float4>(params.envMapTexture, uv.x, uv.y);
-        float3 envColor = make_float3(envSample.x, envSample.y, envSample.z);
-        envColor *= params.envMapIntensity * params.envMapColorTint;
-
-        if (prd->depth == 0 || prd->specularBounce || !prd->neeDone)
-        {
-            // A camera ray, a specular bounce, or a vertex that made no next-event
-            // estimate: the BSDF strategy owns the whole contribution here, so no
-            // MIS weight. That third case is what estimatorMode 1 needs -- weighting
-            // against an estimate that was never made loses the difference.
-            if (params.hasEnvBackground && prd->depth == 0)
-            {
-                // The backdrop is what the camera sees; the map above is what lights
-                // the scene, and the MIS branch below stays on it because that is the
-                // one that was importance sampled.
-                const float4 bgSample = tex2D<float4>(params.envBackgroundTexture, uv.x, uv.y);
-                envColor = make_float3(bgSample.x, bgSample.y, bgSample.z) *
-                           params.envBackgroundIntensity * params.envMapColorTint;
-            }
-            radiance = prd->throughput * envColor;
-        }
-        else
-        {
-            // MIS weight with BSDF sampling vs env map PDF
-            const float envPdf = envMapPdf(ray_dir,
-                                           params.envMapTexturePoint,
-                                           params.envMapWidth, params.envMapHeight,
-                                           params.envMapRotation, params.envPdfScale);
-            // Account for 50% selection probability when local lights exist
-            const float envSelectionPdf = (params.scene.numLights > 0) ? 0.5f : 1.0f;
-            const float effectiveEnvPdf = envPdf * envSelectionPdf;
-            // A texel of zero luminance has zero sampling density, so light sampling
-            // could never have produced this direction and the BSDF strategy owns it
-            // outright. Dropping the contribution instead -- which this guard used to
-            // do -- loses energy exactly along the edges of dark regions, where the
-            // bilinear radiance is still non-zero.
-            const float misWeight = (effectiveEnvPdf > 0.0f)
-                                        ? computeMisWeight(prd->lastBsdfPdf, effectiveEnvPdf, params.misHeuristic)
-                                        : 1.0f;
-            radiance = prd->throughput * envColor * misWeight;
-        }
-    }
-    else
-    {
-        MissData* miss_data = reinterpret_cast<MissData*>(optixGetSbtDataPointer());
-        radiance = prd->throughput * miss_data->bg_color;
-    }
-
-    prd->radiance += clampIndirectContribution(radiance, prd->depth, params.clampIndirect);
-
-    prd->throughput = make_float3(0.0f);
-    prd->depth = params.max_depth;
-}
+// __miss__ms lives in OptixRender_closest_hit.cu.
+//
+// Not for tidiness: a ray that reaches the environment has still travelled a
+// segment, and with an atmosphere that segment can scatter before the sky is
+// ever seen. Handling that needs next-event estimation, and connectToLight and
+// its shadow ray are defined in that translation unit -- OptiX modules do not
+// share device functions, so the program has to be where the light machinery is.
+// createProgramGroups() points the miss group at `closest_hit_module`.
 
 // Reached only for a hit the any-hit program accepted, which is an opaque one:
 // nothing gets through, so the surviving fraction of the light is zero. The
