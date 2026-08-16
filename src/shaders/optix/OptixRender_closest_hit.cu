@@ -1169,7 +1169,26 @@ static __forceinline__ __device__ bool fogScatters(PerRayData* prd,
                                                    const float tMax,
                                                    float& t)
 {
-    if (!params.hasFog || prd->medium != 0u)
+    // The single-hit debug views are declined alongside the medium, and for a
+    // strictly worse failure than the one the medium avoids: a haze event
+    // returns from the closest hit and from the miss program *above* the branch
+    // that writes the normal, so the pixel keeps the zero the raygen
+    // initialised it with.
+    //
+    // Measured on the pine forest, whose sidecar authors a 0.0032-density haze:
+    // with this declined, 6.01% of camera rays stopped in the air before the
+    // closest hit's normal branch and another 0.68% before the miss program's,
+    // and 4.29% of the frame came back exactly black -- isolated speckle, 0.10
+    // black neighbours out of 4, which reads as screen-space noise rather than
+    // anything on a surface. The remainder of those rays are not black but are
+    // no better: they carry whatever the fog vertex's next-event estimate
+    // returned, which is light, in a buffer that is supposed to hold normals.
+    // The fogless Cornell box has none of this, which is what hid it.
+    //
+    // Declined rather than handled at the vertex: an atmospheric vertex has a
+    // position and no normal, so there is nothing for these two views to
+    // report there, and what they are asked for is the surface behind it.
+    if (!params.hasFog || prd->medium != 0u || DEBUG_MODE_IS_SINGLE_HIT(params.debug))
     {
         return false;
     }

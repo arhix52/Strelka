@@ -93,6 +93,14 @@ enum class DebugMode : uint32_t
 
 #define DEBUG_MODE_FIRST_AOV 3u
 
+/// The two views that describe the first surface a camera ray reaches and
+/// nothing past it. They are the ones the path is cut short for, the ones that
+/// skip tonemapping because they are already in display units -- and the ones
+/// nothing volumetric may answer for, since a scattering event ends the path
+/// somewhere that has no surface to report.
+#define DEBUG_MODE_IS_SINGLE_HIT(d)                                                                                    \
+    ((d) == (uint32_t)DebugMode::eNormal || (d) == (uint32_t)DebugMode::eMotionBlur)
+
 /// What a denoiser needs to know about the primary hit, written once per pixel
 /// by the program that shades it (or by the miss program, for background).
 ///

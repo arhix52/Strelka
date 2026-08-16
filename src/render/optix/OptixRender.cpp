@@ -3222,7 +3222,7 @@ void OptiXRender::render(Buffer* output)
 
     // Apply tonemapping except for the single-hit debug views, which are already
     // in display units and would only be crushed by a curve.
-    if (params.debug != (uint32_t)DebugMode::eNormal && params.debug != (uint32_t)DebugMode::eMotionBlur)
+    if (!DEBUG_MODE_IS_SINGLE_HIT(params.debug))
     {
         float maxEDR = settings.getAs<float>("render/post/tonemapper/maxEDR");
         exposureValue *= maxEDR;

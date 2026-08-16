@@ -467,7 +467,7 @@ extern "C" __global__ void __raygen__rg()
 
             // The two single-hit views describe the first surface and nothing
             // past it, so there is no reason to keep tracing.
-            if (params.debug == (uint32_t)DebugMode::eNormal || params.debug == (uint32_t)DebugMode::eMotionBlur)
+            if (DEBUG_MODE_IS_SINGLE_HIT(params.debug))
                 break;
             prd.sampler.depth++;
         }
