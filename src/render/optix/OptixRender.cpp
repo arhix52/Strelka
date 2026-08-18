@@ -109,6 +109,7 @@ static_assert((uint32_t)oka::optix_omm::kAlphaBlend == (uint32_t)ALPHA_MODE_BLEN
 
 #include <postprocessing/Tonemappers.h>
 #include <postprocessing/DenoiseGuides.h>
+#include <sharc_resolve.h>
 #include <skinning/skinning.h>
 
 // Backend-neutral: no Metal headers, and the same table both backends sample
@@ -1837,7 +1838,8 @@ void OptiXRender::createModule()
     {                                                                                                                  \
         offsetof(Params, field), sizeof(Params::field), &spec.field, "params." #field                                  \
     }
-        STRELKA_BOUND_VALUE(sharcCapacity),      STRELKA_BOUND_VALUE(debug),
+        STRELKA_BOUND_VALUE(sharcCapacity),      STRELKA_BOUND_VALUE(sharcResponsive),
+        STRELKA_BOUND_VALUE(debug),
         STRELKA_BOUND_VALUE(estimatorMode),      STRELKA_BOUND_VALUE(volumeModel),
         STRELKA_BOUND_VALUE(misHeuristic),       STRELKA_BOUND_VALUE(subsurfaceIterations),
         STRELKA_BOUND_VALUE(risCandidates),      STRELKA_BOUND_VALUE(denoiseDepthMode),
@@ -2079,6 +2081,7 @@ OptiXRender::PipelineSpec OptiXRender::specFor(const Params& params) const
 {
     PipelineSpec spec;
     spec.sharcCapacity = params.sharcCapacity;
+    spec.sharcResponsive = params.sharcResponsive;
     spec.debug = params.debug;
     spec.estimatorMode = params.estimatorMode;
     spec.volumeModel = params.volumeModel;
@@ -2384,19 +2387,16 @@ void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, u
     params.sharcCapacity = mSharcCapacity;
     params.sharcEntries = mSharcCapacity ? (SharcEntry*)mSharcBuffer->getNativePtr() : nullptr;
     params.sharcPath = mSharcPathBuffer ? (SharcPathState*)mSharcPathBuffer->getNativePtr() : nullptr;
-    if (mSharcCapacity == 0)
-    {
-        return;
-    }
-
-    params.sharcMinSamples =
-        settings.contains("render/pt/sharcMinSamples") ? settings.getAs<uint32_t>("render/pt/sharcMinSamples") : 8u;
-    params.sharcDepth = settings.contains("render/pt/sharcDepth") ? settings.getAs<uint32_t>("render/pt/sharcDepth") : 1u;
 
     // The world size of one pixel at unit distance, times the pixels a voxel
     // should span. Everything scene-dependent -- field of view, resolution -- is
     // folded in here so that the setting itself is not. Same expression the
     // Metal backend fills its sharcBaseSize with.
+    //
+    // Filled whether or not the cache is allocated, which the early return below
+    // used to prevent: DebugMode::eSharcGrid draws the voxels from this number
+    // alone, and choosing a voxel size by looking at it is something you do
+    // *before* switching the cache on.
     const float aspect = height > 0 ? (float)width / (float)height : 1.0f;
     const float tanHalfFov = std::tan(glm::radians(camera.fovForAspect(aspect)) * 0.5f);
     const float pixelAngle = height > 0 ? 2.0f * tanHalfFov / (float)height : 1.0f;
@@ -2405,22 +2405,171 @@ void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, u
                                   4.0f;
     params.sharcBaseSize = pixelAngle * std::max(1.0f, voxelPixels);
 
-    // A cache filled under a camera that has since moved describes voxels that
-    // are no longer where it thinks they are: the level follows the distance to
-    // the eye, so the same point quantises differently once the eye moves. The
-    // accumulator's own restart is exactly the moment the renderer declares the
-    // previous frames not to describe this one, so it is the moment to drop the
-    // cache too.
-    if (getSharedContext().mSubframeIndex == 0)
+    if (mSharcCapacity == 0)
+    {
+        // Cleared before the early return, not after it.
+        //
+        // These two are read by connectToLight, which is not gated on the cache
+        // being on -- it runs on every next-event connection in every scene. So
+        // leaving them at whatever the last frame set would have a scene that
+        // switched the cache off dereferencing the light bitset of a buffer
+        // that has since been freed, on every light sample.
+        params.sharcResponsive = 0u;
+        params.sharcResponsiveLights = nullptr;
+        return;
+    }
+
+    params.sharcMinSamples =
+        settings.contains("render/pt/sharcMinSamples") ? settings.getAs<uint32_t>("render/pt/sharcMinSamples") : 8u;
+    params.sharcDepth = settings.contains("render/pt/sharcDepth") ? settings.getAs<uint32_t>("render/pt/sharcDepth") : 1u;
+    params.sharcReadMaxSubframe = settings.contains("render/pt/sharcReadFrames") ?
+                                      settings.getAs<uint32_t>("render/pt/sharcReadFrames") :
+                                      128u;
+
+    // The temporal window, and how long an unvisited entry survives. Both are
+    // frames, both go to the resolve pass, and both are clamped there to the
+    // SDK's bounds -- a stale threshold below kStaleFrameNumMin in particular
+    // costs more in re-insertion than the table it frees is worth.
+    mSharcAccumFrames = settings.contains("render/pt/sharcAccumFrames") ?
+                            settings.getAs<uint32_t>("render/pt/sharcAccumFrames") :
+                            32u;
+    mSharcStaleFrames = settings.contains("render/pt/sharcStaleFrames") ?
+                            settings.getAs<uint32_t>("render/pt/sharcStaleFrames") :
+                            64u;
+    mSharcResponsiveFrames = settings.contains("render/pt/sharcResponsiveFrames") ?
+                                 settings.getAs<uint32_t>("render/pt/sharcResponsiveFrames") :
+                                 4u;
+
+    // Responsive lighting is a property of the scene, not a setting: it is on
+    // exactly when some light asked for it. The setting below can only turn it
+    // off, which is what makes it usable as an A/B against a scene that has one.
+    const bool responsiveAllowed = !settings.contains("render/pt/sharcResponsiveLighting") ||
+                                   settings.getAs<bool>("render/pt/sharcResponsiveLighting");
+    const uint32_t responsive = (responsiveAllowed && mSharcResponsiveLightCount > 0) ? 1u : 0u;
+    if (responsive != params.sharcResponsive)
+    {
+        // The split changes what an entry holds, so the entries that were filled
+        // under the other setting are answers to a different question.
+        mSharcClearPending = true;
+    }
+    params.sharcResponsive = responsive;
+    // getNativePtr() rather than getPtr(): the latter hands back a CUdeviceptr,
+    // and casting an integer to a pointer is both a tidy error here and a real
+    // pessimisation. The device address is already a pointer on this side.
+    params.sharcResponsiveLights =
+        responsive ? static_cast<const uint32_t*>(mSharcResponsiveLightBuffer->getNativePtr()) : nullptr;
+
+    // Kept for the resolve pass, which runs after the launch and has no camera.
+    //
+    // Derived exactly as the device derives it -- the translation of the inverse
+    // view, which is what params.viewToWorld[3,7,11] holds a few lines below --
+    // rather than from Camera::position. The two agree, but only one of them is
+    // guaranteed to: the voxel level a shading point lands in and the level
+    // reprojection looks for have to be computed from the same eye, and a
+    // discrepancy there would show up as reprojection quietly finding nothing.
+    {
+        const glm::mat4 viewToWorld = glm::inverse(camera.matrices.view);
+        mSharcCameraPosition[0] = viewToWorld[3][0];
+        mSharcCameraPosition[1] = viewToWorld[3][1];
+        mSharcCameraPosition[2] = viewToWorld[3][2];
+    }
+
+    // An explicit reset, from the editor's button or a config. Consumed here so
+    // that holding the setting true does not clear the table every frame.
+    if (settings.contains("render/pt/sharcReset") && settings.getAs<bool>("render/pt/sharcReset"))
+    {
+        mSharcClearPending = true;
+        getSettings()->setAs<bool>("render/pt/sharcReset", false);
+    }
+
+    // The scene itself changing is a different matter from the camera moving:
+    // the voxels still exist, but what they saw does not. resetTemporalHistory()
+    // is the renderer's own declaration that nothing from before applies.
+    if (mResetTemporalHistory)
     {
         mSharcClearPending = true;
     }
+
     if (mSharcClearPending)
     {
         CUDA_CHECK(cudaMemsetAsync(reinterpret_cast<void*>(mSharcBuffer->getPtr()), 0,
                                    (size_t)mSharcCapacity * sizeof(SharcEntry), mState.stream));
         mSharcClearPending = false;
     }
+}
+
+/// Fold one frame of deposits into the cache. See sharc_resolve.h.
+///
+/// Ordering is the whole of the correctness here, and it is why this is a
+/// separate pass rather than something the shading path does inline:
+///
+///     launch            paths atomicAdd into `accum`
+///     -- stream order --
+///     resolve           merges `accum` into `resolved`, ages, evicts, zeroes
+///     -- stream order --
+///     next launch       paths read `resolved`
+///
+/// Everything runs on mState.stream, so each stage sees the previous one's
+/// writes without an explicit barrier -- the CUDA stream is the barrier. Moving
+/// either of these off that stream reintroduces the race silently: the symptom
+/// is a cache that reads a frame's partial sums, which looks like noise rather
+/// than like a synchronisation bug.
+void OptiXRender::resolveSharc()
+{
+    if (mSharcCapacity == 0 || !mSharcBuffer)
+    {
+        return;
+    }
+
+    SharcEntry* entries = reinterpret_cast<SharcEntry*>(mSharcBuffer->getNativePtr());
+
+    SharcResolveParams resolveParams;
+    resolveParams.capacity = mSharcCapacity;
+    resolveParams.accumFrameNumMax = mSharcAccumFrames;
+    resolveParams.staleFrameNumMax = mSharcStaleFrames;
+    resolveParams.responsiveFrameNumMax = mSharcResponsiveFrames;
+    for (int i = 0; i < 3; ++i)
+    {
+        resolveParams.cameraPosition[i] = mSharcCameraPosition[i];
+        resolveParams.cameraPositionPrev[i] = mSharcPrevCameraPosition[i];
+    }
+    // Nothing to reproject on the first frame, and nothing to reproject from a
+    // camera that has not moved -- in which case the probe would find the entry
+    // itself half the time and a neighbour it has no business blending the rest.
+    const float dx = mSharcCameraPosition[0] - mSharcPrevCameraPosition[0];
+    const float dy = mSharcCameraPosition[1] - mSharcPrevCameraPosition[1];
+    const float dz = mSharcCameraPosition[2] - mSharcPrevCameraPosition[2];
+    resolveParams.reproject = mSharcHasPrevCameraPosition && (dx * dx + dy * dy + dz * dz) > 1e-12f;
+
+    sharcResolve(entries, resolveParams, mState.stream);
+
+    for (int i = 0; i < 3; ++i)
+    {
+        mSharcPrevCameraPosition[i] = mSharcCameraPosition[i];
+    }
+    mSharcHasPrevCameraPosition = true;
+
+    // Occupancy, only while something is asking for it. The counter is read back
+    // a frame late on purpose: the alternative is synchronising the render
+    // stream for a number that goes into a debug panel.
+    const SettingsManager& settings = *getSettings();
+    const bool wantOccupancy =
+        settings.contains("render/pt/sharcReportOccupancy") && settings.getAs<bool>("render/pt/sharcReportOccupancy");
+    if (!wantOccupancy)
+    {
+        mSharcOccupancyCounter.reset();
+        mSharcOccupancyEntries = 0;
+        return;
+    }
+    if (!mSharcOccupancyCounter)
+    {
+        mSharcOccupancyCounter.reset(new OptixBuffer(sizeof(uint32_t)));
+    }
+    uint32_t* counter = reinterpret_cast<uint32_t*>(mSharcOccupancyCounter->getNativePtr());
+    // Last frame's count, before this frame overwrites it.
+    CUDA_CHECK(cudaMemcpyAsync(&mSharcOccupancyEntries, counter, sizeof(uint32_t), cudaMemcpyDeviceToHost,
+                               mState.stream));
+    sharcCountOccupancy(entries, mSharcCapacity, counter, mState.stream);
 }
 
 void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t height)
@@ -3375,6 +3524,11 @@ void OptiXRender::render(Buffer* output)
         else
         {
             markStageSubmitted(optix::GpuStage::PathTrace, mState.stream);
+            // Update -> resolve -> query, in stream order. The launch above is
+            // the update and the next one is the query; this is what makes the
+            // deposits it just made readable, and ages out what the camera has
+            // left behind. See resolveSharc().
+            resolveSharc();
         }
 
         // Update subframe index for accumulation.
@@ -3495,7 +3649,13 @@ void OptiXRender::render(Buffer* output)
         std::max(settings.getAs<float>("render/post/tonemapper/maxEDR"), 1.0f);
     mPendingPresentation.gamma = gamma;
     mPendingPresentation.tonemapper = static_cast<uint32_t>(tonemapperType);
-    mPendingPresentation.content = params.debug == static_cast<uint32_t>(DebugMode::eNone) ?
+    // One debug view is not in display values: DebugMode::eSharcRadiance shows
+    // what the radiance cache holds, in scene units. Looking at it is only
+    // useful beside the beauty render at the same exposure, and bypassing the
+    // presentation transform would make every voxel above one the same white.
+    // Everything else the debug menu offers -- normals, motion, the guides, the
+    // cache's grid, occupancy and bounce heatmaps -- is already a colour.
+    mPendingPresentation.content = DEBUG_MODE_IS_SCENE_LINEAR(params.debug) ?
                                        PresentationContent::SceneLinear :
                                        PresentationContent::DebugDisplayLinear;
 
@@ -4424,6 +4584,42 @@ void OptiXRender::createLightBuffer()
 {
     createOrUpdateBuffer(mLightBuffer, mScene->getLights());
     createIesBuffer();
+    createSharcResponsiveLightBuffer();
+}
+
+/// One bit per light, set where the scene marked the light responsive.
+///
+/// Built here rather than in updateSharcParams because it is a property of the
+/// light set and changes only when that does -- and because a per-frame rebuild
+/// would upload a bitset every frame for a feature most scenes never switch on.
+///
+/// The buffer is dropped entirely when no light is responsive, which is what
+/// `params.sharcResponsive` reads, and that value is bound into the pipeline as
+/// a constant: a scene without a responsive light compiles out the second probe
+/// on every cached read and the second deposit on every path.
+void OptiXRender::createSharcResponsiveLightBuffer()
+{
+    const auto& descs = mScene->getLightsDesc();
+    const size_t words = (descs.size() + 31u) / 32u;
+    std::vector<uint32_t> bits(words, 0u);
+    uint32_t responsiveCount = 0;
+    for (size_t i = 0; i < descs.size(); ++i)
+    {
+        if (descs[i].responsive)
+        {
+            bits[i >> 5u] |= 1u << (i & 31u);
+            ++responsiveCount;
+        }
+    }
+
+    mSharcResponsiveLightCount = responsiveCount;
+    if (responsiveCount == 0)
+    {
+        mSharcResponsiveLightBuffer.reset();
+        return;
+    }
+    createOrUpdateBuffer(mSharcResponsiveLightBuffer, bits);
+    STRELKA_INFO("Radiance cache: {} of {} lights are responsive", responsiveCount, descs.size());
 }
 
 void OptiXRender::createIesBuffer()

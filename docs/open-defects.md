@@ -30,6 +30,7 @@ answer, or an asset/converter note that does not need Chaos.
 | ~~9~~ | ~~OptiX had no atmospheric scattering at all~~ | done — see Closed | `fog_check.py` both directions within 1% of Cycles at matched depth |
 | 10 | A volume vertex costs a bounce Cycles does not charge | `OptixRender.cu` raygen loop / `wavefront.metal`; both backends | the fog probe reads 1.00 at `max_depth` 2, not 3, against a `max_bounces` 2 reference |
 | 11 | The iso bathroom's firefly tail | estimator, and an asset the machine does not have | 256 spp noise near the ladder's rows rather than 4x them |
+| 12 | Metal's radiance cache has no resolve pass | `src/shaders/metal/sharc.h` + a new kernel | Metal's cache survives a camera movement, as OptiX's now does |
 
 6 is smaller. 7 is not a renderer bug. 10 is a convention to settle, not a bug to
 find: it is measured, it is the same on both backends, and picking a side changes
@@ -175,6 +176,296 @@ becomes a number rather than a look. If OptiX is genuinely the noisier one, the
 next thing to read is `connectToLight`'s solid-angle pdf against Metal's on a
 grazing rect light, which is the one estimator this scene leans on hardest and
 the ladder's single-light rows are too easy to expose.
+
+---
+
+## 12. Metal's radiance cache is still the one-frame version
+
+**OptiX-only fix, deliberately, and this is the hand-off.** The two backends'
+caches were a port of each other -- `src/shaders/optix/sharc.h` says so, and says
+they must stay one -- and they no longer are.
+
+**What OptiX gained.** An entry is now in two halves, after SHARC v1.8.3: `accum`
+is what a voxel gathered *this frame* and is written by atomics from the shading
+path, `resolved` is what it has concluded *across* frames and is the only half a
+path reads. A resolve pass (`src/shaders/optix/sharc_resolve.cu`) runs once per
+frame between launches and merges the first into the second under a bounded
+temporal window, ages entries nobody visited, and hands back the slots of ones
+that have gone stale. The entry grew from 20 bytes to 32.
+
+**Why it mattered, and the measurement that says so.** The old host code cleared
+the whole table whenever accumulation restarted. Accumulation restarts on every
+camera movement, so in the editor the table was wiped several times a second and
+never held more than one frame of anything.
+
+With the resolve pass the cache demonstrably shortens paths, which it could not
+be shown to do before. `DebugMode::eSharcBounces` -- the bounce-count heatmap,
+green for one indirect bounce and red for two or more -- is the direct
+measurement:
+
+| scene | red (deep) off -> on | green (one bounce) off -> on |
+|---|---|---|
+| cornell_box, 512x384, 64 spp, depth 8 | 0.466 -> 0.068 | 0.312 -> 0.624 |
+| pine_scene, 1280x720, 120 spp, depth 8 | 0.488 -> 0.349 | 0.537 -> 0.628 |
+
+and it costs nothing in accuracy: ratio **0.9997** against the same render with
+the cache off on pine at depth 8 and 16, 0.9925 on the Cornell box.
+
+**It still does not make the pine forest faster, and that is not a contradiction.**
+400 spp at 1280x720, `texture_downscale` 2, three runs each, wall clock:
+
+| depth | cache off | cache on |
+|---|---|---|
+| 4 | 5.5 / 5.7 / 5.6 s | 5.7 / 6.0 / 6.1 s |
+| 8 | 6.2 / 5.9 / 5.7 s | 5.8 / 5.8 / 5.8 s |
+| 16 | 5.7 / 5.7 / 5.7 s | 5.8 / 5.8 / 5.8 s |
+
+Neutral at depth 8 and 16, and about 5% *worse* at depth 4, where there is no
+path left to cut and the cache is pure overhead. This is the same conclusion
+`docs/open-perf.md` already recorded, and the reason is in that file rather than
+in this one: pine is not bound by path length. Its stall profile is
+`long_scoreboard` 38.1 cycles per issued instruction with the SM at 6-12%, so
+removing traversal work removes something the frame was not waiting on.
+
+**Do not benchmark this on short runs.** An idle 4090 sits at 270 MHz against a
+3105 MHz maximum, and a 60-spp render is under a second of GPU work -- not long
+enough for the clocks to come up. The same configuration measured 8.8 to 14.4
+ms/sample run to run that way, which is wide enough to "show" any result wanted.
+Every number above is 400 spp with a warm-up run discarded.
+
+**What Metal has to gain to be a port again**, in the order it matters:
+
+1. The split entry and the resolve dispatch. Metal is a wavefront, so this is
+   one more kernel in the per-frame sequence rather than a call after the
+   launch -- but the arithmetic is already shared and already tested:
+   `oka::sharc::resolveEntry` in `src/shaders/optix/sharc_grid.h` is a pure
+   function of one entry, compiles on the host, and has the cases in
+   `tests/render/test_sharc_grid.cpp`. Metal needs to call it, not rewrite it.
+2. Stop clearing on accumulation restart. This is the whole point; without (1)
+   it cannot be done, because nothing else ages the entries the camera left.
+3. The four debug views. `DebugMode::eSharcGrid`, `eSharcRadiance`,
+   `eSharcOccupancy` and `eSharcBounces` are already in Metal's `ShaderTypes.h`
+   so the two enums stay one numbering and the editor keeps one menu; Metal
+   currently renders normally when one is selected. `src/shaders/optix/sharc.h`
+   (`sharcDebugColour`, `sharcDebugOccupancy`) and the raygen's heatmap are the
+   reference.
+4. Rounding in `encode`. Older, and still not done on Metal: it truncates where
+   OptiX rounds, which is a quarter of a percent of systematic darkening for as
+   long as the cache is on. Measured -- `00_calibration` and `02_basecolor` both
+   read 0.997 truncating and 1.000 rounding.
+5. The 64-bit key, and then reprojection and responsive lighting on top of it.
+   The key layout, the adjacent-level walk and the blend are all in
+   `sharc_grid.h` and all tested on the host, so this is the same kind of port
+   as (1): call the arithmetic, do not rewrite it. Metal's entry is still the
+   20-byte one, so this is where the two backends are furthest apart.
+
+**Reprojection and responsive lighting are on OptiX too**, and both needed the
+key to stop being a checksum first. It is now the SDK's layout -- 17 bits per
+axis, 9 for the level, 3 for the normal bucket, one flag -- which costs four
+bytes an entry (32 -> 40) and buys two things a hash cannot give:
+
+* **Adjacent-level reprojection.** The level under a point follows its distance
+  to the eye, so moving the eye re-quantises a world that has not moved: the
+  point lands in a different voxel and its new entry starts from nothing while
+  everything the cache knew sits one level away, waiting to be evicted unread.
+  The resolve pass now decodes an entry's voxel, works out which way the level
+  moved, and blends the neighbour in. Port of `SharcGetAdjacentLevelHashKey` and
+  the `SHARC_BLEND_ADJACENT_LEVELS` arm of `SharcResolveEntry`.
+* **Responsive lighting.** A light marked `responsive` (light panel, or
+  `"responsive": true` in the `<stem>_light.json` sidecar) has its contribution
+  cached in a second entry per voxel on a much shorter window, so it can change
+  faster than the rest of the cache follows.
+
+**Where the responsive port departs from the SDK, and why.** The SDK splits by
+*component* at each vertex -- direct lighting from a responsive light goes to the
+responsive entry, everything else to the main one -- and keeps the two entries
+adjacent so a six-bit index offset can be packed into the path state it carries
+between vertices. This backend has no such state: the deposit happens once, at
+the end of the path, from a per-pixel record. So:
+
+* The split is made on the path. The record accumulates how much of what the
+  path gathered came from responsive lights, and the deposit subtracts it. Still
+  an additive split, which is what makes a reader's `main + responsive` correct;
+  splitting by *path* instead would make the two means overlap and double-count.
+* Both entries are claimed together and deposited into together, including when
+  the responsive half receives zero, so the two means are over the same paths.
+* Consequently the responsive entry never needs its neighbour's sample count,
+  and the SDK's rule that Resolve must not clear accumulation under responsive
+  lighting -- with the host clearing it before every update instead -- does not
+  apply. One pass fewer.
+* The responsive entry is hashed independently rather than kept adjacent, so a
+  query costs a second probe. In exchange the two do not compete for the same
+  eight slots, and no index offsets need packing.
+
+**Two defects found by looking at the isometric bathroom in the editor**, both
+reported as "the mirror got worse" and "the cache buys nothing", and both real:
+
+* **A surface reached by a delta bounce was being answered for by the cache.**
+  `prd->depth` counts segments, not scattering events, so a mirror at depth 0
+  put what it reflects at depth 1 -- where the gate let the cache answer. What
+  the viewer saw *in* the mirror, and anything behind the shower glass (a delta
+  transmission is specular too), was replaced by a voxel average. On the bath
+  water this is unmistakable once seen: rectangular blocks of constant colour
+  through the surface. The gate now also requires `!prd->specularBounce`. This
+  is the SDK's own rule and its own listed mistake -- a replaced primary surface
+  is still a primary surface -- and it was simply not implemented.
+
+* **The cache put a floor under the render's convergence.** Its error is one
+  value per voxel, held across a temporal window, so it is correlated in space
+  *and* time and does not average away with samples. Plain path tracing keeps
+  converging past it. Measured on iso_bathroom at 960x540, depth 8, against a
+  4096-spp reference of the same backend, taking the residual that survives a
+  9-pixel blur so the number is structured error rather than noise:
+
+  | spp | no cache | cache | + mirror fix | + read cutoff |
+  |---|---|---|---|---|
+  | 16 | 0.154 | 0.098 | 0.108 | 0.108 |
+  | 64 | 0.063 | 0.039 | 0.042 | 0.042 |
+  | 256 | 0.022 | 0.019 | 0.020 | 0.019 |
+  | 1024 | **0.0064** | **0.0127** | 0.0123 | **0.0064** |
+
+  Below the crossover the cache is the better image as well as the faster one;
+  above it the cache is the only thing between the render and convergence. So
+  reads now stop after `render/pt/sharcReadFrames` accumulated samples (default
+  128) while deposits carry on, which leaves the table warm for the next camera
+  movement. At 1024 spp that restores the no-cache structured error exactly, and
+  it changes nothing at 16 and 64 spp.
+
+  This is not a defect in the port -- it is what a world-space cache is. SHaRC
+  is a real-time technique, aimed at one sample per pixel per frame with a
+  denoiser downstream; a renderer that accumulates a still has a regime where it
+  helps and a regime where it does not, and the cutoff is where they meet.
+
+* **The cutoff then disabled the cache in the one place it matters most.** With
+  accumulation off the renderer reports `mSubframeIndex` as the whole sample
+  budget rather than zero -- deliberately, because a counter that reset every
+  frame hung StrelkaCLI on the single-hit debug views -- so `subframe_index` is
+  256 from the second frame on and `subframe_index < 128` was never true. The
+  cache was never read. The limit now applies only while the film is
+  accumulating, which is also the only situation its reasoning covers: with
+  accumulation off every frame is a fresh one-sample image, nothing is
+  converging past the cache, and the cache is the entire reason the frame is not
+  black.
+
+**How large the effect is, and where it is not.** The reference is NVIDIA's own
+banner: one sample per pixel, black room without the cache, lit room with it.
+That is not what this scene does, and the reason is the scene rather than the
+port.
+
+iso_bathroom, 960x540, depth 8, one sample against a warm cache, graded against
+a converged reference at the same pose:
+
+| | rel |
+|---|---|
+| one sample, no cache | 0.9587 |
+| one sample, warm cache | 0.9056 |
+
+Six percent. Both images are essentially noise at one sample.
+
+**Why it is only that much is still open**, and three explanations have been
+measured and rejected, so nobody need try them again:
+
+* *The cached values are undersampled.* No -- raising the samples a voxel must
+  carry before a path will trust it makes the image **worse** (rel 0.9056 at 8,
+  0.9174 at 64, 0.9489 at 512), because fewer voxels qualify. The cache is
+  already giving what it has.
+* *The scene's light is direct, so next-event estimation gets there first and
+  leaves the cache nothing.* No -- with `estimator_mode = 1`, which removes
+  next-event estimation entirely and forces every path to find the light by
+  sampling, the cache is worth 19% against 17% with it. Barely moved.
+* *The update paths pollute the image.* One path in eight never reads and traces
+  to the end, and unlike the SDK -- whose update pass is a separate launch that
+  never touches the film -- ours are part of the render. Raising the share to one
+  in sixty-four moved 17% to 18%.
+
+What is established is the size: about 18% less error at 16-32 samples, 36% less
+structured error, and 12% off the frame. Those are worth having and they are not
+the banner.
+
+Where the cache does pay on this scene: 21% less error and 36% less structured
+error at 16 samples, 18% at 32, and 12% off the frame time. Those are worth
+having and they are not an order of magnitude.
+
+> An earlier revision of this file claimed 88% here. That figure was wrong: the
+> harness that produced it reset the film after the warm-up but left the loop's
+> own bound counting from the restart, so the "one sample" render with the cache
+> was really 201 samples and the one without it really was one. Corrected above.
+
+**The eligibility test decides how much of this is reachable at all.** The port
+originally gated reads on `roughness > 0.3` at the surface being *hit*, which is
+the wrong surface -- what matters is the lobe that launched the segment -- and
+far too blunt. Share of paths the cache terminates after a single bounce, one
+sample, warm cache:
+
+| | 1 bounce | 3+ bounces |
+|---|---|---|
+| no cache | 44.9% | 37.7% |
+| `roughness > 0.3` on the hit | 54.9% | 26.3% |
+| no gate at all | 75.9% | 13.8% |
+| SDK segment-length + footprint test | 57.7% | 30.7% |
+
+The gate is what keeps a reflection sharp, so removing it is not on the table --
+that is what put voxel blocks through the bath water. The SDK's test
+(`oka::sharc::mayReadCache`, AGENTS.md 14.8) asks the right question instead: is
+the segment longer than a voxel's diagonal, and had the lobe that launched it
+already spread wider than a voxel by the time it arrived. It recovers a little
+of the gap at the same image quality, and the rest of the gap is paths that
+genuinely must not read.
+
+To see the cache in the regime it is built for, turn off *Accumulate while
+still* so every frame is one sample again -- and expect the size of effect above
+rather than the banner's.
+
+**Three more things a correctness pass over the cache turned up**, all fixed:
+
+* **The segment length was measured from the wrong end.** The eligibility test
+  used `optixGetRayTmax()`, which is the distance from wherever the ray was last
+  *restarted* -- a cutout, a medium boundary -- not from the vertex that
+  scattered. `prd->misDistance` already carries the difference, for the MIS
+  weight, for the same reason. Under-measuring fails both halves of the test, so
+  a scene with alpha cutouts or glass in front of things refused the cache on
+  paths that qualify. No measurable change on the bathroom; it will matter on the
+  pine forest.
+* **A scattering event inside a medium inherited the lobe that entered it.**
+  Entering water or glass is a delta transmission, roughness zero, so every
+  vertex inside the medium was refused. A phase function, and the cosine lobe off
+  a subsurface exit, are as broad as a lobe gets and are now recorded as such.
+  Worth 16.8% -> 17.2% on the bathroom.
+* **The overflow guard had no headroom for its own race.** `kMaxCount` sat
+  exactly at the arithmetic bound, and the guard is a plain read followed by four
+  atomic adds -- so every thread already past the read still deposits, which on
+  this hardware is a hundred thousand or so. Halved, which costs nothing: the
+  accumulator is cleared every frame anyway.
+
+**And it does pay for itself, where the regime is right.** iso_bathroom,
+1920x1080, depth 8, 1500 spp, warm clocks, two runs each: **12.6 / 12.7 s
+without the cache against 11.1 / 11.2 s with it**, i.e. 12%. In the editor that
+is 12% off every frame you are moving the camera through, since accumulation
+restarts on each movement and the render is therefore always below the cutoff.
+
+Two more things that came out of measuring the responsive port, both worth
+keeping in mind before changing any of this:
+
+* **The two halves must have the same lifetime.** The SDK uses its responsive
+  frame count for the eviction threshold as well as the window; here that read
+  0.68% dark (ratio 0.9932 where the split should be exact), because a voxel
+  visited intermittently lost its responsive half while the main half survived,
+  and every read of it then returned `total - responsive` alone. The window is
+  short; the lifetime is the main one's.
+* **A find must not stop at the first empty slot.** That is the ordinary
+  open-addressing shortcut and it was correct until eviction existed -- eviction
+  frees a slot in the middle of a probe run, and everything the run reaches past
+  that hole becomes invisible. For the main lookup that is a hit-rate loss; for
+  the responsive half it is the same 0.68% bias, because failing to find one half
+  of an additive split does not return "not cached". Both fixed: ratio 0.9999.
+
+**What is still not ported, on either backend**, so nobody goes looking: the
+resolve pass's linear-probe re-find, which needs an entry's neighbours and so
+cannot live in a pure function of one entry; SH-directional encoding
+(`SHARC_ENABLE_SH_ENCODING`) and material demodulation, which are SDK
+compile-time options neither backend sets; and cache resampling during update
+(`SHARC_ENABLE_CACHE_RESAMPLING`), which belongs to the SDK's separate update
+pass and has no counterpart in a single-launch integrator.
 
 ---
 

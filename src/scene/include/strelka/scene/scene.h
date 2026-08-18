@@ -268,6 +268,17 @@ public:
         /// V-Ray's "invisible" flag means. Distinct from `enabled`, which turns
         /// the light off entirely.
         bool visibleToCamera = true;
+        /// Whether this light's contribution is cached separately, in the
+        /// radiance cache's short-window "responsive" entries.
+        ///
+        /// For a light that changes fast enough that the cache's ordinary
+        /// temporal window lags visibly behind it -- a torch being swung, a lamp
+        /// switched on, anything animated. The cache then tracks this light's
+        /// contribution over a few frames while the rest of the signal keeps
+        /// averaging over dozens, which is what the two windows are for. Costs a
+        /// second entry per voxel and a second deposit per path, so it is off
+        /// unless a light asks for it. Ignored entirely when the cache is off.
+        bool responsive = false;
         std::string name;
 
         glm::float3 color{ 1.0f };

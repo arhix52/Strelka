@@ -153,7 +153,16 @@ Two mechanisms behind that, both now measured rather than inferred:
   11.2 vs 11.0 ms/sample. Its 4.46 GB of textures are not what the DRAM read
   traffic is.
 - **`texture_lod`, `sharc`, `opacity_micromaps`** on pine: 11.0, 11.0, 11.2 --
-  all inside run-to-run noise. Micromaps in particular build nothing there: all
+  all inside run-to-run noise. `sharc` has since been re-measured against a cache
+  that actually persists between frames (it used to be cleared on every
+  accumulation restart, so it never held more than one frame). It now cuts the
+  scene's deep-bounce heatmap by 29% and still does not move the frame time:
+  400 spp, depth 8, 5.7-6.2 s off against 5.8 s on. That is consistent with the
+  rest of this file rather than surprising -- pine stalls on `long_scoreboard`
+  at 38.1 cycles with the SM at 6-12%, so removing traversal work removes
+  something the frame was not waiting on. See `docs/open-defects.md` entry 12 for
+  the full table, and for the warning about measuring any of this on runs too
+  short for the GPU clocks to come up. Micromaps in particular build nothing there: all
   144 meshes log `opacity micromap resolves nothing, skipped`, which is a
   separate question (does that scene have alpha cutouts at all?) rather than a
   cost.

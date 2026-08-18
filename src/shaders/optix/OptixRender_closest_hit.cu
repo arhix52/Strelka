@@ -213,7 +213,24 @@ struct LightConnection
     /// against the BSDF pdf -- which is what this code used to do -- discards the
     /// share of the light the BSDF strategy is credited with and never delivers.
     bool isDelta;
+    /// The light behind this connection is marked responsive, so whatever it
+    /// delivers is cached in the short-window half of the voxel rather than the
+    /// long-window one. Always false for the environment: a dome is the one
+    /// emitter that cannot be swung around or switched on mid-shot, and giving
+    /// it a responsive entry would put most of an outdoor scene's light on the
+    /// short clock for nothing.
+    bool isResponsive;
 };
+
+/// True when light `id` is one the scene marked responsive.
+static __forceinline__ __device__ bool isResponsiveLight(uint32_t id)
+{
+    if (params.sharcResponsive == 0u || params.sharcResponsiveLights == nullptr)
+    {
+        return false;
+    }
+    return (params.sharcResponsiveLights[id >> 5u] & (1u << (id & 31u))) != 0u;
+}
 
 static __forceinline__ __device__ LightConnection makeEmptyConnection()
 {
@@ -224,6 +241,7 @@ static __forceinline__ __device__ LightConnection makeEmptyConnection()
     c.tMax = 0.0f;
     c.needsRay = false;
     c.isDelta = false;
+    c.isResponsive = false;
     return c;
 }
 
@@ -406,6 +424,7 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
             const float selectionPdf = (params.scene.numLights > 0) ? 0.5f : 1.0f;
             LightConnection c = connectEnvLight(sampler, si, curveRadius, volumeEvent);
             c.pdf *= selectionPdf;
+            c.isResponsive = false;
             return c;
         }
         // Sample local light (remap u from [0, 0.5) to [0, 1))
@@ -413,6 +432,7 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
         LightConnection c =
             connectLight(sampler, params.scene.lights[lightId], si, curveRadius, volumeEvent);
         c.pdf *= 0.5f / params.scene.numLights;
+        c.isResponsive = isResponsiveLight(lightId);
         return c;
     }
 
@@ -430,6 +450,7 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
     LightConnection c =
         connectLight(sampler, params.scene.lights[lightId], si, curveRadius, volumeEvent);
     c.pdf *= 1.0f / params.scene.numLights;
+    c.isResponsive = isResponsiveLight(lightId);
     return c;
 }
 
@@ -452,10 +473,16 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
 ///
 /// Returns the radiance to add at this vertex, already multiplied by throughput
 /// and clamped, or zero.
+/// `outResponsive` reports whether the survivor's light is one the scene marked
+/// responsive, so the caller can route what it delivered to the short-window
+/// half of the voxel. Resampling keeps exactly one candidate, so the answer is a
+/// single flag rather than a split of the returned contribution.
 static __device__ float3 estimateDirectLighting(PerRayData* prd,
                                                 const SurfaceInteraction& si,
-                                                float curveRadius)
+                                                float curveRadius,
+                                                bool& outResponsive)
 {
+    outResponsive = false;
     const uint32_t candidates = max(params.risCandidates, 1u);
     // A fibre has no back side to reject: the Chiang lobe's TT term is light that
     // entered one side and left the other, and on a bright groom it is four fifths
@@ -545,6 +572,7 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
     // target the survivor was kept for. At one candidate it is 1 / pdf and every
     // line here is the arithmetic this code had.
     const float W = (weightSum / (float)candidates) / bestTarget;
+    outResponsive = bestConn.isResponsive;
     const float3 weight = prd->throughput * bestF * W;
     if (weight.x == 0.0f && weight.y == 0.0f && weight.z == 0.0f)
     {
@@ -1044,6 +1072,16 @@ static __device__ void scatterInMedium(PerRayData* prd,
     prd->lastBsdfPdf = phasePdf;
     prd->misDistance = 0.0f;
     prd->specularBounce = false;
+    // A phase function, or a cosine lobe off a subsurface exit: both are as
+    // broad as a lobe gets, so the cache's eligibility test should treat the
+    // next segment as launched from a fully rough surface. Without this the
+    // segment inherits whatever surface sent the ray into the medium -- for
+    // water or glass that is a delta transmission, roughness zero, and the test
+    // then refuses the cache for every vertex inside the medium.
+    if (params.sharcCapacity != 0u)
+    {
+        params.sharcPath[launchPixelIndex(params)].launchRoughness = 1.0f;
+    }
     prd->neeDone = didNee;
     ++prd->mediumStep;
 
@@ -1152,6 +1190,16 @@ static __device__ void scatterInFog(PerRayData* prd,
     prd->lastBsdfPdf = phasePdf;
     prd->misDistance = 0.0f;
     prd->specularBounce = false;
+    // A phase function, or a cosine lobe off a subsurface exit: both are as
+    // broad as a lobe gets, so the cache's eligibility test should treat the
+    // next segment as launched from a fully rough surface. Without this the
+    // segment inherits whatever surface sent the ray into the medium -- for
+    // water or glass that is a delta transmission, roughness zero, and the test
+    // then refuses the cache for every vertex inside the medium.
+    if (params.sharcCapacity != 0u)
+    {
+        params.sharcPath[launchPixelIndex(params)].launchRoughness = 1.0f;
+    }
     prd->neeDone = didNee;
     // No passedThrough: an atmospheric scattering event is a bounce like any
     // other, so the raygen loop charges it a depth and rolls roulette on it. A
@@ -1300,6 +1348,16 @@ static __device__ void exitMedium(PerRayData* prd,
     prd->lastBsdfPdf = fmaxf(dot(outward, exitDir), 0.0f) * invPi;
     prd->misDistance = 0.0f;
     prd->specularBounce = false;
+    // A phase function, or a cosine lobe off a subsurface exit: both are as
+    // broad as a lobe gets, so the cache's eligibility test should treat the
+    // next segment as launched from a fully rough surface. Without this the
+    // segment inherits whatever surface sent the ray into the medium -- for
+    // water or glass that is a delta transmission, roughness zero, and the test
+    // then refuses the cache for every vertex inside the medium.
+    if (params.sharcCapacity != 0u)
+    {
+        params.sharcPath[launchPixelIndex(params)].launchRoughness = 1.0f;
+    }
     prd->neeDone = didNee;
     prd->medium = 0u;
     prd->mediumStep = 0u;
@@ -1658,6 +1716,63 @@ extern "C" __global__ void __closesthit__radiance()
         return;
     }
 
+    // The two radiance-cache views that describe the primary surface. Both use
+    // exactly the quantities the cache itself uses -- si.position and
+    // si.shading_normal, not the geometry normal -- because a debug view that
+    // addresses a different voxel than the cache does is worse than none: it
+    // agrees often enough to be believed.
+    if (params.debug == (uint32_t)DebugMode::eSharcGrid)
+    {
+        // The voxels themselves. This is the view the SDK's own guidance leans
+        // on for choosing voxel size, and it needs no cache to be allocated --
+        // the grid is arithmetic, so the size can be dialled in before the
+        // cache is ever switched on.
+        const float3 cameraPosition =
+            make_float3(params.viewToWorld[3], params.viewToWorld[7], params.viewToWorld[11]);
+        const unsigned long long key = sharcVoxel(si.position, si.shading_normal, cameraPosition, params.sharcBaseSize,
+                                                  /*responsive=*/false);
+        prd->radiance = sharcDebugColour(oka::sharc::keyHash(key));
+        return;
+    }
+    if (params.debug == (uint32_t)DebugMode::eSharcRadiance && prd->depth == 0 && params.sharcCapacity != 0u)
+    {
+        // What the cache would answer at the primary surface, shown directly
+        // instead of through however many bounces normally stand between a
+        // lookup and the pixel. Black means the voxel is missing or has not
+        // resolved yet -- which is the difference the occupancy view explains.
+        //
+        // Written straight to the image, and the path then carries on shading
+        // normally, which is the whole trick: the voxels this view reads are
+        // filled by the bounces of this same path. Returning here instead --
+        // the obvious way to write it, and the way it was written first --
+        // leaves the cache empty and the view 99% black.
+        //
+        // The raygen skips its own write for this mode, so this is the only
+        // thing that puts a value in the pixel; it also clears the pixel first,
+        // so a camera ray that misses everything stays black rather than
+        // keeping the last frame's answer.
+        const float3 cameraPosition =
+            make_float3(params.viewToWorld[3], params.viewToWorld[7], params.viewToWorld[11]);
+        const unsigned long long key = sharcVoxel(si.position, si.shading_normal, cameraPosition, params.sharcBaseSize,
+                                                  /*responsive=*/false);
+        uint32_t slot = 0u;
+        // Never inserting: a debug view that populates the table changes the
+        // thing it is there to observe.
+        if (sharcFind(params.sharcEntries, params.sharcCapacity, key, false, slot))
+        {
+            float sampleNum = 0.0f;
+            float3 cached = sharcRead(params.sharcEntries, slot, sampleNum);
+            if (sampleNum > 0.0f)
+            {
+                // Shown the way a path would read it, responsive part included,
+                // or the view would disagree with the render beside it exactly
+                // where the responsive signal is the interesting thing.
+                cached += sharcReadResponsive(params.sharcEntries, params.sharcCapacity, key);
+                params.image[launchPixelIndex(params)] = make_float4(cached, 1.0f);
+            }
+        }
+    }
+
     // Coverage. MASK resolves to 0 or 1 and BLEND to its alpha, so one
     // stochastic test covers both: with probability (1 - opacity) the path
     // continues straight through, unchanged and unshaded. Nothing else about
@@ -1717,13 +1832,52 @@ extern "C" __global__ void __closesthit__radiance()
     // and it has nowhere left to record -- which is what this pixel's
     // SharcPathState::index being set means, and why it is part of the guard
     // rather than checked inside.
+    // A surface reached by a delta bounce is still the surface the eye is
+    // looking at, and must not be answered for by a voxel average.
+    //
+    // `prd->depth` counts segments, not scattering events, so a mirror at depth
+    // 0 puts what it reflects at depth 1 -- where this gate used to let the
+    // cache answer. What the viewer sees in the mirror was then replaced by the
+    // average over a voxel, and the same went for anything behind the shower
+    // glass, since a delta transmission is a specular event too. The SDK states
+    // this as its own rule and its own mistake to avoid: a replaced primary
+    // surface is still a primary surface.
+    //
+    // `specularBounce` is written at the end of this program for the bounce it
+    // generates, so here it describes the bounce that arrived -- exactly the
+    // question being asked. It is conservative in one direction: a mirror
+    // reached after a diffuse bounce also blocks the cache one vertex longer
+    // than it strictly must, which costs a caching opportunity and no accuracy.
+    // Reads stop once the render has accumulated past the point where the
+    // cache's own error is the larger of the two; deposits do not, so the table
+    // stays current for the next camera movement. See Params::sharcReadMaxSubframe
+    // for the measurement that sets the default.
+    //
+    // Only while the film is accumulating, and that clause is not a nicety. The
+    // limit exists because the cache's error is correlated and so stops being
+    // the smaller error once enough samples have been averaged -- which
+    // presupposes that samples are being averaged. With accumulation off every
+    // frame is a fresh one-sample image, there is nothing converging past the
+    // cache, and the cache is the entire reason the frame is not black.
+    //
+    // Without this clause the limit did the opposite of its job: with
+    // accumulation off the renderer reports mSubframeIndex as the *whole* sample
+    // budget rather than zero (OptixRender.cpp, and it does so deliberately --
+    // a counter that reset every frame hung StrelkaCLI on the single-hit debug
+    // views), so subframe_index is 256 from the second frame on and the cache
+    // was never read at all. Measured on iso_bathroom at one sample against a
+    // warm cache: 88% less error than no cache, and none of it was reaching the
+    // one configuration built to show it.
+    const bool sharcMayRead = params.sharcReadMaxSubframe == 0u || !params.enableAccumulation ||
+                              params.subframe_index < params.sharcReadMaxSubframe;
+
     if (params.sharcCapacity != 0u && params.sharcPath[launchPixelIndex(params)].index == SHARC_NO_ENTRY &&
-        prd->depth >= params.sharcDepth && si.roughness > oka::sharc::kMinRoughness)
+        prd->depth >= params.sharcDepth && !prd->specularBounce)
     {
         const float3 cameraPosition =
             make_float3(params.viewToWorld[3], params.viewToWorld[7], params.viewToWorld[11]);
-        uint32_t voxelHash = 0u, voxelKey = 0u;
-        sharcVoxel(si.position, si.shading_normal, cameraPosition, params.sharcBaseSize, voxelHash, voxelKey);
+        const unsigned long long voxelKey = sharcVoxel(si.position, si.shading_normal, cameraPosition,
+                                                       params.sharcBaseSize, /*responsive=*/false);
 
         // A fixed share of paths never read and always trace to the end, so the
         // cache keeps converging instead of freezing at whatever the first few
@@ -1735,12 +1889,49 @@ extern "C" __global__ void __closesthit__radiance()
         uint32_t slot = 0u;
         // Inserting, because this path is here to fill the slot in; a read that
         // misses simply carries on tracing.
-        if (sharcFind(params.sharcEntries, params.sharcCapacity, voxelHash, voxelKey, true, slot))
+        if (sharcFind(params.sharcEntries, params.sharcCapacity, voxelKey, true, slot))
         {
-            uint32_t cachedCount = 0u;
-            const float3 cached = sharcRead(params.sharcEntries, slot, cachedCount);
-            if (!updatePath && cachedCount >= params.sharcMinSamples)
+            // The resolved half, which is a frame behind and made of every
+            // deposit the voxel has kept inside its window -- not this frame's
+            // partial sums, which other paths are still writing.
+            float cachedSamples = 0.0f;
+            float3 cached = sharcRead(params.sharcEntries, slot, cachedSamples);
+            // The segment just traced, against the voxel it landed in. Both
+            // numbers are here rather than in the gate above because a path
+            // that may not *read* may still record: the deposit is an honest
+            // estimate whatever lobe produced it, and refusing it would starve
+            // exactly the voxels a tight lobe keeps looking at.
+            const float dx = si.position.x - cameraPosition.x;
+            const float dy = si.position.y - cameraPosition.y;
+            const float dz = si.position.z - cameraPosition.z;
+            const float voxelSize =
+                oka::sharc::voxelForDistance(sqrtf(dx * dx + dy * dy + dz * dz), params.sharcBaseSize).size;
+            // From the vertex that *scattered*, not from wherever the ray was
+            // last restarted. Passing through a cutout or a medium boundary
+            // restarts the ray at that surface, so optixGetRayTmax() alone
+            // measures the last leg only -- and the lobe whose spread this test
+            // is about was launched before it. `misDistance` is the distance
+            // already travelled since that vertex, carried for the MIS weight
+            // for exactly the same reason.
+            //
+            // Under-measuring the segment fails both halves of the test, so a
+            // scene with alpha cutouts or glass in front of things -- this
+            // bathroom has a shower screen -- would refuse the cache on paths
+            // that qualify.
+            const float segmentLength = optixGetRayTmax() + prd->misDistance;
+            const bool eligible = oka::sharc::mayReadCache(
+                segmentLength, params.sharcPath[launchPixelIndex(params)].launchRoughness, voxelSize);
+
+            if (sharcMayRead && eligible && !updatePath && cachedSamples >= (float)params.sharcMinSamples)
             {
+                // The two halves are an additive split of the same radiance, so
+                // a reader adds them back. Compiled out entirely when no light
+                // in the scene is responsive -- sharcResponsive is bound into
+                // the pipeline as a constant.
+                if (params.sharcResponsive != 0u)
+                {
+                    cached += sharcReadResponsive(params.sharcEntries, params.sharcCapacity, voxelKey);
+                }
                 // The rest of this path is what the cache already knows.
                 prd->radiance += prd->throughput * cached;
                 prd->throughput = make_float3(0.0f);
@@ -1757,6 +1948,25 @@ extern "C" __global__ void __closesthit__radiance()
                 SharcPathState visit;
                 visit.index = slot;
                 visit.radianceAtVisit = prd->radiance;
+                visit.responsiveRadiance = make_float3(0.0f);
+                // Both entries are claimed here, together, and both are
+                // deposited into together at the end of the path -- including
+                // when the responsive part turns out to be zero. That is what
+                // makes their two means add up to the mean of the total: they
+                // have to be averages over the same set of paths. Claiming the
+                // responsive slot lazily, only for paths that saw a responsive
+                // light, would make one mean a subset of the other's and the sum
+                // would count some light twice.
+                visit.responsiveIndex = SHARC_NO_ENTRY;
+                if (params.sharcResponsive != 0u)
+                {
+                    uint32_t responsiveSlot = 0u;
+                    if (sharcFind(params.sharcEntries, params.sharcCapacity, oka::sharc::responsiveKey(voxelKey),
+                                  true, responsiveSlot))
+                    {
+                        visit.responsiveIndex = responsiveSlot;
+                    }
+                }
                 visit.invThroughput = make_float3(1.0f / fmaxf(prd->throughput.x, floorT),
                                                   1.0f / fmaxf(prd->throughput.y, floorT),
                                                   1.0f / fmaxf(prd->throughput.z, floorT));
@@ -1806,7 +2016,31 @@ extern "C" __global__ void __closesthit__radiance()
                         (params.scene.numLights > 0 || params.hasEnvMap);
     if (didNee)
     {
-        prd->radiance += estimateDirectLighting(prd, si, curveRadius);
+        bool responsiveLight = false;
+        const float3 direct = estimateDirectLighting(prd, si, curveRadius, responsiveLight);
+        prd->radiance += direct;
+        // Responsive lighting: remember how much of what this path gathers comes
+        // from a light on the fast clock, so the deposit at the end of the path
+        // can be split between the voxel's two entries.
+        //
+        // Recorded in the same units as prd->radiance -- that is, still carrying
+        // the throughput at this vertex -- because the deposit divides the whole
+        // difference by the throughput *at the visit*, and the two have to be
+        // divided by the same thing to subtract cleanly.
+        //
+        // Only while this pixel's path has a live visit to deposit into. Every
+        // vertex from the visit onward counts, not just the visited one: what
+        // the cache stores is the outgoing radiance of the visited point, and a
+        // responsive light reaching it through two more bounces is just as
+        // responsive as one reaching it directly.
+        if (params.sharcResponsive != 0u && responsiveLight)
+        {
+            SharcPathState& visit = params.sharcPath[launchPixelIndex(params)];
+            if (visit.index != SHARC_NO_ENTRY)
+            {
+                visit.responsiveRadiance += direct;
+            }
+        }
         if (prd->throughput.x == 0.0f && prd->throughput.y == 0.0f && prd->throughput.z == 0.0f)
         {
             // estimateDirectLighting() found a NaN and painted the pixel.
@@ -1939,4 +2173,12 @@ extern "C" __global__ void __closesthit__radiance()
     prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
     prd->misDistance = 0.0f;
     prd->throughput *= sample_data.bsdf_over_pdf / sssEntryTint;
+    // What the next hit's cache-eligibility test asks about: the lobe this
+    // vertex is sending the ray out of. A specular event is recorded as zero
+    // roughness whatever the material says, because that is what the test means
+    // by a lobe that still carries an image.
+    if (params.sharcCapacity != 0u)
+    {
+        params.sharcPath[launchPixelIndex(params)].launchRoughness = prd->specularBounce ? 0.0f : si.roughness;
+    }
 }

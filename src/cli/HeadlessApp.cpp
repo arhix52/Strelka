@@ -215,8 +215,18 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.sharcDepth = (uint32_t)*v;
     if (auto v = tbl["render"]["sharc_min_samples"].value<int64_t>())
         cfg.sharcMinSamples = (uint32_t)*v;
+    if (auto v = tbl["render"]["sharc_read_frames"].value<int64_t>())
+        cfg.sharcReadFrames = (uint32_t)*v;
     if (auto v = tbl["render"]["sharc_base_size"].value<double>())
         cfg.sharcBaseSize = (float)*v;
+    if (auto v = tbl["render"]["sharc_accum_frames"].value<int64_t>())
+        cfg.sharcAccumFrames = (uint32_t)*v;
+    if (auto v = tbl["render"]["sharc_stale_frames"].value<int64_t>())
+        cfg.sharcStaleFrames = (uint32_t)*v;
+    if (auto v = tbl["render"]["sharc_responsive_frames"].value<int64_t>())
+        cfg.sharcResponsiveFrames = (uint32_t)*v;
+    if (auto v = tbl["render"]["sharc_responsive_lighting"].value<bool>())
+        cfg.sharcResponsiveLighting = *v;
     if (auto v = tbl["render"]["opacity_micromaps"].value<bool>())
         cfg.opacityMicromaps = *v;
     if (auto v = tbl["render"]["sampler"].value<std::string>())
@@ -421,7 +431,17 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/sharcCapacity", 1u << 22);
     m_settings->setAs<uint32_t>("render/pt/sharcMinSamples", m_config.sharcMinSamples);
     m_settings->setAs<uint32_t>("render/pt/sharcDepth", m_config.sharcDepth);
+    m_settings->setAs<uint32_t>("render/pt/sharcReadFrames", m_config.sharcReadFrames);
     m_settings->setAs<float>("render/pt/sharcVoxelPixels", m_config.sharcBaseSize);
+    m_settings->setAs<uint32_t>("render/pt/sharcAccumFrames", m_config.sharcAccumFrames);
+    m_settings->setAs<uint32_t>("render/pt/sharcStaleFrames", m_config.sharcStaleFrames);
+    m_settings->setAs<uint32_t>("render/pt/sharcResponsiveFrames", m_config.sharcResponsiveFrames);
+    m_settings->setAs<bool>("render/pt/sharcResponsiveLighting", m_config.sharcResponsiveLighting);
+    // Headless renders one camera to convergence, so there is nothing to reset
+    // and nobody to read an occupancy number; both stay off rather than being
+    // absent, because a missing key is a logged assertion in SettingsManager.
+    m_settings->setAs<bool>("render/pt/sharcReset", false);
+    m_settings->setAs<bool>("render/pt/sharcReportOccupancy", false);
     m_settings->setAs<bool>("render/pt/opacityMicromaps", m_config.opacityMicromaps);
     // Block compression and a disk cache for the finished textures.
     // The cache holds them downscaled, mipped and compressed, so a second

@@ -127,10 +127,56 @@ void EditorApp::drawRenderSettingsPanel()
     }
 
     // Must match DebugMode in ShaderTypes.h, in order.
-    const char* const debugViewOptions[] = { "None",           "Normals",        "Motion Blur",
-                                             "AOV: diffuse",   "AOV: specular",  "AOV: normal",
-                                             "AOV: roughness", "AOV: depth",     "AOV: motion",
-                                             "AOV: reactive",  "AOV: spec hit distance" };
+    const char* const debugViewOptions[] = { "None",
+                                             "Normals",
+                                             "Motion Blur",
+                                             "AOV: diffuse",
+                                             "AOV: specular",
+                                             "AOV: normal",
+                                             "AOV: roughness",
+                                             "AOV: depth",
+                                             "AOV: motion",
+                                             "AOV: reactive",
+                                             "AOV: spec hit distance",
+                                             "Cache: voxel grid",
+                                             "Cache: radiance",
+                                             "Cache: occupancy",
+                                             "Cache: bounce count" };
+    // What each cache view is for, because none of them is self-explanatory and
+    // all four exist to answer a specific question about a specific knob.
+    const char* const debugViewHelp[] = {
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        "A stable colour per cache voxel, at the first surface each camera ray reaches.\n"
+        "This is how the voxel size below gets chosen -- it needs no cache allocated,\n"
+        "so dial it in here before switching the cache on. Voxels should be small\n"
+        "against the features you want the cache to keep apart, and large enough that\n"
+        "many paths land in each.",
+        "What the cache would answer at the first surface, shown directly instead of\n"
+        "through the bounces that normally stand between a lookup and the pixel.\n"
+        "Tonemapped like the beauty render, so the two can be compared side by side.\n"
+        "Black means that voxel is missing or has not resolved yet.",
+        "One block per table entry: green has resolved radiance, amber is inserted but\n"
+        "has nothing to answer with yet, black is free. Around 10-20% occupied with a\n"
+        "static camera is healthy. A table that is mostly amber is being evicted before\n"
+        "it ever resolves -- raise the entry count or the stale-frame threshold.",
+        "How deep paths actually went: blue none, green one, yellow two, red three or\n"
+        "more. Comparing this with the cache off and on is the direct measurement of\n"
+        "what the cache buys, and the only one that says *where*. A heatmap that does\n"
+        "not cool when the cache is switched on is a scene that is not being cached,\n"
+        "whatever the frame time says."
+    };
+    static_assert(IM_ARRAYSIZE(debugViewOptions) == IM_ARRAYSIZE(debugViewHelp),
+                  "every debug view needs a help slot, even an empty one");
     static int currentDebugViewOption = 0;
     if (ImGui::BeginCombo("Debug view", debugViewOptions[currentDebugViewOption]))
     {
@@ -144,6 +190,12 @@ void EditorApp::drawRenderSettingsPanel()
                     currentDebugViewOption = n;
                     m_settingsManager->setAs<uint32_t>("render/pt/debug", currentDebugViewOption);
                 }
+            }
+            if (debugViewHelp[n] != nullptr && ImGui::IsItemHovered())
+            {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(debugViewHelp[n]);
+                ImGui::EndTooltip();
             }
             if (is_selected)
             {
@@ -637,6 +689,237 @@ void EditorApp::drawRenderSettingsPanel()
         }
 
         ImGui::TreePop();
+    }
+
+    // --- Radiance cache ----------------------------------------------------
+    //
+    // Everything here changes what the image is, not just how fast it arrives,
+    // so every control restarts accumulation. Counting occupancy is a pass over
+    // the whole table, so it is asked for only while this node is open -- which
+    // is what the setting outside the `if` turns back off again.
+    {
+        const bool cachePanelOpen = ImGui::TreeNode("Radiance cache (SHaRC)");
+        m_settingsManager->setAs<bool>("render/pt/sharcReportOccupancy", cachePanelOpen);
+        if (cachePanelOpen)
+        {
+            auto restart = [this]() { m_sharedCtx->mSubframeIndex = 0; };
+
+            bool cacheEnabled = m_settingsManager->getAs<bool>("render/pt/sharc");
+            if (ImGui::Checkbox("Enable", &cacheEnabled))
+            {
+                m_settingsManager->setAs<bool>("render/pt/sharc", cacheEnabled);
+                restart();
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(
+                    "Let a path stop after a few bounces and read what the rest of it\n"
+                    "would have gathered, averaged over every path that has passed\n"
+                    "through the same place. Trades a little bias for path length.");
+                ImGui::EndTooltip();
+            }
+
+            ImGui::SameLine();
+            if (ImGui::Button("Reset cache"))
+            {
+                // Consumed by the renderer on the next frame. Worth having as a
+                // button: the cache deliberately survives camera movement now,
+                // so this is the only way to see a scene cached from nothing.
+                m_settingsManager->setAs<bool>("render/pt/sharcReset", true);
+                restart();
+            }
+
+            uint32_t entriesUsed = 0;
+            uint32_t capacity = 0;
+            if (m_render != nullptr && m_render->radianceCacheOccupancy(entriesUsed, capacity) && capacity > 0)
+            {
+                const float occupancy = 100.0f * (float)entriesUsed / (float)capacity;
+                ImGui::Text("Occupancy: %.1f%%  (%u / %u entries)", (double)occupancy, entriesUsed, capacity);
+                // The SDK's own reading of this number, which is the only thing
+                // that makes it actionable.
+                if (occupancy > 60.0f)
+                {
+                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f),
+                                       "Table is crowded -- raise entries, or evict sooner.");
+                }
+            }
+            else if (cacheEnabled)
+            {
+                ImGui::TextDisabled("Occupancy: not reported by this backend");
+            }
+
+            // Entries, as an exponent: the table is masked rather than divided
+            // into, so it has to be a power of two, and a free-typed number
+            // would only be rounded down behind the user's back.
+            uint32_t entries = m_settingsManager->getAs<uint32_t>("render/pt/sharcCapacity");
+            int exponent = 22;
+            while ((1u << exponent) > entries && exponent > 16)
+            {
+                --exponent;
+            }
+            if (ImGui::SliderInt("Entries (2^n)", &exponent, 16, 25))
+            {
+                m_settingsManager->setAs<uint32_t>("render/pt/sharcCapacity", 1u << exponent);
+                restart();
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::BeginTooltip();
+                ImGui::Text("%u entries, %.0f MB.\nMore entries means fewer probe runs that come back full.",
+                            1u << exponent, (double)(1u << exponent) * 40.0 / 1e6);
+                ImGui::EndTooltip();
+            }
+
+            float voxelPixels = m_settingsManager->getAs<float>("render/pt/sharcVoxelPixels");
+            if (ImGui::SliderFloat("Voxel size (px)", &voxelPixels, 1.0f, 32.0f, "%.1f"))
+            {
+                m_settingsManager->setAs<float>("render/pt/sharcVoxelPixels", voxelPixels);
+                restart();
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(
+                    "How many pixels wide a voxel is, at any distance -- the size follows\n"
+                    "the distance to the camera, so one number means the same thing in a\n"
+                    "room and in a forest. Use the 'Cache: voxel grid' debug view to set it.");
+                ImGui::EndTooltip();
+            }
+
+            uint32_t firstBounce = m_settingsManager->getAs<uint32_t>("render/pt/sharcDepth");
+            if (ImGui::SliderInt("First cached bounce", (int*)&firstBounce, 0, 8))
+            {
+                m_settingsManager->setAs<uint32_t>("render/pt/sharcDepth", firstBounce);
+                restart();
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(
+                    "Bounces before this are always traced. The camera ray and the first\n"
+                    "bounce carry the detail a voxel average would blur, so reading the\n"
+                    "cache too early shows up as flat, blotchy indirect light.");
+                ImGui::EndTooltip();
+            }
+
+            uint32_t readFrames = m_settingsManager->getAs<uint32_t>("render/pt/sharcReadFrames");
+            if (ImGui::SliderInt("Read until (samples)", (int*)&readFrames, 0, 1024))
+            {
+                m_settingsManager->setAs<uint32_t>("render/pt/sharcReadFrames", readFrames);
+                restart();
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(
+                    "Stop reading the cache once this many samples have accumulated;\n"
+                    "0 never stops. Deposits carry on either way, so the cache is warm\n"
+                    "the moment the camera moves again.\n\n"
+                    "This is not a taste setting. The cache's error is one value per\n"
+                    "voxel held across a temporal window, so it is correlated in space\n"
+                    "and time and does not average away -- it is a floor, while plain\n"
+                    "path tracing keeps converging past it. Measured on the isometric\n"
+                    "bathroom against a 4096-spp reference, structured error only:\n"
+                    "  16 spp   0.154 without, 0.098 with   -- cache half the error\n"
+                    "  64 spp   0.063 without, 0.039 with   -- cache half the error\n"
+                    " 256 spp   0.022 without, 0.019 with   -- level\n"
+                    "1024 spp   0.006 without, 0.012 with   -- cache twice the error\n\n"
+                    "So the cache is both the faster and the better image while you are\n"
+                    "moving, and the thing in the way once you stop.");
+                ImGui::EndTooltip();
+            }
+
+            uint32_t minSamples = m_settingsManager->getAs<uint32_t>("render/pt/sharcMinSamples");
+            if (ImGui::SliderInt("Min samples to read", (int*)&minSamples, 1, 256))
+            {
+                m_settingsManager->setAs<uint32_t>("render/pt/sharcMinSamples", minSamples);
+                restart();
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(
+                    "How much a voxel has to have seen before a path will believe it.\n"
+                    "Too low and the cache spreads one path's noise over a region.");
+                ImGui::EndTooltip();
+            }
+
+            uint32_t accumFrames = m_settingsManager->getAs<uint32_t>("render/pt/sharcAccumFrames");
+            if (ImGui::SliderInt("Temporal window (frames)", (int*)&accumFrames, 1, 256))
+            {
+                m_settingsManager->setAs<uint32_t>("render/pt/sharcAccumFrames", accumFrames);
+                restart();
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(
+                    "How many frames a voxel averages over. Larger is quieter and slower\n"
+                    "to notice that the lighting changed -- a light switched on takes\n"
+                    "roughly this many frames to appear in the cache.");
+                ImGui::EndTooltip();
+            }
+
+            uint32_t staleFrames = m_settingsManager->getAs<uint32_t>("render/pt/sharcStaleFrames");
+            if (ImGui::SliderInt("Evict after (frames)", (int*)&staleFrames, 8, 512))
+            {
+                m_settingsManager->setAs<uint32_t>("render/pt/sharcStaleFrames", staleFrames);
+                restart();
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(
+                    "How long an entry survives with nothing deposited into it. This is\n"
+                    "what lets the cache outlive a moving camera instead of being thrown\n"
+                    "away by it. Evicting too eagerly costs more in re-insertion than the\n"
+                    "slots are worth, so small values are clamped.");
+                ImGui::EndTooltip();
+            }
+
+            // Responsive lighting. The controls are shown whether or not the
+            // scene has a responsive light, because the answer to "why is this
+            // doing nothing" is on the light's own panel and a control that is
+            // not there cannot say so.
+            ImGui::SeparatorText("Responsive lighting");
+            bool responsiveEnabled = m_settingsManager->getAs<bool>("render/pt/sharcResponsiveLighting");
+            if (ImGui::Checkbox("Enable##sharcResponsive", &responsiveEnabled))
+            {
+                m_settingsManager->setAs<bool>("render/pt/sharcResponsiveLighting", responsiveEnabled);
+                restart();
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(
+                    "Cache lights marked Responsive -- on the light's own panel -- in a\n"
+                    "second entry per voxel with a much shorter window, so they can change\n"
+                    "faster than the rest of the cache follows. Does nothing unless some\n"
+                    "light is marked; turning it off here is how you A/B a scene that has\n"
+                    "one.");
+                ImGui::EndTooltip();
+            }
+
+            uint32_t responsiveFrames = m_settingsManager->getAs<uint32_t>("render/pt/sharcResponsiveFrames");
+            if (ImGui::SliderInt("Responsive window (frames)", (int*)&responsiveFrames, 1, 64))
+            {
+                m_settingsManager->setAs<uint32_t>("render/pt/sharcResponsiveFrames", responsiveFrames);
+                restart();
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(
+                    "The window responsive entries average over, and how long they survive\n"
+                    "unvisited. Both, because they are the same trade: short enough to\n"
+                    "follow the light, long enough not to be noise. Well below the window\n"
+                    "above, or there is no point having two.");
+                ImGui::EndTooltip();
+            }
+
+            ImGui::TreePop();
+        }
     }
 
     if (ImGui::Button("Save Preview Screenshot"))

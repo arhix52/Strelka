@@ -89,17 +89,57 @@ enum class DebugMode : uint32_t
     eAovMotion,
     eAovReactive,
     eAovSpecularHitDistance,
+    // Radiance cache. Appended, so every value above keeps its number and a
+    // scene file or a `--debug` from before still selects what it used to.
+    //
+    // These are the SDK's HashGridDebug* family, and they exist for the reason
+    // it gives: every parameter of a hash grid is invisible in the final image
+    // until it is wrong, and then it is wrong in a way that reads as a shading
+    // bug. Voxel size cannot be chosen without seeing the voxels.
+    //
+    // Metal does not implement them yet -- its DebugMode carries the same names
+    // so the two enums stay one numbering and the editor's menu stays one list,
+    // and it falls through to a normal render. See the hand-off in
+    // docs/open-defects.md.
+    eSharcGrid, ///< a stable colour per voxel, at the primary hit
+    eSharcRadiance, ///< what the cache would answer at the primary hit
+    eSharcOccupancy, ///< how much of the table is in use, as a screen overlay
+    eSharcBounces, ///< bounces traced per pixel: what the cache actually saves
 };
 
 #define DEBUG_MODE_FIRST_AOV 3u
 
-/// The two views that describe the first surface a camera ray reaches and
-/// nothing past it. They are the ones the path is cut short for, the ones that
-/// skip tonemapping because they are already in display units -- and the ones
-/// nothing volumetric may answer for, since a scattering event ends the path
-/// somewhere that has no surface to report.
+/// The views that describe the first surface a camera ray reaches and nothing
+/// past it. They are the ones the path is cut short for, and the ones nothing
+/// volumetric may answer for, since a scattering event ends the path somewhere
+/// that has no surface to report.
+///
+/// eSharcGrid belongs here because the grid is arithmetic -- it needs no cache
+/// and no second bounce. The other two cache views deliberately do *not*: they
+/// observe the table, and the table is filled by the very bounces cutting the
+/// path would remove. Both were written that way first, and both rendered an
+/// empty cache -- eSharcRadiance 0.6% covered, eSharcOccupancy entirely black,
+/// on a Cornell box whose walls the cache fills in a frame.
 #define DEBUG_MODE_IS_SINGLE_HIT(d)                                                                                    \
-    ((d) == (uint32_t)DebugMode::eNormal || (d) == (uint32_t)DebugMode::eMotionBlur)
+    ((d) == (uint32_t)DebugMode::eNormal || (d) == (uint32_t)DebugMode::eMotionBlur ||                                  \
+     (d) == (uint32_t)DebugMode::eSharcGrid)
+
+/// The views whose output is radiance in scene units, and which therefore want
+/// the same presentation transform -- exposure, curve, gamma -- as the render.
+///
+/// Everything else the debug menu offers is already a colour: normals, motion,
+/// the denoiser guides, and the cache's grid, occupancy and bounce views. They
+/// travel as PresentationContent::DebugDisplayLinear and a curve would only
+/// crush them.
+///
+/// The list is short and has exactly one entry that is not obvious.
+/// eSharcRadiance shows what the radiance cache holds, and it holds radiance:
+/// it is only worth looking at beside the beauty render at the same exposure,
+/// and presented as display-linear every voxel above one is the same white.
+/// That it also cuts the path at the first surface, like the views that *are*
+/// display-linear, is what made this worth naming separately.
+#define DEBUG_MODE_IS_SCENE_LINEAR(d)                                                                                  \
+    ((d) == (uint32_t)DebugMode::eNone || (d) == (uint32_t)DebugMode::eSharcRadiance)
 
 /// What a denoiser needs to know about the primary hit, written once per pixel
 /// by the program that shades it (or by the miss program, for background).
@@ -146,8 +186,37 @@ struct SharcPathState
     float3 radianceAtVisit;
     /// 1 / throughput at the visit, floored per channel.
     float3 invThroughput;
+    /// How much of what the path gathered after the visit came from a light
+    /// marked responsive, in the same units as `radianceAtVisit` -- i.e. before
+    /// the division by throughput, so the two subtract cleanly.
+    ///
+    /// The cache stores this part in a separate entry with a much shorter
+    /// temporal window, and the reader adds the two back together. Splitting by
+    /// *component* rather than by path is what makes that sum correct: a mean of
+    /// (total - responsive) plus a mean of (responsive) is the mean of the
+    /// total, while sending whole paths to one entry or the other would make the
+    /// two means overlap and the sum count some light twice.
+    ///
+    /// Only written while responsive lighting is on; the field costs 12 bytes of
+    /// a per-pixel buffer that exists only when the cache does.
+    float3 responsiveRadiance;
+    /// Roughness of the surface this path's current segment was launched from.
+    ///
+    /// The cache's eligibility test needs the lobe that *sent* the ray, not the
+    /// surface it arrived at -- see oka::sharc::mayReadCache. Carried here
+    /// rather than in PerRayData because that struct sizes the continuation
+    /// stack byte for byte in every scene (docs/open-perf.md), while this buffer
+    /// exists only while the cache does. One path per pixel is in flight at a
+    /// time, so a per-pixel slot is a per-path slot.
+    float launchRoughness;
     /// SHARC_NO_ENTRY until this path visits a voxel.
     uint32_t index;
+    /// The slot holding the same voxel's responsive half, resolved at the visit
+    /// alongside `index` so the deposit does not have to hash again at the end
+    /// of the path. SHARC_NO_ENTRY when responsive lighting is off, or when the
+    /// probe run for it was full -- in which case the whole deposit goes to the
+    /// ordinary entry, which is the right answer, just a slower-reacting one.
+    uint32_t responsiveIndex;
 };
 
 struct Params
@@ -301,6 +370,37 @@ struct Params
     uint32_t sharcCapacity; ///< entries; a power of two, 0 = off
     uint32_t sharcMinSamples; ///< deposits a voxel needs before it may be read
     uint32_t sharcDepth; ///< first bounce allowed to read the cache
+    /// Stop *reading* the cache once this many samples have accumulated; 0 is
+    /// no limit. Deposits carry on regardless, so the cache stays warm for the
+    /// moment the camera moves again.
+    ///
+    /// The cache trades per-pixel noise for error that is correlated in space
+    /// (a voxel is one value) and in time (the temporal window makes
+    /// consecutive frames agree). Correlated error does not average away as
+    /// samples accumulate, so it is a floor -- while plain path tracing keeps
+    /// converging past it. Measured on iso_bathroom at 960x540, depth 8,
+    /// against a 4096-spp reference, taking the residual that survives a blur
+    /// so it is the structured error rather than the noise:
+    ///
+    ///     spp     no cache     cache
+    ///      16      0.154       0.098    cache half the error
+    ///      64      0.063       0.039    cache half the error
+    ///     256      0.022       0.019    level
+    ///    1024      0.0064      0.0123   cache twice the error
+    ///
+    /// So it is not a knob for taste: below the crossover the cache is the
+    /// better image as well as the faster one, and above it the cache is the
+    /// only thing standing between the render and convergence. A runtime read
+    /// rather than a bound constant -- it changes every frame, and a
+    /// specialisation per frame is a recompile per frame.
+    uint32_t sharcReadMaxSubframe;
+    /// Non-zero when any light in the scene is marked responsive. Bound into the
+    /// pipeline as a constant, so a scene without one compiles the second entry,
+    /// the second probe and the second set of atomics out entirely.
+    uint32_t sharcResponsive;
+    /// One bit per light, set where UniformLightDesc::responsive is. Null when
+    /// sharcResponsive is 0. Indexed by light id: word `id >> 5`, bit `id & 31`.
+    const uint32_t* sharcResponsiveLights;
     /// World size of one pixel at unit distance times the pixels a voxel should
     /// span, so the setting behind it means the same thing at any resolution or
     /// field of view. See sharc_grid.h.

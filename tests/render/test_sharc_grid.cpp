@@ -3,6 +3,7 @@
 #include "sharc_grid.h"
 
 #include <cmath>
+#include <limits>
 #include <map>
 #include <set>
 #include <vector>
@@ -16,8 +17,11 @@ TEST_CASE("a voxel subtends the same angle wherever it is")
     // pixel at unit distance times the pixels a voxel should span, so
     // size/distance is that product to within the power-of-two quantisation.
     const float baseSize = 4.0f * (2.0f * std::tan(0.3926991f) / 512.0f); // 45 deg, 512 px, 4 px voxels
-    for (float distance = 0.5f; distance < 500.0f; distance *= 1.3f)
+    // Integer induction: a float loop counter both drifts and trips
+    // cert-flp30-c / clang-analyzer-security.FloatLoopCounter.
+    for (int step = 0; step < 27; ++step)
     {
+        const float distance = 0.5f * std::pow(1.3f, (float)step);
         const Voxel v = voxelForDistance(distance, baseSize);
         const float angle = v.size / distance;
         // Quantising to powers of two can only halve or hold the ideal, never
@@ -29,8 +33,9 @@ TEST_CASE("a voxel subtends the same angle wherever it is")
 
 TEST_CASE("the level is the exponent of the size, exactly")
 {
-    for (float distance = 0.01f; distance < 10000.0f; distance *= 1.7f)
+    for (int step = 0; step < 26; ++step)
     {
+        const float distance = 0.01f * std::pow(1.7f, (float)step);
         const Voxel v = voxelForDistance(distance, 0.01f);
         CHECK(v.size == std::exp2((float)v.level));
         // Powers of two, so a point near a level boundary lands in one voxel or
@@ -88,37 +93,198 @@ TEST_CASE("the normal bucket separates the six faces and nothing else")
     }
 }
 
+TEST_CASE("a key round-trips every field it carries")
+{
+    // The key stopped being a checksum so that two things could read it back:
+    // reprojection, which needs the voxel's position and level, and responsive
+    // lighting, which needs the flag. Both are silent if a field does not
+    // survive the packing -- reprojection simply finds nothing.
+    for (int32_t level : { -255, -20, -1, 0, 1, 7, 255 })
+        for (uint32_t bucket = 0; bucket < 6u; ++bucket)
+            for (bool responsive : { false, true })
+            {
+                const uint64_t key = voxelKey(-37, 1024, -65536, level, bucket, responsive);
+                CHECK(unpackCoordinate(key, 0u) == -37);
+                CHECK(unpackCoordinate(key, 1u) == 1024);
+                CHECK(unpackCoordinate(key, 2u) == -65536);
+                CHECK(unpackLevel(key) == level);
+                CHECK(unpackBucket(key) == bucket);
+                CHECK(isResponsiveKey(key) == responsive);
+            }
+}
+
 TEST_CASE("neighbouring voxels do not collide, and the hash spreads")
 {
     // A key that repeats across a small neighbourhood is a wall bleeding into
-    // the room behind it. 8x8x8 of them, all six normal buckets.
-    std::set<uint32_t> keys;
+    // the room behind it. 8x8x8 of them, all six normal buckets. Exact now
+    // rather than probable: the key carries the coordinates instead of a mix
+    // of them, so two different voxels cannot agree by accident.
+    std::set<uint64_t> keys;
+    std::set<uint32_t> slots;
     size_t total = 0;
     for (int32_t x = 0; x < 8; ++x)
         for (int32_t y = 0; y < 8; ++y)
             for (int32_t z = 0; z < 8; ++z)
                 for (uint32_t b = 0; b < 6; ++b)
                 {
-                    keys.insert(voxelKey(voxelHash(x, y, z, 3, b)));
+                    const uint64_t key = voxelKey(x, y, z, 3, b, false);
+                    keys.insert(key);
+                    slots.insert(keyHash(key));
                     ++total;
                 }
     CHECK(keys.size() == total);
+    // And the slot hash still spreads them: a key that is exact but hashes into
+    // a handful of slots would fill eight probes and drop the rest.
+    CHECK(slots.size() > total * 9 / 10);
 }
 
 TEST_CASE("the same voxel at two levels is two voxels")
 {
     // The level is in the key because a coarse voxel and a fine one with the
     // same integer coordinate are different regions of the world.
-    CHECK(voxelHash(3, 4, 5, 2, 0) != voxelHash(3, 4, 5, 3, 0));
-    CHECK(voxelHash(3, 4, 5, -2, 0) != voxelHash(3, 4, 5, 2, 0));
+    CHECK(voxelKey(3, 4, 5, 2, 0, false) != voxelKey(3, 4, 5, 3, 0, false));
+    CHECK(voxelKey(3, 4, 5, -2, 0, false) != voxelKey(3, 4, 5, 2, 0, false));
+}
+
+TEST_CASE("the responsive half of a voxel is a different voxel to the table")
+{
+    // Same place, same normal, same level -- and it has to land in its own slot,
+    // because the two hold different halves of the signal and a reader adds
+    // them. If they collided, one would overwrite the other and the sum would be
+    // whichever won.
+    const uint64_t key = voxelKey(11, -3, 40, 2, 4, false);
+    const uint64_t responsive = responsiveKey(key);
+    CHECK(responsive != key);
+    CHECK(isResponsiveKey(responsive));
+    CHECK(!isResponsiveKey(key));
+    CHECK(keyHash(responsive) != keyHash(key));
+    // And everything else about it is unchanged, so reprojection and eviction
+    // treat it as the same place.
+    CHECK(unpackCoordinate(responsive, 0u) == unpackCoordinate(key, 0u));
+    CHECK(unpackLevel(responsive) == unpackLevel(key));
+    CHECK(unpackBucket(responsive) == unpackBucket(key));
+    // Idempotent: marking an already-responsive key must not toggle it back.
+    CHECK(responsiveKey(responsive) == responsive);
 }
 
 TEST_CASE("a key is never zero, because zero means empty")
 {
-    for (uint32_t i = 0; i < 200000u; ++i)
+    // Zero is the empty slot, so a voxel that packed to zero would be invisible
+    // to every probe that walked past it. The level field is biased to make that
+    // unreachable: it is at least 1 for any level the clamp admits.
+    for (int32_t level = -300; level <= 300; ++level)
     {
-        CHECK(voxelKey(hash(i)) != 0u);
+        CHECK(voxelKey(0, 0, 0, level, 0u, false) != 0ull);
     }
+    for (uint32_t i = 0; i < 50000u; ++i)
+    {
+        const int32_t x = (int32_t)hash(i) % 4096;
+        const int32_t y = (int32_t)hash(i + 1u) % 4096;
+        const int32_t z = (int32_t)hash(i + 2u) % 4096;
+        CHECK(voxelKey(x, y, z, (int32_t)(i % 40u) - 20, i % 6u, false) != 0ull);
+    }
+}
+
+TEST_CASE("reprojection looks coarser when the eye came closer, finer when it went away")
+{
+    // The level follows distance to the eye, so moving the eye re-quantises a
+    // world that has not moved. This is the lookup that finds where the data
+    // went. Which direction it looks is the whole of its correctness: looking
+    // the wrong way finds an unrelated voxel and blends it in.
+    const uint64_t key = voxelKey(8, 8, 8, 3, 2, false);
+
+    // Eye now near the voxel, previously far: this entry is the finer one, and
+    // the history is a level coarser.
+    const uint64_t closer = adjacentLevelKey(key, 64.0f, 64.0f, 64.0f, 4000.0f, 4000.0f, 4000.0f);
+    CHECK(unpackLevel(closer) == 4);
+    CHECK(unpackCoordinate(closer, 0u) == 4);
+
+    // And the other way.
+    const uint64_t further = adjacentLevelKey(key, 4000.0f, 4000.0f, 4000.0f, 64.0f, 64.0f, 64.0f);
+    CHECK(unpackLevel(further) == 2);
+    CHECK(unpackCoordinate(further, 0u) == 16);
+}
+
+TEST_CASE("reprojection keeps the surface it is about")
+{
+    // The normal bucket and the responsive flag are properties of the surface
+    // and the signal, not of the resolution it is stored at. Dropping either
+    // would blend a floor into the ceiling below it, or the steady half of a
+    // voxel into the responsive half.
+    for (uint32_t bucket = 0; bucket < 6u; ++bucket)
+        for (bool responsive : { false, true })
+        {
+            const uint64_t key = voxelKey(5, -9, 2, 1, bucket, responsive);
+            const uint64_t adjacent = adjacentLevelKey(key, 1.0f, 1.0f, 1.0f, 900.0f, 900.0f, 900.0f);
+            CHECK(unpackBucket(adjacent) == bucket);
+            CHECK(isResponsiveKey(adjacent) == responsive);
+        }
+}
+
+TEST_CASE("reprojection halves a negative coordinate downwards")
+{
+    // floor, not truncation, and the reason is the same one that made
+    // voxelCoordinate use floor: truncating folds the two cells either side of
+    // the origin into one, which puts a seam through the middle of every scene
+    // -- and here it would put it there only while the camera is moving.
+    const uint64_t key = voxelKey(-3, -1, -7, 3, 0, false);
+    const uint64_t coarser = adjacentLevelKey(key, 0.0f, 0.0f, 0.0f, 5000.0f, 5000.0f, 5000.0f);
+    CHECK(unpackLevel(coarser) == 4);
+    CHECK(unpackCoordinate(coarser, 0u) == -2);
+    CHECK(unpackCoordinate(coarser, 1u) == -1);
+    CHECK(unpackCoordinate(coarser, 2u) == -4);
+}
+
+TEST_CASE("reprojection cannot walk off the end of the level field")
+{
+    // A wrapped level is a key pointing at an unrelated region of the world,
+    // which is the one outcome worse than not reprojecting at all. The bound is
+    // a rail rather than a working limit -- voxelForDistance floors the
+    // footprint at 1e-4, so real levels run about [-14, 14] against a field that
+    // holds [-255, 255] -- and the point of the sweep is that nothing gets
+    // anywhere near it whatever the two cameras are.
+    for (int32_t level : { kLevelMin, kLevelMin + 1, -14, 0, 14, kLevelMax - 1, kLevelMax })
+        for (float near : { 0.0f, 1.0f, 1e4f })
+            for (float far : { 0.0f, 2.0f, 1e5f })
+            {
+                const uint64_t key = voxelKey(1, 1, 1, level, 0, false);
+                const int32_t moved = unpackLevel(adjacentLevelKey(key, near, near, near, far, far, far));
+                CHECK(moved >= kLevelMin);
+                CHECK(moved <= kLevelMax);
+                // And it moves by at most one level, in either direction: the
+                // blend is only meaningful against an immediate neighbour.
+                CHECK(std::abs(moved - level) <= 1);
+            }
+}
+
+TEST_CASE("an adjacent level blends by the samples behind each")
+{
+    Resolved own;
+    own.r = own.g = own.b = 1.0f;
+    own.sampleNum = 10.0f;
+    Resolved adjacent;
+    adjacent.r = adjacent.g = adjacent.b = 5.0f;
+    adjacent.sampleNum = 30.0f;
+
+    const Resolved blended = blendAdjacentLevel(own, adjacent);
+    // (1*10 + 5*30) / 40 = 4
+    CHECK(blended.r == doctest::Approx(4.0f).epsilon(0.001));
+    // The samples come with it, or the blended entry stays under the threshold a
+    // path has to clear before it may read -- and the reprojection buys nothing.
+    CHECK(blended.sampleNum == doctest::Approx(40.0f).epsilon(0.001));
+}
+
+TEST_CASE("blending against an empty neighbour changes nothing")
+{
+    // The common case by far: most voxels have no counterpart one level away.
+    Resolved own;
+    own.r = 2.0f;
+    own.g = 3.0f;
+    own.b = 4.0f;
+    own.sampleNum = 7.0f;
+    const Resolved blended = blendAdjacentLevel(own, Resolved{});
+    CHECK(blended.r == doctest::Approx(own.r));
+    CHECK(blended.sampleNum == doctest::Approx(own.sampleNum));
 }
 
 TEST_CASE("the probe run visits eight distinct slots and stays in the table")
@@ -257,7 +423,6 @@ TEST_CASE("the thresholds are the ones Metal measured, and in the right directio
     CHECK(kClamp == 256.0f);
     CHECK(kProbeCount == 8u);
     CHECK(kUpdateShare == 8u);
-    CHECK(kMinRoughness == doctest::Approx(0.3f));
     CHECK(kMinRecordThroughput == doctest::Approx(0.05f));
     CHECK(kThroughputFloor == doctest::Approx(0.02f));
     // A clamp below the radiance an interior legitimately produces is a
@@ -273,4 +438,346 @@ TEST_CASE("the capacity floor keeps a mistyped setting from becoming one slot")
     CHECK(kMinCapacity == (1u << 16));
     // Power of two, because the probe sequence masks rather than divides.
     CHECK((kMinCapacity & (kMinCapacity - 1u)) == 0u);
+}
+
+// ---------------------------------------------------------------------------
+// Resolve: what a voxel keeps between frames
+// ---------------------------------------------------------------------------
+//
+// These cover the half of the cache that decides whether it is a cache at all.
+// Every rule here fails silently on a GPU and looks like something else in the
+// image: a window that does not normalise reads as a cache that ignores the
+// lights, a staleness rule that never fires reads as a table that is full, and
+// one that fires too eagerly reads as a cache that is simply slow.
+
+TEST_CASE("binary16 round-trips the values a voxel actually holds")
+{
+    // Radiance, and sample counts up to a few thousand. Relative error of
+    // binary16 is 2^-11, so anything inside half a percent is the format doing
+    // its job rather than the code doing it wrong.
+    for (float v : { 0.001f, 0.5f, 1.0f, 3.14159f, 42.0f, 255.0f, 1000.0f, 30000.0f })
+    {
+        const float back = unpackHalf(packHalf(v));
+        CHECK(back == doctest::Approx(v).epsilon(0.001));
+    }
+}
+
+TEST_CASE("binary16 encoding admits nothing that would poison a voxel")
+{
+    // A negative or a NaN reaching the resolved half is read back by every path
+    // that passes through the voxel, so both are refused at the door rather than
+    // encoded and discovered later.
+    CHECK(unpackHalf(packHalf(-1.0f)) == 0.0f);
+    CHECK(unpackHalf(packHalf(-0.0f)) == 0.0f);
+    CHECK(unpackHalf(packHalf(std::nanf(""))) == 0.0f);
+    CHECK(unpackHalf(packHalf(0.0f)) == 0.0f);
+
+    // And an overflow is clamped to the largest finite value rather than
+    // becoming an infinity, which would spread through the blend below.
+    const float huge = unpackHalf(packHalf(1e30f));
+    CHECK(std::isfinite(huge));
+    CHECK(huge == doctest::Approx(kHalfMax).epsilon(0.001));
+    CHECK(std::isfinite(unpackHalf(packHalf(std::numeric_limits<float>::infinity()))));
+}
+
+TEST_CASE("rounding to binary16 is unbiased")
+{
+    // The same argument that made `encode` round rather than truncate: a bias of
+    // half a quantum, applied to every voxel every frame in the same direction,
+    // is a bias in the image and not noise in it.
+    // Integer induction, because accumulating the step in a float both drifts
+    // and trips cert-flp30-c.
+    const int steps = 5000;
+    double sum = 0.0;
+    for (int step = 0; step < steps; ++step)
+    {
+        const float v = 0.5f + (float)step * 0.0007f;
+        sum += (double)unpackHalf(packHalf(v)) - (double)v;
+    }
+    const double meanError = sum / steps;
+    CHECK(std::fabs(meanError) < 1e-5);
+}
+
+TEST_CASE("an entry's two packed words survive a round trip")
+{
+    Resolved value;
+    value.r = 1.25f;
+    value.g = 0.5f;
+    value.b = 12.0f;
+    value.sampleNum = 640.0f;
+
+    uint32_t lo = 0u, hi = 0u;
+    packResolved(value, lo, hi);
+    const Resolved back = unpackResolved(lo, hi);
+
+    CHECK(back.r == doctest::Approx(value.r).epsilon(0.001));
+    CHECK(back.g == doctest::Approx(value.g).epsilon(0.001));
+    CHECK(back.b == doctest::Approx(value.b).epsilon(0.001));
+    CHECK(back.sampleNum == doctest::Approx(value.sampleNum).epsilon(0.001));
+
+    // Channels must not bleed into each other: r and g share a word, and so do
+    // b and the sample count.
+    uint32_t soloLo = 0u, soloHi = 0u;
+    Resolved solo;
+    solo.r = 7.0f;
+    packResolved(solo, soloLo, soloHi);
+    const Resolved soloBack = unpackResolved(soloLo, soloHi);
+    CHECK(soloBack.r == doctest::Approx(7.0f).epsilon(0.001));
+    CHECK(soloBack.g == 0.0f);
+    CHECK(soloBack.b == 0.0f);
+    CHECK(soloBack.sampleNum == 0.0f);
+}
+
+TEST_CASE("the two frame counters share a word without touching")
+{
+    uint32_t accumFrames = 0u, staleFrames = 0u;
+    unpackFrameData(packFrameData(31u, 7u), accumFrames, staleFrames);
+    CHECK(accumFrames == 31u);
+    CHECK(staleFrames == 7u);
+
+    // Saturating rather than wrapping. A wrapped accumulation count reads as a
+    // brand-new entry, which would restart the window on a voxel that has been
+    // averaging for an hour.
+    unpackFrameData(packFrameData(100000u, 100000u), accumFrames, staleFrames);
+    CHECK(accumFrames == kFrameNumMask);
+    CHECK(staleFrames == kFrameNumMask);
+}
+
+namespace
+{
+/// One frame of deposits: `count` samples, each of `radiance`, into a voxel.
+ResolveInput depositFrame(const ResolveOutput& previous, float radiance, uint32_t count)
+{
+    ResolveInput input;
+    input.accum[0] = encode(radiance) * count;
+    input.accum[1] = encode(radiance) * count;
+    input.accum[2] = encode(radiance) * count;
+    input.accumCount = count;
+    input.resolvedLo = previous.resolvedLo;
+    input.resolvedHi = previous.resolvedHi;
+    input.frameData = previous.frameData;
+    return input;
+}
+
+/// A frame in which nobody visited the voxel.
+ResolveInput idleFrame(const ResolveOutput& previous)
+{
+    ResolveInput input;
+    input.resolvedLo = previous.resolvedLo;
+    input.resolvedHi = previous.resolvedHi;
+    input.frameData = previous.frameData;
+    return input;
+}
+} // namespace
+
+TEST_CASE("a voxel's first frame resolves to the mean of what it was given")
+{
+    const ResolveOutput fresh;
+    const ResolveOutput out = resolveEntry(depositFrame(fresh, 2.5f, 16u), 32u, 64u);
+
+    CHECK(!out.evict);
+    const Resolved resolved = unpackResolved(out.resolvedLo, out.resolvedHi);
+    CHECK(resolved.r == doctest::Approx(2.5f).epsilon(0.01));
+    CHECK(resolved.sampleNum == doctest::Approx(16.0f).epsilon(0.01));
+
+    uint32_t accumFrames = 0u, staleFrames = 0u;
+    unpackFrameData(out.frameData, accumFrames, staleFrames);
+    CHECK(accumFrames == 1u);
+    CHECK(staleFrames == 0u);
+}
+
+TEST_CASE("a steady voxel stays where it is")
+{
+    // The cache's own fixed point. If repeated identical deposits drift, every
+    // number below is measuring drift instead of what it claims to.
+    ResolveOutput state;
+    for (int frame = 0; frame < 200; ++frame)
+    {
+        state = resolveEntry(depositFrame(state, 3.0f, 8u), 32u, 64u);
+        REQUIRE(!state.evict);
+    }
+    const Resolved resolved = unpackResolved(state.resolvedLo, state.resolvedHi);
+    CHECK(resolved.r == doctest::Approx(3.0f).epsilon(0.01));
+    CHECK(std::isfinite(resolved.sampleNum));
+}
+
+TEST_CASE("the window bounds the weight of the history")
+{
+    // Without the normalisation the accumulated sample count grows without
+    // bound, and a voxel that has been averaging for a thousand frames can no
+    // longer notice that somebody turned a light on. The count has to settle.
+    const uint32_t window = 8u;
+    const uint32_t perFrame = 10u;
+    ResolveOutput state;
+    for (int frame = 0; frame < 500; ++frame)
+    {
+        state = resolveEntry(depositFrame(state, 1.0f, perFrame), window, 64u);
+    }
+    const Resolved resolved = unpackResolved(state.resolvedLo, state.resolvedHi);
+    // The fixed point of n -> n * window / (window + 1) + perFrame, which is
+    // perFrame * (window + 1) and not perFrame * window -- the frame being
+    // folded in is one the window has not yet charged for. Worth pinning: the
+    // difference is one window's worth of weight, which is exactly how much a
+    // step change in the lighting lags.
+    CHECK(resolved.sampleNum == doctest::Approx((float)(perFrame * (window + 1u))).epsilon(0.05));
+
+    uint32_t accumFrames = 0u, staleFrames = 0u;
+    unpackFrameData(state.frameData, accumFrames, staleFrames);
+    CHECK(accumFrames == window);
+}
+
+TEST_CASE("a voxel follows the lights, and does it inside its window")
+{
+    // The whole reason the window exists. A cache that averages for ever is a
+    // photograph of the first frame.
+    const uint32_t window = 16u;
+    ResolveOutput state;
+    for (int frame = 0; frame < 200; ++frame)
+    {
+        state = resolveEntry(depositFrame(state, 1.0f, 8u), window, 512u);
+    }
+    CHECK(unpackResolved(state.resolvedLo, state.resolvedHi).r == doctest::Approx(1.0f).epsilon(0.02));
+
+    // Somebody turns the light up. Within a few window lengths the voxel should
+    // have followed it essentially all the way.
+    for (int frame = 0; frame < 4 * (int)window; ++frame)
+    {
+        state = resolveEntry(depositFrame(state, 5.0f, 8u), window, 512u);
+    }
+    CHECK(unpackResolved(state.resolvedLo, state.resolvedHi).r == doctest::Approx(5.0f).epsilon(0.05));
+}
+
+TEST_CASE("a larger window is slower to follow than a smaller one")
+{
+    // The knob has to mean something, and this is the direction it means. It is
+    // the trade the editor's tooltip promises: quieter, and slower to react.
+    auto settleAfter = [](uint32_t window, int frames) {
+        ResolveOutput state;
+        for (int i = 0; i < 200; ++i)
+        {
+            state = resolveEntry(depositFrame(state, 1.0f, 8u), window, 512u);
+        }
+        for (int i = 0; i < frames; ++i)
+        {
+            state = resolveEntry(depositFrame(state, 5.0f, 8u), window, 512u);
+        }
+        return unpackResolved(state.resolvedLo, state.resolvedHi).r;
+    };
+    CHECK(settleAfter(4u, 8) > settleAfter(64u, 8));
+}
+
+TEST_CASE("an unvisited voxel keeps its answer, then gives back its slot")
+{
+    // Both halves matter. A voxel that is off screen for a moment must still be
+    // the answer when a path reaches it again -- that is what survives a camera
+    // movement, and what the host used to throw away by clearing the table. But
+    // it cannot be kept for ever, or the table fills with places the camera has
+    // left and never frees a slot.
+    const uint32_t staleMax = 16u;
+    ResolveOutput state = resolveEntry(depositFrame(ResolveOutput{}, 4.0f, 32u), 32u, staleMax);
+    REQUIRE(!state.evict);
+
+    for (uint32_t frame = 1; frame < staleMax; ++frame)
+    {
+        state = resolveEntry(idleFrame(state), 32u, staleMax);
+        REQUIRE(!state.evict);
+        // Still answering, with the value it had.
+        CHECK(unpackResolved(state.resolvedLo, state.resolvedHi).r == doctest::Approx(4.0f).epsilon(0.01));
+    }
+
+    state = resolveEntry(idleFrame(state), 32u, staleMax);
+    CHECK(state.evict);
+}
+
+TEST_CASE("eviction cannot be made hair-trigger from a setting")
+{
+    // The SDK's own warning: evicting too eagerly costs more in re-insertion
+    // than the slots are worth, so the threshold is clamped no matter what the
+    // caller asks for. A config that says 0 must not turn the table over every
+    // frame.
+    ResolveOutput state = resolveEntry(depositFrame(ResolveOutput{}, 1.0f, 4u), 32u, 0u);
+    REQUIRE(!state.evict);
+    for (uint32_t frame = 1; frame < kStaleFrameNumMin; ++frame)
+    {
+        state = resolveEntry(idleFrame(state), 32u, 0u);
+        CHECK(!state.evict);
+    }
+}
+
+TEST_CASE("a voxel nobody has ever deposited into is still evicted")
+{
+    // Insertion and deposit are separate: a path may take a slot and then fail
+    // the throughput test, or be a reading path that never records. Those slots
+    // have to come back, or a moving camera leaks the table one probe run at a
+    // time.
+    ResolveOutput state;
+    bool evicted = false;
+    for (uint32_t frame = 0; frame < kStaleFrameNumMin + 1u; ++frame)
+    {
+        state = resolveEntry(idleFrame(state), 32u, 0u);
+        evicted = evicted || state.evict;
+    }
+    CHECK(evicted);
+}
+
+TEST_CASE("the eligibility test refuses a segment that never left its voxel")
+{
+    // The hit is inside the voxel the ray departed from, so the average the
+    // cache would return includes the very point being shaded. No lobe is wide
+    // enough to make that acceptable.
+    CHECK(!mayReadCache(/*segment=*/0.5f, /*launchRoughness=*/1.0f, /*voxelSize=*/1.0f));
+    CHECK(!mayReadCache(1.7f, 1.0f, 1.0f)); // just under the diagonal
+    CHECK(mayReadCache(1.8f, 1.0f, 1.0f)); // just over it
+}
+
+TEST_CASE("the eligibility test refuses a lobe that still carries an image")
+{
+    // A mirror, and anything near one. This is the condition that keeps a
+    // reflection sharp, and it asks about the surface the segment *left*.
+    const float voxel = 0.1f;
+    const float segment = 5.0f; // long enough that the diagonal test passes
+    CHECK(!mayReadCache(segment, 0.0f, voxel));
+    CHECK(!mayReadCache(segment, 0.01f, voxel));
+    // ... and admits one that has spread wider than a voxel by the time it
+    // arrived, which is the whole point: a wide lobe is already an average.
+    CHECK(mayReadCache(segment, 0.5f, voxel));
+    CHECK(mayReadCache(segment, 1.0f, voxel));
+}
+
+TEST_CASE("the eligibility test is monotone in every argument")
+{
+    // The three knobs have to push in the directions the reasoning claims, or a
+    // scene tuned on one of them moves the wrong way.
+    const float voxel = 0.2f;
+    // Rougher is more eligible.
+    bool seenFalse = false, seenTrue = false;
+    for (int step = 0; step <= 50; ++step)
+    {
+        const float r = (float)step * 0.02f;
+        const bool ok = mayReadCache(4.0f, r, voxel);
+        if (ok)
+            seenTrue = true;
+        else
+            CHECK(!seenTrue); // never goes back to ineligible once eligible
+        seenFalse = seenFalse || !ok;
+    }
+    CHECK(seenFalse);
+    CHECK(seenTrue);
+    // Longer segments are more eligible, larger voxels less.
+    CHECK(mayReadCache(8.0f, 0.4f, voxel));
+    CHECK(!mayReadCache(8.0f, 0.4f, voxel * 100.0f));
+}
+
+TEST_CASE("a degenerate voxel or segment cannot make the test say yes by accident")
+{
+    CHECK(!mayReadCache(0.0f, 1.0f, 1.0f));
+    CHECK(!mayReadCache(-1.0f, 1.0f, 1.0f));
+    CHECK(!mayReadCache(std::nanf(""), 1.0f, 1.0f));
+    // A perfectly smooth surface is refused at every distance, which is the
+    // mirror case and the one that must never slip through.
+    for (int step = 0; step < 11; ++step)
+    {
+        const float d = 0.01f * std::pow(3.0f, (float)step);
+        CHECK(!mayReadCache(d, 0.0f, 0.001f));
+    }
 }

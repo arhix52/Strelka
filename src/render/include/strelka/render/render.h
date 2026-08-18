@@ -114,6 +114,24 @@ public:
         return false;
     }
 
+    /// How much of the radiance cache's table is in use, and how big it is.
+    ///
+    /// False when the backend has no cache, the cache is off, or nobody has
+    /// asked for the number -- counting it costs a pass over the table, so it is
+    /// only run while `render/pt/sharcReportOccupancy` is set.
+    ///
+    /// Worth having on the interface rather than in the panel's own arithmetic
+    /// because it is the one number that says whether the cache is working at
+    /// all: the SDK's guidance is 10-20% with a static camera, and a table
+    /// pinned near full is thrashing -- inserting and evicting faster than
+    /// entries ever resolve, which costs the atomics and returns nothing.
+    virtual bool radianceCacheOccupancy(uint32_t& entriesUsed, uint32_t& capacity) const
+    {
+        (void)entriesUsed;
+        (void)capacity;
+        return false;
+    }
+
     /// Return the last completed output buffer, or nullptr if none ready yet.
     /// The finished frame as a texture, when the backend can produce one.
     /// Nullptr means the caller should fall back to getReadyBuffer(); OptiX does.

@@ -655,8 +655,30 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/sharcCapacity", 1u << 22);
     m_settingsManager->setAs<uint32_t>("render/pt/sharcMinSamples", 8);
     m_settingsManager->setAs<uint32_t>("render/pt/sharcDepth", 1);
+    // Samples after which the cache stops being read. It accelerates the frames
+    // you are moving the camera through and then gets out of the way, because
+    // past this point its own error is the larger of the two. 0 = never stop.
+    m_settingsManager->setAs<uint32_t>("render/pt/sharcReadFrames", 128);
     // How many pixels wide a cache voxel should be at any distance.
     m_settingsManager->setAs<float>("render/pt/sharcVoxelPixels", 4.0f);
+    // The temporal window, in frames, and how long an entry survives with
+    // nothing deposited into it. Together these are what let the table outlive a
+    // camera movement instead of being cleared by it; see sharc_resolve.h.
+    m_settingsManager->setAs<uint32_t>("render/pt/sharcAccumFrames", 32);
+    m_settingsManager->setAs<uint32_t>("render/pt/sharcStaleFrames", 64);
+    // Responsive lighting: the short window a light marked `responsive` in the
+    // scene is cached on. On whenever such a light exists -- the setting can
+    // only turn it off, which is what makes it an A/B rather than a switch
+    // somebody has to find.
+    m_settingsManager->setAs<bool>("render/pt/sharcResponsiveLighting", true);
+    m_settingsManager->setAs<uint32_t>("render/pt/sharcResponsiveFrames", 4);
+    // Raised for one frame by the panel's Reset button, and consumed by the
+    // renderer. A setting rather than a call so that headless and interactive
+    // reach it the same way.
+    m_settingsManager->setAs<bool>("render/pt/sharcReset", false);
+    // Counting occupancy is a pass over the whole table, so it runs only while
+    // the panel that shows the number is open.
+    m_settingsManager->setAs<bool>("render/pt/sharcReportOccupancy", false);
     // Block compression and a disk cache for the finished textures.
     // The cache holds them downscaled, mipped and compressed, so a second
     // launch skips the decode, the resample, the mip chain and the encode.
@@ -4285,8 +4307,11 @@ void EditorApp::dumpCameraSettings()
     const std::string dump = oka::formatCameraDump(s);
     // Straight to stdout as well as to the log: the point is to be copied out of
     // a terminal, and the log's prefixes land on every line of the block.
-    std::fputs(dump.c_str(), stdout);
-    std::fflush(stdout);
+    // Return values discarded deliberately, and said so: there is nothing to do
+    // if writing a debug dump to a terminal fails, and cert-err33-c is an error
+    // in this tree.
+    (void)std::fputs(dump.c_str(), stdout);
+    (void)std::fflush(stdout);
     ImGui::SetClipboardText(dump.c_str());
 
     STRELKA_INFO("ACTION dump_camera camera={} pos=[{} {} {}] fov={}", m_selectedCamera, cam.position.x,

@@ -183,6 +183,29 @@ void EditorApp::drawPropertyPanel()
             }
         }
 
+        // Radiance cache. Only meaningful while the cache is on, and harmless
+        // otherwise, so it is shown either way rather than appearing and
+        // vanishing with a render setting on another panel.
+        ImGui::SeparatorText("Radiance cache");
+        if (ImGui::Checkbox("Responsive", &desc.responsive))
+        {
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted(
+                "Cache this light's contribution on a short clock, separately from the\n"
+                "rest of the scene's. For a light that changes faster than the cache's\n"
+                "temporal window can follow -- swung, animated, switched on mid-shot --\n"
+                "which otherwise lags visibly behind the render.\n\n"
+                "Costs a second cache entry per voxel this light reaches and a second\n"
+                "deposit per path, so it is worth setting only on the lights that need\n"
+                "it. Nothing in the scene has to be responsive, and a scene with none\n"
+                "pays nothing at all.");
+            ImGui::EndTooltip();
+        }
+
         if (changed)
         {
             pushUndoLight(m_selectedLightId);

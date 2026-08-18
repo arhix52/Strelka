@@ -88,7 +88,26 @@ struct RenderConfig
     bool sharc = false;
     uint32_t sharcDepth = 1;
     uint32_t sharcMinSamples = 8;
+    /// Accumulated samples after which cache reads stop; 0 never stops. The
+    /// cache's error is correlated and therefore a floor, so past the crossover
+    /// it is the only thing keeping the render from converging. See
+    /// Params::sharcReadMaxSubframe for the measurement.
+    uint32_t sharcReadFrames = 128;
     float sharcBaseSize = 4.0f; // voxel width in pixels
+    /// Frames the cache averages a voxel over. Larger is quieter and slower to
+    /// notice that the lighting changed; the resolve pass clamps it to the SDK's
+    /// bounds. See src/shaders/optix/sharc_resolve.h.
+    uint32_t sharcAccumFrames = 32;
+    /// Frames an entry survives with nothing deposited into it before its slot
+    /// goes back to the table. This is what lets the cache outlive a moving
+    /// camera; evicting too eagerly costs more in re-insertion than it frees.
+    uint32_t sharcStaleFrames = 64;
+    /// The window and lifetime, in frames, of the short-clock entries that hold
+    /// what lights marked `responsive` in the scene deliver. Short on purpose.
+    uint32_t sharcResponsiveFrames = 4;
+    /// Lets a headless A/B turn the split off on a scene that has responsive
+    /// lights, which is the only way to measure what it costs and buys.
+    bool sharcResponsiveLighting = true;
     /// Resolve alpha cutouts in the traversal hardware where the answer is
     /// uniform, and enter the shader only where it is not. Off by default: it is
     /// an acceleration, and one that has to be measured on a machine that can

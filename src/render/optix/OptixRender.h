@@ -172,6 +172,11 @@ private:
     struct PipelineSpec
     {
         uint32_t sharcCapacity = 0;
+        /// Whether any light is responsive. A constant rather than a runtime
+        /// read because it gates a second hash probe on every cached read and a
+        /// second set of atomics on every deposit; a scene without a responsive
+        /// light must not pay a branch for one.
+        uint32_t sharcResponsive = 0;
         uint32_t debug = 0;
         uint32_t estimatorMode = 0;
         uint32_t volumeModel = 0;
@@ -368,12 +373,47 @@ private:
     std::unique_ptr<OptixBuffer> mSharcPathBuffer;
     size_t mSharcPathStateCount = 0;
     uint32_t mSharcCapacity = 0;
-    /// Whether the table has to be cleared before the next launch. Raised when
-    /// it is allocated and whenever accumulation restarts, because a cache
-    /// filled under a camera that has since moved describes voxels that are no
-    /// longer where it thinks they are.
+    /// Whether the table has to be cleared before the next launch.
+    ///
+    /// Raised when it is allocated, when the scene under it changes, and when a
+    /// user asks -- and deliberately *not* when accumulation restarts, which is
+    /// what it used to do. Accumulation restarts on every camera movement, so
+    /// that rule cleared the whole table several times a second and the cache
+    /// never held more than one frame of anything. Entries the camera has
+    /// invalidated are now aged out one at a time by the resolve pass instead,
+    /// which is what the SDK does and the reason it has a resolve pass at all.
     bool mSharcClearPending = false;
+    /// Temporal window and eviction threshold, in frames, read from settings
+    /// once per frame and handed to the resolve pass. See sharc_resolve.h.
+    uint32_t mSharcAccumFrames = 32;
+    uint32_t mSharcStaleFrames = 64;
+    /// The window and lifetime of the responsive half, in frames. Short on
+    /// purpose: it is the whole of what "responsive" means.
+    uint32_t mSharcResponsiveFrames = 4;
+    /// One bit per light, set where the light is responsive. Null when none is,
+    /// which is also when params.sharcResponsive is 0.
+    std::unique_ptr<OptixBuffer> mSharcResponsiveLightBuffer;
+    uint32_t mSharcResponsiveLightCount = 0;
+    void createSharcResponsiveLightBuffer();
+    /// Where the eye was when the previous frame resolved, and whether there was
+    /// one. Reprojection needs both cameras to work out which way the grid level
+    /// moved under a voxel; on the first frame there is nothing to reproject
+    /// from and the probe is skipped rather than fed the origin.
+    float mSharcPrevCameraPosition[3] = { 0.0f, 0.0f, 0.0f };
+    bool mSharcHasPrevCameraPosition = false;
+    /// This frame's eye position, taken in updateSharcParams -- which has the
+    /// camera -- and used by resolveSharc, which runs later and does not.
+    float mSharcCameraPosition[3] = { 0.0f, 0.0f, 0.0f };
+    /// One device word the occupancy kernel counts into, and the last value read
+    /// back from it. Allocated only while somebody is looking (the editor panel
+    /// asks for it); the readback is a frame behind so that nothing stalls on it.
+    std::unique_ptr<OptixBuffer> mSharcOccupancyCounter;
+    uint32_t mSharcOccupancyEntries = 0;
     void updateSharcParams(const oka::Camera& camera, uint32_t width, uint32_t height);
+    /// Fold this frame's deposits into the cache and age it. Runs on the render
+    /// stream straight after the launch, so the writes it reads are the ones
+    /// that launch made and the next launch reads what it wrote.
+    void resolveSharc();
 
     // --- Denoiser / guides -----------------------------------------------
     OptixDenoiserContext mDenoiser;
@@ -535,6 +575,17 @@ public:
     bool denoiserFallbackActive() const override
     {
         return mDenoiserFallback;
+    }
+
+    bool radianceCacheOccupancy(uint32_t& entriesUsed, uint32_t& capacity) const override
+    {
+        if (mSharcCapacity == 0 || !mSharcOccupancyCounter)
+        {
+            return false;
+        }
+        entriesUsed = mSharcOccupancyEntries;
+        capacity = mSharcCapacity;
+        return true;
     }
 
     /// The presented form of the last frame, synthesized without modifying the

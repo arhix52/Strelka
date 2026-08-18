@@ -25,6 +25,11 @@ TEST_CASE("Light JSON round-trip preserves desc fields")
     // A light that lights the scene without being in frame. Written only when
     // false, so this also pins that the sidecar stays quiet about the default.
     rect.visibleToCamera = false;
+    // Cached on the radiance cache's short clock. Written only when true, so
+    // this pins both halves of that: it survives the round trip, and the light
+    // below -- which never asks for it -- comes back false rather than picking
+    // up whatever the previous entry set.
+    rect.responsive = true;
     scene.createLight(rect);
 
     Scene::UniformLightDesc distant{};
@@ -58,6 +63,7 @@ TEST_CASE("Light JSON round-trip preserves desc fields")
     CHECK(r.intensity == doctest::Approx(123.0f));
     CHECK(r.orientation.y == doctest::Approx(20.0f));
     CHECK(r.visibleToCamera == false);
+    CHECK(r.responsive == true);
 
     const auto& d = loaded.getLightsDesc()[1];
     CHECK(d.type == LIGHT_TYPE_DISTANT);
@@ -65,11 +71,27 @@ TEST_CASE("Light JSON round-trip preserves desc fields")
     CHECK(d.halfAngle == doctest::Approx(distant.halfAngle).epsilon(1e-4));
     // Absent from the JSON entirely; the loader has to default it to visible.
     CHECK(d.visibleToCamera == true);
+    CHECK(d.responsive == false);
 
-    REQUIRE(loaded.getEnvLight().has_value());
-    CHECK(loaded.getEnvLight()->texturePath == "hdr/studio.exr");
-    CHECK(loaded.getEnvLight()->intensity == doctest::Approx(1.25f));
-    CHECK(loaded.getEnvLight()->rotationY == doctest::Approx(42.0f));
+    // Bound once rather than re-fetched: getEnvLight() returns by value, so
+    // each `->` was a fresh optional the has_value() above had never seen --
+    // which is what bugprone-unchecked-optional-access was reporting, and it
+    // was right that the guard did not guard these three.
+    // Bound once rather than re-fetched: getEnvLight() returns by value, so each
+    // `loaded.getEnvLight()->` was a fresh optional that the REQUIRE had never
+    // seen. The `if` is not redundant with the REQUIRE either -- REQUIRE is a
+    // macro the analyser cannot read as a guard, so without the branch every
+    // access below is an unchecked one. REQUIRE still owns the failure message;
+    // the branch only tells the analyser what REQUIRE already guarantees.
+    const auto loadedEnv = loaded.getEnvLight();
+    REQUIRE(loadedEnv.has_value());
+    if (loadedEnv.has_value())
+    {
+        const Scene::EnvLightDesc& readBack = *loadedEnv;
+        CHECK(readBack.texturePath == "hdr/studio.exr");
+        CHECK(readBack.intensity == doctest::Approx(1.25f));
+        CHECK(readBack.rotationY == doctest::Approx(42.0f));
+    }
 
     fs::remove(jsonPath);
 }

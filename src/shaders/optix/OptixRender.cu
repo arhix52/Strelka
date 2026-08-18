@@ -284,7 +284,26 @@ extern "C" __global__ void __raygen__rg()
     float3 specular = make_float3(0.0f);
     float4 specularOut = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
     uint32_t specularSamples = 0;
+    /// Bounces actually traced, summed over this launch's samples, for
+    /// DebugMode::eSharcBounces. A raygen local rather than a PerRayData field
+    /// because that struct sizes the continuation stack byte for byte
+    /// (docs/open-perf.md), and this is wanted by one debug view.
+    ///
+    /// It cannot be read back from prd.depth: a cache hit sets that to
+    /// max_depth to stop the loop, which is exactly the case the view exists to
+    /// show, and it would show it as the deepest possible path.
+    uint32_t bounceSum = 0;
     const uint32_t linearPixelIndex = launch_index.y * params.image_width + launch_index.x;
+
+    // DebugMode::eSharcRadiance is written by the closest hit, at the primary
+    // surface, while the rest of the path carries on filling the cache it reads
+    // -- see there. Nothing else writes this pixel, so it is cleared here: a
+    // camera ray that reaches no surface at all must leave black rather than
+    // whatever the last frame put there.
+    if (params.debug == (uint32_t)DebugMode::eSharcRadiance)
+    {
+        params.image[linearPixelIndex] = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+    }
 
     for (uint32_t sampleIdx = 0; sampleIdx < params.samples_per_launch; ++sampleIdx)
     {
@@ -331,6 +350,9 @@ extern "C" __global__ void __raygen__rg()
         if (params.sharcCapacity != 0u)
         {
             params.sharcPath[linearPixelIndex].index = SHARC_NO_ENTRY;
+            // No segment has been launched yet, and zero blocks the eligibility
+            // test -- which is correct: the camera ray is not a lobe.
+            params.sharcPath[linearPixelIndex].launchRoughness = 0.0f;
         }
 
         float3 ray_origin, ray_direction;
@@ -378,6 +400,8 @@ extern "C" __global__ void __raygen__rg()
         const uint32_t maxSegments =
             params.max_depth + PATH_PASSTHROUGH_MAX + min(params.subsurfaceIterations, MEDIUM_MAX_STEPS);
         uint32_t segments = 0;
+        // Tracks prd.depth, but survives the cache overwriting it. See bounceSum.
+        uint32_t bounces = 0;
 
         while (prd.depth < params.max_depth && segments < maxSegments)
         {
@@ -479,8 +503,9 @@ extern "C" __global__ void __raygen__rg()
             }
 
             ++prd.depth;
+            ++bounces;
 
-            // The two single-hit views describe the first surface and nothing
+            // The single-hit views describe the first surface and nothing
             // past it, so there is no reason to keep tracing.
             if (DEBUG_MODE_IS_SINGLE_HIT(params.debug))
                 break;
@@ -507,12 +532,31 @@ extern "C" __global__ void __raygen__rg()
                 // accumulator.
                 if (gathered.x >= 0.0f && gathered.y >= 0.0f && gathered.z >= 0.0f)
                 {
-                    sharcWrite(params.sharcEntries, visit.index, gathered);
+                    if (params.sharcResponsive != 0u && visit.responsiveIndex != SHARC_NO_ENTRY)
+                    {
+                        // Split, additively: what came from lights on the fast
+                        // clock goes to the short-window entry, the remainder to
+                        // the long-window one, and a reader adds them back.
+                        // Both are written even when one of them is zero -- see
+                        // the note at the visit for why that is required and not
+                        // merely tidy.
+                        const float3 responsive = visit.responsiveRadiance * visit.invThroughput;
+                        const float3 steady = make_float3(fmaxf(gathered.x - responsive.x, 0.0f),
+                                                          fmaxf(gathered.y - responsive.y, 0.0f),
+                                                          fmaxf(gathered.z - responsive.z, 0.0f));
+                        sharcWrite(params.sharcEntries, visit.index, steady);
+                        sharcWrite(params.sharcEntries, visit.responsiveIndex, responsive);
+                    }
+                    else
+                    {
+                        sharcWrite(params.sharcEntries, visit.index, gathered);
+                    }
                 }
             }
         }
 
         result += prd.radiance;
+        bounceSum += bounces;
 
         if (params.writeSplitAov)
         {
@@ -584,9 +628,61 @@ extern "C" __global__ void __raygen__rg()
     (void)diffuseOut;
     (void)specularOut;
 
-    if (params.debug >= DEBUG_MODE_FIRST_AOV && params.aov != nullptr)
+    if (params.debug >= DEBUG_MODE_FIRST_AOV && params.debug < (uint32_t)DebugMode::eSharcGrid &&
+        params.aov != nullptr)
     {
         params.image[linearPixelIndex] = make_float4(visualiseGuide(params.aov[linearPixelIndex], params.debug), 1.0f);
+        return;
+    }
+
+    // The two radiance-cache views that are not a property of one surface. The
+    // other two (eSharcGrid, eSharcRadiance) are written by the closest hit,
+    // where the surface is.
+    if (params.debug == (uint32_t)DebugMode::eSharcBounces)
+    {
+        // The SDK's efficiency view: how deep paths actually went. Comparing it
+        // with the cache off and on is the direct measurement of what the cache
+        // buys, and it is the one that says *where* -- a scene whose heatmap
+        // does not cool when the cache is switched on is not being cached,
+        // whatever the frame time says.
+        //
+        // Blue, green, yellow, red at zero, one, two, three or more bounces,
+        // matching the SDK's green-is-one, red-is-two-or-more reading with two
+        // more steps of resolution.
+        const float mean = (float)bounceSum / (float)params.samples_per_launch;
+        const float t = fminf(mean, 3.0f);
+        float3 heat;
+        if (t < 1.0f)
+        {
+            heat = lerp(make_float3(0.0f, 0.0f, 0.4f), make_float3(0.0f, 1.0f, 0.0f), t);
+        }
+        else if (t < 2.0f)
+        {
+            heat = lerp(make_float3(0.0f, 1.0f, 0.0f), make_float3(1.0f, 1.0f, 0.0f), t - 1.0f);
+        }
+        else
+        {
+            heat = lerp(make_float3(1.0f, 1.0f, 0.0f), make_float3(1.0f, 0.0f, 0.0f), t - 2.0f);
+        }
+        params.image[linearPixelIndex] = make_float4(heat, 1.0f);
+        return;
+    }
+    if (params.debug == (uint32_t)DebugMode::eSharcRadiance)
+    {
+        return; // already written, at the primary hit
+    }
+    if (params.debug == (uint32_t)DebugMode::eSharcOccupancy)
+    {
+        // A view of the table, not of the scene -- the table has no position in
+        // the world, so there is nothing to show it over. Black where the grid
+        // of blocks does not reach, as the SDK's own overlay does.
+        float3 overlay = make_float3(0.0f);
+        if (params.sharcCapacity != 0u)
+        {
+            sharcDebugOccupancy(params.sharcEntries, params.sharcCapacity,
+                                make_uint2(launch_index.x, launch_index.y), make_uint2(dim.x, dim.y), overlay);
+        }
+        params.image[linearPixelIndex] = make_float4(overlay, 1.0f);
         return;
     }
 

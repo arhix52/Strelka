@@ -46,6 +46,11 @@ if(WIN32 OR LINUX)
     cuda_compile(compiled_denoise_guide_files
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/DenoiseGuides.cu
     )
+    # The radiance cache's resolve pass. A plain CUDA kernel, not OPTIXIR: it
+    # traces nothing and runs once per frame between launches.
+    cuda_compile(compiled_sharc_files
+        ${CMAKE_CURRENT_SOURCE_DIR}/optix/sharc_resolve.cu
+    )
 
     add_library(strelka_shaders STATIC
         ${generated_optix_files}
@@ -53,10 +58,14 @@ if(WIN32 OR LINUX)
         ${compiled_tonemap_files}
         ${compiled_skinning_files}
         ${compiled_denoise_guide_files}
+        ${compiled_sharc_files}
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/Tonemappers.h
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/DenoiseGuides.h
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/postprocessing/Guides.h
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/skinning/skinning.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/optix/sharc.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/optix/sharc_grid.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/optix/sharc_resolve.h
     )
     set_target_properties(strelka_shaders PROPERTIES LINKER_LANGUAGE CXX)
 

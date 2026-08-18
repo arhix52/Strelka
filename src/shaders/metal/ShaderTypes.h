@@ -59,6 +59,19 @@ enum class DebugMode : uint32_t
     // a fifth of the frame went unnoticed until an object disappeared.
     eAovReactive,
     eAovSpecularHitDistance,
+    // Radiance-cache views. Carried here, and in this order, so that the two
+    // backends keep one numbering and the editor keeps one menu: a debug value
+    // has to mean the same thing on both, and the panel builds its list from
+    // this enum for both.
+    //
+    // Not implemented on Metal yet -- selecting one renders normally rather
+    // than failing. The OptiX side has them (src/shaders/optix/sharc.h,
+    // OptixRender.cu) and is the reference for the port; it is a hand-off, see
+    // docs/open-defects.md.
+    eSharcGrid,
+    eSharcRadiance,
+    eSharcOccupancy,
+    eSharcBounces,
 };
 
 #define DEBUG_MODE_FIRST_AOV 3
