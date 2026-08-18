@@ -30,6 +30,8 @@ public:
     {
         Buffer* buffer = nullptr;
         void* texture = nullptr;
+        uint64_t frameSerial = 0;
+        PresentationMetadata presentation{};
     };
 
     virtual ~Render() = default;
@@ -122,6 +124,14 @@ public:
     virtual bool readDisplayTexture(std::vector<float>&, uint32_t&, uint32_t&)
     {
         return false;
+    }
+
+    /// Read an SDR display transform for formats such as PNG. HDR backends
+    /// override this so highlights are compressed to SDR instead of clipped
+    /// after an EDR transform.
+    virtual bool readDisplayTextureSdr(std::vector<float>& out, uint32_t& width, uint32_t& height)
+    {
+        return readDisplayTexture(out, width, height);
     }
 
     virtual void* getReadyTexture()
@@ -239,6 +249,17 @@ public:
     }
 
     virtual void* getNativeCommandQueue()
+    {
+        return nullptr;
+    }
+
+    /// CUDA identity used by external graphics interop. Non-CUDA backends keep
+    /// these defaults so Metal remains independent of CUDA headers and types.
+    virtual int activeCudaDeviceOrdinal() const
+    {
+        return -1;
+    }
+    virtual void* getNativeCudaStream()
     {
         return nullptr;
     }

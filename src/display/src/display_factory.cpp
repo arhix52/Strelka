@@ -1,7 +1,7 @@
 #ifdef __APPLE__
 #include "metal/glfw_display.h"
 #else
-#include "opengl/glfw_display.h"
+#include "vulkan/glfw_display.h"
 #endif
 
 using namespace oka;

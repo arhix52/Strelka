@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <strelka/render/buffer.h>
 #include <tonemappers.h>
 
 namespace
@@ -36,4 +37,44 @@ TEST_CASE("extended sRGB transfer preserves EDR values")
 {
     CHECK(oka::tonemap::gammaFloat(1.0f, 2.4f) == doctest::Approx(1.0f));
     CHECK(oka::tonemap::gammaFloat(4.0f, 2.4f) > 1.0f);
+}
+
+TEST_CASE("presentation metadata defaults describe an identity linear handoff")
+{
+    const oka::PresentationMetadata metadata{};
+    const oka::ImageBuffer image{};
+
+    CHECK(metadata.content == oka::PresentationContent::SceneLinear);
+    CHECK(metadata.exposure[0] == doctest::Approx(1.0f));
+    CHECK(metadata.exposure[1] == doctest::Approx(1.0f));
+    CHECK(metadata.exposure[2] == doctest::Approx(1.0f));
+    CHECK(metadata.maxOutput == doctest::Approx(1.0f));
+    CHECK(metadata.gamma == doctest::Approx(0.0f));
+    CHECK(metadata.tonemapper == 0u);
+    CHECK(image.frameSerial == 0u);
+    CHECK(oka::shouldApplyPresentationTransform(metadata));
+}
+
+TEST_CASE("debug presentation content explicitly bypasses display transforms")
+{
+    oka::PresentationMetadata metadata{};
+
+    metadata.exposure[0] = 4.0f;
+    metadata.maxOutput = 2.0f;
+    metadata.gamma = 2.4f;
+    metadata.tonemapper = 2u;
+    metadata.content = oka::PresentationContent::DebugDisplayLinear;
+
+    CHECK(metadata.content == oka::PresentationContent::DebugDisplayLinear);
+    CHECK_FALSE(oka::shouldApplyPresentationTransform(metadata));
+}
+
+TEST_CASE("presentation frame serial transforms each published frame once")
+{
+    const uint64_t transformedFrameSerial = 41;
+
+    CHECK_FALSE(oka::shouldTransformFrame(0, transformedFrameSerial));
+    CHECK_FALSE(
+        oka::shouldTransformFrame(transformedFrameSerial, transformedFrameSerial));
+    CHECK(oka::shouldTransformFrame(42, transformedFrameSerial));
 }

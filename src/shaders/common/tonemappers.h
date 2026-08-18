@@ -142,14 +142,14 @@ static TONEMAP_CONST float3x3 ACESOutputMat =
     {-0.00327, -0.07276,  1.07602}
 };
 
-float3 RRTAndODTFit(float3 v)
+inline float3 RRTAndODTFit(float3 v)
 {
     float3 a = v * (v + 0.0245786f) - 0.000090537f;
     float3 b = v * (0.983729f * v + 0.4329510f) + 0.238081f;
     return a / b;
 }
 
-float3 ACESFitted(float3 color)
+inline float3 ACESFitted(float3 color)
 {
     color = transpose(ACESInputMat) * color;
     // Apply RRT and ODT
@@ -169,7 +169,7 @@ inline float3 ACESFitted(float3 color, const float maxOutput)
 }
 
 // https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
-float3 ACESFilm(float3 x)
+inline float3 ACESFilm(float3 x)
 {
     float a = 2.51f;
     float b = 0.03f;
@@ -185,12 +185,12 @@ inline float3 ACESFilm(float3 x, const float maxOutput)
 }
 
 // original implementation https://github.com/NVIDIAGameWorks/Falcor/blob/5236495554f57a734cc815522d95ae9a7dfe458a/Source/RenderPasses/ToneMapper/ToneMapping.ps.slang
-float calcLuminance(float3 color)
+inline float calcLuminance(float3 color)
 {
     return dot(color, MAKE_FLOAT3(0.299f, 0.587f, 0.114f));
 }
 
-float3 reinhard(float3 color)
+inline float3 reinhard(float3 color)
 {
     float luminance = calcLuminance(color);
     // float reinhard = luminance / (luminance + 1);
@@ -202,7 +202,7 @@ inline float3 reinhard(float3 color, const float maxOutput)
     return reinhard(color / maxOutput) * maxOutput;
 }
 
-float gammaFloat(const float c, const float gamma)
+inline float gammaFloat(const float c, const float gamma)
 {
     if (isnan(c))
     {
@@ -219,19 +219,19 @@ float gammaFloat(const float c, const float gamma)
     return 1.055f * pow(c, 1.0f / gamma) - 0.055f;
 }
 
-float3 srgbGamma(const float3 color, const float gamma)
+inline float3 srgbGamma(const float3 color, const float gamma)
 {
     return MAKE_FLOAT3(gammaFloat(color.x, gamma), gammaFloat(color.y, gamma), gammaFloat(color.z, gamma));
 }
 
 // utility function for accumulation and HDR <=> LDR
-float3 tonemap(float3 color, const float3 exposure)
+inline float3 tonemap(float3 color, const float3 exposure)
 {
     color *= exposure;
     return color / (color + 1.0f);
 }
 
-float3 inverseTonemap(const float3 color, const float3 exposure)
+inline float3 inverseTonemap(const float3 color, const float3 exposure)
 {
     return color / (exposure - color * exposure);
 }

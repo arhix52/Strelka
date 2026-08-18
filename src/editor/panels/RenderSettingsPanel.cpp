@@ -3,6 +3,9 @@
 #include "../editor_denoiser_ui.h"
 #include "../editor_frame_budget.h"
 
+#include <math.h>
+#include <strelka/display/output_policy.h>
+
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
 
@@ -14,10 +17,105 @@
 
 namespace oka
 {
+namespace
+{
+void drawDisplayOutputSettings(SettingsManager& settings, const Display& display)
+{
+    const char* const outputModeItems[] = { "Auto", "HDR10", "SDR" };
+    display_output::DisplayCapabilities capabilities;
+    uint32_t storedMode = 0;
+    int outputMode = 0;
+    int n = 0;
+    bool isSelected = false;
+    bool vrrEnabled = false;
+    float paperWhite = NAN;
+    float peakNits = NAN;
+    const char *vrrStatus = nullptr;
+
+    if (!ImGui::TreeNodeEx("Display output", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        return;
+    }
+
+    storedMode = settings.getAs<uint32_t>("render/post/outputMode");
+    outputMode = static_cast<int>(std::min(storedMode, static_cast<uint32_t>(display_output::OutputMode::SDR)));
+    if (ImGui::BeginCombo("Dynamic range", outputModeItems[outputMode]))
+    {
+        for (n = 0; n < IM_ARRAYSIZE(outputModeItems); ++n)
+        {
+            isSelected = outputMode == n;
+            if (ImGui::Selectable(outputModeItems[n], isSelected))
+            {
+                outputMode = n;
+                settings.setAs<uint32_t>("render/post/outputMode", static_cast<uint32_t>(n));
+            }
+            if (isSelected)
+            {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    paperWhite = settings.getAs<float>("render/post/paperWhiteNits");
+    peakNits = settings.getAs<float>("render/post/peakNits");
+    ImGui::BeginDisabled(outputMode == static_cast<int>(display_output::OutputMode::SDR));
+    if (ImGui::DragFloat("Paper white", &paperWhite, 1.0f, 80.0f, 500.0f, "%.0f nits"))
+    {
+        peakNits = std::max(peakNits, paperWhite);
+        settings.setAs<float>("render/post/paperWhiteNits", paperWhite);
+        settings.setAs<float>("render/post/peakNits", peakNits);
+    }
+    if (ImGui::DragFloat("HDR peak", &peakNits, 10.0f, paperWhite, 10000.0f, "%.0f nits",
+                         ImGuiSliderFlags_Logarithmic))
+    {
+        settings.setAs<float>("render/post/peakNits", peakNits);
+    }
+    ImGui::EndDisabled();
+
+    vrrEnabled = settings.getAs<bool>("display/vrr/enabled");
+    if (ImGui::Checkbox("Variable refresh rate", &vrrEnabled))
+    {
+        settings.setAs<bool>("display/vrr/enabled", vrrEnabled);
+    }
+
+    capabilities = display.getOutputCapabilities();
+    vrrStatus = display_output::vrrStatusName(capabilities.vrrStatus);
+    ImGui::SeparatorText("Capabilities");
+    ImGui::TextDisabled(
+        "HDR10: %s  |  selected: %s  |  metadata: %s",
+        capabilities.output.hdr10 ? "supported" : "unavailable",
+        capabilities.output.hdrSelected ? "yes" : "no",
+        capabilities.output.hdrMetadata ? "supported" : "unavailable");
+    ImGui::TextDisabled(
+        "Present modes: FIFO%s%s%s",
+        capabilities.present.fifoRelaxed ? ", FIFO_RELAXED" : "",
+        capabilities.present.mailbox ? ", MAILBOX" : "",
+        capabilities.present.immediate ? ", IMMEDIATE" : "");
+    ImGui::TextDisabled(
+        "Present wait: %s  |  present ID: %s  |  timing: %s",
+        capabilities.presentWait ? "available" : "unavailable",
+        capabilities.presentId ? "available" : "unavailable",
+        capabilities.displayTiming ? "available" : "unavailable");
+    ImGui::TextDisabled(
+        "VRR: %s  |  current: %.3f Hz; Vulkan FIFO baseline",
+        vrrStatus, capabilities.currentRefreshRateHz);
+    if (capabilities.minRefreshRateHz > 0.0f &&
+        capabilities.maxRefreshRateHz > 0.0f)
+    {
+        ImGui::TextDisabled(
+            "Compositor VRR range: %.3f-%.3f Hz",
+            capabilities.minRefreshRateHz, capabilities.maxRefreshRateHz);
+    }
+    ImGui::TreePop();
+}
+} // namespace
 
 void EditorApp::drawRenderSettingsPanel()
 {
     ImGui::Begin("Render Settings:");
+
+    drawDisplayOutputSettings(*m_settingsManager, *m_display);
 
     {
         bool analytic = m_settingsManager->getAs<bool>("render/validate/analyticLights");

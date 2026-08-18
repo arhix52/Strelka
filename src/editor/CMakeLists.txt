@@ -51,10 +51,6 @@ set_target_properties(StrelkaEditor PROPERTIES
     CXX_EXTENSIONS OFF
 )
 
-if(WIN32)
-    target_compile_definitions(StrelkaEditor PUBLIC GLAD_GLAPI_EXPORT)
-endif()
-
 target_include_directories(StrelkaEditor
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}

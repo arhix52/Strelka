@@ -21,7 +21,7 @@ build_type=$(ucfirst "$build_type")
 
 git submodule update --init --recursive
 
-# Pins that conan-center does not publish yet (imgui Metal 4, ImGuizmo).
+# Pins that conan-center does not publish yet (GLFW, ImGui Metal 4, ImGuizmo).
 ./scripts/export_local_conan.sh
 
 conan install . -c tools.cmake.cmaketoolchain:generator=Ninja \

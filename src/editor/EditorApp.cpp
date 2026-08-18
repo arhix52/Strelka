@@ -11,6 +11,7 @@
 #include "ImGuiFileDialog.h"
 
 #include <strelka/sceneloader/sceneserializer.h>
+#include <strelka/display/output_policy.h>
 #include <env.h>
 #include <log.h>
 #include <paths.h>
@@ -75,8 +76,10 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     m_display->setNativeDevice(m_render->getNativeDevicePtr());
     // Display creates its own command queue for independent frame pacing
 #endif
-    m_display->init(1024, 768, m_settingsManager.get());
+    // Vulkan selects the physical device matching the renderer's active CUDA
+    // device, so the renderer identity must be available during display init.
     m_display->setRender(m_render.get());
+    m_display->init(1024, 768, m_settingsManager.get());
     m_display->setResizeHandler(this);
 
     // A camera has to exist before a scene does: the main loop reads
@@ -670,6 +673,11 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<bool>("render/validate/analyticLights", true);
     m_settingsManager->setAs<std::string>("resource/searchPath", m_resourceSearchPath);
     // Postprocessing settings:
+    m_settingsManager->setAs<uint32_t>("render/post/outputMode",
+                                       static_cast<uint32_t>(display_output::OutputMode::Auto));
+    m_settingsManager->setAs<float>("render/post/paperWhiteNits", 203.0f);
+    m_settingsManager->setAs<float>("render/post/peakNits", 1000.0f);
+    m_settingsManager->setAs<bool>("display/vrr/enabled", true);
     m_settingsManager->setAs<float>("render/post/tonemapper/maxEDR", 1.0f); // refreshed per frame from the display
     m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", 100.0f);
     m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", 1.0f);
@@ -3984,6 +3992,8 @@ void EditorApp::run()
             // Metal hands over the tonemapped texture directly; the buffer is
             // still there and still linear, which is what a screenshot wants.
             outputImage.deviceTexture = readyFrame.texture;
+            outputImage.frameSerial = readyFrame.frameSerial;
+            outputImage.presentation = readyFrame.presentation;
             outputImage.dataSize = (size_t)readyBuf->width() * readyBuf->height() * readyBuf->getElementSize();
             m_display->drawFrame(outputImage);
             // Viewport layout must describe the exact texture adopted above,
@@ -4073,15 +4083,28 @@ void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
     uint32_t h = buf->height();
     const float* data = static_cast<const float*>(buf->getHostPointer());
     std::vector<float> displayPixels;
-    if (editor_screenshot::sourceForExtension(ext) == editor_screenshot::Source::DisplayPreview)
+    bool displayReadbackAvailable = false;
+
+    if (editor_screenshot::sourceForExtension(ext) ==
+        editor_screenshot::Source::DisplayReferredSdr)
     {
         uint32_t displayWidth = 0;
         uint32_t displayHeight = 0;
-        if (m_render->readDisplayTexture(displayPixels, displayWidth, displayHeight) && !displayPixels.empty())
+        displayReadbackAvailable = m_render->readDisplayTextureSdr(
+            displayPixels, displayWidth, displayHeight);
+        if (displayReadbackAvailable && !displayPixels.empty())
         {
             w = displayWidth;
             h = displayHeight;
             data = displayPixels.data();
+        }
+        else
+        {
+            STRELKA_INFO("ACTION screenshot path={} ok=false", path);
+            STRELKA_ERROR(
+                "Display-referred SDR pixels are unavailable for PNG screenshot");
+            showAlert("Display-referred SDR pixels are unavailable for PNG screenshot");
+            return;
         }
     }
 
@@ -4112,7 +4135,10 @@ void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
         {
             for (size_t c = 0; c < 4; ++c)
             {
-                const float v = std::max(0.0f, std::min(1.0f, data[i * 4 + c]));
+                const float v =
+                    c < 3
+                        ? editor_screenshot::encodeSrgb(data[i * 4 + c])
+                        : std::clamp(data[i * 4 + c], 0.0f, 1.0f);
                 pixels[i * 4 + c] = static_cast<uint8_t>(std::lround(v * 255.0f));
             }
         }

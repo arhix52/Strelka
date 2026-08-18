@@ -48,6 +48,8 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_camera_framing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_overlay.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_camera_dump.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/display/test_output_policy.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/display/test_output_probe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_frame_jitter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_features.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_cache_key.cpp
@@ -61,6 +63,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_wavefront_stage_diagnostic.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_optix_denoise_plan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_tonemappers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_hdr_output.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_scene_stream.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_fibre_chord.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_nee_pairing.cpp
@@ -139,6 +142,30 @@ target_compile_definitions(unit_tests
 )
 
 add_test(NAME unit_tests COMMAND unit_tests)
+
+if(LINUX AND TARGET strelka_display)
+    add_executable(vulkan_cuda_interop_smoke
+        ${CMAKE_CURRENT_SOURCE_DIR}/display/vulkan_cuda_interop_smoke.cpp
+    )
+    strelka_apply_warnings(vulkan_cuda_interop_smoke)
+    target_include_directories(vulkan_cuda_interop_smoke
+        PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/display/vulkan
+            ${CMAKE_SOURCE_DIR}/src/shaders/optix
+    )
+    target_link_libraries(vulkan_cuda_interop_smoke
+        PRIVATE
+            strelka_display
+            strelka_shaders
+    )
+    add_test(NAME vulkan_cuda_interop_smoke
+             COMMAND vulkan_cuda_interop_smoke)
+    set_tests_properties(vulkan_cuda_interop_smoke
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 60
+    )
+endif()
 
 # The curve sidecar has a writer as well as a reader, and the writer is Python
 # that Blender runs -- which is where the diameter/radius convention actually

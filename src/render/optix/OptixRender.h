@@ -392,11 +392,18 @@ private:
     /// Radiance at render resolution when that is not the output resolution,
     /// i.e. when the 2x model is upscaling into the caller's buffer.
     std::unique_ptr<OptixBuffer> mRenderImageBuffer;
-    /// The buffer the caller last got, so readDisplayTexture() can hand back the
-    /// same pixels the screen is showing rather than an intermediate.
-    void* mDisplayImage = nullptr;
+    /// The last completed linear image. readDisplayTexture() copies this into a
+    /// scratch allocation and presents the copy, preserving the published data.
+    void *mDisplayImage = nullptr;
     uint32_t mDisplayWidth = 0;
     uint32_t mDisplayHeight = 0;
+    std::unique_ptr<OptixBuffer> mDisplayReadbackBuffer;
+    PresentationMetadata mDisplayPresentation{};
+    PresentationMetadata mPendingPresentation{};
+    bool readDisplayTextureWithMaxOutput(std::vector<float>& out,
+                                         uint32_t& width,
+                                         uint32_t& height,
+                                         float maxOutput);
     /// Raised by resetTemporalHistory() and consumed by the next render().
     bool mResetTemporalHistory = true;
     /// True when denoising was asked for and could not be provided.
@@ -490,7 +497,11 @@ private:
     std::atomic<bool> mRenderBusy{ false };
     std::atomic<int> mReadyIndex{ -1 };
     int mWriteIndex = 0;
-    Buffer* mAsyncOutputBuffers[2] = { nullptr, nullptr };
+    int mCudaDeviceOrdinal = -1;
+    Buffer *mAsyncOutputBuffers[2] = { nullptr, nullptr };
+    uint64_t mFrameSerials[2] = {};
+    PresentationMetadata mFramePresentation[2] = {};
+    uint64_t mNextFrameSerial = 1;
 
     // ---------------------------------------------------------------- capture --
     bool mCaptureActive = false;
@@ -526,8 +537,10 @@ public:
         return mDenoiserFallback;
     }
 
-    /// The finished frame, after tonemapping, exactly as the display shows it.
+    /// The presented form of the last frame, synthesized without modifying the
+    /// scene-linear published buffer.
     bool readDisplayTexture(std::vector<float>& out, uint32_t& width, uint32_t& height) override;
+    bool readDisplayTextureSdr(std::vector<float>& out, uint32_t& width, uint32_t& height) override;
 
     /// One guide, as RGBA floats with unused channels zeroed. These are the
     /// bytes the denoiser consumes, which is the only way to check a guide
@@ -551,6 +564,15 @@ public:
 
     void triggerRenderIfIdle() override;
     Buffer* getReadyBuffer() override;
+    ReadyFrame getReadyFrame() override;
+    int activeCudaDeviceOrdinal() const override
+    {
+        return mCudaDeviceOrdinal;
+    }
+    void* getNativeCudaStream() override
+    {
+        return static_cast<void*>(mState.stream);
+    }
 
     bool memoryReport(MemoryReport& report) const override;
 

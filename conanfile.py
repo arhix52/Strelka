@@ -8,6 +8,10 @@ from conan.tools.files import copy
 class StrelkaRecipe(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
     generators = "CMakeToolchain", "CMakeDeps"
+    default_options = {
+        "glfw/*:with_wayland": True,
+        "glfw/*:with_x11": True,
+    }
 
     def requirements(self):
         # Foundation
@@ -26,24 +30,31 @@ class StrelkaRecipe(ConanFile):
         # what lets the UI pass move off Metal 3. conan-center has not published it
         # yet, so the recipe is exported locally -- see docs/imgui-metal4.md.
         self.requires("imgui/1.92.9b-docking", override=True)
-        self.requires("glfw/3.4")
+        # Conan Center has not published 3.5.1 yet; build.sh exports the
+        # official release through scripts/export_local_conan.sh.
+        self.requires("glfw/3.5.1")
         # ImGuizmo's conan-center package is from 2023 and calls ImGui APIs that
         # 1.92 removed (BeginChildFrame, the old AddPolyline signature). Upstream
         # has kept up; this is a local export of its head. Bumping ImGui for the
         # Metal 4 backend forces this bump with it.
         self.requires("imguizmo/cci.20260729")
         if self.settings.os != "Macos":
-            self.requires("glad/0.1.36")
+            self.requires("vulkan-loader/1.3.268.0")
         self.requires("cxxopts/3.1.1")
 
         # Testing
         self.requires("doctest/2.4.11")
 
+    def build_requirements(self):
+        if self.settings.os != "Macos":
+            self.tool_requires("shaderc/2025.3")
+
     def generate(self):
         copy(self, "*glfw*", os.path.join(self.dependencies["imgui"].package_folder,
              "res", "bindings"), os.path.join(self.source_folder, "external", "imgui"))
-        copy(self, "*opengl3*", os.path.join(self.dependencies["imgui"].package_folder,
-             "res", "bindings"), os.path.join(self.source_folder, "external", "imgui"))
+        if self.settings.os != "Macos":
+            copy(self, "*vulkan*", os.path.join(self.dependencies["imgui"].package_folder,
+                 "res", "bindings"), os.path.join(self.source_folder, "external", "imgui"))
         copy(self, "*metal*", os.path.join(self.dependencies["imgui"].package_folder,
              "res", "bindings"), os.path.join(self.source_folder, "external", "imgui"))
 

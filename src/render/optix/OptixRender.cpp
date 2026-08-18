@@ -404,12 +404,16 @@ OptiXRender::~OptiXRender()
 
 void OptiXRender::createContext()
 {
+    OptixDeviceContextOptions options = {};
+    CUcontext cuCtx = 0;
+    unsigned int reorderFlags = 0;
+
     // Initialize CUDA
     CUDA_CHECK(cudaFree(0));
+    CUDA_CHECK(cudaGetDevice(&mCudaDeviceOrdinal));
     CUDA_CHECK(cudaStreamCreate(&mState.stream));
 
     OPTIX_CHECK(optixInit());
-    OptixDeviceContextOptions options = {};
     options.logCallbackFunction = &context_log_cb;
     if (mEnableValidation)
     {
@@ -421,14 +425,13 @@ void OptiXRender::createContext()
         options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
         options.logCallbackLevel = 2; // error
     }
-    CUcontext cu_ctx = 0; // zero means take the current context
-    OPTIX_CHECK(optixDeviceContextCreate(cu_ctx, &options, &mState.context));
+    // Zero means take the current context.
+    OPTIX_CHECK(optixDeviceContextCreate(cuCtx, &options, &mState.context));
 
     // Ask whether optixReorder() does anything here before paying for its
     // coherence key. The call is documented as a no-op on hardware without the
     // sorting unit, so this is not a correctness gate -- it is what keeps two
     // dependent loads per bounce off a machine that cannot spend them.
-    unsigned int reorderFlags = 0;
     OPTIX_CHECK(optixDeviceContextGetProperty(mState.context,
                                               OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING,
                                               &reorderFlags, sizeof(reorderFlags)));
@@ -2439,6 +2442,7 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
         mDisplayImage = nullptr;
         mDisplayWidth = 0;
         mDisplayHeight = 0;
+        mDisplayReadbackBuffer.reset();
     }
     mState.params.image_width = width;
     mState.params.image_height = height;
@@ -2526,8 +2530,16 @@ void OptiXRender::updateGuideBuffers(const DenoisePlan& plan)
     }
 }
 
-bool OptiXRender::readDisplayTexture(std::vector<float>& out, uint32_t& width, uint32_t& height)
+bool OptiXRender::readDisplayTextureWithMaxOutput(std::vector<float>& out,
+                                                  uint32_t& width,
+                                                  uint32_t& height,
+                                                  float maxOutput)
 {
+    size_t imageSize = 0;
+    float4 *scratch = nullptr;
+    float3 exposure;
+    ToneMapperType tonemapperType = ToneMapperType::eNone;
+
     if (mDisplayImage == nullptr || mDisplayWidth == 0 || mDisplayHeight == 0)
     {
         return false;
@@ -2535,9 +2547,44 @@ bool OptiXRender::readDisplayTexture(std::vector<float>& out, uint32_t& width, u
     width = mDisplayWidth;
     height = mDisplayHeight;
     out.resize(static_cast<size_t>(width) * height * 4);
+    imageSize = out.size() * sizeof(float);
+    if (!mDisplayReadbackBuffer)
+    {
+        mDisplayReadbackBuffer.reset(new OptixBuffer(imageSize));
+    }
+    else if (mDisplayReadbackBuffer->size() != imageSize)
+    {
+        mDisplayReadbackBuffer->realloc(imageSize);
+    }
+    scratch = static_cast<float4*>(mDisplayReadbackBuffer->getNativePtr());
+    CUDA_CHECK(cudaMemcpy(scratch, mDisplayImage, imageSize, cudaMemcpyDeviceToDevice));
+    if (mDisplayPresentation.content == PresentationContent::SceneLinear)
+    {
+        exposure = make_float3(mDisplayPresentation.exposure[0],
+                               mDisplayPresentation.exposure[1],
+                               mDisplayPresentation.exposure[2]);
+        tonemapperType = static_cast<ToneMapperType>(mDisplayPresentation.tonemapper);
+        tonemap(tonemapperType,
+                exposure,
+                maxOutput,
+                0.0f,
+                scratch,
+                width,
+                height);
+    }
     CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaMemcpy(out.data(), mDisplayImage, out.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(out.data(), scratch, imageSize, cudaMemcpyDeviceToHost));
     return true;
+}
+
+bool OptiXRender::readDisplayTexture(std::vector<float>& out, uint32_t& width, uint32_t& height)
+{
+    return readDisplayTextureWithMaxOutput(out, width, height, mDisplayPresentation.maxOutput);
+}
+
+bool OptiXRender::readDisplayTextureSdr(std::vector<float>& out, uint32_t& width, uint32_t& height)
+{
+    return readDisplayTextureWithMaxOutput(out, width, height, 1.0f);
 }
 
 bool OptiXRender::readGuideTexture(Guide guide, std::vector<float>& out, uint32_t& width, uint32_t& height)
@@ -3437,15 +3484,20 @@ void OptiXRender::render(Buffer* output)
     }
     mResetTemporalHistory = false;
 
-    // Apply tonemapping except for the single-hit debug views, which are already
-    // in display units and would only be crushed by a curve.
-    if (!DEBUG_MODE_IS_SINGLE_HIT(params.debug))
-    {
-        float maxEDR = settings.getAs<float>("render/post/tonemapper/maxEDR");
-        exposureValue *= maxEDR;
-        tonemap(tonemapperType, exposureValue, gamma, displayImage, outputWidth, outputHeight);
-        markStageSubmitted(optix::GpuStage::Tonemap, 0);
-    }
+    // Publication stays scene-linear. Presentation state travels with the exact
+    // slot it describes so a display can apply exposure, the curve and gamma
+    // once, after acquiring that slot. Debug views already contain display
+    // values and bypass the complete presentation transform.
+    mPendingPresentation.exposure[0] = exposureValue.x;
+    mPendingPresentation.exposure[1] = exposureValue.y;
+    mPendingPresentation.exposure[2] = exposureValue.z;
+    mPendingPresentation.maxOutput =
+        std::max(settings.getAs<float>("render/post/tonemapper/maxEDR"), 1.0f);
+    mPendingPresentation.gamma = gamma;
+    mPendingPresentation.tonemapper = static_cast<uint32_t>(tonemapperType);
+    mPendingPresentation.content = params.debug == static_cast<uint32_t>(DebugMode::eNone) ?
+                                       PresentationContent::SceneLinear :
+                                       PresentationContent::DebugDisplayLinear;
 
     if (mFrameStopEvent && !latchCudaError(cudaEventRecord(mFrameStopEvent, 0), "record the frame stop event"))
     {
@@ -3455,6 +3507,7 @@ void OptiXRender::render(Buffer* output)
     mDisplayImage = displayImage;
     mDisplayWidth = outputWidth;
     mDisplayHeight = outputHeight;
+    mDisplayPresentation = mPendingPresentation;
 
     getSharedContext().mFrameNumber++;
 
@@ -4223,6 +4276,8 @@ void OptiXRender::triggerRenderIfIdle()
         // alert says why it stopped moving.
         if (!mDeviceError)
         {
+            mFramePresentation[mWriteIndex] = mPendingPresentation;
+            mFrameSerials[mWriteIndex] = mNextFrameSerial++;
             mReadyIndex.store(mWriteIndex, std::memory_order_release);
         }
         mRenderBusy.store(false, std::memory_order_release);
@@ -4233,6 +4288,17 @@ Buffer* OptiXRender::getReadyBuffer()
 {
     const int ready = mReadyIndex.load(std::memory_order_acquire);
     return ready >= 0 ? mAsyncOutputBuffers[ready] : nullptr;
+}
+
+Render::ReadyFrame OptiXRender::getReadyFrame()
+{
+    const int ready = mReadyIndex.load(std::memory_order_acquire);
+
+    if (ready < 0 || ready > 1)
+    {
+        return {};
+    }
+    return { mAsyncOutputBuffers[ready], nullptr, mFrameSerials[ready], mFramePresentation[ready] };
 }
 
 // ---------------------------------------------------------------------------

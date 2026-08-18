@@ -3,6 +3,7 @@
 #include <strelka/render/common.h>
 #include <strelka/render/buffer.h>
 #include <strelka/render/render.h>
+#include <strelka/display/output_policy.h>
 
 #include <settings.h>
 
@@ -45,6 +46,10 @@ public:
 
     virtual void* getDisplayNativeTexure() = 0;
     virtual float getMaxEDR() = 0;
+    virtual display_output::DisplayCapabilities getOutputCapabilities() const
+    {
+        return {};
+    }
 
 #ifdef __APPLE__
     virtual void setNativeDevice(void* device) = 0;

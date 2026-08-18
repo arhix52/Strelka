@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Export the two Conan packages that conan-center does not publish yet.
+# Export the Conan packages that conan-center does not publish yet.
 # Safe to re-run: skips any ref already present in the local cache.
 set -euo pipefail
 
@@ -49,6 +49,49 @@ if "1.92.9b-docking:" not in text:
     path.write_text(text)
 PY
     (cd "${imgui_dir}" && conan export . --version=1.92.9b-docking)
+fi
+
+# --- glfw/3.5.1 ------------------------------------------------------------
+# Base recipe from conan-center (3.4) plus the latest official GLFW release.
+if have_recipe "glfw/3.5.1"; then
+    echo "glfw/3.5.1 already in cache"
+else
+    echo "Exporting glfw/3.5.1 ..."
+    conan download glfw/3.4 -r conancenter --only-recipe
+    recipe_dir="$(conan cache path glfw/3.4)"
+    glfw_dir="${WORKDIR}/glfw_recipe"
+    mkdir -p "${glfw_dir}"
+    cp "${recipe_dir}/conanfile.py" "${recipe_dir}/conandata.yml" "${glfw_dir}/"
+    GLFW_CONANDATA="${glfw_dir}/conandata.yml" GLFW_CONANFILE="${glfw_dir}/conanfile.py" python3 - <<'PY'
+import os
+from pathlib import Path
+
+path = Path(os.environ["GLFW_CONANDATA"])
+conanfile = Path(os.environ["GLFW_CONANFILE"])
+text = path.read_text()
+entry = """  "3.5.1":
+    url: "https://github.com/glfw/glfw/releases/download/3.5.1/glfw-3.5.1.zip"
+    sha256: "ea79bc5feffc254c87291980c2d0bce9acebb68c4983b79f961dcd2cb8a611a0"
+"""
+if '"3.5.1":' not in text:
+    if "sources:" not in text:
+        raise SystemExit("conandata.yml has no sources: key")
+    text = text.replace("sources:\n", "sources:\n" + entry, 1)
+    path.write_text(text)
+
+# GLFW 3.5 removed the MinGW-only static-libgcc line that the 3.4 CCI recipe
+# strips unconditionally. Remove that obsolete recipe rewrite.
+recipe = conanfile.read_text()
+obsolete = """        # don't force static link to libgcc if MinGW
+        replace_in_file(self, os.path.join(self.source_folder, "src", "CMakeLists.txt"),
+                        "target_link_libraries(glfw PRIVATE \\"-static-libgcc\\")", "")
+
+"""
+if obsolete not in recipe:
+    raise SystemExit("glfw recipe no longer contains the expected 3.4 MinGW rewrite")
+conanfile.write_text(recipe.replace(obsolete, "", 1))
+PY
+    (cd "${glfw_dir}" && conan export . --version=3.5.1)
 fi
 
 # --- imguizmo/cci.20260729 -------------------------------------------------

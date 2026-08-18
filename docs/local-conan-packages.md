@@ -1,16 +1,25 @@
 # Locally exported Conan packages
 
-Two dependencies are pinned to versions conan-center does not publish. Prefer:
+Three dependencies are pinned to versions conan-center does not publish. Prefer:
 
 ```bash
 ./scripts/export_local_conan.sh
 ```
 
 `./build.sh` calls that script before `conan install`. Re-run the script only if
-the Conan cache is wiped. Drop both pins once conan-center publishes
-1.92.9-docking (or newer) and an ImGuizmo newer than 2023.
+the Conan cache is wiped. Drop the corresponding pins once conan-center publishes
+GLFW 3.5.1, ImGui 1.92.9-docking (or newer), and an ImGuizmo newer
+than 2023.
 
 ## Why these pins
+
+### glfw/3.5.1
+
+GLFW 3.5.1 improves Wayland support and exposes the window's `EGLConfig`, which
+is useful for validating HDR-capable framebuffer formats. It does not yet
+implement `wp_color_management_v1`, so the Linux HDR display path still needs
+explicit color-management integration in Strelka. Conan Center currently stops
+at GLFW 3.4.
 
 ### imgui/1.92.9b-docking
 
@@ -26,6 +35,18 @@ removed in 1.92. Upstream ImGuizmo has kept up (5ab7676402, 2026-07-29).
 ## Manual export (Conan 2)
 
 Only needed if the script cannot run (no network, offline recipe edits, …).
+
+### glfw
+
+```sh
+conan download glfw/3.4 -r conancenter --only-recipe
+recipe="$(conan cache path glfw/3.4)"
+mkdir glfw_recipe && cd glfw_recipe
+cp "$recipe"/{conanfile.py,conandata.yml} .
+# Add glfw/3.5.1 and its archive checksum to conandata.yml as done by
+# scripts/export_local_conan.sh.
+conan export . --version=3.5.1
+```
 
 ### imgui
 

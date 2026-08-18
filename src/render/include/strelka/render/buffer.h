@@ -14,6 +14,38 @@ enum class BufferFormat : char
     FLOAT3
 };
 
+enum class PresentationContent : uint32_t
+{
+    SceneLinear = 0,
+    DebugDisplayLinear,
+};
+
+/// Describes how a scene-linear frame becomes a display image.
+///
+/// SceneLinear content is multiplied by exposure, passed through tonemapper
+/// with maxOutput as the curve's output headroom, then encoded with gamma when
+/// gamma is positive. DebugDisplayLinear content bypasses all three operations.
+struct PresentationMetadata
+{
+    float exposure[3] = { 1.0f, 1.0f, 1.0f };
+    float maxOutput = 1.0f;
+    float gamma = 0.0f;
+    uint32_t tonemapper = 0;
+    PresentationContent content = PresentationContent::SceneLinear;
+};
+
+inline bool shouldApplyPresentationTransform(
+    const PresentationMetadata& metadata)
+{
+    return metadata.content == PresentationContent::SceneLinear;
+}
+
+inline bool shouldTransformFrame(uint64_t frameSerial,
+                                 uint64_t transformedFrameSerial)
+{
+    return frameSerial != 0 && frameSerial != transformedFrameSerial;
+}
+
 struct BufferDesc
 {
     uint32_t width;
@@ -109,6 +141,8 @@ struct ImageBuffer
     unsigned int width = 0;
     unsigned int height = 0;
     BufferFormat pixel_format;
+    uint64_t frameSerial = 0;
+    PresentationMetadata presentation{};
 };
 
 } // namespace oka

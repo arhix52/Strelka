@@ -1,5 +1,6 @@
 #include "Tonemappers.h"
 
+#include <cuda_fp16.h>
 #include <sutil/Matrix.h>
 #include <sutil/vec_math_adv.h>
 
@@ -20,15 +21,23 @@ __device__ __inline__ float3 reinhard(const float3 color)
     return color / (luminance + 1);
 }
 
-__global__ void tonemapReinhard(float4* image, const float3 exposure, uint32_t width, uint32_t height)
+__global__ void tonemapReinhard(float4 *image,
+                                const float3 exposure,
+                                const float maxOutput,
+                                uint32_t width,
+                                uint32_t height)
 {
     const uint32_t linearPixelIndex = blockIdx.x * blockDim.x + threadIdx.x;
+    float3 radiance;
+    float output;
+
     if (linearPixelIndex >= height * width)
     {
         return;
     }
-    const float3 radiance = make_float3(image[linearPixelIndex]) * exposure;
-    image[linearPixelIndex] = make_float4(reinhard(radiance), 1.0f);
+    output = fmaxf(maxOutput, 1.0f);
+    radiance = make_float3(image[linearPixelIndex]) * exposure / output;
+    image[linearPixelIndex] = make_float4(reinhard(radiance) * output, 1.0f);
     return;
 }
 
@@ -43,15 +52,23 @@ __device__ __inline__ float3 ACESFilm(const float3 x)
     return saturate((x*(a*x+b))/(x*(c*x+d)+e));
 }
 
-__global__ void tonemapACESFilm(float4* image, const float3 exposure, uint32_t width, uint32_t height)
+__global__ void tonemapACESFilm(float4 *image,
+                               const float3 exposure,
+                               const float maxOutput,
+                               uint32_t width,
+                               uint32_t height)
 {
     const uint32_t linearPixelIndex = blockIdx.x * blockDim.x + threadIdx.x;
+    float3 radiance;
+    float output;
+
     if (linearPixelIndex >= height * width)
     {
         return;
     }
-    const float3 radiance = make_float3(image[linearPixelIndex]) * exposure;
-    image[linearPixelIndex] = make_float4(ACESFilm(radiance), 1.0f);
+    output = fmaxf(maxOutput, 1.0f);
+    radiance = make_float3(image[linearPixelIndex]) * exposure / output;
+    image[linearPixelIndex] = make_float4(ACESFilm(radiance) * output, 1.0f);
     return;
 }
 
@@ -90,16 +107,121 @@ __device__ __inline__ float3 ACESFitted(float3 color)
     return color;
 }
 
-__global__ void tonemapACESFitted(float4* image, const float3 exposure, uint32_t width, uint32_t height)
+__global__ void tonemapACESFitted(float4 *image,
+                                 const float3 exposure,
+                                 const float maxOutput,
+                                 uint32_t width,
+                                 uint32_t height)
 {
     const uint32_t linearPixelIndex = blockIdx.x * blockDim.x + threadIdx.x;
+    float3 radiance;
+    float output;
+
     if (linearPixelIndex >= height * width)
     {
         return;
     }
-    const float3 radiance = make_float3(image[linearPixelIndex]) * exposure;
-    image[linearPixelIndex] = make_float4(ACESFitted(radiance), 1.0f);
+    output = fmaxf(maxOutput, 1.0f);
+    radiance = make_float3(image[linearPixelIndex]) * exposure / output;
+    image[linearPixelIndex] = make_float4(ACESFitted(radiance) * output, 1.0f);
     return;
+}
+
+__global__ void applyExposure(float4 *image, const float3 exposure, uint32_t width, uint32_t height)
+{
+    const uint32_t linearPixelIndex = blockIdx.x * blockDim.x + threadIdx.x;
+    float3 radiance;
+
+    if (linearPixelIndex >= height * width)
+    {
+        return;
+    }
+    radiance = make_float3(image[linearPixelIndex]) * exposure;
+    image[linearPixelIndex] = make_float4(radiance, 1.0f);
+}
+
+__device__ __inline__ float3 applyLinearPresentation(
+    const float3 color,
+    const oka::PresentationMetadata metadata)
+{
+    float3 exposure;
+    float3 exposed;
+    float output;
+    ToneMapperType type;
+
+    if (metadata.content == oka::PresentationContent::DebugDisplayLinear)
+    {
+        return color;
+    }
+
+    exposure = make_float3(metadata.exposure[0], metadata.exposure[1], metadata.exposure[2]);
+    exposed = color * exposure;
+    output = fmaxf(metadata.maxOutput, 1.0f);
+    type = static_cast<ToneMapperType>(metadata.tonemapper);
+    switch (type)
+    {
+    case ToneMapperType::eReinhard:
+        return reinhard(exposed / output) * output;
+    case ToneMapperType::eACES:
+        return ACESFitted(exposed / output) * output;
+    case ToneMapperType::eFilmic:
+        return ACESFilm(exposed / output) * output;
+    case ToneMapperType::eNone:
+        return exposed;
+    default:
+        return exposed;
+    }
+}
+
+__global__ void tonemapToSurfaceLinearKernel(
+    const float4 *source,
+    cudaSurfaceObject_t destination,
+    uint32_t width,
+    uint32_t height,
+    oka::PresentationMetadata metadata)
+{
+    const uint32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t y = blockIdx.y * blockDim.y + threadIdx.y;
+    size_t linearPixelIndex;
+    float3 color;
+    ushort4 encoded;
+
+    if (x >= width || y >= height)
+    {
+        return;
+    }
+
+    linearPixelIndex = static_cast<size_t>(y) * width + x;
+    color = applyLinearPresentation(make_float3(source[linearPixelIndex]), metadata);
+    encoded.x = __half_as_ushort(__float2half(color.x));
+    encoded.y = __half_as_ushort(__float2half(color.y));
+    encoded.z = __half_as_ushort(__float2half(color.z));
+    encoded.w = __half_as_ushort(__float2half(1.0f));
+    surf2Dwrite(encoded, destination, x * sizeof(ushort4), y);
+}
+
+cudaError_t tonemapToSurfaceLinear(
+    const float4 *source,
+    cudaSurfaceObject_t destination,
+    const uint32_t width,
+    const uint32_t height,
+    const oka::PresentationMetadata *metadata,
+    cudaStream_t stream)
+{
+    dim3 blockSize(16, 16, 1);
+    dim3 gridSize;
+
+    if (source == nullptr || destination == 0 || width == 0 || height == 0 ||
+        metadata == nullptr)
+    {
+        return cudaErrorInvalidValue;
+    }
+
+    gridSize = dim3((width + blockSize.x - 1) / blockSize.x,
+                    (height + blockSize.y - 1) / blockSize.y, 1);
+    tonemapToSurfaceLinearKernel<<<gridSize, blockSize, 0, stream>>>(
+        source, destination, width, height, *metadata);
+    return cudaGetLastError();
 }
 
 /// The sRGB transfer function, one channel.
@@ -130,35 +252,45 @@ __device__ __inline__ float srgbGammaChannel(const float c, const float gamma)
     return 1.055f * powf(c, 1.0f / gamma) - 0.055f;
 }
 
-__global__ void gammaCorrection(const float gamma, float4* image, uint32_t width, uint32_t height)
+__global__ void gammaCorrection(const float gamma, float4 *image, uint32_t width, uint32_t height)
 {
     const uint32_t linearPixelIndex = blockIdx.x * blockDim.x + threadIdx.x;
+    float3 color;
+
     if (linearPixelIndex >= height * width)
     {
         return;
     }
-    const float3 color = make_float3(image[linearPixelIndex]);
+    color = make_float3(image[linearPixelIndex]);
     image[linearPixelIndex] = make_float4(srgbGammaChannel(color.x, gamma), srgbGammaChannel(color.y, gamma),
                                           srgbGammaChannel(color.z, gamma), 1.0f);
     return;
 }
 
-void tonemap(const ToneMapperType type, const float3 exposure, const float gamma, float4* image, const uint32_t width, const uint32_t height)
+void tonemap(const ToneMapperType type,
+             const float3 exposure,
+             const float maxOutput,
+             const float gamma,
+             float4 *image,
+             const uint32_t width,
+             const uint32_t height)
 {
     dim3 blockSize(256, 1, 1);
     dim3 gridSize((width * height + 255) / 256, 1, 1);
+
     switch (type)
     {
     case ToneMapperType::eReinhard:
-        tonemapReinhard<<<gridSize, blockSize, 0>>>(image, exposure, width, height);
+        tonemapReinhard<<<gridSize, blockSize, 0>>>(image, exposure, maxOutput, width, height);
         break;
     case ToneMapperType::eACES:
-        tonemapACESFitted<<<gridSize, blockSize, 0>>>(image, exposure, width, height);
+        tonemapACESFitted<<<gridSize, blockSize, 0>>>(image, exposure, maxOutput, width, height);
         break;
     case ToneMapperType::eFilmic:
-        tonemapACESFilm<<<gridSize, blockSize, 0>>>(image, exposure, width, height);
+        tonemapACESFilm<<<gridSize, blockSize, 0>>>(image, exposure, maxOutput, width, height);
         break;
     case ToneMapperType::eNone:
+        applyExposure<<<gridSize, blockSize, 0>>>(image, exposure, width, height);
         break;
     default:
         break;
