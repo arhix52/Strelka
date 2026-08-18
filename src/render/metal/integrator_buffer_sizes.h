@@ -15,6 +15,7 @@ namespace metal
 struct WavefrontElementSizes
 {
     size_t pathState = 0;
+    size_t mediumPathState = 0;
     size_t sharcPathState = 0;
     size_t pathRay = 0;
     size_t hitRecord = 0;
@@ -27,6 +28,7 @@ struct WavefrontElementSizes
 struct WavefrontBufferLayout
 {
     size_t pathStateBytes = 0;
+    size_t mediumPathStateBytes = 0;
     size_t sharcPathStateBytes = 0;
     size_t pathRayBytes = 0;
     size_t hitBytes = 0;
@@ -93,6 +95,7 @@ inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width, uint32_t heig
     WavefrontBufferLayout layout;
     layout.pixels = pixels;
     layout.pathStateBytes = (size_t)pixels * sz.pathState;
+    layout.mediumPathStateBytes = (size_t)pixels * sz.mediumPathState;
     layout.sharcPathStateBytes = (size_t)pixels * sz.sharcPathState;
     layout.pathRayBytes = (size_t)pixels * sz.pathRay;
     layout.hitBytes = (size_t)pixels * sz.hitRecord;

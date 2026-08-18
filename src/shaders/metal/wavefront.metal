@@ -527,7 +527,8 @@ kernel void wavefrontGenerate(
     // per-sample counters, and a host-side clear would race the frame in flight.
     // The tally is therefore per sample, which is the rate rather than a total.
     device uint32_t*                                           iorStats       [[buffer(9)]],
-    device SharcPathState*                                     sharcPaths     [[buffer(10)]])
+    device SharcPathState*                                     sharcPaths     [[buffer(10)]],
+    device MediumPathState*                                    mediumPaths    [[buffer(11)]])
 {
     const uint32_t pixelCount = uniforms.width * uniforms.height;
     if (tid == 0u)
@@ -597,11 +598,16 @@ kernel void wavefrontGenerate(
         sharc.invThroughput = packed_float3(0.0f);
         sharcPaths[tid] = sharc;
     }
-    // Outside every medium. A camera that starts inside a translucent object is
-    // not handled -- there is nothing to tell the path which medium it is in.
-    p.medium = 0u;
-    p.mediumAlbedo = 0u;
     paths[tid] = p;
+    if (SPEC_SSS)
+    {
+        // Outside every medium. A camera that starts inside a translucent object
+        // is not handled -- nothing tells the path which medium it is in.
+        MediumPathState mediumState;
+        mediumState.medium = 0u;
+        mediumState.mediumAlbedo = 0u;
+        mediumPaths[tid] = mediumState;
+    }
 
     // ior_stack_* take a thread reference; device memory cannot bind to one.
     IorStack stack;
@@ -635,6 +641,7 @@ static void extendImpl(
     // Only for the subsurface walk, which needs the medium's mean free path to
     // sample a free flight and reads it from the material the path is inside.
     device const Material*                                     materials,
+    device const MediumPathState*                              mediumPaths,
     // Chosen per dispatch rather than per ray: the only thing it distinguishes
     // is the camera bounce from the rest, and `extend` is encoded once per
     // bounce anyway. Reading the path's depth here to answer the same question
@@ -695,7 +702,8 @@ static void extendImpl(
     float mediumScatterT = 0.0f;
     if (SPEC_SSS)
     {
-        const uint32_t sss = paths[tid].medium;
+        const MediumPathState mediumState = mediumPaths[tid];
+        const uint32_t sss = mediumState.medium;
         const uint32_t medium = sss & MEDIUM_INDEX_MASK;
         insideSss = medium != 0u;
         if (insideSss)
@@ -707,7 +715,7 @@ static void extendImpl(
                 const float3 sigmaT = sssSigmaT(float3(mm.subsurface_radius));
                 const float3 albedo = ((mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
                                           ? float3(mm.diffuse_transmission_color)
-                                          : unpackMediumAlbedo(paths[tid].mediumAlbedo);
+                                          : unpackMediumAlbedo(mediumState.mediumAlbedo);
                 const float3 channelPdf = sssChannelPdf(float3(paths[tid].throughput), albedo);
                 SamplerState srng = samplerFor(uniforms, tid, sampleIdx,
                                                pathDepth(paths[tid].depthAndFlags) + step);
@@ -894,12 +902,13 @@ static void extendImpl(
                      device const Material* materials [[buffer(13)]],                                       \
                      constant uint32_t& rayMask [[buffer(14)]],                                            \
                      TRAITS::structure volumeAccelerationStructure [[buffer(15)]],                         \
-                     constant uint32_t& queueOffset [[buffer(16)]])                                        \
+                     constant uint32_t& queueOffset [[buffer(16)]],                                        \
+                     device const MediumPathState* mediumPaths [[buffer(17)]])                             \
     {                                                                                                       \
         extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure,                   \
                            volumeAccelerationStructure,                                                     \
                            rays, hits, sampleIdx, queue, control, hitQueue, hitCounter, missQueue,           \
-                           missCounter, paths, materials, rayMask);                                         \
+                           missCounter, paths, materials, mediumPaths, rayMask);                            \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
@@ -1497,6 +1506,7 @@ kernel void wavefrontShade(
     // ShaderTypes.h. Written only when one of them has already gone wrong.
     device atomic_uint*                                        iorStats       [[buffer(28)]],
     device SharcPathState*                                     sharcPaths     [[buffer(29)]],
+    device MediumPathState*                                    mediumPaths    [[buffer(30)]],
     texture2d<float>                                           envMapTexture  [[texture(0)]])
 {
     if (gid >= control[WF_CTRL_HIT_N])
@@ -1505,6 +1515,11 @@ kernel void wavefrontShade(
     }
     const uint32_t tid = queue[gid];
     PathState p = paths[tid];
+    MediumPathState mediumState = {};
+    if (SPEC_SSS)
+    {
+        mediumState = mediumPaths[tid];
+    }
     const PathRay pr = rays[tid];
 
     const uint32_t depth = pathDepth(p.depthAndFlags);
@@ -1555,7 +1570,7 @@ kernel void wavefrontShade(
     // interior. A bounded volume is not skipped -- being inside a fog gizmo says
     // nothing about whether the path is also inside glass.
     {
-        const uint32_t walk = p.medium & MEDIUM_INDEX_MASK;
+        const uint32_t walk = mediumState.medium & MEDIUM_INDEX_MASK;
         const bool inSubsurfaceWalk =
             SPEC_SSS && walk != 0u &&
             (materials[walk - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u;
@@ -1626,7 +1641,7 @@ kernel void wavefrontShade(
                     sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
                     sr.maxDistance = conn.tMax;
                     sr.pixelIndex = tid;
-                    sr.medium = p.medium & MEDIUM_INDEX_MASK;
+                    sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
                     sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) *
                                   kShadowTransmittanceCutoff;
                     shadowRays[slot] = sr;
@@ -1687,15 +1702,15 @@ kernel void wavefrontShade(
     // Light gets in and out through the surface, where NEE does run.
     if (SPEC_SSS && (rec.geomEntryIndex & HIT_SSS_BIT) != 0u)
     {
-        const uint32_t medium = p.medium & MEDIUM_INDEX_MASK;
-        const uint32_t step = p.medium >> MEDIUM_STEP_SHIFT;
+        const uint32_t medium = mediumState.medium & MEDIUM_INDEX_MASK;
+        const uint32_t step = mediumState.medium >> MEDIUM_STEP_SHIFT;
         device const Material& mm = materials[medium - 1u];
         const float3 sigmaT = sssSigmaT(float3(mm.subsurface_radius));
         // A bounded volume has no entry surface to have textured, so it keeps the
         // material's constant; a subsurface walk takes what the boundary resolved.
         const bool isBoundedMedium = (mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u;
         const float3 albedo = isBoundedMedium ? float3(mm.diffuse_transmission_color)
-                                              : unpackMediumAlbedo(p.mediumAlbedo);
+                                              : unpackMediumAlbedo(mediumState.mediumAlbedo);
 
         throughput *=
             sssScatterWeight(sigmaT, albedo, sssChannelPdf(sampledThroughput, albedo), rec.distance);
@@ -1750,7 +1765,7 @@ kernel void wavefrontShade(
                             clampIndirectContribution(weight, depth, uniforms.clampIndirect));
                         sr.maxDistance = conn.tMax;
                         sr.pixelIndex = tid;
-                        sr.medium = p.medium & MEDIUM_INDEX_MASK;
+                        sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
                         sr.rrCutoff = random<SampleDimension::eShadowRR>(wrng, uniforms.samplerType) *
                                       kShadowTransmittanceCutoff;
                         const uint32_t slot =
@@ -1792,7 +1807,7 @@ kernel void wavefrontShade(
         // whole walk is one scattering event as far as the path budget is
         // concerned, and charging it per step would make a translucent object go
         // black at any sane maxDepth.
-        p.medium = medium | ((step + 1u) << MEDIUM_STEP_SHIFT);
+        mediumState.medium = medium | ((step + 1u) << MEDIUM_STEP_SHIFT);
         // A subsurface walk keeps its depth: the whole walk is one scattering
         // event as far as the path budget is concerned, and charging it per step
         // would make a translucent object go black at any sane maxDepth. A
@@ -1808,6 +1823,7 @@ kernel void wavefrontShade(
             return;
         }
         paths[tid] = p;
+        mediumPaths[tid] = mediumState;
         queuePush(outCounter, queueOut, tid);
         return;
     }
@@ -1967,8 +1983,8 @@ kernel void wavefrontShade(
         // frame then scattered in open air, which is what the speckle over the
         // backdrop and the haze through the window were.
         const uint32_t here = (entry.materialId + 1u) & MEDIUM_INDEX_MASK;
-        const bool leaving = (p.medium & MEDIUM_INDEX_MASK) == here;
-        p.medium = leaving ? 0u : here;
+        const bool leaving = (mediumState.medium & MEDIUM_INDEX_MASK) == here;
+        mediumState.medium = leaving ? 0u : here;
 
         // Push past the surface on the side the ray is heading, which needs the
         // sign of the normal and not its direction.
@@ -1986,6 +2002,7 @@ kernel void wavefrontShade(
         p.misDistance += rec.distance;
         radianceOut[tid] += float4(radiance, 0.0f);
         paths[tid] = p;
+        mediumPaths[tid] = mediumState;
         queuePush(outCounter, queueOut, tid);
         return;
     }
@@ -2002,13 +2019,13 @@ kernel void wavefrontShade(
     // surface; for geometry that interpenetrates it is a simplification, and the
     // alternative is carrying the entry instance and rejecting hits on anything
     // else -- which turns an open mesh into a light leak instead.
-    if (SPEC_SSS && (p.medium & MEDIUM_INDEX_MASK) != 0u &&
-        (materials[(p.medium & MEDIUM_INDEX_MASK) - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u)
+    if (SPEC_SSS && (mediumState.medium & MEDIUM_INDEX_MASK) != 0u &&
+        (materials[(mediumState.medium & MEDIUM_INDEX_MASK) - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u)
     {
-        const uint32_t medium = p.medium & MEDIUM_INDEX_MASK;
-        const uint32_t step = p.medium >> MEDIUM_STEP_SHIFT;
+        const uint32_t medium = mediumState.medium & MEDIUM_INDEX_MASK;
+        const uint32_t step = mediumState.medium >> MEDIUM_STEP_SHIFT;
         device const Material& mm = materials[medium - 1u];
-        const float3 exitAlbedo = unpackMediumAlbedo(p.mediumAlbedo);
+        const float3 exitAlbedo = unpackMediumAlbedo(mediumState.mediumAlbedo);
         throughput *= sssBoundaryWeight(sssSigmaT(float3(mm.subsurface_radius)),
                                         sssChannelPdf(sampledThroughput, exitAlbedo), rec.distance);
 
@@ -2100,7 +2117,7 @@ kernel void wavefrontShade(
         p.throughput = packed_float3(throughput);
         p.lastBsdfPdf = fmax(dot(outward, exitDir), 0.0f) * M_1_PI_F;
         p.misDistance = 0.0f;
-        p.medium = 0u;
+        mediumState.medium = 0u;
         // Depth advances once for the whole walk, here rather than at the entry:
         // charging it at both ends would cost a translucent surface two bounces
         // to do what an opaque one does in one.
@@ -2113,6 +2130,7 @@ kernel void wavefrontShade(
             return;
         }
         paths[tid] = p;
+        mediumPaths[tid] = mediumState;
         queuePush(outCounter, queueOut, tid);
         return;
     }
@@ -2147,7 +2165,7 @@ kernel void wavefrontShade(
     // should leave this alone; at a genuine 1 spp there is nothing to hide it.
     //
     // The cone is derived rather than carried. PathState is read and written for
-    // every live path on every bounce and is guarded at 32 bytes, so two floats
+    // every live path on every bounce and is guarded at 24 bytes, so two floats
     // there would cost more memory traffic than the mips they buy back.
     //
     // What the width needs is the spread times the segment, and past the primary
@@ -2588,7 +2606,7 @@ kernel void wavefrontShade(
                 sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
                 sr.maxDistance = bestConn.tMax;
                 sr.pixelIndex = tid;
-                sr.medium = p.medium & MEDIUM_INDEX_MASK;
+                sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
                 sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) *
                               kShadowTransmittanceCutoff;
                 const uint32_t slot =
@@ -2657,7 +2675,7 @@ kernel void wavefrontShade(
         if (SPEC_SSS && si.subsurface > 0.0f &&
             (sampleResult.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION) != 0)
         {
-            p.medium = (entry.materialId + 1u) & MEDIUM_INDEX_MASK;
+            mediumState.medium = (entry.materialId + 1u) & MEDIUM_INDEX_MASK;
 
             // The walk's albedo, resolved here because this is the last place a
             // texture exists: inside the medium there is no surface to sample.
@@ -2671,7 +2689,12 @@ kernel void wavefrontShade(
             {
                 walkAlbedo *= si.albedo / reference;
             }
-            p.mediumAlbedo = packMediumAlbedo(saturate(walkAlbedo));
+            mediumState.mediumAlbedo = packMediumAlbedo(saturate(walkAlbedo));
+            // This is the only common surface-shading branch that changes the
+            // side record. Leave every other surface bounce read-only so an
+            // SSS-capable scene does not turn eight cold bytes into an
+            // unconditional write on every live path.
+            mediumPaths[tid] = mediumState;
             sssEntryTint = max(float3(si.diffuse_transmission_color), float3(1e-4f));
         }
     }
@@ -2790,7 +2813,9 @@ kernel void wavefrontPrepare(
     constant uint32_t&      diagnosticsEnabled [[buffer(8)]],
     device uint32_t*        traversalDispatches [[buffer(9)]],
     constant uint32_t&      traversalBatchThreads [[buffer(10)]],
-    constant uint32_t&      traversalBatchCount [[buffer(11)]])
+    constant uint32_t&      traversalBatchCount [[buffer(11)]],
+    device const MediumPathState* mediumPaths [[buffer(12)]],
+    constant uint32_t&      diagnosticsMediumEnabled [[buffer(13)]])
 {
     device uint32_t* control = &controlRef;
     const uint32_t n = min(control[srcIdx], control[WF_CTRL_CAPACITY]);
@@ -2813,7 +2838,12 @@ kernel void wavefrontPrepare(
             const PathRay r = rays[tid];
             const float3 origin = float3(r.origin);
             const float3 direction = float3(r.direction);
-            stageStats[laneBase + 1u] = p.medium;
+            // prepare is intentionally not specialised with the scene feature
+            // constants. The runtime flag keeps non-SSS diagnostics from
+            // reading the uninitialised cold table; this only runs for the
+            // handful of diagnostic lanes and adds no traffic to rendering.
+            stageStats[laneBase + 1u] =
+                diagnosticsMediumEnabled != 0u ? mediumPaths[tid].medium : 0u;
             stageStats[laneBase + 2u] = p.depthAndFlags;
             stageStats[laneBase + 3u] = as_type<uint32_t>(origin.x);
             stageStats[laneBase + 4u] = as_type<uint32_t>(origin.y);

@@ -25,7 +25,7 @@ namespace oka
 
 uint32_t Scene::createMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib)
 {
-    std::scoped_lock lock(mMeshMutex);
+    const std::scoped_lock lock(mMeshMutex);
 
     Mesh* mesh = nullptr;
     uint32_t meshId = -1;
@@ -60,7 +60,7 @@ uint32_t Scene::createMesh(const std::vector<Vertex>& vb, const std::vector<uint
 
 uint32_t Scene::createSkeletalMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib, const std::vector<oka::Scene::vertexSkinData>& sb)
 {
-    std::scoped_lock lock(mMeshMutex);
+    const std::scoped_lock lock(mMeshMutex);
 
     Mesh* mesh = nullptr;
     uint32_t meshId = -1;
@@ -103,7 +103,7 @@ uint32_t Scene::createInstance(const Instance::Type type,
                                const glm::mat4& transform,
                                const uint32_t lightId)
 {
-    std::scoped_lock lock(mInstanceMutex);
+    const std::scoped_lock lock(mInstanceMutex);
 
     Instance* inst = nullptr;
     uint32_t instId = -1;
@@ -140,20 +140,20 @@ uint32_t Scene::createInstance(const Instance::Type type,
 uint32_t Scene::addMaterial(const MaterialDescription& material)
 {
     // TODO: fix here
-    uint32_t res = mMaterialsDescs.size();
+    const uint32_t res = mMaterialsDescs.size();
     mMaterialsDescs.push_back(material);
     return res;
 }
 
 std::string Scene::getSceneFileName()
 {
-    fs::path p(modelPath);
+    const fs::path p(modelPath);
     return p.filename().string();
 };
 
 std::string Scene::getSceneDir()
 {
-    fs::path p(modelPath);
+    const fs::path p(modelPath);
     return p.parent_path().string();
 }
 
@@ -201,8 +201,8 @@ glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationC
     nextIdx = std::clamp(nextIdx, 1, n - 1);
     const int prevIdx = nextIdx - 1;
 
-    float previousTime = sampler.inputs[prevIdx];
-    float nextTime = sampler.inputs[nextIdx];
+    const float previousTime = sampler.inputs[prevIdx];
+    const float nextTime = sampler.inputs[nextIdx];
 
     // Exact match — return value directly
     if (std::abs(time - previousTime) < 1e-7f)
@@ -220,15 +220,15 @@ glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationC
     {
         // glTF cubic spline: Hermite interpolation
         // outputsVec4 layout per keyframe: [inTangent, value, outTangent]
-        float deltaTime = nextTime - previousTime;
-        float t = (time - previousTime) / deltaTime;
-        float t2 = t * t;
-        float t3 = t2 * t;
+        const float deltaTime = nextTime - previousTime;
+        const float t = (time - previousTime) / deltaTime;
+        const float t2 = t * t;
+        const float t3 = t2 * t;
 
-        glm::float4 p0 = sampler.outputsVec4[prevIdx * 3 + 1]; // value at prev
-        glm::float4 m0 = sampler.outputsVec4[prevIdx * 3 + 2] * deltaTime; // out-tangent at prev
-        glm::float4 p1 = sampler.outputsVec4[nextIdx * 3 + 1]; // value at next
-        glm::float4 m1 = sampler.outputsVec4[nextIdx * 3 + 0] * deltaTime; // in-tangent at next
+        const glm::float4 p0 = sampler.outputsVec4[prevIdx * 3 + 1]; // value at prev
+        const glm::float4 m0 = sampler.outputsVec4[prevIdx * 3 + 2] * deltaTime; // out-tangent at prev
+        const glm::float4 p1 = sampler.outputsVec4[nextIdx * 3 + 1]; // value at next
+        const glm::float4 m1 = sampler.outputsVec4[nextIdx * 3 + 0] * deltaTime; // in-tangent at next
 
         result = (2.0f * t3 - 3.0f * t2 + 1.0f) * p0
                + (t3 - 2.0f * t2 + t) * m0
@@ -242,9 +242,9 @@ glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationC
 
     default: // LINEAR
     {
-        float interpolationValue = (time - previousTime) / (nextTime - previousTime);
-        glm::float4 prevVal = sampler.outputsVec4[prevIdx];
-        glm::float4 nextVal = sampler.outputsVec4[nextIdx];
+        const float interpolationValue = (time - previousTime) / (nextTime - previousTime);
+        const glm::float4 prevVal = sampler.outputsVec4[prevIdx];
+        const glm::float4 nextVal = sampler.outputsVec4[nextIdx];
         if (targetProperty != AnimationChannel::PathType::ROTATION)
             result = glm::lerp(prevVal, nextVal, interpolationValue);
         else
@@ -352,8 +352,6 @@ bool Scene::applyNodeSideEffects(const uint32_t nodeId)
         return false;
 
     case Node::NodeType::skeleton:
-        break;
-
     default:
         break;
     }
@@ -432,7 +430,7 @@ void Scene::applySkinning()
     {
         if (node.skin != -1 && node.type == Node::NodeType::mesh)
         {
-            auto jointCount = mSkines[node.skin].joints.size();
+            const size_t jointCount = mSkines[node.skin].joints.size();
             std::vector<glm::mat4> jointMat;
             computeJointMatrices(&jointMat, jointCount, node.skin);
             for (const auto instId: node.instanceIds) {
@@ -454,13 +452,15 @@ void Scene::applySkinning()
     }
 }
 
-void Scene::computeJointMatrices(std::vector<glm::mat4> *jointMatrices, int jointCount, const uint32_t skinId)
+void Scene::computeJointMatrices(std::vector<glm::mat4>* jointMatrices,
+                                 const size_t jointCount,
+                                 const uint32_t skinId)
 {
     ensureGlobalTransforms();
 
-    auto &skin = mSkines[skinId];
+    auto& skin = mSkines[skinId];
     jointMatrices->reserve(jointMatrices->size() + jointCount);
-    for (int i = 0; i < jointCount; ++i)
+    for (size_t i = 0; i < jointCount; ++i)
     {
         // Read the cached world transform instead of re-walking to the root for
         // each joint: applyAnimation() already refreshed the whole table.
@@ -478,7 +478,7 @@ glm::mat4 Scene::calculateNodeLocalTransform(const uint32_t nodeId)
 
 glm::mat4 Scene::calculateNodeGlobalTransform(const uint32_t nodeId)
 {
-    int parentId = mNodes[nodeId].parent;
+    const int parentId = mNodes[nodeId].parent;
     if (parentId == -1) {
         return calculateNodeLocalTransform(nodeId);
     }
@@ -555,16 +555,16 @@ uint32_t Scene::createRectLightMesh()
     v2.pos = glm::float4(-0.5f, 0.5f, 0.0f, 1.0f); // top left 1
     v3.pos = glm::float4(-0.5f, -0.5f, 0.0f, 1.0f); // bottom left 2
     v4.pos = glm::float4(0.5f, -0.5f, 0.0f, 1.0f); // bottom right 3
-    glm::float3 normal = glm::float3(0.f, 0.f, 1.f);
+    const glm::float3 normal = glm::float3(0.f, 0.f, 1.f);
     v1.normal = v2.normal = v3.normal = v4.normal = packNormal(normal);
-    std::vector<uint32_t> ib = { 0, 1, 2, 2, 3, 0 };
+    const std::vector<uint32_t> ib = { 0, 1, 2, 2, 3, 0 };
     vb.push_back(v1);
     vb.push_back(v2);
     vb.push_back(v3);
     vb.push_back(v4);
 
-    uint32_t meshId = createMesh(vb, ib);
-    assert(meshId != -1);
+    const uint32_t meshId = createMesh(vb, ib);
+    assert(meshId != std::numeric_limits<uint32_t>::max());
 
     return meshId;
 }
@@ -584,22 +584,23 @@ uint32_t Scene::createSphereLightMesh()
     // Generate vertices and normals
     for (int i = 0; i <= rings; ++i)
     {
-        float theta = static_cast<float>(i) * static_cast<float>(M_PI) / static_cast<float>(rings);
-        float sinTheta = sin(theta);
-        float cosTheta = cos(theta);
+        const float theta = static_cast<float>(i) * static_cast<float>(M_PI) / static_cast<float>(rings);
+        const float sinTheta = sin(theta);
+        const float cosTheta = cos(theta);
 
         for (int j = 0; j <= segments; ++j)
         {
-            float phi = static_cast<float>(j) * 2.0f * static_cast<float>(M_PI) / static_cast<float>(segments);
-            float sinPhi = sin(phi);
-            float cosPhi = cos(phi);
+            const float phi = static_cast<float>(j) * 2.0f * static_cast<float>(M_PI) /
+                              static_cast<float>(segments);
+            const float sinPhi = sin(phi);
+            const float cosPhi = cos(phi);
 
-            float x = cosPhi * sinTheta;
-            float y = cosTheta;
-            float z = sinPhi * sinTheta;
+            const float x = cosPhi * sinTheta;
+            const float y = cosTheta;
+            const float z = sinPhi * sinTheta;
 
-            glm::float3 pos = { radius * x, radius * y, radius * z };
-            glm::float3 normal = { x, y, z };
+            const glm::float3 pos = { radius * x, radius * y, radius * z };
+            const glm::float3 normal = { x, y, z };
 
             vertices.push_back(Scene::Vertex{ pos, 0, packNormal(normal), 0 });
         }
@@ -624,7 +625,7 @@ uint32_t Scene::createSphereLightMesh()
         }
     }
     const uint32_t meshId = createMesh(vertices, indices);
-    assert(meshId != -1);
+    assert(meshId != std::numeric_limits<uint32_t>::max());
 
     return meshId;
 }
@@ -643,7 +644,7 @@ uint32_t Scene::createDiscLightMesh()
     v1.pos = glm::float4(0.f, 0.f, 0.f, 1.f);
     v2.pos = glm::float4(1.0f, 0.f, 0.f, 1.f);
 
-    glm::float3 normal = glm::float3(0.f, 0.f, 1.f);
+    const glm::float3 normal = glm::float3(0.f, 0.f, 1.f);
     v1.normal = v2.normal = packNormal(normal);
 
     vertices.push_back(v1); // central point
@@ -669,8 +670,8 @@ uint32_t Scene::createDiscLightMesh()
         indices.push_back(vertices.size() - 1); // added vertex
     }
 
-    uint32_t meshId = createMesh(vertices, indices);
-    assert(meshId != -1);
+    const uint32_t meshId = createMesh(vertices, indices);
+    assert(meshId != std::numeric_limits<uint32_t>::max());
 
     return meshId;
 }
@@ -684,7 +685,8 @@ void Scene::updateAnimation(const float time)
     auto& animation = mAnimations[0];
     for (auto& channel : animation.channels)
     {
-        assert(channel.node < mNodes.size());
+        assert(channel.node >= 0 && static_cast<size_t>(channel.node) < mNodes.size());
+        const size_t nodeId = static_cast<size_t>(channel.node);
         auto& sampler = animation.samplers[channel.samplerIndex];
         if (sampler.inputs.size() > sampler.outputsVec4.size())
         {
@@ -694,19 +696,20 @@ void Scene::updateAnimation(const float time)
         {
             if ((time >= sampler.inputs[i]) && (time <= sampler.inputs[i + 1]))
             {
-                float u = std::max(0.0f, time - sampler.inputs[i]) / (sampler.inputs[i + 1] - sampler.inputs[i]);
+                const float u =
+                    std::max(0.0f, time - sampler.inputs[i]) / (sampler.inputs[i + 1] - sampler.inputs[i]);
                 if (u <= 1.0f)
                 {
                     switch (channel.path)
                     {
                     case AnimationChannel::PathType::TRANSLATION: {
-                        glm::vec4 trans = glm::mix(sampler.outputsVec4[i], sampler.outputsVec4[i + 1], u);
-                        mNodes[channel.node].translation = glm::float3(trans);
+                        const glm::vec4 trans = glm::mix(sampler.outputsVec4[i], sampler.outputsVec4[i + 1], u);
+                        mNodes[nodeId].translation = glm::float3(trans);
                         break;
                     }
                     case AnimationChannel::PathType::SCALE: {
-                        glm::vec4 scale = glm::mix(sampler.outputsVec4[i], sampler.outputsVec4[i + 1], u);
-                        mNodes[channel.node].scale = glm::float3(scale);
+                        const glm::vec4 scale = glm::mix(sampler.outputsVec4[i], sampler.outputsVec4[i + 1], u);
+                        mNodes[nodeId].scale = glm::float3(scale);
                         break;
                     }
                     case AnimationChannel::PathType::ROTATION: {
@@ -716,9 +719,9 @@ void Scene::updateAnimation(const float time)
                                                     (float)sampler.outputsVec4[i + 1][0],
                                                     (float)sampler.outputsVec4[i + 1][1],
                                                     (float)sampler.outputsVec4[i + 1][2] };
-                        glm::quat q1 = glm::make_quat(floatRotation);
-                        glm::quat q2 = glm::make_quat(floatRotation1);
-                        mNodes[channel.node].rotation = glm::normalize(glm::slerp(q1, q2, u));
+                        const glm::quat q1 = glm::make_quat(floatRotation);
+                        const glm::quat q2 = glm::make_quat(floatRotation1);
+                        mNodes[nodeId].rotation = glm::normalize(glm::slerp(q1, q2, u));
                         break;
                     }
                     }
@@ -731,8 +734,8 @@ void Scene::updateAnimation(const float time)
 
 uint32_t Scene::createLight(const UniformLightDesc& desc)
 {
-    auto lightId = (uint32_t)mLights.size();
-    Light l;
+    const auto lightId = (uint32_t)mLights.size();
+    const Light l{};
     mLights.push_back(l);
     mLightDesc.push_back(desc);
 
@@ -768,18 +771,15 @@ uint32_t Scene::createLight(const UniformLightDesc& desc)
         const float r = desc.radius > 1e-4f ? desc.radius : 0.05f;
         scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(r));
     }
-    else if (desc.type == LIGHT_TYPE_DISTANT)
-    {
-        return lightId;
-    }
     else
     {
         return lightId;
     }
 
     const glm::float4x4 transform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
-    uint32_t instId = createInstance(Instance::Type::eLight, currentLightMeshId, (uint32_t)-1, transform, lightId);
-    assert(instId != -1);
+    const uint32_t instId = createInstance(Instance::Type::eLight, currentLightMeshId,
+                                           std::numeric_limits<uint32_t>::max(), transform, lightId);
+    assert(instId != std::numeric_limits<uint32_t>::max());
 
     mLightIdToInstanceId[lightId] = instId;
 
@@ -951,12 +951,14 @@ void Scene::setMaterial(const uint32_t id, const MaterialDescription& desc)
     markChanged(ChangeBits::Materials);
 }
 
-static bool intersectTriangle(const glm::float3& orig,
-                              const glm::float3& dir,
-                              const glm::float3& v0,
-                              const glm::float3& v1,
-                              const glm::float3& v2,
-                              float& tOut)
+namespace
+{
+bool intersectTriangle(const glm::float3& orig,
+                       const glm::float3& dir,
+                       const glm::float3& v0,
+                       const glm::float3& v1,
+                       const glm::float3& v2,
+                       float& tOut)
 {
     const glm::float3 e1 = v1 - v0;
     const glm::float3 e2 = v2 - v0;
@@ -984,6 +986,7 @@ static bool intersectTriangle(const glm::float3& orig,
     tOut = t;
     return true;
 }
+} // namespace
 
 int Scene::findInstanceNodeId(const uint32_t instId) const
 {
@@ -1016,7 +1019,7 @@ std::vector<glm::mat4> Scene::buildJointPalette(const uint32_t instId)
     }
     const uint32_t skinId = (uint32_t)mNodes[nodeId].skin;
     std::vector<glm::mat4> palette;
-    computeJointMatrices(&palette, (int)mSkines[skinId].joints.size(), skinId);
+    computeJointMatrices(&palette, mSkines[skinId].joints.size(), skinId);
     return palette;
 }
 
@@ -1391,7 +1394,7 @@ uint32_t Scene::createCurve(const Curve::Type type,
         c.mWidthsCount = -1;
         c.mWidthsStart = -1;
     }
-    uint32_t res = mCurves.size();
+    const uint32_t res = mCurves.size();
     mCurves.push_back(c);
     return res;
 }

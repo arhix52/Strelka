@@ -336,13 +336,15 @@ struct GeometryEntry
 // every lane of a simdgroup to wait for the longest-lived path in it. The
 // wavefront tracer trades that for explicit state in memory, so each stage only
 // runs over paths that are still alive. Memory traffic is therefore the design
-// constraint, and this struct is deliberately kept at 32 bytes.
+// constraint, and this struct is deliberately kept at 24 bytes.
 //
-// Three things are *not* stored:
+// Four things are *not* stored:
 //   - the sampler, because it is a pure function of
 //     (pixelIndex, sampleIndex, depth) and is cheaper to recompute than to load;
 //   - the IOR stack (52 B), which only matters to paths currently inside a
 //     dielectric and lives in a side table indexed by path slot;
+//   - participating-medium state (8 B), which only SSS/volume specialisations
+//     touch and likewise lives in a side table;
 //   - SHARC bookkeeping, which only cache-enabled shade/deposit kernels touch
 //     and likewise lives in a side table.
 // The ray is separate from the rest of the state because `extend` reads only
@@ -371,7 +373,16 @@ struct PathState
     // last restarted. The direction does not change across a pass-through, so
     // one number recovers that vertex: origin - direction * this.
     float misDistance;
+};
 
+// Participating-medium bookkeeping is cold for the common surface-only path.
+// Keeping it beside PathState made generate, extend, miss and shade address a
+// 32-byte-stride record even after their medium branches had been compiled out.
+// A separate table leaves the hot record at 24 bytes; SSS/volume specialisations
+// load these exact eight bytes in addition, so no precision or material-index
+// range is traded away.
+struct MediumPathState
+{
     /// Which participating medium the path is inside, and how many scattering
     /// events it has had there: material index + 1 in the low 16 bits, step count
     /// in the high 16. Zero means the path is outside every medium.
@@ -398,9 +409,9 @@ struct PathState
 };
 
 // Radiance-cache bookkeeping lives apart from PathState because every stage
-// streams PathState on every bounce, while only SHARC-enabled shade/deposit
+// streams the hot PathState on every bounce, while only SHARC-enabled shade/deposit
 // kernels touch these values. Keeping 28 cold bytes in the hot record made a
-// cache-disabled path 60 bytes wide instead of 32.
+// cache-disabled path 52 bytes wide instead of 24.
 struct SharcPathState
 {
     uint32_t index;

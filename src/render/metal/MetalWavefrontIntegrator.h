@@ -199,6 +199,7 @@ private:
     MTL::ComputePipelineState* mAovResolvePSO4 = nullptr;
 
     MTL::Buffer* mPathStateBuffer = nullptr;
+    MTL::Buffer* mMediumPathStateBuffer = nullptr;
     MTL::Buffer* mSharcPathStateBuffer = nullptr;
     MTL::Buffer* mPathRayBuffer = nullptr;
     MTL::Buffer* mHitBuffer = nullptr;

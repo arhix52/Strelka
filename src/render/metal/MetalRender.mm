@@ -584,14 +584,11 @@ bool MetalRender::memoryReport(MemoryReport& report) const
 void MetalRender::init()
 {
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
-    // 32 rather than 24: the subsurface walk adds two words. One holds which
-    // medium the path is inside and how far into the walk it is -- not the
-    // medium's parameters, which would be 28 more bytes per pixel to avoid a load
-    // from a material table that fits in cache. The other holds the walk's
-    // albedo, packed RGBA8, which cannot come from the material because it is
-    // textured and the texture only exists on the boundary the walk entered
-    // through.
-    static_assert(sizeof(PathState) == 32, "PathState is read and written for every live path on every bounce");
+    // The hot record is what every live path streams on every bounce. Medium
+    // bookkeeping lives in an exact, eight-byte side record so surface-only
+    // specialisations do not pay for it.
+    static_assert(sizeof(PathState) == 24, "PathState is read and written for every live path on every bounce");
+    static_assert(sizeof(MediumPathState) == 8, "Medium state is a cold side table, not part of PathState");
     static_assert(sizeof(SharcPathState) == 28, "SHARC state is a cold side table, not part of PathState");
     // 32 rather than 24: the hit now carries the TLAS instance, because a shared
     // BLAS belongs to no single one. One extra word per live path.

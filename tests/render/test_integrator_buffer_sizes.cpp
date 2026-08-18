@@ -20,6 +20,7 @@ TEST_CASE("wavefrontBufferLayout scales with pixel count")
 {
     WavefrontElementSizes sz;
     sz.pathState = 64;
+    sz.mediumPathState = 8;
     sz.sharcPathState = 28;
     sz.pathRay = 32;
     sz.hitRecord = 48;
@@ -31,6 +32,7 @@ TEST_CASE("wavefrontBufferLayout scales with pixel count")
     const auto a = wavefrontBufferLayout(64, 48, sz);
     CHECK(a.pixels == 64u * 48u);
     CHECK(a.pathStateBytes == (size_t)a.pixels * 64);
+    CHECK(a.mediumPathStateBytes == (size_t)a.pixels * 8);
     CHECK(a.sharcPathStateBytes == (size_t)a.pixels * 28);
     CHECK(a.pathRayBytes == (size_t)a.pixels * 32);
     CHECK(a.hitBytes == (size_t)a.pixels * 48);
@@ -55,6 +57,7 @@ TEST_CASE("wavefrontBufferLayout scales with pixel count")
     const auto b = wavefrontBufferLayout(128, 96, sz);
     CHECK(b.pixels == 4 * a.pixels);
     CHECK(b.pathStateBytes == 4 * a.pathStateBytes);
+    CHECK(b.mediumPathStateBytes == 4 * a.mediumPathStateBytes);
     CHECK(b.sharcPathStateBytes == 4 * a.sharcPathStateBytes);
     CHECK(b.controlBytes == a.controlBytes);
     CHECK(b.traversalDispatchBytes == 3 * a.traversalDispatchBytes);
@@ -64,7 +67,8 @@ TEST_CASE("wavefrontBufferLayout scales with pixel count")
 TEST_CASE("preview presets make wavefront memory growth explicit")
 {
     WavefrontElementSizes sz;
-    sz.pathState = 32;
+    sz.pathState = 24;
+    sz.mediumPathState = 8;
     sz.sharcPathState = 28;
     sz.pathRay = 24;
     sz.hitRecord = 32;
@@ -79,13 +83,15 @@ TEST_CASE("preview presets make wavefront memory growth explicit")
     CHECK(preview.pixels == 518400);
     CHECK(fullHd.pixels == 4 * preview.pixels);
     CHECK(fullHd.pathStateBytes == 4 * preview.pathStateBytes);
+    CHECK(fullHd.mediumPathStateBytes == 4 * preview.mediumPathStateBytes);
     CHECK(fullHd.sharcPathStateBytes == 4 * preview.sharcPathStateBytes);
-    CHECK(fullHd.pathStateBytes + fullHd.sharcPathStateBytes == (size_t)fullHd.pixels * 60);
+    CHECK(fullHd.pathStateBytes + fullHd.mediumPathStateBytes + fullHd.sharcPathStateBytes ==
+          (size_t)fullHd.pixels * 60);
     CHECK(fullHd.shadowRayBytes == 4 * preview.shadowRayBytes);
     CHECK(fullHd.aovBytes == 4 * preview.aovBytes);
     CHECK(fullHd.controlBytes == preview.controlBytes);
-    CHECK(preview.traversalDispatchBytes == 127 * 3 * sizeof(uint32_t));
-    CHECK(fullHd.traversalDispatchBytes == 507 * 3 * sizeof(uint32_t));
+    CHECK(preview.traversalDispatchBytes == static_cast<size_t>(127) * 3 * sizeof(uint32_t));
+    CHECK(fullHd.traversalDispatchBytes == static_cast<size_t>(507) * 3 * sizeof(uint32_t));
     CHECK(fullHd.stageStatsBytes == preview.stageStatsBytes);
 }
 

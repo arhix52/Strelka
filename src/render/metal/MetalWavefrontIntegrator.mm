@@ -45,6 +45,7 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mPreparePSO);
     safeRelease(mPrepareShadowPSO);
     safeRelease(mPathStateBuffer);
+    safeRelease(mMediumPathStateBuffer);
     safeRelease(mSharcPathStateBuffer);
     safeRelease(mPathRayBuffer);
     safeRelease(mHitBuffer);
@@ -95,6 +96,7 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
 {
     add(mIorStatsBuffer);
     add(mPathStateBuffer);
+    add(mMediumPathStateBuffer);
     add(mSharcPathStateBuffer);
     add(mPathRayBuffer);
     add(mHitBuffer);
@@ -120,7 +122,7 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
 size_t MetalWavefrontIntegrator::queueBytes() const
 {
     auto bufBytes = [](MTL::Buffer* b) { return b ? b->length() : 0; };
-    return bufBytes(mPathStateBuffer) + bufBytes(mSharcPathStateBuffer) +
+    return bufBytes(mPathStateBuffer) + bufBytes(mMediumPathStateBuffer) + bufBytes(mSharcPathStateBuffer) +
            bufBytes(mPathRayBuffer) + bufBytes(mHitBuffer) +
            bufBytes(mIorStackBuffer) + bufBytes(mRadianceBuffer) + bufBytes(mGuideRadianceBuffer) +
            bufBytes(mPathQueueBuffer[0]) + bufBytes(mPathQueueBuffer[1]) + bufBytes(mControlBuffer) +
@@ -240,7 +242,8 @@ void MetalWavefrontIntegrator::reportStageFailureMetal4()
             const uint32_t lanes = std::min(active, kWavefrontStageDiagnosticLanes);
             for (uint32_t lane = 0; lane < lanes; ++lane)
             {
-                const uint32_t* d = stats + base + 1 + lane * kWavefrontStageDiagnosticLaneUints;
+                const uint32_t* d = stats + static_cast<size_t>(base) + 1u +
+                                    static_cast<size_t>(lane) * kWavefrontStageDiagnosticLaneUints;
                 const uint32_t medium = d[1];
                 STRELKA_ERROR(
                     "Metal 4 pending ray {}: tid={} medium=0x{:x} depth_flags=0x{:x} "
@@ -467,6 +470,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const uint32_t s = chunk.sampleIndex;
     const MTL::GPUAddress sampleIdx = ring.push(s);
     const MTL::GPUAddress diagnosticsEnabled = ring.push(diagnose ? 1u : 0u);
+    const MTL::GPUAddress diagnosticsMediumEnabled =
+        ring.push((features & WavefrontFeatures::kSubsurface) != 0u ? 1u : 0u);
     MTL::Buffer* sampleRadiance =
         (uniforms->canonicalGuideSample && s == 0u) ? mGuideRadianceBuffer : mRadianceBuffer;
 
@@ -485,6 +490,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         bind(mPathRayBuffer, 0, 8);
         bind(mIorStatsBuffer, 0, 9);
         bind(mSharcPathStateBuffer, 0, 10);
+        bind(mMediumPathStateBuffer, 0, 11);
         enc->dispatchThreadgroups(fullGrid, tg);
         barrier();
     }
@@ -521,6 +527,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 bind(mTraversalDispatchBuffer, 0, 9);
                 table->setAddress(traversalBatchThreadsAddress, 10);
                 table->setAddress(traversalBatchCountAddress, 11);
+                bind(mMediumPathStateBuffer, 0, 12);
+                table->setAddress(diagnosticsMediumEnabled, 13);
                 enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
                 barrier();
                 mark(kStageExtend);
@@ -547,6 +555,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                               : (uniforms->primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN);
             table->setAddress(ring.push(extendMask), 14);
             table->setResource(scene.volumeAccelerationStructure->gpuResourceID(), 15);
+            bind(mMediumPathStateBuffer, 0, 17);
             const uint32_t batchBegin = chunk.phase == WavefrontChunkPhase::Complete
                                             ? 0u
                                             : chunk.traversalBatchBegin;
@@ -556,7 +565,9 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             for (uint32_t batch = batchBegin; batch < batchEnd; ++batch)
             {
                 table->setAddress(ring.push(batch * traversalBatchThreads), 16);
-                enc->dispatchThreadgroups(traversalDispatches + batch * 3 * sizeof(uint32_t), tg);
+                enc->dispatchThreadgroups(traversalDispatches +
+                                              static_cast<MTL::GPUAddress>(batch) * 3u * sizeof(uint32_t),
+                                          tg);
                 if (batch + 1 < batchEnd)
                 {
                     traversalBatchBarrier();
@@ -641,6 +652,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             }
             bind(mIorStatsBuffer, 0, 28);
             bind(mSharcPathStateBuffer, 0, 29);
+            bind(mMediumPathStateBuffer, 0, 30);
             enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
             barrier();
 
@@ -684,7 +696,9 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             for (uint32_t batch = 0; batch < shadowBatchCount; ++batch)
             {
                 table->setAddress(ring.push(batch * shadowBatchThreads), 12);
-                enc->dispatchThreadgroups(traversalDispatches + batch * 3 * sizeof(uint32_t), tg);
+                enc->dispatchThreadgroups(traversalDispatches +
+                                              static_cast<MTL::GPUAddress>(batch) * 3u * sizeof(uint32_t),
+                                          tg);
                 if (batch + 1 < shadowBatchCount)
                 {
                     traversalBatchBarrier();
@@ -840,6 +854,8 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     mStageKinds.clear();
     const bool profile = frame.profileStages && mStageTimestampBuffer != nullptr;
     const uint32_t diagnosticsEnabled = profile ? 1u : 0u;
+    const uint32_t diagnosticsMediumEnabled =
+        (features & WavefrontFeatures::kSubsurface) != 0u ? 1u : 0u;
     auto stamp = [&](uint8_t kind) {
         if (!profile || mStageKinds.size() >= kMaxStageSamples)
         {
@@ -878,6 +894,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         enc->setBuffer(mPathRayBuffer, 0, 8);
         enc->setBuffer(mIorStatsBuffer, 0, 9);
         enc->setBuffer(mSharcPathStateBuffer, 0, 10);
+        enc->setBuffer(mMediumPathStateBuffer, 0, 11);
         enc->dispatchThreads(grid, tg);
 
         for (uint32_t bounce = 0; bounce < bounceIterations; ++bounce)
@@ -901,6 +918,8 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBuffer(mTraversalDispatchBuffer, 0, 9);
             enc->setBytes(&traversalBatchThreads, sizeof(traversalBatchThreads), 10);
             enc->setBytes(&traversalBatchCount, sizeof(traversalBatchCount), 11);
+            enc->setBuffer(mMediumPathStateBuffer, 0, 12);
+            enc->setBytes(&diagnosticsMediumEnabled, sizeof(diagnosticsMediumEnabled), 13);
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
             // Sort the queue this bounce is about to traverse. Bounce 0 is the
@@ -932,6 +951,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBytes(&extendMask, sizeof(uint32_t), 14);
             enc->setAccelerationStructure(scene.volumeAccelerationStructure, 15);
             enc->setBytes(&traversalQueueOffset, sizeof(traversalQueueOffset), 16);
+            enc->setBuffer(mMediumPathStateBuffer, 0, 17);
             enc->dispatchThreadgroups(mControlBuffer, kDispatchArgsOffset, tg);
             enc->popDebugGroup();
 
@@ -1008,6 +1028,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             }
             enc->setBuffer(mIorStatsBuffer, 0, 28);
             enc->setBuffer(mSharcPathStateBuffer, 0, 29);
+            enc->setBuffer(mMediumPathStateBuffer, 0, 30);
             enc->dispatchThreadgroups(mControlBuffer, kHitArgsOffset, tg);
             enc->popDebugGroup();
 
@@ -1373,6 +1394,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height)
     }
     auto release = [](MTL::Buffer*& b) { if (b) { b->release(); b = nullptr; } };
     release(mPathStateBuffer);
+    release(mMediumPathStateBuffer);
     release(mSharcPathStateBuffer);
     release(mPathRayBuffer);
     release(mHitBuffer);
@@ -1391,6 +1413,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height)
 
     metal::WavefrontElementSizes sz;
     sz.pathState = sizeof(PathState);
+    sz.mediumPathState = sizeof(MediumPathState);
     sz.sharcPathState = sizeof(SharcPathState);
     sz.pathRay = sizeof(PathRay);
     sz.hitRecord = sizeof(HitRecord);
@@ -1402,6 +1425,8 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height)
 
     // Private storage: these never leave the GPU.
     mPathStateBuffer = mDevice->newBuffer(layout.pathStateBytes, MTL::ResourceStorageModePrivate);
+    mMediumPathStateBuffer =
+        mDevice->newBuffer(layout.mediumPathStateBytes, MTL::ResourceStorageModePrivate);
     mSharcPathStateBuffer =
         mDevice->newBuffer(layout.sharcPathStateBytes, MTL::ResourceStorageModePrivate);
     mPathRayBuffer = mDevice->newBuffer(layout.pathRayBytes, MTL::ResourceStorageModePrivate);

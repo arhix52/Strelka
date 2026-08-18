@@ -26,7 +26,6 @@
 
 #include <strelka/scene/transform.h>
 
-#include <iostream>
 #include <limits>
 #include <env.h>
 #include <log.h>
@@ -37,6 +36,8 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 namespace oka
+{
+namespace
 {
 
 bool gltfDebugLoggingEnabled()
@@ -56,14 +57,11 @@ bool lodFilterEnabled()
 
 // Reported once per load: silently dropping geometry is exactly the kind of
 // thing that must not be discovered by wondering where an object went.
-namespace
-{
 uint32_t& lodSkipCounter()
 {
     static uint32_t skipped = 0;
     return skipped;
 }
-} // namespace
 
 
 // packNormal(), packUV(), unpackNormal(), unpackUV() provided by <strelka/scene/vertex_packing.h>
@@ -77,24 +75,24 @@ void computeTangent(std::vector<Scene::Vertex>& vertices,
     Scene::Vertex& v1 = vertices[indices[lastIndex - 2]];
     Scene::Vertex& v2 = vertices[indices[lastIndex - 1]];
 
-    glm::float2 uv0 = unpackUV(v0.uv);
-    glm::float2 uv1 = unpackUV(v1.uv);
-    glm::float2 uv2 = unpackUV(v2.uv);
+    const glm::float2 uv0 = unpackUV(v0.uv);
+    const glm::float2 uv1 = unpackUV(v1.uv);
+    const glm::float2 uv2 = unpackUV(v2.uv);
 
-    glm::float3 deltaPos1 = v1.pos - v0.pos;
-    glm::float3 deltaPos2 = v2.pos - v0.pos;
-    glm::vec2 deltaUV1 = uv1 - uv0;
-    glm::vec2 deltaUV2 = uv2 - uv0;
+    const glm::float3 deltaPos1 = v1.pos - v0.pos;
+    const glm::float3 deltaPos2 = v2.pos - v0.pos;
+    const glm::vec2 deltaUV1 = uv1 - uv0;
+    const glm::vec2 deltaUV2 = uv2 - uv0;
 
     glm::vec3 tangent{ 0.0f, 0.0f, 1.0f };
     const float d = deltaUV1.x * deltaUV2.y - deltaUV1.y * deltaUV2.x;
     if (abs(d) > 1e-6)
     {
-        float r = 1.0f / d;
+        const float r = 1.0f / d;
         tangent = (deltaPos1 * deltaUV2.y - deltaPos2 * deltaUV1.y) * r;
     }
 
-    glm::uint32_t packedTangent = packNormal(tangent);
+    const glm::uint32_t packedTangent = packNormal(tangent);
 
     v0.tangent = packedTangent;
     v1.tangent = packedTangent;
@@ -105,6 +103,9 @@ void computeTangent(std::vector<Scene::Vertex>& vertices,
 // referenced by many nodes is parsed and uploaded once.
 using MeshCache = std::unordered_map<uint64_t, uint32_t>;
 
+// glTF exposes accessor payloads as byte arrays. Component metadata and stride
+// validation above each view establish the typed interpretation used here.
+// NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
 void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uint32_t parentNodeId, const tinygltf::Primitive& primitive, const glm::float4x4& transform, const float globalScale, MeshCache& meshCache, uint64_t primitiveKey)
 {
     using namespace std;
@@ -142,7 +143,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
     assert(vertexCount != 0);
     const int byteStride = positionAccessor.ByteStride(positionView);
     assert(byteStride > 0); // -1 means invalid glTF
-    int posStride = byteStride / sizeof(float);
+    const int posStride = byteStride / static_cast<int>(sizeof(float));
 
     // Normals
     const float* normalsData = nullptr;
@@ -153,7 +154,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
         const tinygltf::BufferView& normView = model.bufferViews[normalAccessor.bufferView];
         normalsData = reinterpret_cast<const float*>(&(model.buffers[normView.buffer].data[normalAccessor.byteOffset + normView.byteOffset]));
         assert(normalsData != nullptr);
-        normalStride = normalAccessor.ByteStride(normView) / sizeof(float);
+        normalStride = normalAccessor.ByteStride(normView) / static_cast<int>(sizeof(float));
         assert(normalStride > 0);
     }
 
@@ -165,7 +166,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
         const tinygltf::Accessor& uvAccessor = model.accessors[primitive.attributes.find("TEXCOORD_0")->second];
         const tinygltf::BufferView& uvView = model.bufferViews[uvAccessor.bufferView];
         texCoord0Data = reinterpret_cast<const float*>(&(model.buffers[uvView.buffer].data[uvAccessor.byteOffset + uvView.byteOffset]));
-        texCoord0Stride = uvAccessor.ByteStride(uvView) / sizeof(float);
+        texCoord0Stride = uvAccessor.ByteStride(uvView) / static_cast<int>(sizeof(float));
     }
 
     // Tangents. vec4: xyz is the tangent, w the bitangent handedness. Exporters
@@ -179,7 +180,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
         const tinygltf::BufferView& tanView = model.bufferViews[tanAccessor.bufferView];
         tangentData = reinterpret_cast<const float*>(
             &(model.buffers[tanView.buffer].data[tanAccessor.byteOffset + tanView.byteOffset]));
-        tangentStride = tanAccessor.ByteStride(tanView) / sizeof(float);
+        tangentStride = tanAccessor.ByteStride(tanView) / static_cast<int>(sizeof(float));
         assert(tangentStride > 0);
     }
 
@@ -225,24 +226,25 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
         {
         case TINYGLTF_PARAMETER_TYPE_UNSIGNED_INT: {
             jointsData = reinterpret_cast<const void*>(&model.buffers[jointsView.buffer].data[jointsAccessor.byteOffset + jointsView.byteOffset]);
-            jointsStride = jointsAccessor.ByteStride(jointsView) / sizeof(uint32_t);
+            jointsStride = jointsAccessor.ByteStride(jointsView) / static_cast<int>(sizeof(uint32_t));
             assert(jointsData != nullptr);
             break;
         }
         case TINYGLTF_PARAMETER_TYPE_UNSIGNED_SHORT: {
             jointsData = reinterpret_cast<const void*>(&model.buffers[jointsView.buffer].data[jointsAccessor.byteOffset + jointsView.byteOffset]);
-            jointsStride = jointsAccessor.ByteStride(jointsView) / sizeof(uint16_t);
+            jointsStride = jointsAccessor.ByteStride(jointsView) / static_cast<int>(sizeof(uint16_t));
             assert(jointsData != nullptr);
             break;
         }
         case TINYGLTF_PARAMETER_TYPE_UNSIGNED_BYTE: {
             jointsData = reinterpret_cast<const void*>(&model.buffers[jointsView.buffer].data[jointsAccessor.byteOffset + jointsView.byteOffset]);
-            jointsStride = jointsAccessor.ByteStride(jointsView) / sizeof(uint8_t);
+            jointsStride = jointsAccessor.ByteStride(jointsView) / static_cast<int>(sizeof(uint8_t));
             assert(jointsData != nullptr);
             break;
         }
         default:
-            std::cerr << "Joint component type " << jointsAccessor.componentType << " not supported" << std::endl;
+            STRELKA_WARNING("glTF joint component type {} is not supported; skipping primitive",
+                            jointsAccessor.componentType);
             return;
         }
         assert(jointsStride > 0);
@@ -251,7 +253,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
         const tinygltf::BufferView& weightsView = model.bufferViews[weightsAccessor.bufferView];
         weightsData = reinterpret_cast<const float*>(&model.buffers[weightsView.buffer].data[weightsAccessor.byteOffset + weightsView.byteOffset]);
         assert(weightsData != nullptr);
-        weightsStride = weightsAccessor.ByteStride(weightsView) / sizeof(float);
+        weightsStride = weightsAccessor.ByteStride(weightsView) / static_cast<int>(sizeof(float));
         assert(weightsStride > 0);
 
         sb.reserve(vertexCount);
@@ -259,11 +261,12 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
 
     std::vector<oka::Scene::Vertex> vertices;
     vertices.reserve(vertexCount);
-    for (uint32_t v = 0; v < vertexCount; ++v)
+    for (size_t v = 0; v < vertexCount; ++v)
     {
         oka::Scene::Vertex vertex{};
-        glm::float3 vPos = glm::make_vec3(&positionData[v * posStride]) * globalScale;
-        glm::float3 vNorm = glm::vec3(normalsData ? glm::make_vec3(&normalsData[v * normalStride]) : glm::vec3(0.0f));
+        const glm::float3 vPos = glm::make_vec3(&positionData[v * posStride]) * globalScale;
+        const glm::float3 vNorm =
+            glm::vec3(normalsData ? glm::make_vec3(&normalsData[v * normalStride]) : glm::vec3(0.0f));
         vertex.pos = vPos;
         vertex.normal = packNormal(glm::normalize(vNorm));
         vertex.uv = packUV(texCoord0Data ? glm::make_vec2(&texCoord0Data[v * texCoord0Stride]) : glm::vec3(0.0f));
@@ -281,13 +284,13 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
             case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
                 const uint8_t* src = static_cast<const uint8_t*>(colorData) + v * colorStride;
                 for (int k = 0; k < colorComponents; ++k)
-                    c[k] = src[k] / 255.0f;
+                    c[k] = static_cast<float>(src[k]) / 255.0f;
                 break;
             }
             case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
                 const uint16_t* src = static_cast<const uint16_t*>(colorData) + v * colorStride;
                 for (int k = 0; k < colorComponents; ++k)
-                    c[k] = src[k] / 65535.0f;
+                    c[k] = static_cast<float>(src[k]) / 65535.0f;
                 break;
             }
             default:
@@ -341,7 +344,8 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
                     break;
                 }
                 default:
-                    std::cerr << "Joint component type " << jointsAccessor.componentType << " not supported!" << std::endl;
+                    STRELKA_WARNING("glTF joint component type {} is not supported; skipping primitive",
+                                    jointsAccessor.componentType);
                     return;
             }
             skinData.weights = glm::make_vec4(&weightsData[v * weightsStride]);
@@ -398,7 +402,8 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
             break;
         }
         default:
-            std::cerr << "Index component type " << accessor.componentType << " not supported!" << std::endl;
+            STRELKA_WARNING("glTF index component type {} is not supported; skipping primitive",
+                            accessor.componentType);
             return;
         }
     }
@@ -412,21 +417,22 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
         }
     }
 
-    uint32_t meshId = -1;
+    uint32_t meshId = std::numeric_limits<uint32_t>::max();
     if (hasJoints)
         meshId = scene.createSkeletalMesh(vertices, indices, sb);
     else
         meshId = scene.createMesh(vertices, indices);
-    assert(meshId != -1);
+    assert(meshId != std::numeric_limits<uint32_t>::max());
     // Skinned meshes are deliberately never cached: their vertices are rewritten
     // per frame from their own skin, so two nodes sharing one would deform the
     // same geometry twice.
     if (!hasJoints)
         meshCache.emplace(primitiveKey, meshId);
-    uint32_t instId = scene.createInstance(Instance::Type::eMesh, meshId, matId, transform);
-    assert(instId != -1);
+    const uint32_t instId = scene.createInstance(Instance::Type::eMesh, meshId, matId, transform);
+    assert(instId != std::numeric_limits<uint32_t>::max());
     scene.mNodes[parentNodeId].instanceIds.push_back(instId);
 }
+// NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
 
 void processMesh(const tinygltf::Model& model, oka::Scene& scene, const uint32_t parentNodeId, const tinygltf::Mesh& mesh, const glm::float4x4& transform, const float globalScale, MeshCache& meshCache, uint32_t meshIndex)
 {
@@ -605,7 +611,7 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
         if (node.skin != -1)
         {
             scene.mNodes[currentNodeId].skin = node.skin;
-            scene.mSkines[node.skin].refNodeId = currentNodeId;
+            scene.mSkines[node.skin].refNodeId = static_cast<int>(currentNodeId);
         }
     }
     else if (node.camera != -1) // camera node
@@ -628,7 +634,7 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
             rotation = glm::conjugate(rotation);
 
             oka::Camera& camera = scene.getCamera((uint32_t)cameraId);
-            camera.node = currentNodeId;
+            camera.node = static_cast<int>(currentNodeId);
             // decomposeTrs already returns the world translation; multiplying it by
             // the node's scale again moves the camera by however much the hierarchy
             // was scaled. Harmless while every scale is 1, which is why it survived.
@@ -640,11 +646,11 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
         }
     }
 
-    for (int childIdx : node.children)
+    for (const int childIdx : node.children)
     {
         if (scene.mNodes[currentNodeId].type == oka::Scene::Node::NodeType::unknown)
             scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::sceneGraph;
-        scene.mNodes[childIdx].parent = currentNodeId;
+        scene.mNodes[childIdx].parent = static_cast<int>(currentNodeId);
         processNode(model, scene, model.nodes[childIdx], childIdx, globalTransform, globalScale, meshCache,
                     cameraIndexMap);
     }
@@ -680,7 +686,7 @@ std::string getTextureUri(const tinygltf::Model& model, int texIndex)
 // material from a single Mapping node, so taking the first is not a compromise
 // in practice -- and without it a tiled texture authored at scale 0.1 renders
 // ten times too large.
-static void readTextureTransform(const tinygltf::Material& material, MaterialParams& p)
+void readTextureTransform(const tinygltf::Material& material, MaterialParams& p)
 {
     p.uv_offset_x = 0.0f;
     p.uv_offset_y = 0.0f;
@@ -717,10 +723,10 @@ static void readTextureTransform(const tinygltf::Material& material, MaterialPar
     }
 }
 
-static float khrFloat(const tinygltf::Material& material,
-                      const char* extension,
-                      const char* key,
-                      float fallback)
+float khrFloat(const tinygltf::Material& material,
+               const char* extension,
+               const char* key,
+               float fallback)
 {
     const auto it = material.extensions.find(extension);
     if (it == material.extensions.end() || !it->second.IsObject() || !it->second.Has(key))
@@ -1095,10 +1101,10 @@ void loadCameras(const tinygltf::Model& model, oka::Scene& scene, std::vector<in
         if (cameraGltf.type == "perspective")
         {
             camera.projection = oka::Camera::ProjectionType::perspective;
-            camera.fov = cameraGltf.perspective.yfov * (180.0f / 3.1415926f);
+            camera.fov = static_cast<float>(cameraGltf.perspective.yfov) * (180.0f / 3.1415926f);
             camera.authoredAspect = (float)cameraGltf.perspective.aspectRatio;
-            camera.znear = cameraGltf.perspective.znear;
-            camera.zfar = cameraGltf.perspective.zfar;
+            camera.znear = static_cast<float>(cameraGltf.perspective.znear);
+            camera.zfar = static_cast<float>(cameraGltf.perspective.zfar);
         }
         else if (cameraGltf.type == "orthographic")
         {
@@ -1108,8 +1114,8 @@ void loadCameras(const tinygltf::Model& model, oka::Scene& scene, std::vector<in
             camera.xmag = (float)cameraGltf.orthographic.xmag;
             camera.ymag = (float)cameraGltf.orthographic.ymag;
             camera.authoredAspect = (camera.ymag > 0.0f) ? (camera.xmag / camera.ymag) : 0.0f;
-            camera.znear = cameraGltf.orthographic.znear;
-            camera.zfar = cameraGltf.orthographic.zfar;
+            camera.znear = static_cast<float>(cameraGltf.orthographic.znear);
+            camera.zfar = static_cast<float>(cameraGltf.orthographic.zfar);
         }
         else
         {
@@ -1206,7 +1212,8 @@ void loadAnimation(const tinygltf::Model& model, oka::Scene& scene)
                     break;
                 }
                 default: {
-                    std::cout << "unknown type" << std::endl;
+                    STRELKA_WARNING("glTF animation '{}' uses unsupported output accessor type {}; skipping output",
+                                    animation.name, accessor.type);
                     break;
                 }
                 }
@@ -1230,14 +1237,16 @@ void loadAnimation(const tinygltf::Model& model, oka::Scene& scene)
             }
             if (channel.target_path == "weights")
             {
-                std::cout << "weights not yet supported, skipping channel" << std::endl;
+                STRELKA_WARNING("glTF animation '{}' uses an unsupported weights channel; skipping channel",
+                                animation.name);
                 continue;
             }
             chan.samplerIndex = channel.sampler;
             chan.node = channel.target_node;
             if (chan.node < 0)
             {
-                std::cout << "node id < 0, skipping channel" << std::endl;
+                STRELKA_WARNING("glTF animation '{}' channel has invalid node {}; skipping channel", animation.name,
+                                chan.node);
                 continue;
             }
 
@@ -1292,6 +1301,9 @@ void loadNodes(const tinygltf::Model& model, oka::Scene& scene, const float glob
 
 void loadSkeletalData(const tinygltf::Model& model, oka::Scene& scene, const float /*globalScale*/ = 1.0f)
 {
+    // glTF stores matrices in byte-backed accessor payloads; the accessor type
+    // and stride validate this float view.
+    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
     for (const auto& skin : model.skins)
     {
         oka::Scene::Skin s{};
@@ -1306,7 +1318,7 @@ void loadSkeletalData(const tinygltf::Model& model, oka::Scene& scene, const flo
         assert(matrixData != nullptr);
         const auto matrixCount = static_cast<uint32_t>(matrixAccessor.count);
         assert(matrixCount != 0);
-        const int matStride = matrixAccessor.ByteStride(bufferView) / sizeof(float);;
+        const int matStride = matrixAccessor.ByteStride(bufferView) / static_cast<int>(sizeof(float));
         assert(matStride > 0);
 
         for (const int jointid : s.joints)
@@ -1314,21 +1326,27 @@ void loadSkeletalData(const tinygltf::Model& model, oka::Scene& scene, const flo
             scene.mNodes[jointid].type = oka::Scene::Node::NodeType::skeleton;
             //s.inverseBindMatrices.push_back(glm::inverse(scene.calculateNodeGlobalTransform(jointid)));
         }
-        for (uint32_t m = 0; m < matrixCount; ++m)
+        for (size_t m = 0; m < matrixCount; ++m)
         {
-            glm::mat4 inverseBindMatrix = glm::make_mat4(&matrixData[m * matStride]);
+            const glm::mat4 inverseBindMatrix = glm::make_mat4(&matrixData[m * matStride]);
             s.inverseBindMatrices.push_back(inverseBindMatrix);
         }
 
         scene.mSkines.push_back(s);
     }
+    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
 }
+
+} // namespace
 
 
 // Curves ride in a binary sidecar; see curve_sidecar.h for the format and for
 // why glTF cannot carry them. Named after the model rather than scanned for,
 // unlike the light sidecar: a directory holding two converted scenes would
 // otherwise give one of them the other's hair.
+// External linkage is intentional: the binary-format regression test calls this
+// loader hook directly without making it part of the public glTF loader API.
+// NOLINTNEXTLINE(misc-use-internal-linkage)
 bool loadCurvesFromSidecar(const std::string& modelPath, oka::Scene& scene)
 {
     const std::string stem = modelPath.substr(0, modelPath.rfind('.'));
@@ -1341,22 +1359,25 @@ bool loadCurvesFromSidecar(const std::string& modelPath, oka::Scene& scene)
     return curvesidecar::loadCurvesFile(curvePath, scene);
 }
 
+namespace
+{
+
 bool loadLightsFromJson(const std::string& modelPath, oka::Scene& scene)
 {
     // First try exact match: <modelname>_light.json
-    std::string fileName = modelPath.substr(0, modelPath.rfind('.')); // w/o extension
+    const std::string fileName = modelPath.substr(0, modelPath.rfind('.')); // w/o extension
     std::string jsonPath = fileName + "_light" + ".json";
 
     // If not found, scan directory for any *_light.json file
     if (!fs::exists(jsonPath))
     {
-        fs::path dir = fs::path(modelPath).parent_path();
+        const fs::path dir = fs::path(modelPath).parent_path();
         jsonPath.clear();
         for (const auto& entry : fs::directory_iterator(dir))
         {
             if (entry.is_regular_file())
             {
-                std::string name = entry.path().filename().string();
+                const std::string name = entry.path().filename().string();
                 if (name.size() > 11 && name.substr(name.size() - 11) == "_light.json")
                 {
                     jsonPath = entry.path().string();
@@ -1481,18 +1502,18 @@ bool loadPunctualLights(const tinygltf::Model& model, oka::Scene& scene)
 
 void loadCamerasFromJson(const std::string& modelPath, oka::Scene& scene)
 {
-    std::string fileName = modelPath.substr(0, modelPath.rfind('.'));
+    const std::string fileName = modelPath.substr(0, modelPath.rfind('.'));
     std::string jsonPath = fileName + "_camera.json";
 
     if (!fs::exists(jsonPath))
     {
-        fs::path dir = fs::path(modelPath).parent_path();
+        const fs::path dir = fs::path(modelPath).parent_path();
         jsonPath.clear();
         for (const auto& entry : fs::directory_iterator(dir))
         {
             if (entry.is_regular_file())
             {
-                std::string name = entry.path().filename().string();
+                const std::string name = entry.path().filename().string();
                 if (name.size() > 12 && name.substr(name.size() - 12) == "_camera.json")
                 {
                     jsonPath = entry.path().string();
@@ -1518,8 +1539,8 @@ void loadCamerasFromJson(const std::string& modelPath, oka::Scene& scene)
         if (!cam.contains("name"))
             continue;
 
-        std::string name = cam["name"].get<std::string>();
-        uint32_t idx = scene.findCameraByName(name);
+        const std::string name = cam["name"].get<std::string>();
+        const uint32_t idx = scene.findCameraByName(name);
         if (idx == (uint32_t)-1)
         {
             STRELKA_WARNING("Camera JSON: no matching camera '{}' in scene", name);
@@ -1559,6 +1580,8 @@ void loadCamerasFromJson(const std::string& modelPath, oka::Scene& scene)
         STRELKA_INFO("Camera JSON: applied properties to '{}'", name);
     }
 }
+
+} // namespace
 
 bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
 {

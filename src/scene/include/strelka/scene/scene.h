@@ -82,6 +82,9 @@ enum class ChangeBits : uint32_t
 
 inline ChangeBits operator|(ChangeBits a, ChangeBits b)
 {
+    // ChangeBits is a bitmask; combined values deliberately need not name an
+    // enumerator.
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
     return static_cast<ChangeBits>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
 }
 
@@ -126,11 +129,11 @@ public:
     // a multiplier of 1, and a zeroed one would render the surface black.
     struct Vertex
     {
-        glm::float3 pos;
-        uint32_t tangent;
+        glm::float3 pos{ 0.0f };
+        uint32_t tangent = 0;
 
-        uint32_t normal;
-        uint32_t uv;
+        uint32_t normal = 0;
+        uint32_t uv = 0;
         uint32_t uv1 = 0;                  // byte 24, packUV format
         uint32_t color = 0xFFFFFFFFu;      // byte 28, packed RGBA8, linear
     };
@@ -226,8 +229,8 @@ public:
         float current;
     };
     std::vector<Animation> mAnimations;
-    int blasUpdateCount;
-    int tlasUpdateCount;
+    int blasUpdateCount = 0;
+    int tlasUpdateCount = 0;
 
     // GPU side structure
     // Uploaded to the GPU verbatim, so every field is initialized: a light type
@@ -472,7 +475,7 @@ public:
     glm::float4 interpolate(const AnimationSampler &sampler, const AnimationChannel::PathType targetProperty, const float time);
     bool applyAnimation(const uint32_t animId);
     void applySkinning();
-    void computeJointMatrices(std::vector<glm::mat4> *jointMatrices, int jointCount, const uint32_t skinId);
+    void computeJointMatrices(std::vector<glm::mat4>* jointMatrices, size_t jointCount, uint32_t skinId);
     const std::vector<Node>& getNodes() const
     {
         return mNodes;
@@ -512,7 +515,7 @@ public:
 
     uint32_t findCameraByName(const std::string& name)
     {
-        std::scoped_lock lock(mCameraMutex);
+        const std::scoped_lock lock(mCameraMutex);
         if (mNameToCamera.find(name) != mNameToCamera.end())
         {
             return mNameToCamera[name];
@@ -522,7 +525,7 @@ public:
 
     uint32_t addCamera(Camera& camera)
     {
-        std::scoped_lock lock(mCameraMutex);
+        const std::scoped_lock lock(mCameraMutex);
         mCameras.push_back(camera);
         // store camera index
         mNameToCamera[camera.name] = (uint32_t)mCameras.size() - 1;
@@ -532,26 +535,26 @@ public:
     void updateCamera(Camera& camera, uint32_t index)
     {
         assert(index < mCameras.size());
-        std::scoped_lock lock(mCameraMutex);
+        const std::scoped_lock lock(mCameraMutex);
         mCameras[index] = camera;
     }
 
     Camera& getCamera(uint32_t index)
     {
         assert(index < mCameras.size());
-        std::scoped_lock lock(mCameraMutex);
+        const std::scoped_lock lock(mCameraMutex);
         return mCameras[index];
     }
 
     const std::vector<Camera>& getCameras()
     {
-        std::scoped_lock lock(mCameraMutex);
+        const std::scoped_lock lock(mCameraMutex);
         return mCameras;
     }
 
     size_t getCameraCount()
     {
-        std::scoped_lock lock(mCameraMutex);
+        const std::scoped_lock lock(mCameraMutex);
         return mCameras.size();
     }
 
@@ -584,14 +587,14 @@ public:
     {
         for (Camera& camera : mCameras)
         {
-            camera.updateAspectRatio((float)width / height);
+            camera.updateAspectRatio(static_cast<float>(width) / static_cast<float>(height));
         }
     }
 
     glm::float4x4 getTransform(const Scene::UniformLightDesc& desc)
     {
         const glm::float4x4 translationMatrix = glm::translate(glm::float4x4(1.0f), desc.position);
-        glm::quat rotation = glm::quat(glm::radians(desc.orientation)); // to quaternion
+        const glm::quat rotation = glm::quat(glm::radians(desc.orientation)); // to quaternion
         const glm::float4x4 rotationMatrix{ rotation };
         // The shape's own size, not always the rectangle's. A disc or sphere light
         // carries a radius and no width, so scaling every light by
@@ -624,8 +627,9 @@ public:
         while (nodeIdx != -1)
         {
             const Node& n = mNodes[nodeIdx];
-            glm::float4x4 xform = glm::translate(glm::float4x4(1.0f), n.translation) * glm::float4x4(n.rotation) *
-                                  glm::scale(glm::float4x4(1.0f), n.scale);
+            const glm::float4x4 xform = glm::translate(glm::float4x4(1.0f), n.translation) *
+                                        glm::float4x4(n.rotation) *
+                                        glm::scale(glm::float4x4(1.0f), n.scale);
             xforms.push(xform);
             nodeIdx = n.parent;
         }
@@ -654,7 +658,7 @@ public:
 
     glm::float4x4 getCameraTransform(int nodeIdx)
     {
-        int child = mNodes[nodeIdx].children[0];
+        const int child = mNodes[nodeIdx].children[0];
         return getTransform(child);
     }
 

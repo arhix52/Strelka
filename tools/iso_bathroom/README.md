@@ -88,10 +88,11 @@ Rendered at 1024x1024, 2048 spp, `--depth 16 --clamp 8 --camera 0`:
   Henyey-Greenstein scattering in `shade`, and next-event estimation at the exit
   vertex (`src/shaders/metal/subsurface.h`). Gated by a `kFeatureSubsurface`
   function constant, so a scene without a translucent material compiles the
-  kernels it compiled before. `PathState` carries one extra word -- which medium
-  and how far into the walk -- rather than the medium's parameters, which would
-  have been 28 MB per frame at 1024x1024 to avoid a load from a table that fits
-  in cache.
+  kernels it compiled before. A cold side table carries two words -- which
+  medium and how far into the walk, plus the textured entry albedo -- rather
+  than widening the `PathState` every stage streams or copying the medium's
+  parameters, which would have been 28 MB at 1024x1024 to avoid a load from a
+  table that fits in cache.
 - **Texture wrap** -- material samplers are `address::repeat`. glTF's default
   wrap is REPEAT and Metal's is clamp_to_edge; under clamping a tiled texture
   smears its edge texel across the whole surface, which reads as a texture that
