@@ -38,6 +38,15 @@ public:
 
     virtual void init() = 0;
 
+    /// False when init() could not bring the backend up (no GPU, no Metal 4,
+    /// no ray tracing). init() logs and returns; it does not abort, so callers
+    /// have to check before createBuffer / render -- otherwise a missing device
+    /// is a null deref, which is how GitHub CI died with SIGSEGV.
+    virtual bool isReady() const
+    {
+        return true;
+    }
+
     /// Tell the renderer that the next frame has no valid temporal predecessor --
     /// a camera cut, a scene change, anything that breaks pixel-to-pixel
     /// correspondence. Smooth camera motion is *not* such an event: motion vectors

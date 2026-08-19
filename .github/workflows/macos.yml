@@ -69,6 +69,27 @@ jobs:
         working-directory: build/Release
         run: ./unit_tests
 
+      # GitHub-hosted macOS has no GPU passthrough. StrelkaCLI used to SIGSEGV
+      # (exit 139) there after CreateSystemDefaultDevice returned nil; it now
+      # exits 3. Treat that as a skip so the compile + unit-test gate stays green.
+      # A self-hosted runner with a real GPU still runs the smokes.
+      - name: Probe Metal GPU
+        run: |
+          cat > /tmp/probe_metal.swift <<'EOF'
+          import Metal
+          let devices = MTLCopyAllDevices()
+          print("MTLCopyAllDevices count=\(devices.count)")
+          for d in devices {
+              print("device name=\(d.name) raytracing=\(d.supportsRaytracing)")
+          }
+          if let def = MTLCreateSystemDefaultDevice() {
+              print("default name=\(def.name) raytracing=\(def.supportsRaytracing)")
+          } else {
+              print("default=nil")
+          }
+          EOF
+          swift /tmp/probe_metal.swift || echo "::warning::Metal probe failed to run"
+
       - name: CLI smoke (no golden images)
         working-directory: build/Release
         run: |
@@ -78,9 +99,19 @@ jobs:
           # scene to exactly zero in 8-bit, and then asserted only that the file
           # was non-empty -- so it passed on an entirely black image, and would
           # have gone on passing if the renderer stopped tracing altogether.
+          set +e
           ./StrelkaCLI ../../scenes/validation/cornell_box/cornell_box.glb \
             -o /tmp/strelka_smoke.exr -w 64 --height 48 --spp 16 \
             --tonemap none --exposure-iso 100
+          status=$?
+          set -e
+          if [ "$status" -eq 3 ]; then
+            echo "::notice::No Metal GPU on this runner; skipping Cornell smoke"
+            exit 0
+          fi
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
           test -s /tmp/strelka_smoke.exr
           python3 - <<'PY'
           import sys
@@ -98,8 +129,18 @@ jobs:
         run: |
           # animation_time=0.5 is load-bearing: at t=start the skeleton is never
           # dirtied and this would pass with skinning broken.
+          set +e
           ./StrelkaCLI -c ../../scenes/validation/brainstem/BrainStem.toml \
             -o /tmp/strelka_brainstem.png -w 128 --height 96 --spp 8 2>&1 | tee /tmp/strelka_brainstem.log
+          status=$?
+          set -e
+          if [ "$status" -eq 3 ]; then
+            echo "::notice::No Metal GPU on this runner; skipping BrainStem smoke"
+            exit 0
+          fi
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
           test -s /tmp/strelka_brainstem.png
           # Extent is the diagonal of the skinned vertices on the GPU. A broken
           # skinning submission collapses it toward zero; BrainStem mid-pose is

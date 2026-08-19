@@ -191,6 +191,11 @@ uint32_t parseTonemapName(const std::string& name);
 /// Parse a TOML config file into a RenderConfig, starting from defaults.
 RenderConfig parseTomlConfig(const std::string& tomlPath);
 
+/// StrelkaCLI returns this when the renderer could not start. GitHub-hosted
+/// macOS runners have no GPU passthrough, so the workflow treats this as a skip
+/// rather than a failed render.
+inline constexpr int kExitRendererUnavailable = 3;
+
 class HeadlessApp
 {
 public:

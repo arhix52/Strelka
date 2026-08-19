@@ -36,6 +36,10 @@ public:
     ~MetalRender() override;
 
     void init() override;
+    bool isReady() const override
+    {
+        return mDevice != nullptr && mMetal4.isValid();
+    }
     void render(Buffer* output) override;
     void renderSync(Buffer* output) override;
     void beginGpuCapture(const std::string& path) override;
@@ -68,8 +72,7 @@ public:
         // Frame serial stays 0, as it always has here: it exists for the Vulkan
         // display's transform-once bookkeeping, and the Metal display does not
         // transform published frames at all.
-        return { mAsyncOutputBuffers[readyIndex], mPost.displayTexture(readyIndex), 0,
-                 mPresentation[readyIndex] };
+        return { mAsyncOutputBuffers[readyIndex], mPost.displayTexture(readyIndex), 0, mPresentation[readyIndex] };
     }
 
     bool memoryReport(MemoryReport& report) const override;

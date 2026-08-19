@@ -785,12 +785,22 @@ int HeadlessApp::run()
 
     STRELKA_INFO("Initializing renderer ({}x{}, {} spp)...", m_config.width, m_config.height, m_config.spp);
     m_render->init();
+    if (!m_render->isReady())
+    {
+        STRELKA_FATAL("Renderer failed to initialise (no Metal GPU, or Metal 4 / ray tracing unavailable)");
+        return kExitRendererUnavailable;
+    }
 
     BufferDesc desc{};
     desc.format = BufferFormat::FLOAT4;
     desc.width = m_config.width;
     desc.height = m_config.height;
     const std::unique_ptr<Buffer> outputBuf(m_render->createBuffer(desc));
+    if (!outputBuf)
+    {
+        STRELKA_FATAL("Failed to create the output buffer");
+        return kExitRendererUnavailable;
+    }
 
     const auto startTime = high_resolution_clock::now();
     bool announced = false;

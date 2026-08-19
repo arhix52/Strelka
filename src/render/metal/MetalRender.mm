@@ -718,6 +718,40 @@ bool MetalRender::memoryReport(MemoryReport& report) const
     return true;
 }
 
+namespace
+{
+// CreateSystemDefaultDevice is for apps with a display. A CLI, a daemon, and a
+// GitHub Actions session have none, and Apple documents MTLCopyAllDevices as
+// the replacement. Prefer a device that can actually trace; a stub GPU that
+// enumerates but cannot is how a headless runner used to get past init and
+// SIGSEGV on the first acceleration structure.
+MTL::Device* acquireMetalDevice()
+{
+    NS::Array* devices = MTL::CopyAllDevices();
+    MTL::Device* device = nullptr;
+    if (devices)
+    {
+        const NS::UInteger count = devices->count();
+        for (NS::UInteger i = 0; i < count; ++i)
+        {
+            MTL::Device* candidate = static_cast<MTL::Device*>(devices->object(i));
+            if (candidate && candidate->supportsRaytracing())
+            {
+                device = candidate;
+                device->retain();
+                break;
+            }
+        }
+        devices->release();
+    }
+    if (!device)
+    {
+        device = MTL::CreateSystemDefaultDevice();
+    }
+    return device;
+}
+} // namespace
+
 void MetalRender::init()
 {
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
@@ -738,10 +772,17 @@ void MetalRender::init()
     static_assert(sizeof(GeometryEntry) == 16, "GeometryEntry size changed");
     static_assert(sizeof(AovSample) == 64, "AovSample is written once per pixel per frame; keep an eye on the size");
 
-    mDevice = MTL::CreateSystemDefaultDevice();
+    mDevice = acquireMetalDevice();
     if (!mDevice)
     {
-        STRELKA_FATAL("Failed to create Metal device");
+        STRELKA_FATAL("Failed to create Metal device (no GPU, or none visible to this process)");
+        return;
+    }
+    STRELKA_INFO("Metal device: {} (ray tracing {})", mDevice->name()->utf8String(),
+                 mDevice->supportsRaytracing() ? "yes" : "no");
+    if (!mDevice->supportsRaytracing())
+    {
+        STRELKA_FATAL("Metal device '{}' does not support ray tracing", mDevice->name()->utf8String());
         return;
     }
     mCommandQueue = mDevice->newCommandQueue();
@@ -2763,7 +2804,11 @@ void MetalRender::renderSync(Buffer* output)
 
 Buffer* MetalRender::createBuffer(const BufferDesc& desc)
 {
-    assert(mDevice);
+    if (!mDevice)
+    {
+        STRELKA_ERROR("createBuffer called before a Metal device exists");
+        return nullptr;
+    }
     const size_t size = static_cast<size_t>(desc.height) * desc.width * Buffer::getElementSize(desc.format);
     assert(size != 0);
     MTL::Buffer* buff = mDevice->newBuffer(size, MTL::ResourceStorageModeShared);
