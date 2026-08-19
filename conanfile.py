@@ -11,18 +11,24 @@ class StrelkaRecipe(ConanFile):
     default_options = {
         "glfw/*:with_wayland": True,
         "glfw/*:with_x11": True,
+        # GLM 1.0.3's Conan recipe builds a compiled library by default. That
+        # bakes radians-vs-degrees and clip-space at library compile time, so
+        # GLM_FORCE_RADIANS / GLM_FORCE_DEPTH_ZERO_TO_ONE in glm_wrapper.hpp
+        # would not apply. Vertex and curve uploads also assume packed float3
+        # (12 bytes); stay header-only so those defines reach every include.
+        "glm/*:header_only": True,
     }
 
     def requirements(self):
         # Foundation
-        self.requires("glm/cci.20230113")
+        self.requires("glm/1.0.3")
         self.requires("spdlog/1.17.0")
         self.requires("tomlplusplus/3.4.0")
 
         # Scene loading
-        self.requires("tinygltf/2.8.19")
-        self.requires("nlohmann_json/3.11.3")
-        self.requires("stb/cci.20230920")
+        self.requires("tinygltf/2.9.7")
+        self.requires("nlohmann_json/3.12.0")
+        self.requires("stb/cci.20240531")
         self.requires("tinyexr/1.0.7")
 
         # Editor (conditional via options)
@@ -40,10 +46,10 @@ class StrelkaRecipe(ConanFile):
         self.requires("imguizmo/cci.20260729")
         if self.settings.os != "Macos":
             self.requires("vulkan-loader/1.3.268.0")
-        self.requires("cxxopts/3.1.1")
+        self.requires("cxxopts/3.3.1")
 
         # Testing
-        self.requires("doctest/2.4.11")
+        self.requires("doctest/2.5.2")
 
     def build_requirements(self):
         if self.settings.os != "Macos":

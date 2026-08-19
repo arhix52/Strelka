@@ -1,6 +1,8 @@
 #pragma once
 
 #include "camera.h"
+#include <glm/ext/vector_int4.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <strelka/material/material_params.h>
 #include <light_types.h>
 // lightTypeIsPunctual() and the radiometric bake. A light description is not
@@ -22,11 +24,11 @@ namespace oka
 
 struct Mesh
 {
-    uint32_t mIndex; // Index of 1st index in index buffer
-    uint32_t mCount; // amount of indices in mesh
-    uint32_t mVbOffset; // start in vb
-    uint32_t mVertexCount; // number of vertices in mesh
-    uint32_t mSbOffset; // start in sb
+    uint32_t mIndex = 0; // Index of 1st index in index buffer
+    uint32_t mCount = 0; // amount of indices in mesh
+    uint32_t mVbOffset = 0; // start in vb
+    uint32_t mVertexCount = 0; // number of vertices in mesh
+    uint32_t mSbOffset = 0; // start in sb
     bool isSkeletal = false;
 };
 
@@ -37,12 +39,12 @@ struct Curve
         eLinear,
         eCubic,
     };
-    uint32_t mVertexCountsStart;
-    uint32_t mVertexCountsCount;
-    uint32_t mPointsStart;
-    uint32_t mPointsCount;
-    uint32_t mWidthsStart;
-    uint32_t mWidthsCount;
+    uint32_t mVertexCountsStart = 0;
+    uint32_t mVertexCountsCount = 0;
+    uint32_t mPointsStart = 0;
+    uint32_t mPointsCount = 0;
+    uint32_t mWidthsStart = 0;
+    uint32_t mWidthsCount = 0;
     // The basis the control points are meant to be read under. It used to be a
     // parameter of createCurve that nothing stored, so every consumer had to
     // assume one -- and the two backends assumed different ones.
@@ -63,10 +65,10 @@ struct Instance
         eMesh,
         eLight,
         eCurve
-    } type;
+    } type = Type::eMesh;
     union
     {
-        uint32_t mMeshId;
+        uint32_t mMeshId = 0;
         uint32_t mCurveId;
     };
     uint32_t mMaterialId = 0;
@@ -113,7 +115,7 @@ public:
     struct MaterialDescription
     {
         std::string name;
-        MaterialParams params = {};  // GPU-ready PBR material parameters
+        MaterialParams params = {}; // GPU-ready PBR material parameters
 
         // Texture file paths (resolved by renderer into GPU texture objects)
         std::string baseColorTexPath;
@@ -137,18 +139,19 @@ public:
 
         uint32_t normal = 0;
         uint32_t uv = 0;
-        uint32_t uv1 = 0;                  // byte 24, packUV format
-        uint32_t color = 0xFFFFFFFFu;      // byte 28, packed RGBA8, linear
+        uint32_t uv1 = 0; // byte 24, packUV format
+        uint32_t color = 0xFFFFFFFFu; // byte 28, packed RGBA8, linear
     };
+    static_assert(sizeof(Vertex) == 32, "Scene::Vertex must stay 32 bytes (Metal vtxStride)");
 
-    struct vertexSkinData //vertex skin data
+    struct vertexSkinData // vertex skin data
     {
-        glm::ivec4 joints{0};
-        glm::vec4 weights{0.0};
-        glm::float3 pos;
-        float pad0;
-        glm::float3 normal;
-        uint32_t tangent{0}; // rest-pose packed tangent for skinning
+        glm::ivec4 joints{ 0 };
+        glm::vec4 weights{ 0.0 };
+        glm::float3 pos{ 0.0f };
+        float pad0 = 0.0f;
+        glm::float3 normal{ 0.0f };
+        uint32_t tangent{ 0 }; // rest-pose packed tangent for skinning
     };
     std::vector<vertexSkinData> mVerticesSkinData;
 
@@ -167,9 +170,9 @@ public:
         // Identity, not left to whatever the allocation held: a node the loader
         // did not fill in every field of still has to describe a usable
         // transform, and a garbage 3x3 propagates to every descendant.
-        glm::float3 translation{ 0.0f }; //local translation
-        glm::float3 scale{ 1.0f }; //local scale
-        glm::quat rotation{ 1.0f, 0.0f, 0.0f, 0.0f }; //local rotation
+        glm::float3 translation{ 0.0f }; // local translation
+        glm::float3 scale{ 1.0f }; // local scale
+        glm::quat rotation{ 1.0f, 0.0f, 0.0f, 0.0f }; // local rotation
         int parent = -1;
         std::vector<int> children;
         std::vector<uint32_t> instanceIds;
@@ -204,7 +207,7 @@ public:
             STEP,
             CUBICSPLINE
         };
-        InterpolationType interpolation;
+        InterpolationType interpolation = InterpolationType::LINEAR;
         std::vector<float> inputs;
         std::vector<glm::float4> outputsVec4;
     };
@@ -217,9 +220,9 @@ public:
             ROTATION,
             SCALE
         };
-        PathType path;
-        int node;
-        uint32_t samplerIndex;
+        PathType path = PathType::TRANSLATION;
+        int node = -1;
+        uint32_t samplerIndex = 0;
     };
 
     struct Animation
@@ -229,7 +232,7 @@ public:
         std::vector<AnimationChannel> channels;
         float start = std::numeric_limits<float>::max();
         float end = std::numeric_limits<float>::min();
-        float current;
+        float current = 0.0f;
     };
     std::vector<Animation> mAnimations;
     int blasUpdateCount = 0;
@@ -510,9 +513,11 @@ public:
         return mAnimations;
     }
 
-    glm::quat makeQuatFromFloat4 (const glm::float4 &value);
-    glm::float4 makeFloat4FromQuat(const glm::quat &q);
-    glm::float4 interpolate(const AnimationSampler &sampler, const AnimationChannel::PathType targetProperty, const float time);
+    glm::quat makeQuatFromFloat4(const glm::float4& value);
+    glm::float4 makeFloat4FromQuat(const glm::quat& q);
+    glm::float4 interpolate(const AnimationSampler& sampler,
+                            const AnimationChannel::PathType targetProperty,
+                            const float time);
     bool applyAnimation(const uint32_t animId);
     void applySkinning();
     void computeJointMatrices(std::vector<glm::mat4>* jointMatrices, size_t jointCount, uint32_t skinId);
@@ -552,7 +557,6 @@ private:
     bool applyNodeSideEffects(const uint32_t nodeId);
 
 public:
-
     uint32_t findCameraByName(const std::string& name)
     {
         const std::scoped_lock lock(mCameraMutex);
@@ -667,8 +671,7 @@ public:
         while (nodeIdx != -1)
         {
             const Node& n = mNodes[nodeIdx];
-            const glm::float4x4 xform = glm::translate(glm::float4x4(1.0f), n.translation) *
-                                        glm::float4x4(n.rotation) *
+            const glm::float4x4 xform = glm::translate(glm::float4x4(1.0f), n.translation) * glm::float4x4(n.rotation) *
                                         glm::scale(glm::float4x4(1.0f), n.scale);
             xforms.push(xform);
             nodeIdx = n.parent;
@@ -740,14 +743,17 @@ public:
     {
         mExposure = desc;
     }
-    const std::optional<ExposureDesc>& getExposure() const { return mExposure; }
+    const std::optional<ExposureDesc>& getExposure() const
+    {
+        return mExposure;
+    }
 
     struct AtmosphereDesc
     {
         glm::float3 color = glm::float3(1.0f); // single-scattering albedo
-        float density = 0.0f;                  // extinction, per world unit
-        float anisotropy = 0.0f;               // Henyey-Greenstein g
-        float height = 0.0f;                   // world y above which there is none
+        float density = 0.0f; // extinction, per world unit
+        float anisotropy = 0.0f; // Henyey-Greenstein g
+        float height = 0.0f; // world y above which there is none
     };
 
     void setAtmosphere(const AtmosphereDesc& desc)
@@ -755,17 +761,29 @@ public:
         mAtmosphere = desc;
         markChanged(ChangeBits::Env);
     }
-    const std::optional<AtmosphereDesc>& getAtmosphere() const { return mAtmosphere; }
+    const std::optional<AtmosphereDesc>& getAtmosphere() const
+    {
+        return mAtmosphere;
+    }
 
     void setEnvLight(const EnvLightDesc& desc)
     {
         mEnvLight = desc;
         markChanged(ChangeBits::Env);
     }
-    const std::optional<EnvLightDesc>& getEnvLight() const { return mEnvLight; }
+    const std::optional<EnvLightDesc>& getEnvLight() const
+    {
+        return mEnvLight;
+    }
 
-    void setSourcePath(const std::string& path) { modelPath = path; }
-    const std::string& getSourcePath() const { return modelPath; }
+    void setSourcePath(const std::string& path)
+    {
+        modelPath = path;
+    }
+    const std::string& getSourcePath() const
+    {
+        return modelPath;
+    }
 
     /// Unified light edit: updates desc, baked GPU light, and proxy instance.
     void setLight(uint32_t lightId, const UniformLightDesc& desc);
@@ -805,7 +823,9 @@ public:
     /// <param name="ib">Indices</param>
     /// <returns>Mesh id in scene</returns>
     uint32_t createMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib);
-    uint32_t createSkeletalMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib, const std::vector<oka::Scene::vertexSkinData>& sb);
+    uint32_t createSkeletalMesh(const std::vector<Vertex>& vb,
+                                const std::vector<uint32_t>& ib,
+                                const std::vector<oka::Scene::vertexSkinData>& sb);
     /// <summary>
     /// Creates Instance
     /// </summary>

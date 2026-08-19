@@ -1,13 +1,9 @@
 #pragma once
 
-#define GLM_FORCE_SILENT_WARNINGS
-#define GLM_FORCE_RADIANS
-#define GLM_FORCE_DEPTH_ZERO_TO_ONE
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
+#include <strelka/scene/glm_wrapper.hpp>
 #include <glm/gtc/quaternion.hpp>
-#include <glm/gtx/compatibility.hpp>
 
+#include <cstdint>
 #include <string>
 
 namespace oka
@@ -39,7 +35,7 @@ public:
     };
     ProjectionType projection = ProjectionType::perspective;
 
-    float fov = 45.0f;   // vertical, degrees
+    float fov = 45.0f; // vertical, degrees
 
     // Orthographic half-extents in world units, i.e. glTF xmag / ymag. Blender's
     // `ortho_scale` is the full extent of the fitted axis, so it is half of that.
@@ -71,8 +67,8 @@ public:
     // View dir -Z
     glm::quat mOrientation = { 1.0f, 0.0f, 0.0f, 0.0f };
     glm::float3 position = { 0.0f, 0.0f, 10.0f };
-    glm::float3 mWorldUp = {0.0, 1.0, 0.0};
-    glm::float3 mWorldForward = {0.0, 0.0, -1.0};
+    glm::float3 mWorldUp = { 0.0, 1.0, 0.0 };
+    glm::float3 mWorldForward = { 0.0, 0.0, -1.0 };
     glm::quat getOrientation();
 
     float rotationSpeed = 0.025f;
@@ -96,7 +92,7 @@ public:
         bool middle = false;
     } mouseButtons;
 
-    glm::float2 mousePos;
+    glm::float2 mousePos{ 0.0f };
 
     struct Matrices
     {

@@ -3,8 +3,9 @@
 // GPU-side counterparts: src/shaders/optix/optix_device_utils.h (CUDA)
 //                        src/shaders/metal/pathtrace.metal (Metal)
 
+#include <cmath>
 #include <cstdint>
-#include <glm/glm.hpp>
+#include <strelka/scene/glm_wrapper.hpp>
 
 namespace oka
 {
@@ -29,9 +30,9 @@ inline glm::float3 unpackNormal(uint32_t val)
 {
     constexpr float scale = 1.0f / 256.0f;
     glm::float3 normal;
-    normal.z = ((val & 0x3ff00000) >> 20) * scale - 1.0f;
-    normal.y = ((val & 0x000ffc00) >> 10) * scale - 1.0f;
-    normal.x = (val & 0x000003ff) * scale - 1.0f;
+    normal.z = static_cast<float>((val & 0x3ff00000u) >> 20) * scale - 1.0f;
+    normal.y = static_cast<float>((val & 0x000ffc00u) >> 10) * scale - 1.0f;
+    normal.x = static_cast<float>(val & 0x000003ffu) * scale - 1.0f;
     return normal;
 }
 
@@ -58,7 +59,7 @@ inline uint32_t packColor(const glm::float4& c)
 {
     auto q = [](float v) -> uint32_t {
         const float x = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-        return (uint32_t)(x * 255.0f + 0.5f);
+        return static_cast<uint32_t>(std::lround(x * 255.0f));
     };
     return q(c.x) | (q(c.y) << 8) | (q(c.z) << 16) | (q(c.w) << 24);
 }
@@ -66,25 +67,25 @@ inline uint32_t packColor(const glm::float4& c)
 inline glm::float4 unpackColor(uint32_t val)
 {
     constexpr float s = 1.0f / 255.0f;
-    return glm::float4((val & 0xffu) * s, ((val >> 8) & 0xffu) * s, ((val >> 16) & 0xffu) * s,
-                       ((val >> 24) & 0xffu) * s);
+    return glm::float4(static_cast<float>(val & 0xffu) * s, static_cast<float>((val >> 8) & 0xffu) * s,
+                       static_cast<float>((val >> 16) & 0xffu) * s, static_cast<float>((val >> 24) & 0xffu) * s);
 }
 
 // Pack UV to uint32_t. Valid range: [-10, 10]
 // Format: 16 bits per component (x low, y high)
 inline uint32_t packUV(const glm::float2& uv)
 {
-    int32_t packed = (uint32_t)((uv.x + 10.0f) / 20.0f * 16383.99999f);
-    packed += (uint32_t)((uv.y + 10.0f) / 20.0f * 16383.99999f) << 16;
-    return packed;
+    const uint32_t x = static_cast<uint32_t>((uv.x + 10.0f) / 20.0f * 16383.99999f);
+    const uint32_t y = static_cast<uint32_t>((uv.y + 10.0f) / 20.0f * 16383.99999f);
+    return (y << 16) | x;
 }
 
 // Unpack UV from uint32_t.
 inline glm::float2 unpackUV(uint32_t val)
 {
     glm::float2 uv;
-    uv.y = ((val & 0xffff0000) >> 16) / 16383.99999f * 20.0f - 10.0f;
-    uv.x = (val & 0x0000ffff) / 16383.99999f * 20.0f - 10.0f;
+    uv.y = static_cast<float>((val & 0xffff0000u) >> 16) / 16383.99999f * 20.0f - 10.0f;
+    uv.x = static_cast<float>(val & 0x0000ffffu) / 16383.99999f * 20.0f - 10.0f;
     return uv;
 }
 

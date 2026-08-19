@@ -5,7 +5,6 @@
 #include <strelka/scene/light_desc.h>
 
 #include <glm/gtc/quaternion.hpp>
-#include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/norm.hpp>
 
 #include <strelka/scene/transform.h>
@@ -58,7 +57,9 @@ uint32_t Scene::createMesh(const std::vector<Vertex>& vb, const std::vector<uint
     return meshId;
 }
 
-uint32_t Scene::createSkeletalMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib, const std::vector<oka::Scene::vertexSkinData>& sb)
+uint32_t Scene::createSkeletalMesh(const std::vector<Vertex>& vb,
+                                   const std::vector<uint32_t>& ib,
+                                   const std::vector<oka::Scene::vertexSkinData>& sb)
 {
     const std::scoped_lock lock(mMeshMutex);
 
@@ -157,25 +158,21 @@ std::string Scene::getSceneDir()
     return p.parent_path().string();
 }
 
-glm::quat Scene::makeQuatFromFloat4(const glm::float4 &value)
+glm::quat Scene::makeQuatFromFloat4(const glm::float4& value)
 {
-    const float floatRotation[4] = {
-                value[3],
-                value[0],
-                value[1],
-                value[2],
-            };
-    return glm::make_quat(floatRotation);
+    return quatFromGltf(value[0], value[1], value[2], value[3]);
 }
 
-glm::float4 Scene::makeFloat4FromQuat(const glm::quat &q)
+glm::float4 Scene::makeFloat4FromQuat(const glm::quat& q)
 {
     return glm::float4(q.x, q.y, q.z, q.w);
 }
 
 // packNormal() provided by <strelka/scene/vertex_packing.h>
 
-glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationChannel::PathType targetProperty, const float time)
+glm::float4 Scene::interpolate(const AnimationSampler& sampler,
+                               const AnimationChannel::PathType targetProperty,
+                               const float time)
 {
     const bool isCubic = (sampler.interpolation == AnimationSampler::InterpolationType::CUBICSPLINE);
     // For CUBICSPLINE, outputsVec4 stores triplets: [inTangent, value, outTangent] per keyframe.
@@ -184,7 +181,8 @@ glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationC
     const int valueOffset = isCubic ? 1 : 0;
 
     const int n = (int)sampler.inputs.size();
-    if (n == 0) return glm::float4(0.0f);
+    if (n == 0)
+        return glm::float4(0.0f);
 
     // Clamp to range
     if (time <= sampler.inputs[0])
@@ -216,8 +214,7 @@ glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationC
         result = sampler.outputsVec4[prevIdx * stride + valueOffset];
         break;
 
-    case AnimationSampler::InterpolationType::CUBICSPLINE:
-    {
+    case AnimationSampler::InterpolationType::CUBICSPLINE: {
         // glTF cubic spline: Hermite interpolation
         // outputsVec4 layout per keyframe: [inTangent, value, outTangent]
         const float deltaTime = nextTime - previousTime;
@@ -230,10 +227,8 @@ glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationC
         const glm::float4 p1 = sampler.outputsVec4[nextIdx * 3 + 1]; // value at next
         const glm::float4 m1 = sampler.outputsVec4[nextIdx * 3 + 0] * deltaTime; // in-tangent at next
 
-        result = (2.0f * t3 - 3.0f * t2 + 1.0f) * p0
-               + (t3 - 2.0f * t2 + t) * m0
-               + (-2.0f * t3 + 3.0f * t2) * p1
-               + (t3 - t2) * m1;
+        result = (2.0f * t3 - 3.0f * t2 + 1.0f) * p0 + (t3 - 2.0f * t2 + t) * m0 + (-2.0f * t3 + 3.0f * t2) * p1 +
+                 (t3 - t2) * m1;
 
         if (targetProperty == AnimationChannel::PathType::ROTATION)
             result = makeFloat4FromQuat(glm::normalize(makeQuatFromFloat4(result)));
@@ -246,9 +241,10 @@ glm::float4 Scene::interpolate(const AnimationSampler &sampler, const AnimationC
         const glm::float4 prevVal = sampler.outputsVec4[prevIdx];
         const glm::float4 nextVal = sampler.outputsVec4[nextIdx];
         if (targetProperty != AnimationChannel::PathType::ROTATION)
-            result = glm::lerp(prevVal, nextVal, interpolationValue);
+            result = glm::mix(prevVal, nextVal, interpolationValue);
         else
-            result = makeFloat4FromQuat(glm::slerp(makeQuatFromFloat4(prevVal), makeQuatFromFloat4(nextVal), interpolationValue));
+            result = makeFloat4FromQuat(
+                glm::slerp(makeQuatFromFloat4(prevVal), makeQuatFromFloat4(nextVal), interpolationValue));
         break;
     }
     }
@@ -302,8 +298,7 @@ void Scene::refreshGlobalTransforms()
     {
         const glm::mat4 local = calculateNodeLocalTransform(nodeId);
         const int parent = mNodes[nodeId].parent;
-        mGlobalTransforms[nodeId] =
-            (parent == -1) ? local : mGlobalTransforms[parent] * local;
+        mGlobalTransforms[nodeId] = (parent == -1) ? local : mGlobalTransforms[parent] * local;
     }
 }
 
@@ -426,14 +421,15 @@ bool Scene::applyAnimation(const uint32_t animId)
 
 void Scene::applySkinning()
 {
-    for (auto& node: mNodes)
+    for (auto& node : mNodes)
     {
         if (node.skin != -1 && node.type == Node::NodeType::mesh)
         {
             const size_t jointCount = mSkines[node.skin].joints.size();
             std::vector<glm::mat4> jointMat;
             computeJointMatrices(&jointMat, jointCount, node.skin);
-            for (const auto instId: node.instanceIds) {
+            for (const auto instId : node.instanceIds)
+            {
                 const Mesh& mesh = mMeshes[mInstances[instId].mMeshId];
                 for (uint32_t iv = 0; iv < mesh.mVertexCount; ++iv)
                 {
@@ -452,9 +448,7 @@ void Scene::applySkinning()
     }
 }
 
-void Scene::computeJointMatrices(std::vector<glm::mat4>* jointMatrices,
-                                 const size_t jointCount,
-                                 const uint32_t skinId)
+void Scene::computeJointMatrices(std::vector<glm::mat4>* jointMatrices, const size_t jointCount, const uint32_t skinId)
 {
     ensureGlobalTransforms();
 
@@ -479,10 +473,12 @@ glm::mat4 Scene::calculateNodeLocalTransform(const uint32_t nodeId)
 glm::mat4 Scene::calculateNodeGlobalTransform(const uint32_t nodeId)
 {
     const int parentId = mNodes[nodeId].parent;
-    if (parentId == -1) {
+    if (parentId == -1)
+    {
         return calculateNodeLocalTransform(nodeId);
     }
-    else {
+    else
+    {
         return calculateNodeGlobalTransform(parentId) * calculateNodeLocalTransform(nodeId);
     }
 }
@@ -590,8 +586,7 @@ uint32_t Scene::createSphereLightMesh()
 
         for (int j = 0; j <= segments; ++j)
         {
-            const float phi = static_cast<float>(j) * 2.0f * static_cast<float>(M_PI) /
-                              static_cast<float>(segments);
+            const float phi = static_cast<float>(j) * 2.0f * static_cast<float>(M_PI) / static_cast<float>(segments);
             const float sinPhi = sin(phi);
             const float cosPhi = cos(phi);
 
@@ -696,8 +691,7 @@ void Scene::updateAnimation(const float time)
         {
             if ((time >= sampler.inputs[i]) && (time <= sampler.inputs[i + 1]))
             {
-                const float u =
-                    std::max(0.0f, time - sampler.inputs[i]) / (sampler.inputs[i + 1] - sampler.inputs[i]);
+                const float u = std::max(0.0f, time - sampler.inputs[i]) / (sampler.inputs[i + 1] - sampler.inputs[i]);
                 if (u <= 1.0f)
                 {
                     switch (channel.path)
@@ -713,14 +707,8 @@ void Scene::updateAnimation(const float time)
                         break;
                     }
                     case AnimationChannel::PathType::ROTATION: {
-                        float floatRotation[4] = { (float)sampler.outputsVec4[i][3], (float)sampler.outputsVec4[i][0],
-                                                   (float)sampler.outputsVec4[i][1], (float)sampler.outputsVec4[i][2] };
-                        float floatRotation1[4] = { (float)sampler.outputsVec4[i + 1][3],
-                                                    (float)sampler.outputsVec4[i + 1][0],
-                                                    (float)sampler.outputsVec4[i + 1][1],
-                                                    (float)sampler.outputsVec4[i + 1][2] };
-                        const glm::quat q1 = glm::make_quat(floatRotation);
-                        const glm::quat q2 = glm::make_quat(floatRotation1);
+                        const glm::quat q1 = makeQuatFromFloat4(sampler.outputsVec4[i]);
+                        const glm::quat q2 = makeQuatFromFloat4(sampler.outputsVec4[i + 1]);
                         mNodes[nodeId].rotation = glm::normalize(glm::slerp(q1, q2, u));
                         break;
                     }
@@ -777,8 +765,8 @@ uint32_t Scene::createLight(const UniformLightDesc& desc)
     }
 
     const glm::float4x4 transform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
-    const uint32_t instId = createInstance(Instance::Type::eLight, currentLightMeshId,
-                                           std::numeric_limits<uint32_t>::max(), transform, lightId);
+    const uint32_t instId = createInstance(
+        Instance::Type::eLight, currentLightMeshId, std::numeric_limits<uint32_t>::max(), transform, lightId);
     assert(instId != std::numeric_limits<uint32_t>::max());
 
     mLightIdToInstanceId[lightId] = instId;
@@ -1359,8 +1347,8 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
             }
         }
     }
-    STRELKA_DEBUG("Pick: {} instances, {} boxes hit, {} traversed, {} triangles, {:.1f} ms ({})",
-                  mInstances.size(), candidates.size(), traversed, trianglesTested,
+    STRELKA_DEBUG("Pick: {} instances, {} boxes hit, {} traversed, {} triangles, {:.1f} ms ({})", mInstances.size(),
+                  candidates.size(), traversed, trianglesTested,
                   std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pickStart).count(),
                   best.hit ? "hit" : "miss");
     return best;

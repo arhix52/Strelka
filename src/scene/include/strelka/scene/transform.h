@@ -1,9 +1,8 @@
 #pragma once
 
-#include <glm/glm.hpp>
-#include <glm/gtc/quaternion.hpp>
+#include <strelka/scene/glm_wrapper.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtx/compatibility.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include <cmath>
 
@@ -22,10 +21,7 @@ namespace oka
 ///
 /// Shear is not represented: a glTF node cannot express it, and neither can a
 /// gizmo edit. A sheared matrix comes back as the closest rotation.
-inline void decomposeTrs(const glm::float4x4& matrix,
-                         glm::float3& translation,
-                         glm::quat& rotation,
-                         glm::float3& scale)
+inline void decomposeTrs(const glm::float4x4& matrix, glm::float3& translation, glm::quat& rotation, glm::float3& scale)
 {
     translation = glm::float3(matrix[3]);
 
@@ -47,8 +43,7 @@ inline void decomposeTrs(const glm::float4x4& matrix,
                                            glm::float3(0.0f, 0.0f, 1.0f) };
     for (int axis = 0; axis < 3; ++axis)
     {
-        basis[axis] =
-            (std::fabs(scale[axis]) > 0.0f) ? basis[axis] / scale[axis] : identityBasis[axis];
+        basis[axis] = (std::fabs(scale[axis]) > 0.0f) ? basis[axis] / scale[axis] : identityBasis[axis];
     }
 
     rotation = glm::quat_cast(glm::float3x3(basis[0], basis[1], basis[2]));
@@ -59,6 +54,14 @@ inline glm::float4x4 composeTrs(const glm::float3& translation, const glm::quat&
 {
     return glm::translate(glm::float4x4(1.0f), translation) * glm::float4x4(rotation) *
            glm::scale(glm::float4x4(1.0f), scale);
+}
+
+/// glTF stores rotation as [x, y, z, w]. GLM's value constructor is (w, x, y, z)
+/// regardless of how the components sit in memory, so this does not depend on
+/// GLM_FORCE_QUAT_DATA_WXYZ / XYZW.
+inline glm::quat quatFromGltf(float x, float y, float z, float w)
+{
+    return glm::quat(w, x, y, z);
 }
 
 } // namespace oka

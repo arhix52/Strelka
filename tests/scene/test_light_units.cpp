@@ -1,7 +1,6 @@
 #include <doctest/doctest.h>
 
-// glm_wrapper.hpp is what defines the glm::floatN aliases (via gtx/compatibility)
-// that light_desc.h uses in its signatures, so it has to come first.
+// glm_wrapper.hpp is what defines the glm::floatN aliases that light_desc.h uses in its signatures.
 #include <strelka/scene/glm_wrapper.hpp>
 #include <strelka/scene/light_desc.h>
 #include <light_types.h>

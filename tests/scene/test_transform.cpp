@@ -70,9 +70,9 @@ TEST_CASE("decomposeTrs handles a scale glm::decompose refuses")
 
 TEST_CASE("decomposeTrs agrees with glm on a well conditioned matrix")
 {
-    const glm::float4x4 matrix = composeTrs(glm::float3(1.0f, 2.0f, 3.0f),
-                                            glm::angleAxis(glm::radians(50.0f), glm::normalize(glm::float3(0, 1, 1))),
-                                            glm::float3(1.0f));
+    const glm::float4x4 matrix =
+        composeTrs(glm::float3(1.0f, 2.0f, 3.0f),
+                   glm::angleAxis(glm::radians(50.0f), glm::normalize(glm::float3(0, 1, 1))), glm::float3(1.0f));
 
     glm::float3 translation, scale;
     glm::quat rotation;
@@ -92,8 +92,8 @@ TEST_CASE("decomposeTrs agrees with glm on a well conditioned matrix")
 
 TEST_CASE("decomposeTrs reports a mirrored basis as negative scale")
 {
-    const glm::float4x4 matrix = composeTrs(glm::float3(0.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
-                                            glm::float3(-1.0f, 1.0f, 1.0f));
+    const glm::float4x4 matrix =
+        composeTrs(glm::float3(0.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::float3(-1.0f, 1.0f, 1.0f));
 
     glm::float3 translation, scale;
     glm::quat rotation;
@@ -108,8 +108,8 @@ TEST_CASE("decomposeTrs reports a mirrored basis as negative scale")
 
 TEST_CASE("decomposeTrs stays finite for a collapsed axis")
 {
-    glm::float4x4 matrix = composeTrs(glm::float3(1.0f, 1.0f, 1.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
-                                      glm::float3(1.0f, 0.0f, 1.0f));
+    const glm::float4x4 matrix =
+        composeTrs(glm::float3(1.0f, 1.0f, 1.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::float3(1.0f, 0.0f, 1.0f));
 
     glm::float3 translation, scale;
     glm::quat rotation;
@@ -121,4 +121,21 @@ TEST_CASE("decomposeTrs stays finite for a collapsed axis")
     CHECK(std::isfinite(rotation.y));
     CHECK(std::isfinite(rotation.z));
     CHECK(translation.x == doctest::Approx(1.0f));
+}
+
+// glTF stores [x,y,z,w]; GLM's constructor is (w,x,y,z). The conversion must
+// not memcpy through glm::make_quat, whose layout changed between 0.9.9 and 1.0.
+TEST_CASE("quatFromGltf maps glTF xyzw onto GLM's constructor")
+{
+    const glm::quat identity = quatFromGltf(0.0f, 0.0f, 0.0f, 1.0f);
+    CHECK(identity.w == doctest::Approx(1.0f));
+    CHECK(identity.x == doctest::Approx(0.0f));
+    CHECK(identity.y == doctest::Approx(0.0f));
+    CHECK(identity.z == doctest::Approx(0.0f));
+
+    const float s = 0.70710678f;
+    const glm::quat yaw = glm::normalize(quatFromGltf(0.0f, s, 0.0f, s));
+    const glm::float3 forward = glm::normalize(yaw * glm::float3(0.0f, 0.0f, -1.0f));
+    CHECK(forward.x == doctest::Approx(-1.0f).epsilon(1e-4));
+    CHECK(forward.z == doctest::Approx(0.0f).epsilon(1e-4));
 }

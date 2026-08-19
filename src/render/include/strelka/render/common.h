@@ -1,8 +1,8 @@
 #pragma once
 
-#include <glm/glm.hpp>
-#include <glm/gtx/compatibility.hpp>
+#include <strelka/scene/glm_wrapper.hpp>
 
+#include <cstdint>
 #include <settings.h>
 
 namespace oka

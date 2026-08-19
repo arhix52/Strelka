@@ -8,8 +8,7 @@
 
 #include <doctest/doctest.h>
 
-// glm_wrapper.hpp is what defines the glm::floatN aliases (via gtx/compatibility)
-// that vertex_packing.h uses; it relies on a transitive include, so pull it first.
+// glm_wrapper.hpp is what defines the glm::floatN aliases that vertex_packing.h uses.
 #include <strelka/scene/glm_wrapper.hpp>
 #include <strelka/scene/vertex_packing.h>
 

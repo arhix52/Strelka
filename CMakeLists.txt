@@ -17,6 +17,30 @@ endif()
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
 include(${CMAKE_SOURCE_DIR}/cmake/CompilerWarnings.cmake)
 
+# GLM 1.0.3's Conan recipe exports glm::glm only for the compiled library.
+# Header-only builds (required: see conanfile.py glm/*:header_only) expose
+# glm::glm-header-only. Alias so the rest of the tree can keep linking glm::glm.
+#
+# The FORCE macros must be compile definitions, not only #defines in
+# glm_wrapper.hpp: GLM 1.0 turns a missing GLM_ENABLE_EXPERIMENTAL into a hard
+# error on every gtx/ header, and several TUs include those after a raw
+# <glm/glm.hpp>. A pre-1.0 include order that only warned now fails to compile.
+find_package(glm REQUIRED)
+if(NOT TARGET glm::glm)
+    if(TARGET glm::glm-header-only)
+        add_library(glm::glm ALIAS glm::glm-header-only)
+    else()
+        message(FATAL_ERROR "find_package(glm) succeeded but neither glm::glm nor glm::glm-header-only exists")
+    endif()
+endif()
+add_compile_definitions(
+    GLM_ENABLE_EXPERIMENTAL
+    GLM_FORCE_SILENT_WARNINGS
+    GLM_FORCE_CTOR_INIT
+    GLM_FORCE_RADIANS
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+)
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 

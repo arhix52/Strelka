@@ -1,5 +1,6 @@
 #include <strelka/scene/camera.h>
 
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/quaternion.hpp>
 
 #include <strelka/scene/glm_wrapper.hpp>
@@ -41,7 +42,8 @@ glm::float3 Camera::getRight() const
 
 bool Camera::moving() const
 {
-    return keys.left || keys.right || keys.up || keys.down || keys.forward || keys.back || mouseButtons.right || mouseButtons.left || mouseButtons.middle;
+    return keys.left || keys.right || keys.up || keys.down || keys.forward || keys.back || mouseButtons.right ||
+           mouseButtons.left || mouseButtons.middle;
 }
 
 float Camera::getNearClip() const
@@ -60,6 +62,8 @@ void Camera::setFov(float newFov)
 }
 
 // original implementation: https://vincent-p.github.io/notes/20201216234910-the_projection_matrix_in_vulkan/
+namespace
+{
 glm::float4x4 perspective(float fov, float aspect_ratio, float n, float f, glm::float4x4* inverse)
 {
     const float focal_length = 1.0f / std::tan(glm::radians(fov) / 2.0f);
@@ -69,14 +73,14 @@ glm::float4x4 perspective(float fov, float aspect_ratio, float n, float f, glm::
     const float A = n / (f - n);
     const float B = f * A;
 
-    //glm::float4x4 projection = glm::perspective(fov, aspect_ratio, n, f);
-    //if (inverse)
+    // glm::float4x4 projection = glm::perspective(fov, aspect_ratio, n, f);
+    // if (inverse)
     //{
-    //    *inverse = glm::inverse(projection);
-    //}
+    //     *inverse = glm::inverse(projection);
+    // }
 
 
-    glm::float4x4 projection({
+    const glm::float4x4 projection({
         x,
         0.0f,
         0.0f,
@@ -100,7 +104,8 @@ glm::float4x4 perspective(float fov, float aspect_ratio, float n, float f, glm::
 
     if (inverse)
     {
-        *inverse = glm::transpose(glm::float4x4({ // glm inverse
+        *inverse = glm::transpose(glm::float4x4({
+            // glm inverse
             1 / x,
             0.0f,
             0.0f,
@@ -122,6 +127,7 @@ glm::float4x4 perspective(float fov, float aspect_ratio, float n, float f, glm::
 
     return glm::transpose(projection);
 }
+} // namespace
 
 void Camera::setPerspective(float _fov, float _aspect, float _znear, float _zfar)
 {
@@ -137,6 +143,8 @@ void Camera::setPerspective(float _fov, float _aspect, float _znear, float _zfar
 // plane maps to 1 and the far plane to 0. Unlike the perspective case the fourth
 // row is (0,0,0,1) -- there is no divide -- so clip space and view space differ
 // only by a scale, which is what makes the inverse trivial.
+namespace
+{
 glm::float4x4 orthographic(float halfWidth, float halfHeight, float n, float f, glm::float4x4* inverse)
 {
     const float x = 1.0f / halfWidth;
@@ -144,25 +152,50 @@ glm::float4x4 orthographic(float halfWidth, float halfHeight, float n, float f, 
     const float A = 1.0f / (f - n);
     const float B = f * A;
 
-    glm::float4x4 projection({
-        x,    0.0f, 0.0f, 0.0f,
-        0.0f, y,    0.0f, 0.0f,
-        0.0f, 0.0f, A,    B,
-        0.0f, 0.0f, 0.0f, 1.0f,
+    const glm::float4x4 projection({
+        x,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        y,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        A,
+        B,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
     });
 
     if (inverse)
     {
         *inverse = glm::transpose(glm::float4x4({
-            halfWidth, 0.0f,       0.0f,     0.0f,
-            0.0f,      halfHeight, 0.0f,     0.0f,
-            0.0f,      0.0f,       1.0f / A, -B / A,
-            0.0f,      0.0f,       0.0f,     1.0f,
+            halfWidth,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            halfHeight,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            1.0f / A,
+            -B / A,
+            0.0f,
+            0.0f,
+            0.0f,
+            1.0f,
         }));
     }
 
     return glm::transpose(projection);
 }
+} // namespace
 
 void Camera::setOrthographic(float _xmag, float _ymag, float _znear, float _zfar)
 {
@@ -270,8 +303,7 @@ void Camera::updateAspectRatio(float _aspect)
         matrices.perspective = orthographic(halfWidth, halfHeight, znear, zfar, &matrices.invPerspective);
         return;
     }
-    matrices.perspective =
-        perspective(fovForAspect(_aspect), _aspect, zfar, znear, &matrices.invPerspective);
+    matrices.perspective = perspective(fovForAspect(_aspect), _aspect, zfar, znear, &matrices.invPerspective);
 }
 
 // The vertical angle to use when rendering at `aspect`, given what the camera
@@ -357,7 +389,7 @@ void Camera::update(float deltaTime)
     {
         if (moving())
         {
-            float moveSpeed = deltaTime * movementSpeed;
+            const float moveSpeed = deltaTime * movementSpeed;
             if (keys.up)
                 position += getWorldUp() * moveSpeed;
             if (keys.down)

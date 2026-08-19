@@ -13,16 +13,14 @@
 #define TINYGLTF_IMPLEMENTATION
 #include "tiny_gltf.h"
 
-#include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <unordered_map>
-#include <glm/gtc/quaternion.hpp>
-#include <glm/gtc/type_ptr.hpp>
-#include <glm/gtx/compatibility.hpp>
 
 #include <strelka/scene/transform.h>
 
@@ -67,8 +65,7 @@ uint32_t& lodSkipCounter()
 // packNormal(), packUV(), unpackNormal(), unpackUV() provided by <strelka/scene/vertex_packing.h>
 // packTangent uses same format as packNormal (tangents are unit vectors in [-1,1])
 
-void computeTangent(std::vector<Scene::Vertex>& vertices,
-                                 const std::vector<uint32_t>& indices)
+void computeTangent(std::vector<Scene::Vertex>& vertices, const std::vector<uint32_t>& indices)
 {
     const size_t lastIndex = indices.size();
     Scene::Vertex& v0 = vertices[indices[lastIndex - 3]];
@@ -92,7 +89,7 @@ void computeTangent(std::vector<Scene::Vertex>& vertices,
         tangent = (deltaPos1 * deltaUV2.y - deltaPos2 * deltaUV1.y) * r;
     }
 
-    const glm::uint32_t packedTangent = packNormal(tangent);
+    const uint32_t packedTangent = packNormal(tangent);
 
     v0.tangent = packedTangent;
     v1.tangent = packedTangent;
@@ -106,7 +103,14 @@ using MeshCache = std::unordered_map<uint64_t, uint32_t>;
 // glTF exposes accessor payloads as byte arrays. Component metadata and stride
 // validation above each view establish the typed interpretation used here.
 // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
-void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uint32_t parentNodeId, const tinygltf::Primitive& primitive, const glm::float4x4& transform, const float globalScale, MeshCache& meshCache, uint64_t primitiveKey)
+void processPrimitive(const tinygltf::Model& model,
+                      oka::Scene& scene,
+                      const uint32_t parentNodeId,
+                      const tinygltf::Primitive& primitive,
+                      const glm::float4x4& transform,
+                      const float globalScale,
+                      MeshCache& meshCache,
+                      uint64_t primitiveKey)
 {
     using namespace std;
     assert(primitive.attributes.find("POSITION") != primitive.attributes.end());
@@ -114,7 +118,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
     // A glTF mesh referenced by more than one node is one mesh, not one per
     // node. The pine forest scatters 34 539 placements over 24 objects; built
     // per node that is 34 539 copies of vertices that are bit-identical, and
-    //34 539 acceleration structures over them -- the instancing the scene is
+    // 34 539 acceleration structures over them -- the instancing the scene is
     // made of buys nothing at all.
     //
     // Safe because the vertices here are in object space: only globalScale is
@@ -127,8 +131,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
             int cachedMatId = primitive.material;
             if (cachedMatId == -1)
                 cachedMatId = 0;
-            const uint32_t instId =
-                scene.createInstance(Instance::Type::eMesh, cached->second, cachedMatId, transform);
+            const uint32_t instId = scene.createInstance(Instance::Type::eMesh, cached->second, cachedMatId, transform);
             scene.mNodes[parentNodeId].instanceIds.push_back(instId);
             return;
         }
@@ -152,7 +155,8 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
     {
         const tinygltf::Accessor& normalAccessor = model.accessors[primitive.attributes.find("NORMAL")->second];
         const tinygltf::BufferView& normView = model.bufferViews[normalAccessor.bufferView];
-        normalsData = reinterpret_cast<const float*>(&(model.buffers[normView.buffer].data[normalAccessor.byteOffset + normView.byteOffset]));
+        normalsData = reinterpret_cast<const float*>(
+            &(model.buffers[normView.buffer].data[normalAccessor.byteOffset + normView.byteOffset]));
         assert(normalsData != nullptr);
         normalStride = normalAccessor.ByteStride(normView) / static_cast<int>(sizeof(float));
         assert(normalStride > 0);
@@ -165,7 +169,8 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
     {
         const tinygltf::Accessor& uvAccessor = model.accessors[primitive.attributes.find("TEXCOORD_0")->second];
         const tinygltf::BufferView& uvView = model.bufferViews[uvAccessor.bufferView];
-        texCoord0Data = reinterpret_cast<const float*>(&(model.buffers[uvView.buffer].data[uvAccessor.byteOffset + uvView.byteOffset]));
+        texCoord0Data = reinterpret_cast<const float*>(
+            &(model.buffers[uvView.buffer].data[uvAccessor.byteOffset + uvView.byteOffset]));
         texCoord0Stride = uvAccessor.ByteStride(uvView) / static_cast<int>(sizeof(float));
     }
 
@@ -187,7 +192,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
     // Vertex colours. glTF allows VEC3 or VEC4, as float or as normalised
     // unsigned byte/short, and the values are linear multipliers on base colour.
     const void* colorData = nullptr;
-    int colorStride = 0;          // in components, not bytes
+    int colorStride = 0; // in components, not bytes
     int colorComponents = 4;
     int colorComponentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
     if (primitive.attributes.find("COLOR_0") != primitive.attributes.end())
@@ -197,9 +202,9 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
         colorData = reinterpret_cast<const void*>(&model.buffers[cv.buffer].data[ca.byteOffset + cv.byteOffset]);
         colorComponents = ca.type == TINYGLTF_TYPE_VEC3 ? 3 : 4;
         colorComponentType = ca.componentType;
-        const int elemSize = colorComponentType == TINYGLTF_COMPONENT_TYPE_FLOAT          ? 4
-                             : colorComponentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT ? 2
-                                                                                            : 1;
+        const int elemSize = colorComponentType == TINYGLTF_COMPONENT_TYPE_FLOAT          ? 4 :
+                             colorComponentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT ? 2 :
+                                                                                            1;
         colorStride = ca.ByteStride(cv) / elemSize;
         assert(colorStride > 0);
     }
@@ -217,7 +222,8 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
     int weightsStride = 0;
     bool hasJoints = false;
     std::vector<oka::Scene::vertexSkinData> sb;
-    if ( (primitive.attributes.find("JOINTS_0") != primitive.attributes.end()) && (primitive.attributes.find("WEIGHTS_0") != primitive.attributes.end()) )
+    if ((primitive.attributes.find("JOINTS_0") != primitive.attributes.end()) &&
+        (primitive.attributes.find("WEIGHTS_0") != primitive.attributes.end()))
     {
         hasJoints = true;
         const tinygltf::Accessor& jointsAccessor = model.accessors[primitive.attributes.find("JOINTS_0")->second];
@@ -225,33 +231,37 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
         switch (jointsAccessor.componentType)
         {
         case TINYGLTF_PARAMETER_TYPE_UNSIGNED_INT: {
-            jointsData = reinterpret_cast<const void*>(&model.buffers[jointsView.buffer].data[jointsAccessor.byteOffset + jointsView.byteOffset]);
+            jointsData = reinterpret_cast<const void*>(
+                &model.buffers[jointsView.buffer].data[jointsAccessor.byteOffset + jointsView.byteOffset]);
             jointsStride = jointsAccessor.ByteStride(jointsView) / static_cast<int>(sizeof(uint32_t));
             assert(jointsData != nullptr);
             break;
         }
         case TINYGLTF_PARAMETER_TYPE_UNSIGNED_SHORT: {
-            jointsData = reinterpret_cast<const void*>(&model.buffers[jointsView.buffer].data[jointsAccessor.byteOffset + jointsView.byteOffset]);
+            jointsData = reinterpret_cast<const void*>(
+                &model.buffers[jointsView.buffer].data[jointsAccessor.byteOffset + jointsView.byteOffset]);
             jointsStride = jointsAccessor.ByteStride(jointsView) / static_cast<int>(sizeof(uint16_t));
             assert(jointsData != nullptr);
             break;
         }
         case TINYGLTF_PARAMETER_TYPE_UNSIGNED_BYTE: {
-            jointsData = reinterpret_cast<const void*>(&model.buffers[jointsView.buffer].data[jointsAccessor.byteOffset + jointsView.byteOffset]);
+            jointsData = reinterpret_cast<const void*>(
+                &model.buffers[jointsView.buffer].data[jointsAccessor.byteOffset + jointsView.byteOffset]);
             jointsStride = jointsAccessor.ByteStride(jointsView) / static_cast<int>(sizeof(uint8_t));
             assert(jointsData != nullptr);
             break;
         }
         default:
-            STRELKA_WARNING("glTF joint component type {} is not supported; skipping primitive",
-                            jointsAccessor.componentType);
+            STRELKA_WARNING(
+                "glTF joint component type {} is not supported; skipping primitive", jointsAccessor.componentType);
             return;
         }
         assert(jointsStride > 0);
 
         const tinygltf::Accessor& weightsAccessor = model.accessors[primitive.attributes.find("WEIGHTS_0")->second];
         const tinygltf::BufferView& weightsView = model.bufferViews[weightsAccessor.bufferView];
-        weightsData = reinterpret_cast<const float*>(&model.buffers[weightsView.buffer].data[weightsAccessor.byteOffset + weightsView.byteOffset]);
+        weightsData = reinterpret_cast<const float*>(
+            &model.buffers[weightsView.buffer].data[weightsAccessor.byteOffset + weightsView.byteOffset]);
         assert(weightsData != nullptr);
         weightsStride = weightsAccessor.ByteStride(weightsView) / static_cast<int>(sizeof(float));
         assert(weightsStride > 0);
@@ -313,40 +323,34 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
             const tinygltf::Accessor& jointsAccessor = model.accessors[primitive.attributes.find("JOINTS_0")->second];
             switch (jointsAccessor.componentType)
             {
-                case TINYGLTF_PARAMETER_TYPE_UNSIGNED_INT: {
-                    const uint32_t* jointsDataCasted = static_cast<const uint32_t*>(jointsData);
-                    skinData.joints = glm::ivec4(
-                        static_cast<int>(jointsDataCasted[v * jointsStride + 0]),
-                        static_cast<int>(jointsDataCasted[v * jointsStride + 1]),
-                        static_cast<int>(jointsDataCasted[v * jointsStride + 2]),
-                        static_cast<int>(jointsDataCasted[v * jointsStride + 3])
-                    );
-                    break;
-                }
-                case TINYGLTF_PARAMETER_TYPE_UNSIGNED_SHORT: {
-                    const uint16_t* jointsDataCasted = static_cast<const uint16_t*>(jointsData);
-                    skinData.joints = glm::ivec4(
-                        static_cast<int>(jointsDataCasted[v * jointsStride + 0]),
-                        static_cast<int>(jointsDataCasted[v * jointsStride + 1]),
-                        static_cast<int>(jointsDataCasted[v * jointsStride + 2]),
-                        static_cast<int>(jointsDataCasted[v * jointsStride + 3])
-                    );
-                    break;
-                }
-                case TINYGLTF_PARAMETER_TYPE_UNSIGNED_BYTE: {
-                    const uint8_t* jointsDataCasted = static_cast<const uint8_t*>(jointsData);
-                    skinData.joints = glm::ivec4(
-                        static_cast<int>(jointsDataCasted[v * jointsStride + 0]),
-                        static_cast<int>(jointsDataCasted[v * jointsStride + 1]),
-                        static_cast<int>(jointsDataCasted[v * jointsStride + 2]),
-                        static_cast<int>(jointsDataCasted[v * jointsStride + 3])
-                    );
-                    break;
-                }
-                default:
-                    STRELKA_WARNING("glTF joint component type {} is not supported; skipping primitive",
-                                    jointsAccessor.componentType);
-                    return;
+            case TINYGLTF_PARAMETER_TYPE_UNSIGNED_INT: {
+                const uint32_t* jointsDataCasted = static_cast<const uint32_t*>(jointsData);
+                skinData.joints = glm::ivec4(static_cast<int>(jointsDataCasted[v * jointsStride + 0]),
+                                             static_cast<int>(jointsDataCasted[v * jointsStride + 1]),
+                                             static_cast<int>(jointsDataCasted[v * jointsStride + 2]),
+                                             static_cast<int>(jointsDataCasted[v * jointsStride + 3]));
+                break;
+            }
+            case TINYGLTF_PARAMETER_TYPE_UNSIGNED_SHORT: {
+                const uint16_t* jointsDataCasted = static_cast<const uint16_t*>(jointsData);
+                skinData.joints = glm::ivec4(static_cast<int>(jointsDataCasted[v * jointsStride + 0]),
+                                             static_cast<int>(jointsDataCasted[v * jointsStride + 1]),
+                                             static_cast<int>(jointsDataCasted[v * jointsStride + 2]),
+                                             static_cast<int>(jointsDataCasted[v * jointsStride + 3]));
+                break;
+            }
+            case TINYGLTF_PARAMETER_TYPE_UNSIGNED_BYTE: {
+                const uint8_t* jointsDataCasted = static_cast<const uint8_t*>(jointsData);
+                skinData.joints = glm::ivec4(static_cast<int>(jointsDataCasted[v * jointsStride + 0]),
+                                             static_cast<int>(jointsDataCasted[v * jointsStride + 1]),
+                                             static_cast<int>(jointsDataCasted[v * jointsStride + 2]),
+                                             static_cast<int>(jointsDataCasted[v * jointsStride + 3]));
+                break;
+            }
+            default:
+                STRELKA_WARNING(
+                    "glTF joint component type {} is not supported; skipping primitive", jointsAccessor.componentType);
+                return;
             }
             skinData.weights = glm::make_vec4(&weightsData[v * weightsStride]);
             skinData.pos = vPos;
@@ -402,8 +406,7 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
             break;
         }
         default:
-            STRELKA_WARNING("glTF index component type {} is not supported; skipping primitive",
-                            accessor.componentType);
+            STRELKA_WARNING("glTF index component type {} is not supported; skipping primitive", accessor.componentType);
             return;
         }
     }
@@ -434,7 +437,14 @@ void processPrimitive(const tinygltf::Model& model, oka::Scene& scene, const uin
 }
 // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
 
-void processMesh(const tinygltf::Model& model, oka::Scene& scene, const uint32_t parentNodeId, const tinygltf::Mesh& mesh, const glm::float4x4& transform, const float globalScale, MeshCache& meshCache, uint32_t meshIndex)
+void processMesh(const tinygltf::Model& model,
+                 oka::Scene& scene,
+                 const uint32_t parentNodeId,
+                 const tinygltf::Mesh& mesh,
+                 const glm::float4x4& transform,
+                 const float globalScale,
+                 MeshCache& meshCache,
+                 uint32_t meshIndex)
 {
     if (gltfDebugLoggingEnabled())
     {
@@ -463,13 +473,8 @@ glm::float4x4 getTransform(const tinygltf::Node& node, const float globalScale)
         glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
         if (!node.rotation.empty())
         {
-            const float floatRotation[4] = {
-                (float)node.rotation[3],
-                (float)node.rotation[0],
-                (float)node.rotation[1],
-                (float)node.rotation[2],
-            };
-            rotation = glm::make_quat(floatRotation);
+            rotation = quatFromGltf(
+                (float)node.rotation[0], (float)node.rotation[1], (float)node.rotation[2], (float)node.rotation[3]);
         }
 
         glm::float3 translation{ 0.0f };
@@ -497,16 +502,14 @@ glm::float4x4 getTransform(const tinygltf::Node& node, const float globalScale)
 // Per-instance transforms from EXT_mesh_gpu_instancing, empty when the node has
 // none. Floats only: the extension permits normalised integer rotations, which
 // nothing here writes, and silently misreading them would be worse than saying so.
-void readGpuInstancing(const tinygltf::Model& model, const tinygltf::Node& node,
-                       std::vector<glm::float4x4>& out)
+void readGpuInstancing(const tinygltf::Model& model, const tinygltf::Node& node, std::vector<glm::float4x4>& out)
 {
     const auto ext = node.extensions.find("EXT_mesh_gpu_instancing");
     if (ext == node.extensions.end() || !ext->second.Has("attributes"))
         return;
     const tinygltf::Value& attributes = ext->second.Get("attributes");
 
-    auto readAttribute = [&](const char* name, int components,
-                             std::vector<float>& values) -> size_t {
+    auto readAttribute = [&](const char* name, int components, std::vector<float>& values) -> size_t {
         if (!attributes.Has(name))
             return 0;
         const int index = attributes.Get(name).GetNumberAsInt();
@@ -519,10 +522,8 @@ void readGpuInstancing(const tinygltf::Model& model, const tinygltf::Node& node,
             return 0;
         }
         const tinygltf::BufferView& view = model.bufferViews[accessor.bufferView];
-        const unsigned char* base =
-            model.buffers[view.buffer].data.data() + view.byteOffset + accessor.byteOffset;
-        const size_t stride = accessor.ByteStride(view) ? accessor.ByteStride(view)
-                                                        : sizeof(float) * components;
+        const unsigned char* base = model.buffers[view.buffer].data.data() + view.byteOffset + accessor.byteOffset;
+        const size_t stride = accessor.ByteStride(view) ? accessor.ByteStride(view) : sizeof(float) * components;
         values.resize(accessor.count * components);
         for (size_t i = 0; i < accessor.count; ++i)
         {
@@ -541,26 +542,27 @@ void readGpuInstancing(const tinygltf::Model& model, const tinygltf::Node& node,
     out.resize(count);
     for (size_t i = 0; i < count; ++i)
     {
-        const glm::float3 t = translation.empty()
-                                  ? glm::float3(0.0f)
-                                  : glm::float3(translation[i * 3], translation[i * 3 + 1],
-                                                translation[i * 3 + 2]);
+        const glm::float3 t = translation.empty() ?
+                                  glm::float3(0.0f) :
+                                  glm::float3(translation[i * 3], translation[i * 3 + 1], translation[i * 3 + 2]);
         // glTF stores a quaternion xyzw; glm::quat takes w first.
-        const glm::quat r = rotation.empty()
-                                ? glm::quat(1.0f, 0.0f, 0.0f, 0.0f)
-                                : glm::quat(rotation[i * 4 + 3], rotation[i * 4], rotation[i * 4 + 1],
-                                            rotation[i * 4 + 2]);
-        const glm::float3 s = scale.empty()
-                                  ? glm::float3(1.0f)
-                                  : glm::float3(scale[i * 3], scale[i * 3 + 1], scale[i * 3 + 2]);
-        out[i] = glm::translate(glm::float4x4(1.0f), t) * glm::mat4_cast(r) *
-                 glm::scale(glm::float4x4(1.0f), s);
+        const glm::quat r =
+            rotation.empty() ? glm::quat(1.0f, 0.0f, 0.0f, 0.0f) :
+                               glm::quat(rotation[i * 4 + 3], rotation[i * 4], rotation[i * 4 + 1], rotation[i * 4 + 2]);
+        const glm::float3 s =
+            scale.empty() ? glm::float3(1.0f) : glm::float3(scale[i * 3], scale[i * 3 + 1], scale[i * 3 + 2]);
+        out[i] = glm::translate(glm::float4x4(1.0f), t) * glm::mat4_cast(r) * glm::scale(glm::float4x4(1.0f), s);
     }
 }
 
-void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf::Node& node,
-                 const uint32_t currentNodeId, const glm::float4x4& baseTransform, const float globalScale,
-                 MeshCache& meshCache, const std::vector<int>& cameraIndexMap)
+void processNode(const tinygltf::Model& model,
+                 oka::Scene& scene,
+                 const tinygltf::Node& node,
+                 const uint32_t currentNodeId,
+                 const glm::float4x4& baseTransform,
+                 const float globalScale,
+                 MeshCache& meshCache,
+                 const std::vector<int>& cameraIndexMap)
 {
     if (gltfDebugLoggingEnabled())
     {
@@ -598,8 +600,8 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
         {
             for (const glm::float4x4& instance : instanceTransforms)
             {
-                processMesh(model, scene, currentNodeId, mesh, globalTransform * instance, globalScale,
-                            meshCache, (uint32_t)node.mesh);
+                processMesh(model, scene, currentNodeId, mesh, globalTransform * instance, globalScale, meshCache,
+                            (uint32_t)node.mesh);
             }
         }
         else
@@ -607,7 +609,7 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
             processMesh(model, scene, currentNodeId, mesh, globalTransform, globalScale, meshCache, (uint32_t)node.mesh);
         }
 
-        //skin binding
+        // skin binding
         if (node.skin != -1)
         {
             scene.mNodes[currentNodeId].skin = node.skin;
@@ -651,8 +653,8 @@ void processNode(const tinygltf::Model& model, oka::Scene& scene, const tinygltf
         if (scene.mNodes[currentNodeId].type == oka::Scene::Node::NodeType::unknown)
             scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::sceneGraph;
         scene.mNodes[childIdx].parent = static_cast<int>(currentNodeId);
-        processNode(model, scene, model.nodes[childIdx], childIdx, globalTransform, globalScale, meshCache,
-                    cameraIndexMap);
+        processNode(
+            model, scene, model.nodes[childIdx], childIdx, globalTransform, globalScale, meshCache, cameraIndexMap);
     }
 }
 
@@ -723,10 +725,7 @@ void readTextureTransform(const tinygltf::Material& material, MaterialParams& p)
     }
 }
 
-float khrFloat(const tinygltf::Material& material,
-               const char* extension,
-               const char* key,
-               float fallback)
+float khrFloat(const tinygltf::Material& material, const char* extension, const char* key, float fallback)
 {
     const auto it = material.extensions.find(extension);
     if (it == material.extensions.end() || !it->second.IsObject() || !it->second.Has(key))
@@ -764,15 +763,15 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
 
     // Base color
     const auto& bcf = material.pbrMetallicRoughness.baseColorFactor;
-    p.base_color = {(float)bcf[0], (float)bcf[1], (float)bcf[2]};
+    p.base_color = { (float)bcf[0], (float)bcf[1], (float)bcf[2] };
     p.base_color_alpha = (float)bcf[3];
-    p.alpha_mode = material.alphaMode == "MASK"    ? ALPHA_MODE_MASK
-                   : material.alphaMode == "BLEND" ? ALPHA_MODE_BLEND
-                                                   : ALPHA_MODE_OPAQUE;
+    p.alpha_mode = material.alphaMode == "MASK"  ? ALPHA_MODE_MASK :
+                   material.alphaMode == "BLEND" ? ALPHA_MODE_BLEND :
+                                                   ALPHA_MODE_OPAQUE;
 
     // Metallic / roughness
     p.roughness = (float)material.pbrMetallicRoughness.roughnessFactor;
-    p.metallic  = (float)material.pbrMetallicRoughness.metallicFactor;
+    p.metallic = (float)material.pbrMetallicRoughness.metallicFactor;
 
     // IOR / specular / transmission / anisotropy, from the KHR extensions.
     // specularFactor is a 0..1 multiplier on the dielectric F0, and glTF's
@@ -785,14 +784,12 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     p.specular_color = glm::float3(1.0f);
     {
         const auto sp = material.extensions.find("KHR_materials_specular");
-        if (sp != material.extensions.end() && sp->second.IsObject() &&
-            sp->second.Has("specularColorFactor"))
+        if (sp != material.extensions.end() && sp->second.IsObject() && sp->second.Has("specularColorFactor"))
         {
             const tinygltf::Value& c = sp->second.Get("specularColorFactor");
             if (c.IsArray() && c.ArrayLen() >= 3)
             {
-                p.specular_color = { (float)c.Get(0).GetNumberAsDouble(),
-                                     (float)c.Get(1).GetNumberAsDouble(),
+                p.specular_color = { (float)c.Get(0).GetNumberAsDouble(), (float)c.Get(1).GetNumberAsDouble(),
                                      (float)c.Get(2).GetNumberAsDouble() };
             }
         }
@@ -803,8 +800,7 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     // leaves diffusely on the far side. Blender writes this through a Translucent
     // BSDF, which the glTF exporter cannot express, so export_scene.py injects
     // the extension after the fact -- see flatten_materials.py.
-    p.diffuse_transmission =
-        khrFloat(material, "KHR_materials_diffuse_transmission", "diffuseTransmissionFactor", 0.0f);
+    p.diffuse_transmission = khrFloat(material, "KHR_materials_diffuse_transmission", "diffuseTransmissionFactor", 0.0f);
     p.diffuse_transmission_color = glm::float3(1.0f);
     {
         const auto ext = material.extensions.find("KHR_materials_diffuse_transmission");
@@ -834,8 +830,7 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
             const tinygltf::Value& c = sit->second.Get("sheenColorFactor");
             if (c.IsArray() && c.ArrayLen() >= 3)
             {
-                const glm::float3 sheenColor((float)c.Get(0).GetNumberAsDouble(),
-                                             (float)c.Get(1).GetNumberAsDouble(),
+                const glm::float3 sheenColor((float)c.Get(0).GetNumberAsDouble(), (float)c.Get(1).GetNumberAsDouble(),
                                              (float)c.Get(2).GetNumberAsDouble());
                 p.sheen = std::max(sheenColor.x, std::max(sheenColor.y, sheenColor.z));
                 if (p.sheen > 0.0f)
@@ -866,8 +861,7 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
                 const tinygltf::Value& r = ext.Get("scatterRadius");
                 if (r.IsArray() && r.ArrayLen() >= 3)
                 {
-                    p.subsurface_radius = { (float)r.Get(0).GetNumberAsDouble(),
-                                            (float)r.Get(1).GetNumberAsDouble(),
+                    p.subsurface_radius = { (float)r.Get(0).GetNumberAsDouble(), (float)r.Get(1).GetNumberAsDouble(),
                                             (float)r.Get(2).GetNumberAsDouble() };
                 }
             }
@@ -880,8 +874,7 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
                 const tinygltf::Value& r = ext.Get("scatterReference");
                 if (r.IsArray() && r.ArrayLen() >= 3)
                 {
-                    p.subsurface_reference = { (float)r.Get(0).GetNumberAsDouble(),
-                                               (float)r.Get(1).GetNumberAsDouble(),
+                    p.subsurface_reference = { (float)r.Get(0).GetNumberAsDouble(), (float)r.Get(1).GetNumberAsDouble(),
                                                (float)r.Get(2).GetNumberAsDouble() };
                 }
             }
@@ -890,8 +883,7 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
             // A zero mean free path is an infinitely dense medium, i.e. a walk
             // that never terminates. Treat it as "no medium" rather than as a
             // hang.
-            if (p.subsurface_radius.x <= 0.0f && p.subsurface_radius.y <= 0.0f &&
-                p.subsurface_radius.z <= 0.0f)
+            if (p.subsurface_radius.x <= 0.0f && p.subsurface_radius.y <= 0.0f && p.subsurface_radius.z <= 0.0f)
             {
                 p.subsurface = 0.0f;
             }
@@ -935,8 +927,7 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
             {
                 p.medium_flags |= MEDIUM_FLAG_BOUNDARY;
                 p.subsurface_radius = glm::float3(1.0f / density);
-                p.subsurface_anisotropy =
-                    khrFloat(material, "STRELKA_materials_medium", "anisotropy", 0.0f);
+                p.subsurface_anisotropy = khrFloat(material, "STRELKA_materials_medium", "anisotropy", 0.0f);
                 p.diffuse_transmission_color = glm::float3(1.0f);
                 if (ext.Has("scatterColor"))
                 {
@@ -953,8 +944,7 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
                     const tinygltf::Value& c = ext.Get("emissionColor");
                     if (c.IsArray() && c.ArrayLen() >= 3)
                     {
-                        p.medium_emission = { (float)c.Get(0).GetNumberAsDouble(),
-                                              (float)c.Get(1).GetNumberAsDouble(),
+                        p.medium_emission = { (float)c.Get(0).GetNumberAsDouble(), (float)c.Get(1).GetNumberAsDouble(),
                                               (float)c.Get(2).GetNumberAsDouble() };
                     }
                 }
@@ -967,12 +957,10 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     // exporter that wants a specific film writes the same value to both bounds.
     p.iridescence = khrFloat(material, "KHR_materials_iridescence", "iridescenceFactor", 0.0f);
     p.iridescence_ior = khrFloat(material, "KHR_materials_iridescence", "iridescenceIor", 1.3f);
-    p.iridescence_thickness =
-        khrFloat(material, "KHR_materials_iridescence", "iridescenceThicknessMaximum", 400.0f);
+    p.iridescence_thickness = khrFloat(material, "KHR_materials_iridescence", "iridescenceThicknessMaximum", 400.0f);
 
     p.clearcoat = khrFloat(material, "KHR_materials_clearcoat", "clearcoatFactor", 0.0f);
-    p.clearcoat_roughness =
-        khrFloat(material, "KHR_materials_clearcoat", "clearcoatRoughnessFactor", 0.0f);
+    p.clearcoat_roughness = khrFloat(material, "KHR_materials_clearcoat", "clearcoatRoughnessFactor", 0.0f);
     // Not in KHR_materials_clearcoat, which fixes the coat at a clear lacquer.
     // Blender writes it into extras, and the ceramics in the bathroom scene are
     // authored at 2.0 -- an F0 of 0.111 against the extension's 0.04, which is
@@ -992,14 +980,12 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     p.attenuation_color = { 1.0f, 1.0f, 1.0f };
     {
         const auto vit = material.extensions.find("KHR_materials_volume");
-        if (vit != material.extensions.end() && vit->second.IsObject() &&
-            vit->second.Has("attenuationColor"))
+        if (vit != material.extensions.end() && vit->second.IsObject() && vit->second.Has("attenuationColor"))
         {
             const tinygltf::Value& c = vit->second.Get("attenuationColor");
             if (c.IsArray() && c.ArrayLen() >= 3)
             {
-                p.attenuation_color = { (float)c.Get(0).GetNumberAsDouble(),
-                                        (float)c.Get(1).GetNumberAsDouble(),
+                p.attenuation_color = { (float)c.Get(0).GetNumberAsDouble(), (float)c.Get(1).GetNumberAsDouble(),
                                         (float)c.Get(2).GetNumberAsDouble() };
             }
         }
@@ -1010,9 +996,8 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     // exactly the field this used to overwrite with a presence flag, collapsing
     // every emitter in every Blender export to 1x.
     const auto& emf = material.emissiveFactor;
-    p.emission = {(float)emf[0], (float)emf[1], (float)emf[2]};
-    p.emission_strength =
-        khrFloat(material, "KHR_materials_emissive_strength", "emissiveStrength", 1.0f);
+    p.emission = { (float)emf[0], (float)emf[1], (float)emf[2] };
+    p.emission_strength = khrFloat(material, "KHR_materials_emissive_strength", "emissiveStrength", 1.0f);
 
     // Normal / occlusion / alpha
     p.normal_scale = (float)material.normalTexture.scale;
@@ -1044,8 +1029,7 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
         const auto vit = material.extensions.find("KHR_materials_volume");
         if (vit != material.extensions.end() && vit->second.IsObject())
         {
-            const float thickness =
-                khrFloat(material, "KHR_materials_volume", "thicknessFactor", 0.0f);
+            const float thickness = khrFloat(material, "KHR_materials_volume", "thicknessFactor", 0.0f);
             p.thin_walled = (thickness <= 0.0f) ? 1u : 0u;
         }
     }
@@ -1119,8 +1103,7 @@ void loadCameras(const tinygltf::Model& model, oka::Scene& scene, std::vector<in
         }
         else
         {
-            STRELKA_WARNING("glTF camera {} '{}': unknown type '{}', skipped", i, cameraGltf.name,
-                            cameraGltf.type);
+            STRELKA_WARNING("glTF camera {} '{}': unknown type '{}', skipped", i, cameraGltf.name, cameraGltf.type);
             continue;
         }
 
@@ -1237,16 +1220,16 @@ void loadAnimation(const tinygltf::Model& model, oka::Scene& scene)
             }
             if (channel.target_path == "weights")
             {
-                STRELKA_WARNING("glTF animation '{}' uses an unsupported weights channel; skipping channel",
-                                animation.name);
+                STRELKA_WARNING(
+                    "glTF animation '{}' uses an unsupported weights channel; skipping channel", animation.name);
                 continue;
             }
             chan.samplerIndex = channel.sampler;
             chan.node = channel.target_node;
             if (chan.node < 0)
             {
-                STRELKA_WARNING("glTF animation '{}' channel has invalid node {}; skipping channel", animation.name,
-                                chan.node);
+                STRELKA_WARNING(
+                    "glTF animation '{}' channel has invalid node {}; skipping channel", animation.name, chan.node);
                 continue;
             }
 
@@ -1274,17 +1257,12 @@ void loadNodes(const tinygltf::Model& model, oka::Scene& scene, const float glob
         }
         n.scale = scale;
 
-        //glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        // glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
         glm::quat rotation = glm::quat_cast(glm::float4x4(1.0f));
         if (!node.rotation.empty())
         {
-            const float floatRotation[4] = {
-                (float)node.rotation[3],
-                (float)node.rotation[0],
-                (float)node.rotation[1],
-                (float)node.rotation[2],
-            };
-            rotation = glm::make_quat(floatRotation);
+            rotation = quatFromGltf(
+                (float)node.rotation[0], (float)node.rotation[1], (float)node.rotation[2], (float)node.rotation[3]);
         }
         n.rotation = rotation;
 
@@ -1324,7 +1302,7 @@ void loadSkeletalData(const tinygltf::Model& model, oka::Scene& scene, const flo
         for (const int jointid : s.joints)
         {
             scene.mNodes[jointid].type = oka::Scene::Node::NodeType::skeleton;
-            //s.inverseBindMatrices.push_back(glm::inverse(scene.calculateNodeGlobalTransform(jointid)));
+            // s.inverseBindMatrices.push_back(glm::inverse(scene.calculateNodeGlobalTransform(jointid)));
         }
         for (size_t m = 0; m < matrixCount; ++m)
         {
@@ -1440,8 +1418,7 @@ bool loadPunctualLights(const tinygltf::Model& model, oka::Scene& scene)
         desc.enabled = true;
         desc.name = L.Has("name") ? L.Get("name").Get<std::string>() : node.name;
         desc.color = L.Has("color") ? readVec3(L.Get("color"), glm::float3(1.0f)) : glm::float3(1.0f);
-        desc.intensity =
-            (L.Has("intensity") ? (float)L.Get("intensity").GetNumberAsDouble() : 1.0f) / kLumensPerWatt;
+        desc.intensity = (L.Has("intensity") ? (float)L.Get("intensity").GetNumberAsDouble() : 1.0f) / kLumensPerWatt;
         desc.range = L.Has("range") ? (float)L.Get("range").GetNumberAsDouble() : 0.0f;
 
         const std::string type = L.Has("type") ? L.Get("type").Get<std::string>() : "point";
@@ -1612,10 +1589,9 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     // An image embedded in a buffer view rather than referenced by uri would
     // lose its pixels this way -- but such an image has no file to open either,
     // so it was never supported.
-    gltf_ctx.SetImageLoader(
-        [](tinygltf::Image*, const int, std::string*, std::string*, int, int,
-           const unsigned char*, int, void*) { return true; },
-        nullptr);
+    gltf_ctx.SetImageLoader([](tinygltf::Image*, const int, std::string*, std::string*, int, int, const unsigned char*,
+                               int, void*) { return true; },
+                            nullptr);
     std::string err;
     std::string warn;
     bool res = false;
@@ -1652,10 +1628,8 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
         // Only the default scene is instantiated. A file with several is
         // ambiguous by construction, and silently drawing a fraction of it looks
         // like missing geometry rather than a choice.
-        STRELKA_WARNING("glTF has {} scenes; loading only '{}' (index {}). The rest are ignored.",
-                        model.scenes.size(),
-                        model.scenes[sceneId].name.empty() ? "<unnamed>" : model.scenes[sceneId].name,
-                        sceneId);
+        STRELKA_WARNING("glTF has {} scenes; loading only '{}' (index {}). The rest are ignored.", model.scenes.size(),
+                        model.scenes[sceneId].name.empty() ? "<unnamed>" : model.scenes[sceneId].name, sceneId);
     }
 
     // The load expressed as a list of phases rather than as a sequence of calls.
@@ -1702,16 +1676,17 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     {
         phases.push_back({ "geometry", [&, i] {
                               const int rootNodeIdx = model.scenes[sceneId].nodes[i];
-                              processNode(model, scene, model.nodes[rootNodeIdx], rootNodeIdx,
-                                          glm::float4x4(1.0f), globalScale, meshCache, cameraIndexMap);
+                              processNode(model, scene, model.nodes[rootNodeIdx], rootNodeIdx, glm::float4x4(1.0f),
+                                          globalScale, meshCache, cameraIndexMap);
                           } });
     }
     phases.push_back({ "geometry", [&] {
                           if (lodSkipCounter() != 0)
                           {
-                              STRELKA_INFO("Skipped {} proxy / non-zero-LOD nodes; set STRELKA_NO_LOD_FILTER=1 "
-                                           "to draw every level at once",
-                                           lodSkipCounter());
+                              STRELKA_INFO(
+                                  "Skipped {} proxy / non-zero-LOD nodes; set STRELKA_NO_LOD_FILTER=1 "
+                                  "to draw every level at once",
+                                  lodSkipCounter());
                           }
                       } });
     // Punctual lights need node world transforms, so they land after the graph.
@@ -1767,8 +1742,7 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
         }
         if (released > 0)
         {
-            STRELKA_INFO("Released {:.2f} GB of glTF buffer data after loading scene data",
-                         released / 1e9);
+            STRELKA_INFO("Released {:.2f} GB of glTF buffer data after loading scene data", released / 1e9);
         }
     }
 

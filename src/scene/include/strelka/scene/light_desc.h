@@ -2,10 +2,7 @@
 
 #include <light_types.h>
 
-// glm_wrapper, not <glm/glm.hpp>: the glm::float3 spelling used below comes
-// from the wrapper's experimental headers, and including the bare glm here left
-// this header compiling only when something else had already pulled the wrapper
-// in first.
+// glm_wrapper, not <glm/glm.hpp>: glm::float3 is an alias defined in the wrapper.
 #include <strelka/scene/glm_wrapper.hpp>
 
 #include <algorithm>
@@ -204,8 +201,7 @@ inline glm::float3 bakeLightRadiometric(int type,
 
     switch (unit)
     {
-    case LIGHT_UNIT_POWER:
-    {
+    case LIGHT_UNIT_POWER: {
         // Φ (W). Lambertian area: L = Φ / (π A). Point: I = Φ / 4π.
         // Spot: I = Φ / Ω_outer so the integral over the cone recovers Φ.
         if (type == LIGHT_TYPE_POINT)
@@ -249,8 +245,7 @@ inline glm::float3 bakeLightRadiometric(int type,
         // value so a mis-tagged area light still lights something.
         (void)type;
         return tint;
-    case LIGHT_UNIT_IRRADIANCE:
-    {
+    case LIGHT_UNIT_IRRADIANCE: {
         // E (W/m²). Distant: L = E / Ω.
         const float omega = std::max(coneSolidAngle(std::max(halfAngleRad, 1e-6f)), 1e-8f);
         return tint / omega;
