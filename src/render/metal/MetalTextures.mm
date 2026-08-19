@@ -11,6 +11,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
@@ -141,8 +142,7 @@ MTL::Texture* MetalTextures::createFromPayload(const Payload& payload, const std
     {
         const uint32_t w = std::max(1, payload.width >> l);
         const uint32_t h = std::max(1, payload.height >> l);
-        const size_t rowBytes =
-            payload.blockBytes ? (size_t)((w + 3) / 4) * payload.blockBytes : (size_t)w * 4;
+        const size_t rowBytes = payload.blockBytes ? (size_t)((w + 3) / 4) * payload.blockBytes : (size_t)w * 4;
         texture->replaceRegion(MTL::Region::Make3D(0, 0, 0, w, h, 1), l, payload.data[l].data(), rowBytes);
     }
     if (!cacheFileToWrite.empty())
@@ -220,8 +220,7 @@ MTL::Texture* MetalTextures::loadCached(const std::string& cachePath)
         }
         const uint32_t w = std::max(1u, header.width >> l);
         const uint32_t h = std::max(1u, header.height >> l);
-        const size_t rowBytes =
-            header.blockBytes ? (size_t)((w + 3) / 4) * header.blockBytes : (size_t)w * 4;
+        const size_t rowBytes = header.blockBytes ? (size_t)((w + 3) / 4) * header.blockBytes : (size_t)w * 4;
         texture->replaceRegion(MTL::Region::Make3D(0, 0, 0, w, h, 1), l, level.data(), rowBytes);
     }
     return texture;
@@ -277,10 +276,10 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
             dstH = std::max(1, dstH / 2);
         }
         auto* scaled = (stbi_uc*)malloc((size_t)dstW * dstH * 4);
-        const int ok = scaled ? (srgb ? stbir_resize_uint8_srgb(data, texWidth, texHeight, 0, scaled, dstW,
-                                                                dstH, 0, 4, 3, 0)
-                                      : stbir_resize_uint8(data, texWidth, texHeight, 0, scaled, dstW, dstH, 0, 4))
-                              : 0;
+        const int ok =
+            scaled ? (srgb ? stbir_resize_uint8_srgb(data, texWidth, texHeight, 0, scaled, dstW, dstH, 0, 4, 3, 0) :
+                             stbir_resize_uint8(data, texWidth, texHeight, 0, scaled, dstW, dstH, 0, 4)) :
+                     0;
         if (ok)
         {
             stbi_image_free(data);
@@ -298,25 +297,31 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
     while ((1u << levels) <= (uint32_t)std::max(texWidth, texHeight))
         ++levels;
 
-    std::vector<std::vector<uint8_t>> chain;
-    chain.reserve(levels);
-    chain.emplace_back(data, data + (size_t)texWidth * texHeight * 4);
-    stbi_image_free(data);
+    // Keep the decoder's buffer as mip 0. Copying it into a vector just to
+    // compress or upload it doubles the full-resolution image in RAM.
+    const std::unique_ptr<stbi_uc, void (*)(void*)> base(data, stbi_image_free);
+    data = nullptr;
+    std::vector<std::vector<uint8_t>> mips;
+    mips.reserve(levels > 0 ? levels - 1 : 0);
+    const uint8_t* prev = base.get();
+    int prevW = texWidth;
+    int prevH = texHeight;
     for (uint32_t l = 1; l < levels; ++l)
     {
-        const int prevW = std::max(1, texWidth >> (l - 1));
-        const int prevH = std::max(1, texHeight >> (l - 1));
         const int w = std::max(1, texWidth >> l);
         const int h = std::max(1, texHeight >> l);
         std::vector<uint8_t> next((size_t)w * h * 4);
-        const int ok = srgb ? stbir_resize_uint8_srgb(chain[l - 1].data(), prevW, prevH, 0, next.data(), w, h, 0, 4, 3, 0)
-                            : stbir_resize_uint8(chain[l - 1].data(), prevW, prevH, 0, next.data(), w, h, 0, 4);
+        const int ok = srgb ? stbir_resize_uint8_srgb(prev, prevW, prevH, 0, next.data(), w, h, 0, 4, 3, 0) :
+                              stbir_resize_uint8(prev, prevW, prevH, 0, next.data(), w, h, 0, 4);
         if (!ok)
         {
             levels = l;
             break;
         }
-        chain.push_back(std::move(next));
+        mips.push_back(std::move(next));
+        prev = mips.back().data();
+        prevW = w;
+        prevH = h;
     }
 
     // A normal map tagged sRGB is neither compressed nor normalised: BC5 has no
@@ -330,10 +335,10 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
     oka::bc::Format bcFormat = oka::bc::Format::BC1;
     if (normalMap)
         bcFormat = oka::bc::Format::BC5;
-    else if (canCompress && oka::bc::hasAlpha(chain[0].data(), texWidth, texHeight))
+    else if (canCompress && oka::bc::hasAlpha(base.get(), texWidth, texHeight))
         bcFormat = oka::bc::Format::BC3;
 
-    MTL::PixelFormat format;
+    MTL::PixelFormat format = MTL::PixelFormatRGBA8Unorm;
     if (!canCompress)
         format = srgb ? MTL::PixelFormatRGBA8Unorm_sRGB : MTL::PixelFormatRGBA8Unorm;
     else if (bcFormat == oka::bc::Format::BC5)
@@ -349,23 +354,34 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
     // the two paths shade the same.
     if (normalMap)
     {
-        for (uint32_t l = 0; l < levels; ++l)
+        oka::bc::normalizeNormalMap(base.get(), texWidth, texHeight);
+        for (uint32_t l = 1; l < levels; ++l)
         {
-            oka::bc::normalizeNormalMap(chain[l].data(), std::max(1, texWidth >> l), std::max(1, texHeight >> l));
+            oka::bc::normalizeNormalMap(mips[l - 1].data(), std::max(1, texWidth >> l), std::max(1, texHeight >> l));
         }
     }
 
     std::vector<std::vector<uint8_t>> payload;
     payload.reserve(levels);
-    for (uint32_t l = 0; l < levels; ++l)
+    if (canCompress)
     {
-        const int w = std::max(1, texWidth >> l);
-        const int h = std::max(1, texHeight >> l);
-        payload.push_back(canCompress ? oka::bc::compressImage(chain[l].data(), w, h, bcFormat)
-                                      : std::move(chain[l]));
+        payload.push_back(oka::bc::compressImage(base.get(), texWidth, texHeight, bcFormat));
+        for (uint32_t l = 1; l < levels; ++l)
+        {
+            payload.push_back(oka::bc::compressImage(
+                mips[l - 1].data(), std::max(1, texWidth >> l), std::max(1, texHeight >> l), bcFormat));
+        }
     }
-    chain.clear();
-    chain.shrink_to_fit();
+    else
+    {
+        payload.emplace_back(base.get(), base.get() + (size_t)texWidth * texHeight * 4);
+        for (auto& mip : mips)
+        {
+            payload.push_back(std::move(mip));
+        }
+    }
+    mips.clear();
+    mips.shrink_to_fit();
 
     Payload out;
     out.width = texWidth;
@@ -427,10 +443,9 @@ bool MetalTextures::prewarmStep(const std::vector<Request>& requests, double bud
         const Request* queue = mPrewarmQueue.data();
         const std::string* keys = mPrewarmKeys.data();
         dispatch_apply(count, DISPATCH_APPLY_AUTO, ^(size_t i) {
-            const Request& r = queue[begin + i];
-            const std::string cacheFile =
-                cacheDir.empty() ? std::string() : (cacheDir / keys[begin + i]).string();
-            out[i] = decodeToPayload(r.path, r.srgb, r.kind, cacheFile, params);
+          const Request& r = queue[begin + i];
+          const std::string cacheFile = cacheDir.empty() ? std::string() : (cacheDir / keys[begin + i]).string();
+          out[i] = decodeToPayload(r.path, r.srgb, r.kind, cacheFile, params);
         });
         for (size_t i = 0; i < count; ++i)
         {
@@ -440,10 +455,10 @@ bool MetalTextures::prewarmStep(const std::vector<Request>& requests, double bud
             }
         }
         mPrewarmCursor += count;
-    } while (mPrewarmCursor < mPrewarmQueue.size() &&
-             (budgetMs <= 0.0 ||
-              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceStart).count() <
-                  budgetMs));
+    } while (
+        mPrewarmCursor < mPrewarmQueue.size() &&
+        (budgetMs <= 0.0 ||
+         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceStart).count() < budgetMs));
 
     return mPrewarmCursor >= mPrewarmQueue.size();
 }
@@ -479,8 +494,7 @@ MTL::ResourceID MetalTextures::loadMaterialTexture(const std::string& absolutePa
     if (absolutePath.empty())
         return MTL::ResourceID{};
 
-    const std::string key =
-        absolutePath + (srgb ? "|srgb" : "|linear") + "|" + std::to_string((int)kind);
+    const std::string key = absolutePath + (srgb ? "|srgb" : "|linear") + "|" + std::to_string((int)kind);
     if (auto it = mDedupCache.find(key); it != mDedupCache.end())
         return it->second->gpuResourceID();
 

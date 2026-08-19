@@ -468,7 +468,17 @@ bool MetalAccelStructure::step(double budgetMs)
                                mScene->getIndices().size() * sizeof(uint32_t) };
         if (mSettings->getAs<bool>("scene/releaseHostGeometry") && !mScene->hostGeometryReleased())
         {
-            mScene->releaseHostGeometry();
+            // A no-copy wrap is already using these arrays as GPU storage, so
+            // free-and-forget would leave the buffers pointing at deallocated
+            // pages. Hand the allocation to Geometry instead.
+            if (mGeometry->vertexBufferAliasesHost())
+            {
+                mGeometry->adoptAliasedHost(mScene);
+            }
+            else
+            {
+                mScene->releaseHostGeometry();
+            }
         }
 
         // --- Group mesh instances that always move together -----------------------

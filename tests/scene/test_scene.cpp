@@ -134,8 +134,7 @@ TEST_CASE("Parent translate updates child instance world transform")
     const uint32_t childId = 1;
     scene.mNodes[parentId].children.push_back((int)childId);
 
-    const uint32_t instId =
-        addUnitTriangle(scene, glm::translate(glm::mat4(1.0f), glm::float3(0, 0, 2)));
+    const uint32_t instId = addUnitTriangle(scene, glm::translate(glm::mat4(1.0f), glm::float3(0, 0, 2)));
     scene.mNodes[childId].instanceIds.push_back(instId);
 
     scene.setNodeLocalTransform(parentId, glm::float3(10, 0, 0), glm::quat(1, 0, 0, 0), glm::float3(1.0f));
@@ -217,28 +216,71 @@ TEST_CASE("CPU pick hits unit triangle and misses offset ray")
     node.rotation = glm::quat(1, 0, 0, 0);
     scene.mNodes.push_back(node);
 
-    const Scene::PickHit hit =
-        scene.pick(glm::float3(0, 0, 5), glm::float3(0, 0, -1));
+    const Scene::PickHit hit = scene.pick(glm::float3(0, 0, 5), glm::float3(0, 0, -1));
     CHECK(hit.hit);
     CHECK(hit.instanceId == instId);
     CHECK(hit.nodeId == 0);
 
-    const Scene::PickHit miss =
-        scene.pick(glm::float3(10, 10, 5), glm::float3(0, 0, -1));
+    const Scene::PickHit miss = scene.pick(glm::float3(10, 10, 5), glm::float3(0, 0, -1));
     CHECK_FALSE(miss.hit);
 }
 
 TEST_CASE("CPU pick prefers closer of two overlapping instances")
 {
     Scene scene;
-    const uint32_t nearId =
-        addUnitTriangle(scene, glm::translate(glm::mat4(1.0f), glm::float3(0, 0, 1)));
-    const uint32_t farId =
-        addUnitTriangle(scene, glm::translate(glm::mat4(1.0f), glm::float3(0, 0, -1)));
+    const uint32_t nearId = addUnitTriangle(scene, glm::translate(glm::mat4(1.0f), glm::float3(0, 0, 1)));
+    const uint32_t farId = addUnitTriangle(scene, glm::translate(glm::mat4(1.0f), glm::float3(0, 0, -1)));
 
-    const Scene::PickHit hit =
-        scene.pick(glm::float3(0, 0, 5), glm::float3(0, 0, -1));
+    const Scene::PickHit hit = scene.pick(glm::float3(0, 0, 5), glm::float3(0, 0, -1));
     REQUIRE(hit.hit);
     CHECK(hit.instanceId == nearId);
     CHECK(hit.instanceId != farId);
+}
+
+TEST_CASE("createMeshFromOffsets records appended geometry without copying")
+{
+    Scene scene;
+    scene.reserveGeometry(6, 6);
+    auto& vertices = scene.getVertices();
+    auto& indices = scene.getIndices();
+    const uint32_t vbOffset = static_cast<uint32_t>(vertices.size());
+    Scene::Vertex v{};
+    v.pos = glm::float3(0, 0, 0);
+    vertices.push_back(v);
+    v.pos = glm::float3(1, 0, 0);
+    vertices.push_back(v);
+    v.pos = glm::float3(0, 1, 0);
+    vertices.push_back(v);
+    const uint32_t ibOffset = static_cast<uint32_t>(indices.size());
+    indices.push_back(0);
+    indices.push_back(1);
+    indices.push_back(2);
+
+    const uint32_t meshId = scene.createMeshFromOffsets(vbOffset, 3, ibOffset, 3);
+    REQUIRE(meshId == 0);
+    CHECK(scene.getMeshes()[meshId].mVbOffset == 0);
+    CHECK(scene.getMeshes()[meshId].mVertexCount == 3);
+    CHECK(scene.getMeshes()[meshId].mIndex == 0);
+    CHECK(scene.getMeshes()[meshId].mCount == 3);
+    CHECK(scene.getVertices().size() == 3);
+    CHECK(scene.getVertices().capacity() >= 6);
+}
+
+TEST_CASE("takeHostGeometry moves arrays and blocks picking")
+{
+    Scene scene;
+    addUnitTriangle(scene, glm::mat4(1.0f));
+    REQUIRE_FALSE(scene.getVertices().empty());
+
+    std::vector<Scene::Vertex> vertices;
+    std::vector<uint32_t> indices;
+    scene.takeHostGeometry(vertices, indices);
+    CHECK(scene.hostGeometryReleased());
+    CHECK(scene.getVertices().empty());
+    CHECK(scene.getIndices().empty());
+    CHECK(vertices.size() == 3);
+    CHECK(indices.size() == 3);
+
+    const Scene::PickHit hit = scene.pick(glm::float3(0, 0, 5), glm::float3(0, 0, -1));
+    CHECK_FALSE(hit.hit);
 }

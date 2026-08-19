@@ -22,38 +22,60 @@ namespace fs = std::filesystem;
 namespace oka
 {
 
-uint32_t Scene::createMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib)
+uint32_t Scene::acquireMeshSlot(Mesh*& mesh)
 {
-    const std::scoped_lock lock(mMeshMutex);
-
-    Mesh* mesh = nullptr;
-    uint32_t meshId = -1;
+    uint32_t meshId = static_cast<uint32_t>(-1);
     if (mDelMesh.empty())
     {
-        meshId = mMeshes.size(); // add mesh to storage
+        meshId = static_cast<uint32_t>(mMeshes.size());
         mMeshes.push_back({});
         mesh = &mMeshes.back();
     }
     else
     {
-        meshId = mDelMesh.top(); // get index from stack
-        mDelMesh.pop(); // del taken index from stack
+        meshId = mDelMesh.top();
+        mDelMesh.pop();
         mesh = &mMeshes[meshId];
     }
+    return meshId;
+}
 
-    mesh->mIndex = mIndices.size(); // Index of 1st index in index buffer
-    mesh->mCount = ib.size(); // amount of indices in mesh
+void Scene::reserveGeometry(size_t vertexCount, size_t indexCount, size_t skinCount)
+{
+    // 16 KiB is the Apple Silicon page and a multiple of 4 KiB, so rounding
+    // capacity to it makes a Metal no-copy wrap legal on either.
+    constexpr size_t kPage = 16384;
+    auto pageRound = [](size_t count, size_t elemSize) -> size_t {
+        if (count == 0)
+        {
+            return 0;
+        }
+        const size_t bytes = count * elemSize;
+        const size_t padded = (bytes + kPage - 1) & ~(kPage - 1);
+        return padded / elemSize;
+    };
+    mVertices.reserve(pageRound(vertexCount, sizeof(Vertex)));
+    mIndices.reserve(pageRound(indexCount, sizeof(uint32_t)));
+    if (skinCount != 0)
+    {
+        mVerticesSkinData.reserve(skinCount);
+    }
+}
 
-    mesh->mVbOffset = mVertices.size();
-    mesh->mVertexCount = vb.size();
+uint32_t Scene::createMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib)
+{
+    const std::scoped_lock lock(mMeshMutex);
 
-    // const uint32_t ibOffset = mVertices.size(); // adjust indices for global index buffer
-    // for (int i = 0; i < ib.size(); ++i)
-    // {
-    //     mIndices.push_back(ibOffset + ib[i]);
-    // }
+    Mesh* mesh = nullptr;
+    const uint32_t meshId = acquireMeshSlot(mesh);
+
+    mesh->mIndex = static_cast<uint32_t>(mIndices.size());
+    mesh->mCount = static_cast<uint32_t>(ib.size());
+    mesh->mVbOffset = static_cast<uint32_t>(mVertices.size());
+    mesh->mVertexCount = static_cast<uint32_t>(vb.size());
+
     mIndices.insert(mIndices.end(), ib.begin(), ib.end());
-    mVertices.insert(mVertices.end(), vb.begin(), vb.end()); // copy vertices
+    mVertices.insert(mVertices.end(), vb.begin(), vb.end());
     return meshId;
 }
 
@@ -64,37 +86,51 @@ uint32_t Scene::createSkeletalMesh(const std::vector<Vertex>& vb,
     const std::scoped_lock lock(mMeshMutex);
 
     Mesh* mesh = nullptr;
-    uint32_t meshId = -1;
-    if (mDelMesh.empty())
-    {
-        meshId = mMeshes.size(); // add mesh to storage
-        mMeshes.push_back({});
-        mesh = &mMeshes.back();
-    }
-    else
-    {
-        meshId = mDelMesh.top(); // get index from stack
-        mDelMesh.pop(); // del taken index from stack
-        mesh = &mMeshes[meshId];
-    }
+    const uint32_t meshId = acquireMeshSlot(mesh);
 
-    mesh->mIndex = mIndices.size(); // Index of 1st index in index buffer
-    mesh->mCount = ib.size(); // amount of indices in mesh
-
-    mesh->mVbOffset = mVertices.size();
-    mesh->mVertexCount = vb.size();
-
-    mesh->mSbOffset = mVerticesSkinData.size();
+    mesh->mIndex = static_cast<uint32_t>(mIndices.size());
+    mesh->mCount = static_cast<uint32_t>(ib.size());
+    mesh->mVbOffset = static_cast<uint32_t>(mVertices.size());
+    mesh->mVertexCount = static_cast<uint32_t>(vb.size());
+    mesh->mSbOffset = static_cast<uint32_t>(mVerticesSkinData.size());
     mesh->isSkeletal = true;
 
-    // const uint32_t ibOffset = mVertices.size(); // adjust indices for global index buffer
-    // for (int i = 0; i < ib.size(); ++i)
-    // {
-    //     mIndices.push_back(ibOffset + ib[i]);
-    // }
     mIndices.insert(mIndices.end(), ib.begin(), ib.end());
-    mVertices.insert(mVertices.end(), vb.begin(), vb.end()); // copy vertices
+    mVertices.insert(mVertices.end(), vb.begin(), vb.end());
     mVerticesSkinData.insert(mVerticesSkinData.end(), sb.begin(), sb.end());
+    return meshId;
+}
+
+uint32_t Scene::createMeshFromOffsets(uint32_t vbOffset, uint32_t vertexCount, uint32_t ibOffset, uint32_t indexCount)
+{
+    const std::scoped_lock lock(mMeshMutex);
+
+    Mesh* mesh = nullptr;
+    const uint32_t meshId = acquireMeshSlot(mesh);
+    mesh->mIndex = ibOffset;
+    mesh->mCount = indexCount;
+    mesh->mVbOffset = vbOffset;
+    mesh->mVertexCount = vertexCount;
+    return meshId;
+}
+
+uint32_t Scene::createSkeletalMeshFromOffsets(uint32_t vbOffset,
+                                              uint32_t vertexCount,
+                                              uint32_t ibOffset,
+                                              uint32_t indexCount,
+                                              uint32_t sbOffset,
+                                              uint32_t /*skinCount*/)
+{
+    const std::scoped_lock lock(mMeshMutex);
+
+    Mesh* mesh = nullptr;
+    const uint32_t meshId = acquireMeshSlot(mesh);
+    mesh->mIndex = ibOffset;
+    mesh->mCount = indexCount;
+    mesh->mVbOffset = vbOffset;
+    mesh->mVertexCount = vertexCount;
+    mesh->mSbOffset = sbOffset;
+    mesh->isSkeletal = true;
     return meshId;
 }
 

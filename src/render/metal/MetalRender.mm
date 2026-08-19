@@ -707,7 +707,7 @@ bool MetalRender::memoryReport(MemoryReport& report) const
 
     // The host arrays the editor keeps so Scene::pick() can walk them. A full
     // duplicate of the two largest GPU buffers, which is why it is worth naming.
-    if (mScene && !mScene->hostGeometryReleased())
+    if (mScene && !mScene->hostGeometryReleased() && !mGeometry.vertexBufferAliasesHost())
     {
         report.cpu.push_back(
             { "Host geometry (picking)", mGeometry.hostGeometryBytes().first + mGeometry.hostGeometryBytes().second });

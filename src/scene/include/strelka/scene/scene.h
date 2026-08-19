@@ -493,10 +493,27 @@ public:
         mHostGeometryReleased = true;
     }
 
+    /// Hand the vertex and index arrays to a backend that will keep them alive
+    /// as GPU-visible storage (a Metal no-copy wrap). The scene is then in the
+    /// same state as after releaseHostGeometry(): pick() has nothing to walk.
+    void takeHostGeometry(std::vector<Vertex>& vertices, std::vector<uint32_t>& indices)
+    {
+        vertices = std::move(mVertices);
+        indices = std::move(mIndices);
+        mHostGeometryReleased = true;
+    }
+
     bool hostGeometryReleased() const
     {
         return mHostGeometryReleased;
     }
+
+    /// Grow geometry storage once, before a graph walk that appends many meshes.
+    /// Without this, a 50 M triangle forest reallocates the vertex array through
+    /// every doubling -- copying gigabytes that the next mesh will copy again.
+    /// Capacity is rounded to a host page so a Metal no-copy wrap can legally
+    /// pass the allocation as a buffer length.
+    void reserveGeometry(size_t vertexCount, size_t indexCount, size_t skinCount = 0);
 
     const std::vector<Instance>& getInstances() const
     {
@@ -826,6 +843,17 @@ public:
     uint32_t createSkeletalMesh(const std::vector<Vertex>& vb,
                                 const std::vector<uint32_t>& ib,
                                 const std::vector<oka::Scene::vertexSkinData>& sb);
+    /// Register a mesh whose vertices and indices have already been appended to
+    /// the scene arrays. The loader writes those arrays in place so a 1.5 GB
+    /// forest is not copied from a temporary into mVertices and then again onto
+    /// the GPU.
+    uint32_t createMeshFromOffsets(uint32_t vbOffset, uint32_t vertexCount, uint32_t ibOffset, uint32_t indexCount);
+    uint32_t createSkeletalMeshFromOffsets(uint32_t vbOffset,
+                                           uint32_t vertexCount,
+                                           uint32_t ibOffset,
+                                           uint32_t indexCount,
+                                           uint32_t sbOffset,
+                                           uint32_t skinCount);
     /// <summary>
     /// Creates Instance
     /// </summary>
@@ -958,6 +986,8 @@ private:
     std::stack<uint32_t> mDelInstances;
     std::stack<uint32_t> mDelMesh;
     std::stack<uint32_t> mDelMaterial;
+
+    uint32_t acquireMeshSlot(Mesh*& mesh);
 
     std::vector<MaterialDescription> mMaterialsDescs;
 

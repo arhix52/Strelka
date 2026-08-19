@@ -50,6 +50,17 @@ public:
     // Does not upload lights or frame uniforms (those are other domains).
     void buildBuffers(Scene* scene);
 
+    /// Take the scene arrays that a no-copy wrap is already using as backing
+    /// store. Call after createMeshData(), which still walks the host arrays.
+    void adoptAliasedHost(Scene* scene);
+
+    /// True when the GPU vertex/index buffer is the scene's host array, not a copy.
+    /// The memory report must not count those bytes twice.
+    bool vertexBufferAliasesHost() const
+    {
+        return mVertexBufferAliased;
+    }
+
     void createMeshData(Scene* scene, size_t meshIndex, bool needsPrimitiveData);
 
     void clearMeshes();
@@ -144,6 +155,14 @@ private:
     MTL::Buffer* mIndexBuffer = nullptr;
     MTL::Buffer* mPrevVertexBuffer = nullptr;
     bool mOwnsPrevVertexBuffer = false;
+    // Scene arrays taken so a no-copy wrap can keep them alive after the scene
+    // has dropped its own copy. Empty when the wrap aliased the scene, or when
+    // the upload copied and the host storage was freed.
+    std::vector<Scene::Vertex> mAdoptedVertices;
+    std::vector<uint32_t> mAdoptedIndices;
+    bool mVertexBufferAliased = false;
+    bool mWrappedVertices = false;
+    bool mWrappedIndices = false;
 
     std::vector<Mesh*> mMetalMeshes;
     std::vector<GeometryEntry> mGeometryEntries;

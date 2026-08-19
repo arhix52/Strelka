@@ -17,6 +17,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -65,9 +66,9 @@ uint32_t& lodSkipCounter()
 // packNormal(), packUV(), unpackNormal(), unpackUV() provided by <strelka/scene/vertex_packing.h>
 // packTangent uses same format as packNormal (tangents are unit vectors in [-1,1])
 
-void computeTangent(std::vector<Scene::Vertex>& vertices, const std::vector<uint32_t>& indices)
+void computeTangent(Scene::Vertex* vertices, const uint32_t* indices, size_t indexCount)
 {
-    const size_t lastIndex = indices.size();
+    const size_t lastIndex = indexCount;
     Scene::Vertex& v0 = vertices[indices[lastIndex - 3]];
     Scene::Vertex& v1 = vertices[indices[lastIndex - 2]];
     Scene::Vertex& v2 = vertices[indices[lastIndex - 1]];
@@ -99,6 +100,34 @@ void computeTangent(std::vector<Scene::Vertex>& vertices, const std::vector<uint
 // Maps a glTF (mesh, primitive) onto the oka mesh built for it, so geometry
 // referenced by many nodes is parsed and uploaded once.
 using MeshCache = std::unordered_map<uint64_t, uint32_t>;
+
+void countModelGeometry(const tinygltf::Model& model, size_t& vertexCount, size_t& indexCount, size_t& skinCount)
+{
+    vertexCount = 0;
+    indexCount = 0;
+    skinCount = 0;
+    for (const tinygltf::Mesh& mesh : model.meshes)
+    {
+        for (const tinygltf::Primitive& primitive : mesh.primitives)
+        {
+            const auto pos = primitive.attributes.find("POSITION");
+            if (pos == primitive.attributes.end())
+            {
+                continue;
+            }
+            const size_t n = model.accessors[pos->second].count;
+            vertexCount += n;
+            if (primitive.indices >= 0)
+            {
+                indexCount += model.accessors[primitive.indices].count;
+            }
+            if (primitive.attributes.count("JOINTS_0") != 0 && primitive.attributes.count("WEIGHTS_0") != 0)
+            {
+                skinCount += n;
+            }
+        }
+    }
+}
 
 // glTF exposes accessor payloads as byte arrays. Component metadata and stride
 // validation above each view establish the typed interpretation used here.
@@ -269,8 +298,14 @@ void processPrimitive(const tinygltf::Model& model,
         sb.reserve(vertexCount);
     }
 
-    std::vector<oka::Scene::Vertex> vertices;
-    vertices.reserve(vertexCount);
+    // Written straight into the scene arrays. A local vector that createMesh
+    // then copies is a second pass over every unique vertex -- 1.5 GB on the
+    // pine forest, on top of the realloc copies that happen if those arrays
+    // were not reserved.
+    auto& vertices = scene.getVertices();
+    auto& indicesOut = scene.getIndices();
+    const uint32_t vbOffset = static_cast<uint32_t>(vertices.size());
+    vertices.reserve(vertices.size() + vertexCount);
     for (size_t v = 0; v < vertexCount; ++v)
     {
         oka::Scene::Vertex vertex{};
@@ -359,7 +394,7 @@ void processPrimitive(const tinygltf::Model& model,
         }
     }
     uint32_t indexCount = 0;
-    std::vector<uint32_t> indices;
+    const uint32_t ibOffset = static_cast<uint32_t>(indicesOut.size());
     const bool hasIndices = (primitive.indices != -1);
     assert(hasIndices); // currently support only this mode
     if (hasIndices)
@@ -372,59 +407,62 @@ void processPrimitive(const tinygltf::Model& model,
         assert(indexCount != 0 && (indexCount % 3 == 0));
         const void* dataPtr = &(buffer.data[accessor.byteOffset + bufferView.byteOffset]);
 
-        indices.reserve(indexCount);
+        const size_t indexStart = indicesOut.size();
+        indicesOut.resize(indexStart + indexCount);
+        uint32_t* dst = indicesOut.data() + indexStart;
         switch (accessor.componentType)
         {
         case TINYGLTF_PARAMETER_TYPE_UNSIGNED_INT: {
             const auto* buf = static_cast<const uint32_t*>(dataPtr);
-            for (size_t index = 0; index < indexCount; index++)
-            {
-                indices.push_back(buf[index]);
-            }
-            if (!tangentData)
-                computeTangent(vertices, indices);
+            std::memcpy(dst, buf, static_cast<size_t>(indexCount) * sizeof(uint32_t));
             break;
         }
         case TINYGLTF_PARAMETER_TYPE_UNSIGNED_SHORT: {
             const auto* buf = static_cast<const uint16_t*>(dataPtr);
-            for (size_t index = 0; index < indexCount; index++)
+            for (uint32_t index = 0; index < indexCount; ++index)
             {
-                indices.push_back(buf[index]);
+                dst[index] = buf[index];
             }
-            if (!tangentData)
-                computeTangent(vertices, indices);
             break;
         }
         case TINYGLTF_PARAMETER_TYPE_UNSIGNED_BYTE: {
             const auto* buf = static_cast<const uint8_t*>(dataPtr);
-            for (size_t index = 0; index < indexCount; index++)
+            for (uint32_t index = 0; index < indexCount; ++index)
             {
-                indices.push_back(buf[index]);
+                dst[index] = buf[index];
             }
-            if (!tangentData)
-                computeTangent(vertices, indices);
             break;
         }
         default:
             STRELKA_WARNING("glTF index component type {} is not supported; skipping primitive", accessor.componentType);
+            vertices.resize(vbOffset);
+            indicesOut.resize(ibOffset);
             return;
+        }
+        if (!tangentData)
+        {
+            computeTangent(vertices.data() + vbOffset, indicesOut.data() + ibOffset, indexCount);
         }
     }
 
-    // Copy computed tangent from vertices into skin data (tangent is computed after vertex loop)
+    uint32_t sbOffset = 0;
     if (hasJoints)
     {
+        auto& skinOut = scene.getVerticesSkinData();
+        sbOffset = static_cast<uint32_t>(skinOut.size());
         for (size_t v = 0; v < sb.size(); ++v)
         {
-            sb[v].tangent = vertices[v].tangent;
+            sb[v].tangent = vertices[vbOffset + v].tangent;
         }
+        skinOut.insert(skinOut.end(), sb.begin(), sb.end());
     }
 
     uint32_t meshId = std::numeric_limits<uint32_t>::max();
     if (hasJoints)
-        meshId = scene.createSkeletalMesh(vertices, indices, sb);
+        meshId = scene.createSkeletalMeshFromOffsets(
+            vbOffset, vertexCount, ibOffset, indexCount, sbOffset, static_cast<uint32_t>(sb.size()));
     else
-        meshId = scene.createMesh(vertices, indices);
+        meshId = scene.createMeshFromOffsets(vbOffset, vertexCount, ibOffset, indexCount);
     assert(meshId != std::numeric_limits<uint32_t>::max());
     // Skinned meshes are deliberately never cached: their vertices are rewritten
     // per frame from their own skin, so two nodes sharing one would deform the
@@ -509,50 +547,88 @@ void readGpuInstancing(const tinygltf::Model& model, const tinygltf::Node& node,
         return;
     const tinygltf::Value& attributes = ext->second.Get("attributes");
 
-    auto readAttribute = [&](const char* name, int components, std::vector<float>& values) -> size_t {
+    auto findAccessor = [&](const char* name) -> const tinygltf::Accessor* {
+        if (!attributes.Has(name))
+            return nullptr;
+        const int index = attributes.Get(name).GetNumberAsInt();
+        if (index < 0 || (size_t)index >= model.accessors.size())
+            return nullptr;
+        const tinygltf::Accessor& accessor = model.accessors[index];
+        if (accessor.componentType != TINYGLTF_COMPONENT_TYPE_FLOAT)
+        {
+            STRELKA_WARNING("EXT_mesh_gpu_instancing {} is not float; ignoring", name);
+            return nullptr;
+        }
+        return &accessor;
+    };
+    auto bytesOf = [&](const tinygltf::Accessor& accessor) -> const unsigned char* {
+        const tinygltf::BufferView& view = model.bufferViews[accessor.bufferView];
+        return model.buffers[view.buffer].data.data() + view.byteOffset + accessor.byteOffset;
+    };
+    auto strideOf = [&](const tinygltf::Accessor& accessor, int components) -> size_t {
+        const tinygltf::BufferView& view = model.bufferViews[accessor.bufferView];
+        const int stride = accessor.ByteStride(view);
+        return stride ? static_cast<size_t>(stride) : sizeof(float) * static_cast<size_t>(components);
+    };
+
+    const tinygltf::Accessor* translation = findAccessor("TRANSLATION");
+    const tinygltf::Accessor* rotation = findAccessor("ROTATION");
+    const tinygltf::Accessor* scale = findAccessor("SCALE");
+    const size_t count = std::max({ translation ? translation->count : 0, rotation ? rotation->count : 0,
+                                    scale ? scale->count : 0 });
+    if (count == 0)
+        return;
+
+    const unsigned char* tBase = translation ? bytesOf(*translation) : nullptr;
+    const unsigned char* rBase = rotation ? bytesOf(*rotation) : nullptr;
+    const unsigned char* sBase = scale ? bytesOf(*scale) : nullptr;
+    const size_t tStride = translation ? strideOf(*translation, 3) : 0;
+    const size_t rStride = rotation ? strideOf(*rotation, 4) : 0;
+    const size_t sStride = scale ? strideOf(*scale, 3) : 0;
+
+    // Written straight into the output. Three float vectors the size of the
+    // forest -- 1.1 million placements -- were a 45 MB staging copy of data
+    // that is only ever read once.
+    out.resize(count);
+    for (size_t i = 0; i < count; ++i)
+    {
+        glm::float3 t(0.0f);
+        if (tBase)
+        {
+            std::memcpy(&t, tBase + i * tStride, sizeof(t));
+        }
+        glm::quat r(1.0f, 0.0f, 0.0f, 0.0f);
+        if (rBase)
+        {
+            float q[4];
+            std::memcpy(q, rBase + i * rStride, sizeof(q));
+            // glTF stores a quaternion xyzw; glm::quat takes w first.
+            r = glm::quat(q[3], q[0], q[1], q[2]);
+        }
+        glm::float3 s(1.0f);
+        if (sBase)
+        {
+            std::memcpy(&s, sBase + i * sStride, sizeof(s));
+        }
+        out[i] = glm::translate(glm::float4x4(1.0f), t) * glm::mat4_cast(r) * glm::scale(glm::float4x4(1.0f), s);
+    }
+}
+
+size_t gpuInstanceCount(const tinygltf::Model& model, const tinygltf::Node& node)
+{
+    const auto ext = node.extensions.find("EXT_mesh_gpu_instancing");
+    if (ext == node.extensions.end() || !ext->second.Has("attributes"))
+        return 0;
+    const tinygltf::Value& attributes = ext->second.Get("attributes");
+    auto countOf = [&](const char* name) -> size_t {
         if (!attributes.Has(name))
             return 0;
         const int index = attributes.Get(name).GetNumberAsInt();
         if (index < 0 || (size_t)index >= model.accessors.size())
             return 0;
-        const tinygltf::Accessor& accessor = model.accessors[index];
-        if (accessor.componentType != TINYGLTF_COMPONENT_TYPE_FLOAT)
-        {
-            STRELKA_WARNING("EXT_mesh_gpu_instancing {} is not float; ignoring", name);
-            return 0;
-        }
-        const tinygltf::BufferView& view = model.bufferViews[accessor.bufferView];
-        const unsigned char* base = model.buffers[view.buffer].data.data() + view.byteOffset + accessor.byteOffset;
-        const size_t stride = accessor.ByteStride(view) ? accessor.ByteStride(view) : sizeof(float) * components;
-        values.resize(accessor.count * components);
-        for (size_t i = 0; i < accessor.count; ++i)
-        {
-            std::memcpy(&values[i * components], base + i * stride, sizeof(float) * components);
-        }
-        return accessor.count;
+        return model.accessors[index].count;
     };
-
-    std::vector<float> translation, rotation, scale;
-    size_t count = readAttribute("TRANSLATION", 3, translation);
-    count = std::max(count, readAttribute("ROTATION", 4, rotation));
-    count = std::max(count, readAttribute("SCALE", 3, scale));
-    if (count == 0)
-        return;
-
-    out.resize(count);
-    for (size_t i = 0; i < count; ++i)
-    {
-        const glm::float3 t = translation.empty() ?
-                                  glm::float3(0.0f) :
-                                  glm::float3(translation[i * 3], translation[i * 3 + 1], translation[i * 3 + 2]);
-        // glTF stores a quaternion xyzw; glm::quat takes w first.
-        const glm::quat r =
-            rotation.empty() ? glm::quat(1.0f, 0.0f, 0.0f, 0.0f) :
-                               glm::quat(rotation[i * 4 + 3], rotation[i * 4], rotation[i * 4 + 1], rotation[i * 4 + 2]);
-        const glm::float3 s =
-            scale.empty() ? glm::float3(1.0f) : glm::float3(scale[i * 3], scale[i * 3 + 1], scale[i * 3 + 2]);
-        out[i] = glm::translate(glm::float4x4(1.0f), t) * glm::mat4_cast(r) * glm::scale(glm::float4x4(1.0f), s);
-    }
+    return std::max({ countOf("TRANSLATION"), countOf("ROTATION"), countOf("SCALE") });
 }
 
 void processNode(const tinygltf::Model& model,
@@ -1242,6 +1318,7 @@ void loadAnimation(const tinygltf::Model& model, oka::Scene& scene)
 
 void loadNodes(const tinygltf::Model& model, oka::Scene& scene, const float globalScale = 1.0f)
 {
+    scene.mNodes.reserve(model.nodes.size());
     for (const auto& node : model.nodes)
     {
         oka::Scene::Node n{};
@@ -1658,6 +1735,32 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     // graph walk, so it has to outlive both phases.
     std::vector<int> cameraIndexMap;
 
+    size_t expectedVertices = 0;
+    size_t expectedIndices = 0;
+    size_t expectedSkin = 0;
+    countModelGeometry(model, expectedVertices, expectedIndices, expectedSkin);
+    scene.reserveGeometry(expectedVertices, expectedIndices, expectedSkin);
+    {
+        size_t primitiveCount = 0;
+        for (const tinygltf::Mesh& mesh : model.meshes)
+        {
+            primitiveCount += mesh.primitives.size();
+        }
+        scene.mMeshes.reserve(primitiveCount);
+        size_t expectedInstances = 0;
+        for (const tinygltf::Node& node : model.nodes)
+        {
+            if (node.mesh < 0)
+            {
+                continue;
+            }
+            const size_t prims = model.meshes[node.mesh].primitives.size();
+            const size_t instanced = gpuInstanceCount(model, node);
+            expectedInstances += (instanced == 0 ? 1 : instanced) * prims;
+        }
+        scene.getInstances().reserve(expectedInstances);
+    }
+
     std::vector<Phase> phases;
     phases.push_back({ "materials", [&] { loadMaterials(model, scene); } });
     // After the materials, which the sets are matched against by name.
@@ -1745,6 +1848,11 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
             STRELKA_INFO("Released {:.2f} GB of glTF buffer data after loading scene data", released / 1e9);
         }
     }
+
+    STRELKA_INFO("Scene host geometry: {} vertices ({:.2f} GB), {} indices ({:.2f} GB), {} meshes, {} instances",
+                 scene.getVertices().size(), scene.getVertices().size() * sizeof(oka::Scene::Vertex) / 1e9,
+                 scene.getIndices().size(), scene.getIndices().size() * sizeof(uint32_t) / 1e9, scene.mMeshes.size(),
+                 scene.getInstances().size());
 
     return res;
 }

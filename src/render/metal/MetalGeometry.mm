@@ -3,13 +3,66 @@
 #include <log.h>
 
 #include <algorithm>
+#include <bit>
+#include <cstdint>
 #include <cstring>
+#include <unistd.h>
 #include <vector>
 
 namespace oka
 {
 namespace metal
 {
+namespace
+{
+size_t hostPageSize()
+{
+    static const size_t page = [] {
+        const long p = sysconf(_SC_PAGESIZE);
+        return p > 0 ? static_cast<size_t>(p) : 4096u;
+    }();
+    return page;
+}
+
+bool canWrapNoCopy(const void* ptr, size_t bytes, size_t capacityBytes, size_t& paddedBytes)
+{
+    if (ptr == nullptr || bytes == 0)
+    {
+        return false;
+    }
+    const size_t page = hostPageSize();
+    if ((std::bit_cast<uintptr_t>(ptr) % page) != 0)
+    {
+        return false;
+    }
+    paddedBytes = (bytes + page - 1) & ~(page - 1);
+    return paddedBytes <= capacityBytes;
+}
+
+MTL::Buffer* makeSharedBuffer(
+    MTL::Device* device, const void* data, size_t bytes, size_t capacityBytes, const char* name, bool& wrapped)
+{
+    wrapped = false;
+    if (device == nullptr || data == nullptr || bytes == 0)
+    {
+        return nullptr;
+    }
+    size_t padded = 0;
+    if (canWrapNoCopy(data, bytes, capacityBytes, padded))
+    {
+        MTL::Buffer* buffer = device->newBuffer(data, padded, MTL::ResourceStorageModeShared,
+                                                ^(void*, NS::UInteger){
+                                                });
+        if (buffer != nullptr)
+        {
+            wrapped = true;
+            STRELKA_INFO("Metal geometry {}: wrapped {:.2f} GB without copy", name, bytes / 1e9);
+            return buffer;
+        }
+    }
+    return device->newBuffer(data, bytes, MTL::ResourceStorageModeShared);
+}
+} // namespace
 
 MetalGeometry::~MetalGeometry()
 {
@@ -59,10 +112,9 @@ void MetalGeometry::uploadGeometryEntryBuffer()
     }
     if (mGeometryEntries.empty())
         return;
-    mGeometryEntryBuffer = mDevice->newBuffer(mGeometryEntries.size() * sizeof(GeometryEntry),
-                                              MTL::ResourceStorageModeShared);
-    memcpy(mGeometryEntryBuffer->contents(), mGeometryEntries.data(),
-           mGeometryEntries.size() * sizeof(GeometryEntry));
+    mGeometryEntryBuffer =
+        mDevice->newBuffer(mGeometryEntries.size() * sizeof(GeometryEntry), MTL::ResourceStorageModeShared);
+    memcpy(mGeometryEntryBuffer->contents(), mGeometryEntries.data(), mGeometryEntries.size() * sizeof(GeometryEntry));
 }
 
 void MetalGeometry::release()
@@ -85,6 +137,13 @@ void MetalGeometry::release()
         mPrevVertexBuffer = nullptr;
     safeRelease(mVertexBuffer);
     mOwnsPrevVertexBuffer = false;
+    mVertexBufferAliased = false;
+    mWrappedVertices = false;
+    mWrappedIndices = false;
+    mAdoptedVertices.clear();
+    mAdoptedVertices.shrink_to_fit();
+    mAdoptedIndices.clear();
+    mAdoptedIndices.shrink_to_fit();
 
     safeRelease(mCurvePointBuffer);
     safeRelease(mCurveRadiusBuffer);
@@ -106,31 +165,8 @@ void MetalGeometry::buildBuffers(Scene* scene)
     const std::vector<Scene::Vertex>& vertices = scene->getVertices();
     const std::vector<uint32_t>& indices = scene->getIndices();
 
-    const size_t vertexDataSize = sizeof(Scene::Vertex) * vertices.size();
-    const size_t indexDataSize = sizeof(uint32_t) * indices.size();
-
-    // Shared rather than managed, and this is not a preference.
-    //
-    // Metal 4 removes the managed storage mode outright -- it exists to keep a
-    // separate CPU and GPU copy in step on discrete memory, which is not the
-    // architecture Metal 4 targets -- and it removes didModifyRange with it. A
-    // managed buffer bound into an argument table by GPU address therefore has
-    // no defined behaviour, and the GPU writing one (which is exactly what the
-    // skinning kernel does to this buffer) has nowhere to publish the result.
-    MTL::Buffer* pVertexBuffer = nullptr;
-    if (vertexDataSize > 0)
-    {
-        pVertexBuffer = mDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeShared);
-        memcpy(pVertexBuffer->contents(), vertices.data(), vertexDataSize);
-    }
-    MTL::Buffer* pIndexBuffer = nullptr;
-    if (indexDataSize > 0)
-    {
-        pIndexBuffer = mDevice->newBuffer(indexDataSize, MTL::ResourceStorageModeShared);
-        memcpy(pIndexBuffer->contents(), indices.data(), indexDataSize);
-    }
-
-    // Drop previous geometry buffers before adopting the new ones.
+    // A no-copy wrap aliases the scene arrays, so the previous buffers have to
+    // go before those vectors are replaced on a reload.
     {
         auto safeRelease = [](MTL::Buffer*& p) {
             if (p)
@@ -146,9 +182,47 @@ void MetalGeometry::buildBuffers(Scene* scene)
         mOwnsPrevVertexBuffer = false;
         mPrevVertexBuffer = nullptr;
     }
+    mAdoptedVertices.clear();
+    mAdoptedIndices.clear();
+    mVertexBufferAliased = false;
+    mWrappedVertices = false;
+    mWrappedIndices = false;
 
-    mVertexBuffer = pVertexBuffer;
-    mIndexBuffer = pIndexBuffer;
+    const size_t vertexDataSize = sizeof(Scene::Vertex) * vertices.size();
+    const size_t indexDataSize = sizeof(uint32_t) * indices.size();
+
+    bool anySkeletal = false;
+    for (const oka::Mesh& mesh : scene->getMeshes())
+    {
+        anySkeletal = anySkeletal || mesh.isSkeletal;
+    }
+
+    // Shared rather than managed, and this is not a preference.
+    //
+    // Metal 4 removes the managed storage mode outright -- it exists to keep a
+    // separate CPU and GPU copy in step on discrete memory, which is not the
+    // architecture Metal 4 targets -- and it removes didModifyRange with it. A
+    // managed buffer bound into an argument table by GPU address therefore has
+    // no defined behaviour, and the GPU writing one (which is exactly what the
+    // skinning kernel does to this buffer) has nowhere to publish the result.
+    //
+    // When the pointer is page-aligned and the allocation is large enough, wrap
+    // it instead of copying. On the pine forest that is 1.5 GB of vertices plus
+    // 0.56 GB of indices that otherwise exist twice in the same unified pool.
+    // Skeletal vertex buffers are copied: the skinning kernel rewrites them, and
+    // the host array has to keep the bind pose for picking.
+    if (vertexDataSize > 0)
+    {
+        const size_t vertexCapacityBytes = anySkeletal ? 0 : vertices.capacity() * sizeof(Scene::Vertex);
+        mVertexBuffer = makeSharedBuffer(
+            mDevice, vertices.data(), vertexDataSize, vertexCapacityBytes, "vertices", mWrappedVertices);
+    }
+    if (indexDataSize > 0)
+    {
+        mIndexBuffer = makeSharedBuffer(
+            mDevice, indices.data(), indexDataSize, indices.capacity() * sizeof(uint32_t), "indices", mWrappedIndices);
+    }
+    mVertexBufferAliased = mWrappedVertices || mWrappedIndices;
 
     // The previous shutter keyframe, for motion blur and for the denoiser's
     // reprojection. It is a second copy of every vertex in the scene -- 1.66 GB
@@ -156,15 +230,9 @@ void MetalGeometry::buildBuffers(Scene* scene)
     // something deforms. A scene with no skeletal geometry can share the buffer
     // instead of duplicating it, which is the difference between that scene
     // fitting in memory and not.
-    bool anySkeletal = false;
-    for (const oka::Mesh& mesh : scene->getMeshes())
-    {
-        anySkeletal = anySkeletal || mesh.isSkeletal;
-    }
     if (vertexDataSize > 0 && anySkeletal)
     {
-        mPrevVertexBuffer = mDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeShared);
-        memcpy(mPrevVertexBuffer->contents(), vertices.data(), vertexDataSize);
+        mPrevVertexBuffer = mDevice->newBuffer(vertices.data(), vertexDataSize, MTL::ResourceStorageModeShared);
         mOwnsPrevVertexBuffer = true;
     }
     else
@@ -174,6 +242,26 @@ void MetalGeometry::buildBuffers(Scene* scene)
     }
 
     buildCurveBuffers(scene);
+}
+
+void MetalGeometry::adoptAliasedHost(Scene* scene)
+{
+    if (!mVertexBufferAliased || scene == nullptr || scene->hostGeometryReleased())
+    {
+        return;
+    }
+    scene->takeHostGeometry(mAdoptedVertices, mAdoptedIndices);
+    if (!mWrappedVertices)
+    {
+        mAdoptedVertices.clear();
+        mAdoptedVertices.shrink_to_fit();
+    }
+    if (!mWrappedIndices)
+    {
+        mAdoptedIndices.clear();
+        mAdoptedIndices.shrink_to_fit();
+    }
+    mVertexBufferAliased = false;
 }
 
 void MetalGeometry::buildCurveBuffers(Scene* scene)
@@ -200,8 +288,7 @@ void MetalGeometry::buildCurveBuffers(Scene* scene)
         const size_t count = std::min<size_t>(curve.mWidthsCount, curve.mPointsCount);
         if (curve.mWidthsStart + count <= radii.size() && curve.mPointsStart + count <= radiusData.size())
         {
-            std::copy_n(radii.begin() + curve.mWidthsStart, count,
-                        radiusData.begin() + curve.mPointsStart);
+            std::copy_n(radii.begin() + curve.mWidthsStart, count, radiusData.begin() + curve.mPointsStart);
         }
     }
 
@@ -254,9 +341,8 @@ void MetalGeometry::buildCurveBuffers(Scene* scene)
     memcpy(mCurveSegmentBuffer->contents(), segments.data(), segments.size() * sizeof(uint32_t));
 
     mSceneHasCurves = true;
-    STRELKA_INFO("Curves: {} set(s), {} control points, {} segments ({:.2f} MB)", curves.size(),
-                 points.size(), segments.size(),
-                 (points.size() * 16 + segments.size() * 4) / 1e6);
+    STRELKA_INFO("Curves: {} set(s), {} control points, {} segments ({:.2f} MB)", curves.size(), points.size(),
+                 segments.size(), (points.size() * 16 + segments.size() * 4) / 1e6);
 }
 
 void MetalGeometry::createMeshData(Scene* scene, size_t meshIndex, bool needsPrimitiveData)
@@ -296,15 +382,15 @@ void MetalGeometry::createMeshData(Scene* scene, size_t meshIndex, bool needsPri
         const uint32_t i1 = indices[mesh.mIndex + i * 3 + 1];
         const uint32_t i2 = indices[mesh.mIndex + i * 3 + 2];
 
-        curr.positions[0] = packed_float3(simd_make_float3(vertices[mesh.mVbOffset + i0].pos.x,
-                                                          vertices[mesh.mVbOffset + i0].pos.y,
-                                                          vertices[mesh.mVbOffset + i0].pos.z));
-        curr.positions[1] = packed_float3(simd_make_float3(vertices[mesh.mVbOffset + i1].pos.x,
-                                                          vertices[mesh.mVbOffset + i1].pos.y,
-                                                          vertices[mesh.mVbOffset + i1].pos.z));
-        curr.positions[2] = packed_float3(simd_make_float3(vertices[mesh.mVbOffset + i2].pos.x,
-                                                          vertices[mesh.mVbOffset + i2].pos.y,
-                                                          vertices[mesh.mVbOffset + i2].pos.z));
+        curr.positions[0] =
+            packed_float3(simd_make_float3(vertices[mesh.mVbOffset + i0].pos.x, vertices[mesh.mVbOffset + i0].pos.y,
+                                           vertices[mesh.mVbOffset + i0].pos.z));
+        curr.positions[1] =
+            packed_float3(simd_make_float3(vertices[mesh.mVbOffset + i1].pos.x, vertices[mesh.mVbOffset + i1].pos.y,
+                                           vertices[mesh.mVbOffset + i1].pos.z));
+        curr.positions[2] =
+            packed_float3(simd_make_float3(vertices[mesh.mVbOffset + i2].pos.x, vertices[mesh.mVbOffset + i2].pos.y,
+                                           vertices[mesh.mVbOffset + i2].pos.z));
         curr.normals[0] = vertices[mesh.mVbOffset + i0].normal;
         curr.normals[1] = vertices[mesh.mVbOffset + i1].normal;
         curr.normals[2] = vertices[mesh.mVbOffset + i2].normal;
