@@ -129,7 +129,12 @@ jobs:
         run: |
           # animation_time=0.5 is load-bearing: at t=start the skeleton is never
           # dirtied and this would pass with skinning broken.
+          #
+          # pipefail is load-bearing too: without it $? is tee's (always 0), the
+          # no-GPU skip never fires, and the step fails on a missing PNG. Cornell
+          # does not pipe, which is why it was already green on the same runner.
           set +e
+          set -o pipefail
           ./StrelkaCLI -c ../../scenes/validation/brainstem/BrainStem.toml \
             -o /tmp/strelka_brainstem.png -w 128 --height 96 --spp 8 2>&1 | tee /tmp/strelka_brainstem.log
           status=$?
