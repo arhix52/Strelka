@@ -152,6 +152,18 @@ public:
         return readDisplayTexture(out, width, height);
     }
 
+    /// The same display image with its EDR range left intact, for a float
+    /// container that can hold it. Display-linear like the two above: the
+    /// transfer encoding belongs to the writer, not to the readback.
+    ///
+    /// Defaults to readDisplayTexture(), which is already exactly this on a
+    /// backend whose readback re-runs the display transform rather than copying
+    /// an already-encoded framebuffer.
+    virtual bool readDisplayTextureHdr(std::vector<float>& out, uint32_t& width, uint32_t& height)
+    {
+        return readDisplayTexture(out, width, height);
+    }
+
     virtual void* getReadyTexture()
     {
         return nullptr;

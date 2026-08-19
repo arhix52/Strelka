@@ -124,7 +124,13 @@ private:
     GLFWmonitor *mOutputMonitor = nullptr;
     VkSurfaceFormatKHR mSelectedSurfaceFormat = {};
     std::vector<VkPresentModeKHR> mAvailablePresentModes;
-    display_output::DisplayCapabilities mOutputCapabilities;
+    // Tagged where it is declared, not where it is filled: every early-out in
+    // swapchain setup returns this struct, and a Vulkan capability set that
+    // reached the UI still claiming DisplayBackend::Unknown would be shown
+    // through whichever branch happened to be the fallback.
+    display_output::DisplayCapabilities mOutputCapabilities{
+        .backend = display_output::DisplayBackend::Vulkan
+    };
 
     uint32_t mAppliedOutputMode = UINT32_MAX;
     float mAppliedPaperWhiteNits = 0.0f;

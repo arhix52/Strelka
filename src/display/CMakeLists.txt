@@ -127,11 +127,16 @@ if(APPLE)
             "-framework Metal"
             "-framework MetalKit"
     )
+    # imguizmo alongside imgui, matching the Vulkan branch above: strelka_display
+    # is where the ImGui stack is assembled, and a consumer that names imguizmo
+    # itself ends up with imgui on the link line twice -- once directly from
+    # here, once behind imguizmo.
     target_link_libraries(strelka_display
         PUBLIC
             strelka_foundation
             strelka_render
             imgui::imgui
+            imguizmo::imguizmo
             glfw
             glm::glm
     )

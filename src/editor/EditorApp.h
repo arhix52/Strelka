@@ -149,6 +149,15 @@ private:
     std::string m_resourceSearchPath;
 
     std::string m_pendingScreenshotPath;
+    // Only reaches an EXR: a PNG is display-referred whatever this says,
+    // because 8 bits have nowhere to put the rest. See
+    // editor_screenshot::sourceForExtension.
+    bool m_screenshotDisplayReferred = false;
+    // --need_screenshot: armed before run(), disarmed by the shot it fires so
+    // a scene that keeps converging does not write a file per frame.
+    bool m_batchScreenshotArmed = false;
+    uint32_t m_batchSppTotal = 0;
+    bool m_batchScreenshotPending = false;
 
     // Throttles for AppKit round-trips that do not need per-frame accuracy.
     std::chrono::high_resolution_clock::time_point m_lastTitleUpdate{};
@@ -198,6 +207,13 @@ private:
 
 public:
     EditorApp(const std::string& sceneFile, const std::string& resourceSearchPath);
+
+    /// Render `sppTotal` samples, write one screenshot, close.
+    ///
+    /// This is what --need_screenshot is for. Call before run(); with
+    /// `screenshotOnComplete` false it only sets the sample counts, which is
+    /// what --spp_total and --spp_subframe do on their own.
+    void setBatchCapture(uint32_t sppTotal, uint32_t sppSubframe, bool screenshotOnComplete);
     /// Cancels a load in flight and waits for it.
     ///
     /// std::future's destructor blocks until the task finishes, so without the

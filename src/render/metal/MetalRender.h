@@ -65,7 +65,11 @@ public:
         {
             return {};
         }
-        return { mAsyncOutputBuffers[readyIndex], mPost.displayTexture(readyIndex) };
+        // Frame serial stays 0, as it always has here: it exists for the Vulkan
+        // display's transform-once bookkeeping, and the Metal display does not
+        // transform published frames at all.
+        return { mAsyncOutputBuffers[readyIndex], mPost.displayTexture(readyIndex), 0,
+                 mPresentation[readyIndex] };
     }
 
     bool memoryReport(MemoryReport& report) const override;
@@ -79,7 +83,16 @@ public:
         mResetDenoiseHistory = true;
         mFrameUniforms.requestSharcReset();
     }
+    /// Rebuilds the display image on the host from the linear frame the slot
+    /// holds, at the headroom the caller asks for and with no transfer encoding.
+    /// Mirrors what the OptiX backend does with a CUDA kernel, and for the same
+    /// reason: the readback has to be able to answer at a *different* headroom
+    /// than the one on screen, which a copy of the finished texture cannot.
+    bool readDisplayReferred(std::vector<float>& rgba, uint32_t& width, uint32_t& height, float maxOutput);
+
     bool readDisplayTexture(std::vector<float>& rgba, uint32_t& width, uint32_t& height) override;
+    bool readDisplayTextureSdr(std::vector<float>& rgba, uint32_t& width, uint32_t& height) override;
+    bool readDisplayTextureHdr(std::vector<float>& rgba, uint32_t& width, uint32_t& height) override;
     bool readGuideTexture(Guide guide, std::vector<float>& rgba, uint32_t& width, uint32_t& height) override;
     float skinnedGeometryExtent() override;
     bool deviceError() const override
@@ -253,6 +266,11 @@ private:
 
     // Async render (double-buffered output)
     Buffer* mAsyncOutputBuffers[2] = { nullptr, nullptr };
+    // How the linear frame in each slot becomes a display image. Filled from
+    // the tonemap uniforms the frame was encoded with, so a readback taken
+    // later reproduces that frame's transform rather than the current
+    // settings, which the user may have moved in the meantime.
+    PresentationMetadata mPresentation[2]{};
     bool mResetDenoiseHistory = true;
     /// A denoised frame is present in mPost.denoisedTexture() and belongs to the
     /// scene and camera as they stand. What the sample budget freezes is that

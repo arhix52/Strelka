@@ -1124,7 +1124,7 @@ bool GlfwDisplay::refreshOutputPolicy()
     mOutputCapabilities.surfaceEncoding = selectedEncoding;
     mOutputCapabilities.output.hdrSelected =
         selectedEncoding == display_output::SurfaceEncoding::HDR10;
-    if (requestedMode == display_output::OutputMode::HDR10 && !hdrAvailable &&
+    if (requestedMode == display_output::OutputMode::HDR && !hdrAvailable &&
         !mForcedHdrFallbackWarned)
     {
         STRELKA_WARNING(

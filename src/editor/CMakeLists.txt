@@ -22,10 +22,18 @@ add_library(strelka_vendor_file_dialog OBJECT
     ${ROOT_HOME}/third_party/imgui_file_dialog/ImGuiFileDialog.cpp
 )
 strelka_apply_vendor_warnings(strelka_vendor_file_dialog)
+# ImGui's headers and defines, not its archive. These objects are folded into
+# StrelkaEditor, which already links imgui through strelka_display; naming the
+# library here as well put the same archive on the link line twice and made ld
+# warn about it. Spelled with target properties rather than $<COMPILE_ONLY:> so
+# it still works on the CMake version this project claims as its minimum.
 target_include_directories(strelka_vendor_file_dialog PRIVATE
     ${ROOT_HOME}/third_party/imgui_file_dialog
+    $<TARGET_PROPERTY:imgui::imgui,INTERFACE_INCLUDE_DIRECTORIES>
 )
-target_link_libraries(strelka_vendor_file_dialog PRIVATE imgui::imgui)
+target_compile_definitions(strelka_vendor_file_dialog PRIVATE
+    $<TARGET_PROPERTY:imgui::imgui,INTERFACE_COMPILE_DEFINITIONS>
+)
 
 add_executable(StrelkaEditor ${EDITOR_SOURCES})
 strelka_apply_warnings(StrelkaEditor)
@@ -65,7 +73,6 @@ target_include_directories(StrelkaEditor
 # This is an executable: its link interface is never consumed, so PRIVATE.
 set(EDITOR_LINK_LIBS
     cxxopts::cxxopts
-    imguizmo::imguizmo
     strelka_display
     strelka_sceneloader
 )

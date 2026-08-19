@@ -10,6 +10,7 @@
 #include "ImGuiFileDialog.h"
 
 #include <cfloat>
+#include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <algorithm>
@@ -19,10 +20,12 @@ namespace oka
 {
 namespace
 {
-void drawDisplayOutputSettings(SettingsManager& settings, const Display& display)
+/// Vulkan/OptiX output settings: an HDR10 swapchain the application negotiates,
+/// with absolute nits for the metadata it attaches to it.
+void drawSwapchainOutputSettings(SettingsManager& settings,
+                                 const display_output::DisplayCapabilities& capabilities)
 {
     const char* const outputModeItems[] = { "Auto", "HDR10", "SDR" };
-    display_output::DisplayCapabilities capabilities;
     uint32_t storedMode = 0;
     int outputMode = 0;
     int n = 0;
@@ -31,11 +34,6 @@ void drawDisplayOutputSettings(SettingsManager& settings, const Display& display
     float paperWhite = NAN;
     float peakNits = NAN;
     const char *vrrStatus = nullptr;
-
-    if (!ImGui::TreeNodeEx("Display output", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        return;
-    }
 
     storedMode = settings.getAs<uint32_t>("render/post/outputMode");
     outputMode = static_cast<int>(std::min(storedMode, static_cast<uint32_t>(display_output::OutputMode::SDR)));
@@ -79,7 +77,6 @@ void drawDisplayOutputSettings(SettingsManager& settings, const Display& display
         settings.setAs<bool>("display/vrr/enabled", vrrEnabled);
     }
 
-    capabilities = display.getOutputCapabilities();
     vrrStatus = display_output::vrrStatusName(capabilities.vrrStatus);
     ImGui::SeparatorText("Capabilities");
     ImGui::TextDisabled(
@@ -106,6 +103,209 @@ void drawDisplayOutputSettings(SettingsManager& settings, const Display& display
         ImGui::TextDisabled(
             "Compositor VRR range: %.3f-%.3f Hz",
             capabilities.minRefreshRateHz, capabilities.maxRefreshRateHz);
+    }
+}
+
+/// Metal output settings.
+///
+/// Deliberately not the swapchain panel above with the words changed. macOS
+/// gives an application no HDR10 surface to select and no absolute luminance to
+/// target: the window server grants a *headroom*, a multiplier over SDR white
+/// that moves with the brightness slider, the thermal state and what other
+/// windows are asking for. So there is nothing here to set in nits, and the
+/// choices that do exist -- how much of the granted headroom to use, and how the
+/// layer presents -- have no counterpart on the Vulkan side.
+void drawMetalOutputSettings(SettingsManager& settings,
+                             const display_output::DisplayCapabilities& capabilities)
+{
+    struct ModeItem
+    {
+        display_output::OutputMode mode;
+        const char* name;
+        const char* help;
+    };
+    // Order matches display_output::OutputMode so the combo index is the stored
+    // value; ReferenceHDR is last there for the Vulkan clamp, and last here
+    // because it is the specialist entry.
+    static const ModeItem kModes[] = {
+        { display_output::OutputMode::Auto, "Auto",
+          "Follow the display. Uses whatever headroom the window server currently\n"
+          "grants, and falls back to plain SDR on a panel that grants none." },
+        { display_output::OutputMode::HDR, "Extended (EDR)",
+          "Always ask for extended-range output, even while the granted headroom\n"
+          "is 1.0. Same result as Auto on a display that has headroom; the\n"
+          "difference is that the layer keeps asking, so the image follows the\n"
+          "headroom back up when it is restored." },
+        { display_output::OutputMode::SDR, "SDR",
+          "Clamp at SDR white and drop the layer to a plain sRGB colour space.\n"
+          "This is the mode to compare against a screenshot, an EXR viewer or a\n"
+          "second machine: everything above white is gone in all of them." },
+        { display_output::OutputMode::ReferenceHDR, "Reference (XDR)",
+          "Map the tone curve to the panel's reference headroom instead of the\n"
+          "headroom handed to an ordinary window. Only on an XDR display in a\n"
+          "reference preset -- pick one in System Settings > Displays before this\n"
+          "entry becomes selectable." },
+    };
+    const uint32_t storedMode =
+        std::min(settings.getAs<uint32_t>("render/post/outputMode"),
+                 static_cast<uint32_t>(display_output::OutputMode::ReferenceHDR));
+    int selectedItem = 0;
+    int n = 0;
+    bool supported = false;
+    bool isSelected = false;
+    float headroomLimit = NAN;
+    float frameRateLimit = NAN;
+    bool vsync = false;
+    bool tripleBuffering = false;
+    char referenceText[32] = "unavailable";
+
+    for (n = 0; n < IM_ARRAYSIZE(kModes); ++n)
+    {
+        if (static_cast<uint32_t>(kModes[n].mode) == storedMode)
+        {
+            selectedItem = n;
+        }
+    }
+
+    ImGui::TextDisabled("Display: %s",
+                        capabilities.displayName.empty() ? "unknown" : capabilities.displayName.c_str());
+
+    if (ImGui::BeginCombo("Dynamic range", kModes[selectedItem].name))
+    {
+        for (n = 0; n < IM_ARRAYSIZE(kModes); ++n)
+        {
+            supported = display_output::outputModeSupported(kModes[n].mode, capabilities.edr);
+            isSelected = n == selectedItem;
+            if (ImGui::Selectable(kModes[n].name, isSelected,
+                                  supported ? ImGuiSelectableFlags_None : ImGuiSelectableFlags_Disabled))
+            {
+                settings.setAs<uint32_t>("render/post/outputMode", static_cast<uint32_t>(kModes[n].mode));
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+                ImGui::SetTooltip("%s%s", kModes[n].help,
+                                  supported ? "" : "\n\nThis display does not offer it.");
+            }
+            if (isSelected)
+            {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    // A ceiling, not a target: the display still decides what it grants, this
+    // only stops the tone curve from spending all of it. Worth having because a
+    // panel that grants 16x makes an ordinary interior render look like a
+    // lightbox, and because A/B against an SDR reference needs a fixed number
+    // rather than one the compositor keeps moving.
+    headroomLimit = settings.getAs<float>("display/edr/headroomLimit");
+    ImGui::BeginDisabled(storedMode == static_cast<uint32_t>(display_output::OutputMode::SDR));
+    if (ImGui::DragFloat("Headroom limit", &headroomLimit, 0.05f, 0.0f,
+                         std::max(capabilities.edr.potentialHeadroom, 2.0f),
+                         headroomLimit >= 1.0f ? "%.2fx" : "%.0f = display maximum"))
+    {
+        settings.setAs<float>("display/edr/headroomLimit", headroomLimit);
+    }
+    ImGui::EndDisabled();
+
+    vsync = settings.getAs<bool>("display/vsync/enabled");
+    if (ImGui::Checkbox("V-Sync", &vsync))
+    {
+        settings.setAs<bool>("display/vsync/enabled", vsync);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+    {
+        ImGui::SetTooltip(
+            "CAMetalLayer displaySyncEnabled. Off presents as fast as the layer\n"
+            "hands out drawables, which tears but takes the compositor out of a\n"
+            "frame time measurement.");
+    }
+
+    tripleBuffering = settings.getAs<bool>("display/present/tripleBuffering");
+    if (ImGui::Checkbox("Triple buffering", &tripleBuffering))
+    {
+        settings.setAs<bool>("display/present/tripleBuffering", tripleBuffering);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+    {
+        ImGui::SetTooltip(
+            "Three drawables absorb a late frame; two save a frame of latency and\n"
+            "make the editor feel more direct on a fast scene.");
+    }
+
+    frameRateLimit = settings.getAs<float>("display/present/fpsLimit");
+    if (ImGui::DragFloat("Frame rate limit", &frameRateLimit, 1.0f, 0.0f,
+                         std::max(capabilities.maxRefreshRateHz, 240.0f),
+                         frameRateLimit >= 1.0f ? "%.0f fps" : "%.0f = display refresh"))
+    {
+        settings.setAs<float>("display/present/fpsLimit", std::max(frameRateLimit, 0.0f));
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+    {
+        ImGui::SetTooltip(
+            "Presented as a minimum frame duration, not a sleep. On a\n"
+            "variable-refresh panel the window server answers it by dropping the\n"
+            "panel to a matching rate, which is where the power saving comes from;\n"
+            "on a fixed-rate one it just paces the presents.");
+    }
+
+    ImGui::SeparatorText("Capabilities");
+    if (capabilities.edr.referenceHeadroom > 1.0f)
+    {
+        // Truncation would only shorten a cosmetic label, and snprintf still
+        // terminates the buffer, so there is nothing here to recover from.
+        (void)snprintf(referenceText, sizeof(referenceText), "%.2fx", capabilities.edr.referenceHeadroom);
+    }
+    ImGui::TextDisabled("EDR headroom: %.2fx now  |  %.2fx potential  |  reference %s",
+                        capabilities.edr.currentHeadroom, capabilities.edr.potentialHeadroom, referenceText);
+    ImGui::TextDisabled("Tone curve maps white to %.2fx SDR white", capabilities.appliedHeadroom);
+    ImGui::TextDisabled("Colour space: %s%s  |  layer: %s",
+                        capabilities.colorSpaceName.empty() ? "unknown" : capabilities.colorSpaceName.c_str(),
+                        capabilities.edr.wideGamut ? " (P3 capable)" : "",
+                        capabilities.edr.edrRequested ? "extended sRGB, RGBA16F" : "sRGB, RGBA16F");
+    if (capabilities.vrrStatus == display_output::VrrStatus::Supported)
+    {
+        ImGui::TextDisabled("Refresh: variable %.1f-%.1f Hz  |  up to %.0f fps",
+                            capabilities.minRefreshRateHz, capabilities.maxRefreshRateHz,
+                            capabilities.currentRefreshRateHz);
+    }
+    else
+    {
+        ImGui::TextDisabled("Refresh: fixed %.1f Hz", capabilities.maxRefreshRateHz);
+    }
+    ImGui::TextDisabled("Present: %u drawables  |  vsync %s  |  %s",
+                        capabilities.maxDrawableCount, capabilities.displaySync ? "on" : "off",
+                        capabilities.frameRateLimitHz > 0.0f ? "rate limited" : "display rate");
+}
+
+void drawDisplayOutputSettings(SettingsManager& settings, const Display& display)
+{
+    display_output::DisplayCapabilities capabilities;
+
+    if (!ImGui::TreeNodeEx("Display output", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        return;
+    }
+
+    // Which controls exist is a property of the backend, not a preference. The
+    // swapchain panel used to be drawn on macOS too, where every row it reports
+    // reads "unavailable" -- not because the display cannot do it, but because
+    // none of it is a Metal concept.
+    capabilities = display.getOutputCapabilities();
+    if (capabilities.backend == display_output::DisplayBackend::Metal)
+    {
+        drawMetalOutputSettings(settings, capabilities);
+    }
+    else
+    {
+        drawSwapchainOutputSettings(settings, capabilities);
     }
     ImGui::TreePop();
 }
@@ -744,7 +944,7 @@ void EditorApp::drawRenderSettingsPanel()
             // Entries, as an exponent: the table is masked rather than divided
             // into, so it has to be a power of two, and a free-typed number
             // would only be rounded down behind the user's back.
-            uint32_t entries = m_settingsManager->getAs<uint32_t>("render/pt/sharcCapacity");
+            const uint32_t entries = m_settingsManager->getAs<uint32_t>("render/pt/sharcCapacity");
             int exponent = 22;
             while ((1u << exponent) > entries && exponent > 16)
             {
@@ -1068,6 +1268,21 @@ void EditorApp::drawRenderSettingsPanel()
         config.path = ".";
         config.fileName = defaultName;
         ImGuiFileDialog::Instance()->OpenDialog("SaveScreenshotDlgKey", "Save Screenshot", ".exr,.png", config);
+    }
+    if (ImGui::Checkbox("EXR holds the display image", &m_screenshotDisplayReferred))
+    {
+        // Nothing to invalidate: the flag is read when the file is written.
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+    {
+        ImGui::SetTooltip(
+            "Off: the EXR holds scene-linear radiance, which is what a reference or a\n"
+            "comparison against another renderer wants.\n\n"
+            "On: it holds what the screen shows -- exposure, tone curve and display\n"
+            "headroom applied -- with the range above white intact, which no PNG can\n"
+            "carry. Neither is transfer encoded; a PNG always gets the SDR rendition.");
     }
 
     auto cameraSpeed = m_settingsManager->getAs<float>("render/cameraSpeed");

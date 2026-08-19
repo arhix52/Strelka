@@ -38,6 +38,9 @@
 #include <fstream>
 
 #include <algorithm>
+// The display transform the readback replays; the same header the tonemap
+// kernel is compiled from, so the two cannot drift.
+#include "tonemappers.h"
 #include <cstdlib>
 #include <map>
 #include <cassert>
@@ -263,6 +266,92 @@ float halfToFloat(uint16_t h)
     return f;
 }
 } // namespace
+
+// Rebuild the display image on the host, at a headroom of the caller's choosing.
+//
+// Not a copy of the finished display texture, and deliberately so. That texture
+// is the frame *as presented*: already at the display's EDR headroom and already
+// through the transfer encoding. A PNG needs neither -- it has nowhere to put a
+// value above white, and its writer applies the encoding itself -- so handing it
+// that texture clipped every highlight the headroom had lifted and encoded the
+// transfer twice, which is a washed-out screenshot of an image that looked right
+// on screen.
+//
+// The OptiX backend answers the same way for the same reason, with a CUDA kernel
+// instead of this loop; both replay the transform from the slot's linear frame,
+// through the shared tone curve, at whatever headroom was asked for and with no
+// gamma. The loop is fine here: this is an inspection path, a few frames taken
+// by hand, not something the frame loop runs.
+bool MetalRender::readDisplayReferred(std::vector<float>& rgba, uint32_t& width, uint32_t& height, float maxOutput)
+{
+    const int ri = mReadyIndex.load();
+    if (ri < 0 || ri > 1 || mAsyncOutputBuffers[ri] == nullptr)
+    {
+        return false;
+    }
+    Buffer* const buffer = mAsyncOutputBuffers[ri];
+    const float* const linear = static_cast<const float*>(buffer->getHostPointer());
+    if (linear == nullptr)
+    {
+        return false;
+    }
+    width = buffer->width();
+    height = buffer->height();
+    if (width == 0 || height == 0)
+    {
+        return false;
+    }
+
+    const PresentationMetadata& presentation = mPresentation[ri];
+    const oka::tonemap::float3 exposure = oka::tonemap::make_float3(
+        presentation.exposure[0], presentation.exposure[1], presentation.exposure[2]);
+    const float headroom = std::max(maxOutput, 1.0f);
+    const auto curve = static_cast<oka::tonemap::ToneMapperType>(presentation.tonemapper);
+    const size_t pixels = static_cast<size_t>(width) * height;
+
+    rgba.resize(pixels * 4);
+    for (size_t i = 0; i < pixels; ++i)
+    {
+        oka::tonemap::float3 c = oka::tonemap::make_float3(
+            linear[i * 4 + 0], linear[i * 4 + 1], linear[i * 4 + 2]);
+        if (shouldApplyPresentationTransform(presentation))
+        {
+            c = c * exposure;
+            switch (curve)
+            {
+            case oka::tonemap::ToneMapperType::eReinhard:
+                c = oka::tonemap::reinhard(c, headroom);
+                break;
+            case oka::tonemap::ToneMapperType::eACES:
+                c = oka::tonemap::ACESFitted(c, headroom);
+                break;
+            case oka::tonemap::ToneMapperType::eFilmic:
+                c = oka::tonemap::ACESFilm(c, headroom);
+                break;
+            case oka::tonemap::ToneMapperType::eNone:
+                break;
+            }
+        }
+        rgba[i * 4 + 0] = c.x;
+        rgba[i * 4 + 1] = c.y;
+        rgba[i * 4 + 2] = c.z;
+        rgba[i * 4 + 3] = linear[i * 4 + 3];
+    }
+    return true;
+}
+
+bool MetalRender::readDisplayTextureSdr(std::vector<float>& rgba, uint32_t& width, uint32_t& height)
+{
+    return readDisplayReferred(rgba, width, height, 1.0f);
+}
+
+bool MetalRender::readDisplayTextureHdr(std::vector<float>& rgba, uint32_t& width, uint32_t& height)
+{
+    const int ri = mReadyIndex.load();
+    const float headroom = (ri >= 0 && ri <= 1) ? mPresentation[ri].maxOutput : 1.0f;
+
+    return readDisplayReferred(rgba, width, height, headroom);
+}
 
 // Read the display texture back to the CPU.
 //
@@ -1533,6 +1622,25 @@ void MetalRender::render(Buffer* output)
         fin.subframeIndex = 0;
         fin.resetDenoiseHistory = true;
         filled = mFrameUniforms.fill(fin);
+    }
+
+    // Record the display transform this slot's frame is being encoded with.
+    // A screenshot is taken frames later, after the user has stopped moving
+    // sliders; reading the settings at that point would describe a transform the
+    // pixels never went through.
+    if (filled.tonemap != nullptr)
+    {
+        PresentationMetadata& presentation = mPresentation[mWriteIndex];
+        presentation.exposure[0] = filled.tonemap->exposureValue.x;
+        presentation.exposure[1] = filled.tonemap->exposureValue.y;
+        presentation.exposure[2] = filled.tonemap->exposureValue.z;
+        presentation.maxOutput = filled.tonemap->maxEDR;
+        presentation.gamma = filled.tonemap->gamma;
+        presentation.tonemapper = filled.tonemap->tonemapperType;
+        // Always SceneLinear: a debug view arrives here as tonemapper None with
+        // gamma 0 and unit exposure, so replaying the transform is already the
+        // identity and needs no second way to say so.
+        presentation.content = PresentationContent::SceneLinear;
     }
 
     MTL::Buffer* pUniformBuffer = filled.uniformBuffer;

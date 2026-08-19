@@ -36,9 +36,20 @@ public:
     }
 
     float getMaxEDR() override;
+    display_output::DisplayCapabilities getOutputCapabilities() const override;
 
 private:
     static constexpr size_t kMaxFramesInFlight = 3;
+
+    /// Reads the NSScreen the window currently sits on. Crosses into AppKit, so
+    /// the frame loop calls it on a timer rather than every frame; everything
+    /// else reads the cached snapshot.
+    void refreshDisplayCapabilities();
+    /// Pushes the user's choices onto the CAMetalLayer, and only when one of
+    /// them changed -- reassigning the colour space rebuilds the layer's
+    /// drawables, which is a visible hitch if done per frame.
+    void applyDisplaySettings();
+    display_output::OutputMode requestedOutputMode() const;
 
     MTL::Device* _pDevice = nullptr;
     MTL::CommandQueue* _pCommandQueue = nullptr;
@@ -76,6 +87,18 @@ private:
 
     // Backing storage for ImGuiIO::IniFilename, which keeps the raw pointer.
     std::string mIniPath;
+
+    display_output::DisplayCapabilities mOutputCapabilities;
+    // UINT32_MAX rather than 0: mode 0 (Auto) is a legal request, so a zero
+    // "applied" value would make the first frame skip the layer configuration
+    // and leave whatever init() happened to set.
+    uint32_t mAppliedOutputMode = UINT32_MAX;
+    uint32_t mAppliedDrawableCount = 0;
+    bool mAppliedDisplaySync = true;
+    // Read every frame instead of latched, because it costs nothing: it only
+    // picks which presentDrawable overload onEndFrame calls.
+    float mFrameRateLimitHz = 0.0f;
+    uint64_t mFrameIndex = 0;
 };
 
 } // namespace oka

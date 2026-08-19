@@ -14,7 +14,9 @@
 #import <QuartzCore/QuartzCore.h>
 #import <CoreGraphics/CGColorSpace.h>
 
+#include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <log.h>
@@ -36,6 +38,32 @@ bool readSourceFile(std::string& str, const std::string& filename)
         return true;
     }
     return false;
+}
+
+/// How often the AppKit probe runs, in frames.
+///
+/// Every field it reads can change while the editor is running -- the window is
+/// dragged to another monitor, the user switches the panel to a reference
+/// preset, the compositor lowers the granted headroom because another window
+/// wants the backlight -- so it cannot be read once at startup. It is also a
+/// dozen ObjC property reads and an NSString, which is not something to spend
+/// per frame for values that move on a human timescale.
+constexpr uint64_t kCapabilityPollFrames = 15;
+
+const char* outputModeName(oka::display_output::OutputMode mode)
+{
+    switch (mode)
+    {
+    case oka::display_output::OutputMode::Auto:
+        return "auto";
+    case oka::display_output::OutputMode::HDR:
+        return "extended";
+    case oka::display_output::OutputMode::SDR:
+        return "sdr";
+    case oka::display_output::OutputMode::ReferenceHDR:
+        return "reference";
+    }
+    return "auto";
 }
 } // namespace
 
@@ -133,18 +161,16 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     layer->setDevice(_pDevice);
     layer->setPixelFormat(MTL::PixelFormatRGBA16Float);
     auto l = (__bridge CAMetalLayer*)layer;
-    // The renderer and its ACES output matrix produce sRGB primaries. Let
-    // ColorSync convert those to the actual panel gamut instead of labelling
-    // them as Display P3, which would oversaturate the image. The extended
-    // transfer function carries encoded values above SDR white for EDR.
-    const CFStringRef name = kCGColorSpaceExtendedSRGB;
-    CGColorSpaceRef colorspace = CGColorSpaceCreateWithName(name);
-    l.colorspace = colorspace;
-    CGColorSpaceRelease(colorspace);
-
-    l.wantsExtendedDynamicRangeContent = YES;
     nswin.contentView.layer = l;
     nswin.contentView.wantsLayer = YES;
+
+    // Colour space, EDR request, vsync and drawable count are all user-visible
+    // choices that can change while the editor runs, so they are set from the
+    // settings in one place instead of half here and half in the frame loop.
+    // The probe runs before the first frame because EditorApp asks for the EDR
+    // headroom before it calls onBeginFrame().
+    refreshDisplayCapabilities();
+    applyDisplaySettings();
 
     renderPassDescriptor = MTL::RenderPassDescriptor::renderPassDescriptor()->retain();
 
@@ -174,8 +200,202 @@ void GlfwDisplay::resetFrame()
 
 float GlfwDisplay::getMaxEDR()
 {
-    NSWindow *const nswin = glfwGetCocoaWindow(mWindow);
-    return static_cast<float>(nswin.screen.maximumExtendedDynamicRangeColorComponentValue);
+    // The mode-adjusted headroom, not the raw NSScreen value. SDR output has to
+    // report 1.0 or the tone curve keeps mapping into range the layer no longer
+    // carries, and the user's headroom ceiling has to reach the tone curve to
+    // mean anything at all -- nothing else consumes it.
+    return mOutputCapabilities.appliedHeadroom;
+}
+
+display_output::DisplayCapabilities GlfwDisplay::getOutputCapabilities() const
+{
+    return mOutputCapabilities;
+}
+
+display_output::OutputMode GlfwDisplay::requestedOutputMode() const
+{
+    uint32_t storedMode = 0;
+
+    if (mSettings != nullptr)
+    {
+        storedMode = mSettings->getAs<uint32_t>("render/post/outputMode");
+    }
+    storedMode = std::min(storedMode, static_cast<uint32_t>(display_output::OutputMode::ReferenceHDR));
+    return static_cast<display_output::OutputMode>(storedMode);
+}
+
+void GlfwDisplay::refreshDisplayCapabilities()
+{
+    if (mWindow == nullptr)
+    {
+        return;
+    }
+
+    NSWindow* const nswin = glfwGetCocoaWindow(mWindow);
+    // nil while the window is entirely off-screen or being torn down. The main
+    // screen is what AppKit itself falls back to, and answering with last
+    // frame's numbers would be worse than answering with another display's.
+    NSScreen* screen = nswin.screen;
+    if (screen == nil)
+    {
+        screen = [NSScreen mainScreen];
+    }
+
+    display_output::EdrCapabilities edr;
+    std::string displayName;
+    std::string colorSpaceName;
+    float minRefreshRateHz = 0.0f;
+    float maxRefreshRateHz = 0.0f;
+    float currentRefreshRateHz = 0.0f;
+
+    if (screen != nil)
+    {
+        // -UTF8String is declared nullable even on a non-nil NSString, and
+        // assigning null to a std::string is undefined -- the analyzer is right
+        // to insist on the check rather than on a nil test of the NSString.
+        const char* const name = screen.localizedName.UTF8String;
+        if (name != nullptr)
+        {
+            displayName = name;
+        }
+        edr.currentHeadroom = static_cast<float>(screen.maximumExtendedDynamicRangeColorComponentValue);
+        edr.potentialHeadroom =
+            static_cast<float>(screen.maximumPotentialExtendedDynamicRangeColorComponentValue);
+        edr.referenceHeadroom =
+            static_cast<float>(screen.maximumReferenceExtendedDynamicRangeColorComponentValue);
+        edr.wideGamut = [screen canRepresentDisplayGamut:NSDisplayGamutP3] == YES;
+
+        NSColorSpace* const colorSpace = screen.colorSpace;
+        const char* const colorSpaceUtf8 = colorSpace != nil ? colorSpace.localizedName.UTF8String : nullptr;
+        if (colorSpaceUtf8 != nullptr)
+        {
+            colorSpaceName = colorSpaceUtf8;
+        }
+
+        // AppKit describes the refresh range as intervals, and the shortest
+        // interval is the *highest* rate -- the two names read backwards against
+        // the hertz they turn into. A fixed-rate panel reports the same interval
+        // twice, which is what tells ProMotion apart from a 60 Hz display.
+        const NSTimeInterval shortestInterval = screen.minimumRefreshInterval;
+        const NSTimeInterval longestInterval = screen.maximumRefreshInterval;
+        if (shortestInterval > 0.0)
+        {
+            maxRefreshRateHz = static_cast<float>(1.0 / shortestInterval);
+        }
+        if (longestInterval > 0.0)
+        {
+            minRefreshRateHz = static_cast<float>(1.0 / longestInterval);
+        }
+        currentRefreshRateHz = static_cast<float>(screen.maximumFramesPerSecond);
+        if (maxRefreshRateHz <= 0.0f)
+        {
+            maxRefreshRateHz = currentRefreshRateHz;
+        }
+    }
+
+    if (layer != nullptr)
+    {
+        CAMetalLayer* const l = (__bridge CAMetalLayer*)layer;
+        edr.edrRequested = l.wantsExtendedDynamicRangeContent == YES;
+        mOutputCapabilities.maxDrawableCount = static_cast<uint32_t>(l.maximumDrawableCount);
+        mOutputCapabilities.displaySync = l.displaySyncEnabled == YES;
+    }
+
+    // Fires on the first probe and again whenever the window is dragged to
+    // another monitor, which are the two moments the numbers below change
+    // wholesale. Logged rather than left to the panel because "the image looks
+    // wrong on the second screen" is a report that arrives without a screenshot
+    // of the settings.
+    if (mOutputCapabilities.displayName != displayName)
+    {
+        STRELKA_INFO("Display \"{}\": EDR headroom {:.2f}x now, {:.2f}x potential, {:.2f}x reference; "
+                     "refresh {:.1f}-{:.1f} Hz; colour space {}{}",
+                     displayName, edr.currentHeadroom, edr.potentialHeadroom, edr.referenceHeadroom,
+                     minRefreshRateHz, maxRefreshRateHz,
+                     colorSpaceName.empty() ? "unknown" : colorSpaceName, edr.wideGamut ? " (P3 capable)" : "");
+    }
+
+    mOutputCapabilities.backend = display_output::DisplayBackend::Metal;
+    mOutputCapabilities.edr = edr;
+    mOutputCapabilities.displayName = displayName;
+    mOutputCapabilities.colorSpaceName = colorSpaceName;
+    mOutputCapabilities.minRefreshRateHz = minRefreshRateHz;
+    mOutputCapabilities.maxRefreshRateHz = maxRefreshRateHz;
+    mOutputCapabilities.currentRefreshRateHz = currentRefreshRateHz;
+    mOutputCapabilities.vrrStatus = display_output::interpretRefreshRange(minRefreshRateHz, maxRefreshRateHz);
+    mOutputCapabilities.present.vrr = mOutputCapabilities.vrrStatus == display_output::VrrStatus::Supported;
+    // Reported through the backend-neutral fields too, so a log line or a future
+    // headless probe reading those gets the same answer as the Metal block.
+    // Nothing sets surfaceEncoding: this path never produces an HDR10 surface,
+    // it hands extended-range values to the window server.
+    mOutputCapabilities.output.hdr10 = edr.potentialHeadroom > 1.0f;
+}
+
+void GlfwDisplay::applyDisplaySettings()
+{
+    uint32_t mode = static_cast<uint32_t>(display_output::OutputMode::Auto);
+    bool displaySync = true;
+    bool tripleBuffering = true;
+    float frameRateLimitHz = 0.0f;
+    float headroomLimit = 0.0f;
+
+    if (mSettings != nullptr)
+    {
+        mode = static_cast<uint32_t>(requestedOutputMode());
+        displaySync = mSettings->getAs<bool>("display/vsync/enabled");
+        tripleBuffering = mSettings->getAs<bool>("display/present/tripleBuffering");
+        frameRateLimitHz = mSettings->getAs<float>("display/present/fpsLimit");
+        headroomLimit = mSettings->getAs<float>("display/edr/headroomLimit");
+    }
+    mFrameRateLimitHz = frameRateLimitHz > 0.0f ? frameRateLimitHz : 0.0f;
+
+    // Cheap and pure, so it runs every frame rather than on the AppKit poll: the
+    // ceiling is a slider, and a knob that takes a quarter of a second to move
+    // the image reads as a knob that does not work.
+    mOutputCapabilities.appliedHeadroom = display_output::selectEdrHeadroom(
+        static_cast<display_output::OutputMode>(mode), mOutputCapabilities.edr, headroomLimit);
+    mOutputCapabilities.output.hdrSelected = mOutputCapabilities.appliedHeadroom > 1.0f;
+    mOutputCapabilities.frameRateLimitHz = mFrameRateLimitHz;
+
+    const uint32_t drawableCount = tripleBuffering ? 3U : 2U;
+    if (layer == nullptr ||
+        (mode == mAppliedOutputMode && displaySync == mAppliedDisplaySync &&
+         drawableCount == mAppliedDrawableCount))
+    {
+        return;
+    }
+
+    CAMetalLayer* const l = (__bridge CAMetalLayer*)layer;
+    const bool sdr = mode == static_cast<uint32_t>(display_output::OutputMode::SDR);
+
+    // The renderer and its ACES output matrix produce sRGB primaries. Let
+    // ColorSync convert those to the actual panel gamut instead of labelling
+    // them as Display P3, which would oversaturate the image. The extended
+    // transfer function carries encoded values above SDR white for EDR; the
+    // plain one clamps them, which is exactly what SDR output means.
+    //
+    // The pixel format stays RGBA16Float in SDR as well. An 8-bit layer would
+    // need the blit PSO and ImGui's Metal pipeline rebuilt for the new
+    // attachment format and buys nothing here -- the window server does the
+    // clamping either way.
+    const CFStringRef colorSpaceName = sdr ? kCGColorSpaceSRGB : kCGColorSpaceExtendedSRGB;
+    CGColorSpaceRef colorspace = CGColorSpaceCreateWithName(colorSpaceName);
+    l.colorspace = colorspace;
+    CGColorSpaceRelease(colorspace);
+
+    l.wantsExtendedDynamicRangeContent = sdr ? NO : YES;
+    l.displaySyncEnabled = displaySync ? YES : NO;
+    // Two drawables give up the compositor's slack to save a frame of latency.
+    // The in-flight semaphore is sized for three either way, so with two it is
+    // nextDrawable that applies the back pressure.
+    l.maximumDrawableCount = drawableCount;
+
+    mAppliedOutputMode = mode;
+    mAppliedDisplaySync = displaySync;
+    mAppliedDrawableCount = drawableCount;
+    STRELKA_INFO("Display output: mode={} colorspace={} vsync={} drawables={}",
+                 outputModeName(static_cast<display_output::OutputMode>(mode)),
+                 sdr ? "sRGB" : "extended sRGB", displaySync, drawableCount);
 }
 
 void GlfwDisplay::drawFrame(ImageBuffer& result)
@@ -361,6 +581,17 @@ void GlfwDisplay::destroy()
 
 void GlfwDisplay::onBeginFrame()
 {
+    // Before the semaphore wait and every early-out below it: a frame this
+    // display drops is still a frame in which the user may have changed the
+    // output mode, and skipping the apply would leave the layer stale until a
+    // frame happens to complete.
+    if ((mFrameIndex % kCapabilityPollFrames) == 0)
+    {
+        refreshDisplayCapabilities();
+    }
+    applyDisplaySettings();
+    ++mFrameIndex;
+
     // Bounded like Metal4's 5s waits: a forever wait here freezes the whole
     // editor if a completed-handler never runs (GPU hang / lost device).
     constexpr int64_t kFrameWaitNs = 5LL * 1000LL * 1000LL * 1000LL;
@@ -442,7 +673,18 @@ void GlfwDisplay::onEndFrame()
         return;
     }
 
-    mCommandBuffer->presentDrawable(drawable);
+    if (mFrameRateLimitHz > 0.0f)
+    {
+        // Not a sleep: the minimum duration is a request to the window server,
+        // which on a variable-refresh panel answers it by dropping the panel to
+        // a matching rate instead of repeating frames at the maximum one.
+        mCommandBuffer->presentDrawableAfterMinimumDuration(
+            drawable, static_cast<CFTimeInterval>(1.0F / mFrameRateLimitHz));
+    }
+    else
+    {
+        mCommandBuffer->presentDrawable(drawable);
+    }
 
     const dispatch_semaphore_t sem = _semaphore;
     mCommandBuffer->addCompletedHandler(^void(MTL::CommandBuffer* /*cb*/) {

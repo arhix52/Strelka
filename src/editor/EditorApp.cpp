@@ -483,10 +483,14 @@ void EditorApp::applyAutoExposure(oka::Buffer* buf)
     m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", 0.0f);
     m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", (float)factor);
     m_autoExposurePending = false;
+    // {:.4g}, not {:.1f}: the factor is middle grey over the scene mean, so on
+    // any scene brighter than 0.18 it is well below 1 and a single decimal place
+    // printed every one of them as "x0.0". Stops alongside it, because that is
+    // the unit the exposure controls in the UI are in.
     STRELKA_INFO(
-        "Auto exposure: scene mean luminance {:.5f}, exposure x{:.1f} "
-        "(no exposure in the light sidecar)",
-        mean, factor);
+        "Auto exposure: scene mean luminance {:.5f}, exposure x{:.4g} ({:+.2f} EV); "
+        "no exposure in the light sidecar",
+        mean, factor, std::log2(factor));
 }
 
 // Exposure comes from the scene when the scene says, and is measured from the
@@ -719,6 +723,16 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<float>("render/post/paperWhiteNits", 203.0f);
     m_settingsManager->setAs<float>("render/post/peakNits", 1000.0f);
     m_settingsManager->setAs<bool>("display/vrr/enabled", true);
+    // Metal presentation. Seeded on every platform because SettingsManager does
+    // not insert on read -- a missing key logs an error and asserts -- and the
+    // panel picks its branch from the display, not from an #ifdef here.
+    // 0 headroom means "whatever the display grants"; 0 fps means "the display's
+    // own rate". Both are the neutral choice, so the defaults change nothing
+    // until the user touches them.
+    m_settingsManager->setAs<float>("display/edr/headroomLimit", 0.0f);
+    m_settingsManager->setAs<bool>("display/vsync/enabled", true);
+    m_settingsManager->setAs<bool>("display/present/tripleBuffering", true);
+    m_settingsManager->setAs<float>("display/present/fpsLimit", 0.0f);
     m_settingsManager->setAs<float>("render/post/tonemapper/maxEDR", 1.0f); // refreshed per frame from the display
     m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", 100.0f);
     m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", 1.0f);
@@ -735,6 +749,24 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<float>("render/pt/dev/materialRayTmin", 0.0f); // offset to avoid self-collision in
 
     loadAnimSettings();
+}
+
+void EditorApp::setBatchCapture(uint32_t sppTotal, uint32_t sppSubframe, bool screenshotOnComplete)
+{
+    if (sppTotal > 0)
+    {
+        m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", sppTotal);
+        m_batchSppTotal = sppTotal;
+    }
+    else
+    {
+        m_batchSppTotal = m_settingsManager->getAs<uint32_t>("render/pt/sppTotal");
+    }
+    if (sppSubframe > 0)
+    {
+        m_settingsManager->setAs<uint32_t>("render/pt/spp", sppSubframe);
+    }
+    m_batchScreenshotArmed = screenshotOnComplete;
 }
 
 void EditorApp::loadAnimSettings()
@@ -4050,11 +4082,36 @@ void EditorApp::run()
             drawUI();
         }
 
+        // --need_screenshot: the sample cap has been reached, so the estimator has
+        // stopped and this frame is the finished one. Queued rather than written
+        // here so it takes the same path as the menu's screenshot, including the
+        // display readback.
+        if (m_batchScreenshotArmed && m_pendingScreenshotPath.empty() && !m_isLoading &&
+            m_batchSppTotal > 0 && m_sharedCtx->mSubframeIndex >= m_batchSppTotal)
+        {
+            // PNG, not EXR: StrelkaCLI already writes scene-linear radiance, and
+            // what this flag is for is the editor's own picture -- exposure, tone
+            // curve and all -- in something that can just be looked at.
+            const std::filesystem::path scene(m_sceneFile);
+            const std::string stem = scene.has_stem() ? scene.stem().string() : "strelka";
+            m_batchScreenshotArmed = false;
+            m_batchScreenshotPending = true;
+            m_pendingScreenshotPath = fmt::format("{}_{}spp.png", stem, m_batchSppTotal);
+            STRELKA_INFO("Batch capture: {} spp reached, writing {}", m_batchSppTotal, m_pendingScreenshotPath);
+        }
+
         // Process pending screenshot save
         if (!m_pendingScreenshotPath.empty() && readyBuf)
         {
             saveScreenshot(readyBuf, m_pendingScreenshotPath);
             m_pendingScreenshotPath.clear();
+            // A batch run has nothing left to do once the file is on disk, and
+            // leaving the window up would make it look like it had hung.
+            if (m_batchScreenshotPending)
+            {
+                m_batchScreenshotPending = false;
+                m_display->requestClose();
+            }
         }
 
         m_display->drawUI();
@@ -4126,13 +4183,16 @@ void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
     std::vector<float> displayPixels;
     bool displayReadbackAvailable = false;
 
-    if (editor_screenshot::sourceForExtension(ext) ==
-        editor_screenshot::Source::DisplayReferredSdr)
+    const editor_screenshot::Source source =
+        editor_screenshot::sourceForExtension(ext, m_screenshotDisplayReferred);
+    if (source != editor_screenshot::Source::SceneLinear)
     {
+        const bool hdr = source == editor_screenshot::Source::DisplayReferredHdr;
         uint32_t displayWidth = 0;
         uint32_t displayHeight = 0;
-        displayReadbackAvailable = m_render->readDisplayTextureSdr(
-            displayPixels, displayWidth, displayHeight);
+        displayReadbackAvailable =
+            hdr ? m_render->readDisplayTextureHdr(displayPixels, displayWidth, displayHeight)
+                : m_render->readDisplayTextureSdr(displayPixels, displayWidth, displayHeight);
         if (displayReadbackAvailable && !displayPixels.empty())
         {
             w = displayWidth;
@@ -4142,9 +4202,8 @@ void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
         else
         {
             STRELKA_INFO("ACTION screenshot path={} ok=false", path);
-            STRELKA_ERROR(
-                "Display-referred SDR pixels are unavailable for PNG screenshot");
-            showAlert("Display-referred SDR pixels are unavailable for PNG screenshot");
+            STRELKA_ERROR("Display-referred pixels are unavailable for this screenshot");
+            showAlert("Display-referred pixels are unavailable for this screenshot");
             return;
         }
     }

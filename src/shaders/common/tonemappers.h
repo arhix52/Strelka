@@ -160,12 +160,113 @@ inline float3 ACESFitted(float3 color)
     return color;
 }
 
+/// Spend display headroom on the highlights, and only on the highlights.
+///
+/// The curve maps into [0, 1]; a display with headroom can show `maxOutput`
+/// times SDR white, and this adds back, above white, what the curve had to
+/// compress away to fit.
+///
+/// The obvious way to reach the display peak is to scale both of the curve's
+/// axes -- `f(x / maxOutput) * maxOutput` -- and that is what these overloads used
+/// to return outright. It rebuilds the whole tone rather than the part that was
+/// clipping: at 3.54x headroom ACES took a middle-grey 0.18 from 0.106 down to
+/// 0.050, so picking an HDR display mode crushed the shadows by a stop and a half
+/// instead of adding highlights. Reinhard alone escaped it, because its toe is
+/// exactly linear and the two scalings cancel there -- which is why that curve
+/// looked like the control did nothing at all.
+///
+/// Blending toward the rescaled curve above a knee fixes the shadows but not the
+/// rest: it assumes the rescaled curve is the brighter of the two, which holds
+/// only for a curve that is concave through the origin. ACES is not -- it has an
+/// S-curve toe, so dividing the input by a large headroom lands in it, and
+/// `f(x/16)*16` comes out *below* `f(x)` from roughly one third of a stop under
+/// white to half a stop over. On the iso_bathroom frame that turned 16x headroom
+/// into a mean lift of x0.97: more headroom, darker picture.
+///
+/// So the lift is built from the linear input instead of from a second pass
+/// through the curve, and bounded by the range the curve actually left unspent.
+/// It is non-negative by construction, which makes the two properties that
+/// matter hold for any curve shape at all: the result is never darker than the
+/// SDR curve, and never above the display peak -- except where the SDR curve was
+/// already past it, which no amount of headroom can undo and which clamping
+/// would only turn into a pixel darker than SDR.
+///
+/// One lift for the pixel, from its brightest channel, rather than one per
+/// channel. Adding the same lift to all three walks a bright saturated highlight
+/// toward white as it brightens, which is what a highlight does; a per-channel
+/// lift extends only the channel that clipped and walks it further away.
+inline float3 spendHeadroomOnHighlights(const float3 linearColor, const float3 sdr, const float maxOutput)
+{
+    // Linear 1.0 is diffuse white: both exposure paths are photographic -- the
+    // auto-exposure anchors the scene mean at middle grey 0.18, the sidecar sets
+    // ISO/f-stop/shutter -- and white sits the usual two and a half stops over it.
+    const float whitePoint = 1.0f;
+    // Where the SDR curve stops being the whole answer. Expressed in curve
+    // output rather than scene linear because each curve puts white at a
+    // different input; 0.5 out is exactly where Reinhard puts linear 1.0.
+    const float knee = 0.5f;
+    float sdrPeak = sdr.x;
+    float linearPeak = linearColor.x;
+    float excess = 0.0f;
+    float lift = 0.0f;
+    float t = 0.0f;
+
+    if (sdr.y > sdrPeak)
+    {
+        sdrPeak = sdr.y;
+    }
+    if (sdr.z > sdrPeak)
+    {
+        sdrPeak = sdr.z;
+    }
+    if (linearColor.y > linearPeak)
+    {
+        linearPeak = linearColor.y;
+    }
+    if (linearColor.z > linearPeak)
+    {
+        linearPeak = linearColor.z;
+    }
+
+    // Range left between what the curve already produced and what the display can
+    // show, not simply maxOutput - 1.
+    //
+    // A curve's own output is not bounded by white. Reinhard divides by the
+    // pixel's luminance, so a channel far brighter than that luminance comes out
+    // above 1 at any headroom -- on a Cornell box frame that is thousands of
+    // pixels. Budgeting from white instead of from where the curve actually
+    // landed put those past the display peak, where the window server clips them
+    // per channel and shifts their hue on the way.
+    //
+    // Clamped at zero rather than allowed to go negative: when the curve has
+    // already overshot the peak there is nothing left to spend, and the pixel
+    // must still not come back darker than the SDR curve left it.
+    const float available = maxOutput > sdrPeak ? maxOutput - sdrPeak : 0.0f;
+
+    excess = linearPeak > whitePoint ? linearPeak - whitePoint : 0.0f;
+    // Reinhard-shaped on the excess: follows it one for one just over white,
+    // where the range is not yet scarce, and rolls off to what is available
+    // rather than running past the peak the display can show. The guard is for
+    // available == 0, where the quotient would be 0/0.
+    lift = available > 0.0f ? available * excess / (excess + available) : 0.0f;
+    // Smoothstep, so the lift is admitted with zero slope and rejoins the SDR
+    // curve without a crease. A step in the first derivative at white shows up as
+    // a hard edge drawn across every smooth falloff in the frame.
+    t = saturate((sdrPeak - knee) / (1.0f - knee));
+    return sdr + lift * (t * t * (3.0f - 2.0f * t));
+}
+
 inline float3 ACESFitted(float3 color, const float maxOutput)
 {
-    // Keep the SDR curve unchanged at maxOutput == 1 while moving its shoulder
-    // to the display peak for EDR. Scaling the result only would brighten paper
-    // white; scaling both axes preserves the curve's slope near black.
-    return ACESFitted(color / maxOutput) * maxOutput;
+    const float3 sdr = ACESFitted(color);
+
+    // Not only an optimisation: it is what keeps the SDR path bit-identical, so
+    // the headless writer, the reference EXRs and the Cycles ladder do not move.
+    if (maxOutput <= 1.0f)
+    {
+        return sdr;
+    }
+    return spendHeadroomOnHighlights(color, sdr, maxOutput);
 }
 
 // https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
@@ -181,7 +282,13 @@ inline float3 ACESFilm(float3 x)
 
 inline float3 ACESFilm(float3 x, const float maxOutput)
 {
-    return ACESFilm(x / maxOutput) * maxOutput;
+    const float3 sdr = ACESFilm(x);
+
+    if (maxOutput <= 1.0f)
+    {
+        return sdr;
+    }
+    return spendHeadroomOnHighlights(x, sdr, maxOutput);
 }
 
 // original implementation https://github.com/NVIDIAGameWorks/Falcor/blob/5236495554f57a734cc815522d95ae9a7dfe458a/Source/RenderPasses/ToneMapper/ToneMapping.ps.slang
@@ -199,7 +306,13 @@ inline float3 reinhard(float3 color)
 
 inline float3 reinhard(float3 color, const float maxOutput)
 {
-    return reinhard(color / maxOutput) * maxOutput;
+    const float3 sdr = reinhard(color);
+
+    if (maxOutput <= 1.0f)
+    {
+        return sdr;
+    }
+    return spendHeadroomOnHighlights(color, sdr, maxOutput);
 }
 
 inline float gammaFloat(const float c, const float gamma)

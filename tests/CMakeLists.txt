@@ -121,16 +121,16 @@ target_include_directories(unit_tests
         ${CMAKE_SOURCE_DIR}/src/shaders/optix
 )
 
+# strelka_sceneloader PUBLIC-links strelka_scene and strelka_display PUBLIC-links
+# imgui and imguizmo, so naming any of them again here only put the archive on
+# the link line twice.
 target_link_libraries(unit_tests
     PRIVATE
         doctest::doctest
         strelka_material
-        strelka_scene
         strelka_sceneloader
         strelka_display
         glm::glm
-        imgui::imgui
-        imguizmo::imguizmo
 )
 
 # scenes/validation is the asset root the skinned-bounds regression reads when
@@ -164,6 +164,35 @@ if(LINUX AND TARGET strelka_display)
         PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 60
+    )
+endif()
+
+# One rendered frame, put through the display transform.
+#
+# Separate from unit_tests because it needs a device and a built StrelkaCLI, and
+# a suite that cannot run without a GPU is a suite that stops being run. It skips
+# rather than fails when either is missing.
+if(TARGET StrelkaCLI)
+    find_package(tinyexr REQUIRED)
+    add_executable(cornell_display_regression
+        ${CMAKE_CURRENT_SOURCE_DIR}/render/cornell_display_regression.cpp
+    )
+    strelka_apply_warnings(cornell_display_regression)
+    target_compile_definitions(cornell_display_regression
+        PRIVATE
+            STRELKA_TEST_ASSETS_DIR="${CMAKE_SOURCE_DIR}/scenes/validation"
+            STRELKA_TEST_BINARY_DIR="${OUTPUT_DIRECTORY}"
+    )
+    target_include_directories(cornell_display_regression
+        PRIVATE ${CMAKE_SOURCE_DIR}/src/shaders/common
+    )
+    target_link_libraries(cornell_display_regression PRIVATE tinyexr::tinyexr glm::glm)
+    add_dependencies(cornell_display_regression StrelkaCLI)
+    add_test(NAME cornell_display_regression COMMAND cornell_display_regression)
+    set_tests_properties(cornell_display_regression
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 300
     )
 endif()
 

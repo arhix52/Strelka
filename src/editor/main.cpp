@@ -1,6 +1,7 @@
 #include <log.h>
 #include <logmanager.h>
 #include <cxxopts.hpp>
+#include <algorithm>
 #include <filesystem>
 
 #include "EditorApp.h"
@@ -13,7 +14,6 @@ int main(int argc, const char* argv[])
     // clang-format off
     options.add_options()
         ("s, scene", "scene path", cxxopts::value<std::string>()->default_value(""))
-        ("i, iteration", "Iteration to capture", cxxopts::value<int32_t>()->default_value("-1"))
         ("h, help", "Print usage")("t, spp_total", "spp total", cxxopts::value<int32_t>()->default_value("64"))
         ("f, spp_subframe", "spp subframe", cxxopts::value<int32_t>()->default_value("1"))
         ("c, need_screenshot", "Screenshot after spp total", cxxopts::value<bool>()->default_value("false"))
@@ -46,6 +46,12 @@ int main(int argc, const char* argv[])
     STRELKA_DEBUG("Resource search path {}", resourceSearchPath);
 
     oka::EditorApp editor(sceneFile, resourceSearchPath);
+
+    // These were parsed and then dropped on the floor: --need_screenshot in
+    // particular advertised a batch capture the editor never performed.
+    editor.setBatchCapture(static_cast<uint32_t>(std::max(result["t"].as<int32_t>(), 0)),
+                           static_cast<uint32_t>(std::max(result["f"].as<int32_t>(), 0)),
+                           result["c"].as<bool>());
 
     editor.run();
 

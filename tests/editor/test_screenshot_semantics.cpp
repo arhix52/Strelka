@@ -13,9 +13,27 @@ TEST_CASE("preview screenshots choose the source that matches their format")
     CHECK(sourceForExtension(".unknown") == Source::SceneLinear);
 }
 
+TEST_CASE("EXR carries the display image only when asked, PNG always does")
+{
+    // PNG is 8 bits: there is nowhere in it for a value above white, so the
+    // choice does not apply and clipping the EDR range into it would discard
+    // exactly the highlights the headroom was spent on.
+    CHECK(sourceForExtension(".png", false) == Source::DisplayReferredSdr);
+    CHECK(sourceForExtension(".png", true) == Source::DisplayReferredSdr);
+
+    // EXR can hold either, so it follows the caller.
+    CHECK(sourceForExtension(".exr", false) == Source::SceneLinear);
+    CHECK(sourceForExtension(".exr", true) == Source::DisplayReferredHdr);
+
+    // Omitting the flag keeps the behaviour every existing caller had.
+    CHECK(sourceForExtension(".exr") == Source::SceneLinear);
+    CHECK(sourceForExtension(".png") == Source::DisplayReferredSdr);
+}
+
 TEST_CASE("EXR screenshot policy never selects display transfer encoding")
 {
     CHECK(sourceForExtension(".exr") != Source::DisplayReferredSdr);
+    CHECK(sourceForExtension(".exr", true) != Source::DisplayReferredSdr);
 }
 
 TEST_CASE("PNG screenshot transfer encodes display-linear RGB as sRGB")
