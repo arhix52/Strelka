@@ -62,6 +62,7 @@ public:
 
     void update(double deltaTime, float speed)
     {
+        const float dt = static_cast<float>(deltaTime);
         mCam.rotationSpeed = rotationSpeed;
         mCam.movementSpeed = speed;
         if (mCam.keys.left || mCam.keys.right || mCam.keys.up || mCam.keys.down || mCam.keys.forward ||
@@ -69,7 +70,7 @@ public:
         {
             mUserMovedCamera = true;
         }
-        mCam.update(deltaTime);
+        mCam.update(dt);
 
         // Arrow key rotation
         if (mRotateKeys.left || mRotateKeys.right || mRotateKeys.up || mRotateKeys.down)
@@ -77,13 +78,13 @@ public:
             mUserMovedCamera = true;
             float dx = 0.0f, dy = 0.0f;
             if (mRotateKeys.left)
-                dx -= keyRotationSpeed * deltaTime;
+                dx -= keyRotationSpeed * dt;
             if (mRotateKeys.right)
-                dx += keyRotationSpeed * deltaTime;
+                dx += keyRotationSpeed * dt;
             if (mRotateKeys.up)
-                dy -= keyRotationSpeed * deltaTime;
+                dy -= keyRotationSpeed * dt;
             if (mRotateKeys.down)
-                dy += keyRotationSpeed * deltaTime;
+                dy += keyRotationSpeed * dt;
             mCam.rotate(dx, dy);
         }
     }
@@ -242,13 +243,13 @@ public:
     {
         if (mGizmoBlocksInput)
         {
-            mCam.mousePos[0] = xpos;
-            mCam.mousePos[1] = ypos;
+            mCam.mousePos[0] = static_cast<float>(xpos);
+            mCam.mousePos[1] = static_cast<float>(ypos);
             return;
         }
 
-        const float dx = mCam.mousePos[0] - xpos;
-        const float dy = mCam.mousePos[1] - ypos;
+        const float dx = mCam.mousePos[0] - static_cast<float>(xpos);
+        const float dy = mCam.mousePos[1] - static_cast<float>(ypos);
 
         if (mCam.mouseButtons.right || mCam.mouseButtons.left || mCam.mouseButtons.middle)
         {
@@ -269,10 +270,10 @@ public:
         }
         if (mCam.mouseButtons.middle)
         {
-            mCam.translate(glm::float3(-dx * 0.01, -dy * 0.01, 0.0f));
+            mCam.translate(glm::float3(-dx * 0.01f, -dy * 0.01f, 0.0f));
         }
-        mCam.mousePos[0] = xpos;
-        mCam.mousePos[1] = ypos;
+        mCam.mousePos[0] = static_cast<float>(xpos);
+        mCam.mousePos[1] = static_cast<float>(ypos);
     }
 };
 

@@ -205,9 +205,9 @@ inline void normalizeNormalMap(uint8_t* rgba, int width, int height)
     for (size_t i = 0; i < count; ++i)
     {
         uint8_t* p = rgba + i * 4;
-        const float x = p[0] / 255.0f * 2.0f - 1.0f;
-        const float y = p[1] / 255.0f * 2.0f - 1.0f;
-        const float z = p[2] / 255.0f * 2.0f - 1.0f;
+        const float x = static_cast<float>(p[0]) / 255.0f * 2.0f - 1.0f;
+        const float y = static_cast<float>(p[1]) / 255.0f * 2.0f - 1.0f;
+        const float z = static_cast<float>(p[2]) / 255.0f * 2.0f - 1.0f;
         const float len = std::sqrt(x * x + y * y + z * z);
         if (len < 1e-6f)
         {

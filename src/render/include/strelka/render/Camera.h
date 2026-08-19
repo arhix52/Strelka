@@ -78,7 +78,7 @@ public:
         U = glm::normalize(glm::cross(W, m_up));
         V = glm::normalize(glm::cross(U, W));
 
-        float vlen = wlen * tanf(0.5f * m_fovY * M_PI / 180.0f);
+        float vlen = wlen * tanf(glm::radians(0.5f * m_fovY));
         V *= vlen;
         float ulen = vlen * m_aspectRatio;
         U *= ulen;

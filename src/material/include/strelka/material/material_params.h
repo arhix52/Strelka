@@ -63,6 +63,9 @@ enum AlphaMode : unsigned int
     ALPHA_MODE_BLEND  = 2,
 };
 
+// The values are an ABI the shaders share, written out one by one on purpose;
+// COUNT is a sentinel rather than a material, so it has no number of its own.
+// NOLINTNEXTLINE(cert-int09-c)
 enum MaterialType : unsigned int
 {
     MATERIAL_TYPE_DIFFUSE       = 0,

@@ -17,15 +17,22 @@ namespace oka
 /// off, depth 0, Metal 3 -- so a typo produced a measurement quietly taken with
 /// settings nobody asked for. Parsing here reports it instead.
 
+/// std::getenv is flagged mt-unsafe because another thread may call setenv
+/// underneath it. Nothing in this tree writes the environment, and every read
+/// below happens while the process is still setting itself up, so the NOLINTs
+/// on the three call sites record that rather than repeating it.
+
 /// True when the variable is present, whatever its value. For the knobs that
 /// select a mode by existing at all (STRELKA_BENCH, STRELKA_REF, ...).
 inline bool envFlag(const char* name)
 {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
     return std::getenv(name) != nullptr;
 }
 
 inline uint32_t envUint(const char* name, uint32_t fallback)
 {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
     const char* raw = std::getenv(name);
     if (raw == nullptr || *raw == '\0')
     {
@@ -43,6 +50,7 @@ inline uint32_t envUint(const char* name, uint32_t fallback)
 
 inline double envDouble(const char* name, double fallback)
 {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
     const char* raw = std::getenv(name);
     if (raw == nullptr || *raw == '\0')
     {
