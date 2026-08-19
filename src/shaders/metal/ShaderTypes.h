@@ -3,9 +3,9 @@
 
 #include <simd/simd.h>
 #ifndef __METAL_VERSION__
-#ifdef __cplusplus
-#include <Metal/MTLTypes.hpp>
-#endif
+#    ifdef __cplusplus
+#        include <Metal/MTLTypes.hpp>
+#    endif
 #endif
 
 #define GEOMETRY_MASK_TRIANGLE 1
@@ -64,10 +64,8 @@ enum class DebugMode : uint32_t
     // has to mean the same thing on both, and the panel builds its list from
     // this enum for both.
     //
-    // Not implemented on Metal yet -- selecting one renders normally rather
-    // than failing. The OptiX side has them (src/shaders/optix/sharc.h,
-    // OptixRender.cu) and is the reference for the port; it is a hand-off, see
-    // docs/open-defects.md.
+    // eSharcGrid is NVIDIA's HashGridDebugColoredHash -- the compact spatial key
+    // at the primary world-space intersection, which needs no cache allocated.
     eSharcGrid,
     eSharcRadiance,
     eSharcOccupancy,
@@ -75,6 +73,14 @@ enum class DebugMode : uint32_t
 };
 
 #define DEBUG_MODE_FIRST_AOV 3
+#define DEBUG_MODE_LAST_AOV ((uint32_t)DebugMode::eAovSpecularHitDistance)
+#define DEBUG_MODE_IS_AOV(d) ((d) >= DEBUG_MODE_FIRST_AOV && (d) <= DEBUG_MODE_LAST_AOV)
+// Debug views answered by the first surface a camera ray meets. The background
+// and any emitter along the way have to stay out of them, or the one number the
+// view exists to show competes with the sky for the pixel.
+#define DEBUG_MODE_IS_SINGLE_HIT(d)                                                                                    \
+    ((d) == (uint32_t)DebugMode::eNormal || (d) == (uint32_t)DebugMode::eMotionBlur ||                                 \
+     (d) == (uint32_t)DebugMode::eSharcGrid || (d) == (uint32_t)DebugMode::eSharcRadiance)
 
 struct Vertex
 {
@@ -158,11 +164,31 @@ struct Uniforms
     /// only subsurface media -- whose boundaries a shadow ray never crosses --
     /// pays nothing for it.
     uint32_t hasBoundedMedium;
-    // Radiance cache; see sharc.h.
-    uint32_t sharcCapacity;   // 0 disables
+    // Sparse Hash Radiance Cache (SHARC); see sharc.h. The cache is updated by
+    // a sparse path pass, resolved, and only then queried by the image pass.
+    uint32_t sharcCapacity; // 0 disables
     uint32_t sharcMinSamples; // before a voxel may be read
-    uint32_t sharcDepth;      // first bounce allowed to read the cache
+    uint32_t sharcDepth; // first bounce allowed to read the cache
+    uint32_t sharcFlags;
     float sharcBaseSize;
+    float sharcSceneScale;
+    float sharcRoughnessThreshold;
+    float sharcRadianceScale;
+    uint32_t sharcUpdateDownscale;
+    uint32_t sharcAccumulationFrames;
+    uint32_t sharcResponsiveFrames;
+    uint32_t sharcStaleFrameCount;
+    uint32_t sharcPropagationDepth;
+    uint32_t sharcDebug;
+    uint32_t sharcUpdatePathCount;
+    uint32_t sharcFrameIndex;
+    int32_t sharcLevelBias;
+    /// Camera position the grid was addressed from last frame. Resolve needs it
+    /// to tell whether a cell moved nearer or further, and therefore which
+    /// adjacent LOD holds its history. Its own field rather than
+    /// `prevViewToWorld`, which is the shutter-open matrix for camera motion
+    /// blur and only advances while an animation is playing.
+    vector_float3 sharcCameraPrev;
     float fogSigmaT;
     float fogAnisotropy;
     float fogHeight;
@@ -242,7 +268,6 @@ struct Uniforms
 };
 
 
-
 // How the depth guide is encoded.
 //
 // MetalFX does not document which it wants. Two things point at device depth: the
@@ -253,11 +278,11 @@ struct Uniforms
 // reading the header harder.
 // Uniforms::projectionType. Mirrors oka::Camera::ProjectionType, which the
 // shaders cannot include.
-#define PROJECTION_PERSPECTIVE  0u
+#define PROJECTION_PERSPECTIVE 0u
 #define PROJECTION_ORTHOGRAPHIC 1u
 
 #define kDenoiseDepthDevice 0u ///< clip z / w, the value a depth buffer holds
-#define kDenoiseDepthViewZ  1u ///< distance along the camera's forward axis
+#define kDenoiseDepthViewZ 1u ///< distance along the camera's forward axis
 #define kDenoiseDepthRadial 2u ///< distance to the eye
 
 // What a denoiser needs to know about the primary hit, written once per pixel by
@@ -271,11 +296,11 @@ struct Uniforms
 struct AovSample
 {
     packed_float3 diffuseAlbedo;
-    float depth;            // encoding selected by Uniforms::denoiseDepthMode
+    float depth; // encoding selected by Uniforms::denoiseDepthMode
     packed_float3 specularAlbedo;
     float roughness;
-    packed_float3 normal;   // world space
-    float motionX;          // previous-frame screen position minus current, in pixels
+    packed_float3 normal; // world space
+    float motionX; // previous-frame screen position minus current, in pixels
     float motionY;
     /// Distance from the primary hit to what its specular lobe sees. MetalFX
     /// reprojects reflections with this instead of treating them as if they sat
@@ -285,7 +310,10 @@ struct AovSample
     /// is known to be a lie: mirrors, glass, and anything whose previous position
     /// could not be established.
     float reactive;
-    float pad2;
+    /// Path depth the sample reached before it died, for
+    /// `DebugMode::eSharcBounces`. It was padding and still is when that view is
+    /// off; the struct needs the word either way.
+    float bounceDepth;
 };
 
 struct UniformsTonemap
@@ -328,8 +356,8 @@ struct Triangle
 // this table instead, and the geometry index within the BLAS selects the entry.
 struct GeometryEntry
 {
-    uint32_t vbOffset;     // mesh vertex buffer offset, or first control point of a curve set
-    uint32_t indexOffset;  // mesh index buffer offset, or first segment of a curve set
+    uint32_t vbOffset; // mesh vertex buffer offset, or first control point of a curve set
+    uint32_t indexOffset; // mesh index buffer offset, or first segment of a curve set
     uint32_t materialId;
     // Zero for a triangle mesh. For a curve set: GEOM_FLAG_CURVE, plus the
     // segments per strand in the low bits, which is what lets the shader recover
@@ -339,8 +367,8 @@ struct GeometryEntry
     uint32_t flags;
 };
 
-#define GEOM_FLAG_CURVE        (1u << 31)
-#define GEOM_CURVE_CUBIC       (1u << 30)
+#define GEOM_FLAG_CURVE (1u << 31)
+#define GEOM_CURVE_CUBIC (1u << 30)
 #define GEOM_CURVE_STRAND_MASK 0x0000FFFFu
 
 // --- Wavefront path tracing ------------------------------------------------
@@ -421,25 +449,73 @@ struct MediumPathState
     uint32_t mediumAlbedo;
 };
 
-// Radiance-cache bookkeeping lives apart from PathState because every stage
-// streams the hot PathState on every bounce, while only SHARC-enabled shade/deposit
-// kernels touch these values. Keeping 28 cold bytes in the hot record made a
-// cache-disabled path 52 bytes wide instead of 24.
-struct SharcPathState
+// The sparse update pass stores only the vertices that can still receive
+// radiance. Four is the non-resampling propagation depth used by SHARC; the
+// default resampling mode uses the first two records.
+#define SHARC_MAX_PROPAGATION_DEPTH 4
+struct SharcUpdateState
 {
-    uint32_t index;
-    packed_float3 radianceAtVisit;
-    packed_float3 invThroughput;
+    uint32_t cacheIndices[SHARC_MAX_PROPAGATION_DEPTH];
+    uint32_t responsiveIndices[SHARC_MAX_PROPAGATION_DEPTH];
+    packed_float3 weights[SHARC_MAX_PROPAGATION_DEPTH];
+    packed_float3 directions[SHARC_MAX_PROPAGATION_DEPTH];
+    float directionWeights[SHARC_MAX_PROPAGATION_DEPTH];
+    packed_float3 pendingThroughput;
+    uint32_t pixelIndex;
+    uint32_t pathLength;
+    uint32_t flags;
 };
 
-#define MEDIUM_INDEX_MASK  0xFFFFu
-#define MEDIUM_STEP_SHIFT   16u
+#define MEDIUM_INDEX_MASK 0xFFFFu
+#define MEDIUM_STEP_SHIFT 16u
 /// Ceiling on one walk. A dense medium is a long walk that Russian roulette
 /// alone terminates slowly, and a path that never ends is a hang rather than a
 /// dim pixel.
-#define MEDIUM_MAX_STEPS    256u
+#define MEDIUM_MAX_STEPS 256u
 
 #define SHARC_NO_ENTRY 0xFFFFFFFFu
+
+#define SHARC_FLAG_MATERIAL_DEMODULATION (1u << 0)
+#define SHARC_FLAG_SEPARATE_EMISSIVE (1u << 1)
+#define SHARC_FLAG_DIRECTIONAL (1u << 2)
+#define SHARC_FLAG_RESPONSIVE (1u << 3)
+#define SHARC_FLAG_CACHE_RESAMPLING (1u << 4)
+#define SHARC_FLAG_BLEND_ADJACENT_LEVELS (1u << 5)
+#define SHARC_FLAG_FADE_ACCELERATION (1u << 6)
+// Internal resolved-entry classification; not part of Uniforms::sharcFlags.
+#define SHARC_RESOLVED_RESPONSIVE_ENTRY (1u << 31)
+
+#define SHARC_STAT_INSERTION 0u
+#define SHARC_STAT_INSERTION_FAILURE 1u
+#define SHARC_STAT_QUERY_ATTEMPT 2u
+#define SHARC_STAT_QUERY_HIT 3u
+#define SHARC_STAT_EVICTION 4u
+#define SHARC_STAT_COLLISION 5u
+#define SHARC_STAT_SEGMENT_REJECT 6u
+#define SHARC_STAT_FOOTPRINT_REJECT 7u
+#define SHARC_STAT_ACCUMULATION_CLAMP 8u
+#define SHARC_STAT_NONFINITE_REJECT 9u
+#define SHARC_STAT_MAX_RADIANCE_FIXED 10u
+#define SHARC_STAT_MAX_SAMPLE_COUNT 11u
+#define SHARC_STAT_COUNT 12u
+
+// Metal-only cache internals, alongside -- not overlapping -- the four
+// cross-backend `DebugMode` cache views. The grid, the resolved radiance, the
+// table occupancy and the bounce heatmap live in DebugMode because both
+// backends answer them; what is below exists because the Metal hash map is the
+// thing being debugged.
+#define SHARC_DEBUG_OFF 0u
+#define SHARC_DEBUG_CACHED_KEY 1u
+#define SHARC_DEBUG_QUERY_RESULT 2u
+#define SHARC_DEBUG_SAMPLE_COUNT 3u
+#define SHARC_DEBUG_COUNTERS 4u
+#define SHARC_DEBUG_COLLISIONS 5u
+#define SHARC_DEBUG_LAST_VISUALIZATION SHARC_DEBUG_COLLISIONS
+
+// Views answered by one surface. They replace the image rather than adding to
+// it, so nothing else -- sky, emitter, or a later bounce -- may write the pixel.
+#define SHARC_DEBUG_IS_SURFACE_VIEW(d)                                                                                 \
+    ((d) != SHARC_DEBUG_OFF && (d) != SHARC_DEBUG_COUNTERS && (d) <= SHARC_DEBUG_LAST_VISUALIZATION)
 
 // Two counters for the two ways the nested-dielectric stack loses a path, in a
 // shared buffer the host reads back after the frame. See ior_stack.h and entry 1
@@ -450,7 +526,7 @@ struct SharcPathState
 // that one is device-private and reading it back needs a blit the Metal 4 path
 // does not encode. Two words of shared memory cost nothing and both submission
 // paths write them the same way.
-#define IOR_STAT_OVERFLOW  0
+#define IOR_STAT_OVERFLOW 0
 #define IOR_STAT_UNMATCHED 1
 /// A path that reached the environment with a non-empty stack. The other half of
 /// the same failure: a pop that matches nothing is a ray that *left* something it
@@ -458,21 +534,25 @@ struct SharcPathState
 /// which is what a hole in a refracting mesh produces, and the case no exit
 /// event exists to catch.
 #define IOR_STAT_ESCAPED_INSIDE 2
-#define IOR_STAT_COUNT     3
+#define IOR_STAT_COUNT 3
 
-#define PATH_FLAG_ALIVE      (1u << 8)
-#define PATH_FLAG_SPECULAR   (1u << 9)
-#define PATH_FLAG_NEE_DONE   (1u << 10)
+#define PATH_FLAG_ALIVE (1u << 8)
+#define PATH_FLAG_SPECULAR (1u << 9)
+#define PATH_FLAG_NEE_DONE (1u << 10)
 // The denoiser guides for this pixel have been written. A mirror or a glass
 // surface has no albedo to demodulate against and a roughness of nothing, so the
 // guides are deferred to the first surface that does -- and then must not be
 // overwritten by the bounce after it.
-#define PATH_FLAG_AOV_DONE   (1u << 11)
-#define PATH_DEPTH_MASK      0xFFu
+#define PATH_FLAG_AOV_DONE (1u << 11)
+#define PATH_DEPTH_MASK 0xFFu
 // Transparent hits are counted apart from bounces: passing through a cutout is
 // not a scattering event and must not consume path depth. Bits 12+ are free.
 #define PATH_PASSTHROUGH_SHIFT 12u
-#define PATH_PASSTHROUGH_MAX   32u
+#define PATH_PASSTHROUGH_MAX 32u
+// Origin-lobe roughness for the SHARC footprint test. Pass-through uses bits
+// 12..17, leaving this byte cold in the existing flags word.
+#define PATH_SHARC_ROUGHNESS_SHIFT 18u
+#define PATH_SHARC_ROUGHNESS_MASK (0xffu << PATH_SHARC_ROUGHNESS_SHIFT)
 
 // What `extend` hands to `shade`. Deliberately small: `intersection.primitive_data`
 // is only valid inside the kernel that ran the intersect, so instead of copying
@@ -510,6 +590,10 @@ struct ShadowRay
     /// says whether it began within one. A vertex inside a fog volume and a
     /// vertex just outside it produce the same origin and direction.
     uint32_t medium;
+    // Local (pre-path-throughput) direct-light estimate. The sparse update pass
+    // propagates this only after visibility has been established by shadow.
+    packed_float3 sharcRadiance;
+    uint32_t sharcPathIndex;
 };
 
 // One entry of the environment map alias table (Walker/Vose), one per texel.
@@ -523,8 +607,8 @@ struct EnvAliasEntry
 
 struct SkinningParams
 {
-    uint32_t vbOffset;       // vertex buffer offset for this mesh
-    uint32_t sbOffset;       // skin data buffer offset
+    uint32_t vbOffset; // vertex buffer offset for this mesh
+    uint32_t sbOffset; // skin data buffer offset
     uint32_t jointMatOffset; // offset into joint matrices array
     uint32_t vertexCount;
 };
@@ -532,8 +616,8 @@ struct SkinningParams
 struct TriangleUpdateParams
 {
     uint32_t triangleCount;
-    uint32_t indexOffset;    // mesh.mIndex
-    uint32_t vbOffset;       // mesh.mVbOffset
+    uint32_t indexOffset; // mesh.mIndex
+    uint32_t vbOffset; // mesh.mVbOffset
     uint32_t pad0;
 };
 
@@ -581,70 +665,70 @@ struct IesGpuProfileHeader
 struct Material
 {
     // PBR parameters (layout uses packed_float3 for host/GPU compatibility)
-    packed_float3 base_color;       // 12 bytes
-    float metallic;                 //  4 bytes  -- 16
+    packed_float3 base_color; // 12 bytes
+    float metallic; //  4 bytes  -- 16
 
-    float roughness;                //  4 bytes
-    float ior;                      //  4 bytes
-    float specular;                 //  4 bytes
-    float _pad_specular;            //  4 bytes  -- 32 (was specular_tint)
+    float roughness; //  4 bytes
+    float ior; //  4 bytes
+    float specular; //  4 bytes
+    float _pad_specular; //  4 bytes  -- 32 (was specular_tint)
 
-    float transmission;             //  4 bytes
-    float clearcoat;                //  4 bytes
-    float clearcoat_roughness;      //  4 bytes
-    float anisotropy;               //  4 bytes  -- 48
+    float transmission; //  4 bytes
+    float clearcoat; //  4 bytes
+    float clearcoat_roughness; //  4 bytes
+    float anisotropy; //  4 bytes  -- 48
 
-    packed_float3 emission;         // 12 bytes
-    float emission_strength;        //  4 bytes  -- 64
+    packed_float3 emission; // 12 bytes
+    float emission_strength; //  4 bytes  -- 64
 
-    float normal_scale;             //  4 bytes
-    float occlusion_strength;       //  4 bytes
-    float alpha_cutoff;             //  4 bytes
-    uint32_t material_type;         //  4 bytes  -- 80
+    float normal_scale; //  4 bytes
+    float occlusion_strength; //  4 bytes
+    float alpha_cutoff; //  4 bytes
+    uint32_t material_type; //  4 bytes  -- 80
 
-    uint32_t thin_walled;           //  4 bytes
-    uint32_t dielectric_priority;   //  4 bytes  (nested dielectrics)
-    uint32_t alpha_mode;            //  4 bytes  (AlphaMode)
-    float base_color_alpha;         //  4 bytes  -- 96
+    uint32_t thin_walled; //  4 bytes
+    uint32_t dielectric_priority; //  4 bytes  (nested dielectrics)
+    uint32_t alpha_mode; //  4 bytes  (AlphaMode)
+    float base_color_alpha; //  4 bytes  -- 96
 
     packed_float3 attenuation_color; // 12 bytes (KHR_materials_volume)
-    float attenuation_distance;      //  4 bytes -- 112
+    float attenuation_distance; //  4 bytes -- 112
 
     // KHR_texture_transform, one per material; see material_params.h.
-    vector_float2 uv_offset;         //  8 bytes
-    vector_float2 uv_scale;          //  8 bytes
-    float uv_rotation;               //  4 bytes
-    float _pad_uv;                   //  4 bytes -- 136
+    vector_float2 uv_offset; //  8 bytes
+    vector_float2 uv_scale; //  8 bytes
+    float uv_rotation; //  4 bytes
+    float _pad_uv; //  4 bytes -- 136
 
     // KHR_materials_diffuse_transmission; see material_params.h.
     packed_float3 diffuse_transmission_color; // 12 bytes
-    float diffuse_transmission;               //  4 bytes -- 152
+    float diffuse_transmission; //  4 bytes -- 152
 
     // KHR_materials_sheen; see material_params.h.
-    packed_float3 sheen_color;                // 12 bytes
-    float sheen;                              //  4 bytes -- 168
+    packed_float3 sheen_color; // 12 bytes
+    float sheen; //  4 bytes -- 168
 
     // STRELKA_materials_subsurface; see material_params.h.
-    packed_float3 subsurface_radius;          // 12 bytes
-    float sheen_roughness;                    //  4 bytes -- 184
-    float subsurface;                         //  4 bytes
-    float subsurface_anisotropy;              //  4 bytes -- 192
+    packed_float3 subsurface_radius; // 12 bytes
+    float sheen_roughness; //  4 bytes -- 184
+    float subsurface; //  4 bytes
+    float subsurface_anisotropy; //  4 bytes -- 192
 
     // STRELKA_materials_medium; see material_params.h.
-    packed_float3 medium_emission;            // 12 bytes
-    uint32_t medium_flags;                    //  4 bytes -- 208
-    float clearcoat_ior;                      //  4 bytes -- 212
+    packed_float3 medium_emission; // 12 bytes
+    uint32_t medium_flags; //  4 bytes -- 208
+    float clearcoat_ior; //  4 bytes -- 212
 
     // KHR_materials_specular specularColorFactor; see material_params.h.
-    packed_float3 specular_color;             // 12 bytes -- 224
+    packed_float3 specular_color; // 12 bytes -- 224
 
     // KHR_materials_iridescence; see material_params.h.
-    float iridescence;                        //  4 bytes
-    float iridescence_ior;                    //  4 bytes
-    float iridescence_thickness;              //  4 bytes -- 236
+    float iridescence; //  4 bytes
+    float iridescence_ior; //  4 bytes
+    float iridescence_thickness; //  4 bytes -- 236
 
-    packed_float3 subsurface_reference;       // 12 bytes -- 248
-    float _pad_irid[2];                       //  8 bytes -- 256
+    packed_float3 subsurface_reference; // 12 bytes -- 248
+    float _pad_irid[2]; //  8 bytes -- 256
 
     // Textures (8 bytes each: resource ID on CPU, texture handle on GPU)
 #ifdef __METAL_VERSION__

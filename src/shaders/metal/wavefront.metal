@@ -54,8 +54,7 @@
 // than a scattering albedo carries meaning at, and this rides on every live path.
 static inline uint32_t packMediumAlbedo(float3 a)
 {
-    return (uint32_t)(saturate(a.x) * 255.0f + 0.5f) |
-           ((uint32_t)(saturate(a.y) * 255.0f + 0.5f) << 8) |
+    return (uint32_t)(saturate(a.x) * 255.0f + 0.5f) | ((uint32_t)(saturate(a.y) * 255.0f + 0.5f) << 8) |
            ((uint32_t)(saturate(a.z) * 255.0f + 0.5f) << 16);
 }
 
@@ -76,42 +75,41 @@ static inline float3 unpackMediumAlbedo(uint32_t v)
 //   [6..10]  : shadow ray count, republished count, and its dispatch arguments
 //   [11..15] : the same for rays that hit geometry
 //   [16..20] : the same for rays that escaped
-#define WF_CTRL_COUNT0     0
-#define WF_CTRL_COUNT1     1
-#define WF_CTRL_DISPATCH   2
-#define WF_CTRL_ACTIVE     5
-#define WF_CTRL_SHADOW     6
-#define WF_CTRL_SHADOW_N   7
+#define WF_CTRL_COUNT0 0
+#define WF_CTRL_COUNT1 1
+#define WF_CTRL_DISPATCH 2
+#define WF_CTRL_ACTIVE 5
+#define WF_CTRL_SHADOW 6
+#define WF_CTRL_SHADOW_N 7
 #define WF_CTRL_SHADOW_DIS 8
-#define WF_CTRL_HIT        11
-#define WF_CTRL_HIT_N      12
-#define WF_CTRL_HIT_DIS    13
-#define WF_CTRL_MISS       16
-#define WF_CTRL_MISS_N     17
-#define WF_CTRL_MISS_DIS   18
-#define WF_CTRL_CAPACITY   24
+#define WF_CTRL_HIT 11
+#define WF_CTRL_HIT_N 12
+#define WF_CTRL_HIT_DIS 13
+#define WF_CTRL_MISS 16
+#define WF_CTRL_MISS_N 17
+#define WF_CTRL_MISS_DIS 18
+#define WF_CTRL_CAPACITY 24
 // Profiling only: live path count and shadow ray count per bounce, so the
 // per-stage timings can be read as a cost per ray rather than a cost per stage.
-#define WF_CTRL_STATS_PATHS  32
+#define WF_CTRL_STATS_PATHS 32
 #define WF_CTRL_STATS_SHADOW 64
 
 // Shared pre-traversal breadcrumbs. The prepare dispatch completes before
 // extend starts, so these survive even when one of the first few rays wedges in
 // the ray tracing unit and the command buffer is terminated by the watchdog.
-#define WF_DIAG_BOUNCES    96
-#define WF_DIAG_LANES      4
+#define WF_DIAG_BOUNCES 96
+#define WF_DIAG_LANES 4
 #define WF_DIAG_LANE_WORDS 11
-#define WF_DIAG_STRIDE     (1 + WF_DIAG_LANES * WF_DIAG_LANE_WORDS)
+#define WF_DIAG_STRIDE (1 + WF_DIAG_LANES * WF_DIAG_LANE_WORDS)
 #define WF_STAGE_BREADCRUMB 96
-#define WF_DIAG_BASE       97
+#define WF_DIAG_BASE 97
 
 // Reserve a run of output slots for the active lanes of one simdgroup. Every
 // lane that reaches a call site belongs in that queue -- the others already
 // returned or took the other branch, so they are inactive and the simdgroup
 // reductions below see only the lanes being queued. One atomic per simdgroup
 // instead of one per lane.
-static inline void queuePush(device atomic_uint* counter, device uint32_t* queueOut,
-                             uint32_t pathIndex)
+static inline void queuePush(device atomic_uint* counter, device uint32_t* queueOut, uint32_t pathIndex)
 {
     const uint32_t rank = simd_prefix_exclusive_sum(1u);
     const uint32_t total = simd_sum(1u);
@@ -190,8 +188,7 @@ static bool shadowAlphaAnyHitImpl(uint primitive_id,
     for (uint32_t k = 0; k < 3; ++k)
     {
         const uint32_t idx = indexBuffer[entry.indexOffset + primitive_id * 3 + k];
-        uvv[k] = unpackUV(
-            *(device const uint32_t*)(vertexBuffer + (entry.vbOffset + idx) * vtxStride + uvOff));
+        uvv[k] = unpackUV(*(device const uint32_t*)(vertexBuffer + (entry.vbOffset + idx) * vtxStride + uvOff));
     }
     const float2 uv = interpolateAttrib(uvv[0], uvv[1], uvv[2], barycentric_coord);
     const float opacity = resolveOpacity(mat, uv);
@@ -213,20 +210,16 @@ static bool shadowAlphaAnyHitImpl(uint primitive_id,
 // to match the intersector and the table that will hold it, so a curve-capable
 // shadow pipeline needs its own copy -- the test itself is identical, and curve
 // geometry is built opaque, so this is never called on a strand.
-#define WF_ANY_HIT_ENTRY(NAME, ...)                                                                  \
-    [[intersection(triangle, __VA_ARGS__)]]                                                          \
-    bool NAME(uint primitive_id [[primitive_id]], uint geometry_id [[geometry_id]],                  \
-              uint instance_id [[instance_id]], float2 barycentric_coord [[barycentric_coord]],      \
-              ray_data ShadowPayload& payload [[payload]],                                           \
-              constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(0)]],  \
-              device const Material* materials [[buffer(1)]],                                        \
-              device const GeometryEntry* geometryEntries [[buffer(2)]],                             \
-              device const char* vertexBuffer [[buffer(3)]],                                         \
-              device const uint32_t* indexBuffer [[buffer(4)]])                                      \
-    {                                                                                                \
-        return shadowAlphaAnyHitImpl(primitive_id, geometry_id, instance_id, barycentric_coord,      \
-                                     payload, instances, materials, geometryEntries, vertexBuffer,   \
-                                     indexBuffer);                                                   \
+#define WF_ANY_HIT_ENTRY(NAME, ...)                                                                                      \
+    [[intersection(triangle, __VA_ARGS__)]]                                                                              \
+    bool NAME(uint primitive_id [[primitive_id]], uint geometry_id [[geometry_id]], uint instance_id [[instance_id]],    \
+              float2 barycentric_coord [[barycentric_coord]], ray_data ShadowPayload& payload [[payload]],               \
+              constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(0)]],                      \
+              device const Material* materials [[buffer(1)]], device const GeometryEntry* geometryEntries [[buffer(2)]], \
+              device const char* vertexBuffer [[buffer(3)]], device const uint32_t* indexBuffer [[buffer(4)]])           \
+    {                                                                                                                    \
+        return shadowAlphaAnyHitImpl(primitive_id, geometry_id, instance_id, barycentric_coord, payload, instances,      \
+                                     materials, geometryEntries, vertexBuffer, indexBuffer);                             \
     }
 
 WF_ANY_HIT_ENTRY(shadowAlphaAnyHit, triangle_data, instancing)
@@ -268,13 +261,12 @@ struct MotionTraversal
     {
         return i.intersect(r, as, mask, time);
     }
-    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as,
-                                                  uint32_t mask, float time)
+    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as, uint32_t mask, float time)
     {
         return i.intersect(r, as, mask, time);
     }
-    static isect::result_type traceAnyHit(thread isect& i, ray r, structure as, uint32_t mask,
-                                          float time, table t, thread ShadowPayload& payload)
+    static isect::result_type traceAnyHit(
+        thread isect& i, ray r, structure as, uint32_t mask, float time, table t, thread ShadowPayload& payload)
     {
         return i.intersect(r, as, mask, time, t, payload);
     }
@@ -298,13 +290,12 @@ struct StaticTraversal
     {
         return i.intersect(r, as, mask);
     }
-    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as,
-                                                  uint32_t mask, float)
+    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as, uint32_t mask, float)
     {
         return i.intersect(r, as, mask);
     }
-    static isect::result_type traceAnyHit(thread isect& i, ray r, structure as, uint32_t mask,
-                                          float, table t, thread ShadowPayload& payload)
+    static isect::result_type traceAnyHit(
+        thread isect& i, ray r, structure as, uint32_t mask, float, table t, thread ShadowPayload& payload)
     {
         return i.intersect(r, as, mask, t, payload);
     }
@@ -336,13 +327,12 @@ struct CurveMotionTraversal
     {
         return i.intersect(r, as, mask, time);
     }
-    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as,
-                                                  uint32_t mask, float time)
+    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as, uint32_t mask, float time)
     {
         return i.intersect(r, as, mask, time);
     }
-    static isect::result_type traceAnyHit(thread isect& i, ray r, structure as, uint32_t mask,
-                                          float time, table t, thread ShadowPayload& payload)
+    static isect::result_type traceAnyHit(
+        thread isect& i, ray r, structure as, uint32_t mask, float time, table t, thread ShadowPayload& payload)
     {
         return i.intersect(r, as, mask, time, t, payload);
     }
@@ -366,13 +356,12 @@ struct CurveStaticTraversal
     {
         return i.intersect(r, as, mask);
     }
-    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as,
-                                                  uint32_t mask, float)
+    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as, uint32_t mask, float)
     {
         return i.intersect(r, as, mask);
     }
-    static isect::result_type traceAnyHit(thread isect& i, ray r, structure as, uint32_t mask,
-                                          float, table t, thread ShadowPayload& payload)
+    static isect::result_type traceAnyHit(
+        thread isect& i, ray r, structure as, uint32_t mask, float, table t, thread ShadowPayload& payload)
     {
         return i.intersect(r, as, mask, t, payload);
     }
@@ -429,11 +418,13 @@ static inline uint32_t pathDepth(uint32_t depthAndFlags)
 
 // The sampler is never stored: it is a pure function of these three values, and
 // recomputing it costs less than the 12 bytes it would add to every path.
-static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixelIndex,
-                                      uint32_t sampleIdx, uint32_t depth)
+static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixelIndex, uint32_t sampleIdx, uint32_t depth)
 {
-    SamplerState s = initSampler(pixelIndex, uniforms.subframeIndex + sampleIdx, uniforms.width,
-                                 uniforms.blueNoiseSwitchSpp);
+    // The sparse update is a temporal estimator even while interactive
+    // accumulation is disabled and subframeIndex remains zero. Seed it from the
+    // frame number so a tile revisited later does not retrace the same path.
+    const uint32_t sequenceIndex = SPEC_SHARC_UPDATE ? uniforms.sharcFrameIndex : uniforms.subframeIndex + sampleIdx;
+    SamplerState s = initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp);
     s.depth = depth;
     return s;
 }
@@ -457,15 +448,31 @@ static inline float motionTimeFor(constant Uniforms& uniforms, uint32_t pixelInd
     const uint32_t radianceSample = sampleIdx - firstRadianceSample;
     const uint32_t sampleCount = max(uniforms.samples_per_launch, 1u);
     const float t =
-        ((float)radianceSample + random<SampleDimension::eTime>(s, uniforms.samplerType)) /
-        (float)sampleCount;
+        ((float)radianceSample + random<SampleDimension::eTime>(s, uniforms.samplerType)) / (float)sampleCount;
     return uniforms.isMotionBlurVisible ? t : 1.0f;
 }
 
 static inline bool shouldWriteAov(constant Uniforms& uniforms, uint32_t sampleIdx)
 {
-    return uniforms.writeAov &&
-           (!uniforms.canonicalGuideSample || sampleIdx == 0u);
+    return !SPEC_SHARC_UPDATE && uniforms.writeAov && (!uniforms.canonicalGuideSample || sampleIdx == 0u);
+}
+
+static inline uint32_t sharcUpdateStateIndex(constant Uniforms& uniforms, uint32_t pixelIndex)
+{
+    const uint32_t scale = max(uniforms.sharcUpdateDownscale, 1u);
+    const uint32_t tileWidth = (uniforms.width + scale - 1u) / scale;
+    const uint2 pixel = uint2(pixelIndex % uniforms.width, pixelIndex / uniforms.width);
+    return (pixel.y / scale) * tileWidth + pixel.x / scale;
+}
+
+static inline uint32_t packSharcRoughness(float roughness)
+{
+    return uint32_t(round(saturate(roughness) * 255.0f)) << PATH_SHARC_ROUGHNESS_SHIFT;
+}
+
+static inline float unpackSharcRoughness(uint32_t depthAndFlags)
+{
+    return float((depthAndFlags & PATH_SHARC_ROUGHNESS_MASK) >> PATH_SHARC_ROUGHNESS_SHIFT) / 255.0f;
 }
 
 // Measured and not kept: adaptive sampling -- retiring a pixel once its estimate
@@ -512,54 +519,70 @@ static inline bool shouldWriteAov(constant Uniforms& uniforms, uint32_t sampleId
 // ---------------------------------------------------------------------------
 // generate -- camera rays
 // ---------------------------------------------------------------------------
-kernel void wavefrontGenerate(
-    uint                                                       tid            [[thread_position_in_grid]],
-    constant Uniforms&                                         uniforms       [[buffer(0)]],
-    device PathState*                                          paths          [[buffer(1)]],
-    device PathRay*                                            rays           [[buffer(8)]],
-    device float4*                                             radianceOut    [[buffer(2)]],
-    device IorStack*                                           iorStacks      [[buffer(3)]],
-    constant uint32_t&                                         sampleIdx      [[buffer(4)]],
-    device uint32_t*                                           queueOut       [[buffer(5)]],
-    device uint32_t*                                           control        [[buffer(6)]],
-    device AovSample*                                          aov            [[buffer(7)]],
-    // Zeroed here rather than on the host: `generate` already owns resetting the
-    // per-sample counters, and a host-side clear would race the frame in flight.
-    // The tally is therefore per sample, which is the rate rather than a total.
-    device uint32_t*                                           iorStats       [[buffer(9)]],
-    device SharcPathState*                                     sharcPaths     [[buffer(10)]],
-    device MediumPathState*                                    mediumPaths    [[buffer(11)]])
+kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
+                              constant Uniforms& uniforms [[buffer(0)]],
+                              device PathState* paths [[buffer(1)]],
+                              device PathRay* rays [[buffer(8)]],
+                              device float4* radianceOut [[buffer(2)]],
+                              device IorStack* iorStacks [[buffer(3)]],
+                              constant uint32_t& sampleIdx [[buffer(4)]],
+                              device uint32_t* queueOut [[buffer(5)]],
+                              device uint32_t* control [[buffer(6)]],
+                              device AovSample* aov [[buffer(7)]],
+                              // Zeroed here rather than on the host: `generate` already owns resetting the
+                              // per-sample counters, and a host-side clear would race the frame in flight.
+                              // The tally is therefore per sample, which is the rate rather than a total.
+                              device uint32_t* iorStats [[buffer(9)]],
+                              device SharcUpdateState* sharcUpdates [[buffer(10)]],
+                              device MediumPathState* mediumPaths [[buffer(11)]])
 {
     const uint32_t pixelCount = uniforms.width * uniforms.height;
+    const uint32_t pathCount = SPEC_SHARC_UPDATE ? uniforms.sharcUpdatePathCount : pixelCount;
     if (tid == 0u)
     {
-        control[WF_CTRL_COUNT0] = pixelCount;
+        control[WF_CTRL_COUNT0] = pathCount;
         control[WF_CTRL_COUNT1] = 0u;
         control[WF_CTRL_SHADOW] = 0u;
         control[WF_CTRL_HIT] = 0u;
         control[WF_CTRL_MISS] = 0u;
-        control[WF_CTRL_CAPACITY] = pixelCount;
+        control[WF_CTRL_CAPACITY] = pathCount;
         iorStats[IOR_STAT_OVERFLOW] = 0u;
         iorStats[IOR_STAT_UNMATCHED] = 0u;
         iorStats[IOR_STAT_ESCAPED_INSIDE] = 0u;
     }
-    if (tid >= pixelCount)
+    if (tid >= pathCount)
     {
         return;
     }
-    // Every camera ray starts alive, so the first queue is the identity and
-    // needs no compaction.
-    queueOut[tid] = tid;
+
+    uint32_t pixelIndex = tid;
+    if (SPEC_SHARC_UPDATE)
+    {
+        const uint32_t scale = max(uniforms.sharcUpdateDownscale, 1u);
+        const uint32_t tileWidth = (uniforms.width + scale - 1u) / scale;
+        const uint2 tile = uint2(tid % tileWidth, tid / tileWidth);
+        const uint32_t scramble = sharcHash(tid ^ (uniforms.sharcFrameIndex * 0x9e3779b9u));
+        const uint2 offset = uint2(scramble % scale, (scramble / scale) % scale);
+        const uint2 pixel = min(tile * scale + offset, uint2(uniforms.width - 1u, uniforms.height - 1u));
+        pixelIndex = pixel.y * uniforms.width + pixel.x;
+        SharcUpdateState updateState;
+        sharcInitUpdateState(updateState, pixelIndex);
+        sharcUpdates[tid] = updateState;
+    }
+
+    // Sparse updates preserve the same tile order while queueing the selected
+    // full-resolution path slots.
+    queueOut[tid] = pixelIndex;
 
     const uint32_t firstRadianceSample = uniforms.canonicalGuideSample ? 1u : 0u;
     if (sampleIdx == firstRadianceSample)
     {
-        radianceOut[tid] = float4(0.0f);
+        radianceOut[pixelIndex] = float4(0.0f);
     }
 
-    const uint2 pixel = uint2(tid % uniforms.width, tid / uniforms.width);
-    SamplerState rng = samplerFor(uniforms, tid, sampleIdx, 0u);
-    const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
+    const uint2 pixel = uint2(pixelIndex % uniforms.width, pixelIndex / uniforms.width);
+    SamplerState rng = samplerFor(uniforms, pixelIndex, sampleIdx, 0u);
+    const float motionTime = motionTimeFor(uniforms, pixelIndex, sampleIdx);
 
     float3 origin, direction;
     generateCameraRay(pixel, rng, origin, direction, uniforms, motionTime);
@@ -570,35 +593,29 @@ kernel void wavefrontGenerate(
         a.specularAlbedo = packed_float3(float3(0.0f));
         a.normal = packed_float3(-direction);
         a.roughness = 1.0f;
-        a.depth =
-            uniforms.denoiseDepthMode == kDenoiseDepthDevice ? 0.0f : 1e7f;
+        a.depth = uniforms.denoiseDepthMode == kDenoiseDepthDevice ? 0.0f : 1e7f;
         a.motionX = 0.0f;
         a.motionY = 0.0f;
         a.specularHitDistance = 0.0f;
         a.reactive = 1.0f;
-        a.pad2 = 0.0f;
-        aov[tid] = a;
+        a.bounceDepth = 0.0f;
+        aov[pixelIndex] = a;
     }
 
     PathRay r;
     r.origin = packed_float3(origin);
     r.direction = packed_float3(direction);
-    rays[tid] = r;
+    rays[pixelIndex] = r;
 
     PathState p;
     p.throughput = packed_float3(float3(1.0f));
-    p.depthAndFlags = PATH_FLAG_ALIVE; // depth 0, not specular, NEE not done
+    // The camera segment has no scattering footprint. The specular flag keeps
+    // it non-queryable independently; subsequent bounces accumulate their cone
+    // width into the packed SHARC roughness.
+    p.depthAndFlags = PATH_FLAG_ALIVE | PATH_FLAG_SPECULAR | packSharcRoughness(0.0f);
     p.lastBsdfPdf = 0.0f;
     p.misDistance = 0.0f;
-    if (SPEC_SHARC)
-    {
-        SharcPathState sharc;
-        sharc.index = SHARC_NO_ENTRY;
-        sharc.radianceAtVisit = packed_float3(0.0f);
-        sharc.invThroughput = packed_float3(0.0f);
-        sharcPaths[tid] = sharc;
-    }
-    paths[tid] = p;
+    paths[pixelIndex] = p;
     if (SPEC_SSS)
     {
         // Outside every medium. A camera that starts inside a translucent object
@@ -606,47 +623,46 @@ kernel void wavefrontGenerate(
         MediumPathState mediumState;
         mediumState.medium = 0u;
         mediumState.mediumAlbedo = 0u;
-        mediumPaths[tid] = mediumState;
+        mediumPaths[pixelIndex] = mediumState;
     }
 
     // ior_stack_* take a thread reference; device memory cannot bind to one.
     IorStack stack;
     ior_stack_init(stack);
-    iorStacks[tid] = stack;
+    iorStacks[pixelIndex] = stack;
 }
 
 // ---------------------------------------------------------------------------
 // extend -- closest hit
 // ---------------------------------------------------------------------------
 template <typename T>
-static void extendImpl(
-    uint gid,
-    constant Uniforms&                                         uniforms,
-    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
-    typename T::structure accelerationStructure,
-    typename T::structure volumeAccelerationStructure,
-    device const PathRay*                                      rays,
-    device HitRecord*                                          hits,
-    constant uint32_t&                                         sampleIdx,
-    device const uint32_t*                                     queue,
-    device const uint32_t*                                     control,
-    device uint32_t*                                           hitQueue,
-    device atomic_uint*                                        hitCounter,
-    device uint32_t*                                           missQueue,
-    device atomic_uint*                                        missCounter,
-    // Only for the fog: the path's depth decorrelates the free-flight draw
-    // across bounces, and without it every bounce of a path scatters at the same
-    // fraction of its segment, which shows up as banding in the haze.
-    device const PathState*                                    paths,
-    // Only for the subsurface walk, which needs the medium's mean free path to
-    // sample a free flight and reads it from the material the path is inside.
-    device const Material*                                     materials,
-    device const MediumPathState*                              mediumPaths,
-    // Chosen per dispatch rather than per ray: the only thing it distinguishes
-    // is the camera bounce from the rest, and `extend` is encoded once per
-    // bounce anyway. Reading the path's depth here to answer the same question
-    // would put a load in the hottest kernel in the renderer.
-    uint32_t                                                   rayMask)
+static void extendImpl(uint gid,
+                       constant Uniforms& uniforms,
+                       constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                       typename T::structure accelerationStructure,
+                       typename T::structure volumeAccelerationStructure,
+                       device const PathRay* rays,
+                       device HitRecord* hits,
+                       constant uint32_t& sampleIdx,
+                       device const uint32_t* queue,
+                       device const uint32_t* control,
+                       device uint32_t* hitQueue,
+                       device atomic_uint* hitCounter,
+                       device uint32_t* missQueue,
+                       device atomic_uint* missCounter,
+                       // Only for the fog: the path's depth decorrelates the free-flight draw
+                       // across bounces, and without it every bounce of a path scatters at the same
+                       // fraction of its segment, which shows up as banding in the haze.
+                       device const PathState* paths,
+                       // Only for the subsurface walk, which needs the medium's mean free path to
+                       // sample a free flight and reads it from the material the path is inside.
+                       device const Material* materials,
+                       device const MediumPathState* mediumPaths,
+                       // Chosen per dispatch rather than per ray: the only thing it distinguishes
+                       // is the camera bounce from the rest, and `extend` is encoded once per
+                       // bounce anyway. Reading the path's depth here to answer the same question
+                       // would put a load in the hottest kernel in the renderer.
+                       uint32_t rayMask)
 {
     // Indirect dispatch can only launch whole threadgroups, so the tail of the
     // last one runs past the queue and has to be discarded here.
@@ -681,8 +697,7 @@ static void extendImpl(
     // traversal on malformed rays can fail to make progress and trip the GPU
     // watchdog instead of merely returning no intersection.
     const float directionLength2 = dot(r.direction, r.direction);
-    if (!all(isfinite(r.origin)) || !all(isfinite(r.direction)) ||
-        !(directionLength2 > 0.25f && directionLength2 < 4.0f))
+    if (!all(isfinite(r.origin)) || !all(isfinite(r.direction)) || !(directionLength2 > 0.25f && directionLength2 < 4.0f))
     {
         return;
     }
@@ -713,16 +728,14 @@ static void extendImpl(
             {
                 device const Material& mm = materials[medium - 1u];
                 const float3 sigmaT = sssSigmaT(float3(mm.subsurface_radius));
-                const float3 albedo = ((mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
-                                          ? float3(mm.diffuse_transmission_color)
-                                          : unpackMediumAlbedo(mediumState.mediumAlbedo);
+                const float3 albedo = ((mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u) ?
+                                          float3(mm.diffuse_transmission_color) :
+                                          unpackMediumAlbedo(mediumState.mediumAlbedo);
                 const float3 channelPdf = sssChannelPdf(float3(paths[tid].throughput), albedo);
-                SamplerState srng = samplerFor(uniforms, tid, sampleIdx,
-                                               pathDepth(paths[tid].depthAndFlags) + step);
+                SamplerState srng = samplerFor(uniforms, tid, sampleIdx, pathDepth(paths[tid].depthAndFlags) + step);
                 if (sssSampleDistance(sigmaT, channelPdf, 1e16f,
                                       random<SampleDimension::eSssChannel>(srng, uniforms.samplerType),
-                                      random<SampleDimension::eSssDistance>(srng, uniforms.samplerType),
-                                      mediumScatterT))
+                                      random<SampleDimension::eSssDistance>(srng, uniforms.samplerType), mediumScatterT))
                 {
                     mediumHitBit = HIT_SSS_BIT;
                 }
@@ -731,11 +744,9 @@ static void extendImpl(
     }
     if (SPEC_FOG && uniforms.hasFog && !insideSss)
     {
-        SamplerState frng = samplerFor(uniforms, tid, sampleIdx,
-                                      pathDepth(paths[tid].depthAndFlags));
+        SamplerState frng = samplerFor(uniforms, tid, sampleIdx, pathDepth(paths[tid].depthAndFlags));
         if (fogSampleDistance(r.origin, r.direction, 1e16f, uniforms.fogHeight, uniforms.fogSigmaT,
-                              random<SampleDimension::eFogDistance>(frng, uniforms.samplerType),
-                              mediumScatterT))
+                              random<SampleDimension::eFogDistance>(frng, uniforms.samplerType), mediumScatterT))
         {
             mediumHitBit = HIT_FOG_BIT;
         }
@@ -782,8 +793,7 @@ static void extendImpl(
         volumeIsect.force_opacity(forced_opacity::opaque);
         volumeIsect.accept_any_intersection(false);
         const typename T::volume_isect::result_type volumeHit =
-            T::traceVolume(volumeIsect, r, volumeAccelerationStructure,
-                           rayMask & ~GEOMETRY_MASK_CURVE, motionTime);
+            T::traceVolume(volumeIsect, r, volumeAccelerationStructure, rayMask & ~GEOMETRY_MASK_CURVE, motionTime);
         hit = captureExtendIntersection(volumeHit, 0.0f);
     }
     else
@@ -794,11 +804,8 @@ static void extendImpl(
         // see the note above extendAlphaAnyHit's replacement for the measurement.
         isect.force_opacity(forced_opacity::opaque);
         isect.accept_any_intersection(false);
-        const typename T::isect::result_type surfaceHit =
-            T::trace(isect, r, accelerationStructure, rayMask, motionTime);
-        const float curveParameter = surfaceHit.type == intersection_type::curve
-                                         ? T::curveParameter(surfaceHit)
-                                         : 0.0f;
+        const typename T::isect::result_type surfaceHit = T::trace(isect, r, accelerationStructure, rayMask, motionTime);
+        const float curveParameter = surfaceHit.type == intersection_type::curve ? T::curveParameter(surfaceHit) : 0.0f;
         hit = captureExtendIntersection(surfaceHit, curveParameter);
     }
 
@@ -844,8 +851,7 @@ static void extendImpl(
     // this renderer has already measured that dispatch boundaries are not free
     // (see the acceleration structure batching note). Not attempted.
     //
-    if (mediumHitBit != 0u &&
-        (hit.type == intersection_type::none || mediumScatterT < hit.distance))
+    if (mediumHitBit != 0u && (hit.type == intersection_type::none || mediumScatterT < hit.distance))
     {
         HitRecord mediumRec;
         mediumRec.geomEntryIndex = mediumHitBit;
@@ -869,46 +875,37 @@ static void extendImpl(
     // For emissive geometry userID indexes the light table, not the geometry
     // table; the flag bit tells `shade` which one it is.
     HitRecord rec;
-    rec.geomEntryIndex = isLight ? (HIT_LIGHT_BIT | inst.userID)
-                                 : (inst.userID + hit.geometryId);
+    rec.geomEntryIndex = isLight ? (HIT_LIGHT_BIT | inst.userID) : (inst.userID + hit.geometryId);
     rec.instanceIndex = hit.instanceId;
     rec.primitiveId = hit.primitiveId;
     // A curve hit has no barycentrics; what it has is one parameter along the
     // segment. It rides in the same two floats rather than in a field of its own,
     // because `shade` already has to read the geometry entry to find the
     // material and the entry says which kind of primitive this is.
-    rec.barycentrics = (hit.type == intersection_type::curve)
-                           ? vector_float2(hit.curveParameter, 0.0f)
-                           : hit.barycentrics;
+    rec.barycentrics =
+        (hit.type == intersection_type::curve) ? vector_float2(hit.curveParameter, 0.0f) : hit.barycentrics;
     rec.distance = hit.distance;
     hits[tid] = rec;
     queuePush(hitCounter, hitQueue, tid);
 }
 
 
-#define WF_EXTEND_ENTRY(NAME, TRAITS)                                                                       \
-    kernel void NAME(uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],       \
-                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],  \
-                     TRAITS::structure accelerationStructure [[buffer(2)]],                                 \
-                     device const PathRay* rays [[buffer(3)]], device HitRecord* hits [[buffer(4)]],        \
-                     constant uint32_t& sampleIdx [[buffer(5)]],                                            \
-                     device const uint32_t* queue [[buffer(6)]],                                            \
-                     device const uint32_t* control [[buffer(7)]],                                          \
-                     device uint32_t* hitQueue [[buffer(8)]],                                               \
-                     device atomic_uint* hitCounter [[buffer(9)]],                                          \
-                     device uint32_t* missQueue [[buffer(10)]],                                             \
-                     device atomic_uint* missCounter [[buffer(11)]],                                        \
-                     device const PathState* paths [[buffer(12)]],                                          \
-                     device const Material* materials [[buffer(13)]],                                       \
-                     constant uint32_t& rayMask [[buffer(14)]],                                            \
-                     TRAITS::structure volumeAccelerationStructure [[buffer(15)]],                         \
-                     constant uint32_t& queueOffset [[buffer(16)]],                                        \
-                     device const MediumPathState* mediumPaths [[buffer(17)]])                             \
-    {                                                                                                       \
-        extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure,                   \
-                           volumeAccelerationStructure,                                                     \
-                           rays, hits, sampleIdx, queue, control, hitQueue, hitCounter, missQueue,           \
-                           missCounter, paths, materials, mediumPaths, rayMask);                            \
+#define WF_EXTEND_ENTRY(NAME, TRAITS)                                                                                  \
+    kernel void NAME(                                                                                                  \
+        uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                               \
+        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],                          \
+        TRAITS::structure accelerationStructure [[buffer(2)]], device const PathRay* rays [[buffer(3)]],               \
+        device HitRecord* hits [[buffer(4)]], constant uint32_t& sampleIdx [[buffer(5)]],                              \
+        device const uint32_t* queue [[buffer(6)]], device const uint32_t* control [[buffer(7)]],                      \
+        device uint32_t* hitQueue [[buffer(8)]], device atomic_uint* hitCounter [[buffer(9)]],                         \
+        device uint32_t* missQueue [[buffer(10)]], device atomic_uint* missCounter [[buffer(11)]],                     \
+        device const PathState* paths [[buffer(12)]], device const Material* materials [[buffer(13)]],                 \
+        constant uint32_t& rayMask [[buffer(14)]], TRAITS::structure volumeAccelerationStructure [[buffer(15)]],       \
+        constant uint32_t& queueOffset [[buffer(16)]], device const MediumPathState* mediumPaths [[buffer(17)]])       \
+    {                                                                                                                  \
+        extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure, volumeAccelerationStructure, \
+                           rays, hits, sampleIdx, queue, control, hitQueue, hitCounter, missQueue, missCounter, paths, \
+                           materials, mediumPaths, rayMask);                                                           \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
@@ -930,17 +927,21 @@ static void fetchTriangle(device const char* vertexBuffer,
                           uint32_t primitiveId,
                           bool interpolateMotion,
                           float motionTime,
-                          thread float3* p, thread float3* n, thread float3* t, thread float2* uv,
-                          thread float& tangentSign, thread float3* vcol)
+                          thread float3* p,
+                          thread float3* n,
+                          thread float3* t,
+                          thread float2* uv,
+                          thread float& tangentSign,
+                          thread float3* vcol)
 {
     // Scene::Vertex layout (32 bytes): pos@0 (packed_float3), tangent@12,
     // normal@16, uv@20 — all uint32 after the position. The `Vertex` struct in
     // ShaderTypes.h does *not* match this and must not be used.
-    constexpr uint32_t vtxStride  = 32;
+    constexpr uint32_t vtxStride = 32;
     constexpr uint32_t tangentOff = 12;
-    constexpr uint32_t normalOff  = 16;
-    constexpr uint32_t uvOff      = 20;
-    constexpr uint32_t colorOff   = 28;   // Scene::Vertex::color, packed RGBA8
+    constexpr uint32_t normalOff = 16;
+    constexpr uint32_t uvOff = 20;
+    constexpr uint32_t colorOff = 28; // Scene::Vertex::color, packed RGBA8
 
     uint32_t idx[3];
     idx[0] = indexBuffer[entry.indexOffset + primitiveId * 3 + 0];
@@ -1068,13 +1069,11 @@ static void fetchCurve(device const packed_float3* curvePoints,
     const float lenSq = dot(perp, perp);
     // A hit exactly on the axis has no radial direction; anything perpendicular
     // to the strand will do, and this is far rarer than a denormal guard.
-    outNormal = lenSq > 1e-16f ? perp * rsqrt(lenSq)
-                               : normalize(cross(outTangent, float3(0.0f, 0.0f, 1.0f)));
+    outNormal = lenSq > 1e-16f ? perp * rsqrt(lenSq) : normalize(cross(outTangent, float3(0.0f, 0.0f, 1.0f)));
     outRadius = sqrt(lenSq);
 
     const uint32_t perStrand = entry.flags & GEOM_CURVE_STRAND_MASK;
-    const float alongStrand =
-        perStrand != 0u ? ((float)(primitiveId % perStrand) + u) / (float)perStrand : 0.0f;
+    const float alongStrand = perStrand != 0u ? ((float)(primitiveId % perStrand) + u) / (float)perStrand : 0.0f;
     outUv = float2(alongStrand, 0.0f);
 }
 
@@ -1093,8 +1092,7 @@ static void fetchCurve(device const packed_float3* curvePoints,
 // surface along `normal`. In the plane across the axis the chord from that point
 // along the ray is -2r(n.u); the distance travelled to cover it is that over the
 // length the direction itself has in the plane.
-static inline float3 fibreExitOrigin(float3 position, float3 tangent, float3 normal,
-                                     float radius, float3 dir)
+static inline float3 fibreExitOrigin(float3 position, float3 tangent, float3 normal, float radius, float3 dir)
 {
     const float3 dPerp = dir - tangent * dot(dir, tangent);
     const float m2 = dot(dPerp, dPerp);
@@ -1134,21 +1132,25 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
                                  bool interpolateMotion,
                                  float motionTime,
                                  float2 bary,
-                                 thread float3& outNormal, thread float3& outTangent,
-                                 thread float2& outUv, thread float3& outColor,
-                                 thread float& tangentSign, thread float3& outGeomNormal,
+                                 thread float3& outNormal,
+                                 thread float3& outTangent,
+                                 thread float2& outUv,
+                                 thread float3& outColor,
+                                 thread float& tangentSign,
+                                 thread float3& outGeomNormal,
                                  // For the ray-cone texture LOD: the two object-space
                                  // edges and twice the triangle's area in uv. Both fall
                                  // out of loads this function already does, so the
                                  // footprint costs no extra memory traffic.
-                                 thread float3& outEdge1, thread float3& outEdge2,
+                                 thread float3& outEdge1,
+                                 thread float3& outEdge2,
                                  thread float& outUvArea2)
 {
-    constexpr uint32_t vtxStride  = 32;
+    constexpr uint32_t vtxStride = 32;
     constexpr uint32_t tangentOff = 12;
-    constexpr uint32_t normalOff  = 16;
-    constexpr uint32_t uvOff      = 20;
-    constexpr uint32_t colorOff   = 28;
+    constexpr uint32_t normalOff = 16;
+    constexpr uint32_t uvOff = 20;
+    constexpr uint32_t colorOff = 28;
 
     const float w0 = 1.0f - bary.x - bary.y;
     const float3 weight = float3(w0, bary.x, bary.y);
@@ -1188,14 +1190,20 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
         outTangent += tan * weight[k];
         const float2 vertUv = unpackUV(*(device const uint32_t*)(v + uvOff));
         outUv += vertUv * weight[k];
-        if (k == 0) uv0 = vertUv;
-        else if (k == 1) uvE1 = vertUv - uv0;
-        else uvE2 = vertUv - uv0;
+        if (k == 0)
+            uv0 = vertUv;
+        else if (k == 1)
+            uvE1 = vertUv - uv0;
+        else
+            uvE2 = vertUv - uv0;
         outColor += unpackVertexColor(*(device const uint32_t*)(v + colorOff)) * weight[k];
 
-        if (k == 0) p0 = pos;
-        else if (k == 1) e1 = pos - p0;
-        else e2 = pos - p0;
+        if (k == 0)
+            p0 = pos;
+        else if (k == 1)
+            e1 = pos - p0;
+        else
+            e2 = pos - p0;
     }
     outGeomNormal = cross(e1, e2);
     outEdge1 = e1;
@@ -1213,14 +1221,13 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
 // in time. Without it a temporal denoiser reprojects a moving limb onto wherever
 // that pixel used to be looking and smears the two together -- the ghosting that
 // shows up on exactly the animated content the denoiser is supposed to help with.
-static inline float3 previousWorldPosition(
-    device const char* prevFrameVertexBuffer,
-    device const uint32_t* indexBuffer,
-    constant MTLIndirectAccelerationStructureInstanceDescriptor* prevInstances,
-    GeometryEntry entry,
-    uint32_t instanceIndex,
-    uint32_t primitiveId,
-    float2 bary)
+static inline float3 previousWorldPosition(device const char* prevFrameVertexBuffer,
+                                           device const uint32_t* indexBuffer,
+                                           device const MTLIndirectAccelerationStructureInstanceDescriptor* prevInstances,
+                                           GeometryEntry entry,
+                                           uint32_t instanceIndex,
+                                           uint32_t primitiveId,
+                                           float2 bary)
 {
     constexpr uint32_t vtxStride = 32; // see fetchTriangle for the layout
 
@@ -1228,17 +1235,14 @@ static inline float3 previousWorldPosition(
     for (uint32_t k = 0; k < 3; ++k)
     {
         const uint32_t idx = indexBuffer[entry.indexOffset + primitiveId * 3 + k];
-        p[k] = float3(*(device const packed_float3*)(prevFrameVertexBuffer +
-                                                     (entry.vbOffset + idx) * vtxStride));
+        p[k] = float3(*(device const packed_float3*)(prevFrameVertexBuffer + (entry.vbOffset + idx) * vtxStride));
     }
     const float3 objectPos = interpolateAttrib(p[0], p[1], p[2], bary);
 
     const auto inst = prevInstances[instanceIndex];
-    const float4x4 prevObjectToWorld = float4x4(
-        float4(float3(inst.transformationMatrix[0]), 0.0f),
-        float4(float3(inst.transformationMatrix[1]), 0.0f),
-        float4(float3(inst.transformationMatrix[2]), 0.0f),
-        float4(float3(inst.transformationMatrix[3]), 1.0f));
+    const float4x4 prevObjectToWorld =
+        float4x4(float4(float3(inst.transformationMatrix[0]), 0.0f), float4(float3(inst.transformationMatrix[1]), 0.0f),
+                 float4(float3(inst.transformationMatrix[2]), 0.0f), float4(float3(inst.transformationMatrix[3]), 1.0f));
     return (prevObjectToWorld * float4(objectPos, 1.0f)).xyz;
 }
 
@@ -1301,12 +1305,11 @@ static inline float2 screenMotion(constant Uniforms& uniforms, float4 prevClip, 
         return float2(0.0f);
     }
     const float2 prevNdc = prevClip.xy / prevClip.w;
-    const float2 prevPixel = float2((prevNdc.x * 0.5f + 0.5f) * (float)uniforms.width,
-                                    (1.0f - (prevNdc.y * 0.5f + 0.5f)) * (float)uniforms.height);
+    const float2 prevPixel = float2(
+        (prevNdc.x * 0.5f + 0.5f) * (float)uniforms.width, (1.0f - (prevNdc.y * 0.5f + 0.5f)) * (float)uniforms.height);
     // generateCameraRay builds pixelPos.y as height - (y + 0.5 + jitterY), so the
     // flip cancels and the sample sits at row y + 0.5 + jitterY in screen space.
-    const float2 currPixel = float2((float)pixel.x + 0.5f + uniforms.jitterX,
-                                    (float)pixel.y + 0.5f + uniforms.jitterY);
+    const float2 currPixel = float2((float)pixel.x + 0.5f + uniforms.jitterX, (float)pixel.y + 0.5f + uniforms.jitterY);
     const float2 motion = prevPixel - currPixel;
     // Nothing that moved further than the frame is across in one frame can be
     // reprojected onto anything: past that the history lookup lands outside the
@@ -1325,24 +1328,25 @@ static inline float2 screenMotion(constant Uniforms& uniforms, float4 prevClip, 
 // threads for escaped rays nor carries the environment sampler in its register
 // budget.
 // ---------------------------------------------------------------------------
-kernel void wavefrontMiss(
-    uint                    gid           [[thread_position_in_grid]],
-    constant Uniforms&      uniforms      [[buffer(0)]],
-    device const PathState* paths         [[buffer(1)]],
-    device const PathRay*   rays          [[buffer(2)]],
-    device float4*          radianceOut   [[buffer(3)]],
-    device const uint32_t*  queue         [[buffer(4)]],
-    device const uint32_t*  control       [[buffer(5)]],
-    device AovSample*       aov           [[buffer(6)]],
-    constant uint32_t&      sampleIdx     [[buffer(7)]],
-    // The escape counter's other half. A path that reaches infinity while its
-    // dielectric stack still holds something left a volume without crossing its
-    // surface -- which is exactly what a hole in a refracting mesh does, and the
-    // failure `shade` cannot see because no exit event ever happens.
-    device const IorStack*  iorStacks     [[buffer(8)]],
-    device atomic_uint*     iorStats      [[buffer(9)]],
-    texture2d<float>        envMapTexture [[texture(0)]],
-    texture2d<float>        envBackgroundTexture [[texture(1)]])
+kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
+                          constant Uniforms& uniforms [[buffer(0)]],
+                          device const PathState* paths [[buffer(1)]],
+                          device const PathRay* rays [[buffer(2)]],
+                          device float4* radianceOut [[buffer(3)]],
+                          device const uint32_t* queue [[buffer(4)]],
+                          device const uint32_t* control [[buffer(5)]],
+                          device AovSample* aov [[buffer(6)]],
+                          constant uint32_t& sampleIdx [[buffer(7)]],
+                          // The escape counter's other half. A path that reaches infinity while its
+                          // dielectric stack still holds something left a volume without crossing its
+                          // surface -- which is exactly what a hole in a refracting mesh does, and the
+                          // failure `shade` cannot see because no exit event ever happens.
+                          device const IorStack* iorStacks [[buffer(8)]],
+                          device atomic_uint* iorStats [[buffer(9)]],
+                          device SharcUpdateState* sharcUpdates [[buffer(10)]],
+                          device SharcAccumulationEntry* sharcAccumulation [[buffer(11)]],
+                          texture2d<float> envMapTexture [[texture(0)]],
+                          texture2d<float> envBackgroundTexture [[texture(1)]])
 {
     if (gid >= control[WF_CTRL_MISS_N])
     {
@@ -1356,6 +1360,12 @@ kernel void wavefrontMiss(
     const bool specularBounce = (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u;
     const bool neeDone = (p.depthAndFlags & PATH_FLAG_NEE_DONE) != 0u;
 
+    // Bounce heatmap; see the note in shade.
+    if (SPEC_DEBUG && (DebugMode)uniforms.debug == DebugMode::eSharcBounces)
+    {
+        aov[tid].bounceDepth = (float)depth;
+    }
+
     // Counted here because here is the only place it is visible: the path is
     // gone and it still thinks it is inside glass. See ior_stack.h.
     if (iorStacks[tid].top >= 0)
@@ -1367,8 +1377,7 @@ kernel void wavefrontMiss(
     // previous frame left in the guides and smears the silhouette. Not only at
     // depth 0: a specular primary hit defers its guides, so if the reflected ray
     // is the one that escapes, this is the only chance to write them.
-    if (shouldWriteAov(uniforms, sampleIdx) &&
-        (depth == 0u || (p.depthAndFlags & PATH_FLAG_AOV_DONE) == 0u))
+    if (shouldWriteAov(uniforms, sampleIdx) && (depth == 0u || (p.depthAndFlags & PATH_FLAG_AOV_DONE) == 0u))
     {
         AovSample a;
         a.diffuseAlbedo = packed_float3(float3(0.0f));
@@ -1388,15 +1397,14 @@ kernel void wavefrontMiss(
         // pixel. Those directions point everywhere, including nearly across the
         // view, where the projection is degenerate; that is where most of the
         // absurd motion vectors came from.
-        const float2 motion =
-            (depth == 0u) ? screenMotion(uniforms, uniforms.prevWorldToClip * float4(rayDir, 0.0f),
-                                         uint2(tid % uniforms.width, tid / uniforms.width))
-                          : float2(0.0f);
+        const float2 motion = (depth == 0u) ? screenMotion(uniforms, uniforms.prevWorldToClip * float4(rayDir, 0.0f),
+                                                           uint2(tid % uniforms.width, tid / uniforms.width)) :
+                                              float2(0.0f);
         a.specularHitDistance = 0.0f;
         // Sky seen through a mirror moves with the reflection, not with the
         // reflector, so its history is not reliable either.
         a.reactive = (depth > 0u) ? 1.0f : 0.0f;
-        a.pad2 = 0.0f;
+        a.bounceDepth = 0.0f;
         if (depth == 0u)
         {
             a.motionX = motion.x;
@@ -1417,7 +1425,18 @@ kernel void wavefrontMiss(
         }
     }
 
+    // A single-hit debug view and the SHaRC surface diagnostics are answers about
+    // a surface. The background has nothing to say in either, and an environment
+    // brighter than the debug colours drowns them where it does appear.
+    if (!SPEC_SHARC_UPDATE && ((SPEC_DEBUG && DEBUG_MODE_IS_SINGLE_HIT(uniforms.debug)) ||
+                               (SPEC_SHARC && uniforms.sharcCapacity != 0u &&
+                                SHARC_DEBUG_IS_SURFACE_VIEW(uniforms.sharcDebug))))
+    {
+        return;
+    }
+
     float3 radiance = float3(0.0f);
+    float3 sharcEnvironment = float3(0.0f);
     if (SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
         constexpr sampler envSampler(mag_filter::linear, min_filter::linear, address::repeat, coord::normalized);
@@ -1434,15 +1453,15 @@ kernel void wavefrontMiss(
             // because that is the one that was importance sampled.
             if (uniforms.hasEnvBackground && depth == 0u)
             {
-                envColor = envBackgroundTexture.sample(envSampler, envUV).xyz *
-                           uniforms.envBackgroundIntensity * float3(uniforms.envMapColorTint);
+                envColor = envBackgroundTexture.sample(envSampler, envUV).xyz * uniforms.envBackgroundIntensity *
+                           float3(uniforms.envMapColorTint);
             }
             radiance += throughput * envColor;
+            sharcEnvironment = envColor;
         }
         else
         {
-            const float envPdf = envMapPdf(rayDir, envMapTexture,
-                                           uniforms.envMapWidth, uniforms.envMapHeight,
+            const float envPdf = envMapPdf(rayDir, envMapTexture, uniforms.envMapWidth, uniforms.envMapHeight,
                                            uniforms.envMapRotation, uniforms.envPdfScale);
             const float envSelectionPdf = (uniforms.numLights > 0) ? 0.5f : 1.0f;
             const float effectiveEnvPdf = envPdf * envSelectionPdf;
@@ -1451,13 +1470,22 @@ kernel void wavefrontMiss(
             // strategy owns it outright. Dropping the contribution instead --
             // which the guard used to do -- loses energy exactly along the edges
             // of dark regions, where the bilinear radiance is still non-zero.
-            radiance += throughput * envColor *
-                        (effectiveEnvPdf > 0.0f ? misWeightBalance(p.lastBsdfPdf, effectiveEnvPdf) : 1.0f);
+            const float mis = effectiveEnvPdf > 0.0f ? misWeightBalance(p.lastBsdfPdf, effectiveEnvPdf) : 1.0f;
+            radiance += throughput * envColor * mis;
+            sharcEnvironment = envColor * mis;
         }
     }
     else
     {
         radiance += throughput * uniforms.missColor;
+        sharcEnvironment = uniforms.missColor;
+    }
+    if (SPEC_SHARC_UPDATE)
+    {
+        const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+        SharcUpdateState updateState = sharcUpdates[updateIndex];
+        sharcUpdateMiss(updateState, uniforms, sharcAccumulation, sharcEnvironment, -rayDir);
+        sharcUpdates[updateIndex] = updateState;
     }
     radianceOut[tid] += float4(clampIndirectContribution(radiance, depth, uniforms.clampIndirect), 0.0f);
 }
@@ -1465,55 +1493,62 @@ kernel void wavefrontMiss(
 // ---------------------------------------------------------------------------
 // shade -- material evaluation, next-event estimation, next ray
 // ---------------------------------------------------------------------------
-kernel void wavefrontShade(
-    uint                                                       gid            [[thread_position_in_grid]],
-    constant Uniforms&                                         uniforms       [[buffer(0)]],
-    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances    [[buffer(1)]],
-    device const IesGpuBufferHeader*                           iesProfiles    [[buffer(2)]],
-    device UniformLight*                                       lights         [[buffer(3)]],
-    device Material*                                           materials      [[buffer(4)]],
-    device PathState*                                          paths          [[buffer(5)]],
-    device PathRay*                                            rays           [[buffer(21)]],
-    device const HitRecord*                                    hits           [[buffer(6)]],
-    device float4*                                             radianceOut    [[buffer(7)]],
-    device IorStack*                                           iorStacks      [[buffer(8)]],
-    device const GeometryEntry*                                geometryEntries[[buffer(9)]],
-    device const EnvAliasEntry*                                envAliasTable  [[buffer(10)]],
-    device const char*                                         vertexBuffer   [[buffer(11)]],
-    device const char*                                         prevVertexBuffer [[buffer(12)]],
-    device const uint32_t*                                     indexBuffer    [[buffer(13)]],
-    constant uint32_t&                                         sampleIdx      [[buffer(14)]],
-    device const uint32_t*                                     queue          [[buffer(15)]],
-    device uint32_t*                                           queueOut       [[buffer(16)]],
-    device atomic_uint*                                        outCounter     [[buffer(17)]],
-    device const uint32_t*                                     control        [[buffer(18)]],
-    device ShadowRay*                                          shadowRays     [[buffer(19)]],
-    device atomic_uint*                                        shadowCounter  [[buffer(20)]],
-    device AovSample*                                          aov            [[buffer(22)]],
-    // The previous frame's pose, for motion vectors. Separate from
-    // prevVertexBuffer, which is a motion-blur shutter keyframe and is forced
-    // equal to the current pose whenever motion blur is off.
-    device const char*                                         prevFrameVertexBuffer [[buffer(23)]],
-    constant MTLIndirectAccelerationStructureInstanceDescriptor* prevInstances [[buffer(24)]],
-    device SharcEntry*                                         sharcEntries   [[buffer(25)]],
-    // Curves. `extend` cannot hand over what it saw -- primitive_data is only
-    // addressable inside the kernel that ran the intersect -- so a strand hit is
-    // rebuilt here from the same buffers the acceleration structure was built
-    // from, exactly as a triangle hit is refetched from the vertex buffer.
-    device const packed_float3*                                curvePoints    [[buffer(26)]],
-    device const uint32_t*                                     curveSegments  [[buffer(27)]],
-    // Two counters for the ways the nested-dielectric stack loses a path; see
-    // ShaderTypes.h. Written only when one of them has already gone wrong.
-    device atomic_uint*                                        iorStats       [[buffer(28)]],
-    device SharcPathState*                                     sharcPaths     [[buffer(29)]],
-    device MediumPathState*                                    mediumPaths    [[buffer(30)]],
-    texture2d<float>                                           envMapTexture  [[texture(0)]])
+kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
+                           constant Uniforms& uniforms [[buffer(0)]],
+                           constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],
+                           device const IesGpuBufferHeader* iesProfiles [[buffer(2)]],
+                           device UniformLight* lights [[buffer(3)]],
+                           device Material* materials [[buffer(4)]],
+                           device PathState* paths [[buffer(5)]],
+                           device PathRay* rays [[buffer(21)]],
+                           device const HitRecord* hits [[buffer(6)]],
+                           device float4* radianceOut [[buffer(7)]],
+                           device IorStack* iorStacks [[buffer(8)]],
+                           device const GeometryEntry* geometryEntries [[buffer(9)]],
+                           device const EnvAliasEntry* envAliasTable [[buffer(10)]],
+                           device const char* vertexBuffer [[buffer(11)]],
+                           device const char* prevVertexBuffer [[buffer(12)]],
+                           device const uint32_t* indexBuffer [[buffer(13)]],
+                           constant uint32_t& sampleIdx [[buffer(14)]],
+                           device const uint32_t* queue [[buffer(15)]],
+                           device uint32_t* queueOut [[buffer(16)]],
+                           device atomic_uint* outCounter [[buffer(17)]],
+                           device const uint32_t* control [[buffer(18)]],
+                           device ShadowRay* shadowRays [[buffer(19)]],
+                           device atomic_uint* shadowCounter [[buffer(20)]],
+                           device AovSample* aov [[buffer(22)]],
+                           // The previous frame's pose, for motion vectors. Separate from
+                           // prevVertexBuffer, which is a motion-blur shutter keyframe and is forced
+                           // equal to the current pose whenever motion blur is off.
+                           device char* sharcPassBuffer0 [[buffer(23)]],
+                           device const char* sharcPassBuffer1 [[buffer(24)]],
+                           device SharcHashEntry* sharcHashEntries [[buffer(25)]],
+                           // Curves. `extend` cannot hand over what it saw -- primitive_data is only
+                           // addressable inside the kernel that ran the intersect -- so a strand hit is
+                           // rebuilt here from the same buffers the acceleration structure was built
+                           // from, exactly as a triangle hit is refetched from the vertex buffer.
+                           device const packed_float3* curvePoints [[buffer(26)]],
+                           device const uint32_t* curveSegments [[buffer(27)]],
+                           // Two counters for the ways the nested-dielectric stack loses a path; see
+                           // ShaderTypes.h. Written only when one of them has already gone wrong.
+                           device atomic_uint* iorStats [[buffer(28)]],
+                           device char* sharcPassState [[buffer(29)]],
+                           device MediumPathState* mediumPaths [[buffer(30)]],
+                           texture2d<float> envMapTexture [[texture(0)]])
 {
     if (gid >= control[WF_CTRL_HIT_N])
     {
         return;
     }
     const uint32_t tid = queue[gid];
+    device const char* prevFrameVertexBuffer = sharcPassBuffer0;
+    device const MTLIndirectAccelerationStructureInstanceDescriptor* prevInstances =
+        (device const MTLIndirectAccelerationStructureInstanceDescriptor*)sharcPassBuffer1;
+    device SharcUpdateState* sharcUpdates = (device SharcUpdateState*)sharcPassState;
+    device SharcAccumulationEntry* sharcAccumulation = (device SharcAccumulationEntry*)sharcPassBuffer0;
+    device const SharcResolvedEntry* sharcResolved = SPEC_SHARC_UPDATE ?
+                                                         (device const SharcResolvedEntry*)sharcPassBuffer1 :
+                                                         (device const SharcResolvedEntry*)sharcPassState;
     PathState p = paths[tid];
     MediumPathState mediumState = {};
     if (SPEC_SSS)
@@ -1526,12 +1561,20 @@ kernel void wavefrontShade(
     const bool specularBounce = (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u;
     const bool neeDone = (p.depthAndFlags & PATH_FLAG_NEE_DONE) != 0u;
 
+    // Bounce heatmap. Every stage that sees a path records how deep it was, so
+    // whichever one it dies in has left the answer behind.
+    if (SPEC_DEBUG && (DebugMode)uniforms.debug == DebugMode::eSharcBounces)
+    {
+        aov[tid].bounceDepth = (float)depth;
+    }
+
     SamplerState rng = samplerFor(uniforms, tid, sampleIdx, depth);
     const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
 
     const float3 rayOrigin = float3(pr.origin);
     const float3 rayDir = float3(pr.direction);
     float3 throughput = float3(p.throughput);
+    const float3 throughputAtStageEntry = throughput;
     // The throughput `extend` drew this segment's medium channel from. The
     // nested-dielectric attenuation below moves `throughput` on, and weighting a
     // free flight by a density other than the one it was sampled from is how an
@@ -1572,19 +1615,18 @@ kernel void wavefrontShade(
     {
         const uint32_t walk = mediumState.medium & MEDIUM_INDEX_MASK;
         const bool inSubsurfaceWalk =
-            SPEC_SSS && walk != 0u &&
-            (materials[walk - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u;
+            SPEC_SSS && walk != 0u && (materials[walk - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u;
         IorStack preStack = iorStacks[tid];
         const uint32_t inside = ior_stack_current_material(preStack);
         if (!inSubsurfaceWalk && inside != 0xFFFFFFFFu)
         {
             device const Material& im = materials[inside];
-            const float3 sigma_t = volume_extinction(float3(im.attenuation_color),
-                                                     im.attenuation_distance, uniforms.volumeModel);
+            const float3 sigma_t =
+                volume_extinction(float3(im.attenuation_color), im.attenuation_distance, uniforms.volumeModel);
             throughput *= beer_lambert_transmittance(sigma_t, rec.distance);
             // Every branch below that persists the path either recomputes this
             // or writes `p` unchanged, so it is written once here.
-            p.throughput = packed_float3(throughput);
+            p.throughput = packed_float3(SPEC_SHARC_UPDATE ? float3(1.0f) : throughput);
         }
     }
 
@@ -1598,6 +1640,14 @@ kernel void wavefrontShade(
     {
         const float3 scatterPoint = rayOrigin + rayDir * rec.distance;
         throughput *= float3(uniforms.fogAlbedo);
+        if (SPEC_SHARC_UPDATE)
+        {
+            const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+            SharcUpdateState updateState = sharcUpdates[updateIndex];
+            sharcMultiplyPendingThroughput(updateState, throughput / max(throughputAtStageEntry, float3(1e-6f)));
+            sharcApplyPendingThroughput(updateState, uniforms);
+            sharcUpdates[updateIndex] = updateState;
+        }
 
         // A medium event has a position and no normal, which is what the
         // volumeEvent flag tells the light connection.
@@ -1610,9 +1660,8 @@ kernel void wavefrontShade(
         bool didNee = false;
         if (SPEC_LIGHTS || (SPEC_ENV_MAP && uniforms.hasEnvMap))
         {
-            const LightConnection conn =
-                connectToLight(uniforms, uniforms.numLights, lights, rng, si, envAliasTable,
-                               envMapTexture, iesProfiles, true);
+            const LightConnection conn = connectToLight(
+                uniforms, uniforms.numLights, lights, rng, si, envAliasTable, envMapTexture, iesProfiles, true);
             if (conn.needsRay && conn.pdf > 0.0f)
             {
                 // dot(rayDir, toLight), not dot(-rayDir, toLight). The phase
@@ -1628,13 +1677,11 @@ kernel void wavefrontShade(
                 // The phase function is the medium's BSDF and its own pdf, so
                 // MIS pairs it against the light density exactly as a surface
                 // lobe would.
-                const float misWeight =
-                    conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, phase);
+                const float misWeight = conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, phase);
                 const float3 weight = throughput * (conn.radiance / conn.pdf) * misWeight * phase;
                 if (any(weight > 1e-6f))
                 {
-                    const uint32_t slot =
-                        atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                    const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
                     ShadowRay sr;
                     sr.origin = packed_float3(scatterPoint);
                     sr.direction = packed_float3(conn.toLight);
@@ -1642,8 +1689,11 @@ kernel void wavefrontShade(
                     sr.maxDistance = conn.tMax;
                     sr.pixelIndex = tid;
                     sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
-                    sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) *
-                                  kShadowTransmittanceCutoff;
+                    sr.sharcRadiance =
+                        packed_float3(SPEC_SHARC_UPDATE ? (conn.radiance / conn.pdf) * misWeight * phase : float3(0.0f));
+                    sr.sharcPathIndex = tid;
+                    sr.rrCutoff =
+                        random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                     shadowRays[slot] = sr;
                     didNee = true;
                 }
@@ -1652,8 +1702,7 @@ kernel void wavefrontShade(
 
         float phasePdf = 0.0f;
         const float3 nextDir =
-            hgSample(-rayDir, uniforms.fogAnisotropy,
-                     random<SampleDimension::eFogPhaseU>(rng, uniforms.samplerType),
+            hgSample(-rayDir, uniforms.fogAnisotropy, random<SampleDimension::eFogPhaseU>(rng, uniforms.samplerType),
                      random<SampleDimension::eFogPhaseV>(rng, uniforms.samplerType), phasePdf);
 
         radianceOut[tid] += float4(radiance, 0.0f);
@@ -1668,21 +1717,29 @@ kernel void wavefrontShade(
         }
         throughput /= survive;
 
+        if (SPEC_SHARC_UPDATE)
+        {
+            const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+            SharcUpdateState updateState = sharcUpdates[updateIndex];
+            sharcSetThroughput(updateState, float3(1.0f / max(survive, 1e-5f)));
+            sharcUpdates[updateIndex] = updateState;
+        }
+
         PathRay nextRay;
         nextRay.origin = packed_float3(scatterPoint);
         nextRay.direction = packed_float3(nextDir);
         rays[tid] = nextRay;
 
-        p.throughput = packed_float3(throughput);
+        p.throughput = packed_float3(SPEC_SHARC_UPDATE ? float3(1.0f) : throughput);
         p.lastBsdfPdf = phasePdf;
         p.misDistance = 0.0f;
 
         // Depth advances: a scattering event is a bounce, and a medium with no
         // depth budget of its own would let a path wander forever.
-        p.depthAndFlags = (depth + 1u) | PATH_FLAG_ALIVE |
-                          (p.depthAndFlags & ~(PATH_DEPTH_MASK | PATH_FLAG_ALIVE |
-                                               PATH_FLAG_SPECULAR | PATH_FLAG_NEE_DONE)) |
-                          (didNee ? PATH_FLAG_NEE_DONE : 0u);
+        p.depthAndFlags =
+            (depth + 1u) | PATH_FLAG_ALIVE |
+            (p.depthAndFlags & ~(PATH_DEPTH_MASK | PATH_FLAG_ALIVE | PATH_FLAG_SPECULAR | PATH_FLAG_NEE_DONE)) |
+            (didNee ? PATH_FLAG_NEE_DONE : 0u);
         if (depth + 1u >= uniforms.maxDepth)
         {
             return;
@@ -1709,11 +1766,24 @@ kernel void wavefrontShade(
         // A bounded volume has no entry surface to have textured, so it keeps the
         // material's constant; a subsurface walk takes what the boundary resolved.
         const bool isBoundedMedium = (mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u;
-        const float3 albedo = isBoundedMedium ? float3(mm.diffuse_transmission_color)
-                                              : unpackMediumAlbedo(mediumState.mediumAlbedo);
+        const float3 albedo =
+            isBoundedMedium ? float3(mm.diffuse_transmission_color) : unpackMediumAlbedo(mediumState.mediumAlbedo);
 
-        throughput *=
-            sssScatterWeight(sigmaT, albedo, sssChannelPdf(sampledThroughput, albedo), rec.distance);
+        throughput *= sssScatterWeight(sigmaT, albedo, sssChannelPdf(sampledThroughput, albedo), rec.distance);
+
+        if (SPEC_SHARC_UPDATE)
+        {
+            const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+            SharcUpdateState updateState = sharcUpdates[updateIndex];
+            sharcMultiplyPendingThroughput(updateState, throughput / max(throughputAtStageEntry, float3(1e-6f)));
+            sharcApplyPendingThroughput(updateState, uniforms);
+            if (isBoundedMedium)
+            {
+                sharcPropagate(updateState, sharcAccumulation, float3(mm.medium_emission), uniforms,
+                               (uniforms.sharcFlags & SHARC_FLAG_RESPONSIVE) != 0u);
+            }
+            sharcUpdates[updateIndex] = updateState;
+        }
 
         const float3 scatterPoint = rayOrigin + rayDir * rec.distance;
         SamplerState wrng = samplerFor(uniforms, tid, sampleIdx, depth + step);
@@ -1734,8 +1804,7 @@ kernel void wavefrontShade(
             // and adding that unclamped put fireflies over the entire frame --
             // including the backdrop outside the room, which is what made it
             // obvious the term and not the medium was at fault.
-            radiance += clampIndirectContribution(throughput * float3(mm.medium_emission), depth,
-                                                  uniforms.clampIndirect);
+            radiance += clampIndirectContribution(throughput * float3(mm.medium_emission), depth, uniforms.clampIndirect);
 
             if (SPEC_LIGHTS || (SPEC_ENV_MAP && uniforms.hasEnvMap))
             {
@@ -1744,9 +1813,8 @@ kernel void wavefrontShade(
                 vsi.shading_normal = -rayDir;
                 vsi.geometry_normal = -rayDir;
                 vsi.front_face = true;
-                const LightConnection conn =
-                    connectToLight(uniforms, uniforms.numLights, lights, wrng, vsi, envAliasTable,
-                                   envMapTexture, iesProfiles, true);
+                const LightConnection conn = connectToLight(
+                    uniforms, uniforms.numLights, lights, wrng, vsi, envAliasTable, envMapTexture, iesProfiles, true);
                 if (conn.needsRay && conn.pdf > 0.0f)
                 {
                     // dot(rayDir, toLight): the phase function takes the angle
@@ -1761,15 +1829,16 @@ kernel void wavefrontShade(
                         ShadowRay sr;
                         sr.origin = packed_float3(scatterPoint);
                         sr.direction = packed_float3(conn.toLight);
-                        sr.weight = packed_float3(
-                            clampIndirectContribution(weight, depth, uniforms.clampIndirect));
+                        sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
                         sr.maxDistance = conn.tMax;
                         sr.pixelIndex = tid;
                         sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
-                        sr.rrCutoff = random<SampleDimension::eShadowRR>(wrng, uniforms.samplerType) *
-                                      kShadowTransmittanceCutoff;
-                        const uint32_t slot =
-                            atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                        sr.sharcRadiance = packed_float3(
+                            SPEC_SHARC_UPDATE ? (conn.radiance / conn.pdf) * misWeight * phase : float3(0.0f));
+                        sr.sharcPathIndex = tid;
+                        sr.rrCutoff =
+                            random<SampleDimension::eShadowRR>(wrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
+                        const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
                         shadowRays[slot] = sr;
                         didNeeVolume = true;
                     }
@@ -1779,8 +1848,7 @@ kernel void wavefrontShade(
 
         float phasePdf = 0.0f;
         const float3 nextDir =
-            hgSample(-rayDir, mm.subsurface_anisotropy,
-                     random<SampleDimension::eSssPhaseU>(wrng, uniforms.samplerType),
+            hgSample(-rayDir, mm.subsurface_anisotropy, random<SampleDimension::eSssPhaseU>(wrng, uniforms.samplerType),
                      random<SampleDimension::eSssPhaseV>(wrng, uniforms.samplerType), phasePdf);
 
         radianceOut[tid] += float4(radiance, 0.0f);
@@ -1795,12 +1863,20 @@ kernel void wavefrontShade(
         }
         throughput /= survive;
 
+        if (SPEC_SHARC_UPDATE)
+        {
+            const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+            SharcUpdateState updateState = sharcUpdates[updateIndex];
+            sharcSetThroughput(updateState, float3(1.0f / max(survive, 1e-5f)));
+            sharcUpdates[updateIndex] = updateState;
+        }
+
         PathRay nextRay;
         nextRay.origin = packed_float3(scatterPoint);
         nextRay.direction = packed_float3(nextDir);
         rays[tid] = nextRay;
 
-        p.throughput = packed_float3(throughput);
+        p.throughput = packed_float3(SPEC_SHARC_UPDATE ? float3(1.0f) : throughput);
         p.lastBsdfPdf = phasePdf;
         p.misDistance = 0.0f;
         // The walk advances its own step counter and not the path depth: the
@@ -1814,10 +1890,10 @@ kernel void wavefrontShade(
         // bounded volume does advance, for the reason the fog path does -- a
         // medium with no depth budget of its own is a path that wanders forever.
         const uint32_t nextDepth = isBounded ? (depth + 1u) : depth;
-        p.depthAndFlags = nextDepth | PATH_FLAG_ALIVE |
-                          (p.depthAndFlags & ~(PATH_DEPTH_MASK | PATH_FLAG_ALIVE |
-                                               PATH_FLAG_SPECULAR | PATH_FLAG_NEE_DONE)) |
-                          (didNeeVolume ? PATH_FLAG_NEE_DONE : 0u);
+        p.depthAndFlags =
+            nextDepth | PATH_FLAG_ALIVE |
+            (p.depthAndFlags & ~(PATH_DEPTH_MASK | PATH_FLAG_ALIVE | PATH_FLAG_SPECULAR | PATH_FLAG_NEE_DONE)) |
+            (didNeeVolume ? PATH_FLAG_NEE_DONE : 0u);
         if (nextDepth >= uniforms.maxDepth)
         {
             return;
@@ -1846,30 +1922,57 @@ kernel void wavefrontShade(
             a.depth = viewDepth(uniforms, hitPoint);
             // Analytic lights do not move, so the camera is the only thing that
             // can have displaced them.
-            const float2 motion =
-                screenMotion(uniforms, uniforms.prevWorldToClip * float4(hitPoint, 1.0f),
-                             uint2(tid % uniforms.width, tid / uniforms.width));
+            const float2 motion = screenMotion(uniforms, uniforms.prevWorldToClip * float4(hitPoint, 1.0f),
+                                               uint2(tid % uniforms.width, tid / uniforms.width));
             a.motionX = motion.x;
             a.motionY = motion.y;
             a.specularHitDistance = 0.0f;
             a.reactive = (depth > 0u) ? 1.0f : 0.0f;
-            a.pad2 = 0.0f;
+            a.bounceDepth = 0.0f;
             aov[tid] = a;
         }
         device const UniformLight& currLight = lights[lightId];
         const float3 lightNormal = calcLightNormal(currLight, hitPoint);
+        // An emitter is a surface with a grid address like any other, so the
+        // single-hit diagnostics answer here as well. Left to the branch below,
+        // its emission -- orders of magnitude above any debug colour -- would
+        // simply take the pixel.
+        if (!SPEC_SHARC_UPDATE && depth == 0u)
+        {
+            if (SPEC_DEBUG && (DebugMode)uniforms.debug == DebugMode::eSharcGrid)
+            {
+                radianceOut[tid] = float4(sharcDebugColoredHash(uniforms, hitPoint, lightNormal), 0.0f);
+                return;
+            }
+            if (SPEC_DEBUG && SPEC_SHARC && uniforms.sharcCapacity != 0u &&
+                (DebugMode)uniforms.debug == DebugMode::eSharcRadiance)
+            {
+                radianceOut[tid] = float4(sharcDebugRadiance(uniforms, sharcHashEntries, sharcResolved, hitPoint,
+                                                             lightNormal, -rayDir, float3(1.0f)),
+                                          0.0f);
+                return;
+            }
+            if (SPEC_SHARC && uniforms.sharcCapacity != 0u && SHARC_DEBUG_IS_SURFACE_VIEW(uniforms.sharcDebug))
+            {
+                radianceOut[tid] = float4(sharcDebugSurface(uniforms, sharcHashEntries, sharcResolved, hitPoint,
+                                                            lightNormal, -rayDir, float3(1.0f)),
+                                          0.0f);
+                return;
+            }
+        }
+        float3 sharcLight = float3(0.0f);
         if (-dot(rayDir, lightNormal) > 0.0f)
         {
             const float3 Le = float3(currLight.color);
             if (depth == 0u || specularBounce || !neeDone)
             {
                 radiance += throughput * Le;
+                sharcLight = Le;
             }
             else
             {
-                const float lightSelectionPdf = uniforms.hasEnvMap
-                    ? 0.5f / (float)uniforms.numLights
-                    : 1.0f / (float)uniforms.numLights;
+                const float lightSelectionPdf =
+                    uniforms.hasEnvMap ? 0.5f / (float)uniforms.numLights : 1.0f / (float)uniforms.numLights;
                 // From the vertex that scattered, which is not the ray's origin
                 // once it has passed through a cutout on the way here. Using the
                 // origin makes the light look nearer than the scattering vertex
@@ -1879,8 +1982,18 @@ kernel void wavefrontShade(
                 const float3 misOrigin = rayOrigin - rayDir * p.misDistance;
                 const float lightPdf =
                     getLightPdf(currLight, hitPoint, misOrigin, uniforms.rectLightSamplingMethod) * lightSelectionPdf;
-                radiance += throughput * Le * misWeightBalance(p.lastBsdfPdf, lightPdf);
+                const float mis = misWeightBalance(p.lastBsdfPdf, lightPdf);
+                radiance += throughput * Le * mis;
+                sharcLight = Le * mis;
             }
+        }
+        if (SPEC_SHARC_UPDATE)
+        {
+            const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+            SharcUpdateState updateState = sharcUpdates[updateIndex];
+            sharcMultiplyPendingThroughput(updateState, throughput / max(throughputAtStageEntry, float3(1e-6f)));
+            sharcUpdateMiss(updateState, uniforms, sharcAccumulation, sharcLight, -rayDir);
+            sharcUpdates[updateIndex] = updateState;
         }
         radianceOut[tid] += float4(clampIndirectContribution(radiance, depth, uniforms.clampIndirect), 0.0f);
         return;
@@ -1888,8 +2001,8 @@ kernel void wavefrontShade(
 
     // --- Surface ------------------------------------------------------------
     const GeometryEntry entry = geometryEntries[rec.geomEntryIndex];
-    const bool interpolateMotion = SPEC_MOTION_BLUR && uniforms.enableMotionBlur &&
-                                   motionTime < 1.0f && prevVertexBuffer && indexBuffer;
+    const bool interpolateMotion =
+        SPEC_MOTION_BLUR && uniforms.enableMotionBlur && motionTime < 1.0f && prevVertexBuffer && indexBuffer;
 
     const float2 bary = rec.barycentrics;
     const bool isCurve = SPEC_CURVES && (entry.flags & GEOM_FLAG_CURVE) != 0u;
@@ -1902,11 +2015,9 @@ kernel void wavefrontShade(
     float curveRadius = 0.0f;
 
     const auto inst = instances[rec.instanceIndex];
-    const float4x4 objectToWorld = float4x4(
-        float4(float3(inst.transformationMatrix[0]), 0.0f),
-        float4(float3(inst.transformationMatrix[1]), 0.0f),
-        float4(float3(inst.transformationMatrix[2]), 0.0f),
-        float4(float3(inst.transformationMatrix[3]), 1.0f));
+    const float4x4 objectToWorld =
+        float4x4(float4(float3(inst.transformationMatrix[0]), 0.0f), float4(float3(inst.transformationMatrix[1]), 0.0f),
+                 float4(float3(inst.transformationMatrix[2]), 0.0f), float4(float3(inst.transformationMatrix[3]), 1.0f));
 
     const float3 worldPosition = rayOrigin + rayDir * rec.distance;
 
@@ -1918,8 +2029,8 @@ kernel void wavefrontShade(
         // point* -- and the hit point only exists in world space. Coming back the
         // other way would need the transform's inverse, which MSL does not
         // provide and which nothing else in this kernel wants.
-        fetchCurve(curvePoints, curveSegments, entry, rec.primitiveId, bary.x, worldPosition,
-                   objectToWorld, shadingNormal, shadingTangent, uv, curveRadius);
+        fetchCurve(curvePoints, curveSegments, entry, rec.primitiveId, bary.x, worldPosition, objectToWorld,
+                   shadingNormal, shadingTangent, uv, curveRadius);
         // A strand has no separate geometric normal: the surface *is* the
         // cylinder, so the shading normal is the geometric one.
         shadingGeomNormal = shadingNormal;
@@ -1930,9 +2041,9 @@ kernel void wavefrontShade(
     }
     else
     {
-        fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId,
-                             interpolateMotion, motionTime, bary, objectNormal, objectTangent, uv,
-                             vertexColor, tangentSign, objectGeomNormal, objEdge1, objEdge2, uvArea2);
+        fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId, interpolateMotion,
+                             motionTime, bary, objectNormal, objectTangent, uv, vertexColor, tangentSign,
+                             objectGeomNormal, objEdge1, objEdge2, uvArea2);
         shadingNormal = normalize(transformDirection(normalize(objectNormal), objectToWorld));
         shadingTangent = normalize(transformDirection(normalize(objectTangent), objectToWorld));
         shadingGeomNormal = normalize(transformDirection(objectGeomNormal, objectToWorld));
@@ -1969,8 +2080,8 @@ kernel void wavefrontShade(
             radianceOut[tid] += float4(radiance, 0.0f);
             return;
         }
-        p.depthAndFlags = (p.depthAndFlags & ((1u << PATH_PASSTHROUGH_SHIFT) - 1u)) |
-                          ((passes + 1u) << PATH_PASSTHROUGH_SHIFT);
+        p.depthAndFlags =
+            (p.depthAndFlags & ((1u << PATH_PASSTHROUGH_SHIFT) - 1u)) | ((passes + 1u) << PATH_PASSTHROUGH_SHIFT);
 
         // Toggle, rather than deciding from the normal.
         //
@@ -2001,6 +2112,13 @@ kernel void wavefrontShade(
         // way a cutout pass-through would.
         p.misDistance += rec.distance;
         radianceOut[tid] += float4(radiance, 0.0f);
+        if (SPEC_SHARC_UPDATE)
+        {
+            const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+            SharcUpdateState updateState = sharcUpdates[updateIndex];
+            sharcMultiplyPendingThroughput(updateState, throughput / max(throughputAtStageEntry, float3(1e-6f)));
+            sharcUpdates[updateIndex] = updateState;
+        }
         paths[tid] = p;
         mediumPaths[tid] = mediumState;
         queuePush(outCounter, queueOut, tid);
@@ -2026,8 +2144,16 @@ kernel void wavefrontShade(
         const uint32_t step = mediumState.medium >> MEDIUM_STEP_SHIFT;
         device const Material& mm = materials[medium - 1u];
         const float3 exitAlbedo = unpackMediumAlbedo(mediumState.mediumAlbedo);
-        throughput *= sssBoundaryWeight(sssSigmaT(float3(mm.subsurface_radius)),
-                                        sssChannelPdf(sampledThroughput, exitAlbedo), rec.distance);
+        throughput *= sssBoundaryWeight(
+            sssSigmaT(float3(mm.subsurface_radius)), sssChannelPdf(sampledThroughput, exitAlbedo), rec.distance);
+        if (SPEC_SHARC_UPDATE)
+        {
+            const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+            SharcUpdateState updateState = sharcUpdates[updateIndex];
+            sharcMultiplyPendingThroughput(updateState, throughput / max(throughputAtStageEntry, float3(1e-6f)));
+            sharcApplyPendingThroughput(updateState, uniforms);
+            sharcUpdates[updateIndex] = updateState;
+        }
 
         // The ray is travelling outwards, so the outward normal is the one it
         // agrees with.
@@ -2046,9 +2172,8 @@ kernel void wavefrontShade(
             xsi.geometry_normal = outward;
             xsi.wo = -rayDir;
             xsi.front_face = true;
-            const LightConnection conn =
-                connectToLight(uniforms, uniforms.numLights, lights, xrng, xsi, envAliasTable,
-                               envMapTexture, iesProfiles, false);
+            const LightConnection conn = connectToLight(
+                uniforms, uniforms.numLights, lights, xrng, xsi, envAliasTable, envMapTexture, iesProfiles, false);
             if (conn.needsRay && conn.pdf > 0.0f)
             {
                 const float cosOut = dot(outward, conn.toLight);
@@ -2066,15 +2191,13 @@ kernel void wavefrontShade(
                     // already deducted the whole of it from the bounce ray.
                     const float lobePdf = cosOut * M_1_PI_F;
                     const float misWeight = conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, lobePdf);
-                    const float3 weight =
-                        throughput * (conn.radiance / conn.pdf) * misWeight * M_1_PI_F;
+                    const float3 weight = throughput * (conn.radiance / conn.pdf) * misWeight * M_1_PI_F;
                     if (any(weight > 1e-6f))
                     {
                         ShadowRay sr;
                         sr.origin = packed_float3(offset_ray(worldPosition, outward));
                         sr.direction = packed_float3(conn.toLight);
-                        sr.weight = packed_float3(
-                            clampIndirectContribution(weight, depth, uniforms.clampIndirect));
+                        sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
                         sr.maxDistance = conn.tMax;
                         sr.pixelIndex = tid;
                         // Outside the medium: this vertex is the walk leaving it,
@@ -2084,10 +2207,12 @@ kernel void wavefrontShade(
                         // ever cancelled -- the connection is what lights a
                         // translucent object, and it was arriving at zero.
                         sr.medium = 0u;
-                        sr.rrCutoff = random<SampleDimension::eShadowRR>(xrng, uniforms.samplerType) *
-                                      kShadowTransmittanceCutoff;
-                        const uint32_t slot =
-                            atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                        sr.sharcRadiance = packed_float3(
+                            SPEC_SHARC_UPDATE ? (conn.radiance / conn.pdf) * misWeight * M_1_PI_F : float3(0.0f));
+                        sr.sharcPathIndex = tid;
+                        sr.rrCutoff =
+                            random<SampleDimension::eShadowRR>(xrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
+                        const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
                         shadowRays[slot] = sr;
                         didNeeExit = true;
                     }
@@ -2096,8 +2221,7 @@ kernel void wavefrontShade(
         }
 
         const float3 exitDir =
-            sssCosineDirection(outward,
-                               random<SampleDimension::eSssPhaseU>(xrng, uniforms.samplerType),
+            sssCosineDirection(outward, random<SampleDimension::eSssPhaseU>(xrng, uniforms.samplerType),
                                random<SampleDimension::eSssPhaseV>(xrng, uniforms.samplerType));
 
         radianceOut[tid] += float4(radiance, 0.0f);
@@ -2109,22 +2233,30 @@ kernel void wavefrontShade(
         }
         throughput /= survive;
 
+        if (SPEC_SHARC_UPDATE)
+        {
+            const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+            SharcUpdateState updateState = sharcUpdates[updateIndex];
+            sharcSetThroughput(updateState, float3(1.0f / max(survive, 1e-5f)));
+            sharcUpdates[updateIndex] = updateState;
+        }
+
         PathRay nextRay;
         nextRay.origin = packed_float3(offset_ray(worldPosition, outward));
         nextRay.direction = packed_float3(exitDir);
         rays[tid] = nextRay;
 
-        p.throughput = packed_float3(throughput);
+        p.throughput = packed_float3(SPEC_SHARC_UPDATE ? float3(1.0f) : throughput);
         p.lastBsdfPdf = fmax(dot(outward, exitDir), 0.0f) * M_1_PI_F;
         p.misDistance = 0.0f;
         mediumState.medium = 0u;
         // Depth advances once for the whole walk, here rather than at the entry:
         // charging it at both ends would cost a translucent surface two bounces
         // to do what an opaque one does in one.
-        p.depthAndFlags = (depth + 1u) | PATH_FLAG_ALIVE |
-                          (p.depthAndFlags & ~(PATH_DEPTH_MASK | PATH_FLAG_ALIVE |
-                                               PATH_FLAG_SPECULAR | PATH_FLAG_NEE_DONE)) |
-                          (didNeeExit ? PATH_FLAG_NEE_DONE : 0u);
+        p.depthAndFlags =
+            (depth + 1u) | PATH_FLAG_ALIVE |
+            (p.depthAndFlags & ~(PATH_DEPTH_MASK | PATH_FLAG_ALIVE | PATH_FLAG_SPECULAR | PATH_FLAG_NEE_DONE)) |
+            (didNeeExit ? PATH_FLAG_NEE_DONE : 0u);
         if (depth + 1u >= uniforms.maxDepth)
         {
             return;
@@ -2186,9 +2318,8 @@ kernel void wavefrontShade(
     }
 
     SurfaceInteraction si;
-    initSurfaceInteraction(si, materials[entry.materialId],
-                           worldPosition, worldNormal, geomNormal,
-                           worldTangent, worldBinormal, uv, rayDir, vertexColor, lodBase);
+    initSurfaceInteraction(si, materials[entry.materialId], worldPosition, worldNormal, geomNormal, worldTangent,
+                           worldBinormal, uv, rayDir, vertexColor, lodBase);
 
     // A strand shaded by the whole-fibre lobe: light crosses it in one event, so
     // neither the hemisphere tests nor the ray offsets below apply. Gated on the
@@ -2255,8 +2386,16 @@ kernel void wavefrontShade(
             through.direction = packed_float3(rayDir);
             rays[tid] = through;
             p.misDistance += rec.distance;
-            p.depthAndFlags = (p.depthAndFlags & ((1u << PATH_PASSTHROUGH_SHIFT) - 1u)) |
-                              ((passes + 1u) << PATH_PASSTHROUGH_SHIFT);
+            p.depthAndFlags =
+                (p.depthAndFlags & ((1u << PATH_PASSTHROUGH_SHIFT) - 1u)) | ((passes + 1u) << PATH_PASSTHROUGH_SHIFT);
+            if (SPEC_SHARC_UPDATE)
+            {
+                const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+                SharcUpdateState updateState = sharcUpdates[updateIndex];
+                sharcMultiplyPendingThroughput(updateState, throughput / max(throughputAtStageEntry, float3(1e-6f)));
+                sharcUpdates[updateIndex] = updateState;
+                p.throughput = packed_float3(float3(1.0f));
+            }
             paths[tid] = p;
             queuePush(outCounter, queueOut, tid);
             return;
@@ -2264,6 +2403,15 @@ kernel void wavefrontShade(
     }
 
     const DebugMode debugMode = (DebugMode)uniforms.debug;
+    if (!SPEC_SHARC_UPDATE && SPEC_DEBUG && debugMode == DebugMode::eSharcGrid && depth == 0u)
+    {
+        // NVIDIA's hash-grid view is evaluated at the primary world-space hit.
+        // It visualizes addressing, not cache contents, and therefore works
+        // whether the SHaRC resources are enabled or not. Assigned, not added:
+        // a diagnostic answers for the pixel instead of tinting the render.
+        radianceOut[tid] = float4(sharcDebugColoredHash(uniforms, si.position, si.geometry_normal), 0.0f);
+        return;
+    }
     if (SPEC_DEBUG && (debugMode == DebugMode::eMotionBlur || debugMode == DebugMode::eNormal))
     {
         // Debug views replace the radiance outright rather than accumulating.
@@ -2279,13 +2427,12 @@ kernel void wavefrontShade(
             float3 nCur[3], pCur[3], tCur[3], cCur[3];
             float2 uvCur[3];
             float signCur = 1.0f; // unused by this debug view
-            fetchTriangle(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId,
-                          false, motionTime, pCur, nCur, tCur, uvCur, signCur, cCur);
-            dbg = float3(motionTime,
-                         clamp(length(normalize(objectNormal) - normalize(nCur[0])) * 10.0f, 0.0f, 1.0f),
-                         0.0f);
+            fetchTriangle(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId, false, motionTime, pCur,
+                          nCur, tCur, uvCur, signCur, cCur);
+            dbg = float3(
+                motionTime, clamp(length(normalize(objectNormal) - normalize(nCur[0])) * 10.0f, 0.0f, 1.0f), 0.0f);
         }
-        radianceOut[tid] = float4(dbg, 0.0f);
+        radianceOut[tid] += float4(dbg, 0.0f);
         return;
     }
 
@@ -2304,9 +2451,7 @@ kernel void wavefrontShade(
     // With guidePrimaryHit the camera-visible surface is the answer by
     // definition, so the roughness floor -- and the flicker it causes where a
     // material sits on top of it -- does not enter into it.
-    const bool guideWorthy = uniforms.guidePrimaryHit
-                                 ? (depth == 0u)
-                                 : (si.roughness > kGuideRoughnessFloor);
+    const bool guideWorthy = uniforms.guidePrimaryHit ? (depth == 0u) : (si.roughness > kGuideRoughnessFloor);
     // Never walk forever: past a couple of bounces the reflected surface has
     // little to do with this pixel, and no guides at all is worse than imperfect
     // ones.
@@ -2325,14 +2470,12 @@ kernel void wavefrontShade(
     const bool writingAov = shouldWriteAov(uniforms, sampleIdx);
     if (writingAov && depth == 0u)
     {
-        const float3 prevPrimary =
-            uniforms.hasPrevFramePose
-                ? previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances, entry, rec.instanceIndex,
-                                        rec.primitiveId, bary)
-                : worldPosition;
-        const float2 primaryMotion =
-            screenMotion(uniforms, uniforms.prevWorldToClip * float4(prevPrimary, 1.0f),
-                         uint2(tid % uniforms.width, tid / uniforms.width));
+        const float3 prevPrimary = uniforms.hasPrevFramePose ?
+                                       previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances, entry,
+                                                             rec.instanceIndex, rec.primitiveId, bary) :
+                                       worldPosition;
+        const float2 primaryMotion = screenMotion(uniforms, uniforms.prevWorldToClip * float4(prevPrimary, 1.0f),
+                                                  uint2(tid % uniforms.width, tid / uniforms.width));
         aov[tid].depth = viewDepth(uniforms, worldPosition);
         aov[tid].motionX = primaryMotion.x;
         aov[tid].motionY = primaryMotion.y;
@@ -2367,7 +2510,7 @@ kernel void wavefrontShade(
         // reflective surfaces the mask is for. Motion is what motion vectors are
         // for; a pixel that moved is reprojectable, not untrustworthy.
         a.reactive = (depth > 0u) ? 1.0f : 0.0f;
-        a.pad2 = 0.0f;
+        a.bounceDepth = 0.0f;
         aov[tid] = a;
         p.depthAndFlags |= PATH_FLAG_AOV_DONE;
         paths[tid].depthAndFlags = p.depthAndFlags;
@@ -2392,76 +2535,116 @@ kernel void wavefrontShade(
     // walk can reach the first rough surface. The secondary hit distance above
     // is recorded before stopping, so mirror/glass reprojection keeps the same
     // data as the full walk did. guideLastChance bounds this to depth two.
-    if (uniforms.canonicalGuideSample && sampleIdx == 0u &&
-        (p.depthAndFlags & PATH_FLAG_AOV_DONE) != 0u)
+    if (uniforms.canonicalGuideSample && sampleIdx == 0u && (p.depthAndFlags & PATH_FLAG_AOV_DONE) != 0u)
     {
         return;
     }
 
-    if (si.emission.x > 0.0f || si.emission.y > 0.0f || si.emission.z > 0.0f)
-    {
-        radiance += throughput * si.emission;
-    }
+    const float3 surfaceEmission = float3(si.emission);
 
     IorStack iorStack = iorStacks[tid];
     const bool entering = si.front_face;
-    si.exterior_ior = entering ? ior_stack_current_ior(iorStack)
-                               : ior_stack_peek_after_pop(iorStack, si.dielectric_priority);
+    si.exterior_ior =
+        entering ? ior_stack_current_ior(iorStack) : ior_stack_peek_after_pop(iorStack, si.dielectric_priority);
 
-    // --- Radiance cache ------------------------------------------------------
-    //
-    // Read only past the first few bounces and only off a rough surface: the
-    // camera ray and the first bounce carry the detail a voxel average would
-    // blur, and a mirror reflects a direction rather than a place.
-    if (SPEC_SHARC && uniforms.sharcCapacity != 0u && depth >= uniforms.sharcDepth &&
-        si.roughness > 0.3f)
+    // --- Sparse Hash Radiance Cache ----------------------------------------
+    const float3 diffuseAlbedo = float3(si.albedo) * (1.0f - si.metallic);
+    const float3 specularF0 = gltf_f0(si.ior, si.specular, si.specular_color, si.albedo, si.metallic);
+    const float3 materialDemodulation = sharcMaterialDemodulation(diffuseAlbedo, specularF0);
+    if (SPEC_SHARC_UPDATE)
     {
-        SharcPathState sharc = sharcPaths[tid];
-        uint32_t voxelHash = 0u, voxelKey = 0u;
-        sharcVoxel(si.position, si.shading_normal, uniforms.viewToWorld[3].xyz, uniforms.sharcBaseSize,
-                   voxelHash, voxelKey);
+        si.roughness = max(si.roughness, uniforms.sharcRoughnessThreshold);
+    }
 
-        uint32_t slot = 0u;
-        // Insert only when this path is going to fill it in; a read that misses
-        // simply carries on tracing.
-        const bool wantVisit = (sharc.index == SHARC_NO_ENTRY);
-        // A fixed share of paths never read and always trace to the end, so the
-        // cache keeps converging instead of freezing at whatever the first few
-        // paths through a voxel happened to find. This is what SHARC gives its
-        // separate update pass; here it is the same paths, thinned.
-        const bool updatePath =
-            (sharcHash(tid * 9781u + sampleIdx * 6271u) & 7u) == 0u;
-        if (sharcFind(sharcEntries, uniforms.sharcCapacity, voxelHash, voxelKey, wantVisit, slot))
+    if (SPEC_SHARC_UPDATE && uniforms.sharcCapacity != 0u)
+    {
+        // The upstream contract hands SharcUpdateHit this vertex's direct
+        // lighting. A wavefront tracer does not have it yet: the connection is a
+        // shadow ray that the next stage resolves, so `shadow` deposits it into
+        // this same vertex -- state.cacheIndices[0], weight 1/demodulation --
+        // and into the vertices behind it, which is exactly the pair of writes
+        // SharcUpdateHit would have made. The direction weight is deferred for
+        // the same reason: it is a property of the lobe the BSDF has not been
+        // sampled from yet, and sharcSetRadianceDirectionWeight sets it below.
+        const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+        SharcUpdateState updateState = sharcUpdates[updateIndex];
+        sharcMultiplyPendingThroughput(updateState, throughput / max(throughputAtStageEntry, float3(1e-6f)));
+        const bool responsive = (uniforms.sharcFlags & SHARC_FLAG_RESPONSIVE) != 0u;
+        const bool continueTracing =
+            sharcUpdateHit(updateState, uniforms, sharcHashEntries, sharcAccumulation, sharcResolved,
+                           uniforms.sharcDebug != 0u ? iorStats + IOR_STAT_COUNT : nullptr, si.position,
+                           si.geometry_normal, -rayDir, 0.0f, materialDemodulation, float3(0.0f), surfaceEmission,
+                           float(sharcHash(tid ^ uniforms.sharcFrameIndex)) * (1.0f / 4294967296.0f), responsive);
+        sharcUpdates[updateIndex] = updateState;
+        if (!continueTracing)
         {
-            uint32_t cachedCount = 0u;
-            const float3 cached = sharcRead(sharcEntries, slot, cachedCount);
-            // A path either reads or records, never both. One that has recorded
-            // a voxel owes it an honest estimate of the rest of the path, and a
-            // cached read inside that estimate feeds the cache its own output --
-            // a loop that amplifies whatever error it starts with. It showed as
-            // a classroom 11% bright with no single step being wrong.
-            if (!updatePath && sharc.index == SHARC_NO_ENTRY &&
-                cachedCount >= uniforms.sharcMinSamples)
+            return;
+        }
+    }
+    else if (SPEC_SHARC && uniforms.sharcCapacity != 0u)
+    {
+        // The cache diagnostics answer for the surface the camera sees, replace
+        // the pixel outright, and end the path -- the same contract the upstream
+        // sample's debug branch has. Everything they need is a query, so they run
+        // ahead of the eligibility gates that the render path is bound by.
+        if (SPEC_DEBUG && (DebugMode)uniforms.debug == DebugMode::eSharcRadiance && depth == 0u)
+        {
+            radianceOut[tid] = float4(sharcDebugRadiance(uniforms, sharcHashEntries, sharcResolved, si.position,
+                                                         si.geometry_normal, -rayDir, materialDemodulation),
+                                      0.0f);
+            return;
+        }
+        if (SHARC_DEBUG_IS_SURFACE_VIEW(uniforms.sharcDebug) && depth == 0u)
+        {
+            radianceOut[tid] = float4(sharcDebugSurface(uniforms, sharcHashEntries, sharcResolved, si.position,
+                                                        si.geometry_normal, -rayDir, materialDemodulation),
+                                      0.0f);
+            return;
+        }
+        if (depth >= uniforms.sharcDepth)
+        {
+            const SharcAddress address = sharcAddress(uniforms, si.position, si.geometry_normal, false);
+            // Both gates are the upstream ones. A segment shorter than a voxel
+            // diagonal would read the cell it is standing in, and a scattering
+            // lobe whose footprint is finer than a voxel resolves detail the cell
+            // cannot hold -- a mirror being the limiting case, with no footprint
+            // at any distance.
+            const float roughness = min(max(unpackSharcRoughness(p.depthAndFlags), 0.0f), 0.99f);
+            const float alpha = roughness * roughness;
+            const float alpha2 = alpha * alpha;
+            const float footprint = rec.distance * sqrt(max(0.5f * alpha2 / max(1.0f - alpha2, 1e-5f), 0.0f));
+            const bool validSegment = rec.distance > address.voxelSize * sqrt(3.0f);
+            const bool validLobe = footprint > address.voxelSize;
+            device atomic_uint* sharcStats = uniforms.sharcDebug != 0u ? iorStats + IOR_STAT_COUNT : nullptr;
+            if (sharcStats && !validSegment)
             {
-                // The rest of this path is what the cache already knows.
+                atomic_fetch_add_explicit(&sharcStats[SHARC_STAT_SEGMENT_REJECT], 1u, memory_order_relaxed);
+            }
+            if (sharcStats && validSegment && !validLobe)
+            {
+                atomic_fetch_add_explicit(&sharcStats[SHARC_STAT_FOOTPRINT_REJECT], 1u, memory_order_relaxed);
+            }
+            float3 cached = float3(0.0f);
+            uint32_t cachedSamples = 0u;
+            if (validSegment && validLobe &&
+                sharcQuery(uniforms, sharcHashEntries, sharcResolved, sharcStats, si.position, si.geometry_normal,
+                           -rayDir, materialDemodulation, cached, cachedSamples))
+            {
+                if ((uniforms.sharcFlags & SHARC_FLAG_SEPARATE_EMISSIVE) != 0u)
+                {
+                    cached += surfaceEmission;
+                }
                 radiance += throughput * cached;
                 radianceOut[tid] += float4(radiance, 0.0f);
                 paths[tid] = p;
                 return;
             }
-            // Recorded only while the throughput is worth dividing by. The
-            // deposit is what the path gathered divided by its throughput here,
-            // and at a throughput of a thousandth that estimator has a variance
-            // to match -- a handful of such deposits pulled a classroom 46%
-            // bright. Below the threshold the path simply carries on untracked.
-            if (wantVisit && luminance(throughput) > 0.05f)
-            {
-                sharc.index = slot;
-                sharc.radianceAtVisit = packed_float3(float3(radianceOut[tid].xyz) + radiance);
-                sharc.invThroughput = packed_float3(1.0f / max(throughput, float3(0.02f)));
-                sharcPaths[tid] = sharc;
-            }
         }
+    }
+
+    if (any(surfaceEmission > 0.0f))
+    {
+        radiance += throughput * surfaceEmission;
     }
 
     const float4 xi = float4(random<SampleDimension::eBSDF0>(rng, uniforms.samplerType),
@@ -2477,9 +2660,17 @@ kernel void wavefrontShade(
     }
 
     const bool nextSpecular = ((sampleResult.event_type & BSDF_EVENT_SPECULAR) != 0);
+    if (SPEC_SHARC_UPDATE)
+    {
+        const float directionWeight =
+            (sampleResult.event_type & BSDF_EVENT_DIFFUSE) != 0 ? 0.0f : 1.0f - saturate(si.roughness);
+        const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+        SharcUpdateState updateState = sharcUpdates[updateIndex];
+        sharcSetRadianceDirectionWeight(updateState, directionWeight);
+        sharcUpdates[updateIndex] = updateState;
+    }
 
-    bool didNee = (uniforms.estimatorMode == 0) &&
-                  (sampleResult.event_type & (BSDF_EVENT_DIFFUSE | BSDF_EVENT_GLOSSY)) &&
+    bool didNee = (uniforms.estimatorMode == 0) && (sampleResult.event_type & (BSDF_EVENT_DIFFUSE | BSDF_EVENT_GLOSSY)) &&
                   ((SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap));
     if (didNee)
     {
@@ -2539,12 +2730,11 @@ kernel void wavefrontShade(
                 crng.seed = hash_combine(rng.seed, i * 0x9E3779B9u);
             }
 
-            const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, crng,
-                                                        si, envAliasTable, envMapTexture, iesProfiles);
+            const LightConnection conn = connectToLight(
+                uniforms, uniforms.numLights, lights, crng, si, envAliasTable, envMapTexture, iesProfiles);
             // A fibre has no back side to reject: see scattersThroughFibre().
             const bool isNextEventValid =
-                (isFibre || (dot(conn.toLight, si.shading_normal) > 0.0f) == si.front_face) &&
-                conn.pdf > 0.0f;
+                (isFibre || (dot(conn.toLight, si.shading_normal) > 0.0f) == si.front_face) && conn.pdf > 0.0f;
             if (!isNextEventValid || !conn.needsRay)
             {
                 continue;
@@ -2559,8 +2749,7 @@ kernel void wavefrontShade(
             {
                 continue;
             }
-            const float misWeight =
-                conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, evalResult.pdf);
+            const float misWeight = conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, evalResult.pdf);
             const float3 f = conn.radiance * evalResult.bsdf * misWeight;
             const float target = luminance(f);
             if (!(target > 0.0f))
@@ -2598,27 +2787,25 @@ kernel void wavefrontShade(
                 // Past the strand when the connection leaves through it: the lobe
                 // has already charged for the crossing, so the fibre must not
                 // shadow itself.
-                sr.origin = packed_float3(
-                    isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal,
-                                              curveRadius, bestConn.toLight)
-                            : bestConn.origin);
+                sr.origin = packed_float3(isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal,
+                                                                    curveRadius, bestConn.toLight) :
+                                                    bestConn.origin);
                 sr.direction = packed_float3(bestConn.toLight);
                 sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
                 sr.maxDistance = bestConn.tMax;
                 sr.pixelIndex = tid;
                 sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
-                sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) *
-                              kShadowTransmittanceCutoff;
-                const uint32_t slot =
-                    atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                sr.sharcRadiance = packed_float3(SPEC_SHARC_UPDATE ? bestF * W : float3(0.0f));
+                sr.sharcPathIndex = tid;
+                sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
+                const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
                 shadowRays[slot] = sr;
             }
         }
     }
 
     // --- Next segment -------------------------------------------------------
-    const float3 faceNg = (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal
-                                                                  : -si.geometry_normal;
+    const float3 faceNg = (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
     float3 nextOrigin;
     // Colour the diffuse-transmission lobe applied on the way into a subsurface
     // medium, divided back out below. The walk supplies the colour itself, once
@@ -2650,8 +2837,7 @@ kernel void wavefrontShade(
                 // something has actually gone wrong.
                 if (ior_stack_full(iorStack))
                 {
-                    atomic_fetch_add_explicit(&iorStats[IOR_STAT_OVERFLOW], 1u,
-                                              memory_order_relaxed);
+                    atomic_fetch_add_explicit(&iorStats[IOR_STAT_OVERFLOW], 1u, memory_order_relaxed);
                 }
                 ior_stack_push(iorStack, si.dielectric_priority, si.ior, entry.materialId);
             }
@@ -2659,8 +2845,7 @@ kernel void wavefrontShade(
             {
                 if (!ior_stack_can_pop(iorStack, si.dielectric_priority, entry.materialId))
                 {
-                    atomic_fetch_add_explicit(&iorStats[IOR_STAT_UNMATCHED], 1u,
-                                              memory_order_relaxed);
+                    atomic_fetch_add_explicit(&iorStats[IOR_STAT_UNMATCHED], 1u, memory_order_relaxed);
                 }
                 ior_stack_pop(iorStack, si.dielectric_priority, entry.materialId);
             }
@@ -2672,8 +2857,7 @@ kernel void wavefrontShade(
         // side; what this adds is that it random-walks on the way. From here the
         // path is inside, and `extend` samples free flight instead of running to
         // the next surface.
-        if (SPEC_SSS && si.subsurface > 0.0f &&
-            (sampleResult.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION) != 0)
+        if (SPEC_SSS && si.subsurface > 0.0f && (sampleResult.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION) != 0)
         {
             mediumState.medium = (entry.materialId + 1u) & MEDIUM_INDEX_MASK;
 
@@ -2710,10 +2894,18 @@ kernel void wavefrontShade(
         // Both branches above assume a surface with an inside and an outside. A
         // strand has neither: the bounce leaves from wherever the crossing the lobe
         // already accounted for comes out.
-        nextOrigin = fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius,
-                                     nextDir);
+        nextOrigin = fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, nextDir);
     }
-    float3 nextThroughput = throughput * (float3(sampleResult.bsdf_over_pdf) / sssEntryTint);
+    float3 segmentThroughput = float3(sampleResult.bsdf_over_pdf) / sssEntryTint;
+    // SHaRC treats every path segment independently: the cache stores radiance
+    // per vertex and carries the connecting throughput itself, through
+    // sharcSetThroughput. Leaving the path throughput accumulating on top of
+    // that weights each deposit twice, and -- because Russian roulette then
+    // divides by the whole path's throughput rather than this segment's -- puts
+    // compensation factors of thousands into cells that see a handful of samples
+    // a frame. That is the difference between a cache that converges and one
+    // whose fireflies feed back through cache resampling.
+    float3 nextThroughput = SPEC_SHARC_UPDATE ? segmentThroughput : throughput * segmentThroughput;
 
     // NEE only reaches directions above the shading normal of a front face, so a
     // hit anywhere else must not be weighted against it. On a fibre it reaches all
@@ -2733,6 +2925,7 @@ kernel void wavefrontShade(
         else
         {
             nextThroughput *= 1.0f / max(q, 1e-5f);
+            segmentThroughput *= 1.0f / max(q, 1e-5f);
         }
     }
     if (depth + 1u >= uniforms.maxDepth)
@@ -2745,22 +2938,32 @@ kernel void wavefrontShade(
         return;
     }
 
+    if (SPEC_SHARC_UPDATE)
+    {
+        const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+        SharcUpdateState updateState = sharcUpdates[updateIndex];
+        sharcSetThroughput(updateState, segmentThroughput);
+        sharcUpdates[updateIndex] = updateState;
+    }
+
     PathRay nextRay;
     nextRay.origin = packed_float3(nextOrigin);
     nextRay.direction = packed_float3(nextDir);
     rays[tid] = nextRay;
 
-    p.throughput = packed_float3(nextThroughput);
+    p.throughput = packed_float3(SPEC_SHARC_UPDATE ? float3(1.0f) : nextThroughput);
     p.lastBsdfPdf = nextSpecular ? 1.0f : sampleResult.pdf;
     p.misDistance = 0.0f;
     // AOV_DONE is carried, not rebuilt: it records something that already
     // happened to this path, unlike the others, which describe the bounce being
     // set up. Dropping it let every escaping ray overwrite guides that a surface
     // had already written, which is most of the frame in an open scene.
-    p.depthAndFlags = (depth + 1u) | PATH_FLAG_ALIVE |
-                      (nextSpecular ? PATH_FLAG_SPECULAR : 0u) |
-                      (didNee ? PATH_FLAG_NEE_DONE : 0u) |
-                      (p.depthAndFlags & PATH_FLAG_AOV_DONE);
+    const float previousSharcRoughness = unpackSharcRoughness(p.depthAndFlags);
+    const float sharcRoughness = min(
+        previousSharcRoughness + (((sampleResult.event_type & BSDF_EVENT_DIFFUSE) != 0) ? 1.0f : si.roughness), 1.0f);
+    p.depthAndFlags = (depth + 1u) | PATH_FLAG_ALIVE | (nextSpecular ? PATH_FLAG_SPECULAR : 0u) |
+                      (didNee ? PATH_FLAG_NEE_DONE : 0u) | (p.depthAndFlags & PATH_FLAG_AOV_DONE) |
+                      packSharcRoughness(sharcRoughness);
     paths[tid] = p;
 
     queuePush(outCounter, queueOut, tid);
@@ -2777,19 +2980,13 @@ kernel void wavefrontShade(
 // may split a compute pass internally, and hundreds of them made a healthy long
 // frame trip the GPU watchdog. This one-word breadcrumb identifies the stage
 // that was entered without using the counter-sampling path at all.
-kernel void wavefrontStageBreadcrumb(
-    device atomic_uint* stage     [[buffer(0)]],
-    constant uint32_t&  stageIndex [[buffer(1)]])
+kernel void wavefrontStageBreadcrumb(device atomic_uint* stage [[buffer(0)]], constant uint32_t& stageIndex [[buffer(1)]])
 {
     atomic_store_explicit(stage, stageIndex, memory_order_relaxed);
 }
 
 static inline void prepareTraversalDispatches(
-    device uint32_t* args,
-    uint32_t active,
-    uint32_t threadsPerGroup,
-    uint32_t batchThreads,
-    uint32_t batchCount)
+    device uint32_t* args, uint32_t active, uint32_t threadsPerGroup, uint32_t batchThreads, uint32_t batchCount)
 {
     for (uint32_t batch = 0u; batch < batchCount; ++batch)
     {
@@ -2801,28 +2998,26 @@ static inline void prepareTraversalDispatches(
     }
 }
 
-kernel void wavefrontPrepare(
-    device uint32_t&        controlRef    [[buffer(0)]],
-    constant uint32_t&      srcIdx        [[buffer(1)]],
-    constant uint32_t&      threadsPerGroup [[buffer(2)]],
-    constant uint32_t&      bounceIdx       [[buffer(3)]],
-    device uint32_t*        stageStats      [[buffer(4)]],
-    device const PathState* paths           [[buffer(5)]],
-    device const PathRay*   rays            [[buffer(6)]],
-    device const uint32_t*  queue           [[buffer(7)]],
-    constant uint32_t&      diagnosticsEnabled [[buffer(8)]],
-    device uint32_t*        traversalDispatches [[buffer(9)]],
-    constant uint32_t&      traversalBatchThreads [[buffer(10)]],
-    constant uint32_t&      traversalBatchCount [[buffer(11)]],
-    device const MediumPathState* mediumPaths [[buffer(12)]],
-    constant uint32_t&      diagnosticsMediumEnabled [[buffer(13)]])
+kernel void wavefrontPrepare(device uint32_t& controlRef [[buffer(0)]],
+                             constant uint32_t& srcIdx [[buffer(1)]],
+                             constant uint32_t& threadsPerGroup [[buffer(2)]],
+                             constant uint32_t& bounceIdx [[buffer(3)]],
+                             device uint32_t* stageStats [[buffer(4)]],
+                             device const PathState* paths [[buffer(5)]],
+                             device const PathRay* rays [[buffer(6)]],
+                             device const uint32_t* queue [[buffer(7)]],
+                             constant uint32_t& diagnosticsEnabled [[buffer(8)]],
+                             device uint32_t* traversalDispatches [[buffer(9)]],
+                             constant uint32_t& traversalBatchThreads [[buffer(10)]],
+                             constant uint32_t& traversalBatchCount [[buffer(11)]],
+                             device const MediumPathState* mediumPaths [[buffer(12)]],
+                             constant uint32_t& diagnosticsMediumEnabled [[buffer(13)]])
 {
     device uint32_t* control = &controlRef;
     const uint32_t n = min(control[srcIdx], control[WF_CTRL_CAPACITY]);
     if (diagnosticsEnabled != 0u)
     {
-        const uint32_t diagBase = WF_DIAG_BASE +
-                                  min(bounceIdx, WF_DIAG_BOUNCES - 1u) * WF_DIAG_STRIDE;
+        const uint32_t diagBase = WF_DIAG_BASE + min(bounceIdx, WF_DIAG_BOUNCES - 1u) * WF_DIAG_STRIDE;
         stageStats[diagBase] = n;
         for (uint32_t lane = 0u; lane < min(n, (uint32_t)WF_DIAG_LANES); ++lane)
         {
@@ -2842,8 +3037,7 @@ kernel void wavefrontPrepare(
             // constants. The runtime flag keeps non-SSS diagnostics from
             // reading the uninitialised cold table; this only runs for the
             // handful of diagnostic lanes and adds no traffic to rendering.
-            stageStats[laneBase + 1u] =
-                diagnosticsMediumEnabled != 0u ? mediumPaths[tid].medium : 0u;
+            stageStats[laneBase + 1u] = diagnosticsMediumEnabled != 0u ? mediumPaths[tid].medium : 0u;
             stageStats[laneBase + 2u] = p.depthAndFlags;
             stageStats[laneBase + 3u] = as_type<uint32_t>(origin.x);
             stageStats[laneBase + 4u] = as_type<uint32_t>(origin.y);
@@ -2852,9 +3046,8 @@ kernel void wavefrontPrepare(
             stageStats[laneBase + 7u] = as_type<uint32_t>(direction.y);
             stageStats[laneBase + 8u] = as_type<uint32_t>(direction.z);
             stageStats[laneBase + 9u] = as_type<uint32_t>(dot(direction, direction));
-            stageStats[laneBase + 10u] = as_type<uint32_t>(max(max(float3(p.throughput).x,
-                                                                   float3(p.throughput).y),
-                                                               float3(p.throughput).z));
+            stageStats[laneBase + 10u] =
+                as_type<uint32_t>(max(max(float3(p.throughput).x, float3(p.throughput).y), float3(p.throughput).z));
         }
         control[WF_CTRL_STATS_PATHS + min(bounceIdx, 31u)] = n;
     }
@@ -2862,8 +3055,7 @@ kernel void wavefrontPrepare(
     control[WF_CTRL_DISPATCH + 0] = (n + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_DISPATCH + 1] = 1u;
     control[WF_CTRL_DISPATCH + 2] = 1u;
-    prepareTraversalDispatches(traversalDispatches, n, threadsPerGroup,
-                               traversalBatchThreads, traversalBatchCount);
+    prepareTraversalDispatches(traversalDispatches, n, threadsPerGroup, traversalBatchThreads, traversalBatchCount);
     // The stages about to run append into these, so clear their counts before
     // anything can add to them.
     control[1u - srcIdx] = 0u;
@@ -2893,9 +3085,8 @@ kernel void wavefrontPrepare(
 // longer than a camera ray into a canopy, and no reordering shortens it.
 
 // Between `extend` and the two stages that consume its classification.
-kernel void wavefrontPrepareHitMiss(
-    device uint32_t&        controlRef      [[buffer(0)]],
-    constant uint32_t&      threadsPerGroup [[buffer(1)]])
+kernel void wavefrontPrepareHitMiss(device uint32_t& controlRef [[buffer(0)]],
+                                    constant uint32_t& threadsPerGroup [[buffer(1)]])
 {
     device uint32_t* control = &controlRef;
     const uint32_t h = control[WF_CTRL_HIT];
@@ -2914,13 +3105,12 @@ kernel void wavefrontPrepareHitMiss(
 // Between `shade` and `shadow`: publish the number of shadow rays `shade`
 // emitted and size their dispatch. Separate from wavefrontPrepare because the
 // count does not exist until `shade` has run.
-kernel void wavefrontPrepareShadow(
-    device uint32_t&        controlRef      [[buffer(0)]],
-    constant uint32_t&      threadsPerGroup [[buffer(1)]],
-    constant uint32_t&      bounceIdx       [[buffer(2)]],
-    device uint32_t*        traversalDispatches [[buffer(3)]],
-    constant uint32_t&      traversalBatchThreads [[buffer(4)]],
-    constant uint32_t&      traversalBatchCount [[buffer(5)]])
+kernel void wavefrontPrepareShadow(device uint32_t& controlRef [[buffer(0)]],
+                                   constant uint32_t& threadsPerGroup [[buffer(1)]],
+                                   constant uint32_t& bounceIdx [[buffer(2)]],
+                                   device uint32_t* traversalDispatches [[buffer(3)]],
+                                   constant uint32_t& traversalBatchThreads [[buffer(4)]],
+                                   constant uint32_t& traversalBatchCount [[buffer(5)]])
 {
     device uint32_t* control = &controlRef;
     const uint32_t n = control[WF_CTRL_SHADOW];
@@ -2929,8 +3119,7 @@ kernel void wavefrontPrepareShadow(
     control[WF_CTRL_SHADOW_DIS + 0] = (n + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_SHADOW_DIS + 1] = 1u;
     control[WF_CTRL_SHADOW_DIS + 2] = 1u;
-    prepareTraversalDispatches(traversalDispatches, n, threadsPerGroup,
-                               traversalBatchThreads, traversalBatchCount);
+    prepareTraversalDispatches(traversalDispatches, n, threadsPerGroup, traversalBatchThreads, traversalBatchCount);
 }
 
 // Transmittance of a shadow ray through whatever bounded media it crosses.
@@ -2952,8 +3141,11 @@ static float3 mediumTransmittance(typename T::structure accelerationStructure,
                                   device const Material* materials,
                                   device const GeometryEntry* geometryEntries,
                                   constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
-                                  float3 origin, float3 direction, float maxDistance,
-                                  uint32_t startMedium, float motionTime)
+                                  float3 origin,
+                                  float3 direction,
+                                  float maxDistance,
+                                  uint32_t startMedium,
+                                  float motionTime)
 {
     constexpr uint32_t kMaxCrossings = 8u;
 
@@ -2997,8 +3189,7 @@ static float3 mediumTransmittance(typename T::structure accelerationStructure,
         // gizmo's winding is arbitrary, so the normal cannot say which way the
         // ray is going.
         const auto inst = instances[hit.instance_id];
-        const uint32_t here =
-            (geometryEntries[inst.userID + hit.geometry_id].materialId + 1u) & MEDIUM_INDEX_MASK;
+        const uint32_t here = (geometryEntries[inst.userID + hit.geometry_id].materialId + 1u) & MEDIUM_INDEX_MASK;
         medium = (medium == here) ? 0u : here;
 
         travelled += segment + 1e-4f;
@@ -3011,20 +3202,21 @@ static float3 mediumTransmittance(typename T::structure accelerationStructure,
 // shadow -- resolve the deferred connections
 // ---------------------------------------------------------------------------
 template <typename T>
-static void shadowImpl(
-    uint                    gid,
-    constant Uniforms&      uniforms,
-    typename T::structure   accelerationStructure,
-    device const ShadowRay* shadowRays,
-    device float4*          radianceOut,
-    device const uint32_t*  control,
-    constant uint32_t&      sampleIdx,
-    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
-    device const Material*  materials,
-    device const GeometryEntry* geometryEntries,
-    device const char*      vertexBuffer,
-    device const uint32_t*  indexBuffer,
-    typename T::table       functionTable)
+static void shadowImpl(uint gid,
+                       constant Uniforms& uniforms,
+                       typename T::structure accelerationStructure,
+                       device const ShadowRay* shadowRays,
+                       device float4* radianceOut,
+                       device const uint32_t* control,
+                       constant uint32_t& sampleIdx,
+                       constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                       device const Material* materials,
+                       device const GeometryEntry* geometryEntries,
+                       device const char* vertexBuffer,
+                       device const uint32_t* indexBuffer,
+                       typename T::table functionTable,
+                       device SharcUpdateState* sharcUpdates,
+                       device SharcAccumulationEntry* sharcAccumulation)
 {
     if (gid >= control[WF_CTRL_SHADOW_N])
     {
@@ -3043,39 +3235,50 @@ static void shadowImpl(
 
     const float motionTime = motionTimeFor(uniforms, sr.pixelIndex, sampleIdx);
     float3 weight = float3(sr.weight);
+    float3 sharcRadiance = float3(sr.sharcRadiance);
 
     if (!SPEC_ALPHA)
     {
         // No cutouts in this scene: one any-hit trace, exactly as before.
         isect.force_opacity(forced_opacity::opaque);
         isect.accept_any_intersection(true);
-        if (T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime).type ==
-            intersection_type::none)
+        if (T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime).type == intersection_type::none)
         {
             // Whatever survived the geometry still has to cross the atmosphere. Without
-    // this a shadow ray is a hole in the fog, and every light reads as if the
-    // haze were not there -- which is exactly the term that makes a low sun
-    // through trees look like a low sun through trees.
-    // Measured and not moved: this depends only on the ray, so it can be folded
-    // into sr.weight where the ray is built, and doing so lifts this kernel's
-    // threadgroup limit from 576 to 640. Six interleaved runs of each say the
-    // stage does not care -- 36.7 ms against 37.5 -- which is what the model
-    // predicts: the same 11% of limit was worth 4.5% of the frame on `extend`
-    // at 63% of it, so on a stage at 28% it is around 2%, under the noise floor
-    // of a machine that swings 5% between runs.
-    if (SPEC_FOG && uniforms.hasFog)
-    {
-        const float tau = fogOpticalDepth(float3(sr.origin), float3(sr.direction),
-                                          sr.maxDistance, uniforms.fogHeight, uniforms.fogSigmaT);
-        weight *= exp(-tau);
-    }
-    if (SPEC_SSS && uniforms.hasBoundedMedium)
-    {
-        weight *= mediumTransmittance<T>(accelerationStructure, materials, geometryEntries,
-                                         instances, float3(sr.origin), float3(sr.direction),
-                                         sr.maxDistance, sr.medium, motionTime);
-    }
-    radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
+            // this a shadow ray is a hole in the fog, and every light reads as if the
+            // haze were not there -- which is exactly the term that makes a low sun
+            // through trees look like a low sun through trees.
+            // Measured and not moved: this depends only on the ray, so it can be folded
+            // into sr.weight where the ray is built, and doing so lifts this kernel's
+            // threadgroup limit from 576 to 640. Six interleaved runs of each say the
+            // stage does not care -- 36.7 ms against 37.5 -- which is what the model
+            // predicts: the same 11% of limit was worth 4.5% of the frame on `extend`
+            // at 63% of it, so on a stage at 28% it is around 2%, under the noise floor
+            // of a machine that swings 5% between runs.
+            if (SPEC_FOG && uniforms.hasFog)
+            {
+                const float tau = fogOpticalDepth(
+                    float3(sr.origin), float3(sr.direction), sr.maxDistance, uniforms.fogHeight, uniforms.fogSigmaT);
+                const float fogTransmittance = exp(-tau);
+                weight *= fogTransmittance;
+                sharcRadiance *= fogTransmittance;
+            }
+            if (SPEC_SSS && uniforms.hasBoundedMedium)
+            {
+                const float3 transmittance = mediumTransmittance<T>(accelerationStructure, materials, geometryEntries,
+                                                                    instances, float3(sr.origin), float3(sr.direction),
+                                                                    sr.maxDistance, sr.medium, motionTime);
+                weight *= transmittance;
+                sharcRadiance *= transmittance;
+            }
+            radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
+            if (SPEC_SHARC_UPDATE)
+            {
+                const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, sr.sharcPathIndex);
+                const SharcUpdateState updateState = sharcUpdates[updateIndex];
+                sharcPropagate(updateState, sharcAccumulation, sharcRadiance, uniforms,
+                               (uniforms.sharcFlags & SHARC_FLAG_RESPONSIVE) != 0u);
+            }
         }
         return;
     }
@@ -3110,8 +3313,8 @@ static void shadowImpl(
     ShadowPayload payload;
     payload.transmittance = float3(1.0f);
     payload.cutoff = sr.rrCutoff;
-    const auto hit = T::traceAnyHit(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW,
-                                    motionTime, functionTable, payload);
+    const auto hit =
+        T::traceAnyHit(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime, functionTable, payload);
     // Above the early return, not below it: in a canopy most shadow rays are
     // blocked and return here, so a probe past this point runs on the minority
     // that got through and reports headroom the stage does not have.
@@ -3131,6 +3334,7 @@ static void shadowImpl(
         transmittance *= kShadowTransmittanceCutoff / max(m, 1e-20f);
     }
     weight *= transmittance;
+    sharcRadiance *= transmittance;
     if (all(weight <= 1e-6f))
     {
         return;
@@ -3138,70 +3342,284 @@ static void shadowImpl(
 
     if (SPEC_FOG && uniforms.hasFog)
     {
-        const float tau = fogOpticalDepth(float3(sr.origin), float3(sr.direction),
-                                          sr.maxDistance, uniforms.fogHeight, uniforms.fogSigmaT);
-        weight *= exp(-tau);
+        const float tau = fogOpticalDepth(
+            float3(sr.origin), float3(sr.direction), sr.maxDistance, uniforms.fogHeight, uniforms.fogSigmaT);
+        const float fogTransmittance = exp(-tau);
+        weight *= fogTransmittance;
+        sharcRadiance *= fogTransmittance;
     }
     if (SPEC_SSS && uniforms.hasBoundedMedium)
     {
-        weight *= mediumTransmittance<T>(accelerationStructure, materials, geometryEntries,
-                                         instances, float3(sr.origin), float3(sr.direction),
-                                         sr.maxDistance, sr.medium, motionTime);
+        const float3 mediumTr =
+            mediumTransmittance<T>(accelerationStructure, materials, geometryEntries, instances, float3(sr.origin),
+                                   float3(sr.direction), sr.maxDistance, sr.medium, motionTime);
+        weight *= mediumTr;
+        sharcRadiance *= mediumTr;
     }
     radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
+    if (SPEC_SHARC_UPDATE)
+    {
+        const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, sr.sharcPathIndex);
+        const SharcUpdateState updateState = sharcUpdates[updateIndex];
+        sharcPropagate(updateState, sharcAccumulation, sharcRadiance, uniforms,
+                       (uniforms.sharcFlags & SHARC_FLAG_RESPONSIVE) != 0u);
+    }
 }
 
-// One pass at the end of a sample: every path that passed through a cache voxel
-// deposits what it gathered afterwards.
-//
-// Here rather than at each of the half-dozen places a path can end, because the
-// path state survives to the end of the sample and this is one dispatch instead
-// of six scattered edits that would each have to stay correct.
-kernel void wavefrontSharcDeposit(uint tid [[thread_position_in_grid]],
-                                  constant Uniforms& uniforms [[buffer(0)]],
-                                  device SharcPathState* sharcPaths [[buffer(1)]],
-                                  device const float4* radianceOut [[buffer(2)]],
-                                  device SharcEntry* sharcEntries [[buffer(3)]])
+// Full reset clears all three resources. Responsive mode uses the same kernel
+// with clearPersistent == 0 to clear only the per-frame atomic accumulation.
+kernel void sharcClear(uint tid [[thread_position_in_grid]],
+                       constant Uniforms& uniforms [[buffer(0)]],
+                       device SharcHashEntry* hashEntries [[buffer(1)]],
+                       device SharcAccumulationEntry* accumulationEntries [[buffer(2)]],
+                       device SharcResolvedEntry* resolvedEntries [[buffer(3)]],
+                       device atomic_uint* stats [[buffer(4)]],
+                       constant uint32_t& clearPersistent [[buffer(5)]])
 {
-    if (tid >= uniforms.width * uniforms.height)
+    if (tid < uniforms.sharcCapacity)
     {
-        return;
+        for (uint32_t channel = 0u; channel < 3u; ++channel)
+        {
+            atomic_store_explicit(&accumulationEntries[tid].radiance[channel], 0, memory_order_relaxed);
+            atomic_store_explicit(&accumulationEntries[tid].direction[channel], 0, memory_order_relaxed);
+        }
+        atomic_store_explicit(&accumulationEntries[tid].sampleCount, 0u, memory_order_relaxed);
+        atomic_store_explicit(&accumulationEntries[tid].diagnosticFlags, 0u, memory_order_relaxed);
+        if (clearPersistent != 0u)
+        {
+            atomic_store_explicit(&hashEntries[tid].key, 0u, memory_order_relaxed);
+            SharcResolvedEntry empty = {};
+            resolvedEntries[tid] = empty;
+        }
     }
-    SharcPathState sharc = sharcPaths[tid];
-    if (sharc.index == SHARC_NO_ENTRY)
+    if (tid < SHARC_STAT_COUNT)
     {
-        return;
+        atomic_store_explicit(&stats[tid], 0u, memory_order_relaxed);
     }
-    const float3 gathered =
-        (float3(radianceOut[tid].xyz) - float3(sharc.radianceAtVisit)) * float3(sharc.invThroughput);
-    if (all(gathered >= 0.0f))
-    {
-        sharcWrite(sharcEntries, sharc.index, gathered);
-    }
-    sharc.index = SHARC_NO_ENTRY;
-    sharcPaths[tid] = sharc;
 }
 
-#define WF_SHADOW_ENTRY(NAME, TRAITS)                                                                \
-    kernel void NAME(uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]], \
-                     TRAITS::structure accelerationStructure [[buffer(1)]],                          \
-                     device const ShadowRay* shadowRays [[buffer(2)]],                               \
-                     device float4* radianceOut [[buffer(3)]],                                       \
-                     device const uint32_t* control [[buffer(4)]],                                   \
-                     constant uint32_t& sampleIdx [[buffer(5)]],                                     \
-                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances          \
-                         [[buffer(6)]],                                                              \
-                     device const Material* materials [[buffer(7)]],                                 \
-                     device const GeometryEntry* geometryEntries [[buffer(8)]],                      \
-                     device const char* vertexBuffer [[buffer(9)]],                                  \
-                     device const uint32_t* indexBuffer [[buffer(10)]],                             \
-                     TRAITS::table functionTable [[buffer(11)]],                                    \
-                     constant uint32_t& queueOffset [[buffer(12)]])                                 \
-    {                                                                                                \
-        shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, shadowRays,            \
-                           radianceOut, control,                                                      \
-                           sampleIdx, instances, materials, geometryEntries, vertexBuffer,           \
-                           indexBuffer, functionTable);                                              \
+// The only pass that publishes update data to queries. Running one thread per
+// cache entry also owns stale eviction, so no hash mutation races a query.
+kernel void sharcResolve(uint tid [[thread_position_in_grid]],
+                         constant Uniforms& uniforms [[buffer(0)]],
+                         device SharcHashEntry* hashEntries [[buffer(1)]],
+                         device SharcAccumulationEntry* accumulationEntries [[buffer(2)]],
+                         device SharcResolvedEntry* resolvedEntries [[buffer(3)]],
+                         device atomic_uint* stats [[buffer(4)]])
+{
+    if (tid >= uniforms.sharcCapacity)
+    {
+        return;
+    }
+    const uint32_t mainCapacity = sharcMainCapacity(uniforms);
+    const bool responsiveEntry = (uniforms.sharcFlags & SHARC_FLAG_RESPONSIVE) != 0u && tid >= mainCapacity;
+    const bool preserveAccumulation = (uniforms.sharcFlags & SHARC_FLAG_RESPONSIVE) != 0u;
+    const uint32_t key = atomic_load_explicit(&hashEntries[tid].key, memory_order_relaxed);
+    if (key == 0u)
+    {
+        return;
+    }
+
+    device SharcAccumulationEntry& accumulation = accumulationEntries[tid];
+    const uint32_t entrySampleCount = preserveAccumulation ?
+                                          atomic_load_explicit(&accumulation.sampleCount, memory_order_relaxed) :
+                                          atomic_exchange_explicit(&accumulation.sampleCount, 0u, memory_order_relaxed);
+    const uint32_t diagnosticFlags =
+        preserveAccumulation ? atomic_load_explicit(&accumulation.diagnosticFlags, memory_order_relaxed) :
+                               atomic_exchange_explicit(&accumulation.diagnosticFlags, 0u, memory_order_relaxed);
+    float3 sum = float3(0.0f);
+    float3 directionSum = float3(0.0f);
+    uint32_t maxRadianceFixed = 0u;
+    const bool directional = (uniforms.sharcFlags & SHARC_FLAG_DIRECTIONAL) != 0u;
+    const float inverseScale = 1.0f / max(uniforms.sharcRadianceScale, 1.0f);
+    for (uint32_t channel = 0u; channel < 3u; ++channel)
+    {
+        const int32_t radiance = preserveAccumulation ?
+                                     atomic_load_explicit(&accumulation.radiance[channel], memory_order_relaxed) :
+                                     atomic_exchange_explicit(&accumulation.radiance[channel], 0, memory_order_relaxed);
+        const int32_t direction =
+            preserveAccumulation ? atomic_load_explicit(&accumulation.direction[channel], memory_order_relaxed) :
+                                   atomic_exchange_explicit(&accumulation.direction[channel], 0, memory_order_relaxed);
+        sum[channel] = directional ? float(radiance) * inverseScale : float(as_type<uint32_t>(radiance)) * inverseScale;
+        directionSum[channel] = float(direction) * inverseScale;
+        maxRadianceFixed =
+            max(maxRadianceFixed, directional ? sharcSignedMagnitude(radiance) : as_type<uint32_t>(radiance));
+        if (directional)
+        {
+            maxRadianceFixed = max(maxRadianceFixed, sharcSignedMagnitude(direction));
+        }
+    }
+    if (uniforms.sharcDebug != 0u)
+    {
+        if ((diagnosticFlags & kSharcDiagnosticAccumulationClamp) != 0u)
+        {
+            atomic_fetch_add_explicit(&stats[SHARC_STAT_ACCUMULATION_CLAMP], 1u, memory_order_relaxed);
+        }
+        if ((diagnosticFlags & kSharcDiagnosticNonfiniteReject) != 0u)
+        {
+            atomic_fetch_add_explicit(&stats[SHARC_STAT_NONFINITE_REJECT], 1u, memory_order_relaxed);
+        }
+        sharcAtomicMax(&stats[SHARC_STAT_MAX_RADIANCE_FIXED], maxRadianceFixed);
+        sharcAtomicMax(&stats[SHARC_STAT_MAX_SAMPLE_COUNT], entrySampleCount);
+    }
+
+    SharcResolvedEntry previous = resolvedEntries[tid];
+    uint32_t accumulatedFrames = (previous.accumulatedFramesAndFlags & ~SHARC_RESOLVED_RESPONSIVE_ENTRY) + 1u;
+    uint32_t staleFrames = entrySampleCount != 0u ? 0u : previous.staleFrames + 1u;
+    const uint32_t staleLimit =
+        responsiveEntry ? max(uniforms.sharcResponsiveFrames, 1u) : clamp(uniforms.sharcStaleFrameCount, 8u, 1024u);
+    if (staleFrames >= staleLimit)
+    {
+        SharcResolvedEntry empty = {};
+        resolvedEntries[tid] = empty;
+        // Resolve is the sole hash mutator in this phase; update and query are
+        // separated by barriers, so eviction needs no fallible weak CAS.
+        atomic_store_explicit(&hashEntries[tid].key, 0u, memory_order_relaxed);
+        atomic_fetch_add_explicit(&stats[SHARC_STAT_EVICTION], 1u, memory_order_relaxed);
+        return;
+    }
+
+    const uint32_t fadeBit = 1u << (uniforms.sharcFrameIndex & 31u);
+    uint32_t count = entrySampleCount;
+    if (responsiveEntry)
+    {
+        uint32_t mainIndex = SHARC_NO_ENTRY;
+        SharcAddress mainAddress;
+        mainAddress.key = key;
+        mainAddress.hash = sharcHash(key);
+        mainAddress.voxelSize = 0.0f;
+        mainAddress.levelBlend = 0.0f;
+        mainAddress.level = 0;
+        if (sharcFindEntry(uniforms, hashEntries, mainAddress, false, false, nullptr, mainIndex))
+        {
+            count = atomic_load_explicit(&accumulationEntries[mainIndex].sampleCount, memory_order_relaxed);
+        }
+    }
+
+    if (count == 0u)
+    {
+        previous.accumulatedFramesAndFlags =
+            min(accumulatedFrames, 1024u) | (responsiveEntry ? SHARC_RESOLVED_RESPONSIVE_ENTRY : 0u);
+        previous.staleFrames = staleFrames;
+        if ((uniforms.sharcFlags & SHARC_FLAG_FADE_ACCELERATION) != 0u && !responsiveEntry)
+        {
+            previous.fadeMask |= fadeBit;
+        }
+        resolvedEntries[tid] = previous;
+        return;
+    }
+
+    float4 currentRadiance;
+    float4 currentDirection = float4(0.0f);
+    if (directional)
+    {
+        currentRadiance = float4(sharcResolveDirection(sum / float(count)), directionSum.x / float(count));
+        currentDirection.xy = directionSum.yz / float(count);
+    }
+    else
+    {
+        currentRadiance = float4(max(sum / float(count), float3(0.0f)), 0.0f);
+    }
+    if (previous.sampleCount == 0u)
+    {
+        // A cell whose first insertion lost the race for its slot is re-inserted
+        // further along the same bucket, and its history is sitting in the older
+        // copy. Adopt it rather than restarting temporal accumulation from
+        // nothing every time the hash map shuffles an entry.
+        // Bounded by the region this entry lives in. Responsive companions carry
+        // the same spatial key as their persistent partner -- the two are told
+        // apart by which half of the table they sit in -- so a window that ran
+        // past the split would adopt the wrong signal's history.
+        const uint32_t regionEnd = responsiveEntry ? uniforms.sharcCapacity : mainCapacity;
+        const uint32_t searchEnd = min(tid + 1u + kSharcLinearProbeWindow, regionEnd);
+        for (uint32_t i = tid + 1u; i < searchEnd; ++i)
+        {
+            if (atomic_load_explicit(&hashEntries[i].key, memory_order_relaxed) != key)
+            {
+                continue;
+            }
+            const SharcResolvedEntry older = resolvedEntries[i];
+            previous.radiance = older.radiance;
+            previous.direction = older.direction;
+            previous.sampleCount = older.sampleCount;
+            previous.fadeMask = older.fadeMask;
+            accumulatedFrames = (older.accumulatedFramesAndFlags & ~SHARC_RESOLVED_RESPONSIVE_ENTRY) + 1u;
+            staleFrames = 0u;
+            break;
+        }
+    }
+
+    float previousCount = float(previous.sampleCount);
+    const uint32_t historyLimit =
+        clamp(responsiveEntry ? uniforms.sharcResponsiveFrames : uniforms.sharcAccumulationFrames, 1u, 1024u);
+    if (accumulatedFrames > historyLimit)
+    {
+        previousCount *= float(historyLimit) / float(accumulatedFrames);
+        accumulatedFrames = historyLimit;
+    }
+
+    if ((uniforms.sharcFlags & SHARC_FLAG_FADE_ACCELERATION) != 0u && !responsiveEntry)
+    {
+        const float currentLuminance = directional ? max(currentRadiance.w, 0.0f) : sharcLuminance(currentRadiance.xyz);
+        const float previousLuminance =
+            directional ? max(float(previous.radiance.w), 0.0f) : sharcLuminance(float3(previous.radiance.xyz));
+        const bool fading = currentLuminance < previousLuminance;
+        previous.fadeMask = (previous.fadeMask & ~fadeBit) | (fading ? fadeBit : 0u);
+        if (popcount(previous.fadeMask) == 32u)
+        {
+            previousCount = float(count);
+        }
+    }
+
+    float combinedCount = previousCount + float(count);
+    const float alpha = float(count) / max(combinedCount, 1.0f);
+    float4 resolvedRadiance = mix(float4(previous.radiance), currentRadiance, alpha);
+    float4 resolvedDirection = mix(float4(previous.direction), currentDirection, alpha);
+
+    const float3 cameraDelta = uniforms.viewToWorld[3].xyz - float3(uniforms.sharcCameraPrev);
+    if ((uniforms.sharcFlags & SHARC_FLAG_BLEND_ADJACENT_LEVELS) != 0u && !responsiveEntry &&
+        dot(cameraDelta, cameraDelta) > 1e-6f && accumulatedFrames <= 2u)
+    {
+        const SharcAddress adjacentAddress = sharcAdjacentLevelAddress(uniforms, key);
+        uint32_t adjacentIndex = SHARC_NO_ENTRY;
+        if (sharcFindEntry(uniforms, hashEntries, adjacentAddress, false, false, nullptr, adjacentIndex))
+        {
+            const SharcResolvedEntry adjacent = resolvedEntries[adjacentIndex];
+            if (adjacent.sampleCount != 0u)
+            {
+                const float adjacentCount = float(adjacent.sampleCount);
+                const float adjacentWeight = adjacentCount / (combinedCount + adjacentCount);
+                resolvedRadiance = mix(resolvedRadiance, float4(adjacent.radiance), adjacentWeight);
+                resolvedDirection = mix(resolvedDirection, float4(adjacent.direction), adjacentWeight);
+                combinedCount += adjacentCount;
+            }
+        }
+    }
+
+    previous.radiance = half4(clamp(resolvedRadiance, float4(-65504.0f), float4(65504.0f)));
+    previous.direction = half4(clamp(resolvedDirection, float4(-65504.0f), float4(65504.0f)));
+    previous.sampleCount = uint32_t(min(round(combinedCount), 4294960000.0f));
+    previous.accumulatedFramesAndFlags = accumulatedFrames | (responsiveEntry ? SHARC_RESOLVED_RESPONSIVE_ENTRY : 0u);
+    previous.staleFrames = staleFrames;
+    resolvedEntries[tid] = previous;
+}
+
+#define WF_SHADOW_ENTRY(NAME, TRAITS)                                                                                  \
+    kernel void NAME(uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                  \
+                     TRAITS::structure accelerationStructure [[buffer(1)]],                                            \
+                     device const ShadowRay* shadowRays [[buffer(2)]], device float4* radianceOut [[buffer(3)]],       \
+                     device const uint32_t* control [[buffer(4)]], constant uint32_t& sampleIdx [[buffer(5)]],         \
+                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(6)]],             \
+                     device const Material* materials [[buffer(7)]],                                                   \
+                     device const GeometryEntry* geometryEntries [[buffer(8)]],                                        \
+                     device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]], \
+                     TRAITS::table functionTable [[buffer(11)]], constant uint32_t& queueOffset [[buffer(12)]],        \
+                     device SharcUpdateState* sharcUpdates [[buffer(13)]],                                             \
+                     device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]])                                  \
+    {                                                                                                                  \
+        shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, shadowRays, radianceOut, control,       \
+                           sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer, functionTable, \
+                           sharcUpdates, sharcAccumulation);                                                           \
     }
 
 WF_SHADOW_ENTRY(wavefrontShadow, MotionTraversal)
@@ -3215,14 +3633,15 @@ WF_SHADOW_ENTRY(wavefrontShadowStaticCurve, CurveStaticTraversal)
 // Byte-for-byte the same arithmetic as the megakernel's tail, so the two
 // tracers produce identical images.
 // ---------------------------------------------------------------------------
-kernel void wavefrontResolve(
-    uint                    tid           [[thread_position_in_grid]],
-    constant Uniforms&      uniforms      [[buffer(0)]],
-    device const float4*    radianceIn    [[buffer(1)]],
-    device float4*          res           [[buffer(2)]],
-    device float4*          accum         [[buffer(3)]],
-    constant uint32_t&      sampleCount   [[buffer(4)]],
-    device const AovSample* aov           [[buffer(5)]])
+kernel void wavefrontResolve(uint tid [[thread_position_in_grid]],
+                             constant Uniforms& uniforms [[buffer(0)]],
+                             device const float4* radianceIn [[buffer(1)]],
+                             device float4* res [[buffer(2)]],
+                             device float4* accum [[buffer(3)]],
+                             constant uint32_t& sampleCount [[buffer(4)]],
+                             device const AovSample* aov [[buffer(5)]],
+                             device SharcHashEntry* sharcHashEntries [[buffer(6)]],
+                             device const SharcResolvedEntry* sharcResolved [[buffer(7)]])
 {
     const uint32_t pixelCount = uniforms.width * uniforms.height;
     if (tid >= pixelCount)
@@ -3233,31 +3652,54 @@ kernel void wavefrontResolve(
     // Guide views. A denoiser fed a broken guide degrades quietly, so the guides
     // have to be inspectable on their own.
     const uint32_t debugMode = uniforms.debug;
-    if (debugMode >= DEBUG_MODE_FIRST_AOV)
+    if (uniforms.sharcCapacity != 0u && debugMode == (uint32_t)DebugMode::eSharcOccupancy)
+    {
+        res[tid] = float4(sharcDebugOccupancy(tid, uniforms, sharcHashEntries, sharcResolved), 1.0f);
+        return;
+    }
+    if (debugMode == (uint32_t)DebugMode::eSharcBounces)
+    {
+        res[tid] = float4(sharcDebugBounceColor((uint32_t)max(aov[tid].bounceDepth, 0.0f)), 1.0f);
+        return;
+    }
+    if (DEBUG_MODE_IS_AOV(debugMode))
     {
         const AovSample a = aov[tid];
         float3 v = float3(0.0f);
         switch ((DebugMode)debugMode)
         {
-        case DebugMode::eAovDiffuseAlbedo:  v = float3(a.diffuseAlbedo); break;
-        case DebugMode::eAovSpecularAlbedo: v = float3(a.specularAlbedo); break;
-        case DebugMode::eAovNormal:         v = float3(a.normal) * 0.5f + 0.5f; break;
-        case DebugMode::eAovRoughness:      v = float3(a.roughness); break;
+        case DebugMode::eAovDiffuseAlbedo:
+            v = float3(a.diffuseAlbedo);
+            break;
+        case DebugMode::eAovSpecularAlbedo:
+            v = float3(a.specularAlbedo);
+            break;
+        case DebugMode::eAovNormal:
+            v = float3(a.normal) * 0.5f + 0.5f;
+            break;
+        case DebugMode::eAovRoughness:
+            v = float3(a.roughness);
+            break;
         // d/(1+d): monotonic and scale-free, so a scene of any size is readable
         // and nothing crosses zero the way a logarithm does at d == 1.
-        case DebugMode::eAovDepth:          v = float3(a.depth / (1.0f + a.depth)); break;
+        case DebugMode::eAovDepth:
+            v = float3(a.depth / (1.0f + a.depth));
+            break;
         // Red/green for the two axes, scaled so a few pixels of motion is visible.
         case DebugMode::eAovMotion:
             v = float3(a.motionX, a.motionY, 0.0f) * 0.05f + 0.5f;
             break;
         // Red where the denoiser is being told to distrust its history, so the
         // extent of the mask is a thing you can look at rather than infer.
-        case DebugMode::eAovReactive:      v = float3(a.reactive, 0.0f, 0.0f); break;
+        case DebugMode::eAovReactive:
+            v = float3(a.reactive, 0.0f, 0.0f);
+            break;
         // d/(1+d) again: scale-free, and zero stays zero.
         case DebugMode::eAovSpecularHitDistance:
             v = float3(a.specularHitDistance / (1.0f + a.specularHitDistance));
             break;
-        default: break;
+        default:
+            break;
         }
         res[tid] = float4(v, 1.0f);
         return;
@@ -3289,22 +3731,21 @@ kernel void wavefrontResolve(
 // free of texture bindings, which matters because it is the kernel with the
 // least register headroom.
 // ---------------------------------------------------------------------------
-kernel void wavefrontAovResolve(
-    uint2                          tid       [[thread_position_in_grid]],
-    constant Uniforms&             uniforms  [[buffer(0)]],
-    device const AovSample*        aov       [[buffer(1)]],
-    device const float4*           radiance  [[buffer(2)]],
-    constant uint32_t&             sampleCount [[buffer(3)]],
-    device const float4*           accumulated [[buffer(4)]],
-    texture2d<float, access::write> colorTex   [[texture(0)]],
-    texture2d<float, access::write> depthTex   [[texture(1)]],
-    texture2d<float, access::write> motionTex  [[texture(2)]],
-    texture2d<float, access::write> diffuseTex [[texture(3)]],
-    texture2d<float, access::write> specularTex[[texture(4)]],
-    texture2d<float, access::write> normalTex  [[texture(5)]],
-    texture2d<float, access::write> roughTex   [[texture(6)]],
-    texture2d<float, access::write> specHitTex [[texture(7)]],
-    texture2d<float, access::write> reactiveTex[[texture(8)]])
+kernel void wavefrontAovResolve(uint2 tid [[thread_position_in_grid]],
+                                constant Uniforms& uniforms [[buffer(0)]],
+                                device const AovSample* aov [[buffer(1)]],
+                                device const float4* radiance [[buffer(2)]],
+                                constant uint32_t& sampleCount [[buffer(3)]],
+                                device const float4* accumulated [[buffer(4)]],
+                                texture2d<float, access::write> colorTex [[texture(0)]],
+                                texture2d<float, access::write> depthTex [[texture(1)]],
+                                texture2d<float, access::write> motionTex [[texture(2)]],
+                                texture2d<float, access::write> diffuseTex [[texture(3)]],
+                                texture2d<float, access::write> specularTex [[texture(4)]],
+                                texture2d<float, access::write> normalTex [[texture(5)]],
+                                texture2d<float, access::write> roughTex [[texture(6)]],
+                                texture2d<float, access::write> specHitTex [[texture(7)]],
+                                texture2d<float, access::write> reactiveTex [[texture(8)]])
 {
     if (tid.x >= uniforms.width || tid.y >= uniforms.height)
     {

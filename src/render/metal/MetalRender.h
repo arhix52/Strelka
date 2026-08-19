@@ -77,6 +77,7 @@ public:
     void resetTemporalHistory() override
     {
         mResetDenoiseHistory = true;
+        mFrameUniforms.requestSharcReset();
     }
     bool readDisplayTexture(std::vector<float>& rgba, uint32_t& width, uint32_t& height) override;
     bool readGuideTexture(Guide guide, std::vector<float>& rgba, uint32_t& width, uint32_t& height) override;
@@ -156,6 +157,14 @@ private:
     static constexpr uint32_t kPassthroughIterations = 8;
     /// Iterations of the wavefront loop for one sample at this path depth.
     uint32_t wavefrontIterations(uint32_t maxDepth, uint32_t subsurfaceIterations) const;
+    /// The same, for SHaRC's sparse update pass. See the definition: the update
+    /// pass cannot reach either of the two budgets the render pass needs.
+    uint32_t sharcUpdateIterations(uint32_t maxDepth, uint32_t subsurfaceIterations) const;
+    /// Walk steps the sparse update pass allows inside a subsurface medium.
+    static constexpr uint32_t kSharcUpdateSubsurfaceIterations = 8;
+    /// Medium scattering events the sparse update pass allows on top of its
+    /// propagation depth; they cost a path's depth and cache no vertex.
+    static constexpr uint32_t kSharcUpdateVolumeAllowance = 2;
 
     // A GPU command buffer failed. Kept so a headless run can exit non-zero
     // instead of writing a black image and reporting success.
@@ -208,6 +217,7 @@ private:
     // Bumped when the allocation set can have changed, so residency is
     // rebuilt then and not every frame.
     uint32_t mMetal4ResidencyGeneration = 0;
+    uint32_t mMetal4SharcResidencyGeneration = 0;
     // Resources added by makeResourcesResidentForMetal4. A residency set retains
     // its allocations independently of the C++ owner, so every replacement must
     // remove the previous generation or resolution changes accumulate old GPU

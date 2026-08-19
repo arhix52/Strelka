@@ -36,7 +36,6 @@ struct WavefrontVariant
     // traversal rather than as a restart loop around it.
     MTL::IntersectionFunctionTable* shadowTableMotion = nullptr;
     MTL::IntersectionFunctionTable* shadowTableStatic = nullptr;
-    MTL::ComputePipelineState* sharcDeposit = nullptr;
 };
 
 // TODO(phase-N): replace pointer bags with owned domain handles once
@@ -59,7 +58,10 @@ struct IntegratorSceneBindings
     MTL::Buffer* prevFrameInstanceBuffer = nullptr;
     MTL::Buffer* curvePointBuffer = nullptr;
     MTL::Buffer* curveSegmentBuffer = nullptr;
-    MTL::Buffer* sharcBuffer = nullptr;
+    MTL::Buffer* sharcHashBuffer = nullptr;
+    MTL::Buffer* sharcAccumulationBuffer = nullptr;
+    MTL::Buffer* sharcResolvedBuffer = nullptr;
+    MTL::Buffer* sharcStatsBuffer = nullptr;
     MTL::Buffer* accumulationBuffer = nullptr;
     MetalEnvironment* environment = nullptr;
     MetalTextures* textures = nullptr;
@@ -85,6 +87,7 @@ struct IntegratorFrameRequest
     uint32_t features = 0;
     uint32_t bounceIterations = 0;
     uint32_t traversalBatchThreads = kWavefrontTraversalBatchThreads;
+    uint32_t pathCount = 0;
     bool motionBlasBuilt = false;
     bool profileStages = false;
     SettingsManager* settings = nullptr;
@@ -107,7 +110,7 @@ public:
     void release();
 
     void buildPipelines();
-    void ensureBuffers(uint32_t width, uint32_t height);
+    void ensureBuffers(uint32_t width, uint32_t height, uint32_t sharcUpdateDownscale);
     const WavefrontVariant* variantFor(uint32_t features);
 
     // Returns the encoder to keep using: in profiling mode each stage gets its
@@ -116,16 +119,31 @@ public:
                                        MTL::ComputeCommandEncoder* enc,
                                        const IntegratorSceneBindings& scene,
                                        const IntegratorFrameRequest& frame);
+    void encodeSharcClear(MTL::ComputeCommandEncoder* enc,
+                          const IntegratorSceneBindings& scene,
+                          const IntegratorFrameRequest& frame,
+                          bool clearPersistent);
+    void encodeSharcResolve(MTL::ComputeCommandEncoder* enc,
+                            const IntegratorSceneBindings& scene,
+                            const IntegratorFrameRequest& frame);
     void encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                       const IntegratorSceneBindings& scene,
                       const IntegratorFrameRequest& frame,
                       const WavefrontChunk& chunk);
+    void encodeSharcClearMetal4(MTL4::ComputeCommandEncoder* enc,
+                                const IntegratorSceneBindings& scene,
+                                const IntegratorFrameRequest& frame,
+                                bool clearPersistent);
+    void encodeSharcResolveMetal4(MTL4::ComputeCommandEncoder* enc,
+                                  const IntegratorSceneBindings& scene,
+                                  const IntegratorFrameRequest& frame);
     void resetStageProfilingMetal4();
 
     void createStageTimestampBuffer();
     void reportStageTimings();
     void reportStageFailureMetal4();
     void reportIorStackStats();
+    void reportSharcStats();
 
     // Wavefront allocations + shadow tables for Metal 4 residency.
     void addResidentAllocations(const std::function<void(MTL::Allocation*)>& add) const;
@@ -161,6 +179,10 @@ public:
     {
         return mIorStatsBuffer;
     }
+    MTL::Buffer* sharcStatsBuffer() const
+    {
+        return mIorStatsBuffer;
+    }
     MTL::ComputePipelineState* aovResolvePSO() const
     {
         return mAovResolvePSO;
@@ -190,6 +212,8 @@ private:
     MTL::ComputePipelineState* mPrepareShadowPSO = nullptr;
     MTL::ComputePipelineState* mPrepareHitMissPSO = nullptr;
     MTL::ComputePipelineState* mAovResolvePSO = nullptr;
+    MTL::ComputePipelineState* mSharcClearPSO = nullptr;
+    MTL::ComputePipelineState* mSharcResolvePSO = nullptr;
 
     MTL::ComputePipelineState* mResolvePSO4 = nullptr;
     MTL::ComputePipelineState* mPreparePSO4 = nullptr;
@@ -197,10 +221,12 @@ private:
     MTL::ComputePipelineState* mPrepareHitMissPSO4 = nullptr;
     MTL::ComputePipelineState* mStageBreadcrumbPSO4 = nullptr;
     MTL::ComputePipelineState* mAovResolvePSO4 = nullptr;
+    MTL::ComputePipelineState* mSharcClearPSO4 = nullptr;
+    MTL::ComputePipelineState* mSharcResolvePSO4 = nullptr;
 
     MTL::Buffer* mPathStateBuffer = nullptr;
     MTL::Buffer* mMediumPathStateBuffer = nullptr;
-    MTL::Buffer* mSharcPathStateBuffer = nullptr;
+    MTL::Buffer* mSharcUpdateStateBuffer = nullptr;
     MTL::Buffer* mPathRayBuffer = nullptr;
     MTL::Buffer* mHitBuffer = nullptr;
     MTL::Buffer* mIorStackBuffer = nullptr;
@@ -218,8 +244,10 @@ private:
     MTL::Buffer* mStageStatsBuffer = nullptr;
     MTL::Buffer* mIorStatsBuffer = nullptr;
     bool mReportedIorStats = false;
+    uint64_t mLastSharcActivity = 0;
     std::vector<uint8_t> mStageKinds;
     uint32_t mCapacity = 0;
+    uint32_t mSharcUpdateDownscale = 0;
     bool mResidencyDirty = true;
 };
 

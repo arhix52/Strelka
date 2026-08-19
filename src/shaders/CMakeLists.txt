@@ -144,6 +144,10 @@ if(APPLE)
 
     set(SHADER_OUTPUT_DIR ${OUTPUT_DIRECTORY}/metal/shaders)
     set(SHADER_AIR_DIR ${CMAKE_CURRENT_BINARY_DIR}/air)
+    # Keep Clang's Metal module cache inside the build tree. A global cache under
+    # the developer's home directory makes hermetic/sandboxed builds fail and
+    # lets two unrelated Xcode toolchains poison each other's precompiled modules.
+    list(APPEND METAL_BUILD_FLAGS -fmodules-cache-path=${SHADER_AIR_DIR}/module-cache)
 
     # Copy fullScreen.metal (no compilation needed, loaded at runtime)
     add_custom_command(
@@ -169,6 +173,7 @@ if(APPLE)
             OUTPUT ${SHADER_OUTPUT_DIR}/${shader}.metallib
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_AIR_DIR}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_AIR_DIR}/module-cache
             COMMAND xcrun -sdk macosx metal ${METAL_BUILD_FLAGS}
                 ${METAL_INCLUDE_FLAGS}
                 -MD -MF ${SHADER_AIR_DIR}/${shader}.d

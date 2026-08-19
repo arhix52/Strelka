@@ -24,7 +24,6 @@ using namespace metal;
 using namespace raytracing;
 
 
-
 // ---------------------------------------------------------------------------
 // Feature specialisation.
 //
@@ -48,6 +47,7 @@ constant bool kFcFog [[function_constant(6)]];
 constant bool kFcSharc [[function_constant(7)]];
 constant bool kFcSubsurface [[function_constant(8)]];
 constant bool kFcCurves [[function_constant(9)]];
+constant bool kFcSharcUpdate [[function_constant(10)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
 constant bool SPEC_SHARC = is_function_constant_defined(kFcSharc) ? kFcSharc : false;
@@ -68,6 +68,7 @@ constant bool SPEC_ALPHA = is_function_constant_defined(kFcAlpha) ? kFcAlpha : t
 // intersector, only the branch that rebuilds a hit strand, and that one is worth
 // compiling out of every scene that has no hair in it.
 constant bool SPEC_CURVES = is_function_constant_defined(kFcCurves) ? kFcCurves : false;
+constant bool SPEC_SHARC_UPDATE = is_function_constant_defined(kFcSharcUpdate) ? kFcSharcUpdate : false;
 
 struct PerRayData
 {
@@ -85,10 +86,8 @@ struct PerRayData
 };
 
 
-
-
-__attribute__((always_inline))
-float3 transformDirection(float3 p, float4x4 transform) {
+__attribute__((always_inline)) float3 transformDirection(float3 p, float4x4 transform)
+{
     return (transform * float4(p.x, p.y, p.z, 0.0f)).xyz;
 }
 
@@ -118,8 +117,7 @@ static float2 applyTextureTransform(float2 uv, device const Material& m)
     const float c = cos(m.uv_rotation);
     const float s = sin(m.uv_rotation);
     const float2 k = float2(m.uv_scale);
-    return float2(uv.x * k.x * c - uv.y * k.y * s, uv.x * k.x * s + uv.y * k.y * c) +
-           float2(m.uv_offset);
+    return float2(uv.x * k.x * c - uv.y * k.y * s, uv.x * k.x * s + uv.y * k.y * c) + float2(m.uv_offset);
 }
 
 // Coverage of a surface at a given uv. MASK is a binary predicate, BLEND passes
@@ -172,12 +170,18 @@ static float2 unpackUV(uint32_t val)
     return uv;
 }
 
-static __attribute__((always_inline)) float3 interpolateAttrib(const float3 attr1, const float3 attr2, const float3 attr3, const float2 bary)
+static __attribute__((always_inline)) float3 interpolateAttrib(const float3 attr1,
+                                                               const float3 attr2,
+                                                               const float3 attr3,
+                                                               const float2 bary)
 {
     return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
 
-static __attribute__((always_inline)) float2 interpolateAttrib(const float2 attr1, const float2 attr2, const float2 attr3, const float2 bary)
+static __attribute__((always_inline)) float2 interpolateAttrib(const float2 attr1,
+                                                               const float2 attr2,
+                                                               const float2 attr3,
+                                                               const float2 bary)
 {
     return attr1 * (1.0f - bary.x - bary.y) + attr2 * bary.x + attr3 * bary.y;
 }
@@ -190,8 +194,7 @@ static __attribute__((always_inline)) bool emitsLight(const float3 radiance)
     return radiance.x > 0.0f || radiance.y > 0.0f || radiance.z > 0.0f;
 }
 
-__attribute__((always_inline))
-float4x4 lerpMatrix(float4x4 a, float4x4 b, float t)
+__attribute__((always_inline)) float4x4 lerpMatrix(float4x4 a, float4x4 b, float t)
 {
     float4x4 r;
     r[0] = mix(a[0], b[0], t);
@@ -227,7 +230,8 @@ float2 samplePolygonAperture(float u1, float u2, int blades)
 {
     float sectorAngle = 2.0f * M_PI_F / (float)blades;
     int sector = (int)(u1 * blades);
-    if (sector >= blades) sector = blades - 1;
+    if (sector >= blades)
+        sector = blades - 1;
     float u = u1 * blades - (float)sector;
 
     float su = sqrt(u);
@@ -284,24 +288,23 @@ inline float3 clampIndirectContribution(float3 radiance, uint depth, float limit
 }
 
 void generateCameraRay(uint2 pixelIndex,
-                        thread SamplerState& samplerRnd,
-                        thread float3& origin,
-                        thread float3& direction,
-                        const constant Uniforms& params,
-                        float motionTime)
+                       thread SamplerState& samplerRnd,
+                       thread float3& origin,
+                       thread float3& direction,
+                       const constant Uniforms& params,
+                       float motionTime)
 {
     // A temporal upscaler reconstructs detail from a known per-frame shift, so
     // when one is running the whole image moves together and the per-pixel random
     // jitter -- which is antialiasing for a still frame -- would only add noise it
     // has to filter out.
-    const float2 subpixel_jitter =
-        params.useFrameJitter ?
-            float2(params.jitterX + 0.5f, params.jitterY + 0.5f) :
-            float2(random<SampleDimension::ePixelX>(samplerRnd, params.samplerType),
-                   random<SampleDimension::ePixelY>(samplerRnd, params.samplerType));
-    float2 pixelPos {pixelIndex.x + subpixel_jitter.x, params.height - (pixelIndex.y + subpixel_jitter.y)};
+    const float2 subpixel_jitter = params.useFrameJitter ?
+                                       float2(params.jitterX + 0.5f, params.jitterY + 0.5f) :
+                                       float2(random<SampleDimension::ePixelX>(samplerRnd, params.samplerType),
+                                              random<SampleDimension::ePixelY>(samplerRnd, params.samplerType));
+    float2 pixelPos{ pixelIndex.x + subpixel_jitter.x, params.height - (pixelIndex.y + subpixel_jitter.y) };
 
-    float2 dimension {(float)params.width, (float)params.height};
+    float2 dimension{ (float)params.width, (float)params.height };
     float2 pixelNDC = (pixelPos / dimension) * 2.0f - 1.0f;
 
     // Lens shift
@@ -323,9 +326,7 @@ void generateCameraRay(uint2 pixelIndex,
         // pixel picks where on the film it starts. clipToView is deliberately
         // unused -- for an orthographic frame it is a scale, and going through it
         // would only re-derive the half-extents that are already here.
-        const float3 filmPos = float3(pixelNDC.x * params.orthoHalfWidth,
-                                      pixelNDC.y * params.orthoHalfHeight,
-                                      0.0f);
+        const float3 filmPos = float3(pixelNDC.x * params.orthoHalfWidth, pixelNDC.y * params.orthoHalfHeight, 0.0f);
         origin = (viewToWorld * float4(filmPos, 1.0f)).xyz;
         direction = normalize((viewToWorld * float4(0.0f, 0.0f, -1.0f, 0.0f)).xyz);
     }
@@ -379,22 +380,21 @@ inline float texLod(Tex2D tex, float lodBase, bool hasLod)
 }
 
 // Fill SurfaceInteraction from hit geometry and sample Material textures
-void initSurfaceInteraction(
-    thread SurfaceInteraction& si,
-    const device Material& material,
-    float3 worldPosition,
-    float3 worldNormal,
-    float3 geomNormal,
-    float3 worldTangent,
-    float3 worldBinormal,
-    float2 uv,
-    float3 rayDir,
-    float3 vertexColor = float3(1.0f),
-    // Ray-cone footprint for this hit, in log2 texels-per-unit *before* the
-    // texture's own resolution is folded in -- each texture adds its own, since
-    // the slots of one material are rarely the same size. FLT_MAX_10_EXP as the
-    // sentinel would be cute; -1e30 says "no cone, use level 0" and is checked once.
-    float lodBase = -1e30f)
+void initSurfaceInteraction(thread SurfaceInteraction& si,
+                            const device Material& material,
+                            float3 worldPosition,
+                            float3 worldNormal,
+                            float3 geomNormal,
+                            float3 worldTangent,
+                            float3 worldBinormal,
+                            float2 uv,
+                            float3 rayDir,
+                            float3 vertexColor = float3(1.0f),
+                            // Ray-cone footprint for this hit, in log2 texels-per-unit *before* the
+                            // texture's own resolution is folded in -- each texture adds its own, since
+                            // the slots of one material are rarely the same size. FLT_MAX_10_EXP as the
+                            // sentinel would be cute; -1e30 says "no cone, use level 0" and is checked once.
+                            float lodBase = -1e30f)
 {
     // Two samplers, not one with mip_filter::linear always on. Turning mip
     // filtering on changes the image even when every fetch asks for level 0 --
@@ -404,15 +404,14 @@ void initSurfaceInteraction(
     // the sampler, and the call, are exactly the originals.
     // See the note on alphaSampler: glTF's default wrap is REPEAT.
     constexpr sampler texSampler(mag_filter::linear, min_filter::linear, address::repeat);
-    constexpr sampler texSamplerMip(mag_filter::linear, min_filter::linear, mip_filter::linear,
-                                    address::repeat);
+    constexpr sampler texSamplerMip(mag_filter::linear, min_filter::linear, mip_filter::linear, address::repeat);
 
-    si.position       = worldPosition;
+    si.position = worldPosition;
     si.shading_normal = worldNormal;
     si.geometry_normal = geomNormal;
-    si.tangent        = worldTangent;
-    si.bitangent      = worldBinormal;
-    si.uv             = uv;
+    si.tangent = worldTangent;
+    si.bitangent = worldBinormal;
+    si.uv = uv;
     // The cone gives texels per world unit; a texture turns that into a level
     // once its own resolution is known. Clamped at zero because a cone narrower
     // than a texel still wants the sharpest mip, not a negative one.
@@ -420,8 +419,8 @@ void initSurfaceInteraction(
     // One transform for every slot of the material -- see readTextureTransform()
     // in the loader for why that is not a compromise in practice.
     const float2 tuv = applyTextureTransform(uv, material);
-    si.wo             = -rayDir;
-    si.front_face     = dot(geomNormal, -rayDir) > 0.0f;
+    si.wo = -rayDir;
+    si.front_face = dot(geomNormal, -rayDir) > 0.0f;
     // Written on every path, not only where it becomes true: wavefront.metal
     // declares its SurfaceInteraction without an initialiser, and a field this
     // function leaves alone is read as whatever the stack held. On the OptiX
@@ -435,17 +434,23 @@ void initSurfaceInteraction(
     float3 baseColor = float3(material.base_color) * vertexColor;
     if (!is_null_texture(material.baseColorTexture))
     {
-        baseColor *= (hasLod ? material.baseColorTexture.sample(texSamplerMip, tuv, level(texLod(material.baseColorTexture, lodBase, hasLod))) : material.baseColorTexture.sample(texSampler, tuv)).rgb;
+        baseColor *= (hasLod ? material.baseColorTexture.sample(
+                                   texSamplerMip, tuv, level(texLod(material.baseColorTexture, lodBase, hasLod))) :
+                               material.baseColorTexture.sample(texSampler, tuv))
+                         .rgb;
     }
     si.albedo = baseColor;
-    si.opacity = resolveOpacity(material, uv);   // applies the transform itself
+    si.opacity = resolveOpacity(material, uv); // applies the transform itself
 
     // Sample metallic-roughness texture (glTF: G = roughness, B = metallic)
     float resolvedRoughness = material.roughness;
     float resolvedMetallic = material.metallic;
     if (!is_null_texture(material.metallicRoughnessTexture))
     {
-        float4 mrTex = (hasLod ? material.metallicRoughnessTexture.sample(texSamplerMip, tuv, level(texLod(material.metallicRoughnessTexture, lodBase, hasLod))) : material.metallicRoughnessTexture.sample(texSampler, tuv));
+        float4 mrTex =
+            (hasLod ? material.metallicRoughnessTexture.sample(
+                          texSamplerMip, tuv, level(texLod(material.metallicRoughnessTexture, lodBase, hasLod))) :
+                      material.metallicRoughnessTexture.sample(texSampler, tuv));
         resolvedRoughness *= mrTex.g;
         resolvedMetallic *= mrTex.b;
     }
@@ -457,7 +462,12 @@ void initSurfaceInteraction(
     // keeps the two paths from disagreeing.
     if (!is_null_texture(material.normalTexture))
     {
-        float2 bumpXY = (hasLod ? material.normalTexture.sample(texSamplerMip, tuv, level(texLod(material.normalTexture, lodBase, hasLod))) : material.normalTexture.sample(texSampler, tuv)).xy * 2.0f - 1.0f;
+        float2 bumpXY = (hasLod ? material.normalTexture.sample(
+                                      texSamplerMip, tuv, level(texLod(material.normalTexture, lodBase, hasLod))) :
+                                  material.normalTexture.sample(texSampler, tuv))
+                                .xy *
+                            2.0f -
+                        1.0f;
         // glTF scales X and Y and leaves Z, so Z is rebuilt before the scale.
         const float bumpZ = sqrt(saturate(1.0f - dot(bumpXY, bumpXY)));
         float3 bumpNormal = float3(bumpXY * material.normal_scale, bumpZ);
@@ -476,8 +486,7 @@ void initSurfaceInteraction(
         // disagree about a surface. See valid_reflection.h.
         if (dot(si.shading_normal, si.wo) <= 0.0f)
         {
-            const float3 facingGeom =
-                (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
+            const float3 facingGeom = (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
             si.shading_normal = ensureValidSpecularReflection(facingGeom, si.wo, si.shading_normal);
             si.diffuse_faces_away = true;
         }
@@ -487,7 +496,9 @@ void initSurfaceInteraction(
     float3 emissionColor = float3(material.emission);
     if (!is_null_texture(material.emissionTexture))
     {
-        float4 emTex = (hasLod ? material.emissionTexture.sample(texSamplerMip, tuv, level(texLod(material.emissionTexture, lodBase, hasLod))) : material.emissionTexture.sample(texSampler, tuv));
+        float4 emTex = (hasLod ? material.emissionTexture.sample(
+                                     texSamplerMip, tuv, level(texLod(material.emissionTexture, lodBase, hasLod))) :
+                                 material.emissionTexture.sample(texSampler, tuv));
         emissionColor *= emTex.rgb;
     }
     si.emission = emissionColor * material.emission_strength;
@@ -532,14 +543,13 @@ void initSurfaceInteraction(
     si.metallic = saturate(resolvedMetallic);
 }
 
-bool traceOcclusion(
-    acceleration_structure<instancing, primitive_motion> accelerationStructure,
-    thread intersector<triangle_data, instancing, primitive_motion>& isect,
-    const float3 origin, 
-    const float3 direction,
-    const float tMin,
-    const float tMax,
-    const float motionTime)
+bool traceOcclusion(acceleration_structure<instancing, primitive_motion> accelerationStructure,
+                    thread intersector<triangle_data, instancing, primitive_motion>& isect,
+                    const float3 origin,
+                    const float3 direction,
+                    const float tMin,
+                    const float tMax,
+                    const float motionTime)
 {
     struct ray shadowRay;
     shadowRay.origin = origin;
@@ -568,13 +578,13 @@ bool traceOcclusion(
 // changes no arithmetic and draws no extra random numbers.
 struct LightConnection
 {
-    float3 radiance;  // unoccluded Li times the cosine at the surface
-    float3 toLight;   // shadow ray direction
-    float3 origin;    // shadow ray origin
+    float3 radiance; // unoccluded Li times the cosine at the surface
+    float3 toLight; // shadow ray direction
+    float3 origin; // shadow ray origin
     float pdf;
     float tMin;
     float tMax;
-    bool needsRay;    // false when the connection is degenerate and contributes nothing
+    bool needsRay; // false when the connection is degenerate and contributes nothing
     // A delta light has no area, so BSDF sampling can never generate a direction
     // that hits it and there is no second strategy to combine with. Its pdf is a
     // placeholder of 1, not a solid-angle density, so feeding it to the balance
@@ -618,8 +628,7 @@ static inline bool lightReachesShadingPoint(thread SurfaceInteraction& si, float
 // far side comes back either black or blown out.
 static inline float shadingCosine(thread SurfaceInteraction& si, float3 L)
 {
-    return scattersThroughFibre(si) ? abs(dot(si.shading_normal, L))
-                                    : saturate(dot(si.shading_normal, L));
+    return scattersThroughFibre(si) ? abs(dot(si.shading_normal, L)) : saturate(dot(si.shading_normal, L));
 }
 
 LightConnection connectLight(constant Uniforms& uniforms,
@@ -633,7 +642,8 @@ LightConnection connectLight(constant Uniforms& uniforms,
                              device const IesGpuBufferHeader* iesBuffer)
 {
     LightSampleData lightSampleData = {};
-    const float2 uv = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType), random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
+    const float2 uv = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
+                             random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
     switch (light.type)
     {
     case 0:
@@ -692,14 +702,12 @@ LightConnection connectLight(constant Uniforms& uniforms,
     // For area lights the facing test uses the light's surface normal; for a
     // sharp point the "normal" is -L, so -dot(L, normal) = 1 always.
     const bool lit = lightReachesShadingPoint(si, lightSampleData.L);
-    const bool facing =
-        volumeEvent
-            ? (emitsLight(Li) &&
-               (light.type == 5 || light.type == 6 ||
-                -dot(lightSampleData.L, lightSampleData.normal) > 0.001f))
-        : (light.type == 5 || light.type == 6)
-            ? (lit && emitsLight(Li))
-            : (lit && -dot(lightSampleData.L, lightSampleData.normal) > 0.001f && emitsLight(Li));
+    const bool facing = volumeEvent ?
+                            (emitsLight(Li) && (light.type == 5 || light.type == 6 ||
+                                                -dot(lightSampleData.L, lightSampleData.normal) > 0.001f)) :
+                        (light.type == 5 || light.type == 6) ?
+                            (lit && emitsLight(Li)) :
+                            (lit && -dot(lightSampleData.L, lightSampleData.normal) > 0.001f && emitsLight(Li));
     if (facing)
     {
         // The cosine belongs here because bsdf_eval() returns f alone, unlike
@@ -715,13 +723,11 @@ LightConnection connectLight(constant Uniforms& uniforms,
     return c;
 }
 
-__attribute__((always_inline))
-int __float_as_int(float x)
+__attribute__((always_inline)) int __float_as_int(float x)
 {
     return as_type<int>(x);
 }
-__attribute__((always_inline))
-float __int_as_float(int x)
+__attribute__((always_inline)) float __int_as_float(int x)
 {
     return as_type<float>(x);
 }
@@ -735,33 +741,27 @@ static float3 offset_ray(const float3 p, const float3 n)
     int3 of_i = int3(int_scale * n.x, int_scale * n.y, int_scale * n.z);
 
     float3 p_i = float3(__int_as_float(__float_as_int(p.x) + ((p.x < 0) ? -of_i.x : of_i.x)),
-                             __int_as_float(__float_as_int(p.y) + ((p.y < 0) ? -of_i.y : of_i.y)),
-                             __int_as_float(__float_as_int(p.z) + ((p.z < 0) ? -of_i.z : of_i.z)));
+                        __int_as_float(__float_as_int(p.y) + ((p.y < 0) ? -of_i.y : of_i.y)),
+                        __int_as_float(__float_as_int(p.z) + ((p.z < 0) ? -of_i.z : of_i.z)));
 
     return float3(abs(p.x) < origin ? p.x + float_scale * n.x : p_i.x,
-                       abs(p.y) < origin ? p.y + float_scale * n.y : p_i.y,
-                       abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
+                  abs(p.y) < origin ? p.y + float_scale * n.y : p_i.y,
+                  abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
 }
 
-LightConnection connectEnvLight(
-    constant Uniforms& uniforms,
-    thread SamplerState& samplerRnd,
-    thread SurfaceInteraction& si,
-    device const EnvAliasEntry* envAliasTable,
-    texture2d<float> envMapTexture,
-    bool volumeEvent)
+LightConnection connectEnvLight(constant Uniforms& uniforms,
+                                thread SamplerState& samplerRnd,
+                                thread SurfaceInteraction& si,
+                                device const EnvAliasEntry* envAliasTable,
+                                texture2d<float> envMapTexture,
+                                bool volumeEvent)
 {
-    const float2 xi = float2(
-        random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
-        random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
+    const float2 xi = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
+                             random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
 
     float envPdf = 0.0f;
-    float3 dir = sampleEnvMap(xi,
-                              envAliasTable, envMapTexture,
-                              uniforms.envMapWidth, uniforms.envMapHeight,
-                              uniforms.envMapRotation,
-                              uniforms.envPdfScale,
-                              envPdf);
+    float3 dir = sampleEnvMap(xi, envAliasTable, envMapTexture, uniforms.envMapWidth, uniforms.envMapHeight,
+                              uniforms.envMapRotation, uniforms.envPdfScale, envPdf);
 
     LightConnection c = makeEmptyConnection();
     c.toLight = dir;
@@ -814,8 +814,7 @@ LightConnection connectToLight(constant Uniforms& uniforms,
         if (!SPEC_LIGHTS || numLights == 0 || u >= 0.5f)
         {
             const float selectionPdf = (numLights > 0) ? 0.5f : 1.0f;
-            LightConnection c =
-                connectEnvLight(uniforms, samplerRnd, si, envAliasTable, envMapTexture, volumeEvent);
+            LightConnection c = connectEnvLight(uniforms, samplerRnd, si, envAliasTable, envMapTexture, volumeEvent);
             c.pdf *= selectionPdf;
             return c;
         }
@@ -841,4 +840,3 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     c.pdf *= 1.0f / numLights;
     return c;
 }
-

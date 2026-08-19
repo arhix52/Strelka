@@ -28,7 +28,9 @@ namespace fs = std::filesystem;
 namespace oka
 {
 
-static uint32_t parseIntegratorName(const std::string& name)
+namespace
+{
+uint32_t parseIntegratorName(const std::string& name)
 {
     if (name == "pt")
     {
@@ -44,6 +46,7 @@ static uint32_t parseIntegratorName(const std::string& name)
     }
     throw std::invalid_argument("Unknown integrator: " + name);
 }
+} // namespace
 
 uint32_t parseSamplerName(const std::string& name)
 {
@@ -93,10 +96,12 @@ uint32_t parseTonemapName(const std::string& name)
     throw std::invalid_argument("Unknown tonemap: " + name);
 }
 
-static uint32_t parseEnumOrDefault(const std::string& name,
-                                   uint32_t (*parse)(const std::string&),
-                                   uint32_t fallback,
-                                   const char* label)
+namespace
+{
+uint32_t parseEnumOrDefault(const std::string& name,
+                            uint32_t (*parse)(const std::string&),
+                            uint32_t fallback,
+                            const char* label)
 {
     try
     {
@@ -108,6 +113,7 @@ static uint32_t parseEnumOrDefault(const std::string& name,
         return fallback;
     }
 }
+} // namespace
 
 RenderConfig parseTomlConfig(const std::string& tomlPath)
 {
@@ -211,10 +217,17 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.splitAov = *v;
     if (auto v = tbl["render"]["sharc"].value<bool>())
         cfg.sharc = *v;
+    if (auto v = tbl["render"]["sharc_capacity"].value<int64_t>())
+        cfg.sharcCapacity = (uint32_t)*v;
     if (auto v = tbl["render"]["sharc_depth"].value<int64_t>())
         cfg.sharcDepth = (uint32_t)*v;
     if (auto v = tbl["render"]["sharc_min_samples"].value<int64_t>())
+    {
         cfg.sharcMinSamples = (uint32_t)*v;
+        cfg.sharcMetalMinSamples = (uint32_t)*v;
+    }
+    if (auto v = tbl["render"]["sharc_metal_min_samples"].value<int64_t>())
+        cfg.sharcMetalMinSamples = (uint32_t)*v;
     if (auto v = tbl["render"]["sharc_read_frames"].value<int64_t>())
         cfg.sharcReadFrames = (uint32_t)*v;
     if (auto v = tbl["render"]["sharc_base_size"].value<double>())
@@ -227,6 +240,34 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.sharcResponsiveFrames = (uint32_t)*v;
     if (auto v = tbl["render"]["sharc_responsive_lighting"].value<bool>())
         cfg.sharcResponsiveLighting = *v;
+    if (auto v = tbl["render"]["sharc_metal_responsive"].value<bool>())
+        cfg.sharcMetalResponsive = *v;
+    if (auto v = tbl["render"]["sharc_scene_scale"].value<double>())
+        cfg.sharcSceneScale = (float)*v;
+    if (auto v = tbl["render"]["sharc_roughness_threshold"].value<double>())
+        cfg.sharcRoughnessThreshold = (float)*v;
+    if (auto v = tbl["render"]["sharc_radiance_scale"].value<double>())
+        cfg.sharcRadianceScale = (float)*v;
+    if (auto v = tbl["render"]["sharc_update_downscale"].value<int64_t>())
+        cfg.sharcUpdateDownscale = (uint32_t)*v;
+    if (auto v = tbl["render"]["sharc_propagation_depth"].value<int64_t>())
+        cfg.sharcPropagationDepth = (uint32_t)*v;
+    if (auto v = tbl["render"]["sharc_debug"].value<int64_t>())
+        cfg.sharcDebug = (uint32_t)*v;
+    if (auto v = tbl["render"]["sharc_level_bias"].value<int64_t>())
+        cfg.sharcLevelBias = (int32_t)*v;
+    if (auto v = tbl["render"]["sharc_material_demodulation"].value<bool>())
+        cfg.sharcMaterialDemodulation = *v;
+    if (auto v = tbl["render"]["sharc_separate_emissive"].value<bool>())
+        cfg.sharcSeparateEmissive = *v;
+    if (auto v = tbl["render"]["sharc_directional"].value<bool>())
+        cfg.sharcDirectional = *v;
+    if (auto v = tbl["render"]["sharc_cache_resampling"].value<bool>())
+        cfg.sharcCacheResampling = *v;
+    if (auto v = tbl["render"]["sharc_blend_adjacent_levels"].value<bool>())
+        cfg.sharcBlendAdjacentLevels = *v;
+    if (auto v = tbl["render"]["sharc_fade_acceleration"].value<bool>())
+        cfg.sharcFadeAcceleration = *v;
     if (auto v = tbl["render"]["opacity_micromaps"].value<bool>())
         cfg.opacityMicromaps = *v;
     if (auto v = tbl["render"]["sampler"].value<std::string>())
@@ -314,11 +355,13 @@ HeadlessApp::HeadlessApp(const RenderConfig& config) : m_config(config)
     m_render->setSharedContext(m_sharedCtx.get());
 }
 
-static bool computeNodeWorldBounds(Scene& scene,
-                                   uint32_t nodeId,
-                                   const std::optional<uint32_t>& selectedInstance,
-                                   glm::float3& worldMin,
-                                   glm::float3& worldMax)
+namespace
+{
+bool computeNodeWorldBounds(Scene& scene,
+                            uint32_t nodeId,
+                            const std::optional<uint32_t>& selectedInstance,
+                            glm::float3& worldMin,
+                            glm::float3& worldMax)
 {
     const std::vector<Scene::Node>& nodes = scene.getNodes();
     const std::vector<Instance>& instances = scene.getInstances();
@@ -358,6 +401,7 @@ static bool computeNodeWorldBounds(Scene& scene,
     }
     return any;
 }
+} // namespace
 
 void HeadlessApp::populateSettings()
 {
@@ -428,8 +472,9 @@ void HeadlessApp::populateSettings()
     // Spatially hashed radiance cache. Off by default: it trades a little
     // bias for a large cut in path length, which is a choice a scene makes.
     m_settings->setAs<bool>("render/pt/sharc", m_config.sharc);
-    m_settings->setAs<uint32_t>("render/pt/sharcCapacity", 1u << 22);
+    m_settings->setAs<uint32_t>("render/pt/sharcCapacity", m_config.sharcCapacity);
     m_settings->setAs<uint32_t>("render/pt/sharcMinSamples", m_config.sharcMinSamples);
+    m_settings->setAs<uint32_t>("render/pt/sharcMetalMinSamples", m_config.sharcMetalMinSamples);
     m_settings->setAs<uint32_t>("render/pt/sharcDepth", m_config.sharcDepth);
     m_settings->setAs<uint32_t>("render/pt/sharcReadFrames", m_config.sharcReadFrames);
     m_settings->setAs<float>("render/pt/sharcVoxelPixels", m_config.sharcBaseSize);
@@ -442,6 +487,20 @@ void HeadlessApp::populateSettings()
     // absent, because a missing key is a logged assertion in SettingsManager.
     m_settings->setAs<bool>("render/pt/sharcReset", false);
     m_settings->setAs<bool>("render/pt/sharcReportOccupancy", false);
+    m_settings->setAs<bool>("render/pt/sharcMetalResponsive", m_config.sharcMetalResponsive);
+    m_settings->setAs<float>("render/pt/sharcSceneScale", m_config.sharcSceneScale);
+    m_settings->setAs<float>("render/pt/sharcRoughnessThreshold", m_config.sharcRoughnessThreshold);
+    m_settings->setAs<float>("render/pt/sharcRadianceScale", m_config.sharcRadianceScale);
+    m_settings->setAs<uint32_t>("render/pt/sharcUpdateDownscale", m_config.sharcUpdateDownscale);
+    m_settings->setAs<uint32_t>("render/pt/sharcPropagationDepth", m_config.sharcPropagationDepth);
+    m_settings->setAs<uint32_t>("render/pt/sharcDebug", m_config.sharcDebug);
+    m_settings->setAs<uint32_t>("render/pt/sharcLevelBias", (uint32_t)m_config.sharcLevelBias);
+    m_settings->setAs<bool>("render/pt/sharcMaterialDemodulation", m_config.sharcMaterialDemodulation);
+    m_settings->setAs<bool>("render/pt/sharcSeparateEmissive", m_config.sharcSeparateEmissive);
+    m_settings->setAs<bool>("render/pt/sharcDirectional", m_config.sharcDirectional);
+    m_settings->setAs<bool>("render/pt/sharcCacheResampling", m_config.sharcCacheResampling);
+    m_settings->setAs<bool>("render/pt/sharcBlendAdjacentLevels", m_config.sharcBlendAdjacentLevels);
+    m_settings->setAs<bool>("render/pt/sharcFadeAcceleration", m_config.sharcFadeAcceleration);
     m_settings->setAs<bool>("render/pt/opacityMicromaps", m_config.opacityMicromaps);
     // Block compression and a disk cache for the finished textures.
     // The cache holds them downscaled, mipped and compressed, so a second
@@ -543,21 +602,43 @@ void HeadlessApp::saveOutput(Buffer* buf)
         //
         // The curve comes from the same header the shader uses, so the two
         // cannot drift.
-        const float exposure = m_settings->getAs<float>("render/post/tonemapper/filmIso") > 0.0f ?
-                                   m_settings->getAs<float>("render/post/tonemapper/cm2_factor") *
-                                       m_settings->getAs<float>("render/post/tonemapper/filmIso") /
-                                       (m_settings->getAs<float>("render/post/tonemapper/shutterSpeed") *
-                                        m_settings->getAs<float>("render/post/tonemapper/fStop") *
-                                        m_settings->getAs<float>("render/post/tonemapper/fStop")) /
-                                       100.0f :
-                                   m_settings->getAs<float>("render/post/tonemapper/cm2_factor");
-        const uint32_t curve = m_settings->getAs<uint32_t>("render/pt/tonemapperType");
+        // A diagnostic view is data wearing an image's clothes: its colours mean
+        // one thing each and none of them is a quantity of light. The renderer
+        // already bypasses exposure and the tone curve for these (see
+        // MetalFrameUniforms), but this writer computes its own, and applying a
+        // photographic exposure of about 1/140 to a debug colour of 0.2 is how
+        // every SHaRC and single-hit view came out of the CLI black.
+        // Mirrors SHARC_DEBUG_* in src/shaders/metal/ShaderTypes.h, duplicated
+        // rather than included: that header is Metal-only and brings metal-cpp
+        // with it. Every mode but "counters in the log" draws an image.
+        // The radiance view is the exception: it holds radiance, so it wants the
+        // render's own exposure and curve to be comparable with the render.
+        constexpr uint32_t kSharcDebugCounters = 4u;
+        constexpr uint32_t kSharcDebugRadiance = 7u;
+        constexpr uint32_t kSharcDebugLastVisualization = 7u;
+        const uint32_t sharcDebug = m_settings->getAs<uint32_t>("render/pt/sharcDebug");
+        const bool sharcPaletteView = m_settings->getAs<bool>("render/pt/sharc") && sharcDebug != 0u &&
+                                      sharcDebug != kSharcDebugCounters && sharcDebug != kSharcDebugRadiance &&
+                                      sharcDebug <= kSharcDebugLastVisualization;
+        const bool debugView = m_settings->getAs<uint32_t>("render/pt/debug") != 0u || sharcPaletteView;
+        const float photographicExposure = m_settings->getAs<float>("render/post/tonemapper/filmIso") > 0.0f ?
+                                               m_settings->getAs<float>("render/post/tonemapper/cm2_factor") *
+                                                   m_settings->getAs<float>("render/post/tonemapper/filmIso") /
+                                                   (m_settings->getAs<float>("render/post/tonemapper/shutterSpeed") *
+                                                    m_settings->getAs<float>("render/post/tonemapper/fStop") *
+                                                    m_settings->getAs<float>("render/post/tonemapper/fStop")) /
+                                                   100.0f :
+                                               m_settings->getAs<float>("render/post/tonemapper/cm2_factor");
+        const float exposure = debugView ? 1.0f : photographicExposure;
+        const uint32_t curve = debugView ? (uint32_t)oka::tonemap::ToneMapperType::eNone :
+                                           m_settings->getAs<uint32_t>("render/pt/tonemapperType");
         const float gamma = m_settings->getAs<float>("render/post/gamma");
 
         std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4);
         for (uint32_t i = 0; i < w * h; ++i)
         {
-            oka::tonemap::float3 c = oka::tonemap::make_float3(data[i * 4 + 0], data[i * 4 + 1], data[i * 4 + 2]) * exposure;
+            oka::tonemap::float3 c =
+                oka::tonemap::make_float3(data[i * 4 + 0], data[i * 4 + 1], data[i * 4 + 2]) * exposure;
             switch (static_cast<oka::tonemap::ToneMapperType>(curve))
             {
             case oka::tonemap::ToneMapperType::eReinhard:
@@ -709,7 +790,7 @@ int HeadlessApp::run()
     desc.format = BufferFormat::FLOAT4;
     desc.width = m_config.width;
     desc.height = m_config.height;
-    std::unique_ptr<Buffer> outputBuf(m_render->createBuffer(desc));
+    const std::unique_ptr<Buffer> outputBuf(m_render->createBuffer(desc));
 
     const auto startTime = high_resolution_clock::now();
     bool announced = false;

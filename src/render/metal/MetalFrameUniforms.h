@@ -23,7 +23,7 @@ namespace metal
 static constexpr size_t kFrameUniformSlots = 3;
 
 // Camera / jitter / exposure / SHARC → Uniforms fill. Owns the per-frame uniform
-// ring buffers and the radiance-cache buffer.
+// ring buffers and the three SHARC resources.
 class MetalFrameUniforms
 {
 public:
@@ -114,13 +114,40 @@ public:
     {
         return mUniformTMBuffers;
     }
-    MTL::Buffer* sharcBuffer() const
+    MTL::Buffer* sharcHashBuffer() const
     {
-        return mSharcBuffer;
+        return mSharcHashBuffer;
+    }
+    MTL::Buffer* sharcAccumulationBuffer() const
+    {
+        return mSharcAccumulationBuffer;
+    }
+    MTL::Buffer* sharcResolvedBuffer() const
+    {
+        return mSharcResolvedBuffer;
     }
     uint32_t sharcCapacity() const
     {
         return mSharcCapacity;
+    }
+    uint32_t sharcResourceGeneration() const
+    {
+        return mSharcResourceGeneration;
+    }
+    bool sharcResetPending() const
+    {
+        return mSharcResetPending;
+    }
+    void markSharcResetComplete()
+    {
+        mSharcResetPending = false;
+    }
+    void requestSharcReset()
+    {
+        if (mSharcCapacity != 0u)
+        {
+            mSharcResetPending = true;
+        }
     }
 
     FillResult fill(const FillInput& in);
@@ -156,8 +183,18 @@ private:
     MTL::Device* mDevice = nullptr;
     MTL::Buffer* mUniformBuffers[kFrameUniformSlots] = {};
     MTL::Buffer* mUniformTMBuffers[kFrameUniformSlots] = {};
-    MTL::Buffer* mSharcBuffer = nullptr;
+    MTL::Buffer* mSharcHashBuffer = nullptr;
+    MTL::Buffer* mSharcAccumulationBuffer = nullptr;
+    MTL::Buffer* mSharcResolvedBuffer = nullptr;
     uint32_t mSharcCapacity = 0;
+    // Changes whenever any SHARC allocation is replaced. Metal 4 residency is
+    // queue-wide, so a runtime UI toggle must publish the new buffers even when
+    // the wavefront resolution (and therefore its own generation) is unchanged.
+    uint32_t mSharcResourceGeneration = 0;
+    uint32_t mSharcFlags = 0;
+    float mSharcSceneScale = -1.0f;
+    int32_t mSharcLevelBias = 0;
+    bool mSharcResetPending = false;
     PrevSettings mPrevSettings;
 };
 

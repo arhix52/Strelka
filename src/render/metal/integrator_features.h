@@ -24,6 +24,9 @@ public:
     static constexpr uint32_t kSharc = 1u << 8;
     static constexpr uint32_t kSubsurface = 1u << 9;
     static constexpr uint32_t kCurves = 1u << 10;
+    // Dedicated sparse cache update. kSharc without this bit is the full-frame
+    // query pass; update never queries its own writes.
+    static constexpr uint32_t kSharcUpdate = 1u << 11;
 
     WavefrontFeatures() = default;
     explicit WavefrontFeatures(uint32_t bits) : mBits(bits)

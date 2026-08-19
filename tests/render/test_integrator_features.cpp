@@ -73,6 +73,11 @@ TEST_CASE("packWavefrontFeatures motion blur needs enable and a mover")
 
 TEST_CASE("WavefrontFeatures with() accumulates bits")
 {
-    const auto f = WavefrontFeatures().with(WavefrontFeatures::kEnvMap).with(WavefrontFeatures::kMetal4);
-    CHECK(f.bits() == (WavefrontFeatures::kEnvMap | WavefrontFeatures::kMetal4));
+    const auto f = WavefrontFeatures()
+                       .with(WavefrontFeatures::kEnvMap)
+                       .with(WavefrontFeatures::kSharc)
+                       .with(WavefrontFeatures::kSharcUpdate)
+                       .with(WavefrontFeatures::kMetal4);
+    CHECK(f.bits() == (WavefrontFeatures::kEnvMap | WavefrontFeatures::kSharc | WavefrontFeatures::kSharcUpdate |
+                       WavefrontFeatures::kMetal4));
 }

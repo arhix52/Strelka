@@ -86,6 +86,7 @@ struct RenderConfig
     /// backend for. See docs/open-perf.md.
     bool splitAov = false;
     bool sharc = false;
+    uint32_t sharcCapacity = 1u << 22;
     uint32_t sharcDepth = 1;
     uint32_t sharcMinSamples = 8;
     /// Accumulated samples after which cache reads stop; 0 never stops. The
@@ -93,6 +94,10 @@ struct RenderConfig
     /// it is the only thing keeping the render from converging. See
     /// Params::sharcReadMaxSubframe for the measurement.
     uint32_t sharcReadFrames = 128;
+    /// Sample count a Metal voxel needs before a query may read it. The legacy
+    /// `sharc_min_samples` sets both backends; this overrides it for Metal,
+    /// where 1 is the upstream `> 0` threshold.
+    uint32_t sharcMetalMinSamples = 1;
     float sharcBaseSize = 4.0f; // voxel width in pixels
     /// Frames the cache averages a voxel over. Larger is quieter and slower to
     /// notice that the lighting changed; the resolve pass clamps it to the SDK's
@@ -108,6 +113,30 @@ struct RenderConfig
     /// Lets a headless A/B turn the split off on a scene that has responsive
     /// lights, which is the only way to measure what it costs and buys.
     bool sharcResponsiveLighting = true;
+    /// Metal's own responsive switch, and not the same setting: its compact key
+    /// has no spare bit for a per-light tag, so the companion entries hold the
+    /// whole lighting signal and come out of the configured capacity. Off by
+    /// default for that reason. See docs/sharc-metal.md.
+    bool sharcMetalResponsive = false;
+    /// World-space voxel scale: larger values make smaller voxels. Metal only;
+    /// OptiX sizes its grid from sharcBaseSize in pixels.
+    float sharcSceneScale = 50.0f;
+    float sharcRoughnessThreshold = 0.4f;
+    /// Quantization factor for the atomic radiance accumulator. Reduce it if the
+    /// diagnostics report 31-32 occupied radiance bits.
+    float sharcRadianceScale = 1000.0f;
+    /// One update path per this many pixels, squared. 5 traces about 4%.
+    uint32_t sharcUpdateDownscale = 5;
+    /// Vertices an update path keeps behind it for back-propagation.
+    uint32_t sharcPropagationDepth = 2;
+    uint32_t sharcDebug = 0;
+    int32_t sharcLevelBias = 0;
+    bool sharcMaterialDemodulation = true;
+    bool sharcSeparateEmissive = true;
+    bool sharcDirectional = false;
+    bool sharcCacheResampling = true;
+    bool sharcBlendAdjacentLevels = true;
+    bool sharcFadeAcceleration = false;
     /// Resolve alpha cutouts in the traversal hardware where the answer is
     /// uniform, and enter the shader only where it is not. Off by default: it is
     /// an acceleration, and one that has to be measured on a machine that can

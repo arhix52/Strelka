@@ -1,0 +1,21 @@
+[scene]
+path = "../../iso_bathroom/iso_bathroom.gltf"
+
+[output]
+path = "output/iso_bathroom.exr"
+width = 960
+height = 540
+
+[render]
+spp = 64
+spp_per_launch = 1
+max_depth = 8
+sampler = "sobol"
+
+[camera]
+index = 0
+
+[tonemap]
+type = "aces"
+gamma = 0.0
+

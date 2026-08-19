@@ -177,10 +177,12 @@ void EditorApp::drawRenderSettingsPanel()
     };
     static_assert(IM_ARRAYSIZE(debugViewOptions) == IM_ARRAYSIZE(debugViewHelp),
                   "every debug view needs a help slot, even an empty one");
-    static int currentDebugViewOption = 0;
+    const int debugViewOptionCount = IM_ARRAYSIZE(debugViewOptions);
+    const uint32_t requestedDebugView = m_settingsManager->getAs<uint32_t>("render/pt/debug");
+    int currentDebugViewOption = requestedDebugView < (uint32_t)debugViewOptionCount ? (int)requestedDebugView : 0;
     if (ImGui::BeginCombo("Debug view", debugViewOptions[currentDebugViewOption]))
     {
-        for (int n = 0; n < IM_ARRAYSIZE(debugViewOptions); n++)
+        for (int n = 0; n < debugViewOptionCount; n++)
         {
             const bool is_selected = (currentDebugViewOption == n);
             if (ImGui::Selectable(debugViewOptions[n], is_selected))
@@ -189,6 +191,8 @@ void EditorApp::drawRenderSettingsPanel()
                 {
                     currentDebugViewOption = n;
                     m_settingsManager->setAs<uint32_t>("render/pt/debug", currentDebugViewOption);
+                    m_sharedCtx->mSubframeIndex = 0;
+                    m_render->resetTemporalHistory();
                 }
             }
             if (debugViewHelp[n] != nullptr && ImGui::IsItemHovered())
@@ -275,8 +279,8 @@ void EditorApp::drawRenderSettingsPanel()
             cam.fStopDof = exposureFStop;
         }
 
-        changed |= ImGui::DragFloat("Focal length", &cam.focalLengthMm, 0.5f, 1.0f, 500.0f, "%.1f mm",
-                                    ImGuiSliderFlags_Logarithmic);
+        changed |= ImGui::DragFloat(
+            "Focal length", &cam.focalLengthMm, 0.5f, 1.0f, 500.0f, "%.1f mm", ImGuiSliderFlags_Logarithmic);
         changed |= ImGui::DragFloat("Sensor width", &cam.sensorWidth, 0.1f, 1.0f, 100.0f, "%.1f mm");
         changed |= ImGui::DragFloat("Sensor height", &cam.sensorHeight, 0.1f, 1.0f, 100.0f, "%.1f mm");
         ImGui::TextDisabled("Vertical FOV %.1f deg (from lens + sensor)",
@@ -287,8 +291,8 @@ void EditorApp::drawRenderSettingsPanel()
 
         if (cam.useDof)
         {
-            if (ImGui::SliderFloat("Focus distance", &cam.focalDistance, 0.1f, 1000.0f, "%.2f m",
-                                   ImGuiSliderFlags_Logarithmic))
+            if (ImGui::SliderFloat(
+                    "Focus distance", &cam.focalDistance, 0.1f, 1000.0f, "%.2f m", ImGuiSliderFlags_Logarithmic))
                 changed = true;
 
             float dofFStop = linkDof ? exposureFStop : cam.fStopDof;
@@ -306,8 +310,8 @@ void EditorApp::drawRenderSettingsPanel()
                     cam.fStopDof = dofFStop;
                 }
             }
-            ImGui::TextDisabled("Lens radius %.4f m",
-                                editor_camera_exposure::lensRadiusMetres(cam.focalLengthMm, cam.fStopDof));
+            ImGui::TextDisabled(
+                "Lens radius %.4f m", editor_camera_exposure::lensRadiusMetres(cam.focalLengthMm, cam.fStopDof));
 
             if (ImGui::SliderInt("Aperture blades", &cam.apertureBlades, 0, 8))
                 changed = true;
@@ -373,21 +377,17 @@ void EditorApp::drawRenderSettingsPanel()
             if (ImGui::InputInt("Width", &customWidth))
             {
                 const uint32_t width = editor_viewport::clampPreviewDimension(customWidth);
-                const uint32_t height =
-                    lockAspect
-                        ? editor_viewport::clampPreviewDimension(
-                              static_cast<int>(std::lround(static_cast<float>(width) / aspect)))
-                               : previewHeight;
+                const uint32_t height = lockAspect ? editor_viewport::clampPreviewDimension(static_cast<int>(
+                                                         std::lround(static_cast<float>(width) / aspect))) :
+                                                     previewHeight;
                 requestPreviewResolution(width, height);
             }
             if (ImGui::InputInt("Height", &customHeight))
             {
                 const uint32_t height = editor_viewport::clampPreviewDimension(customHeight);
-                const uint32_t width =
-                    lockAspect
-                        ? editor_viewport::clampPreviewDimension(
-                              static_cast<int>(std::lround(static_cast<float>(height) * aspect)))
-                               : previewWidth;
+                const uint32_t width = lockAspect ? editor_viewport::clampPreviewDimension(static_cast<int>(
+                                                        std::lround(static_cast<float>(height) * aspect))) :
+                                                    previewWidth;
                 requestPreviewResolution(width, height);
             }
             ImGui::Checkbox("Lock aspect ratio", &lockAspect);
@@ -410,12 +410,10 @@ void EditorApp::drawRenderSettingsPanel()
         {
             for (const auto& item : rectlightSamplingMethodItems)
             {
-                const bool is_selected =
-                    (item == rectlightSamplingMethodItems[currentRectlightSamplingMethodItemId]);
+                const bool is_selected = (item == rectlightSamplingMethodItems[currentRectlightSamplingMethodItemId]);
                 if (ImGui::Selectable(item, is_selected))
                 {
-                    currentRectlightSamplingMethodItemId =
-                        static_cast<int>(&item - rectlightSamplingMethodItems);
+                    currentRectlightSamplingMethodItemId = static_cast<int>(&item - rectlightSamplingMethodItems);
                 }
                 if (is_selected)
                 {
@@ -431,8 +429,7 @@ void EditorApp::drawRenderSettingsPanel()
         // Read back rather than remembered in a static: the default is set in
         // loadSettings, and a static starting at zero showed "Halton" no matter
         // what was actually running.
-        int currentSamplerTypeId =
-            (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/samplerType"), 4u);
+        int currentSamplerTypeId = (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/samplerType"), 4u);
         if (ImGui::BeginCombo("Sampler", samplerTypeItems[currentSamplerTypeId]))
         {
             for (const auto& item : samplerTypeItems)
@@ -465,9 +462,10 @@ void EditorApp::drawRenderSettingsPanel()
             ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered())
             {
-                ImGui::SetTooltip("Samples drawn from the blue-noise sequence before handing over to\n"
-                                  "per-pixel scrambling. Blue noise looks cleaner at low sample counts;\n"
-                                  "scrambling converges faster past a few dozen.");
+                ImGui::SetTooltip(
+                    "Samples drawn from the blue-noise sequence before handing over to\n"
+                    "per-pixel scrambling. Blue noise looks cleaner at low sample counts;\n"
+                    "scrambling converges faster past a few dozen.");
             }
         }
 
@@ -497,8 +495,7 @@ void EditorApp::drawRenderSettingsPanel()
         // the frame-budget button, the benchmark drivers, STRELKA_DENOISE.
         if (fx.modeCount > 0 &&
             (!mDenoiseModeInitialized || mDenoiseModeIndex >= fx.modeCount ||
-             !editor_denoiser::settingsMatchMode(fx, mDenoiseModeIndex, denoiseSetting, upscaleSetting,
-                                                 requestedScale)))
+             !editor_denoiser::settingsMatchMode(fx, mDenoiseModeIndex, denoiseSetting, upscaleSetting, requestedScale)))
         {
             mDenoiseModeIndex = editor_denoiser::modeIndexFromSettings(fx, denoiseSetting, upscaleSetting);
             mDenoiseModeInitialized = true;
@@ -560,19 +557,15 @@ void EditorApp::drawRenderSettingsPanel()
 
             if (fx.playbackMotionBlurToggle && fxMode.denoise)
             {
-                bool playbackBlur =
-                    m_settingsManager->getAs<bool>(
-                        "render/pt/denoisePlaybackMotionBlur");
+                bool playbackBlur = m_settingsManager->getAs<bool>("render/pt/denoisePlaybackMotionBlur");
                 if (ImGui::Checkbox("Path-traced playback blur", &playbackBlur))
                 {
-                    m_settingsManager->setAs<bool>(
-                        "render/pt/denoisePlaybackMotionBlur", playbackBlur);
+                    m_settingsManager->setAs<bool>("render/pt/denoisePlaybackMotionBlur", playbackBlur);
                     m_render->resetTemporalHistory();
                 }
                 ImGui::SameLine();
                 ImGui::BeginDisabled();
-                ImGui::TextUnformatted(
-                    playbackBlur ? "(uses SPP per frame)" : "(stable shutter-close guides)");
+                ImGui::TextUnformatted(playbackBlur ? "(uses SPP per frame)" : "(stable shutter-close guides)");
                 ImGui::EndDisabled();
             }
 
@@ -588,10 +581,9 @@ void EditorApp::drawRenderSettingsPanel()
                 }
                 ImGui::SameLine();
                 ImGui::BeginDisabled();
-                const char* const scaleStatus = factor < 1.0f
-                                                    ? "(rendering below display resolution)"
-                                                    : (fxMode.denoise ? "(denoising at 1:1)"
-                                                                      : "(inactive at 1:1; lower scale to enable)");
+                const char* const scaleStatus =
+                    factor < 1.0f ? "(rendering below display resolution)" :
+                                    (fxMode.denoise ? "(denoising at 1:1)" : "(inactive at 1:1; lower scale to enable)");
                 ImGui::TextUnformatted(scaleStatus);
                 ImGui::EndDisabled();
             }
@@ -610,9 +602,8 @@ void EditorApp::drawRenderSettingsPanel()
         const double lastGpuMs = m_render->getLastRenderTimeMs();
         if (lastGpuMs > editor_frame_budget::kInteractiveBudgetMs)
         {
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
-                               "Last PT frame: %.0f ms (interactive budget: %.0f ms)", lastGpuMs,
-                               editor_frame_budget::kInteractiveBudgetMs);
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "Last PT frame: %.0f ms (interactive budget: %.0f ms)",
+                               lastGpuMs, editor_frame_budget::kInteractiveBudgetMs);
             // The scale the frame was *actually* traced at, not the one the
             // slider holds: the budget divides a measured GPU time by a pixel
             // count, and on a fixed-ratio backend the slider is not that count.
@@ -669,6 +660,7 @@ void EditorApp::drawRenderSettingsPanel()
         {
             m_settingsManager->setAs<uint32_t>("render/pt/depth", maxDepth);
         }
+
 
         auto sppSubframe = m_settingsManager->getAs<uint32_t>("render/pt/spp");
         if (ImGui::SliderInt("SPP per frame", (int*)&sppSubframe, 1, 32))
@@ -918,6 +910,140 @@ void EditorApp::drawRenderSettingsPanel()
                 ImGui::EndTooltip();
             }
 
+            // Metal-only cache internals. The controls above mean the same thing
+            // on both backends; what is below is the hash map this backend
+            // actually has -- a compact 32-bit key, a sparse update pass and an
+            // fp16 resolved half. See docs/sharc-metal.md.
+            const bool metalBackend = m_render->denoiserKind() == Render::DenoiserKind::eMetalFx;
+            if (metalBackend)
+            {
+                ImGui::SeparatorText("Metal");
+
+                // Must match SHARC_DEBUG_* in ShaderTypes.h, in order.
+                const char* const sharcDebugOptions[] = { "Off",
+                                                          "Cached-key colors",
+                                                          "Query: hit / miss",
+                                                          "Cached sample count",
+                                                          "Counters in log",
+                                                          "Hash bucket collisions" };
+                uint32_t sharcDebug = m_settingsManager->getAs<uint32_t>("render/pt/sharcDebug");
+                sharcDebug = std::min<uint32_t>(sharcDebug, IM_ARRAYSIZE(sharcDebugOptions) - 1u);
+                if (ImGui::BeginCombo("Hash map diagnostics", sharcDebugOptions[sharcDebug]))
+                {
+                    for (uint32_t n = 0; n < IM_ARRAYSIZE(sharcDebugOptions); ++n)
+                    {
+                        const bool selected = sharcDebug == n;
+                        if (ImGui::Selectable(sharcDebugOptions[n], selected) && !selected)
+                        {
+                            sharcDebug = n;
+                            m_settingsManager->setAs<uint32_t>("render/pt/sharcDebug", sharcDebug);
+                            restart();
+                            m_render->resetTemporalHistory();
+                        }
+                        if (selected)
+                        {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(
+                        "Alongside the four cache views in Debug view above, which both backends\n"
+                        "answer. These are about the map rather than the cache: hit / miss is green\n"
+                        "where a query is answered and red where the lookup fails, collisions use\n"
+                        "NVIDIA's blue-to-red probe-depth palette, and the counters go to the log\n"
+                        "as SHARC stats rather than to the image.");
+                    ImGui::EndTooltip();
+                }
+
+                if (ImGui::TreeNode("Metal cache features"))
+                {
+                    bool featureChanged = false;
+                    auto featureToggle = [&](const char* label, const char* setting) {
+                        bool value = m_settingsManager->getAs<bool>(setting);
+                        if (ImGui::Checkbox(label, &value))
+                        {
+                            m_settingsManager->setAs<bool>(setting, value);
+                            featureChanged = true;
+                        }
+                    };
+                    featureToggle("Material demodulation", "render/pt/sharcMaterialDemodulation");
+                    featureToggle("Separate emissive", "render/pt/sharcSeparateEmissive");
+                    featureToggle("Directional radiance (SH)", "render/pt/sharcDirectional");
+                    if (ImGui::IsItemHovered())
+                    {
+                        ImGui::SetTooltip(
+                            "Keeps a bright glossy sample from being reused in an unrelated direction, and pays "
+                            "for it with a first-order reconstruction of a signal a cell otherwise stores exactly. "
+                            "Off by default, as upstream's SH encoding is.");
+                    }
+                    featureToggle("Responsive lighting", "render/pt/sharcMetalResponsive");
+                    if (ImGui::IsItemHovered())
+                    {
+                        ImGui::SetTooltip(
+                            "Not the same switch as the one above: the compact key has no spare bit for a "
+                            "per-light tag, so the companion entries hold the whole lighting signal and come "
+                            "out of the configured capacity.");
+                    }
+                    featureToggle("Cache resampling", "render/pt/sharcCacheResampling");
+                    featureToggle("Blend adjacent levels", "render/pt/sharcBlendAdjacentLevels");
+                    featureToggle("Fade acceleration", "render/pt/sharcFadeAcceleration");
+
+                    constexpr int kSharcMaxPropagationDepth = 4; // ShaderTypes.h ABI limit.
+                    auto propagationDepth = m_settingsManager->getAs<uint32_t>("render/pt/sharcPropagationDepth");
+                    if (ImGui::SliderInt("Propagation depth", (int*)&propagationDepth, 1, kSharcMaxPropagationDepth))
+                    {
+                        m_settingsManager->setAs<uint32_t>("render/pt/sharcPropagationDepth", propagationDepth);
+                        featureChanged = true;
+                    }
+                    auto updateDownscale = m_settingsManager->getAs<uint32_t>("render/pt/sharcUpdateDownscale");
+                    if (ImGui::SliderInt("Update block size", (int*)&updateDownscale, 1, 16))
+                    {
+                        m_settingsManager->setAs<uint32_t>("render/pt/sharcUpdateDownscale", updateDownscale);
+                        featureChanged = true;
+                    }
+                    auto metalMinSamples = m_settingsManager->getAs<uint32_t>("render/pt/sharcMetalMinSamples");
+                    if (ImGui::SliderInt("Minimum cached samples", (int*)&metalMinSamples, 1, 64))
+                    {
+                        m_settingsManager->setAs<uint32_t>("render/pt/sharcMetalMinSamples", metalMinSamples);
+                        featureChanged = true;
+                    }
+                    float sceneScale = m_settingsManager->getAs<float>("render/pt/sharcSceneScale");
+                    if (ImGui::DragFloat("Scene scale", &sceneScale, 0.25f, 0.25f, 1000.0f, "%.2f"))
+                    {
+                        m_settingsManager->setAs<float>("render/pt/sharcSceneScale", sceneScale);
+                        featureChanged = true;
+                    }
+                    if (ImGui::IsItemHovered())
+                    {
+                        ImGui::SetTooltip(
+                            "World-space voxel scale: larger values make smaller voxels. The "
+                            "voxel-grid debug view is how to choose it.");
+                    }
+                    float radianceScale = m_settingsManager->getAs<float>("render/pt/sharcRadianceScale");
+                    if (ImGui::DragFloat("Radiance fixed-point scale", &radianceScale, 10.0f, 1.0f, 100000.0f, "%.0f"))
+                    {
+                        m_settingsManager->setAs<float>("render/pt/sharcRadianceScale", radianceScale);
+                        featureChanged = true;
+                    }
+                    if (ImGui::IsItemHovered())
+                    {
+                        ImGui::SetTooltip(
+                            "Start at 1000. Reduce it if the counters report 31-32 occupied radiance bits or "
+                            "accumulation clamps; a lower value trades fixed-point precision for headroom.");
+                    }
+                    if (featureChanged)
+                    {
+                        restart();
+                        m_render->resetTemporalHistory();
+                    }
+                    ImGui::TreePop();
+                }
+            }
+
             ImGui::TreePop();
         }
     }
@@ -941,8 +1067,7 @@ void EditorApp::drawRenderSettingsPanel()
         IGFD::FileDialogConfig config{};
         config.path = ".";
         config.fileName = defaultName;
-        ImGuiFileDialog::Instance()->OpenDialog(
-            "SaveScreenshotDlgKey", "Save Screenshot", ".exr,.png", config);
+        ImGuiFileDialog::Instance()->OpenDialog("SaveScreenshotDlgKey", "Save Screenshot", ".exr,.png", config);
     }
 
     auto cameraSpeed = m_settingsManager->getAs<float>("render/cameraSpeed");
@@ -986,16 +1111,15 @@ void EditorApp::drawRenderSettingsPanel()
         }
         if (ImGui::IsItemHovered())
         {
-            ImGui::SetTooltip("When on, one f-stop drives both DOF blur and photographic exposure.\n"
-                              "Untick to blur the lens without changing film brightness.");
+            ImGui::SetTooltip(
+                "When on, one f-stop drives both DOF blur and photographic exposure.\n"
+                "Untick to blur the lens without changing film brightness.");
         }
 
         if (mode == 0)
         {
-            changed |= ImGui::DragFloat("Film ISO", &iso, 1.0f, 1.0f, 25600.0f, "%.0f",
-                                        ImGuiSliderFlags_Logarithmic);
-            if (ImGui::DragFloat(linkDof ? "Aperture (linked)" : "Exposure f-stop", &fStop, 0.05f, 0.7f, 32.0f,
-                                 "f/%.1f"))
+            changed |= ImGui::DragFloat("Film ISO", &iso, 1.0f, 1.0f, 25600.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::DragFloat(linkDof ? "Aperture (linked)" : "Exposure f-stop", &fStop, 0.05f, 0.7f, 32.0f, "f/%.1f"))
             {
                 changed = true;
                 if (linkDof)
@@ -1003,14 +1127,15 @@ void EditorApp::drawRenderSettingsPanel()
                     m_scene->getCamera(m_selectedCamera).fStopDof = fStop;
                 }
             }
-            changed |= ImGui::DragFloat("Shutter", &shutter, 1.0f, 1.0f, 8000.0f, "1/%.0f s",
-                                        ImGuiSliderFlags_Logarithmic);
-            changed |= ImGui::DragFloat("cd/m^2 factor", &cm2, 0.01f, 0.0001f, 100000.0f, "%.4f",
-                                        ImGuiSliderFlags_Logarithmic);
+            changed |=
+                ImGui::DragFloat("Shutter", &shutter, 1.0f, 1.0f, 8000.0f, "1/%.0f s", ImGuiSliderFlags_Logarithmic);
+            changed |=
+                ImGui::DragFloat("cd/m^2 factor", &cm2, 0.01f, 0.0001f, 100000.0f, "%.4f", ImGuiSliderFlags_Logarithmic);
             if (ImGui::IsItemHovered())
             {
-                ImGui::SetTooltip("Photometric scale (candela per square metre factor).\n"
-                                  "Not a generic exposure multiplier — use Mode=Multiplier for that.");
+                ImGui::SetTooltip(
+                    "Photometric scale (candela per square metre factor).\n"
+                    "Not a generic exposure multiplier — use Mode=Multiplier for that.");
             }
             const float linear = editor_camera_exposure::photographicLinearScale(iso, fStop, shutter, cm2);
             const float ev = editor_camera_exposure::ev100(iso, fStop, shutter);
@@ -1018,8 +1143,8 @@ void EditorApp::drawRenderSettingsPanel()
         }
         else
         {
-            changed |= ImGui::DragFloat("Linear multiplier", &cm2, 0.01f, 0.0001f, 100000.0f, "x%.4f",
-                                        ImGuiSliderFlags_Logarithmic);
+            changed |= ImGui::DragFloat(
+                "Linear multiplier", &cm2, 0.01f, 0.0001f, 100000.0f, "x%.4f", ImGuiSliderFlags_Logarithmic);
             ImGui::TextDisabled("Linear radiance x%.4f (photographic controls off)", cm2);
         }
 
@@ -1118,8 +1243,9 @@ void EditorApp::drawLoadingOverlay()
         0.00f, // Done
     };
     static const char* const kStageNames[(size_t)LoadProgress::Stage::Count] = {
-        "Starting", "Reading file",   "Parsing scene", "Uploading geometry",
-        "Loading textures", "Building acceleration structures", "Environment", "Finishing",
+        "Starting",           "Reading file",     "Parsing scene",
+        "Uploading geometry", "Loading textures", "Building acceleration structures",
+        "Environment",        "Finishing",
     };
 
     const uint32_t stage =

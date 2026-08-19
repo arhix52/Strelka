@@ -1,0 +1,21 @@
+[scene]
+path = "../../kids_room/kids_room.gltf"
+
+[output]
+path = "output/kids_room.exr"
+width = 960
+height = 540
+
+[render]
+spp = 64
+spp_per_launch = 1
+max_depth = 8
+sampler = "sobol"
+
+[camera]
+index = 0
+
+[tonemap]
+type = "aces"
+gamma = 0.0
+

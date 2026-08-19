@@ -16,7 +16,7 @@ struct WavefrontElementSizes
 {
     size_t pathState = 0;
     size_t mediumPathState = 0;
-    size_t sharcPathState = 0;
+    size_t sharcUpdateState = 0;
     size_t pathRay = 0;
     size_t hitRecord = 0;
     size_t iorStack = 0;
@@ -29,7 +29,7 @@ struct WavefrontBufferLayout
 {
     size_t pathStateBytes = 0;
     size_t mediumPathStateBytes = 0;
-    size_t sharcPathStateBytes = 0;
+    size_t sharcUpdateStateBytes = 0;
     size_t pathRayBytes = 0;
     size_t hitBytes = 0;
     size_t iorStackBytes = 0;
@@ -44,6 +44,7 @@ struct WavefrontBufferLayout
     size_t hitQueueBytes = 0;
     size_t missQueueBytes = 0;
     uint32_t pixels = 0;
+    uint32_t sharcUpdatePaths = 0;
 };
 
 inline constexpr uint32_t kWavefrontControlUints = 96;
@@ -72,8 +73,8 @@ inline constexpr uint32_t kWavefrontCurveTraversalBatchesPerGroup = 2;
 // following command buffer.
 inline constexpr uint32_t kWavefrontTraversalBatchesPerCommandBuffer = 4;
 
-inline constexpr uint32_t wavefrontTraversalBatchCount(
-    uint32_t pixels, uint32_t batchThreads = kWavefrontTraversalBatchThreads)
+inline constexpr uint32_t wavefrontTraversalBatchCount(uint32_t pixels,
+                                                       uint32_t batchThreads = kWavefrontTraversalBatchThreads)
 {
     return std::max(1u, (pixels + batchThreads - 1u) / batchThreads);
 }
@@ -89,14 +90,19 @@ inline constexpr uint32_t kWavefrontStageDiagnosticStride =
 inline constexpr uint32_t kWavefrontStageStatsUints =
     kWavefrontStageDiagnosticBase + kWavefrontStageDiagnosticBounces * kWavefrontStageDiagnosticStride;
 
-inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width, uint32_t height, const WavefrontElementSizes& sz)
+inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width,
+                                                   uint32_t height,
+                                                   const WavefrontElementSizes& sz,
+                                                   uint32_t sharcUpdateDownscale = 1u)
 {
     const uint32_t pixels = width * height;
     WavefrontBufferLayout layout;
     layout.pixels = pixels;
     layout.pathStateBytes = (size_t)pixels * sz.pathState;
     layout.mediumPathStateBytes = (size_t)pixels * sz.mediumPathState;
-    layout.sharcPathStateBytes = (size_t)pixels * sz.sharcPathState;
+    const uint32_t updateScale = std::max(sharcUpdateDownscale, 1u);
+    layout.sharcUpdatePaths = ((width + updateScale - 1u) / updateScale) * ((height + updateScale - 1u) / updateScale);
+    layout.sharcUpdateStateBytes = (size_t)layout.sharcUpdatePaths * sz.sharcUpdateState;
     layout.pathRayBytes = (size_t)pixels * sz.pathRay;
     layout.hitBytes = (size_t)pixels * sz.hitRecord;
     layout.iorStackBytes = (size_t)pixels * sz.iorStack;
@@ -105,8 +111,7 @@ inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width, uint32_t heig
     layout.pathQueueBytes = (size_t)pixels * sizeof(uint32_t);
     layout.controlBytes = (size_t)kWavefrontControlUints * sizeof(uint32_t);
     layout.traversalDispatchBytes =
-        (size_t)wavefrontTraversalBatchCount(pixels, kWavefrontMinDiagnosticTraversalBatchThreads) *
-        3 * sizeof(uint32_t);
+        (size_t)wavefrontTraversalBatchCount(pixels, kWavefrontMinDiagnosticTraversalBatchThreads) * 3 * sizeof(uint32_t);
     layout.shadowRayBytes = (size_t)pixels * sz.shadowRay;
     // The first control-sized block is the Metal 3 profiling snapshot. Fault
     // breadcrumbs follow it so that copying the snapshot cannot overwrite them.

@@ -43,7 +43,7 @@ std::optional<std::string> environmentValue(const char* name)
     const char* value = std::getenv(name);
     return value != nullptr ? std::optional<std::string>(value) : std::nullopt;
 }
-}
+} // namespace
 
 EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSearchPath)
     : m_resourceSearchPath(resourceSearchPath)
@@ -131,8 +131,7 @@ void EditorApp::drawAlertModal()
     if (ImGui::BeginPopupModal("EditorAlert", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
         ImGui::TextWrapped("%s", m_alertMessage.c_str());
-        if (m_alertOffersRendererRestart &&
-            ImGui::Button("Restart renderer at 0.25 PT scale", ImVec2(260, 0)))
+        if (m_alertOffersRendererRestart && ImGui::Button("Restart renderer at 0.25 PT scale", ImVec2(260, 0)))
         {
             m_rendererRestartRequested = true;
             m_alertOpen = false;
@@ -161,9 +160,10 @@ void EditorApp::drawFrameBudgetModal()
     }
     if (ImGui::BeginPopupModal("FrameBudgetWarning", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
-        ImGui::TextWrapped("This preview is estimated at %.0f ms per PT frame, above the %.0f ms "
-                           "interactive budget.",
-                           m_pendingPredictedGpuMs, editor_frame_budget::kInteractiveBudgetMs);
+        ImGui::TextWrapped(
+            "This preview is estimated at %.0f ms per PT frame, above the %.0f ms "
+            "interactive budget.",
+            m_pendingPredictedGpuMs, editor_frame_budget::kInteractiveBudgetMs);
         ImGui::TextWrapped("Lower PT scale to keep the editor responsive?");
 
         const std::string recommendedLabel = fmt::format("Use {:.2f} PT scale", m_pendingRecommendedScale);
@@ -233,8 +233,9 @@ void EditorApp::handleDeviceError()
     m_frameBudgetConfirmOpen = false;
     STRELKA_INFO("ACTION device_error");
     STRELKA_ERROR("GPU device error — render submissions stopped");
-    showAlert("GPU device error.\nRender submissions have been stopped.\n"
-              "You can rebuild the renderer at a safe PT scale or keep the last good frame.");
+    showAlert(
+        "GPU device error.\nRender submissions have been stopped.\n"
+        "You can rebuild the renderer at a safe PT scale or keep the last good frame.");
     m_alertOffersRendererRestart = true;
 }
 
@@ -382,12 +383,12 @@ void EditorApp::requestPreviewResolution(uint32_t width, uint32_t height)
     // by the wrong pixel count mispredicts the next one by that ratio squared.
     const bool enableUpscale = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
     const editor_denoiser::Ui fx = editor_denoiser::uiFor(m_render->denoiserKind());
-    const int denoiseMode = editor_denoiser::modeIndexFromSettings(
-        fx, m_settingsManager->getAs<bool>("render/pt/denoise"), enableUpscale);
-    const float tracedScale = editor_denoiser::appliedScale(
-        fx, denoiseMode, m_settingsManager->getAs<float>("render/pt/upscaleFactor"));
+    const int denoiseMode =
+        editor_denoiser::modeIndexFromSettings(fx, m_settingsManager->getAs<bool>("render/pt/denoise"), enableUpscale);
+    const float tracedScale =
+        editor_denoiser::appliedScale(fx, denoiseMode, m_settingsManager->getAs<float>("render/pt/upscaleFactor"));
     const editor_frame_budget::RenderSettingsSnapshot current{ currentWidth, currentHeight, tracedScale < 1.0f,
-                                                                tracedScale };
+                                                               tracedScale };
     const editor_frame_budget::FrameSample sample =
         editor_frame_budget::sampleFrom(m_render->getLastRenderTimeMs(), current);
     const editor_frame_budget::RenderSettingsSnapshot proposed{ width, height, tracedScale < 1.0f, tracedScale };
@@ -482,9 +483,10 @@ void EditorApp::applyAutoExposure(oka::Buffer* buf)
     m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", 0.0f);
     m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", (float)factor);
     m_autoExposurePending = false;
-    STRELKA_INFO("Auto exposure: scene mean luminance {:.5f}, exposure x{:.1f} "
-                 "(no exposure in the light sidecar)",
-                 mean, factor);
+    STRELKA_INFO(
+        "Auto exposure: scene mean luminance {:.5f}, exposure x{:.1f} "
+        "(no exposure in the light sidecar)",
+        mean, factor);
 }
 
 // Exposure comes from the scene when the scene says, and is measured from the
@@ -532,8 +534,8 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/depth", 8);
     m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", 256);
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
-                                                                               // stratified sampling, 3 -
-                                                                               // optimized stratified sampling
+    // stratified sampling, 3 -
+    // optimized stratified sampling
     m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", 1); // 0 - None, 1 - Reinhard, 2 - ACES, 3 - Filmic
     m_settingsManager->setAs<uint32_t>("render/pt/debug", 0); // 0 - none, 1 - normals
     m_settingsManager->setAs<float>("render/cameraSpeed", 1.0f);
@@ -612,8 +614,7 @@ void EditorApp::loadSettings()
     // denoise audit has to flip to measure reprojection at all -- with no way to
     // turn it on headlessly, the motion vectors it grades feed nothing, which is
     // how they stayed identically zero through several audit runs.
-    m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode",
-                                       envUint("STRELKA_UPSCALE_MODE", 0) != 0 ? 1u : 0u);
+    m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", envUint("STRELKA_UPSCALE_MODE", 0) != 0 ? 1u : 0u);
     if (envFlag("STRELKA_UPSCALE"))
     {
         const float f = envFloat("STRELKA_UPSCALE", 1.0f);
@@ -654,6 +655,7 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<bool>("render/pt/sharc", false);
     m_settingsManager->setAs<uint32_t>("render/pt/sharcCapacity", 1u << 22);
     m_settingsManager->setAs<uint32_t>("render/pt/sharcMinSamples", 8);
+    m_settingsManager->setAs<uint32_t>("render/pt/sharcMetalMinSamples", 1);
     m_settingsManager->setAs<uint32_t>("render/pt/sharcDepth", 1);
     // Samples after which the cache stops being read. It accelerates the frames
     // you are moving the camera through and then gets out of the way, because
@@ -679,6 +681,23 @@ void EditorApp::loadSettings()
     // Counting occupancy is a pass over the whole table, so it runs only while
     // the panel that shows the number is open.
     m_settingsManager->setAs<bool>("render/pt/sharcReportOccupancy", false);
+    // Metal's own responsive switch, off by default: its compact key has no
+    // spare bit for a per-light tag, so the companion entries hold the whole
+    // lighting signal and come out of the configured capacity.
+    m_settingsManager->setAs<bool>("render/pt/sharcMetalResponsive", false);
+    m_settingsManager->setAs<float>("render/pt/sharcSceneScale", 50.0f);
+    m_settingsManager->setAs<float>("render/pt/sharcRoughnessThreshold", 0.4f);
+    m_settingsManager->setAs<float>("render/pt/sharcRadianceScale", 1000.0f);
+    m_settingsManager->setAs<uint32_t>("render/pt/sharcUpdateDownscale", 5u);
+    m_settingsManager->setAs<uint32_t>("render/pt/sharcPropagationDepth", 2u);
+    m_settingsManager->setAs<uint32_t>("render/pt/sharcDebug", 0u);
+    m_settingsManager->setAs<uint32_t>("render/pt/sharcLevelBias", 0u);
+    m_settingsManager->setAs<bool>("render/pt/sharcMaterialDemodulation", true);
+    m_settingsManager->setAs<bool>("render/pt/sharcSeparateEmissive", true);
+    m_settingsManager->setAs<bool>("render/pt/sharcDirectional", false);
+    m_settingsManager->setAs<bool>("render/pt/sharcCacheResampling", true);
+    m_settingsManager->setAs<bool>("render/pt/sharcBlendAdjacentLevels", true);
+    m_settingsManager->setAs<bool>("render/pt/sharcFadeAcceleration", false);
     // Block compression and a disk cache for the finished textures.
     // The cache holds them downscaled, mipped and compressed, so a second
     // launch skips the decode, the resample, the mip chain and the encode.
@@ -688,8 +707,8 @@ void EditorApp::loadSettings()
     // often enough to matter.
     m_settingsManager->setAs<float>("render/stream/publishIntervalMs", 500.0f);
     m_settingsManager->setAs<bool>("render/texture/compress", true);
-    m_settingsManager->setAs<std::string>("render/texture/cachePath",
-                           (std::filesystem::temp_directory_path() / "strelka_texcache").string());
+    m_settingsManager->setAs<std::string>(
+        "render/texture/cachePath", (std::filesystem::temp_directory_path() / "strelka_texcache").string());
     // The editor picks against the host arrays, so it keeps them.
     m_settingsManager->setAs<bool>("scene/releaseHostGeometry", false);
     m_settingsManager->setAs<bool>("render/validate/analyticLights", true);
@@ -862,9 +881,8 @@ void EditorApp::runBenchmark()
 
     if (envFlag("STRELKA_BENCH_W") || envFlag("STRELKA_BENCH_H"))
     {
-        applyPreviewResolution(
-            envUint("STRELKA_BENCH_W", m_settingsManager->getAs<uint32_t>("render/width")),
-            envUint("STRELKA_BENCH_H", m_settingsManager->getAs<uint32_t>("render/height")));
+        applyPreviewResolution(envUint("STRELKA_BENCH_W", m_settingsManager->getAs<uint32_t>("render/width")),
+                               envUint("STRELKA_BENCH_H", m_settingsManager->getAs<uint32_t>("render/height")));
     }
     if (envFlag("STRELKA_BENCH_SCALE"))
     {
@@ -1003,10 +1021,10 @@ void EditorApp::runBenchmark()
             // Spread as well as median: a tight band means the difference is the
             // configuration, and a bimodal one means the process latched into a
             // power state and neither median means anything.
-            STRELKA_INFO("BENCH  pair {}: static gpu={:.2f} [{:.0f}..{:.0f}] wall={:.2f} | "
-                         "play gpu={:.2f} [{:.0f}..{:.0f}] wall={:.2f} | ratio={:.2f}x",
-                         p, s.gpu, s.gpuMin, s.gpuMax, s.wall, d.gpu, d.gpuMin, d.gpuMax, d.wall,
-                         d.gpu / s.gpu);
+            STRELKA_INFO(
+                "BENCH  pair {}: static gpu={:.2f} [{:.0f}..{:.0f}] wall={:.2f} | "
+                "play gpu={:.2f} [{:.0f}..{:.0f}] wall={:.2f} | ratio={:.2f}x",
+                p, s.gpu, s.gpuMin, s.gpuMax, s.wall, d.gpu, d.gpuMin, d.gpuMax, d.wall, d.gpu / s.gpu);
         }
         if (ratios.empty())
         {
@@ -1017,8 +1035,8 @@ void EditorApp::runBenchmark()
         std::sort(staticGpu.begin(), staticGpu.end());
         std::sort(playGpu.begin(), playGpu.end());
         STRELKA_INFO("BENCH  PAIRED static={:.2f} ms  play={:.2f} ms  ratio={:.2f}x  (median of {} pairs)",
-                     staticGpu[staticGpu.size() / 2], playGpu[playGpu.size() / 2],
-                     ratios[ratios.size() / 2], ratios.size());
+                     staticGpu[staticGpu.size() / 2], playGpu[playGpu.size() / 2], ratios[ratios.size() / 2],
+                     ratios.size());
         return;
     }
 
@@ -1028,9 +1046,8 @@ void EditorApp::runBenchmark()
         STRELKA_INFO("BENCH  no frames measured");
         return;
     }
-    STRELKA_INFO("BENCH  tracer={} depth={} frames={}  median={:.2f} ms  min={:.2f}  max={:.2f}  wall={:.2f} ms",
-                 1u, m_settingsManager->getAs<uint32_t>("render/pt/depth"), frames, b.gpu, b.gpuMin,
-                 b.gpuMax, b.wall);
+    STRELKA_INFO("BENCH  tracer={} depth={} frames={}  median={:.2f} ms  min={:.2f}  max={:.2f}  wall={:.2f} ms", 1u,
+                 m_settingsManager->getAs<uint32_t>("render/pt/depth"), frames, b.gpu, b.gpuMin, b.gpuMax, b.wall);
 }
 
 // Jitter-sign measurement (STRELKA_JITTER_TEST=<frames>).
@@ -1205,8 +1222,8 @@ void EditorApp::runJitterTest()
         }
         const double swim = (swimCount && lumSum > 0.0) ? swimSum / lumSum : -1.0;
         const double sharp = (mean > 0.0) ? grad / mean : -1.0;
-        STRELKA_INFO("JITTER sign={} {}  rmse={:.5f} at shift({},{})  swim={:.5f}  sharp={:.5f}  ({}x{})",
-                     sign, names[sign], bestRmse, bestDx, bestDy, swim, sharp, w, h);
+        STRELKA_INFO("JITTER sign={} {}  rmse={:.5f} at shift({},{})  swim={:.5f}  sharp={:.5f}  ({}x{})", sign,
+                     names[sign], bestRmse, bestDx, bestDy, swim, sharp, w, h);
     }
 }
 
@@ -1419,8 +1436,8 @@ void EditorApp::runLightAudit()
                 return true;
             if (std::chrono::duration<double>(std::chrono::steady_clock::now() - phaseStart).count() > stepTimeoutSec)
             {
-                report(fmt::format("LIGHTAUDIT WARN frame did not {} within {:.0f}s",
-                                   submitted ? "complete" : "submit", stepTimeoutSec));
+                report(fmt::format("LIGHTAUDIT WARN frame did not {} within {:.0f}s", submitted ? "complete" : "submit",
+                                   stepTimeoutSec));
                 return false;
             }
             usleep(200);
@@ -1456,17 +1473,17 @@ void EditorApp::runLightAudit()
 
     const std::vector<Scene::UniformLightDesc> original = m_scene->getLightsDesc();
     report(fmt::format("LIGHTAUDIT lights={} analytic={} tracerMode={} envMap={} spp={} {}x{}", original.size(),
-                       m_settingsManager->getAs<bool>("render/validate/analyticLights"),
-                       1u,
+                       m_settingsManager->getAs<bool>("render/validate/analyticLights"), 1u,
                        m_scene->getEnvLight().has_value(), refSpp, auditW, auditH));
     for (size_t i = 0; i < original.size(); ++i)
     {
         const Scene::UniformLightDesc& d = original[i];
         const glm::float4 baked = m_scene->getLights()[i].color;
-        report(fmt::format("LIGHTAUDIT light{} type={} intensity={:.1f} color=({:.3f},{:.3f},{:.3f}) "
-                           "baked=({:.1f},{:.1f},{:.1f}) pos=({:.3f},{:.3f},{:.3f})",
-                           i, d.type, d.intensity, d.color.x, d.color.y, d.color.z, baked.x, baked.y, baked.z,
-                           d.position.x, d.position.y, d.position.z));
+        report(
+            fmt::format("LIGHTAUDIT light{} type={} intensity={:.1f} color=({:.3f},{:.3f},{:.3f}) "
+                        "baked=({:.1f},{:.1f},{:.1f}) pos=({:.3f},{:.3f},{:.3f})",
+                        i, d.type, d.intensity, d.color.x, d.color.y, d.color.z, baked.x, baked.y, baked.z,
+                        d.position.x, d.position.y, d.position.z));
     }
     // The GPU record, not the description: the sampling routines read these
     // points and this normal, and a light that emits nothing usually has
@@ -1474,11 +1491,12 @@ void EditorApp::runLightAudit()
     for (size_t i = 0; i < original.size(); ++i)
     {
         const Scene::Light& l = m_scene->getLights()[i];
-        report(fmt::format("LIGHTAUDIT light{} gpu p0=({:.3f},{:.3f},{:.3f}) p1=({:.3f},{:.3f},{:.3f}) "
-                           "p2=({:.3f},{:.3f},{:.3f}) p3=({:.3f},{:.3f},{:.3f}) n=({:.3f},{:.3f},{:.3f})",
-                           i, l.points[0].x, l.points[0].y, l.points[0].z, l.points[1].x, l.points[1].y, l.points[1].z,
-                           l.points[2].x, l.points[2].y, l.points[2].z, l.points[3].x, l.points[3].y, l.points[3].z,
-                           l.normal.x, l.normal.y, l.normal.z));
+        report(
+            fmt::format("LIGHTAUDIT light{} gpu p0=({:.3f},{:.3f},{:.3f}) p1=({:.3f},{:.3f},{:.3f}) "
+                        "p2=({:.3f},{:.3f},{:.3f}) p3=({:.3f},{:.3f},{:.3f}) n=({:.3f},{:.3f},{:.3f})",
+                        i, l.points[0].x, l.points[0].y, l.points[0].z, l.points[1].x, l.points[1].y, l.points[1].z,
+                        l.points[2].x, l.points[2].y, l.points[2].z, l.points[3].x, l.points[3].y, l.points[3].z,
+                        l.normal.x, l.normal.y, l.normal.z));
     }
     if (original.empty())
     {
@@ -1510,9 +1528,10 @@ void EditorApp::runLightAudit()
         const double mean = auditMean(img);
         int dx = 0, dy = 0;
         const double rmse = auditRmse(base, img, dx, dy);
-        report(fmt::format("LIGHTAUDIT light{} intensity=0 baked=({:.1f},{:.1f},{:.1f}) mean={:.5f} delta={:+.5f} ({:+.1f}%) rmse_vs_base={:.5f}",
-                           i, baked.x, baked.y, baked.z, mean, mean - baseMean,
-                           baseMean > 0.0 ? 100.0 * (mean - baseMean) / baseMean : 0.0, rmse));
+        report(fmt::format(
+            "LIGHTAUDIT light{} intensity=0 baked=({:.1f},{:.1f},{:.1f}) mean={:.5f} delta={:+.5f} ({:+.1f}%) rmse_vs_base={:.5f}",
+            i, baked.x, baked.y, baked.z, mean, mean - baseMean,
+            baseMean > 0.0 ? 100.0 * (mean - baseMean) / baseMean : 0.0, rmse));
         save(fmt::format("light{}_off", i), img);
 
         m_scene->setLight((uint32_t)i, original[i]);
@@ -1579,10 +1598,11 @@ void EditorApp::runLightAudit()
         const glm::float3 nearlyRgb = auditChannelMean(nearly);
         save("light0_almost_red", nearly);
 
-        report(fmt::format("LIGHTAUDIT light0 red=({:.5f},{:.5f},{:.5f}) almost_red=({:.5f},{:.5f},{:.5f}) "
-                           "red_r/almost_r={:.3f}",
-                           pureRgb.x, pureRgb.y, pureRgb.z, nearlyRgb.x, nearlyRgb.y, nearlyRgb.z,
-                           nearlyRgb.x > 0.0f ? pureRgb.x / nearlyRgb.x : 0.0f));
+        report(
+            fmt::format("LIGHTAUDIT light0 red=({:.5f},{:.5f},{:.5f}) almost_red=({:.5f},{:.5f},{:.5f}) "
+                        "red_r/almost_r={:.3f}",
+                        pureRgb.x, pureRgb.y, pureRgb.z, nearlyRgb.x, nearlyRgb.y, nearlyRgb.z,
+                        nearlyRgb.x > 0.0f ? pureRgb.x / nearlyRgb.x : 0.0f));
         m_scene->setLight(0, original[0]);
     }
 
@@ -1608,8 +1628,8 @@ void EditorApp::runLightAudit()
         m_scene->setLight(0, big);
         AuditImage img;
         converge(img);
-        report(fmt::format("LIGHTAUDIT light0 3x size mean={:.5f} delta={:+.5f}", auditMean(img),
-                           auditMean(img) - baseMean));
+        report(fmt::format(
+            "LIGHTAUDIT light0 3x size mean={:.5f} delta={:+.5f}", auditMean(img), auditMean(img) - baseMean));
         save("light0_big", img);
         m_scene->setLight(0, original[0]);
     }
@@ -1715,8 +1735,7 @@ void EditorApp::runPauseBlurCheck()
             {
                 return true;
             }
-            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - phaseStart).count() >
-                stepTimeoutSec)
+            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - phaseStart).count() > stepTimeoutSec)
             {
                 report("PAUSEBLUR WARN frame did not land in time");
                 return false;
@@ -1834,14 +1853,12 @@ void EditorApp::runPauseBlurCheck()
     const double sharpCrisp = auditSharp(crisp);
 
     report(fmt::format("PAUSEBLUR held mean over the pause: {}", trace));
-    report(fmt::format("PAUSEBLUR mean first={:.4f} last={:.4f} ({:+.1f}%)  frame-to-frame step "
-                       "early={:.5f} late={:.5f}",
-                       meanFirst, meanLast,
-                       meanFirst > 0.0 ? 100.0 * (meanLast - meanFirst) / meanFirst : 0.0, earlyStep,
-                       lateStep));
-    report(fmt::format("PAUSEBLUR sharpness held(blur)={:.5f}  same pose(no blur)={:.5f}  ({:+.1f}%)",
-                       sharpBlur, sharpCrisp,
-                       sharpCrisp > 0.0 ? 100.0 * (sharpBlur - sharpCrisp) / sharpCrisp : 0.0));
+    report(fmt::format(
+        "PAUSEBLUR mean first={:.4f} last={:.4f} ({:+.1f}%)  frame-to-frame step "
+        "early={:.5f} late={:.5f}",
+        meanFirst, meanLast, meanFirst > 0.0 ? 100.0 * (meanLast - meanFirst) / meanFirst : 0.0, earlyStep, lateStep));
+    report(fmt::format("PAUSEBLUR sharpness held(blur)={:.5f}  same pose(no blur)={:.5f}  ({:+.1f}%)", sharpBlur,
+                       sharpCrisp, sharpCrisp > 0.0 ? 100.0 * (sharpBlur - sharpCrisp) / sharpCrisp : 0.0));
 
     if (meanFirst > 0.0 && meanLast > 0.0 && meanLast < meanFirst * 0.75)
     {
@@ -1849,15 +1866,17 @@ void EditorApp::runPauseBlurCheck()
     }
     if (earlyStep > 0.0 && lateStep > 0.0 && lateStep >= earlyStep)
     {
-        report(fmt::format("PAUSEBLUR FAIL the held frame is not converging: the step between "
-                           "consecutive frames did not shrink ({:.5f} -> {:.5f})",
-                           earlyStep, lateStep));
+        report(
+            fmt::format("PAUSEBLUR FAIL the held frame is not converging: the step between "
+                        "consecutive frames did not shrink ({:.5f} -> {:.5f})",
+                        earlyStep, lateStep));
     }
     if (sharpBlur > 0.0 && sharpCrisp > 0.0 && sharpBlur >= sharpCrisp)
     {
-        report(fmt::format("PAUSEBLUR FAIL the held frame is no softer than the unblurred pose "
-                           "({:.5f} vs {:.5f}) -- the blur did not survive the pause",
-                           sharpBlur, sharpCrisp));
+        report(
+            fmt::format("PAUSEBLUR FAIL the held frame is no softer than the unblurred pose "
+                        "({:.5f} vs {:.5f}) -- the blur did not survive the pause",
+                        sharpBlur, sharpCrisp));
     }
     report("PAUSEBLUR done");
 }
@@ -1885,9 +1904,7 @@ void EditorApp::runDenoiseAudit()
     const double budgetSec = envDouble("STRELKA_AUDIT_BUDGET", 90.0);
     const double stepTimeoutSec = envDouble("STRELKA_AUDIT_STEP_SEC", 10.0);
     const auto auditStart = std::chrono::steady_clock::now();
-    auto elapsed = [&]() {
-        return std::chrono::duration<double>(std::chrono::steady_clock::now() - auditStart).count();
-    };
+    auto elapsed = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - auditStart).count(); };
     // Distinguished on purpose: a closed window means the run was abandoned and
     // its numbers are partial, which is a different statement from having spent
     // the budget.
@@ -1942,12 +1959,11 @@ void EditorApp::runDenoiseAudit()
             }
             if (submitted && !m_render->isRenderBusy())
                 return true;
-            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - phaseStart).count() >
-                stepTimeoutSec)
+            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - phaseStart).count() > stepTimeoutSec)
             {
                 report(fmt::format("AUDIT WARN frame did not {} within {:.0f}s (frame={} lastGpu={:.1f}ms)",
-                                   submitted ? "complete" : "submit", stepTimeoutSec,
-                                   m_sharedCtx->mFrameNumber, m_render->getLastRenderTimeMs()));
+                                   submitted ? "complete" : "submit", stepTimeoutSec, m_sharedCtx->mFrameNumber,
+                                   m_render->getLastRenderTimeMs()));
                 return false;
             }
             usleep(200);
@@ -1955,9 +1971,7 @@ void EditorApp::runDenoiseAudit()
         return false;
     };
     auto shown = [&](AuditImage& img) { return m_render->readDisplayTexture(img.px, img.w, img.h); };
-    auto guide = [&](Render::Guide g, AuditImage& img) {
-        return m_render->readGuideTexture(g, img.px, img.w, img.h);
-    };
+    auto guide = [&](Render::Guide g, AuditImage& img) { return m_render->readGuideTexture(g, img.px, img.w, img.h); };
 
     const bool denoiseWithAcc = !envFlag("STRELKA_AUDIT_NO_ACC");
     auto setDenoise = [&](bool on) {
@@ -1965,8 +1979,7 @@ void EditorApp::runDenoiseAudit()
         m_settingsManager->setAs<bool>("render/pt/enableUpscale", on);
         m_settingsManager->setAs<bool>("render/pt/enableAcc", on ? denoiseWithAcc : true);
         m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
-        m_settingsManager->setAs<uint32_t>("render/pt/sppTotal",
-                                           on ? (denoiseWithAcc ? refSpp : 1u) : refSpp);
+        m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", on ? (denoiseWithAcc ? refSpp : 1u) : refSpp);
     };
 
     // Converged, at native resolution, with neither scaler nor denoiser in the
@@ -1996,8 +2009,7 @@ void EditorApp::runDenoiseAudit()
         if (!saveImages || !img.valid())
             return;
         const char* err = nullptr;
-        SaveEXR(img.px.data(), (int)img.w, (int)img.h, 4, 0,
-                (*outDir + "/" + name + ".exr").c_str(), &err);
+        SaveEXR(img.px.data(), (int)img.w, (int)img.h, 4, 0, (*outDir + "/" + name + ".exr").c_str(), &err);
         if (err)
             FreeEXRErrorMessage(err);
         const size_t pixelCount = (size_t)img.w * img.h;
@@ -2006,8 +2018,7 @@ void EditorApp::runDenoiseAudit()
         {
             bytes[i] = (uint8_t)std::lround(std::clamp(img.px[i], 0.0f, 1.0f) * 255.0f);
         }
-        stbi_write_png((*outDir + "/" + name + ".png").c_str(), (int)img.w, (int)img.h, 4,
-                       bytes.data(), (int)img.w * 4);
+        stbi_write_png((*outDir + "/" + name + ".png").c_str(), (int)img.w, (int)img.h, 4, bytes.data(), (int)img.w * 4);
     };
 
     // Yaw orbit about whatever the scene's own camera is already looking at.
@@ -2040,8 +2051,8 @@ void EditorApp::runDenoiseAudit()
         }
     };
 
-    report(fmt::format("AUDIT scene animations={} {}x{} refSpp={} frames={} upscale={:.2f} budget={:.0f}s",
-                       animCount, auditW, auditH, refSpp, frames, upscale, budgetSec));
+    report(fmt::format("AUDIT scene animations={} {}x{} refSpp={} frames={} upscale={:.2f} budget={:.0f}s", animCount,
+                       auditW, auditH, refSpp, frames, upscale, budgetSec));
 
     // === Guide invariants ===================================================
     setOrbit(0.0f);
@@ -2157,29 +2168,27 @@ void EditorApp::runDenoiseAudit()
             }
             const float extentHeld = m_render->skinnedGeometryExtent();
             int hdx = 0, hdy = 0;
-            const double drift = (firstHeld.valid() && lastHeld.valid())
-                                     ? auditRmse(firstHeld, lastHeld, hdx, hdy)
-                                     : -1.0;
+            const double drift =
+                (firstHeld.valid() && lastHeld.valid()) ? auditRmse(firstHeld, lastHeld, hdx, hdy) : -1.0;
             const char* label = denoiseOn ? "stop denoise" : "stop plain  ";
             report(fmt::format("AUDIT {} held mean across the stop: {}", label, trace));
-            report(fmt::format("AUDIT {} mean first={:.4f} last={:.4f} ({:+.1f}%)  drift={:.5f}  "
-                               "skinned extent {:.3f} -> {:.3f}",
-                               label, meanFirst, meanLast,
-                               meanFirst > 0.0 ? 100.0 * (meanLast - meanFirst) / meanFirst : 0.0,
-                               drift, extentAtStop, extentHeld));
+            report(fmt::format(
+                "AUDIT {} mean first={:.4f} last={:.4f} ({:+.1f}%)  drift={:.5f}  "
+                "skinned extent {:.3f} -> {:.3f}",
+                label, meanFirst, meanLast, meanFirst > 0.0 ? 100.0 * (meanLast - meanFirst) / meanFirst : 0.0, drift,
+                extentAtStop, extentHeld));
             save(denoiseOn ? "stop_denoise_first" : "stop_plain_first", firstHeld);
             save(denoiseOn ? "stop_denoise_last" : "stop_plain_last", lastHeld);
             // Refining a frozen frame moves the estimate towards its own mean. It
             // does not empty the frame.
             if (meanFirst > 0.0 && meanLast > 0.0 && meanLast < meanFirst * 0.75)
             {
-                report(fmt::format("AUDIT FAIL {} the held frame faded ({:.4f} -> {:.4f})", label,
-                                   meanFirst, meanLast));
+                report(fmt::format("AUDIT FAIL {} the held frame faded ({:.4f} -> {:.4f})", label, meanFirst, meanLast));
             }
             if (extentAtStop > 1e-3f && extentHeld < extentAtStop * 0.25f)
             {
-                report(fmt::format("AUDIT FAIL {} skinned geometry collapsed while held ({:.3f} -> {:.3f})",
-                                   label, extentAtStop, extentHeld));
+                report(fmt::format("AUDIT FAIL {} skinned geometry collapsed while held ({:.3f} -> {:.3f})", label,
+                                   extentAtStop, extentHeld));
             }
         }
         m_settingsManager->setAs<bool>("render/enableMotionBlur", false);
@@ -2200,15 +2209,19 @@ void EditorApp::runDenoiseAudit()
             for (int k = 0; k < channels; ++k)
             {
                 const float v = img.px[i + k];
-                if (!std::isfinite(v)) { ++nonFinite; continue; }
+                if (!std::isfinite(v))
+                {
+                    ++nonFinite;
+                    continue;
+                }
                 mn = std::min(mn, v);
                 mx = std::max(mx, v);
-                if (v < lo || v > hi) ++bad;
+                if (v < lo || v > hi)
+                    ++bad;
             }
         }
-        report(fmt::format(
-            "AUDIT guide {:14s} {}x{}  range[{:.4f},{:.4f}]  outside[{:.2f},{:.2f}]={}  nonfinite={}", label,
-            img.w, img.h, mn, mx, lo, hi, bad, nonFinite));
+        report(fmt::format("AUDIT guide {:14s} {}x{}  range[{:.4f},{:.4f}]  outside[{:.2f},{:.2f}]={}  nonfinite={}",
+                           label, img.w, img.h, mn, mx, lo, hi, bad, nonFinite));
     };
     reportGuide("color", Render::Guide::Color, 0.0f, 1e9f, 3);
     reportGuide("depth", Render::Guide::Depth, 0.0f, 1e9f, 1);
@@ -2230,7 +2243,8 @@ void EditorApp::runDenoiseAudit()
             for (size_t i = 0; i < r.px.size(); i += 4)
             {
                 sum += r.px[i];
-                if (r.px[i] > 0.5f) ++high;
+                if (r.px[i] > 0.5f)
+                    ++high;
                 ++n;
             }
             report(fmt::format("AUDIT guide reactive       mean={:.3f}  above 0.5={:.1f}% of the frame",
@@ -2276,18 +2290,22 @@ void EditorApp::runDenoiseAudit()
                 maxMag = m;
                 maxIdx = i / 4;
             }
-            if (m > 0.05) ++nonZero;
-            if (m > 1.0) ++over1;
-            if (m > 10.0) ++over10;
-            if (m > 1000.0) ++over1000;
+            if (m > 0.05)
+                ++nonZero;
+            if (m > 1.0)
+                ++over1;
+            if (m > 10.0)
+                ++over10;
+            if (m > 1000.0)
+                ++over1000;
             ++total;
         }
         const double pct = total ? 100.0 / (double)total : 0.0;
-        report(fmt::format("AUDIT motion {:22s} nonzero={:.1f}%  >1px={:.1f}%  >10px={:.1f}%  >1000px={:.2f}%  "
-                           "max={:.2f} px at ({},{}) of {}x{}",
-                           label, (double)nonZero * pct, (double)over1 * pct, (double)over10 * pct,
-                           (double)over1000 * pct, maxMag, mv.w ? maxIdx % mv.w : 0, mv.w ? maxIdx / mv.w : 0,
-                           mv.w, mv.h));
+        report(
+            fmt::format("AUDIT motion {:22s} nonzero={:.1f}%  >1px={:.1f}%  >10px={:.1f}%  >1000px={:.2f}%  "
+                        "max={:.2f} px at ({},{}) of {}x{}",
+                        label, (double)nonZero * pct, (double)over1 * pct, (double)over10 * pct, (double)over1000 * pct,
+                        maxMag, mv.w ? maxIdx % mv.w : 0, mv.w ? maxIdx / mv.w : 0, mv.w, mv.h));
         return mv;
     };
 
@@ -2340,9 +2358,7 @@ void EditorApp::runDenoiseAudit()
             std::sort(floorDeltas.begin(), floorDeltas.end());
         }
         const double floorDelta =
-            floorDeltas.empty()
-                ? 0.0
-                : floorDeltas[static_cast<size_t>(static_cast<double>(floorDeltas.size()) * 0.99)];
+            floorDeltas.empty() ? 0.0 : floorDeltas[static_cast<size_t>(static_cast<double>(floorDeltas.size()) * 0.99)];
         const double movedThreshold = std::max(4.0 * floorDelta, 0.01);
 
         // A step the renderer still calls playback. Animation time is normalised
@@ -2388,8 +2404,8 @@ void EditorApp::runDenoiseAudit()
                     ++withMv;
             }
         }
-        report(fmt::format("AUDIT motion {:22s} jitter floor={:.4f}, threshold={:.4f}", "scene moved",
-                           floorDelta, movedThreshold));
+        report(fmt::format(
+            "AUDIT motion {:22s} jitter floor={:.4f}, threshold={:.4f}", "scene moved", floorDelta, movedThreshold));
         report(fmt::format("AUDIT motion {:22s} surface={} px, silhouette moved={} px, depth moved={} px",
                            "scene moved", surface, silhouette, deformed));
         report(fmt::format("AUDIT motion {:22s} with motion vector={:.1f}%  mean={:.2f} px  max={:.2f} px",
@@ -2449,8 +2465,7 @@ void EditorApp::runDenoiseAudit()
         last = prev;
         // Whether the picture was already wrong or drifted there matters: the
         // first tells you an input is wrong, the second that the accumulation is.
-        report(fmt::format("AUDIT {:14s} mean over run: first={:.4f} last={:.4f}", label, firstMean,
-                           auditMean(prev)));
+        report(fmt::format("AUDIT {:14s} mean over run: first={:.4f} last={:.4f}", label, firstMean, auditMean(prev)));
         return swimCount ? swimSum / swimCount : -1.0;
     };
 
@@ -2483,9 +2498,8 @@ void EditorApp::runDenoiseAudit()
                 const double rmse = auditRmse(last, truth, dx, dy);
                 static const char* const kDepthNames[3] = { "device", "viewZ", "radial" };
                 static const char* const kSignNames[4] = { "(+x,+y)", "(-x,+y)", "(+x,-y)", "(-x,-y)" };
-                report(fmt::format(
-                    "AUDIT sweep depth={:6s} jitter={:7s} rmse={:.5f} shift({},{}) swim={:.5f} sharp={:.5f}",
-                    kDepthNames[depthMode], kSignNames[sign], rmse, dx, dy, swim, auditSharp(last)));
+                report(fmt::format("AUDIT sweep depth={:6s} jitter={:7s} rmse={:.5f} shift({},{}) swim={:.5f} sharp={:.5f}",
+                                   kDepthNames[depthMode], kSignNames[sign], rmse, dx, dy, swim, auditSharp(last)));
             }
         }
         m_settingsManager->setAs<uint32_t>("render/pt/denoiseDepthMode", 0);
@@ -2531,7 +2545,8 @@ void EditorApp::runDenoiseAudit()
         // something if staying at centre actually costs more error.
         double rmse00 = -1.0;
         {
-            double se = 0.0; size_t n = 0;
+            double se = 0.0;
+            size_t n = 0;
             if (last.valid() && truth.valid() && last.px.size() == truth.px.size())
             {
                 for (uint32_t y = 1; y + 1 < last.h; ++y)
@@ -2540,21 +2555,20 @@ void EditorApp::runDenoiseAudit()
                         {
                             const size_t i = ((size_t)y * last.w + x) * 4 + k;
                             const double d = (double)last.px[i] - (double)truth.px[i];
-                            se += d * d; ++n;
+                            se += d * d;
+                            ++n;
                         }
                 rmse00 = n ? std::sqrt(se / (double)n) : -1.0;
             }
         }
+        report(fmt::format("AUDIT {:14s} rmse@centre={:.5f} (best {:.5f} at shift {},{})", s.name, rmse00, rmse, dx, dy));
         report(fmt::format(
-            "AUDIT {:14s} rmse@centre={:.5f} (best {:.5f} at shift {},{})", s.name, rmse00, rmse, dx, dy));
-        report(fmt::format(
-            "AUDIT {:14s} rmse={:.5f} at shift({},{})  swim={:.5f}  sharp={:.5f}/{:.5f}  mean={:.4f}/{:.4f}",
-            s.name, rmse, dx, dy, swim, auditSharp(last), auditSharp(truth), auditMean(last),
-            auditMean(truth)));
+            "AUDIT {:14s} rmse={:.5f} at shift({},{})  swim={:.5f}  sharp={:.5f}/{:.5f}  mean={:.4f}/{:.4f}", s.name,
+            rmse, dx, dy, swim, auditSharp(last), auditSharp(truth), auditMean(last), auditMean(truth)));
         // Only a real misregistration if centring costs more than a few percent.
         if (rmse >= 0.0 && (dx != 0 || dy != 0) && rmse00 > rmse * 1.05)
-            report(fmt::format("AUDIT FAIL {} reconstruction is misregistered by ({},{}), centre costs {:.1f}%",
-                               s.name, dx, dy, 100.0 * (rmse00 / rmse - 1.0)));
+            report(fmt::format("AUDIT FAIL {} reconstruction is misregistered by ({},{}), centre costs {:.1f}%", s.name,
+                               dx, dy, 100.0 * (rmse00 / rmse - 1.0)));
         // Uniformly darker and partly black are different faults with the same
         // mean, and only one of them is an exposure problem.
         if (last.valid() && truth.valid() && last.px.size() == truth.px.size())
@@ -2575,17 +2589,18 @@ void EditorApp::runDenoiseAudit()
             std::sort(ratios.begin(), ratios.end());
             const double median = ratios.empty() ? 0.0 : ratios[ratios.size() / 2];
             const double blackShare = lit ? 100.0 * (double)nearBlack / (double)lit : 0.0;
-            report(fmt::format("AUDIT {:14s} vs truth: median ratio={:.4f}  pixels below 10% of truth={:.1f}%",
-                               s.name, median, blackShare));
+            report(fmt::format("AUDIT {:14s} vs truth: median ratio={:.4f}  pixels below 10% of truth={:.1f}%", s.name,
+                               median, blackShare));
             // Loud, because this was the number that knew. A reconstruction that
             // lands at half the reference's brightness with a sixth of the frame
             // near black is not a denoise quality question, it is a broken input
             // -- and it sat in the log as a report line for as long as MetalFX
             // was being handed radiance with no exposure to read it by.
             if (!ratios.empty() && (median < 0.75 || median > 1.33 || blackShare > 5.0))
-                report(fmt::format("AUDIT FAIL {} does not reproduce the reference's brightness "
-                                   "(median ratio {:.2f}, {:.1f}% near black)",
-                                   s.name, median, blackShare));
+                report(
+                    fmt::format("AUDIT FAIL {} does not reproduce the reference's brightness "
+                                "(median ratio {:.2f}, {:.1f}% near black)",
+                                s.name, median, blackShare));
         }
         save((std::string(s.name).substr(0, 2) + "_denoised").c_str(), last);
         save((std::string(s.name).substr(0, 2) + "_truth").c_str(), truth);
@@ -2699,16 +2714,16 @@ void EditorApp::runDenoiseAudit()
             if (extentBefore >= 0.0f)
             {
                 const float worst = worstExtent >= 1e9f ? extentBefore : worstExtent;
-                report(fmt::format("AUDIT {} skinned geometry extent before={:.3f} worst={:.3f}", label,
-                                   extentBefore, worst));
+                report(fmt::format(
+                    "AUDIT {} skinned geometry extent before={:.3f} worst={:.3f}", label, extentBefore, worst));
                 // Absolute, not relative to the start of this scenario: by the
                 // time playback runs the character may already have collapsed in
                 // an earlier phase, and a ratio against zero notices nothing.
                 if (worst < 1e-3f || extentBefore < 1e-3f)
                     report(fmt::format("AUDIT FAIL {} skinned geometry collapsed to a point", label));
                 else if (worst < extentBefore * 0.25f)
-                    report(fmt::format("AUDIT FAIL {} skinned geometry collapsed ({:.3f} -> {:.3f})", label,
-                                       extentBefore, worst));
+                    report(fmt::format(
+                        "AUDIT FAIL {} skinned geometry collapsed ({:.3f} -> {:.3f})", label, extentBefore, worst));
             }
             if (meanBefore > 0.0 && worstMean < 1e9 && worstMean < meanBefore * 0.6)
                 report(fmt::format("AUDIT FAIL {} picture collapsed during playback ({:.4f} -> {:.4f})", label,
@@ -2780,15 +2795,12 @@ void EditorApp::runDenoiseAudit()
                         if (std::abs(mx) + std::abs(my) < 0.5)
                             continue;
                         ++moved;
-                        auto agrees = [&](double d) {
-                            return d > 0.0 && d < 1e6 && std::abs(d - now) / now < 0.02;
-                        };
+                        auto agrees = [&](double d) { return d > 0.0 && d < 1e6 && std::abs(d - now) / now < 0.02; };
                         const double sx[4] = { mx, -mx, mx, -mx };
                         const double sy[4] = { my, my, -my, -my };
                         for (int v = 0; v < 4; ++v)
                         {
-                            if (agrees(depthAt(d0, x + (int)std::lround(sx[v]),
-                                               y + (int)std::lround(sy[v]))))
+                            if (agrees(depthAt(d0, x + (int)std::lround(sx[v]), y + (int)std::lround(sy[v]))))
                                 ++hitVariant[v];
                         }
                         if (agrees(depthAt(d0, x, y)))
@@ -2797,17 +2809,17 @@ void EditorApp::runDenoiseAudit()
                 }
             }
             const double pct = moved ? 100.0 / (double)moved : 0.0;
-            report(fmt::format("AUDIT motioncheck camera {} : n={} ignoring={:.1f}%  (+x,+y)={:.1f}%  "
-                               "(-x,+y)={:.1f}%  (+x,-y)={:.1f}%  (-x,-y)={:.1f}%",
-                               axis == 0 ? "right" : "up   ", moved, static_cast<double>(hitWithout) * pct,
-                               static_cast<double>(hitVariant[0]) * pct,
-                               static_cast<double>(hitVariant[1]) * pct,
-                               static_cast<double>(hitVariant[2]) * pct,
-                               static_cast<double>(hitVariant[3]) * pct));
+            report(
+                fmt::format("AUDIT motioncheck camera {} : n={} ignoring={:.1f}%  (+x,+y)={:.1f}%  "
+                            "(-x,+y)={:.1f}%  (+x,-y)={:.1f}%  (-x,-y)={:.1f}%",
+                            axis == 0 ? "right" : "up   ", moved, static_cast<double>(hitWithout) * pct,
+                            static_cast<double>(hitVariant[0]) * pct, static_cast<double>(hitVariant[1]) * pct,
+                            static_cast<double>(hitVariant[2]) * pct, static_cast<double>(hitVariant[3]) * pct));
             if (moved > 100 && hitVariant[0] <= hitWithout)
-                report(fmt::format("AUDIT FAIL motion vectors ({} move) are no better than assuming "
-                                   "nothing moved",
-                                   axis == 0 ? "horizontal" : "vertical"));
+                report(
+                    fmt::format("AUDIT FAIL motion vectors ({} move) are no better than assuming "
+                                "nothing moved",
+                                axis == 0 ? "horizontal" : "vertical"));
         }
         camera.position = basePos;
         camera.updateViewMatrix();
@@ -2938,8 +2950,8 @@ void EditorApp::runDenoiseAudit()
         // reproject -- accumulation resolves it, the denoiser cannot.
         const bool holdTime = envFlag("STRELKA_AUDIT_HOLD");
         AuditImage last;
-        const double swim = holdTime ? reconstruct("held", 0.0f, 0.0f, tB, tB, last)
-                                     : reconstruct("moving", 0.0f, 0.0f, tA, tB, last);
+        const double swim =
+            holdTime ? reconstruct("held", 0.0f, 0.0f, tB, tB, last) : reconstruct("moving", 0.0f, 0.0f, tA, tB, last);
 
         auto maskedRmse = [&](const AuditImage& img, bool wantMoving) {
             if (!img.valid() || !truthB.valid() || img.px.size() != truthB.px.size() || moving.empty())
@@ -2990,15 +3002,26 @@ void EditorApp::runDenoiseAudit()
                         mag += std::abs(v);
                     }
                     len = std::sqrt(len);
-                    if (moving[p] == 1) { sumMesh += len; magMesh += mag; ++nMesh; }
-                    else if (moving[p] == 0) { sumRest += len; magRest += mag; ++nRest; }
+                    if (moving[p] == 1)
+                    {
+                        sumMesh += len;
+                        magMesh += mag;
+                        ++nMesh;
+                    }
+                    else if (moving[p] == 0)
+                    {
+                        sumRest += len;
+                        magRest += mag;
+                        ++nRest;
+                    }
                 }
-                report(fmt::format("AUDIT guide-on-mesh {:14s} mesh len={:.4f} sum|v|={:.4f} | rest len={:.4f} "
-                                   "sum|v|={:.4f}",
-                                   name, nMesh ? sumMesh / static_cast<double>(nMesh) : -1.0,
-                                   nMesh ? magMesh / static_cast<double>(nMesh) : -1.0,
-                                   nRest ? sumRest / static_cast<double>(nRest) : -1.0,
-                                   nRest ? magRest / static_cast<double>(nRest) : -1.0));
+                report(
+                    fmt::format("AUDIT guide-on-mesh {:14s} mesh len={:.4f} sum|v|={:.4f} | rest len={:.4f} "
+                                "sum|v|={:.4f}",
+                                name, nMesh ? sumMesh / static_cast<double>(nMesh) : -1.0,
+                                nMesh ? magMesh / static_cast<double>(nMesh) : -1.0,
+                                nRest ? sumRest / static_cast<double>(nRest) : -1.0,
+                                nRest ? magRest / static_cast<double>(nRest) : -1.0));
             };
             guideStats("normal", Render::Guide::Normal, 3);
             guideStats("diffuseAlbedo", Render::Guide::DiffuseAlbedo, 3);
@@ -3025,9 +3048,9 @@ void EditorApp::runDenoiseAudit()
         shown(raw);
         const double rawMoving = maskedRmse(raw, true);
         const double rawStatic = maskedRmse(raw, false);
-        report(fmt::format("AUDIT moving    motionBlur={} timeHeld={} {:.1f}% of pixels move   swim={:.5f}",
-                           (int)mbOn, (int)holdTime,
-                           moving.empty() ? 0.0 : 100.0 * (double)movingCount / (double)moving.size(), swim));
+        report(fmt::format("AUDIT moving    motionBlur={} timeHeld={} {:.1f}% of pixels move   swim={:.5f}", (int)mbOn,
+                           (int)holdTime, moving.empty() ? 0.0 : 100.0 * (double)movingCount / (double)moving.size(),
+                           swim));
         report(fmt::format("AUDIT moving    on MOVING pixels: raw={:.5f} denoised={:.5f}  improvement x{:.2f}",
                            rawMoving, rmseMoving, rmseMoving > 0.0 ? rawMoving / rmseMoving : -1.0));
         report(fmt::format("AUDIT moving    on STATIC pixels: raw={:.5f} denoised={:.5f}  improvement x{:.2f}",
@@ -3087,13 +3110,12 @@ void EditorApp::runDenoiseAudit()
         const size_t subframeAfter = m_sharedCtx->mSubframeIndex;
         AuditImage pausedDepthLast;
         guide(Render::Guide::Depth, pausedDepthLast);
-        const double pausedGuideDelta =
-            auditSwim(pausedDepthFirst, pausedDepthLast);
+        const double pausedGuideDelta = auditSwim(pausedDepthFirst, pausedDepthLast);
 
-        report(fmt::format("AUDIT pause     motion geometry while playing={} held across pause={}  "
-                           "accumulation {} -> {} guideDelta={:.7f}",
-                           (int)motionWhilePlaying, (int)motionHeld, subframeAtPause,
-                           subframeAfter, pausedGuideDelta));
+        report(
+            fmt::format("AUDIT pause     motion geometry while playing={} held across pause={}  "
+                        "accumulation {} -> {} guideDelta={:.7f}",
+                        (int)motionWhilePlaying, (int)motionHeld, subframeAtPause, subframeAfter, pausedGuideDelta));
         if (motionWhilePlaying && !motionHeld)
             report("AUDIT FAIL pause dropped motion blur instead of refining the blurred frame");
         if (subframeAfter <= subframeAtPause)
@@ -3159,8 +3181,7 @@ void EditorApp::runDenoiseAudit()
         {
             m_settingsManager->setAs<bool>("render/enableMotionBlur", mb != 0);
             m_settingsManager->setAs<bool>("render/isMotionBlurVisible", mb != 0);
-            m_settingsManager->setAs<bool>(
-                "render/pt/denoisePlaybackMotionBlur", mb != 0);
+            m_settingsManager->setAs<bool>("render/pt/denoisePlaybackMotionBlur", mb != 0);
             // Play first, then hold. Holding from the start leaves both pose
             // keyframes identical, so the shutter has nothing to smear between and
             // the very defect being tested cannot appear -- which is exactly the
@@ -3188,8 +3209,8 @@ void EditorApp::runDenoiseAudit()
         m_settingsManager->setAs<bool>("render/enableMotionBlur", false);
         m_settingsManager->setAs<bool>("render/isMotionBlurVisible", false);
         m_settingsManager->setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);
-        report(fmt::format("AUDIT shutter   held frame instability: shutter off={:.5f} on={:.5f} ratio={:.1f}",
-                           swimOff, swimOn, swimOff > 0.0 ? swimOn / swimOff : -1.0));
+        report(fmt::format("AUDIT shutter   held frame instability: shutter off={:.5f} on={:.5f} ratio={:.1f}", swimOff,
+                           swimOn, swimOff > 0.0 ? swimOn / swimOff : -1.0));
         if (swimOff > 0.0 && swimOn > swimOff * 3.0)
             report("AUDIT FAIL the shutter is shaking the denoised frame");
     }
@@ -3224,9 +3245,10 @@ void EditorApp::runDenoiseAudit()
                 worstMean = std::min(worstMean, auditMean(img));
         }
         const double meanAfterLimit = worstMean >= 1e9 ? -1.0 : worstMean;
-        report(fmt::format("AUDIT sppcap    denoised image past a 4-sample cap: dimmest of 16 frames "
-                           "mean={:.4f}",
-                           meanAfterLimit));
+        report(
+            fmt::format("AUDIT sppcap    denoised image past a 4-sample cap: dimmest of 16 frames "
+                        "mean={:.4f}",
+                        meanAfterLimit));
         if (meanAfterLimit >= 0.0 && meanAfterLimit <= 1e-3)
             report("AUDIT FAIL denoised image vanished once the sample cap was reached");
         m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", refSpp);
@@ -3275,8 +3297,8 @@ void EditorApp::runDenoiseAudit()
         }
         // Named before it is entered: if a combination aborts the process, the
         // last line printed is the one that names the combination that did it.
-        report(fmt::format("AUDIT mode  {:22s} entering ({}x{} tracer={} denoise={} upscale={} factor={:.2f})",
-                           m.name, m.w, m.h, m.tracer, (int)m.denoise, (int)m.upscale, m.factor));
+        report(fmt::format("AUDIT mode  {:22s} entering ({}x{} tracer={} denoise={} upscale={} factor={:.2f})", m.name,
+                           m.w, m.h, m.tracer, (int)m.denoise, (int)m.upscale, m.factor));
         m_settingsManager->setAs<uint32_t>("render/width", m.w);
         m_settingsManager->setAs<uint32_t>("render/height", m.h);
         m_settingsManager->setAs<bool>("render/pt/denoise", m.denoise);
@@ -3311,15 +3333,14 @@ void EditorApp::runDenoiseAudit()
                         editor_denoiser::appliedScale(fx, fxMode, m.factor), m.w, m.h);
         const bool stale = got && prevModeImage.valid() && modeKey != prevModeKey &&
                            prevModeImage.px.size() == img.px.size() &&
-                           std::memcmp(prevModeImage.px.data(), img.px.data(),
-                                       img.px.size() * sizeof(float)) == 0;
+                           std::memcmp(prevModeImage.px.data(), img.px.data(), img.px.size() * sizeof(float)) == 0;
         prevModeKey = modeKey;
-        const char* verdict = !stepped     ? "NO FRAME"
-                              : !got       ? "NO IMAGE"
-                              : !finite    ? "NON-FINITE"
-                              : mean <= 1e-6 ? "BLACK"
-                              : stale      ? "STALE (mode wrote nothing)"
-                                           : "ok";
+        const char* verdict = !stepped     ? "NO FRAME" :
+                              !got         ? "NO IMAGE" :
+                              !finite      ? "NON-FINITE" :
+                              mean <= 1e-6 ? "BLACK" :
+                              stale        ? "STALE (mode wrote nothing)" :
+                                             "ok";
         if (got)
             prevModeImage = img;
         if (std::strcmp(verdict, "ok") == 0)
@@ -3344,12 +3365,17 @@ void EditorApp::runReferenceCapture()
     const std::optional<std::string> outDir = environmentValue("STRELKA_REF");
     const uint32_t spp = envUint("STRELKA_REF_SPP", 512);
 
-    struct C { const char* name; uint32_t estimator; bool analyticLights; };
+    struct C
+    {
+        const char* name;
+        uint32_t estimator;
+        bool analyticLights;
+    };
     const C cases[] = {
-        { "nee",           0, true  },
-        { "bsdf_only",     1, true  },
-        { "nee_envonly",   0, false },
-        { "bsdf_envonly",  1, false },
+        { "nee", 0, true },
+        { "bsdf_only", 1, true },
+        { "nee_envonly", 0, false },
+        { "bsdf_envonly", 1, false },
     };
 
     // Linear output: the tone curve is irrelevant for comparing estimators and
@@ -3388,7 +3414,8 @@ void EditorApp::runReferenceCapture()
             usleep(300);
         }
         // Let the last submission land.
-        for (int i = 0; i < 2000 && m_render->getReadyBuffer() == nullptr; ++i) usleep(500);
+        for (int i = 0; i < 2000 && m_render->getReadyBuffer() == nullptr; ++i)
+            usleep(500);
         usleep(200000);
 
         oka::Buffer* rb = m_render->getReadyBuffer();
@@ -3400,7 +3427,7 @@ void EditorApp::runReferenceCapture()
             const size_t n = (size_t)rb->width() * rb->height() * 4;
             img.assign(px, px + n);
             for (size_t i = 0; i < n; i += 4)
-                meanLum += 0.2126*px[i] + 0.7152*px[i+1] + 0.0722*px[i+2];
+                meanLum += 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
             const size_t pixelCount = n / 4;
             meanLum /= (double)pixelCount;
             if (outDir.has_value())
@@ -3414,8 +3441,7 @@ void EditorApp::runReferenceCapture()
             if (outDir.has_value() && m_render->readDisplayTexture(shown, sw, sh))
             {
                 const char* err = nullptr;
-                SaveEXR(shown.data(), (int)sw, (int)sh, 4, 0,
-                        (*outDir + "/" + c.name + "_display.exr").c_str(), &err);
+                SaveEXR(shown.data(), (int)sw, (int)sh, 4, 0, (*outDir + "/" + c.name + "_display.exr").c_str(), &err);
             }
         }
         images.push_back(std::move(img));
@@ -3423,25 +3449,27 @@ void EditorApp::runReferenceCapture()
     }
 
     auto compare = [&](const char* label, size_t a, size_t b) {
-        if (images[a].empty() || images[b].empty() || images[a].size() != images[b].size()) return;
-        double se = 0.0, refEnergy = 0.0; size_t n = 0;
+        if (images[a].empty() || images[b].empty() || images[a].size() != images[b].size())
+            return;
+        double se = 0.0, refEnergy = 0.0;
+        size_t n = 0;
         double lumA = 0.0, lumB = 0.0;
         for (size_t i = 0; i < images[a].size(); i += 4)
         {
             for (int k = 0; k < 3; ++k)
             {
-                const double d = images[a][i+k] - images[b][i+k];
+                const double d = images[a][i + k] - images[b][i + k];
                 se += d * d;
-                refEnergy += (double)images[a][i+k] * images[a][i+k];
+                refEnergy += (double)images[a][i + k] * images[a][i + k];
             }
-            lumA += 0.2126*images[a][i] + 0.7152*images[a][i+1] + 0.0722*images[a][i+2];
-            lumB += 0.2126*images[b][i] + 0.7152*images[b][i+1] + 0.0722*images[b][i+2];
+            lumA += 0.2126 * images[a][i] + 0.7152 * images[a][i + 1] + 0.0722 * images[a][i + 2];
+            lumB += 0.2126 * images[b][i] + 0.7152 * images[b][i + 1] + 0.0722 * images[b][i + 2];
             ++n;
         }
         const double rmse = sqrt(se / (double)(n * 3));
         const double rel = refEnergy > 0 ? sqrt(se / refEnergy) : 0.0;
-        STRELKA_INFO("REF  {:28s} RMSE={:.6f}  relative={:.3f}%  meanLum {:.6f} vs {:.6f}  bias={:+.2f}%",
-                     label, rmse, 100.0*rel, lumA/n, lumB/n, 100.0*(lumB/lumA - 1.0));
+        STRELKA_INFO("REF  {:28s} RMSE={:.6f}  relative={:.3f}%  meanLum {:.6f} vs {:.6f}  bias={:+.2f}%", label, rmse,
+                     100.0 * rel, lumA / n, lumB / n, 100.0 * (lumB / lumA - 1.0));
     };
     compare("NEE vs BSDF-only (all)", 0, 1);
     compare("NEE vs BSDF-only (env only)", 2, 3);
@@ -3496,9 +3524,7 @@ void EditorApp::runConvergenceSweep()
     const std::string samplersEnv = samplersEnvValue.value_or("0,1,2");
 
     const auto startTime = std::chrono::steady_clock::now();
-    auto elapsed = [&]() {
-        return std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime).count();
-    };
+    auto elapsed = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime).count(); };
     auto outOfTime = [&]() { return elapsed() > budgetSec || m_display->windowShouldClose(); };
     auto report = [&](const std::string& line) { STRELKA_INFO("{}", line); };
 
@@ -3611,8 +3637,8 @@ void EditorApp::runConvergenceSweep()
     // eye and any reconstruction filter throw it away. Two samplers with the
     // same RMSE and different spectra look very different, and only this number
     // says so.
-    auto lowPassRms = [&](const std::vector<float>& a, const std::vector<float>& b, uint32_t w,
-                          uint32_t h, double weight) {
+    auto lowPassRms = [&](const std::vector<float>& a, const std::vector<float>& b, uint32_t w, uint32_t h,
+                          double weight) {
         if (a.size() != b.size() || (size_t)w * h * 4 != a.size())
             return -1.0;
         // 5-tap binomial, separable, applied to the error field.
@@ -3654,9 +3680,8 @@ void EditorApp::runConvergenceSweep()
     std::vector<float> deepest[5];
     uint32_t deepestSpp[5] = { 0, 0, 0, 0, 0 };
 
-    report(fmt::format("CONV {}x{} spp {}..{} step={} depth={} tracer={}", convW, convH, firstSpp, maxSpp,
-                       sppPerLaunch, m_settingsManager->getAs<uint32_t>("render/pt/depth"),
-                       1u));
+    report(fmt::format("CONV {}x{} spp {}..{} step={} depth={} tracer={}", convW, convH, firstSpp, maxSpp, sppPerLaunch,
+                       m_settingsManager->getAs<uint32_t>("render/pt/depth"), 1u));
 
     // A comma-separated list, so it is parsed here rather than through envUint.
     for (const char* p = samplersEnv.c_str(); p != nullptr && *p != '\0';)
@@ -3699,20 +3724,18 @@ void EditorApp::runConvergenceSweep()
             }
             if (m_sharedCtx->mSubframeIndex != checkpoints[c])
             {
-                report(fmt::format("CONV WARN {} wanted spp={} got {}", kSamplerNames[samplerType],
-                                   checkpoints[c], (uint32_t)m_sharedCtx->mSubframeIndex));
+                report(fmt::format("CONV WARN {} wanted spp={} got {}", kSamplerNames[samplerType], checkpoints[c],
+                                   (uint32_t)m_sharedCtx->mSubframeIndex));
             }
             if (saveImages)
             {
                 const char* err = nullptr;
                 SaveEXR(snaps[c].data(), (int)convW, (int)convH, 4, 0,
-                        fmt::format("{}/{}_{:05d}.exr", *outDir, kSamplerNames[samplerType], checkpoints[c])
-                            .c_str(),
+                        fmt::format("{}/{}_{:05d}.exr", *outDir, kSamplerNames[samplerType], checkpoints[c]).c_str(),
                         &err);
             }
         }
-        const double sweepSec =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - samplerStart).count();
+        const double sweepSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - samplerStart).count();
 
         // Everything is reported relative to the image's own mean level, so the
         // three samplers -- and different scenes -- are on one scale.
@@ -3750,9 +3773,7 @@ void EditorApp::runConvergenceSweep()
             // Same error field as rmseVsDeepest, after a blur -- what survives a
             // reconstruction filter, which is what a person actually sees.
             const double lp = c < last ? lowPassRms(snaps[c], snaps[last], convW, convH, w) : -1.0;
-            auto slope = [](double prev, double cur) {
-                return (prev > 0.0 && cur > 0.0) ? std::log2(prev / cur) : 0.0;
-            };
+            auto slope = [](double prev, double cur) { return (prev > 0.0 && cur > 0.0) ? std::log2(prev / cur) : 0.0; };
             report(fmt::format("CONV {:6d}   {:12.5f}  {:+5.2f}    {:12.5f}  {:+5.2f}    {:10.5f}  {:6.3f}",
                                checkpoints[c], noise, slope(prevNoise, noise), ref, slope(prevRef, ref), lp,
                                (ref > 0.0 && lp > 0.0) ? lp / ref : 0.0));
@@ -3774,13 +3795,12 @@ void EditorApp::runConvergenceSweep()
                 continue;
             const double lvl = mean(deepest[a]);
             const double w = lvl > 1e-9 ? 1.0 / lvl : 1.0;
-            report(fmt::format("CONV agree {:6s} vs {:6s} @spp {}/{}: rmse={:.5f}  mean {:.4f}/{:.4f} "
-                               "({:+.2f}%)  median {:.4f}/{:.4f} ({:+.2f}%)",
-                               kSamplerNames[a], kSamplerNames[b], deepestSpp[a], deepestSpp[b],
-                               rms(deepest[a], deepest[b], w), mean(deepest[a]), mean(deepest[b]),
-                               100.0 * (mean(deepest[b]) / mean(deepest[a]) - 1.0), median(deepest[a]),
-                               median(deepest[b]),
-                               100.0 * (median(deepest[b]) / median(deepest[a]) - 1.0)));
+            report(fmt::format(
+                "CONV agree {:6s} vs {:6s} @spp {}/{}: rmse={:.5f}  mean {:.4f}/{:.4f} "
+                "({:+.2f}%)  median {:.4f}/{:.4f} ({:+.2f}%)",
+                kSamplerNames[a], kSamplerNames[b], deepestSpp[a], deepestSpp[b], rms(deepest[a], deepest[b], w),
+                mean(deepest[a]), mean(deepest[b]), 100.0 * (mean(deepest[b]) / mean(deepest[a]) - 1.0),
+                median(deepest[a]), median(deepest[b]), 100.0 * (median(deepest[b]) / median(deepest[a]) - 1.0)));
         }
     }
 
@@ -3999,8 +4019,7 @@ void EditorApp::run()
                 ++m_framesSinceSceneReady;
             }
         }
-        if (readyBuf && m_autoExposurePending && sceneReady &&
-            m_framesSinceSceneReady >= kExposureSettleFrames)
+        if (readyBuf && m_autoExposurePending && sceneReady && m_framesSinceSceneReady >= kExposureSettleFrames)
         {
             applyAutoExposure(readyBuf);
         }
@@ -4133,8 +4152,7 @@ void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
     if (ext == ".exr")
     {
         const char* err = nullptr;
-        const int ret =
-            SaveEXR(data, static_cast<int>(w), static_cast<int>(h), 4, 0, path.c_str(), &err);
+        const int ret = SaveEXR(data, static_cast<int>(w), static_cast<int>(h), 4, 0, path.c_str(), &err);
         if (ret != TINYEXR_SUCCESS)
         {
             STRELKA_INFO("ACTION screenshot path={} ok=false", path);
@@ -4164,8 +4182,8 @@ void EditorApp::saveScreenshot(Buffer* buf, const std::string& path)
                 pixels[i * 4 + c] = static_cast<uint8_t>(std::lround(v * 255.0f));
             }
         }
-        const int ret = stbi_write_png(path.c_str(), static_cast<int>(w), static_cast<int>(h), 4, pixels.data(),
-                                       static_cast<int>(w * 4));
+        const int ret = stbi_write_png(
+            path.c_str(), static_cast<int>(w), static_cast<int>(h), 4, pixels.data(), static_cast<int>(w * 4));
         if (!ret)
         {
             STRELKA_INFO("ACTION screenshot path={} ok=false", path);
@@ -4314,8 +4332,8 @@ void EditorApp::dumpCameraSettings()
     (void)std::fflush(stdout);
     ImGui::SetClipboardText(dump.c_str());
 
-    STRELKA_INFO("ACTION dump_camera camera={} pos=[{} {} {}] fov={}", m_selectedCamera, cam.position.x,
-                 cam.position.y, cam.position.z, cam.fov);
+    STRELKA_INFO("ACTION dump_camera camera={} pos=[{} {} {}] fov={}", m_selectedCamera, cam.position.x, cam.position.y,
+                 cam.position.z, cam.fov);
 }
 
 void EditorApp::frameSelectionInView()
@@ -4574,8 +4592,7 @@ void EditorApp::drawUI()
     ensureValidCameraSelection();
     const bool orthographicCamera =
         m_scene && m_scene->getCameraCount() > 0 &&
-        m_scene->getCamera(static_cast<uint32_t>(m_selectedCamera)).projection ==
-            Camera::ProjectionType::orthographic;
+        m_scene->getCamera(static_cast<uint32_t>(m_selectedCamera)).projection == Camera::ProjectionType::orthographic;
     ImGuizmo::SetOrthographic(orthographicCamera);
     ImGuizmo::BeginFrame();
 
@@ -4589,8 +4606,7 @@ void EditorApp::drawUI()
         // Gizmo W/E/R only with a selection and the viewport hovered — otherwise
         // camera WASD (and E for down) would fight the gizmo bindings.
         const bool gizmoHotkeys =
-            m_display->isViewPortHovered() &&
-            (m_selectedNodeId != (uint32_t)-1 || m_selectedLightId != (uint32_t)-1);
+            m_display->isViewPortHovered() && (m_selectedNodeId != (uint32_t)-1 || m_selectedLightId != (uint32_t)-1);
         if (gizmoHotkeys)
         {
             if (ImGui::IsKeyPressed(ImGuiKey_W))
@@ -4612,8 +4628,7 @@ void EditorApp::drawUI()
         // Frame Selection (F): Blender/Maya convention. Not viewport-gated — framing
         // from the outliner after a click is the usual path, and F does not collide
         // with WASD or the gizmo bindings.
-        const bool canFrameSelection = m_selectedNodeId != (uint32_t)-1 ||
-                                       m_selectedInstanceId != (uint32_t)-1 ||
+        const bool canFrameSelection = m_selectedNodeId != (uint32_t)-1 || m_selectedInstanceId != (uint32_t)-1 ||
                                        m_selectedLightId != (uint32_t)-1;
         if (canFrameSelection && ImGui::IsKeyPressed(ImGuiKey_F))
             frameSelectionInView();
@@ -4705,8 +4720,7 @@ void EditorApp::drawUI()
     }
     if (ImGui::BeginMenu("View"))
     {
-        const bool canFrameSelection = m_selectedNodeId != (uint32_t)-1 ||
-                                       m_selectedInstanceId != (uint32_t)-1 ||
+        const bool canFrameSelection = m_selectedNodeId != (uint32_t)-1 || m_selectedInstanceId != (uint32_t)-1 ||
                                        m_selectedLightId != (uint32_t)-1;
         if (ImGui::MenuItem("Frame Selection", "F", false, canFrameSelection && !m_isLoading))
             frameSelectionInView();
@@ -4718,9 +4732,10 @@ void EditorApp::drawUI()
             dumpCameraSettings();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         {
-            ImGui::SetTooltip("Print this viewport to the console as a StrelkaCLI .toml,\n"
-                              "and copy it to the clipboard, so the exact frame can be\n"
-                              "re-rendered headlessly.");
+            ImGui::SetTooltip(
+                "Print this viewport to the console as a StrelkaCLI .toml,\n"
+                "and copy it to the clipboard, so the exact frame can be\n"
+                "re-rendered headlessly.");
         }
         ImGui::EndMenu();
     }
