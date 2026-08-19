@@ -1170,27 +1170,92 @@ def s26_dof(tex):
     cam.data.dof.aperture_blades = 0
 
 
-def write_synthetic_ies(path):
-    """Axially symmetric hotspot for the IES row: 1000 cd on axis, falling to
-    ~10 cd at 90°. One horizontal angle so the profile is a pure vertical curve,
-    which both Strelka and Cycles sample the same way.
+IES_ASSET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets",
+                         "philips_cdm_r111_35w_24deg.ies")
+
+
+def install_ies(path):
+    """Put the row's photometric file in place and report its peak candela.
+
+    Prefers the real Philips CDM-R111 reflector in assets/ over the synthetic
+    curve below, for the reason spelled out in assets/README.md: a synthetic
+    cos^4 falloff renders as a slightly vignetted point light, and so does every
+    way of mis-reading it. A 24-degree beam does not.
     """
-    vertical = [0.0, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 75.0, 90.0]
-    # Cosine^4 falloff, clipped: a clear hotspot without a hard cutoff that
-    # would look like a spot cone rather than a photometric file.
-    candela = []
-    for v in vertical:
-        c = math.cos(math.radians(v))
-        candela.append(max(10.0, 1000.0 * (c ** 4)))
+    if os.path.exists(IES_ASSET):
+        with open(IES_ASSET, "rb") as src, open(path, "wb") as dst:
+            dst.write(src.read())
+        peak = 0.0
+        with open(IES_ASSET, "r", errors="replace") as f:
+            for token in f.read().split():
+                try:
+                    peak = max(peak, float(token))
+                except ValueError:
+                    pass
+        return peak
+    return write_synthetic_ies(path)
+
+
+def write_synthetic_ies(path):
+    """A batwing luminaire with an asymmetric azimuth, for the IES row.
+
+    Deliberately not a hotspot on the axis. The row used to carry a pure
+    cos^4 curve, which is a perfectly good photometric file and a terrible test:
+    a cos^4 point light and a bare point light differ by a smooth falloff, so
+    the render looked like an ordinary lamp and any of the ways the table could
+    have been misread -- dropped, transposed, folded wrongly, extrapolated --
+    would still have looked like an ordinary lamp.
+
+    Two features fix that, and each one fails visibly if it is not honoured:
+
+      * Vertically it is a batwing: a dip at nadir and a peak near 40 degrees,
+        which paints a bright *ring* on the floor with a dark centre. Nothing a
+        point light or a spot cone can produce.
+      * Azimuthally it is elongated -- brightest across one axis, dimmest across
+        the other -- tabulated for a single quadrant, which is the LM-63
+        symmetry that has to be *mirrored* into the other three rather than
+        repeated. Getting that wrong rotates the pattern by 90 degrees, which is
+        obvious in the image and was not obvious in the numbers.
+
+    The elongation also puts light on the back wall, so the row stops being a
+    picture of a floor.
+    """
+    vertical = [0.0, 10.0, 20.0, 30.0, 35.0, 40.0, 45.0, 50.0, 60.0, 70.0, 80.0, 90.0]
+    # One quadrant; LM-63 mirrors it about both vertical planes.
+    horizontal = [0.0, 22.5, 45.0, 67.5, 90.0]
+
+    def vertical_shape(deg):
+        # Batwing: a lobe centred off-axis, over a small pedestal so the centre
+        # is dark rather than black.
+        lobe = math.exp(-(((deg - 40.0) / 15.0) ** 2))
+        pedestal = 0.12 * math.cos(math.radians(deg)) ** 2
+        return max(0.0, lobe + pedestal)
+
+    def azimuth_shape(deg):
+        # 1.0 across the 0-180 axis, 0.3 across 90-270.
+        return 0.3 + 0.7 * math.cos(math.radians(deg)) ** 2
+
+    peak = 1000.0
+    columns = []
+    for h in horizontal:
+        columns.append([peak * vertical_shape(v) * azimuth_shape(h) for v in vertical])
+
     with open(path, "w") as f:
         f.write("IESNA:LM-63-2002\n")
+        f.write("[TEST] STRELKA-FEATURE-27\n")
+        f.write("[MANUFAC] Synthetic\n")
+        f.write("[LUMINAIRE] Batwing, quadrant symmetry\n")
         f.write("TILT=NONE\n")
-        # lamps lumens multiplier nV nH phototype units w l h ballast unused watts
-        f.write("1 1000 1.0 %d 1 1 1 0 0 0 1 1 10\n" % len(vertical))
+        # lamps lumens multiplier nV nH phototype units w l h
+        f.write("1 -1 1.0 %d %d 1 1 0 0 0\n" % (len(vertical), len(horizontal)))
+        f.write("1.0 1.0 10\n")
         f.write(" ".join("%.1f" % v for v in vertical) + "\n")
-        f.write("0.0\n")
-        f.write(" ".join("%.3f" % c for c in candela) + "\n")
-    return candela[0]
+        f.write(" ".join("%.1f" % h for h in horizontal) + "\n")
+        # LM-63 order: every vertical angle of the first horizontal plane, then
+        # the next plane, and so on.
+        for column in columns:
+            f.write(" ".join("%.3f" % c for c in column) + "\n")
+    return max(max(c) for c in columns)
 
 
 def s27_ies(tex):
@@ -1934,7 +1999,7 @@ def main():
 
         if name in IES_SCENES:
             ies_path = os.path.join(scene_dir, name + ".ies")
-            peak = write_synthetic_ies(ies_path)
+            peak = install_ies(ies_path)
             # Point the Cycles TexIES node at the file we just wrote.
             for obj in bpy.data.objects:
                 if obj.type != "LIGHT" or "strelka_ies_node" not in obj:

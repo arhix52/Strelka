@@ -125,6 +125,9 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->samples_per_launch = spp;
     pUniformData->enableAccumulation = (uint32_t)accumulationActive;
     pUniformData->risCandidates = std::max(settings.getAs<uint32_t>("render/pt/risCandidates"), 1u);
+    // 0 = balance, 1 = power. The same key OptiX reads, so the two backends can
+    // be compared under either heuristic.
+    pUniformData->misHeuristic = settings.getAs<uint32_t>("render/pt/misHeuristic");
     pUniformData->textureLodMode = settings.getAs<uint32_t>("render/pt/textureLod");
     pUniformData->guidePrimaryHit = settings.getAs<uint32_t>("render/pt/guidePrimaryHit");
     pUniformData->missColor = float3(0.0f);

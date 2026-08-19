@@ -1,82 +1,18 @@
 #pragma once
 // Environment map (dome light) sampling utilities for OptiX shaders.
 //
-// CUDA only, despite living under shaders/common: Metal keeps its own copy in
-// src/shaders/metal/env_light_metal.h. The two must stay behaviourally identical
-// -- both now sample from the alias table that src/render/metal/ibl_alias_table.h
-// builds on the host -- but they are separate translation units and nothing here
-// is compiled for Metal.
+// CUDA only, despite living under shaders/common: the texture fetches below take
+// a cudaTextureObject_t. The parametrisation and the density are not CUDA at
+// all, and they used to be duplicated here and in
+// src/shaders/metal/env_light_metal.h with a comment on each asking that the two
+// stay identical. They now come from common/env_map_math.h, which the Metal
+// header includes as well and which the host tests compile.
 
 #include <vector_types.h>
 #include <sutil/vec_math.h>
 
 #include <OptixRenderParams.h>
-
-#ifndef M_PIf
-#define M_PIf 3.14159265358979323846f
-#endif
-
-// Convert a world-space direction to equirectangular UV coordinates.
-// rotation: Y-axis rotation in radians applied to the environment map.
-static __forceinline__ __device__ float2 dirToEnvUV(const float3& dir, float rotation)
-{
-    // Apply inverse Y-rotation to the direction
-    const float cosR = cosf(-rotation);
-    const float sinR = sinf(-rotation);
-    const float rx = cosR * dir.x + sinR * dir.z;
-    const float rz = -sinR * dir.x + cosR * dir.z;
-
-    // Equirectangular: phi = atan2(rx, rz), theta = acos(dir.y)
-    float phi = atan2f(rx, rz); // [-pi, pi]
-    float theta = acosf(fminf(fmaxf(dir.y, -1.0f), 1.0f)); // [0, pi]
-
-    float u = (phi + M_PIf) / (2.0f * M_PIf); // [0, 1]
-    float v = theta / M_PIf;                    // [0, 1]
-    return make_float2(u, v);
-}
-
-// Convert equirectangular UV to world-space direction.
-static __forceinline__ __device__ float3 envUVToDir(const float2& uv, float rotation)
-{
-    float phi = uv.x * 2.0f * M_PIf - M_PIf; // [-pi, pi]
-    float theta = uv.y * M_PIf;                // [0, pi]
-
-    float sinTheta = sinf(theta);
-    float cosTheta = cosf(theta);
-
-    // Direction before rotation
-    float x = sinTheta * sinf(phi);
-    float y = cosTheta;
-    float z = sinTheta * cosf(phi);
-
-    // Apply Y-rotation
-    const float cosR = cosf(rotation);
-    const float sinR = sinf(rotation);
-    float rx = cosR * x + sinR * z;
-    float rz = -sinR * x + cosR * z;
-
-    return make_float3(rx, y, rz);
-}
-
-// Luminance used to build the sampling distribution. Must match the host weight
-// in buildIblAliasTable() exactly, or sampling and pdf disagree.
-static __forceinline__ __device__ float envLuminance(const float3& rgb)
-{
-    return 0.2126f * rgb.x + 0.7152f * rgb.y + 0.0722f * rgb.z;
-}
-
-// Solid-angle pdf of the texel a direction falls into.
-//
-// The discrete probability of texel i is  w_i / W  with  w_i = lum_i * sin(theta_row),
-// and the texel subtends  dOmega = 2*pi^2 * sin(theta_row) / (w*h).
-// Dividing them cancels sin(theta) outright, so the whole pdf collapses to the
-// texel luminance times one precomputed constant:
-//     envPdfScale = (w*h) / (2*pi^2 * totalPower)
-// That is why no CDF or per-texel pdf array has to be stored or searched.
-static __forceinline__ __device__ float envTexelPdf(const float3& radiance, float envPdfScale)
-{
-    return envLuminance(radiance) * envPdfScale;
-}
+#include <env_map_math.h>
 
 // Point fetch of one texel. The sampling distribution is built from unfiltered
 // texels on the host, so sampling and pdf have to read unfiltered texels too --
@@ -112,7 +48,7 @@ static __forceinline__ __device__ float3 sampleEnvMap(
     const uint32_t w = envMapWidth;
     const uint32_t h = envMapHeight;
 
-    // Shared with the host: see src/render/optix/env_alias_sampling.h, which
+    // Shared with Metal and the host: see common/env_alias_sampling.h, which
     // tests/render/test_env_alias_sampling.cpp exercises without a GPU.
     const EnvAliasDraw draw = envAliasDraw(aliasTable, w * h, xi.x);
 

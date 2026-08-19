@@ -15,6 +15,12 @@
 
 #include <strelka/scene/glm_wrapper.hpp>
 
+// The spherical rectangle itself. This header used to carry its own
+// transcription of it -- and tests/scene/test_rect_light_sampling.cpp, the only
+// test of the construction in the tree, therefore covered a copy that no GPU
+// ever runs. Both shader backends now compile the same file.
+#include <rect_sampling.h>
+
 namespace oka
 {
 namespace rect_light_sampling
@@ -37,32 +43,9 @@ struct LightSample
     float pdf = 0.0f;
 };
 
-struct SphQuad
-{
-    glm::float3 o{};
-    glm::float3 x{};
-    glm::float3 y{};
-    glm::float3 z{};
-    float z0 = 0.0f;
-    float x0 = 0.0f;
-    float y0 = 0.0f;
-    float x1 = 0.0f;
-    float y1 = 0.0f;
-    float b0 = 0.0f;
-    float b1 = 0.0f;
-    float b0sq = 0.0f;
-    float g2 = 0.0f;
-    float g3 = 0.0f;
-    float S = 0.0f;
-    // True when the solid angle is too small / grazing for single-precision
-    // SphQuadSample — callers should fall back to area sampling.
-    bool useAreaFallback = false;
-};
-
-inline float safeAsin(float x)
-{
-    return std::asin(std::clamp(x, -1.0f, 1.0f));
-}
+// The shared construction, in this namespace and taking the corner triple this
+// header works with.
+using ::SphQuad;
 
 inline float length3(const glm::float3& v)
 {
@@ -119,85 +102,16 @@ inline float solidAngleGirard(const RectCorners& c, const glm::float3& o)
     return g0 + g1 + g2 + g3 - 2.0f * 3.14159265358979323846f;
 }
 
-// Cycles-hardened SphQuad init. Returns S = subtended solid angle; S <= 0 means
-// the rectangle is edge-on or behind the local plane of the light.
+// Cycles-hardened SphQuad init, from common/rect_sampling.h. S <= 0 means the
+// rectangle is edge-on or behind the local plane of the light.
 inline SphQuad initSphQuad(const RectCorners& c, const glm::float3& o)
 {
-    SphQuad squad;
-    squad.o = o;
-
-    const glm::float3 ex = c.p1 - c.p0;
-    const glm::float3 ey = c.p3 - c.p0;
-    const float exl = length3(ex);
-    const float eyl = length3(ey);
-    squad.x = ex / exl;
-    squad.y = ey / eyl;
-    squad.z = glm::cross(squad.x, squad.y);
-
-    const glm::float3 d = c.p0 - o;
-    squad.z0 = glm::dot(d, squad.z);
-    if (squad.z0 > 0.0f)
-    {
-        squad.z *= -1.0f;
-        squad.z0 *= -1.0f;
-    }
-
-    // Local frame extents. Cycles stores the rectangle centred; we keep the
-    // paper's corner-based x0..x1 so the sample reconstructs the same corners.
-    const float xc = glm::dot(d, squad.x);
-    const float yc = glm::dot(d, squad.y);
-    squad.x0 = xc;
-    squad.y0 = yc;
-    squad.x1 = xc + exl;
-    squad.y1 = yc + eyl;
-
-    // Compact edge-normal z-components: (-y0, x1, y1, -x0) / hypot(*, z0).
-    float nz[4] = { -squad.y0, squad.x1, squad.y1, -squad.x0 };
-    float nzMinSq = 1.0f;
-    for (float& n : nz)
-    {
-        n /= std::sqrt(n * n + squad.z0 * squad.z0);
-        nzMinSq = std::min(nzMinSq, n * n);
-    }
-
-    // asin form of the internal angles — see Cycles area.h comment.
-    const float g0 = safeAsin(-nz[0] * nz[1]);
-    const float g1 = safeAsin(-nz[1] * nz[2]);
-    const float g2 = safeAsin(-nz[2] * nz[3]);
-    const float g3 = safeAsin(-nz[3] * nz[0]);
-    squad.S = -(g0 + g1 + g2 + g3);
-    squad.g2 = g2;
-    squad.g3 = g3;
-    squad.b0 = nz[0];
-    squad.b1 = nz[2];
-    squad.b0sq = squad.b0 * squad.b0;
-
-    // Tiny / grazing: S is not trustworthy in float32.
-    squad.useAreaFallback = (squad.S < 1e-5f) || (nzMinSq > 0.99999f);
-    return squad;
+    return sphQuadInit(c.p0, c.p1 - c.p0, c.p3 - c.p0, o);
 }
 
 inline glm::float3 sampleSphQuad(const SphQuad& squad, float u, float v)
 {
-    // Cycles form: au = u*S + g2 + g3, fu with +b1 (sign flip absorbs the π).
-    const float au = u * squad.S + squad.g2 + squad.g3;
-    const float sinAu = std::sin(au);
-    const float fu = (std::abs(sinAu) > 1e-8f) ? (std::cos(au) * squad.b0 + squad.b1) / sinAu : 0.0f;
-    float cu = std::copysign(1.0f / std::sqrt(fu * fu + squad.b0sq), fu);
-    cu = std::clamp(cu, -1.0f, 1.0f);
-
-    const float cu2 = std::max(1.0f - cu * cu, 1e-7f);
-    float xu = -(cu * squad.z0) / std::sqrt(cu2);
-    xu = std::clamp(xu, squad.x0, squad.x1);
-
-    const float d2 = xu * xu + squad.z0 * squad.z0;
-    const float h0 = squad.y0 / std::sqrt(d2 + squad.y0 * squad.y0);
-    const float h1 = squad.y1 / std::sqrt(d2 + squad.y1 * squad.y1);
-    const float hv = h0 + v * (h1 - h0);
-    const float hv2 = hv * hv;
-    const float yv = (hv2 < 1.0f - 1e-6f) ? hv * std::sqrt(d2 / (1.0f - hv2)) : squad.y1;
-
-    return squad.o + xu * squad.x + yv * squad.y + squad.z0 * squad.z;
+    return sphQuadSample(squad, u, v);
 }
 
 inline float areaToSolidAnglePdf(const glm::float3& pointOnLight,

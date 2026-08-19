@@ -10,7 +10,7 @@
 #include <strelka/material/shading_frame.h>
 #include <strelka/material/bsdf.h>
 
-#include <shading/nee_pairing.h>
+#include <nee_pairing.h>
 
 #include <cmath>
 

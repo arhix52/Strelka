@@ -18,6 +18,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_ior_stack.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_diffuse_transmission.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_sample_eval_consistency.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_smooth_lobe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_sheen.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_clearcoat.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_iridescence.cpp
@@ -25,6 +26,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_light_units.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_scene.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_light_json.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_ies_loader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_curve_sidecar.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_lod_filter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_pick_ray.cpp
@@ -56,6 +58,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_compress.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_ibl_alias_table.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_env_alias_sampling.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_env_map_math.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_buffer_sizes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_render_resolution.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_residency_set_diff.cpp
@@ -67,10 +70,12 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_scene_stream.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_fibre_chord.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_nee_pairing.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_light_pdf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_transform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_upload_plan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_accel_build_policy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_ies_pack.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_ies_math.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_opacity_micromap_policy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_sharc_grid.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_curve_layout.cpp

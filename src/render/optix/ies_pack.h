@@ -1,5 +1,7 @@
 #pragma once
 
+#include <strelka/scene/light_desc.h>
+
 // Packing IESNA LM-63 candela tables into the single flat buffer the shading
 // path reads, and the one unit conversion that goes with it.
 //
@@ -52,21 +54,18 @@ struct IesProfileHeader
 
 /// Luminous efficacy used to turn a photometric table into radiometric units.
 ///
+// Re-exported into this namespace so callers that already say
+// oka::optix_ies::kCandelaToRadiantIntensity keep working; the definition lives
+// in scene/light_desc.h, next to the other photometric conversions.
+using oka::kCandelaToRadiantIntensity;
+using oka::kLuminousEfficacyD65;
+
 /// An IES file is in candela -- lumens per steradian -- while a light's colour
 /// in this renderer is radiant intensity, watts per steradian. Converting needs
 /// a luminous efficacy, and a photometric file carries no spectrum of its own,
-/// so a standard illuminant has to be assumed. 177.83 lm/W is D65, which is the
-/// figure Cycles assumes for the same conversion (cycles/src/util/ies.cpp, where
-/// it appears as 4pi/177.83 because a Cycles lamp takes watts rather than watts
-/// per steradian).
-///
-/// This is not a constant fitted to make a comparison pass. Picking the same
-/// illuminant as the reference is what lets the 27_ies ladder row compare the
-/// two angular distributions instead of two guesses at an absolute scale; a
-/// fitted constant would move that row and leave every other IES scene wrong by
-/// whatever the fit absorbed.
-constexpr float kLuminousEfficacyD65 = 177.83f;
-constexpr float kCandelaToRadiantIntensity = 1.0f / kLuminousEfficacyD65;
+/// so a standard illuminant has to be assumed. See kLuminousEfficacyD65 in
+/// scene/light_desc.h for which one and why, including why the glTF loader's
+/// 683 is a different number for a different job.
 
 /// One profile as the scene holds it. Mirrors Scene::IesProfile's numeric
 /// fields; the path is not needed to pack.

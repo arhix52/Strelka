@@ -2,7 +2,11 @@
 
 #include <light_types.h>
 
-#include <glm/glm.hpp>
+// glm_wrapper, not <glm/glm.hpp>: the glm::float3 spelling used below comes
+// from the wrapper's experimental headers, and including the bare glm here left
+// this header compiling only when something else had already pulled the wrapper
+// in first.
+#include <strelka/scene/glm_wrapper.hpp>
 
 #include <cmath>
 #include <string>
@@ -84,6 +88,27 @@ inline int lightUnitFromName(const std::string& name)
 /// narrower rounds to zero. The shader computes the sampling pdf from the same
 /// quantity, so a discrepancy here does not cancel against the baked radiance --
 /// it is a multiplier on the light, and it was 73x.
+/// Luminous efficacy assumed when a photometric measurement has to become a
+/// radiometric one.
+///
+/// 177.83 lm/W is D65's, and it is the figure Cycles assumes for exactly this
+/// conversion in cycles/src/util/ies.cpp. A photometric file carries no spectrum
+/// of its own, so some illuminant has to be assumed, and picking the reference's
+/// is what lets the `27_ies` ladder row compare two angular distributions rather
+/// than two guesses at an absolute scale.
+///
+/// Note that this is NOT the number the glTF loader divides by. A candela in a
+/// glTF file is whatever the exporter put there, and Blender's glTF exporter
+/// converts its own watts with a flat 683 lm/W -- so undoing that conversion
+/// needs 683, not this. The two constants describe two different things: this
+/// one is a physical assumption about an unknown spectrum, and 683 is the
+/// inverse of a specific tool's bookkeeping. Collapsing them into one number
+/// necessarily breaks agreement with one reference or the other -- with Cycles
+/// on IES profiles, or with Blender on round-tripped lamps. See
+/// tests/scene/test_light_units.cpp, which pins both.
+inline constexpr float kLuminousEfficacyD65 = 177.83f;
+inline constexpr float kCandelaToRadiantIntensity = 1.0f / kLuminousEfficacyD65;
+
 inline float coneSolidAngle(float halfAngleRad)
 {
     const float s = std::sin(0.5f * halfAngleRad);
@@ -152,12 +177,16 @@ inline glm::float3 bakeLightRadiometric(int type,
         return tint / (float(M_PI) * area);
     }
     case LIGHT_UNIT_INTENSITY:
-        // Candela. Meaningful for point/spot; for anything else fall through to
-        // radiance so a mis-tagged area light still lights something.
-        if (type == LIGHT_TYPE_POINT || type == LIGHT_TYPE_SPOT)
-        {
-            return tint;
-        }
+        // Radiant intensity, W/sr, already. The name says candela and the
+        // sidecar spells the unit "intensity", but nothing here converts:
+        // whoever fills this in has done the photometry. The glTF loader divides
+        // by its exporter's lm/W before handing the value over, and a sidecar
+        // written by scripts/blend2strelka.py uses "power" and never reaches
+        // this branch at all.
+        //
+        // Meaningful for point/spot; anything else falls through to the same
+        // value so a mis-tagged area light still lights something.
+        (void)type;
         return tint;
     case LIGHT_UNIT_IRRADIANCE:
     {

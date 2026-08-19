@@ -761,7 +761,9 @@ extern "C" __global__ void __closesthit__light()
         prd->aovDone = true;
     }
 
-    if (-dot(rayDir, lightNormal) > 0.0f)
+    // The same predicate connectLight() offers directions by, so the two halves
+    // of the estimate agree on the set they are splitting.
+    if (lightSampleFacesVertex(-dot(rayDir, lightNormal)))
     {
         // `color` is radiance, and radiance along a ray does not fall off with the
         // angle it leaves the emitter at: the cosine at the light belongs in the

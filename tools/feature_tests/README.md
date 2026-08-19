@@ -101,7 +101,7 @@ fixing, but it is not a shading bug.
 | `24_orthographic` | ortho twin of `00_calibration` | 0.024 / 1.009 |
 | `25_subsurface` | `STRELKA_materials_subsurface` (Van de Hulst recipe) | 0.056 / 1.009 |
 | `26_dof` | thin-lens depth of field (`_camera.json`) | 0.024 / 1.015 |
-| `27_ies` | IES point light via light sidecar | 0.028 / 1.021 |
+| `27_ies` | IES point light via light sidecar | 0.047 / 1.032 |
 | `28_hair` | close-up round linear Chiang groom (`STRELKA_materials_hair`) | 0.033 / 1.012 |
 
 `19_env_and_light` is the only row with two kinds of light in it, and it is
@@ -323,12 +323,25 @@ the same numbers on `cam.dof`. Three grey spheres at different depths: the middl
 one is sharp, the near and far ones measure the blur. The TOML still only carries
 pose and FOV — DOF lives entirely in the camera sidecar.
 
-`27_ies` is a point light whose angular distribution comes from a synthetic
-LM-63 file (cosine^4 hotspot, 1000 cd on axis). Cycles samples it through a
-TexIES→Emission chain; Strelka through the light sidecar's `ies` path. The GPU
-divides the candela table by 177.83 lm/W, the D65 efficacy Cycles assumes for
-the same conversion, so the row compares the angular distribution instead of two
-guesses at a scale. No rect key: the IES light is the whole of the lighting.
+`27_ies` is a point light whose angular distribution comes from a real LM-63
+file: a Philips CDM-R111 35W/830 24° reflector, in
+`tools/feature_tests/assets/`. Cycles samples it through a TexIES→Emission
+chain; Strelka through the light sidecar's `ies` path. The GPU divides the
+candela table by 177.83 lm/W, the D65 efficacy Cycles assumes for the same
+conversion, so the row compares the angular distribution instead of two guesses
+at a scale. No rect key: the IES light is the whole of the lighting.
+
+It used to be a synthetic cosine^4 hotspot, and that made the row unable to
+fail. A cos^4 point light and a bare point light differ by a smooth vignette, so
+every way of mis-reading the table — dropping it, transposing the candela block,
+folding a symmetric azimuth by repeating instead of mirroring, extrapolating
+past the last tabulated angle — still rendered as a slightly vignetted point
+light. A 24° beam does not: it paints a hard-edged pool with a dark surround,
+and the parser has to get 19 vertical angles by 24 horizontal planes, values
+wrapped eight to a line, and a `[LUMCAT]` line carrying a latin-1 degree sign,
+all right to produce it. Recovering the beam angle from the loaded table gives
+23.6°, which is the "24" in the lamp's own name — a check on the read that does
+not depend on the render at all.
 
 The lamp's `energy` is set explicitly to 1 W here, and that line is load-bearing.
 Cycles renders the product of energy and whatever Emission strength the node
@@ -337,8 +350,24 @@ looks entirely reasonable. Left unset, it pushed this row to a ratio of 18, and
 the factor of ten hid comfortably inside a fitted constant (π²/177.83, within
 0.8% of the truth and derivable-looking) that made the row pass while leaving
 every IES scene outside the suite ten times too bright. The honest constant
-lands the row at 1.021 instead of 1.008; the remaining 2% is Cycles' own
+lands the row at 1.021 instead of 1.008; the remainder is Cycles' own
 normalisation and interpolation of the table, and is worth more than a match.
+
+That residue used to be two things, and the larger one is gone. Compared
+radially against the reference, the row drifted from 0% on axis to 9% at 22° --
+the steep flank of the beam, between the table's 20° and 25° rows, where the
+beam falls 2.4x in one step. Strelka drew straight lines between the samples and
+Cycles drew a Catmull-Rom through four of them, which reads 12.7% apart at the
+midpoint of that interval. Strelka now draws the same cubic
+(`common/ies_math.h`), and the radial curve is flat: 1.02-1.04 across the whole
+floor instead of a hump.
+
+What is left is a ~4% scale offset with no angular structure, and it predates
+the interpolation work -- the old synthetic cos⁴ profile, where interpolation
+barely mattered, sat at 1.028. It is not the table: on axis the direction lands
+exactly on a tabulated angle, so both renderers read the same 3418.9 cd and
+still differ. It sits with the ratios the rest of the ladder carries
+(`06_normalmap` 1.061, `20_mirror_and_floor` 1.038) and has not been traced.
 
 `28_hair` is one close-up particle groom on a grey scalp. There is deliberately
 no bald control anymore: `00_calibration` already checks exposure and framing,

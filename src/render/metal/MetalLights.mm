@@ -2,6 +2,10 @@
 
 #include "ShaderTypes.h"
 
+// The one place the photometric assumption is stated; this file used to spell
+// out 1/177.83 and would not have moved if that number ever did.
+#include <strelka/scene/light_desc.h>
+
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -37,7 +41,7 @@ std::vector<uint8_t> packIesProfiles(const std::vector<Scene::IesProfile>& profi
         // appears as 4pi/177.83 because a Cycles lamp takes Watts rather than
         // Watts per steradian). Picking the same illuminant is what lets 27_ies
         // compare the angular distribution rather than two guesses at a scale.
-        constexpr float kCandelaToRadiantIntensity = 1.0f / 177.83f;
+
         for (float c : p.candela)
         {
             floats.push_back(c * kCandelaToRadiantIntensity);

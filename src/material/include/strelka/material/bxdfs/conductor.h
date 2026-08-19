@@ -91,7 +91,7 @@ DEVICE_FUNC BsdfSampleResult conductor_sample(const THREAD_REF SurfaceInteractio
     // PDF in solid-angle measure
     result.pdf = ggx_vndf_pdf(alpha, NdotH, NdotV, VdotH);
 
-    result.event_type = (alpha < 0.001f)
+    result.event_type = (alpha < BSDF_DELTA_ALPHA)
                       ? BSDF_EVENT_SPECULAR_REFLECTION
                       : BSDF_EVENT_GLOSSY_REFLECTION;
 

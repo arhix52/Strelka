@@ -15,6 +15,10 @@
 #include "env_light_metal.h"
 
 #include "ShaderTypes.h"
+// The two rules the OptiX closest-hit program applies as well: which directions
+// the halves of the MIS estimate share, and when a vertex owes the bounce ray a
+// deduction at all. Restating them by hand here is how the backends drifted.
+#include <nee_pairing.h>
 #include <strelka/material/ior_stack.h>
 #include <strelka/material/volume.h>
 #include <strelka/material/bsdf.h>
@@ -582,7 +586,6 @@ struct LightConnection
     float3 toLight; // shadow ray direction
     float3 origin; // shadow ray origin
     float pdf;
-    float tMin;
     float tMax;
     bool needsRay; // false when the connection is degenerate and contributes nothing
     // A delta light has no area, so BSDF sampling can never generate a direction
@@ -599,7 +602,6 @@ static LightConnection makeEmptyConnection()
     c.toLight = float3(0.0f);
     c.origin = float3(0.0f);
     c.pdf = 0.0f;
-    c.tMin = 0.0f;
     c.tMax = 0.0f;
     c.needsRay = false;
     c.isDelta = false;
@@ -631,98 +633,6 @@ static inline float shadingCosine(thread SurfaceInteraction& si, float3 L)
     return scattersThroughFibre(si) ? abs(dot(si.shading_normal, L)) : saturate(dot(si.shading_normal, L));
 }
 
-LightConnection connectLight(constant Uniforms& uniforms,
-                             thread SamplerState& samplerRnd,
-                             device const UniformLight& light,
-                             thread SurfaceInteraction& si,
-                             // A scattering event in a medium has a position and no normal. The facing
-                             // test and the cosine below are surface terms; applied to a volume they
-                             // reject half of every connection and darken the other half.
-                             bool volumeEvent,
-                             device const IesGpuBufferHeader* iesBuffer)
-{
-    LightSampleData lightSampleData = {};
-    const float2 uv = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
-                             random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
-    switch (light.type)
-    {
-    case 0:
-        if (uniforms.rectLightSamplingMethod == 0)
-        {
-            lightSampleData = SampleRectLightUniform(light, uv, si.position);
-        }
-        else
-        {
-            lightSampleData = SampleRectLight(light, uv, si.position);
-        }
-        break;
-    case 1:
-        lightSampleData = SampleDiscLight(light, uv, si.position);
-        break;
-    case 2:
-        lightSampleData = SampleSphereLight(light, uv, si.position);
-        break;
-    case 3:
-        lightSampleData = SampleDistantLight(light, uv, si.position);
-        break;
-    case 5: // point
-    case 6: // spot
-        lightSampleData = SamplePointLight(light, uv, si.position);
-        break;
-    }
-
-    LightConnection c = makeEmptyConnection();
-    c.toLight = lightSampleData.L;
-    // Sharp point/spot only: give one a radius and it is sampled as a sphere,
-    // which BSDF rays can hit and which therefore does need MIS.
-    c.isDelta = (light.type == 5 || light.type == 6) && !(light.points[0].x > 1e-4f);
-
-    float3 Li = float3(light.color);
-    // Point/spot colour is radiant intensity: convert to irradiance on the
-    // surface by the inverse-square law. Soft points sampled as spheres still
-    // carry intensity, so divide by the distance to the sampled point.
-    if (light.type == 5 || light.type == 6)
-    {
-        const float dist = max(lightSampleData.distToLight, 1e-4f);
-        Li *= rangeWindow(light, dist) / (dist * dist);
-        // IES replaces the isotropic (and, for spots, the cone) angular shape:
-        // the file is already in candela, and the light's intensity is a
-        // multiplier on top of it. No profile means the cone alone, as before.
-        const bool hasIes = light.points[0].y >= 0.0f;
-        if (hasIes)
-        {
-            Li *= sampleIesCandela(iesBuffer, light, -lightSampleData.L);
-        }
-        else if (light.type == 6)
-        {
-            Li *= spotAttenuation(light, -lightSampleData.L);
-        }
-    }
-
-    // For area lights the facing test uses the light's surface normal; for a
-    // sharp point the "normal" is -L, so -dot(L, normal) = 1 always.
-    const bool lit = lightReachesShadingPoint(si, lightSampleData.L);
-    const bool facing = volumeEvent ?
-                            (emitsLight(Li) && (light.type == 5 || light.type == 6 ||
-                                                -dot(lightSampleData.L, lightSampleData.normal) > 0.001f)) :
-                        (light.type == 5 || light.type == 6) ?
-                            (lit && emitsLight(Li)) :
-                            (lit && -dot(lightSampleData.L, lightSampleData.normal) > 0.001f && emitsLight(Li));
-    if (facing)
-    {
-        // The cosine belongs here because bsdf_eval() returns f alone, unlike
-        // bsdf_sample()'s bsdf_over_pdf which already carries it. See the note on
-        // both result structs in bsdf_types.h.
-        c.radiance = volumeEvent ? Li : Li * shadingCosine(si, lightSampleData.L);
-        c.origin = si.position;
-        c.pdf = lightSampleData.pdf;
-        c.tMin = 0.001f;
-        c.tMax = lightSampleData.distToLight - 1e-5f;
-        c.needsRay = true;
-    }
-    return c;
-}
-
 __attribute__((always_inline)) int __float_as_int(float x)
 {
     return as_type<int>(x);
@@ -749,6 +659,130 @@ static float3 offset_ray(const float3 p, const float3 n)
                   abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
 }
 
+LightConnection connectLight(constant Uniforms& uniforms,
+                             thread SamplerState& samplerRnd,
+                             device const UniformLight& light,
+                             thread SurfaceInteraction& si,
+                             // A scattering event in a medium has a position and no normal. The facing
+                             // test and the cosine below are surface terms; applied to a volume they
+                             // reject half of every connection and darken the other half.
+                             bool volumeEvent,
+                             device const IesGpuBufferHeader* iesBuffer)
+{
+    LightSampleData lightSampleData = {};
+    const float2 uv = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
+                             random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
+    switch (light.type)
+    {
+    case LIGHT_TYPE_RECT:
+        if (uniforms.rectLightSamplingMethod == 0)
+        {
+            lightSampleData = SampleRectLightUniform(light, uv, si.position);
+        }
+        else
+        {
+            lightSampleData = SampleRectLight(light, uv, si.position);
+        }
+        break;
+    case LIGHT_TYPE_DISC:
+        lightSampleData = SampleDiscLight(light, uv, si.position);
+        break;
+    case LIGHT_TYPE_SPHERE:
+        lightSampleData = SampleSphereLight(light, uv, si.position);
+        break;
+    case LIGHT_TYPE_DISTANT:
+        lightSampleData = SampleDistantLight(light, uv, si.position);
+        break;
+    case LIGHT_TYPE_DOME:
+        // Missing entirely until now, and a missing case here is not a compile
+        // error -- the sample stayed zero-initialised, the facing test rejected
+        // pdf 0, and a dome light was silently black on this backend only.
+        lightSampleData = SampleDomeLight(light, uv, si.position);
+        break;
+    case LIGHT_TYPE_POINT:
+    case LIGHT_TYPE_SPOT:
+        lightSampleData = SamplePointLight(light, uv, si.position);
+        break;
+    }
+
+    LightConnection c = makeEmptyConnection();
+    c.toLight = lightSampleData.L;
+    // Every point and spot, whatever its radius -- see lightIsDeltaForMis().
+    // MetalAccelStructure gives a point or spot proxy a zero visibility mask, so
+    // no ray can hit one and there is no second strategy to balance against.
+    // Exempting a soft one deducted a share the BSDF half never delivered.
+    c.isDelta = lightIsDeltaForMis(light.type);
+
+    float3 Li = float3(light.color);
+    if (light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT)
+    {
+        const float dist = max(lightSampleData.distToLight, 1e-4f);
+        // Colour is radiant intensity either way, but the two cases turn it into
+        // what the surface receives differently. A sharp light is a point and
+        // carries the inverse-square law. A soft one is sampled as a sphere and
+        // its solid-angle density already holds the d^2, so applying the falloff
+        // as well counts the distance twice -- what the sphere needs is the
+        // radiance a uniform emitter of that intensity has, I / (pi r^2).
+        const bool soft = punctualLightIsSoft(light.points[0].x);
+        Li *= rangeWindow(light, dist) *
+              (soft ? sphereRadianceFromIntensity(light.points[0].x) : (1.0f / (dist * dist)));
+        // IES replaces the isotropic (and, for spots, the cone) angular shape:
+        // the file is already in candela, and the light's intensity is a
+        // multiplier on top of it. No profile means the cone alone, as before.
+        const bool hasIes = light.points[0].y >= 0.0f;
+        if (hasIes)
+        {
+            Li *= sampleIesCandela(iesBuffer, light, -lightSampleData.L);
+        }
+        else if (light.type == LIGHT_TYPE_SPOT)
+        {
+            Li *= spotAttenuation(light, -lightSampleData.L);
+        }
+    }
+
+    // For area lights the facing test uses the light's surface normal; for a
+    // sharp point the "normal" is -L, so -dot(L, normal) = 1 always.
+    //
+    // The threshold on the cosine at the light is 0, not 1e-3. Both halves of
+    // the MIS estimate have to agree on which directions next-event estimation
+    // offers, and the light hit in wavefrontShade admits every direction with a
+    // positive cosine there. Rejecting a sliver of grazing ones here while the
+    // light hit still deducts a share for them loses that share outright. OptiX
+    // has always tested against zero.
+    const bool punctual = light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT;
+    const bool lit = lightReachesShadingPoint(si, lightSampleData.L);
+    const bool facesLight = lightSampleFacesVertex(-dot(lightSampleData.L, lightSampleData.normal));
+    const bool facing = volumeEvent ? (emitsLight(Li) && (punctual || facesLight)) :
+                        punctual    ? (lit && emitsLight(Li)) :
+                                      (lit && facesLight && emitsLight(Li));
+    if (facing)
+    {
+        // The cosine belongs here because bsdf_eval() returns f alone, unlike
+        // bsdf_sample()'s bsdf_over_pdf which already carries it. See the note on
+        // both result structs in bsdf_types.h.
+        c.radiance = volumeEvent ? Li : Li * shadingCosine(si, lightSampleData.L);
+        // Offset along the face the shadow ray actually leaves from, exactly as
+        // connectEnvLight() below already did and as the bounce ray does. This
+        // used to be the raw hit position with a fixed 1 mm tMin standing in for
+        // the offset: on a back-face hit that starts the ray inside the surface
+        // it came from, so next-event estimation reports occlusion the BSDF
+        // strategy does not see and the two halves stop summing to the integral.
+        // A world-space constant is also the wrong shape for the problem -- too
+        // small at architectural scale, too large at prop scale -- while
+        // offset_ray() scales with the coordinate itself.
+        //
+        // A medium scattering event has no surface to leave through and no
+        // geometry normal to orient against, so it departs from where it is.
+        c.origin = volumeEvent
+                       ? si.position
+                       : offset_ray(si.position, orientedFaceNormal(si.geometry_normal, lightSampleData.L));
+        c.pdf = lightSampleData.pdf;
+        c.tMax = lightSampleData.distToLight - 1e-5f;
+        c.needsRay = true;
+    }
+    return c;
+}
+
 LightConnection connectEnvLight(constant Uniforms& uniforms,
                                 thread SamplerState& samplerRnd,
                                 thread SurfaceInteraction& si,
@@ -773,7 +807,15 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
     if (!volumeEvent && !lightReachesShadingPoint(si, dir))
         return c;
 
-    constexpr sampler envSampler(mag_filter::linear, min_filter::linear, address::repeat, coord::normalized);
+    // repeat in u, clamp in v. The map wraps in azimuth and does not wrap in
+    // polar angle: with repeat on both axes the bilinear tap in the first row
+    // blends the zenith with the last row, which is the nadir. OptiX has always
+    // clamped v (cudaAddressModeClamp on axis 1); this backend wrapped it, so the
+    // two disagreed on the one row where an equirectangular map has a seam that
+    // is not a seam.
+    constexpr sampler envSampler(mag_filter::linear, min_filter::linear,
+                                 s_address::repeat, t_address::clamp_to_edge,
+                                 coord::normalized);
     const float2 uv = dirToEnvUV(dir, uniforms.envMapRotation);
     const float4 envSample = envMapTexture.sample(envSampler, uv);
     float3 Li = envSample.xyz;
@@ -787,9 +829,7 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
     // the geometry it started on — NEE then reports occlusion that the BSDF
     // strategy does not see, and the two estimators disagree. The bounce ray in
     // the main loop already orients its offset this way.
-    const float3 offsetNg = (dot(si.geometry_normal, dir) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
-    c.origin = offset_ray(si.position, offsetNg);
-    c.tMin = 0.001f;
+    c.origin = offset_ray(si.position, orientedFaceNormal(si.geometry_normal, dir));
     c.tMax = 1e16f;
     c.needsRay = true;
     return c;

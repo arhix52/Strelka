@@ -265,9 +265,7 @@ static __forceinline__ __device__ float3 shadowOrigin(const SurfaceInteraction& 
     {
         return fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, toLight);
     }
-    const float3 offsetNg =
-        (dot(si.geometry_normal, toLight) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
-    return offset_ray(si.position, offsetNg);
+    return offset_ray(si.position, orientedFaceNormal(si.geometry_normal, toLight));
 }
 
 static __device__ LightConnection connectLight(SamplerState& sampler,
@@ -315,16 +313,29 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
 
     LightConnection c = makeEmptyConnection();
     c.toLight = lightSampleData.L;
-    // Sharp point/spot only: give one a radius and it is sampled as a sphere,
-    // which BSDF rays can hit and which therefore does need MIS.
-    c.isDelta = (light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT) &&
-                !(light.points[0].x > 1e-4f);
+    // Every point and spot, whatever its radius -- see lightIsDeltaForMis(). The
+    // radius used to exempt a soft one from this on the theory that a BSDF ray
+    // could hit the sphere it is sampled as, but createInstance() gives a point
+    // or spot proxy a zero visibility mask, so no ray can. The MIS weight then
+    // deducted a share for a strategy that is switched off and never delivered
+    // it.
+    c.isDelta = lightIsDeltaForMis(light.type);
 
     float3 Li = make_float3(light.color);
     if (light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT)
     {
         const float dist = fmaxf(lightSampleData.distToLight, 1e-4f);
-        Li *= rangeWindow(light, dist) / (dist * dist);
+        // Colour is radiant intensity either way, but the two cases turn it into
+        // what the surface receives differently. A sharp light is a point and
+        // carries the inverse-square law. A soft one is sampled as a sphere, and
+        // its solid-angle density already holds the d^2, so applying the falloff
+        // as well counts the distance twice -- what the sphere needs is the
+        // radiance a uniform emitter of that intensity has, I / (pi r^2). With
+        // the falloff kept and the density wrong, a lamp jumped by 4 pi the
+        // moment its radius crossed the softness threshold.
+        const bool soft = punctualLightIsSoft(light.points[0].x);
+        Li *= rangeWindow(light, dist) *
+              (soft ? sphereRadianceFromIntensity(light.points[0].x) : (1.0f / (dist * dist)));
         // IES replaces the isotropic (and, for spots, the cone) angular shape:
         // the table is the whole distribution, and the light's own intensity is
         // a multiplier on top of it. No profile means the cone alone, as before.
@@ -508,7 +519,7 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
 
         const LightConnection conn = connectToLight(crng, si, curveRadius);
         // The set of directions this half of the estimate is willing to offer.
-        // Stated once, in shading/nee_pairing.h, because the bounce ray at the
+        // Stated once, in common/nee_pairing.h, because the bounce ray at the
         // bottom of __closesthit__radiance has to deduct a MIS share against
         // exactly this set and no other.
         // Against the frame the BSDF shaded in. An opaque back hit is flipped
@@ -998,7 +1009,8 @@ static __device__ void scatterInMedium(PerRayData* prd,
     // the whole contribution on exactly the draws where the connection failed,
     // and the two strategies stop summing to one: it put the white-furnace
     // sphere 15% over unity, uniformly at every mean free path.
-    bool didNee = (params.estimatorMode == 0) && (params.scene.numLights > 0 || params.hasEnvMap);
+    bool didNee = volumeNeePairsWithBounce(params.estimatorMode == 0,
+                                          params.scene.numLights > 0 || params.hasEnvMap);
     if (isBounded)
     {
         // Volumetric emission: what makes bath water glow rather than merely
@@ -1136,7 +1148,8 @@ static __device__ void scatterInFog(PerRayData* prd,
     // question the miss and light-hit programs need answered and not the same as
     // whether the estimate came back with anything. Same reasoning, and the same
     // failure if it is decided from the outcome, as scatterInMedium records.
-    const bool didNee = (params.estimatorMode == 0) && (params.scene.numLights > 0 || params.hasEnvMap);
+    const bool didNee = volumeNeePairsWithBounce(params.estimatorMode == 0,
+                                                params.scene.numLights > 0 || params.hasEnvMap);
     if (didNee)
     {
         // A medium event has a position and no normal. Facing the ray back the
@@ -1279,7 +1292,8 @@ static __device__ void exitMedium(PerRayData* prd,
     // scatterInMedium(). The exit lobe covers the whole outward hemisphere and
     // so does the light strategy, so the MIS weight is owed on every draw,
     // including the ones where the light sample landed below the boundary.
-    bool didNee = (params.estimatorMode == 0) && (params.scene.numLights > 0 || params.hasEnvMap);
+    bool didNee = volumeNeePairsWithBounce(params.estimatorMode == 0,
+                                          params.scene.numLights > 0 || params.hasEnvMap);
     if (didNee)
     {
         // Next-event estimation here and not inside the walk: this is the vertex
@@ -1975,45 +1989,29 @@ extern "C" __global__ void __closesthit__radiance()
         }
     }
 
-    const float z1 = random<SampleDimension::eBSDF0>(prd->sampler);
-    const float z2 = random<SampleDimension::eBSDF1>(prd->sampler);
-    const float z3 = random<SampleDimension::eBSDF2>(prd->sampler);
-    const float z4 = random<SampleDimension::eBSDF3>(prd->sampler);
-
-    float4 xi = make_float4(z1, z2, z3, z4);
-    BsdfSampleResult sample_data = bsdf_sample(si, xi);
-
-    if (sample_data.event_type == BSDF_EVENT_ABSORB)
-    {
-        if (prd->depth == 0)
-        {
-            prd->setFirstEventType(EventType::eAbsorb);
-        }
-        // stop on absorb
-        prd->throughput = make_float3(0.0f);
-        return;
-    }
-    prd->specularBounce = ((sample_data.event_type & BSDF_EVENT_SPECULAR) != 0);
-
-    if (prd->depth == 0)
-    {
-        if (sample_data.event_type & BSDF_EVENT_DIFFUSE)
-        {
-            prd->setFirstEventType(EventType::eDiffuse);
-        }
-        if (sample_data.event_type & BSDF_EVENT_GLOSSY)
-        {
-            prd->setFirstEventType(EventType::eSpecular);
-        }
-    }
-
+    // Next-event estimation first, and decided by the material rather than by the
+    // bounce.
+    //
+    // It used to run after bsdf_sample() and be gated on the event that came
+    // back, which made the light half of the estimate depend on a draw belonging
+    // to the other half. Two things were lost that way: the whole vertex
+    // whenever the sample came back BSDF_EVENT_ABSORB (a microfacet draw that
+    // landed below the horizon is not a material that absorbs), and the smooth
+    // lobe's direct light on every draw the delta lobe won -- over half the
+    // draws on a clearcoat with glTF's default coat roughness of 0. See
+    // neeRunsAtVertex() and bsdf_has_smooth_lobe().
+    //
+    // Moving it costs nothing in sample values: random<Dim>() is a pure function
+    // of (sampleIdx, dimension, seed, depth), so the order the dimensions are
+    // drawn in does not change any of them.
+    //
     // estimatorMode 1 drops next-event estimation entirely and lets BSDF sampling
     // carry the whole integral. The two are independent unbiased estimators, so at
     // convergence they must agree; the difference between them measures estimator
     // inconsistency directly, which is the only reason the switch exists.
-    const bool didNee = (params.estimatorMode == 0) &&
-                        ((sample_data.event_type & (BSDF_EVENT_DIFFUSE | BSDF_EVENT_GLOSSY)) != 0) &&
-                        (params.scene.numLights > 0 || params.hasEnvMap);
+    const bool didNee = neeRunsAtVertex(params.estimatorMode == 0,
+                                        params.scene.numLights > 0 || params.hasEnvMap,
+                                        bsdf_has_smooth_lobe(si));
     if (didNee)
     {
         bool responsiveLight = false;
@@ -2048,10 +2046,43 @@ extern "C" __global__ void __closesthit__radiance()
         }
     }
 
+    const float z1 = random<SampleDimension::eBSDF0>(prd->sampler);
+    const float z2 = random<SampleDimension::eBSDF1>(prd->sampler);
+    const float z3 = random<SampleDimension::eBSDF2>(prd->sampler);
+    const float z4 = random<SampleDimension::eBSDF3>(prd->sampler);
+
+    float4 xi = make_float4(z1, z2, z3, z4);
+    BsdfSampleResult sample_data = bsdf_sample(si, xi);
+
+    if (sample_data.event_type == BSDF_EVENT_ABSORB)
+    {
+        if (prd->depth == 0)
+        {
+            prd->setFirstEventType(EventType::eAbsorb);
+        }
+        // stop on absorb. Whatever next-event estimation delivered above stays:
+        // it is this vertex's direct lighting and does not depend on where the
+        // path went next.
+        prd->throughput = make_float3(0.0f);
+        return;
+    }
+    prd->specularBounce = ((sample_data.event_type & BSDF_EVENT_SPECULAR) != 0);
+
+    if (prd->depth == 0)
+    {
+        if (sample_data.event_type & BSDF_EVENT_DIFFUSE)
+        {
+            prd->setFirstEventType(EventType::eDiffuse);
+        }
+        if (sample_data.event_type & BSDF_EVENT_GLOSSY)
+        {
+            prd->setFirstEventType(EventType::eSpecular);
+        }
+    }
+
     // setup next path segment
     // Face normal oriented toward the incoming ray (wo)
-    float3 faceNg = (dot(si.geometry_normal, si.wo) > 0.0f)
-                  ? si.geometry_normal : -si.geometry_normal;
+    float3 faceNg = orientedFaceNormal(si.geometry_normal, si.wo);
     // Update IOR stack on transmission.
     //
     // A fibre's transmission lobes do not put the path inside anything: the

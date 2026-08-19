@@ -254,6 +254,38 @@ TEST_CASE("a 1000 lux Blender sun round-trips through 683000 lx")
     CHECK(baked.x * coneSolidAngle(halfAngle) == doctest::Approx(1000.0f).epsilon(1e-3));
 }
 
+// --- the two photometric constants, and why they are two ---
+
+TEST_CASE("the renderer carries two lm/W figures, for two different jobs")
+{
+    // This looks like an inconsistency and is regularly reported as one, so it
+    // is pinned here with the reason.
+    //
+    //   kLuminousEfficacyD65 = 177.83 converts a *measurement*. An IES file
+    //   holds candela produced by a real luminaire with an unknown spectrum, and
+    //   turning that into watts needs an assumed illuminant. Cycles assumes D65
+    //   for the same conversion, which is what lets the 27_ies ladder row
+    //   compare two angular distributions instead of two guesses at a scale.
+    //
+    //   683 lm/W, in gltfloader.cpp, undoes a *bookkeeping step*. Blender's glTF
+    //   exporter writes candela as watts * 683 / (4 pi), so recovering the watts
+    //   the artist typed means dividing by 683 -- the same 683, whatever the
+    //   lamp's spectrum is or is not.
+    //
+    // Collapsing them into one number necessarily breaks agreement with one
+    // reference or the other: with Cycles on IES profiles, or with Blender on a
+    // round-tripped lamp. The round trip is pinned above; this pins the pair.
+    CHECK(oka::kLuminousEfficacyD65 == doctest::Approx(177.83f));
+    CHECK(oka::kCandelaToRadiantIntensity == doctest::Approx(1.0f / 177.83f));
+    CHECK(kLumensPerWatt == doctest::Approx(683.0f));
+
+    // A luminaire measured at 1000 cd and a Blender lamp exported at 1000 cd are
+    // therefore not the same light, and differ by this much. Anyone mixing the
+    // two in one scene is looking at a 3.84x imbalance that is inherited, not
+    // introduced.
+    CHECK(kLumensPerWatt / oka::kLuminousEfficacyD65 == doctest::Approx(3.841f).epsilon(1e-3));
+}
+
 // --- helpers the conversions are built on ---
 
 TEST_CASE("coneSolidAngle spans the sphere correctly")

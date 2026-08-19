@@ -471,6 +471,281 @@ pass and has no counterpart in a single-launch integrator.
 
 ## Closed (kept for the measurement, not the work)
 
+### IES tables were interpolated with straight lines, Cycles uses a cubic
+
+**Fixed.** With the parser reading real files and the ladder row carrying a real
+beam, the row still sat at ratio 1.050 / rel 0.057 against the reference, and the
+error had a shape: 0% on axis, rising to 9% at 22 degrees and falling again.
+That is the steep flank of the Philips reflector's beam, between the table's 20
+and 25 degree rows, where the intensity drops 2.4x in one 5 degree step.
+
+Both renderers were reading the same four numbers and drawing different curves
+through them. Cycles interpolates with Catmull-Rom over four samples per axis
+(intern/cycles/kernel/util/ies.h); Strelka drew straight lines, which cut the
+corner of a convex curve and read 12.7% high at the midpoint of that interval.
+
+Strelka now runs the same cubic, with the same endpoint fallbacks and the same
+wrap behaviour at the poles and at the azimuth seam, from one header both
+backends and the host loader share (`common/ies_math.h`). Two smaller things
+came with it, both also Cycles' behaviour and both previously wrong here:
+
+* the azimuth table is unfolded to the full turn **at load time** rather than
+  folded at every lookup, so the cubic has real neighbours at the seam instead
+  of reflected guesses, and a table that omits its 360 degree duplicate gets one;
+* a direction outside the tabulated range returns zero rather than the clamped
+  edge value, which is what the file actually says about it.
+
+Measured on the row: ratio 1.050 -> 1.032, rel 0.057 -> 0.047, and the radial
+error curve went from a hump to flat (1.02-1.04 everywhere). What remains is a
+scale offset with no angular structure that predates this work -- the old
+synthetic cos^4 profile, where interpolation barely mattered, sat at 1.028 -- and
+is not the table: on axis the lookup lands exactly on a tabulated angle, so both
+renderers read the same 3418.9 cd and still differ. Untraced, and in the band the
+rest of the ladder occupies.
+
+Tests: the cubic against its closed form and against straight lines on data that
+is straight; the 12.7% gap at the steep step; non-negativity (a cubic through
+non-negative samples can dip below zero); zero outside the table; and continuity
+across the azimuth seam.
+
+### The IES reader could not read most of an IES file
+
+**Fixed.** The audit above tested the *evaluation* of a photometric table
+against hand-built profiles. That left the parser untested, and the only case in
+the suite wrote the smallest file that could possibly parse: a version line,
+`TILT=NONE`, three angles, three numbers. A real LM-63 file is not that, and four
+of the paths a real one takes were broken. Each fails the same way -- the profile
+is rejected or misread, and the luminaire silently becomes an isotropic point
+light with whatever intensity the sidecar gave it, which does not look like a
+failure. It looks like a plain lamp.
+
+1. **`TILT=<filename>`**, the third legal specification, was treated as
+   `TILT=INCLUDE`: the parser consumed the photometric header as a tilt block --
+   lamp count read as a pair count -- and threw the file away.
+2. **A keyword line whose text begins with those four letters** ("[TESTLAB]
+   TILTON Photometrics") was mistaken for the TILT line, with the same result.
+   The reader scanned for a *token* starting with "TILT" rather than for the
+   line.
+3. **A UTF-8 BOM** in front of a file with no version line made the TILT line
+   invisible to the line filter, so the file had no TILT at all.
+4. **`tilt=none` in lower case, or `TILT = NONE` spaced out**, were not
+   recognised either.
+
+The reader now splits the file at the TILT line -- everything above is free text,
+everything below is numbers, which is what the format is built around -- instead
+of guessing line by line from the first character. Two more things came out of
+looking at it: a non-type-C file (photometric types A and B tabulate a different
+pair of angles) is now loaded with a warning rather than silently read as type C,
+and a descending angle table is refused rather than fed to a binary search that
+would return a plausible wrong number for every direction.
+
+Tests: `tests/sceneloader/test_ies_loader.cpp` -- a realistic LM-63-2002 file
+with keywords, a candela multiplier, a ballast factor and wrapped values; all
+three TILT forms; the header quirks above; the candela layout (horizontal plane
+outermost, which if transposed rotates the beam into a different plane); and the
+refusals. Each was checked by re-introducing the defect it guards.
+
+### The two lumens-per-watt constants are not a mistake
+
+**Not a defect; documented and pinned.** The audit reported three
+candela-to-watt assumptions and recommended collapsing them. Looking closer,
+`LIGHT_UNIT_INTENSITY` does not convert anything -- it is radiant intensity
+already, and the glTF loader divides before handing the value over -- so there
+are two, and they are two on purpose:
+
+  * `kLuminousEfficacyD65` (177.83) converts a **measurement**. An IES file is
+    candela from a real luminaire with an unknown spectrum, and an illuminant has
+    to be assumed. Cycles assumes D65 for the same conversion.
+  * 683 lm/W in `gltfloader.cpp` undoes a **bookkeeping step**. Blender's glTF
+    exporter writes candela as `watts * 683 / (4 pi)`, so recovering the watts
+    the artist typed means dividing by 683 -- whatever the lamp's spectrum is.
+
+Collapsing them breaks agreement with one reference or the other: with Cycles on
+IES profiles, or with Blender on a round-tripped lamp, which
+`tests/scene/test_light_units.cpp` already pins as a shipped field regression.
+Both constants now live in one place with that reasoning next to them
+(`scene/light_desc.h`; the Metal path used to hard-code its own copy of 1/177.83),
+and a test states the 3.84x gap so it stops being reported as new.
+
+### A second audit pass over the lights and the environment
+
+**Fixed.** The MIS audit above looked at how the two halves of the estimate are
+combined. This pass looked at what they are combining: the environment's
+distribution and the analytic light types.
+
+What the environment turned out to have right, measured rather than assumed:
+the reported density integrates to 1.000 over the texels' true solid angles
+(exactly, not by Monte Carlo -- uniform sky, a theta gradient, and a sun at the
+horizon and at the zenith); a jittered texel sample lands back in its own texel
+for all but 0.001-0.02% of draws, and those are float rounding at the texel
+boundary; the OptiX point texture really is unnormalised-coordinate point-filtered
+under a `tex2D(x + 0.5, y + 0.5)`; and both backends build one alias table from
+one host builder.
+
+What was wrong:
+
+1. **Metal wrapped the environment in v.** `address::repeat` on both axes, where
+   an equirectangular map wraps in azimuth only. The bilinear tap in the first
+   row blended the zenith with the last row -- the nadir. OptiX has always
+   clamped v. Narrow (a row out of 512) but visible on a background that looks
+   up, and a backend disagreement in the one place they should agree texel for
+   texel.
+
+2. **One NaN texel took the whole HDRI with it.** `buildIblAliasTable` clamped
+   negatives with `std::max` and let NaN through, so `totalPower` went NaN,
+   `envPdfScale` went NaN, and every density -- sampling and MIS weight alike --
+   followed.
+
+3. **IES tables were extrapolated past their own data.** Neither the CPU loader
+   nor either shader clamped the interpolation weight, so a direction outside the
+   tabulated range continued the last interval. Measured on a table that falls to
+   zero at 90 degrees: -1800 cd at 180, a negative light that only `emitsLight()`
+   kept out of the frame. On a table that rises to its last entry -- the case
+   nothing rejects -- +2800 cd at 180, a luminaire shining nearly three times its
+   own peak straight up.
+
+4. **Quadrant-symmetric IES profiles were unfolded with a repeat, not a mirror.**
+   `fmod(azimuth, 90)` sends 90 to 0 and 100 to 10, where mirroring sends them to
+   90 and 80. A luminaire bright along one axis and dark along the other came out
+   rotated by a quadrant: the dark axis read as the bright one.
+
+And four copies of things that should have been one, which is how all of the
+above happened in the first place:
+
+| what | was | now |
+|---|---|---|
+| equirectangular uv, luminance, texel pdf | `common/env_light.h` + `metal/env_light_metal.h` | `common/env_map_math.h` |
+| alias-table draw | shared header + a Metal transcription missing its guards | `common/env_alias_sampling.h`, moved so Metal can reach it |
+| spherical-rectangle sampling | `common/lights.h` + `metal/lights_metal.h` + `scene/rect_light_sampling.h` | `common/rect_sampling.h` |
+| IES fold and clamp | `iesloader.cpp` + both light headers | `common/ies_math.h` |
+
+The rect case is worth stating on its own: `tests/scene/test_rect_light_sampling.cpp`
+was the only test of the spherical-rectangle construction in the tree, and it
+exercised the host copy -- the one no GPU runs. It now covers the shipping code.
+
+Every validation scene renders bit for bit identically across this pass
+(`cornell_box`, `metal_sphere`, `mixed_materials`, `kids_room`, all at 32 spp),
+which is what says the four unifications were refactors and nothing else.
+
+Tests: `tests/render/test_env_map_math.cpp`, `tests/render/test_ies_math.cpp`, a
+NaN case in `test_ibl_alias_table.cpp`, and the existing rect and alias suites
+now pointed at the shared code. Each was checked by re-introducing the defect it
+guards.
+
+Not fixed, because it is a calibration decision rather than a code one: the
+renderer carries three different candela-to-watt assumptions -- `/683` for glTF
+`KHR_lights_punctual`, `/177.83` (D65) for IES profiles, and 1:1 for a sidecar
+light authored with `unit = "intensity"`. No scene in the repository uses either
+of the first or the third (all sidecar lights are `radiance` or `power`), so
+nothing currently renders differently for it; a scene that mixed a punctual light
+with an IES one would be off by 3.84x between them.
+
+
+### The MIS estimate was audited end to end, and seven things came out of it
+
+**Fixed.** An audit of both backends against the two properties multiple
+importance sampling rests on -- the halves agree on the density of every
+direction, and each half divides by the density its own sampler drew from --
+found seven defects. They are grouped here because six of them are the same
+mistake in different clothes: something that belongs to one half of the estimate
+was decided by a draw belonging to the other, or a density was shared by name
+and not by code.
+
+The measurement that closes them all is the estimator A/B, which the
+`render/validate/estimatorMode` switch exists for: NEE + MIS against BSDF
+sampling alone, two independent unbiased estimators that must agree at
+convergence. On `cornell_box` at 2048 spp, 512x384:
+
+| | mean, NEE + MIS | mean, BSDF only | disagreement |
+|---|---|---|---|
+| before | 4.6444 | 4.6845 | 0.86% |
+| after | 4.6914 | 4.6845 | 0.15% |
+
+The BSDF-only column is identical to the last digit across the change, which is
+what says the next-event half moved and the transport did not.
+
+What was found:
+
+1. **The sphere light's density was the constant 1/(4pi)** while the sampler drew
+   a point uniformly over the sphere's *area*. Neither a solid-angle nor an area
+   density. Both halves used the same wrong number, so the weights still summed
+   to one and nothing looked inconsistent -- the light was simply wrong, by
+   `d^2 / (r^2 cos)`. Against the analytic irradiance of a uniformly emitting
+   sphere: 111x too bright at r = 0.5, d = 4, and worse with distance. A point
+   light given a soft radius took the same path and jumped by 4 pi the moment
+   its radius crossed the softness threshold.
+
+2. **`standard_pbr_eval()` did not describe reflections off a transmissive
+   surface.** `standard_pbr_sample()` produces them from inside the transmission
+   lobe, through its Fresnel coin flip; eval left the term out of both f and the
+   pdf. On glass, *every* non-delta reflection the sampler produced was reported
+   by eval as pdf 0 -- 8194 of 8194 at roughness 0.15 -- so next-event estimation
+   could not see a rough glass reflection at all, while the light hit still
+   deducted a MIS share for it.
+
+3. **Refraction: two mistakes in the change of variables**, and this one closes
+   the "sample and eval genuinely disagree" note that
+   `test_sample_eval_consistency.cpp` carried as a known bug. The half vector was
+   rebuilt as `normalize(V + eta * wi)` where Walter et al. 2007 build it from
+   `eta_i * V + eta_t * wi` -- about 0.2 rad away from the one the sampler bent
+   around -- and the density used `ggx_vndf_pdf()`, which is already divided by
+   the `4 * VdotH` that turns a half-vector density into a reflected-direction
+   one. Integrated over the sphere the reported pdf came to 0.24 where the
+   sampler produces a non-delta event 0.96 of the time.
+
+4. **Next-event estimation was gated on the BSDF sample's event type.** A
+   material carrying both a delta lobe and a smooth one -- a clearcoat over a
+   diffuse base, and glTF's default coat roughness is 0 -- delivered the smooth
+   lobe's direct light only on the draws where the delta lobe lost the lobe
+   selection. Measured as the fraction of draws flagged specular: 52% on a 0.18
+   grey base under a smooth coat, 73% on a dark lacquered paint. A vertex whose
+   sample came back `BSDF_EVENT_ABSORB` lost its direct lighting outright.
+
+5. **Metal decided `PATH_FLAG_NEE_DONE` from whether the connection produced a
+   shadow ray**, in all three of its volume paths. OptiX documents this exact
+   trap and avoids it; the flag has to record what was *available* at the vertex.
+   Deciding it from the outcome hands the bounce ray the whole contribution on
+   exactly the draws where the connection came back empty. Analytically that is
+   `1.5 - 0.5 * emitterFraction` times the correct answer, which
+   `test_nee_pairing.cpp` now both measures and states.
+
+6. **Metal never sampled `LIGHT_TYPE_DOME`.** A missing switch case is not a
+   compile error: the sample stayed zero-initialised, the facing test rejected
+   pdf 0, and a dome light was silently black on that backend only. OptiX had the
+   same hole and it was fixed there alone.
+
+7. **Smaller divergences between the backends**, each of which breaks the
+   agreement the halves need: `render/pt/misHeuristic` was read by OptiX and
+   ignored by Metal, whose kernels called the balance form unconditionally; the
+   distant light's cone density was written `1/(2pi(1-cos a))` on one side and
+   `1/(4pi sin^2(a/2))` on the other (equal on paper, 0.2% apart at the sun's
+   half angle and 4.9% at 0.001 rad); Metal's local-light connections left from
+   the raw hit position with a fixed 1 mm ray tMin standing in for the face
+   offset the bounce ray uses; Metal's facing test admitted directions above
+   1e-3 while its light hit admitted everything above 0; a soft point or spot was
+   exempted from the delta rule and weighed against a BSDF strategy that
+   `visibilityMask = 0` had switched off; and `misWeightBalance(0, 0)` was a NaN
+   in the pixel.
+
+Where the shared code now lives: `src/shaders/common/light_pdf.h` (densities and
+heuristics), `src/shaders/common/nee_pairing.h` (which directions the halves
+share, and when a vertex owes a deduction -- moved out of `shaders/optix/` so
+Metal includes it too), `bsdf_has_smooth_lobe()` in the material library, and
+`pbr_reflection_terms()` in `standard_pbr.h`, which is now the single place the
+reflection hemisphere is evaluated rather than the fourth copy of it.
+
+Tests: `tests/render/test_light_pdf.cpp`, `tests/material/test_smooth_lobe.cpp`,
+and new cases in `test_nee_pairing.cpp` and `test_sample_eval_consistency.cpp`.
+Each was checked by re-introducing the defect it guards and confirming it fails.
+
+### Rendered images that moved
+
+`kids_room` drops 13% in mean radiance -- it has two 6.5 mm sphere lights, which
+is defect 1 at its worst. `mixed_materials` moves 0.4% in the mean with local
+differences up to 62 on its glass. `cornell_box` and `metal_sphere` gain about
+1%, which is the direct lighting defects 4 and 7 were losing.
+
+
 ### OptiX rendered the pine forest with no atmosphere at all
 
 **Fixed.** `atmosphere` -- the sidecar block carrying a homogeneous haze, which

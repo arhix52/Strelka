@@ -365,28 +365,28 @@ TEST_CASE("bsdf_sample and bsdf_eval describe the same BRDF (clearcoat layer)")
 }
 
 // ---------------------------------------------------------------------------
-// The rough dielectric's REFLECTION lobe.
+// The rough dielectric, both lobes.
 //
-// Refraction events are excluded here, and not because they are delta lobes --
-// at these roughnesses they are not. They are excluded because sample and eval
-// genuinely disagree on them today, by orders of magnitude rather than by float
-// noise, and this file is a regression guard rather than a bug report. Pinning
-// the reflection lobe still protects the half of the BSDF that is correct.
-// Measured on the grid below (200k samples per point):
+// Refraction used to be excluded here, because sample and eval disagreed on it
+// by orders of magnitude rather than by float noise. Two separate mistakes, both
+// of them in the change of variables from the half vector to the outgoing
+// direction, and both now fixed in microfacet.h:
 //
-//   - the transmission pdfs differ by a median factor of ~2 and a worst case of
-//     ~4000x, because dielectric_sample() builds the Jacobian denominator from
-//     |dot(wi, H)| while dielectric_eval() uses the signed dot -- and for a
-//     refracted direction that dot is negative, so one computes
-//     (VdotH + eta*|LdotH|) and the other (VdotH - eta*|LdotH|);
-//   - bsdf_over_pdf and bsdf*|NdotL|/pdf differ by a steady ~120%;
-//   - at grazing incidence (75 deg) roughly 60-75% of the refracted directions
-//     the sampler returns are reported as zero density by dielectric_eval().
+//   - the half vector was rebuilt as normalize(V + eta * wi) when Walter et al.
+//     2007 build it from eta_i * V + eta_t * wi, which in this file's eta
+//     convention is V + wi / eta. That is a half vector about 0.2 rad away from
+//     the one the sampler actually bent around;
+//   - the density used ggx_vndf_pdf(), which is already divided by the 4 * VdotH
+//     that turns a half-vector density into a *reflected direction* density.
+//     A refraction needs the half-vector density itself, so the reported pdf was
+//     short by roughly a factor of four on top of everything else.
 //
-// Any fix belongs in dielectric.h; when it lands, delete the skip below and let
-// this case cover both lobes.
+// Together they put the integral of the reported pdf over the sphere at 0.24
+// where the sampler produces a non-delta event 0.96 of the time. The
+// normalisation case at the bottom of this file is what pins that down; the
+// grid here pins the pointwise agreement.
 // ---------------------------------------------------------------------------
-TEST_CASE("bsdf_sample and bsdf_eval describe the same BRDF (dielectric reflection lobe)")
+TEST_CASE("bsdf_sample and bsdf_eval describe the same BRDF (dielectric, both lobes)")
 {
     std::uint32_t seed = 0xC2B2AE35u;
     for (float roughness : kRoughnessGrid)
@@ -400,9 +400,138 @@ TEST_CASE("bsdf_sample and bsdf_eval describe the same BRDF (dielectric reflecti
             g.viewTilt     = tilt;
 
             seed += 0x9E3779B9u;
-            const Disagreement d = cross_check(g, 4000, seed, /*skipTransmission=*/true);
+            const Disagreement d = cross_check(g, 4000, seed, /*skipTransmission=*/false);
             check_grid_point(g, d);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A transmissive STANDARD_PBR material.
+//
+// This is the gap that mattered in practice, and it was a gap in the grid rather
+// than in the invariants: the glTF loader tags every material
+// MATERIAL_TYPE_STANDARD_PBR (gltfloader.cpp), including anything carrying
+// KHR_materials_transmission, so real glass never goes through dielectric.h at
+// all -- and the grids above hold transmission at zero.
+//
+// What was hiding there: standard_pbr_sample() produces reflections from inside
+// the transmission lobe through its Fresnel coin flip, and standard_pbr_eval()
+// left that term out of both f and the pdf. On transmission = 1, every single
+// non-delta reflection the sampler produced was reported by eval as pdf 0 --
+// 8194 out of 8194 at roughness 0.15. A direction the sampler produces and eval
+// calls impossible is not a small inconsistency: next-event estimation cannot
+// see a rough glass reflection at all (it needs eval's pdf to be positive),
+// while the light hit still deducts a MIS share for it. The share is deducted
+// and never delivered.
+//
+// Partial transmission was worse in a quieter way, because eval returned a
+// plausible non-zero number that simply was not sample's: up to 17000x apart on
+// the directions the two do share.
+// ---------------------------------------------------------------------------
+TEST_CASE("bsdf_sample and bsdf_eval describe the same BRDF (transmissive standard_pbr)")
+{
+    std::uint32_t seed = 0x165667B1u;
+    for (float transmission : { 0.25f, 0.5f, 0.75f, 1.0f })
+    {
+        for (float roughness : kRoughnessGrid)
+        {
+            for (float tilt : kViewTiltGrid)
+            {
+                GridPoint g;
+                g.materialType = MATERIAL_TYPE_STANDARD_PBR;
+                g.roughness = roughness;
+                g.transmission = transmission;
+                g.viewTilt = tilt;
+
+                seed += 0x9E3779B9u;
+                const Disagreement d = cross_check(g, 4000, seed, /*skipTransmission=*/false);
+                check_grid_point(g, d);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Normalisation.
+//
+// The grid above is pointwise: it compares the two routines to each other at
+// directions the sampler produced. Two routines can agree perfectly and both be
+// wrong, and that is exactly what the refraction lobe did -- sample and eval
+// applied the same mistaken change of variables, so a pointwise check with the
+// refraction events skipped saw nothing.
+//
+// A density has an absolute property no amount of agreement can supply: it has
+// to integrate to one over the sphere, or to the probability of the events it
+// describes when some of them are delta. That is what this measures, and it is
+// the case that would have caught both refraction mistakes on its own.
+// ---------------------------------------------------------------------------
+TEST_CASE("bsdf_eval's density integrates to the probability of a non-delta event")
+{
+    struct Point
+    {
+        unsigned int type;
+        float roughness;
+        float transmission;
+        float tilt;
+    };
+    const Point points[] = {
+        { MATERIAL_TYPE_STANDARD_PBR, 0.3f, 0.0f, 0.0f },  { MATERIAL_TYPE_STANDARD_PBR, 0.3f, 0.0f, 0.9f },
+        { MATERIAL_TYPE_STANDARD_PBR, 0.2f, 1.0f, 0.0f },  { MATERIAL_TYPE_STANDARD_PBR, 0.2f, 1.0f, 0.9f },
+        { MATERIAL_TYPE_STANDARD_PBR, 0.4f, 0.5f, 0.4f },  { MATERIAL_TYPE_DIELECTRIC, 0.2f, 1.0f, 0.4f },
+        { MATERIAL_TYPE_DIELECTRIC, 0.4f, 1.0f, 0.9f },
+    };
+
+    for (const Point& p : points)
+    {
+        CAPTURE(p.type);
+        CAPTURE(p.roughness);
+        CAPTURE(p.transmission);
+        CAPTURE(p.tilt);
+
+        GridPoint g;
+        g.materialType = p.type;
+        g.roughness = p.roughness;
+        g.transmission = p.transmission;
+        g.viewTilt = p.tilt;
+        const SurfaceInteraction si = make_si(g);
+
+        // How often the sampler produces an event that has a density at all.
+        FixedSeedSampler drawRng(0x2545F491u);
+        int nonDelta = 0;
+        const int drawCount = 200000;
+        for (int i = 0; i < drawCount; ++i)
+        {
+            const BsdfSampleResult s = bsdf_sample(si, drawRng.next4());
+            if (s.event_type != BSDF_EVENT_ABSORB && (s.event_type & BSDF_EVENT_SPECULAR) == 0)
+            {
+                ++nonDelta;
+            }
+        }
+        const double eventProbability = double(nonDelta) / double(drawCount);
+
+        // The integral of the reported density over the whole sphere, by uniform
+        // sampling. Slow to converge because the lobes are peaked, hence the
+        // loose tolerance -- but "0.24 where it should be 0.96" is not a
+        // tolerance question.
+        FixedSeedSampler intRng(0x27220A95u);
+        double integral = 0.0;
+        const int integralSamples = 4000000;
+        for (int i = 0; i < integralSamples; ++i)
+        {
+            const float cosTheta = 1.0f - 2.0f * intRng.next();
+            const float sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
+            const float phi = 2.0f * float(M_PI_F) * intRng.next();
+            const float3 wi =
+                make_float3(sinTheta * std::cos(phi), cosTheta, sinTheta * std::sin(phi));
+            const float pdf = bsdf_eval(si, wi).pdf;
+            REQUIRE(std::isfinite(pdf));
+            REQUIRE(pdf >= 0.0f);
+            integral += double(pdf);
+        }
+        integral = integral / double(integralSamples) * 4.0 * double(M_PI_F);
+
+        CHECK(integral == doctest::Approx(eventProbability).epsilon(0.08));
     }
 }
 

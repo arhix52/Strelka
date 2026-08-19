@@ -65,6 +65,17 @@ struct BsdfSampleResult
     unsigned int    event_type; // BsdfEventType flags
 };
 
+// GGX alpha at or below which a lobe is treated as a perfect mirror: sampled as
+// a single direction, reported as a BSDF_EVENT_SPECULAR event, and given a
+// discrete probability in the pdf field instead of a density.
+//
+// One constant because three separate places have to agree on it. The samplers
+// use it to decide what kind of event they produced, bsdf_eval() uses it to
+// decide it has nothing to evaluate, and bsdf_has_smooth_lobe() uses it to tell
+// the integrator whether next-event estimation has anything to connect to at
+// this vertex. alpha = roughness^2, so this is roughness 0.0316.
+#define BSDF_DELTA_ALPHA 0.001f
+
 // ---------------------------------------------------------------------------
 // Result of bsdf_eval() -- evaluating the BSDF for a given direction pair
 // ---------------------------------------------------------------------------

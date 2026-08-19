@@ -53,7 +53,14 @@ inline IblAliasTableResult buildIblAliasTable(const float* pixelRgba, int width,
             const size_t i = (size_t)y * (size_t)width + (size_t)x;
             const float* px = pixelRgba + i * 4;
             const double lum = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
-            const double w = std::max(lum, 0.0) * sinTheta;
+            // A NaN texel is not a rare thing in a downloaded HDRI, and without
+            // this test one of them takes the whole map with it: totalPower
+            // becomes NaN, envPdfScale becomes NaN, and every density the
+            // shaders compute -- for sampling and for the MIS weight alike --
+            // is NaN. std::max propagates it rather than clamping it, so the
+            // guard has to be an explicit finiteness test.
+            const double clean = std::isfinite(lum) ? std::max(lum, 0.0) : 0.0;
+            const double w = clean * sinTheta;
             weights[i] = w;
             totalPower += w;
         }

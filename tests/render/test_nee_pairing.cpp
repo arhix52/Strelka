@@ -1,6 +1,9 @@
 #include <doctest/doctest.h>
 
-#include <shading/nee_pairing.h>
+#include <light_pdf.h>
+#include <nee_pairing.h>
+
+#include <cmath>
 
 // ---------------------------------------------------------------------------
 // The two halves of the multiple-importance-sampling estimate at a shading
@@ -96,6 +99,170 @@ TEST_CASE("the bounce rule never claims a pairing the proposal rule would refuse
                     CHECK(neeProposesDirection(throughFibre, frontFace, nDot));
                 }
             }
+        }
+    }
+}
+
+// ===========================================================================
+// When a vertex owes the bounce ray a deduction at all
+//
+// The rules above are about *which directions* the two halves share. These are
+// about *whether* the vertex made an estimate to share them with -- the other
+// half of the same question, and the one both backends got wrong in their own
+// way: OptiX gated it on the BSDF event that came back, Metal on whether the
+// light connection produced a shadow ray. Both tie the two halves of the
+// estimate to a draw belonging to one of them.
+// ===========================================================================
+
+TEST_CASE("next-event estimation runs on the material, not on the bounce that was drawn")
+{
+    // The gate is three independent conditions and nothing else. In particular
+    // there is no argument for "what the BSDF sample came back as": a vertex
+    // either has a lobe a light can connect to or it does not, and that is the
+    // same on every draw.
+    CHECK(neeRunsAtVertex(true, true, true));
+
+    CHECK_FALSE(neeRunsAtVertex(false, true, true)); // estimatorMode 1: BSDF only
+    CHECK_FALSE(neeRunsAtVertex(true, false, true)); // nothing to connect to
+    CHECK_FALSE(neeRunsAtVertex(true, true, false)); // a pure mirror has no density
+}
+
+TEST_CASE("a medium vertex always owes the deduction its bounce is discounted by")
+{
+    // A phase function is smooth at every anisotropy, so the material question
+    // is answered before it is asked and the rule collapses to the two
+    // conditions that describe the scene.
+    CHECK(volumeNeePairsWithBounce(true, true));
+    CHECK_FALSE(volumeNeePairsWithBounce(false, true));
+    CHECK_FALSE(volumeNeePairsWithBounce(true, false));
+
+    CHECK(volumeNeePairsWithBounce(true, true) == neeRunsAtVertex(true, true, true));
+}
+
+namespace
+{
+
+// ---------------------------------------------------------------------------
+// A single scattering event in a medium, integrated two ways.
+//
+// One isotropic phase function (p = 1/4pi), one emitter covering a fraction
+// `emitterFraction` of the sphere of directions, and a light-sampling strategy
+// that draws uniformly over the whole sphere. A light draw that lands off the
+// emitter carries nothing -- the ordinary way a Monte Carlo sample contributes
+// zero, not a failure -- and the question is what the *bounce* ray is then
+// weighted by when it lands on the emitter itself.
+//
+// Both densities are 1/4pi here, so the balance heuristic gives each strategy
+// exactly half of every direction and the closed form of the whole estimate is
+// simply the emitter's mean radiance, L * emitterFraction.
+//
+// `flagFromOutcome` reproduces the shipped Metal behaviour: the vertex is
+// recorded as having made an estimate only when its light draw happened to
+// deliver something. The bounce then keeps the *whole* emitter on the draws
+// where the light strategy came back empty, and the two halves sum to more than
+// one. The analytic value of that error is (1.5 - 0.5 * emitterFraction), which
+// the case below both measures and states.
+// ---------------------------------------------------------------------------
+double singleScatterEstimate(double emitterFraction, bool flagFromOutcome, unsigned int seed, int samples)
+{
+    // A tiny deterministic LCG; the two policies must see the same draws.
+    unsigned int state = seed | 1u;
+    auto next = [&state]() {
+        state = state * 1664525u + 1013904223u;
+        return double((state >> 8) & 0xFFFFFFu) / double(0x1000000);
+    };
+
+    const double radiance = 1.0;
+    const double phase = 1.0 / (4.0 * double(M_PI_F)); // isotropic
+    const double lightPdf = 1.0 / (4.0 * double(M_PI_F)); // uniform over the sphere
+    const double misWeightLight = double(misWeightBalance(float(lightPdf), float(phase)));
+    const double misWeightBsdf = double(misWeightBalance(float(phase), float(lightPdf)));
+
+    double total = 0.0;
+    for (int i = 0; i < samples; ++i)
+    {
+        // --- next-event estimation ---------------------------------------
+        // "Is the drawn direction on the emitter" stands in for the whole of
+        // connectToLight(): a draw that misses contributes zero either way.
+        const bool lightDrawHitEmitter = next() < emitterFraction;
+        double contribution = 0.0;
+        if (lightDrawHitEmitter)
+        {
+            contribution += misWeightLight * radiance * phase / lightPdf;
+        }
+
+        // --- the flag the bounce ray will read ----------------------------
+        const bool neeDone = flagFromOutcome
+                                 ? lightDrawHitEmitter
+                                 : volumeNeePairsWithBounce(/*neeEnabled=*/true, /*hasEmitter=*/true);
+
+        // --- the bounce ------------------------------------------------------
+        const bool bounceHitEmitter = next() < emitterFraction;
+        if (bounceHitEmitter)
+        {
+            contribution += (neeDone ? misWeightBsdf : 1.0) * radiance;
+        }
+        total += contribution;
+    }
+    return total / double(samples);
+}
+
+} // namespace
+
+TEST_CASE("deciding the flag from the outcome puts the volume estimate over unity")
+{
+    const int samples = 2000000;
+
+    for (double emitterFraction : { 0.05, 0.25, 0.5 })
+    {
+        CAPTURE(emitterFraction);
+        const double exact = emitterFraction; // radiance 1 over that fraction of the sphere
+
+        const double correct = singleScatterEstimate(emitterFraction, /*flagFromOutcome=*/false, 0x9E3779B9u, samples);
+        CHECK(correct == doctest::Approx(exact).epsilon(0.02));
+
+        // And what the shipped code did, with its analytic value. Stated as a
+        // number so the case says how much light this was worth rather than
+        // merely that it was wrong: at a small emitter, half as much again.
+        const double fromOutcome = singleScatterEstimate(emitterFraction, /*flagFromOutcome=*/true, 0x9E3779B9u, samples);
+        const double predicted = exact * (1.5 - 0.5 * emitterFraction);
+        CHECK(fromOutcome == doctest::Approx(predicted).epsilon(0.02));
+        CHECK(fromOutcome > correct * 1.2);
+    }
+}
+
+// ===========================================================================
+// Where a connection leaves from
+// ===========================================================================
+
+TEST_CASE("a shadow ray is offset along the face it actually leaves through")
+{
+    // The rule is one line, and the reason it is written down is that one
+    // backend applied it to environment connections and not to local-light ones,
+    // where it stood in a fixed 1 mm ray tMin instead.
+    const float3 ng = make_float3(0.0f, 1.0f, 0.0f);
+
+    // Leaving above the surface: the raw normal is already right.
+    const float3 up = orientedFaceNormal(ng, make_float3(0.0f, 1.0f, 0.0f));
+    CHECK(up.y == doctest::Approx(1.0f));
+
+    // Leaving below it -- a back-face hit, or a transmitted bounce. Offsetting
+    // along the raw normal here pushes the origin into the geometry the ray
+    // starts on, and the connection reports an occlusion the BSDF strategy
+    // never sees.
+    const float3 down = orientedFaceNormal(ng, make_float3(0.0f, -1.0f, 0.0f));
+    CHECK(down.y == doctest::Approx(-1.0f));
+
+    // The invariant, over a sweep: the offset never opposes the ray.
+    for (int i = -10; i <= 10; ++i)
+    {
+        for (int j = -10; j <= 10; ++j)
+        {
+            const float3 dir = make_float3(float(i) * 0.1f, float(j) * 0.1f, 0.35f);
+            const float3 offset = orientedFaceNormal(ng, dir);
+            CHECK(dot(offset, dir) >= 0.0f);
+            // And it is still the geometry normal, only possibly negated.
+            CHECK(std::abs(std::abs(offset.y) - 1.0f) < 1e-6f);
         }
     }
 }

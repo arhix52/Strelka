@@ -37,7 +37,7 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
     float eta = entering ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
 
     float alpha = alpha_from_roughness(si.roughness);
-    bool is_smooth = (alpha < 0.001f);
+    bool is_smooth = (alpha < BSDF_DELTA_ALPHA);
 
     // -- Sample microfacet half-vector (or use normal for smooth case) ------
     float3 H;
@@ -145,18 +145,24 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
         else
         {
             float NdotH  = fabsf(dot(Nf, H));
-            float LdotH  = fabsf(dot(result.wi, H));
+            float LdotH  = dot(result.wi, H);
             float G2     = ggx_smith_g2(alpha, NdotV_abs, fmaxf(NdotL, 0.001f));
             float G1     = ggx_smith_g1(alpha, NdotV_abs);
 
             float factor = si.thin_walled ? 1.0f : (eta * eta);
             result.bsdf_over_pdf = si.albedo * factor * (G2 / (G1 + 1e-10f));
 
-            // BTDF PDF includes the Jacobian |dH/dwi| for refraction
-            float denom = (VdotH + eta * LdotH);
-            float dwh_dwi = (eta * eta * LdotH) / (denom * denom + 1e-10f);
-            float vndf_p  = ggx_vndf_pdf(alpha, NdotH, NdotV_abs, VdotH);
-            result.pdf    = (1.0f - F) * vndf_p * fabsf(dwh_dwi);
+            // The half vector this direction was bent around, and the density
+            // of that direction as the sampler produced it. See the identical
+            // pair in standard_pbr.h and in refraction_jacobian(): the pdf used
+            // the reflected-direction form of the VNDF density (short by
+            // 4 * VdotH) and built the Jacobian denominator from a magnitude
+            // rather than the signed sum Walter et al. 2007 eq. 17 wants.
+            // dielectric_eval() applies the same pair, which is what makes this
+            // direction have one density rather than two.
+            float dwh_dwi = refraction_jacobian(eta, VdotH, LdotH);
+            float pdf_h = ggx_vndf_pdf_half(alpha, NdotH, NdotV_abs, VdotH);
+            result.pdf = (1.0f - F) * pdf_h * dwh_dwi;
             result.event_type = BSDF_EVENT_GLOSSY_TRANSMISSION;
         }
     }
@@ -175,7 +181,7 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& 
     result.pdf  = 0.0f;
 
     float alpha = alpha_from_roughness(si.roughness);
-    if (alpha < 0.001f)
+    if (alpha < BSDF_DELTA_ALPHA)
         return result; // Delta distribution -- cannot evaluate
 
     float3 N = si.shading_normal;
@@ -213,10 +219,9 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& 
         // Transmission lobe
         float NdotL_abs = fabsf(NdotL);
 
-        // Half-vector for refraction
-        float3 H = safe_normalize(V + eta * wi);
-        // Ensure H points to the same side as Nf
-        if (dot(Nf, H) < 0.0f) H = -H;
+        // eta_i * V + eta_t * wi, normalised, oriented to Nf's side -- see
+        // refraction_half_vector().
+        float3 H = refraction_half_vector(V, wi, eta, Nf);
 
         float NdotH = dot(Nf, H);
         float VdotH = dot(V, H);
@@ -229,14 +234,15 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& 
         float D  = ggx_ndf(alpha, NdotH);
         float G2 = ggx_smith_g2(alpha, NdotV_abs, NdotL_abs);
 
-        float denom   = (VdotH + eta * LdotH);
+        float denom   = (eta * VdotH + LdotH);
         float factor  = fabsf(VdotH * LdotH) / (NdotV_abs * NdotL_abs + 1e-10f);
         float btdf    = (1.0f - F) * D * G2 * eta * eta * factor / (denom * denom + 1e-10f);
         result.bsdf   = si.albedo * fmaxf(btdf, 0.0f);
 
-        float dwh_dwi = (eta * eta * fabsf(LdotH)) / (denom * denom + 1e-10f);
-        float vndf_p  = ggx_vndf_pdf(alpha, NdotH, NdotV_abs, VdotH);
-        result.pdf    = (1.0f - F) * vndf_p * dwh_dwi;
+        // The same pair dielectric_sample() applies; see the note there.
+        float dwh_dwi = refraction_jacobian(eta, VdotH, LdotH);
+        float pdf_h   = ggx_vndf_pdf_half(alpha, NdotH, NdotV_abs, VdotH);
+        result.pdf    = (1.0f - F) * pdf_h * dwh_dwi;
     }
 
     return result;

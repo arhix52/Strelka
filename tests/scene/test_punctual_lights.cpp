@@ -153,8 +153,11 @@ TEST_CASE("IES loader reads a minimal LM-63 file")
     Scene::IesProfile profile;
     REQUIRE(loadIesProfile(path.string(), profile));
     CHECK(profile.verticalAngles.size() == 3);
-    CHECK(profile.horizontalAngles.size() == 1);
-    CHECK(profile.candela.size() == 3);
+    // The single tabulated plane of a rotationally symmetric file is unfolded to
+    // 0 and 360 at load time, so the cubic interpolation has a column on either
+    // side of every direction. See unfoldIesAzimuth().
+    CHECK(profile.horizontalAngles.size() == 2);
+    CHECK(profile.candela.size() == 6);
     CHECK(profile.maxCandela == doctest::Approx(100.0f));
 
     // Along -Z (nadir) → vertical 0° → 100 cd.

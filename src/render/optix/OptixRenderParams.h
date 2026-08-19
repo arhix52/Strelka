@@ -8,7 +8,7 @@
 #include <strelka/material/material_params.h>
 #include <strelka/material/ior_stack.h>
 
-#include "env_alias_sampling.h"
+#include <env_alias_sampling.h>
 #include <sharc.h>
 
 #define GEOMETRY_MASK_TRIANGLE 1

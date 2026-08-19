@@ -10,7 +10,7 @@
 // image is still an image -- smooth, plausible, and wrong by whatever the
 // mismatch is -- which is why it is worth a test rather than an inspection.
 
-#include "env_alias_sampling.h"
+#include <env_alias_sampling.h>
 #include "ibl_alias_table.h"
 
 #include <cmath>

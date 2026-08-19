@@ -208,6 +208,48 @@ DEVICE_FUNC float ggx_vndf_pdf(float alpha, float NdotH, float NdotV, float Vdot
     return D * G1 * fmaxf(VdotH, 0.0f) / (NdotV + 1e-10f) / (4.0f * VdotH + 1e-10f);
 }
 
+// The density of the half vector itself, before any change of variables.
+//
+// ggx_vndf_pdf() above already divides by the 4 * VdotH that turns a half-vector
+// density into a *reflected direction* density, which is what a reflection lobe
+// wants and is why it is spelled that way. A refraction lobe needs the other
+// Jacobian, so it needs the half-vector density back: multiplying the reflection
+// form by 4 * VdotH is exactly that, and cheaper than a second D * G1.
+//
+// Getting this wrong is not a subtle error. Both transmission lobes used the
+// reflection form directly and then applied the refraction Jacobian on top, so
+// their reported density was short by a factor of 4 * VdotH -- around four at
+// normal incidence. Integrating the pdf over the lower hemisphere gave 0.24
+// where the sampler refracts 0.96 of the time.
+DEVICE_FUNC float ggx_vndf_pdf_half(float alpha, float NdotH, float NdotV, float VdotH)
+{
+    return ggx_vndf_pdf(alpha, NdotH, NdotV, VdotH) * 4.0f * fmaxf(VdotH, 0.0f);
+}
+
+// The half vector a refraction through an interface of relative index `eta`
+// bends around, and the Jacobian of the map from it to the outgoing direction.
+//
+// eta is the shader's convention throughout: the ratio of the medium the view
+// vector is in to the medium the transmitted ray enters. Walter et al. 2007
+// build the half vector from eta_i * wi + eta_t * wt, which in that convention
+// is V + wt / eta -- NOT V + eta * wt, which is what both eval paths were using.
+// The difference is a half vector 0.2 radians away from the one the sampler
+// bent around, and pdfs three orders of magnitude apart at grazing angles.
+DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3 Nf)
+{
+    const float3 H = safe_normalize(V + wt / fmaxf(eta, 1e-6f));
+    return (dot(Nf, H) < 0.0f) ? -H : H;
+}
+
+// eta^2 |wt.h| / (eta_i (V.h) + eta_t (wt.h))^2, with the same normalisation as
+// refraction_half_vector: dividing through by eta_i and substituting eta_t/eta_i
+// = 1/eta leaves |wt.h| / (eta (V.h) + (wt.h))^2, which is what this returns.
+DEVICE_FUNC float refraction_jacobian(float eta, float VdotH, float LdotH)
+{
+    const float denom = eta * VdotH + LdotH;
+    return fabsf(LdotH) / (denom * denom + 1e-10f);
+}
+
 // ---------------------------------------------------------------------------
 // Anisotropic GGX
 //

@@ -251,6 +251,12 @@ struct Uniforms
     /// M of resampled importance sampling. One is plain next-event estimation
     /// and the arithmetic reduces to exactly what it was.
     uint32_t risCandidates;
+    /// Which MIS heuristic weighs the two strategies: 0 = balance, 1 = power.
+    /// Seeded by both apps as render/pt/misHeuristic and honoured by OptiX from
+    /// the start; this backend used to call the balance form unconditionally, so
+    /// the switch silently did nothing on macOS and no A/B against OptiX could
+    /// be run on it.
+    uint32_t misHeuristic;
     /// 0 = sample level 0 (what a compute kernel does by default), 1 = ray-cone
     /// level of detail. A switch rather than a constant because the whole point
     /// of it is a memory-pressure trade that has to be measured per scene.
@@ -596,14 +602,11 @@ struct ShadowRay
     uint32_t sharcPathIndex;
 };
 
-// One entry of the environment map alias table (Walker/Vose), one per texel.
-// Sampling is a single load: draw a bucket uniformly, then keep it with
-// probability `prob`, otherwise jump to `alias`.
-struct EnvAliasEntry
-{
-    float prob;
-    uint32_t alias;
-};
+// EnvAliasEntry and the draw that walks it live in common/env_alias_sampling.h,
+// which the OptiX modules, these kernels and the host tests all compile. It used
+// to be declared here and transcribed into env_light_metal.h, which is how the
+// Metal copy ended up without the guards the shared one has.
+#include <env_alias_sampling.h>
 
 struct SkinningParams
 {

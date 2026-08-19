@@ -1439,7 +1439,15 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
     float3 sharcEnvironment = float3(0.0f);
     if (SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
-        constexpr sampler envSampler(mag_filter::linear, min_filter::linear, address::repeat, coord::normalized);
+        // repeat in u, clamp in v. The map wraps in azimuth and does not wrap in
+        // polar angle: with repeat on both axes the bilinear tap in the first row
+        // blends the zenith with the last row, which is the nadir. OptiX has always
+        // clamped v (cudaAddressModeClamp on axis 1); this backend wrapped it, so the
+        // two disagreed on the one row where an equirectangular map has a seam that
+        // is not a seam.
+        constexpr sampler envSampler(mag_filter::linear, min_filter::linear,
+                                     s_address::repeat, t_address::clamp_to_edge,
+                                     coord::normalized);
         const float2 envUV = dirToEnvUV(rayDir, uniforms.envMapRotation);
         float3 envColor = envMapTexture.sample(envSampler, envUV).xyz;
         envColor *= uniforms.envMapIntensity * float3(uniforms.envMapColorTint);
@@ -1470,7 +1478,9 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
             // strategy owns it outright. Dropping the contribution instead --
             // which the guard used to do -- loses energy exactly along the edges
             // of dark regions, where the bilinear radiance is still non-zero.
-            const float mis = effectiveEnvPdf > 0.0f ? misWeightBalance(p.lastBsdfPdf, effectiveEnvPdf) : 1.0f;
+            const float mis = effectiveEnvPdf > 0.0f
+                                  ? computeMisWeight(p.lastBsdfPdf, effectiveEnvPdf, uniforms.misHeuristic)
+                                  : 1.0f;
             radiance += throughput * envColor * mis;
             sharcEnvironment = envColor * mis;
         }
@@ -1657,8 +1667,15 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         si.geometry_normal = -rayDir;
         si.front_face = true;
 
-        bool didNee = false;
-        if (SPEC_LIGHTS || (SPEC_ENV_MAP && uniforms.hasEnvMap))
+        // Decided by what this vertex had available, never by what the draw
+        // produced -- see volumeNeePairsWithBounce(). Setting it from the
+        // outcome hands the bounce ray the whole contribution on exactly the
+        // draws where the connection failed, and the two strategies stop
+        // summing to one.
+        const bool didNee = volumeNeePairsWithBounce(
+            uniforms.estimatorMode == 0,
+            (SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap));
+        if (didNee)
         {
             const LightConnection conn = connectToLight(
                 uniforms, uniforms.numLights, lights, rng, si, envAliasTable, envMapTexture, iesProfiles, true);
@@ -1677,7 +1694,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 // The phase function is the medium's BSDF and its own pdf, so
                 // MIS pairs it against the light density exactly as a surface
                 // lobe would.
-                const float misWeight = conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, phase);
+                const float misWeight =
+                    conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, phase, uniforms.misHeuristic);
                 const float3 weight = throughput * (conn.radiance / conn.pdf) * misWeight * phase;
                 if (any(weight > 1e-6f))
                 {
@@ -1695,7 +1713,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     sr.rrCutoff =
                         random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                     shadowRays[slot] = sr;
-                    didNee = true;
                 }
             }
         }
@@ -1793,7 +1810,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // are single scattering. A subsurface walk gets neither -- its boundary
         // occludes almost every shadow ray it would spawn.
         const bool isBounded = isBoundedMedium;
-        bool didNeeVolume = false;
+        // As in the fog path: available, not delivered.
+        const bool didNeeVolume =
+            isBounded && volumeNeePairsWithBounce(uniforms.estimatorMode == 0,
+                                                  (SPEC_LIGHTS && uniforms.numLights > 0) ||
+                                                      (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (isBounded)
         {
             // Volumetric emission: what makes the bath water glow rather than
@@ -1806,7 +1827,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             // obvious the term and not the medium was at fault.
             radiance += clampIndirectContribution(throughput * float3(mm.medium_emission), depth, uniforms.clampIndirect);
 
-            if (SPEC_LIGHTS || (SPEC_ENV_MAP && uniforms.hasEnvMap))
+            if (didNeeVolume)
             {
                 SurfaceInteraction vsi = {};
                 vsi.position = scatterPoint;
@@ -1822,7 +1843,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     // directions pointing away from the vertex. See the same
                     // note on the fog path.
                     const float phase = hgPhase(dot(rayDir, conn.toLight), mm.subsurface_anisotropy);
-                    const float misWeight = conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, phase);
+                    const float misWeight =
+                        conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, phase, uniforms.misHeuristic);
                     const float3 weight = throughput * (conn.radiance / conn.pdf) * misWeight * phase;
                     if (any(weight > 1e-6f))
                     {
@@ -1840,7 +1862,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                             random<SampleDimension::eShadowRR>(wrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                         const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
                         shadowRays[slot] = sr;
-                        didNeeVolume = true;
                     }
                 }
             }
@@ -1961,7 +1982,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             }
         }
         float3 sharcLight = float3(0.0f);
-        if (-dot(rayDir, lightNormal) > 0.0f)
+        // The same predicate connectLight() offers directions by, so the two
+        // halves of the estimate agree on the set they are splitting.
+        if (lightSampleFacesVertex(-dot(rayDir, lightNormal)))
         {
             const float3 Le = float3(currLight.color);
             if (depth == 0u || specularBounce || !neeDone)
@@ -1982,7 +2005,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 const float3 misOrigin = rayOrigin - rayDir * p.misDistance;
                 const float lightPdf =
                     getLightPdf(currLight, hitPoint, misOrigin, uniforms.rectLightSamplingMethod) * lightSelectionPdf;
-                const float mis = misWeightBalance(p.lastBsdfPdf, lightPdf);
+                const float mis = computeMisWeight(p.lastBsdfPdf, lightPdf, uniforms.misHeuristic);
                 radiance += throughput * Le * mis;
                 sharcLight = Le * mis;
             }
@@ -2160,8 +2183,13 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         const float3 outward = (dot(geomNormal, rayDir) > 0.0f) ? geomNormal : -geomNormal;
         SamplerState xrng = samplerFor(uniforms, tid, sampleIdx, depth + step);
 
-        bool didNeeExit = false;
-        if (SPEC_LIGHTS || (SPEC_ENV_MAP && uniforms.hasEnvMap))
+        // As in the fog path: available, not delivered. The exit lobe is a cosine
+        // hemisphere, which is smooth at every parameter, so there is nothing
+        // about the material to ask.
+        const bool didNeeExit = volumeNeePairsWithBounce(
+            uniforms.estimatorMode == 0,
+            (SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap));
+        if (didNeeExit)
         {
             // NEE here and not inside the walk: this is the vertex light can
             // actually reach, and leaving it to BSDF sampling alone is what makes
@@ -2190,7 +2218,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     // connection came back around 70% of its value while MIS had
                     // already deducted the whole of it from the bounce ray.
                     const float lobePdf = cosOut * M_1_PI_F;
-                    const float misWeight = conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, lobePdf);
+                    const float misWeight =
+                        conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, lobePdf, uniforms.misHeuristic);
                     const float3 weight = throughput * (conn.radiance / conn.pdf) * misWeight * M_1_PI_F;
                     if (any(weight > 1e-6f))
                     {
@@ -2214,7 +2243,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                             random<SampleDimension::eShadowRR>(xrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                         const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
                         shadowRays[slot] = sr;
-                        didNeeExit = true;
                     }
                 }
             }
@@ -2647,31 +2675,23 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         radiance += throughput * surfaceEmission;
     }
 
-    const float4 xi = float4(random<SampleDimension::eBSDF0>(rng, uniforms.samplerType),
-                             random<SampleDimension::eBSDF1>(rng, uniforms.samplerType),
-                             random<SampleDimension::eBSDF2>(rng, uniforms.samplerType),
-                             random<SampleDimension::eBSDF3>(rng, uniforms.samplerType));
-    BsdfSampleResult sampleResult = bsdf_sample(si, xi);
-
-    if (sampleResult.event_type == BSDF_EVENT_ABSORB)
-    {
-        radianceOut[tid] += float4(radiance, 0.0f);
-        return;
-    }
-
-    const bool nextSpecular = ((sampleResult.event_type & BSDF_EVENT_SPECULAR) != 0);
-    if (SPEC_SHARC_UPDATE)
-    {
-        const float directionWeight =
-            (sampleResult.event_type & BSDF_EVENT_DIFFUSE) != 0 ? 0.0f : 1.0f - saturate(si.roughness);
-        const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
-        SharcUpdateState updateState = sharcUpdates[updateIndex];
-        sharcSetRadianceDirectionWeight(updateState, directionWeight);
-        sharcUpdates[updateIndex] = updateState;
-    }
-
-    bool didNee = (uniforms.estimatorMode == 0) && (sampleResult.event_type & (BSDF_EVENT_DIFFUSE | BSDF_EVENT_GLOSSY)) &&
-                  ((SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap));
+    // Next-event estimation first, and decided by the material rather than by the
+    // bounce.
+    //
+    // It used to run after bsdf_sample() and be gated on the event that came
+    // back, which made the light half of the estimate depend on a draw belonging
+    // to the other half. Two things were lost that way: the whole vertex
+    // whenever the sample came back BSDF_EVENT_ABSORB (a microfacet draw that
+    // landed below the horizon is not a material that absorbs), and the smooth
+    // lobe's direct light on every draw the delta lobe won -- over half the
+    // draws on a clearcoat with glTF's default coat roughness of 0. See
+    // neeRunsAtVertex() and bsdf_has_smooth_lobe().
+    //
+    // Moving it costs nothing in sample values: every random<Dim>() here is a
+    // pure function of (sampleIdx, dimension, seed, depth), so the order the
+    // dimensions are drawn in does not change any of them.
+    const bool hasEmitter = (SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap);
+    bool didNee = neeRunsAtVertex(uniforms.estimatorMode == 0, hasEmitter, bsdf_has_smooth_lobe(si));
     if (didNee)
     {
         // Resampled importance sampling over several light candidates: draw M of
@@ -2749,7 +2769,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             {
                 continue;
             }
-            const float misWeight = conn.isDelta ? 1.0f : misWeightBalance(conn.pdf, evalResult.pdf);
+            const float misWeight =
+                conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, evalResult.pdf, uniforms.misHeuristic);
             const float3 f = conn.radiance * evalResult.bsdf * misWeight;
             const float target = luminance(f);
             if (!(target > 0.0f))
@@ -2802,6 +2823,31 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 shadowRays[slot] = sr;
             }
         }
+    }
+
+    const float4 xi = float4(random<SampleDimension::eBSDF0>(rng, uniforms.samplerType),
+                             random<SampleDimension::eBSDF1>(rng, uniforms.samplerType),
+                             random<SampleDimension::eBSDF2>(rng, uniforms.samplerType),
+                             random<SampleDimension::eBSDF3>(rng, uniforms.samplerType));
+    BsdfSampleResult sampleResult = bsdf_sample(si, xi);
+
+    if (sampleResult.event_type == BSDF_EVENT_ABSORB)
+    {
+        // Whatever next-event estimation queued above stays: it is this vertex's
+        // direct lighting and does not depend on where the path went next.
+        radianceOut[tid] += float4(radiance, 0.0f);
+        return;
+    }
+
+    const bool nextSpecular = ((sampleResult.event_type & BSDF_EVENT_SPECULAR) != 0);
+    if (SPEC_SHARC_UPDATE)
+    {
+        const float directionWeight =
+            (sampleResult.event_type & BSDF_EVENT_DIFFUSE) != 0 ? 0.0f : 1.0f - saturate(si.roughness);
+        const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+        SharcUpdateState updateState = sharcUpdates[updateIndex];
+        sharcSetRadianceDirectionWeight(updateState, directionWeight);
+        sharcUpdates[updateIndex] = updateState;
     }
 
     // --- Next segment -------------------------------------------------------
@@ -3230,7 +3276,14 @@ static void shadowImpl(uint gid,
     ray shadowRay;
     shadowRay.origin = float3(sr.origin);
     shadowRay.direction = float3(sr.direction);
-    shadowRay.min_distance = 0.001f;
+    // Zero, because connectLight/connectEnvLight now offset the origin along the
+    // face the ray leaves through. A world-space epsilon standing in for that
+    // offset is the wrong shape for the problem -- too small at architectural
+    // scale, too large at prop scale -- and it was applied to connections whose
+    // origin had already been offset, which is the same self-occlusion
+    // asymmetry from the other side. OptiX runs its occlusion rays at
+    // shadowRayTmin, which both apps seed to 0.
+    shadowRay.min_distance = 0.0f;
     shadowRay.max_distance = sr.maxDistance;
 
     const float motionTime = motionTimeFor(uniforms, sr.pixelIndex, sampleIdx);

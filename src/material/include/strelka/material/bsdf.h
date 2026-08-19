@@ -251,6 +251,61 @@ DEVICE_FUNC BsdfEvalResult bsdf_eval(const THREAD_REF SurfaceInteraction& si,
 }
 
 // ---------------------------------------------------------------------------
+// bsdf_has_smooth_lobe -- is there anything here for a light connection to reach?
+//
+// True when the material carries at least one lobe with a density with respect
+// to solid angle, so that bsdf_eval() can return a non-zero pdf and next-event
+// estimation has a second strategy to be weighed against.
+//
+// The integrators call this to decide whether to run next-event estimation at a
+// vertex. They used to ask the *sample* instead -- "did this draw come back
+// non-delta" -- which makes the decision depend on a coin flip the light
+// connection has nothing to do with, and loses the smooth lobe's direct light in
+// proportion to how often the delta lobe wins the draw. See neeRunsAtVertex() in
+// shaders/common/nee_pairing.h for the measurements.
+//
+// Erring towards true is free and erring towards false is not: an unnecessary
+// connection is evaluated, finds bsdf_eval().pdf == 0 and is discarded, whereas
+// a missing one is light that is never delivered. The transmission lobe is
+// therefore admitted when either its own alpha or the thin-walled one is above
+// the delta threshold.
+// ---------------------------------------------------------------------------
+DEVICE_FUNC bool bsdf_has_smooth_lobe(const THREAD_REF SurfaceInteraction& si)
+{
+    const float alpha = alpha_from_roughness(si.roughness);
+
+    switch (si.material_type)
+    {
+    // Lambertian is never delta, and the Chiang lobes are driven by
+    // longitudinal/azimuthal roughness that hair_chiang.h floors well above the
+    // delta threshold, so a strand always has a density.
+    case MATERIAL_TYPE_DIFFUSE:
+    case MATERIAL_TYPE_HAIR:
+        return true;
+
+    // A single GGX lobe, smooth or not.
+    case MATERIAL_TYPE_CONDUCTOR:
+    case MATERIAL_TYPE_DIELECTRIC:
+        return alpha >= BSDF_DELTA_ALPHA;
+
+    case MATERIAL_TYPE_STANDARD_PBR:
+    default:
+        break;
+    }
+
+    const PbrLobeWeights w = pbr_lobe_weights(si);
+    const float alphaCoat = alpha_from_roughness(si.clearcoat_roughness);
+    const float alphaThin = thin_glass_transmission_alpha(
+        alpha, fmaxf(si.ior / fmaxf(si.exterior_ior, 1e-4f), 1.0f));
+    const bool roughBase = alpha >= BSDF_DELTA_ALPHA;
+    const bool roughTransmission = roughBase || (si.thin_walled && alphaThin >= BSDF_DELTA_ALPHA);
+
+    return (w.diffuse > 0.0f) || (w.diffuse_transmission > 0.0f) ||
+           (w.specular > 0.0f && roughBase) || (w.transmission > 0.0f && roughTransmission) ||
+           (w.clearcoat > 0.0f && alphaCoat >= BSDF_DELTA_ALPHA);
+}
+
+// ---------------------------------------------------------------------------
 // bsdf_pdf -- Return only the PDF for a given (wo, wi) pair
 // ---------------------------------------------------------------------------
 DEVICE_FUNC float bsdf_pdf(const THREAD_REF SurfaceInteraction& si,
