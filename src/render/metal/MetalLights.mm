@@ -6,8 +6,12 @@
 // out 1/177.83 and would not have moved if that number ever did.
 #include <strelka/scene/light_desc.h>
 
+#include <log.h>
+
 #include <cmath>
+#include <cstddef>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace oka
@@ -42,7 +46,7 @@ std::vector<uint8_t> packIesProfiles(const std::vector<Scene::IesProfile>& profi
         // Watts per steradian). Picking the same illuminant is what lets 27_ies
         // compare the angular distribution rather than two guesses at a scale.
 
-        for (float c : p.candela)
+        for (const float c : p.candela)
         {
             floats.push_back(c * kCandelaToRadiantIntensity);
         }
@@ -81,7 +85,19 @@ void MetalLights::init(MTL::Device* device)
     mDevice = device;
     // Shade always binds the IES table; keep a zero-count buffer ready so a
     // frame that runs before the first upload cannot hand the kernel null.
-    upload({}, {});
+    uploadIesProfiles({});
+}
+
+void MetalLights::uploadIesProfiles(const std::vector<Scene::IesProfile>& iesProfiles)
+{
+    const std::vector<uint8_t> packed = packIesProfiles(iesProfiles);
+    if (!mIesBuffer || mIesBuffer->length() < packed.size())
+    {
+        if (mIesBuffer)
+            mIesBuffer->release();
+        mIesBuffer = mDevice->newBuffer(packed.size(), MTL::ResourceStorageModeShared);
+    }
+    memcpy(mIesBuffer->contents(), packed.data(), packed.size());
 }
 
 void MetalLights::release()
@@ -96,13 +112,66 @@ void MetalLights::release()
         mIesBuffer->release();
         mIesBuffer = nullptr;
     }
+    releaseProjectorTextures();
+}
+
+void MetalLights::releaseProjectorTextures()
+{
+    for (MTL::Texture* texture : mProjectorTextures)
+    {
+        if (texture)
+            texture->release();
+    }
+    mProjectorTextures.clear();
+    mProjectorImagePaths.clear();
+}
+
+/// Decode the images projector lights throw, in the order the scene registered
+/// them, so that a light's points[0].z indexes this vector.
+///
+/// Loaded as colour, because a slide is display encoded and its texels are meant
+/// to be seen: the sRGB pixel format is what turns them back into the linear
+/// radiance the light multiplies. A slot whose file failed to decode stays null
+/// and the shader throws a plain white frame there, which is a visible rectangle
+/// rather than a light that quietly stopped working.
+void MetalLights::loadProjectorImages(const std::vector<std::string>& paths, MetalTextures& textures)
+{
+    if (paths == mProjectorImagePaths)
+    {
+        return;
+    }
+    releaseProjectorTextures();
+    mProjectorImagePaths = paths;
+    mProjectorTextures.reserve(paths.size());
+    for (const std::string& path : paths)
+    {
+        mProjectorTextures.push_back(path.empty() ? nullptr :
+                                                    textures.loadFromFile(path, true, TextureKind::Color));
+        if (const MTL::Texture* texture = mProjectorTextures.back())
+        {
+            STRELKA_INFO("Loaded projector image: {} ({}x{})", path, texture->width(), texture->height());
+        }
+    }
 }
 
 void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
-                         const std::vector<Scene::IesProfile>& iesProfiles)
+                         const std::vector<Scene::IesProfile>& iesProfiles,
+                         const std::vector<std::string>& projectorImages,
+                         MetalTextures& textures)
 {
-    static_assert(sizeof(Scene::Light) == sizeof(UniformLight));
-    const size_t lightBufferSize = sizeof(Scene::Light) * lightDescs.size();
+    loadProjectorImages(projectorImages, textures);
+
+    // This backend's UniformLight carries one field the host's Scene::Light does
+    // not -- the bindless handle of a projector's image -- so the table is built
+    // field for field rather than memcpy'd whole. The shared prefix is still one
+    // copy; only the handle is resolved per light, from the slot the scene
+    // packed into points[0].z.
+    static_assert(offsetof(UniformLight, projectorTexture) == sizeof(Scene::Light),
+                  "the host light must be the exact prefix of the GPU light");
+    static_assert(sizeof(UniformLight) == sizeof(Scene::Light) + 16,
+                  "the GPU light adds a handle and its padding, and nothing else");
+
+    const size_t lightBufferSize = sizeof(UniformLight) * lightDescs.size();
 
     if (lightBufferSize == 0)
     {
@@ -120,7 +189,23 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
                 mLightBuffer->release();
             mLightBuffer = mDevice->newBuffer(lightBufferSize, MTL::ResourceStorageModeShared);
         }
-        memcpy(mLightBuffer->contents(), lightDescs.data(), lightBufferSize);
+        auto* gpuLights = static_cast<UniformLight*>(mLightBuffer->contents());
+        for (size_t i = 0; i < lightDescs.size(); ++i)
+        {
+            UniformLight& dst = gpuLights[i];
+            std::memcpy(&dst, &lightDescs[i], sizeof(Scene::Light));
+            dst.projectorTexture = MTL::ResourceID{};
+            dst._padProjector[0] = 0.0f;
+            dst._padProjector[1] = 0.0f;
+            if (lightDescs[i].type == LIGHT_TYPE_PROJECTOR)
+            {
+                const int slot = (int)lightDescs[i].points[0].z;
+                if (slot >= 0 && (size_t)slot < mProjectorTextures.size() && mProjectorTextures[slot])
+                {
+                    dst.projectorTexture = mProjectorTextures[slot]->gpuResourceID();
+                }
+            }
+        }
     }
 
     const std::vector<uint8_t> packed = packIesProfiles(iesProfiles);

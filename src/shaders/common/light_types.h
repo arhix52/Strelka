@@ -11,6 +11,9 @@ enum LightType : int
     LIGHT_TYPE_DOME    = 4,
     LIGHT_TYPE_POINT   = 5,
     LIGHT_TYPE_SPOT    = 6,
+    // A spot whose cone is a rectangular pyramid and whose intensity across it
+    // is an image: a home cinema beamer, a slide projector, a theatre gobo.
+    LIGHT_TYPE_PROJECTOR = 7,
 };
 
 // How UniformLightDesc::intensity is interpreted before baking into the GPU

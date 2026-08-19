@@ -190,19 +190,33 @@ DEVICE_FUNC bool punctualLightIsSoft(float radius)
     return radius > STRELKA_SOFT_LIGHT_RADIUS_MIN;
 }
 
+/// True when a light is a lamp at a point rather than a surface: point, spot and
+/// projector.
+///
+/// The three share a packing (UniformLight::points[1] is the position, points[2]
+/// and [3] the local axes, normal the emission axis), a sampler, and a colour
+/// that means radiant intensity rather than radiance. They differ only in the
+/// angular profile applied on top -- isotropic, a cone, or an image -- so
+/// everything that asks "is there a surface here" wants this one question and
+/// not a list that a fourth kind of lamp would have to be added to.
+DEVICE_FUNC bool lightIsPunctual(int type)
+{
+    return type == LIGHT_TYPE_POINT || type == LIGHT_TYPE_SPOT || type == LIGHT_TYPE_PROJECTOR;
+}
+
 /// True when next-event estimation owns every direction reaching this light, so
 /// its contribution must not be weighed against the BSDF pdf.
 ///
-/// Every point and spot light, whatever its radius. That is a statement about
-/// this renderer and not about the geometry: OptiXRender::createInstance and
-/// MetalAccelStructure both give a point or spot proxy a zero visibility mask,
-/// so no ray of any kind can hit one and the BSDF strategy is not merely
-/// unlikely to find it -- it cannot. Weighing a soft point against a pdf for a
-/// strategy that is switched off deducts a share that is never delivered, which
-/// is what a radius used to do here.
+/// Every point, spot and projector, whatever its radius. That is a statement
+/// about this renderer and not about the geometry: OptiXRender::createInstance
+/// and MetalAccelStructure both give such a proxy a zero visibility mask, so no
+/// ray of any kind can hit one and the BSDF strategy is not merely unlikely to
+/// find it -- it cannot. Weighing a soft point against a pdf for a strategy that
+/// is switched off deducts a share that is never delivered, which is what a
+/// radius used to do here.
 DEVICE_FUNC bool lightIsDeltaForMis(int type)
 {
-    return type == LIGHT_TYPE_POINT || type == LIGHT_TYPE_SPOT;
+    return lightIsPunctual(type);
 }
 
 /// Everything the density of one light depends on, unpacked from whichever
@@ -256,9 +270,12 @@ DEVICE_FUNC float lightSolidAnglePdf(const THREAD_REF LightPdfQuery& q)
         return domeLightSolidAnglePdf();
     case LIGHT_TYPE_POINT:
     case LIGHT_TYPE_SPOT:
+    case LIGHT_TYPE_PROJECTOR:
         // A soft one is a sphere and is divided by a real density; a sharp one
         // carries the placeholder. Both are exempt from the MIS heuristic --
-        // see lightIsDeltaForMis().
+        // see lightIsDeltaForMis(). The projector's image modulates how much
+        // light leaves in a direction, not how the sampler picked it, so its
+        // density is the point light's.
         return punctualLightIsSoft(q.radius) ? sphereLightSolidAnglePdf(q.distToLight, q.cosAtLight, q.radius) :
                                                deltaLightPdf();
     default:

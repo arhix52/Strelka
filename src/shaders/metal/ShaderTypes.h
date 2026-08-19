@@ -628,6 +628,12 @@ struct TriangleUpdateParams
 // pad0: spot inner cone (rad) or point soft radius.
 // pad1: KHR attenuation range (0 = infinite).
 // points[0].y for point/spot: IES profile index, or -1 when isotropic.
+// pad0: spot inner cone (rad), projector edge softness, or point soft radius.
+// pad1: KHR attenuation range (0 = infinite).
+// points[0] for point/spot/projector: (soft radius, IES profile, projector image
+// slot, projector frame aspect); an unused slot carries -1, not a stale value.
+// halfAngle: distant cone, spot outer cone, or half the projector's horizontal
+// field of view.
 struct UniformLight
 {
     vector_float4 points[4];
@@ -637,6 +643,22 @@ struct UniformLight
     float halfAngle;
     float pad0;
     float pad1;
+    // The image a projector throws: 8 bytes, a resource ID on the CPU and a
+    // texture handle on the GPU, exactly like the maps in Material below.
+    //
+    // In the light struct rather than in a table of its own because the shade
+    // kernel has no room for one: it binds buffers 0 through 30 and Metal allows
+    // 31. MetalLights::upload resolves the slot in Scene::Light::points[0].z
+    // into this handle while it copies the lights across, which is also why this
+    // field has no counterpart in the host's backend-neutral Scene::Light.
+#ifdef __METAL_VERSION__
+    texture2d<float> projectorTexture;
+#else
+    MTL::ResourceID projectorTexture;
+#endif
+    // Spelled out so both compilers agree on 128 bytes rather than each padding
+    // a 120-byte struct to its own idea of the vector_float4 alignment.
+    float _padProjector[2];
 };
 
 // Packed IES candela tables for the GPU. MetalLights lays the buffer out as:

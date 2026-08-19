@@ -38,7 +38,7 @@ bool subtreeMatchesFilter(const Scene& scene, int nodeId, const ImGuiTextFilter&
     {
         return true;
     }
-    for (int child : node.children)
+    for (const int child : node.children)
     {
         if (subtreeMatchesFilter(scene, child, filter))
         {
@@ -113,7 +113,7 @@ void EditorApp::drawNodeRecursive(int nodeId, const ImGuiTextFilter& filter)
     }
     if (open)
     {
-        for (int child : node.children)
+        for (const int child : node.children)
         {
             drawNodeRecursive(child, filter);
         }
@@ -137,8 +137,10 @@ void EditorApp::drawOutlinerPanel()
     {
         for (uint32_t i = 0; i < lights.size(); ++i)
         {
-            static const char* kTypeNames[] = { "rect", "disc", "sphere", "distant", "dome", "point", "spot" };
-            const char* typeName = lights[i].type >= 0 && lights[i].type < 7 ? kTypeNames[lights[i].type] : "unknown";
+            // lightTypeName() rather than a table of its own: this one had to be
+            // kept in step with the LightType enum by hand, and a new light type
+            // showed up here as "unknown" until someone noticed.
+            const char* typeName = lightTypeName(lights[i].type);
             const std::string name = lights[i].name.empty() ? fmt::format("Light {}", i) : lights[i].name;
             const std::string label = fmt::format("{} ({}){}", name, typeName, lights[i].enabled ? "" : " [off]");
             if (ImGui::Selectable(label.c_str(), m_selectedLightId == i))

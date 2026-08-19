@@ -701,6 +701,10 @@ LightConnection connectLight(constant Uniforms& uniforms,
         break;
     case LIGHT_TYPE_POINT:
     case LIGHT_TYPE_SPOT:
+    case LIGHT_TYPE_PROJECTOR:
+        // One sampler for all three: a lamp at a point, or the sphere a soft
+        // radius turns it into. What differs is the angular profile applied
+        // below, not where the sample is taken.
         lightSampleData = SamplePointLight(light, uv, si.position);
         break;
     }
@@ -714,7 +718,7 @@ LightConnection connectLight(constant Uniforms& uniforms,
     c.isDelta = lightIsDeltaForMis(light.type);
 
     float3 Li = float3(light.color);
-    if (light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT)
+    if (lightIsPunctual(light.type))
     {
         const float dist = max(lightSampleData.distToLight, 1e-4f);
         // Colour is radiant intensity either way, but the two cases turn it into
@@ -730,7 +734,14 @@ LightConnection connectLight(constant Uniforms& uniforms,
         // the file is already in candela, and the light's intensity is a
         // multiplier on top of it. No profile means the cone alone, as before.
         const bool hasIes = light.points[0].y >= 0.0f;
-        if (hasIes)
+        if (light.type == LIGHT_TYPE_PROJECTOR)
+        {
+            // The image *is* the profile, so it replaces the cone the same way
+            // an IES table would -- and a projector never carries both, which
+            // Scene::updateLight enforces by writing -1 into the IES slot.
+            Li *= projectorEmission(light, -lightSampleData.L);
+        }
+        else if (hasIes)
         {
             Li *= sampleIesCandela(iesBuffer, light, -lightSampleData.L);
         }
@@ -749,7 +760,7 @@ LightConnection connectLight(constant Uniforms& uniforms,
     // positive cosine there. Rejecting a sliver of grazing ones here while the
     // light hit still deducts a share for them loses that share outright. OptiX
     // has always tested against zero.
-    const bool punctual = light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT;
+    const bool punctual = lightIsPunctual(light.type);
     const bool lit = lightReachesShadingPoint(si, lightSampleData.L);
     const bool facesLight = lightSampleFacesVertex(-dot(lightSampleData.L, lightSampleData.normal));
     const bool facing = volumeEvent ? (emitsLight(Li) && (punctual || facesLight)) :

@@ -327,6 +327,9 @@ private:
 
     void createLightBuffer();
     void createIesBuffer();
+    /// Images thrown by projector lights, indexed by each light's points[0].z.
+    void createProjectorTextures();
+    void destroyProjectorTextures();
 
     oka::optix_tex::DecodeSettings textureDecodeSettings() const;
     Texture loadTextureFromFile(const std::string& fileName, oka::optix_tex::Kind kind);
@@ -355,6 +358,12 @@ private:
     std::vector<cudaArray_t> mMaterialTextureArrays;
     std::vector<cudaMipmappedArray_t> mMaterialTextureMipmappedArrays;
     std::vector<cudaTextureObject_t> mMaterialTextureObjects;
+    // A third set, apart from both of the above: a projector's slide belongs to
+    // the light set, so it survives a material reload, and it is not the
+    // environment either.
+    std::vector<cudaArray_t> mProjectorTextureArrays;
+    std::vector<cudaTextureObject_t> mProjectorTextureObjects;
+    std::unique_ptr<OptixBuffer> mProjectorTextureBuffer;
 
     // Environment map resources
     std::unique_ptr<OptixBuffer> mEnvAliasBuffer; // Walker/Vose alias table, one entry per texel

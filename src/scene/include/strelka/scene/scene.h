@@ -3,6 +3,9 @@
 #include "camera.h"
 #include <strelka/material/material_params.h>
 #include <light_types.h>
+// lightTypeIsPunctual() and the radiometric bake. A light description is not
+// usable without them, and the header costs nothing beyond light_types.h.
+#include <strelka/scene/light_desc.h>
 
 #include <cstdint>
 #include <cmath>
@@ -298,6 +301,10 @@ public:
 
         // Spot cone, radians. Defaults match KHR_lights_punctual (π/4 outer,
         // 0 inner = hard edge). Emission along local -Z, like every other light.
+        //
+        // A projector reads outerConeAngle as half of its *horizontal* field of
+        // view and ignores the inner angle: its edge is a rectangle, not a cone,
+        // and softening it is projectorEdgeSoftness below.
         float innerConeAngle = 0.0f;
         float outerConeAngle = float(M_PI) / 4.0f;
 
@@ -308,6 +315,23 @@ public:
         // isotropic. Indexed into Scene::mIesProfiles at bake time.
         std::string iesPath;
         int32_t iesProfile = -1;
+
+        // Projector: the image it throws, resolved relative to the scene, and
+        // its index in Scene::mProjectorImages -- the same two-field shape the
+        // IES profile above uses, and for the same reason. The renderer turns
+        // that index into a texture of its own kind (an MTL::ResourceID on
+        // Metal, a cudaTextureObject_t on OptiX), so nothing here has to know
+        // which backend is running. Empty path = a plain white frame, which is
+        // still a usable rectangular spot.
+        std::string projectorImagePath;
+        int32_t projectorImage = -1;
+        // Width / height of the thrown frame. 16:9 because that is what a home
+        // projector is, and because a wrong aspect is otherwise only visible as
+        // a subtly stretched image.
+        float projectorAspect = 16.0f / 9.0f;
+        // Fraction of the frame's half extent over which the edge fades out.
+        // 0 = the crisp border a focused projector has.
+        float projectorEdgeSoftness = 0.0f;
     };
 
     // Candela table from an IESNA LM-63 file. Sampled on the GPU by (θ, φ).
@@ -378,6 +402,11 @@ public:
     std::vector<Instance> mInstances;
     std::vector<Light> mLights;
     std::vector<IesProfile> mIesProfiles;
+    /// Images thrown by projector lights, in the order the GPU table holds them.
+    /// A light carries the index, never the path, for the same reason an IES
+    /// light does: the renderer walks this list once and the light struct stays
+    /// a fixed size.
+    std::vector<std::string> mProjectorImages;
 
     std::vector<uint32_t> mTransparentInstances;
     std::vector<uint32_t> mOpaqueInstances;
@@ -617,11 +646,11 @@ public:
         {
             scale = glm::float3(desc.width, desc.height, 1.0f);
         }
-        else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPHERE ||
-                 desc.type == LIGHT_TYPE_POINT || desc.type == LIGHT_TYPE_SPOT)
+        else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPHERE || lightTypeIsPunctual(desc.type))
         {
-            // Point/spot use radius as a viewport proxy (and soft size); a zero
-            // radius still needs a unit scale so the orientation is not lost.
+            // Point/spot/projector use radius as a viewport proxy (and soft
+            // size); a zero radius still needs a unit scale so the orientation is
+            // not lost.
             const float r = desc.radius > 0.0f ? desc.radius : 1.0f;
             scale = glm::float3(r);
         }
@@ -746,6 +775,14 @@ public:
     const std::vector<IesProfile>& getIesProfiles() const
     {
         return mIesProfiles;
+    }
+
+    /// Register an image for a projector light and return its index, reusing the
+    /// entry when the same file is already in the table.
+    int32_t addProjectorImage(const std::string& path);
+    const std::vector<std::string>& getProjectorImages() const
+    {
+        return mProjectorImages;
     }
 
     uint32_t getLightInstanceId(uint32_t lightId) const

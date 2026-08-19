@@ -110,6 +110,7 @@
     #define copysignf(x,y) metal::copysign(x, y)
     #define acosf(x)   metal::acos(x)
     #define asinf(x)   metal::asin(x)
+    #define tanf(x)    metal::tan(x)
     #define atan2f(y,x) metal::atan2(y, x)
     #define expf(x)    metal::exp(x)
     #define logf(x)    metal::log(x)

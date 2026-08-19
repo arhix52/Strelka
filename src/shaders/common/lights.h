@@ -8,6 +8,7 @@
 #include <light_pdf.h>
 #include <rect_sampling.h>
 #include <ies_math.h>
+#include <projector.h>
 
 // GPU side structure
 // pad0: spot inner cone (rad) or point soft radius.
@@ -82,10 +83,9 @@ static __inline__ __device__ float calcLightArea(const UniformLight& l)
     {
         area = sphereLightArea(l.points[0].x);
     }
-    else if (punctualLightIsSoft(l.points[0].x) &&
-             (l.type == LIGHT_TYPE_POINT || l.type == LIGHT_TYPE_SPOT))
+    else if (punctualLightIsSoft(l.points[0].x) && lightIsPunctual(l.type))
     {
-        // A point or spot with a radius is sampled as a sphere, so it needs the
+        // A point, spot or projector with a radius is sampled as a sphere, so it needs the
         // same area the sphere's density divides by. Without this case
         // fillLightData() left the area at zero and the density collapsed to the
         // constant it used to be.
@@ -109,9 +109,9 @@ static __inline__ __device__ float3 calcLightNormal(const UniformLight& l, const
     {
         norm = make_float3(l.normal);
     }
-    else if (l.type == LIGHT_TYPE_SPHERE || l.type == LIGHT_TYPE_POINT || l.type == LIGHT_TYPE_SPOT)
+    else if (l.type == LIGHT_TYPE_SPHERE || lightIsPunctual(l.type))
     {
-        // points[1] is the centre for all three. A soft point is a sphere and
+        // points[1] is the centre for all of them. A soft point is a sphere and
         // needs a real surface normal for the area-to-solid-angle conversion; a
         // sharp one never reaches a density that uses it.
         norm = normalize(hitPoint - make_float3(l.points[1]));
@@ -171,7 +171,7 @@ static __inline__ __device__ LightPdfQuery buildLightPdfQuery(const UniformLight
     q.cosAtLight = -dot(d.L, d.normal);
     q.area = d.area;
     q.halfAngle = l.halfAngle;
-    if (l.type == LIGHT_TYPE_SPHERE || l.type == LIGHT_TYPE_POINT || l.type == LIGHT_TYPE_SPOT)
+    if (l.type == LIGHT_TYPE_SPHERE || lightIsPunctual(l.type))
     {
         q.radius = l.points[0].x;
     }
@@ -430,6 +430,38 @@ static __inline__ __device__ float rangeWindow(const UniformLight& l, float dist
     return y * y;
 }
 
+
+// The index of the image a projector light throws, or a negative number when it
+// throws a plain white frame. points[0].z, the slot Scene::updateLight fills
+// from UniformLightDesc::projectorImage.
+static __inline__ __device__ int projectorImageIndex(const UniformLight& l)
+{
+    return (int)l.points[0].z;
+}
+
+/// Where a direction leaving a projector lands on the image it throws.
+///
+/// The light's own frame is rebuilt from points[2..3] and normal, exactly as
+/// sampleIesCandela does below -- a projector is the same lamp with a different
+/// angular profile, and it inherits that packing rather than a second one.
+/// halfAngle is half the horizontal field of view and points[0].w the frame's
+/// aspect; pad0 is the edge feather.
+///
+/// The texture fetch is deliberately *not* here. This backend indexes
+/// params.scene.projectorTextures with the slot above, Metal keeps the handle
+/// inside its own copy of the light struct, and neither spelling survives being
+/// written down in code the other compiler has to read -- the same split bsdf.h
+/// makes for material maps.
+static __inline__ __device__ ProjectorSample projectorSampleForLight(const UniformLight& l, const float3 dirFromLight)
+{
+    const float3 ax = normalize(make_float3(l.points[2]));
+    const float3 ay = normalize(make_float3(l.points[3]));
+    const float3 az = normalize(make_float3(l.normal)); // emission axis, the light's -Z
+    const float3 d = normalize(dirFromLight);
+    const float tanX = projectorTanHalfX(l.halfAngle);
+    const float tanY = projectorTanHalfY(tanX, l.points[0].w);
+    return projectorProject(dot(d, ax), dot(d, ay), dot(d, az), tanX, tanY, l.pad0);
+}
 
 // Bilinear sample of an IES candela table. `dirFromLight` is world-space; the
 // light's local frame is rebuilt from points[2..3] (X/Y axes) and normal (-Z),

@@ -58,6 +58,11 @@ struct SceneData
     /// null once the scene is built -- a scene with no profile still gets a
     /// zero-count header, so sampleIesCandela() needs no null check per light.
     const IesGpuBufferHeader* iesProfiles;
+    /// Images thrown by projector lights, indexed by each light's points[0].z.
+    /// Null when the scene has no projector, so the fetch checks -- unlike the
+    /// IES table this is an array of texture objects, and an empty one has no
+    /// header to make a zero-length version of.
+    const cudaTextureObject_t* projectorTextures;
 };
 
 /// How `AovSample::depth` is encoded. Mirrors kDenoiseDepth* in the Metal

@@ -657,7 +657,18 @@ bool MetalRender::memoryReport(MemoryReport& report) const
     add("Curves", bufBytes(mGeometry.curvePointBuffer()) + bufBytes(mGeometry.curveRadiusBuffer()) +
                       bufBytes(mGeometry.curveSegmentBuffer()));
     add("Materials", bufBytes(mMaterials.buffer()));
-    add("Lights", bufBytes(mLights.buffer()));
+    {
+        // The slides projector lights throw belong here rather than with the
+        // material maps: they are owned by the light domain and survive a
+        // material reload, so counting them there would show them vanishing and
+        // reappearing for reasons that have nothing to do with them.
+        size_t lightBytes = bufBytes(mLights.buffer()) + bufBytes(mLights.iesBuffer());
+        for (MTL::Texture* t : mLights.projectorTextures())
+        {
+            lightBytes += texBytes(t);
+        }
+        add("Lights", lightBytes);
+    }
     add("Skinning", bufBytes(mSkinning.skinDataBuffer()) + bufBytes(mSkinning.jointMatricesBuffer()));
 
     // The per-path side tables: one entry per pixel per stage, so they scale with
@@ -853,6 +864,11 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mMaterials.buffer());
     add(mLights.buffer());
     add(mLights.iesBuffer());
+    // The light buffer names these by handle and nothing else does. Metal 4 has
+    // no useResource to fall back on, so a projector's slide that the argument
+    // table reaches and the residency set does not is a page fault.
+    for (MTL::Texture* t : mLights.projectorTextures())
+        add(t);
     add(mGeometry.geometryEntryBuffer());
     add(mSceneTablePlaceholder);
     add(mGeometry.curvePointBuffer());
@@ -2773,7 +2789,7 @@ MTL::Library* MetalRender::loadShaderLibrary(const char* relativePath)
 
 void MetalRender::uploadLightBuffer()
 {
-    mLights.upload(mScene->getLights(), mScene->getIesProfiles());
+    mLights.upload(mScene->getLights(), mScene->getIesProfiles(), mScene->getProjectorImages(), mTextures);
 }
 
 void MetalRender::handleSceneChanges()
@@ -2817,6 +2833,15 @@ void MetalRender::handleSceneChanges()
         needReset = true;
         needSharcReset |= !responsiveSharc;
     }
+
+    // Any branch above can have replaced an allocation the residency set names:
+    // a light edit grows the light buffer or decodes a projector's slide, a
+    // material edit reloads its maps, a new environment is a new texture. Metal 4
+    // has no useResource to fall back on, so an address in an argument table that
+    // the set does not know about is a fault rather than a validation message --
+    // and the set is otherwise refreshed only when the integrator's capacity
+    // changes, which an edit never touches.
+    mMetal4ResidencyGeneration = 0;
 
     mScene->consumeChanges();
     if (needReset)

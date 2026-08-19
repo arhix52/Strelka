@@ -9,6 +9,7 @@
 #include <ies_math.h>
 #include <rect_sampling.h>
 #include <light_pdf.h>
+#include <projector.h>
 
 using namespace metal;
 
@@ -48,10 +49,10 @@ static float calcLightArea(device const UniformLight& l)
     }
     case LIGHT_TYPE_POINT:
     case LIGHT_TYPE_SPOT:
-    {
-        // A point or spot with a radius is sampled as a sphere and needs the
-        // same area its density divides by. A sharp one has none and never
-        // reaches a density that reads this.
+    case LIGHT_TYPE_PROJECTOR: {
+        // A point, spot or projector with a radius is sampled as a sphere and
+        // needs the same area its density divides by. A sharp one has none and
+        // never reaches a density that reads this.
         if (punctualLightIsSoft(l.points[0].x))
         {
             area = sphereLightArea(l.points[0].x);
@@ -79,8 +80,9 @@ static float3 calcLightNormal(device const UniformLight& l, thread const float3 
     }
     case LIGHT_TYPE_SPHERE:
     case LIGHT_TYPE_POINT:
-    case LIGHT_TYPE_SPOT: {
-        // points[1] is the centre for all three.
+    case LIGHT_TYPE_SPOT:
+    case LIGHT_TYPE_PROJECTOR: {
+        // points[1] is the centre for all of them.
         norm = normalize(hitPoint - float3(l.points[1]));
         break;
     }
@@ -340,6 +342,61 @@ static __inline__ float spotAttenuation(device const UniformLight& l, const floa
 }
 
 
+/// Where a direction leaving a projector lands on the image it throws.
+///
+/// The light's own frame is rebuilt from points[2..3] and normal, exactly as
+/// sampleIesCandela does below -- a projector is the same lamp with a different
+/// angular profile, and it inherits that packing rather than a second one.
+/// halfAngle is half the horizontal field of view, points[0].w the frame's
+/// aspect, pad0 the edge feather.
+///
+/// The fetch is the caller's: on this backend the image handle rides in the
+/// light struct itself (see ShaderTypes.h), because the shade kernel has no
+/// binding slot left for a table -- all 31 are spoken for.
+static __inline__ ProjectorSample projectorSampleForLight(device const UniformLight& l, const float3 dirFromLight)
+{
+    const float3 ax = normalize(float3(l.points[2]));
+    const float3 ay = normalize(float3(l.points[3]));
+    const float3 az = normalize(float3(l.normal)); // emission axis, the light's -Z
+    const float3 d = normalize(dirFromLight);
+    const float tanX = projectorTanHalfX(l.halfAngle);
+    const float tanY = projectorTanHalfY(tanX, l.points[0].w);
+    return projectorProject(dot(d, ax), dot(d, ay), dot(d, az), tanX, tanY, l.pad0);
+}
+
+/// What a projector emits in a direction, as a multiplier on its intensity.
+///
+/// The image, faded at the frame's edge, and black outside the frame -- so the
+/// caller can multiply unconditionally the way it does with an IES table. A
+/// projector with no image throws a plain white rectangle, which is a usable
+/// light in its own right and is what an unresolved path degrades to rather than
+/// darkness.
+///
+/// Level 0, deliberately. A compute kernel has no derivatives, and the footprint
+/// that would set the level here is the *camera's* on the receiving surface, not
+/// anything this function can see -- the same reason the material fetches take
+/// an explicitly computed level. Sampling the top level makes a projector as
+/// sharp as its image and leaves minification aliasing to be resolved by the
+/// pixel samples, which converge on the right answer because they are jittered
+/// across the pixel.
+static __inline__ float3 projectorEmission(device const UniformLight& l, const float3 dirFromLight)
+{
+    const ProjectorSample p = projectorSampleForLight(l, dirFromLight);
+    if (!p.inside)
+    {
+        return float3(0.0f);
+    }
+    if (is_null_texture(l.projectorTexture))
+    {
+        return float3(p.falloff);
+    }
+    // clamp_to_edge on both axes: a slide has an edge, and repeating it would
+    // tile the wall with copies of the frame the moment a sample lands a texel
+    // outside from the bilinear tap.
+    constexpr sampler projectorSampler(mag_filter::linear, min_filter::linear, address::clamp_to_edge, coord::normalized);
+    return p.falloff * l.projectorTexture.sample(projectorSampler, float2(p.u, p.v), level(0.0f)).rgb;
+}
+
 // Bilinear sample of an IES candela table. `dirFromLight` is world-space; the
 // light's local frame is rebuilt from points[2..3] (X/Y axes) and normal (−Z),
 // the same packing Scene::updateLight writes for the CPU sampler.
@@ -401,7 +458,7 @@ static __inline__ LightPdfQuery buildLightPdfQuery(device const UniformLight& l,
     q.cosAtLight = -dot(d.L, d.normal);
     q.area = d.area;
     q.halfAngle = l.halfAngle;
-    if (l.type == LIGHT_TYPE_SPHERE || l.type == LIGHT_TYPE_POINT || l.type == LIGHT_TYPE_SPOT)
+    if (l.type == LIGHT_TYPE_SPHERE || lightIsPunctual(l.type))
     {
         q.radius = l.points[0].x;
     }

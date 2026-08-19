@@ -108,6 +108,7 @@ bool loadLightsJson(Scene& scene, const std::string& lightJsonPath)
     {
         Scene::UniformLightDesc desc = lightjson::parseDesc(light, searchDir);
         lightjson::resolveIes(scene, desc, searchDir);
+        lightjson::resolveProjectorImage(scene, desc, searchDir);
         scene.createLight(desc);
     }
 
@@ -216,9 +217,12 @@ bool saveGltf(const Scene& scene, const std::string& outputPath)
         std::vector<float> positions;
         std::vector<float> normals;
         std::vector<float> uvs;
-        positions.reserve(mesh.mVertexCount * 3);
-        normals.reserve(mesh.mVertexCount * 3);
-        uvs.reserve(mesh.mVertexCount * 2);
+        // size_t before the multiply, not after: a mesh past 1.4 billion
+        // vertices would otherwise wrap in uint32_t and reserve a fraction of
+        // what the loop then pushes.
+        positions.reserve(size_t(mesh.mVertexCount) * 3);
+        normals.reserve(size_t(mesh.mVertexCount) * 3);
+        uvs.reserve(size_t(mesh.mVertexCount) * 2);
         for (uint32_t i = 0; i < mesh.mVertexCount; ++i)
         {
             const Scene::Vertex& v = vertices[mesh.mVbOffset + i];

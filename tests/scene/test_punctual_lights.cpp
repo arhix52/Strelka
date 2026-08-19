@@ -52,6 +52,74 @@ TEST_CASE("spot light stores cone angles and emits along -Z")
     CHECK(glm::normalize(glm::float3(gpu.normal)).z == doctest::Approx(-1.0f).epsilon(1e-4));
 }
 
+TEST_CASE("projector light packs its frame, its image and its axes")
+{
+    Scene scene;
+    Scene::UniformLightDesc desc{};
+    desc.type = LIGHT_TYPE_PROJECTOR;
+    desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+    desc.intensity = 1000.0f;
+    desc.color = glm::float3(1.0f);
+    desc.position = glm::float3(0.0f, 2.0f, 3.0f);
+    desc.orientation = glm::float3(0.0f);
+    desc.outerConeAngle = 0.35f; // half the horizontal field of view
+    desc.projectorAspect = 16.0f / 9.0f;
+    desc.projectorEdgeSoftness = 0.1f;
+    desc.projectorImage = scene.addProjectorImage("slides/beach.png");
+    const uint32_t id = scene.createLight(desc);
+
+    const Scene::Light& gpu = scene.getLights()[id];
+    CHECK(gpu.type == LIGHT_TYPE_PROJECTOR);
+    CHECK(gpu.halfAngle == doctest::Approx(desc.outerConeAngle));
+    CHECK(gpu.pad0 == doctest::Approx(desc.projectorEdgeSoftness));
+    CHECK(gpu.points[0].z == doctest::Approx(0.0f)); // first image in the table
+    CHECK(gpu.points[0].w == doctest::Approx(16.0f / 9.0f));
+    CHECK(glm::float3(gpu.points[1]) == desc.position);
+    // Emission along -Z with the frame's right and up axes beside it, which is
+    // the basis the shader rebuilds to find a direction's place in the image.
+    CHECK(glm::normalize(glm::float3(gpu.normal)).z == doctest::Approx(-1.0f).epsilon(1e-4));
+    CHECK(glm::normalize(glm::float3(gpu.points[2])).x == doctest::Approx(1.0f).epsilon(1e-4));
+    CHECK(glm::normalize(glm::float3(gpu.points[3])).y == doctest::Approx(1.0f).epsilon(1e-4));
+}
+
+TEST_CASE("a projector carries no IES profile, even one left over from a spot")
+{
+    // The image is the angular profile. Applying a table as well would shape the
+    // beam twice, so the slot is cleared on the way to the GPU rather than left
+    // holding whatever the desc still remembers from before the type changed.
+    Scene scene;
+    Scene::IesProfile profile;
+    profile.path = "left-over.ies";
+    profile.verticalAngles = { 0.0f, 90.0f };
+    profile.horizontalAngles = { 0.0f, 360.0f };
+    profile.candela = { 1.0f, 1.0f, 1.0f, 1.0f };
+    profile.maxCandela = 1.0f;
+
+    Scene::UniformLightDesc desc{};
+    desc.type = LIGHT_TYPE_SPOT;
+    desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+    desc.intensity = 10.0f;
+    desc.color = glm::float3(1.0f);
+    desc.iesProfile = scene.addIesProfile(profile);
+    const uint32_t id = scene.createLight(desc);
+    CHECK(scene.getLights()[id].points[0].y == doctest::Approx(0.0f));
+
+    desc.type = LIGHT_TYPE_PROJECTOR;
+    scene.setLight(id, desc);
+    CHECK(scene.getLights()[id].points[0].y == doctest::Approx(-1.0f));
+}
+
+TEST_CASE("the projector image table reuses an entry for the same file")
+{
+    Scene scene;
+    const int32_t first = scene.addProjectorImage("slides/beach.png");
+    const int32_t again = scene.addProjectorImage("slides/beach.png");
+    const int32_t other = scene.addProjectorImage("slides/city.png");
+    CHECK(first == again);
+    CHECK(other != first);
+    CHECK(scene.getProjectorImages().size() == 2);
+}
+
 TEST_CASE("disabling a light zeroes its GPU contribution")
 {
     Scene scene;

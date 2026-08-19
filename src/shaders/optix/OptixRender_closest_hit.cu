@@ -268,6 +268,40 @@ static __forceinline__ __device__ float3 shadowOrigin(const SurfaceInteraction& 
     return offset_ray(si.position, orientedFaceNormal(si.geometry_normal, toLight));
 }
 
+/// What a projector emits in a direction, as a multiplier on its intensity.
+///
+/// The image it throws, faded at the frame's edge, and black outside the frame,
+/// so the caller multiplies unconditionally the way it does with an IES table.
+/// A projector with no image throws a plain white rectangle -- a usable light,
+/// and what an image that failed to load degrades to rather than darkness.
+///
+/// Here rather than in common/lights.h because tex2D is a device intrinsic and
+/// that header is also compiled by the OptiX backend's host translation units.
+/// The frame maths it does share; only this fetch is CUDA's.
+static __forceinline__ __device__ float3 projectorEmission(const UniformLight& light, const float3 dirFromLight)
+{
+    const ProjectorSample p = projectorSampleForLight(light, dirFromLight);
+    if (!p.inside)
+    {
+        return make_float3(0.0f);
+    }
+    const int slot = projectorImageIndex(light);
+    if (slot < 0 || params.scene.projectorTextures == nullptr)
+    {
+        return make_float3(p.falloff);
+    }
+    const cudaTextureObject_t tex = params.scene.projectorTextures[slot];
+    if (tex == 0)
+    {
+        return make_float3(p.falloff);
+    }
+    // The texture is created with clamp addressing (see createProjectorTextures):
+    // a slide has an edge, and repeating it would tile the wall with copies of
+    // the frame as soon as a bilinear tap reached a texel past the border.
+    const float4 slide = tex2D<float4>(tex, p.u, p.v);
+    return p.falloff * make_float3(slide);
+}
+
 static __device__ LightConnection connectLight(SamplerState& sampler,
                                                const UniformLight& light,
                                                const SurfaceInteraction& si,
@@ -307,6 +341,10 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
         break;
     case LIGHT_TYPE_POINT:
     case LIGHT_TYPE_SPOT:
+    case LIGHT_TYPE_PROJECTOR:
+        // One sampler for all three: a lamp at a point, or the sphere a soft
+        // radius turns it into. What differs is the angular profile applied
+        // below, not where the sample is taken.
         lightSampleData = SamplePointLight(light, uv, si.position);
         break;
     }
@@ -322,7 +360,7 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
     c.isDelta = lightIsDeltaForMis(light.type);
 
     float3 Li = make_float3(light.color);
-    if (light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT)
+    if (lightIsPunctual(light.type))
     {
         const float dist = fmaxf(lightSampleData.distToLight, 1e-4f);
         // Colour is radiant intensity either way, but the two cases turn it into
@@ -342,7 +380,14 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
         // Applying the cone as well would count the luminaire's aperture twice,
         // once from the file and once from the sidecar's outer angle.
         const bool hasIes = light.points[0].y >= 0.0f;
-        if (hasIes)
+        if (light.type == LIGHT_TYPE_PROJECTOR)
+        {
+            // The image *is* the profile, so it replaces the cone exactly as an
+            // IES table would -- and a projector never carries both, which
+            // Scene::updateLight enforces by writing -1 into the IES slot.
+            Li *= projectorEmission(light, -lightSampleData.L);
+        }
+        else if (hasIes)
         {
             Li *= sampleIesCandela(params.scene.iesProfiles, light, -lightSampleData.L);
         }
@@ -356,10 +401,9 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
     // fibre, where the hemisphere test is the wrong question -- see the note on
     // it in shading/shading_common.h.
     const bool lit = volumeEvent || lightReachesShadingPoint(si, lightSampleData.L);
-    const bool facing = (light.type == LIGHT_TYPE_POINT || light.type == LIGHT_TYPE_SPOT)
-                            ? (lit && emitsLight(Li))
-                            : (lit && -dot(lightSampleData.L, lightSampleData.normal) > 0.0f &&
-                               emitsLight(Li));
+    const bool facing = lightIsPunctual(light.type) ?
+                            (lit && emitsLight(Li)) :
+                            (lit && -dot(lightSampleData.L, lightSampleData.normal) > 0.0f && emitsLight(Li));
     if (facing)
     {
         // The cosine belongs here because bsdf_eval() returns f alone, unlike

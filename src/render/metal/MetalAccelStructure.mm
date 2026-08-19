@@ -718,7 +718,7 @@ bool MetalAccelStructure::step(double budgetMs)
                 const bool visibleToCamera = curr.mLightId < mScene->getLightsDesc().size() ?
                                                  mScene->getLightsDesc()[curr.mLightId].visibleToCamera :
                                                  true;
-                if (!enabled || lightType == LIGHT_TYPE_POINT || lightType == LIGHT_TYPE_SPOT)
+                if (!enabled || lightTypeIsPunctual(lightType))
                     emitted.mask = 0;
                 else
                     emitted.mask = visibleToCamera ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_LIGHT_HIDDEN;

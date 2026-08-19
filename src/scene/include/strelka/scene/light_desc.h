@@ -8,6 +8,7 @@
 // in first.
 #include <strelka/scene/glm_wrapper.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 
@@ -31,6 +32,8 @@ inline const char* lightTypeName(int type)
         return "point";
     case LIGHT_TYPE_SPOT:
         return "spot";
+    case LIGHT_TYPE_PROJECTOR:
+        return "projector";
     case LIGHT_TYPE_DOME:
         return "dome";
     default:
@@ -66,7 +69,23 @@ inline int lightTypeFromName(const std::string& name)
         return LIGHT_TYPE_POINT;
     if (name == "spot")
         return LIGHT_TYPE_SPOT;
+    if (name == "projector" || name == "gobo")
+        return LIGHT_TYPE_PROJECTOR;
     return LIGHT_TYPE_RECT;
+}
+
+/// True when a light is a lamp at a point rather than a surface: point, spot or
+/// projector.
+///
+/// The host mirror of lightIsPunctual() in shaders/common/light_pdf.h, which is
+/// the same question asked on the device. The two are separate because that
+/// header is written against whichever vector spellings the device path
+/// installs, and a scene header reached from the editor, the loaders and both
+/// backends' host code cannot drag those in. Anything that changes on one side
+/// changes on the other.
+inline bool lightTypeIsPunctual(int type)
+{
+    return type == LIGHT_TYPE_POINT || type == LIGHT_TYPE_SPOT || type == LIGHT_TYPE_PROJECTOR;
 }
 
 inline int lightUnitFromName(const std::string& name)
@@ -115,6 +134,33 @@ inline float coneSolidAngle(float halfAngleRad)
     return 4.0f * float(M_PI) * s * s;
 }
 
+/// Solid angle of the rectangular pyramid a projector throws into, from half of
+/// its horizontal field of view and the frame's aspect (width / height).
+///
+/// Omega = 4 asin(sin a sin b), and the host mirror of projectorSolidAngle() in
+/// shaders/common/projector.h: the bake below divides a projector's Watts by
+/// this number and the shader spreads the image back out over exactly that
+/// pyramid, so the two have to agree to the last bit. tests/render/
+/// test_projector.cpp pins them against each other for that reason.
+///
+/// Copied rather than included for the same reason coneSolidAngle() above is a
+/// copy of coneSolidAngleFromHalfAngle(). The shader header is written against
+/// whichever vector spellings the device path installs, and dragging it into a
+/// scene header that every target on three platforms includes would put
+/// material_math.h ahead of sutil in translation units that have no reason to
+/// know about either.
+inline float projectorSolidAngleFromFov(float halfFovX, float aspect)
+{
+    // The same clamp projectorTanHalfX() applies: at 90 degrees the tangent is
+    // infinite and the pyramid is a half space, which is not a projector.
+    const float ax = std::min(std::max(halfFovX, 1e-4f), 1.55334f);
+    const float tanX = std::tan(ax);
+    const float tanY = tanX / std::max(aspect, 1e-4f);
+    const float sinX = tanX / std::sqrt(1.0f + tanX * tanX);
+    const float sinY = tanY / std::sqrt(1.0f + tanY * tanY);
+    return 4.0f * std::asin(std::min(sinX * sinY, 1.0f));
+}
+
 /// Area of the light's emissive surface in world units squared. Zero for
 /// punctual and distant lights.
 inline float lightSurfaceArea(int type, float width, float height, float radius)
@@ -134,8 +180,8 @@ inline float lightSurfaceArea(int type, float width, float height, float radius)
 
 /// Convert the authored intensity into the quantity the shader expects in
 /// UniformLight::color:
-///   area / distant → radiance (W/sr/m²)
-///   point / spot    → radiant intensity (W/sr), divided by r² in the shader
+///   area / distant           → radiance (W/sr/m²)
+///   point / spot / projector → radiant intensity (W/sr), divided by r² in the shader
 inline glm::float3 bakeLightRadiometric(int type,
                                         int unit,
                                         const glm::float3& color,
@@ -144,7 +190,11 @@ inline glm::float3 bakeLightRadiometric(int type,
                                         float height,
                                         float radius,
                                         float halfAngleRad,
-                                        float outerConeAngleRad)
+                                        float outerConeAngleRad,
+                                        // Projector only: the frame's width / height. Trailing and
+                                        // defaulted because every other light type has no frame, and
+                                        // the callers that predate the projector say nothing about one.
+                                        float projectorAspect = 1.0f)
 {
     const glm::float3 tint = color * std::max(intensity, 0.0f);
     if (intensity <= 0.0f)
@@ -165,6 +215,17 @@ inline glm::float3 bakeLightRadiometric(int type,
         if (type == LIGHT_TYPE_SPOT)
         {
             const float omega = std::max(coneSolidAngle(outerConeAngleRad), 1e-8f);
+            return tint / omega;
+        }
+        if (type == LIGHT_TYPE_PROJECTOR)
+        {
+            // Same idea as the spot, over a rectangular pyramid instead of a
+            // cone: I = Phi / Omega, so that integrating the light over the frame
+            // it actually fills gives back the Watts that were typed in. The
+            // image on top averages whatever it averages -- a slide that is half
+            // black throws half the light, which is what a real projector does
+            // with the same lamp.
+            const float omega = std::max(projectorSolidAngleFromFov(outerConeAngleRad, projectorAspect), 1e-8f);
             return tint / omega;
         }
         if (type == LIGHT_TYPE_DISTANT)

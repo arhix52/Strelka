@@ -1,0 +1,33 @@
+# A projector light thrown onto the back wall of the Cornell box.
+#
+# The room's own rect light is gone on purpose: everything in frame is either the
+# slide or a bounce off it, so a mapping mistake -- a mirrored image, a wrong
+# aspect, an upside-down frame -- is visible at a glance rather than washed out
+# by another light. The slide is a colour-bar card with a red L in its top-left
+# corner for exactly that reason.
+[scene]
+path = "projector_room.glb"
+
+[output]
+path = "output/projector_room.exr"
+width = 512
+height = 384
+
+[render]
+spp = 256
+spp_per_launch = 1
+max_depth = 8
+sampler = "sobol"
+
+[camera]
+index = 0
+position = [0.0, 1.0, 3.5]
+target = [0.0, 1.0, 0.0]
+fov = 45.0
+
+[tonemap]
+type = "aces"
+gamma = 0.0
+exposure_iso = 6400.0
+exposure_fstop = 2.8
+exposure_shutter = 60.0

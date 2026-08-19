@@ -108,7 +108,7 @@ TEST_CASE("saveGltf does not embed lights; lights stay in sidecar")
     vb[0].pos = glm::float3(0, 0, 0);
     vb[1].pos = glm::float3(1, 0, 0);
     vb[2].pos = glm::float3(0, 1, 0);
-    std::vector<uint32_t> ib = { 0, 1, 2 };
+    const std::vector<uint32_t> ib = { 0, 1, 2 };
     const uint32_t meshId = scene.createMesh(vb, ib);
     scene.createInstance(Instance::Type::eMesh, meshId, 0, glm::mat4(1.0f));
 
@@ -125,7 +125,7 @@ TEST_CASE("saveGltf does not embed lights; lights stay in sidecar")
     // glTF ASCII should not mention analytic light types as Strelka lights
     std::ifstream in(gltfPath);
     REQUIRE(in);
-    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     CHECK(content.find("\"meshes\"") != std::string::npos);
     // KHR_lights_punctual not used
     CHECK(content.find("KHR_lights_punctual") == std::string::npos);
@@ -137,4 +137,89 @@ TEST_CASE("saveGltf does not embed lights; lights stay in sidecar")
     fs::remove(lightPath);
     // tinygltf may write .bin
     fs::remove(fs::temp_directory_path() / "strelka_minimal.bin");
+}
+
+TEST_CASE("a projector round-trips its frame and its image through the sidecar")
+{
+    Scene scene;
+    Scene::UniformLightDesc projector{};
+    projector.type = LIGHT_TYPE_PROJECTOR;
+    projector.name = "beamer";
+    projector.intensityUnit = LIGHT_UNIT_POWER;
+    projector.intensity = 250.0f;
+    projector.color = glm::float3(1.0f);
+    projector.position = glm::float3(0.0f, 1.8f, 4.0f);
+    projector.orientation = glm::float3(0.0f, 180.0f, 0.0f);
+    // 40 degrees of horizontal field, stored as its half angle.
+    projector.outerConeAngle = 20.0f * (float(M_PI) / 180.0f);
+    projector.projectorAspect = 16.0f / 9.0f;
+    projector.projectorEdgeSoftness = 0.05f;
+    projector.projectorImagePath = "slides/beach.png";
+    projector.range = 20.0f;
+    scene.createLight(projector);
+
+    const fs::path tmp = fs::temp_directory_path() / "strelka_projector.gltf";
+    REQUIRE(saveLightsJson(scene, tmp.string()));
+
+    Scene loaded;
+    const fs::path jsonPath = fs::temp_directory_path() / "strelka_projector_light.json";
+    REQUIRE(loadLightsJson(loaded, jsonPath.string()));
+    REQUIRE(loaded.getLightsDesc().size() == 1);
+
+    const auto& p = loaded.getLightsDesc()[0];
+    CHECK(p.type == LIGHT_TYPE_PROJECTOR);
+    CHECK(p.name == "beamer");
+    CHECK(p.intensityUnit == LIGHT_UNIT_POWER);
+    CHECK(p.intensity == doctest::Approx(250.0f));
+    CHECK(p.outerConeAngle == doctest::Approx(20.0f * (float(M_PI) / 180.0f)).epsilon(1e-4));
+    CHECK(p.projectorAspect == doctest::Approx(16.0f / 9.0f));
+    CHECK(p.projectorEdgeSoftness == doctest::Approx(0.05f));
+    CHECK(p.range == doctest::Approx(20.0f));
+
+    // The path is resolved against the sidecar's own directory and registered in
+    // the scene's image table, which is what the renderer uploads from and what
+    // the light's points[0].z indexes.
+    CHECK(fs::path(p.projectorImagePath).is_absolute());
+    CHECK(fs::path(p.projectorImagePath).filename() == "beach.png");
+    CHECK(p.projectorImage == 0);
+    REQUIRE(loaded.getProjectorImages().size() == 1);
+    CHECK(loaded.getProjectorImages()[0] == p.projectorImagePath);
+    CHECK(loaded.getLights()[0].points[0].z == doctest::Approx(0.0f));
+
+    fs::remove(jsonPath);
+}
+
+TEST_CASE("a sidecar names a projector's field of view, not half of it")
+{
+    // The one place the projector and the spot disagree about what an angle in
+    // the file means, so it is worth stating outright: a spot writes its outer
+    // *half* angle and a projector writes the full horizontal field, because
+    // nobody describes a beamer by half its throw angle.
+    Scene scene;
+    Scene::UniformLightDesc projector{};
+    projector.type = LIGHT_TYPE_PROJECTOR;
+    projector.intensity = 1.0f;
+    projector.color = glm::float3(1.0f);
+    projector.outerConeAngle = 30.0f * (float(M_PI) / 180.0f);
+    scene.createLight(projector);
+
+    const fs::path tmp = fs::temp_directory_path() / "strelka_projector_fov.gltf";
+    REQUIRE(saveLightsJson(scene, tmp.string()));
+
+    const fs::path jsonPath = fs::temp_directory_path() / "strelka_projector_fov_light.json";
+    std::ifstream in(jsonPath);
+    REQUIRE(in);
+    const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(content.find("\"fov\"") != std::string::npos);
+    CHECK(content.find("\"projector\"") != std::string::npos);
+    // A projector has no cone, so the spot's half-angle keys must not appear at
+    // all -- finding both would mean two ways to say the same thing.
+    CHECK(content.find("outerConeAngle") == std::string::npos);
+
+    Scene loaded;
+    REQUIRE(loadLightsJson(loaded, jsonPath.string()));
+    REQUIRE(loaded.getLightsDesc().size() == 1);
+    CHECK(loaded.getLightsDesc()[0].outerConeAngle == doctest::Approx(30.0f * (float(M_PI) / 180.0f)).epsilon(1e-4));
+
+    fs::remove(jsonPath);
 }

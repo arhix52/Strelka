@@ -74,6 +74,21 @@ inline Scene::UniformLightDesc parseDesc(const nlohmann::json& light, const std:
         if (!light.contains("unit"))
             desc.intensityUnit = LIGHT_UNIT_INTENSITY;
         break;
+    case LIGHT_TYPE_PROJECTOR:
+        desc.radius = light.value("radius", 0.0f);
+        // The *full* horizontal field of view in degrees, the way a projector or
+        // a camera is specified, halved into the outer-cone field the GPU light
+        // already has. A spot's "outerConeAngle" is a half angle in the same
+        // file, which reads like an inconsistency and is not one: nobody
+        // describes a beamer by half its throw angle.
+        desc.outerConeAngle = light.value("fov", 45.0f) * 0.5f * (float(M_PI) / 180.0f);
+        desc.projectorAspect = light.value("aspect", 16.0f / 9.0f);
+        desc.projectorEdgeSoftness = light.value("edgeSoftness", 0.0f);
+        if (light.contains("image"))
+            desc.projectorImagePath = light["image"].get<std::string>();
+        if (!light.contains("unit"))
+            desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+        break;
     case LIGHT_TYPE_RECT:
     default:
         desc.type = LIGHT_TYPE_RECT;
@@ -118,7 +133,7 @@ inline nlohmann::json toJson(const Scene::UniformLightDesc& desc)
             light["height"] = desc.height;
         }
         else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPHERE || desc.type == LIGHT_TYPE_POINT ||
-                 desc.type == LIGHT_TYPE_SPOT)
+                 desc.type == LIGHT_TYPE_SPOT || desc.type == LIGHT_TYPE_PROJECTOR)
         {
             light["radius"] = desc.radius;
         }
@@ -127,12 +142,39 @@ inline nlohmann::json toJson(const Scene::UniformLightDesc& desc)
             light["innerConeAngle"] = desc.innerConeAngle * (180.0f / float(M_PI));
             light["outerConeAngle"] = desc.outerConeAngle * (180.0f / float(M_PI));
         }
+        if (desc.type == LIGHT_TYPE_PROJECTOR)
+        {
+            light["fov"] = desc.outerConeAngle * 2.0f * (180.0f / float(M_PI));
+            light["aspect"] = desc.projectorAspect;
+            if (desc.projectorEdgeSoftness > 0.0f)
+                light["edgeSoftness"] = desc.projectorEdgeSoftness;
+            if (!desc.projectorImagePath.empty())
+                light["image"] = desc.projectorImagePath;
+        }
         if (desc.range > 0.0f)
             light["range"] = desc.range;
         if (!desc.iesPath.empty())
             light["ies"] = desc.iesPath;
     }
     return light;
+}
+
+/// Turn a projector's image path into an index into the scene's image table.
+///
+/// The mirror of resolveIes() below, and split from parseDesc() for the same
+/// reason: parsing is a pure function of the JSON, while registering a resource
+/// needs the Scene. The path is made absolute here so that a sidecar can name
+/// the file next to itself and the renderer, which resolves everything else
+/// against `resource/searchPath`, still finds it.
+inline void resolveProjectorImage(Scene& scene, Scene::UniformLightDesc& desc, const std::string& searchDir)
+{
+    if (desc.type != LIGHT_TYPE_PROJECTOR || desc.projectorImagePath.empty())
+        return;
+    std::filesystem::path p(desc.projectorImagePath);
+    if (!p.is_absolute() && !searchDir.empty())
+        p = std::filesystem::path(searchDir) / p;
+    desc.projectorImagePath = p.string();
+    desc.projectorImage = scene.addProjectorImage(desc.projectorImagePath);
 }
 
 inline void resolveIes(Scene& scene, Scene::UniformLightDesc& desc, const std::string& searchDir)

@@ -188,6 +188,81 @@ namespace fs = std::filesystem;
 namespace
 {
 
+/// One image decoded to four float channels, and the deleter it needs.
+///
+/// EXR comes back from tinyexr's malloc and everything else from stb, so the
+/// free is not the same call, which is why this carries its own release rather
+/// than handing back a bare pointer and a flag for the caller to remember.
+struct Rgba32fImage
+{
+    float* pixels = nullptr;
+    int width = 0;
+    int height = 0;
+    bool fromExr = false;
+
+    bool valid() const
+    {
+        return pixels != nullptr && width > 0 && height > 0;
+    }
+
+    void release()
+    {
+        if (!pixels)
+        {
+            return;
+        }
+        if (fromExr)
+        {
+            // tinyexr returns a malloc'd buffer, so free is the only correct
+            // deleter for it -- there is no RAII form of someone else's malloc.
+            // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
+            free(pixels);
+        }
+        else
+        {
+            stbi_image_free(pixels);
+        }
+        pixels = nullptr;
+    }
+};
+
+/// Decode an EXR through tinyexr and anything else through stb, always to RGBA
+/// float. `what` names the image in the error message, which is the only reason
+/// the environment, its backdrop and a projector's slide cannot share one line.
+///
+/// stbi_loadf undoes a gamma of 2.2 on a display-encoded file, which is what
+/// makes an ordinary PNG usable as a light source rather than as a set of code
+/// values.
+Rgba32fImage decodeRgba32f(const std::string& path, const char* what)
+{
+    Rgba32fImage img;
+    const std::string ext = fs::path(path).extension().string();
+    img.fromExr = (ext == ".exr" || ext == ".EXR");
+    if (img.fromExr)
+    {
+        const char* err = nullptr;
+        if (LoadEXR(&img.pixels, &img.width, &img.height, path.c_str(), &err) != TINYEXR_SUCCESS)
+        {
+            STRELKA_ERROR("Failed to load EXR {}: {} ({})", what, path, err ? err : "unknown");
+            if (err)
+            {
+                FreeEXRErrorMessage(err);
+            }
+            img.pixels = nullptr;
+        }
+    }
+    else
+    {
+        int channels = 0;
+        img.pixels = stbi_loadf(path.c_str(), &img.width, &img.height, &channels, 4);
+        if (!img.pixels)
+        {
+            STRELKA_ERROR("Failed to load {}: {}", what, path);
+        }
+    }
+    return img;
+}
+
 double nowMilliseconds()
 {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -1507,7 +1582,7 @@ void OptiXRender::resolveInstanceGeometry(OptixInstance& oi, const oka::Instance
         const bool enabled = known ? descs[instance.mLightId].enabled : true;
         const bool visibleToCamera = known ? descs[instance.mLightId].visibleToCamera : true;
         const uint32_t lightType = known ? descs[instance.mLightId].type : (uint32_t)LIGHT_TYPE_RECT;
-        if (!enabled || lightType == LIGHT_TYPE_POINT || lightType == LIGHT_TYPE_SPOT)
+        if (!enabled || lightTypeIsPunctual((int)lightType))
         {
             oi.visibilityMask = 0;
         }
@@ -4584,7 +4659,100 @@ void OptiXRender::createLightBuffer()
 {
     createOrUpdateBuffer(mLightBuffer, mScene->getLights());
     createIesBuffer();
+    createProjectorTextures();
     createSharcResponsiveLightBuffer();
+}
+
+/// Upload the images projector lights throw, in the order the scene registered
+/// them, and publish the table each light's points[0].z indexes.
+///
+/// Rebuilt with the light set rather than with the materials, and tracked in its
+/// own resource list, because the two have different lifetimes: editing a
+/// material reloads every material texture, and a projector's slide must not go
+/// with them while a light in the buffer still names it.
+///
+/// The images go up as RGBA float rather than through the block-compressed
+/// material path. A projector's texels are its emission, magnified across a wall
+/// by a factor of ten or more, where the 4x4 block artefacts a BC7 encode leaves
+/// behind are not a subtle quality difference -- and a scene has a handful of
+/// slides, not the thousands of maps that made compression worth its cost there.
+void OptiXRender::createProjectorTextures()
+{
+    destroyProjectorTextures();
+
+    const std::vector<std::string>& images = mScene->getProjectorImages();
+    if (images.empty())
+    {
+        mState.params.scene.projectorTextures = nullptr;
+        return;
+    }
+
+    std::vector<cudaTextureObject_t> table(images.size(), 0);
+    for (size_t i = 0; i < images.size(); ++i)
+    {
+        Rgba32fImage image = decodeRgba32f(images[i], "projector image");
+        if (!image.valid())
+        {
+            // Left at zero: the shader then throws a plain white frame, so a
+            // missing file is a visible white rectangle rather than a light that
+            // silently stopped working.
+            continue;
+        }
+
+        cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
+        cudaArray_t array = nullptr;
+        CUDA_CHECK(cudaMallocArray(&array, &channelDesc, image.width, image.height));
+        CUDA_CHECK(cudaMemcpy2DToArray(array, 0, 0, image.pixels, image.width * sizeof(float4),
+                                       image.width * sizeof(float4), image.height, cudaMemcpyHostToDevice));
+        image.release();
+
+        cudaResourceDesc resDesc{};
+        resDesc.resType = cudaResourceTypeArray;
+        resDesc.res.array.array = array;
+
+        cudaTextureDesc texDesc{};
+        // Clamp on both axes: a slide has an edge, and wrapping would tile the
+        // wall with copies of the frame the moment a bilinear tap reached a
+        // texel past the border.
+        texDesc.addressMode[0] = cudaAddressModeClamp;
+        texDesc.addressMode[1] = cudaAddressModeClamp;
+        texDesc.filterMode = cudaFilterModeLinear;
+        texDesc.readMode = cudaReadModeElementType;
+        texDesc.normalizedCoords = 1;
+
+        cudaTextureObject_t texObj = 0;
+        CUDA_CHECK(cudaCreateTextureObject(&texObj, &resDesc, &texDesc, nullptr));
+
+        mProjectorTextureArrays.push_back(array);
+        mProjectorTextureObjects.push_back(texObj);
+        table[i] = texObj;
+        STRELKA_INFO("Loaded projector image: {} ({}x{})", images[i], image.width, image.height);
+    }
+
+    const size_t bytes = table.size() * sizeof(cudaTextureObject_t);
+    mProjectorTextureBuffer.reset(new OptixBuffer(bytes));
+    CUDA_CHECK(cudaMemcpy((void*)mProjectorTextureBuffer->getPtr(), table.data(), bytes, cudaMemcpyHostToDevice));
+    mState.params.scene.projectorTextures = (const cudaTextureObject_t*)mProjectorTextureBuffer->getPtr();
+}
+
+void OptiXRender::destroyProjectorTextures()
+{
+    for (cudaTextureObject_t obj : mProjectorTextureObjects)
+    {
+        if (obj)
+            cudaDestroyTextureObject(obj);
+    }
+    mProjectorTextureObjects.clear();
+
+    for (cudaArray_t arr : mProjectorTextureArrays)
+    {
+        if (arr)
+            cudaFreeArray(arr);
+    }
+    mProjectorTextureArrays.clear();
+
+    mProjectorTextureBuffer.reset();
+    mState.params.scene.projectorTextures = nullptr;
 }
 
 /// One bit per light, set where the scene marked the light responsive.
@@ -4738,32 +4906,14 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName, oka::optix
 
 void OptiXRender::loadEnvMap(const std::string& texturePath)
 {
-    int width = 0, height = 0;
-    float* pixelData = nullptr;
-
-    const std::string ext = fs::path(texturePath).extension().string();
-    if (ext == ".exr" || ext == ".EXR")
+    Rgba32fImage image = decodeRgba32f(texturePath, "env map");
+    if (!image.valid())
     {
-        const char* err = nullptr;
-        int ret = LoadEXR(&pixelData, &width, &height, texturePath.c_str(), &err);
-        if (ret != TINYEXR_SUCCESS)
-        {
-            STRELKA_ERROR("Failed to load EXR env map: {} ({})", texturePath, err ? err : "unknown");
-            if (err) FreeEXRErrorMessage(err);
-            return;
-        }
+        return;
     }
-    else
-    {
-        // HDR / LDR via stbi
-        int channels = 0;
-        pixelData = stbi_loadf(texturePath.c_str(), &width, &height, &channels, 4);
-        if (!pixelData)
-        {
-            STRELKA_ERROR("Failed to load env map: {}", texturePath);
-            return;
-        }
-    }
+    const int width = image.width;
+    const int height = image.height;
+    const float* pixelData = image.pixels;
 
     STRELKA_INFO("Loaded env map: {} ({}x{})", texturePath, width, height);
 
@@ -4823,11 +4973,7 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     static_assert(alignof(EnvAliasEntry) == alignof(metal::EnvAliasEntry),
                   "device EnvAliasEntry must match the host builder's entry");
 
-    // Free host pixel data
-    if (ext == ".exr" || ext == ".EXR")
-        free(pixelData);
-    else
-        stbi_image_free(pixelData);
+    image.release();
 
     const size_t aliasBytes = aliasResult.alias.size() * sizeof(metal::EnvAliasEntry);
     mEnvAliasBuffer.reset(new OptixBuffer(aliasBytes));
@@ -4870,42 +5016,21 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
 
 void OptiXRender::loadEnvBackground(const std::string& texturePath)
 {
-    int width = 0, height = 0;
-    float* pixelData = nullptr;
-
-    const std::string ext = fs::path(texturePath).extension().string();
-    if (ext == ".exr" || ext == ".EXR")
+    Rgba32fImage image = decodeRgba32f(texturePath, "env background");
+    if (!image.valid())
     {
-        const char* err = nullptr;
-        if (LoadEXR(&pixelData, &width, &height, texturePath.c_str(), &err) != TINYEXR_SUCCESS)
-        {
-            STRELKA_ERROR("Failed to load EXR env background: {} ({})", texturePath, err ? err : "unknown");
-            if (err)
-                FreeEXRErrorMessage(err);
-            return;
-        }
+        return;
     }
-    else
-    {
-        int channels = 0;
-        pixelData = stbi_loadf(texturePath.c_str(), &width, &height, &channels, 4);
-        if (!pixelData)
-        {
-            STRELKA_ERROR("Failed to load env background: {}", texturePath);
-            return;
-        }
-    }
+    const int width = image.width;
+    const int height = image.height;
 
     cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
     cudaArray_t bgArray = nullptr;
     CUDA_CHECK(cudaMallocArray(&bgArray, &channelDesc, width, height));
-    CUDA_CHECK(cudaMemcpy2DToArray(bgArray, 0, 0, pixelData, width * sizeof(float4), width * sizeof(float4), height,
-                                   cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy2DToArray(
+        bgArray, 0, 0, image.pixels, width * sizeof(float4), width * sizeof(float4), height, cudaMemcpyHostToDevice));
 
-    if (ext == ".exr" || ext == ".EXR")
-        free(pixelData);
-    else
-        stbi_image_free(pixelData);
+    image.release();
 
     cudaResourceDesc resDesc{};
     resDesc.resType = cudaResourceTypeArray;
@@ -4948,6 +5073,7 @@ void OptiXRender::destroyMaterialTextures()
 void OptiXRender::destroyTextures()
 {
     destroyMaterialTextures();
+    destroyProjectorTextures();
 
     for (auto obj : mTextureObjects)
         if (obj) cudaDestroyTextureObject(obj);

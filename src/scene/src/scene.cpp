@@ -764,7 +764,7 @@ uint32_t Scene::createLight(const UniformLightDesc& desc)
         const float r = desc.radius > 1e-4f ? desc.radius : 0.05f;
         scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(r));
     }
-    else if (desc.type == LIGHT_TYPE_SPOT)
+    else if (desc.type == LIGHT_TYPE_SPOT || desc.type == LIGHT_TYPE_PROJECTOR)
     {
         mDiskLightMeshId = createDiscLightMesh();
         currentLightMeshId = mDiskLightMeshId;
@@ -835,18 +835,36 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].pad0 = 0.0f;
         mLights[lightId].pad1 = 0.0f;
     }
-    else if (desc.type == LIGHT_TYPE_POINT || desc.type == LIGHT_TYPE_SPOT)
+    else if (lightTypeIsPunctual(desc.type))
     {
         const glm::float4x4 localTransform = desc.useXform ? desc.xform : getTransform(desc);
-        mLights[lightId].points[0] = glm::float4(desc.radius, (float)desc.iesProfile, 0.f, 0.f);
+        // The three lamps share one packing -- see lightIsPunctual() in
+        // light_pdf.h. points[0] is (soft radius, IES profile, projector image,
+        // frame aspect); a light that has no use for a slot carries -1 or 0 in
+        // it rather than a stale value, because the shader decides what a light
+        // does from these numbers and not from its type alone.
+        //
+        // A projector's angular shape is its image, so it never also carries an
+        // IES profile: -1 goes in that slot even when the desc still remembers a
+        // file from before the type was switched.
+        const bool isProjector = desc.type == LIGHT_TYPE_PROJECTOR;
+        mLights[lightId].points[0] =
+            glm::float4(desc.radius, isProjector ? -1.0f : (float)desc.iesProfile,
+                        isProjector ? (float)desc.projectorImage : -1.0f, isProjector ? desc.projectorAspect : 0.0f);
         mLights[lightId].points[1] = localTransform * glm::float4(0.f, 0.f, 0.f, 1.f);
-        // Local axes so an IES profile can be evaluated in light space.
+        // Local axes so an IES profile or a projected image can be evaluated in
+        // light space.
         mLights[lightId].points[2] = localTransform * glm::float4(1.f, 0.f, 0.f, 0.f);
         mLights[lightId].points[3] = localTransform * glm::float4(0.f, 1.f, 0.f, 0.f);
         mLights[lightId].normal = glm::normalize(localTransform * glm::float4(0.0f, 0.0f, -1.0f, 0.0f));
         mLights[lightId].type = desc.type;
-        mLights[lightId].halfAngle = desc.type == LIGHT_TYPE_SPOT ? desc.outerConeAngle : 0.0f;
-        mLights[lightId].pad0 = desc.type == LIGHT_TYPE_SPOT ? desc.innerConeAngle : desc.radius;
+        // Spot: the outer cone. Projector: half of the horizontal field of view,
+        // which is the same quantity in the same field -- both are the angle at
+        // which the light stops -- so the two need no separate slot.
+        mLights[lightId].halfAngle = (desc.type == LIGHT_TYPE_SPOT || isProjector) ? desc.outerConeAngle : 0.0f;
+        mLights[lightId].pad0 = isProjector                  ? desc.projectorEdgeSoftness :
+                                desc.type == LIGHT_TYPE_SPOT ? desc.innerConeAngle :
+                                                               desc.radius;
         mLights[lightId].pad1 = desc.range;
     }
     else if (desc.type == LIGHT_TYPE_DISTANT)
@@ -860,9 +878,10 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
     }
 
     const glm::float3 radiometric =
-        desc.enabled ? bakeLightRadiometric(desc.type, desc.intensityUnit, desc.color, desc.intensity, desc.width,
-                                            desc.height, desc.radius, desc.halfAngle, desc.outerConeAngle)
-                     : glm::float3(0.0f);
+        desc.enabled ?
+            bakeLightRadiometric(desc.type, desc.intensityUnit, desc.color, desc.intensity, desc.width, desc.height,
+                                 desc.radius, desc.halfAngle, desc.outerConeAngle, desc.projectorAspect) :
+            glm::float3(0.0f);
     mLights[lightId].color = glm::float4(radiometric, 1.0f);
     markChanged(ChangeBits::Lights);
 }
@@ -882,6 +901,22 @@ int32_t Scene::addIesProfile(IesProfile profile)
     return (int32_t)mIesProfiles.size() - 1;
 }
 
+int32_t Scene::addProjectorImage(const std::string& path)
+{
+    // Same dedup as addIesProfile, and for the same reason: picking the same
+    // file twice in the UI must not grow the GPU texture table, and two
+    // projectors showing one slide should be one upload.
+    for (int32_t i = 0; i < (int32_t)mProjectorImages.size(); ++i)
+    {
+        if (mProjectorImages[(size_t)i] == path)
+        {
+            return i;
+        }
+    }
+    mProjectorImages.push_back(path);
+    return (int32_t)mProjectorImages.size() - 1;
+}
+
 void Scene::setLight(const uint32_t lightId, const UniformLightDesc& desc)
 {
     assert(lightId < mLightDesc.size());
@@ -896,7 +931,7 @@ void Scene::setLight(const uint32_t lightId, const UniformLightDesc& desc)
             scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.width, desc.height, 1.0f));
         else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPHERE)
             scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.radius, desc.radius, desc.radius));
-        else if (desc.type == LIGHT_TYPE_POINT || desc.type == LIGHT_TYPE_SPOT)
+        else if (lightTypeIsPunctual(desc.type))
         {
             const float r = desc.radius > 1e-4f ? desc.radius : 0.05f;
             scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(r));

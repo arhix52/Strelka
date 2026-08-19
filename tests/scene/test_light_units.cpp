@@ -18,30 +18,38 @@ static constexpr float kLumensPerWatt = 683.0f;
 
 static constexpr float kPi = 3.14159265358979323846f;
 
-static const glm::float3 kWhite(1.0f, 1.0f, 1.0f);
+static constexpr glm::float3 kWhite(1.0f, 1.0f, 1.0f);
 
 // bakeLightRadiometric takes nine positional arguments and most tests only care
 // about two or three of them; these wrappers keep the intent readable.
-static glm::float3 bakePoint(int unit, float intensity, const glm::float3& color = kWhite)
+namespace
+{
+glm::float3 bakePoint(int unit, float intensity, const glm::float3& color = kWhite)
 {
     return bakeLightRadiometric(LIGHT_TYPE_POINT, unit, color, intensity, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
-static glm::float3 bakeSpot(int unit, float intensity, float outerConeAngleRad, const glm::float3& color = kWhite)
+glm::float3 bakeSpot(int unit, float intensity, float outerConeAngleRad, const glm::float3& color = kWhite)
 {
     return bakeLightRadiometric(
         LIGHT_TYPE_SPOT, unit, color, intensity, 0.0f, 0.0f, 0.0f, 0.0f, outerConeAngleRad);
 }
 
-static glm::float3 bakeRect(int unit, float intensity, float width, float height, const glm::float3& color = kWhite)
+glm::float3 bakeProjector(int unit, float intensity, float halfFovX, float aspect, const glm::float3& color = kWhite)
+{
+    return bakeLightRadiometric(LIGHT_TYPE_PROJECTOR, unit, color, intensity, 0.0f, 0.0f, 0.0f, 0.0f, halfFovX, aspect);
+}
+
+glm::float3 bakeRect(int unit, float intensity, float width, float height, const glm::float3& color = kWhite)
 {
     return bakeLightRadiometric(LIGHT_TYPE_RECT, unit, color, intensity, width, height, 0.0f, 0.0f, 0.0f);
 }
 
-static glm::float3 bakeDistant(int unit, float intensity, float halfAngleRad, const glm::float3& color = kWhite)
+glm::float3 bakeDistant(int unit, float intensity, float halfAngleRad, const glm::float3& color = kWhite)
 {
     return bakeLightRadiometric(LIGHT_TYPE_DISTANT, unit, color, intensity, 0.0f, 0.0f, 0.0f, halfAngleRad, 0.0f);
 }
+} // namespace
 
 // --- LIGHT_UNIT_POWER: watts in, the quantity the shader wants out ---
 
@@ -97,6 +105,40 @@ TEST_CASE("power on a spot light integrates back to the input power over its con
         // I is constant inside the cone, so the integral is just I * Omega.
         CHECK(baked.x * omega == doctest::Approx(watts).epsilon(1e-4));
     }
+}
+
+TEST_CASE("power on a projector integrates back over its rectangular frame")
+{
+    // I = Phi / Omega, with Omega the pyramid the image fills. Six 90-degree
+    // square pyramids tile the sphere, so this one takes a sixth of the watts of
+    // the equivalent point lamp -- and multiplying the intensity back by the
+    // solid angle has to return the watts that went in.
+    const float halfFov = 0.25f * kPi;
+    const float aspect = 1.0f;
+    const glm::float3 baked = bakeProjector(LIGHT_UNIT_POWER, 60.0f, halfFov, aspect);
+    const float omega = projectorSolidAngleFromFov(halfFov, aspect);
+    CHECK(baked.x * omega == doctest::Approx(60.0f).epsilon(1e-4));
+    CHECK(omega == doctest::Approx(4.0f * kPi / 6.0f).epsilon(1e-5));
+}
+
+TEST_CASE("a wider projector frame spreads the same watts thinner")
+{
+    // Not the cone the same angle would give: a 16:9 frame is the narrower of
+    // the two, so the same watts land brighter in it than in a square one.
+    const float halfFov = 0.5f;
+    const glm::float3 square = bakeProjector(LIGHT_UNIT_POWER, 100.0f, halfFov, 1.0f);
+    const glm::float3 wide = bakeProjector(LIGHT_UNIT_POWER, 100.0f, halfFov, 16.0f / 9.0f);
+    CHECK(wide.x > square.x);
+    CHECK(wide.x / square.x ==
+          doctest::Approx(projectorSolidAngleFromFov(halfFov, 1.0f) / projectorSolidAngleFromFov(halfFov, 16.0f / 9.0f))
+              .epsilon(1e-4));
+}
+
+TEST_CASE("intensity on a projector is candela straight through, like a spot")
+{
+    // The image multiplies this, so the number the user types is the intensity
+    // along a fully lit texel and not an average over the frame.
+    CHECK(bakeProjector(LIGHT_UNIT_INTENSITY, 250.0f, 0.4f, 16.0f / 9.0f).x == doctest::Approx(250.0f));
 }
 
 TEST_CASE("a spot opened to the full sphere matches the point light conversion")

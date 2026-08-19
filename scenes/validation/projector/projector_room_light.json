@@ -1,0 +1,16 @@
+{
+    "lights": [
+        {
+            "type": "projector",
+            "name": "beamer",
+            "position": [0.0, 1.45, 1.2],
+            "orientation": [0.0, 0.0, 0.0],
+            "color": [1.0, 1.0, 1.0],
+            "unit": "power",
+            "intensity": 40.0,
+            "fov": 45.0,
+            "aspect": 1.7778,
+            "image": "slide.png"
+        }
+    ]
+}
