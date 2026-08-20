@@ -30,8 +30,7 @@ DEVICE_FUNC float2 apply_texture_transform(float2 uv, const THREAD_REF MaterialP
     // this is what keeps a material that predates that field readable.
     const float kx = (m.uv_scale_x != 0.0f) ? m.uv_scale_x : 1.0f;
     const float ky = (m.uv_scale_y != 0.0f) ? m.uv_scale_y : 1.0f;
-    return make_float2(uv.x * kx * c - uv.y * ky * s + m.uv_offset_x,
-                       uv.x * kx * s + uv.y * ky * c + m.uv_offset_y);
+    return make_float2(uv.x * kx * c - uv.y * ky * s + m.uv_offset_x, uv.x * kx * s + uv.y * ky * c + m.uv_offset_y);
 }
 
 // glTF COLOR_0, packed RGBA8 and LINEAR -- it carries no transfer function,
@@ -39,8 +38,8 @@ DEVICE_FUNC float2 apply_texture_transform(float2 uv, const THREAD_REF MaterialP
 DEVICE_FUNC float3 unpack_vertex_color(unsigned int val)
 {
     const float s = 1.0f / 255.0f;
-    return make_float3((val & 0xffu) * s, ((val >> 8) & 0xffu) * s,
-                       ((val >> 16) & 0xffu) * s);
+    return make_float3(static_cast<float>(val & 0xffu) * s, static_cast<float>((val >> 8) & 0xffu) * s,
+                       static_cast<float>((val >> 16) & 0xffu) * s);
 }
 
 // Coverage of a surface, given the alpha the base-colour slot resolved to.

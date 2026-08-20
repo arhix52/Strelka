@@ -69,9 +69,9 @@ Profile grid(uint32_t nV, uint32_t nH, float first)
 {
     Profile p;
     for (uint32_t v = 0; v < nV; ++v)
-        p.verticalAngles.push_back(v * (90.0f / (float)(nV - 1)));
+        p.verticalAngles.push_back(static_cast<float>(v) * (90.0f / (float)(nV - 1)));
     for (uint32_t h = 0; h < nH; ++h)
-        p.horizontalAngles.push_back(h * (360.0f / (float)nH));
+        p.horizontalAngles.push_back(static_cast<float>(h) * (360.0f / (float)nH));
     for (uint32_t i = 0; i < nV * nH; ++i)
         p.candela.push_back(first + (float)i);
     p.maxCandela = first + (float)(nV * nH - 1);

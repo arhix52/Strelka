@@ -130,7 +130,7 @@ TEST_CASE("a full stack drops the innermost push rather than corrupting itself")
 TEST_CASE("packed entries are eight bytes and round-trip both fields")
 {
     CHECK(sizeof(IorStackEntry) == 8u);
-    CHECK(sizeof(IorStack) == 8u * IOR_STACK_SIZE + sizeof(int));
+    CHECK(sizeof(IorStack) == size_t{ 8 } * IOR_STACK_SIZE + sizeof(int));
 
     IorStack s;
     ior_stack_init(s);

@@ -82,8 +82,12 @@ void EditorApp::drawNodeRecursive(int nodeId, const ImGuiTextFilter& filter)
     }
 
     const char* label = node.name.empty() ? "(unnamed)" : node.name.c_str();
-    const bool open = ImGui::TreeNodeEx((void*)(intptr_t)nodeId, flags, "%s%s", label,
-                                        node.instanceIds.empty() ? "" : " [mesh]");
+    // The node index is the widget's identity, and it goes on the ID stack as an
+    // integer rather than being laundered through a void* -- two nodes can share
+    // a name, so the label cannot carry it. PopID pairs with this below, after
+    // TreePop, since the children are drawn inside this node's scope.
+    ImGui::PushID(nodeId);
+    const bool open = ImGui::TreeNodeEx("", flags, "%s%s", label, node.instanceIds.empty() ? "" : " [mesh]");
     if (isSelected && m_outlinerScrollToSelection)
     {
         ImGui::SetScrollHereY(0.5f);
@@ -119,6 +123,7 @@ void EditorApp::drawNodeRecursive(int nodeId, const ImGuiTextFilter& filter)
         }
         ImGui::TreePop();
     }
+    ImGui::PopID();
 }
 
 void EditorApp::drawOutlinerPanel()

@@ -345,8 +345,8 @@ STRELKA_SHARC_FN float voxelSizeForLevel(int32_t level)
 /// Which way to look is decided the SDK's way, by measuring the same voxel's
 /// distance to both cameras in its own grid units: if the eye is nearer now, the
 /// current level is the finer one and the history is one level coarser.
-STRELKA_SHARC_FN uint64_t adjacentLevelKey(uint64_t key, float cameraX, float cameraY, float cameraZ,
-                                           float previousX, float previousY, float previousZ)
+STRELKA_SHARC_FN uint64_t adjacentLevelKey(
+    uint64_t key, float cameraX, float cameraY, float cameraZ, float previousX, float previousY, float previousZ)
 {
     int32_t x = unpackCoordinate(key, 0u);
     int32_t y = unpackCoordinate(key, 1u);
@@ -425,7 +425,12 @@ STRELKA_SHARC_FN uint32_t encode(float radiance)
     {
         v = kClamp;
     }
-    return (uint32_t)(v * kScale + 0.5f);
+    // roundf, not a truncated v + 0.5f: the two agree for every non-negative
+    // value except the ones where v * kScale + 0.5f rounds up to the next
+    // representable float on its own, and there the truncation lands a quantum
+    // high. kClamp keeps v well below that, so this is the same number today --
+    // it is spelled this way so it stays the same number if kScale grows.
+    return (uint32_t)roundf(v * kScale);
 }
 
 /// Decode a channel's mean from its sum and the sample count.
@@ -692,9 +697,7 @@ struct ResolveOutput
 /// a window that does not normalise freezes the cache at its first answer, a
 /// staleness rule that never fires leaks the table, and one that fires too
 /// eagerly re-inserts every entry every frame.
-STRELKA_SHARC_FN ResolveOutput resolveEntry(const ResolveInput& input,
-                                            uint32_t accumFrameNumMax,
-                                            uint32_t staleFrameNumMax)
+STRELKA_SHARC_FN ResolveOutput resolveEntry(const ResolveInput& input, uint32_t accumFrameNumMax, uint32_t staleFrameNumMax)
 {
     ResolveOutput output;
 

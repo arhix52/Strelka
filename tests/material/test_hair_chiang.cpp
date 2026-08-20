@@ -4,7 +4,11 @@
 #include <strelka/material/material_params.h>
 #include <strelka/material/surface_interaction.h>
 
+#include "../support/sampling.h"
+
 #include <cmath>
+
+using oka::test::stratum;
 
 namespace
 {
@@ -38,9 +42,9 @@ TEST_CASE("hair Chiang samples produce a finite glossy lobe")
     float3 mean = make_float3(0.0f);
     for (int i = 0; i < 1024; ++i)
     {
-        const float u1 = ((i * 3) % 1024 + 0.5f) / 1024.0f;
-        const float u2 = ((i * 7) % 1024 + 0.5f) / 1024.0f;
-        const float u3 = ((i * 11) % 1024 + 0.5f) / 1024.0f;
+        const float u1 = stratum((i * 3) % 1024, 1024);
+        const float u2 = stratum((i * 7) % 1024, 1024);
+        const float u3 = stratum((i * 11) % 1024, 1024);
         BsdfSampleResult s = bsdf_sample(si, make_float4(u1, u2, u3, 0.0f));
         if (s.event_type == BSDF_EVENT_ABSORB)
             continue;
@@ -63,9 +67,9 @@ TEST_CASE("hair Chiang sample and eval agree on the sampled direction")
     int checked = 0;
     for (int i = 0; i < 800 && checked < 40; ++i)
     {
-        const float u1 = ((i * 5) % 800 + 0.5f) / 800.0f;
-        const float u2 = ((i * 11) % 800 + 0.5f) / 800.0f;
-        const float u3 = ((i * 17) % 800 + 0.5f) / 800.0f;
+        const float u1 = stratum((i * 5) % 800, 800);
+        const float u2 = stratum((i * 11) % 800, 800);
+        const float u3 = stratum((i * 17) % 800, 800);
         BsdfSampleResult s = bsdf_sample(si, make_float4(u1, u2, u3, 0.0f));
         if (s.event_type == BSDF_EVENT_ABSORB || s.pdf < 1e-6f)
             continue;
@@ -101,10 +105,10 @@ TEST_CASE("hair Chiang is brighter in transmission than a dielectric cylinder")
     const float3 forward = make_float3(0.0f) - hair.wo;
     for (int i = 0; i < 2048; ++i)
     {
-        const float u1 = ((i * 3) % 2048 + 0.5f) / 2048.0f;
-        const float u2 = ((i * 7) % 2048 + 0.5f) / 2048.0f;
-        const float u3 = ((i * 13) % 2048 + 0.5f) / 2048.0f;
-        const float u4 = ((i * 19) % 2048 + 0.5f) / 2048.0f;
+        const float u1 = stratum((i * 3) % 2048, 2048);
+        const float u2 = stratum((i * 7) % 2048, 2048);
+        const float u3 = stratum((i * 13) % 2048, 2048);
+        const float u4 = stratum((i * 19) % 2048, 2048);
 
         BsdfSampleResult hs = bsdf_sample(hair, make_float4(u1, u2, u3, u4));
         if (hs.event_type != BSDF_EVENT_ABSORB && dot(hs.wi, forward) > 0.0f)
@@ -137,9 +141,9 @@ TEST_CASE("hair Chiang scatters over the whole sphere, not a hemisphere")
     const int kSamples = 4096;
     for (int i = 0; i < kSamples; ++i)
     {
-        const float u1 = ((i * 3) % kSamples + 0.5f) / kSamples;
-        const float u2 = ((i * 7) % kSamples + 0.5f) / kSamples;
-        const float u3 = ((i * 13) % kSamples + 0.5f) / kSamples;
+        const float u1 = stratum((i * 3) % kSamples, kSamples);
+        const float u2 = stratum((i * 7) % kSamples, kSamples);
+        const float u3 = stratum((i * 13) % kSamples, kSamples);
         BsdfSampleResult s = bsdf_sample(si, make_float4(u1, u2, u3, 0.0f));
         if (s.event_type == BSDF_EVENT_ABSORB)
             continue;

@@ -10,7 +10,11 @@
 #include <strelka/material/shading_frame.h>
 #include <strelka/material/bsdf.h>
 
+#include "../support/sampling.h"
+
 #include <nee_pairing.h>
+
+using oka::test::stratum;
 
 #include <cmath>
 
@@ -176,7 +180,7 @@ TEST_CASE("eval accepts what sample produced, from behind as from in front")
     {
         for (int i = 0; i < 8; ++i)
         {
-            const float u = (i + 0.5f) / 8.0f;
+            const float u = stratum(i, 8);
             CAPTURE(r);
             CAPTURE(u);
 
@@ -281,7 +285,7 @@ TEST_CASE("a flipped hit offers and pairs over the same hemisphere it scatters i
 
     for (int i = 0; i < 16; ++i)
     {
-        const float u = (i + 0.5f) / 16.0f;
+        const float u = stratum(i, 16);
         CAPTURE(u);
         BsdfSampleResult s = bsdf_sample(si, make_float4(u, 1.0f - u, 0.3f, 0.2f));
         if (s.event_type == BSDF_EVENT_ABSORB || (s.event_type & BSDF_EVENT_SPECULAR) != 0)

@@ -725,7 +725,7 @@ TEST_CASE("the eligibility test refuses a segment that never left its voxel")
     // The hit is inside the voxel the ray departed from, so the average the
     // cache would return includes the very point being shaded. No lobe is wide
     // enough to make that acceptable.
-    CHECK(!mayReadCache(/*segment=*/0.5f, /*launchRoughness=*/1.0f, /*voxelSize=*/1.0f));
+    CHECK(!mayReadCache(/*segmentLength=*/0.5f, /*launchRoughness=*/1.0f, /*voxelSize=*/1.0f));
     CHECK(!mayReadCache(1.7f, 1.0f, 1.0f)); // just under the diagonal
     CHECK(mayReadCache(1.8f, 1.0f, 1.0f)); // just over it
 }

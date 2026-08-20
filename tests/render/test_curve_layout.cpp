@@ -123,7 +123,7 @@ TEST_CASE("the strand coordinate runs root to tip across a whole strand")
     {
         for (int k = 0; k < 4; ++k)
         {
-            const float c = strandCoordinate(seg, perStrand, 0.25f * k);
+            const float c = strandCoordinate(seg, perStrand, 0.25f * static_cast<float>(k));
             CHECK(c > prev);
             prev = c;
         }

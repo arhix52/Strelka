@@ -20,6 +20,10 @@ int main(int argc, const char* argv[])
     {
         if (std::string(argv[i]) == "--capture" || std::string(argv[i]).rfind("--capture=", 0) == 0)
         {
+            // The one write to the environment in the tree, and it happens on the
+            // first statement of main(): no other thread exists yet for setenv to
+            // race, which is the whole of what the check is about.
+            // NOLINTNEXTLINE(concurrency-mt-unsafe)
             setenv("MTL_CAPTURE_ENABLED", "1", 1);
             break;
         }

@@ -23,10 +23,13 @@
 
 #include <medium_walk.h>
 
+#include "../support/sampling.h"
+
 #include <cmath>
 #include <initializer_list>
 
 using namespace oka::medium;
+using oka::test::stratum;
 
 namespace
 {
@@ -206,7 +209,7 @@ TEST_CASE("medium: the estimator transports exactly the albedo and the transmitt
         // an exact change of variables: t = -ln(1-u)/sigma_c.
         for (int i = 0; i < kSteps; ++i)
         {
-            const float u = (i + 0.5f) / kSteps;
+            const float u = stratum(i, kSteps);
             const float t = -std::log(1.0f - u) / sc;
             if (t < L)
             {
@@ -267,7 +270,7 @@ TEST_CASE("medium: Henyey-Greenstein integrates to one over the sphere")
         double total = 0.0;
         for (int i = 0; i < kSteps; ++i)
         {
-            const float mu = -1.0f + 2.0f * (i + 0.5f) / kSteps;
+            const float mu = -1.0f + 2.0f * stratum(i, kSteps);
             total += hgPhase(mu, g) * (2.0 / kSteps);
         }
         total *= 2.0 * 3.14159265358979323846;

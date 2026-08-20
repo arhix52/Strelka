@@ -16,8 +16,8 @@ namespace
 
 constexpr float kRectW = 1024.0f;
 constexpr float kRectH = 768.0f;
-const glm::float2 kRectMin(100.0f, 50.0f);
-const glm::float2 kRectSize(kRectW, kRectH);
+constexpr glm::float2 kRectMin(100.0f, 50.0f);
+constexpr glm::float2 kRectSize(kRectW, kRectH);
 
 Camera makePerspective()
 {

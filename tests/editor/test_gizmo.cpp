@@ -114,8 +114,9 @@ DragResult dragGizmo(ViewportItem item,
 // being hardcoded to a size the library is free to change.
 DragResult dragHandleAlongX(ImGuizmo::OPERATION operation, ImVec2 dragBy)
 {
-    for (float offset = 10.0f; offset < 400.0f; offset += 5.0f)
+    for (int offsetPixels = 10; offsetPixels < 400; offsetPixels += 5)
     {
+        const float offset = static_cast<float>(offsetPixels);
         DragResult result = dragGizmo(ViewportItem::image, operation, ImVec2(offset, 0.0f), dragBy);
         if (result.grabbed)
         {

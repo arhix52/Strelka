@@ -327,6 +327,8 @@ TEST_CASE("Rotating the joint swings the bounds around the bind position")
 TEST_CASE("Skinned bounds on a real asset stay glued to the animated pose")
 {
     std::string assetPath;
+    // Single-threaded test, and nothing writes the environment while it reads.
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
     if (const char* env = std::getenv("STRELKA_SKINNED_GLTF"))
     {
         assetPath = env;

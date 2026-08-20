@@ -2,8 +2,12 @@
 
 #include "texture_compress.h"
 
+#include "../support/sampling.h"
+
 #include <cmath>
 #include <vector>
+
+using oka::test::unorm8;
 
 // What this guards is the choice of BC5 for normal maps over the BC1 the colour
 // textures use. The number that matters is not per-channel error but the angle
@@ -109,7 +113,7 @@ void decodeBC1(const uint8_t block[8], uint8_t out[16][3])
     std::memcpy(&indices, block + 4, 4);
     for (int i = 0; i < 16; ++i)
     {
-        const int k = (indices >> (2 * i)) & 0x3;
+        const uint32_t k = (indices >> (2 * i)) & 0x3u;
         for (int c = 0; c < 3; ++c)
         {
             out[i][c] = (uint8_t)palette[k][c];
@@ -170,17 +174,17 @@ Error measure(const std::vector<uint8_t>& rgba, int width, int height, oka::bc::
                 uint8_t xs[16], ys[16];
                 decodeBC4(block, xs);
                 decodeBC4(block + 8, ys);
-                decoded = reconstructNormal(xs[i] / 255.0f, ys[i] / 255.0f);
+                decoded = reconstructNormal(unorm8(xs[i]), unorm8(ys[i]));
             }
             else
             {
                 uint8_t rgb[16][3];
                 decodeBC1(block, rgb);
-                decoded = unpackNormal(rgb[i][0] / 255.0f, rgb[i][1] / 255.0f, rgb[i][2] / 255.0f);
+                decoded = unpackNormal(unorm8(rgb[i][0]), unorm8(rgb[i][1]), unorm8(rgb[i][2]));
             }
 
             const uint8_t* p = rgba.data() + ((size_t)y * width + x) * 4;
-            const Normal want = unpackNormal(p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f);
+            const Normal want = unpackNormal(unorm8(p[0]), unorm8(p[1]), unorm8(p[2]));
             const float angle = angleDegrees(decoded, want);
             sum += angle;
             err.max = std::max(err.max, angle);
@@ -244,12 +248,12 @@ TEST_CASE("normalizeNormalMap makes Z reconstruction exact")
     // lossy encoder looks like. Without the pass, the rebuilt Z is not the Z that
     // was stored and the direction shifts.
     std::vector<uint8_t> rgba = { 200, 90, 230, 255 };
-    const Normal source = unpackNormal(rgba[0] / 255.0f, rgba[1] / 255.0f, rgba[2] / 255.0f);
-    const Normal before = reconstructNormal(rgba[0] / 255.0f, rgba[1] / 255.0f);
+    const Normal source = unpackNormal(unorm8(rgba[0]), unorm8(rgba[1]), unorm8(rgba[2]));
+    const Normal before = reconstructNormal(unorm8(rgba[0]), unorm8(rgba[1]));
     CHECK(angleDegrees(before, source) > 0.5f);
 
     oka::bc::normalizeNormalMap(rgba.data(), 1, 1);
-    const Normal after = reconstructNormal(rgba[0] / 255.0f, rgba[1] / 255.0f);
+    const Normal after = reconstructNormal(unorm8(rgba[0]), unorm8(rgba[1]));
     CHECK(angleDegrees(after, source) < 0.2f); // what is left is the 8-bit rounding
 }
 
@@ -263,10 +267,10 @@ TEST_CASE("normalizeNormalMap keeps the direction of a non-unit texel")
     for (const uint8_t grey : { (uint8_t)200, (uint8_t)128 })
     {
         std::vector<uint8_t> rgba = { grey, grey, grey, 255 };
-        const Normal source = unpackNormal(grey / 255.0f, grey / 255.0f, grey / 255.0f);
+        const Normal source = unpackNormal(unorm8(grey), unorm8(grey), unorm8(grey));
 
         oka::bc::normalizeNormalMap(rgba.data(), 1, 1);
-        const Normal after = reconstructNormal(rgba[0] / 255.0f, rgba[1] / 255.0f);
+        const Normal after = reconstructNormal(unorm8(rgba[0]), unorm8(rgba[1]));
         CHECK(angleDegrees(after, source) < 0.5f);
     }
 }

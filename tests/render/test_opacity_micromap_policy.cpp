@@ -248,13 +248,13 @@ TEST_CASE("BC4 alpha decodes to what the compressor was handed, within the palet
     // cover whatever the palette cost.
     auto roundTrip = [](const std::vector<uint8_t>& alphas) {
         REQUIRE(alphas.size() == 16u);
-        std::vector<uint8_t> rgba(16 * 4, 0u);
+        std::vector<uint8_t> rgba(size_t{ 16 } * 4, 0u);
         for (size_t i = 0; i < 16; ++i)
         {
             rgba[i * 4 + 3] = alphas[i];
         }
         uint8_t block[8] = {};
-        oka::bc::compressBlockBC4(rgba.data(), 4, 4, 0, 0, 4 * 4, 3, block);
+        oka::bc::compressBlockBC4(rgba.data(), 4, 4, 0, 0, size_t{ 4 } * 4, 3, block);
         uint8_t decoded[16] = {};
         decodeBc4AlphaBlock(block, decoded);
         return std::vector<uint8_t>(decoded, decoded + 16);

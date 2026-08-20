@@ -26,30 +26,30 @@
 #include "../fresnel.h"
 
 #if defined(__METAL_VERSION__)
-#define hair_sinhf(x) metal::sinh(x)
-#define hair_asinf(x) metal::asin(x)
-#define hair_atan2f(y, x) metal::atan2(y, x)
-#define hair_floorf(x) metal::floor(x)
-#define hair_copysignf(a, b) metal::copysign(a, b)
+#    define hair_sinhf(x) metal::sinh(x)
+#    define hair_asinf(x) metal::asin(x)
+#    define hair_atan2f(y, x) metal::atan2(y, x)
+#    define hair_floorf(x) metal::floor(x)
+#    define hair_copysignf(a, b) metal::copysign(a, b)
 #else
-#define hair_sinhf(x) sinhf(x)
-#define hair_asinf(x) asinf(x)
-#define hair_atan2f(y, x) atan2f(y, x)
-#define hair_floorf(x) floorf(x)
-#define hair_copysignf(a, b) copysignf(a, b)
+#    define hair_sinhf(x) sinhf(x)
+#    define hair_asinf(x) asinf(x)
+#    define hair_atan2f(y, x) atan2f(y, x)
+#    define hair_floorf(x) floorf(x)
+#    define hair_copysignf(a, b) copysignf(a, b)
 #endif
 
 #ifndef M_2PI_F
-#define M_2PI_F (2.0f * M_PI_F)
+#    define M_2PI_F (2.0f * M_PI_F)
 #endif
 #ifndef M_1_2PI_F
-#define M_1_2PI_F (0.5f * M_1_PI_F)
+#    define M_1_2PI_F (0.5f * M_1_PI_F)
 #endif
 #ifndef M_SQRT_PI_8_F
-#define M_SQRT_PI_8_F 0.6266570686577501f
+#    define M_SQRT_PI_8_F 0.6266570686577501f
 #endif
 #ifndef M_LN_2PI_F
-#define M_LN_2PI_F 1.8378770664093453f
+#    define M_LN_2PI_F 1.8378770664093453f
 #endif
 
 // Cuticle tilt, radians. Cycles Principled Hair default Offset.
@@ -77,8 +77,7 @@ DEVICE_FUNC float hair_safe_divide(float a, float b)
 
 DEVICE_FUNC float3 hair_safe_divide3(float3 a, float3 b)
 {
-    return make_float3(hair_safe_divide(a.x, b.x), hair_safe_divide(a.y, b.y),
-                       hair_safe_divide(a.z, b.z));
+    return make_float3(hair_safe_divide(a.x, b.x), hair_safe_divide(a.y, b.y), hair_safe_divide(a.z, b.z));
 }
 
 DEVICE_FUNC float hair_pow20(float x)
@@ -164,11 +163,8 @@ DEVICE_FUNC float hair_azimuthal_scattering(float phi, int p, float s, float gam
     return hair_trimmed_logistic(phi_o, s);
 }
 
-DEVICE_FUNC float hair_longitudinal_scattering(float sin_theta_i,
-                                               float cos_theta_i,
-                                               float sin_theta_o,
-                                               float cos_theta_o,
-                                               float v)
+DEVICE_FUNC float hair_longitudinal_scattering(
+    float sin_theta_i, float cos_theta_i, float sin_theta_o, float cos_theta_o, float v)
 {
     const float inv_v = 1.0f / v;
     const float cos_arg = cos_theta_i * cos_theta_o * inv_v;
@@ -186,17 +182,13 @@ DEVICE_FUNC float hair_longitudinal_scattering(float sin_theta_i,
 DEVICE_FUNC float3 hair_sigma_from_reflectance(float3 color, float radial_roughness)
 {
     const float x = radial_roughness;
-    const float roughness_fac =
-        (((((0.245f * x) + 5.574f) * x - 10.73f) * x + 2.532f) * x - 0.215f) * x + 5.969f;
+    const float roughness_fac = (((((0.245f * x) + 5.574f) * x - 10.73f) * x + 2.532f) * x - 0.215f) * x + 5.969f;
     const float3 c = make_float3(fmaxf(color.x, 1e-5f), fmaxf(color.y, 1e-5f), fmaxf(color.z, 1e-5f));
     const float3 sigma = make_float3(logf(c.x), logf(c.y), logf(c.z)) * (1.0f / roughness_fac);
     return make_float3(sigma.x * sigma.x, sigma.y * sigma.y, sigma.z * sigma.z);
 }
 
-DEVICE_FUNC void hair_attenuation(float f,
-                                  float3 T,
-                                  THREAD_REF float3* Ap,
-                                  THREAD_REF float* Ap_energy)
+DEVICE_FUNC void hair_attenuation(float f, float3 T, THREAD_REF float3* Ap, THREAD_REF float* Ap_energy)
 {
     Ap[0] = make_float3(f);
     Ap_energy[0] = f;
@@ -222,10 +214,7 @@ DEVICE_FUNC void hair_attenuation(float f,
     Ap_energy[3] *= fac;
 }
 
-DEVICE_FUNC void hair_alpha_angles(float sin_theta_o,
-                                   float cos_theta_o,
-                                   float alpha,
-                                   THREAD_REF float* angles)
+DEVICE_FUNC void hair_alpha_angles(float sin_theta_o, float cos_theta_o, float alpha, THREAD_REF float* angles)
 {
     const float sin_1alpha = sinf(alpha);
     const float cos_1alpha = hair_cos_from_sin(sin_1alpha);
@@ -263,8 +252,7 @@ DEVICE_FUNC HairChiangParams hair_chiang_prepare(const THREAD_REF SurfaceInterac
     HairChiangParams p;
 
     float rough_u = clamp(si.roughness, 0.001f, 1.0f);
-    float rough_v = (fabsf(si.anisotropy) > 1e-4f) ? clamp(fabsf(si.anisotropy), 0.001f, 1.0f)
-                                                     : rough_u;
+    float rough_v = (fabsf(si.anisotropy) > 1e-4f) ? clamp(fabsf(si.anisotropy), 0.001f, 1.0f) : rough_u;
     float coat = saturate(si.clearcoat);
     float m0 = clamp((1.0f - coat) * rough_u, 0.001f, 1.0f);
 
@@ -321,19 +309,16 @@ DEVICE_FUNC void hair_eval_lobes(const THREAD_REF HairChiangParams& p,
     const float gamma_o = hair_safe_asinf(sin_gamma_o);
 
     const float denom_g = sqr(p.eta) - sqr(sin_theta_o);
-    const float sin_gamma_t =
-        sin_gamma_o * cos_theta_o / sqrtf(fmaxf(denom_g, 1e-8f));
+    const float sin_gamma_t = sin_gamma_o * cos_theta_o / sqrtf(fmaxf(denom_g, 1e-8f));
     const float cos_gamma_t = hair_cos_from_sin(sin_gamma_t);
     const float gamma_t = hair_safe_asinf(sin_gamma_t);
 
-    const float3 T =
-        make_float3(expf(-p.sigma.x * (2.0f * cos_gamma_t / fmaxf(cos_theta_t, 1e-4f))),
-                    expf(-p.sigma.y * (2.0f * cos_gamma_t / fmaxf(cos_theta_t, 1e-4f))),
-                    expf(-p.sigma.z * (2.0f * cos_gamma_t / fmaxf(cos_theta_t, 1e-4f))));
+    const float3 T = make_float3(expf(-p.sigma.x * (2.0f * cos_gamma_t / fmaxf(cos_theta_t, 1e-4f))),
+                                 expf(-p.sigma.y * (2.0f * cos_gamma_t / fmaxf(cos_theta_t, 1e-4f))),
+                                 expf(-p.sigma.z * (2.0f * cos_gamma_t / fmaxf(cos_theta_t, 1e-4f))));
 
     // eta is hair IOR; our Fresnel wants exterior/interior = 1/eta.
-    const float F0 =
-        fresnel_dielectric(cos_theta_o * cos_gamma_o, 1.0f / p.eta);
+    const float F0 = fresnel_dielectric(cos_theta_o * cos_gamma_o, 1.0f / p.eta);
 
     float3 Ap[4];
     float Ap_energy[4];
@@ -349,26 +334,25 @@ DEVICE_FUNC void hair_eval_lobes(const THREAD_REF HairChiangParams& p,
     for (int i = 0; i < 3; ++i)
     {
         const float v_lobe = (i == 0) ? p.m0_roughness : (i == 1) ? 0.25f * p.v : 4.0f * p.v;
-        const float Mp = hair_longitudinal_scattering(
-            sin_theta_i, cos_theta_i, angles[2 * i], angles[2 * i + 1], v_lobe);
+        // angles holds a (sin, cos) pair per lobe; naming the pair's base keeps
+        // the subscript free of arithmetic.
+        const int tilted = 2 * i;
+        const float Mp =
+            hair_longitudinal_scattering(sin_theta_i, cos_theta_i, angles[tilted], angles[tilted + 1], v_lobe);
         const float Np = hair_azimuthal_scattering(phi, i, p.s, gamma_o, gamma_t);
         F = F + Ap[i] * (Mp * Np);
         F_energy += Ap_energy[i] * Mp * Np;
     }
 
     {
-        const float Mp = hair_longitudinal_scattering(
-            sin_theta_i, cos_theta_i, sin_theta_o, cos_theta_o, 4.0f * p.v);
+        const float Mp = hair_longitudinal_scattering(sin_theta_i, cos_theta_i, sin_theta_o, cos_theta_o, 4.0f * p.v);
         const float Np = M_1_2PI_F;
         F = F + Ap[3] * (Mp * Np);
         F_energy += Ap_energy[3] * Mp * Np;
     }
 }
 
-DEVICE_FUNC BsdfSampleResult hair_chiang_sample(const THREAD_REF SurfaceInteraction& si,
-                                                float u1,
-                                                float u2,
-                                                float u3)
+DEVICE_FUNC BsdfSampleResult hair_chiang_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2, float u3)
 {
     BsdfSampleResult result;
     result.bsdf_over_pdf = make_float3(0.0f);
@@ -387,15 +371,13 @@ DEVICE_FUNC BsdfSampleResult hair_chiang_sample(const THREAD_REF SurfaceInteract
     const float cos_gamma_o = hair_cos_from_sin(sin_gamma_o);
     const float gamma_o = hair_safe_asinf(sin_gamma_o);
     const float denom_g = sqr(p.eta) - sqr(sin_theta_o);
-    const float sin_gamma_t =
-        sin_gamma_o * cos_theta_o / sqrtf(fmaxf(denom_g, 1e-8f));
+    const float sin_gamma_t = sin_gamma_o * cos_theta_o / sqrtf(fmaxf(denom_g, 1e-8f));
     const float cos_gamma_t = hair_cos_from_sin(sin_gamma_t);
     const float gamma_t = hair_safe_asinf(sin_gamma_t);
 
-    const float3 T =
-        make_float3(expf(-p.sigma.x * (2.0f * cos_gamma_t / fmaxf(cos_theta_t, 1e-4f))),
-                    expf(-p.sigma.y * (2.0f * cos_gamma_t / fmaxf(cos_theta_t, 1e-4f))),
-                    expf(-p.sigma.z * (2.0f * cos_gamma_t / fmaxf(cos_theta_t, 1e-4f))));
+    const float3 T = make_float3(expf(-p.sigma.x * (2.0f * cos_gamma_t / fmaxf(cos_theta_t, 1e-4f))),
+                                 expf(-p.sigma.y * (2.0f * cos_gamma_t / fmaxf(cos_theta_t, 1e-4f))),
+                                 expf(-p.sigma.z * (2.0f * cos_gamma_t / fmaxf(cos_theta_t, 1e-4f))));
     const float F0 = fresnel_dielectric(cos_theta_o * cos_gamma_o, 1.0f / p.eta);
 
     float3 Ap[4];
@@ -424,15 +406,15 @@ DEVICE_FUNC BsdfSampleResult hair_chiang_sample(const THREAD_REF SurfaceInteract
     float cos_theta_o_tilted = cos_theta_o;
     if (lobe < 3)
     {
-        sin_theta_o_tilted = angles[2 * lobe];
-        cos_theta_o_tilted = angles[2 * lobe + 1];
+        const int tilted = 2 * lobe;
+        sin_theta_o_tilted = angles[tilted];
+        cos_theta_o_tilted = angles[tilted + 1];
     }
 
     rz = fmaxf(rz, 1e-5f);
     const float fac = 1.0f + v * logf(rz + (1.0f - rz) * expf(-2.0f / v));
     const float sin_theta_i =
-        -fac * sin_theta_o_tilted +
-        hair_sin_from_cos(fac) * cosf(M_2PI_F * u2) * cos_theta_o_tilted;
+        -fac * sin_theta_o_tilted + hair_sin_from_cos(fac) * cosf(M_2PI_F * u2) * cos_theta_o_tilted;
     const float cos_theta_i = hair_cos_from_sin(sin_theta_i);
 
     float phi;
@@ -444,14 +426,12 @@ DEVICE_FUNC BsdfSampleResult hair_chiang_sample(const THREAD_REF SurfaceInteract
 
     float3 F;
     float F_energy;
-    hair_eval_lobes(p, sin_theta_o, cos_theta_o, phi_o, sin_theta_i, cos_theta_i, phi_i, F,
-                    F_energy);
+    hair_eval_lobes(p, sin_theta_o, cos_theta_o, phi_o, sin_theta_i, cos_theta_i, phi_i, F, F_energy);
     if (!(F_energy > 1e-10f))
         return result;
 
     // pbrt / Chiang local direction: (sin θ, cos θ cos φ, cos θ sin φ).
-    const float3 local_I =
-        make_float3(sin_theta_i, cos_theta_i * cosf(phi_i), cos_theta_i * sinf(phi_i));
+    const float3 local_I = make_float3(sin_theta_i, cos_theta_i * cosf(phi_i), cos_theta_i * sinf(phi_i));
     result.wi = safe_normalize(hair_to_world(local_I, p.X, p.Y, p.Z));
     result.pdf = F_energy;
     // Hair is not a surface BRDF with an |n·wi| factor in its definition.
@@ -481,8 +461,7 @@ DEVICE_FUNC BsdfEvalResult hair_chiang_eval(const THREAD_REF SurfaceInteraction&
 
     float3 F;
     float F_energy;
-    hair_eval_lobes(p, sin_theta_o, cos_theta_o, phi_o, sin_theta_i, cos_theta_i, phi_i, F,
-                    F_energy);
+    hair_eval_lobes(p, sin_theta_o, cos_theta_o, phi_o, sin_theta_i, cos_theta_i, phi_i, F, F_energy);
     if (!(F_energy > 0.0f))
         return result;
 

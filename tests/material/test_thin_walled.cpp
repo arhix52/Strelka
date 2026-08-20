@@ -9,7 +9,11 @@
 #include <strelka/material/microfacet.h>
 #include <strelka/material/bsdf.h>
 
+#include "../support/sampling.h"
+
 #include <cmath>
+
+using oka::test::stratum;
 
 // ---------------------------------------------------------------------------
 // A thin-walled surface hit from its far side.
@@ -110,7 +114,7 @@ void sweep(const SurfaceInteraction& si, float& transmitted, float& mean_through
         // Offset off the ends of the interval: the draw is compared against F
         // with a strict inequality, and 0 or 1 exactly would test the boundary
         // rather than the distribution.
-        const float u = (i + 0.5f) / (float)N;
+        const float u = stratum(i, N);
         BsdfSampleResult r = bsdf_sample(si, make_float4(0.5f, 0.5f, 0.25f, u));
         if ((r.event_type & BSDF_EVENT_TRANSMISSION) != 0)
         {
@@ -211,7 +215,7 @@ TEST_CASE("a smooth thin wall transmits as a delta, and says so")
         int transmitted = 0;
         for (int i = 0; i < 512; ++i)
         {
-            const float u = (i + 0.5f) / 512.0f;
+            const float u = stratum(i, 512);
             BsdfSampleResult r = bsdf_sample(si, make_float4(0.3f, 0.7f, 0.25f, u));
             if ((r.event_type & BSDF_EVENT_TRANSMISSION) == 0) continue;
             ++transmitted;
@@ -236,9 +240,9 @@ TEST_CASE("a rough thin wall blurs transmission around -V")
     const float3 through = make_float3(0.0f) - si.wo;
     for (int i = 0; i < 2048; ++i)
     {
-        const float u = (i + 0.5f) / 2048.0f;
-        const float u1 = ((i * 7) % 2048 + 0.5f) / 2048.0f;
-        const float u2 = ((i * 13) % 2048 + 0.5f) / 2048.0f;
+        const float u = stratum(i, 2048);
+        const float u1 = stratum((i * 7) % 2048, 2048);
+        const float u2 = stratum((i * 13) % 2048, 2048);
         BsdfSampleResult r = bsdf_sample(si, make_float4(u1, u2, 0.25f, u));
         if ((r.event_type & BSDF_EVENT_TRANSMISSION) == 0) continue;
         ++transmitted;
@@ -275,9 +279,9 @@ TEST_CASE("a rough thin wall is evaluable in transmission and agrees with sample
     int checked = 0;
     for (int i = 0; i < 800 && checked < 40; ++i)
     {
-        const float u = (i + 0.5f) / 800.0f;
-        const float u1 = ((i * 3) % 800 + 0.5f) / 800.0f;
-        const float u2 = ((i * 11) % 800 + 0.5f) / 800.0f;
+        const float u = stratum(i, 800);
+        const float u1 = stratum((i * 3) % 800, 800);
+        const float u2 = stratum((i * 11) % 800, 800);
         BsdfSampleResult s = bsdf_sample(si, make_float4(u1, u2, 0.25f, u));
         if ((s.event_type & BSDF_EVENT_TRANSMISSION) == 0) continue;
         if ((s.event_type & BSDF_EVENT_SPECULAR) != 0) continue;
