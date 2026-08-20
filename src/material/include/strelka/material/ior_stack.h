@@ -25,8 +25,11 @@
 /// stack is carried per path on both backends -- inside OptiX's PerRayData,
 /// where every byte is a byte of continuation stack, and in Metal's per-pixel
 /// side table. See docs/open-perf.md for what a byte of PerRayData costs.
-#define IOR_ENTRY_MATERIAL_BITS 24u
-#define IOR_ENTRY_MATERIAL_MASK ((1u << IOR_ENTRY_MATERIAL_BITS) - 1u)
+enum : unsigned int
+{
+    IOR_ENTRY_MATERIAL_BITS = 24u,
+    IOR_ENTRY_MATERIAL_MASK = (1u << IOR_ENTRY_MATERIAL_BITS) - 1u
+};
 
 struct IorStackEntry
 {
@@ -56,7 +59,10 @@ DEVICE_FUNC unsigned int ior_entry_pack(unsigned int priority, unsigned int mate
     return ((priority & 0xFFu) << IOR_ENTRY_MATERIAL_BITS) | (material_index & IOR_ENTRY_MATERIAL_MASK);
 }
 
-#define IOR_STACK_SIZE 4
+enum : int
+{
+    IOR_STACK_SIZE = 4
+};
 
 struct IorStack
 {

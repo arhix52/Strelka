@@ -211,7 +211,10 @@ struct MaterialParams
 /// medium_flags bit 0: this material's geometry is the boundary of a medium.
 /// A ray crossing it toggles the medium it is in and carries on, unshaded and
 /// without spending a bounce.
-#define MEDIUM_FLAG_BOUNDARY 1u
+enum : unsigned int
+{
+    MEDIUM_FLAG_BOUNDARY = 1u
+};
 
 // Static assert equivalent for size (works on all three backends)
 // 288 bytes, 16-byte aligned -- fits nicely in SBT / argument buffers.

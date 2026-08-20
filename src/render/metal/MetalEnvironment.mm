@@ -107,6 +107,8 @@ void MetalEnvironment::loadBackground(const std::string& texturePath)
     mState.backgroundTexture->replaceRegion(MTL::Region::Make3D(0, 0, 0, width, height, 1), 0, pixelData,
                                             width * sizeof(float) * 4);
     if (isExr)
+        // LoadEXR allocates with malloc, so this has to be free.
+        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
         free(pixelData);
     else
         stbi_image_free(pixelData);
@@ -183,6 +185,8 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
                                             MTL::ResourceStorageModeShared);
 
     if (isExr)
+        // LoadEXR allocates with malloc, so this has to be free.
+        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
         free(pixelData);
     else
         stbi_image_free(pixelData);

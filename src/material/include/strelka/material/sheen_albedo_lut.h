@@ -22,7 +22,10 @@
 
 #include "material_math.h"
 
-#define SHEEN_ALBEDO_LUT_SIZE 16
+enum : int
+{
+    SHEEN_ALBEDO_LUT_SIZE = 16
+};
 
 // Row-major: [roughness][NdotV].
 DEVICE_CONST float kSheenAlbedoLut[SHEEN_ALBEDO_LUT_SIZE * SHEEN_ALBEDO_LUT_SIZE] = {

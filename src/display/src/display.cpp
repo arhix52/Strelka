@@ -10,7 +10,7 @@ void Display::framebufferResizeCallback(GLFWwindow* window, int width, int heigh
         return;
     }
 
-    auto app = reinterpret_cast<Display*>(glfwGetWindowUserPointer(window));
+    auto app = static_cast<Display*>(glfwGetWindowUserPointer(window));
     // app->framebufferResized = true;
     ResizeHandler* handler = app->getResizeHandler();
     if (handler)
@@ -26,7 +26,7 @@ void Display::keyCallback(GLFWwindow* window,
                           [[maybe_unused]] int mods)
 {
     assert(window);
-    auto app = reinterpret_cast<Display*>(glfwGetWindowUserPointer(window));
+    auto app = static_cast<Display*>(glfwGetWindowUserPointer(window));
     if (!app->mViewPortHovered)
     {
         return;
@@ -42,7 +42,7 @@ void Display::mouseButtonCallback(GLFWwindow* window,
                                   [[maybe_unused]] int mods)
 {
     assert(window);
-    auto app = reinterpret_cast<Display*>(glfwGetWindowUserPointer(window));
+    auto app = static_cast<Display*>(glfwGetWindowUserPointer(window));
     InputHandler* handler = app->getInputHandler();
     if (handler)
     {
@@ -53,7 +53,7 @@ void Display::mouseButtonCallback(GLFWwindow* window,
 void Display::handleMouseMoveCallback(GLFWwindow* window, [[maybe_unused]] double xpos, [[maybe_unused]] double ypos)
 {
     assert(window);
-    auto app = reinterpret_cast<Display*>(glfwGetWindowUserPointer(window));
+    auto app = static_cast<Display*>(glfwGetWindowUserPointer(window));
     InputHandler* handler = app->getInputHandler();
     if (handler)
     {
@@ -64,7 +64,7 @@ void Display::handleMouseMoveCallback(GLFWwindow* window, [[maybe_unused]] doubl
 void Display::scrollCallback(GLFWwindow* window, [[maybe_unused]] double xoffset, [[maybe_unused]] double yoffset)
 {
     assert(window);
-    auto app = reinterpret_cast<Display*>(glfwGetWindowUserPointer(window));
+    auto app = static_cast<Display*>(glfwGetWindowUserPointer(window));
     // Gated on hover like the keyboard is, and for the same reason: the wheel over
     // a panel belongs to that panel's scrollbar, and ImGui has already had it.
     if (!app->mViewPortHovered)

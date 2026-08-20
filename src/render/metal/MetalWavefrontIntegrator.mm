@@ -368,7 +368,7 @@ void MetalWavefrontIntegrator::reportIorStackStats()
         "hole in it, seen from each side -- and the third is the one no exit event can "
         "catch, because the ray left through the hole. Each of them carries the wrong "
         "medium, and therefore the wrong absorption, for the rest of its life.",
-        overflow, IOR_STACK_SIZE, unmatched, escaped);
+        overflow, int{ IOR_STACK_SIZE }, unmatched, escaped);
 }
 
 void MetalWavefrontIntegrator::reportSharcStats()

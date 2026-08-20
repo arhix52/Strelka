@@ -278,6 +278,9 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
             dstW = std::max(1, dstW / 2);
             dstH = std::max(1, dstH / 2);
         }
+        // Freed through stbi_image_free once it takes over `data`, and that is
+        // free() under another name, so it has to come from malloc.
+        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
         auto* scaled = (stbi_uc*)malloc((size_t)dstW * dstH * 4);
         const int ok =
             scaled ? (srgb ? stbir_resize_uint8_srgb(data, texWidth, texHeight, 0, scaled, dstW, dstH, 0, 4, 3, 0) :
@@ -292,6 +295,7 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
         }
         else if (scaled)
         {
+            // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
             free(scaled);
         }
     }

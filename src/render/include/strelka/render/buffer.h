@@ -121,10 +121,10 @@ public:
     }
 
 protected:
-    void* mDeviceData;
+    void* mDeviceData = nullptr;
     size_t mWidth = 0u;
     size_t mHeight = 0u;
-    BufferFormat mFormat;
+    BufferFormat mFormat = BufferFormat::UNSIGNED_BYTE;
 
     std::vector<char> mHostData;
 };
@@ -140,7 +140,7 @@ struct ImageBuffer
     size_t dataSize = 0;
     unsigned int width = 0;
     unsigned int height = 0;
-    BufferFormat pixel_format;
+    BufferFormat pixel_format = BufferFormat::UNSIGNED_BYTE;
     uint64_t frameSerial = 0;
     PresentationMetadata presentation{};
 };

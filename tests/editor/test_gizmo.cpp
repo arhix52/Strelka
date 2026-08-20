@@ -56,8 +56,8 @@ DragResult dragGizmo(ViewportItem item,
 
     struct Step
     {
-        ImVec2 mouse;
-        bool down;
+        ImVec2 mouse{};
+        bool down = false;
     };
     // Hover first: ImGui derives a click from the previous frame's button state,
     // so a press on frame one would never read as one.
