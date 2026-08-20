@@ -1,7 +1,34 @@
 # Folded scalar (>) — a plain '<' would disable every check silently.
 #
-# Focus: bugs, static analysis, performance, concurrency, security.
-# Style (readability/modernize/hicpp) is off — it drowned signal under Werror.
+# What this is for, in order: correctness, undefined behaviour, performance.
+# Those are the four families in WarningsAsErrors below, and they are the only
+# ones allowed to stop a build. Everything else is advisory.
+#
+# modernize-* is on as advisory, to walk the codebase towards current C++ — but
+# only the checks that change what the code *is*, not how it is spelled. A
+# thousand diagnostics nobody intends to act on is how the hundred that matter
+# get ignored, so the spelling-only ones are off, with what each was producing
+# over the tree (note that YAML's folded scalar takes no comments, hence here):
+#
+#   use-trailing-return-type      1348   and against the house style
+#   avoid-c-style-cast             916   device code casts C-style by necessity
+#   use-nodiscard                  202
+#   use-designated-initializers    177   the GPU-facing structs are hand-packed
+#   avoid-c-arrays                 164   mostly device-facing storage
+#   use-auto                       141   this codebase spells its types out
+#
+# readability-* and hicpp-* stay off for the same reason.
+#
+# The fixed-seed checks are off because a fixed seed is the point: a renderer's
+# tests have to produce the same image twice, and a sampler seeded from the clock
+# is not reproducible. It takes three entries -- bugprone-random-generator-seed
+# plus the cert-msc32-c / cert-msc51-cpp aliases -- because disabling one spelling
+# leaves the other two reporting the same line, and cert-* is in
+# WarningsAsErrors, so it fails the build rather than merely warning.
+#
+# src/material/ and src/shaders/ carry their own .clang-tidy: those headers are
+# compiled by NVCC and the Metal compiler as well as by the host toolchain, so a
+# suggestion to reach for the C++ standard library is not actionable there.
 # HeaderFilterRegex limits diagnostics to our trees; third_party/ and external/
 # have their own .clang-tidy with Checks: '-*'.
 Checks: >
@@ -17,8 +44,13 @@ Checks: >
   -zircon-*,
   -llvm*,
   -readability-*,
-  -modernize-*,
   -hicpp-*,
+  -modernize-use-trailing-return-type,
+  -modernize-avoid-c-style-cast,
+  -modernize-use-nodiscard,
+  -modernize-use-designated-initializers,
+  -modernize-avoid-c-arrays,
+  -modernize-use-auto,
   -cppcoreguidelines-pro-type-vararg,
   -cppcoreguidelines-pro-type-cstyle-cast,
   -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
@@ -42,8 +74,11 @@ Checks: >
   -portability-avoid-pragma-once,
   -bugprone-easily-swappable-parameters,
   -bugprone-exception-escape,
+  -bugprone-random-generator-seed,
   -cert-env33-c,
-  -cert-err58-cpp
+  -cert-err58-cpp,
+  -cert-msc32-c,
+  -cert-msc51-cpp
 
 WarningsAsErrors: >
   bugprone-*,

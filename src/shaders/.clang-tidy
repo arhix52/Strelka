@@ -1,0 +1,8 @@
+# Device shading code, shared with the OptiX closest-hit programs and the Metal
+# kernels. Same reason as src/material/.clang-tidy, and the same limit on when it
+# applies: the host build these diagnostics come from is the only one clang-tidy
+# sees, and the standard library it would reach for does not exist in the other
+# two.
+InheritParentConfig: true
+Checks: >
+  -modernize-*

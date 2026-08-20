@@ -1,0 +1,18 @@
+# strelka_material is compiled by three compilers: NVCC, the Metal compiler, and
+# the host C++ compiler for the doctest suite. clang-tidy only ever sees the
+# third, so a suggestion that reaches for the C++ standard library -- <numbers>,
+# <ranges>, std::cmp_less -- would fix the host build and break the two device
+# builds no analyzer here runs over.
+#
+# Correctness, UB and performance checks still apply: those are about what the
+# code does, and it does the same thing under all three.
+#
+# Scope, exactly: clang-tidy picks its config from the *translation unit*, not
+# from the header a diagnostic lands in, and this directory is an INTERFACE
+# target with no TU of its own. So this file governs editor integration -- which
+# is the only way tidy runs in this repo, see CLAUDE.md -- and not a batch
+# run-clang-tidy over compile_commands.json, where these headers are reached
+# through tests/material/*.cpp and answer to the root config instead.
+InheritParentConfig: true
+Checks: >
+  -modernize-*
