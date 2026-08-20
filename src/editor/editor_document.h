@@ -65,7 +65,9 @@ inline int clampCameraIndex(int selected, uint32_t cameraCount)
     {
         return 0;
     }
-    if (static_cast<uint32_t>(selected) >= cameraCount)
+    // Non-negative by the guard above, so the conversion is exact.
+    const uint32_t selectedIndex = static_cast<uint32_t>(selected);
+    if (selectedIndex >= cameraCount)
     {
         return static_cast<int>(cameraCount - 1);
     }

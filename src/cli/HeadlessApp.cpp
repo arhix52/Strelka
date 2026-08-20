@@ -738,7 +738,7 @@ int HeadlessApp::run()
         m_scene->addCamera(camera);
     }
 
-    if (m_config.cameraIndex >= 0 && m_config.cameraIndex < static_cast<int>(m_scene->getCameraCount()))
+    if (m_config.cameraIndex >= 0 && static_cast<size_t>(m_config.cameraIndex) < m_scene->getCameraCount())
     {
         Camera& cam = m_scene->getCamera(static_cast<uint32_t>(m_config.cameraIndex));
 
@@ -770,13 +770,13 @@ int HeadlessApp::run()
                 editor_camera_framing::frameCamera(cam, worldMin, worldMax, aspect);
                 cam.updateAspectRatio(aspect);
                 STRELKA_INFO("ACTION frame_selection node={} instance={} camera={} projection={}", *m_config.frameNode,
-                             m_config.frameInstance.value_or(static_cast<uint32_t>(-1)), m_config.cameraIndex,
+                             m_config.frameInstance.value_or(kInvalidIndex), m_config.cameraIndex,
                              cam.projection == Camera::ProjectionType::orthographic ? "ortho" : "persp");
             }
             else
             {
                 STRELKA_WARNING("Cannot frame node {} instance {}: selection has no renderable bounds",
-                                *m_config.frameNode, m_config.frameInstance.value_or(static_cast<uint32_t>(-1)));
+                                *m_config.frameNode, m_config.frameInstance.value_or(kInvalidIndex));
             }
         }
     }

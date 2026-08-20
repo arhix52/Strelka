@@ -1485,7 +1485,7 @@ bool loadPunctualLights(const tinygltf::Model& model, oka::Scene& scene)
         if (lightIt == node.extensions.end() || !lightIt->second.Has("light"))
             continue;
         const int lightIndex = lightIt->second.Get("light").GetNumberAsInt();
-        if (lightIndex < 0 || lightIndex >= (int)lightsArr.ArrayLen())
+        if (lightIndex < 0 || (size_t)lightIndex >= lightsArr.ArrayLen())
             continue;
         const tinygltf::Value& L = lightsArr.Get(lightIndex);
         if (!L.IsObject())
@@ -1595,7 +1595,7 @@ void loadCamerasFromJson(const std::string& modelPath, oka::Scene& scene)
 
         const std::string name = cam["name"].get<std::string>();
         const uint32_t idx = scene.findCameraByName(name);
-        if (idx == (uint32_t)-1)
+        if (idx == kInvalidIndex)
         {
             STRELKA_WARNING("Camera JSON: no matching camera '{}' in scene", name);
             continue;

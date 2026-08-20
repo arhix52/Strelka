@@ -24,7 +24,7 @@ namespace oka
 
 uint32_t Scene::acquireMeshSlot(Mesh*& mesh)
 {
-    uint32_t meshId = static_cast<uint32_t>(-1);
+    uint32_t meshId = kInvalidIndex;
     if (mDelMesh.empty())
     {
         meshId = static_cast<uint32_t>(mMeshes.size());
@@ -307,7 +307,7 @@ void Scene::buildNodeOrder()
         mNodeOrder.push_back(nodeId);
         for (const int childId : mNodes[nodeId].children)
         {
-            if (childId >= 0 && childId < (int)mNodes.size())
+            if (childId >= 0 && (size_t)childId < mNodes.size())
                 queue.push_back(childId);
         }
     }
@@ -366,7 +366,7 @@ bool Scene::applyNodeSideEffects(const uint32_t nodeId)
         return false;
 
     case Node::NodeType::camera:
-        if (mNodes[nodeId].camera >= 0 && mNodes[nodeId].camera < (int)mCameras.size() &&
+        if (mNodes[nodeId].camera >= 0 && (size_t)mNodes[nodeId].camera < mCameras.size() &&
             !mCameras[mNodes[nodeId].camera].manualControl)
         {
             glm::float3 scale;
@@ -576,7 +576,7 @@ bool Scene::updateNode(const uint32_t nodeId)
 
 uint32_t Scene::createRectLightMesh()
 {
-    if (mRectLightMeshId != static_cast<uint32_t>(-1))
+    if (mRectLightMeshId != kInvalidIndex)
     {
         return mRectLightMeshId;
     }
@@ -603,7 +603,7 @@ uint32_t Scene::createRectLightMesh()
 
 uint32_t Scene::createSphereLightMesh()
 {
-    if (mSphereLightMeshId != static_cast<uint32_t>(-1))
+    if (mSphereLightMeshId != kInvalidIndex)
     {
         return mSphereLightMeshId;
     }
@@ -663,7 +663,7 @@ uint32_t Scene::createSphereLightMesh()
 
 uint32_t Scene::createDiscLightMesh()
 {
-    if (mDiskLightMeshId != static_cast<uint32_t>(-1))
+    if (mDiskLightMeshId != kInvalidIndex)
     {
         return mDiskLightMeshId;
     }
@@ -914,11 +914,11 @@ int32_t Scene::addIesProfile(IesProfile profile)
 {
     // Reuse an already-loaded path so toggling the same file in the UI does not
     // grow the table without bound.
-    for (int32_t i = 0; i < (int32_t)mIesProfiles.size(); ++i)
+    for (size_t i = 0; i < mIesProfiles.size(); ++i)
     {
-        if (mIesProfiles[(size_t)i].path == profile.path)
+        if (mIesProfiles[i].path == profile.path)
         {
-            return i;
+            return (int32_t)i;
         }
     }
     mIesProfiles.push_back(std::move(profile));
@@ -930,11 +930,11 @@ int32_t Scene::addProjectorImage(const std::string& path)
     // Same dedup as addIesProfile, and for the same reason: picking the same
     // file twice in the UI must not grow the GPU texture table, and two
     // projectors showing one slide should be one upload.
-    for (int32_t i = 0; i < (int32_t)mProjectorImages.size(); ++i)
+    for (size_t i = 0; i < mProjectorImages.size(); ++i)
     {
-        if (mProjectorImages[(size_t)i] == path)
+        if (mProjectorImages[i] == path)
         {
-            return i;
+            return (int32_t)i;
         }
     }
     mProjectorImages.push_back(path);
@@ -990,7 +990,7 @@ void Scene::setNodeLocalTransform(const uint32_t nodeId,
         mNodeDirty[id] = 1;
         for (const int child : mNodes[id].children)
         {
-            if (child >= 0 && child < (int)mNodes.size())
+            if (child >= 0 && (size_t)child < mNodes.size())
                 stack.push_back((uint32_t)child);
         }
     }
@@ -1368,10 +1368,10 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
 
     // The owning node, resolved for the one instance that won rather than by
     // building a reverse map of every instance in the scene on every click.
-    best.nodeId = (uint32_t)-1;
+    best.nodeId = kInvalidIndex;
     if (best.hit)
     {
-        for (uint32_t n = 0; n < mNodes.size() && best.nodeId == (uint32_t)-1; ++n)
+        for (uint32_t n = 0; n < mNodes.size() && best.nodeId == kInvalidIndex; ++n)
         {
             for (const uint32_t instId : mNodes[n].instanceIds)
             {

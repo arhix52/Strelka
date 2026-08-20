@@ -234,10 +234,13 @@ void MetalWavefrontIntegrator::reportStageFailureMetal4()
                 ++bounce;
             }
         }
-        if (bounce >= 0 && bounce < static_cast<int32_t>(kWavefrontStageDiagnosticBounces))
+        // -1 means no extend stage ran since the last generate, so there is no
+        // bounce to report. Converted once, past that test, and the slot index
+        // is what the rest of the block wants anyway.
+        const uint32_t bounceIndex = static_cast<uint32_t>(bounce);
+        if (bounce >= 0 && bounceIndex < kWavefrontStageDiagnosticBounces)
         {
-            const uint32_t base =
-                kWavefrontStageDiagnosticBase + static_cast<uint32_t>(bounce) * kWavefrontStageDiagnosticStride;
+            const uint32_t base = kWavefrontStageDiagnosticBase + bounceIndex * kWavefrontStageDiagnosticStride;
             const uint32_t active = stats[base];
             STRELKA_ERROR("Metal 4 stage diagnosis: bounce={} active_paths={}", bounce, active);
             const uint32_t lanes = std::min(active, kWavefrontStageDiagnosticLanes);

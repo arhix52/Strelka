@@ -113,7 +113,7 @@ bool EditorApp::computeNodeBounds(const Scene::Node& node,
     // under the cursor, and it cost a pass over every placement to draw. Sibling
     // primitives of the clicked placement still share its transform, so they are
     // still boxed together.
-    const bool haveSelected = m_selectedInstanceId != (uint32_t)-1 && m_selectedInstanceId < instances.size();
+    const bool haveSelected = m_selectedInstanceId != kInvalidIndex && m_selectedInstanceId < instances.size();
     const glm::mat4* selectedXform = haveSelected ? &instances[m_selectedInstanceId].transform : nullptr;
 
     for (const uint32_t instId : node.instanceIds)
@@ -160,7 +160,7 @@ void EditorApp::drawSelectionOverlay(Camera& cam)
     glm::float3 bbMax(0.0f);
     glm::mat4 worldFromLocal(1.0f);
 
-    if (m_selectedNodeId != (uint32_t)-1 && m_selectedNodeId < nodes.size() &&
+    if (m_selectedNodeId != kInvalidIndex && m_selectedNodeId < nodes.size() &&
         !nodes[m_selectedNodeId].instanceIds.empty())
     {
         if (computeNodeBounds(nodes[m_selectedNodeId], bbMin, bbMax, worldFromLocal))
@@ -171,7 +171,7 @@ void EditorApp::drawSelectionOverlay(Camera& cam)
     }
 
     const std::vector<Instance>& instances = m_scene->getInstances();
-    if (m_selectedInstanceId != (uint32_t)-1 && m_selectedInstanceId < instances.size() &&
+    if (m_selectedInstanceId != kInvalidIndex && m_selectedInstanceId < instances.size() &&
         m_scene->computeInstanceBounds(m_selectedInstanceId, bbMin, bbMax))
     {
         drawBoundsWireframe(bbMin, bbMax, instances[m_selectedInstanceId].transform, cam);
@@ -183,8 +183,8 @@ void EditorApp::drawSelectionOverlay(Camera& cam)
 // Properties panel is closed or its dock tab is inactive.
 void EditorApp::drawSelectionGizmo(Camera& cam)
 {
-    const bool hasLight = m_selectedLightId != (uint32_t)-1 && m_selectedLightId < m_scene->getLightsDesc().size();
-    const bool hasNode = m_selectedNodeId != (uint32_t)-1 && m_selectedNodeId < m_scene->getNodes().size();
+    const bool hasLight = m_selectedLightId != kInvalidIndex && m_selectedLightId < m_scene->getLightsDesc().size();
+    const bool hasNode = m_selectedNodeId != kInvalidIndex && m_selectedNodeId < m_scene->getNodes().size();
     if (!hasLight && !hasNode)
     {
         return;
@@ -361,11 +361,11 @@ void EditorApp::drawViewportPanel()
 
         // Selection readout: the only in-viewport confirmation that a click landed.
         ImGui::SetCursorScreenPos(ImVec2(panelMin.x + 8.0f, panelMin.y + 8.0f));
-        if (m_selectedLightId != (uint32_t)-1)
+        if (m_selectedLightId != kInvalidIndex)
         {
             ImGui::Text("Selected: light %u", m_selectedLightId);
         }
-        else if (m_selectedNodeId != (uint32_t)-1 && m_selectedNodeId < m_scene->getNodes().size())
+        else if (m_selectedNodeId != kInvalidIndex && m_selectedNodeId < m_scene->getNodes().size())
         {
             const Scene::Node& node = m_scene->getNodes()[m_selectedNodeId];
             ImGui::Text("Selected: %s", node.name.empty() ? "(unnamed)" : node.name.c_str());

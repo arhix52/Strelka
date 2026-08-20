@@ -226,6 +226,11 @@ private:
     void flushAccelerationStructureGroup();
     MTL::AccelerationStructure* createAccelerationStructureNoCompact(MTL::AccelerationStructureDescriptor* descriptor);
     size_t buildBlas(const std::vector<uint32_t>& sceneInstanceIds, bool skeletal);
+    /// What buildCurveBlas returns for a set it could not build: an empty one,
+    /// or one whose points never got uploaded. Named because the caller has to
+    /// test for it, and `(size_t)-1` at both ends said nothing about which end
+    /// owned the convention.
+    static constexpr size_t kNoCurveBlas = ~size_t{ 0 };
     size_t buildCurveBlas(uint32_t sceneInstanceId);
     void ensureScratchBuffer(MTL::Buffer*& buffer, size_t requiredSize);
     void addDescriptorResidency();

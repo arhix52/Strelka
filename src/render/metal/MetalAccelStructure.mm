@@ -248,7 +248,7 @@ size_t MetalAccelStructure::buildCurveBlas(uint32_t sceneInstanceId)
     if (curveId >= mGeometry->curveRanges().size() || mGeometry->curveRanges()[curveId].segmentCount == 0 ||
         !mGeometry->curvePointBuffer())
     {
-        return (size_t)-1;
+        return kNoCurveBlas;
     }
     const MetalGeometry::CurveRange& range = mGeometry->curveRanges()[curveId];
     const oka::Curve& curve = mScene->getCurves()[curveId];
@@ -665,7 +665,7 @@ bool MetalAccelStructure::step(double budgetMs)
                 if (it == st.curveBlasOfSet.end())
                 {
                     const size_t blasIdx = buildCurveBlas((uint32_t)i);
-                    if (blasIdx == (size_t)-1)
+                    if (blasIdx == kNoCurveBlas)
                     {
                         continue; // an empty set: warned about in buildCurveBuffers
                     }

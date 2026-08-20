@@ -45,7 +45,7 @@ void EditorApp::drawPropertyPanel()
     if (ImGui::RadioButton("World", m_gizmoMode == ImGuizmo::WORLD))
         m_gizmoMode = ImGuizmo::WORLD;
 
-    if (m_selectedLightId != (uint32_t)-1 && m_selectedLightId < m_scene->getLightsDesc().size())
+    if (m_selectedLightId != kInvalidIndex && m_selectedLightId < m_scene->getLightsDesc().size())
     {
         Scene::UniformLightDesc desc = m_scene->getLightsDesc()[m_selectedLightId];
         ImGui::SeparatorText(desc.name.empty() ? "Light" : desc.name.c_str());
@@ -265,7 +265,7 @@ void EditorApp::drawPropertyPanel()
             markDocumentDirty();
         }
     }
-    else if (m_selectedNodeId != (uint32_t)-1 && m_selectedNodeId < m_scene->getNodes().size())
+    else if (m_selectedNodeId != kInvalidIndex && m_selectedNodeId < m_scene->getNodes().size())
     {
         const Scene::Node& node = m_scene->getNodes()[m_selectedNodeId];
         ImGui::SeparatorText("Node");
@@ -301,7 +301,7 @@ void EditorApp::drawPropertyPanel()
 
     if (ImGuiFileDialog::Instance()->Display("ProjectorImageDlgKey"))
     {
-        if (ImGuiFileDialog::Instance()->IsOk() && m_selectedLightId != (uint32_t)-1 &&
+        if (ImGuiFileDialog::Instance()->IsOk() && m_selectedLightId != kInvalidIndex &&
             m_selectedLightId < m_scene->getLightsDesc().size())
         {
             Scene::UniformLightDesc desc = m_scene->getLightsDesc()[m_selectedLightId];
@@ -320,7 +320,7 @@ void EditorApp::drawPropertyPanel()
 
     if (ImGuiFileDialog::Instance()->Display("LoadIesDlgKey"))
     {
-        if (ImGuiFileDialog::Instance()->IsOk() && m_selectedLightId != (uint32_t)-1 &&
+        if (ImGuiFileDialog::Instance()->IsOk() && m_selectedLightId != kInvalidIndex &&
             m_selectedLightId < m_scene->getLightsDesc().size())
         {
             Scene::UniformLightDesc desc = m_scene->getLightsDesc()[m_selectedLightId];

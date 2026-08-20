@@ -556,9 +556,9 @@ void EditorApp::drawRenderSettingsPanel()
         };
         if (ImGui::Combo("Preset", &selectedPreset, presetNames, IM_ARRAYSIZE(presetNames)))
         {
-            customSelected = selectedPreset == static_cast<int>(editor_viewport::kPreviewPresets.size());
-            if (!customSelected && selectedPreset >= 0 &&
-                selectedPreset < static_cast<int>(editor_viewport::kPreviewPresets.size()))
+            const int presetCount = static_cast<int>(editor_viewport::kPreviewPresets.size());
+            customSelected = selectedPreset == presetCount;
+            if (!customSelected && selectedPreset >= 0 && selectedPreset < presetCount)
             {
                 const editor_viewport::PreviewPreset& selected = editor_viewport::kPreviewPresets[selectedPreset];
                 requestPreviewResolution(selected.width, selected.height);

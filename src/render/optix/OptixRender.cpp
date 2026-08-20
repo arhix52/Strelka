@@ -885,7 +885,7 @@ void OptiXRender::resolveMeshMaterials()
         {
             continue;
         }
-        const int32_t materialId = (instance.mMaterialId == (uint32_t)-1) ? 0 : (int32_t)instance.mMaterialId;
+        const int32_t materialId = (instance.mMaterialId == kInvalidIndex) ? 0 : (int32_t)instance.mMaterialId;
         int32_t& slot = mMeshMaterialIds[instance.mMeshId];
         if (slot < 0 && !conflicted[instance.mMeshId])
         {
@@ -1544,7 +1544,7 @@ void OptiXRender::resolveInstanceGeometry(OptixInstance& oi, const oka::Instance
     if (instance.type == oka::Instance::Type::eMesh)
     {
         const auto& materials = mScene->getMaterials();
-        const uint32_t materialId = (instance.mMaterialId == (uint32_t)-1) ? 0u : instance.mMaterialId;
+        const uint32_t materialId = (instance.mMaterialId == kInvalidIndex) ? 0u : instance.mMaterialId;
         if (materialId < materials.size())
         {
             opaque = materials[materialId].params.alpha_mode == ALPHA_MODE_OPAQUE;
@@ -2315,7 +2315,7 @@ void OptiXRender::createSbt()
         for (size_t i = 0; i < instances.size(); i++)
         {
             const oka::Instance& instance = instances[i];
-            const uint32_t material_idx = (instance.mMaterialId == (uint32_t)-1) ? 0u : instance.mMaterialId;
+            const uint32_t material_idx = (instance.mMaterialId == kInvalidIndex) ? 0u : instance.mMaterialId;
             // A linear curve set needs the linear intersector; everything else,
             // triangles included, keeps the cubic one it has always had.
             //

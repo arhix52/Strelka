@@ -280,7 +280,7 @@ void MetalGeometry::buildCurveBuffers(Scene* scene)
     std::vector<float> radiusData(points.size(), 0.001f);
     for (const oka::Curve& curve : curves)
     {
-        if (curve.mWidthsCount == static_cast<uint32_t>(-1))
+        if (curve.mWidthsCount == kInvalidIndex)
         {
             continue;
         }

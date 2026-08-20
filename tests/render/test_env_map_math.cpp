@@ -224,9 +224,9 @@ TEST_CASE("a jittered texel sample lands back in the texel it was drawn from")
                 const float3 dir = envUVToDir(make_float2(u, v), rotation);
 
                 const float2 back = dirToEnvUV(dir, rotation);
-                const int bx = std::clamp(int(back.x * float(w)), 0, w - 1);
-                const int by = std::clamp(int(back.y * float(h)), 0, h - 1);
-                if (uint32_t(bx) != x || uint32_t(by) != y)
+                const uint32_t bx = uint32_t(std::clamp(int(back.x * float(w)), 0, w - 1));
+                const uint32_t by = uint32_t(std::clamp(int(back.y * float(h)), 0, h - 1));
+                if (bx != x || by != y)
                 {
                     ++mismatch;
                 }

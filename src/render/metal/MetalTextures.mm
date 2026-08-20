@@ -265,11 +265,15 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
 
     const uint32_t maxDim = params.maxDimension;
     const uint32_t divisor = std::max(1u, params.downscale);
-    if ((maxDim > 0 && (uint32_t)std::max(texWidth, texHeight) > maxDim) || divisor > 1)
+    // Dimensions are non-negative by construction, so naming the unsigned edge
+    // states the conversion once instead of burying it in a comparison.
+    const uint32_t srcLongestEdge = (uint32_t)std::max(texWidth, texHeight);
+    if ((maxDim > 0 && srcLongestEdge > maxDim) || divisor > 1)
     {
         int dstW = std::max(1, texWidth / (int)divisor);
         int dstH = std::max(1, texHeight / (int)divisor);
-        while (maxDim > 0 && (uint32_t)std::max(dstW, dstH) > maxDim && dstW > 1 && dstH > 1)
+        const int maxEdge = (int)std::min<uint32_t>(maxDim, (uint32_t)INT_MAX);
+        while (maxEdge > 0 && std::max(dstW, dstH) > maxEdge && dstW > 1 && dstH > 1)
         {
             dstW = std::max(1, dstW / 2);
             dstH = std::max(1, dstH / 2);

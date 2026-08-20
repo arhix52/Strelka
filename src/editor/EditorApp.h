@@ -46,10 +46,10 @@ private:
     bool m_cameraDetached = false; // true when user takes manual control of a GLTF camera
 
     // Selection (invalid id == -1)
-    uint32_t m_selectedNodeId = (uint32_t)-1;
-    uint32_t m_selectedInstanceId = (uint32_t)-1;
-    uint32_t m_selectedLightId = (uint32_t)-1;
-    uint32_t m_selectedMaterialId = (uint32_t)-1;
+    uint32_t m_selectedNodeId = kInvalidIndex;
+    uint32_t m_selectedInstanceId = kInvalidIndex;
+    uint32_t m_selectedLightId = kInvalidIndex;
+    uint32_t m_selectedMaterialId = kInvalidIndex;
 
     ImGuizmo::OPERATION m_gizmoOperation = ImGuizmo::TRANSLATE;
     ImGuizmo::MODE m_gizmoMode = ImGuizmo::LOCAL;

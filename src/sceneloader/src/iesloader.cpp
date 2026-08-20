@@ -148,9 +148,9 @@ void unfoldAzimuthTable(std::vector<float>& hAngles, std::vector<float>& candela
 
     std::vector<std::vector<float>> columns;
     columns.reserve(hAngles.size());
-    for (int h = 0; h < (int)hAngles.size(); ++h)
+    for (size_t h = 0; h < hAngles.size(); ++h)
     {
-        columns.push_back(column(h));
+        columns.push_back(column(static_cast<int>(h)));
     }
 
     // Rotationally symmetric: one column covers everything.

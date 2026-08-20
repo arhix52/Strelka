@@ -16,7 +16,7 @@ namespace
 bool nodeIsAncestorOf(const Scene& scene, int candidate, uint32_t nodeId)
 {
     int walk = (int)nodeId;
-    while (walk >= 0 && walk < (int)scene.getNodes().size())
+    while (walk >= 0 && (size_t)walk < scene.getNodes().size())
     {
         if (walk == candidate)
         {
@@ -29,7 +29,7 @@ bool nodeIsAncestorOf(const Scene& scene, int candidate, uint32_t nodeId)
 
 bool subtreeMatchesFilter(const Scene& scene, int nodeId, const ImGuiTextFilter& filter)
 {
-    if (nodeId < 0 || nodeId >= (int)scene.getNodes().size())
+    if (nodeId < 0 || (size_t)nodeId >= scene.getNodes().size())
     {
         return false;
     }
@@ -53,7 +53,7 @@ bool subtreeMatchesFilter(const Scene& scene, int nodeId, const ImGuiTextFilter&
 void EditorApp::drawNodeRecursive(int nodeId, const ImGuiTextFilter& filter)
 {
     const Scene& scene = *m_scene;
-    if (nodeId < 0 || nodeId >= (int)scene.getNodes().size())
+    if (nodeId < 0 || (size_t)nodeId >= scene.getNodes().size())
     {
         return;
     }
@@ -63,19 +63,22 @@ void EditorApp::drawNodeRecursive(int nodeId, const ImGuiTextFilter& filter)
     }
 
     const Scene::Node& node = scene.getNodes()[nodeId];
+    // Non-negative past the guard above, so this is the same index in the type
+    // the selection is held in.
+    const uint32_t nodeIndex = (uint32_t)nodeId;
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
     if (node.children.empty())
     {
         flags |= ImGuiTreeNodeFlags_Leaf;
     }
-    const bool isSelected = (uint32_t)nodeId == m_selectedNodeId;
+    const bool isSelected = nodeIndex == m_selectedNodeId;
     if (isSelected)
     {
         flags |= ImGuiTreeNodeFlags_Selected;
     }
 
     // Keep the selected node reachable: open its ancestors, scroll to it once.
-    if (m_selectedNodeId != (uint32_t)-1 && !node.children.empty() &&
+    if (m_selectedNodeId != kInvalidIndex && !node.children.empty() &&
         nodeIsAncestorOf(scene, nodeId, m_selectedNodeId) && !isSelected)
     {
         ImGui::SetNextItemOpen(true);
@@ -96,11 +99,11 @@ void EditorApp::drawNodeRecursive(int nodeId, const ImGuiTextFilter& filter)
     if (ImGui::IsItemClicked())
     {
         const uint32_t prevNode = m_selectedNodeId;
-        m_selectedNodeId = (uint32_t)nodeId;
-        m_selectedLightId = (uint32_t)-1;
-        m_selectedInstanceId = node.instanceIds.empty() ? (uint32_t)-1 : node.instanceIds.front();
-        m_selectedMaterialId = (uint32_t)-1;
-        if (m_selectedInstanceId != (uint32_t)-1 && m_selectedInstanceId < scene.getInstances().size())
+        m_selectedNodeId = nodeIndex;
+        m_selectedLightId = kInvalidIndex;
+        m_selectedInstanceId = node.instanceIds.empty() ? kInvalidIndex : node.instanceIds.front();
+        m_selectedMaterialId = kInvalidIndex;
+        if (m_selectedInstanceId != kInvalidIndex && m_selectedInstanceId < scene.getInstances().size())
         {
             const Instance& inst = scene.getInstances()[m_selectedInstanceId];
             m_selectedMaterialId = inst.mMaterialId;

@@ -928,8 +928,8 @@ void EditorApp::runBenchmark()
     }
     if (envFlag("STRELKA_BENCH_FRAME_NODE"))
     {
-        m_selectedNodeId = envUint("STRELKA_BENCH_FRAME_NODE", static_cast<uint32_t>(-1));
-        m_selectedInstanceId = envUint("STRELKA_BENCH_FRAME_INSTANCE", static_cast<uint32_t>(-1));
+        m_selectedNodeId = envUint("STRELKA_BENCH_FRAME_NODE", kInvalidIndex);
+        m_selectedInstanceId = envUint("STRELKA_BENCH_FRAME_INSTANCE", kInvalidIndex);
         frameSelectionInView();
     }
 
@@ -4274,7 +4274,7 @@ void EditorApp::setCameraDetached(bool detached)
     {
         m_scene->getCamera(i).manualControl = false;
     }
-    if (detached && m_selectedCamera >= 0 && m_selectedCamera < (int)m_scene->getCameraCount())
+    if (detached && m_selectedCamera >= 0 && (size_t)m_selectedCamera < m_scene->getCameraCount())
     {
         m_scene->getCamera(m_selectedCamera).manualControl = true;
     }
@@ -4289,7 +4289,7 @@ bool EditorApp::computeSelectionWorldBounds(glm::float3& outMin, glm::float3& ou
 
     // Same priority as the selection overlay: a node union first (so a multi-
     // primitive mesh frames as one object), then a lone instance, then a light.
-    if (m_selectedNodeId != (uint32_t)-1 && m_selectedNodeId < nodes.size() &&
+    if (m_selectedNodeId != kInvalidIndex && m_selectedNodeId < nodes.size() &&
         !nodes[m_selectedNodeId].instanceIds.empty())
     {
         if (computeNodeBounds(nodes[m_selectedNodeId], localMin, localMax, worldFromLocal))
@@ -4300,7 +4300,7 @@ bool EditorApp::computeSelectionWorldBounds(glm::float3& outMin, glm::float3& ou
     }
 
     const std::vector<Instance>& instances = m_scene->getInstances();
-    if (m_selectedInstanceId != (uint32_t)-1 && m_selectedInstanceId < instances.size() &&
+    if (m_selectedInstanceId != kInvalidIndex && m_selectedInstanceId < instances.size() &&
         m_scene->computeInstanceBounds(m_selectedInstanceId, localMin, localMax))
     {
         editor_camera_framing::worldAabbFromLocalBox(
@@ -4308,7 +4308,7 @@ bool EditorApp::computeSelectionWorldBounds(glm::float3& outMin, glm::float3& ou
         return true;
     }
 
-    if (m_selectedLightId != (uint32_t)-1 && m_selectedLightId < m_scene->getLightsDesc().size())
+    if (m_selectedLightId != kInvalidIndex && m_selectedLightId < m_scene->getLightsDesc().size())
     {
         // Lights have no mesh AABB. Frame a box around the emitter so a rect /
         // disc lands in view at a readable size and a point light is still
@@ -4445,10 +4445,10 @@ void EditorApp::frameSelectionInView()
 
 void EditorApp::clearSelection()
 {
-    m_selectedNodeId = (uint32_t)-1;
-    m_selectedInstanceId = (uint32_t)-1;
-    m_selectedLightId = (uint32_t)-1;
-    m_selectedMaterialId = (uint32_t)-1;
+    m_selectedNodeId = kInvalidIndex;
+    m_selectedInstanceId = kInvalidIndex;
+    m_selectedLightId = kInvalidIndex;
+    m_selectedMaterialId = kInvalidIndex;
 }
 
 void EditorApp::markDocumentDirty()
@@ -4573,7 +4573,7 @@ void EditorApp::applySelectionFromPick(const Scene::PickHit& hit)
     clearSelection();
     if (!hit.hit)
     {
-        if (prevNode != (uint32_t)-1 || prevInstance != (uint32_t)-1 || prevLight != (uint32_t)-1)
+        if (prevNode != kInvalidIndex || prevInstance != kInvalidIndex || prevLight != kInvalidIndex)
         {
             STRELKA_INFO("ACTION select clear");
         }
@@ -4670,7 +4670,7 @@ void EditorApp::drawUI()
         // Gizmo W/E/R only with a selection and the viewport hovered — otherwise
         // camera WASD (and E for down) would fight the gizmo bindings.
         const bool gizmoHotkeys =
-            m_display->isViewPortHovered() && (m_selectedNodeId != (uint32_t)-1 || m_selectedLightId != (uint32_t)-1);
+            m_display->isViewPortHovered() && (m_selectedNodeId != kInvalidIndex || m_selectedLightId != kInvalidIndex);
         if (gizmoHotkeys)
         {
             if (ImGui::IsKeyPressed(ImGuiKey_W))
@@ -4682,8 +4682,8 @@ void EditorApp::drawUI()
         }
         if (ImGui::IsKeyPressed(ImGuiKey_Escape))
         {
-            if (m_selectedNodeId != (uint32_t)-1 || m_selectedLightId != (uint32_t)-1 ||
-                m_selectedInstanceId != (uint32_t)-1)
+            if (m_selectedNodeId != kInvalidIndex || m_selectedLightId != kInvalidIndex ||
+                m_selectedInstanceId != kInvalidIndex)
             {
                 STRELKA_INFO("ACTION select clear");
             }
@@ -4692,8 +4692,8 @@ void EditorApp::drawUI()
         // Frame Selection (F): Blender/Maya convention. Not viewport-gated — framing
         // from the outliner after a click is the usual path, and F does not collide
         // with WASD or the gizmo bindings.
-        const bool canFrameSelection = m_selectedNodeId != (uint32_t)-1 || m_selectedInstanceId != (uint32_t)-1 ||
-                                       m_selectedLightId != (uint32_t)-1;
+        const bool canFrameSelection = m_selectedNodeId != kInvalidIndex || m_selectedInstanceId != kInvalidIndex ||
+                                       m_selectedLightId != kInvalidIndex;
         if (canFrameSelection && ImGui::IsKeyPressed(ImGuiKey_F))
             frameSelectionInView();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
@@ -4784,8 +4784,8 @@ void EditorApp::drawUI()
     }
     if (ImGui::BeginMenu("View"))
     {
-        const bool canFrameSelection = m_selectedNodeId != (uint32_t)-1 || m_selectedInstanceId != (uint32_t)-1 ||
-                                       m_selectedLightId != (uint32_t)-1;
+        const bool canFrameSelection = m_selectedNodeId != kInvalidIndex || m_selectedInstanceId != kInvalidIndex ||
+                                       m_selectedLightId != kInvalidIndex;
         if (ImGui::MenuItem("Frame Selection", "F", false, canFrameSelection && !m_isLoading))
             frameSelectionInView();
         ImGui::EndMenu();

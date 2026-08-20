@@ -22,6 +22,15 @@
 namespace oka
 {
 
+/// The "no such thing" value of the uint32_t ids the scene runs on: node,
+/// instance, light, material, and the counts that mark an absent attribute.
+///
+/// It was written out as `kInvalidIndex` in sixty-one places. The value is the
+/// same and always was -- but the conversion is what made every comparison
+/// against it a signed-to-unsigned one, which is the shape a real sign bug
+/// takes, and none of the sixty-one said what the number meant.
+inline constexpr uint32_t kInvalidIndex = ~uint32_t{ 0 };
+
 struct Mesh
 {
     uint32_t mIndex = 0; // Index of 1st index in index buffer
@@ -72,7 +81,7 @@ struct Instance
         uint32_t mCurveId;
     };
     uint32_t mMaterialId = 0;
-    uint32_t mLightId = (uint32_t)-1;
+    uint32_t mLightId = kInvalidIndex;
 };
 
 enum class ChangeBits : uint32_t
@@ -581,7 +590,7 @@ public:
         {
             return mNameToCamera[name];
         }
-        return (uint32_t)-1;
+        return kInvalidIndex;
     }
 
     uint32_t addCamera(Camera& camera)
@@ -823,7 +832,7 @@ public:
     uint32_t getLightInstanceId(uint32_t lightId) const
     {
         auto it = mLightIdToInstanceId.find(lightId);
-        return it != mLightIdToInstanceId.end() ? it->second : (uint32_t)-1;
+        return it != mLightIdToInstanceId.end() ? it->second : kInvalidIndex;
     }
 
     /// Authoritative node local TRS edit; refreshes derived instance transforms.
@@ -865,7 +874,7 @@ public:
                             const uint32_t geomId,
                             const uint32_t materialId,
                             const glm::mat4& transform,
-                            const uint32_t lightId = (uint32_t)-1);
+                            const uint32_t lightId = kInvalidIndex);
 
     uint32_t addMaterial(const MaterialDescription& material);
 
@@ -937,9 +946,9 @@ public:
     struct PickHit
     {
         bool hit = false;
-        uint32_t instanceId = (uint32_t)-1;
-        uint32_t nodeId = (uint32_t)-1;
-        uint32_t lightId = (uint32_t)-1;
+        uint32_t instanceId = kInvalidIndex;
+        uint32_t nodeId = kInvalidIndex;
+        uint32_t lightId = kInvalidIndex;
         float distance = 0.0f;
         glm::float3 position{ 0.0f };
     };
@@ -1014,8 +1023,8 @@ private:
 
     std::set<uint32_t> mDirtyInstances;
 
-    uint32_t mRectLightMeshId = (uint32_t)-1;
-    uint32_t mDiskLightMeshId = (uint32_t)-1;
-    uint32_t mSphereLightMeshId = (uint32_t)-1;
+    uint32_t mRectLightMeshId = kInvalidIndex;
+    uint32_t mDiskLightMeshId = kInvalidIndex;
+    uint32_t mSphereLightMeshId = kInvalidIndex;
 };
 } // namespace oka

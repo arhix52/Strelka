@@ -16,6 +16,7 @@
 // compared, and the ladder compares them.
 
 #include <algorithm>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 
@@ -106,9 +107,13 @@ struct Extent
 inline Extent resolveExtent(int srcWidth, int srcHeight, uint32_t maxDimension, uint32_t downscale)
 {
     const int divisor = (int)std::max(1u, downscale);
+    // Both bounds in one signedness: a texture edge that does not fit in an int
+    // is past every limit a GPU has anyway, so the clamp cannot change a
+    // decision.
+    const int maxEdge = (int)std::min<uint32_t>(maxDimension, (uint32_t)INT_MAX);
     int w = std::max(1, srcWidth / divisor);
     int h = std::max(1, srcHeight / divisor);
-    while (maxDimension > 0 && (uint32_t)std::max(w, h) > maxDimension && (w > 1 || h > 1))
+    while (maxEdge > 0 && std::max(w, h) > maxEdge && (w > 1 || h > 1))
     {
         w = std::max(1, w / 2);
         h = std::max(1, h / 2);

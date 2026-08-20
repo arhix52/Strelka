@@ -1382,9 +1382,9 @@ void MetalRender::render(Buffer* output)
         mAnimTargetTimes.resize(animCount);
         mAnimChanged.resize(animCount);
         std::fill(mAnimChanged.begin(), mAnimChanged.end(), false);
-        for (int i = 0; i < (int)animCount; ++i)
+        for (size_t i = 0; i < animCount; ++i)
         {
-            mAnimTargetTimes[i] = animSettings.getAs<float>(animationTimeKey((size_t)i));
+            mAnimTargetTimes[i] = animSettings.getAs<float>(animationTimeKey(i));
             const float delta = std::abs(animations[i].current - mAnimTargetTimes[i]);
             if (delta > EPSILON)
             {
@@ -1414,7 +1414,7 @@ void MetalRender::render(Buffer* output)
         // predecessor to reproject from. Playback advances a sixtieth of a second
         // at a time, so a fraction of the clip length separates the two cases by a
         // wide margin. This was already being computed and then not used.
-        for (int i = 0; i < (int)animCount; ++i)
+        for (size_t i = 0; i < animCount; ++i)
         {
             const float clip = animations[i].end - animations[i].start;
             if (mAnimChanged[i] && clip > 0.0f && maxTimeDelta > 0.05f * clip)
@@ -1454,7 +1454,7 @@ void MetalRender::render(Buffer* output)
 
                 // --- Pass 1: evaluate CHANGED animations at t_open ---
                 bool pass1Skeletal = false;
-                for (int i = 0; i < (int)animations.size(); ++i)
+                for (size_t i = 0; i < animations.size(); ++i)
                 {
                     float tOpen = mAnimTargetTimes[i];
                     if (mAnimChanged[i])
@@ -1485,7 +1485,7 @@ void MetalRender::render(Buffer* output)
 
                 // --- Pass 2: evaluate CHANGED animations at t_close ---
                 bool pass2Skeletal = false;
-                for (int i = 0; i < (int)animations.size(); ++i)
+                for (size_t i = 0; i < animations.size(); ++i)
                 {
                     float tClose = mAnimTargetTimes[i];
                     if (mAnimChanged[i])
@@ -1507,14 +1507,14 @@ void MetalRender::render(Buffer* output)
                 encodeTlas = true;
 
                 // Restore target times so next-frame EPSILON check is stable
-                for (int i = 0; i < (int)animations.size(); ++i)
+                for (size_t i = 0; i < animations.size(); ++i)
                     animations[i].current = mAnimTargetTimes[i];
             }
             else
             {
                 // Motion blur disabled or no shutter: single-pass at target time
                 bool accelStructureDirty = false;
-                for (int i = 0; i < (int)animations.size(); ++i)
+                for (size_t i = 0; i < animations.size(); ++i)
                 {
                     animations[i].current = mAnimTargetTimes[i];
                     accelStructureDirty |= mScene->applyAnimation(i);

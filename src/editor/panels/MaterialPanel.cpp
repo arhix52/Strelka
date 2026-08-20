@@ -31,7 +31,7 @@ void EditorApp::drawMaterialPanel()
         return;
     }
 
-    if (m_selectedInstanceId != (uint32_t)-1 && m_selectedInstanceId < m_scene->getInstances().size())
+    if (m_selectedInstanceId != kInvalidIndex && m_selectedInstanceId < m_scene->getInstances().size())
     {
         const auto& inst = m_scene->getInstances()[m_selectedInstanceId];
         if (inst.type == Instance::Type::eMesh)
