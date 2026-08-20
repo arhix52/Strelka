@@ -11,9 +11,8 @@
 #include <unordered_map>
 #include <vector>
 
-namespace oka
-{
-namespace curvesidecar
+
+namespace oka::curvesidecar
 {
 
 // Curves ride beside the glTF, the way the analytic lights already do.
@@ -227,5 +226,5 @@ inline bool loadCurvesFile(const std::string& path, Scene& scene)
     return created != 0;
 }
 
-} // namespace curvesidecar
-} // namespace oka
+} // namespace oka::curvesidecar
+

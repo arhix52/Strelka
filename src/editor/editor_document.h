@@ -9,9 +9,8 @@
 
 #include <fmt/format.h>
 
-namespace oka
-{
-namespace editor_document
+
+namespace oka::editor_document
 {
 
 /// Window title: "Strelka [*] basename — render ms / spp"
@@ -178,5 +177,5 @@ inline bool saveRecentScenes(const std::filesystem::path& file, const std::vecto
     return static_cast<bool>(out);
 }
 
-} // namespace editor_document
-} // namespace oka
+} // namespace oka::editor_document
+

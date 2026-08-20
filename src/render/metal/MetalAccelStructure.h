@@ -17,9 +17,8 @@
 #include <utility>
 #include <vector>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 struct AsBuildState;
@@ -303,5 +302,5 @@ private:
     size_t mNextBlasRebuildIndex = 0;
 };
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

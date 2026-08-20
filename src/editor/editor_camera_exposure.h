@@ -7,9 +7,8 @@
 #    define M_PI 3.14159265358979323846
 #endif
 
-namespace oka
-{
-namespace editor_camera_exposure
+
+namespace oka::editor_camera_exposure
 {
 
 /// Thin-lens radius in metres: focalLengthMm / (2 * fStop * 1000).
@@ -87,5 +86,5 @@ inline void carryExposureAcrossModeSwitch(
     cm2Factor = target * (shutterReciprocal * fStop * fStop) * 100.0f / filmIso;
 }
 
-} // namespace editor_camera_exposure
-} // namespace oka
+} // namespace oka::editor_camera_exposure
+

@@ -14,9 +14,8 @@
 #include <string>
 #include <vector>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 namespace
 {
@@ -218,5 +217,5 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
     memcpy(mIesBuffer->contents(), packed.data(), packed.size());
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

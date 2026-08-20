@@ -10,9 +10,8 @@
 #include <cstdint>
 #include <vector>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 // Tonemap, guide/display/upscale textures, and MetalFxContext usage.
@@ -163,5 +162,5 @@ private:
     bool mPrevDenoiseEnabled = false;
 };
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

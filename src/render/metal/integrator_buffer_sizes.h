@@ -4,9 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 // Byte sizes of one wavefront pixel's worth of path buffers. Callers pass
@@ -122,5 +121,5 @@ inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width,
     return layout;
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

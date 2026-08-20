@@ -21,9 +21,8 @@
 
 namespace fs = std::filesystem;
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 namespace
 {
@@ -524,5 +523,5 @@ void MetalTextures::generateMips()
     mTexturesNeedingMips.clear();
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

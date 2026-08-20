@@ -9,9 +9,8 @@
 #include <unistd.h>
 #include <vector>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 namespace
 {
@@ -409,5 +408,5 @@ void MetalGeometry::createMeshData(Scene* scene, size_t meshIndex, bool needsPri
     mMetalMeshes.push_back(result);
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

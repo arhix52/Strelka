@@ -26,9 +26,8 @@
 #    include <vector>
 #endif
 
-namespace oka
-{
-namespace curve_layout
+
+namespace oka::curve_layout
 {
 
 /// Control points one segment spans. A round linear segment is a cylinder
@@ -114,5 +113,5 @@ inline uint32_t segmentsPerStrand(const std::vector<uint32_t>& vertexCounts,
 }
 #endif // !__CUDACC__
 
-} // namespace curve_layout
-} // namespace oka
+} // namespace oka::curve_layout
+

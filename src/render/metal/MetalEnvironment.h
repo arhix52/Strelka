@@ -5,9 +5,8 @@
 
 #include <string>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 struct EnvMapState
@@ -52,5 +51,5 @@ private:
     EnvMapState mState;
 };
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

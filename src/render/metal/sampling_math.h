@@ -3,9 +3,8 @@
 #include <algorithm>
 #include <cstdint>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 // Halton sequence sample in [0, 1). Index from 1 for jitter so the first entry
@@ -32,5 +31,5 @@ inline void frameJitter(uint64_t frameIndex, uint32_t phaseCount, float& x, floa
     y = haltonAt(phase + 1, 3) - 0.5f;
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

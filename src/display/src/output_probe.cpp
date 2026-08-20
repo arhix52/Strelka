@@ -20,9 +20,8 @@
 #include <windows.h>
 #endif
 
-namespace oka
-{
-namespace display_output
+
+namespace oka::display_output
 {
 namespace
 {
@@ -497,5 +496,5 @@ PlatformDisplayState probePlatformDisplay(std::string_view monitorName,
 #endif
 }
 
-} // namespace display_output
-} // namespace oka
+} // namespace oka::display_output
+

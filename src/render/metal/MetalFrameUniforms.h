@@ -15,9 +15,8 @@
 
 #include <glm/glm.hpp>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 static constexpr size_t kFrameUniformSlots = 3;
@@ -198,5 +197,5 @@ private:
     PrevSettings mPrevSettings;
 };
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

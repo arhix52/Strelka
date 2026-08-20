@@ -8,9 +8,8 @@
 #include <string>
 #include <vector>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 // Analytic light domain: Scene::Light → UniformLight GPU buffer, plus the packed
@@ -67,5 +66,5 @@ private:
     std::vector<std::string> mProjectorImagePaths;
 };
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

@@ -4,9 +4,8 @@
 #include <cstdint>
 #include <limits>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 struct WavefrontStageFailure
@@ -46,5 +45,5 @@ inline WavefrontStageFailure inferWavefrontStageFailure(uint32_t enteredStage, s
     return result;
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

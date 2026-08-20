@@ -3,9 +3,8 @@
 #include <unordered_set>
 #include <vector>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 template <typename T>
@@ -24,5 +23,5 @@ std::vector<T> retiredResidencyAllocations(const std::unordered_set<T>& previous
     return retired;
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

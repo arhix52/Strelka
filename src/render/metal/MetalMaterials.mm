@@ -11,9 +11,8 @@
 
 namespace fs = std::filesystem;
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 // Working state of a resumable material build.
@@ -334,5 +333,5 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
     return true;
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

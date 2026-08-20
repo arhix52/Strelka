@@ -7,9 +7,8 @@
 #include <cstring>
 #include <string>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 MetalPostProcess::~MetalPostProcess()
@@ -263,5 +262,5 @@ void MetalPostProcess::buildTonemapperPipeline()
     pComputeLibrary->release();
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

@@ -11,9 +11,8 @@
 
 #include <simd/simd.h>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 MetalFrameUniforms::~MetalFrameUniforms()
@@ -560,5 +559,5 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     return out;
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

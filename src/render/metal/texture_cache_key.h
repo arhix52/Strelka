@@ -3,9 +3,8 @@
 #include <cstdint>
 #include <string>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 // Bumped whenever the .btex cache layout or encoder changes.
@@ -61,5 +60,5 @@ inline std::string textureCacheKey(const TextureCacheKeyInputs& in)
     return name;
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

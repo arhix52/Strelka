@@ -48,9 +48,8 @@ using namespace metal;
 #define TONEMAP_NS_BEGIN namespace oka { namespace tonemap {
 #define TONEMAP_NS_END } }
 
-namespace oka
-{
-namespace tonemap
+
+namespace oka::tonemap
 {
 #if defined(__APPLE__)
 using float3 = simd_float3;
@@ -111,8 +110,8 @@ inline float dot(const float3& a, const float3& b)
     return glm::dot(a, b);
 #endif
 }
-} // namespace tonemap
-} // namespace oka
+} // namespace oka::tonemap
+
 #endif
 
 TONEMAP_NS_BEGIN

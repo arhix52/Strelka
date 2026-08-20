@@ -3,9 +3,8 @@
 #include <algorithm>
 #include <cstdint>
 
-namespace oka
-{
-namespace render_resolution
+
+namespace oka::render_resolution
 {
 
 struct Resolution
@@ -64,5 +63,5 @@ inline DenoiserPolicy resolveDenoiserPolicy(bool wantDenoise,
     return result;
 }
 
-} // namespace render_resolution
-} // namespace oka
+} // namespace oka::render_resolution
+

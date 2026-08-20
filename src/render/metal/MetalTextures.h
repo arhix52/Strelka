@@ -9,9 +9,8 @@
 #include <unordered_map>
 #include <vector>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 // Material texture domain: decode → mip/BC → GPU texture + disk cache.
@@ -117,5 +116,5 @@ private:
     uint32_t mCacheMisses = 0;
 };
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

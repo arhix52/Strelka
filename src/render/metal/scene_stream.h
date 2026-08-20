@@ -2,9 +2,8 @@
 
 #include <cstdint>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 /// Which parts of the scene are on the GPU, and therefore showable, right now.
@@ -103,5 +102,5 @@ private:
     bool mStarted = false;
 };
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

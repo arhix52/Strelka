@@ -27,9 +27,8 @@
 #include <cstring>
 #include <vector>
 
-namespace oka
-{
-namespace optix_ies
+
+namespace oka::optix_ies
 {
 
 struct IesBufferHeader
@@ -145,5 +144,5 @@ inline std::vector<uint8_t> packProfiles(const std::vector<Profile>& profiles)
     return bytes;
 }
 
-} // namespace optix_ies
-} // namespace oka
+} // namespace oka::optix_ies
+

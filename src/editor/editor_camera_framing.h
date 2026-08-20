@@ -6,9 +6,8 @@
 #include <cmath>
 #include <limits>
 
-namespace oka
-{
-namespace editor_camera_framing
+
+namespace oka::editor_camera_framing
 {
 
 /// World AABB of an oriented box: transform the eight local corners and take the
@@ -163,5 +162,5 @@ inline void frameCamera(Camera& cam,
     cam.updateViewMatrix();
 }
 
-} // namespace editor_camera_framing
-} // namespace oka
+} // namespace oka::editor_camera_framing
+

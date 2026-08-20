@@ -4,9 +4,8 @@
 #include <cstdint>
 #include <vector>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 enum class WavefrontChunkPhase : uint8_t
@@ -191,5 +190,5 @@ inline const char* wavefrontChunkPhaseName(WavefrontChunkPhase phase)
     return "unknown";
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

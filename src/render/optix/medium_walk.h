@@ -25,9 +25,8 @@
 
 #include <cmath>
 
-namespace oka
-{
-namespace medium
+
+namespace oka::medium
 {
 
 /// Three channels of anything -- extinction, albedo, a throughput. Laid out to
@@ -215,5 +214,5 @@ STRELKA_MEDIUM_FN float hgSampleCosine(float g, float u)
     return cosTheta < -1.0f ? -1.0f : (cosTheta > 1.0f ? 1.0f : cosTheta);
 }
 
-} // namespace medium
-} // namespace oka
+} // namespace oka::medium
+

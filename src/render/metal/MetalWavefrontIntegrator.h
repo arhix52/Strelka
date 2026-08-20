@@ -17,9 +17,8 @@
 #include <map>
 #include <vector>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 // One specialised pipeline set for a WavefrontFeatures bit combination.
@@ -251,5 +250,5 @@ private:
     bool mResidencyDirty = true;
 };
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

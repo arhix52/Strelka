@@ -11,9 +11,8 @@
 
 #include <glm/glm.hpp>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 // Joint matrices, skin PSO, skinned VB writes. Does not own the vertex buffer
@@ -70,5 +69,5 @@ private:
     bool mLoggedSkinningPipelineGap = false;
 };
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

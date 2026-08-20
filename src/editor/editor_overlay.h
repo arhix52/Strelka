@@ -4,9 +4,8 @@
 
 #include <strelka/scene/glm_wrapper.hpp>
 
-namespace oka
-{
-namespace editor_overlay
+
+namespace oka::editor_overlay
 {
 
 /// Trim a segment to the part of it the camera can see, given the view-space
@@ -75,5 +74,5 @@ inline bool clipToScreen(const glm::float4& clip,
     return std::isfinite(outPixels.x) && std::isfinite(outPixels.y);
 }
 
-} // namespace editor_overlay
-} // namespace oka
+} // namespace oka::editor_overlay
+

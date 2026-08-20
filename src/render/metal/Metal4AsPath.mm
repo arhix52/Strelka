@@ -15,9 +15,8 @@
 #include <cstdlib>
 #include <vector>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 namespace
 {
@@ -466,5 +465,5 @@ std::unique_ptr<AccelBuildPath> createMetal4AsPath(MTL::Device* device, Metal4Co
     return std::make_unique<Metal4AsPath>(device, metal4);
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

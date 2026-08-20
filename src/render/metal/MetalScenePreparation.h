@@ -5,9 +5,8 @@
 #include <cstdint>
 #include <functional>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 // Thin BuildStage state machine for primary scene preparation.
@@ -95,5 +94,5 @@ private:
     BuildStage mStage = BuildStage::Done;
 };
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

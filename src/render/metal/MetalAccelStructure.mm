@@ -17,9 +17,8 @@
 
 #include <glm/glm.hpp>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 struct AsBuildState
@@ -1528,5 +1527,5 @@ void MetalAccelStructure::release()
     mCommandQueue = nullptr;
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

@@ -11,9 +11,8 @@
 
 #include <simd/simd.h>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 MetalSkinning::~MetalSkinning()
@@ -264,5 +263,5 @@ void MetalSkinning::encodeCopyVertexBufferToPrev(MTL4::ComputeCommandEncoder* en
 }
 
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

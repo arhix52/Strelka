@@ -3,9 +3,8 @@
 #include <cstdint>
 #include <string>
 
-namespace oka
-{
-namespace display_output
+
+namespace oka::display_output
 {
 
 /// Which backend filled a DisplayCapabilities.
@@ -261,5 +260,5 @@ struct DisplayCapabilities
     bool displaySync = true;
 };
 
-} // namespace display_output
-} // namespace oka
+} // namespace oka::display_output
+

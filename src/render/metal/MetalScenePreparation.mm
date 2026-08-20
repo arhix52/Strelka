@@ -6,9 +6,8 @@
 
 #include <Metal/Metal.hpp>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 bool MetalScenePreparation::step(SceneBuildHooks& hooks, Buffer* output)
@@ -97,5 +96,5 @@ void MetalScenePreparation::finish(SceneBuildHooks& hooks, Buffer* output)
     }
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

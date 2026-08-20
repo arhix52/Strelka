@@ -3,9 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace oka
-{
-namespace optix
+
+namespace oka::optix
 {
 
 /// The GPU submissions one frame is made of, in the order they are enqueued.
@@ -116,5 +115,5 @@ inline GpuStageFailure inferGpuStageFailure(const uint8_t* completed, const uint
     return result;
 }
 
-} // namespace optix
-} // namespace oka
+} // namespace oka::optix
+

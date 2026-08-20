@@ -5,9 +5,8 @@
 #include <cstdint>
 #include <optional>
 
-namespace oka
-{
-namespace editor_viewport
+
+namespace oka::editor_viewport
 {
 
 enum class PresentationMode : uint32_t
@@ -148,5 +147,5 @@ inline uint32_t clampPreviewDimension(int value)
         std::clamp(value, static_cast<int>(kMinPreviewDimension), static_cast<int>(kMaxPreviewDimension)));
 }
 
-} // namespace editor_viewport
-} // namespace oka
+} // namespace oka::editor_viewport
+

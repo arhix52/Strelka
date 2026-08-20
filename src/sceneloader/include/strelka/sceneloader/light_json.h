@@ -10,9 +10,8 @@
 #include <filesystem>
 #include <string>
 
-namespace oka
-{
-namespace lightjson
+
+namespace oka::lightjson
 {
 
 inline Scene::UniformLightDesc parseDesc(const nlohmann::json& light, const std::string& searchDir = {})
@@ -192,5 +191,5 @@ inline void resolveIes(Scene& scene, Scene::UniformLightDesc& desc, const std::s
     }
 }
 
-} // namespace lightjson
-} // namespace oka
+} // namespace oka::lightjson
+

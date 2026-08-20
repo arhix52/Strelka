@@ -4,9 +4,8 @@
 #include <cmath>
 #include <string_view>
 
-namespace oka
-{
-namespace editor_screenshot
+
+namespace oka::editor_screenshot
 {
 
 enum class Source
@@ -47,5 +46,5 @@ inline float encodeSrgb(float linear)
     return 1.055f * std::pow(value, 1.0f / 2.4f) - 0.055f;
 }
 
-} // namespace editor_screenshot
-} // namespace oka
+} // namespace oka::editor_screenshot
+

@@ -5,9 +5,8 @@
 #include <array>
 #include <cstdint>
 
-namespace oka
-{
-namespace editor_frame_budget
+
+namespace oka::editor_frame_budget
 {
 
 inline constexpr double kInteractiveBudgetMs = 500.0;
@@ -91,5 +90,5 @@ inline float recommendedScale(const FrameSample& sample,
     return kScales.back();
 }
 
-} // namespace editor_frame_budget
-} // namespace oka
+} // namespace oka::editor_frame_budget
+

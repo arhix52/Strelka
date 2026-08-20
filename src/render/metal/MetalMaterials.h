@@ -17,9 +17,8 @@
 /// pulling the shader types in.
 struct Material;
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 struct MaterialBuildState;
@@ -98,5 +97,5 @@ private:
     MaterialBuildState* mBuild = nullptr;
 };
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

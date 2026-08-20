@@ -41,9 +41,8 @@
 #include <cstdint>
 #include <utility>
 
-namespace oka
-{
-namespace optix_omm
+
+namespace oka::optix_omm
 {
 
 /// Mirrors of OPTIX_OPACITY_MICROMAP_STATE_*. Checked in OptixRender.cpp.
@@ -411,5 +410,5 @@ struct BuildSummary
     }
 };
 
-} // namespace optix_omm
-} // namespace oka
+} // namespace oka::optix_omm
+

@@ -9,9 +9,8 @@
 #include <utility>
 #include <vector>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 // Vertex stream domain: VB/IB, mesh records, curve uploads, GeometryEntry table.
@@ -176,5 +175,5 @@ private:
     bool mSceneHasCurves = false;
 };
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

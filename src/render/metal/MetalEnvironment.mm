@@ -15,9 +15,8 @@
 
 namespace fs = std::filesystem;
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 MetalEnvironment::~MetalEnvironment()
@@ -200,5 +199,5 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
         aliasResult.totalPower, avgWeightedLum, mState.autoScale);
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

@@ -4,9 +4,8 @@
 
 #include <string_view>
 
-namespace oka
-{
-namespace display_output
+
+namespace oka::display_output
 {
 
 struct PlatformDisplayState
@@ -25,5 +24,5 @@ PlatformDisplayState parseGdctlOutput(std::string_view output,
 PlatformDisplayState probePlatformDisplay(std::string_view monitorName,
                                           void *nativeWindow);
 
-} // namespace display_output
-} // namespace oka
+} // namespace oka::display_output
+

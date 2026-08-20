@@ -2,9 +2,8 @@
 
 #include <cstdint>
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 // Strong bitmask for wavefront function-constant specialisation. Pack through
@@ -106,5 +105,5 @@ inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in
     return WavefrontFeatures(features);
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

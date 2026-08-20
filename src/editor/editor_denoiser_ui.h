@@ -30,9 +30,8 @@
 #include <algorithm>
 #include <cstdint>
 
-namespace oka
-{
-namespace editor_denoiser
+
+namespace oka::editor_denoiser
 {
 
 /// One entry of the combo, and what it means in settings.
@@ -251,5 +250,5 @@ inline Resolution resolution(const Ui& ui, int modeIndex, float requestedScale, 
     return out;
 }
 
-} // namespace editor_denoiser
-} // namespace oka
+} // namespace oka::editor_denoiser
+

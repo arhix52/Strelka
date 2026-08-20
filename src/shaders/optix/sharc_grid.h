@@ -25,9 +25,8 @@
 #    define STRELKA_SHARC_FN inline
 #endif
 
-namespace oka
-{
-namespace sharc
+
+namespace oka::sharc
 {
 
 /// Fixed point rather than float atomics: a sum of a few hundred samples of
@@ -766,5 +765,5 @@ STRELKA_SHARC_FN ResolveOutput resolveEntry(const ResolveInput& input, uint32_t 
     return output;
 }
 
-} // namespace sharc
-} // namespace oka
+} // namespace oka::sharc
+

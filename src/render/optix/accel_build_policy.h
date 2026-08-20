@@ -26,9 +26,8 @@
 
 #include <cstdint>
 
-namespace oka
-{
-namespace optix_accel
+
+namespace oka::optix_accel
 {
 
 /// Mirrors of OptixBuildFlags. Checked against the SDK in OptixRender.cpp.
@@ -113,5 +112,5 @@ inline bool shouldCompact(Geometry geometry)
     return (flags & kFlagAllowCompaction) != 0u && (flags & kFlagAllowUpdate) == 0u;
 }
 
-} // namespace optix_accel
-} // namespace oka
+} // namespace oka::optix_accel
+

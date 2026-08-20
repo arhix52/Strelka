@@ -19,9 +19,8 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace oka
-{
-namespace optix_tex
+
+namespace oka::optix_tex
 {
 
 /// What the texture is for. Decides the transfer function and, when the texture
@@ -272,5 +271,5 @@ inline Plan planTexture(const PlanInputs& in)
     return plan;
 }
 
-} // namespace optix_tex
-} // namespace oka
+} // namespace oka::optix_tex
+

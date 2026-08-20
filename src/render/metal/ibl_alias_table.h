@@ -10,9 +10,8 @@
 #    define M_PI 3.14159265358979323846
 #endif
 
-namespace oka
-{
-namespace metal
+
+namespace oka::metal
 {
 
 // Host-side mirror of ShaderTypes.h EnvAliasEntry (layout must stay identical).
@@ -120,5 +119,5 @@ inline IblAliasTableResult buildIblAliasTable(const float* pixelRgba, int width,
     return out;
 }
 
-} // namespace metal
-} // namespace oka
+} // namespace oka::metal
+

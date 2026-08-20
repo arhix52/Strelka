@@ -21,9 +21,8 @@
 // ever runs. Both shader backends now compile the same file.
 #include <rect_sampling.h>
 
-namespace oka
-{
-namespace rect_light_sampling
+
+namespace oka::rect_light_sampling
 {
 
 struct RectCorners
@@ -196,5 +195,5 @@ inline float rectLightPdf(const RectCorners& c,
     return 1.0f / squad.S;
 }
 
-} // namespace rect_light_sampling
-} // namespace oka
+} // namespace oka::rect_light_sampling
+
