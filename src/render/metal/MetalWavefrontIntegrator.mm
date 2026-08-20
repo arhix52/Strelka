@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cassert>
 #include <cstring>
 #include <string>
 
@@ -69,8 +70,6 @@ void MetalWavefrontIntegrator::release()
         safeRelease(kv.second.miss);
         safeRelease(kv.second.shadowMotion);
         safeRelease(kv.second.shadowStatic);
-        safeRelease(kv.second.shadowTableMotion);
-        safeRelease(kv.second.shadowTableStatic);
     }
     mVariants.clear();
     safeRelease(mLibrary);
@@ -117,11 +116,6 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
     add(mControlBuffer);
     add(mTraversalDispatchBuffer);
     add(mStageStatsBuffer);
-    for (const auto& entry : mVariants)
-    {
-        add(entry.second.shadowTableMotion);
-        add(entry.second.shadowTableStatic);
-    }
 }
 
 size_t MetalWavefrontIntegrator::queueBytes() const
@@ -474,6 +468,15 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         enc->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch, MTL4::VisibilityOptionNone);
     };
     auto bind = [&](MTL::Buffer* buffer, NS::UInteger offset, NS::UInteger index) {
+        // The table is sized once, in Metal4Context, and every stage shares it.
+        // Binding past its end is silent without the debug layer, so say it here
+        // too: this is the file that keeps growing new bindings.
+        assert(index < kMetal4BufferBindCount);
+        if (!buffer)
+        {
+            buffer = scene.placeholderBuffer;
+            offset = 0;
+        }
         table->setAddress(buffer ? buffer->gpuAddress() + offset : 0, index);
     };
 
@@ -678,11 +681,11 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                  0, 24);
             bind(scene.sharcHashBuffer, 0, 25);
             // See the Metal 3 path: a curve hit is rebuilt from these, not carried.
-            if (scene.curvePointBuffer)
-            {
-                bind(scene.curvePointBuffer, 0, 26);
-                bind(scene.curveSegmentBuffer, 0, 27);
-            }
+            // Bound either way. Skipping them left the previous encoder's
+            // addresses in those two slots, which is a stale pointer rather
+            // than an absent one -- and no validation layer can see it.
+            bind(scene.curvePointBuffer, 0, 26);
+            bind(scene.curveSegmentBuffer, 0, 27);
             bind(mIorStatsBuffer, 0, 28);
             bind(sharcUpdate ? mSharcUpdateStateBuffer : scene.sharcResolvedBuffer, 0, 29);
             bind(mMediumPathStateBuffer, 0, 30);
@@ -712,20 +715,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(scene.geometryEntryBuffer, 0, 8);
             bind(scene.vertexBuffer, 0, 9);
             bind(scene.indexBuffer, 0, 10);
-            // Cutout shadows: without this the shadow kernel calls into a table
-            // that was never bound, and a canopy blocks light outright instead
-            // of letting the alpha test decide.
-            MTL::IntersectionFunctionTable* shadowTable =
-                useMotion ? variant->shadowTableMotion : variant->shadowTableStatic;
-            if (shadowTable)
-            {
-                shadowTable->setBuffer(scene.instanceBuffer, 0, 0);
-                shadowTable->setBuffer(scene.materialBuffer, 0, 1);
-                shadowTable->setBuffer(scene.geometryEntryBuffer, 0, 2);
-                shadowTable->setBuffer(scene.vertexBuffer, 0, 3);
-                shadowTable->setBuffer(scene.indexBuffer, 0, 4);
-                table->setResource(shadowTable->gpuResourceID(), 11);
-            }
+            // Binding 11 was the intersection function table. The cutout test
+            // reads the five tables above from the argument table instead.
             for (uint32_t batch = 0; batch < shadowBatchCount; ++batch)
             {
                 table->setAddress(ring.push(batch * shadowBatchThreads), 12);
@@ -1178,20 +1169,6 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBuffer(scene.geometryEntryBuffer, 0, 8);
             enc->setBuffer(scene.vertexBuffer, 0, 9);
             enc->setBuffer(scene.indexBuffer, 0, 10);
-            // The intersection function reads the same tables the kernel does,
-            // through the function table's own binding points.
-            MTL::IntersectionFunctionTable* shadowTable =
-                useMotion ? variant->shadowTableMotion : variant->shadowTableStatic;
-            if (shadowTable)
-            {
-                shadowTable->setBuffer(scene.instanceBuffer, 0, 0);
-                shadowTable->setBuffer(scene.materialBuffer, 0, 1);
-                shadowTable->setBuffer(scene.geometryEntryBuffer, 0, 2);
-                shadowTable->setBuffer(scene.vertexBuffer, 0, 3);
-                shadowTable->setBuffer(scene.indexBuffer, 0, 4);
-                enc->setIntersectionFunctionTable(shadowTable, 11);
-                enc->useResource(shadowTable, MTL::ResourceUsageRead);
-            }
             enc->setBytes(&traversalQueueOffset, sizeof(traversalQueueOffset), 12);
             enc->setBuffer(mSharcUpdateStateBuffer, 0, 13);
             enc->setBuffer(scene.sharcAccumulationBuffer, 0, 14);
@@ -1304,61 +1281,19 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
         return pso;
     };
 
-    // The alpha-shadow intersection function has to be linked into the pipelines
-    // that call it, and the pipeline then hands out a table to bind it through.
-    MTL::Function* anyHitFn = nullptr;
-    MTL::LinkedFunctions* linked = nullptr;
-    // The table's tags must match the intersector's, so a curve-capable shadow
-    // pipeline links a curve-tagged copy of the same test. Same body; the tag
-    // list is the whole difference.
-    const std::string anyHitName = entry("shadowAlphaAnyHit");
-    if (alpha && !useMetal4)
-    {
-        anyHitFn = mLibrary->newFunction(NS::String::string(anyHitName.c_str(), NS::UTF8StringEncoding), values, &err);
-        if (anyHitFn)
-        {
-            const NS::Object* const fns[] = { anyHitFn };
-            linked = MTL::LinkedFunctions::alloc()->init();
-            linked->setFunctions(NS::Array::array(fns, 1));
-        }
-        else
-        {
-            STRELKA_ERROR("wavefront: specialising {} -> {}", anyHitName,
-                          err ? err->localizedDescription()->utf8String() : "unknown error");
-        }
-    }
-    auto makeLinked = [&](const char* name) -> MTL::ComputePipelineState* {
-        if (useMetal4)
-        {
-            // Metal 4 states linking through descriptors, so it never builds the
-            // MTL::Function above and cannot go through the branch below.
-            return alpha ? mMetal4->newComputePipelineStateLinked(mLibrary, name, anyHitName.c_str(), values) :
-                           make(name);
-        }
-        if (!linked)
-        {
-            return make(name);
-        }
-        MTL::Function* fn = mLibrary->newFunction(NS::String::string(name, NS::UTF8StringEncoding), values, &err);
-        if (!fn)
-        {
-            STRELKA_FATAL("wavefront: specialising {} -> {}", name,
-                          err ? err->localizedDescription()->utf8String() : "unknown error");
-            return nullptr;
-        }
-        MTL::ComputePipelineDescriptor* desc = MTL::ComputePipelineDescriptor::alloc()->init();
-        desc->setComputeFunction(fn);
-        desc->setLinkedFunctions(linked);
-        MTL::ComputePipelineState* pso = mDevice->newComputePipelineState(desc, MTL::PipelineOptionNone, nullptr, &err);
-        if (!pso)
-        {
-            STRELKA_FATAL("wavefront: {} with linked functions -> {}", name,
-                          err ? err->localizedDescription()->utf8String() : "unknown error");
-        }
-        desc->release();
-        fn->release();
-        return pso;
-    };
+    // No intersection function, and deliberately so.
+    //
+    // Cutout shadows used to run their alpha test inside an any-hit function
+    // bound through an MTLIntersectionFunctionTable. That mechanism cannot be
+    // used from the Metal 4 queue: every device read an intersection function
+    // makes faults, because neither the residency set nor the argument table
+    // reaches the traversal's own execution context, and Metal 4 has no
+    // useResource to fall back on. The test now runs in `shadowImpl`, from the
+    // kernel -- see the note there, which records how it presented (a GPU hang
+    // on a command buffer doing almost no work) and how it was pinned down.
+    //
+    // Nothing links a function here any more, so the shadow pipelines are built
+    // exactly like every other stage.
 
     WavefrontVariant v;
     v.generate = make("wavefrontGenerate");
@@ -1366,44 +1301,9 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     v.extendStatic = make(entry("wavefrontExtendStatic").c_str());
     v.shade = make("wavefrontShade");
     v.miss = make("wavefrontMiss");
-    v.shadowMotion = makeLinked(entry("wavefrontShadow").c_str());
-    v.shadowStatic = makeLinked(entry("wavefrontShadowStatic").c_str());
+    v.shadowMotion = make(entry("wavefrontShadow").c_str());
+    v.shadowStatic = make(entry("wavefrontShadowStatic").c_str());
 
-    // One table per pipeline: it is created from the pipeline that will bind it,
-    // and the two shadow pipelines are different pipelines.
-    if ((linked && anyHitFn) || (useMetal4 && alpha))
-    {
-        auto makeTable = [&](MTL::ComputePipelineState* pso) -> MTL::IntersectionFunctionTable* {
-            if (!pso)
-                return nullptr;
-            MTL::IntersectionFunctionTableDescriptor* d = MTL::IntersectionFunctionTableDescriptor::alloc()->init();
-            d->setFunctionCount(1);
-            MTL::IntersectionFunctionTable* table = pso->newIntersectionFunctionTable(d);
-            d->release();
-            if (!table)
-                return nullptr;
-            // By name on the Metal 4 path: linking there is stated with
-            // descriptors, so there is no MTL::Function to ask for a handle.
-            const MTL::FunctionHandle* handle =
-                anyHitFn ? pso->functionHandle(anyHitFn) :
-                           pso->functionHandle(NS::String::string(anyHitName.c_str(), NS::UTF8StringEncoding));
-            if (!handle)
-            {
-                STRELKA_ERROR("wavefront: no function handle for {}", anyHitName);
-                table->release();
-                return nullptr;
-            }
-            table->setFunction(handle, 0);
-            return table;
-        };
-        v.shadowTableMotion = makeTable(v.shadowMotion);
-        v.shadowTableStatic = makeTable(v.shadowStatic);
-        mResidencyDirty = true;
-    }
-    if (anyHitFn)
-        anyHitFn->release();
-    if (linked)
-        linked->release();
     values->release();
 
     if (!v.shade)
@@ -1498,9 +1398,21 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height, ui
     {
         return;
     }
-    auto release = [](MTL::Buffer*& b) {
+    // Out of the residency set before it is freed, for the same reason the
+    // acceleration structures do it: the set does not retain what it names, so a
+    // released allocation leaves a dangling entry, and the allocator readily
+    // hands the same address back for the replacement below. addAllocation then
+    // sees an address the set already holds and the new buffer is never made
+    // resident. `makeResourcesResidentForMetal4` reconciles by pointer
+    // set-difference, so a reused address is invisible to it and cannot repair
+    // this. Every buffer released here is named by addResidentAllocations().
+    auto release = [this](MTL::Buffer*& b) {
         if (b)
         {
+            if (mMetal4)
+            {
+                mMetal4->removeResident(b);
+            }
             b->release();
             b = nullptr;
         }

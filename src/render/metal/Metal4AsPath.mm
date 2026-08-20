@@ -229,6 +229,7 @@ public:
 
         MTL4::CommandBuffer* commandBuffer = mMetal4->beginImmediate();
         MTL4::ComputeCommandEncoder* commandEncoder = commandBuffer ? commandBuffer->computeCommandEncoder() : nullptr;
+        labelMetal4(commandEncoder, "accel build");
         if (!commandEncoder)
         {
             removeResident(accelerationStructure);
@@ -266,6 +267,7 @@ public:
         addResident(compacted);
         commandBuffer = mMetal4->beginImmediate();
         commandEncoder = commandBuffer ? commandBuffer->computeCommandEncoder() : nullptr;
+        labelMetal4(commandEncoder, "accel compact");
         if (!commandEncoder)
         {
             removeResident(compacted);
@@ -322,6 +324,7 @@ public:
             commitResidency();
             mAsGroupCommandBuffer = mMetal4->beginImmediate();
             mAsGroupEncoder = mAsGroupCommandBuffer ? mAsGroupCommandBuffer->computeCommandEncoder() : nullptr;
+            labelMetal4(mAsGroupEncoder, "accel build group");
             if (!mAsGroupEncoder)
             {
                 removeResident(accelerationStructure);
@@ -374,6 +377,7 @@ public:
         flushBuildGroup();
         MTL4::CommandBuffer* commandBuffer = mMetal4->beginImmediate();
         MTL4::ComputeCommandEncoder* encoder = commandBuffer ? commandBuffer->computeCommandEncoder() : nullptr;
+        labelMetal4(encoder, "accel drain");
         if (encoder)
         {
             encoder->endEncoding();

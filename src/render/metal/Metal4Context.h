@@ -24,6 +24,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <algorithm>
 #include <functional>
 #include <vector>
@@ -77,6 +78,28 @@ private:
     uint32_t mFrame = 0;
     uint32_t mPage = 0;
 };
+
+/// Width of the one argument table every Metal 4 stage shares. Counts, not
+/// indices: the highest binding in wavefront.metal is buffer(30), the shade
+/// stage's medium path state, and texture(8), the reactive guide. Raise these
+/// with the shader, in the same commit -- a bind past the declared count writes
+/// past the end of the table, and only MTL_DEBUG_LAYER=1 will tell you.
+inline constexpr uint32_t kMetal4BufferBindCount = 31;
+inline constexpr uint32_t kMetal4TextureBindCount = 9;
+
+/// Names a Metal 4 command buffer or encoder, for Xcode captures and the debug
+/// layer. A frame here is a dozen command buffers whose only distinguishing
+/// feature is which bounce they carry, and a capture of unnamed ones is
+/// unreadable.
+///
+/// Not a fix for MTL_SHADER_VALIDATION: labelling every encoder was tried for
+/// that and does not help. MetalTools still dereferences a null label while
+/// decoding a GPU error report (resolvedSharedPacketData, just before
+/// setEncoderLabel:), so validation runs still die in the completion handler
+/// before printing what they found. Stepping the program counter past that one
+/// instruction in lldb is what makes the report readable.
+void labelMetal4(MTL4::CommandBuffer* buffer, const std::string& name);
+void labelMetal4(MTL4::CommandEncoder* encoder, const std::string& name);
 
 /// Owns the Metal 4 objects and nothing else: it is deliberately separable from
 /// MetalRender so the migration can be reviewed, measured and reverted on its
@@ -199,16 +222,6 @@ public:
     MTL::ComputePipelineState* newComputePipelineState(MTL::Library* library,
                                                        const char* functionName,
                                                        MTL::FunctionConstantValues* constants);
-
-    /// Same, with an intersection function statically linked in, so the pipeline
-    /// can hand out a table to bind it through. Metal 3 states this with
-    /// MTLLinkedFunctions on the pipeline descriptor; Metal 4 replaces that with
-    /// a StaticLinkingDescriptor carrying function *descriptors*, which is why
-    /// this cannot just take the MTL::Function the other path builds.
-    MTL::ComputePipelineState* newComputePipelineStateLinked(MTL::Library* library,
-                                                             const char* functionName,
-                                                             const char* linkedFunctionName,
-                                                             MTL::FunctionConstantValues* constants);
 
 private:
     struct FrameContinuation

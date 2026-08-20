@@ -877,7 +877,7 @@ bool MetalRender::stepMetalMaterials(double budgetMs)
 // and an address in an argument table pointing at a non-resident allocation is a
 // GPU fault rather than a validation message. This is the price of the argument
 // table: the caller owns lifetime and residency both.
-// Wavefront queues and shadow tables come from mIntegrator; everything else is
+// Wavefront queues come from mIntegrator; everything else is
 // still owned by MetalRender until those domains are extracted.
 void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
 {
@@ -1022,6 +1022,7 @@ metal::IntegratorSceneBindings MetalRender::integratorSceneBindings()
     b.lightBuffer = mLights.buffer();
     b.iesBuffer = mLights.iesBuffer();
     b.geometryEntryBuffer = mGeometry.geometryEntryBuffer() ? mGeometry.geometryEntryBuffer() : mSceneTablePlaceholder;
+    b.placeholderBuffer = mSceneTablePlaceholder;
     b.vertexBuffer = mGeometry.vertexBuffer();
     b.prevVertexBuffer = mGeometry.prevVertexBuffer();
     b.indexBuffer = mGeometry.indexBuffer();
@@ -1858,9 +1859,9 @@ void MetalRender::render(Buffer* output)
 
             if (useMetal4)
             {
-                // Build the variant first: its intersection function tables are
-                // allocations, and residency has to name every allocation the
-                // frame will touch before the frame is committed.
+                // Build the variant first: compiling a pipeline can allocate,
+                // and residency has to name every allocation the frame will
+                // touch before the frame is committed.
                 mIntegrator.resetStageProfilingMetal4();
                 mIntegrator.variantFor(features | metal::WavefrontFeatures::kMetal4);
                 if (featureIn.hasSharc)
@@ -1955,6 +1956,7 @@ void MetalRender::render(Buffer* output)
                     {
                         MTL4::CommandBuffer* skinBuf = mMetal4.beginSkin((uint32_t)ctx.mFrameNumber);
                         MTL4::ComputeCommandEncoder* skinEnc = skinBuf->computeCommandEncoder();
+                        labelMetal4(skinEnc, "skinning");
                         encodeSkinningAndCopies(skinEnc, mMetal4.skinConstants());
                         skinEnc->endEncoding();
                         asUpdate.afterSkinningValue = mMetal4.submitSkin(skinBuf);
@@ -1969,6 +1971,7 @@ void MetalRender::render(Buffer* output)
                     mMetal4.wait(mAccel.readyEvent(), mAccel.readyValue());
                     cmd4 = mMetal4.beginFrame((uint32_t)ctx.mFrameNumber);
                     enc4 = cmd4->computeCommandEncoder();
+                    labelMetal4(enc4, "trace chunk 0");
                 }
                 else
                 {
@@ -1976,6 +1979,7 @@ void MetalRender::render(Buffer* output)
                     // trace all share one Metal 4 command buffer.
                     cmd4 = mMetal4.beginFrame((uint32_t)ctx.mFrameNumber);
                     enc4 = cmd4->computeCommandEncoder();
+                    labelMetal4(enc4, "skinning + accel + trace chunk 0");
                     encodeSkinningAndCopies(enc4, mMetal4.constants());
                     if (encodeSkeletalBlas || encodeTlas)
                     {
@@ -2047,6 +2051,10 @@ void MetalRender::render(Buffer* output)
                             return;
                         }
                         enc4 = cmd4->computeCommandEncoder();
+                        const metal::WavefrontChunk& labelled = wavefrontChunks[chunkIndex];
+                        labelMetal4(enc4, fmt::format("trace chunk {} sample {} bounce {}..{} {}", chunkIndex,
+                                                       labelled.sampleIndex, labelled.bounceBegin, labelled.bounceEnd,
+                                                       metal::wavefrontChunkPhaseName(labelled.phase)));
                     }
                     mIntegrator.encodeMetal4(enc4, sceneBind, frameReq, wavefrontChunks[chunkIndex]);
                 }

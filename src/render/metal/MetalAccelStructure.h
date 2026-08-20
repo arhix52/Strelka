@@ -234,6 +234,14 @@ private:
     size_t buildCurveBlas(uint32_t sceneInstanceId);
     void ensureScratchBuffer(MTL::Buffer*& buffer, size_t requiredSize);
     void addDescriptorResidency();
+
+    /// Residency for an allocation this class owns. Null-safe on both the
+    /// allocation and the Metal 4 context, so callers do not repeat either
+    /// guard -- and `retireResident` exists so that "out of the set before it is
+    /// freed" is a single call rather than a rule to remember. The set does not
+    /// retain what it names, and the allocator reuses addresses.
+    void makeResident(MTL::Allocation* allocation);
+    void retireResident(MTL::Buffer*& buffer);
     void writeInstanceTransforms(MTL::Buffer* buffer);
     void releaseRetiredInstanceStructures(uint64_t age);
     void encodeSkeletalUpdates();

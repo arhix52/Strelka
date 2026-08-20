@@ -130,24 +130,11 @@ static inline void queuePush(device atomic_uint* counter, device uint32_t* queue
 // runtime branch or a function constant, it has to be two compiled variants. It
 // is worth it: every ray was paying for motion-BVH traversal, including in scenes
 // with no deforming geometry at all, and that was 12-19% of the frame.
-// What a cutout shadow ray carries through traversal. The intersection function
-// multiplies into it and lets traversal continue, so one traversal answers the
-// whole ray instead of eight restarts from the root.
-struct ShadowPayload
-{
-    float3 transmittance;
-    float cutoff;
-};
 
-// Alpha test during traversal.
+// The fraction of a light a cutout shadow ray is allowed to carry before Russian
+// roulette ends its walk.
 //
-// Returning false means "this was a hole, keep going", which is what an any-hit
-// shader is for. The alternative -- and what this replaces -- is to find the
-// closest hit, test it, move the ray past it and trace again, up to eight times.
-// Each of those restarts walks the tree from the root, and on this forest that
-// loop was a quarter of the whole frame.
-//
-// Accepting on a collapsed transmittance keeps the early-out the loop had: once
+// Accepting on a collapsed transmittance keeps the early-out the walk had: once
 // nothing measurable can get through, the ray is blocked and traversal stops.
 // A shadow ray that is already almost blocked is allowed to stop.
 //
@@ -162,16 +149,17 @@ struct ShadowPayload
 // in any scene.
 constant float kShadowTransmittanceCutoff = 0.05f;
 
-static bool shadowAlphaAnyHitImpl(uint primitive_id,
-                                  uint geometry_id,
-                                  uint instance_id,
-                                  float2 barycentric_coord,
-                                  ray_data ShadowPayload& payload,
-                                  constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
-                                  device const Material* materials,
-                                  device const GeometryEntry* geometryEntries,
-                                  device const char* vertexBuffer,
-                                  device const uint32_t* indexBuffer)
+// Coverage of one cutout candidate. Callable from a kernel, which is the whole
+// point -- see the note on the traversal in shadowImpl.
+static inline float cutoutOpacityAt(uint primitive_id,
+                                    uint geometry_id,
+                                    uint instance_id,
+                                    float2 barycentric_coord,
+                                    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                    device const Material* materials,
+                                    device const GeometryEntry* geometryEntries,
+                                    device const char* vertexBuffer,
+                                    device const uint32_t* indexBuffer)
 {
     const auto inst = instances[instance_id];
     const GeometryEntry entry = geometryEntries[inst.userID + geometry_id];
@@ -179,7 +167,7 @@ static bool shadowAlphaAnyHitImpl(uint primitive_id,
 
     if (mat.alpha_mode == ALPHA_MODE_OPAQUE)
     {
-        return true; // blocks outright
+        return 1.0f; // blocks outright
     }
 
     constexpr uint32_t vtxStride = 32;
@@ -191,39 +179,8 @@ static bool shadowAlphaAnyHitImpl(uint primitive_id,
         uvv[k] = unpackUV(*(device const uint32_t*)(vertexBuffer + (entry.vbOffset + idx) * vtxStride + uvOff));
     }
     const float2 uv = interpolateAttrib(uvv[0], uvv[1], uvv[2], barycentric_coord);
-    const float opacity = resolveOpacity(mat, uv);
-
-    payload.transmittance *= (1.0f - opacity);
-
-    // Monotonically decreasing, so crossing the threshold once is the same
-    // event as ending below it -- which is what lets the compensation be
-    // applied at the end, from one draw taken before the ray was traced.
-    const float3 t = payload.transmittance;
-    if (max(max(t.x, t.y), t.z) <= payload.cutoff)
-    {
-        return true; // roulette says this ray is done
-    }
-    return all(payload.transmittance <= 1e-6f);
+    return resolveOpacity(mat, uv);
 }
-
-// Two entry points over one body. The tags an intersection function carries have
-// to match the intersector and the table that will hold it, so a curve-capable
-// shadow pipeline needs its own copy -- the test itself is identical, and curve
-// geometry is built opaque, so this is never called on a strand.
-#define WF_ANY_HIT_ENTRY(NAME, ...)                                                                                      \
-    [[intersection(triangle, __VA_ARGS__)]]                                                                              \
-    bool NAME(uint primitive_id [[primitive_id]], uint geometry_id [[geometry_id]], uint instance_id [[instance_id]],    \
-              float2 barycentric_coord [[barycentric_coord]], ray_data ShadowPayload& payload [[payload]],               \
-              constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(0)]],                      \
-              device const Material* materials [[buffer(1)]], device const GeometryEntry* geometryEntries [[buffer(2)]], \
-              device const char* vertexBuffer [[buffer(3)]], device const uint32_t* indexBuffer [[buffer(4)]])           \
-    {                                                                                                                    \
-        return shadowAlphaAnyHitImpl(primitive_id, geometry_id, instance_id, barycentric_coord, payload, instances,      \
-                                     materials, geometryEntries, vertexBuffer, indexBuffer);                             \
-    }
-
-WF_ANY_HIT_ENTRY(shadowAlphaAnyHit, triangle_data, instancing)
-WF_ANY_HIT_ENTRY(shadowAlphaAnyHitCurve, triangle_data, curve_data, instancing)
 
 // Measured and not kept: the same stochastic alpha test as an intersection
 // function on the *main* rays, so a canopy resolves in one traversal instead of
@@ -245,10 +202,15 @@ WF_ANY_HIT_ENTRY(shadowAlphaAnyHitCurve, triangle_data, curve_data, instancing)
 
 struct MotionTraversal
 {
+    // intersection_query rejects the motion tags, so this one keeps the
+    // restart walk.
+    enum
+    {
+        kInlineQuery = 0
+    };
     using structure = acceleration_structure<instancing, primitive_motion>;
     using isect = intersector<triangle_data, instancing, primitive_motion>;
     using volume_isect = isect;
-    using table = intersection_function_table<triangle_data, instancing, primitive_motion>;
     static geometry_type geometryTypes()
     {
         return geometry_type::triangle;
@@ -265,19 +227,22 @@ struct MotionTraversal
     {
         return i.intersect(r, as, mask, time);
     }
-    static isect::result_type traceAnyHit(
-        thread isect& i, ray r, structure as, uint32_t mask, float time, table t, thread ShadowPayload& payload)
-    {
-        return i.intersect(r, as, mask, time, t, payload);
-    }
 };
 
 struct StaticTraversal
 {
     using structure = acceleration_structure<instancing>;
     using isect = intersector<triangle_data, instancing>;
+    // Metal's inline traversal, used by the cutout shadow walk so the alpha test
+    // can run in the kernel without giving up the single traversal. An enum
+    // rather than a static constexpr: a program-scope constexpr under the Metal
+    // compiler has to live in the constant address space.
+    using query = intersection_query<triangle_data, instancing>;
+    enum
+    {
+        kInlineQuery = 1
+    };
     using volume_isect = isect;
-    using table = intersection_function_table<triangle_data, instancing>;
     static geometry_type geometryTypes()
     {
         return geometry_type::triangle;
@@ -293,11 +258,6 @@ struct StaticTraversal
     static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as, uint32_t mask, float)
     {
         return i.intersect(r, as, mask);
-    }
-    static isect::result_type traceAnyHit(
-        thread isect& i, ray r, structure as, uint32_t mask, float, table t, thread ShadowPayload& payload)
-    {
-        return i.intersect(r, as, mask, t, payload);
     }
 };
 
@@ -311,10 +271,15 @@ struct StaticTraversal
 // nothing.
 struct CurveMotionTraversal
 {
+    // intersection_query rejects the motion tags, so this one keeps the
+    // restart walk.
+    enum
+    {
+        kInlineQuery = 0
+    };
     using structure = acceleration_structure<instancing, primitive_motion>;
     using isect = intersector<triangle_data, curve_data, instancing, primitive_motion>;
     using volume_isect = intersector<triangle_data, instancing, primitive_motion>;
-    using table = intersection_function_table<triangle_data, curve_data, instancing, primitive_motion>;
     static geometry_type geometryTypes()
     {
         return geometry_type::triangle | geometry_type::curve;
@@ -331,19 +296,18 @@ struct CurveMotionTraversal
     {
         return i.intersect(r, as, mask, time);
     }
-    static isect::result_type traceAnyHit(
-        thread isect& i, ray r, structure as, uint32_t mask, float time, table t, thread ShadowPayload& payload)
-    {
-        return i.intersect(r, as, mask, time, t, payload);
-    }
 };
 
 struct CurveStaticTraversal
 {
     using structure = acceleration_structure<instancing>;
     using isect = intersector<triangle_data, curve_data, instancing>;
+    using query = intersection_query<triangle_data, curve_data, instancing>;
+    enum
+    {
+        kInlineQuery = 1
+    };
     using volume_isect = intersector<triangle_data, instancing>;
-    using table = intersection_function_table<triangle_data, curve_data, instancing>;
     static geometry_type geometryTypes()
     {
         return geometry_type::triangle | geometry_type::curve;
@@ -359,11 +323,6 @@ struct CurveStaticTraversal
     static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as, uint32_t mask, float)
     {
         return i.intersect(r, as, mask);
-    }
-    static isect::result_type traceAnyHit(
-        thread isect& i, ray r, structure as, uint32_t mask, float, table t, thread ShadowPayload& payload)
-    {
-        return i.intersect(r, as, mask, t, payload);
     }
 };
 
@@ -3244,6 +3203,169 @@ static float3 mediumTransmittance(typename T::structure accelerationStructure,
     return exp(-optical);
 }
 
+// Cutout shadow occlusion, computed in the kernel.
+//
+// The alpha test used to live in an any-hit intersection function bound through
+// an MTLIntersectionFunctionTable. That is unusable on the Metal 4 queue: every
+// device read an intersection function makes faults, because neither the
+// residency set nor the argument table reaches the traversal's own execution
+// context, and Metal 4 has no useResource to fall back on. Carrying the pointers
+// in on the ray payload does not help either, so it is the execution context and
+// not the binding. It reproduces on a 288-byte buffer in the two-triangle
+// 07_alpha_clip scene, so it is not a matter of scale.
+//
+// What it looked like before it was understood: an in-range load of a page that
+// is not resident wedges the ray tracing unit, and the queue reports whichever
+// command buffer was current as kIOGPUCommandBufferCallbackErrorHang -- a hang
+// with no long dispatch anywhere near it, at six milliseconds of GPU time,
+// landing on a different bounce and a different stage each run.
+//
+// Two implementations, because the tags decide what is available:
+//
+//   * Static traversal uses Metal's inline intersection_query, which walks the
+//     same single traversal the any-hit did and hands each candidate back to the
+//     kernel -- where the tables are the kernel's own bindings. Same cost, same
+//     result, no intersection function.
+//   * Motion traversal cannot: intersection_query rejects the motion tags. It
+//     restarts past each cutout instead, which is what this renderer did before
+//     the any-hit existed. Bounded, because a canopy can stack more leaves than
+//     any shadow ray needs to resolve.
+//
+// Returns false when the ray is blocked; `transmittance` is what survived.
+// One cutout candidate's contribution to the shadow ray, and the roulette that
+// ends the walk. Shared by both specialisations below: the compensation applied
+// to the survivors in `shadowImpl` assumes exactly this termination rule, so the
+// two must not drift apart.
+static inline bool cutoutRouletteDone(thread float3& transmittance, float opacity, float cutoff)
+{
+    transmittance *= (1.0f - opacity);
+    const float left = max(max(transmittance.x, transmittance.y), transmittance.z);
+    return left <= cutoff || all(transmittance <= 1e-6f);
+}
+
+// How many cutout crossings the restart walk below may take before it gives up
+// and reports what it has. It bounds that walk only -- the inline query needs no
+// bound, because it answers the whole ray in one traversal.
+constant uint32_t kMaxCutoutCrossings = 16u;
+
+template <typename T, bool Inline>
+struct CutoutShadowWalk
+{
+    static bool run(typename T::structure as,
+                    ray shadowRay,
+                    float motionTime,
+                    float cutoff,
+                    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                    device const Material* materials,
+                    device const GeometryEntry* geometryEntries,
+                    device const char* vertexBuffer,
+                    device const uint32_t* indexBuffer,
+                    thread float3& transmittance)
+    {
+        transmittance = float3(1.0f);
+        ray probe = shadowRay;
+        // Only probe.min_distance changes between restarts, so the intersector is
+        // configured once. Closest hit, because the walk has to meet the cutouts
+        // in the order the ray does; forced opaque so traversal never looks for
+        // an intersection function.
+        typename T::isect isect;
+        isect.assume_geometry_type(T::geometryTypes());
+        isect.force_opacity(forced_opacity::opaque);
+        isect.accept_any_intersection(false);
+        for (uint32_t crossing = 0u; crossing < kMaxCutoutCrossings; ++crossing)
+        {
+            const auto hit = T::trace(isect, probe, as, RAY_MASK_SHADOW, motionTime);
+            if (hit.type == intersection_type::none)
+            {
+                return true; // nothing else in the way
+            }
+            // Curve geometry is built opaque and carries no cutout, so a strand
+            // blocks outright rather than being alpha tested.
+            float opacity = 1.0f;
+            if (hit.type == intersection_type::triangle)
+            {
+                opacity = cutoutOpacityAt(hit.primitive_id, hit.geometry_id, hit.instance_id,
+                                          hit.triangle_barycentric_coord, instances, materials, geometryEntries,
+                                          vertexBuffer, indexBuffer);
+            }
+            if (cutoutRouletteDone(transmittance, opacity, cutoff))
+            {
+                return false;
+            }
+            // Past the candidate just tested. Relative, because an absolute
+            // epsilon is either too small to clear a distant hit or big enough
+            // to step over a near one.
+            probe.min_distance = hit.distance * (1.0f + 1e-5f) + 1e-5f;
+            if (probe.min_distance >= probe.max_distance)
+            {
+                return true;
+            }
+        }
+        return true;
+    }
+};
+
+template <typename T>
+struct CutoutShadowWalk<T, true>
+{
+    static bool run(typename T::structure as,
+                    ray shadowRay,
+                    float,
+                    float cutoff,
+                    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                    device const Material* materials,
+                    device const GeometryEntry* geometryEntries,
+                    device const char* vertexBuffer,
+                    device const uint32_t* indexBuffer,
+                    thread float3& transmittance)
+    {
+        transmittance = float3(1.0f);
+        // Any hit, not the closest one, and only the geometry this traits set can
+        // actually contain.
+        //
+        // The default intersection_params are neither: they ask for the nearest
+        // hit and admit bounding boxes. Nearest is wasted work here -- the
+        // committed result is only ever compared against `none`, so a ray that is
+        // blocked keeps traversing for a *closer* blocker, and every cutout in
+        // front of it still pays a full cutoutOpacityAt for a transmittance that
+        // is then discarded. In a canopy most shadow rays are blocked, so that is
+        // the common path, and it measured 116.6 ms/sample against 108.9 with
+        // these two lines.
+        intersection_params params;
+        params.accept_any_intersection(true);
+        params.assume_geometry_type(T::geometryTypes());
+        typename T::query q;
+        q.reset(shadowRay, as, RAY_MASK_SHADOW, params);
+        while (q.next())
+        {
+            // Only geometry the builder left non-opaque surfaces as a candidate.
+            // Opaque geometry is committed by traversal itself and is never seen
+            // here -- which is why the committed result has to be read after the
+            // loop. Getting that wrong drops every opaque shadow caster in the
+            // scene: the ground keeps its dappled canopy shade and loses the
+            // trunks and rocks entirely, at 156 of this scene's 300 geometries.
+            if (q.get_candidate_intersection_type() != intersection_type::triangle)
+            {
+                // A curve candidate carries no cutout -- curve geometry is built
+                // opaque -- so it blocks.
+                q.abort();
+                return false;
+            }
+            const float opacity = cutoutOpacityAt(q.get_candidate_primitive_id(), q.get_candidate_geometry_id(),
+                                                  q.get_candidate_instance_id(),
+                                                  q.get_candidate_triangle_barycentric_coord(), instances, materials,
+                                                  geometryEntries, vertexBuffer, indexBuffer);
+            if (cutoutRouletteDone(transmittance, opacity, cutoff))
+            {
+                q.abort();
+                return false;
+            }
+        }
+        // Anything committed during that walk was opaque, and blocks outright.
+        return q.get_committed_intersection_type() == intersection_type::none;
+    }
+};
+
 // ---------------------------------------------------------------------------
 // shadow -- resolve the deferred connections
 // ---------------------------------------------------------------------------
@@ -3260,7 +3382,6 @@ static void shadowImpl(uint gid,
                        device const GeometryEntry* geometryEntries,
                        device const char* vertexBuffer,
                        device const uint32_t* indexBuffer,
-                       typename T::table functionTable,
                        device SharcUpdateState* sharcUpdates,
                        device SharcAccumulationEntry* sharcAccumulation)
 {
@@ -3269,9 +3390,6 @@ static void shadowImpl(uint gid,
         return;
     }
     const ShadowRay sr = shadowRays[gid];
-
-    typename T::isect isect;
-    isect.assume_geometry_type(T::geometryTypes());
 
     ray shadowRay;
     shadowRay.origin = float3(sr.origin);
@@ -3293,6 +3411,8 @@ static void shadowImpl(uint gid,
     if (!SPEC_ALPHA)
     {
         // No cutouts in this scene: one any-hit trace, exactly as before.
+        typename T::isect isect;
+        isect.assume_geometry_type(T::geometryTypes());
         isect.force_opacity(forced_opacity::opaque);
         isect.accept_any_intersection(true);
         if (T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime).type == intersection_type::none)
@@ -3337,50 +3457,26 @@ static void shadowImpl(uint gid,
     }
 
     // Cutouts make occlusion a product rather than a predicate, so a plain
-    // any-hit does not answer the question: the nearest hit may be a hole. The
-    // alpha test runs inside traversal instead, accumulating coverage into the
-    // ray payload, so the whole ray is answered by one traversal.
+    // any-hit does not answer the question: the nearest hit may be a hole.
     //
     // Deterministic rather than stochastic: a MASK surface contributes 0 or 1
     // exactly and a BLEND one its alpha, which is far quieter than rolling a
     // second random number per shadow ray.
     //
-    // force_opacity is not set here -- the instance flag decides -- because
-    // forcing opacity is exactly what makes traversal skip the function.
-    //
-    // It used to be set, a few lines up and before this branch existed, left
-    // over from when a shadow ray was a plain predicate. The intersection
-    // function was therefore never called once, cutouts blocked light outright,
-    // and every measurement of this stage was measuring a closest-hit search
-    // with no alpha test in it.
-    // Any hit, not the closest one.
-    //
-    // The alpha test accumulates a product over the candidates it lets through,
-    // and a product does not care in which order they arrive; the traversal
-    // stops when the function accepts, which it does only once nothing
-    // measurable is left. Asking for the closest accepted hit instead makes the
-    // intersector keep candidates in distance order for an answer that is
-    // discarded.
-    isect.accept_any_intersection(true);
-
-    ShadowPayload payload;
-    payload.transmittance = float3(1.0f);
-    payload.cutoff = sr.rrCutoff;
-    const auto hit =
-        T::traceAnyHit(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime, functionTable, payload);
-    // Above the early return, not below it: in a canopy most shadow rays are
-    // blocked and return here, so a probe past this point runs on the minority
-    // that got through and reports headroom the stage does not have.
-
-    if (hit.type != intersection_type::none)
+    // The walk itself is in CutoutShadowWalk -- inline intersection_query where
+    // the tags allow it, a bounded restart otherwise. See the note there for why
+    // this cannot be an any-hit intersection function on Metal 4.
+    float3 transmittance;
+    if (!CutoutShadowWalk<T, T::kInlineQuery != 0>::run(accelerationStructure, shadowRay, motionTime, sr.rrCutoff,
+                                                        instances, materials, geometryEntries, vertexBuffer,
+                                                        indexBuffer, transmittance))
     {
-        return; // something accepted: fully blocked
+        return; // fully blocked
     }
     // The survivors of the roulette carry the weight of the ones it killed. A
     // ray ends below the cutoff only if it passed the test, which it does with
     // probability (its transmittance / cutoff), so scaling by the inverse of
     // that puts the expectation back where it was.
-    float3 transmittance = payload.transmittance;
     const float m = max(max(transmittance.x, transmittance.y), transmittance.z);
     if (m < kShadowTransmittanceCutoff)
     {
@@ -3666,12 +3762,12 @@ kernel void sharcResolve(uint tid [[thread_position_in_grid]],
                      device const Material* materials [[buffer(7)]],                                                   \
                      device const GeometryEntry* geometryEntries [[buffer(8)]],                                        \
                      device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]], \
-                     TRAITS::table functionTable [[buffer(11)]], constant uint32_t& queueOffset [[buffer(12)]],        \
+                     constant uint32_t& queueOffset [[buffer(12)]],                                                    \
                      device SharcUpdateState* sharcUpdates [[buffer(13)]],                                             \
                      device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]])                                  \
     {                                                                                                                  \
         shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, shadowRays, radianceOut, control,       \
-                           sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer, functionTable, \
+                           sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer,               \
                            sharcUpdates, sharcAccumulation);                                                           \
     }
 

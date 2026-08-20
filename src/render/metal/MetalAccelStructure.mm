@@ -802,11 +802,13 @@ bool MetalAccelStructure::step(double budgetMs)
 
     // buildEmptyTopLevel may have left a one-descriptor placeholder here so the
     // scene could be traced while it loaded. It is replaced, not appended to.
-    if (mInstanceBuffer)
-    {
-        mInstanceBuffer->release();
-        mInstanceBuffer = nullptr;
-    }
+    // Retired, not just released: the set does not retain what it names, and the
+    // allocator readily hands the same address back for the buffer allocated
+    // next. addAllocation would then see an address the set already holds, add
+    // nothing, and the replacement would never be made resident -- read later at
+    // an offset that is perfectly in range, faulting because the page is not
+    // resident, and reported by the queue as kIOGPUCommandBufferCallbackErrorHang.
+    retireResident(mInstanceBuffer);
     mInstanceBuffer = mDevice->newBuffer(
         sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor) *
             std::max<size_t>(mEmittedInstances.size(), 1),
@@ -817,8 +819,13 @@ bool MetalAccelStructure::step(double budgetMs)
     {
         const EmittedInstance& e = mEmittedInstances[d];
         instanceDescriptors[d].accelerationStructureID = mBlasList[e.asIndex].mAs->gpuResourceID();
-        // Not marked opaque when the scene has cutouts: the flag makes traversal
-        // skip the intersection function, which is what performs the alpha test.
+        // Not marked opaque when the scene has cutouts. The flag used to mean
+        // "skip the intersection function"; the alpha test now runs in the
+        // kernel, and the flag is what makes traversal report these triangles as
+        // *candidates* to it at all. Setting it here would hand the shadow walk a
+        // committed hit with no chance to test coverage -- every cutout would
+        // block outright and the canopy would go solid.
+        //
         // The kernels that do not want the test -- extend, and the shadow path of
         // a scene without cutouts -- force opacity on the intersector instead,
         // which overrides this and costs them nothing.
@@ -833,6 +840,10 @@ bool MetalAccelStructure::step(double budgetMs)
     // Both buffers carry identical immutable descriptor fields. Transform
     // updates can now exchange their roles and overwrite only the new current
     // one; the old current remains the previous rendered pose at zero copy cost.
+    // Same rule for the pose buffer, which until now was overwritten without
+    // being released at all: that leaked the allocation and left the residency
+    // set naming it forever.
+    retireResident(mPreviousInstanceBuffer);
     mPreviousInstanceBuffer = mDevice->newBuffer(mInstanceBuffer->length(), MTL::ResourceStorageModeShared);
     if (mPreviousInstanceBuffer)
     {
@@ -1088,6 +1099,7 @@ void MetalAccelStructure::updateSkeletalBLAS()
         MTL4::CommandBuffer* commandBuffer = mMetal4->beginImmediate();
         MTL4::ComputeCommandEncoder* encoder =
             commandBuffer ? commandBuffer->computeCommandEncoder() : nullptr;
+        labelMetal4(encoder, "accel side update");
         if (!encoder)
         {
             return;
@@ -1232,6 +1244,18 @@ void MetalAccelStructure::buildEmptyTopLevel()
     mPath->drain();
 }
 
+namespace
+{
+/// Size to allocate when `buffer` must hold at least `bytes`. Doubling, so a
+/// buffer that grows a batch at a time reallocates O(log n) times rather than
+/// once per growth.
+size_t growthTarget(const MTL::Buffer* buffer, size_t bytes)
+{
+    const size_t current = buffer ? buffer->length() : 0;
+    return std::max(bytes, current * 2);
+}
+} // namespace
+
 void MetalAccelStructure::publishPartialTopLevel()
 {
     if (!mPath || mEmittedInstances.empty())
@@ -1248,15 +1272,20 @@ void MetalAccelStructure::publishPartialTopLevel()
     // buffer is tens of megabytes and the load publishes repeatedly.
     if (!mInstanceBuffer || mInstanceBuffer->length() < bytes)
     {
-        if (mInstanceBuffer)
-        {
-            mInstanceBuffer->release();
-        }
-        mInstanceBuffer = mDevice->newBuffer(bytes, MTL::ResourceStorageModeShared);
+        // See the rebuild path above for why this is retired rather than
+        // released. Doubling rather than fitting exactly: `bytes` grows
+        // monotonically while a million-instance scene streams in and this
+        // function publishes on every batch, so an exact fit reallocated both
+        // buffers -- and, below, copied all of them -- once per publish instead
+        // of O(log n) times.
+        const size_t grown = growthTarget(mInstanceBuffer, bytes);
+        retireResident(mInstanceBuffer);
+        mInstanceBuffer = mDevice->newBuffer(grown, MTL::ResourceStorageModeShared);
         if (!mInstanceBuffer)
         {
             return;
         }
+        makeResident(mInstanceBuffer);
     }
 
     auto* descriptors =
@@ -1279,6 +1308,27 @@ void MetalAccelStructure::publishPartialTopLevel()
         descriptors[d].mask = e.mask;
     }
     writeInstanceTransforms(mInstanceBuffer);
+
+    // The two pose buffers exchange roles every frame, so the previous one has
+    // to be able to hold this instance count too. Growing only the current one
+    // left the shorter buffer to be swapped in by the next transform update --
+    // and writeInstanceTransforms writes mEmittedInstances.size() descriptors
+    // with no regard for the length it was handed, which is a heap overflow on
+    // the host and an out-of-range read for the tracer.
+    if (mPreviousInstanceBuffer && mPreviousInstanceBuffer->length() < bytes)
+    {
+        const size_t grown = growthTarget(mPreviousInstanceBuffer, bytes);
+        retireResident(mPreviousInstanceBuffer);
+        mPreviousInstanceBuffer = mDevice->newBuffer(grown, MTL::ResourceStorageModeShared);
+        if (mPreviousInstanceBuffer)
+        {
+            // Both buffers carry identical immutable descriptor fields, so the
+            // grown one starts as a copy rather than as uninitialised memory a
+            // swap would hand straight to the tracer.
+            std::memcpy(mPreviousInstanceBuffer->contents(), mInstanceBuffer->contents(), bytes);
+            makeResident(mPreviousInstanceBuffer);
+        }
+    }
 
     if (mTlasDescriptor)
     {
@@ -1326,6 +1376,7 @@ void MetalAccelStructure::rebuildTLAS()
         MTL4::CommandBuffer* commandBuffer = mMetal4->beginImmediate();
         MTL4::ComputeCommandEncoder* encoder =
             commandBuffer ? commandBuffer->computeCommandEncoder() : nullptr;
+        labelMetal4(encoder, "accel side update");
         if (!encoder)
         {
             return;
@@ -1374,6 +1425,28 @@ void MetalAccelStructure::init(MTL::Device* device,
         STRELKA_INFO("Acceleration structures: Metal 3 path (side queue; device lacks "
                      "Metal 4 ray tracing)");
     }
+}
+
+void MetalAccelStructure::makeResident(MTL::Allocation* allocation)
+{
+    if (mMetal4 && allocation)
+    {
+        mMetal4->addResident(allocation);
+    }
+}
+
+void MetalAccelStructure::retireResident(MTL::Buffer*& buffer)
+{
+    if (!buffer)
+    {
+        return;
+    }
+    if (mMetal4)
+    {
+        mMetal4->removeResident(buffer);
+    }
+    buffer->release();
+    buffer = nullptr;
 }
 
 void MetalAccelStructure::addDescriptorResidency()
