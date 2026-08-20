@@ -16,6 +16,7 @@ endif()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
 include(${CMAKE_SOURCE_DIR}/cmake/CompilerWarnings.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/StaticAnalyzers.cmake)
 
 # GLM 1.0.3's Conan recipe exports glm::glm only for the compiled library.
 # Header-only builds (required: see conanfile.py glm/*:header_only) expose
@@ -100,6 +101,9 @@ if(STRELKA_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+# Vendored sources are not ours to analyze; see cmake/StaticAnalyzers.cmake.
+strelka_skip_clang_tidy_on_vendored_targets()
 
 # macOS package layout: binaries and metallibs share the install prefix root so
 # resolveResourcePath("metal/shaders/...") keeps working without path changes.

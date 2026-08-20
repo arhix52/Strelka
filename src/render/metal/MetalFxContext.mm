@@ -52,7 +52,10 @@ bool MetalFxContext::ensureSpatialScaler(MTL::Device* device,
             return false;
         }
 
-        MTLFXSpatialScalerDescriptor* const desc = [MTLFXSpatialScalerDescriptor new];
+        // +1 from new, and this file is compiled without ARC: autoreleased so the
+        // enclosing pool takes it on every path, including the early returns
+        // below, which is what leaked it before.
+        MTLFXSpatialScalerDescriptor* const desc = [[MTLFXSpatialScalerDescriptor new] autorelease];
         desc.colorTextureFormat = (MTLPixelFormat)colorFormat;
         desc.outputTextureFormat = (MTLPixelFormat)outputFormat;
         desc.inputWidth = inputWidth;
@@ -212,7 +215,10 @@ bool MetalFxContext::ensureTemporalScaler(MTL::Device* device,
             return false;
         }
 
-        MTLFXTemporalScalerDescriptor* const desc = [MTLFXTemporalScalerDescriptor new];
+        // +1 from new, and this file is compiled without ARC: autoreleased so the
+        // enclosing pool takes it on every path, including the early returns
+        // below, which is what leaked it before.
+        MTLFXTemporalScalerDescriptor* const desc = [[MTLFXTemporalScalerDescriptor new] autorelease];
         desc.colorTextureFormat = (MTLPixelFormat)colorFormat;
         desc.depthTextureFormat = (MTLPixelFormat)depthFormat;
         desc.motionTextureFormat = (MTLPixelFormat)motionFormat;
@@ -362,7 +368,10 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
             return false;
         }
 
-        MTLFXTemporalDenoisedScalerDescriptor* const desc = [MTLFXTemporalDenoisedScalerDescriptor new];
+        // +1 from new, and this file is compiled without ARC: autoreleased so the
+        // enclosing pool takes it on every path, including the early returns
+        // below, which is what leaked it before.
+        MTLFXTemporalDenoisedScalerDescriptor* const desc = [[MTLFXTemporalDenoisedScalerDescriptor new] autorelease];
         desc.colorTextureFormat = kColorFormat;
         desc.depthTextureFormat = kDepthFormat;
         desc.motionTextureFormat = kMotionFormat;

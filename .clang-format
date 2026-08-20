@@ -1,4 +1,16 @@
-Language: Cpp
+# No `Language:` key, and that is load-bearing.
+#
+# With `Language: Cpp` written out, clang-format refuses every .mm file in the
+# tree -- "Configuration file(s) do(es) not support Objective-C" -- because it
+# classifies .mm as ObjC and looks for a section that names that language. The
+# Metal backend is 17 .mm files, so that quietly put the whole of it outside
+# both clang-format and git-clang-format.
+#
+# Omitting the key applies these options to ObjC as well as to C++, which is
+# what the ObjC options already in here (AfterObjCDeclaration,
+# ObjCSpaceAfterProperty, ObjCSpaceBeforeProtocolList) were always meant to do.
+# The alternative -- a second YAML document with `Language: ObjC` -- would mean
+# maintaining two copies of every option, which drift.
 Standard: Cpp11
 AccessModifierOffset: -4
 AlignAfterOpenBracket: Align

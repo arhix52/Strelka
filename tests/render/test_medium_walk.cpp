@@ -26,6 +26,7 @@
 #include "../support/sampling.h"
 
 #include <cmath>
+#include <cstring>
 #include <initializer_list>
 #include <numbers>
 
@@ -313,7 +314,11 @@ TEST_CASE("medium: the spectrum is layout-compatible with a device float3")
     // real float3. Three floats, in order, no padding.
     static_assert(sizeof(Spectrum) == 3 * sizeof(float), "Spectrum must be three tight floats");
     const Spectrum s = makeSpectrum(1.0f, 2.0f, 3.0f);
-    const float* raw = &s.x;
+    // memcpy rather than walking off &s.x: indexing past a scalar is undefined
+    // however the bytes are laid out, and it is the layout this is checking, so
+    // reading it as bytes is both the well-defined spelling and the honest one.
+    float raw[3] = {};
+    std::memcpy(raw, &s, sizeof(raw));
     CHECK(raw[0] == 1.0f);
     CHECK(raw[1] == 2.0f);
     CHECK(raw[2] == 3.0f);

@@ -80,9 +80,21 @@ Checks: >
   -cert-msc32-c,
   -cert-msc51-cpp
 
+# The two analyzer checks excluded here fire *inside* header-only third-party
+# libraries -- stb_image.h, tinyexr.h, doctest.h -- which are compiled into our
+# own translation units. Analyzer diagnostics ignore HeaderFilterRegex and
+# ExcludeHeaderFilterRegex both (they are reported at the point the bug
+# materialises, whoever's header that is), so there is no way to keep them as
+# errors without a vendored library failing our build. They still report as
+# warnings, which is where anything of ours in those families would show up.
+#
+# clang-analyzer-osx.cocoa.RetainCount stays an error, and earned it: it is what
+# caught three leaked MetalFX descriptors in a file compiled without ARC.
 WarningsAsErrors: >
   bugprone-*,
   clang-analyzer-*,
+  -clang-analyzer-unix.Malloc,
+  -clang-analyzer-cplusplus.NewDeleteLeaks,
   performance-*,
   concurrency-*,
   cert-*
