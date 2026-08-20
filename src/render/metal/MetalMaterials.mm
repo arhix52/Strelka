@@ -40,7 +40,9 @@ struct MaterialBuildState
 // handles are left null, and the shader reads these factors wherever one is,
 // so a table built from this alone already shades the scene correctly -- in
 // flat colours, until the maps arrive.
-static Material makeMaterialParams(const Scene::MaterialDescription& currMatDesc)
+namespace
+{
+Material makeMaterialParams(const Scene::MaterialDescription& currMatDesc)
 {
     Material material = {};
     const auto& p = currMatDesc.params;
@@ -94,6 +96,7 @@ static Material makeMaterialParams(const Scene::MaterialDescription& currMatDesc
 
     return material;
 }
+} // namespace
 
 MetalMaterials::~MetalMaterials()
 {

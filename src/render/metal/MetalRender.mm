@@ -1385,6 +1385,7 @@ void MetalRender::render(Buffer* output)
         // Not std::ranges::fill: mAnimChanged is a vector<bool>, whose proxy
         // reference does not model indirectly_writable, so the ranges overload
         // does not apply to it.
+        // NOLINTNEXTLINE(modernize-use-ranges)
         std::fill(mAnimChanged.begin(), mAnimChanged.end(), false);
         for (size_t i = 0; i < animCount; ++i)
         {

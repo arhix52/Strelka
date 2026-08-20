@@ -9,7 +9,9 @@
 namespace oka
 {
 
-static MTLFXSpatialScalerColorProcessingMode toNative(MetalFxContext::ColorMode mode)
+namespace
+{
+MTLFXSpatialScalerColorProcessingMode toNative(MetalFxContext::ColorMode mode)
 {
     switch (mode)
     {
@@ -22,6 +24,7 @@ static MTLFXSpatialScalerColorProcessingMode toNative(MetalFxContext::ColorMode 
         return MTLFXSpatialScalerColorProcessingModePerceptual;
     }
 }
+} // namespace
 
 bool MetalFxContext::ensureSpatialScaler(MTL::Device* device,
                                          MTL::PixelFormat colorFormat,

@@ -13,7 +13,9 @@
 #include <algorithm>
 #include <cmath>
 
-static SurfaceInteraction make_test_si()
+namespace
+{
+SurfaceInteraction make_test_si()
 {
     SurfaceInteraction si = {};
     si.position = make_float3(0, 0, 0);
@@ -27,7 +29,7 @@ static SurfaceInteraction make_test_si()
     return si;
 }
 
-static MaterialParams make_diffuse_params()
+MaterialParams make_diffuse_params()
 {
     MaterialParams p = {};
     p.material_type = MATERIAL_TYPE_DIFFUSE;
@@ -55,6 +57,7 @@ static MaterialParams make_diffuse_params()
     p.thin_walled = 0;
     return p;
 }
+} // namespace
 
 // --- material_math tests ---
 

@@ -301,7 +301,7 @@ void MetalWavefrontIntegrator::reportStageTimings()
     }
 
     double sum = 0.0;
-    for (double total : totals)
+    for (const double total : totals)
     {
         sum += total;
     }

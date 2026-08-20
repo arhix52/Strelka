@@ -8,7 +8,9 @@
 
 using namespace oka;
 
-static uint32_t addUnitTriangle(Scene& scene, const glm::mat4& xform, uint32_t matId = 0)
+namespace
+{
+uint32_t addUnitTriangle(Scene& scene, const glm::mat4& xform, uint32_t matId = 0)
 {
     if (scene.getMaterials().empty())
     {
@@ -27,6 +29,7 @@ static uint32_t addUnitTriangle(Scene& scene, const glm::mat4& xform, uint32_t m
     const uint32_t meshId = scene.createMesh(vb, ib);
     return scene.createInstance(Instance::Type::eMesh, meshId, matId, xform);
 }
+} // namespace
 
 TEST_CASE("ChangeBits lifecycle: setLight marks Lights and consume clears")
 {

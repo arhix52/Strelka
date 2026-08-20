@@ -343,7 +343,7 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     return cfg;
 }
 
-HeadlessApp::HeadlessApp(const RenderConfig& config) : m_config(config)
+HeadlessApp::HeadlessApp(RenderConfig config) : m_config(std::move(config))
 {
     m_settings = std::make_unique<SettingsManager>();
     m_scene = std::make_unique<Scene>();

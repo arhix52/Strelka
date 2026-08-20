@@ -46,7 +46,7 @@ struct EstimatorStats
 };
 
 template <typename Integrand>
-EstimatorStats estimate(const RectCorners& c, const glm::float3& hit, bool solidAngle, int samples, Integrand&& integrand)
+EstimatorStats estimate(const RectCorners& c, const glm::float3& hit, bool solidAngle, int samples, const Integrand& integrand)
 {
     std::mt19937 rng(0xC0FFEEu);
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);

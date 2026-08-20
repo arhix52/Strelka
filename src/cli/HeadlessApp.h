@@ -199,7 +199,7 @@ inline constexpr int kExitRendererUnavailable = 3;
 class HeadlessApp
 {
 public:
-    explicit HeadlessApp(const RenderConfig& config);
+    explicit HeadlessApp(RenderConfig config);
     ~HeadlessApp() = default;
 
     int run();

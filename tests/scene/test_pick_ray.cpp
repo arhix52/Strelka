@@ -147,7 +147,9 @@ TEST_CASE("Screen space pick selects the object under the cursor in every quadra
     CHECK_FALSE(pickAt(0.5f, 0.5f).hit);
 }
 
-static Camera makeOrthoCamera(float xmag, float ymag, float aspect)
+namespace
+{
+Camera makeOrthoCamera(float xmag, float ymag, float aspect)
 {
     Camera cam;
     cam.position = glm::float3(0.0f, 0.0f, 5.0f);
@@ -157,6 +159,7 @@ static Camera makeOrthoCamera(float xmag, float ymag, float aspect)
     cam.updateAspectRatio(aspect);
     return cam;
 }
+} // namespace
 
 TEST_CASE("Ortho pick ray uses aspect-adapted film extents, not raw xmag/ymag")
 {
