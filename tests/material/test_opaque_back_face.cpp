@@ -131,7 +131,7 @@ TEST_CASE("the back-face premise holds")
     // If this stops being negative every case below is testing nothing.
     for (float r : { 0.05f, 0.4f, 0.9f })
     {
-        SurfaceInteraction si = back_hit(r);
+        const SurfaceInteraction si = back_hit(r);
         CAPTURE(r);
         CHECK(dot(si.shading_normal, si.wo) < 0.0f);
         CHECK(si.transmission == doctest::Approx(0.0f));
@@ -144,8 +144,8 @@ TEST_CASE("an opaque surface hit from behind scatters instead of absorbing")
     for (float r : { 0.05f, 0.4f, 0.9f })
     {
         CAPTURE(r);
-        SurfaceInteraction si = back_hit(r);
-        BsdfSampleResult s = bsdf_sample(si, make_float4(0.4f, 0.6f, 0.3f, 0.2f));
+        const SurfaceInteraction si = back_hit(r);
+        const BsdfSampleResult s = bsdf_sample(si, make_float4(0.4f, 0.6f, 0.3f, 0.2f));
 
         REQUIRE(s.event_type != BSDF_EVENT_ABSORB);
         CHECK(s.pdf > 0.0f);
@@ -160,11 +160,11 @@ TEST_CASE("an opaque surface hit from behind scatters instead of absorbing")
 
 TEST_CASE("light reaching the lit side of a back hit is evaluated, not discarded")
 {
-    SurfaceInteraction si = back_hit(0.4f);
+    const SurfaceInteraction si = back_hit(0.4f);
 
     // A light below the surface, on the same side as the viewer.
     const float3 wi = safe_normalize(make_float3(-0.4f, -1.0f, 0.2f));
-    BsdfEvalResult e = bsdf_eval(si, wi);
+    const BsdfEvalResult e = bsdf_eval(si, wi);
 
     CHECK(e.pdf > 0.0f);
     CHECK(is_finite3(e.bsdf));
@@ -184,14 +184,14 @@ TEST_CASE("eval accepts what sample produced, from behind as from in front")
             CAPTURE(r);
             CAPTURE(u);
 
-            SurfaceInteraction si = back_hit(r);
-            BsdfSampleResult s = bsdf_sample(si, make_float4(u, 1.0f - u, 0.3f, 0.2f));
+            const SurfaceInteraction si = back_hit(r);
+            const BsdfSampleResult s = bsdf_sample(si, make_float4(u, 1.0f - u, 0.3f, 0.2f));
             if (s.event_type == BSDF_EVENT_ABSORB || (s.event_type & BSDF_EVENT_SPECULAR) != 0)
             {
                 continue; // a rejected draw, or a delta lobe eval cannot score
             }
 
-            BsdfEvalResult e = bsdf_eval(si, s.wi);
+            const BsdfEvalResult e = bsdf_eval(si, s.wi);
             CHECK(e.pdf > 0.0f);
             CHECK(dot(e.bsdf, e.bsdf) > 0.0f);
         }
@@ -209,8 +209,8 @@ TEST_CASE("the two sides of one opaque surface shade the same")
         const float3 wiFront = safe_normalize(make_float3(-0.4f, 1.0f, 0.2f));
         const float3 wiBack = safe_normalize(make_float3(-0.4f, -1.0f, 0.2f));
 
-        BsdfEvalResult front = bsdf_eval(front_hit(r), wiFront);
-        BsdfEvalResult back = bsdf_eval(back_hit(r), wiBack);
+        const BsdfEvalResult front = bsdf_eval(front_hit(r), wiFront);
+        const BsdfEvalResult back = bsdf_eval(back_hit(r), wiBack);
 
         REQUIRE(front.pdf > 0.0f);
         REQUIRE(back.pdf > 0.0f);
@@ -236,7 +236,7 @@ TEST_CASE("a ray leaving a dielectric is still routed to the transmission lobe")
     CHECK_FALSE(opaqueBackHitFlipsFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission,
                                         si.diffuse_transmission));
 
-    BsdfSampleResult s = bsdf_sample(si, make_float4(0.5f, 0.5f, 0.9f, 0.9f));
+    const BsdfSampleResult s = bsdf_sample(si, make_float4(0.5f, 0.5f, 0.9f, 0.9f));
     REQUIRE(s.event_type != BSDF_EVENT_ABSORB);
     CHECK((s.event_type & BSDF_EVENT_TRANSMISSION) != 0);
     // Refraction crosses the surface; the flip would have kept it on this side.
@@ -247,25 +247,25 @@ TEST_CASE("the shaded frame is what both halves of the estimate must be told")
 {
     // Unflipped cases pass the geometry straight through.
     {
-        ShadedFrame f = shadedFrame(true, 0.7f, 0.0f, 0.0f);
+        const ShadedFrame f = shadedFrame(true, 0.7f, 0.0f, 0.0f);
         CHECK(f.frontFace);
         CHECK(f.normalSign == doctest::Approx(1.0f));
     }
     {
         // A dielectric exit stays a back face: the transmission lobe owns it.
-        ShadedFrame f = shadedFrame(false, -0.7f, 1.0f, 0.0f);
+        const ShadedFrame f = shadedFrame(false, -0.7f, 1.0f, 0.0f);
         CHECK_FALSE(f.frontFace);
         CHECK(f.normalSign == doctest::Approx(1.0f));
     }
     {
         // A leaf lit through its own thickness, likewise.
-        ShadedFrame f = shadedFrame(false, -0.7f, 0.0f, 0.5f);
+        const ShadedFrame f = shadedFrame(false, -0.7f, 0.0f, 0.5f);
         CHECK_FALSE(f.frontFace);
         CHECK(f.normalSign == doctest::Approx(1.0f));
     }
     {
         // The flipped case: shaded as a front face, with the normal negated.
-        ShadedFrame f = shadedFrame(false, -0.7f, 0.0f, 0.0f);
+        const ShadedFrame f = shadedFrame(false, -0.7f, 0.0f, 0.0f);
         CHECK(f.frontFace);
         CHECK(f.normalSign == doctest::Approx(-1.0f));
     }
@@ -278,7 +278,7 @@ TEST_CASE("a flipped hit offers and pairs over the same hemisphere it scatters i
     // and the directions the BSDF actually samples all have to be one set. The
     // failure this guards is the one that withholds the weight from a bounce the
     // estimate did offer, which counts the light about twice.
-    SurfaceInteraction si = back_hit(0.4f);
+    const SurfaceInteraction si = back_hit(0.4f);
     const ShadedFrame f = shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission,
                                       si.diffuse_transmission);
     REQUIRE(f.normalSign == doctest::Approx(-1.0f));
@@ -287,7 +287,7 @@ TEST_CASE("a flipped hit offers and pairs over the same hemisphere it scatters i
     {
         const float u = stratum(i, 16);
         CAPTURE(u);
-        BsdfSampleResult s = bsdf_sample(si, make_float4(u, 1.0f - u, 0.3f, 0.2f));
+        const BsdfSampleResult s = bsdf_sample(si, make_float4(u, 1.0f - u, 0.3f, 0.2f));
         if (s.event_type == BSDF_EVENT_ABSORB || (s.event_type & BSDF_EVENT_SPECULAR) != 0)
         {
             continue;

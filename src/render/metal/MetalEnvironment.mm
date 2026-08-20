@@ -137,7 +137,7 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
     if (ext == ".exr" || ext == ".EXR")
     {
         const char* err = nullptr;
-        int ret = LoadEXR(&pixelData, &width, &height, texturePath.c_str(), &err);
+        const int ret = LoadEXR(&pixelData, &width, &height, texturePath.c_str(), &err);
         if (ret != TINYEXR_SUCCESS)
         {
             STRELKA_ERROR("Failed to load EXR env map: {} ({})", texturePath, err ? err : "unknown");

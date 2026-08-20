@@ -37,7 +37,7 @@ SurfaceInteraction hair_si(float tilt_deg, float roughness = 0.3f)
 
 TEST_CASE("hair Chiang samples produce a finite glossy lobe")
 {
-    SurfaceInteraction si = hair_si(25.0f, 0.35f);
+    const SurfaceInteraction si = hair_si(25.0f, 0.35f);
     int ok = 0;
     float3 mean = make_float3(0.0f);
     for (int i = 0; i < 1024; ++i)
@@ -45,7 +45,7 @@ TEST_CASE("hair Chiang samples produce a finite glossy lobe")
         const float u1 = stratum((i * 3) % 1024, 1024);
         const float u2 = stratum((i * 7) % 1024, 1024);
         const float u3 = stratum((i * 11) % 1024, 1024);
-        BsdfSampleResult s = bsdf_sample(si, make_float4(u1, u2, u3, 0.0f));
+        const BsdfSampleResult s = bsdf_sample(si, make_float4(u1, u2, u3, 0.0f));
         if (s.event_type == BSDF_EVENT_ABSORB)
             continue;
         CHECK(s.pdf > 0.0f);
@@ -63,7 +63,7 @@ TEST_CASE("hair Chiang samples produce a finite glossy lobe")
 
 TEST_CASE("hair Chiang sample and eval agree on the sampled direction")
 {
-    SurfaceInteraction si = hair_si(20.0f, 0.3f);
+    const SurfaceInteraction si = hair_si(20.0f, 0.3f);
     int checked = 0;
     for (int i = 0; i < 800 && checked < 40; ++i)
     {
@@ -92,7 +92,7 @@ TEST_CASE("hair Chiang is brighter in transmission than a dielectric cylinder")
     // The defect: a rough dielectric at the same colour and roughness under-
     // counts the light that crosses the fibre. Chiang's TT/TRT lobes should
     // put more energy into the forward hemisphere.
-    SurfaceInteraction hair = hair_si(15.0f, 0.4f);
+    const SurfaceInteraction hair = hair_si(15.0f, 0.4f);
 
     SurfaceInteraction cyl = hair;
     cyl.material_type = MATERIAL_TYPE_STANDARD_PBR;
@@ -110,11 +110,11 @@ TEST_CASE("hair Chiang is brighter in transmission than a dielectric cylinder")
         const float u3 = stratum((i * 13) % 2048, 2048);
         const float u4 = stratum((i * 19) % 2048, 2048);
 
-        BsdfSampleResult hs = bsdf_sample(hair, make_float4(u1, u2, u3, u4));
+        const BsdfSampleResult hs = bsdf_sample(hair, make_float4(u1, u2, u3, u4));
         if (hs.event_type != BSDF_EVENT_ABSORB && dot(hs.wi, forward) > 0.0f)
             hair_fwd += luminance(hs.bsdf_over_pdf);
 
-        BsdfSampleResult cs = bsdf_sample(cyl, make_float4(u1, u2, u3, u4));
+        const BsdfSampleResult cs = bsdf_sample(cyl, make_float4(u1, u2, u3, u4));
         if (cs.event_type != BSDF_EVENT_ABSORB && dot(cs.wi, forward) > 0.0f)
             cyl_fwd += luminance(cs.bsdf_over_pdf);
     }
@@ -144,7 +144,7 @@ TEST_CASE("hair Chiang scatters over the whole sphere, not a hemisphere")
         const float u1 = stratum((i * 3) % kSamples, kSamples);
         const float u2 = stratum((i * 7) % kSamples, kSamples);
         const float u3 = stratum((i * 13) % kSamples, kSamples);
-        BsdfSampleResult s = bsdf_sample(si, make_float4(u1, u2, u3, 0.0f));
+        const BsdfSampleResult s = bsdf_sample(si, make_float4(u1, u2, u3, 0.0f));
         if (s.event_type == BSDF_EVENT_ABSORB)
             continue;
         const float w = luminance(s.bsdf_over_pdf);
@@ -172,7 +172,7 @@ TEST_CASE("hair Chiang scatters over the whole sphere, not a hemisphere")
         const float3 wi = safe_normalize(make_float3(0.35f * std::cos(phi),
                                                      0.35f * std::sin(phi), -1.0f));
         REQUIRE(dot(si.shading_normal, wi) < 0.0f);
-        BsdfEvalResult e = bsdf_eval(si, wi);
+        const BsdfEvalResult e = bsdf_eval(si, wi);
         if (e.pdf > 0.0f && luminance(e.bsdf) > 0.0f)
             ++nonzero;
     }

@@ -260,7 +260,7 @@ TEST_CASE("packUV keeps the two components independent")
     CHECK(swapped.y == -10.0f);
 
     // and neither component's encoding depends on the other
-    for (float other : { -10.0f, -3.0f, 0.0f, 4.5f, 10.0f })
+    for (const float other : { -10.0f, -3.0f, 0.0f, 4.5f, 10.0f })
     {
         CHECK((packUV(glm::float2(2.5f, other)) & 0x0000ffffu) ==
               (packUV(glm::float2(2.5f, 0.0f)) & 0x0000ffffu));

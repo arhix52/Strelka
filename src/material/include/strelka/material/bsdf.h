@@ -145,7 +145,7 @@ DEVICE_FUNC void bsdf_init(SurfaceInteraction& si,
                             const void* textures = nullptr)
 {
     // Texture stubs return (1,1,1,1) so factor multiplication is harmless.
-    float4 base_tex = texture_sample_2d(textures, params.base_color_tex, si.uv);
+    const float4 base_tex = texture_sample_2d(textures, params.base_color_tex, si.uv);
     si.albedo = make_float3(params.base_color.x * base_tex.x,
                             params.base_color.y * base_tex.y,
                             params.base_color.z * base_tex.z);
@@ -153,7 +153,7 @@ DEVICE_FUNC void bsdf_init(SurfaceInteraction& si,
     si.roughness = fmaxf(params.roughness, 0.0001f);
     si.metallic  = saturate(params.metallic);
 
-    float4 em_tex = texture_sample_2d(textures, params.emission_tex, si.uv);
+    const float4 em_tex = texture_sample_2d(textures, params.emission_tex, si.uv);
     si.emission = make_float3(params.emission.x * em_tex.x * params.emission_strength,
                               params.emission.y * em_tex.y * params.emission_strength,
                               params.emission.z * em_tex.z * params.emission_strength);

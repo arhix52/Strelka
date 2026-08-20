@@ -34,7 +34,7 @@ inline const std::filesystem::path& getExecutableDir()
         {
             return std::filesystem::current_path(ec);
         }
-        std::filesystem::path exe = std::filesystem::weakly_canonical(std::filesystem::path(buf.data()), ec);
+        const std::filesystem::path exe = std::filesystem::weakly_canonical(std::filesystem::path(buf.data()), ec);
 #elif defined(_WIN32)
         wchar_t buf[MAX_PATH] = {};
         const DWORD len = GetModuleFileNameW(nullptr, buf, MAX_PATH);

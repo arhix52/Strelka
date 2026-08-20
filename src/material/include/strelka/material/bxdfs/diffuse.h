@@ -24,7 +24,7 @@ DEVICE_FUNC BsdfSampleResult diffuse_sample(const THREAD_REF SurfaceInteraction&
     build_onb(si.shading_normal, T, B);
 
     // Cosine-weighted hemisphere sample in local space
-    float3 wi_local = cosine_hemisphere_sample(u1, u2);
+    const float3 wi_local = cosine_hemisphere_sample(u1, u2);
 
     // Transform to world space
     result.wi  = local_to_world(wi_local, T, B, si.shading_normal);
@@ -52,7 +52,7 @@ DEVICE_FUNC BsdfEvalResult diffuse_eval(const THREAD_REF SurfaceInteraction& si,
 {
     BsdfEvalResult result;
 
-    float cos_theta = dot(si.shading_normal, wi);
+    const float cos_theta = dot(si.shading_normal, wi);
     if (cos_theta <= 0.0f)
     {
         result.bsdf = make_float3(0.0f);
@@ -68,7 +68,7 @@ DEVICE_FUNC BsdfEvalResult diffuse_eval(const THREAD_REF SurfaceInteraction& si,
 
 DEVICE_FUNC float diffuse_pdf(const THREAD_REF SurfaceInteraction& si, float3 wi)
 {
-    float cos_theta = dot(si.shading_normal, wi);
+    const float cos_theta = dot(si.shading_normal, wi);
     return cosine_hemisphere_pdf(fmaxf(cos_theta, 0.0f));
 }
 

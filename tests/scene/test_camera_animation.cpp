@@ -61,7 +61,7 @@ TEST_CASE("a default node is an identity transform")
 {
     // Everything downstream of a node reads its world transform, and the
     // hierarchy multiplies a garbage local into every descendant.
-    Scene::Node node{};
+    const Scene::Node node{};
     CHECK(node.translation == glm::float3(0.0f));
     CHECK(node.scale == glm::float3(1.0f));
     CHECK(node.rotation == glm::quat(1.0f, 0.0f, 0.0f, 0.0f));
@@ -106,7 +106,7 @@ TEST_CASE("manual control keeps animation off a camera")
     // Playback continues -- the pose is the user's, not the clip's. Both have to
     // hold: a stale position would show up in the gizmo and picking ray, a stale
     // view matrix in the rendered frame.
-    for (float t : { 0.25f, 0.75f, 1.0f })
+    for (const float t : { 0.25f, 0.75f, 1.0f })
     {
         scene->mAnimations[0].current = t;
         scene->applyAnimation(0);

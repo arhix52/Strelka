@@ -107,7 +107,7 @@ float3 dir_at(float deg)
 float3 integrate_albedo(const MaterialParams& p, float3 wo, int samples, std::uint32_t seed)
 {
     float3 total = make_float3(0.0f);
-    SurfaceInteraction si = make_si(p, wo);
+    const SurfaceInteraction si = make_si(p, wo);
     Lcg rng(seed);
     for (int i = 0; i < samples; ++i)
     {
@@ -133,11 +133,11 @@ TEST_CASE("sheen: weight 0 changes nothing")
     zeroed.sheen_color = make_float3(0.2f, 0.7f, 0.4f); // colour set, weight not
     zeroed.sheen_roughness = 0.9f;
 
-    for (float deg : { 5.0f, 35.0f, 65.0f, 85.0f })
+    for (const float deg : { 5.0f, 35.0f, 65.0f, 85.0f })
     {
         const float3 wo = dir_at(deg);
-        SurfaceInteraction a = make_si(without, wo);
-        SurfaceInteraction b = make_si(zeroed, wo);
+        const SurfaceInteraction a = make_si(without, wo);
+        const SurfaceInteraction b = make_si(zeroed, wo);
         const float3 wi = dir_at(-deg + 40.0f);
 
         const BsdfEvalResult ea = bsdf_eval(a, wi);
@@ -189,9 +189,9 @@ TEST_CASE("sheen: sample and eval agree")
     // two describe different materials and the weights blend them.
     const MaterialParams fabric = cloth_params(1.0f, 0.4f);
 
-    for (float deg : { 15.0f, 45.0f, 75.0f })
+    for (const float deg : { 15.0f, 45.0f, 75.0f })
     {
-        SurfaceInteraction si = make_si(fabric, dir_at(deg));
+        const SurfaceInteraction si = make_si(fabric, dir_at(deg));
         Lcg rng(0xC10Du + static_cast<std::uint32_t>(deg));
         int checked = 0;
         for (int i = 0; i < 400 && checked < 60; ++i)
@@ -224,7 +224,7 @@ TEST_CASE("sheen: a black fabric still scatters")
     MaterialParams fabric = cloth_params(1.0f, 0.3f);
     fabric.base_color = make_float3(0.0f, 0.0f, 0.0f);
 
-    SurfaceInteraction si = make_si(fabric, dir_at(70.0f));
+    const SurfaceInteraction si = make_si(fabric, dir_at(70.0f));
     Lcg rng(99u);
     float3 total = make_float3(0.0f);
     int diffuseSamples = 0;
@@ -248,7 +248,7 @@ TEST_CASE("sheen: does not manufacture energy")
     // not energy-exact -- but it must not push a fabric past the light that fell
     // on it, which is what a missing visibility term or a mis-normalised Charlie
     // distribution would do.
-    for (float deg : { 20.0f, 50.0f, 78.0f })
+    for (const float deg : { 20.0f, 50.0f, 78.0f })
     {
         const float3 wo = dir_at(deg);
         const float3 albedo = integrate_albedo(cloth_params(1.0f, 0.3f), wo, 20000, 7u);

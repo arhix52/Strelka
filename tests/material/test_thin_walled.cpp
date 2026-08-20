@@ -115,7 +115,7 @@ void sweep(const SurfaceInteraction& si, float& transmitted, float& mean_through
         // with a strict inequality, and 0 or 1 exactly would test the boundary
         // rather than the distribution.
         const float u = stratum(i, N);
-        BsdfSampleResult r = bsdf_sample(si, make_float4(0.5f, 0.5f, 0.25f, u));
+        const BsdfSampleResult r = bsdf_sample(si, make_float4(0.5f, 0.5f, 0.25f, u));
         if ((r.event_type & BSDF_EVENT_TRANSMISSION) != 0)
         {
             ++through;
@@ -134,7 +134,7 @@ TEST_CASE("the far wall of a bubble is set up as a back-face hit")
     // the wrong reason.
     for (float deg : { 10.0f, 50.0f, 80.0f })
     {
-        SurfaceInteraction si = wall_si(deg, /*front=*/false);
+        const SurfaceInteraction si = wall_si(deg, /*front=*/false);
         CAPTURE(deg);
         CHECK(dot(si.shading_normal, si.wo) < 0.0f);
         CHECK(si.thin_walled == 1u);
@@ -151,7 +151,7 @@ TEST_CASE("a thin wall transmits past the critical angle of the solid it is made
 
     for (float deg : { 40.0f, 50.0f, 60.0f, 70.0f, 80.0f, 88.0f })
     {
-        SurfaceInteraction si = wall_si(deg, /*front=*/false);
+        const SurfaceInteraction si = wall_si(deg, /*front=*/false);
         float transmitted = 0.0f, throughput = 0.0f;
         sweep(si, transmitted, throughput);
         CAPTURE(deg);
@@ -211,12 +211,12 @@ TEST_CASE("a smooth thin wall transmits as a delta, and says so")
     // delta at exactly -V.
     for (float rough : { 0.0f, 0.001f })
     {
-        SurfaceInteraction si = wall_si(35.0f, /*front=*/true, rough);
+        const SurfaceInteraction si = wall_si(35.0f, /*front=*/true, rough);
         int transmitted = 0;
         for (int i = 0; i < 512; ++i)
         {
             const float u = stratum(i, 512);
-            BsdfSampleResult r = bsdf_sample(si, make_float4(0.3f, 0.7f, 0.25f, u));
+            const BsdfSampleResult r = bsdf_sample(si, make_float4(0.3f, 0.7f, 0.25f, u));
             if ((r.event_type & BSDF_EVENT_TRANSMISSION) == 0) continue;
             ++transmitted;
             CAPTURE(rough);
@@ -233,7 +233,7 @@ TEST_CASE("a rough thin wall blurs transmission around -V")
     // Every sample used to land on exactly -V. With the mirrored-GGX lobe the
     // mean stays on -V and the variance grows with roughness -- that is the
     // blur a frosted sheet has to have.
-    SurfaceInteraction si = wall_si(20.0f, /*front=*/true, /*roughness=*/0.4f);
+    const SurfaceInteraction si = wall_si(20.0f, /*front=*/true, /*roughness=*/0.4f);
     float3 mean = make_float3(0.0f);
     float var = 0.0f;
     int transmitted = 0;
@@ -243,7 +243,7 @@ TEST_CASE("a rough thin wall blurs transmission around -V")
         const float u = stratum(i, 2048);
         const float u1 = stratum((i * 7) % 2048, 2048);
         const float u2 = stratum((i * 13) % 2048, 2048);
-        BsdfSampleResult r = bsdf_sample(si, make_float4(u1, u2, 0.25f, u));
+        const BsdfSampleResult r = bsdf_sample(si, make_float4(u1, u2, 0.25f, u));
         if ((r.event_type & BSDF_EVENT_TRANSMISSION) == 0) continue;
         ++transmitted;
         CHECK(r.event_type == BSDF_EVENT_GLOSSY_TRANSMISSION);
@@ -263,11 +263,11 @@ TEST_CASE("a smooth thin wall cannot be evaluated in transmission")
 {
     // eval() on a delta returns zero; a light connection through a smooth wall
     // has nothing to land on. Rough walls are evaluable -- see the next case.
-    SurfaceInteraction si = wall_si(35.0f, /*front=*/true, 0.0f);
+    const SurfaceInteraction si = wall_si(35.0f, /*front=*/true, 0.0f);
     for (float tilt : { 0.0f, 0.15f, 0.4f })
     {
         const float3 wi = safe_normalize(make_float3(-si.wo.x + tilt, tilt, -si.wo.z));
-        BsdfEvalResult e = bsdf_eval(si, wi);
+        const BsdfEvalResult e = bsdf_eval(si, wi);
         CAPTURE(tilt);
         CHECK(dot(e.bsdf, e.bsdf) == doctest::Approx(0.0f));
     }
@@ -275,7 +275,7 @@ TEST_CASE("a smooth thin wall cannot be evaluated in transmission")
 
 TEST_CASE("a rough thin wall is evaluable in transmission and agrees with sample")
 {
-    SurfaceInteraction si = wall_si(25.0f, /*front=*/true, 0.35f);
+    const SurfaceInteraction si = wall_si(25.0f, /*front=*/true, 0.35f);
     int checked = 0;
     for (int i = 0; i < 800 && checked < 40; ++i)
     {
@@ -309,7 +309,7 @@ TEST_CASE("solid glass still total-internally-reflects")
     // branch must not have leaked into.
     for (float deg : { 45.0f, 60.0f, 80.0f })
     {
-        SurfaceInteraction si = wall_si(deg, /*front=*/false, 0.0f, /*thin=*/false);
+        const SurfaceInteraction si = wall_si(deg, /*front=*/false, 0.0f, /*thin=*/false);
         float transmitted = 0.0f, throughput = 0.0f;
         sweep(si, transmitted, throughput);
         CAPTURE(deg);
@@ -317,7 +317,7 @@ TEST_CASE("solid glass still total-internally-reflects")
     }
 
     // And below it, the same surface lets light out.
-    SurfaceInteraction si = wall_si(20.0f, /*front=*/false, 0.0f, /*thin=*/false);
+    const SurfaceInteraction si = wall_si(20.0f, /*front=*/false, 0.0f, /*thin=*/false);
     float transmitted = 0.0f, throughput = 0.0f;
     sweep(si, transmitted, throughput);
     CHECK(transmitted > 0.9f);

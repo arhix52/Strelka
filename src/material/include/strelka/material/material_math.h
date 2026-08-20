@@ -196,7 +196,7 @@
 
     inline float3 safe_normalize(float3 v)
     {
-        float len = glm::length(v);
+        const float len = glm::length(v);
         return len > 1e-8f ? v / len : float3(0.0f, 1.0f, 0.0f);
     }
 
@@ -211,8 +211,8 @@
 
     inline bool refract_dir(float3 incident, float3 normal, float eta, float3& out)
     {
-        float cosi  = glm::dot(normal, incident);
-        float sin2t = eta * eta * (1.0f - cosi * cosi);
+        const float cosi = glm::dot(normal, incident);
+        const float sin2t = eta * eta * (1.0f - cosi * cosi);
         if (sin2t > 1.0f) return false;
         out = eta * incident - (eta * cosi + std::sqrt(1.0f - sin2t)) * normal;
         return true;

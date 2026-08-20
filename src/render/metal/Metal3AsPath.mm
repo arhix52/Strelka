@@ -107,7 +107,7 @@ public:
         MTL::MotionKeyframeData* kf1 = MTL::MotionKeyframeData::alloc()->init();
         kf1->setBuffer(geometry->vertexBuffer());
         kf1->setOffset(mesh.mVbOffset * sizeof(Scene::Vertex));
-        const NS::Object* keyframes[] = { kf0, kf1 };
+        const NS::Object* const keyframes[] = { kf0, kf1 };
         geom->setVertexBuffers(NS::Array::array(keyframes, 2UL));
         geom->setVertexStride(sizeof(Scene::Vertex));
         geom->setIndexBuffer(geometry->indexBuffer());
@@ -230,7 +230,7 @@ public:
         commandBuffer->waitUntilCompleted();
         if (commandBuffer->status() == MTL::CommandBufferStatusError)
         {
-            NS::Error* err = commandBuffer->error();
+            const NS::Error* err = commandBuffer->error();
             STRELKA_ERROR("Acceleration structure build failed on the GPU: {}",
                           err && err->localizedDescription()
                               ? err->localizedDescription()->utf8String()
@@ -274,7 +274,7 @@ public:
                           accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
             return nullptr;
         }
-        MTL::Buffer* scratchBuffer =
+        MTL::Buffer* const scratchBuffer =
             mDevice->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate);
         static const uint32_t kGroupSize = std::max(1u, envUint("STRELKA_AS_GROUP", 1));
         if (!mAsGroupCommandBuffer)

@@ -144,8 +144,8 @@ static TONEMAP_CONST float3x3 ACESOutputMat =
 
 inline float3 RRTAndODTFit(float3 v)
 {
-    float3 a = v * (v + 0.0245786f) - 0.000090537f;
-    float3 b = v * (0.983729f * v + 0.4329510f) + 0.238081f;
+    const float3 a = v * (v + 0.0245786f) - 0.000090537f;
+    const float3 b = v * (0.983729f * v + 0.4329510f) + 0.238081f;
     return a / b;
 }
 
@@ -272,11 +272,11 @@ inline float3 ACESFitted(float3 color, const float maxOutput)
 // https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
 inline float3 ACESFilm(float3 x)
 {
-    float a = 2.51f;
-    float b = 0.03f;
-    float c = 2.43f;
-    float d = 0.59f;
-    float e = 0.14f;
+    const float a = 2.51f;
+    const float b = 0.03f;
+    const float c = 2.43f;
+    const float d = 0.59f;
+    const float e = 0.14f;
     return saturate((x*(a*x+b))/(x*(c*x+d)+e));
 }
 
@@ -299,7 +299,7 @@ inline float calcLuminance(float3 color)
 
 inline float3 reinhard(float3 color)
 {
-    float luminance = calcLuminance(color);
+    const float luminance = calcLuminance(color);
     // float reinhard = luminance / (luminance + 1);
     return color / (luminance + 1.0f);
 }

@@ -108,7 +108,7 @@ struct Response
 Response integrate(const MaterialParams& p, float3 wo, int samples, std::uint32_t seed)
 {
     Response r{ make_float3(0.0f), make_float3(0.0f) };
-    SurfaceInteraction si = make_si(p, wo);
+    const SurfaceInteraction si = make_si(p, wo);
     Lcg rng(seed);
     for (int i = 0; i < samples; ++i)
     {
@@ -211,8 +211,8 @@ TEST_CASE("turning the lobe up does not add energy, only move it")
 TEST_CASE("sample and eval agree on the far side")
 {
     const float3 wo = glm::normalize(make_float3(0.25f, -0.15f, 0.95f));
-    MaterialParams p = leaf_params(0.6f);
-    SurfaceInteraction si = make_si(p, wo);
+    const MaterialParams p = leaf_params(0.6f);
+    const SurfaceInteraction si = make_si(p, wo);
     Lcg rng(31337u);
 
     int checked = 0;
@@ -245,8 +245,8 @@ TEST_CASE("a back-face hit still scatters")
     // only thing that can answer, and returning nothing makes foliage opaque
     // from one side -- which reads as a shadowing bug, not a BSDF one.
     const float3 wo = glm::normalize(make_float3(0.2f, 0.1f, -0.97f)); // below the surface
-    MaterialParams p = leaf_params(0.8f);
-    SurfaceInteraction si = make_si(p, wo);
+    const MaterialParams p = leaf_params(0.8f);
+    const SurfaceInteraction si = make_si(p, wo);
     Lcg rng(99u);
 
     int scattered = 0;

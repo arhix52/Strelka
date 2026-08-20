@@ -49,7 +49,7 @@ DEVICE_FUNC float sheen_v_ashikhmin(float n_dot_l, float n_dot_v)
 
 DEVICE_FUNC float alpha_from_roughness(float roughness)
 {
-    float r = fmaxf(roughness, ROUGHNESS_MIN);
+    const float r = fmaxf(roughness, ROUGHNESS_MIN);
     return r * r;
 }
 
@@ -104,8 +104,8 @@ DEVICE_FUNC float3 ggx_energy_compensation(float3 F0, float roughness, float Ndo
 // ---------------------------------------------------------------------------
 DEVICE_FUNC float ggx_ndf(float alpha, float NdotH)
 {
-    float a2    = alpha * alpha;
-    float denom = NdotH * NdotH * (a2 - 1.0f) + 1.0f;
+    const float a2 = alpha * alpha;
+    const float denom = NdotH * NdotH * (a2 - 1.0f) + 1.0f;
     return a2 / (M_PI_F * denom * denom + 1e-10f);
 }
 
@@ -116,8 +116,8 @@ DEVICE_FUNC float ggx_ndf(float alpha, float NdotH)
 // ---------------------------------------------------------------------------
 DEVICE_FUNC float ggx_smith_g1(float alpha, float NdotV)
 {
-    float a2    = alpha * alpha;
-    float NdotV2 = NdotV * NdotV;
+    const float a2 = alpha * alpha;
+    const float NdotV2 = NdotV * NdotV;
     return 2.0f * NdotV / (NdotV + sqrtf(a2 + (1.0f - a2) * NdotV2) + 1e-10f);
 }
 
@@ -129,9 +129,9 @@ DEVICE_FUNC float ggx_smith_g1(float alpha, float NdotV)
 // ---------------------------------------------------------------------------
 DEVICE_FUNC float ggx_smith_g2(float alpha, float NdotV, float NdotL)
 {
-    float a2 = alpha * alpha;
-    float ggx_v = NdotL * sqrtf(a2 + (1.0f - a2) * NdotV * NdotV);
-    float ggx_l = NdotV * sqrtf(a2 + (1.0f - a2) * NdotL * NdotL);
+    const float a2 = alpha * alpha;
+    const float ggx_v = NdotL * sqrtf(a2 + (1.0f - a2) * NdotV * NdotV);
+    const float ggx_l = NdotV * sqrtf(a2 + (1.0f - a2) * NdotL * NdotL);
     return 2.0f * NdotV * NdotL / (ggx_v + ggx_l + 1e-10f);
 }
 
@@ -142,9 +142,9 @@ DEVICE_FUNC float ggx_smith_g2(float alpha, float NdotV, float NdotL)
 // ---------------------------------------------------------------------------
 DEVICE_FUNC float ggx_smith_visibility(float alpha, float NdotV, float NdotL)
 {
-    float a2 = alpha * alpha;
-    float ggx_v = NdotL * sqrtf(a2 + (1.0f - a2) * NdotV * NdotV);
-    float ggx_l = NdotV * sqrtf(a2 + (1.0f - a2) * NdotL * NdotL);
+    const float a2 = alpha * alpha;
+    const float ggx_v = NdotL * sqrtf(a2 + (1.0f - a2) * NdotV * NdotV);
+    const float ggx_l = NdotV * sqrtf(a2 + (1.0f - a2) * NdotL * NdotL);
     return 0.5f / (ggx_v + ggx_l + 1e-10f);
 }
 
@@ -160,33 +160,26 @@ DEVICE_FUNC float ggx_smith_visibility(float alpha, float NdotV, float NdotL)
 DEVICE_FUNC float3 ggx_vndf_sample(float3 wo_local, float alpha, float u1, float u2)
 {
     // 1. Stretch wo
-    float3 Vh = safe_normalize(make_float3(alpha * wo_local.x,
-                                           alpha * wo_local.y,
-                                           wo_local.z));
+    const float3 Vh = safe_normalize(make_float3(alpha * wo_local.x, alpha * wo_local.y, wo_local.z));
 
     // 2. Build orthonormal basis around Vh
-    float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
-    float3 T1 = lensq > 1e-7f
-        ? make_float3(-Vh.y, Vh.x, 0.0f) / sqrtf(lensq)
-        : make_float3(1.0f, 0.0f, 0.0f);
-    float3 T2 = cross(Vh, T1);
+    const float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    const float3 T1 = lensq > 1e-7f ? make_float3(-Vh.y, Vh.x, 0.0f) / sqrtf(lensq) : make_float3(1.0f, 0.0f, 0.0f);
+    const float3 T2 = cross(Vh, T1);
 
     // 3. Parameterize projected area (hemisphere cap)
-    float r   = sqrtf(u1);
-    float phi = 2.0f * M_PI_F * u2;
-    float t1  = r * cosf(phi);
+    const float r = sqrtf(u1);
+    const float phi = 2.0f * M_PI_F * u2;
+    const float t1 = r * cosf(phi);
     float t2  = r * sinf(phi);
-    float s   = 0.5f * (1.0f + Vh.z);
+    const float s = 0.5f * (1.0f + Vh.z);
     t2 = (1.0f - s) * sqrtf(fmaxf(0.0f, 1.0f - t1 * t1)) + s * t2;
 
     // 4. Reproject onto hemisphere
-    float3 Nh = t1 * T1 + t2 * T2
-              + sqrtf(fmaxf(0.0f, 1.0f - t1 * t1 - t2 * t2)) * Vh;
+    const float3 Nh = t1 * T1 + t2 * T2 + sqrtf(fmaxf(0.0f, 1.0f - t1 * t1 - t2 * t2)) * Vh;
 
     // 5. Unstretch
-    float3 H = safe_normalize(make_float3(alpha * Nh.x,
-                                          alpha * Nh.y,
-                                          fmaxf(0.0f, Nh.z)));
+    const float3 H = safe_normalize(make_float3(alpha * Nh.x, alpha * Nh.y, fmaxf(0.0f, Nh.z)));
     return H;
 }
 
@@ -203,8 +196,8 @@ DEVICE_FUNC float3 ggx_vndf_sample(float3 wo_local, float alpha, float u1, float
 // ---------------------------------------------------------------------------
 DEVICE_FUNC float ggx_vndf_pdf(float alpha, float NdotH, float NdotV, float VdotH)
 {
-    float D  = ggx_ndf(alpha, NdotH);
-    float G1 = ggx_smith_g1(alpha, NdotV);
+    const float D = ggx_ndf(alpha, NdotH);
+    const float G1 = ggx_smith_g1(alpha, NdotV);
     return D * G1 * fmaxf(VdotH, 0.0f) / (NdotV + 1e-10f) / (4.0f * VdotH + 1e-10f);
 }
 
@@ -270,11 +263,11 @@ DEVICE_FUNC float refraction_jacobian(float eta, float VdotH, float LdotH)
 DEVICE_FUNC void anisotropic_alpha(float roughness, float anisotropy,
                                    THREAD_REF float& alpha_x, THREAD_REF float& alpha_y)
 {
-    float r2 = roughness * roughness;
-    float a = anisotropy < 0.0f ? -anisotropy : anisotropy;
-    float aspect = sqrtf(1.0f - 0.9f * a);
-    float long_axis  = fmaxf(r2 / aspect, ROUGHNESS_MIN);
-    float short_axis = fmaxf(r2 * aspect, ROUGHNESS_MIN);
+    const float r2 = roughness * roughness;
+    const float a = anisotropy < 0.0f ? -anisotropy : anisotropy;
+    const float aspect = sqrtf(1.0f - 0.9f * a);
+    const float long_axis = fmaxf(r2 / aspect, ROUGHNESS_MIN);
+    const float short_axis = fmaxf(r2 * aspect, ROUGHNESS_MIN);
     alpha_x = anisotropy < 0.0f ? short_axis : long_axis;
     alpha_y = anisotropy < 0.0f ? long_axis : short_axis;
 }
@@ -311,21 +304,20 @@ DEVICE_FUNC float ggx_smith_g2_aniso(float ax, float ay, float3 V, float3 L)
 // Heitz 2018, with the stretch applied per axis instead of uniformly.
 DEVICE_FUNC float3 ggx_vndf_sample_aniso(float3 wo_local, float ax, float ay, float u1, float u2)
 {
-    float3 Vh = safe_normalize(make_float3(ax * wo_local.x, ay * wo_local.y, wo_local.z));
+    const float3 Vh = safe_normalize(make_float3(ax * wo_local.x, ay * wo_local.y, wo_local.z));
 
-    float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
-    float3 T1 = lensq > 1e-7f ? make_float3(-Vh.y, Vh.x, 0.0f) / sqrtf(lensq)
-                              : make_float3(1.0f, 0.0f, 0.0f);
-    float3 T2 = cross(Vh, T1);
+    const float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    const float3 T1 = lensq > 1e-7f ? make_float3(-Vh.y, Vh.x, 0.0f) / sqrtf(lensq) : make_float3(1.0f, 0.0f, 0.0f);
+    const float3 T2 = cross(Vh, T1);
 
-    float r   = sqrtf(u1);
-    float phi = 2.0f * M_PI_F * u2;
-    float t1  = r * cosf(phi);
+    const float r = sqrtf(u1);
+    const float phi = 2.0f * M_PI_F * u2;
+    const float t1 = r * cosf(phi);
     float t2  = r * sinf(phi);
-    float s   = 0.5f * (1.0f + Vh.z);
+    const float s = 0.5f * (1.0f + Vh.z);
     t2 = (1.0f - s) * sqrtf(fmaxf(0.0f, 1.0f - t1 * t1)) + s * t2;
 
-    float3 Nh = t1 * T1 + t2 * T2 + sqrtf(fmaxf(0.0f, 1.0f - t1 * t1 - t2 * t2)) * Vh;
+    const float3 Nh = t1 * T1 + t2 * T2 + sqrtf(fmaxf(0.0f, 1.0f - t1 * t1 - t2 * t2)) * Vh;
 
     return safe_normalize(make_float3(ax * Nh.x, ay * Nh.y, fmaxf(0.0f, Nh.z)));
 }

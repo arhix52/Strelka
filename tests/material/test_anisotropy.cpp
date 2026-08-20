@@ -240,7 +240,7 @@ TEST_CASE("bsdf_init carries anisotropy into the SurfaceInteraction")
     // The plumbing up to the BSDF boundary does work -- this one is green, and
     // it is what makes the failures below unambiguously a BxDF-side defect
     // rather than a lost parameter.
-    SurfaceInteraction si = make_aniso_si(0.25f, 1.0f, 0.9f);
+    const SurfaceInteraction si = make_aniso_si(0.25f, 1.0f, 0.9f);
     CHECK(si.anisotropy == doctest::Approx(0.9f));
 }
 
@@ -252,13 +252,13 @@ TEST_CASE("isotropic control: tangent and bitangent directions match at anisotro
     // exactly. GREEN today (trivially, since anisotropy is ignored), but it is
     // the control that stops a future anisotropy patch from perturbing
     // isotropic materials.
-    SurfaceInteraction si = make_aniso_si(0.25f, 1.0f, 0.0f);
+    const SurfaceInteraction si = make_aniso_si(0.25f, 1.0f, 0.0f);
 
     for (float theta : { 0.15f, 0.35f, 0.5f, 0.8f })
     {
         CAPTURE(theta);
-        BsdfEvalResult t = bsdf_eval(si, dir_along_tangent(si, theta));
-        BsdfEvalResult b = bsdf_eval(si, dir_along_bitangent(si, theta));
+        const BsdfEvalResult t = bsdf_eval(si, dir_along_tangent(si, theta));
+        const BsdfEvalResult b = bsdf_eval(si, dir_along_bitangent(si, theta));
 
         CHECK(luminance_of(t.bsdf) == doctest::Approx(luminance_of(b.bsdf)).epsilon(1e-4));
         CHECK(t.pdf == doctest::Approx(b.pdf).epsilon(1e-4));
@@ -271,14 +271,14 @@ TEST_CASE("RED: anisotropy 0.9 must split the specular lobe along tangent vs bit
     // control above. A tangent-frame GGX with alpha_x / alpha_y about 4.8:1
     // spreads energy along T and starves it along B, so off the specular peak
     // the two evaluations must differ by far more than noise.
-    SurfaceInteraction si = make_aniso_si(0.25f, 1.0f, 0.9f);
+    const SurfaceInteraction si = make_aniso_si(0.25f, 1.0f, 0.9f);
     REQUIRE(si.anisotropy == doctest::Approx(0.9f));
 
     for (float theta : { 0.35f, 0.5f, 0.8f })
     {
         CAPTURE(theta);
-        BsdfEvalResult t = bsdf_eval(si, dir_along_tangent(si, theta));
-        BsdfEvalResult b = bsdf_eval(si, dir_along_bitangent(si, theta));
+        const BsdfEvalResult t = bsdf_eval(si, dir_along_tangent(si, theta));
+        const BsdfEvalResult b = bsdf_eval(si, dir_along_bitangent(si, theta));
 
         const float lt = luminance_of(t.bsdf);
         const float lb = luminance_of(b.bsdf);
@@ -301,9 +301,9 @@ TEST_CASE("RED: the anisotropic sampling density must follow the anisotropic lob
     // distribution, not just the value of f. If only the NDF is made
     // anisotropic and ggx_vndf_pdf() is left isotropic, MIS weights and the
     // sample/eval consistency check in test_bsdf.cpp go quietly wrong.
-    SurfaceInteraction si = make_aniso_si(0.25f, 1.0f, 0.9f);
+    const SurfaceInteraction si = make_aniso_si(0.25f, 1.0f, 0.9f);
 
-    BsdfEvalResult t = bsdf_eval(si, dir_along_tangent(si, 0.5f));
+    const BsdfEvalResult t = bsdf_eval(si, dir_along_tangent(si, 0.5f));
     BsdfEvalResult b = bsdf_eval(si, dir_along_bitangent(si, 0.5f));
     REQUIRE(t.pdf > 0.0f);
     REQUIRE(b.pdf > 0.0f);
@@ -318,8 +318,8 @@ TEST_CASE("RED: flipping the sign of anisotropy must swap the two axes")
     // +a stretched along T should be the same lobe as -a stretched along B.
     // This pins the sign convention end to end, so the tangent frame cannot be
     // wired in transposed and still pass the magnitude test above.
-    SurfaceInteraction pos = make_aniso_si(0.25f, 1.0f, 0.8f);
-    SurfaceInteraction neg = make_aniso_si(0.25f, 1.0f, -0.8f);
+    const SurfaceInteraction pos = make_aniso_si(0.25f, 1.0f, 0.8f);
+    const SurfaceInteraction neg = make_aniso_si(0.25f, 1.0f, -0.8f);
 
     const float theta = 0.5f;
     const float pos_t = luminance_of(bsdf_eval(pos, dir_along_tangent(pos, theta)).bsdf);
@@ -343,7 +343,7 @@ TEST_CASE("RED: rotating the tangent frame must rotate the specular lobe with it
     // Swapping T and B is a 90-degree rotation of the frame about N; with
     // anisotropy held fixed, the value along the world direction +X has to
     // follow the frame.
-    SurfaceInteraction a = make_aniso_si(0.25f, 1.0f, 0.9f);
+    const SurfaceInteraction a = make_aniso_si(0.25f, 1.0f, 0.9f);
 
     SurfaceInteraction rotated = a;
     rotated.tangent = a.bitangent;

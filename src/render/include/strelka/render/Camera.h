@@ -74,13 +74,13 @@ public:
     void UVWFrame(glm::float3& U, glm::float3& V, glm::float3& W) const
     {
         W = m_lookat - m_eye; // Do not normalize W -- it implies focal length
-        float wlen = glm::length(W);
+        const float wlen = glm::length(W);
         U = glm::normalize(glm::cross(W, m_up));
         V = glm::normalize(glm::cross(U, W));
 
-        float vlen = wlen * tanf(glm::radians(0.5f * m_fovY));
+        const float vlen = wlen * tanf(glm::radians(0.5f * m_fovY));
         V *= vlen;
-        float ulen = vlen * m_aspectRatio;
+        const float ulen = vlen * m_aspectRatio;
         U *= ulen;
     }
 

@@ -222,7 +222,7 @@ TEST_CASE("ImGuizmo draws with editor call order (dockspace, manipulate from ano
         ImGuizmo::BeginFrame();
         ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
 
-        ImDrawList* viewportList = nullptr;
+        const ImDrawList* viewportList = nullptr;
         ImGui::Begin("Viewport");
         viewportList = ImGui::GetWindowDrawList();
         ImGui::InvisibleButton("##viewport", ImVec2(600, 400));
@@ -267,7 +267,7 @@ TEST_CASE("ImGuizmo draws nothing when the target is behind the camera")
     ImGuizmo::BeginFrame();
 
     ImGui::Begin("Viewport");
-    ImDrawList* viewportList = ImGui::GetWindowDrawList();
+    const ImDrawList* viewportList = ImGui::GetWindowDrawList();
     ImGuizmo::SetDrawlist();
     ImGuizmo::SetRect(0.0f, 0.0f, 1024.0f, 768.0f);
     ImGui::End();

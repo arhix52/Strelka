@@ -164,7 +164,7 @@ TEST_CASE("a degenerate reprojection reports no motion rather than a huge one")
     // w at or below zero is a point on or behind the previous camera's plane.
     // Dividing by it does not give a large motion vector, it gives a meaningless
     // one, and the denoiser would then fetch history from those coordinates.
-    for (float w : { 0.0f, -1.0f, 1e-9f })
+    for (const float w : { 0.0f, -1.0f, 1e-9f })
     {
         const auto m = guides::screenMotion(1000.0f, 1000.0f, w, 256.0f, 256.0f, 512, 512);
         CHECK(m.x == doctest::Approx(0.0f));

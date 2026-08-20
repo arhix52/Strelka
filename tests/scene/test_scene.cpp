@@ -23,7 +23,7 @@ static uint32_t addUnitTriangle(Scene& scene, const glm::mat4& xform, uint32_t m
     vb[0].pos = glm::float3(-1, -1, 0);
     vb[1].pos = glm::float3(1, -1, 0);
     vb[2].pos = glm::float3(0, 1, 0);
-    std::vector<uint32_t> ib = { 0, 1, 2 };
+    const std::vector<uint32_t> ib = { 0, 1, 2 };
     const uint32_t meshId = scene.createMesh(vb, ib);
     return scene.createInstance(Instance::Type::eMesh, meshId, matId, xform);
 }
@@ -111,7 +111,7 @@ TEST_CASE("createLight distant vs rect bake differently")
 TEST_CASE("Parent translate updates child instance world transform")
 {
     Scene scene;
-    Scene::MaterialDescription mat{};
+    const Scene::MaterialDescription mat{};
     scene.addMaterial(mat);
 
     Scene::Node parent{};
@@ -153,7 +153,7 @@ TEST_CASE("Parent translate updates child instance world transform")
 TEST_CASE("Deep hierarchy leaf world is product of locals")
 {
     Scene scene;
-    Scene::MaterialDescription mat{};
+    const Scene::MaterialDescription mat{};
     scene.addMaterial(mat);
 
     auto addNode = [&](int parent, const glm::float3& t) -> uint32_t {

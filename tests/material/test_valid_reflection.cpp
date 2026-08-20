@@ -201,10 +201,10 @@ TEST_CASE("the result is always finite and unit length")
 TEST_CASE("a corrected hit scatters instead of absorbing")
 {
     // What the user sees: the pixel is no longer black.
-    SurfaceInteraction si = corrected_hit(/*suppressDiffuse=*/true);
+    const SurfaceInteraction si = corrected_hit(/*suppressDiffuse=*/true);
     REQUIRE(dot(si.shading_normal, si.wo) > 0.0f);
 
-    BsdfSampleResult s = bsdf_sample(si, make_float4(0.4f, 0.6f, 0.3f, 0.2f));
+    const BsdfSampleResult s = bsdf_sample(si, make_float4(0.4f, 0.6f, 0.3f, 0.2f));
     CHECK(s.event_type != BSDF_EVENT_ABSORB);
     CHECK(s.pdf > 0.0f);
 }
@@ -214,8 +214,8 @@ TEST_CASE("the corrected hit is lit by its highlight, not by its whole surface")
     // The half of Cycles' answer that the ladder pays for. Correcting the normal
     // for the diffuse lobe as well lights the entire surface rather than only
     // the highlight, and took 06_normalmap from 1.061 to 1.091 against Cycles.
-    SurfaceInteraction lit = corrected_hit(/*suppressDiffuse=*/false);
-    SurfaceInteraction specularOnly = corrected_hit(/*suppressDiffuse=*/true);
+    const SurfaceInteraction lit = corrected_hit(/*suppressDiffuse=*/false);
+    const SurfaceInteraction specularOnly = corrected_hit(/*suppressDiffuse=*/true);
 
     const float3 wi = norm(0.2f, 1.0f, 0.0f);
     const BsdfEvalResult a = bsdf_eval(lit, wi);

@@ -116,10 +116,10 @@ TEST_CASE("iridescence: factor 0 changes nothing")
     const MaterialParams bare = bubble_params(0.0f, 400.0f);
     const MaterialParams zeroed = bubble_params(0.0f, 900.0f); // thickness set, weight not
 
-    for (float deg : { 10.0f, 45.0f, 80.0f })
+    for (const float deg : { 10.0f, 45.0f, 80.0f })
     {
-        SurfaceInteraction a = make_si(bare, dir_at(deg));
-        SurfaceInteraction b = make_si(zeroed, dir_at(deg));
+        const SurfaceInteraction a = make_si(bare, dir_at(deg));
+        const SurfaceInteraction b = make_si(zeroed, dir_at(deg));
         const float3 wi = dir_at(-deg);
         const BsdfEvalResult ea = bsdf_eval(a, wi);
         const BsdfEvalResult eb = bsdf_eval(b, wi);
@@ -186,7 +186,7 @@ TEST_CASE("iridescence: the reflectance stays a reflectance")
     for (int i = 0; i <= 20; ++i)
     {
         const float cosTheta = 0.02f + 0.98f * (float)i / 20.0f;
-        for (float thickness : { 100.0f, 300.0f, 550.0f, 800.0f, 1200.0f })
+        for (const float thickness : { 100.0f, 300.0f, 550.0f, 800.0f, 1200.0f })
         {
             const float3 f = iridescence_fresnel(1.0f, 1.4f, cosTheta, thickness, greyF0);
             CHECK(f.x >= 0.0f);
@@ -202,9 +202,9 @@ TEST_CASE("iridescence: the reflectance stays a reflectance")
 TEST_CASE("iridescence: sample and eval agree")
 {
     const MaterialParams bubble = bubble_params(1.0f, 400.0f);
-    for (float deg : { 20.0f, 60.0f })
+    for (const float deg : { 20.0f, 60.0f })
     {
-        SurfaceInteraction si = make_si(bubble, dir_at(deg));
+        const SurfaceInteraction si = make_si(bubble, dir_at(deg));
         Lcg rng(0x121Du + static_cast<std::uint32_t>(deg));
         int checked = 0;
         for (int i = 0; i < 600 && checked < 60; ++i)

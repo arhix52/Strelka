@@ -217,7 +217,7 @@ std::unique_ptr<BoundSkin> makeBoundSkin()
     auto fixture = std::make_unique<BoundSkin>();
     Scene& scene = fixture->scene;
 
-    Scene::MaterialDescription mat{};
+    const Scene::MaterialDescription mat{};
     const uint32_t matId = scene.addMaterial(mat);
 
     const glm::float3 positions[4] = { { -1, -1, 0 }, { 1, -1, 0 }, { 1, 1, 0 }, { -1, 1, 0 } };
@@ -427,7 +427,7 @@ TEST_CASE("Skinned bounds on a real asset stay glued to the animated pose")
 TEST_CASE("Rigid mesh bounds are the plain vertex extent")
 {
     Scene scene;
-    Scene::MaterialDescription mat{};
+    const Scene::MaterialDescription mat{};
     const uint32_t matId = scene.addMaterial(mat);
 
     std::vector<Scene::Vertex> vb(3);

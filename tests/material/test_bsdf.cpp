@@ -60,7 +60,7 @@ static MaterialParams make_diffuse_params()
 
 TEST_CASE("make_float3 constructs correctly")
 {
-    float3 v = make_float3(1.0f, 2.0f, 3.0f);
+    const float3 v = make_float3(1.0f, 2.0f, 3.0f);
     CHECK(v.x == doctest::Approx(1.0f));
     CHECK(v.y == doctest::Approx(2.0f));
     CHECK(v.z == doctest::Approx(3.0f));
@@ -68,9 +68,9 @@ TEST_CASE("make_float3 constructs correctly")
 
 TEST_CASE("reflect_dir gives correct reflection")
 {
-    float3 incident = make_float3(1, -1, 0);
-    float3 normal = make_float3(0, 1, 0);
-    float3 r = reflect_dir(incident, normal);
+    const float3 incident = make_float3(1, -1, 0);
+    const float3 normal = make_float3(0, 1, 0);
+    const float3 r = reflect_dir(incident, normal);
     CHECK(r.x == doctest::Approx(1.0f));
     CHECK(r.y == doctest::Approx(1.0f));
     CHECK(r.z == doctest::Approx(0.0f));
@@ -80,8 +80,8 @@ TEST_CASE("reflect_dir gives correct reflection")
 
 TEST_CASE("fresnel_schlick at normal incidence returns F0")
 {
-    float3 F0 = make_float3(0.04f);
-    float3 F = fresnel_schlick(F0, 1.0f);
+    const float3 F0 = make_float3(0.04f);
+    const float3 F = fresnel_schlick(F0, 1.0f);
     CHECK(F.x == doctest::Approx(0.04f));
     CHECK(F.y == doctest::Approx(0.04f));
     CHECK(F.z == doctest::Approx(0.04f));
@@ -89,8 +89,8 @@ TEST_CASE("fresnel_schlick at normal incidence returns F0")
 
 TEST_CASE("fresnel_schlick at grazing angle approaches 1")
 {
-    float3 F0 = make_float3(0.04f);
-    float3 F = fresnel_schlick(F0, 0.0f);
+    const float3 F0 = make_float3(0.04f);
+    const float3 F = fresnel_schlick(F0, 0.0f);
     CHECK(F.x == doctest::Approx(1.0f));
 }
 
@@ -98,7 +98,7 @@ TEST_CASE("fresnel_dielectric total internal reflection")
 {
     // Going from glass (ior=1.5) to air (eta = 1.5)
     // At angle > critical angle, should get TIR
-    float F = fresnel_dielectric(0.1f, 1.5f);
+    const float F = fresnel_dielectric(0.1f, 1.5f);
     CHECK(F == doctest::Approx(1.0f));
 }
 
@@ -106,17 +106,17 @@ TEST_CASE("fresnel_dielectric total internal reflection")
 
 TEST_CASE("cosine_hemisphere_sample produces valid directions")
 {
-    float3 dir = cosine_hemisphere_sample(0.5f, 0.5f);
+    const float3 dir = cosine_hemisphere_sample(0.5f, 0.5f);
     // z should be positive (upper hemisphere)
     CHECK(dir.z >= 0.0f);
     // should be approximately unit length
-    float len = glm::length(dir);
+    const float len = glm::length(dir);
     CHECK(len == doctest::Approx(1.0f).epsilon(0.01f));
 }
 
 TEST_CASE("cosine_hemisphere_pdf is positive for positive cos_theta")
 {
-    float pdf = cosine_hemisphere_pdf(0.5f);
+    const float pdf = cosine_hemisphere_pdf(0.5f);
     CHECK(pdf > 0.0f);
     CHECK(pdf == doctest::Approx(0.5f * M_1_PI_F));
 }
@@ -125,9 +125,9 @@ TEST_CASE("cosine_hemisphere_pdf is positive for positive cos_theta")
 
 TEST_CASE("ggx_ndf peaks at normal direction")
 {
-    float alpha = 0.5f;
-    float NdotH = 1.0f; // half-vector aligned with normal
-    float D = ggx_ndf(alpha, NdotH);
+    const float alpha = 0.5f;
+    const float NdotH = 1.0f; // half-vector aligned with normal
+    const float D = ggx_ndf(alpha, NdotH);
     CHECK(D > 0.0f);
 }
 
@@ -135,11 +135,11 @@ TEST_CASE("ggx_ndf peaks at normal direction")
 
 TEST_CASE("diffuse_sample produces valid result")
 {
-    MaterialParams p = make_diffuse_params();
+    const MaterialParams p = make_diffuse_params();
     SurfaceInteraction si = make_test_si();
     bsdf_init(si, p, nullptr);
 
-    BsdfSampleResult r = diffuse_sample(si, 0.5f, 0.5f);
+    const BsdfSampleResult r = diffuse_sample(si, 0.5f, 0.5f);
 
     CHECK(r.pdf > 0.0f);
     CHECK((r.event_type & BSDF_EVENT_DIFFUSE) != 0);
@@ -150,23 +150,23 @@ TEST_CASE("diffuse_sample produces valid result")
 
 TEST_CASE("diffuse_eval returns zero for directions below surface")
 {
-    MaterialParams p = make_diffuse_params();
+    const MaterialParams p = make_diffuse_params();
     SurfaceInteraction si = make_test_si();
     bsdf_init(si, p, nullptr);
-    float3 wi = make_float3(0, -1, 0); // below surface
+    const float3 wi = make_float3(0, -1, 0); // below surface
 
-    BsdfEvalResult r = diffuse_eval(si, wi);
+    const BsdfEvalResult r = diffuse_eval(si, wi);
     CHECK(r.pdf == doctest::Approx(0.0f));
 }
 
 TEST_CASE("diffuse_eval returns positive for directions above surface")
 {
-    MaterialParams p = make_diffuse_params();
+    const MaterialParams p = make_diffuse_params();
     SurfaceInteraction si = make_test_si();
     bsdf_init(si, p, nullptr);
-    float3 wi = make_float3(0, 1, 0); // above surface
+    const float3 wi = make_float3(0, 1, 0); // above surface
 
-    BsdfEvalResult r = diffuse_eval(si, wi);
+    const BsdfEvalResult r = diffuse_eval(si, wi);
     CHECK(r.pdf > 0.0f);
     CHECK(r.bsdf.x > 0.0f);
 }
@@ -188,12 +188,12 @@ TEST_CASE("bsdf_init resolves material parameters")
 
 TEST_CASE("bsdf_sample dispatches to correct lobe")
 {
-    MaterialParams p = make_diffuse_params();
+    const MaterialParams p = make_diffuse_params();
     SurfaceInteraction si = make_test_si();
     bsdf_init(si, p, nullptr);
 
-    float4 xi = make_float4(0.3f, 0.7f, 0.5f, 0.5f);
-    BsdfSampleResult r = bsdf_sample(si, xi);
+    const float4 xi = make_float4(0.3f, 0.7f, 0.5f, 0.5f);
+    const BsdfSampleResult r = bsdf_sample(si, xi);
 
     CHECK((r.event_type & BSDF_EVENT_DIFFUSE) != 0);
 }
@@ -243,8 +243,8 @@ TEST_CASE("conductor_sample produces reflection")
     SurfaceInteraction si = make_test_si();
     bsdf_init(si, p, nullptr);
 
-    float4 xi = make_float4(0.5f, 0.5f, 0.5f, 0.5f);
-    BsdfSampleResult r = bsdf_sample(si, xi);
+    const float4 xi = make_float4(0.5f, 0.5f, 0.5f, 0.5f);
+    const BsdfSampleResult r = bsdf_sample(si, xi);
 
     if (r.event_type != BSDF_EVENT_ABSORB)
     {
@@ -275,8 +275,8 @@ TEST_CASE("standard_pbr_sample produces valid result")
     SurfaceInteraction si = make_test_si();
     bsdf_init(si, p, nullptr);
 
-    float4 xi = make_float4(0.3f, 0.7f, 0.2f, 0.1f);
-    BsdfSampleResult r = bsdf_sample(si, xi);
+    const float4 xi = make_float4(0.3f, 0.7f, 0.2f, 0.1f);
+    const BsdfSampleResult r = bsdf_sample(si, xi);
 
     CHECK(r.event_type != BSDF_EVENT_ABSORB);
     CHECK(r.pdf > 0.0f);
@@ -302,8 +302,8 @@ TEST_CASE("standard_pbr_eval returns positive for valid directions")
     SurfaceInteraction si = make_test_si();
     bsdf_init(si, p, nullptr);
 
-    float3 wi = glm::normalize(make_float3(0.3f, 1.0f, 0.2f));
-    BsdfEvalResult r = bsdf_eval(si, wi);
+    const float3 wi = glm::normalize(make_float3(0.3f, 1.0f, 0.2f));
+    const BsdfEvalResult r = bsdf_eval(si, wi);
 
     CHECK(r.pdf > 0.0f);
 }
@@ -312,17 +312,17 @@ TEST_CASE("standard_pbr_eval returns positive for valid directions")
 
 TEST_CASE("diffuse bsdf_over_pdf bounded")
 {
-    MaterialParams p = make_diffuse_params();
+    const MaterialParams p = make_diffuse_params();
     SurfaceInteraction si = make_test_si();
     bsdf_init(si, p, nullptr);
 
     // Sample many directions and check throughput doesn't explode
     for (int i = 0; i < 100; ++i)
     {
-        float u1 = (float)i / 100.0f;
-        float u2 = (float)(i * 7 % 100) / 100.0f;
-        float4 xi = make_float4(u1, u2, 0.5f, 0.5f);
-        BsdfSampleResult r = bsdf_sample(si, xi);
+        const float u1 = (float)i / 100.0f;
+        const float u2 = (float)(i * 7 % 100) / 100.0f;
+        const float4 xi = make_float4(u1, u2, 0.5f, 0.5f);
+        const BsdfSampleResult r = bsdf_sample(si, xi);
 
         if (r.event_type != BSDF_EVENT_ABSORB)
         {
@@ -390,20 +390,20 @@ TEST_CASE("bsdf_eval reports the density bsdf_sample draws from")
             {
                 for (float tilt : { 0.1f, 0.7f, 1.2f })
                 {
-                    SurfaceInteraction si = si_with(type, roughness, metallic, 0.0f, 0.0f, tilt);
+                    const SurfaceInteraction si = si_with(type, roughness, metallic, 0.0f, 0.0f, tilt);
                     int compared = 0;
                     double worstPdf = 0.0, worstF = 0.0;
                     for (int i = 0; i < 4000; ++i)
                     {
                         const float4 xi =
                             make_float4(rng.next(), rng.next(), rng.next(), rng.next());
-                        BsdfSampleResult s = bsdf_sample(si, xi);
+                        const BsdfSampleResult s = bsdf_sample(si, xi);
                         if (s.event_type == BSDF_EVENT_ABSORB ||
                             (s.event_type & BSDF_EVENT_SPECULAR) != 0 || s.pdf <= 1e-4f)
                         {
                             continue; // delta lobes have no density to compare
                         }
-                        BsdfEvalResult e = bsdf_eval(si, s.wi);
+                        const BsdfEvalResult e = bsdf_eval(si, s.wi);
                         if (e.pdf <= 1e-4f)
                         {
                             continue;

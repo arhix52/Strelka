@@ -80,7 +80,7 @@ bool MetalScenePreparation::step(SceneBuildHooks& hooks, Buffer* output)
 
     if (ran != BuildStage::Done)
     {
-        static const char* kStageNames[] = { "buffers",    "environment",       "material params",
+        static const char* const kStageNames[] = { "buffers",    "environment",       "material params",
                                              "structures", "material textures", "tail" };
         STRELKA_DEBUG("Scene build stage '{}' took {:.0f} ms", kStageNames[(uint32_t)ran],
                       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());

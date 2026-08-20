@@ -514,7 +514,7 @@ void MetalTextures::generateMips()
     MTL::CommandBuffer* cb = mQueue->commandBuffer();
     cb->retain();
     MTL::BlitCommandEncoder* blit = cb->blitCommandEncoder();
-    for (MTL::Texture* t : mTexturesNeedingMips)
+    for (const MTL::Texture* t : mTexturesNeedingMips)
         blit->generateMipmaps(t);
     blit->endEncoding();
     cb->commit();

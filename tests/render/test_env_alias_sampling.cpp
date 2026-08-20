@@ -205,7 +205,7 @@ TEST_CASE("a variate at the top of the range stays in the table")
     const uint32_t n = (uint32_t)table.size();
 
     // 1 - 2^-24 is the largest float below one, and n * it rounds to n.
-    for (float xi : { 0.0f, 0.99999994f, 1.0f })
+    for (const float xi : { 0.0f, 0.99999994f, 1.0f })
     {
         const EnvAliasDraw d = envAliasDraw(table.data(), n, xi);
         CHECK(d.texel < n);

@@ -23,21 +23,21 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
 {
     BsdfSampleResult result;
 
-    float3 N = si.shading_normal;
-    float3 V = si.wo;
+    const float3 N = si.shading_normal;
+    const float3 V = si.wo;
 
-    float NdotV = dot(N, V);
-    bool entering = NdotV > 0.0f;
+    const float NdotV = dot(N, V);
+    const bool entering = NdotV > 0.0f;
 
     // Flip normal to face the incoming ray
-    float3 Nf = entering ? N : -N;
-    float NdotV_abs = fabsf(NdotV);
+    const float3 Nf = entering ? N : -N;
+    const float NdotV_abs = fabsf(NdotV);
 
     // IOR ratio: exterior / interior (supports nested dielectrics via exterior_ior)
-    float eta = entering ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
+    const float eta = entering ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
 
-    float alpha = alpha_from_roughness(si.roughness);
-    bool is_smooth = (alpha < BSDF_DELTA_ALPHA);
+    const float alpha = alpha_from_roughness(si.roughness);
+    const bool is_smooth = (alpha < BSDF_DELTA_ALPHA);
 
     // -- Sample microfacet half-vector (or use normal for smooth case) ------
     float3 H;
@@ -49,12 +49,12 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
     {
         float3 T, B;
         build_onb(Nf, T, B);
-        float3 V_local = world_to_local(V, T, B, Nf);
-        float3 H_local = ggx_vndf_sample(V_local, alpha, u1, u2);
+        const float3 V_local = world_to_local(V, T, B, Nf);
+        const float3 H_local = ggx_vndf_sample(V_local, alpha, u1, u2);
         H = local_to_world(H_local, T, B, Nf);
     }
 
-    float VdotH = dot(V, H);
+    const float VdotH = dot(V, H);
     if (VdotH <= 0.0f)
     {
         result.bsdf_over_pdf = make_float3(0.0f);
@@ -64,17 +64,17 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
     }
 
     // -- Fresnel ------------------------------------------------------------
-    float F = fresnel_dielectric(VdotH, eta);
+    const float F = fresnel_dielectric(VdotH, eta);
 
     // -- Choose reflection or refraction ------------------------------------
-    bool do_reflect = (u3 < F);
+    const bool do_reflect = (u3 < F);
 
     if (do_reflect)
     {
         // Reflection
         result.wi = reflect_dir(-V, H);
 
-        float NdotL = dot(Nf, result.wi);
+        const float NdotL = dot(Nf, result.wi);
         if (NdotL <= 0.0f)
         {
             result.bsdf_over_pdf = make_float3(0.0f);
@@ -92,9 +92,9 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
         }
         else
         {
-            float NdotH = dot(Nf, H);
-            float G2    = ggx_smith_g2(alpha, NdotV_abs, NdotL);
-            float G1    = ggx_smith_g1(alpha, NdotV_abs);
+            const float NdotH = dot(Nf, H);
+            const float G2 = ggx_smith_g2(alpha, NdotV_abs, NdotL);
+            const float G1 = ggx_smith_g1(alpha, NdotV_abs);
 
             result.bsdf_over_pdf = si.albedo * (G2 / (G1 + 1e-10f));
             result.pdf           = F * ggx_vndf_pdf(alpha, NdotH, NdotV_abs, VdotH);
@@ -105,7 +105,7 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
     {
         // Refraction
         float3 wi_refracted;
-        bool valid = refract_dir(-V, H, eta, wi_refracted);
+        const bool valid = refract_dir(-V, H, eta, wi_refracted);
         if (!valid)
         {
             // Total internal reflection fallback -- should be rare if F is correct
@@ -127,7 +127,7 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
             result.wi = safe_normalize(result.wi);
         }
 
-        float NdotL = fabsf(dot(Nf, result.wi));
+        const float NdotL = fabsf(dot(Nf, result.wi));
         if (NdotL <= 0.0f && !si.thin_walled)
         {
             // Check that refracted ray is on the other side
@@ -137,19 +137,19 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
         if (is_smooth)
         {
             // The non-symmetry correction factor eta^2 for BTDF importance sampling
-            float factor = si.thin_walled ? 1.0f : (eta * eta);
+            const float factor = si.thin_walled ? 1.0f : (eta * eta);
             result.bsdf_over_pdf = si.albedo * factor;
             result.pdf           = (1.0f - F); // discrete
             result.event_type    = BSDF_EVENT_SPECULAR_TRANSMISSION;
         }
         else
         {
-            float NdotH  = fabsf(dot(Nf, H));
-            float LdotH  = dot(result.wi, H);
-            float G2     = ggx_smith_g2(alpha, NdotV_abs, fmaxf(NdotL, 0.001f));
-            float G1     = ggx_smith_g1(alpha, NdotV_abs);
+            const float NdotH = fabsf(dot(Nf, H));
+            const float LdotH = dot(result.wi, H);
+            const float G2 = ggx_smith_g2(alpha, NdotV_abs, fmaxf(NdotL, 0.001f));
+            const float G1 = ggx_smith_g1(alpha, NdotV_abs);
 
-            float factor = si.thin_walled ? 1.0f : (eta * eta);
+            const float factor = si.thin_walled ? 1.0f : (eta * eta);
             result.bsdf_over_pdf = si.albedo * factor * (G2 / (G1 + 1e-10f));
 
             // The half vector this direction was bent around, and the density
@@ -160,8 +160,8 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
             // rather than the signed sum Walter et al. 2007 eq. 17 wants.
             // dielectric_eval() applies the same pair, which is what makes this
             // direction have one density rather than two.
-            float dwh_dwi = refraction_jacobian(eta, VdotH, LdotH);
-            float pdf_h = ggx_vndf_pdf_half(alpha, NdotH, NdotV_abs, VdotH);
+            const float dwh_dwi = refraction_jacobian(eta, VdotH, LdotH);
+            const float pdf_h = ggx_vndf_pdf_half(alpha, NdotH, NdotV_abs, VdotH);
             result.pdf = (1.0f - F) * pdf_h * dwh_dwi;
             result.event_type = BSDF_EVENT_GLOSSY_TRANSMISSION;
         }
@@ -180,36 +180,36 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& 
     result.bsdf = make_float3(0.0f);
     result.pdf  = 0.0f;
 
-    float alpha = alpha_from_roughness(si.roughness);
+    const float alpha = alpha_from_roughness(si.roughness);
     if (alpha < BSDF_DELTA_ALPHA)
         return result; // Delta distribution -- cannot evaluate
 
-    float3 N = si.shading_normal;
-    float3 V = si.wo;
+    const float3 N = si.shading_normal;
+    const float3 V = si.wo;
 
-    float NdotV = dot(N, V);
-    float NdotL = dot(N, wi);
-    bool entering   = NdotV > 0.0f;
-    float3 Nf       = entering ? N : -N;
-    float NdotV_abs = fabsf(NdotV);
-    float eta       = entering ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
+    const float NdotV = dot(N, V);
+    const float NdotL = dot(N, wi);
+    const bool entering = NdotV > 0.0f;
+    const float3 Nf = entering ? N : -N;
+    const float NdotV_abs = fabsf(NdotV);
+    const float eta = entering ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
 
-    bool is_reflection = (NdotL * NdotV > 0.0f); // same hemisphere
+    const bool is_reflection = (NdotL * NdotV > 0.0f); // same hemisphere
 
     if (is_reflection)
     {
         // Reflection lobe
-        float NdotL_abs = fabsf(NdotL);
-        float3 H     = safe_normalize(V + wi);
-        float NdotH  = dot(Nf, H);
-        float VdotH  = dot(V, H);
+        const float NdotL_abs = fabsf(NdotL);
+        const float3 H = safe_normalize(V + wi);
+        const float NdotH = dot(Nf, H);
+        const float VdotH = dot(V, H);
 
         if (NdotH <= 0.0f || VdotH <= 0.0f)
             return result;
 
-        float F  = fresnel_dielectric(VdotH, eta);
-        float D  = ggx_ndf(alpha, NdotH);
-        float G2 = ggx_smith_g2(alpha, NdotV_abs, NdotL_abs);
+        const float F = fresnel_dielectric(VdotH, eta);
+        const float D = ggx_ndf(alpha, NdotH);
+        const float G2 = ggx_smith_g2(alpha, NdotV_abs, NdotL_abs);
 
         result.bsdf = si.albedo * (F * D * G2 / (4.0f * NdotV_abs * NdotL_abs + 1e-10f));
         result.pdf  = F * ggx_vndf_pdf(alpha, NdotH, NdotV_abs, VdotH);
@@ -217,31 +217,31 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& 
     else
     {
         // Transmission lobe
-        float NdotL_abs = fabsf(NdotL);
+        const float NdotL_abs = fabsf(NdotL);
 
         // eta_i * V + eta_t * wi, normalised, oriented to Nf's side -- see
         // refraction_half_vector().
-        float3 H = refraction_half_vector(V, wi, eta, Nf);
+        const float3 H = refraction_half_vector(V, wi, eta, Nf);
 
-        float NdotH = dot(Nf, H);
-        float VdotH = dot(V, H);
-        float LdotH = dot(wi, H);
+        const float NdotH = dot(Nf, H);
+        const float VdotH = dot(V, H);
+        const float LdotH = dot(wi, H);
 
         if (NdotH <= 0.0f || VdotH <= 0.0f)
             return result;
 
-        float F  = fresnel_dielectric(VdotH, eta);
-        float D  = ggx_ndf(alpha, NdotH);
-        float G2 = ggx_smith_g2(alpha, NdotV_abs, NdotL_abs);
+        const float F = fresnel_dielectric(VdotH, eta);
+        const float D = ggx_ndf(alpha, NdotH);
+        const float G2 = ggx_smith_g2(alpha, NdotV_abs, NdotL_abs);
 
-        float denom   = (eta * VdotH + LdotH);
-        float factor  = fabsf(VdotH * LdotH) / (NdotV_abs * NdotL_abs + 1e-10f);
-        float btdf    = (1.0f - F) * D * G2 * eta * eta * factor / (denom * denom + 1e-10f);
+        const float denom = (eta * VdotH + LdotH);
+        const float factor = fabsf(VdotH * LdotH) / (NdotV_abs * NdotL_abs + 1e-10f);
+        const float btdf = (1.0f - F) * D * G2 * eta * eta * factor / (denom * denom + 1e-10f);
         result.bsdf   = si.albedo * fmaxf(btdf, 0.0f);
 
         // The same pair dielectric_sample() applies; see the note there.
-        float dwh_dwi = refraction_jacobian(eta, VdotH, LdotH);
-        float pdf_h   = ggx_vndf_pdf_half(alpha, NdotH, NdotV_abs, VdotH);
+        const float dwh_dwi = refraction_jacobian(eta, VdotH, LdotH);
+        const float pdf_h = ggx_vndf_pdf_half(alpha, NdotH, NdotV_abs, VdotH);
         result.pdf    = (1.0f - F) * pdf_h * dwh_dwi;
     }
 
@@ -253,7 +253,7 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& 
 // ---------------------------------------------------------------------------
 DEVICE_FUNC float dielectric_pdf(const THREAD_REF SurfaceInteraction& si, float3 wi)
 {
-    BsdfEvalResult r = dielectric_eval(si, wi);
+    const BsdfEvalResult r = dielectric_eval(si, wi);
     return r.pdf;
 }
 

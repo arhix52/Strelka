@@ -203,9 +203,9 @@ TEST_CASE("a degenerate profile is packed empty rather than dropped")
 
 TEST_CASE("the float blob starts immediately after the profile headers")
 {
-    for (size_t n : { size_t(0), size_t(1), size_t(2), size_t(7) })
+    for (const size_t n : { size_t(0), size_t(1), size_t(2), size_t(7) })
     {
-        std::vector<Profile> profiles(n, grid(3, 1, 1.0f));
+        const std::vector<Profile> profiles(n, grid(3, 1, 1.0f));
         const std::vector<uint8_t> bytes = packProfiles(profiles);
         const Reader r{ bytes.data() };
         CHECK(r.buffer().floatOffset == floatBlobOffset(n));

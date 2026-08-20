@@ -25,7 +25,7 @@ uint32_t addQuad(Scene& scene, const glm::float3& center, float halfSize)
     vb[1].pos = glm::float3(halfSize, -halfSize, 0.0f);
     vb[2].pos = glm::float3(halfSize, halfSize, 0.0f);
     vb[3].pos = glm::float3(-halfSize, halfSize, 0.0f);
-    std::vector<uint32_t> ib = { 0, 1, 2, 0, 2, 3 };
+    const std::vector<uint32_t> ib = { 0, 1, 2, 0, 2, 3 };
     const uint32_t meshId = scene.createMesh(vb, ib);
     return scene.createInstance(Instance::Type::eMesh, meshId, 0, glm::translate(glm::mat4(1.0f), center));
 }

@@ -309,13 +309,13 @@ TEST_CASE("bsdf_sample and bsdf_eval describe the same BRDF (opaque materials)")
                                    MATERIAL_TYPE_STANDARD_PBR };
 
     std::uint32_t seed = 0x9E3779B9u;
-    for (unsigned int type : types)
+    for (const unsigned int type : types)
     {
-        for (float roughness : kRoughnessGrid)
+        for (const float roughness : kRoughnessGrid)
         {
-            for (float metallic : { 0.0f, 0.5f, 1.0f })
+            for (const float metallic : { 0.0f, 0.5f, 1.0f })
             {
-                for (float tilt : kViewTiltGrid)
+                for (const float tilt : kViewTiltGrid)
                 {
                     GridPoint g;
                     g.materialType = type;
@@ -342,11 +342,11 @@ TEST_CASE("bsdf_sample and bsdf_eval describe the same BRDF (opaque materials)")
 TEST_CASE("bsdf_sample and bsdf_eval describe the same BRDF (clearcoat layer)")
 {
     std::uint32_t seed = 0x85EBCA6Bu;
-    for (float roughness : kRoughnessGrid)
+    for (const float roughness : kRoughnessGrid)
     {
-        for (float metallic : { 0.0f, 1.0f })
+        for (const float metallic : { 0.0f, 1.0f })
         {
-            for (float tilt : kViewTiltGrid)
+            for (const float tilt : kViewTiltGrid)
             {
                 GridPoint g;
                 g.materialType      = MATERIAL_TYPE_STANDARD_PBR;
@@ -389,9 +389,9 @@ TEST_CASE("bsdf_sample and bsdf_eval describe the same BRDF (clearcoat layer)")
 TEST_CASE("bsdf_sample and bsdf_eval describe the same BRDF (dielectric, both lobes)")
 {
     std::uint32_t seed = 0xC2B2AE35u;
-    for (float roughness : kRoughnessGrid)
+    for (const float roughness : kRoughnessGrid)
     {
-        for (float tilt : kViewTiltGrid)
+        for (const float tilt : kViewTiltGrid)
         {
             GridPoint g;
             g.materialType = MATERIAL_TYPE_DIELECTRIC;
@@ -432,11 +432,11 @@ TEST_CASE("bsdf_sample and bsdf_eval describe the same BRDF (dielectric, both lo
 TEST_CASE("bsdf_sample and bsdf_eval describe the same BRDF (transmissive standard_pbr)")
 {
     std::uint32_t seed = 0x165667B1u;
-    for (float transmission : { 0.25f, 0.5f, 0.75f, 1.0f })
+    for (const float transmission : { 0.25f, 0.5f, 0.75f, 1.0f })
     {
-        for (float roughness : kRoughnessGrid)
+        for (const float roughness : kRoughnessGrid)
         {
-            for (float tilt : kViewTiltGrid)
+            for (const float tilt : kViewTiltGrid)
             {
                 GridPoint g;
                 g.materialType = MATERIAL_TYPE_STANDARD_PBR;

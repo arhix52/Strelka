@@ -43,13 +43,13 @@ bool MetalFxContext::ensureSpatialScaler(MTL::Device* device,
 
     @autoreleasepool
     {
-        id<MTLDevice> nativeDevice = (__bridge id<MTLDevice>)device;
+        const id<MTLDevice> nativeDevice = (__bridge id<MTLDevice>)device;
         if (!nativeDevice || inputWidth == 0 || inputHeight == 0)
         {
             return false;
         }
 
-        MTLFXSpatialScalerDescriptor* desc = [MTLFXSpatialScalerDescriptor new];
+        MTLFXSpatialScalerDescriptor* const desc = [MTLFXSpatialScalerDescriptor new];
         desc.colorTextureFormat = (MTLPixelFormat)colorFormat;
         desc.outputTextureFormat = (MTLPixelFormat)outputFormat;
         desc.inputWidth = inputWidth;
@@ -58,7 +58,7 @@ bool MetalFxContext::ensureSpatialScaler(MTL::Device* device,
         desc.outputHeight = outputHeight;
         desc.colorProcessingMode = toNative(colorMode);
 
-        id<MTLFXSpatialScaler> scaler = [desc newSpatialScalerWithDevice:nativeDevice];
+        const id<MTLFXSpatialScaler> scaler = [desc newSpatialScalerWithDevice:nativeDevice];
         if (!scaler)
         {
             STRELKA_ERROR("MetalFX spatial scaler unavailable for {}x{} -> {}x{}", inputWidth, inputHeight,
@@ -69,7 +69,7 @@ bool MetalFxContext::ensureSpatialScaler(MTL::Device* device,
 
         if (metal4Compiler)
         {
-            id<MTL4FXSpatialScaler> scaler4 =
+            const id<MTL4FXSpatialScaler> scaler4 =
                 [desc newSpatialScalerWithDevice:nativeDevice
                                         compiler:(__bridge id<MTL4Compiler>)metal4Compiler];
             if (scaler4)
@@ -101,7 +101,7 @@ MTL::TextureUsage MetalFxContext::requiredColorUsage() const
     {
         return MTL::TextureUsageShaderRead;
     }
-    id<MTLFXSpatialScaler> scaler = (__bridge id<MTLFXSpatialScaler>)mSpatialScaler;
+    const id<MTLFXSpatialScaler> scaler = (__bridge id<MTLFXSpatialScaler>)mSpatialScaler;
     return (MTL::TextureUsage)scaler.colorTextureUsage;
 }
 
@@ -111,7 +111,7 @@ MTL::TextureUsage MetalFxContext::requiredOutputUsage() const
     {
         return MTL::TextureUsageShaderWrite;
     }
-    id<MTLFXSpatialScaler> scaler = (__bridge id<MTLFXSpatialScaler>)mSpatialScaler;
+    const id<MTLFXSpatialScaler> scaler = (__bridge id<MTLFXSpatialScaler>)mSpatialScaler;
     return (MTL::TextureUsage)scaler.outputTextureUsage;
 }
 
@@ -135,7 +135,7 @@ void MetalFxContext::encodeSpatial(void* commandBuffer,
         // no input and no output attached, which is not an error: it simply never
         // wrote the display texture, and the viewport went black the moment
         // upscaling was switched on.
-        id<MTL4FXSpatialScaler> scaler4 = (__bridge id<MTL4FXSpatialScaler>)mSpatialScaler4;
+        const id<MTL4FXSpatialScaler> scaler4 = (__bridge id<MTL4FXSpatialScaler>)mSpatialScaler4;
         if (scaler4)
         {
             scaler4.colorTexture = (__bridge id<MTLTexture>)colorTexture;
@@ -147,7 +147,7 @@ void MetalFxContext::encodeSpatial(void* commandBuffer,
         return;
     }
 
-    id<MTLFXSpatialScaler> scaler = (__bridge id<MTLFXSpatialScaler>)mSpatialScaler;
+    const id<MTLFXSpatialScaler> scaler = (__bridge id<MTLFXSpatialScaler>)mSpatialScaler;
     scaler.colorTexture = (__bridge id<MTLTexture>)colorTexture;
     scaler.outputTexture = (__bridge id<MTLTexture>)outputTexture;
     // Content size can be smaller than the texture, which is how a dynamic
@@ -172,7 +172,7 @@ static constexpr MTLPixelFormat kReactiveFormat = MTLPixelFormatR8Unorm;
 
 void MetalFxContext::denoiserScaleRange(MTL::Device* device, float& minScale, float& maxScale)
 {
-    id<MTLDevice> native = (__bridge id<MTLDevice>)device;
+    const id<MTLDevice> native = (__bridge id<MTLDevice>)device;
     minScale = [MTLFXTemporalDenoisedScalerDescriptor supportedInputContentMinScaleForDevice:native];
     maxScale = [MTLFXTemporalDenoisedScalerDescriptor supportedInputContentMaxScaleForDevice:native];
 }
@@ -203,13 +203,13 @@ bool MetalFxContext::ensureTemporalScaler(MTL::Device* device,
 
     @autoreleasepool
     {
-        id<MTLDevice> nativeDevice = (__bridge id<MTLDevice>)device;
+        const id<MTLDevice> nativeDevice = (__bridge id<MTLDevice>)device;
         if (!nativeDevice || inputWidth == 0 || inputHeight == 0)
         {
             return false;
         }
 
-        MTLFXTemporalScalerDescriptor* desc = [MTLFXTemporalScalerDescriptor new];
+        MTLFXTemporalScalerDescriptor* const desc = [MTLFXTemporalScalerDescriptor new];
         desc.colorTextureFormat = (MTLPixelFormat)colorFormat;
         desc.depthTextureFormat = (MTLPixelFormat)depthFormat;
         desc.motionTextureFormat = (MTLPixelFormat)motionFormat;
@@ -236,7 +236,7 @@ bool MetalFxContext::ensureTemporalScaler(MTL::Device* device,
         desc.autoExposureEnabled = envFlag("STRELKA_MFX_AUTOEXPOSURE") ? YES : NO;
         desc.requiresSynchronousInitialization = YES;
 
-        id<MTLFXTemporalScaler> scaler = [desc newTemporalScalerWithDevice:nativeDevice];
+        const id<MTLFXTemporalScaler> scaler = [desc newTemporalScalerWithDevice:nativeDevice];
         if (!scaler)
         {
             STRELKA_ERROR("MetalFX temporal scaler unavailable for {}x{} -> {}x{}", inputWidth, inputHeight,
@@ -247,7 +247,7 @@ bool MetalFxContext::ensureTemporalScaler(MTL::Device* device,
 
         if (metal4Compiler)
         {
-            id<MTL4FXTemporalScaler> scaler4 =
+            const id<MTL4FXTemporalScaler> scaler4 =
                 [desc newTemporalScalerWithDevice:nativeDevice
                                          compiler:(__bridge id<MTL4Compiler>)metal4Compiler];
             if (scaler4)
@@ -306,7 +306,7 @@ void MetalFxContext::encodeTemporal(void* commandBuffer, bool metal4, const Temp
     }
     if (metal4 && mTemporalScaler4)
     {
-        id<MTL4FXTemporalScaler> t = (__bridge id<MTL4FXTemporalScaler>)mTemporalScaler4;
+        const id<MTL4FXTemporalScaler> t = (__bridge id<MTL4FXTemporalScaler>)mTemporalScaler4;
         t.colorTexture = (__bridge id<MTLTexture>)inputs.color;
         t.depthTexture = (__bridge id<MTLTexture>)inputs.depth;
         t.motionTexture = (__bridge id<MTLTexture>)inputs.motion;
@@ -324,7 +324,7 @@ void MetalFxContext::encodeTemporal(void* commandBuffer, bool metal4, const Temp
     {
         return;
     }
-    id<MTLFXTemporalScaler> t = (__bridge id<MTLFXTemporalScaler>)mTemporalScaler;
+    const id<MTLFXTemporalScaler> t = (__bridge id<MTLFXTemporalScaler>)mTemporalScaler;
     t.colorTexture = (__bridge id<MTLTexture>)inputs.color;
     t.depthTexture = (__bridge id<MTLTexture>)inputs.depth;
     t.motionTexture = (__bridge id<MTLTexture>)inputs.motion;
@@ -353,13 +353,13 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
 
     @autoreleasepool
     {
-        id<MTLDevice> nativeDevice = (__bridge id<MTLDevice>)device;
+        const id<MTLDevice> nativeDevice = (__bridge id<MTLDevice>)device;
         if (!nativeDevice || inputWidth == 0 || inputHeight == 0)
         {
             return false;
         }
 
-        MTLFXTemporalDenoisedScalerDescriptor* desc = [MTLFXTemporalDenoisedScalerDescriptor new];
+        MTLFXTemporalDenoisedScalerDescriptor* const desc = [MTLFXTemporalDenoisedScalerDescriptor new];
         desc.colorTextureFormat = kColorFormat;
         desc.depthTextureFormat = kDepthFormat;
         desc.motionTextureFormat = kMotionFormat;
@@ -418,7 +418,7 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         // asserts inside MPSGraph rather than failing the creation call.
         desc.requiresSynchronousInitialization = YES;
 
-        id<MTLFXTemporalDenoisedScaler> denoiser = [desc newTemporalDenoisedScalerWithDevice:nativeDevice];
+        const id<MTLFXTemporalDenoisedScaler> denoiser = [desc newTemporalDenoisedScalerWithDevice:nativeDevice];
         if (!denoiser)
         {
             STRELKA_ERROR("MetalFX temporal denoiser unavailable for {}x{} -> {}x{}", inputWidth, inputHeight,
@@ -430,7 +430,7 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         // Auto exposure is off, so this is the only thing that tells MetalFX what
         // scale the radiance it is handed is in. Shared storage: a single half
         // the CPU rewrites when the exposure changes, which is rarely.
-        MTLTextureDescriptor* exposureDesc =
+        MTLTextureDescriptor* const exposureDesc =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float
                                                                width:1
                                                               height:1
@@ -458,7 +458,7 @@ MTL::TextureUsage MetalFxContext::denoiseColorUsage() const
 MTL::TextureUsage MetalFxContext::denoiseGuideUsage() const
 {
     if (!mDenoiser) return MTL::TextureUsageShaderWrite;
-    id<MTLFXTemporalDenoisedScaler> d = (__bridge id<MTLFXTemporalDenoisedScaler>)mDenoiser;
+    const id<MTLFXTemporalDenoisedScaler> d = (__bridge id<MTLFXTemporalDenoisedScaler>)mDenoiser;
     // One flag set for every guide: they are all read the same way and taking the
     // union costs nothing.
     return (MTL::TextureUsage)(d.depthTextureUsage | d.motionTextureUsage | d.normalTextureUsage |
@@ -479,7 +479,7 @@ void MetalFxContext::encodeDenoise(void* commandBuffer, const DenoiseInputs& inp
     {
         return;
     }
-    id<MTLFXTemporalDenoisedScaler> d = (__bridge id<MTLFXTemporalDenoisedScaler>)mDenoiser;
+    const id<MTLFXTemporalDenoisedScaler> d = (__bridge id<MTLFXTemporalDenoisedScaler>)mDenoiser;
     d.colorTexture = (__bridge id<MTLTexture>)inputs.color;
     d.depthTexture = (__bridge id<MTLTexture>)inputs.depth;
     d.motionTexture = (__bridge id<MTLTexture>)inputs.motion;

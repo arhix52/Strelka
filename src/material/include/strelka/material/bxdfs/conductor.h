@@ -25,10 +25,10 @@ DEVICE_FUNC BsdfSampleResult conductor_sample(const THREAD_REF SurfaceInteractio
 {
     BsdfSampleResult result;
 
-    float3 N = si.shading_normal;
-    float3 V = si.wo;
+    const float3 N = si.shading_normal;
+    const float3 V = si.wo;
 
-    float NdotV = dot(N, V);
+    const float NdotV = dot(N, V);
     if (NdotV <= 0.0f)
     {
         result.bsdf_over_pdf = make_float3(0.0f);
@@ -37,21 +37,21 @@ DEVICE_FUNC BsdfSampleResult conductor_sample(const THREAD_REF SurfaceInteractio
         return result;
     }
 
-    float alpha = alpha_from_roughness(si.roughness);
+    const float alpha = alpha_from_roughness(si.roughness);
 
     // Build local frame
     float3 T, B;
     build_onb(N, T, B);
 
     // Transform V to local space for VNDF sampling
-    float3 V_local = world_to_local(V, T, B, N);
+    const float3 V_local = world_to_local(V, T, B, N);
 
     // Sample half-vector via VNDF
-    float3 H_local = ggx_vndf_sample(V_local, alpha, u1, u2);
-    float3 H       = local_to_world(H_local, T, B, N);
+    const float3 H_local = ggx_vndf_sample(V_local, alpha, u1, u2);
+    const float3 H = local_to_world(H_local, T, B, N);
 
     // Reflect
-    float VdotH = dot(V, H);
+    const float VdotH = dot(V, H);
     if (VdotH <= 0.0f)
     {
         result.bsdf_over_pdf = make_float3(0.0f);
@@ -61,7 +61,7 @@ DEVICE_FUNC BsdfSampleResult conductor_sample(const THREAD_REF SurfaceInteractio
     }
     result.wi = reflect_dir(-V, H);
 
-    float NdotL = dot(N, result.wi);
+    const float NdotL = dot(N, result.wi);
     if (NdotL <= 0.0f)
     {
         result.bsdf_over_pdf = make_float3(0.0f);
@@ -70,16 +70,16 @@ DEVICE_FUNC BsdfSampleResult conductor_sample(const THREAD_REF SurfaceInteractio
         return result;
     }
 
-    float NdotH = dot(N, H);
+    const float NdotH = dot(N, H);
 
     // Fresnel -- for conductors, F0 = base_color (tinted metal)
-    float3 F = fresnel_schlick(si.albedo, VdotH);
+    const float3 F = fresnel_schlick(si.albedo, VdotH);
 
     // Smith G2 (height-correlated)
-    float G2 = ggx_smith_g2(alpha, NdotV, NdotL);
+    const float G2 = ggx_smith_g2(alpha, NdotV, NdotL);
 
     // G1 for the outgoing direction (needed for VNDF PDF cancellation)
-    float G1 = ggx_smith_g1(alpha, NdotV);
+    const float G1 = ggx_smith_g1(alpha, NdotV);
 
     // bsdf_over_pdf = F * G2 / G1  (VNDF sampling simplification), then the
     // multiple-scattering energy the single-scatter lobe drops. The pdf is
@@ -106,11 +106,11 @@ DEVICE_FUNC BsdfEvalResult conductor_eval(const THREAD_REF SurfaceInteraction& s
 {
     BsdfEvalResult result;
 
-    float3 N = si.shading_normal;
-    float3 V = si.wo;
+    const float3 N = si.shading_normal;
+    const float3 V = si.wo;
 
-    float NdotV = dot(N, V);
-    float NdotL = dot(N, wi);
+    const float NdotV = dot(N, V);
+    const float NdotL = dot(N, wi);
     if (NdotV <= 0.0f || NdotL <= 0.0f)
     {
         result.bsdf = make_float3(0.0f);
@@ -118,11 +118,11 @@ DEVICE_FUNC BsdfEvalResult conductor_eval(const THREAD_REF SurfaceInteraction& s
         return result;
     }
 
-    float alpha = alpha_from_roughness(si.roughness);
+    const float alpha = alpha_from_roughness(si.roughness);
 
-    float3 H     = safe_normalize(V + wi);
-    float NdotH  = dot(N, H);
-    float VdotH  = dot(V, H);
+    const float3 H = safe_normalize(V + wi);
+    const float NdotH = dot(N, H);
+    const float VdotH = dot(V, H);
 
     if (NdotH <= 0.0f || VdotH <= 0.0f)
     {
@@ -131,9 +131,9 @@ DEVICE_FUNC BsdfEvalResult conductor_eval(const THREAD_REF SurfaceInteraction& s
         return result;
     }
 
-    float  D  = ggx_ndf(alpha, NdotH);
-    float  G2 = ggx_smith_g2(alpha, NdotV, NdotL);
-    float3 F  = fresnel_schlick(si.albedo, VdotH);
+    const float D = ggx_ndf(alpha, NdotH);
+    const float G2 = ggx_smith_g2(alpha, NdotV, NdotL);
+    const float3 F = fresnel_schlick(si.albedo, VdotH);
 
     // Cook-Torrance: D * G2 * F / (4 * NdotV * NdotL), plus the multiple
     // scattering the single-scatter lobe drops. Must match conductor_sample()
@@ -150,18 +150,18 @@ DEVICE_FUNC BsdfEvalResult conductor_eval(const THREAD_REF SurfaceInteraction& s
 // ---------------------------------------------------------------------------
 DEVICE_FUNC float conductor_pdf(const THREAD_REF SurfaceInteraction& si, float3 wi)
 {
-    float3 N = si.shading_normal;
-    float3 V = si.wo;
+    const float3 N = si.shading_normal;
+    const float3 V = si.wo;
 
-    float NdotV = dot(N, V);
-    float NdotL = dot(N, wi);
+    const float NdotV = dot(N, V);
+    const float NdotL = dot(N, wi);
     if (NdotV <= 0.0f || NdotL <= 0.0f)
         return 0.0f;
 
-    float alpha = alpha_from_roughness(si.roughness);
-    float3 H    = safe_normalize(V + wi);
-    float NdotH = dot(N, H);
-    float VdotH = dot(V, H);
+    const float alpha = alpha_from_roughness(si.roughness);
+    const float3 H = safe_normalize(V + wi);
+    const float NdotH = dot(N, H);
+    const float VdotH = dot(V, H);
 
     if (NdotH <= 0.0f || VdotH <= 0.0f)
         return 0.0f;

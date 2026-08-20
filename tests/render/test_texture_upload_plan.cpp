@@ -80,7 +80,7 @@ TEST_CASE("only a colour texture gets a transfer function")
     in.srcHeight = 256;
 
     in.kind = Kind::Color;
-    Plan colour = planTexture(in);
+    const Plan colour = planTexture(in);
     CHECK(colour.format == Format::RGBA8);
     CHECK(colour.srgbTextureFlag);
     CHECK(colour.resampleInSrgb);
@@ -89,14 +89,14 @@ TEST_CASE("only a colour texture gets a transfer function")
     // A roughness or occlusion map read through sRGB is the classic silent
     // shading error; it must not happen.
     in.kind = Kind::NonColor;
-    Plan linear = planTexture(in);
+    const Plan linear = planTexture(in);
     CHECK_FALSE(linear.srgbTextureFlag);
     CHECK_FALSE(linear.srgbBlockFormat);
     CHECK_FALSE(linear.resampleInSrgb);
 
     // Nor a normal map, which is a direction rather than a colour.
     in.kind = Kind::Normal;
-    Plan normal = planTexture(in);
+    const Plan normal = planTexture(in);
     CHECK_FALSE(normal.srgbTextureFlag);
     CHECK_FALSE(normal.srgbBlockFormat);
     CHECK(normal.normalizeLevels);
@@ -137,7 +137,7 @@ TEST_CASE("format choice: what compresses, and to what")
 
     in.sourceIsFloat = false;
     in.sourceIs16Bit = true;
-    Plan sixteen = planTexture(in);
+    const Plan sixteen = planTexture(in);
     CHECK(sixteen.format == Format::RGBA16);
     // CUDA's sRGB texture flag is an 8-bit-unorm feature, so a 16-bit colour map
     // must have been linearised on the host. The plan says so by leaving the

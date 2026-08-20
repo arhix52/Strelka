@@ -251,10 +251,10 @@ DEVICE_FUNC HairChiangParams hair_chiang_prepare(const THREAD_REF SurfaceInterac
 {
     HairChiangParams p;
 
-    float rough_u = clamp(si.roughness, 0.001f, 1.0f);
-    float rough_v = (fabsf(si.anisotropy) > 1e-4f) ? clamp(fabsf(si.anisotropy), 0.001f, 1.0f) : rough_u;
-    float coat = saturate(si.clearcoat);
-    float m0 = clamp((1.0f - coat) * rough_u, 0.001f, 1.0f);
+    const float rough_u = clamp(si.roughness, 0.001f, 1.0f);
+    const float rough_v = (fabsf(si.anisotropy) > 1e-4f) ? clamp(fabsf(si.anisotropy), 0.001f, 1.0f) : rough_u;
+    const float coat = saturate(si.clearcoat);
+    const float m0 = clamp((1.0f - coat) * rough_u, 0.001f, 1.0f);
 
     // Map roughness -> variance / scale (Chiang 2016 via Cycles).
     p.v = sqr(0.726f * rough_u + 0.812f * sqr(rough_u) + 3.700f * hair_pow20(rough_u));
@@ -359,7 +359,7 @@ DEVICE_FUNC BsdfSampleResult hair_chiang_sample(const THREAD_REF SurfaceInteract
     result.pdf = 0.0f;
     result.event_type = BSDF_EVENT_ABSORB;
 
-    HairChiangParams p = hair_chiang_prepare(si);
+    const HairChiangParams p = hair_chiang_prepare(si);
     const float3 local_O = hair_to_local(si.wo, p.X, p.Y, p.Z);
     const float sin_theta_o = local_O.x;
     const float cos_theta_o = hair_cos_from_sin(sin_theta_o);
@@ -448,7 +448,7 @@ DEVICE_FUNC BsdfEvalResult hair_chiang_eval(const THREAD_REF SurfaceInteraction&
     result.bsdf = make_float3(0.0f);
     result.pdf = 0.0f;
 
-    HairChiangParams p = hair_chiang_prepare(si);
+    const HairChiangParams p = hair_chiang_prepare(si);
     const float3 local_O = hair_to_local(si.wo, p.X, p.Y, p.Z);
     const float3 local_I = hair_to_local(wi, p.X, p.Y, p.Z);
 

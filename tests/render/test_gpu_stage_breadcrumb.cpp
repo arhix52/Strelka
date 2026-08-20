@@ -105,7 +105,7 @@ TEST_CASE("marks above the gap do not move the blame past it")
 // from outside this frame.
 TEST_CASE("an empty frame implicates nothing and exonerates nothing")
 {
-    Frame f;
+    const Frame f;
     const GpuStageFailure failure = f.infer();
     CHECK(failure.suspectedStage == -1);
     CHECK(failure.lastCompletedStage == -1);

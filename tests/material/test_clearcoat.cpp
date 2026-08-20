@@ -104,7 +104,7 @@ float3 dir_at(float deg)
 float3 integrate_albedo(const MaterialParams& p, float3 wo, int samples, std::uint32_t seed)
 {
     float3 total = make_float3(0.0f);
-    SurfaceInteraction si = make_si(p, wo);
+    const SurfaceInteraction si = make_si(p, wo);
     Lcg rng(seed);
     for (int i = 0; i < samples; ++i)
     {
@@ -126,10 +126,10 @@ TEST_CASE("clearcoat: weight 0 changes nothing")
     const MaterialParams bare = ceramic_params(0.0f, 1.5f);
     const MaterialParams zeroed = ceramic_params(0.0f, 2.0f); // IOR set, weight not
 
-    for (float deg : { 5.0f, 40.0f, 80.0f })
+    for (const float deg : { 5.0f, 40.0f, 80.0f })
     {
-        SurfaceInteraction a = make_si(bare, dir_at(deg));
-        SurfaceInteraction b = make_si(zeroed, dir_at(deg));
+        const SurfaceInteraction a = make_si(bare, dir_at(deg));
+        const SurfaceInteraction b = make_si(zeroed, dir_at(deg));
         const float3 wi = dir_at(-deg + 30.0f);
         const BsdfEvalResult ea = bsdf_eval(a, wi);
         const BsdfEvalResult eb = bsdf_eval(b, wi);
@@ -183,9 +183,9 @@ TEST_CASE("clearcoat: does not manufacture energy")
     // the old (1-F_L)*(1-F_V) scale was hiding that by crushing the base. What
     // the coat must not do is push a direction that was under 1 over it, or make
     // the grazing overshoot worse than the bare material's own.
-    for (float ior : { 1.5f, 2.0f })
+    for (const float ior : { 1.5f, 2.0f })
     {
-        for (float deg : { 15.0f, 45.0f })
+        for (const float deg : { 15.0f, 45.0f })
         {
             const float3 albedo =
                 integrate_albedo(ceramic_params(1.0f, ior), dir_at(deg), 20000, 11u);
@@ -252,9 +252,9 @@ TEST_CASE("clearcoat: sample and eval agree")
     // describe the same material.
     MaterialParams glaze = ceramic_params(1.0f, 2.0f);
     glaze.clearcoat_roughness = 0.25f;
-    for (float deg : { 20.0f, 55.0f })
+    for (const float deg : { 20.0f, 55.0f })
     {
-        SurfaceInteraction si = make_si(glaze, dir_at(deg));
+        const SurfaceInteraction si = make_si(glaze, dir_at(deg));
         Lcg rng(0xC0A7u + static_cast<std::uint32_t>(deg));
         int checked = 0;
         for (int i = 0; i < 600 && checked < 60; ++i)

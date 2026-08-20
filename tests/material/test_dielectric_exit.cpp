@@ -85,7 +85,7 @@ TEST_CASE("the exit surface of a dielectric is set up as a back-face hit")
     // rest of the file is testing nothing.
     for (float r : { 0.0f, 0.3f })
     {
-        SurfaceInteraction si = exiting_si(r);
+        const SurfaceInteraction si = exiting_si(r);
         CAPTURE(r);
         CHECK(dot(si.shading_normal, si.wo) < 0.0f);
         CHECK(si.transmission == doctest::Approx(1.0f));
@@ -94,12 +94,12 @@ TEST_CASE("the exit surface of a dielectric is set up as a back-face hit")
 
 TEST_CASE("a ray inside a smooth dielectric can leave it")
 {
-    SurfaceInteraction si = exiting_si(0.0f);
+    const SurfaceInteraction si = exiting_si(0.0f);
 
     // xi.w is the reflect/refract draw and the branch is `u_fresnel < F`, so a
     // HIGH value is the refraction one. At 14 degrees from the normal F is about
     // 0.04, well below this.
-    BsdfSampleResult r = bsdf_sample(si, make_float4(0.5f, 0.5f, 0.9f, 0.9f));
+    const BsdfSampleResult r = bsdf_sample(si, make_float4(0.5f, 0.5f, 0.9f, 0.9f));
 
     REQUIRE(r.event_type != BSDF_EVENT_ABSORB);
     CHECK((r.event_type & BSDF_EVENT_TRANSMISSION) != 0);
@@ -114,9 +114,9 @@ TEST_CASE("a ray inside a smooth dielectric can leave it")
 
 TEST_CASE("a ray inside a rough dielectric can leave it")
 {
-    SurfaceInteraction si = exiting_si(0.35f);
+    const SurfaceInteraction si = exiting_si(0.35f);
 
-    BsdfSampleResult r = bsdf_sample(si, make_float4(0.4f, 0.6f, 0.9f, 0.9f));
+    const BsdfSampleResult r = bsdf_sample(si, make_float4(0.4f, 0.6f, 0.9f, 0.9f));
 
     REQUIRE(r.event_type != BSDF_EVENT_ABSORB);
     CHECK((r.event_type & BSDF_EVENT_TRANSMISSION) != 0);
@@ -129,11 +129,11 @@ TEST_CASE("total internal reflection still reflects rather than absorbing")
     // Grazing enough to be past the critical angle for 1.5 -> 1.0 (about 41.8
     // degrees from the normal). The path must bounce back into the medium, not
     // die.
-    SurfaceInteraction si = exiting_si(0.0f, /*tilt=*/3.0f);
+    const SurfaceInteraction si = exiting_si(0.0f, /*tilt=*/3.0f);
     REQUIRE(dot(si.shading_normal, si.wo) < 0.0f);
 
     // Past the critical angle F is exactly 1, so every draw reflects.
-    BsdfSampleResult r = bsdf_sample(si, make_float4(0.5f, 0.5f, 0.9f, 0.9f));
+    const BsdfSampleResult r = bsdf_sample(si, make_float4(0.5f, 0.5f, 0.9f, 0.9f));
 
     REQUIRE(r.event_type != BSDF_EVENT_ABSORB);
     CHECK((r.event_type & BSDF_EVENT_TRANSMISSION) == 0);
@@ -161,7 +161,7 @@ TEST_CASE("an opaque material takes a back face as its own underside, not as an 
     SurfaceInteraction si = exiting_si(0.3f);
     si.transmission = 0.0f;
 
-    BsdfSampleResult r = bsdf_sample(si, make_float4(0.4f, 0.6f, 0.5f, 0.5f));
+    const BsdfSampleResult r = bsdf_sample(si, make_float4(0.4f, 0.6f, 0.5f, 0.5f));
     CHECK(r.event_type != BSDF_EVENT_ABSORB);
     // Shaded on the side it was hit from -- it did not refract through.
     CHECK(dot(si.shading_normal, r.wi) < 0.0f);
@@ -170,13 +170,13 @@ TEST_CASE("an opaque material takes a back face as its own underside, not as an 
 TEST_CASE("eval agrees with sample on the exit surface")
 {
     // Rough only: a smooth interface is a delta lobe and eval cannot see it.
-    SurfaceInteraction si = exiting_si(0.35f);
+    const SurfaceInteraction si = exiting_si(0.35f);
 
-    BsdfSampleResult s = bsdf_sample(si, make_float4(0.4f, 0.6f, 0.9f, 0.9f));
+    const BsdfSampleResult s = bsdf_sample(si, make_float4(0.4f, 0.6f, 0.9f, 0.9f));
     REQUIRE((s.event_type & BSDF_EVENT_TRANSMISSION) != 0);
     REQUIRE((s.event_type & BSDF_EVENT_SPECULAR) == 0);
 
-    BsdfEvalResult e = bsdf_eval(si, s.wi);
+    const BsdfEvalResult e = bsdf_eval(si, s.wi);
 
     // The part this fix owns: eval must accept the direction at all. Before it,
     // eval classified a refracted wi as a reflection (NdotL > 0 with NdotV < 0)
@@ -215,11 +215,11 @@ TEST_CASE("entering a rough dielectric: sample and eval must agree too")
     si.exterior_ior = 1.0f;
     REQUIRE(dot(si.shading_normal, si.wo) > 0.0f);
 
-    BsdfSampleResult s = bsdf_sample(si, make_float4(0.4f, 0.6f, 0.99f, 0.9f));
+    const BsdfSampleResult s = bsdf_sample(si, make_float4(0.4f, 0.6f, 0.99f, 0.9f));
     REQUIRE((s.event_type & BSDF_EVENT_TRANSMISSION) != 0);
     REQUIRE((s.event_type & BSDF_EVENT_SPECULAR) == 0);
 
-    BsdfEvalResult e = bsdf_eval(si, s.wi);
+    const BsdfEvalResult e = bsdf_eval(si, s.wi);
     CHECK(e.pdf > 0.0f);
     // Same known gap, measured on the entering side: 0.211 vs 0.286. That the
     // guard-free path was always inconsistent is the point of this case.
@@ -238,14 +238,14 @@ TEST_CASE("a fully transmissive material has no separate specular lobe")
     si.front_face = true;
 
     si.transmission = 1.0f;
-    PbrLobeWeights full = pbr_lobe_weights(si);
+    const PbrLobeWeights full = pbr_lobe_weights(si);
     CHECK(full.specular == doctest::Approx(0.0f).epsilon(1e-6));
     CHECK(full.diffuse == doctest::Approx(0.0f).epsilon(1e-6));
     CHECK(full.transmission > 0.0f);
 
     // An opaque dielectric must be untouched by that scaling.
     si.transmission = 0.0f;
-    PbrLobeWeights opaque = pbr_lobe_weights(si);
+    const PbrLobeWeights opaque = pbr_lobe_weights(si);
     CHECK(opaque.specular > 0.0f);
     CHECK(opaque.transmission == doctest::Approx(0.0f).epsilon(1e-6));
 
@@ -253,6 +253,6 @@ TEST_CASE("a fully transmissive material has no separate specular lobe")
     // lobe must survive.
     si.transmission = 1.0f;
     si.metallic = 1.0f;
-    PbrLobeWeights metal = pbr_lobe_weights(si);
+    const PbrLobeWeights metal = pbr_lobe_weights(si);
     CHECK(metal.specular > 0.0f);
 }

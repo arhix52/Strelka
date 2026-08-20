@@ -318,7 +318,7 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
         // What the texture set costs on the device, since which formats the
         // encoder picked is otherwise only visible in the editor's memory panel.
         size_t bytes = 0;
-        for (MTL::Texture* t : mTextures->materialTextures())
+        for (const MTL::Texture* t : mTextures->materialTextures())
         {
             bytes += t ? t->allocatedSize() : 0;
         }

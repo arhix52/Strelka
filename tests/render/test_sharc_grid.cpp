@@ -48,7 +48,7 @@ TEST_CASE("a degenerate distance still yields a usable voxel")
 {
     // A shading point at the eye, or a base size of zero from a camera nobody
     // configured. Neither may produce a zero size: the coordinate divides by it.
-    for (float baseSize : { 0.0f, 1e-30f, 1.0f })
+    for (const float baseSize : { 0.0f, 1e-30f, 1.0f })
     {
         const Voxel v = voxelForDistance(0.0f, baseSize);
         CHECK(v.size > 0.0f);
@@ -243,9 +243,9 @@ TEST_CASE("reprojection cannot walk off the end of the level field")
     // footprint at 1e-4, so real levels run about [-14, 14] against a field that
     // holds [-255, 255] -- and the point of the sweep is that nothing gets
     // anywhere near it whatever the two cameras are.
-    for (int32_t level : { kLevelMin, kLevelMin + 1, -14, 0, 14, kLevelMax - 1, kLevelMax })
-        for (float near : { 0.0f, 1.0f, 1e4f })
-            for (float far : { 0.0f, 2.0f, 1e5f })
+    for (const int32_t level : { kLevelMin, kLevelMin + 1, -14, 0, 14, kLevelMax - 1, kLevelMax })
+        for (const float near : { 0.0f, 1.0f, 1e4f })
+            for (const float far : { 0.0f, 2.0f, 1e5f })
             {
                 const uint64_t key = voxelKey(1, 1, 1, level, 0, false);
                 const int32_t moved = unpackLevel(adjacentLevelKey(key, near, near, near, far, far, far));
@@ -290,7 +290,7 @@ TEST_CASE("blending against an empty neighbour changes nothing")
 TEST_CASE("the probe run visits eight distinct slots and stays in the table")
 {
     const uint32_t capacity = 1u << 16;
-    for (uint32_t seed : { 0u, 1u, 12345u, 0xFFFFFFFFu, capacity - 1u })
+    for (const uint32_t seed : { 0u, 1u, 12345u, 0xFFFFFFFFu, capacity - 1u })
     {
         std::set<uint32_t> visited;
         for (uint32_t p = 0; p < kProbeCount; ++p)
@@ -305,7 +305,7 @@ TEST_CASE("the probe run visits eight distinct slots and stays in the table")
 
 TEST_CASE("the fixed point round trips within half its own quantum")
 {
-    for (float v : { 0.0f, 0.001f, 0.5f, 1.0f, 7.25f, 100.0f, 255.9f })
+    for (const float v : { 0.0f, 0.001f, 0.5f, 1.0f, 7.25f, 100.0f, 255.9f })
     {
         const uint32_t e = encode(v);
         const float back = decode(e, 1u);
@@ -373,7 +373,7 @@ TEST_CASE("the mean of a slot is the mean of what went into it")
     const std::vector<float> samples = { 0.5f, 1.5f, 2.0f, 4.25f, 0.0f, 3.75f, 1.0f };
     uint32_t sum = 0;
     double reference = 0.0;
-    for (float s : samples)
+    for (const float s : samples)
     {
         sum += encode(s);
         reference += s;
@@ -455,7 +455,7 @@ TEST_CASE("binary16 round-trips the values a voxel actually holds")
     // Radiance, and sample counts up to a few thousand. Relative error of
     // binary16 is 2^-11, so anything inside half a percent is the format doing
     // its job rather than the code doing it wrong.
-    for (float v : { 0.001f, 0.5f, 1.0f, 3.14159f, 42.0f, 255.0f, 1000.0f, 30000.0f })
+    for (const float v : { 0.001f, 0.5f, 1.0f, 3.14159f, 42.0f, 255.0f, 1000.0f, 30000.0f })
     {
         const float back = unpackHalf(packHalf(v));
         CHECK(back == doctest::Approx(v).epsilon(0.001));

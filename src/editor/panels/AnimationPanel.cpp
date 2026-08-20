@@ -155,7 +155,7 @@ void EditorApp::drawAnimationPanel()
                         m_settingsManager->setAs<float>("render/motionBlur/shutterTime", shutterTime);
                     }
 
-                    const char* shutterModes[] = { "Centered", "Leading", "Trailing" };
+                    const char* const shutterModes[] = { "Centered", "Leading", "Trailing" };
                     int shutterMode = (int)m_settingsManager->getAs<uint32_t>("render/motionBlur/shutterMode");
                     if (ImGui::Combo("Shutter Mode", &shutterMode, shutterModes, IM_ARRAYSIZE(shutterModes)))
                     {

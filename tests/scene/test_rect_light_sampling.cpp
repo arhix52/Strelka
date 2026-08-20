@@ -129,9 +129,9 @@ TEST_CASE("Solid-angle PDF is constant 1/S over the rectangle")
     const SphQuad squad = initSphQuad(c, hit);
     REQUIRE(squad.S > 1e-4f);
 
-    for (float u : { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f })
+    for (const float u : { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f })
     {
-        for (float v : { 0.0f, 0.5f, 1.0f })
+        for (const float v : { 0.0f, 0.5f, 1.0f })
         {
             const LightSample s = sampleRectSolidAngle(c, glm::float2(u, v), hit);
             CHECK(s.pdf == doctest::Approx(1.0f / squad.S).epsilon(1e-5));

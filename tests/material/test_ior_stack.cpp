@@ -67,7 +67,7 @@ TEST_CASE("popping by priority alone would take the wrong one")
     // both entries at the same priority a top-down priority search finds the
     // bubble, and a ray leaving the water would come out believing it is inside
     // a bubble at IOR 1.6 rather than in air.
-    IorStack s = with(3u, 1.33f, 7u, 1.60f);
+    const IorStack s = with(3u, 1.33f, 7u, 1.60f);
     int topmost_by_priority = -1;
     for (int i = s.top; i >= 0; --i)
     {
