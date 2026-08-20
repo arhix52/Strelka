@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <functional>
 #include <map>
+#include <ranges>
 #include <utility>
 #include <vector>
 
@@ -876,7 +877,7 @@ bool MetalAccelStructure::step(double budgetMs)
     // the mesh-instance prefix so those rays cannot enter either giant curve BLAS
     // at all. The bottom levels and descriptor buffer are shared; only the top-
     // level hierarchy is duplicated.
-    const auto firstCurve = std::find_if(mEmittedInstances.begin(), mEmittedInstances.end(),
+    const auto firstCurve = std::ranges::find_if(mEmittedInstances,
                                          [](const EmittedInstance& e) {
                                              return e.mask == GEOMETRY_MASK_CURVE;
                                          });
@@ -920,7 +921,7 @@ bool MetalAccelStructure::step(double budgetMs)
                 if (mBlasList[bi].mAs)
                     bySize.emplace_back(mBlasList[bi].mAs->size(), bi);
             }
-            std::sort(bySize.rbegin(), bySize.rend());
+            std::ranges::sort(std::views::reverse(bySize));
             for (size_t k = 0; k < std::min<size_t>(5, bySize.size()); ++k)
             {
                 STRELKA_INFO("  BLAS {} : {:.2f} GB, geometry base {}", bySize[k].second,
@@ -1428,9 +1429,7 @@ void MetalAccelStructure::releaseRetiredInstanceStructures(uint64_t age)
         }
         retired.first->release();
     }
-    mRetiredInstanceStructures.erase(
-        std::remove_if(mRetiredInstanceStructures.begin(), mRetiredInstanceStructures.end(), expired),
-        mRetiredInstanceStructures.end());
+    std::erase_if(mRetiredInstanceStructures, expired);
 }
 
 std::vector<MTL::Buffer*> MetalAccelStructure::accelerationStructureAuxiliaryBuffers() const

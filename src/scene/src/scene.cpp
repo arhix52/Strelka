@@ -1,5 +1,6 @@
 #include <strelka/scene/scene.h>
 
+#include <algorithm>
 #include <chrono>
 #include <strelka/scene/vertex_packing.h>
 #include <strelka/scene/light_desc.h>
@@ -231,7 +232,7 @@ glm::float4 Scene::interpolate(const AnimationSampler& sampler,
     // inputs is sorted by construction, so binary search it — the previous linear
     // scan cost O(keyframes) per channel per frame (BrainStem has channels with
     // 838 keys, evaluated 116 times per pass and twice per frame).
-    const auto upper = std::upper_bound(sampler.inputs.begin(), sampler.inputs.end(), time);
+    const auto upper = std::ranges::upper_bound(sampler.inputs, time);
     int nextIdx = (int)std::distance(sampler.inputs.begin(), upper);
     nextIdx = std::clamp(nextIdx, 1, n - 1);
     const int prevIdx = nextIdx - 1;
@@ -411,7 +412,7 @@ bool Scene::applyAnimation(const uint32_t animId)
     // Phase 1 only writes local TRS; phase 2 derives every world transform in a
     // single parent-before-child sweep.
     auto& animation = mAnimations[animId];
-    std::fill(mNodeDirty.begin(), mNodeDirty.end(), 0);
+    std::ranges::fill(mNodeDirty, 0);
 
     for (size_t i = 0; i < animation.channels.size(); ++i)
     {
@@ -1053,7 +1054,7 @@ int Scene::findInstanceNodeId(const uint32_t instId) const
     for (uint32_t n = 0; n < mNodes.size(); ++n)
     {
         const std::vector<uint32_t>& ids = mNodes[n].instanceIds;
-        if (std::find(ids.begin(), ids.end(), instId) != ids.end())
+        if (std::ranges::find(ids, instId) != ids.end())
         {
             return (int)n;
         }
@@ -1311,8 +1312,7 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
         }
         candidates.push_back({ instId, tEnter });
     }
-    std::sort(candidates.begin(), candidates.end(),
-              [](const Candidate& a, const Candidate& b) { return a.tEnter < b.tEnter; });
+    std::ranges::sort(candidates, [](const Candidate& a, const Candidate& b) { return a.tEnter < b.tEnter; });
 
     for (const Candidate& candidate : candidates)
     {

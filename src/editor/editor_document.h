@@ -113,11 +113,10 @@ inline void pushRecentScene(std::vector<std::string>& recent, const std::string&
     {
         return;
     }
-    recent.erase(std::remove_if(recent.begin(), recent.end(),
-                                [&](const std::string& existing) {
-                                    return normalizeRecentPath(existing) == norm;
-                                }),
-                 recent.end());
+    // std::erase_if rather than the erase-remove pair: ranges::remove_if returns
+    // a subrange, so the pair does not even compile against it, and the one-call
+    // form is what it was always spelling out.
+    std::erase_if(recent, [&](const std::string& existing) { return normalizeRecentPath(existing) == norm; });
     recent.insert(recent.begin(), norm);
     if (recent.size() > capacity)
     {
@@ -149,9 +148,8 @@ inline std::vector<std::string> loadRecentScenes(const std::filesystem::path& fi
         {
             continue;
         }
-        const bool already = std::any_of(recent.begin(), recent.end(), [&](const std::string& existing) {
-            return normalizeRecentPath(existing) == norm;
-        });
+        const bool already = std::ranges::any_of(
+            recent, [&](const std::string& existing) { return normalizeRecentPath(existing) == norm; });
         if (already)
         {
             continue;

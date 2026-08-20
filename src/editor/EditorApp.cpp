@@ -15,6 +15,7 @@
 #include <env.h>
 #include <log.h>
 #include <paths.h>
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <algorithm>
@@ -1015,8 +1016,8 @@ void EditorApp::runBenchmark()
             }
             usleep(200);
         }
-        std::sort(samples.begin(), samples.end());
-        std::sort(wall.begin(), wall.end());
+        std::ranges::sort(samples);
+        std::ranges::sort(wall);
         Block b;
         if (!samples.empty())
         {
@@ -1064,9 +1065,9 @@ void EditorApp::runBenchmark()
             STRELKA_INFO("BENCH  no pairs measured");
             return;
         }
-        std::sort(ratios.begin(), ratios.end());
-        std::sort(staticGpu.begin(), staticGpu.end());
-        std::sort(playGpu.begin(), playGpu.end());
+        std::ranges::sort(ratios);
+        std::ranges::sort(staticGpu);
+        std::ranges::sort(playGpu);
         STRELKA_INFO("BENCH  PAIRED static={:.2f} ms  play={:.2f} ms  ratio={:.2f}x  (median of {} pairs)",
                      staticGpu[staticGpu.size() / 2], playGpu[playGpu.size() / 2], ratios[ratios.size() / 2],
                      ratios.size());
@@ -2109,7 +2110,7 @@ void EditorApp::runDenoiseAudit()
         }
         if (finite.size() > d.px.size() / 40) // at least 10% of the frame is geometry
         {
-            std::sort(finite.begin(), finite.end());
+            std::ranges::sort(finite);
             orbitTarget = startPos + startFront * finite[finite.size() / 2];
         }
         const size_t depthPixels = d.px.size() / 4;
@@ -2388,7 +2389,7 @@ void EditorApp::runDenoiseAudit()
                     continue;
                 floorDeltas.push_back(std::abs(d1 - d0) / d0);
             }
-            std::sort(floorDeltas.begin(), floorDeltas.end());
+            std::ranges::sort(floorDeltas);
         }
         const double floorDelta =
             floorDeltas.empty() ? 0.0 : floorDeltas[static_cast<size_t>(static_cast<double>(floorDeltas.size()) * 0.99)];
@@ -2619,7 +2620,7 @@ void EditorApp::runDenoiseAudit()
                     ++nearBlack;
                 ratios.push_back(d / t);
             }
-            std::sort(ratios.begin(), ratios.end());
+            std::ranges::sort(ratios);
             const double median = ratios.empty() ? 0.0 : ratios[ratios.size() / 2];
             const double blackShare = lit ? 100.0 * (double)nearBlack / (double)lit : 0.0;
             report(fmt::format("AUDIT {:14s} vs truth: median ratio={:.4f}  pixels below 10% of truth={:.1f}%", s.name,
@@ -2953,7 +2954,7 @@ void EditorApp::runDenoiseAudit()
                 if (!haveSurface || surface[p])
                     sorted.push_back(change[p]);
             }
-            std::sort(sorted.begin(), sorted.end());
+            std::ranges::sort(sorted);
             moving.assign(pixels, 2); // 2 = neither, excluded from both measures
             if (!sorted.empty())
             {

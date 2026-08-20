@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstddef>
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
@@ -1381,6 +1382,9 @@ void MetalRender::render(Buffer* output)
         const size_t animCount = animations.size();
         mAnimTargetTimes.resize(animCount);
         mAnimChanged.resize(animCount);
+        // Not std::ranges::fill: mAnimChanged is a vector<bool>, whose proxy
+        // reference does not model indirectly_writable, so the ranges overload
+        // does not apply to it.
         std::fill(mAnimChanged.begin(), mAnimChanged.end(), false);
         for (size_t i = 0; i < animCount; ++i)
         {
@@ -3040,7 +3044,7 @@ void MetalRender::buildSceneTail(Buffer* output)
         MemoryReport report;
         if (memoryReport(report))
         {
-            std::sort(report.gpu.begin(), report.gpu.end(),
+            std::ranges::sort(report.gpu,
                       [](const MemoryReport::Entry& a, const MemoryReport::Entry& b) { return a.bytes > b.bytes; });
             std::string top;
             for (size_t i = 0; i < std::min<size_t>(4, report.gpu.size()); ++i)

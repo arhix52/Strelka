@@ -14,7 +14,7 @@ TEST_CASE("residency diff retires replaced allocations")
     const std::unordered_set<uintptr_t> current = { 2, 4, 5 };
 
     std::vector<uintptr_t> retired = retiredResidencyAllocations(previous, current);
-    std::sort(retired.begin(), retired.end());
+    std::ranges::sort(retired);
 
     REQUIRE(retired.size() == 2);
     CHECK(retired[0] == 1);

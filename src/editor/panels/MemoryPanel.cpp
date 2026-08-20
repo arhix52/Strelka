@@ -70,10 +70,9 @@ void drawBreakdown(const char* title,
 {
     // Largest first: the question this panel answers is always "what is the big
     // one", and a fixed declaration order buries it.
-    std::sort(entries.begin(), entries.end(),
-              [](const Render::MemoryReport::Entry& a, const Render::MemoryReport::Entry& b) {
-                  return a.bytes > b.bytes;
-              });
+    std::ranges::sort(entries, [](const Render::MemoryReport::Entry& a, const Render::MemoryReport::Entry& b) {
+        return a.bytes > b.bytes;
+    });
 
     size_t accounted = 0;
     for (const auto& e : entries)
