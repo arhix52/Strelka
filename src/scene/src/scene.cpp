@@ -1129,7 +1129,7 @@ glm::float3 Scene::posedVertexPosition(const Mesh& mesh,
     {
         return mVertices[mesh.mVbOffset + vertexIndex].pos;
     }
-    return glm::float3(skinMat * glm::float4(mVerticesSkinData[mesh.mSbOffset + vertexIndex].pos, 1.0f));
+    return { skinMat * glm::float4(mVerticesSkinData[mesh.mSbOffset + vertexIndex].pos, 1.0f) };
 }
 
 bool Scene::meshBounds(const uint32_t meshId, glm::float3& outMin, glm::float3& outMax)

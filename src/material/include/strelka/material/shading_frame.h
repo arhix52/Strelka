@@ -41,6 +41,18 @@
 
 #include <strelka/material/material_math.h>
 
+// NOLINTBEGIN(cppcoreguidelines-pro-type-member-init)
+//
+// Device-shared header: NVCC and the Metal compiler read this too, and
+// clang-tidy only ever sees the host build, so these two suggestions cannot be
+// taken here. Initialising the locals means a dead store in a BSDF inner loop --
+// they are out-parameters written on the next line -- and the fixer spells the
+// initialiser NAN, which needs <math.h>, which Metal rejects outright. Default
+// member initialisers do the same to structs that are memcpy'd to the GPU.
+// Suppressed rather than left to warn because these repeat in every translation
+// unit that includes the header, and 700 lines of unactionable output per build
+// is how the handful that matter get skipped.
+
 /// True when a hit with `nDotV = dot(shading_normal, wo)` should be shaded with
 /// the shading frame flipped to face the viewer.
 ///
@@ -103,3 +115,5 @@ DEVICE_FUNC ShadedFrame shadedFrame(bool frontFace, float nDotV, float transmiss
 }
 
 #endif // STRELKA_MATERIAL_SHADING_FRAME_H
+
+// NOLINTEND(cppcoreguidelines-pro-type-member-init)

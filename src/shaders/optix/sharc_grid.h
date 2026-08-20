@@ -17,6 +17,18 @@
 
 #include <cstdint>
 
+// NOLINTBEGIN(cppcoreguidelines-init-variables)
+//
+// Device-shared header: NVCC and the Metal compiler read this too, and
+// clang-tidy only ever sees the host build, so these two suggestions cannot be
+// taken here. Initialising the locals means a dead store in a BSDF inner loop --
+// they are out-parameters written on the next line -- and the fixer spells the
+// initialiser NAN, which needs <math.h>, which Metal rejects outright. Default
+// member initialisers do the same to structs that are memcpy'd to the GPU.
+// Suppressed rather than left to warn because these repeat in every translation
+// unit that includes the header, and 700 lines of unactionable output per build
+// is how the handful that matter get skipped.
+
 #if defined(__CUDACC__)
 #    define STRELKA_SHARC_FN static __forceinline__ __device__
 #else
@@ -767,3 +779,5 @@ STRELKA_SHARC_FN ResolveOutput resolveEntry(const ResolveInput& input, uint32_t 
 
 } // namespace oka::sharc
 
+
+// NOLINTEND(cppcoreguidelines-init-variables)

@@ -168,10 +168,18 @@
     using float4 = glm::vec4;
     #endif
 
+    // NOLINTBEGIN(modernize-return-braced-init-list)
+    //
+    // Naming the type is the whole point of a shim three compilers share, so a
+    // braced return would delete the only thing these lines say. Markers rather
+    // than trailing NOLINTs because clang-format splits a one-liner it is asked
+    // to format and carries the comment to the closing brace, where it suppresses
+    // nothing -- and this block is hand-aligned, so it is not formatted at all.
     inline float3 make_float3(float x, float y, float z) { return float3(x, y, z); }
     inline float3 make_float3(float v)                    { return float3(v); }
     inline float2 make_float2(float x, float y)           { return float2(x, y); }
     inline float4 make_float4(float x, float y, float z, float w) { return float4(x, y, z, w); }
+    // NOLINTEND(modernize-return-braced-init-list)
 
     using glm::dot;
     using glm::cross;

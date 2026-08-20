@@ -19,6 +19,14 @@
 #
 # readability-* and hicpp-* stay off for the same reason.
 #
+# modernize-use-std-numbers is off for a structural reason rather than a
+# stylistic one. Every host site was converted to std::numbers; what is left, and
+# cannot be, is M_PI_F in the material and shader headers -- <numbers> exists
+# under neither the Metal compiler nor NVCC, and the point of that constant is
+# that all three compilers see the same one. Those headers are pulled into a
+# dozen host translation units apiece, so the check was printing 474 lines per
+# build, 63% of everything the analyzer had to say.
+#
 # The fixed-seed checks are off because a fixed seed is the point: a renderer's
 # tests have to produce the same image twice, and a sampler seeded from the clock
 # is not reproducible. It takes three entries -- bugprone-random-generator-seed
@@ -51,6 +59,7 @@ Checks: >
   -modernize-use-designated-initializers,
   -modernize-avoid-c-arrays,
   -modernize-use-auto,
+  -modernize-use-std-numbers,
   -cppcoreguidelines-pro-type-vararg,
   -cppcoreguidelines-pro-type-cstyle-cast,
   -cppcoreguidelines-pro-bounds-array-to-pointer-decay,

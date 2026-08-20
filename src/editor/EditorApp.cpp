@@ -1409,7 +1409,7 @@ glm::float3 auditChannelMean(const AuditImage& img)
     }
     const size_t pixelCount = img.px.size() / 4;
     const double pixels = img.px.empty() ? 1.0 : (double)pixelCount;
-    return glm::float3(sum / pixels);
+    return { sum / pixels };
 }
 
 } // namespace

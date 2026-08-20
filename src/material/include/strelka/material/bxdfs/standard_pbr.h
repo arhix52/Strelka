@@ -26,6 +26,18 @@
 #include "../iridescence.h"
 #include "../shading_frame.h"
 
+// NOLINTBEGIN(cppcoreguidelines-pro-type-member-init, cppcoreguidelines-init-variables)
+//
+// Device-shared header: NVCC and the Metal compiler read this too, and
+// clang-tidy only ever sees the host build, so these two suggestions cannot be
+// taken here. Initialising the locals means a dead store in a BSDF inner loop --
+// they are out-parameters written on the next line -- and the fixer spells the
+// initialiser NAN, which needs <math.h>, which Metal rejects outright. Default
+// member initialisers do the same to structs that are memcpy'd to the GPU.
+// Suppressed rather than left to warn because these repeat in every translation
+// unit that includes the header, and 700 lines of unactionable output per build
+// is how the handful that matter get skipped.
+
 // ---------------------------------------------------------------------------
 // Internal: compute lobe weights for stochastic lobe selection
 // ---------------------------------------------------------------------------
@@ -1108,3 +1120,5 @@ DEVICE_FUNC float standard_pbr_pdf(const THREAD_REF SurfaceInteraction& si, floa
 }
 
 #endif // STRELKA_BXDF_STANDARD_PBR_H
+
+// NOLINTEND(cppcoreguidelines-pro-type-member-init, cppcoreguidelines-init-variables)

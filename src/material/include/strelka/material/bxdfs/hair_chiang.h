@@ -25,32 +25,44 @@
 #include "../surface_interaction.h"
 #include "../fresnel.h"
 
-#if defined(__METAL_VERSION__)
-#    define hair_sinhf(x) metal::sinh(x)
-#    define hair_asinf(x) metal::asin(x)
-#    define hair_atan2f(y, x) metal::atan2(y, x)
-#    define hair_floorf(x) metal::floor(x)
-#    define hair_copysignf(a, b) metal::copysign(a, b)
-#else
-#    define hair_sinhf(x) sinhf(x)
-#    define hair_asinf(x) asinf(x)
-#    define hair_atan2f(y, x) atan2f(y, x)
-#    define hair_floorf(x) floorf(x)
-#    define hair_copysignf(a, b) copysignf(a, b)
-#endif
+// NOLINTBEGIN(cppcoreguidelines-pro-type-member-init, cppcoreguidelines-init-variables)
+//
+// Device-shared header: NVCC and the Metal compiler read this too, and
+// clang-tidy only ever sees the host build, so these two suggestions cannot be
+// taken here. Initialising the locals means a dead store in a BSDF inner loop --
+// they are out-parameters written on the next line -- and the fixer spells the
+// initialiser NAN, which needs <math.h>, which Metal rejects outright. Default
+// member initialisers do the same to structs that are memcpy'd to the GPU.
+// Suppressed rather than left to warn because these repeat in every translation
+// unit that includes the header, and 700 lines of unactionable output per build
+// is how the handful that matter get skipped.
 
-#ifndef M_2PI_F
-#    define M_2PI_F (2.0f * M_PI_F)
-#endif
-#ifndef M_1_2PI_F
-#    define M_1_2PI_F (0.5f * M_1_PI_F)
-#endif
-#ifndef M_SQRT_PI_8_F
-#    define M_SQRT_PI_8_F 0.6266570686577501f
-#endif
-#ifndef M_LN_2PI_F
-#    define M_LN_2PI_F 1.8378770664093453f
-#endif
+#    if defined(__METAL_VERSION__)
+#        define hair_sinhf(x) metal::sinh(x)
+#        define hair_asinf(x) metal::asin(x)
+#        define hair_atan2f(y, x) metal::atan2(y, x)
+#        define hair_floorf(x) metal::floor(x)
+#        define hair_copysignf(a, b) metal::copysign(a, b)
+#    else
+#        define hair_sinhf(x) sinhf(x)
+#        define hair_asinf(x) asinf(x)
+#        define hair_atan2f(y, x) atan2f(y, x)
+#        define hair_floorf(x) floorf(x)
+#        define hair_copysignf(a, b) copysignf(a, b)
+#    endif
+
+#    ifndef M_2PI_F
+#        define M_2PI_F (2.0f * M_PI_F)
+#    endif
+#    ifndef M_1_2PI_F
+#        define M_1_2PI_F (0.5f * M_1_PI_F)
+#    endif
+#    ifndef M_SQRT_PI_8_F
+#        define M_SQRT_PI_8_F 0.6266570686577501f
+#    endif
+#    ifndef M_LN_2PI_F
+#        define M_LN_2PI_F 1.8378770664093453f
+#    endif
 
 // Cuticle tilt, radians. Cycles Principled Hair default Offset.
 #define HAIR_CUTICLE_ALPHA 0.034906585f
@@ -477,3 +489,5 @@ DEVICE_FUNC float hair_chiang_pdf(const THREAD_REF SurfaceInteraction& si, float
 }
 
 #endif // STRELKA_BXDF_HAIR_CHIANG_H
+
+// NOLINTEND(cppcoreguidelines-pro-type-member-init, cppcoreguidelines-init-variables)
