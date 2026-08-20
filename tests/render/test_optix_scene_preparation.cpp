@@ -29,19 +29,19 @@ struct Recorder
     SceneBuildHooks hooks()
     {
         SceneBuildHooks h;
-        h.buildBuffers = [this]() { ran.push_back("buffers"); };
-        h.buildEnvironment = [this](oka::Buffer*) { ran.push_back("environment"); };
-        h.publishMaterialParams = [this]() { ran.push_back("material params"); };
+        h.buildBuffers = [this]() { ran.emplace_back("buffers"); };
+        h.buildEnvironment = [this](oka::Buffer*) { ran.emplace_back("environment"); };
+        h.publishMaterialParams = [this]() { ran.emplace_back("material params"); };
         h.stepStructures = [this](double budgetMs) {
-            ran.push_back("structures");
+            ran.emplace_back("structures");
             lastStructureBudget = budgetMs;
             return ++structureCalls >= structureSlices;
         };
         h.stepMaterialTextures = [this](double) {
-            ran.push_back("material textures");
+            ran.emplace_back("material textures");
             return ++textureCalls >= textureSlices;
         };
-        h.buildTail = [this](oka::Buffer*) { ran.push_back("tail"); };
+        h.buildTail = [this](oka::Buffer*) { ran.emplace_back("tail"); };
         return h;
     }
 };

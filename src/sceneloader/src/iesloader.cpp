@@ -98,7 +98,7 @@ IesFileBody splitIesFile(const std::string& path)
         if (!body.found)
         {
             const std::string upper = upperCased(trimmed(line));
-            if (upper.rfind("TILT", 0) != 0)
+            if (!upper.starts_with("TILT"))
             {
                 continue; // still in the free-text header
             }

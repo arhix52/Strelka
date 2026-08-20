@@ -85,7 +85,7 @@ glm::float3 photometricDir(float verticalDeg, float azimuthDeg)
 {
     const float th = verticalDeg * float(M_PI) / 180.0f;
     const float ph = azimuthDeg * float(M_PI) / 180.0f;
-    return glm::float3(std::sin(th) * std::sin(ph), -std::sin(th) * std::cos(ph), -std::cos(th));
+    return { std::sin(th) * std::sin(ph), -std::sin(th) * std::cos(ph), -std::cos(th) };
 }
 
 } // namespace

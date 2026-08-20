@@ -84,7 +84,7 @@ public:
     {
         for (auto it = mMap.lower_bound(p); it != mMap.end();)
         {
-            if (std::string_view(it->first).substr(0, p.size()) != p)
+            if (!std::string_view(it->first).starts_with(p))
                 break;
             it = mMap.erase(it);
         }

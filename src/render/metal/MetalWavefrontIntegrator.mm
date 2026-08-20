@@ -301,9 +301,9 @@ void MetalWavefrontIntegrator::reportStageTimings()
     }
 
     double sum = 0.0;
-    for (uint32_t k = 0; k < kStageCount; ++k)
+    for (double total : totals)
     {
-        sum += totals[k];
+        sum += total;
     }
     std::string line;
     for (uint32_t k = 0; k < kStageCount; ++k)

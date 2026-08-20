@@ -18,7 +18,7 @@ int main(int argc, const char* argv[])
     // startCapture failing with "Capture layer is not inserted".
     for (int i = 1; i < argc; ++i)
     {
-        if (std::string(argv[i]) == "--capture" || std::string(argv[i]).rfind("--capture=", 0) == 0)
+        if (std::string(argv[i]) == "--capture" || std::string(argv[i]).starts_with("--capture="))
         {
             // The one write to the environment in the tree, and it happens on the
             // first statement of main(): no other thread exists yet for setenv to

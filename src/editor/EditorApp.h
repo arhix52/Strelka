@@ -221,7 +221,7 @@ public:
     /// of that load. Waiting here rather than letting the member destructor do it
     /// also keeps the worker's raw pointer to m_sceneLoader valid for as long as
     /// the worker can still use it.
-    virtual ~EditorApp();
+    ~EditorApp() override;
 
     void framebufferResize(int newWidth, int newHeight) override;
 

@@ -65,7 +65,7 @@ class CameraController : public oka::InputHandler
     } mRotateKeys;
 
 public:
-    virtual ~CameraController() = default;
+    ~CameraController() override = default;
 
     void setGizmoBlocksInput(bool blocks)
     {

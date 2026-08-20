@@ -65,14 +65,14 @@ const char* const kSimplePhotometry =
 glm::float3 atVertical(float deg)
 {
     const float th = deg * float(M_PI) / 180.0f;
-    return glm::float3(std::sin(th), 0.0f, -std::cos(th));
+    return { std::sin(th), 0.0f, -std::cos(th) };
 }
 
 glm::float3 atAngles(float verticalDeg, float azimuthDeg)
 {
     const float th = verticalDeg * float(M_PI) / 180.0f;
     const float ph = azimuthDeg * float(M_PI) / 180.0f;
-    return glm::float3(std::sin(th) * std::sin(ph), -std::sin(th) * std::cos(ph), -std::cos(th));
+    return { std::sin(th) * std::sin(ph), -std::sin(th) * std::cos(ph), -std::cos(th) };
 }
 
 } // namespace

@@ -13,6 +13,7 @@
 #define TINYGLTF_IMPLEMENTATION
 #include "tiny_gltf.h"
 
+#include <algorithm>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -908,7 +909,7 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
             {
                 const glm::float3 sheenColor((float)c.Get(0).GetNumberAsDouble(), (float)c.Get(1).GetNumberAsDouble(),
                                              (float)c.Get(2).GetNumberAsDouble());
-                p.sheen = std::max(sheenColor.x, std::max(sheenColor.y, sheenColor.z));
+                p.sheen = std::max({ sheenColor.x, sheenColor.y, sheenColor.z });
                 if (p.sheen > 0.0f)
                     p.sheen_color = sheenColor / p.sheen;
             }

@@ -33,6 +33,7 @@
 #include <strelka/material/microfacet.h>
 #include <strelka/material/bsdf.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -104,8 +105,8 @@ float3 dir_at(float deg)
 // produces exactly zero for a grey F0.
 float chroma(float3 c)
 {
-    const float mx = std::max(c.x, std::max(c.y, c.z));
-    const float mn = std::min(c.x, std::min(c.y, c.z));
+    const float mx = std::max({ c.x, c.y, c.z });
+    const float mn = std::min({ c.x, c.y, c.z });
     return (mx > 1e-6f) ? (mx - mn) / mx : 0.0f;
 }
 

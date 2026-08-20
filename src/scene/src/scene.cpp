@@ -201,7 +201,7 @@ glm::quat Scene::makeQuatFromFloat4(const glm::float4& value)
 
 glm::float4 Scene::makeFloat4FromQuat(const glm::quat& q)
 {
-    return glm::float4(q.x, q.y, q.z, q.w);
+    return { q.x, q.y, q.z, q.w };
 }
 
 // packNormal() provided by <strelka/scene/vertex_packing.h>

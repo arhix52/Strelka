@@ -61,8 +61,7 @@ std::vector<glm::float3> unitVectors()
         for (int j = 0; j < 32; ++j)
         {
             const float phi = float(j) / 32.0f * 2.0f * 3.14159265358979f;
-            v.push_back(glm::float3(std::sin(theta) * std::cos(phi), std::cos(theta),
-                                    std::sin(theta) * std::sin(phi)));
+            v.emplace_back(std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi));
         }
     }
     return v;

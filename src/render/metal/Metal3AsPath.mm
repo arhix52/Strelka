@@ -21,9 +21,9 @@ namespace
 class Metal3AsPath final : public AccelBuildPath
 {
 public:
-    Metal3AsPath(MTL::Device* device, MTL::CommandQueue* queue) : mDevice(device), mCommandQueue(queue)
+    Metal3AsPath(MTL::Device* device, MTL::CommandQueue* queue)
+        : mDevice(device), mCommandQueue(queue), mBuildEvent(device->newSharedEvent())
     {
-        mBuildEvent = device->newSharedEvent();
     }
 
     ~Metal3AsPath() override

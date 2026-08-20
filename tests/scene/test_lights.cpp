@@ -53,9 +53,9 @@ TEST_CASE("a light's GPU record has no uninitialized fields")
     // Every light is memcpy'd to the GPU whole, including the fields its own type
     // never writes.
     const Scene::Light fresh;
-    for (int i = 0; i < 4; ++i)
+    for (auto point : fresh.points)
     {
-        CHECK(fresh.points[i] == glm::float4(0.0f));
+        CHECK(point == glm::float4(0.0f));
     }
     CHECK(fresh.normal == glm::float4(0.0f));
     CHECK(fresh.halfAngle == 0.0f);

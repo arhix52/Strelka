@@ -410,7 +410,7 @@ glm::vec3 EditorApp::computeSceneFitPosition(float fovDegrees) const
 {
     const auto& vertices = m_scene->getVertices();
     if (vertices.empty())
-        return glm::vec3(0, 0, -10);
+        return { 0, 0, -10 };
 
     // Compute AABB
     glm::vec3 aabbMin(std::numeric_limits<float>::max());

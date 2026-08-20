@@ -25,8 +25,7 @@ namespace
 
 std::string lightJsonPathFromScenePath(const std::string& gltfOrJsonPath)
 {
-    if (gltfOrJsonPath.size() >= 11 &&
-        gltfOrJsonPath.compare(gltfOrJsonPath.size() - 11, 11, "_light.json") == 0)
+    if (gltfOrJsonPath.size() >= 11 && gltfOrJsonPath.ends_with("_light.json"))
     {
         return gltfOrJsonPath;
     }

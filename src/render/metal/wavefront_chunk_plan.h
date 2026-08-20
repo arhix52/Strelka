@@ -74,7 +74,7 @@ inline std::vector<WavefrontChunk> makeWavefrontChunkPlan(uint32_t sampleCount,
             const bool earlyPath = longPath && begin < 16;
             const uint32_t currentChunkSize = earlyPath ? 1u : (longPath ? std::max(chunkSize, 16u) : chunkSize);
             const uint32_t phaseEnd = earlyPath ? 16u : bounceIterations;
-            const uint32_t end = begin + std::min(currentChunkSize, std::min(phaseEnd - begin, bounceIterations - begin));
+            const uint32_t end = begin + std::min({ currentChunkSize, phaseEnd - begin, bounceIterations - begin });
             chunks.push_back({ sample, begin, end, begin == 0, false });
             begin = end;
         }

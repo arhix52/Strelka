@@ -61,7 +61,7 @@ inline glm::float4x4 composeTrs(const glm::float3& translation, const glm::quat&
 /// GLM_FORCE_QUAT_DATA_WXYZ / XYZW.
 inline glm::quat quatFromGltf(float x, float y, float z, float w)
 {
-    return glm::quat(w, x, y, z);
+    return { w, x, y, z };
 }
 
 } // namespace oka

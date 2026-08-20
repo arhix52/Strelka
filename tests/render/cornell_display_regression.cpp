@@ -77,7 +77,7 @@ float3 applyCurve(ToneMapperType type, const float3 color, float maxOutput)
 
 float peakChannel(const float3 c)
 {
-    return std::max(std::max(c.x, c.y), c.z);
+    return std::max({ c.x, c.y, c.z });
 }
 
 const char* curveName(ToneMapperType type)

@@ -126,7 +126,7 @@ inline Extent resolveExtent(int srcWidth, int srcHeight, uint32_t maxDimension, 
 inline uint32_t fullMipLevelCount(int width, int height)
 {
     uint32_t levels = 1;
-    const uint32_t longest = (uint32_t)std::max(1, std::max(width, height));
+    const uint32_t longest = (uint32_t)std::max({ 1, width, height });
     while ((1u << levels) <= longest)
         ++levels;
     return levels;

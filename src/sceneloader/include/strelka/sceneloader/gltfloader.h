@@ -15,7 +15,7 @@ private:
     LoadProgress* mProgress = nullptr;
 
 public:
-    explicit GltfLoader(){}
+    explicit GltfLoader() = default;
 
     /// Where to report progress and where to read cancellation from. Optional:
     /// nothing here reports if it is left unset, which is what the headless path

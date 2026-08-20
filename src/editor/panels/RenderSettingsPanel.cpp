@@ -3,7 +3,7 @@
 #include "../editor_denoiser_ui.h"
 #include "../editor_frame_budget.h"
 
-#include <math.h>
+#include <cmath>
 #include <strelka/display/output_policy.h>
 
 #include "imgui.h"

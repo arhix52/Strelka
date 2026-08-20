@@ -67,8 +67,8 @@ inline uint32_t packColor(const glm::float4& c)
 inline glm::float4 unpackColor(uint32_t val)
 {
     constexpr float s = 1.0f / 255.0f;
-    return glm::float4(static_cast<float>(val & 0xffu) * s, static_cast<float>((val >> 8) & 0xffu) * s,
-                       static_cast<float>((val >> 16) & 0xffu) * s, static_cast<float>((val >> 24) & 0xffu) * s);
+    return { static_cast<float>(val & 0xffu) * s, static_cast<float>((val >> 8) & 0xffu) * s,
+             static_cast<float>((val >> 16) & 0xffu) * s, static_cast<float>((val >> 24) & 0xffu) * s };
 }
 
 // Pack UV to uint32_t. Valid range: [-10, 10]
