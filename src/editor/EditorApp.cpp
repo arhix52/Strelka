@@ -4416,6 +4416,11 @@ void EditorApp::frameSelectionInView()
     // over so animation does not pose the frame back on the next tick.
     setCameraDetached(true);
 
+    // Framing replaces the pose outright, so anything the user had queued -- half
+    // a drag, a movement key still coasting -- must not land on top of the new one
+    // a frame later and slide the frame the user just asked for.
+    m_cameraController->clearPendingInput();
+
     Camera& ctrlCam = m_cameraController->getCamera();
     editor_camera_framing::frameCamera(ctrlCam, worldMin, worldMax, aspect);
     ctrlCam.updateAspectRatio(aspect);

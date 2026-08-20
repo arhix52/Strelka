@@ -382,42 +382,70 @@ void Camera::translate(glm::float3 delta)
 // seconds, which is the same order as the walk speed does for a perspective camera.
 static constexpr float kOrthoKeyZoomRate = 1.0f;
 
+bool Camera::isSettling() const
+{
+    // Below this the remaining glide is a fraction of a pixel at any sane speed,
+    // and holding on to it would keep the camera "moving" -- and so keep
+    // accumulation restarting -- forever, since an exponential never reaches zero.
+    constexpr float kIdleInput = 1e-3f;
+    return glm::dot(mMoveInput, mMoveInput) > kIdleInput * kIdleInput;
+}
+
 void Camera::update(float deltaTime)
 {
     updated = false;
-    if (type == CameraType::firstperson)
+    if (type != CameraType::firstperson)
     {
-        if (moving())
+        return;
+    }
+
+    // Axis input the keys ask for, before smoothing: opposite keys cancel rather
+    // than both being applied, which is also what the old branch chain did.
+    const glm::float3 target{ (keys.right ? 1.0f : 0.0f) - (keys.left ? 1.0f : 0.0f),
+                              (keys.up ? 1.0f : 0.0f) - (keys.down ? 1.0f : 0.0f),
+                              (keys.forward ? 1.0f : 0.0f) - (keys.back ? 1.0f : 0.0f) };
+
+    if (movementSmoothing > 0.0f && deltaTime > 0.0f)
+    {
+        // Frame-rate independent exponential approach: the same wall-clock time
+        // gets the same fraction of the way to `target` whether it took one long
+        // frame or ten short ones. A plain lerp by a constant factor would not,
+        // and would tie the feel of the camera to how expensive the scene is.
+        const float alpha = 1.0f - std::exp(-deltaTime / movementSmoothing);
+        mMoveInput += (target - mMoveInput) * alpha;
+        if (target == glm::float3(0.0f) && !isSettling())
         {
-            const float moveSpeed = deltaTime * movementSpeed;
-            if (keys.up)
-                position += getWorldUp() * moveSpeed;
-            if (keys.down)
-                position -= getWorldUp() * moveSpeed;
-            if (keys.left)
-                position -= getRight() * moveSpeed;
-            if (keys.right)
-                position += getRight() * moveSpeed;
-            // Forward and back are the two that a parallel projection cannot honour
-            // by moving: see zoomOrthographic. Panning across the film still works
-            // the same way for both, which is why only these two branch.
-            if (projection == ProjectionType::orthographic)
-            {
-                if (keys.forward)
-                    zoomOrthographic(std::exp(-kOrthoKeyZoomRate * moveSpeed));
-                if (keys.back)
-                    zoomOrthographic(std::exp(kOrthoKeyZoomRate * moveSpeed));
-            }
-            else
-            {
-                if (keys.forward)
-                    position += getFront() * moveSpeed;
-                if (keys.back)
-                    position -= getFront() * moveSpeed;
-            }
-            updateViewMatrix();
+            mMoveInput = glm::float3(0.0f);
         }
     }
+    else
+    {
+        mMoveInput = target;
+    }
+
+    if (mMoveInput == glm::float3(0.0f) && !mouseButtons.right && !mouseButtons.left && !mouseButtons.middle)
+    {
+        return;
+    }
+
+    const float moveSpeed = deltaTime * movementSpeed;
+    position += getRight() * (mMoveInput.x * moveSpeed);
+    position += getWorldUp() * (mMoveInput.y * moveSpeed);
+    // Forward and back are the two that a parallel projection cannot honour
+    // by moving: see zoomOrthographic. Panning across the film still works
+    // the same way for both, which is why only these two branch.
+    if (projection == ProjectionType::orthographic)
+    {
+        if (mMoveInput.z != 0.0f)
+        {
+            zoomOrthographic(std::exp(-kOrthoKeyZoomRate * moveSpeed * mMoveInput.z));
+        }
+    }
+    else
+    {
+        position += getFront() * (mMoveInput.z * moveSpeed);
+    }
+    updateViewMatrix();
 }
 
 void generatePickRay(const Camera& camera, const glm::float2& uv, glm::float3& origin, glm::float3& direction)

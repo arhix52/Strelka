@@ -87,7 +87,18 @@ TEST_CASE("movement keys take the camera over")
     controller.update(0.016, 1.0f);
     CHECK(controller.consumeUserMovedCamera());
 
+    // The key coming up does not stop the camera dead -- movement is smoothed, so
+    // it glides for a couple of tenths of a second, and that glide is still the
+    // user's motion. Only once it has settled is the camera nobody's.
     controller.keyCallback(GLFW_KEY_W, 0, GLFW_RELEASE, 0);
+    controller.update(0.016, 1.0f);
+    CHECK(controller.consumeUserMovedCamera());
+
+    for (int i = 0; i < 100; ++i)
+    {
+        controller.update(0.016, 1.0f);
+        controller.consumeUserMovedCamera();
+    }
     controller.update(0.016, 1.0f);
     CHECK_FALSE(controller.consumeUserMovedCamera());
 

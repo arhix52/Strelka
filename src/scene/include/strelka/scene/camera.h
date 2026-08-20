@@ -74,6 +74,24 @@ public:
     float rotationSpeed = 0.025f;
     float movementSpeed = 5.0f;
 
+    // Time constant, in seconds, of the exponential ramp between "key not held"
+    // and "key held" -- 0 means the old instant behaviour and is the default, so
+    // a camera driven from a test or from animation still moves exactly as far as
+    // deltaTime * movementSpeed says.
+    //
+    // Interactive movement needs it because a path tracer's frame time is not
+    // stable: the frame that restarts accumulation is much dearer than the ones
+    // that follow it, so a step of deltaTime * speed lands the camera in a
+    // different place every frame for one unchanging key. Ramping the *input*
+    // rather than the step spreads that jitter over several frames, which is
+    // what the eye reads as smooth.
+    float movementSmoothing = 0.0f;
+    // Smoothed key input, one component per axis in [-1, 1]: x right, y up,
+    // z forward. Not the camera's velocity in world units -- movementSpeed and
+    // deltaTime still scale it -- so changing speed mid-move does not have to
+    // rescale anything held here.
+    glm::float3 mMoveInput{ 0.0f };
+
     bool updated = false;
     bool isDirty = true;
 
@@ -122,6 +140,10 @@ public:
     glm::float3 getUp() const;
     glm::float3 getRight() const;
     bool moving() const;
+    /// Whether smoothed input is still carrying the camera after the keys were
+    /// released. The editor has to keep treating that as user-driven motion, or
+    /// animation poses the camera back mid-glide.
+    bool isSettling() const;
     float getNearClip() const;
     float getFarClip() const;
     void setFov(float fov);

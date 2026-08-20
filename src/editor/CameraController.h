@@ -3,6 +3,7 @@
 #include <strelka/scene/camera.h>
 #include <GLFW/glfw3.h>
 
+#include <algorithm>
 #include <cmath>
 
 namespace oka
@@ -14,6 +15,31 @@ class CameraController : public oka::InputHandler
     float rotationSpeed = 0.025f;
     float movementSpeed = 1.0f;
     float keyRotationSpeed = 60.0f; // degrees per second for arrow key rotation
+
+    // Smoothing time constants, in seconds. Everything the user drives the camera
+    // with is filtered through one of these, because the raw input is not the
+    // problem -- the frame it lands on is. A path tracer's frame time swings by a
+    // factor of several between the frame that restarts accumulation and the ones
+    // that follow, so equal input per frame is unequal motion per frame, and that
+    // is what reads as jerky. Filtering spreads each frame's share over the next
+    // few, which costs a little latency and buys motion that does not step.
+    //
+    // Look is the tighter of the two: the hand expects the view to follow the
+    // mouse, and past ~50 ms the lag is felt as the camera lagging rather than as
+    // smoothness.
+    static constexpr float kMoveSmoothingSec = 0.09f;
+    static constexpr float kLookSmoothingSec = 0.045f;
+    // A frame longer than this is a hitch -- a scene load, a window drag, a
+    // breakpoint -- not slow rendering. Integrating it would teleport the camera
+    // by whatever the pause happened to last, so it is treated as one slow frame.
+    static constexpr float kMaxFrameSec = 0.1f;
+
+    // Input the user has given that has not been applied to the camera yet, in the
+    // units rotate()/translate() take. A buffer rather than a filtered value, so
+    // nothing is lost or invented: every pixel of mouse travel still reaches the
+    // camera, just spread over a few frames.
+    float mPendingLookX = 0.0f, mPendingLookY = 0.0f;
+    glm::float3 mPendingTranslate{ 0.0f };
     // E-folds of orthographic zoom per wheel notch: ~16% of the frame per click,
     // and it composes smoothly with the fractional deltas a trackpad sends.
     static constexpr float kWheelZoomRate = 0.15f;
@@ -62,31 +88,90 @@ public:
 
     void update(double deltaTime, float speed)
     {
-        const float dt = static_cast<float>(deltaTime);
+        const float dt = std::min(static_cast<float>(deltaTime), kMaxFrameSec);
         mCam.rotationSpeed = rotationSpeed;
         mCam.movementSpeed = speed;
-        if (mCam.keys.left || mCam.keys.right || mCam.keys.up || mCam.keys.down || mCam.keys.forward ||
-            mCam.keys.back)
+        mCam.movementSmoothing = kMoveSmoothingSec;
+        if (mCam.keys.left || mCam.keys.right || mCam.keys.up || mCam.keys.down || mCam.keys.forward || mCam.keys.back)
         {
             mUserMovedCamera = true;
         }
         mCam.update(dt);
+        // The camera can still be gliding after the key came up. That is the user's
+        // motion finishing, not animation's turn to pose the camera back.
+        if (mCam.isSettling())
+        {
+            mUserMovedCamera = true;
+        }
 
-        // Arrow key rotation
+        // Arrow key rotation. Queued rather than applied, so it goes through the
+        // same filter the mouse does and a tap does not start and stop abruptly.
         if (mRotateKeys.left || mRotateKeys.right || mRotateKeys.up || mRotateKeys.down)
         {
             mUserMovedCamera = true;
-            float dx = 0.0f, dy = 0.0f;
             if (mRotateKeys.left)
-                dx -= keyRotationSpeed * dt;
+                mPendingLookX -= keyRotationSpeed * dt;
             if (mRotateKeys.right)
-                dx += keyRotationSpeed * dt;
+                mPendingLookX += keyRotationSpeed * dt;
             if (mRotateKeys.up)
-                dy -= keyRotationSpeed * dt;
+                mPendingLookY -= keyRotationSpeed * dt;
             if (mRotateKeys.down)
-                dy += keyRotationSpeed * dt;
+                mPendingLookY += keyRotationSpeed * dt;
+        }
+
+        applyPendingInput(dt);
+    }
+
+    /// Hand the queued look/translate input to the camera, a fixed fraction of
+    /// what is left per unit of wall-clock time.
+    ///
+    /// Exponential rather than a fixed number of frames: the fraction depends on
+    /// dt, so the camera arrives at the same place at the same time whether the
+    /// scene renders at 15 fps or 120, and the feel of the control does not change
+    /// with how expensive the scene is.
+    void applyPendingInput(float dt)
+    {
+        // Below this a residual would take forever to reach zero (an exponential
+        // never does) while keeping the camera nominally in motion, which keeps
+        // accumulation restarting on a camera nobody is touching.
+        constexpr float kLookEpsilon = 1e-3f; // degrees of raw mouse travel
+        constexpr float kTranslateEpsilon = 1e-6f; // world units
+
+        const float alpha = (dt > 0.0f) ? (1.0f - std::exp(-dt / kLookSmoothingSec)) : 1.0f;
+
+        if (std::abs(mPendingLookX) > kLookEpsilon || std::abs(mPendingLookY) > kLookEpsilon)
+        {
+            const float dx = mPendingLookX * alpha;
+            const float dy = mPendingLookY * alpha;
+            mPendingLookX -= dx;
+            mPendingLookY -= dy;
             mCam.rotate(dx, dy);
         }
+        else
+        {
+            mPendingLookX = mPendingLookY = 0.0f;
+        }
+
+        if (glm::dot(mPendingTranslate, mPendingTranslate) > kTranslateEpsilon * kTranslateEpsilon)
+        {
+            const glm::float3 step = mPendingTranslate * alpha;
+            mPendingTranslate -= step;
+            mCam.translate(step);
+        }
+        else
+        {
+            mPendingTranslate = glm::float3(0.0f);
+        }
+    }
+
+    /// Drop queued input without applying it. Used where the camera's pose is
+    /// being replaced outright, so half a gesture cannot arrive on top of the new
+    /// one a frame later.
+    void clearPendingInput()
+    {
+        mPendingLookX = mPendingLookY = 0.0f;
+        mPendingTranslate = glm::float3(0.0f);
+        mCam.mMoveInput = glm::float3(0.0f);
     }
 
     void updateViewMatrix()
@@ -117,6 +202,8 @@ public:
     void setCamera(Camera& cam)
     {
         mCam = cam;
+        mCam.movementSmoothing = kMoveSmoothingSec;
+        clearPendingInput();
     }
 
     CameraController(Camera& cam, bool isYup)
@@ -132,6 +219,7 @@ public:
             cam.setWorldForward(glm::float3(0.0, 1.0, 0.0));
         }
         mCam = cam;
+        mCam.movementSmoothing = kMoveSmoothingSec;
     }
 
     void keyCallback(int key, [[maybe_unused]] int scancode, int action, [[maybe_unused]] int mods) override
@@ -260,17 +348,24 @@ public:
             }
         }
 
+        // Queued, not applied: mouse motion arrives in a burst of callbacks inside
+        // one pollEvents, so applying it here puts a whole frame's travel into a
+        // single step however long that frame turned out to be. applyPendingInput
+        // pays it out against the clock instead. Nothing is dropped -- the queue
+        // drains -- so a gesture still turns the camera by exactly as much.
         if (mCam.mouseButtons.right)
         {
-            mCam.rotate(-dx, -dy);
+            mPendingLookX += -dx;
+            mPendingLookY += -dy;
         }
         if (mCam.mouseButtons.left)
         {
-            mCam.translate(glm::float3(-0.0, 0.0, -dy * .005 * movementSpeed));
+            mPendingTranslate.z += -dy * .005f * movementSpeed;
         }
         if (mCam.mouseButtons.middle)
         {
-            mCam.translate(glm::float3(-dx * 0.01f, -dy * 0.01f, 0.0f));
+            mPendingTranslate.x += -dx * 0.01f;
+            mPendingTranslate.y += -dy * 0.01f;
         }
         mCam.mousePos[0] = static_cast<float>(xpos);
         mCam.mousePos[1] = static_cast<float>(ypos);

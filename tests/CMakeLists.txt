@@ -40,6 +40,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_punctual_lights.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_gizmo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_camera_takeover.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_camera_smoothing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_viewport_input.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_viewport_layout.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_screenshot_semantics.cpp
