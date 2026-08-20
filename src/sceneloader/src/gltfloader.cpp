@@ -33,6 +33,7 @@
 namespace fs = std::filesystem;
 
 #include "nlohmann/json.hpp"
+#include <numbers>
 using json = nlohmann::json;
 
 namespace oka
@@ -1162,7 +1163,7 @@ void loadCameras(const tinygltf::Model& model, oka::Scene& scene, std::vector<in
         if (cameraGltf.type == "perspective")
         {
             camera.projection = oka::Camera::ProjectionType::perspective;
-            camera.fov = static_cast<float>(cameraGltf.perspective.yfov) * (180.0f / 3.1415926f);
+            camera.fov = static_cast<float>(cameraGltf.perspective.yfov) * (180.0f / std::numbers::pi_v<float>);
             camera.authoredAspect = (float)cameraGltf.perspective.aspectRatio;
             camera.znear = static_cast<float>(cameraGltf.perspective.znear);
             camera.zfar = static_cast<float>(cameraGltf.perspective.zfar);
@@ -1505,14 +1506,14 @@ bool loadPunctualLights(const tinygltf::Model& model, oka::Scene& scene)
             desc.type = LIGHT_TYPE_DISTANT;
             desc.intensityUnit = LIGHT_UNIT_IRRADIANCE;
             // glTF has no sun angular size; use a small disk so soft shadows work.
-            desc.halfAngle = 0.53f * 0.5f * (float(M_PI) / 180.0f);
+            desc.halfAngle = 0.53f * 0.5f * (std::numbers::pi_v<float> / 180.0f);
         }
         else if (type == "spot")
         {
             desc.type = LIGHT_TYPE_SPOT;
             desc.intensityUnit = LIGHT_UNIT_INTENSITY;
             float inner = 0.0f;
-            float outer = float(M_PI) / 4.0f;
+            float outer = std::numbers::pi_v<float> / 4.0f;
             if (L.Has("spot") && L.Get("spot").IsObject())
             {
                 const tinygltf::Value& spot = L.Get("spot");
@@ -1803,7 +1804,7 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
                               lightDesc.position = glm::float3(0.0f, 0.0f, 0.0f);
                               lightDesc.orientation = glm::float3(-45.0f, 15.0f, 0.0f);
                               lightDesc.type = LIGHT_TYPE_DISTANT;
-                              lightDesc.halfAngle = 10.0f * 0.5f * (float(M_PI) / 180.0f);
+                              lightDesc.halfAngle = 10.0f * 0.5f * (std::numbers::pi_v<float> / 180.0f);
                               lightDesc.intensity = 100000;
                               lightDesc.color = glm::float3(1.0);
                               scene.createLight(lightDesc);

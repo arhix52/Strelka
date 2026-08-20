@@ -12,6 +12,7 @@
 #include "../support/sampling.h"
 
 #include <cmath>
+#include <numbers>
 
 using oka::test::stratum;
 
@@ -83,7 +84,7 @@ MaterialParams film_params(float roughness, bool thin)
 // within the bubble, which is the case the defect lived in.
 SurfaceInteraction wall_si(float degrees, bool front, float roughness = 0.0f, bool thin = true)
 {
-    const float th = degrees * (float)M_PI / 180.0f;
+    const float th = degrees * std::numbers::pi_v<float> / 180.0f;
     const float c = std::cos(th) * (front ? 1.0f : -1.0f);
     const float s = std::sin(th);
 
@@ -146,7 +147,7 @@ TEST_CASE("a thin wall transmits past the critical angle of the solid it is made
 {
     // asin(1 / 1.6) = 38.68 degrees. Everything below used to reflect with
     // probability 1 on the far wall.
-    const float critical = std::asin(1.0f / kIor) * 180.0f / (float)M_PI;
+    const float critical = std::asin(1.0f / kIor) * 180.0f / std::numbers::pi_v<float>;
     REQUIRE(critical == doctest::Approx(38.68f).epsilon(0.01));
 
     for (float deg : { 40.0f, 50.0f, 60.0f, 70.0f, 80.0f, 88.0f })
@@ -166,7 +167,7 @@ TEST_CASE("a thin wall reflects by the entering-side Fresnel from either side")
     // ratio would put the far wall at 1.0 for every angle past 38.7 degrees.
     for (float deg : { 0.0f, 20.0f, 40.0f, 60.0f, 80.0f })
     {
-        const float cos_i = std::cos(deg * (float)M_PI / 180.0f);
+        const float cos_i = std::cos(deg * std::numbers::pi_v<float> / 180.0f);
         const float expect = fresnel_dielectric(cos_i, 1.0f / kIor);
 
         float front_t = 0.0f, front_e = 0.0f, far_t = 0.0f, far_e = 0.0f;

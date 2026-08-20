@@ -7,6 +7,7 @@
 #include <fstream>
 #include <filesystem>
 #include <cmath>
+#include <numbers>
 
 using namespace oka;
 namespace fs = std::filesystem;
@@ -35,7 +36,7 @@ TEST_CASE("Light JSON round-trip preserves desc fields")
     Scene::UniformLightDesc distant{};
     distant.type = LIGHT_TYPE_DISTANT;
     distant.orientation = glm::float3(-45.0f, 15.0f, 0.0f);
-    distant.halfAngle = 0.53f * 0.5f * (float(M_PI) / 180.0f);
+    distant.halfAngle = 0.53f * 0.5f * (std::numbers::pi_v<float> / 180.0f);
     distant.color = glm::float3(1.0f);
     distant.intensity = 50000.0f;
     scene.createLight(distant);
@@ -151,7 +152,7 @@ TEST_CASE("a projector round-trips its frame and its image through the sidecar")
     projector.position = glm::float3(0.0f, 1.8f, 4.0f);
     projector.orientation = glm::float3(0.0f, 180.0f, 0.0f);
     // 40 degrees of horizontal field, stored as its half angle.
-    projector.outerConeAngle = 20.0f * (float(M_PI) / 180.0f);
+    projector.outerConeAngle = 20.0f * (std::numbers::pi_v<float> / 180.0f);
     projector.projectorAspect = 16.0f / 9.0f;
     projector.projectorEdgeSoftness = 0.05f;
     projector.projectorImagePath = "slides/beach.png";
@@ -171,7 +172,7 @@ TEST_CASE("a projector round-trips its frame and its image through the sidecar")
     CHECK(p.name == "beamer");
     CHECK(p.intensityUnit == LIGHT_UNIT_POWER);
     CHECK(p.intensity == doctest::Approx(250.0f));
-    CHECK(p.outerConeAngle == doctest::Approx(20.0f * (float(M_PI) / 180.0f)).epsilon(1e-4));
+    CHECK(p.outerConeAngle == doctest::Approx(20.0f * (std::numbers::pi_v<float> / 180.0f)).epsilon(1e-4));
     CHECK(p.projectorAspect == doctest::Approx(16.0f / 9.0f));
     CHECK(p.projectorEdgeSoftness == doctest::Approx(0.05f));
     CHECK(p.range == doctest::Approx(20.0f));
@@ -200,7 +201,7 @@ TEST_CASE("a sidecar names a projector's field of view, not half of it")
     projector.type = LIGHT_TYPE_PROJECTOR;
     projector.intensity = 1.0f;
     projector.color = glm::float3(1.0f);
-    projector.outerConeAngle = 30.0f * (float(M_PI) / 180.0f);
+    projector.outerConeAngle = 30.0f * (std::numbers::pi_v<float> / 180.0f);
     scene.createLight(projector);
 
     const fs::path tmp = fs::temp_directory_path() / "strelka_projector_fov.gltf";
@@ -219,7 +220,8 @@ TEST_CASE("a sidecar names a projector's field of view, not half of it")
     Scene loaded;
     REQUIRE(loadLightsJson(loaded, jsonPath.string()));
     REQUIRE(loaded.getLightsDesc().size() == 1);
-    CHECK(loaded.getLightsDesc()[0].outerConeAngle == doctest::Approx(30.0f * (float(M_PI) / 180.0f)).epsilon(1e-4));
+    CHECK(loaded.getLightsDesc()[0].outerConeAngle ==
+          doctest::Approx(30.0f * (std::numbers::pi_v<float> / 180.0f)).epsilon(1e-4));
 
     fs::remove(jsonPath);
 }

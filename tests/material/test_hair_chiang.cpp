@@ -7,6 +7,7 @@
 #include "../support/sampling.h"
 
 #include <cmath>
+#include <numbers>
 
 using oka::test::stratum;
 
@@ -16,7 +17,7 @@ namespace
 SurfaceInteraction hair_si(float tilt_deg, float roughness = 0.3f)
 {
     SurfaceInteraction si{};
-    const float a = tilt_deg * (float)M_PI / 180.0f;
+    const float a = tilt_deg * std::numbers::pi_v<float> / 180.0f;
     // View in the XZ plane; strand runs along +Y (tangent).
     si.wo = safe_normalize(make_float3(std::sin(a), 0.0f, std::cos(a)));
     si.tangent = make_float3(0.0f, 1.0f, 0.0f);
@@ -167,7 +168,7 @@ TEST_CASE("hair Chiang scatters over the whole sphere, not a hemisphere")
     int nonzero = 0;
     for (int i = 0; i < 64; ++i)
     {
-        const float phi = (float)(2.0 * M_PI * (i + 0.5) / 64.0);
+        const float phi = (float)(2.0 * std::numbers::pi * (i + 0.5) / 64.0);
         // Around the fibre, on the far side of the shading normal.
         const float3 wi = safe_normalize(make_float3(0.35f * std::cos(phi),
                                                      0.35f * std::sin(phi), -1.0f));

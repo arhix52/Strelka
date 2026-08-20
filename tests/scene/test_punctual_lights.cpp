@@ -9,6 +9,7 @@
 #include <fstream>
 #include <filesystem>
 #include <cmath>
+#include <numbers>
 
 using namespace oka;
 namespace fs = std::filesystem;
@@ -41,8 +42,8 @@ TEST_CASE("spot light stores cone angles and emits along -Z")
     desc.intensity = 10.0f;
     desc.color = glm::float3(1.0f);
     desc.orientation = glm::float3(0.0f);
-    desc.outerConeAngle = float(M_PI) / 4.0f;
-    desc.innerConeAngle = float(M_PI) / 8.0f;
+    desc.outerConeAngle = std::numbers::pi_v<float> / 4.0f;
+    desc.innerConeAngle = std::numbers::pi_v<float> / 8.0f;
     const uint32_t id = scene.createLight(desc);
 
     const Scene::Light& gpu = scene.getLights()[id];
@@ -147,7 +148,7 @@ TEST_CASE("power unit converts area lights to Lambertian radiance")
     desc.intensityUnit = LIGHT_UNIT_POWER;
     desc.width = 1.0f;
     desc.height = 1.0f;
-    desc.intensity = float(M_PI);
+    desc.intensity = std::numbers::pi_v<float>;
     desc.color = glm::float3(1.0f);
     const uint32_t id = scene.createLight(desc);
     CHECK(scene.getLights()[id].color.x == doctest::Approx(1.0f).epsilon(1e-4));

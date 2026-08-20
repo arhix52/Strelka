@@ -10,6 +10,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include <cmath>
+#include <numbers>
 
 namespace oka
 {
@@ -80,7 +81,7 @@ void EditorApp::drawPropertyPanel()
                 if (desc.intensityUnit == LIGHT_UNIT_INTENSITY)
                     desc.intensityUnit = LIGHT_UNIT_IRRADIANCE;
                 if (desc.halfAngle <= 0.0f)
-                    desc.halfAngle = 0.53f * 0.5f * (float(M_PI) / 180.0f);
+                    desc.halfAngle = 0.53f * 0.5f * (std::numbers::pi_v<float> / 180.0f);
             }
             else if (lightTypeIsPunctual(prev))
             {
@@ -135,10 +136,10 @@ void EditorApp::drawPropertyPanel()
         }
         else if (desc.type == LIGHT_TYPE_SPOT)
         {
-            float outerDeg = desc.outerConeAngle * (180.0f / float(M_PI));
+            float outerDeg = desc.outerConeAngle * (180.0f / std::numbers::pi_v<float>);
             if (ImGui::DragFloat("Spot Size", &outerDeg, 0.5f, 0.1f, 90.0f))
             {
-                desc.outerConeAngle = outerDeg * (float(M_PI) / 180.0f);
+                desc.outerConeAngle = outerDeg * (std::numbers::pi_v<float> / 180.0f);
                 desc.innerConeAngle = std::min(desc.innerConeAngle, desc.outerConeAngle);
                 changed = true;
             }
@@ -159,10 +160,10 @@ void EditorApp::drawPropertyPanel()
             // The full horizontal field of view, the way a projector is
             // specified. The desc stores half of it, in the outer-cone field the
             // GPU light already has -- see Scene::UniformLightDesc.
-            float fovDeg = desc.outerConeAngle * 2.0f * (180.0f / float(M_PI));
+            float fovDeg = desc.outerConeAngle * 2.0f * (180.0f / std::numbers::pi_v<float>);
             if (ImGui::DragFloat("Field of View", &fovDeg, 0.5f, 1.0f, 178.0f, "%.1f deg"))
             {
-                desc.outerConeAngle = fovDeg * 0.5f * (float(M_PI) / 180.0f);
+                desc.outerConeAngle = fovDeg * 0.5f * (std::numbers::pi_v<float> / 180.0f);
                 changed = true;
             }
             // Throw ratio is how a projector is actually sold -- "1.5:1" means
@@ -204,10 +205,10 @@ void EditorApp::drawPropertyPanel()
         }
         else if (desc.type == LIGHT_TYPE_DISTANT)
         {
-            float angleDeg = desc.halfAngle * 2.0f * (180.0f / float(M_PI));
+            float angleDeg = desc.halfAngle * 2.0f * (180.0f / std::numbers::pi_v<float>);
             if (ImGui::DragFloat("Angular Diameter", &angleDeg, 0.05f, 0.01f, 20.0f))
             {
-                desc.halfAngle = angleDeg * 0.5f * (float(M_PI) / 180.0f);
+                desc.halfAngle = angleDeg * 0.5f * (std::numbers::pi_v<float> / 180.0f);
                 changed = true;
             }
         }

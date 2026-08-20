@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <numbers>
 
 namespace
 {
@@ -96,7 +97,7 @@ SurfaceInteraction make_si(const MaterialParams& p, float3 wo)
 
 float3 dir_at(float deg)
 {
-    const float r = deg * 3.14159265358979f / 180.0f;
+    const float r = deg * std::numbers::pi_v<float> / 180.0f;
     return make_float3(std::sin(r), 0.0f, std::cos(r));
 }
 

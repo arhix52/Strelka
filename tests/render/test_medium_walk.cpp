@@ -27,6 +27,7 @@
 
 #include <cmath>
 #include <initializer_list>
+#include <numbers>
 
 using namespace oka::medium;
 using oka::test::stratum;
@@ -273,7 +274,7 @@ TEST_CASE("medium: Henyey-Greenstein integrates to one over the sphere")
             const float mu = -1.0f + 2.0f * stratum(i, kSteps);
             total += hgPhase(mu, g) * (2.0 / kSteps);
         }
-        total *= 2.0 * 3.14159265358979323846;
+        total *= 2.0 * std::numbers::pi;
         CHECK(total == doctest::Approx(1.0).epsilon(1e-3));
     }
 }

@@ -40,6 +40,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <numbers>
 
 namespace
 {
@@ -97,7 +98,7 @@ SurfaceInteraction make_si(const MaterialParams& p, float3 wo)
 
 float3 dir_at(float deg)
 {
-    const float r = deg * 3.14159265358979f / 180.0f;
+    const float r = deg * std::numbers::pi_v<float> / 180.0f;
     return make_float3(std::sin(r), 0.0f, std::cos(r));
 }
 
@@ -229,8 +230,8 @@ TEST_CASE("clearcoat: underside bounces return energy that scales with IOR")
         const float Fv = f0 + (1.0f - f0) * std::pow(1.0f - nDotV, 5.0f);
         return (1.0f - Fl) * (1.0f - Fv);
     };
-    const float nDotV = std::cos(25.0f * 3.14159265358979f / 180.0f);
-    const float nDotL = std::cos(70.0f * 3.14159265358979f / 180.0f);
+    const float nDotV = std::cos(25.0f * std::numbers::pi_v<float> / 180.0f);
+    const float nDotL = std::cos(70.0f * std::numbers::pi_v<float> / 180.0f);
     // Lambert * albedo / pi, times the single-scatter scale -- what eval would
     // report with the series left out.
     const float lambert = 0.9f * 0.318309886f;

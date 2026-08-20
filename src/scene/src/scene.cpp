@@ -16,6 +16,7 @@
 #include <unordered_map>
 
 #include <log.h>
+#include <numbers>
 
 namespace fs = std::filesystem;
 
@@ -616,13 +617,13 @@ uint32_t Scene::createSphereLightMesh()
     // Generate vertices and normals
     for (int i = 0; i <= rings; ++i)
     {
-        const float theta = static_cast<float>(i) * static_cast<float>(M_PI) / static_cast<float>(rings);
+        const float theta = static_cast<float>(i) * std::numbers::pi_v<float> / static_cast<float>(rings);
         const float sinTheta = sin(theta);
         const float cosTheta = cos(theta);
 
         for (int j = 0; j <= segments; ++j)
         {
-            const float phi = static_cast<float>(j) * 2.0f * static_cast<float>(M_PI) / static_cast<float>(segments);
+            const float phi = static_cast<float>(j) * 2.0f * std::numbers::pi_v<float> / static_cast<float>(segments);
             const float sinPhi = sin(phi);
             const float cosPhi = cos(phi);
 
@@ -682,7 +683,7 @@ uint32_t Scene::createDiscLightMesh()
     vertices.push_back(v2); // first point
 
     const float diskRadius = 1.0f; // param
-    const float step = 2.0f * M_PI / 16;
+    const float step = 2.0f * std::numbers::pi / 16;
     float angle = 0;
     for (int i = 0; i < 16; ++i)
     {

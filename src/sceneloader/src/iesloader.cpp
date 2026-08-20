@@ -14,6 +14,7 @@
 #include <limits>
 #include <sstream>
 #include <vector>
+#include <numbers>
 
 namespace oka
 {
@@ -382,8 +383,8 @@ float sampleIesCandela(const Scene::IesProfile& profile, const glm::float3& loca
     }
 
     const glm::float3 d = glm::normalize(localDir);
-    const float vertDeg = std::acos(std::clamp(-d.z, -1.0f, 1.0f)) * (180.0f / float(M_PI));
-    const float horizDeg = std::atan2(d.x, -d.y) * (180.0f / float(M_PI));
+    const float vertDeg = std::acos(std::clamp(-d.z, -1.0f, 1.0f)) * (180.0f / std::numbers::pi_v<float>);
+    const float horizDeg = std::atan2(d.x, -d.y) * (180.0f / std::numbers::pi_v<float>);
 
     // The same evaluation the GPU runs, from the same header -- see ies_math.h.
     return iesEvaluate(profile.verticalAngles.data(), (int)profile.verticalAngles.size(), profile.horizontalAngles.data(),

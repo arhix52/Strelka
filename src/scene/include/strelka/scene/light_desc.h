@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <numbers>
 
 namespace oka
 {
@@ -128,7 +129,7 @@ inline constexpr float kCandelaToRadiantIntensity = 1.0f / kLuminousEfficacyD65;
 inline float coneSolidAngle(float halfAngleRad)
 {
     const float s = std::sin(0.5f * halfAngleRad);
-    return 4.0f * float(M_PI) * s * s;
+    return 4.0f * std::numbers::pi_v<float> * s * s;
 }
 
 /// Solid angle of the rectangular pyramid a projector throws into, from half of
@@ -167,9 +168,9 @@ inline float lightSurfaceArea(int type, float width, float height, float radius)
     case LIGHT_TYPE_RECT:
         return std::max(width, 0.0f) * std::max(height, 0.0f);
     case LIGHT_TYPE_DISC:
-        return float(M_PI) * radius * radius;
+        return std::numbers::pi_v<float> * radius * radius;
     case LIGHT_TYPE_SPHERE:
-        return 4.0f * float(M_PI) * radius * radius;
+        return 4.0f * std::numbers::pi_v<float> * radius * radius;
     default:
         return 0.0f;
     }
@@ -206,7 +207,7 @@ inline glm::float3 bakeLightRadiometric(int type,
         // Spot: I = Φ / Ω_outer so the integral over the cone recovers Φ.
         if (type == LIGHT_TYPE_POINT)
         {
-            return tint / (4.0f * float(M_PI));
+            return tint / (4.0f * std::numbers::pi_v<float>);
         }
         if (type == LIGHT_TYPE_SPOT)
         {
@@ -231,7 +232,7 @@ inline glm::float3 bakeLightRadiometric(int type,
             return tint / omega;
         }
         const float area = std::max(lightSurfaceArea(type, width, height, radius), 1e-8f);
-        return tint / (float(M_PI) * area);
+        return tint / (std::numbers::pi_v<float> * area);
     }
     case LIGHT_UNIT_INTENSITY:
         // Radiant intensity, W/sr, already. The name says candela and the

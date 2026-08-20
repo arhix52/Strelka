@@ -7,6 +7,7 @@
 #include <map>
 #include <set>
 #include <vector>
+#include <numbers>
 
 using namespace oka::sharc;
 
@@ -455,7 +456,7 @@ TEST_CASE("binary16 round-trips the values a voxel actually holds")
     // Radiance, and sample counts up to a few thousand. Relative error of
     // binary16 is 2^-11, so anything inside half a percent is the format doing
     // its job rather than the code doing it wrong.
-    for (const float v : { 0.001f, 0.5f, 1.0f, 3.14159f, 42.0f, 255.0f, 1000.0f, 30000.0f })
+    for (const float v : { 0.001f, 0.5f, 1.0f, std::numbers::pi_v<float>, 42.0f, 255.0f, 1000.0f, 30000.0f })
     {
         const float back = unpackHalf(packHalf(v));
         CHECK(back == doctest::Approx(v).epsilon(0.001));

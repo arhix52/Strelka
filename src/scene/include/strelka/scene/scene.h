@@ -18,6 +18,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <numbers>
 
 namespace oka
 {
@@ -318,7 +319,7 @@ public:
         // view and ignores the inner angle: its edge is a rectangle, not a cone,
         // and softening it is projectorEdgeSoftness below.
         float innerConeAngle = 0.0f;
-        float outerConeAngle = float(M_PI) / 4.0f;
+        float outerConeAngle = std::numbers::pi_v<float> / 4.0f;
 
         // KHR range; 0 = infinite. Applied as a smooth window for point/spot.
         float range = 0.0f;

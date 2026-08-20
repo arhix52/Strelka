@@ -11,8 +11,9 @@
 #include <strelka/scene/light_desc.h>
 
 #include <cmath>
+#include <numbers>
 
-static constexpr float kPi = 3.14159265358979323846f;
+static constexpr float kPi = std::numbers::pi_v<float>;
 
 // A 90 degree horizontal field on a square frame: the pyramid whose apex angle
 // makes six of it fill the sphere. Used by several cases below.

@@ -9,6 +9,7 @@
 #include <cmath>
 #include <filesystem>
 #include <string>
+#include <numbers>
 
 
 namespace oka::lightjson
@@ -50,7 +51,7 @@ inline Scene::UniformLightDesc parseDesc(const nlohmann::json& light, const std:
     {
     case LIGHT_TYPE_DISTANT:
         // JSON stores full angular diameter in degrees; GPU wants half-angle rad.
-        desc.halfAngle = light.value("halfAngle", 0.53f) * 0.5f * (float(M_PI) / 180.0f);
+        desc.halfAngle = light.value("halfAngle", 0.53f) * 0.5f * (std::numbers::pi_v<float> / 180.0f);
         if (!light.contains("unit"))
             desc.intensityUnit = LIGHT_UNIT_RADIANCE;
         break;
@@ -68,8 +69,8 @@ inline Scene::UniformLightDesc parseDesc(const nlohmann::json& light, const std:
     case LIGHT_TYPE_SPOT:
         desc.radius = light.value("radius", 0.0f);
         // Degrees in JSON, radians on the desc — matches Blender / KHR UX.
-        desc.innerConeAngle = light.value("innerConeAngle", 0.0f) * (float(M_PI) / 180.0f);
-        desc.outerConeAngle = light.value("outerConeAngle", 45.0f) * (float(M_PI) / 180.0f);
+        desc.innerConeAngle = light.value("innerConeAngle", 0.0f) * (std::numbers::pi_v<float> / 180.0f);
+        desc.outerConeAngle = light.value("outerConeAngle", 45.0f) * (std::numbers::pi_v<float> / 180.0f);
         if (!light.contains("unit"))
             desc.intensityUnit = LIGHT_UNIT_INTENSITY;
         break;
@@ -80,7 +81,7 @@ inline Scene::UniformLightDesc parseDesc(const nlohmann::json& light, const std:
         // already has. A spot's "outerConeAngle" is a half angle in the same
         // file, which reads like an inconsistency and is not one: nobody
         // describes a beamer by half its throw angle.
-        desc.outerConeAngle = light.value("fov", 45.0f) * 0.5f * (float(M_PI) / 180.0f);
+        desc.outerConeAngle = light.value("fov", 45.0f) * 0.5f * (std::numbers::pi_v<float> / 180.0f);
         desc.projectorAspect = light.value("aspect", 16.0f / 9.0f);
         desc.projectorEdgeSoftness = light.value("edgeSoftness", 0.0f);
         if (light.contains("image"))
@@ -121,7 +122,7 @@ inline nlohmann::json toJson(const Scene::UniformLightDesc& desc)
 
     if (desc.type == LIGHT_TYPE_DISTANT)
     {
-        light["halfAngle"] = desc.halfAngle * 2.0f * (180.0f / float(M_PI));
+        light["halfAngle"] = desc.halfAngle * 2.0f * (180.0f / std::numbers::pi_v<float>);
     }
     else
     {
@@ -138,12 +139,12 @@ inline nlohmann::json toJson(const Scene::UniformLightDesc& desc)
         }
         if (desc.type == LIGHT_TYPE_SPOT)
         {
-            light["innerConeAngle"] = desc.innerConeAngle * (180.0f / float(M_PI));
-            light["outerConeAngle"] = desc.outerConeAngle * (180.0f / float(M_PI));
+            light["innerConeAngle"] = desc.innerConeAngle * (180.0f / std::numbers::pi_v<float>);
+            light["outerConeAngle"] = desc.outerConeAngle * (180.0f / std::numbers::pi_v<float>);
         }
         if (desc.type == LIGHT_TYPE_PROJECTOR)
         {
-            light["fov"] = desc.outerConeAngle * 2.0f * (180.0f / float(M_PI));
+            light["fov"] = desc.outerConeAngle * 2.0f * (180.0f / std::numbers::pi_v<float>);
             light["aspect"] = desc.projectorAspect;
             if (desc.projectorEdgeSoftness > 0.0f)
                 light["edgeSoftness"] = desc.projectorEdgeSoftness;

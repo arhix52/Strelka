@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <numbers>
 
 namespace oka
 {
@@ -20,7 +21,7 @@ const ImU32 kSliceColors[] = {
     IM_COL32(0x4a, 0xc0, 0xc8, 0xff), IM_COL32(0x86, 0x6f, 0xb0, 0xff), IM_COL32(0x6f, 0x8f, 0x4a, 0xff),
     IM_COL32(0xd8, 0xa0, 0x50, 0xff), IM_COL32(0x50, 0x78, 0xa8, 0xff), IM_COL32(0xa8, 0x50, 0x78, 0xff),
 };
-constexpr float kPi = 3.14159265358979323846f;
+constexpr float kPi = std::numbers::pi_v<float>;
 
 std::string humanBytes(size_t bytes)
 {

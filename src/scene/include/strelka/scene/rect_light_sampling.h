@@ -20,6 +20,7 @@
 // test of the construction in the tree, therefore covered a copy that no GPU
 // ever runs. Both shader backends now compile the same file.
 #include <rect_sampling.h>
+#include <numbers>
 
 
 namespace oka::rect_light_sampling
@@ -98,7 +99,7 @@ inline float solidAngleGirard(const RectCorners& c, const glm::float3& o)
     const float g1 = std::acos(std::clamp(-glm::dot(n1, n2), -1.0f, 1.0f));
     const float g2 = std::acos(std::clamp(-glm::dot(n2, n3), -1.0f, 1.0f));
     const float g3 = std::acos(std::clamp(-glm::dot(n3, n0), -1.0f, 1.0f));
-    return g0 + g1 + g2 + g3 - 2.0f * 3.14159265358979323846f;
+    return g0 + g1 + g2 + g3 - 2.0f * std::numbers::pi_v<float>;
 }
 
 // Cycles-hardened SphQuad init, from common/rect_sampling.h. S <= 0 means the

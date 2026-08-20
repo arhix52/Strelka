@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <numbers>
 
 // ============================================================================
 // test_ies_loader.cpp -- reading an actual LM-63 file.
@@ -64,14 +65,14 @@ const char* const kSimplePhotometry =
 /// azimuth the table is tabulated at. -Z is the photometric axis.
 glm::float3 atVertical(float deg)
 {
-    const float th = deg * float(M_PI) / 180.0f;
+    const float th = deg * std::numbers::pi_v<float> / 180.0f;
     return { std::sin(th), 0.0f, -std::cos(th) };
 }
 
 glm::float3 atAngles(float verticalDeg, float azimuthDeg)
 {
-    const float th = verticalDeg * float(M_PI) / 180.0f;
-    const float ph = azimuthDeg * float(M_PI) / 180.0f;
+    const float th = verticalDeg * std::numbers::pi_v<float> / 180.0f;
+    const float ph = azimuthDeg * std::numbers::pi_v<float> / 180.0f;
     return { std::sin(th) * std::sin(ph), -std::sin(th) * std::cos(ph), -std::cos(th) };
 }
 

@@ -6,6 +6,7 @@
 #include <light_types.h>
 
 #include <cmath>
+#include <numbers>
 
 using namespace oka;
 
@@ -15,7 +16,7 @@ using namespace oka;
 // file-static, so this is the contract the test pins, not the symbol.
 static constexpr float kLumensPerWatt = 683.0f;
 
-static constexpr float kPi = 3.14159265358979323846f;
+static constexpr float kPi = std::numbers::pi_v<float>;
 
 static constexpr glm::float3 kWhite(1.0f, 1.0f, 1.0f);
 
@@ -396,7 +397,7 @@ TEST_CASE("cone solid angle survives sun-sized half-angles")
     {
         CAPTURE(c.halfAngle);
         // Reference in double, where the cancellation is survivable.
-        const double reference = 2.0 * M_PI * (1.0 - std::cos(c.halfAngle));
+        const double reference = 2.0 * std::numbers::pi * (1.0 - std::cos(c.halfAngle));
         const double got = coneSolidAngle((float)c.halfAngle);
         CHECK(got == doctest::Approx(reference).epsilon(1e-4));
         CHECK(got > 0.0);

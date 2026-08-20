@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <vector>
+#include <numbers>
 
 // ============================================================================
 // test_ies_math.cpp -- how a photometric table is interpolated, and what it
@@ -83,8 +84,8 @@ struct Beam
 
 glm::float3 photometricDir(float verticalDeg, float azimuthDeg)
 {
-    const float th = verticalDeg * float(M_PI) / 180.0f;
-    const float ph = azimuthDeg * float(M_PI) / 180.0f;
+    const float th = verticalDeg * std::numbers::pi_v<float> / 180.0f;
+    const float ph = azimuthDeg * std::numbers::pi_v<float> / 180.0f;
     return { std::sin(th) * std::sin(ph), -std::sin(th) * std::cos(ph), -std::cos(th) };
 }
 

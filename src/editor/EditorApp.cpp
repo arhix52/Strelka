@@ -28,6 +28,7 @@
 #include <tinyexr.h>
 #include <stb_image_write.h>
 #include <cstring>
+#include <numbers>
 
 namespace oka
 {
@@ -3799,7 +3800,7 @@ void EditorApp::runConvergenceSweep()
                 {
                     secondHalf[i] = 2.0f * snaps[c + 1][i] - snaps[c][i];
                 }
-                noise = rms(snaps[c], secondHalf, w) / std::sqrt(2.0);
+                noise = rms(snaps[c], secondHalf, w) / std::numbers::sqrt2;
             }
             const double ref = c < last ? rms(snaps[c], snaps[last], w) : -1.0;
             // Same error field as rmseVsDeepest, after a blur -- what survives a

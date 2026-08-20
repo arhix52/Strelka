@@ -14,6 +14,7 @@
 
 #include <cmath>
 #include <vector>
+#include <numbers>
 
 using oka::kTangentSignBit;
 using oka::packNormal;
@@ -57,10 +58,10 @@ std::vector<glm::float3> unitVectors()
     // on hand-picked directions
     for (int i = 0; i <= 16; ++i)
     {
-        const float theta = float(i) / 16.0f * 3.14159265358979f;
+        const float theta = float(i) / 16.0f * std::numbers::pi_v<float>;
         for (int j = 0; j < 32; ++j)
         {
-            const float phi = float(j) / 32.0f * 2.0f * 3.14159265358979f;
+            const float phi = float(j) / 32.0f * 2.0f * std::numbers::pi_v<float>;
             v.emplace_back(std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi));
         }
     }
