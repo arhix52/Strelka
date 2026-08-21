@@ -513,40 +513,77 @@ absent, `hix.local` does not resolve from this network, and the Slurm session at
 question for anyone with a CUDA toolkit -- compile one `.cu` that includes
 `<strelka/material/openpbr/openpbr_bridge.h>` and calls `openpbr_prepare_at`.
 
-## 14. Two runs of one binary do not agree on a subsurface walk
+## 14. Two runs of one binary do not agree, when OpenPBR and subsurface are both on
 
-This file and `open-perf.md` both lean on a property that turns out not to hold
-everywhere: "the renderer is deterministic -- two runs of one binary are
-bit-identical, checked". On `25_subsurface` it is not.
+Rewritten after re-measuring it. The previous entry named the wrong witness and
+the wrong subsystem, and its advice -- grade `25_subsurface` on a threshold
+rather than on equality -- cost sharpness for nothing.
 
-Three consecutive runs of one binary, same scene, same seed, nothing else
-touched:
+**`25_subsurface` is deterministic.** Seven runs on HEAD and five on a fresh
+build of `e5684bd`, the very commit the old entry cited, are all bit-identical --
+`ac667285835f3a04904db0d15b224b12` on *both* builds. So neither the row nor the
+OpenPBR work moves it, and an exact-match regression on it is valid.
 
-    mean   0.240777   0.240834   0.240836
-    max |a-b| = 1.95e-02, and 18.3% of components differ at all
+**The real witness is the Open Chess Set with OpenPBR.** 960x540, 512 samples:
+eight of ten runs differ from the first. What differs is astonishingly small and
+fixed -- exactly two pixels ever change, always the same two, (329,482) and
+(336,494), each toggling between two values 1.53e-02 and 3.12e-02 apart. That is
+0.0002% of the components: two paths out of 265 million path-samples, each
+binary rather than drifting.
 
-Measured on e5684bd, so it predates the OpenPBR work; a build with that work
-added produces the same spread and its means interleave with these
-(0.240834 / 0.240830 / 0.240795). `00_calibration` on the same binaries is
-bit-identical across runs, so this is the subsurface path and not the renderer at
-large.
+Reproduce it far more strongly with constant parameters and no MaterialX at all:
+the chess `.glb`, an `_openpbr.json` naming both materials with
+`subsurface_weight` 1 and `subsurface_radius` 0.02, and the `.mtlx` moved aside.
+Six runs, six different images.
 
-It is small -- `rel` 0.00026 against a row whose noise floor is 0.006, and the
-means spread by 0.024% -- so nothing about the ladder's *grades* is in question.
-What it costs is the method: an exact-match regression on this row reports a
-change that did not happen, and reports "unchanged" only because the small number
-of possible outcomes makes a collision likely. Several `maxdiff 0.00e+00`
-readings were taken on this row during the OpenPBR work before the spread was
-noticed, and they meant less than they appeared to.
+### What it takes, and what it does not
 
-Not diagnosed. The walk's randoms are a pure function of (tid, sampleIdx, depth,
-step), so the sampling is not the suspect; the queue compaction that feeds each
-wavefront iteration hands out slots with an atomic, which makes the *order* of
-paths within an iteration vary, and Metal 4 does no hazard tracking of its own.
-Whether some read of a per-path buffer is missing a barrier is the first thing to
-check.
+It needs **OpenPBR and subsurface together**. Either alone is stable:
 
-Until then, grade `25_subsurface` on `rel` against a threshold, not on equality.
+| configuration | runs | distinct |
+|---|---|---|
+| glTF subsurface, no OpenPBR (`25_subsurface`) | 12 | 1 |
+| glTF subsurface, no OpenPBR (chess, `.mtlx` moved aside) | 10 | 1 |
+| OpenPBR, no subsurface (sidecar, constant parameters) | 6 | 1 |
+| OpenPBR **and** subsurface (sidecar, radius 0.02) | 6 | **6** |
+
+Ruled out, each by building it and running the six:
+
+- **The walk length.** `subsurface_iterations = 0` still diverges.
+- **MaterialX textures.** The constant-parameter sidecar diverges harder than
+  the textured document does.
+- **Launch batching.** `spp_per_launch = 512`, one launch for the whole render,
+  still diverges.
+- **`openpbr_interior_volume`.** Replacing the OpenPBR medium's extinction,
+  albedo and anisotropy with constants: still diverges.
+- **The medium-properties branch** as a whole, routed through the glTF path.
+- **The entry event.** Entering on `DIFFUSE_TRANSMISSION` like the glTF path
+  instead of `TRANSMISSION`: still diverges.
+- **The missing miss/shade barrier**, the one place in the encoder where an
+  absent barrier is argued for in a comment. Making it unconditional: still
+  diverges.
+- **Out-of-range energy-table reads.** `OPENPBR_ASSERT` expands to nothing on
+  Metal, so the library's "index must be clamped" preconditions are unchecked
+  there and a violation would be an out-of-bounds constant read -- which would
+  explain a value that varies between runs. It does not happen: 44,800 calls of
+  `openpbr_prepare`/`sample`/`eval`/`pdf` through the bridge, compiled with
+  asserts live, across degenerate roughness, anisotropy, IOR and grazing angles,
+  trip nothing.
+
+### Where that leaves it
+
+Neither feature's own code explains it and no shared buffer has been caught. The
+remaining reading is that the combination changes the shade kernel's register
+pressure and occupancy enough to expose a race that neither variant's scheduling
+reaches on its own -- which would make it a pre-existing defect in shared code
+that OpenPBR only reveals. That is a hypothesis, not a finding: it has not been
+localised to a buffer or a stage.
+
+Worth what it costs, in the meantime: the effect is two pixels out of half a
+million, so it changes no grade and no image anyone looks at. What it costs is
+the method -- an exact-match regression on a scene with both features on will
+report a change that did not happen. Grade those on `rel` against a threshold.
+Every other scene, including `25_subsurface`, can be graded on equality.
 
 ## Closed (kept for the measurement, not the work)
 
