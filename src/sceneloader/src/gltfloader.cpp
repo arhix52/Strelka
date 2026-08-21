@@ -774,7 +774,7 @@ void readTextureTransform(const tinygltf::Material& material, MaterialParams& p)
     p.uv_scale_y = 1.0f;
     p.uv_rotation = 0.0f;
 
-    const tinygltf::ExtensionMap* slots[] = {
+    const tinygltf::ExtensionMap* const slots[] = {
         &material.pbrMetallicRoughness.baseColorTexture.extensions,
         &material.pbrMetallicRoughness.metallicRoughnessTexture.extensions,
         &material.normalTexture.extensions,

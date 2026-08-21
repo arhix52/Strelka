@@ -11,30 +11,39 @@
 #include <env_alias_sampling.h>
 #include <sharc.h>
 
-#define GEOMETRY_MASK_TRIANGLE 1
-#define GEOMETRY_MASK_CURVE 2
-#define GEOMETRY_MASK_LIGHT 4
+// Values, not spellings, are what has to match Metal's ShaderTypes.h, which
+// keeps its copy as #define. Enumerators here so the debugger and the analyzer
+// can see them; the numbers below are the contract.
+enum : uint32_t
+{
+    GEOMETRY_MASK_TRIANGLE = 1,
+    GEOMETRY_MASK_CURVE = 2,
+    GEOMETRY_MASK_LIGHT = 4,
 // An emitter the camera must not see, but a bounce must. A light authored with
 // visibleToCamera off still lights the scene and still has to be hit by a BSDF
 // ray for the MIS estimate to balance -- it simply must not appear as a shape in
 // the frame. Same value as Metal's GEOMETRY_MASK_LIGHT_HIDDEN.
-#define GEOMETRY_MASK_LIGHT_HIDDEN 8
+    GEOMETRY_MASK_LIGHT_HIDDEN = 8,
 // The boundary of a participating medium. Its own bit because a shadow ray must
 // not be stopped by it -- RAY_MASK_SHADOW is the geometry bits alone, so a fog
 // gizmo left on the triangle mask blacks out everything it encloses. Same value
 // as Metal's GEOMETRY_MASK_MEDIUM.
-#define GEOMETRY_MASK_MEDIUM 16
+    GEOMETRY_MASK_MEDIUM = 16,
 
-#define GEOMETRY_MASK_GEOMETRY (GEOMETRY_MASK_TRIANGLE | GEOMETRY_MASK_CURVE)
+    GEOMETRY_MASK_GEOMETRY = GEOMETRY_MASK_TRIANGLE | GEOMETRY_MASK_CURVE,
 
-#define RAY_MASK_PRIMARY (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_MEDIUM)
-#define RAY_MASK_SHADOW GEOMETRY_MASK_GEOMETRY
-#define RAY_MASK_SECONDARY (RAY_MASK_PRIMARY | GEOMETRY_MASK_LIGHT_HIDDEN)
+    RAY_MASK_PRIMARY = GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_MEDIUM,
+    RAY_MASK_SHADOW = GEOMETRY_MASK_GEOMETRY,
+    RAY_MASK_SECONDARY = RAY_MASK_PRIMARY | GEOMETRY_MASK_LIGHT_HIDDEN,
+};
 
 // Params::projectionType. Mirrors oka::Camera::ProjectionType, which device code
 // cannot include, and the identically-named constants in the Metal ShaderTypes.h.
-#define PROJECTION_PERSPECTIVE 0u
-#define PROJECTION_ORTHOGRAPHIC 1u
+enum : uint32_t
+{
+    PROJECTION_PERSPECTIVE = 0u,
+    PROJECTION_ORTHOGRAPHIC = 1u
+};
 
 struct Vertex
 {
@@ -68,9 +77,12 @@ struct SceneData
 /// How `AovSample::depth` is encoded. Mirrors kDenoiseDepth* in the Metal
 /// ShaderTypes.h, value for value, so a guide dumped from either backend means
 /// the same thing.
-#define STRELKA_DENOISE_DEPTH_DEVICE 0u ///< clip z / w, the value a depth buffer holds
-#define STRELKA_DENOISE_DEPTH_VIEWZ 1u ///< distance along the camera's forward axis
-#define STRELKA_DENOISE_DEPTH_RADIAL 2u ///< distance to the eye
+enum : uint32_t
+{
+    STRELKA_DENOISE_DEPTH_DEVICE = 0u, ///< clip z / w, the value a depth buffer holds
+    STRELKA_DENOISE_DEPTH_VIEWZ = 1u, ///< distance along the camera's forward axis
+    STRELKA_DENOISE_DEPTH_RADIAL = 2u ///< distance to the eye
+};
 
 /// Debug visualisations, in the order the editor's combo box lists them.
 ///
@@ -112,7 +124,10 @@ enum class DebugMode : uint32_t
     eSharcBounces, ///< bounces traced per pixel: what the cache actually saves
 };
 
-#define DEBUG_MODE_FIRST_AOV 3u
+enum : uint32_t
+{
+    DEBUG_MODE_FIRST_AOV = 3u
+};
 
 /// The views that describe the first surface a camera ray reaches and nothing
 /// past it. They are the ones the path is cut short for, and the ones nothing
@@ -224,8 +239,15 @@ struct SharcPathState
     uint32_t responsiveIndex;
 };
 
+// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 struct Params
 {
+    // Grouped by subsystem, not by size. The analyzer counts 36 bytes of padding
+    // and would sort the fields widest-first; that would scatter the commented
+    // blocks below -- camera, environment, SHARC, denoiser -- which are how
+    // anyone finds anything in a launch-parameter struct with eighty members.
+    // The struct is memcpy'd to the device once per frame, so those 36 bytes are
+    // one 32-byte-longer copy of ~700 bytes, per frame, and nothing else.
     uint32_t subframe_index;
     uint32_t samples_per_launch;
     uint32_t maxSampleCount;
@@ -454,11 +476,17 @@ enum class EventType: uint8_t
 /// passing through deliberately does not spend a bounce (see PerRayData::
 /// passthrough), so `max_depth` cannot bound it. Same value as Metal's
 /// PATH_PASSTHROUGH_MAX, for the same reason.
-#define PATH_PASSTHROUGH_MAX 32u
+enum : uint32_t
+{
+    PATH_PASSTHROUGH_MAX = 32u
+};
 
 /// Hard ceiling on a walk, whatever `Params::subsurfaceIterations` asks for.
 /// Metal's MEDIUM_MAX_STEPS, for the same reason.
-#define MEDIUM_MAX_STEPS 256u
+enum : uint32_t
+{
+    MEDIUM_MAX_STEPS = 256u
+};
 
 // The three ways the nested-dielectric stack loses a path, in the order Metal's
 // ShaderTypes.h numbers them so the two backends' reports read the same.
@@ -468,10 +496,13 @@ enum class EventType: uint8_t
 // hole in it, seen from each side -- and the third is the one no exit event can
 // catch, because the ray left through the hole. Each of them carries the wrong
 // medium, and therefore the wrong absorption, for the rest of its life.
-#define IOR_STAT_OVERFLOW 0
-#define IOR_STAT_UNMATCHED 1
-#define IOR_STAT_ESCAPED_INSIDE 2
-#define IOR_STAT_COUNT 3
+enum : uint32_t
+{
+    IOR_STAT_OVERFLOW = 0,
+    IOR_STAT_UNMATCHED = 1,
+    IOR_STAT_ESCAPED_INSIDE = 2,
+    IOR_STAT_COUNT = 3
+};
 
 /// Everything one path carries between traversals.
 ///
@@ -497,7 +528,10 @@ enum class EventType: uint8_t
 /// words measured as sixty-four *more* bytes of stack rather than sixty-four
 /// fewer, and 2.5-7.7% slower. Measured, reverted, written down. See
 /// docs/open-perf.md.
-#define STRELKA_PAYLOAD_COUNT 2
+enum : uint32_t
+{
+    STRELKA_PAYLOAD_COUNT = 2
+};
 
 /// Everything one path carries between traversals.
 ///
@@ -631,11 +665,14 @@ struct PerRayData
 /// one.
 static_assert(sizeof(PerRayData) == 136, "PerRayData sizes the continuation stack; see docs/open-perf.md");
 
+/// All three are spelled out because the first two are SBT record offsets that
+/// the hit-group layout in OptixRender.cpp indexes by hand; a value here is not
+/// an implementation detail of the enum.
 enum RayType
 {
     RAY_TYPE_RADIANCE = 0,
     RAY_TYPE_OCCLUSION = 1,
-    RAY_TYPE_COUNT
+    RAY_TYPE_COUNT = 2
 };
 
 struct RayGenData

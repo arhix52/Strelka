@@ -235,6 +235,8 @@ bool loadIesProfile(const std::string& path, Scene::IesProfile& out)
             return false;
         }
         ++i; // lamp-to-luminaire geometry
+        // strtol's out-parameter is char**, so end cannot be const char*.
+        // NOLINTNEXTLINE(misc-const-correctness)
         char* end = nullptr;
         const long nTilt = std::strtol(tokens[i].c_str(), &end, 10);
         if (end == tokens[i].c_str() || nTilt < 0)
@@ -259,6 +261,7 @@ bool loadIesProfile(const std::string& path, Scene::IesProfile& out)
         if (i >= tokens.size())
             return false;
         const std::string& token = tokens[i++];
+        // NOLINTNEXTLINE(misc-const-correctness)
         char* end = nullptr;
         const long parsed = std::strtol(token.c_str(), &end, 10);
         if (end == token.c_str() || parsed < std::numeric_limits<int>::min() || parsed > std::numeric_limits<int>::max())

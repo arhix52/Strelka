@@ -228,8 +228,12 @@ inline VrrStatus interpretRefreshRange(float minRefreshRateHz, float maxRefreshR
 
 struct DisplayCapabilities
 {
-    OutputCapabilities output;
-    PresentCapabilities present;
+    // Braced even though both are aggregates that default-construct: the Vulkan
+    // backend builds this with a designated initializer naming only `backend`,
+    // and GCC's -Wmissing-field-initializers counts a member with no default
+    // member initializer as missing there, whatever the member's own type does.
+    OutputCapabilities output{};
+    PresentCapabilities present{};
     SurfaceEncoding surfaceEncoding = SurfaceEncoding::SDR;
     PresentMode presentMode = PresentMode::Fifo;
     VrrStatus vrrStatus = VrrStatus::Unknown;
@@ -246,10 +250,10 @@ struct DisplayCapabilities
     // Metal. The window server, not the app, owns the encoding, so what is worth
     // reporting is the headroom granted and how the layer was configured to use
     // it -- there is no surface format negotiation to show.
-    EdrCapabilities edr;
+    EdrCapabilities edr{};
     /// Empty when the platform does not name its displays.
-    std::string displayName;
-    std::string colorSpaceName;
+    std::string displayName{};
+    std::string colorSpaceName{};
     /// Headroom the tone curve was actually given this frame, after the mode and
     /// the user's ceiling. Shown because it is frequently neither the display's
     /// current headroom nor the requested one.

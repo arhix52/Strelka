@@ -42,7 +42,7 @@ inline const std::filesystem::path& getExecutableDir()
         {
             return std::filesystem::current_path(ec);
         }
-        std::filesystem::path exe = std::filesystem::weakly_canonical(std::filesystem::path(buf), ec);
+        const std::filesystem::path exe = std::filesystem::weakly_canonical(std::filesystem::path(buf), ec);
 #else
         std::vector<char> buf(4096, '\0');
         const ssize_t len = ::readlink("/proc/self/exe", buf.data(), buf.size() - 1);
@@ -50,7 +50,7 @@ inline const std::filesystem::path& getExecutableDir()
         {
             return std::filesystem::current_path(ec);
         }
-        std::filesystem::path exe = std::filesystem::weakly_canonical(std::filesystem::path(buf.data()), ec);
+        const std::filesystem::path exe = std::filesystem::weakly_canonical(std::filesystem::path(buf.data()), ec);
 #endif
         if (ec)
         {

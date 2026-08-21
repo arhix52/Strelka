@@ -3720,6 +3720,8 @@ void EditorApp::runConvergenceSweep()
     // A comma-separated list, so it is parsed here rather than through envUint.
     for (const char* p = samplersEnv.c_str(); p != nullptr && *p != '\0';)
     {
+        // strtol's out-parameter is char**, so end cannot be const char*.
+        // NOLINTNEXTLINE(misc-const-correctness)
         char* end = nullptr;
         const long parsed = std::strtol(p, &end, 10);
         if (end == p)

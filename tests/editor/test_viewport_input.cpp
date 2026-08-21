@@ -27,7 +27,7 @@ enum class ViewportItem
 
 HoverTrace traceHoverThroughClick(ViewportItem item)
 {
-    HeadlessImGui ctx;
+    const HeadlessImGui ctx;
 
     const ImVec2 viewportSize(800.0f, 600.0f);
     const ImVec2 inside(100.0f, 100.0f);
@@ -104,7 +104,7 @@ TEST_CASE("an interactive viewport frame also stays hovered")
 
 TEST_CASE("letterbox bars do not hover the rendered image")
 {
-    HeadlessImGui ctx;
+    const HeadlessImGui ctx;
     ImGuiIO& io = ImGui::GetIO();
     io.AddMousePosEvent(100.0f, 20.0f);
 

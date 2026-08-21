@@ -15,7 +15,7 @@ public:
     OptixBuffer(size_t size);
     // Creates two dimensional buffer
     OptixBuffer(void* devicePtr, BufferFormat format, uint32_t width, uint32_t height);
-    virtual ~OptixBuffer();
+    ~OptixBuffer() override;
 
     /// Const because the memory report walks every buffer the renderer owns from
     /// a const method, and a size that cannot be read without permission to

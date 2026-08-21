@@ -147,6 +147,9 @@ int main()
     if (pixels == nullptr || width <= 0 || height <= 0)
     {
         std::printf("FAIL: %s decoded to nothing\n", out.string().c_str());
+        // Zero extent with a non-null block is the one shape of this that leaks.
+        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
+        free(pixels);
         return 1;
     }
 

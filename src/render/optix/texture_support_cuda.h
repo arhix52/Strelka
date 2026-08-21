@@ -68,9 +68,7 @@ struct Texture
     uint32_t levels = 0; // mip levels resident, 1 when there is no chain
 };
 
-namespace oka
-{
-namespace optix_tex
+namespace oka::optix_tex
 {
 
 // Bumped whenever the payload this backend writes changes meaning. It rides in
@@ -89,6 +87,24 @@ struct Payload
 
 namespace detail
 {
+
+/// std::istream and std::ostream traffic in char*, so reading a struct or a
+/// length prefix out of a binary file is a reinterpret_cast by construction.
+/// Two of them here rather than six at the call sites, which is also the only
+/// place the cast has to be read carefully.
+template <typename T>
+void readRaw(std::istream& in, T* dst, size_t bytes)
+{
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    in.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(bytes));
+}
+
+template <typename T>
+void writeRaw(std::ostream& out, const T* src, size_t bytes)
+{
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    out.write(reinterpret_cast<const char*>(src), static_cast<std::streamsize>(bytes));
+}
 
 struct CachedHeader
 {
@@ -279,7 +295,7 @@ inline Payload readCachedPayload(const std::string& cachePath)
     if (!in)
         return payload;
     detail::CachedHeader header{};
-    in.read(reinterpret_cast<char*>(&header), sizeof(header));
+    detail::readRaw(in, &header, sizeof(header));
     if (!in || std::memcmp(header.magic, "OTEX", 4) != 0 || header.payloadVersion != kOptixPayloadVersion)
         return payload;
     payload.plan.extent = Extent{ (int)header.width, (int)header.height };
@@ -291,11 +307,11 @@ inline Payload readCachedPayload(const std::string& cachePath)
     for (uint32_t l = 0; l < header.levels; ++l)
     {
         uint32_t byteLength = 0;
-        in.read(reinterpret_cast<char*>(&byteLength), sizeof(byteLength));
+        detail::readRaw(in, &byteLength, sizeof(byteLength));
         if (!in || byteLength == 0 || byteLength != payload.plan.levelBytes(l))
             return Payload{};
         std::vector<uint8_t> level(byteLength);
-        in.read(reinterpret_cast<char*>(level.data()), byteLength);
+        detail::readRaw(in, level.data(), byteLength);
         if (!in)
             return Payload{};
         payload.levels.push_back(std::move(level));
@@ -327,12 +343,12 @@ inline void writeCachedPayload(const Payload& payload, const std::string& cacheP
     header.levels = payload.plan.levels;
     header.format = (uint32_t)payload.plan.format;
     header.flags = detail::packFlags(payload.plan);
-    out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    detail::writeRaw(out, &header, sizeof(header));
     for (uint32_t l = 0; l < payload.plan.levels && l < payload.levels.size(); ++l)
     {
         const uint32_t byteLength = (uint32_t)payload.levels[l].size();
-        out.write(reinterpret_cast<const char*>(&byteLength), sizeof(byteLength));
-        out.write(reinterpret_cast<const char*>(payload.levels[l].data()), byteLength);
+        detail::writeRaw(out, &byteLength, sizeof(byteLength));
+        detail::writeRaw(out, payload.levels[l].data(), byteLength);
     }
     out.close();
     if (!out)
@@ -573,5 +589,4 @@ inline TextureResources createTexture(const Payload& payload,
     return out;
 }
 
-} // namespace optix_tex
-} // namespace oka
+} // namespace oka::optix_tex

@@ -1,6 +1,7 @@
 #include "OptixRender.h"
 
 #include "OptixBuffer.h"
+#include "device_ptr.h"
 
 #include <env.h>
 
@@ -95,6 +96,7 @@ static_assert((uint32_t)oka::optix_omm::kAlphaBlend == (uint32_t)ALPHA_MODE_BLEN
 #include <unistd.h>
 
 #include <algorithm>
+#include <ranges>
 #include <chrono>
 #include <limits>
 #include <filesystem>
@@ -118,7 +120,10 @@ static_assert((uint32_t)oka::optix_omm::kAlphaBlend == (uint32_t)ALPHA_MODE_BLEN
 
 #include <strelka/render/Camera.h>
 
-static void context_log_cb(unsigned int level, const char* tag, const char* message, void* /*cbdata */)
+namespace
+{
+
+void context_log_cb(unsigned int level, const char* tag, const char* message, void* /*cbdata */)
 {
     switch (level)
     {
@@ -139,7 +144,7 @@ static void context_log_cb(unsigned int level, const char* tag, const char* mess
     }
 }
 
-static inline void optixCheck(OptixResult res, const char* call, const char* file, unsigned int line)
+inline void optixCheck(OptixResult res, const char* call, const char* file, unsigned int line)
 {
     if (res != OPTIX_SUCCESS)
     {
@@ -150,13 +155,13 @@ static inline void optixCheck(OptixResult res, const char* call, const char* fil
     }
 }
 
-static inline void optixCheckLog(OptixResult res,
-                                 const char* log,
-                                 size_t sizeof_log,
-                                 size_t sizeof_log_returned,
-                                 const char* call,
-                                 const char* file,
-                                 unsigned int line)
+inline void optixCheckLog(OptixResult res,
+                          const char* log,
+                          size_t sizeof_log,
+                          size_t sizeof_log_returned,
+                          const char* call,
+                          const char* file,
+                          unsigned int line)
 {
     if (res != OPTIX_SUCCESS)
     {
@@ -172,6 +177,8 @@ static inline void optixCheckLog(OptixResult res,
         std::abort();
     }
 }
+
+} // namespace
 
 //------------------------------------------------------------------------------
 //
@@ -302,9 +309,14 @@ size_t deviceAllocatedBytes()
     using HandleFn = int (*)(unsigned int, void**);
     using ProcFn = int (*)(void*, unsigned int*, NvmlProcessInfoV2*);
 
+    // dlsym hands back void*, and POSIX guarantees only that the round trip
+    // through it works; there is no other spelling for looking a function up by
+    // name. The three go together because they are one API being bound.
+    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
     static auto nvmlInit = reinterpret_cast<InitFn>(dlsym(handle, "nvmlInit_v2"));
     static auto nvmlGetHandle = reinterpret_cast<HandleFn>(dlsym(handle, "nvmlDeviceGetHandleByIndex_v2"));
     static auto nvmlGetProcs = reinterpret_cast<ProcFn>(dlsym(handle, "nvmlDeviceGetComputeRunningProcesses_v3"));
+    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
     if (!nvmlInit || !nvmlGetHandle || !nvmlGetProcs)
     {
         return 0;
@@ -376,11 +388,14 @@ struct SbtRecord
     T data;
 };
 
-typedef SbtRecord<RayGenData> RayGenSbtRecord;
-typedef SbtRecord<MissData> MissSbtRecord;
-typedef SbtRecord<HitGroupData> HitGroupSbtRecord;
+using RayGenSbtRecord = SbtRecord<RayGenData>;
+using MissSbtRecord = SbtRecord<MissData>;
+using HitGroupSbtRecord = SbtRecord<HitGroupData>;
 
-static bool readSourceFile(std::string& str, const fs::path& filename)
+namespace
+{
+
+bool readSourceFile(std::string& str, const fs::path& filename)
 {
     // Try to open file
     std::ifstream file(filename.c_str(), std::ios::binary);
@@ -394,6 +409,8 @@ static bool readSourceFile(std::string& str, const fs::path& filename)
     return false;
 }
 
+} // namespace
+
 OptiXRender::OptiXRender() = default;
 
 OptiXRender::~OptiXRender()
@@ -403,11 +420,11 @@ OptiXRender::~OptiXRender()
 
     // Free SBT records
     if (mState.sbt.raygenRecord)
-        cudaFree(reinterpret_cast<void*>(mState.sbt.raygenRecord));
+        cudaFree(optix::devicePtr<void>(mState.sbt.raygenRecord));
     if (mState.sbt.missRecordBase)
-        cudaFree(reinterpret_cast<void*>(mState.sbt.missRecordBase));
+        cudaFree(optix::devicePtr<void>(mState.sbt.missRecordBase));
     if (mState.sbt.hitgroupRecordBase)
-        cudaFree(reinterpret_cast<void*>(mState.sbt.hitgroupRecordBase));
+        cudaFree(optix::devicePtr<void>(mState.sbt.hitgroupRecordBase));
 
     // Destroy pipeline
     if (mState.pipeline)
@@ -457,7 +474,7 @@ OptiXRender::~OptiXRender()
 
     // Free instance device memory
     if (mState.d_instances)
-        cudaFree(reinterpret_cast<void*>(mState.d_instances));
+        cudaFree(optix::devicePtr<void>(mState.d_instances));
 
     if (mFrameStartEvent)
         cudaEventDestroy(mFrameStartEvent);
@@ -481,11 +498,11 @@ OptiXRender::~OptiXRender()
 void OptiXRender::createContext()
 {
     OptixDeviceContextOptions options = {};
-    CUcontext cuCtx = 0;
+    CUcontext cuCtx = nullptr;
     unsigned int reorderFlags = 0;
 
     // Initialize CUDA
-    CUDA_CHECK(cudaFree(0));
+    CUDA_CHECK(cudaFree(nullptr));
     CUDA_CHECK(cudaGetDevice(&mCudaDeviceOrdinal));
     CUDA_CHECK(cudaStreamCreate(&mState.stream));
 
@@ -514,7 +531,7 @@ void OptiXRender::createContext()
     mShaderReorderSupported = (reorderFlags & OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING_FLAG_STANDARD) != 0;
     STRELKA_INFO("Shader execution reordering: {}", mShaderReorderSupported ? "supported" : "not available");
 
-    mState.mParamsBuffer.reset(new OptixBuffer(sizeof(Params)));
+    mState.mParamsBuffer = std::make_unique<OptixBuffer>(sizeof(Params));
 }
 
 // Returns what the structure occupies afterwards -- the compacted size when
@@ -527,8 +544,8 @@ size_t OptiXRender::compactAccel(CUdeviceptr& buffer,
                                  size_t outputSizeInBytes)
 {
     // Get compacted size from device
-    size_t compactedSize;
-    CUDA_CHECK(cudaMemcpy(&compactedSize, (void*)result, sizeof(size_t), cudaMemcpyDeviceToHost));
+    size_t compactedSize = 0;
+    CUDA_CHECK(cudaMemcpy(&compactedSize, optix::devicePtr<void>(result), sizeof(size_t), cudaMemcpyDeviceToHost));
 
     // Only compact if it saves space
     if (compactedSize >= outputSizeInBytes)
@@ -537,14 +554,14 @@ size_t OptiXRender::compactAccel(CUdeviceptr& buffer,
     }
 
     // Allocate compacted buffer
-    CUdeviceptr compactedBuffer;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&compactedBuffer), compactedSize));
+    CUdeviceptr compactedBuffer = 0;
+    CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(compactedBuffer), compactedSize));
 
     // Compact acceleration structure into new buffer
-    OPTIX_CHECK(optixAccelCompact(mState.context, 0, handle, compactedBuffer, compactedSize, &handle));
+    OPTIX_CHECK(optixAccelCompact(mState.context, nullptr, handle, compactedBuffer, compactedSize, &handle));
 
     // Free original buffer and update pointer
-    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(buffer)));
+    CUDA_CHECK(cudaFree(optix::devicePtr<void>(buffer)));
     buffer = compactedBuffer;
 
     return compactedSize;
@@ -595,9 +612,9 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
     // Reuse existing buffer if large enough, otherwise allocate new one
     if (!mSegmentIndicesBuffer || mSegmentIndicesBuffer->size() < segmentIndicesSize)
     {
-        mSegmentIndicesBuffer.reset(new OptixBuffer(segmentIndicesSize));
+        mSegmentIndicesBuffer = std::make_unique<OptixBuffer>(segmentIndicesSize);
     }
-    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(mSegmentIndicesBuffer->getPtr()), segmentIndices.data(),
+    CUDA_CHECK(cudaMemcpy(optix::devicePtr<void>(mSegmentIndicesBuffer->getPtr()), segmentIndices.data(),
                           segmentIndicesSize, cudaMemcpyHostToDevice));
 
     OptixBuildInput curve_input = {};
@@ -617,7 +634,7 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
     CUdeviceptr widthBuffers[] = { mWidthsBuffer->getPtr() };
     curve_input.curveArray.widthBuffers = widthBuffers;
     curve_input.curveArray.widthStrideInBytes = sizeof(float);
-    curve_input.curveArray.normalBuffers = 0;
+    curve_input.curveArray.normalBuffers = nullptr;
     curve_input.curveArray.normalStrideInBytes = 0;
     curve_input.curveArray.indexBuffer = mSegmentIndicesBuffer->getPtr();
     curve_input.curveArray.indexStrideInBytes = sizeof(int);
@@ -633,15 +650,15 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
     // These buffers are kept alive and reused for future GAS builds
     if (!mTempAccelBuffer || mTempAccelBuffer->size() < gas_buffer_sizes.tempSizeInBytes)
     {
-        mTempAccelBuffer.reset(new OptixBuffer(gas_buffer_sizes.tempSizeInBytes));
+        mTempAccelBuffer = std::make_unique<OptixBuffer>(gas_buffer_sizes.tempSizeInBytes);
     }
     if (!mCompactedSizeBuffer || mCompactedSizeBuffer->size() < sizeof(uint64_t))
     {
-        mCompactedSizeBuffer.reset(new OptixBuffer(sizeof(uint64_t)));
+        mCompactedSizeBuffer = std::make_unique<OptixBuffer>(sizeof(uint64_t));
     }
 
-    CUdeviceptr d_gas_output_buffer;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
+    CUdeviceptr d_gas_output_buffer = 0;
+    CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
 
     OptixAccelEmitDesc property = {};
     property.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
@@ -781,6 +798,9 @@ const OptiXRender::OmmAlphaImage* OptiXRender::ommAlphaImage(int32_t materialId)
     case tex::Format::RGBA16:
         if (level0.size() >= texels * 8)
         {
+            // The decoded level is a byte blob; reading its alpha means viewing
+            // it as the texel type the format says it holds.
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
             const uint16_t* src = reinterpret_cast<const uint16_t*>(level0.data());
             image.alpha.resize(texels);
             for (size_t i = 0; i < texels; ++i)
@@ -792,6 +812,7 @@ const OptiXRender::OmmAlphaImage* OptiXRender::ommAlphaImage(int32_t materialId)
     case tex::Format::RGBA32F:
         if (level0.size() >= texels * 16)
         {
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
             const float* src = reinterpret_cast<const float*>(level0.data());
             image.alpha.resize(texels);
             for (size_t i = 0; i < texels; ++i)
@@ -1028,10 +1049,10 @@ OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka
 
         // The whole triangle first. A cutout is mostly leaf and mostly gap, and
         // both answer here for four bytes instead of sixty-four.
-        const float triU0 = std::min(uv0.x, std::min(uv1.x, uv2.x));
-        const float triU1 = std::max(uv0.x, std::max(uv1.x, uv2.x));
-        const float triV0 = std::min(uv0.y, std::min(uv1.y, uv2.y));
-        const float triV1 = std::max(uv0.y, std::max(uv1.y, uv2.y));
+        const float triU0 = std::min({ uv0.x, uv1.x, uv2.x });
+        const float triU1 = std::max({ uv0.x, uv1.x, uv2.x });
+        const float triV0 = std::min({ uv0.y, uv1.y, uv2.y });
+        const float triV1 = std::max({ uv0.y, uv1.y, uv2.y });
         const omm::Coverage whole = classifyUvBox(triU0, triU1, triV0, triV1);
         if (whole != omm::Coverage::Mixed || !subdivide)
         {
@@ -1045,7 +1066,7 @@ OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka
             continue;
         }
 
-        std::fill(scratch.begin(), scratch.end(), (uint8_t)0);
+        std::ranges::fill(scratch, (uint8_t)0);
         uint32_t firstState = 0xFFFFFFFFu;
         bool uniform = true;
         for (uint32_t micro = 0; micro < microCount; ++micro)
@@ -1058,10 +1079,9 @@ OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka
             // uv is affine in the barycentrics, so the corners' box is the
             // microtriangle's box exactly -- no sampling and nothing missed
             // between the corners.
-            const omm::Coverage coverage = classifyUvBox(std::min(m0.x, std::min(m1.x, m2.x)),
-                                                         std::max(m0.x, std::max(m1.x, m2.x)),
-                                                         std::min(m0.y, std::min(m1.y, m2.y)),
-                                                         std::max(m0.y, std::max(m1.y, m2.y)));
+            const omm::Coverage coverage =
+                classifyUvBox(std::min({ m0.x, m1.x, m2.x }), std::max({ m0.x, m1.x, m2.x }),
+                              std::min({ m0.y, m1.y, m2.y }), std::max({ m0.y, m1.y, m2.y }));
             const uint32_t state = omm::microStateFor(coverage);
             omm::setMicroState(scratch.data(), micro, state);
             ++summary.microTriangles;
@@ -1113,13 +1133,13 @@ OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka
     {
         CUdeviceptr d_input = 0;
         CUdeviceptr d_descs = 0;
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_input), micromapData.size()));
-        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(d_input), micromapData.data(), micromapData.size(),
+        CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(d_input), micromapData.size()));
+        CUDA_CHECK(cudaMemcpy(optix::devicePtr<void>(d_input), micromapData.data(), micromapData.size(),
                               cudaMemcpyHostToDevice));
         const size_t descBytes = micromapDescs.size() * sizeof(OptixOpacityMicromapDesc);
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_descs), descBytes));
+        CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(d_descs), descBytes));
         CUDA_CHECK(
-            cudaMemcpy(reinterpret_cast<void*>(d_descs), micromapDescs.data(), descBytes, cudaMemcpyHostToDevice));
+            cudaMemcpy(optix::devicePtr<void>(d_descs), micromapDescs.data(), descBytes, cudaMemcpyHostToDevice));
 
         OptixOpacityMicromapHistogramEntry histogram = {};
         histogram.count = (unsigned int)micromapDescs.size();
@@ -1137,8 +1157,8 @@ OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka
         OPTIX_CHECK(optixOpacityMicromapArrayComputeMemoryUsage(mState.context, &arrayInput, &sizes));
 
         CUdeviceptr d_temp = 0;
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&out.array), sizes.outputSizeInBytes));
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_temp), std::max<size_t>(sizes.tempSizeInBytes, 1)));
+        CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(out.array), sizes.outputSizeInBytes));
+        CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(d_temp), std::max<size_t>(sizes.tempSizeInBytes, 1)));
 
         OptixMicromapBuffers buffers = {};
         buffers.output = out.array;
@@ -1148,9 +1168,9 @@ OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka
         OPTIX_CHECK(optixOpacityMicromapArrayBuild(mState.context, mState.stream, &arrayInput, &buffers));
         CUDA_CHECK(cudaStreamSynchronize(mState.stream));
 
-        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_temp)));
-        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_input)));
-        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_descs)));
+        CUDA_CHECK(cudaFree(optix::devicePtr<void>(d_temp)));
+        CUDA_CHECK(cudaFree(optix::devicePtr<void>(d_input)));
+        CUDA_CHECK(cudaFree(optix::devicePtr<void>(d_descs)));
         out.arrayBytes = sizes.outputSizeInBytes;
 
         out.usage.push_back(
@@ -1159,9 +1179,9 @@ OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka
     }
 
     const size_t indexBytes = triangleIndices.size() * sizeof(int32_t);
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&out.indices), indexBytes));
+    CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(out.indices), indexBytes));
     CUDA_CHECK(
-        cudaMemcpy(reinterpret_cast<void*>(out.indices), triangleIndices.data(), indexBytes, cudaMemcpyHostToDevice));
+        cudaMemcpy(optix::devicePtr<void>(out.indices), triangleIndices.data(), indexBytes, cudaMemcpyHostToDevice));
     out.valid = true;
     mOmmTotalBytes += out.arrayBytes;
 
@@ -1179,17 +1199,17 @@ void OptiXRender::releaseOpacityMicromapScratch(MeshOpacityMicromap& omm)
     // during traversal and belongs to the Mesh.
     if (omm.indices)
     {
-        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(omm.indices)));
+        CUDA_CHECK(cudaFree(optix::devicePtr<void>(omm.indices)));
         omm.indices = 0;
     }
 }
 
 std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh, size_t meshIndex)
 {
-    bool isSkeletal = mesh.isSkeletal;
+    const bool isSkeletal = mesh.isSkeletal;
 
-    OptixTraversableHandle gas_handle;
-    CUdeviceptr d_gas_output_buffer;
+    OptixTraversableHandle gas_handle = 0;
+    CUdeviceptr d_gas_output_buffer = 0;
 
     // A static mesh no longer asks for ALLOW_UPDATE. Nothing refits one --
     // updateBottomLevelAccelerationStructures() skips every mesh that is not
@@ -1275,14 +1295,14 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
     // These buffers are kept alive and reused for future GAS builds
     if (!mTempAccelBuffer || mTempAccelBuffer->size() < gas_buffer_sizes.tempSizeInBytes)
     {
-        mTempAccelBuffer.reset(new OptixBuffer(gas_buffer_sizes.tempSizeInBytes));
+        mTempAccelBuffer = std::make_unique<OptixBuffer>(gas_buffer_sizes.tempSizeInBytes);
     }
     if (!mCompactedSizeBuffer || mCompactedSizeBuffer->size() < sizeof(uint64_t))
     {
-        mCompactedSizeBuffer.reset(new OptixBuffer(sizeof(uint64_t)));
+        mCompactedSizeBuffer = std::make_unique<OptixBuffer>(sizeof(uint64_t));
     }
 
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
+    CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(d_gas_output_buffer), gas_buffer_sizes.outputSizeInBytes));
 
     // What the structure costs before compaction, for the memory report. The
     // compacted size, when there is one, overwrites it below.
@@ -1381,7 +1401,7 @@ void OptiXRender::endOpacityMicromaps()
 void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
 {
     OptixTraversableHandle& gas_handle = mOptixMeshes[optixMeshesId]->gas_handle;
-    CUdeviceptr& d_gas_output_buffer = mOptixMeshes[optixMeshesId]->d_gas_output_buffer;
+    const CUdeviceptr& d_gas_output_buffer = mOptixMeshes[optixMeshesId]->d_gas_output_buffer;
 
     // The same flags the structure was built with. An update reads its output
     // buffer as the result of a build with exactly these; spelling them a second
@@ -1417,7 +1437,7 @@ void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
     const size_t updateTempSize = gas_buffer_sizes.tempUpdateSizeInBytes;
     if (!mTempAccelBuffer || mTempAccelBuffer->size() < updateTempSize)
     {
-        mTempAccelBuffer.reset(new OptixBuffer(updateTempSize));
+        mTempAccelBuffer = std::make_unique<OptixBuffer>(updateTempSize);
     }
 
     OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &accel_options, &triangle_input, 1,
@@ -1440,7 +1460,7 @@ void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
 bool OptiXRender::rebuildMesh(const oka::Mesh& mesh, int optixMeshesId)
 {
     OptixTraversableHandle& gas_handle = mOptixMeshes[optixMeshesId]->gas_handle;
-    CUdeviceptr d_gas_output_buffer = mOptixMeshes[optixMeshesId]->d_gas_output_buffer;
+    const CUdeviceptr d_gas_output_buffer = mOptixMeshes[optixMeshesId]->d_gas_output_buffer;
 
     OptixAccelBuildOptions accel_options = {};
     accel_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_BUILD | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
@@ -1468,7 +1488,7 @@ bool OptiXRender::rebuildMesh(const oka::Mesh& mesh, int optixMeshesId)
 
     if (!mTempAccelBuffer || mTempAccelBuffer->size() < gas_buffer_sizes.tempSizeInBytes)
     {
-        mTempAccelBuffer.reset(new OptixBuffer(gas_buffer_sizes.tempSizeInBytes));
+        mTempAccelBuffer = std::make_unique<OptixBuffer>(gas_buffer_sizes.tempSizeInBytes);
     }
 
     const OptixTraversableHandle before = gas_handle;
@@ -1622,13 +1642,13 @@ void OptiXRender::uploadInstancesToDevice(const std::vector<OptixInstance>& opti
     {
         if (mState.d_instances)
         {
-            CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mState.d_instances)));
+            CUDA_CHECK(cudaFree(optix::devicePtr<void>(mState.d_instances)));
         }
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.d_instances), instancesSize));
+        CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(mState.d_instances), instancesSize));
         mState.d_instances_size = instancesSize;
     }
     CUDA_CHECK(cudaMemcpy(
-        reinterpret_cast<void*>(mState.d_instances), optixInstances.data(), instancesSize, cudaMemcpyHostToDevice));
+        optix::devicePtr<void>(mState.d_instances), optixInstances.data(), instancesSize, cudaMemcpyHostToDevice));
 }
 
 void OptiXRender::createTopLevelAccelerationStructure()
@@ -1667,7 +1687,7 @@ void OptiXRender::createTopLevelAccelerationStructure()
         if (mEnableMotionBlur && instance.isAnimated)
         {
             OptixMatrixMotionTransform matrixMotionTransform = {};
-            OptixTraversableHandle matrixMotionTransformHandle;
+            OptixTraversableHandle matrixMotionTransformHandle = 0;
 
             matrixMotionTransform.child = oi.traversableHandle;
             matrixMotionTransform.motionOptions.numKeys = NUM_MOTION_KEYS;
@@ -1741,17 +1761,17 @@ void OptiXRender::createTopLevelAccelerationStructure()
     size_t outputBufferSize = iasBufferSizes.outputSizeInBytes;
     if (!mTlasBuffer || mTlasBuffer->size() < outputBufferSize)
     {
-        mTlasBuffer.reset(new OptixBuffer(outputBufferSize));
+        mTlasBuffer = std::make_unique<OptixBuffer>(outputBufferSize);
     }
 
     // Reuse temporary buffers if large enough, otherwise allocate new ones
     if (!mTempAccelBuffer || mTempAccelBuffer->size() < iasBufferSizes.tempSizeInBytes)
     {
-        mTempAccelBuffer.reset(new OptixBuffer(iasBufferSizes.tempSizeInBytes));
+        mTempAccelBuffer = std::make_unique<OptixBuffer>(iasBufferSizes.tempSizeInBytes);
     }
     if (!mCompactedSizeBuffer || mCompactedSizeBuffer->size() < sizeof(uint64_t))
     {
-        mCompactedSizeBuffer.reset(new OptixBuffer(sizeof(uint64_t)));
+        mCompactedSizeBuffer = std::make_unique<OptixBuffer>(sizeof(uint64_t));
     }
 
     const bool compactTlas = oka::optix_accel::shouldCompact(tlasClass);
@@ -1779,8 +1799,8 @@ void OptiXRender::createTopLevelAccelerationStructure()
     }
 
     // Compact acceleration structure
-    size_t compactedSize;
-    CUDA_CHECK(cudaMemcpy(&compactedSize, (void*)property.result, sizeof(size_t), cudaMemcpyDeviceToHost));
+    size_t compactedSize = 0;
+    CUDA_CHECK(cudaMemcpy(&compactedSize, optix::devicePtr<void>(property.result), sizeof(size_t), cudaMemcpyDeviceToHost));
 
     // Only compact if it saves space
     if (compactedSize < outputBufferSize)
@@ -1789,7 +1809,7 @@ void OptiXRender::createTopLevelAccelerationStructure()
         std::unique_ptr<OptixBuffer> compactedBuffer(new OptixBuffer(compactedSize));
 
         // Compact acceleration structure into new buffer
-        OPTIX_CHECK(optixAccelCompact(mState.context, 0, mState.ias_handle,
+        OPTIX_CHECK(optixAccelCompact(mState.context, nullptr, mState.ias_handle,
                                      compactedBuffer->getPtr(), compactedSize, &mState.ias_handle));
 
         // Replace old buffer with compacted one
@@ -1843,7 +1863,7 @@ void oka::OptiXRender::updateTopLevelAccelerationStructure()
     const size_t updateTempSize = iasBufferSizes.tempUpdateSizeInBytes;
     if (!mTempAccelBuffer || mTempAccelBuffer->size() < updateTempSize)
     {
-        mTempAccelBuffer.reset(new OptixBuffer(updateTempSize));
+        mTempAccelBuffer = std::make_unique<OptixBuffer>(updateTempSize);
     }
 
     // Build (refit) IAS. The output size is the size the build wrote, which is
@@ -2004,7 +2024,7 @@ void OptiXRender::createModule()
 
 void OptiXRender::createProgramGroups()
 {
-    OptixProgramGroupOptions program_group_options = {}; // Initialize to zeros
+    const OptixProgramGroupOptions program_group_options = {}; // Initialize to zeros
 
     OptixProgramGroupDesc raygen_prog_group_desc = {}; //
     raygen_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
@@ -2044,7 +2064,7 @@ void OptiXRender::createProgramGroups()
     hit_prog_group_desc.hitgroup.moduleIS = mState.m_catromCurveModule;
     hit_prog_group_desc.hitgroup.entryFunctionNameIS = nullptr; // auto for built-in
     sizeof_log = sizeof(log);
-    OptixProgramGroup radiance_hit_group;
+    OptixProgramGroup radiance_hit_group = nullptr;
     OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &hit_prog_group_desc,
                                             1, // num program groups
                                             &program_group_options, log, &sizeof_log, &radiance_hit_group));
@@ -2063,7 +2083,7 @@ void OptiXRender::createProgramGroups()
     light_hit_prog_group_desc.hitgroup.moduleCH = mState.ptx_module;
     light_hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__light";
     sizeof_log = sizeof(log);
-    OptixProgramGroup light_hit_group;
+    OptixProgramGroup light_hit_group = nullptr;
     OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &light_hit_prog_group_desc,
                                             1, // num program groups
                                             &program_group_options, log, &sizeof_log, &light_hit_group));
@@ -2083,7 +2103,7 @@ void OptiXRender::createProgramGroups()
     hit_prog_group_desc.hitgroup.entryFunctionNameAH = "__anyhit__occlusion";
 
     hit_prog_group_desc.hitgroup.moduleIS = mState.m_catromCurveModule;
-    hit_prog_group_desc.hitgroup.entryFunctionNameIS = 0; // automatically supplied for built-in module
+    hit_prog_group_desc.hitgroup.entryFunctionNameIS = nullptr; // automatically supplied for built-in module
 
     sizeof_log = sizeof(log);
     OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &hit_prog_group_desc,
@@ -2127,15 +2147,15 @@ void OptiXRender::createPipeline()
         OPTIX_CHECK(optixUtilAccumulateStackSizes(prog_group, &stack_sizes, pipeline));
     }
 
-    uint32_t direct_callable_stack_size_from_traversal;
-    uint32_t direct_callable_stack_size_from_state;
-    uint32_t continuation_stack_size;
+    uint32_t direct_callable_stack_size_from_traversal = 0;
+    uint32_t direct_callable_stack_size_from_state = 0;
+    uint32_t continuation_stack_size = 0;
     OPTIX_CHECK(optixUtilComputeStackSizes(&stack_sizes, max_trace_depth,
                                            0, // maxCCDepth
                                            0, // maxDCDepth
                                            &direct_callable_stack_size_from_traversal,
                                            &direct_callable_stack_size_from_state, &continuation_stack_size));
-    int maxTraversableDepth = mEnableMotionBlur ? 3 : 2;
+    const int maxTraversableDepth = mEnableMotionBlur ? 3 : 2;
     OPTIX_CHECK(optixPipelineSetStackSize(pipeline, direct_callable_stack_size_from_traversal,
                                           direct_callable_stack_size_from_state, continuation_stack_size,
                                           maxTraversableDepth));
@@ -2250,27 +2270,27 @@ void OptiXRender::createSbt()
 {
     // Free previous SBT records if they exist
     if (mState.sbt.raygenRecord)
-        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mState.sbt.raygenRecord)));
+        CUDA_CHECK(cudaFree(optix::devicePtr<void>(mState.sbt.raygenRecord)));
     if (mState.sbt.missRecordBase)
-        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mState.sbt.missRecordBase)));
+        CUDA_CHECK(cudaFree(optix::devicePtr<void>(mState.sbt.missRecordBase)));
     if (mState.sbt.hitgroupRecordBase)
-        CUDA_CHECK(cudaFree(reinterpret_cast<void*>(mState.sbt.hitgroupRecordBase)));
+        CUDA_CHECK(cudaFree(optix::devicePtr<void>(mState.sbt.hitgroupRecordBase)));
     mState.sbt = {};
     mSbtDirty = false;
 
     // Create raygen record
-    CUdeviceptr raygen_record;
+    CUdeviceptr raygen_record = 0;
     const size_t raygen_record_size = sizeof(RayGenSbtRecord);
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&raygen_record), raygen_record_size));
+    CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(raygen_record), raygen_record_size));
 
     RayGenSbtRecord rg_sbt;
     OPTIX_CHECK(optixSbtRecordPackHeader(mState.raygen_prog_group, &rg_sbt));
-    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(raygen_record), &rg_sbt, raygen_record_size, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(optix::devicePtr<void>(raygen_record), &rg_sbt, raygen_record_size, cudaMemcpyHostToDevice));
 
     // Create miss records
-    CUdeviceptr miss_record;
+    CUdeviceptr miss_record = 0;
     const size_t miss_record_size = sizeof(MissSbtRecord) * RAY_TYPE_COUNT;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&miss_record), miss_record_size));
+    CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(miss_record), miss_record_size));
 
     std::vector<MissSbtRecord> miss_records(RAY_TYPE_COUNT);
 
@@ -2287,7 +2307,7 @@ void OptiXRender::createSbt()
     OPTIX_CHECK(optixSbtRecordPackHeader(mState.occlusion_miss_group, &occlusion_miss));
 
     CUDA_CHECK(cudaMemcpy(
-        reinterpret_cast<void*>(miss_record), miss_records.data(), miss_record_size, cudaMemcpyHostToDevice));
+        optix::devicePtr<void>(miss_record), miss_records.data(), miss_record_size, cudaMemcpyHostToDevice));
 
     // Create hit group records
     const std::vector<oka::Instance>& instances = mScene->getInstances();
@@ -2295,8 +2315,8 @@ void OptiXRender::createSbt()
     const size_t hit_group_size = sizeof(HitGroupSbtRecord) * hit_group_count;
 
     std::vector<HitGroupSbtRecord> hit_groups(hit_group_count);
-    CUdeviceptr hit_group_record;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&hit_group_record), hit_group_size));
+    CUdeviceptr hit_group_record = 0;
+    CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(hit_group_record), hit_group_size));
 
     if (instances.empty())
     {
@@ -2340,7 +2360,7 @@ void OptiXRender::createSbt()
 
             if (instance.type == oka::Instance::Type::eLight)
             {
-                radiance_hit.data.lightId = instance.mLightId;
+                radiance_hit.data.lightId = static_cast<int32_t>(instance.mLightId);
                 OPTIX_CHECK(optixSbtRecordPackHeader(mState.light_hit_group, &radiance_hit));
             }
             else
@@ -2352,15 +2372,15 @@ void OptiXRender::createSbt()
             }
 
             // Material is looked up from device buffer by materialId
-            radiance_hit.data.materialId = material_idx;
+            radiance_hit.data.materialId = static_cast<int32_t>(material_idx);
 
             // Set mesh data if applicable
             if (instance.type == oka::Instance::Type::eMesh)
             {
                 const oka::Mesh& mesh = meshes[instance.mMeshId];
-                radiance_hit.data.indexCount = mesh.mCount;
-                radiance_hit.data.indexOffset = mesh.mIndex;
-                radiance_hit.data.vertexOffset = mesh.mVbOffset;
+                radiance_hit.data.indexCount = static_cast<int32_t>(mesh.mCount);
+                radiance_hit.data.indexOffset = static_cast<int32_t>(mesh.mIndex);
+                radiance_hit.data.vertexOffset = static_cast<int32_t>(mesh.mVbOffset);
             }
             else if (instance.type == oka::Instance::Type::eCurve)
             {
@@ -2385,7 +2405,7 @@ void OptiXRender::createSbt()
     }
 
     CUDA_CHECK(cudaMemcpy(
-        reinterpret_cast<void*>(hit_group_record), hit_groups.data(), hit_group_size, cudaMemcpyHostToDevice));
+        optix::devicePtr<void>(hit_group_record), hit_groups.data(), hit_group_size, cudaMemcpyHostToDevice));
 
     // Create final SBT
     OptixShaderBindingTable sbt = {};
@@ -2436,7 +2456,7 @@ void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, u
         mSharcCapacity = 0;
         if (capacity != 0)
         {
-            mSharcBuffer.reset(new OptixBuffer((size_t)capacity * sizeof(SharcEntry)));
+            mSharcBuffer = std::make_unique<OptixBuffer>((size_t)capacity * sizeof(SharcEntry));
             mSharcCapacity = capacity;
             mSharcClearPending = true;
             STRELKA_INFO("Radiance cache: {} entries ({:.1f} MB)", capacity,
@@ -2450,7 +2470,7 @@ void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, u
     const size_t pathStateCount = (size_t)params.image_width * params.image_height;
     if (mSharcCapacity != 0 && (!mSharcPathBuffer || mSharcPathStateCount != pathStateCount))
     {
-        mSharcPathBuffer.reset(new OptixBuffer(pathStateCount * sizeof(SharcPathState)));
+        mSharcPathBuffer = std::make_unique<OptixBuffer>(pathStateCount * sizeof(SharcPathState));
         mSharcPathStateCount = pathStateCount;
     }
     else if (mSharcCapacity == 0 && mSharcPathBuffer)
@@ -2567,7 +2587,7 @@ void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, u
 
     if (mSharcClearPending)
     {
-        CUDA_CHECK(cudaMemsetAsync(reinterpret_cast<void*>(mSharcBuffer->getPtr()), 0,
+        CUDA_CHECK(cudaMemsetAsync(optix::devicePtr<void>(mSharcBuffer->getPtr()), 0,
                                    (size_t)mSharcCapacity * sizeof(SharcEntry), mState.stream));
         mSharcClearPending = false;
     }
@@ -2596,7 +2616,7 @@ void OptiXRender::resolveSharc()
         return;
     }
 
-    SharcEntry* entries = reinterpret_cast<SharcEntry*>(mSharcBuffer->getNativePtr());
+    SharcEntry* entries = static_cast<SharcEntry*>(mSharcBuffer->getNativePtr());
 
     SharcResolveParams resolveParams;
     resolveParams.capacity = mSharcCapacity;
@@ -2638,9 +2658,9 @@ void OptiXRender::resolveSharc()
     }
     if (!mSharcOccupancyCounter)
     {
-        mSharcOccupancyCounter.reset(new OptixBuffer(sizeof(uint32_t)));
+        mSharcOccupancyCounter = std::make_unique<OptixBuffer>(sizeof(uint32_t));
     }
-    uint32_t* counter = reinterpret_cast<uint32_t*>(mSharcOccupancyCounter->getNativePtr());
+    uint32_t* counter = static_cast<uint32_t*>(mSharcOccupancyCounter->getNativePtr());
     // Last frame's count, before this frame overwrites it.
     CUDA_CHECK(cudaMemcpyAsync(&mSharcOccupancyEntries, counter, sizeof(uint32_t), cudaMemcpyDeviceToHost,
                                mState.stream));
@@ -2686,21 +2706,21 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
         mState.params.diffuseCounter = nullptr;
         mState.params.specular = nullptr;
         mState.params.specularCounter = nullptr;
-        const size_t frameSize = mState.params.image_width * mState.params.image_height;
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.accum), frameSize * sizeof(float4)));
+        const size_t frameSize = static_cast<size_t>(mState.params.image_width) * mState.params.image_height;
+        CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(mState.params.accum), frameSize * sizeof(float4)));
 
         if (mState.params.writeSplitAov)
         {
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.diffuse), frameSize * sizeof(float4)));
+            CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(mState.params.diffuse), frameSize * sizeof(float4)));
             CUDA_CHECK(cudaMemset(mState.params.diffuse, 0, frameSize * sizeof(float4)));
             CUDA_CHECK(
-                cudaMalloc(reinterpret_cast<void**>(&mState.params.diffuseCounter), frameSize * sizeof(uint16_t)));
+                cudaMalloc(optix::deviceAllocTarget(mState.params.diffuseCounter), frameSize * sizeof(uint16_t)));
             CUDA_CHECK(cudaMemset(mState.params.diffuseCounter, 0, frameSize * sizeof(uint16_t)));
 
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mState.params.specular), frameSize * sizeof(float4)));
+            CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(mState.params.specular), frameSize * sizeof(float4)));
             CUDA_CHECK(cudaMemset(mState.params.specular, 0, frameSize * sizeof(float4)));
             CUDA_CHECK(
-                cudaMalloc(reinterpret_cast<void**>(&mState.params.specularCounter), frameSize * sizeof(uint16_t)));
+                cudaMalloc(optix::deviceAllocTarget(mState.params.specularCounter), frameSize * sizeof(uint16_t)));
             CUDA_CHECK(cudaMemset(mState.params.specularCounter, 0, frameSize * sizeof(uint16_t)));
         }
     }
@@ -2774,7 +2794,7 @@ bool OptiXRender::readDisplayTextureWithMaxOutput(std::vector<float>& out,
     imageSize = out.size() * sizeof(float);
     if (!mDisplayReadbackBuffer)
     {
-        mDisplayReadbackBuffer.reset(new OptixBuffer(imageSize));
+        mDisplayReadbackBuffer = std::make_unique<OptixBuffer>(imageSize);
     }
     else if (mDisplayReadbackBuffer->size() != imageSize)
     {
@@ -2829,7 +2849,7 @@ bool OptiXRender::readGuideTexture(Guide guide, std::vector<float>& out, uint32_
         height = mDenoiser.outputHeight();
         out.resize(static_cast<size_t>(width) * height * 4);
         CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(out.data(), reinterpret_cast<const void*>(mDenoiser.output()),
+        CUDA_CHECK(cudaMemcpy(out.data(), optix::devicePtr<const void>(mDenoiser.output()),
                               out.size() * sizeof(float), cudaMemcpyDeviceToHost));
         return true;
     }
@@ -2924,7 +2944,7 @@ void OptiXRender::applySkinning()
         }
     }
 
-    size_t jointMatSize = jointMat.size();
+    const size_t jointMatSize = jointMat.size();
     std::vector<sutil::Matrix4x4> cudaMatrices(jointMatSize);
     for (size_t i = 0; i < jointMatSize; ++i)
     {
@@ -2955,8 +2975,9 @@ void OptiXRender::applySkinning()
             {
                 auto& mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
 
-                cuApplySkinning(256, mesh.mVbOffset, mesh.mSbOffset, reinterpret_cast<void*>(mVertexBuffer->getPtr()),
-                                reinterpret_cast<void*>(mVertexSkinDataBuffer->getPtr()), mSkinningPtrs.d_jointMats,
+                cuApplySkinning(256, static_cast<int>(mesh.mVbOffset), static_cast<int>(mesh.mSbOffset),
+                                optix::devicePtr<void>(mVertexBuffer->getPtr()),
+                                optix::devicePtr<void>(mVertexSkinDataBuffer->getPtr()), mSkinningPtrs.d_jointMats,
                                 jointMatOffset, mesh.mVertexCount);
             }
         }
@@ -2964,7 +2985,7 @@ void OptiXRender::applySkinning()
     // One mark for the whole set. A per-mesh breadcrumb would say which mesh's
     // dispatch died, but the kernel is the same one for all of them and the
     // memset would cost more than the dispatch it follows.
-    markStageSubmitted(optix::GpuStage::Skinning, 0);
+    markStageSubmitted(optix::GpuStage::Skinning, nullptr);
 }
 
 // Bounding-box diagonal of the skinned vertices, read back from the GPU.
@@ -3007,7 +3028,7 @@ float OptiXRender::skinnedGeometryExtent()
 
     std::vector<oka::Scene::Vertex> host(count);
     CUDA_CHECK(cudaMemcpy(host.data(),
-                          reinterpret_cast<const void*>(mVertexBuffer->getPtr() +
+                          optix::devicePtr<const void>(mVertexBuffer->getPtr() +
                                                         first * sizeof(oka::Scene::Vertex)),
                           bytes, cudaMemcpyDeviceToHost));
 
@@ -3036,7 +3057,7 @@ void OptiXRender::allocJointMatrices()
             mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
 
             jointMatSize += currJointMats.size();
-            mJointMatOffsets.push_back(currJointMats.size());
+            mJointMatOffsets.push_back(static_cast<int>(currJointMats.size()));
         }
     }
     mSkinningPtrs.bytes = jointMatSize * sizeof(sutil::Matrix4x4);
@@ -3158,7 +3179,7 @@ void OptiXRender::render(Buffer* output)
         mScene->consumeChanges();
     }
 
-    SettingsManager& settings = *getSettings();
+    const SettingsManager& settings = *getSettings();
     bool settingsChanged = false;
     bool animStateChanged = false;
 
@@ -3171,7 +3192,7 @@ void OptiXRender::render(Buffer* output)
     {
         const std::string scrollNameStr = "render/animation/anim" + std::to_string(i) + "/time";
         const char* scrollName = scrollNameStr.c_str();
-        float currAnimTime = settings.getAs<float>(scrollName);
+        const float currAnimTime = settings.getAs<float>(scrollName);
 
         const float EPSILON = 1e-6f; // 0.000001
 
@@ -3264,7 +3285,7 @@ void OptiXRender::render(Buffer* output)
 
     const uint32_t selectedCameraIdx = settings.getAs<uint32_t>("render/selectedCamera");
     oka::Camera& camera = mScene->getCamera(selectedCameraIdx < mScene->getCameraCount() ? selectedCameraIdx : 0);
-    camera.updateAspectRatio(outputWidth / (float)outputHeight);
+    camera.updateAspectRatio(static_cast<float>(outputWidth) / static_cast<float>(outputHeight));
     camera.updateViewMatrix();
 
     View currView = {};
@@ -3317,10 +3338,10 @@ void OptiXRender::render(Buffer* output)
     const ToneMapperType tonemapperType = (ToneMapperType)settings.getAs<uint32_t>("render/pt/tonemapperType");
 
     Params& params = mState.params;
-    params.scene.vb = (Vertex*)mVertexBuffer->getPtr();
+    params.scene.vb = optix::devicePtr<Vertex>(mVertexBuffer->getPtr());
 
     if (mEnableMotionBlur)
-        params.scene.vb_prev = (Vertex*)mPrevVertexBuffer->getPtr();
+        params.scene.vb_prev = optix::devicePtr<Vertex>(mPrevVertexBuffer->getPtr());
     params.enableMotionBlur = mEnableMotionBlur;
     settingsChanged |= (params.isMotionBlurVisible != settings.getAs<bool>("render/isMotionBlurVisible"));
     params.isMotionBlurVisible = settings.getAs<bool>("render/isMotionBlurVisible");
@@ -3330,13 +3351,14 @@ void OptiXRender::render(Buffer* output)
         getSharedContext().mSubframeIndex = 0;
     }
 
-    params.scene.ib = (uint32_t*)mIndexBuffer->getPtr();
-    params.scene.lights = (UniformLight*)mLightBuffer->getPtr();
+    params.scene.ib = optix::devicePtr<uint32_t>(mIndexBuffer->getPtr());
+    params.scene.lights = optix::devicePtr<UniformLight>(mLightBuffer->getPtr());
     params.scene.numLights = mScene->getLights().size();
     // createLightBuffer() always leaves this populated -- with a zero-count
     // header when the scene has no profile -- so the shading path never sees
     // null here. Guarded anyway: a launch before the first scene build would.
-    params.scene.iesProfiles = mIesBuffer ? (const IesGpuBufferHeader*)mIesBuffer->getPtr() : nullptr;
+    params.scene.iesProfiles =
+        mIesBuffer ? optix::devicePtr<const IesGpuBufferHeader>(mIesBuffer->getPtr()) : nullptr;
 
     // When the 2x model is upscaling, the caller's buffer is twice the size the
     // path tracer runs at, so the tracer writes into its own buffer and the
@@ -3413,7 +3435,7 @@ void OptiXRender::render(Buffer* output)
     // Dropped once the numbers have been reported, so the steady state pays
     // neither the memset nor the three atomics' guard.
     params.iorStats = (mIorStatsBuffer && !mReportedIorStats)
-                          ? reinterpret_cast<uint32_t*>(mIorStatsBuffer->getPtr())
+                          ? optix::devicePtr<uint32_t>(mIorStatsBuffer->getPtr())
                           : nullptr;
     updateSharcParams(camera, params.image_width, params.image_height);
 
@@ -3478,19 +3500,19 @@ void OptiXRender::render(Buffer* output)
     // known as "film speed." The higher this value, the greater the exposure. If this is set to a non-zero value,
     // "Photographic" mode is enabled. If this is set to 0, "Arbitrary" mode is enabled, and all color scaling is then
     // strictly defined by the value of cm^2 Factor.
-    float filmIso = settings.getAs<float>("render/post/tonemapper/filmIso");
+    const float filmIso = settings.getAs<float>("render/post/tonemapper/filmIso");
     // The candela per meter square factor
-    float cm2_factor = settings.getAs<float>("render/post/tonemapper/cm2_factor");
+    const float cm2_factor = settings.getAs<float>("render/post/tonemapper/cm2_factor");
     // The fractional aperture number; e.g., 11 means aperture "f/11." It adjusts the size of the opening of the "camera
     // iris" and is expressed as a ratio. The higher this value, the lower the exposure.
-    float fStop = settings.getAs<float>("render/post/tonemapper/fStop");
+    const float fStop = settings.getAs<float>("render/post/tonemapper/fStop");
     // Controls the duration, in fractions of a second, that the "shutter" is open; e.g., the value 100 means that the
     // "shutter" is open for 1/100th of a second. The higher this value, the greater the exposure
-    float shutterSpeed = settings.getAs<float>("render/post/tonemapper/shutterSpeed");
+    const float shutterSpeed = settings.getAs<float>("render/post/tonemapper/shutterSpeed");
     // Specifies the main color temperature of the light sources; the color that will be mapped to "white" on output,
     // e.g., an incoming color of this hue/saturation will be mapped to grayscale, but its intensity will remain
     // unchanged. This is similar to white balance controls on digital cameras.
-    float3 whitePoint{ 1.0f, 1.0f, 1.0f };
+    const float3 whitePoint{ 1.0f, 1.0f, 1.0f };
     float3 exposureValue = all(whitePoint) ? 1.0f / whitePoint : make_float3(1.0f);
     const float lum = dot(exposureValue, make_float3(0.299f, 0.587f, 0.114f));
     if (filmIso > 0.0f)
@@ -3515,7 +3537,13 @@ void OptiXRender::render(Buffer* output)
     // -- stored into a uint32_t -- wraps to ~4.29 billion, which becomes the
     // raygen's per-pixel sample-loop trip count and hangs the launch (and the
     // editor, which synchronizes on it every frame).
-    const int32_t leftSpp = std::max<int32_t>(0, totalSpp - getSharedContext().mSubframeIndex);
+    // The subtraction is done in int64_t rather than left to wrap: totalSpp is
+    // uint32_t and mSubframeIndex is size_t, so the natural spelling underflows
+    // to ~1.8e19 and reaches int32_t only through an implementation-defined
+    // conversion that happens to give back the negative number this wants.
+    const int64_t remaining =
+        static_cast<int64_t>(totalSpp) - static_cast<int64_t>(getSharedContext().mSubframeIndex);
+    const int32_t leftSpp = static_cast<int32_t>(std::max<int64_t>(0, remaining));
     // if accumulation is off then launch selected samples per pixel
     uint32_t samplesThisLaunch = enableAccumulation ? std::min((int32_t)samplesPerLaunch, leftSpp) : samplesPerLaunch;
     // not to trace rays if there is no geometry
@@ -3555,16 +3583,16 @@ void OptiXRender::render(Buffer* output)
         // mState.stream as well as the post kernels on this one, and the number
         // is the whole frame rather than the part of it that happens to share a
         // stream with the events.
-        latchCudaError(cudaEventRecord(mFrameStartEvent, 0), "record the frame start event");
+        latchCudaError(cudaEventRecord(mFrameStartEvent, nullptr), "record the frame start event");
     }
 
-    if (latchCudaError(cudaMemcpy(reinterpret_cast<void*>(mState.mParamsBuffer->getPtr()), &params, sizeof(params),
+    if (latchCudaError(cudaMemcpy(optix::devicePtr<void>(mState.mParamsBuffer->getPtr()), &params, sizeof(params),
                                   cudaMemcpyHostToDevice),
                        "upload the launch parameters"))
     {
         return;
     }
-    markStageSubmitted(optix::GpuStage::ParamsUpload, 0);
+    markStageSubmitted(optix::GpuStage::ParamsUpload, nullptr);
 
     if (samplesThisLaunch != 0)
     {
@@ -3639,7 +3667,8 @@ void OptiXRender::render(Buffer* output)
         // picture rather than whatever was in its buffer.
         if (params.debug == 0)
         {
-            const size_t imageSize = mState.params.image_width * mState.params.image_height * sizeof(float4);
+            const size_t imageSize =
+                static_cast<size_t>(mState.params.image_width) * mState.params.image_height * sizeof(float4);
             CUDA_CHECK(cudaMemcpy(params.image, params.accum, imageSize, cudaMemcpyDeviceToDevice));
         }
     }
@@ -3688,7 +3717,7 @@ void OptiXRender::render(Buffer* output)
                                   mDenoiseFlowTrustBuffer->getPtr());
             if (denoised)
             {
-                copyDenoisedToImage((const float4*)mDenoiser.output(), displayImage, outputWidth, outputHeight);
+                copyDenoisedToImage(optix::devicePtr<const float4>(mDenoiser.output()), displayImage, outputWidth, outputHeight);
             }
             else
             {
@@ -3734,7 +3763,7 @@ void OptiXRender::render(Buffer* output)
                                        PresentationContent::SceneLinear :
                                        PresentationContent::DebugDisplayLinear;
 
-    if (mFrameStopEvent && !latchCudaError(cudaEventRecord(mFrameStopEvent, 0), "record the frame stop event"))
+    if (mFrameStopEvent && !latchCudaError(cudaEventRecord(mFrameStopEvent, nullptr), "record the frame stop event"))
     {
         mFrameTimingPending = true;
     }
@@ -3869,7 +3898,10 @@ void OptiXRender::buildSceneEnvironment(Buffer* output)
         const fs::path envTexPath = fs::path(resourcePathStr) / envLight->texturePath;
         loadEnvMap(envTexPath.string());
         mState.params.envMapIntensity = mEnvMapAutoScale * envLight->intensity;
-        mState.params.envMapRotation = envLight->rotationY * (M_PI / 180.0f);
+        // Kept in double until the store, which is what the implicit conversion did
+    // before the cast was made explicit -- M_PI is a double, so narrowing the
+    // factor first would move the result by an ulp.
+    mState.params.envMapRotation = static_cast<float>(envLight->rotationY * (M_PI / 180.0));
         mState.params.envMapColorTint = make_float3(envLight->color.x, envLight->color.y, envLight->color.z);
         // A backdrop the camera sees instead of the lighting environment. The
         // intensity is the backdrop's own; the auto-calibration scale above is
@@ -3916,10 +3948,10 @@ void OptiXRender::buildEmptyTopLevel()
     // Straight into the member the real top level will overwrite. It is a few
     // hundred bytes, and createTopLevelAccelerationStructure reallocates when it
     // needs more, so nothing is leaked by handing it a buffer sized for nothing.
-    mTlasBuffer.reset(new OptixBuffer(std::max<size_t>(iasBufferSizes.outputSizeInBytes, 1)));
+    mTlasBuffer = std::make_unique<OptixBuffer>(std::max<size_t>(iasBufferSizes.outputSizeInBytes, 1));
     if (!mTempAccelBuffer || mTempAccelBuffer->size() < iasBufferSizes.tempSizeInBytes)
     {
-        mTempAccelBuffer.reset(new OptixBuffer(std::max<size_t>(iasBufferSizes.tempSizeInBytes, 1)));
+        mTempAccelBuffer = std::make_unique<OptixBuffer>(std::max<size_t>(iasBufferSizes.tempSizeInBytes, 1));
     }
 
     OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &iasOptions, &iasInput, 1, mTempAccelBuffer->getPtr(),
@@ -4002,8 +4034,8 @@ void OptiXRender::buildSceneTail(Buffer* output)
     MemoryReport report;
     if (memoryReport(report))
     {
-        std::sort(report.gpu.begin(), report.gpu.end(),
-                  [](const MemoryReport::Entry& a, const MemoryReport::Entry& b) { return a.bytes > b.bytes; });
+        std::ranges::sort(report.gpu,
+                          [](const MemoryReport::Entry& a, const MemoryReport::Entry& b) { return a.bytes > b.bytes; });
         std::string top;
         for (size_t i = 0; i < std::min<size_t>(4, report.gpu.size()); ++i)
         {
@@ -4246,12 +4278,12 @@ void OptiXRender::createTimingEvents()
     // One byte per stage. Allocated once and reset per frame, so the fault path
     // costs a single small memset in the steady state and nothing at all when
     // nothing fails.
-    mStageMarkBuffer.reset(new OptixBuffer(optix::kGpuStageCount));
+    mStageMarkBuffer = std::make_unique<OptixBuffer>(optix::kGpuStageCount);
 
     // Three words, allocated once. The counting on the device is guarded on this
     // pointer being non-null, so a failed allocation costs the report and
     // nothing else.
-    mIorStatsBuffer.reset(new OptixBuffer(IOR_STAT_COUNT * sizeof(uint32_t)));
+    mIorStatsBuffer = std::make_unique<OptixBuffer>(IOR_STAT_COUNT * sizeof(uint32_t));
 }
 
 void OptiXRender::reportIorStackStats()
@@ -4261,7 +4293,7 @@ void OptiXRender::reportIorStackStats()
         return;
     }
     uint32_t stats[IOR_STAT_COUNT] = {};
-    if (cudaMemcpy(stats, reinterpret_cast<void*>(mIorStatsBuffer->getPtr()), sizeof(stats),
+    if (cudaMemcpy(stats, optix::devicePtr<void>(mIorStatsBuffer->getPtr()), sizeof(stats),
                    cudaMemcpyDeviceToHost) != cudaSuccess)
     {
         cudaGetLastError();
@@ -4284,7 +4316,9 @@ void OptiXRender::reportIorStackStats()
         "hole in it, seen from each side -- and the third is the one no exit event can "
         "catch, because the ray left through the hole. Each of them carries the wrong "
         "medium, and therefore the wrong absorption, for the rest of its life.",
-        overflow, IOR_STACK_SIZE, unmatched, escaped);
+        // IOR_STACK_SIZE is an unnamed enum, which fmt 11 refuses to format
+        // through an implicit conversion; the cast is what makes it an int.
+        overflow, static_cast<int>(IOR_STACK_SIZE), unmatched, escaped);
 }
 
 void OptiXRender::collectFrameTiming(bool wait)
@@ -4350,10 +4384,10 @@ void OptiXRender::beginFrameBreadcrumbs()
     {
         return;
     }
-    std::fill(std::begin(mStageSubmitted), std::end(mStageSubmitted), static_cast<uint8_t>(0));
+    std::ranges::fill(mStageSubmitted, static_cast<uint8_t>(0));
     // On the legacy stream, so it is ordered before everything this frame
     // enqueues on either stream.
-    cudaMemsetAsync(reinterpret_cast<void*>(mStageMarkBuffer->getPtr()), 0, optix::kGpuStageCount, 0);
+    cudaMemsetAsync(optix::devicePtr<void>(mStageMarkBuffer->getPtr()), 0, optix::kGpuStageCount, nullptr);
 }
 
 void OptiXRender::markStageSubmitted(optix::GpuStage stage, CUstream stream)
@@ -4372,7 +4406,7 @@ void OptiXRender::markStageSubmitted(optix::GpuStage stage, CUstream stream)
     // only if that work ran to completion. A fault takes the stream down with
     // the memset still in it, which is exactly what makes the absent mark
     // meaningful.
-    cudaMemsetAsync(reinterpret_cast<uint8_t*>(mStageMarkBuffer->getPtr()) + index, 1, 1, stream);
+    cudaMemsetAsync(optix::devicePtr<uint8_t>(mStageMarkBuffer->getPtr()) + index, 1, 1, stream);
 }
 
 void OptiXRender::reportGpuStageFailure()
@@ -4384,7 +4418,7 @@ void OptiXRender::reportGpuStageFailure()
     uint8_t completed[optix::kGpuStageCount] = {};
     // Deliberately unchecked: the device has already failed, and a second error
     // out of this copy would say nothing the first one did not.
-    if (cudaMemcpy(completed, reinterpret_cast<void*>(mStageMarkBuffer->getPtr()), optix::kGpuStageCount,
+    if (cudaMemcpy(completed, optix::devicePtr<void>(mStageMarkBuffer->getPtr()), optix::kGpuStageCount,
                    cudaMemcpyDeviceToHost) != cudaSuccess)
     {
         STRELKA_ERROR("GPU fault: the stage breadcrumbs could not be read back either");
@@ -4582,7 +4616,7 @@ void OptiXRender::endGpuCapture()
 
 Buffer* OptiXRender::createBuffer(const BufferDesc& desc)
 {
-    const size_t size = desc.height * desc.width * Buffer::getElementSize(desc.format);
+    const size_t size = static_cast<size_t>(desc.height) * desc.width * Buffer::getElementSize(desc.format);
     assert(size != 0);
 
     void* devicePtr = nullptr;
@@ -4591,6 +4625,9 @@ Buffer* OptiXRender::createBuffer(const BufferDesc& desc)
     return new OptixBuffer(devicePtr, desc.format, desc.width, desc.height);
 }
 
+namespace
+{
+
 template <typename T>
 void createOrUpdateBuffer(std::unique_ptr<OptixBuffer>& buffer, const std::vector<T>& data)
 {
@@ -4598,7 +4635,7 @@ void createOrUpdateBuffer(std::unique_ptr<OptixBuffer>& buffer, const std::vecto
 
     if (buffer == nullptr)
     {
-        buffer.reset(new OptixBuffer(bufferSize));
+        buffer = std::make_unique<OptixBuffer>(bufferSize);
     }
     if (buffer->size() != bufferSize)
     {
@@ -4606,9 +4643,12 @@ void createOrUpdateBuffer(std::unique_ptr<OptixBuffer>& buffer, const std::vecto
     }
     if (bufferSize > 0)
     {
-        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(buffer->getPtr()), data.data(), bufferSize, cudaMemcpyHostToDevice));
+        CUDA_CHECK(
+            cudaMemcpy(optix::devicePtr<void>(buffer->getPtr()), data.data(), bufferSize, cudaMemcpyHostToDevice));
     }
 }
+
+} // namespace
 
 void OptiXRender::createPointsBuffer()
 {
@@ -4699,7 +4739,7 @@ void OptiXRender::createProjectorTextures()
             continue;
         }
 
-        cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
+        const cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
         cudaArray_t array = nullptr;
         CUDA_CHECK(cudaMallocArray(&array, &channelDesc, image.width, image.height));
         CUDA_CHECK(cudaMemcpy2DToArray(array, 0, 0, image.pixels, image.width * sizeof(float4),
@@ -4730,14 +4770,15 @@ void OptiXRender::createProjectorTextures()
     }
 
     const size_t bytes = table.size() * sizeof(cudaTextureObject_t);
-    mProjectorTextureBuffer.reset(new OptixBuffer(bytes));
-    CUDA_CHECK(cudaMemcpy((void*)mProjectorTextureBuffer->getPtr(), table.data(), bytes, cudaMemcpyHostToDevice));
-    mState.params.scene.projectorTextures = (const cudaTextureObject_t*)mProjectorTextureBuffer->getPtr();
+    mProjectorTextureBuffer = std::make_unique<OptixBuffer>(bytes);
+    CUDA_CHECK(cudaMemcpy(optix::devicePtr<void>(mProjectorTextureBuffer->getPtr()), table.data(), bytes, cudaMemcpyHostToDevice));
+    mState.params.scene.projectorTextures =
+        optix::devicePtr<const cudaTextureObject_t>(mProjectorTextureBuffer->getPtr());
 }
 
 void OptiXRender::destroyProjectorTextures()
 {
-    for (cudaTextureObject_t obj : mProjectorTextureObjects)
+    for (const cudaTextureObject_t obj : mProjectorTextureObjects)
     {
         if (obj)
             cudaDestroyTextureObject(obj);
@@ -4862,7 +4903,7 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName, oka::optix
         if (!payload.valid)
         {
             STRELKA_ERROR("Unable to load texture from file: {}", fileName.c_str());
-            return Texture();
+            return {};
         }
         writeCachedPayload(payload, cacheFile);
     }
@@ -4885,7 +4926,7 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName, oka::optix
         if (res.object == 0)
         {
             STRELKA_ERROR("Unable to upload texture: {}", fileName.c_str());
-            return Texture();
+            return {};
         }
     }
 
@@ -4899,9 +4940,9 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName, oka::optix
         mMaterialTextureMipmappedArrays.push_back(res.mipmapped);
     mMaterialTextureObjects.push_back(res.object);
 
-    return Texture(res.object,
-                   make_uint3((uint32_t)payload.plan.extent.width, (uint32_t)payload.plan.extent.height, 1),
-                   payload.plan.levels);
+    return { res.object,
+             make_uint3((uint32_t)payload.plan.extent.width, (uint32_t)payload.plan.extent.height, 1),
+             payload.plan.levels };
 }
 
 void OptiXRender::loadEnvMap(const std::string& texturePath)
@@ -4918,7 +4959,7 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     STRELKA_INFO("Loaded env map: {} ({}x{})", texturePath, width, height);
 
     // Create CUDA array and texture object for the env map (float4)
-    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
+    const cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
     cudaArray_t envArray = nullptr;
     CUDA_CHECK(cudaMallocArray(&envArray, &channelDesc, width, height));
     CUDA_CHECK(cudaMemcpy2DToArray(envArray, 0, 0, pixelData,
@@ -4976,19 +5017,19 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     image.release();
 
     const size_t aliasBytes = aliasResult.alias.size() * sizeof(metal::EnvAliasEntry);
-    mEnvAliasBuffer.reset(new OptixBuffer(aliasBytes));
-    CUDA_CHECK(cudaMemcpy((void*)mEnvAliasBuffer->getPtr(), aliasResult.alias.data(), aliasBytes,
+    mEnvAliasBuffer = std::make_unique<OptixBuffer>(aliasBytes);
+    CUDA_CHECK(cudaMemcpy(optix::devicePtr<void>(mEnvAliasBuffer->getPtr()), aliasResult.alias.data(), aliasBytes,
                           cudaMemcpyHostToDevice));
     // The stage the breadcrumbs know as EnvCdf is now the alias table: the CDF
     // kernel it was named for is gone, but it is still the same point in the
     // frame -- the environment's sampling distribution reaching the device -- so
     // a fault there is still reported against it.
-    markStageSubmitted(optix::GpuStage::EnvCdf, 0);
+    markStageSubmitted(optix::GpuStage::EnvCdf, nullptr);
 
     // Store env map params
     mState.params.envMapTexture = envTexObj;
     mState.params.envMapTexturePoint = envTexPointObj;
-    mState.params.envAliasTable = (const EnvAliasEntry*)mEnvAliasBuffer->getPtr();
+    mState.params.envAliasTable = optix::devicePtr<const EnvAliasEntry>(mEnvAliasBuffer->getPtr());
     mState.params.envPdfScale = aliasResult.envPdfScale;
     mState.params.envMapWidth = width;
     mState.params.envMapHeight = height;
@@ -5024,7 +5065,7 @@ void OptiXRender::loadEnvBackground(const std::string& texturePath)
     const int width = image.width;
     const int height = image.height;
 
-    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
+    const cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
     cudaArray_t bgArray = nullptr;
     CUDA_CHECK(cudaMallocArray(&bgArray, &channelDesc, width, height));
     CUDA_CHECK(cudaMemcpy2DToArray(
@@ -5132,8 +5173,8 @@ void OptiXRender::publishMaterialParams()
 
     mHostMaterialTextures.assign(matDescs.size() * MAX_MATERIAL_TEXTURES, 0);
     const size_t totalTexSize = mHostMaterialTextures.size() * sizeof(cudaTextureObject_t);
-    mTexturesDataBuffer.reset(new OptixBuffer(totalTexSize));
-    CUDA_CHECK(cudaMemset(reinterpret_cast<void*>(mTexturesDataBuffer->getPtr()), 0, totalTexSize));
+    mTexturesDataBuffer = std::make_unique<OptixBuffer>(totalTexSize);
+    CUDA_CHECK(cudaMemset(optix::devicePtr<void>(mTexturesDataBuffer->getPtr()), 0, totalTexSize));
 
     std::vector<MaterialParams> allParams(matDescs.size());
     for (uint32_t i = 0; i < matDescs.size(); ++i)
@@ -5141,13 +5182,14 @@ void OptiXRender::publishMaterialParams()
         allParams[i] = mMaterials[i].params;
     }
     const size_t paramsSize = allParams.size() * sizeof(MaterialParams);
-    mMaterialParamsBuffer.reset(new OptixBuffer(paramsSize));
+    mMaterialParamsBuffer = std::make_unique<OptixBuffer>(paramsSize);
     CUDA_CHECK(
-        cudaMemcpy((void*)mMaterialParamsBuffer->getPtr(), allParams.data(), paramsSize, cudaMemcpyHostToDevice));
+        cudaMemcpy(optix::devicePtr<void>(mMaterialParamsBuffer->getPtr()), allParams.data(), paramsSize,
+                   cudaMemcpyHostToDevice));
     mMaterialCount = matDescs.size();
 
-    mState.params.materials = (MaterialParams*)mMaterialParamsBuffer->getPtr();
-    mState.params.materialTextures = (cudaTextureObject_t*)mTexturesDataBuffer->getPtr();
+    mState.params.materials = optix::devicePtr<MaterialParams>(mMaterialParamsBuffer->getPtr());
+    mState.params.materialTextures = optix::devicePtr<cudaTextureObject_t>(mTexturesDataBuffer->getPtr());
 
     mMaterialTextureCursor = 0;
     mTextureCache.clear();
@@ -5224,11 +5266,11 @@ bool OptiXRender::stepMaterialTextures(double budgetMs)
         params.transmission_tex = -1;
 
         // Objects first, then the parameters that name them.
-        CUDA_CHECK(cudaMemcpy(reinterpret_cast<cudaTextureObject_t*>(mTexturesDataBuffer->getPtr()) +
+        CUDA_CHECK(cudaMemcpy(optix::devicePtr<cudaTextureObject_t>(mTexturesDataBuffer->getPtr()) +
                                   i * MAX_MATERIAL_TEXTURES,
                               texSlots, MAX_MATERIAL_TEXTURES * sizeof(cudaTextureObject_t),
                               cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(reinterpret_cast<MaterialParams*>(mMaterialParamsBuffer->getPtr()) + i, &params,
+        CUDA_CHECK(cudaMemcpy(optix::devicePtr<MaterialParams>(mMaterialParamsBuffer->getPtr()) + i, &params,
                               sizeof(MaterialParams), cudaMemcpyHostToDevice));
 
         ++mMaterialTextureCursor;

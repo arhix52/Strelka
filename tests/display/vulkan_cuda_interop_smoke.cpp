@@ -2,7 +2,7 @@
 #include "postprocessing/Tonemappers.h"
 
 #include <cuda_runtime_api.h>
-#include <math.h>
+#include <cmath>
 #include <vulkan/vulkan.h>
 
 #include <algorithm>

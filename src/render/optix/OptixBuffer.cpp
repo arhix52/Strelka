@@ -6,27 +6,29 @@
 
 using namespace oka;
 
-oka::OptixBuffer::OptixBuffer(const size_t size)
+oka::OptixBuffer::OptixBuffer(const size_t size) : mSizeInBytes(size)
 {
     mFormat = BufferFormat::UNSIGNED_BYTE;
     mWidth = size;
     mHeight = 1;
-    mSizeInBytes = size;
     void* devicePtr = nullptr;
     if (size > 0)
     {
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&devicePtr), size));
+        CUDA_CHECK(cudaMalloc(&devicePtr, size));
     }
     mDeviceData = devicePtr;
 }
 
 oka::OptixBuffer::OptixBuffer(void* devicePtr, BufferFormat format, uint32_t width, uint32_t height)
+    : mSizeInBytes(static_cast<size_t>(width) * height)
 {
     mDeviceData = devicePtr;
     mFormat = format;
     mWidth = width;
     mHeight = height;
-    mSizeInBytes = mWidth * mHeight * getElementSize();
+    // getElementSize() reads mFormat, so it cannot run in the initializer list
+    // above -- the base's mFormat is not assigned until this line.
+    mSizeInBytes *= getElementSize();
 }
 
 oka::OptixBuffer::~OptixBuffer()
@@ -46,8 +48,8 @@ void oka::OptixBuffer::resize(uint32_t width, uint32_t height)
     }
     mWidth = width;
     mHeight = height;
-    mSizeInBytes = mWidth * mHeight * getElementSize();
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mDeviceData), mSizeInBytes));
+    mSizeInBytes = static_cast<size_t>(mWidth) * mHeight * getElementSize();
+    CUDA_CHECK(cudaMalloc(&mDeviceData, mSizeInBytes));
 }
 
 void oka::OptixBuffer::realloc(size_t size)
@@ -61,7 +63,7 @@ void oka::OptixBuffer::realloc(size_t size)
     }
     mSizeInBytes = size;
     if (size > 0)
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&mDeviceData), size));
+        CUDA_CHECK(cudaMalloc(&mDeviceData, size));
 }
 
 void* oka::OptixBuffer::map()

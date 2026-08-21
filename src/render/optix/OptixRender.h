@@ -9,6 +9,7 @@
 #include <strelka/scene/scene.h>
 
 #include "cuda_checks.h"
+#include "device_ptr.h"
 #include <strelka/render/common.h>
 #include "OptixBuffer.h"
 #include "OptixDenoiser.h"
@@ -37,33 +38,33 @@ namespace oka
 
 struct PathTracerState
 {
-    OptixDeviceContext context = 0;
+    OptixDeviceContext context = nullptr;
 
-    OptixTraversableHandle ias_handle;
+    OptixTraversableHandle ias_handle = 0;
     CUdeviceptr d_instances = 0;
     size_t d_instances_size = 0;
 
     OptixModuleCompileOptions module_compile_options = {};
-    OptixModule ptx_module = 0;
-    OptixModule closest_hit_module = 0; // Loaded from OptixRender_closest_hit.cu.optixir
+    OptixModule ptx_module = nullptr;
+    OptixModule closest_hit_module = nullptr; // Loaded from OptixRender_closest_hit.cu.optixir
     OptixPipelineCompileOptions pipeline_compile_options = {};
-    OptixPipeline pipeline = 0;
-    OptixModule m_catromCurveModule = 0;
+    OptixPipeline pipeline = nullptr;
+    OptixModule m_catromCurveModule = nullptr;
     /// Built-in intersector for round *linear* curves. A separate module from
     /// the cubic one because the basis is baked into the intersector, so a
     /// scene with both kinds of strand needs both hit groups.
-    OptixModule m_linearCurveModule = 0;
+    OptixModule m_linearCurveModule = nullptr;
 
-    OptixProgramGroup raygen_prog_group = 0;
-    OptixProgramGroup radiance_miss_group = 0;
-    OptixProgramGroup occlusion_miss_group = 0;
-    OptixProgramGroup radiance_default_hit_group = 0;
-    OptixProgramGroup radiance_linear_curve_hit_group = 0;
+    OptixProgramGroup raygen_prog_group = nullptr;
+    OptixProgramGroup radiance_miss_group = nullptr;
+    OptixProgramGroup occlusion_miss_group = nullptr;
+    OptixProgramGroup radiance_default_hit_group = nullptr;
+    OptixProgramGroup radiance_linear_curve_hit_group = nullptr;
     std::vector<OptixProgramGroup> radiance_hit_groups;
-    OptixProgramGroup occlusion_hit_group = 0;
-    OptixProgramGroup occlusion_linear_curve_hit_group = 0;
-    OptixProgramGroup light_hit_group = 0;
-    CUstream stream = 0;
+    OptixProgramGroup occlusion_hit_group = nullptr;
+    OptixProgramGroup occlusion_linear_curve_hit_group = nullptr;
+    OptixProgramGroup light_hit_group = nullptr;
+    CUstream stream = nullptr;
     Params params = {};
     Params prevParams = {};
 
@@ -94,10 +95,10 @@ private:
         size_t omm_bytes = 0;
         ~Mesh()
         {
-            CUDA_CHECK(cudaFree((void*)d_gas_output_buffer));
+            CUDA_CHECK(cudaFree(optix::devicePtr<void>(d_gas_output_buffer)));
             if (d_omm_array)
             {
-                CUDA_CHECK(cudaFree((void*)d_omm_array));
+                CUDA_CHECK(cudaFree(optix::devicePtr<void>(d_omm_array)));
             }
         }
     };
@@ -115,7 +116,7 @@ private:
         size_t gas_bytes = 0;
         ~Curve()
         {
-            CUDA_CHECK(cudaFree((void*)d_gas_output_buffer));
+            CUDA_CHECK(cudaFree(optix::devicePtr<void>(d_gas_output_buffer)));
         }
     };
 
@@ -153,8 +154,8 @@ private:
     View mPrevView;
 
     PathTracerState mState;
-    bool mEnableValidation;
-    bool mEnableMotionBlur;
+    bool mEnableValidation = false;
+    bool mEnableMotionBlur = false;
     bool mShaderReorderSupported = false;
 
     /// The launch-parameter fields the modules are compiled against as
@@ -563,7 +564,7 @@ private:
 
 public:
     OptiXRender(/* args */);
-    ~OptiXRender();
+    ~OptiXRender() override;
 
     void init() override;
     void render(Buffer* output_buffer) override;

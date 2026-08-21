@@ -604,7 +604,7 @@ void EditorApp::drawRenderSettingsPanel()
 
     if (ImGui::TreeNode("Path Tracer"))
     {
-        const char* rectlightSamplingMethodItems[] = { "Uniform", "Advanced" };
+        const char* const rectlightSamplingMethodItems[] = { "Uniform", "Advanced" };
         static int currentRectlightSamplingMethodItemId = 0;
         if (ImGui::BeginCombo("Rect Light Sampling", rectlightSamplingMethodItems[currentRectlightSamplingMethodItemId]))
         {
@@ -624,7 +624,7 @@ void EditorApp::drawRenderSettingsPanel()
             ImGui::EndCombo();
         }
 
-        const char* samplerTypeItems[] = { "Halton", "PCG", "Sobol (Owen)", "Sobol + blue noise",
+        const char* const samplerTypeItems[] = { "Halton", "PCG", "Sobol (Owen)", "Sobol + blue noise",
                                            "Hybrid (blue noise -> Sobol)" };
         // Read back rather than remembered in a static: the default is set in
         // loadSettings, and a static starting at zero showed "Halton" no matter

@@ -619,14 +619,14 @@ uint32_t Scene::createSphereLightMesh()
     for (int i = 0; i <= rings; ++i)
     {
         const float theta = static_cast<float>(i) * std::numbers::pi_v<float> / static_cast<float>(rings);
-        const float sinTheta = sin(theta);
-        const float cosTheta = cos(theta);
+        const float sinTheta = std::sin(theta);
+        const float cosTheta = std::cos(theta);
 
         for (int j = 0; j <= segments; ++j)
         {
             const float phi = static_cast<float>(j) * 2.0f * std::numbers::pi_v<float> / static_cast<float>(segments);
-            const float sinPhi = sin(phi);
-            const float cosPhi = cos(phi);
+            const float sinPhi = std::sin(phi);
+            const float cosPhi = std::cos(phi);
 
             const float x = cosPhi * sinTheta;
             const float y = cosTheta;
@@ -692,8 +692,8 @@ uint32_t Scene::createDiscLightMesh()
         indices.push_back(vertices.size() - 1); // prev vertex
 
         angle += step;
-        const float x = cos(angle) * diskRadius;
-        const float y = sin(angle) * diskRadius;
+        const float x = std::cos(angle) * diskRadius;
+        const float y = std::sin(angle) * diskRadius;
 
         Scene::Vertex v;
         v.pos = glm::float4(x, y, 0.0f, 1.0f);

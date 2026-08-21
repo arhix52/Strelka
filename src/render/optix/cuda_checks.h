@@ -14,7 +14,7 @@ inline void cudaCheck(cudaError_t error, const char* call, const char* file, uns
 inline void cudaSyncCheck(const char* file, unsigned int line)
 {
     cudaDeviceSynchronize();
-    cudaError_t error = cudaGetLastError();
+    const cudaError_t error = cudaGetLastError();
     if (error != cudaSuccess)
     {
         STRELKA_FATAL("CUDA error on synchronize with error {0} , {1}:{2}", cudaGetErrorString(error), file, line);

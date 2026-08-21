@@ -1,6 +1,7 @@
 #include "OptixDenoiser.h"
 
 #include "cuda_checks.h"
+#include "device_ptr.h"
 
 #include <optix_stubs.h>
 
@@ -18,7 +19,7 @@ void freeDevice(CUdeviceptr& ptr)
 {
     if (ptr != 0)
     {
-        cudaFree(reinterpret_cast<void*>(ptr));
+        cudaFree(optix::devicePtr<void>(ptr));
         ptr = 0;
     }
 }
@@ -30,7 +31,7 @@ bool allocDevice(CUdeviceptr& ptr, size_t bytes)
     {
         return false;
     }
-    ptr = reinterpret_cast<CUdeviceptr>(raw);
+    ptr = optix::deviceAddress(raw);
     return true;
 }
 
@@ -173,7 +174,7 @@ bool OptixDenoiserContext::configure(OptixDeviceContext context, CUstream stream
         release();
         return false;
     }
-    CUDA_CHECK(cudaMemset(reinterpret_cast<void*>(mOutput), 0, layout.denoisedBytes));
+    CUDA_CHECK(cudaMemset(optix::devicePtr<void>(mOutput), 0, layout.denoisedBytes));
     mOwnedImageBytes = layout.denoisedBytes;
 
     if (plan.temporal)
@@ -184,7 +185,7 @@ bool OptixDenoiserContext::configure(OptixDeviceContext context, CUstream stream
             release();
             return false;
         }
-        CUDA_CHECK(cudaMemset(reinterpret_cast<void*>(mPreviousOutput), 0, layout.denoisedBytes));
+        CUDA_CHECK(cudaMemset(optix::devicePtr<void>(mPreviousOutput), 0, layout.denoisedBytes));
         mOwnedImageBytes += layout.denoisedBytes;
 
         mInternalPixelBytes = sizes.internalGuideLayerPixelSizeInBytes;
@@ -197,8 +198,8 @@ bool OptixDenoiserContext::configure(OptixDeviceContext context, CUstream stream
             return false;
         }
         // Zeroed for the first frame, which is what "no previous layers" means.
-        CUDA_CHECK(cudaMemset(reinterpret_cast<void*>(mInternalPrev), 0, internalBytes));
-        CUDA_CHECK(cudaMemset(reinterpret_cast<void*>(mInternalNext), 0, internalBytes));
+        CUDA_CHECK(cudaMemset(optix::devicePtr<void>(mInternalPrev), 0, internalBytes));
+        CUDA_CHECK(cudaMemset(optix::devicePtr<void>(mInternalNext), 0, internalBytes));
         mOwnedImageBytes += 2 * internalBytes;
     }
 
@@ -271,7 +272,7 @@ bool OptixDenoiserContext::denoise(CUstream stream,
         // differently and are given nothing instead.
         if (mFirstFrame && !mPlan.upscale)
         {
-            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(mPreviousOutput), reinterpret_cast<const void*>(color),
+            CUDA_CHECK(cudaMemcpyAsync(optix::devicePtr<void>(mPreviousOutput), optix::devicePtr<const void>(color),
                                        static_cast<size_t>(w) * h * 4 * sizeof(float), cudaMemcpyDeviceToDevice,
                                        stream));
         }
@@ -302,10 +303,10 @@ bool OptixDenoiserContext::denoise(CUstream stream,
 
     if (mPlan.temporal)
     {
-        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(mPreviousOutput), reinterpret_cast<const void*>(mOutput),
+        CUDA_CHECK(cudaMemcpyAsync(optix::devicePtr<void>(mPreviousOutput), optix::devicePtr<const void>(mOutput),
                                    static_cast<size_t>(mPlan.outputWidth) * mPlan.outputHeight * 4 * sizeof(float),
                                    cudaMemcpyDeviceToDevice, stream));
-        CUdeviceptr tmp = mInternalPrev;
+        const CUdeviceptr tmp = mInternalPrev;
         mInternalPrev = mInternalNext;
         mInternalNext = tmp;
     }

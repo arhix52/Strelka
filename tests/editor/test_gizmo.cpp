@@ -41,7 +41,7 @@ DragResult dragGizmo(ViewportItem item,
                      const glm::float4x4& startModel = glm::float4x4(1.0f),
                      glm::float3 cameraPos = glm::float3(0.0f, 0.0f, 5.0f))
 {
-    HeadlessImGui ctx;
+    const HeadlessImGui ctx;
 
     Camera cam;
     cam.position = cameraPos;
@@ -203,7 +203,7 @@ TEST_CASE("dragging a scale handle resizes the target")
 
 TEST_CASE("ImGuizmo draws with editor call order (dockspace, manipulate from another window)")
 {
-    HeadlessImGui ctx;
+    const HeadlessImGui ctx;
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
     Camera cam;
@@ -252,7 +252,7 @@ TEST_CASE("ImGuizmo draws with editor call order (dockspace, manipulate from ano
 // documented next to the positive case.
 TEST_CASE("ImGuizmo draws nothing when the target is behind the camera")
 {
-    HeadlessImGui ctx;
+    const HeadlessImGui ctx;
 
     Camera cam;
     cam.position = glm::float3(0.0f, 0.0f, 5.0f);

@@ -48,6 +48,12 @@ inline constexpr char kMagic[8] = { 'S', 'T', 'R', 'K', 'C', 'R', 'V', '1' };
 
 struct Reader
 {
+    /// A view over the caller's buffer, deliberately: the sidecar is read once,
+    /// in one scope, and copying a multi-megabyte groom to walk it would be the
+    /// whole cost of loading it. Non-copyable as a consequence, which is what
+    /// cppcoreguidelines-avoid-const-or-ref-data-members is warning about and
+    /// what is wanted here.
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
     const std::vector<char>& data;
     size_t offset = 0;
 

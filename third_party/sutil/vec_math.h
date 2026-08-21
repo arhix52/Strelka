@@ -39,6 +39,19 @@
 #include <cstdlib>
 #endif
 
+// Local change to the vendored header. CUDA 13 deprecated longlong4 and
+// ulonglong4 in favour of the explicitly-aligned longlong4_16a/_32a spellings,
+// and sutil wraps both throughout. Nothing in Strelka uses a 64-bit 4-vector,
+// but every .cu that includes this header paid 183 -Wdeprecated-declarations
+// lines for those overloads. Silenced across the file rather than with
+// -Wno-deprecated-declarations on the shader compile, which would also hide
+// deprecations in our own device code. Everything below this line is vendored,
+// so nothing of ours is being masked.
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+
 /* scalar functions used in vector functions */
 #ifndef M_PIf
 #define M_PIf       3.14159265358979323846f
@@ -2631,4 +2644,6 @@ SUTIL_INLINE SUTIL_HOSTDEVICE float4 make_float4(const float3& v0, const float v
 SUTIL_INLINE SUTIL_HOSTDEVICE float4 make_float4(const float2& v0, const float2& v1) { return make_float4( v0.x, v0.y, v1.x, v1.y ); }
 /** @} */
 
-
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
