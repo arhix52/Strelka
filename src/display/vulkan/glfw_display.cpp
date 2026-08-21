@@ -132,6 +132,11 @@ void GlfwDisplay::init(int width, int height, SettingsManager *settings)
     io = &ImGui::GetIO();
     io->ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io->ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    // Panels, menus and sliders reachable from the pad. The ImGui GLFW backend
+    // feeds it from the same joystick GLFW hands us, so this needs no wiring --
+    // but it is deliberately *only* nav: the pad does not move the pointer, so
+    // gizmo drags and viewport picking stay on the mouse.
+    io->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     io->ConfigWindowsMoveFromTitleBarOnly = true;
     ImGui::StyleColorsDark();
 

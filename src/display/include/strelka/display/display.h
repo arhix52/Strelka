@@ -4,6 +4,8 @@
 #include <strelka/render/buffer.h>
 #include <strelka/render/render.h>
 #include <strelka/display/output_policy.h>
+#include <strelka/display/gamepad.h>
+#include <strelka/display/glfw_gamepad.h>
 
 #include <settings.h>
 
@@ -105,6 +107,22 @@ public:
     void pollEvents()
     {
         glfwPollEvents();
+        // Here rather than in either backend: both windowing paths are GLFW and
+        // the joystick API is per-process, so a copy in each would be two
+        // answers to one question. Also here rather than in the editor's main
+        // loop, because the editor has half a dozen other loops -- scene load,
+        // benchmarks, convergence runs -- that pump events without going through
+        // it, and a pad plugged in during one of those has to be noticed too.
+        glfw_gamepad::poll(mGamepad);
+    }
+
+    /// The gamepad as of the last pollEvents(), or a disconnected state.
+    ///
+    /// Detection is automatic and continuous: nothing has to be enabled, and a
+    /// pad plugged in or pulled mid-session is picked up on the next frame.
+    const GamepadState& getGamepadState() const
+    {
+        return mGamepad;
     }
 
     virtual void onBeginFrame() = 0;
@@ -150,6 +168,7 @@ protected:
     Render* mRender = nullptr;
 
     GLFWwindow* mWindow = nullptr;
+    GamepadState mGamepad;
 };
 
 class DisplayFactory

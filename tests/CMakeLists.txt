@@ -51,6 +51,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_camera_framing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_editor_overlay.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_camera_dump.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/editor/test_gamepad_camera.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/display/test_output_policy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/display/test_output_probe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_frame_jitter.cpp

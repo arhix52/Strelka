@@ -257,6 +257,9 @@ public:
     // Panel draw methods (defined in panels/*.cpp)
     void drawViewportPanel();
     void drawRenderSettingsPanel();
+    /// The gamepad block inside the render settings panel. Split out because the
+    /// panel is already 1500 lines and this is self-contained.
+    void drawGamepadSettings();
     void drawMemoryPanel();
     void drawAnimationPanel();
     void drawPropertyPanel();

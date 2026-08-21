@@ -3,6 +3,8 @@
 #include <strelka/scene/camera.h>
 #include <GLFW/glfw3.h>
 
+#include "gamepad_camera.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -161,6 +163,38 @@ public:
         else
         {
             mPendingTranslate = glm::float3(0.0f);
+        }
+    }
+
+    /// Add a frame of gamepad input to the same queues the mouse and keys feed.
+    ///
+    /// Queued rather than applied, for the reason handleMouseMoveCallback is:
+    /// everything the user drives the camera with goes through one filter, so a
+    /// hand on the stick and a hand on the mouse compose instead of fighting, and
+    /// the stick inherits the smoothing that makes motion survive a path tracer's
+    /// uneven frame times.
+    ///
+    /// Gated on the viewport being hovered like the movement keys are -- a stick
+    /// held while the user is in a text field must not fly the camera -- except
+    /// that a pad has no cursor, so "hovered" here means the viewport is the
+    /// thing the pointer is over, which is the editor's normal resting state.
+    void applyGamepad(const gamepad::CameraInput& input)
+    {
+        if (mGizmoBlocksInput || !input.active)
+        {
+            return;
+        }
+        mUserMovedCamera = true;
+        mPendingLookX += input.lookX;
+        mPendingLookY += input.lookY;
+        mPendingTranslate += input.translate;
+        if (input.worldUp != 0.0f)
+        {
+            // The queue is in camera space and this lift is in world space, so it
+            // is rotated into the queue's frame rather than the queue being split
+            // in two. Camera::translate applies conjugate(orientation), so
+            // orientation * v is the delta that comes back out as world v.
+            mPendingTranslate += mCam.mOrientation * (mCam.getWorldUp() * input.worldUp);
         }
     }
 

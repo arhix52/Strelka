@@ -545,6 +545,21 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", 1); // 0 - None, 1 - Reinhard, 2 - ACES, 3 - Filmic
     m_settingsManager->setAs<uint32_t>("render/pt/debug", 0); // 0 - none, 1 - normals
     m_settingsManager->setAs<float>("render/cameraSpeed", 1.0f);
+    // Gamepad. Editor-only, so deliberately not mirrored into
+    // HeadlessApp::populateSettings(): a headless render has no one holding a
+    // controller, and a key that exists in both places is a key that has to be
+    // kept in step in both places.
+    //
+    // The pad itself needs no enabling -- it is detected and used when present.
+    // What is here is the tuning a hand can disagree with: `enabled` exists to
+    // turn a pad off without unplugging it (a controller left on a desk with a
+    // sticky stick would otherwise keep restarting accumulation), and the rest
+    // is the feel. Defaults come from gamepad::Config, which is where the
+    // measurements behind them are written down.
+    m_settingsManager->setAs<bool>("editor/gamepad/enabled", true);
+    m_settingsManager->setAs<bool>("editor/gamepad/invertLookY", false);
+    m_settingsManager->setAs<float>("editor/gamepad/lookSpeed", gamepad::Config{}.lookSpeed);
+    m_settingsManager->setAs<float>("editor/gamepad/deadzone", gamepad::Config{}.deadzone);
     m_settingsManager->setAs<float>("render/pt/upscaleFactor", 0.5f);
     // Preview resolution itself bounds interactive work. MetalFX remains an
     // explicit quality/performance choice inside that fixed output.
@@ -3934,6 +3949,30 @@ void EditorApp::run()
         const double deltaTime = std::chrono::duration<double>(currentTime - prevTime).count();
 
         const auto cameraSpeed = m_settingsManager->getAs<float>("render/cameraSpeed");
+
+        // Before update(), so the stick's contribution is in the queue that
+        // update() drains this frame rather than next. The pad shares the mouse's
+        // speed setting deliberately: two numbers for one notion of "how fast
+        // does the camera fly" is how they end up disagreeing.
+        // WantTextInput is last frame's, which is what it has to be here: this
+        // runs before NewFrame(). One frame of lag on "a text field has focus"
+        // is not something a hand can produce.
+        if (m_settingsManager->getAs<bool>("editor/gamepad/enabled") &&
+            gamepad::cameraOwnsPad(m_display->getGamepadState(), ImGui::GetIO().WantTextInput))
+        {
+            gamepad::Config padConfig;
+            padConfig.moveSpeed = cameraSpeed;
+            padConfig.invertLookY = m_settingsManager->getAs<bool>("editor/gamepad/invertLookY");
+            padConfig.lookSpeed = m_settingsManager->getAs<float>("editor/gamepad/lookSpeed");
+            padConfig.deadzone = m_settingsManager->getAs<float>("editor/gamepad/deadzone");
+            // Clamped like CameraController does: a frame that took a second was
+            // a scene load, and integrating the stick across it would teleport
+            // the camera by however long the pause happened to be.
+            const gamepad::CameraInput padInput = gamepad::mapToCamera(
+                m_display->getGamepadState(), padConfig, std::min(static_cast<float>(deltaTime), 0.1f));
+            m_cameraController->applyGamepad(padInput);
+        }
+
         m_cameraController->update(deltaTime, cameraSpeed);
         prevTime = currentTime;
 

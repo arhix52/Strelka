@@ -1289,6 +1289,8 @@ void EditorApp::drawRenderSettingsPanel()
     ImGui::InputFloat("Camera Speed", (float*)&cameraSpeed, 0.5);
     m_settingsManager->setAs<float>("render/cameraSpeed", cameraSpeed);
 
+    drawGamepadSettings();
+
     // Exposure, the camera side of the tone curve. The renderer computes
     //     film speed  > 0 : cm2_factor * iso / (shutter * fstop^2) / 100
     //     film speed == 0 : cm2_factor
@@ -1515,6 +1517,106 @@ void EditorApp::drawLoadingOverlay()
     }
 
     ImGui::End();
+}
+
+/// The gamepad section of the render settings.
+///
+/// Under Camera Speed rather than in a panel of its own, because the pad shares
+/// that setting: the two numbers a user compares are "how fast does the camera
+/// fly" and "how fast does the stick fly it", and putting them on one screen is
+/// what stops the second from acquiring a duplicate of the first.
+///
+/// The pad name is shown even when nothing is connected. A section that
+/// disappears with the hardware leaves a user who plugged something in with
+/// nowhere to look for why it did nothing.
+void EditorApp::drawGamepadSettings()
+{
+    const GamepadState& pad = m_display->getGamepadState();
+
+    if (!ImGui::TreeNode("Gamepad"))
+    {
+        return;
+    }
+
+    if (pad.connected)
+    {
+        ImGui::TextUnformatted(pad.name.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("(slot %d)", pad.slot);
+    }
+    else
+    {
+        ImGui::TextDisabled("No controller detected");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(
+                "A controller is picked up automatically when it is plugged in --\n"
+                "nothing here needs enabling first.\n\n"
+                "If one is connected and this still says no, the platform has no\n"
+                "game-controller mapping for it, and its axes cannot be told apart.");
+        }
+    }
+
+    bool enabled = m_settingsManager->getAs<bool>("editor/gamepad/enabled");
+    if (ImGui::Checkbox("Enabled", &enabled))
+    {
+        m_settingsManager->setAs<bool>("editor/gamepad/enabled", enabled);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+    {
+        ImGui::SetTooltip("Off ignores the pad without unplugging it. A controller with a worn\n"
+                          "stick reports motion at rest, and motion at rest restarts\n"
+                          "accumulation every frame, so the image never converges.");
+    }
+
+    bool invert = m_settingsManager->getAs<bool>("editor/gamepad/invertLookY");
+    if (ImGui::Checkbox("Invert look Y", &invert))
+    {
+        m_settingsManager->setAs<bool>("editor/gamepad/invertLookY", invert);
+    }
+
+    float lookSpeed = m_settingsManager->getAs<float>("editor/gamepad/lookSpeed");
+    if (ImGui::SliderFloat("Look speed", &lookSpeed, 100.0f, 3000.0f, "%.0f"))
+    {
+        m_settingsManager->setAs<float>("editor/gamepad/lookSpeed", lookSpeed);
+    }
+
+    float deadzone = m_settingsManager->getAs<float>("editor/gamepad/deadzone");
+    if (ImGui::SliderFloat("Deadzone", &deadzone, 0.0f, 0.5f, "%.3f"))
+    {
+        m_settingsManager->setAs<float>("editor/gamepad/deadzone", deadzone);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+    {
+        ImGui::SetTooltip("How far a stick must move before it counts. A DualSense at rest\n"
+                          "reads up to 0.043 on the right stick, so anything below that lets\n"
+                          "the camera drift on its own and the render never settles.");
+    }
+
+    // The live axes, so a pad that behaves oddly can be diagnosed here rather
+    // than by guessing from how the camera moved.
+    if (pad.connected && ImGui::TreeNode("Live input"))
+    {
+        ImGui::Text("Left  stick  %+.3f %+.3f", pad.leftX, pad.leftY);
+        ImGui::Text("Right stick  %+.3f %+.3f", pad.rightX, pad.rightY);
+        ImGui::Text("Triggers     L2 %.3f  R2 %.3f", pad.leftTrigger, pad.rightTrigger);
+        ImGui::Text("Speed scale  x%.2f",
+                    gamepad::speedScaleFromTriggers(pad.leftTrigger, pad.rightTrigger, gamepad::Config{}));
+        ImGui::TreePop();
+    }
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Left stick   move        Right stick  look");
+    ImGui::TextDisabled("L1 / R1      down / up   L2 / R2      slower / faster");
+    ImGui::TextDisabled("D-pad        navigate the UI");
+
+    ImGui::TreePop();
 }
 
 } // namespace oka
