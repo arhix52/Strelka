@@ -74,6 +74,37 @@ namespace fs = std::filesystem;
 // resident size is not, and undercounts GPU allocations badly.
 namespace
 {
+// How much a failed commit's error is worth saying out loud.
+//
+// A GPU reset kills every command buffer in flight, and the driver reports the
+// bystanders as "Discarded (victim of GPU error/recovery)" -- an error the chunk
+// that actually hung never receives. Feedback arrives in queue order, not in
+// causal order, so reporting the first failure and muting the rest reliably
+// names a bystander and buries the cause: the log ends up pointing at whichever
+// group the feedback queue happened to drain first, which is not evidence about
+// anything. Rank the errors instead, and let a more informative one replace a
+// victim's report.
+enum class Metal4FailureRank : int
+{
+    Victim = 1, // discarded by someone else's fault; names no cause
+    Cause = 2 // a timeout, page fault or the like -- this is the one worth having
+};
+
+int metal4FailureRank(const NS::Error* error)
+{
+    if (!error)
+    {
+        return 0;
+    }
+    const NS::String* description = error->localizedDescription();
+    const char* text = description ? description->utf8String() : nullptr;
+    if (text != nullptr && (std::strstr(text, "victim") != nullptr || std::strstr(text, "Discarded") != nullptr))
+    {
+        return static_cast<int>(Metal4FailureRank::Victim);
+    }
+    return static_cast<int>(Metal4FailureRank::Cause);
+}
+
 struct Metal4FrameFeedbackState
 {
     // Commit feedback is delivered on Metal4Context's serial feedback queue.
@@ -941,6 +972,11 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mPost.denoisedTexture());
     for (MTL::Texture* t : mTextures.materialTextures())
         add(t);
+    // Reached by address out of the uniforms, so Metal cannot infer its use from
+    // any binding -- exactly the same reason the material textures above have to
+    // be named here one by one.
+    add(mMaterials.openpbrBuffer());
+    add(mMaterials.openpbrTextureBuffer());
     for (uint32_t i = 0; i < 2; ++i)
         add(mPost.displayTexture((int)i));
     for (uint32_t i = 0; i < 2; ++i)
@@ -1806,7 +1842,17 @@ void MetalRender::render(Buffer* output)
             featureIn.hasSharc = pUniformData->sharcCapacity != 0;
             featureIn.hasSubsurface = mMaterials.hasSubsurfaceMaterials();
             featureIn.hasCurves = mGeometry.hasCurves();
+            featureIn.hasOpenPBR = mMaterials.hasOpenPBRMaterials();
             const uint32_t features = metal::packWavefrontFeatures(featureIn).bits();
+
+            // The OpenPBR table is reached through the uniforms rather than a
+            // binding -- the shade stage has no slot left. Written here and not
+            // in MetalFrameUniforms because the address belongs to the material
+            // table, which that file cannot see. Null when the scene has none,
+            // and the kernel that reads it is compiled out in that case anyway.
+            pUniformData->openpbrParams = mMaterials.openpbrBuffer() ? mMaterials.openpbrBuffer()->gpuAddress() : 0ull;
+            pUniformData->openpbrTextures =
+                mMaterials.openpbrTextureBuffer() ? mMaterials.openpbrTextureBuffer()->gpuAddress() : 0ull;
 
             metal::IntegratorSceneBindings sceneBind = integratorSceneBindings();
             metal::IntegratorFrameRequest frameReq;
@@ -2130,7 +2176,19 @@ void MetalRender::render(Buffer* output)
                             if (error)
                             {
                                 mMetal4FrameFailed.store(true, std::memory_order_relaxed);
-                                if (!mMetal4FrameFailReported.exchange(true, std::memory_order_relaxed))
+                                const int rank = metal4FailureRank(error);
+                                int reported = mMetal4FrameFailReportRank.load(std::memory_order_relaxed);
+                                bool report = false;
+                                while (rank > reported)
+                                {
+                                    if (mMetal4FrameFailReportRank.compare_exchange_weak(
+                                            reported, rank, std::memory_order_relaxed))
+                                    {
+                                        report = true;
+                                        break;
+                                    }
+                                }
+                                if (report)
                                 {
                                     const double wallMs = std::chrono::duration<double, std::milli>(
                                                               std::chrono::steady_clock::now() - commitStartedAt)
@@ -2140,11 +2198,15 @@ void MetalRender::render(Buffer* output)
                                     // the queue actually spent executing or waiting.
                                     STRELKA_ERROR(
                                         "Metal 4 frame chunk group {}/{} failed after {:.1f} ms wall / "
-                                        "{:.1f} ms group GPU: {} (domain {}, code {})",
+                                        "{:.1f} ms group GPU: {} (domain {}, code {}){}",
                                         groupIndex + 1, state->groups.size(), wallMs, chunkGpuMs,
                                         error->localizedDescription() ? error->localizedDescription()->utf8String() :
                                                                         "unknown error",
-                                        error->domain() ? error->domain()->utf8String() : "?", (long)error->code());
+                                        error->domain() ? error->domain()->utf8String() : "?", (long)error->code(),
+                                        rank == static_cast<int>(Metal4FailureRank::Victim) ?
+                                            " -- a bystander of a GPU reset, so the chunk and workload below are not "
+                                            "the cause; the causing chunk reports its own error if it reaches us" :
+                                            "");
                                     STRELKA_ERROR("Metal 4 failed workload: PT={}x{} spp={} depth={} features=0x{:x}",
                                                   width, height, samplesThisLaunch, maxDepth, features);
                                     if (groupIndex < state->groups.size())

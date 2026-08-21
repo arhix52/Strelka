@@ -1256,6 +1256,8 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     values->setConstantValue(&curves, MTL::DataTypeBool, (NS::UInteger)9);
     const bool sharcUpdate = (features & WavefrontFeatures::kSharcUpdate) != 0;
     values->setConstantValue(&sharcUpdate, MTL::DataTypeBool, (NS::UInteger)10);
+    const bool openpbr = (features & WavefrontFeatures::kOpenPBR) != 0;
+    values->setConstantValue(&openpbr, MTL::DataTypeBool, (NS::UInteger)11);
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);
     };
@@ -1312,8 +1314,8 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     }
     STRELKA_INFO(
         "wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} sss={} sharc={} "
-        "curves={} sharcUpdate={} metal4={}",
-        envMap, lights, motionBlur, dof, debug, alpha, fog, subsurface, sharc, curves, sharcUpdate, useMetal4);
+        "curves={} sharcUpdate={} openpbr={} metal4={}",
+        envMap, lights, motionBlur, dof, debug, alpha, fog, subsurface, sharc, curves, sharcUpdate, openpbr, useMetal4);
     // Every pipeline's threadgroup limit, not just two of them.
     //
     // This is the only figure the public API gives on register pressure -- the

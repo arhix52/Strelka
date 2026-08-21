@@ -144,6 +144,15 @@ struct RenderConfig
     bool opacityMicromaps = false;
     // 0 = glTF (-ln(C)/d), 1 = Cycles ((1-C)/d)
     uint32_t volumeModel = 0;
+    /// Which BSDF the scene's materials shade with: 0 = the glTF
+    /// metallic-roughness model that has always shipped, 1 = OpenPBR Surface.
+    ///
+    /// A render setting rather than a scene property, so that one asset can be
+    /// rendered both ways and the two compared. That comparison is the only
+    /// external check on the OpenPBR integration available: Blender has no
+    /// OpenPBR, so Cycles cannot referee it. Default 0 -- every existing scene
+    /// renders exactly as before, and the OpenPBR code is compiled out.
+    uint32_t materialModel = 0;
     // Longest side a texture is allowed on load; 0 = no limit.
     uint32_t textureMaxDim = 0;
     // Divide every texture's dimensions by this on load; 1 = full size.

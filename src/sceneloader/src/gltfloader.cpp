@@ -3,6 +3,8 @@
 #include <strelka/sceneloader/curve_sidecar.h>
 #include <strelka/sceneloader/lod_filter.h>
 #include <strelka/sceneloader/light_json.h>
+#include <strelka/sceneloader/material_sidecar.h>
+#include <strelka/sceneloader/materialx_loader.h>
 
 #include <strelka/scene/camera.h>
 #include <strelka/scene/vertex_packing.h>
@@ -1419,6 +1421,38 @@ bool loadCurvesFromSidecar(const std::string& modelPath, oka::Scene& scene)
 namespace
 {
 
+/// Re-authors named materials as OpenPBR from <stem>_openpbr.json.
+///
+/// Runs after loadMaterials() because it matches by the name that gave them, and
+/// it is deliberately additive: a scene with no sidecar, or a material the
+/// sidecar does not name, keeps the glTF model and the exact pixels it had.
+void loadOpenPBRMaterialsFromSidecar(const std::string& modelPath, oka::Scene& scene)
+{
+    const std::string stem = modelPath.substr(0, modelPath.rfind('.'));
+    const std::string path = oka::materialsidecar::findMaterialSidecar(stem);
+    if (path.empty())
+    {
+        return;
+    }
+    oka::materialsidecar::loadMaterialsJson(scene, path);
+}
+
+/// Re-authors named materials from <stem>.mtlx, when one sits beside the scene.
+///
+/// Runs after the JSON sidecar so that a hand-written block can override what a
+/// document says -- the JSON is the place to correct a material without editing
+/// someone else's .mtlx.
+void loadMaterialXFromSidecar(const std::string& modelPath, oka::Scene& scene)
+{
+    const std::string stem = modelPath.substr(0, modelPath.rfind('.'));
+    const std::string path = stem + ".mtlx";
+    if (!fs::exists(path))
+    {
+        return;
+    }
+    oka::mtlx::applyMaterialXDocument(scene, path);
+}
+
 bool loadLightsFromJson(const std::string& modelPath, oka::Scene& scene)
 {
     // First try exact match: <modelname>_light.json
@@ -1765,6 +1799,7 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
 
     std::vector<Phase> phases;
     phases.push_back({ "materials", [&] { loadMaterials(model, scene); } });
+    phases.push_back({ "openpbr materials", [&] { loadOpenPBRMaterialsFromSidecar(modelPath, scene); } });
     // After the materials, which the sets are matched against by name.
     phases.push_back({ "curves", [&] { loadCurvesFromSidecar(modelPath, scene); } });
     phases.push_back({ "lights", [&] { hadJsonLights = loadLightsFromJson(modelPath, scene); } });
@@ -1810,6 +1845,12 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
                               scene.createLight(lightDesc);
                           }
                       } });
+    // Last, and it has to be: a MaterialX <look> assigns by geometry name, so it
+    // needs both the node graph (loaded in "nodes") and the instances the graph
+    // produced (created in "geometry"). Run any earlier and it binds nothing
+    // while reporting that it read the file -- which is exactly how it failed
+    // the first time.
+    phases.push_back({ "materialx", [&] { loadMaterialXFromSidecar(modelPath, scene); } });
     phases.push_back({ "animation", [&] { loadAnimation(model, scene); } });
 
     if (mProgress)

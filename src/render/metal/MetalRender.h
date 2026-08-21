@@ -189,7 +189,10 @@ private:
     // Same, for Metal 4: the commit feedback runs off the render thread, so it
     // cannot touch the two above.
     std::atomic<bool> mMetal4FrameFailed{ false };
-    std::atomic<bool> mMetal4FrameFailReported{ false };
+    // Rank of the failure already reported this run, so a GPU reset's bystander
+    // report can be replaced by the error that names a cause. See
+    // metal4FailureRank() in MetalRender.mm.
+    std::atomic<int> mMetal4FrameFailReportRank{ -1 };
     uint32_t mFrameIndex = 0;
 
     // Reusable per-frame vectors (avoid heap alloc each frame)

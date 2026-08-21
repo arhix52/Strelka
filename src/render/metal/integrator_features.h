@@ -26,6 +26,12 @@ public:
     // Dedicated sparse cache update. kSharc without this bit is the full-frame
     // query pass; update never queries its own writes.
     static constexpr uint32_t kSharcUpdate = 1u << 11;
+    // OpenPBR Surface. Carries ~264 KB of lookup tables and a lobe stack that
+    // no glTF scene needs, so a scene without an OpenPBR material must compile
+    // a kernel in which none of it exists -- the room scenes are instruction
+    // cache bound (docs/open-perf.md) and a second uber-BSDF compiled in
+    // unconditionally would undo the specialisation work outright.
+    static constexpr uint32_t kOpenPBR = 1u << 12;
 
     WavefrontFeatures() = default;
     explicit WavefrontFeatures(uint32_t bits) : mBits(bits)
@@ -74,6 +80,7 @@ struct IntegratorFeatureInputs
     bool hasSharc = false;
     bool hasSubsurface = false;
     bool hasCurves = false;
+    bool hasOpenPBR = false;
     bool useMetal4 = false;
 };
 
@@ -100,6 +107,8 @@ inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in
         features |= WavefrontFeatures::kSubsurface;
     if (in.hasCurves)
         features |= WavefrontFeatures::kCurves;
+    if (in.hasOpenPBR)
+        features |= WavefrontFeatures::kOpenPBR;
     if (in.useMetal4)
         features |= WavefrontFeatures::kMetal4;
     return WavefrontFeatures(features);

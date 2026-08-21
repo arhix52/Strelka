@@ -8,6 +8,12 @@
 #    endif
 #endif
 
+// OpenPBRParams, for the pointer Uniforms carries. Deliberately the parameter
+// header and not the BSDF: this one pulls in nothing, while openpbr.h would put
+// ~264 KB of lookup tables into every translation unit that wants a vertex
+// layout.
+#include <strelka/material/openpbr/openpbr_params.h>
+
 #define GEOMETRY_MASK_TRIANGLE 1
 #define GEOMETRY_MASK_CURVE 2
 #define GEOMETRY_MASK_LIGHT 4
@@ -41,6 +47,26 @@ struct packed_float3
     float z;
 };
 #endif
+
+/// Bindless textures for one OpenPBR material, one per OpenPBRTextureSlot.
+///
+/// A struct of its own rather than fields inside OpenPBRParams, because that
+/// struct is read verbatim by four compilers and a texture handle has a
+/// different type in each. Keeping the handles out is what lets OpenPBRParams
+/// have no per-backend mirror at all (see openpbr/openpbr_params.h) -- so the
+/// split follows the same rule the rest of the file does: portable data in the
+/// shared header, handles in the backend's own.
+///
+/// A null handle means the parameter is a constant. Indexed by material id, in
+/// step with Uniforms::openpbrParams.
+struct OpenPBRTextures
+{
+#ifdef __METAL_VERSION__
+    metal::texture2d<float> tex[MAX_OPENPBR_TEXTURES];
+#else
+    MTL::ResourceID tex[MAX_OPENPBR_TEXTURES];
+#endif
+};
 
 enum class DebugMode : uint32_t
 {
@@ -164,6 +190,13 @@ struct Uniforms
     /// only subsurface media -- whose boundaries a shadow ray never crosses --
     /// pays nothing for it.
     uint32_t hasBoundedMedium;
+    // Diagonal of the scene's world bounds, and the ceiling a subsurface free
+    // flight is drawn against. A bounded medium cannot host a flight longer
+    // than the scene it sits in, so a draw past this one did not stay inside
+    // the medium: the walk skips the event and the ray runs to its boundary
+    // instead. Without it the ceiling is 1e16 -- see docs/open-defects.md #15
+    // for the five-second GPU timeout that produced.
+    float sceneExtent;
     // Sparse Hash Radiance Cache (SHARC); see sharc.h. The cache is updated by
     // a sparse path pass, resolved, and only then queried by the image pass.
     uint32_t sharcCapacity; // 0 disables
@@ -271,6 +304,34 @@ struct Uniforms
     /// also what makes a glossy floor's guides flicker between the floor and
     /// whatever it reflects, one pixel to the next.
     uint32_t guidePrimaryHit;
+
+    /// The OpenPBR parameter block for material i, or null when no material in
+    /// the scene is MATERIAL_TYPE_OPENPBR.
+    ///
+    /// A pointer in the uniforms rather than a binding of its own, and that is
+    /// forced rather than chosen: `wavefrontShade` binds buffers 0 through 30 and
+    /// Metal allows 31 (kMetal4BufferBindCount, Metal4Context.h). The same wall
+    /// is why UniformLight carries its projector texture inline. The host writes
+    /// MTL::Buffer::gpuAddress() here -- what Metal 3 introduced buffer pointers
+    /// for -- and the buffer still has to be made resident by hand, exactly like
+    /// the bindless material textures.
+    ///
+    /// Indexed by the same material id as `materials`, so the two are published
+    /// and patched together.
+#ifdef __METAL_VERSION__
+    device const OpenPBRParams* openpbrParams;
+#else
+    uint64_t openpbrParams;
+#endif
+
+    /// The bindless maps for material i, or null when no OpenPBR material in the
+    /// scene has any. Same addressing story as openpbrParams above: no binding
+    /// slot is free, so the table is reached by address and made resident by hand.
+#ifdef __METAL_VERSION__
+    device const OpenPBRTextures* openpbrTextures;
+#else
+    uint64_t openpbrTextures;
+#endif
 };
 
 

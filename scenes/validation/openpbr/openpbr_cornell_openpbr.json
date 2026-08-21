@@ -1,0 +1,71 @@
+{
+    "version": 1,
+    "_comment": [
+        "Three surfaces the glTF material model cannot describe, so that the OpenPBR",
+        "path is exercised by something other than a re-spelled metallic-roughness",
+        "material. Each names a parameter that openpbr_from_gltf.h can never reach:",
+        "base_diffuse_roughness is hardcoded to 0 there, glTF has no fuzz lobe (its",
+        "sheen is a different distribution), and KHR_materials_clearcoat has no",
+        "darkening of what lies beneath it.",
+        "",
+        "Carried on a Cornell box on purpose: the estimator A/B that validates this",
+        "path renders with BSDF sampling alone, which does not converge against a",
+        "small emitter. A big area light is the point of the room."
+    ],
+    "materials": [
+        {
+            "gltfMaterial": "WhiteDiffuse",
+            "_why": "base_diffuse_roughness -- retroreflective diffuse, no glTF equivalent",
+            "openpbr": {
+                "base_color": [
+                    0.75,
+                    0.75,
+                    0.72
+                ],
+                "base_diffuse_roughness": 0.9,
+                "specular_roughness": 0.5,
+                "specular_weight": 0.2
+            }
+        },
+        {
+            "gltfMaterial": "RedDiffuse",
+            "_why": "fuzz -- an LTC microflake layer, not glTF's Charlie sheen",
+            "openpbr": {
+                "base_color": [
+                    0.55,
+                    0.06,
+                    0.05
+                ],
+                "specular_roughness": 0.6,
+                "fuzz_weight": 1.0,
+                "fuzz_color": [
+                    1.0,
+                    0.85,
+                    0.8
+                ],
+                "fuzz_roughness": 0.3
+            }
+        },
+        {
+            "gltfMaterial": "GreenDiffuse",
+            "_why": "coat_darkening -- the coat absorbs into the base; glTF's does not",
+            "openpbr": {
+                "base_color": [
+                    0.1,
+                    0.42,
+                    0.1
+                ],
+                "specular_roughness": 0.35,
+                "coat_weight": 1.0,
+                "coat_roughness": 0.08,
+                "coat_ior": 1.6,
+                "coat_darkening": 1.0,
+                "coat_color": [
+                    0.9,
+                    1.0,
+                    0.9
+                ]
+            }
+        }
+    ]
+}

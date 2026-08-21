@@ -2,6 +2,8 @@
 
 #include "editor_camera_exposure.h"
 
+#include <vector>
+
 using namespace oka::editor_camera_exposure;
 
 TEST_CASE("lensRadiusMetres matches the Metal thin-lens formula")
@@ -52,4 +54,89 @@ TEST_CASE("degrees and radians convert both ways")
 {
     CHECK(degreesFromRadians(radiansFromDegrees(90.0f)) == doctest::Approx(90.0f).epsilon(1e-5));
     CHECK(radiansFromDegrees(180.0f) == doctest::Approx(3.14159265f).epsilon(1e-5));
+}
+
+namespace
+{
+// Builds an RGBA frame of `pixels` pixels of which `lit` carry luminance `value`.
+std::vector<float> frameWith(size_t pixels, size_t lit, float value)
+{
+    std::vector<float> f(pixels * 4, 0.0f);
+    for (size_t i = 0; i < pixels; ++i)
+    {
+        const float v = i < lit ? value : 0.0f;
+        f[i * 4 + 0] = v;
+        f[i * 4 + 1] = v;
+        f[i * 4 + 2] = v;
+        f[i * 4 + 3] = 1.0f;
+    }
+    return f;
+}
+} // namespace
+
+TEST_CASE("meteredMeanLuminance ignores a frame's empty background")
+{
+    // The Open Chess Set as its own camera frames it: 2% subject, 98% black
+    // because the scene has no environment.
+    const std::vector<float> frame = frameWith(10000, 200, 0.62f);
+    size_t lit = 0;
+    size_t total = 0;
+    const double mean = oka::editor_camera_exposure::meteredMeanLuminance(frame.data(), frame.size(), lit, total);
+
+    CHECK(lit == 200);
+    CHECK(total == 10000);
+    // The subject's brightness, not the subject diluted by the void -- which
+    // would read 0.0124 and buy the scene +3.8 EV it must not have.
+    CHECK(mean == doctest::Approx(0.62).epsilon(1e-4));
+}
+
+TEST_CASE("meteredMeanLuminance does not move when only the framing does")
+{
+    // One scene, one lighting rig, two framings. A meter that disagrees here is
+    // metering the camera instead of the light.
+    size_t litWide = 0, totalWide = 0, litTight = 0, totalTight = 0;
+    const std::vector<float> wide = frameWith(10000, 200, 0.62f);
+    const std::vector<float> tight = frameWith(10000, 9000, 0.62f);
+
+    const double meanWide =
+        oka::editor_camera_exposure::meteredMeanLuminance(wide.data(), wide.size(), litWide, totalWide);
+    const double meanTight =
+        oka::editor_camera_exposure::meteredMeanLuminance(tight.data(), tight.size(), litTight, totalTight);
+
+    CHECK(meanWide == doctest::Approx(meanTight).epsilon(1e-6));
+}
+
+TEST_CASE("meteredMeanLuminance keeps every pixel when there is an environment")
+{
+    // With an environment nothing is exactly zero, so the exclusion must not
+    // fire and the result must be the plain full-frame mean.
+    std::vector<float> frame = frameWith(1000, 1000, 0.5f);
+    for (size_t i = 0; i < 900; ++i)
+    {
+        frame[i * 4 + 0] = frame[i * 4 + 1] = frame[i * 4 + 2] = 0.05f; // sky
+    }
+    size_t lit = 0;
+    size_t total = 0;
+    const double mean = oka::editor_camera_exposure::meteredMeanLuminance(frame.data(), frame.size(), lit, total);
+
+    CHECK(lit == 1000);
+    CHECK(total == 1000);
+    CHECK(mean == doctest::Approx(0.9 * 0.05 + 0.1 * 0.5).epsilon(1e-4));
+}
+
+TEST_CASE("meteredMeanLuminance reports nothing metered on a black frame")
+{
+    const std::vector<float> frame = frameWith(64, 0, 0.0f);
+    size_t lit = 0;
+    size_t total = 0;
+    const double mean = oka::editor_camera_exposure::meteredMeanLuminance(frame.data(), frame.size(), lit, total);
+
+    CHECK(lit == 0);
+    CHECK(total == 64);
+    CHECK(mean == 0.0);
+
+    size_t l2 = 0, t2 = 0;
+    CHECK(oka::editor_camera_exposure::meteredMeanLuminance(nullptr, 400, l2, t2) == 0.0);
+    CHECK(l2 == 0);
+    CHECK(t2 == 0);
 }

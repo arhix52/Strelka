@@ -186,6 +186,18 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->denoiseFireflyClamp = settings.getAs<float>("render/pt/denoiseFireflyClamp");
     pUniformData->clampIndirect = settings.getAs<float>("render/pt/clampIndirect");
     pUniformData->hasBoundedMedium = in.materials->hasBoundedMedium() ? 1u : 0u;
+    // The world scale the subsurface walk draws its free flights against. Cached
+    // in Scene against the transform generation, so this is a comparison once
+    // the scene has settled. The fallback matters for a scene with no bounded
+    // geometry -- an environment-only frame -- where there is nothing to bound
+    // and nothing to scatter in either.
+    {
+        glm::float3 boundsMin(0.0f);
+        glm::float3 boundsMax(0.0f);
+        pUniformData->sceneExtent = (in.scene != nullptr && in.scene->worldBounds(boundsMin, boundsMax)) ?
+                                        std::max(glm::length(boundsMax - boundsMin), 1e-4f) :
+                                        1e16f;
+    }
     {
         // Previous frame's world-to-clip for screen-space reprojection. The
         // motion-blur uniforms hold the inverses and cannot serve here.

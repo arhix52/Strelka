@@ -22,6 +22,12 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_sheen.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_clearcoat.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_iridescence.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_openpbr_params.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_openpbr_consistency.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_openpbr_energy.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_openpbr_from_gltf.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_openpbr_volume.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_openpbr_chi2.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_vertex_packing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_light_units.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_scene.cpp
@@ -29,8 +35,11 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_ies_loader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_curve_sidecar.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_lod_filter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_material_sidecar.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_materialx_loader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_pick_ray.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_skinned_bounds.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_world_bounds.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_camera_animation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_camera_basis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_camera_ortho_zoom.cpp
@@ -147,6 +156,9 @@ target_link_libraries(unit_tests
 target_compile_definitions(unit_tests
     PRIVATE
         STRELKA_TEST_ASSETS_DIR="${CMAKE_SOURCE_DIR}/scenes/validation"
+        # The MaterialX submodule, for the tests that read its shipped example
+        # documents rather than a fixture written to agree with the loader.
+        STRELKA_MATERIALX_ROOT="${CMAKE_SOURCE_DIR}/third_party/materialx"
 )
 
 add_test(NAME unit_tests COMMAND unit_tests)

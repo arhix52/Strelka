@@ -86,5 +86,45 @@ inline void carryExposureAcrossModeSwitch(
     cm2Factor = target * (shutterReciprocal * fStop * fStop) * 100.0f / filmIso;
 }
 
+/// Mean luminance of an RGBA float frame, over the pixels that caught light.
+///
+/// Pixels that are exactly zero received no light along any path, and they are
+/// not evidence about how bright the scene is -- they are evidence about how
+/// much empty space the camera happens to see. A scene with no environment
+/// renders its background as exact zero, so averaging the whole frame meters
+/// the framing instead of the lighting: on the Open Chess Set, whose own camera
+/// leaves 98% of the frame black, the full-frame mean reads 0.0127 against the
+/// subject's 0.62 and asks for +3.8 EV -- which blows out the only thing in
+/// shot. The same scene framed tight asks for -1.3 EV. One scene under one
+/// lighting rig must not meter 35x apart because the camera moved back.
+///
+/// Where an environment exists no pixel is zero and this excludes nothing.
+///
+/// \param litPixels receives the count metered, \param totalPixels the count seen.
+/// Returns 0 when nothing caught light, which the caller must treat as "do not
+/// expose" rather than as a dark scene.
+inline double meteredMeanLuminance(const float* rgba, size_t floatCount, size_t& litPixels, size_t& totalPixels)
+{
+    litPixels = 0;
+    totalPixels = 0;
+    if (rgba == nullptr)
+    {
+        return 0.0;
+    }
+    double sum = 0.0;
+    for (size_t i = 0; i + 3 < floatCount; i += 4)
+    {
+        // Rec.709 luma of the linear radiance, which is what the eye weights.
+        const double luma = 0.2126 * rgba[i] + 0.7152 * rgba[i + 1] + 0.0722 * rgba[i + 2];
+        ++totalPixels;
+        if (luma > 0.0)
+        {
+            sum += luma;
+            ++litPixels;
+        }
+    }
+    return litPixels > 0 ? sum / double(litPixels) : 0.0;
+}
+
 } // namespace oka::editor_camera_exposure
 

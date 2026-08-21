@@ -73,6 +73,11 @@ enum MaterialType : unsigned int
     MATERIAL_TYPE_DIELECTRIC    = 2,
     MATERIAL_TYPE_STANDARD_PBR  = 3,
     MATERIAL_TYPE_HAIR          = 4, // Chiang et al. 2016; curves only in practice
+    // OpenPBR Surface 1.1.1. Its parameters do not live in MaterialParams: they
+    // are a parallel OpenPBRParams array indexed by the same material id, so
+    // that adding this model moved no byte of the struct above. See
+    // openpbr/openpbr_params.h.
+    MATERIAL_TYPE_OPENPBR       = 5,
     MATERIAL_TYPE_COUNT
 };
 

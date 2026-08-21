@@ -16,6 +16,11 @@
 /// declared here so the table can be written and patched without this header
 /// pulling the shader types in.
 struct Material;
+/// The OpenPBR argument block (material/openpbr/openpbr_params.h), forward
+/// declared for the same reason: only its name is needed here.
+struct OpenPBRParams;
+/// The bindless map table for one OpenPBR material (ShaderTypes.h).
+struct OpenPBRTextures;
 
 
 namespace oka::metal
@@ -48,6 +53,10 @@ public:
 private:
     /// Writes the whole table. Called once, before any texture is opened.
     void uploadMaterialBuffer(const std::vector<Material>& materials);
+    /// Writes the parallel OpenPBR table, or drops it when the scene has none.
+    void uploadOpenPBRBuffer(const std::vector<OpenPBRParams>& params);
+    /// Allocates the bindless map table, all handles null, one entry per material.
+    void allocOpenPBRTextureBuffer(size_t materialCount);
     /// Writes one entry into the live table, for a texture that has just landed.
     void patchMaterial(size_t index, const Material& material);
 
@@ -60,6 +69,23 @@ public:
     MTL::Buffer* buffer() const
     {
         return mMaterialBuffer;
+    }
+    /// The parallel OpenPBR parameter table, or null when no material uses it.
+    /// Reached from the shader through Uniforms::openpbrParams rather than a
+    /// binding, because the shade stage has no slot left -- but it still has to
+    /// be made resident, so the caller needs the buffer itself.
+    MTL::Buffer* openpbrBuffer() const
+    {
+        return mOpenPBRBuffer;
+    }
+    /// The parallel bindless map table. Null until a material asks for a map.
+    MTL::Buffer* openpbrTextureBuffer() const
+    {
+        return mOpenPBRTexBuffer;
+    }
+    bool hasOpenPBRMaterials() const
+    {
+        return mSceneHasOpenPBRMaterials;
     }
     bool hasAlphaMaterials() const
     {
@@ -88,6 +114,9 @@ private:
     SettingsManager* mSettings = nullptr;
 
     MTL::Buffer* mMaterialBuffer = nullptr;
+    MTL::Buffer* mOpenPBRBuffer = nullptr;
+    MTL::Buffer* mOpenPBRTexBuffer = nullptr;
+    bool mSceneHasOpenPBRMaterials = false;
     bool mSceneHasAlphaMaterials = false;
     bool mSceneHasBoundedMedium = false;
     bool mSceneHasSubsurfaceMaterials = false;

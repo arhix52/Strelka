@@ -15,6 +15,10 @@ if(WIN32 OR LINUX)
     include_directories(${CMAKE_SOURCE_DIR}/third_party)
     include_directories(${SHADER_COMMON_DIR})
     include_directories(${CMAKE_SOURCE_DIR}/src/material/include)
+    # openpbr.h includes its own headers relative to this root, so the directory
+    # itself has to be on the path -- ${CMAKE_SOURCE_DIR}/third_party above is
+    # one level too high.
+    include_directories(${CMAKE_SOURCE_DIR}/third_party/openpbr_bsdf)
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/optix)
 
     # CUDA flags for OptiX shaders (targeting SM 89 / Ada Lovelace: RTX 4090+)
@@ -115,6 +119,7 @@ if(APPLE)
 
     set(METAL_INCLUDE_FLAGS
         -I ${CMAKE_SOURCE_DIR}/src/material/include
+        -I ${CMAKE_SOURCE_DIR}/third_party/openpbr_bsdf
         -I ${SHADER_COMMON_DIR}
         -I ${CMAKE_CURRENT_SOURCE_DIR}/metal
     )

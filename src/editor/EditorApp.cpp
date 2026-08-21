@@ -1,4 +1,6 @@
 #include "EditorApp.h"
+
+#include "editor_camera_exposure.h"
 #include "editor_denoiser_ui.h"
 #include "editor_frame_budget.h"
 #include "editor_camera_framing.h"
@@ -235,6 +237,13 @@ void EditorApp::handleDeviceError()
     m_frameBudgetConfirmOpen = false;
     STRELKA_INFO("ACTION device_error");
     STRELKA_ERROR("GPU device error — render submissions stopped");
+    // Print the viewport that did it, unasked. A GPU timeout is reported by the
+    // backend as a chunk index and a bounce range, which says what the renderer
+    // was doing but not what it was looking at -- and the ones seen so far only
+    // reproduce from one angle, which no chunk index recovers. The dump is a
+    // .toml StrelkaCLI reads, so a pasted crash log carries its own repro
+    // instead of a description of where the camera roughly was.
+    dumpCameraSettings();
     showAlert(
         "GPU device error.\nRender submissions have been stopped.\n"
         "You can rebuild the renderer at a safe PT scale or keep the last good frame.");
@@ -460,19 +469,16 @@ void EditorApp::applyAutoExposure(oka::Buffer* buf)
     {
         return;
     }
-    double sum = 0.0;
+    // Metering lives in editor_camera_exposure.h so it can be tested against a
+    // synthetic frame: the failure it guards is a meter that swings by stops
+    // when only the framing changed, which no rendered check would notice.
     size_t n = 0;
-    for (size_t i = 0; i + 3 < count; i += 4)
-    {
-        // Rec.709 luma of the linear radiance, which is what the eye weights.
-        sum += 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
-        ++n;
-    }
+    size_t total = 0;
+    const double mean = oka::editor_camera_exposure::meteredMeanLuminance(px, count, n, total);
     if (n == 0)
     {
         return;
     }
-    const double mean = sum / double(n);
     // A frame that is genuinely black -- lights off, camera in a wall -- has
     // nothing to expose for, and dividing by it would produce an absurd factor
     // that the next frame cannot recover from.
@@ -489,10 +495,12 @@ void EditorApp::applyAutoExposure(oka::Buffer* buf)
     // any scene brighter than 0.18 it is well below 1 and a single decimal place
     // printed every one of them as "x0.0". Stops alongside it, because that is
     // the unit the exposure controls in the UI are in.
+    // The metered coverage is in the line because it is what distinguishes a
+    // dim scene from a mostly empty frame, and those want opposite answers.
     STRELKA_INFO(
-        "Auto exposure: scene mean luminance {:.5f}, exposure x{:.4g} ({:+.2f} EV); "
-        "no exposure in the light sidecar",
-        mean, factor, std::log2(factor));
+        "Auto exposure: scene mean luminance {:.5f} over the {:.1f}% of the frame that caught light, "
+        "exposure x{:.4g} ({:+.2f} EV); no exposure in the light sidecar",
+        mean, total > 0 ? 100.0 * double(n) / double(total) : 0.0, factor, std::log2(factor));
 }
 
 // Exposure comes from the scene when the scene says, and is measured from the
@@ -605,6 +613,16 @@ void EditorApp::loadSettings()
     // Wavefront by default: bit-identical output, 2.6x faster at depth 8. The
     // megakernel stays selectable so any change can still be A/B'd against it.
     m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 0);
+    // Honour STRELKA_STAGES in interactive runs, not only in a benchmark. The
+    // GPU-failure path tells the reader to "reproduce with STRELKA_STAGES=1",
+    // and until this line the variable was read in runBenchmark() alone -- so
+    // following that advice on the editor changed nothing and the log said
+    // "stage diagnosis disabled" a second time. Advice a diagnostic prints has
+    // to work in the mode that printed it.
+    if (envFlag("STRELKA_STAGES"))
+    {
+        m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 1);
+    }
     m_settingsManager->setAs<uint32_t>("render/pt/subsurfaceIterations", 64);
     m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", 1u);
     m_settingsManager->setAs<uint32_t>("render/pt/writeAov", 0);
@@ -661,6 +679,9 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/validate/estimatorMode", 0);
     // Absorption convention for transmissive media: 0 = glTF, 1 = Cycles.
     m_settingsManager->setAs<uint32_t>("render/material/volumeModel", 0);
+    // 0 = glTF metallic-roughness, 1 = OpenPBR Surface. Seeded here as well as in
+    // HeadlessApp because SettingsManager::getAs asserts on a key nobody set.
+    m_settingsManager->setAs<uint32_t>("render/material/model", 0);
     m_settingsManager->setAs<uint32_t>("render/texture/maxDimension", 0);
     m_settingsManager->setAs<uint32_t>("render/texture/downscale", 1);
     // An HDRI carries radiance; normalising it away makes physical parity

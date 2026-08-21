@@ -4,6 +4,9 @@
 #include <glm/ext/vector_int4.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <strelka/material/material_params.h>
+#include <strelka/material/openpbr/openpbr_params.h>
+
+#include <array>
 #include <light_types.h>
 // lightTypeIsPunctual() and the radiometric bake. A light description is not
 // usable without them, and the header costs nothing beyond light_types.h.
@@ -126,6 +129,25 @@ public:
     {
         std::string name;
         MaterialParams params = {}; // GPU-ready PBR material parameters
+
+        /// The OpenPBR argument block, when this material is authored as OpenPBR
+        /// rather than translated from glTF.
+        ///
+        /// Meaningful only when params.material_type == MATERIAL_TYPE_OPENPBR,
+        /// which the <stem>_openpbr.json sidecar sets. Kept beside params
+        /// rather than inside it so that adding this model moved no byte of the
+        /// struct the shaders read -- see openpbr/openpbr_params.h.
+        OpenPBRParams openpbr = openpbr_make_default_params();
+
+        /// Texture per OpenPBR slot, indexed by OpenPBRTextureSlot. Empty where
+        /// the parameter is a constant.
+        ///
+        /// Separate from the five glTF paths above rather than folded into them:
+        /// the two models do not agree on what a slot means (glTF's
+        /// metallicRoughness packs two channels of one image, OpenPBR names each
+        /// input separately), and a material is authored through one route or
+        /// the other, never both.
+        std::array<std::string, MAX_OPENPBR_TEXTURES> openpbrTexPaths;
 
         // Texture file paths (resolved by renderer into GPU texture objects)
         std::string baseColorTexPath;
@@ -411,6 +433,9 @@ public:
     std::vector<MeshBounds> mInstanceWorldBounds;
     uint64_t mTransformGeneration = 1;
     uint64_t mInstanceBoundsGeneration = 0;
+
+    /// Rebuild mInstanceWorldBounds when the transform generation has moved on.
+    void ensureInstanceWorldBounds();
     std::vector<Curve> mCurves;
     std::vector<Instance> mInstances;
     std::vector<Light> mLights;
@@ -965,6 +990,17 @@ public:
     /// CPU side that needs the posed geometry has to re-evaluate it from the
     /// joint palette, which is what this does.
     bool computeInstanceBounds(uint32_t instId, glm::float3& outMin, glm::float3& outMax);
+
+    /// World-space bounds of every instance, unioned; false when the scene has
+    /// no bounded geometry at all. Cached against the transform generation, so
+    /// asking once a frame costs a comparison after the scene has settled.
+    ///
+    /// The renderer needs a world scale it can trust. A subsurface free flight
+    /// longer than the whole scene cannot have stayed inside a bounded medium,
+    /// and without that bound the random walk places scatter events -- and the
+    /// shadow rays connecting them to lights -- arbitrarily far outside it.
+    /// See docs/open-defects.md #15.
+    bool worldBounds(glm::float3& outMin, glm::float3& outMax);
 
     /// Local-space bounds of a mesh, computed once and kept.
     ///

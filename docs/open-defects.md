@@ -31,6 +31,8 @@ answer, or an asset/converter note that does not need Chaos.
 | 10 | A volume vertex costs a bounce Cycles does not charge | `OptixRender.cu` raygen loop / `wavefront.metal`; both backends | the fog probe reads 1.00 at `max_depth` 2, not 3, against a `max_bounces` 2 reference |
 | 11 | The iso bathroom's firefly tail | estimator, and an asset the machine does not have | 256 spp noise near the ladder's rows rather than 4x them |
 | 12 | Metal's radiance cache has no resolve pass | `src/shaders/metal/sharc.h` + a new kernel | Metal's cache survives a camera movement, as OptiX's now does |
+| 13 | OpenPBR's vendored BSDF has never been through nvcc | `third_party/openpbr_bsdf`, `src/shaders/optix` | an OptiX module that calls `openpbr_prepare` compiles, and the ladder is unmoved |
+| 14 | The subsurface walk does not reproduce run to run | `wavefront.metal` medium path, Metal | two runs of one binary on `25_subsurface` are bit-identical |
 
 6 is smaller. 7 is not a renderer bug. 10 is a convention to settle, not a bug to
 find: it is measured, it is the same on both backends, and picking a side changes
@@ -469,7 +471,140 @@ pass and has no counterpart in a single-launch integrator.
 
 ---
 
+## 13. Adobe's OpenPBR carries 191 functions with no execution space, and nvcc has not seen them
+
+`third_party/openpbr_bsdf` is Adobe's OpenPBR 1.1.1, vendored unmodified. It
+advertises a CUDA backend (`interop/openpbr_interop_cuda.h`, selected on
+`__CUDACC__`), and the Metal and host C++ backends are both confirmed working:
+`wavefront.metal`'s flags compile it with zero errors and zero warnings, and
+`tests/material/test_openpbr_*.cpp` run it on the host through
+`openpbr/openpbr_bridge.h`.
+
+What is not confirmed is CUDA, and there is a specific reason to doubt it rather
+than assume it. Counted in the tree as vendored:
+
+    191   function definitions with no linkage or execution-space macro at all,
+          e.g. `float openpbr_average_fresnel(const float eta) {...}` at file
+          scope (impl/openpbr_lobe_utils.h:211)
+     87   function definitions carrying OPENPBR_INLINE_FUNCTION, which the CUDA
+          interop layer defines as `__device__ inline`
+
+A bare definition is a `__host__` function to nvcc, and calling one from
+`__device__` code is an error, not a warning. The 191 are called from the 87. If
+that reading is right, `openpbr.h` cannot be compiled by nvcc as shipped, and the
+OptiX half of OpenPBR support needs one of:
+
+  - NVRTC with `-default-device`, which changes how `src/shaders/CMakeLists.txt`
+    builds the OptiX IR (it uses `cuda_wrap_srcs`, i.e. nvcc), or
+  - a build-time transform that prefixes those definitions with
+    `__device__ inline`, or
+  - an upstream fix; the repository is active (last commit 2026-08-11).
+
+The same property has already bitten the host build, which is what makes it worth
+writing down rather than guessing at: two host translation units that both
+include `openpbr.h` fail to link with ~200 duplicate symbols. That is handled --
+`openpbr/openpbr_shim.h` puts the library in an anonymous namespace on the host
+only -- but the fix does not transfer, because a shader module wants those
+definitions to keep external linkage.
+
+This is unresolved only because there is no CUDA on this machine: `nvcc` is
+absent, `hix.local` does not resolve from this network, and the Slurm session at
+`login-bia.nvidia.com` needs an MFA login that has expired. It is a ten-minute
+question for anyone with a CUDA toolkit -- compile one `.cu` that includes
+`<strelka/material/openpbr/openpbr_bridge.h>` and calls `openpbr_prepare_at`.
+
+## 14. Two runs of one binary do not agree on a subsurface walk
+
+This file and `open-perf.md` both lean on a property that turns out not to hold
+everywhere: "the renderer is deterministic -- two runs of one binary are
+bit-identical, checked". On `25_subsurface` it is not.
+
+Three consecutive runs of one binary, same scene, same seed, nothing else
+touched:
+
+    mean   0.240777   0.240834   0.240836
+    max |a-b| = 1.95e-02, and 18.3% of components differ at all
+
+Measured on e5684bd, so it predates the OpenPBR work; a build with that work
+added produces the same spread and its means interleave with these
+(0.240834 / 0.240830 / 0.240795). `00_calibration` on the same binaries is
+bit-identical across runs, so this is the subsurface path and not the renderer at
+large.
+
+It is small -- `rel` 0.00026 against a row whose noise floor is 0.006, and the
+means spread by 0.024% -- so nothing about the ladder's *grades* is in question.
+What it costs is the method: an exact-match regression on this row reports a
+change that did not happen, and reports "unchanged" only because the small number
+of possible outcomes makes a collision likely. Several `maxdiff 0.00e+00`
+readings were taken on this row during the OpenPBR work before the spread was
+noticed, and they meant less than they appeared to.
+
+Not diagnosed. The walk's randoms are a pure function of (tid, sampleIdx, depth,
+step), so the sampling is not the suspect; the queue compaction that feeds each
+wavefront iteration hands out slots with an atomic, which makes the *order* of
+paths within an iteration vary, and Metal 4 does no hazard tracking of its own.
+Whether some read of a per-path buffer is missing a barrier is the first thing to
+check.
+
+Until then, grade `25_subsurface` on `rel` against a threshold, not on equality.
+
 ## Closed (kept for the measurement, not the work)
+
+### Subsurface free flights drawn against infinity
+
+**Fixed.** A five-second `MTL4CommandQueueErrorTimeout` killed the Metal 4 queue
+on the Open Chess Set with its MaterialX materials -- in the editor after a few
+seconds of accumulation, and in the CLI 4 runs out of 4 at 4096 samples
+(960x540, depth 8), at samples 111, 2066, 2815 and once near the end. Every
+reproduction blamed the same stage: `last_completed=shade suspected=shadow`.
+
+The walk drew its free flight with `sssSampleDistance(sigmaT, channelPdf, 1e16f,
+...)`. The draw bounds the ray, so "no surface within it" is the ordinary way a
+walk scatters -- which makes a flight longer than the medium indistinguishable
+from one that stayed inside, and the event is taken at that distance anyway. For
+a closed mesh the boundary wins and it never shows. For the paths that leak out
+through a hole -- this scene reports 4677 of them per sample in the
+nested-dielectrics warning -- nothing stops the ray, and the walk lands a scatter
+event as far out as `-log(1e-7)/sigma_t` allows: with sigma_t around 1 that is 16
+units in a scene half a unit across. The light connection made from there is a
+shadow ray tens of times longer than the scene, and that is what puts Metal's
+traversal into the pathological mode this tree has hit before (see the
+triangle-only intersector note in `wavefront.metal`) and holds the dispatch past
+the GPU watchdog.
+
+The ceiling is now `uniforms.sceneExtent`, the diagonal of `Scene::worldBounds()`:
+a free flight longer than the scene cannot have stayed inside a bounded medium,
+so `sssSampleDistance` declines it and the ray runs to its boundary instead.
+
+Measured, at 512 samples on the failing camera: two runs of the fixed build
+differ by `rel` 0.00004 (the run-to-run floor, defect #14), and fixed against
+unfixed by 0.00006, with the means equal to six decimals. The image does not
+move; 4096-sample runs that failed 4 out of 4 now pass. `Scene::worldBounds()` is
+covered by `tests/scene/test_world_bounds.cpp`, including that a transform change
+invalidates its cache.
+
+Still unbounded, deliberately: `fogSampleDistance` keeps its `1e16f`, because fog
+*is* unbounded -- it fills the world rather than a mesh, so a long flight in it
+is legitimate. If a fog scene ever reproduces this, the bound to reach for is the
+same one.
+
+### Diagnostics this cost
+
+**Fixed.** Three of them, each of which had been hiding the fault:
+
+- The failure report printed the **first** failure it saw. A GPU reset delivers
+  failures in queue order, not causal order, so it named a discarded bystander
+  (`kIOGPUCommandBufferCallbackErrorInnocentVictim`) and buried the cause.
+  Ranked now by `metal4FailureRank()`, which is what made the queue timeout
+  visible at all.
+- `STRELKA_STAGES=1` was read in `runBenchmark()` alone, so following the failure
+  path's own advice on the editor changed nothing and it printed "stage diagnosis
+  disabled" a second time. It applies to interactive runs now, and it is what
+  named the shadow stage.
+- On a device error the editor dumps the viewport as a paste-ready CLI `.toml`.
+  A chunk index says what the renderer was doing, not what it was looking at, and
+  the sampler in that dump (`hybrid`, not `sobol`) was part of reproducing it.
+
 
 ### IES tables were interpolated with straight lines, Cycles uses a cubic
 

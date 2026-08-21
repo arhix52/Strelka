@@ -191,6 +191,8 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.textureMaxDim = (uint32_t)*v;
     if (auto v = tbl["render"]["volume_model"].value<std::string>())
         cfg.volumeModel = (*v == "cycles") ? 1u : 0u;
+    if (auto v = tbl["render"]["material_model"].value<std::string>())
+        cfg.materialModel = (*v == "openpbr") ? 1u : 0u;
     if (auto v = tbl["render"]["denoise"].value<bool>())
         cfg.denoise = *v;
     if (auto v = tbl["render"]["profile_stages"].value<bool>())
@@ -457,6 +459,8 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/validate/estimatorMode", m_config.estimatorMode);
     // Absorption convention for transmissive media: 0 = glTF, 1 = Cycles.
     m_settings->setAs<uint32_t>("render/material/volumeModel", m_config.volumeModel);
+    // 0 = glTF metallic-roughness, 1 = OpenPBR Surface. See RenderConfig.
+    m_settings->setAs<uint32_t>("render/material/model", m_config.materialModel);
     // 0 = load textures at full resolution.
     m_settings->setAs<uint32_t>("render/texture/maxDimension", m_config.textureMaxDim);
     // Headless: nothing picks, nothing saves the scene back out.

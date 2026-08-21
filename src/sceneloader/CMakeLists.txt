@@ -9,6 +9,9 @@ set(SCENELOADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/sceneloader/sceneserializer.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/sceneloader/iesloader.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/sceneloader/light_json.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/sceneloader/material_sidecar.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/sceneloader/materialx_loader.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/materialx_loader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gltfloader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/sceneserializer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/iesloader.cpp
@@ -28,5 +31,9 @@ target_link_libraries(strelka_sceneloader
         strelka_scene
         glm::glm
         TinyGLTF::TinyGLTF
+        # Core is the document model, Format its XML reader. No generator: see
+        # the note beside add_subdirectory(third_party/materialx) in the root.
+        MaterialXCore
+        MaterialXFormat
         nlohmann_json::nlohmann_json
 )

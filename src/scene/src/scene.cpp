@@ -1203,6 +1203,64 @@ bool Scene::computeInstanceBounds(const uint32_t instId, glm::float3& outMin, gl
     return true;
 }
 
+void Scene::ensureInstanceWorldBounds()
+{
+    if (mInstanceWorldBounds.size() == mInstances.size() && mInstanceBoundsGeneration == mTransformGeneration)
+    {
+        return;
+    }
+    // Built from the eight transformed corners of the mesh box, which is
+    // conservative -- looser than the oriented box, never tighter, so it cannot
+    // reject something the triangles would have hit.
+    mInstanceWorldBounds.assign(mInstances.size(), MeshBounds{});
+    for (uint32_t instId = 0; instId < mInstances.size(); ++instId)
+    {
+        const Instance& inst = mInstances[instId];
+        glm::float3 lo(0.0f), hi(0.0f);
+        if (!meshBounds(inst.mMeshId, lo, hi))
+        {
+            continue;
+        }
+        MeshBounds& wb = mInstanceWorldBounds[instId];
+        wb.min = glm::float3(std::numeric_limits<float>::max());
+        wb.max = glm::float3(std::numeric_limits<float>::lowest());
+        for (int c = 0; c < 8; ++c)
+        {
+            const glm::float3 corner((c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z);
+            const glm::float3 w = glm::float3(inst.transform * glm::float4(corner, 1.0f));
+            wb.min = glm::min(wb.min, w);
+            wb.max = glm::max(wb.max, w);
+        }
+        wb.valid = true;
+    }
+    mInstanceBoundsGeneration = mTransformGeneration;
+}
+
+bool Scene::worldBounds(glm::float3& outMin, glm::float3& outMax)
+{
+    ensureInstanceWorldBounds();
+    bool any = false;
+    glm::float3 lo(std::numeric_limits<float>::max());
+    glm::float3 hi(std::numeric_limits<float>::lowest());
+    for (const MeshBounds& wb : mInstanceWorldBounds)
+    {
+        if (!wb.valid)
+        {
+            continue;
+        }
+        lo = glm::min(lo, wb.min);
+        hi = glm::max(hi, wb.max);
+        any = true;
+    }
+    if (!any)
+    {
+        return false;
+    }
+    outMin = lo;
+    outMax = hi;
+    return true;
+}
+
 Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& direction)
 {
     // The arrays this walks can have been handed back to the OS; see
@@ -1256,31 +1314,7 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
     // Built from the eight transformed corners of the mesh box, which is
     // conservative -- looser than the oriented box, never tighter, so it cannot
     // reject something the triangles would have hit.
-    if (mInstanceWorldBounds.size() != mInstances.size() || mInstanceBoundsGeneration != mTransformGeneration)
-    {
-        mInstanceWorldBounds.assign(mInstances.size(), MeshBounds{});
-        for (uint32_t instId = 0; instId < mInstances.size(); ++instId)
-        {
-            const Instance& inst = mInstances[instId];
-            glm::float3 lo(0.0f), hi(0.0f);
-            if (!meshBounds(inst.mMeshId, lo, hi))
-            {
-                continue;
-            }
-            MeshBounds& wb = mInstanceWorldBounds[instId];
-            wb.min = glm::float3(std::numeric_limits<float>::max());
-            wb.max = glm::float3(std::numeric_limits<float>::lowest());
-            for (int c = 0; c < 8; ++c)
-            {
-                const glm::float3 corner((c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z);
-                const glm::float3 w = glm::float3(inst.transform * glm::float4(corner, 1.0f));
-                wb.min = glm::min(wb.min, w);
-                wb.max = glm::max(wb.max, w);
-            }
-            wb.valid = true;
-        }
-        mInstanceBoundsGeneration = mTransformGeneration;
-    }
+    ensureInstanceWorldBounds();
 
     // Candidates first, nearest box first.
     //

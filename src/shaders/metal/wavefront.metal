@@ -1,5 +1,13 @@
 #include "shading_common.h"
 
+// The OpenPBR BSDF. Included unconditionally, and it has to be: SPEC_OPENPBR is
+// a function constant, so it selects code when the pipeline is specialised, not
+// when this file is preprocessed. Its ~264 KB of lookup tables therefore land in
+// the metallib whichever variant is built. That is data rather than
+// instructions, so it does not compete for the instruction cache this kernel is
+// bound by -- which is the whole reason the branch below is behind a constant.
+#include <strelka/material/openpbr/openpbr_bridge.h>
+
 // ============================================================================
 // Wavefront path tracer.
 //
@@ -478,6 +486,80 @@ static inline float unpackSharcRoughness(uint32_t depthAndFlags)
 // ---------------------------------------------------------------------------
 // generate -- camera rays
 // ---------------------------------------------------------------------------
+
+/// The medium a path is travelling inside, from whichever model describes it.
+///
+/// Two sites need this -- `extend`, to sample the next free flight, and `shade`,
+/// to weight a scattering event -- and they must agree to the digit or the
+/// estimator stops being unbiased: a flight sampled from one density and
+/// weighted by another is exactly that mistake.
+///
+/// The OpenPBR branch does not read the material's subsurface fields at all. It
+/// derives the medium from the OpenPBR parameters through the vendored
+/// implementation, which blends subsurface scattering and transmission into one
+/// volume the way the specification defines them jointly, and which applies a van
+/// de Hulst mapping from the authored colour to a single-scattering albedo.
+/// Reimplementing either here would be two formulas to keep in step instead of
+/// none.
+struct MediumProps
+{
+    float3 sigmaT;
+    float3 albedo;
+    float anisotropy;
+};
+
+/// Extinction alone, for the two places that need no albedo: the exit boundary
+/// weight and the optical depth a shadow ray accumulates.
+///
+/// Its own function because those two sites read the material directly and had
+/// no reason to know OpenPBR exists -- which is exactly how they went on using
+/// Material::subsurface_radius, a glTF field an OpenPBR material never fills.
+/// At zero that reciprocal is 1e5, so the exit boundary weight annihilated every
+/// path leaving the medium, independent of how long its walk had been. That is
+/// what made the chess kings dark at every iteration budget.
+static float3 mediumSigmaT(constant Uniforms& uniforms, device const Material* materials, uint32_t materialIndex)
+{
+    device const Material& mm = materials[materialIndex];
+    if (SPEC_OPENPBR && mm.material_type == MATERIAL_TYPE_OPENPBR && uniforms.openpbrParams != nullptr)
+    {
+        const OpenPBRParams mat = uniforms.openpbrParams[materialIndex];
+        return openpbr_interior_volume(mat).extinction_coefficient;
+    }
+    return sssSigmaT(float3(mm.subsurface_radius));
+}
+
+static MediumProps mediumPropsFor(constant Uniforms& uniforms,
+                                  device const Material* materials,
+                                  uint32_t materialIndex,
+                                  uint32_t packedAlbedo)
+{
+    device const Material& mm = materials[materialIndex];
+    MediumProps out;
+
+    if (SPEC_OPENPBR && mm.material_type == MATERIAL_TYPE_OPENPBR && uniforms.openpbrParams != nullptr)
+    {
+        // Copied out of device memory because the bridge takes a thread
+        // reference -- it is portable code and cannot name Metal's address
+        // spaces. The copy is nominal: openpbr_interior_volume() reads eleven
+        // of these fields and the rest are dead, which scalar replacement
+        // removes.
+        const OpenPBRParams mat = uniforms.openpbrParams[materialIndex];
+        const OpenPBR_HomogeneousVolume v = openpbr_interior_volume(mat);
+        out.sigmaT = v.extinction_coefficient;
+        out.albedo = v.albedo;
+        out.anisotropy = v.anisotropy;
+        return out;
+    }
+
+    out.sigmaT = mediumSigmaT(uniforms, materials, materialIndex);
+    // A bounded volume has no entry surface to have textured, so it keeps the
+    // material's constant; a subsurface walk takes what the boundary resolved.
+    out.albedo = ((mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u) ? float3(mm.diffuse_transmission_color) :
+                                                                    unpackMediumAlbedo(packedAlbedo);
+    out.anisotropy = mm.subsurface_anisotropy;
+    return out;
+}
+
 kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
                               constant Uniforms& uniforms [[buffer(0)]],
                               device PathState* paths [[buffer(1)]],
@@ -685,14 +767,30 @@ static void extendImpl(uint gid,
             const uint32_t step = sss >> MEDIUM_STEP_SHIFT;
             if (step < MEDIUM_MAX_STEPS)
             {
-                device const Material& mm = materials[medium - 1u];
-                const float3 sigmaT = sssSigmaT(float3(mm.subsurface_radius));
-                const float3 albedo = ((mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u) ?
-                                          float3(mm.diffuse_transmission_color) :
-                                          unpackMediumAlbedo(mediumState.mediumAlbedo);
+                const MediumProps mp = mediumPropsFor(uniforms, materials, medium - 1u, mediumState.mediumAlbedo);
+                const float3 sigmaT = mp.sigmaT;
+                const float3 albedo = mp.albedo;
                 const float3 channelPdf = sssChannelPdf(float3(paths[tid].throughput), albedo);
                 SamplerState srng = samplerFor(uniforms, tid, sampleIdx, pathDepth(paths[tid].depthAndFlags) + step);
-                if (sssSampleDistance(sigmaT, channelPdf, 1e16f,
+                // Drawn against the scene, not against infinity. The ray is
+                // bounded by whatever distance comes back, so "no surface
+                // within it" is the ordinary way a walk scatters -- which
+                // means a draw longer than the medium is indistinguishable
+                // from one that stayed inside, and the event gets taken at
+                // that distance. For a closed mesh the boundary wins and it
+                // never shows; for the leaked paths this scene reports by the
+                // thousand (see the nested-dielectrics warning) nothing stops
+                // the ray, and the walk lands a scatter event -- and the light
+                // connection made from it -- as far out as -log(1e-7)/sigma_t
+                // allows. A shadow ray tens of times longer than the scene is
+                // what puts Metal's traversal into its pathological mode and
+                // holds the dispatch past the GPU watchdog (open-defects #15).
+                //
+                // A flight longer than the scene cannot have stayed inside a
+                // bounded medium, so sssSampleDistance declines it and the ray
+                // runs to its boundary instead. Nothing legitimate is lost:
+                // the medium being sampled is geometry that fits in the scene.
+                if (sssSampleDistance(sigmaT, channelPdf, uniforms.sceneExtent,
                                       random<SampleDimension::eSssChannel>(srng, uniforms.samplerType),
                                       random<SampleDimension::eSssDistance>(srng, uniforms.samplerType), mediumScatterT))
                 {
@@ -1738,12 +1836,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         const uint32_t medium = mediumState.medium & MEDIUM_INDEX_MASK;
         const uint32_t step = mediumState.medium >> MEDIUM_STEP_SHIFT;
         device const Material& mm = materials[medium - 1u];
-        const float3 sigmaT = sssSigmaT(float3(mm.subsurface_radius));
-        // A bounded volume has no entry surface to have textured, so it keeps the
-        // material's constant; a subsurface walk takes what the boundary resolved.
+        const MediumProps mp = mediumPropsFor(uniforms, materials, medium - 1u, mediumState.mediumAlbedo);
+        const float3 sigmaT = mp.sigmaT;
         const bool isBoundedMedium = (mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u;
-        const float3 albedo =
-            isBoundedMedium ? float3(mm.diffuse_transmission_color) : unpackMediumAlbedo(mediumState.mediumAlbedo);
+        const float3 albedo = mp.albedo;
 
         throughput *= sssScatterWeight(sigmaT, albedo, sssChannelPdf(sampledThroughput, albedo), rec.distance);
 
@@ -2124,10 +2220,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     {
         const uint32_t medium = mediumState.medium & MEDIUM_INDEX_MASK;
         const uint32_t step = mediumState.medium >> MEDIUM_STEP_SHIFT;
-        device const Material& mm = materials[medium - 1u];
         const float3 exitAlbedo = unpackMediumAlbedo(mediumState.mediumAlbedo);
         throughput *= sssBoundaryWeight(
-            sssSigmaT(float3(mm.subsurface_radius)), sssChannelPdf(sampledThroughput, exitAlbedo), rec.distance);
+            mediumSigmaT(uniforms, materials, medium - 1u), sssChannelPdf(sampledThroughput, exitAlbedo),
+            rec.distance);
         if (SPEC_SHARC_UPDATE)
         {
             const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
@@ -2649,8 +2745,37 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // Moving it costs nothing in sample values: every random<Dim>() here is a
     // pure function of (sampleIdx, dimension, seed, depth), so the order the
     // dimensions are drawn in does not change any of them.
+    // OpenPBR, prepared once for this vertex.
+    //
+    // Once, because openpbr_prepare() builds the entire layered lobe stack and
+    // both halves of the estimate run here -- eval for the light connection just
+    // below, sample for the next segment further down. Preparing inside each
+    // would do that work twice at every vertex.
+    //
+    // Placed after si is finished with rather than beside initSurfaceInteraction:
+    // the nested-dielectric exterior IOR is resolved above, and prepare() reads
+    // it. (The SHaRC roughness floor applied up there does not reach OpenPBR --
+    // it clamps si.roughness, while these lobes read their own parameters. That
+    // is a cache heuristic, not shading, so it is a gap rather than a defect.)
+    const bool isOpenPBR = SPEC_OPENPBR && si.material_type == MATERIAL_TYPE_OPENPBR;
+    OpenPBR_PreparedBsdf openpbrPrepared;
+    OpenPBRParams openpbrMat;
+    if (isOpenPBR)
+    {
+        openpbrMat = uniforms.openpbrParams[entry.materialId];
+        // The mask first: a material with no maps -- which is most of them --
+        // never touches the handle table, and that table is a second buffer this
+        // kernel would otherwise stream at every hit.
+        if (openpbrMat.texture_mask != 0u && uniforms.openpbrTextures != nullptr)
+        {
+            applyOpenPBRTextures(openpbrMat, uniforms.openpbrTextures[entry.materialId], si, uv);
+        }
+        openpbrPrepared = openpbr_prepare_at(openpbrMat, si, throughput);
+    }
+
     const bool hasEmitter = (SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap);
-    bool didNee = neeRunsAtVertex(uniforms.estimatorMode == 0, hasEmitter, bsdf_has_smooth_lobe(si));
+    const bool smoothLobe = isOpenPBR ? openpbr_has_smooth_lobe(openpbrMat) : bsdf_has_smooth_lobe(si);
+    bool didNee = neeRunsAtVertex(uniforms.estimatorMode == 0, hasEmitter, smoothLobe);
     if (didNee)
     {
         // Resampled importance sampling over several light candidates: draw M of
@@ -2718,7 +2843,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             {
                 continue;
             }
-            BsdfEvalResult evalResult = bsdf_eval(si, conn.toLight);
+            BsdfEvalResult evalResult =
+                isOpenPBR ? openpbr_bsdf_eval(openpbrPrepared, si, conn.toLight) : bsdf_eval(si, conn.toLight);
             if (isnan(conn.pdf) || isnan(evalResult.pdf))
             {
                 radianceOut[tid] = float4(1000000.0f, 0.0f, 0.0f, 0.0f);
@@ -2788,7 +2914,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                              random<SampleDimension::eBSDF1>(rng, uniforms.samplerType),
                              random<SampleDimension::eBSDF2>(rng, uniforms.samplerType),
                              random<SampleDimension::eBSDF3>(rng, uniforms.samplerType));
-    BsdfSampleResult sampleResult = bsdf_sample(si, xi);
+    BsdfSampleResult sampleResult =
+        isOpenPBR ? openpbr_bsdf_sample(openpbrPrepared, xi) : bsdf_sample(si, xi);
 
     if (sampleResult.event_type == BSDF_EVENT_ABSORB)
     {
@@ -2857,12 +2984,35 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
         nextOrigin = offset_ray(si.position, -faceNg);
 
-        // Entering a subsurface medium. The lobe that got here is the diffuse
-        // transmission one, which on its own puts the light straight out the far
-        // side; what this adds is that it random-walks on the way. From here the
-        // path is inside, and `extend` samples free flight instead of running to
-        // the next surface.
-        if (SPEC_SSS && si.subsurface > 0.0f && (sampleResult.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION) != 0)
+        // Entering a subsurface medium. The lobe that got here put the light
+        // through the surface; what this adds is that it random-walks on the way.
+        // From here the path is inside, and `extend` samples free flight instead
+        // of running to the next surface.
+        //
+        // Two things differ for OpenPBR, and both were measured rather than
+        // assumed:
+        //
+        //   * which event counts. The glTF model reaches here through its
+        //     diffuse-transmission lobe. OpenPBR does not: sampling a subsurface
+        //     material reports Transmission|Glossy, with the Diffuse bit clear
+        //     on every draw. Testing for diffuse transmission admitted none of
+        //     them, so the medium was entered by nothing at all.
+        //
+        //   * which materials. Only a *scattering* interior belongs in the walk.
+        //     A transmission-depth medium is pure absorption -- its derived
+        //     single-scattering albedo is exactly zero -- and Beer-Lambert
+        //     already carries it over the segment. Sending it through the walk
+        //     would have every sampled scattering event absorb the path instead.
+        //
+        // Read off the resolved block, not si: a subsurface weight can come from
+        // a map, and openpbrMat has had its textures folded in where si has not.
+        const bool entersMedium =
+            isOpenPBR ? (openpbrMat.subsurface_weight > 0.0f && openpbrMat.geometry_thin_walled == 0u) :
+                        (si.subsurface > 0.0f);
+        const uint32_t entryEvent =
+            isOpenPBR ? (sampleResult.event_type & BSDF_EVENT_TRANSMISSION) :
+                        (sampleResult.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION);
+        if (SPEC_SSS && entersMedium && entryEvent != 0)
         {
             mediumState.medium = (entry.materialId + 1u) & MEDIUM_INDEX_MASK;
 
@@ -2872,11 +3022,26 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             // material's scatter colour was derived from, so a flat material
             // takes the ratio 1 and is unchanged, and marble carries its veining
             // in.
-            float3 walkAlbedo = float3(materials[entry.materialId].diffuse_transmission_color);
-            const float3 reference = float3(materials[entry.materialId].subsurface_reference);
-            if (reference.x > 1e-4f && reference.y > 1e-4f && reference.z > 1e-4f)
+            float3 walkAlbedo;
+            if (isOpenPBR)
             {
-                walkAlbedo *= si.albedo / reference;
+                // Adobe's own single-scattering albedo, mapped from the authored
+                // subsurface colour by the van de Hulst formulas the OpenPBR
+                // specification names. Taken whole rather than scaled by a
+                // reference the way the glTF path does: that scaling exists to
+                // carry a texture's veining into a walk derived from a flat
+                // scatter colour, and here the colour *is* the resolved one --
+                // openpbrMat has already had its maps folded in above.
+                walkAlbedo = openpbr_interior_volume(openpbrMat).albedo;
+            }
+            else
+            {
+                walkAlbedo = float3(materials[entry.materialId].diffuse_transmission_color);
+                const float3 reference = float3(materials[entry.materialId].subsurface_reference);
+                if (reference.x > 1e-4f && reference.y > 1e-4f && reference.z > 1e-4f)
+                {
+                    walkAlbedo *= si.albedo / reference;
+                }
             }
             mediumState.mediumAlbedo = packMediumAlbedo(saturate(walkAlbedo));
             // This is the only common surface-shading branch that changes the
@@ -2884,7 +3049,21 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             // SSS-capable scene does not turn eight cold bytes into an
             // unconditional write on every live path.
             mediumPaths[tid] = mediumState;
-            sssEntryTint = max(float3(si.diffuse_transmission_color), float3(1e-4f));
+            // Only the glTF path divides by an entry tint. Its
+            // diffuse-transmission lobe already carries the scatter colour in
+            // bsdf_over_pdf, and the walk applies that colour again through the
+            // medium's albedo, so one of the two has to come back out.
+            //
+            // OpenPBR does not double it: Adobe's subsurface lobe weight and the
+            // single-scattering albedo its volume derives are already the split.
+            // Dividing here would use si.diffuse_transmission_color, a glTF
+            // field no OpenPBR material fills -- clamped to 1e-4, that is not a
+            // small darkening but a factor of ten thousand, which is what the
+            // fireflies around the chess kings were.
+            if (!isOpenPBR)
+            {
+                sssEntryTint = max(float3(si.diffuse_transmission_color), float3(1e-4f));
+            }
         }
     }
     else
@@ -3143,6 +3322,7 @@ kernel void wavefrontPrepareShadow(device uint32_t& controlRef [[buffer(0)]],
 // produce the same origin and direction.
 template <typename T>
 static float3 mediumTransmittance(typename T::structure accelerationStructure,
+                                  constant Uniforms& uniforms,
                                   device const Material* materials,
                                   device const GeometryEntry* geometryEntries,
                                   constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
@@ -3183,7 +3363,7 @@ static float3 mediumTransmittance(typename T::structure accelerationStructure,
 
         if (medium != 0u)
         {
-            optical += sssSigmaT(float3(materials[medium - 1u].subsurface_radius)) * segment;
+            optical += mediumSigmaT(uniforms, materials, medium - 1u) * segment;
         }
         if (escaped)
         {
@@ -3438,7 +3618,7 @@ static void shadowImpl(uint gid,
             }
             if (SPEC_SSS && uniforms.hasBoundedMedium)
             {
-                const float3 transmittance = mediumTransmittance<T>(accelerationStructure, materials, geometryEntries,
+                const float3 transmittance = mediumTransmittance<T>(accelerationStructure, uniforms, materials, geometryEntries,
                                                                     instances, float3(sr.origin), float3(sr.direction),
                                                                     sr.maxDistance, sr.medium, motionTime);
                 weight *= transmittance;
@@ -3500,7 +3680,7 @@ static void shadowImpl(uint gid,
     if (SPEC_SSS && uniforms.hasBoundedMedium)
     {
         const float3 mediumTr =
-            mediumTransmittance<T>(accelerationStructure, materials, geometryEntries, instances, float3(sr.origin),
+            mediumTransmittance<T>(accelerationStructure, uniforms, materials, geometryEntries, instances, float3(sr.origin),
                                    float3(sr.direction), sr.maxDistance, sr.medium, motionTime);
         weight *= mediumTr;
         sharcRadiance *= mediumTr;

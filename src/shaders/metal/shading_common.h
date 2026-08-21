@@ -52,6 +52,7 @@ constant bool kFcSharc [[function_constant(7)]];
 constant bool kFcSubsurface [[function_constant(8)]];
 constant bool kFcCurves [[function_constant(9)]];
 constant bool kFcSharcUpdate [[function_constant(10)]];
+constant bool kFcOpenPBR [[function_constant(11)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
 constant bool SPEC_SHARC = is_function_constant_defined(kFcSharc) ? kFcSharc : false;
@@ -73,6 +74,12 @@ constant bool SPEC_ALPHA = is_function_constant_defined(kFcAlpha) ? kFcAlpha : t
 // compiling out of every scene that has no hair in it.
 constant bool SPEC_CURVES = is_function_constant_defined(kFcCurves) ? kFcCurves : false;
 constant bool SPEC_SHARC_UPDATE = is_function_constant_defined(kFcSharcUpdate) ? kFcSharcUpdate : false;
+// OpenPBR Surface. Defaults false, and that default is load-bearing rather than
+// tidy: the branch it guards pulls in ~264 KB of lookup tables and the whole
+// layered lobe stack, and the two room scenes are instruction cache bound.
+// A scene with no OpenPBR material must compile a kernel that does not contain
+// it at all -- see WavefrontFeatures::kOpenPBR.
+constant bool SPEC_OPENPBR = is_function_constant_defined(kFcOpenPBR) ? kFcOpenPBR : false;
 
 struct PerRayData
 {
@@ -116,6 +123,126 @@ static float3 unpackNormal(uint32_t val)
 // so scale applies before rotation and the translation last. Getting the order
 // wrong is invisible at rotation 0 -- which is what every exporter writes by
 // default -- and wrong everywhere else.
+/// Folds an OpenPBR material's maps into its parameter block.
+///
+/// Replace, not multiply -- and that is the opposite of the glTF path a few
+/// lines below, deliberately. In glTF a texture modulates a factor, so both are
+/// meaningful at once. In MaterialX an input is *either* a value or a nodegraph
+/// output; when a map drives base_color there is no base_color constant to
+/// combine it with. Multiplying instead would silently darken every textured
+/// material by whatever default happened to be left in the block.
+///
+/// The maps are folded before openpbr_prepare() rather than sampled inside the
+/// BSDF because that is how the Metal backend already works: the material
+/// library never sees a texture handle on this platform, only resolved values.
+/// Whether the material names a file for this slot.
+///
+/// Read from the parameter block, which is already loaded, instead of testing
+/// the handle -- the handles live in another buffer, and touching it is the cost
+/// this gate exists to avoid.
+static bool openpbrHasMap(thread const OpenPBRParams& p, uint slot)
+{
+    return (p.texture_mask & (1u << slot)) != 0u;
+}
+
+static void applyOpenPBRTextures(thread OpenPBRParams& p,
+                                 device const OpenPBRTextures& t,
+                                 thread SurfaceInteraction& si,
+                                 float2 uv)
+{
+    // Its own sampler: the glTF path's lives inside initSurfaceInteraction and
+    // is not in scope here. Repeat rather than clamp, because MaterialX's image
+    // node tiles by default and a clamped one would smear the last texel across
+    // anything with a UV outside the unit square.
+    constexpr sampler openpbrSampler(mag_filter::linear, min_filter::linear, address::repeat);
+
+    const float c = cos(p.uv_rotation);
+    const float sn = sin(p.uv_rotation);
+    const float2 k = float2(p.uv_scale_x, p.uv_scale_y);
+    const float2 tuv = float2(uv.x * k.x * c - uv.y * k.y * sn, uv.x * k.x * sn + uv.y * k.y * c) +
+                       float2(p.uv_offset_x, p.uv_offset_y);
+
+    if (openpbrHasMap(p, OPENPBR_TEX_BASE_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_BASE_COLOR]))
+    {
+        const float3 v = t.tex[OPENPBR_TEX_BASE_COLOR].sample(openpbrSampler, tuv).rgb;
+        p.base_color = OpenPBRColor{ v.r, v.g, v.b };
+    }
+    if (openpbrHasMap(p, OPENPBR_TEX_BASE_METALNESS) && !is_null_texture(t.tex[OPENPBR_TEX_BASE_METALNESS]))
+        p.base_metalness = t.tex[OPENPBR_TEX_BASE_METALNESS].sample(openpbrSampler, tuv).r;
+    if (openpbrHasMap(p, OPENPBR_TEX_SPECULAR_ROUGHNESS) && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_ROUGHNESS]))
+        p.specular_roughness = t.tex[OPENPBR_TEX_SPECULAR_ROUGHNESS].sample(openpbrSampler, tuv).r;
+    if (openpbrHasMap(p, OPENPBR_TEX_SPECULAR_ANISOTROPY) && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_ANISOTROPY]))
+        p.specular_roughness_anisotropy = t.tex[OPENPBR_TEX_SPECULAR_ANISOTROPY].sample(openpbrSampler, tuv).r;
+    if (openpbrHasMap(p, OPENPBR_TEX_SPECULAR_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_COLOR]))
+    {
+        const float3 v = t.tex[OPENPBR_TEX_SPECULAR_COLOR].sample(openpbrSampler, tuv).rgb;
+        p.specular_color = OpenPBRColor{ v.r, v.g, v.b };
+    }
+    if (openpbrHasMap(p, OPENPBR_TEX_COAT_WEIGHT) && !is_null_texture(t.tex[OPENPBR_TEX_COAT_WEIGHT]))
+        p.coat_weight = t.tex[OPENPBR_TEX_COAT_WEIGHT].sample(openpbrSampler, tuv).r;
+    if (openpbrHasMap(p, OPENPBR_TEX_COAT_ROUGHNESS) && !is_null_texture(t.tex[OPENPBR_TEX_COAT_ROUGHNESS]))
+        p.coat_roughness = t.tex[OPENPBR_TEX_COAT_ROUGHNESS].sample(openpbrSampler, tuv).r;
+    if (openpbrHasMap(p, OPENPBR_TEX_COAT_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_COAT_COLOR]))
+    {
+        const float3 v = t.tex[OPENPBR_TEX_COAT_COLOR].sample(openpbrSampler, tuv).rgb;
+        p.coat_color = OpenPBRColor{ v.r, v.g, v.b };
+    }
+    if (openpbrHasMap(p, OPENPBR_TEX_FUZZ_WEIGHT) && !is_null_texture(t.tex[OPENPBR_TEX_FUZZ_WEIGHT]))
+        p.fuzz_weight = t.tex[OPENPBR_TEX_FUZZ_WEIGHT].sample(openpbrSampler, tuv).r;
+    if (openpbrHasMap(p, OPENPBR_TEX_FUZZ_ROUGHNESS) && !is_null_texture(t.tex[OPENPBR_TEX_FUZZ_ROUGHNESS]))
+        p.fuzz_roughness = t.tex[OPENPBR_TEX_FUZZ_ROUGHNESS].sample(openpbrSampler, tuv).r;
+    if (openpbrHasMap(p, OPENPBR_TEX_TRANSMISSION_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_TRANSMISSION_COLOR]))
+    {
+        const float3 v = t.tex[OPENPBR_TEX_TRANSMISSION_COLOR].sample(openpbrSampler, tuv).rgb;
+        p.transmission_color = OpenPBRColor{ v.r, v.g, v.b };
+    }
+    if (openpbrHasMap(p, OPENPBR_TEX_SUBSURFACE_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_SUBSURFACE_COLOR]))
+    {
+        const float3 v = t.tex[OPENPBR_TEX_SUBSURFACE_COLOR].sample(openpbrSampler, tuv).rgb;
+        p.subsurface_color = OpenPBRColor{ v.r, v.g, v.b };
+    }
+    if (openpbrHasMap(p, OPENPBR_TEX_GEOMETRY_OPACITY) && !is_null_texture(t.tex[OPENPBR_TEX_GEOMETRY_OPACITY]))
+        p.geometry_opacity = t.tex[OPENPBR_TEX_GEOMETRY_OPACITY].sample(openpbrSampler, tuv).r;
+    if (openpbrHasMap(p, OPENPBR_TEX_SUBSURFACE_WEIGHT) && !is_null_texture(t.tex[OPENPBR_TEX_SUBSURFACE_WEIGHT]))
+        p.subsurface_weight = t.tex[OPENPBR_TEX_SUBSURFACE_WEIGHT].sample(openpbrSampler, tuv).r;
+    if (openpbrHasMap(p, OPENPBR_TEX_FUZZ_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_FUZZ_COLOR]))
+    {
+        const float3 v = t.tex[OPENPBR_TEX_FUZZ_COLOR].sample(openpbrSampler, tuv).rgb;
+        p.fuzz_color = OpenPBRColor{ v.r, v.g, v.b };
+    }
+    if (openpbrHasMap(p, OPENPBR_TEX_SUBSURFACE_RADIUS) && !is_null_texture(t.tex[OPENPBR_TEX_SUBSURFACE_RADIUS]))
+    {
+        // A per-channel tint on the mean free path. The scalar length stays as
+        // authored: a map here says how the three channels differ, not how far
+        // light travels, which is what subsurface_radius carries.
+        const float3 v = t.tex[OPENPBR_TEX_SUBSURFACE_RADIUS].sample(openpbrSampler, tuv).rgb;
+        p.subsurface_radius_scale = OpenPBRColor{ v.r, v.g, v.b };
+    }
+
+    // Emission stays out of this on purpose: the shade kernel reads it from the
+    // Material struct, not from the BSDF, so an emission map would have to be
+    // folded there instead. Left unhandled rather than half-handled.
+
+    // The normal map, read the same way the glTF one is: Z rebuilt from X and Y
+    // because a compressed normal map is BC5 and stores two channels.
+    if (openpbrHasMap(p, OPENPBR_TEX_GEOMETRY_NORMAL) && !is_null_texture(t.tex[OPENPBR_TEX_GEOMETRY_NORMAL]))
+    {
+        const float2 xy = t.tex[OPENPBR_TEX_GEOMETRY_NORMAL].sample(openpbrSampler, tuv).xy * 2.0f - 1.0f;
+        const float z = sqrt(saturate(1.0f - dot(xy, xy)));
+        const float3x3 TBN = float3x3(si.tangent, si.bitangent, si.shading_normal);
+        si.shading_normal = normalize(TBN * float3(xy, z));
+        si.bump_normal = si.shading_normal;
+        // Same grazing-angle correction as the glTF path, from the same header,
+        // so the two do not disagree about a surface a map bent past the viewer.
+        if (dot(si.shading_normal, si.wo) <= 0.0f)
+        {
+            const float3 facingGeom = (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
+            si.shading_normal = ensureValidSpecularReflection(facingGeom, si.wo, si.shading_normal);
+            si.diffuse_faces_away = true;
+        }
+    }
+}
+
 static float2 applyTextureTransform(float2 uv, device const Material& m)
 {
     const float c = cos(m.uv_rotation);

@@ -85,6 +85,52 @@ restored around both `optixTraverse` and `optixInvoke`.
 So the split does not exist to be re-attempted. `STRELKA_PAYLOAD_COUNT` stays at
 2 and carries this note.
 
+## OpenPBR: free when off, and what it costs when on
+
+The OpenPBR material path is behind a function constant (`kFcOpenPBR`,
+`WavefrontFeatures::kOpenPBR`), on the argument that a scene without an OpenPBR
+material must compile a kernel that does not contain it. That argument was made
+from the instruction-cache findings below; this is the measurement of it.
+
+**Not the RTX 4090 numbers above.** Those are OptiX. This is an M4 Pro on Metal,
+so the only comparison that means anything here is HEAD against HEAD-plus-the-
+feature on the same machine in the same session.
+
+1920x1080, `max_depth` 8, sobol, one sample per launch, median ms/sample over
+samples 8..24 of a 24-sample render, best of three:
+
+| | iso_bathroom | kids_room |
+|---|---|---|
+| e5684bd (before the feature) | 83.4 | 122.6 |
+| with the feature, bit **off** | 80.6 | 122.5 |
+| with the feature, bit **on** | 177.7 | 199.3 |
+
+**Off costs nothing measurable.** -3.4% and -0.1% against a run-to-run spread of
+about 3% (three consecutive runs of one binary on iso_bathroom: 87.6 / 84.7 /
+85.8 for HEAD, 84.6 / 85.3 / 82.8 for the feature build). The honest statement is
+not "free" but "below what this measurement can resolve" -- and the images are
+bit-identical on four of five ladder rows, with the fifth differing by half a
+half-float ULP, so there is no mechanism for it to be otherwise.
+
+Worth stating what "off" does *not* mean: the metallib still carries the whole
+OpenPBR implementation, about 264 KB of it, most of that lookup tables. That is
+data rather than instructions, which is why it does not show up here -- the
+tables are only read by a kernel specialised with the constant on.
+
+**On costs 2.1x and 1.6x.** That figure is `render/material/model = openpbr`,
+which routes *every* material in the scene through the OpenPBR BSDF -- a switch
+that exists so one asset can be rendered both ways and compared, not a production
+mode. A scene where only some materials are OpenPBR pays in proportion. The two
+rooms differ because kids_room spends more of its frame in traversal, so a more
+expensive shade kernel dilutes.
+
+No attempt has been made to reduce it. The obvious lever is Adobe's own
+specialisation constants -- `EnableSheenAndCoat`, `EnableDispersion`,
+`EnableTranslucency`, `EnableMetallic` -- which are wired to a macro that
+currently answers `true` unconditionally. Packing a scene-wide scan of which
+lobes any OpenPBR material actually uses into four more function constants is
+the same trick this file already records as worth 15-23% of the frame.
+
 ## The measurement everything below is read against
 
 RTX 4090, OptiX 9.1, Release, sobol, one sample per launch. Scenes are the three

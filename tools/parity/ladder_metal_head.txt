@@ -1,0 +1,52 @@
+# Metal ladder at HEAD, recorded 2026-08-21
+#
+# Why this file exists: the table in tools/feature_tests/README.md and the
+# EXPECTED dict in run_ladder.py both correspond to e17db4b^, not to HEAD.
+# e17db4b ("Fix the MIS estimate, the light densities, and the IES path") moved
+# 26 of the 29 rows and only 27_ies was re-recorded afterwards. Bisected:
+#
+#   render 13 Aug -> e17db4b^   ratio 1.00000   (nothing changed)
+#   e17db4b^      -> e17db4b    ratio up to 1.10640
+#   e17db4b       -> HEAD       ratio 1.00000   (nothing changed)
+#
+# The move is a correction, not a regression. On 00_calibration at 8192 spp the
+# BSDF-only estimator -- which does not use NEE at all -- reads 1.0330 against
+# Cycles both before and after the commit, while NEE+MIS went 1.0098 -> 1.0331.
+# The old value agreed with Cycles by accident, being 2.25% darker than Strelka's
+# own transport. So this file, not the README, is what "unchanged" means from now
+# on, and the residual ~3% against Cycles is a separate pre-existing question.
+#
+# Generated: Blender 5.2.0 LTS references (pixel-identical to the 9 Aug ones),
+# StrelkaCLI at e5684bd, Metal, M4 Pro.
+#   tools/parity/run_ladder.py --cli build/Release/StrelkaCLI --suffix metal
+#
+# scene                    rel     ratio
+00_calibration             0.034     1.033
+01_srgb_texture            0.037     1.032
+02_basecolor               0.029     1.026
+03_roughness               0.038     1.035
+04_metal                   0.047     1.025
+05_anisotropy              0.066     1.022
+06_normalmap               0.092     1.089
+07_alpha_clip              0.037     1.029
+08_alpha_blend             0.035     1.030
+09_glass_ior               0.071     1.031
+10_glass_absorption        0.051     1.032
+11_emission                0.017     1.008
+12_lights_punctual         0.041     1.024
+13_uv2_vcol                0.039     1.035
+14_sheen                   0.066     1.036
+15_clearcoat               0.046     1.020
+16_iridescence             0.038     1.030
+17_coated_glass            0.135     1.100
+18_bounded_volume          0.032     0.979
+19_env_and_light           0.026     1.011
+20_mirror_and_floor        0.064     1.045
+21_specular_color          0.044     1.037
+22_thin_walled             0.090     1.001
+23_diffuse_transmission    0.011     1.003
+24_orthographic            0.036     1.036
+25_subsurface              0.057     1.015
+26_dof                     0.038     1.036
+27_ies                     0.065     1.038
+28_hair                    0.043     1.032

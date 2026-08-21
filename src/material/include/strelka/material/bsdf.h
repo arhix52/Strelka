@@ -11,6 +11,21 @@
 //   bsdf_pdf()    -- Return only the PDF for a given direction pair
 //
 // The material_type field in SurfaceInteraction selects the appropriate BxDF.
+//
+// MATERIAL_TYPE_OPENPBR is deliberately absent from every switch below, and
+// lands on the standard_pbr `default:` arm. Two reasons, both intentional:
+//
+//   - OpenPBR's parameters are not in SurfaceInteraction. They are a separate
+//     OpenPBRParams block, and its evaluator wants a prepared state built once
+//     per hit rather than rebuilt inside sample, eval and pdf separately. So the
+//     shading kernels call openpbr/openpbr_bridge.h directly, and this header
+//     stays unaware of it -- which also keeps openpbr.h's ~264 KB of lookup
+//     tables out of every translation unit that only wants a Lambert lobe.
+//
+//   - Falling through to standard_pbr is the wanted behaviour when the OpenPBR
+//     path is compiled out (see the feature bit in
+//     src/render/metal/integrator_features.h): the material shades as a plain
+//     PBR surface instead of going black or NaN.
 // ============================================================================
 
 #include "material_math.h"

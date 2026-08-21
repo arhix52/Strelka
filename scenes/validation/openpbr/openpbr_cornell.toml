@@ -1,0 +1,26 @@
+[scene]
+path = "openpbr_cornell.glb"
+
+[output]
+path = "output/openpbr_cornell.exr"
+width = 512
+height = 384
+
+[render]
+spp = 256
+spp_per_launch = 1
+max_depth = 8
+sampler = "sobol"
+
+[camera]
+index = 0
+position = [0.0, 1.0, 3.5]
+target = [0.0, 1.0, 0.0]
+fov = 45.0
+
+[tonemap]
+type = "none"
+gamma = 0.0
+exposure_iso = 100.0
+exposure_fstop = 1.0
+exposure_shutter = 1.0

@@ -59,7 +59,17 @@ endif()
 # Checks: '-*', and clang-tidy treats "no checks enabled" as a usage error and
 # exits non-zero, which fails the build on a file nobody wanted analysed.
 macro(strelka_skip_clang_tidy_on_vendored_targets)
-    foreach(vendored_target strelka_vendor_imgui strelka_vendor_file_dialog)
+    # MaterialX brings its own targets and its own .clang-tidy, and running ours
+    # over them fails outright rather than merely reporting: the two configs
+    # disagree about which checks exist, and clang-tidy exits non-zero on "no
+    # checks enabled". Vendored code is not ours to analyse either way.
+    foreach(vendored_target
+            strelka_vendor_imgui
+            strelka_vendor_file_dialog
+            MaterialXCore
+            MaterialXFormat
+            MaterialXGenShader
+            MaterialXRender)
         if(TARGET ${vendored_target})
             set_target_properties(${vendored_target} PROPERTIES CXX_CLANG_TIDY "")
         endif()
