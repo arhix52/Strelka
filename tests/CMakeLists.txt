@@ -37,6 +37,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_lod_filter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_material_sidecar.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_materialx_loader.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_materialx_inputs.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_pick_ray.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_skinned_bounds.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_world_bounds.cpp

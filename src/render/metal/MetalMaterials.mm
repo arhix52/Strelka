@@ -44,6 +44,28 @@ std::pair<bool, TextureKind> openpbrSlotKind(uint32_t slot)
         return { false, TextureKind::NonColor };
     }
 }
+
+/// The slot's guess at the encoding, overridden by whatever the document stated.
+///
+/// A slot default is a good guess and no more: it is glTF's convention, which
+/// the Open Chess Set happens to agree with exactly. Only the document knows
+/// that a particular roughness map was authored sRGB-encoded, or that a base
+/// colour is already linear. TextureKind is deliberately not overridden -- that
+/// says what the data *is*, a normal or a colour or a scalar, which no
+/// colorspace attribute changes.
+std::pair<bool, TextureKind> openpbrSlotKind(uint32_t slot, TexColorSpace stated)
+{
+    std::pair<bool, TextureKind> kind = openpbrSlotKind(slot);
+    if (stated == TexColorSpace::Linear)
+    {
+        kind.first = false;
+    }
+    else if (stated == TexColorSpace::Srgb)
+    {
+        kind.first = true;
+    }
+    return kind;
+}
 } // namespace
 
 // Working state of a resumable material build.
@@ -503,7 +525,7 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
             want(d.occlusionTexPath, false, TextureKind::NonColor);
             for (uint32_t slot = 0; slot < MAX_OPENPBR_TEXTURES; ++slot)
             {
-                const auto kind = openpbrSlotKind(slot);
+                const auto kind = openpbrSlotKind(slot, d.openpbrTexColorSpace[slot]);
                 want(d.openpbrTexPaths[slot], kind.first, kind.second);
             }
         }
@@ -564,7 +586,7 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
             auto* table = static_cast<OpenPBRTextures*>(mOpenPBRTexBuffer->contents());
             for (uint32_t slot = 0; slot < MAX_OPENPBR_TEXTURES; ++slot)
             {
-                const auto kind = openpbrSlotKind(slot);
+                const auto kind = openpbrSlotKind(slot, currMatDesc.openpbrTexColorSpace[slot]);
                 table[index].tex[slot] = loadTex(currMatDesc.openpbrTexPaths[slot], kind.first, kind.second);
                 // A slot the material named a file for but that produced no
                 // handle is the one failure this path can have that the image

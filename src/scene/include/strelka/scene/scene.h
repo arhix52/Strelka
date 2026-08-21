@@ -122,6 +122,19 @@ inline bool any(ChangeBits bits)
     return static_cast<uint32_t>(bits) != 0;
 }
 
+/// How a texture file is encoded, where something authoritative said so.
+///
+/// Only the transfer function. The renderer decodes sRGB or it does not, and has
+/// no colour-management path for primaries, so acescg and lin_rec709 both arrive
+/// as Linear even though their gamuts differ -- the loader warns rather than
+/// pretending otherwise.
+enum class TexColorSpace : uint8_t
+{
+    Unspecified = 0, // nothing was stated, so the slot's own default stands
+    Linear = 1,
+    Srgb = 2
+};
+
 class Scene
 {
 public:
@@ -148,6 +161,10 @@ public:
         /// input separately), and a material is authored through one route or
         /// the other, never both.
         std::array<std::string, MAX_OPENPBR_TEXTURES> openpbrTexPaths;
+        /// Per-slot override of the renderer's own encoding guess, from a
+        /// MaterialX document -- the only place that knows a roughness map was
+        /// authored sRGB-encoded, or a base colour already linear.
+        std::array<TexColorSpace, MAX_OPENPBR_TEXTURES> openpbrTexColorSpace{};
 
         // Texture file paths (resolved by renderer into GPU texture objects)
         std::string baseColorTexPath;

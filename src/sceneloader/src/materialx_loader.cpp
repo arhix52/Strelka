@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <ranges>
+#include <cctype>
 #include <cmath>
 #include <unordered_map>
 
@@ -21,14 +22,682 @@ namespace oka::mtlx
 namespace
 {
 
+/// The UV placement an image asks for, already in the form the shader applies:
+///
+///     tuv = rotate_ccw(uv * scale, rotation) + offset
+///
+/// which is one transform per *material*, not per slot -- OpenPBRParams carries
+/// a single uv_scale/uv_rotation/uv_offset that every map of that material is
+/// sampled through. Two maps placed differently cannot both be honoured, so the
+/// second one is reported rather than quietly overwriting the first.
+struct UvPlacement
+{
+    float scaleX = 1.0f;
+    float scaleY = 1.0f;
+    float rotation = 0.0f; // radians, counter-clockwise, the shader's convention
+    float offsetX = 0.0f;
+    float offsetY = 0.0f;
+    bool stated = false; // the document asked for something other than identity
+};
+
+bool placementsAgree(const UvPlacement& a, const UvPlacement& b)
+{
+    const auto same = [](float x, float y) { return std::fabs(x - y) <= 1e-6f; };
+    return same(a.scaleX, b.scaleX) && same(a.scaleY, b.scaleY) && same(a.rotation, b.rotation) &&
+           same(a.offsetX, b.offsetX) && same(a.offsetY, b.offsetY);
+}
+
 /// What an input resolved to.
 struct Resolved
 {
     bool isConstant = false;
     mx::ValuePtr value;
     std::string texture; // absolute path, empty when none
+    std::string colorSpace; // verbatim from the document, empty when unstated
+    UvPlacement placement;
     std::string unsupportedCategory;
 };
+
+/// A value folded out of a node graph: up to four components, and how many of
+/// them mean anything.
+///
+/// Kept as bare floats rather than as mx::Value all the way down because every
+/// operator below has to broadcast a scalar against a colour, and doing that
+/// through the variant would mean a type switch per operand per node. The mx
+/// type is put back on at the end, where the shader inputs are read.
+struct Folded
+{
+    float v[4]{ 0.0f, 0.0f, 0.0f, 0.0f };
+    int n = 0;
+    bool isColor = false;
+    bool ok = false;
+};
+
+Folded foldScalar(float x)
+{
+    Folded f;
+    f.v[0] = x;
+    f.n = 1;
+    f.ok = true;
+    return f;
+}
+
+/// Component i, with a one-component value broadcast across all of them --
+/// which is what makes multiply(color3, float) mean what a shading artist
+/// expects it to.
+float component(const Folded& f, int i)
+{
+    if (f.n <= 1)
+    {
+        return f.v[0];
+    }
+    return i < f.n ? f.v[i] : 0.0f;
+}
+
+int widthOfType(const std::string& type)
+{
+    if (type == "float" || type == "integer" || type == "boolean")
+        return 1;
+    if (type == "vector2")
+        return 2;
+    if (type == "color3" || type == "vector3")
+        return 3;
+    if (type == "color4" || type == "vector4")
+        return 4;
+    return 0;
+}
+
+Folded fromValue(const mx::ValuePtr& v)
+{
+    Folded f;
+    if (!v)
+    {
+        return f;
+    }
+    if (v->isA<float>())
+        return foldScalar(v->asA<float>());
+    if (v->isA<int>())
+        return foldScalar(static_cast<float>(v->asA<int>()));
+    if (v->isA<bool>())
+        return foldScalar(v->asA<bool>() ? 1.0f : 0.0f);
+    if (v->isA<mx::Vector2>())
+    {
+        const mx::Vector2 a = v->asA<mx::Vector2>();
+        f = { { a[0], a[1], 0.0f, 0.0f }, 2, false, true };
+        return f;
+    }
+    if (v->isA<mx::Color3>())
+    {
+        const mx::Color3 a = v->asA<mx::Color3>();
+        f = { { a[0], a[1], a[2], 0.0f }, 3, true, true };
+        return f;
+    }
+    if (v->isA<mx::Vector3>())
+    {
+        const mx::Vector3 a = v->asA<mx::Vector3>();
+        f = { { a[0], a[1], a[2], 0.0f }, 3, false, true };
+        return f;
+    }
+    if (v->isA<mx::Color4>())
+    {
+        const mx::Color4 a = v->asA<mx::Color4>();
+        f = { { a[0], a[1], a[2], a[3] }, 4, true, true };
+        return f;
+    }
+    if (v->isA<mx::Vector4>())
+    {
+        const mx::Vector4 a = v->asA<mx::Vector4>();
+        f = { { a[0], a[1], a[2], a[3] }, 4, false, true };
+        return f;
+    }
+    return f;
+}
+
+/// The node an input is driven by, whether it is wired straight to it or
+/// through a nodegraph's output.
+mx::NodePtr upstreamNode(const mx::InputPtr& input)
+{
+    if (!input)
+    {
+        return nullptr;
+    }
+    if (const mx::OutputPtr connected = input->getConnectedOutput())
+    {
+        if (const mx::NodePtr n = connected->getConnectedNode())
+        {
+            return n;
+        }
+    }
+    return input->getConnectedNode();
+}
+
+Folded foldNode(const mx::NodePtr& node, int depth);
+
+/// An operand: its literal value, or the graph behind it, or `fallback` when the
+/// node leaves it at its nodedef default and MaterialX has not filled one in.
+Folded foldOperand(const mx::NodePtr& node, const char* name, int depth, Folded fallback)
+{
+    if (!node)
+    {
+        return fallback;
+    }
+    const mx::InputPtr input = node->getInput(name);
+    if (!input)
+    {
+        return fallback;
+    }
+    if (input->hasValue())
+    {
+        const Folded f = fromValue(input->getValue());
+        return f.ok ? f : fallback;
+    }
+    const Folded f = foldNode(upstreamNode(input), depth + 1);
+    return f.ok ? f : Folded{};
+}
+
+/// Fold a subgraph whose leaves are all constants.
+///
+/// Everything here is arithmetic on values the document states outright, which
+/// is the whole difference between this and a shader generator: no texture may
+/// appear anywhere in the subgraph, because a texture's value is not known until
+/// the pixel is shaded and this result becomes a single number in OpenPBRParams.
+/// An operand that does not fold makes the whole node not fold, and the input
+/// ends up in `unsupported` with the category named -- silently substituting a
+/// default for half an expression would be worse than saying so.
+Folded foldNode(const mx::NodePtr& node, int depth)
+{
+    Folded bad;
+    // Graphs are acyclic by construction, but a hand-edited document need not be
+    // and this walk has no other way to notice.
+    if (!node || depth > 32)
+    {
+        return bad;
+    }
+
+    const std::string category = node->getCategory();
+    const int outWidth = widthOfType(node->getType());
+    const bool outIsColor = node->getType() == "color3" || node->getType() == "color4";
+
+    const auto retype = [&](Folded f) {
+        if (f.ok && outWidth > 0)
+        {
+            // A scalar driving a colour output is the broadcast the type system
+            // is asking for; anything else keeps the width it folded to.
+            if (f.n == 1 && outWidth > 1)
+            {
+                for (int i = 1; i < outWidth; ++i)
+                {
+                    f.v[i] = f.v[0];
+                }
+                f.n = outWidth;
+            }
+            f.isColor = outIsColor;
+        }
+        return f;
+    };
+
+    const auto binary = [&](const char* aName, const char* bName, float (*op)(float, float), Folded bFallback) {
+        const Folded a = foldOperand(node, aName, depth, Folded{});
+        const Folded b = foldOperand(node, bName, depth, bFallback);
+        if (!a.ok || !b.ok)
+        {
+            return Folded{};
+        }
+        Folded r;
+        r.n = std::max(a.n, b.n);
+        r.isColor = a.isColor || b.isColor;
+        r.ok = true;
+        for (int i = 0; i < r.n; ++i)
+        {
+            r.v[i] = op(component(a, i), component(b, i));
+        }
+        return r;
+    };
+
+    const auto unary = [&](float (*op)(float)) {
+        const Folded a = foldOperand(node, "in", depth, Folded{});
+        if (!a.ok)
+        {
+            return Folded{};
+        }
+        Folded r = a;
+        for (int i = 0; i < r.n; ++i)
+        {
+            r.v[i] = op(a.v[i]);
+        }
+        return r;
+    };
+
+    if (category == "constant")
+    {
+        return retype(foldOperand(node, "value", depth, Folded{}));
+    }
+    if (category == "dot")
+    {
+        return foldOperand(node, "in", depth, Folded{});
+    }
+    if (category == "add")
+        return retype(binary("in1", "in2", [](float a, float b) { return a + b; }, foldScalar(0.0f)));
+    if (category == "subtract")
+        return retype(binary("in1", "in2", [](float a, float b) { return a - b; }, foldScalar(0.0f)));
+    if (category == "multiply")
+        return retype(binary("in1", "in2", [](float a, float b) { return a * b; }, foldScalar(1.0f)));
+    if (category == "divide")
+        return retype(binary("in1", "in2", [](float a, float b) { return b != 0.0f ? a / b : 0.0f; }, foldScalar(1.0f)));
+    if (category == "modulo")
+        return retype(binary(
+            "in1", "in2", [](float a, float b) { return b != 0.0f ? std::fmod(a, b) : 0.0f; }, foldScalar(1.0f)));
+    if (category == "power")
+        return retype(binary("in1", "in2", [](float a, float b) { return std::pow(a, b); }, foldScalar(1.0f)));
+    if (category == "min")
+        return retype(binary("in1", "in2", [](float a, float b) { return std::min(a, b); }, foldScalar(0.0f)));
+    if (category == "max")
+        return retype(binary("in1", "in2", [](float a, float b) { return std::max(a, b); }, foldScalar(0.0f)));
+    if (category == "absval")
+        return unary([](float a) { return std::fabs(a); });
+    if (category == "floor")
+        return unary([](float a) { return std::floor(a); });
+    if (category == "ceil")
+        return unary([](float a) { return std::ceil(a); });
+    if (category == "round")
+        return unary([](float a) { return std::round(a); });
+    if (category == "sign")
+        return unary([](float a) { return a > 0.0f ? 1.0f : (a < 0.0f ? -1.0f : 0.0f); });
+    if (category == "sqrt")
+        return unary([](float a) { return a > 0.0f ? std::sqrt(a) : 0.0f; });
+    if (category == "clamp")
+    {
+        const Folded a = foldOperand(node, "in", depth, Folded{});
+        const Folded lo = foldOperand(node, "low", depth, foldScalar(0.0f));
+        const Folded hi = foldOperand(node, "high", depth, foldScalar(1.0f));
+        if (!a.ok || !lo.ok || !hi.ok)
+        {
+            return bad;
+        }
+        Folded r = a;
+        for (int i = 0; i < r.n; ++i)
+        {
+            r.v[i] = std::clamp(component(a, i), component(lo, i), component(hi, i));
+        }
+        return r;
+    }
+    if (category == "mix")
+    {
+        // mix = 0 is bg and mix = 1 is fg, which is the way round the stdlib
+        // defines it and the opposite of the argument order most libraries use.
+        const Folded fg = foldOperand(node, "fg", depth, Folded{});
+        const Folded bg = foldOperand(node, "bg", depth, Folded{});
+        const Folded t = foldOperand(node, "mix", depth, foldScalar(0.0f));
+        if (!fg.ok || !bg.ok || !t.ok)
+        {
+            return bad;
+        }
+        Folded r;
+        r.n = std::max(fg.n, bg.n);
+        r.isColor = fg.isColor || bg.isColor;
+        r.ok = true;
+        for (int i = 0; i < r.n; ++i)
+        {
+            const float k = component(t, i);
+            r.v[i] = component(bg, i) * (1.0f - k) + component(fg, i) * k;
+        }
+        return r;
+    }
+    if (category == "remap")
+    {
+        const Folded a = foldOperand(node, "in", depth, Folded{});
+        const Folded il = foldOperand(node, "inlow", depth, foldScalar(0.0f));
+        const Folded ih = foldOperand(node, "inhigh", depth, foldScalar(1.0f));
+        const Folded ol = foldOperand(node, "outlow", depth, foldScalar(0.0f));
+        const Folded oh = foldOperand(node, "outhigh", depth, foldScalar(1.0f));
+        if (!a.ok || !il.ok || !ih.ok || !ol.ok || !oh.ok)
+        {
+            return bad;
+        }
+        Folded r = a;
+        for (int i = 0; i < r.n; ++i)
+        {
+            const float span = component(ih, i) - component(il, i);
+            const float u = span != 0.0f ? (component(a, i) - component(il, i)) / span : 0.0f;
+            r.v[i] = component(ol, i) + u * (component(oh, i) - component(ol, i));
+        }
+        return r;
+    }
+    if (category == "smoothstep")
+    {
+        const Folded a = foldOperand(node, "in", depth, Folded{});
+        const Folded lo = foldOperand(node, "low", depth, foldScalar(0.0f));
+        const Folded hi = foldOperand(node, "high", depth, foldScalar(1.0f));
+        if (!a.ok || !lo.ok || !hi.ok)
+        {
+            return bad;
+        }
+        Folded r = a;
+        for (int i = 0; i < r.n; ++i)
+        {
+            const float span = component(hi, i) - component(lo, i);
+            const float u = span != 0.0f ? std::clamp((component(a, i) - component(lo, i)) / span, 0.0f, 1.0f) : 0.0f;
+            r.v[i] = u * u * (3.0f - 2.0f * u);
+        }
+        return r;
+    }
+    if (category == "invert")
+    {
+        const Folded a = foldOperand(node, "in", depth, Folded{});
+        const Folded amount = foldOperand(node, "amount", depth, foldScalar(1.0f));
+        if (!a.ok || !amount.ok)
+        {
+            return bad;
+        }
+        Folded r = a;
+        r.n = std::max(a.n, amount.n);
+        for (int i = 0; i < r.n; ++i)
+        {
+            r.v[i] = component(amount, i) - component(a, i);
+        }
+        return r;
+    }
+    if (category == "normalize" || category == "magnitude" || category == "dotproduct")
+    {
+        const Folded a = foldOperand(node, "in", depth, Folded{});
+        if (category == "dotproduct")
+        {
+            const Folded b = foldOperand(node, "in2", depth, Folded{});
+            const Folded a2 = a.ok ? a : foldOperand(node, "in1", depth, Folded{});
+            if (!a2.ok || !b.ok)
+            {
+                return bad;
+            }
+            float d = 0.0f;
+            for (int i = 0; i < std::max(a2.n, b.n); ++i)
+            {
+                d += component(a2, i) * component(b, i);
+            }
+            return foldScalar(d);
+        }
+        if (!a.ok)
+        {
+            return bad;
+        }
+        float len2 = 0.0f;
+        for (int i = 0; i < a.n; ++i)
+        {
+            len2 += a.v[i] * a.v[i];
+        }
+        const float len = std::sqrt(len2);
+        if (category == "magnitude")
+        {
+            return foldScalar(len);
+        }
+        Folded r = a;
+        for (int i = 0; i < r.n; ++i)
+        {
+            r.v[i] = len > 0.0f ? a.v[i] / len : 0.0f;
+        }
+        return r;
+    }
+    if (category == "luminance")
+    {
+        const Folded a = foldOperand(node, "in", depth, Folded{});
+        // The stdlib default lumacoeffs, which are ACEScg's and not Rec.709's --
+        // taking the familiar ones would be a quiet 3% on every grey.
+        const Folded c =
+            foldOperand(node, "lumacoeffs", depth, Folded{ { 0.272229f, 0.674082f, 0.053690f, 0.0f }, 3, false, true });
+        if (!a.ok || !c.ok)
+        {
+            return bad;
+        }
+        float l = 0.0f;
+        for (int i = 0; i < 3; ++i)
+        {
+            l += component(a, i) * component(c, i);
+        }
+        Folded r = a;
+        for (int i = 0; i < r.n && i < 3; ++i)
+        {
+            r.v[i] = l;
+        }
+        return r;
+    }
+    if (category == "combine2" || category == "combine3" || category == "combine4")
+    {
+        const int count = category == "combine2" ? 2 : (category == "combine3" ? 3 : 4);
+        Folded r;
+        r.n = count;
+        r.isColor = outIsColor;
+        r.ok = true;
+        const char* const names[4] = { "in1", "in2", "in3", "in4" };
+        for (int i = 0; i < count; ++i)
+        {
+            const Folded a = foldOperand(node, names[i], depth, foldScalar(0.0f));
+            if (!a.ok)
+            {
+                return bad;
+            }
+            r.v[i] = a.v[0];
+        }
+        return r;
+    }
+    if (category == "extract")
+    {
+        const Folded a = foldOperand(node, "in", depth, Folded{});
+        const Folded idx = foldOperand(node, "index", depth, foldScalar(0.0f));
+        if (!a.ok || !idx.ok)
+        {
+            return bad;
+        }
+        const int i = std::clamp(static_cast<int>(idx.v[0]), 0, 3);
+        return foldScalar(a.n > i ? a.v[i] : 0.0f);
+    }
+    if (category == "swizzle")
+    {
+        const Folded a = foldOperand(node, "in", depth, Folded{});
+        const mx::InputPtr channels = node->getInput("channels");
+        if (!a.ok || !channels)
+        {
+            return bad;
+        }
+        const std::string spec = channels->getValueString();
+        Folded r;
+        r.isColor = outIsColor;
+        r.ok = true;
+        for (const char ch : spec)
+        {
+            if (r.n >= 4)
+            {
+                break;
+            }
+            float value = 0.0f;
+            switch (ch)
+            {
+            case 'r':
+            case 'x':
+                value = component(a, 0);
+                break;
+            case 'g':
+            case 'y':
+                value = component(a, 1);
+                break;
+            case 'b':
+            case 'z':
+                value = component(a, 2);
+                break;
+            case 'a':
+            case 'w':
+                value = component(a, 3);
+                break;
+            case '0':
+                value = 0.0f;
+                break;
+            case '1':
+                value = 1.0f;
+                break;
+            default:
+                return bad;
+            }
+            r.v[r.n++] = value;
+        }
+        return r.n > 0 ? r : bad;
+    }
+    if (category == "convert")
+    {
+        return retype(foldOperand(node, "in", depth, Folded{}));
+    }
+    if (category == "ifgreater" || category == "ifgreatereq" || category == "ifequal")
+    {
+        const Folded v1 = foldOperand(node, "value1", depth, Folded{});
+        const Folded v2 = foldOperand(node, "value2", depth, Folded{});
+        const Folded a = foldOperand(node, "in1", depth, Folded{});
+        const Folded b = foldOperand(node, "in2", depth, Folded{});
+        if (!v1.ok || !v2.ok || !a.ok || !b.ok)
+        {
+            return bad;
+        }
+        const bool taken = category == "ifgreater"     ? (v1.v[0] > v2.v[0]) :
+                           (category == "ifgreatereq") ? (v1.v[0] >= v2.v[0]) :
+                                                         (v1.v[0] == v2.v[0]);
+        return taken ? a : b;
+    }
+
+    return bad;
+}
+
+/// Put the mx type back on, so the shader-input readers stay unchanged.
+mx::ValuePtr foldedToValue(const Folded& f)
+{
+    switch (f.n)
+    {
+    case 1:
+        return mx::Value::createValue<float>(f.v[0]);
+    case 2:
+        return mx::Value::createValue<mx::Vector2>(mx::Vector2(f.v[0], f.v[1]));
+    case 3:
+        return f.isColor ? mx::Value::createValue<mx::Color3>(mx::Color3(f.v[0], f.v[1], f.v[2])) :
+                           mx::Value::createValue<mx::Vector3>(mx::Vector3(f.v[0], f.v[1], f.v[2]));
+    case 4:
+        return f.isColor ? mx::Value::createValue<mx::Color4>(mx::Color4(f.v[0], f.v[1], f.v[2], f.v[3])) :
+                           mx::Value::createValue<mx::Vector4>(mx::Vector4(f.v[0], f.v[1], f.v[2], f.v[3]));
+    default:
+        return nullptr;
+    }
+}
+
+/// Read the placement of an image node: <tiledimage>'s own tiling, and whatever
+/// <place2d> feeds its texcoord.
+///
+/// Both are transcribed from the stdlib nodegraphs rather than from the field
+/// names, because the names mislead in both nodes. place2d *divides* by scale
+/// and *subtracts* offset, around a pivot; tiledimage subtracts its offset
+/// after multiplying. And MaterialX's rotate2d is (ca*x + sa*y, -sa*x + ca*y),
+/// which is a clockwise rotation, while the shader's is counter-clockwise --
+/// hence the negated angle. Getting any of these backwards produces a texture
+/// that is placed *almost* right, which is the hardest kind of wrong to see.
+UvPlacement readPlacement(const mx::NodePtr& node, std::string& gap)
+{
+    UvPlacement out;
+    if (!node)
+    {
+        return out;
+    }
+
+    if (node->getCategory() == "tiledimage")
+    {
+        const Folded tiling = foldOperand(node, "uvtiling", 0, Folded{ { 1.0f, 1.0f, 0.0f, 0.0f }, 2, false, true });
+        const Folded offset = foldOperand(node, "uvoffset", 0, Folded{ { 0.0f, 0.0f, 0.0f, 0.0f }, 2, false, true });
+        if (tiling.ok && offset.ok)
+        {
+            out.scaleX = component(tiling, 0);
+            out.scaleY = component(tiling, 1);
+            out.offsetX = -component(offset, 0);
+            out.offsetY = -component(offset, 1);
+            out.stated = out.scaleX != 1.0f || out.scaleY != 1.0f || out.offsetX != 0.0f || out.offsetY != 0.0f;
+        }
+        // Real-world sizing needs the scene's unit system, which the renderer
+        // does not carry. Named rather than silently applied as a factor of one.
+        for (const char* input : { "realworldimagesize", "realworldtilesize" })
+        {
+            if (const mx::InputPtr i = node->getInput(input); i && (i->hasValue() || i->getConnectedNode()))
+            {
+                gap = input;
+            }
+        }
+    }
+
+    const mx::InputPtr texcoord = node->getInput("texcoord");
+    const mx::NodePtr placer = upstreamNode(texcoord);
+    if (!placer)
+    {
+        return out;
+    }
+    const std::string placerCategory = placer->getCategory();
+    // A bare <texcoord> is the identity, and the mesh's own UVs are what the
+    // shader already samples with.
+    if (placerCategory == "texcoord")
+    {
+        return out;
+    }
+    if (placerCategory != "place2d")
+    {
+        gap = placerCategory;
+        return out;
+    }
+    const mx::InputPtr order = placer->getInput("operationorder");
+    const Folded orderValue = order && order->hasValue() ? fromValue(order->getValue()) : foldScalar(0.0f);
+    if (orderValue.ok && orderValue.v[0] != 0.0f)
+    {
+        // The other order applies translation before scale and rotation, which
+        // is a different transform and not the one composed below.
+        gap = "place2d(operationorder)";
+        return out;
+    }
+
+    const Folded pivot = foldOperand(placer, "pivot", 0, Folded{ { 0.0f, 0.0f, 0.0f, 0.0f }, 2, false, true });
+    const Folded scale = foldOperand(placer, "scale", 0, Folded{ { 1.0f, 1.0f, 0.0f, 0.0f }, 2, false, true });
+    const Folded rotate = foldOperand(placer, "rotate", 0, foldScalar(0.0f));
+    const Folded offset = foldOperand(placer, "offset", 0, Folded{ { 0.0f, 0.0f, 0.0f, 0.0f }, 2, false, true });
+    if (!pivot.ok || !scale.ok || !rotate.ok || !offset.ok)
+    {
+        gap = "place2d(non-constant)";
+        return out;
+    }
+
+    const float sx = component(scale, 0);
+    const float sy = component(scale, 1);
+    if (sx == 0.0f || sy == 0.0f)
+    {
+        gap = "place2d(zero scale)";
+        return out;
+    }
+
+    // out = R((uv - pivot)/scale) - offset + pivot, so the shader's
+    // rotate(uv * k) + off matches with k = 1/scale and the pivot terms folded
+    // into off.
+    const float theta = -static_cast<float>(rotate.v[0] * M_PI / 180.0);
+    const float c = std::cos(theta);
+    const float sn = std::sin(theta);
+    const float px = component(pivot, 0) / sx;
+    const float py = component(pivot, 1) / sy;
+    const float rotatedPivotX = px * c - py * sn;
+    const float rotatedPivotY = px * sn + py * c;
+
+    UvPlacement fromPlacer;
+    fromPlacer.scaleX = 1.0f / sx;
+    fromPlacer.scaleY = 1.0f / sy;
+    fromPlacer.rotation = theta;
+    fromPlacer.offsetX = component(pivot, 0) - component(offset, 0) - rotatedPivotX;
+    fromPlacer.offsetY = component(pivot, 1) - component(offset, 1) - rotatedPivotY;
+    fromPlacer.stated = true;
+
+    if (out.stated)
+    {
+        // A tiled image *and* a placement in front of it compose into a
+        // transform this single scale/rotate/offset cannot always express --
+        // a per-axis scale after a rotation is not of that form.
+        gap = "place2d+tiledimage";
+        return out;
+    }
+    return fromPlacer;
+}
 
 /// Follows an input to a constant, to a single image, or to nothing this loader
 /// can express.
@@ -91,7 +760,37 @@ Resolved resolveInput(const mx::InputPtr& input, const mx::FilePath& docDir)
                 // not the same one for a shared material library.
                 out.texture = (docDir / mx::FilePath(name)).asString();
             }
+            // Only what this element states, never what it inherits. A document
+            // declares its *working* space on the root element, and reading
+            // that as the file's would relabel every untagged map -- the chess
+            // set tags its base colours srgb_texture and leaves metalness,
+            // roughness and normals bare, which is exactly the arrangement the
+            // renderer's own slot defaults already assume.
+            out.colorSpace = file->getAttribute("colorspace");
         }
+        if (out.colorSpace.empty())
+        {
+            out.colorSpace = node->getAttribute("colorspace");
+        }
+        std::string placementGap;
+        out.placement = readPlacement(node, placementGap);
+        if (!placementGap.empty())
+        {
+            out.unsupportedCategory = placementGap;
+        }
+        return out;
+    }
+
+    // Not an image, so the last chance is that the graph behind it is
+    // arithmetic on constants -- a tint scaled, two colours mixed, a roughness
+    // remapped. Those are what a real library is made of, and until this fold
+    // existed every one of them landed in `unsupported` and left the parameter
+    // at its specification default: a material that quietly ignored what the
+    // document said, while reporting success.
+    if (const Folded folded = foldNode(node, 0); folded.ok)
+    {
+        out.isConstant = true;
+        out.value = foldedToValue(folded);
         return out;
     }
 
@@ -134,6 +833,47 @@ OpenPBRColor asColor(const mx::ValuePtr& v, OpenPBRColor fallback)
         return OpenPBRColor{ f, f, f };
     }
     return fallback;
+}
+
+/// The document's colorspace name, reduced to the one question the renderer can
+/// answer: is this file gamma-encoded or is it linear?
+///
+/// Matched on the naming convention rather than a table of every name, because
+/// the set is open -- a studio config adds its own -- and the convention is what
+/// the names are built from: `lin_` and the ACES spaces are linear, `srgb`,
+/// `g22`, `g18` and the display spaces carry a curve. What is *not* answered is
+/// the gamut: acescg and lin_rec709 both come back Linear even though their
+/// primaries differ, because there is no colour management here to convert them
+/// with. A name that fits neither pattern is reported and left to the slot.
+TexColorSpace colorSpaceFromName(const std::string& raw, const std::string& forInput)
+{
+    if (raw.empty())
+    {
+        return TexColorSpace::Unspecified;
+    }
+    std::string name;
+    name.reserve(raw.size());
+    for (const char c : raw)
+    {
+        name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    const auto startsWith = [&name](const char* prefix) { return name.starts_with(prefix); };
+
+    if (startsWith("lin_") || startsWith("linear") || name == "acescg" || name == "acescc" || name == "aces2065-1" ||
+        name == "raw" || name == "none" || name == "scene-linear")
+    {
+        return TexColorSpace::Linear;
+    }
+    if (startsWith("srgb") || startsWith("g22") || startsWith("g18") || startsWith("gamma") || name == "adobergb" ||
+        name == "rec709_display" || name == "rec709")
+    {
+        return TexColorSpace::Srgb;
+    }
+    STRELKA_WARNING(
+        "MaterialX: colorspace '{}' on '{}' is not one this renderer can decode; "
+        "using the slot's own default. Only the transfer function is honoured, never the gamut.",
+        raw, forInput);
+    return TexColorSpace::Unspecified;
 }
 
 bool asBool(const mx::ValuePtr& v, bool fallback)
@@ -414,6 +1154,10 @@ MaterialXDocumentData loadMaterialXDocument(const std::string& path)
         bool sawScale = false;
         float thinFilmThickness = 0.0f;
         bool sawThinFilm = false;
+        // OpenPBRParams carries one UV transform for the whole material, so the
+        // first placement stated wins and a second, different one is reported.
+        UvPlacement placement;
+        bool sawPlacement = false;
 
         for (const mx::InputPtr& input : shader->getInputs())
         {
@@ -456,6 +1200,19 @@ MaterialXDocumentData loadMaterialXDocument(const std::string& path)
             if (!r.texture.empty() && binding.textureSlot >= 0)
             {
                 out.texPaths[(size_t)binding.textureSlot] = r.texture;
+                out.texColorSpace[(size_t)binding.textureSlot] = colorSpaceFromName(r.colorSpace, name);
+                if (r.placement.stated)
+                {
+                    if (!sawPlacement)
+                    {
+                        placement = r.placement;
+                        sawPlacement = true;
+                    }
+                    else if (!placementsAgree(placement, r.placement))
+                    {
+                        out.unsupported.push_back(name + "<-place2d(second placement)");
+                    }
+                }
             }
             else if (!r.texture.empty())
             {
@@ -466,6 +1223,15 @@ MaterialXDocumentData loadMaterialXDocument(const std::string& path)
             {
                 writeBinding(out.params, binding, r.value);
             }
+        }
+
+        if (sawPlacement)
+        {
+            out.params.uv_scale_x = placement.scaleX;
+            out.params.uv_scale_y = placement.scaleY;
+            out.params.uv_rotation = placement.rotation;
+            out.params.uv_offset_x = placement.offsetX;
+            out.params.uv_offset_y = placement.offsetY;
         }
 
         if (category == "standard_surface")
@@ -550,6 +1316,7 @@ int applyMaterialXDocument(Scene& scene, const std::string& path)
             }
             desc.openpbr = m.params;
             desc.openpbrTexPaths = m.texPaths;
+            desc.openpbrTexColorSpace = m.texColorSpace;
             desc.params.material_type = MATERIAL_TYPE_OPENPBR;
             matched = true;
             ++applied;
@@ -606,6 +1373,7 @@ int applyMaterialXDocument(Scene& scene, const std::string& path)
         desc.params.uv_scale_y = 1.0f;
         desc.openpbr = found->params;
         desc.openpbrTexPaths = found->texPaths;
+        desc.openpbrTexColorSpace = found->texColorSpace;
         const uint32_t materialId = scene.addMaterial(desc);
 
         int instances = 0;
