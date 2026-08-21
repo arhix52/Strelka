@@ -45,6 +45,11 @@ class CameraController : public oka::InputHandler
     // E-folds of orthographic zoom per wheel notch: ~16% of the frame per click,
     // and it composes smoothly with the fractional deltas a trackpad sends.
     static constexpr float kWheelZoomRate = 0.15f;
+    // The same for a stick held on an orthographic camera, per world unit the
+    // stick asked to travel. Mirrors kOrthoKeyZoomRate in camera.cpp, which is
+    // file-static there and cannot be shared -- so it is written down here that
+    // the two are meant to match, and that a change to one wants the other.
+    static constexpr float kOrthoStickZoomRate = 1.0f;
 
     bool mIsViewportHovered = false;
     bool mGizmoBlocksInput = false;
@@ -187,7 +192,37 @@ public:
         mUserMovedCamera = true;
         mPendingLookX += input.lookX;
         mPendingLookY += input.lookY;
-        mPendingTranslate += input.translate;
+
+        glm::float3 translate = input.translate;
+        if (mCam.projection == Camera::ProjectionType::orthographic)
+        {
+            // A parallel projection cannot dolly: sliding the camera along its
+            // own view axis leaves the image identical, so pushing the stick
+            // forward on an orthographic camera moved it through the scene and
+            // changed nothing on screen -- a control that looks broken because
+            // it is doing exactly what it was told.
+            //
+            // Camera::update spends the movement keys' forward axis on
+            // zoomOrthographic instead, and scrollCallback does the same for the
+            // wheel. The stick joins them rather than being the one input that
+            // behaves differently.
+            //
+            // input.zoom rather than translate.z: the radial deadzone lets the
+            // other axis's rest drift through, and a compounding exponential is
+            // the one control where that is visible. See CameraInput::zoom.
+            //
+            // input.zoom is already speed- and dt-scaled, and it carries the
+            // stick's own sign -- pushed away is negative, like translate.z --
+            // while the key path's mMoveInput.z is +1 forward, so the exponent's
+            // sign flips relative to camera.cpp's exp(-rate * moveInput.z).
+            if (input.zoom != 0.0f)
+            {
+                mCam.zoomOrthographic(std::exp(kOrthoStickZoomRate * input.zoom));
+            }
+            translate.z = 0.0f;
+        }
+        mPendingTranslate += translate;
+
         if (input.worldUp != 0.0f)
         {
             // The queue is in camera space and this lift is in world space, so it

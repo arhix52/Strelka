@@ -539,3 +539,135 @@ TEST_CASE("stick and mouse compose rather than overwrite")
         glm::angle(glm::normalize(before * glm::conjugate(mouseOnly.getCamera().mOrientation)));
     CHECK(bothYaw > mouseYaw);
 }
+
+TEST_CASE("on an orthographic camera the stick zooms instead of dollying")
+{
+    // A parallel projection cannot dolly -- sliding along the view axis leaves
+    // the image identical -- so Camera::update spends the movement keys' forward
+    // axis on zoomOrthographic and the wheel does the same. The stick has to
+    // join them, or pushing forward is a control that silently does nothing.
+    oka::CameraController controller = makeController();
+    oka::Camera& cam = controller.getCamera();
+    cam.projection = oka::Camera::ProjectionType::orthographic;
+    cam.xmag = 2.0f;
+    cam.ymag = 2.0f;
+
+    const glm::float3 start = cam.position;
+
+    GamepadState pad = restingDualSense();
+    pad.leftY = -1.0f; // pushed away: zoom in
+
+    gp::Config cfg;
+    cfg.moveSpeed = 10.0f;
+    controller.applyGamepad(gp::mapToCamera(pad, cfg, 1.0f / 60.0f));
+    settle(controller);
+
+    CHECK(cam.xmag < 2.0f);
+    CHECK(cam.ymag < 2.0f);
+    // And it did not dolly while doing it. Along the view axis specifically:
+    // the radial deadzone passes the other axis's rest drift, so the camera does
+    // creep a fraction sideways, which is both expected and invisible.
+    const glm::float3 moved = cam.position - start;
+    CHECK(glm::dot(moved, cam.getFront()) == doctest::Approx(0.0f));
+}
+
+TEST_CASE("pulling the stick back on an orthographic camera zooms out")
+{
+    oka::CameraController controller = makeController();
+    oka::Camera& cam = controller.getCamera();
+    cam.projection = oka::Camera::ProjectionType::orthographic;
+    cam.xmag = 2.0f;
+    cam.ymag = 2.0f;
+
+    GamepadState pad = restingDualSense();
+    pad.leftY = 1.0f;
+
+    gp::Config cfg;
+    cfg.moveSpeed = 10.0f;
+    controller.applyGamepad(gp::mapToCamera(pad, cfg, 1.0f / 60.0f));
+    settle(controller);
+
+    CHECK(cam.xmag > 2.0f);
+}
+
+TEST_CASE("an orthographic camera still strafes and lifts")
+{
+    // Only forward and back branch: panning across the film works the same way
+    // for both projections, which is what camera.cpp says and what the wheel
+    // path already assumes.
+    oka::CameraController controller = makeController();
+    oka::Camera& cam = controller.getCamera();
+    cam.projection = oka::Camera::ProjectionType::orthographic;
+    cam.xmag = 2.0f;
+    cam.ymag = 2.0f;
+
+    const glm::float3 right = cam.getRight();
+    const glm::float3 start = cam.position;
+
+    GamepadState pad = restingDualSense();
+    pad.leftX = 1.0f;
+
+    gp::Config cfg;
+    cfg.moveSpeed = 10.0f;
+    controller.applyGamepad(gp::mapToCamera(pad, cfg, 1.0f / 60.0f));
+    settle(controller);
+
+    const glm::float3 moved = cam.position - start;
+    CHECK(glm::length(moved) > 0.0f);
+    CHECK(glm::dot(glm::normalize(moved), right) > 0.99f);
+    // Strafing is not zooming -- exactly, not approximately. This is what the
+    // per-axis deadzone on CameraInput::zoom buys: the radial one passed the
+    // stick's 0.012 of forward drift into a compounding exponential, and a few
+    // seconds of sideways travel walked the frame extents on their own.
+    // Exact, not Approx: doctest's Approx compares with a strict <, so an
+    // epsilon of zero fails even on an equal pair.
+    CHECK(cam.xmag == 2.0f);
+    CHECK(cam.ymag == 2.0f);
+}
+
+TEST_CASE("a perspective camera is not zoomed by the stick")
+{
+    oka::CameraController controller = makeController();
+    oka::Camera& cam = controller.getCamera();
+    cam.projection = oka::Camera::ProjectionType::perspective;
+    cam.xmag = 2.0f;
+
+    GamepadState pad = restingDualSense();
+    pad.leftY = -1.0f;
+
+    gp::Config cfg;
+    cfg.moveSpeed = 10.0f;
+    controller.applyGamepad(gp::mapToCamera(pad, cfg, 1.0f / 60.0f));
+    settle(controller);
+
+    CHECK(cam.xmag == doctest::Approx(2.0f));
+}
+
+TEST_CASE("a sideways push reports no orthographic zoom at all")
+{
+    // The regression this pins directly, without a camera in the way: rest drift
+    // on the forward axis must not survive into `zoom`, because the orthographic
+    // path compounds it.
+    GamepadState pad = restingDualSense();
+    pad.leftX = 1.0f; // hard left/right, forward axis only drifting
+
+    const gp::CameraInput out = gp::mapToCamera(pad, gp::Config{}, 1.0f / 60.0f);
+    CHECK(out.zoom == 0.0f);
+    // The translation still carries it, and is meant to: a radial deadzone keeps
+    // a diagonal push diagonal, and 1% off-axis velocity is invisible.
+    CHECK(out.translate.x > 0.0f);
+}
+
+TEST_CASE("zoom carries the same sign as the forward translation")
+{
+    GamepadState pad = restingDualSense();
+    pad.leftY = -1.0f;
+    const gp::CameraInput forward = gp::mapToCamera(pad, gp::Config{}, 1.0f / 60.0f);
+    CHECK(forward.zoom < 0.0f);
+    CHECK(forward.translate.z < 0.0f);
+
+    pad.leftY = 1.0f;
+    const gp::CameraInput back = gp::mapToCamera(pad, gp::Config{}, 1.0f / 60.0f);
+    CHECK(back.zoom > 0.0f);
+    CHECK(back.translate.z > 0.0f);
+}

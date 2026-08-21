@@ -4692,6 +4692,9 @@ void EditorApp::buildDefaultDockLayout(ImGuiID dockspaceId)
 void EditorApp::drawUI()
 {
     ImGui_ImplGlfw_NewFrame();
+    // After the backend, before NewFrame: the backend looks for the pad in slot
+    // 0 and finds nothing here, so without this ImGui gets no gamepad at all.
+    gamepad::feedImGui(m_display->getGamepadState(), ImGui::GetIO());
     ImGui::NewFrame();
 
     // Set before BeginFrame as well as in the viewport: the flag is global state

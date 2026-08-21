@@ -1608,6 +1608,42 @@ void EditorApp::drawGamepadSettings()
         ImGui::Text("Triggers     L2 %.3f  R2 %.3f", pad.leftTrigger, pad.rightTrigger);
         ImGui::Text("Speed scale  x%.2f",
                     gamepad::speedScaleFromTriggers(pad.leftTrigger, pad.rightTrigger, gamepad::Config{}));
+
+        // Every button, lit while held. The point is to separate "this button
+        // does nothing" from "this button is not arriving": the first is ours to
+        // fix, the second is the mapping's, and from the camera alone the two
+        // look the same.
+        struct Named
+        {
+            oka::GamepadState::Button button;
+            const char* label;
+        };
+        static const Named kButtons[] = {
+            { oka::GamepadState::a, "Cross" },       { oka::GamepadState::b, "Circle" },
+            { oka::GamepadState::x, "Square" },      { oka::GamepadState::y, "Triangle" },
+            { oka::GamepadState::leftBumper, "L1" }, { oka::GamepadState::rightBumper, "R1" },
+            { oka::GamepadState::leftThumb, "L3" },  { oka::GamepadState::rightThumb, "R3" },
+            { oka::GamepadState::dpadUp, "Up" },     { oka::GamepadState::dpadDown, "Down" },
+            { oka::GamepadState::dpadLeft, "Left" }, { oka::GamepadState::dpadRight, "Right" },
+            { oka::GamepadState::back, "Share" },    { oka::GamepadState::start, "Options" },
+            { oka::GamepadState::guide, "PS" },
+        };
+        int column = 0;
+        for (const Named& entry : kButtons)
+        {
+            if (column++ % 4 != 0)
+            {
+                ImGui::SameLine(static_cast<float>(column % 4) * 90.0f);
+            }
+            if (pad.pressed(entry.button))
+            {
+                ImGui::TextUnformatted(entry.label);
+            }
+            else
+            {
+                ImGui::TextDisabled("%s", entry.label);
+            }
+        }
         ImGui::TreePop();
     }
 

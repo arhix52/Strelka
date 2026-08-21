@@ -5,6 +5,8 @@
 
 #include <glm/geometric.hpp>
 
+#include "imgui.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -72,6 +74,23 @@ struct CameraInput
     /// The two conventions sit four lines apart in camera.cpp and swapping them
     /// gives a camera that flies backwards, which is worth writing down once.
     glm::float3 translate{ 0.0f };
+
+    /// Forward and back again, but deadzoned per axis rather than radially, for
+    /// the orthographic zoom.
+    ///
+    /// Separate from `translate.z` because the two want different filtering, and
+    /// the difference is measurable. A radial deadzone keeps a diagonal push
+    /// diagonal, which is what translation wants -- but it necessarily passes the
+    /// *other* axis's rest drift once the stick clears it, so a stick pushed hard
+    /// left also reports the 0.012 of forward drift a DualSense shows at rest.
+    ///
+    /// For a translation that is a constant 1% off-axis velocity and nobody can
+    /// see it. The orthographic zoom is exponential and compounds: that same
+    /// drift held through a few seconds of strafing walks the frame extents by a
+    /// factor nobody asked for, slowly enough to read as the renderer doing
+    /// something rather than as the stick. Per-axis here, so a stick pushed
+    /// sideways reports no zoom at all.
+    float zoom = 0.0f;
 
     /// Lift along *world* up, kept out of `translate` because that is what the
     /// keys it mirrors do: Camera::update moves Q/E along getWorldUp(), so a
@@ -153,6 +172,69 @@ inline float speedScaleFromTriggers(float leftTrigger, float rightTrigger, const
     return boost * brake;
 }
 
+/// Hand the pad to Dear ImGui, because its GLFW backend cannot find it.
+///
+/// ImGui_ImplGlfw_UpdateGamepads() reads GLFW_JOYSTICK_1 -- slot *zero* -- and
+/// returns immediately if that slot has no game controller mapping. It is the
+/// same assumption our own polling deliberately does not make, and on a desk
+/// where something else claims slot 0 (a Keychron K8 Pro's system-control HID
+/// collection does, which is how this was found) the result is that ImGui
+/// receives no gamepad input at all: Cross does not activate a menu item, the
+/// D-pad does not move between them, and nothing says why.
+///
+/// So the events are fed from the pad we did find. Safe to call unconditionally:
+/// the backend runs first and either bailed -- leaving these the only source --
+/// or read the same device and wrote the same values, and AddKeyEvent with an
+/// unchanged value is a no-op.
+///
+/// The thresholds and analogue ranges are ImGui's own, copied from that function
+/// so the two agree about when a stick counts as pushed.
+template <typename ImGuiIoT>
+void feedImGui(const GamepadState& pad, ImGuiIoT& io)
+{
+    if (!pad.connected)
+    {
+        return;
+    }
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+
+    const auto button = [&io](ImGuiKey key, bool down) { io.AddKeyEvent(key, down); };
+    // ImGui maps an axis onto [v0, v1] and calls it pressed past 0.10.
+    const auto analog = [&io](ImGuiKey key, float raw, float v0, float v1) {
+        const float v = std::clamp((raw - v0) / (v1 - v0), 0.0f, 1.0f);
+        io.AddKeyAnalogEvent(key, v > 0.10f, v);
+    };
+
+    button(ImGuiKey_GamepadStart, pad.pressed(GamepadState::start));
+    button(ImGuiKey_GamepadBack, pad.pressed(GamepadState::back));
+    button(ImGuiKey_GamepadFaceLeft, pad.pressed(GamepadState::x)); // Square
+    button(ImGuiKey_GamepadFaceRight, pad.pressed(GamepadState::b)); // Circle
+    button(ImGuiKey_GamepadFaceUp, pad.pressed(GamepadState::y)); // Triangle
+    button(ImGuiKey_GamepadFaceDown, pad.pressed(GamepadState::a)); // Cross
+    button(ImGuiKey_GamepadDpadLeft, pad.pressed(GamepadState::dpadLeft));
+    button(ImGuiKey_GamepadDpadRight, pad.pressed(GamepadState::dpadRight));
+    button(ImGuiKey_GamepadDpadUp, pad.pressed(GamepadState::dpadUp));
+    button(ImGuiKey_GamepadDpadDown, pad.pressed(GamepadState::dpadDown));
+    button(ImGuiKey_GamepadL1, pad.pressed(GamepadState::leftBumper));
+    button(ImGuiKey_GamepadR1, pad.pressed(GamepadState::rightBumper));
+    button(ImGuiKey_GamepadL3, pad.pressed(GamepadState::leftThumb));
+    button(ImGuiKey_GamepadR3, pad.pressed(GamepadState::rightThumb));
+
+    // GamepadState already normalised the triggers to [0, 1]; ImGui's own
+    // version maps GLFW's raw [-0.75, 1] because it reads them unconverted.
+    analog(ImGuiKey_GamepadL2, pad.leftTrigger, 0.125f, 1.0f);
+    analog(ImGuiKey_GamepadR2, pad.rightTrigger, 0.125f, 1.0f);
+
+    analog(ImGuiKey_GamepadLStickLeft, pad.leftX, -0.25f, -1.0f);
+    analog(ImGuiKey_GamepadLStickRight, pad.leftX, 0.25f, 1.0f);
+    analog(ImGuiKey_GamepadLStickUp, pad.leftY, -0.25f, -1.0f);
+    analog(ImGuiKey_GamepadLStickDown, pad.leftY, 0.25f, 1.0f);
+    analog(ImGuiKey_GamepadRStickLeft, pad.rightX, -0.25f, -1.0f);
+    analog(ImGuiKey_GamepadRStickRight, pad.rightX, 0.25f, 1.0f);
+    analog(ImGuiKey_GamepadRStickUp, pad.rightY, -0.25f, -1.0f);
+    analog(ImGuiKey_GamepadRStickDown, pad.rightY, 0.25f, 1.0f);
+}
+
 /// Whether the camera may read the pad this frame, or whether the UI has it.
 ///
 /// One controller, two consumers, and the division is Dear ImGui's own rather
@@ -205,11 +287,15 @@ inline CameraInput mapToCamera(const GamepadState& pad, const Config& cfg, float
     const float down = pad.pressed(GamepadState::leftBumper) ? 1.0f : 0.0f;
     out.worldUp = up - down;
 
+    // Per-axis, not from `move`: see CameraInput::zoom.
+    out.zoom = shapeAxis(pad.leftY, cfg);
+
     const float scale = cfg.moveSpeed * out.speedScale * dt;
-    if (glm::dot(out.translate, out.translate) > 0.0f || out.worldUp != 0.0f)
+    if (glm::dot(out.translate, out.translate) > 0.0f || out.worldUp != 0.0f || out.zoom != 0.0f)
     {
         out.translate *= scale;
         out.worldUp *= scale;
+        out.zoom *= scale;
         out.active = true;
     }
 
