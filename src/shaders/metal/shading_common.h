@@ -878,6 +878,10 @@ LightConnection connectLight(constant Uniforms& uniforms,
         }
     }
 
+    // Blender's controlled falloff. Self-gated to area lights, so punctual
+    // lights (whose pad1 is the KHR range) are untouched.
+    Li *= areaFalloff(light, lightSampleData.distToLight);
+
     // For area lights the facing test uses the light's surface normal; for a
     // sharp point the "normal" is -L, so -dot(L, normal) = 1 always.
     //

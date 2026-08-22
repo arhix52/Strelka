@@ -397,6 +397,10 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
         }
     }
 
+    // Blender's controlled falloff. Self-gated to area lights, so punctual
+    // lights (whose pad1 is the KHR range) are untouched.
+    Li *= areaFalloff(light, lightSampleData.distToLight);
+
     // lightReachesShadingPoint() is `dot(N, L) > 0` for everything except a
     // fibre, where the hemisphere test is the wrong question -- see the note on
     // it in shading/shading_common.h.

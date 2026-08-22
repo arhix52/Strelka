@@ -2041,7 +2041,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // halves of the estimate agree on the set they are splitting.
         if (lightSampleFacesVertex(-dot(rayDir, lightNormal)))
         {
-            const float3 Le = float3(currLight.color);
+            // Same distance the shadow ray uses in connectLight() -- from the
+            // scattering vertex, not the offset origin -- so both halves of the
+            // MIS estimate scale the emission by the same controlled falloff.
+            const float3 falloffOrigin = rayOrigin - rayDir * p.misDistance;
+            const float3 Le = float3(currLight.color) * areaFalloff(currLight, length(hitPoint - falloffOrigin));
             if (depth == 0u || specularBounce || !neeDone)
             {
                 radiance += throughput * Le;

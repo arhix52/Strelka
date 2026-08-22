@@ -772,7 +772,11 @@ extern "C" __global__ void __closesthit__light()
         // every emitter it hit off-axis while the next-event strategy did not, so
         // the two disagreed by exactly cos at every vertex. Metal's light hit has
         // never had the factor.
-        const float3 Le = make_float3(currLight.color);
+        // Same distance the shadow ray uses in connectLight() -- from the
+        // scattering vertex, not the offset origin -- so both halves of the MIS
+        // estimate scale the emission by the same controlled falloff.
+        const float3 falloffOrigin = optixGetWorldRayOrigin() - rayDir * prd->misDistance;
+        const float3 Le = make_float3(currLight.color) * areaFalloff(currLight, length(hitPoint - falloffOrigin));
         float3 radiance;
         if (prd->depth == 0 || prd->specularBounce || !prd->neeDone)
         {

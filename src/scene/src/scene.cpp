@@ -828,7 +828,9 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].type = LIGHT_TYPE_RECT;
         mLights[lightId].halfAngle = 0.0f;
         mLights[lightId].pad0 = 0.0f;
-        mLights[lightId].pad1 = 0.0f;
+        // Controlled-falloff cutoff distance for area lights, read by
+        // areaFalloff(); 0 (the default range) leaves the light unbounded.
+        mLights[lightId].pad1 = desc.range;
     }
     else if (desc.type == LIGHT_TYPE_DISC)
     {
@@ -847,7 +849,9 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].type = LIGHT_TYPE_DISC;
         mLights[lightId].halfAngle = 0.0f;
         mLights[lightId].pad0 = 0.0f;
-        mLights[lightId].pad1 = 0.0f;
+        // Controlled-falloff cutoff distance for area lights, read by
+        // areaFalloff(); 0 (the default range) leaves the light unbounded.
+        mLights[lightId].pad1 = desc.range;
     }
     else if (desc.type == LIGHT_TYPE_SPHERE)
     {

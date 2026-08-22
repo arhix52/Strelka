@@ -446,6 +446,27 @@ static __inline__ float rangeWindow(device const UniformLight& l, float dist)
     return y * y;
 }
 
+// Blender's "controlled falloff" for area lights: a Light Path "Ray Length"
+// divided by a cutoff distance, run through a smootherstep Map Range, fades the
+// emission out with a Mix Shader. pad1 carries that cutoff distance (0 = none),
+// and only area lights read it -- punctual lights use pad1 as the KHR range in
+// rangeWindow() above, so scaling them here as well would apply two windows.
+static __inline__ float areaFalloff(device const UniformLight& l, float dist)
+{
+    if (l.pad1 <= 0.0f)
+    {
+        return 1.0f;
+    }
+    if (l.type != LIGHT_TYPE_RECT && l.type != LIGHT_TYPE_DISC && l.type != LIGHT_TYPE_SPHERE)
+    {
+        return 1.0f;
+    }
+    const float x = saturate(dist / l.pad1);
+    // 1 - smootherstep(x), the Map Range (SMOOTHERSTEP) node feeding the Mix.
+    const float s = x * x * x * (x * (x * 6.0f - 15.0f) + 10.0f);
+    return 1.0f - s;
+}
+
 /// Unpack one light into the scalars lightSolidAnglePdf() needs.
 ///
 /// `radius` is only read for the types that have one, because points[0] means
