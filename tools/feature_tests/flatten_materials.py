@@ -29,6 +29,7 @@ afterwards by export_scene.py.
 """
 
 import bpy
+import math
 import numpy as np
 import os
 
@@ -141,6 +142,31 @@ def _mean_colour(socket, depth=0):
             weight = alpha.sum()
             return [float((px[:, c] * alpha).sum() / weight) for c in range(3)]
         return [float(px[:, c].mean()) for c in range(3)]
+    # A plain RGB constant: the colour is on the node's output, not on any input,
+    # so the name loop below never reaches it. The monster's skin is authored
+    # this way -- a purple RGB node behind a Mix -- and without this the exporter
+    # dropped the colour and wrote white, which lost both the diffuse tint and
+    # the subsurface hue it is derived from.
+    if node.type == "RGB":
+        value = node.outputs[0].default_value
+        return [float(value[0]), float(value[1]), float(value[2])]
+    # The generic Mix node (ShaderNodeMix) carries duplicate A/B sockets for
+    # every data type, so inputs["A"] resolves to the unused float one and the
+    # name loop misses the colour entirely. Blend the two RGBA sockets by the
+    # clamped factor, which for the monster's factor of 3 collapses to input B.
+    if node.type == "MIX" and getattr(node, "data_type", "") == "RGBA":
+        rgba_inputs = [i for i in node.inputs if i.type == "RGBA"]
+        if len(rgba_inputs) >= 2:
+            a = _mean_colour(rgba_inputs[0], depth + 1)
+            b = _mean_colour(rgba_inputs[1], depth + 1)
+            if a is None or b is None:
+                return a if a is not None else b
+            fac_socket = next((i for i in node.inputs
+                               if i.name == "Factor" and i.type == "VALUE"), None)
+            fac = float(fac_socket.default_value) if fac_socket is not None else 0.5
+            if getattr(node, "clamp_factor", True):
+                fac = min(max(fac, 0.0), 1.0)
+            return [a[c] * (1.0 - fac) + b[c] * fac for c in range(3)]
     # Colour inputs only, and named ones first. Wandering into a Vector or a Fac
     # returns a number that is not a colour, and it is the sort of wrong answer
     # that renders rather than raises.
@@ -240,6 +266,70 @@ def _reduce_inputs(principled):
     return changed
 
 
+def _apply_rgb_curve(node, rgb):
+    """A colour through an RGB Curves node: the combined curve, then per-channel."""
+    mapping = node.mapping
+    try:
+        mapping.initialize()
+    except (RuntimeError, AttributeError):
+        pass
+    out = []
+    for c in range(3):
+        v = float(rgb[c])
+        v = mapping.evaluate(mapping.curves[3], v)
+        v = mapping.evaluate(mapping.curves[c], v)
+        out.append(v)
+    return out
+
+
+def _adjusted_mean(socket, depth=0):
+    """Mean colour at a socket, applying the colour grades _mean_colour ignores.
+
+    _mean_colour walks straight through an RGB Curves node to the texture behind
+    it, which is what the exporter carries. This is the other half: the same
+    walk with the grade applied, so the difference between the two is exactly the
+    shift the exporter drops.
+    """
+    if depth > 6 or not socket.links:
+        return _mean_colour(socket, depth)
+    node = socket.links[0].from_node
+    if node.type == "CURVE_RGB":
+        inp = _adjusted_mean(node.inputs["Color"], depth + 1)
+        if inp is None:
+            return None
+        return _apply_rgb_curve(node, inp)
+    return _mean_colour(socket, depth)
+
+
+def _base_color_tint(principled):
+    """A multiplicative tint for a textured base colour whose grade is dropped.
+
+    The pyjama fabric is a grey texture pushed to purple by an RGB Curves node.
+    glTF cannot carry the curve, so the exporter keeps the grey texture and the
+    hood comes out white. Rather than bake a whole new texture, the average shift
+    the grade applies is folded into baseColorFactor -- which glTF multiplies
+    onto the texture -- so the weave stays and the colour returns. Exact only for
+    a per-channel scaling, an approximation for a curved one, and stated as such.
+    """
+    base = principled.inputs.get("Base Color")
+    if base is None or not base.links or not _reaches_texture(base):
+        return None
+    # A bare texture is carried whole by the exporter -- nothing to recover.
+    if base.links[0].from_node.type == "TEX_IMAGE":
+        return None
+    in_mean = _mean_colour(base)
+    out_mean = _adjusted_mean(base)
+    if in_mean is None or out_mean is None:
+        return None
+    tint = []
+    for c in range(3):
+        denom = in_mean[c] if in_mean[c] > 1e-4 else 1e-4
+        tint.append(min(max(out_mean[c] / denom, 0.0), 1.0))
+    if all(abs(t - 1.0) < 0.02 for t in tint):
+        return None
+    return tint
+
+
 def _volume_absorption(mat):
     """(attenuation colour, attenuation distance) from a Volume Absorption node.
 
@@ -263,6 +353,114 @@ def _volume_absorption(mat):
     if density <= 0.0:
         return None
     return [float(colour[0]), float(colour[1]), float(colour[2])], 1.0 / density
+
+
+def _diffuse_to_single_scattering_albedo(a):
+    """Diffuse albedo -> single-scattering albedo (Van de Hulst inversion).
+
+    The same fit build_features.py and tools/iso_bathroom/vray2strelka.py use for
+    STRELKA_materials_subsurface: a DCC subsurface colour is a diffuse albedo,
+    and the random walk wants the probability that one extinction event
+    scatters. Feeding the diffuse value straight in darkens every multi-scatter
+    path by albedo^n.
+    """
+    def diffuse_albedo(alpha):
+        s = math.sqrt(max(1.0 - alpha, 0.0))
+        return (1.0 - s) * (1.0 - 0.139 * s) / (1.0 + 1.17 * s)
+
+    a = min(max(float(a), 0.0), 0.999)
+    lo, hi = 0.0, 1.0
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        if diffuse_albedo(mid) < a:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def _cycles_radius_scale(a):
+    """Cycles' searchlight remap of a subsurface radius, per channel.
+
+    Christensen-Burley's random-walk fit has two halves: the diffuse albedo
+    becomes a single-scattering albedo, and the radius is stretched by
+    s = 1.9 - A + 3.5 (A - 0.8)^2 before it is the mean free path Cycles walks.
+    Only the first half was applied here, so every channel scattered over a
+    shorter distance than Cycles gives it -- and s varies per channel, 2.25 for
+    the monster's red against 1.10 for its blue, so the error is chromatic. Red
+    stopped reaching through a thin lobe, the hue collapsed toward the surface
+    albedo, and a magenta that Cycles renders at saturation 0.9 came out a pale
+    salmon at 0.49.
+    """
+    a = min(max(float(a), 0.0), 1.0)
+    return 1.9 - a + 3.5 * (a - 0.8) ** 2
+
+
+def _subsurface(principled):
+    """STRELKA_materials_subsurface payload from a Principled BSDF, or None.
+
+    Cycles' Principled v2 carries subsurface as a weight, a per-channel radius
+    scaled by a scalar, and Base Color as the surface albedo -- there is no
+    separate Subsurface Color input since 4.0. The extension wants the
+    single-scattering albedo, so Base Color is inverted through Van de Hulst per
+    channel and kept unchanged as scatterReference, which the loader divides the
+    textured base colour by so a textured skin still scatters the right amount.
+    Radius is the mean free path in world units, which is Blender's Subsurface
+    Radius times Subsurface Scale.
+    """
+    weight_socket = principled.inputs.get("Subsurface Weight")
+    if weight_socket is None:
+        return None
+    weight = _mean_scalar(weight_socket)
+    if weight is None or weight <= 0.0:
+        return None
+
+    radius = [0.01, 0.01, 0.01]
+    radius_socket = principled.inputs.get("Subsurface Radius")
+    if radius_socket is not None:
+        value = getattr(radius_socket, "default_value", None)
+        if value is not None and hasattr(value, "__len__"):
+            radius = [float(value[0]), float(value[1]), float(value[2])]
+    scale_socket = principled.inputs.get("Subsurface Scale")
+    scale = _mean_scalar(scale_socket) if scale_socket is not None else 1.0
+    if scale is None:
+        scale = 1.0
+    radius = [r * scale for r in radius]
+    if max(radius) <= 0.0:
+        return None
+
+    anisotropy = 0.0
+    aniso_socket = principled.inputs.get("Subsurface Anisotropy")
+    if aniso_socket is not None:
+        got = _mean_scalar(aniso_socket)
+        if got is not None:
+            anisotropy = got
+
+    # scatterReference is the diffuse albedo the single-scattering colour is
+    # derived from. Prefer the averaged Base Color, but a monster's skin runs its
+    # colour through a procedural Mix chain _mean_colour cannot walk, and there
+    # the socket keeps the constant the author last set behind the graph -- a far
+    # better reference than a flat grey, which would leave the loader scaling the
+    # skin texture against the wrong albedo and shift the scatter off-hue.
+    base_socket = principled.inputs.get("Base Color")
+    base = _mean_colour(base_socket) if base_socket is not None else None
+    if base is None and base_socket is not None:
+        cached = getattr(base_socket, "default_value", None)
+        if cached is not None and hasattr(cached, "__len__"):
+            base = [float(cached[0]), float(cached[1]), float(cached[2])]
+    if base is None:
+        base = [0.8, 0.8, 0.8]
+    base = [min(max(c, 0.0), 1.0) for c in base]
+    scatter = [_diffuse_to_single_scattering_albedo(c) for c in base]
+    # The other half of the remap the single-scattering albedo above comes from.
+    radius = [radius[c] * _cycles_radius_scale(base[c]) for c in range(3)]
+    return {
+        "weight": float(weight),
+        "radius": radius,
+        "anisotropy": float(anisotropy),
+        "reference": base,
+        "scatter": scatter,
+    }
 
 
 def _invert_image(img, out_dir):
@@ -298,15 +496,268 @@ def _invert_image(img, out_dir):
     return out
 
 
+def _normal_is_plain_map(socket):
+    """Whether a Normal input is already a tangent-space normal map, which glTF
+    carries as-is and nothing here needs to touch."""
+    if not socket.links:
+        return True
+    node = socket.links[0].from_node
+    if node.type != "NORMAL_MAP" or node.space != "TANGENT":
+        return False
+    src = node.inputs["Color"]
+    return bool(src.links) and src.links[0].from_node.type == "TEX_IMAGE"
+
+
+def _bake_normal_map(mat, principled, out_dir, size=2048):
+    """Bake a Normal input that glTF has no way to state into a normal map.
+
+    The floor's relief is a Bump node fed a Brick texture -- the parquet's plank
+    seams -- mixed with the laminate photo. glTF has neither a bump node nor a
+    procedural brick, and Blender's exporter resolves that by writing the *height
+    source* into normalTexture: the laminate colour jpg, bound as a tangent-space
+    normal map. Decoded as 2*rgb-1 a warm brown becomes a normal tilted into the
+    surface, which is why the floor rendered near black with no parquet on it at
+    all, the two complaints having one cause.
+
+    Baking states the same relief in the one form glTF does carry. The seams
+    arrive because they are in the bake, not because the format learned about
+    bricks.
+    """
+    users = [ob for ob in bpy.data.objects
+             if ob.type == "MESH" and any(s.material == mat for s in ob.material_slots)]
+    users = [ob for ob in users if ob.data.uv_layers]
+    if not users:
+        return None
+
+    name = "%s_baked_normal" % mat.name.replace(" ", "_")
+    img = bpy.data.images.new(name, width=size, height=size, alpha=False, float_buffer=False)
+    img.colorspace_settings.name = "Non-Color"
+
+    tree = mat.node_tree
+    target = tree.nodes.new("ShaderNodeTexImage")
+    target.image = img
+    target.select = True
+    tree.nodes.active = target
+
+    scene = bpy.context.scene
+    engine, view = scene.render.engine, bpy.context.view_layer
+    scene.render.engine = "CYCLES"
+    scene.render.bake.use_selected_to_active = False
+    scene.render.bake.margin = 8
+    scene.cycles.bake_type = "NORMAL"
+    scene.render.bake.normal_space = "TANGENT"
+    # One sample, not the scene's. A normal bake asks the surface where it points
+    # and gets the same answer every time -- there is no light in it to converge.
+    # Inheriting this file's 1024 spends all of them per texel and takes the bake
+    # from seconds to past twenty minutes, which reads as a hang.
+    samples = scene.cycles.samples
+    scene.cycles.samples = 1
+
+    for ob in bpy.data.objects:
+        ob.select_set(False)
+    for ob in users:
+        ob.select_set(True)
+        # The bake writes through the active layer, while the exporter numbers by
+        # position and Strelka reads TEXCOORD_0; promote_render_uv() moves the
+        # render layer there, so the bake has to agree with that one.
+        uvs = ob.data.uv_layers
+        chosen = next((l for l in uvs if l.active_render), uvs[0])
+        uvs.active = chosen
+    view.objects.active = users[0]
+
+    try:
+        bpy.ops.object.bake(type="NORMAL")
+    except Exception as exc:
+        tree.nodes.remove(target)
+        bpy.data.images.remove(img)
+        scene.render.engine, scene.cycles.samples = engine, samples
+        return "bake failed: %s" % exc
+
+    img.filepath_raw = os.path.join(out_dir, name + ".png")
+    img.file_format = "PNG"
+    img.save()
+    scene.render.engine, scene.cycles.samples = engine, samples
+
+    nmap = tree.nodes.new("ShaderNodeNormalMap")
+    nmap.space = "TANGENT"
+    tree.links.new(target.outputs["Color"], nmap.inputs["Color"])
+    for link in list(principled.inputs["Normal"].links):
+        tree.links.remove(link)
+    tree.links.new(nmap.outputs["Normal"], principled.inputs["Normal"])
+    return name
+
+
+def _gradient_value(kind, p):
+    """Blender's Gradient Texture, per type, over an (N, 3) array of points."""
+    x, y, z = p[:, 0], p[:, 1], p[:, 2]
+    if kind == "LINEAR":
+        return x
+    if kind == "QUADRATIC":
+        r = np.maximum(x, 0.0)
+        return r * r
+    if kind == "EASING":
+        r = np.clip(x, 0.0, 1.0)
+        return r * r * (3.0 - 2.0 * r)
+    if kind == "DIAGONAL":
+        return (x + y) * 0.5
+    if kind == "RADIAL":
+        return np.arctan2(y, x) / (2.0 * math.pi) + 0.5
+    r = np.maximum(1.0 - np.sqrt(x * x + y * y + z * z), 0.0)
+    if kind == "SPHERICAL":
+        return r
+    if kind == "QUADRATIC_SPHERE":
+        return r * r
+    return None
+
+
+def _object_space_samples(mat, per_triangle=4096):
+    """Points on the surfaces that wear this material, in object space, with the
+    area weight of the triangle each came from.
+
+    A texture driving an emission has no single value; it has an average over the
+    emitter, and the average is over *area*, since that is what the radiance is
+    integrated against. Sampling the mesh gets that for a shape of any kind,
+    where a bounding box would only get it for a rectangle.
+    """
+    # Seeded, because an exporter that writes a different number each run turns
+    # every later comparison into a question about which run it came from.
+    rng = np.random.default_rng(0x5721EA)
+    pts = []
+    wts = []
+    for ob in bpy.data.objects:
+        if ob.type != "MESH":
+            continue
+        slots = [i for i, s in enumerate(ob.material_slots) if s.material == mat]
+        if not slots:
+            continue
+        me = ob.data
+        me.calc_loop_triangles()
+        verts = np.array([v.co[:] for v in me.vertices], dtype=np.float64)
+        for tri in me.loop_triangles:
+            if tri.material_index not in slots:
+                continue
+            a, b, c = verts[list(tri.vertices)]
+            area = 0.5 * np.linalg.norm(np.cross(b - a, c - a))
+            if area <= 0.0:
+                continue
+            u = rng.random(per_triangle)
+            v = rng.random(per_triangle)
+            fold = u + v > 1.0
+            u[fold], v[fold] = 1.0 - u[fold], 1.0 - v[fold]
+            pts.append(a + np.outer(u, b - a) + np.outer(v, c - a))
+            wts.append(np.full(per_triangle, area / per_triangle))
+    if not pts:
+        return None, None
+    return np.concatenate(pts), np.concatenate(wts)
+
+
+def _apply_mapping(node, p):
+    """A Mapping node in Texture mode, which is the inverse of the point one:
+    the coordinate is un-located, un-rotated and un-scaled before the texture
+    reads it. Any other mode returns None rather than a wrong transform."""
+    if node.vector_type != "TEXTURE":
+        return None
+    if any(node.inputs[k].links for k in ("Location", "Rotation", "Scale")):
+        return None
+    loc = np.array(node.inputs["Location"].default_value[:], dtype=np.float64)
+    rot = np.array(node.inputs["Rotation"].default_value[:], dtype=np.float64)
+    scale = np.array(node.inputs["Scale"].default_value[:], dtype=np.float64)
+    q = p - loc
+    if np.any(np.abs(rot) > 1e-9):
+        cx, cy, cz = np.cos(rot)
+        sx, sy, sz = np.sin(rot)
+        rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]], dtype=np.float64)
+        ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]], dtype=np.float64)
+        rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]], dtype=np.float64)
+        q = q @ (rz @ ry @ rx)
+    safe = np.where(np.abs(scale) < 1e-9, 1.0, scale)
+    return q / safe
+
+
+def _procedural_mean(socket, mat, depth=0):
+    """The area average of a scalar socket driven by a procedural texture.
+
+    Only the chain this scene actually uses is walked -- a Gradient Texture
+    behind an optional Mapping, optionally scaled by Math -- and anything else
+    returns None so the caller reports it instead of averaging the wrong thing.
+    """
+    if not socket.links or depth > 4:
+        return None
+    node = socket.links[0].from_node
+    if node.type == "MATH":
+        # One operand constant, the other the texture: the mean is linear in it
+        # for multiply and add, which are the two that appear on a strength.
+        a, b = node.inputs[0], node.inputs[1]
+        if node.operation not in {"MULTIPLY", "ADD"}:
+            return None
+        for driven, other in ((a, b), (b, a)):
+            if driven.links and not other.links:
+                inner = _procedural_mean(driven, mat, depth + 1)
+                if inner is None:
+                    return None
+                k = float(other.default_value)
+                return inner * k if node.operation == "MULTIPLY" else inner + k
+        return None
+    if node.type != "TEX_GRADIENT":
+        return None
+    vec = node.inputs["Vector"]
+    pts, wts = _object_space_samples(mat)
+    if pts is None:
+        return None
+    if vec.links:
+        src = vec.links[0].from_node
+        if src.type == "MAPPING":
+            pts = _apply_mapping(src, pts)
+            if pts is None:
+                return None
+            up = src.inputs["Vector"]
+            if up.links and not (up.links[0].from_node.type == "TEX_COORD"
+                                 and up.links[0].from_socket.name == "Object"):
+                return None
+        elif not (src.type == "TEX_COORD" and vec.links[0].from_socket.name == "Object"):
+            return None
+    vals = _gradient_value(node.gradient_type, pts)
+    if vals is None:
+        return None
+    return float(np.average(vals, weights=wts))
+
+
+def _resolve_emission_strength(mat, emission):
+    """Collapse a textured Emission Strength to the average it emits.
+
+    The softbox panels are lit by a quadratic-sphere gradient times 10: bright in
+    the middle, dark at the corners, averaging 4.01 over the panel. Blender's
+    glTF exporter reads the socket as if the gradient were 1 and writes 10, so
+    the three panels -- 62% of this scene's light, measured by rendering it
+    without them -- come across 2.5x too bright, which is most of why the
+    interior sat above the reference while its walls sat below.
+    """
+    if "Strength" not in emission.inputs:
+        return None
+    sock = emission.inputs["Strength"]
+    if not sock.links:
+        return None
+    mean = _procedural_mean(sock, mat)
+    if mean is None:
+        return None
+    tree = mat.node_tree
+    for link in list(sock.links):
+        tree.links.remove(link)
+    sock.default_value = mean
+    return mean
+
+
 def flatten(out_dir):
     """Rewrite every material that needs it.
 
-    Returns (report, translucency, volumes): the two extension payloads the
-    exporter cannot derive on its own, keyed by material name.
+    Returns (report, translucency, volumes, subsurface, tints): the extension
+    payloads the exporter cannot derive on its own, keyed by material name.
     """
     report = []
     translucency = {}
     volumes = {}
+    subsurface = {}
+    tints = {}
     for mat in bpy.data.materials:
         if not mat.use_nodes or mat.node_tree is None:
             continue
@@ -322,13 +773,35 @@ def flatten(out_dir):
         if surface.type == "BSDF_PRINCIPLED":
             # Already the shape the exporter wants -- but its inputs may still be
             # driven by nodes it cannot read.
+            sss = _subsurface(surface)
+            if sss is not None:
+                subsurface[mat.name] = sss
+            tint = _base_color_tint(surface)
+            if tint is not None:
+                tints[mat.name] = tint
+            baked = None
+            if not _normal_is_plain_map(surface.inputs["Normal"]):
+                baked = _bake_normal_map(mat, surface, out_dir)
+                if baked is not None:
+                    report.append((mat.name, "normal baked -> %s" % baked))
             reduced = _reduce_inputs(surface)
-            if reduced or volume is not None:
+            if reduced or volume is not None or sss is not None:
                 note = "inputs reduced: %s" % ", ".join(reduced) if reduced else "volume only"
                 if volume is not None:
                     note += "; volume %s over %.2f" % (
                         "".join("%.2f " % c for c in volume[0]).strip(), volume[1])
+                if sss is not None:
+                    note += "; subsurface %.2f radius %s" % (
+                        sss["weight"], "".join("%.3f " % r for r in sss["radius"]).strip())
                 report.append((mat.name, note))
+            continue
+
+        if surface.type == "EMISSION":
+            # A pure emitter is already what glTF wants; only its strength can be
+            # driven by something the exporter reads as a single number.
+            mean = _resolve_emission_strength(mat, surface)
+            report.append((mat.name, "emission strength averaged to %.3f" % mean if mean is not None
+                           else "emission strength left as authored"))
             continue
 
         principled = _find_principled(surface)
@@ -337,6 +810,13 @@ def flatten(out_dir):
             continue
 
         nt = mat.node_tree
+
+        sss = _subsurface(principled)
+        if sss is not None:
+            subsurface[mat.name] = sss
+        tint = _base_color_tint(principled)
+        if tint is not None:
+            tints[mat.name] = tint
 
         # Foliage translucency, before the graph is rewritten and the node is
         # orphaned. Blender writes it as a Translucent BSDF added alongside the
@@ -403,5 +883,11 @@ def flatten(out_dir):
             note += ", translucency %.2f %s" % (
                 translucency[mat.name][0],
                 "".join("%.2f " % c for c in translucency[mat.name][1]).strip())
+        if mat.name in subsurface:
+            note += ", subsurface %.2f radius %s" % (
+                subsurface[mat.name]["weight"],
+                "".join("%.3f " % r for r in subsurface[mat.name]["radius"]).strip())
+        if mat.name in tints:
+            note += ", tint %s" % "".join("%.2f " % t for t in tints[mat.name]).strip()
         report.append((mat.name, note))
-    return report, translucency, volumes
+    return report, translucency, volumes, subsurface, tints

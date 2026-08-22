@@ -24,6 +24,7 @@ Geometry Nodes are realised.
 import array
 
 import bpy
+import importlib
 import json
 import math
 import os
@@ -32,6 +33,7 @@ import sys
 # Alongside this file, which is not on the path when Blender runs a script by
 # absolute path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "iso_bathroom")))
 
 from mathutils import Matrix, Vector
 
@@ -41,13 +43,130 @@ def gltf_pos(v):
     return [v.x, v.z, -v.y]
 
 
+def _blackbody_rgb(kelvin):
+    """A blackbody temperature as a linear-RGB tint, normalised to a unit peak.
+
+    The lamps here are driven by a Blackbody node rather than a white colour, so
+    exporting L.color -- which stays (1,1,1) when the graph sets the colour --
+    loses the warmth and the whole interior reads cooler than the reference.
+    This is the Tanner Helland fit to the Planckian locus, converted sRGB to
+    linear and scaled so the strongest channel is 1, so it tints the light
+    without disturbing the exported intensity.
+    """
+    t = max(1000.0, min(40000.0, kelvin)) / 100.0
+    if t <= 66.0:
+        r = 255.0
+        g = 99.4708025861 * math.log(t) - 161.1195681661
+    else:
+        r = 329.698727446 * ((t - 60.0) ** -0.1332047592)
+        g = 288.1221695283 * ((t - 60.0) ** -0.0755148492)
+    if t >= 66.0:
+        b = 255.0
+    elif t <= 19.0:
+        b = 0.0
+    else:
+        b = 138.5177312231 * math.log(t - 10.0) - 305.0447927307
+    srgb = [max(0.0, min(255.0, c)) / 255.0 for c in (r, g, b)]
+    lin = [(c / 12.92) if c <= 0.04045 else (((c + 0.055) / 1.055) ** 2.4) for c in srgb]
+    peak = max(lin) or 1.0
+    return [c / peak for c in lin]
+
+
+def _find_emission_node(node, depth=0):
+    """The Emission node under a lamp's Mix/Add shader tree, if any."""
+    if node is None or depth > 6:
+        return None
+    if node.type == "EMISSION":
+        return node
+    if node.type in {"MIX_SHADER", "ADD_SHADER"}:
+        for i in node.inputs:
+            if i.type == "SHADER" and i.links:
+                found = _find_emission_node(i.links[0].from_node, depth + 1)
+                if found is not None:
+                    return found
+    return None
+
+
+def _lamp_color(L):
+    """The lamp's emission colour, following a Blackbody or Emission node when the
+    lamp is node-driven, otherwise its plain colour."""
+    base = [float(L.color[0]), float(L.color[1]), float(L.color[2])]
+    if not L.use_nodes or L.node_tree is None:
+        return base
+    out = next((n for n in L.node_tree.nodes if n.type == "OUTPUT_LIGHT"), None)
+    node = out.inputs["Surface"].links[0].from_node if (out and out.inputs["Surface"].links) else None
+    emission = _find_emission_node(node)
+    if emission is None:
+        return base
+    colour_socket = emission.inputs["Color"]
+    if colour_socket.links:
+        src = colour_socket.links[0].from_node
+        if src.type == "BLACKBODY":
+            tint = _blackbody_rgb(float(src.inputs["Temperature"].default_value))
+            return [base[c] * tint[c] for c in range(3)]
+    value = getattr(colour_socket, "default_value", None)
+    if value is not None and hasattr(value, "__len__"):
+        return [base[c] * float(value[c]) for c in range(3)]
+    return base
+
+
+def _controlled_falloff_distance(L):
+    """Blender's node-based "controlled falloff": a Light Path "Ray Length"
+    divided by a cutoff distance, run through a smootherstep Map Range, then
+    faded out with a Mix Shader. Returns the distance at which the emission
+    reaches zero -- what the sidecar carries as the light's range -- or None
+    when the lamp has no such network."""
+    if not L.use_nodes or L.node_tree is None:
+        return None
+    div = None
+    for n in L.node_tree.nodes:
+        if n.type == "MATH" and n.operation == "DIVIDE" and n.inputs[0].links:
+            link = n.inputs[0].links[0]
+            if link.from_node.type == "LIGHT_PATH" and link.from_socket.name == "Ray Length":
+                div = float(n.inputs[1].default_value)
+                break
+    if div is None or div <= 0.0:
+        return None
+    # smootherstep reaches 1 (emission fully faded) at the Map Range's From Max,
+    # so the cutoff distance is that fraction of the divisor.
+    mr = next((n for n in L.node_tree.nodes if n.type == "MAP_RANGE"), None)
+    from_max = float(mr.inputs["From Max"].default_value) if mr is not None else 1.0
+    return div * from_max
+
+
+def _lamp_emission_strength(L):
+    """The Emission node's Strength on a lamp's own shader, which multiplies the
+    power its Watts already state.
+
+    Every lamp in the monster scene carries the same 7.854 W and differs only
+    here -- 12, 10, 10, 10, 8, 2, 1.25, 1.25 -- so reading the Watts alone gives
+    eight lamps of identical brightness and a lighting rig that is not the
+    artist's. Cycles applies it linearly, which is measurable rather than
+    assumed: flattening every Strength to 1 in the .blend drops what the lamps
+    contribute by 6.6x.
+
+    A linked Strength is driven by something spatial and has no one value; the
+    caller is told 1.0 rather than a number invented from the socket's stale
+    default."""
+    if not L.use_nodes or L.node_tree is None:
+        return 1.0
+    em = next((n for n in L.node_tree.nodes if n.type == "EMISSION"), None)
+    if em is None or "Strength" not in em.inputs:
+        return 1.0
+    sock = em.inputs["Strength"]
+    if sock.links:
+        return 1.0
+    return float(sock.default_value)
+
+
 def collect_lights(depsgraph):
     """Every light in the evaluated scene, in the sidecar's schema.
 
     Intensities are radiometric here, which is what the sidecar means by
     default: area lights convert watts to radiance as P/(A*pi), and point and
     spot convert to W/sr as P/(4*pi) -- the same conversion the glTF path does
-    after dividing out 683 lm/W.
+    after dividing out 683 lm/W. A lamp whose shader sets an Emission Strength
+    scales all of that, so it is folded in once here.
     """
     out = []
     for ob in depsgraph.objects:
@@ -63,29 +182,45 @@ def collect_lights(depsgraph):
         # same Z-up to Y-up change of basis the positions are.
         yup = Matrix.Rotation(math.radians(-90.0), 4, "X")
         eul = (yup @ m).to_euler("XYZ")
+        # Whether a camera ray may hit the light's proxy quad. Strelka draws area
+        # lights as real geometry, so a lamp facing the lens shows as a bright
+        # card and one facing away as a black one that still occludes -- either
+        # way it is in the frame. Blender's lamps carry a camera ray-visibility
+        # toggle for exactly this, off on every light here, and the sidecar has a
+        # visibleToCamera that maps onto it one to one. Without carrying it the
+        # loader defaults to visible and the interior fills with light quads.
         entry = {
             "name": ob.name,
             "position": pos,
-            "color": list(L.color),
+            "color": _lamp_color(L),
             "orientation": [math.degrees(eul.x), math.degrees(eul.y), math.degrees(eul.z)],
+            "visibleToCamera": bool(getattr(ob, "visible_camera", True)),
         }
+        # Watts for area, point and spot; W/m^2 for a sun. The Emission Strength
+        # scales whichever it is.
+        power = L.energy * _lamp_emission_strength(L)
         if L.type == "AREA":
             if L.shape in {"SQUARE", "RECTANGLE"}:
                 w = L.size
                 h = L.size_y if L.shape == "RECTANGLE" else L.size
                 entry.update(type="rect", width=w, height=h,
-                             intensity=L.energy / (max(w * h, 1e-9) * math.pi))
+                             intensity=power / (max(w * h, 1e-9) * math.pi))
             else:  # DISK / ELLIPSE
                 r = L.size * 0.5
                 area = math.pi * r * r
                 entry.update(type="disc", radius=r,
-                             intensity=L.energy / (max(area, 1e-9) * math.pi))
+                             intensity=power / (max(area, 1e-9) * math.pi))
+            # Blender's controlled falloff, carried as the light's range so the
+            # renderer fades the emission out with the same smootherstep cutoff.
+            falloff = _controlled_falloff_distance(L)
+            if falloff is not None:
+                entry["range"] = falloff
         elif L.type == "POINT":
             entry.update(type="point", radius=L.shadow_soft_size,
-                         intensity=L.energy / (4.0 * math.pi))
+                         intensity=power / (4.0 * math.pi))
         elif L.type == "SPOT":
             entry.update(type="spot", radius=L.shadow_soft_size,
-                         intensity=L.energy / (4.0 * math.pi),
+                         intensity=power / (4.0 * math.pi),
                          outerConeAngle=L.spot_size * 0.5,
                          innerConeAngle=L.spot_size * 0.5 * (1.0 - L.spot_blend))
         elif L.type == "SUN":
@@ -103,7 +238,7 @@ def collect_lights(depsgraph):
             # the radiance the host baked, and the sun came out 73 times too
             # bright -- which looked like a blown-out riverbed, not like a unit
             # mistake.
-            entry.update(type="distant", halfAngle=math.degrees(L.angle), intensity=L.energy,
+            entry.update(type="distant", halfAngle=math.degrees(L.angle), intensity=power,
                          unit="irradiance")
         else:
             continue
@@ -139,6 +274,50 @@ def merge_scenes():
         print("merged %d other scene(s): +%d collections, +%d objects"
               % (len(bpy.data.scenes) - 1, linked_collections, linked_objects))
     return linked_objects + linked_collections
+
+
+def promote_render_uv():
+    """Make each mesh's render-active UV map its first one.
+
+    glTF numbers a texture's texCoord by the layer's position, and Strelka's
+    loader reads TEXCOORD_0 alone -- one packed uv per vertex, see gltfloader.cpp
+    where it fills vertex.uv. This scene's floor, hair and bed sheet carry two
+    layers with the second, 'automap', active for render, which is what a
+    TEX_COORD node's UV output means; they exported as texCoord 1 and were then
+    shaded with the *other* unwrap. The floor came out 2.5x darker than the
+    reference because its laminate was being read from the wrong place.
+
+    Swapping the data and the names, rather than only the data, keeps every
+    material's reference by name valid while moving the layer the exporter will
+    number 0.
+    """
+    moved = []
+    for me in bpy.data.meshes:
+        layers = me.uv_layers
+        if len(layers) < 2:
+            continue
+        idx = next((i for i, l in enumerate(layers) if l.active_render), 0)
+        if idx == 0:
+            continue
+        first, chosen = layers[0], layers[idx]
+        n = len(me.loops) * 2
+        a = array.array("f", [0.0]) * n
+        b = array.array("f", [0.0]) * n
+        first.data.foreach_get("uv", a)
+        chosen.data.foreach_get("uv", b)
+        first.data.foreach_set("uv", b)
+        chosen.data.foreach_set("uv", a)
+        # Through a placeholder, because assigning a name a sibling still holds
+        # makes Blender disambiguate it to "automap.001" and every material that
+        # referred to the layer by name would follow the wrong one.
+        held = first.name
+        first.name = "__uv_swap__"
+        first.name, chosen.name = chosen.name, held
+        layers[0].active_render = True
+        moved.append("%s: %s" % (me.name, layers[0].name))
+    if moved:
+        print("  uv promoted to TEXCOORD_0 -> %s" % ", ".join(moved))
+    return moved
 
 
 def export_gltf(path):
@@ -630,7 +809,7 @@ def _report_missing(missing):
         print("        %-40s x%d" % (name, count))
 
 
-def write_material_extensions(gltf_path, translucency, volumes):
+def write_material_extensions(gltf_path, translucency, volumes, hair, subsurface, tints):
     """Add the KHR material extensions the exporter has no mapping for.
 
     KHR_materials_diffuse_transmission from a Translucent BSDF: without it the
@@ -640,13 +819,41 @@ def write_material_extensions(gltf_path, translucency, volumes):
     KHR_materials_volume from a Volume Absorption wired to the output: the river
     is a transmissive surface over an absorbing medium, and without the medium it
     is clear glass over sand.
+
+    STRELKA_materials_subsurface from a Principled BSDF's subsurface inputs: glTF
+    has no word for a random walk, and without it skin and wax read as flat
+    diffuse -- the whole point of the monster's translucent hide is lost. The
+    loader enters the medium through the diffuse transmission lobe, so this is
+    the sidecar that turns a subsurface weight into scattering.
     """
     with open(gltf_path) as f:
         doc = json.load(f)
 
     used = set(doc.get("extensionsUsed", []))
-    counts = {"diffuse_transmission": 0, "volume": 0}
-    for mat in doc.get("materials", []):
+    counts = {"diffuse_transmission": 0, "volume": 0, "hair": 0, "subsurface": 0, "tint": 0}
+    materials = doc.setdefault("materials", [])
+    by_name = {mat.get("name"): mat for mat in materials}
+    for name, entry in hair.items():
+        mat = by_name.get(name)
+        if mat is None:
+            mat = {"name": name, "doubleSided": True}
+            materials.append(mat)
+            by_name[name] = mat
+        mat["pbrMetallicRoughness"] = {
+            "baseColorFactor": entry["color"] + [1.0],
+            "metallicFactor": 0.0,
+            "roughnessFactor": entry["roughness"],
+        }
+        extensions = mat.setdefault("extensions", {})
+        extensions["KHR_materials_ior"] = {"ior": entry["ior"]}
+        extensions["STRELKA_materials_hair"] = {
+            "radialRoughness": entry["radial_roughness"],
+            "coat": entry["coat"],
+        }
+        used.update(("KHR_materials_ior", "STRELKA_materials_hair"))
+        counts["hair"] += 1
+
+    for mat in materials:
         name = mat.get("name")
         entry = translucency.get(name)
         if entry is not None:
@@ -669,26 +876,104 @@ def write_material_extensions(gltf_path, translucency, volumes):
             used.add("KHR_materials_volume")
             counts["volume"] += 1
 
+        sss = subsurface.get(name)
+        if sss is not None:
+            mat.setdefault("extensions", {})["STRELKA_materials_subsurface"] = {
+                "subsurfaceFactor": sss["weight"],
+                "scatterColor": sss["scatter"],
+                "scatterRadius": sss["radius"],
+                "anisotropy": sss["anisotropy"],
+                "scatterReference": sss["reference"],
+            }
+            used.add("STRELKA_materials_subsurface")
+            counts["subsurface"] += 1
+
+        # A colour grade the exporter dropped, folded onto the base texture as
+        # the factor glTF multiplies by. The alpha channel is left as it was.
+        tint = tints.get(name)
+        if tint is not None:
+            pbr = mat.setdefault("pbrMetallicRoughness", {})
+            alpha = pbr.get("baseColorFactor", [1.0, 1.0, 1.0, 1.0])[3]
+            pbr["baseColorFactor"] = [tint[0], tint[1], tint[2], alpha]
+            counts["tint"] += 1
+
     doc["extensionsUsed"] = sorted(used)
     with open(gltf_path, "w") as f:
         json.dump(doc, f)
-    print("material extensions -> diffuse transmission %d, volume %d"
-          % (counts["diffuse_transmission"], counts["volume"]))
+    print("material extensions -> diffuse transmission %d, volume %d, hair %d, subsurface %d, tint %d"
+          % (counts["diffuse_transmission"], counts["volume"], counts["hair"], counts["subsurface"], counts["tint"]))
     return counts
 
 
-def curve_objects(depsgraph):
-    """Curve and hair-curves objects, which glTF has no representation for.
+def _hair_parameters(mat, flatten_materials):
+    """Strelka hair parameters from a directly connected Principled Hair node."""
+    default = {
+        "color": [0.18, 0.07, 0.03],
+        "roughness": 0.35,
+        "radial_roughness": 0.35,
+        "ior": 1.55,
+        "coat": 0.0,
+    }
+    if mat is None or mat.node_tree is None:
+        return default
+    out = next((node for node in mat.node_tree.nodes
+                if node.type == "OUTPUT_MATERIAL" and node.is_active_output), None)
+    if out is None or not out.inputs["Surface"].links:
+        return default
+    hair = out.inputs["Surface"].links[0].from_node
+    if hair.type != "BSDF_HAIR_PRINCIPLED":
+        return default
+    color = flatten_materials._mean_colour(hair.inputs["Color"])
+    if color is not None:
+        default["color"] = [max(0.0, min(1.0, float(value))) for value in color]
+    default["roughness"] = float(hair.inputs["Roughness"].default_value)
+    default["radial_roughness"] = float(hair.inputs["Radial Roughness"].default_value)
+    default["ior"] = float(hair.inputs["IOR"].default_value)
+    default["coat"] = float(hair.inputs["Coat"].default_value)
+    return default
 
-    Reported rather than written: Metal does support curve primitives
-    (AccelerationStructureCurveGeometryDescriptor, with linear/B-spline/
-    Catmull-Rom/Bezier bases and a motion variant), and oka::Curve already
-    exists, so these want their own binary sidecar once that path is built.
+
+def collect_curve_sets(depsgraph, flatten_materials):
+    """Convert visible Blender Curves objects to Strelka curve-sidecar sets.
+
+    Points stay in object space and the instance transform carries the same
+    Blender Z-up to glTF Y-up conversion used by the mesh exporter.
     """
-    # Only hair curves. A legacy Curve object is converted to a mesh on export
-    # and comes through fine -- reporting those as missing sent the search after
-    # trees that were in the file all along.
-    return [ob.name for ob in depsgraph.objects if ob.type == "CURVES"]
+    curve_sidecar = importlib.import_module("curve_sidecar")
+
+    axis_conv = Matrix.Rotation(math.radians(-90.0), 4, "X")
+    sets = []
+    hair = {}
+    for ob in depsgraph.objects:
+        if ob.type != "CURVES":
+            continue
+        data = ob.data
+        slots = [mat for mat in data.materials]
+        material_attr = data.attributes.get("material_index")
+        by_material = {}
+        for curve in data.curves:
+            material_index = 0
+            if material_attr is not None:
+                material_index = int(material_attr.data[curve.index].value)
+            mat = slots[material_index] if 0 <= material_index < len(slots) else None
+            material = mat.name if mat is not None else ""
+            points = [(float(point.position.x), float(point.position.y),
+                       float(point.position.z), float(point.radius))
+                      for point in curve.points]
+            if len(points) < 2 or points[0][:3] == points[-1][:3]:
+                continue
+            by_material.setdefault(material, []).append(points)
+            if material not in hair:
+                hair[material] = _hair_parameters(mat, flatten_materials)
+        transform_matrix = axis_conv @ ob.matrix_world
+        transform = [float(transform_matrix[row][column])
+                     for column in range(4) for row in range(4)]
+        for material, strands in by_material.items():
+            sets.append(curve_sidecar.CurveSet(
+                material, strands, curve_sidecar.BASIS_LINEAR, transform))
+            print("curves <- %s: %d strands, material '%s'"
+                  % (ob.name, len(strands), material or "(default)"))
+    return sets, hair
 
 
 def main():
@@ -741,18 +1026,10 @@ def main():
     print("instances: %d placements over %d sources, from the render depsgraph"
           % (placements, len(instances)))
 
-    curves = curve_objects(depsgraph)
-    if curves:
-        print("[gap] %d curve objects have no glTF representation and are NOT exported:"
-              % len(curves))
-        for c in curves[:10]:
-            print("        %s" % c)
-        if len(curves) > 10:
-            print("        ... and %d more" % (len(curves) - 10))
-
     # Before the export, because it rewrites the graphs the exporter reads.
     import flatten_materials
-    flat, translucency, volumes = flatten_materials.flatten(out)
+    curve_sets, hair = collect_curve_sets(depsgraph, flatten_materials)
+    flat, translucency, volumes, subsurface, tints = flatten_materials.flatten(out)
     if flat:
         print("materials rewritten for export: %d" % len(flat))
         for mat_name, note in flat:
@@ -772,6 +1049,7 @@ def main():
             write_instances(gltf, instances)
         return
 
+    promote_render_uv()
     print("exporting %s ..." % gltf)
     export_gltf(gltf)
 
@@ -793,10 +1071,16 @@ def main():
 
     # After the summary, because these rewrite the file the summary was read from.
     strip_unrendered_nodes(gltf, rendered_object_names())
-    if translucency or volumes:
-        write_material_extensions(gltf, translucency, volumes)
+    if translucency or volumes or hair or subsurface or tints:
+        write_material_extensions(gltf, translucency, volumes, hair, subsurface, tints)
     if instances:
         write_instances(gltf, instances)
+    if curve_sets:
+        curve_sidecar = importlib.import_module("curve_sidecar")
+        curves_path = os.path.join(out, name + "_curves.bin")
+        n_strands, n_points = curve_sidecar.write_curve_sidecar(curves_path, curve_sets)
+        print("curves -> %s: %d strands, %d control points"
+              % (curves_path, n_strands, n_points))
 
 
 # Guarded, because these are imported as a module by env_check.py -- without it

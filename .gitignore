@@ -30,6 +30,11 @@ scenes/iso_bathroom/
 # produces -- ~65 MB of buffer alone, plus baked textures and the hair sidecar.
 scenes/kids_room/
 
+# Monster Under the Bed, converted from the artist's .blend by
+# tools/feature_tests/export_scene.py: ~123 MB of glTF, buffer, the author's
+# textures and the normal maps the exporter bakes for it.
+scenes/monster_under_the_bed/
+
 # Scene exports written in the repository root are local test artifacts.
 /*.gltf
 /*.glb
