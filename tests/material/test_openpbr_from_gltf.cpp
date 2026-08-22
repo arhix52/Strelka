@@ -106,6 +106,37 @@ TEST_CASE("emission survives the change of parameterisation as a product")
     }
 }
 
+TEST_CASE("subsurface colour is the authored albedo, not the inverted one")
+{
+    // OpenPBR's interior volume runs its own van de Hulst inversion on this
+    // input, so it has to receive the colour the DCC authored. Strelka's own
+    // walk wants the single-scattering albedo instead and keeps it on
+    // diffuse_transmission_color, which makes the two fields easy to confuse --
+    // and confusing them inverts twice, which whitens a saturated medium
+    // rather than shifting it slightly.
+    MaterialParams p = plainGltfMaterial();
+    p.subsurface = 1.0f;
+    p.subsurface_radius = make_float3(6.75f, 1.66f, 0.33f);
+    p.diffuse_transmission_color = make_float3(0.811f, 0.679f, 0.991f); // already inverted
+    p.subsurface_reference = make_float3(0.352f, 0.240f, 0.800f);       // what the author picked
+
+    const OpenPBRParams o = openpbr_from_material_params(p);
+    CHECK(o.subsurface_color.r == doctest::Approx(0.352f));
+    CHECK(o.subsurface_color.g == doctest::Approx(0.240f));
+    CHECK(o.subsurface_color.b == doctest::Approx(0.800f));
+
+    SUBCASE("a diffuse-transmission material has no reference and keeps its colour")
+    {
+        // KHR_materials_diffuse_transmission states an authored colour directly,
+        // so nothing inverted it and there is nothing to undo.
+        p.subsurface_reference = make_float3(0.0f, 0.0f, 0.0f);
+        const OpenPBRParams d = openpbr_from_material_params(p);
+        CHECK(d.subsurface_color.r == doctest::Approx(0.811f));
+        CHECK(d.subsurface_color.g == doctest::Approx(0.679f));
+        CHECK(d.subsurface_color.b == doctest::Approx(0.991f));
+    }
+}
+
 TEST_CASE("subsurface radius splits into a length and a normalised scale")
 {
     MaterialParams p = plainGltfMaterial();

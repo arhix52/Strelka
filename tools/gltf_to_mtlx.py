@@ -33,6 +33,7 @@ import json
 import math
 import os
 import sys
+import urllib.parse
 
 
 def ext(mat, name, key, fallback):
@@ -47,8 +48,11 @@ def tex_index(d):
     return d.get("index") if isinstance(d, dict) else None
 
 
-def convert(mat, images, textures):
-    """One glTF material -> (inputs, texture slots). See openpbr_from_gltf.h."""
+def convert(mat, images, textures, notes):
+    """One glTF material -> (inputs, texture slots). See openpbr_from_gltf.h.
+
+    Appends to `notes` whatever the mapping could not carry, so a scene that
+    comes out looking wrong says why on the way through."""
     pbr = mat.get("pbrMetallicRoughness", {})
     base = pbr.get("baseColorFactor", [1, 1, 1, 1])
     inputs = {}
@@ -132,7 +136,14 @@ def convert(mat, images, textures):
             if m > 0.0:
                 inputs["subsurface_radius"] = ("float", m)
                 inputs["subsurface_radius_scale"] = ("color3", [c / m for c in sr])
-        scol = ext(mat, "STRELKA_materials_subsurface", "scatterColor", None)
+        # scatterReference, not scatterColor: the extension states scatterColor as
+        # a single-scattering albedo, while OpenPBR's subsurface_color is the
+        # authored albedo it derives one from. Writing the former inverts twice --
+        # [0.352 0.240 0.800] authored comes back [0.992 0.972 1.000] -- so the
+        # reference the inversion started from is what belongs here. Materials
+        # written before scatterReference existed fall back to scatterColor.
+        scol = ext(mat, "STRELKA_materials_subsurface", "scatterReference", None) or ext(
+            mat, "STRELKA_materials_subsurface", "scatterColor", None)
         if scol:
             inputs["subsurface_color"] = ("color3", scol)
         g = ext(mat, "STRELKA_materials_subsurface", "anisotropy", 0.0)
@@ -156,13 +167,31 @@ def convert(mat, images, textures):
     if an:
         inputs["specular_roughness_anisotropy"] = ("float", abs(an))
 
-    # Maps. glTF packs roughness and metalness into one image; OpenPBR names each
-    # input separately, so one file lands in two slots and each shader reads the
-    # channel it wants. Recorded here as-is rather than split, which would mean
-    # writing new images.
+    # Maps. glTF's metallicRoughness image is a packed one: roughness in green,
+    # metalness in blue, red an unused filler that these exporters leave at 255.
+    # OpenPBR names the two inputs separately, and this loader gives a slot one
+    # texture handle whose red channel the shader samples -- there is nowhere to
+    # say "the green one". Sending the file anyway does not lose the detail, it
+    # substitutes the filler for both values: every material carrying such a map
+    # rendered fully metallic and fully rough, which is what made the bed's wood
+    # white and the floor flat. The factors below are what the file was going to
+    # be multiplied by, and glTF gives 0 metalness to ten of the twelve here, so
+    # dropping the map is exact for them rather than merely safer. Carrying it
+    # properly needs a per-slot channel in OpenPBRParams; noted, not done here.
+    packed = tex_index(pbr.get("metallicRoughnessTexture"))
+    if packed is not None:
+        notes.append(
+            f"{mat.get('name', '?')}: metallicRoughness map dropped, no channel selector; "
+            f"metalness {pbr.get('metallicFactor', 1.0):g}, roughness {pbr.get('roughnessFactor', 1.0):g}")
+
+    # A glTF factor multiplies its texture. A MaterialX input reads the image
+    # instead of scaling by it, so a factor that is not white is lost the moment
+    # a map arrives -- and the loader has no multiply it can fold over an image.
+    if tex_index(pbr.get("baseColorTexture")) is not None and any(abs(c - 1.0) > 1e-3 for c in base[:3]):
+        notes.append(f"{mat.get('name', '?')}: baseColorFactor "
+                     f"[{base[0]:.3g} {base[1]:.3g} {base[2]:.3g}] lost under its base_color map")
+
     for slot, src in (("base_color", tex_index(pbr.get("baseColorTexture"))),
-                      ("specular_roughness", tex_index(pbr.get("metallicRoughnessTexture"))),
-                      ("base_metalness", tex_index(pbr.get("metallicRoughnessTexture"))),
                       ("geometry_normal", tex_index(mat.get("normalTexture"))),
                       ("emission_color", tex_index(mat.get("emissiveTexture")))):
         if src is None:
@@ -172,7 +201,13 @@ def convert(mat, images, textures):
             continue
         uri = images[img].get("uri")
         if uri:
-            maps[slot] = uri
+            # A glTF uri is percent-encoded, a MaterialX filename is a path. An
+            # exporter that wrote "Old white plastic_Normal.jpg" stores it with
+            # %20, and copying that through asks the texture loader for a file
+            # whose name really does contain a percent sign. Every map on this
+            # scene's floor, pyjamas and fur is spelt with a space, so the whole
+            # set went missing and the surfaces rendered at their flat factors.
+            maps[slot] = urllib.parse.unquote(uri)
     return inputs, maps
 
 
@@ -201,11 +236,12 @@ def main():
            f'       mapping is exact about and what it approximates. -->']
 
     textured = 0
+    notes = []
     for m in mats:
         name = m.get("name")
         if not name:
             continue
-        inputs, maps = convert(m, images, textures)
+        inputs, maps = convert(m, images, textures, notes)
         if maps:
             textured += 1
         # Only the *internal* node names are sanitised. The surfacematerial keeps
@@ -251,6 +287,8 @@ def main():
     dst = os.path.splitext(src)[0] + ".mtlx"
     open(dst, "w").write("\n".join(out) + "\n")
     print(f"{len(mats)} material(s), {textured} with maps -> {dst}")
+    for n in notes:
+        print(f"  not carried: {n}")
     return 0
 
 

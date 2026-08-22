@@ -135,8 +135,23 @@ inline OpenPBRParams openpbr_from_material_params(const MaterialParams& p)
     // path with a per-channel scale. The radius is split into a scalar and a
     // normalised scale so that the largest channel keeps its world-space length.
     o.subsurface_weight = std::clamp(p.subsurface, 0.0f, 1.0f);
-    o.subsurface_color =
-        OpenPBRColor{ p.diffuse_transmission_color.x, p.diffuse_transmission_color.y, p.diffuse_transmission_color.z };
+    // The colour is the one input here that is not a change of spelling. A
+    // STRELKA_materials_subsurface material arrives with the *single-scattering*
+    // albedo on diffuse_transmission_color -- gltfloader.cpp says so where it
+    // fills it -- while OpenPBR defines subsurface_color as the authored albedo
+    // and has openpbr_interior_volume() apply its own van de Hulst mapping to
+    // reach a single-scattering one. Handing it the inverted value inverts
+    // twice, and the second inversion is not a small error: the monster's
+    // authored [0.352 0.240 0.800] comes back [0.992 0.972 1.000], saturation
+    // 0.70 down to 0.03, which is white. subsurface_reference is exactly the
+    // albedo the inversion started from, so it is what this input is defined in
+    // terms of. A genuine KHR_materials_diffuse_transmission material has no
+    // reference -- the loader leaves it at zero -- and keeps the old source,
+    // which for it was never inverted in the first place.
+    const bool hasReference = p.subsurface_reference.x > 0.0f || p.subsurface_reference.y > 0.0f ||
+                              p.subsurface_reference.z > 0.0f;
+    const float3 subsurfaceColor = hasReference ? p.subsurface_reference : p.diffuse_transmission_color;
+    o.subsurface_color = OpenPBRColor{ subsurfaceColor.x, subsurfaceColor.y, subsurfaceColor.z };
     const float radiusMax = std::max({ p.subsurface_radius.x, p.subsurface_radius.y, p.subsurface_radius.z });
     if (radiusMax > 0.0f)
     {
