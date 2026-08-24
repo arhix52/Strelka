@@ -283,7 +283,11 @@ DEVICE_FUNC float3 subsurface_entry_direction(float3 wo, float3 n, float roughne
     const float3 woLocal = world_to_local(wo, T, B, n);
     if (woLocal.z <= 0.0f)
     {
-        return -n;
+        // Cycles returns false here and the caller gives up on the bounce. The
+        // zero vector is how that is spelled across a function that has to
+        // return a direction; the two call sites reject it with the same test
+        // they use on the geometric normal.
+        return make_float3(0.0f);
     }
 
     const float alpha = fmaxf(alpha_from_roughness(roughness), 1e-4f);

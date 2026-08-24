@@ -3113,6 +3113,20 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                        random<SampleDimension::eSssChannel>(rng, uniforms.samplerType),
                                        random<SampleDimension::eSssDistance>(rng, uniforms.samplerType)) :
             normalize(sampleResult.wi);
+
+    // A refracted entry that came back out on the viewer's side of the geometric
+    // normal never entered anything, and the walk it would start is a walk
+    // through the outside of the object. Cycles gives up on the bounce for the
+    // same test -- `dot(sd->Ng, wo) >= 0.0f` in subsurface_bounce() -- and the
+    // draws this rejects are the grazing ones, which is where the microfacet
+    // normal can tilt far enough to refract along the surface rather than into
+    // it. Keeping them lit a rim on every sphere that no reference has.
+    if (sssRefractedEntry && dot(faceNg, nextDir) >= 0.0f)
+    {
+        radianceOut[tid] += float4(radiance, 0.0f);
+        return;
+    }
+
     if (isFibre)
     {
         // Both branches above assume a surface with an inside and an outside. A

@@ -2238,6 +2238,18 @@ extern "C" __global__ void __closesthit__radiance()
                                               random<SampleDimension::eSssChannel>(prd->sampler),
                                               random<SampleDimension::eSssDistance>(prd->sampler)) :
                    sample_data.wi;
+
+    // The same rejection Cycles makes in subsurface_bounce(): a refracted entry
+    // on the viewer's side of the geometric normal never entered anything. See
+    // the note at the matching site in wavefront.metal.
+    if (sssRefractedEntry && dot(faceNg, prd->dir) >= 0.0f)
+    {
+        // Stopped the way an absorbed sample is: whatever next-event estimation
+        // delivered at this vertex stays, and nothing is carried onward.
+        prd->throughput = make_float3(0.0f);
+        return;
+    }
+
     if (isFibre)
     {
         // Both branches above assume a surface with an inside and an outside. A

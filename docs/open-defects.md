@@ -832,14 +832,33 @@ other, where before the fix this walk read 7.03 to 5.85.
 
 No non-subsurface row moves.
 
-### What is left
+### What is left, and what the rim is not
 
-A rim. Per region, the lit halves sit at 0.987 on all three rows and the shadowed
-halves at 0.996, 1.032 and 1.156, and the 8x difference on `31` is noise plus a
-bright arc along the top edge of each sphere -- the grazing entry, where a
-microfacet refraction and Cycles' differ most. That residual is a few percent of a
-row that was 3.3x wrong at the shadowed half, and it is what a further pass should
-be graded on.
+Both of Cycles' entry rejections are ported: a draw whose refraction leaves on the
+viewer's side of the *geometric* normal, and one whose view direction is already
+below the shading normal. They are correct and they are almost never taken -- the
+four rows move by 0.0001 in `rel`, which is the honest way to record a guard that
+matters for a case the ladder does not contain.
+
+So the rim is not that. Measured with a sign rather than through the 8x
+difference, which shows a magnitude:
+
+| row | spheres | lit half | shadowed half | top rim |
+|---|---|---|---|---|
+| `31_subsurface_absorbing` | 1.032 | 0.987 | 1.156 | **0.883** |
+| `30_subsurface_translucent` | 1.002 | 0.986 | 1.031 | 0.969 |
+| `25_subsurface` | 0.989 | 0.986 | 0.995 | 0.982 |
+
+We are *dark* at the grazing rim and bright on the shadowed side: light that
+Cycles returns near the entry, this walk carries around the body. The rim is 12%
+on the row built to be hardest and 2% on the one that looks like skin.
+
+The lead worth taking next is the entry *weight*, not the direction.
+`subsurface_bounce()` applies `surface_shader_bssrdf_sample_weight(sd, sc)`, whose
+comment says "optionally including Fresnel from entry point", and this walk
+applies one -- the diffuse-transmission lobe's, which carries no angular term.
+An interface with an index reflects at grazing, and grazing is exactly where the
+two disagree. That function has not been read.
 
 
 ### The diffuse lobe was summed with the specular one instead of layered under it
