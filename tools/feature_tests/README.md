@@ -74,20 +74,20 @@ fixing, but it is not a shading bug.
 
 | Scene | Tests | Expected today |
 |---|---|---|
-| `00_calibration` | light units + exposure | 0.021 / 1.010 |
-| `01_srgb_texture` | sRGB decode of base colour | 0.026 / 1.004 |
-| `02_basecolor` | untextured albedo | 0.022 / 1.003 |
-| `03_roughness` | dielectric roughness ramp | 0.024 / 1.015 |
-| `04_metal` | conductor roughness ramp | 0.055 / 0.986 |
-| `05_anisotropy` | `KHR_materials_anisotropy` | 0.061 / 1.007 |
-| `06_normalmap` | normal map + tangents | 0.071 / 1.061 |
-| `07_alpha_clip` | `alphaMode: MASK` | 0.025 / 1.018 |
-| `08_alpha_blend` | `alphaMode: BLEND` | 0.024 / 1.016 |
-| `09_glass_ior` | `KHR_materials_ior` / `_transmission` | 0.059 / 1.012 |
-| `10_glass_absorption` | `KHR_materials_volume` | 0.038 / 1.012 |
-| `11_emission` | `KHR_materials_emissive_strength` | 0.017 / 1.004 |
-| `12_lights_punctual` | point / spot / sun via KHR | 0.031 / 1.002 |
-| `13_uv2_vcol` | `TEXCOORD_1`, `COLOR_0` | 0.024 / 1.010 |
+| `00_calibration` | light units + exposure | 0.012 / 1.008 |
+| `01_srgb_texture` | sRGB decode of base colour | 0.021 / 1.014 |
+| `02_basecolor` | untextured albedo | 0.014 / 1.006 |
+| `03_roughness` | dielectric roughness ramp | 0.017 / 1.008 |
+| `04_metal` | conductor roughness ramp | 0.037 / 1.007 |
+| `05_anisotropy` | `KHR_materials_anisotropy` | 0.059 / 1.004 |
+| `06_normalmap` | normal map + tangents | 0.065 / 1.053 |
+| `07_alpha_clip` | `alphaMode: MASK` | 0.019 / 1.002 |
+| `08_alpha_blend` | `alphaMode: BLEND` | 0.017 / 1.000 |
+| `09_glass_ior` | `KHR_materials_ior` / `_transmission` | 0.055 / 1.006 |
+| `10_glass_absorption` | `KHR_materials_volume` | 0.033 / 1.007 |
+| `11_emission` | `KHR_materials_emissive_strength` | 0.015 / 1.001 |
+| `12_lights_punctual` | point / spot / sun via KHR | 0.025 / 0.996 |
+| `13_uv2_vcol` | `TEXCOORD_1`, `COLOR_0` | 0.018 / 1.009 |
 | `14_sheen` | `KHR_materials_sheen` roughness ramp | 0.053 / 1.016 |
 | `15_clearcoat` | `KHR_materials_clearcoat` + IOR ramp | 0.037 / 1.002 |
 | `16_iridescence` | `KHR_materials_iridescence` thickness ramp | 0.023 / 1.010 |
@@ -99,10 +99,37 @@ fixing, but it is not a shading bug.
 | `22_thin_walled` | Thin Wall roughness ramp (+ solid) | 0.094 / 0.966 |
 | `23_diffuse_transmission` | `KHR_materials_diffuse_transmission` weight ramp | 0.012 / 1.000 |
 | `24_orthographic` | ortho twin of `00_calibration` | 0.024 / 1.009 |
-| `25_subsurface` | `STRELKA_materials_subsurface` (Van de Hulst recipe) | 0.056 / 1.009 |
+| `25_subsurface` | `STRELKA_materials_subsurface` (Van de Hulst recipe) | 0.048 / 0.997 |
 | `26_dof` | thin-lens depth of field (`_camera.json`) | 0.024 / 1.015 |
 | `27_ies` | IES point light via light sidecar | 0.047 / 1.032 |
 | `28_hair` | close-up round linear Chiang groom (`STRELKA_materials_hair`) | 0.033 / 1.012 |
+| `29_subsurface_skin` | `25_subsurface` at Blender's skin preset (opt-in) | 0.050 / 0.996 |
+| `30_subsurface_translucent` | `25_subsurface` at body-scale mean free path (opt-in) | 0.097 / 1.027 |
+| `31_subsurface_absorbing` | near-zero albedo at the same mean free path (opt-in) | 0.229 / 1.112 FAIL |
+
+Rows `00`-`13`, `25`, `29` and `30` were re-measured on 2026-08-24, after two
+fixes in the Closed section of `docs/open-defects.md`: the acceleration-structure
+synchronisation hazard, and the diffuse lobe being summed with the specular one
+instead of layered under it. Every one of them moved toward the reference and
+five now grade OK.
+
+`14`-`24` and `26`-`28` still carry older numbers -- their scenes were not built
+on that machine -- and both fixes move any row with a rough dielectric in it, so
+expect them to improve when they are next rebuilt. Do not read the two sets
+against each other.
+
+The second of those is worth knowing when reading any older number here. The
+recorded `00_calibration` of 0.021 / 1.010 was **two errors cancelling**: its
+sphere was 4.5% dark and the stage it sits on 3.5% bright, and only the frame
+mean was ever written down. It reads 0.012 / 1.008 now, and its three regions
+agree with each other -- sphere 1.004, wall 1.003, floor 1.001. That agreement,
+not the frame mean, is what says the row is converged. Grade a calibration row
+per region.
+
+Six of them moved on the acceleration-structure fix alone -- 06, 09, 10, 11, 13
+and 25 -- because bottom-level structures were being read while they were still
+being built and geometry went missing from traversal. `25_subsurface` was hurt
+worst (0.217 / 0.880) and read as a subsurface defect, which it was not.
 
 `19_env_and_light` is the only row with two kinds of light in it, and it is
 there for one question: whether resampled importance sampling and plain
@@ -213,6 +240,73 @@ itself: driven at raw albedos, a thick sphere reads 6–8% above what the fit
 predicts, because the fit describes a plane-parallel half-space and the test
 subject is curved. That bias is the row's residual, and it is in the recipe
 rather than in the walk.
+
+The row also hid a defect that was not subsurface at all. Two of its five spheres
+were absent from traversal -- from the `render.debug = 1` normal buffer as well as
+the beauty -- because bottom-level acceleration structures were being read while
+they were still being built. That is fixed, and it moved five other rows with it;
+see the Closed section of `docs/open-defects.md`. What made it look like a walk
+defect is that a walk was the only unusual thing in the scene. Two cheap
+measurements rule the walk out before the geometry is worth suspecting: whether
+the suspect region moves at all between `subsurface_iterations` of 16 and 256, and
+whether it reads exactly the backdrop behind it.
+
+**`25_subsurface` passes with subsurface switched off.** Strip the extension from
+its glTF and render the same base colours as plain Lambertian diffuse: that
+control grades rel 0.060 against the Cycles subsurface reference, against 0.057
+for the real thing. The row cannot tell them apart, and neither can the eye.
+
+That is by construction, not by accident. At mean free paths of 0.05 / 0.025 /
+0.015 against a sphere of radius 0.48 the medium is optically thick, and the van
+de Hulst mapping is *defined* to make a thick medium reproduce a chosen diffuse
+albedo. The row measures the mapping -- worth measuring -- and says nothing about
+the transport underneath it. Read it that way.
+
+Two more rows exist for what it cannot see, built by
+`tools/feature_tests/sss_regimes.py`, each `25_subsurface` with one constant
+changed:
+
+```bash
+/Applications/Blender.app/Contents/MacOS/Blender -b -P tools/feature_tests/sss_regimes.py
+tools/feature_tests/run_strelka.sh
+SSS_SCENE=30_subsurface_translucent \
+    /Applications/Blender.app/Contents/MacOS/Blender -b -P tools/feature_tests/sss_probe.py
+```
+
+They write into the ordinary scene root, so steps 2 and 3 of the normal method
+pick them up with no arguments once they exist. They are deliberately absent from
+`SCENES` so a plain `build_features.py` run does not pay for two more Cycles
+references of the same five spheres.
+
+- **`29_subsurface_skin`** -- Blender's own skin preset, Subsurface Radius
+  (1, 0.2, 0.1) at Subsurface Scale 0.005, which against the same sphere is one
+  hundred to one thousand mean free paths instead of ten to sixty. Thicker still,
+  so it inherits the blindness above; what it guards is the walk's *length*.
+  Russian roulette does not fire in a medium that absorbs nothing, so the step
+  ceiling is the only thing ending those walks and every walk it ends is
+  discarded energy. It does not happen today: the row grades 0.060 / 1.014, and
+  `subsurface_iterations` 64 and 256 give the same answer (16 loses 0.7%, 8 loses
+  2.6%), so the default of 64 is right and does not need raising for characters.
+- **`30_subsurface_translucent`** -- mean free paths comparable to the body, so
+  light crosses it instead of turning round inside the first millimetre. This is
+  the only row that grades the feature: the diffuse control scoring 0.060 on
+  `25_subsurface` scores ratio **0.910** here against 1.045 for the walk, and the
+  two are plainly different to look at. It **fails**, at 0.102 / 1.045, and
+  `sss_probe.py` says how: the lit half reads 0.92-1.00 and the shadowed half
+  1.17-1.35. Light is carried too far rather than lost. Entry 16 of
+  `docs/open-defects.md`.
+- **`31_subsurface_absorbing`** -- the same body at an albedo near zero, so a path
+  either crosses without a collision or dies. It is the instrument that localised
+  entry 16, because it splits the disagreement in two: the lit half reads 1.03 and
+  the shadowed half 3.30. The whole excess is in paths that never scatter, and any
+  fix has to bring the second to one without moving the first.
+
+This row is also the one that caught the subsurface exit shading with the flat
+geometric normal, which drew the UV sphere's 32 latitude rings straight into the
+image. `25_subsurface` cannot see that -- its longer free path spreads the exit
+across many triangles -- so the same fix measured on the wrong row reads as
+nothing at all. When something looks banded, grade the contact sheet: the
+aggregate `rel` moved by 0.0008 on the row where the banding is obvious.
 
 `sss_probe.py` reads the row per sphere rather than per frame, and splits each
 silhouette into its lit and shadowed halves — a walk that carries light the wrong

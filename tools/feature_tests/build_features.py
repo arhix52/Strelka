@@ -1616,7 +1616,13 @@ def patch_subsurface(doc):
     # -- and keep the radius Cycles used. Cycles' own BaseColor→medium mapping is
     # not published as this function, so the row is a regression guard on our
     # side until that mapping is measured the way bake_env.py measured the sky.
-    radius = list(SSS_RADIUS)
+    # Cycles renders the *product* of Subsurface Radius and Subsurface Scale;
+    # the extension carries one number. Multiplying here rather than writing
+    # SSS_RADIUS straight through is what keeps the two sides describing the same
+    # medium if SSS_SCALE ever stops being 1 -- otherwise the row would silently
+    # measure that factor instead of the walk. tools/feature_tests/sss_regimes.py
+    # drives this constant to skin values and relies on it.
+    radius = [c * SSS_SCALE for c in SSS_RADIUS]
     for mat in doc.get("materials", []):
         name = mat.get("name", "")
         if not name.startswith("sss"):

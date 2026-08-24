@@ -33,6 +33,8 @@ answer, or an asset/converter note that does not need Chaos.
 | 12 | Metal's radiance cache has no resolve pass | `src/shaders/metal/sharc.h` + a new kernel | Metal's cache survives a camera movement, as OptiX's now does |
 | 13 | OpenPBR's vendored BSDF has never been through nvcc | `third_party/openpbr_bsdf`, `src/shaders/optix` | an OptiX module that calls `openpbr_prepare` compiles, and the ladder is unmoved |
 | 14 | The subsurface walk does not reproduce run to run | `wavefront.metal` medium path, Metal | two runs of one binary on `25_subsurface` are bit-identical |
+| ~~15~~ | ~~Diffuse summed with specular instead of layered under it~~ | done — see Closed | `00_calibration` 0.012 / 1.008, its three regions within 0.4% of each other |
+| 16 | Subsurface transmits far too much straight through a body | the walk's zero-collision path, `wavefront.metal` / `medium.h` | `31_subsurface_absorbing`'s shadowed half at 1.0 without moving its lit half off 1.03 |
 
 6 is smaller. 7 is not a renderer bug. 10 is a convention to settle, not a bug to
 find: it is measured, it is the same on both backends, and picking a side changes
@@ -585,7 +587,413 @@ the method -- an exact-match regression on a scene with both features on will
 report a change that did not happen. Grade those on `rel` against a threshold.
 Every other scene, including `25_subsurface`, can be graded on equality.
 
+## 16. Subsurface transmits far too much straight through a body
+
+`25_subsurface` and `29_subsurface_skin` both **pass with subsurface switched
+off** -- strip the extension, render the same base colours as plain Lambertian
+diffuse, and the control grades rel 0.060 against the Cycles subsurface
+reference, against 0.057 for the real walk. Both are optically thick, and the van
+de Hulst mapping is defined to make a thick medium reproduce a chosen diffuse
+albedo, so those rows measure the mapping and not the transport.
+
+`30_subsurface_translucent` and `31_subsurface_absorbing`
+(`tools/feature_tests/sss_regimes.py`) are the rows that do measure it, and they
+fail: **0.0966 / 1.027** and **0.2294 / 1.112**.
+
+### The disagreement is in the paths that never scatter
+
+`31_subsurface_absorbing` is the sharp instrument. Same body and mean free path
+as row 30, but a base colour of 0.05, so a path either crosses the body without a
+single collision or is absorbed. It splits the frame cleanly:
+
+| | ratio |
+|---|---|
+| lit half | **1.030** |
+| shadowed half | **3.304** |
+
+What comes back out of the lit side is right. What crosses to the far side is
+three times too much. On row 30's scattering medium the same split reads 0.92
+lit and 1.34 shadowed, and the error grows as the body gets optically thinner:
+at mean free paths of 0.05, 0.15, 0.40 and 0.80 against a sphere of radius 0.48
+the frame ratio runs 0.997, 1.007, 1.048, 1.093 and the shadowed half 1.06, 1.10,
+1.26, 1.49.
+
+`subsurface_iterations` places it exactly. At **zero** -- no scattering event
+permitted at all -- the shadowed half of the thinnest row already reads 1.445,
+and allowing the full 64 steps only takes it to 1.485. The whole excess is in the
+zero-collision path: enter, cross, leave.
+
+### Ruled out, each by measurement
+
+- **The colour to medium mapping.** The thick rows are flat per channel: 25 reads
+  R 0.979 / G 0.998 / B 1.015 and 29 reads 0.989 / 1.005 / 1.002. Cycles uses van
+  de Hulst here too -- confirmed in `intern/cycles/kernel/integrator/subsurface_random_walk.h`.
+- **A radius or extinction convention.** No single scale reconciles the two
+  halves. On the absorbing row, scaling the radius by 0.3 brings the shadowed
+  half from 3.30 to 1.11 and simultaneously drives the lit half from 1.03 to
+  0.54. Cycles computes `*sigma_t = reciprocal(max(radius, 1e-16))` -- the same
+  reciprocal we do.
+- **Next-event estimation and MIS.** `render.estimator_mode` 0 and 1 agree to
+  three digits on the failing row: 1.093 against 1.090, with the shadowed half at
+  1.487 and 1.483. Two independent unbiased estimators agreeing means the
+  transported quantity is what differs.
+- **Walk length.** See the `subsurface_iterations` sweep above; and
+  `29_subsurface_skin` shows 64 and 256 steps give the same answer.
+- **Cycles rejecting zero-scatter paths.** It does not: a path that reaches the
+  boundary with no collisions exits and contributes, weighted
+  `transmittance / dot(channel_pdf, pdf)`, which is the weight
+  `sssBoundaryWeight()` computes.
+- **Cycles' Dwivedi guiding.** Present -- it measures the opposite interface on
+  the first bounce and biases later scattering toward it -- but it is
+  variance reduction under MIS, so it cannot move the mean.
+
+### Line by line against Cycles
+
+`intern/cycles/kernel/integrator/subsurface_random_walk.h` and `subsurface.h`,
+read against `wavefront.metal`'s medium path and `src/shaders/metal/subsurface.h`.
+
+**Identical, and now confirmed rather than assumed:**
+
+| quantity | Cycles | here |
+|---|---|---|
+| colour to single-scattering albedo | `subsurface_random_walk_remap()`, van de Hulst | `patch_subsurface`'s inversion of the same fit |
+| extinction | `*sigma_t = reciprocal(max(radius, 1e-16))` | `sssSigmaT()` |
+| channel choice | `volume_sample_channel(alpha, throughput, ...)` | `sssChannelPdf(throughput, albedo)` |
+| free flight | `t = -logf(1.0f - randt) / sample_sigma_t` | `sssSampleDistance()` |
+| weight at a scattering event | `sigma_s * transmittance / dot(channel_pdf, pdf)` | `sssScatterWeight()` |
+| weight at the boundary | `transmittance / dot(channel_pdf, pdf)` | `sssBoundaryWeight()` |
+| entry direction | cosine about `-N` from the BSSRDF closure | the diffuse-transmission lobe |
+| exit | `bsdf_diffuse_setup(sd, N, weight)` | cosine lobe about the exit normal |
+| a zero-collision path | exits and contributes | the same |
+
+The mapping check is worth stating numerically because it had never been done:
+on `31_subsurface_absorbing`'s base colour of 0.05, our inversion produces
+0.218484 and Cycles' `subsurface_random_walk_remap` produces 0.218489.
+
+**Present in Cycles and absent here:**
+
+1. **An albedo floor.** `subsurface_random_walk_coefficients()` ends with
+
+       const float min_alpha = 0.2f;
+       if (alpha[i] < min_alpha) { throughput[i] *= alpha[i] / min_alpha; alpha[i] = min_alpha; }
+
+   The walk is run at a higher albedo than authored and the entry throughput is
+   scaled by the ratio. Note this is exact for one scattering event and not for
+   n, so it is a deliberate approximation on Cycles' side, and it changes the
+   weight a zero-collision path carries from 1 to `alpha/0.2`. It does **not**
+   explain this row -- 0.2185 is above the floor, so it does not fire -- but any
+   darker medium will diverge for this reason alone.
+
+2. **Dwivedi guided sampling.** `guided_fraction`, `sample_phase_dwivedi()`,
+   `forward_stretching` / `backward_stretching` applied to `sample_sigma_t`, and
+   a three-way MIS between classic, forward-guided and backward-guided across
+   three channels. Variance reduction under MIS, so it cannot move the mean, and
+   its absence is a noise cost rather than a bias.
+
+3. **The opposite-interface probe.** On the first bounce Cycles traces
+   `ray.tmax = max(t, 10.0f / reduce_min(sigma_t))` -- further than the sampled
+   distance -- records `opposite_distance`, and only then decides
+   `hit = ray.tmax < t`. The extra reach exists to feed the guiding above; the
+   decision itself is the same test this kernel makes.
+
+4. **`*throughput = safe_divide_color(*throughput, albedo)`** at walk entry. We
+   have the equivalent in `sssEntryTint`, divided out at the same place.
+
+### Where that leaves it
+
+None of the four explains the measured gap, and everything that could have
+explained it is now confirmed identical. What the numbers say about the residual:
+scaling the radius by 0.3 on `31_subsurface_absorbing` moves the shadowed half
+from 3.304 to 1.113, a factor of 2.97 where correct Beer-Lambert over that change
+in optical depth would give 16.4 -- so the transmitted path is attenuated, but
+with an effective optical depth around 0.4 of nominal. Whether that is a defect
+or the mean chord of a cosine entry into a sphere is not separable on this
+geometry: it wants a slab, where the path length is known rather than
+distributed.
+
+Grade any attempt on `31_subsurface_absorbing`: the shadowed half to one without
+moving the lit half off 1.03, which is the constraint that disqualified every
+scale factor tried so far.
+
 ## Closed (kept for the measurement, not the work)
+
+### The diffuse lobe was summed with the specular one instead of layered under it
+
+`tools/feature_tests/README.md` recorded `00_calibration` at 0.021 / 1.010; on
+HEAD it renders 0.0337 / 1.033, and every other row moves with it. Bisected, and
+then the bisect turned out to be measuring the removal of a second error rather
+than the arrival of a first.
+
+### The recorded 1.010 was two errors cancelling
+
+`git bisect run` over `cf9c951..3f00e2f`, grading `00_calibration`'s frame mean
+against its checked-in reference, names `e17db4b` ("Fix the MIS estimate, the
+light densities, and the IES path"): 1.0098 before, 1.0332 after. Running the
+estimator A/B on both builds says what actually happened:
+
+| build | estimator | frame | sphere | back wall |
+|---|---|---|---|---|
+| `e17db4b^` | NEE + MIS | 1.0098 | **0.9554** | 1.0045 |
+| `e17db4b^` | BSDF only | 1.0331 | 1.0087 | 1.0357 |
+| HEAD | either | 1.0332 | 1.0093 | 1.0363 |
+
+Before that commit the two estimators disagreed by 3%, which is the disagreement
+it set out to close and did. What it closed was a next-event deficit on the
+sphere -- 0.955 to 1.009 -- and the frame mean had been averaging that deficit
+against a stage that was already 3.5% bright. `e17db4b` is not a regression: it
+removed the half that was cancelling, and the recorded 1.010 was never a correct
+render of anything.
+
+### What is left is the stage, and it predates all of this
+
+The stage reads 1.0357 under BSDF sampling alone on the *old* build, so the
+excess is older than the commit the bisect named. Two things localise it:
+
+- Only surfaces with a specular lobe carry it. `00_calibration`'s sphere is
+  authored `KHR_materials_specular: {specularFactor: 0}` and matches at 1.009;
+  the stage takes the default and reads 1.036 on the wall, 1.025 on the floor.
+  The same split holds on every row: `02_basecolor` spheres 1.004 and
+  `04_metal` spheres 1.008 against their stages at 1.02-1.03, while
+  `03_roughness`, whose subjects are themselves rough dielectrics, runs 1.036 on
+  the spheres too.
+- It is per bounce. Splitting each surface by how much light it receives, the
+  directly lit fifth reads 1.005 on the sphere and 1.037 on the floor, and the
+  dimmest fifth -- which is almost entirely inter-reflection -- reads 1.044 to
+  1.058 everywhere.
+
+### The cause, measured on the host
+
+`tests/material/test_standard_pbr_furnace.cpp` integrates `bsdf * cos` over the
+hemisphere for a white base with no metal. With the specular weight at zero the
+directional albedo is exactly 1.000 head on. With it at one:
+
+| roughness | cos(V) 1.0 | 0.7 | 0.3 |
+|---|---|---|---|
+| 0.85 | 1.042 | 1.047 | 1.069 |
+| 0.50 | 1.074 | 1.076 | 1.129 |
+| 0.20 | 1.080 | 1.082 | 1.227 |
+
+`f_diffuse` is `albedo/pi` scaled only by the metallic, transmission and
+diffuse-transmission complements. Nothing takes out what the specular lobe
+reflects, so the two are summed. The coat has had this fixed for a while --
+`clearcoat_base_scale()` takes `(1-F_L)(1-F_V)` out of the base and gives the
+interreflection series back -- and the specular layer never got the same
+treatment.
+
+The material library itself is *not* what `e17db4b` changed: compiling
+`bsdf_eval` and `bsdf_sample` from `e17db4b^` and from HEAD against the same
+opaque dielectric gives identical sums to seven digits.
+
+### The fix, and the one that did not work
+
+Mirroring `clearcoat_base_scale()` with the specular lobe's `F0` was tried and
+reverted. Schlick with `F0 = 0` is not zero -- its `(1-F0)(1-cos)^5` tail reaches
+one at grazing -- so any `1 - F` complement takes energy from a material that has
+no specular lobe at all: the furnace's `specular = 0` row falls from 1.000 to
+0.976. The specular weight cannot be recovered from `F0` after `gltf_f0()` has
+folded it in.
+
+What it wants is the specular layer's *directional albedo*, and that turned out
+not to need a fit. Integrating the lobe numerically over `F0` shows it is exactly
+
+    E = (A * F0 + B) * (1 + F0 * t),    t = ggx_energy_term(roughness, NdotV)
+
+-- the split-sum form times the factor `ggx_energy_compensation()` already
+applies -- and that `A`, the coefficient of `F0`, is the single-scatter white
+albedo `1 / (1 + t)`. At roughness 0.85 head on the measured `A` is 0.4855
+against `1/(1+t)` = 0.4819, and the resulting albedo is 0.0419 against a measured
+0.0422. `ggx_specular_albedo()` in `microfacet.h` is those two lines.
+
+`B` is dropped deliberately: it is what the lobe reflects at `F0 = 0`, the
+Schlick tail, and subtracting it is what broke the first attempt. It is zero at
+normal incidence and is the grazing residual pinned separately in the furnace
+test.
+
+`specular_base_scale()` then scales the diffuse lobe by `1 - E`, and the
+diffuse-transmission lobe by the same factor -- it sits under the same interface,
+and scaling only the reflected half made a canopy grow brighter as it became more
+translucent, which `test_diffuse_transmission.cpp` caught immediately.
+
+**Every row moved, and all of them toward the reference:**
+
+| row | before | after |
+|---|---|---|
+| `00_calibration` | 0.0337 / 1.033 | **0.0123 / 1.008** |
+| `01_srgb_texture` | 0.0365 / 1.032 | 0.0213 / 1.014 |
+| `02_basecolor` | 0.0291 / 1.026 | 0.0137 / 1.006 |
+| `03_roughness` | 0.0380 / 1.035 | 0.0174 / 1.008 |
+| `04_metal` | 0.0470 / 1.025 | 0.0374 / 1.007 |
+| `05_anisotropy` | 0.0656 / 1.022 | 0.0588 / 1.004 |
+| `06_normalmap` | 0.0922 / 1.089 | 0.0645 / 1.053 |
+| `07_alpha_clip` | 0.0365 / 1.029 | 0.0192 / 1.002 |
+| `08_alpha_blend` | 0.0345 / 1.030 | 0.0169 / 1.000 |
+| `09_glass_ior` | 0.0707 / 1.031 | 0.0550 / 1.006 |
+| `10_glass_absorption` | 0.0506 / 1.032 | 0.0334 / 1.007 |
+| `11_emission` | 0.0174 / 1.008 | 0.0150 / 1.001 |
+| `12_lights_punctual` | 0.0407 / 1.024 | 0.0253 / 0.996 |
+| `13_uv2_vcol` | 0.0387 / 1.035 | 0.0184 / 1.009 |
+| `25_subsurface` | 0.0568 / 1.014 | 0.0479 / 0.997 |
+| `29_subsurface_skin` | 0.0591 / 1.013 | 0.0496 / 0.996 |
+| `30_subsurface_translucent` | 0.1018 / 1.044 | 0.0966 / 1.027 |
+
+`00_calibration` is now better than the 0.021 / 1.010 it was originally recorded
+at, and -- the point of the whole entry -- its three regions agree with each
+other: sphere 1.0037, back wall 1.0029, floor 1.0006, where they used to be
+1.009 / 1.036 / 1.025. Five rows grade OK rather than CLOSE.
+
+The material library is shared, so the OptiX backend takes the same change with
+no edit of its own.
+
+Still open, and now visible rather than buried under this: at grazing views a
+white base climbs above unity even with the specular lobe switched off -- 1.016
+at roughness 0.85, 1.161 at 0.20. That is single-scattering GGX/Smith masking
+plus the Schlick tail, it is a different defect, and the furnace test pins it so
+a fix to one cannot be credited with the other.
+
+### A trap for whoever picks it up
+
+Comparing an old build against HEAD on any scene with more than about four
+instances does not work until the acceleration-structure fix in the Closed
+section is cherry-picked onto it. Without it the old build is missing geometry --
+on `03_roughness` the roughness-0.5 sphere renders at 0.44 of the reference
+because it is absent -- and the missing bounce light moves the walls and floor
+in the same direction as the thing being measured. `00_calibration` has four
+instances and is clean, which is why the bisect used it and nothing else.
+
+
+### The subsurface exit vertex shaded with the flat normal, and drew the tessellation
+
+**Fixed.** `29_subsurface_skin` showed horizontal latitude banding on every
+sphere -- plainly in the render and unmistakably in the 8x difference, where it
+was the only structure in an otherwise noise-only image. The rings are the UV
+sphere's 32 `ring_count` bands.
+
+The exit from a subsurface walk took the *geometric* normal for four things: the
+cosine lobe it leaves on, the shading normal it hands the light connection, that
+connection's cosine, and the ray offsets. Only the last of those wants it. Every
+other shading vertex in both kernels uses the interpolated normal, and that
+normal was already in scope at the exit.
+
+**Why it only shows on a dense medium, and the method mistake that hid it.**
+Measured first on `25_subsurface`, at 2048 samples, the fix moved the image by
+rel **0.0032** -- below the noise floor -- and was written off. That was the wrong
+row. At a mean free path of 0.05 against a radius of 0.48 the walk exits over
+roughly a tenth of the radius, which averages across many triangles and hides the
+flat normal. At `29_subsurface_skin`'s 0.005 it exits within one triangle of where
+it entered, and there is nothing to average. Same code, same tessellation, and one
+row cannot see what the other shows at a glance.
+
+The aggregate barely moves even on the row that shows it -- 0.0599 to 0.0591,
+with the two images differing by rel 0.0085 -- because banding is structure at
+low amplitude and `rel` is amplitude. The contact sheet is what graded this, not
+the number.
+
+Fixed in `wavefront.metal` and, behaviour-for-behaviour, in
+`OptixRender_closest_hit.cu`. **The OptiX half is unverified**: there is no CUDA
+on this machine (see entry 13). It is the same four-line change against the same
+already-in-scope `surfaceHit.normal`.
+
+Adobe ships `openpbr_volume_faceting_correction` in `third_party/openpbr_bsdf`
+for a related but different problem -- the *distribution* of exit points follows
+the geometry even when the normal does not. Not needed here, because this exit
+applies its own explicit cosine lobe rather than relying on that distribution.
+
+
+### Bottom-level structures were read while they were still being built
+
+**Fixed.** Two of the five spheres in `25_subsurface` were missing -- not dark,
+absent: the `render.debug = 1` normal buffer showed the wall and floor behind
+them, so they were not in traversal at all. The row was at 0.2166 / 0.880 against
+a README that records 0.056 / 1.009.
+
+It is not a shading bug and not a loader bug. Giving all five spheres sphere 3's
+material changed nothing; each sphere rendered correctly when it was the only one
+in the scene; and the CPU-side bookkeeping is **byte-identical** between a run
+that loses two structures and one that loses none -- same groups, same BLAS
+indices, same geometry entries, same instance masks, same `gpuResourceID`s.
+
+What named it was `STRELKA_AS_GROUP`, the batch size for bottom-level builds.
+Which structures went missing was fixed for a given batch size and moved when the
+batch size did: 1 lost two spheres, 2 and 3 lost none, 4 lost three, 6 lost one,
+7 and 8 lost none. A knob that only decides how many builds share a command
+buffer cannot change an image, so the fault was in the batching rather than in
+anything the batches carry.
+
+`Metal3AsPath` committed each batch to the queue with no dependency between them.
+Metal schedules command buffers in commit order but does not make one wait for
+the previous to *complete*, so the top-level build -- which reads every bottom
+level its instance buffer names -- could run against structures still being
+written. Confirmed by making each flush `waitUntilCompleted()`, which fixed it.
+
+The fix chains the acceleration-structure command buffers on the shared event the
+path already keeps, so the wait is on the GPU rather than a CPU round trip per
+structure. The image no longer depends on the batch size, at any value from 1
+to 8.
+
+The Metal 4 path does not have this: `Metal4Context::beginImmediate()` reuses one
+command buffer and `submitAndWait()` blocks, so its builds are already serial.
+
+**It costs build time, and that is the trade.** On the pine forest (259
+structures), the BLAS phase goes from a median of 1818 ms to 2236 ms and the
+finish phase from 275 ms to 395 ms -- about +23% on that stage, some hundreds of
+milliseconds of a multi-second load. The bottom levels are independent of each
+other, so in principle only the top level needs to wait and the rest could still
+overlap. That is not what this does, because a shared event carries one value:
+if two builds may complete out of order, waiting on the highest value does not
+imply the lower ones are done, and the cheap version would be unsound in exactly
+the way the bug was. Recovering the time wants a fence per structure or a
+separate event, and is worth doing only if load time on heavy scenes becomes the
+complaint.
+
+**Six rows were affected, not one.** Graded against Cycles, unfixed then fixed:
+
+| row | rel before | rel after | ratio before | ratio after |
+|---|---|---|---|---|
+| `06_normalmap` | 0.1502 | 0.0922 | 0.898 | 1.089 |
+| `09_glass_ior` | 0.1210 | 0.0707 | 1.026 | 1.031 |
+| `10_glass_absorption` | 0.1114 | 0.0506 | 1.045 | 1.032 |
+| `11_emission` | 0.1777 | 0.0174 | 0.826 | 1.008 |
+| `13_uv2_vcol` | 0.1271 | 0.0387 | 1.050 | 1.035 |
+| `25_subsurface` | 0.2166 | 0.0570 | 0.880 | 1.015 |
+
+The other nine rows are bit-identical across the two builds, which is what a
+synchronisation fix should look like: it changes the scenes where the hazard bit
+and nothing else. Entry 15 above is why the "after" column still sits ~3% high.
+
+The reason this surfaced as a subsurface defect is that `25_subsurface` was the
+row hurt worst, and the walk was the obvious suspect. It was not the walk. Two
+measurements ruled the walk out before the geometry was suspected: the missing
+spheres did not move at all between `subsurface_iterations` of 16, 64 and 256 --
+a truncated walk would have -- and they read exactly the backdrop behind them.
+
+### Subsurface at skin mean free paths does not need a longer walk
+
+**Measured, no change needed.** `tools/feature_tests/sss_regimes.py` adds row
+`29_subsurface_skin`, which is `25_subsurface` at Blender's own skin preset -- Subsurface Radius (1, 0.2, 0.1)
+at Subsurface Scale 0.005 -- which against the same 0.48 sphere is between one
+hundred and one thousand mean free paths, and a single-scattering albedo that
+rounds to one in red. The concern was that Russian roulette does not fire in a
+medium that absorbs nothing, leaving the step ceiling as the only thing that ends
+a walk, and every walk it ends as energy discarded.
+
+It does not happen. The skin row grades 0.0599 / 1.014, against 0.0570 / 1.015
+for the coarse row -- the same, inside the ladder's own 3% offset. Over
+`subsurface_iterations`:
+
+| iterations | rel | ratio |
+|---|---|---|
+| 8 | 0.0787 | 0.974 |
+| 16 | 0.0682 | 0.993 |
+| 64 | 0.0599 | 1.014 |
+| 256 | 0.0598 | 1.020 |
+
+64 and 256 are the same answer, so the default is not truncating. The reasoning
+that predicted trouble was wrong about which length matters: a path enters the
+medium about one mean free path deep and escapes from there, so the number of
+scattering events is set by the depth of penetration and not by how many free
+paths span the body. A thousand-free-path sphere and a ten-free-path sphere ask
+the walk for the same number of steps.
+
 
 ### Subsurface free flights drawn against infinity
 

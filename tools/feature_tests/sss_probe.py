@@ -13,7 +13,11 @@ import bpy
 import numpy as np
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-SCENE = os.path.join(ROOT, "scenes", "feature_tests", "25_subsurface")
+# SSS_SCENE points this at the regime rows sss_regimes.py builds
+# (29_subsurface_skin, 30_subsurface_translucent); they differ from 25_subsurface
+# only in mean free path, so one readout serves all three.
+NAME = os.environ.get("SSS_SCENE", "25_subsurface")
+SCENE = os.path.join(ROOT, "scenes", "feature_tests", NAME)
 
 
 def load(path):
@@ -26,8 +30,8 @@ def load(path):
 
 def main():
     which = sys.argv[sys.argv.index("--") + 1] if "--" in sys.argv else "strelka"
-    ref = load(os.path.join(SCENE, "25_subsurface_cycles.exr"))
-    ours = load(os.path.join(SCENE, f"25_subsurface_{which}.exr"))
+    ref = load(os.path.join(SCENE, f"{NAME}_cycles.exr"))
+    ours = load(os.path.join(SCENE, f"{NAME}_{which}.exr"))
     print(f"-- {which}")
     h, w, _ = ref.shape
 
