@@ -1326,13 +1326,22 @@ static __forceinline__ __device__ bool fogScatters(PerRayData* prd,
 /// turns an open mesh into a light leak instead.
 static __device__ void exitMedium(PerRayData* prd,
                                   const float3 worldPosition,
+                                  const float3 shadingNormal,
                                   const float3 geomNormal,
                                   const float3 rayDir)
 {
     // The ray is travelling outwards, so the outward normal is the one it agrees
-    // with.
-    const float3 outward = (dot(geomNormal, rayDir) > 0.0f) ? geomNormal : -geomNormal;
-    const float3 exitOrigin = offset_ray(worldPosition, outward);
+    // with. Geometric for the offset, which is what it is for; interpolated for
+    // the lobe and the connection, which is what every other shading vertex uses.
+    //
+    // Taking the geometric one for all three draws the tessellation: on a sphere
+    // of 32 latitude rings, every ring. A dense medium is what makes it visible,
+    // because the walk then leaves within one triangle of where it entered and
+    // nothing averages the flat normal away. See the same note in
+    // wavefront.metal, and `29_subsurface_skin`, which is the row that shows it.
+    const float3 outwardGeom = (dot(geomNormal, rayDir) > 0.0f) ? geomNormal : -geomNormal;
+    const float3 outward = (dot(shadingNormal, outwardGeom) > 0.0f) ? shadingNormal : -shadingNormal;
+    const float3 exitOrigin = offset_ray(worldPosition, outwardGeom);
     SamplerState xrng = mediumSampler(prd->sampler, prd->mediumStep + 1u);
     const float invPi = 1.0f / M_PIf;
 
@@ -1751,7 +1760,7 @@ extern "C" __global__ void __closesthit__radiance()
     // describe a ray arriving from outside. This one is on its way out.
     if (insideMedium && !mediumIsBounded)
     {
-        exitMedium(prd, surfaceHit.position, surfaceHit.geom_normal, ray_dir);
+        exitMedium(prd, surfaceHit.position, surfaceHit.normal, surfaceHit.geom_normal, ray_dir);
         return;
     }
 

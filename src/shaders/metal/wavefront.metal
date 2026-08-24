@@ -2238,8 +2238,21 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
 
         // The ray is travelling outwards, so the outward normal is the one it
-        // agrees with.
-        const float3 outward = (dot(geomNormal, rayDir) > 0.0f) ? geomNormal : -geomNormal;
+        // agrees with. Geometric for the offsets, which is what they are for;
+        // interpolated for the lobe and the connection, which is what every
+        // other shading vertex in this kernel uses.
+        //
+        // The exit used to take the geometric normal for all four, and on a
+        // sphere that is 32 latitude rings it drew every one of them. A dense
+        // medium is what makes it visible: at a mean free path of 0.005 against
+        // a radius of 0.48 the walk leaves within one triangle of where it
+        // entered, so the flat normal is applied with no spatial averaging to
+        // hide it. Ten times that free path spreads the exit over many triangles
+        // and the banding disappears -- which is why `25_subsurface` cannot see
+        // this and `29_subsurface_skin` shows it plainly, and why measuring it on
+        // the wrong row said the fault was not there.
+        const float3 outwardGeom = (dot(geomNormal, rayDir) > 0.0f) ? geomNormal : -geomNormal;
+        const float3 outward = (dot(worldNormal, outwardGeom) > 0.0f) ? worldNormal : -worldNormal;
         SamplerState xrng = samplerFor(uniforms, tid, sampleIdx, depth + step);
 
         // As in the fog path: available, not delivered. The exit lobe is a cosine
@@ -2283,7 +2296,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     if (any(weight > 1e-6f))
                     {
                         ShadowRay sr;
-                        sr.origin = packed_float3(offset_ray(worldPosition, outward));
+                        sr.origin = packed_float3(offset_ray(worldPosition, outwardGeom));
                         sr.direction = packed_float3(conn.toLight);
                         sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
                         sr.maxDistance = conn.tMax;
@@ -2329,7 +2342,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
 
         PathRay nextRay;
-        nextRay.origin = packed_float3(offset_ray(worldPosition, outward));
+        nextRay.origin = packed_float3(offset_ray(worldPosition, outwardGeom));
         nextRay.direction = packed_float3(exitDir);
         rays[tid] = nextRay;
 
