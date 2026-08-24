@@ -34,7 +34,7 @@ answer, or an asset/converter note that does not need Chaos.
 | 13 | OpenPBR's vendored BSDF has never been through nvcc | `third_party/openpbr_bsdf`, `src/shaders/optix` | an OptiX module that calls `openpbr_prepare` compiles, and the ladder is unmoved |
 | 14 | The subsurface walk does not reproduce run to run | `wavefront.metal` medium path, Metal | two runs of one binary on `25_subsurface` are bit-identical |
 | ~~15~~ | ~~Diffuse summed with specular instead of layered under it~~ | done — see Closed | `00_calibration` 0.012 / 1.008, its three regions within 0.4% of each other |
-| 16 | Subsurface transmits far too much straight through a body | the walk's zero-collision path, `wavefront.metal` / `medium.h` | `31_subsurface_absorbing`'s shadowed half at 1.0 without moving its lit half off 1.03 |
+| 16 | The subsurface walk is entered diffusely where Cycles refracts | the entry lobe, `wavefront.metal` / `OptixRender_closest_hit.cu` | `sss_slab_read.py`'s `sigma here` column flat at 5.0 |
 
 6 is smaller. 7 is not a renderer bug. 10 is a convention to settle, not a bug to
 find: it is measured, it is the same on both backends, and picking a side changes
@@ -739,21 +739,73 @@ limb rather than through the body -- but it means "carries light too far" was th
 wrong description, and any fix has to be graded on the slab, where the path
 length is a number rather than a distribution.
 
-### Where that leaves it
+### Cause: the entry direction
 
-Everything that could have explained the disagreement is confirmed identical, and
-the slab says our transmitted profile is not exponential where Cycles' is. The
-estimator as written should give exactly `exp(-sigma_t d)`: a distance is drawn
-from `Exp(sigma_t[c])`, the surface wins when it is nearer, which happens with
-probability `dot(channel_pdf, transmittance)`, and `sssBoundaryWeight()` divides
-that back out. Something between that description and the kernel does not hold,
-and the slab is now sharp enough to bisect it -- the free flight in `extend`, the
-`r.max_distance` bound, and the exit weight are three places, each testable on
-its own against the analytic column.
+Not the free flight, not the ray bound, not the exit weight. The sampler was
+eliminated first -- `pcg`, `sobol` and `hybrid` give the same effective
+extinction to two decimals, and `halton` to within 1% -- so the exponential draw
+is sound. What is left is the *length* of the path being attenuated, and that is
+set by the direction the walk is entered on.
 
-Grade any attempt on `sss_slab_read.py`'s second table: the `sigma here` column
-flat at 5.0, and slightly under it once scattering is allowed back in. That is a
-sharper target than anything the sphere rows could offer.
+This walk enters along the glTF diffuse-transmission lobe: a cosine hemisphere
+about `-N`. A path entering at angle `theta` then crosses a slab of thickness `d`
+along `d / cos(theta)`, so the transmitted fraction is not `exp(-tau)` but
+
+    T(tau) = 2 * E3(tau) = 2 * integral_0^1 mu * exp(-tau / mu) dmu
+
+which decays faster and whose logarithmic slope falls with thickness. That is the
+measured shape, and it is not close:
+
+| pair | pure exponential | cosine entry | measured here | Cycles |
+|---|---|---|---|---|
+| 0.10 -> 0.20 | 5.00 | 7.03 | **6.57** | 4.74 |
+| 0.20 -> 0.40 | 5.00 | 6.46 | **6.15** | 4.81 |
+| 0.40 -> 0.80 | 5.00 | 5.97 | **5.85** | 4.88 |
+
+Ours tracks the cosine prediction and sits a few percent under it, which is the
+in-scattering this albedo still has. Cycles tracks the pure exponential and sits
+a few percent under *that*, for the same reason.
+
+**Cycles does not enter diffusely.** `subsurface_entry_bounce()` in
+`intern/cycles/kernel/integrator/subsurface.h` refracts through a rough
+dielectric interface:
+
+    const float3 local_H = microfacet_ggx_sample_vndf(local_I, alpha, alpha, rand_bsdf);
+    const float3 H = to_global(local_H, X, Y, Z);
+    const float cos_HI = dot(H, sd->wi);
+    const float arg = 1.0f - (sqr(neta) * (1.0f - sqr(cos_HI)));
+    const float dnp = max(sqrtf(arg), 1e-7f);
+    const float nK = (neta * cos_HI) - dnp;
+    *wo = -(neta * sd->wi) + (nK * H);
+
+Snell about a GGX microfacet normal, with `neta = 1 / bssrdf->ior`. At a low
+interface roughness that is a narrow cone about the refracted view direction, so
+the path length through a slab is close to `d` and the profile is exponential.
+A cosine hemisphere is used only by `CLOSURE_BSSRDF_RANDOM_WALK_SKIN_ID`, and
+even there on only half the draws -- the other half refracts.
+
+This single difference explains both symptoms that looked contradictory. A cosine
+entry takes longer chords, which is the slab reading too dark, and spreads
+laterally far more, which is `31_subsurface_absorbing`'s shadowed half reading
+3.3x too bright: that half is fed by paths that wrap the limb rather than cross
+the body.
+
+### What the fix has to decide
+
+The direction is the whole of it, but it is not a one-line swap, because the
+entry is currently a BSDF lobe whose weight and density are part of the material.
+Ours is cosine-sampled with a cosine density, so the two cancel and the lobe
+delivers weight one after `sssEntryTint` is divided out; a refracted entry has to
+keep that property or the walk starts on the wrong throughput.
+
+It also needs an interface IOR, which `STRELKA_materials_subsurface` does not
+carry -- Cycles takes `bssrdf->ior` from Principled, 1.4 for skin. Adding it to
+the extension, or defaulting it, is the one design decision here.
+
+Grade on `sss_slab_read.py`'s second table: the `sigma here` column flat at 5.0
+and slightly under it once scattering is allowed back in. Then re-read
+`31_subsurface_absorbing`, where the shadowed half has to fall to one without
+moving the lit half off 1.03.
 
 ## Closed (kept for the measurement, not the work)
 
