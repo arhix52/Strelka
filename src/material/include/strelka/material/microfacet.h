@@ -98,6 +98,31 @@ DEVICE_FUNC float3 ggx_energy_compensation(float3 F0, float roughness, float Ndo
 }
 
 // ---------------------------------------------------------------------------
+// ggx_specular_albedo -- what the specular lobe takes, so the base can be told.
+//
+// Derived, not fitted: integrating the lobe over F0 shows it is exactly
+// (A * F0 + B) * (1 + F0 * t), the split-sum form times the factor
+// ggx_energy_compensation() applies, and A is the single-scatter white albedo
+// 1 / (1 + t). Accurate to under 1%; the numbers are in docs/open-defects.md.
+//
+// B is dropped deliberately. It is what the lobe reflects at F0 = 0 -- Schlick's
+// (1-F0)(1-cos)^5 tail, which reaches one at grazing whatever the interface is --
+// so subtracting it would take energy from a material whose specular weight is
+// zero. It is a defect of its own, still open, and test_standard_pbr_furnace.cpp
+// pins the two apart so a fix to either can be graded. B is zero head on.
+// ---------------------------------------------------------------------------
+DEVICE_FUNC float3 ggx_specular_albedo(float3 F0, float roughness, float NdotV)
+{
+    const float t = ggx_energy_term(roughness, NdotV);
+    const float singleScatter = 1.0f / (1.0f + t);
+    // Component-wise for the reason ggx_energy_compensation() is: float3 + float
+    // is not spelled the same way on CUDA, Metal and GLM.
+    return make_float3(fminf(F0.x * singleScatter * (1.0f + F0.x * t), 1.0f),
+                       fminf(F0.y * singleScatter * (1.0f + F0.y * t), 1.0f),
+                       fminf(F0.z * singleScatter * (1.0f + F0.z * t), 1.0f));
+}
+
+// ---------------------------------------------------------------------------
 // GGX (Trowbridge-Reitz) Normal Distribution Function
 //   alpha  = roughness^2
 //   NdotH  = dot(N, H)

@@ -18,6 +18,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_ior_stack.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_diffuse_transmission.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_sample_eval_consistency.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/material/test_standard_pbr_furnace.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_smooth_lobe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_sheen.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_clearcoat.cpp

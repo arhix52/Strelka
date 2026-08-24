@@ -171,6 +171,27 @@ DEVICE_FUNC float clearcoat_f0(const THREAD_REF SurfaceInteraction& si)
 // Both are the wrong Fresnel for a model that never refracts L and V into the
 // coat. The ceiling at (1-F_ms) is what keeps a base whose albedo we have
 // under-counted -- specular sits under the coat too -- from climbing past one.
+// What survives under the specular layer, the way clearcoat_base_scale() answers
+// it for the coat. The lobe used to be summed on top of a full diffuse one, so a
+// rough dielectric returned more light than fell on it -- docs/open-defects.md,
+// Closed, for the measurements.
+//
+// Against the layer's directional albedo rather than a Fresnel at one angle:
+// Schlick with F0 = 0 has a (1-cos)^5 tail reaching one, so a (1-F) complement
+// drains a material that has no specular lobe at all. ggx_specular_albedo() is
+// the quantity that goes to zero when the lobe does.
+//
+// View side only, because the model never refracts L into the layer.
+DEVICE_FUNC float3 specular_base_scale(const THREAD_REF SurfaceInteraction& si,
+                                       const THREAD_REF float3& F0,
+                                       float n_dot_v)
+{
+    // ggx_specular_albedo() is already clamped to one and specular_lobe_scale()
+    // to [0,1], so the complement cannot go negative and needs no clamp of its own.
+    const float3 e = specular_lobe_scale(si) * ggx_specular_albedo(F0, si.roughness, fabsf(n_dot_v));
+    return make_float3(1.0f - e.x, 1.0f - e.y, 1.0f - e.z);
+}
+
 DEVICE_FUNC float3 clearcoat_base_scale(const THREAD_REF SurfaceInteraction& si, float n_dot_v, float n_dot_l)
 {
     if (si.clearcoat <= 0.0f)
@@ -447,7 +468,9 @@ DEVICE_FUNC PbrReflectionTerms pbr_reflection_terms(const THREAD_REF SurfaceInte
     const float3 f_sheen = sheen_brdf(si, NdotH, NdotL, NdotV);
 
     out.f = out.f +
-            ((f_diffuse + f_spec * specular_lobe_scale(si)) * clearcoat_base_scale(si, NdotV, NdotL) + f_cc) *
+            ((f_diffuse * specular_base_scale(si, F0, NdotV) + f_spec * specular_lobe_scale(si)) *
+                 clearcoat_base_scale(si, NdotV, NdotL) +
+             f_cc) *
                 sheen_base_scale(si, NdotV) +
             f_sheen;
 
@@ -604,8 +627,14 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
             return result;
 
         const float dt = saturate(si.diffuse_transmission);
-        const float3 f_dt =
-            si.diffuse_transmission_color * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) * dt;
+        // Under the same interface the reflected diffuse lobe sits under, so it
+        // gives up the same share. Without this, turning the weight up moved
+        // energy from a lobe that pays the specular layer to one that did not,
+        // and a canopy grew brighter as it became more translucent --
+        // test_diffuse_transmission.cpp catches exactly that.
+        const float3 f_dt = si.diffuse_transmission_color * M_1_PI_F * (1.0f - si.metallic) *
+                            (1.0f - si.transmission) * dt *
+                            specular_base_scale(si, F0, NdotV);
 
         // Only this lobe reaches the far hemisphere without an interface, so the
         // pdf has no other term to share with -- unless the material is also
@@ -1022,8 +1051,11 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
             const float NdotL_t = dot(Nt, wi);
             if (NdotL_t > 0.0f)
             {
-                result.bsdf =
-                    si.diffuse_transmission_color * M_1_PI_F * (1.0f - si.metallic) * (1.0f - si.transmission) * dt;
+                // The same share the reflected diffuse lobe gives up; see the
+                // note at the matching site in standard_pbr_sample().
+                result.bsdf = si.diffuse_transmission_color * M_1_PI_F * (1.0f - si.metallic) *
+                              (1.0f - si.transmission) * dt *
+                              specular_base_scale(si, F0, NdotV);
                 result.pdf = p_diffuse_tr * cosine_hemisphere_pdf(NdotL_t);
             }
         }
