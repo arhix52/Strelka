@@ -84,7 +84,7 @@ TEST_CASE("the specular lobe is layered over the base rather than added to it")
     // Head on, where Schlick's grazing tail is zero and conservation is therefore
     // exactly testable. Before specular_base_scale() these read 1.042, 1.074 and
     // 1.080.
-    for (float roughness : { 0.85f, 0.50f, 0.20f })
+    for (const float roughness : { 0.85f, 0.50f, 0.20f })
     {
         CHECK(directionalAlbedo(roughness, 1.0f, 1.0f, 1.0f) == doctest::Approx(1.0).epsilon(0.001));
     }
@@ -97,7 +97,7 @@ TEST_CASE("layering the base costs nothing where there is no lobe to layer under
     // weight at zero has to leave the material untouched. An earlier attempt
     // scaled by (1 - Fresnel) instead of by the lobe's own albedo and took 2.4%
     // from a material with no specular lobe at all.
-    for (float roughness : { 0.85f, 0.50f, 0.20f })
+    for (const float roughness : { 0.85f, 0.50f, 0.20f })
     {
         CHECK(directionalAlbedo(roughness, 0.0f, 1.0f, 1.0f) == doctest::Approx(1.0).epsilon(0.001));
     }
@@ -107,9 +107,9 @@ TEST_CASE("the specular weight no longer decides whether energy is conserved")
 {
     // The split that named the defect: with it fixed, turning the lobe on and off
     // moves the albedo by well under a percent at every angle, instead of by 4-23%.
-    for (float roughness : { 0.85f, 0.50f, 0.20f })
+    for (const float roughness : { 0.85f, 0.50f, 0.20f })
     {
-        for (float cosV : { 1.0f, 0.7f, 0.3f })
+        for (const float cosV : { 1.0f, 0.7f, 0.3f })
         {
             const double on = directionalAlbedo(roughness, 1.0f, 1.0f, cosV);
             const double off = directionalAlbedo(roughness, 0.0f, 1.0f, cosV);
