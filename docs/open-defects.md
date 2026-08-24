@@ -699,21 +699,61 @@ on `31_subsurface_absorbing`'s base colour of 0.05, our inversion produces
 4. **`*throughput = safe_divide_color(*throughput, albedo)`** at walk entry. We
    have the equivalent in `sssEntryTint`, divided out at the same place.
 
+### The slab, and what it says instead
+
+`tools/feature_tests/sss_slab.py` builds five flat plates of known thickness in
+the same nearly-absorbing medium, lit from above with the top face held at a
+fixed height so every row receives identical irradiance, and viewed from below.
+Everything the measurement does not control -- the entry and exit lobes, the
+light, the solid angle, the camera -- is common to all five, so it cancels in the
+ratio of two thicknesses and
+
+    T(d1) / T(d2) = exp(-sigma_t * (d1 - d2))
+
+is exact. **This grades the feature with no reference at all**, which is what the
+sphere could not do.
+
+At a mean free path of 0.2, so a nominal `sigma_t` of 5:
+
+| pair | analytic | Cycles | here | sigma Cycles | sigma here |
+|---|---|---|---|---|---|
+| 0.05 -> 0.10 | 0.7788 | 0.7919 | 0.7037 | 4.67 | **7.03** |
+| 0.10 -> 0.20 | 0.6065 | 0.6228 | 0.5185 | 4.74 | **6.57** |
+| 0.20 -> 0.40 | 0.3679 | 0.3819 | 0.2922 | 4.81 | **6.15** |
+| 0.40 -> 0.80 | 0.1353 | 0.1418 | 0.0962 | 4.88 | **5.85** |
+
+Cycles brackets Beer-Lambert from below by 2 to 7%, which is what the small
+scattering component at this albedo should do, and converges toward it as the
+slab thickens. **We attenuate too much**, by 17 to 40%, and our effective
+extinction is not even constant -- it falls with thickness, so the transmitted
+profile is not an exponential at all.
+
+`subsurface_iterations = 0` reproduces the slab numbers to four digits, so no
+scattering event is involved: the defect is entirely in the free flight and the
+boundary weight.
+
+This **inverts** the reading the sphere gave. On `31_subsurface_absorbing` the
+shadowed half is 3.3 times too bright; on a slab the transmitted light is too
+dark. Both can be true -- the sphere's shadowed half is fed by paths around the
+limb rather than through the body -- but it means "carries light too far" was the
+wrong description, and any fix has to be graded on the slab, where the path
+length is a number rather than a distribution.
+
 ### Where that leaves it
 
-None of the four explains the measured gap, and everything that could have
-explained it is now confirmed identical. What the numbers say about the residual:
-scaling the radius by 0.3 on `31_subsurface_absorbing` moves the shadowed half
-from 3.304 to 1.113, a factor of 2.97 where correct Beer-Lambert over that change
-in optical depth would give 16.4 -- so the transmitted path is attenuated, but
-with an effective optical depth around 0.4 of nominal. Whether that is a defect
-or the mean chord of a cosine entry into a sphere is not separable on this
-geometry: it wants a slab, where the path length is known rather than
-distributed.
+Everything that could have explained the disagreement is confirmed identical, and
+the slab says our transmitted profile is not exponential where Cycles' is. The
+estimator as written should give exactly `exp(-sigma_t d)`: a distance is drawn
+from `Exp(sigma_t[c])`, the surface wins when it is nearer, which happens with
+probability `dot(channel_pdf, transmittance)`, and `sssBoundaryWeight()` divides
+that back out. Something between that description and the kernel does not hold,
+and the slab is now sharp enough to bisect it -- the free flight in `extend`, the
+`r.max_distance` bound, and the exit weight are three places, each testable on
+its own against the analytic column.
 
-Grade any attempt on `31_subsurface_absorbing`: the shadowed half to one without
-moving the lit half off 1.03, which is the constraint that disqualified every
-scale factor tried so far.
+Grade any attempt on `sss_slab_read.py`'s second table: the `sigma here` column
+flat at 5.0, and slightly under it once scattering is allowed back in. That is a
+sharper target than anything the sphere rows could offer.
 
 ## Closed (kept for the measurement, not the work)
 
