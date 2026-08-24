@@ -2154,6 +2154,9 @@ extern "C" __global__ void __closesthit__radiance()
     // for a deep-red medium is about a third of the light it should return.
     // Cycles divides the same factor out at the same place.
     float3 sssEntryTint = make_float3(1.0f);
+    // Set when the path enters a subsurface medium, so the direction below is the
+    // refraction rather than the lobe's cosine draw. See docs/open-defects.md 16.
+    bool sssRefractedEntry = false;
     if ((sample_data.event_type & BSDF_EVENT_TRANSMISSION) != 0 && !isFibre)
     {
         // A thin-walled surface has no interior either, so crossing it does not
@@ -2214,13 +2217,24 @@ extern "C" __global__ void __closesthit__radiance()
             }
             prd->mediumAlbedo = saturate(walkAlbedo);
             sssEntryTint = fmaxf(si.diffuse_transmission_color, make_float3(1e-4f));
+
+            // Enter on the refraction, not on the lobe's cosine draw. The lobe
+            // still decides whether the medium is entered and still supplies the
+            // weight; only the direction changes, and it is the direction that
+            // sets how far a path travels through the body. Same note as in
+            // wavefront.metal.
+            sssRefractedEntry = true;
         }
     }
     else
     {
         prd->origin = offset_ray(si.position, faceNg);
     }
-    prd->dir = sample_data.wi;
+    prd->dir = sssRefractedEntry ?
+                   subsurface_entry_direction(si.wo,
+                                              (dot(si.shading_normal, si.wo) > 0.0f) ? si.shading_normal :
+                                                                                       -si.shading_normal) :
+                   sample_data.wi;
     if (isFibre)
     {
         // Both branches above assume a surface with an inside and an outside. A

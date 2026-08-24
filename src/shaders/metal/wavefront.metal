@@ -2963,6 +2963,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // deep-red medium is a third of the light it should return. Cycles divides
     // the same factor out for the same reason.
     float3 sssEntryTint = float3(1.0f);
+    // Set when the path enters a subsurface medium, so the direction below is the
+    // refraction rather than the lobe's cosine draw. See entry 16.
+    bool sssRefractedEntry = false;
     // A fibre's transmission lobes do not put the path inside anything: the strand
     // is crossed within the one event, so there is no medium to enter and no entry
     // to match with an exit. Pushing the IOR stack here left every transmitted hair
@@ -3081,6 +3084,17 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             {
                 sssEntryTint = max(float3(si.diffuse_transmission_color), float3(1e-4f));
             }
+
+            // Enter on the refraction, not on the lobe's cosine draw.
+            //
+            // The lobe still decides *whether* the medium is entered and still
+            // supplies the weight -- cosine-sampled against a cosine density,
+            // so the two cancel and what is left after the tint is one, which is
+            // the weight Cycles' entry carries too. Only the direction changes,
+            // and it is the direction that sets how far a path travels through
+            // the body: a cosine entry crosses a slab along d / cos(theta) and
+            // transmits 2 * E3(tau) where the measurement wants exp(-tau).
+            sssRefractedEntry = true;
         }
     }
     else
@@ -3089,7 +3103,12 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     }
     iorStacks[tid] = iorStack;
 
-    const float3 nextDir = normalize(sampleResult.wi);
+    const float3 nextDir =
+        sssRefractedEntry ?
+            subsurface_entry_direction(float3(si.wo), (dot(float3(si.shading_normal), float3(si.wo)) > 0.0f) ?
+                                                          float3(si.shading_normal) :
+                                                          -float3(si.shading_normal)) :
+            normalize(sampleResult.wi);
     if (isFibre)
     {
         // Both branches above assume a surface with an inside and an outside. A

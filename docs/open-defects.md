@@ -34,7 +34,7 @@ answer, or an asset/converter note that does not need Chaos.
 | 13 | OpenPBR's vendored BSDF has never been through nvcc | `third_party/openpbr_bsdf`, `src/shaders/optix` | an OptiX module that calls `openpbr_prepare` compiles, and the ladder is unmoved |
 | 14 | The subsurface walk does not reproduce run to run | `wavefront.metal` medium path, Metal | two runs of one binary on `25_subsurface` are bit-identical |
 | ~~15~~ | ~~Diffuse summed with specular instead of layered under it~~ | done — see Closed | `00_calibration` 0.012 / 1.008, its three regions within 0.4% of each other |
-| 16 | The subsurface walk is entered diffusely where Cycles refracts | the entry lobe, `wavefront.metal` / `OptixRender_closest_hit.cu` | `sss_slab_read.py`'s `sigma here` column flat at 5.0 |
+| 16 | Subsurface is 3% dark since the entry was corrected | the entry weight, `wavefront.metal` / `OptixRender_closest_hit.cu` | the four subsurface rows back at ratio ~1.00; the slab is already there |
 
 6 is smaller. 7 is not a renderer bug. 10 is a convention to settle, not a bug to
 find: it is measured, it is the same on both backends, and picking a side changes
@@ -790,22 +790,58 @@ laterally far more, which is `31_subsurface_absorbing`'s shadowed half reading
 3.3x too bright: that half is fed by paths that wrap the limb rather than cross
 the body.
 
-### What the fix has to decide
+### Fixed, and what it left behind
 
-The direction is the whole of it, but it is not a one-line swap, because the
-entry is currently a BSDF lobe whose weight and density are part of the material.
-Ours is cosine-sampled with a cosine density, so the two cancel and the lobe
-delivers weight one after `sssEntryTint` is divided out; a refracted entry has to
-keep that property or the walk starts on the wrong throughput.
+`subsurface_entry_direction()` in `material/microfacet.h` refracts Snell about the
+shading normal at a fixed index of 1.4, and both backends take it at the point
+they enter the medium. The lobe still decides *whether* the walk is entered and
+still supplies the weight -- cosine-sampled against a cosine density, so the two
+cancel and one is left after the tint, which is the weight Cycles' entry carries
+too. Only the direction changes.
 
-It also needs an interface IOR, which `STRELKA_materials_subsurface` does not
-carry -- Cycles takes `bssrdf->ior` from Principled, 1.4 for skin. Adding it to
-the extension, or defaulting it, is the one design decision here.
+Smooth rather than through a GGX microfacet. Cycles refracts about a sampled half
+vector, but refraction alone compresses the cone -- at 1.4 even a grazing ray
+bends to 45.6 degrees -- and the slab says a smooth interface reproduces its
+exponential. 1.4 is not a parameter: the extension does not carry one, and it is
+Cycles' skin default.
 
-Grade on `sss_slab_read.py`'s second table: the `sigma here` column flat at 5.0
-and slightly under it once scattering is allowed back in. Then re-read
-`31_subsurface_absorbing`, where the shadowed half has to fall to one without
-moving the lit half off 1.03.
+**The slab is now correct**, and it is graded against algebra rather than against
+the reference:
+
+| pair | analytic | Cycles | here | sigma Cycles | sigma here |
+|---|---|---|---|---|---|
+| 0.05 -> 0.10 | 0.7788 | 0.7919 | 0.7930 | 4.67 | 4.64 |
+| 0.10 -> 0.20 | 0.6065 | 0.6228 | 0.6242 | 4.74 | 4.71 |
+| 0.20 -> 0.40 | 0.3679 | 0.3819 | 0.3839 | 4.81 | 4.79 |
+| 0.40 -> 0.80 | 0.1353 | 0.1418 | 0.1431 | 4.88 | 4.86 |
+
+Both track the pure exponential from below by the in-scattering this albedo still
+has, and they agree with each other to 0.03 in every row. In absolute terms the
+slab reads 1.002 to 1.020 against Cycles where it read 0.852 to 0.327.
+
+The sphere rows improve where they measure transport and go slightly dark
+everywhere:
+
+| row | before | after |
+|---|---|---|
+| `25_subsurface` | 0.0479 / 0.997 | 0.0501 / 0.976 |
+| `29_subsurface_skin` | 0.0496 / 0.996 | 0.0531 / 0.972 |
+| `30_subsurface_translucent` | 0.0966 / 1.027 | 0.0780 / 0.969 |
+| `31_subsurface_absorbing` | 0.2294 / 1.112 | 0.1337 / 0.896 |
+
+31's `rel` nearly halves and 30's falls by a fifth, which is the transport being
+right. What is left is a deficit of about 2.4 to 3% on the two thick rows -- and
+those are the rows that cannot tell subsurface from diffuse, so they were reading
+0.997 with a wrong entry, which is the cancellation pattern of entry 15 again.
+
+2.8% is the normal-incidence Fresnel reflectance of a 1.4 interface, `((1-1.4) /
+(1+1.4))^2`. That is a coincidence worth testing rather than a conclusion: the
+entry weight is one on both sides, so neither renderer is taking a Fresnel share
+out, and if the number is real it is on the exit rather than the entry. Nothing
+here has measured it yet.
+
+Grade the remainder on the four subsurface rows returning to ratio ~1.00 without
+moving `sss_slab_read.py`'s `sigma here` column off Cycles'.
 
 ## Closed (kept for the measurement, not the work)
 

@@ -244,6 +244,39 @@ DEVICE_FUNC float ggx_vndf_pdf_half(float alpha, float NdotH, float NdotV, float
     return ggx_vndf_pdf(alpha, NdotH, NdotV, VdotH) * 4.0f * fmaxf(VdotH, 0.0f);
 }
 
+// The direction a path takes on entering a subsurface medium.
+//
+// Snell about the shading normal, which is what Cycles' subsurface_entry_bounce()
+// does and what this walk did not: it entered along the glTF diffuse-transmission
+// lobe, a cosine hemisphere. A path entering a slab of thickness d at angle theta
+// crosses it along d / cos(theta), so a cosine entry transmits 2 * E3(tau) rather
+// than exp(-tau) -- measurably steeper, and not even exponential. See
+// docs/open-defects.md entry 16 and tools/feature_tests/sss_slab.py, which grades
+// this against algebra rather than against a reference.
+//
+// Smooth rather than through a GGX microfacet. Cycles refracts about a sampled
+// half vector, but refraction alone already compresses the cone -- at an IOR of
+// 1.4 even a grazing ray bends to 45.6 degrees -- and the slab says a smooth
+// interface reproduces its exponential. A microfacet lobe here would be a second
+// parameter with nothing measured asking for it.
+//
+// `wo` points away from the surface toward where the light came from, and `n` is
+// the shading normal on that side. Entering from the outside cannot reach total
+// internal reflection, since eta < 1 leaves the radicand above 1 - eta^2.
+//
+// The index is 1.4 and is not a parameter: STRELKA_materials_subsurface does not
+// carry one, Cycles takes it from Principled's IOR where 1.4 is the skin default,
+// and that is the value the ladder is graded against. Give it an argument when a
+// scene needs to author it.
+DEVICE_FUNC float3 subsurface_entry_direction(float3 wo, float3 n)
+{
+    const float eta = 1.0f / 1.4f;
+    const float cosI = fminf(fmaxf(dot(n, wo), 0.0f), 1.0f);
+    const float k = 1.0f - eta * eta * (1.0f - cosI * cosI);
+    const float cosT = sqrtf(fmaxf(k, 0.0f));
+    return safe_normalize(-eta * wo + (eta * cosI - cosT) * n);
+}
+
 // The half vector a refraction through an interface of relative index `eta`
 // bends around, and the Jacobian of the map from it to the outgoing direction.
 //
