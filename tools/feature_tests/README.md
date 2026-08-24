@@ -99,13 +99,13 @@ fixing, but it is not a shading bug.
 | `22_thin_walled` | Thin Wall roughness ramp (+ solid) | 0.094 / 0.966 |
 | `23_diffuse_transmission` | `KHR_materials_diffuse_transmission` weight ramp | 0.012 / 1.000 |
 | `24_orthographic` | ortho twin of `00_calibration` | 0.024 / 1.009 |
-| `25_subsurface` | `STRELKA_materials_subsurface` (Van de Hulst recipe) | 0.048 / 0.997 |
+| `25_subsurface` | `STRELKA_materials_subsurface` (Van de Hulst recipe) | 0.040 / 0.998 |
 | `26_dof` | thin-lens depth of field (`_camera.json`) | 0.024 / 1.015 |
 | `27_ies` | IES point light via light sidecar | 0.047 / 1.032 |
 | `28_hair` | close-up round linear Chiang groom (`STRELKA_materials_hair`) | 0.033 / 1.012 |
-| `29_subsurface_skin` | `25_subsurface` at Blender's skin preset (opt-in) | 0.050 / 0.996 |
-| `30_subsurface_translucent` | `25_subsurface` at body-scale mean free path (opt-in) | 0.097 / 1.027 |
-| `31_subsurface_absorbing` | near-zero albedo at the same mean free path (opt-in) | 0.229 / 1.112 FAIL |
+| `29_subsurface_skin` | `25_subsurface` at Blender's skin preset (opt-in) | 0.042 / 0.994 |
+| `30_subsurface_translucent` | `25_subsurface` at body-scale mean free path (opt-in) | 0.050 / 1.003 |
+| `31_subsurface_absorbing` | near-zero albedo at the same mean free path (opt-in) | 0.065 / 1.001 |
 
 Rows `00`-`13`, `25`, `29` and `30` were re-measured on 2026-08-24, after two
 fixes in the Closed section of `docs/open-defects.md`: the acceleration-structure
@@ -298,8 +298,9 @@ references of the same five spheres.
 - **`31_subsurface_absorbing`** -- the same body at an albedo near zero, so a path
   either crosses without a collision or dies. It is the instrument that localised
   entry 16, because it splits the disagreement in two: the lit half reads 1.03 and
-  the shadowed half 3.30. The whole excess is in paths that never scatter, and any
-  fix has to bring the second to one without moving the first.
+  the shadowed half 3.30. That was the walk being entered on a cosine hemisphere
+  where Cycles refracts through the interface; both are at ~1.00 now, and the row
+  stays as the instrument that separates the two halves.
 
 This row is also the one that caught the subsurface exit shading with the flat
 geometric normal, which drew the UV sphere's 32 latitude rings straight into the

@@ -34,7 +34,7 @@ answer, or an asset/converter note that does not need Chaos.
 | 13 | OpenPBR's vendored BSDF has never been through nvcc | `third_party/openpbr_bsdf`, `src/shaders/optix` | an OptiX module that calls `openpbr_prepare` compiles, and the ladder is unmoved |
 | 14 | The subsurface walk does not reproduce run to run | `wavefront.metal` medium path, Metal | two runs of one binary on `25_subsurface` are bit-identical |
 | ~~15~~ | ~~Diffuse summed with specular instead of layered under it~~ | done — see Closed | `00_calibration` 0.012 / 1.008, its three regions within 0.4% of each other |
-| 16 | Subsurface is 3% dark since the entry was corrected | the entry weight, `wavefront.metal` / `OptixRender_closest_hit.cu` | the four subsurface rows back at ratio ~1.00; the slab is already there |
+| ~~16~~ | ~~The walk was entered diffusely where Cycles refracts~~ | done — see Closed | four subsurface rows at 0.994-1.003; slab within 5% of Cycles |
 
 6 is smaller. 7 is not a renderer bug. 10 is a convention to settle, not a bug to
 find: it is measured, it is the same on both backends, and picking a side changes
@@ -587,7 +587,9 @@ the method -- an exact-match regression on a scene with both features on will
 report a change that did not happen. Grade those on `rel` against a threshold.
 Every other scene, including `25_subsurface`, can be graded on equality.
 
-## 16. Subsurface transmits far too much straight through a body
+## Closed (kept for the measurement, not the work)
+
+### The subsurface walk was entered diffusely where Cycles refracts
 
 `25_subsurface` and `29_subsurface_skin` both **pass with subsurface switched
 off** -- strip the extension, render the same base colours as plain Lambertian
@@ -790,60 +792,55 @@ laterally far more, which is `31_subsurface_absorbing`'s shadowed half reading
 3.3x too bright: that half is fed by paths that wrap the limb rather than cross
 the body.
 
-### Fixed, and what it left behind
+### Fixed
 
-`subsurface_entry_direction()` in `material/microfacet.h` refracts Snell about the
-shading normal at a fixed index of 1.4, and both backends take it at the point
-they enter the medium. The lobe still decides *whether* the walk is entered and
-still supplies the weight -- cosine-sampled against a cosine density, so the two
-cancel and one is left after the tint, which is the weight Cycles' entry carries
-too. Only the direction changes.
+`subsurface_entry_direction()` in `material/microfacet.h` refracts through the
+interface about a GGX microfacet normal at a fixed index of 1.4, and both backends
+take it where they enter the medium. The lobe still decides *whether* the walk is
+entered and still supplies the weight -- cosine-sampled against a cosine density,
+so the two cancel and one is left after the tint, which is the weight Cycles'
+entry carries too. Only the direction changes.
 
-Smooth rather than through a GGX microfacet. Cycles refracts about a sampled half
-vector, but refraction alone compresses the cone -- at 1.4 even a grazing ray
-bends to 45.6 degrees -- and the slab says a smooth interface reproduces its
-exponential. 1.4 is not a parameter: the extension does not carry one, and it is
-Cycles' skin default.
+**The microfacet matters as much as the refraction.** A smooth interface was tried
+first and is wrong, in a way worth recording because the slab could not see it:
+Snell alone compresses the cone so hard -- at 1.4 even a grazing ray bends to 45.6
+degrees -- that every path dives almost radially, crosses the whole body and is
+absorbed instead of turning round near the surface. The slab, which only measures
+what crosses, read correctly; the lit half of `31_subsurface_absorbing` fell to
+**0.36** of the reference, because what lights it is scattering close to the entry
+and nothing was landing there. One instrument confirming a change is not the same
+as the change being right.
 
-**The slab is now correct**, and it is graded against algebra rather than against
-the reference:
+1.4 is not a parameter: the extension carries no index, and it is Cycles' skin
+default. The interface roughness is the material's.
 
-| pair | analytic | Cycles | here | sigma Cycles | sigma here |
-|---|---|---|---|---|---|
-| 0.05 -> 0.10 | 0.7788 | 0.7919 | 0.7930 | 4.67 | 4.64 |
-| 0.10 -> 0.20 | 0.6065 | 0.6228 | 0.6242 | 4.74 | 4.71 |
-| 0.20 -> 0.40 | 0.3679 | 0.3819 | 0.3839 | 4.81 | 4.79 |
-| 0.40 -> 0.80 | 0.1353 | 0.1418 | 0.1431 | 4.88 | 4.86 |
+| row | before | smooth refraction | microfacet refraction |
+|---|---|---|---|
+| `25_subsurface` | 0.0479 / 0.997 | 0.0501 / 0.976 | **0.0397 / 0.998** |
+| `29_subsurface_skin` | 0.0496 / 0.996 | 0.0531 / 0.972 | **0.0423 / 0.994** |
+| `30_subsurface_translucent` | 0.0966 / 1.027 | 0.0780 / 0.969 | **0.0500 / 1.003** |
+| `31_subsurface_absorbing` | 0.2294 / 1.112 | 0.1337 / 0.896 | **0.0648 / 1.001** |
 
-Both track the pure exponential from below by the in-scattering this albedo still
-has, and they agree with each other to 0.03 in every row. In absolute terms the
-slab reads 1.002 to 1.020 against Cycles where it read 0.852 to 0.327.
+`31`'s `rel` falls by a factor of 3.5 and `30`'s by a factor of 2. The two thick
+rows, which had been passing at ~0.997 with a wrong entry, keep that ratio for the
+right reason now.
 
-The sphere rows improve where they measure transport and go slightly dark
-everywhere:
+On the slab, graded against algebra rather than the reference, the effective
+extinction reads 4.92, 4.98, 5.05, 5.11 against Cycles' 4.67, 4.74, 4.81, 4.88 on
+a nominal 5.00 -- the two now bracket it from opposite sides, within 5% of each
+other, where before the fix this walk read 7.03 to 5.85.
 
-| row | before | after |
-|---|---|---|
-| `25_subsurface` | 0.0479 / 0.997 | 0.0501 / 0.976 |
-| `29_subsurface_skin` | 0.0496 / 0.996 | 0.0531 / 0.972 |
-| `30_subsurface_translucent` | 0.0966 / 1.027 | 0.0780 / 0.969 |
-| `31_subsurface_absorbing` | 0.2294 / 1.112 | 0.1337 / 0.896 |
+No non-subsurface row moves.
 
-31's `rel` nearly halves and 30's falls by a fifth, which is the transport being
-right. What is left is a deficit of about 2.4 to 3% on the two thick rows -- and
-those are the rows that cannot tell subsurface from diffuse, so they were reading
-0.997 with a wrong entry, which is the cancellation pattern of entry 15 again.
+### What is left
 
-2.8% is the normal-incidence Fresnel reflectance of a 1.4 interface, `((1-1.4) /
-(1+1.4))^2`. That is a coincidence worth testing rather than a conclusion: the
-entry weight is one on both sides, so neither renderer is taking a Fresnel share
-out, and if the number is real it is on the exit rather than the entry. Nothing
-here has measured it yet.
+A rim. Per region, the lit halves sit at 0.987 on all three rows and the shadowed
+halves at 0.996, 1.032 and 1.156, and the 8x difference on `31` is noise plus a
+bright arc along the top edge of each sphere -- the grazing entry, where a
+microfacet refraction and Cycles' differ most. That residual is a few percent of a
+row that was 3.3x wrong at the shadowed half, and it is what a further pass should
+be graded on.
 
-Grade the remainder on the four subsurface rows returning to ratio ~1.00 without
-moving `sss_slab_read.py`'s `sigma here` column off Cycles'.
-
-## Closed (kept for the measurement, not the work)
 
 ### The diffuse lobe was summed with the specular one instead of layered under it
 

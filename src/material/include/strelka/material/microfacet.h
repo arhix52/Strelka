@@ -10,6 +10,9 @@
 // ============================================================================
 
 #include "material_math.h"
+// build_onb / world_to_local, for the subsurface entry frame. sampling.h includes
+// only material_math.h, so this does not cycle.
+#include "sampling.h"
 
 // ---------------------------------------------------------------------------
 // Minimum roughness to avoid singularities
@@ -246,35 +249,50 @@ DEVICE_FUNC float ggx_vndf_pdf_half(float alpha, float NdotH, float NdotV, float
 
 // The direction a path takes on entering a subsurface medium.
 //
-// Snell about the shading normal, which is what Cycles' subsurface_entry_bounce()
-// does and what this walk did not: it entered along the glTF diffuse-transmission
-// lobe, a cosine hemisphere. A path entering a slab of thickness d at angle theta
-// crosses it along d / cos(theta), so a cosine entry transmits 2 * E3(tau) rather
-// than exp(-tau) -- measurably steeper, and not even exponential. See
-// docs/open-defects.md entry 16 and tools/feature_tests/sss_slab.py, which grades
-// this against algebra rather than against a reference.
+// Refraction through the interface, about a GGX microfacet normal -- the port of
+// Cycles' subsurface_entry_bounce(). This walk used to enter along the glTF
+// diffuse-transmission lobe, a cosine hemisphere, and a path entering a slab of
+// thickness d at angle theta crosses it along d / cos(theta), so a cosine entry
+// transmits 2 * E3(tau) rather than exp(-tau): measurably steeper, and not even
+// exponential. See docs/open-defects.md entry 16 and tools/feature_tests/sss_slab.py,
+// which grades this against algebra rather than against a reference.
 //
-// Smooth rather than through a GGX microfacet. Cycles refracts about a sampled
-// half vector, but refraction alone already compresses the cone -- at an IOR of
-// 1.4 even a grazing ray bends to 45.6 degrees -- and the slab says a smooth
-// interface reproduces its exponential. A microfacet lobe here would be a second
-// parameter with nothing measured asking for it.
-//
-// `wo` points away from the surface toward where the light came from, and `n` is
-// the shading normal on that side. Entering from the outside cannot reach total
-// internal reflection, since eta < 1 leaves the radicand above 1 - eta^2.
+// The microfacet matters as much as the refraction, and a smooth interface was
+// tried first and is wrong. Snell alone compresses the cone so hard -- at an index
+// of 1.4 even a grazing ray bends to 45.6 degrees -- that every path dives almost
+// radially, crosses the whole body and is absorbed instead of turning round near
+// the surface. The slab, which only measures what crosses, was correct; the lit
+// half of a sphere fell to 0.36 of the reference, because what lights it is
+// scattering close to the entry and nothing was landing there.
 //
 // The index is 1.4 and is not a parameter: STRELKA_materials_subsurface does not
 // carry one, Cycles takes it from Principled's IOR where 1.4 is the skin default,
 // and that is the value the ladder is graded against. Give it an argument when a
 // scene needs to author it.
-DEVICE_FUNC float3 subsurface_entry_direction(float3 wo, float3 n)
+//
+// `wo` points away from the surface toward where the light came from, and `n` is
+// the shading normal on that side. Entering from the outside cannot reach total
+// internal reflection, since eta < 1 leaves the radicand above 1 - eta^2.
+DEVICE_FUNC float3 subsurface_entry_direction(float3 wo, float3 n, float roughness, float u1, float u2)
 {
     const float eta = 1.0f / 1.4f;
-    const float cosI = fminf(fmaxf(dot(n, wo), 0.0f), 1.0f);
-    const float k = 1.0f - eta * eta * (1.0f - cosI * cosI);
+
+    float3 T;
+    float3 B;
+    build_onb(n, T, B);
+    const float3 woLocal = world_to_local(wo, T, B, n);
+    if (woLocal.z <= 0.0f)
+    {
+        return -n;
+    }
+
+    const float alpha = fmaxf(alpha_from_roughness(roughness), 1e-4f);
+    const float3 h = local_to_world(ggx_vndf_sample(woLocal, alpha, u1, u2), T, B, n);
+
+    const float cosHI = fmaxf(dot(h, wo), 0.0f);
+    const float k = 1.0f - eta * eta * (1.0f - cosHI * cosHI);
     const float cosT = sqrtf(fmaxf(k, 0.0f));
-    return safe_normalize(-eta * wo + (eta * cosI - cosT) * n);
+    return safe_normalize(-eta * wo + (eta * cosHI - cosT) * h);
 }
 
 // The half vector a refraction through an interface of relative index `eta`

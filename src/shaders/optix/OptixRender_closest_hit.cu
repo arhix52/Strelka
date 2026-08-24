@@ -2233,7 +2233,10 @@ extern "C" __global__ void __closesthit__radiance()
     prd->dir = sssRefractedEntry ?
                    subsurface_entry_direction(si.wo,
                                               (dot(si.shading_normal, si.wo) > 0.0f) ? si.shading_normal :
-                                                                                       -si.shading_normal) :
+                                                                                       -si.shading_normal,
+                                              si.roughness,
+                                              random<SampleDimension::eSssChannel>(prd->sampler),
+                                              random<SampleDimension::eSssDistance>(prd->sampler)) :
                    sample_data.wi;
     if (isFibre)
     {
