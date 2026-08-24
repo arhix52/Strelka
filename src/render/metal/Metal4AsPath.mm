@@ -50,6 +50,7 @@ public:
     {
         // Metal 4 descriptors derive from Metal 3 ones so the device query is an
         // upcast. Valid only on hardware that supports Metal 4 ray tracing.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         return mDevice->accelerationStructureSizes(static_cast<MTL4::AccelerationStructureDescriptor*>(descriptor));
     }
 
@@ -160,6 +161,9 @@ public:
 
     void setGeometryOpaque(NS::Object* geometryDescriptor, bool opaque) override
     {
+        // The descriptor is a concrete geometry descriptor this class created; the
+        // NS::Object* is only how the interface carries it back.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         static_cast<MTL4::AccelerationStructureGeometryDescriptor*>(geometryDescriptor)->setOpaque(opaque);
     }
 
@@ -199,6 +203,8 @@ public:
     void setInstanceDescriptorBuffer(MTL::AccelerationStructureDescriptor* descriptor,
                                      MTL::Buffer* instanceBuffer) override
     {
+        // The base pointer always refers to the instance descriptor built above.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         static_cast<MTL4::InstanceAccelerationStructureDescriptor*>(descriptor)
             ->setInstanceDescriptorBuffer(bufferRange(instanceBuffer));
     }
@@ -206,6 +212,8 @@ public:
     MTL::AccelerationStructure* createCompacted(MTL::AccelerationStructureDescriptor* descriptor) override
     {
         NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+        // The Metal 4 descriptor is passed in as its Metal 3 base; recover it.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         auto* m4desc = static_cast<MTL4::AccelerationStructureDescriptor*>(descriptor);
         const MTL::AccelerationStructureSizes accelSizes = sizes(descriptor);
         MTL::AccelerationStructure* accelerationStructure =
@@ -297,6 +305,8 @@ public:
 
     MTL::AccelerationStructure* createNoCompact(MTL::AccelerationStructureDescriptor* descriptor) override
     {
+        // The Metal 4 descriptor is passed in as its Metal 3 base; recover it.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         auto* m4desc = static_cast<MTL4::AccelerationStructureDescriptor*>(descriptor);
         const auto tSizes = std::chrono::steady_clock::now();
         const MTL::AccelerationStructureSizes accelSizes = sizes(descriptor);
@@ -407,6 +417,7 @@ public:
     {
         assert(mInlineEncoder);
         mInlineEncoder->buildAccelerationStructure(
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
             as, static_cast<MTL4::AccelerationStructureDescriptor*>(descriptor), bufferRange(scratch));
     }
 
@@ -416,6 +427,7 @@ public:
     {
         assert(mInlineEncoder);
         mInlineEncoder->refitAccelerationStructure(
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
             as, static_cast<MTL4::AccelerationStructureDescriptor*>(descriptor), as, bufferRange(scratch));
     }
 

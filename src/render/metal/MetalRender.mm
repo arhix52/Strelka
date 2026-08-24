@@ -766,6 +766,8 @@ MTL::Device* acquireMetalDevice()
         const NS::UInteger count = devices->count();
         for (NS::UInteger i = 0; i < count; ++i)
         {
+            // metal-cpp exposes this framework-owned collection as NS::Object.
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
             MTL::Device* candidate = static_cast<MTL::Device*>(devices->object(i));
             if (candidate && candidate->supportsRaytracing())
             {

@@ -157,6 +157,9 @@ public:
 
     void setGeometryOpaque(NS::Object* geometryDescriptor, bool opaque) override
     {
+        // The descriptor is a concrete geometry descriptor this class created; the
+        // NS::Object* is only how the interface carries it back.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         static_cast<MTL::AccelerationStructureGeometryDescriptor*>(geometryDescriptor)->setOpaque(opaque);
     }
 
@@ -197,6 +200,8 @@ public:
     void setInstanceDescriptorBuffer(MTL::AccelerationStructureDescriptor* descriptor,
                                      MTL::Buffer* instanceBuffer) override
     {
+        // The base pointer always refers to the instance descriptor built above.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         static_cast<MTL::InstanceAccelerationStructureDescriptor*>(descriptor)
             ->setInstanceDescriptorBuffer(instanceBuffer);
     }
@@ -219,6 +224,8 @@ public:
         MTL::Buffer* scratchBuffer =
             mDevice->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate);
         MTL::CommandBuffer* commandBuffer = mCommandQueue->commandBuffer();
+        // The top level reads every bottom level named by its instance buffer.
+        waitForPriorBuilds(commandBuffer);
         MTL::AccelerationStructureCommandEncoder* commandEncoder =
             commandBuffer->accelerationStructureCommandEncoder();
         MTL::Buffer* compactedSizeBuffer = mDevice->newBuffer(sizeof(uint32_t), MTL::ResourceStorageModeShared);
@@ -248,6 +255,7 @@ public:
             return nullptr;
         }
         commandBuffer = mCommandQueue->commandBuffer();
+        waitForPriorBuilds(commandBuffer);
         commandEncoder = commandBuffer->accelerationStructureCommandEncoder();
         commandEncoder->copyAndCompactAccelerationStructure(accelerationStructure, compacted);
         commandEncoder->endEncoding();
@@ -273,12 +281,16 @@ public:
                           accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
             return nullptr;
         }
+        // Newly owned buffer intentionally kept as a mutable pointer: it is stored
+        // in mAsGroupScratch (a vector of non-const pointers) and released later.
+        // NOLINTNEXTLINE(misc-const-correctness)
         MTL::Buffer* const scratchBuffer =
             mDevice->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate);
         static const uint32_t kGroupSize = std::max(1u, envUint("STRELKA_AS_GROUP", 1));
         if (!mAsGroupCommandBuffer)
         {
             mAsGroupCommandBuffer = mCommandQueue->commandBuffer()->retain();
+            waitForPriorBuilds(mAsGroupCommandBuffer);
             mAsGroupEncoder = mAsGroupCommandBuffer->accelerationStructureCommandEncoder()->retain();
         }
         mAsGroupEncoder->buildAccelerationStructure(accelerationStructure, descriptor, scratchBuffer, 0UL);
@@ -363,6 +375,7 @@ public:
         }
         NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
         MTL::CommandBuffer* commandBuffer = mCommandQueue->commandBuffer();
+        waitForPriorBuilds(commandBuffer);
         if (update.afterSkinning && update.afterSkinningValue != 0)
         {
             commandBuffer->encodeWait(update.afterSkinning, update.afterSkinningValue);
@@ -377,6 +390,24 @@ public:
     }
 
 private:
+    /// Order this command buffer behind every acceleration-structure build
+    /// already committed on this queue.
+    ///
+    /// Metal schedules command buffers in commit order but does not make one
+    /// wait for the previous to *complete*. The top level reads every bottom
+    /// level its instance buffer names, so without this it traced structures
+    /// that were still being written and whole meshes vanished. A GPU wait
+    /// rather than waitUntilCompleted: a CPU round trip per structure costs
+    /// real time on scenes with thousands. Measurement and elimination in
+    /// docs/open-defects.md, Closed.
+    void waitForPriorBuilds(MTL::CommandBuffer* commandBuffer)
+    {
+        if (mBuildEvent && mBuildValue != 0)
+        {
+            commandBuffer->encodeWait(mBuildEvent, mBuildValue);
+        }
+    }
+
     void signalBuild(MTL::CommandBuffer* commandBuffer)
     {
         if (!mBuildEvent)

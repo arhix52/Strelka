@@ -95,6 +95,8 @@ MetalTextures::Payload MetalTextures::readCachedPayload(const std::string& cache
     if (!in)
         return payload;
     CachedTextureHeader header{};
+    // Binary cache I/O: streaming POD/byte buffers through char* is the idiom.
+    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
     in.read(reinterpret_cast<char*>(&header), sizeof(header));
     if (!in || std::memcmp(header.magic, "BTEX", 4) != 0 || header.version != kTextureCacheVersion)
         return payload;
@@ -116,6 +118,7 @@ MetalTextures::Payload MetalTextures::readCachedPayload(const std::string& cache
             return Payload{};
         payload.data.push_back(std::move(level));
     }
+    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
     payload.fromCache = true;
     payload.valid = true;
     return payload;
@@ -162,6 +165,8 @@ MTL::Texture* MetalTextures::createFromPayload(const Payload& payload, const std
             header.levels = payload.levels;
             header.pixelFormat = payload.pixelFormat;
             header.blockBytes = payload.blockBytes;
+            // Binary cache I/O: streaming POD/byte buffers through char* is the idiom.
+            // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
             out.write(reinterpret_cast<const char*>(&header), sizeof(header));
             for (uint32_t l = 0; l < payload.levels && l < payload.data.size(); ++l)
             {
@@ -169,6 +174,7 @@ MTL::Texture* MetalTextures::createFromPayload(const Payload& payload, const std
                 out.write(reinterpret_cast<const char*>(&byteLength), sizeof(byteLength));
                 out.write(reinterpret_cast<const char*>(payload.data[l].data()), byteLength);
             }
+            // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
             out.close();
             fs::rename(tmp, cacheFileToWrite, ec);
         }
@@ -183,6 +189,8 @@ MTL::Texture* MetalTextures::loadCached(const std::string& cachePath)
         return nullptr;
 
     CachedTextureHeader header{};
+    // Binary cache I/O: streaming POD/byte buffers through char* is the idiom.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     in.read(reinterpret_cast<char*>(&header), sizeof(header));
     if (!in || std::memcmp(header.magic, "BTEX", 4) != 0 || header.version != kTextureCacheVersion)
         return nullptr;
@@ -201,6 +209,7 @@ MTL::Texture* MetalTextures::loadCached(const std::string& cachePath)
         return nullptr;
 
     std::vector<uint8_t> level;
+    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
     for (uint32_t l = 0; l < header.levels; ++l)
     {
         uint32_t byteLength = 0;
@@ -222,6 +231,7 @@ MTL::Texture* MetalTextures::loadCached(const std::string& cachePath)
         const size_t rowBytes = header.blockBytes ? (size_t)((w + 3) / 4) * header.blockBytes : (size_t)w * 4;
         texture->replaceRegion(MTL::Region::Make3D(0, 0, 0, w, h, 1), l, level.data(), rowBytes);
     }
+    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
     return texture;
 }
 
@@ -439,7 +449,12 @@ bool MetalTextures::prewarmStep(const std::vector<Request>& requests, double bud
     // checked per batch rather than relied on to cut one short.
     const size_t batch = std::max<size_t>(1, (size_t)std::thread::hardware_concurrency());
     const auto sliceStart = std::chrono::steady_clock::now();
-    do
+    // The early return above guarantees at least one pending entry, so the first
+    // batch always runs; the condition only gates whether a further batch starts.
+    while (mPrewarmCursor < mPrewarmQueue.size() &&
+           (budgetMs <= 0.0 ||
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceStart).count() <
+                budgetMs))
     {
         const size_t begin = mPrewarmCursor;
         const size_t count = std::min(batch, mPrewarmQueue.size() - begin);
@@ -462,10 +477,7 @@ bool MetalTextures::prewarmStep(const std::vector<Request>& requests, double bud
             }
         }
         mPrewarmCursor += count;
-    } while (
-        mPrewarmCursor < mPrewarmQueue.size() &&
-        (budgetMs <= 0.0 ||
-         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceStart).count() < budgetMs));
+    }
 
     return mPrewarmCursor >= mPrewarmQueue.size();
 }

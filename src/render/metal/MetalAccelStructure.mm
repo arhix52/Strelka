@@ -509,6 +509,9 @@ bool MetalAccelStructure::step(double budgetMs)
 
     auto hashTransform = [](const glm::mat4& m) {
         uint64_t h = 1469598103934665603ull;
+        // FNV-1a over the matrix bytes; byte aliasing through unsigned char is
+        // well-defined and is the point of the cast.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         const auto* raw = reinterpret_cast<const unsigned char*>(&m);
         for (size_t i = 0; i < sizeof(glm::mat4); ++i)
         {
