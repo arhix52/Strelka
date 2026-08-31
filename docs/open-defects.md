@@ -870,20 +870,42 @@ The closure weight divided by the probability of having picked that closure,
 which is what `bsdf_over_pdf` already is on this side. Neither renderer takes an
 angular term at the entry. The comment describes an intention, not the code.
 
-What is still unread, in the order their evidence is worth:
+**It is not the exit either.** `subsurface_shader_data_setup()` clears the
+closures and installs `bsdf_diffuse_setup(sd, N, one_spectrum())` -- a cosine lobe
+at unit weight about the exit shading normal, with the shader *not* re-evaluated.
+The ray reversal before it (`ray.P += ray.D * ray.tmax * 2.0f; ray.D = -ray.D;`)
+exists to make the exit read as a front-facing hit, not to change what leaves it.
+That is what this walk already emits.
 
-- **The exit.** Cycles ends the walk by reversing the ray, re-intersecting to get
-  a proper surface hit, and setting up a real diffuse BSDF there
-  (`bsdf_diffuse_setup`), after which ordinary surface shading runs. This walk
-  emits from a bare cosine lobe at the hit it already had. At a grazing rim the
-  difference between those two is largest, which is where the disagreement is.
-- **Which geometry the walk may exit through.** Cycles intersects only the object
-  the walk started in (`scene_intersect_local(..., object, ...)`). This one traces
-  the whole volume top level with a triangle mask and takes whatever it hits,
-  which the code comment at the exit already admits is a simplification. The
-  spheres in these rows rest on the floor.
-- The interface roughness fed to the microfacet. Both are 1.0 in every row here,
-  because the builders author `roughness=1.0`, so nothing in the ladder tests it.
+Measured rather than only read: `render.estimator_mode` 0 and 1 give the same
+numbers to three digits on this row -- spheres 1.032 both, rim 0.883 against 0.886
+-- so the exit's light connection is not where it lives. Two independent unbiased
+estimators agreeing puts it in the transported quantity.
+
+**Sharpened, it is an angular redistribution across the disc**, not a rim effect:
+
+| region | ratio |
+|---|---|
+| disc centre, normal view | **1.173** |
+| whole sphere | 1.032 |
+| top rim, grazing view | **0.883** |
+
+Seventeen percent too much where the surface faces the camera and twelve percent
+too little where it turns away, summing to the +3% the row reports. Since the
+camera ray is what enters the medium, that is the entry refraction's angular
+behaviour and nothing downstream of it.
+
+The microfacet width cannot be the explanation on these rows: every builder
+authors `roughness = 1.0`, so the entry alpha is already saturated at 1 on both
+sides and there is no wider distribution available to reach for. A row at a lower
+roughness would separate `alpha = roughness` from `alpha = roughness^2` as the
+convention, and nothing in the ladder has one.
+
+Still unread, and now the only structural difference left: Cycles intersects only
+the object the walk started in (`scene_intersect_local(..., object, ...)`), while
+this walk traces the whole volume top level with a triangle mask and takes
+whatever it hits -- which the comment at the exit already admits is a
+simplification. The spheres in these rows rest on the floor.
 
 
 ### The diffuse lobe was summed with the specular one instead of layered under it
