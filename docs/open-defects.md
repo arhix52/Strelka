@@ -853,12 +853,37 @@ We are *dark* at the grazing rim and bright on the shadowed side: light that
 Cycles returns near the entry, this walk carries around the body. The rim is 12%
 on the row built to be hardest and 2% on the one that looks like skin.
 
-The lead worth taking next is the entry *weight*, not the direction.
-`subsurface_bounce()` applies `surface_shader_bssrdf_sample_weight(sd, sc)`, whose
-comment says "optionally including Fresnel from entry point", and this walk
-applies one -- the diffuse-transmission lobe's, which carries no angular term.
-An interface with an index reflects at grazing, and grazing is exactly where the
-two disagree. That function has not been read.
+**It is not the entry weight.** That was the obvious lead, because
+`subsurface_bounce()` calls `surface_shader_bssrdf_sample_weight()` under a
+comment reading "Compute weight, optionally including Fresnel from entry point".
+The function does no such thing:
+
+    Spectrum weight = bssrdf_sc->weight;
+    if (sd->num_closure > 1) {
+      float sum = 0.0f;
+      for (int i = 0; i < sd->num_closure; i++) { ... sum += sc->sample_weight; }
+      weight *= sum / bssrdf_sc->sample_weight;
+    }
+    return weight;
+
+The closure weight divided by the probability of having picked that closure,
+which is what `bsdf_over_pdf` already is on this side. Neither renderer takes an
+angular term at the entry. The comment describes an intention, not the code.
+
+What is still unread, in the order their evidence is worth:
+
+- **The exit.** Cycles ends the walk by reversing the ray, re-intersecting to get
+  a proper surface hit, and setting up a real diffuse BSDF there
+  (`bsdf_diffuse_setup`), after which ordinary surface shading runs. This walk
+  emits from a bare cosine lobe at the hit it already had. At a grazing rim the
+  difference between those two is largest, which is where the disagreement is.
+- **Which geometry the walk may exit through.** Cycles intersects only the object
+  the walk started in (`scene_intersect_local(..., object, ...)`). This one traces
+  the whole volume top level with a triangle mask and takes whatever it hits,
+  which the code comment at the exit already admits is a simplification. The
+  spheres in these rows rest on the floor.
+- The interface roughness fed to the microfacet. Both are 1.0 in every row here,
+  because the builders author `roughness=1.0`, so nothing in the ladder tests it.
 
 
 ### The diffuse lobe was summed with the specular one instead of layered under it
