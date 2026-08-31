@@ -43,7 +43,6 @@ void MetalSkinning::release()
     safeRelease(mSkinDataBuffer);
     safeRelease(mJointMatricesBuffer);
     safeRelease(mSkinningPSO4);
-    safeRelease(mTriangleUpdatePSO4);
     mJointMatOffsets.clear();
     mJointMatScratch.clear();
     mJointMatricesPerPose = 0;
@@ -70,8 +69,7 @@ void MetalSkinning::buildPipeline()
         return;
     }
     mSkinningPSO4 = mMetal4->newComputePipelineState(pLibrary, "skinningKernel", nullptr);
-    mTriangleUpdatePSO4 = mMetal4->newComputePipelineState(pLibrary, "updateTriangleBufferKernel", nullptr);
-    if (!mSkinningPSO4 || !mTriangleUpdatePSO4)
+    if (!mSkinningPSO4)
     {
         STRELKA_FATAL("Failed to create Metal 4 skinning pipelines");
         assert(false);
@@ -126,7 +124,7 @@ bool MetalSkinning::uploadJointMatrices(uint32_t frameIndex, uint32_t poseIndex)
         return false;
     }
 
-    if (!mSkinningPSO4 || !mTriangleUpdatePSO4)
+    if (!mSkinningPSO4)
     {
         if (!mLoggedSkinningPipelineGap)
         {
@@ -171,8 +169,7 @@ void MetalSkinning::encode(MTL4::ComputeCommandEncoder* pEncoder,
                            uint32_t frameIndex,
                            uint32_t poseIndex)
 {
-    if (!pEncoder || !mSkinningPSO4 || !mTriangleUpdatePSO4 ||
-        !mSkinDataBuffer || !mJointMatricesBuffer || mFrameCount == 0 || poseIndex >= 2)
+    if (!pEncoder || !mSkinningPSO4 || !mSkinDataBuffer || !mJointMatricesBuffer || mFrameCount == 0 || poseIndex >= 2)
     {
         return;
     }
@@ -197,7 +194,6 @@ void MetalSkinning::encode(MTL4::ComputeCommandEncoder* pEncoder,
             for (const auto instId : node.instanceIds)
             {
                 auto& mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
-                const uint32_t meshId = mScene->mInstances[instId].mMeshId;
 
                 // Dispatch skinning kernel
                 SkinningParams skinParams = {};
@@ -216,36 +212,6 @@ void MetalSkinning::encode(MTL4::ComputeCommandEncoder* pEncoder,
                 const MTL::Size groupSize = MTL::Size(threadsPerGroup, 1, 1);
                 pEncoder->dispatchThreadgroups(
                     MTL::Size((mesh.mVertexCount + threadsPerGroup - 1) / threadsPerGroup, 1, 1), groupSize);
-
-                // Dispatch triangle update kernel. The per-mesh records are
-                // created in the structures stage, and frames are published from
-                // the environment stage onwards -- so a frame that poses a
-                // streaming scene can arrive before they exist, and indexing an
-                // empty vector here is a read through null.
-                if (meshId >= mGeometry->meshes().size())
-                {
-                    continue;
-                }
-                const MetalGeometry::Mesh* metalMesh = mGeometry->meshes()[meshId];
-                if (metalMesh->mPerPrimitiveBuffer)
-                {
-                    TriangleUpdateParams triParams = {};
-                    triParams.triangleCount = metalMesh->mTriangleCount;
-                    triParams.indexOffset = mesh.mIndex;
-                    triParams.vbOffset = mesh.mVbOffset;
-
-                    // Skinning writes the vertices this reads.
-                    pEncoder->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch,
-                                                        MTL4::VisibilityOptionDevice);
-                    pEncoder->setComputePipelineState(mTriangleUpdatePSO4);
-                    skinTable->setAddress(metalMesh->mPerPrimitiveBuffer->gpuAddress(), 0);
-                    skinTable->setAddress(mGeometry->vertexBuffer()->gpuAddress(), 1);
-                    skinTable->setAddress(mGeometry->indexBuffer()->gpuAddress(), 2);
-                    skinTable->setAddress(constants.push(triParams), 3);
-
-                    pEncoder->dispatchThreadgroups(
-                        MTL::Size((metalMesh->mTriangleCount + 255) / 256, 1, 1), groupSize);
-                }
             }
         }
     }

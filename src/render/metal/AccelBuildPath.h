@@ -58,15 +58,11 @@ public:
 
     // --- Descriptor factories (return retained objects; caller releases) ---
 
-    virtual NS::Object* makeTriangleGeometry(MetalGeometry* geometry,
-                                             const oka::Mesh& mesh,
-                                             MTL::Buffer* perPrimitiveBuffer,
-                                             uint32_t triangleCount) = 0;
+    virtual NS::Object* makeTriangleGeometry(MetalGeometry* geometry, const oka::Mesh& mesh, uint32_t triangleCount) = 0;
 
     virtual NS::Object* makeMotionTriangleGeometry(MTL::Device* device,
                                                    MetalGeometry* geometry,
                                                    const oka::Mesh& mesh,
-                                                   MTL::Buffer* perPrimitiveBuffer,
                                                    uint32_t triangleCount,
                                                    std::vector<MTL::Buffer*>& motionVertexRangeBuffers) = 0;
 

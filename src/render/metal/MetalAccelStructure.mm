@@ -57,7 +57,6 @@ struct AsBuildState
 
     // Meshes
     size_t meshCursor = 0;
-    size_t primitiveBytes = 0;
 
     // Grouping
     std::vector<int> instanceNode;
@@ -182,13 +181,12 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
         NS::Object* geom = nullptr;
         if (skeletal && mBuildMotionBlas)
         {
-            geom = mPath->makeMotionTriangleGeometry(mDevice, mGeometry, mesh, meshData->mPerPrimitiveBuffer,
-                                                     meshData->mTriangleCount, blas.mMotionVertexRangeBuffers);
+            geom = mPath->makeMotionTriangleGeometry(
+                mDevice, mGeometry, mesh, meshData->mTriangleCount, blas.mMotionVertexRangeBuffers);
         }
         else
         {
-            geom = mPath->makeTriangleGeometry(mGeometry, mesh, meshData->mPerPrimitiveBuffer,
-                                               meshData->mTriangleCount);
+            geom = mPath->makeTriangleGeometry(mGeometry, mesh, meshData->mTriangleCount);
         }
         static const bool leaveDefault = envFlag("STRELKA_NO_SET_OPAQUE");
         if (!leaveDefault)
@@ -421,18 +419,12 @@ bool MetalAccelStructure::step(double budgetMs)
 
     if (st.phase == Phase::Meshes)
     {
-        // Per-mesh buffers survive a rebuild of the structures that reference them.
+        // Per-mesh records survive a rebuild of the structures that reference them.
         if (mGeometry->meshes().empty())
         {
-            // Read once, here: the meshes are built now and the acceleration
-            // structures embed whatever they are given, so a later change of tracer
-            // cannot retroactively add the data.
-            // Nothing reads per-primitive data now: it existed for the megakernel.
-            mNeedsPrimitiveData = false;
             while (st.meshCursor < meshes.size())
             {
-                mGeometry->createMeshData(mScene, st.meshCursor, mNeedsPrimitiveData);
-                st.primitiveBytes += (size_t)(meshes[st.meshCursor].mCount / 3) * sizeof(Triangle);
+                mGeometry->createMeshData(mScene, st.meshCursor);
                 ++st.meshCursor;
                 if (outOfTime(st.meshCursor))
                 {
@@ -440,12 +432,6 @@ bool MetalAccelStructure::step(double budgetMs)
                     report();
                     return finish(false);
                 }
-            }
-            if (!mNeedsPrimitiveData && st.primitiveBytes > 0)
-            {
-                STRELKA_INFO("Skipped {:.2f} GB of per-primitive attribute data: the wavefront tracer "
-                             "refetches from the vertex buffer",
-                             st.primitiveBytes / 1e9);
             }
         }
         mMotionBlasBuilt = mBuildMotionBlas;
@@ -1427,13 +1413,6 @@ void MetalAccelStructure::addDescriptorResidency()
     mMetal4->addResident(mGeometry->curveSegmentBuffer());
     mMetal4->addResident(mInstanceBuffer);
     mMetal4->addResident(mPreviousInstanceBuffer);
-    for (const MetalGeometry::Mesh* mesh : mGeometry->meshes())
-    {
-        if (mesh)
-        {
-            mMetal4->addResident(mesh->mPerPrimitiveBuffer);
-        }
-    }
     for (const Blas& blas : mBlasList)
     {
         mMetal4->addResident(blas.mAs);
@@ -1553,7 +1532,6 @@ void MetalAccelStructure::release()
     mOpaqueGeometryCount = 0;
     mCutoutGeometryCount = 0;
     mNextBlasRebuildIndex = 0;
-    mNeedsPrimitiveData = false;
     mMotionBlasBuilt = false;
     mBuildMotionBlas = false;
     delete mAsBuild;

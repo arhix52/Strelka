@@ -22,10 +22,7 @@ public:
     // the geometry descriptors need. Acceleration structures live in Accel.
     struct Mesh
     {
-        MTL::Buffer* mPerPrimitiveBuffer = nullptr;
         uint32_t mTriangleCount = 0;
-        uint32_t mVbOffset = 0;
-        bool mIsSkeletal = false;
     };
 
     /// Per scene curve set: where its segments start in mCurveSegmentBuffer and
@@ -49,8 +46,7 @@ public:
     // Does not upload lights or frame uniforms (those are other domains).
     void buildBuffers(Scene* scene);
 
-    /// Take the scene arrays that a no-copy wrap is already using as backing
-    /// store. Call after createMeshData(), which still walks the host arrays.
+    /// Take the scene arrays that a no-copy wrap is already using as backing store.
     void adoptAliasedHost(Scene* scene);
 
     /// True when the GPU vertex/index buffer is the scene's host array, not a copy.
@@ -60,7 +56,7 @@ public:
         return mVertexBufferAliased;
     }
 
-    void createMeshData(Scene* scene, size_t meshIndex, bool needsPrimitiveData);
+    void createMeshData(Scene* scene, size_t meshIndex);
 
     void clearMeshes();
     void clearGeometryEntries();

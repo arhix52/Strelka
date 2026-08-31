@@ -57,7 +57,6 @@ private:
     Scene* mScene = nullptr;
 
     MTL::ComputePipelineState* mSkinningPSO4 = nullptr;
-    MTL::ComputePipelineState* mTriangleUpdatePSO4 = nullptr;
 
     MTL::Buffer* mSkinDataBuffer = nullptr;
     MTL::Buffer* mJointMatricesBuffer = nullptr;

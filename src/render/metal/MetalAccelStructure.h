@@ -96,10 +96,6 @@ public:
     {
         return mMotionBlasBuilt;
     }
-    bool needsPrimitiveData() const
-    {
-        return mNeedsPrimitiveData;
-    }
     bool buildActive() const
     {
         return mAsBuild != nullptr;
@@ -284,7 +280,6 @@ private:
 
     AsBuildState* mAsBuild = nullptr;
 
-    bool mNeedsPrimitiveData = false;
     bool mMotionBlasBuilt = false;
     bool mBuildMotionBlas = false;
     uint32_t mOpaqueGeometryCount = 0;

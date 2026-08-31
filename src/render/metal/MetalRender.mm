@@ -728,10 +728,6 @@ bool MetalRender::memoryReport(MemoryReport& report) const
             bytes += bufBytes(mFrameUniforms.uniformBuffer(i));
             bytes += bufBytes(mFrameUniforms.tonemapBuffer(i));
         }
-        for (const Mesh* m : mGeometry.meshes())
-        {
-            bytes += m ? bufBytes(m->mPerPrimitiveBuffer) : 0;
-        }
         add("Uniforms & misc", bytes);
     }
 
@@ -956,11 +952,6 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mAccel.volumeAccelerationStructure());
     for (MTL::Buffer* buffer : mAccel.accelerationStructureAuxiliaryBuffers())
         add(buffer);
-    for (const Mesh* mesh : mGeometry.meshes())
-    {
-        if (mesh && mesh->mPerPrimitiveBuffer)
-            add(mesh->mPerPrimitiveBuffer);
-    }
     // The renderer alternates between output buffers, so declaring only the one
     // this frame happens to use leaves every other frame writing into an
     // allocation the queue does not know about -- which reads back as black

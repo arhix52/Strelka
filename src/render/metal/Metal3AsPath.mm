@@ -69,10 +69,7 @@ public:
     {
     }
 
-    NS::Object* makeTriangleGeometry(MetalGeometry* geometry,
-                                     const oka::Mesh& mesh,
-                                     MTL::Buffer* perPrimitiveBuffer,
-                                     uint32_t triangleCount) override
+    NS::Object* makeTriangleGeometry(MetalGeometry* geometry, const oka::Mesh& mesh, uint32_t triangleCount) override
     {
         auto* geom = MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
         geom->setVertexBuffer(geometry->vertexBuffer());
@@ -82,20 +79,12 @@ public:
         geom->setIndexBufferOffset(mesh.mIndex * sizeof(uint32_t));
         geom->setIndexType(MTL::IndexTypeUInt32);
         geom->setTriangleCount(triangleCount);
-        if (perPrimitiveBuffer)
-        {
-            geom->setPrimitiveDataBuffer(perPrimitiveBuffer);
-            geom->setPrimitiveDataBufferOffset(0);
-            geom->setPrimitiveDataElementSize(sizeof(Triangle));
-            geom->setPrimitiveDataStride(sizeof(Triangle));
-        }
         return geom;
     }
 
     NS::Object* makeMotionTriangleGeometry(MTL::Device*,
                                            MetalGeometry* geometry,
                                            const oka::Mesh& mesh,
-                                           MTL::Buffer* perPrimitiveBuffer,
                                            uint32_t triangleCount,
                                            std::vector<MTL::Buffer*>& /*motionVertexRangeBuffers*/) override
     {
@@ -113,13 +102,6 @@ public:
         geom->setIndexBufferOffset(mesh.mIndex * sizeof(uint32_t));
         geom->setIndexType(MTL::IndexTypeUInt32);
         geom->setTriangleCount(triangleCount);
-        if (perPrimitiveBuffer)
-        {
-            geom->setPrimitiveDataBuffer(perPrimitiveBuffer);
-            geom->setPrimitiveDataBufferOffset(0);
-            geom->setPrimitiveDataElementSize(sizeof(Triangle));
-            geom->setPrimitiveDataStride(sizeof(Triangle));
-        }
         kf0->release();
         kf1->release();
         return geom;

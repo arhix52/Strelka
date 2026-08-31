@@ -78,10 +78,7 @@ public:
         }
     }
 
-    NS::Object* makeTriangleGeometry(MetalGeometry* geometry,
-                                     const oka::Mesh& mesh,
-                                     MTL::Buffer* perPrimitiveBuffer,
-                                     uint32_t triangleCount) override
+    NS::Object* makeTriangleGeometry(MetalGeometry* geometry, const oka::Mesh& mesh, uint32_t triangleCount) override
     {
         auto* geom = MTL4::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
         geom->setVertexBuffer(bufferRange(geometry->vertexBuffer(), mesh.mVbOffset * sizeof(Scene::Vertex)));
@@ -90,19 +87,12 @@ public:
         geom->setIndexBuffer(bufferRange(geometry->indexBuffer(), mesh.mIndex * sizeof(uint32_t)));
         geom->setIndexType(MTL::IndexTypeUInt32);
         geom->setTriangleCount(triangleCount);
-        if (perPrimitiveBuffer)
-        {
-            geom->setPrimitiveDataBuffer(bufferRange(perPrimitiveBuffer));
-            geom->setPrimitiveDataElementSize(sizeof(Triangle));
-            geom->setPrimitiveDataStride(sizeof(Triangle));
-        }
         return geom;
     }
 
     NS::Object* makeMotionTriangleGeometry(MTL::Device* device,
                                            MetalGeometry* geometry,
                                            const oka::Mesh& mesh,
-                                           MTL::Buffer* perPrimitiveBuffer,
                                            uint32_t triangleCount,
                                            std::vector<MTL::Buffer*>& motionVertexRangeBuffers) override
     {
@@ -121,12 +111,6 @@ public:
         geom->setIndexBuffer(bufferRange(geometry->indexBuffer(), mesh.mIndex * sizeof(uint32_t)));
         geom->setIndexType(MTL::IndexTypeUInt32);
         geom->setTriangleCount(triangleCount);
-        if (perPrimitiveBuffer)
-        {
-            geom->setPrimitiveDataBuffer(bufferRange(perPrimitiveBuffer));
-            geom->setPrimitiveDataElementSize(sizeof(Triangle));
-            geom->setPrimitiveDataStride(sizeof(Triangle));
-        }
         return geom;
     }
 

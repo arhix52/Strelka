@@ -79,8 +79,6 @@ void MetalGeometry::clearMeshes()
     {
         if (mesh)
         {
-            if (mesh->mPerPrimitiveBuffer)
-                mesh->mPerPrimitiveBuffer->release();
             delete mesh;
         }
     }
@@ -344,67 +342,12 @@ void MetalGeometry::buildCurveBuffers(Scene* scene)
                  segments.size(), (points.size() * 16 + segments.size() * 4) / 1e6);
 }
 
-void MetalGeometry::createMeshData(Scene* scene, size_t meshIndex, bool needsPrimitiveData)
+void MetalGeometry::createMeshData(Scene* scene, size_t meshIndex)
 {
     const oka::Mesh& mesh = scene->getMeshes()[meshIndex];
     auto* result = new Mesh();
 
-    const uint32_t triangleCount = mesh.mCount / 3;
-    result->mTriangleCount = triangleCount;
-    result->mVbOffset = mesh.mVbOffset;
-    result->mIsSkeletal = mesh.isSkeletal;
-
-    const std::vector<Scene::Vertex>& vertices = scene->getVertices();
-    const std::vector<uint32_t>& indices = scene->getIndices();
-
-    // Per-primitive data is a second copy of every triangle's attributes, 72
-    // bytes each, held both here and inside the acceleration structure Metal
-    // builds from it. Only the megakernel reads it: the wavefront tracer cannot,
-    // because intersection.primitive_data is addressable solely inside the
-    // kernel that ran the intersect, so its shade stage refetches attributes
-    // from the vertex buffer instead (see fetchTriangle in wavefront.metal).
-    //
-    // Skipping it under the wavefront tracer is worth far more than it sounds:
-    // on a 50 M triangle forest it is 3.7 GB of host memory, the same again
-    // inside the acceleration structures, and the CPU time to fill it.
-    if (!needsPrimitiveData)
-    {
-        mMetalMeshes.push_back(result);
-        return;
-    }
-
-    std::vector<Triangle> triangleData(triangleCount);
-    for (uint32_t i = 0; i < triangleCount; ++i)
-    {
-        Triangle& curr = triangleData[i];
-        const uint32_t i0 = indices[mesh.mIndex + i * 3 + 0];
-        const uint32_t i1 = indices[mesh.mIndex + i * 3 + 1];
-        const uint32_t i2 = indices[mesh.mIndex + i * 3 + 2];
-
-        curr.positions[0] =
-            packed_float3(simd_make_float3(vertices[mesh.mVbOffset + i0].pos.x, vertices[mesh.mVbOffset + i0].pos.y,
-                                           vertices[mesh.mVbOffset + i0].pos.z));
-        curr.positions[1] =
-            packed_float3(simd_make_float3(vertices[mesh.mVbOffset + i1].pos.x, vertices[mesh.mVbOffset + i1].pos.y,
-                                           vertices[mesh.mVbOffset + i1].pos.z));
-        curr.positions[2] =
-            packed_float3(simd_make_float3(vertices[mesh.mVbOffset + i2].pos.x, vertices[mesh.mVbOffset + i2].pos.y,
-                                           vertices[mesh.mVbOffset + i2].pos.z));
-        curr.normals[0] = vertices[mesh.mVbOffset + i0].normal;
-        curr.normals[1] = vertices[mesh.mVbOffset + i1].normal;
-        curr.normals[2] = vertices[mesh.mVbOffset + i2].normal;
-        curr.tangent[0] = vertices[mesh.mVbOffset + i0].tangent;
-        curr.tangent[1] = vertices[mesh.mVbOffset + i1].tangent;
-        curr.tangent[2] = vertices[mesh.mVbOffset + i2].tangent;
-        curr.uv[0] = vertices[mesh.mVbOffset + i0].uv;
-        curr.uv[1] = vertices[mesh.mVbOffset + i1].uv;
-        curr.uv[2] = vertices[mesh.mVbOffset + i2].uv;
-    }
-
-    result->mPerPrimitiveBuffer =
-        mDevice->newBuffer(triangleData.size() * sizeof(Triangle), MTL::ResourceStorageModeShared);
-    memcpy(result->mPerPrimitiveBuffer->contents(), triangleData.data(), sizeof(Triangle) * triangleData.size());
-
+    result->mTriangleCount = mesh.mCount / 3;
     mMetalMeshes.push_back(result);
 }
 
