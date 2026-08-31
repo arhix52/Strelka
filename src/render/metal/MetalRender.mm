@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <cstddef>
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
@@ -26,14 +25,11 @@
 #include "MetalPostProcess.h"
 #include "MetalScenePreparation.h"
 #include "MetalWavefrontIntegrator.h"
-#include "MetalDomainMap.h"
-#include "texture_compress.h"
 #include "sampling_math.h"
 #include "integrator_features.h"
-#include "render_resolution.h"
+#include <host/render_resolution.h>
 #include "residency_set_diff.h"
-#include "ibl_alias_table.h"
-#include "integrator_buffer_sizes.h"
+#include <host/integrator_buffer_sizes.h>
 
 #include <fstream>
 
@@ -873,8 +869,8 @@ bool MetalRender::stepMetalMaterials(double budgetMs)
 // and an address in an argument table pointing at a non-resident allocation is a
 // GPU fault rather than a validation message. This is the price of the argument
 // table: the caller owns lifetime and residency both.
-// Wavefront queues come from mIntegrator; everything else is
-// still owned by MetalRender until those domains are extracted.
+// Persistent allocations are gathered here because residency spans every
+// domain and is committed once for the Metal 4 queue.
 void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
 {
     if (!mMetal4.isValid())

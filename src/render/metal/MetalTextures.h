@@ -1,6 +1,6 @@
 #pragma once
 
-#include "texture_cache_key.h"
+#include <host/texture_cache_key.h>
 
 #include <Metal/Metal.hpp>
 #include <settings.h>

@@ -1,6 +1,6 @@
 #include <doctest/doctest.h>
 
-#include "ibl_alias_table.h"
+#include <host/ibl_alias_table.h>
 
 #include <cmath>
 #include <limits>

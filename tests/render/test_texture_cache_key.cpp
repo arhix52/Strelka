@@ -1,6 +1,6 @@
 #include <doctest/doctest.h>
 
-#include "texture_cache_key.h"
+#include <host/texture_cache_key.h>
 
 using oka::metal::textureCacheKey;
 using oka::metal::TextureCacheKeyInputs;

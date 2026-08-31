@@ -1,6 +1,6 @@
 #include <doctest/doctest.h>
 
-#include "integrator_buffer_sizes.h"
+#include <host/integrator_buffer_sizes.h>
 
 using oka::metal::kWavefrontControlUints;
 using oka::metal::kWavefrontCurveTraversalBatchesPerGroup;

@@ -24,7 +24,7 @@
 
 #include <strelka/render/render.h>
 
-#include "../render/metal/render_resolution.h"
+#include <host/render_resolution.h>
 #include "../render/optix/optix_denoise_plan.h"
 
 #include <algorithm>

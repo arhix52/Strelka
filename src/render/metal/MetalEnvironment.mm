@@ -1,5 +1,5 @@
 #include "MetalEnvironment.h"
-#include "ibl_alias_table.h"
+#include <host/ibl_alias_table.h>
 
 #include "ShaderTypes.h"
 

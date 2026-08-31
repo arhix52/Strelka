@@ -25,9 +25,9 @@
 
 #include "texture_upload_plan.h"
 
-// Host-side and backend-neutral despite where they live; see the note above.
-#include "../metal/texture_cache_key.h"
-#include "../metal/texture_compress.h"
+// Host-side and backend-neutral; see the note above.
+#include <host/texture_cache_key.h>
+#include <host/texture_compress.h>
 
 // stb_image.h and stb_image_resize.h are deliberately NOT included here. Their
 // implementation blocks sit outside their include guards, so a second
@@ -273,8 +273,7 @@ inline std::string cacheKey(const std::string& fileName,
 
     oka::metal::TextureCacheKeyInputs in;
     // The salt goes in the file name field rather than in a new struct member so
-    // that texture_cache_key.h -- which the Metal backend owns and this machine
-    // cannot test -- does not have to change to carry a second backend.
+    // that texture_cache_key.h does not need a backend-specific field.
     in.fileName = "optix|v" + std::to_string(kOptixPayloadVersion) + (blockCompress ? "|bc" : "|raw") +
                   (wantMips ? "|mips" : "|lod0") + "|" + fileName;
     in.fileSize = ec ? 0 : (uint64_t)size;

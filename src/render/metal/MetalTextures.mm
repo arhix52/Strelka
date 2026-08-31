@@ -1,5 +1,5 @@
 #include "MetalTextures.h"
-#include "texture_compress.h"
+#include <host/texture_compress.h>
 
 #include <log.h>
 

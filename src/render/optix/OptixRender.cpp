@@ -116,7 +116,7 @@ static_assert((uint32_t)oka::optix_omm::kAlphaBlend == (uint32_t)ALPHA_MODE_BLEN
 
 // Backend-neutral: no Metal headers, and the same table both backends sample
 // from. See the note in loadEnvMap().
-#include "../metal/ibl_alias_table.h"
+#include <host/ibl_alias_table.h>
 
 namespace
 {
@@ -2726,7 +2726,7 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
 
 // The production sizes the plan is told about have to be the sizes the device
 // actually uses, or the buffers are allocated for a struct that is not the one
-// being written. Same discipline as src/render/metal/integrator_buffer_sizes.h.
+// being written. Same discipline as src/render/host/integrator_buffer_sizes.h.
 static_assert(sizeof(AovSample) == 64, "AovSample is written once per pixel per frame; keep an eye on the size");
 static_assert(sizeof(AovSample) == sizeof(float) * 16, "AovSample must stay a whole number of floats to read back");
 
@@ -5001,7 +5001,7 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     mTextureObjects.push_back(envTexPointObj);
 
     // The alias table comes from the shared host builder in
-    // render/metal/ibl_alias_table.h. It is backend-neutral (no Metal headers) and
+    // render/host/ibl_alias_table.h. It is backend-neutral and
     // already has a unit test; reusing it rather than writing a second
     // implementation is what makes the two backends importance-sample the same
     // HDRI from the same distribution, which is the only way their EXRs can be

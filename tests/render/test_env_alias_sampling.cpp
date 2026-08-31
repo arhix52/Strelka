@@ -1,7 +1,7 @@
 #include <doctest/doctest.h>
 
 // The two halves of environment importance sampling, checked against each other
-// on the host: the host builder in ibl_alias_table.h and the draw the GPU
+// on the host: the host builder in render/host/ibl_alias_table.h and the draw the GPU
 // actually runs, which env_alias_sampling.h compiles for both targets.
 //
 // What this pins is the property the whole scheme rests on and that no
@@ -11,7 +11,7 @@
 // mismatch is -- which is why it is worth a test rather than an inspection.
 
 #include <env_alias_sampling.h>
-#include "ibl_alias_table.h"
+#include <host/ibl_alias_table.h>
 
 #include <cmath>
 #include <cstdint>

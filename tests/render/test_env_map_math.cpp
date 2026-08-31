@@ -1,7 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <env_map_math.h>
-#include <ibl_alias_table.h>
+#include <host/ibl_alias_table.h>
 
 #include <algorithm>
 #include <cmath>

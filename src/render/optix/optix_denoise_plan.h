@@ -5,7 +5,7 @@
 // Pure arithmetic and pure decisions, no CUDA and no OptiX headers, so the parts
 // of the denoiser that can be wrong without a GPU can be tested without one.
 // OptixRender.cpp static_asserts that the production struct sizes match what
-// this header is told, in the same way src/render/metal/integrator_buffer_sizes.h
+// this header is told, in the same way src/render/host/integrator_buffer_sizes.h
 // does for the Metal integrator.
 //
 // The device code includes this too, which is why the functions carry a

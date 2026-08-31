@@ -16,10 +16,8 @@
 #include "MetalFrameUniforms.h"
 #include "MetalPostProcess.h"
 #include "MetalScenePreparation.h"
-#include "scene_stream.h"
+#include <host/scene_stream.h>
 #include "MetalWavefrontIntegrator.h"
-#include "MetalDomainMap.h"
-#include "ShaderTypes.h" // GeometryEntry, shared with the path-trace kernel
 #include <atomic>
 #include <unordered_set>
 #include <vector>
@@ -148,7 +146,7 @@ private:
     // the real tables arrive rather than passing null GPU addresses.
     MTL::Buffer* mSceneTablePlaceholder = nullptr;
 
-    // Domain-owned resources (see MetalDomainMap.h).
+    // Domain-owned resources (see docs/metal-backend.md).
     metal::MetalTextures mTextures;
     metal::MetalEnvironment mEnvironment;
     metal::MetalGeometry mGeometry;

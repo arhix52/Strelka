@@ -60,7 +60,7 @@ DEVICE_FUNC float3 envUVToDir(float2 uv, float rotation)
 
 /// The luminance the sampling distribution is built from.
 ///
-/// Must match buildIblAliasTable() in render/metal/ibl_alias_table.h exactly:
+/// Must match buildIblAliasTable() in render/host/ibl_alias_table.h exactly:
 /// the host weights texels by this and the device divides by the result, so a
 /// different set of coefficients on either side is a density for a map that was
 /// never sampled.

@@ -1,7 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "opacity_micromap_policy.h"
-#include "texture_compress.h"
+#include <host/texture_compress.h>
 
 #include <vector>
 

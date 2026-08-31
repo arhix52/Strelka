@@ -1,7 +1,7 @@
 #include "MetalWavefrontIntegrator.h"
 
 #include "MetalBuffer.h"
-#include "integrator_buffer_sizes.h"
+#include <host/integrator_buffer_sizes.h>
 #include "wavefront_stage_diagnostic.h"
 
 #include <algorithm>

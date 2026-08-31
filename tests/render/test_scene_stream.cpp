@@ -1,6 +1,6 @@
 #include <doctest/doctest.h>
 
-#include "scene_stream.h"
+#include <host/scene_stream.h>
 
 using oka::metal::canTracePartial;
 using oka::metal::PublishClock;

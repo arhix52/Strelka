@@ -23,7 +23,7 @@
 // be republished, and neither question has anything Metal in it. Duplicating it
 // here would mean two answers to one question, and the copy that has the test
 // would be the one that stayed right.
-#include <metal/scene_stream.h>
+#include <host/scene_stream.h>
 
 #include <cuda_runtime.h>
 

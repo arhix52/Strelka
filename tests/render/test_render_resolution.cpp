@@ -1,6 +1,6 @@
 #include <doctest/doctest.h>
 
-#include "render_resolution.h"
+#include <host/render_resolution.h>
 
 using namespace oka::render_resolution;
 

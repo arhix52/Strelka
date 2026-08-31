@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../render/metal/render_resolution.h"
+#include <host/render_resolution.h>
 
 #include <array>
 #include <cstdint>

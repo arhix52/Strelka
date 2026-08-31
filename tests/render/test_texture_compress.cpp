@@ -1,6 +1,6 @@
 #include <doctest/doctest.h>
 
-#include "texture_compress.h"
+#include <host/texture_compress.h>
 
 #include "../support/sampling.h"
 

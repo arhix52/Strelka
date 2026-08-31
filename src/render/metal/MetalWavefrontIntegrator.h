@@ -5,7 +5,7 @@
 #include "MetalEnvironment.h"
 #include "MetalTextures.h"
 #include "integrator_features.h"
-#include "integrator_buffer_sizes.h"
+#include <host/integrator_buffer_sizes.h>
 
 #include <strelka/render/buffer.h>
 #include <settings.h>
