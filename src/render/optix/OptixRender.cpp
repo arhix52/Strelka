@@ -573,11 +573,7 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
     accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
 
     const uint32_t pointsCount = mScene->getCurvesPoint().size(); // total points count in points buffer
-    // The sidecar carries the basis; it is not a property of the renderer. Every
-    // particle groom in the tree is linear, and this used to be hardcoded to 3 --
-    // so those strands were built as cubic B-splines over the same control
-    // points, which is a different curve (a B-spline does not pass through its
-    // control points) and one segment shorter per strand at each end.
+    // The sidecar basis selects linear or cubic geometry.
     const bool isLinear = (curve.mType == oka::Curve::Type::eLinear);
 
     rcurve->isLinear = isLinear;
@@ -644,8 +640,7 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
                                              1, // Number of build inputs
                                              &gas_buffer_sizes));
 
-    // Reuse temporary buffers if large enough, otherwise allocate new ones
-    // These buffers are kept alive and reused for future GAS builds
+    // Reuse temporary build buffers across GAS builds.
     if (!mTempAccelBuffer || mTempAccelBuffer->size() < gas_buffer_sizes.tempSizeInBytes)
     {
         mTempAccelBuffer = std::make_unique<OptixBuffer>(gas_buffer_sizes.tempSizeInBytes);
@@ -701,11 +696,7 @@ constexpr size_t kOmmBytesPerMesh = 64ull << 20;
 /// load into a stall.
 constexpr int64_t kOmmMaxTexelsPerMicroTriangle = 4096;
 
-/// Absorbs the difference between the host's evaluation of the barycentric
-/// interpolation and the device's. They are the same expression, not the same
-/// instruction sequence, and a uv landing exactly on a texel boundary must not
-/// turn on which way the last bit went. One part in ten thousand of the uv
-/// range, which at 4k is a twentieth of a texel.
+/// Padding follows optix_omm::bilinearTexelSpan's host/device boundary invariant.
 constexpr float kOmmUvPad = 1e-4f;
 
 struct Uv
@@ -1289,8 +1280,6 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
     OptixAccelBufferSizes gas_buffer_sizes;
     OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &accel_options, &triangle_input, 1, &gas_buffer_sizes));
 
-    // Reuse temporary buffers if large enough, otherwise allocate new ones
-    // These buffers are kept alive and reused for future GAS builds
     if (!mTempAccelBuffer || mTempAccelBuffer->size() < gas_buffer_sizes.tempSizeInBytes)
     {
         mTempAccelBuffer = std::make_unique<OptixBuffer>(gas_buffer_sizes.tempSizeInBytes);
@@ -1496,18 +1485,7 @@ bool OptiXRender::rebuildMesh(const oka::Mesh& mesh, int optixMeshesId)
     return gas_handle != before;
 }
 
-/// Refit every skeletal BLAS, and fully rebuild a bounded slice of them.
-///
-/// The policy this replaces was a blanket rebuild of *every* acceleration
-/// structure in the scene -- static geometry included, which never moves --
-/// on every tenth animation update. That is a stall proportional to the whole
-/// scene once every ten frames, to fix drift in a handful of skinned meshes,
-/// and the counter it was driven by measured update count rather than anything
-/// about the geometry.
-///
-/// Instead, the same round-robin Metal uses: the rebuild budget moves through
-/// the skeletal meshes a few per frame, so every one of them is rebuilt within
-/// a bounded number of frames and no single frame pays for all of them.
+/// Refit skeletal BLASes and rebuild them by bounded round robin.
 ///
 /// Returns whether any BLAS handle moved, which the caller needs because an
 /// instance naming a stale handle cannot be fixed by refitting the TLAS.
@@ -1587,14 +1565,8 @@ void OptiXRender::resolveInstanceGeometry(OptixInstance& oi, const oka::Instance
         // A light's proxy mesh is how the light is picked in the editor and how a
         // BSDF ray finds an emitter for MIS. It is not always something to look at.
         //
-        // A point or a spot has no shape: the proxy is a placeholder sphere that
-        // emits nothing, so leaving it visible put a black dot in the frame where
-        // the lamp is. That cost 4.4% of 12_lights_punctual and 3.4% of 27_ies.
-        // A disabled light is not there at all, and one authored with
-        // visibleToCamera off still lights the scene and still has to be hit by a
-        // bounce -- otherwise the MIS estimate is missing the strategy it deducts
-        // for -- but must not appear in the image. Same three rules Metal applies
-        // in MetalAccelStructure.
+        // Punctual and disabled lights have no visible proxy; camera-hidden area
+        // lights remain visible to bounce rays for MIS.
         const auto& descs = mScene->getLightsDesc();
         const bool known = instance.mLightId < descs.size();
         const bool enabled = known ? descs[instance.mLightId].enabled : true;
@@ -1660,13 +1632,7 @@ void OptiXRender::createTopLevelAccelerationStructure()
     // Structure() does not set this.
     mSbtDirty = true;
 
-    // The motion transforms are pooled rather than reallocated. Each animated
-    // instance needs one OptixMatrixMotionTransform of device memory, and this
-    // used to cudaMalloc a fresh one per instance on every rebuild and free the
-    // previous set -- an allocation and a free per animated instance per frame,
-    // on a path that already runs once per frame while an animation plays. The
-    // buffers are all the same size and their contents are overwritten anyway,
-    // so the pool only ever grows to the largest frame's instance count.
+    // Pool fixed-size motion transforms to avoid per-frame allocation churn.
     size_t motionTransformCursor = 0;
 
     const std::vector<oka::Instance>& instances = mScene->getInstances();
@@ -1762,7 +1728,6 @@ void OptiXRender::createTopLevelAccelerationStructure()
         mTlasBuffer = std::make_unique<OptixBuffer>(outputBufferSize);
     }
 
-    // Reuse temporary buffers if large enough, otherwise allocate new ones
     if (!mTempAccelBuffer || mTempAccelBuffer->size() < iasBufferSizes.tempSizeInBytes)
     {
         mTempAccelBuffer = std::make_unique<OptixBuffer>(iasBufferSizes.tempSizeInBytes);
@@ -1810,7 +1775,6 @@ void OptiXRender::createTopLevelAccelerationStructure()
         OPTIX_CHECK(optixAccelCompact(mState.context, nullptr, mState.ias_handle,
                                      compactedBuffer->getPtr(), compactedSize, &mState.ias_handle));
 
-        // Replace old buffer with compacted one
         mTlasBuffer = std::move(compactedBuffer);
         outputBufferSize = compactedSize;
     }
@@ -1855,9 +1819,6 @@ void oka::OptiXRender::updateTopLevelAccelerationStructure()
     OptixAccelBufferSizes iasBufferSizes;
     OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &iasOptions, &iasInput, 1, &iasBufferSizes));
 
-    // Reuse temporary buffers if large enough, otherwise allocate new ones.
-    // An update has its own scratch requirement; tempSizeInBytes is a full
-    // build's.
     const size_t updateTempSize = iasBufferSizes.tempUpdateSizeInBytes;
     if (!mTempAccelBuffer || mTempAccelBuffer->size() < updateTempSize)
     {
@@ -1890,30 +1851,7 @@ void OptiXRender::createModule()
         moduleOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
     }
 
-    // A ceiling on registers, which is a ceiling on how much of the path state
-    // can stay in them and therefore a floor on how much spills to local memory.
-    // Zero -- OptiX's own default -- means no limit, and the mega-kernel then
-    // takes all 255, which caps occupancy at eight warps per SM.
-    //
-    // Left at no limit, because that is what measured fastest. On a 4090 at
-    // 1280x720 depth 4, best of three, ms/sample:
-    //
-    //     limit    iso    kids    pine    pine occupancy
-    //       0     4.10    4.70   10.90        32.9%
-    //     128     4.00    4.70   10.90        32.9%
-    //      96     4.80    5.40   12.10        41.0%
-    //      64     7.30    8.00   14.90          --
-    //
-    // 128 does not bind -- same time, same occupancy, so no program was over it.
-    // 96 does, and it is the measurement worth keeping: occupancy rises a
-    // quarter and the launch gets 11% *slower*, because every register taken
-    // away comes back as local-memory traffic in a launch that is already memory
-    // bound rather than latency starved. More warps in flight only buys more
-    // spilling to wait on.
-    //
-    // The knob stays so this can be re-measured once the path state shrinks --
-    // that is the change that would make a lower ceiling free. See
-    // docs/open-perf.md.
+    // Leave registers unlimited by default; the environment knob is diagnostic.
     moduleOptions.maxRegisterCount = static_cast<int>(envUint("STRELKA_OPTIX_MAX_REGISTERS", 0));
 
     // Compile the launch parameters that select whole features in as constants,
@@ -2157,13 +2095,8 @@ void OptiXRender::createPipeline()
     OPTIX_CHECK(optixPipelineSetStackSize(pipeline, direct_callable_stack_size_from_traversal,
                                           direct_callable_stack_size_from_state, continuation_stack_size,
                                           maxTraversableDepth));
-    // The continuation stack is per thread and it is local memory, so it is the
-    // number that decides how much of the launch fits on the machine. It follows
-    // the live state the raygen holds across optixInvoke -- which is
-    // sizeof(PerRayData) plus whatever the shading programs need -- and it is
-    // logged because that relationship is the least visible thing about this
-    // backend's cost: 256 bytes of ballast added to PerRayData and never read
-    // measured 39-61% slower. See docs/open-perf.md.
+    // Live PerRayData held across optixInvoke contributes to the per-thread
+    // continuation stack, so log both sizes together.
     STRELKA_DEBUG("Pipeline stack: continuation={} B, dc_from_traversal={} B, dc_from_state={} B, PerRayData={} B",
                   continuation_stack_size, direct_callable_stack_size_from_traversal,
                   direct_callable_stack_size_from_state, sizeof(PerRayData));
@@ -2334,16 +2267,8 @@ void OptiXRender::createSbt()
         {
             const oka::Instance& instance = instances[i];
             const uint32_t material_idx = (instance.mMaterialId == kInvalidIndex) ? 0u : instance.mMaterialId;
-            // A linear curve set needs the linear intersector; everything else,
-            // triangles included, keeps the cubic one it has always had.
-            //
-            // The scene is built in slices, and the environment stage runs before
-            // the structures stage so a sky is on screen while the acceleration
-            // structures build. That means this can run with the instance list
-            // already populated and mOptixCurves still empty -- reading it then is
-            // a segfault, which is what 28_hair did. Fall back to the cubic group
-            // and mark the table dirty; render() rebuilds it once the curves exist,
-            // and no ray is traced against a curve before they do.
+            // Curves not yet built use the cubic group temporarily and dirty the
+            // table so render() rebuilds it before tracing them.
             const bool curveReady = instance.type == oka::Instance::Type::eCurve &&
                                     instance.mCurveId < mOptixCurves.size() &&
                                     mOptixCurves[instance.mCurveId] != nullptr;
@@ -2481,15 +2406,7 @@ void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, u
     params.sharcEntries = mSharcCapacity ? (SharcEntry*)mSharcBuffer->getNativePtr() : nullptr;
     params.sharcPath = mSharcPathBuffer ? (SharcPathState*)mSharcPathBuffer->getNativePtr() : nullptr;
 
-    // The world size of one pixel at unit distance, times the pixels a voxel
-    // should span. Everything scene-dependent -- field of view, resolution -- is
-    // folded in here so that the setting itself is not. Same expression the
-    // Metal backend fills its sharcBaseSize with.
-    //
-    // Filled whether or not the cache is allocated, which the early return below
-    // used to prevent: DebugMode::eSharcGrid draws the voxels from this number
-    // alone, and choosing a voxel size by looking at it is something you do
-    // *before* switching the cache on.
+    // SHARC grid debug needs the scene-derived base size before cache allocation.
     const float aspect = height > 0 ? (float)width / (float)height : 1.0f;
     const float tanHalfFov = std::tan(glm::radians(camera.fovForAspect(aspect)) * 0.5f);
     const float pixelAngle = height > 0 ? 2.0f * tanHalfFov / (float)height : 1.0f;
@@ -2500,13 +2417,7 @@ void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, u
 
     if (mSharcCapacity == 0)
     {
-        // Cleared before the early return, not after it.
-        //
-        // These two are read by connectToLight, which is not gated on the cache
-        // being on -- it runs on every next-event connection in every scene. So
-        // leaving them at whatever the last frame set would have a scene that
-        // switched the cache off dereferencing the light bitset of a buffer
-        // that has since been freed, on every light sample.
+        // Clear responsive pointers before returning to avoid stale device addresses.
         params.sharcResponsive = 0u;
         params.sharcResponsiveLights = nullptr;
         return;
@@ -2724,9 +2635,7 @@ void OptiXRender::updatePathtracerParams(const uint32_t width, const uint32_t he
     }
 }
 
-// The production sizes the plan is told about have to be the sizes the device
-// actually uses, or the buffers are allocated for a struct that is not the one
-// being written. Same discipline as src/render/host/integrator_buffer_sizes.h.
+// The plan's production size must match the struct written by the device.
 static_assert(sizeof(AovSample) == 64, "AovSample is written once per pixel per frame; keep an eye on the size");
 static_assert(sizeof(AovSample) == sizeof(float) * 16, "AovSample must stay a whole number of floats to read back");
 
@@ -3290,20 +3199,8 @@ void OptiXRender::render(Buffer* output)
 
     currView.mCamMatrices = camera.matrices;
 
-    // The pose the previous frame actually rendered with, taken before the latch
-    // below overwrites it.
-    //
-    // Reprojection reads it a few hundred lines further down, to build
-    // params.prevWorldToClip. Reading mPrevView *there* gets this frame's own
-    // camera, because the latch has already run -- so prevWorldToClip equalled
-    // worldToClip on every frame and every motion vector came out zero. A
-    // temporal denoiser then reprojects a moving camera onto itself: the history
-    // it blends in belongs to a different part of the scene.
-    //
-    // STRELKA_DENOISE_AUDIT measured it directly, and had been failing on it:
-    // after an orbit step, "motion camera moved nonzero=0.0% max=0.00 px" and
-    // "AUDIT FAIL camera motion missing from motion vectors". The same step now
-    // reports 100% of pixels carrying motion, max 11.48 px.
+    // Capture the previous rendered camera before the latch below mutates it;
+    // reprojection uses this pose to build prevWorldToClip.
     const View prevView = mPrevView;
 
     if (glm::any(glm::notEqual(currView.mCamMatrices.perspective, mPrevView.mCamMatrices.perspective)) ||
@@ -4929,7 +4826,7 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName, oka::optix
     }
 
     // Tracked in the *material* set, not the general one: these are released and
-    // reloaded whenever createOptixMaterials() runs again, which is what makes an
+    // reloaded whenever publishMaterialParams() runs again, which is what makes an
     // edited material reach the GPU. The general set holds the environment, which
     // a material reload must not free.
     if (res.array)
@@ -5034,14 +4931,8 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     mState.params.hasEnvMap = true;
     mEnvMapLoaded = true;
 
-    // Reconcile an HDRI's units with the analytic lights' units, but only when
-    // asked. The constant is arbitrary -- it maps the map's mean weighted
-    // luminance onto 1000 -- so applying it unconditionally means every scene
-    // with an environment renders at a brightness that depends on the *content*
-    // of the HDRI rather than on anything authored. On 19_env_and_light, where
-    // Blender's sky and the rect light are already in the same physical units,
-    // that put the frame 9.8x too bright. Metal drives the same constant from
-    // render/env/autoCalibrate and both headless and editor default it off.
+    // Environment auto-calibration is opt-in because its content-derived scale
+    // overrides authored lighting units.
     const float avgWeightedLum = (float)(aliasResult.totalPower / (double)(width * height));
     const bool autoCalibrate = getSettings()->getAs<bool>("render/env/autoCalibrate");
     const float kCalibrationTarget = 1000.0f;

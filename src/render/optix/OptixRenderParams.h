@@ -86,11 +86,7 @@ enum : uint32_t
 
 /// Debug visualisations, in the order the editor's combo box lists them.
 ///
-/// This is Metal's DebugMode from ShaderTypes.h, unchanged. It was already the
-/// numbering the editor sent -- `RenderSettingsPanel` builds its list from that
-/// enum for both backends -- while OptiX read 2 and 3 as "diffuse split" and
-/// "specular split", so every AOV entry in that menu selected something else on
-/// this backend.
+/// Numbering is shared by the editor and both backends and must remain stable.
 enum class DebugMode : uint32_t
 {
     eNone = 0,
@@ -114,10 +110,6 @@ enum class DebugMode : uint32_t
     // until it is wrong, and then it is wrong in a way that reads as a shading
     // bug. Voxel size cannot be chosen without seeing the voxels.
     //
-    // Metal does not implement them yet -- its DebugMode carries the same names
-    // so the two enums stay one numbering and the editor's menu stays one list,
-    // and it falls through to a normal render. See the hand-off in
-    // docs/open-defects.md.
     eSharcGrid, ///< a stable colour per voxel, at the primary hit
     eSharcRadiance, ///< what the cache would answer at the primary hit
     eSharcOccupancy, ///< how much of the table is in use, as a screen overlay
@@ -136,10 +128,7 @@ enum : uint32_t
 ///
 /// eSharcGrid belongs here because the grid is arithmetic -- it needs no cache
 /// and no second bounce. The other two cache views deliberately do *not*: they
-/// observe the table, and the table is filled by the very bounces cutting the
-/// path would remove. Both were written that way first, and both rendered an
-/// empty cache -- eSharcRadiance 0.6% covered, eSharcOccupancy entirely black,
-/// on a Cornell box whose walls the cache fills in a frame.
+/// observe a table filled by the bounces that early termination would remove.
 #define DEBUG_MODE_IS_SINGLE_HIT(d)                                                                                    \
     ((d) == (uint32_t)DebugMode::eNormal || (d) == (uint32_t)DebugMode::eMotionBlur ||                                  \
      (d) == (uint32_t)DebugMode::eSharcGrid)
@@ -164,10 +153,8 @@ enum : uint32_t
 /// What a denoiser needs to know about the primary hit, written once per pixel
 /// by the program that shades it (or by the miss program, for background).
 ///
-/// Field for field the Metal backend's AovSample, including the padding, so the
-/// two backends' guides are the same 64 bytes and can be compared directly. The
-/// packing differs only in spelling: Metal needs `packed_float3` because its
-/// float3 is 16 bytes, CUDA's is already 12.
+/// This shares Metal's 64-byte semantic contract, but not every field: Metal
+/// ends with bounceDepth while OptiX ends with pad2.
 struct AovSample
 {
     float3 diffuseAlbedo;
@@ -197,8 +184,6 @@ struct AovSample
 /// It sits in its own buffer, allocated only when the cache is on, because in
 /// PerRayData it was 28 bytes of continuation stack on every path in every
 /// scene -- including the great majority that never turn the cache on at all.
-/// Metal has always kept these three fields in a SharcPathState buffer, for a
-/// different reason: its shade and deposit kernels are separate dispatches.
 struct SharcPathState
 {
     /// prd.radiance at the moment of the visit, so the difference at the end of
@@ -242,12 +227,8 @@ struct SharcPathState
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 struct Params
 {
-    // Grouped by subsystem, not by size. The analyzer counts 36 bytes of padding
-    // and would sort the fields widest-first; that would scatter the commented
-    // blocks below -- camera, environment, SHARC, denoiser -- which are how
-    // anyone finds anything in a launch-parameter struct with eighty members.
-    // The struct is memcpy'd to the device once per frame, so those 36 bytes are
-    // one 32-byte-longer copy of ~700 bytes, per frame, and nothing else.
+    // Grouped by subsystem so camera, environment, SHARC and denoiser fields
+    // remain readable; padding order is secondary for this per-frame upload.
     uint32_t subframe_index;
     uint32_t samples_per_launch;
     uint32_t maxSampleCount;
@@ -261,13 +242,8 @@ struct Params
     uint16_t* specularCounter;
     /// Whether to accumulate the diffuse/specular split of the first event.
     ///
-    /// Off by default, and the buffers are not allocated when it is: the raygen
-    /// used to write four scattered records per pixel per launch -- two float4s
-    /// and two counters -- that nothing on the host ever read back. Measured on
-    /// the iso bathroom, that is a fifth of the launch's global store traffic
-    /// spent on an image no caller asks for, and those stores are the ones that
-    /// come back at 19 sectors per request because shader reordering has already
-    /// scattered the lanes across the film. See docs/open-perf.md.
+    /// Off by default, with no buffers allocated, because no host caller
+    /// normally consumes these split AOVs.
     bool writeSplitAov;
     uint32_t image_width;
     uint32_t image_height;
@@ -368,10 +344,8 @@ struct Params
 
     // --- Atmosphere ------------------------------------------------------
     //
-    // The scene's `atmosphere` sidecar block, which until now only the Metal
-    // backend read: a homogeneous slab below `fogHeight`. Same five fields and
-    // the same meanings as MetalFrameUniforms sets, so a scene hazes identically
-    // on both. See `src/shaders/optix/fog.h` for why a slab and not a volume.
+    // The scene's `atmosphere` sidecar: a homogeneous slab below `fogHeight`,
+    // with the same field meanings as MetalFrameUniforms.
     bool hasFog;
     float fogSigmaT; ///< extinction, per world unit
     float fogAnisotropy; ///< Henyey-Greenstein g; > 0 scatters forward
@@ -381,8 +355,8 @@ struct Params
     /// The three ways the nested-dielectric stack loses a path, counted per
     /// launch: see IOR_STAT_* below. Null when the buffer has not been
     /// allocated, and then the counting is skipped rather than guessed at.
-    /// Metal has reported these since its pop learned to match on the material
-    /// being left; this is the other half of entry 5 of docs/open-defects.md.
+    /// Reports stack overflow, unmatched nested-dielectric exits, and paths that
+    /// escape while still marked inside a dielectric.
     uint32_t* iorStats;
     // --- Radiance cache --------------------------------------------------
     //
@@ -401,25 +375,9 @@ struct Params
     /// no limit. Deposits carry on regardless, so the cache stays warm for the
     /// moment the camera moves again.
     ///
-    /// The cache trades per-pixel noise for error that is correlated in space
-    /// (a voxel is one value) and in time (the temporal window makes
-    /// consecutive frames agree). Correlated error does not average away as
-    /// samples accumulate, so it is a floor -- while plain path tracing keeps
-    /// converging past it. Measured on iso_bathroom at 960x540, depth 8,
-    /// against a 4096-spp reference, taking the residual that survives a blur
-    /// so it is the structured error rather than the noise:
-    ///
-    ///     spp     no cache     cache
-    ///      16      0.154       0.098    cache half the error
-    ///      64      0.063       0.039    cache half the error
-    ///     256      0.022       0.019    level
-    ///    1024      0.0064      0.0123   cache twice the error
-    ///
-    /// So it is not a knob for taste: below the crossover the cache is the
-    /// better image as well as the faster one, and above it the cache is the
-    /// only thing standing between the render and convergence. A runtime read
-    /// rather than a bound constant -- it changes every frame, and a
-    /// specialisation per frame is a recompile per frame.
+    /// Cache error eventually becomes the convergence floor, so reads stop
+    /// after the configured crossover. This remains runtime state because it
+    /// changes per frame.
     uint32_t sharcReadMaxSubframe;
     /// Non-zero when any light in the scene is marked responsive. Bound into the
     /// pipeline as a constant, so a scene without one compiles the second entry,
@@ -504,30 +462,12 @@ enum : uint32_t
     IOR_STAT_COUNT = 3
 };
 
-/// Everything one path carries between traversals.
-///
-/// The raygen holds it across `optixInvoke`, so it is what sizes the pipeline's
-/// continuation stack -- byte for byte, measured: 208 bytes of this gave a
-/// 576-byte stack, 464 gave 832. That stack is per thread and it is local
-/// memory, so this struct's size sets the whole launch's local working set, and
-/// it is the steepest cost curve in the backend: 256 bytes of ballast the path
-/// never reads measured 39-61% slower across the three scenes in
-/// docs/open-perf.md.
-///
-/// Hence the layout. The small fields are the smallest type that holds their
-/// documented bound and they sit together rather than between the float3s, which
-/// is worth more than it looks: interleaved, each one cost four bytes plus its
-/// own padding.
 /// How many payload registers the pipeline is compiled with. Two, holding a
 /// packed pointer to PerRayData -- everything else the path carries is behind
 /// that pointer.
 ///
-/// It is tempting to raise this and carry the hot state in the payload instead,
-/// on the reading that payload values are registers. They are not, across a
-/// traversal: OptiX preserves them in the continuation stack, so fifteen extra
-/// words measured as sixty-four *more* bytes of stack rather than sixty-four
-/// fewer, and 2.5-7.7% slower. Measured, reverted, written down. See
-/// docs/open-perf.md.
+/// More payload registers increased continuation-stack use and were reverted;
+/// see docs/open-perf.md.
 enum : uint32_t
 {
     STRELKA_PAYLOAD_COUNT = 2
@@ -535,20 +475,8 @@ enum : uint32_t
 
 /// Everything one path carries between traversals.
 ///
-/// The raygen holds it across `optixInvoke`, so it is what sizes the pipeline's
-/// continuation stack -- byte for byte, measured: 208 bytes of it gave a
-/// 576-byte stack, 464 gave 832. That stack is per thread and it is local
-/// memory, so this struct's size sets the whole launch's local working set, and
-/// it is the steepest cost curve in the backend. At 1920x1080 and depth 8, 64
-/// bytes of ballast the path never reads measured 1.2% slower on the iso
-/// bathroom, 3.4% on the kids bedroom and 6.0% on the pine forest.
-///
-/// It is *not* worth moving the hot half of this into payload registers. That
-/// was built and measured: fifteen payload words in place of 64 bytes of struct
-/// grew the continuation stack from 480 to 544 bytes and cost 2.5 / 3.4 / 7.7%.
-/// OptiX preserves payload across a traversal by putting it in that same stack,
-/// so the move relocates the bytes rather than removing them, and adds the
-/// packing. See docs/open-perf.md.
+/// The raygen holds this across `optixInvoke`, so its size directly determines
+/// per-thread continuation-stack local state.
 ///
 /// Hence the layout. The small fields are bit fields in one word and they sit
 /// together rather than between the float3s, which is worth more than it looks:
@@ -585,8 +513,7 @@ struct PerRayData
     // Bit fields rather than nine separate members. Laid out as bytes and bools
     // these cost twelve bytes of the record and its padding; the widths below
     // are each field's documented bound and they add to exactly 32 bits. The
-    // mask-and-shift this compiles to is free here -- the launch runs at 14% of
-    // SM throughput, so instructions are not what it is short of.
+    // mask-and-shift cost is preferable to a larger local-memory record.
     /// Bounce. `params.max_depth` is clamped to 255 so that the closest hit's
     /// "stop this path" idiom -- setting depth to max_depth, which the raygen
     /// then increments once more -- cannot overflow nine bits.
@@ -660,9 +587,8 @@ struct PerRayData
     }
 };
 
-/// The size is the point, so it is asserted rather than left to be rediscovered.
-/// A field added here is not free -- read the measurement above before adding
-/// one.
+/// The 136-byte size is continuation-stack ABI; adding a field increases
+/// per-thread local state.
 static_assert(sizeof(PerRayData) == 136, "PerRayData sizes the continuation stack; see docs/open-perf.md");
 
 /// All three are spelled out because the first two are SBT record offsets that

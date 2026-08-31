@@ -1,33 +1,14 @@
 #pragma once
 
-// The arithmetic of the SHARC hash grid, with no CUDA in it.
-//
-// Everything here is what decides *which* slot a shading point lands in and
-// *what number* goes into it: the voxel quantisation, the two hashes, the probe
-// sequence and the fixed-point encoding. None of it needs a GPU to be wrong, and
-// all of the ways it goes wrong are silent -- a voxel that straddles a level
-// boundary blurs across a wall, a fixed-point scale that overflows turns a lit
-// room dark, a probe sequence that does not cover its table drops half the
-// inserts. So it is here, where it can be tested, and src/shaders/optix/sharc.h
-// is the thin layer of atomics on top.
-//
-// It is a port of src/shaders/metal/sharc.h and must stay one: two backends that
-// quantise a voxel differently do not have a comparable cache, and the whole
-// point of the parity ladder is that they answer alike.
+// Host-testable SHARC grid arithmetic. Its numeric contracts stay aligned with
+// src/shaders/metal/sharc.h; src/shaders/optix/sharc.h adds CUDA atomics.
 
 #include <cstdint>
 
 // NOLINTBEGIN(cppcoreguidelines-init-variables)
 //
-// Device-shared header: NVCC and the Metal compiler read this too, and
-// clang-tidy only ever sees the host build, so these two suggestions cannot be
-// taken here. Initialising the locals means a dead store in a BSDF inner loop --
-// they are out-parameters written on the next line -- and the fixer spells the
-// initialiser NAN, which needs <math.h>, which Metal rejects outright. Default
-// member initialisers do the same to structs that are memcpy'd to the GPU.
-// Suppressed rather than left to warn because these repeat in every translation
-// unit that includes the header, and 700 lines of unactionable output per build
-// is how the handful that matter get skipped.
+// NVCC and host tests compile this header, while clang-tidy sees only the host
+// build. Initialising out-parameters or GPU-bound structs would add dead stores.
 
 #if defined(__CUDACC__)
 #    define STRELKA_SHARC_FN static __forceinline__ __device__
@@ -51,10 +32,7 @@ namespace oka::sharc
 /// long before the count did.
 constexpr float kScale = 64.0f;
 
-/// The clamp exists for fireflies, and it has to sit well above anything a scene
-/// legitimately produces. Metal measured 32 costing a classroom a third of its
-/// outgoing radiance and 34% of its brightness: a cache that clips is worse than
-/// no cache, because the error is systematic rather than noisy.
+/// The clamp rejects fireflies while preserving legitimate outgoing radiance.
 constexpr float kClamp = 256.0f;
 
 /// How far the linear probe walks before it gives up. A miss at the end of it
@@ -71,11 +49,7 @@ constexpr uint32_t kMinCapacity = 1u << 16;
 /// pass; here it is the same paths, thinned.
 constexpr uint32_t kUpdateShare = 8u;
 
-/// Below this throughput a path is not worth recording.
-///
-/// The deposit is what the path gathered divided by its throughput at the visit,
-/// so at a throughput of a thousandth the estimator has a variance to match --
-/// Metal measured a handful of such deposits pulling a classroom 46% bright.
+/// Below this throughput, division at deposit produces excessive variance.
 constexpr float kMinRecordThroughput = 0.05f;
 
 /// Floor on the per-channel throughput the deposit divides by, so one dark
@@ -84,15 +58,8 @@ constexpr float kThroughputFloor = 0.02f;
 
 /// Whether a path may read the cache at a hit it has just traced to.
 ///
-/// This is the SDK's eligibility test, and it replaces what used to be a flat
-/// `roughness > 0.3` on the surface being *hit*. That gate was crude in both
-/// directions: it asked the wrong surface -- what matters is the lobe that
-/// launched the segment, not what the segment landed on -- and it cost about
-/// two thirds of the cache's benefit. Measured on iso_bathroom at one sample
-/// with a warm cache, the share of paths the cache terminates after a single
-/// bounce: 44.9% with no cache, 54.9% with the roughness gate, 75.9% with no
-/// gate at all. Blurring is what the gate is *for*, so removing it is not an
-/// option; asking the right question is.
+/// The SDK eligibility test uses the lobe that launched the segment rather than
+/// a roughness gate on the surface it reached.
 ///
 /// Two conditions, both from the SDK:
 ///
@@ -145,12 +112,7 @@ STRELKA_SHARC_FN uint32_t hash(uint32_t x)
 /// The world size of a voxel at `distance` from the eye.
 ///
 /// It follows the screen-space footprint: `baseSize` is the world size of one
-/// pixel at unit distance times however many pixels a voxel should span, so the
-/// same setting means the same thing in a forest and in a classroom, at any
-/// resolution or field of view. An absolute size in metres does not -- Metal
-/// measured 0.25 m being a tenth of the room's depth (a voxel fifty pixels
-/// across, and a 15% bias to match) while in the forest the same number was
-/// barely used.
+/// pixel at unit distance times the target voxel span in pixels.
 ///
 /// Quantised to powers of two so that a point near a level boundary lands in one
 /// voxel or the other rather than smearing across both.
@@ -221,25 +183,8 @@ STRELKA_SHARC_FN uint32_t normalBucket(float nx, float ny, float nz)
 // The key: which voxel a slot holds
 // ---------------------------------------------------------------------------
 //
-// Sixty-four bits carrying the voxel's integer coordinates, its level, its
-// normal bucket and one flag -- the SDK's HashGridComputeSpatialHash layout,
-// bit for bit in spirit if not in constant.
-//
-// It used to be a 32-bit checksum of all of that, mixed through the hash, and
-// the comment here defended the trade: one wrong voxel in millions against the
-// memory a 64-bit key costs. That was true as far as it went, and it is not why
-// the key is now what it is. An un-hashable key cannot answer *which* voxel a
-// slot holds, and two things need to ask:
-//
-//   * reprojection, which takes an entry's voxel, works out where the same
-//     region sat one grid level away, and blends the data the camera's movement
-//     stranded there (adjacentLevelKey below);
-//   * responsive lighting, which needs one bit to say "this entry holds the
-//     fast-changing part of the signal" -- and a bit in a checksum is a bit
-//     that changes the checksum.
-//
-// Both come out of the SDK, and neither is expressible over a hash. The cost is
-// four bytes an entry (32 -> 40 with alignment) and the collisions go away.
+// Sixty-four-bit keys preserve coordinates and level for reprojection plus a
+// responsive-lighting identity bit.
 
 /// 17 bits per axis, signed, which is the SDK's split and for the same reason.
 /// Coordinates are position/voxelSize and the voxel size follows the distance to
@@ -404,11 +349,7 @@ STRELKA_SHARC_FN uint64_t adjacentLevelKey(
 
 /// Whether this path is one of the fixed share that records rather than reads.
 ///
-/// A path either reads or records, never both. One that has recorded a voxel
-/// owes it an honest estimate of the rest of the path, and a cached read inside
-/// that estimate feeds the cache its own output -- a loop that amplifies
-/// whatever error it starts with. Metal saw it as a classroom 11% bright with no
-/// single step being wrong.
+/// A path either reads or records, never both, preventing cache feedback.
 STRELKA_SHARC_FN bool isUpdatePath(uint32_t pixelIndex, uint32_t sampleIndex)
 {
     return (hash(pixelIndex * 9781u + sampleIndex * 6271u) & (kUpdateShare - 1u)) == 0u;
@@ -416,15 +357,7 @@ STRELKA_SHARC_FN bool isUpdatePath(uint32_t pixelIndex, uint32_t sampleIndex)
 
 /// Encode one channel of radiance for the accumulator.
 ///
-/// Rounded, not truncated, and that is the one deliberate departure from the
-/// Metal port. Truncation loses half a quantum on every deposit in the same
-/// direction, and half a quantum is 1/128 of a unit of radiance: against an
-/// outgoing radiance of a couple of units that is a quarter of a percent, every
-/// time, for as long as the cache is on. Measured -- 00_calibration and
-/// 02_basecolor both came back at a ratio of 0.997 against the same render with
-/// the cache off, on two scenes that share nothing but this arithmetic. Rounding
-/// makes the error zero-mean instead, and the same two rows then read 1.000.
-/// The Metal side should take the same change; it is reported as a hand-off.
+/// Rounded rather than truncated so quantisation error is zero-mean.
 STRELKA_SHARC_FN uint32_t encode(float radiance)
 {
     float v = radiance;
@@ -474,25 +407,9 @@ constexpr uint32_t kMaxCount = (uint32_t)(4294967295.0 / (double)(kClamp * kScal
 // Resolve: what a voxel keeps between frames
 // ---------------------------------------------------------------------------
 //
-// Everything above describes one frame's deposits. What follows is the part
-// that was missing, and the reason the cache measured nothing: the entry held a
-// single running mean and the host wiped the whole table whenever the
-// accumulator restarted, which in the editor is every camera movement. A cache
-// that starts from nothing on every frame the camera moves is not a cache.
-//
-// The fix is NVIDIA's, from SHARC v1.8.3 `SharcResolveEntry`: split what a
-// voxel gathered *this frame* from what it has resolved *across* frames, merge
-// the two once per frame under a bounded window, and let entries nobody visits
-// age out on their own. Then a camera movement costs the entries it actually
-// invalidates instead of all of them.
-//
-// Faithful to the SDK in the parts that decide a number -- the window
-// normalisation, the staleness rule, the fp16 packing of the resolved half --
-// and deliberately not in three others, each noted where it bites:
-//   * no responsive-lighting or SH-directional path (both are SDK compile-time
-//     options this backend does not set),
-//   * no adjacent-level reprojection, which needs a key that carries the voxel
-//     position; ours is a 32-bit checksum and cannot be un-hashed (see below),
+// Resolve follows the SDK's window normalisation, staleness, fp16 packing and
+// adjacent-level reprojection. SH-directional storage remains omitted, and
+// responsive entries use independent keys.
 //   * no linear-probe re-find, which needs a whole entry's neighbours and so
 //     cannot live in a pure function of one entry.
 
@@ -511,8 +428,7 @@ constexpr uint32_t kAccumFrameNumMax = 1024u;
 constexpr uint32_t kStaleFrameNumMin = 8u;
 constexpr uint32_t kStaleFrameNumMax = 1024u;
 
-/// Both frame counters live in one word, sixteen bits each, so the entry stays
-/// at 32 bytes. Sixteen bits is far more than either bound above needs.
+/// Both frame counters live in one word, sixteen bits each.
 constexpr uint32_t kFrameNumMask = 0xFFFFu;
 
 /// Largest finite binary16. Values are clamped to it rather than allowed to
@@ -597,10 +513,7 @@ STRELKA_SHARC_FN float unpackHalf(uint32_t half)
 /// The half of an entry that survives the frame: a voxel's mean radiance and
 /// the sample count behind it, in eight bytes.
 ///
-/// Same four-component fp16 packing as the SDK's `SharcPackedData::radianceData`
-/// -- three channels and the count -- because the quantities and their ranges
-/// are the same. Eight bytes rather than the twelve a float3 would take is what
-/// pays for splitting the entry in two without growing it past 32.
+/// Same four-component fp16 packing as the SDK's `SharcPackedData::radianceData`.
 struct Resolved
 {
     float r = 0.0f;

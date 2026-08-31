@@ -177,9 +177,8 @@ struct PlanInputs
     bool blockCompress = false;
     /// Whether any texel's alpha is below opaque. Only consulted for colour.
     bool hasAlpha = false;
-    /// Whether mip levels are wanted at all. Off by default: `tex2D` from a ray
-    /// tracing program has no derivatives, so it reads level 0 and a chain is
-    /// 33% of memory for nothing until ray cones select a level.
+    /// Whether mip levels are wanted. Off until ray cones select levels because
+    /// `tex2D` has no ray-tracing derivatives and otherwise reads level 0.
     bool wantMips = false;
 };
 

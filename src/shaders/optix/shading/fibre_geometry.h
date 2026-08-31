@@ -14,15 +14,8 @@
 
 // NOLINTBEGIN(cppcoreguidelines-pro-type-member-init)
 //
-// Device-shared header: NVCC and the Metal compiler read this too, and
-// clang-tidy only ever sees the host build, so these two suggestions cannot be
-// taken here. Initialising the locals means a dead store in a BSDF inner loop --
-// they are out-parameters written on the next line -- and the fixer spells the
-// initialiser NAN, which needs <math.h>, which Metal rejects outright. Default
-// member initialisers do the same to structs that are memcpy'd to the GPU.
-// Suppressed rather than left to warn because these repeat in every translation
-// unit that includes the header, and 700 lines of unactionable output per build
-// is how the handful that matter get skipped.
+// NVCC and host tests compile this header, while clang-tidy sees only the host
+// build. Initialising out-parameters or GPU-bound structs would add dead stores.
 
 // The Chiang hair lobe is a whole-fibre model: its transmission term is the
 // absorption over the chord *inside* the strand, so a direction leaving on the
@@ -36,10 +29,6 @@
 // along the ray is -2r(n.u), where u is the ray direction projected into that
 // plane and renormalised; the distance travelled to cover it is that chord over
 // the length the direction itself has in the plane.
-//
-// See docs/open-defects.md, "A fibre was being traced as if it were a surface",
-// for the measurement that cornered this: an isolated strand's cross-section
-// must go flat past two bounces and instead kept climbing, 1.00 -> 1.29.
 struct FibreExit
 {
     float3 position; // where the ray leaves the strand

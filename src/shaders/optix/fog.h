@@ -1,24 +1,7 @@
 #pragma once
 
-// Homogeneous atmospheric scattering, ported from src/shaders/metal/fog.h.
-//
-// A slab rather than a bounded volume: the medium fills everything below a
-// height, and outside that there is nothing. That is a deliberate narrowing.
-// Production scenes describe haze with a box the size of the set containing the
-// camera -- the pine forest's is 209 x 209 x 29 m at the origin -- and a slab
-// reproduces it exactly while costing one comparison instead of a second
-// traversal of a volume boundary, per ray, including shadow rays.
-//
-// What it cannot do: a medium that is not the atmosphere. Smoke in a corner, a
-// beam through a doorway, fog that ends at a wall. Those need the bounded kind
-// (STRELKA_materials_medium, `shading/medium.h`), and this is not a step toward
-// it so much as the common case taken on its own.
-//
-// The phase function is not here. `shading/medium.h` already carries
-// hgPhaseFunction / hgSampleDirection for the bounded medium and the subsurface
-// walk, and a second copy is how the two conventions drift apart -- Metal's own
-// file records that taking the standard HG inversion at face value scatters a
-// forward medium backwards.
+// Homogeneous atmospheric scattering in a slab below a fixed height. Bounded
+// media use shading/medium.h, which also owns the shared phase-function helpers.
 
 #include <sutil/vec_math.h>
 

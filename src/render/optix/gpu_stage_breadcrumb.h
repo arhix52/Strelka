@@ -25,7 +25,7 @@ enum class GpuStage : uint32_t
 {
     Skinning = 0,   ///< cuApplySkinning over the deforming meshes
     AccelBuild,     ///< optixAccelBuild / optixAccelCompact
-    EnvCdf,         ///< the environment map's 2D CDF kernel
+    EnvCdf,         ///< environment alias-table upload; the enum name is historical
     ParamsUpload,   ///< the launch parameter block
     PathTrace,      ///< optixLaunch -- the raygen and everything it calls
     Tonemap,        ///< the post kernels writing the output image

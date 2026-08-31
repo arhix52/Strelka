@@ -20,23 +20,11 @@ __global__ void sharcResolveKernel(SharcEntry* entries, SharcResolveParams param
         return; // empty slot; nothing to resolve and nothing to age
     }
 
-    // An entry holding the responsive part of a voxel's signal lives by a much
-    // shorter clock: a short window is what lets it follow a light that is
-    // moving, and a short life is what stops it lingering once that light has
-    // gone. The SDK uses its responsive frame count for both, and so does this.
+    // Responsive lighting uses a shorter accumulation window.
     const bool responsive = oka::sharc::isResponsiveKey(key);
     const uint32_t accumFrameNumMax = responsive ? params.responsiveFrameNumMax : params.accumFrameNumMax;
-    // The window is short; the *lifetime* is not, and that is a departure from
-    // the SDK, which uses its responsive frame count for both.
-    //
-    // It follows from where the split is made. Here it is made on the path: both
-    // halves of a voxel are claimed together and deposited into together, by the
-    // same paths, including when the responsive half receives zero. So they go
-    // stale in lockstep, and giving the responsive half a shorter lifetime does
-    // not evict it sooner for any good reason -- it evicts it out from under a
-    // main entry that is still being read, and a reader that finds one half and
-    // not the other gets the other half alone. Measured: 0.68% dark on a Cornell
-    // box with one responsive light, where the split should be exact.
+    // Both halves are deposited together and go stale in lockstep, so they use
+    // the same lifetime to prevent one half being evicted while the other remains.
     const uint32_t staleFrameNumMax = params.staleFrameNumMax;
 
     oka::sharc::ResolveInput input;

@@ -56,10 +56,7 @@ static __forceinline__ __device__ float traceOcclusion(
                transmittance);
     float visible = __uint_as_float(transmittance);
 
-    // The atmosphere dims every shadow ray, including the ones that reach the
-    // light unobstructed. Without this a shadow ray is a hole in the haze and
-    // every light reads as if the medium were not there -- which is the same
-    // note Metal's shadow kernel carries, in the same place.
+    // Atmospheric transmittance applies even when geometry leaves the shadow ray unobstructed.
     if (visible > 0.0f && params.hasFog)
     {
         const float tau = fogOpticalDepth(ray_origin, ray_direction, tmax, params.fogHeight,
@@ -208,10 +205,7 @@ struct LightConnection
     float pdf; // solid-angle density, including the light-selection probability
     float tMax;
     bool needsRay;
-    /// A sharp point or spot cannot be hit by a BSDF ray, so no other strategy
-    /// can produce this direction and its MIS weight is exactly one. Weighting it
-    /// against the BSDF pdf -- which is what this code used to do -- discards the
-    /// share of the light the BSDF strategy is credited with and never delivers.
+    /// Delta lights are unreachable by BSDF sampling, so their MIS weight is one.
     bool isDelta;
     /// The light behind this connection is marked responsive, so whatever it
     /// delivers is cached in the short-window half of the voxel rather than the
@@ -351,12 +345,7 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
 
     LightConnection c = makeEmptyConnection();
     c.toLight = lightSampleData.L;
-    // Every point and spot, whatever its radius -- see lightIsDeltaForMis(). The
-    // radius used to exempt a soft one from this on the theory that a BSDF ray
-    // could hit the sphere it is sampled as, but createInstance() gives a point
-    // or spot proxy a zero visibility mask, so no ray can. The MIS weight then
-    // deducted a share for a strategy that is switched off and never delivered
-    // it.
+    // Point and spot proxies are invisible to BSDF rays, so all are delta for MIS.
     c.isDelta = lightIsDeltaForMis(light.type);
 
     float3 Li = make_float3(light.color);
@@ -495,10 +484,7 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
         return c;
     }
 
-    // A scene with neither an environment nor an analytic light has nothing to
-    // connect to. This used to fall through and divide by numLights == 0, then
-    // read lights[0] off a null device pointer -- mLightBuffer is constructed
-    // empty, so the pointer really is null rather than merely unpopulated.
+    // No emitter means there is no light connection to propose.
     if (params.scene.numLights == 0)
     {
         return makeEmptyConnection();
@@ -513,29 +499,9 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
     return c;
 }
 
-/// Next-event estimation, with resampled importance sampling over the candidates.
-///
-/// Draw M candidates from the light-sampling density, weight each by what it
-/// would actually contribute -- BSDF, cosine and MIS weight included, none of
-/// which the light's own density knows about -- and keep one. The shadow ray
-/// count does not change: one candidate survives and one ray is traced.
-///
-/// The target is the luminance of the *unshadowed* contribution with the MIS
-/// weight already folded in. Folding it in is what keeps this unbiased against
-/// the BSDF strategy: the two weights still sum to one in every direction, so
-/// resampling only improves the next-event half and leaves the other alone.
-/// Resampling cannot help with visibility, by construction -- the target does not
-/// know it.
-///
-/// The default of one candidate reduces every line below to plain next-event
-/// estimation, bit for bit: the first candidate uses the sampler unmodified.
-///
-/// Returns the radiance to add at this vertex, already multiplied by throughput
-/// and clamped, or zero.
-/// `outResponsive` reports whether the survivor's light is one the scene marked
-/// responsive, so the caller can route what it delivered to the short-window
-/// half of the voxel. Resampling keeps exactly one candidate, so the answer is a
-/// single flag rather than a split of the returned contribution.
+/// Resampled next-event estimation using unshadowed MIS-weighted luminance as the unbiased target.
+/// Exactly one candidate survives to trace one shadow ray; one candidate reduces to ordinary NEE.
+/// Returns throughput-weighted radiance and whether its sole survivor is responsive.
 static __device__ float3 estimateDirectLighting(PerRayData* prd,
                                                 const SurfaceInteraction& si,
                                                 float curveRadius,
@@ -638,14 +604,8 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
         return make_float3(0.0f);
     }
 
-    // Only the survivor pays for a ray. shadowOrigin() picks where it departs:
-    // the oriented face offset for a surface -- this is the same fix Metal's
-    // connectEnvLight carries -- and the far side of the strand for a fibre.
-    // A float, not a bool: with the any-hit alpha test in place a shadow ray comes
-    // back with the product of the transmittances it crossed, so a connection
-    // through a cutout leaf or a blended pane is dimmed rather than being all or
-    // nothing. Reading it as a bool inverts the test outright -- an unoccluded ray
-    // returns 1.0, which is true -- and discards every next-event connection.
+    // shadowOrigin() offsets surfaces and starts fibres on the far side of the strand.
+    // Occlusion returns accumulated transmittance, not binary visibility.
     const float transmittance =
         traceOcclusion(params.handle, shadowOrigin(si, curveRadius, bestConn.toLight), bestConn.toLight,
                        params.shadowRayTmin, bestConn.tMax);
@@ -653,11 +613,7 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
     {
         return make_float3(0.0f);
     }
-    // Whatever survived the geometry still has to cross whatever bounded media
-    // stand between this vertex and the light. Without it a shadow ray is a hole
-    // in the fog, and every light reads as if the volume were not there -- which
-    // is the term that made 18_bounded_volume 1.9x too bright on the backend
-    // that had it first.
+    // Geometry transmittance is additionally attenuated through bounded media.
     float3 survived = make_float3(transmittance);
     if (params.hasBoundedMedium)
     {
@@ -676,11 +632,6 @@ static __forceinline__ __device__ float3 getHitPoint()
 
     return rayOrigin + t * rayDirection;
 }
-
-// (normalCubic() used to sit here: a second, unreferenced copy of what
-// fillCubicCurveGeomData() does. Removed rather than left as a warning, because
-// the next person adding a curve basis would have had two places to change and
-// only one of them would have mattered.)
 
 struct SurfaceHitData
 {
@@ -881,14 +832,7 @@ static __forceinline__ __device__ SurfaceHitData fillCubicCurveGeomData(const Hi
     return res;
 }
 
-/// Round linear curves: two control points, a cylinder with spherical caps.
-///
-/// This arm used to be unreachable. `createCurve` hardcoded degree 3, so a
-/// linear sidecar -- which is what every particle groom in the tree writes, and
-/// what `28_hair` is -- was built and fetched as a cubic B-spline over the same
-/// points. A B-spline does not interpolate its control points, so the strands
-/// were built along a curve that ran inside the one the sidecar described, three
-/// control points short at every strand.
+/// Round linear curves use two control points and cylindrical geometry with spherical caps.
 static __forceinline__ __device__ SurfaceHitData fillLinearCurveGeomData(const HitGroupData* hit_data)
 {
     const unsigned int primitiveIndex = optixGetPrimitiveIndex();
@@ -992,12 +936,7 @@ static __forceinline__ __device__ void writeSurfaceGuide(const HitGroupData* hit
         AovSample a;
         // Metals put their colour in the specular lobe and have no diffuse one.
         //
-        // Clamped because an albedo guide is a reflectance and the denoiser reads
-        // it as one: it divides the colour through by this and multiplies back
-        // afterwards, so a value above 1 tells it a surface returns more light
-        // than fell on it and it under-filters that pixel. si.albedo is the raw
-        // base colour and an emissive material can carry any magnitude there --
-        // measured up to 25.5 on 20_mirror_and_floor, 1.8% of the frame.
+        // Albedo guides are reflectance, so saturate unbounded material colour for the denoiser.
         const float3 base = saturate(si.albedo);
         a.diffuseAlbedo = base * (1.0f - si.metallic);
         a.specularAlbedo = lerp(make_float3(0.04f), base, si.metallic);
@@ -1048,15 +987,7 @@ static __device__ void scatterInMedium(PerRayData* prd,
     const float3 scatterPoint = rayOrigin + rayDir * m.t;
     SamplerState mrng = mediumSampler(prd->sampler, prd->mediumStep + 1u);
 
-    // Whether this vertex made a next-event estimate at all -- the question the
-    // miss and light-hit programs need answered, and not the same question as
-    // whether the estimate came back with anything. A vertex that drew a light
-    // sample pointing the wrong way still had the light strategy available for
-    // the direction the phase function eventually took, so the MIS weight there
-    // is still owed. Deciding it from the outcome instead hands the bounce ray
-    // the whole contribution on exactly the draws where the connection failed,
-    // and the two strategies stop summing to one: it put the white-furnace
-    // sphere 15% over unity, uniformly at every mean free path.
+    // Record NEE availability, not its sampled outcome, so the paired bounce keeps its MIS weight.
     bool didNee = volumeNeePairsWithBounce(params.estimatorMode == 0,
                                           params.scene.numLights > 0 || params.hasEnvMap);
     if (isBounded)
@@ -1132,12 +1063,7 @@ static __device__ void scatterInMedium(PerRayData* prd,
     prd->lastBsdfPdf = phasePdf;
     prd->misDistance = 0.0f;
     prd->specularBounce = false;
-    // A phase function, or a cosine lobe off a subsurface exit: both are as
-    // broad as a lobe gets, so the cache's eligibility test should treat the
-    // next segment as launched from a fully rough surface. Without this the
-    // segment inherits whatever surface sent the ray into the medium -- for
-    // water or glass that is a delta transmission, roughness zero, and the test
-    // then refuses the cache for every vertex inside the medium.
+    // Medium scattering launches a broad lobe, so SHARC eligibility uses full roughness.
     if (params.sharcCapacity != 0u)
     {
         params.sharcPath[launchPixelIndex(params)].launchRoughness = 1.0f;
@@ -1192,10 +1118,6 @@ static __device__ void scatterInFog(PerRayData* prd,
     prd->throughput *= params.fogAlbedo;
     const float3 scatterPoint = rayOrigin + rayDir * t;
 
-    // Whether this vertex made a next-event estimate at all, which is the
-    // question the miss and light-hit programs need answered and not the same as
-    // whether the estimate came back with anything. Same reasoning, and the same
-    // failure if it is decided from the outcome, as scatterInMedium records.
     const bool didNee = volumeNeePairsWithBounce(params.estimatorMode == 0,
                                                 params.scene.numLights > 0 || params.hasEnvMap);
     if (didNee)
@@ -1251,12 +1173,6 @@ static __device__ void scatterInFog(PerRayData* prd,
     prd->lastBsdfPdf = phasePdf;
     prd->misDistance = 0.0f;
     prd->specularBounce = false;
-    // A phase function, or a cosine lobe off a subsurface exit: both are as
-    // broad as a lobe gets, so the cache's eligibility test should treat the
-    // next segment as launched from a fully rough surface. Without this the
-    // segment inherits whatever surface sent the ray into the medium -- for
-    // water or glass that is a delta transmission, roughness zero, and the test
-    // then refuses the cache for every vertex inside the medium.
     if (params.sharcCapacity != 0u)
     {
         params.sharcPath[launchPixelIndex(params)].launchRoughness = 1.0f;
@@ -1269,41 +1185,15 @@ static __device__ void scatterInFog(PerRayData* prd,
 
 /// Whether the atmosphere scatters this segment before `tMax`, and where.
 ///
-/// Gated on the path not being inside a participating medium. The atmosphere is
-/// what is outside things, and a path partway through a subsurface walk or a fog
-/// gizmo is not in it. Metal gates on the subsurface case alone; the difference
-/// only shows in a scene that puts a bounded volume inside atmospheric haze,
-/// where two free flights would otherwise be drawn for one segment and the
-/// nearer one silently discarded.
-///
-/// What neither backend does: notice that the path is inside *glass*. The IOR
-/// stack knows, and a ray crossing a windowpane will pick up haze it should not.
-/// Left matching Metal rather than fixed on one side.
+/// Atmosphere is disabled inside bounded or subsurface media to avoid competing free flights.
+/// Glass is not represented by `prd->medium`, so atmospheric attenuation through glass remains unsupported.
 static __forceinline__ __device__ bool fogScatters(PerRayData* prd,
                                                    const float3 rayOrigin,
                                                    const float3 rayDir,
                                                    const float tMax,
                                                    float& t)
 {
-    // The single-hit debug views are declined alongside the medium, and for a
-    // strictly worse failure than the one the medium avoids: a haze event
-    // returns from the closest hit and from the miss program *above* the branch
-    // that writes the normal, so the pixel keeps the zero the raygen
-    // initialised it with.
-    //
-    // Measured on the pine forest, whose sidecar authors a 0.0032-density haze:
-    // with this declined, 6.01% of camera rays stopped in the air before the
-    // closest hit's normal branch and another 0.68% before the miss program's,
-    // and 4.29% of the frame came back exactly black -- isolated speckle, 0.10
-    // black neighbours out of 4, which reads as screen-space noise rather than
-    // anything on a surface. The remainder of those rays are not black but are
-    // no better: they carry whatever the fog vertex's next-event estimate
-    // returned, which is light, in a buffer that is supposed to hold normals.
-    // The fogless Cornell box has none of this, which is what hid it.
-    //
-    // Declined rather than handled at the vertex: an atmospheric vertex has a
-    // position and no normal, so there is nothing for these two views to
-    // report there, and what they are asked for is the surface behind it.
+    // Single-hit debug views decline fog events because atmospheric vertices have no normal.
     if (!params.hasFog || prd->medium != 0u || DEBUG_MODE_IS_SINGLE_HIT(params.debug))
     {
         return false;
@@ -1368,16 +1258,7 @@ static __device__ void exitMedium(PerRayData* prd,
             const float cosOut = dot(outward, conn.toLight);
             if (cosOut > 0.0f)
             {
-                // The exit is Lambertian and the medium's albedo was already paid
-                // for during the walk, so the lobe here is 1/pi and its own
-                // density is cos/pi.
-                //
-                // The density is for the MIS weight only. connectLight folds the
-                // cosine into conn.radiance -- it returns what a caller holding f
-                // alone needs -- so multiplying the estimate by the density as
-                // well applies that cosine twice: the exit connection comes back
-                // at around 70% of its value while MIS has already deducted the
-                // whole of it from the bounce ray.
+                // The Lambertian exit density is MIS-only; conn.radiance already includes the cosine.
                 const float lobePdf = cosOut * invPi;
                 const float misWeight =
                     conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, lobePdf, params.misHeuristic);
@@ -1419,12 +1300,6 @@ static __device__ void exitMedium(PerRayData* prd,
     prd->lastBsdfPdf = fmaxf(dot(outward, exitDir), 0.0f) * invPi;
     prd->misDistance = 0.0f;
     prd->specularBounce = false;
-    // A phase function, or a cosine lobe off a subsurface exit: both are as
-    // broad as a lobe gets, so the cache's eligibility test should treat the
-    // next segment as launched from a fully rough surface. Without this the
-    // segment inherits whatever surface sent the ray into the medium -- for
-    // water or glass that is a delta transmission, roughness zero, and the test
-    // then refuses the cache for every vertex inside the medium.
     if (params.sharcCapacity != 0u)
     {
         params.sharcPath[launchPixelIndex(params)].launchRoughness = 1.0f;
@@ -1460,12 +1335,7 @@ extern "C" __global__ void __miss__ms()
         return;
     }
 
-    // A path that reached the environment still inside a medium. Counted here
-    // because here is the only place it is visible: the path is gone and it
-    // still thinks it is inside glass, so every segment it travelled after the
-    // exit it never had carried the wrong absorption. No exit event can catch
-    // this one -- the ray left through a hole in the mesh. See ior_stack.h and
-    // entry 5 of docs/open-defects.md.
+    // Report paths that escape while still inside a dielectric, indicating an open mesh or unmatched exit.
     if (params.iorStats != nullptr && prd->iorStack.top >= 0)
     {
         atomicAdd(&params.iorStats[IOR_STAT_ESCAPED_INSIDE], 1u);
@@ -1641,9 +1511,6 @@ extern "C" __global__ void __closesthit__radiance()
     // pop at the bottom of this program, and before emission and next-event
     // estimation, or everything seen through a dense medium keeps its own colour.
     //
-    // volume.h was included by no .cu file at all before this, so the OptiX path
-    // had no volumetric attenuation of any kind.
-    //
     // Skipped inside a subsurface walk, which is a different medium model:
     // mediumScatterWeight already carries that medium's extinction, and a
     // material carrying both extensions would otherwise be attenuated twice for
@@ -1812,12 +1679,7 @@ extern "C" __global__ void __closesthit__radiance()
         // lookup and the pixel. Black means the voxel is missing or has not
         // resolved yet -- which is the difference the occupancy view explains.
         //
-        // Written straight to the image, and the path then carries on shading
-        // normally, which is the whole trick: the voxels this view reads are
-        // filled by the bounces of this same path. Returning here instead --
-        // the obvious way to write it, and the way it was written first --
-        // leaves the cache empty and the view 99% black.
-        //
+        // Write the debug pixel without ending the path, so its later bounces can populate SHARC.
         // The raygen skips its own write for this mode, so this is the only
         // thing that puts a value in the pixel; it also clears the pixel first,
         // so a camera ray that misses everything stays black rather than
@@ -1887,58 +1749,8 @@ extern "C" __global__ void __closesthit__radiance()
     }
 
     // --- Radiance cache ------------------------------------------------------
-    //
-    // Read only past the first few bounces and only off a rough surface: the
-    // camera ray and the first bounce carry the detail a voxel average would
-    // blur, and a mirror reflects a direction rather than a place.
-    //
-    // Placed here, after emission and the IOR stack and before the BSDF sample,
-    // for the same reason Metal places it here: the snapshot has to exclude this
-    // vertex's own emission (which the cache's readers add for themselves when
-    // they land on the same surface) and include this vertex's direct lighting
-    // (which is part of what leaves the point).
-    //
-    // A path that has already recorded a voxel is done with the cache -- it owes
-    // that voxel an honest estimate of the rest of itself, so it may not read,
-    // and it has nowhere left to record -- which is what this pixel's
-    // SharcPathState::index being set means, and why it is part of the guard
-    // rather than checked inside.
-    // A surface reached by a delta bounce is still the surface the eye is
-    // looking at, and must not be answered for by a voxel average.
-    //
-    // `prd->depth` counts segments, not scattering events, so a mirror at depth
-    // 0 puts what it reflects at depth 1 -- where this gate used to let the
-    // cache answer. What the viewer sees in the mirror was then replaced by the
-    // average over a voxel, and the same went for anything behind the shower
-    // glass, since a delta transmission is a specular event too. The SDK states
-    // this as its own rule and its own mistake to avoid: a replaced primary
-    // surface is still a primary surface.
-    //
-    // `specularBounce` is written at the end of this program for the bounce it
-    // generates, so here it describes the bounce that arrived -- exactly the
-    // question being asked. It is conservative in one direction: a mirror
-    // reached after a diffuse bounce also blocks the cache one vertex longer
-    // than it strictly must, which costs a caching opportunity and no accuracy.
-    // Reads stop once the render has accumulated past the point where the
-    // cache's own error is the larger of the two; deposits do not, so the table
-    // stays current for the next camera movement. See Params::sharcReadMaxSubframe
-    // for the measurement that sets the default.
-    //
-    // Only while the film is accumulating, and that clause is not a nicety. The
-    // limit exists because the cache's error is correlated and so stops being
-    // the smaller error once enough samples have been averaged -- which
-    // presupposes that samples are being averaged. With accumulation off every
-    // frame is a fresh one-sample image, there is nothing converging past the
-    // cache, and the cache is the entire reason the frame is not black.
-    //
-    // Without this clause the limit did the opposite of its job: with
-    // accumulation off the renderer reports mSubframeIndex as the *whole* sample
-    // budget rather than zero (OptixRender.cpp, and it does so deliberately --
-    // a counter that reset every frame hung StrelkaCLI on the single-hit debug
-    // views), so subframe_index is 256 from the second frame on and the cache
-    // was never read at all. Measured on iso_bathroom at one sample against a
-    // warm cache: 88% less error than no cache, and none of it was reaching the
-    // one configuration built to show it.
+    // Read only beyond the configured depth and never after a specular arrival or a prior voxel visit.
+    // Reads stop after the accumulation cap; non-accumulating frames remain eligible and deposits continue.
     const bool sharcMayRead = params.sharcReadMaxSubframe == 0u || !params.enableAccumulation ||
                               params.subframe_index < params.sharcReadMaxSubframe;
 
@@ -1950,12 +1762,7 @@ extern "C" __global__ void __closesthit__radiance()
         const unsigned long long voxelKey = sharcVoxel(si.position, si.shading_normal, cameraPosition,
                                                        params.sharcBaseSize, /*responsive=*/false);
 
-        // A fixed share of paths never read and always trace to the end, so the
-        // cache keeps converging instead of freezing at whatever the first few
-        // paths through a voxel happened to find. They are also the only paths
-        // whose deposits are unconditioned on the cache's own output, which is
-        // the loop that would amplify whatever error it starts with -- Metal saw
-        // it as a classroom 11% bright with no single step being wrong.
+        // Update paths bypass reads and provide cache-independent deposits.
         const bool updatePath = oka::sharc::isUpdatePath(launchPixelIndex(params), prd->sampler.sampleIdx);
         uint32_t slot = 0u;
         // Inserting, because this path is here to fill the slot in; a read that
@@ -2154,8 +1961,7 @@ extern "C" __global__ void __closesthit__radiance()
     // for a deep-red medium is about a third of the light it should return.
     // Cycles divides the same factor out at the same place.
     float3 sssEntryTint = make_float3(1.0f);
-    // Set when the path enters a subsurface medium, so the direction below is the
-    // refraction rather than the lobe's cosine draw. See docs/open-defects.md 16.
+    // A subsurface entry continues along the refracted direction, not the lobe's cosine draw.
     bool sssRefractedEntry = false;
     if ((sample_data.event_type & BSDF_EVENT_TRANSMISSION) != 0 && !isFibre)
     {
@@ -2168,12 +1974,7 @@ extern "C" __global__ void __closesthit__radiance()
         {
             if (entering)
             {
-                // Counted, not merely survived. Both of these leave the path
-                // carrying the wrong medium and neither used to say a word on
-                // this backend; see entry 5 of docs/open-defects.md. The test is
-                // a loop over at most four entries on a path that has already
-                // established it is a transmission through a solid, and the
-                // atomic only runs when something has actually gone wrong.
+                // Report nested-dielectric stack overflow here; the matching pop reports unmatched exits.
                 if (params.iorStats != nullptr && ior_stack_full(prd->iorStack))
                 {
                     atomicAdd(&params.iorStats[IOR_STAT_OVERFLOW], 1u);

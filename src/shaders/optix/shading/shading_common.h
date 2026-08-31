@@ -1,22 +1,9 @@
 #ifndef STRELKA_OPTIX_SHADING_COMMON_H
 #define STRELKA_OPTIX_SHADING_COMMON_H
 
-// ============================================================================
-// shading_common.h -- the CUDA counterpart of src/shaders/metal/shading_common.h
-//
-// The Metal backend has owned initSurfaceInteraction -- texture fetch, normal
-// mapping, KHR_texture_transform, vertex colour, opacity -- since the material
-// system was split out; OptiX had no equivalent and called bsdf_init() directly,
-// which does none of those. That is why the OptiX path rendered no normal maps
-// at all and ignored uv_offset / uv_scale / uv_rotation although the loader
-// uploads them.
-//
-// This is a port of the *behaviour*, not of the code: Metal resolves textures
-// itself and calls a bsdf_init overload that leaves si.albedo alone, while the
-// CUDA overload of bsdf_init does its own tex2D fetches. So the order here is
-// "hand bsdf_init the transformed uv, then correct the three things it cannot
-// know about" rather than "resolve everything, then call bsdf_init".
-// ============================================================================
+// Behaviour port of src/shaders/metal/shading_common.h, not a code port.
+// CUDA's bsdf_init samples textures, so it receives transformed UVs before this
+// layer applies the material properties it cannot resolve itself.
 
 #include <optix.h>
 
@@ -34,12 +21,7 @@
 #include <nee_pairing.h>
 #include "texture_transform.h"
 
-// Which reading of KHR_materials_volume the OptiX path uses.
-//
-// volume.h documents the two, and they disagree by a lot -- at an attenuation
-// colour of 0.5 the glTF form gives sigma_t = 0.69/d and the Cycles form 0.5/d.
-// Taken from `render/material/volumeModel`, the same setting Metal reads, which
-// the CLI drives from the scene's `volume_model` key.
+// KHR_materials_volume uses the model selected by `render/material/volumeModel`.
 
 // ---------------------------------------------------------------------------
 // Fibre semantics.
@@ -90,11 +72,7 @@ static __forceinline__ __device__ float3 fibreExitOrigin(
 // ---------------------------------------------------------------------------
 // Fill SurfaceInteraction from hit geometry and sample the material's textures.
 //
-// `lodBase` is accepted so the signature matches Metal's and so the ray-cone
-// work can land here later, but the OptiX backend builds its textures without a
-// mipmapped array (see OptiXRender::loadTextureFromFile), so there is no level to
-// select and it is currently unused. Silently sampling level 0 is what the
-// backend did before this function existed.
+// OptiX currently has no mipmapped material arrays, so lodBase is unused.
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__ void initSurfaceInteraction(
     SurfaceInteraction& si,
@@ -116,11 +94,8 @@ static __forceinline__ __device__ void initSurfaceInteraction(
     si.bitangent = worldBinormal;
     si.wo = -rayDir;
     si.front_face = dot(geomNormal, -rayDir) > 0.0f;
-    // Set here rather than only where it becomes true: the closest-hit program
-    // declares its SurfaceInteraction without an initialiser, so a field this
-    // function does not write on every path is read as whatever the stack held.
-    // Left to the normal-map branch alone it suppressed the diffuse lobe over
-    // the whole frame -- 00_calibration came back at ratio 0.045.
+    // The closest-hit program does not initialise SurfaceInteraction, so every
+    // field must be written on every path.
     si.diffuse_faces_away = false;
     si.bump_normal = si.shading_normal;
 
@@ -160,18 +135,10 @@ static __forceinline__ __device__ void initSurfaceInteraction(
         // pre-bump normal instead would reject directions no map ever moved.
         si.bump_normal = si.shading_normal;
 
-        // At a grazing angle the map can turn the normal past the viewer, and a
-        // surface facing away from the camera is one no lobe can answer:
-        // standard_pbr reads dot(N, wo) <= 0 as a dielectric exit, an opaque
-        // material has no such lobe, and the hit absorbs into a black pixel that
-        // has lost its direct lighting as well, because the closest-hit program
-        // terminates on absorb above next-event estimation. On the pine forest's
-        // mossy rock that is 2.4% of the frame in solid patches.
-        //
-        // Corrected here, at the one place the shading normal is produced, so
-        // bsdf_sample and bsdf_eval cannot be handed different normals -- and
-        // the diffuse lobe is switched off with it, because the correction is
-        // for the lobes that reflect. See SurfaceInteraction::diffuse_faces_away.
+        // A grazing normal map can turn the normal past the viewer, where an
+        // opaque material has no valid lobe. Correct it where the shading normal
+        // is produced so sampling and evaluation use the same normal; disable
+        // the diffuse lobe because the correction is for reflective lobes.
         //
         // Against the geometric normal turned to agree with the view ray: the
         // correction is about the surface the reflection has to clear, and on a

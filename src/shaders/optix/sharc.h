@@ -1,42 +1,9 @@
 #pragma once
 
-// A spatially hashed radiance cache, after NVIDIA's SHARC. Port of
-// src/shaders/metal/sharc.h; the arithmetic that decides which slot a point
-// lands in and what number goes into it lives in sharc_grid.h, which carries no
-// CUDA and has tests.
-//
-// Why: paths run to the depth limit although capping them at three or four
-// changes the image by under a percent, and those late bounces are cheap in
-// contribution and expensive in traversal. Caching lets a path stop after two or
-// three and read what the rest of it would have gathered -- from an average over
-// every path that has passed through the same place, which is also quieter than
-// any single path's estimate.
-//
-// The cache is a hash grid rather than a spatial structure: no build, no
-// hierarchy, and a voxel is addressed by arithmetic. Its resolution follows the
-// distance to the camera, so a voxel covers roughly a constant angle -- fine
-// where the eye is, coarse where it is not, without anything having to decide
-// that per scene.
-//
-// What it is not: a cache of everything. Only diffuse-ish bounces past the first
-// few read from it. The camera ray, the first bounce and any specular path are
-// traced as before, because that is what carries the detail a cache would blur.
-//
-// An entry is in two halves, which is the shape SHARC v1.8.3 uses and the thing
-// this file used to be missing. `accum` is what the voxel gathered *this frame*
-// and is written by atomics from the shading path; `resolved` is what it has
-// concluded *across* frames and is the only half a path ever reads. Once a frame
-// the resolve pass (sharc_resolve.cu) merges the first into the second under a
-// bounded window and hands unvisited slots back to the table. Before that split
-// the entry held one running mean and the host cleared the whole table whenever
-// the accumulator restarted -- which in the editor is every camera movement, so
-// the cache never had more than one frame of anything in it. That is why it
-// measured nothing (docs/open-perf.md).
-//
-// The one shape difference from Metal is where the deposit happens. Metal is a
-// wavefront, so it needs a separate pass at the end of a sample to walk the path
-// states; here the path runs to completion inside the raygen loop, and the
-// deposit is the last thing that loop does. Same estimator, one fewer buffer.
+// Spatially hashed radiance cache after NVIDIA SHARC. Entries split per-frame
+// atomic deposits from temporally resolved radiance; sharc_grid.h owns the
+// host-testable grid arithmetic. OptiX deposits inline when each path completes,
+// while Metal's wavefront backend uses a separate pass.
 
 #include <sharc_grid.h>
 
@@ -106,15 +73,8 @@ static __forceinline__ __device__ uint64_t sharcVoxel(
 /// Returns false when the probe run is exhausted, which means the table is
 /// over-subscribed and the caller should simply carry on tracing.
 ///
-/// A responsive key probes its own run rather than sharing the main entry's,
-/// which is where this departs from the SDK. The SDK keeps the two adjacent --
-/// the responsive entry is inserted from the *main* key's base slot -- so that
-/// their index difference fits in six bits and can be packed into the cache
-/// index its path state carries. We have no such state to carry it in: the
-/// deposit happens once, at the end of the path, from a per-pixel record. So the
-/// responsive entry is hashed independently and found by hashing again, which
-/// costs one more scattered read on a query and buys back the eight slots the
-/// two would otherwise have had to share.
+/// Responsive lighting uses an independent key and probe run because OptiX does
+/// not carry the SDK's adjacent-entry offset in path state.
 static __forceinline__ __device__ bool sharcFind(
     SharcEntry* entries, uint32_t capacity, unsigned long long key, bool insert, uint32_t& outIndex)
 {
@@ -133,22 +93,8 @@ static __forceinline__ __device__ bool sharcFind(
         {
             if (!insert)
             {
-                // Keep probing rather than concluding the voxel is absent.
-                //
-                // An empty slot part-way through a run used to end the search,
-                // which is the ordinary open-addressing shortcut and was correct
-                // while nothing was ever removed. Eviction removes things: it
-                // frees a slot in the middle of a run, and every entry the run
-                // reaches past that hole becomes invisible to a reader.
-                //
-                // Costly for the main lookup -- a miss now walks all eight slots
-                // instead of stopping at the first gap -- and not optional. For
-                // the responsive half it is a correctness matter rather than a
-                // hit-rate one: the two halves are an additive split, so failing
-                // to find one does not return "not cached", it returns the other
-                // half alone. Measured on a Cornell box with one responsive
-                // light, that read 0.68% dark (ratio 0.9932) against the same
-                // render with the split off, which should be identical.
+                // Eviction leaves holes in probe runs, so an empty slot cannot
+                // terminate lookup; responsive halves must also remain visible.
                 continue;
             }
             const unsigned long long previous = atomicCAS(slot, 0ull, key);

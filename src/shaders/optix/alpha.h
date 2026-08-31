@@ -33,11 +33,7 @@
 /// Coverage of a surface at a uv. 1 for an opaque material, 0 or 1 for MASK,
 /// the base-colour alpha for BLEND.
 ///
-/// The uv is used raw, exactly as bsdf_init() uses it for base colour on this
-/// backend. KHR_texture_transform is not applied to *either* on OptiX today;
-/// applying it here alone would tile the cutout against an untiled albedo,
-/// which is a worse failure than not tiling at all because it looks like a
-/// shading bug rather than a missing feature.
+/// Opacity uses raw UV; material shading passes transformed UV to bsdf_init.
 static __forceinline__ __device__ float resolveOpacity(const MaterialParams& material,
                                                        const cudaTextureObject_t* textures,
                                                        float2 uv)
@@ -61,24 +57,8 @@ static __forceinline__ __device__ float resolveOpacity(const MaterialParams& mat
     return __saturatef(alpha);
 }
 
-/// A uniform draw for the coverage test, from the sampler's own `eOpacity`
-/// dimension, rotated per cutout layer.
-///
-/// This used to be a standalone radical inverse on the sample index, rotated per
-/// pixel, on the argument that adding a dimension shifts every other draw in the
-/// renderer and moves every row of the ladder to buy one number. It is stratified
-/// across the samples of a pixel, which is the direction that argument cared
-/// about, and it still cost measurable variance: BLEND coverage is a continuous
-/// test, so what matters is not that the coverage draw is stratified on its own
-/// but that it is stratified *jointly* with where in the pixel the ray went. The
-/// Sobol index is scrambled per pixel, so pairing sample i's jitter with the i-th
-/// radical inverse pairs a stratum with a shuffled one, and the pair is random.
-/// Measured on `08_alpha_blend` against a converged render of this backend --
-/// noise 0.0287 the old way against Metal's 0.0183 on the same scene, the only
-/// row of 29 where the two disagreed once the film offset was fixed.
-///
-/// `07_alpha_clip` was never affected and says why: MASK resolves to 0 or 1, so
-/// the draw decides nothing that a neighbouring sample would decide differently.
+/// Use sampler eOpacity for joint stratification with pixel jitter, rotated per
+/// cutout layer.
 ///
 /// The per-layer rotation is what makes a stack of cutouts behave like a stack.
 /// Passing through does not advance the sampler, so without it two leaves of

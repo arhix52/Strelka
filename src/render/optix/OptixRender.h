@@ -161,11 +161,7 @@ private:
     /// The launch-parameter fields the modules are compiled against as
     /// constants, so the branches they gate are not in the binary at all.
     ///
-    /// Every one of these is a whole feature the mega-kernel carries whether or
-    /// not the scene uses it, and the cost of carrying it is not the branch --
-    /// it is the instruction cache. On the three measured scenes `no_instruction`
-    /// is 12--13.5 cycles per issued instruction, roughly half of all stall, and
-    /// folding these away is worth 15--35% of the frame. See docs/open-perf.md.
+    /// Each folds a scene-wide branch and its unused code out of the pipeline.
     ///
     /// What is *not* here matters as much. `max_depth` is a slider, and a
     /// recompile is a visible hitch; anything a user drags has to stay a
@@ -296,7 +292,6 @@ private:
     /// Packed IES candela tables for every profile the scene loaded, indexed by
     /// each light's points[0].y. Rebuilt with the light buffer.
     std::unique_ptr<OptixBuffer> mIesBuffer;
-    // TODO: move to raii buffers
     std::unique_ptr<OptixBuffer> mPointsBuffer;
     std::unique_ptr<OptixBuffer> mWidthsBuffer;
 
@@ -342,11 +337,8 @@ private:
 
     std::vector<Material> mMaterials;
 
-    // Texture resource tracking for cleanup. Material textures are tracked
-    // apart from the environment map's because createOptixMaterials() now runs
-    // again whenever a material changes, and it has to be able to release the
-    // set it loaded last time without taking the env map -- whose texture object
-    // is already sitting in Params -- with it.
+    // Material textures are tracked apart from the environment because
+    // publishMaterialParams() may replace them without replacing the env map.
     std::vector<cudaArray_t> mTextureArrays;
     std::vector<cudaMipmappedArray_t> mTextureMipmappedArrays;
     std::vector<cudaTextureObject_t> mTextureObjects;
@@ -506,8 +498,8 @@ private:
     /// a push onto a full stack, a pop that matched nothing, and a path that
     /// reached the environment still inside a medium. Zeroed before each launch
     /// and read back once per scene, because the numbers are a property of the
-    /// asset rather than of the frame. Metal's MetalWavefrontIntegrator reports
-    /// the same three; see entry 5 of docs/open-defects.md.
+    /// asset rather than of the frame. Metal reports the same stack overflow,
+    /// unmatched exit, and escaped-inside failures.
     std::unique_ptr<OptixBuffer> mIorStatsBuffer;
     bool mReportedIorStats = false;
     /// Reads the counters back and warns once, if any of them fired.

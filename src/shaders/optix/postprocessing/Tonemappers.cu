@@ -4,11 +4,7 @@
 #include <sutil/Matrix.h>
 #include <sutil/vec_math_adv.h>
 
-// The bounds test in every kernel below is `>=` and used to be `>`, so the one
-// thread at index width*height wrote a pixel past the end of the image on every
-// tonemap of every frame. It is a 16-byte overrun of a cudaMalloc'd buffer, which
-// is exactly the kind of thing that does no visible damage for years and then
-// corrupts whatever the allocator happened to put next.
+// Bounds checks use >= so the width*height thread cannot write past the image.
 
 __device__ __inline__ float calcLuminance(const float3 color)
 {
@@ -224,21 +220,8 @@ cudaError_t tonemapToSurfaceLinear(
     return cudaGetLastError();
 }
 
-/// The sRGB transfer function, one channel.
-///
-/// This used to be a bare `pow(c, 1/gamma)`, which is not what the other two
-/// implementations of the same step do: `srgbGamma` in src/shaders/common is
-/// what Metal's tonemapper and StrelkaCLI's PNG writer both call, and it has a
-/// linear segment below 0.0031308 and the 1.055/-0.055 scale above it. The
-/// difference is largest exactly where a display image spends most of its
-/// pixels: at 0.05 linear the two answer 0.246 and 0.287.
-///
-/// A copy rather than an include. The shared header declares its functions
-/// without a `__device__` qualifier and pulls in glm on anything that is not
-/// Metal, so nvcc cannot call them from a kernel; making it callable means a
-/// qualifier macro on every function in a header that also compiles into the
-/// Metal backend, and this machine has no Mac to prove that change harmless on.
-/// The numbers are pinned by tests/render/test_tonemappers.cpp on the host side.
+/// Piecewise sRGB transfer matching the other backends. This local copy is
+/// required because the shared host/Metal header is not CUDA-callable.
 __device__ __inline__ float srgbGammaChannel(const float c, const float gamma)
 {
     if (isnan(c) || c < 0.0f)

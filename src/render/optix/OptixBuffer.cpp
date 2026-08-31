@@ -33,7 +33,6 @@ oka::OptixBuffer::OptixBuffer(void* devicePtr, BufferFormat format, uint32_t wid
 
 oka::OptixBuffer::~OptixBuffer()
 {
-    // TODO:
     if (mDeviceData)
     {
         CUDA_CHECK(cudaFree(mDeviceData));

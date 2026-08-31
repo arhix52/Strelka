@@ -13,18 +13,8 @@ namespace optix
 
 /// The stages a scene's GPU-side build passes through, in the order they run.
 ///
-/// This mirrors `oka::metal::BuildStage` deliberately -- the two backends must
-/// make a loading scene look the same, and the editor's progress bar and its
-/// "still building" gate read one interface for both. Ordered by dependency
-/// first, and beyond that by how soon a stage produces something worth looking
-/// at.
-///
-/// Environment comes second for the latter reason. It is the cheapest stage and
-/// the only one that yields a complete, correct picture on its own -- an empty
-/// top level means every ray misses and reaches the environment, so the frame is
-/// the scene's own sky and the light it casts, with none of its objects in it
-/// yet. The structures, which are the long pole, then build into that rather
-/// than replacing a black screen.
+/// This mirrors `oka::metal::BuildStage` so both backends expose the same
+/// loading order and progress state. Stages are dependency-ordered.
 enum class BuildStage : uint32_t
 {
     Buffers = 0,      ///< vertices, indices, curve points and widths, skin data

@@ -47,8 +47,8 @@ enum class Geometry : int
 {
     /// Triangles that never move. Built once, traced for the whole render.
     StaticMesh = 0,
-    /// Triangles behind a skeleton. Refit every animated frame, rebuilt every
-    /// tenth to stop the refit's quality drifting.
+    /// Triangles behind a skeleton. Refit every animated frame, with a bounded
+    /// round-robin subset rebuilt to prevent quality drift.
     SkinnedMesh = 1,
     /// Curve segments. Never deform (skinning does not reach them) and the
     /// closest-hit program reads their control points back with
@@ -69,9 +69,8 @@ inline uint32_t buildFlags(Geometry geometry)
     case Geometry::StaticMesh:
         return kFlagAllowCompaction | kFlagPreferFastTrace;
     case Geometry::SkinnedMesh:
-        // Fast build rather than fast trace: this one is rebuilt from scratch
-        // every tenth animated frame, so its build time is a per-frame cost in a
-        // way a static mesh's is not. No compaction -- it is refit in place.
+        // Fast build because bounded round-robin rebuilds make build time a
+        // recurring cost. No compaction: this structure is refit in place.
         return kFlagPreferFastBuild | kFlagAllowUpdate;
     case Geometry::Curve:
         return kFlagAllowCompaction | kFlagPreferFastTrace | kFlagAllowRandomVertexAccess;

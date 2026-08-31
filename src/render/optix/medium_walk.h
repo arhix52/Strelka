@@ -1,21 +1,7 @@
 #pragma once
 
-// ============================================================================
-// medium_walk.h -- the arithmetic of a spectral free-flight walk
-//
-// A port of src/shaders/metal/subsurface.h, with the parts that are pure
-// arithmetic separated from the parts that need a ray. Everything here is
-// float-in / float-out and compiles on the host, so the estimator can be
-// checked against a reference integral in a unit test rather than only by
-// looking at a render; the device wrapper lives in
-// src/shaders/optix/shading/medium.h and adds the geometry.
-//
-// Why a walk and not a BSSRDF: the separable diffusion approximations need a
-// disk probe around the entry point -- extra traversal, and a half-space
-// assumption the geometry does not honour. The walk reuses the free-flight
-// machinery a participating medium needs anyway, which is why subsurface
-// scattering and a bounded fog volume are one feature here and not two.
-// ============================================================================
+// Host-testable arithmetic for the OptiX spectral free-flight walk. The device
+// wrapper in shading/medium.h adds geometry.
 
 #if defined(__CUDACC__)
 #    define STRELKA_MEDIUM_FN __host__ __device__ inline
@@ -27,16 +13,8 @@
 
 // NOLINTBEGIN(cppcoreguidelines-pro-type-member-init, cppcoreguidelines-init-variables)
 //
-// Device-shared header: NVCC and the Metal compiler read this too, and
-// clang-tidy only ever sees the host build, so these two suggestions cannot be
-// taken here. Initialising the locals means a dead store in a BSDF inner loop --
-// they are out-parameters written on the next line -- and the fixer spells the
-// initialiser NAN, which needs <math.h>, which Metal rejects outright. Default
-// member initialisers do the same to structs that are memcpy'd to the GPU.
-// Suppressed rather than left to warn because these repeat in every translation
-// unit that includes the header, and 700 lines of unactionable output per build
-// is how the handful that matter get skipped.
-
+// NVCC and host tests compile this header. Initialising immediate out-parameters
+// adds dead stores, while default member initialisers alter GPU-copyable structs.
 
 namespace oka::medium
 {
@@ -85,14 +63,8 @@ STRELKA_MEDIUM_FN Spectrum sigmaTFromRadius(const Spectrum& radius)
 /// Which channel drives the next free flight, in proportion to what the path is
 /// still carrying.
 ///
-/// Choosing uniformly is unbiased and unusable: in a medium whose extinction
-/// differs threefold between channels -- which is exactly what 25_subsurface's
-/// (0.05, 0.025, 0.015) mean free paths are -- the balance-heuristic weight
-/// below can exceed one for whichever channel the sampled distance happened to
-/// suit, and over a walk of tens of steps those factors compound into
-/// fireflies. Weighting the choice by throughput times albedo makes the
-/// dominant channel the one whose distance is sampled. Cycles picks its channel
-/// the same way, after Chiang et al.'s production subsurface paper.
+/// Weighting by throughput times albedo avoids compounding balance-heuristic
+/// weights when channel extinction differs.
 STRELKA_MEDIUM_FN Spectrum channelPdf(const Spectrum& throughput, const Spectrum& albedo)
 {
     const float wx = std::fabs(throughput.x * albedo.x);
@@ -178,9 +150,7 @@ STRELKA_MEDIUM_FN Spectrum scatterWeight(const Spectrum& sigmaT,
 /// Throughput weight for reaching a boundary at `t` without scattering, over
 /// the same three channels.
 ///
-/// Exactly one for a medium whose extinction is grey, which is why omitting it
-/// is invisible on a fog gizmo and costs 25_subsurface -- whose mean free paths
-/// differ by more than threefold -- the colour of everything the walk carries.
+/// This is one for grey extinction and preserves spectral throughput otherwise.
 STRELKA_MEDIUM_FN Spectrum boundaryWeight(const Spectrum& sigmaT, const Spectrum& pdf, float t)
 {
     const Spectrum tr =

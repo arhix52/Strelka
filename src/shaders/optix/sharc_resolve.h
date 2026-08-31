@@ -17,8 +17,7 @@ struct SharcResolveParams
     uint32_t accumFrameNumMax = 32u;
     /// Frames an entry survives with nothing deposited into it.
     uint32_t staleFrameNumMax = 64u;
-    /// The same, for entries holding the responsive part of the signal -- much
-    /// shorter, which is the whole of what makes them responsive.
+    /// Accumulation window for the responsive part of the signal.
     uint32_t responsiveFrameNumMax = 4u;
 
     /// Where the eye is, and where it was when the previous frame resolved.
@@ -31,13 +30,8 @@ struct SharcResolveParams
     bool reproject = false;
 };
 
-/// Fold one frame of deposits into what each voxel already knows, and hand back
-/// the slots nobody has visited for a while.
-///
-/// Runs once per frame, between launches, one thread per entry. It is the pass
-/// that makes the cache a cache: without it an entry is a single running mean
-/// with no notion of when it was taken, which is why the host used to clear the
-/// whole table on every camera movement. See src/shaders/optix/sharc.h.
+/// Between launches, fold the frame's deposits into resolved radiance and evict
+/// stale slots.
 extern "C" void sharcResolve(SharcEntry* entries, const SharcResolveParams& params, cudaStream_t stream);
 
 /// Count entries in use, for the editor's occupancy readout.

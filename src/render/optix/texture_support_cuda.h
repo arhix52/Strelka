@@ -1,24 +1,8 @@
 #pragma once
 
-// The OptiX material-texture pipeline: decode, resample, mip, block compress,
-// cache, upload.
-//
-// What it replaces: a `stbi_load(..., STBI_rgb_alpha)` into an 8-bit RGBA array
-// with `cudaReadModeNormalizedFloat` and no transfer function, which meant every
-// base-colour map in every scene was shaded with its sRGB *encoding* as though
-// it were radiance. That is a ~1.12x error on a mid-grey and it is the whole of
-// what `01_srgb_texture` was measuring.
-//
-// The arithmetic -- extent, level count, format choice, byte counts -- is in
-// texture_upload_plan.h with no CUDA in it, so it has unit tests. This header is
-// the part that needs a device.
-//
-// The block encoder and the cache key are shared with the Metal backend rather
-// than reimplemented: both are host-side, backend-neutral and already covered by
-// tests. Only the cache *payload* differs (CUDA arrays want channel kinds, not
-// MTLPixelFormats), which is what the "optix|v<N>|..." prefix `cacheKey()` puts
-// in front of the file name separates -- the two backends can share one cache
-// directory and will never hash to each other's files.
+// OptiX material textures are decoded, resampled, cached and uploaded with sRGB
+// colour maps converted before shading. Backend-specific cache versions keep
+// CUDA payloads separate from Metal payloads.
 
 #include <cuda.h>
 #include <cuda_runtime.h>

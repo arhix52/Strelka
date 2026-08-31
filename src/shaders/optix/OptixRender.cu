@@ -97,19 +97,7 @@ __device__ void generateCameraRay(
     float2 subpixel_jitter =
         make_float2(random<SampleDimension::ePixelX>(sampler), random<SampleDimension::ePixelY>(sampler));
 
-    // Film position, y up, from a launch index that counts down. The flip has to
-    // take the jitter with it -- `height - (y + j)` -- and not be applied to the
-    // integer alone. `height - y` then `+ j` is the same expression one row out:
-    // row 0 samples the band [height, height+1), which is off the film entirely,
-    // and every row lands one pixel from where Metal puts it.
-    //
-    // That was measurable and was being read as noise. Fitting the offset between
-    // the two backends' ladder renders gives dy = +1.00 on every scene with an
-    // edge in it (00 +0.91, 02 +0.98, 20 +1.00, 24 +1.02, 28 +1.04) and dx = 0.
-    // A one-row displacement puts a full-contrast residual on every silhouette,
-    // so `rel` against Cycles ran ~1.3x Metal's while the two backends' per-sample
-    // variance, measured where the reference is locally flat, was the same to 2%.
-    // tools/parity/noise_check.py is that measurement.
+    // The film Y flip includes subpixel jitter so every sample stays in its row.
     float2 pixelPos = make_float2(pixelIndex.x + subpixel_jitter.x,
                                   (float)params.image_height - (pixelIndex.y + subpixel_jitter.y));
 
@@ -170,24 +158,7 @@ __device__ void generateCameraRay(
     }
 }
 
-/// Fold `value` -- the mean of `newSampleCount` fresh samples -- into a running
-/// mean that already holds `prevSampleCount` of them.
-///
-/// Linearly, in radiance. This used to lerp in tone-mapped space and invert the
-/// curve afterwards, which is not an average of the samples but an average of
-/// `c/(c+1)` mapped back, and the two differ by Jensen's inequality: the
-/// tone-mapped mean is always the darker one, by an amount that grows with the
-/// variance among the samples. The whole ladder was low because of it --
-/// 00_calibration at ratio 0.973 where Metal reads 1.010 -- and the mirror scene,
-/// which has the most per-sample variance of any row, was 0.779. The inverse
-/// also diverges: `c / (exposure - c*exposure)` goes to infinity as the
-/// tone-mapped value approaches 1, so a bright pixel's history was one rounding
-/// error away from an infinity.
-///
-/// The weight is the new samples' share of the total, not `1/(n+1)`: with more
-/// than one sample per launch the old form counted a whole launch as a single
-/// sample and left the first launch permanently over-weighted. Byte for byte
-/// what wavefrontResolve does on Metal.
+/// Fold fresh samples into the running mean in linear radiance.
 __device__ float4 accumulate(float4* history,
                              const float3 value,
                              const uint32_t linearPixelIndex,
@@ -307,16 +278,8 @@ extern "C" __global__ void __raygen__rg()
 
     for (uint32_t sampleIdx = 0; sampleIdx < params.samples_per_launch; ++sampleIdx)
     {
-        // Zero-initialised, which was measured: 256 bytes of ballast added to
-        // this record and never read cost 52% of the frame on the iso bathroom,
-        // and removing the `= {}` with that ballast still in place gave none of
-        // it back. So the size is what costs, not the zeroing, and this keeps a
-        // field added later from being read before it is written.
-        //
-        // What the size costs is the continuation stack, which is per thread and
-        // is local memory: it tracks sizeof(PerRayData) byte for byte. See
-        // docs/open-perf.md, including why the hot half of this is *not* in
-        // payload registers -- that was tried and it is slower.
+        // Zero-initialise every field; PerRayData size directly determines the
+        // per-thread continuation stack.
         PerRayData prd = {};
         prd.setFirstEventType(EventType::eUndef);
         const uint32_t sampleIndex = params.subframe_index + sampleIdx;
@@ -451,40 +414,9 @@ extern "C" __global__ void __raygen__rg()
                 continue;
             }
 
-            // Russian roulette on the largest channel the path still carries,
-            // capped at one. Metal's `q`, arrived at from the other side.
-            //
-            // This used to be `clamp(luminance, 0.05, 0.95)`, and both ends of
-            // that were paying for themselves in variance:
-            //
-            //   * The ceiling killed strong paths. A path whose throughput is at
-            //     or above one -- which after four bounces in a bright interior
-            //     is most of what is left -- was killed 5% of the time anyway and
-            //     the survivors scaled by 1/0.95. Unbiased, and pure added
-            //     variance, charged again at every bounce: over the twelve
-            //     remaining at depth 16, 46% of such paths die and the survivors
-            //     come back carrying 1.85x. That is a firefly generator with no
-            //     upside, and `q = min(max_component, 1)` never kills a path that
-            //     carries a full unit of light.
-            //
-            //   * Luminance is the wrong norm for a coloured path. A throughput
-            //     of (0, 0, 5) -- what a blue-tinted glass leaves -- has
-            //     luminance 0.36, so it was killed 64% of the time and the
-            //     survivors multiplied by 2.8, while carrying five units of blue.
-            //     That is where the bathroom's *coloured* speckle came from, and
-            //     why clamp_indirect = 8 halved the frame's variance.
-            //
-            // Measured on the iso bathroom at 256 spp, graded against a 4096-spp
-            // render of this backend on the pixels where it is locally flat:
-            // relative noise 0.184 before, 0.175 after, converged mean unmoved at
-            // 0.2169. So it is worth having and it is not what makes that scene
-            // noisy -- half of that frame's variance is in samples above 8, which
-            // `clamp_indirect = 8` removes at the cost of 6.5% of the mean, and
-            // the roulette is not where they come from. See docs/open-defects.md.
-            // The floor is kept -- Metal has none -- because without it a path
-            // whose largest channel is 1e-6 survives one time in a million
-            // carrying 1e6, and at 0.05 the same path survives one time in twenty
-            // carrying 20. Both are unbiased; the second has a variance.
+            // Russian roulette uses the largest throughput channel, capped at
+            // one; the floor bounds the weight of surviving low-throughput paths.
+            // See docs/open-defects.md.
             if (prd.depth > 3)
             {
                 const float maxChannel =
