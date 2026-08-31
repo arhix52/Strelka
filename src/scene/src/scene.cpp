@@ -352,7 +352,7 @@ void Scene::ensureGlobalTransforms()
 
 bool Scene::applyNodeSideEffects(const uint32_t nodeId)
 {
-    // Mirrors the traversal the old updateNode() performed: mesh and camera nodes
+    // Preserve the legacy traversal contract: mesh and camera nodes
     // consume the update and do not propagate it to their children.
     switch (mNodes[nodeId].type)
     {
@@ -401,8 +401,7 @@ bool Scene::applyAnimation(const uint32_t animId)
 {
     ensureGlobalTransforms();
 
-    // Two phases instead of one update per channel. The old code called
-    // updateNode() for every channel, and updateNode() recomputed each visited
+    // Two phases instead of one update per channel. The legacy path recomputed each visited
     // node's world transform by walking back up to the root — so a scene with C
     // channels cost O(C * subtree * depth) matrix builds every frame, re-deriving
     // the same ancestors again and again. BrainStem has 116 channels over a
@@ -519,61 +518,6 @@ glm::mat4 Scene::calculateNodeGlobalTransform(const uint32_t nodeId)
     {
         return calculateNodeGlobalTransform(parentId) * calculateNodeLocalTransform(nodeId);
     }
-}
-
-bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType targetProperty, const glm::float3 newValue)
-{
-    switch (targetProperty)
-    {
-    case AnimationChannel::PathType::TRANSLATION:
-        mNodes[nodeId].translation = newValue;
-        return updateNode(nodeId);
-        break;
-
-    case AnimationChannel::PathType::SCALE:
-        mNodes[nodeId].scale = newValue;
-        return updateNode(nodeId);
-        break;
-
-    case AnimationChannel::PathType::ROTATION:
-        STRELKA_DEBUG("Invalid value to animate ROTATION, use 2nd definition");
-        break;
-
-    default:
-        break;
-    }
-    return false;
-}
-
-bool Scene::animateNode(const uint32_t nodeId, AnimationChannel::PathType targetProperty, const glm::quat newValue)
-{
-    switch (targetProperty)
-    {
-    case AnimationChannel::PathType::TRANSLATION:
-        STRELKA_DEBUG("Invalid value to animate TRANSLATION, use 1st definition");
-        break;
-
-    case AnimationChannel::PathType::SCALE:
-        STRELKA_DEBUG("Invalid value to animate SCALE, use 1st definition");
-        break;
-
-    case AnimationChannel::PathType::ROTATION:
-        mNodes[nodeId].rotation = newValue;
-        return updateNode(nodeId);
-
-    default:
-        break;
-    }
-    return false;
-}
-
-bool Scene::updateNode(const uint32_t nodeId)
-{
-    ensureGlobalTransforms();
-    refreshGlobalTransforms();
-    const bool skeletonNodesUpdated = applyNodeSideEffects(nodeId);
-    markChanged(ChangeBits::Transforms);
-    return skeletonNodesUpdated;
 }
 
 uint32_t Scene::createRectLightMesh()
@@ -707,55 +651,6 @@ uint32_t Scene::createDiscLightMesh()
     assert(meshId != std::numeric_limits<uint32_t>::max());
 
     return meshId;
-}
-
-void Scene::updateAnimation(const float time)
-{
-    if (mAnimations.empty())
-    {
-        return;
-    }
-    auto& animation = mAnimations[0];
-    for (auto& channel : animation.channels)
-    {
-        assert(channel.node >= 0 && static_cast<size_t>(channel.node) < mNodes.size());
-        const size_t nodeId = static_cast<size_t>(channel.node);
-        auto& sampler = animation.samplers[channel.samplerIndex];
-        if (sampler.inputs.size() > sampler.outputsVec4.size())
-        {
-            continue;
-        }
-        for (size_t i = 0; i < sampler.inputs.size() - 1; i++)
-        {
-            if ((time >= sampler.inputs[i]) && (time <= sampler.inputs[i + 1]))
-            {
-                const float u = std::max(0.0f, time - sampler.inputs[i]) / (sampler.inputs[i + 1] - sampler.inputs[i]);
-                if (u <= 1.0f)
-                {
-                    switch (channel.path)
-                    {
-                    case AnimationChannel::PathType::TRANSLATION: {
-                        const glm::vec4 trans = glm::mix(sampler.outputsVec4[i], sampler.outputsVec4[i + 1], u);
-                        mNodes[nodeId].translation = glm::float3(trans);
-                        break;
-                    }
-                    case AnimationChannel::PathType::SCALE: {
-                        const glm::vec4 scale = glm::mix(sampler.outputsVec4[i], sampler.outputsVec4[i + 1], u);
-                        mNodes[nodeId].scale = glm::float3(scale);
-                        break;
-                    }
-                    case AnimationChannel::PathType::ROTATION: {
-                        const glm::quat q1 = makeQuatFromFloat4(sampler.outputsVec4[i]);
-                        const glm::quat q2 = makeQuatFromFloat4(sampler.outputsVec4[i + 1]);
-                        mNodes[nodeId].rotation = glm::normalize(glm::slerp(q1, q2, u));
-                        break;
-                    }
-                    }
-                }
-            }
-        }
-    }
-    mCameras[0].matrices.view = getTransform(mCameras[0].node);
 }
 
 uint32_t Scene::createLight(const UniformLightDesc& desc)

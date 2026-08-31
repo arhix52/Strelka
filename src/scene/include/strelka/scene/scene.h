@@ -13,7 +13,6 @@
 #include <strelka/scene/light_desc.h>
 
 #include <cstdint>
-#include <cmath>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -597,9 +596,6 @@ public:
 
     glm::mat4 calculateNodeLocalTransform(const uint32_t nodeId);
     glm::mat4 calculateNodeGlobalTransform(const uint32_t nodeId);
-    bool animateNode(const uint32_t nodeId, AnimationChannel::PathType targetProperty, const glm::float3 newValue);
-    bool animateNode(const uint32_t nodeId, AnimationChannel::PathType targetProperty, const glm::quat newValue);
-    bool updateNode(const uint32_t nodeId);
 
     /// World transform of every node, refreshed in one top-down pass.
     ///
@@ -733,48 +729,6 @@ public:
 
         return localTransform;
     }
-
-    glm::float4x4 getTransformFromRoot(int nodeIdx)
-    {
-        std::stack<glm::float4x4> xforms;
-        while (nodeIdx != -1)
-        {
-            const Node& n = mNodes[nodeIdx];
-            const glm::float4x4 xform = glm::translate(glm::float4x4(1.0f), n.translation) * glm::float4x4(n.rotation) *
-                                        glm::scale(glm::float4x4(1.0f), n.scale);
-            xforms.push(xform);
-            nodeIdx = n.parent;
-        }
-        glm::float4x4 xform = glm::float4x4(1.0);
-        while (!xforms.empty())
-        {
-            xform = xform * xforms.top();
-            xforms.pop();
-        }
-        return xform;
-    }
-
-    glm::float4x4 getTransform(int nodeIdx)
-    {
-        glm::float4x4 xform = glm::float4x4(1.0);
-        while (nodeIdx != -1)
-        {
-            const Node& n = mNodes[nodeIdx];
-            xform = glm::translate(glm::float4x4(1.0f), n.translation) * glm::float4x4(n.rotation) *
-                    glm::scale(glm::float4x4(1.0f), n.scale) * xform;
-            nodeIdx = n.parent;
-        }
-        return xform;
-    }
-
-
-    glm::float4x4 getCameraTransform(int nodeIdx)
-    {
-        const int child = mNodes[nodeIdx].children[0];
-        return getTransform(child);
-    }
-
-    void updateAnimation(const float dt);
 
     struct EnvLightDesc
     {
