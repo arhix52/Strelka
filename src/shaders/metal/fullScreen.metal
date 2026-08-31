@@ -31,7 +31,7 @@ vertex CopyVertexOut copyVertex(unsigned short vid [[vertex_id]])
     return out;
 }
 
-// A simple fragment shader that copies a texture and applies a simple tonemapping function.
+// Copy the texture with nearest filtering.
 fragment float4 copyFragment(CopyVertexOut in [[stage_in]],
                              texture2d<float> tex)
 {

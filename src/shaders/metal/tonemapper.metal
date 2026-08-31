@@ -81,14 +81,7 @@ kernel void toneMappingTextureShader(
     displayTexture.write(float4(result, inputColor.a), tid);
 }
 
-// The denoised frame, back into the buffer the headless writer reads.
-//
-// It lands in a texture and nothing put it anywhere else, so StrelkaCLI wrote
-// the accumulation buffer -- the estimate the denoiser was handed, not the one
-// it produced. `--denoise` therefore cost a canonical guide sample, turned on
-// frame jitter and the firefly clamp, and delivered no denoising at all to the
-// file. Linear in and linear out: the tone curve is the host's, and an EXR must
-// keep the radiance.
+// Copy the denoised display texture to the headless writer's linear buffer without tonemapping.
 kernel void denoisedTextureToBuffer(
     uint2 tid [[thread_position_in_grid]],
     constant UniformsTonemap& uniforms [[buffer(0)]],

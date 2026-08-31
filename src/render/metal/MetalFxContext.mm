@@ -385,24 +385,8 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         // mirror describes the mirror rather than the image in it.
         desc.specularHitDistanceTextureEnabled = envFlag("STRELKA_NO_SPECDIST") ? NO : YES;
         desc.specularHitDistanceTextureFormat = kSpecularHitDistanceFormat;
-        // On, and the aggregate metrics argue against it. They are wrong, and how
-        // they are wrong is worth keeping.
-        //
-        // The mask marks pixels whose history cannot be trusted. The rule that
-        // produces it fires when the guides had to be taken past the primary hit,
-        // which happens exactly when that hit was too smooth to describe -- water,
-        // glass, a mirror. On the pine forest that is 22.6% of the frame, and it
-        // is water.
-        //
-        // Turning it off improves every number the denoise audit reports: swim
-        // 0.0793 -> 0.0301, sharpness 0.368 -> 0.441, pixels below a tenth of the
-        // truth 0.7% -> 0.4%. It also makes the water surface vanish. The audit
-        // averages over the frame, and a fifth of it getting worse in a way that
-        // matters is worth less to a mean than four fifths getting slightly
-        // better -- so the summary improved while the picture lost an object.
-        //
-        // STRELKA_NO_REACTIVE=1 turns it off, which is the configuration those
-        // numbers describe.
+        // Reactive masks reject history where smooth primaries defer guides to another surface.
+        // STRELKA_NO_REACTIVE=1 remains a diagnostic override.
         desc.reactiveMaskTextureEnabled = envFlag("STRELKA_NO_REACTIVE") ? NO : YES;
         desc.reactiveMaskTextureFormat = kReactiveFormat;
         desc.inputWidth = inputWidth;
@@ -502,21 +486,8 @@ void MetalFxContext::encodeDenoise(void* commandBuffer, const DenoiseInputs& inp
     d.specularHitDistanceTexture = (__bridge id<MTLTexture>)inputs.specularHitDistance;
     d.reactiveMaskTexture = (__bridge id<MTLTexture>)inputs.reactive;
     d.outputTexture = (__bridge id<MTLTexture>)inputs.output;
-    // Hand over the scene's exposure rather than leaving MetalFX to assume 1.
-    //
-    // The colour texture is linear radiance, which on a path traced scene runs to
-    // hundreds while the tone curve that follows scales it by about a thousandth.
-    // MetalFX weighs history, clamps neighbourhoods and detects fireflies in an
-    // exposed space, so at an assumed exposure of 1 every lit pixel sits past the
-    // top of that space and those three decisions are all made on saturated
-    // values: measured on BrainStem it crushed the 99th percentile of the frame
-    // from 202 to 93 and blew a thousandth of it up to a 2047 clamp -- a black
-    // model covered in coloured sparks. With the exposure supplied the same frame
-    // reconstructs to within 25% of the converged reference.
-    //
-    // A fixed value rather than autoExposureEnabled on purpose: that estimate
-    // moves with the frame's content, so the history would be normalised
-    // differently from the frame being blended into it.
+    // Supply fixed scene exposure because MetalFX operates in exposed space.
+    // Auto exposure would normalize history differently from the incoming frame.
     if (mExposureTexture)
     {
         if (inputs.exposure != mExposure)

@@ -245,14 +245,7 @@ static __inline__ LightSampleData SampleDiscLight(device const UniformLight& l, 
 
 /// A point drawn uniformly over the surface of a sphere light.
 ///
-/// The density is the area one converted to solid angle, not the constant
-/// 1/(4pi) this used to report. Uniform-area sampling has p_A = 1/(4 pi r^2),
-/// and turning that into a solid-angle density needs the d^2 / cos Jacobian like
-/// any other area light -- the sampler picks a point, not a direction. Reporting
-/// 1/(4pi) made the next-event estimator scale with (d / r)^2: measured against
-/// the analytic irradiance of a uniformly emitting sphere it was 111x too bright
-/// at r = 0.5, d = 4. Both halves of the MIS estimate used the same wrong
-/// number, so the weights still summed to one and nothing looked inconsistent.
+/// Uniform-area sampling uses p_A = 1/(4 pi r^2), converted to solid angle by the d^2/cos Jacobian.
 static __inline__ LightSampleData SampleSphereLight(device const UniformLight& l, const float2 u, const float3 hitPoint)
 {
     LightSampleData lightSampleData;
@@ -278,11 +271,6 @@ static __inline__ LightSampleData SampleSphereLight(device const UniformLight& l
 /// analytic form of an environment, and an environment lights a surface from
 /// below as well as above once anything reflects. `color` is radiance, so there
 /// is no distance falloff and no area.
-///
-/// This case was missing from connectLight()'s switch, which left the sample
-/// zero-initialised -- direction (0,0,0), pdf 0 -- so the facing test rejected it
-/// and a dome light on Metal contributed exactly nothing, silently. OptiX had
-/// the same hole and it was fixed there only.
 static __inline__ LightSampleData SampleDomeLight(device const UniformLight& l, const float2 u, const float3 hitPoint)
 {
     LightSampleData lightSampleData;

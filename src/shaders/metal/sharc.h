@@ -506,10 +506,7 @@ static inline bool sharcQuery(constant Uniforms& uniforms,
     return true;
 }
 
-// Rounded, not truncated. Truncation biases every deposit towards zero by half a
-// quantum, which the OptiX port measured as a quarter of a percent of systematic
-// darkening for as long as the cache is on -- `00_calibration` and
-// `02_basecolor` read 0.997 truncating and 1.000 rounding.
+// Round fixed-point deposits because truncation biases every value toward zero.
 static inline int32_t sharcFixed(float value, float scale)
 {
     const float limit = 2147480000.0f;

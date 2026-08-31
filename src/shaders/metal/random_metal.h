@@ -114,30 +114,9 @@ constant unsigned int primeNumbers[32] =
   127, 131
 };
 
-// Sobol direction matrices (5 dimensions x 32 bits)
 // Sobol' direction numbers, 256 dimensions, from the Joe-Kuo tables that
-// optimise the t-value of the two-dimensional projections (new-joe-kuo-6.21201,
-// https://web.maths.unsw.edu.au/~fkuo/sobol/). Generated, not hand-written; the
-// first five rows are byte-identical to the five this file used to carry, which
-// is how the generator was checked.
-//
-// Five was not enough, and the way it failed is worth recording. `dimension % 5`
-// meant dimensions five apart selected the same matrix, and since they also
-// scrambled the sample index identically they produced the *same value*. Owen
-// scrambling the outputs with different seeds makes each of them uniform on its
-// own and leaves the pair a bijection: their 2D projection is a diagonal, not a
-// point set. Measured over the first 36 dimensions, 18% of all pairs were
-// degenerate that way -- 16 occupied cells out of 256. With this table none are:
-// the worst pair reaches 32 and it is 0.3% of them.
-//
-// Nothing notices a degenerate pair until something takes a *decision* from one
-// of the two. The coverage test for a blended surface is a threshold, and the
-// two sides of it then select systematically different values of the other
-// dimension. eOpacity is 11 and eBSDF0 is 6: whether to shade the surface and
-// where to scatter off it were the same number. That read as a plane 7.5% too
-// bright on the alpha-blend harness scene, and as a 2% error over the frame.
-//
-// 256 covers eNUM_DIMENSIONS x 14 bounces before it has to wrap.
+// optimize two-dimensional projections and avoid dimensional aliasing from a small modulo table.
+// 256 dimensions cover eNUM_DIMENSIONS x 14 bounces before wrapping.
 constant const uint32_t sb_matrix[256][32] = {
     {0x80000000, 0x40000000, 0x20000000, 0x10000000, 0x08000000, 0x04000000, 0x02000000, 0x01000000, 0x00800000, 0x00400000, 0x00200000, 0x00100000, 0x00080000, 0x00040000, 0x00020000, 0x00010000, 0x00008000, 0x00004000, 0x00002000, 0x00001000, 0x00000800, 0x00000400, 0x00000200, 0x00000100, 0x00000080, 0x00000040, 0x00000020, 0x00000010, 0x00000008, 0x00000004, 0x00000002, 0x00000001},
     {0x80000000, 0xc0000000, 0xa0000000, 0xf0000000, 0x88000000, 0xcc000000, 0xaa000000, 0xff000000, 0x80800000, 0xc0c00000, 0xa0a00000, 0xf0f00000, 0x88880000, 0xcccc0000, 0xaaaa0000, 0xffff0000, 0x80008000, 0xc000c000, 0xa000a000, 0xf000f000, 0x88008800, 0xcc00cc00, 0xaa00aa00, 0xff00ff00, 0x80808080, 0xc0c0c0c0, 0xa0a0a0a0, 0xf0f0f0f0, 0x88888888, 0xcccccccc, 0xaaaaaaaa, 0xffffffff},
@@ -410,7 +389,7 @@ float halton(uint32_t index, uint32_t base)
       i = (i - digit) / base;
       f *= s;
     }
-    return clamp(result, 0.0f, 1.0f - 1e-6f); // TODO: 1minusEps
+    return clamp(result, 0.0f, 1.0f - 1e-6f);
 }
 
 constant constexpr uint32_t kBlueNoiseTile = 128u;
@@ -419,7 +398,7 @@ static SamplerState initSampler(uint32_t linearPixelIndex, uint32_t pixelSampleI
                                 uint32_t bnSwitch)
 {
   SamplerState sampler {};
-  sampler.seed = hash(linearPixelIndex); //^ 0x736caf6fu;
+  sampler.seed = hash(linearPixelIndex);
   sampler.sampleIdx = pixelSampleIndex;
   sampler.depth = 0;
   const uint32_t px = linearPixelIndex % max(width, 1u);
@@ -464,23 +443,8 @@ inline uint32_t sobol_uint(uint32_t index, uint32_t dim)
     return X;
 }
 
-// An Owen scramble needs a hash in which every output bit depends on all the
-// input bits below it and none above it. Vegdahl's variant of the Laine-Karras
-// hash (https://psychopath.io/post/2021_01_30_building_a_better_lk_hash) reaches
-// that condition much more closely than the original for the same cost: it mixes
-// the seed in multiplicatively as well as additively, so seeds that differ in
-// only their low bits no longer produce related scrambles -- which matters here
-// because the seeds are hash_combine(seed, dimension) for consecutive
-// dimensions.
-//
-// It is the blue-noise samplers that this changes, because they are the ones
-// whose seed is a screen-wide constant and whose dimensions therefore differ
-// only by that hash_combine. Sampler 3 used to disagree with sampler 2 at the
-// deepest sample count by more than either one's noise -- 9.7% of the median on
-// cornell_box, 1.5% on mixed_materials, i.e. correlated dimensions reading as a
-// brightness error. With this hash the two agree to 0.9% and 0.2%. Sampler 2,
-// which seeds from the pixel index and so never had related seeds, does not
-// measurably move.
+// Owen scrambling needs every output bit to depend on lower input bits; multiplicative seed mixing
+// decorrelates consecutive dimension seeds used by the screen-wide blue-noise samplers.
 inline uint32_t laine_karras_permutation(uint32_t value, uint32_t seed)
 {
     value ^= value * 0x3d20adeau;
@@ -556,16 +520,7 @@ inline float blueNoiseShift(float bn, uint32_t dimension)
     return fract(bn + float(dimension) * kGoldenRatioConjugate);
 }
 
-// Blue noise reaches the error field only through the primary hit's dimensions.
-//
-// The construction needs the error to be a slowly-varying function of the pixel's
-// shift. A depth-8 path draws 117 dimensions; shifting all of them makes the
-// error oscillate many times as the shift crosses [0, 1), so error(shift) is
-// effectively a hash of the shift and the mask's spectrum does not survive the
-// map. Measured: shifting every dimension gave lowPassErr/rawErr = 0.28, which is
-// the white-noise value for that filter -- no better than the per-pixel scramble
-// it replaced. Only depth 0 responds smoothly enough to be worth shifting, and
-// that is also where most of the visible noise is.
+// Shift only primary dimensions so error varies smoothly with the mask; deeper paths hash away its spatial spectrum.
 template <SampleDimension Dim>
 static float randomSobolBlueNoise(thread SamplerState& state)
 {

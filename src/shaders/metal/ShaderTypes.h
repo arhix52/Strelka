@@ -82,8 +82,7 @@ enum class DebugMode : uint32_t
     eAovRoughness,
     eAovDepth,
     eAovMotion,
-    // The two guides that had no view of their own, which is how a mask covering
-    // a fifth of the frame went unnoticed until an object disappeared.
+    // Guides whose visualization enables their production.
     eAovReactive,
     eAovSpecularHitDistance,
     // Radiance-cache views. Carried here, and in this order, so that the two
@@ -192,12 +191,7 @@ struct Uniforms
     /// only subsurface media -- whose boundaries a shadow ray never crosses --
     /// pays nothing for it.
     uint32_t hasBoundedMedium;
-    // Diagonal of the scene's world bounds, and the ceiling a subsurface free
-    // flight is drawn against. A bounded medium cannot host a flight longer
-    // than the scene it sits in, so a draw past this one did not stay inside
-    // the medium: the walk skips the event and the ray runs to its boundary
-    // instead. Without it the ceiling is 1e16 -- see docs/open-defects.md #15
-    // for the five-second GPU timeout that produced.
+    // Scene-bounds diagonal caps subsurface free flights; longer draws leave the bounded medium.
     float sceneExtent;
     // Sparse Hash Radiance Cache (SHARC); see sharc.h. The cache is updated by
     // a sparse path pass, resolved, and only then queried by the image pass.
@@ -287,10 +281,6 @@ struct Uniforms
     /// and the arithmetic reduces to exactly what it was.
     uint32_t risCandidates;
     /// Which MIS heuristic weighs the two strategies: 0 = balance, 1 = power.
-    /// Seeded by both apps as render/pt/misHeuristic and honoured by OptiX from
-    /// the start; this backend used to call the balance form unconditionally, so
-    /// the switch silently did nothing on macOS and no A/B against OptiX could
-    /// be run on it.
     uint32_t misHeuristic;
     /// 0 = sample level 0 (what a compute kernel does by default), 1 = ray-cone
     /// level of detail. A switch rather than a constant because the whole point
@@ -427,29 +417,8 @@ struct GeometryEntry
 #define GEOM_CURVE_CUBIC (1u << 30)
 #define GEOM_CURVE_STRAND_MASK 0x0000FFFFu
 
-// --- Wavefront path tracing ------------------------------------------------
-//
-// The megakernel keeps a path's state in registers, which is free but forces
-// every lane of a simdgroup to wait for the longest-lived path in it. The
-// wavefront tracer trades that for explicit state in memory, so each stage only
-// runs over paths that are still alive. Memory traffic is therefore the design
-// constraint, and this struct is deliberately kept at 24 bytes.
-//
-// Four things are *not* stored:
-//   - the sampler, because it is a pure function of
-//     (pixelIndex, sampleIndex, depth) and is cheaper to recompute than to load;
-//   - the IOR stack (52 B), which only matters to paths currently inside a
-//     dielectric and lives in a side table indexed by path slot;
-//   - participating-medium state (8 B), which only SSS/volume specialisations
-//     touch and likewise lives in a side table;
-//   - SHARC bookkeeping, which only cache-enabled shade/deposit kernels touch
-//     and likewise lives in a side table.
-// The ray is separate from the rest of the state because `extend` reads only
-// the ray and is the most traffic-sensitive stage: keeping them together made it
-// pull 48 bytes per path to use 24. `shade` reads both, so nothing is read twice.
-//
-// There is no pixelIndex: a path lives in the slot of the pixel it belongs to,
-// so its index *is* its pixel.
+// Wavefront path state is memory-traffic critical and fixed at 24 bytes; feature-specific state uses side tables.
+// Pixel index is the path slot, and PathRay stays separate so extend fetches only traversal data.
 struct PathRay
 {
     packed_float3 origin;
@@ -576,10 +545,7 @@ struct SharcUpdateState
 #define SHARC_DEBUG_IS_SURFACE_VIEW(d)                                                                                 \
     ((d) != SHARC_DEBUG_OFF && (d) != SHARC_DEBUG_COUNTERS && (d) <= SHARC_DEBUG_LAST_VISUALIZATION)
 
-// Two counters for the two ways the nested-dielectric stack loses a path, in a
-// shared buffer the host reads back after the frame. See ior_stack.h and entry 1
-// of docs/open-defects.md: both failures are silent, and a scene can bleed paths
-// to either for years without anything saying so.
+// Shared counters expose nested-dielectric stack overflow and unmatched exits; see ior_stack.h.
 //
 // Its own tiny buffer rather than a slot in the wavefront control block, because
 // that one is device-private and reading it back needs a blit the Metal 4 path
@@ -620,11 +586,7 @@ struct SharcUpdateState
 struct HitRecord
 {
     uint32_t geomEntryIndex; // instance userID + intersection.geometry_id
-    // The TLAS instance that was hit. Carried rather than looked up from the
-    // geometry entry, because a BLAS is shared by every instance of the same
-    // object -- 38 000 scattered trees over 50 distinct meshes in the pine
-    // forest -- and the geometry it holds therefore belongs to no single
-    // instance. The intersection knows which one; nothing downstream does.
+    // Carried because a BLAS may be shared by instances while only the intersection identifies the TLAS instance.
     uint32_t instanceIndex;
     uint32_t primitiveId;
     vector_float2 barycentrics; // not float2: this header is compiled by the host too
@@ -655,10 +617,7 @@ struct ShadowRay
     uint32_t sharcPathIndex;
 };
 
-// EnvAliasEntry and the draw that walks it live in common/env_alias_sampling.h,
-// which the OptiX modules, these kernels and the host tests all compile. It used
-// to be declared here and transcribed into env_light_metal.h, which is how the
-// Metal copy ended up without the guards the shared one has.
+// EnvAliasEntry is shared by Metal, OptiX and host tests.
 #include <env_alias_sampling.h>
 
 struct SkinningParams
@@ -670,10 +629,6 @@ struct SkinningParams
 };
 static_assert(sizeof(SkinningParams) == 16, "SkinningParams host/Metal ABI changed");
 
-// GPU side structure
-// pad0: spot inner cone (rad) or point soft radius.
-// pad1: KHR attenuation range (0 = infinite).
-// points[0].y for point/spot: IES profile index, or -1 when isotropic.
 // pad0: spot inner cone (rad), projector edge softness, or point soft radius.
 // pad1: KHR attenuation range (0 = infinite).
 // points[0] for point/spot/projector: (soft radius, IES profile, projector image
@@ -743,7 +698,7 @@ struct Material
     float roughness; //  4 bytes
     float ior; //  4 bytes
     float specular; //  4 bytes
-    float _pad_specular; //  4 bytes  -- 32 (was specular_tint)
+    float _pad_specular; //  4 bytes  -- 32
 
     float transmission; //  4 bytes
     float clearcoat; //  4 bytes

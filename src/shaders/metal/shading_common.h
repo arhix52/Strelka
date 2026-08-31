@@ -1,11 +1,6 @@
 #pragma once
-// ============================================================================
-// shading_common.h -- everything the path tracers share.
-//
-// Extracted verbatim from pathtrace.metal so the megakernel and the wavefront
-// kernels evaluate identical shading, sampling and light code. Nothing here
-// depends on how paths are scheduled; only the tracer kernels do.
-// ============================================================================
+// Shared wavefront shading, sampling and light helpers.
+// Scheduling stays in wavefront.metal; estimator rules shared with OptiX live in common headers.
 
 #include <metal_stdlib>
 #include <simd/simd.h>
@@ -37,9 +32,7 @@ using namespace raytracing;
 // which matters less for the branch itself than for the registers and texture
 // state the dead code was keeping alive.
 //
-// Each constant falls back to `true` when the pipeline does not supply it, so
-// the megakernel — which is built without constant values — keeps the full,
-// unspecialised behaviour and needs no changes.
+// Defaults preserve required behaviour when a pipeline omits a function constant.
 // ---------------------------------------------------------------------------
 constant bool kFcEnvMap [[function_constant(0)]];
 constant bool kFcLights [[function_constant(1)]];
@@ -242,12 +235,7 @@ static float resolveOpacity(device const Material& material, float2 uv)
 {
     if (material.alpha_mode == ALPHA_MODE_OPAQUE)
         return 1.0f;
-    // address::repeat, not Metal's clamp_to_edge default: glTF's default wrap is
-    // REPEAT (10497), and a UV transform is the normal way to tile -- the marble
-    // worktop in the bathroom scene repeats 2x2 and the plant's ramp 50x50. Under
-    // clamping neither tiles; the edge texel is smeared across the whole surface,
-    // which reads as a texture that simply did not load rather than as a wrap-mode
-    // bug.
+    // glTF defaults to REPEAT, so transformed UVs must not use Metal's clamp-to-edge default.
     constexpr sampler alphaSampler(mag_filter::linear, min_filter::linear, address::repeat);
     float alpha = material.base_color_alpha;
     if (!is_null_texture(material.baseColorTexture))
@@ -459,13 +447,7 @@ void generateCameraRay(uint2 pixelIndex,
     // Thin lens depth of field
     if (SPEC_DOF && params.useDof && params.lensRadius > 0.0f)
     {
-        // The camera basis in world space is the columns of viewToWorld. This read
-        // its rows, which transposes the rotation: both the lens offset and the axis
-        // the focal distance is measured along then point somewhere else. The visible
-        // effect is not a wrong blur but no blur at all -- past 45 degrees of yaw
-        // dot(direction, camFwd) crosses zero, the clamp below throws the focal point
-        // out to a million units, and depth of field silently stops happening for
-        // every camera that is not axis aligned.
+        // The world-space camera basis is stored in the columns of viewToWorld.
         float3 camRight = viewToWorld[0].xyz;
         float3 camUp = viewToWorld[1].xyz;
         float3 camFwd = -viewToWorld[2].xyz;
@@ -511,13 +493,7 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
                             // sentinel would be cute; -1e30 says "no cone, use level 0" and is checked once.
                             float lodBase = -1e30f)
 {
-    // Two samplers, not one with mip_filter::linear always on. Turning mip
-    // filtering on changes the image even when every fetch asks for level 0 --
-    // measured, 4.4/255 mean over 55% of pixels against the same render without
-    // it -- so leaving it on would make "level of detail off" mean something
-    // other than what the renderer did before this existed. With the switch off
-    // the sampler, and the call, are exactly the originals.
-    // See the note on alphaSampler: glTF's default wrap is REPEAT.
+    // Keep a non-mip sampler so disabling LOD preserves explicit level-zero filtering; glTF wrapping remains REPEAT.
     constexpr sampler texSampler(mag_filter::linear, min_filter::linear, address::repeat);
     constexpr sampler texSamplerMip(mag_filter::linear, min_filter::linear, mip_filter::linear, address::repeat);
 
@@ -536,11 +512,7 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
     const float2 tuv = applyTextureTransform(uv, material);
     si.wo = -rayDir;
     si.front_face = dot(geomNormal, -rayDir) > 0.0f;
-    // Written on every path, not only where it becomes true: wavefront.metal
-    // declares its SurfaceInteraction without an initialiser, and a field this
-    // function leaves alone is read as whatever the stack held. On the OptiX
-    // side that suppressed the diffuse lobe over a whole frame before it was
-    // caught -- 00_calibration came back at ratio 0.045.
+    // Initialize every field because callers may pass an uninitialized SurfaceInteraction.
     si.diffuse_faces_away = false;
     si.bump_normal = si.shading_normal;
 
@@ -690,13 +662,7 @@ static LightConnection makeEmptyConnection()
     return c;
 }
 
-// A strand is not a surface with a lit side and a dark side. The Chiang lobe's TT
-// and TRT terms describe light that entered one side of the fibre and left the
-// other, and on a bright groom TT alone holds about four fifths of the albedo.
-// Testing the shading hemisphere the way a surface does discards every one of
-// those connections, leaving the dominant lobe to be found only by chance through
-// multi-bounce paths: on an isolated strand that lost 46% of the light at two
-// bounces, and what came back at eight arrived as noise.
+// Hair TT/TRT lobes transmit across the strand, so fibre lighting must not reject the opposite shading hemisphere.
 static inline bool scattersThroughFibre(thread SurfaceInteraction& si)
 {
     return si.material_type == MATERIAL_TYPE_HAIR;
@@ -776,9 +742,6 @@ LightConnection connectLight(constant Uniforms& uniforms,
         lightSampleData = SampleDistantLight(light, uv, si.position);
         break;
     case LIGHT_TYPE_DOME:
-        // Missing entirely until now, and a missing case here is not a compile
-        // error -- the sample stayed zero-initialised, the facing test rejected
-        // pdf 0, and a dome light was silently black on this backend only.
         lightSampleData = SampleDomeLight(light, uv, si.position);
         break;
     case LIGHT_TYPE_POINT:
@@ -920,12 +883,7 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
 
     // Cosine folded in here for the same reason as in connectLight().
     c.radiance = volumeEvent ? Li : Li * shadingCosine(si, dir);
-    // Offset along the face the shadow ray actually leaves from. The raw
-    // geometry normal points to a fixed side of the triangle, so on a back-face
-    // hit it pushes the origin *into* the surface and the ray immediately hits
-    // the geometry it started on — NEE then reports occlusion that the BSDF
-    // strategy does not see, and the two estimators disagree. The bounce ray in
-    // the main loop already orients its offset this way.
+    // Match connectLight(): offset along the face the shadow ray leaves.
     c.origin = offset_ray(si.position, orientedFaceNormal(si.geometry_normal, dir));
     c.tMax = 1e16f;
     c.needsRay = true;

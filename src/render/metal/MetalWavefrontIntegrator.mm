@@ -326,20 +326,8 @@ void MetalWavefrontIntegrator::reportStageTimings()
     }
 }
 
-// What the nested-dielectric stack lost, once per scene.
-//
-// Once, not once per frame: this is a fact about the geometry and the materials,
-// not about this frame, and a warning that fires sixty times a second is a
-// warning nobody reads. The counters are per *sample*, because `generate` clears
-// them and generate runs per sample -- so the number is a rate, and comparable
-// between a 4 spp preview and a 4096 spp render.
-//
-// The two failures mean different things and are worth telling apart. An
-// overflow is four nested dielectrics, which is a scene that wants a deeper
-// stack. An unmatched pop is a ray leaving something it never entered, which is
-// almost always a mesh with a hole in it -- and that one cannot be fixed in the
-// renderer at all, because the ray left through the hole without crossing a
-// surface. See docs/open-defects.md entry 1.
+// Report nested-dielectric loss once per scene; generate clears the per-sample counters.
+// Overflow needs a deeper stack, while unmatched or escaped paths indicate broken volume boundaries.
 void MetalWavefrontIntegrator::reportIorStackStats()
 {
     if (mReportedIorStats || !mIorStatsBuffer)
@@ -680,10 +668,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                                (scene.prevFrameInstanceBuffer ? scene.prevFrameInstanceBuffer : scene.instanceBuffer),
                  0, 24);
             bind(scene.sharcHashBuffer, 0, 25);
-            // See the Metal 3 path: a curve hit is rebuilt from these, not carried.
-            // Bound either way. Skipping them left the previous encoder's
-            // addresses in those two slots, which is a stale pointer rather
-            // than an absent one -- and no validation layer can see it.
+            // The persistent argument table requires rebinding curve slots even when the scene has no curves.
             bind(scene.curvePointBuffer, 0, 26);
             bind(scene.curveSegmentBuffer, 0, 27);
             bind(mIorStatsBuffer, 0, 28);
@@ -1146,10 +1131,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->dispatchThreadgroups(mControlBuffer, kHitArgsOffset, tg);
             enc->popDebugGroup();
 
-            // Deferred occlusion. It has to run before the next bounce's shade,
-            // so that this bounce's direct lighting lands in the accumulator
-            // ahead of the next bounce's emission -- the same order the
-            // megakernel adds them in.
+            // Resolve this bounce's direct light before the next bounce contributes emission.
             stamp(kStagePrepareShadow);
             enc->setComputePipelineState(mPrepareShadowPSO);
             enc->setBuffer(mControlBuffer, 0, 0);
@@ -1187,8 +1169,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         return enc;
     }
 
-    // Fold the accumulated radiance into the output exactly as the megakernel's
-    // tail does, reusing the resolve kernel in wavefront.metal.
+    // Resolve this launch's radiance into the persistent accumulation buffer.
     stamp(kStageResolve);
     enc->setComputePipelineState(mResolvePSO);
     enc->setBuffer(uniformBuffer, 0, 0);
@@ -1321,15 +1302,7 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
         "wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} sss={} sharc={} "
         "curves={} sharcUpdate={} openpbr={} metal4={}",
         envMap, lights, motionBlur, dof, debug, alpha, fog, subsurface, sharc, curves, sharcUpdate, openpbr, useMetal4);
-    // Every pipeline's threadgroup limit, not just two of them.
-    //
-    // This is the only figure the public API gives on register pressure -- the
-    // driver's own answer to how many threads fit -- and against the 1024 a
-    // register-light kernel reaches it reads directly: 640 is roughly 1.6x the
-    // registers per thread, 384 is 2.7x. There is no breakdown of what they
-    // hold anywhere in Metal; the way to find that is to remove something and
-    // watch this number, and having all of them at once makes each rebuild
-    // answer for the whole renderer rather than for one kernel.
+    // maxTotalThreadsPerThreadgroup is Metal's available proxy for per-pipeline register pressure.
     auto tgLimit = [](MTL::ComputePipelineState* p) -> uint32_t {
         return p ? (uint32_t)p->maxTotalThreadsPerThreadgroup() : 0u;
     };

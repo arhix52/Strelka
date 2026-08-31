@@ -2,8 +2,6 @@
 
 #include "ShaderTypes.h"
 
-// The one place the photometric assumption is stated; this file used to spell
-// out 1/177.83 and would not have moved if that number ever did.
 #include <strelka/scene/light_desc.h>
 
 #include <log.h>

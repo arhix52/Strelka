@@ -2,12 +2,7 @@
 
 // Homogeneous atmospheric scattering.
 //
-// A slab rather than a bounded volume: the medium fills everything below a
-// height, and outside that there is nothing. That is a deliberate narrowing.
-// Production scenes describe haze with a box the size of the set containing the
-// camera -- the pine forest's is 209 x 209 x 29 m at the origin -- and a slab
-// reproduces it exactly while costing one comparison instead of a second
-// traversal of a volume boundary, per ray, including shadow rays.
+// Atmospheric haze is a slab below a height, avoiding volume-boundary traversal for the global-medium case.
 //
 // What it cannot do: a medium that is not the atmosphere. Smoke in a corner, a
 // beam through a doorway, fog that ends at a wall. Those need the bounded kind,

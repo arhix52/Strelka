@@ -8,27 +8,8 @@
 // bound by -- which is the whole reason the branch below is behind a constant.
 #include <strelka/material/openpbr/openpbr_bridge.h>
 
-// ============================================================================
-// Wavefront path tracer.
-//
-// Same shading as the megakernel (everything comes from shading_common.h); only
-// the scheduling differs. A path's state lives in memory instead of registers so
-// that each stage can later run over just the paths that are still alive, rather
-// than making every lane of a simdgroup wait for the longest-lived path in it.
-//
-// Live paths are compacted between bounces into an index queue, so a stage only
-// dispatches threads for work that is still alive. Compaction moves 4-byte
-// indices, not 48-byte records, and reserves output slots one atomic per
-// simdgroup rather than one per lane.
-//
-// Path state stays indexed by pixel; only the queue is compacted. That keeps the
-// side tables (hits, IOR stacks, radiance) addressable by a single index and
-// makes the queue's contents a permutation rather than a copy.
-//
-// Shadow rays are deferred into their own stage: they are a second, incoherent
-// traversal that would otherwise run inside the most register-hungry kernel, and
-// only a subset of the shaded paths emit one.
-// ============================================================================
+// Path state stays pixel-indexed while queues compact live indices between stages.
+// Shadow traversal is deferred so its incoherent work stays out of shade.
 
 #include "fog.h"
 #include "subsurface.h"
@@ -134,13 +115,8 @@ static inline void queuePush(device atomic_uint* counter, device uint32_t* queue
 }
 
 
-// Traversal specialisation.
-//
-// A motion acceleration structure is a different type from a static one, and the
-// intersector that walks it is a different type again — so this cannot be a
-// runtime branch or a function constant, it has to be two compiled variants. It
-// is worth it: every ray was paying for motion-BVH traversal, including in scenes
-// with no deforming geometry at all, and that was 12-19% of the frame.
+// Static and motion acceleration structures require different intersector types,
+// so traversal specialization cannot be a runtime branch or function constant.
 
 // The fraction of a light a cutout shadow ray is allowed to carry before Russian
 // roulette ends its walk.
@@ -160,8 +136,7 @@ static inline void queuePush(device atomic_uint* counter, device uint32_t* queue
 // in any scene.
 constant float kShadowTransmittanceCutoff = 0.05f;
 
-// Coverage of one cutout candidate. Callable from a kernel, which is the whole
-// point -- see the note on the traversal in shadowImpl.
+// Coverage is callable from the restart walk because Metal 4 cannot run its intersection function.
 static inline float cutoutOpacityAt(uint primitive_id,
                                     uint geometry_id,
                                     uint instance_id,
@@ -192,24 +167,6 @@ static inline float cutoutOpacityAt(uint primitive_id,
     const float2 uv = interpolateAttrib(uvv[0], uvv[1], uvv[2], barycentric_coord);
     return resolveOpacity(mat, uv);
 }
-
-// Measured and not kept: the same stochastic alpha test as an intersection
-// function on the *main* rays, so a canopy resolves in one traversal instead of
-// one per leaf slipped past.
-//
-// It works and it is slightly more accurate on a single blended plane -- the
-// harness scene went from 0.052 to 0.042 relative error -- but on the pine
-// forest, which is the scene it was written for, it renders the same image
-// (0.5% relative) 4% slower: 31.3 s against 30.0 s at 128 spp, twice each. An
-// intersection-function callback per candidate costs more than the handful of
-// traversal restarts it saves, because a ray meets few leaves, not many.
-//
-// The shadow case above is the opposite and stays: there the old path restarted
-// a full closest-hit query up to eight times per ray.
-//
-// The first version of this measured as a 9% win, which it was not -- it also
-// ran the coverage test a second time in `shade`, so foliage passed a^2 instead
-// of a and rays escaped the canopy that should not have.
 
 struct MotionTraversal
 {
@@ -445,47 +402,6 @@ static inline float unpackSharcRoughness(uint32_t depthAndFlags)
     return float((depthAndFlags & PATH_SHARC_ROUGHNESS_MASK) >> PATH_SHARC_ROUGHNESS_SHIFT) / 255.0f;
 }
 
-// Measured and not kept: adaptive sampling -- retiring a pixel once its estimate
-// stops moving, so that nothing downstream traces for it.
-//
-// It works, it is not worth it, and the reasons are structural rather than a
-// matter of tuning. Pine forest, 640x480, against a 512 spp reference:
-//
-//   128 spp uniform    33.0 s   rel 0.0787  rmse 0.01404  median 0.994
-//   116 spp uniform    29.4 s   rel 0.0853  rmse 0.01516  median 0.992
-//   adaptive 0.002     30.0 s   rel 0.0876  rmse 0.01461  median 0.955
-//   100 spp uniform    28.4 s   rel 0.0932  rmse 0.01654  median 0.992
-//   adaptive 0.005     26.5 s   rel 0.0950  rmse 0.01515  median 0.854
-//
-// At equal wall clock it loses to simply asking for fewer samples, and it pays
-// for that with a bias the uniform render does not have.
-//
-// Three things go wrong, and each is worth knowing before trying again.
-//
-// A pixel that converges cheaply is also cheap to sample. The sky retires first,
-// and a sky ray misses almost immediately -- with a criterion relative to the
-// pixel's own mean only a tenth of the frame ever retired, all of it sky: the
-// camera-ray count fell from 307k to 275k while the bounce-1 count did not move
-// at all. Nothing expensive stops.
-//
-// Retiring anything expensive needs an absolute criterion, and an absolute
-// criterion retires dark pixels. Radiance is non-negative and heavy-tailed, so a
-// dark pixel that has not yet found its rare bright path looks converged
-// precisely because it has not found it. Freezing it there is a systematic
-// darkening -- 15% at the median at a threshold of 0.005, far more than the
-// noise it saved.
-//
-// And retirement needs a compacted queue, which this architecture charges for.
-// `generate` writes the identity, and every later stage reads PathRay,
-// HitRecord and PathState in pixel order because of it. Compacting a queue that
-// had nothing to compact -- the machinery enabled, the threshold zero -- cost
-// 15% of the frame on its own, the same coherence effect that made ray sorting
-// lose.
-//
-// A tile-level version answers the second and third of those: a tile mean is
-// estimated well enough not to freeze low, and whole tiles keep the queue
-// ordered. It does not answer the first, which is the one that bounds the win.
-//
 // ---------------------------------------------------------------------------
 // generate -- camera rays
 // ---------------------------------------------------------------------------
@@ -775,24 +691,8 @@ static void extendImpl(uint gid,
                 const float3 albedo = mp.albedo;
                 const float3 channelPdf = sssChannelPdf(float3(paths[tid].throughput), albedo);
                 SamplerState srng = samplerFor(uniforms, tid, sampleIdx, pathDepth(paths[tid].depthAndFlags) + step);
-                // Drawn against the scene, not against infinity. The ray is
-                // bounded by whatever distance comes back, so "no surface
-                // within it" is the ordinary way a walk scatters -- which
-                // means a draw longer than the medium is indistinguishable
-                // from one that stayed inside, and the event gets taken at
-                // that distance. For a closed mesh the boundary wins and it
-                // never shows; for the leaked paths this scene reports by the
-                // thousand (see the nested-dielectrics warning) nothing stops
-                // the ray, and the walk lands a scatter event -- and the light
-                // connection made from it -- as far out as -log(1e-7)/sigma_t
-                // allows. A shadow ray tens of times longer than the scene is
-                // what puts Metal's traversal into its pathological mode and
-                // holds the dispatch past the GPU watchdog (open-defects #15).
-                //
-                // A flight longer than the scene cannot have stayed inside a
-                // bounded medium, so sssSampleDistance declines it and the ray
-                // runs to its boundary instead. Nothing legitimate is lost:
-                // the medium being sampled is geometry that fits in the scene.
+                // Bound free flights by the scene: a longer draw left the medium and can wedge traversal on leaked
+                // paths.
                 if (sssSampleDistance(sigmaT, channelPdf, uniforms.sceneExtent,
                                       random<SampleDimension::eSssChannel>(srng, uniforms.samplerType),
                                       random<SampleDimension::eSssDistance>(srng, uniforms.samplerType), mediumScatterT))
@@ -819,25 +719,6 @@ static void extendImpl(uint gid,
         r.max_distance = max(mediumScatterT, r.min_distance + 1e-6f);
     }
 
-    // Measured and not kept: `intersection_query`, Metal's inline traversal, in
-    // place of the intersector object.
-    //
-    // The hardware counters say this kernel runs at 16% compute occupancy where
-    // a saturating ALU kernel reaches 88%, and the hope was that stepping
-    // traversal in the shader would ask for fewer registers and let more waves
-    // stay resident. It does not: occupancy comes back 15.2% against 16.9%, and
-    // the frame takes the same 174 ms. Occupancy is pinned by something below
-    // this API -- most likely how many traversals the ray tracing unit will
-    // carry at once -- and neither threadgroup size (64, 128, 256 all give
-    // 16.9%) nor the API form moves it.
-    //
-    // It does move the *limiters*: MMU 44% -> 29% and last level cache 29% ->
-    // 20%, with ALU going 34% -> 39%. Same work, differently constrained, same
-    // wall clock. Worth knowing if the memory picture ever changes.
-    //
-    // It also cannot serve the whole renderer: `intersection_query` rejects the
-    // primitive_motion tag, so a deforming scene would need the intersector kept
-    // alongside it.
     // SSS random walks only need the closed triangle boundary of their volume.
     // Curves are fibre primitives, not volume boundaries. An instance mask was
     // not sufficient here: the curve-capable intersector still entered Metal's
@@ -860,8 +741,7 @@ static void extendImpl(uint gid,
     {
         typename T::isect isect;
         isect.assume_geometry_type(T::geometryTypes());
-        // The coverage test for cutout geometry happens in `shade`, not here --
-        // see the note above extendAlphaAnyHit's replacement for the measurement.
+        // Cutout coverage is tested in shade, not extend.
         isect.force_opacity(forced_opacity::opaque);
         isect.accept_any_intersection(false);
         const typename T::isect::result_type surfaceHit = T::trace(isect, r, accelerationStructure, rayMask, motionTime);
@@ -869,48 +749,8 @@ static void extendImpl(uint gid,
         hit = captureExtendIntersection(surfaceHit, curveParameter);
     }
 
-    // Chased through the ray buffer -- 22 MB at 720p, past the caches -- because
-    // the queue this used to walk is 3.7 MB and fits in them, which made the
-    // probe report on cache hits rather than on memory.
-
-    // A ray that escaped carries no information beyond the fact, so it goes
-    // straight to the miss stage: no hit record is written and the path never
-    // enters `shade`. On a scene with an open background that is most of the
-    // secondary rays, and it was the whole cost of the bounce.
-    // Atmospheric and subsurface scattering are decided here because this is
-    // the one kernel that knows whether a surface precedes the sampled event.
-    // A ray that scatters never reaches that surface, and one that would escape
-    // can still scatter on the way out -- so the miss branch remains below.
-    // Everything below this line is on the wrong side of a register cliff, and
-    // the cliff is the only lever the hardware counters leave.
-    //
-    // This kernel runs at 17% compute occupancy where a saturating ALU kernel
-    // reaches 88%. The machine is empty, not busy: relieving memory pressure
-    // without raising occupancy buys nothing at all -- Metal's inline
-    // `intersection_query` cut the MMU limiter from 44% to 29% and the last
-    // level cache from 29% to 20% for exactly the same 174 ms frame. What does
-    // move is occupancy, and occupancy moves with registers: compiling the fog
-    // out lifts the pipeline's threadgroup limit from 640 to 704, occupancy from
-    // 16.5% to 18.8%, and the frame from ~175 ms to ~167 (three interleaved
-    // runs each, swapping metallibs to cancel thermal drift).
-    //
-    // Reaching 704 with the fog still in was tried and cannot be done piecemeal.
-    // Every one of these on its own leaves it at 640, and only removing the
-    // whole block reaches 704:
-    //   - writing the fog HitRecord field by field instead of through a local
-    //   - calling randomSobol directly, so the runtime samplerType switch does
-    //     not inline all five samplers here
-    //   - merging the fog and surface exits into a single hit-queue push
-    //   - carrying the free-flight draw on PathRay, taken where the ray was
-    //     created, so no SamplerState is built here at all -- and that one is
-    //     self-defeating: the extra word takes PathRay from 24 bytes to 28 and
-    //     lives across the traversal, which costs what it saved
-    //
-    // The remaining route is a separate dispatch for the fog decision, which
-    // buys at most those 4.5% and pays a barrier and a drain per bounce -- and
-    // this renderer has already measured that dispatch boundaries are not free
-    // (see the acceleration structure batching note). Not attempted.
-    //
+    // Escaped rays skip shade and go to miss. Fog/SSS are decided here
+    // because only extend knows whether a surface precedes the medium event.
     if (mediumHitBit != 0u && (hit.type == intersection_type::none || mediumScatterT < hit.distance))
     {
         HitRecord mediumRec;
@@ -994,9 +834,7 @@ static void fetchTriangle(device const char* vertexBuffer,
                           thread float& tangentSign,
                           thread float3* vcol)
 {
-    // Scene::Vertex layout (32 bytes): pos@0 (packed_float3), tangent@12,
-    // normal@16, uv@20 — all uint32 after the position. The `Vertex` struct in
-    // ShaderTypes.h does *not* match this and must not be used.
+    // Scene::Vertex is 32 bytes; these offsets are shared with ShaderTypes.h and guarded by host static_asserts.
     constexpr uint32_t vtxStride = 32;
     constexpr uint32_t tangentOff = 12;
     constexpr uint32_t normalOff = 16;
@@ -1137,21 +975,8 @@ static void fetchCurve(device const packed_float3* curvePoints,
     outUv = float2(alongStrand, 0.0f);
 }
 
-// Where a ray that scattered through a strand has to start.
-//
-// The Chiang lobe is a whole-fibre model: its T factor is the absorption over the
-// chord *inside* the strand, so a direction leaving on the far side has already
-// paid for the crossing. Start such a ray on the surface it came from and the
-// strand is in its way -- a shadow ray dies on its own fibre, and a bounce ray
-// hits the far wall and buys a second whole-fibre event that the first one already
-// contains. On one isolated strand that second event is what put the rendered
-// cross-section 29% over Cycles and kept it climbing with every extra bounce
-// instead of converging.
-//
-// The strand is a cylinder of radius r about `tangent` and the hit sits on its
-// surface along `normal`. In the plane across the axis the chord from that point
-// along the ray is -2r(n.u); the distance travelled to cover it is that over the
-// length the direction itself has in the plane.
+// The whole-fibre lobe already accounts for absorption across the chord, so transmission starts at the far surface.
+// For a cylinder, the chord distance is -2r(n.u) divided by the direction's length across the strand.
 static inline float3 fibreExitOrigin(float3 position, float3 tangent, float3 normal, float radius, float3 dir)
 {
     const float3 dPerp = dir - tangent * dot(dir, tangent);
@@ -1348,17 +1173,7 @@ static inline float backgroundDepth(constant Uniforms& uniforms)
 // already accounts for the jitter itself through jitterOffsetX/Y.
 static inline float2 screenMotion(constant Uniforms& uniforms, float4 prevClip, uint2 pixel)
 {
-    // A w at or near zero is a point on the previous camera's plane, and dividing
-    // by it does not produce a large motion vector -- it produces a meaningless
-    // one. Measured on the pine forest before this guard: 14% of pixels claimed
-    // more than ten pixels of motion with the camera standing still, and the
-    // worst saturated the half-float motion texture at 65504 in both channels.
-    // The denoiser then fetched history from those coordinates, which is a
-    // temporal filter that cannot converge by construction.
-    //
-    // Zero is the honest answer for a reprojection that has none: it says "this
-    // pixel did not move", the history it blends is the one under the pixel, and
-    // every caller that can reach this case already marks the pixel reactive.
+    // Near-zero clip w has no valid reprojection; return zero motion and let the caller's reactive mask reject history.
     const float kMinW = 1e-4f;
     if (prevClip.w <= kMinW)
     {
@@ -1420,7 +1235,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
     const bool specularBounce = (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u;
     const bool neeDone = (p.depthAndFlags & PATH_FLAG_NEE_DONE) != 0u;
 
-    // Bounce heatmap; see the note in shade.
+    // Record path depth for the SHARC bounce heatmap.
     if (SPEC_DEBUG && (DebugMode)uniforms.debug == DebugMode::eSharcBounces)
     {
         aov[tid].bounceDepth = (float)depth;
@@ -1433,10 +1248,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         atomic_fetch_add_explicit(&iorStats[IOR_STAT_ESCAPED_INSIDE], 1u, memory_order_relaxed);
     }
 
-    // Background still needs a record, or the denoiser reads whatever the
-    // previous frame left in the guides and smears the silhouette. Not only at
-    // depth 0: a specular primary hit defers its guides, so if the reflected ray
-    // is the one that escapes, this is the only chance to write them.
+    // Escapes must overwrite stale denoiser guides, including those reached after a specular primary hit.
     if (shouldWriteAov(uniforms, sampleIdx) && (depth == 0u || (p.depthAndFlags & PATH_FLAG_AOV_DONE) == 0u))
     {
         AovSample a;
@@ -1445,18 +1257,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         a.normal = packed_float3(-rayDir);
         a.roughness = 1.0f;
         a.depth = backgroundDepth(uniforms);
-        // The sky moves on screen when the camera turns, and leaving this at zero
-        // tells the denoiser it did not: the history is then blended from the
-        // wrong place across the whole background. A direction reprojects like a
-        // point at infinity -- w = 0 -- so the previous camera is all that is
-        // needed, and no depth.
-        // Only for a camera ray. Past a bounce, `rayDir` is the direction the
-        // path left the surface in, and projecting it through the previous
-        // camera answers "where would something infinitely far in that direction
-        // have been on screen" -- a question about the bounce, not about this
-        // pixel. Those directions point everywhere, including nearly across the
-        // view, where the projection is degenerate; that is where most of the
-        // absurd motion vectors came from.
+        // Camera rays reproject the sky at infinity; bounced rays retain the primary surface's motion instead.
         const float2 motion = (depth == 0u) ? screenMotion(uniforms, uniforms.prevWorldToClip * float4(rayDir, 0.0f),
                                                            uint2(tid % uniforms.width, tid / uniforms.width)) :
                                               float2(0.0f);
@@ -1473,11 +1274,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         }
         else
         {
-            // Depth and motion belong to the surface the camera sees, and this is
-            // not it -- the path got here through a bounce. Leaving the primary
-            // hit's values in place keeps the denoiser reprojecting this pixel by
-            // this pixel's own motion; overwriting them with the sky's asked it to
-            // reproject by something several hundred pixels away.
+            // Bounced sky keeps the camera-visible surface's depth and motion for reprojection.
             a.depth = aov[tid].depth;
             a.motionX = aov[tid].motionX;
             a.motionY = aov[tid].motionY;
@@ -1593,10 +1390,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                            device char* sharcPassBuffer0 [[buffer(23)]],
                            device const char* sharcPassBuffer1 [[buffer(24)]],
                            device SharcHashEntry* sharcHashEntries [[buffer(25)]],
-                           // Curves. `extend` cannot hand over what it saw -- primitive_data is only
-                           // addressable inside the kernel that ran the intersect -- so a strand hit is
-                           // rebuilt here from the same buffers the acceleration structure was built
-                           // from, exactly as a triangle hit is refetched from the vertex buffer.
+                           // Curves are rebuilt because primitive_data is local to the intersection kernel.
                            device const packed_float3* curvePoints [[buffer(26)]],
                            device const uint32_t* curveSegments [[buffer(27)]],
                            // Two counters for the ways the nested-dielectric stack loses a path; see
@@ -1654,34 +1448,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     float3 radiance = float3(0.0f);
     const HitRecord rec = hits[tid];
 
-    // --- Absorption over the segment just travelled -------------------------
-    //
-    // The IOR stack already knows which medium the path is inside; it also
-    // carries which material that medium came from, so the extinction can be
-    // looked up here rather than threaded through the path state.
-    //
-    // Once, here, rather than inside each of the four branches below -- because
-    // three of them return before the fourth is reached, and a branch that
-    // forgets this does not lose a highlight, it loses the colour of everything
-    // seen through the medium.
-    //
-    // That is what the fog gizmo around the bathtub was doing to the water. The
-    // gizmo is dense enough that nearly every ray inside the water scatters in
-    // it before reaching a surface, a scattering event returns from its own
-    // branch, and the water's absorption over the segment leading to that event
-    // was applied by nobody. It read as the fog washing the cyan out, which is
-    // why four orders of magnitude of fog density barely moved it: the fog was
-    // not tinting anything, it was replacing the vertex that would have.
-    //
-    // rec.distance is the segment in all four cases -- a scattering event
-    // carries the free-flight distance it sampled, a surface hit carries the
-    // hit distance.
-    //
-    // Skipped inside a subsurface walk, which is a different medium model:
-    // sssScatterWeight already carries that medium's extinction, and a material
-    // carrying both extensions would otherwise be attenuated twice for one
-    // interior. A bounded volume is not skipped -- being inside a fog gizmo says
-    // nothing about whether the path is also inside glass.
+    // Apply enclosing IOR absorption once before all vertex branches; rec.distance is the segment just travelled.
+    // Subsurface walks carry their own extinction, while bounded volumes can still overlap enclosing glass.
     {
         const uint32_t walk = mediumState.medium & MEDIUM_INDEX_MASK;
         const bool inSubsurfaceWalk =
@@ -1741,15 +1509,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 uniforms, uniforms.numLights, lights, rng, si, envAliasTable, envMapTexture, iesProfiles, true);
             if (conn.needsRay && conn.pdf > 0.0f)
             {
-                // dot(rayDir, toLight), not dot(-rayDir, toLight). The phase
-                // function takes the angle between the two directions of
-                // *travel*: light arrives along -toLight and leaves toward the
-                // camera along -rayDir, so their cosine is dot(rayDir, toLight).
-                //
-                // Negated, a forward-scattering medium becomes a backward-
-                // scattering one. Looking into a low sun -- where the glow is --
-                // it was six times too dim, and looking away from it, where
-                // there should be almost nothing, thirty-seven times too bright.
+                // The phase cosine compares travel directions: dot(rayDir, toLight).
                 const float phase = hgPhase(dot(rayDir, conn.toLight), uniforms.fogAnisotropy);
                 // The phase function is the medium's BSDF and its own pdf, so
                 // MIS pairs it against the light density exactly as a surface
@@ -1828,12 +1588,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
 
     // --- Subsurface random walk ---------------------------------------------
     //
-    // A scattering event inside the medium bounded by the surface the path
-    // entered through. Shaped like the fog case above and different from it in
-    // two ways: the medium is per material rather than global, and there is no
-    // next-event estimation -- the boundary occludes nearly every shadow ray a
-    // dense medium would spawn, so the cost is real and the contribution is not.
-    // Light gets in and out through the surface, where NEE does run.
+    // Dense random walks skip NEE; bounded media connect at the scatter vertex.
+    // Surface NEE handles light entering and leaving the material.
     if (SPEC_SSS && (rec.geomEntryIndex & HIT_SSS_BIT) != 0u)
     {
         const uint32_t medium = mediumState.medium & MEDIUM_INDEX_MASK;
@@ -1896,10 +1652,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     uniforms, uniforms.numLights, lights, wrng, vsi, envAliasTable, envMapTexture, iesProfiles, true);
                 if (conn.needsRay && conn.pdf > 0.0f)
                 {
-                    // dot(rayDir, toLight): the phase function takes the angle
-                    // between the two directions of travel, not between the two
-                    // directions pointing away from the vertex. See the same
-                    // note on the fog path.
+                    // Match the fog path's travel-direction phase convention.
                     const float phase = hgPhase(dot(rayDir, conn.toLight), mm.subsurface_anisotropy);
                     const float misWeight =
                         conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, phase, uniforms.misHeuristic);
@@ -1958,16 +1711,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         p.throughput = packed_float3(SPEC_SHARC_UPDATE ? float3(1.0f) : throughput);
         p.lastBsdfPdf = phasePdf;
         p.misDistance = 0.0f;
-        // The walk advances its own step counter and not the path depth: the
-        // whole walk is one scattering event as far as the path budget is
-        // concerned, and charging it per step would make a translucent object go
-        // black at any sane maxDepth.
+        // Dense walks advance only their step counter; the whole walk consumes one path bounce.
         mediumState.medium = medium | ((step + 1u) << MEDIUM_STEP_SHIFT);
-        // A subsurface walk keeps its depth: the whole walk is one scattering
-        // event as far as the path budget is concerned, and charging it per step
-        // would make a translucent object go black at any sane maxDepth. A
-        // bounded volume does advance, for the reason the fog path does -- a
-        // medium with no depth budget of its own is a path that wanders forever.
+        // Bounded-volume scattering advances path depth so it cannot wander without a bounce budget.
         const uint32_t nextDepth = isBounded ? (depth + 1u) : depth;
         p.depthAndFlags =
             nextDepth | PATH_FLAG_ALIVE |
@@ -2240,20 +1986,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             sharcUpdates[updateIndex] = updateState;
         }
 
-        // The ray is travelling outwards, so the outward normal is the one it
-        // agrees with. Geometric for the offsets, which is what they are for;
-        // interpolated for the lobe and the connection, which is what every
-        // other shading vertex in this kernel uses.
-        //
-        // The exit used to take the geometric normal for all four, and on a
-        // sphere that is 32 latitude rings it drew every one of them. A dense
-        // medium is what makes it visible: at a mean free path of 0.005 against
-        // a radius of 0.48 the walk leaves within one triangle of where it
-        // entered, so the flat normal is applied with no spatial averaging to
-        // hide it. Ten times that free path spreads the exit over many triangles
-        // and the banding disappears -- which is why `25_subsurface` cannot see
-        // this and `29_subsurface_skin` shows it plainly, and why measuring it on
-        // the wrong row said the fault was not there.
+        // Use the geometric normal for offsets and the interpolated normal for the exit lobe and light connection.
         const float3 outwardGeom = (dot(geomNormal, rayDir) > 0.0f) ? geomNormal : -geomNormal;
         const float3 outward = (dot(worldNormal, outwardGeom) > 0.0f) ? worldNormal : -worldNormal;
         SamplerState xrng = samplerFor(uniforms, tid, sampleIdx, depth + step);
@@ -2282,16 +2015,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 const float cosOut = dot(outward, conn.toLight);
                 if (cosOut > 0.0f)
                 {
-                    // The exit is Lambertian and the medium's albedo was already
-                    // paid for during the walk, so the lobe here is 1/pi and its
-                    // own density is cos/pi.
-                    //
-                    // The density is for the MIS weight only. connectLight folds
-                    // the cosine into conn.radiance -- it returns what a caller
-                    // holding f alone needs -- so multiplying the estimate by the
-                    // density as well applied that cosine twice, and the exit
-                    // connection came back around 70% of its value while MIS had
-                    // already deducted the whole of it from the bounce ray.
+                    // The exit lobe is 1/pi; cos/pi is only its MIS density because conn.radiance includes the cosine.
                     const float lobePdf = cosOut * M_1_PI_F;
                     const float misWeight =
                         conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, lobePdf, uniforms.misHeuristic);
@@ -2370,45 +2094,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         return;
     }
 
-    // Ray-cone footprint at this hit. The cone opened by `coneSpread` over the
-    // distance just travelled; the triangle turns that width into texels via the
-    // ratio of its uv area to its world area, and the grazing term accounts for a
-    // footprint stretched by hitting the surface at an angle.
+    // Derive texture LOD because compute kernels have no derivatives and carrying a cone would expand 24-byte
+    // PathState. Specular paths keep pixel spread; diffuse events widen the cone to a hemisphere.
     const float3 worldEdge1 = transformDirection(objEdge1, objectToWorld);
     const float3 worldEdge2 = transformDirection(objEdge2, objectToWorld);
     const float worldArea2 = length(cross(worldEdge1, worldEdge2));
-    // MEASURED: no faster. 45.15 ms against 45.25 at 1280x720 native, and 13.80
-    // against 13.88 at half resolution with the radiance cache on (n=4 each,
-    // ABBA, t=0.10 and t=0.20) -- zero either way, while the image moves on 29%
-    // of pixels, so the level of detail is certainly being applied.
-    //
-    // The premise was that `shade` costs 26% of the frame because five level-0
-    // fetches per hit pull against the cache the acceleration structures need.
-    // It does not: cutting that traffic moves neither `shade` nor `extend`. The
-    // same answer is already recorded above the extend kernel, reached from the
-    // other side -- inline traversal cut the MMU limiter from 44% to 29% and the
-    // last level cache from 29% to 20% for exactly the same frame time. This
-    // renderer is latency-bound on the ray tracing unit at 17% occupancy, and
-    // memory-side work of any kind measures as nothing until that moves.
-    //
-    // Kept, and off by default, because it is a filtering fix rather than a
-    // performance one: the renderer builds mip chains, pays for them in memory,
-    // and without this reads level 0 for every fetch -- a compute kernel has no
-    // derivatives, so sample() takes the top level however the sampler is set.
-    // That aliases minified surfaces. At high sample counts the supersampling
-    // hides it and mip 0 converges correctly, which is why an offline render
-    // should leave this alone; at a genuine 1 spp there is nothing to hide it.
-    //
-    // The cone is derived rather than carried. PathState is read and written for
-    // every live path on every bounce and is guarded at 24 bytes, so two floats
-    // there would cost more memory traffic than the mips they buy back.
-    //
-    // What the width needs is the spread times the segment, and past the primary
-    // hit the spread is dominated by the last scattering event, not by the pixel
-    // it started from: one diffuse bounce opens the cone over the hemisphere and
-    // whatever it was before that stops mattering. So a specular path keeps the
-    // pixel's own spread -- which is what keeps a mirror sharp -- and everything
-    // else takes a hemisphere's worth.
     const float pixelSpread = 2.0f * abs(uniforms.clipToView[1][1]) / float(max(uniforms.height, 1u));
     const bool coneIsPixelWide = (depth == 0u) || ((p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u);
     const float coneSpread = coneIsPixelWide ? pixelSpread : 1.0f;
@@ -2429,9 +2119,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // geometry as well as the material because the chord needs a radius, and only
     // a curve hit has one.
     const bool isFibre = isCurve && scattersThroughFibre(si);
-
-    // 0xFFFFFF words is 64 MB of chase, past any cache on this part; the earlier
-    // version walked a 3.7 MB queue and was measuring cache hits, not memory.
 
     // Coverage. A MASK surface resolves to 0 or 1 and a BLEND one to its alpha,
     // so one stochastic test covers both: with probability (1 - opacity) the
@@ -2525,8 +2212,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
         else
         {
-            // Same quantity as the megakernel: how far the motion-interpolated
-            // normal has moved from the current-frame one.
+            // Visualize displacement between the motion-interpolated and current-frame normals.
             float3 nCur[3], pCur[3], tCur[3], cCur[3];
             float2 uvCur[3];
             float signCur = 1.0f; // unused by this debug view
@@ -2560,16 +2246,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // ones.
     const bool guideLastChance = depth >= 2u;
 
-    // Depth and motion, always from the surface the camera actually sees.
-    //
-    // These two are what the denoiser reprojects with, and unlike albedo or
-    // roughness they belong to the pixel rather than to whatever surface the
-    // material guides were eventually taken from. Written here, before the walk
-    // to the first rough surface, so a specular or alpha-tested primary hit
-    // cannot hand the pixel a secondary surface's screen position instead --
-    // which is not a small error: the two sit in different places on screen, and
-    // measured on the pine forest it gave a fifth of the frame motion vectors of
-    // tens of pixels with the camera standing still.
+    // Depth and motion always belong to the camera-visible surface, even when material guides are deferred.
     const bool writingAov = shouldWriteAov(uniforms, sampleIdx);
     if (writingAov && depth == 0u)
     {
@@ -2601,17 +2278,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         a.motionY = motion.y;
         // Filled in by the bounce that follows a specular one; see below.
         a.specularHitDistance = 0.0f;
-        // Reactive means "the history for this pixel is not valid", and the one
-        // thing that makes it so is guides describing a surface other than the one
-        // the camera sees -- which is exactly the deferred-guide case, a primary
-        // hit too smooth to describe. Water, glass, a mirror.
-        //
-        // It used to also scale with the motion vector, saturating at four pixels
-        // of movement. That marked the whole frame the moment the camera moved at
-        // all, so every camera movement threw away the entire history and the
-        // image fell back to single-sample noise -- everywhere, not just on the
-        // reflective surfaces the mask is for. Motion is what motion vectors are
-        // for; a pixel that moved is reprojectable, not untrustworthy.
+        // Only deferred guides invalidate history; ordinary movement is handled by motion vectors.
         a.reactive = (depth > 0u) ? 1.0f : 0.0f;
         a.bounceDepth = 0.0f;
         aov[tid] = a;
@@ -2627,17 +2294,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         aov[tid].specularHitDistance = rec.distance;
     }
 
-    // The canonical sample exists only to produce deterministic MetalFX
-    // guides. Its radiance is written to a throw-away side buffer, yet it used
-    // to keep evaluating emission, direct lighting and every remaining bounce
-    // after the guide had already been completed. At 1 spp that made temporal
-    // denoising nearly double the path-tracing cost, and a close-up groom kept
-    // millions of those useless paths inside the curve AS for several bounces.
-    //
-    // A smooth primary surface deliberately leaves AOV_DONE clear so the guide
-    // walk can reach the first rough surface. The secondary hit distance above
-    // is recorded before stopping, so mirror/glass reprojection keeps the same
-    // data as the full walk did. guideLastChance bounds this to depth two.
+    // Stop the canonical guide sample once its guides are complete; smooth primaries may continue to the first rough
+    // hit. Secondary hit distance is recorded first so specular reprojection remains valid.
     if (uniforms.canonicalGuideSample && sampleIdx == 0u && (p.depthAndFlags & PATH_FLAG_AOV_DONE) != 0u)
     {
         return;
@@ -2798,43 +2456,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     bool didNee = neeRunsAtVertex(uniforms.estimatorMode == 0, hasEmitter, smoothLobe);
     if (didNee)
     {
-        // Resampled importance sampling over several light candidates: draw M of
-        // them from the light-sampling density, weight each by how much it
-        // would actually contribute, and keep one. The shadow ray count does not
-        // change -- one candidate survives and one ray is traced -- but the
-        // survivor is chosen knowing the BSDF, the cosine and the MIS weight,
-        // none of which the light's own density knows about.
-        //
-        // That is the resampling half of ReSTIR. What it is worth, measured:
-        //
-        //   classroom, direct light only, 32 spp   rmse 0.0570 -> 0.0370 at M=8
-        //   classroom, full render, 256 spp        rmse 10.02  -> 9.76
-        //   pine, direct light only, 32 spp        rel  0.1289 -> 0.1277
-        //   pine, full render, 128 spp             rel  0.0787 -> 0.0788
-        //
-        // A third off the direct-lighting error where light selection is the
-        // hard part, and nothing at all where it is not. The full renders are
-        // the same picture because their error is somewhere else: in the
-        // classroom, twelve bounces of indirect; in the forest, visibility.
-        // Resampling cannot touch visibility -- the target function is the
-        // *unshadowed* contribution, by construction, and which gap in a canopy
-        // a direction happens to find is exactly what it does not know.
-        //
-        // Which is also why the reuse half is not here. Reuse pays by
-        // concentrating a reservoir on lights a neighbour already found
-        // unoccluded, and that is worth having when visibility is smooth over a
-        // few pixels. Dappled light through a canopy is not: the measurement
-        // above bounds what any amount of it could recover on this scene at
-        // around one percent.
-        //
-        // Default is one candidate, which reduces every line below to the
-        // arithmetic this code had before, bit for bit.
-        //
-        // The target is the luminance of the unshadowed contribution, with the
-        // MIS weight already folded in. Folding it in is what keeps this
-        // unbiased against the BSDF strategy: the two weights still sum to one
-        // at every direction, so RIS is simply a better estimator of the
-        // next-event half and the other half is untouched.
+        // RIS selects one of M candidates by unshadowed luminance with MIS folded in; visibility follows in shadow.
+        // One candidate reproduces the base estimator, while larger M preserves its balance with the BSDF strategy.
         const uint32_t candidates = max(uniforms.risCandidates, 1u);
 
         LightConnection bestConn = makeEmptyConnection();
@@ -2884,12 +2507,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             }
             const float w = target / conn.pdf;
             weightSum += w;
-            // The acceptance draw reuses eLightId under a different scramble
-            // rather than taking a dimension of its own. Adding one to the
-            // enum shifts every dimension index above it, and with only five
-            // Sobol direction matrices to alias into, that alone cost 8% of the
-            // relative error on the forest before a single candidate had been
-            // resampled.
+            // Reuse eLightId under a new scramble so adding RIS does not shift later Sobol dimensions.
             SamplerState arng = crng;
             arng.seed = hash_combine(crng.seed, 0x51633e2du);
             if (random<SampleDimension::eLightId>(arng, uniforms.samplerType) * weightSum <= w)
@@ -2966,8 +2584,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // deep-red medium is a third of the light it should return. Cycles divides
     // the same factor out for the same reason.
     float3 sssEntryTint = float3(1.0f);
-    // Set when the path enters a subsurface medium, so the direction below is the
-    // refraction rather than the lobe's cosine draw. See entry 16.
+    // Use the refracted entry direction instead of the lobe's cosine draw.
     bool sssRefractedEntry = false;
     // A fibre's transmission lobes do not put the path inside anything: the strand
     // is crossed within the one event, so there is no medium to enter and no entry
@@ -2984,12 +2601,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         {
             if (entering)
             {
-                // Counted, not merely survived. Both of these leave the path
-                // carrying the wrong medium and neither used to say a word; see
-                // entry 1 of docs/open-defects.md. The test is a loop over at
-                // most four entries on a path that has already established it is
-                // a transmission through a solid, and the atomic only runs when
-                // something has actually gone wrong.
+                // Count stack failures because either leaves the path carrying the wrong medium.
                 if (ior_stack_full(iorStack))
                 {
                     atomic_fetch_add_explicit(&iorStats[IOR_STAT_OVERFLOW], 1u, memory_order_relaxed);
@@ -3007,28 +2619,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
         nextOrigin = offset_ray(si.position, -faceNg);
 
-        // Entering a subsurface medium. The lobe that got here put the light
-        // through the surface; what this adds is that it random-walks on the way.
-        // From here the path is inside, and `extend` samples free flight instead
-        // of running to the next surface.
-        //
-        // Two things differ for OpenPBR, and both were measured rather than
-        // assumed:
-        //
-        //   * which event counts. The glTF model reaches here through its
-        //     diffuse-transmission lobe. OpenPBR does not: sampling a subsurface
-        //     material reports Transmission|Glossy, with the Diffuse bit clear
-        //     on every draw. Testing for diffuse transmission admitted none of
-        //     them, so the medium was entered by nothing at all.
-        //
-        //   * which materials. Only a *scattering* interior belongs in the walk.
-        //     A transmission-depth medium is pure absorption -- its derived
-        //     single-scattering albedo is exactly zero -- and Beer-Lambert
-        //     already carries it over the segment. Sending it through the walk
-        //     would have every sampled scattering event absorb the path instead.
-        //
-        // Read off the resolved block, not si: a subsurface weight can come from
-        // a map, and openpbrMat has had its textures folded in where si has not.
+        // OpenPBR enters on textured subsurface weight plus any transmission; glTF uses diffuse transmission.
+        // Pure-absorption interiors stay Beer-Lambert instead of entering the random walk.
         const bool entersMedium =
             isOpenPBR ? (openpbrMat.subsurface_weight > 0.0f && openpbrMat.geometry_thin_walled == 0u) :
                         (si.subsurface > 0.0f);
@@ -3088,15 +2680,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 sssEntryTint = max(float3(si.diffuse_transmission_color), float3(1e-4f));
             }
 
-            // Enter on the refraction, not on the lobe's cosine draw.
-            //
-            // The lobe still decides *whether* the medium is entered and still
-            // supplies the weight -- cosine-sampled against a cosine density,
-            // so the two cancel and what is left after the tint is one, which is
-            // the weight Cycles' entry carries too. Only the direction changes,
-            // and it is the direction that sets how far a path travels through
-            // the body: a cosine entry crosses a slab along d / cos(theta) and
-            // transmits 2 * E3(tau) where the measurement wants exp(-tau).
+            // The lobe chooses and weights entry, but the random walk starts along the refracted direction.
             sssRefractedEntry = true;
         }
     }
@@ -3303,26 +2887,6 @@ kernel void wavefrontPrepare(device uint32_t& controlRef [[buffer(0)]],
     control[WF_CTRL_HIT] = 0u;
     control[WF_CTRL_MISS] = 0u;
 }
-
-// Measured and not kept: reordering the extend queue so that neighbouring
-// threads trace similar rays.
-//
-// The profile invites it. A camera ray costs 0.090 us of traversal and a bounce
-// ray costs 0.166 -- same structure, same scene, 1.8x the time -- and extend is
-// two thirds of the frame, so closing that gap would be worth a fifth of it.
-//
-// A counting sort into octahedral direction bins (count, scan, scatter) costs
-// almost nothing to run, 0.6 ms against extend's 95, and made extend slower
-// both ways it was tried. Sorting the whole queue: 94.7 ms -> 103.5. Sorting
-// within blocks of 8192, which keeps the origins together: 94.7 -> 98.2.
-//
-// Why it does not pay here: the queue already arrives in pixel order, because
-// `generate` writes it that way and `shade` compacts it in place, so
-// neighbouring entries already start from neighbouring points and read
-// neighbouring PathRay, HitRecord and PathState. A permutation buys direction
-// coherence by giving up both origin coherence and every coalesced access in
-// the stage. The 1.8x is also not all divergence -- a bounce ray is simply
-// longer than a camera ray into a canopy, and no reordering shortens it.
 
 // Between `extend` and the two stages that consume its classification.
 kernel void wavefrontPrepareHitMiss(device uint32_t& controlRef [[buffer(0)]],
@@ -3556,17 +3120,7 @@ struct CutoutShadowWalk<T, true>
                     thread float3& transmittance)
     {
         transmittance = float3(1.0f);
-        // Any hit, not the closest one, and only the geometry this traits set can
-        // actually contain.
-        //
-        // The default intersection_params are neither: they ask for the nearest
-        // hit and admit bounding boxes. Nearest is wasted work here -- the
-        // committed result is only ever compared against `none`, so a ray that is
-        // blocked keeps traversing for a *closer* blocker, and every cutout in
-        // front of it still pays a full cutoutOpacityAt for a transmittance that
-        // is then discarded. In a canopy most shadow rays are blocked, so that is
-        // the common path, and it measured 116.6 ms/sample against 108.9 with
-        // these two lines.
+        // Accept any hit and restrict geometry to avoid nearest-hit work and irrelevant bounding-box candidates.
         intersection_params params;
         params.accept_any_intersection(true);
         params.assume_geometry_type(T::geometryTypes());
@@ -3653,17 +3207,7 @@ static void shadowImpl(uint gid,
         isect.accept_any_intersection(true);
         if (T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime).type == intersection_type::none)
         {
-            // Whatever survived the geometry still has to cross the atmosphere. Without
-            // this a shadow ray is a hole in the fog, and every light reads as if the
-            // haze were not there -- which is exactly the term that makes a low sun
-            // through trees look like a low sun through trees.
-            // Measured and not moved: this depends only on the ray, so it can be folded
-            // into sr.weight where the ray is built, and doing so lifts this kernel's
-            // threadgroup limit from 576 to 640. Six interleaved runs of each say the
-            // stage does not care -- 36.7 ms against 37.5 -- which is what the model
-            // predicts: the same 11% of limit was worth 4.5% of the frame on `extend`
-            // at 63% of it, so on a stage at 28% it is around 2%, under the noise floor
-            // of a machine that swings 5% between runs.
+            // Geometry visibility and atmospheric transmittance are separate; surviving shadow rays still cross fog.
             if (SPEC_FOG && uniforms.hasFog)
             {
                 const float tau = fogOpticalDepth(
@@ -4015,8 +3559,7 @@ WF_SHADOW_ENTRY(wavefrontShadowStaticCurve, CurveStaticTraversal)
 // ---------------------------------------------------------------------------
 // resolve -- average the samples and fold into the accumulation buffer
 //
-// Byte-for-byte the same arithmetic as the megakernel's tail, so the two
-// tracers produce identical images.
+// Fold this launch into the persistent accumulation buffer.
 // ---------------------------------------------------------------------------
 kernel void wavefrontResolve(uint tid [[thread_position_in_grid]],
                              constant Uniforms& uniforms [[buffer(0)]],

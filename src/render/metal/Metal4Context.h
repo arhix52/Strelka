@@ -153,14 +153,8 @@ public:
     MTL4::CommandBuffer* beginImmediate();
     void submitAndWait(MTL4::CommandBuffer* commandBuffer);
 
-    /// Per-frame skinning on its own allocator ring, committed without blocking
-    /// the CPU.
-    ///
-    /// The alternative -- beginImmediate() + submitAndWait() -- costs a full
-    /// submit-to-completion round trip in the middle of every animated frame
-    /// (measured at ~19 ms median on BrainStem), and leaves the GPU with nothing
-    /// queued for the duration. Consumers order behind this work by waiting on
-    /// skinEvent() at the value returned here, on whichever queue they use.
+    /// Per-frame skinning uses its own allocator ring and commits without a mid-frame CPU wait.
+    /// Consumers on either queue order through skinEvent() at the returned value.
     ///
     /// The ring must be at least as deep as the frames the renderer keeps in
     /// flight: beginSkin() resets the allocator for its slot, so a shallower ring

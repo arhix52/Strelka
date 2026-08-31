@@ -33,9 +33,7 @@ struct WavefrontVariant
     MTL::ComputePipelineState* shadowStatic = nullptr;
 };
 
-// TODO(phase-N): replace pointer bags with owned domain handles once
-// Materials/Geometry/Accel/Lights are extracted. For Phase 2 the integrator
-// still binds scene resources MetalRender owns.
+// Non-owning resources assembled by MetalRender for each encode.
 struct IntegratorSceneBindings
 {
     MTL::Buffer* instanceBuffer = nullptr;

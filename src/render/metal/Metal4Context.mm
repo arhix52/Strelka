@@ -169,18 +169,7 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
         return false;
     }
 
-    // One argument table shared by every stage, so it has to be as wide as the
-    // highest index any of them binds: buffer(30) is the shade stage's medium
-    // path state and texture(8) the reactive guide (see wavefront.metal). These
-    // are counts, not indices -- 31 buffers means 0..30.
-    //
-    // A bind past the declared count is a hard failure, and only the debug layer
-    // says so: without MTL_DEBUG_LAYER the write goes past the end of the table
-    // and the next stage reads whatever it landed on. This has now rotted twice,
-    // once when the curve, IOR-stats and reactive bindings arrived and again
-    // when fog added buffer(30), and the second time the symptom was a GPU hang
-    // in primary-ray traversal -- a stage that binds none of the offending
-    // buffers and simply inherited a corrupted table.
+    // Shared table counts must cover every stage's highest binding; overruns can silently corrupt later stages.
     MTL4::ArgumentTableDescriptor* tableDesc = MTL4::ArgumentTableDescriptor::alloc()->init();
     tableDesc->setMaxBufferBindCount(kMetal4BufferBindCount);
     tableDesc->setMaxTextureBindCount(kMetal4TextureBindCount);

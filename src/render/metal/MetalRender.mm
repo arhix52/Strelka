@@ -1060,12 +1060,7 @@ uint32_t MetalRender::wavefrontIterations(uint32_t maxDepth, uint32_t subsurface
     {
         iterations += kPassthroughIterations;
     }
-    // A walk step is not a pass-through and has its own, much larger, ceiling.
-    // Matching MEDIUM_MAX_STEPS here would be 256 extra iterations on any scene
-    // with a bar of soap in it, so this buys a walk of useful length rather than
-    // the longest one the shader will take. 64 is where 25_subsurface stops
-    // moving: it renders the same as 256 to within the comparison's noise and in
-    // half the time, while 16 truncates enough of the tail to lose about 2%.
+    // Subsurface walk steps have a separate ceiling; cap host iterations so rare long tails do not pad every launch.
     if (mMaterials.hasSubsurfaceMaterials())
     {
         iterations += std::min(subsurfaceIterations, 256u);
@@ -1073,29 +1068,8 @@ uint32_t MetalRender::wavefrontIterations(uint32_t maxDepth, uint32_t subsurface
     return iterations;
 }
 
-// The sparse update pass traces one path per `sharcUpdateDownscale` square --
-// about 4% of the pixels at the default of 5. That is far too little occupancy
-// to hide dispatch latency, so what the pass costs is set by how many bounce
-// iterations the encoder issues rather than by the paths it traces, and neither
-// of the two budgets the render pass needs applies to it:
-//
-//   - Cache resampling answers an update path from the cache as soon as it has
-//     `sharcPropagationDepth` vertices behind it, so no update path survives
-//     past that. Iterating to the render depth issues dispatches nothing can
-//     reach.
-//   - The subsurface walk budget is 64 iterations on any scene with skin or a
-//     bar of soap in it. Those are empty dispatches for every path not inside a
-//     medium, and the cache samples the tail of a walk far too sparsely for it
-//     to be worth them.
-//
-// The allowance on top of the propagation depth is for medium scattering
-// events, which spend a path's depth without giving the cache a vertex. Without
-// it the cache loses about 1% of its energy on the Cornell box; with it the
-// capped pass matches the uncapped one to within the comparison's noise.
-//
-// Measured on iso_bathroom (subsurface, 960x540, depth 8): the uncapped update
-// pass costs 8 ms/sample against a 31 ms render, which is more than the 4.6 ms
-// its queries save.
+// Cache resampling bounds update paths by propagation depth; the allowance covers medium events without cache vertices.
+// Limit subsurface steps because sparse update paths do not justify the render pass's full walk budget.
 uint32_t MetalRender::sharcUpdateIterations(uint32_t maxDepth, uint32_t subsurfaceIterations) const
 {
     uint32_t depth = maxDepth;
@@ -1230,9 +1204,7 @@ void MetalRender::render(Buffer* output)
     // Temporal denoising subsumes upscaling: the denoised scaler takes the
     // reduced-resolution frame and produces the display-resolution one, so the
     // spatial scaler is only for when denoising is off.
-    // Denoising needs the guides, and the wavefront tracer writes them. It is
-    // also the only tracer left: the megakernel went with the banded Metal 3
-    // submission it was encoded through.
+    // Denoising requires the wavefront guides.
     const bool useWavefrontTracer = mIntegrator.library() != nullptr;
     const uint32_t debug = getSettings()->getAs<uint32_t>("render/pt/debug");
     const uint32_t sharcDebug = getSettings()->getAs<uint32_t>("render/pt/sharcDebug");
@@ -1416,10 +1388,7 @@ void MetalRender::render(Buffer* output)
             animStateChanged = true;
         }
 
-        // A jump in animation time is a cut: the frame after it has no valid
-        // predecessor to reproject from. Playback advances a sixtieth of a second
-        // at a time, so a fraction of the clip length separates the two cases by a
-        // wide margin. This was already being computed and then not used.
+        // Treat time jumps larger than a fraction of the clip as cuts with no valid reprojection history.
         for (size_t i = 0; i < animCount; ++i)
         {
             const float clip = animations[i].end - animations[i].start;
@@ -1633,8 +1602,6 @@ void MetalRender::render(Buffer* output)
     const uint32_t sspTotal = settings.getAs<uint32_t>("render/pt/sppTotal");
     const bool isMotionBlurVisible = settings.getAs<bool>("render/isMotionBlurVisible");
     const bool enableCameraMotionBlur = settings.getAs<bool>("render/enableCameraMotionBlur");
-    // shutter / playback-blur settings are read inside MetalFrameUniforms::fill;
-    // they used to be cached here before that extraction and are dead if left.
     const metal::MetalFrameUniforms::CameraView currCamView{ currView.mCamMatrices };
     const metal::MetalFrameUniforms::CameraView prevCamView{ mPrevView.mCamMatrices };
     const metal::MetalFrameUniforms::CameraView prevMbView{ mPrevMotionBlurView.mCamMatrices };
@@ -1744,25 +1711,9 @@ void MetalRender::render(Buffer* output)
     {
         pUniformData->samples_per_launch = samplesThisLaunch;
 
-        // Environment map buffers must always be bound — the kernel declares
-        // indices 10/11 unconditionally.
-        // The kernel declares buffer(10) unconditionally, so it must always be bound.
+        // Environment buffers 10/11 are declared unconditionally and must always be bound.
         mEnvironment.ensurePlaceholderAliasBuffer();
 
-        // --- Split the path trace into horizontal bands ---------------------
-        //
-        // A full-frame path-trace dispatch is a single indivisible unit of GPU
-        // work. While it runs, the display queue's command buffer cannot start,
-        // so nextDrawable() blocks and the whole UI thread stalls for the entire
-        // render time — seconds per frame on a heavy scene.
-        //
-        // Splitting the frame into several command buffers gives the scheduler
-        // preemption points between them, so the compositor keeps getting
-        // drawables and the UI keeps its vsync cadence regardless of how long
-        // the full frame takes. The band height is derived from the measured
-        // per-row cost so each submission stays near kTargetSubmissionMs.
-        // Wavefront mode replaces the banded megakernel dispatch entirely: it
-        // already issues many short dispatches, so it needs no banding of its own.
         {
             mIntegrator.ensureBuffers(width, height, pUniformData->sharcUpdateDownscale);
             // Output resolution, not render resolution: this is what the display
@@ -1950,18 +1901,8 @@ void MetalRender::render(Buffer* output)
                 MTL4::ComputeCommandEncoder* enc4 = nullptr;
                 if (asSideQueue)
                 {
-                    // Devices without hardware ray tracing build acceleration
-                    // structures on the Metal 3 queue, which the Metal 4 tracer
-                    // cannot share, so an animated frame spans two queues:
-                    // skinning (Metal 4) -> structures (Metal 3) -> trace (Metal 4).
-                    //
-                    // All three are chained GPU-side. Skinning used to be retired
-                    // with a blocking submit-and-wait before the build was even
-                    // encoded, which cost a full round trip in the middle of every
-                    // animated frame -- 19 ms median on BrainStem -- and left the
-                    // GPU idle across it. The ordering that costs was already
-                    // expressible: the build waits on the skinning event, the trace
-                    // waits on the build's, and the CPU waits on neither.
+                    // Software RT spans Metal 4 skinning, Metal 3 AS build and Metal 4 tracing.
+                    // GPU events chain the queues without a mid-frame CPU wait.
                     if (anySkinWork)
                     {
                         MTL4::CommandBuffer* skinBuf = mMetal4.beginSkin((uint32_t)ctx.mFrameNumber);
@@ -2397,17 +2338,7 @@ void MetalRender::render(Buffer* output)
                 mPost.metalFx().encodeDenoise(pCmd, in);
                 mHasDenoisedFrame = true;
 
-                // And back into the buffer, which is what anything not looking at
-                // a screen reads: StrelkaCLI writes its EXR and its PNG from
-                // there, and the tone curve it applies is the host's.
-                //
-                // Without this the denoised frame existed only as a texture the
-                // display path consumed, so a headless `denoise = true` wrote the
-                // estimate the denoiser had been *handed*. It still paid for the
-                // denoiser -- a canonical guide sample it does not accumulate,
-                // frame jitter, and the firefly clamp -- which at 1024 spp cost
-                // 0.0435 relative RMSE against 0.1437. All price, no product, and
-                // it read exactly like a denoiser that damages the image.
+                // Copy denoised output back to the linear buffer consumed by headless image writers.
                 if (mPost.denoisedToBufferPSO() && mPost.denoisedTexture())
                 {
                     MTL::ComputeCommandEncoder* cp = pCmd->computeCommandEncoder();
@@ -2760,8 +2691,7 @@ void MetalRender::renderSync(Buffer* output)
             STRELKA_INFO("LAUNCH encode {:.1f} ms, wait {:.1f} ms",
                          std::chrono::duration<double, std::milli>(tSubmitted - tEncode).count(),
                          std::chrono::duration<double, std::milli>(tDone - tSubmitted).count());
-            // The commit feedback carries the GPU interval, so this is the same
-            // number the Metal 3 path reads off its command buffer.
+            // Metal 4 commit feedback supplies the frame's GPU interval.
             STRELKA_INFO("CMDBUF gpu {:.1f} ms (metal4)", getLastRenderTimeMs());
         }
     }
@@ -2779,9 +2709,7 @@ void MetalRender::renderSync(Buffer* output)
                          (mLastCommandBuffer->kernelEndTime() - mLastCommandBuffer->kernelStartTime()) * 1000.0,
                          (mLastCommandBuffer->kernelEndTime() - mLastCommandBuffer->GPUStartTime()) * 1000.0);
         }
-        // The async path reports these from a completion handler; the synchronous
-        // one had nowhere to report from, so a headless profiling run printed the
-        // CPU encode time and nothing about the GPU.
+        // Metal 3 exposes timestamp-buffer stage timings here; Metal 4 provides breadcrumb diagnostics instead.
         if (getSettings()->getAs<uint32_t>("render/pt/profileStages") != 0)
         {
             mIntegrator.reportStageTimings();

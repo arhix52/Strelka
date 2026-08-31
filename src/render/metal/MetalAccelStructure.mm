@@ -125,9 +125,6 @@ MTL::AccelerationStructure* MetalAccelStructure::createAccelerationStructureNoCo
     const auto tEnd = std::chrono::steady_clock::now();
     if (accelerationStructure)
     {
-        // Only the encode is timed here; sizing, allocation and scratch all
-        // happen inside the path. They used to have buckets of their own that
-        // were only ever incremented by zero, so the log reported three noughts.
         using ms = std::chrono::duration<double, std::milli>;
         mBlasEncodeMs += ms(tEnd - tAlloc).count();
         ++mBlasCount;
@@ -436,14 +433,8 @@ bool MetalAccelStructure::step(double budgetMs)
         }
         mMotionBlasBuilt = mBuildMotionBlas;
 
-        // Before the structures are built, not after. The host arrays are a full
-        // duplicate of the GPU buffers -- 2.27 GB here -- and holding them across the
-        // acceleration structure build stacks that on top of the largest allocation
-        // the renderer makes. Nothing below this point reads them: buildBlas() works
-        // from buffer offsets and triangle counts.
-        //
-        // Off by default because Scene::pick() walks these arrays -- the editor needs
-        // them, a headless render does not.
+        // Release host geometry before AS allocation once builds depend only on GPU offsets and counts.
+        // Disabled by default because editor picking still reads the host arrays.
         mGeometry->hostGeometryBytes() = { mScene->getVertices().size() * sizeof(Scene::Vertex),
                                mScene->getIndices().size() * sizeof(uint32_t) };
         if (mSettings->getAs<bool>("scene/releaseHostGeometry") && !mScene->hostGeometryReleased())
@@ -742,11 +733,7 @@ bool MetalAccelStructure::step(double budgetMs)
     // largest scene here -- and it cannot be interrupted anyway, since the TLAS
     // descriptor has to see every structure at once.
 
-    // Hand the host copies back once everything that reads them has run: the
-    // vertex and index buffers are uploaded, the per-primitive data (if the
-    // megakernel wanted any) is built, and the structures are up. On unified
-    // memory the GPU-visible buffers and these vectors come out of the same pool,
-    // so the duplicate is real, not bookkeeping.
+    // Record whether host copies survived after all current upload and build consumers have run.
     //
     // Off by default because Scene::pick() walks these arrays -- the editor needs
     // them, a headless render does not.
@@ -864,13 +851,8 @@ bool MetalAccelStructure::step(double budgetMs)
                       "and the image will be black.");
     }
 
-    // A ray mask prevents a curve hit from being returned, but it does not make
-    // the curve BLAS disappear from a mixed top level. On Metal 4, rare deep SSS
-    // rays were observed spending 120+ ms inside traversal even with a triangle-
-    // only intersector and the curve mask cleared. Build a second, tiny TLAS over
-    // the mesh-instance prefix so those rays cannot enter either giant curve BLAS
-    // at all. The bottom levels and descriptor buffer are shared; only the top-
-    // level hierarchy is duplicated.
+    // A mask cannot remove curve BLAS traversal, so volume rays use a triangle-only TLAS.
+    // Bottom levels and descriptors remain shared; only the top-level hierarchy is duplicated.
     const auto firstCurve = std::ranges::find_if(mEmittedInstances,
                                          [](const EmittedInstance& e) {
                                              return e.mask == GEOMETRY_MASK_CURVE;
