@@ -5,6 +5,7 @@
 
 #include <log.h>
 
+#include <cstdlib>
 #include <filesystem>
 
 #define STB_IMAGE_STATIC
@@ -18,6 +19,79 @@ namespace fs = std::filesystem;
 
 namespace oka::metal
 {
+namespace
+{
+struct FloatImage
+{
+    float* pixels = nullptr;
+    int width = 0;
+    int height = 0;
+    bool isExr = false;
+};
+
+bool loadFloatImage(const std::string& texturePath, const char* kind, FloatImage& image)
+{
+    const std::string ext = fs::path(texturePath).extension().string();
+    const char* error = nullptr;
+    int channels = 0;
+
+    image.isExr = ext == ".exr" || ext == ".EXR";
+    if (image.isExr)
+    {
+        if (LoadEXR(&image.pixels, &image.width, &image.height, texturePath.c_str(), &error) != TINYEXR_SUCCESS)
+        {
+            STRELKA_ERROR("Failed to load EXR {}: {} ({})", kind, texturePath, error ? error : "unknown");
+            if (error)
+            {
+                FreeEXRErrorMessage(error);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    image.pixels = stbi_loadf(texturePath.c_str(), &image.width, &image.height, &channels, 4);
+    if (!image.pixels)
+    {
+        STRELKA_ERROR("Failed to load {}: {}", kind, texturePath);
+        return false;
+    }
+    return true;
+}
+
+void releaseFloatImage(FloatImage& image)
+{
+    if (image.isExr)
+    {
+        // LoadEXR allocates with malloc, so this has to be free.
+        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
+        free(image.pixels);
+    }
+    else
+    {
+        stbi_image_free(image.pixels);
+    }
+    image.pixels = nullptr;
+}
+
+MTL::Texture* uploadFloatTexture(MTL::Device* device, const FloatImage& image)
+{
+    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
+    MTL::Texture* texture = nullptr;
+
+    desc->setWidth(image.width);
+    desc->setHeight(image.height);
+    desc->setPixelFormat(MTL::PixelFormatRGBA32Float);
+    desc->setTextureType(MTL::TextureType2D);
+    desc->setStorageMode(MTL::StorageModeShared);
+    desc->setUsage(MTL::TextureUsageShaderRead);
+    texture = device->newTexture(desc);
+    desc->release();
+    texture->replaceRegion(
+        MTL::Region::Make3D(0, 0, 0, image.width, image.height, 1), 0, image.pixels, image.width * sizeof(float) * 4);
+    return texture;
+}
+} // namespace
 
 MetalEnvironment::~MetalEnvironment()
 {
@@ -61,63 +135,27 @@ void MetalEnvironment::ensurePlaceholderAliasBuffer()
 
 void MetalEnvironment::loadBackground(const std::string& texturePath)
 {
+    FloatImage image;
+
     if (mState.backgroundTexture)
     {
         mState.backgroundTexture->release();
         mState.backgroundTexture = nullptr;
     }
-
-    int width = 0, height = 0;
-    float* pixelData = nullptr;
-    bool isExr = false;
-
-    const std::string ext = fs::path(texturePath).extension().string();
-    if (ext == ".exr" || ext == ".EXR")
+    if (!loadFloatImage(texturePath, "env background", image))
     {
-        const char* err = nullptr;
-        if (LoadEXR(&pixelData, &width, &height, texturePath.c_str(), &err) != TINYEXR_SUCCESS)
-        {
-            STRELKA_ERROR("Failed to load EXR env background: {} ({})", texturePath, err ? err : "unknown");
-            if (err)
-                FreeEXRErrorMessage(err);
-            return;
-        }
-        isExr = true;
-    }
-    else
-    {
-        int channels = 0;
-        pixelData = stbi_loadf(texturePath.c_str(), &width, &height, &channels, 4);
-        if (!pixelData)
-        {
-            STRELKA_ERROR("Failed to load env background: {}", texturePath);
-            return;
-        }
+        return;
     }
 
-    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
-    desc->setWidth(width);
-    desc->setHeight(height);
-    desc->setPixelFormat(MTL::PixelFormatRGBA32Float);
-    desc->setTextureType(MTL::TextureType2D);
-    desc->setStorageMode(MTL::StorageModeShared);
-    desc->setUsage(MTL::TextureUsageShaderRead);
-    mState.backgroundTexture = mDevice->newTexture(desc);
-    desc->release();
-    mState.backgroundTexture->replaceRegion(MTL::Region::Make3D(0, 0, 0, width, height, 1), 0, pixelData,
-                                            width * sizeof(float) * 4);
-    if (isExr)
-        // LoadEXR allocates with malloc, so this has to be free.
-        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
-        free(pixelData);
-    else
-        stbi_image_free(pixelData);
-
-    STRELKA_INFO("Loaded env background: {} ({}x{})", texturePath, width, height);
+    mState.backgroundTexture = uploadFloatTexture(mDevice, image);
+    releaseFloatImage(image);
+    STRELKA_INFO("Loaded env background: {} ({}x{})", texturePath, image.width, image.height);
 }
 
 void MetalEnvironment::loadMap(const std::string& texturePath)
 {
+    FloatImage image;
+
     if (mState.mapTexture)
     {
         mState.mapTexture->release();
@@ -129,53 +167,15 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
         mState.aliasBuffer = nullptr;
     }
     mState.loaded = false;
-
-    int width = 0, height = 0;
-    float* pixelData = nullptr;
-    bool isExr = false;
-
-    const std::string ext = fs::path(texturePath).extension().string();
-    if (ext == ".exr" || ext == ".EXR")
+    if (!loadFloatImage(texturePath, "env map", image))
     {
-        const char* err = nullptr;
-        const int ret = LoadEXR(&pixelData, &width, &height, texturePath.c_str(), &err);
-        if (ret != TINYEXR_SUCCESS)
-        {
-            STRELKA_ERROR("Failed to load EXR env map: {} ({})", texturePath, err ? err : "unknown");
-            if (err)
-                FreeEXRErrorMessage(err);
-            return;
-        }
-        isExr = true;
-    }
-    else
-    {
-        int channels = 0;
-        pixelData = stbi_loadf(texturePath.c_str(), &width, &height, &channels, 4);
-        if (!pixelData)
-        {
-            STRELKA_ERROR("Failed to load env map: {}", texturePath);
-            return;
-        }
+        return;
     }
 
-    STRELKA_INFO("Loaded env map: {} ({}x{})", texturePath, width, height);
+    STRELKA_INFO("Loaded env map: {} ({}x{})", texturePath, image.width, image.height);
+    mState.mapTexture = uploadFloatTexture(mDevice, image);
 
-    MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
-    pTextureDesc->setWidth(width);
-    pTextureDesc->setHeight(height);
-    pTextureDesc->setPixelFormat(MTL::PixelFormatRGBA32Float);
-    pTextureDesc->setTextureType(MTL::TextureType2D);
-    pTextureDesc->setStorageMode(MTL::StorageModeShared);
-    pTextureDesc->setUsage(MTL::TextureUsageShaderRead);
-
-    mState.mapTexture = mDevice->newTexture(pTextureDesc);
-    pTextureDesc->release();
-
-    const MTL::Region region = MTL::Region::Make3D(0, 0, 0, width, height, 1);
-    mState.mapTexture->replaceRegion(region, 0, pixelData, width * sizeof(float) * 4);
-
-    const auto aliasResult = buildIblAliasTable(pixelData, width, height);
+    const auto aliasResult = buildIblAliasTable(image.pixels, image.width, image.height);
     static_assert(sizeof(EnvAliasEntry) == sizeof(metal::EnvAliasEntry),
                   "host EnvAliasEntry must match ShaderTypes EnvAliasEntry");
     mState.pdfScale = aliasResult.envPdfScale;
@@ -184,14 +184,9 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
                                             aliasResult.alias.size() * sizeof(EnvAliasEntry),
                                             MTL::ResourceStorageModeShared);
 
-    if (isExr)
-        // LoadEXR allocates with malloc, so this has to be free.
-        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
-        free(pixelData);
-    else
-        stbi_image_free(pixelData);
+    releaseFloatImage(image);
 
-    const float avgWeightedLum = (float)(aliasResult.totalPower / (double)(width * height));
+    const float avgWeightedLum = (float)(aliasResult.totalPower / (double)(image.width * image.height));
     const bool autoCalibrate = mSettings->getAs<bool>("render/env/autoCalibrate");
     const float kCalibrationTarget = 1000.0f;
     mState.autoScale = (autoCalibrate && avgWeightedLum > 1e-6f) ? kCalibrationTarget / avgWeightedLum : 1.0f;
