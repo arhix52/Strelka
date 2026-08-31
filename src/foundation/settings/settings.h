@@ -2,6 +2,7 @@
 
 #include <log.h>
 #include <spdlog/fmt/fmt.h>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <string>
@@ -105,6 +106,35 @@ inline std::string animationStateKey(size_t index)
 inline std::string animationTimeKey(size_t index)
 {
     return fmt::format("render/animation/anim{}/time", index);
+}
+
+inline void seedCommonRenderSettings(SettingsManager& settings)
+{
+    settings.setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
+    settings.setAs<bool>("render/pt/enableAcc", true);
+    settings.setAs<bool>("render/enableCameraMotionBlur", false);
+    settings.setAs<float>("render/motionBlur/shutterTime", 1.0f / 24.0f);
+    settings.setAs<uint32_t>("render/motionBlur/shutterMode", 1);
+    settings.setAs<uint32_t>("render/pt/jitterSign", 0);
+    // MetalFX audit baseline: device depth and a stable shutter-close frame.
+    settings.setAs<uint32_t>("render/pt/denoiseDepthMode", 0);
+    settings.setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);
+    settings.setAs<uint32_t>("render/pt/staticTraversal", 1);
+    // HDR environment values are radiance and must not be normalized away.
+    settings.setAs<bool>("render/env/autoCalibrate", false);
+    // These expensive/manual SHARC actions start idle in both applications.
+    settings.setAs<bool>("render/pt/sharcReset", false);
+    settings.setAs<bool>("render/pt/sharcReportOccupancy", false);
+    // Cache the finished downscaled, mipped, compressed textures between runs.
+    settings.setAs<bool>("render/texture/compress", true);
+    settings.setAs<std::string>(
+        "render/texture/cachePath", (std::filesystem::temp_directory_path() / "strelka_texcache").string());
+    settings.setAs<bool>("render/validate/analyticLights", true);
+    settings.setAs<uint32_t>("render/pt/misHeuristic", 0);
+    settings.setAs<float>("render/pt/dev/shadowRayTmin", 0.0f);
+    settings.setAs<float>("render/pt/dev/materialRayTmin", 0.0f);
+    settings.setAs<bool>("render/enableValidation", false);
+    settings.setAs<float>("render/post/tonemapper/maxEDR", 1.0f);
 }
 
 } // namespace oka

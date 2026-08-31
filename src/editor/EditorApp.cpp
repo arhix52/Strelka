@@ -543,6 +543,7 @@ void EditorApp::loadSettings()
     const uint32_t imageWidth = editor_viewport::kDefaultPreviewWidth;
     const uint32_t imageHeight = editor_viewport::kDefaultPreviewHeight;
 
+    seedCommonRenderSettings(*m_settingsManager);
     m_settingsManager->setAs<uint32_t>("render/width", imageWidth);
     m_settingsManager->setAs<uint32_t>("render/height", imageHeight);
     m_settingsManager->setAs<uint32_t>("render/pt/depth", 8);
@@ -572,9 +573,6 @@ void EditorApp::loadSettings()
     // Preview resolution itself bounds interactive work. MetalFX remains an
     // explicit quality/performance choice inside that fixed output.
     m_settingsManager->setAs<bool>("render/pt/enableUpscale", false);
-    m_settingsManager->setAs<bool>("render/pt/enableAcc", true);
-    m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
-    m_settingsManager->setAs<uint32_t>("render/pt/misHeuristic", 0); // 0 = balance, 1 = power
     // Sobol with a blue-noise screen-space error distribution, handing over to
     // plain per-pixel Owen scrambling once the frame has enough samples that the
     // spectrum of the error matters less than how fast it shrinks.
@@ -602,13 +600,9 @@ void EditorApp::loadSettings()
     // Four is also where it matters: accumulation restarts whenever the camera
     // moves, so navigating the scene means looking at 1-4 spp frames.
     m_settingsManager->setAs<uint32_t>("render/pt/blueNoiseSwitchSpp", 4);
-    m_settingsManager->setAs<bool>("render/enableValidation", false);
     m_settingsManager->setAs<uint32_t>("render/selectedCamera", 0);
     m_settingsManager->setAs<bool>("render/enableMotionBlur", true);
     m_settingsManager->setAs<bool>("render/isMotionBlurVisible", true);
-    m_settingsManager->setAs<bool>("render/enableCameraMotionBlur", false);
-    m_settingsManager->setAs<float>("render/motionBlur/shutterTime", 1.0f / 24.0f);
-    m_settingsManager->setAs<uint32_t>("render/motionBlur/shutterMode", 1); // 0=centered, 1=leading, 2=trailing
     m_settingsManager->setAs<float>("render/animation/speed", 1.0f);
     // Wavefront by default: bit-identical output, 2.6x faster at depth 8. The
     // megakernel stays selectable so any change can still be A/B'd against it.
@@ -627,19 +621,11 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", 1u);
     m_settingsManager->setAs<uint32_t>("render/pt/writeAov", 0);
     m_settingsManager->setAs<bool>("render/pt/denoise", false);
-    m_settingsManager->setAs<uint32_t>("render/pt/jitterSign", 0);
-    // 0 = device depth (clip z/w), 1 = view-space axial, 2 = distance to the eye.
-    // MetalFX does not say which it wants; the default is whichever the audit
-    // measures as closest to the reference. See kDenoiseDepth* in ShaderTypes.h.
-    m_settingsManager->setAs<uint32_t>("render/pt/denoiseDepthMode", 0);
     // Luminance ceiling for the denoiser's colour input, in exposed units: a
     // single unbounded sample gets smeared over many frames by a temporal filter.
     // 0 disables it.
     m_settingsManager->setAs<float>("render/pt/denoiseFireflyClamp", 8.0f);
     m_settingsManager->setAs<float>("render/pt/clampIndirect", 0.0f);
-    // Playback stays stable at shutter close unless path-traced blur is enabled;
-    // render/pt/spp controls its sample count.
-    m_settingsManager->setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);
     if (envFlag("STRELKA_DENOISE"))
     {
         m_settingsManager->setAs<bool>("render/pt/denoise", envBool("STRELKA_DENOISE", false));
@@ -671,7 +657,6 @@ void EditorApp::loadSettings()
     // Static-geometry traversal. Forcing it off makes the wavefront traverse the
     // same structure the megakernel does, which is what the bit-identity check
     // needs: the two intersector types round intersection distances differently.
-    m_settingsManager->setAs<uint32_t>("render/pt/staticTraversal", 1);
     if (envFlag("STRELKA_STATIC"))
     {
         m_settingsManager->setAs<uint32_t>("render/pt/staticTraversal", envUint("STRELKA_STATIC", 1));
@@ -684,9 +669,6 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/material/model", 0);
     m_settingsManager->setAs<uint32_t>("render/texture/maxDimension", 0);
     m_settingsManager->setAs<uint32_t>("render/texture/downscale", 1);
-    // An HDRI carries radiance; normalising it away makes physical parity
-    // impossible. See loadEnvMap().
-    m_settingsManager->setAs<bool>("render/env/autoCalibrate", false);
     // The diffuse/specular split of the first event, accumulated into two extra
     // images. Off by default: nothing in either app reads them back, and writing
     // them costs four scattered records per pixel per launch. See
@@ -716,13 +698,6 @@ void EditorApp::loadSettings()
     // somebody has to find.
     m_settingsManager->setAs<bool>("render/pt/sharcResponsiveLighting", true);
     m_settingsManager->setAs<uint32_t>("render/pt/sharcResponsiveFrames", 4);
-    // Raised for one frame by the panel's Reset button, and consumed by the
-    // renderer. A setting rather than a call so that headless and interactive
-    // reach it the same way.
-    m_settingsManager->setAs<bool>("render/pt/sharcReset", false);
-    // Counting occupancy is a pass over the whole table, so it runs only while
-    // the panel that shows the number is open.
-    m_settingsManager->setAs<bool>("render/pt/sharcReportOccupancy", false);
     // Metal's own responsive switch, off by default: its compact key has no
     // spare bit for a per-light tag, so the companion entries hold the whole
     // lighting signal and come out of the configured capacity.
@@ -740,20 +715,13 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<bool>("render/pt/sharcCacheResampling", true);
     m_settingsManager->setAs<bool>("render/pt/sharcBlendAdjacentLevels", true);
     m_settingsManager->setAs<bool>("render/pt/sharcFadeAcceleration", false);
-    // Block compression and a disk cache for the finished textures.
-    // The cache holds them downscaled, mipped and compressed, so a second
-    // launch skips the decode, the resample, the mip chain and the encode.
     // How often a scene that is still loading is republished. Every snapshot
     // restarts convergence, so this trades latency against the noise the load
     // finishes with; twice a second reads as continuous without doing that
     // often enough to matter.
     m_settingsManager->setAs<float>("render/stream/publishIntervalMs", 500.0f);
-    m_settingsManager->setAs<bool>("render/texture/compress", true);
-    m_settingsManager->setAs<std::string>(
-        "render/texture/cachePath", (std::filesystem::temp_directory_path() / "strelka_texcache").string());
     // The editor picks against the host arrays, so it keeps them.
     m_settingsManager->setAs<bool>("scene/releaseHostGeometry", false);
-    m_settingsManager->setAs<bool>("render/validate/analyticLights", true);
     m_settingsManager->setAs<std::string>("resource/searchPath", m_resourceSearchPath);
     // Postprocessing settings:
     m_settingsManager->setAs<uint32_t>("render/post/outputMode",
@@ -771,7 +739,6 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<bool>("display/vsync/enabled", true);
     m_settingsManager->setAs<bool>("display/present/tripleBuffering", true);
     m_settingsManager->setAs<float>("display/present/fpsLimit", 0.0f);
-    m_settingsManager->setAs<float>("render/post/tonemapper/maxEDR", 1.0f); // refreshed per frame from the display
     m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", 100.0f);
     m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", 1.0f);
     m_settingsManager->setAs<float>("render/post/tonemapper/fStop", 4.0f);
@@ -781,10 +748,6 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<bool>("render/post/tonemapper/linkDofFStop", true);
 
     m_settingsManager->setAs<float>("render/post/gamma", 2.4f); // 0.0f - off
-    // Dev settings:
-    m_settingsManager->setAs<float>("render/pt/dev/shadowRayTmin", 0.0f); // offset to avoid self-collision in
-                                                                          // light sampling
-    m_settingsManager->setAs<float>("render/pt/dev/materialRayTmin", 0.0f); // offset to avoid self-collision in
 
     loadAnimSettings();
 }

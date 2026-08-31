@@ -417,6 +417,7 @@ void HeadlessApp::populateSettings()
     }
 
     // Only keys MetalRender reads (plus per-animation state/time).
+    seedCommonRenderSettings(*m_settings);
     m_settings->setAs<uint32_t>("render/width", m_config.width);
     m_settings->setAs<uint32_t>("render/height", m_config.height);
     m_settings->setAs<uint32_t>("render/pt/depth", m_config.maxDepth);
@@ -427,35 +428,23 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/debug", m_config.debugMode);
     m_settings->setAs<uint32_t>("render/pt/samplerType", m_config.samplerType);
     m_settings->setAs<uint32_t>("render/pt/blueNoiseSwitchSpp", m_config.blueNoiseSwitchSpp);
-    m_settings->setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
     m_settings->setAs<float>("render/pt/upscaleFactor", m_config.upscaleFactor);
     m_settings->setAs<bool>("render/pt/enableUpscale", m_config.upscale);
     m_settings->setAs<uint32_t>("render/pt/upscaleMode", m_config.upscaleMode);
-    m_settings->setAs<bool>("render/pt/enableAcc", true);
     m_settings->setAs<uint32_t>("render/selectedCamera", static_cast<uint32_t>(std::max(0, m_config.cameraIndex)));
     m_settings->setAs<bool>("render/enableMotionBlur", false);
     m_settings->setAs<bool>("render/isMotionBlurVisible", false);
-    m_settings->setAs<bool>("render/enableCameraMotionBlur", false);
-    m_settings->setAs<float>("render/motionBlur/shutterTime", 1.0f / 24.0f);
-    m_settings->setAs<uint32_t>("render/motionBlur/shutterMode", 1);
     m_settings->setAs<std::string>("resource/searchPath", resourceSearchPath);
 
-    // Wavefront + single submission: deterministic sync, no banding overhead.
-    m_settings->setAs<uint32_t>("render/pt/profileStages", 0);
-    m_settings->setAs<uint32_t>("render/pt/risCandidates", 1u);
     m_settings->setAs<uint32_t>("render/pt/writeAov", 0);
     m_settings->setAs<bool>("render/pt/denoise", m_config.denoise);
     m_settings->setAs<uint32_t>("render/pt/profileStages", m_config.profileStages ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/risCandidates", m_config.risCandidates);
-    m_settings->setAs<uint32_t>("render/pt/jitterSign", 0);
-    m_settings->setAs<uint32_t>("render/pt/denoiseDepthMode", 0);
     m_settings->setAs<float>("render/pt/denoiseFireflyClamp", m_config.denoiseFireflyClamp);
     m_settings->setAs<float>("render/pt/clampIndirect", m_config.clampIndirect);
-    m_settings->setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);
     m_settings->setAs<uint32_t>("render/pt/sortRays", m_config.sortRays ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/textureLod", m_config.textureLod ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/guidePrimaryHit", m_config.guidePrimaryHit ? 1u : 0u);
-    m_settings->setAs<uint32_t>("render/pt/staticTraversal", 1);
     m_settings->setAs<uint32_t>("render/validate/estimatorMode", m_config.estimatorMode);
     // Absorption convention for transmissive media: 0 = glTF, 1 = Cycles.
     m_settings->setAs<uint32_t>("render/material/volumeModel", m_config.volumeModel);
@@ -466,9 +455,6 @@ void HeadlessApp::populateSettings()
     // Headless: nothing picks, nothing saves the scene back out.
     m_settings->setAs<bool>("scene/releaseHostGeometry", true);
     m_settings->setAs<uint32_t>("render/texture/downscale", m_config.textureDownscale);
-    // An HDRI carries radiance; normalising it away makes physical parity
-    // impossible. See loadEnvMap().
-    m_settings->setAs<bool>("render/env/autoCalibrate", false);
     // The diffuse/specular split of the first event. Off by default: nothing
     // reads it back, and writing it costs four scattered records per pixel per
     // launch. See docs/open-perf.md.
@@ -486,11 +472,6 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/sharcStaleFrames", m_config.sharcStaleFrames);
     m_settings->setAs<uint32_t>("render/pt/sharcResponsiveFrames", m_config.sharcResponsiveFrames);
     m_settings->setAs<bool>("render/pt/sharcResponsiveLighting", m_config.sharcResponsiveLighting);
-    // Headless renders one camera to convergence, so there is nothing to reset
-    // and nobody to read an occupancy number; both stay off rather than being
-    // absent, because a missing key is a logged assertion in SettingsManager.
-    m_settings->setAs<bool>("render/pt/sharcReset", false);
-    m_settings->setAs<bool>("render/pt/sharcReportOccupancy", false);
     m_settings->setAs<bool>("render/pt/sharcMetalResponsive", m_config.sharcMetalResponsive);
     m_settings->setAs<float>("render/pt/sharcSceneScale", m_config.sharcSceneScale);
     m_settings->setAs<float>("render/pt/sharcRoughnessThreshold", m_config.sharcRoughnessThreshold);
@@ -506,16 +487,9 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<bool>("render/pt/sharcBlendAdjacentLevels", m_config.sharcBlendAdjacentLevels);
     m_settings->setAs<bool>("render/pt/sharcFadeAcceleration", m_config.sharcFadeAcceleration);
     m_settings->setAs<bool>("render/pt/opacityMicromaps", m_config.opacityMicromaps);
-    // Block compression and a disk cache for the finished textures.
-    // The cache holds them downscaled, mipped and compressed, so a second
-    // launch skips the decode, the resample, the mip chain and the encode.
     // Headless renders one final image, so intermediate snapshots are pure
     // cost: publish nothing until the scene is complete.
     m_settings->setAs<float>("render/stream/publishIntervalMs", 0.0f);
-    m_settings->setAs<bool>("render/texture/compress", true);
-    m_settings->setAs<std::string>(
-        "render/texture/cachePath", (std::filesystem::temp_directory_path() / "strelka_texcache").string());
-    m_settings->setAs<bool>("render/validate/analyticLights", true);
 
     // A scene may state its own exposure in the light sidecar, and when it does
     // it wins over the defaults here -- an exposure is a property of the shot,
@@ -541,20 +515,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<float>("render/post/tonemapper/cm2_factor", cm2Factor);
     m_settings->setAs<float>("render/post/tonemapper/fStop", fStop);
     m_settings->setAs<float>("render/post/tonemapper/shutterSpeed", shutterSpeed);
-    m_settings->setAs<float>("render/post/tonemapper/maxEDR", 1.0f);
     m_settings->setAs<float>("render/post/gamma", m_config.gamma);
-
-    // Keys the OptiX backend reads that only EditorApp::loadSettings() used to
-    // write. getAs() on a missing key logs, asserts and returns a default, so
-    // headless renders were silently taking whatever zero happened to mean while
-    // printing three errors per sample. Same values the editor uses.
-    m_settings->setAs<uint32_t>("render/pt/misHeuristic", 0); // 0 = balance, 1 = power
-    m_settings->setAs<float>("render/pt/dev/shadowRayTmin", 0.0f);
-    m_settings->setAs<float>("render/pt/dev/materialRayTmin", 0.0f);
-    // Read once in OptiXRender::init(). Off for a headless render: OptiX
-    // validation mode drops the optimisation level and is a debugging tool.
-    m_settings->setAs<bool>("render/enableValidation", false);
-    m_settings->setAs<bool>("render/enableMotionBlur", false);
 
     for (size_t i = 0; i < m_scene->getAnimations().size(); ++i)
     {
