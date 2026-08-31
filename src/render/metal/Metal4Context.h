@@ -140,15 +140,6 @@ public:
         return mConstants;
     }
 
-    /// A ring of its own for work outside the frame loop, reset by
-    /// beginImmediate(). Sharing the frame's would either run it dry -- skinning
-    /// pushes two constants per mesh per frame and never resets -- or overwrite
-    /// constants a frame still in flight is reading.
-    ConstantRing& immediateConstants()
-    {
-        return mImmediateConstants;
-    }
-
     /// Begin recording into the given frame's allocator. The allocator is reset
     /// here, so the frame's previous work must already have completed.
     MTL4::CommandBuffer* beginFrame(uint32_t frameIndex);
@@ -189,7 +180,6 @@ public:
 
     /// Insert a wait/signal on the Metal 4 queue timeline (cross-queue sync).
     void wait(MTL::SharedEvent* event, uint64_t value);
-    void signal(MTL::SharedEvent* event, uint64_t value);
 
     /// Frame-loop counterpart of submitAndWait's tail, split in two so the
     /// caller can commit, do other work, and block later -- which is what an
@@ -199,10 +189,9 @@ public:
     /// handler, never through the buffer itself, so there is no
     /// waitUntilCompleted to call. A queue-signalled shared event is the only
     /// thing a caller can block on.
-    uint64_t signalFrame();
     uint64_t reserveFrameSignal();
     void signalFrame(uint64_t value);
-    /// The event signalFrame() signals, for a consumer on another queue to wait on.
+    /// The event signalFrame(value) signals, for a consumer on another queue to wait on.
     MTL::SharedEvent* frameEvent() const
     {
         return mFrameEvent;
@@ -252,7 +241,6 @@ private:
     MTL::SharedEvent* mFrameEvent = nullptr;
     uint64_t mFrameValue = 0;
     ConstantRing mConstants;
-    ConstantRing mImmediateConstants;
     bool mResidencyDirty = false;
 };
 

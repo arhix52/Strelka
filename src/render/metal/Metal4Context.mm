@@ -274,7 +274,6 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     // the frame's pre-submit commitResidency() publishes those.
     const ConstantRing::PageCallback residency = [this](MTL::Buffer* page) { addResident(page); };
     if (!mConstants.init(device, constantBytesPerFrame, frameCount, residency) ||
-        !mImmediateConstants.init(device, constantBytesPerFrame, 1, residency) ||
         !mSkinConstants.init(device, constantBytesPerFrame, frameCount, residency))
     {
         STRELKA_ERROR("Metal 4 constant ring allocation failed");
@@ -316,9 +315,8 @@ MTL4::CommandBuffer* Metal4Context::beginImmediate()
     {
         return nullptr;
     }
+    // submitAndWait() blocks, so this allocator/buffer pair is always safe to reuse.
     mImmediateAllocator->reset();
-    // submitAndWait() blocks, so one buffer's worth is always safe to reuse.
-    mImmediateConstants.beginFrame(0);
     mImmediateBuffer->beginCommandBuffer(mImmediateAllocator);
     mImmediateBuffer->useResidencySet(mResidencySet);
     return mImmediateBuffer;
@@ -399,13 +397,6 @@ uint64_t Metal4Context::submitSkin(MTL4::CommandBuffer* commandBuffer)
     return mSkinValue;
 }
 
-uint64_t Metal4Context::signalFrame()
-{
-    const uint64_t value = reserveFrameSignal();
-    signalFrame(value);
-    return value;
-}
-
 uint64_t Metal4Context::reserveFrameSignal()
 {
     if (!mFrameEvent)
@@ -471,7 +462,6 @@ void Metal4Context::release()
         mImmediateAllocator = nullptr;
     }
     mConstants.release();
-    mImmediateConstants.release();
     for (MTL4::CommandBuffer* commandBuffer : mCommandBuffers)
     {
         commandBuffer->release();
@@ -586,15 +576,6 @@ void Metal4Context::wait(MTL::SharedEvent* event, uint64_t value)
         return;
     }
     mQueue->wait(event, value);
-}
-
-void Metal4Context::signal(MTL::SharedEvent* event, uint64_t value)
-{
-    if (!mQueue || !event || value == 0)
-    {
-        return;
-    }
-    mQueue->signalEvent(event, value);
 }
 
 void Metal4Context::addResident(MTL::Allocation* allocation)
