@@ -171,10 +171,6 @@ protected:
     GamepadState mGamepad;
 };
 
-class DisplayFactory
-{
-public:
-    static Display* createDisplay();
-};
+Display* createDisplay();
 
 } // namespace oka

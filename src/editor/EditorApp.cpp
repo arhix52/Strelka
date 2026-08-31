@@ -55,7 +55,7 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     m_settingsManager = std::make_unique<SettingsManager>();
 
     m_scene = std::make_unique<Scene>();
-    m_display = std::unique_ptr<Display>(DisplayFactory::createDisplay());
+    m_display = std::unique_ptr<Display>(createDisplay());
     m_render = std::unique_ptr<Render>(RenderFactory::createRender());
     m_sharedCtx = std::make_unique<SharedContext>();
 

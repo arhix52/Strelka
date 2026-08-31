@@ -1,6 +1,17 @@
 #include <strelka/display/display.h>
 
+#ifdef __APPLE__
+#include "metal/glfw_display.h"
+#else
+#include "vulkan/glfw_display.h"
+#endif
+
 using namespace oka;
+
+Display* oka::createDisplay()
+{
+    return new GlfwDisplay();
+}
 
 void Display::framebufferResizeCallback(GLFWwindow* window, int width, int height)
 {

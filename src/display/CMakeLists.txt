@@ -10,7 +10,6 @@ set(DISPLAY_SOURCES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/display/output_policy.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/display/output_probe.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/display.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/display_factory.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/output_probe.cpp
 )
 
