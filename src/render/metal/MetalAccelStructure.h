@@ -123,14 +123,11 @@ public:
     /// by the complete one when the build finishes.
     void publishPartialTopLevel();
 
-    /// Build every acceleration structure the scene needs, in one call.
-    void create();
     /// Resumable build. Zero budget = no limit. Returns true when complete.
     bool step(double budgetMs);
     /// Rebuild for a different motion setting (drains the queue first).
     void rebuild();
 
-    void updateSkeletalBLAS();
     void updateInstanceTransforms();
     void rebuildTLAS();
 

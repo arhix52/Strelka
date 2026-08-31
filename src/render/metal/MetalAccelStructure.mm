@@ -344,19 +344,13 @@ void MetalAccelStructure::rebuild()
     mMetal4->commitResidency();
 
     const auto rebuildStart = std::chrono::high_resolution_clock::now();
-    create();
-    STRELKA_INFO("Acceleration structures rebuilt for motion={} in {:.1f} ms", mBuildMotionBlas,
-                 std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - rebuildStart)
-                     .count());
-}
-
-void MetalAccelStructure::create()
-{
-    // No budget: one call does the lot, which is what a rebuild driven by an
-    // animation and what the headless path both want.
+    // No budget: a settings-driven rebuild must finish before rendering resumes.
     while (!step(0.0))
     {
     }
+    STRELKA_INFO("Acceleration structures rebuilt for motion={} in {:.1f} ms", mBuildMotionBlas,
+                 std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - rebuildStart)
+                     .count());
 }
 
 bool MetalAccelStructure::step(double budgetMs)
@@ -1086,39 +1080,6 @@ void MetalAccelStructure::encodeTlasUpdates()
            mVolumeTlasScratchBuffer, true);
 
     mPath->barrierAfterTlasBeforeDispatch();
-}
-
-void MetalAccelStructure::updateSkeletalBLAS()
-{
-    AsFrameUpdate update;
-    update.skeletal = true;
-    if (inlineWithTracer())
-    {
-        if (!mMetal4 || !mMetal4->isValid())
-        {
-            return;
-        }
-        mMetal4->commitResidency();
-        MTL4::CommandBuffer* commandBuffer = mMetal4->beginImmediate();
-        MTL4::ComputeCommandEncoder* encoder =
-            commandBuffer ? commandBuffer->computeCommandEncoder() : nullptr;
-        labelMetal4(encoder, "accel side update");
-        if (!encoder)
-        {
-            return;
-        }
-        encodeInline(encoder, update);
-        encoder->endEncoding();
-        mMetal4->submitAndWait(commandBuffer);
-    }
-    else
-    {
-        submitSide(update);
-        if (mPath && mPath->readyEvent())
-        {
-            mPath->readyEvent()->waitUntilSignaledValue(mPath->readyValue(), UINT64_MAX);
-        }
-    }
 }
 
 void MetalAccelStructure::encodeInline(MTL4::ComputeCommandEncoder* encoder, const AsFrameUpdate& update)
