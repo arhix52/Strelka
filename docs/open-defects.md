@@ -993,24 +993,59 @@ is defined to 9 and enabled by default, and past that bounce Cycles substitutes
 fraction changes, which is unbiased. So it cannot be the cause at this anisotropy
 either, and a row at `g != 0` would be needed to see it at all.
 
-### Where this stops
+### The third estimator says the residual is ours
 
-Every structural difference between the two walks has now been eliminated, each by
-measurement except the last two, which were closed by reading Cycles' source. What
-remains is an angular redistribution across the disc that only the rows built to be
-extreme can see: `31_subsurface_absorbing` reads 1.174 at the centre and 0.883 at
-the rim, and it is that row's whole 3% error.
+`tools/feature_tests/sss_halfspace.py` puts a semi-infinite medium -- 96 mean free
+paths across a sphere, single-scattering albedo 0.9512 -- under a uniform sky and
+nothing else. A sphere presents every view angle at once, `mu = 1` at the centre
+of the disc and `mu -> 0` at the rim, so the disc *is* the emergent angular
+distribution.
 
-The rows a character is rendered with are within 2% everywhere -- `25_subsurface`
-0.998 with centre 0.993 and rim 0.982, `29_subsurface_skin` 0.994 with 0.981 and
-0.970. The slab, which grades against algebra rather than a reference, brackets the
-nominal extinction from the opposite side to Cycles and within 5% of it.
+That distribution has a closed form. Chandrasekhar's H-function gives
 
-This is a reasonable place to leave it. What would take it further is not another
-reading of Cycles -- there is nothing left to read -- but a third estimator: a
-one-dimensional reference for the angular distribution of light leaving a
-half-space at a known albedo and optical depth, which the slab harness is close
-enough to produce.
+    f_r(mu, mu0) = (omega / 4 pi) H(mu) H(mu0) / (mu + mu0)
+
+so under uniform illumination
+
+    L(mu) = (omega / 2) H(mu) integral_0^1 mu0 H(mu0) / (mu + mu0) dmu0,
+
+with H the solution of `H = 1 + (omega/2) mu H int H(mu')/(mu+mu') dmu'`.
+`sss_halfspace_read.py` solves it by iteration and checks itself against the
+identity `int_0^1 H dmu = 2(1 - sqrt(1-omega)) / omega`, which it satisfies to
+1e-12 at every albedo tried.
+
+Both renders are normalised at the disc centre, because the absolute level is what
+the other two instruments already grade; what this compares is the shape.
+
+| r/R | mu | analytic | Cycles | here | ours / analytic |
+|---|---|---|---|---|---|
+| 0.039 | 0.999 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+| 0.352 | 0.936 | 1.0187 | 1.0204 | 1.0175 | 0.9988 |
+| 0.587 | 0.809 | 1.0576 | 1.0596 | 1.0494 | 0.9923 |
+| 0.744 | 0.668 | 1.1049 | 1.1063 | 1.0857 | 0.9826 |
+| 0.822 | 0.569 | 1.1411 | 1.1421 | 1.1148 | 0.9770 |
+| 0.901 | 0.434 | 1.1948 | 1.1964 | 1.1585 | **0.9696** |
+
+**rms departure from the closed form: Cycles 0.0013, here 0.0131.**
+
+Cycles reproduces Chandrasekhar to a tenth of a percent. This walk departs by ten
+times that, monotonically with angle, reaching 3% too dark at the grazing rim.
+That settles what two renderers disagreeing never could: the residual is ours.
+
+It also raises a question the port has to answer. A bare half-space has no
+interface, and both walks are entered through a refraction at index 1.4, which
+should distort the emergent distribution away from H for *both* of them. Cycles
+lands on it anyway. Either its `bssrdf->ior` is not what this port assumed for a
+non-skin walk, or its entry is being compensated somewhere this reading has not
+found. Setting the index to 1 here is not the answer -- at `eta = 1` the
+refraction degenerates to the view ray continued, the narrowest entry there is,
+and `32_subsurface_roughness` already measures that regime at 0.6 of the
+reference.
+
+The rows a character is rendered with remain within 2% everywhere --
+`25_subsurface` 0.998, `29_subsurface_skin` 0.994 -- and the slab brackets the
+nominal extinction within 5% of Cycles. The three instruments now grade absolute
+transmission, angular shape, and agreement, and only the middle one is failing.
 
 
 ### The diffuse lobe was summed with the specular one instead of layered under it
