@@ -1,4 +1,5 @@
 #include "glfw_display.h"
+#include "imgui_style.h"
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -138,7 +139,7 @@ void GlfwDisplay::init(int width, int height, SettingsManager *settings)
     // gizmo drags and viewport picking stay on the mouse.
     io->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     io->ConfigWindowsMoveFromTitleBarOnly = true;
-    ImGui::StyleColorsDark();
+    imgui_style::applyGraphiteBlue();
 
     if (!ImGui_ImplGlfw_InitForVulkan(mWindow, true))
     {

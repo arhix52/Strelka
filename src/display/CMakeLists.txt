@@ -6,6 +6,7 @@ find_package(glfw3 REQUIRED)
 find_package(glm REQUIRED)
 
 set(DISPLAY_SOURCES_COMMON
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgui_style.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/display/display.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/display/output_policy.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/display/output_probe.h

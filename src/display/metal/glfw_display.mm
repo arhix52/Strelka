@@ -1,4 +1,5 @@
 #include "glfw_display.h"
+#include "imgui_style.h"
 #include <strelka/render/render.h>
 
 #define IMGUI_IMPL_METAL_CPP
@@ -149,8 +150,7 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     // gizmo drags and viewport picking stay on the mouse.
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 
-    // Setup style
-    ImGui::StyleColorsDark();
+    imgui_style::applyGraphiteBlue();
 
     // Setup Platform/Renderer backends
     ImGui_ImplGlfw_InitForOpenGL(mWindow, true);
