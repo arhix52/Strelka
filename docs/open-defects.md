@@ -971,12 +971,46 @@ next-event estimation, and the geometry the walk may reach.
 | `31_subsurface_absorbing` | 0.0649 / 1.000 |
 | `32_subsurface_roughness` | 0.0638 / 1.019 |
 
-What is left is the angular redistribution across the disc, which only the
-synthetic rows can see -- `31` reads 1.174 at the centre and 0.883 at the rim
-while the row that looks like skin is within 2% everywhere. The candidate is
-Dwivedi guiding, which Cycles has and this walk does not: it was set aside as
-variance reduction that cannot move a mean, and that holds only if its three-way
-MIS is exact. Nothing here has tested whether Cycles' is.
+**Dwivedi guiding is not it either, and this time by reading rather than
+measuring.** Cycles samples the phase from a mixture -- Dwivedi with probability
+`guided_fraction`, Henyey-Greenstein otherwise -- and divides by that same
+mixture:
+
+    pdf = mix(pdf, guided_pdf, guided_fraction)
+    throughput *= (hit ? transmittance : sigma_s * transmittance) / dot(channel_pdf, pdf)
+
+One-sample MIS over a mixture, with a matched sampler and density:
+`sample_phase_dwivedi()` is the inverse CDF of `p(cos) ~ 1 / (v - cos)` and
+`eval_phase_dwivedi()` is `1 / ((v - cos) * phase_log)`, its normalisation. The
+stretched `sigma_t` is carried into the guided pdf the same way. That is unbiased,
+so it changes variance and cannot move a mean.
+
+Its neighbour *is* an approximation -- `SUBSURFACE_RANDOM_WALK_SIMILARITY_LEVEL`
+is defined to 9 and enabled by default, and past that bounce Cycles substitutes
+`sigma_t* = sigma_t - sigma_s + sigma_s (1 - g)` and drops the anisotropy. At
+`g = 0`, which is every row here and Blender's default, `sigma_s* = sigma_s` and
+`sigma_t* = sigma_t`: the substitution is the identity and only the guiding
+fraction changes, which is unbiased. So it cannot be the cause at this anisotropy
+either, and a row at `g != 0` would be needed to see it at all.
+
+### Where this stops
+
+Every structural difference between the two walks has now been eliminated, each by
+measurement except the last two, which were closed by reading Cycles' source. What
+remains is an angular redistribution across the disc that only the rows built to be
+extreme can see: `31_subsurface_absorbing` reads 1.174 at the centre and 0.883 at
+the rim, and it is that row's whole 3% error.
+
+The rows a character is rendered with are within 2% everywhere -- `25_subsurface`
+0.998 with centre 0.993 and rim 0.982, `29_subsurface_skin` 0.994 with 0.981 and
+0.970. The slab, which grades against algebra rather than a reference, brackets the
+nominal extinction from the opposite side to Cycles and within 5% of it.
+
+This is a reasonable place to leave it. What would take it further is not another
+reading of Cycles -- there is nothing left to read -- but a third estimator: a
+one-dimensional reference for the angular distribution of light leaving a
+half-space at a known albedo and optical depth, which the slab harness is close
+enough to produce.
 
 
 ### The diffuse lobe was summed with the specular one instead of layered under it
