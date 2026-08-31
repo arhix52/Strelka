@@ -462,9 +462,6 @@ public:
     /// a fixed size.
     std::vector<std::string> mProjectorImages;
 
-    std::vector<uint32_t> mTransparentInstances;
-    std::vector<uint32_t> mOpaqueInstances;
-
     Scene() = default;
 
     ~Scene() = default;
@@ -890,10 +887,6 @@ public:
     void removeInstance(uint32_t instId);
     void removeMesh(uint32_t meshId);
     void removeMaterial(uint32_t materialId);
-
-    std::vector<uint32_t>& getOpaqueInstancesToRender(const glm::float3& camPos);
-
-    std::vector<uint32_t>& getTransparentInstancesToRender(const glm::float3& camPos);
 
     ChangeBits peekChanges() const
     {

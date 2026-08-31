@@ -171,8 +171,6 @@ uint32_t Scene::createInstance(const Instance::Type type,
     inst->transform = transform;
     inst->mLightId = lightId;
 
-    mOpaqueInstances.push_back(instId);
-
     return instId;
 }
 
@@ -1308,16 +1306,6 @@ void Scene::removeMesh(const uint32_t meshId)
 void Scene::removeMaterial(const uint32_t materialId)
 {
     mDelMaterial.push(materialId); // marked as removed
-}
-
-std::vector<uint32_t>& Scene::getOpaqueInstancesToRender(const glm::float3& /*camPos*/)
-{
-    return mOpaqueInstances;
-}
-
-std::vector<uint32_t>& Scene::getTransparentInstancesToRender(const glm::float3& /*camPos*/)
-{
-    return mTransparentInstances;
 }
 
 std::set<uint32_t> Scene::getDirtyInstances()
