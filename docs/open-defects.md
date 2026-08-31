@@ -1032,15 +1032,37 @@ Cycles reproduces Chandrasekhar to a tenth of a percent. This walk departs by te
 times that, monotonically with angle, reaching 3% too dark at the grazing rim.
 That settles what two renderers disagreeing never could: the residual is ours.
 
-It also raises a question the port has to answer. A bare half-space has no
-interface, and both walks are entered through a refraction at index 1.4, which
-should distort the emergent distribution away from H for *both* of them. Cycles
-lands on it anyway. Either its `bssrdf->ior` is not what this port assumed for a
-non-skin walk, or its entry is being compensated somewhere this reading has not
-found. Setting the index to 1 here is not the answer -- at `eta = 1` the
-refraction degenerates to the view ray continued, the narrowest entry there is,
-and `32_subsurface_roughness` already measures that regime at 0.6 of the
-reference.
+### The entry constants here are a compensation, not a port
+
+`bssrdf->ior` for a non-skin walk is now read rather than guessed. In
+`svm/closure.h`, where Principled builds the closure:
+
+    bssrdf->alpha = sqr(roughness);
+    bssrdf->ior = eta;
+    bssrdf->anisotropy = anisotropy;
+    if (subsurface_method == CLOSURE_BSSRDF_RANDOM_WALK_SKIN_ID) {
+      bssrdf->ior = stack_load(stack, data.subsurface_ior);
+    }
+
+So the interface roughness *is* the surface roughness squared, the index *is* the
+material's own, and the separate `subsurface_ior` input exists only for the skin
+walk. Both were ported exactly and measured, and the exact port is 40% dark:
+`32_subsurface_roughness` reads 0.600, 0.520, 0.576, 0.553, 0.821 across the ramp,
+and the half-space departure from Chandrasekhar rises from 0.0131 to 0.0160. At a
+roughness of 0 Cycles has the same alpha of zero and does not go dark.
+
+The same formula therefore behaves differently in the two renderers, and the
+constants in `subsurface_entry_direction()` -- alpha 1, index 1.4 -- are the
+compensation that measures best, not a description of Cycles. Against 1.5, the
+index the glTF actually carries, the ramp reads 1.125, 1.126, 1.227, 1.108, 1.061
+and Chandrasekhar 0.0160; at 1.4 it reads 1.094, 1.087, 1.164, 1.068, 1.031 and
+0.0131.
+
+That is the shape of what is left: not a missing feature and not a wrong constant,
+but the same entry construction giving a different result here than there. The
+half-space row says which of the two is wrong -- 0.0131 against 0.0013 -- and the
+roughness ramp says where to look, because the disagreement is largest exactly
+where the entry cone is narrowest.
 
 The rows a character is rendered with remain within 2% everywhere --
 `25_subsurface` 0.998, `29_subsurface_skin` 0.994 -- and the slab brackets the

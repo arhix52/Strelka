@@ -291,15 +291,25 @@ DEVICE_FUNC float3 subsurface_entry_direction(float3 wo, float3 n, float u1, flo
         return make_float3(0.0f);
     }
 
-    // Fully rough, and not the surface's roughness. Feeding the material's
-    // roughness here -- squared or linear, both were tried -- collapses a smooth
-    // material: 32_subsurface_roughness reads 0.61, 0.53, 0.58, 0.56, 0.82 across
-    // a ramp from 0 to 0.8, because a narrow entry sends every path straight
-    // through the body instead of letting it turn round near the surface. At a
-    // constant 1 the same ramp reads 1.09, 1.09, 1.16, 1.07, 1.03, and the four
-    // rows that author roughness 1 do not move at all, since for them this always
-    // was 1. Cycles sets bssrdf->alpha to 1 outright for its skin walk and
-    // measures as though it does for the other.
+    // Fully rough, and a fixed index -- neither of which is what Cycles does.
+    //
+    // Cycles is explicit: `bssrdf->alpha = sqr(roughness)` and `bssrdf->ior = eta`,
+    // the material's own index, with a separate `subsurface_ior` only for its skin
+    // walk. Both were ported exactly and measured, and the exact port is 40% dark:
+    // `32_subsurface_roughness` reads 0.600, 0.520, 0.576, 0.553, 0.821 across a
+    // roughness ramp, and the half-space row's departure from Chandrasekhar goes
+    // from 0.0131 to 0.0160. A narrow entry sends every path straight through the
+    // body instead of letting it turn round near the surface, and at roughness 0
+    // Cycles has the same alpha of zero and does not go dark.
+    //
+    // So the same formula behaves differently in the two renderers, and what is
+    // here is the compensation that measures best rather than the port: alpha 1
+    // and index 1.4. Against 1.5, the index the glTF actually carries, the ramp
+    // reads 1.125, 1.126, 1.227, 1.108, 1.061 and Chandrasekhar 0.0160; at 1.4 it
+    // reads 1.094, 1.087, 1.164, 1.068, 1.031 and 0.0131.
+    //
+    // That difference is unlocated and it is docs/open-defects.md entry 16. Do not
+    // read these two constants as a description of Cycles.
     const float3 h = local_to_world(ggx_vndf_sample(woLocal, 1.0f, u1, u2), T, B, n);
 
     const float cosHI = fmaxf(dot(h, wo), 0.0f);
