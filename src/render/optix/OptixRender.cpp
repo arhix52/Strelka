@@ -118,8 +118,6 @@ static_assert((uint32_t)oka::optix_omm::kAlphaBlend == (uint32_t)ALPHA_MODE_BLEN
 // from. See the note in loadEnvMap().
 #include "../metal/ibl_alias_table.h"
 
-#include <strelka/render/Camera.h>
-
 namespace
 {
 

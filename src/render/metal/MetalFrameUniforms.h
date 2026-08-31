@@ -8,7 +8,6 @@
 
 #include <Metal/Metal.hpp>
 #include <settings.h>
-#include <strelka/render/Camera.h>
 #include <strelka/scene/scene.h>
 
 #include <cstdint>

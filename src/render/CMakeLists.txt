@@ -7,10 +7,8 @@ set(RENDER_SOURCES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/render/render.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/render/buffer.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/render/common.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/render/Camera.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/render/materials.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/render.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/Camera.cpp
 )
 
 if(WIN32 OR LINUX)
