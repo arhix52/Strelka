@@ -81,22 +81,6 @@ constant bool SPEC_SHARC_UPDATE = is_function_constant_defined(kFcSharcUpdate) ?
 // it at all -- see WavefrontFeatures::kOpenPBR.
 constant bool SPEC_OPENPBR = is_function_constant_defined(kFcOpenPBR) ? kFcOpenPBR : false;
 
-struct PerRayData
-{
-    SamplerState sampler;
-    uint32_t depth;
-    float3 radiance;
-    float3 throughput;
-    float3 origin;
-    float3 direction;
-    float lastBsdfPdf;
-    IorStack iorStack;
-    bool specularBounce;
-    bool neeDone; // did NEE run at the vertex that spawned this ray?
-    bool shouldTerninate;
-};
-
-
 __attribute__((always_inline)) float3 transformDirection(float3 p, float4x4 transform)
 {
     return (transform * float4(p.x, p.y, p.z, 0.0f)).xyz;
@@ -674,39 +658,10 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
     si.metallic = saturate(resolvedMetallic);
 }
 
-bool traceOcclusion(acceleration_structure<instancing, primitive_motion> accelerationStructure,
-                    thread intersector<triangle_data, instancing, primitive_motion>& isect,
-                    const float3 origin,
-                    const float3 direction,
-                    const float tMin,
-                    const float tMax,
-                    const float motionTime)
-{
-    struct ray shadowRay;
-    shadowRay.origin = origin;
-    shadowRay.direction = direction;
-    shadowRay.min_distance = tMin;
-    shadowRay.max_distance = tMax;
-    isect.accept_any_intersection(true);
-
-    bool res = true;
-    typename intersector<triangle_data, instancing, primitive_motion>::result_type intersection;
-    intersection = isect.intersect(shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime);
-    if (intersection.type == intersection_type::none)
-    {
-        res = false;
-    }
-    isect.accept_any_intersection(false);
-    return res;
-}
-
 // A next-event connection, before the visibility test.
 //
-// Splitting the light sample from the occlusion trace is what lets the wavefront
-// tracer defer the shadow ray into its own stage while the megakernel keeps
-// tracing it inline: both build the same connection, they just resolve it at
-// different times. Nothing here depends on the trace's result, so the split
-// changes no arithmetic and draws no extra random numbers.
+// The wavefront tracer defers its shadow ray into a separate stage; nothing
+// here depends on that trace's result.
 struct LightConnection
 {
     float3 radiance; // unoccluded Li times the cosine at the surface
