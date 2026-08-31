@@ -164,7 +164,6 @@ private:
     double mBuildStartMs = 0.0;
     bool mReportedFirstPartialFrame = false;
     metal::MetalWavefrontIntegrator mIntegrator;
-    void generateTextureMips();
     metal::IntegratorSceneBindings integratorSceneBindings();
 
     /// Extra extend/shade iterations a scene needs so that geometry which does
@@ -247,20 +246,10 @@ private:
     // a new variant builds intersection tables.
     void makeResourcesResidentForMetal4(Buffer* output);
 
-    MTL::Library* loadShaderLibrary(const char* relativePath);
     void buildBuffers();
     void uploadLightBuffer();
     void handleSceneChanges();
 
-    enum class TextureKind
-    {
-        Color,
-        NonColor,
-        Normal,
-    };
-    MTL::Texture* loadTextureFromFile(const std::string& fileName, bool srgb, TextureKind kind = TextureKind::Color);
-    MTL::Texture* loadCachedTexture(const std::string& cachePath);
-    std::string textureCacheKey(const std::string& fileName, bool srgb, TextureKind kind) const;
     void createMetalMaterials();
     bool stepMetalMaterials(double budgetMs);
 

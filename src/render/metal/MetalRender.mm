@@ -32,7 +32,6 @@
 #include "integrator_features.h"
 #include "render_resolution.h"
 #include "residency_set_diff.h"
-#include "texture_cache_key.h"
 #include "ibl_alias_table.h"
 #include "integrator_buffer_sizes.h"
 
@@ -59,7 +58,6 @@
 
 #include <env.h>
 #include <log.h>
-#include <paths.h>
 
 #include <simd/simd.h>
 
@@ -858,37 +856,6 @@ void MetalRender::init()
     // Arm the deferred scene build. The first render() call picks it up a stage
     // at a time; a synchronous caller drives it to the end through renderSync.
     mScenePrep.begin();
-}
-
-MTL::Texture* MetalRender::loadTextureFromFile(const std::string& fileName, bool srgb, TextureKind kind)
-{
-    return mTextures.loadFromFile(fileName, srgb, static_cast<metal::TextureKind>((int)kind));
-}
-
-std::string MetalRender::textureCacheKey(const std::string& fileName, bool srgb, TextureKind kind) const
-{
-    std::error_code ec;
-    const auto size = fs::file_size(fileName, ec);
-    const auto stamp = fs::last_write_time(fileName, ec).time_since_epoch().count();
-    metal::TextureCacheKeyInputs in;
-    in.fileName = fileName;
-    in.fileSize = ec ? 0 : (uint64_t)size;
-    in.writeTimeCount = ec ? 0 : (int64_t)stamp;
-    in.maxDimension = getSettings()->getAs<uint32_t>("render/texture/maxDimension");
-    in.downscale = getSettings()->getAs<uint32_t>("render/texture/downscale");
-    in.srgb = srgb;
-    in.kind = static_cast<metal::TextureKind>((int)kind);
-    return metal::textureCacheKey(in);
-}
-
-MTL::Texture* MetalRender::loadCachedTexture(const std::string&)
-{
-    return nullptr;
-}
-
-void MetalRender::generateTextureMips()
-{
-    mTextures.generateMips();
 }
 
 void MetalRender::createMetalMaterials()
@@ -2894,20 +2861,6 @@ Buffer* MetalRender::createBuffer(const BufferDesc& desc)
     assert(res);
     return res;
 }
-
-MTL::Library* MetalRender::loadShaderLibrary(const char* relativePath)
-{
-    const std::string path = oka::resolveResourcePath(relativePath);
-    NS::Error* pError = nullptr;
-    MTL::Library* pLibrary = mDevice->newLibrary(NS::String::string(path.c_str(), NS::UTF8StringEncoding), &pError);
-    if (!pLibrary)
-    {
-        STRELKA_FATAL(
-            "Failed to load {}: {}", path, pError ? pError->localizedDescription()->utf8String() : "unknown error");
-    }
-    return pLibrary;
-}
-
 
 void MetalRender::uploadLightBuffer()
 {
