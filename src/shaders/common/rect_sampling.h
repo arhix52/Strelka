@@ -9,11 +9,9 @@
 // internal angles via asin rather than acos, because the solid angle of a small
 // rectangle is a tiny leftover from ~2pi and acos loses it to cancellation.
 //
-// This existed in three copies -- common/lights.h, metal/lights_metal.h and the
-// host's scene/rect_light_sampling.h -- and the only test in the tree,
-// tests/scene/test_rect_light_sampling.cpp, exercised the host copy: the one
-// that never runs on a GPU. The three are now one, so that test covers what
-// ships.
+// This existed in three copies -- common/lights.h, metal/lights_metal.h and a
+// host-only scene helper. The host test now includes this file directly, so it
+// covers what ships.
 //
 // Takes a corner and two edge vectors rather than a light struct, so the same
 // code serves a UniformLight on either device and a RectCorners on the host.

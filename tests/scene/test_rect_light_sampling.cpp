@@ -1,16 +1,151 @@
 #include <doctest/doctest.h>
 
-#include <strelka/scene/rect_light_sampling.h>
+#include <rect_sampling.h>
+#include <strelka/scene/glm_wrapper.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <random>
-#include <vector>
-
-using namespace oka::rect_light_sampling;
 
 namespace
 {
+
+struct RectCorners
+{
+    float3 p0{};
+    float3 p1{};
+    float3 p3{};
+};
+
+struct LightSample
+{
+    float3 pointOnLight{};
+    float3 L{};
+    float3 normal{};
+    float distToLight = 0.0f;
+    float area = 0.0f;
+    float pdf = 0.0f;
+};
+
+float length3(const float3& v)
+{
+    return std::sqrt(glm::dot(v, v));
+}
+
+RectCorners fromWidthHeight(const float3& center, float width, float height)
+{
+    const float halfWidth = 0.5f * width;
+    const float halfHeight = 0.5f * height;
+    return {
+        center + float3(-halfWidth, 0.0f, halfHeight),
+        center + float3(halfWidth, 0.0f, halfHeight),
+        center + float3(-halfWidth, 0.0f, -halfHeight),
+    };
+}
+
+float rectArea(const RectCorners& c)
+{
+    return length3(glm::cross(c.p1 - c.p0, c.p3 - c.p0));
+}
+
+float3 rectNormal(const RectCorners& c)
+{
+    return -glm::normalize(glm::cross(c.p1 - c.p0, c.p3 - c.p0));
+}
+
+float solidAngleGirard(const RectCorners& c, const float3& origin)
+{
+    const float3 v0 = glm::normalize(c.p0 - origin);
+    const float3 v1 = glm::normalize(c.p1 - origin);
+    const float3 v2 = glm::normalize(c.p1 + c.p3 - c.p0 - origin);
+    const float3 v3 = glm::normalize(c.p3 - origin);
+    const auto edgeNormal = [](const float3& a, const float3& b) { return glm::normalize(glm::cross(a, b)); };
+    const float3 n0 = edgeNormal(v0, v1);
+    const float3 n1 = edgeNormal(v1, v2);
+    const float3 n2 = edgeNormal(v2, v3);
+    const float3 n3 = edgeNormal(v3, v0);
+    const auto angle = [](const float3& a, const float3& b) {
+        return std::acos(std::clamp(-glm::dot(a, b), -1.0f, 1.0f));
+    };
+    return angle(n0, n1) + angle(n1, n2) + angle(n2, n3) + angle(n3, n0) - 2.0f * std::numbers::pi_v<float>;
+}
+
+SphQuad initSphQuad(const RectCorners& c, const float3& origin)
+{
+    return sphQuadInit(c.p0, c.p1 - c.p0, c.p3 - c.p0, origin);
+}
+
+float3 sampleSphQuad(const SphQuad& squad, float u, float v)
+{
+    return sphQuadSample(squad, u, v);
+}
+
+float areaToSolidAnglePdf(const float3& pointOnLight, const float3& hitPoint, const float3& lightNormal, float area)
+{
+    const float3 toLight = pointOnLight - hitPoint;
+    const float distance = length3(toLight);
+    if (distance < 1e-8f || area <= 0.0f)
+    {
+        return 0.0f;
+    }
+    const float3 direction = toLight / distance;
+    const float cosine = glm::dot(-direction, lightNormal);
+    return cosine > 0.0f ? distance * distance / (cosine * area) : 0.0f;
+}
+
+LightSample sampleRectUniform(const RectCorners& c, const float2& uv, const float3& hitPoint)
+{
+    LightSample sample;
+    sample.pointOnLight = c.p0 + (c.p1 - c.p0) * uv.x + (c.p3 - c.p0) * uv.y;
+    sample.area = rectArea(c);
+    sample.normal = rectNormal(c);
+    const float3 toLight = sample.pointOnLight - hitPoint;
+    sample.distToLight = length3(toLight);
+    sample.L = sample.distToLight > 1e-8f ? toLight / sample.distToLight : float3(0.0f);
+    sample.pdf = areaToSolidAnglePdf(sample.pointOnLight, hitPoint, sample.normal, sample.area);
+    return sample;
+}
+
+LightSample sampleRectSolidAngle(const RectCorners& c, const float2& uv, const float3& hitPoint)
+{
+    const SphQuad squad = initSphQuad(c, hitPoint);
+    if (squad.S <= 0.0f)
+    {
+        LightSample sample = sampleRectUniform(c, uv, hitPoint);
+        sample.pdf = 0.0f;
+        return sample;
+    }
+    if (squad.useAreaFallback)
+    {
+        return sampleRectUniform(c, uv, hitPoint);
+    }
+
+    LightSample sample;
+    sample.pointOnLight = sampleSphQuad(squad, uv.x, uv.y);
+    sample.area = rectArea(c);
+    sample.normal = rectNormal(c);
+    const float3 toLight = sample.pointOnLight - hitPoint;
+    sample.distToLight = length3(toLight);
+    sample.L = sample.distToLight > 1e-8f ? toLight / sample.distToLight : float3(0.0f);
+    sample.pdf = 1.0f / squad.S;
+    return sample;
+}
+
+float rectLightPdf(const RectCorners& c, const float3& lightHitPoint, const float3& surfaceHitPoint, bool solidAngle)
+{
+    if (!solidAngle)
+    {
+        return areaToSolidAnglePdf(lightHitPoint, surfaceHitPoint, rectNormal(c), rectArea(c));
+    }
+    const SphQuad squad = initSphQuad(c, surfaceHitPoint);
+    if (squad.S <= 0.0f)
+    {
+        return 0.0f;
+    }
+    return squad.useAreaFallback ? areaToSolidAnglePdf(lightHitPoint, surfaceHitPoint, rectNormal(c), rectArea(c)) :
+                                   1.0f / squad.S;
+}
 
 // Ceiling light above the origin, facing down (normal -Y).
 RectCorners ceilingLight(float width = 2.0f, float height = 1.0f, float y = 2.0f)
