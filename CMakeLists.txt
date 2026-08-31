@@ -17,6 +17,9 @@ endif()
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
 include(${CMAKE_SOURCE_DIR}/cmake/CompilerWarnings.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/StaticAnalyzers.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/GitVersion.cmake)
+configure_file(${CMAKE_SOURCE_DIR}/cmake/strelka_version.h.in
+              ${CMAKE_BINARY_DIR}/generated/strelka_version.h @ONLY)
 
 # GLM 1.0.3's Conan recipe exports glm::glm only for the compiled library.
 # Header-only builds (required: see conanfile.py glm/*:header_only) expose

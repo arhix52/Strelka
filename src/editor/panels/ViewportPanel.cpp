@@ -374,6 +374,14 @@ void EditorApp::drawViewportPanel()
         {
             ImGui::TextDisabled("Click an object to select");
         }
+
+        // Render stats: used to live in the OS window title, which updated at a
+        // rate no title bar is meant for. This is the HUD they belong in.
+        const std::string stats = fmt::format(
+            "{:.1f} ms · {} spp", m_render->getLastRenderTimeMs(), m_sharedCtx->mSubframeIndex);
+        const ImVec2 statsSize = ImGui::CalcTextSize(stats.c_str());
+        ImGui::SetCursorScreenPos(ImVec2(panelMin.x + 8.0f, panelMax.y - statsSize.y - 8.0f));
+        ImGui::TextDisabled("%s", stats.c_str());
     }
 
     if (mIsHoveredViewport && !thisFrameHovered)

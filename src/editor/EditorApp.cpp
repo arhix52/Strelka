@@ -7,6 +7,7 @@
 #include "editor_document.h"
 #include "editor_screenshot.h"
 #include "camera_dump.h"
+#include "strelka_version.h"
 
 #include "imgui_impl_glfw.h"
 #include "imgui_internal.h" // DockBuilder / window settings lookup
@@ -150,6 +151,38 @@ void EditorApp::drawAlertModal()
         {
             m_alertOpen = false;
             m_alertOffersRendererRestart = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void EditorApp::drawAboutModal()
+{
+    if (m_aboutOpen)
+    {
+        ImGui::OpenPopup("About Strelka");
+        m_aboutOpen = false;
+    }
+    if (ImGui::BeginPopupModal("About Strelka", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::Text("Strelka");
+        ImGui::TextDisabled("GPU path tracer for macOS (Metal)");
+        ImGui::Spacing();
+        ImGui::Text("Version %s", STRELKA_VERSION);
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        // Everything a bug report needs, one click from the menu that opened
+        // this rather than the user retyping a version string by hand.
+        if (ImGui::Button("Copy Version Info", ImVec2(160, 0)))
+        {
+            const std::string info = fmt::format("Strelka {} (macOS)", STRELKA_VERSION);
+            ImGui::SetClipboardText(info.c_str());
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close", ImVec2(120, 0)))
+        {
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -4160,14 +4193,12 @@ void EditorApp::run()
             m_render->triggerRenderIfIdle();
         }
 
-        // Window titles go through AppKit; refreshing at vsync is pure overhead
-        // and the numbers are unreadable at 60+ Hz anyway.
-        if (std::chrono::duration<double>(currentTime - m_lastTitleUpdate).count() > 0.25)
+        // Window titles go through AppKit; only the dirty flag and scene path can
+        // change it now, so once a second is more than enough.
+        if (std::chrono::duration<double>(currentTime - m_lastTitleUpdate).count() > 1.0)
         {
             m_lastTitleUpdate = currentTime;
-            const std::string title = editor_document::formatWindowTitle(
-                m_documentDirty, m_sceneFile, static_cast<float>(m_render->getLastRenderTimeMs()),
-                m_sharedCtx->mSubframeIndex);
+            const std::string title = editor_document::formatWindowTitle(m_documentDirty, m_sceneFile);
             m_display->setWindowTitle(title.c_str());
         }
     }
@@ -4866,6 +4897,14 @@ void EditorApp::drawUI()
         }
         ImGui::EndMenu();
     }
+    if (ImGui::BeginMenu("Help"))
+    {
+        if (ImGui::MenuItem("About Strelka"))
+        {
+            m_aboutOpen = true;
+        }
+        ImGui::EndMenu();
+    }
     ImGui::EndMainMenuBar();
 
     // --- File dialog handling ---
@@ -4906,6 +4945,7 @@ void EditorApp::drawUI()
 
     drawLoadingOverlay();
     drawAlertModal();
+    drawAboutModal();
     drawFrameBudgetModal();
 
     // --- Panel draw calls (implementations in panels/*.cpp) ---

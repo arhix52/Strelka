@@ -1,0 +1,3 @@
+#pragma once
+
+#define STRELKA_VERSION "@STRELKA_VERSION@"

@@ -99,6 +99,7 @@ private:
     std::string m_alertMessage;
     bool m_alertOpen = false;
     bool m_alertOffersRendererRestart = false;
+    bool m_aboutOpen = false;
     bool m_rendererRestartRequested = false;
     bool m_frameBudgetConfirmOpen = false;
     uint32_t m_pendingPreviewWidth = 0;
@@ -198,6 +199,7 @@ private:
     void drawLoadingOverlay();
     void showAlert(const std::string& message);
     void drawAlertModal();
+    void drawAboutModal();
     void drawFrameBudgetModal();
     void ensureValidCameraSelection();
     void handleDeviceError();

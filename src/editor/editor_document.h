@@ -13,8 +13,10 @@
 namespace oka::editor_document
 {
 
-/// Window title: "Strelka [*] basename — render ms / spp"
-inline std::string formatWindowTitle(bool dirty, const std::string& scenePath, float renderMs, uint32_t spp)
+/// Window title: "Strelka [*] basename". Render stats (ms/spp) live in the
+/// viewport's own status line instead -- an OS title bar is not a HUD, and it
+/// only ever shows the scene a user actually cares about identifying.
+inline std::string formatWindowTitle(bool dirty, const std::string& scenePath)
 {
     std::string doc;
     if (scenePath.empty())
@@ -29,7 +31,7 @@ inline std::string formatWindowTitle(bool dirty, const std::string& scenePath, f
             doc = scenePath;
         }
     }
-    return fmt::format("Strelka {}{} — [{:.1f} ms] [{} spp]", dirty ? "* " : "", doc, renderMs, spp);
+    return fmt::format("Strelka {}{}", dirty ? "* " : "", doc);
 }
 
 /// After a failed/cancelled open, keep the previous document path (may be empty).

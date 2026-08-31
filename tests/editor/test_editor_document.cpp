@@ -9,12 +9,10 @@ using namespace oka::editor_document;
 
 TEST_CASE("formatWindowTitle marks dirty and empty documents")
 {
-    CHECK(formatWindowTitle(false, "", 1.5f, 10) == "Strelka (empty) — [1.5 ms] [10 spp]");
-    CHECK(formatWindowTitle(true, "", 2.0f, 1) == "Strelka * (empty) — [2.0 ms] [1 spp]");
-    CHECK(formatWindowTitle(true, "/tmp/scenes/cornell_box.glb", 0.5f, 64) ==
-          "Strelka * cornell_box.glb — [0.5 ms] [64 spp]");
-    CHECK(formatWindowTitle(false, "/tmp/scenes/cornell_box.glb", 12.34f, 0) ==
-          "Strelka cornell_box.glb — [12.3 ms] [0 spp]");
+    CHECK(formatWindowTitle(false, "") == "Strelka (empty)");
+    CHECK(formatWindowTitle(true, "") == "Strelka * (empty)");
+    CHECK(formatWindowTitle(true, "/tmp/scenes/cornell_box.glb") == "Strelka * cornell_box.glb");
+    CHECK(formatWindowTitle(false, "/tmp/scenes/cornell_box.glb") == "Strelka cornell_box.glb");
 }
 
 TEST_CASE("restorePathAfterFailedLoad keeps the previous document path")

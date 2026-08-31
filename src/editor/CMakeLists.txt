@@ -64,6 +64,7 @@ target_include_directories(StrelkaEditor
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${ROOT_HOME}/third_party/imgui_file_dialog
+        ${CMAKE_BINARY_DIR}/generated
 )
 
 # strelka_display already PUBLIC-links strelka_render, strelka_foundation and
