@@ -265,15 +265,16 @@ DEVICE_FUNC float ggx_vndf_pdf_half(float alpha, float NdotH, float NdotV, float
 // half of a sphere fell to 0.36 of the reference, because what lights it is
 // scattering close to the entry and nothing was landing there.
 //
-// The index is 1.4 and is not a parameter: STRELKA_materials_subsurface does not
-// carry one, Cycles takes it from Principled's IOR where 1.4 is the skin default,
-// and that is the value the ladder is graded against. Give it an argument when a
+// Neither the index nor the interface roughness is a parameter: the extension
+// carries no index, 1.4 is Cycles' skin default and the value the ladder is
+// graded against, and the roughness is measured to be 1 rather than the
+// material's -- see the note at the sample below. Give either an argument when a
 // scene needs to author it.
 //
 // `wo` points away from the surface toward where the light came from, and `n` is
 // the shading normal on that side. Entering from the outside cannot reach total
 // internal reflection, since eta < 1 leaves the radicand above 1 - eta^2.
-DEVICE_FUNC float3 subsurface_entry_direction(float3 wo, float3 n, float roughness, float u1, float u2)
+DEVICE_FUNC float3 subsurface_entry_direction(float3 wo, float3 n, float u1, float u2)
 {
     const float eta = 1.0f / 1.4f;
 
@@ -290,8 +291,16 @@ DEVICE_FUNC float3 subsurface_entry_direction(float3 wo, float3 n, float roughne
         return make_float3(0.0f);
     }
 
-    const float alpha = fmaxf(alpha_from_roughness(roughness), 1e-4f);
-    const float3 h = local_to_world(ggx_vndf_sample(woLocal, alpha, u1, u2), T, B, n);
+    // Fully rough, and not the surface's roughness. Feeding the material's
+    // roughness here -- squared or linear, both were tried -- collapses a smooth
+    // material: 32_subsurface_roughness reads 0.61, 0.53, 0.58, 0.56, 0.82 across
+    // a ramp from 0 to 0.8, because a narrow entry sends every path straight
+    // through the body instead of letting it turn round near the surface. At a
+    // constant 1 the same ramp reads 1.09, 1.09, 1.16, 1.07, 1.03, and the four
+    // rows that author roughness 1 do not move at all, since for them this always
+    // was 1. Cycles sets bssrdf->alpha to 1 outright for its skin walk and
+    // measures as though it does for the other.
+    const float3 h = local_to_world(ggx_vndf_sample(woLocal, 1.0f, u1, u2), T, B, n);
 
     const float cosHI = fmaxf(dot(h, wo), 0.0f);
     const float k = 1.0f - eta * eta * (1.0f - cosHI * cosHI);

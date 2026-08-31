@@ -3109,7 +3109,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                        (dot(float3(si.shading_normal), float3(si.wo)) > 0.0f) ?
                                            float3(si.shading_normal) :
                                            -float3(si.shading_normal),
-                                       si.roughness,
                                        random<SampleDimension::eSssChannel>(rng, uniforms.samplerType),
                                        random<SampleDimension::eSssDistance>(rng, uniforms.samplerType)) :
             normalize(sampleResult.wi);

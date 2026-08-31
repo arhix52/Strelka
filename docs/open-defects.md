@@ -931,13 +931,52 @@ near zero, so almost nothing scatters and every path is a near-straight crossing
 -- it is +17% at the centre and -12% at the rim. On the row that looks like skin
 it is 2%, and on `25` it is 1%.
 
-The remaining candidate is Dwivedi guiding, which Cycles has and this walk does
-not. It was set aside as variance reduction that cannot move a mean, and that
-holds only if its three-way MIS is exact; nothing here has tested whether Cycles'
-is. That is the next thing to read, and it is worth doing on a row at low
-roughness, which would also separate `alpha = roughness` from `alpha = roughness^2`
-as the entry convention -- the ladder has no such row, because every builder
-authors `roughness = 1.0`.
+### The entry interface is fully rough, and not the material's roughness
+
+`32_subsurface_roughness` is the row the ladder was missing: the same absorbing
+body across a roughness ramp of 0, 0.1, 0.2, 0.4, 0.8. Every other row authors
+1.0, where `alpha = roughness` and `alpha = roughness^2` are the same number and
+neither convention can be told from the other -- nor either from a constant.
+
+Feeding the material's roughness to the entry, which is what the first port did,
+collapses a smooth material:
+
+| entry alpha | r=0 | 0.1 | 0.2 | 0.4 | 0.8 |
+|---|---|---|---|---|---|
+| `roughness^2` | 0.605 | 0.526 | 0.581 | 0.563 | 0.816 |
+| `roughness` | 0.606 | 0.552 | 0.647 | 0.708 | 0.901 |
+| **1.0** | **1.094** | **1.087** | **1.164** | **1.068** | **1.031** |
+
+A narrow entry sends every path straight through the body instead of letting it
+turn round near the surface, and the narrower it is the darker the material --
+half the reference at the smooth end. Neither convention is the answer: the
+interface is fully rough whatever the surface is. Cycles sets `bssrdf->alpha = 1`
+outright for its skin walk and measures as though it does for the other.
+
+The four rows that author roughness 1 do not move at all, because for them this
+was always 1. `32` goes from a 40-47% deficit to 0.0638 / 1.019.
+
+### Where entry 16's residual stands
+
+Everything structural is eliminated by measurement: the colour mapping, the
+extinction, the channel choice, the free flight, both weights, the entry
+direction, the entry interface roughness, the entry weight, the exit lobe,
+next-event estimation, and the geometry the walk may reach.
+
+| row | rel / ratio |
+|---|---|
+| `25_subsurface` | 0.0398 / 0.998 |
+| `29_subsurface_skin` | 0.0423 / 0.994 |
+| `30_subsurface_translucent` | 0.0501 / 1.002 |
+| `31_subsurface_absorbing` | 0.0649 / 1.000 |
+| `32_subsurface_roughness` | 0.0638 / 1.019 |
+
+What is left is the angular redistribution across the disc, which only the
+synthetic rows can see -- `31` reads 1.174 at the centre and 0.883 at the rim
+while the row that looks like skin is within 2% everywhere. The candidate is
+Dwivedi guiding, which Cycles has and this walk does not: it was set aside as
+variance reduction that cannot move a mean, and that holds only if its three-way
+MIS is exact. Nothing here has tested whether Cycles' is.
 
 
 ### The diffuse lobe was summed with the specular one instead of layered under it

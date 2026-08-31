@@ -63,18 +63,22 @@ import build_features  # noqa: E402  (path set above)
 # it -- with the scale pinned at 1 everywhere else the omission was invisible, and
 # here it would have been a factor of 200 between the two sides, read as a
 # shading error.
-# (name, subsurface_radius, subsurface_scale, base_colour). The colour is what
-# separates the last row from the third: at an albedo near zero almost nothing
-# scatters, so what crosses the body is Beer-Lambert and nothing else, and the
-# entry and exit lobes are the only things left that can disagree.
+# (name, subsurface_radius, subsurface_scale, base_colour, roughness). The colour
+# separates 31 from 30: at an albedo near zero almost nothing scatters, so what
+# crosses the body is Beer-Lambert and nothing else. The roughness separates 32
+# from 31: it is the interface roughness the entry refraction is sampled against,
+# and every other row in the ladder authors 1.0, where alpha = roughness and
+# alpha = roughness^2 are the same number and neither convention can be told from
+# the other.
 ROWS = [
-    ("29_subsurface_skin", (1.0, 0.2, 0.1), 0.005, None),
-    ("30_subsurface_translucent", (0.40, 0.25, 0.15), 1.0, None),
-    ("31_subsurface_absorbing", (0.8, 0.8, 0.8), 1.0, 0.05),
+    ("29_subsurface_skin", (1.0, 0.2, 0.1), 0.005, None, None),
+    ("30_subsurface_translucent", (0.40, 0.25, 0.15), 1.0, None, None),
+    ("31_subsurface_absorbing", (0.8, 0.8, 0.8), 1.0, 0.05, None),
+    ("32_subsurface_roughness", (0.8, 0.8, 0.8), 1.0, 0.05, [0.0, 0.1, 0.2, 0.4, 0.8]),
 ]
 
 if __name__ == "__main__":
-    def builder_for(base):
+    def builder_for(base, roughness):
         if base is None:
             return build_features.s25_subsurface
 
@@ -83,18 +87,19 @@ if __name__ == "__main__":
             for i, pos in enumerate(build_features.row_positions(5)):
                 obj = build_features.sphere("A%d" % i, pos, radius=0.48)
                 obj.data.materials.append(build_features.new_material(
-                    "sss%d" % i, base_color=(base, base, base, 1.0), roughness=1.0,
+                    "sss%d" % i, base_color=(base, base, base, 1.0),
+                    roughness=1.0 if roughness is None else roughness[i],
                     metallic=0.0, specular=0.0, subsurface=1.0,
                     subsurface_radius=build_features.SSS_RADIUS,
                     subsurface_scale=build_features.SSS_SCALE, subsurface_anisotropy=0.0))
 
         return build
 
-    for name, _, _, base in ROWS:
-        build_features.SCENES.append((name, builder_for(base), True))
+    for name, _, _, base, roughness in ROWS:
+        build_features.SCENES.append((name, builder_for(base, roughness), True))
         build_features.GLTF_PATCHERS[name] = build_features.patch_subsurface
 
-    for name, radius, scale, _ in ROWS:
+    for name, radius, scale, _, _ in ROWS:
         # The builder and the patcher read these at call time, so one main() per
         # row with the constants set immediately before is what keeps them apart.
         build_features.SSS_RADIUS = radius

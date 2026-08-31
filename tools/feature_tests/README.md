@@ -105,7 +105,8 @@ fixing, but it is not a shading bug.
 | `28_hair` | close-up round linear Chiang groom (`STRELKA_materials_hair`) | 0.033 / 1.012 |
 | `29_subsurface_skin` | `25_subsurface` at Blender's skin preset (opt-in) | 0.042 / 0.994 |
 | `30_subsurface_translucent` | `25_subsurface` at body-scale mean free path (opt-in) | 0.050 / 1.003 |
-| `31_subsurface_absorbing` | near-zero albedo at the same mean free path (opt-in) | 0.065 / 1.001 |
+| `31_subsurface_absorbing` | near-zero albedo at the same mean free path (opt-in) | 0.065 / 1.000 |
+| `32_subsurface_roughness` | subsurface entry across a roughness ramp (opt-in) | 0.064 / 1.019 |
 
 Rows `00`-`13`, `25`, `29` and `30` were re-measured on 2026-08-24, after two
 fixes in the Closed section of `docs/open-defects.md`: the acceleration-structure
@@ -301,6 +302,12 @@ references of the same five spheres.
   the shadowed half 3.30. That was the walk being entered on a cosine hemisphere
   where Cycles refracts through the interface; both are at ~1.00 now, and the row
   stays as the instrument that separates the two halves.
+- **`32_subsurface_roughness`** -- the same body across a roughness ramp of 0 to
+  0.8. Every other row authors 1.0, where the two candidate conventions for the
+  entry interface -- `alpha = roughness` and `alpha = roughness^2` -- are the same
+  number, so nothing could tell them apart, or either from a constant. It turns
+  out to be neither: the interface is fully rough whatever the surface is, and
+  feeding it the material's roughness halves a smooth material.
 
 This row is also the one that caught the subsurface exit shading with the flat
 geometric normal, which drew the UV sphere's 32 latitude rings straight into the
