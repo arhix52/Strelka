@@ -69,6 +69,7 @@ struct IorStack
     IorStackEntry entries[IOR_STACK_SIZE]; // 32 bytes
     int top;                               //  4 bytes (-1 = empty = air)
 };
+static_assert(sizeof(IorStack) == 36, "IorStack is a tightly packed per-path GPU side table");
 
 // ---------------------------------------------------------------------------
 // ior_stack_init -- Reset the stack to empty (air)

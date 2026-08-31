@@ -117,7 +117,7 @@ static inline float3 unpackMediumAlbedo(uint32_t v)
 // returned or took the other branch, so they are inactive and the simdgroup
 // reductions below see only the lanes being queued. One atomic per simdgroup
 // instead of one per lane.
-static inline void queuePush(device atomic_uint* counter, device uint32_t* queueOut, uint32_t pathIndex)
+static inline void queuePush(device atomic_uint* counter, device uint32_t* queueOut, uint32_t pathIndex, uint32_t capacity)
 {
     const uint32_t rank = simd_prefix_exclusive_sum(1u);
     const uint32_t total = simd_sum(1u);
@@ -127,7 +127,10 @@ static inline void queuePush(device atomic_uint* counter, device uint32_t* queue
         base = atomic_fetch_add_explicit(counter, total, memory_order_relaxed);
     }
     base = simd_broadcast_first(base);
-    queueOut[base + rank] = pathIndex;
+    if (base < capacity && rank < capacity - base)
+    {
+        queueOut[base + rank] = pathIndex;
+    }
 }
 
 
@@ -917,13 +920,13 @@ static void extendImpl(uint gid,
         mediumRec.barycentrics = vector_float2(0.0f, 0.0f);
         mediumRec.distance = mediumScatterT;
         hits[tid] = mediumRec;
-        queuePush(hitCounter, hitQueue, tid);
+        queuePush(hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
 
     if (hit.type == intersection_type::none)
     {
-        queuePush(missCounter, missQueue, tid);
+        queuePush(missCounter, missQueue, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
 
@@ -943,7 +946,7 @@ static void extendImpl(uint gid,
         (hit.type == intersection_type::curve) ? vector_float2(hit.curveParameter, 0.0f) : hit.barycentrics;
     rec.distance = hit.distance;
     hits[tid] = rec;
-    queuePush(hitCounter, hitQueue, tid);
+    queuePush(hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
 }
 
 
@@ -1819,7 +1822,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             return;
         }
         paths[tid] = p;
-        queuePush(outCounter, queueOut, tid);
+        queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
 
@@ -1976,7 +1979,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
         paths[tid] = p;
         mediumPaths[tid] = mediumState;
-        queuePush(outCounter, queueOut, tid);
+        queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
 
@@ -2203,7 +2206,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
         paths[tid] = p;
         mediumPaths[tid] = mediumState;
-        queuePush(outCounter, queueOut, tid);
+        queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
 
@@ -2363,7 +2366,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
         paths[tid] = p;
         mediumPaths[tid] = mediumState;
-        queuePush(outCounter, queueOut, tid);
+        queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
 
@@ -2497,7 +2500,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 p.throughput = packed_float3(float3(1.0f));
             }
             paths[tid] = p;
-            queuePush(outCounter, queueOut, tid);
+            queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
             return;
         }
     }
@@ -3203,7 +3206,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                       packSharcRoughness(sharcRoughness);
     paths[tid] = p;
 
-    queuePush(outCounter, queueOut, tid);
+    queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
 }
 
 // ---------------------------------------------------------------------------
@@ -3326,13 +3329,13 @@ kernel void wavefrontPrepareHitMiss(device uint32_t& controlRef [[buffer(0)]],
                                     constant uint32_t& threadsPerGroup [[buffer(1)]])
 {
     device uint32_t* control = &controlRef;
-    const uint32_t h = control[WF_CTRL_HIT];
+    const uint32_t h = min(control[WF_CTRL_HIT], control[WF_CTRL_CAPACITY]);
     control[WF_CTRL_HIT_N] = h;
     control[WF_CTRL_HIT_DIS + 0] = (h + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_HIT_DIS + 1] = 1u;
     control[WF_CTRL_HIT_DIS + 2] = 1u;
 
-    const uint32_t m = control[WF_CTRL_MISS];
+    const uint32_t m = min(control[WF_CTRL_MISS], control[WF_CTRL_CAPACITY]);
     control[WF_CTRL_MISS_N] = m;
     control[WF_CTRL_MISS_DIS + 0] = (m + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_MISS_DIS + 1] = 1u;
@@ -3350,7 +3353,7 @@ kernel void wavefrontPrepareShadow(device uint32_t& controlRef [[buffer(0)]],
                                    constant uint32_t& traversalBatchCount [[buffer(5)]])
 {
     device uint32_t* control = &controlRef;
-    const uint32_t n = control[WF_CTRL_SHADOW];
+    const uint32_t n = min(control[WF_CTRL_SHADOW], control[WF_CTRL_CAPACITY]);
     control[WF_CTRL_SHADOW_N] = n;
     control[WF_CTRL_STATS_SHADOW + min(bounceIdx, 31u)] = n;
     control[WF_CTRL_SHADOW_DIS + 0] = (n + threadsPerGroup - 1u) / threadsPerGroup;

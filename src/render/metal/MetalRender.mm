@@ -778,6 +778,14 @@ MTL::Device* acquireMetalDevice()
 
 void MetalRender::init()
 {
+    static_assert(offsetof(::Vertex, tangent) == 12);
+    static_assert(offsetof(::Vertex, normal) == 16);
+    static_assert(offsetof(::Vertex, uv) == 20);
+    static_assert(offsetof(::Vertex, uv1) == 24);
+    static_assert(offsetof(::Vertex, color) == 28);
+    static_assert(offsetof(Uniforms, openpbrParams) == 792);
+    static_assert(offsetof(Uniforms, openpbrTextures) == 800);
+    static_assert(offsetof(Material, baseColorTexture) == 256);
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     // The hot record is what every live path streams on every bounce. Medium
     // bookkeeping lives in an exact, eight-byte side record so surface-only

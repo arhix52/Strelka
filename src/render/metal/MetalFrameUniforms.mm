@@ -111,6 +111,8 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     MTL::Buffer* pUniformTMBuffer = mUniformTMBuffers[in.frameSlot % kFrameUniformSlots];
     auto* pUniformData = static_cast<Uniforms*>(pUniformBuffer->contents());
     auto* pUniformTonemap = static_cast<UniformsTonemap*>(pUniformTMBuffer->contents());
+    std::memset(pUniformData, 0, sizeof(*pUniformData));
+    std::memset(pUniformTonemap, 0, sizeof(*pUniformTonemap));
     pUniformData->frameIndex = in.frameSlot;
     pUniformData->subframeIndex = in.subframeIndex;
     pUniformData->height = height;
@@ -264,14 +266,12 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
             mSharcCapacity = 0;
             if (capacity)
             {
-                constexpr size_t kHashStride = 4;
-                constexpr size_t kAccumulationStride = 32;
-                constexpr size_t kResolvedStride = 32;
-                mSharcHashBuffer = mDevice->newBuffer((size_t)capacity * kHashStride, MTL::ResourceStorageModePrivate);
-                mSharcAccumulationBuffer =
-                    mDevice->newBuffer((size_t)capacity * kAccumulationStride, MTL::ResourceStorageModePrivate);
+                mSharcHashBuffer =
+                    mDevice->newBuffer((size_t)capacity * SHARC_HASH_ENTRY_STRIDE, MTL::ResourceStorageModePrivate);
+                mSharcAccumulationBuffer = mDevice->newBuffer(
+                    (size_t)capacity * SHARC_ACCUMULATION_ENTRY_STRIDE, MTL::ResourceStorageModePrivate);
                 mSharcResolvedBuffer =
-                    mDevice->newBuffer((size_t)capacity * kResolvedStride, MTL::ResourceStorageModePrivate);
+                    mDevice->newBuffer((size_t)capacity * SHARC_RESOLVED_ENTRY_STRIDE, MTL::ResourceStorageModePrivate);
                 if (mSharcHashBuffer && mSharcAccumulationBuffer && mSharcResolvedBuffer)
                 {
                     mSharcCapacity = capacity;
@@ -279,8 +279,13 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
                     STRELKA_INFO(
                         "SHARC 1.8.3 Metal: {} entries ({:.1f} MB: hash {:.1f}, "
                         "accumulation {:.1f}, resolved {:.1f})",
-                        capacity, capacity * 68.0 / 1e6, capacity * 4.0 / 1e6, capacity * 32.0 / 1e6,
-                        capacity * 32.0 / 1e6);
+                        capacity,
+                        static_cast<double>(capacity) *
+                            (SHARC_HASH_ENTRY_STRIDE + SHARC_ACCUMULATION_ENTRY_STRIDE + SHARC_RESOLVED_ENTRY_STRIDE) /
+                            1e6,
+                        static_cast<double>(capacity) * SHARC_HASH_ENTRY_STRIDE / 1e6,
+                        static_cast<double>(capacity) * SHARC_ACCUMULATION_ENTRY_STRIDE / 1e6,
+                        static_cast<double>(capacity) * SHARC_RESOLVED_ENTRY_STRIDE / 1e6);
                 }
                 else
                 {

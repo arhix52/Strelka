@@ -57,18 +57,9 @@ struct SharcResolvedEntry
     uint32_t staleFrames;
     uint32_t fadeMask;
 };
-
-struct SharcStats
-{
-    atomic_uint insertions;
-    atomic_uint insertionFailures;
-    atomic_uint queryAttempts;
-    atomic_uint queryHits;
-    atomic_uint evictions;
-    atomic_uint collisions;
-    atomic_uint segmentRejects;
-    atomic_uint footprintRejects;
-};
+static_assert(sizeof(SharcHashEntry) == SHARC_HASH_ENTRY_STRIDE, "SHARC hash stride changed");
+static_assert(sizeof(SharcAccumulationEntry) == SHARC_ACCUMULATION_ENTRY_STRIDE, "SHARC accumulation stride changed");
+static_assert(sizeof(SharcResolvedEntry) == SHARC_RESOLVED_ENTRY_STRIDE, "SHARC resolved stride changed");
 
 struct SharcAddress
 {

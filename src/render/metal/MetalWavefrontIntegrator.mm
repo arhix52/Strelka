@@ -689,6 +689,10 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(mIorStatsBuffer, 0, 28);
             bind(sharcUpdate ? mSharcUpdateStateBuffer : scene.sharcResolvedBuffer, 0, 29);
             bind(mMediumPathStateBuffer, 0, 30);
+            if (scene.environment && scene.environment->state().mapTexture)
+            {
+                table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
+            }
             enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
             barrier();
 
@@ -923,6 +927,10 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         if (scene.environment && scene.environment->state().mapTexture)
         {
             e->useResource(scene.environment->state().mapTexture, MTL::ResourceUsageRead);
+            if (scene.environment->state().backgroundTexture)
+            {
+                e->useResource(scene.environment->state().backgroundTexture, MTL::ResourceUsageRead);
+            }
         }
         e->useResource(((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageWrite);
     };
@@ -1130,11 +1138,8 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             // nothing else: the position, the tangent and the radius all come
             // back out of these three buffers, the same way a triangle hit is
             // refetched from the vertex buffer.
-            if (scene.curvePointBuffer)
-            {
-                enc->setBuffer(scene.curvePointBuffer, 0, 26);
-                enc->setBuffer(scene.curveSegmentBuffer, 0, 27);
-            }
+            enc->setBuffer(scene.curvePointBuffer ? scene.curvePointBuffer : scene.placeholderBuffer, 0, 26);
+            enc->setBuffer(scene.curveSegmentBuffer ? scene.curveSegmentBuffer : scene.placeholderBuffer, 0, 27);
             enc->setBuffer(mIorStatsBuffer, 0, 28);
             enc->setBuffer(sharcUpdate ? mSharcUpdateStateBuffer : scene.sharcResolvedBuffer, 0, 29);
             enc->setBuffer(mMediumPathStateBuffer, 0, 30);

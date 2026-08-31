@@ -67,7 +67,7 @@ kernel void skinningKernel(
     float3 skinnedTangent = normalize(normalMat * restTangent);
 
     // Write to vertex buffer: stride = 32 bytes per vertex (matching Scene::Vertex)
-    // Layout: pos(float3=12) + tangent(uint32=4) + normal(uint32=4) + uv(uint32=4) + pad(8)
+    // Layout: pos(float3=12) + tangent(uint32=4) + normal(uint32=4) + uv/uv1/color(uint32=4 each)
     uint vertexAddr = (params.vbOffset + tid) * 32;
 
     // Write position (12 bytes at offset 0)
@@ -83,50 +83,4 @@ kernel void skinningKernel(
     // Write packed normal (4 bytes at offset 16)
     device uint32_t* normPtr = (device uint32_t*)(vertexBuffer + vertexAddr + 16);
     *normPtr = packNormal(skinnedNormal);
-}
-
-kernel void updateTriangleBufferKernel(
-    device Triangle*          triangleBuffer  [[buffer(0)]],
-    const device char*        vertexBuffer    [[buffer(1)]],
-    const device uint32_t*    indexBuffer     [[buffer(2)]],
-    constant TriangleUpdateParams& params     [[buffer(3)]],
-    uint tid [[thread_position_in_grid]])
-{
-    if (tid >= params.triangleCount)
-        return;
-
-    uint32_t i0 = indexBuffer[params.indexOffset + tid * 3 + 0];
-    uint32_t i1 = indexBuffer[params.indexOffset + tid * 3 + 1];
-    uint32_t i2 = indexBuffer[params.indexOffset + tid * 3 + 2];
-
-    // Read skinned vertices (stride 32 bytes)
-    uint addr0 = (params.vbOffset + i0) * 32;
-    uint addr1 = (params.vbOffset + i1) * 32;
-    uint addr2 = (params.vbOffset + i2) * 32;
-
-    // packed: the position occupies bytes 0..11 of a 32-byte vertex, reading it
-    // as float3 would also pull in the tangent that follows.
-    const device packed_float3* p0 = (const device packed_float3*)(vertexBuffer + addr0);
-    const device packed_float3* p1 = (const device packed_float3*)(vertexBuffer + addr1);
-    const device packed_float3* p2 = (const device packed_float3*)(vertexBuffer + addr2);
-
-    const device uint32_t* t0 = (const device uint32_t*)(vertexBuffer + addr0 + 12);
-    const device uint32_t* t1 = (const device uint32_t*)(vertexBuffer + addr1 + 12);
-    const device uint32_t* t2 = (const device uint32_t*)(vertexBuffer + addr2 + 12);
-
-    const device uint32_t* n0 = (const device uint32_t*)(vertexBuffer + addr0 + 16);
-    const device uint32_t* n1 = (const device uint32_t*)(vertexBuffer + addr1 + 16);
-    const device uint32_t* n2 = (const device uint32_t*)(vertexBuffer + addr2 + 16);
-
-    device Triangle& tri = triangleBuffer[tid];
-    tri.positions[0] = *p0;
-    tri.positions[1] = *p1;
-    tri.positions[2] = *p2;
-    tri.normals[0] = *n0;
-    tri.normals[1] = *n1;
-    tri.normals[2] = *n2;
-    tri.tangent[0] = *t0;
-    tri.tangent[1] = *t1;
-    tri.tangent[2] = *t2;
-    // uv unchanged by skinning
 }

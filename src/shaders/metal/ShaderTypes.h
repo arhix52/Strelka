@@ -67,6 +67,7 @@ struct OpenPBRTextures
     MTL::ResourceID tex[MAX_OPENPBR_TEXTURES];
 #endif
 };
+static_assert(sizeof(OpenPBRTextures) == MAX_OPENPBR_TEXTURES * 8, "OpenPBR texture handles must stay eight bytes");
 
 enum class DebugMode : uint32_t
 {
@@ -110,14 +111,15 @@ enum class DebugMode : uint32_t
 
 struct Vertex
 {
-    vector_float3 pos;
+    packed_float3 pos;
     uint32_t tangent;
 
     uint32_t normal;
     uint32_t uv;
-    float pad0;
-    float pad1;
+    uint32_t uv1;
+    uint32_t color;
 };
+static_assert(sizeof(Vertex) == 32, "Vertex must match Scene::Vertex");
 
 struct Uniforms
 {
@@ -333,6 +335,7 @@ struct Uniforms
     uint64_t openpbrTextures;
 #endif
 };
+static_assert(sizeof(Uniforms) == 816, "Uniforms host/Metal ABI changed");
 
 
 // How the depth guide is encoded.
@@ -398,20 +401,6 @@ struct UniformsTonemap
     float gamma; // 0 - off
     float maxEDR;
     vector_float3 exposureValue;
-};
-
-// Per-primitive attributes stored inside the acceleration structure.
-//
-// positions must be packed: a 16-byte-aligned float3 would pad the array to 48
-// bytes and the struct to 96, where the packed form needs 36 and 72. On a
-// skinned mesh this buffer is also rewritten by the skinning pass every frame,
-// so the padding cost both memory and bandwidth for nothing.
-struct Triangle
-{
-    packed_float3 positions[3];
-    uint32_t normals[3];
-    uint32_t tangent[3];
-    uint32_t uv[3];
 };
 
 // Per-geometry data, indexed by (instance userID + intersection.geometry_id).
@@ -565,6 +554,9 @@ struct SharcUpdateState
 #define SHARC_STAT_MAX_RADIANCE_FIXED 10u
 #define SHARC_STAT_MAX_SAMPLE_COUNT 11u
 #define SHARC_STAT_COUNT 12u
+#define SHARC_HASH_ENTRY_STRIDE 4u
+#define SHARC_ACCUMULATION_ENTRY_STRIDE 32u
+#define SHARC_RESOLVED_ENTRY_STRIDE 32u
 
 // Metal-only cache internals, alongside -- not overlapping -- the four
 // cross-backend `DebugMode` cache views. The grid, the resolved radiance, the
@@ -676,14 +668,7 @@ struct SkinningParams
     uint32_t jointMatOffset; // offset into joint matrices array
     uint32_t vertexCount;
 };
-
-struct TriangleUpdateParams
-{
-    uint32_t triangleCount;
-    uint32_t indexOffset; // mesh.mIndex
-    uint32_t vbOffset; // mesh.mVbOffset
-    uint32_t pad0;
-};
+static_assert(sizeof(SkinningParams) == 16, "SkinningParams host/Metal ABI changed");
 
 // GPU side structure
 // pad0: spot inner cone (rad) or point soft radius.
@@ -721,6 +706,7 @@ struct UniformLight
     // a 120-byte struct to its own idea of the vector_float4 alignment.
     float _padProjector[2];
 };
+static_assert(sizeof(UniformLight) == 128, "UniformLight host/Metal ABI changed");
 
 // Packed IES candela tables for the GPU. MetalLights lays the buffer out as:
 //   IesGpuBufferHeader
@@ -831,5 +817,6 @@ struct Material
     MTL::ResourceID occlusionTexture;
 #endif
 };
+static_assert(sizeof(Material) == 296, "Material host/Metal ABI changed");
 
 #endif

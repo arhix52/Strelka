@@ -12,6 +12,7 @@
 // usable without them, and the header costs nothing beyond light_types.h.
 #include <strelka/scene/light_desc.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -191,6 +192,11 @@ public:
         uint32_t color = 0xFFFFFFFFu; // byte 28, packed RGBA8, linear
     };
     static_assert(sizeof(Vertex) == 32, "Scene::Vertex must stay 32 bytes (Metal vtxStride)");
+    static_assert(offsetof(Vertex, tangent) == 12);
+    static_assert(offsetof(Vertex, normal) == 16);
+    static_assert(offsetof(Vertex, uv) == 20);
+    static_assert(offsetof(Vertex, uv1) == 24);
+    static_assert(offsetof(Vertex, color) == 28);
 
     struct vertexSkinData // vertex skin data
     {
@@ -201,6 +207,12 @@ public:
         glm::float3 normal{ 0.0f };
         uint32_t tangent{ 0 }; // rest-pose packed tangent for skinning
     };
+    static_assert(sizeof(vertexSkinData) == 64, "Scene::vertexSkinData must match Metal SkinData");
+    static_assert(offsetof(vertexSkinData, joints) == 0);
+    static_assert(offsetof(vertexSkinData, weights) == 16);
+    static_assert(offsetof(vertexSkinData, pos) == 32);
+    static_assert(offsetof(vertexSkinData, normal) == 48);
+    static_assert(offsetof(vertexSkinData, tangent) == 60);
     std::vector<vertexSkinData> mVerticesSkinData;
 
     struct Node
