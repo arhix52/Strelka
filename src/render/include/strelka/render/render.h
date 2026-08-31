@@ -13,13 +13,6 @@
 namespace oka
 {
 
-enum class RenderType : int
-{
-    eOptiX = 0,
-    eMetal,
-    eCompute,
-};
-
 /**
  * Render interface
  */
@@ -365,7 +358,6 @@ protected:
 class RenderFactory
 {
 public:
-    static Render* createRender(RenderType type);
     static Render* createRender();
 };
 

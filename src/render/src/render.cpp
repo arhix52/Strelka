@@ -7,24 +7,6 @@
 
 using namespace oka;
 
-Render* RenderFactory::createRender(const RenderType type)
-{
-#ifdef __APPLE__
-    if (type == RenderType::eMetal)
-    {
-        return new MetalRender();
-    }
-    // unsupported
-    return nullptr;
-#else
-    if (type == RenderType::eOptiX)
-    {
-        return new OptiXRender();
-    }
-    return nullptr;
-#endif
-}
-
 Render* RenderFactory::createRender()
 {
 #ifdef __APPLE__
