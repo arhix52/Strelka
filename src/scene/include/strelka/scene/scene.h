@@ -587,7 +587,6 @@ public:
                             const AnimationChannel::PathType targetProperty,
                             const float time);
     bool applyAnimation(const uint32_t animId);
-    void applySkinning();
     void computeJointMatrices(std::vector<glm::mat4>* jointMatrices, size_t jointCount, uint32_t skinId);
     const std::vector<Node>& getNodes() const
     {

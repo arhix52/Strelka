@@ -456,35 +456,6 @@ bool Scene::applyAnimation(const uint32_t animId)
     return blasChanged;
 }
 
-void Scene::applySkinning()
-{
-    for (auto& node : mNodes)
-    {
-        if (node.skin != -1 && node.type == Node::NodeType::mesh)
-        {
-            const size_t jointCount = mSkines[node.skin].joints.size();
-            std::vector<glm::mat4> jointMat;
-            computeJointMatrices(&jointMat, jointCount, node.skin);
-            for (const auto instId : node.instanceIds)
-            {
-                const Mesh& mesh = mMeshes[mInstances[instId].mMeshId];
-                for (uint32_t iv = 0; iv < mesh.mVertexCount; ++iv)
-                {
-                    glm::mat4 skinMat(0.0f);
-                    if (!vertexSkinMatrix(mesh, iv, jointMat, skinMat))
-                    {
-                        continue;
-                    }
-                    const vertexSkinData& skinData = mVerticesSkinData[mesh.mSbOffset + iv];
-                    mVertices[mesh.mVbOffset + iv].pos = glm::float3(skinMat * glm::float4(skinData.pos, 1.0f));
-                    mVertices[mesh.mVbOffset + iv].normal =
-                        packNormal(glm::normalize(glm::mat3(skinMat) * skinData.normal));
-                }
-            }
-        }
-    }
-}
-
 void Scene::computeJointMatrices(std::vector<glm::mat4>* jointMatrices, const size_t jointCount, const uint32_t skinId)
 {
     ensureGlobalTransforms();
