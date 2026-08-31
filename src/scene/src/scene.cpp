@@ -1308,11 +1308,6 @@ void Scene::removeMaterial(const uint32_t materialId)
     mDelMaterial.push(materialId); // marked as removed
 }
 
-std::set<uint32_t> Scene::getDirtyInstances()
-{
-    return this->mDirtyInstances;
-}
-
 void Scene::updateInstanceTransform(uint32_t instId, glm::float4x4 newTransform)
 {
     Instance& inst = mInstances[instId];

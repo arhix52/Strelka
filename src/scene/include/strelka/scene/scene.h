@@ -906,24 +906,6 @@ public:
         mChanges |= bits;
     }
 
-    /// Legacy wrappers — prefer peekChanges / consumeChanges.
-    ChangeBits getDirtyState()
-    {
-        return mChanges;
-    }
-
-    void clearDirtyState()
-    {
-        mChanges = ChangeBits::None;
-        mDirtyInstances.clear();
-    }
-
-    /// <summary>
-    /// Get set of DirtyInstances
-    /// </summary>
-    /// <returns>Set of instances</returns>
-    std::set<uint32_t> getDirtyInstances();
-
     /// <summary>
     /// Updates Instance matrix(transform)
     /// </summary>
