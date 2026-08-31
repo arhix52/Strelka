@@ -1,5 +1,4 @@
 #include "../EditorApp.h"
-#include "../editor_camera_exposure.h"
 #include "../editor_denoiser_ui.h"
 #include "../editor_frame_budget.h"
 
@@ -15,11 +14,35 @@
 #include <filesystem>
 #include <algorithm>
 #include <cmath>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace oka
 {
 namespace
 {
+/// Label/value fact table for both backends' Capabilities section. Replaces
+/// TextDisabled lines joined with " | ", which ran off the panel edge.
+void drawFactTable(const char* id, const std::vector<std::pair<const char*, std::string>>& rows)
+{
+    if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_None))
+    {
+        return;
+    }
+    ImGui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed, 108.0f);
+    ImGui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch);
+    for (const auto& [label, value] : rows)
+    {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextDisabled("%s", label);
+        ImGui::TableSetColumnIndex(1);
+        ImGui::TextWrapped("%s", value.c_str());
+    }
+    ImGui::EndTable();
+}
+
 /// Vulkan/OptiX output settings: an HDR10 swapchain the application negotiates,
 /// with absolute nits for the metadata it attaches to it.
 void drawSwapchainOutputSettings(SettingsManager& settings,
@@ -79,31 +102,27 @@ void drawSwapchainOutputSettings(SettingsManager& settings,
 
     vrrStatus = display_output::vrrStatusName(capabilities.vrrStatus);
     ImGui::SeparatorText("Capabilities");
-    ImGui::TextDisabled(
-        "HDR10: %s  |  selected: %s  |  metadata: %s",
-        capabilities.output.hdr10 ? "supported" : "unavailable",
-        capabilities.output.hdrSelected ? "yes" : "no",
-        capabilities.output.hdrMetadata ? "supported" : "unavailable");
-    ImGui::TextDisabled(
-        "Present modes: FIFO%s%s%s",
-        capabilities.present.fifoRelaxed ? ", FIFO_RELAXED" : "",
-        capabilities.present.mailbox ? ", MAILBOX" : "",
-        capabilities.present.immediate ? ", IMMEDIATE" : "");
-    ImGui::TextDisabled(
-        "Present wait: %s  |  present ID: %s  |  timing: %s",
-        capabilities.presentWait ? "available" : "unavailable",
-        capabilities.presentId ? "available" : "unavailable",
-        capabilities.displayTiming ? "available" : "unavailable");
-    ImGui::TextDisabled(
-        "VRR: %s  |  current: %.3f Hz; Vulkan FIFO baseline",
-        vrrStatus, capabilities.currentRefreshRateHz);
-    if (capabilities.minRefreshRateHz > 0.0f &&
-        capabilities.maxRefreshRateHz > 0.0f)
+    std::vector<std::pair<const char*, std::string>> facts = {
+        { "HDR10", fmt::format("{}  (selected {}, metadata {})",
+                               capabilities.output.hdr10 ? "supported" : "unavailable",
+                               capabilities.output.hdrSelected ? "yes" : "no",
+                               capabilities.output.hdrMetadata ? "supported" : "unavailable") },
+        { "Present modes", fmt::format("FIFO{}{}{}", capabilities.present.fifoRelaxed ? ", FIFO_RELAXED" : "",
+                                       capabilities.present.mailbox ? ", MAILBOX" : "",
+                                       capabilities.present.immediate ? ", IMMEDIATE" : "") },
+        { "Present wait", fmt::format("{}  (present ID {}, timing {})",
+                                      capabilities.presentWait ? "available" : "unavailable",
+                                      capabilities.presentId ? "available" : "unavailable",
+                                      capabilities.displayTiming ? "available" : "unavailable") },
+        { "VRR", fmt::format("{}  (current {:.3f} Hz, Vulkan FIFO baseline)", vrrStatus,
+                             capabilities.currentRefreshRateHz) },
+    };
+    if (capabilities.minRefreshRateHz > 0.0f && capabilities.maxRefreshRateHz > 0.0f)
     {
-        ImGui::TextDisabled(
-            "Compositor VRR range: %.3f-%.3f Hz",
-            capabilities.minRefreshRateHz, capabilities.maxRefreshRateHz);
+        facts.emplace_back("Compositor VRR", fmt::format("{:.3f}-{:.3f} Hz", capabilities.minRefreshRateHz,
+                                                          capabilities.maxRefreshRateHz));
     }
+    drawFactTable("##swapchainCapabilities", facts);
 }
 
 /// Metal output settings.
@@ -214,8 +233,6 @@ void drawMetalOutputSettings(SettingsManager& settings,
     {
         settings.setAs<bool>("display/vsync/enabled", vsync);
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered())
     {
         ImGui::SetTooltip(
@@ -229,8 +246,6 @@ void drawMetalOutputSettings(SettingsManager& settings,
     {
         settings.setAs<bool>("display/present/tripleBuffering", tripleBuffering);
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered())
     {
         ImGui::SetTooltip(
@@ -245,8 +260,6 @@ void drawMetalOutputSettings(SettingsManager& settings,
     {
         settings.setAs<float>("display/present/fpsLimit", std::max(frameRateLimit, 0.0f));
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered())
     {
         ImGui::SetTooltip(
@@ -263,26 +276,26 @@ void drawMetalOutputSettings(SettingsManager& settings,
         // terminates the buffer, so there is nothing here to recover from.
         (void)snprintf(referenceText, sizeof(referenceText), "%.2fx", capabilities.edr.referenceHeadroom);
     }
-    ImGui::TextDisabled("EDR headroom: %.2fx now  |  %.2fx potential  |  reference %s",
-                        capabilities.edr.currentHeadroom, capabilities.edr.potentialHeadroom, referenceText);
-    ImGui::TextDisabled("Tone curve maps white to %.2fx SDR white", capabilities.appliedHeadroom);
-    ImGui::TextDisabled("Colour space: %s%s  |  layer: %s",
-                        capabilities.colorSpaceName.empty() ? "unknown" : capabilities.colorSpaceName.c_str(),
-                        capabilities.edr.wideGamut ? " (P3 capable)" : "",
-                        capabilities.edr.edrRequested ? "extended sRGB, RGBA16F" : "sRGB, RGBA16F");
-    if (capabilities.vrrStatus == display_output::VrrStatus::Supported)
-    {
-        ImGui::TextDisabled("Refresh: variable %.1f-%.1f Hz  |  up to %.0f fps",
-                            capabilities.minRefreshRateHz, capabilities.maxRefreshRateHz,
-                            capabilities.currentRefreshRateHz);
-    }
-    else
-    {
-        ImGui::TextDisabled("Refresh: fixed %.1f Hz", capabilities.maxRefreshRateHz);
-    }
-    ImGui::TextDisabled("Present: %u drawables  |  vsync %s  |  %s",
-                        capabilities.maxDrawableCount, capabilities.displaySync ? "on" : "off",
-                        capabilities.frameRateLimitHz > 0.0f ? "rate limited" : "display rate");
+    const std::vector<std::pair<const char*, std::string>> facts = {
+        { "EDR headroom", fmt::format("{:.2f}x now, {:.2f}x max", capabilities.edr.currentHeadroom,
+                                      capabilities.edr.potentialHeadroom) },
+        { "EDR reference", referenceText },
+        { "Tone curve", fmt::format("{:.2f}x SDR white", capabilities.appliedHeadroom) },
+        { "Colour space", fmt::format("{}{}", capabilities.colorSpaceName.empty() ? "unknown" :
+                                                                                     capabilities.colorSpaceName.c_str(),
+                                      capabilities.edr.wideGamut ? " (P3 capable)" : "") },
+        { "Layer", capabilities.edr.edrRequested ? "extended sRGB, RGBA16F" : "sRGB, RGBA16F" },
+        capabilities.vrrStatus == display_output::VrrStatus::Supported ?
+            std::pair<const char*, std::string>{ "Refresh", fmt::format("variable {:.1f}-{:.1f} Hz (up to {:.0f} fps)",
+                                                                        capabilities.minRefreshRateHz,
+                                                                        capabilities.maxRefreshRateHz,
+                                                                        capabilities.currentRefreshRateHz) } :
+            std::pair<const char*, std::string>{ "Refresh", fmt::format("fixed {:.1f} Hz", capabilities.maxRefreshRateHz) },
+        { "Present", fmt::format("{} drawables  (vsync {}, {})", capabilities.maxDrawableCount,
+                                 capabilities.displaySync ? "on" : "off",
+                                 capabilities.frameRateLimitHz > 0.0f ? "rate limited" : "display rate") },
+    };
+    drawFactTable("##metalCapabilities", facts);
 }
 
 void drawDisplayOutputSettings(SettingsManager& settings, const Display& display)
@@ -315,16 +328,62 @@ void EditorApp::drawRenderSettingsPanel()
 {
     ImGui::Begin("Render Settings:");
 
-    drawDisplayOutputSettings(*m_settingsManager, *m_display);
+    ImGui::BeginTabBar("RenderSettingsTabs");
 
+    if (ImGui::BeginTabItem("Display"))
     {
+        drawDisplayOutputSettings(*m_settingsManager, *m_display);
+
+        if (ImGui::TreeNode("Display tonemap"))
+        {
+            const char* const tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
+            int currentTonemapItemId = (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/tonemapperType"), 3u);
+            if (ImGui::BeginCombo("Operator", tonemapItems[currentTonemapItemId]))
+            {
+                for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
+                {
+                    const bool is_selected = (currentTonemapItemId == n);
+                    if (ImGui::Selectable(tonemapItems[n], is_selected))
+                    {
+                        currentTonemapItemId = n;
+                        m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", (uint32_t)n);
+                    }
+                    if (is_selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            auto gamma = m_settingsManager->getAs<float>("render/post/gamma");
+            if (ImGui::DragFloat("Gamma", &gamma, 0.05f, 0.0f, 5.0f, "%.2f"))
+            {
+                m_settingsManager->setAs<float>("render/post/gamma", gamma);
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("0 = off; default 2.4 is an sRGB-like transfer, not a pure power.");
+            }
+
+            const float maxEdr = m_settingsManager->getAs<float>("render/post/tonemapper/maxEDR");
+            ImGui::TextDisabled("Display max EDR %.2f (tone-map shoulder follows screen headroom)", maxEdr);
+
+            ImGui::TreePop();
+        }
+
+        ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem("Quality"))
+    {
+        ImGui::SeparatorText("Debug & validation");
         bool analytic = m_settingsManager->getAs<bool>("render/validate/analyticLights");
         if (ImGui::Checkbox("Analytic Lights", &analytic))
         {
             m_settingsManager->setAs<bool>("render/validate/analyticLights", analytic);
             m_sharedCtx->mSubframeIndex = 0;
         }
-    }
 
     // Must match DebugMode in ShaderTypes.h, in order.
     const char* const debugViewOptions[] = { "None",
@@ -407,136 +466,6 @@ void EditorApp::drawRenderSettingsPanel()
             }
         }
         ImGui::EndCombo();
-    }
-
-    // Camera selection
-    {
-        const auto& cameras = m_scene->getCameras();
-        const int cameraCount = static_cast<int>(cameras.size());
-        if (cameraCount > 0)
-        {
-            const char* previewName = cameras[m_selectedCamera].name.c_str();
-            if (ImGui::BeginCombo("Camera", previewName))
-            {
-                for (int n = 0; n < cameraCount; n++)
-                {
-                    const bool is_selected = (m_selectedCamera == n);
-                    if (ImGui::Selectable(cameras[n].name.c_str(), is_selected))
-                    {
-                        if (m_selectedCamera != n)
-                        {
-                            m_selectedCamera = n;
-                            setCameraDetached(false);
-                            m_cameraController->setCamera(m_scene->getCamera(m_selectedCamera));
-                            m_sharedCtx->mSubframeIndex = 0;
-                            // A different camera is a cut: nothing in the previous
-                            // frame reprojects into this one. The renderer cannot
-                            // see this -- the jump may be small in world space.
-                            m_render->resetTemporalHistory();
-                            m_settingsManager->setAs<uint32_t>("render/selectedCamera", m_selectedCamera);
-                        }
-                    }
-                    if (is_selected)
-                    {
-                        ImGui::SetItemDefaultFocus();
-                    }
-                }
-                ImGui::EndCombo();
-            }
-
-            // Show re-attach button for GLTF cameras that have been detached
-            auto& selectedCam = cameras[m_selectedCamera];
-            if (selectedCam.node != -1 && m_cameraDetached)
-            {
-                ImGui::SameLine();
-                if (ImGui::Button("Re-attach"))
-                {
-                    setCameraDetached(false);
-                    m_sharedCtx->mSubframeIndex = 0;
-                    m_render->resetTemporalHistory();
-                }
-                if (ImGui::IsItemHovered())
-                {
-                    ImGui::BeginTooltip();
-                    ImGui::TextUnformatted("Resume following GLTF camera animation");
-                    ImGui::EndTooltip();
-                }
-            }
-        }
-    }
-
-    // Camera lens / DOF — physical units (mm, m, f-stop).
-    if (ImGui::TreeNode("Camera / lens"))
-    {
-        oka::Camera& cam = m_scene->getCamera(m_selectedCamera);
-        bool changed = false;
-        const bool linkDof = m_settingsManager->getAs<bool>("render/post/tonemapper/linkDofFStop");
-        float exposureFStop = m_settingsManager->getAs<float>("render/post/tonemapper/fStop");
-        // Keep the lens f-stop aligned with exposure whenever the link is on so
-        // lensRadius and the path tracer see the same N the exposure panel edits.
-        if (linkDof)
-        {
-            cam.fStopDof = exposureFStop;
-        }
-
-        changed |= ImGui::DragFloat(
-            "Focal length", &cam.focalLengthMm, 0.5f, 1.0f, 500.0f, "%.1f mm", ImGuiSliderFlags_Logarithmic);
-        changed |= ImGui::DragFloat("Sensor width", &cam.sensorWidth, 0.1f, 1.0f, 100.0f, "%.1f mm");
-        changed |= ImGui::DragFloat("Sensor height", &cam.sensorHeight, 0.1f, 1.0f, 100.0f, "%.1f mm");
-        ImGui::TextDisabled("Vertical FOV %.1f deg (from lens + sensor)",
-                            editor_camera_exposure::verticalFovDegrees(cam.focalLengthMm, cam.sensorHeight));
-
-        if (ImGui::Checkbox("Enable DOF", &cam.useDof))
-            changed = true;
-
-        if (cam.useDof)
-        {
-            if (ImGui::SliderFloat(
-                    "Focus distance", &cam.focalDistance, 0.1f, 1000.0f, "%.2f m", ImGuiSliderFlags_Logarithmic))
-                changed = true;
-
-            float dofFStop = linkDof ? exposureFStop : cam.fStopDof;
-            if (ImGui::DragFloat(linkDof ? "F-stop (linked)" : "DOF f-stop", &dofFStop, 0.05f, 0.7f, 32.0f, "f/%.1f"))
-            {
-                changed = true;
-                if (linkDof)
-                {
-                    exposureFStop = dofFStop;
-                    cam.fStopDof = dofFStop;
-                    m_settingsManager->setAs<float>("render/post/tonemapper/fStop", exposureFStop);
-                }
-                else
-                {
-                    cam.fStopDof = dofFStop;
-                }
-            }
-            ImGui::TextDisabled(
-                "Lens radius %.4f m", editor_camera_exposure::lensRadiusMetres(cam.focalLengthMm, cam.fStopDof));
-
-            if (ImGui::SliderInt("Aperture blades", &cam.apertureBlades, 0, 8))
-                changed = true;
-            ImGui::SameLine();
-            ImGui::TextDisabled("(0 = circular)");
-
-            float bladeDeg = editor_camera_exposure::degreesFromRadians(cam.bladeRotation);
-            if (ImGui::DragFloat("Blade rotation", &bladeDeg, 1.0f, 0.0f, 360.0f, "%.0f deg"))
-            {
-                cam.bladeRotation = editor_camera_exposure::radiansFromDegrees(bladeDeg);
-                changed = true;
-            }
-            if (ImGui::DragFloat("Anamorphic ratio", &cam.anamorphicRatio, 0.01f, 0.25f, 4.0f, "%.2f"))
-                changed = true;
-        }
-
-        if (ImGui::DragFloat("Shift X", &cam.shiftX, 0.01f, -2.0f, 2.0f, "%.3f (sensor frac)"))
-            changed = true;
-        if (ImGui::DragFloat("Shift Y", &cam.shiftY, 0.01f, -2.0f, 2.0f, "%.3f (sensor frac)"))
-            changed = true;
-
-        if (changed)
-            m_sharedCtx->mSubframeIndex = 0;
-
-        ImGui::TreePop();
     }
 
     if (ImGui::TreeNodeEx("Preview Resolution", ImGuiTreeNodeFlags_DefaultOpen))
@@ -658,8 +587,6 @@ void EditorApp::drawRenderSettingsPanel()
             {
                 m_settingsManager->setAs<uint32_t>("render/pt/blueNoiseSwitchSpp", bnSwitch);
             }
-            ImGui::SameLine();
-            ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered())
             {
                 ImGui::SetTooltip(
@@ -883,14 +810,18 @@ void EditorApp::drawRenderSettingsPanel()
         ImGui::TreePop();
     }
 
+        ImGui::EndTabItem();
+    }
+
     // --- Radiance cache ----------------------------------------------------
     //
     // Everything here changes what the image is, not just how fast it arrives,
     // so every control restarts accumulation. Counting occupancy is a pass over
     // the whole table, so it is asked for only while this node is open -- which
     // is what the setting outside the `if` turns back off again.
+    if (ImGui::BeginTabItem("Cache"))
     {
-        const bool cachePanelOpen = ImGui::TreeNode("Radiance cache (SHaRC)");
+        const bool cachePanelOpen = ImGui::TreeNodeEx("Radiance cache (SHaRC)", ImGuiTreeNodeFlags_DefaultOpen);
         m_settingsManager->setAs<bool>("render/pt/sharcReportOccupancy", cachePanelOpen);
         if (cachePanelOpen)
         {
@@ -1246,8 +1177,12 @@ void EditorApp::drawRenderSettingsPanel()
 
             ImGui::TreePop();
         }
+
+        ImGui::EndTabItem();
     }
 
+    if (ImGui::BeginTabItem("Output"))
+    {
     if (ImGui::Button("Save Preview Screenshot"))
     {
         // Generate default filename with timestamp
@@ -1273,8 +1208,6 @@ void EditorApp::drawRenderSettingsPanel()
     {
         // Nothing to invalidate: the flag is read when the file is written.
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered())
     {
         ImGui::SetTooltip(
@@ -1285,149 +1218,22 @@ void EditorApp::drawRenderSettingsPanel()
             "carry. Neither is transfer encoded; a PNG always gets the SDR rendition.");
     }
 
-    auto cameraSpeed = m_settingsManager->getAs<float>("render/cameraSpeed");
-    ImGui::InputFloat("Camera Speed", (float*)&cameraSpeed, 0.5);
-    m_settingsManager->setAs<float>("render/cameraSpeed", cameraSpeed);
-
-    drawGamepadSettings();
-
-    // Exposure, the camera side of the tone curve. The renderer computes
-    //     film speed  > 0 : cm2_factor * iso / (shutter * fstop^2) / 100
-    //     film speed == 0 : cm2_factor
-    // so a zero film speed is the arbitrary-units mode, which is what a scene lit
-    // in normalised rather than photometric units wants -- and what the light
-    // sidecar writes. Both forms are editable here because the sidecar can carry
-    // either, and a scene that opens too dark is otherwise unexplainable from
-    // inside the editor.
-    if (ImGui::TreeNode("Photographic exposure"))
+    if (ImGui::TreeNode("Developer"))
     {
-        float iso = m_settingsManager->getAs<float>("render/post/tonemapper/filmIso");
-        float fStop = m_settingsManager->getAs<float>("render/post/tonemapper/fStop");
-        float shutter = m_settingsManager->getAs<float>("render/post/tonemapper/shutterSpeed");
-        float cm2 = m_settingsManager->getAs<float>("render/post/tonemapper/cm2_factor");
-        bool linkDof = m_settingsManager->getAs<bool>("render/post/tonemapper/linkDofFStop");
-        bool changed = false;
-
-        int mode = iso > 0.0f ? 0 : 1;
-        const char* const modeItems[] = { "Photographic", "Multiplier" };
-        if (ImGui::Combo("Mode", &mode, modeItems, 2))
-        {
-            editor_camera_exposure::carryExposureAcrossModeSwitch(mode == 1, iso, fStop, shutter, cm2);
-            changed = true;
-        }
-
-        if (ImGui::Checkbox("Link DOF aperture to exposure", &linkDof))
-        {
-            m_settingsManager->setAs<bool>("render/post/tonemapper/linkDofFStop", linkDof);
-            if (linkDof)
-            {
-                // Keep film brightness: push exposure f-stop into the lens.
-                m_scene->getCamera(m_selectedCamera).fStopDof = fStop;
-                m_sharedCtx->mSubframeIndex = 0;
-            }
-        }
-        if (ImGui::IsItemHovered())
-        {
-            ImGui::SetTooltip(
-                "When on, one f-stop drives both DOF blur and photographic exposure.\n"
-                "Untick to blur the lens without changing film brightness.");
-        }
-
-        if (mode == 0)
-        {
-            changed |= ImGui::DragFloat("Film ISO", &iso, 1.0f, 1.0f, 25600.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-            if (ImGui::DragFloat(linkDof ? "Aperture (linked)" : "Exposure f-stop", &fStop, 0.05f, 0.7f, 32.0f, "f/%.1f"))
-            {
-                changed = true;
-                if (linkDof)
-                {
-                    m_scene->getCamera(m_selectedCamera).fStopDof = fStop;
-                }
-            }
-            changed |=
-                ImGui::DragFloat("Shutter", &shutter, 1.0f, 1.0f, 8000.0f, "1/%.0f s", ImGuiSliderFlags_Logarithmic);
-            changed |=
-                ImGui::DragFloat("cd/m^2 factor", &cm2, 0.01f, 0.0001f, 100000.0f, "%.4f", ImGuiSliderFlags_Logarithmic);
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::SetTooltip(
-                    "Photometric scale (candela per square metre factor).\n"
-                    "Not a generic exposure multiplier — use Mode=Multiplier for that.");
-            }
-            const float linear = editor_camera_exposure::photographicLinearScale(iso, fStop, shutter, cm2);
-            const float ev = editor_camera_exposure::ev100(iso, fStop, shutter);
-            ImGui::TextDisabled("EV100 %.2f  |  Linear radiance x%.4f", ev, linear);
-        }
-        else
-        {
-            changed |= ImGui::DragFloat(
-                "Linear multiplier", &cm2, 0.01f, 0.0001f, 100000.0f, "x%.4f", ImGuiSliderFlags_Logarithmic);
-            ImGui::TextDisabled("Linear radiance x%.4f (photographic controls off)", cm2);
-        }
-
-        if (ImGui::Button("Auto-expose"))
-        {
-            m_autoExposurePending = true;
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled("(meters frame → Multiplier mode)");
-
-        if (changed)
-        {
-            m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", iso);
-            m_settingsManager->setAs<float>("render/post/tonemapper/fStop", fStop);
-            m_settingsManager->setAs<float>("render/post/tonemapper/shutterSpeed", shutter);
-            m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", cm2);
-            m_sharedCtx->mSubframeIndex = 0;
-        }
+        auto materialRayTmin = m_settingsManager->getAs<float>("render/pt/dev/materialRayTmin");
+        ImGui::InputFloat("Material ray T min", (float*)&materialRayTmin, 0.1);
+        m_settingsManager->setAs<float>("render/pt/dev/materialRayTmin", materialRayTmin);
+        auto shadowRayTmin = m_settingsManager->getAs<float>("render/pt/dev/shadowRayTmin");
+        ImGui::InputFloat("Shadow ray T min", (float*)&shadowRayTmin, 0.1);
+        m_settingsManager->setAs<float>("render/pt/dev/shadowRayTmin", shadowRayTmin);
 
         ImGui::TreePop();
     }
 
-    if (ImGui::TreeNode("Display tonemap"))
-    {
-        const char* const tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
-        int currentTonemapItemId = (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/tonemapperType"), 3u);
-        if (ImGui::BeginCombo("Operator", tonemapItems[currentTonemapItemId]))
-        {
-            for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
-            {
-                const bool is_selected = (currentTonemapItemId == n);
-                if (ImGui::Selectable(tonemapItems[n], is_selected))
-                {
-                    currentTonemapItemId = n;
-                    m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", (uint32_t)n);
-                }
-                if (is_selected)
-                {
-                    ImGui::SetItemDefaultFocus();
-                }
-            }
-            ImGui::EndCombo();
-        }
-
-        auto gamma = m_settingsManager->getAs<float>("render/post/gamma");
-        if (ImGui::DragFloat("Gamma", &gamma, 0.05f, 0.0f, 5.0f, "%.2f"))
-        {
-            m_settingsManager->setAs<float>("render/post/gamma", gamma);
-        }
-        if (ImGui::IsItemHovered())
-        {
-            ImGui::SetTooltip("0 = off; default 2.4 is an sRGB-like transfer, not a pure power.");
-        }
-
-        const float maxEdr = m_settingsManager->getAs<float>("render/post/tonemapper/maxEDR");
-        ImGui::TextDisabled("Display max EDR %.2f (tone-map shoulder follows screen headroom)", maxEdr);
-
-        ImGui::TreePop();
+        ImGui::EndTabItem();
     }
 
-    auto materialRayTmin = m_settingsManager->getAs<float>("render/pt/dev/materialRayTmin");
-    ImGui::InputFloat("Material ray T min", (float*)&materialRayTmin, 0.1);
-    m_settingsManager->setAs<float>("render/pt/dev/materialRayTmin", materialRayTmin);
-    auto shadowRayTmin = m_settingsManager->getAs<float>("render/pt/dev/shadowRayTmin");
-    ImGui::InputFloat("Shadow ray T min", (float*)&shadowRayTmin, 0.1);
-    m_settingsManager->setAs<float>("render/pt/dev/shadowRayTmin", shadowRayTmin);
+    ImGui::EndTabBar();
 
     ImGui::End();
 }
@@ -1564,8 +1370,6 @@ void EditorApp::drawGamepadSettings()
     {
         m_settingsManager->setAs<bool>("editor/gamepad/enabled", enabled);
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered())
     {
         ImGui::SetTooltip("Off ignores the pad without unplugging it. A controller with a worn\n"
@@ -1590,8 +1394,6 @@ void EditorApp::drawGamepadSettings()
     {
         m_settingsManager->setAs<float>("editor/gamepad/deadzone", deadzone);
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered())
     {
         ImGui::SetTooltip("How far a stick must move before it counts. A DualSense at rest\n"

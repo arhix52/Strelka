@@ -96,17 +96,39 @@ void drawBreakdown(const char* title,
     ImGui::SameLine();
 
     ImGui::BeginGroup();
-    for (size_t i = 0; i < entries.size(); ++i)
+    // Name stretches; Size/% stay fixed. SizingFixedFit would squeeze every
+    // fixed column instead, starving Size/% down to a couple of pixels.
+    if (ImGui::BeginTable("##legend", 4, ImGuiTableFlags_RowBg))
     {
-        const ImU32 colour = kSliceColors[i % IM_ARRAYSIZE(kSliceColors)];
-        ImDrawList* draw = ImGui::GetWindowDrawList();
-        const ImVec2 p = ImGui::GetCursorScreenPos();
-        const float h = ImGui::GetTextLineHeight();
-        draw->AddRectFilled(ImVec2(p.x, p.y + 2.0f), ImVec2(p.x + h - 4.0f, p.y + h - 2.0f), colour);
-        ImGui::Dummy(ImVec2(h, h));
-        ImGui::SameLine();
-        ImGui::Text("%-22s %9s  %4.1f%%", entries[i].name, humanBytes(entries[i].bytes).c_str(),
-                    total > 0 ? 100.0 * (double)entries[i].bytes / (double)total : 0.0);
+        ImGui::TableSetupColumn("##swatch", ImGuiTableColumnFlags_WidthFixed, ImGui::GetTextLineHeight());
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("000.00 GB").x);
+        ImGui::TableSetupColumn("%", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("100.0%").x);
+
+        for (size_t i = 0; i < entries.size(); ++i)
+        {
+            ImGui::TableNextRow();
+
+            ImGui::TableSetColumnIndex(0);
+            const ImU32 colour = kSliceColors[i % IM_ARRAYSIZE(kSliceColors)];
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const float h = ImGui::GetTextLineHeight();
+            draw->AddRectFilled(ImVec2(p.x, p.y + 2.0f), ImVec2(p.x + h - 4.0f, p.y + h - 2.0f), colour);
+            ImGui::Dummy(ImVec2(h, h));
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(entries[i].name);
+
+            const double pct = total > 0 ? 100.0 * (double)entries[i].bytes / (double)total : 0.0;
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextUnformatted(humanBytes(entries[i].bytes).c_str());
+
+            ImGui::TableSetColumnIndex(3);
+            ImGui::Text("%.1f%%", pct);
+        }
+        ImGui::EndTable();
     }
     ImGui::EndGroup();
 }
@@ -115,6 +137,9 @@ void drawBreakdown(const char* title,
 
 void EditorApp::drawMemoryPanel()
 {
+    // Floats (not docked, see buildDefaultDockLayout) -- needs more width
+    // than the slim left column offers.
+    ImGui::SetNextWindowSize(ImVec2(420.0f, 480.0f), ImGuiCond_FirstUseEver);
     ImGui::Begin("Memory:", &m_showMemory);
 
     Render::MemoryReport report;

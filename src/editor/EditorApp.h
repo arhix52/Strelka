@@ -58,9 +58,11 @@ private:
     bool m_showOutliner = true;
     bool m_showProperties = true;
     bool m_showMaterials = true;
-    bool m_showMemory = true;
+    bool m_showMemory = false;
     bool m_outlinerScrollToSelection = false;
     bool m_layoutRebuildPending = false;
+    // Runs the undocked-window scan once at startup; see drawUI().
+    bool m_startupLayoutChecked = false;
 
     // Screen rect of the rendered image inside the Viewport panel, refreshed
     // every frame. Picking and the gizmo both need it, and the gizmo is drawn
@@ -257,8 +259,11 @@ public:
     // Panel draw methods (defined in panels/*.cpp)
     void drawViewportPanel();
     void drawRenderSettingsPanel();
-    /// The gamepad block inside the render settings panel. Split out because the
-    /// panel is already 1500 lines and this is self-contained.
+    /// Camera selection, lens/DOF, exposure and navigation speed. Split out of
+    /// Render Settings: a camera is a scene object, not a renderer config knob.
+    void drawCameraPanel();
+    /// The gamepad block inside the camera panel. Split out because the
+    /// panel is already long and this is self-contained.
     void drawGamepadSettings();
     void drawMemoryPanel();
     void drawAnimationPanel();

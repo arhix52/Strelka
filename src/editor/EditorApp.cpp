@@ -4656,7 +4656,8 @@ void EditorApp::buildDefaultDockLayout(ImGuiID dockspaceId)
 
     ImGuiID center = dockspaceId;
     const ImGuiID left = ImGui::DockBuilderSplitNode(center, ImGuiDir_Left, 0.20f, nullptr, &center);
-    const ImGuiID right = ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.28f, nullptr, &center);
+    // 0.28 clipped the Render Settings tab bar and Capabilities text.
+    const ImGuiID right = ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.32f, nullptr, &center);
     ImGuiID leftTop = left;
     const ImGuiID leftBottom = ImGui::DockBuilderSplitNode(leftTop, ImGuiDir_Down, 0.35f, nullptr, &leftTop);
     ImGuiID rightTop = right;
@@ -4664,8 +4665,10 @@ void EditorApp::buildDefaultDockLayout(ImGuiID dockspaceId)
 
     ImGui::DockBuilderDockWindow("Outliner", leftTop);
     ImGui::DockBuilderDockWindow("Animations", leftBottom);
+    // Memory: not docked, hidden by default, floats when opened from Debug menu.
     ImGui::DockBuilderDockWindow("Viewport", center);
     ImGui::DockBuilderDockWindow("Render Settings:", rightTop);
+    ImGui::DockBuilderDockWindow("Camera:", rightBottom);
     ImGui::DockBuilderDockWindow("Properties", rightBottom);
     ImGui::DockBuilderDockWindow("Materials", rightBottom);
     ImGui::DockBuilderFinish(dockspaceId);
@@ -4736,11 +4739,27 @@ void EditorApp::drawUI()
 
     const ImGuiID dockspaceId = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
 
-    // A layout saved by an older build has no entry for panels added since, and
-    // ImGui then floats them in the top-left corner on top of everything else.
-    // Rebuild the default arrangement in that case instead of leaving the user to
-    // hunt for the windows.
-    if (m_layoutRebuildPending || ImGui::FindWindowSettingsByID(ImHashStr("Outliner")) == nullptr)
+    // A layout saved by an older build is missing a panel added since (floats
+    // it) or carries a stale Pos/Size with DockId 0 (same effect). Checked once
+    // against every window buildDefaultDockLayout places -- not every frame,
+    // since FindWindowSettingsByID reads the ini snapshot, which only catches
+    // up with a fresh rebuild on ImGui's autosave timer, not immediately.
+    if (!m_startupLayoutChecked)
+    {
+        m_startupLayoutChecked = true;
+        static const char* const kDockedWindows[] = { "Outliner", "Animations", "Viewport",
+                                                       "Render Settings:", "Camera:", "Properties", "Materials" };
+        for (const char* name : kDockedWindows)
+        {
+            const ImGuiWindowSettings* windowSettings = ImGui::FindWindowSettingsByID(ImHashStr(name));
+            if (windowSettings == nullptr || windowSettings->DockId == 0)
+            {
+                m_layoutRebuildPending = true;
+                break;
+            }
+        }
+    }
+    if (m_layoutRebuildPending)
     {
         m_layoutRebuildPending = false;
         buildDefaultDockLayout(dockspaceId);
@@ -4831,12 +4850,12 @@ void EditorApp::drawUI()
                 "and copy it to the clipboard, so the exact frame can be\n"
                 "re-rendered headlessly.");
         }
+        ImGui::MenuItem("Memory", nullptr, &m_showMemory);
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Window"))
     {
         ImGui::MenuItem("Outliner", nullptr, &m_showOutliner);
-        ImGui::MenuItem("Memory", nullptr, &m_showMemory);
         ImGui::MenuItem("Properties", nullptr, &m_showProperties);
         ImGui::MenuItem("Materials", nullptr, &m_showMaterials);
         ImGui::Separator();
@@ -4892,6 +4911,7 @@ void EditorApp::drawUI()
     // --- Panel draw calls (implementations in panels/*.cpp) ---
     drawViewportPanel();
     drawRenderSettingsPanel();
+    drawCameraPanel();
     if (m_showMemory)
     {
         drawMemoryPanel();

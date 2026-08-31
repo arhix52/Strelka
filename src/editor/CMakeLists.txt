@@ -11,6 +11,7 @@ set(EDITOR_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/CameraController.h
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/ViewportPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/RenderSettingsPanel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/panels/CameraPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/AnimationPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/PropertyPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/OutlinerPanel.cpp
