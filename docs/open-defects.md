@@ -901,11 +901,43 @@ sides and there is no wider distribution available to reach for. A row at a lowe
 roughness would separate `alpha = roughness` from `alpha = roughness^2` as the
 convention, and nothing in the ladder has one.
 
-Still unread, and now the only structural difference left: Cycles intersects only
-the object the walk started in (`scene_intersect_local(..., object, ...)`), while
-this walk traces the whole volume top level with a triangle mask and takes
-whatever it hits -- which the comment at the exit already admits is a
-simplification. The spheres in these rows rest on the floor.
+**It is not the other geometry.** That was the last structural difference --
+Cycles intersects only the object the walk started in
+(`scene_intersect_local(..., object, ...)`) while this walk traces the whole volume
+top level and takes whatever it hits -- and it was tested before it was
+implemented, by rebuilding the row with no floor and no wall at all. With nothing
+else in the scene for the walk to leave through, the split survives and grows:
+centre 1.261 and rim 0.850, against 1.174 and 0.883 with the stage. Restricting
+the traversal cannot produce that, so it was not built.
+
+### Where entry 16's residual stands
+
+Everything structural is eliminated: the colour mapping, the extinction, the
+channel choice, the free flight, both weights, the entry direction, the entry
+weight, the exit lobe, next-event estimation, and now the geometry the walk may
+reach. What is left is an angular redistribution across the disc that only the
+synthetic rows can see:
+
+| row | spheres | centre | rim |
+|---|---|---|---|
+| `25_subsurface` | 0.989 | 0.993 | 0.982 |
+| `29_subsurface_skin` | 0.976 | 0.981 | 0.970 |
+| `30_subsurface_translucent` | 1.002 | 1.013 | 0.969 |
+| `31_subsurface_absorbing` | 1.032 | 1.174 | 0.883 |
+
+It scales with how thin the medium is and how little it scatters. On `31`, built
+to be the hardest case there is -- one mean free path across the body, an albedo
+near zero, so almost nothing scatters and every path is a near-straight crossing
+-- it is +17% at the centre and -12% at the rim. On the row that looks like skin
+it is 2%, and on `25` it is 1%.
+
+The remaining candidate is Dwivedi guiding, which Cycles has and this walk does
+not. It was set aside as variance reduction that cannot move a mean, and that
+holds only if its three-way MIS is exact; nothing here has tested whether Cycles'
+is. That is the next thing to read, and it is worth doing on a row at low
+roughness, which would also separate `alpha = roughness` from `alpha = roughness^2`
+as the entry convention -- the ladder has no such row, because every builder
+authors `roughness = 1.0`.
 
 
 ### The diffuse lobe was summed with the specular one instead of layered under it
