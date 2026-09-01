@@ -81,11 +81,11 @@ private:
 
 /// Width of the one argument table every Metal 4 stage shares. Counts, not
 /// indices: the highest binding in wavefront.metal is buffer(30), the shade
-/// stage's medium path state, and texture(8), the reactive guide. Raise these
+/// stage's medium path state, and texture(9), the denoise-strength guide. Raise these
 /// with the shader, in the same commit -- a bind past the declared count writes
 /// past the end of the table, and only MTL_DEBUG_LAYER=1 will tell you.
 inline constexpr uint32_t kMetal4BufferBindCount = 31;
-inline constexpr uint32_t kMetal4TextureBindCount = 9;
+inline constexpr uint32_t kMetal4TextureBindCount = 10;
 
 /// Names a Metal 4 command buffer or encoder, for Xcode captures and the debug
 /// layer. A frame here is a dozen command buffers whose only distinguishing

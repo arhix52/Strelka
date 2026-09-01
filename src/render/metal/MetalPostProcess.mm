@@ -81,27 +81,33 @@ void MetalPostProcess::releaseGuideTextures()
     release(mGuides.roughness);
     release(mGuides.specularHitDistance);
     release(mGuides.reactive);
+    release(mGuides.denoiseStrength);
     release(mDenoisedTexture);
     mGuideWidth = 0;
     mGuideHeight = 0;
     mGuideOutWidth = 0;
     mGuideOutHeight = 0;
+    mGuideTextureUsage = 0;
+    mGuideColorUsage = 0;
+    mGuideOutputUsage = 0;
 }
 
 void MetalPostProcess::ensureGuideTextures(uint32_t width, uint32_t height, uint32_t outWidth, uint32_t outHeight)
 {
-    if (width == mGuideWidth && height == mGuideHeight && outWidth == mGuideOutWidth &&
-        outHeight == mGuideOutHeight && mGuides.color && mDenoisedTexture)
+    const MTL::TextureUsage guideUsage = MTL::TextureUsageShaderWrite | mMetalFx.denoiseGuideUsage() |
+                                         mMetalFx.temporalDepthUsage() | mMetalFx.temporalMotionUsage();
+    const MTL::TextureUsage colorUsage =
+        MTL::TextureUsageShaderWrite | mMetalFx.denoiseColorUsage() | mMetalFx.temporalColorUsage();
+    const MTL::TextureUsage outputUsage =
+        MTL::TextureUsageShaderRead | mMetalFx.denoiseOutputUsage() | mMetalFx.temporalOutputUsage();
+    if (width == mGuideWidth && height == mGuideHeight && outWidth == mGuideOutWidth && outHeight == mGuideOutHeight &&
+        guideUsage == mGuideTextureUsage && colorUsage == mGuideColorUsage && outputUsage == mGuideOutputUsage &&
+        mGuides.color && mDenoisedTexture)
     {
         return;
     }
     releaseGuideTextures();
 
-    const bool temporalOnly = !mMetalFx.hasDenoiser() && mMetalFx.hasTemporalScaler();
-    const MTL::TextureUsage guideUsage =
-        MTL::TextureUsageShaderWrite |
-        (temporalOnly ? (mMetalFx.temporalDepthUsage() | mMetalFx.temporalMotionUsage())
-                      : mMetalFx.denoiseGuideUsage());
     auto make = [&](MTL::PixelFormat fmt, uint32_t w, uint32_t h, MTL::TextureUsage usage) {
         MTL::TextureDescriptor* d = MTL::TextureDescriptor::alloc()->init();
         d->setWidth(w);
@@ -114,9 +120,7 @@ void MetalPostProcess::ensureGuideTextures(uint32_t width, uint32_t height, uint
         d->release();
         return t;
     };
-    mGuides.color = make(MTL::PixelFormatRGBA16Float, width, height,
-                         MTL::TextureUsageShaderWrite |
-                             (temporalOnly ? mMetalFx.temporalColorUsage() : mMetalFx.denoiseColorUsage()));
+    mGuides.color = make(MTL::PixelFormatRGBA16Float, width, height, colorUsage);
     mGuides.depth = make(MTL::PixelFormatR32Float, width, height, guideUsage);
     mGuides.motion = make(MTL::PixelFormatRG16Float, width, height, guideUsage);
     mGuides.diffuse = make(MTL::PixelFormatRGBA16Float, width, height, guideUsage);
@@ -125,15 +129,16 @@ void MetalPostProcess::ensureGuideTextures(uint32_t width, uint32_t height, uint
     mGuides.roughness = make(MTL::PixelFormatR16Float, width, height, guideUsage);
     mGuides.specularHitDistance = make(MTL::PixelFormatR16Float, width, height, guideUsage);
     mGuides.reactive = make(MTL::PixelFormatR8Unorm, width, height, guideUsage);
-    mDenoisedTexture = make(MTL::PixelFormatRGBA16Float, outWidth, outHeight,
-                            MTL::TextureUsageShaderRead |
-                                (temporalOnly ? mMetalFx.temporalOutputUsage()
-                                              : mMetalFx.denoiseOutputUsage()));
+    mGuides.denoiseStrength = make(MTL::PixelFormatR8Unorm, width, height, guideUsage);
+    mDenoisedTexture = make(MTL::PixelFormatRGBA16Float, outWidth, outHeight, outputUsage);
 
     mGuideWidth = width;
     mGuideHeight = height;
     mGuideOutWidth = outWidth;
     mGuideOutHeight = outHeight;
+    mGuideTextureUsage = guideUsage;
+    mGuideColorUsage = colorUsage;
+    mGuideOutputUsage = outputUsage;
     markTexturesDirty(false);
     if (mHooks.resetDenoiseHistory)
     {
@@ -263,4 +268,3 @@ void MetalPostProcess::buildTonemapperPipeline()
 }
 
 } // namespace oka::metal
-

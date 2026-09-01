@@ -119,6 +119,7 @@ inline void seedCommonRenderSettings(SettingsManager& settings)
     // MetalFX audit baseline: device depth and a stable shutter-close frame.
     settings.setAs<uint32_t>("render/pt/denoiseDepthMode", 0);
     settings.setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);
+    settings.setAs<bool>("render/pt/prewarmDenoiser", false);
     settings.setAs<uint32_t>("render/pt/staticTraversal", 1);
     // HDR environment values are radiance and must not be normalized away.
     settings.setAs<bool>("render/env/autoCalibrate", false);

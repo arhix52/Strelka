@@ -760,6 +760,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         table->setTexture(scene.guideRoughness->gpuResourceID(), 6);
         table->setTexture(scene.guideSpecularHitDistance->gpuResourceID(), 7);
         table->setTexture(scene.guideReactive->gpuResourceID(), 8);
+        table->setTexture(scene.guideDenoiseStrength->gpuResourceID(), 9);
         enc->dispatchThreadgroups(MTL::Size((width + 7) / 8, (height + 7) / 8, 1), MTL::Size(8, 8, 1));
     }
 

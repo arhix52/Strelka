@@ -130,6 +130,8 @@ struct Uniforms
 
     uint32_t width;
     uint32_t height;
+    /// Monotonic display-frame index. Used to keep one-sample interactive
+    /// frames statistically independent when accumulation is disabled.
     uint32_t frameIndex;
     uint32_t subframeIndex;
 
@@ -370,10 +372,12 @@ struct AovSample
     /// is known to be a lie: mirrors, glass, and anything whose previous position
     /// could not be established.
     float reactive;
-    /// Path depth the sample reached before it died, for
-    /// `DebugMode::eSharcBounces`. It was padding and still is when that view is
-    /// off; the struct needs the word either way.
-    float bounceDepth;
+    /// Dual-purpose cold word. During guide rendering, -1 marks primary
+    /// background and 1 + the Fresnel weight marks a transmissive primary whose
+    /// replacement attributes need blending. In `DebugMode::eSharcBounces`,
+    /// where denoising is disabled, it stores the path depth instead. Sharing it
+    /// keeps this per-pixel record at 64 bytes.
+    float guideStateOrBounceDepth;
 };
 
 struct UniformsTonemap

@@ -113,7 +113,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     auto* pUniformTonemap = static_cast<UniformsTonemap*>(pUniformTMBuffer->contents());
     std::memset(pUniformData, 0, sizeof(*pUniformData));
     std::memset(pUniformTonemap, 0, sizeof(*pUniformTonemap));
-    pUniformData->frameIndex = in.frameSlot;
+    pUniformData->frameIndex = static_cast<uint32_t>(in.frameNumber);
     pUniformData->subframeIndex = in.subframeIndex;
     pUniformData->height = height;
     pUniformData->width = width;
@@ -130,7 +130,6 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     // be compared under either heuristic.
     pUniformData->misHeuristic = settings.getAs<uint32_t>("render/pt/misHeuristic");
     pUniformData->textureLodMode = settings.getAs<uint32_t>("render/pt/textureLod");
-    pUniformData->guidePrimaryHit = settings.getAs<uint32_t>("render/pt/guidePrimaryHit");
     pUniformData->missColor = float3(0.0f);
     pUniformData->maxDepth = maxDepth;
     pUniformData->debug = debug;
@@ -139,20 +138,17 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     // Looking at a guide implies producing it, and so does denoising.
     const bool denoiseOn = denoising;
     pUniformData->writeAov = settings.getAs<uint32_t>("render/pt/writeAov") || DEBUG_MODE_IS_AOV(debug) || denoiseOn;
-    // Hand the denoiser the accumulated estimate whenever there is one.
-    //
-    // A camera that has stopped keeps tracing samples into the accumulation
-    // buffer, and that buffer is a far better input than the frame's single
-    // sample: it converges, and the denoiser then has almost nothing left to
-    // invent. Restricted to the paused-motion-blur case before, so standing
-    // still in the editor fed the denoiser one noisy sample per frame forever
-    // and left MetalFX's short history as the only thing cleaning it up -- which
-    // is why a still camera stayed visibly noisy no matter how long it sat there.
-    //
-    // Moving the camera resets the subframe counter, so this falls back to the
-    // single-sample path by itself. Jitter is skipped while it is on (see just
-    // below): the accumulation already samples the pixel area, and jittering on
-    // top of an average is a second, uncontrolled blur.
+    // Walk to the first rough, opaque surface. Glass and mirrors have no albedo
+    // of their own to demodulate against; writing the pane (guidePrimaryHit)
+    // hands MetalFX a black specular lobe in front of a transmitted room and
+    // the pane comes out opaque and smeared.
+    pUniformData->guidePrimaryHit = settings.getAs<uint32_t>("render/pt/guidePrimaryHit");
+    // A still frame already has an unbiased running estimate. Feed it to
+    // MetalFX once there is history rather than asking the neural filter to
+    // distinguish every rare, energetic light path from a firefly on its own.
+    // Moving the camera resets the accumulation and naturally falls back to the
+    // one-sample temporal path. Jitter is skipped below for the accumulated
+    // input because the path tracer has already sampled the pixel footprint.
     pUniformData->useAccumulatedColor =
         (effectiveAccumulation && in.subframeIndex > 0 && in.accumulationBuffer && !in.noAccumColor) ? 1u : 0u;
     const bool accumulating = pUniformData->useAccumulatedColor != 0u;
@@ -568,4 +564,3 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
 }
 
 } // namespace oka::metal
-

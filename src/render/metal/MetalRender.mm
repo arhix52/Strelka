@@ -27,6 +27,7 @@
 #include "MetalWavefrontIntegrator.h"
 #include "sampling_math.h"
 #include "integrator_features.h"
+#include "temporal_history_policy.h"
 #include <host/render_resolution.h>
 #include "residency_set_diff.h"
 #include <host/integrator_buffer_sizes.h>
@@ -711,9 +712,9 @@ bool MetalRender::memoryReport(MemoryReport& report) const
                        texBytes(mPost.upscaleTexture(0)) + texBytes(mPost.upscaleTexture(1)) +
                        texBytes(mPost.denoisedTexture());
         bytes += texBytes(mPost.guides().color) + texBytes(mPost.guides().depth) + texBytes(mPost.guides().motion) +
-                 texBytes(mPost.guides().diffuse) + texBytes(mPost.guides().specular) +
-                 texBytes(mPost.guides().normal) + texBytes(mPost.guides().roughness) +
-                 texBytes(mPost.guides().specularHitDistance) + texBytes(mPost.guides().reactive);
+                 texBytes(mPost.guides().diffuse) + texBytes(mPost.guides().specular) + texBytes(mPost.guides().normal) +
+                 texBytes(mPost.guides().roughness) + texBytes(mPost.guides().specularHitDistance) +
+                 texBytes(mPost.guides().reactive) + texBytes(mPost.guides().denoiseStrength);
         add("Display & guides", bytes);
     }
 
@@ -850,6 +851,36 @@ void MetalRender::init()
         hooks.writeIndex = &mWriteIndex;
         mPost.init(mDevice, &mMetal4, hooks);
     }
+    // MetalFX builds a large MPS graph when a denoised scaler is created. Do it
+    // during renderer initialization, while startup work is already expected,
+    // instead of stalling the first frame after the default-off editor control
+    // is enabled. When it is off, prewarm the scale that control will select;
+    // an explicitly enabled configuration keeps its exact current dimensions.
+    // A real resize still recreates it, as required by the descriptor.
+    const bool denoiseConfigured = getSettings()->getAs<bool>("render/pt/denoise");
+    const bool prewarmDenoiser = getSettings()->getAs<bool>("render/pt/prewarmDenoiser");
+    if ((denoiseConfigured || prewarmDenoiser) && !envFlag("MTL_SHADER_VALIDATION"))
+    {
+        const uint32_t outputWidth = getSettings()->getAs<uint32_t>("render/width");
+        const uint32_t outputHeight = getSettings()->getAs<uint32_t>("render/height");
+        const float requestedScale = getSettings()->getAs<float>("render/pt/upscaleFactor");
+        const bool wantUpscale =
+            denoiseConfigured ? getSettings()->getAs<bool>("render/pt/enableUpscale") : requestedScale < 1.0f;
+        const render_resolution::Resolution resolution =
+            render_resolution::resolve(outputWidth, outputHeight, wantUpscale, requestedScale);
+        if (resolution.pathTraceWidth != 0u && resolution.pathTraceHeight != 0u)
+        {
+            float minScale = 1.0f, maxScale = 1.0f;
+            MetalFxContext::denoiserScaleRange(mDevice, minScale, maxScale);
+            const float scaleX = (float)outputWidth / (float)resolution.pathTraceWidth;
+            const float scaleY = (float)outputHeight / (float)resolution.pathTraceHeight;
+            if (scaleX >= minScale && scaleX <= maxScale && scaleY >= minScale && scaleY <= maxScale)
+            {
+                mPost.metalFx().ensureDenoiser(
+                    mDevice, resolution.pathTraceWidth, resolution.pathTraceHeight, outputWidth, outputHeight);
+            }
+        }
+    }
     mIntegrator.init(mDevice, &mMetal4);
     mPost.buildTonemapperPipeline();
     mIntegrator.buildPipelines();
@@ -938,6 +969,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mPost.guides().roughness);
     add(mPost.guides().specularHitDistance);
     add(mPost.guides().reactive);
+    add(mPost.guides().denoiseStrength);
     add(mPost.denoisedTexture());
     for (MTL::Texture* t : mTextures.materialTextures())
         add(t);
@@ -1047,6 +1079,7 @@ metal::IntegratorSceneBindings MetalRender::integratorSceneBindings()
     b.guideRoughness = mPost.guides().roughness;
     b.guideSpecularHitDistance = mPost.guides().specularHitDistance;
     b.guideReactive = mPost.guides().reactive;
+    b.guideDenoiseStrength = mPost.guides().denoiseStrength;
     return b;
 }
 
@@ -1250,11 +1283,6 @@ void MetalRender::render(Buffer* output)
             mPost.ensureGuideTextures(width, height, outWidth, outHeight);
         }
     }
-    if (!denoising && mPost.guides().color)
-    {
-        mPost.releaseGuideTextures();
-        mHasDenoisedFrame = false;
-    }
     // Three ways to get from render resolution to output resolution, and the
     // choice matters most at one sample: the spatial scaler has no history and
     // resamples noise as-is, the temporal scaler accumulates across frames, and
@@ -1262,12 +1290,14 @@ void MetalRender::render(Buffer* output)
     // traced sample for clean guides.
     const uint32_t upscaleMode = getSettings()->getAs<uint32_t>("render/pt/upscaleMode");
     const bool wantTemporal = upscaling && !denoising && denoiserScaleSupported && upscaleMode == 1u;
+    bool temporalUpscaling = false;
     if (wantTemporal)
     {
         void* compiler = mMetal4.isValid() ? (void*)mMetal4.compiler() : nullptr;
-        if (mPost.metalFx().ensureTemporalScaler(mDevice, MTL::PixelFormatRGBA16Float, MTL::PixelFormatR32Float,
-                                                 MTL::PixelFormatRG16Float, MTL::PixelFormatRGBA16Float, width, height,
-                                                 outWidth, outHeight, compiler))
+        temporalUpscaling = mPost.metalFx().ensureTemporalScaler(
+            mDevice, MTL::PixelFormatRGBA16Float, MTL::PixelFormatR32Float, MTL::PixelFormatRG16Float,
+            MTL::PixelFormatRGBA16Float, width, height, outWidth, outHeight, compiler);
+        if (temporalUpscaling)
         {
             // Depth and motion are guides the temporal scaler needs as much as
             // the denoiser does, so the same textures and the same producing
@@ -1275,7 +1305,12 @@ void MetalRender::render(Buffer* output)
             mPost.ensureGuideTextures(width, height, outWidth, outHeight);
         }
     }
-    if (upscaling && !denoising && (!mPost.metalFx().hasTemporalScaler() || !denoiserScaleSupported))
+    if (!denoising && !temporalUpscaling && mPost.guides().color)
+    {
+        mPost.releaseGuideTextures();
+        mHasDenoisedFrame = false;
+    }
+    if (upscaling && !denoising && !temporalUpscaling)
     {
         void* spatialCompiler = mMetal4.isValid() ? (void*)mMetal4.compiler() : nullptr;
         mPost.metalFx().ensureSpatialScaler(mDevice, MTL::PixelFormatRGBA16Float, MTL::PixelFormatRGBA16Float, width,
@@ -1555,30 +1590,14 @@ void MetalRender::render(Buffer* output)
     // describe it. What breaks it is a discontinuity -- a teleport, a switch to
     // another camera, a projection change -- after which the history describes a
     // different place and blending it in is ghosting.
+    // A pose cannot reveal whether it arrived through continuous navigation or
+    // an edit/camera switch. Inferring a cut from adjacent movement magnitudes
+    // made a tiny accelerating drag look like a teleport. Smooth translation and
+    // rotation always keep history; operations that replace a pose call
+    // resetTemporalHistory() explicitly.
+    if (metal::temporal_history::projectionChanged(currView.mCamMatrices, mPrevView.mCamMatrices))
     {
-        const glm::float3 camPos = glm::float3(glm::inverse(currView.mCamMatrices.view)[3]);
-        // Third column of the view matrix is the camera's backward axis.
-        const glm::float3 camForward = -glm::float3(
-            currView.mCamMatrices.view[0][2], currView.mCamMatrices.view[1][2], currView.mCamMatrices.view[2][2]);
-        if (mHasPrevCamera)
-        {
-            const float step = glm::length(camPos - mPrevCameraPos);
-            const float turn = glm::dot(camForward, mPrevCameraForward);
-            // A jump is a step far larger than the one before it -- scale-free, so
-            // it works on a scene of any size -- or a turn no hand makes in a frame.
-            const bool teleported = mPrevCameraStep > 0.0f && step > 8.0f * mPrevCameraStep;
-            const bool spun = turn < 0.5f; // more than 60 degrees in one frame
-            const bool projectionChanged =
-                glm::any(glm::notEqual(currView.mCamMatrices.perspective, mPrevView.mCamMatrices.perspective));
-            if (teleported || spun || projectionChanged)
-            {
-                mResetDenoiseHistory = true;
-            }
-            mPrevCameraStep = step;
-        }
-        mPrevCameraPos = camPos;
-        mPrevCameraForward = camForward;
-        mHasPrevCamera = true;
+        mResetDenoiseHistory = true;
     }
 
     // Turning the denoiser on hands it a history from whenever it last ran.
@@ -2265,7 +2284,7 @@ void MetalRender::render(Buffer* output)
                 enc->setTexture(mPost.tonemapTarget(upscaling), 0);
                 enc->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
             }
-            const bool temporalUpscale = upscaling && !denoising && mPost.metalFx().hasTemporalScaler();
+            const bool temporalUpscale = temporalUpscaling;
             if (!useMetal4 && (denoising || temporalUpscale))
             {
                 // Spread the packed guides into the textures MetalFX reads, and
@@ -2288,6 +2307,7 @@ void MetalRender::render(Buffer* output)
                 enc->setTexture(mPost.guides().roughness, 6);
                 enc->setTexture(mPost.guides().specularHitDistance, 7);
                 enc->setTexture(mPost.guides().reactive, 8);
+                enc->setTexture(mPost.guides().denoiseStrength, 9);
                 enc->dispatchThreads(MTL::Size(width, height, 1), MTL::Size(8, 8, 1));
             }
             if (enc)
@@ -2307,6 +2327,7 @@ void MetalRender::render(Buffer* output)
                 in.roughness = mPost.guides().roughness;
                 in.specularHitDistance = mPost.guides().specularHitDistance;
                 in.reactive = mPost.guides().reactive;
+                in.denoiseStrength = mPost.guides().denoiseStrength;
                 in.output = mPost.denoisedTexture();
                 // The header documents this property twice and the two readings
                 // have opposite signs: "the subpixel sampling coordinate you use to
@@ -2320,10 +2341,10 @@ void MetalRender::render(Buffer* output)
                 const uint32_t jitterSign = settings.getAs<uint32_t>("render/pt/jitterSign");
                 in.jitterX = (jitterSign & 1u) ? -pUniformData->jitterX : pUniformData->jitterX;
                 in.jitterY = (jitterSign & 2u) ? -pUniformData->jitterY : pUniformData->jitterY;
-                // The same scalar the tone curve applies after the denoise. The
-                // three channels only differ under a white point the renderer
-                // does not currently set, and MetalFX takes one number.
-                in.exposure = simd::reduce_max(pUniformData->exposureValue);
+                // MetalFX accepts one exposure scalar; the renderer's current
+                // white point is neutral, but luminance remains correct if that
+                // becomes chromatic later.
+                in.exposure = simd::dot(pUniformData->exposureValue, float3{ 0.2126f, 0.7152f, 0.0722f });
                 in.depthReversed = pUniformData->denoiseDepthMode == kDenoiseDepthDevice;
                 // Reset when this frame has no valid predecessor to reproject
                 // from -- *not* when the estimator restarts. Accumulation restarts
@@ -2879,7 +2900,6 @@ metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
         // New scene: nothing from before relates to it.
         mResetDenoiseHistory = true;
         mFrameUniforms.requestSharcReset();
-        mHasPrevCamera = false;
         mHasPrevFramePose = false;
         mShutterIntervalActive = false;
         mNeedsInitialPose = !mScene->getAnimations().empty();

@@ -74,6 +74,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_env_map_math.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_buffer_sizes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_render_resolution.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_metal_temporal_history.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_residency_set_diff.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_wavefront_chunk_plan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_wavefront_stage_diagnostic.cpp

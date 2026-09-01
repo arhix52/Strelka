@@ -269,11 +269,6 @@ private:
     /// scene and camera as they stand. What the sample budget freezes is that
     /// texture, so a post-only frame needs to know it exists.
     bool mHasDenoisedFrame = false;
-    // Enough of the previous camera to tell a cut from a pan.
-    glm::float3 mPrevCameraPos{ 0.0f };
-    glm::float3 mPrevCameraForward{ 0.0f, 0.0f, -1.0f };
-    float mPrevCameraStep = 0.0f;
-    bool mHasPrevCamera = false;
     /// Force motion vectors back to camera-only, for measuring what the
     /// previous-frame pose is actually worth.
     const bool mNoPrevPose = envFlag("STRELKA_NO_PREV_POSE");

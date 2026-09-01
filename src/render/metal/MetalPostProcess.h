@@ -29,6 +29,7 @@ public:
         MTL::Texture* roughness = nullptr;
         MTL::Texture* specularHitDistance = nullptr;
         MTL::Texture* reactive = nullptr;
+        MTL::Texture* denoiseStrength = nullptr;
     };
 
     // Side effects the orchestrator owns (async display index / residency gen /
@@ -155,6 +156,9 @@ private:
     uint32_t mGuideHeight = 0;
     uint32_t mGuideOutWidth = 0;
     uint32_t mGuideOutHeight = 0;
+    MTL::TextureUsage mGuideTextureUsage = 0;
+    MTL::TextureUsage mGuideColorUsage = 0;
+    MTL::TextureUsage mGuideOutputUsage = 0;
 
     bool mLoggedUpscaleClamp = false;
     bool mLoggedMetal4DenoiserGap = false;
@@ -163,4 +167,3 @@ private:
 };
 
 } // namespace oka::metal
-

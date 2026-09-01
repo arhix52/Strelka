@@ -81,13 +81,16 @@ public:
         /// Per-pixel "ignore the history", for surfaces whose motion vectors
         /// cannot describe what is actually moving on them.
         MTL::Texture* reactive = nullptr;
+        /// Per-pixel "do not denoise" mask. MetalFX defines 1 as ignored and 0
+        /// as fully denoised. The renderer sets it only for noise-free background.
+        MTL::Texture* denoiseStrength = nullptr;
         MTL::Texture* output = nullptr;   ///< display resolution, linear
         float jitterX = 0.0f;             ///< the offset this frame was rendered with
         float jitterY = 0.0f;
-        /// The scene's exposure, the same scalar the tone curve applies later.
-        /// MetalFX weighs and clamps samples in an exposed space, so without it
-        /// path-traced radiance in the hundreds sits past the top of that space;
-        /// encodeDenoise has the measurements.
+        /// The same scalar exposure the display transform applies after the
+        /// denoise. MetalFX uses it to put linear scene radiance into the range
+        /// its temporal filter expects; `preExposure` remains one because the
+        /// input color itself is not pre-exposed.
         float exposure = 1.0f;
         bool depthReversed = true;
         bool resetHistory = false;        ///< camera cut, scene change, resize
@@ -173,6 +176,10 @@ public:
     void release();
 
 private:
+    void releaseSpatialScaler();
+    void releaseTemporalScaler();
+    void releaseDenoiser();
+
     void* mSpatialScaler = nullptr; ///< id<MTLFXSpatialScaler>, retained
     void* mSpatialScaler4 = nullptr; ///< id<MTL4FXSpatialScaler>, retained
     void* mDenoiser = nullptr; ///< id<MTLFXTemporalDenoisedScaler>, retained

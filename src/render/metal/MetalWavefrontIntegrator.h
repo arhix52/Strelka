@@ -74,6 +74,7 @@ struct IntegratorSceneBindings
     MTL::Texture* guideRoughness = nullptr;
     MTL::Texture* guideSpecularHitDistance = nullptr;
     MTL::Texture* guideReactive = nullptr;
+    MTL::Texture* guideDenoiseStrength = nullptr;
 };
 
 struct IntegratorFrameRequest
@@ -251,4 +252,3 @@ private:
 };
 
 } // namespace oka::metal
-

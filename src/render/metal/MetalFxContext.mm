@@ -42,7 +42,7 @@ bool MetalFxContext::ensureSpatialScaler(MTL::Device* device,
     {
         return true;
     }
-    release();
+    releaseSpatialScaler();
 
     @autoreleasepool
     {
@@ -205,7 +205,7 @@ bool MetalFxContext::ensureTemporalScaler(MTL::Device* device,
     {
         return true;
     }
-    release();
+    releaseTemporalScaler();
 
     @autoreleasepool
     {
@@ -358,7 +358,7 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
     {
         return true;
     }
-    release();
+    releaseDenoiser();
 
     @autoreleasepool
     {
@@ -389,6 +389,11 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         // STRELKA_NO_REACTIVE=1 remains a diagnostic override.
         desc.reactiveMaskTextureEnabled = envFlag("STRELKA_NO_REACTIVE") ? NO : YES;
         desc.reactiveMaskTextureFormat = kReactiveFormat;
+        // Background radiance has no noisy surface signal to reconstruct. Apple
+        // defines a value of one as "ignore this pixel", so the sky mask keeps
+        // MetalFX from softening an already noise-free environment.
+        desc.denoiseStrengthMaskTextureEnabled = YES;
+        desc.denoiseStrengthMaskTextureFormat = kReactiveFormat;
         desc.inputWidth = inputWidth;
         desc.inputHeight = inputHeight;
         desc.outputWidth = outputWidth;
@@ -423,9 +428,10 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         }
         mDenoiser = (void*)denoiser;
 
-        // Auto exposure is off, so this is the only thing that tells MetalFX what
-        // scale the radiance it is handed is in. Shared storage: a single half
-        // the CPU rewrites when the exposure changes, which is rarely.
+        // Fixed application exposure in a 1x1 R16Float. Auto exposure is off,
+        // and a missing texture is treated as zero. MetalFX uses this multiplier
+        // to normalize its filtering; the renderer still applies the same value
+        // once, after denoising, in the display transform.
         MTLTextureDescriptor* const exposureDesc =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float
                                                                width:1
@@ -458,9 +464,9 @@ MTL::TextureUsage MetalFxContext::denoiseGuideUsage() const
     // One flag set for every guide: they are all read the same way and taking the
     // union costs nothing.
     return (MTL::TextureUsage)(d.depthTextureUsage | d.motionTextureUsage | d.normalTextureUsage |
-                               d.roughnessTextureUsage | d.diffuseAlbedoTextureUsage |
-                               d.specularAlbedoTextureUsage | d.specularHitDistanceTextureUsage |
-                               d.reactiveTextureUsage);
+                               d.roughnessTextureUsage | d.diffuseAlbedoTextureUsage | d.specularAlbedoTextureUsage |
+                               d.specularHitDistanceTextureUsage | d.reactiveTextureUsage |
+                               d.denoiseStrengthMaskTextureUsage);
 }
 
 MTL::TextureUsage MetalFxContext::denoiseOutputUsage() const
@@ -485,19 +491,22 @@ void MetalFxContext::encodeDenoise(void* commandBuffer, const DenoiseInputs& inp
     d.roughnessTexture = (__bridge id<MTLTexture>)inputs.roughness;
     d.specularHitDistanceTexture = (__bridge id<MTLTexture>)inputs.specularHitDistance;
     d.reactiveMaskTexture = (__bridge id<MTLTexture>)inputs.reactive;
+    d.denoiseStrengthMaskTexture = (__bridge id<MTLTexture>)inputs.denoiseStrength;
     d.outputTexture = (__bridge id<MTLTexture>)inputs.output;
-    // Supply fixed scene exposure because MetalFX operates in exposed space.
-    // Auto exposure would normalize history differently from the incoming frame.
+    // The input radiance was not pre-exposed. `exposureTexture` is a different
+    // contract: the scalar MetalFX uses to normalize the scene-linear input.
+    d.preExposure = 1.0f;
     if (mExposureTexture)
     {
-        if (inputs.exposure != mExposure)
+        const float exposure = inputs.exposure > 0.0f ? inputs.exposure : 1.0f;
+        if (exposure != mExposure)
         {
-            const __fp16 half = (__fp16)inputs.exposure;
+            const __fp16 half = (__fp16)exposure;
             [(__bridge id<MTLTexture>)mExposureTexture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
                                                          mipmapLevel:0
                                                            withBytes:&half
                                                          bytesPerRow:sizeof(half)];
-            mExposure = inputs.exposure;
+            mExposure = exposure;
         }
         d.exposureTexture = (__bridge id<MTLTexture>)mExposureTexture;
     }
@@ -520,7 +529,24 @@ void MetalFxContext::encodeDenoise(void* commandBuffer, const DenoiseInputs& inp
     [d encodeToCommandBuffer:(__bridge id<MTLCommandBuffer>)commandBuffer];
 }
 
-void MetalFxContext::release()
+void MetalFxContext::releaseSpatialScaler()
+{
+    if (mSpatialScaler)
+    {
+        CFRelease(mSpatialScaler);
+        mSpatialScaler = nullptr;
+    }
+    if (mSpatialScaler4)
+    {
+        CFRelease(mSpatialScaler4);
+        mSpatialScaler4 = nullptr;
+    }
+    mColorFormat = MTL::PixelFormatInvalid;
+    mOutputFormat = MTL::PixelFormatInvalid;
+    mInputWidth = mInputHeight = mOutputWidth = mOutputHeight = 0;
+}
+
+void MetalFxContext::releaseTemporalScaler()
 {
     if (mTemporalScaler4)
     {
@@ -533,16 +559,10 @@ void MetalFxContext::release()
         mTemporalScaler = nullptr;
     }
     mTemporalInputWidth = mTemporalInputHeight = mTemporalOutputWidth = mTemporalOutputHeight = 0;
-    if (mSpatialScaler)
-    {
-        CFRelease(mSpatialScaler);
-        mSpatialScaler = nullptr;
-    }
-    if (mSpatialScaler4)
-    {
-        CFRelease(mSpatialScaler4);
-        mSpatialScaler4 = nullptr;
-    }
+}
+
+void MetalFxContext::releaseDenoiser()
+{
     if (mDenoiser)
     {
         CFRelease(mDenoiser);
@@ -555,9 +575,13 @@ void MetalFxContext::release()
     }
     mExposure = 0.0f;
     mDenoiseInputWidth = mDenoiseInputHeight = mDenoiseOutputWidth = mDenoiseOutputHeight = 0;
-    mColorFormat = MTL::PixelFormatInvalid;
-    mOutputFormat = MTL::PixelFormatInvalid;
-    mInputWidth = mInputHeight = mOutputWidth = mOutputHeight = 0;
+}
+
+void MetalFxContext::release()
+{
+    releaseSpatialScaler();
+    releaseTemporalScaler();
+    releaseDenoiser();
 }
 
 } // namespace oka

@@ -654,6 +654,11 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", 1u);
     m_settingsManager->setAs<uint32_t>("render/pt/writeAov", 0);
     m_settingsManager->setAs<bool>("render/pt/denoise", false);
+    // The MetalFX denoiser compiles a large graph synchronously. The interactive
+    // renderer prepares it during startup so selecting the default-off mode does
+    // not put that work on a display frame; headless runs opt in only when their
+    // configuration actually enables denoising.
+    m_settingsManager->setAs<bool>("render/pt/prewarmDenoiser", true);
     // Luminance ceiling for the denoiser's colour input, in exposed units: a
     // single unbounded sample gets smeared over many frames by a temporal filter.
     // 0 disables it.
@@ -4495,6 +4500,13 @@ void EditorApp::frameSelectionInView()
     if (m_sharedCtx)
     {
         m_sharedCtx->mSubframeIndex = 0;
+    }
+    // Unlike continuous navigation, framing replaces the whole pose in one
+    // operation. Mark that cut explicitly instead of asking the renderer to
+    // guess from how far the camera happened to move.
+    if (m_render)
+    {
+        m_render->resetTemporalHistory();
     }
 
     STRELKA_INFO("ACTION frame_selection camera={} projection={}", m_selectedCamera,
