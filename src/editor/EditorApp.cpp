@@ -4882,6 +4882,7 @@ void EditorApp::drawUI()
                 "re-rendered headlessly.");
         }
         ImGui::MenuItem("Memory", nullptr, &m_showMemory);
+        ImGui::MenuItem("Render Debug", nullptr, &m_showRenderDebug);
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Window"))
@@ -4955,6 +4956,10 @@ void EditorApp::drawUI()
     if (m_showMemory)
     {
         drawMemoryPanel();
+    }
+    if (m_showRenderDebug)
+    {
+        drawRenderDebugPanel();
     }
     drawAnimationPanel();
     if (m_showOutliner)

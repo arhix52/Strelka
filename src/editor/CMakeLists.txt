@@ -12,11 +12,14 @@ set(EDITOR_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/ViewportPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/RenderSettingsPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/CameraPanel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/panels/GamepadSettings.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/panels/LoadingOverlay.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/AnimationPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/PropertyPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/OutlinerPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/MaterialPanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/panels/MemoryPanel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/panels/RenderDebugPanel.cpp
 )
 
 add_library(strelka_vendor_file_dialog OBJECT

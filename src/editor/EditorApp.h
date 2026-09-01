@@ -59,6 +59,7 @@ private:
     bool m_showProperties = true;
     bool m_showMaterials = true;
     bool m_showMemory = false;
+    bool m_showRenderDebug = false;
     bool m_outlinerScrollToSelection = false;
     bool m_layoutRebuildPending = false;
     // Runs the undocked-window scan once at startup; see drawUI().
@@ -268,6 +269,7 @@ public:
     /// panel is already long and this is self-contained.
     void drawGamepadSettings();
     void drawMemoryPanel();
+    void drawRenderDebugPanel();
     void drawAnimationPanel();
     void drawPropertyPanel();
     void drawOutlinerPanel();

@@ -2,18 +2,15 @@
 #include "../editor_denoiser_ui.h"
 #include "../editor_frame_budget.h"
 
-#include <cmath>
 #include <strelka/display/output_policy.h>
 
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
 
-#include <cfloat>
-#include <cstdio>
-#include <ctime>
-#include <filesystem>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
 #include <string>
 #include <utility>
 #include <vector>
@@ -326,1135 +323,839 @@ void drawDisplayOutputSettings(SettingsManager& settings, const Display& display
 
 void EditorApp::drawRenderSettingsPanel()
 {
-    ImGui::Begin("Render Settings:");
-
-    ImGui::BeginTabBar("RenderSettingsTabs");
-
-    if (ImGui::BeginTabItem("Display"))
+    if (!ImGui::Begin("Render Settings:"))
     {
-        drawDisplayOutputSettings(*m_settingsManager, *m_display);
-
-        if (ImGui::TreeNode("Display tonemap"))
-        {
-            const char* const tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
-            int currentTonemapItemId = (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/tonemapperType"), 3u);
-            if (ImGui::BeginCombo("Operator", tonemapItems[currentTonemapItemId]))
-            {
-                for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
-                {
-                    const bool is_selected = (currentTonemapItemId == n);
-                    if (ImGui::Selectable(tonemapItems[n], is_selected))
-                    {
-                        currentTonemapItemId = n;
-                        m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", (uint32_t)n);
-                    }
-                    if (is_selected)
-                    {
-                        ImGui::SetItemDefaultFocus();
-                    }
-                }
-                ImGui::EndCombo();
-            }
-
-            auto gamma = m_settingsManager->getAs<float>("render/post/gamma");
-            if (ImGui::DragFloat("Gamma", &gamma, 0.05f, 0.0f, 5.0f, "%.2f"))
-            {
-                m_settingsManager->setAs<float>("render/post/gamma", gamma);
-            }
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::SetTooltip("0 = off; default 2.4 is an sRGB-like transfer, not a pure power.");
-            }
-
-            const float maxEdr = m_settingsManager->getAs<float>("render/post/tonemapper/maxEDR");
-            ImGui::TextDisabled("Display max EDR %.2f (tone-map shoulder follows screen headroom)", maxEdr);
-
-            ImGui::TreePop();
-        }
-
-        ImGui::EndTabItem();
+        ImGui::End();
+        return;
     }
 
-    if (ImGui::BeginTabItem("Quality"))
+    if (ImGui::BeginTabBar("RenderSettingsTabs"))
     {
-        ImGui::SeparatorText("Debug & validation");
-        bool analytic = m_settingsManager->getAs<bool>("render/validate/analyticLights");
-        if (ImGui::Checkbox("Analytic Lights", &analytic))
-        {
-            m_settingsManager->setAs<bool>("render/validate/analyticLights", analytic);
-            m_sharedCtx->mSubframeIndex = 0;
-        }
 
-    // Must match DebugMode in ShaderTypes.h, in order.
-    const char* const debugViewOptions[] = { "None",
-                                             "Normals",
-                                             "Motion Blur",
-                                             "AOV: diffuse",
-                                             "AOV: specular",
-                                             "AOV: normal",
-                                             "AOV: roughness",
-                                             "AOV: depth",
-                                             "AOV: motion",
-                                             "AOV: reactive",
-                                             "AOV: spec hit distance",
-                                             "Cache: voxel grid",
-                                             "Cache: radiance",
-                                             "Cache: occupancy",
-                                             "Cache: bounce count" };
-    // What each cache view is for, because none of them is self-explanatory and
-    // all four exist to answer a specific question about a specific knob.
-    const char* const debugViewHelp[] = {
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        "A stable colour per cache voxel, at the first surface each camera ray reaches.\n"
-        "This is how the voxel size below gets chosen -- it needs no cache allocated,\n"
-        "so dial it in here before switching the cache on. Voxels should be small\n"
-        "against the features you want the cache to keep apart, and large enough that\n"
-        "many paths land in each.",
-        "What the cache would answer at the first surface, shown directly instead of\n"
-        "through the bounces that normally stand between a lookup and the pixel.\n"
-        "Tonemapped like the beauty render, so the two can be compared side by side.\n"
-        "Black means that voxel is missing or has not resolved yet.",
-        "One block per table entry: green has resolved radiance, amber is inserted but\n"
-        "has nothing to answer with yet, black is free. Around 10-20% occupied with a\n"
-        "static camera is healthy. A table that is mostly amber is being evicted before\n"
-        "it ever resolves -- raise the entry count or the stale-frame threshold.",
-        "How deep paths actually went: blue none, green one, yellow two, red three or\n"
-        "more. Comparing this with the cache off and on is the direct measurement of\n"
-        "what the cache buys, and the only one that says *where*. A heatmap that does\n"
-        "not cool when the cache is switched on is a scene that is not being cached,\n"
-        "whatever the frame time says."
-    };
-    static_assert(IM_ARRAYSIZE(debugViewOptions) == IM_ARRAYSIZE(debugViewHelp),
-                  "every debug view needs a help slot, even an empty one");
-    const int debugViewOptionCount = IM_ARRAYSIZE(debugViewOptions);
-    const uint32_t requestedDebugView = m_settingsManager->getAs<uint32_t>("render/pt/debug");
-    int currentDebugViewOption = requestedDebugView < (uint32_t)debugViewOptionCount ? (int)requestedDebugView : 0;
-    if (ImGui::BeginCombo("Debug view", debugViewOptions[currentDebugViewOption]))
-    {
-        for (int n = 0; n < debugViewOptionCount; n++)
+        if (ImGui::BeginTabItem("Display"))
         {
-            const bool is_selected = (currentDebugViewOption == n);
-            if (ImGui::Selectable(debugViewOptions[n], is_selected))
+            drawDisplayOutputSettings(*m_settingsManager, *m_display);
+
+            if (ImGui::TreeNode("Display tonemap"))
             {
-                if (currentDebugViewOption != n)
+                const char* const tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
+                int currentTonemapItemId =
+                    (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/tonemapperType"), 3u);
+                if (ImGui::BeginCombo("Operator", tonemapItems[currentTonemapItemId]))
                 {
-                    currentDebugViewOption = n;
-                    m_settingsManager->setAs<uint32_t>("render/pt/debug", currentDebugViewOption);
-                    m_sharedCtx->mSubframeIndex = 0;
-                    m_render->resetTemporalHistory();
-                }
-            }
-            if (debugViewHelp[n] != nullptr && ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::TextUnformatted(debugViewHelp[n]);
-                ImGui::EndTooltip();
-            }
-            if (is_selected)
-            {
-                ImGui::SetItemDefaultFocus();
-            }
-        }
-        ImGui::EndCombo();
-    }
-
-    if (ImGui::TreeNodeEx("Preview Resolution", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        uint32_t previewWidth = m_settingsManager->getAs<uint32_t>("render/width");
-        uint32_t previewHeight = m_settingsManager->getAs<uint32_t>("render/height");
-        const int preset = editor_viewport::findPreset(previewWidth, previewHeight);
-        static bool customSelected = false;
-        int selectedPreset =
-            !customSelected && preset >= 0 ? preset : static_cast<int>(editor_viewport::kPreviewPresets.size());
-        const char* const presetNames[] = {
-            editor_viewport::kPreviewPresets[0].label,
-            editor_viewport::kPreviewPresets[1].label,
-            editor_viewport::kPreviewPresets[2].label,
-            editor_viewport::kPreviewPresets[3].label,
-            "Custom",
-        };
-        if (ImGui::Combo("Preset", &selectedPreset, presetNames, IM_ARRAYSIZE(presetNames)))
-        {
-            const int presetCount = static_cast<int>(editor_viewport::kPreviewPresets.size());
-            customSelected = selectedPreset == presetCount;
-            if (!customSelected && selectedPreset >= 0 && selectedPreset < presetCount)
-            {
-                const editor_viewport::PreviewPreset& selected = editor_viewport::kPreviewPresets[selectedPreset];
-                requestPreviewResolution(selected.width, selected.height);
-                previewWidth = selected.width;
-                previewHeight = selected.height;
-            }
-        }
-
-        if (customSelected)
-        {
-            static bool lockAspect = true;
-            int customWidth = static_cast<int>(previewWidth);
-            int customHeight = static_cast<int>(previewHeight);
-            const float aspect =
-                previewHeight > 0 ? static_cast<float>(previewWidth) / static_cast<float>(previewHeight) : 1.0f;
-            if (ImGui::InputInt("Width", &customWidth))
-            {
-                const uint32_t width = editor_viewport::clampPreviewDimension(customWidth);
-                const uint32_t height = lockAspect ? editor_viewport::clampPreviewDimension(static_cast<int>(
-                                                         std::lround(static_cast<float>(width) / aspect))) :
-                                                     previewHeight;
-                requestPreviewResolution(width, height);
-            }
-            if (ImGui::InputInt("Height", &customHeight))
-            {
-                const uint32_t height = editor_viewport::clampPreviewDimension(customHeight);
-                const uint32_t width = lockAspect ? editor_viewport::clampPreviewDimension(static_cast<int>(
-                                                        std::lround(static_cast<float>(height) * aspect))) :
-                                                    previewWidth;
-                requestPreviewResolution(width, height);
-            }
-            ImGui::Checkbox("Lock aspect ratio", &lockAspect);
-            ImGui::SameLine();
-            if (ImGui::Button("Swap"))
-            {
-                requestPreviewResolution(previewHeight, previewWidth);
-            }
-        }
-
-        ImGui::TextDisabled("Viewport resize changes presentation only");
-        ImGui::TreePop();
-    }
-
-    if (ImGui::TreeNode("Path Tracer"))
-    {
-        const char* const rectlightSamplingMethodItems[] = { "Uniform", "Advanced" };
-        static int currentRectlightSamplingMethodItemId = 0;
-        if (ImGui::BeginCombo("Rect Light Sampling", rectlightSamplingMethodItems[currentRectlightSamplingMethodItemId]))
-        {
-            for (const auto& item : rectlightSamplingMethodItems)
-            {
-                const bool is_selected = (item == rectlightSamplingMethodItems[currentRectlightSamplingMethodItemId]);
-                if (ImGui::Selectable(item, is_selected))
-                {
-                    currentRectlightSamplingMethodItemId = static_cast<int>(&item - rectlightSamplingMethodItems);
-                }
-                if (is_selected)
-                {
-                    ImGui::SetItemDefaultFocus();
-                }
-            }
-            m_settingsManager->setAs<uint32_t>("render/pt/rectLightSamplingMethod", currentRectlightSamplingMethodItemId);
-            ImGui::EndCombo();
-        }
-
-        const char* const samplerTypeItems[] = { "Halton", "PCG", "Sobol (Owen)", "Sobol + blue noise",
-                                           "Hybrid (blue noise -> Sobol)" };
-        // Read back rather than remembered in a static: the default is set in
-        // loadSettings, and a static starting at zero showed "Halton" no matter
-        // what was actually running.
-        int currentSamplerTypeId = (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/samplerType"), 4u);
-        if (ImGui::BeginCombo("Sampler", samplerTypeItems[currentSamplerTypeId]))
-        {
-            for (const auto& item : samplerTypeItems)
-            {
-                const bool is_selected = (item == samplerTypeItems[currentSamplerTypeId]);
-                if (ImGui::Selectable(item, is_selected))
-                {
-                    currentSamplerTypeId = (int)(&item - samplerTypeItems);
-                    m_settingsManager->setAs<uint32_t>("render/pt/samplerType", currentSamplerTypeId);
-                }
-                if (is_selected)
-                {
-                    ImGui::SetItemDefaultFocus();
-                }
-            }
-            ImGui::EndCombo();
-        }
-        if (currentSamplerTypeId == 0)
-        {
-            ImGui::TextDisabled("Halton aliases its bases every 32 dimensions; error stalls past ~512 spp.");
-        }
-        if (currentSamplerTypeId == 4)
-        {
-            auto bnSwitch = m_settingsManager->getAs<uint32_t>("render/pt/blueNoiseSwitchSpp");
-            if (ImGui::SliderInt("Blue-noise samples", (int*)&bnSwitch, 0, 256))
-            {
-                m_settingsManager->setAs<uint32_t>("render/pt/blueNoiseSwitchSpp", bnSwitch);
-            }
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::SetTooltip(
-                    "Samples drawn from the blue-noise sequence before handing over to\n"
-                    "per-pixel scrambling. Blue noise looks cleaner at low sample counts;\n"
-                    "scrambling converges faster past a few dozen.");
-            }
-        }
-
-        // One choice, not two checkboxes -- and this backend's choices, not the
-        // other backend's.
-        //
-        // Denoising and upscaling are alternatives on both: MetalFX sends a frame
-        // through the spatial scaler or the temporal denoised one, and the OptiX
-        // plan has upscaling imply denoising because nothing in it scales without
-        // also running the network. As separate toggles they offered four states,
-        // two of which meant the same thing and none of which said so.
-        //
-        // Which states exist, what they are called, whether the render scale is a
-        // slider or follows from the mode, and what the fallback warning means
-        // are all the backend's answer to give -- see editor_denoiser_ui.h. This
-        // panel used to hard-code MetalFX's answers and show them over OptiX,
-        // where the name was wrong and the scale slider did nothing.
-        const editor_denoiser::Ui fx = editor_denoiser::uiFor(m_render->denoiserKind());
-        const float requestedScale = m_settingsManager->getAs<float>("render/pt/upscaleFactor");
-        const bool denoiseSetting = m_settingsManager->getAs<bool>("render/pt/denoise");
-        const bool upscaleSetting = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
-        // Keep the remembered index and what is actually running in step, every
-        // frame rather than once. A mode index outliving the list it indexed is
-        // how the combo came to show one thing while the renderer ran another: it
-        // displayed whatever sat at that index, and the next click picked
-        // something nobody asked for. The settings move without the panel too --
-        // the frame-budget button, the benchmark drivers, STRELKA_DENOISE.
-        if (fx.modeCount > 0 &&
-            (!mDenoiseModeInitialized || mDenoiseModeIndex >= fx.modeCount ||
-             !editor_denoiser::settingsMatchMode(fx, mDenoiseModeIndex, denoiseSetting, upscaleSetting, requestedScale)))
-        {
-            mDenoiseModeIndex = editor_denoiser::modeIndexFromSettings(fx, denoiseSetting, upscaleSetting);
-            mDenoiseModeInitialized = true;
-        }
-
-        if (!editor_denoiser::hasDenoiser(fx))
-        {
-            ImGui::TextDisabled("This backend has no denoiser");
-        }
-        else
-        {
-            if (ImGui::BeginCombo(fx.title, editor_denoiser::modeAt(fx, mDenoiseModeIndex).label))
-            {
-                for (int n = 0; n < fx.modeCount; n++)
-                {
-                    const bool is_selected = (mDenoiseModeIndex == n);
-                    if (ImGui::Selectable(fx.modes[n].label, is_selected) && mDenoiseModeIndex != n)
+                    for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
                     {
-                        mDenoiseModeIndex = n;
-                        m_settingsManager->setAs<bool>("render/pt/denoise", fx.modes[n].denoise);
-                        // The denoiser is a scaler too: it needs the reduced-
-                        // resolution render whenever the mode asks for one, and
-                        // nothing else does.
-                        m_settingsManager->setAs<bool>(
-                            "render/pt/enableUpscale", editor_denoiser::shouldUpscale(fx, n, requestedScale));
-                        m_render->resetTemporalHistory();
-                    }
-                    if (is_selected)
-                    {
-                        ImGui::SetItemDefaultFocus();
-                    }
-                }
-                ImGui::EndCombo();
-            }
-
-            const editor_denoiser::Mode fxMode = editor_denoiser::modeAt(fx, mDenoiseModeIndex);
-            const bool denoiserOn = fxMode.denoise || fxMode.upscale;
-            if (denoiserOn && fx.modeHint != nullptr)
-            {
-                ImGui::TextDisabled("%s", fx.modeHint);
-            }
-
-            // Temporal is a property of the network on OptiX rather than a mode of
-            // its own: both the denoise-only and the 2x model have a temporal
-            // variant, so it is one switch instead of a doubled list.
-            if (fx.temporalToggle && denoiserOn)
-            {
-                bool temporal = m_settingsManager->getAs<uint32_t>("render/pt/upscaleMode") == 1u;
-                if (ImGui::Checkbox("Temporal", &temporal))
-                {
-                    m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", temporal ? 1u : 0u);
-                    m_render->resetTemporalHistory();
-                }
-                ImGui::SameLine();
-                ImGui::BeginDisabled();
-                ImGui::TextUnformatted(temporal ? "(reprojects the previous frame)" : "(each frame denoised alone)");
-                ImGui::EndDisabled();
-            }
-
-            if (fx.playbackMotionBlurToggle && fxMode.denoise)
-            {
-                bool playbackBlur = m_settingsManager->getAs<bool>("render/pt/denoisePlaybackMotionBlur");
-                if (ImGui::Checkbox("Path-traced playback blur", &playbackBlur))
-                {
-                    m_settingsManager->setAs<bool>("render/pt/denoisePlaybackMotionBlur", playbackBlur);
-                    m_render->resetTemporalHistory();
-                }
-                ImGui::SameLine();
-                ImGui::BeginDisabled();
-                ImGui::TextUnformatted(playbackBlur ? "(uses SPP per frame)" : "(stable shutter-close guides)");
-                ImGui::EndDisabled();
-            }
-
-            if (denoiserOn && fx.freeRenderScale)
-            {
-                float factor = requestedScale;
-                if (ImGui::SliderFloat("PT scale inside preview", &factor, 0.25f, 1.0f, "%.2f"))
-                {
-                    m_settingsManager->setAs<float>("render/pt/upscaleFactor", factor);
-                    m_settingsManager->setAs<bool>(
-                        "render/pt/enableUpscale", editor_denoiser::shouldUpscale(fx, mDenoiseModeIndex, factor));
-                    m_render->resetTemporalHistory();
-                }
-                ImGui::SameLine();
-                ImGui::BeginDisabled();
-                const char* const scaleStatus =
-                    factor < 1.0f ? "(rendering below display resolution)" :
-                                    (fxMode.denoise ? "(denoising at 1:1)" : "(inactive at 1:1; lower scale to enable)");
-                ImGui::TextUnformatted(scaleStatus);
-                ImGui::EndDisabled();
-            }
-        }
-
-        const uint32_t displayWidth = m_settingsManager->getAs<uint32_t>("render/width");
-        const uint32_t displayHeight = m_settingsManager->getAs<uint32_t>("render/height");
-        const editor_denoiser::Resolution previewRes =
-            editor_denoiser::resolution(fx, mDenoiseModeIndex, requestedScale, displayWidth, displayHeight);
-        ImGui::TextDisabled("PT internal: %u x %u", previewRes.pathTraceWidth, previewRes.pathTraceHeight);
-        ImGui::TextDisabled("Preview output: %u x %u", previewRes.outputWidth, previewRes.outputHeight);
-        if (m_render->denoiserFallbackActive())
-        {
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "%s", fx.fallbackMessage);
-        }
-        const double lastGpuMs = m_render->getLastRenderTimeMs();
-        if (lastGpuMs > editor_frame_budget::kInteractiveBudgetMs)
-        {
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "Last PT frame: %.0f ms (interactive budget: %.0f ms)",
-                               lastGpuMs, editor_frame_budget::kInteractiveBudgetMs);
-            // The scale the frame was *actually* traced at, not the one the
-            // slider holds: the budget divides a measured GPU time by a pixel
-            // count, and on a fixed-ratio backend the slider is not that count.
-            const float tracedScale = editor_denoiser::appliedScale(fx, mDenoiseModeIndex, requestedScale);
-            const editor_frame_budget::RenderSettingsSnapshot current{
-                displayWidth,
-                displayHeight,
-                tracedScale < 1.0f,
-                tracedScale,
-            };
-            const editor_frame_budget::FrameSample sample = editor_frame_budget::sampleFrom(lastGpuMs, current);
-            if (fx.freeRenderScale)
-            {
-                const float suggestedScale = editor_frame_budget::recommendedScale(sample, displayWidth, displayHeight);
-                // Scaling, not denoising: the cheapest way to buy frame time, and
-                // the one that does not depend on a history the camera is about to
-                // invalidate anyway.
-                const int scalingMode = editor_denoiser::modeIndexFromSettings(fx, false, true);
-                const std::string label = fmt::format("Lower PT scale to {:.2f}", suggestedScale);
-                if (ImGui::Button(label.c_str()))
-                {
-                    m_settingsManager->setAs<bool>("render/pt/denoise", fx.modes[scalingMode].denoise);
-                    m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
-                    m_settingsManager->setAs<float>("render/pt/upscaleFactor", suggestedScale);
-                    m_settingsManager->setAs<bool>(
-                        "render/pt/enableUpscale", editor_denoiser::shouldUpscale(fx, scalingMode, suggestedScale));
-                    mDenoiseModeIndex = scalingMode;
-                    mDenoiseModeInitialized = true;
-                    m_render->resetTemporalHistory();
-                }
-            }
-            else if (editor_denoiser::hasDenoiser(fx))
-            {
-                // Nothing to lower: this backend's only lever is its fixed ratio,
-                // so the offer is to switch it on rather than to pick a number.
-                const int scalingMode = editor_denoiser::modeIndexFromSettings(fx, true, true);
-                const std::string label = fmt::format("Switch to \"{}\"", fx.modes[scalingMode].label);
-                ImGui::BeginDisabled(mDenoiseModeIndex == scalingMode);
-                if (ImGui::Button(label.c_str()))
-                {
-                    m_settingsManager->setAs<bool>("render/pt/denoise", fx.modes[scalingMode].denoise);
-                    m_settingsManager->setAs<bool>(
-                        "render/pt/enableUpscale", editor_denoiser::shouldUpscale(fx, scalingMode, requestedScale));
-                    mDenoiseModeIndex = scalingMode;
-                    mDenoiseModeInitialized = true;
-                    m_render->resetTemporalHistory();
-                }
-                ImGui::EndDisabled();
-            }
-        }
-
-        auto maxDepth = m_settingsManager->getAs<uint32_t>("render/pt/depth");
-        if (ImGui::SliderInt("Max Depth", (int*)&maxDepth, 1, 16))
-        {
-            m_settingsManager->setAs<uint32_t>("render/pt/depth", maxDepth);
-        }
-
-
-        auto sppSubframe = m_settingsManager->getAs<uint32_t>("render/pt/spp");
-        if (ImGui::SliderInt("SPP per frame", (int*)&sppSubframe, 1, 32))
-        {
-            m_settingsManager->setAs<uint32_t>("render/pt/spp", sppSubframe);
-        }
-
-        auto sppTotal = m_settingsManager->getAs<uint32_t>("render/pt/sppTotal");
-        if (ImGui::SliderInt("Accumulation SPP limit", (int*)&sppTotal, 1, 10000))
-        {
-            m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", sppTotal);
-        }
-
-        bool accumulationEnabled = m_settingsManager->getAs<bool>("render/pt/enableAcc");
-        if (ImGui::Checkbox("Accumulate while still", &accumulationEnabled))
-        {
-            m_settingsManager->setAs<bool>("render/pt/enableAcc", accumulationEnabled);
-        }
-
-        ImGui::TreePop();
-    }
-
-        ImGui::EndTabItem();
-    }
-
-    // --- Radiance cache ----------------------------------------------------
-    //
-    // Everything here changes what the image is, not just how fast it arrives,
-    // so every control restarts accumulation. Counting occupancy is a pass over
-    // the whole table, so it is asked for only while this node is open -- which
-    // is what the setting outside the `if` turns back off again.
-    if (ImGui::BeginTabItem("Cache"))
-    {
-        const bool cachePanelOpen = ImGui::TreeNodeEx("Radiance cache (SHaRC)", ImGuiTreeNodeFlags_DefaultOpen);
-        m_settingsManager->setAs<bool>("render/pt/sharcReportOccupancy", cachePanelOpen);
-        if (cachePanelOpen)
-        {
-            auto restart = [this]() { m_sharedCtx->mSubframeIndex = 0; };
-
-            bool cacheEnabled = m_settingsManager->getAs<bool>("render/pt/sharc");
-            if (ImGui::Checkbox("Enable", &cacheEnabled))
-            {
-                m_settingsManager->setAs<bool>("render/pt/sharc", cacheEnabled);
-                restart();
-            }
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::TextUnformatted(
-                    "Let a path stop after a few bounces and read what the rest of it\n"
-                    "would have gathered, averaged over every path that has passed\n"
-                    "through the same place. Trades a little bias for path length.");
-                ImGui::EndTooltip();
-            }
-
-            ImGui::SameLine();
-            if (ImGui::Button("Reset cache"))
-            {
-                // Consumed by the renderer on the next frame. Worth having as a
-                // button: the cache deliberately survives camera movement now,
-                // so this is the only way to see a scene cached from nothing.
-                m_settingsManager->setAs<bool>("render/pt/sharcReset", true);
-                restart();
-            }
-
-            uint32_t entriesUsed = 0;
-            uint32_t capacity = 0;
-            if (m_render != nullptr && m_render->radianceCacheOccupancy(entriesUsed, capacity) && capacity > 0)
-            {
-                const float occupancy = 100.0f * (float)entriesUsed / (float)capacity;
-                ImGui::Text("Occupancy: %.1f%%  (%u / %u entries)", (double)occupancy, entriesUsed, capacity);
-                // The SDK's own reading of this number, which is the only thing
-                // that makes it actionable.
-                if (occupancy > 60.0f)
-                {
-                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f),
-                                       "Table is crowded -- raise entries, or evict sooner.");
-                }
-            }
-            else if (cacheEnabled)
-            {
-                ImGui::TextDisabled("Occupancy: not reported by this backend");
-            }
-
-            // Entries, as an exponent: the table is masked rather than divided
-            // into, so it has to be a power of two, and a free-typed number
-            // would only be rounded down behind the user's back.
-            const uint32_t entries = m_settingsManager->getAs<uint32_t>("render/pt/sharcCapacity");
-            int exponent = 22;
-            while ((1u << exponent) > entries && exponent > 16)
-            {
-                --exponent;
-            }
-            if (ImGui::SliderInt("Entries (2^n)", &exponent, 16, 25))
-            {
-                m_settingsManager->setAs<uint32_t>("render/pt/sharcCapacity", 1u << exponent);
-                restart();
-            }
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::Text("%u entries, %.0f MB.\nMore entries means fewer probe runs that come back full.",
-                            1u << exponent, (double)(1u << exponent) * 40.0 / 1e6);
-                ImGui::EndTooltip();
-            }
-
-            float voxelPixels = m_settingsManager->getAs<float>("render/pt/sharcVoxelPixels");
-            if (ImGui::SliderFloat("Voxel size (px)", &voxelPixels, 1.0f, 32.0f, "%.1f"))
-            {
-                m_settingsManager->setAs<float>("render/pt/sharcVoxelPixels", voxelPixels);
-                restart();
-            }
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::TextUnformatted(
-                    "How many pixels wide a voxel is, at any distance -- the size follows\n"
-                    "the distance to the camera, so one number means the same thing in a\n"
-                    "room and in a forest. Use the 'Cache: voxel grid' debug view to set it.");
-                ImGui::EndTooltip();
-            }
-
-            uint32_t firstBounce = m_settingsManager->getAs<uint32_t>("render/pt/sharcDepth");
-            if (ImGui::SliderInt("First cached bounce", (int*)&firstBounce, 0, 8))
-            {
-                m_settingsManager->setAs<uint32_t>("render/pt/sharcDepth", firstBounce);
-                restart();
-            }
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::TextUnformatted(
-                    "Bounces before this are always traced. The camera ray and the first\n"
-                    "bounce carry the detail a voxel average would blur, so reading the\n"
-                    "cache too early shows up as flat, blotchy indirect light.");
-                ImGui::EndTooltip();
-            }
-
-            uint32_t readFrames = m_settingsManager->getAs<uint32_t>("render/pt/sharcReadFrames");
-            if (ImGui::SliderInt("Read until (samples)", (int*)&readFrames, 0, 1024))
-            {
-                m_settingsManager->setAs<uint32_t>("render/pt/sharcReadFrames", readFrames);
-                restart();
-            }
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::TextUnformatted(
-                    "Stop reading the cache once this many samples have accumulated;\n"
-                    "0 never stops. Deposits carry on either way, so the cache is warm\n"
-                    "the moment the camera moves again.\n\n"
-                    "This is not a taste setting. The cache's error is one value per\n"
-                    "voxel held across a temporal window, so it is correlated in space\n"
-                    "and time and does not average away -- it is a floor, while plain\n"
-                    "path tracing keeps converging past it. Measured on the isometric\n"
-                    "bathroom against a 4096-spp reference, structured error only:\n"
-                    "  16 spp   0.154 without, 0.098 with   -- cache half the error\n"
-                    "  64 spp   0.063 without, 0.039 with   -- cache half the error\n"
-                    " 256 spp   0.022 without, 0.019 with   -- level\n"
-                    "1024 spp   0.006 without, 0.012 with   -- cache twice the error\n\n"
-                    "So the cache is both the faster and the better image while you are\n"
-                    "moving, and the thing in the way once you stop.");
-                ImGui::EndTooltip();
-            }
-
-            uint32_t minSamples = m_settingsManager->getAs<uint32_t>("render/pt/sharcMinSamples");
-            if (ImGui::SliderInt("Min samples to read", (int*)&minSamples, 1, 256))
-            {
-                m_settingsManager->setAs<uint32_t>("render/pt/sharcMinSamples", minSamples);
-                restart();
-            }
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::TextUnformatted(
-                    "How much a voxel has to have seen before a path will believe it.\n"
-                    "Too low and the cache spreads one path's noise over a region.");
-                ImGui::EndTooltip();
-            }
-
-            uint32_t accumFrames = m_settingsManager->getAs<uint32_t>("render/pt/sharcAccumFrames");
-            if (ImGui::SliderInt("Temporal window (frames)", (int*)&accumFrames, 1, 256))
-            {
-                m_settingsManager->setAs<uint32_t>("render/pt/sharcAccumFrames", accumFrames);
-                restart();
-            }
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::TextUnformatted(
-                    "How many frames a voxel averages over. Larger is quieter and slower\n"
-                    "to notice that the lighting changed -- a light switched on takes\n"
-                    "roughly this many frames to appear in the cache.");
-                ImGui::EndTooltip();
-            }
-
-            uint32_t staleFrames = m_settingsManager->getAs<uint32_t>("render/pt/sharcStaleFrames");
-            if (ImGui::SliderInt("Evict after (frames)", (int*)&staleFrames, 8, 512))
-            {
-                m_settingsManager->setAs<uint32_t>("render/pt/sharcStaleFrames", staleFrames);
-                restart();
-            }
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::TextUnformatted(
-                    "How long an entry survives with nothing deposited into it. This is\n"
-                    "what lets the cache outlive a moving camera instead of being thrown\n"
-                    "away by it. Evicting too eagerly costs more in re-insertion than the\n"
-                    "slots are worth, so small values are clamped.");
-                ImGui::EndTooltip();
-            }
-
-            // Responsive lighting. The controls are shown whether or not the
-            // scene has a responsive light, because the answer to "why is this
-            // doing nothing" is on the light's own panel and a control that is
-            // not there cannot say so.
-            ImGui::SeparatorText("Responsive lighting");
-            bool responsiveEnabled = m_settingsManager->getAs<bool>("render/pt/sharcResponsiveLighting");
-            if (ImGui::Checkbox("Enable##sharcResponsive", &responsiveEnabled))
-            {
-                m_settingsManager->setAs<bool>("render/pt/sharcResponsiveLighting", responsiveEnabled);
-                restart();
-            }
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::TextUnformatted(
-                    "Cache lights marked Responsive -- on the light's own panel -- in a\n"
-                    "second entry per voxel with a much shorter window, so they can change\n"
-                    "faster than the rest of the cache follows. Does nothing unless some\n"
-                    "light is marked; turning it off here is how you A/B a scene that has\n"
-                    "one.");
-                ImGui::EndTooltip();
-            }
-
-            uint32_t responsiveFrames = m_settingsManager->getAs<uint32_t>("render/pt/sharcResponsiveFrames");
-            if (ImGui::SliderInt("Responsive window (frames)", (int*)&responsiveFrames, 1, 64))
-            {
-                m_settingsManager->setAs<uint32_t>("render/pt/sharcResponsiveFrames", responsiveFrames);
-                restart();
-            }
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::TextUnformatted(
-                    "The window responsive entries average over, and how long they survive\n"
-                    "unvisited. Both, because they are the same trade: short enough to\n"
-                    "follow the light, long enough not to be noise. Well below the window\n"
-                    "above, or there is no point having two.");
-                ImGui::EndTooltip();
-            }
-
-            // Metal-only cache internals. The controls above mean the same thing
-            // on both backends; what is below is the hash map this backend
-            // actually has -- a compact 32-bit key, a sparse update pass and an
-            // fp16 resolved half. See docs/sharc-metal.md.
-            const bool metalBackend = m_render->denoiserKind() == Render::DenoiserKind::eMetalFx;
-            if (metalBackend)
-            {
-                ImGui::SeparatorText("Metal");
-
-                // Must match SHARC_DEBUG_* in ShaderTypes.h, in order.
-                const char* const sharcDebugOptions[] = { "Off",
-                                                          "Cached-key colors",
-                                                          "Query: hit / miss",
-                                                          "Cached sample count",
-                                                          "Counters in log",
-                                                          "Hash bucket collisions" };
-                uint32_t sharcDebug = m_settingsManager->getAs<uint32_t>("render/pt/sharcDebug");
-                sharcDebug = std::min<uint32_t>(sharcDebug, IM_ARRAYSIZE(sharcDebugOptions) - 1u);
-                if (ImGui::BeginCombo("Hash map diagnostics", sharcDebugOptions[sharcDebug]))
-                {
-                    for (uint32_t n = 0; n < IM_ARRAYSIZE(sharcDebugOptions); ++n)
-                    {
-                        const bool selected = sharcDebug == n;
-                        if (ImGui::Selectable(sharcDebugOptions[n], selected) && !selected)
+                        const bool is_selected = (currentTonemapItemId == n);
+                        if (ImGui::Selectable(tonemapItems[n], is_selected))
                         {
-                            sharcDebug = n;
-                            m_settingsManager->setAs<uint32_t>("render/pt/sharcDebug", sharcDebug);
-                            restart();
-                            m_render->resetTemporalHistory();
+                            currentTonemapItemId = n;
+                            m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", (uint32_t)n);
                         }
-                        if (selected)
+                        if (is_selected)
                         {
                             ImGui::SetItemDefaultFocus();
                         }
                     }
                     ImGui::EndCombo();
                 }
+
+                auto gamma = m_settingsManager->getAs<float>("render/post/gamma");
+                if (ImGui::DragFloat("Gamma", &gamma, 0.05f, 0.0f, 5.0f, "%.2f"))
+                {
+                    m_settingsManager->setAs<float>("render/post/gamma", gamma);
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip("0 = off; default 2.4 is an sRGB-like transfer, not a pure power.");
+                }
+
+                const float maxEdr = m_settingsManager->getAs<float>("render/post/tonemapper/maxEDR");
+                ImGui::TextDisabled("Display max EDR %.2f (tone-map shoulder follows screen headroom)", maxEdr);
+
+                ImGui::TreePop();
+            }
+
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Quality"))
+        {
+            ImGui::SeparatorText("Preview");
+            {
+                uint32_t previewWidth = m_settingsManager->getAs<uint32_t>("render/width");
+                uint32_t previewHeight = m_settingsManager->getAs<uint32_t>("render/height");
+                const int preset = editor_viewport::findPreset(previewWidth, previewHeight);
+                const int presetCount = static_cast<int>(editor_viewport::kPreviewPresets.size());
+                static bool customSelected = false;
+                static uint32_t previousWidth = previewWidth;
+                static uint32_t previousHeight = previewHeight;
+                if ((previewWidth != previousWidth || previewHeight != previousHeight) && preset >= 0)
+                {
+                    customSelected = false;
+                }
+                int selectedPreset = !customSelected && preset >= 0 ? preset : presetCount;
+                const char* const presetNames[] = {
+                    editor_viewport::kPreviewPresets[0].label,
+                    editor_viewport::kPreviewPresets[1].label,
+                    editor_viewport::kPreviewPresets[2].label,
+                    editor_viewport::kPreviewPresets[3].label,
+                    "Custom",
+                };
+                if (ImGui::Combo("Preset", &selectedPreset, presetNames, IM_ARRAYSIZE(presetNames)))
+                {
+                    customSelected = selectedPreset == presetCount;
+                    if (!customSelected && selectedPreset >= 0 && selectedPreset < presetCount)
+                    {
+                        const editor_viewport::PreviewPreset& selected = editor_viewport::kPreviewPresets[selectedPreset];
+                        requestPreviewResolution(selected.width, selected.height);
+                        previewWidth = selected.width;
+                        previewHeight = selected.height;
+                    }
+                }
+
+                if (selectedPreset == presetCount)
+                {
+                    static bool lockAspect = true;
+                    int customWidth = static_cast<int>(previewWidth);
+                    int customHeight = static_cast<int>(previewHeight);
+                    const float aspect =
+                        previewHeight > 0 ? static_cast<float>(previewWidth) / static_cast<float>(previewHeight) : 1.0f;
+                    if (ImGui::InputInt("Width", &customWidth))
+                    {
+                        const uint32_t width = editor_viewport::clampPreviewDimension(customWidth);
+                        const uint32_t height = lockAspect ? editor_viewport::clampPreviewDimension(static_cast<int>(
+                                                                 std::lround(static_cast<float>(width) / aspect))) :
+                                                             previewHeight;
+                        requestPreviewResolution(width, height);
+                    }
+                    if (ImGui::InputInt("Height", &customHeight))
+                    {
+                        const uint32_t height = editor_viewport::clampPreviewDimension(customHeight);
+                        const uint32_t width = lockAspect ? editor_viewport::clampPreviewDimension(static_cast<int>(
+                                                                std::lround(static_cast<float>(height) * aspect))) :
+                                                            previewWidth;
+                        requestPreviewResolution(width, height);
+                    }
+                    ImGui::Checkbox("Lock aspect ratio", &lockAspect);
+                    ImGui::SameLine();
+                    if (ImGui::Button("Swap"))
+                    {
+                        requestPreviewResolution(previewHeight, previewWidth);
+                    }
+                }
+
+                ImGui::TextDisabled("Viewport resize changes presentation only");
+                previousWidth = m_settingsManager->getAs<uint32_t>("render/width");
+                previousHeight = m_settingsManager->getAs<uint32_t>("render/height");
+            }
+
+            ImGui::SeparatorText("Sampling");
+            {
+                const char* const rectlightSamplingMethodItems[] = { "Uniform", "Advanced" };
+                int currentRectlightSamplingMethodItemId = static_cast<int>(
+                    std::min(m_settingsManager->getAs<uint32_t>("render/pt/rectLightSamplingMethod"), 1u));
+                if (ImGui::BeginCombo(
+                        "Rect Light Sampling", rectlightSamplingMethodItems[currentRectlightSamplingMethodItemId]))
+                {
+                    for (const auto& item : rectlightSamplingMethodItems)
+                    {
+                        const bool is_selected =
+                            (item == rectlightSamplingMethodItems[currentRectlightSamplingMethodItemId]);
+                        if (ImGui::Selectable(item, is_selected))
+                        {
+                            currentRectlightSamplingMethodItemId = static_cast<int>(&item - rectlightSamplingMethodItems);
+                            m_settingsManager->setAs<uint32_t>(
+                                "render/pt/rectLightSamplingMethod",
+                                static_cast<uint32_t>(currentRectlightSamplingMethodItemId));
+                        }
+                        if (is_selected)
+                        {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+
+                const char* const samplerTypeItems[] = { "Halton", "PCG", "Sobol (Owen)", "Sobol + blue noise",
+                                                         "Hybrid (blue noise -> Sobol)" };
+                // Read back rather than remembered in a static: the default is set in
+                // loadSettings, and a static starting at zero showed "Halton" no matter
+                // what was actually running.
+                int currentSamplerTypeId = (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/samplerType"), 4u);
+                if (ImGui::BeginCombo("Sampler", samplerTypeItems[currentSamplerTypeId]))
+                {
+                    for (const auto& item : samplerTypeItems)
+                    {
+                        const bool is_selected = (item == samplerTypeItems[currentSamplerTypeId]);
+                        if (ImGui::Selectable(item, is_selected))
+                        {
+                            currentSamplerTypeId = (int)(&item - samplerTypeItems);
+                            m_settingsManager->setAs<uint32_t>("render/pt/samplerType", currentSamplerTypeId);
+                        }
+                        if (is_selected)
+                        {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (currentSamplerTypeId == 0)
+                {
+                    ImGui::TextDisabled("Halton aliases its bases every 32 dimensions; error stalls past ~512 spp.");
+                }
+                if (currentSamplerTypeId == 4)
+                {
+                    auto bnSwitch = m_settingsManager->getAs<uint32_t>("render/pt/blueNoiseSwitchSpp");
+                    if (ImGui::SliderInt("Blue-noise samples", (int*)&bnSwitch, 0, 256))
+                    {
+                        m_settingsManager->setAs<uint32_t>("render/pt/blueNoiseSwitchSpp", bnSwitch);
+                    }
+                    if (ImGui::IsItemHovered())
+                    {
+                        ImGui::SetTooltip(
+                            "Samples drawn from the blue-noise sequence before handing over to\n"
+                            "per-pixel scrambling. Blue noise looks cleaner at low sample counts;\n"
+                            "scrambling converges faster past a few dozen.");
+                    }
+                }
+
+                ImGui::SeparatorText("Denoiser");
+
+                // One choice, not two checkboxes -- and this backend's choices, not the
+                // other backend's.
+                //
+                // Denoising and upscaling are alternatives on both: MetalFX sends a frame
+                // through the spatial scaler or the temporal denoised one, and the OptiX
+                // plan has upscaling imply denoising because nothing in it scales without
+                // also running the network. As separate toggles they offered four states,
+                // two of which meant the same thing and none of which said so.
+                //
+                // Which states exist, what they are called, whether the render scale is a
+                // slider or follows from the mode, and what the fallback warning means
+                // are all the backend's answer to give -- see editor_denoiser_ui.h. This
+                // panel used to hard-code MetalFX's answers and show them over OptiX,
+                // where the name was wrong and the scale slider did nothing.
+                const editor_denoiser::Ui fx = editor_denoiser::uiFor(m_render->denoiserKind());
+                const float requestedScale = m_settingsManager->getAs<float>("render/pt/upscaleFactor");
+                const bool denoiseSetting = m_settingsManager->getAs<bool>("render/pt/denoise");
+                const bool upscaleSetting = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
+                // Keep the remembered index and what is actually running in step, every
+                // frame rather than once. A mode index outliving the list it indexed is
+                // how the combo came to show one thing while the renderer ran another: it
+                // displayed whatever sat at that index, and the next click picked
+                // something nobody asked for. The settings move without the panel too --
+                // the frame-budget button, the benchmark drivers, STRELKA_DENOISE.
+                if (fx.modeCount > 0 && (!mDenoiseModeInitialized || mDenoiseModeIndex >= fx.modeCount ||
+                                         !editor_denoiser::settingsMatchMode(
+                                             fx, mDenoiseModeIndex, denoiseSetting, upscaleSetting, requestedScale)))
+                {
+                    mDenoiseModeIndex = editor_denoiser::modeIndexFromSettings(fx, denoiseSetting, upscaleSetting);
+                    mDenoiseModeInitialized = true;
+                }
+
+                if (!editor_denoiser::hasDenoiser(fx))
+                {
+                    ImGui::TextDisabled("This backend has no denoiser");
+                }
+                else
+                {
+                    if (ImGui::BeginCombo(fx.title, editor_denoiser::modeAt(fx, mDenoiseModeIndex).label))
+                    {
+                        for (int n = 0; n < fx.modeCount; n++)
+                        {
+                            const bool is_selected = (mDenoiseModeIndex == n);
+                            if (ImGui::Selectable(fx.modes[n].label, is_selected) && mDenoiseModeIndex != n)
+                            {
+                                mDenoiseModeIndex = n;
+                                m_settingsManager->setAs<bool>("render/pt/denoise", fx.modes[n].denoise);
+                                // The denoiser is a scaler too: it needs the reduced-
+                                // resolution render whenever the mode asks for one, and
+                                // nothing else does.
+                                m_settingsManager->setAs<bool>(
+                                    "render/pt/enableUpscale", editor_denoiser::shouldUpscale(fx, n, requestedScale));
+                                m_render->resetTemporalHistory();
+                            }
+                            if (is_selected)
+                            {
+                                ImGui::SetItemDefaultFocus();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+
+                    const editor_denoiser::Mode fxMode = editor_denoiser::modeAt(fx, mDenoiseModeIndex);
+                    const bool denoiserOn = fxMode.denoise || fxMode.upscale;
+                    if (denoiserOn && fx.modeHint != nullptr)
+                    {
+                        ImGui::TextDisabled("%s", fx.modeHint);
+                    }
+
+                    // Temporal is a property of the network on OptiX rather than a mode of
+                    // its own: both the denoise-only and the 2x model have a temporal
+                    // variant, so it is one switch instead of a doubled list.
+                    if (fx.temporalToggle && denoiserOn)
+                    {
+                        bool temporal = m_settingsManager->getAs<uint32_t>("render/pt/upscaleMode") == 1u;
+                        if (ImGui::Checkbox("Temporal", &temporal))
+                        {
+                            m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", temporal ? 1u : 0u);
+                            m_render->resetTemporalHistory();
+                        }
+                        ImGui::SameLine();
+                        ImGui::BeginDisabled();
+                        ImGui::TextUnformatted(temporal ? "(reprojects the previous frame)" :
+                                                          "(each frame denoised alone)");
+                        ImGui::EndDisabled();
+                    }
+
+                    if (fx.playbackMotionBlurToggle && fxMode.denoise)
+                    {
+                        bool playbackBlur = m_settingsManager->getAs<bool>("render/pt/denoisePlaybackMotionBlur");
+                        if (ImGui::Checkbox("Path-traced playback blur", &playbackBlur))
+                        {
+                            m_settingsManager->setAs<bool>("render/pt/denoisePlaybackMotionBlur", playbackBlur);
+                            m_render->resetTemporalHistory();
+                        }
+                        ImGui::SameLine();
+                        ImGui::BeginDisabled();
+                        ImGui::TextUnformatted(playbackBlur ? "(uses SPP per frame)" : "(stable shutter-close guides)");
+                        ImGui::EndDisabled();
+                    }
+
+                    if (denoiserOn && fx.freeRenderScale)
+                    {
+                        float factor = requestedScale;
+                        if (ImGui::SliderFloat("PT scale inside preview", &factor, 0.25f, 1.0f, "%.2f"))
+                        {
+                            m_settingsManager->setAs<float>("render/pt/upscaleFactor", factor);
+                            m_settingsManager->setAs<bool>(
+                                "render/pt/enableUpscale", editor_denoiser::shouldUpscale(fx, mDenoiseModeIndex, factor));
+                            m_render->resetTemporalHistory();
+                        }
+                        ImGui::SameLine();
+                        ImGui::BeginDisabled();
+                        const char* const scaleStatus =
+                            factor < 1.0f ?
+                                "(rendering below display resolution)" :
+                                (fxMode.denoise ? "(denoising at 1:1)" : "(inactive at 1:1; lower scale to enable)");
+                        ImGui::TextUnformatted(scaleStatus);
+                        ImGui::EndDisabled();
+                    }
+                }
+
+                const uint32_t displayWidth = m_settingsManager->getAs<uint32_t>("render/width");
+                const uint32_t displayHeight = m_settingsManager->getAs<uint32_t>("render/height");
+                const editor_denoiser::Resolution previewRes =
+                    editor_denoiser::resolution(fx, mDenoiseModeIndex, requestedScale, displayWidth, displayHeight);
+                ImGui::TextDisabled("PT internal: %u x %u", previewRes.pathTraceWidth, previewRes.pathTraceHeight);
+                ImGui::TextDisabled("Preview output: %u x %u", previewRes.outputWidth, previewRes.outputHeight);
+                if (m_render->denoiserFallbackActive())
+                {
+                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "%s", fx.fallbackMessage);
+                }
+                const double lastGpuMs = m_render->getLastRenderTimeMs();
+                if (lastGpuMs > editor_frame_budget::kInteractiveBudgetMs)
+                {
+                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
+                                       "Last PT frame: %.0f ms (interactive budget: %.0f ms)", lastGpuMs,
+                                       editor_frame_budget::kInteractiveBudgetMs);
+                    // The scale the frame was *actually* traced at, not the one the
+                    // slider holds: the budget divides a measured GPU time by a pixel
+                    // count, and on a fixed-ratio backend the slider is not that count.
+                    const float tracedScale = editor_denoiser::appliedScale(fx, mDenoiseModeIndex, requestedScale);
+                    const editor_frame_budget::RenderSettingsSnapshot current{
+                        displayWidth,
+                        displayHeight,
+                        tracedScale < 1.0f,
+                        tracedScale,
+                    };
+                    const editor_frame_budget::FrameSample sample = editor_frame_budget::sampleFrom(lastGpuMs, current);
+                    if (fx.freeRenderScale)
+                    {
+                        const float suggestedScale =
+                            editor_frame_budget::recommendedScale(sample, displayWidth, displayHeight);
+                        // Scaling, not denoising: the cheapest way to buy frame time, and
+                        // the one that does not depend on a history the camera is about to
+                        // invalidate anyway.
+                        const int scalingMode = editor_denoiser::modeIndexFromSettings(fx, false, true);
+                        const std::string label = fmt::format("Lower PT scale to {:.2f}", suggestedScale);
+                        if (ImGui::Button(label.c_str()))
+                        {
+                            m_settingsManager->setAs<bool>("render/pt/denoise", fx.modes[scalingMode].denoise);
+                            m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", 0);
+                            m_settingsManager->setAs<float>("render/pt/upscaleFactor", suggestedScale);
+                            m_settingsManager->setAs<bool>(
+                                "render/pt/enableUpscale",
+                                editor_denoiser::shouldUpscale(fx, scalingMode, suggestedScale));
+                            mDenoiseModeIndex = scalingMode;
+                            mDenoiseModeInitialized = true;
+                            m_render->resetTemporalHistory();
+                        }
+                    }
+                    else if (editor_denoiser::hasDenoiser(fx))
+                    {
+                        // Nothing to lower: this backend's only lever is its fixed ratio,
+                        // so the offer is to switch it on rather than to pick a number.
+                        const int scalingMode = editor_denoiser::modeIndexFromSettings(fx, true, true);
+                        const std::string label = fmt::format("Switch to \"{}\"", fx.modes[scalingMode].label);
+                        ImGui::BeginDisabled(mDenoiseModeIndex == scalingMode);
+                        if (ImGui::Button(label.c_str()))
+                        {
+                            m_settingsManager->setAs<bool>("render/pt/denoise", fx.modes[scalingMode].denoise);
+                            m_settingsManager->setAs<bool>(
+                                "render/pt/enableUpscale",
+                                editor_denoiser::shouldUpscale(fx, scalingMode, requestedScale));
+                            mDenoiseModeIndex = scalingMode;
+                            mDenoiseModeInitialized = true;
+                            m_render->resetTemporalHistory();
+                        }
+                        ImGui::EndDisabled();
+                    }
+                }
+
+                ImGui::SeparatorText("Convergence");
+
+                auto maxDepth = m_settingsManager->getAs<uint32_t>("render/pt/depth");
+                if (ImGui::SliderInt("Max Depth", (int*)&maxDepth, 1, 16))
+                {
+                    m_settingsManager->setAs<uint32_t>("render/pt/depth", maxDepth);
+                }
+
+
+                auto sppSubframe = m_settingsManager->getAs<uint32_t>("render/pt/spp");
+                if (ImGui::SliderInt("SPP per frame", (int*)&sppSubframe, 1, 32))
+                {
+                    m_settingsManager->setAs<uint32_t>("render/pt/spp", sppSubframe);
+                }
+
+                auto sppTotal = m_settingsManager->getAs<uint32_t>("render/pt/sppTotal");
+                if (ImGui::SliderInt("Accumulation SPP limit", (int*)&sppTotal, 1, 10000))
+                {
+                    m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", sppTotal);
+                }
+
+                bool accumulationEnabled = m_settingsManager->getAs<bool>("render/pt/enableAcc");
+                if (ImGui::Checkbox("Accumulate while still", &accumulationEnabled))
+                {
+                    m_settingsManager->setAs<bool>("render/pt/enableAcc", accumulationEnabled);
+                }
+            }
+
+            ImGui::EndTabItem();
+        }
+
+        // --- Radiance cache ----------------------------------------------------
+        //
+        // Everything here changes what the image is, not just how fast it arrives,
+        // so every control restarts accumulation. Counting occupancy is a pass over
+        // the whole table, so it is asked for only while this node is open -- which
+        // is what the setting outside the `if` turns back off again.
+        if (ImGui::BeginTabItem("Cache"))
+        {
+            const bool cachePanelOpen = ImGui::TreeNodeEx("Radiance cache (SHaRC)", ImGuiTreeNodeFlags_DefaultOpen);
+            m_settingsManager->setAs<bool>("render/pt/sharcReportOccupancy", cachePanelOpen);
+            if (cachePanelOpen)
+            {
+                auto restart = [this]() { m_sharedCtx->mSubframeIndex = 0; };
+
+                bool cacheEnabled = m_settingsManager->getAs<bool>("render/pt/sharc");
+                if (ImGui::Checkbox("Enable", &cacheEnabled))
+                {
+                    m_settingsManager->setAs<bool>("render/pt/sharc", cacheEnabled);
+                    restart();
+                }
                 if (ImGui::IsItemHovered())
                 {
                     ImGui::BeginTooltip();
                     ImGui::TextUnformatted(
-                        "Alongside the four cache views in Debug view above, which both backends\n"
-                        "answer. These are about the map rather than the cache: hit / miss is green\n"
-                        "where a query is answered and red where the lookup fails, collisions use\n"
-                        "NVIDIA's blue-to-red probe-depth palette, and the counters go to the log\n"
-                        "as SHARC stats rather than to the image.");
+                        "Let a path stop after a few bounces and read what the rest of it\n"
+                        "would have gathered, averaged over every path that has passed\n"
+                        "through the same place. Trades a little bias for path length.");
                     ImGui::EndTooltip();
                 }
 
-                if (ImGui::TreeNode("Metal cache features"))
+                ImGui::SameLine();
+                if (ImGui::Button("Reset cache"))
                 {
-                    bool featureChanged = false;
-                    auto featureToggle = [&](const char* label, const char* setting) {
-                        bool value = m_settingsManager->getAs<bool>(setting);
-                        if (ImGui::Checkbox(label, &value))
+                    // Consumed by the renderer on the next frame. Worth having as a
+                    // button: the cache deliberately survives camera movement now,
+                    // so this is the only way to see a scene cached from nothing.
+                    m_settingsManager->setAs<bool>("render/pt/sharcReset", true);
+                    restart();
+                }
+
+                uint32_t entriesUsed = 0;
+                uint32_t capacity = 0;
+                if (m_render != nullptr && m_render->radianceCacheOccupancy(entriesUsed, capacity) && capacity > 0)
+                {
+                    const float occupancy = 100.0f * (float)entriesUsed / (float)capacity;
+                    ImGui::Text("Occupancy: %.1f%%  (%u / %u entries)", (double)occupancy, entriesUsed, capacity);
+                    // The SDK's own reading of this number, which is the only thing
+                    // that makes it actionable.
+                    if (occupancy > 60.0f)
+                    {
+                        ImGui::TextColored(
+                            ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Table is crowded -- raise entries, or evict sooner.");
+                    }
+                }
+                else if (cacheEnabled)
+                {
+                    ImGui::TextDisabled("Occupancy: not reported by this backend");
+                }
+
+                // Entries, as an exponent: the table is masked rather than divided
+                // into, so it has to be a power of two, and a free-typed number
+                // would only be rounded down behind the user's back.
+                const uint32_t entries = m_settingsManager->getAs<uint32_t>("render/pt/sharcCapacity");
+                int exponent = 22;
+                while ((1u << exponent) > entries && exponent > 16)
+                {
+                    --exponent;
+                }
+                if (ImGui::SliderInt("Entries (2^n)", &exponent, 16, 25))
+                {
+                    m_settingsManager->setAs<uint32_t>("render/pt/sharcCapacity", 1u << exponent);
+                    restart();
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::Text("%u entries, %.0f MB.\nMore entries means fewer probe runs that come back full.",
+                                1u << exponent, (double)(1u << exponent) * 40.0 / 1e6);
+                    ImGui::EndTooltip();
+                }
+
+                float voxelPixels = m_settingsManager->getAs<float>("render/pt/sharcVoxelPixels");
+                if (ImGui::SliderFloat("Voxel size (px)", &voxelPixels, 1.0f, 32.0f, "%.1f"))
+                {
+                    m_settingsManager->setAs<float>("render/pt/sharcVoxelPixels", voxelPixels);
+                    restart();
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(
+                        "How many pixels wide a voxel is, at any distance -- the size follows\n"
+                        "the distance to the camera, so one number means the same thing in a\n"
+                        "room and in a forest. Use the 'Cache: voxel grid' debug view to set it.");
+                    ImGui::EndTooltip();
+                }
+
+                uint32_t firstBounce = m_settingsManager->getAs<uint32_t>("render/pt/sharcDepth");
+                if (ImGui::SliderInt("First cached bounce", (int*)&firstBounce, 0, 8))
+                {
+                    m_settingsManager->setAs<uint32_t>("render/pt/sharcDepth", firstBounce);
+                    restart();
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(
+                        "Bounces before this are always traced. The camera ray and the first\n"
+                        "bounce carry the detail a voxel average would blur, so reading the\n"
+                        "cache too early shows up as flat, blotchy indirect light.");
+                    ImGui::EndTooltip();
+                }
+
+                uint32_t readFrames = m_settingsManager->getAs<uint32_t>("render/pt/sharcReadFrames");
+                if (ImGui::SliderInt("Read until (samples)", (int*)&readFrames, 0, 1024))
+                {
+                    m_settingsManager->setAs<uint32_t>("render/pt/sharcReadFrames", readFrames);
+                    restart();
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(
+                        "Stop reading the cache once this many samples have accumulated;\n"
+                        "0 never stops. Deposits carry on either way, so the cache is warm\n"
+                        "the moment the camera moves again.\n\n"
+                        "This is not a taste setting. The cache's error is one value per\n"
+                        "voxel held across a temporal window, so it is correlated in space\n"
+                        "and time and does not average away -- it is a floor, while plain\n"
+                        "path tracing keeps converging past it. Measured on the isometric\n"
+                        "bathroom against a 4096-spp reference, structured error only:\n"
+                        "  16 spp   0.154 without, 0.098 with   -- cache half the error\n"
+                        "  64 spp   0.063 without, 0.039 with   -- cache half the error\n"
+                        " 256 spp   0.022 without, 0.019 with   -- level\n"
+                        "1024 spp   0.006 without, 0.012 with   -- cache twice the error\n\n"
+                        "So the cache is both the faster and the better image while you are\n"
+                        "moving, and the thing in the way once you stop.");
+                    ImGui::EndTooltip();
+                }
+
+                uint32_t minSamples = m_settingsManager->getAs<uint32_t>("render/pt/sharcMinSamples");
+                if (ImGui::SliderInt("Min samples to read", (int*)&minSamples, 1, 256))
+                {
+                    m_settingsManager->setAs<uint32_t>("render/pt/sharcMinSamples", minSamples);
+                    restart();
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(
+                        "How much a voxel has to have seen before a path will believe it.\n"
+                        "Too low and the cache spreads one path's noise over a region.");
+                    ImGui::EndTooltip();
+                }
+
+                uint32_t accumFrames = m_settingsManager->getAs<uint32_t>("render/pt/sharcAccumFrames");
+                if (ImGui::SliderInt("Temporal window (frames)", (int*)&accumFrames, 1, 256))
+                {
+                    m_settingsManager->setAs<uint32_t>("render/pt/sharcAccumFrames", accumFrames);
+                    restart();
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(
+                        "How many frames a voxel averages over. Larger is quieter and slower\n"
+                        "to notice that the lighting changed -- a light switched on takes\n"
+                        "roughly this many frames to appear in the cache.");
+                    ImGui::EndTooltip();
+                }
+
+                uint32_t staleFrames = m_settingsManager->getAs<uint32_t>("render/pt/sharcStaleFrames");
+                if (ImGui::SliderInt("Evict after (frames)", (int*)&staleFrames, 8, 512))
+                {
+                    m_settingsManager->setAs<uint32_t>("render/pt/sharcStaleFrames", staleFrames);
+                    restart();
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(
+                        "How long an entry survives with nothing deposited into it. This is\n"
+                        "what lets the cache outlive a moving camera instead of being thrown\n"
+                        "away by it. Evicting too eagerly costs more in re-insertion than the\n"
+                        "slots are worth, so small values are clamped.");
+                    ImGui::EndTooltip();
+                }
+
+                // Responsive lighting. The controls are shown whether or not the
+                // scene has a responsive light, because the answer to "why is this
+                // doing nothing" is on the light's own panel and a control that is
+                // not there cannot say so.
+                ImGui::SeparatorText("Responsive lighting");
+                bool responsiveEnabled = m_settingsManager->getAs<bool>("render/pt/sharcResponsiveLighting");
+                if (ImGui::Checkbox("Enable##sharcResponsive", &responsiveEnabled))
+                {
+                    m_settingsManager->setAs<bool>("render/pt/sharcResponsiveLighting", responsiveEnabled);
+                    restart();
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(
+                        "Cache lights marked Responsive -- on the light's own panel -- in a\n"
+                        "second entry per voxel with a much shorter window, so they can change\n"
+                        "faster than the rest of the cache follows. Does nothing unless some\n"
+                        "light is marked; turning it off here is how you A/B a scene that has\n"
+                        "one.");
+                    ImGui::EndTooltip();
+                }
+
+                uint32_t responsiveFrames = m_settingsManager->getAs<uint32_t>("render/pt/sharcResponsiveFrames");
+                if (ImGui::SliderInt("Responsive window (frames)", (int*)&responsiveFrames, 1, 64))
+                {
+                    m_settingsManager->setAs<uint32_t>("render/pt/sharcResponsiveFrames", responsiveFrames);
+                    restart();
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(
+                        "The window responsive entries average over, and how long they survive\n"
+                        "unvisited. Both, because they are the same trade: short enough to\n"
+                        "follow the light, long enough not to be noise. Well below the window\n"
+                        "above, or there is no point having two.");
+                    ImGui::EndTooltip();
+                }
+
+                // Metal-only cache internals. The controls above mean the same thing
+                // on both backends; what is below is the hash map this backend
+                // actually has -- a compact 32-bit key, a sparse update pass and an
+                // fp16 resolved half. See docs/sharc-metal.md.
+                const bool metalBackend = m_render->denoiserKind() == Render::DenoiserKind::eMetalFx;
+                if (metalBackend)
+                {
+                    ImGui::SeparatorText("Metal");
+
+                    // Must match SHARC_DEBUG_* in ShaderTypes.h, in order.
+                    const char* const sharcDebugOptions[] = { "Off",
+                                                              "Cached-key colors",
+                                                              "Query: hit / miss",
+                                                              "Cached sample count",
+                                                              "Counters in log",
+                                                              "Hash bucket collisions" };
+                    uint32_t sharcDebug = m_settingsManager->getAs<uint32_t>("render/pt/sharcDebug");
+                    sharcDebug = std::min<uint32_t>(sharcDebug, IM_ARRAYSIZE(sharcDebugOptions) - 1u);
+                    if (ImGui::BeginCombo("Hash map diagnostics", sharcDebugOptions[sharcDebug]))
+                    {
+                        for (uint32_t n = 0; n < IM_ARRAYSIZE(sharcDebugOptions); ++n)
                         {
-                            m_settingsManager->setAs<bool>(setting, value);
+                            const bool selected = sharcDebug == n;
+                            if (ImGui::Selectable(sharcDebugOptions[n], selected) && !selected)
+                            {
+                                sharcDebug = n;
+                                m_settingsManager->setAs<uint32_t>("render/pt/sharcDebug", sharcDebug);
+                                restart();
+                                m_render->resetTemporalHistory();
+                            }
+                            if (selected)
+                            {
+                                ImGui::SetItemDefaultFocus();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                    if (ImGui::IsItemHovered())
+                    {
+                        ImGui::BeginTooltip();
+                        ImGui::TextUnformatted(
+                            "Alongside the four cache views in Debug view above, which both backends\n"
+                            "answer. These are about the map rather than the cache: hit / miss is green\n"
+                            "where a query is answered and red where the lookup fails, collisions use\n"
+                            "NVIDIA's blue-to-red probe-depth palette, and the counters go to the log\n"
+                            "as SHARC stats rather than to the image.");
+                        ImGui::EndTooltip();
+                    }
+
+                    if (ImGui::TreeNode("Metal cache features"))
+                    {
+                        bool featureChanged = false;
+                        auto featureToggle = [&](const char* label, const char* setting) {
+                            bool value = m_settingsManager->getAs<bool>(setting);
+                            if (ImGui::Checkbox(label, &value))
+                            {
+                                m_settingsManager->setAs<bool>(setting, value);
+                                featureChanged = true;
+                            }
+                        };
+                        featureToggle("Material demodulation", "render/pt/sharcMaterialDemodulation");
+                        featureToggle("Separate emissive", "render/pt/sharcSeparateEmissive");
+                        featureToggle("Directional radiance (SH)", "render/pt/sharcDirectional");
+                        if (ImGui::IsItemHovered())
+                        {
+                            ImGui::SetTooltip(
+                                "Keeps a bright glossy sample from being reused in an unrelated direction, and pays "
+                                "for it with a first-order reconstruction of a signal a cell otherwise stores exactly. "
+                                "Off by default, as upstream's SH encoding is.");
+                        }
+                        featureToggle("Responsive lighting", "render/pt/sharcMetalResponsive");
+                        if (ImGui::IsItemHovered())
+                        {
+                            ImGui::SetTooltip(
+                                "Not the same switch as the one above: the compact key has no spare bit for a "
+                                "per-light tag, so the companion entries hold the whole lighting signal and come "
+                                "out of the configured capacity.");
+                        }
+                        featureToggle("Cache resampling", "render/pt/sharcCacheResampling");
+                        featureToggle("Blend adjacent levels", "render/pt/sharcBlendAdjacentLevels");
+                        featureToggle("Fade acceleration", "render/pt/sharcFadeAcceleration");
+
+                        constexpr int kSharcMaxPropagationDepth = 4; // ShaderTypes.h ABI limit.
+                        auto propagationDepth = m_settingsManager->getAs<uint32_t>("render/pt/sharcPropagationDepth");
+                        if (ImGui::SliderInt("Propagation depth", (int*)&propagationDepth, 1, kSharcMaxPropagationDepth))
+                        {
+                            m_settingsManager->setAs<uint32_t>("render/pt/sharcPropagationDepth", propagationDepth);
                             featureChanged = true;
                         }
-                    };
-                    featureToggle("Material demodulation", "render/pt/sharcMaterialDemodulation");
-                    featureToggle("Separate emissive", "render/pt/sharcSeparateEmissive");
-                    featureToggle("Directional radiance (SH)", "render/pt/sharcDirectional");
-                    if (ImGui::IsItemHovered())
-                    {
-                        ImGui::SetTooltip(
-                            "Keeps a bright glossy sample from being reused in an unrelated direction, and pays "
-                            "for it with a first-order reconstruction of a signal a cell otherwise stores exactly. "
-                            "Off by default, as upstream's SH encoding is.");
+                        auto updateDownscale = m_settingsManager->getAs<uint32_t>("render/pt/sharcUpdateDownscale");
+                        if (ImGui::SliderInt("Update block size", (int*)&updateDownscale, 1, 16))
+                        {
+                            m_settingsManager->setAs<uint32_t>("render/pt/sharcUpdateDownscale", updateDownscale);
+                            featureChanged = true;
+                        }
+                        auto metalMinSamples = m_settingsManager->getAs<uint32_t>("render/pt/sharcMetalMinSamples");
+                        if (ImGui::SliderInt("Minimum cached samples", (int*)&metalMinSamples, 1, 64))
+                        {
+                            m_settingsManager->setAs<uint32_t>("render/pt/sharcMetalMinSamples", metalMinSamples);
+                            featureChanged = true;
+                        }
+                        float sceneScale = m_settingsManager->getAs<float>("render/pt/sharcSceneScale");
+                        if (ImGui::DragFloat("Scene scale", &sceneScale, 0.25f, 0.25f, 1000.0f, "%.2f"))
+                        {
+                            m_settingsManager->setAs<float>("render/pt/sharcSceneScale", sceneScale);
+                            featureChanged = true;
+                        }
+                        if (ImGui::IsItemHovered())
+                        {
+                            ImGui::SetTooltip(
+                                "World-space voxel scale: larger values make smaller voxels. The "
+                                "voxel-grid debug view is how to choose it.");
+                        }
+                        float radianceScale = m_settingsManager->getAs<float>("render/pt/sharcRadianceScale");
+                        if (ImGui::DragFloat("Radiance fixed-point scale", &radianceScale, 10.0f, 1.0f, 100000.0f, "%.0f"))
+                        {
+                            m_settingsManager->setAs<float>("render/pt/sharcRadianceScale", radianceScale);
+                            featureChanged = true;
+                        }
+                        if (ImGui::IsItemHovered())
+                        {
+                            ImGui::SetTooltip(
+                                "Start at 1000. Reduce it if the counters report 31-32 occupied radiance bits or "
+                                "accumulation clamps; a lower value trades fixed-point precision for headroom.");
+                        }
+                        if (featureChanged)
+                        {
+                            restart();
+                            m_render->resetTemporalHistory();
+                        }
+                        ImGui::TreePop();
                     }
-                    featureToggle("Responsive lighting", "render/pt/sharcMetalResponsive");
-                    if (ImGui::IsItemHovered())
-                    {
-                        ImGui::SetTooltip(
-                            "Not the same switch as the one above: the compact key has no spare bit for a "
-                            "per-light tag, so the companion entries hold the whole lighting signal and come "
-                            "out of the configured capacity.");
-                    }
-                    featureToggle("Cache resampling", "render/pt/sharcCacheResampling");
-                    featureToggle("Blend adjacent levels", "render/pt/sharcBlendAdjacentLevels");
-                    featureToggle("Fade acceleration", "render/pt/sharcFadeAcceleration");
-
-                    constexpr int kSharcMaxPropagationDepth = 4; // ShaderTypes.h ABI limit.
-                    auto propagationDepth = m_settingsManager->getAs<uint32_t>("render/pt/sharcPropagationDepth");
-                    if (ImGui::SliderInt("Propagation depth", (int*)&propagationDepth, 1, kSharcMaxPropagationDepth))
-                    {
-                        m_settingsManager->setAs<uint32_t>("render/pt/sharcPropagationDepth", propagationDepth);
-                        featureChanged = true;
-                    }
-                    auto updateDownscale = m_settingsManager->getAs<uint32_t>("render/pt/sharcUpdateDownscale");
-                    if (ImGui::SliderInt("Update block size", (int*)&updateDownscale, 1, 16))
-                    {
-                        m_settingsManager->setAs<uint32_t>("render/pt/sharcUpdateDownscale", updateDownscale);
-                        featureChanged = true;
-                    }
-                    auto metalMinSamples = m_settingsManager->getAs<uint32_t>("render/pt/sharcMetalMinSamples");
-                    if (ImGui::SliderInt("Minimum cached samples", (int*)&metalMinSamples, 1, 64))
-                    {
-                        m_settingsManager->setAs<uint32_t>("render/pt/sharcMetalMinSamples", metalMinSamples);
-                        featureChanged = true;
-                    }
-                    float sceneScale = m_settingsManager->getAs<float>("render/pt/sharcSceneScale");
-                    if (ImGui::DragFloat("Scene scale", &sceneScale, 0.25f, 0.25f, 1000.0f, "%.2f"))
-                    {
-                        m_settingsManager->setAs<float>("render/pt/sharcSceneScale", sceneScale);
-                        featureChanged = true;
-                    }
-                    if (ImGui::IsItemHovered())
-                    {
-                        ImGui::SetTooltip(
-                            "World-space voxel scale: larger values make smaller voxels. The "
-                            "voxel-grid debug view is how to choose it.");
-                    }
-                    float radianceScale = m_settingsManager->getAs<float>("render/pt/sharcRadianceScale");
-                    if (ImGui::DragFloat("Radiance fixed-point scale", &radianceScale, 10.0f, 1.0f, 100000.0f, "%.0f"))
-                    {
-                        m_settingsManager->setAs<float>("render/pt/sharcRadianceScale", radianceScale);
-                        featureChanged = true;
-                    }
-                    if (ImGui::IsItemHovered())
-                    {
-                        ImGui::SetTooltip(
-                            "Start at 1000. Reduce it if the counters report 31-32 occupied radiance bits or "
-                            "accumulation clamps; a lower value trades fixed-point precision for headroom.");
-                    }
-                    if (featureChanged)
-                    {
-                        restart();
-                        m_render->resetTemporalHistory();
-                    }
-                    ImGui::TreePop();
                 }
+
+                ImGui::TreePop();
             }
 
-            ImGui::TreePop();
+            ImGui::EndTabItem();
         }
 
-        ImGui::EndTabItem();
-    }
-
-    if (ImGui::BeginTabItem("Output"))
-    {
-    if (ImGui::Button("Save Preview Screenshot"))
-    {
-        // Generate default filename with timestamp
-        const std::time_t now = std::time(nullptr);
-        std::tm localTime{};
-        const std::tm* tm = localtime_r(&now, &localTime);
-        // localtime() returns null for a clock it cannot convert, and strftime()
-        // returns 0 when the result would not fit; either way the dialog still
-        // needs a name to open with.
-        std::string defaultName = "screenshot.exr";
-        char stamp[64];
-        if (tm != nullptr && std::strftime(stamp, sizeof(stamp), "screenshot_%Y%m%d_%H%M%S.exr", tm) != 0)
+        if (ImGui::BeginTabItem("Output"))
         {
-            defaultName = stamp;
+            if (ImGui::Button("Save Preview Screenshot"))
+            {
+                // Generate default filename with timestamp
+                const std::time_t now = std::time(nullptr);
+                std::tm localTime{};
+                const std::tm* tm = localtime_r(&now, &localTime);
+                // localtime() returns null for a clock it cannot convert, and strftime()
+                // returns 0 when the result would not fit; either way the dialog still
+                // needs a name to open with.
+                std::string defaultName = "screenshot.exr";
+                char stamp[64];
+                if (tm != nullptr && std::strftime(stamp, sizeof(stamp), "screenshot_%Y%m%d_%H%M%S.exr", tm) != 0)
+                {
+                    defaultName = stamp;
+                }
+
+                IGFD::FileDialogConfig config{};
+                config.path = ".";
+                config.fileName = defaultName;
+                ImGuiFileDialog::Instance()->OpenDialog("SaveScreenshotDlgKey", "Save Screenshot", ".exr,.png", config);
+            }
+            if (ImGui::Checkbox("EXR holds the display image", &m_screenshotDisplayReferred))
+            {
+                // Nothing to invalidate: the flag is read when the file is written.
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip(
+                    "Off: the EXR holds scene-linear radiance, which is what a reference or a\n"
+                    "comparison against another renderer wants.\n\n"
+                    "On: it holds what the screen shows -- exposure, tone curve and display\n"
+                    "headroom applied -- with the range above white intact, which no PNG can\n"
+                    "carry. Neither is transfer encoded; a PNG always gets the SDR rendition.");
+            }
+
+            ImGui::EndTabItem();
         }
 
-        IGFD::FileDialogConfig config{};
-        config.path = ".";
-        config.fileName = defaultName;
-        ImGuiFileDialog::Instance()->OpenDialog("SaveScreenshotDlgKey", "Save Screenshot", ".exr,.png", config);
-    }
-    if (ImGui::Checkbox("EXR holds the display image", &m_screenshotDisplayReferred))
-    {
-        // Nothing to invalidate: the flag is read when the file is written.
-    }
-    if (ImGui::IsItemHovered())
-    {
-        ImGui::SetTooltip(
-            "Off: the EXR holds scene-linear radiance, which is what a reference or a\n"
-            "comparison against another renderer wants.\n\n"
-            "On: it holds what the screen shows -- exposure, tone curve and display\n"
-            "headroom applied -- with the range above white intact, which no PNG can\n"
-            "carry. Neither is transfer encoded; a PNG always gets the SDR rendition.");
-    }
-
-    if (ImGui::TreeNode("Developer"))
-    {
-        auto materialRayTmin = m_settingsManager->getAs<float>("render/pt/dev/materialRayTmin");
-        ImGui::InputFloat("Material ray T min", (float*)&materialRayTmin, 0.1);
-        m_settingsManager->setAs<float>("render/pt/dev/materialRayTmin", materialRayTmin);
-        auto shadowRayTmin = m_settingsManager->getAs<float>("render/pt/dev/shadowRayTmin");
-        ImGui::InputFloat("Shadow ray T min", (float*)&shadowRayTmin, 0.1);
-        m_settingsManager->setAs<float>("render/pt/dev/shadowRayTmin", shadowRayTmin);
-
-        ImGui::TreePop();
-    }
-
-        ImGui::EndTabItem();
-    }
-
-    ImGui::EndTabBar();
-
-    ImGui::End();
-}
-
-// The scene load, while it is happening.
-//
-// Shown for the parse and for the GPU build alike: to the user those are one
-// wait, and the fact that one runs on a worker and the other a stage per frame
-// on the main loop is not something the window should expose.
-void EditorApp::drawLoadingOverlay()
-{
-    const bool building = m_render && m_render->isBuildingScene();
-    if (!m_isLoading && !building)
-    {
-        return;
-    }
-
-    // Weighted by measured cost on a large scene (the pine forest, seconds), not
-    // by stage count: evenly divided, the bar would spend 40% of the wait in one
-    // sixth of its length, which reads as stuck rather than slow. Indexed by
-    // Stage, which is declared in run order for this to be meaningful.
-    static constexpr float kStageWeights[(size_t)LoadProgress::Stage::Count] = {
-        0.00f, // Idle
-        1.12f, // Reading
-        0.73f, // Parsing
-        0.14f, // Geometry
-        1.07f, // Textures
-        1.95f, // Structures
-        0.04f, // Environment
-        0.00f, // Done
-    };
-    static const char* const kStageNames[(size_t)LoadProgress::Stage::Count] = {
-        "Starting",           "Reading file",     "Parsing scene",
-        "Uploading geometry", "Loading textures", "Building acceleration structures",
-        "Environment",        "Finishing",
-    };
-
-    const uint32_t stage =
-        std::min(m_loadProgress.stage.load(std::memory_order_acquire), (uint32_t)LoadProgress::Stage::Done);
-    const uint32_t done = m_loadProgress.done.load(std::memory_order_relaxed);
-    const uint32_t total = m_loadProgress.total.load(std::memory_order_relaxed);
-
-    float totalWeight = 0.0f;
-    for (const float w : kStageWeights)
-    {
-        totalWeight += w;
-    }
-    float before = 0.0f;
-    for (uint32_t i = 0; i < stage; ++i)
-    {
-        before += kStageWeights[i];
-    }
-    // A stage that cannot say how much work it holds contributes nothing beyond
-    // its starting point, rather than pretending to be complete.
-    const float within = total > 0 ? std::min(1.0f, (float)done / (float)total) : 0.0f;
-    const float fraction = totalWeight > 0.0f ? (before + kStageWeights[stage] * within) / totalWeight : 0.0f;
-
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_Always);
-    ImGui::Begin("##Loading", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove |
-                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-
-    ImGui::TextUnformatted(std::filesystem::path(m_sceneFile).filename().string().c_str());
-    ImGui::Spacing();
-
-    const std::string label =
-        total > 0 ? fmt::format("{}  {}/{}", kStageNames[stage], done, total) : std::string(kStageNames[stage]);
-    ImGui::ProgressBar(fraction, ImVec2(-FLT_MIN, 0.0f), label.c_str());
-
-    // Only the parse can be abandoned. The GPU build hands out buffers and
-    // acceleration structures that the renderer is already holding, so stopping
-    // halfway would leave it in a state nothing else knows how to describe --
-    // and it is the shorter half of the wait anyway.
-    ImGui::Spacing();
-    ImGui::BeginDisabled(!m_isLoading || m_loadProgress.isCancelled());
-    if (ImGui::Button("Cancel"))
-    {
-        m_loadProgress.cancel();
-    }
-    ImGui::EndDisabled();
-    if (m_loadProgress.isCancelled())
-    {
-        ImGui::SameLine();
-        ImGui::TextDisabled("cancelling...");
+        ImGui::EndTabBar();
     }
 
     ImGui::End();
-}
-
-/// The gamepad section of the render settings.
-///
-/// Under Camera Speed rather than in a panel of its own, because the pad shares
-/// that setting: the two numbers a user compares are "how fast does the camera
-/// fly" and "how fast does the stick fly it", and putting them on one screen is
-/// what stops the second from acquiring a duplicate of the first.
-///
-/// The pad name is shown even when nothing is connected. A section that
-/// disappears with the hardware leaves a user who plugged something in with
-/// nowhere to look for why it did nothing.
-void EditorApp::drawGamepadSettings()
-{
-    const GamepadState& pad = m_display->getGamepadState();
-
-    if (!ImGui::TreeNode("Gamepad"))
-    {
-        return;
-    }
-
-    if (pad.connected)
-    {
-        ImGui::TextUnformatted(pad.name.c_str());
-        ImGui::SameLine();
-        ImGui::TextDisabled("(slot %d)", pad.slot);
-    }
-    else
-    {
-        ImGui::TextDisabled("No controller detected");
-        ImGui::SameLine();
-        ImGui::TextDisabled("(?)");
-        if (ImGui::IsItemHovered())
-        {
-            ImGui::SetTooltip(
-                "A controller is picked up automatically when it is plugged in --\n"
-                "nothing here needs enabling first.\n\n"
-                "If one is connected and this still says no, the platform has no\n"
-                "game-controller mapping for it, and its axes cannot be told apart.");
-        }
-    }
-
-    bool enabled = m_settingsManager->getAs<bool>("editor/gamepad/enabled");
-    if (ImGui::Checkbox("Enabled", &enabled))
-    {
-        m_settingsManager->setAs<bool>("editor/gamepad/enabled", enabled);
-    }
-    if (ImGui::IsItemHovered())
-    {
-        ImGui::SetTooltip("Off ignores the pad without unplugging it. A controller with a worn\n"
-                          "stick reports motion at rest, and motion at rest restarts\n"
-                          "accumulation every frame, so the image never converges.");
-    }
-
-    bool invert = m_settingsManager->getAs<bool>("editor/gamepad/invertLookY");
-    if (ImGui::Checkbox("Invert look Y", &invert))
-    {
-        m_settingsManager->setAs<bool>("editor/gamepad/invertLookY", invert);
-    }
-
-    float lookSpeed = m_settingsManager->getAs<float>("editor/gamepad/lookSpeed");
-    if (ImGui::SliderFloat("Look speed", &lookSpeed, 100.0f, 3000.0f, "%.0f"))
-    {
-        m_settingsManager->setAs<float>("editor/gamepad/lookSpeed", lookSpeed);
-    }
-
-    float deadzone = m_settingsManager->getAs<float>("editor/gamepad/deadzone");
-    if (ImGui::SliderFloat("Deadzone", &deadzone, 0.0f, 0.5f, "%.3f"))
-    {
-        m_settingsManager->setAs<float>("editor/gamepad/deadzone", deadzone);
-    }
-    if (ImGui::IsItemHovered())
-    {
-        ImGui::SetTooltip("How far a stick must move before it counts. A DualSense at rest\n"
-                          "reads up to 0.043 on the right stick, so anything below that lets\n"
-                          "the camera drift on its own and the render never settles.");
-    }
-
-    // The live axes, so a pad that behaves oddly can be diagnosed here rather
-    // than by guessing from how the camera moved.
-    if (pad.connected && ImGui::TreeNode("Live input"))
-    {
-        ImGui::Text("Left  stick  %+.3f %+.3f", pad.leftX, pad.leftY);
-        ImGui::Text("Right stick  %+.3f %+.3f", pad.rightX, pad.rightY);
-        ImGui::Text("Triggers     L2 %.3f  R2 %.3f", pad.leftTrigger, pad.rightTrigger);
-        ImGui::Text("Speed scale  x%.2f",
-                    gamepad::speedScaleFromTriggers(pad.leftTrigger, pad.rightTrigger, gamepad::Config{}));
-
-        // Every button, lit while held. The point is to separate "this button
-        // does nothing" from "this button is not arriving": the first is ours to
-        // fix, the second is the mapping's, and from the camera alone the two
-        // look the same.
-        struct Named
-        {
-            oka::GamepadState::Button button;
-            const char* label;
-        };
-        static const Named kButtons[] = {
-            { oka::GamepadState::a, "Cross" },       { oka::GamepadState::b, "Circle" },
-            { oka::GamepadState::x, "Square" },      { oka::GamepadState::y, "Triangle" },
-            { oka::GamepadState::leftBumper, "L1" }, { oka::GamepadState::rightBumper, "R1" },
-            { oka::GamepadState::leftThumb, "L3" },  { oka::GamepadState::rightThumb, "R3" },
-            { oka::GamepadState::dpadUp, "Up" },     { oka::GamepadState::dpadDown, "Down" },
-            { oka::GamepadState::dpadLeft, "Left" }, { oka::GamepadState::dpadRight, "Right" },
-            { oka::GamepadState::back, "Share" },    { oka::GamepadState::start, "Options" },
-            { oka::GamepadState::guide, "PS" },
-        };
-        int column = 0;
-        for (const Named& entry : kButtons)
-        {
-            if (column++ % 4 != 0)
-            {
-                ImGui::SameLine(static_cast<float>(column % 4) * 90.0f);
-            }
-            if (pad.pressed(entry.button))
-            {
-                ImGui::TextUnformatted(entry.label);
-            }
-            else
-            {
-                ImGui::TextDisabled("%s", entry.label);
-            }
-        }
-        ImGui::TreePop();
-    }
-
-    ImGui::Separator();
-    ImGui::TextDisabled("Left stick   move        Right stick  look");
-    ImGui::TextDisabled("L1 / R1      down / up   L2 / R2      slower / faster");
-    ImGui::TextDisabled("D-pad        navigate the UI");
-
-    ImGui::TreePop();
 }
 
 } // namespace oka
