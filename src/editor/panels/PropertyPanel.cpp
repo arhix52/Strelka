@@ -1,4 +1,5 @@
 #include "../EditorApp.h"
+#include "../editor_overlay.h"
 
 #include "imgui.h"
 #include "ImGuizmo.h"
@@ -17,8 +18,14 @@ namespace oka
 
 void EditorApp::showGizmo(Camera& cam, float* matrix, ImGuizmo::OPERATION operation)
 {
-    glm::float4x4 cameraView = cam.matrices.view;
-    glm::float4x4 cameraProjection = cam.matrices.perspective;
+    Camera gizmoCamera = cam;
+    const glm::float3 target(matrix[12], matrix[13], matrix[14]);
+    if (!editor_overlay::prepareGizmoCamera(gizmoCamera, target))
+    {
+        return;
+    }
+    glm::float4x4 cameraView = gizmoCamera.matrices.view;
+    glm::float4x4 cameraProjection = gizmoCamera.matrices.perspective;
     ImGuizmo::Manipulate(
         glm::value_ptr(cameraView), glm::value_ptr(cameraProjection), operation, m_gizmoMode, matrix);
 }

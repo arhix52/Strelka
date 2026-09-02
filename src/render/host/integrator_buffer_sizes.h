@@ -20,6 +20,7 @@ struct WavefrontElementSizes
     size_t hitRecord = 0;
     size_t iorStack = 0;
     size_t radiance = 0; // float4
+    size_t guideRay = 0;
     size_t shadowRay = 0;
     size_t aovSample = 0;
 };
@@ -33,7 +34,7 @@ struct WavefrontBufferLayout
     size_t hitBytes = 0;
     size_t iorStackBytes = 0;
     size_t radianceBytes = 0;
-    size_t guideRadianceBytes = 0;
+    size_t guideRayBytes = 0;
     size_t pathQueueBytes = 0; // one ping-pong queue
     size_t controlBytes = 0;
     size_t traversalDispatchBytes = 0;
@@ -106,7 +107,7 @@ inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width,
     layout.hitBytes = (size_t)pixels * sz.hitRecord;
     layout.iorStackBytes = (size_t)pixels * sz.iorStack;
     layout.radianceBytes = (size_t)pixels * sz.radiance;
-    layout.guideRadianceBytes = (size_t)pixels * sz.radiance;
+    layout.guideRayBytes = (size_t)pixels * sz.guideRay;
     layout.pathQueueBytes = (size_t)pixels * sizeof(uint32_t);
     layout.controlBytes = (size_t)kWavefrontControlUints * sizeof(uint32_t);
     layout.traversalDispatchBytes =

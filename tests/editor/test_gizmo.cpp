@@ -2,6 +2,7 @@
 
 #include <strelka/scene/camera.h>
 
+#include "editor_overlay.h"
 #include "headless_imgui.h"
 #include "ImGuizmo.h"
 
@@ -279,4 +280,58 @@ TEST_CASE("ImGuizmo draws nothing when the target is behind the camera")
     ImGui::Render();
 
     CHECK(vtxAfter == vtxBefore);
+}
+
+TEST_CASE("path-traced gizmo before the authored near plane preserves the draw-list clip")
+{
+    const HeadlessImGui ctx;
+
+    Camera cam;
+    cam.position = glm::float3(0.0f, 0.0f, 1.0f);
+    cam.setPerspective(45.0f, 1024.0f / 768.0f, 10.0f, 30.0f);
+    cam.updateViewMatrix();
+
+    // Frame Selection can put this valid path-traced target one metre from a
+    // glTF camera whose authored near plane is ten metres away.
+    const glm::float4 originalClip = cam.matrices.perspective * cam.matrices.view * glm::float4(0.0f, 0.0f, 0.0f, 1.0f);
+    REQUIRE(originalClip.w != 0.0f);
+    CHECK(originalClip.z / originalClip.w < 0.001f);
+
+    Camera gizmoCamera = cam;
+    REQUIRE(editor_overlay::prepareGizmoCamera(gizmoCamera, glm::float3(0.0f)));
+    CHECK(gizmoCamera.znear < 1.0f);
+    CHECK(gizmoCamera.matrices.perspective[0][0] == doctest::Approx(cam.matrices.perspective[0][0]));
+    CHECK(gizmoCamera.matrices.perspective[1][1] == doctest::Approx(cam.matrices.perspective[1][1]));
+    const glm::float4 safeClip =
+        gizmoCamera.matrices.perspective * gizmoCamera.matrices.view * glm::float4(0.0f, 0.0f, 0.0f, 1.0f);
+    REQUIRE(safeClip.w != 0.0f);
+    CHECK(safeClip.z / safeClip.w >= 0.001f);
+
+    glm::float4x4 model(1.0f);
+    ImGui::NewFrame();
+    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::BeginFrame();
+    ImGui::Begin("Viewport");
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    ImGuizmo::SetDrawlist(drawList);
+    ImGuizmo::SetRect(0.0f, 0.0f, 1024.0f, 768.0f);
+
+    const int clipsBefore = drawList->_ClipRectStack.Size;
+    ImGuizmo::Manipulate(glm::value_ptr(gizmoCamera.matrices.view), glm::value_ptr(gizmoCamera.matrices.perspective),
+                         ImGuizmo::TRANSLATE, ImGuizmo::WORLD, &model[0][0]);
+    const int clipsAfter = drawList->_ClipRectStack.Size;
+    ImGui::End();
+    ImGui::Render();
+
+    CHECK(clipsAfter == clipsBefore);
+}
+
+TEST_CASE("path-traced gizmo skips a target behind the eye")
+{
+    Camera cam;
+    cam.position = glm::float3(0.0f, 0.0f, 1.0f);
+    cam.setPerspective(45.0f, 1.0f, 0.1f, 100.0f);
+    cam.updateViewMatrix();
+
+    CHECK_FALSE(editor_overlay::prepareGizmoCamera(cam, glm::float3(0.0f, 0.0f, 2.0f)));
 }

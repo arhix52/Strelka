@@ -336,8 +336,8 @@ bool MetalRender::readDisplayReferred(std::vector<float>& rgba, uint32_t& width,
         return false;
     }
 
-    const oka::tonemap::float3 exposure = oka::tonemap::make_float3(
-        presentation.exposure[0], presentation.exposure[1], presentation.exposure[2]);
+    const oka::tonemap::float3 exposure =
+        oka::tonemap::make_float3(presentation.exposure[0], presentation.exposure[1], presentation.exposure[2]);
     const float headroom = std::max(maxOutput, 1.0f);
     const auto curve = static_cast<oka::tonemap::ToneMapperType>(presentation.tonemapper);
     const size_t pixels = static_cast<size_t>(width) * height;
@@ -345,8 +345,7 @@ bool MetalRender::readDisplayReferred(std::vector<float>& rgba, uint32_t& width,
     rgba.resize(pixels * 4);
     for (size_t i = 0; i < pixels; ++i)
     {
-        oka::tonemap::float3 c = oka::tonemap::make_float3(
-            linear[i * 4 + 0], linear[i * 4 + 1], linear[i * 4 + 2]);
+        oka::tonemap::float3 c = oka::tonemap::make_float3(linear[i * 4 + 0], linear[i * 4 + 1], linear[i * 4 + 2]);
         if (shouldApplyPresentationTransform(presentation))
         {
             c = c * exposure;
@@ -883,10 +882,12 @@ void MetalRender::init()
     static_assert(offsetof(::Vertex, uv) == 20);
     static_assert(offsetof(::Vertex, uv1) == 24);
     static_assert(offsetof(::Vertex, color) == 28);
-    static_assert(offsetof(Uniforms, openpbrParams) == 792);
-    static_assert(offsetof(Uniforms, openpbrTextures) == 800);
+    static_assert(offsetof(Uniforms, openpbrParams) == 784);
+    static_assert(offsetof(Uniforms, openpbrTextures) == 792);
+    static_assert(offsetof(Uniforms, guideRays) == 800);
     static_assert(offsetof(Material, baseColorTexture) == 256);
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
+    static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");
     // The hot record is what every live path streams on every bounce. Medium
     // bookkeeping lives in an exact, eight-byte side record so surface-only
     // specialisations do not pay for it.
@@ -1207,9 +1208,8 @@ uint32_t MetalRender::sharcUpdateIterations(uint32_t maxDepth, uint32_t subsurfa
     uint32_t depth = maxDepth;
     if (getSettings()->getAs<bool>("render/pt/sharcCacheResampling"))
     {
-        const uint32_t propagationDepth =
-            std::clamp(getSettings()->getAs<uint32_t>("render/pt/sharcPropagationDepth"), 1u,
-                       static_cast<uint32_t>(SHARC_MAX_PROPAGATION_DEPTH));
+        const uint32_t propagationDepth = std::clamp(getSettings()->getAs<uint32_t>("render/pt/sharcPropagationDepth"),
+                                                     1u, static_cast<uint32_t>(SHARC_MAX_PROPAGATION_DEPTH));
         depth = std::min(maxDepth, propagationDepth + 1u + kSharcUpdateVolumeAllowance);
     }
     return wavefrontIterations(depth, std::min(subsurfaceIterations, kSharcUpdateSubsurfaceIterations));
@@ -1347,8 +1347,8 @@ void MetalRender::render(Buffer* output)
         getSettings()->getAs<bool>("render/pt/sharc") && SHARC_DEBUG_IS_SURFACE_VIEW(sharcDebug);
     // Debug views are final outputs. Sending them through MetalFX would alter
     // their values, while the debug path deliberately skips the final tonemap.
-    bool denoising = getSettings()->getAs<bool>("render/pt/denoise") && denoiserScaleSupported &&
-                     useWavefrontTracer && debug == 0 && !sharcVisualization;
+    bool denoising = getSettings()->getAs<bool>("render/pt/denoise") && denoiserScaleSupported && useWavefrontTracer &&
+                     debug == 0 && !sharcVisualization;
     const bool shaderValidation = envUint("MTL_SHADER_VALIDATION", 0) != 0;
     if (denoising && shaderValidation)
     {
@@ -1890,6 +1890,7 @@ void MetalRender::render(Buffer* output)
             pUniformData->openpbrParams = mMaterials.openpbrBuffer() ? mMaterials.openpbrBuffer()->gpuAddress() : 0ull;
             pUniformData->openpbrTextures =
                 mMaterials.openpbrTextureBuffer() ? mMaterials.openpbrTextureBuffer()->gpuAddress() : 0ull;
+            pUniformData->guideRays = mIntegrator.guideRayAddress();
 
             metal::IntegratorSceneBindings sceneBind = integratorSceneBindings();
             metal::IntegratorFrameRequest frameReq;
@@ -1904,10 +1905,9 @@ void MetalRender::render(Buffer* output)
             frameReq.motionBlasBuilt = mAccel.motionBlasBuilt();
             frameReq.profileStages = profileStages;
             frameReq.settings = getSettings();
-            const uint32_t dispatchSampleCount = samplesThisLaunch + (pUniformData->canonicalGuideSample ? 1u : 0u);
             const uint32_t iterationsPerChunk = metal::wavefrontChunkIterations(width, height);
             const std::vector<metal::WavefrontChunk> logicalWavefrontChunks =
-                metal::makeWavefrontChunkPlan(dispatchSampleCount, frameReq.bounceIterations, iterationsPerChunk);
+                metal::makeWavefrontChunkPlan(samplesThisLaunch, frameReq.bounceIterations, iterationsPerChunk);
             uint32_t traversalBatchThreads = useMetal4 && !featureIn.hasCurves ?
                                                  metal::kWavefrontTriangleTraversalBatchThreads :
                                                  metal::kWavefrontTraversalBatchThreads;
@@ -2126,8 +2126,8 @@ void MetalRender::render(Buffer* output)
                         enc4 = cmd4->computeCommandEncoder();
                         const metal::WavefrontChunk& labelled = wavefrontChunks[chunkIndex];
                         labelMetal4(enc4, fmt::format("trace chunk {} sample {} bounce {}..{} {}", chunkIndex,
-                                                       labelled.sampleIndex, labelled.bounceBegin, labelled.bounceEnd,
-                                                       metal::wavefrontChunkPhaseName(labelled.phase)));
+                                                      labelled.sampleIndex, labelled.bounceBegin, labelled.bounceEnd,
+                                                      metal::wavefrontChunkPhaseName(labelled.phase)));
                     }
                     mIntegrator.encodeMetal4(enc4, sceneBind, frameReq, wavefrontChunks[chunkIndex]);
                 }
@@ -2169,10 +2169,9 @@ void MetalRender::render(Buffer* output)
                 mMetal4FrameValue = mMetal4.reserveFrameSignal();
                 const uint64_t frameSignalValue = mMetal4FrameValue;
                 const std::weak_ptr<Metal4FrameFeedbackState> weakFeedbackState = feedbackState;
-                feedbackState->submit = [this, weakFeedbackState, writeIdx4, asyncPresent, commitStartedAt,
-                                         profileStages, width, height, maxDepth, samplesThisLaunch, features,
-                                         traversalBatchThreads, frameSignalValue,
-                                         reportSharcDiagnostics](size_t groupIndex) {
+                feedbackState->submit = [this, weakFeedbackState, writeIdx4, asyncPresent, commitStartedAt, profileStages,
+                                         width, height, maxDepth, samplesThisLaunch, features, traversalBatchThreads,
+                                         frameSignalValue, reportSharcDiagnostics](size_t groupIndex) {
                     const std::shared_ptr<Metal4FrameFeedbackState> state = weakFeedbackState.lock();
                     if (!state)
                     {
@@ -2181,8 +2180,8 @@ void MetalRender::render(Buffer* output)
                     MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
                     options->addFeedbackHandler(MTL4::CommitFeedbackHandlerFunction(
                         [this, state, writeIdx4, asyncPresent, commitStartedAt, profileStages, width, height, maxDepth,
-                         samplesThisLaunch, features, traversalBatchThreads, groupIndex,
-                         frameSignalValue, reportSharcDiagnostics](MTL4::CommitFeedback* fb) {
+                         samplesThisLaunch, features, traversalBatchThreads, groupIndex, frameSignalValue,
+                         reportSharcDiagnostics](MTL4::CommitFeedback* fb) {
                             // The feedback is the only place a Metal 4 frame reports
                             // failure: there is no status() to poll afterwards the way
                             // the Metal 3 path polls its command buffer. Without this
@@ -2447,7 +2446,7 @@ void MetalRender::render(Buffer* output)
                 // white point is neutral, but luminance remains correct if that
                 // becomes chromatic later.
                 in.exposure = simd::dot(pUniformData->exposureValue, float3{ 0.2126f, 0.7152f, 0.0722f });
-                in.depthReversed = pUniformData->denoiseDepthMode == kDenoiseDepthDevice;
+                in.depthReversed = denoiseDepthReversed(pUniformData->denoiseDepthMode, pUniformData->projectionType);
                 // Reset when this frame has no valid predecessor to reproject
                 // from -- *not* when the estimator restarts. Accumulation restarts
                 // on every camera move, and resetting the denoiser with it throws
@@ -2499,7 +2498,8 @@ void MetalRender::render(Buffer* output)
                 const uint32_t jitterSign = settings.getAs<uint32_t>("render/pt/jitterSign");
                 tin.jitterX = (jitterSign & 1u) ? -pUniformData->jitterX : pUniformData->jitterX;
                 tin.jitterY = (jitterSign & 2u) ? -pUniformData->jitterY : pUniformData->jitterY;
-                tin.depthReversed = pUniformData->denoiseDepthMode == kDenoiseDepthDevice;
+                tin.depthReversed =
+                    denoiseDepthReversed(pUniformData->denoiseDepthMode, pUniformData->projectionType);
                 tin.resetHistory = mResetDenoiseHistory;
                 mResetDenoiseHistory = false;
                 mPost.metalFx().encodeTemporal(pCmd, false, tin);
@@ -3115,8 +3115,9 @@ void MetalRender::buildSceneTail(Buffer* output)
         MemoryReport report;
         if (memoryReport(report))
         {
-            std::ranges::sort(report.gpu,
-                      [](const MemoryReport::Entry& a, const MemoryReport::Entry& b) { return a.bytes > b.bytes; });
+            std::ranges::sort(report.gpu, [](const MemoryReport::Entry& a, const MemoryReport::Entry& b) {
+                return a.bytes > b.bytes;
+            });
             std::string top;
             for (size_t i = 0; i < std::min<size_t>(4, report.gpu.size()); ++i)
             {

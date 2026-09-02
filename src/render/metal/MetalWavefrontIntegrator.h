@@ -31,6 +31,8 @@ struct WavefrontVariant
     MTL::ComputePipelineState* miss = nullptr;
     MTL::ComputePipelineState* shadowMotion = nullptr;
     MTL::ComputePipelineState* shadowStatic = nullptr;
+    MTL::ComputePipelineState* guideMotion = nullptr;
+    MTL::ComputePipelineState* guideStatic = nullptr;
 };
 
 // Non-owning resources assembled by MetalRender for each encode.
@@ -175,6 +177,10 @@ public:
     {
         return mRadianceBuffer;
     }
+    uint64_t guideRayAddress() const
+    {
+        return mGuideRayBuffer ? mGuideRayBuffer->gpuAddress() : 0ull;
+    }
     MTL::Buffer* iorStatsBuffer() const
     {
         return mIorStatsBuffer;
@@ -231,7 +237,7 @@ private:
     MTL::Buffer* mHitBuffer = nullptr;
     MTL::Buffer* mIorStackBuffer = nullptr;
     MTL::Buffer* mRadianceBuffer = nullptr;
-    MTL::Buffer* mGuideRadianceBuffer = nullptr;
+    MTL::Buffer* mGuideRayBuffer = nullptr;
     MTL::Buffer* mPathQueueBuffer[2] = { nullptr, nullptr };
     MTL::Buffer* mControlBuffer = nullptr;
     MTL::Buffer* mTraversalDispatchBuffer = nullptr;

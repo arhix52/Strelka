@@ -12,6 +12,7 @@ using oka::editor_denoiser::modeIndexFromSettings;
 using oka::editor_denoiser::resolution;
 using oka::editor_denoiser::settingsMatchMode;
 using oka::editor_denoiser::shouldUpscale;
+using oka::editor_denoiser::usesPerFrameDenoiseInput;
 using oka::editor_denoiser::Ui;
 
 namespace
@@ -58,6 +59,9 @@ TEST_CASE("the two backends do not offer the same modes")
     CHECK_FALSE(modeAt(metalFx(), kMetalSpatial).denoise);
     CHECK(modeAt(metalFx(), kMetalSpatial).upscale);
     CHECK(modeAt(optix(), kOptixDenoiseUpscale).denoise);
+    CHECK(usesPerFrameDenoiseInput(metalFx(), kMetalTemporalDenoise));
+    CHECK_FALSE(usesPerFrameDenoiseInput(metalFx(), kMetalSpatial));
+    CHECK_FALSE(usesPerFrameDenoiseInput(optix(), kOptixDenoise));
 }
 
 TEST_CASE("spatial MetalFX selection survives one-to-one scale")

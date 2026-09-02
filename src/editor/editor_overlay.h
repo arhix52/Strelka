@@ -1,12 +1,58 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
+#include <strelka/scene/camera.h>
 #include <strelka/scene/glm_wrapper.hpp>
 
 
 namespace oka::editor_overlay
 {
+
+// Path-traced camera rays start at the eye/film and do not use the authored
+// raster near plane. Clip overlays only far enough in front of the eye to avoid
+// projecting through its w=0 singularity.
+inline constexpr float kEyePlaneDistance = 1e-4f;
+
+/// Build the projection ImGuizmo needs for a path-traced target.
+///
+/// ImGuizmo rejects a perspective target when its projected reverse-Z depth is
+/// below 0.001. That includes valid path-traced geometry before an authored near
+/// plane (the bathroom camera uses 10 m). Worse, that early return leaks
+/// ImGuizmo's draw-list clip rect and hides every viewport overlay drawn
+/// afterwards. Keep the current screen-space projection, but fit a private depth
+/// range around the gizmo origin.
+inline bool prepareGizmoCamera(Camera& camera, const glm::float3& worldTarget)
+{
+    if (camera.projection == Camera::ProjectionType::orthographic)
+    {
+        return true;
+    }
+
+    const glm::float4 viewTarget = camera.matrices.view * glm::float4(worldTarget, 1.0f);
+    const float depth = -viewTarget.z;
+    if (!std::isfinite(depth) || depth <= kEyePlaneDistance || depth > std::numeric_limits<float>::max() * 0.25f)
+    {
+        return false;
+    }
+
+    // Recover the already aspect-adapted vertical FOV from the live projection,
+    // so changing only its depth terms cannot move the gizmo on screen.
+    const float projectionX = std::fabs(camera.matrices.perspective[0][0]);
+    const float projectionY = std::fabs(camera.matrices.perspective[1][1]);
+    if (!(projectionX > 0.0f) || !(projectionY > 0.0f) || !std::isfinite(projectionX) || !std::isfinite(projectionY))
+    {
+        return false;
+    }
+    const float aspect = projectionY / projectionX;
+    const float verticalFov = glm::degrees(2.0f * std::atan(1.0f / projectionY));
+    const float nearPlane = std::max(kEyePlaneDistance, depth * 0.05f);
+    const float farPlane = std::max(nearPlane * 2.0f, depth * 4.0f);
+    camera.setPerspective(verticalFov, aspect, nearPlane, farPlane);
+    return true;
+}
 
 /// Trim a segment to the part of it the camera can see, given the view-space
 /// depth of both endpoints, and report whether anything is left.
@@ -75,4 +121,3 @@ inline bool clipToScreen(const glm::float4& clip,
 }
 
 } // namespace oka::editor_overlay
-

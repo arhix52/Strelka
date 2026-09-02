@@ -353,9 +353,8 @@ static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixe
     // it there would retrace the same path and hand MetalFX correlated noise.
     // SHARC has its own temporal sequence for the same reason.
     const bool temporalSequence = uniforms.useFrameJitter != 0u || uniforms.enableAccumulation == 0u;
-    const uint32_t sequenceBase = temporalSequence ?
-                                      uniforms.frameIndex * max(uniforms.samples_per_launch, 1u) :
-                                      uniforms.subframeIndex;
+    const uint32_t sequenceBase =
+        temporalSequence ? uniforms.frameIndex * max(uniforms.samples_per_launch, 1u) : uniforms.subframeIndex;
     const uint32_t sequenceIndex = SPEC_SHARC_UPDATE ? uniforms.sharcFrameIndex : sequenceBase + sampleIdx;
     SamplerState s = initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp);
     s.depth = depth;
@@ -368,27 +367,22 @@ static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixe
 // different time on every bounce and smear the path across the shutter.
 static inline float motionTimeFor(constant Uniforms& uniforms, uint32_t pixelIndex, uint32_t sampleIdx)
 {
-    if (uniforms.canonicalGuideSample && sampleIdx == 0u)
-    {
-        return 1.0f;
-    }
     if (!SPEC_MOTION_BLUR || !uniforms.enableMotionBlur)
     {
         return 0.0f;
     }
     SamplerState s = samplerFor(uniforms, pixelIndex, sampleIdx, 0u);
-    const uint32_t firstRadianceSample = uniforms.canonicalGuideSample ? 1u : 0u;
-    const uint32_t radianceSample = sampleIdx - firstRadianceSample;
     const uint32_t sampleCount = max(uniforms.samples_per_launch, 1u);
-    const float t =
-        ((float)radianceSample + random<SampleDimension::eTime>(s, uniforms.samplerType)) / (float)sampleCount;
+    const float t = ((float)sampleIdx + random<SampleDimension::eTime>(s, uniforms.samplerType)) / (float)sampleCount;
     return uniforms.isMotionBlurVisible ? t : 1.0f;
 }
 
 static inline bool shouldWriteAov(constant Uniforms& uniforms, uint32_t sampleIdx)
 {
-    return !SPEC_SHARC_UPDATE && uniforms.writeAov && (!uniforms.canonicalGuideSample || sampleIdx == 0u);
+    return !SPEC_SHARC_UPDATE && uniforms.writeAov && sampleIdx == 0u;
 }
+
+static inline float backgroundDepth(constant Uniforms& uniforms);
 
 static inline uint32_t sharcUpdateStateIndex(constant Uniforms& uniforms, uint32_t pixelIndex)
 {
@@ -471,7 +465,10 @@ static MediumProps mediumPropsFor(constant Uniforms& uniforms,
         const OpenPBRParams mat = uniforms.openpbrParams[materialIndex];
         const OpenPBR_HomogeneousVolume v = openpbr_interior_volume(mat);
         out.sigmaT = v.extinction_coefficient;
-        out.albedo = v.albedo;
+        // The texture-resolved single-scattering albedo was captured where the
+        // path crossed the surface. There is no UV inside the volume with which
+        // to reconstruct it from the material table here.
+        out.albedo = unpackMediumAlbedo(packedAlbedo);
         out.anisotropy = v.anisotropy;
         return out;
     }
@@ -540,32 +537,25 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
     // full-resolution path slots.
     queueOut[tid] = pixelIndex;
 
-    const uint32_t firstRadianceSample = uniforms.canonicalGuideSample ? 1u : 0u;
-    if (sampleIdx == firstRadianceSample)
+    if (sampleIdx == 0u)
     {
         radianceOut[pixelIndex] = float4(0.0f);
     }
 
     const uint2 pixel = uint2(pixelIndex % uniforms.width, pixelIndex / uniforms.width);
-    // The guide ray and the first radiance ray must describe the same camera
-    // sample. This is observable with depth of field: rebuilding the guide with
-    // sample zero otherwise chooses a different point on the lens and the AOVs
-    // describe another ray than the noisy color MetalFX is filtering.
-    const uint32_t cameraSampleIdx =
-        (uniforms.canonicalGuideSample && sampleIdx == 0u) ? firstRadianceSample : sampleIdx;
-    SamplerState rng = samplerFor(uniforms, pixelIndex, cameraSampleIdx, 0u);
-    const float motionTime = motionTimeFor(uniforms, pixelIndex, cameraSampleIdx);
+    SamplerState rng = samplerFor(uniforms, pixelIndex, sampleIdx, 0u);
+    const float motionTime = motionTimeFor(uniforms, pixelIndex, sampleIdx);
 
     float3 origin, direction;
     generateCameraRay(pixel, rng, origin, direction, uniforms, motionTime);
-    if (uniforms.canonicalGuideSample && sampleIdx == 0u)
+    if (shouldWriteAov(uniforms, sampleIdx))
     {
         AovSample a;
         a.diffuseAlbedo = packed_float3(float3(0.0f));
         a.specularAlbedo = packed_float3(float3(0.0f));
         a.normal = packed_float3(-direction);
         a.roughness = 1.0f;
-        a.depth = uniforms.denoiseDepthMode == kDenoiseDepthDevice ? 0.0f : 1e7f;
+        a.depth = backgroundDepth(uniforms);
         a.motionX = 0.0f;
         a.motionY = 0.0f;
         a.specularHitDistance = 0.0f;
@@ -574,6 +564,7 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
         a.reactive = 1.0f;
         a.guideStateOrBounceDepth = -1.0f;
         aov[pixelIndex] = a;
+        uniforms.guideRays[pixelIndex].flags = 0u;
     }
 
     PathRay r;
@@ -1171,7 +1162,7 @@ static inline float viewDepth(constant Uniforms& uniforms, float3 worldPosition)
 // nearer than the geometry.
 static inline float backgroundDepth(constant Uniforms& uniforms)
 {
-    return uniforms.denoiseDepthMode == kDenoiseDepthDevice ? 0.0f : 1e7f;
+    return denoiseBackgroundDepth(uniforms.denoiseDepthMode, uniforms.projectionType);
 }
 
 // Where a point was on screen last frame, in pixels, y down. That is the sign
@@ -1210,8 +1201,7 @@ static inline ScreenMotion screenMotion(constant Uniforms& uniforms, float4 prev
     // This is the raster location of the world-space hit under the current
     // unjittered camera. Using the centre here would make a still scene report
     // exactly the jitter as motion, which is not a dejittered vector.
-    const float2 currPixel =
-        float2((float)pixel.x + 0.5f + uniforms.jitterX, (float)pixel.y + 0.5f + uniforms.jitterY);
+    const float2 currPixel = float2((float)pixel.x + 0.5f + uniforms.jitterX, (float)pixel.y + 0.5f + uniforms.jitterY);
     const float2 motion = prevPixel - currPixel;
     // Nothing that moved further than the frame is across in one frame can be
     // reprojected onto anything: past that the history lookup lands outside the
@@ -1230,6 +1220,12 @@ struct DenoiserMaterialGuides
     float roughness;
     float transmission;
 };
+
+static inline bool openpbrBaseMapDetailsSubsurface(thread const OpenPBRParams& p)
+{
+    return p.subsurface_weight > 0.0f && openpbrHasMap(p, OPENPBR_TEX_BASE_COLOR) &&
+           !openpbrHasMap(p, OPENPBR_TEX_SUBSURFACE_COLOR);
+}
 
 // MetalFX asks for albedos that approximate the diffuse and specular radiance
 // visible from this view, rather than the material's normal-incidence F0. Keep
@@ -1263,13 +1259,19 @@ static inline DenoiserMaterialGuides standardDenoiserGuides(thread const Surface
 }
 
 static inline DenoiserMaterialGuides openpbrDenoiserGuides(thread const OpenPBR_ResolvedInputs& in,
-                                                           thread const SurfaceInteraction& si)
+                                                           thread const SurfaceInteraction& si,
+                                                           bool baseMapDetailsSubsurface)
 {
     DenoiserMaterialGuides g;
     const float dielectric = 1.0f - in.base_metalness;
     const float opaque = 1.0f - in.transmission_weight;
     const float3 weightedBase = in.base_color * in.base_weight;
-    const float3 diffuseColor = mix(weightedBase, in.subsurface_color, in.subsurface_weight);
+    // MaterialX exports in the test scenes use a mapped base plus a constant
+    // subsurface tint. Preserve the mapped detail in that case; a genuinely
+    // mapped subsurface colour remains an independent OpenPBR input.
+    const float3 subsurfaceColor =
+        baseMapDetailsSubsurface ? weightedBase * in.subsurface_color : in.subsurface_color;
+    const float3 diffuseColor = mix(weightedBase, subsurfaceColor, in.subsurface_weight);
     g.diffuse = diffuseColor * dielectric * opaque;
 
     const float cosView = saturate(abs(dot(float3(si.shading_normal), float3(si.wo))));
@@ -1287,8 +1289,8 @@ static inline DenoiserMaterialGuides openpbrDenoiserGuides(thread const OpenPBR_
     const float mainEnergy = max(luminance(g.specular), 1e-4f);
     const float coatEnergy = max(coatFresnel, 0.0f);
     const float fuzzEnergy = max(luminance(fuzz), 0.0f);
-    const float roughnessEnergy = in.specular_roughness * mainEnergy + in.coat_roughness * coatEnergy +
-                                  in.fuzz_roughness * fuzzEnergy;
+    const float roughnessEnergy =
+        in.specular_roughness * mainEnergy + in.coat_roughness * coatEnergy + in.fuzz_roughness * fuzzEnergy;
     g.roughness = saturate(roughnessEnergy / (mainEnergy + coatEnergy + fuzzEnergy));
     g.transmission = in.transmission_weight;
     return g;
@@ -1310,10 +1312,19 @@ static inline float denoiserInterfaceIor(bool isOpenPBR,
     // reflection when specular_weight is zero.
     const float exterior = max(si.exterior_ior, 1e-4f);
     const bool entersCoat = entering && openpbr.coat_weight > 0.0f;
-    const float surrounding =
-        entersCoat ? mix(exterior, max(openpbr.coat_ior, 1.0f), openpbr.coat_weight) : exterior;
-    return surrounding * openpbr_apply_specular_weight_to_ior(max(openpbr.specular_ior, 1.0f) / surrounding,
-                                                               openpbr.specular_weight);
+    const float surrounding = entersCoat ? mix(exterior, max(openpbr.coat_ior, 1.0f), openpbr.coat_weight) : exterior;
+    return surrounding *
+           openpbr_apply_specular_weight_to_ior(max(openpbr.specular_ior, 1.0f) / surrounding, openpbr.specular_weight);
+}
+
+static inline uint32_t packGuideIors(float currentIor, float exteriorIor)
+{
+    return as_type<uint32_t>(half2(currentIor, exteriorIor));
+}
+
+static inline float2 unpackGuideIors(uint32_t packed)
+{
+    return float2(as_type<half2>(packed));
 }
 
 // ---------------------------------------------------------------------------
@@ -1422,7 +1433,8 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
     // A specular primary that escaped into the environment still has a hit
     // distance -- infinity -- and leaving it at zero tells MetalFX the
     // reflection sits on the mirror.
-    if (shouldWriteAov(uniforms, sampleIdx) && depth > 0u && specularBounce)
+    if (shouldWriteAov(uniforms, sampleIdx) && depth > 0u && specularBounce &&
+        (p.depthAndFlags & PATH_FLAG_AOV_DONE) == 0u)
     {
         aov[tid].specularHitDistance += max(uniforms.sceneExtent, 1e3f);
     }
@@ -1430,9 +1442,9 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
     // A single-hit debug view and the SHaRC surface diagnostics are answers about
     // a surface. The background has nothing to say in either, and an environment
     // brighter than the debug colours drowns them where it does appear.
-    if (!SPEC_SHARC_UPDATE && ((SPEC_DEBUG && DEBUG_MODE_IS_SINGLE_HIT(uniforms.debug)) ||
-                               (SPEC_SHARC && uniforms.sharcCapacity != 0u &&
-                                SHARC_DEBUG_IS_SURFACE_VIEW(uniforms.sharcDebug))))
+    if (!SPEC_SHARC_UPDATE &&
+        ((SPEC_DEBUG && DEBUG_MODE_IS_SINGLE_HIT(uniforms.debug)) ||
+         (SPEC_SHARC && uniforms.sharcCapacity != 0u && SHARC_DEBUG_IS_SURFACE_VIEW(uniforms.sharcDebug))))
     {
         return;
     }
@@ -1447,9 +1459,8 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         // clamped v (cudaAddressModeClamp on axis 1); this backend wrapped it, so the
         // two disagreed on the one row where an equirectangular map has a seam that
         // is not a seam.
-        constexpr sampler envSampler(mag_filter::linear, min_filter::linear,
-                                     s_address::repeat, t_address::clamp_to_edge,
-                                     coord::normalized);
+        constexpr sampler envSampler(
+            mag_filter::linear, min_filter::linear, s_address::repeat, t_address::clamp_to_edge, coord::normalized);
         const float2 envUV = dirToEnvUV(rayDir, uniforms.envMapRotation);
         float3 envColor = envMapTexture.sample(envSampler, envUV).xyz;
         envColor *= uniforms.envMapIntensity * uniforms.envMapColorTint.xyz;
@@ -1480,9 +1491,8 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
             // strategy owns it outright. Dropping the contribution instead --
             // which the guard used to do -- loses energy exactly along the edges
             // of dark regions, where the bilinear radiance is still non-zero.
-            const float mis = effectiveEnvPdf > 0.0f
-                                  ? computeMisWeight(p.lastBsdfPdf, effectiveEnvPdf, uniforms.misHeuristic)
-                                  : 1.0f;
+            const float mis =
+                effectiveEnvPdf > 0.0f ? computeMisWeight(p.lastBsdfPdf, effectiveEnvPdf, uniforms.misHeuristic) : 1.0f;
             radiance += throughput * envColor * mis;
             sharcEnvironment = envColor * mis;
         }
@@ -1646,8 +1656,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // draws where the connection failed, and the two strategies stop
         // summing to one.
         const bool didNee = volumeNeePairsWithBounce(
-            uniforms.estimatorMode == 0,
-            (SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap));
+            uniforms.estimatorMode == 0, (SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (didNee)
         {
             const LightConnection conn = connectToLight(
@@ -1659,8 +1668,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 // The phase function is the medium's BSDF and its own pdf, so
                 // MIS pairs it against the light density exactly as a surface
                 // lobe would.
-                const float misWeight =
-                    conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, phase, uniforms.misHeuristic);
+                const float misWeight = conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, phase, uniforms.misHeuristic);
                 const float3 weight = throughput * (conn.radiance / conn.pdf) * misWeight * phase;
                 if (any(weight > 1e-6f))
                 {
@@ -1770,10 +1778,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // occludes almost every shadow ray it would spawn.
         const bool isBounded = isBoundedMedium;
         // As in the fog path: available, not delivered.
-        const bool didNeeVolume =
-            isBounded && volumeNeePairsWithBounce(uniforms.estimatorMode == 0,
-                                                  (SPEC_LIGHTS && uniforms.numLights > 0) ||
-                                                      (SPEC_ENV_MAP && uniforms.hasEnvMap));
+        const bool didNeeVolume = isBounded && volumeNeePairsWithBounce(uniforms.estimatorMode == 0,
+                                                                        (SPEC_LIGHTS && uniforms.numLights > 0) ||
+                                                                            (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (isBounded)
         {
             // Volumetric emission: what makes the bath water glow rather than
@@ -1923,7 +1930,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             a.guideStateOrBounceDepth = 0.0f;
             aov[tid] = a;
         }
-        if (shouldWriteAov(uniforms, sampleIdx) && depth > 0u && specularBounce)
+        if (shouldWriteAov(uniforms, sampleIdx) && depth > 0u && specularBounce &&
+            (p.depthAndFlags & PATH_FLAG_AOV_DONE) == 0u)
         {
             aov[tid].specularHitDistance += rec.distance;
         }
@@ -2146,8 +2154,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         const uint32_t step = mediumState.medium >> MEDIUM_STEP_SHIFT;
         const float3 exitAlbedo = unpackMediumAlbedo(mediumState.mediumAlbedo);
         throughput *= sssBoundaryWeight(
-            mediumSigmaT(uniforms, materials, medium - 1u), sssChannelPdf(sampledThroughput, exitAlbedo),
-            rec.distance);
+            mediumSigmaT(uniforms, materials, medium - 1u), sssChannelPdf(sampledThroughput, exitAlbedo), rec.distance);
         if (SPEC_SHARC_UPDATE)
         {
             const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
@@ -2166,8 +2173,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // hemisphere, which is smooth at every parameter, so there is nothing
         // about the material to ask.
         const bool didNeeExit = volumeNeePairsWithBounce(
-            uniforms.estimatorMode == 0,
-            (SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap));
+            uniforms.estimatorMode == 0, (SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (didNeeExit)
         {
             // NEE here and not inside the walk: this is the vertex light can
@@ -2417,61 +2423,33 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     si.exterior_ior =
         entering ? ior_stack_current_ior(iorStack) : ior_stack_peek_after_pop_material(iorStack, entry.materialId);
 
-    // Denoiser guides, from the first surface that can actually be described.
-    //
-    // A mirror or a pane of glass has no albedo to demodulate against and a
-    // roughness of nothing, so guides taken there tell the denoiser that a
-    // featureless black surface sits where a whole reflected world is, and the
-    // reflection is left to denoise itself with no help at all. Walking on to the
-    // first rough surface gives it something to work with. PATH_FLAG_AOV_DONE
-    // stops the bounce after that from overwriting it.
-    const bool aovDone = (p.depthAndFlags & PATH_FLAG_AOV_DONE) != 0u;
-    // Below this a surface reflects rather than scatters, and its own albedo is
-    // not what the pixel's colour comes from.
+    const float3 surfaceEmission = float3(si.emission);
+
+    // The radiance path owns the primary guides. A mirror or pane of glass may
+    // still need the material behind it, and a glossy primary needs a reflected
+    // hit distance, but those are geometric continuations rather than another
+    // light path. Store one compact ray for the guide kernel instead of tracing
+    // a second camera sample through every lighting and shadow stage.
     constexpr float kGuideRoughnessFloor = 0.05f;
-    // Glass and thin translucency are not a demodulation surface even when they
-    // are rough: the pixel's colour is whatever sits behind them. Writing the
-    // pane made the shower screen opaque.
-    // Keep the guide approximation off ordinary radiance samples. It contains
-    // layered Fresnel work that is useful once per pixel, not once per bounce.
     const bool writingAov = shouldWriteAov(uniforms, sampleIdx);
     DenoiserMaterialGuides materialGuides = {};
     bool guideOpaque = true;
-    if (writingAov)
+    if (writingAov && depth == 0u)
     {
         if (isOpenPBR)
         {
             const OpenPBR_ResolvedInputs openpbrInputs = openpbr_resolve_inputs(openpbrMat, si);
-            materialGuides = openpbrDenoiserGuides(openpbrInputs, si);
+            materialGuides =
+                openpbrDenoiserGuides(openpbrInputs, si, openpbrBaseMapDetailsSubsurface(openpbrMat));
         }
         else
         {
             materialGuides = standardDenoiserGuides(si);
         }
         guideOpaque = materialGuides.transmission <= kGuideRoughnessFloor;
-    }
-    // A sharp specular lobe does not make the whole material a mirror. Glazed
-    // ceramic is the important case: its specular roughness is zero, but most of
-    // the visible energy is the diffuse base. Walking through that surface
-    // replaces the stable blue tile albedo with whichever secondary surface the
-    // narrow reflection probe happens to hit, turning all material guides into
-    // salt-and-pepper noise. Primary-surface replacement is reserved for
-    // mirror-like materials whose own diffuse lobe is negligible; an opaque
-    // material with meaningful diffuse energy keeps its primary attributes and
-    // the continuation below is used only to obtain specularHitDistance.
-    const bool hasPrimaryDiffuse = luminance(materialGuides.diffuse) > 1e-3f;
-    const bool primaryHitRequested = uniforms.guidePrimaryHit && depth == 0u;
-    const bool replacementGuideWorthy =
-        !uniforms.guidePrimaryHit && (hasPrimaryDiffuse || materialGuides.roughness > kGuideRoughnessFloor);
-    const bool guideWorthy = (primaryHitRequested || replacementGuideWorthy) && guideOpaque;
-    // Never walk forever: past a couple of bounces the reflected surface has
-    // little to do with this pixel, and no guides at all is worse than imperfect
-    // ones.
-    const bool guideLastChance = depth >= 2u;
 
-    // Depth and motion always belong to the camera-visible surface, even when material guides are deferred.
-    if (writingAov && depth == 0u)
-    {
+        // Depth and motion always belong to the camera-visible surface, even
+        // when its material attributes will be replaced.
         const float3 prevPrimary = uniforms.hasPrevFramePose ?
                                        previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances, entry,
                                                              rec.instanceIndex, rec.primitiveId, bary) :
@@ -2483,88 +2461,96 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         aov[tid].motionY = primaryMotion.offset.y;
         aov[tid].reactive = primaryMotion.reactive;
         aov[tid].guideStateOrBounceDepth = 0.0f;
-    }
 
-    // A transmissive primary is a layer over the surface reached by the guide
-    // walk. Preserve its view-dependent Fresnel response so the replacement
-    // attributes below are a blend rather than one randomly selected glass
-    // branch. Values >= 1 encode 1 + F; zero means no pending blend.
-    if (writingAov && depth == 0u && !guideOpaque)
-    {
-        const float ior = denoiserInterfaceIor(isOpenPBR, openpbrMat, si, entering);
-        const float eta = entering ? si.exterior_ior / ior : ior / max(si.exterior_ior, 1e-4f);
-        const float cosView = abs(dot(float3(si.shading_normal), float3(si.wo)));
-        const float interfaceFresnel = fresnel_dielectric(cosView, eta);
-        aov[tid].diffuseAlbedo = packed_float3(float3(0.0f));
-        aov[tid].specularAlbedo = packed_float3(float3(interfaceFresnel));
+        aov[tid].diffuseAlbedo = packed_float3(materialGuides.diffuse);
+        aov[tid].specularAlbedo = packed_float3(materialGuides.specular);
         aov[tid].normal = packed_float3(normalize(float3(si.shading_normal)));
         aov[tid].roughness = materialGuides.roughness;
         aov[tid].specularHitDistance = 0.0f;
-        // At total internal reflection the deterministic guide follows the
-        // reflected branch and no transmitted-property blend is meaningful.
-        aov[tid].guideStateOrBounceDepth = interfaceFresnel < 0.5f ? 1.0f + interfaceFresnel : 0.0f;
-    }
 
-    if (writingAov && !aovDone && (guideWorthy || (guideLastChance && guideOpaque)))
-    {
-        AovSample a;
-        const bool blendTransmission = aov[tid].guideStateOrBounceDepth >= 1.0f;
-        const float interfaceFresnel = blendTransmission ? saturate(aov[tid].guideStateOrBounceDepth - 1.0f) : 0.0f;
-        const float transmissionWeight = 1.0f - interfaceFresnel;
-        const float3 priorNormal = float3(aov[tid].normal);
-        const float3 guideNormal = normalize(float3(si.shading_normal));
-        const float3 blendedNormal = priorNormal * interfaceFresnel + guideNormal * transmissionWeight;
-        a.diffuseAlbedo = packed_float3(materialGuides.diffuse * transmissionWeight);
-        a.specularAlbedo = packed_float3(float3(interfaceFresnel) + materialGuides.specular * transmissionWeight);
-        a.normal = packed_float3(
-            blendTransmission && dot(blendedNormal, blendedNormal) > 1e-8f ? normalize(blendedNormal) : guideNormal);
-        a.roughness = blendTransmission ? mix(aov[tid].roughness, materialGuides.roughness, transmissionWeight) :
-                                          materialGuides.roughness;
-        // Taken from the block above, which wrote them for the primary surface
-        // whatever this one is.
-        a.depth = aov[tid].depth;
-        const float2 motion = float2(aov[tid].motionX, aov[tid].motionY);
-        a.motionX = motion.x;
-        a.motionY = motion.y;
-        // Preserve any segments already crossed through layered glass. The hit
-        // below adds this segment before replacement guides are assembled.
-        a.specularHitDistance = aov[tid].specularHitDistance;
-        // A deferred material guide still belongs to the primary surface's
-        // reprojection. Trust it whenever that projection was valid.
-        a.reactive = aov[tid].reactive;
-        a.guideStateOrBounceDepth = 0.0f;
-        aov[tid] = a;
+        const bool hasPrimaryDiffuse = luminance(materialGuides.diffuse) > 1e-3f;
+        const bool replaceMaterial =
+            !uniforms.guidePrimaryHit &&
+            (!guideOpaque || (!hasPrimaryDiffuse && materialGuides.roughness <= kGuideRoughnessFloor));
+        const bool needsSpecularDistance =
+            guideOpaque && materialGuides.roughness < 0.5f && luminance(materialGuides.specular) > 0.02f;
+
+        float interfaceIor = max(si.exterior_ior, 1.0f);
+        float interfaceFresnel = 0.0f;
+        if (!guideOpaque)
+        {
+            interfaceIor = denoiserInterfaceIor(isOpenPBR, openpbrMat, si, entering);
+            const float eta = entering ? si.exterior_ior / interfaceIor : interfaceIor / max(si.exterior_ior, 1e-4f);
+            interfaceFresnel = fresnel_dielectric(abs(dot(float3(si.shading_normal), float3(si.wo))), eta);
+            aov[tid].diffuseAlbedo = packed_float3(float3(0.0f));
+            aov[tid].specularAlbedo = packed_float3(float3(interfaceFresnel));
+            // Values >= 1 carry the glass Fresnel into the replacement blend.
+            aov[tid].guideStateOrBounceDepth = interfaceFresnel < 0.5f ? 1.0f + interfaceFresnel : 0.0f;
+        }
+
+        if (!any(surfaceEmission > 0.0f) && uniforms.writeAov && (replaceMaterial || needsSpecularDistance))
+        {
+            const float3 V = normalize(float3(si.wo));
+            const float3 Ns = normalize(float3(si.shading_normal));
+            const float3 Nf = dot(Ns, V) >= 0.0f ? Ns : -Ns;
+            float3 guideDirection = reflect_dir(-V, Nf);
+            bool transmitted = false;
+            if (!guideOpaque)
+            {
+                const float eta = entering ? si.exterior_ior / interfaceIor : interfaceIor / max(si.exterior_ior, 1e-4f);
+                float3 refracted;
+                const bool validRefraction = si.thin_walled ? true : refract_dir(-V, Nf, eta, refracted);
+                if (validRefraction && interfaceFresnel < 0.5f)
+                {
+                    guideDirection = si.thin_walled ? -V : refracted;
+                    transmitted = true;
+                }
+            }
+
+            const float3 faceNg =
+                dot(float3(si.geometry_normal), V) > 0.0f ? float3(si.geometry_normal) : -float3(si.geometry_normal);
+            GuideRay guide;
+            guide.origin = packed_float3(offset_ray(si.position, transmitted ? -faceNg : faceNg));
+            guide.flags = GUIDE_RAY_ACTIVE | (replaceMaterial ? GUIDE_RAY_REPLACE_MATERIAL : 0u);
+            guide.direction = packed_float3(normalize(guideDirection));
+            IorStack guideIorStack = iorStack;
+            if (!si.thin_walled && !guideOpaque)
+            {
+                if (transmitted)
+                {
+                    if (entering)
+                    {
+                        ior_stack_push(guideIorStack, si.dielectric_priority, interfaceIor, entry.materialId);
+                    }
+                    else
+                    {
+                        ior_stack_pop_material(guideIorStack, entry.materialId);
+                    }
+                }
+                else if (!entering && !ior_stack_has_material(guideIorStack, entry.materialId))
+                {
+                    // A camera may start inside a dielectric without ever
+                    // having pushed it onto the path stack.
+                    ior_stack_push(guideIorStack, si.dielectric_priority, interfaceIor, entry.materialId);
+                }
+            }
+            const float guideCurrentIor = ior_stack_current_ior(guideIorStack);
+            const float guideExteriorIor =
+                guideIorStack.top > 0 ? guideIorStack.entries[guideIorStack.top - 1].ior : 1.0f;
+            guide.mediaIors = packGuideIors(guideCurrentIor, guideExteriorIor);
+            uniforms.guideRays[tid] = guide;
+        }
+
+        // The stochastic radiance continuation must not overwrite the primary
+        // record. Any requested secondary information now belongs to GuideRay.
         p.depthAndFlags |= PATH_FLAG_AOV_DONE;
         paths[tid].depthAndFlags = p.depthAndFlags;
-    }
 
-    // What the specular lobe of the primary hit is looking at. MetalFX takes this
-    // separately so it can reproject a reflection at the depth of the thing being
-    // reflected rather than at the mirror's own.
-    if (shouldWriteAov(uniforms, sampleIdx) && depth > 0u && specularBounce)
-    {
-        aov[tid].specularHitDistance += rec.distance;
-    }
-
-    const float3 surfaceEmission = float3(si.emission);
-    if (writingAov && depth == 0u && any(surfaceEmission > 0.0f))
-    {
-        // Direct emission has no Monte Carlo variance. Mark it as an area the
-        // denoiser ignores, preserving small HDR emitters from the first frame.
-        aov[tid].guideStateOrBounceDepth = -1.0f;
-    }
-
-    // Stop the canonical guide sample once its guides are complete. A smooth
-    // primary still takes the next bounce: specularHitDistance is written there,
-    // and returning here would leave it at zero for every mirror and pane of
-    // glass -- which is the whole input that path exists to produce.
-    if (uniforms.canonicalGuideSample && sampleIdx == 0u && (p.depthAndFlags & PATH_FLAG_AOV_DONE) != 0u)
-    {
-        const bool needsSpecularHit =
-            depth == 0u && guideOpaque && materialGuides.roughness < 0.5f && luminance(materialGuides.specular) > 0.02f;
-        if (depth > 0u || !needsSpecularHit)
+        if (any(surfaceEmission > 0.0f))
         {
-            return;
+            // Direct emission has no Monte Carlo variance. Preserve small HDR
+            // emitters instead of filtering them toward their neighbourhood.
+            aov[tid].guideStateOrBounceDepth = -1.0f;
         }
     }
 
@@ -2802,53 +2788,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                              random<SampleDimension::eBSDF1>(rng, uniforms.samplerType),
                              random<SampleDimension::eBSDF2>(rng, uniforms.samplerType),
                              random<SampleDimension::eBSDF3>(rng, uniforms.samplerType));
-    BsdfSampleResult sampleResult =
-        isOpenPBR ? openpbr_bsdf_sample(openpbrPrepared, xi) : bsdf_sample(si, xi);
-
-    // Guide-only continuation is a geometric probe, not a Monte Carlo light
-    // path. Make it deterministic so glass does not alternate between reflected
-    // and refracted replacement attributes from frame to frame, and so every
-    // glossy primary supplies a stable specular hit distance. The radiance for
-    // this extra sample is discarded, so unit weight and pdf cannot bias the
-    // rendered estimator.
-    if (uniforms.canonicalGuideSample && sampleIdx == 0u)
-    {
-        const bool aovComplete = (p.depthAndFlags & PATH_FLAG_AOV_DONE) != 0u;
-        const bool probeTransmission = !aovComplete && !guideOpaque;
-        const bool probeReflection =
-            depth == 0u && guideOpaque && materialGuides.roughness < 0.5f &&
-            luminance(materialGuides.specular) > 0.02f;
-        if (probeTransmission || probeReflection)
-        {
-            const float3 V = normalize(float3(si.wo));
-            const float3 Ns = normalize(float3(si.shading_normal));
-            const float3 Nf = dot(Ns, V) >= 0.0f ? Ns : -Ns;
-            float3 guideDirection = reflect_dir(-V, Nf);
-            // Mark the probe as specular even for a rough lobe: this flag is
-            // what the next hit uses to recognize that its distance belongs in
-            // the specular-hit guide, not a claim about the radiance BSDF.
-            uint32_t guideEvent = BSDF_EVENT_SPECULAR_REFLECTION;
-
-            if (probeTransmission)
-            {
-                const float ior = denoiserInterfaceIor(isOpenPBR, openpbrMat, si, entering);
-                const float eta = entering ? si.exterior_ior / ior : ior / max(si.exterior_ior, 1e-4f);
-                const float interfaceFresnel = fresnel_dielectric(abs(dot(Nf, V)), eta);
-                float3 refracted;
-                const bool validRefraction = si.thin_walled ? true : refract_dir(-V, Nf, eta, refracted);
-                if (validRefraction && interfaceFresnel < 0.5f)
-                {
-                    guideDirection = si.thin_walled ? -V : refracted;
-                    guideEvent = BSDF_EVENT_SPECULAR_TRANSMISSION;
-                }
-            }
-
-            sampleResult.wi = normalize(guideDirection);
-            sampleResult.bsdf_over_pdf = float3(1.0f);
-            sampleResult.pdf = 1.0f;
-            sampleResult.event_type = guideEvent;
-        }
-    }
+    BsdfSampleResult sampleResult = isOpenPBR ? openpbr_bsdf_sample(openpbrPrepared, xi) : bsdf_sample(si, xi);
 
     if (sampleResult.event_type == BSDF_EVENT_ABSORB)
     {
@@ -2940,13 +2880,16 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             float3 walkAlbedo;
             if (isOpenPBR)
             {
-                // Adobe's own single-scattering albedo, mapped from the authored
-                // subsurface colour by the van de Hulst formulas the OpenPBR
-                // specification names. Taken whole rather than scaled by a
-                // reference the way the glTF path does: that scaling exists to
-                // carry a texture's veining into a walk derived from a flat
-                // scatter colour, and here the colour *is* the resolved one --
-                // openpbrMat has already had its maps folded in above.
+                // MaterialX exports in the test scenes carry marble veining in
+                // base_color and a constant subsurface tint. Fold the former
+                // into the latter before OpenPBR maps it to single-scattering
+                // albedo; a separately mapped subsurface colour stays intact.
+                if (openpbrBaseMapDetailsSubsurface(openpbrMat))
+                {
+                    const float3 base = openpbr_color_to_float3(openpbrMat.base_color);
+                    const float3 subsurface = openpbr_color_to_float3(openpbrMat.subsurface_color) * base;
+                    openpbrMat.subsurface_color = OpenPBRColor{ subsurface.x, subsurface.y, subsurface.z };
+                }
                 walkAlbedo = openpbr_interior_volume(openpbrMat).albedo;
             }
             else
@@ -2990,15 +2933,14 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     }
     iorStacks[tid] = iorStack;
 
-    const float3 nextDir =
-        sssRefractedEntry ?
-            subsurface_entry_direction(float3(si.wo),
-                                       (dot(float3(si.shading_normal), float3(si.wo)) > 0.0f) ?
-                                           float3(si.shading_normal) :
-                                           -float3(si.shading_normal),
-                                       random<SampleDimension::eSssChannel>(rng, uniforms.samplerType),
-                                       random<SampleDimension::eSssDistance>(rng, uniforms.samplerType)) :
-            normalize(sampleResult.wi);
+    const float3 nextDir = sssRefractedEntry ?
+                               subsurface_entry_direction(
+                                   float3(si.wo),
+                                   (dot(float3(si.shading_normal), float3(si.wo)) > 0.0f) ? float3(si.shading_normal) :
+                                                                                            -float3(si.shading_normal),
+                                   random<SampleDimension::eSssChannel>(rng, uniforms.samplerType),
+                                   random<SampleDimension::eSssDistance>(rng, uniforms.samplerType)) :
+                               normalize(sampleResult.wi);
 
     // A refracted entry that came back out on the viewer's side of the geometric
     // normal never entered anything, and the walk it would start is a walk
@@ -3092,6 +3034,287 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
 
     queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
 }
+
+// ---------------------------------------------------------------------------
+// guide -- compact deterministic continuation for MetalFX auxiliary buffers
+// ---------------------------------------------------------------------------
+static inline void storeGuideMaterial(
+    device AovSample* aov, uint32_t tid, thread const DenoiserMaterialGuides& guides, float3 normal, float hitDistance)
+{
+    AovSample out = aov[tid];
+    const float state = out.guideStateOrBounceDepth;
+    const bool blendTransmission = state >= 1.0f;
+    const float interfaceFresnel = blendTransmission ? saturate(state - 1.0f) : 0.0f;
+    const float transmissionWeight = 1.0f - interfaceFresnel;
+    const float3 guideNormal = normalize(normal);
+    const float3 blendedNormal = float3(out.normal) * interfaceFresnel + guideNormal * transmissionWeight;
+    out.diffuseAlbedo = packed_float3(guides.diffuse * transmissionWeight);
+    out.specularAlbedo = packed_float3(float3(interfaceFresnel) + guides.specular * transmissionWeight);
+    out.normal = packed_float3(
+        blendTransmission && dot(blendedNormal, blendedNormal) > 1e-8f ? normalize(blendedNormal) : guideNormal);
+    out.roughness = blendTransmission ? mix(out.roughness, guides.roughness, transmissionWeight) : guides.roughness;
+    out.specularHitDistance = hitDistance;
+    out.guideStateOrBounceDepth = 0.0f;
+    aov[tid] = out;
+}
+
+static inline void storeGuideMiss(device AovSample* aov, uint32_t tid, float3 rayDirection, float hitDistance)
+{
+    DenoiserMaterialGuides sky;
+    sky.diffuse = float3(0.0f);
+    sky.specular = float3(0.0f);
+    sky.roughness = 1.0f;
+    sky.transmission = 0.0f;
+    storeGuideMaterial(aov, tid, sky, -rayDirection, hitDistance);
+}
+
+template <typename T>
+static void guideImpl(uint gid,
+                      constant Uniforms& uniforms,
+                      constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                      typename T::structure accelerationStructure,
+                      device AovSample* aov,
+                      device const Material* materials,
+                      device const GeometryEntry* geometryEntries,
+                      device const char* vertexBuffer,
+                      device const char* prevVertexBuffer,
+                      device const uint32_t* indexBuffer,
+                      device const packed_float3* curvePoints,
+                      device const uint32_t* curveSegments)
+{
+    if (gid >= uniforms.width * uniforms.height)
+    {
+        return;
+    }
+
+    GuideRay guide = uniforms.guideRays[gid];
+    if ((guide.flags & GUIDE_RAY_ACTIVE) == 0u)
+    {
+        return;
+    }
+
+    const bool replaceMaterial = (guide.flags & GUIDE_RAY_REPLACE_MATERIAL) != 0u;
+    const float motionTime = motionTimeFor(uniforms, gid, 0u);
+    float totalDistance = 0.0f;
+    uint32_t describedSurfaces = 0u;
+
+    // Six traversal attempts allow deterministic pass-through of a few alpha
+    // layers while material continuation itself remains capped at two hits.
+    for (uint32_t attempt = 0u; attempt < 6u; ++attempt)
+    {
+        const float3 origin = float3(guide.origin);
+        const float3 direction = normalize(float3(guide.direction));
+        if (!all(isfinite(origin)) || !all(isfinite(direction)))
+        {
+            return;
+        }
+
+        ray r;
+        r.origin = origin;
+        r.direction = direction;
+        r.min_distance = 1e-6f;
+        r.max_distance = INFINITY;
+
+        typename T::isect isect;
+        isect.assume_geometry_type(T::geometryTypes());
+        isect.force_opacity(forced_opacity::opaque);
+        isect.accept_any_intersection(false);
+        const typename T::isect::result_type rawHit =
+            T::trace(isect, r, accelerationStructure, uniforms.primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN, motionTime);
+        const float curveParameter = rawHit.type == intersection_type::curve ? T::curveParameter(rawHit) : 0.0f;
+        const ExtendIntersection hit = captureExtendIntersection(rawHit, curveParameter);
+        if (hit.type == intersection_type::none)
+        {
+            const float missDistance = totalDistance + max(uniforms.sceneExtent, 1e3f);
+            if (replaceMaterial)
+            {
+                storeGuideMiss(aov, gid, direction, missDistance);
+            }
+            else
+            {
+                aov[gid].specularHitDistance = missDistance;
+            }
+            return;
+        }
+
+        totalDistance += hit.distance;
+        const auto inst = instances[hit.instanceId];
+        if (inst.mask == GEOMETRY_MASK_LIGHT || inst.mask == GEOMETRY_MASK_LIGHT_HIDDEN)
+        {
+            if (replaceMaterial)
+            {
+                storeGuideMiss(aov, gid, direction, totalDistance);
+            }
+            else
+            {
+                aov[gid].specularHitDistance = totalDistance;
+            }
+            return;
+        }
+
+        const GeometryEntry entry = geometryEntries[inst.userID + hit.geometryId];
+        // The common glossy case needs only the first opaque hit distance. It
+        // avoids all vertex/material texture traffic here.
+        if (!replaceMaterial && materials[entry.materialId].alpha_mode == ALPHA_MODE_OPAQUE)
+        {
+            aov[gid].specularHitDistance = totalDistance;
+            return;
+        }
+
+        const float4x4 objectToWorld = float4x4(
+            float4(float3(inst.transformationMatrix[0]), 0.0f), float4(float3(inst.transformationMatrix[1]), 0.0f),
+            float4(float3(inst.transformationMatrix[2]), 0.0f), float4(float3(inst.transformationMatrix[3]), 1.0f));
+        const float3 worldPosition = origin + direction * hit.distance;
+        const bool isCurve = SPEC_CURVES && (entry.flags & GEOM_FLAG_CURVE) != 0u;
+
+        float3 objectNormal, objectTangent, vertexColor, objectGeomNormal;
+        float3 shadingNormal, shadingTangent, shadingGeomNormal;
+        float2 uv;
+        float tangentSign = 1.0f;
+        if (isCurve)
+        {
+            float curveRadius = 0.0f;
+            fetchCurve(curvePoints, curveSegments, entry, hit.primitiveId, hit.curveParameter, worldPosition,
+                       objectToWorld, shadingNormal, shadingTangent, uv, curveRadius);
+            shadingGeomNormal = shadingNormal;
+            vertexColor = float3(1.0f);
+        }
+        else
+        {
+            float3 edge1, edge2;
+            float uvArea2 = 0.0f;
+            const bool interpolateMotion =
+                SPEC_MOTION_BLUR && uniforms.enableMotionBlur && motionTime < 1.0f && prevVertexBuffer && indexBuffer;
+            fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, hit.primitiveId, interpolateMotion,
+                                 motionTime, hit.barycentrics, objectNormal, objectTangent, uv, vertexColor,
+                                 tangentSign, objectGeomNormal, edge1, edge2, uvArea2);
+            shadingNormal = normalize(transformDirection(normalize(objectNormal), objectToWorld));
+            shadingTangent = normalize(transformDirection(normalize(objectTangent), objectToWorld));
+            shadingGeomNormal = normalize(transformDirection(objectGeomNormal, objectToWorld));
+        }
+
+        const float3 binormal = cross(shadingNormal, shadingTangent) * tangentSign;
+        SurfaceInteraction si;
+        initSurfaceInteraction(si, materials[entry.materialId], worldPosition, shadingNormal, shadingGeomNormal,
+                               shadingTangent, binormal, uv, direction, vertexColor, -1e30f);
+
+        // Guides must be stable, so BLEND coverage uses a fixed threshold rather
+        // than consuming the radiance path's random opacity decision.
+        if (si.opacity < 0.5f)
+        {
+            const float3 faceNg = dot(shadingGeomNormal, direction) > 0.0f ? shadingGeomNormal : -shadingGeomNormal;
+            guide.origin = packed_float3(offset_ray(worldPosition, faceNg));
+            continue;
+        }
+        if (!replaceMaterial)
+        {
+            aov[gid].specularHitDistance = totalDistance;
+            return;
+        }
+
+        const bool isOpenPBR = SPEC_OPENPBR && si.material_type == MATERIAL_TYPE_OPENPBR;
+        OpenPBRParams openpbrMat;
+        if (isOpenPBR)
+        {
+            openpbrMat = uniforms.openpbrParams[entry.materialId];
+            if (openpbrMat.texture_mask != 0u && uniforms.openpbrTextures != nullptr)
+            {
+                applyOpenPBRTextures(openpbrMat, uniforms.openpbrTextures[entry.materialId], si, uv);
+            }
+        }
+
+        const bool entering = si.front_face;
+        const float2 mediaIors = unpackGuideIors(guide.mediaIors);
+        const float currentIor = max(mediaIors.x, 1.0f);
+        const float exteriorIor = max(mediaIors.y, 1.0f);
+        si.exterior_ior = entering ? currentIor : exteriorIor;
+        DenoiserMaterialGuides materialGuides;
+        if (isOpenPBR)
+        {
+            const OpenPBR_ResolvedInputs openpbrInputs = openpbr_resolve_inputs(openpbrMat, si);
+            materialGuides =
+                openpbrDenoiserGuides(openpbrInputs, si, openpbrBaseMapDetailsSubsurface(openpbrMat));
+        }
+        else
+        {
+            materialGuides = standardDenoiserGuides(si);
+        }
+
+        constexpr float kGuideRoughnessFloor = 0.05f;
+        const bool opaque = materialGuides.transmission <= kGuideRoughnessFloor;
+        const bool hasDiffuse = luminance(materialGuides.diffuse) > 1e-3f;
+        ++describedSurfaces;
+        if ((opaque && (hasDiffuse || materialGuides.roughness > kGuideRoughnessFloor)) || describedSurfaces >= 2u)
+        {
+            storeGuideMaterial(aov, gid, materialGuides, float3(si.shading_normal), totalDistance);
+            return;
+        }
+
+        const float3 V = normalize(float3(si.wo));
+        const float3 Ns = normalize(float3(si.shading_normal));
+        const float3 Nf = dot(Ns, V) >= 0.0f ? Ns : -Ns;
+        float3 nextDirection = reflect_dir(-V, Nf);
+        bool transmitted = false;
+        float nextCurrentIor = currentIor;
+        float nextExteriorIor = exteriorIor;
+        if (!opaque)
+        {
+            const float materialIor = denoiserInterfaceIor(isOpenPBR, openpbrMat, si, entering);
+            const float outsideIor = entering ? currentIor : exteriorIor;
+            const float eta = entering ? outsideIor / materialIor : materialIor / outsideIor;
+            const float fresnel = fresnel_dielectric(abs(dot(Nf, V)), eta);
+            float3 refracted;
+            const bool validRefraction = si.thin_walled ? true : refract_dir(-V, Nf, eta, refracted);
+            if (validRefraction && fresnel < 0.5f)
+            {
+                nextDirection = si.thin_walled ? -V : refracted;
+                transmitted = true;
+                if (!si.thin_walled)
+                {
+                    nextCurrentIor = entering ? materialIor : outsideIor;
+                    nextExteriorIor = entering ? outsideIor : 1.0f;
+                }
+            }
+        }
+
+        const float3 faceNg =
+            dot(float3(si.geometry_normal), V) > 0.0f ? float3(si.geometry_normal) : -float3(si.geometry_normal);
+        guide.origin = packed_float3(offset_ray(si.position, transmitted ? -faceNg : faceNg));
+        guide.direction = packed_float3(normalize(nextDirection));
+        guide.mediaIors = packGuideIors(nextCurrentIor, nextExteriorIor);
+    }
+
+    // A pathological alpha stack is still a valid reflected depth. Using the
+    // scene bound is safer for temporal reprojection than leaving zero.
+    const float fallbackDistance = totalDistance + max(uniforms.sceneExtent, 1e3f);
+    if (replaceMaterial)
+    {
+        storeGuideMiss(aov, gid, float3(guide.direction), fallbackDistance);
+    }
+    else
+    {
+        aov[gid].specularHitDistance = fallbackDistance;
+    }
+}
+
+#define WF_GUIDE_ENTRY(NAME, TRAITS)                                                                                   \
+    kernel void NAME(                                                                                                  \
+        uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                               \
+        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],                          \
+        TRAITS::structure accelerationStructure [[buffer(2)]], device AovSample* aov [[buffer(4)]],                   \
+        device const Material* materials [[buffer(5)]],                                                               \
+        device const GeometryEntry* geometryEntries [[buffer(6)]], device const char* vertexBuffer [[buffer(7)]],      \
+        device const char* prevVertexBuffer [[buffer(8)]], device const uint32_t* indexBuffer [[buffer(9)]],           \
+        device const packed_float3* curvePoints [[buffer(10)]], device const uint32_t* curveSegments [[buffer(11)]])   \
+    {                                                                                                                  \
+        guideImpl<TRAITS>(gid, uniforms, instances, accelerationStructure, aov, materials, geometryEntries,           \
+                          vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments);                    \
+    }
+
+WF_GUIDE_ENTRY(wavefrontGuide, MotionTraversal)
+WF_GUIDE_ENTRY(wavefrontGuideStatic, StaticTraversal)
+WF_GUIDE_ENTRY(wavefrontGuideCurve, CurveMotionTraversal)
+WF_GUIDE_ENTRY(wavefrontGuideStaticCurve, CurveStaticTraversal)
 
 // ---------------------------------------------------------------------------
 // prepare -- turn the live path count into an indirect dispatch
@@ -3384,9 +3607,9 @@ struct CutoutShadowWalk
             float opacity = 1.0f;
             if (hit.type == intersection_type::triangle)
             {
-                opacity = cutoutOpacityAt(hit.primitive_id, hit.geometry_id, hit.instance_id,
-                                          hit.triangle_barycentric_coord, instances, materials, geometryEntries,
-                                          vertexBuffer, indexBuffer);
+                opacity =
+                    cutoutOpacityAt(hit.primitive_id, hit.geometry_id, hit.instance_id, hit.triangle_barycentric_coord,
+                                    instances, materials, geometryEntries, vertexBuffer, indexBuffer);
             }
             if (cutoutRouletteDone(transmittance, opacity, cutoff))
             {
@@ -3441,10 +3664,10 @@ struct CutoutShadowWalk<T, true>
                 q.abort();
                 return false;
             }
-            const float opacity = cutoutOpacityAt(q.get_candidate_primitive_id(), q.get_candidate_geometry_id(),
-                                                  q.get_candidate_instance_id(),
-                                                  q.get_candidate_triangle_barycentric_coord(), instances, materials,
-                                                  geometryEntries, vertexBuffer, indexBuffer);
+            const float opacity =
+                cutoutOpacityAt(q.get_candidate_primitive_id(), q.get_candidate_geometry_id(),
+                                q.get_candidate_instance_id(), q.get_candidate_triangle_barycentric_coord(), instances,
+                                materials, geometryEntries, vertexBuffer, indexBuffer);
             if (cutoutRouletteDone(transmittance, opacity, cutoff))
             {
                 q.abort();
@@ -3518,9 +3741,9 @@ static void shadowImpl(uint gid,
             }
             if (SPEC_SSS && uniforms.hasBoundedMedium)
             {
-                const float3 transmittance = mediumTransmittance<T>(accelerationStructure, uniforms, materials, geometryEntries,
-                                                                    instances, float3(sr.origin), float3(sr.direction),
-                                                                    sr.maxDistance, sr.medium, motionTime);
+                const float3 transmittance = mediumTransmittance<T>(
+                    accelerationStructure, uniforms, materials, geometryEntries, instances, float3(sr.origin),
+                    float3(sr.direction), sr.maxDistance, sr.medium, motionTime);
                 weight *= transmittance;
                 sharcRadiance *= transmittance;
             }
@@ -3580,8 +3803,8 @@ static void shadowImpl(uint gid,
     if (SPEC_SSS && uniforms.hasBoundedMedium)
     {
         const float3 mediumTr =
-            mediumTransmittance<T>(accelerationStructure, uniforms, materials, geometryEntries, instances, float3(sr.origin),
-                                   float3(sr.direction), sr.maxDistance, sr.medium, motionTime);
+            mediumTransmittance<T>(accelerationStructure, uniforms, materials, geometryEntries, instances,
+                                   float3(sr.origin), float3(sr.direction), sr.maxDistance, sr.medium, motionTime);
         weight *= mediumTr;
         sharcRadiance *= mediumTr;
     }
@@ -3834,21 +4057,20 @@ kernel void sharcResolve(uint tid [[thread_position_in_grid]],
 }
 
 #define WF_SHADOW_ENTRY(NAME, TRAITS)                                                                                  \
-    kernel void NAME(uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                  \
-                     TRAITS::structure accelerationStructure [[buffer(1)]],                                            \
-                     device const ShadowRay* shadowRays [[buffer(2)]], device float4* radianceOut [[buffer(3)]],       \
-                     device const uint32_t* control [[buffer(4)]], constant uint32_t& sampleIdx [[buffer(5)]],         \
-                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(6)]],             \
-                     device const Material* materials [[buffer(7)]],                                                   \
-                     device const GeometryEntry* geometryEntries [[buffer(8)]],                                        \
-                     device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]], \
-                     constant uint32_t& queueOffset [[buffer(12)]],                                                    \
-                     device SharcUpdateState* sharcUpdates [[buffer(13)]],                                             \
-                     device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]])                                  \
+    kernel void NAME(                                                                                                  \
+        uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                               \
+        TRAITS::structure accelerationStructure [[buffer(1)]], device const ShadowRay* shadowRays [[buffer(2)]],       \
+        device float4* radianceOut [[buffer(3)]], device const uint32_t* control [[buffer(4)]],                        \
+        constant uint32_t& sampleIdx [[buffer(5)]],                                                                    \
+        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(6)]],                          \
+        device const Material* materials [[buffer(7)]], device const GeometryEntry* geometryEntries [[buffer(8)]],     \
+        device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]],              \
+        constant uint32_t& queueOffset [[buffer(12)]], device SharcUpdateState* sharcUpdates [[buffer(13)]],           \
+        device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]])                                               \
     {                                                                                                                  \
         shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, shadowRays, radianceOut, control,       \
-                           sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer,               \
-                           sharcUpdates, sharcAccumulation);                                                           \
+                           sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer, sharcUpdates,  \
+                           sharcAccumulation);                                                                         \
     }
 
 WF_SHADOW_ENTRY(wavefrontShadow, MotionTraversal)

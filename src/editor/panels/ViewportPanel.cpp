@@ -73,7 +73,7 @@ void EditorApp::drawBoundsWireframe(const glm::float3& bbMin,
     {
         glm::float4 a = clip[e[0]];
         glm::float4 b = clip[e[1]];
-        if (!editor_overlay::trimSegmentToNearPlane(a, b, viewZ[e[0]], viewZ[e[1]], cam.znear))
+        if (!editor_overlay::trimSegmentToNearPlane(a, b, viewZ[e[0]], viewZ[e[1]], editor_overlay::kEyePlaneDistance))
         {
             continue;
         }
@@ -380,8 +380,14 @@ void EditorApp::drawViewportPanel()
         const std::string stats = fmt::format(
             "{:.1f} ms · {} spp", m_render->getLastRenderTimeMs(), m_sharedCtx->mSubframeIndex);
         const ImVec2 statsSize = ImGui::CalcTextSize(stats.c_str());
-        ImGui::SetCursorScreenPos(ImVec2(panelMin.x + 8.0f, panelMax.y - statsSize.y - 8.0f));
-        ImGui::TextDisabled("%s", stats.c_str());
+        constexpr float kHudMargin = 8.0f;
+        constexpr ImVec2 kHudPadding(6.0f, 3.0f);
+        const ImVec2 badgeMin(panelMin.x + kHudMargin, panelMax.y - statsSize.y - 2.0f * kHudPadding.y - kHudMargin);
+        const ImVec2 badgeMax(
+            badgeMin.x + statsSize.x + 2.0f * kHudPadding.x, badgeMin.y + statsSize.y + 2.0f * kHudPadding.y);
+        const ImVec2 textPos(badgeMin.x + kHudPadding.x, badgeMin.y + kHudPadding.y);
+        drawList->AddRectFilled(badgeMin, badgeMax, IM_COL32(0, 0, 0, 180), 4.0f);
+        drawList->AddText(textPos, ImGui::GetColorU32(ImGuiCol_Text), stats.c_str());
     }
 
     if (mIsHoveredViewport && !thisFrameHovered)

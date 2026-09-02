@@ -26,6 +26,7 @@ TEST_CASE("wavefrontBufferLayout scales with pixel count")
     sz.hitRecord = 48;
     sz.iorStack = 16;
     sz.radiance = 16;
+    sz.guideRay = 32;
     sz.shadowRay = 40;
     sz.aovSample = 80;
 
@@ -38,7 +39,7 @@ TEST_CASE("wavefrontBufferLayout scales with pixel count")
     CHECK(a.hitBytes == (size_t)a.pixels * 48);
     CHECK(a.iorStackBytes == (size_t)a.pixels * 16);
     CHECK(a.radianceBytes == (size_t)a.pixels * 16);
-    CHECK(a.guideRadianceBytes == a.radianceBytes);
+    CHECK(a.guideRayBytes == (size_t)a.pixels * 32);
     CHECK(a.pathQueueBytes == (size_t)a.pixels * sizeof(uint32_t));
     CHECK(a.controlBytes == (size_t)kWavefrontControlUints * sizeof(uint32_t));
     CHECK(a.traversalDispatchBytes ==
@@ -72,6 +73,7 @@ TEST_CASE("preview presets make wavefront memory growth explicit")
     sz.hitRecord = 32;
     sz.iorStack = 52;
     sz.radiance = 16;
+    sz.guideRay = 32;
     sz.shadowRay = 48;
     sz.aovSample = 64;
 

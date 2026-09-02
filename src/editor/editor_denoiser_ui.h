@@ -67,6 +67,9 @@ struct Ui
     /// Metal's path-traced playback blur. It is a guide-production choice inside
     /// the wavefront integrator (MetalFrameUniforms.mm) and has no OptiX reader.
     bool playbackMotionBlurToggle = false;
+    /// The denoiser consumes this launch's color rather than the accumulated PT
+    /// mean. Accumulation then controls only when new denoiser frames stop.
+    bool perFrameDenoiseInput = false;
     /// What `Render::denoiserFallbackActive()` means on this backend.
     const char* fallbackMessage = "Denoiser unavailable; showing the raw image";
     /// Shown under the mode combo when the mode is not Off. Says the thing about
@@ -102,6 +105,7 @@ inline Ui uiFor(Render::DenoiserKind kind)
         ui.modeCount = static_cast<int>(std::size(kMetalFxModes));
         ui.freeRenderScale = true;
         ui.playbackMotionBlurToggle = true;
+        ui.perFrameDenoiseInput = true;
         // MetalFX refuses a temporal scaler below its supported ratio and the
         // renderer drops to the spatial one rather than showing nothing.
         ui.fallbackMessage = "Temporal denoiser ratio unsupported; using spatial upscale";
@@ -138,6 +142,11 @@ inline Mode modeAt(const Ui& ui, int index)
         return Mode{};
     }
     return ui.modes[std::clamp(index, 0, ui.modeCount - 1)];
+}
+
+inline bool usesPerFrameDenoiseInput(const Ui& ui, int modeIndex)
+{
+    return ui.perFrameDenoiseInput && modeAt(ui, modeIndex).denoise;
 }
 
 /// Which entry of this backend's list the current settings correspond to.

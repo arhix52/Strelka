@@ -68,7 +68,7 @@ std::vector<glm::float2> boxEdgePixels(const Camera& cam,
     {
         glm::float4 a = clip[e[0]];
         glm::float4 b = clip[e[1]];
-        if (!editor_overlay::trimSegmentToNearPlane(a, b, viewZ[e[0]], viewZ[e[1]], cam.znear))
+        if (!editor_overlay::trimSegmentToNearPlane(a, b, viewZ[e[0]], viewZ[e[1]], editor_overlay::kEyePlaneDistance))
         {
             continue;
         }
@@ -135,6 +135,19 @@ TEST_CASE("Selection box projects inside the viewport for a framed object")
     }
 }
 
+TEST_CASE("Selection box follows path-traced visibility instead of the authored near plane")
+{
+    Camera cam = makePerspective();
+    cam.setPerspective(45.0f, kRectW / kRectH, 10.0f, 1000.0f);
+    cam.updateAspectRatio(kRectW / kRectH);
+
+    // The path tracer still sees this box five metres from the camera. Frame
+    // Selection can legitimately produce this arrangement from a glTF camera
+    // whose raster near plane was authored for the original distant pose.
+    const std::vector<glm::float2> pixels = boxEdgePixels(cam, glm::float3(-0.5f), glm::float3(0.5f));
+    CHECK(pixels.size() == 24);
+}
+
 // An orthographic clip w is 1 everywhere, so the w test the box used to trim with
 // accepted every endpoint: geometry the camera had already passed drew a box over
 // the frame, in the mirrored position, as though it were still in view.
@@ -155,7 +168,7 @@ TEST_CASE("Selection box behind the camera draws nothing")
     }
 }
 
-TEST_CASE("Selection box straddling the near plane keeps its visible half")
+TEST_CASE("Selection box straddling the eye plane keeps its visible half")
 {
     // Spans from in front of the camera to behind it.
     const glm::float3 bbMin(-0.5f, -0.5f, 0.0f);

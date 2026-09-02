@@ -52,7 +52,7 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mHitBuffer);
     safeRelease(mIorStackBuffer);
     safeRelease(mRadianceBuffer);
-    safeRelease(mGuideRadianceBuffer);
+    safeRelease(mGuideRayBuffer);
     safeRelease(mPathQueueBuffer[0]);
     safeRelease(mPathQueueBuffer[1]);
     safeRelease(mControlBuffer);
@@ -70,6 +70,8 @@ void MetalWavefrontIntegrator::release()
         safeRelease(kv.second.miss);
         safeRelease(kv.second.shadowMotion);
         safeRelease(kv.second.shadowStatic);
+        safeRelease(kv.second.guideMotion);
+        safeRelease(kv.second.guideStatic);
     }
     mVariants.clear();
     safeRelease(mLibrary);
@@ -106,7 +108,7 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
     add(mHitBuffer);
     add(mIorStackBuffer);
     add(mRadianceBuffer);
-    add(mGuideRadianceBuffer);
+    add(mGuideRayBuffer);
     add(mPathQueueBuffer[0]);
     add(mPathQueueBuffer[1]);
     add(mHitQueueBuffer);
@@ -123,7 +125,7 @@ size_t MetalWavefrontIntegrator::queueBytes() const
     auto bufBytes = [](MTL::Buffer* b) { return b ? b->length() : 0; };
     return bufBytes(mPathStateBuffer) + bufBytes(mMediumPathStateBuffer) + bufBytes(mSharcUpdateStateBuffer) +
            bufBytes(mPathRayBuffer) + bufBytes(mHitBuffer) + bufBytes(mIorStackBuffer) + bufBytes(mRadianceBuffer) +
-           bufBytes(mGuideRadianceBuffer) + bufBytes(mPathQueueBuffer[0]) + bufBytes(mPathQueueBuffer[1]) +
+           bufBytes(mGuideRayBuffer) + bufBytes(mPathQueueBuffer[0]) + bufBytes(mPathQueueBuffer[1]) +
            bufBytes(mControlBuffer) + bufBytes(mTraversalDispatchBuffer) + bufBytes(mShadowRayBuffer) +
            bufBytes(mHitQueueBuffer) + bufBytes(mMissQueueBuffer) + bufBytes(mAovBuffer) + bufBytes(mStageStatsBuffer);
 }
@@ -141,12 +143,13 @@ enum StageKind : uint8_t
     kStagePrepareShadow,
     kStageShadow,
     kStageMiss,
+    kStageGuide,
     kStageResolve,
     kStageSort,
     kStageCount
 };
-const char* const kStageNames[kStageCount] = { "generate", "prepare", "extend",  "shade", "prepShadow",
-                                               "shadow",   "miss",    "resolve", "sort" };
+const char* const kStageNames[kStageCount] = { "generate", "prepare", "extend", "shade",   "prepShadow",
+                                               "shadow",   "miss",    "guide",  "resolve", "sort" };
 } // namespace
 
 // A timestamp counter buffer, if the device can sample at dispatch boundaries.
@@ -496,15 +499,13 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const MTL::GPUAddress diagnosticsEnabled = ring.push(diagnose ? 1u : 0u);
     const MTL::GPUAddress diagnosticsMediumEnabled =
         ring.push((features & WavefrontFeatures::kSubsurface) != 0u ? 1u : 0u);
-    MTL::Buffer* sampleRadiance = (uniforms->canonicalGuideSample && s == 0u) ? mGuideRadianceBuffer : mRadianceBuffer;
-
     if (chunk.generate)
     {
         mark(kStageGenerate);
         enc->setComputePipelineState(variant->generate);
         bind(uniformBuffer, 0, 0);
         bind(mPathStateBuffer, 0, 1);
-        bind(sampleRadiance, 0, 2);
+        bind(mRadianceBuffer, 0, 2);
         bind(mIorStackBuffer, 0, 3);
         table->setAddress(sampleIdx, 4);
         bind(mPathQueueBuffer[0], 0, 5);
@@ -607,7 +608,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(uniformBuffer, 0, 0);
             bind(mPathStateBuffer, 0, 1);
             bind(mPathRayBuffer, 0, 2);
-            bind(sampleRadiance, 0, 3);
+            bind(mRadianceBuffer, 0, 3);
             bind(mMissQueueBuffer, 0, 4);
             bind(mControlBuffer, 0, 5);
             bind(mAovBuffer, 0, 6);
@@ -644,7 +645,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(scene.materialBuffer, 0, 4);
             bind(mPathStateBuffer, 0, 5);
             bind(mHitBuffer, 0, 6);
-            bind(sampleRadiance, 0, 7);
+            bind(mRadianceBuffer, 0, 7);
             bind(mIorStackBuffer, 0, 8);
             bind(scene.geometryEntryBuffer, 0, 9);
             bind(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 10);
@@ -696,7 +697,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(uniformBuffer, 0, 0);
             table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 1);
             bind(mShadowRayBuffer, 0, 2);
-            bind(sampleRadiance, 0, 3);
+            bind(mRadianceBuffer, 0, 3);
             bind(mControlBuffer, 0, 4);
             table->setAddress(sampleIdx, 5);
             bind(scene.instanceBuffer, 0, 6);
@@ -725,6 +726,25 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     if (!chunk.resolve)
     {
         return;
+    }
+
+    if (uniforms->writeAov && variant->guideMotion && variant->guideStatic)
+    {
+        mark(kStageGuide);
+        enc->setComputePipelineState(useMotion ? variant->guideMotion : variant->guideStatic);
+        bind(uniformBuffer, 0, 0);
+        bind(scene.instanceBuffer, 0, 1);
+        table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 2);
+        bind(mAovBuffer, 0, 4);
+        bind(scene.materialBuffer, 0, 5);
+        bind(scene.geometryEntryBuffer, 0, 6);
+        bind(scene.vertexBuffer, 0, 7);
+        bind(scene.prevVertexBuffer, 0, 8);
+        bind(scene.indexBuffer, 0, 9);
+        bind(scene.curvePointBuffer, 0, 10);
+        bind(scene.curveSegmentBuffer, 0, 11);
+        enc->dispatchThreadgroups(fullGrid, tg);
+        barrier();
     }
 
     mark(kStageResolve);
@@ -880,8 +900,6 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     const MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
     const auto* uniforms = static_cast<const Uniforms*>(uniformBuffer->contents());
     const bool sharcUpdatePass = (features & WavefrontFeatures::kSharcUpdate) != 0u;
-    const uint32_t dispatchSampleCount = sampleCount + (!sharcUpdatePass && uniforms->canonicalGuideSample ? 1u : 0u);
-
     // Textures are reached through resource IDs inside the Material struct, so
     // Metal cannot infer their use from the bindings and every encoder has to be
     // told about them again.
@@ -918,6 +936,9 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             }
         }
         e->useResource(((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageWrite);
+        // wavefrontShade reaches this through Uniforms::guideRays because all
+        // explicit buffer slots are occupied.
+        e->useResource(mGuideRayBuffer, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
     };
     declareResidency(enc);
 
@@ -972,15 +993,13 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         mStageKinds.push_back(kind);
     };
 
-    for (uint32_t s = 0; s < dispatchSampleCount; ++s)
+    for (uint32_t s = 0; s < sampleCount; ++s)
     {
-        const MTL::Buffer* sampleRadiance =
-            (uniforms->canonicalGuideSample && s == 0u) ? mGuideRadianceBuffer : mRadianceBuffer;
         stamp(kStageGenerate);
         enc->setComputePipelineState(variant->generate);
         enc->setBuffer(uniformBuffer, 0, 0);
         enc->setBuffer(mPathStateBuffer, 0, 1);
-        enc->setBuffer(sampleRadiance, 0, 2);
+        enc->setBuffer(mRadianceBuffer, 0, 2);
         enc->setBuffer(mIorStackBuffer, 0, 3);
         enc->setBytes(&s, sizeof(uint32_t), 4);
         enc->setBuffer(mPathQueueBuffer[0], 0, 5);
@@ -1059,7 +1078,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(mPathStateBuffer, 0, 1);
             enc->setBuffer(mPathRayBuffer, 0, 2);
-            enc->setBuffer(sampleRadiance, 0, 3);
+            enc->setBuffer(mRadianceBuffer, 0, 3);
             enc->setBuffer(mMissQueueBuffer, 0, 4);
             enc->setBuffer(mControlBuffer, 0, 5);
             enc->setBuffer(mAovBuffer, 0, 6);
@@ -1088,7 +1107,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBuffer(scene.materialBuffer, 0, 4);
             enc->setBuffer(mPathStateBuffer, 0, 5);
             enc->setBuffer(mHitBuffer, 0, 6);
-            enc->setBuffer(sampleRadiance, 0, 7);
+            enc->setBuffer(mRadianceBuffer, 0, 7);
             enc->setBuffer(mIorStackBuffer, 0, 8);
             enc->setBuffer(scene.geometryEntryBuffer, 0, 9);
             enc->setBuffer(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 10);
@@ -1147,7 +1166,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setAccelerationStructure(scene.instanceAccelerationStructure, 1);
             enc->setBuffer(mShadowRayBuffer, 0, 2);
-            enc->setBuffer(sampleRadiance, 0, 3);
+            enc->setBuffer(mRadianceBuffer, 0, 3);
             enc->setBuffer(mControlBuffer, 0, 4);
             enc->setBytes(&s, sizeof(uint32_t), 5);
             // Cutout shadows need to resolve the material and its uv at each hit.
@@ -1167,6 +1186,26 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     {
         enc->memoryBarrier(MTL::BarrierScopeBuffers);
         return enc;
+    }
+
+    if (uniforms->writeAov && variant->guideMotion && variant->guideStatic)
+    {
+        enc->memoryBarrier(MTL::BarrierScopeBuffers);
+        stamp(kStageGuide);
+        enc->setComputePipelineState(useMotion ? variant->guideMotion : variant->guideStatic);
+        enc->setBuffer(uniformBuffer, 0, 0);
+        enc->setBuffer(scene.instanceBuffer, 0, 1);
+        enc->setAccelerationStructure(scene.instanceAccelerationStructure, 2);
+        enc->setBuffer(mAovBuffer, 0, 4);
+        enc->setBuffer(scene.materialBuffer, 0, 5);
+        enc->setBuffer(scene.geometryEntryBuffer, 0, 6);
+        enc->setBuffer(scene.vertexBuffer, 0, 7);
+        enc->setBuffer(scene.prevVertexBuffer, 0, 8);
+        enc->setBuffer(scene.indexBuffer, 0, 9);
+        enc->setBuffer(scene.curvePointBuffer ? scene.curvePointBuffer : scene.placeholderBuffer, 0, 10);
+        enc->setBuffer(scene.curveSegmentBuffer ? scene.curveSegmentBuffer : scene.placeholderBuffer, 0, 11);
+        enc->dispatchThreads(MTL::Size(static_cast<NS::UInteger>(width) * height, 1, 1), tg);
+        enc->memoryBarrier(MTL::BarrierScopeBuffers);
     }
 
     // Resolve this launch's radiance into the persistent accumulation buffer.
@@ -1291,6 +1330,8 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     v.miss = make("wavefrontMiss");
     v.shadowMotion = make(entry("wavefrontShadow").c_str());
     v.shadowStatic = make(entry("wavefrontShadowStatic").c_str());
+    v.guideMotion = make(entry("wavefrontGuide").c_str());
+    v.guideStatic = make(entry("wavefrontGuideStatic").c_str());
 
     values->release();
 
@@ -1308,9 +1349,9 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     };
     STRELKA_INFO(
         "  maxThreadsPerTG: generate {} extend {} (motion {}) shade {} shadow {} (motion {}) "
-        "miss {}",
-        tgLimit(v.generate), tgLimit(v.extendStatic), tgLimit(v.extendMotion), tgLimit(v.shade),
-        tgLimit(v.shadowStatic), tgLimit(v.shadowMotion), tgLimit(v.miss));
+        "guide {} (motion {}) miss {}",
+        tgLimit(v.generate), tgLimit(v.extendStatic), tgLimit(v.extendMotion), tgLimit(v.shade), tgLimit(v.shadowStatic),
+        tgLimit(v.shadowMotion), tgLimit(v.guideStatic), tgLimit(v.guideMotion), tgLimit(v.miss));
     return &mVariants.emplace(features, v).first->second;
 }
 
@@ -1404,7 +1445,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height, ui
     release(mHitBuffer);
     release(mIorStackBuffer);
     release(mRadianceBuffer);
-    release(mGuideRadianceBuffer);
+    release(mGuideRayBuffer);
     release(mPathQueueBuffer[0]);
     release(mPathQueueBuffer[1]);
     release(mControlBuffer);
@@ -1423,6 +1464,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height, ui
     sz.hitRecord = sizeof(HitRecord);
     sz.iorStack = sizeof(IorStack);
     sz.radiance = sizeof(simd::float4);
+    sz.guideRay = sizeof(GuideRay);
     sz.shadowRay = sizeof(ShadowRay);
     sz.aovSample = sizeof(AovSample);
     const metal::WavefrontBufferLayout layout = metal::wavefrontBufferLayout(width, height, sz, sharcUpdateDownscale);
@@ -1435,7 +1477,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height, ui
     mHitBuffer = mDevice->newBuffer(layout.hitBytes, MTL::ResourceStorageModePrivate);
     mIorStackBuffer = mDevice->newBuffer(layout.iorStackBytes, MTL::ResourceStorageModePrivate);
     mRadianceBuffer = mDevice->newBuffer(layout.radianceBytes, MTL::ResourceStorageModePrivate);
-    mGuideRadianceBuffer = mDevice->newBuffer(layout.guideRadianceBytes, MTL::ResourceStorageModePrivate);
+    mGuideRayBuffer = mDevice->newBuffer(layout.guideRayBytes, MTL::ResourceStorageModePrivate);
     mPathQueueBuffer[0] = mDevice->newBuffer(layout.pathQueueBytes, MTL::ResourceStorageModePrivate);
     mPathQueueBuffer[1] = mDevice->newBuffer(layout.pathQueueBytes, MTL::ResourceStorageModePrivate);
     // Queue counters, active counts, and two sets of indirect dispatch arguments.

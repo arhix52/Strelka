@@ -552,6 +552,8 @@ void EditorApp::drawRenderSettingsPanel()
                     mDenoiseModeIndex = editor_denoiser::modeIndexFromSettings(fx, denoiseSetting, upscaleSetting);
                     mDenoiseModeInitialized = true;
                 }
+                const editor_denoiser::Mode fxMode = editor_denoiser::modeAt(fx, mDenoiseModeIndex);
+                const bool denoiserOn = fxMode.denoise || fxMode.upscale;
 
                 if (!editor_denoiser::hasDenoiser(fx))
                 {
@@ -583,8 +585,6 @@ void EditorApp::drawRenderSettingsPanel()
                         ImGui::EndCombo();
                     }
 
-                    const editor_denoiser::Mode fxMode = editor_denoiser::modeAt(fx, mDenoiseModeIndex);
-                    const bool denoiserOn = fxMode.denoise || fxMode.upscale;
                     if (denoiserOn && fx.modeHint != nullptr)
                     {
                         ImGui::TextDisabled("%s", fx.modeHint);
@@ -727,17 +727,35 @@ void EditorApp::drawRenderSettingsPanel()
                 {
                     m_settingsManager->setAs<uint32_t>("render/pt/spp", sppSubframe);
                 }
-
-                auto sppTotal = m_settingsManager->getAs<uint32_t>("render/pt/sppTotal");
-                if (ImGui::SliderInt("Accumulation SPP limit", (int*)&sppTotal, 1, 10000))
+                const bool perFrameDenoise = editor_denoiser::usesPerFrameDenoiseInput(fx, mDenoiseModeIndex) &&
+                                             !m_render->denoiserFallbackActive();
+                if (perFrameDenoise && ImGui::IsItemHovered())
                 {
-                    m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", sppTotal);
+                    ImGui::SetTooltip("Samples combined into each fresh MetalFX input frame.");
                 }
 
                 bool accumulationEnabled = m_settingsManager->getAs<bool>("render/pt/enableAcc");
-                if (ImGui::Checkbox("Accumulate while still", &accumulationEnabled))
+                const char* accumulationLabel =
+                    perFrameDenoise ? "Stop at traced SPP limit" : "Accumulate while still";
+                if (ImGui::Checkbox(accumulationLabel, &accumulationEnabled))
                 {
                     m_settingsManager->setAs<bool>("render/pt/enableAcc", accumulationEnabled);
+                }
+                if (perFrameDenoise && ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "MetalFX filters each current frame, not the accumulated PT mean.\n"
+                        "This limit freezes both tracing and temporal refinement.");
+                }
+
+                if (accumulationEnabled)
+                {
+                    auto sppTotal = m_settingsManager->getAs<uint32_t>("render/pt/sppTotal");
+                    const char* limitLabel = perFrameDenoise ? "Traced SPP limit" : "Accumulation SPP limit";
+                    if (ImGui::SliderInt(limitLabel, (int*)&sppTotal, 1, 10000))
+                    {
+                        m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", sppTotal);
+                    }
                 }
             }
 

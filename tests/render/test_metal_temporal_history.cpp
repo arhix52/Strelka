@@ -29,3 +29,18 @@ TEST_CASE("a projection change invalidates temporal history")
 
     CHECK(metal::temporal_history::projectionChanged(camera.matrices, previous));
 }
+
+TEST_CASE("MetalFX depth convention follows the camera projection")
+{
+    Camera camera;
+    camera.setPerspective(45.0f, 1.0f, 0.1f, 100.0f);
+    const glm::vec4 perspectiveNear = camera.matrices.perspective * glm::vec4(0.0f, 0.0f, -0.1f, 1.0f);
+    const glm::vec4 perspectiveFar = camera.matrices.perspective * glm::vec4(0.0f, 0.0f, -100.0f, 1.0f);
+    CHECK(perspectiveNear.z / perspectiveNear.w == doctest::Approx(0.0f));
+    CHECK(perspectiveFar.z / perspectiveFar.w == doctest::Approx(1.0f));
+    camera.setOrthographic(1.0f, 1.0f, 0.1f, 100.0f);
+    const glm::vec4 orthoNear = camera.matrices.perspective * glm::vec4(0.0f, 0.0f, -0.1f, 1.0f);
+    const glm::vec4 orthoFar = camera.matrices.perspective * glm::vec4(0.0f, 0.0f, -100.0f, 1.0f);
+    CHECK(orthoNear.z / orthoNear.w == doctest::Approx(1.0f));
+    CHECK(orthoFar.z / orthoFar.w == doctest::Approx(0.0f));
+}

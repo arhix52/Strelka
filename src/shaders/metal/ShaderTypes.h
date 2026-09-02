@@ -276,9 +276,6 @@ struct Uniforms
     float jitterX;
     float jitterY;
     uint32_t useFrameJitter;
-    /// When set, sample zero is a deterministic shutter-close guide pass. Its
-    /// radiance is discarded and the remaining samples estimate the image.
-    uint32_t canonicalGuideSample;
     /// Light candidates drawn per shading point before one is resampled -- the
     /// M of resampled importance sampling. One is plain next-event estimation
     /// and the arithmetic reduces to exactly what it was.
@@ -327,6 +324,14 @@ struct Uniforms
 #else
     uint64_t openpbrTextures;
 #endif
+
+    /// Per-pixel continuation rays written by the primary radiance shade.
+    /// Reached by address because wavefrontShade already uses all 31 bindings.
+#ifdef __METAL_VERSION__
+    device struct GuideRay* guideRays;
+#else
+    uint64_t guideRays;
+#endif
 };
 static_assert(sizeof(Uniforms) == 816, "Uniforms host/Metal ABI changed");
 
@@ -347,6 +352,24 @@ static_assert(sizeof(Uniforms) == 816, "Uniforms host/Metal ABI changed");
 #define kDenoiseDepthDevice 0u ///< clip z / w, the value a depth buffer holds
 #define kDenoiseDepthViewZ 1u ///< distance along the camera's forward axis
 #define kDenoiseDepthRadial 2u ///< distance to the eye
+
+// Camera::perspective currently maps near to zero and far to one, while the
+// orthographic matrix uses reverse Z. MetalFX defines depthReversed as "zero is
+// farthest", so both the host property and the background sentinel must follow
+// the active projection instead of assuming all device depth is reverse Z.
+static inline bool denoiseDepthReversed(uint32_t depthMode, uint32_t projectionType)
+{
+    return depthMode == kDenoiseDepthDevice && projectionType == PROJECTION_ORTHOGRAPHIC;
+}
+
+static inline float denoiseBackgroundDepth(uint32_t depthMode, uint32_t projectionType)
+{
+    if (depthMode != kDenoiseDepthDevice)
+    {
+        return 1e7f;
+    }
+    return denoiseDepthReversed(depthMode, projectionType) ? 0.0f : 1.0f;
+}
 
 // What a denoiser needs to know about the primary hit, written once per pixel by
 // the stage that shades it (or by the miss stage for background).
@@ -429,6 +452,21 @@ struct PathRay
 {
     packed_float3 origin;
     packed_float3 direction;
+};
+
+#define GUIDE_RAY_ACTIVE (1u << 0)
+#define GUIDE_RAY_REPLACE_MATERIAL (1u << 1)
+
+// Cold side state for the small subset of primary hits whose MetalFX guides
+// need one or two more intersections. Keeping it separate preserves the
+// bandwidth-critical 24-byte PathRay layout used by every radiance bounce.
+struct GuideRay
+{
+    packed_float3 origin;
+    uint32_t flags;
+    packed_float3 direction;
+    /// Two binary16 values: the ray's current medium and the medium outside it.
+    uint32_t mediaIors;
 };
 
 struct PathState

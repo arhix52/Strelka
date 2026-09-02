@@ -167,20 +167,6 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     // amount it can undo; without jitter the scaler has nothing new to
     // accumulate between frames and degenerates to a blur.
     pUniformData->useFrameJitter = temporalOn ? 1u : 0u;
-    // Guides are assembled the same way whether the denoiser consumes them or a
-    // debug view shows them, which needs saying because the obvious spelling --
-    // tie it to `denoiseOn` -- cannot be right. `denoiseOn` is false whenever a
-    // debug view is up, since a debug view replaces the image there would be to
-    // filter. So every AOV view rendered its guides the *other* way: writeAov on,
-    // canonical sample off, every sample overwriting the last into a buffer that
-    // is assigned rather than accumulated.
-    //
-    // On a matte surface that is invisible, because every sample picks the same
-    // one. On a glossy one the guide walk stops at a different surface per
-    // sample, the last writer wins per pixel, and the view is salt and pepper --
-    // over the floor tiles and the tiled walls of the bathroom, which is most of
-    // its area. It reads exactly like a broken guide, and the guide is fine.
-    pUniformData->canonicalGuideSample = pUniformData->writeAov ? 1u : 0u;
     pUniformData->denoiseFireflyClamp = settings.getAs<float>("render/pt/denoiseFireflyClamp");
     pUniformData->clampIndirect = settings.getAs<float>("render/pt/clampIndirect");
     pUniformData->hasBoundedMedium = in.materials->hasBoundedMedium() ? 1u : 0u;
