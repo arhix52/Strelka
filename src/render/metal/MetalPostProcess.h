@@ -106,9 +106,9 @@ public:
     {
         return mTonemapperTexPSO;
     }
-    MTL::ComputePipelineState* denoisedToBufferPSO() const
+    MTL::ComputePipelineState* textureToBufferPSO() const
     {
-        return mDenoisedToBufferPSO;
+        return mTextureToBufferPSO;
     }
 
     bool& loggedUpscaleClamp()
@@ -138,7 +138,7 @@ private:
     MTL::ComputePipelineState* mTonemapperPSO = nullptr;
     MTL::ComputePipelineState* mTonemapperPSO4 = nullptr;
     MTL::ComputePipelineState* mTonemapperTexPSO = nullptr;
-    MTL::ComputePipelineState* mDenoisedToBufferPSO = nullptr;
+    MTL::ComputePipelineState* mTextureToBufferPSO = nullptr;
 
     MTL::Texture* mDisplayTextures[2] = { nullptr, nullptr };
     uint32_t mDisplayTextureWidth[2] = { 0, 0 };

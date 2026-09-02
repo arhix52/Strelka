@@ -273,6 +273,12 @@ private:
     /// scene and camera as they stand. What the sample budget freezes is that
     /// texture, so a post-only frame needs to know it exists.
     bool mHasDenoisedFrame = false;
+    /// Set by render() when the Metal4 spatial-upscale path ran: its result sits
+    /// in mPost.displayTexture() and still needs a CPU-side copy into the caller's
+    /// output buffer, done by renderSync() once the frame is known complete. See
+    /// the comment where this is set for why that copy is not just another
+    /// Metal4 encoder.
+    bool mPendingSpatialUpscaleReadback = false;
     /// Force motion vectors back to camera-only, for measuring what the
     /// previous-frame pose is actually worth.
     const bool mNoPrevPose = envFlag("STRELKA_NO_PREV_POSE");

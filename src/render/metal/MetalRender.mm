@@ -1829,6 +1829,27 @@ void MetalRender::render(Buffer* output)
     {
         samplesThisLaunch = std::max(spp, 1u);
     }
+
+    // Verbatim copy of a display-resolution texture into the buffer headless
+    // callers (StrelkaCLI, screenshots) read back. Both the denoiser and the
+    // plain MetalFX spatial upscale produce a display-sized texture and
+    // neither is otherwise readable from the CPU side -- the buffer this
+    // function was handed only ever holds render-resolution data on its own.
+    auto copyTextureToOutputBuffer = [&](MTL::CommandBuffer* cmd, MTL::Texture* source) {
+        if (!mPost.textureToBufferPSO() || !source)
+        {
+            return;
+        }
+        MTL::ComputeCommandEncoder* cp = cmd->computeCommandEncoder();
+        cp->setComputePipelineState(mPost.textureToBufferPSO());
+        cp->useResource(((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+        cp->setBuffer(pUniformTMBuffer, 0, 0);
+        cp->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
+        cp->setTexture(source, 0);
+        cp->dispatchThreads(MTL::Size(outWidth, outHeight, 1), MTL::Size(8, 8, 1));
+        cp->endEncoding();
+    };
+
     if (samplesThisLaunch != 0 && mAccel.instanceBuffer() != nullptr)
     {
         pUniformData->samples_per_launch = samplesThisLaunch;
@@ -2148,6 +2169,20 @@ void MetalRender::render(Buffer* output)
                     // ours, so this has to follow endEncoding().
                     mPost.metalFx().encodeSpatial(cmdIntegrate, true, mPost.upscaleTexture(mWriteIndex),
                                                   mPost.displayTexture(mWriteIndex), width, height);
+                    // The scaler's output is a display-sized texture that the
+                    // headless writer (StrelkaCLI, screenshots) cannot read: it
+                    // wants the linear `output` buffer, which still holds only
+                    // whatever the render-resolution tonemap above wrote, laid out
+                    // at the wrong stride for a display-resolution buffer.
+                    //
+                    // A second Metal4 encoder here to copy it back crashed deep in
+                    // AGXMetalG13X (EXC_BAD_ACCESS in emitUscStateLoad) -- the
+                    // scaler's internal encoding appears to leave the command
+                    // buffer unable to open another compute encoder, the same
+                    // family of MetalFX/Metal4 driver fragility already worked
+                    // around above (FB22575333). Flagged for renderSync() to copy
+                    // out on the CPU instead, once the frame is known complete.
+                    mPendingSpatialUpscaleReadback = true;
                 }
                 cmdIntegrate->endCommandBuffer();
                 integrateBuffers.push_back(cmdIntegrate);
@@ -2461,18 +2496,7 @@ void MetalRender::render(Buffer* output)
                 mHasDenoisedFrame = true;
 
                 // Copy denoised output back to the linear buffer consumed by headless image writers.
-                if (mPost.denoisedToBufferPSO() && mPost.denoisedTexture())
-                {
-                    MTL::ComputeCommandEncoder* cp = pCmd->computeCommandEncoder();
-                    cp->setComputePipelineState(mPost.denoisedToBufferPSO());
-                    cp->useResource(
-                        ((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
-                    cp->setBuffer(pUniformTMBuffer, 0, 0);
-                    cp->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
-                    cp->setTexture(mPost.denoisedTexture(), 0);
-                    cp->dispatchThreads(MTL::Size(outWidth, outHeight, 1), MTL::Size(8, 8, 1));
-                    cp->endEncoding();
-                }
+                copyTextureToOutputBuffer(pCmd, mPost.denoisedTexture());
 
                 if (mPost.tonemapperTexPSO())
                 {
@@ -2519,6 +2543,9 @@ void MetalRender::render(Buffer* output)
             {
                 mPost.metalFx().encodeSpatial(
                     pCmd, false, mPost.upscaleTexture(mWriteIndex), mPost.displayTexture(mWriteIndex), width, height);
+                // Same reason as the denoiser above: the scaler's output is a
+                // display-sized texture, and the headless writer reads the buffer.
+                copyTextureToOutputBuffer(pCmd, mPost.displayTexture(mWriteIndex));
             }
 
             const int writeIdxWf = mWriteIndex;
@@ -2596,17 +2623,7 @@ void MetalRender::render(Buffer* output)
             // Linear denoised radiance back into the output buffer, for the same
             // readers the traced path writes it for: a screenshot taken while the
             // frame is frozen has to hold what is on the screen.
-            if (mPost.denoisedToBufferPSO())
-            {
-                MTL::ComputeCommandEncoder* cp = pCmd->computeCommandEncoder();
-                cp->setComputePipelineState(mPost.denoisedToBufferPSO());
-                cp->useResource(((MetalBuffer*)output)->getNativePtr(), MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
-                cp->setBuffer(pUniformTMBuffer, 0, 0);
-                cp->setBuffer(((MetalBuffer*)output)->getNativePtr(), 0, 1);
-                cp->setTexture(mPost.denoisedTexture(), 0);
-                cp->dispatchThreads(MTL::Size(outWidth, outHeight, 1), MTL::Size(8, 8, 1));
-                cp->endEncoding();
-            }
+            copyTextureToOutputBuffer(pCmd, mPost.denoisedTexture());
 
             MTL::ComputeCommandEncoder* tm = pCmd->computeCommandEncoder();
             tm->setComputePipelineState(mPost.tonemapperTexPSO());
@@ -2648,6 +2665,10 @@ void MetalRender::render(Buffer* output)
             {
                 mPost.metalFx().encodeSpatial(
                     pCmd, false, mPost.upscaleTexture(mWriteIndex), mPost.displayTexture(mWriteIndex), width, height);
+                // The blit and tonemap above only fed the scaler its low-resolution
+                // source through `output`; the display-resolution result the
+                // headless writer actually reads still has to overwrite it.
+                copyTextureToOutputBuffer(pCmd, mPost.displayTexture(mWriteIndex));
             }
         }
 
@@ -2868,6 +2889,47 @@ void MetalRender::renderSync(Buffer* output)
     // frame is already clearing, and the answer is the same either way.
     mIntegrator.reportIorStackStats();
     mIntegrator.reportSharcStats();
+
+    // See the comment where this is set: the Metal4 spatial-upscale path could
+    // not copy its own result back into `output`, so it is done here, on the
+    // CPU, once the frame is known complete -- the same blit-to-staging-buffer
+    // pattern readHalfTexture() uses for screenshots, on the classic Metal3
+    // queue rather than a second Metal4 encoder.
+    if (mPendingSpatialUpscaleReadback && output)
+    {
+        mPendingSpatialUpscaleReadback = false;
+        const MTL::Texture* tex = mPost.displayTexture(mWriteIndex);
+        if (tex && tex->pixelFormat() == MTL::PixelFormatRGBA16Float)
+        {
+            const uint32_t w = (uint32_t)tex->width();
+            const uint32_t h = (uint32_t)tex->height();
+            const size_t packedRowBytes = (size_t)w * 8;
+            const size_t rowBytes = (packedRowBytes + 255u) & ~size_t(255u);
+            MTL::Buffer* staging = mDevice->newBuffer(rowBytes * h, MTL::ResourceStorageModeShared);
+            MTL::CommandBuffer* cmd = mCommandQueue->commandBuffer();
+            cmd->retain();
+            MTL::BlitCommandEncoder* blit = cmd->blitCommandEncoder();
+            blit->copyFromTexture(
+                tex, 0, 0, MTL::Origin(0, 0, 0), MTL::Size(w, h, 1), staging, 0, rowBytes, rowBytes * h);
+            blit->endEncoding();
+            cmd->commit();
+            cmd->waitUntilCompleted();
+            cmd->release();
+
+            auto* dst = static_cast<float*>(((MetalBuffer*)output)->getNativePtr()->contents());
+            for (size_t y = 0; y < h; ++y)
+            {
+                const uint8_t* src = static_cast<const uint8_t*>(staging->contents()) + y * rowBytes;
+                for (size_t x = 0; x < (size_t)w * 4; ++x)
+                {
+                    uint16_t half = 0;
+                    std::memcpy(&half, src + x * sizeof(half), sizeof(half));
+                    dst[(y * w * 4) + x] = halfToFloat(half);
+                }
+            }
+            staging->release();
+        }
+    }
 
     // Managed storage needs an explicit GPU→CPU sync before the host can read.
     // On Apple silicon Managed behaves like Shared, but this keeps Intel Macs correct.

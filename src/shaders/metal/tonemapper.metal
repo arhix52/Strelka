@@ -81,8 +81,12 @@ kernel void toneMappingTextureShader(
     displayTexture.write(float4(result, inputColor.a), tid);
 }
 
-// Copy the denoised display texture to the headless writer's linear buffer without tonemapping.
-kernel void denoisedTextureToBuffer(
+// Copy a display-resolution texture to the headless writer's linear output
+// buffer, verbatim -- no tonemapping. Used for the denoised frame (still
+// scene-linear) and for the plain MetalFX spatial upscale (already
+// tonemapped by the pass that fed it); either way this is just the last stop
+// before the buffer StrelkaCLI reads.
+kernel void textureToBuffer(
     uint2 tid [[thread_position_in_grid]],
     constant UniformsTonemap& uniforms [[buffer(0)]],
     device float4* buffer [[buffer(1)]],

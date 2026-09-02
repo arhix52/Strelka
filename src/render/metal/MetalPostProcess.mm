@@ -53,7 +53,7 @@ void MetalPostProcess::release()
     safeRelease(mTonemapperPSO);
     safeRelease(mTonemapperPSO4);
     safeRelease(mTonemapperTexPSO);
-    safeRelease(mDenoisedToBufferPSO);
+    safeRelease(mTextureToBufferPSO);
     for (int i = 0; i < 2; ++i)
     {
         mDisplayTextureWidth[i] = 0;
@@ -248,8 +248,8 @@ void MetalPostProcess::buildTonemapperPipeline()
     {
         NS::Error* e3 = nullptr;
         MTL::Function* fn = pComputeLibrary->newFunction(
-            NS::String::string("denoisedTextureToBuffer", NS::UTF8StringEncoding));
-        mDenoisedToBufferPSO = fn ? mDevice->newComputePipelineState(fn, &e3) : nullptr;
+            NS::String::string("textureToBuffer", NS::UTF8StringEncoding));
+        mTextureToBufferPSO = fn ? mDevice->newComputePipelineState(fn, &e3) : nullptr;
         if (fn)
             fn->release();
     }
