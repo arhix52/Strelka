@@ -153,6 +153,15 @@ TEST_CASE("extended sRGB transfer preserves EDR values")
     CHECK(oka::tonemap::gammaFloat(4.0f, 2.4f) > 1.0f);
 }
 
+TEST_CASE("sRGB transfer round trips spatial scaler pixels back to display linear")
+{
+    for (const float value : { 0.0f, 0.0031308f, 0.18f, 1.0f, 4.0f })
+    {
+        const float encoded = oka::tonemap::gammaFloat(value, 2.4f);
+        CHECK(oka::tonemap::inverseGammaFloat(encoded, 2.4f) == doctest::Approx(value).epsilon(1e-5));
+    }
+}
+
 TEST_CASE("presentation metadata defaults describe an identity linear handoff")
 {
     const oka::PresentationMetadata metadata{};
@@ -165,6 +174,9 @@ TEST_CASE("presentation metadata defaults describe an identity linear handoff")
     CHECK(metadata.maxOutput == doctest::Approx(1.0f));
     CHECK(metadata.gamma == doctest::Approx(0.0f));
     CHECK(metadata.tonemapper == 0u);
+    CHECK(metadata.sourceWidth == 0u);
+    CHECK(metadata.sourceHeight == 0u);
+    CHECK(metadata.resampling == oka::PresentationResampling::None);
     CHECK(image.frameSerial == 0u);
     CHECK(oka::shouldApplyPresentationTransform(metadata));
 }

@@ -651,7 +651,9 @@ void EditorApp::loadSettings()
         m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 1);
     }
     m_settingsManager->setAs<uint32_t>("render/pt/subsurfaceIterations", 64);
-    m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", 1u);
+    // Four power-sampled candidates cut one-spp log error by 20% on kids room
+    // and 5% on bathroom; eight has little left to win for twice the work.
+    m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", 4u);
     m_settingsManager->setAs<uint32_t>("render/pt/writeAov", 0);
     m_settingsManager->setAs<bool>("render/pt/denoise", false);
     // The MetalFX denoiser compiles a large graph synchronously. The interactive
@@ -2044,13 +2046,15 @@ void EditorApp::runDenoiseAudit()
     auto shown = [&](AuditImage& img) { return m_render->readDisplayTexture(img.px, img.w, img.h); };
     auto guide = [&](Render::Guide g, AuditImage& img) { return m_render->readGuideTexture(g, img.px, img.w, img.h); };
 
-    const bool denoiseWithAcc = !envFlag("STRELKA_AUDIT_NO_ACC");
     auto setDenoise = [&](bool on) {
         m_settingsManager->setAs<bool>("render/pt/denoise", on);
         m_settingsManager->setAs<bool>("render/pt/enableUpscale", on);
-        m_settingsManager->setAs<bool>("render/pt/enableAcc", on ? denoiseWithAcc : true);
+        // MetalFX owns temporal reconstruction while this branch is active.
+        // Keeping the PT accumulator enabled here used to hide frame-stream
+        // defects by feeding its converged mean to the denoiser.
+        m_settingsManager->setAs<bool>("render/pt/enableAcc", !on);
         m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
-        m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", on ? (denoiseWithAcc ? refSpp : 1u) : refSpp);
+        m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", refSpp);
     };
 
     // Converged, at native resolution, with neither scaler nor denoiser in the
@@ -2161,14 +2165,13 @@ void EditorApp::runDenoiseAudit()
     // === Play, then stop ====================================================
     //
     // Stopping playback should freeze a frame of the film and go on refining it.
-    // What it must not do is lose the character. The estimator folds every new
-    // sample into the accumulation buffer, so anything the held frames stop
-    // hitting does not disappear at once -- it fades over the following seconds
-    // as the running mean walks away from the frame that was on screen when the
-    // stop happened. That is why this measures the trend across the hold rather
-    // than the first frame after it, and why the two-second play matters: held
-    // from the start, the pose keyframes are identical and nothing under test is
-    // even reachable.
+    // What it must not do is lose the character. The plain estimator folds new
+    // samples into its accumulation buffer, while MetalFX carries temporal
+    // history of its per-frame stream; either can fade a stale pose over several
+    // frames. That is why this measures the trend across the hold rather than
+    // the first frame after it, and why the two-second play matters: held from
+    // the start, the pose keyframes are identical and nothing under test is even
+    // reachable.
     if (animCount > 0)
     {
         for (int denoiseOn = 0; denoiseOn < 2 && !outOfTime(); ++denoiseOn)
@@ -2574,7 +2577,7 @@ void EditorApp::runDenoiseAudit()
             }
         }
         m_settingsManager->setAs<uint32_t>("render/pt/denoiseDepthMode", 0);
-        m_settingsManager->setAs<uint32_t>("render/pt/jitterSign", 0);
+        m_settingsManager->setAs<uint32_t>("render/pt/jitterSign", 3);
     }
 
     struct Scenario
@@ -2820,6 +2823,11 @@ void EditorApp::runDenoiseAudit()
         setDenoise(true);
         m_settingsManager->setAs<float>("render/pt/upscaleFactor", 1.0f);
         m_settingsManager->setAs<bool>("render/pt/enableUpscale", false);
+        // Reverse-Z device depth is intentionally concentrated near one; almost
+        // any neighbouring pixel falls within the relative tolerance below and
+        // makes every candidate vector look correct. Linear view depth gives
+        // this correspondence test enough separation to distinguish the signs.
+        m_settingsManager->setAs<uint32_t>("render/pt/denoiseDepthMode", 1);
         m_settingsManager->setAs<bool>("render/enableMotionBlur", false);
         m_settingsManager->setAs<bool>("render/isMotionBlurVisible", false);
 
@@ -2894,6 +2902,7 @@ void EditorApp::runDenoiseAudit()
         }
         camera.position = basePos;
         camera.updateViewMatrix();
+        m_settingsManager->setAs<uint32_t>("render/pt/denoiseDepthMode", 0);
         m_settingsManager->setAs<float>("render/pt/upscaleFactor", upscale);
     }
 
@@ -4151,7 +4160,7 @@ void EditorApp::run()
         // stopped and this frame is the finished one. Queued rather than written
         // here so it takes the same path as the menu's screenshot, including the
         // display readback.
-        if (m_batchScreenshotArmed && m_pendingScreenshotPath.empty() && !m_isLoading &&
+        if (m_batchScreenshotArmed && m_pendingScreenshotPath.empty() && !m_isLoading && !m_render->isRenderBusy() &&
             m_batchSppTotal > 0 && m_sharedCtx->mSubframeIndex >= m_batchSppTotal)
         {
             // PNG, not EXR: StrelkaCLI already writes scene-linear radiance, and

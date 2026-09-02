@@ -43,6 +43,10 @@ public:
     {
         return mIesBuffer;
     }
+    double totalPower() const
+    {
+        return mTotalPower;
+    }
     /// For the Metal 4 residency set: an argument table names these by handle,
     /// and a handle whose allocation is not resident is a page fault rather than
     /// a validation message.
@@ -59,6 +63,7 @@ private:
     MTL::Device* mDevice = nullptr;
     MTL::Buffer* mLightBuffer = nullptr;
     MTL::Buffer* mIesBuffer = nullptr;
+    double mTotalPower = 0.0;
     std::vector<MTL::Texture*> mProjectorTextures;
     /// What mProjectorTextures was built from. upload() runs on every light
     /// edit -- dragging an intensity slider is one per frame -- and decoding a
@@ -67,4 +72,3 @@ private:
 };
 
 } // namespace oka::metal
-

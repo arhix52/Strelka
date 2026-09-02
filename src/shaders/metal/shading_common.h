@@ -879,7 +879,7 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
     const float2 uv = dirToEnvUV(dir, uniforms.envMapRotation);
     const float4 envSample = envMapTexture.sample(envSampler, uv);
     float3 Li = envSample.xyz;
-    Li *= uniforms.envMapIntensity * float3(uniforms.envMapColorTint);
+    Li *= uniforms.envMapIntensity * uniforms.envMapColorTint.xyz;
 
     // Cosine folded in here for the same reason as in connectLight().
     c.radiance = volumeEvent ? Li : Li * shadingCosine(si, dir);
@@ -892,6 +892,27 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
 
 // Choose a strategy and build the connection. The caller decides when to test
 // visibility.
+uint32_t sampleAnalyticLight(const uint32_t numLights, device UniformLight* lights, const float u)
+{
+    uint32_t first = 0;
+    uint32_t count = numLights;
+    while (count > 0)
+    {
+        const uint32_t step = count / 2;
+        const uint32_t middle = first + step;
+        if (u < lights[middle].selectionCdf)
+        {
+            count = step;
+        }
+        else
+        {
+            first = middle + 1;
+            count -= step + 1;
+        }
+    }
+    return min(first, numLights - 1);
+}
+
 LightConnection connectToLight(constant Uniforms& uniforms,
                                const uint32_t numLights,
                                device UniformLight* lights,
@@ -905,19 +926,19 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     if (SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
         const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
+        const float envSelectionPdf = uniforms.envMapColorTint.w;
+        const float localSelectionPdf = 1.0f - envSelectionPdf;
 
-        if (!SPEC_LIGHTS || numLights == 0 || u >= 0.5f)
+        if (!SPEC_LIGHTS || numLights == 0 || u >= localSelectionPdf)
         {
-            const float selectionPdf = (numLights > 0) ? 0.5f : 1.0f;
             LightConnection c = connectEnvLight(uniforms, samplerRnd, si, envAliasTable, envMapTexture, volumeEvent);
-            c.pdf *= selectionPdf;
+            c.pdf *= numLights > 0 ? envSelectionPdf : 1.0f;
             return c;
         }
-        // Sample a local light (remap u from [0, 0.5) to [0, 1)).
-        const float remappedU = u * 2.0f;
-        const uint32_t lightId = min((uint32_t)(numLights * remappedU), numLights - 1);
+        const float remappedU = u / localSelectionPdf;
+        const uint32_t lightId = sampleAnalyticLight(numLights, lights, remappedU);
         LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent, iesBuffer);
-        c.pdf *= 0.5f / numLights;
+        c.pdf *= localSelectionPdf * lights[lightId].selectionPdf;
         return c;
     }
 
@@ -930,8 +951,8 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     }
 
     const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
-    const uint32_t lightId = min((uint32_t)(numLights * u), numLights - 1);
+    const uint32_t lightId = sampleAnalyticLight(numLights, lights, u);
     LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent, iesBuffer);
-    c.pdf *= 1.0f / numLights;
+    c.pdf *= lights[lightId].selectionPdf;
     return c;
 }

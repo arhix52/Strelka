@@ -241,4 +241,48 @@ DEVICE_FUNC float ior_stack_peek_after_pop(const THREAD_REF IorStack& stack,
     }
 }
 
+/// Exact material operations for callers that carry a material index. Equal
+/// priorities are common and must not make an unmatched exit remove a different
+/// enclosing medium.
+DEVICE_FUNC bool ior_stack_has_material(const THREAD_REF IorStack& stack, unsigned int material_index)
+{
+    for (int i = stack.top; i >= 0; i--)
+    {
+        if (ior_entry_material(stack.entries[i]) == (material_index & IOR_ENTRY_MATERIAL_MASK))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+DEVICE_FUNC float ior_stack_pop_material(THREAD_REF IorStack& stack, unsigned int material_index)
+{
+    for (int i = stack.top; i >= 0; i--)
+    {
+        if (ior_entry_material(stack.entries[i]) == (material_index & IOR_ENTRY_MATERIAL_MASK))
+        {
+            for (int j = i; j < stack.top; j++)
+            {
+                stack.entries[j] = stack.entries[j + 1];
+            }
+            stack.top--;
+            break;
+        }
+    }
+    return ior_stack_current_ior(stack);
+}
+
+DEVICE_FUNC float ior_stack_peek_after_pop_material(const THREAD_REF IorStack& stack, unsigned int material_index)
+{
+    for (int i = stack.top; i >= 0; i--)
+    {
+        if (ior_entry_material(stack.entries[i]) == (material_index & IOR_ENTRY_MATERIAL_MASK))
+        {
+            return (i == stack.top) ? ((i > 0) ? stack.entries[i - 1].ior : 1.0f) : stack.entries[stack.top].ior;
+        }
+    }
+    return ior_stack_current_ior(stack);
+}
+
 #endif // STRELKA_IOR_STACK_H

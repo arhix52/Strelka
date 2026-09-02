@@ -115,7 +115,7 @@ inline void seedCommonRenderSettings(SettingsManager& settings)
     settings.setAs<bool>("render/enableCameraMotionBlur", false);
     settings.setAs<float>("render/motionBlur/shutterTime", 1.0f / 24.0f);
     settings.setAs<uint32_t>("render/motionBlur/shutterMode", 1);
-    settings.setAs<uint32_t>("render/pt/jitterSign", 0);
+    settings.setAs<uint32_t>("render/pt/jitterSign", 3);
     // MetalFX audit baseline: device depth and a stable shutter-close frame.
     settings.setAs<uint32_t>("render/pt/denoiseDepthMode", 0);
     settings.setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);

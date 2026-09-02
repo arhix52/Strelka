@@ -139,6 +139,10 @@ private:
     MTL::Device* mDevice = nullptr;
     MTL::CommandQueue* mCommandQueue = nullptr;
 
+    bool readHalfTexture(const MTL::Texture* texture, std::vector<float>& rgba, uint32_t& width, uint32_t& height);
+    bool readSpatialDisplayReferred(
+        int readyIndex, std::vector<float>& rgba, uint32_t& width, uint32_t& height, float maxOutput);
+
     MTL::Buffer* mAccumulationBuffer = nullptr;
     // Metal validates every declared kernel binding even when an indirect
     // dispatch has zero threadgroups. The streaming loader traces an empty TLAS
@@ -272,7 +276,6 @@ private:
     /// Force motion vectors back to camera-only, for measuring what the
     /// previous-frame pose is actually worth.
     const bool mNoPrevPose = envFlag("STRELKA_NO_PREV_POSE");
-    const bool mNoAccumColor = envFlag("STRELKA_NO_ACCUM_COLOR");
     std::atomic<int> mReadyIndex{ -1 };
     std::atomic<bool> mRenderBusy{ false };
     std::atomic<bool> mDenoiserFallbackActive{ false };

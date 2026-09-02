@@ -750,7 +750,6 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         bind(mAovBuffer, 0, 1);
         bind(mRadianceBuffer, 0, 2);
         table->setAddress(ring.push(sampleCount), 3);
-        bind(scene.accumulationBuffer, 0, 4);
         table->setTexture(scene.guideColor->gpuResourceID(), 0);
         table->setTexture(scene.guideDepth->gpuResourceID(), 1);
         table->setTexture(scene.guideMotion->gpuResourceID(), 2);

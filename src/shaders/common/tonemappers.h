@@ -336,6 +336,19 @@ inline float3 srgbGamma(const float3 color, const float gamma)
     return MAKE_FLOAT3(gammaFloat(color.x, gamma), gammaFloat(color.y, gamma), gammaFloat(color.z, gamma));
 }
 
+inline float inverseGammaFloat(const float c, const float gamma)
+{
+    if (isnan(c) || c < 0.0f)
+    {
+        return 0.0f;
+    }
+    if (c <= 0.04045f)
+    {
+        return c / 12.92f;
+    }
+    return pow((c + 0.055f) / 1.055f, gamma);
+}
+
 // utility function for accumulation and HDR <=> LDR
 inline float3 tonemap(float3 color, const float3 exposure)
 {

@@ -11,6 +11,7 @@ set(RENDER_SOURCES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/host/scene_stream.h
     ${CMAKE_CURRENT_SOURCE_DIR}/host/render_resolution.h
     ${CMAKE_CURRENT_SOURCE_DIR}/host/ibl_alias_table.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/light_selection.h
     ${CMAKE_CURRENT_SOURCE_DIR}/host/texture_cache_key.h
     ${CMAKE_CURRENT_SOURCE_DIR}/host/texture_compress.h
     ${CMAKE_CURRENT_SOURCE_DIR}/host/integrator_buffer_sizes.h

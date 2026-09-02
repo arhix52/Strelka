@@ -1,10 +1,13 @@
 #include "MetalFrameUniforms.h"
 
+#include <host/light_selection.h>
+
 #include <log.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <numbers>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -93,6 +96,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     const bool enableAccumulation = in.enableAccumulation;
     const bool anyAnimationPlaying = in.anyAnimationPlaying;
     const bool denoising = in.denoising;
+    const bool temporalUpscaling = in.temporalUpscaling;
     const bool isMotionBlurVisible = in.isMotionBlurVisible;
     const bool enableCameraMotionBlur = in.enableCameraMotionBlur;
     const oka::Camera& camera = *in.camera;
@@ -137,23 +141,21 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     // them costs a 64-byte store per pixel at the primary hit.
     // Looking at a guide implies producing it, and so does denoising.
     const bool denoiseOn = denoising;
-    pUniformData->writeAov = settings.getAs<uint32_t>("render/pt/writeAov") || DEBUG_MODE_IS_AOV(debug) || denoiseOn;
+    const bool temporalOn = denoiseOn || temporalUpscaling;
+    pUniformData->writeAov = settings.getAs<uint32_t>("render/pt/writeAov") || DEBUG_MODE_IS_AOV(debug) || temporalOn;
     // Walk to the first rough, opaque surface. Glass and mirrors have no albedo
     // of their own to demodulate against; writing the pane (guidePrimaryHit)
     // hands MetalFX a black specular lobe in front of a transmitted room and
     // the pane comes out opaque and smeared.
     pUniformData->guidePrimaryHit = settings.getAs<uint32_t>("render/pt/guidePrimaryHit");
-    // A still frame already has an unbiased running estimate. Feed it to
-    // MetalFX once there is history rather than asking the neural filter to
-    // distinguish every rare, energetic light path from a firefly on its own.
-    // Moving the camera resets the accumulation and naturally falls back to the
-    // one-sample temporal path. Jitter is skipped below for the accumulated
-    // input because the path tracer has already sampled the pixel footprint.
-    pUniformData->useAccumulatedColor =
-        (effectiveAccumulation && in.subframeIndex > 0 && in.accumulationBuffer && !in.noAccumColor) ? 1u : 0u;
-    const bool accumulating = pUniformData->useAccumulatedColor != 0u;
+    // PT accumulation and MetalFX history solve different problems. The former
+    // remains the converged scene-linear result; the latter must see a fresh,
+    // coherently jittered launch whose color, depth, motion and material guides
+    // all describe the same camera sample. Feeding the running PT mean together
+    // with one current guide sample mixes hundreds of visibility samples into a
+    // single-surface G-buffer and gives the denoiser a biased input.
     float jx = 0.0f, jy = 0.0f;
-    if (denoiseOn && !in.pausedBlurRefine && !accumulating)
+    if (temporalOn)
     {
         const double ratio = (double)outWidth / (double)std::max(width, 1u);
         const uint32_t phaseCount = (uint32_t)std::clamp(std::lround(8.0 * ratio * ratio), 8L, 128L);
@@ -164,8 +166,6 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     // Temporal reconstruction of any kind needs the frame shifted by a known
     // amount it can undo; without jitter the scaler has nothing new to
     // accumulate between frames and degenerates to a blur.
-    const bool temporalOn = denoiseOn || (settings.getAs<bool>("render/pt/enableUpscale") &&
-                                          settings.getAs<uint32_t>("render/pt/upscaleMode") == 1u);
     pUniformData->useFrameJitter = temporalOn ? 1u : 0u;
     // Guides are assembled the same way whether the denoiser consumes them or a
     // debug view shows them, which needs saying because the obvious spelling --
@@ -395,14 +395,24 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
         const bool hasBackdrop = in.environment->state().backgroundTexture != nullptr;
         pUniformData->hasEnvBackground = hasBackdrop ? 1u : 0u;
         pUniformData->envBackgroundIntensity = hasBackdrop && envLight.has_value() ? envLight->backgroundIntensity : 1.0f;
-        if (envLight.has_value())
+        const glm::float3 tint = envLight.has_value() ? envLight->color : glm::float3(1.0f);
+        float envSelectionPdf = 1.0f;
+        if (pUniformData->numLights > 0)
         {
-            pUniformData->envMapColorTint = { envLight->color.x, envLight->color.y, envLight->color.z };
+            // PBRT's infinite-light power proxy: the map's integrated radiance
+            // crossing the projected area of a sphere around the scene. It has
+            // the same units as the emitted power MetalLights accumulated.
+            const double radius = (std::isfinite(pUniformData->sceneExtent) && pUniformData->sceneExtent < 1e15f) ?
+                                      0.5 * pUniformData->sceneExtent :
+                                      1.0;
+            const double mapIntegral = pUniformData->envPdfScale > 0.0f ? 1.0 / pUniformData->envPdfScale : 0.0;
+            const double tintLuminance = std::max(0.2126 * tint.r + 0.7152 * tint.g + 0.0722 * tint.b, 0.0);
+            const double envPower = std::numbers::pi_v<double> * radius * radius * mapIntegral *
+                                    pUniformData->envMapIntensity * tintLuminance;
+            const double localPower = in.lights != nullptr ? in.lights->totalPower() : 0.0;
+            envSelectionPdf = regularizedPowerProbability(envPower, envPower + localPower, 2);
         }
-        else
-        {
-            pUniformData->envMapColorTint = { 1.0f, 1.0f, 1.0f };
-        }
+        pUniformData->envMapColorTint = { tint.x, tint.y, tint.z, envSelectionPdf };
     }
     else
     {

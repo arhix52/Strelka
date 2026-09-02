@@ -1178,13 +1178,12 @@ static inline float backgroundDepth(constant Uniforms& uniforms)
 // MetalFX documents: "the motion vectors for an object that moves down and to
 // the right by 10 pixels would be (-10,-10)".
 //
-// The current position is the *jittered* sample position, not the pixel centre.
+// The current position is the jittered sample position, not the pixel centre.
 // The ray that produced this hit went through the jitter offset, so projecting
-// the hit back through the current camera lands there, not at the centre.
-// Differencing against the centre instead leaves the jitter inside every motion
-// vector -- a subpixel wobble on every pixel of a perfectly still image, which is
-// the one thing a temporal reconstruction must not be told, because MetalFX
-// already accounts for the jitter itself through jitterOffsetX/Y.
+// the hit through either unjittered camera lands there. Subtracting the pixel
+// centre would therefore leave this frame's jitter in every motion vector; a
+// static scene must produce zero motion because MetalFX receives the sampling
+// offset separately through jitterOffsetX/Y.
 struct ScreenMotion
 {
     float2 offset;
@@ -1208,9 +1207,11 @@ static inline ScreenMotion screenMotion(constant Uniforms& uniforms, float4 prev
     const float2 prevNdc = prevClip.xy / prevClip.w;
     const float2 prevPixel = float2(
         (prevNdc.x * 0.5f + 0.5f) * (float)uniforms.width, (1.0f - (prevNdc.y * 0.5f + 0.5f)) * (float)uniforms.height);
-    // generateCameraRay builds pixelPos.y as height - (y + 0.5 + jitterY), so the
-    // flip cancels and the sample sits at row y + 0.5 + jitterY in screen space.
-    const float2 currPixel = float2((float)pixel.x + 0.5f + uniforms.jitterX, (float)pixel.y + 0.5f + uniforms.jitterY);
+    // This is the raster location of the world-space hit under the current
+    // unjittered camera. Using the centre here would make a still scene report
+    // exactly the jitter as motion, which is not a dejittered vector.
+    const float2 currPixel =
+        float2((float)pixel.x + 0.5f + uniforms.jitterX, (float)pixel.y + 0.5f + uniforms.jitterY);
     const float2 motion = prevPixel - currPixel;
     // Nothing that moved further than the frame is across in one frame can be
     // reprojected onto anything: past that the history lookup lands outside the
@@ -1383,9 +1384,10 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
                                                      uint2(tid % uniforms.width, tid / uniforms.width)) :
                                         ScreenMotion{ float2(0.0f), 0.0f };
         a.specularHitDistance = 0.0f;
-        // Primary background is noise-free. A reflected environment is part of
-        // a noisy specular path and remains denoisable.
-        a.reactive = (depth == 0u) ? 1.0f : 0.0f;
+        // Primary background is noise-free but still has valid camera motion.
+        // Denoise strength handles the former; rejecting temporal history here
+        // throws away the subpixel samples the upscaler needs for the latter.
+        a.reactive = depth == 0u ? motion.reactive : 0.0f;
         a.guideStateOrBounceDepth = depth == 0u ? -1.0f : 0.0f;
         if (depth == 0u)
         {
@@ -1413,6 +1415,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
             a.motionX = aov[tid].motionX;
             a.motionY = aov[tid].motionY;
             a.specularHitDistance = aov[tid].specularHitDistance;
+            a.reactive = aov[tid].reactive;
             aov[tid] = a;
         }
     }
@@ -1449,7 +1452,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
                                      coord::normalized);
         const float2 envUV = dirToEnvUV(rayDir, uniforms.envMapRotation);
         float3 envColor = envMapTexture.sample(envSampler, envUV).xyz;
-        envColor *= uniforms.envMapIntensity * float3(uniforms.envMapColorTint);
+        envColor *= uniforms.envMapIntensity * uniforms.envMapColorTint.xyz;
 
         if (depth == 0u || specularBounce || !neeDone)
         {
@@ -1461,7 +1464,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
             if (uniforms.hasEnvBackground && depth == 0u)
             {
                 envColor = envBackgroundTexture.sample(envSampler, envUV).xyz * uniforms.envBackgroundIntensity *
-                           float3(uniforms.envMapColorTint);
+                           uniforms.envMapColorTint.xyz;
             }
             radiance += throughput * envColor;
             sharcEnvironment = envColor;
@@ -1470,7 +1473,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         {
             const float envPdf = envMapPdf(rayDir, envMapTexture, uniforms.envMapWidth, uniforms.envMapHeight,
                                            uniforms.envMapRotation, uniforms.envPdfScale);
-            const float envSelectionPdf = (uniforms.numLights > 0) ? 0.5f : 1.0f;
+            const float envSelectionPdf = uniforms.numLights > 0 ? uniforms.envMapColorTint.w : 1.0f;
             const float effectiveEnvPdf = envPdf * envSelectionPdf;
             // A texel of zero luminance has zero sampling density, so light
             // sampling could never have produced this direction and the BSDF
@@ -1895,7 +1898,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             a.motionY = motion.offset.y;
             a.specularHitDistance = 0.0f;
             a.reactive = motion.reactive;
-            a.guideStateOrBounceDepth = 0.0f;
+            // A directly visible emitter is deterministic. Let MetalFX scale it
+            // temporally but do not ask the denoiser to suppress its energy.
+            a.guideStateOrBounceDepth = -1.0f;
             aov[tid] = a;
         }
         else if (shouldWriteAov(uniforms, sampleIdx) && (p.depthAndFlags & PATH_FLAG_AOV_DONE) == 0u)
@@ -1968,8 +1973,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             }
             else
             {
-                const float lightSelectionPdf =
-                    uniforms.hasEnvMap ? 0.5f / (float)uniforms.numLights : 1.0f / (float)uniforms.numLights;
+                const float localSelectionPdf = uniforms.hasEnvMap ? 1.0f - uniforms.envMapColorTint.w : 1.0f;
+                const float lightSelectionPdf = localSelectionPdf * currLight.selectionPdf;
                 // From the vertex that scattered, which is not the ray's origin
                 // once it has passed through a cutout on the way here. Using the
                 // origin makes the light look nearer than the scattering vertex
@@ -2071,14 +2076,14 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // boundary the ray re-hits through a self-intersection would otherwise
         // toggle the medium forever, and the path would stay in the queue burning
         // samples rather than stopping.
-        const uint32_t passes = p.depthAndFlags >> PATH_PASSTHROUGH_SHIFT;
+        const uint32_t passes = (p.depthAndFlags & PATH_PASSTHROUGH_MASK) >> PATH_PASSTHROUGH_SHIFT;
         if (passes >= PATH_PASSTHROUGH_MAX)
         {
             radianceOut[tid] += float4(radiance, 0.0f);
             return;
         }
-        p.depthAndFlags =
-            (p.depthAndFlags & ((1u << PATH_PASSTHROUGH_SHIFT) - 1u)) | ((passes + 1u) << PATH_PASSTHROUGH_SHIFT);
+        p.depthAndFlags = (p.depthAndFlags & ~PATH_PASSTHROUGH_MASK) |
+                          (((passes + 1u) << PATH_PASSTHROUGH_SHIFT) & PATH_PASSTHROUGH_MASK);
 
         // Toggle, rather than deciding from the normal.
         //
@@ -2284,7 +2289,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // neither the hemisphere tests nor the ray offsets below apply. Gated on the
     // geometry as well as the material because the chord needs a radius, and only
     // a curve hit has one.
-    const bool isFibre = isCurve && scattersThroughFibre(si);
+    const bool fibreMaterial = scattersThroughFibre(si);
+    const bool isFibre = isCurve && fibreMaterial;
 
     // Coverage. A MASK surface resolves to 0 or 1 and a BLEND one to its alpha,
     // so one stochastic test covers both: with probability (1 - opacity) the
@@ -2305,7 +2311,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // 27% too transparent.
     if (si.opacity < 1.0f)
     {
-        const uint32_t layer = p.depthAndFlags >> PATH_PASSTHROUGH_SHIFT;
+        const uint32_t layer = (p.depthAndFlags & PATH_PASSTHROUGH_MASK) >> PATH_PASSTHROUGH_SHIFT;
         SamplerState orng = samplerFor(uniforms, tid, sampleIdx, depth);
         float u = random<SampleDimension::eOpacity>(orng, uniforms.samplerType);
         // Rotated by which layer of cutout this is.
@@ -2328,7 +2334,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
         if (u >= si.opacity)
         {
-            const uint32_t passes = p.depthAndFlags >> PATH_PASSTHROUGH_SHIFT;
+            const uint32_t passes = (p.depthAndFlags & PATH_PASSTHROUGH_MASK) >> PATH_PASSTHROUGH_SHIFT;
             radianceOut[tid] += float4(radiance, 0.0f);
             if (passes >= PATH_PASSTHROUGH_MAX)
             {
@@ -2342,8 +2348,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             through.direction = packed_float3(rayDir);
             rays[tid] = through;
             p.misDistance += rec.distance;
-            p.depthAndFlags =
-                (p.depthAndFlags & ((1u << PATH_PASSTHROUGH_SHIFT) - 1u)) | ((passes + 1u) << PATH_PASSTHROUGH_SHIFT);
+            p.depthAndFlags = (p.depthAndFlags & ~PATH_PASSTHROUGH_MASK) |
+                              (((passes + 1u) << PATH_PASSTHROUGH_SHIFT) & PATH_PASSTHROUGH_MASK);
             if (SPEC_SHARC_UPDATE)
             {
                 const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
@@ -2409,7 +2415,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     IorStack iorStack = iorStacks[tid];
     const bool entering = si.front_face;
     si.exterior_ior =
-        entering ? ior_stack_current_ior(iorStack) : ior_stack_peek_after_pop(iorStack, si.dielectric_priority);
+        entering ? ior_stack_current_ior(iorStack) : ior_stack_peek_after_pop_material(iorStack, entry.materialId);
 
     // Denoiser guides, from the first surface that can actually be described.
     //
@@ -2540,6 +2546,14 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         aov[tid].specularHitDistance += rec.distance;
     }
 
+    const float3 surfaceEmission = float3(si.emission);
+    if (writingAov && depth == 0u && any(surfaceEmission > 0.0f))
+    {
+        // Direct emission has no Monte Carlo variance. Mark it as an area the
+        // denoiser ignores, preserving small HDR emitters from the first frame.
+        aov[tid].guideStateOrBounceDepth = -1.0f;
+    }
+
     // Stop the canonical guide sample once its guides are complete. A smooth
     // primary still takes the next bounce: specularHitDistance is written there,
     // and returning here would leave it at zero for every mirror and pane of
@@ -2553,8 +2567,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             return;
         }
     }
-
-    const float3 surfaceEmission = float3(si.emission);
 
     // --- Sparse Hash Radiance Cache ----------------------------------------
     const float3 diffuseAlbedo = float3(si.albedo) * (1.0f - si.metallic);
@@ -2875,12 +2887,23 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // path one level deeper than it came in, and a groom is thousands of hairs deep.
     if ((sampleResult.event_type & BSDF_EVENT_TRANSMISSION) != 0 && !isFibre)
     {
+        // A diffuse-transmission event crosses an infinitesimally thin sheet.
+        // A subsurface event enters the separately tracked random walk. Neither
+        // makes the following surface segment part of a dielectric volume.
+        const bool entersMedium = isOpenPBR ?
+                                      (openpbrMat.subsurface_weight > 0.0f && openpbrMat.geometry_thin_walled == 0u) :
+                                      (si.subsurface > 0.0f);
+        const uint32_t entryEvent = isOpenPBR ? (sampleResult.event_type & BSDF_EVENT_TRANSMISSION) :
+                                                (sampleResult.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION);
+        const bool startsSubsurfaceWalk = SPEC_SSS && entersMedium && entryEvent != 0u;
+        const bool diffuseTransmission = (sampleResult.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION) != 0u;
+
         // A thin-walled surface has no interior, so crossing it does not put the
         // path inside anything. Pushing the stack anyway left a ray that had gone
         // through the front of a bubble believing it was inside glass, so the far
         // side was an exit from a dense medium -- and every grazing angle there is
         // past the critical angle.
-        if (!si.thin_walled)
+        if (!si.thin_walled && !startsSubsurfaceWalk && !diffuseTransmission && !fibreMaterial)
         {
             if (entering)
             {
@@ -2893,24 +2916,18 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             }
             else
             {
-                if (!ior_stack_can_pop(iorStack, si.dielectric_priority, entry.materialId))
+                if (!ior_stack_has_material(iorStack, entry.materialId))
                 {
                     atomic_fetch_add_explicit(&iorStats[IOR_STAT_UNMATCHED], 1u, memory_order_relaxed);
                 }
-                ior_stack_pop(iorStack, si.dielectric_priority, entry.materialId);
+                ior_stack_pop_material(iorStack, entry.materialId);
             }
         }
         nextOrigin = offset_ray(si.position, -faceNg);
 
         // OpenPBR enters on textured subsurface weight plus any transmission; glTF uses diffuse transmission.
         // Pure-absorption interiors stay Beer-Lambert instead of entering the random walk.
-        const bool entersMedium =
-            isOpenPBR ? (openpbrMat.subsurface_weight > 0.0f && openpbrMat.geometry_thin_walled == 0u) :
-                        (si.subsurface > 0.0f);
-        const uint32_t entryEvent =
-            isOpenPBR ? (sampleResult.event_type & BSDF_EVENT_TRANSMISSION) :
-                        (sampleResult.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION);
-        if (SPEC_SSS && entersMedium && entryEvent != 0)
+        if (startsSubsurfaceWalk)
         {
             mediumState.medium = (entry.materialId + 1u) & MEDIUM_INDEX_MASK;
 
@@ -3947,7 +3964,6 @@ kernel void wavefrontAovResolve(uint2 tid [[thread_position_in_grid]],
                                 device const AovSample* aov [[buffer(1)]],
                                 device const float4* radiance [[buffer(2)]],
                                 constant uint32_t& sampleCount [[buffer(3)]],
-                                device const float4* accumulated [[buffer(4)]],
                                 texture2d<float, access::write> colorTex [[texture(0)]],
                                 texture2d<float, access::write> depthTex [[texture(1)]],
                                 texture2d<float, access::write> motionTex [[texture(2)]],
@@ -3974,13 +3990,11 @@ kernel void wavefrontAovResolve(uint2 tid [[thread_position_in_grid]],
     // denoiser's input brighter by a factor of spp -- invisible at one sample per
     // launch, which is why it survived, and wrong the moment anyone raises it.
     //
-    // When the estimator is accumulating, hand over the running mean rather than
-    // this launch's samples. Nothing stops a paused, static scene from converging
-    // -- the accumulator is already doing it -- but the denoiser was being fed a
-    // one-sample frame forever, so what reached the screen never got better than
-    // its own temporal filter could make it.
-    const float3 launch = radiance[i].xyz / (float)max(sampleCount, 1u);
-    float3 color = uniforms.useAccumulatedColor ? accumulated[i].xyz : launch;
+    // This launch is the MetalFX frame stream. PT accumulation is resolved into
+    // its own buffer by wavefrontResolve and deliberately does not enter here:
+    // the current color and the current auxiliary buffers must describe one and
+    // the same jittered visibility sample.
+    float3 color = radiance[i].xyz / (float)max(sampleCount, 1u);
 
     // Firefly clamp, in exposed units so the threshold means the same thing at
     // any exposure. A single unbounded sample is a bright dot that a temporal
@@ -4003,11 +4017,15 @@ kernel void wavefrontAovResolve(uint2 tid [[thread_position_in_grid]],
     specularTex.write(float4(float3(a.specularAlbedo), 1.0f), tid);
     normalTex.write(float4(float3(a.normal), 0.0f), tid);
     roughTex.write(float4(a.roughness, 0.0f, 0.0f, 0.0f), tid);
-    specHitTex.write(float4(a.specularHitDistance, 0.0f, 0.0f, 0.0f), tid);
+    // The texture is R16Float. Environment reflections use a large finite proxy
+    // for infinity; clamp it before conversion so the guide stays finite rather
+    // than becoming +inf and poisoning the network input.
+    specHitTex.write(float4(clamp(a.specularHitDistance, 0.0f, 65504.0f), 0.0f, 0.0f, 0.0f), tid);
     reactiveTex.write(float4(saturate(a.reactive), 0.0f, 0.0f, 0.0f), tid);
-    // The sentinel is written only by a camera ray that misses. Reactive pixels
-    // are deliberately not reused here: invalid reprojection should reject
-    // history, not disable spatial denoising of the current sample.
+    // Negative marks a noise-free primary: a camera ray that missed or directly
+    // visible emission. Reactive pixels are deliberately not reused here:
+    // invalid reprojection should reject history, not disable spatial denoising
+    // of the current sample.
     const float denoiseStrength = a.guideStateOrBounceDepth < 0.0f ? 1.0f : 0.0f;
     denoiseStrengthTex.write(float4(denoiseStrength, 0.0f, 0.0f, 0.0f), tid);
 }

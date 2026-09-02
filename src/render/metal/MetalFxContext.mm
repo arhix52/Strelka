@@ -3,6 +3,9 @@
 #include <env.h>
 #include <log.h>
 
+#include <algorithm>
+#include <cmath>
+
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
 
@@ -428,10 +431,12 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         }
         mDenoiser = (void*)denoiser;
 
-        // Fixed application exposure in a 1x1 R16Float. Auto exposure is off,
-        // and a missing texture is treated as zero. MetalFX uses this multiplier
-        // to normalize its filtering; the renderer still applies the same value
-        // once, after denoising, in the display transform.
+        // Fixed application exposure in a 1x1 R16Float. This is a filtering
+        // hint: MetalFX evaluates input * exposure to decide which features will
+        // be visible after tone mapping, but does not change output brightness.
+        // The renderer therefore still applies exposure exactly once after the
+        // denoiser. preExposure remains one because the input itself is not
+        // pre-multiplied.
         MTLTextureDescriptor* const exposureDesc =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float
                                                                width:1
@@ -494,11 +499,15 @@ void MetalFxContext::encodeDenoise(void* commandBuffer, const DenoiseInputs& inp
     d.denoiseStrengthMaskTexture = (__bridge id<MTLTexture>)inputs.denoiseStrength;
     d.outputTexture = (__bridge id<MTLTexture>)inputs.output;
     // The input radiance was not pre-exposed. `exposureTexture` is a different
-    // contract: the scalar MetalFX uses to normalize the scene-linear input.
+    // contract: it tells MetalFX which scene-linear features the later display
+    // exposure makes visible; it does not expose the output itself.
     d.preExposure = 1.0f;
     if (mExposureTexture)
     {
-        const float exposure = inputs.exposure > 0.0f ? inputs.exposure : 1.0f;
+        const float requested = std::isfinite(inputs.exposure) && inputs.exposure > 0.0f ? inputs.exposure : 1.0f;
+        // The API requires R16Float. Keep the hint representable instead of
+        // writing infinity for an extreme camera setting.
+        const float exposure = std::clamp(requested, 1.0f / 65504.0f, 65504.0f);
         if (exposure != mExposure)
         {
             const __fp16 half = (__fp16)exposure;

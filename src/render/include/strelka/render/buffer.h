@@ -20,6 +20,12 @@ enum class PresentationContent : uint32_t
     DebugDisplayLinear,
 };
 
+enum class PresentationResampling : uint32_t
+{
+    None = 0,
+    Spatial,
+};
+
 /// Describes how a scene-linear frame becomes a display image.
 ///
 /// SceneLinear content is multiplied by exposure, passed through tonemapper
@@ -32,6 +38,13 @@ struct PresentationMetadata
     float gamma = 0.0f;
     uint32_t tonemapper = 0;
     PresentationContent content = PresentationContent::SceneLinear;
+    /// Dimensions of the valid scene-linear image at the start of the buffer.
+    /// They normally match the published frame. A spatially upscaled frame is
+    /// the exception: the buffer allocation is display-sized while the path
+    /// tracer deliberately writes only this lower-resolution rectangle.
+    uint32_t sourceWidth = 0;
+    uint32_t sourceHeight = 0;
+    PresentationResampling resampling = PresentationResampling::None;
 };
 
 inline bool shouldApplyPresentationTransform(

@@ -243,7 +243,10 @@ struct Uniforms
     // way to actually remove analytic lights: zeroing numLights just disables
     // NEE's light selection, the emissive geometry is still hit by BSDF rays.
     uint32_t primaryRayMask;
-    vector_float3 envMapColorTint;
+    // RGB tint plus the probability of choosing the environment over analytic
+    // lights. float4 uses the same 16-byte slot float3 occupied, so this adds no
+    // uniform traffic.
+    vector_float4 envMapColorTint;
     // Previous frame's world-to-clip, for reprojecting a hit point into the last
     // frame's screen space. The motion-blur matrices are the inverses and cannot
     // be used for this.
@@ -258,8 +261,6 @@ struct Uniforms
     // read. False on the first frame of a scene and after anything that
     // invalidates the correspondence between frames.
     uint32_t hasPrevFramePose;
-    /// Feed the denoiser the accumulated mean instead of this launch's samples.
-    uint32_t useAccumulatedColor;
     /// Luminance ceiling, in exposed units, for the colour handed to the
     /// denoiser. Zero disables it.
     float denoiseFireflyClamp;
@@ -372,9 +373,10 @@ struct AovSample
     /// is known to be a lie: mirrors, glass, and anything whose previous position
     /// could not be established.
     float reactive;
-    /// Dual-purpose cold word. During guide rendering, -1 marks primary
-    /// background and 1 + the Fresnel weight marks a transmissive primary whose
-    /// replacement attributes need blending. In `DebugMode::eSharcBounces`,
+    /// Dual-purpose cold word. During guide rendering, a negative value marks a
+    /// noise-free primary (background or directly visible emission), and 1 + the
+    /// Fresnel weight marks a transmissive primary whose replacement attributes
+    /// need blending. In `DebugMode::eSharcBounces`,
     /// where denoising is disabled, it stores the path depth instead. Sharing it
     /// keeps this per-pixel record at 64 bytes.
     float guideStateOrBounceDepth;
@@ -577,11 +579,14 @@ struct SharcUpdateState
 // Transparent hits are counted apart from bounces: passing through a cutout is
 // not a scattering event and must not consume path depth. Bits 12+ are free.
 #define PATH_PASSTHROUGH_SHIFT 12u
+#define PATH_PASSTHROUGH_MASK (0x3fu << PATH_PASSTHROUGH_SHIFT)
 #define PATH_PASSTHROUGH_MAX 32u
 // Origin-lobe roughness for the SHARC footprint test. Pass-through uses bits
 // 12..17, leaving this byte cold in the existing flags word.
 #define PATH_SHARC_ROUGHNESS_SHIFT 18u
 #define PATH_SHARC_ROUGHNESS_MASK (0xffu << PATH_SHARC_ROUGHNESS_SHIFT)
+static_assert((PATH_PASSTHROUGH_MASK & PATH_SHARC_ROUGHNESS_MASK) == 0u,
+              "path pass-through count overlaps packed roughness");
 
 // What `extend` hands to `shade`. Deliberately small: `intersection.primitive_data`
 // is only valid inside the kernel that ran the intersect, so instead of copying
@@ -661,9 +666,10 @@ struct UniformLight
 #else
     MTL::ResourceID projectorTexture;
 #endif
-    // Spelled out so both compilers agree on 128 bytes rather than each padding
-    // a 120-byte struct to its own idea of the vector_float4 alignment.
-    float _padProjector[2];
+    // Power-weighted analytic-light distribution. These occupy the eight bytes
+    // that used to be explicit padding, keeping UniformLight at 128 bytes.
+    float selectionCdf;
+    float selectionPdf;
 };
 static_assert(sizeof(UniformLight) == 128, "UniformLight host/Metal ABI changed");
 

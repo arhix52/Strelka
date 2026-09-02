@@ -2,6 +2,8 @@
 
 #include "ShaderTypes.h"
 
+#include <host/light_selection.h>
+
 #include <strelka/scene/light_desc.h>
 
 #include <log.h>
@@ -104,6 +106,7 @@ void MetalLights::release()
         mLightBuffer->release();
         mLightBuffer = nullptr;
     }
+    mTotalPower = 0.0;
     if (mIesBuffer)
     {
         mIesBuffer->release();
@@ -166,7 +169,16 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
     static_assert(offsetof(UniformLight, projectorTexture) == sizeof(Scene::Light),
                   "the host light must be the exact prefix of the GPU light");
     static_assert(sizeof(UniformLight) == sizeof(Scene::Light) + 16,
-                  "the GPU light adds a handle and its padding, and nothing else");
+                  "the GPU light adds a handle and selection data, and nothing else");
+
+    std::vector<double> powers;
+    powers.reserve(lightDescs.size());
+    for (const Scene::Light& light : lightDescs)
+    {
+        powers.push_back(analyticLightPower(light));
+    }
+    const LightSelectionTable selection = buildLightSelectionCdf(powers);
+    mTotalPower = selection.totalPower;
 
     const size_t lightBufferSize = sizeof(UniformLight) * lightDescs.size();
 
@@ -192,8 +204,8 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
             UniformLight& dst = gpuLights[i];
             std::memcpy(&dst, &lightDescs[i], sizeof(Scene::Light));
             dst.projectorTexture = MTL::ResourceID{};
-            dst._padProjector[0] = 0.0f;
-            dst._padProjector[1] = 0.0f;
+            dst.selectionCdf = selection.entries[i].cdf;
+            dst.selectionPdf = selection.entries[i].pdf;
             if (lightDescs[i].type == LIGHT_TYPE_PROJECTOR)
             {
                 const int slot = (int)lightDescs[i].points[0].z;
@@ -216,4 +228,3 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
 }
 
 } // namespace oka::metal
-

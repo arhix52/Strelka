@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MetalEnvironment.h"
+#include "MetalLights.h"
 #include "MetalMaterials.h"
 #include "sampling_math.h"
 
@@ -36,9 +37,8 @@ public:
         SettingsManager* settings = nullptr;
         Scene* scene = nullptr;
         MetalMaterials* materials = nullptr;
+        MetalLights* lights = nullptr;
         MetalEnvironment* environment = nullptr;
-        MTL::Buffer* accumulationBuffer = nullptr;
-
         uint32_t frameSlot = 0;
         uint32_t subframeIndex = 0;
         uint64_t frameNumber = 0;
@@ -57,6 +57,7 @@ public:
         bool enableAccumulation = false;
         bool anyAnimationPlaying = false;
         bool denoising = false;
+        bool temporalUpscaling = false;
         bool enableMotionBlur = false;
         bool isMotionBlurVisible = false;
         bool enableCameraMotionBlur = false;
@@ -64,8 +65,6 @@ public:
         bool resetDenoiseHistory = false;
         bool hasPrevFramePose = false;
         bool noPrevPose = false;
-        bool noAccumColor = false;
-
         const oka::Camera* camera = nullptr;
         const CameraView* currView = nullptr;
         const CameraView* prevView = nullptr;
@@ -197,4 +196,3 @@ private:
 };
 
 } // namespace oka::metal
-

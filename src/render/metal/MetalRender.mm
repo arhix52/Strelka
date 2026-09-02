@@ -317,11 +317,18 @@ bool MetalRender::readDisplayReferred(std::vector<float>& rgba, uint32_t& width,
         return false;
     }
     Buffer* const buffer = mAsyncOutputBuffers[ri];
+    const PresentationMetadata& presentation = mPresentation[ri];
+    if (presentation.resampling == PresentationResampling::Spatial)
+    {
+        return readSpatialDisplayReferred(ri, rgba, width, height, maxOutput);
+    }
+
     const float* const linear = static_cast<const float*>(buffer->getHostPointer());
     if (linear == nullptr)
     {
         return false;
     }
+
     width = buffer->width();
     height = buffer->height();
     if (width == 0 || height == 0)
@@ -329,7 +336,6 @@ bool MetalRender::readDisplayReferred(std::vector<float>& rgba, uint32_t& width,
         return false;
     }
 
-    const PresentationMetadata& presentation = mPresentation[ri];
     const oka::tonemap::float3 exposure = oka::tonemap::make_float3(
         presentation.exposure[0], presentation.exposure[1], presentation.exposure[2]);
     const float headroom = std::max(maxOutput, 1.0f);
@@ -367,6 +373,95 @@ bool MetalRender::readDisplayReferred(std::vector<float>& rgba, uint32_t& width,
     return true;
 }
 
+// Re-run only the spatial frame's presentation chain for the requested output
+// headroom. The scene-linear source is already in the shared output buffer, so
+// this adds no frame-path copy: screenshot time performs one low-resolution
+// tone-map, one MetalFX scale, and the unavoidable GPU-to-CPU readback.
+bool MetalRender::readSpatialDisplayReferred(
+    int readyIndex, std::vector<float>& rgba, uint32_t& width, uint32_t& height, float maxOutput)
+{
+    if (readyIndex < 0 || readyIndex > 1 || !mPost.metalFx().hasSpatialScaler() || !mPost.upscaleTexture(readyIndex) ||
+        !mPost.displayTexture(readyIndex) || !mAsyncOutputBuffers[readyIndex])
+    {
+        return false;
+    }
+
+    const PresentationMetadata& presentation = mPresentation[readyIndex];
+    const uint32_t sourceWidth = presentation.sourceWidth;
+    const uint32_t sourceHeight = presentation.sourceHeight;
+    const uint32_t outputWidth = static_cast<uint32_t>(mPost.displayTexture(readyIndex)->width());
+    const uint32_t outputHeight = static_cast<uint32_t>(mPost.displayTexture(readyIndex)->height());
+    if (sourceWidth == 0 || sourceHeight == 0 || outputWidth == 0 || outputHeight == 0)
+    {
+        return false;
+    }
+
+    MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
+    descriptor->setWidth(outputWidth);
+    descriptor->setHeight(outputHeight);
+    descriptor->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    descriptor->setTextureType(MTL::TextureType2D);
+    descriptor->setStorageMode(MTL::StorageModePrivate);
+    descriptor->setUsage((MTL::TextureUsage)(mPost.metalFx().requiredOutputUsage() | MTL::TextureUsageShaderRead));
+    MTL::Texture* screenshotTexture = mDevice->newTexture(descriptor);
+    descriptor->release();
+    if (!screenshotTexture)
+    {
+        return false;
+    }
+
+    UniformsTonemap uniforms{};
+    uniforms.width = sourceWidth;
+    uniforms.height = sourceHeight;
+    uniforms.outWidth = outputWidth;
+    uniforms.outHeight = outputHeight;
+    uniforms.tonemapperType = presentation.tonemapper;
+    uniforms.gamma = presentation.gamma;
+    uniforms.maxEDR = std::max(maxOutput, 1.0f);
+    uniforms.exposureValue = { presentation.exposure[0], presentation.exposure[1], presentation.exposure[2] };
+
+    const MTL::Buffer* const sourceBuffer =
+        static_cast<const MTL::Buffer*>(mAsyncOutputBuffers[readyIndex]->getDevicePointer());
+    MTL::CommandBuffer* commandBuffer = mCommandQueue->commandBuffer();
+    commandBuffer->retain();
+    MTL::ComputeCommandEncoder* encoder = commandBuffer->computeCommandEncoder();
+    encoder->setComputePipelineState(mPost.tonemapperPSO());
+    encoder->useResource(sourceBuffer, MTL::ResourceUsageRead);
+    encoder->setBytes(&uniforms, sizeof(uniforms), 0);
+    encoder->setBuffer(sourceBuffer, 0, 1);
+    encoder->setTexture(mPost.upscaleTexture(readyIndex), 0);
+    encoder->dispatchThreads(MTL::Size(sourceWidth, sourceHeight, 1), MTL::Size(8, 8, 1));
+    encoder->endEncoding();
+    mPost.metalFx().encodeSpatial(
+        commandBuffer, false, mPost.upscaleTexture(readyIndex), screenshotTexture, sourceWidth, sourceHeight);
+    commandBuffer->commit();
+    commandBuffer->waitUntilCompleted();
+    const bool completed = commandBuffer->status() == MTL::CommandBufferStatusCompleted;
+    commandBuffer->release();
+
+    const bool read = completed && readHalfTexture(screenshotTexture, rgba, width, height);
+    screenshotTexture->release();
+    if (!read)
+    {
+        return false;
+    }
+
+    // The spatial scaler is configured for perceptual (sRGB) input/output, as
+    // required by the viewport pipeline. Screenshot writers consume
+    // display-linear floats and apply their own transfer encoding, so undo that
+    // one reversible part here. The tone curve and MetalFX scale stay intact.
+    if (presentation.gamma > 0.0f)
+    {
+        for (size_t i = 0; i < rgba.size(); i += 4)
+        {
+            rgba[i + 0] = oka::tonemap::inverseGammaFloat(rgba[i + 0], presentation.gamma);
+            rgba[i + 1] = oka::tonemap::inverseGammaFloat(rgba[i + 1], presentation.gamma);
+            rgba[i + 2] = oka::tonemap::inverseGammaFloat(rgba[i + 2], presentation.gamma);
+        }
+    }
+    return true;
+}
+
 bool MetalRender::readDisplayTextureSdr(std::vector<float>& rgba, uint32_t& width, uint32_t& height)
 {
     return readDisplayReferred(rgba, width, height, 1.0f);
@@ -386,14 +481,12 @@ bool MetalRender::readDisplayTextureHdr(std::vector<float>& rgba, uint32_t& widt
 // output buffer no longer is. Every effect on the MetalFX plan is invisible
 // without it, and "no validation error" has already been shown this session not
 // to mean "correct image".
-bool MetalRender::readDisplayTexture(std::vector<float>& rgba, uint32_t& width, uint32_t& height)
+bool MetalRender::readHalfTexture(const MTL::Texture* tex, std::vector<float>& rgba, uint32_t& width, uint32_t& height)
 {
-    const int ri = mReadyIndex.load();
-    if (ri < 0 || !mPost.displayTexture(ri))
+    if (!tex || tex->pixelFormat() != MTL::PixelFormatRGBA16Float)
     {
         return false;
     }
-    const MTL::Texture* tex = mPost.displayTexture(ri);
     width = (uint32_t)tex->width();
     height = (uint32_t)tex->height();
 
@@ -424,6 +517,12 @@ bool MetalRender::readDisplayTexture(std::vector<float>& rgba, uint32_t& width, 
     }
     staging->release();
     return true;
+}
+
+bool MetalRender::readDisplayTexture(std::vector<float>& rgba, uint32_t& width, uint32_t& height)
+{
+    const int ri = mReadyIndex.load();
+    return ri >= 0 ? readHalfTexture(mPost.displayTexture(ri), rgba, width, height) : false;
 }
 
 // Read any of the denoiser's textures back as RGBA floats.
@@ -1629,8 +1728,8 @@ void MetalRender::render(Buffer* output)
     fin.settings = getSettings();
     fin.scene = mScene;
     fin.materials = &mMaterials;
+    fin.lights = &mLights;
     fin.environment = &mEnvironment;
-    fin.accumulationBuffer = mAccumulationBuffer;
     fin.frameSlot = mFrameIndex;
     fin.subframeIndex = (uint32_t)ctx.mSubframeIndex;
     fin.frameNumber = ctx.mFrameNumber;
@@ -1648,6 +1747,7 @@ void MetalRender::render(Buffer* output)
     fin.enableAccumulation = enableAccumulation;
     fin.anyAnimationPlaying = anyAnimationPlaying;
     fin.denoising = denoising;
+    fin.temporalUpscaling = temporalUpscaling;
     fin.enableMotionBlur = mEnableMotionBlur;
     fin.isMotionBlurVisible = isMotionBlurVisible;
     fin.enableCameraMotionBlur = enableCameraMotionBlur;
@@ -1655,7 +1755,6 @@ void MetalRender::render(Buffer* output)
     fin.resetDenoiseHistory = mResetDenoiseHistory;
     fin.hasPrevFramePose = mHasPrevFramePose;
     fin.noPrevPose = mNoPrevPose;
-    fin.noAccumColor = mNoAccumColor;
     fin.camera = &camera;
     fin.currView = &currCamView;
     fin.prevView = &prevCamView;
@@ -1690,6 +1789,10 @@ void MetalRender::render(Buffer* output)
         // gamma 0 and unit exposure, so replaying the transform is already the
         // identity and needs no second way to say so.
         presentation.content = PresentationContent::SceneLinear;
+        const bool spatialPresentation = upscaling && !denoising && !temporalUpscaling;
+        presentation.sourceWidth = spatialPresentation ? width : outWidth;
+        presentation.sourceHeight = spatialPresentation ? height : outHeight;
+        presentation.resampling = spatialPresentation ? PresentationResampling::Spatial : PresentationResampling::None;
     }
 
     MTL::Buffer* pUniformBuffer = filled.uniformBuffer;
@@ -1718,7 +1821,7 @@ void MetalRender::render(Buffer* output)
     uint32_t samplesThisLaunch = filled.samplesThisLaunch;
     // Unless there is no such frame to freeze -- the denoiser was switched on
     // after the last sample, or its history was dropped since. One more traced
-    // sample hands it the accumulated estimate and the guides that go with it.
+    // launch hands it a fresh color frame and the guides that go with it.
     // The accumulation buffer is not written at the cap, so that sample cannot
     // disturb what has already converged.
     const bool traceUsesMetal4 = mMetal4.isValid();
@@ -2297,7 +2400,6 @@ void MetalRender::render(Buffer* output)
                 enc->setBuffer(mIntegrator.aovBuffer(), 0, 1);
                 enc->setBuffer(mIntegrator.radianceBuffer(), 0, 2);
                 enc->setBytes(&samplesThisLaunch, sizeof(uint32_t), 3);
-                enc->setBuffer(mAccumulationBuffer, 0, 4);
                 enc->setTexture(mPost.guides().color, 0);
                 enc->setTexture(mPost.guides().depth, 1);
                 enc->setTexture(mPost.guides().motion, 2);

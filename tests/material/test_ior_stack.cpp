@@ -81,6 +81,24 @@ TEST_CASE("popping by priority alone would take the wrong one")
     CHECK(ior_entry_material(s.entries[topmost_by_priority]) != 3u);
 }
 
+TEST_CASE("peeking the exterior IOR identifies the material among equal priorities")
+{
+    const IorStack s = with(/*water*/ 3u, 1.33f, /*bubble*/ 7u, 1.60f);
+
+    CHECK(ior_stack_peek_after_pop_material(s, /*water*/ 3u) == doctest::Approx(1.60f));
+    CHECK(ior_stack_peek_after_pop_material(s, /*bubble*/ 7u) == doctest::Approx(1.33f));
+}
+
+TEST_CASE("an exact material pop preserves an equal-priority enclosing medium")
+{
+    IorStack s = with(/*water*/ 3u, 1.33f, /*bubble*/ 7u, 1.60f);
+
+    CHECK_FALSE(ior_stack_has_material(s, /*never entered*/ 99u));
+    CHECK(ior_stack_pop_material(s, /*never entered*/ 99u) == doctest::Approx(1.60f));
+    CHECK(s.top == 1);
+    CHECK(ior_stack_current_material(s) == 7u);
+}
+
 TEST_CASE("an exit with nothing on the stack leaves it empty rather than negative")
 {
     IorStack s{};
