@@ -227,4 +227,31 @@
     }
 #endif
 
+// Float vectors can have finite components while dot(v,v) overflows. These
+// helpers scale before squaring, and are shared by every backend so geometry
+// support never depends on which compiler implements length().
+DEVICE_FUNC float3 normalizeFiniteVectorOrZero(float3 v)
+{
+    const float scale = fmaxf(fabsf(v.x), fmaxf(fabsf(v.y), fabsf(v.z)));
+    if (!(scale > 0.0f) || !(scale <= 3.402823466e38f))
+    {
+        return make_float3(0.0f);
+    }
+    const float3 scaled = v / scale;
+    const float lengthSquared = dot(scaled, scaled);
+    return lengthSquared > 0.0f ? scaled / sqrtf(lengthSquared) : make_float3(0.0f);
+}
+
+DEVICE_FUNC float finiteVectorLength(float3 v)
+{
+    const float scale = fmaxf(fabsf(v.x), fmaxf(fabsf(v.y), fabsf(v.z)));
+    if (!(scale > 0.0f) || !(scale <= 3.402823466e38f))
+    {
+        return 0.0f;
+    }
+    const float3 scaled = v / scale;
+    const float normalizedLength = sqrtf(dot(scaled, scaled));
+    return normalizedLength <= 3.402823466e38f / scale ? scale * normalizedLength : 0.0f;
+}
+
 #endif // STRELKA_MATERIAL_MATH_H

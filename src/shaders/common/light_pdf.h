@@ -103,11 +103,18 @@ DEVICE_FUNC bool lightSampleFacesVertex(float cosAtLight)
 /// p_omega = d^2 / (cos(theta_light) * area).
 DEVICE_FUNC float areaLightSolidAnglePdf(float distToLight, float cosAtLight, float area)
 {
-    if (!lightSampleFacesVertex(cosAtLight) || !(area > 0.0f))
+    if (!lightSampleFacesVertex(cosAtLight) || !(distToLight > 0.0f) || !(area > 0.0f))
     {
         return 0.0f;
     }
-    return (distToLight * distToLight) / (cosAtLight * area);
+    constexpr float maxFinite = 3.402823466e38f;
+    const float scaledDistance = distToLight / sqrtf(area);
+    const float largestFiniteDistance = sqrtf(maxFinite * cosAtLight);
+    if (!(scaledDistance > 0.0f))
+    {
+        return 0.0f;
+    }
+    return scaledDistance <= largestFiniteDistance ? scaledDistance * scaledDistance / cosAtLight : maxFinite;
 }
 
 /// Emissive area of a sphere of radius r. Named because the estimator, the pdf

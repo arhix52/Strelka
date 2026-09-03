@@ -381,16 +381,16 @@ TEST_CASE("rank-deficient analytic transforms have no area-light support")
     const AnalyticLightSample ellipsoid = sampleAnalyticEllipsoid(zero, x, y, zero, 0.0f, 0.25f);
     CHECK(ellipsoid.areaPdfDenominator == 0.0f);
     CHECK(analyticEllipsoidSurfaceArea(x, y, zero) == 0.0f);
-    CHECK_FALSE(intersectAnalyticEllipsoid(make_float3(0.0f, 0.0f, 2.0f), make_float3(0.0f, 0.0f, -1.0f), 0.0f,
-                                           10.0f, zero, x, y, zero)
+    CHECK_FALSE(intersectAnalyticEllipsoid(
+                    make_float3(0.0f, 0.0f, 2.0f), make_float3(0.0f, 0.0f, -1.0f), 0.0f, 10.0f, zero, x, y, zero)
                     .hit);
 
     // Scene packing marks a singular disc's inverse-transpose normal invalid;
     // the sampler and intersection must not retain positive area behind it.
     const AnalyticLightSample disc = sampleAnalyticDisc(zero, x, y, zero, 0.3f, 0.7f);
     CHECK(disc.areaPdfDenominator == 0.0f);
-    CHECK_FALSE(intersectAnalyticDisc(make_float3(0.0f, 0.0f, 2.0f), make_float3(0.0f, 0.0f, -1.0f), 0.0f, 10.0f,
-                                      zero, x, y, zero)
+    CHECK_FALSE(intersectAnalyticDisc(
+                    make_float3(0.0f, 0.0f, 2.0f), make_float3(0.0f, 0.0f, -1.0f), 0.0f, 10.0f, zero, x, y, zero)
                     .hit);
 
     // Mutation: the old cofactor-only checks see positive 2D area in both
@@ -441,12 +441,46 @@ TEST_CASE("an ellipsoid whose float area measure overflows has no support")
     CHECK(std::isfinite(sample.normal.x));
     CHECK(std::isfinite(sample.normal.y));
     CHECK(std::isfinite(sample.normal.z));
-    CHECK_FALSE(intersectAnalyticEllipsoid(make_float3(0.0f, 0.0f, 2e20f), make_float3(0.0f, 0.0f, -1.0f),
-                                           0.0f, 4e20f, center, axisX, axisY, axisZ)
+    CHECK_FALSE(intersectAnalyticEllipsoid(make_float3(0.0f, 0.0f, 2e20f), make_float3(0.0f, 0.0f, -1.0f), 0.0f, 4e20f,
+                                           center, axisX, axisY, axisZ)
                     .hit);
 
     // Mutation: exact-zero determinant classification accepts infinity.
     CHECK(fabsf(dot(axisX, cross(axisY, axisZ))) > 0.0f);
+}
+
+TEST_CASE("large representable analytic lights keep exact sampler and intersection support")
+{
+    const float scale = 1e13f;
+    const float3 center = make_float3(0.0f);
+    const float3 axisX = make_float3(scale, 0.0f, 0.0f);
+    const float3 axisY = make_float3(0.0f, scale, 0.0f);
+    const float3 axisZ = make_float3(0.0f, 0.0f, scale);
+    REQUIRE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
+
+    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.5f, 0.0f);
+    REQUIRE(sample.areaPdfDenominator > 0.0f);
+    CHECK(std::isfinite(sample.areaPdfDenominator));
+    CHECK(sample.normal == make_float3(1.0f, 0.0f, 0.0f));
+
+    const float3 origin = make_float3(2.0f * scale, 0.0f, 0.0f);
+    const AnalyticLightIntersection hit = intersectAnalyticEllipsoid(
+        origin, make_float3(-1.0f, 0.0f, 0.0f), 0.0f, 4.0f * scale, center, axisX, axisY, axisZ);
+    REQUIRE(hit.hit);
+    CHECK(hit.distance == doctest::Approx(scale).epsilon(2e-6));
+    CHECK(hit.normal == make_float3(1.0f, 0.0f, 0.0f));
+
+    float3 evaluatedNormal;
+    const float denominator =
+        analyticEllipsoidAreaPdfDenominator(center, axisX, axisY, axisZ, sample.point, evaluatedNormal);
+    CHECK(denominator == doctest::Approx(sample.areaPdfDenominator).epsilon(2e-6));
+    CHECK(evaluatedNormal == sample.normal);
+    CHECK(analyticEllipsoidSurfaceArea(axisX, axisY, axisZ) > 0.0f);
+    CHECK(std::isfinite(analyticEllipsoidSurfaceArea(axisX, axisY, axisZ)));
+
+    // Mutation: determinant-first validation rejects this representable area
+    // measure before either the sampler or homogeneous intersection runs.
+    CHECK_FALSE(std::isfinite(dot(axisX, cross(axisY, axisZ))));
 }
 
 TEST_CASE("affine surface normals use the inverse transpose")
@@ -479,6 +513,11 @@ TEST_CASE("a back-facing or degenerate area sample has no density")
     CHECK(areaLightSolidAnglePdf(2.0f, 0.0f, 1.0f) == 0.0f);
     CHECK(areaLightSolidAnglePdf(2.0f, 0.5f, 0.0f) == 0.0f);
     CHECK(misWeightBalance(1.0f, areaLightSolidAnglePdf(2.0f, -0.5f, 1.0f)) == doctest::Approx(1.0f));
+
+    const float largeFinite = areaLightSolidAnglePdf(1e30f, 0.5f, 1e30f);
+    CHECK(std::isfinite(largeFinite));
+    CHECK(largeFinite == doctest::Approx(2e30f).epsilon(2e-6));
+    CHECK(areaLightSolidAnglePdf(1e20f, 0.5f, 1e-30f) == std::numeric_limits<float>::max());
 }
 
 // ---------------------------------------------------------------------------
@@ -596,13 +635,10 @@ TEST_CASE("finite distant support is exactly its spherical cap")
     const float boundary = std::cos(halfAngle);
     const float expected = 1.0f / (4.0f * float(M_PI_F) * std::pow(std::sin(0.5f * halfAngle), 2.0f));
 
-    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, 1.0f) ==
-          doctest::Approx(expected).epsilon(1e-5));
-    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, boundary) ==
-          doctest::Approx(expected).epsilon(1e-5));
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, 1.0f) == doctest::Approx(expected).epsilon(1e-5));
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, boundary) == doctest::Approx(expected).epsilon(1e-5));
     CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, boundary - 1e-4f) == 0.0f);
-    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DOME, 0.0f, -1.0f) ==
-          doctest::Approx(1.0f / (4.0f * float(M_PI_F))));
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DOME, 0.0f, -1.0f) == doctest::Approx(1.0f / (4.0f * float(M_PI_F))));
 
     Rng rng(0xCA9u);
     double integral = 0.0;
@@ -610,8 +646,7 @@ TEST_CASE("finite distant support is exactly its spherical cap")
     for (int i = 0; i < samples; ++i)
     {
         const float3 w = uniformSphereDirection(rng.next(), rng.next());
-        integral += 4.0 * double(M_PI_F) *
-                    double(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, w.z));
+        integral += 4.0 * double(M_PI_F) * double(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, w.z));
     }
     CHECK(integral / double(samples) == doctest::Approx(1.0).epsilon(0.02));
 }

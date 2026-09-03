@@ -98,7 +98,7 @@ static float calcLightArea(device const UniformLight& l, const float3 hitPoint)
     {
         float3 e1 = float3(l.points[1]) - float3(l.points[0]);
         float3 e2 = float3(l.points[3]) - float3(l.points[0]);
-        area = length(cross(e1, e2));
+        area = finiteVectorLength(cross(e1, e2));
         break;
     }
     case LIGHT_TYPE_DISC:

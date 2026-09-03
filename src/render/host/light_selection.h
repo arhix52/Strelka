@@ -130,14 +130,16 @@ inline double analyticLightPower(const Scene::Light& light)
     case LIGHT_TYPE_RECT: {
         const glm::float3 e1 = glm::float3(light.points[1] - light.points[0]);
         const glm::float3 e2 = glm::float3(light.points[3] - light.points[0]);
-        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0)
+        const float deviceArea = finiteVectorLength(glm::cross(e1, e2));
+        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 && deviceArea > 0.0f)
         {
-            measure = pi * glm::length(glm::cross(e1, e2));
+            measure = pi * double(deviceArea);
         }
         break;
     }
     case LIGHT_TYPE_DISC:
-        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0)
+        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 &&
+            analyticDiscArea(glm::float3(light.points[2]), glm::float3(light.points[3])) > 0.0f)
         {
             measure = pi * pi * glm::length(glm::cross(glm::dvec3(light.points[2]), glm::dvec3(light.points[3])));
         }

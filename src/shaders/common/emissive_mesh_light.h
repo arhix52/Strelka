@@ -76,7 +76,7 @@ DEVICE_FUNC EmissiveVisibilitySegment emissiveVisibilitySegment(float3 sourceOff
     segment.maxDistance = 0.0f;
     segment.valid = false;
     const float3 delta = targetOffset - sourceOffset;
-    const float distance = length(delta);
+    const float distance = finiteVectorLength(delta);
     if (distance > 0.0f)
     {
         segment.direction = delta / distance;
@@ -97,7 +97,7 @@ sampleEmissiveTriangle(float3 p0, float3 p1, float3 p2, float2 uv0, float2 uv1, 
     sample.valid = false;
 
     const float3 crossEdges = cross(p1 - p0, p2 - p0);
-    const float twiceArea = length(crossEdges);
+    const float twiceArea = finiteVectorLength(crossEdges);
     if (!(twiceArea > 0.0f))
     {
         return sample;
@@ -108,7 +108,7 @@ sampleEmissiveTriangle(float3 p0, float3 p1, float3 p2, float2 uv0, float2 uv1, 
     const float b1 = root * (1.0f - fminf(fmaxf(u1, 0.0f), 1.0f));
     const float b2 = root - b1;
     sample.point = b0 * p0 + b1 * p1 + b2 * p2;
-    sample.normal = crossEdges / twiceArea;
+    sample.normal = normalizeFiniteVectorOrZero(crossEdges);
     sample.uv = b0 * uv0 + b1 * uv1 + b2 * uv2;
     constexpr float maxFinite = 3.402823466e38f;
     sample.areaPdf = fminf(2.0f / twiceArea, maxFinite);
@@ -119,20 +119,25 @@ sampleEmissiveTriangle(float3 p0, float3 p1, float3 p2, float2 uv0, float2 uv1, 
 DEVICE_FUNC float emissiveTriangleSolidAnglePdf(float areaPdf, float3 shadingPoint, float3 pointOnLight, float3 lightNormal)
 {
     const float3 offset = pointOnLight - shadingPoint;
-    const float distanceSquared = dot(offset, offset);
-    if (!(areaPdf > 0.0f) || !(distanceSquared > 0.0f))
+    const float distance = finiteVectorLength(offset);
+    const float3 direction = normalizeFiniteVectorOrZero(offset);
+    if (!(areaPdf > 0.0f) || !(distance > 0.0f) || !(dot(direction, direction) > 0.0f))
     {
         return 0.0f;
     }
-    const float inverseDistance = 1.0f / sqrtf(distanceSquared);
-    const float cosine = fabsf(dot(lightNormal, -offset * inverseDistance));
+    const float cosine = fabsf(dot(lightNormal, -direction));
     if (!(cosine > 0.0f))
     {
         return 0.0f;
     }
     constexpr float maxFinite = 3.402823466e38f;
-    const float pdf = areaPdf * (distanceSquared / cosine);
-    return pdf > 0.0f ? fminf(pdf, maxFinite) : 0.0f;
+    const float scaledDistance = distance * sqrtf(areaPdf);
+    const float largestFiniteDistance = sqrtf(maxFinite * cosine);
+    if (!(scaledDistance > 0.0f))
+    {
+        return 0.0f;
+    }
+    return scaledDistance <= largestFiniteDistance ? scaledDistance * scaledDistance / cosine : maxFinite;
 }
 
 DEVICE_FUNC float emissiveMeshMarginalSolidAnglePdf(float localSelectionPdf,

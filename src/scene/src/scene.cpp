@@ -33,22 +33,13 @@ glm::float3 transformedAreaLightNormal(const glm::float4x4& transform)
     const glm::float3 axisX(transform * glm::float4(1.0f, 0.0f, 0.0f, 0.0f));
     const glm::float3 axisY(transform * glm::float4(0.0f, 1.0f, 0.0f, 0.0f));
     const glm::float3 axisZ(transform * glm::float4(0.0f, 0.0f, 1.0f, 0.0f));
-    const glm::float3 cofactor = glm::cross(axisX, axisY);
-    const float determinant = glm::dot(axisX, glm::cross(axisY, axisZ));
-    const float cofactorLengthSquared = glm::length2(cofactor);
-    return cofactorLengthSquared > 0.0f && std::isfinite(cofactorLengthSquared) && std::isfinite(determinant) &&
-                   determinant != 0.0f ?
-               -glm::sign(determinant) * glm::normalize(cofactor) :
-               glm::float3(0.0f);
+    return transformAffineNormal(axisX, axisY, axisZ, glm::float3(0.0f, 0.0f, -1.0f));
 }
 
 glm::float3 transformedDirectionOrZero(const glm::float4x4& transform, const glm::float3& direction)
 {
     const glm::float3 transformed(transform * glm::float4(direction, 0.0f));
-    const double lengthSquared = glm::dot(glm::dvec3(transformed), glm::dvec3(transformed));
-    return lengthSquared > 0.0 && std::isfinite(lengthSquared) ?
-               transformed / static_cast<float>(std::sqrt(lengthSquared)) :
-               glm::float3(0.0f);
+    return normalizeFiniteVectorOrZero(transformed);
 }
 
 } // namespace

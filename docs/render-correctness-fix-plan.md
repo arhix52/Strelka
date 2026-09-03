@@ -22,6 +22,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | L. Edited light proxy topology | `SPHERE -> RECT` keeps the sphere mesh while sampling a packed rectangle; infinite→area has no proxy | Type-edit topology/create regression and stale-mesh mutation | Replace/create the editor/intersection proxy and rebuild geometry; mask infinite proxies in both backends | FIXED | Source compiled | Source; external CUDA validation required | pending | FIXED |
 | M. Metal affine surface normals | Metal applies `A*n`; OptiX applies inverse-transpose, changing sidedness under non-uniform transforms | Independent inverse-transpose/sign regression and forward-transform mutation | Shared cofactor inverse-transpose normal helper used at both Metal surface reconstruction sites | Oracle FIXED | Shader compiled | Existing OptiX behavior | pending | FIXED |
 | N. Runtime light topology rebuild | Geometry bit was ignored; Metal TLAS retained captured masks and both backends reused missing/stale BLAS after type edits | Repeated type-edit/cache regression plus backend rebuild source/compile validation | Cache unit proxies and route Geometry changes through buffer, BLAS, TLAS, and SBT rebuilds | FIXED | Source compiled; execution pending reviewer | Source; external CUDA validation required | pending | FIXED |
+| O. Scale-safe analytic and mesh area measures | Finite `1e13` ellipsoid determinant and finite `1e38` triangle length overflow intermediate float products | Large ellipsoid/disc/triangle sample-intersection-PDF regressions and determinant/naive-length mutations | Scale vectors before normalization, solve analytic intersections homogeneously, and bound area-to-solid-angle arithmetic | FIXED | Shader compiled; shared math source | Shared source; external CUDA validation required | pending | FIXED |
 
 ## Per-finding probability records
 
@@ -572,3 +573,26 @@ is out of scope unless it blocks validation.
   production Metal code/shaders compile, and the full audit passes 797/797 tests with 68,680,023 assertions. Actual
   MTLDevice environment execution remains clean; the edit path is source/compile validated. OptiX remains externally
   compile/runtime `UNVERIFIED`. Status: FIXED.
+
+## Adversarial correction O: scale-safe analytic and mesh area measures
+
+- Random variable/measure: analytic object-sphere or object-disc sample and emissive-triangle barycentrics induce
+  world-area density `dA`, then direction at the receiver has density in `domega`. Light identity remains a discrete
+  outer PMF.
+- Support/PDF: every finite surface whose world-area Jacobian and final float density are representable retains
+  support. `p_omega = distance^2 / (cos(theta_light) J_A)` for analytic samples and
+  `p_omega = p_A distance^2 / cos(theta_light)` for triangles. Selection PMFs and delta classification are unchanged.
+- Reproducer/mutation: a uniform ellipsoid at scale `1e13` has finite `4 pi J_A` but its raw float determinant
+  overflows; a triangle with orthogonal `1e19` edges has finite cross product and positive area density but
+  `length(cross)` squares it to infinity. The old determinant and naive-length expressions are retained as failing
+  mutations.
+- Implementation: shared CPU/Metal/OptiX helpers normalize with a component scale, analytic disc/ellipsoid
+  intersections solve scaled equations for the same smooth surfaces sampled by NEE, and area-to-solid-angle
+  conversions avoid forming an overflowing square. Host selection rejects only records whose final device area
+  measure is unrepresentable.
+- MIS strategies: selected-light NEE and BSDF-hit evaluation continue to use the identical analytic intersection,
+  light normal, area Jacobian, and complete marginal outer PMF. No mesh proxy or additional strategy is introduced.
+- Validation: focused large-scale regressions pass 32/32 assertions; Debug and Release CTest pass 4/4, targeted
+  ASan+UBSan is clean, production Metal shaders compile, and the full audit passes 800/800 tests with 68,680,047
+  assertions. The actual Apple M4 Pro audit passes 262,144 samples in fast and safe math with zero measure
+  mismatches. OptiX shares the same source but remains externally compile/runtime `UNVERIFIED`. Status: FIXED.

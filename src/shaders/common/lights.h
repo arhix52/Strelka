@@ -142,7 +142,7 @@ static __inline__ __device__ float calcLightArea(const UniformLight& l, const fl
     {
         float3 e1 = make_float3(l.points[1]) - make_float3(l.points[0]);
         float3 e2 = make_float3(l.points[3]) - make_float3(l.points[0]);
-        area = length(cross(e1, e2));
+        area = finiteVectorLength(cross(e1, e2));
     }
     else if (l.type == LIGHT_TYPE_DISC)
     {
