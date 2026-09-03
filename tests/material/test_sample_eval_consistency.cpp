@@ -180,6 +180,179 @@ bool is_negative(float3 v)
     return v.x < 0.0f || v.y < 0.0f || v.z < 0.0f;
 }
 
+struct Double3
+{
+    double x;
+    double y;
+    double z;
+};
+
+Double3 to_double3(float3 v)
+{
+    return { static_cast<double>(v.x), static_cast<double>(v.y), static_cast<double>(v.z) };
+}
+
+Double3 operator+(Double3 a, Double3 b)
+{
+    return { a.x + b.x, a.y + b.y, a.z + b.z };
+}
+
+Double3 operator/(Double3 v, double s)
+{
+    return { v.x / s, v.y / s, v.z / s };
+}
+
+Double3 operator-(Double3 v)
+{
+    return { -v.x, -v.y, -v.z };
+}
+
+double dot_double(Double3 a, Double3 b)
+{
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+Double3 normalize_double(Double3 v)
+{
+    const double lengthSquared = dot_double(v, v);
+    if (!(lengthSquared > 0.0))
+    {
+        return { 0.0, 0.0, 1.0 };
+    }
+    return v / std::sqrt(lengthSquared);
+}
+
+double luminance_double(float3 c)
+{
+    return 0.2126 * static_cast<double>(c.x) + 0.7152 * static_cast<double>(c.y) + 0.0722 * static_cast<double>(c.z);
+}
+
+double fresnel_dielectric_double(double cosThetaI, double eta)
+{
+    if (cosThetaI < 0.0)
+    {
+        eta = 1.0 / eta;
+        cosThetaI = -cosThetaI;
+    }
+    const double sinThetaTSquared = eta * eta * (1.0 - cosThetaI * cosThetaI);
+    if (sinThetaTSquared > 1.0)
+    {
+        return 1.0;
+    }
+    const double cosThetaT = std::sqrt(std::max(0.0, 1.0 - sinThetaTSquared));
+    const double rs = (eta * cosThetaI - cosThetaT) / (eta * cosThetaI + cosThetaT);
+    const double rp = (cosThetaI - eta * cosThetaT) / (cosThetaI + eta * cosThetaT);
+    return 0.5 * (rs * rs + rp * rp);
+}
+
+// Independent double-precision oracle for the lower-hemisphere density of the
+// solid, isotropic mixed-transmission case below. It deliberately does not call
+// any production PDF helper: this is the sum of a cosine BTDF proposal and a
+// Walter/Heitz GGX refraction proposal, including both lobe-selection PMFs.
+double mixed_transmission_pdf_oracle(const SurfaceInteraction& si, float3 wiFloat)
+{
+    const Double3 n = to_double3(si.shading_normal);
+    const Double3 v = to_double3(si.wo);
+    const Double3 wi = to_double3(wiFloat);
+    const double nDotV = dot_double(n, v);
+    const double nDotL = dot_double(n, wi);
+    if (!(nDotV > 0.0) || !(nDotL < 0.0) || si.thin_walled)
+    {
+        return 0.0;
+    }
+
+    const double metallic = static_cast<double>(si.metallic);
+    const double transmission = static_cast<double>(si.transmission);
+    const double diffuseTransmission = std::clamp(static_cast<double>(si.diffuse_transmission), 0.0, 1.0);
+    const double dielectricWeight = 1.0 - metallic;
+    const double diffuseBase = dielectricWeight * (1.0 - transmission);
+    const double diffuseWeight = diffuseBase * (1.0 - diffuseTransmission) * luminance_double(si.albedo);
+    const double diffuseTransmissionWeight =
+        diffuseBase * diffuseTransmission * luminance_double(si.diffuse_transmission_color);
+    const double f0 = std::pow((static_cast<double>(si.ior) - 1.0) / (static_cast<double>(si.ior) + 1.0), 2.0);
+    const double specularLuminance =
+        (1.0 - metallic) * f0 * luminance_double(si.specular_color) + metallic * luminance_double(si.albedo);
+    const double specularWeight = std::max(specularLuminance, 0.04) * (1.0 - transmission * dielectricWeight);
+    const double transmissionWeight = dielectricWeight * transmission;
+    const double clearcoatWeight = static_cast<double>(si.clearcoat) *
+                                   std::max(std::pow((std::max(static_cast<double>(si.clearcoat_ior), 1.0) - 1.0) /
+                                                         (std::max(static_cast<double>(si.clearcoat_ior), 1.0) + 1.0),
+                                                     2.0),
+                                            0.04) *
+                                   6.0;
+    const double total =
+        diffuseWeight + diffuseTransmissionWeight + specularWeight + transmissionWeight + clearcoatWeight;
+    if (!(total > 0.0))
+    {
+        return 0.0;
+    }
+
+    const double diffusePdf = (diffuseTransmissionWeight / total) * (-nDotL) / M_PI;
+
+    const double roughness = std::max(static_cast<double>(si.roughness), 1.0e-4);
+    const double alpha = roughness * roughness;
+    if (alpha < static_cast<double>(BSDF_DELTA_ALPHA) || !(transmissionWeight > 0.0))
+    {
+        return diffusePdf;
+    }
+
+    const double eta = static_cast<double>(si.exterior_ior) / static_cast<double>(si.ior);
+    Double3 h = normalize_double(v + wi / eta);
+    if (dot_double(n, h) < 0.0)
+    {
+        h = -h;
+    }
+    const double nDotH = dot_double(n, h);
+    const double vDotH = dot_double(v, h);
+    const double lDotH = dot_double(wi, h);
+    if (!(nDotH > 0.0) || !(vDotH > 0.0))
+    {
+        return diffusePdf;
+    }
+
+    const double alphaSquared = alpha * alpha;
+    const double ndfDenominator = nDotH * nDotH * (alphaSquared - 1.0) + 1.0;
+    const double d = alphaSquared / (M_PI * ndfDenominator * ndfDenominator);
+    const double g1 = 2.0 * nDotV / (nDotV + std::sqrt(alphaSquared + (1.0 - alphaSquared) * nDotV * nDotV));
+    const double halfVectorPdf = d * g1 * vDotH / nDotV;
+    const double jacobianDenominator = eta * vDotH + lDotH;
+    const double dHalfDWi = std::abs(lDotH) / (jacobianDenominator * jacobianDenominator);
+    const double fresnel = fresnel_dielectric_double(vDotH, eta);
+    const double refractionPdf = (transmissionWeight / total) * (1.0 - fresnel) * halfVectorPdf * dHalfDWi;
+    return diffusePdf + refractionPdf;
+}
+
+SurfaceInteraction mixed_transmission_si(float roughness = 0.35f,
+                                         float transmission = 0.5f,
+                                         float diffuseTransmission = 0.5f,
+                                         float viewTilt = 0.2914568f,
+                                         bool exiting = false,
+                                         bool thinWalled = false)
+{
+    SurfaceInteraction si = {};
+    si.geometry_normal = make_float3(0.0f, 0.0f, 1.0f);
+    si.shading_normal = si.geometry_normal;
+    si.bump_normal = si.geometry_normal;
+    si.tangent = make_float3(1.0f, 0.0f, 0.0f);
+    si.bitangent = make_float3(0.0f, 1.0f, 0.0f);
+    const float viewZ = std::cos(viewTilt) * (exiting ? -1.0f : 1.0f);
+    si.wo = normalize(make_float3(std::sin(viewTilt), 0.0f, viewZ));
+    si.albedo = make_float3(0.7f, 0.8f, 0.6f);
+    si.diffuse_transmission_color = make_float3(0.4f, 0.8f, 0.3f);
+    si.roughness = roughness;
+    si.ior = 1.5f;
+    si.exterior_ior = 1.0f;
+    si.specular = 0.5f;
+    si.specular_color = make_float3(1.0f);
+    si.transmission = transmission;
+    si.diffuse_transmission = diffuseTransmission;
+    si.clearcoat_ior = 1.5f;
+    si.material_type = MATERIAL_TYPE_STANDARD_PBR;
+    si.front_face = !exiting;
+    si.thin_walled = thinWalled;
+    return si;
+}
+
 // Draw `samples` directions from bsdf_sample() and cross-check each one against
 // bsdf_eval() / bsdf_pdf(). `skipTransmission` drops refraction events (see the
 // dielectric test case for why they are excluded rather than asserted on).
@@ -450,6 +623,148 @@ TEST_CASE("bsdf_sample and bsdf_eval describe the same BRDF (transmissive standa
             }
         }
     }
+}
+
+TEST_CASE("mixed diffuse and specular transmission returns the full marginal PDF")
+{
+    const SurfaceInteraction si = mixed_transmission_si();
+    FixedSeedSampler rng(0xd1ffu);
+    int compared = 0;
+    int evalMismatches = 0;
+    int oracleMismatches = 0;
+
+    for (int i = 0; i < 50000; ++i)
+    {
+        const BsdfSampleResult sample = bsdf_sample(si, rng.next4());
+        if (sample.event_type == BSDF_EVENT_ABSORB || (sample.event_type & BSDF_EVENT_SPECULAR) != 0 ||
+            dot(si.shading_normal, sample.wi) >= 0.0f)
+        {
+            continue;
+        }
+
+        const BsdfEvalResult evaluated = bsdf_eval(si, sample.wi);
+        const double oraclePdf = mixed_transmission_pdf_oracle(si, sample.wi);
+        const double evalScale =
+            std::max({ static_cast<double>(sample.pdf), static_cast<double>(evaluated.pdf), 1.0e-8 });
+        const double oracleScale = std::max({ static_cast<double>(sample.pdf), oraclePdf, 1.0e-8 });
+        ++compared;
+        if (std::abs(static_cast<double>(sample.pdf) - static_cast<double>(evaluated.pdf)) > 1.0e-3 * evalScale)
+        {
+            ++evalMismatches;
+        }
+        if (std::abs(static_cast<double>(sample.pdf) - oraclePdf) > 1.0e-3 * oracleScale)
+        {
+            ++oracleMismatches;
+        }
+    }
+
+    CAPTURE(compared);
+    CAPTURE(evalMismatches);
+    CAPTURE(oracleMismatches);
+    CHECK(compared > 10000);
+    CHECK(evalMismatches == 0);
+    CHECK(oracleMismatches == 0);
+}
+
+TEST_CASE("splitting an identical continuous lobe leaves a mixture estimator unchanged")
+{
+    const double otherWeight = 0.3;
+    const double splitWeightA = 0.2;
+    const double splitWeightB = 0.5;
+    const double otherPdf = 0.11;
+    const double duplicatedPdf = 0.73;
+    const double unsplitPdf = otherWeight * otherPdf + (splitWeightA + splitWeightB) * duplicatedPdf;
+    const double splitPdf = otherWeight * otherPdf + splitWeightA * duplicatedPdf + splitWeightB * duplicatedPdf;
+    const double numerator = 0.42;
+
+    CHECK(splitPdf == doctest::Approx(unsplitPdf).epsilon(1.0e-15));
+    CHECK(numerator / splitPdf == doctest::Approx(numerator / unsplitPdf).epsilon(1.0e-15));
+}
+
+TEST_CASE("mixed transmission is finite and marginal across domains and roughness limits")
+{
+    FixedSeedSampler rng(0x7f4a7c15u);
+    int continuous = 0;
+    int delta = 0;
+    int diffuseTransmission = 0;
+    int interfaceTransmission = 0;
+
+    for (const bool exiting : { false, true })
+    {
+        for (const bool thinWalled : { false, true })
+        {
+            for (const float roughness : { 0.0f, 0.031f, 0.032f, 0.35f, 1.0f })
+            {
+                for (const float transmission : { 0.0f, 0.5f, 1.0f })
+                {
+                    for (const float diffuseWeight : { 0.0f, 0.5f, 1.0f })
+                    {
+                        for (const float viewTilt : { 0.0f, 0.8f, 1.5f })
+                        {
+                            const SurfaceInteraction si = mixed_transmission_si(
+                                roughness, transmission, diffuseWeight, viewTilt, exiting, thinWalled);
+                            for (int i = 0; i < 300; ++i)
+                            {
+                                const BsdfSampleResult sample = bsdf_sample(si, rng.next4());
+                                CAPTURE(exiting);
+                                CAPTURE(thinWalled);
+                                CAPTURE(roughness);
+                                CAPTURE(transmission);
+                                CAPTURE(diffuseWeight);
+                                CAPTURE(viewTilt);
+                                CAPTURE(i);
+
+                                CHECK(std::isfinite(sample.pdf));
+                                CHECK(sample.pdf >= 0.0f);
+                                CHECK(is_finite(sample.bsdf_over_pdf));
+                                CHECK_FALSE(is_negative(sample.bsdf_over_pdf));
+                                if (sample.event_type == BSDF_EVENT_ABSORB)
+                                {
+                                    continue;
+                                }
+                                CHECK(is_finite(sample.wi));
+                                if ((sample.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION) != 0u)
+                                {
+                                    ++diffuseTransmission;
+                                }
+                                if ((sample.event_type &
+                                     (BSDF_EVENT_GLOSSY_TRANSMISSION | BSDF_EVENT_SPECULAR_TRANSMISSION)) != 0u)
+                                {
+                                    ++interfaceTransmission;
+                                }
+                                if ((sample.event_type & BSDF_EVENT_SPECULAR) != 0u)
+                                {
+                                    ++delta;
+                                    // A delta sample carries probability mass. eval() may still
+                                    // see an overlapping diffuse density at that exact direction,
+                                    // but the two measures must not be compared or summed.
+                                    CHECK(sample.pdf > 0.0f);
+                                    continue;
+                                }
+
+                                ++continuous;
+                                const BsdfEvalResult evaluated = bsdf_eval(si, sample.wi);
+                                CHECK(evaluated.pdf > 0.0f);
+                                CHECK(std::isfinite(evaluated.pdf));
+                                CHECK(evaluated.pdf == doctest::Approx(sample.pdf).epsilon(kPdfTolerance));
+                                const float absoluteCosine = std::fabs(dot(si.shading_normal, sample.wi));
+                                const float3 fromSample = sample.bsdf_over_pdf * sample.pdf;
+                                const float3 fromEval = evaluated.bsdf * absoluteCosine;
+                                const double scale =
+                                    std::max({ max_component(fromSample), max_component(fromEval), 1.0e-6 });
+                                CHECK(static_cast<double>(length(fromSample - fromEval)) / scale < kValueTolerance);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    CHECK(continuous > 1000);
+    CHECK(delta > 1000);
+    CHECK(diffuseTransmission > 1000);
+    CHECK(interfaceTransmission > 1000);
 }
 
 // ---------------------------------------------------------------------------
