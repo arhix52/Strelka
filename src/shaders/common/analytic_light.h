@@ -47,6 +47,21 @@ DEVICE_FUNC float3 affineSphereCofactor(float3 axisX, float3 axisY, float3 axisZ
            objectNormal.z * cross(axisX, axisY);
 }
 
+// Unit inverse-transpose normal for an affine map whose columns are the three
+// axes. The determinant sign matters for mirrored transforms; its magnitude
+// cancels during normalization.
+DEVICE_FUNC float3 transformAffineNormal(float3 axisX, float3 axisY, float3 axisZ, float3 objectNormal)
+{
+    const float determinant = dot(axisX, cross(axisY, axisZ));
+    const float3 cofactorNormal = affineSphereCofactor(axisX, axisY, axisZ, objectNormal);
+    const float lengthSquared = dot(cofactorNormal, cofactorNormal);
+    if (!(fabsf(determinant) > 0.0f) || !(lengthSquared > 0.0f) || !(lengthSquared <= 3.402823466e38f))
+    {
+        return make_float3(0.0f);
+    }
+    return copysignf(1.0f, determinant) * cofactorNormal / sqrtf(lengthSquared);
+}
+
 DEVICE_FUNC bool analyticAffineTransformIsNonsingular(float3 axisX, float3 axisY, float3 axisZ)
 {
     const float determinantMagnitude = fabsf(dot(axisX, cross(axisY, axisZ)));

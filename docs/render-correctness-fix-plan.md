@@ -20,6 +20,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | J. Unrepresentable analytic area transforms | Finite axes near `1e20` overflow the float cofactor/determinant and produce NaN normal/PDF | Extreme-scale sampler/intersection/host-power test and exact-zero mutation | Reject affine area records whose device determinant is non-finite, consistently in sampling, intersection, and selection | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
 | K. Invalid transformed light frames | Singular transforms normalize local emission axes to NaN while retaining positive selection power | Scene packing and host-power regressions for spot/projector/distant/IES point | Pack a finite zero sentinel and give invalid directional records zero outer PMF | FIXED | Shader compiled; packed ABI | Same packed ABI; external CUDA validation required | pending | FIXED |
 | L. Edited light proxy topology | `SPHERE -> RECT` keeps the sphere mesh while sampling a packed rectangle; infinite→area has no proxy | Type-edit topology/create regression and stale-mesh mutation | Replace/create the editor/intersection proxy and rebuild geometry; mask infinite proxies in both backends | FIXED | Source compiled | Source; external CUDA validation required | pending | FIXED |
+| M. Metal affine surface normals | Metal applies `A*n`; OptiX applies inverse-transpose, changing sidedness under non-uniform transforms | Independent inverse-transpose/sign regression and forward-transform mutation | Shared cofactor inverse-transpose normal helper used at both Metal surface reconstruction sites | Oracle FIXED | Shader compiled | Existing OptiX behavior | pending | FIXED |
 
 ## Per-finding probability records
 
@@ -535,3 +536,21 @@ is out of scope unless it blocks validation.
   shaders compile, and the full audit passes 796/796 tests with 68,680,016 assertions. Actual MTLDevice environment
   execution remains clean; OptiX source is updated but CUDA compile/runtime remains externally `UNVERIFIED`.
   Status: FIXED.
+
+## Adversarial correction M: Metal affine surface normals
+
+- Random variable/measure: the BSDF/light connection direction remains continuous in `domega`; receiver support and
+  projected cosine are defined by the world shading/geometric normals. A tangent is a vector (`A*t`), while a normal
+  is a covector (`transpose(inverse(A))*n`).
+- Support/PDF: Metal and OptiX now construct the same receiver frame under non-uniform and mirrored transforms.
+  Light/BSDF selection PMFs, conditional PDFs, delta classification, and MIS enumeration are unchanged.
+- Reproducer/mutation: under `A=diag(2,1,1)`, object `n=normalize(1,1,0)` must become
+  `normalize(0.5,1,0)`. The old forward normal is `normalize(2,1,0)`; for `wi=normalize(-0.6,0.8,0)` their support
+  signs are opposite.
+- Implementation: shared cofactor math returns the normalized inverse-transpose including determinant orientation;
+  both Metal triangle reconstruction sites use it for shading and geometric normals, retaining forward transforms
+  for tangents and edges. OptiX already uses its inverse-transpose intrinsic.
+- Validation: the independent value/sign/mirror test and old-forward mutation pass 6/6 assertions. Debug and Release
+  CTest pass 4/4, targeted ASan+UBSan is clean, production Metal shaders compile, and the full audit passes 797/797
+  tests with 68,680,022 assertions. Actual MTLDevice environment execution remains clean but does not exercise mesh
+  normals; OptiX runtime remains externally `UNVERIFIED`. Status: FIXED.

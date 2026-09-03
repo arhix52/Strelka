@@ -449,6 +449,27 @@ TEST_CASE("an ellipsoid whose float area measure overflows has no support")
     CHECK(fabsf(dot(axisX, cross(axisY, axisZ))) > 0.0f);
 }
 
+TEST_CASE("affine surface normals use the inverse transpose")
+{
+    const float3 axisX = make_float3(2.0f, 0.0f, 0.0f);
+    const float3 axisY = make_float3(0.0f, 1.0f, 0.0f);
+    const float3 axisZ = make_float3(0.0f, 0.0f, 1.0f);
+    const float3 objectNormal = normalize(make_float3(1.0f, 1.0f, 0.0f));
+    const float3 worldNormal = transformAffineNormal(axisX, axisY, axisZ, objectNormal);
+    const float3 expected = normalize(make_float3(0.5f, 1.0f, 0.0f));
+    CHECK(worldNormal.x == doctest::Approx(expected.x).epsilon(1e-6));
+    CHECK(worldNormal.y == doctest::Approx(expected.y).epsilon(1e-6));
+    CHECK(worldNormal.z == doctest::Approx(expected.z).epsilon(1e-6));
+
+    const float3 direction = normalize(make_float3(-0.6f, 0.8f, 0.0f));
+    CHECK(dot(worldNormal, direction) > 0.0f);
+    const float3 oldForwardNormal = normalize(objectNormal.x * axisX + objectNormal.y * axisY);
+    CHECK(dot(oldForwardNormal, direction) < 0.0f);
+
+    const float3 mirrored = transformAffineNormal(-axisX, axisY, axisZ, make_float3(0.0f, 0.0f, 1.0f));
+    CHECK(mirrored == make_float3(0.0f, 0.0f, 1.0f));
+}
+
 TEST_CASE("a back-facing or degenerate area sample has no density")
 {
     // Zero rather than a negative or infinite pdf: the callers read this as "the

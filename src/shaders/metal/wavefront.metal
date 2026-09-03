@@ -2154,9 +2154,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId, interpolateMotion,
                              motionTime, bary, objectNormal, objectTangent, uv, vertexColor, tangentSign,
                              objectGeomNormal, objEdge1, objEdge2, uvArea2);
-        shadingNormal = normalize(transformDirection(normalize(objectNormal), objectToWorld));
+        shadingNormal = transformNormal(normalize(objectNormal), objectToWorld);
         shadingTangent = normalize(transformDirection(normalize(objectTangent), objectToWorld));
-        shadingGeomNormal = normalize(transformDirection(objectGeomNormal, objectToWorld));
+        shadingGeomNormal = transformNormal(objectGeomNormal, objectToWorld);
     }
 
     const float3 worldNormal = shadingNormal;
@@ -3344,9 +3344,9 @@ static void guideImpl(uint gid,
             fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, hit.primitiveId, interpolateMotion,
                                  motionTime, hit.barycentrics, objectNormal, objectTangent, uv, vertexColor,
                                  tangentSign, objectGeomNormal, edge1, edge2, uvArea2);
-            shadingNormal = normalize(transformDirection(normalize(objectNormal), objectToWorld));
+            shadingNormal = transformNormal(normalize(objectNormal), objectToWorld);
             shadingTangent = normalize(transformDirection(normalize(objectTangent), objectToWorld));
-            shadingGeomNormal = normalize(transformDirection(objectGeomNormal, objectToWorld));
+            shadingGeomNormal = transformNormal(objectGeomNormal, objectToWorld);
         }
 
         const float3 binormal = cross(shadingNormal, shadingTangent) * tangentSign;

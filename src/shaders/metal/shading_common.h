@@ -80,6 +80,11 @@ __attribute__((always_inline)) float3 transformDirection(float3 p, float4x4 tran
     return (transform * float4(p.x, p.y, p.z, 0.0f)).xyz;
 }
 
+__attribute__((always_inline)) float3 transformNormal(float3 n, float4x4 transform)
+{
+    return transformAffineNormal(transform[0].xyz, transform[1].xyz, transform[2].xyz, n);
+}
+
 //  valid range of coordinates [-1; 1]
 //
 // z is 10 bits wide, not 12: bit 30 carries the tangent handedness sign that
