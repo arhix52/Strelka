@@ -172,6 +172,52 @@ TEST_CASE("environment solid-angle jitter excludes the coordinate singularities"
     CHECK(envUVToDir(make_float2(0.125f, 0.0f), 0.0f).y == 1.0f);
 }
 
+TEST_CASE("finite environment jitter remains inside the selected texel")
+{
+    constexpr uint32_t width = 4u;
+    constexpr uint32_t selectedX = 1u;
+    const float oldU = (static_cast<float>(selectedX) + envOpenUnitInterval(0x1.fffffep-1f)) /
+                       static_cast<float>(width);
+    CHECK(static_cast<uint32_t>(oldU * static_cast<float>(width)) == 2u);
+
+    const float u = envSampleTexelU(static_cast<int>(selectedX), static_cast<int>(width), 0x1.fffffep-1f);
+    CHECK(static_cast<uint32_t>(u * static_cast<float>(width)) == selectedX);
+
+    for (const int w : { 1, 4, 16, 1024 })
+    {
+        for (const int h : { 1, 4, 8 })
+        {
+            const int xStep = std::max(w / 16, 1);
+            for (int x = 0; x < w; x += xStep)
+            {
+                for (int y = 0; y < h; ++y)
+                {
+                    for (const float rotation : { 0.0f, 0.63f, -2.1f })
+                    {
+                        for (const float xi : { 0.0f, 0x1.fffffep-1f })
+                        {
+                            const float3 direction = envSampleTexelDirection(x, y, w, h, xi, xi, rotation);
+                            const float2 evaluated = dirToEnvUV(direction, rotation);
+                            const int evaluatedX = std::clamp(static_cast<int>(evaluated.x * static_cast<float>(w)),
+                                                              0, w - 1);
+                            const int evaluatedY = std::clamp(static_cast<int>(evaluated.y * static_cast<float>(h)),
+                                                              0, h - 1);
+                            CAPTURE(w);
+                            CAPTURE(h);
+                            CAPTURE(x);
+                            CAPTURE(y);
+                            CAPTURE(rotation);
+                            CAPTURE(xi);
+                            CHECK(evaluatedX == x);
+                            CHECK(evaluatedY == y);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST_CASE("a zero-luminance texel is never drawn")
 {
     const int w = 16;

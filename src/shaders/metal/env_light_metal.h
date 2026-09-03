@@ -34,10 +34,8 @@ static inline float3 sampleEnvMap(const float4 xi,
     const uint32_t x = draw.texel % w;
     const uint32_t y = draw.texel / w;
 
-    const float u = ((float)x + envOpenUnitInterval(xi.z)) / (float)w;
-    const float v = envSampleSolidAngleV((int)y, (int)h, xi.w);
-
-    const float3 dir = envUVToDir(float2(u, v), envMapRotation);
+    const float3 dir =
+        envSampleTexelDirection((int)x, (int)y, (int)w, (int)h, xi.z, xi.w, envMapRotation);
 
     pdf = aliasTable[draw.texel].solidAnglePdf;
 

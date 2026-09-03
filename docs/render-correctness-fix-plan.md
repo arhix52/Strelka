@@ -363,3 +363,21 @@ is out of scope unless it blocks validation.
   production Metal shaders compile, and the full harness passes 785/785 tests with 68,674,133 assertions. The actual
   Apple M4 Pro audit passes 262,144 samples in fast and safe math with zero measure mismatches. Shared OptiX source
   uses the same mapping; CUDA compilation/execution remains externally `UNVERIFIED` on this host. Status: FIXED.
+
+## Adversarial correction C: representable texel interiors
+
+- Random variable/measure: the independent azimuth and solid-angle-row jitters remain uniform conditional variables,
+  represented on a finite lattice. Their emitted float direction must inverse-map to the same categorical texel whose
+  `P(texel)/DeltaOmega` density is returned.
+- Reproducer: for `w=4`, selected `x=1`, and the largest float below one, `float(x)+jitter` rounds to `2`, so the old
+  sample returns texel 1's PDF while `pdf(direction)` reads texel 2. At the lower endpoint, seam trigonometry can map
+  texel 0 to `u` just below one. Row inversion likewise rounds many largest jitters onto the next row.
+- Implementation: validate the representable UV and the complete direction-to-UV round trip; only a value that rounds
+  across a bin boundary falls back to that selected bin's interior uniform-cosine midpoint. This preserves support
+  and prevents a finite-probability PDF mismatch without adding an epsilon support region.
+- Regression: both jitter endpoints, three rotations, widths `1/4/16/1024`, and heights `1/4/8` produce 5,774 exact
+  selected/evaluated-bin assertions; the old arithmetic boundary is retained as a mutation.
+- Validation: Debug and Release CTest pass 4/4, targeted ASan+UBSan is clean, production Metal shaders compile, and
+  the full harness passes 786/786 tests with 68,679,907 assertions. The actual Apple M4 Pro audit passes 262,144
+  samples in fast and safe math with zero measure mismatches. OptiX shares the mapping but remains externally
+  compile/runtime `UNVERIFIED`. Status: FIXED.

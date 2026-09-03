@@ -53,14 +53,22 @@ DEVICE_FUNC float envOpenUnitInterval(float xi)
     return fminf(fmaxf(centred, 0x1p-24f), 0x1.fffffep-1f);
 }
 
-/// Sample v within lat-long row `y` uniformly in solid angle.
-///
-/// Uniform v would make theta uniform and induce a 1/sin(theta) directional
-/// density. Interpolating cos(theta) instead makes the conditional density
-/// constant over the row's exact solid angle.
-DEVICE_FUNC float envSampleSolidAngleV(int y, int height, float xi)
+/// A representable normalized coordinate whose lookup remains in texel `x`.
+/// The midpoint fallback is used only when adding the largest lattice value to
+/// an integer rounds onto the next bin boundary.
+DEVICE_FUNC float envSampleTexelU(int x, int width, float xi)
 {
-    const float t = envOpenUnitInterval(xi);
+    const float w = (float)width;
+    float u = ((float)x + envOpenUnitInterval(xi)) / w;
+    if ((int)(u * w) != x)
+    {
+        u = ((float)x + 0.5f) / w;
+    }
+    return u;
+}
+
+DEVICE_FUNC float envSolidAngleRowV(int y, int height, float t)
+{
     const float theta0 = M_PI_F * (float)y / (float)height;
     const float theta1 = M_PI_F * (float)(y + 1) / (float)height;
     const float approximateCosTheta = cosf(theta0) + (cosf(theta1) - cosf(theta0)) * t;
@@ -86,6 +94,16 @@ DEVICE_FUNC float envSampleSolidAngleV(int y, int height, float xi)
     return theta / M_PI_F;
 }
 
+/// Sample v within lat-long row `y` uniformly in solid angle.
+///
+/// Uniform v would make theta uniform and induce a 1/sin(theta) directional
+/// density. Interpolating cos(theta) instead makes the conditional density
+/// constant over the row's exact solid angle.
+DEVICE_FUNC float envSampleSolidAngleV(int y, int height, float xi)
+{
+    return envSolidAngleRowV(y, height, envOpenUnitInterval(xi));
+}
+
 /// Equirectangular uv back to a world-space direction.
 DEVICE_FUNC float3 envUVToDir(float2 uv, float rotation)
 {
@@ -102,6 +120,30 @@ DEVICE_FUNC float3 envUVToDir(float2 uv, float rotation)
     const float cosR = cosf(rotation);
     const float sinR = sinf(rotation);
     return make_float3(cosR * x + sinR * z, y, -sinR * x + cosR * z);
+}
+
+/// Sample a direction whose finite-precision inverse mapping still belongs to
+/// the selected texel. Trigonometric roundoff at the azimuth seam can move an
+/// endpoint-sized jitter into an adjacent bin even when the UV arithmetic did
+/// not; an interior solid-angle midpoint is the exact conditional fallback.
+DEVICE_FUNC float3 envSampleTexelDirection(int x, int y, int width, int height, float xiU, float xiV, float rotation)
+{
+    float u = envSampleTexelU(x, width, xiU);
+    float v = envSampleSolidAngleV(y, height, xiV);
+    float3 direction = envUVToDir(make_float2(u, v), rotation);
+    float2 evaluated = dirToEnvUV(direction, rotation);
+    int evaluatedX = (int)(evaluated.x * (float)width);
+    int evaluatedY = (int)(evaluated.y * (float)height);
+    evaluatedX = evaluatedX < 0 ? 0 : (evaluatedX >= width ? width - 1 : evaluatedX);
+    evaluatedY = evaluatedY < 0 ? 0 : (evaluatedY >= height ? height - 1 : evaluatedY);
+
+    if (evaluatedX != x || evaluatedY != y)
+    {
+        u = ((float)x + 0.5f) / (float)width;
+        v = envSolidAngleRowV(y, height, 0.5f);
+        direction = envUVToDir(make_float2(u, v), rotation);
+    }
+    return direction;
 }
 
 /// The luminance the sampling distribution is built from.
