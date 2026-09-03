@@ -9,8 +9,8 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | finding | reproducer | test | implementation | CPU | Metal | OptiX | commit | status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1. Standard PBR mixture PDF | 28,923/36,794 legacy audit mismatches; independent regression 28,882 eval and 28,866 oracle mismatches / 36,818 | `test_sample_eval_consistency`: marginal double oracle, split-lobe invariance, 1.3M edge/domain assertions; audit guard | Shared `eval()` finishes every non-delta sample; exit-side diffuse/interface proposals are conditionally renormalized; delta mass unchanged | FIXED | Shared header compiled | Shared header; backend build pending | `f845f2c` | PARTIAL |
-| 2. Distant/dome support and MIS completeness | Dome packed as type `-1`; sharp distant reports continuous PDF 0 but is not delta; analytic dome one-bounce ratio `0.2988202609` | Scene/JSON packing, common support/delta oracle, cap normalization, analytic one-bounce MIS, omitted-miss mutation | Separate delta distant, finite spherical-cap, and dome measures; evaluate continuous infinite emitters on miss with the same selection PMF/support as NEE | FIXED | Shader compiled; analytic execution pending final GPU audit | Shared math/source changed; toolchain unavailable on macOS | pending | PARTIAL |
-| 3. Metal back-face NEE/MIS double counting | Pending | Pending | Make sidedness and strategy enumeration agree with the CPU oracle | OPEN | OPEN | N/A unless shared | — | OPEN |
+| 2. Distant/dome support and MIS completeness | Dome packed as type `-1`; sharp distant reports continuous PDF 0 but is not delta; analytic dome one-bounce ratio `0.2988202609` | Scene/JSON packing, common support/delta oracle, cap normalization, analytic one-bounce MIS, omitted-miss mutation | Separate delta distant, finite spherical-cap, and dome measures; evaluate continuous infinite emitters on miss with the same selection PMF/support as NEE | FIXED | Shader compiled; analytic execution pending final GPU audit | Shared math/source changed; toolchain unavailable on macOS | `ad4c3d9` | PARTIAL |
+| 3. Metal back-face NEE/MIS double counting | Back-face direction accepted by NEE but unpaired bounce gives MIS shares `0.4 + 1.0 = 1.4` | Exact support-equivalence sweep, front/back/flipped/transmission/fibre cases, 0.4/0.6 balance-share mutation | Evaluate proposal and bounce pairing in one shaded frame and make their continuous supports identical | Oracle FIXED | Shader compiled; path execution pending final GPU audit | Shared predicate fixed; toolchain unavailable on macOS | pending | PARTIAL |
 | 4. Non-uniform transforms for analytic lights | Pending | Pending | Sample intersected proxy geometry and apply the world-area Jacobian and inverse-transpose normals | OPEN | OPEN | OPEN | — | OPEN |
 | 5. Robust large-distribution support | Pending | Pending | Select a GPU-friendly PMF representation that preserves every finite positive bin | OPEN | OPEN | OPEN | — | OPEN |
 | 6. Emissive mesh NEE | Pending | Pending | Add selection, transformed-area sampling, solid-angle conversion, and BSDF-hit MIS | OPEN | OPEN | OPEN | — | OPEN |
@@ -96,3 +96,37 @@ is out of scope unless it blocks validation.
   0/262,144 measure mismatches; it does not execute the new analytic-infinite miss path. The OptiX source uses the
   same common support/PDF functions but its toolchain is unavailable on this macOS host, so cross-backend execution
   remains for finding 7.
+
+## Finding 3: Metal back-face NEE/MIS double counting
+
+- Random variable: strategy `S` (selected-light NEE or BSDF continuation) and the continuous direction `W` leaving
+  one surface vertex; a successful BSDF endpoint additionally identifies the same emitter selected by NEE.
+- Measure: `S` and light identity use discrete probability mass; both non-delta directional proposals use density in
+  solid angle `domega` in the BSDF's shaded frame.
+- Support: for an ordinary surface, both strategies share exactly the hemisphere accepted by
+  `neeProposesDirection(throughFibre, shadedFrontFace, signed n dot W)`. Fibres share both sides. Reflection and
+  transmission outside that common set are BSDF-only. Mirroring a geometry/shading frame changes the signs but not
+  this equivalence.
+- Conditional and marginal PDF: `p_L(W)=P(light group) P(light identity|group) p(W|light)` and `p_B(W)` is the full
+  marginal BSDF PDF from finding 1. Each endpoint uses balance/power shares `p_L^k/(p_L^k+p_B^k)` and
+  `p_B^k/(p_L^k+p_B^k)` only where both supports overlap; otherwise the sole strategy has weight one.
+- Selection PMF: unchanged from the light selector and already included in `LightConnection::pdf`. This finding
+  changes only whether that continuous density is a valid competitor for the sampled direction.
+- Delta classification: delta light or BSDF events remain exclusive and never enter this continuous pairing. The
+  defect is specifically a non-delta direction that Metal NEE accepted but whose later path flag denied the
+  complementary strategy.
+- MIS strategies: one selected-light NEE sample (or local-RIS survivor representing that estimator) and one BSDF
+  continuation sample. They enumerate the same path-space event only when their shaded-frame support predicates
+  agree.
+- Current-HEAD reproducer: on a raw back face with `n dot W=-0.7`, `neeProposesDirection` is true while
+  `neePairsWithBounce` is false. With `p_L=0.4`, `p_B=0.6`, the NEE balance share is `0.4` and the unweighted BSDF hit
+  contributes `1.0`, for total share `1.4`.
+- Corrected result: the old predicate fails 11 cells of the exhaustive fibre/front-face/sign sweep. The paired
+  predicate now equals the proposal predicate in every cell. The concrete back-face event returns balance shares
+  `0.4 + 0.6 = 1.0`; clearing the pairing bit as a mutation returns `1.4`. Metal now constructs one `ShadedFrame`
+  and uses it for both NEE validation and the outgoing path flag; OptiX already constructed that frame and inherits
+  the corrected common support predicate for transmissive back faces.
+- Validation: targeted pairing/frame cases passed 68/68 assertions; the full Debug audit passed 760/760 tests and
+  58,590,488 assertions; Release CTest passed 4/4; targeted ASan+UBSan and production `wavefront.metal` compilation
+  passed. The actual-MTLDevice audit still exercises only environment mapping, so renderer execution of this path is
+  deferred to the cross-backend validation finding.

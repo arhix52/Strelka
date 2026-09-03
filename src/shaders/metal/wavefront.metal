@@ -2751,6 +2751,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     const bool hasEmitter = (SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap);
     const bool smoothLobe = isOpenPBR ? openpbr_has_smooth_lobe(openpbrMat) : bsdf_has_smooth_lobe(si);
     bool didNee = neeRunsAtVertex(uniforms.estimatorMode == 0, hasEmitter, smoothLobe);
+    const ShadedFrame neeFrame =
+        shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
     if (didNee)
     {
         // RIS selects one of M candidates by unshadowed luminance with MIS folded in; visibility follows in shadow.
@@ -2778,7 +2780,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 uniforms, uniforms.numLights, lights, crng, si, envAliasTable, envMapTexture, iesProfiles);
             // A fibre has no back side to reject: see scattersThroughFibre().
             const bool isNextEventValid =
-                (isFibre || (dot(conn.toLight, si.shading_normal) > 0.0f) == si.front_face) && conn.pdf > 0.0f;
+                neeProposesDirection(isFibre, neeFrame.frontFace,
+                                     neeFrame.normalSign * dot(conn.toLight, si.shading_normal)) &&
+                conn.pdf > 0.0f;
             if (!isNextEventValid || !conn.needsRay)
             {
                 continue;
@@ -3034,10 +3038,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // whose fireflies feed back through cache resampling.
     float3 nextThroughput = SPEC_SHARC_UPDATE ? segmentThroughput : throughput * segmentThroughput;
 
-    // NEE only reaches directions above the shading normal of a front face, so a
-    // hit anywhere else must not be weighted against it. On a fibre it reaches all
-    // of them, and withholding the weight there would count the light twice.
-    didNee = didNee && (isFibre || (si.front_face && dot(si.shading_normal, nextDir) > 0.0f));
+    // Record exactly the support NEE offered in the same shaded frame. A raw
+    // back face may be an opaque two-sided surface whose BSDF flipped its frame,
+    // or a transmissive exit that did not; shadedFrame distinguishes them.
+    didNee = neePairsWithBounce(didNee, isFibre, neeFrame.frontFace,
+                                neeFrame.normalSign * dot(si.shading_normal, nextDir));
 
     radianceOut[tid] += float4(radiance, 0.0f);
 

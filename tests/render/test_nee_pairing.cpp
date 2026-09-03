@@ -2,6 +2,7 @@
 
 #include <light_pdf.h>
 #include <nee_pairing.h>
+#include <strelka/material/shading_frame.h>
 
 #include <cmath>
 
@@ -80,13 +81,12 @@ TEST_CASE("a fibre bounce pairs whichever side of the strand it leaves by")
     CHECK(neePairsWithBounce(true, true, false, -0.9f));
 }
 
-TEST_CASE("the bounce rule never claims a pairing the proposal rule would refuse")
+TEST_CASE("the bounce and proposal rules have identical directional support")
 {
-    // The property the whole file exists for. Whenever a bounce is weighted down
-    // against next-event estimation, next-event estimation had to be willing to
-    // propose that same direction -- otherwise the deduction has no counterpart.
-    // The converse is allowed to fail, and does, on a back face: see the note on
-    // neePairsWithBounce().
+    // The property the whole file exists for. A direction either has both
+    // strategies, whose heuristic shares sum to one, or exactly one strategy,
+    // whose weight is one. A one-way implication still permits the old positive
+    // bias: NEE took 0.4 while an incorrectly unpaired BSDF hit took 1.0.
     for (const bool throughFibre : { true, false })
     {
         for (const bool frontFace : { true, false })
@@ -94,12 +94,61 @@ TEST_CASE("the bounce rule never claims a pairing the proposal rule would refuse
             for (int i = -10; i <= 10; ++i)
             {
                 const float nDot = (float)i * 0.1f;
-                if (neePairsWithBounce(true, throughFibre, frontFace, nDot))
-                {
-                    CHECK(neeProposesDirection(throughFibre, frontFace, nDot));
-                }
+                CHECK(neePairsWithBounce(true, throughFibre, frontFace, nDot) ==
+                      neeProposesDirection(throughFibre, frontFace, nDot));
             }
         }
+    }
+}
+
+TEST_CASE("back-face complementary MIS shares sum to one")
+{
+    constexpr float lightPdf = 0.4f;
+    constexpr float bsdfPdf = 0.6f;
+    constexpr bool frontFace = false;
+    constexpr float nDotDirection = -0.7f;
+
+    REQUIRE(neeProposesDirection(false, frontFace, nDotDirection));
+    REQUIRE(neePairsWithBounce(true, false, frontFace, nDotDirection));
+    const float lightShare = computeMisWeight(lightPdf, bsdfPdf, 0u);
+    const float bounceShare = computeMisWeight(bsdfPdf, lightPdf, 0u);
+    CHECK(lightShare == doctest::Approx(0.4f));
+    CHECK(bounceShare == doctest::Approx(0.6f));
+    CHECK(lightShare + bounceShare == doctest::Approx(1.0f));
+
+    // Mutation: clearing the pairing flag gives the BSDF strategy weight one
+    // and recreates the audit's 1.4 total.
+    CHECK(lightShare + 1.0f == doctest::Approx(1.4f));
+}
+
+TEST_CASE("raw, flipped, mirrored, and transmissive frames preserve pairing")
+{
+    struct Case
+    {
+        bool frontFace;
+        float nDotView;
+        float transmission;
+        float diffuseTransmission;
+        float rawNDotDirection;
+    };
+    const Case cases[] = {
+        { true, 0.8f, 0.0f, 0.0f, 0.7f }, // ordinary front
+        { false, -0.8f, 0.0f, 0.0f, -0.7f }, // opaque back, frame flips
+        { false, -0.8f, 1.0f, 0.0f, -0.7f }, // dielectric exit, frame stays raw
+        { false, -0.8f, 0.0f, 1.0f, -0.7f }, // diffuse transmission
+        { true, 0.8f, 0.0f, 0.0f, 0.7f }, // mirrored transform after winding correction
+    };
+
+    for (const Case& c : cases)
+    {
+        const ShadedFrame frame =
+            shadedFrame(c.frontFace, c.nDotView, c.transmission, c.diffuseTransmission);
+        const float signedNDotDirection = frame.normalSign * c.rawNDotDirection;
+        CAPTURE(c.frontFace);
+        CAPTURE(c.transmission);
+        CAPTURE(c.diffuseTransmission);
+        CHECK(neePairsWithBounce(true, false, frame.frontFace, signedNDotDirection) ==
+              neeProposesDirection(false, frame.frontFace, signedNDotDirection));
     }
 }
 

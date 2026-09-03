@@ -49,18 +49,13 @@ DEVICE_FUNC bool neeProposesDirection(bool throughFibre, bool frontFace, float n
 /// dir)`, may be weighted against next-event estimation when it lands on a
 /// light. `didNee` is whether this vertex made an estimate at all.
 ///
-/// Note the asymmetry against neeProposesDirection() on a *back* face: this is
-/// the expression Metal's `wavefrontShade` applies, and it withholds the weight
-/// from every back-face bounce rather than only from the ones that cross the
-/// normal. A path leaving a back face is a path on its way out of a dielectric,
-/// where the connection the proposal above would allow -- back into the medium
-/// it is inside -- is blocked by the far wall of that same medium in every
-/// measured scene, so the share it would claim is one it does not deliver
-/// either. Keeping the two backends on one rule is worth more here than the
-/// difference, which no ladder row can see.
+/// This support must be exactly neeProposesDirection(), gated only by whether
+/// NEE ran. A one-way implication is insufficient: Metal used to accept a
+/// back-face NEE direction but withhold the complementary weight when the BSDF
+/// generated the same direction. The resulting balance shares were 0.4 + 1.0.
 DEVICE_FUNC bool neePairsWithBounce(bool didNee, bool throughFibre, bool frontFace, float nDotDir)
 {
-    return didNee && (throughFibre || (frontFace && nDotDir > 0.0f));
+    return didNee && neeProposesDirection(throughFibre, frontFace, nDotDir);
 }
 
 /// Whether next-event estimation runs at this vertex at all.
