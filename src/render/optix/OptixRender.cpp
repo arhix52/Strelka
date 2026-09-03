@@ -3057,12 +3057,24 @@ void OptiXRender::render(Buffer* output)
     const bool sceneOnDevice = !mScenePrep.isBuilding();
 
     const ChangeBits changes = sceneOnDevice ? mScene->peekChanges() : ChangeBits::None;
+    const bool geometryChanged = any(changes & ChangeBits::Geometry);
+    if (geometryChanged)
+    {
+        createVertexBuffer();
+        createIndexBuffer();
+        createBottomLevelAccelerationStructures();
+        createTopLevelAccelerationStructure();
+        createSbt();
+    }
     if (any(changes & ChangeBits::Lights))
     {
         createLightBuffer();
-        createTopLevelAccelerationStructure();
+        if (!geometryChanged)
+        {
+            createTopLevelAccelerationStructure();
+        }
     }
-    if (any(changes & ChangeBits::Transforms))
+    if (!geometryChanged && any(changes & ChangeBits::Transforms))
     {
         // Instance transforms changed outside the animation path
         createTopLevelAccelerationStructure();
@@ -3096,7 +3108,7 @@ void OptiXRender::render(Buffer* output)
         mLoadProgress = progress;
         createTopLevelAccelerationStructure();
     }
-    if (any(changes & (ChangeBits::Lights | ChangeBits::Transforms | ChangeBits::Materials)))
+    if (any(changes & (ChangeBits::Lights | ChangeBits::Transforms | ChangeBits::Materials | ChangeBits::Geometry)))
     {
         mScene->consumeChanges();
     }

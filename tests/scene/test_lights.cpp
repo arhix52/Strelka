@@ -390,6 +390,14 @@ TEST_CASE("changing a light type replaces or creates the matching proxy topology
     REQUIRE(createdInstanceId != kInvalidIndex);
     CHECK(infiniteScene.getMeshes()[infiniteScene.getInstances()[createdInstanceId].mMeshId].mCount == 6u);
 
+    const size_t proxyMeshCount = infiniteScene.getMeshes().size();
+    for (int i = 0; i < 100; ++i)
+    {
+        desc.width += 0.01f;
+        infiniteScene.setLight(distantId, desc);
+    }
+    CHECK(infiniteScene.getMeshes().size() == proxyMeshCount);
+
     // Mutation: updating only the transform leaves the original sphere mesh.
     CHECK(sphereMeshId != rectMeshId);
 }

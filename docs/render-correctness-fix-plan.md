@@ -21,6 +21,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | K. Invalid transformed light frames | Singular transforms normalize local emission axes to NaN while retaining positive selection power | Scene packing and host-power regressions for spot/projector/distant/IES point | Pack a finite zero sentinel and give invalid directional records zero outer PMF | FIXED | Shader compiled; packed ABI | Same packed ABI; external CUDA validation required | pending | FIXED |
 | L. Edited light proxy topology | `SPHERE -> RECT` keeps the sphere mesh while sampling a packed rectangle; infinite→area has no proxy | Type-edit topology/create regression and stale-mesh mutation | Replace/create the editor/intersection proxy and rebuild geometry; mask infinite proxies in both backends | FIXED | Source compiled | Source; external CUDA validation required | pending | FIXED |
 | M. Metal affine surface normals | Metal applies `A*n`; OptiX applies inverse-transpose, changing sidedness under non-uniform transforms | Independent inverse-transpose/sign regression and forward-transform mutation | Shared cofactor inverse-transpose normal helper used at both Metal surface reconstruction sites | Oracle FIXED | Shader compiled | Existing OptiX behavior | pending | FIXED |
+| N. Runtime light topology rebuild | Geometry bit was ignored; Metal TLAS retained captured masks and both backends reused missing/stale BLAS after type edits | Repeated type-edit/cache regression plus backend rebuild source/compile validation | Cache unit proxies and route Geometry changes through buffer, BLAS, TLAS, and SBT rebuilds | FIXED | Source compiled; execution pending reviewer | Source; external CUDA validation required | pending | FIXED |
 
 ## Per-finding probability records
 
@@ -554,3 +555,20 @@ is out of scope unless it blocks validation.
   CTest pass 4/4, targeted ASan+UBSan is clean, production Metal shaders compile, and the full audit passes 797/797
   tests with 68,680,022 assertions. Actual MTLDevice environment execution remains clean but does not exercise mesh
   normals; OptiX runtime remains externally `UNVERIFIED`. Status: FIXED.
+
+## Adversarial correction N: runtime light topology rebuild
+
+- Random variable/measure: unchanged from correction L. This closes the runtime state transition so the discrete
+  light identity's newly selected geometry is actually the geometry uploaded and intersected by each backend.
+- Support/PDF: a geometry/topology edit rebuilds GPU vertex/index storage plus BLAS/TLAS/SBT as required; Metal no
+  longer reuses the old emitted-instance mask. No selection or conditional density changes.
+- Reproducer/mutation: `ChangeBits::Geometry` was set but ignored. Metal `rebuildTLAS()` retained captured `asIndex`
+  and mask, while OptiX resolved against the old GAS list. A first infinite→rect edit also failed to cache its newly
+  created shared proxy and repeated edits grew the mesh array.
+- Implementation: proxy IDs are cached when first created. Metal handles Geometry with a full geometry/AS rebuild;
+  OptiX recreates vertex/index buffers, BLAS, TLAS, and SBT. Transform-only edits keep the cheaper existing path.
+- Validation: 100 repeated edits leave the proxy mesh count unchanged; both topology transitions use the expected
+  mesh and focused tests pass 9/9 assertions. Debug and Release CTest pass 4/4, targeted ASan+UBSan is clean,
+  production Metal code/shaders compile, and the full audit passes 797/797 tests with 68,680,023 assertions. Actual
+  MTLDevice environment execution remains clean; the edit path is source/compile validated. OptiX remains externally
+  compile/runtime `UNVERIFIED`. Status: FIXED.

@@ -872,18 +872,30 @@ void Scene::setLight(const uint32_t lightId, const UniformLightDesc& desc)
     uint32_t desiredMeshId = kInvalidIndex;
     if (desc.type == LIGHT_TYPE_RECT)
     {
-        desiredMeshId = createRectLightMesh();
+        if (mRectLightMeshId == kInvalidIndex)
+        {
+            mRectLightMeshId = createRectLightMesh();
+        }
+        desiredMeshId = mRectLightMeshId;
         scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.width, desc.height, 1.0f));
     }
     else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPOT || desc.type == LIGHT_TYPE_PROJECTOR)
     {
-        desiredMeshId = createDiscLightMesh();
+        if (mDiskLightMeshId == kInvalidIndex)
+        {
+            mDiskLightMeshId = createDiscLightMesh();
+        }
+        desiredMeshId = mDiskLightMeshId;
         const float radius = desc.type == LIGHT_TYPE_DISC ? desc.radius : (desc.radius > 1e-4f ? desc.radius : 0.05f);
         scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(radius));
     }
     else if (desc.type == LIGHT_TYPE_SPHERE || desc.type == LIGHT_TYPE_POINT)
     {
-        desiredMeshId = createSphereLightMesh();
+        if (mSphereLightMeshId == kInvalidIndex)
+        {
+            mSphereLightMeshId = createSphereLightMesh();
+        }
+        desiredMeshId = mSphereLightMeshId;
         const float radius = desc.type == LIGHT_TYPE_SPHERE ? desc.radius : (desc.radius > 1e-4f ? desc.radius : 0.05f);
         scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(radius));
     }

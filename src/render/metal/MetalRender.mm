@@ -2993,13 +2993,26 @@ void MetalRender::handleSceneChanges()
     bool needReset = false;
     bool needSharcReset = false;
     const bool responsiveSharc = getSettings()->getAs<bool>("render/pt/sharcMetalResponsive");
+    const bool geometryChanged = any(changes & ChangeBits::Geometry);
     if (any(changes & ChangeBits::Lights))
     {
         uploadLightBuffer();
         needReset = true;
         needSharcReset = !responsiveSharc;
     }
-    if (any(changes & ChangeBits::Transforms))
+    if (geometryChanged)
+    {
+        // A light type edit can point an instance at a different proxy mesh or
+        // add the first finite-light instance. Rebuild buffers and every BLAS/
+        // TLAS descriptor so no stale topology or captured visibility mask is
+        // reused by rebuildTLAS(). The editor retains host geometry precisely
+        // for mutations such as this.
+        mGeometry.buildBuffers(mScene);
+        rebuildAccelerationStructures();
+        needReset = true;
+        needSharcReset = true;
+    }
+    else if (any(changes & ChangeBits::Transforms))
     {
         if (!mAccel.blasList().empty())
         {
