@@ -44,7 +44,7 @@ static __forceinline__ __device__ float3 sampleEnvMap(const float4& xi,
     const uint32_t x = draw.texel % w;
     const uint32_t y = draw.texel / w;
 
-    const float u = ((float)x + xi.z) / (float)w;
+    const float u = ((float)x + envOpenUnitInterval(xi.z)) / (float)w;
     const float v = envSampleSolidAngleV((int)y, (int)h, xi.w);
 
     const float3 dir = envUVToDir(make_float2(u, v), envMapRotation);

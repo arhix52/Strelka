@@ -44,15 +44,23 @@ DEVICE_FUNC float2 dirToEnvUV(float3 dir, float rotation)
     return make_float2((phi + M_PI_F) / (2.0f * M_PI_F), theta / M_PI_F);
 }
 
+/// Move the renderer's 23-bit [0,1) random lattice to cell centres. This keeps
+/// finite-probability samples away from UV bin boundaries and, in particular,
+/// away from the lat-long coordinate singularities at the two poles.
+DEVICE_FUNC float envOpenUnitInterval(float xi)
+{
+    const float centred = xi + 0x1p-24f;
+    return fminf(fmaxf(centred, 0x1p-24f), 0x1.fffffep-1f);
+}
+
 /// Sample v within lat-long row `y` uniformly in solid angle.
 ///
 /// Uniform v would make theta uniform and induce a 1/sin(theta) directional
 /// density. Interpolating cos(theta) instead makes the conditional density
-/// constant over the row's exact solid angle. The largest-float clamp keeps a
-/// defensive xi==1 input on the selected side of the row boundary.
+/// constant over the row's exact solid angle.
 DEVICE_FUNC float envSampleSolidAngleV(int y, int height, float xi)
 {
-    const float t = fminf(fmaxf(xi, 0.0f), 0x1.fffffep-1f);
+    const float t = envOpenUnitInterval(xi);
     const float theta0 = M_PI_F * (float)y / (float)height;
     const float theta1 = M_PI_F * (float)(y + 1) / (float)height;
     const float approximateCosTheta = cosf(theta0) + (cosf(theta1) - cosf(theta0)) * t;

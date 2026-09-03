@@ -157,6 +157,21 @@ TEST_CASE("environment alias thresholds match the finite GPU random lattice")
     CHECK(representedConditionalMass == doctest::Approx(threshold).epsilon(1e-7));
 }
 
+TEST_CASE("environment solid-angle jitter excludes the coordinate singularities")
+{
+    constexpr int height = 8;
+    const float north = envSampleSolidAngleV(0, height, 0.0f);
+    const float south = envSampleSolidAngleV(height - 1, height, 0x1.fffffep-1f);
+
+    CHECK(north > 0.0f);
+    CHECK(south < 1.0f);
+
+    // Mutation: the old closed-interval mapping collapses every first-row
+    // azimuth onto one pole direction while returning the selected texel's
+    // potentially different PDF.
+    CHECK(envUVToDir(make_float2(0.125f, 0.0f), 0.0f).y == 1.0f);
+}
+
 TEST_CASE("a zero-luminance texel is never drawn")
 {
     const int w = 16;

@@ -345,3 +345,21 @@ is out of scope unless it blocks validation.
   tests with 68,674,130 assertions. The actual Apple M4 Pro environment kernel passes 262,144 samples with zero
   measure mismatches. OptiX uses the same dimension/specification but remains externally compile/runtime
   `UNVERIFIED` on this host.
+
+## Adversarial correction B: lat-long pole atoms
+
+- Random variable and measure: the selected texel is a discrete mass; its two conditional coordinates must induce
+  the continuous solid-angle density `P(texel)/DeltaOmega`. The finite 23-bit jitter lattice therefore represents
+  equal-probability cells by their interior midpoints rather than by a closed endpoint.
+- Support/PDF: the north and south poles have zero continuous measure and no synthetic atom. Moving the lattice to
+  `(k+1/2)/2^23` preserves every conditional mass while keeping sampled directions in the selected texel interior;
+  selection PMFs, delta classification, and environment-vs-BSDF MIS remain unchanged.
+- Reproducer/mutation: `envSampleSolidAngleV(0, H, 0)` previously returned exactly `v=0`; all azimuth texels in that
+  row collapsed to the same direction but returned different per-texel PDFs. The retained closed-endpoint mutation
+  still maps different `u` values to the same north pole.
+- Implementation: shared CPU/Metal/OptiX mapping centres both within-texel jitter dimensions on their finite random
+  lattice before applying uniform azimuth and uniform-cosine row inversion.
+- Validation: the regression passes 3/3 assertions; Debug and Release CTest pass 4/4, targeted ASan+UBSan is clean,
+  production Metal shaders compile, and the full harness passes 785/785 tests with 68,674,133 assertions. The actual
+  Apple M4 Pro audit passes 262,144 samples in fast and safe math with zero measure mismatches. Shared OptiX source
+  uses the same mapping; CUDA compilation/execution remains externally `UNVERIFIED` on this host. Status: FIXED.
