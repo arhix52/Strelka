@@ -428,6 +428,27 @@ TEST_CASE("a very thin full-rank ellipsoid keeps sampler and intersection suppor
     CHECK_FALSE(std::isfinite(oldB * oldB - oldA * oldC));
 }
 
+TEST_CASE("an ellipsoid whose float area measure overflows has no support")
+{
+    const float3 center = make_float3(0.0f);
+    const float3 axisX = make_float3(1e20f, 0.0f, 0.0f);
+    const float3 axisY = make_float3(0.0f, 1e20f, 0.0f);
+    const float3 axisZ = make_float3(0.0f, 0.0f, 1e20f);
+
+    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
+    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.5f, 0.25f);
+    CHECK(sample.areaPdfDenominator == 0.0f);
+    CHECK(std::isfinite(sample.normal.x));
+    CHECK(std::isfinite(sample.normal.y));
+    CHECK(std::isfinite(sample.normal.z));
+    CHECK_FALSE(intersectAnalyticEllipsoid(make_float3(0.0f, 0.0f, 2e20f), make_float3(0.0f, 0.0f, -1.0f),
+                                           0.0f, 4e20f, center, axisX, axisY, axisZ)
+                    .hit);
+
+    // Mutation: exact-zero determinant classification accepts infinity.
+    CHECK(fabsf(dot(axisX, cross(axisY, axisZ))) > 0.0f);
+}
+
 TEST_CASE("a back-facing or degenerate area sample has no density")
 {
     // Zero rather than a negative or infinite pdf: the callers read this as "the

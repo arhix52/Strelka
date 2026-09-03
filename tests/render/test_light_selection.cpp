@@ -331,6 +331,11 @@ TEST_CASE("analytic light power uses transformed smooth area")
     sphere.points[3] = glm::float4(0.0f);
     CHECK(analyticLightPower(disc) == 0.0);
     CHECK(analyticLightPower(sphere) == 0.0);
+
+    sphere.points[0] = glm::float4(1e20f, 0.0f, 0.0f, 0.0f);
+    sphere.points[2] = glm::float4(0.0f, 1e20f, 0.0f, 0.0f);
+    sphere.points[3] = glm::float4(0.0f, 0.0f, 1e20f, 0.0f);
+    CHECK(analyticLightPower(sphere) == 0.0);
 }
 
 TEST_CASE("emissive mesh hierarchy preserves mesh and triangle PMFs")

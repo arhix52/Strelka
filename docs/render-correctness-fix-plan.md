@@ -17,6 +17,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | 7. Cross-backend consistency | OptiX uses uniform analytic-light identity, fixed 1/2 environment/local selection, and centre-Jacobian environment rows while Metal uses power aliases and exact row solid angle | Shared hierarchy/marginal-PMF oracle, sharp-distant support, exact environment degeneracies, legacy-selector mutation, source/toolchain validation | Use one host probability specification and represented PMFs; migrate OptiX environment and analytic selection to it | FIXED | FIXED on MTLDevice | Source fixed; external CUDA validation required | `0b85cd9` | UNVERIFIED |
 | H. Ill-conditioned ellipsoid intersection | Inverse-space quadratic overflows for `diag(1,1,1e-20)` although sampler/PDF are finite | Thin full-rank sampled-point round trip and inverse-quadratic mutation | Solve the ray/ellipsoid quadratic in scaled homogeneous cofactor coordinates | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
 | I. Sheared spherical-rectangle sampling | Normalized non-orthogonal edges move solid-angle samples off the affine proxy plane | Sheared parallelogram plane/PDF checks and old-frame mutation | Select the exact uniform-area path for non-rectangular affine parallelograms | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
+| J. Unrepresentable analytic area transforms | Finite axes near `1e20` overflow the float cofactor/determinant and produce NaN normal/PDF | Extreme-scale sampler/intersection/host-power test and exact-zero mutation | Reject affine area records whose device determinant is non-finite, consistently in sampling, intersection, and selection | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
 
 ## Per-finding probability records
 
@@ -477,3 +478,21 @@ is out of scope unless it blocks validation.
   production Metal shaders compile, and the full audit passes 792/792 tests with 68,679,983 assertions. The actual
   Apple M4 Pro environment audit remains clean; OptiX shares the predicate but CUDA compile/runtime remains
   externally `UNVERIFIED`. Status: FIXED.
+
+## Adversarial correction J: unrepresentable analytic area transforms
+
+- Random variable/measure: ellipsoid identity is discrete; object-sphere area, affine world area, and the induced
+  `domega` density are continuous. A transform whose float determinant/cofactors overflow cannot represent that
+  measure in either device backend and is classified as an invalid, zero-support analytic record.
+- Support/PDF: valid finite transforms retain their existing Jacobian and MIS. Invalid transforms have zero outer
+  selection power, zero conditional sample/PDF, and no analytic intersection, so no NaN-valued event is introduced.
+- Reproducer/mutation: `A=diag(1e20,1e20,1e20)` has finite stored axes but float cofactors and determinant overflow;
+  the old exact-nonzero test accepts `Inf`, then computes `Inf/Inf` for the normal. The host's double power remained
+  positive and selected that invalid device record.
+- Implementation: shared validity now requires a positive finite float determinant; host power first applies that
+  exact device predicate before its double-precision area quadrature.
+- Validation: the old predicate is retained as an accepting mutation; corrected sample, intersection, and host
+  power all report zero without non-finite outputs. Focused tests pass 9/9 assertions; Debug and Release CTest pass
+  4/4, targeted ASan+UBSan is clean, production Metal shaders compile, and the audit passes 793/793 tests with
+  68,679,991 assertions. Actual MTLDevice environment execution remains clean; OptiX source shares the predicate but
+  CUDA compile/runtime remains externally `UNVERIFIED`. Status: FIXED.

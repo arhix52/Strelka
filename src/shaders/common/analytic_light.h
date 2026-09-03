@@ -49,7 +49,8 @@ DEVICE_FUNC float3 affineSphereCofactor(float3 axisX, float3 axisY, float3 axisZ
 
 DEVICE_FUNC bool analyticAffineTransformIsNonsingular(float3 axisX, float3 axisY, float3 axisZ)
 {
-    return fabsf(dot(axisX, cross(axisY, axisZ))) > 0.0f;
+    const float determinantMagnitude = fabsf(dot(axisX, cross(axisY, axisZ)));
+    return determinantMagnitude > 0.0f && determinantMagnitude <= 3.402823466e38f;
 }
 
 DEVICE_FUNC float3 affineSphereCoordinates(float3 axisX, float3 axisY, float3 axisZ, float3 worldOffset)

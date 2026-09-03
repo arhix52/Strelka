@@ -145,9 +145,16 @@ inline double analyticLightPower(const Scene::Light& light)
         // material_math.h names float3 as GLM (Metal/CPU) or CUDA (OptiX).
         constexpr size_t sampleCount = 256u;
         constexpr double goldenAngle = 2.39996322972865332;
-        const glm::dvec3 axisX(light.points[0]);
-        const glm::dvec3 axisY(light.points[2]);
-        const glm::dvec3 axisZ(light.points[3]);
+        const glm::float3 deviceAxisX(light.points[0]);
+        const glm::float3 deviceAxisY(light.points[2]);
+        const glm::float3 deviceAxisZ(light.points[3]);
+        if (!analyticAffineTransformIsNonsingular(deviceAxisX, deviceAxisY, deviceAxisZ))
+        {
+            break;
+        }
+        const glm::dvec3 axisX(deviceAxisX);
+        const glm::dvec3 axisY(deviceAxisY);
+        const glm::dvec3 axisZ(deviceAxisZ);
         if (!(std::abs(glm::dot(axisX, glm::cross(axisY, axisZ))) > 0.0))
         {
             break;
