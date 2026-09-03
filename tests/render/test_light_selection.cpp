@@ -56,6 +56,29 @@ TEST_CASE("uniform and sub-float positive light weights remain reachable")
     CHECK(double(extreme.entries[0].pdf) + double(extreme.entries[1].pdf) == doctest::Approx(1.0).epsilon(1e-7));
 }
 
+TEST_CASE("finite light powers normalize without overflowing their alias table")
+{
+    const double largest = std::numeric_limits<double>::max();
+    const auto table = buildLightSelectionAlias({ largest, largest, 1.0 });
+
+    REQUIRE(table.entries.size() == 3);
+    CHECK(std::isfinite(table.totalPower));
+    double sum = 0.0;
+    for (const auto& entry : table.entries)
+    {
+        CHECK(std::isfinite(entry.aliasProbability));
+        CHECK(std::isfinite(entry.pdf));
+        CHECK(entry.alias < table.entries.size());
+        CHECK(entry.pdf > 0.0f);
+        sum += entry.pdf;
+    }
+    CHECK(sum == doctest::Approx(1.0).epsilon(1e-7));
+    CHECK(table.entries[0].pdf == doctest::Approx(0.5f).epsilon(1e-6));
+    CHECK(table.entries[1].pdf == doctest::Approx(0.5f).epsilon(1e-6));
+    CHECK(table.entries[2].pdf > 0.0f);
+    CHECK(table.entries[2].pdf < 1e-6f);
+}
+
 TEST_CASE("invalid or black light powers have empty selection support")
 {
     const auto table = buildLightSelectionAlias(

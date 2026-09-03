@@ -186,15 +186,25 @@ inline LightSelectionTable buildLightSelectionAlias(const std::vector<double>& p
     LightSelectionTable table;
     table.entries.resize(powers.size());
     std::vector<double> cleanPowers(powers.size());
+    double powerScale = 0.0;
     for (size_t i = 0; i < powers.size(); ++i)
     {
         cleanPowers[i] = cleanLightPower(powers[i]);
-        table.totalPower += cleanPowers[i];
+        powerScale = std::max(powerScale, cleanPowers[i]);
     }
-    if (powers.empty() || !(table.totalPower > 0.0))
+    if (powers.empty() || !(powerScale > 0.0))
     {
         return table;
     }
+
+    double scaledTotal = 0.0;
+    for (const double power : cleanPowers)
+    {
+        scaledTotal += power / powerScale;
+    }
+    table.totalPower = powerScale > std::numeric_limits<double>::max() / scaledTotal ?
+                           std::numeric_limits<double>::max() :
+                           powerScale * scaledTotal;
 
     const size_t count = powers.size();
     // A positive input must remain a positive float PMF even after division by
@@ -215,7 +225,7 @@ inline LightSelectionTable buildLightSelectionAlias(const std::vector<double>& p
     {
         if (cleanPowers[i] > 0.0)
         {
-            probabilities[i] = std::max(cleanPowers[i] / table.totalPower, minimumProbability);
+            probabilities[i] = std::max((cleanPowers[i] / powerScale) / scaledTotal, minimumProbability);
             adjustedTotal += probabilities[i];
         }
     }
