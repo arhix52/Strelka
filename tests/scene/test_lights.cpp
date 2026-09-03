@@ -65,11 +65,11 @@ TEST_CASE("a light's GPU record has no uninitialized fields")
     Scene scene;
     const uint32_t id = scene.createLight(rectDesc());
     const Scene::Light& baked = scene.getLights()[id];
-    // A rect light leaves the normal alone; it must still be a finite number.
+    // Rect sampling uses this packed inverse-transpose normal.
     CHECK(std::isfinite(baked.normal.x));
     CHECK(std::isfinite(baked.normal.y));
     CHECK(std::isfinite(baked.normal.z));
-    CHECK(glm::length(glm::float3(baked.normal)) < 1e3f);
+    CHECK(glm::length(glm::float3(baked.normal)) == doctest::Approx(1.0f));
 }
 
 TEST_CASE("intensity and colour end up multiplied into the GPU light")
@@ -171,6 +171,30 @@ TEST_CASE("a sheared mirrored disc uses its inverse-transpose emission normal")
     CHECK(normal.x == doctest::Approx(0.0f).epsilon(1e-5));
     CHECK(normal.y == doctest::Approx(0.0f).epsilon(1e-5));
     CHECK(normal.z == doctest::Approx(-1.0f).epsilon(1e-5));
+}
+
+TEST_CASE("a rectangle mirrored through its plane keeps inverse-transpose orientation")
+{
+    Scene identityScene;
+    Scene::UniformLightDesc identity = rectDesc();
+    identity.useXform = true;
+    identity.xform = glm::mat4(1.0f);
+    const Scene::Light& ordinary = identityScene.getLights()[identityScene.createLight(identity)];
+
+    Scene mirroredScene;
+    Scene::UniformLightDesc mirrored = identity;
+    mirrored.xform = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, 1.0f, -1.0f));
+    const Scene::Light& reflected = mirroredScene.getLights()[mirroredScene.createLight(mirrored)];
+
+    CHECK(glm::vec3(ordinary.normal) == glm::vec3(0.0f, 0.0f, -1.0f));
+    CHECK(glm::vec3(reflected.normal) == glm::vec3(0.0f, 0.0f, 1.0f));
+    for (size_t i = 0; i < 4; ++i)
+    {
+        CHECK(ordinary.points[i] == reflected.points[i]);
+    }
+    // Mutation: reconstructing orientation from the coplanar points cannot
+    // distinguish these two transforms.
+    CHECK(rectNormalFromPoints(ordinary) == rectNormalFromPoints(reflected));
 }
 
 TEST_CASE("analytic light visibility is packed for manual traversal")

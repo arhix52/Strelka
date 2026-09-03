@@ -425,3 +425,18 @@ is out of scope unless it blocks validation.
   targeted ASan+UBSan is clean, production Metal shaders compile, and the full harness passes 789/789 tests with
   68,679,930 assertions. The actual Apple M4 Pro audit remains clean. OptiX shares the analytic math but remains
   externally compile/runtime `UNVERIFIED`. Status: FIXED.
+
+## Adversarial correction G: mirrored rectangle orientation
+
+- Random variable/measure: a rectangle point is sampled in world area and converted to `domega`; its one-sided
+  emitter support depends on the inverse-transpose of authored local `-Z`, including transform orientation.
+- Reproducer/mutation: identity and `diag(1,1,-1)` produce byte-identical coplanar rectangle corners, so the old
+  `-normalize(cross(edge1,edge2))` reconstruction returned `-Z` for both although the mirrored normal is `+Z`.
+- Implementation: scene packing stores the inverse-transpose/cofactor normal for rectangles and discs; both shaders
+  consume it directly. Singular records have zero selection power. Point sampling and intersected proxy geometry are
+  unchanged and remain the same transformed rectangle.
+- Validation: focused tests pass 9/9 assertions; Debug and Release CTest pass 4/4, targeted ASan+UBSan is clean,
+  production Metal shaders compile, and the full audit passes 790/790 tests with 68,679,937 assertions. The first
+  parallel Debug/audit invocation collided in pre-existing fixed-name temporary directories; the required sequential
+  rerun passed. OptiX consumes the same packed normal but remains externally compile/runtime `UNVERIFIED`.
+  Status: FIXED.

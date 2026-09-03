@@ -25,6 +25,23 @@ namespace fs = std::filesystem;
 namespace oka
 {
 
+namespace
+{
+
+glm::float3 transformedAreaLightNormal(const glm::float4x4& transform)
+{
+    const glm::float3 axisX(transform * glm::float4(1.0f, 0.0f, 0.0f, 0.0f));
+    const glm::float3 axisY(transform * glm::float4(0.0f, 1.0f, 0.0f, 0.0f));
+    const glm::float3 axisZ(transform * glm::float4(0.0f, 0.0f, 1.0f, 0.0f));
+    const glm::float3 cofactor = glm::cross(axisX, axisY);
+    const float determinant = glm::dot(axisX, glm::cross(axisY, axisZ));
+    return glm::length2(cofactor) > 0.0f && determinant != 0.0f ?
+               -glm::sign(determinant) * glm::normalize(cofactor) :
+               glm::float3(0.0f);
+}
+
+} // namespace
+
 uint32_t Scene::acquireMeshSlot(Mesh*& mesh)
 {
     uint32_t meshId = kInvalidIndex;
@@ -689,6 +706,7 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].points[1] = localTransform * glm::float4(-0.5f, 0.5f, 0.0f, 1.0f);
         mLights[lightId].points[2] = localTransform * glm::float4(-0.5f, -0.5f, 0.0f, 1.0f);
         mLights[lightId].points[3] = localTransform * glm::float4(0.5f, -0.5f, 0.0f, 1.0f);
+        mLights[lightId].normal = glm::float4(transformedAreaLightNormal(localTransform), 0.0f);
 
         mLights[lightId].type = LIGHT_TYPE_RECT;
         mLights[lightId].halfAngle = 0.0f;
@@ -708,17 +726,7 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].points[2] = localTransform * glm::float4(1.f, 0.f, 0.f, 0.f);
         mLights[lightId].points[3] = localTransform * glm::float4(0.f, 1.f, 0.f, 0.f);
 
-        // Inverse-transpose(local -Z), written without an inverse. The sign of
-        // det removes the orientation flip from a mirrored transform while the
-        // cross product supplies the cofactor and handles shear/non-uniform scale.
-        const glm::float3 axisX(mLights[lightId].points[2]);
-        const glm::float3 axisY(mLights[lightId].points[3]);
-        const glm::float3 axisZ(localTransform * glm::float4(0.f, 0.f, 1.f, 0.f));
-        const glm::float3 cofactor = glm::cross(axisX, axisY);
-        const float determinant = glm::dot(axisX, glm::cross(axisY, axisZ));
-        mLights[lightId].normal = glm::length2(cofactor) > 0.0f ?
-                                      glm::float4(-glm::sign(determinant) * glm::normalize(cofactor), 0.0f) :
-                                      glm::float4(0.0f);
+        mLights[lightId].normal = glm::float4(transformedAreaLightNormal(localTransform), 0.0f);
         mLights[lightId].type = LIGHT_TYPE_DISC;
         mLights[lightId].halfAngle = 0.0f;
         mLights[lightId].pad0 = 0.0f;

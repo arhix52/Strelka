@@ -135,9 +135,7 @@ static float3 calcLightNormal(device const UniformLight& l, thread const float3 
     switch (l.type)
     {
     case LIGHT_TYPE_RECT: {
-        float3 e1 = float3(l.points[1]) - float3(l.points[0]);
-        float3 e2 = float3(l.points[3]) - float3(l.points[0]);
-        norm = -normalize(cross(e1, e2));
+        norm = float3(l.normal);
         break;
     }
     case LIGHT_TYPE_DISC: {

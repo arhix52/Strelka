@@ -171,10 +171,7 @@ static __inline__ __device__ float3 calcLightNormal(const UniformLight& l, const
 
     if (l.type == LIGHT_TYPE_RECT)
     {
-        float3 e1 = make_float3(l.points[1]) - make_float3(l.points[0]);
-        float3 e2 = make_float3(l.points[3]) - make_float3(l.points[0]);
-
-        norm = -normalize(cross(e1, e2));
+        norm = make_float3(l.normal);
     }
     else if (l.type == LIGHT_TYPE_DISC)
     {

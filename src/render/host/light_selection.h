@@ -126,7 +126,10 @@ inline double analyticLightPower(const Scene::Light& light)
     case LIGHT_TYPE_RECT: {
         const glm::float3 e1 = glm::float3(light.points[1] - light.points[0]);
         const glm::float3 e2 = glm::float3(light.points[3] - light.points[0]);
-        measure = pi * glm::length(glm::cross(e1, e2));
+        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0)
+        {
+            measure = pi * glm::length(glm::cross(e1, e2));
+        }
         break;
     }
     case LIGHT_TYPE_DISC:

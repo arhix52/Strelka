@@ -292,6 +292,7 @@ TEST_CASE("analytic light power accounts for emitting measure")
     oka::Scene::Light rect{};
     rect.type = LIGHT_TYPE_RECT;
     rect.color = glm::float4(1.0f);
+    rect.normal = glm::float4(0.0f, 0.0f, -1.0f, 0.0f);
     rect.points[0] = glm::float4(1.0f, 0.5f, 0.0f, 1.0f);
     rect.points[1] = glm::float4(-1.0f, 0.5f, 0.0f, 1.0f);
     rect.points[3] = glm::float4(1.0f, -0.5f, 0.0f, 1.0f);
