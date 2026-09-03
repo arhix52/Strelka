@@ -24,29 +24,28 @@
 // table and the same host builder Metal uses, so the two backends now draw their
 // environment samples from one distribution rather than two.
 //
-// xi: two uniform random numbers in [0, 1). Returns a world-space direction and
+// xi: four independent uniform random numbers in [0, 1): alias bucket, alias
+// coin, u jitter and solid-angle v jitter. Returns a world-space direction and
 // writes the solid-angle pdf.
-static __forceinline__ __device__ float3 sampleEnvMap(
-    const float2& xi,
-    const EnvAliasEntry* aliasTable,
-    uint32_t envMapWidth,
-    uint32_t envMapHeight,
-    float envMapRotation,
-    float& pdf)
+static __forceinline__ __device__ float3 sampleEnvMap(const float4& xi,
+                                                      const EnvAliasEntry* aliasTable,
+                                                      uint32_t envMapWidth,
+                                                      uint32_t envMapHeight,
+                                                      float envMapRotation,
+                                                      float& pdf)
 {
     const uint32_t w = envMapWidth;
     const uint32_t h = envMapHeight;
 
     // Shared with Metal and the host: see common/env_alias_sampling.h, which
     // tests/render/test_env_alias_sampling.cpp exercises without a GPU.
-    const EnvAliasDraw draw = envAliasDraw(aliasTable, w * h, xi.x);
+    const EnvAliasDraw draw = envAliasDraw(aliasTable, w * h, xi.x, xi.y);
 
     const uint32_t x = draw.texel % w;
     const uint32_t y = draw.texel / w;
 
-    // Jitter inside the texel, on the variate the alias draw handed back.
-    const float u = ((float)x + draw.frac) / (float)w;
-    const float v = envSampleSolidAngleV((int)y, (int)h, xi.y);
+    const float u = ((float)x + xi.z) / (float)w;
+    const float v = envSampleSolidAngleV((int)y, (int)h, xi.w);
 
     const float3 dir = envUVToDir(make_float2(u, v), envMapRotation);
 

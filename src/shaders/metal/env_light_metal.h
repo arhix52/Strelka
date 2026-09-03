@@ -14,9 +14,10 @@ using namespace metal;
 //
 // The alias table avoids the serial dependent loads of a two-dimensional CDF search.
 //
-// xi: two uniform random numbers in [0, 1). Returns a world-space direction and
+// xi: four independent uniform random numbers in [0, 1): alias bucket, alias
+// coin, u jitter and solid-angle v jitter. Returns a world-space direction and
 // writes the solid-angle pdf.
-static inline float3 sampleEnvMap(const float2 xi,
+static inline float3 sampleEnvMap(const float4 xi,
                                   device const EnvAliasEntry* aliasTable,
                                   uint32_t envMapWidth,
                                   uint32_t envMapHeight,
@@ -28,14 +29,13 @@ static inline float3 sampleEnvMap(const float2 xi,
 
     // Shared with OptiX and the host: see common/env_alias_sampling.h, which
     // tests/render/test_env_alias_sampling.cpp exercises without a GPU.
-    const EnvAliasDraw draw = envAliasDraw(aliasTable, w * h, xi.x);
+    const EnvAliasDraw draw = envAliasDraw(aliasTable, w * h, xi.x, xi.y);
 
     const uint32_t x = draw.texel % w;
     const uint32_t y = draw.texel / w;
 
-    // Jitter with the alias draw's residual variate so sampled directions match the continuous density.
-    const float u = ((float)x + draw.frac) / (float)w;
-    const float v = envSampleSolidAngleV((int)y, (int)h, xi.y);
+    const float u = ((float)x + xi.z) / (float)w;
+    const float v = envSampleSolidAngleV((int)y, (int)h, xi.w);
 
     const float3 dir = envUVToDir(float2(u, v), envMapRotation);
 

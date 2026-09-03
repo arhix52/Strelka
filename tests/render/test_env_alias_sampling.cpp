@@ -103,8 +103,9 @@ TEST_CASE("envAliasDraw reproduces the distribution the table was built from")
     std::vector<int> hits(n, 0);
     for (int s = 0; s < draws; ++s)
     {
-        const float xi = ((float)s + 0.5f) / (float)draws;
-        const EnvAliasDraw d = envAliasDraw(table.data(), n, xi);
+        const float bucketUniform = ((float)s + 0.5f) / (float)draws;
+        const float aliasUniform = std::fmod(((float)s + 0.5f) * 0.61803398875f, 1.0f);
+        const EnvAliasDraw d = envAliasDraw(table.data(), n, bucketUniform, aliasUniform);
         REQUIRE(d.texel < n);
         hits[d.texel]++;
     }
@@ -132,6 +133,30 @@ TEST_CASE("envAliasDraw reproduces the distribution the table was built from")
     }
 }
 
+TEST_CASE("environment alias thresholds match the finite GPU random lattice")
+{
+    constexpr uint32_t texelCount = 1u << 20u;
+    constexpr float threshold = 0x1p-22f;
+    const EnvAliasEntry table[] = { { threshold, 1u, 0.0f }, { 1.0f, 1u, 0.0f } };
+
+    uint32_t legacyOwn = 0u;
+    for (uint32_t fraction = 0u; fraction < 8u; ++fraction)
+    {
+        legacyOwn += static_cast<float>(fraction) * 0x1p-23f < threshold ? 1u : 0u;
+    }
+    CHECK(static_cast<double>(legacyOwn) / 8.0 != doctest::Approx(threshold).epsilon(1e-7));
+
+    uint32_t own = 0u;
+    constexpr uint32_t randomValues = 1u << 23u;
+    for (uint32_t raw = 0u; raw < randomValues; ++raw)
+    {
+        const float aliasUniform = static_cast<float>(raw) * 0x1p-23f;
+        own += envAliasDraw(table, texelCount, 0.0f, aliasUniform).texel == 0u ? 1u : 0u;
+    }
+    const double representedConditionalMass = static_cast<double>(own) / static_cast<double>(randomValues);
+    CHECK(representedConditionalMass == doctest::Approx(threshold).epsilon(1e-7));
+}
+
 TEST_CASE("a zero-luminance texel is never drawn")
 {
     const int w = 16;
@@ -144,8 +169,9 @@ TEST_CASE("a zero-luminance texel is never drawn")
     const int draws = 100000;
     for (int s = 0; s < draws; ++s)
     {
-        const float xi = ((float)s + 0.5f) / (float)draws;
-        const EnvAliasDraw d = envAliasDraw(table.data(), n, xi);
+        const float bucketUniform = ((float)s + 0.5f) / (float)draws;
+        const float aliasUniform = std::fmod(((float)s + 0.5f) * 0.61803398875f, 1.0f);
+        const EnvAliasDraw d = envAliasDraw(table.data(), n, bucketUniform, aliasUniform);
         const int y = (int)(d.texel / (uint32_t)w);
         CHECK(y != h / 2);
     }
@@ -205,20 +231,22 @@ TEST_CASE("solid-angle samples and evaluated PDFs use the same texel measure")
 
         for (uint32_t sample = 0; sample < 20000u; ++sample)
         {
-            const float xi0 = uniform(rng);
-            const float xi1 = uniform(rng);
-            const EnvAliasDraw draw = envAliasDraw(table.data(), (uint32_t)table.size(), xi0);
+            const float bucketUniform = uniform(rng);
+            const float aliasUniform = uniform(rng);
+            const float jitterU = uniform(rng);
+            const float jitterV = uniform(rng);
+            const EnvAliasDraw draw = envAliasDraw(table.data(), (uint32_t)table.size(), bucketUniform, aliasUniform);
             const uint32_t x = draw.texel % (uint32_t)w;
             const uint32_t y = draw.texel / (uint32_t)w;
-            const float u = ((float)x + draw.frac) / (float)w;
-            const float v = envSampleSolidAngleV((int)y, h, xi1);
+            const float u = ((float)x + jitterU) / (float)w;
+            const float v = envSampleSolidAngleV((int)y, h, jitterV);
             const float3 direction = envUVToDir(make_float2(u, v), 0.63f);
             const float2 evaluatedUv = dirToEnvUV(direction, 0.63f);
             const int evaluatedX = std::clamp((int)(evaluatedUv.x * (float)w), 0, w - 1);
             const int evaluatedY = std::clamp((int)(evaluatedUv.y * (float)h), 0, h - 1);
             const float returnedPdf = (float)(texelLuminance(px, w, (int)x, (int)y) * (double)built.envPdfScale);
             const float evaluatedPdf = (float)(texelLuminance(px, w, evaluatedX, evaluatedY) * (double)built.envPdfScale);
-            INFO("sample=", sample, " texel=", x, ",", y, " frac=", draw.frac, " uv=", u, ",", v,
+            INFO("sample=", sample, " texel=", x, ",", y, " jitter=", jitterU, " uv=", u, ",", v,
                  " evaluated=", evaluatedX, ",", evaluatedY);
             CHECK(returnedPdf == doctest::Approx(evaluatedPdf).epsilon(2e-5));
             CHECK(std::isfinite(returnedPdf));
@@ -244,7 +272,7 @@ TEST_CASE("one by one solid-angle Lambertian estimator converges to one")
     CHECK(sum / (double)samples == doctest::Approx(1.0).epsilon(1e-12));
 }
 
-TEST_CASE("the leftover variate stays inside the unit interval and spreads out")
+TEST_CASE("independent within-texel jitter stays inside the unit interval and spreads out")
 {
     const int w = 8;
     const int h = 4;
@@ -253,17 +281,18 @@ TEST_CASE("the leftover variate stays inside the unit interval and spreads out")
     const auto table = toDeviceTable(built.alias);
     const uint32_t n = (uint32_t)table.size();
 
-    // The jitter is what stops the sampler returning only texel centres, so it
-    // has to be a usable variate and not a constant.
+    // An independent jitter is what turns the selected texel mass into a
+    // continuous solid-angle density without conditioning on the alias branch.
     int lowHalf = 0;
     const int draws = 20000;
     for (int s = 0; s < draws; ++s)
     {
-        const float xi = ((float)s + 0.5f) / (float)draws;
-        const EnvAliasDraw d = envAliasDraw(table.data(), n, xi);
-        CHECK(d.frac >= 0.0f);
-        CHECK(d.frac < 1.0f);
-        if (d.frac < 0.5f)
+        const float jitter = ((float)s + 0.5f) / (float)draws;
+        const EnvAliasDraw d = envAliasDraw(table.data(), n, jitter, 1.0f - jitter);
+        CHECK(d.texel < n);
+        CHECK(jitter >= 0.0f);
+        CHECK(jitter < 1.0f);
+        if (jitter < 0.5f)
         {
             lowHalf++;
         }
@@ -284,21 +313,19 @@ TEST_CASE("a variate at the top of the range stays in the table")
     // 1 - 2^-24 is the largest float below one, and n * it rounds to n.
     for (const float xi : { 0.0f, 0.99999994f, 1.0f })
     {
-        const EnvAliasDraw d = envAliasDraw(table.data(), n, xi);
+        const EnvAliasDraw d = envAliasDraw(table.data(), n, xi, 0.5f);
         CHECK(d.texel < n);
     }
 }
 
 TEST_CASE("envAliasDraw refuses an empty table instead of reading it")
 {
-    const EnvAliasDraw a = envAliasDraw(nullptr, 16, 0.5f);
+    const EnvAliasDraw a = envAliasDraw(nullptr, 16, 0.5f, 0.5f);
     CHECK(a.texel == 0u);
-    CHECK(a.frac == 0.0f);
 
     std::vector<EnvAliasEntry> table(1);
     table[0].prob = 1.0f;
     table[0].alias = 0u;
-    const EnvAliasDraw b = envAliasDraw(table.data(), 0, 0.5f);
+    const EnvAliasDraw b = envAliasDraw(table.data(), 0, 0.5f, 0.5f);
     CHECK(b.texel == 0u);
-    CHECK(b.frac == 0.0f);
 }

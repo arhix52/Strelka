@@ -16,10 +16,13 @@ enum class SampleDimension : uint32_t
 {
     ePixelX,
     ePixelY,
+    // Independent random variables for each level of light selection.
     eLightId,
-    // Independent alias coin. Reusing a light-point dimension would condition
-    // the point on which alias branch selected the light.
+    eLightClass,
+    eLightBucket,
     eLightAlias,
+    eTriangleBucket,
+    eTriangleAlias,
     eTime, // motion blur time [0, 1]
     eLightPointX,
     eLightPointY,

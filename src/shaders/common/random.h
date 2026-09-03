@@ -14,9 +14,13 @@ enum struct SampleDimension : uint32_t
 {
     ePixelX,
     ePixelY,
+    // Independent random variables for each level of light selection.
     eLightId,
-    // Independent Walker/Vose coin for analytic-light selection.
+    eLightClass,
+    eLightBucket,
     eLightAlias,
+    eTriangleBucket,
+    eTriangleAlias,
     eTime,
     eLightPointX,
     eLightPointY,

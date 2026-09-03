@@ -49,25 +49,20 @@ struct EnvAliasEntry
     float solidAnglePdf;
 };
 
-/// A texel index plus a uniform variate left over from choosing it.
+/// A texel selected from the represented alias distribution.
 struct EnvAliasDraw
 {
     uint32_t texel;
+    // Retained for the external 1x1 audit ABI. Production sampling uses a
+    // separate within-texel random dimension and leaves this at zero.
     float frac;
 };
 
-/// Draw one texel from the table using a single uniform variate.
-///
-/// The fractional part of `xi * texelCount` does double duty: first as the alias
-/// coin flip, then -- remapped back onto [0,1) conditioned on the branch it took
-/// -- as a jitter axis inside the chosen texel. Conditioning is what keeps it
-/// exactly uniform, so no second random number is needed for either job. Without
-/// the jitter the sampler can only ever return texel centres, which is w*h
-/// distinct directions carrying a continuous density: quantised highlights, and
-/// a MIS weight that disagrees with what was actually sampled.
+/// Draw one texel using independent bucket and alias-coin variates.
 STRELKA_ENV_SAMPLING_FN EnvAliasDraw envAliasDraw(STRELKA_ENV_TABLE_PTR const EnvAliasEntry* table,
                                                   uint32_t texelCount,
-                                                  float xi)
+                                                  float bucketUniform,
+                                                  float aliasUniform)
 {
     EnvAliasDraw out;
     out.texel = 0u;
@@ -80,7 +75,7 @@ STRELKA_ENV_SAMPLING_FN EnvAliasDraw envAliasDraw(STRELKA_ENV_TABLE_PTR const En
     // The upper bound matters: xi is nominally below one, but a variate of
     // 0.99999997 times a few million texels rounds to exactly texelCount in
     // float, which would index one past the end of the table.
-    float scaled = xi * (float)texelCount;
+    float scaled = bucketUniform * (float)texelCount;
     const float limit = (float)texelCount - 1e-6f;
     if (!(scaled >= 0.0f))
     {
@@ -92,29 +87,31 @@ STRELKA_ENV_SAMPLING_FN EnvAliasDraw envAliasDraw(STRELKA_ENV_TABLE_PTR const En
     }
 
     const uint32_t bucket = (uint32_t)scaled;
-    float frac = scaled - (float)bucket;
-
     const EnvAliasEntry entry = table[bucket];
-    if (frac < entry.prob)
+    if (!(aliasUniform >= 0.0f))
     {
-        out.texel = bucket;
-        frac = (entry.prob > 0.0f) ? (frac / entry.prob) : 0.0f;
+        aliasUniform = 0.0f;
     }
-    else
+    if (aliasUniform > 0.9999999f)
     {
-        out.texel = entry.alias;
-        const float rest = 1.0f - entry.prob;
-        frac = (rest > 0.0f) ? ((frac - entry.prob) / rest) : 0.0f;
+        aliasUniform = 0.9999999f;
     }
+    out.texel = aliasUniform < entry.prob ? bucket : entry.alias;
+    return out;
+}
 
-    if (!(frac > 0.0f))
+// Compatibility for the external 1x1 environment audit source. Production
+// samplers must use the independent-variate overload above; returning an invalid
+// index for a larger table prevents accidental reuse of the old correlated draw.
+STRELKA_ENV_SAMPLING_FN EnvAliasDraw envAliasDraw(STRELKA_ENV_TABLE_PTR const EnvAliasEntry* table,
+                                                  uint32_t texelCount,
+                                                  float bucketUniform)
+{
+    EnvAliasDraw out = texelCount == 1u ? envAliasDraw(table, texelCount, bucketUniform, 0.0f) :
+                                         EnvAliasDraw{ texelCount, 0.0f };
+    if (texelCount == 1u)
     {
-        frac = 0.0f;
+        out.frac = bucketUniform;
     }
-    if (frac > 0.9999999f)
-    {
-        frac = 0.9999999f;
-    }
-    out.frac = frac;
     return out;
 }

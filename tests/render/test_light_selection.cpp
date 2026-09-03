@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <limits>
 #include <numbers>
+#include <ranges>
 #include <vector>
 
 using oka::metal::analyticLightPower;
@@ -158,6 +159,31 @@ TEST_CASE("environment power proxy is shared and finite at scene-boundary cases"
     CHECK(classes.analyticGivenLocal > 0.0f);
     CHECK(classes.environment + classes.local == doctest::Approx(1.0f));
     CHECK(classes.meshGivenLocal + classes.analyticGivenLocal == doctest::Approx(1.0f));
+}
+
+TEST_CASE("a rare emitter class retains entropy for every conditional light bucket")
+{
+    constexpr float localProbability = 0x1p-22f;
+    constexpr uint32_t lightCount = 8u;
+    std::array<bool, lightCount> reached{};
+    for (uint32_t raw = 0u; raw < 1u << 23u; ++raw)
+    {
+        const float u = static_cast<float>(raw) * 0x1p-23f;
+        if (u >= localProbability)
+        {
+            break;
+        }
+        reached[lightAliasBucket(lightCount, u / localProbability)] = true;
+    }
+    CHECK_FALSE(std::ranges::all_of(reached, [](bool value) { return value; }));
+
+    reached.fill(false);
+    for (uint32_t bucket = 0u; bucket < lightCount; ++bucket)
+    {
+        const float independent = (static_cast<float>(bucket) + 0.5f) / static_cast<float>(lightCount);
+        reached[lightAliasBucket(lightCount, independent)] = true;
+    }
+    CHECK(std::ranges::all_of(reached, [](bool value) { return value; }));
 }
 
 TEST_CASE("million-light selection preserves positive support and excludes zero weights")

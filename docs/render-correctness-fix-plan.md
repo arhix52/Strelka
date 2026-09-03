@@ -14,7 +14,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | 4. Non-uniform transforms for analytic lights | Disc geometry/sampler area ratio `6.0`; a smooth-disc sample outside the 16-gon is invisible to old traversal; sphere record loses affine axes | Double-precision affine-Jacobian oracle, smooth sample/intersection/PDF agreement, mirrored normals, CPU picking, coarse-proxy mutation | Sample and intersect the same smooth affine disc/ellipsoid; keep tessellation editor-only | FIXED | Shader compiled; shared analytic math executed on MTLDevice | Source updated; toolchain unavailable on macOS | `495e2a7` | PARTIAL |
 | 5. Robust large-distribution support | 209,715/1,048,576 positive-PMF bins have zero float-CDF interval | Million-bin support/normalization, sparse zeros, 1e12 dynamic range, PMF lookup, GOF, old-CDF mutation | Replace the cumulative float table with an O(1) Walker/Vose alias draw and its represented PMF | FIXED | 1,048,576-entry support kernel passed on MTLDevice | OptiX remains uniform until finding 7 | `cd2dd98` | PARTIAL |
 | 6. Emissive mesh NEE | A scene containing only one material-emissive triangle has `hasEmitter=false` and NEE proposal probability 0 despite nonzero emitted radiance | Single/multiple triangle frequencies, affine instances, texture evaluation, sample/PDF oracle, hit MIS, NEE-off expectation, omitted-NEE and visibility mutations | Hierarchical mesh-instance/triangle selection, exact transformed-area sampling, endpoint-consistent visibility, and the same marginal density at BSDF hits | FIXED | FIXED on MTLDevice | Source implemented; toolchain unavailable | `d53e662` | PARTIAL |
-| 7. Cross-backend consistency | OptiX uses uniform analytic-light identity, fixed 1/2 environment/local selection, and centre-Jacobian environment rows while Metal uses power aliases and exact row solid angle | Shared hierarchy/marginal-PMF oracle, sharp-distant support, exact environment degeneracies, legacy-selector mutation, source/toolchain validation | Use one host probability specification and represented PMFs; migrate OptiX environment and analytic selection to it | FIXED | FIXED on MTLDevice | Source fixed; external CUDA validation required | this commit | UNVERIFIED |
+| 7. Cross-backend consistency | OptiX uses uniform analytic-light identity, fixed 1/2 environment/local selection, and centre-Jacobian environment rows while Metal uses power aliases and exact row solid angle | Shared hierarchy/marginal-PMF oracle, sharp-distant support, exact environment degeneracies, legacy-selector mutation, source/toolchain validation | Use one host probability specification and represented PMFs; migrate OptiX environment and analytic selection to it | FIXED | FIXED on MTLDevice | Source fixed; external CUDA validation required | `0b85cd9` | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -325,3 +325,23 @@ is out of scope unless it blocks validation.
   "{\"schema\":\"strelka.optix-correctness.v1\",\"exit_code\":%d,\"status\":\"%s\"}\\n" "$s"
   "$([ "$s" -eq 0 ] && echo PASS || echo FAIL)"; exit "$s"'`. The command builds both OptiX device modules,
   rejects empty `.optixir` outputs, runs unit tests and production smoke renders, and emits a machine-readable result.
+
+## Adversarial correction A: finite-RNG hierarchy support
+
+- Random variables and measure: environment/local class `C`, local emitter class `K`, alias bucket `B`, alias coin
+  `A`, nested triangle bucket/coin, and within-texel coordinates are distinct discrete draws from the renderer's
+  23-bit uniform lattice. The selected environment texel, light, mesh, and triangle remain categorical masses;
+  environment direction remains a density in `domega` after independent continuous jitter.
+- Support and PDFs: each hierarchy level uses its declared PMF without conditional remapping of the parent draw.
+  The marginal PMF is still the product of the independent selection masses; the stored represented alias PMF and
+  all MIS densities are unchanged. Delta/continuous classification and MIS strategy enumeration are unchanged.
+- Reproducer: for an environment alias threshold `2^-22` at `2^20` texels, reusing the bucket fraction as the coin
+  realizes conditional mass `1/8`, not `2^-22`. Remapping a parent draw from a class of probability `2^-22` into an
+  eight-light bucket reaches only two buckets on the same finite lattice.
+- Implementation: Metal and OptiX now use separate dimensions for emitter class, alias bucket/coin, nested triangle
+  bucket/coin, and environment texel jitter. The old remaps and hash-scrambled reuse were removed.
+- Validation: both mutations fail before the change; the corrected lattice checks pass exactly. Debug and Release
+  CTest pass 4/4, targeted ASan+UBSan passes, production Metal shaders compile, and the host audit passes 784/784
+  tests with 68,674,130 assertions. The actual Apple M4 Pro environment kernel passes 262,144 samples with zero
+  measure mismatches. OptiX uses the same dimension/specification but remains externally compile/runtime
+  `UNVERIFIED` on this host.

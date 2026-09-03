@@ -855,7 +855,9 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
                                 texture2d<float> envMapTexture,
                                 bool volumeEvent)
 {
-    const float2 xi = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
+    const float4 xi = float4(random<SampleDimension::eLightBucket>(samplerRnd, uniforms.samplerType),
+                             random<SampleDimension::eLightAlias>(samplerRnd, uniforms.samplerType),
+                             random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
                              random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
 
     float envPdf = 0.0f;
@@ -968,12 +970,10 @@ static uint32_t sampleEmissiveTriangleIndex(constant Uniforms& uniforms,
                                             thread SamplerState& sampler,
                                             device const EmissiveMeshLight& mesh)
 {
-    SamplerState triangleSampler = sampler;
-    triangleSampler.seed = hash_combine(sampler.seed, 0x6d2b79f5u);
-    const float bucketUniform = random<SampleDimension::eLightId>(triangleSampler, uniforms.samplerType);
+    const float bucketUniform = random<SampleDimension::eTriangleBucket>(sampler, uniforms.samplerType);
     const uint32_t bucket = lightAliasBucket(mesh.triangleCount, bucketUniform);
     device const EmissiveTriangleLight& entry = uniforms.emissiveTriangles[mesh.triangleOffset + bucket];
-    const float coin = random<SampleDimension::eLightAlias>(triangleSampler, uniforms.samplerType);
+    const float coin = random<SampleDimension::eTriangleAlias>(sampler, uniforms.samplerType);
     return lightAliasSelect(mesh.triangleCount, bucket, coin, entry.aliasProbability, entry.alias);
 }
 
@@ -1131,7 +1131,6 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     const bool hasLocal = hasAnalytic || hasMesh;
     const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
     float localSelectionPdf = 1.0f;
-    float localU = u;
     if (SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
         const float envSelectionPdf = uniforms.envMapColorTint.w;
@@ -1143,7 +1142,6 @@ LightConnection connectToLight(constant Uniforms& uniforms,
             c.pdf *= hasLocal ? envSelectionPdf : 1.0f;
             return c;
         }
-        localU = u / localSelectionPdf;
     }
 
     if (!hasLocal)
@@ -1151,10 +1149,11 @@ LightConnection connectToLight(constant Uniforms& uniforms,
         return makeEmptyConnection();
     }
 
+    const float classU = random<SampleDimension::eLightClass>(samplerRnd, uniforms.samplerType);
     const float meshSelectionPdf = uniforms.meshLightSelectionPdf;
-    if (hasMesh && (!hasAnalytic || meshSelectionPdf >= 1.0f || localU < meshSelectionPdf))
+    if (hasMesh && (!hasAnalytic || meshSelectionPdf >= 1.0f || classU < meshSelectionPdf))
     {
-        const float meshU = hasAnalytic ? localU / meshSelectionPdf : localU;
+        const float meshU = random<SampleDimension::eLightBucket>(samplerRnd, uniforms.samplerType);
         LightConnection c = connectEmissiveMesh(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer,
                                                 materials, samplerRnd, si, meshU, motionTime, volumeEvent);
         c.pdf *= localSelectionPdf * (hasAnalytic ? meshSelectionPdf : 1.0f);
@@ -1166,7 +1165,7 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     {
         return makeEmptyConnection();
     }
-    const float analyticU = hasMesh ? (localU - meshSelectionPdf) / analyticSelectionPdf : localU;
+    const float analyticU = random<SampleDimension::eLightBucket>(samplerRnd, uniforms.samplerType);
     const float aliasU = random<SampleDimension::eLightAlias>(samplerRnd, uniforms.samplerType);
     const uint32_t lightId = sampleAnalyticLight(numLights, lights, analyticU, aliasU);
     if (lightId >= numLights)
