@@ -49,8 +49,8 @@ DEVICE_FUNC SphQuad sphQuadInit(float3 p0, float3 ex, float3 ey, float3 o)
 {
     SphQuad squad = {};
 
-    const float exl = length(ex);
-    const float eyl = length(ey);
+    const float exl = finiteVectorLength(ex);
+    const float eyl = finiteVectorLength(ey);
 
     if (!(exl > 0.0f) || !(eyl > 0.0f))
     {
@@ -59,14 +59,14 @@ DEVICE_FUNC SphQuad sphQuadInit(float3 p0, float3 ex, float3 ey, float3 o)
     }
 
     squad.o = o;
-    squad.x = ex / exl;
-    squad.y = ey / eyl;
+    squad.x = normalizeFiniteVectorOrZero(ex);
+    squad.y = normalizeFiniteVectorOrZero(ey);
     // The Urena/Fajardo/King mapping is for a Euclidean rectangle. A shear
     // turns it into a general parallelogram whose normalized edges are not an
     // orthonormal frame; using that frame moves samples off the light plane.
     // The existing uniform-area sampler is exact for every affine
     // parallelogram and its PDF path observes this same flag.
-    if (fabsf(dot(squad.x, squad.y)) > 1e-6f)
+    if (dot(squad.x, squad.y) != 0.0f)
     {
         squad.S = 1.0f; // positive sentinel; unused by the area fallback
         squad.useAreaFallback = true;
@@ -75,6 +75,14 @@ DEVICE_FUNC SphQuad sphQuadInit(float3 p0, float3 ex, float3 ey, float3 o)
     squad.z = cross(squad.x, squad.y);
 
     const float3 d = p0 - o;
+    constexpr float maxSquaredCoordinate = 3.402823466e38f / 8.0f;
+    const float coordinateLimit = sqrtf(maxSquaredCoordinate);
+    if (exl > coordinateLimit || eyl > coordinateLimit || finiteVectorLength(d) > coordinateLimit)
+    {
+        squad.S = 1.0f;
+        squad.useAreaFallback = true;
+        return squad;
+    }
     squad.z0 = dot(d, squad.z);
     if (squad.z0 > 0.0f)
     {

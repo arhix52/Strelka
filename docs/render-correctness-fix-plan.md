@@ -17,12 +17,13 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | 7. Cross-backend consistency | OptiX uses uniform analytic-light identity, fixed 1/2 environment/local selection, and centre-Jacobian environment rows while Metal uses power aliases and exact row solid angle | Shared hierarchy/marginal-PMF oracle, sharp-distant support, exact environment degeneracies, legacy-selector mutation, source/toolchain validation | Use one host probability specification and represented PMFs; migrate OptiX environment and analytic selection to it | FIXED | FIXED on MTLDevice | Source fixed; external CUDA validation required | `0b85cd9` | UNVERIFIED |
 | H. Ill-conditioned ellipsoid intersection | Inverse-space quadratic overflows for `diag(1,1,1e-20)` although sampler/PDF are finite | Thin full-rank sampled-point round trip and inverse-quadratic mutation | Solve the ray/ellipsoid quadratic in scaled homogeneous cofactor coordinates | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
 | I. Sheared spherical-rectangle sampling | Normalized non-orthogonal edges move solid-angle samples off the affine proxy plane | Sheared parallelogram plane/PDF checks and old-frame mutation | Select the exact uniform-area path for non-rectangular affine parallelograms | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
-| J. Unrepresentable analytic area transforms | Finite axes near `1e20` overflow the float cofactor/determinant and produce NaN normal/PDF | Extreme-scale sampler/intersection/host-power test and exact-zero mutation | Reject affine area records whose device determinant is non-finite, consistently in sampling, intersection, and selection | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
+| J. Extreme analytic area transforms | Finite axes near `1e20` overflow a raw float cofactor/determinant and used to produce NaN normal/PDF | Extreme-scale sampler/intersection/host-power test and raw-denominator mutation | Represent the area density directly; reject only transforms whose homogeneous geometry or final density is unrepresentable | FIXED | Shader compiled; shared source executed | Shared source; external CUDA validation required | pending | FIXED |
 | K. Invalid transformed light frames | Singular transforms normalize local emission axes to NaN while retaining positive selection power | Scene packing and host-power regressions for spot/projector/distant/IES point | Pack a finite zero sentinel and give invalid directional records zero outer PMF | FIXED | Shader compiled; packed ABI | Same packed ABI; external CUDA validation required | pending | FIXED |
 | L. Edited light proxy topology | `SPHERE -> RECT` keeps the sphere mesh while sampling a packed rectangle; infinite→area has no proxy | Type-edit topology/create regression and stale-mesh mutation | Replace/create the editor/intersection proxy and rebuild geometry; mask infinite proxies in both backends | FIXED | Source compiled | Source; external CUDA validation required | pending | FIXED |
 | M. Metal affine surface normals | Metal applies `A*n`; OptiX applies inverse-transpose, changing sidedness under non-uniform transforms | Independent inverse-transpose/sign regression and forward-transform mutation | Shared cofactor inverse-transpose normal helper used at both Metal surface reconstruction sites | Oracle FIXED | Shader compiled | Existing OptiX behavior | pending | FIXED |
 | N. Runtime light topology rebuild | Geometry bit was ignored; Metal TLAS retained captured masks and both backends reused missing/stale BLAS after type edits | Repeated type-edit/cache regression plus backend rebuild source/compile validation | Cache unit proxies and route Geometry changes through buffer, BLAS, TLAS, and SBT rebuilds | FIXED | Source compiled; execution pending reviewer | Source; external CUDA validation required | pending | FIXED |
 | O. Scale-safe analytic and mesh area measures | Finite `1e13` ellipsoid determinant and finite `1e38` triangle length overflow intermediate float products | Large ellipsoid/disc/triangle sample-intersection-PDF regressions and determinant/naive-length mutations | Scale vectors before normalization, solve analytic intersections homogeneously, and bound area-to-solid-angle arithmetic | FIXED | Shader compiled; shared math source | Shared source; external CUDA validation required | pending | FIXED |
+| P. Extreme affine normal/support consistency | Common cofactor scaling underflows the only active normal; a finite `J_A` denominator can overflow although `p_A` and `p_omega` remain finite | Extreme inverse-transpose normal, `diag(2e19,2e19,1)` density, sample/eval/intersect, shear, and overflow mutations | Transform normals from an object tangent plane and carry scale-safe `p_A` directly through sample/PDF/intersection | FIXED | FIXED on MTLDevice | Shared source; external CUDA validation required | pending | FIXED |
 
 ## Per-finding probability records
 
@@ -491,16 +492,17 @@ is out of scope unless it blocks validation.
   measure in either device backend and is classified as an invalid, zero-support analytic record.
 - Support/PDF: valid finite transforms retain their existing Jacobian and MIS. Invalid transforms have zero outer
   selection power, zero conditional sample/PDF, and no analytic intersection, so no NaN-valued event is introduced.
-- Reproducer/mutation: `A=diag(1e20,1e20,1e20)` has finite stored axes but float cofactors and determinant overflow;
-  the old exact-nonzero test accepts `Inf`, then computes `Inf/Inf` for the normal. The host's double power remained
-  positive and selected that invalid device record.
-- Implementation: shared validity now requires a positive finite float determinant; host power first applies that
-  exact device predicate before its double-precision area quadrature.
-- Validation: the old predicate is retained as an accepting mutation; corrected sample, intersection, and host
-  power all report zero without non-finite outputs. Focused tests pass 9/9 assertions; Debug and Release CTest pass
-  4/4, targeted ASan+UBSan is clean, production Metal shaders compile, and the audit passes 793/793 tests with
-  68,679,991 assertions. Actual MTLDevice environment execution remains clean; OptiX source shares the predicate but
-  CUDA compile/runtime remains externally `UNVERIFIED`. Status: FIXED.
+- Reproducer/mutation: raw float cofactors and determinants overflow for axes near `1e20`; the old exact-nonzero
+  test accepted `Inf`, then computed `Inf/Inf` for the normal. The initial correction conservatively rejected those
+  records, but `A=diag(2e19,2e19,1)` proves that policy too broad: `J_A` overflows at the pole while the final
+  `p_A=1.98944e-40` and induced `p_omega=0.0795775` are finite.
+- Implementation: correction P supersedes the interim determinant gate. Shared code carries reciprocal area density,
+  evaluates tangent-plane Jacobians without forming the overflowing cofactor magnitude, and rejects only when either
+  the homogeneous intersection loses rank or the final density itself has no positive float representation. Host
+  power applies that device predicate before its double-precision area quadrature.
+- Validation: the raw determinant/cross mutations remain non-finite while the corrected sampler, evaluator,
+  intersection, host selection power, and solid-angle density retain support. Full current results are recorded in
+  correction P. Status: FIXED.
 
 ## Adversarial correction K: invalid transformed light frames
 
@@ -596,3 +598,29 @@ is out of scope unless it blocks validation.
   ASan+UBSan is clean, production Metal shaders compile, and the full audit passes 800/800 tests with 68,680,047
   assertions. The actual Apple M4 Pro audit passes 262,144 samples in fast and safe math with zero measure
   mismatches. OptiX shares the same source but remains externally compile/runtime `UNVERIFIED`. Status: FIXED.
+
+## Adversarial correction P: extreme affine normal/support consistency
+
+- Random variable/measure: mesh normals define BSDF sidedness in `domega`; analytic ellipsoid samples use object
+  sphere area, affine world area, and then `domega`. No selection PMF changes.
+- Support/PDF: an arbitrary mesh normal is transformed by the inverse transpose even when irrelevant affine axes
+  differ by `1e60`. Analytic lights carry `p_A` directly, so an overflowing area or Jacobian does not remove support
+  when the reciprocal density is positive. A light is rejected only when the homogeneous float representation shared
+  by sample, PDF evaluation, and intersection loses rank, or when no positive final area density is representable.
+- Reproducer/mutation: for `A=diag(1e-30,1e30,1)` and object normal `Y`, global cofactor scaling underflows the only
+  active `1e-30` cofactor and returns zero. The ellipsoid sampler previously returned positive area at its `Y` pole,
+  while global-axis-scaled PDF/intersection arithmetic underflowed the `X` axis and returned no support.
+- Implementation: transform an object-space tangent plane with `A`, take a scale-safe cross direction, and apply
+  determinant orientation, avoiding irrelevant cofactor magnitudes. Evaluate
+  `p_A=1/(pi |A ex cross A ey|)` for discs and `p_A=1/(4 pi |A t cross A b|)` for ellipsoids directly, then compute
+  `p_omega=p_A distance^2/cos(theta_light)` without first forming either `J_A` or `distance^2`. The validity predicate
+  checks the same scaled determinant used by the homogeneous analytic intersection and a conservative positive
+  density bound over the complete sphere.
+- Delta/continuous and MIS: unchanged; meshes and ellipsoids remain continuous, and the light/BSDF strategies use
+  the same support decision. The selected-light outer PMF is unchanged.
+- Validation: the `diag(2e19,2e19,1)` regression gives `p_A=1.98944e-40` and `p_omega=0.0795775`, while raw
+  `length(cross(axisX,axisY))` is non-finite; sample/evaluate/intersection normals and densities agree exactly. The
+  focused sanitizer run passes 76,716/76,716 assertions, Debug and Release CTest pass 4/4, production Metal shaders
+  compile, and the full harness passes 805/805 tests with 68,680,088 assertions. The actual Apple M4 Pro shared-math
+  audit passes 262,144 samples in fast and safe math with zero measure mismatches. OptiX consumes the same headers but
+  CUDA compile/runtime remains externally `UNVERIFIED`. Status: FIXED.

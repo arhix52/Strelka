@@ -254,4 +254,48 @@ DEVICE_FUNC float finiteVectorLength(float3 v)
     return normalizedLength <= 3.402823466e38f / scale ? scale * normalizedLength : 0.0f;
 }
 
+
+DEVICE_FUNC float3 finiteDirectionAndDistance(float3 offset, THREAD_REF float& distance)
+{
+    distance = finiteVectorLength(offset);
+    return distance > 0.0f ? offset / distance : make_float3(0.0f);
+}
+
+DEVICE_FUNC float3 finiteCrossDirection(float3 a, float3 b)
+{
+    float scale = fmaxf(fabsf(a.x), fmaxf(fabsf(a.y), fabsf(a.z)));
+    scale = fmaxf(scale, fmaxf(fabsf(b.x), fmaxf(fabsf(b.y), fabsf(b.z))));
+    if (!(scale > 0.0f) || !(scale <= 3.402823466e38f))
+    {
+        return make_float3(0.0f);
+    }
+    return normalizeFiniteVectorOrZero(cross(a / scale, b / scale));
+}
+
+// `numerator / length(cross(a, b))`, evaluated without first forming either
+// the potentially overflowing cross product or its reciprocal. This is the
+// useful quantity for area densities: the area itself need not fit in float as
+// long as the final density does.
+DEVICE_FUNC float finiteCrossReciprocal(float3 a, float3 b, float numerator)
+{
+    float scale = fmaxf(fabsf(a.x), fmaxf(fabsf(a.y), fabsf(a.z)));
+    scale = fmaxf(scale, fmaxf(fabsf(b.x), fmaxf(fabsf(b.y), fabsf(b.z))));
+    if (!(scale > 0.0f) || !(scale <= 3.402823466e38f))
+    {
+        return 0.0f;
+    }
+    const float scaledLength = finiteVectorLength(cross(a / scale, b / scale));
+    if (!(scaledLength > 0.0f))
+    {
+        return 0.0f;
+    }
+    const float reciprocal = (numerator / scaledLength / scale) / scale;
+    return reciprocal > 0.0f && reciprocal <= 3.402823466e38f ? reciprocal : 0.0f;
+}
+
+DEVICE_FUNC float inverseFiniteCrossLength(float3 a, float3 b)
+{
+    return finiteCrossReciprocal(a, b, 1.0f);
+}
+
 #endif // STRELKA_MATERIAL_MATH_H

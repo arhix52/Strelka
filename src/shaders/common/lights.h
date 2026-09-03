@@ -51,7 +51,7 @@ struct IesGpuProfileHeader
 {
     unsigned int nVertical;
     unsigned int nHorizontal;
-    unsigned int anglesOffset;  // index into the float blob: vertical then horizontal
+    unsigned int anglesOffset; // index into the float blob: vertical then horizontal
     unsigned int candelaOffset; // index into the float blob
     float maxCandela;
     float pad0;
@@ -65,7 +65,7 @@ struct LightSampleData
     float pdf;
 
     float3 normal;
-    float area;
+    float areaPdf;
 
     float3 L;
     float distToLight;
@@ -134,25 +134,25 @@ static __inline__ __device__ AnalyticAreaLightHit findAnalyticAreaLightHit(const
     return closest;
 }
 
-static __inline__ __device__ float calcLightArea(const UniformLight& l, const float3 hitPoint)
+static __inline__ __device__ float calcLightAreaPdf(const UniformLight& l, const float3 hitPoint)
 {
-    float area = 0.0f;
+    float areaPdf = 0.0f;
 
     if (l.type == LIGHT_TYPE_RECT)
     {
         float3 e1 = make_float3(l.points[1]) - make_float3(l.points[0]);
         float3 e2 = make_float3(l.points[3]) - make_float3(l.points[0]);
-        area = finiteVectorLength(cross(e1, e2));
+        areaPdf = inverseFiniteCrossLength(e1, e2);
     }
     else if (l.type == LIGHT_TYPE_DISC)
     {
-        area = analyticDiscArea(make_float3(l.points[2]), make_float3(l.points[3]));
+        areaPdf = analyticDiscAreaPdf(make_float3(l.points[2]), make_float3(l.points[3]));
     }
     else if (l.type == LIGHT_TYPE_SPHERE)
     {
         float3 normal;
-        area = analyticEllipsoidAreaPdfDenominator(make_float3(l.points[1]), make_float3(l.points[0]),
-                                                   make_float3(l.points[2]), make_float3(l.points[3]), hitPoint, normal);
+        areaPdf = analyticEllipsoidAreaPdf(make_float3(l.points[1]), make_float3(l.points[0]), make_float3(l.points[2]),
+                                           make_float3(l.points[3]), hitPoint, normal);
     }
     else if (punctualLightIsSoft(l.points[0].x) && lightIsPunctual(l.type))
     {
@@ -160,9 +160,9 @@ static __inline__ __device__ float calcLightArea(const UniformLight& l, const fl
         // same area the sphere's density divides by. Without this case
         // fillLightData() left the area at zero and the density collapsed to the
         // constant it used to be.
-        area = sphereLightArea(l.points[0].x);
+        areaPdf = sphereLightAreaPdf(l.points[0].x);
     }
-    return area;
+    return areaPdf;
 }
 
 static __inline__ __device__ float3 calcLightNormal(const UniformLight& l, const float3 hitPoint)
@@ -179,8 +179,8 @@ static __inline__ __device__ float3 calcLightNormal(const UniformLight& l, const
     }
     else if (l.type == LIGHT_TYPE_SPHERE)
     {
-        analyticEllipsoidAreaPdfDenominator(make_float3(l.points[1]), make_float3(l.points[0]),
-                                            make_float3(l.points[2]), make_float3(l.points[3]), hitPoint, norm);
+        analyticEllipsoidAreaPdf(make_float3(l.points[1]), make_float3(l.points[0]), make_float3(l.points[2]),
+                                 make_float3(l.points[3]), hitPoint, norm);
     }
     else if (lightIsPunctual(l.type))
     {
@@ -196,11 +196,11 @@ static __inline__ __device__ void fillLightData(const UniformLight& l,
                                                 const float3 hitPoint,
                                                 LightSampleData& lightSampleData)
 {
-    lightSampleData.area = calcLightArea(l, lightSampleData.pointOnLight);
+    lightSampleData.areaPdf = calcLightAreaPdf(l, lightSampleData.pointOnLight);
     lightSampleData.normal = calcLightNormal(l, lightSampleData.pointOnLight);
     const float3 toLight = lightSampleData.pointOnLight - hitPoint;
-    const float lenToLight = length(toLight);
-    lightSampleData.L = (lenToLight > 0.0f) ? (toLight / lenToLight) : make_float3(0.0f);
+    float lenToLight;
+    lightSampleData.L = finiteDirectionAndDistance(toLight, lenToLight);
     lightSampleData.distToLight = lenToLight;
 }
 
@@ -236,15 +236,15 @@ static __inline__ __device__ bool emitsLight(const float3 radiance)
 
 /// Unpack one light into the scalars lightSolidAnglePdf() needs.
 ///
-/// `radius` is only read for punctual types; an ellipsoid carries the reciprocal
-/// of its local world-area density in `d.area`.
+/// `radius` is only read for punctual types; every area light carries its local
+/// world-area density in `d.areaPdf`.
 static __inline__ __device__ LightPdfQuery buildLightPdfQuery(const UniformLight& l,
                                                               const LightSampleData& d)
 {
     LightPdfQuery q = makeLightPdfQuery(l.type);
     q.distToLight = d.distToLight;
     q.cosAtLight = -dot(d.L, d.normal);
-    q.area = d.area;
+    q.areaPdf = d.areaPdf;
     q.halfAngle = l.halfAngle;
     if (lightIsPunctual(l.type))
     {
@@ -261,7 +261,7 @@ static __inline__ __device__ float getLightPdf(const UniformLight& l,
                                                const float3 surfaceHitPoint,
                                                unsigned int rectLightSamplingMethod = 0)
 {
-    LightSampleData d {};
+    LightSampleData d{};
     d.pointOnLight = lightHitPoint;
     fillLightData(l, surfaceHitPoint, d);
 
@@ -302,9 +302,8 @@ static __inline__ __device__ LightSampleData SampleRectLight(const UniformLight&
     {
         lightSampleData.pointOnLight = make_float3(l.points[0]) + e1 * u.x + e2 * u.y;
         fillLightData(l, hitPoint, lightSampleData);
-        lightSampleData.pdf = areaLightSolidAnglePdf(lightSampleData.distToLight,
-                                                     -dot(lightSampleData.L, lightSampleData.normal),
-                                                     lightSampleData.area);
+        lightSampleData.pdf = areaPdfToSolidAnglePdf(
+            lightSampleData.distToLight, -dot(lightSampleData.L, lightSampleData.normal), lightSampleData.areaPdf);
         return lightSampleData;
     }
 
@@ -323,9 +322,8 @@ static __inline__ __device__ LightSampleData SampleRectLightUniform(const Unifor
     float3 e2 = make_float3(l.points[3]) - make_float3(l.points[0]);
     lightSampleData.pointOnLight = make_float3(l.points[0]) + e1 * u.x + e2 * u.y;
     fillLightData(l, hitPoint, lightSampleData);
-    lightSampleData.pdf = areaLightSolidAnglePdf(lightSampleData.distToLight,
-                                                 -dot(lightSampleData.L, lightSampleData.normal),
-                                                 lightSampleData.area);
+    lightSampleData.pdf = areaPdfToSolidAnglePdf(
+        lightSampleData.distToLight, -dot(lightSampleData.L, lightSampleData.normal), lightSampleData.areaPdf);
     return lightSampleData;
 }
 
@@ -375,7 +373,7 @@ static __inline__ __device__ LightSampleData SampleDistantLight(const UniformLig
         coneSample = SampleCone(u, l.halfAngle, axis, pdf);
     }
 
-    lightSampleData.area = 0.0f;
+    lightSampleData.areaPdf = 0.0f;
     lightSampleData.distToLight = 1e9;
     lightSampleData.L = coneSample;
     lightSampleData.normal = make_float3(l.normal);
@@ -394,13 +392,11 @@ static __inline__ __device__ LightSampleData SampleDiscLight(const UniformLight&
         sampleAnalyticDisc(center, make_float3(l.points[2]), make_float3(l.points[3]), make_float3(l.normal), u.x, u.y);
     lightSampleData.pointOnLight = sample.point;
     const float3 toLight = sample.point - hitPoint;
-    lightSampleData.distToLight = length(toLight);
-    lightSampleData.L = lightSampleData.distToLight > 0.0f ? toLight / lightSampleData.distToLight : make_float3(0.0f);
+    lightSampleData.L = finiteDirectionAndDistance(toLight, lightSampleData.distToLight);
     lightSampleData.normal = sample.normal;
-    lightSampleData.area = sample.areaPdfDenominator;
-    lightSampleData.pdf = areaLightSolidAnglePdf(lightSampleData.distToLight,
-                                                 -dot(lightSampleData.L, lightSampleData.normal),
-                                                 lightSampleData.area);
+    lightSampleData.areaPdf = sample.areaPdf;
+    lightSampleData.pdf = areaPdfToSolidAnglePdf(
+        lightSampleData.distToLight, -dot(lightSampleData.L, lightSampleData.normal), lightSampleData.areaPdf);
     return lightSampleData;
 }
 
@@ -413,12 +409,11 @@ static __inline__ __device__ LightSampleData SampleSphereLight(const UniformLigh
         center, make_float3(l.points[0]), make_float3(l.points[2]), make_float3(l.points[3]), u.x, u.y);
     lightSampleData.pointOnLight = sample.point;
     const float3 toLight = sample.point - hitPoint;
-    lightSampleData.distToLight = length(toLight);
-    lightSampleData.L = lightSampleData.distToLight > 0.0f ? toLight / lightSampleData.distToLight : make_float3(0.0f);
+    lightSampleData.L = finiteDirectionAndDistance(toLight, lightSampleData.distToLight);
     lightSampleData.normal = sample.normal;
-    lightSampleData.area = sample.areaPdfDenominator;
-    lightSampleData.pdf = areaLightSolidAnglePdf(
-        lightSampleData.distToLight, -dot(lightSampleData.L, lightSampleData.normal), sample.areaPdfDenominator);
+    lightSampleData.areaPdf = sample.areaPdf;
+    lightSampleData.pdf = areaPdfToSolidAnglePdf(
+        lightSampleData.distToLight, -dot(lightSampleData.L, lightSampleData.normal), sample.areaPdf);
 
     return lightSampleData;
 }
@@ -442,7 +437,7 @@ static __inline__ __device__ LightSampleData SampleDomeLight(const UniformLight&
 
     lightSampleData.L = uniformSphereDirection(u.x, u.y);
     lightSampleData.distToLight = 1e9f;
-    lightSampleData.area = 0.0f;
+    lightSampleData.areaPdf = 0.0f;
     // Faces the shading point by construction, so the caller's -dot(L, normal)
     // test passes for every sampled direction.
     lightSampleData.normal = -lightSampleData.L;
@@ -461,10 +456,9 @@ static __inline__ __device__ LightSampleData SamplePointLight(const UniformLight
         const float3 sphereDirection = uniformSphereDirection(u.x, u.y);
         const float3 lightPoint = make_float3(l.points[1]) + radius * sphereDirection;
         lightSampleData.pointOnLight = lightPoint;
-        lightSampleData.distToLight = length(lightPoint - hitPoint);
-        lightSampleData.L = normalize(lightPoint - hitPoint);
+        lightSampleData.L = finiteDirectionAndDistance(lightPoint - hitPoint, lightSampleData.distToLight);
         lightSampleData.normal = sphereDirection;
-        lightSampleData.area = sphereLightArea(radius);
+        lightSampleData.areaPdf = sphereLightAreaPdf(radius);
         lightSampleData.pdf = sphereLightSolidAnglePdf(
             lightSampleData.distToLight, -dot(lightSampleData.L, lightSampleData.normal), radius);
         return lightSampleData;
@@ -473,12 +467,12 @@ static __inline__ __device__ LightSampleData SamplePointLight(const UniformLight
     LightSampleData lightSampleData;
     const float3 center = make_float3(l.points[1]);
     const float3 toLight = center - hitPoint;
-    const float dist = length(toLight);
+    float dist;
     lightSampleData.pointOnLight = center;
-    lightSampleData.L = toLight / fmaxf(dist, 1e-8f);
+    lightSampleData.L = finiteDirectionAndDistance(toLight, dist);
     lightSampleData.distToLight = dist;
     lightSampleData.normal = -lightSampleData.L;
-    lightSampleData.area = 0.0f;
+    lightSampleData.areaPdf = 0.0f;
     lightSampleData.pdf = deltaLightPdf();
     return lightSampleData;
 }

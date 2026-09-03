@@ -1051,12 +1051,12 @@ static LightConnection connectEmissiveMesh(constant Uniforms& uniforms,
         return connection;
     }
     const float3 offset = sample.point - si.position;
-    const float distance = length(offset);
+    float distance;
+    const float3 direction = finiteDirectionAndDistance(offset, distance);
     if (!(distance > 1e-5f))
     {
         return connection;
     }
-    const float3 direction = offset / distance;
     device const Material& material = materials[mesh.materialId];
     const float3 emission = emissiveMeshRadiance(material, sample.uv) * resolveOpacity(material, sample.uv);
     if (!emitsLight(emission) || (!volumeEvent && !lightReachesShadingPoint(si, direction)))

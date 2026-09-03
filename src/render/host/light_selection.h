@@ -122,24 +122,22 @@ inline double analyticLightPower(const Scene::Light& light)
     constexpr double pi = std::numbers::pi_v<double>;
     const glm::dvec3 packedDirection(light.normal);
     const double packedDirectionLengthSquared = glm::dot(packedDirection, packedDirection);
-    const bool hasFiniteDirection =
-        packedDirectionLengthSquared > 0.0 && std::isfinite(packedDirectionLengthSquared);
+    const bool hasFiniteDirection = packedDirectionLengthSquared > 0.0 && std::isfinite(packedDirectionLengthSquared);
     double measure = 0.0;
     switch (light.type)
     {
     case LIGHT_TYPE_RECT: {
         const glm::float3 e1 = glm::float3(light.points[1] - light.points[0]);
         const glm::float3 e2 = glm::float3(light.points[3] - light.points[0]);
-        const float deviceArea = finiteVectorLength(glm::cross(e1, e2));
-        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 && deviceArea > 0.0f)
+        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 && inverseFiniteCrossLength(e1, e2) > 0.0f)
         {
-            measure = pi * double(deviceArea);
+            measure = pi * glm::length(glm::cross(glm::dvec3(e1), glm::dvec3(e2)));
         }
         break;
     }
     case LIGHT_TYPE_DISC:
         if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 &&
-            analyticDiscArea(glm::float3(light.points[2]), glm::float3(light.points[3])) > 0.0f)
+            analyticDiscAreaPdf(glm::float3(light.points[2]), glm::float3(light.points[3])) > 0.0f)
         {
             measure = pi * pi * glm::length(glm::cross(glm::dvec3(light.points[2]), glm::dvec3(light.points[3])));
         }

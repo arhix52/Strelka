@@ -357,7 +357,8 @@ TEST_CASE("analytic light power uses transformed smooth area")
     sphere.points[0] = glm::float4(1e20f, 0.0f, 0.0f, 0.0f);
     sphere.points[2] = glm::float4(0.0f, 1e20f, 0.0f, 0.0f);
     sphere.points[3] = glm::float4(0.0f, 0.0f, 1e20f, 0.0f);
-    CHECK(analyticLightPower(sphere) == 0.0);
+    CHECK(analyticLightPower(sphere) > 0.0);
+    CHECK(std::isfinite(analyticLightPower(sphere)));
 
     sphere.points[0] = glm::float4(1e13f, 0.0f, 0.0f, 0.0f);
     sphere.points[2] = glm::float4(0.0f, 1e13f, 0.0f, 0.0f);
@@ -509,8 +510,8 @@ TEST_CASE("emissive triangle sample and hit PDF agree under affine transform")
 TEST_CASE("large finite emissive triangles retain area-measure support")
 {
     const float3 p0 = make_float3(0.0f);
-    const float3 p1 = make_float3(1e19f, 0.0f, 0.0f);
-    const float3 p2 = make_float3(0.0f, 1e19f, 0.0f);
+    const float3 p1 = make_float3(2e19f, 0.0f, 0.0f);
+    const float3 p2 = make_float3(0.0f, 2e19f, 0.0f);
     const float2 uv = make_float2(0.0f, 0.0f);
     const EmissiveTriangleSample sample = sampleEmissiveTriangle(p0, p1, p2, uv, uv, uv, 0.25f, 0.5f);
     REQUIRE(sample.valid);
@@ -524,9 +525,15 @@ TEST_CASE("large finite emissive triangles retain area-measure support")
 
     // Mutation: the old length(cross) squares a finite 1e38 vector and
     // overflows before the reciprocal area density can be formed.
-    const float3 crossEdges = cross(p1 - p0, p2 - p0);
-    CHECK_FALSE(std::isfinite(length(crossEdges)));
-    CHECK(finiteVectorLength(crossEdges) > 0.0f);
+    CHECK_FALSE(std::isfinite(cross(p1 - p0, p2 - p0).z));
+    CHECK(inverseFiniteCrossLength(p1 - p0, p2 - p0) > 0.0f);
+
+    float distance = 0.0f;
+    const float3 direction = finiteDirectionAndDistance(make_float3(1e20f, 1e14f, 0.0f), distance);
+    CHECK(distance > 0.0f);
+    CHECK(std::isfinite(distance));
+    CHECK(dot(direction, direction) == doctest::Approx(1.0f));
+    CHECK_FALSE(std::isfinite(length(make_float3(1e20f, 1e14f, 0.0f))));
 }
 
 TEST_CASE("emissive mesh visibility ends before the traversed emitter")

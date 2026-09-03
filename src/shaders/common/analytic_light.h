@@ -24,9 +24,10 @@ struct AnalyticLightSample
 {
     float3 point{};
     float3 normal{};
-    // Reciprocal of the world-area density. For a disc this is its total area;
-    // for an ellipsoid it is 4*pi times the local affine area Jacobian.
-    float areaPdfDenominator = 0.0f;
+    // Density with respect to world area. Keeping p_A rather than 1/p_A is
+    // essential when a very large finite surface has a representable density
+    // although its area Jacobian itself exceeds float range.
+    float areaPdf = 0.0f;
 };
 
 struct AnalyticLightIntersection
@@ -44,6 +45,11 @@ DEVICE_FUNC float analyticDiscArea(float3 axisX, float3 axisY)
                0.0f;
 }
 
+DEVICE_FUNC float analyticDiscAreaPdf(float3 axisX, float3 axisY)
+{
+    return finiteCrossReciprocal(axisX, axisY, 1.0f / M_PI_F);
+}
+
 DEVICE_FUNC float3 affineSphereCofactor(float3 axisX, float3 axisY, float3 axisZ, float3 objectNormal)
 {
     return objectNormal.x * cross(axisY, axisZ) + objectNormal.y * cross(axisZ, axisX) +
@@ -59,26 +65,60 @@ DEVICE_FUNC float analyticAffineOrientation(float3 axisX, float3 axisY, float3 a
     return determinant > 0.0f ? 1.0f : (determinant < 0.0f ? -1.0f : 0.0f);
 }
 
-DEVICE_FUNC float3 scaledAffineSphereCofactor(float3 axisX, float3 axisY, float3 axisZ, float3 objectNormal)
+DEVICE_FUNC void objectTangentPlane(float3 objectNormal, THREAD_REF float3& tangent, THREAD_REF float3& bitangent)
 {
-    const float scaleX = fmaxf(fabsf(axisX.x), fmaxf(fabsf(axisX.y), fabsf(axisX.z)));
-    const float scaleY = fmaxf(fabsf(axisY.x), fmaxf(fabsf(axisY.y), fabsf(axisY.z)));
-    const float scaleZ = fmaxf(fabsf(axisZ.x), fmaxf(fabsf(axisZ.y), fabsf(axisZ.z)));
-    const float largest = fmaxf(scaleX, fmaxf(scaleY, scaleZ));
-    const float secondLargest = fmaxf(fminf(scaleX, scaleY), fminf(fmaxf(scaleX, scaleY), scaleZ));
-    if (!(scaleX > 0.0f) || !(scaleY > 0.0f) || !(scaleZ > 0.0f) || !(secondLargest > 0.0f) ||
-        !(largest <= 3.402823466e38f))
+    const float3 n = normalizeFiniteVectorOrZero(objectNormal);
+    if (!(dot(n, n) > 0.0f))
     {
-        return make_float3(0.0f);
+        tangent = make_float3(0.0f);
+        bitangent = make_float3(0.0f);
+        return;
     }
-    const float3 x = axisX / scaleX;
-    const float3 y = axisY / scaleY;
-    const float3 z = axisZ / scaleZ;
-    const float yzScale = (fmaxf(scaleY, scaleZ) / largest) * (fminf(scaleY, scaleZ) / secondLargest);
-    const float zxScale = (fmaxf(scaleZ, scaleX) / largest) * (fminf(scaleZ, scaleX) / secondLargest);
-    const float xyScale = (fmaxf(scaleX, scaleY) / largest) * (fminf(scaleX, scaleY) / secondLargest);
-    return objectNormal.x * yzScale * cross(y, z) + objectNormal.y * zxScale * cross(z, x) +
-           objectNormal.z * xyScale * cross(x, y);
+    const float3 reference = fabsf(n.z) < 0.999f ? make_float3(0.0f, 0.0f, 1.0f) : make_float3(0.0f, 1.0f, 0.0f);
+    tangent = normalizeFiniteVectorOrZero(cross(reference, n));
+    bitangent = cross(n, tangent);
+}
+
+DEVICE_FUNC float affineAxisScale(float3 axisX, float3 axisY, float3 axisZ)
+{
+    float scale = fmaxf(fabsf(axisX.x), fmaxf(fabsf(axisX.y), fabsf(axisX.z)));
+    scale = fmaxf(scale, fmaxf(fabsf(axisY.x), fmaxf(fabsf(axisY.y), fabsf(axisY.z))));
+    return fmaxf(scale, fmaxf(fabsf(axisZ.x), fmaxf(fabsf(axisZ.y), fabsf(axisZ.z))));
+}
+
+DEVICE_FUNC float affineSphereAreaPdfAndNormal(
+    float3 axisX, float3 axisY, float3 axisZ, float3 objectNormal, THREAD_REF float3& normal)
+{
+    normal = make_float3(0.0f);
+    const float axisScale = affineAxisScale(axisX, axisY, axisZ);
+    if (!(axisScale > 0.0f) || !(axisScale <= 3.402823466e38f))
+    {
+        return 0.0f;
+    }
+    float3 objectTangent;
+    float3 objectBitangent;
+    objectTangentPlane(objectNormal, objectTangent, objectBitangent);
+    const float3 worldTangent = objectTangent.x * axisX + objectTangent.y * axisY + objectTangent.z * axisZ;
+    const float3 worldBitangent = objectBitangent.x * axisX + objectBitangent.y * axisY + objectBitangent.z * axisZ;
+    const float orientation = analyticAffineOrientation(axisX, axisY, axisZ);
+    normal = orientation * finiteCrossDirection(worldTangent, worldBitangent);
+    const float areaPdf = finiteCrossReciprocal(worldTangent, worldBitangent, 1.0f / (4.0f * M_PI_F));
+    if (orientation == 0.0f || !(dot(normal, normal) > 0.0f) || !(areaPdf > 0.0f))
+    {
+        normal = make_float3(0.0f);
+        return 0.0f;
+    }
+    return areaPdf;
+}
+
+DEVICE_FUNC float3 transformedNormalCofactor(float3 axisX, float3 axisY, float3 axisZ, float3 objectNormal)
+{
+    float3 objectTangent;
+    float3 objectBitangent;
+    objectTangentPlane(objectNormal, objectTangent, objectBitangent);
+    const float3 worldTangent = objectTangent.x * axisX + objectTangent.y * axisY + objectTangent.z * axisZ;
+    const float3 worldBitangent = objectBitangent.x * axisX + objectBitangent.y * axisY + objectBitangent.z * axisZ;
+    return finiteCrossDirection(worldTangent, worldBitangent);
 }
 
 // Unit inverse-transpose normal for an affine map whose columns are the three
@@ -87,7 +127,7 @@ DEVICE_FUNC float3 scaledAffineSphereCofactor(float3 axisX, float3 axisY, float3
 DEVICE_FUNC float3 transformAffineNormal(float3 axisX, float3 axisY, float3 axisZ, float3 objectNormal)
 {
     const float orientation = analyticAffineOrientation(axisX, axisY, axisZ);
-    const float3 cofactorNormal = scaledAffineSphereCofactor(axisX, axisY, axisZ, objectNormal);
+    const float3 cofactorNormal = transformedNormalCofactor(axisX, axisY, axisZ, objectNormal);
     const float3 normal = normalizeFiniteVectorOrZero(cofactorNormal);
     if (orientation == 0.0f || !(dot(normal, normal) > 0.0f))
     {
@@ -102,13 +142,35 @@ DEVICE_FUNC bool analyticAffineTransformIsNonsingular(float3 axisX, float3 axisY
     {
         return false;
     }
-    const float cofactorXLength = finiteVectorLength(cross(axisY, axisZ));
-    const float cofactorYLength = finiteVectorLength(cross(axisZ, axisX));
-    const float cofactorZLength = finiteVectorLength(cross(axisX, axisY));
-    constexpr float maxJacobian = 3.402823466e38f / (4.0f * M_PI_F);
-    return cofactorXLength > 0.0f && cofactorYLength > 0.0f && cofactorZLength > 0.0f &&
-           cofactorXLength <= maxJacobian - cofactorYLength &&
-           cofactorXLength + cofactorYLength <= maxJacobian - cofactorZLength;
+    const float axisScale = affineAxisScale(axisX, axisY, axisZ);
+    if (!(axisScale > 0.0f))
+    {
+        return false;
+    }
+    const float3 scaledX = axisX / axisScale;
+    const float3 scaledY = axisY / axisScale;
+    const float3 scaledZ = axisZ / axisScale;
+    const float scaledDeterminant = dot(scaledX, cross(scaledY, scaledZ));
+    if (!(fabsf(scaledDeterminant) > 0.0f))
+    {
+        return false;
+    }
+
+    // For a unit object normal n, J_A(n)=|cofactor(A)n|. Its maximum is at
+    // most the sum of the three column norms. Express the reciprocal bound in
+    // terms of representable basis densities, so no overflowing Jacobian is
+    // formed and every point on an accepted ellipsoid has positive p_A.
+    float3 ignoredNormal;
+    const float px = affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, make_float3(1.0f, 0.0f, 0.0f), ignoredNormal);
+    const float py = affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, make_float3(0.0f, 1.0f, 0.0f), ignoredNormal);
+    const float pz = affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, make_float3(0.0f, 0.0f, 1.0f), ignoredNormal);
+    const float minimumPdf = fminf(px, fminf(py, pz));
+    if (!(minimumPdf > 0.0f))
+    {
+        return false;
+    }
+    const float conservativePdf = minimumPdf / (minimumPdf / px + minimumPdf / py + minimumPdf / pz);
+    return conservativePdf > 0.0f;
 }
 
 DEVICE_FUNC float3 affineSphereCoordinates(float3 axisX, float3 axisY, float3 axisZ, float3 worldOffset)
@@ -133,8 +195,8 @@ DEVICE_FUNC AnalyticLightSample
 sampleAnalyticDisc(float3 center, float3 axisX, float3 axisY, float3 emissionNormal, float u1, float u2)
 {
     AnalyticLightSample sample;
-    const float area = analyticDiscArea(axisX, axisY);
-    if (!(area > 0.0f) || !(dot(emissionNormal, emissionNormal) > 0.0f))
+    const float areaPdf = analyticDiscAreaPdf(axisX, axisY);
+    if (!(areaPdf > 0.0f) || !(dot(emissionNormal, emissionNormal) > 0.0f))
     {
         return sample;
     }
@@ -142,7 +204,7 @@ sampleAnalyticDisc(float3 center, float3 axisX, float3 axisY, float3 emissionNor
     const float phi = 2.0f * M_PI_F * u2;
     sample.point = center + radius * (cosf(phi) * axisX + sinf(phi) * axisY);
     sample.normal = emissionNormal;
-    sample.areaPdfDenominator = area;
+    sample.areaPdf = areaPdf;
     return sample;
 }
 
@@ -164,15 +226,11 @@ sampleAnalyticEllipsoid(float3 center, float3 axisX, float3 axisY, float3 axisZ,
         objectNormal /= sqrtf(objectLengthSquared);
     }
     sample.point = center + objectNormal.x * axisX + objectNormal.y * axisY + objectNormal.z * axisZ;
-    const float3 cofactorNormal = affineSphereCofactor(axisX, axisY, axisZ, objectNormal);
-    const float jacobian = finiteVectorLength(cofactorNormal);
-    const float orientation = analyticAffineOrientation(axisX, axisY, axisZ);
-    sample.normal = jacobian > 0.0f ? orientation * normalizeFiniteVectorOrZero(cofactorNormal) : make_float3(0.0f);
-    sample.areaPdfDenominator = 4.0f * M_PI_F * jacobian;
+    sample.areaPdf = affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, objectNormal, sample.normal);
     return sample;
 }
 
-DEVICE_FUNC float analyticEllipsoidAreaPdfDenominator(
+DEVICE_FUNC float analyticEllipsoidAreaPdf(
     float3 center, float3 axisX, float3 axisY, float3 axisZ, float3 point, THREAD_REF float3& normal)
 {
     if (!analyticAffineTransformIsNonsingular(axisX, axisY, axisZ))
@@ -180,9 +238,7 @@ DEVICE_FUNC float analyticEllipsoidAreaPdfDenominator(
         normal = make_float3(0.0f);
         return 0.0f;
     }
-    float axisScale = fmaxf(fabsf(axisX.x), fmaxf(fabsf(axisX.y), fabsf(axisX.z)));
-    axisScale = fmaxf(axisScale, fmaxf(fabsf(axisY.x), fmaxf(fabsf(axisY.y), fabsf(axisY.z))));
-    axisScale = fmaxf(axisScale, fmaxf(fabsf(axisZ.x), fmaxf(fabsf(axisZ.y), fabsf(axisZ.z))));
+    const float axisScale = affineAxisScale(axisX, axisY, axisZ);
     if (!(axisScale > 0.0f) || !(axisScale <= 3.402823466e38f))
     {
         normal = make_float3(0.0f);
@@ -199,10 +255,7 @@ DEVICE_FUNC float analyticEllipsoidAreaPdfDenominator(
         normal = make_float3(0.0f);
         return 0.0f;
     }
-    const float3 cofactorNormal = affineSphereCofactor(axisX, axisY, axisZ, objectNormal);
-    const float jacobian = finiteVectorLength(cofactorNormal);
-    normal = jacobian > 0.0f ? orientation * normalizeFiniteVectorOrZero(cofactorNormal) : make_float3(0.0f);
-    return 4.0f * M_PI_F * jacobian;
+    return affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, objectNormal, normal);
 }
 
 // Deterministic equal-area quadrature of the smooth ellipsoid's surface area.
@@ -223,7 +276,18 @@ DEVICE_FUNC float analyticEllipsoidSurfaceArea(float3 axisX, float3 axisY, float
         const float radial = sqrtf(fmaxf(1.0f - z * z, 0.0f));
         const float phi = goldenAngle * float(i);
         const float3 objectNormal = make_float3(radial * cosf(phi), radial * sinf(phi), z);
-        jacobianMean += finiteVectorLength(affineSphereCofactor(axisX, axisY, axisZ, objectNormal)) / float(sampleCount);
+        float3 normal;
+        const float areaPdf = affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, objectNormal, normal);
+        if (!(areaPdf > 0.0f))
+        {
+            return 0.0f;
+        }
+        const float jacobian = 1.0f / (4.0f * M_PI_F * areaPdf);
+        if (!(jacobian > 0.0f) || !(jacobian <= 3.402823466e38f))
+        {
+            return 0.0f;
+        }
+        jacobianMean += jacobian / float(sampleCount);
     }
     return 4.0f * M_PI_F * jacobianMean;
 }
@@ -264,18 +328,14 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticDisc(float3 rayOrigin,
     const float3 scaledX = axisX / axisScale;
     const float3 scaledY = axisY / axisScale;
     const float3 offset = (rayOrigin + distance * rayDirection - center) / axisScale;
-    const float xx = dot(scaledX, scaledX);
-    const float xy = dot(scaledX, scaledY);
-    const float yy = dot(scaledY, scaledY);
-    const float determinant = xx * yy - xy * xy;
+    const float3 dualNormal = cross(scaledX, scaledY);
+    const float determinant = dot(dualNormal, planeNormal);
     if (!(determinant > 0.0f))
     {
         return result;
     }
-    const float offsetX = dot(offset, scaledX);
-    const float offsetY = dot(offset, scaledY);
-    const float x = (yy * offsetX - xy * offsetY) / determinant;
-    const float y = (xx * offsetY - xy * offsetX) / determinant;
+    const float x = dot(cross(offset, scaledY), planeNormal) / determinant;
+    const float y = dot(cross(scaledX, offset), planeNormal) / determinant;
     if (!(x * x + y * y <= 1.0f))
     {
         return result;
@@ -372,8 +432,8 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
 
     const float3 point = rayOrigin + distance * rayDirection;
     float3 normal;
-    const float areaPdfDenominator = analyticEllipsoidAreaPdfDenominator(center, axisX, axisY, axisZ, point, normal);
-    if (!(areaPdfDenominator > 0.0f))
+    const float areaPdf = analyticEllipsoidAreaPdf(center, axisX, axisY, axisZ, point, normal);
+    if (!(areaPdf > 0.0f))
     {
         return result;
     }

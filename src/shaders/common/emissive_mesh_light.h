@@ -76,10 +76,11 @@ DEVICE_FUNC EmissiveVisibilitySegment emissiveVisibilitySegment(float3 sourceOff
     segment.maxDistance = 0.0f;
     segment.valid = false;
     const float3 delta = targetOffset - sourceOffset;
-    const float distance = finiteVectorLength(delta);
+    float distance;
+    const float3 direction = finiteDirectionAndDistance(delta, distance);
     if (distance > 0.0f)
     {
-        segment.direction = delta / distance;
+        segment.direction = direction;
         segment.maxDistance = distance;
         segment.valid = true;
     }
@@ -96,9 +97,11 @@ sampleEmissiveTriangle(float3 p0, float3 p1, float3 p2, float2 uv0, float2 uv1, 
     sample.areaPdf = 0.0f;
     sample.valid = false;
 
-    const float3 crossEdges = cross(p1 - p0, p2 - p0);
-    const float twiceArea = finiteVectorLength(crossEdges);
-    if (!(twiceArea > 0.0f))
+    const float3 edge1 = p1 - p0;
+    const float3 edge2 = p2 - p0;
+    const float inverseTwiceArea = inverseFiniteCrossLength(edge1, edge2);
+    const float3 normal = finiteCrossDirection(edge1, edge2);
+    if (!(inverseTwiceArea > 0.0f) || !(dot(normal, normal) > 0.0f))
     {
         return sample;
     }
@@ -108,10 +111,10 @@ sampleEmissiveTriangle(float3 p0, float3 p1, float3 p2, float2 uv0, float2 uv1, 
     const float b1 = root * (1.0f - fminf(fmaxf(u1, 0.0f), 1.0f));
     const float b2 = root - b1;
     sample.point = b0 * p0 + b1 * p1 + b2 * p2;
-    sample.normal = normalizeFiniteVectorOrZero(crossEdges);
+    sample.normal = normal;
     sample.uv = b0 * uv0 + b1 * uv1 + b2 * uv2;
     constexpr float maxFinite = 3.402823466e38f;
-    sample.areaPdf = fminf(2.0f / twiceArea, maxFinite);
+    sample.areaPdf = fminf(2.0f * inverseTwiceArea, maxFinite);
     sample.valid = true;
     return sample;
 }

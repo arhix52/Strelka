@@ -628,12 +628,12 @@ static __forceinline__ __device__ LightConnection connectEmissiveMesh(SamplerSta
         return c;
     }
     const float3 offset = sample.point - si.position;
-    const float distance = length(offset);
+    float distance;
+    const float3 direction = finiteDirectionAndDistance(offset, distance);
     if (!(distance > 1e-5f))
     {
         return c;
     }
-    const float3 direction = offset / distance;
     const float3 emission = emissiveMeshRadiance(mesh, sample.uv);
     if (!emitsLight(emission) || (!volumeEvent && !lightReachesShadingPoint(si, direction)))
     {

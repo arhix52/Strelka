@@ -117,11 +117,31 @@ DEVICE_FUNC float areaLightSolidAnglePdf(float distToLight, float cosAtLight, fl
     return scaledDistance <= largestFiniteDistance ? scaledDistance * scaledDistance / cosAtLight : maxFinite;
 }
 
+/// Area density converted to solid angle without first materialising its
+/// reciprocal area/Jacobian. The multiplication order keeps p_A*d^2 finite in
+/// cases where d^2 alone overflows.
+DEVICE_FUNC float areaPdfToSolidAnglePdf(float distToLight, float cosAtLight, float areaPdf)
+{
+    if (!lightSampleFacesVertex(cosAtLight) || !(distToLight > 0.0f) || !(areaPdf > 0.0f))
+    {
+        return 0.0f;
+    }
+    constexpr float maxFinite = 3.402823466e38f;
+    const float firstProduct = areaPdf * distToLight;
+    const float productLimit = maxFinite * cosAtLight / distToLight;
+    return firstProduct > 0.0f && firstProduct <= productLimit ? firstProduct * distToLight / cosAtLight : maxFinite;
+}
+
 /// Emissive area of a sphere of radius r. Named because the estimator, the pdf
 /// and the host's radiometric bake all have to use the same one.
 DEVICE_FUNC float sphereLightArea(float radius)
 {
     return 4.0f * M_PI_F * radius * radius;
+}
+
+DEVICE_FUNC float sphereLightAreaPdf(float radius)
+{
+    return radius > 0.0f ? (1.0f / (4.0f * M_PI_F * radius)) / radius : 0.0f;
 }
 
 /// A sphere light sampled uniformly over its surface.
@@ -132,7 +152,7 @@ DEVICE_FUNC float sphereLightArea(float radius)
 /// That costs half the samples to variance and nothing to correctness.
 DEVICE_FUNC float sphereLightSolidAnglePdf(float distToLight, float cosAtLight, float radius)
 {
-    return areaLightSolidAnglePdf(distToLight, cosAtLight, sphereLightArea(radius));
+    return areaPdfToSolidAnglePdf(distToLight, cosAtLight, sphereLightAreaPdf(radius));
 }
 
 /// A dome: uniform over the whole sphere of directions.
@@ -277,7 +297,7 @@ struct LightPdfQuery
     int type;
     float distToLight; ///< shading vertex to the point on the light
     float cosAtLight; ///< -dot(L, light normal); <= 0 means the sample faces away
-    float area; ///< reciprocal local area density; total area when p_A is uniform
+    float areaPdf; ///< density with respect to world area
     float radius; ///< point/spot/projector soft radius
     float halfAngle; ///< distant light's cone half angle
     float solidAngle; ///< rect solid-angle sampling: > 0 selects 1/S over the area form
@@ -289,7 +309,7 @@ DEVICE_FUNC LightPdfQuery makeLightPdfQuery(int type)
     q.type = type;
     q.distToLight = 0.0f;
     q.cosAtLight = 0.0f;
-    q.area = 0.0f;
+    q.areaPdf = 0.0f;
     q.radius = 0.0f;
     q.halfAngle = 0.0f;
     q.solidAngle = 0.0f;
@@ -310,11 +330,11 @@ DEVICE_FUNC float lightSolidAnglePdf(const THREAD_REF LightPdfQuery& q)
         // caller decides which by passing S or leaving it at zero, and it has to
         // make that decision the same way in both places or the halves disagree.
         return (q.solidAngle > 0.0f) ? (1.0f / q.solidAngle) :
-                                       areaLightSolidAnglePdf(q.distToLight, q.cosAtLight, q.area);
+                                       areaPdfToSolidAnglePdf(q.distToLight, q.cosAtLight, q.areaPdf);
     case LIGHT_TYPE_DISC:
-        return areaLightSolidAnglePdf(q.distToLight, q.cosAtLight, q.area);
+        return areaPdfToSolidAnglePdf(q.distToLight, q.cosAtLight, q.areaPdf);
     case LIGHT_TYPE_SPHERE:
-        return areaLightSolidAnglePdf(q.distToLight, q.cosAtLight, q.area);
+        return areaPdfToSolidAnglePdf(q.distToLight, q.cosAtLight, q.areaPdf);
     case LIGHT_TYPE_DISTANT:
         return coneLightSolidAnglePdf(q.halfAngle);
     case LIGHT_TYPE_DOME:
