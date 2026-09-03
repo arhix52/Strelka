@@ -816,12 +816,9 @@ LightConnection connectLight(constant Uniforms& uniforms,
     // positive cosine there. Rejecting a sliver of grazing ones here while the
     // light hit still deducts a share for them loses that share outright. OptiX
     // has always tested against zero.
-    const bool punctual = lightIsPunctual(light.type);
     const bool lit = lightReachesShadingPoint(si, lightSampleData.L);
-    const bool facesLight = lightSampleFacesVertex(-dot(lightSampleData.L, lightSampleData.normal));
-    const bool facing = volumeEvent ? (emitsLight(Li) && (punctual || facesLight)) :
-                        punctual    ? (lit && emitsLight(Li)) :
-                                      (lit && facesLight && emitsLight(Li));
+    const bool facesLight = lightConnectionFacesVertex(light.type, -dot(lightSampleData.L, lightSampleData.normal));
+    const bool facing = (volumeEvent || lit) && facesLight && emitsLight(Li);
     if (facing)
     {
         // The cosine belongs here because bsdf_eval() returns f alone, unlike

@@ -237,6 +237,14 @@ DEVICE_FUNC bool lightIsInfinite(int type)
     return type == LIGHT_TYPE_DISTANT || type == LIGHT_TYPE_DOME;
 }
 
+/// Whether the emitter itself can send the sampled direction toward a vertex.
+/// Infinite lights have directional support but no emitting surface normal;
+/// applying an area-light facing test would cut wide distant caps in half.
+DEVICE_FUNC bool lightConnectionFacesVertex(int type, float cosAtLight)
+{
+    return lightIsPunctual(type) || lightIsInfinite(type) || lightSampleFacesVertex(cosAtLight);
+}
+
 /// Conditional solid-angle density for evaluating an analytic infinite light
 /// along a direction selected by the BSDF. `cosToAxis` is dot(W, -normal) for a
 /// distant light and is ignored for a dome.

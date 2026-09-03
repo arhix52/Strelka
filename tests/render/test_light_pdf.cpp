@@ -516,6 +516,20 @@ TEST_CASE("finite distant support is exactly its spherical cap")
     CHECK(integral / double(samples) == doctest::Approx(1.0).epsilon(0.02));
 }
 
+TEST_CASE("infinite lights do not inherit area-emitter sidedness")
+{
+    CHECK(lightConnectionFacesVertex(LIGHT_TYPE_DISTANT, -1.0f));
+    CHECK(lightConnectionFacesVertex(LIGHT_TYPE_DOME, -1.0f));
+    CHECK(lightConnectionFacesVertex(LIGHT_TYPE_POINT, -1.0f));
+    CHECK(lightConnectionFacesVertex(LIGHT_TYPE_RECT, 1e-6f));
+    CHECK_FALSE(lightConnectionFacesVertex(LIGHT_TYPE_RECT, -1e-6f));
+
+    // Mutation: the former unconditional area-facing test rejected exactly
+    // half of a distant light whose cap spans the full sphere.
+    CHECK_FALSE(lightSampleFacesVertex(-1.0f));
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, float(M_PI_F), -1.0f) > 0.0f);
+}
+
 TEST_CASE("a sharp distant is delta and has no continuous density")
 {
     CHECK(distantLightIsDelta(0.0f));

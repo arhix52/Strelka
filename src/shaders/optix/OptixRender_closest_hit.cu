@@ -419,9 +419,8 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
     // fibre, where the hemisphere test is the wrong question -- see the note on
     // it in shading/shading_common.h.
     const bool lit = volumeEvent || lightReachesShadingPoint(si, lightSampleData.L);
-    const bool facing = lightIsPunctual(light.type) ?
-                            (lit && emitsLight(Li)) :
-                            (lit && -dot(lightSampleData.L, lightSampleData.normal) > 0.0f && emitsLight(Li));
+    const bool facing = lit && lightConnectionFacesVertex(light.type, -dot(lightSampleData.L, lightSampleData.normal)) &&
+                        emitsLight(Li);
     if (facing)
     {
         // The cosine belongs here because bsdf_eval() returns f alone, unlike

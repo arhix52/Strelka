@@ -396,3 +396,17 @@ is out of scope unless it blocks validation.
   clean, production Metal shaders compile, and the full harness passes 787/787 tests with 68,679,914 assertions.
   The actual Apple M4 Pro environment audit remains clean; it does not execute this surface path. OptiX shares the
   predicate but remains externally compile/runtime `UNVERIFIED`. Status: FIXED.
+
+## Adversarial correction E: infinite-light emitter sidedness
+
+- Random variable/measure: finite distant and dome directions are continuous in `domega`; unlike area lights they
+  have no emitter-surface normal. Receiver-side support remains the shaded-frame predicate, and the light PDF keeps
+  its existing selection PMF times spherical-cap/full-sphere conditional density.
+- Reproducer/mutation: at distant half-angle `pi`, the declared support is the sphere, but the old area-facing test
+  `-dot(L, normal)>0` rejected one hemisphere in NEE while miss evaluation retained and MIS-weighted it.
+- Implementation: a shared predicate applies emitter-facing only to finite area lights; punctual and infinite lights
+  are not clipped. Delta distant classification and all MIS strategy identities are unchanged.
+- Validation: the focused case passes 7/7 assertions; Debug and Release CTest pass 4/4, targeted ASan+UBSan is
+  clean, production Metal shaders compile, and the full harness passes 788/788 tests with 68,679,921 assertions.
+  The actual Apple M4 Pro environment audit remains clean but does not execute the distant path. OptiX shares the
+  predicate but remains externally compile/runtime `UNVERIFIED`. Status: FIXED.
