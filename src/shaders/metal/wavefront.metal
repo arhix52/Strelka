@@ -648,6 +648,7 @@ static void extendImpl(uint gid,
                        // sample a free flight and reads it from the material the path is inside.
                        device const Material* materials,
                        device const MediumPathState* mediumPaths,
+                       device const UniformLight* lights,
                        // Chosen per dispatch rather than per ray: the only thing it distinguishes
                        // is the camera bounce from the rest, and `extend` is encoded once per
                        // bounce anyway. Reading the path's depth here to answer the same question
@@ -779,9 +780,21 @@ static void extendImpl(uint gid,
         hit = captureExtendIntersection(surfaceHit, curveParameter);
     }
 
+    const float hardwareDistance = hit.type == intersection_type::none ? r.max_distance : hit.distance;
+    AnalyticAreaLightHit analyticHit;
+    analyticHit.hit = false;
+    analyticHit.distance = hardwareDistance;
+    if (SPEC_LIGHTS && uniforms.numLights > 0u)
+    {
+        const bool includeCameraHidden = (rayMask & GEOMETRY_MASK_LIGHT_HIDDEN) != 0u;
+        analyticHit = findAnalyticAreaLightHit(lights, uniforms.numLights, r.origin, r.direction, r.min_distance,
+                                              hardwareDistance, includeCameraHidden);
+    }
+    const float surfaceDistance = analyticHit.hit ? analyticHit.distance : hardwareDistance;
+
     // Escaped rays skip shade and go to miss. Fog/SSS are decided here
     // because only extend knows whether a surface precedes the medium event.
-    if (mediumHitBit != 0u && (hit.type == intersection_type::none || mediumScatterT < hit.distance))
+    if (mediumHitBit != 0u && mediumScatterT < surfaceDistance)
     {
         HitRecord mediumRec;
         mediumRec.geomEntryIndex = mediumHitBit;
@@ -790,6 +803,19 @@ static void extendImpl(uint gid,
         mediumRec.barycentrics = vector_float2(0.0f, 0.0f);
         mediumRec.distance = mediumScatterT;
         hits[tid] = mediumRec;
+        queuePush(hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
+        return;
+    }
+
+    if (analyticHit.hit)
+    {
+        HitRecord rec;
+        rec.geomEntryIndex = HIT_LIGHT_BIT | analyticHit.lightId;
+        rec.instanceIndex = 0u;
+        rec.primitiveId = 0u;
+        rec.barycentrics = vector_float2(0.0f);
+        rec.distance = analyticHit.distance;
+        hits[tid] = rec;
         queuePush(hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
@@ -831,11 +857,12 @@ static void extendImpl(uint gid,
         device uint32_t* missQueue [[buffer(10)]], device atomic_uint* missCounter [[buffer(11)]],                     \
         device const PathState* paths [[buffer(12)]], device const Material* materials [[buffer(13)]],                 \
         constant uint32_t& rayMask [[buffer(14)]], TRAITS::structure volumeAccelerationStructure [[buffer(15)]],       \
-        constant uint32_t& queueOffset [[buffer(16)]], device const MediumPathState* mediumPaths [[buffer(17)]])       \
+        constant uint32_t& queueOffset [[buffer(16)]], device const MediumPathState* mediumPaths [[buffer(17)]],      \
+        device const UniformLight* lights [[buffer(18)]])                                                             \
     {                                                                                                                  \
         extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure, volumeAccelerationStructure, \
                            rays, hits, sampleIdx, queue, control, hitQueue, hitCounter, missQueue, missCounter, paths, \
-                           materials, mediumPaths, rayMask);                                                           \
+                           materials, mediumPaths, lights, rayMask);                                                   \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
@@ -2047,8 +2074,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 // this weight -- and the next-event estimate at that vertex has
                 // already claimed the rest. The two then sum to more than one.
                 const float3 misOrigin = rayOrigin - rayDir * p.misDistance;
-                const float lightPdf =
-                    getLightPdf(currLight, hitPoint, misOrigin, uniforms.rectLightSamplingMethod) * lightSelectionPdf;
+                const float lightPdf = getLightPdf(currLight, hitPoint, misOrigin,
+                                                   uniforms.rectLightSamplingMethod) *
+                                       lightSelectionPdf;
                 const float mis = computeMisWeight(p.lastBsdfPdf, lightPdf, uniforms.misHeuristic);
                 radiance += throughput * Le * mis;
                 sharcLight = Le * mis;
@@ -3146,7 +3174,8 @@ static void guideImpl(uint gid,
                       device const char* prevVertexBuffer,
                       device const uint32_t* indexBuffer,
                       device const packed_float3* curvePoints,
-                      device const uint32_t* curveSegments)
+                      device const uint32_t* curveSegments,
+                      device const UniformLight* lights)
 {
     if (gid >= uniforms.width * uniforms.height)
     {
@@ -3189,6 +3218,27 @@ static void guideImpl(uint gid,
             T::trace(isect, r, accelerationStructure, uniforms.primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN, motionTime);
         const float curveParameter = rawHit.type == intersection_type::curve ? T::curveParameter(rawHit) : 0.0f;
         const ExtendIntersection hit = captureExtendIntersection(rawHit, curveParameter);
+        const float hardwareDistance = hit.type == intersection_type::none ? INFINITY : hit.distance;
+        AnalyticAreaLightHit analyticHit;
+        analyticHit.hit = false;
+        if (SPEC_LIGHTS && uniforms.numLights > 0u)
+        {
+            analyticHit = findAnalyticAreaLightHit(lights, uniforms.numLights, origin, direction, r.min_distance,
+                                                  hardwareDistance, true);
+        }
+        if (analyticHit.hit)
+        {
+            totalDistance += analyticHit.distance;
+            if (replaceMaterial)
+            {
+                storeGuideMiss(aov, gid, direction, totalDistance);
+            }
+            else
+            {
+                aov[gid].specularHitDistance = totalDistance;
+            }
+            return;
+        }
         if (hit.type == intersection_type::none)
         {
             const float missDistance = totalDistance + max(uniforms.sceneExtent, 1e3f);
@@ -3371,10 +3421,11 @@ static void guideImpl(uint gid,
         device const Material* materials [[buffer(5)]],                                                               \
         device const GeometryEntry* geometryEntries [[buffer(6)]], device const char* vertexBuffer [[buffer(7)]],      \
         device const char* prevVertexBuffer [[buffer(8)]], device const uint32_t* indexBuffer [[buffer(9)]],           \
-        device const packed_float3* curvePoints [[buffer(10)]], device const uint32_t* curveSegments [[buffer(11)]])   \
+        device const packed_float3* curvePoints [[buffer(10)]], device const uint32_t* curveSegments [[buffer(11)]],  \
+        device const UniformLight* lights [[buffer(12)]])                                                             \
     {                                                                                                                  \
         guideImpl<TRAITS>(gid, uniforms, instances, accelerationStructure, aov, materials, geometryEntries,           \
-                          vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments);                    \
+                          vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments, lights);            \
     }
 
 WF_GUIDE_ENTRY(wavefrontGuide, MotionTraversal)

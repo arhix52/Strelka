@@ -1572,7 +1572,11 @@ void OptiXRender::resolveInstanceGeometry(OptixInstance& oi, const oka::Instance
         const bool enabled = known ? descs[instance.mLightId].enabled : true;
         const bool visibleToCamera = known ? descs[instance.mLightId].visibleToCamera : true;
         const uint32_t lightType = known ? descs[instance.mLightId].type : (uint32_t)LIGHT_TYPE_RECT;
-        if (!enabled || lightTypeIsPunctual((int)lightType))
+        // Smooth discs and ellipsoids are intersected analytically by the ray
+        // programs. Suppress the coarse editor proxy so it cannot become a
+        // nearer, incompatible surface.
+        const bool analyticArea = lightUsesAnalyticAreaIntersection((int)lightType);
+        if (!enabled || lightTypeIsPunctual((int)lightType) || analyticArea)
         {
             oi.visibilityMask = 0;
         }

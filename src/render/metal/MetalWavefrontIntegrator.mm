@@ -578,6 +578,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             table->setAddress(ring.push(extendMask), 14);
             table->setResource(scene.volumeAccelerationStructure->gpuResourceID(), 15);
             bind(mMediumPathStateBuffer, 0, 17);
+            bind(scene.lightBuffer, 0, 18);
             const uint32_t batchBegin = chunk.phase == WavefrontChunkPhase::Complete ? 0u : chunk.traversalBatchBegin;
             const uint32_t batchEnd = chunk.phase == WavefrontChunkPhase::Complete ?
                                           traversalBatchCount :
@@ -744,6 +745,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         bind(scene.indexBuffer, 0, 9);
         bind(scene.curvePointBuffer, 0, 10);
         bind(scene.curveSegmentBuffer, 0, 11);
+        bind(scene.lightBuffer, 0, 12);
         enc->dispatchThreadgroups(fullGrid, tg);
         barrier();
     }
@@ -1066,6 +1068,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setAccelerationStructure(scene.volumeAccelerationStructure, 15);
             enc->setBytes(&traversalQueueOffset, sizeof(traversalQueueOffset), 16);
             enc->setBuffer(mMediumPathStateBuffer, 0, 17);
+            enc->setBuffer(scene.lightBuffer, 0, 18);
             enc->dispatchThreadgroups(mControlBuffer, kDispatchArgsOffset, tg);
             enc->popDebugGroup();
 
@@ -1206,6 +1209,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         enc->setBuffer(scene.indexBuffer, 0, 9);
         enc->setBuffer(scene.curvePointBuffer ? scene.curvePointBuffer : scene.placeholderBuffer, 0, 10);
         enc->setBuffer(scene.curveSegmentBuffer ? scene.curveSegmentBuffer : scene.placeholderBuffer, 0, 11);
+        enc->setBuffer(scene.lightBuffer, 0, 12);
         enc->dispatchThreads(MTL::Size(static_cast<NS::UInteger>(width) * height, 1, 1), tg);
         enc->memoryBarrier(MTL::BarrierScopeBuffers);
     }

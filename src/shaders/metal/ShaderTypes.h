@@ -238,9 +238,8 @@ struct Uniforms
     // integral, so at convergence they must produce the same image; the
     // difference between them measures estimator inconsistency directly.
     uint32_t estimatorMode;
-    // Ray mask for camera/secondary rays. Excluding light geometry is the only
-    // way to actually remove analytic lights: zeroing numLights just disables
-    // NEE's light selection, the emissive geometry is still hit by BSDF rays.
+    // Ray mask for camera/secondary hardware traversal. `numLights` separately
+    // gates smooth analytic-light intersections performed in the extend kernel.
     uint32_t primaryRayMask;
     // RGB tint plus the probability of choosing the environment over analytic
     // lights. float4 uses the same 16-byte slot float3 occupied, so this adds no
@@ -680,6 +679,9 @@ static_assert(sizeof(SkinningParams) == 16, "SkinningParams host/Metal ABI chang
 // pad1: KHR attenuation range (0 = infinite).
 // points[0] for point/spot/projector: (soft radius, IES profile, projector image
 // slot, projector frame aspect); an unused slot carries -1, not a stale value.
+// points[0..3] for a sphere: affine axis X, centre, affine axis Y, affine axis Z.
+// points[1..3] for a disc: centre, affine axis X, affine axis Y.
+// normal.w: analytic intersection visibility bits (camera, secondary).
 // halfAngle: distant cone, spot outer cone, or half the projector's horizontal
 // field of view.
 struct UniformLight

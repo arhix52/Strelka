@@ -95,11 +95,12 @@ DEVICE_FUNC bool lightSampleFacesVertex(float cosAtLight)
     return cosAtLight > 0.0f;
 }
 
-/// A point drawn uniformly over an emitter's area, converted to solid angle.
+/// A point drawn from an emitter's area measure, converted to solid angle.
 ///
-/// p_omega = p_A * d^2 / cos(theta_light), with p_A = 1/area. Returning zero for
-/// a back-facing or degenerate sample is what the callers want: the light half
-/// then contributes nothing and the BSDF half is handed the whole direction.
+/// `area` is the reciprocal local area density, `1/p_A`. It is the total area
+/// for uniform-area emitters; for an affine ellipsoid sampled by mapping a
+/// uniform unit-sphere direction it is `4*pi*J_A(n_object)`. Thus
+/// p_omega = d^2 / (cos(theta_light) * area).
 DEVICE_FUNC float areaLightSolidAnglePdf(float distToLight, float cosAtLight, float area)
 {
     if (!lightSampleFacesVertex(cosAtLight) || !(area > 0.0f))
@@ -261,8 +262,8 @@ struct LightPdfQuery
     int type;
     float distToLight; ///< shading vertex to the point on the light
     float cosAtLight; ///< -dot(L, light normal); <= 0 means the sample faces away
-    float area; ///< emissive area: w*h for a rect, pi r^2 for a disc
-    float radius; ///< sphere radius, or a point/spot light's soft radius
+    float area; ///< reciprocal local area density; total area when p_A is uniform
+    float radius; ///< point/spot/projector soft radius
     float halfAngle; ///< distant light's cone half angle
     float solidAngle; ///< rect solid-angle sampling: > 0 selects 1/S over the area form
 };
@@ -298,7 +299,7 @@ DEVICE_FUNC float lightSolidAnglePdf(const THREAD_REF LightPdfQuery& q)
     case LIGHT_TYPE_DISC:
         return areaLightSolidAnglePdf(q.distToLight, q.cosAtLight, q.area);
     case LIGHT_TYPE_SPHERE:
-        return sphereLightSolidAnglePdf(q.distToLight, q.cosAtLight, q.radius);
+        return areaLightSolidAnglePdf(q.distToLight, q.cosAtLight, q.area);
     case LIGHT_TYPE_DISTANT:
         return coneLightSolidAnglePdf(q.halfAngle);
     case LIGHT_TYPE_DOME:

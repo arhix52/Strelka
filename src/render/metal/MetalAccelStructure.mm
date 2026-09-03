@@ -1,6 +1,7 @@
 #include "MetalAccelStructure.h"
 
 #include "ShaderTypes.h"
+#include <analytic_light.h>
 
 #include <env.h>
 #include <log.h>
@@ -702,7 +703,11 @@ bool MetalAccelStructure::step(double budgetMs)
                 const bool visibleToCamera = curr.mLightId < mScene->getLightsDesc().size() ?
                                                  mScene->getLightsDesc()[curr.mLightId].visibleToCamera :
                                                  true;
-                if (!enabled || lightTypeIsPunctual(lightType))
+                // Smooth discs and ellipsoids are intersected analytically in
+                // the wavefront kernels. Their coarse editor proxy must not
+                // compete with that surface in hardware traversal.
+                const bool analyticArea = lightUsesAnalyticAreaIntersection(lightType);
+                if (!enabled || lightTypeIsPunctual(lightType) || analyticArea)
                     emitted.mask = 0;
                 else
                     emitted.mask = visibleToCamera ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_LIGHT_HIDDEN;
@@ -1524,4 +1529,3 @@ void MetalAccelStructure::release()
 }
 
 } // namespace oka::metal
-

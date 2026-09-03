@@ -379,9 +379,13 @@ extern "C" __global__ void __raygen__rg()
             // replaces -- same payloads, same programs, same results. The payload
             // pair is a packed pointer to PerRayData in local memory, so nothing
             // rides in the registers that the split could drop.
+            const AnalyticAreaLightHit analyticHit = findAnalyticAreaLightHit(
+                params.scene.lights, params.scene.numLights, ray_origin, ray_direction, params.materialRayTmin, 1e16f,
+                prd.depth != 0u);
+            const float traversalMax = analyticHit.hit ? analyticHit.distance : 1e16f;
             optixTraverse(params.handle, ray_origin, ray_direction,
                           params.materialRayTmin, // Min intersection distance
-                          1e16f, // Max intersection distance
+                          traversalMax, // Stop before geometry behind an analytic emitter.
                           time, // rayTime -- used for motion blur
                           // Camera rays see what the camera should see; every
                           // bounce after also sees the emitters marked hidden, so
@@ -729,8 +733,7 @@ extern "C" __global__ void __closesthit__light()
             // one.
             const float3 misOrigin = optixGetWorldRayOrigin() - rayDir * prd->misDistance;
             float lightPdf =
-                getLightPdf(currLight, hitPoint, misOrigin, params.rectLightSamplingMethod) *
-                lightSelectionPdf;
+                getLightPdf(currLight, hitPoint, misOrigin, params.rectLightSamplingMethod) * lightSelectionPdf;
             const float misWeight = computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
             radiance = prd->throughput * Le * misWeight;
         }

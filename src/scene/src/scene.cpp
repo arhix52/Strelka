@@ -4,6 +4,7 @@
 #include <chrono>
 #include <strelka/scene/vertex_packing.h>
 #include <strelka/scene/light_desc.h>
+#include <analytic_light.h>
 
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/norm.hpp>
@@ -707,9 +708,17 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].points[2] = localTransform * glm::float4(1.f, 0.f, 0.f, 0.f);
         mLights[lightId].points[3] = localTransform * glm::float4(0.f, 1.f, 0.f, 0.f);
 
-        // Emission along -Z, like the rect light (whose normal comes out as the
-        // negated edge cross product) and the distant light.
-        mLights[lightId].normal = glm::normalize(localTransform * glm::float4(0.0f, 0.0f, -1.0f, 0.0f));
+        // Inverse-transpose(local -Z), written without an inverse. The sign of
+        // det removes the orientation flip from a mirrored transform while the
+        // cross product supplies the cofactor and handles shear/non-uniform scale.
+        const glm::float3 axisX(mLights[lightId].points[2]);
+        const glm::float3 axisY(mLights[lightId].points[3]);
+        const glm::float3 axisZ(localTransform * glm::float4(0.f, 0.f, 1.f, 0.f));
+        const glm::float3 cofactor = glm::cross(axisX, axisY);
+        const float determinant = glm::dot(axisX, glm::cross(axisY, axisZ));
+        mLights[lightId].normal = glm::length2(cofactor) > 0.0f ?
+                                      glm::float4(-glm::sign(determinant) * glm::normalize(cofactor), 0.0f) :
+                                      glm::float4(0.0f);
         mLights[lightId].type = LIGHT_TYPE_DISC;
         mLights[lightId].halfAngle = 0.0f;
         mLights[lightId].pad0 = 0.0f;
@@ -719,10 +728,16 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
     }
     else if (desc.type == LIGHT_TYPE_SPHERE)
     {
-        const glm::float4x4 localTransform = desc.useXform ? desc.xform : getTransform(desc);
+        const glm::float4x4 scaleMatrix =
+            glm::scale(glm::float4x4(1.0f), glm::float3(desc.radius, desc.radius, desc.radius));
+        const glm::float4x4 localTransform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
 
-        mLights[lightId].points[0] = glm::float4(desc.radius, 0.f, 0.f, 0.f);
+        // Centre plus all three transformed unit-sphere axes. This is the full
+        // affine ellipsoid used by both sampling and renderer intersection.
+        mLights[lightId].points[0] = localTransform * glm::float4(1.f, 0.f, 0.f, 0.f);
         mLights[lightId].points[1] = localTransform * glm::float4(0.f, 0.f, 0.f, 1.f);
+        mLights[lightId].points[2] = localTransform * glm::float4(0.f, 1.f, 0.f, 0.f);
+        mLights[lightId].points[3] = localTransform * glm::float4(0.f, 0.f, 1.f, 0.f);
 
         mLights[lightId].type = LIGHT_TYPE_SPHERE;
         mLights[lightId].halfAngle = 0.0f;
@@ -785,6 +800,13 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
                                  desc.radius, desc.halfAngle, desc.outerConeAngle, desc.projectorAspect) :
             glm::float3(0.0f);
     mLights[lightId].color = glm::float4(radiometric, 1.0f);
+    // Disc and sphere intersections are evaluated against their smooth
+    // analytic geometry in every renderer. Keep visibility beside the packed
+    // axes so the manual intersection path has the same camera-hidden semantics
+    // the former proxy instance mask had.
+    mLights[lightId].normal.w = desc.enabled ? float(STRELKA_ANALYTIC_LIGHT_SECONDARY_BIT |
+                                                     (desc.visibleToCamera ? STRELKA_ANALYTIC_LIGHT_CAMERA_BIT : 0u)) :
+                                               0.0f;
     markChanged(ChangeBits::Lights);
 }
 
@@ -1235,6 +1257,36 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
         const uint32_t instId = candidate.instId;
         const Instance& inst = mInstances[instId];
         ++traversed;
+
+        if (inst.type == Instance::Type::eLight && inst.mLightId < mLights.size())
+        {
+            const Light& light = mLights[inst.mLightId];
+            AnalyticLightIntersection analyticHit{};
+            if (light.type == LIGHT_TYPE_DISC)
+            {
+                analyticHit = intersectAnalyticDisc(origin, dir, 1e-5f, best.distance, glm::float3(light.points[1]),
+                                                    glm::float3(light.points[2]), glm::float3(light.points[3]),
+                                                    glm::float3(light.normal));
+            }
+            else if (light.type == LIGHT_TYPE_SPHERE)
+            {
+                analyticHit = intersectAnalyticEllipsoid(origin, dir, 1e-5f, best.distance,
+                                                         glm::float3(light.points[1]), glm::float3(light.points[0]),
+                                                         glm::float3(light.points[2]), glm::float3(light.points[3]));
+            }
+            if (light.type == LIGHT_TYPE_DISC || light.type == LIGHT_TYPE_SPHERE)
+            {
+                if (analyticHit.hit)
+                {
+                    best.hit = true;
+                    best.distance = analyticHit.distance;
+                    best.position = origin + dir * analyticHit.distance;
+                    best.instanceId = instId;
+                    best.lightId = inst.mLightId;
+                }
+                continue;
+            }
+        }
 
         const Mesh& mesh = mMeshes[inst.mMeshId];
         const glm::mat4& xform = inst.transform;

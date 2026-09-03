@@ -1320,18 +1320,90 @@ static __device__ void exitMedium(PerRayData* prd,
 /// the one the haze is most likely to stop, and stopping it means a next-event
 /// estimate. OptiX modules do not share device functions, and connectToLight is
 /// in this one. createProgramGroups() points the miss group at this module.
+static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd,
+                                                                 const AnalyticAreaLightHit& hit,
+                                                                 float3 rayOrigin,
+                                                                 float3 rayDirection)
+{
+    const UniformLight& light = params.scene.lights[hit.lightId];
+    const float3 hitPoint = rayOrigin + hit.distance * rayDirection;
+    const float3 lightNormal = calcLightNormal(light, hitPoint);
+
+    if (prd->writeAov && !prd->aovDone && params.aov != nullptr)
+    {
+        AovSample a;
+        const float3 lightColor = make_float3(light.color);
+        const float peak = fmaxf(fmaxf(lightColor.x, lightColor.y), fmaxf(lightColor.z, 1e-6f));
+        a.diffuseAlbedo = lightColor / peak;
+        a.specularAlbedo = make_float3(0.0f);
+        a.normal = lightNormal;
+        a.roughness = 1.0f;
+        a.depth = prd->depth == 0 ? guideViewDepth(params, hitPoint) : params.aov[launchPixelIndex(params)].depth;
+        if (prd->depth == 0)
+        {
+            const float2 motion = guideScreenMotion(params, make_float4(hitPoint, 1.0f), prd->pixelSample);
+            a.motionX = motion.x;
+            a.motionY = motion.y;
+        }
+        else
+        {
+            a.motionX = params.aov[launchPixelIndex(params)].motionX;
+            a.motionY = params.aov[launchPixelIndex(params)].motionY;
+        }
+        a.specularHitDistance = 0.0f;
+        a.reactive = oka::guides::reactiveFor(prd->depth);
+        a.pad2 = 0.0f;
+        params.aov[launchPixelIndex(params)] = a;
+        prd->aovDone = true;
+    }
+
+    if (lightSampleFacesVertex(-dot(rayDirection, lightNormal)))
+    {
+        const float3 misOrigin = rayOrigin - rayDirection * prd->misDistance;
+        const float3 Le = make_float3(light.color) * areaFalloff(light, length(hitPoint - misOrigin));
+        float3 radiance;
+        if (prd->depth == 0 || prd->specularBounce || !prd->neeDone)
+        {
+            radiance = prd->throughput * Le;
+        }
+        else
+        {
+            const float lightSelectionPdf = params.hasEnvMap ?
+                                                0.5f / float(params.scene.numLights) :
+                                                1.0f / float(params.scene.numLights);
+            const float lightPdf =
+                getLightPdf(light, hitPoint, misOrigin, params.rectLightSamplingMethod) * lightSelectionPdf;
+            radiance = prd->throughput * Le *
+                       computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
+        }
+        prd->radiance += clampIndirectContribution(radiance, prd->depth, params.clampIndirect);
+    }
+    prd->throughput = make_float3(0.0f);
+}
+
 extern "C" __global__ void __miss__ms()
 {
     PerRayData* prd = getPRD();
     const float3 ray_dir = optixGetWorldRayDirection();
+    const float3 ray_origin = optixGetWorldRayOrigin();
+    const AnalyticAreaLightHit analyticHit =
+        findAnalyticAreaLightHit(params.scene.lights, params.scene.numLights, ray_origin, ray_dir,
+                                 params.materialRayTmin, 1e16f, prd->depth != 0u);
+    const float segmentMax = analyticHit.hit ? analyticHit.distance : 1e16f;
 
     // Before everything else, including the counters and the guide: if the haze
     // scatters, this path did not reach the environment and nothing below is
     // true of it.
     float fogT = 0.0f;
-    if (fogScatters(prd, optixGetWorldRayOrigin(), ray_dir, 1e16f, fogT))
+    if (fogScatters(prd, ray_origin, ray_dir, segmentMax, fogT))
     {
         scatterInFog(prd, optixGetWorldRayOrigin(), ray_dir, fogT);
+        return;
+    }
+
+    if (analyticHit.hit)
+    {
+        shadeAnalyticAreaLightHit(prd, analyticHit, ray_origin, ray_dir);
         return;
     }
 

@@ -1,11 +1,13 @@
 #include <doctest/doctest.h>
 
 #include <strelka/scene/scene.h>
+#include <analytic_light.h>
 #include <light_types.h>
 
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <cmath>
+#include <numbers>
 
 using namespace oka;
 
@@ -138,6 +140,97 @@ TEST_CASE("a sphere light's mesh is scaled to its radius")
     const glm::float4x4 xform = scene.getInstances()[instId].transform;
     CHECK(glm::length(glm::float3(xform[0])) == doctest::Approx(0.35f));
     CHECK(scene.getLights()[id].points[0].x == doctest::Approx(0.35f));
+}
+
+TEST_CASE("a sphere light record preserves every affine analytic axis")
+{
+    Scene scene;
+    Scene::UniformLightDesc desc = discDesc();
+    desc.type = LIGHT_TYPE_SPHERE;
+    desc.radius = 0.5f;
+    desc.useXform = true;
+    desc.xform = glm::scale(glm::mat4(1.0f), glm::vec3(-2.0f, 3.0f, 4.0f));
+    const uint32_t id = scene.createLight(desc);
+
+    const Scene::Light& light = scene.getLights()[id];
+    CHECK(glm::vec3(light.points[0]) == glm::vec3(-1.0f, 0.0f, 0.0f));
+    CHECK(glm::vec3(light.points[2]) == glm::vec3(0.0f, 1.5f, 0.0f));
+    CHECK(glm::vec3(light.points[3]) == glm::vec3(0.0f, 0.0f, 2.0f));
+}
+
+TEST_CASE("a sheared mirrored disc uses its inverse-transpose emission normal")
+{
+    Scene scene;
+    Scene::UniformLightDesc desc = discDesc();
+    desc.useXform = true;
+    desc.xform = glm::scale(glm::mat4(1.0f), glm::vec3(-2.0f, 3.0f, 1.0f));
+    desc.xform[2][0] = 1.0f; // shear local Z into world X; the disc itself remains in Z=0
+    const uint32_t id = scene.createLight(desc);
+
+    const glm::vec3 normal(scene.getLights()[id].normal);
+    CHECK(normal.x == doctest::Approx(0.0f).epsilon(1e-5));
+    CHECK(normal.y == doctest::Approx(0.0f).epsilon(1e-5));
+    CHECK(normal.z == doctest::Approx(-1.0f).epsilon(1e-5));
+}
+
+TEST_CASE("analytic light visibility is packed for manual traversal")
+{
+    Scene scene;
+    Scene::UniformLightDesc visible = discDesc();
+    visible.visibleToCamera = true;
+    const uint32_t visibleId = scene.createLight(visible);
+    CHECK(uint32_t(scene.getLights()[visibleId].normal.w) ==
+          (STRELKA_ANALYTIC_LIGHT_CAMERA_BIT | STRELKA_ANALYTIC_LIGHT_SECONDARY_BIT));
+
+    Scene::UniformLightDesc hidden = visible;
+    hidden.visibleToCamera = false;
+    const uint32_t hiddenId = scene.createLight(hidden);
+    CHECK(uint32_t(scene.getLights()[hiddenId].normal.w) == STRELKA_ANALYTIC_LIGHT_SECONDARY_BIT);
+
+    Scene::UniformLightDesc disabled = visible;
+    disabled.enabled = false;
+    const uint32_t disabledId = scene.createLight(disabled);
+    CHECK(scene.getLights()[disabledId].normal.w == 0.0f);
+}
+
+TEST_CASE("CPU picking intersects smooth transformed analytic lights")
+{
+    for (const int type : { LIGHT_TYPE_DISC, LIGHT_TYPE_SPHERE })
+    {
+        Scene scene;
+        Scene::UniformLightDesc desc = discDesc();
+        desc.type = type;
+        desc.radius = 0.5f;
+        desc.useXform = true;
+        desc.xform = glm::scale(glm::mat4(1.0f), glm::vec3(-2.0f, 3.0f, 4.0f));
+        desc.xform[2][0] = 0.25f;
+        const uint32_t lightId = scene.createLight(desc);
+        const Scene::Light& light = scene.getLights()[lightId];
+        const glm::vec3 center(light.points[1]);
+        glm::vec3 target;
+        glm::vec3 origin;
+        if (type == LIGHT_TYPE_DISC)
+        {
+            const float angle = std::numbers::pi_v<float> / 16.0f;
+            // At the midpoint of a 16-gon edge, r=0.99 lies on the smooth disc
+            // but outside the editor proxy (whose radius there is cos(pi/16)).
+            target = center + 0.99f * (std::cos(angle) * glm::vec3(light.points[2]) +
+                                       std::sin(angle) * glm::vec3(light.points[3]));
+            origin = target - 3.0f * glm::vec3(light.normal);
+        }
+        else
+        {
+            const glm::vec3 q = glm::normalize(glm::vec3(0.31f, 0.47f, 0.73f));
+            const glm::vec3 radial =
+                q.x * glm::vec3(light.points[0]) + q.y * glm::vec3(light.points[2]) + q.z * glm::vec3(light.points[3]);
+            target = center + radial;
+            origin = center + 2.0f * radial;
+        }
+        const Scene::PickHit hit = scene.pick(origin, glm::normalize(target - origin));
+        REQUIRE(hit.hit);
+        CHECK(hit.lightId == lightId);
+        CHECK(glm::length(hit.position - target) < 1e-4f);
+    }
 }
 
 // A disc that emits along +Z while the rect and distant lights emit along -Z

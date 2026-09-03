@@ -2,6 +2,7 @@
 
 #include <strelka/scene/light_desc.h>
 #include <strelka/scene/scene.h>
+#include <analytic_light.h>
 
 #include <algorithm>
 #include <cmath>
@@ -61,10 +62,11 @@ inline double analyticLightPower(const Scene::Light& light)
         break;
     }
     case LIGHT_TYPE_DISC:
-        measure = pi * pi * static_cast<double>(light.points[0].x) * light.points[0].x;
+        measure = pi * static_cast<double>(analyticDiscArea(float3(light.points[2]), float3(light.points[3])));
         break;
     case LIGHT_TYPE_SPHERE:
-        measure = 4.0 * pi * pi * static_cast<double>(light.points[0].x) * light.points[0].x;
+        measure = pi * static_cast<double>(analyticEllipsoidSurfaceArea(
+                           float3(light.points[0]), float3(light.points[2]), float3(light.points[3])));
         break;
     case LIGHT_TYPE_POINT:
         measure = 4.0 * pi;

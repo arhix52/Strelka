@@ -10,8 +10,8 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1. Standard PBR mixture PDF | 28,923/36,794 legacy audit mismatches; independent regression 28,882 eval and 28,866 oracle mismatches / 36,818 | `test_sample_eval_consistency`: marginal double oracle, split-lobe invariance, 1.3M edge/domain assertions; audit guard | Shared `eval()` finishes every non-delta sample; exit-side diffuse/interface proposals are conditionally renormalized; delta mass unchanged | FIXED | Shared header compiled | Shared header; backend build pending | `f845f2c` | PARTIAL |
 | 2. Distant/dome support and MIS completeness | Dome packed as type `-1`; sharp distant reports continuous PDF 0 but is not delta; analytic dome one-bounce ratio `0.2988202609` | Scene/JSON packing, common support/delta oracle, cap normalization, analytic one-bounce MIS, omitted-miss mutation | Separate delta distant, finite spherical-cap, and dome measures; evaluate continuous infinite emitters on miss with the same selection PMF/support as NEE | FIXED | Shader compiled; analytic execution pending final GPU audit | Shared math/source changed; toolchain unavailable on macOS | `ad4c3d9` | PARTIAL |
-| 3. Metal back-face NEE/MIS double counting | Back-face direction accepted by NEE but unpaired bounce gives MIS shares `0.4 + 1.0 = 1.4` | Exact support-equivalence sweep, front/back/flipped/transmission/fibre cases, 0.4/0.6 balance-share mutation | Evaluate proposal and bounce pairing in one shaded frame and make their continuous supports identical | Oracle FIXED | Shader compiled; path execution pending final GPU audit | Shared predicate fixed; toolchain unavailable on macOS | pending | PARTIAL |
-| 4. Non-uniform transforms for analytic lights | Pending | Pending | Sample intersected proxy geometry and apply the world-area Jacobian and inverse-transpose normals | OPEN | OPEN | OPEN | — | OPEN |
+| 3. Metal back-face NEE/MIS double counting | Back-face direction accepted by NEE but unpaired bounce gives MIS shares `0.4 + 1.0 = 1.4` | Exact support-equivalence sweep, front/back/flipped/transmission/fibre cases, 0.4/0.6 balance-share mutation | Evaluate proposal and bounce pairing in one shaded frame and make their continuous supports identical | Oracle FIXED | Shader compiled; path execution pending final GPU audit | Shared predicate fixed; toolchain unavailable on macOS | `b214620` | PARTIAL |
+| 4. Non-uniform transforms for analytic lights | Disc geometry/sampler area ratio `6.0`; a smooth-disc sample outside the 16-gon is invisible to old traversal; sphere record loses affine axes | Double-precision affine-Jacobian oracle, smooth sample/intersection/PDF agreement, mirrored normals, CPU picking, coarse-proxy mutation | Sample and intersect the same smooth affine disc/ellipsoid; keep tessellation editor-only | FIXED | Shader compiled; shared analytic math executed on MTLDevice | Source updated; toolchain unavailable on macOS | pending | PARTIAL |
 | 5. Robust large-distribution support | Pending | Pending | Select a GPU-friendly PMF representation that preserves every finite positive bin | OPEN | OPEN | OPEN | — | OPEN |
 | 6. Emissive mesh NEE | Pending | Pending | Add selection, transformed-area sampling, solid-angle conversion, and BSDF-hit MIS | OPEN | OPEN | OPEN | — | OPEN |
 | 7. Cross-backend consistency | Pending | Pending | Audit common probability conventions and compile/execute each available backend | OPEN | OPEN | OPEN | — | OPEN |
@@ -130,3 +130,41 @@ is out of scope unless it blocks validation.
   58,590,488 assertions; Release CTest passed 4/4; targeted ASan+UBSan and production `wavefront.metal` compilation
   passed. The actual-MTLDevice audit still exercises only environment mapping, so renderer execution of this path is
   deferred to the cross-backend validation finding.
+
+## Finding 4: Non-uniform transforms for analytic lights
+
+- Random variable: analytic-light identity `J`, object-space point/direction `Q`, transformed surface point
+  `X=c+A Q`, and induced direction `W=(X-P)/|X-P|` from shading point `P`.
+- Measure: `J` is discrete. `Q` is area on the unit disc or unit sphere; `X` is world-space area `dA_world`; `W` is
+  solid angle `domega` at the shading vertex.
+- Support: the smooth affine image of the unit disc or sphere. The old tessellated mesh remains an editor proxy only
+  and is removed from radiance traversal for these two light types, so it cannot add or remove renderer support.
+- Conditional and marginal PDF: the disc draws `p_Q=1/pi` and has constant
+  `J_A=length(cross(axisX,axisY))`, hence `p_A=1/(pi J_A)`. The ellipsoid draws `p_Q=1/(4pi)` and uses
+  `J_A(n)=abs(det(A))*length(transpose(inverse(A))*n_object)`, hence `p_A(X)=1/(4pi J_A(n))`. Both convert with
+  `p_omega=p_A distance^2/abs(n_light dot -W)`. Hit-side inverse mapping reconstructs the same `n_object`, Jacobian,
+  outward inverse-transpose normal, and density.
+- Selection PMF: the existing analytic-light PMF remains an outer factor. Disc power uses its exact smooth area;
+  ellipsoid selection power uses deterministic equal-area quadrature of `J_A`. That quadrature changes variance only:
+  the returned selection PMF is still the exact one sampled and is included in MIS.
+- Delta classification: transformed discs and ellipsoids are continuous area lights. Degenerate transforms have zero
+  area/support and return PDF zero without NaN/Inf; no delta fallback is invented.
+- MIS strategies: NEE maps `Q` to the analytic surface; a BSDF/camera ray uses the same analytic intersection before
+  any farther hardware hit. Both use the same hit normal and local area density. Shadow visibility still traces scene
+  geometry to just before the analytic endpoint; light proxies have never belonged to the shadow mask.
+- Current-HEAD reproducer: a radius-0.5 disc under x/y scales 2/3 is intersected as an ellipse with semi-axes 1/1.5,
+  while NEE normalizes both stored axes and samples a radius-0.5 circle, giving geometry/sampler area ratio `6.0`.
+  At the midpoint of a 16-gon edge, smooth-disc radii in `(cos(pi/16),1]` are sampled but old ray traversal cannot hit
+  them. A sphere stores only one scalar radius, so an ellipsoid transform is lost.
+- Corrected result: 4,096 fixed-seed samples per transformed shape agree with the independent double-precision
+  Jacobian and hit-side density; the complete analytic test group passes 76,705 assertions. Every sampled disc point
+  is on the smooth affine disc used by CPU/Metal/OptiX intersection, and every well-conditioned ellipsoid sample
+  round-trips through the quadratic intersection. Mirrored/sheared normals agree with `transpose(inverse(A))`.
+  The old normalized-axis mutation retains the measured area ratio `6.0`; the old 16-gon mutation misses radius
+  `0.99 > cos(pi/16)` while the analytic intersection hits it.
+- Validation: full Debug and Release CTest pass 4/4, the full sampling audit passes 769/769 tests and 58,667,179
+  assertions, targeted ASan+UBSan passes 76,705/76,705 assertions, and production `wavefront.metal` compilation
+  passes. The expanded audit kernel executed 262,144 affine ellipsoid samples on an actual Apple M4 Pro in both fast
+  and safe Metal math modes with zero sample/eval mismatches, intersection mismatches, NaN, Inf, or negative PDFs.
+  The OptiX implementation uses the same header but cannot be compiled on this macOS host; it remains UNVERIFIED
+  until the cross-backend finding.

@@ -1,10 +1,12 @@
 #include <doctest/doctest.h>
 
+#include <analytic_light.h>
 #include <light_pdf.h>
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numbers>
 #include <random>
 
 // ============================================================================
@@ -68,6 +70,16 @@ float3 unit(float3 v)
 float dot3(float3 a, float3 b)
 {
     return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+double affineAreaJacobian(const glm::dmat3& transform, const glm::dvec3& objectNormal)
+{
+    return std::abs(glm::determinant(transform)) * glm::length(glm::transpose(glm::inverse(transform)) * objectNormal);
+}
+
+glm::dvec3 objectCoordinates(const glm::dmat3& transform, float3 center, float3 point)
+{
+    return glm::inverse(transform) * (glm::dvec3(point) - glm::dvec3(center));
 }
 
 /// The irradiance a Lambert-facing point receives, estimated exactly the way
@@ -215,6 +227,147 @@ TEST_CASE("a sphere light's density is not the constant it used to be")
     CHECK(sphereLightSolidAnglePdf(4.0f, 0.7f, 0.5f) ==
           doctest::Approx(areaLightSolidAnglePdf(4.0f, 0.7f, sphereLightArea(0.5f))));
     CHECK(sphereLightArea(0.5f) == doctest::Approx(4.0f * float(M_PI_F) * 0.25f));
+}
+
+TEST_CASE("analytic transformed light densities obey the affine area Jacobian")
+{
+    const float3 axisX = make_float3(-1.0f, 0.0f, 0.0f);
+    const float3 axisY = make_float3(0.0f, 1.5f, 0.0f);
+    const float3 axisZ = make_float3(0.25f, 0.0f, 2.0f);
+    const glm::dmat3 transform{ glm::dvec3(axisX), glm::dvec3(axisY), glm::dvec3(axisZ) };
+
+    CHECK(double(analyticDiscArea(axisX, axisY)) ==
+          doctest::Approx(std::numbers::pi * glm::length(glm::cross(glm::dvec3(axisX), glm::dvec3(axisY)))).epsilon(1e-6));
+
+    Rng rng(0xA11Fu);
+    double integratedMass = 0.0;
+    for (int i = 0; i < 4096; ++i)
+    {
+        const float z = 1.0f - 2.0f * rng.next();
+        const float radial = std::sqrt(std::max(1.0f - z * z, 0.0f));
+        const float phi = 2.0f * float(M_PI_F) * rng.next();
+        const float3 n = make_float3(radial * std::cos(phi), radial * std::sin(phi), z);
+        const double oracle = affineAreaJacobian(transform, glm::dvec3(n));
+        const double shared = glm::length(glm::dvec3(affineSphereCofactor(axisX, axisY, axisZ, n)));
+        CHECK(shared == doctest::Approx(oracle).epsilon(2e-5));
+        const float3 point = axisX * n.x + axisY * n.y + axisZ * n.z;
+        float3 evaluatedNormal;
+        const double areaPdfDenominator =
+            analyticEllipsoidAreaPdfDenominator(make_float3(0.0f), axisX, axisY, axisZ, point, evaluatedNormal);
+        integratedMass += (1.0 / areaPdfDenominator) * oracle * (4.0 * std::numbers::pi / 4096.0);
+    }
+    CHECK(integratedMass == doctest::Approx(1.0).epsilon(3e-5));
+
+    const float r = 0.7f;
+    CHECK(analyticEllipsoidSurfaceArea(
+              make_float3(r, 0.0f, 0.0f), make_float3(0.0f, r, 0.0f), make_float3(0.0f, 0.0f, r)) ==
+          doctest::Approx(4.0f * float(M_PI_F) * r * r).epsilon(2e-5));
+}
+
+TEST_CASE("analytic samples, intersections, and hit-side PDFs agree")
+{
+    const float3 center = make_float3(0.3f, -0.2f, 0.5f);
+    const float3 axisX = make_float3(-1.0f, 0.0f, 0.0f);
+    const float3 axisY = make_float3(0.0f, 1.5f, 0.0f);
+    const float3 axisZ = make_float3(0.25f, 0.0f, 2.0f);
+    const float3 discNormal = make_float3(0.0f, 0.0f, -1.0f);
+    const float3 shadingPoint = make_float3(0.3f, -0.2f, -5.0f);
+
+    Rng rng(0xA771Eu);
+    const glm::dmat3 transform{ glm::dvec3(axisX), glm::dvec3(axisY), glm::dvec3(axisZ) };
+    for (int i = 0; i < 4096; ++i)
+    {
+        const AnalyticLightSample disc = sampleAnalyticDisc(center, axisX, axisY, discNormal, rng.next(), rng.next());
+        const float3 discDirection = unit(sub(disc.point, shadingPoint));
+        const float discDistance = len(sub(disc.point, shadingPoint));
+        const AnalyticLightIntersection discHit =
+            intersectAnalyticDisc(shadingPoint, discDirection, 0.0f, 1e9f, center, axisX, axisY, discNormal);
+        REQUIRE(discHit.hit);
+        CHECK(discHit.distance == doctest::Approx(discDistance).epsilon(2e-5));
+        CHECK(disc.areaPdfDenominator == doctest::Approx(analyticDiscArea(axisX, axisY)).epsilon(1e-6));
+
+        const AnalyticLightSample sphere = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, rng.next(), rng.next());
+        const glm::dvec3 q = objectCoordinates(transform, center, sphere.point);
+        CHECK(glm::length(q) == doctest::Approx(1.0).epsilon(3e-5));
+        const double jacobian = affineAreaJacobian(transform, glm::normalize(q));
+        CHECK(double(sphere.areaPdfDenominator) == doctest::Approx(4.0 * std::numbers::pi * jacobian).epsilon(3e-5));
+        CHECK(sphere.areaPdfDenominator > 0.0f);
+        CHECK(std::isfinite(sphere.areaPdfDenominator));
+        CHECK(std::isfinite(sphere.normal.x));
+        CHECK(std::isfinite(sphere.normal.y));
+        CHECK(std::isfinite(sphere.normal.z));
+        const glm::dvec3 normalOracle = glm::normalize(glm::transpose(glm::inverse(transform)) * glm::normalize(q));
+        CHECK(len(sub(sphere.normal, float3(normalOracle))) < 3e-5f);
+
+        const float3 toLight = sub(sphere.point, shadingPoint);
+        const double distance = double(len(toLight));
+        const float3 wi = unit(toLight);
+        const double cosine = -double(dot3(wi, sphere.normal));
+        const float reported = areaLightSolidAnglePdf(float(distance), float(cosine), sphere.areaPdfDenominator);
+        const double oracle = cosine > 0.0 ? distance * distance / (cosine * double(sphere.areaPdfDenominator)) : 0.0;
+        CHECK(double(reported) == doctest::Approx(oracle).epsilon(2e-5));
+        float3 evaluatedNormal;
+        const float evaluatedDenominator =
+            analyticEllipsoidAreaPdfDenominator(center, axisX, axisY, axisZ, sphere.point, evaluatedNormal);
+        CHECK(evaluatedDenominator == doctest::Approx(sphere.areaPdfDenominator).epsilon(3e-5));
+        CHECK(len(sub(evaluatedNormal, sphere.normal)) < 3e-5f);
+
+        // Near tangency the intersection location is condition-numbered by
+        // 1/cos(theta); all such rays are still checked for finite output, while
+        // the pointwise identity test is restricted to well-conditioned hits.
+        if (cosine > 0.05)
+        {
+            const AnalyticLightIntersection sphereHit =
+                intersectAnalyticEllipsoid(shadingPoint, wi, 0.0f, 1e9f, center, axisX, axisY, axisZ);
+            REQUIRE(sphereHit.hit);
+            CHECK(sphereHit.distance == doctest::Approx(float(distance)).epsilon(5e-5));
+            CHECK(len(sub(sphereHit.normal, sphere.normal)) < 5e-5f);
+        }
+        else
+        {
+            const AnalyticLightIntersection grazingHit =
+                intersectAnalyticEllipsoid(shadingPoint, wi, 0.0f, 1e9f, center, axisX, axisY, axisZ);
+            CHECK(std::isfinite(grazingHit.distance));
+            CHECK(std::isfinite(grazingHit.normal.x));
+            CHECK(std::isfinite(grazingHit.normal.y));
+            CHECK(std::isfinite(grazingHit.normal.z));
+        }
+    }
+}
+
+TEST_CASE("analytic intersection covers the smooth disc beyond the editor proxy")
+{
+    CHECK(lightUsesAnalyticAreaIntersection(LIGHT_TYPE_DISC));
+    CHECK(lightUsesAnalyticAreaIntersection(LIGHT_TYPE_SPHERE));
+    CHECK_FALSE(lightUsesAnalyticAreaIntersection(LIGHT_TYPE_RECT));
+    const float angle = float(M_PI_F) / 16.0f;
+    const float3 target = make_float3(0.99f * std::cos(angle), 0.99f * std::sin(angle), 0.0f);
+    const float3 origin = target + make_float3(0.0f, 0.0f, 2.0f);
+    const AnalyticLightIntersection hit = intersectAnalyticDisc(
+        origin, make_float3(0.0f, 0.0f, -1.0f), 0.0f, 10.0f, make_float3(0.0f), make_float3(1.0f, 0.0f, 0.0f),
+        make_float3(0.0f, 1.0f, 0.0f), make_float3(0.0f, 0.0f, -1.0f));
+    CHECK(hit.hit);
+    CHECK(hit.distance == doctest::Approx(2.0f));
+    CHECK(0.99f > std::cos(angle)); // inscribed-16-gon mutation misses this point
+}
+
+TEST_CASE("degenerate analytic lights have zero density without non-finite samples")
+{
+    const float3 zero = make_float3(0.0f);
+    const AnalyticLightSample disc = sampleAnalyticDisc(zero, zero, zero, zero, 0.3f, 0.7f);
+    const AnalyticLightSample sphere = sampleAnalyticEllipsoid(zero, zero, zero, zero, 0.3f, 0.7f);
+    for (const AnalyticLightSample& sample : { disc, sphere })
+    {
+        CHECK(sample.areaPdfDenominator == 0.0f);
+        CHECK(std::isfinite(sample.point.x));
+        CHECK(std::isfinite(sample.point.y));
+        CHECK(std::isfinite(sample.point.z));
+        CHECK(std::isfinite(sample.normal.x));
+        CHECK(std::isfinite(sample.normal.y));
+        CHECK(std::isfinite(sample.normal.z));
+    }
+    CHECK_FALSE(intersectAnalyticDisc(zero, make_float3(0.0f, 0.0f, 1.0f), 0.0f, 10.0f, zero, zero, zero, zero).hit);
+    CHECK_FALSE(intersectAnalyticEllipsoid(zero, make_float3(0.0f, 0.0f, 1.0f), 0.0f, 10.0f, zero, zero, zero, zero).hit);
 }
 
 TEST_CASE("a back-facing or degenerate area sample has no density")
@@ -444,7 +597,7 @@ TEST_CASE("the dispatcher routes each type to the density that type was sampled 
 
     const LightPdfQuery sphere = plausibleQuery(LIGHT_TYPE_SPHERE);
     CHECK(lightSolidAnglePdf(sphere) ==
-          doctest::Approx(sphereLightSolidAnglePdf(sphere.distToLight, sphere.cosAtLight, sphere.radius)));
+          doctest::Approx(areaLightSolidAnglePdf(sphere.distToLight, sphere.cosAtLight, sphere.area)));
 
     const LightPdfQuery dome = plausibleQuery(LIGHT_TYPE_DOME);
     CHECK(lightSolidAnglePdf(dome) == doctest::Approx(domeLightSolidAnglePdf()));
