@@ -6,6 +6,8 @@
 #include "MetalMaterials.h"
 #include "MetalTextures.h"
 
+#include <host/emissive_mesh_distribution.h>
+
 #include <Metal/Metal.hpp>
 #include <settings.h>
 #include <strelka/scene/scene.h>
@@ -58,6 +60,10 @@ public:
         uint32_t asIndex;
         uint32_t userID;
         uint32_t mask;
+        // Geometry order in this emitted BLAS. Needed by emissive-mesh NEE:
+        // shared BLAS records describe geometry, while the emitted instance
+        // supplies the transform and therefore owns a distinct light source.
+        std::vector<uint32_t> geometrySceneInstanceIds;
     };
 
     MetalAccelStructure() = default;
@@ -213,6 +219,23 @@ public:
     {
         return mCutoutGeometryCount;
     }
+    MTL::Buffer* emissiveMeshBuffer() const
+    {
+        return mEmissiveMeshBuffer;
+    }
+    MTL::Buffer* emissiveTriangleBuffer() const
+    {
+        return mEmissiveTriangleBuffer;
+    }
+    uint32_t emissiveMeshCount() const
+    {
+        return mEmissiveMeshCount;
+    }
+    double emissiveMeshPower() const
+    {
+        return mEmissiveMeshPower;
+    }
+    void rebuildEmissiveMeshLights();
 
 private:
     MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);
@@ -227,6 +250,8 @@ private:
     size_t buildCurveBlas(uint32_t sceneInstanceId);
     void ensureScratchBuffer(MTL::Buffer*& buffer, size_t requiredSize);
     void addDescriptorResidency();
+    void prepareEmissiveMeshInputs();
+    void uploadEmissiveMeshLights();
 
     /// Residency for an allocation this class owns. Null-safe on both the
     /// allocation and the Metal 4 context, so callers do not repeat either
@@ -254,6 +279,11 @@ private:
 
     std::vector<Blas> mBlasList;
     std::vector<EmittedInstance> mEmittedInstances;
+    std::vector<render::EmissiveMeshBuildInput> mSceneEmissiveInputs;
+    MTL::Buffer* mEmissiveMeshBuffer = nullptr;
+    MTL::Buffer* mEmissiveTriangleBuffer = nullptr;
+    uint32_t mEmissiveMeshCount = 0;
+    double mEmissiveMeshPower = 0.0;
     std::vector<MTL::AccelerationStructure*> mPrimitiveAccelerationStructures;
     MTL::AccelerationStructure* mInstanceAccelerationStructure = nullptr;
     MTL::AccelerationStructure* mVolumeInstanceAccelerationStructure = nullptr;
@@ -308,4 +338,3 @@ private:
 };
 
 } // namespace oka::metal
-

@@ -1,0 +1,157 @@
+#pragma once
+
+#include "light_selection.h"
+
+#include <emissive_mesh_light.h>
+
+#include <strelka/scene/scene.h>
+
+#include <cmath>
+#include <cstdint>
+#include <numbers>
+#include <span>
+#include <vector>
+
+namespace oka::render
+{
+
+struct EmissiveMeshBuildInput
+{
+    uint32_t instanceId = 0;
+    uint32_t geometryId = 0;
+    uint32_t vertexOffset = 0;
+    uint32_t indexOffset = 0;
+    uint32_t materialId = 0;
+    std::vector<double> trianglePowers;
+};
+
+struct EmissiveMeshDistribution
+{
+    std::vector<EmissiveMeshLight> meshes;
+    std::vector<EmissiveTriangleLight> triangles;
+    double totalPower = 0.0;
+};
+
+inline double emissiveMaterialLuminance(const Scene::MaterialDescription& material)
+{
+    glm::dvec3 emission;
+    double strength = 0.0;
+    if (material.params.material_type == MATERIAL_TYPE_OPENPBR)
+    {
+        emission = { material.openpbr.emission_color.r, material.openpbr.emission_color.g,
+                     material.openpbr.emission_color.b };
+        strength = material.openpbr.emission_luminance;
+    }
+    else
+    {
+        emission = glm::dvec3(material.params.emission);
+        strength = material.params.emission_strength;
+    }
+    if (!(std::isfinite(strength) && strength > 0.0) || !std::isfinite(emission.x) || !std::isfinite(emission.y) ||
+        !std::isfinite(emission.z))
+    {
+        return 0.0;
+    }
+    // Negative radiance channels are invalid and are clamped by the proposal,
+    // not allowed to cancel a positive channel and erase its sampling support.
+    const glm::dvec3 positive = glm::max(emission, glm::dvec3(0.0));
+    return (0.2126 * positive.r + 0.7152 * positive.g + 0.0722 * positive.b) * strength;
+}
+
+inline std::vector<double> emissiveTrianglePowers(std::span<const Scene::Vertex> vertices,
+                                                  std::span<const uint32_t> indices,
+                                                  const Mesh& mesh,
+                                                  const Scene::MaterialDescription& material,
+                                                  const glm::mat4& objectToWorld)
+{
+    const size_t triangleCount = mesh.mCount / 3u;
+    std::vector<double> powers(triangleCount, 0.0);
+    const double radiance = emissiveMaterialLuminance(material);
+    if (!(radiance > 0.0))
+    {
+        return powers;
+    }
+
+    for (size_t triangle = 0; triangle < triangleCount; ++triangle)
+    {
+        const size_t index = size_t(mesh.mIndex) + triangle * 3u;
+        if (index + 2u >= indices.size())
+        {
+            break;
+        }
+        const size_t i0 = size_t(mesh.mVbOffset) + indices[index + 0u];
+        const size_t i1 = size_t(mesh.mVbOffset) + indices[index + 1u];
+        const size_t i2 = size_t(mesh.mVbOffset) + indices[index + 2u];
+        if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size())
+        {
+            continue;
+        }
+        const glm::dvec3 p0 = glm::dvec3(objectToWorld * glm::vec4(vertices[i0].pos, 1.0f));
+        const glm::dvec3 p1 = glm::dvec3(objectToWorld * glm::vec4(vertices[i1].pos, 1.0f));
+        const glm::dvec3 p2 = glm::dvec3(objectToWorld * glm::vec4(vertices[i2].pos, 1.0f));
+        const double area = 0.5 * glm::length(glm::cross(p1 - p0, p2 - p0));
+        if (std::isfinite(area) && area > 0.0)
+        {
+            // Existing mesh emission is two-sided. This is only a power proxy
+            // for selection; the exact sampled density is reconstructed below.
+            powers[triangle] = 2.0 * std::numbers::pi_v<double> * radiance * area;
+        }
+    }
+    return powers;
+}
+
+inline std::vector<double> emissiveTrianglePowers(const Scene& scene,
+                                                  const Mesh& mesh,
+                                                  const Scene::MaterialDescription& material,
+                                                  const glm::mat4& objectToWorld)
+{
+    return emissiveTrianglePowers(scene.getVertices(), scene.getIndices(), mesh, material, objectToWorld);
+}
+
+inline EmissiveMeshDistribution buildEmissiveMeshDistribution(const std::vector<EmissiveMeshBuildInput>& inputs)
+{
+    EmissiveMeshDistribution out;
+    std::vector<double> meshPowers;
+    meshPowers.reserve(inputs.size());
+
+    for (const EmissiveMeshBuildInput& input : inputs)
+    {
+        const metal::LightSelectionTable triangleTable = metal::buildLightSelectionAlias(input.trianglePowers);
+        if (!(triangleTable.totalPower > 0.0))
+        {
+            continue;
+        }
+
+        EmissiveMeshLight mesh{};
+        mesh.instanceId = input.instanceId;
+        mesh.geometryId = input.geometryId;
+        mesh.triangleOffset = static_cast<uint32_t>(out.triangles.size());
+        mesh.triangleCount = static_cast<uint32_t>(input.trianglePowers.size());
+        mesh.vertexOffset = input.vertexOffset;
+        mesh.indexOffset = input.indexOffset;
+        mesh.materialId = input.materialId;
+        out.meshes.push_back(mesh);
+        meshPowers.push_back(triangleTable.totalPower);
+
+        for (const metal::LightSelectionEntry& entry : triangleTable.entries)
+        {
+            EmissiveTriangleLight triangle{};
+            triangle.selectionPdf = entry.pdf;
+            triangle.aliasProbability = entry.aliasProbability;
+            triangle.alias = entry.alias;
+            out.triangles.push_back(triangle);
+        }
+    }
+
+    const metal::LightSelectionTable meshTable = metal::buildLightSelectionAlias(meshPowers);
+    out.totalPower = meshTable.totalPower;
+    for (size_t i = 0; i < out.meshes.size(); ++i)
+    {
+        out.meshes[i].selectionPdf = meshTable.entries[i].pdf;
+        out.meshes[i].aliasProbability = meshTable.entries[i].aliasProbability;
+        out.meshes[i].alias = meshTable.entries[i].alias;
+    }
+    return out;
+}
+
+} // namespace oka::render

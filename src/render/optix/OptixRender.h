@@ -289,6 +289,11 @@ private:
     std::unique_ptr<OptixBuffer> mVertexSkinDataBuffer;
     std::unique_ptr<OptixBuffer> mIndexBuffer;
     std::unique_ptr<OptixBuffer> mLightBuffer;
+    std::unique_ptr<OptixBuffer> mEmissiveMeshBuffer;
+    std::unique_ptr<OptixBuffer> mEmissiveTriangleBuffer;
+    std::unique_ptr<OptixBuffer> mEmissiveInstanceTransformBuffer;
+    std::unique_ptr<OptixBuffer> mPrevEmissiveInstanceTransformBuffer;
+    double mEmissiveMeshPower = 0.0;
     /// Packed IES candela tables for every profile the scene loaded, indexed by
     /// each light's points[0].y. Rebuilt with the light buffer.
     std::unique_ptr<OptixBuffer> mIesBuffer;
@@ -322,6 +327,7 @@ private:
     void createWidthsBuffer();
 
     void createLightBuffer();
+    void createEmissiveMeshLights();
     void createIesBuffer();
     /// Images thrown by projector lights, indexed by each light's points[0].z.
     void createProjectorTextures();

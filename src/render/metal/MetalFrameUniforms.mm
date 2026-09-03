@@ -1,5 +1,7 @@
 #include "MetalFrameUniforms.h"
 
+#include "MetalAccelStructure.h"
+
 #include "sharc_grid_size.h"
 
 #include <host/light_selection.h>
@@ -125,6 +127,10 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->width = width;
     const bool analyticLightsEnabled = settings.getAs<bool>("render/validate/analyticLights");
     pUniformData->numLights = analyticLightsEnabled ? (uint32_t)in.scene->getLightsDesc().size() : 0u;
+    pUniformData->numEmissiveMeshes = in.accel ? in.accel->emissiveMeshCount() : 0u;
+    const double analyticPower = pUniformData->numLights > 0u && in.lights ? in.lights->totalPower() : 0.0;
+    const double meshPower = pUniformData->numEmissiveMeshes > 0u && in.accel ? in.accel->emissiveMeshPower() : 0.0;
+    pUniformData->meshLightSelectionPdf = binaryPowerProbability(meshPower, analyticPower);
     pUniformData->primaryRayMask = analyticLightsEnabled ? RAY_MASK_PRIMARY : GEOMETRY_MASK_GEOMETRY;
     pUniformData->estimatorMode = settings.getAs<uint32_t>("render/validate/estimatorMode");
     // 0 = glTF (-ln(C)/d), 1 = Cycles ((1-C)/d). See volume.h.
@@ -382,7 +388,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
         pUniformData->envBackgroundIntensity = hasBackdrop && envLight.has_value() ? envLight->backgroundIntensity : 1.0f;
         const glm::float3 tint = envLight.has_value() ? envLight->color : glm::float3(1.0f);
         float envSelectionPdf = 1.0f;
-        if (pUniformData->numLights > 0)
+        if (pUniformData->numLights > 0 || pUniformData->numEmissiveMeshes > 0)
         {
             // PBRT's infinite-light power proxy: the map's integrated radiance
             // crossing the projected area of a sphere around the scene. It has
@@ -394,7 +400,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
             const double tintLuminance = std::max(0.2126 * tint.r + 0.7152 * tint.g + 0.0722 * tint.b, 0.0);
             const double envPower = std::numbers::pi_v<double> * radius * radius * mapIntegral *
                                     pUniformData->envMapIntensity * tintLuminance;
-            const double localPower = in.lights != nullptr ? in.lights->totalPower() : 0.0;
+            const double localPower = analyticPower + meshPower;
             envSelectionPdf = binaryPowerProbability(envPower, localPower);
         }
         pUniformData->envMapColorTint = { tint.x, tint.y, tint.z, envSelectionPdf };

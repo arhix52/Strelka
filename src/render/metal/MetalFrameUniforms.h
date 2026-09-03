@@ -19,6 +19,8 @@
 namespace oka::metal
 {
 
+class MetalAccelStructure;
+
 static constexpr size_t kFrameUniformSlots = 3;
 
 // Camera / jitter / exposure / SHARC → Uniforms fill. Owns the per-frame uniform
@@ -38,6 +40,7 @@ public:
         Scene* scene = nullptr;
         MetalMaterials* materials = nullptr;
         MetalLights* lights = nullptr;
+        MetalAccelStructure* accel = nullptr;
         MetalEnvironment* environment = nullptr;
         uint32_t frameSlot = 0;
         uint32_t subframeIndex = 0;

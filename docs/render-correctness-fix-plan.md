@@ -12,8 +12,8 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | 2. Distant/dome support and MIS completeness | Dome packed as type `-1`; sharp distant reports continuous PDF 0 but is not delta; analytic dome one-bounce ratio `0.2988202609` | Scene/JSON packing, common support/delta oracle, cap normalization, analytic one-bounce MIS, omitted-miss mutation | Separate delta distant, finite spherical-cap, and dome measures; evaluate continuous infinite emitters on miss with the same selection PMF/support as NEE | FIXED | Shader compiled; analytic execution pending final GPU audit | Shared math/source changed; toolchain unavailable on macOS | `ad4c3d9` | PARTIAL |
 | 3. Metal back-face NEE/MIS double counting | Back-face direction accepted by NEE but unpaired bounce gives MIS shares `0.4 + 1.0 = 1.4` | Exact support-equivalence sweep, front/back/flipped/transmission/fibre cases, 0.4/0.6 balance-share mutation | Evaluate proposal and bounce pairing in one shaded frame and make their continuous supports identical | Oracle FIXED | Shader compiled; path execution pending final GPU audit | Shared predicate fixed; toolchain unavailable on macOS | `b214620` | PARTIAL |
 | 4. Non-uniform transforms for analytic lights | Disc geometry/sampler area ratio `6.0`; a smooth-disc sample outside the 16-gon is invisible to old traversal; sphere record loses affine axes | Double-precision affine-Jacobian oracle, smooth sample/intersection/PDF agreement, mirrored normals, CPU picking, coarse-proxy mutation | Sample and intersect the same smooth affine disc/ellipsoid; keep tessellation editor-only | FIXED | Shader compiled; shared analytic math executed on MTLDevice | Source updated; toolchain unavailable on macOS | `495e2a7` | PARTIAL |
-| 5. Robust large-distribution support | 209,715/1,048,576 positive-PMF bins have zero float-CDF interval | Million-bin support/normalization, sparse zeros, 1e12 dynamic range, PMF lookup, GOF, old-CDF mutation | Replace the cumulative float table with an O(1) Walker/Vose alias draw and its represented PMF | FIXED | 1,048,576-entry support kernel passed on MTLDevice | OptiX remains uniform until finding 7 | pending | PARTIAL |
-| 6. Emissive mesh NEE | Pending | Pending | Add selection, transformed-area sampling, solid-angle conversion, and BSDF-hit MIS | OPEN | OPEN | OPEN | — | OPEN |
+| 5. Robust large-distribution support | 209,715/1,048,576 positive-PMF bins have zero float-CDF interval | Million-bin support/normalization, sparse zeros, 1e12 dynamic range, PMF lookup, GOF, old-CDF mutation | Replace the cumulative float table with an O(1) Walker/Vose alias draw and its represented PMF | FIXED | 1,048,576-entry support kernel passed on MTLDevice | OptiX remains uniform until finding 7 | `cd2dd98` | PARTIAL |
+| 6. Emissive mesh NEE | A scene containing only one material-emissive triangle has `hasEmitter=false` and NEE proposal probability 0 despite nonzero emitted radiance | Single/multiple triangle frequencies, affine instances, texture evaluation, sample/PDF oracle, hit MIS, NEE-off expectation, omitted-NEE and visibility mutations | Hierarchical mesh-instance/triangle selection, exact transformed-area sampling, endpoint-consistent visibility, and the same marginal density at BSDF hits | FIXED | FIXED on MTLDevice | Source implemented; toolchain unavailable | pending | PARTIAL |
 | 7. Cross-backend consistency | Pending | Pending | Audit common probability conventions and compile/execute each available backend | OPEN | OPEN | OPEN | — | OPEN |
 
 ## Per-finding probability records
@@ -214,3 +214,50 @@ is out of scope unless it blocks validation.
   positive-support loss and zero selection of zero bins in fast and safe math modes. Release, sanitizer, and final
   checks pass: Release CTest 4/4 and targeted ASan+UBSan 5,243,704/5,243,704. OptiX still uses its previous uniform
   analytic-light selector; the cross-backend convention is deliberately completed in finding 7.
+
+## Finding 6: Emissive mesh NEE
+
+- Random variable: emitter class `C` (environment or local), local class `K` (analytic or material-emissive mesh),
+  mesh/instance identity `M`, triangle identity `T`, and barycentric surface point `X` on that triangle.
+- Measure: `C`, `K`, `M`, and `T` are discrete probability masses. `X` has density with respect to world-space area
+  `dA`; its induced direction `W=(X-P)/|X-P|` has density with respect to solid angle `domega` at shading point `P`.
+- Support: every non-degenerate triangle instance whose material's multiplicative emission factor is finite and has
+  a positive channel. Texture values are evaluated at the sampled barycentric UV; a black texel contributes zero but
+  does not remove support from other positive texels. Existing surface shading emits on both traced sides, so mesh
+  NEE uses the same two-sided support rather than inventing a one-sided material convention.
+- Conditional and marginal PDF: within a selected triangle, `p_A(X|T,M)=1/A_world`. The area-to-direction Jacobian is
+  `p_omega(W|T,M)=distance^2/[A_world abs(n_light dot (-W))]`. The complete light density is
+  `P(C=local) P(K=mesh|local) P(M|mesh) P(T|M) p_omega(W|T,M)`. The hit-side lookup reconstructs this same product.
+- Selection PMF: mesh-instance power is the sum of its triangle powers; the conditional triangle PMF is represented
+  by its own alias table. Both stored PMFs are reconstructed from the float alias representation. Analytic lights and
+  emissive meshes remain separate conditional tables, joined by an explicit local-class PMF; the environment/local
+  PMF uses their combined local power.
+- Delta classification: a finite-area mesh triangle is continuous even if it is very small. Degenerate world-space
+  triangles have zero area and no continuous support; no delta fallback is synthesized.
+- MIS strategies: selected-light NEE and non-delta BSDF continuation that hits the same emissive triangle. Camera,
+  specular, NEE-disabled, and unsupported hits retain weight one. Otherwise both sides use the complete marginal
+  light density above with the same heuristic.
+- Current-HEAD reproducer: ordinary mesh hits add `si.emission`, but Metal's and OptiX's `hasEmitter` predicates and
+  `connectToLight()` enumerate only analytic lights and the environment. For a scene containing one positive
+  emissive triangle and no analytic/environment light, `P(NEE)=0`; the independent one-bounce triangle integral is
+  positive. The existing BSDF-only path remains unbiased where its lobe has support, but the required direct-light
+  strategy, selection PMFs, and complementary hit MIS are absent.
+- Corrected result: the nested alias tables reproduce the represented PMFs `(0.1, 0.3, 0, 0.6)` in one million
+  fixed-seed draws and never select the zero entry. Across 4,096 affine samples, the sampled point, transformed
+  normal, world-space area density, solid-angle Jacobian, and full marginal PDF agree with an independent
+  double-precision GLM oracle, including a mirrored non-uniform instance. An independent one-bounce QMC estimate
+  agrees with midpoint quadrature; deleting the mesh proposal returns exactly zero and is retained as the mutation.
+  Texture emission and alpha are evaluated at the sampled barycentric UV rather than replaced by a constant proxy.
+- Visibility correction: the physical connection keeps the exact shading-point-to-light direction used by the
+  BSDF and PDF, while the shadow ray is the exact segment between independently scale-offset source and target
+  endpoints. The old `distance - 1e-5` mutation, measured from the unoffset source, crosses the emitter plane after
+  the source is offset and self-occludes; the endpoint construction terminates strictly before the emitter without
+  changing the sampled event.
+- Validation: the five focused cases pass 2,646,048 assertions; Debug and Release CTest pass 4/4; the full audit
+  passes 777/777 tests and 68,654,065 assertions; targeted ASan+UBSan passes 2,646,048 assertions (macOS reports that
+  leak detection is unsupported). Production `wavefront.metal` compiles. On the actual Apple M4 Pro, a textured
+  emissive-triangle scene at 96x96 and 32,768 spp gives receiver means `0.1022682866` with NEE and `0.1022836623`
+  BSDF-only (relative difference `0.015035%`), with zero non-finite or negative pixels. The corresponding Debug GPU
+  runs took 13.2 s and 10.4 s; these are correctness observations, not performance claims. OptiX uses the same
+  analytic transformed-triangle and visibility specification, but cannot be compiled or executed on this macOS
+  host, so its status remains UNVERIFIED until finding 7.

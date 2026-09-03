@@ -640,9 +640,11 @@ struct LightConnection
     float3 radiance; // unoccluded Li times the cosine at the surface
     float3 toLight; // shadow ray direction
     float3 origin; // shadow ray origin
+    float3 visibilityTarget; // offset near-side endpoint for traversed mesh emitters
     float pdf;
     float tMax;
     bool needsRay; // false when the connection is degenerate and contributes nothing
+    bool hasVisibilityTarget;
     // A delta light has no area, so BSDF sampling can never generate a direction
     // that hits it and there is no second strategy to combine with. Its pdf is a
     // placeholder of 1, not a solid-angle density, so feeding it to the balance
@@ -656,9 +658,11 @@ static LightConnection makeEmptyConnection()
     c.radiance = float3(0.0f);
     c.toLight = float3(0.0f);
     c.origin = float3(0.0f);
+    c.visibilityTarget = float3(0.0f);
     c.pdf = 0.0f;
     c.tMax = 0.0f;
     c.needsRay = false;
+    c.hasVisibilityTarget = false;
     c.isDelta = false;
     return c;
 }
@@ -891,6 +895,204 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
     return c;
 }
 
+struct EmissiveTriangleGeometry
+{
+    float3 p0;
+    float3 p1;
+    float3 p2;
+    float2 uv0;
+    float2 uv1;
+    float2 uv2;
+};
+
+static float4x4 emissiveObjectToWorld(constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                      uint32_t instanceId)
+{
+    const auto inst = instances[instanceId];
+    return float4x4(
+        float4(float3(inst.transformationMatrix[0]), 0.0f), float4(float3(inst.transformationMatrix[1]), 0.0f),
+        float4(float3(inst.transformationMatrix[2]), 0.0f), float4(float3(inst.transformationMatrix[3]), 1.0f));
+}
+
+static EmissiveTriangleGeometry fetchEmissiveTriangle(constant Uniforms& uniforms,
+                                                      constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                                      device const char* vertexBuffer,
+                                                      device const char* prevVertexBuffer,
+                                                      device const uint32_t* indexBuffer,
+                                                      device const EmissiveMeshLight& mesh,
+                                                      uint32_t primitiveId,
+                                                      float motionTime)
+{
+    constexpr uint32_t stride = 32u;
+    constexpr uint32_t uvOffset = 20u;
+    EmissiveTriangleGeometry triangle;
+    thread float3* points[3] = { &triangle.p0, &triangle.p1, &triangle.p2 };
+    thread float2* uvs[3] = { &triangle.uv0, &triangle.uv1, &triangle.uv2 };
+    const float4x4 objectToWorld = emissiveObjectToWorld(instances, mesh.instanceId);
+    for (uint32_t k = 0u; k < 3u; ++k)
+    {
+        const uint32_t vertexId = indexBuffer[mesh.indexOffset + primitiveId * 3u + k] + mesh.vertexOffset;
+        device const char* current = vertexBuffer + size_t(vertexId) * stride;
+        float3 objectPoint = float3(*(device const packed_float3*)current);
+        if (SPEC_MOTION_BLUR && uniforms.enableMotionBlur && motionTime < 1.0f && prevVertexBuffer)
+        {
+            device const char* previous = prevVertexBuffer + size_t(vertexId) * stride;
+            objectPoint = mix(float3(*(device const packed_float3*)previous), objectPoint, motionTime);
+        }
+        *points[k] = (objectToWorld * float4(objectPoint, 1.0f)).xyz;
+        *uvs[k] = unpackUV(*(device const uint32_t*)(current + uvOffset));
+    }
+    return triangle;
+}
+
+static float3 emissiveMeshRadiance(device const Material& material, float2 uv)
+{
+    float3 emission = float3(material.emission) * material.emission_strength;
+    if (!is_null_texture(material.emissionTexture))
+    {
+        constexpr sampler emissionSampler(mag_filter::linear, min_filter::linear, address::repeat);
+        emission *= material.emissionTexture.sample(emissionSampler, applyTextureTransform(uv, material)).rgb;
+    }
+    return emission;
+}
+
+static uint32_t sampleEmissiveMesh(constant Uniforms& uniforms, thread SamplerState& sampler, float bucketUniform)
+{
+    const uint32_t bucket = lightAliasBucket(uniforms.numEmissiveMeshes, bucketUniform);
+    device const EmissiveMeshLight& entry = uniforms.emissiveMeshes[bucket];
+    const float coin = random<SampleDimension::eLightAlias>(sampler, uniforms.samplerType);
+    return lightAliasSelect(uniforms.numEmissiveMeshes, bucket, coin, entry.aliasProbability, entry.alias);
+}
+
+static uint32_t sampleEmissiveTriangleIndex(constant Uniforms& uniforms,
+                                            thread SamplerState& sampler,
+                                            device const EmissiveMeshLight& mesh)
+{
+    SamplerState triangleSampler = sampler;
+    triangleSampler.seed = hash_combine(sampler.seed, 0x6d2b79f5u);
+    const float bucketUniform = random<SampleDimension::eLightId>(triangleSampler, uniforms.samplerType);
+    const uint32_t bucket = lightAliasBucket(mesh.triangleCount, bucketUniform);
+    device const EmissiveTriangleLight& entry = uniforms.emissiveTriangles[mesh.triangleOffset + bucket];
+    const float coin = random<SampleDimension::eLightAlias>(triangleSampler, uniforms.samplerType);
+    return lightAliasSelect(mesh.triangleCount, bucket, coin, entry.aliasProbability, entry.alias);
+}
+
+static int findEmissiveMesh(constant Uniforms& uniforms, uint32_t instanceId, uint32_t geometryId)
+{
+    uint32_t first = 0u;
+    uint32_t count = uniforms.numEmissiveMeshes;
+    while (count > 0u)
+    {
+        const uint32_t step = count / 2u;
+        const uint32_t middle = first + step;
+        if (emissiveMeshKeyLess(uniforms.emissiveMeshes[middle].instanceId, uniforms.emissiveMeshes[middle].geometryId,
+                                instanceId, geometryId))
+        {
+            first = middle + 1u;
+            count -= step + 1u;
+        }
+        else
+        {
+            count = step;
+        }
+    }
+    if (first < uniforms.numEmissiveMeshes)
+    {
+        device const EmissiveMeshLight& light = uniforms.emissiveMeshes[first];
+        if (light.instanceId == instanceId && light.geometryId == geometryId)
+        {
+            return int(first);
+        }
+    }
+    return -1;
+}
+
+static LightConnection connectEmissiveMesh(constant Uniforms& uniforms,
+                                           constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                           device const char* vertexBuffer,
+                                           device const char* prevVertexBuffer,
+                                           device const uint32_t* indexBuffer,
+                                           device const Material* materials,
+                                           thread SamplerState& sampler,
+                                           thread SurfaceInteraction& si,
+                                           float meshBucketUniform,
+                                           float motionTime,
+                                           bool volumeEvent)
+{
+    LightConnection connection = makeEmptyConnection();
+    const uint32_t meshId = sampleEmissiveMesh(uniforms, sampler, meshBucketUniform);
+    if (meshId >= uniforms.numEmissiveMeshes)
+    {
+        return connection;
+    }
+    device const EmissiveMeshLight& mesh = uniforms.emissiveMeshes[meshId];
+    const uint32_t primitiveId = sampleEmissiveTriangleIndex(uniforms, sampler, mesh);
+    if (primitiveId >= mesh.triangleCount)
+    {
+        return connection;
+    }
+    device const EmissiveTriangleLight& triangleEntry = uniforms.emissiveTriangles[mesh.triangleOffset + primitiveId];
+    if (!(mesh.selectionPdf > 0.0f) || !(triangleEntry.selectionPdf > 0.0f))
+    {
+        return connection;
+    }
+    const EmissiveTriangleGeometry triangle = fetchEmissiveTriangle(
+        uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, mesh, primitiveId, motionTime);
+    const float u0 = random<SampleDimension::eLightPointX>(sampler, uniforms.samplerType);
+    const float u1 = random<SampleDimension::eLightPointY>(sampler, uniforms.samplerType);
+    const EmissiveTriangleSample sample =
+        sampleEmissiveTriangle(triangle.p0, triangle.p1, triangle.p2, triangle.uv0, triangle.uv1, triangle.uv2, u0, u1);
+    if (!sample.valid)
+    {
+        return connection;
+    }
+    const float3 offset = sample.point - si.position;
+    const float distance = length(offset);
+    if (!(distance > 1e-5f))
+    {
+        return connection;
+    }
+    const float3 direction = offset / distance;
+    device const Material& material = materials[mesh.materialId];
+    const float3 emission = emissiveMeshRadiance(material, sample.uv) * resolveOpacity(material, sample.uv);
+    if (!emitsLight(emission) || (!volumeEvent && !lightReachesShadingPoint(si, direction)))
+    {
+        return connection;
+    }
+    const float selectedMeshPdf =
+        emissiveMeshMarginalSolidAnglePdf(1.0f, 1.0f, mesh.selectionPdf, triangleEntry.selectionPdf, sample.areaPdf,
+                                          si.position, sample.point, sample.normal);
+    if (!(selectedMeshPdf > 0.0f))
+    {
+        return connection;
+    }
+
+    connection.radiance = volumeEvent ? emission : emission * shadingCosine(si, direction);
+    connection.toLight = direction;
+    connection.origin =
+        volumeEvent ? si.position : offset_ray(si.position, orientedFaceNormal(si.geometry_normal, direction));
+    connection.visibilityTarget = offset_ray(sample.point, orientedFaceNormal(sample.normal, -direction));
+    connection.pdf = selectedMeshPdf;
+    connection.tMax = distance;
+    connection.needsRay = true;
+    connection.hasVisibilityTarget = true;
+    connection.isDelta = false;
+    return connection;
+}
+
+static EmissiveVisibilitySegment lightVisibilitySegment(thread const LightConnection& connection, float3 shadowOrigin)
+{
+    if (connection.hasVisibilityTarget)
+    {
+        return emissiveVisibilitySegment(shadowOrigin, connection.visibilityTarget);
+    }
+    EmissiveVisibilitySegment segment;
+    segment.direction = connection.toLight;
+    segment.maxDistance = connection.tMax;
+    segment.valid = connection.needsRay && connection.tMax > 0.0f;
+    return segment;
+}
+
 // Choose a strategy and build the connection. The caller decides when to test
 // visibility.
 uint32_t sampleAnalyticLight(const uint32_t numLights,
@@ -911,6 +1113,12 @@ float analyticLightSelectionPdf(device const UniformLight& light)
 LightConnection connectToLight(constant Uniforms& uniforms,
                                const uint32_t numLights,
                                device UniformLight* lights,
+                               constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                               device const Material* materials,
+                               device const char* vertexBuffer,
+                               device const char* prevVertexBuffer,
+                               device const uint32_t* indexBuffer,
+                               float motionTime,
                                thread SamplerState& samplerRnd,
                                thread SurfaceInteraction& si,
                                device const EnvAliasEntry* envAliasTable,
@@ -918,46 +1126,92 @@ LightConnection connectToLight(constant Uniforms& uniforms,
                                device const IesGpuBufferHeader* iesBuffer,
                                bool volumeEvent = false)
 {
+    const bool hasAnalytic = SPEC_LIGHTS && numLights > 0u;
+    const bool hasMesh = SPEC_LIGHTS && uniforms.numEmissiveMeshes > 0u;
+    const bool hasLocal = hasAnalytic || hasMesh;
+    const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
+    float localSelectionPdf = 1.0f;
+    float localU = u;
     if (SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
-        const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
         const float envSelectionPdf = uniforms.envMapColorTint.w;
-        const float localSelectionPdf = 1.0f - envSelectionPdf;
+        localSelectionPdf = 1.0f - envSelectionPdf;
 
-        if (!SPEC_LIGHTS || numLights == 0 || u >= localSelectionPdf)
+        if (!hasLocal || u >= localSelectionPdf)
         {
             LightConnection c = connectEnvLight(uniforms, samplerRnd, si, envAliasTable, envMapTexture, volumeEvent);
-            c.pdf *= numLights > 0 ? envSelectionPdf : 1.0f;
+            c.pdf *= hasLocal ? envSelectionPdf : 1.0f;
             return c;
         }
-        const float remappedU = u / localSelectionPdf;
-        const float aliasU = random<SampleDimension::eLightAlias>(samplerRnd, uniforms.samplerType);
-        const uint32_t lightId = sampleAnalyticLight(numLights, lights, remappedU, aliasU);
-        if (lightId >= numLights)
-        {
-            return makeEmptyConnection();
-        }
-        LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent, iesBuffer);
-        c.pdf *= localSelectionPdf * analyticLightSelectionPdf(lights[lightId]);
-        return c;
+        localU = u / localSelectionPdf;
     }
 
-    // No env map and no analytic lights: nothing to connect to. Falling through
-    // would divide by numLights == 0, produce a NaN light PDF, and trip the
-    // isnan() guard in the caller that paints the pixel bright red.
-    if (!SPEC_LIGHTS || numLights == 0)
+    if (!hasLocal)
     {
         return makeEmptyConnection();
     }
 
-    const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
+    const float meshSelectionPdf = uniforms.meshLightSelectionPdf;
+    if (hasMesh && (!hasAnalytic || meshSelectionPdf >= 1.0f || localU < meshSelectionPdf))
+    {
+        const float meshU = hasAnalytic ? localU / meshSelectionPdf : localU;
+        LightConnection c = connectEmissiveMesh(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer,
+                                                materials, samplerRnd, si, meshU, motionTime, volumeEvent);
+        c.pdf *= localSelectionPdf * (hasAnalytic ? meshSelectionPdf : 1.0f);
+        return c;
+    }
+
+    const float analyticSelectionPdf = hasMesh ? 1.0f - meshSelectionPdf : 1.0f;
+    if (!(analyticSelectionPdf > 0.0f))
+    {
+        return makeEmptyConnection();
+    }
+    const float analyticU = hasMesh ? (localU - meshSelectionPdf) / analyticSelectionPdf : localU;
     const float aliasU = random<SampleDimension::eLightAlias>(samplerRnd, uniforms.samplerType);
-    const uint32_t lightId = sampleAnalyticLight(numLights, lights, u, aliasU);
+    const uint32_t lightId = sampleAnalyticLight(numLights, lights, analyticU, aliasU);
     if (lightId >= numLights)
     {
         return makeEmptyConnection();
     }
     LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent, iesBuffer);
-    c.pdf *= analyticLightSelectionPdf(lights[lightId]);
+    c.pdf *= localSelectionPdf * analyticSelectionPdf * analyticLightSelectionPdf(lights[lightId]);
     return c;
+}
+
+static float emissiveMeshHitPdf(constant Uniforms& uniforms,
+                                constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                device const char* vertexBuffer,
+                                device const char* prevVertexBuffer,
+                                device const uint32_t* indexBuffer,
+                                uint32_t instanceId,
+                                uint32_t geometryId,
+                                uint32_t primitiveId,
+                                float3 shadingPoint,
+                                float3 pointOnLight,
+                                float motionTime)
+{
+    const int meshId = findEmissiveMesh(uniforms, instanceId, geometryId);
+    if (meshId < 0)
+    {
+        return 0.0f;
+    }
+    device const EmissiveMeshLight& mesh = uniforms.emissiveMeshes[meshId];
+    if (primitiveId >= mesh.triangleCount)
+    {
+        return 0.0f;
+    }
+    device const EmissiveTriangleLight& triangleEntry = uniforms.emissiveTriangles[mesh.triangleOffset + primitiveId];
+    const EmissiveTriangleGeometry triangle = fetchEmissiveTriangle(
+        uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, mesh, primitiveId, motionTime);
+    const EmissiveTriangleSample geometry = sampleEmissiveTriangle(
+        triangle.p0, triangle.p1, triangle.p2, triangle.uv0, triangle.uv1, triangle.uv2, 0.25f, 0.5f);
+    if (!geometry.valid)
+    {
+        return 0.0f;
+    }
+    const float localSelectionPdf = (SPEC_ENV_MAP && uniforms.hasEnvMap) ? 1.0f - uniforms.envMapColorTint.w : 1.0f;
+    const float meshClassPdf = uniforms.numLights > 0u ? uniforms.meshLightSelectionPdf : 1.0f;
+    return emissiveMeshMarginalSolidAnglePdf(localSelectionPdf, meshClassPdf, mesh.selectionPdf,
+                                             triangleEntry.selectionPdf, geometry.areaPdf, shadingPoint, pointOnLight,
+                                             geometry.normal);
 }

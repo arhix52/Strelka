@@ -13,6 +13,7 @@
 // ~264 KB of lookup tables into every translation unit that wants a vertex
 // layout.
 #include <strelka/material/openpbr/openpbr_params.h>
+#include <emissive_mesh_light.h>
 
 #define GEOMETRY_MASK_TRIANGLE 1
 #define GEOMETRY_MASK_CURVE 2
@@ -136,6 +137,10 @@ struct Uniforms
     uint32_t subframeIndex;
 
     uint32_t numLights;
+    uint32_t numEmissiveMeshes;
+    // Probability of the mesh-emitter class conditioned on selecting a local
+    // light. The complement selects the analytic-light alias table.
+    float meshLightSelectionPdf;
     uint32_t enableAccumulation;
     uint32_t samples_per_launch;
     uint32_t maxDepth;
@@ -330,8 +335,16 @@ struct Uniforms
 #else
     uint64_t guideRays;
 #endif
+
+#ifdef __METAL_VERSION__
+    device const EmissiveMeshLight* emissiveMeshes;
+    device const EmissiveTriangleLight* emissiveTriangles;
+#else
+    uint64_t emissiveMeshes;
+    uint64_t emissiveTriangles;
+#endif
 };
-static_assert(sizeof(Uniforms) == 816, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 832, "Uniforms host/Metal ABI changed");
 
 
 // How the depth guide is encoded.

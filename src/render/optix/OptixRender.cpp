@@ -34,6 +34,7 @@
 #include "texture_support_cuda.h"
 #include "accel_build_policy.h"
 #include "ies_pack.h"
+#include <host/emissive_mesh_distribution.h>
 
 // ies_pack.h mirrors the two IES header structs so that it -- and its tests --
 // need no CUDA. This is where the mirrors are held to the originals in
@@ -98,6 +99,7 @@ static_assert((uint32_t)oka::optix_omm::kAlphaBlend == (uint32_t)ALPHA_MODE_BLEN
 #include <algorithm>
 #include <ranges>
 #include <chrono>
+#include <cstring>
 #include <limits>
 #include <filesystem>
 #include <array>
@@ -1650,6 +1652,9 @@ void OptiXRender::createTopLevelAccelerationStructure()
         const auto& instance = instances[instID];
         OptixInstance oi = {};
         resolveInstanceGeometry(oi, instance);
+        // Stable scene-instance identity for emissive-mesh hit-side PDF lookup.
+        // sbtOffset is an address, not an identity, and may be rebuilt.
+        oi.instanceId = static_cast<unsigned int>(instID);
 
         // If instance is animated, create linear matrix motion transform; else set transform directly
         if (mEnableMotionBlur && instance.isAnimated)
@@ -1698,6 +1703,7 @@ void OptiXRender::createTopLevelAccelerationStructure()
     }
 
     uploadInstancesToDevice(optixInstances);
+    createEmissiveMeshLights();
     mTlasInstanceCount = optixInstances.size();
 
     // Setup IAS build input
@@ -1793,16 +1799,19 @@ void oka::OptiXRender::updateTopLevelAccelerationStructure()
     std::vector<OptixInstance> optixInstances;
     optixInstances.reserve(instances.size());
 
-    for (const auto& instance : instances)
+    for (size_t instID = 0; instID < instances.size(); ++instID)
     {
+        const oka::Instance& instance = instances[instID];
         OptixInstance oi = {};
         resolveInstanceGeometry(oi, instance);
+        oi.instanceId = static_cast<unsigned int>(instID);
         memcpy(oi.transform, glm::value_ptr(glm::float3x4(glm::rowMajor4(instance.transform))), sizeof(float) * 12);
         oi.sbtOffset = static_cast<unsigned int>(optixInstances.size() * RAY_TYPE_COUNT);
         optixInstances.push_back(oi);
     }
 
     uploadInstancesToDevice(optixInstances);
+    createEmissiveMeshLights();
 
     // Setup IAS build (refit) input
     OptixBuildInput iasInput = {};
@@ -3975,6 +3984,9 @@ bool OptiXRender::memoryReport(MemoryReport& report) const
     add("Vertices (previous)", bufBytes(mPrevVertexBuffer));
     add("Indices", bufBytes(mIndexBuffer));
     add("Curves", bufBytes(mPointsBuffer) + bufBytes(mWidthsBuffer) + bufBytes(mSegmentIndicesBuffer));
+    add("Emissive mesh sampling", bufBytes(mEmissiveMeshBuffer) + bufBytes(mEmissiveTriangleBuffer) +
+                                      bufBytes(mEmissiveInstanceTransformBuffer) +
+                                      bufBytes(mPrevEmissiveInstanceTransformBuffer));
 
     {
         // cudaArrayGetInfo asks the array itself for its extent and format, so
@@ -4600,6 +4612,112 @@ void OptiXRender::createLightBuffer()
     createIesBuffer();
     createProjectorTextures();
     createSharcResponsiveLightBuffer();
+}
+
+void OptiXRender::createEmissiveMeshLights()
+{
+    const auto& instances = mScene->getInstances();
+    const auto& meshes = mScene->getMeshes();
+    const auto& materials = mScene->getMaterials();
+
+    std::vector<oka::render::EmissiveMeshBuildInput> inputs;
+    inputs.reserve(instances.size());
+    std::vector<EmissiveInstanceTransform> currentTransforms(instances.size());
+    std::vector<EmissiveInstanceTransform> previousTransforms(instances.size());
+
+    for (size_t instanceId = 0; instanceId < instances.size(); ++instanceId)
+    {
+        const oka::Instance& instance = instances[instanceId];
+        const glm::mat4& previous = mEnableMotionBlur && instanceId < mPrevInstances.size() ?
+                                        mPrevInstances[instanceId].transform :
+                                        instance.transform;
+        std::memcpy(currentTransforms[instanceId].matrix,
+                    glm::value_ptr(glm::float3x4(glm::rowMajor4(instance.transform))), sizeof(float) * 12u);
+        std::memcpy(previousTransforms[instanceId].matrix, glm::value_ptr(glm::float3x4(glm::rowMajor4(previous))),
+                    sizeof(float) * 12u);
+
+        if (instance.type != oka::Instance::Type::eMesh || instance.mMeshId >= meshes.size())
+        {
+            continue;
+        }
+        const uint32_t materialId = instance.mMaterialId == kInvalidIndex ? 0u : instance.mMaterialId;
+        if (materialId >= materials.size())
+        {
+            continue;
+        }
+
+        const oka::Mesh& mesh = meshes[instance.mMeshId];
+        oka::render::EmissiveMeshBuildInput input;
+        input.instanceId = static_cast<uint32_t>(instanceId);
+        // OptiX emits one GAS geometry per scene mesh, so primitive hits use
+        // geometry zero within the instance.
+        input.geometryId = 0u;
+        input.vertexOffset = mesh.mVbOffset;
+        input.indexOffset = mesh.mIndex;
+        input.materialId = materialId;
+        input.trianglePowers =
+            oka::render::emissiveTrianglePowers(*mScene, mesh, materials[materialId], instance.transform);
+
+        // Traversal linearly interpolates the previous/current transform over
+        // shutter time. Keep any triangle that has area at either endpoint in
+        // the proposal support; the power is only a variance heuristic.
+        if (mEnableMotionBlur)
+        {
+            const std::vector<double> previousPowers =
+                oka::render::emissiveTrianglePowers(*mScene, mesh, materials[materialId], previous);
+            for (size_t triangle = 0; triangle < input.trianglePowers.size(); ++triangle)
+            {
+                input.trianglePowers[triangle] = std::max(input.trianglePowers[triangle], previousPowers[triangle]);
+            }
+        }
+        inputs.push_back(std::move(input));
+    }
+
+    const oka::render::EmissiveMeshDistribution distribution = oka::render::buildEmissiveMeshDistribution(inputs);
+    mEmissiveMeshPower = distribution.totalPower;
+
+    if (distribution.meshes.empty())
+    {
+        mEmissiveMeshBuffer.reset();
+        mEmissiveTriangleBuffer.reset();
+    }
+    else
+    {
+        createOrUpdateBuffer(mEmissiveMeshBuffer, distribution.meshes);
+        createOrUpdateBuffer(mEmissiveTriangleBuffer, distribution.triangles);
+    }
+    if (currentTransforms.empty())
+    {
+        mEmissiveInstanceTransformBuffer.reset();
+        mPrevEmissiveInstanceTransformBuffer.reset();
+    }
+    else
+    {
+        createOrUpdateBuffer(mEmissiveInstanceTransformBuffer, currentTransforms);
+        createOrUpdateBuffer(mPrevEmissiveInstanceTransformBuffer, previousTransforms);
+    }
+
+    double analyticPower = 0.0;
+    for (const Scene::Light& light : mScene->getLights())
+    {
+        analyticPower += metal::analyticLightPower(light);
+    }
+    SceneData& scene = mState.params.scene;
+    scene.numEmissiveMeshes = static_cast<uint32_t>(distribution.meshes.size());
+    scene.meshLightSelectionPdf = metal::binaryPowerProbability(mEmissiveMeshPower, analyticPower);
+    scene.emissiveMeshes =
+        mEmissiveMeshBuffer ? optix::devicePtr<const EmissiveMeshLight>(mEmissiveMeshBuffer->getPtr()) : nullptr;
+    scene.emissiveTriangles = mEmissiveTriangleBuffer ?
+                                  optix::devicePtr<const EmissiveTriangleLight>(mEmissiveTriangleBuffer->getPtr()) :
+                                  nullptr;
+    scene.emissiveInstanceTransforms =
+        mEmissiveInstanceTransformBuffer ?
+            optix::devicePtr<const EmissiveInstanceTransform>(mEmissiveInstanceTransformBuffer->getPtr()) :
+            nullptr;
+    scene.prevEmissiveInstanceTransforms =
+        mPrevEmissiveInstanceTransformBuffer ?
+            optix::devicePtr<const EmissiveInstanceTransform>(mPrevEmissiveInstanceTransformBuffer->getPtr()) :
+            nullptr;
 }
 
 /// Upload the images projector lights throw, in the order the scene registered

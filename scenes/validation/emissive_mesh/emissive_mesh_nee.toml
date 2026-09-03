@@ -1,0 +1,26 @@
+[scene]
+path = "emissive_mesh.gltf"
+
+[output]
+path = "emissive_mesh_nee.exr"
+width = 96
+height = 96
+
+[render]
+spp = 4096
+spp_per_launch = 64
+max_depth = 2
+sampler = "sobol"
+estimator_mode = 0
+denoise = false
+clamp_indirect = 0
+
+[camera]
+index = 0
+
+[tonemap]
+type = "none"
+gamma = 0
+exposure_iso = 100
+exposure_fstop = 1
+exposure_shutter = 1

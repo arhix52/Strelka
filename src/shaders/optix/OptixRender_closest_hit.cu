@@ -14,6 +14,7 @@
 
 #include <lights.h>
 #include <env_light.h>
+#include <light_alias_sampling.h>
 
 #include <strelka/material/bsdf.h>
 #include <strelka/material/volume.h>
@@ -202,9 +203,11 @@ struct LightConnection
 {
     float3 radiance; // Li times the shading cosine, unshadowed
     float3 toLight;
+    float3 visibilityTarget;
     float pdf; // solid-angle density, including the light-selection probability
     float tMax;
     bool needsRay;
+    bool hasVisibilityTarget;
     /// Delta lights are unreachable by BSDF sampling, so their MIS weight is one.
     bool isDelta;
     /// The light behind this connection is marked responsive, so whatever it
@@ -231,9 +234,11 @@ static __forceinline__ __device__ LightConnection makeEmptyConnection()
     LightConnection c;
     c.radiance = make_float3(0.0f);
     c.toLight = make_float3(0.0f);
+    c.visibilityTarget = make_float3(0.0f);
     c.pdf = 0.0f;
     c.tMax = 0.0f;
     c.needsRay = false;
+    c.hasVisibilityTarget = false;
     c.isDelta = false;
     c.isResponsive = false;
     return c;
@@ -260,6 +265,20 @@ static __forceinline__ __device__ float3 shadowOrigin(const SurfaceInteraction& 
         return fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, toLight);
     }
     return offset_ray(si.position, orientedFaceNormal(si.geometry_normal, toLight));
+}
+
+static __forceinline__ __device__ EmissiveVisibilitySegment lightVisibilitySegment(const LightConnection& connection,
+                                                                                   float3 origin)
+{
+    if (connection.hasVisibilityTarget)
+    {
+        return emissiveVisibilitySegment(origin, connection.visibilityTarget);
+    }
+    EmissiveVisibilitySegment segment;
+    segment.direction = connection.toLight;
+    segment.maxDistance = connection.tMax;
+    segment.valid = connection.needsRay && connection.tMax > 0.0f;
+    return segment;
 }
 
 /// What a projector emits in a direction, as a multiplier on its intensity.
@@ -456,45 +475,289 @@ static __device__ LightConnection connectEnvLight(SamplerState& sampler,
     return c;
 }
 
+struct EmissiveTriangleGeometry
+{
+    float3 p0;
+    float3 p1;
+    float3 p2;
+    float2 uv0;
+    float2 uv1;
+    float2 uv2;
+};
+
+static __forceinline__ __device__ float3 transformEmissivePoint(uint32_t instanceId, float3 objectPoint, float motionTime)
+{
+    const EmissiveInstanceTransform& current = params.scene.emissiveInstanceTransforms[instanceId];
+    const EmissiveInstanceTransform* previousTransforms = params.scene.prevEmissiveInstanceTransforms;
+    const EmissiveInstanceTransform& previous = previousTransforms ? previousTransforms[instanceId] : current;
+    const float t = params.enableMotionBlur ? motionTime : 1.0f;
+    float m[12];
+#pragma unroll
+    for (uint32_t i = 0u; i < 12u; ++i)
+    {
+        m[i] = previous.matrix[i] + (current.matrix[i] - previous.matrix[i]) * t;
+    }
+    return make_float3(m[0] * objectPoint.x + m[1] * objectPoint.y + m[2] * objectPoint.z + m[3],
+                       m[4] * objectPoint.x + m[5] * objectPoint.y + m[6] * objectPoint.z + m[7],
+                       m[8] * objectPoint.x + m[9] * objectPoint.y + m[10] * objectPoint.z + m[11]);
+}
+
+static __forceinline__ __device__ EmissiveTriangleGeometry fetchEmissiveTriangle(const EmissiveMeshLight& mesh,
+                                                                                 uint32_t primitiveId,
+                                                                                 float motionTime)
+{
+    const uint32_t i0 = params.scene.ib[mesh.indexOffset + primitiveId * 3u + 0u] + mesh.vertexOffset;
+    const uint32_t i1 = params.scene.ib[mesh.indexOffset + primitiveId * 3u + 1u] + mesh.vertexOffset;
+    const uint32_t i2 = params.scene.ib[mesh.indexOffset + primitiveId * 3u + 2u] + mesh.vertexOffset;
+    const Vertex& v0 = params.scene.vb[i0];
+    const Vertex& v1 = params.scene.vb[i1];
+    const Vertex& v2 = params.scene.vb[i2];
+
+    float3 p0 = v0.position;
+    float3 p1 = v1.position;
+    float3 p2 = v2.position;
+    if (params.enableMotionBlur && params.scene.vb_prev != nullptr)
+    {
+        p0 = lerp(params.scene.vb_prev[i0].position, p0, motionTime);
+        p1 = lerp(params.scene.vb_prev[i1].position, p1, motionTime);
+        p2 = lerp(params.scene.vb_prev[i2].position, p2, motionTime);
+    }
+
+    EmissiveTriangleGeometry triangle;
+    triangle.p0 = transformEmissivePoint(mesh.instanceId, p0, motionTime);
+    triangle.p1 = transformEmissivePoint(mesh.instanceId, p1, motionTime);
+    triangle.p2 = transformEmissivePoint(mesh.instanceId, p2, motionTime);
+    triangle.uv0 = unpackUV(v0.uv);
+    triangle.uv1 = unpackUV(v1.uv);
+    triangle.uv2 = unpackUV(v2.uv);
+    return triangle;
+}
+
+static __forceinline__ __device__ float3 emissiveMeshRadiance(const EmissiveMeshLight& mesh, float2 uv)
+{
+    const MaterialParams& material = params.materials[mesh.materialId];
+    const cudaTextureObject_t* textures = &params.materialTextures[mesh.materialId * MAX_MATERIAL_TEXTURES];
+    float3 emission = material.emission * material.emission_strength;
+    if (material.emission_tex >= 0)
+    {
+        emission *=
+            make_float3(texture_sample_2d(textures, material.emission_tex, apply_texture_transform(uv, material)));
+    }
+    return emission * resolveOpacity(material, textures, uv);
+}
+
+static __forceinline__ __device__ uint32_t sampleEmissiveMesh(SamplerState& sampler, float bucketUniform)
+{
+    const uint32_t bucket = lightAliasBucket(params.scene.numEmissiveMeshes, bucketUniform);
+    const EmissiveMeshLight& entry = params.scene.emissiveMeshes[bucket];
+    return lightAliasSelect(params.scene.numEmissiveMeshes, bucket, random<SampleDimension::eLightAlias>(sampler),
+                            entry.aliasProbability, entry.alias);
+}
+
+static __forceinline__ __device__ uint32_t sampleEmissiveTriangleIndex(SamplerState& sampler,
+                                                                       const EmissiveMeshLight& mesh)
+{
+    SamplerState triangleSampler = sampler;
+    triangleSampler.seed = hash_combine(sampler.seed, 0x6d2b79f5u);
+    const uint32_t bucket =
+        lightAliasBucket(mesh.triangleCount, random<SampleDimension::eLightId>(triangleSampler));
+    const EmissiveTriangleLight& entry = params.scene.emissiveTriangles[mesh.triangleOffset + bucket];
+    return lightAliasSelect(mesh.triangleCount, bucket, random<SampleDimension::eLightAlias>(triangleSampler),
+                            entry.aliasProbability, entry.alias);
+}
+
+static __forceinline__ __device__ int findEmissiveMesh(uint32_t instanceId, uint32_t geometryId)
+{
+    uint32_t first = 0u;
+    uint32_t count = params.scene.numEmissiveMeshes;
+    while (count > 0u)
+    {
+        const uint32_t step = count / 2u;
+        const uint32_t middle = first + step;
+        const EmissiveMeshLight& light = params.scene.emissiveMeshes[middle];
+        if (emissiveMeshKeyLess(light.instanceId, light.geometryId, instanceId, geometryId))
+        {
+            first = middle + 1u;
+            count -= step + 1u;
+        }
+        else
+        {
+            count = step;
+        }
+    }
+    if (first < params.scene.numEmissiveMeshes)
+    {
+        const EmissiveMeshLight& light = params.scene.emissiveMeshes[first];
+        if (light.instanceId == instanceId && light.geometryId == geometryId)
+        {
+            return static_cast<int>(first);
+        }
+    }
+    return -1;
+}
+
+static __forceinline__ __device__ LightConnection connectEmissiveMesh(SamplerState& sampler,
+                                                                      const SurfaceInteraction& si,
+                                                                      float meshUniform,
+                                                                      bool volumeEvent)
+{
+    LightConnection c = makeEmptyConnection();
+    const uint32_t meshId = sampleEmissiveMesh(sampler, meshUniform);
+    if (meshId >= params.scene.numEmissiveMeshes)
+    {
+        return c;
+    }
+    const EmissiveMeshLight& mesh = params.scene.emissiveMeshes[meshId];
+    const uint32_t primitiveId = sampleEmissiveTriangleIndex(sampler, mesh);
+    if (primitiveId >= mesh.triangleCount)
+    {
+        return c;
+    }
+    const EmissiveTriangleLight& triangleEntry = params.scene.emissiveTriangles[mesh.triangleOffset + primitiveId];
+    if (!(mesh.selectionPdf > 0.0f) || !(triangleEntry.selectionPdf > 0.0f))
+    {
+        return c;
+    }
+
+    const EmissiveTriangleGeometry triangle = fetchEmissiveTriangle(mesh, primitiveId, optixGetRayTime());
+    const EmissiveTriangleSample sample = sampleEmissiveTriangle(
+        triangle.p0, triangle.p1, triangle.p2, triangle.uv0, triangle.uv1, triangle.uv2,
+        random<SampleDimension::eLightPointX>(sampler), random<SampleDimension::eLightPointY>(sampler));
+    if (!sample.valid)
+    {
+        return c;
+    }
+    const float3 offset = sample.point - si.position;
+    const float distance = length(offset);
+    if (!(distance > 1e-5f))
+    {
+        return c;
+    }
+    const float3 direction = offset / distance;
+    const float3 emission = emissiveMeshRadiance(mesh, sample.uv);
+    if (!emitsLight(emission) || (!volumeEvent && !lightReachesShadingPoint(si, direction)))
+    {
+        return c;
+    }
+    const float selectedMeshPdf =
+        emissiveMeshMarginalSolidAnglePdf(1.0f, 1.0f, mesh.selectionPdf, triangleEntry.selectionPdf, sample.areaPdf,
+                                          si.position, sample.point, sample.normal);
+    if (!(selectedMeshPdf > 0.0f))
+    {
+        return c;
+    }
+
+    c.radiance = volumeEvent ? emission : emission * shadingCosine(si, direction);
+    c.toLight = direction;
+    c.visibilityTarget = offset_ray(sample.point, orientedFaceNormal(sample.normal, -direction));
+    c.pdf = selectedMeshPdf;
+    c.tMax = distance;
+    c.needsRay = true;
+    c.hasVisibilityTarget = true;
+    c.isDelta = false;
+    c.isResponsive = false;
+    return c;
+}
+
+static __forceinline__ __device__ float emissiveMeshHitPdf(
+    uint32_t instanceId, uint32_t geometryId, uint32_t primitiveId, float3 shadingPoint, float3 pointOnLight)
+{
+    const int meshId = findEmissiveMesh(instanceId, geometryId);
+    if (meshId < 0)
+    {
+        return 0.0f;
+    }
+    const EmissiveMeshLight& mesh = params.scene.emissiveMeshes[meshId];
+    if (primitiveId >= mesh.triangleCount)
+    {
+        return 0.0f;
+    }
+    const EmissiveTriangleLight& triangleEntry = params.scene.emissiveTriangles[mesh.triangleOffset + primitiveId];
+    const EmissiveTriangleGeometry triangle = fetchEmissiveTriangle(mesh, primitiveId, optixGetRayTime());
+    const EmissiveTriangleSample geometry = sampleEmissiveTriangle(
+        triangle.p0, triangle.p1, triangle.p2, triangle.uv0, triangle.uv1, triangle.uv2, 0.25f, 0.5f);
+    if (!geometry.valid)
+    {
+        return 0.0f;
+    }
+    const float localSelectionPdf = params.hasEnvMap ? 0.5f : 1.0f;
+    const float meshClassPdf = params.scene.numLights > 0u ? params.scene.meshLightSelectionPdf : 1.0f;
+    return emissiveMeshMarginalSolidAnglePdf(localSelectionPdf, meshClassPdf, mesh.selectionPdf,
+                                             triangleEntry.selectionPdf, geometry.areaPdf, shadingPoint, pointOnLight,
+                                             geometry.normal);
+}
+
 /// Choose a strategy and build the connection. Visibility is the caller's job.
 static __device__ LightConnection connectToLight(SamplerState& sampler,
                                                  const SurfaceInteraction& si,
                                                  float curveRadius,
                                                  bool volumeEvent = false)
 {
+    const bool hasAnalytic = params.scene.numLights > 0u;
+    const bool hasMesh = params.scene.numEmissiveMeshes > 0u;
+    const bool hasLocal = hasAnalytic || hasMesh;
     if (params.hasEnvMap)
     {
         const float u = random<SampleDimension::eLightId>(sampler);
 
-        if (params.scene.numLights == 0 || u >= 0.5f)
+        if (!hasLocal || u >= 0.5f)
         {
             // Sample environment map
-            const float selectionPdf = (params.scene.numLights > 0) ? 0.5f : 1.0f;
+            const float selectionPdf = hasLocal ? 0.5f : 1.0f;
             LightConnection c = connectEnvLight(sampler, si, curveRadius, volumeEvent);
             c.pdf *= selectionPdf;
             c.isResponsive = false;
             return c;
         }
-        // Sample local light (remap u from [0, 0.5) to [0, 1))
-        const uint32_t lightId = selectLightIndex(u * 2.0f, params.scene.numLights);
+        // Sample a local class (remap u from [0, 0.5) to [0, 1)).
+        const float localU = u * 2.0f;
+        const float meshPdf = params.scene.meshLightSelectionPdf;
+        if (hasMesh && (!hasAnalytic || meshPdf >= 1.0f || localU < meshPdf))
+        {
+            const float meshU = hasAnalytic ? localU / meshPdf : localU;
+            LightConnection c = connectEmissiveMesh(sampler, si, meshU, volumeEvent);
+            c.pdf *= 0.5f * (hasAnalytic ? meshPdf : 1.0f);
+            return c;
+        }
+        const float analyticPdf = hasMesh ? 1.0f - meshPdf : 1.0f;
+        if (!(analyticPdf > 0.0f))
+        {
+            return makeEmptyConnection();
+        }
+        const float analyticU = hasMesh ? (localU - meshPdf) / analyticPdf : localU;
+        const uint32_t lightId = selectLightIndex(analyticU, params.scene.numLights);
         LightConnection c =
             connectLight(sampler, params.scene.lights[lightId], si, curveRadius, volumeEvent);
-        c.pdf *= 0.5f / params.scene.numLights;
+        c.pdf *= 0.5f * analyticPdf / params.scene.numLights;
         c.isResponsive = isResponsiveLight(lightId);
         return c;
     }
 
     // No emitter means there is no light connection to propose.
-    if (params.scene.numLights == 0)
+    if (!hasLocal)
     {
         return makeEmptyConnection();
     }
 
     const float u = random<SampleDimension::eLightId>(sampler);
-    const uint32_t lightId = selectLightIndex(u, params.scene.numLights);
+    const float meshPdf = params.scene.meshLightSelectionPdf;
+    if (hasMesh && (!hasAnalytic || meshPdf >= 1.0f || u < meshPdf))
+    {
+        const float meshU = hasAnalytic ? u / meshPdf : u;
+        LightConnection c = connectEmissiveMesh(sampler, si, meshU, volumeEvent);
+        c.pdf *= hasAnalytic ? meshPdf : 1.0f;
+        return c;
+    }
+    const float analyticPdf = hasMesh ? 1.0f - meshPdf : 1.0f;
+    if (!(analyticPdf > 0.0f))
+    {
+        return makeEmptyConnection();
+    }
+    const float analyticU = hasMesh ? (u - meshPdf) / analyticPdf : u;
+    const uint32_t lightId = selectLightIndex(analyticU, params.scene.numLights);
     LightConnection c =
         connectLight(sampler, params.scene.lights[lightId], si, curveRadius, volumeEvent);
-    c.pdf *= 1.0f / params.scene.numLights;
+    c.pdf *= analyticPdf / params.scene.numLights;
     c.isResponsive = isResponsiveLight(lightId);
     return c;
 }
@@ -604,11 +867,17 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
         return make_float3(0.0f);
     }
 
-    // shadowOrigin() offsets surfaces and starts fibres on the far side of the strand.
+    // Mesh emitters remain in traversal, so their segment ends at an offset
+    // point on the near side instead of letting the emitter shadow itself.
+    const float3 origin = shadowOrigin(si, curveRadius, bestConn.toLight);
+    const EmissiveVisibilitySegment visibility = lightVisibilitySegment(bestConn, origin);
+    if (!visibility.valid)
+    {
+        return make_float3(0.0f);
+    }
     // Occlusion returns accumulated transmittance, not binary visibility.
     const float transmittance =
-        traceOcclusion(params.handle, shadowOrigin(si, curveRadius, bestConn.toLight), bestConn.toLight,
-                       params.shadowRayTmin, bestConn.tMax);
+        traceOcclusion(params.handle, origin, visibility.direction, params.shadowRayTmin, visibility.maxDistance);
     if (transmittance <= 0.0f)
     {
         return make_float3(0.0f);
@@ -617,8 +886,7 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
     float3 survived = make_float3(transmittance);
     if (params.hasBoundedMedium)
     {
-        survived *= mediumTransmittance(shadowOrigin(si, curveRadius, bestConn.toLight),
-                                        bestConn.toLight, bestConn.tMax, prd->medium);
+        survived *= mediumTransmittance(origin, visibility.direction, visibility.maxDistance, prd->medium);
     }
     return clampIndirectContribution(weight * survived, prd->depth, params.clampIndirect);
 }
@@ -988,8 +1256,8 @@ static __device__ void scatterInMedium(PerRayData* prd,
     SamplerState mrng = mediumSampler(prd->sampler, prd->mediumStep + 1u);
 
     // Record NEE availability, not its sampled outcome, so the paired bounce keeps its MIS weight.
-    bool didNee = volumeNeePairsWithBounce(params.estimatorMode == 0,
-                                          params.scene.numLights > 0 || params.hasEnvMap);
+    bool didNee = volumeNeePairsWithBounce(
+        params.estimatorMode == 0, params.scene.numLights > 0 || params.scene.numEmissiveMeshes > 0 || params.hasEnvMap);
     if (isBounded)
     {
         // Volumetric emission: what makes bath water glow rather than merely
@@ -1032,8 +1300,11 @@ static __device__ void scatterInMedium(PerRayData* prd,
                     prd->throughput * (conn.radiance / conn.pdf) * misWeight * phase;
                 if (weight.x > 1e-6f || weight.y > 1e-6f || weight.z > 1e-6f)
                 {
-                    const float visible = traceOcclusion(params.handle, scatterPoint, conn.toLight,
-                                                         params.shadowRayTmin, conn.tMax);
+                    const EmissiveVisibilitySegment visibility = lightVisibilitySegment(conn, scatterPoint);
+                    const float visible = visibility.valid ?
+                                              traceOcclusion(params.handle, scatterPoint, visibility.direction,
+                                                             params.shadowRayTmin, visibility.maxDistance) :
+                                              0.0f;
                     if (visible > 0.0f)
                     {
                         // Starts inside this medium, so the optical depth begins
@@ -1042,8 +1313,8 @@ static __device__ void scatterInMedium(PerRayData* prd,
                         float3 survived = make_float3(visible);
                         if (params.hasBoundedMedium)
                         {
-                            survived *= mediumTransmittance(scatterPoint, conn.toLight, conn.tMax,
-                                                            prd->medium);
+                            survived *= mediumTransmittance(
+                                scatterPoint, visibility.direction, visibility.maxDistance, prd->medium);
                         }
                         prd->radiance += clampIndirectContribution(weight * survived, prd->depth,
                                                                    params.clampIndirect);
@@ -1118,8 +1389,8 @@ static __device__ void scatterInFog(PerRayData* prd,
     prd->throughput *= params.fogAlbedo;
     const float3 scatterPoint = rayOrigin + rayDir * t;
 
-    const bool didNee = volumeNeePairsWithBounce(params.estimatorMode == 0,
-                                                params.scene.numLights > 0 || params.hasEnvMap);
+    const bool didNee = volumeNeePairsWithBounce(
+        params.estimatorMode == 0, params.scene.numLights > 0 || params.scene.numEmissiveMeshes > 0 || params.hasEnvMap);
     if (didNee)
     {
         // A medium event has a position and no normal. Facing the ray back the
@@ -1151,8 +1422,11 @@ static __device__ void scatterInFog(PerRayData* prd,
             {
                 // traceOcclusion carries the haze's own transmittance along this
                 // ray, so the connection is dimmed by the medium it starts in.
-                const float visible = traceOcclusion(params.handle, scatterPoint, conn.toLight,
-                                                     params.shadowRayTmin, conn.tMax);
+                const EmissiveVisibilitySegment visibility = lightVisibilitySegment(conn, scatterPoint);
+                const float visible = visibility.valid ?
+                                          traceOcclusion(params.handle, scatterPoint, visibility.direction,
+                                                         params.shadowRayTmin, visibility.maxDistance) :
+                                          0.0f;
                 if (visible > 0.0f)
                 {
                     prd->radiance += clampIndirectContribution(weight * visible, prd->depth,
@@ -1239,8 +1513,8 @@ static __device__ void exitMedium(PerRayData* prd,
     // scatterInMedium(). The exit lobe covers the whole outward hemisphere and
     // so does the light strategy, so the MIS weight is owed on every draw,
     // including the ones where the light sample landed below the boundary.
-    bool didNee = volumeNeePairsWithBounce(params.estimatorMode == 0,
-                                          params.scene.numLights > 0 || params.hasEnvMap);
+    bool didNee = volumeNeePairsWithBounce(
+        params.estimatorMode == 0, params.scene.numLights > 0 || params.scene.numEmissiveMeshes > 0 || params.hasEnvMap);
     if (didNee)
     {
         // Next-event estimation here and not inside the walk: this is the vertex
@@ -1265,8 +1539,11 @@ static __device__ void exitMedium(PerRayData* prd,
                 const float3 weight = prd->throughput * (conn.radiance / conn.pdf) * misWeight * invPi;
                 if (weight.x > 1e-6f || weight.y > 1e-6f || weight.z > 1e-6f)
                 {
-                    const float visible = traceOcclusion(params.handle, exitOrigin, conn.toLight,
-                                                         params.shadowRayTmin, conn.tMax);
+                    const EmissiveVisibilitySegment visibility = lightVisibilitySegment(conn, exitOrigin);
+                    const float visible = visibility.valid ?
+                                              traceOcclusion(params.handle, exitOrigin, visibility.direction,
+                                                             params.shadowRayTmin, visibility.maxDistance) :
+                                              0.0f;
                     if (visible > 0.0f)
                     {
                         // Outside the medium: this vertex is the walk leaving it,
@@ -1278,8 +1555,7 @@ static __device__ void exitMedium(PerRayData* prd,
                         float3 survived = make_float3(visible);
                         if (params.hasBoundedMedium)
                         {
-                            survived *=
-                                mediumTransmittance(exitOrigin, conn.toLight, conn.tMax, 0u);
+                            survived *= mediumTransmittance(exitOrigin, visibility.direction, visibility.maxDistance, 0u);
                         }
                         prd->radiance += clampIndirectContribution(weight * survived, prd->depth,
                                                                    params.clampIndirect);
@@ -1368,9 +1644,10 @@ static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd
         }
         else
         {
-            const float lightSelectionPdf = params.hasEnvMap ?
-                                                0.5f / float(params.scene.numLights) :
-                                                1.0f / float(params.scene.numLights);
+            const float localSelectionPdf = params.hasEnvMap ? 0.5f : 1.0f;
+            const float analyticClassPdf =
+                params.scene.numEmissiveMeshes > 0u ? 1.0f - params.scene.meshLightSelectionPdf : 1.0f;
+            const float lightSelectionPdf = localSelectionPdf * analyticClassPdf / float(params.scene.numLights);
             const float lightPdf =
                 getLightPdf(light, hitPoint, misOrigin, params.rectLightSamplingMethod) * lightSelectionPdf;
             radiance = prd->throughput * Le *
@@ -1454,7 +1731,8 @@ extern "C" __global__ void __miss__ms()
                                            params.envMapWidth, params.envMapHeight,
                                            params.envMapRotation, params.envPdfScale);
             // Account for 50% selection probability when local lights exist
-            const float envSelectionPdf = (params.scene.numLights > 0) ? 0.5f : 1.0f;
+            const bool hasLocal = params.scene.numLights > 0u || params.scene.numEmissiveMeshes > 0u;
+            const float envSelectionPdf = hasLocal ? 0.5f : 1.0f;
             const float effectiveEnvPdf = envPdf * envSelectionPdf;
             // A texel of zero luminance has zero sampling density, so light sampling
             // could never have produced this direction and the BSDF strategy owns it
@@ -1479,6 +1757,7 @@ extern "C" __global__ void __miss__ms()
     // and then sampled this direction. A zero-angle distant is singular and is
     // intentionally absent from this continuous miss integral.
     const float localSelectionPdf = params.hasEnvMap ? 0.5f : 1.0f;
+    const float analyticClassPdf = params.scene.numEmissiveMeshes > 0u ? 1.0f - params.scene.meshLightSelectionPdf : 1.0f;
     for (uint32_t lightId = 0; lightId < params.scene.numLights; ++lightId)
     {
         const UniformLight& light = params.scene.lights[lightId];
@@ -1492,7 +1771,7 @@ extern "C" __global__ void __miss__ms()
         {
             continue;
         }
-        const float effectivePdf = localSelectionPdf * conditionalPdf / params.scene.numLights;
+        const float effectivePdf = localSelectionPdf * analyticClassPdf * conditionalPdf / params.scene.numLights;
         const float misWeight =
             (prd->depth == 0 || prd->specularBounce || !prd->neeDone || !(effectivePdf > 0.0f)) ?
                 1.0f :
@@ -1832,8 +2111,20 @@ extern "C" __global__ void __closesthit__radiance()
     // Add emission
     if (si.emission.x > 0.0f || si.emission.y > 0.0f || si.emission.z > 0.0f)
     {
+        float emissionMis = 1.0f;
+        if (primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE && prd->depth != 0u && !prd->specularBounce && prd->neeDone &&
+            params.scene.numEmissiveMeshes > 0u)
+        {
+            const float3 misOrigin = optixGetWorldRayOrigin() - ray_dir * prd->misDistance;
+            const float lightPdf =
+                emissiveMeshHitPdf(optixGetInstanceId(), 0u, optixGetPrimitiveIndex(), misOrigin, si.position);
+            if (lightPdf > 0.0f)
+            {
+                emissionMis = computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
+            }
+        }
         prd->radiance +=
-            clampIndirectContribution(prd->throughput * si.emission, prd->depth, params.clampIndirect);
+            clampIndirectContribution(prd->throughput * si.emission * emissionMis, prd->depth, params.clampIndirect);
     }
 
     // Set exterior IOR from the IOR stack for nested dielectrics
@@ -1972,9 +2263,9 @@ extern "C" __global__ void __closesthit__radiance()
     // carry the whole integral. The two are independent unbiased estimators, so at
     // convergence they must agree; the difference between them measures estimator
     // inconsistency directly, which is the only reason the switch exists.
-    const bool didNee = neeRunsAtVertex(params.estimatorMode == 0,
-                                        params.scene.numLights > 0 || params.hasEnvMap,
-                                        bsdf_has_smooth_lobe(si));
+    const bool didNee = neeRunsAtVertex(
+        params.estimatorMode == 0, params.scene.numLights > 0 || params.scene.numEmissiveMeshes > 0 || params.hasEnvMap,
+        bsdf_has_smooth_lobe(si));
     if (didNee)
     {
         bool responsiveLight = false;

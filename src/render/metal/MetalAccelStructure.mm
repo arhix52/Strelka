@@ -1,5 +1,7 @@
 #include "MetalAccelStructure.h"
 
+#include <host/emissive_mesh_distribution.h>
+
 #include "ShaderTypes.h"
 #include <analytic_light.h>
 
@@ -151,6 +153,103 @@ MTL::AccelerationStructureUsage blasExtraUsage()
                     : MTL::AccelerationStructureUsagePreferFastIntersection;
 }
 } // namespace
+
+void MetalAccelStructure::prepareEmissiveMeshInputs()
+{
+    if (!mScene)
+    {
+        return;
+    }
+    std::span<const Scene::Vertex> vertices = mScene->getVertices();
+    std::span<const uint32_t> indices = mScene->getIndices();
+    if (mScene->hostGeometryReleased())
+    {
+        // All Metal geometry buffers use shared storage, including buffers that
+        // adopted the scene's page-aligned vectors. Reconstruct selection
+        // powers from that live storage after the optional host release so a
+        // later material/transform edit cannot leave a newly positive emitter
+        // outside the proposal support.
+        MTL::Buffer* vertexBuffer = mGeometry ? mGeometry->vertexBuffer() : nullptr;
+        MTL::Buffer* indexBuffer = mGeometry ? mGeometry->indexBuffer() : nullptr;
+        if (!vertexBuffer || !indexBuffer || !vertexBuffer->contents() || !indexBuffer->contents())
+        {
+            return;
+        }
+        vertices = std::span<const Scene::Vertex>(static_cast<const Scene::Vertex*>(vertexBuffer->contents()),
+                                                  vertexBuffer->length() / sizeof(Scene::Vertex));
+        indices = std::span<const uint32_t>(
+            static_cast<const uint32_t*>(indexBuffer->contents()), indexBuffer->length() / sizeof(uint32_t));
+    }
+    const auto& instances = mScene->getInstances();
+    const auto& meshes = mScene->getMeshes();
+    const auto& materials = mScene->getMaterials();
+    mSceneEmissiveInputs.assign(instances.size(), render::EmissiveMeshBuildInput{});
+    for (size_t instanceId = 0; instanceId < instances.size(); ++instanceId)
+    {
+        const Instance& instance = instances[instanceId];
+        if (instance.type != Instance::Type::eMesh || instance.mMeshId >= meshes.size() ||
+            instance.mMaterialId >= materials.size())
+        {
+            continue;
+        }
+        render::EmissiveMeshBuildInput& input = mSceneEmissiveInputs[instanceId];
+        const Mesh& mesh = meshes[instance.mMeshId];
+        input.vertexOffset = mesh.mVbOffset;
+        input.indexOffset = mesh.mIndex;
+        input.materialId = instance.mMaterialId;
+        input.trianglePowers =
+            render::emissiveTrianglePowers(vertices, indices, mesh, materials[instance.mMaterialId], instance.transform);
+    }
+}
+
+void MetalAccelStructure::uploadEmissiveMeshLights()
+{
+    std::vector<render::EmissiveMeshBuildInput> inputs;
+    for (size_t emittedId = 0; emittedId < mEmittedInstances.size(); ++emittedId)
+    {
+        const EmittedInstance& emitted = mEmittedInstances[emittedId];
+        for (size_t geometryId = 0; geometryId < emitted.geometrySceneInstanceIds.size(); ++geometryId)
+        {
+            const uint32_t sceneInstanceId = emitted.geometrySceneInstanceIds[geometryId];
+            if (sceneInstanceId >= mSceneEmissiveInputs.size())
+            {
+                continue;
+            }
+            render::EmissiveMeshBuildInput input = mSceneEmissiveInputs[sceneInstanceId];
+            input.instanceId = static_cast<uint32_t>(emittedId);
+            input.geometryId = static_cast<uint32_t>(geometryId);
+            inputs.push_back(std::move(input));
+        }
+    }
+    const render::EmissiveMeshDistribution distribution = render::buildEmissiveMeshDistribution(inputs);
+
+    retireResident(mEmissiveMeshBuffer);
+    retireResident(mEmissiveTriangleBuffer);
+    mEmissiveMeshCount = static_cast<uint32_t>(distribution.meshes.size());
+    mEmissiveMeshPower = distribution.totalPower;
+    if (!distribution.meshes.empty())
+    {
+        mEmissiveMeshBuffer =
+            mDevice->newBuffer(distribution.meshes.data(), distribution.meshes.size() * sizeof(EmissiveMeshLight),
+                               MTL::ResourceStorageModeShared);
+        makeResident(mEmissiveMeshBuffer);
+    }
+    if (!distribution.triangles.empty())
+    {
+        mEmissiveTriangleBuffer = mDevice->newBuffer(distribution.triangles.data(),
+                                                     distribution.triangles.size() * sizeof(EmissiveTriangleLight),
+                                                     MTL::ResourceStorageModeShared);
+        makeResident(mEmissiveTriangleBuffer);
+    }
+    STRELKA_INFO("Emissive mesh NEE: {} mesh instance(s), {} triangle record(s)", distribution.meshes.size(),
+                 distribution.triangles.size());
+}
+
+void MetalAccelStructure::rebuildEmissiveMeshLights()
+{
+    prepareEmissiveMeshInputs();
+    uploadEmissiveMeshLights();
+}
 
 
 size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, bool skeletal)
@@ -331,6 +430,12 @@ void MetalAccelStructure::rebuild()
     safeRelease(mInstanceBuffer);
     mMetal4->removeResident(mPreviousInstanceBuffer);
     safeRelease(mPreviousInstanceBuffer);
+    mMetal4->removeResident(mEmissiveMeshBuffer);
+    safeRelease(mEmissiveMeshBuffer);
+    mMetal4->removeResident(mEmissiveTriangleBuffer);
+    safeRelease(mEmissiveTriangleBuffer);
+    mEmissiveMeshCount = 0u;
+    mEmissiveMeshPower = 0.0;
     mInstanceTransformsChanged = false;
     mGeometry->clearGeometryEntries();
     mMetal4->removeResident(mTlasScratchBuffer);
@@ -433,6 +538,11 @@ bool MetalAccelStructure::step(double budgetMs)
             }
         }
         mMotionBlasBuilt = mBuildMotionBlas;
+
+        // The optional host release below discards the only cheap copy of the
+        // triangle positions. Cache only emissive triangle powers before that
+        // happens; sampling itself still reads the live GPU vertex buffers.
+        prepareEmissiveMeshInputs();
 
         // Release host geometry before AS allocation once builds depend only on GPU offsets and counts.
         // Disabled by default because editor picking still reads the host arrays.
@@ -610,6 +720,7 @@ bool MetalAccelStructure::step(double budgetMs)
             const bool isMediumBoundary = groupMaterial < mMaterials->isMediumBoundary().size() &&
                                           mMaterials->isMediumBoundary()[groupMaterial] != 0u;
             emitted.mask = isMediumBoundary ? GEOMETRY_MASK_MEDIUM : GEOMETRY_MASK_TRIANGLE;
+            emitted.geometrySceneInstanceIds = st.groups[g];
 
             mEmittedInstances.push_back(emitted);
 
@@ -774,6 +885,7 @@ bool MetalAccelStructure::step(double budgetMs)
 
     // Per-geometry lookup table consumed by the kernel.
     mGeometry->uploadGeometryEntryBuffer();
+    uploadEmissiveMeshLights();
 
     // buildEmptyTopLevel may have left a one-descriptor placeholder here so the
     // scene could be traced while it loaded. It is replaced, not appended to.
@@ -1504,6 +1616,13 @@ void MetalAccelStructure::release()
     safeRelease(mInstanceBuffer);
     removeResident(mPreviousInstanceBuffer);
     safeRelease(mPreviousInstanceBuffer);
+    removeResident(mEmissiveMeshBuffer);
+    safeRelease(mEmissiveMeshBuffer);
+    removeResident(mEmissiveTriangleBuffer);
+    safeRelease(mEmissiveTriangleBuffer);
+    mSceneEmissiveInputs.clear();
+    mEmissiveMeshCount = 0u;
+    mEmissiveMeshPower = 0.0;
     mInstanceTransformsChanged = false;
     removeResident(mTlasScratchBuffer);
     safeRelease(mTlasScratchBuffer);

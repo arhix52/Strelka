@@ -1,0 +1,86 @@
+{
+  "asset": {"version": "2.0", "generator": "Strelka emissive-mesh correctness fixture"},
+  "scene": 0,
+  "scenes": [{"nodes": [0, 1, 2]}],
+  "nodes": [
+    {"name": "Diffuse receiver", "mesh": 0},
+    {"name": "Emissive triangle", "mesh": 1},
+    {
+      "name": "Camera",
+      "camera": 0,
+      "matrix": [1, 0, 0, 0, 0, 0.5547002, 0.8320503, 0, 0, -0.8320503, 0.5547002, 0, 0, -3, 2, 1]
+    }
+  ],
+  "cameras": [
+    {"name": "Camera", "type": "perspective", "perspective": {"yfov": 0.65, "znear": 0.05, "zfar": 20}}
+  ],
+  "images": [
+    {"name": "Emission variation", "uri": "../../feature_tests/_textures/srgb_probe.png"}
+  ],
+  "samplers": [
+    {"magFilter": 9729, "minFilter": 9729, "wrapS": 10497, "wrapT": 10497}
+  ],
+  "textures": [
+    {"sampler": 0, "source": 0}
+  ],
+  "meshes": [
+    {
+      "name": "Receiver",
+      "primitives": [
+        {"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2}, "indices": 3, "material": 0}
+      ]
+    },
+    {
+      "name": "Emitter",
+      "primitives": [
+        {"attributes": {"POSITION": 4, "NORMAL": 5, "TEXCOORD_0": 6}, "indices": 7, "material": 1}
+      ]
+    }
+  ],
+  "materials": [
+    {
+      "name": "White diffuse",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [1, 1, 1, 1],
+        "metallicFactor": 0,
+        "roughnessFactor": 1
+      }
+    },
+    {
+      "name": "Mesh emitter",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [0, 0, 0, 1],
+        "metallicFactor": 0,
+        "roughnessFactor": 1
+      },
+      "emissiveFactor": [10, 10, 10],
+      "emissiveTexture": {"index": 0}
+    }
+  ],
+  "accessors": [
+    {"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [-1, -1, 0], "max": [1, 1, 0]},
+    {"bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC3"},
+    {"bufferView": 2, "componentType": 5126, "count": 4, "type": "VEC2"},
+    {"bufferView": 3, "componentType": 5123, "count": 6, "type": "SCALAR"},
+    {"bufferView": 4, "componentType": 5126, "count": 3, "type": "VEC3", "min": [-0.4, -0.2, 1], "max": [0.4, 0.4, 1]},
+    {"bufferView": 5, "componentType": 5126, "count": 3, "type": "VEC3"},
+    {"bufferView": 6, "componentType": 5126, "count": 3, "type": "VEC2"},
+    {"bufferView": 7, "componentType": 5123, "count": 3, "type": "SCALAR"}
+  ],
+  "bufferViews": [
+    {"buffer": 0, "byteOffset": 0, "byteLength": 48, "target": 34962},
+    {"buffer": 0, "byteOffset": 48, "byteLength": 48, "target": 34962},
+    {"buffer": 0, "byteOffset": 96, "byteLength": 32, "target": 34962},
+    {"buffer": 0, "byteOffset": 128, "byteLength": 12, "target": 34963},
+    {"buffer": 0, "byteOffset": 140, "byteLength": 36, "target": 34962},
+    {"buffer": 0, "byteOffset": 176, "byteLength": 36, "target": 34962},
+    {"buffer": 0, "byteOffset": 212, "byteLength": 24, "target": 34962},
+    {"buffer": 0, "byteOffset": 236, "byteLength": 6, "target": 34963}
+  ],
+  "buffers": [
+    {
+      "byteLength": 242,
+      "uri": "data:application/octet-stream;base64,AACAvwAAgL8AAAAAAACAPwAAgL8AAAAAAACAPwAAgD8AAAAAAACAvwAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAgD8AAIA/AAAAAAAAgD8AAAEAAgAAAAIAAwDNzMy+zcxMvgAAgD/NzMw+zcxMvgAAgD8AAAAAzczMPgAAgD8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgD8AAAAAAAAAPwAAgD8AAAEAAgA="
+    }
+  ]
+}

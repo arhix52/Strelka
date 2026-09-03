@@ -885,6 +885,8 @@ void MetalRender::init()
     static_assert(offsetof(Uniforms, openpbrParams) == 784);
     static_assert(offsetof(Uniforms, openpbrTextures) == 792);
     static_assert(offsetof(Uniforms, guideRays) == 800);
+    static_assert(offsetof(Uniforms, emissiveMeshes) == 808);
+    static_assert(offsetof(Uniforms, emissiveTriangles) == 816);
     static_assert(offsetof(Material, baseColorTexture) == 256);
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");
@@ -1034,6 +1036,8 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mGeometry.indexBuffer());
     add(mAccel.instanceBuffer());
     add(mAccel.previousInstanceBuffer());
+    add(mAccel.emissiveMeshBuffer());
+    add(mAccel.emissiveTriangleBuffer());
     add(mMaterials.buffer());
     add(mLights.buffer());
     add(mLights.iesBuffer());
@@ -1729,6 +1733,7 @@ void MetalRender::render(Buffer* output)
     fin.scene = mScene;
     fin.materials = &mMaterials;
     fin.lights = &mLights;
+    fin.accel = &mAccel;
     fin.environment = &mEnvironment;
     fin.frameSlot = mFrameIndex;
     fin.subframeIndex = (uint32_t)ctx.mSubframeIndex;
@@ -1889,7 +1894,7 @@ void MetalRender::render(Buffer* output)
             const auto encodeStart = std::chrono::high_resolution_clock::now();
             metal::IntegratorFeatureInputs featureIn;
             featureIn.hasEnvMap = pUniformData->hasEnvMap;
-            featureIn.hasLights = pUniformData->numLights > 0;
+            featureIn.hasLights = pUniformData->numLights > 0 || pUniformData->numEmissiveMeshes > 0;
             featureIn.hasAlphaMaterials = mMaterials.hasAlphaMaterials();
             featureIn.enableMotionBlur = pUniformData->enableMotionBlur;
             featureIn.motionBlasBuilt = mAccel.motionBlasBuilt();
@@ -1912,6 +1917,9 @@ void MetalRender::render(Buffer* output)
             pUniformData->openpbrTextures =
                 mMaterials.openpbrTextureBuffer() ? mMaterials.openpbrTextureBuffer()->gpuAddress() : 0ull;
             pUniformData->guideRays = mIntegrator.guideRayAddress();
+            pUniformData->emissiveMeshes = mAccel.emissiveMeshBuffer() ? mAccel.emissiveMeshBuffer()->gpuAddress() : 0ull;
+            pUniformData->emissiveTriangles =
+                mAccel.emissiveTriangleBuffer() ? mAccel.emissiveTriangleBuffer()->gpuAddress() : 0ull;
 
             metal::IntegratorSceneBindings sceneBind = integratorSceneBindings();
             metal::IntegratorFrameRequest frameReq;
@@ -2994,13 +3002,17 @@ void MetalRender::handleSceneChanges()
     if (any(changes & ChangeBits::Transforms))
     {
         if (!mAccel.blasList().empty())
+        {
             mAccel.rebuildTLAS();
+            mAccel.rebuildEmissiveMeshLights();
+        }
         needReset = true;
         needSharcReset = true;
     }
     if (any(changes & ChangeBits::Materials))
     {
         createMetalMaterials();
+        mAccel.rebuildEmissiveMeshLights();
         needReset = true;
         needSharcReset = true;
     }

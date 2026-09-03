@@ -1,8 +1,11 @@
 #include <doctest/doctest.h>
 
 #include <host/light_selection.h>
+#include <host/emissive_mesh_distribution.h>
+#include <emissive_mesh_light.h>
 #include <light_alias_sampling.h>
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -210,4 +213,219 @@ TEST_CASE("analytic light power uses transformed smooth area")
     const double sphereArea =
         analyticEllipsoidSurfaceArea(float3(sphere.points[0]), float3(sphere.points[2]), float3(sphere.points[3]));
     CHECK(analyticLightPower(sphere) == doctest::Approx(std::numbers::pi * sphereArea).epsilon(1e-6));
+}
+
+TEST_CASE("emissive mesh hierarchy preserves mesh and triangle PMFs")
+{
+    std::vector<oka::render::EmissiveMeshBuildInput> inputs(2);
+    inputs[0].instanceId = 4;
+    inputs[0].geometryId = 1;
+    inputs[0].trianglePowers = { 1.0, 3.0, 0.0 };
+    inputs[1].instanceId = 9;
+    inputs[1].geometryId = 0;
+    inputs[1].trianglePowers = { 6.0 };
+
+    const auto distribution = oka::render::buildEmissiveMeshDistribution(inputs);
+    REQUIRE(distribution.meshes.size() == 2);
+    REQUIRE(distribution.triangles.size() == 4);
+    CHECK(distribution.totalPower == doctest::Approx(10.0));
+    CHECK(distribution.meshes[0].selectionPdf == doctest::Approx(0.4));
+    CHECK(distribution.meshes[1].selectionPdf == doctest::Approx(0.6));
+    CHECK(distribution.triangles[0].selectionPdf == doctest::Approx(0.25));
+    CHECK(distribution.triangles[1].selectionPdf == doctest::Approx(0.75));
+    CHECK(distribution.triangles[2].selectionPdf == 0.0f);
+    CHECK(distribution.triangles[3].selectionPdf == 1.0f);
+
+    // The complete marginal triangle masses are 0.1, 0.3, 0, 0.6.
+    CHECK(distribution.meshes[0].selectionPdf * distribution.triangles[0].selectionPdf == doctest::Approx(0.1));
+    CHECK(distribution.meshes[0].selectionPdf * distribution.triangles[1].selectionPdf == doctest::Approx(0.3));
+    CHECK(distribution.meshes[1].selectionPdf * distribution.triangles[3].selectionPdf == doctest::Approx(0.6));
+
+    std::array<uint32_t, 4> counts{};
+    uint32_t state = 0x8f3a12cdu;
+    auto uniform = [&state]() {
+        state ^= state << 13u;
+        state ^= state >> 17u;
+        state ^= state << 5u;
+        return static_cast<float>(state >> 8u) * (1.0f / 16777216.0f);
+    };
+    constexpr uint32_t draws = 1u << 20u;
+    for (uint32_t draw = 0u; draw < draws; ++draw)
+    {
+        const uint32_t meshBucket = lightAliasBucket(static_cast<uint32_t>(distribution.meshes.size()), uniform());
+        const EmissiveMeshLight& meshEntry = distribution.meshes[meshBucket];
+        const uint32_t meshId = lightAliasSelect(static_cast<uint32_t>(distribution.meshes.size()), meshBucket,
+                                                 uniform(), meshEntry.aliasProbability, meshEntry.alias);
+        REQUIRE(meshId < distribution.meshes.size());
+        const EmissiveMeshLight& mesh = distribution.meshes[meshId];
+        const uint32_t triangleBucket = lightAliasBucket(mesh.triangleCount, uniform());
+        const EmissiveTriangleLight& triangleEntry = distribution.triangles[mesh.triangleOffset + triangleBucket];
+        const uint32_t triangleId = lightAliasSelect(
+            mesh.triangleCount, triangleBucket, uniform(), triangleEntry.aliasProbability, triangleEntry.alias);
+        REQUIRE(triangleId < mesh.triangleCount);
+        ++counts[mesh.triangleOffset + triangleId];
+    }
+    CHECK(double(counts[0]) / draws == doctest::Approx(0.1).epsilon(0.01));
+    CHECK(double(counts[1]) / draws == doctest::Approx(0.3).epsilon(0.01));
+    CHECK(counts[2] == 0u);
+    CHECK(double(counts[3]) / draws == doctest::Approx(0.6).epsilon(0.01));
+}
+
+TEST_CASE("emissive mesh production input retains every positive radiance channel")
+{
+    oka::Scene scene;
+    std::vector<oka::Scene::Vertex> vertices(3);
+    vertices[0].pos = { 0.0f, 0.0f, 0.0f };
+    vertices[1].pos = { 1.0f, 0.0f, 0.0f };
+    vertices[2].pos = { 0.0f, 1.0f, 0.0f };
+    const uint32_t meshId = scene.createMesh(vertices, { 0u, 1u, 2u });
+
+    oka::Scene::MaterialDescription material;
+    // Invalid negative channels must not cancel the valid red emitter and
+    // erase it from the discrete proposal support.
+    material.params.emission = { 1.0f, -10.0f, 0.0f };
+    material.params.emission_strength = 2.0f;
+    const uint32_t materialId = scene.addMaterial(material);
+    const glm::mat4 transform = glm::scale(glm::mat4(1.0f), glm::vec3(-2.0f, 3.0f, 0.5f));
+    scene.createInstance(oka::Instance::Type::eMesh, meshId, materialId, transform);
+
+    const auto powers = oka::render::emissiveTrianglePowers(
+        scene, scene.getMeshes()[meshId], scene.getMaterials()[materialId], transform);
+    REQUIRE(powers.size() == 1u);
+    // World area is 3, two-sided projected power is 2*pi*L*A, and only the
+    // positive red channel participates in the selection proxy.
+    const double expected = 2.0 * std::numbers::pi * (0.2126 * 2.0) * 3.0;
+    CHECK(powers[0] == doctest::Approx(expected).epsilon(1e-6));
+    CHECK(powers[0] > 0.0);
+}
+
+TEST_CASE("emissive triangle sample and hit PDF agree under affine transform")
+{
+    const float3 object0 = make_float3(-1.0f, -0.5f, 0.0f);
+    const float3 object1 = make_float3(1.0f, -0.5f, 0.0f);
+    const float3 object2 = make_float3(-1.0f, 0.5f, 0.0f);
+    // Non-uniform, sheared and mirrored affine image plus translation.
+    auto transform = [](float3 p) {
+        return make_float3(-2.0f * p.x + 0.4f * p.y + 0.3f, 0.25f * p.y - 0.2f, 0.3f * p.x + 1.5f);
+    };
+    const float3 p0 = transform(object0);
+    const float3 p1 = transform(object1);
+    const float3 p2 = transform(object2);
+    const float2 uv0 = make_float2(0.0f, 0.0f);
+    const float2 uv1 = make_float2(1.0f, 0.0f);
+    const float2 uv2 = make_float2(0.0f, 1.0f);
+    const float3 shadingPoint = make_float3(0.1f, -0.4f, -0.7f);
+
+    for (uint32_t i = 0; i < 4096; ++i)
+    {
+        const float u0 = (float(i) + 0.5f) / 4096.0f;
+        const float u1 = (float((i * 2654435761u) & 4095u) + 0.5f) / 4096.0f;
+        const EmissiveTriangleSample sample = sampleEmissiveTriangle(p0, p1, p2, uv0, uv1, uv2, u0, u1);
+        REQUIRE(sample.valid);
+
+        const glm::dvec3 d0 = glm::dvec3(p0.x, p0.y, p0.z);
+        const glm::dvec3 d1 = glm::dvec3(p1.x, p1.y, p1.z);
+        const glm::dvec3 d2 = glm::dvec3(p2.x, p2.y, p2.z);
+        const glm::dvec3 e1 = d1 - d0;
+        const glm::dvec3 e2 = d2 - d0;
+        const double area = 0.5 * std::sqrt(glm::dot(glm::cross(e1, e2), glm::cross(e1, e2)));
+        REQUIRE(area > 0.0);
+        CHECK(sample.areaPdf == doctest::Approx(1.0 / area).epsilon(2e-6));
+
+        const glm::dvec3 q(sample.point.x, sample.point.y, sample.point.z);
+        const glm::dvec3 s(shadingPoint.x, shadingPoint.y, shadingPoint.z);
+        const glm::dvec3 delta = q - s;
+        const double distanceSquared = glm::dot(delta, delta);
+        const glm::dvec3 normal = glm::normalize(glm::cross(e1, e2));
+        const double cosine = std::abs(glm::dot(normal, -delta / std::sqrt(distanceSquared)));
+        const double oraclePdf = distanceSquared / (area * cosine);
+        CHECK(emissiveTriangleSolidAnglePdf(sample.areaPdf, shadingPoint, sample.point, sample.normal) ==
+              doctest::Approx(oraclePdf).epsilon(4e-6));
+        CHECK(emissiveMeshMarginalSolidAnglePdf(0.8f, 0.25f, 0.4f, 0.75f, sample.areaPdf, shadingPoint, sample.point,
+                                                sample.normal) == doctest::Approx(oraclePdf * 0.06).epsilon(4e-6));
+        CHECK(std::isfinite(sample.areaPdf));
+    }
+
+    CHECK(emissiveMeshMarginalSolidAnglePdf(
+              0.0f, 1.0f, 1.0f, 1.0f, 1.0f, shadingPoint, p0, make_float3(0.0f, 0.0f, 1.0f)) == 0.0f);
+    const float extremePdf =
+        emissiveMeshMarginalSolidAnglePdf(1.0f, 1.0f, 1.0f, 1.0f, std::numeric_limits<float>::max(), make_float3(0.0f),
+                                          make_float3(0.0f, 0.0f, 2.0f), make_float3(0.0f, 0.0f, 1.0f));
+    CHECK(std::isfinite(extremePdf));
+    CHECK(extremePdf > 0.0f);
+}
+
+TEST_CASE("emissive mesh visibility ends before the traversed emitter")
+{
+    constexpr float offset = 1.0f / 65536.0f;
+    const float3 source = make_float3(0.0f, 0.0f, offset);
+    const float3 target = make_float3(0.0f, 0.0f, 1.0f - offset);
+    const EmissiveVisibilitySegment segment = emissiveVisibilitySegment(source, target);
+    REQUIRE(segment.valid);
+    CHECK(segment.direction.x == 0.0f);
+    CHECK(segment.direction.y == 0.0f);
+    CHECK(segment.direction.z == 1.0f);
+    CHECK(segment.maxDistance == doctest::Approx(1.0f - 2.0f * offset));
+
+    // The old distance-minus-1e-5 segment starts at the offset source but is
+    // measured from the unoffset shading point. It therefore crosses z=1 and
+    // lets the sampled emitter report itself as an occluder.
+    const float emitterIntersection = 1.0f - offset;
+    const float oldMaxDistance = 1.0f - 1e-5f;
+    CHECK(oldMaxDistance > emitterIntersection);
+    CHECK(segment.maxDistance < emitterIntersection);
+}
+
+TEST_CASE("emissive triangle NEE recovers a positive one-bounce integral")
+{
+    const float3 p0 = make_float3(-0.5f, -0.5f, 1.0f);
+    const float3 p1 = make_float3(0.5f, -0.5f, 1.0f);
+    const float3 p2 = make_float3(-0.5f, 0.5f, 1.0f);
+    const float2 uv = make_float2(0.0f, 0.0f);
+    const float3 shadingPoint = make_float3(0.0f);
+    constexpr uint32_t sampleCount = 1u << 18u;
+    double estimate = 0.0;
+    for (uint32_t i = 0; i < sampleCount; ++i)
+    {
+        const float u0 = (float(i) + 0.5f) / float(sampleCount);
+        uint32_t reversed = i;
+        reversed = ((reversed & 0x55555555u) << 1u) | ((reversed >> 1u) & 0x55555555u);
+        reversed = ((reversed & 0x33333333u) << 2u) | ((reversed >> 2u) & 0x33333333u);
+        reversed = ((reversed & 0x0f0f0f0fu) << 4u) | ((reversed >> 4u) & 0x0f0f0f0fu);
+        reversed = (reversed << 24u) | ((reversed & 0xff00u) << 8u) | ((reversed >> 8u) & 0xff00u) | (reversed >> 24u);
+        reversed >>= 8u;
+        const float u1 = (float(reversed) + 0.5f) * (1.0f / 16777216.0f);
+        const EmissiveTriangleSample sample = sampleEmissiveTriangle(p0, p1, p2, uv, uv, uv, u0, u1);
+        REQUIRE(sample.valid);
+        const float3 delta = sample.point - shadingPoint;
+        const float3 wi = delta / length(delta);
+        const float pdf = emissiveTriangleSolidAnglePdf(sample.areaPdf, shadingPoint, sample.point, sample.normal);
+        REQUIRE(pdf > 0.0f);
+        estimate += double(fmaxf(wi.z, 0.0f)) * M_1_PI_F / double(pdf);
+    }
+    estimate /= double(sampleCount);
+
+    // Independent midpoint quadrature in barycentric coordinates.
+    double reference = 0.0;
+    constexpr uint32_t rows = 1024;
+    for (uint32_t y = 0; y < rows; ++y)
+    {
+        for (uint32_t x = 0; x <= y; ++x)
+        {
+            const double b1 = (double(x) + 0.5) / double(rows);
+            const double b2 = (double(y - x) + 0.5) / double(rows);
+            if (b1 + b2 >= 1.0)
+                continue;
+            const double px = -0.5 + b1;
+            const double py = -0.5 + b2;
+            const double r2 = px * px + py * py + 1.0;
+            reference += 1.0 / (std::numbers::pi * r2 * r2);
+        }
+    }
+    reference /= double(rows * rows);
+
+    CHECK(estimate > 0.0);
+    CHECK(estimate == doctest::Approx(reference).epsilon(3e-3));
+    const double legacyOmittedNee = 0.0;
+    CHECK(std::abs(legacyOmittedNee - reference) > 0.05);
 }

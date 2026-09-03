@@ -3,7 +3,6 @@
 #include <strelka/scene/light_desc.h>
 #include <strelka/scene/scene.h>
 #include <analytic_light.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -68,12 +67,33 @@ inline double analyticLightPower(const Scene::Light& light)
         break;
     }
     case LIGHT_TYPE_DISC:
-        measure = pi * static_cast<double>(analyticDiscArea(float3(light.points[2]), float3(light.points[3])));
+        measure = pi * pi * glm::length(glm::cross(glm::dvec3(light.points[2]), glm::dvec3(light.points[3])));
         break;
-    case LIGHT_TYPE_SPHERE:
-        measure = pi * static_cast<double>(analyticEllipsoidSurfaceArea(
-                           float3(light.points[0]), float3(light.points[2]), float3(light.points[3])));
+    case LIGHT_TYPE_SPHERE: {
+        // Same deterministic equal-solid-angle quadrature as
+        // analyticEllipsoidSurfaceArea(), evaluated in host double precision.
+        // Keeping this in GLM avoids making the host proposal depend on whether
+        // material_math.h names float3 as GLM (Metal/CPU) or CUDA (OptiX).
+        constexpr size_t sampleCount = 256u;
+        constexpr double goldenAngle = 2.39996322972865332;
+        const glm::dvec3 axisX(light.points[0]);
+        const glm::dvec3 axisY(light.points[2]);
+        const glm::dvec3 axisZ(light.points[3]);
+        double jacobianSum = 0.0;
+        for (size_t i = 0u; i < sampleCount; ++i)
+        {
+            const double z = 1.0 - 2.0 * (static_cast<double>(i) + 0.5) / static_cast<double>(sampleCount);
+            const double radial = std::sqrt(std::max(1.0 - z * z, 0.0));
+            const double phi = goldenAngle * static_cast<double>(i);
+            const glm::dvec3 n(radial * std::cos(phi), radial * std::sin(phi), z);
+            const glm::dvec3 cofactor =
+                n.x * glm::cross(axisY, axisZ) + n.y * glm::cross(axisZ, axisX) + n.z * glm::cross(axisX, axisY);
+            jacobianSum += glm::length(cofactor);
+        }
+        const double area = 4.0 * pi * jacobianSum / static_cast<double>(sampleCount);
+        measure = pi * area;
         break;
+    }
     case LIGHT_TYPE_POINT:
         measure = 4.0 * pi;
         break;

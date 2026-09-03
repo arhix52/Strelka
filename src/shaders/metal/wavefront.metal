@@ -1537,7 +1537,8 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         {
             const float envPdf = envMapPdf(rayDir, envMapTexture, uniforms.envMapWidth, uniforms.envMapHeight,
                                            uniforms.envMapRotation, uniforms.envPdfScale);
-            const float envSelectionPdf = uniforms.numLights > 0 ? uniforms.envMapColorTint.w : 1.0f;
+            const float envSelectionPdf =
+                (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0) ? uniforms.envMapColorTint.w : 1.0f;
             const float effectiveEnvPdf = envPdf * envSelectionPdf;
             // A texel of zero luminance has zero sampling density, so light
             // sampling could never have produced this direction and the BSDF
@@ -1564,6 +1565,8 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
     {
         const float localSelectionPdf =
             (SPEC_ENV_MAP && uniforms.hasEnvMap) ? (1.0f - uniforms.envMapColorTint.w) : 1.0f;
+        const float analyticClassPdf =
+            uniforms.numEmissiveMeshes > 0u ? (1.0f - uniforms.meshLightSelectionPdf) : 1.0f;
         for (uint32_t lightId = 0; lightId < uniforms.numLights; ++lightId)
         {
             device const UniformLight& light = lights[lightId];
@@ -1577,7 +1580,8 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
             {
                 continue;
             }
-            const float effectivePdf = localSelectionPdf * analyticLightSelectionPdf(light) * conditionalPdf;
+            const float effectivePdf =
+                localSelectionPdf * analyticClassPdf * analyticLightSelectionPdf(light) * conditionalPdf;
             const float mis = (depth == 0u || specularBounce || !neeDone || !(effectivePdf > 0.0f)) ?
                                   1.0f :
                                   computeMisWeight(p.lastBsdfPdf, effectivePdf, uniforms.misHeuristic);
@@ -1740,11 +1744,14 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // draws where the connection failed, and the two strategies stop
         // summing to one.
         const bool didNee = volumeNeePairsWithBounce(
-            uniforms.estimatorMode == 0, (SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap));
+            uniforms.estimatorMode == 0,
+            (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
+                (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (didNee)
         {
             const LightConnection conn = connectToLight(
-                uniforms, uniforms.numLights, lights, rng, si, envAliasTable, envMapTexture, iesProfiles, true);
+                uniforms, uniforms.numLights, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
+                motionTime, rng, si, envAliasTable, envMapTexture, iesProfiles, true);
             if (conn.needsRay && conn.pdf > 0.0f)
             {
                 // The phase cosine compares travel directions: dot(rayDir, toLight).
@@ -1754,14 +1761,15 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 // lobe would.
                 const float misWeight = conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, phase, uniforms.misHeuristic);
                 const float3 weight = throughput * (conn.radiance / conn.pdf) * misWeight * phase;
-                if (any(weight > 1e-6f))
+                const EmissiveVisibilitySegment visibility = lightVisibilitySegment(conn, scatterPoint);
+                if (any(weight > 1e-6f) && visibility.valid)
                 {
                     const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
                     ShadowRay sr;
                     sr.origin = packed_float3(scatterPoint);
-                    sr.direction = packed_float3(conn.toLight);
+                    sr.direction = packed_float3(visibility.direction);
                     sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
-                    sr.maxDistance = conn.tMax;
+                    sr.maxDistance = visibility.maxDistance;
                     sr.pixelIndex = tid;
                     sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
                     sr.sharcRadiance =
@@ -1863,7 +1871,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         const bool isBounded = isBoundedMedium;
         // As in the fog path: available, not delivered.
         const bool didNeeVolume = isBounded && volumeNeePairsWithBounce(uniforms.estimatorMode == 0,
-                                                                        (SPEC_LIGHTS && uniforms.numLights > 0) ||
+                                                                        (SPEC_LIGHTS && (uniforms.numLights > 0 ||
+                                                                                         uniforms.numEmissiveMeshes > 0)) ||
                                                                             (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (isBounded)
         {
@@ -1885,7 +1894,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 vsi.geometry_normal = -rayDir;
                 vsi.front_face = true;
                 const LightConnection conn = connectToLight(
-                    uniforms, uniforms.numLights, lights, wrng, vsi, envAliasTable, envMapTexture, iesProfiles, true);
+                    uniforms, uniforms.numLights, lights, instances, materials, vertexBuffer, prevVertexBuffer,
+                    indexBuffer, motionTime, wrng, vsi, envAliasTable, envMapTexture, iesProfiles, true);
                 if (conn.needsRay && conn.pdf > 0.0f)
                 {
                     // Match the fog path's travel-direction phase convention.
@@ -1893,13 +1903,14 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     const float misWeight =
                         conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, phase, uniforms.misHeuristic);
                     const float3 weight = throughput * (conn.radiance / conn.pdf) * misWeight * phase;
-                    if (any(weight > 1e-6f))
+                    const EmissiveVisibilitySegment visibility = lightVisibilitySegment(conn, scatterPoint);
+                    if (any(weight > 1e-6f) && visibility.valid)
                     {
                         ShadowRay sr;
                         sr.origin = packed_float3(scatterPoint);
-                        sr.direction = packed_float3(conn.toLight);
+                        sr.direction = packed_float3(visibility.direction);
                         sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
-                        sr.maxDistance = conn.tMax;
+                        sr.maxDistance = visibility.maxDistance;
                         sr.pixelIndex = tid;
                         sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
                         sr.sharcRadiance = packed_float3(
@@ -2066,7 +2077,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             else
             {
                 const float localSelectionPdf = uniforms.hasEnvMap ? 1.0f - uniforms.envMapColorTint.w : 1.0f;
-                const float lightSelectionPdf = localSelectionPdf * analyticLightSelectionPdf(currLight);
+                const float analyticClassPdf =
+                    uniforms.numEmissiveMeshes > 0u ? 1.0f - uniforms.meshLightSelectionPdf : 1.0f;
+                const float lightSelectionPdf =
+                    localSelectionPdf * analyticClassPdf * analyticLightSelectionPdf(currLight);
                 // From the vertex that scattered, which is not the ray's origin
                 // once it has passed through a cutout on the way here. Using the
                 // origin makes the light look nearer than the scattering vertex
@@ -2258,7 +2272,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // hemisphere, which is smooth at every parameter, so there is nothing
         // about the material to ask.
         const bool didNeeExit = volumeNeePairsWithBounce(
-            uniforms.estimatorMode == 0, (SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap));
+            uniforms.estimatorMode == 0,
+            (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
+                (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (didNeeExit)
         {
             // NEE here and not inside the walk: this is the vertex light can
@@ -2271,7 +2287,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             xsi.wo = -rayDir;
             xsi.front_face = true;
             const LightConnection conn = connectToLight(
-                uniforms, uniforms.numLights, lights, xrng, xsi, envAliasTable, envMapTexture, iesProfiles, false);
+                uniforms, uniforms.numLights, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
+                motionTime, xrng, xsi, envAliasTable, envMapTexture, iesProfiles, false);
             if (conn.needsRay && conn.pdf > 0.0f)
             {
                 const float cosOut = dot(outward, conn.toLight);
@@ -2282,13 +2299,15 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     const float misWeight =
                         conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, lobePdf, uniforms.misHeuristic);
                     const float3 weight = throughput * (conn.radiance / conn.pdf) * misWeight * M_1_PI_F;
-                    if (any(weight > 1e-6f))
+                    const float3 shadowOrigin = offset_ray(worldPosition, outwardGeom);
+                    const EmissiveVisibilitySegment visibility = lightVisibilitySegment(conn, shadowOrigin);
+                    if (any(weight > 1e-6f) && visibility.valid)
                     {
                         ShadowRay sr;
-                        sr.origin = packed_float3(offset_ray(worldPosition, outwardGeom));
-                        sr.direction = packed_float3(conn.toLight);
+                        sr.origin = packed_float3(shadowOrigin);
+                        sr.direction = packed_float3(visibility.direction);
                         sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
-                        sr.maxDistance = conn.tMax;
+                        sr.maxDistance = visibility.maxDistance;
                         sr.pixelIndex = tid;
                         // Outside the medium: this vertex is the walk leaving it,
                         // and the ray starts on the far side of the boundary.
@@ -2742,7 +2761,21 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
 
     if (any(surfaceEmission > 0.0f))
     {
-        radiance += throughput * surfaceEmission;
+        float emissionMis = 1.0f;
+        if (SPEC_LIGHTS && depth > 0u && !specularBounce && neeDone && !isCurve &&
+            uniforms.numEmissiveMeshes > 0u)
+        {
+            const uint32_t geometryId = rec.geomEntryIndex - inst.userID;
+            const float3 misOrigin = rayOrigin - rayDir * p.misDistance;
+            const float lightPdf = emissiveMeshHitPdf(
+                uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, rec.instanceIndex, geometryId,
+                rec.primitiveId, misOrigin, worldPosition, motionTime);
+            if (lightPdf > 0.0f)
+            {
+                emissionMis = computeMisWeight(p.lastBsdfPdf, lightPdf, uniforms.misHeuristic);
+            }
+        }
+        radiance += throughput * surfaceEmission * emissionMis;
     }
 
     // Next-event estimation first, and decided by the material rather than by the
@@ -2776,7 +2809,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         openpbrPrepared = openpbr_prepare_at(openpbrMat, si, throughput);
     }
 
-    const bool hasEmitter = (SPEC_LIGHTS && uniforms.numLights > 0) || (SPEC_ENV_MAP && uniforms.hasEnvMap);
+    const bool hasEmitter =
+        (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
+        (SPEC_ENV_MAP && uniforms.hasEnvMap);
     const bool smoothLobe = isOpenPBR ? openpbr_has_smooth_lobe(openpbrMat) : bsdf_has_smooth_lobe(si);
     bool didNee = neeRunsAtVertex(uniforms.estimatorMode == 0, hasEmitter, smoothLobe);
     const ShadedFrame neeFrame =
@@ -2805,7 +2840,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             }
 
             const LightConnection conn = connectToLight(
-                uniforms, uniforms.numLights, lights, crng, si, envAliasTable, envMapTexture, iesProfiles);
+                uniforms, uniforms.numLights, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
+                motionTime, crng, si, envAliasTable, envMapTexture, iesProfiles);
             // A fibre has no back side to reject: see scattersThroughFibre().
             const bool isNextEventValid =
                 neeProposesDirection(isFibre, neeFrame.frontFace,
@@ -2854,18 +2890,21 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             // 1 / pdf and every line below is the arithmetic this code had.
             const float W = (weightSum / (float)candidates) / bestTarget;
             const float3 weight = throughput * bestF * W;
-            if (any(weight != 0.0f))
+            const float3 shadowOrigin = isFibre ?
+                                            fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius,
+                                                            bestConn.toLight) :
+                                            bestConn.origin;
+            const EmissiveVisibilitySegment visibility = lightVisibilitySegment(bestConn, shadowOrigin);
+            if (any(weight != 0.0f) && visibility.valid)
             {
                 ShadowRay sr;
                 // Past the strand when the connection leaves through it: the lobe
                 // has already charged for the crossing, so the fibre must not
                 // shadow itself.
-                sr.origin = packed_float3(isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal,
-                                                                    curveRadius, bestConn.toLight) :
-                                                    bestConn.origin);
-                sr.direction = packed_float3(bestConn.toLight);
+                sr.origin = packed_float3(shadowOrigin);
+                sr.direction = packed_float3(visibility.direction);
                 sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
-                sr.maxDistance = bestConn.tMax;
+                sr.maxDistance = visibility.maxDistance;
                 sr.pixelIndex = tid;
                 sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
                 sr.sharcRadiance = packed_float3(SPEC_SHARC_UPDATE ? bestF * W : float3(0.0f));

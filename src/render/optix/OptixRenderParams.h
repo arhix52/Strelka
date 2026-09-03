@@ -9,6 +9,7 @@
 #include <strelka/material/ior_stack.h>
 
 #include <env_alias_sampling.h>
+#include <emissive_mesh_light.h>
 #include <sharc.h>
 
 // Values, not spellings, are what has to match Metal's ShaderTypes.h, which
@@ -63,6 +64,14 @@ struct SceneData
     uint32_t* ib;
     UniformLight* lights;
     uint32_t numLights;
+    const EmissiveMeshLight* emissiveMeshes;
+    const EmissiveTriangleLight* emissiveTriangles;
+    const EmissiveInstanceTransform* emissiveInstanceTransforms;
+    const EmissiveInstanceTransform* prevEmissiveInstanceTransforms;
+    uint32_t numEmissiveMeshes;
+    // P(mesh emitter | local emitter). The complement selects an analytic
+    // light; environment selection is the outer strategy.
+    float meshLightSelectionPdf;
     /// Packed IES candela tables, indexed by each light's points[0].y. Never
     /// null once the scene is built -- a scene with no profile still gets a
     /// zero-count header, so sampleIesCandela() needs no null check per light.
