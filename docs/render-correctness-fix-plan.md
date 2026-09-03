@@ -15,6 +15,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | 5. Robust large-distribution support | 209,715/1,048,576 positive-PMF bins have zero float-CDF interval | Million-bin support/normalization, sparse zeros, 1e12 dynamic range, PMF lookup, GOF, old-CDF mutation | Replace the cumulative float table with an O(1) Walker/Vose alias draw and its represented PMF | FIXED | 1,048,576-entry support kernel passed on MTLDevice | OptiX remains uniform until finding 7 | `cd2dd98` | PARTIAL |
 | 6. Emissive mesh NEE | A scene containing only one material-emissive triangle has `hasEmitter=false` and NEE proposal probability 0 despite nonzero emitted radiance | Single/multiple triangle frequencies, affine instances, texture evaluation, sample/PDF oracle, hit MIS, NEE-off expectation, omitted-NEE and visibility mutations | Hierarchical mesh-instance/triangle selection, exact transformed-area sampling, endpoint-consistent visibility, and the same marginal density at BSDF hits | FIXED | FIXED on MTLDevice | Source implemented; toolchain unavailable | `d53e662` | PARTIAL |
 | 7. Cross-backend consistency | OptiX uses uniform analytic-light identity, fixed 1/2 environment/local selection, and centre-Jacobian environment rows while Metal uses power aliases and exact row solid angle | Shared hierarchy/marginal-PMF oracle, sharp-distant support, exact environment degeneracies, legacy-selector mutation, source/toolchain validation | Use one host probability specification and represented PMFs; migrate OptiX environment and analytic selection to it | FIXED | FIXED on MTLDevice | Source fixed; external CUDA validation required | `0b85cd9` | UNVERIFIED |
+| H. Ill-conditioned ellipsoid intersection | Inverse-space quadratic overflows for `diag(1,1,1e-20)` although sampler/PDF are finite | Thin full-rank sampled-point round trip and inverse-quadratic mutation | Solve the ray/ellipsoid quadratic in scaled homogeneous cofactor coordinates | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
 
 ## Per-finding probability records
 
@@ -440,3 +441,21 @@ is out of scope unless it blocks validation.
   parallel Debug/audit invocation collided in pre-existing fixed-name temporary directories; the required sequential
   rerun passed. OptiX consumes the same packed normal but remains externally compile/runtime `UNVERIFIED`.
   Status: FIXED.
+
+## Adversarial correction H: ill-conditioned ellipsoid intersection
+
+- Random variable/measure: the outer ellipsoid proposal is a discrete light mass followed by uniform object-sphere
+  area and the affine world-area Jacobian; the induced connection remains a continuous `domega` density.
+- Support/PDF: every full-rank affine sphere sample with a positive finite cofactor Jacobian must lie on the same
+  analytic surface intersected by visibility. Selection PMFs, one-sided support, and continuous MIS remain unchanged.
+- Reproducer/mutation: for `A=diag(1,1,1e-20)`, the old inverse-space origin/direction are order `1e20`; their
+  squared quadratic coefficients overflow and the discriminant becomes `Inf-Inf=NaN`, rejecting a finite sampled
+  equator point with positive PDF.
+- Implementation: solve `|adj(A)(O+tD)|^2=det(A)^2` directly and divide all homogeneous terms by one common scale.
+  Normal/PDF reconstruction likewise normalizes adjugate coordinates before applying determinant orientation, so it
+  never needs the overflowing inverse coordinates.
+- Validation: the mutation is non-finite while the corrected sample round-trips with a finite hit/normal; focused
+  tests pass 14/14 assertions and all analytic tests pass 76,714/76,714. Debug and Release CTest pass 4/4, targeted
+  ASan+UBSan is clean, the production Metal shader compiles, and the full audit passes 791/791 tests with 68,679,944
+  assertions. The actual Apple M4 Pro environment audit remains clean; OptiX source shares the equation but CUDA
+  compile/runtime remains externally `UNVERIFIED`. Status: FIXED.

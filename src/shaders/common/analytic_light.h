@@ -64,6 +64,12 @@ DEVICE_FUNC float3 affineSphereCoordinates(float3 axisX, float3 axisY, float3 ax
            determinant;
 }
 
+DEVICE_FUNC float3 affineSphereCoordinateNumerators(float3 axisX, float3 axisY, float3 axisZ, float3 worldOffset)
+{
+    return make_float3(dot(worldOffset, cross(axisY, axisZ)), dot(worldOffset, cross(axisZ, axisX)),
+                       dot(worldOffset, cross(axisX, axisY)));
+}
+
 DEVICE_FUNC AnalyticLightSample
 sampleAnalyticDisc(float3 center, float3 axisX, float3 axisY, float3 emissionNormal, float u1, float u2)
 {
@@ -110,14 +116,15 @@ sampleAnalyticEllipsoid(float3 center, float3 axisX, float3 axisY, float3 axisZ,
 DEVICE_FUNC float analyticEllipsoidAreaPdfDenominator(
     float3 center, float3 axisX, float3 axisY, float3 axisZ, float3 point, THREAD_REF float3& normal)
 {
-    float3 objectNormal = affineSphereCoordinates(axisX, axisY, axisZ, point - center);
+    const float determinant = dot(axisX, cross(axisY, axisZ));
+    float3 objectNormal = affineSphereCoordinateNumerators(axisX, axisY, axisZ, point - center);
     const float objectLengthSquared = dot(objectNormal, objectNormal);
     if (!(objectLengthSquared > 0.0f))
     {
         normal = make_float3(0.0f);
         return 0.0f;
     }
-    objectNormal /= sqrtf(objectLengthSquared);
+    objectNormal *= copysignf(1.0f, determinant) / sqrtf(objectLengthSquared);
     const float3 cofactorNormal = affineSphereCofactor(axisX, axisY, axisZ, objectNormal);
     const float jacobian = length(cofactorNormal);
     const float orientation = dot(axisX, cross(axisY, axisZ)) < 0.0f ? -1.0f : 1.0f;
@@ -208,11 +215,32 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
     {
         return result;
     }
-    const float3 objectOrigin = affineSphereCoordinates(axisX, axisY, axisZ, rayOrigin - center);
-    const float3 objectDirection = affineSphereCoordinates(axisX, axisY, axisZ, rayDirection);
+    const float3 cofactorX = cross(axisY, axisZ);
+    const float3 cofactorY = cross(axisZ, axisX);
+    const float3 cofactorZ = cross(axisX, axisY);
+    const float determinant = dot(axisX, cofactorX);
+    float3 objectOrigin = make_float3(dot(rayOrigin - center, cofactorX), dot(rayOrigin - center, cofactorY),
+                                      dot(rayOrigin - center, cofactorZ));
+    float3 objectDirection =
+        make_float3(dot(rayDirection, cofactorX), dot(rayDirection, cofactorY), dot(rayDirection, cofactorZ));
+    // Solve |adj(A) * (O + tD)|^2 = det(A)^2 directly. Dividing by a tiny
+    // determinant first can overflow even though this homogeneous equation is
+    // well represented. A common scale keeps all quadratic coefficients finite
+    // without changing either root.
+    float coefficientScale = fabsf(determinant);
+    coefficientScale = fmaxf(coefficientScale, fmaxf(fabsf(objectOrigin.x), fabsf(objectOrigin.y)));
+    coefficientScale = fmaxf(coefficientScale, fmaxf(fabsf(objectOrigin.z), fabsf(objectDirection.x)));
+    coefficientScale = fmaxf(coefficientScale, fmaxf(fabsf(objectDirection.y), fabsf(objectDirection.z)));
+    if (!(coefficientScale > 0.0f))
+    {
+        return result;
+    }
+    objectOrigin /= coefficientScale;
+    objectDirection /= coefficientScale;
+    const float scaledDeterminant = determinant / coefficientScale;
     const float a = dot(objectDirection, objectDirection);
     const float b = dot(objectOrigin, objectDirection);
-    const float c = dot(objectOrigin, objectOrigin) - 1.0f;
+    const float c = dot(objectOrigin, objectOrigin) - scaledDeterminant * scaledDeterminant;
     const float discriminant = b * b - a * c;
     if (!(a > 0.0f) || !(discriminant >= 0.0f))
     {

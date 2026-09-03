@@ -399,6 +399,35 @@ TEST_CASE("rank-deficient analytic transforms have no area-light support")
     CHECK(length(affineSphereCofactor(x, y, zero, make_float3(0.0f, 0.0f, 1.0f))) > 0.0f);
 }
 
+TEST_CASE("a very thin full-rank ellipsoid keeps sampler and intersection support")
+{
+    const float3 center = make_float3(0.0f);
+    const float3 axisX = make_float3(1.0f, 0.0f, 0.0f);
+    const float3 axisY = make_float3(0.0f, 1.0f, 0.0f);
+    const float3 axisZ = make_float3(0.0f, 0.0f, 1e-20f);
+    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.5f, 0.0f);
+    REQUIRE(sample.areaPdfDenominator > 0.0f);
+
+    const float3 origin = make_float3(0.0f, 0.0f, 2.0f);
+    const float3 direction = normalize(sample.point - origin);
+    const AnalyticLightIntersection hit =
+        intersectAnalyticEllipsoid(origin, direction, 0.0f, 10.0f, center, axisX, axisY, axisZ);
+    CHECK(hit.hit);
+    CHECK(std::isfinite(hit.distance));
+    CHECK(std::isfinite(hit.normal.x));
+    CHECK(std::isfinite(hit.normal.y));
+    CHECK(std::isfinite(hit.normal.z));
+
+    // Mutation: forming inverse-space coefficients before the quadratic
+    // overflows for this valid affine map and loses the sampled endpoint.
+    const float3 oldOrigin = affineSphereCoordinates(axisX, axisY, axisZ, origin);
+    const float3 oldDirection = affineSphereCoordinates(axisX, axisY, axisZ, direction);
+    const float oldA = dot(oldDirection, oldDirection);
+    const float oldB = dot(oldOrigin, oldDirection);
+    const float oldC = dot(oldOrigin, oldOrigin) - 1.0f;
+    CHECK_FALSE(std::isfinite(oldB * oldB - oldA * oldC));
+}
+
 TEST_CASE("a back-facing or degenerate area sample has no density")
 {
     // Zero rather than a negative or infinite pdf: the callers read this as "the
