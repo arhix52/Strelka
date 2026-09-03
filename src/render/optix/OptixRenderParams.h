@@ -7,6 +7,9 @@
 #include <lights.h>
 #include <strelka/material/material_params.h>
 #include <strelka/material/ior_stack.h>
+// Parameters only, never openpbr.h: this header is included by the host, and the
+// vendored library carries ~264 KB of lookup tables the host has no use for.
+#include <strelka/material/openpbr/openpbr_params.h>
 
 #include <env_alias_sampling.h>
 #include <emissive_mesh_light.h>
@@ -287,6 +290,18 @@ struct Params
     // Material data (indexed by materialId)
     MaterialParams* materials;
     cudaTextureObject_t* materialTextures; // flat array: [materialId * MAX_MATERIAL_TEXTURES + slot]
+
+    /// OpenPBR Surface 1.1.1, in a parallel array indexed by the same material
+    /// id. Not folded into MaterialParams for the reason material_params.h gives:
+    /// adding the model moved no byte of the struct every other material type
+    /// shares. Null when the scene has no OpenPBR material, which is the test the
+    /// closest-hit program uses to skip the model entirely -- OptiX has no
+    /// function constant to specialise on, so the branch is the specialisation.
+    OpenPBRParams* openpbrParams;
+    /// Flat, like materialTextures: [materialId * MAX_OPENPBR_TEXTURES + slot].
+    /// Nineteen slots rather than six, and a wider set of transfer functions; the
+    /// mapping lives in OptixRender.cpp beside its Metal counterpart's.
+    cudaTextureObject_t* openpbrTextures;
 
     bool enableAccumulation;
     // developers settings:

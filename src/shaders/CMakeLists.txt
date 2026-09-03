@@ -18,11 +18,59 @@ if(WIN32 OR LINUX)
     # openpbr.h includes its own headers relative to this root, so the directory
     # itself has to be on the path -- ${CMAKE_SOURCE_DIR}/third_party above is
     # one level too high.
+    #
+    # The *generated* copy goes first. Adobe's OpenPBR cannot be compiled by nvcc
+    # as shipped -- 211 of its definitions carry no execution space, and its eight
+    # lookup tables are host globals -- and neither is reachable from the
+    # preprocessor. openpbr_device_headers.py rewrites both into the build tree,
+    # and the submodule stays byte-identical to upstream. Ordering is the whole
+    # mechanism: `#include "openpbr.h"` and every relative include beneath it
+    # resolve here, and only fall through to the real root if this copy is
+    # missing a file -- which would mean the rewrite is stale.
+    set(OPENPBR_DEVICE_INCLUDE_DIR ${CMAKE_CURRENT_BINARY_DIR}/openpbr_device)
+    file(GLOB_RECURSE OPENPBR_VENDORED_HEADERS
+        ${CMAKE_SOURCE_DIR}/third_party/openpbr_bsdf/*.h)
+    add_custom_command(
+        OUTPUT ${OPENPBR_DEVICE_INCLUDE_DIR}/openpbr.h
+        COMMAND ${CMAKE_COMMAND} -E env python3
+            ${CMAKE_SOURCE_DIR}/tools/openpbr_device_headers.py
+            ${CMAKE_SOURCE_DIR}/third_party/openpbr_bsdf
+            ${OPENPBR_DEVICE_INCLUDE_DIR}
+        DEPENDS ${CMAKE_SOURCE_DIR}/tools/openpbr_device_headers.py ${OPENPBR_VENDORED_HEADERS}
+        COMMENT "Rewriting OpenPBR headers for device compilation"
+        VERBATIM
+    )
+    add_custom_target(openpbr_device_headers DEPENDS ${OPENPBR_DEVICE_INCLUDE_DIR}/openpbr.h)
+
+    include_directories(${OPENPBR_DEVICE_INCLUDE_DIR})
     include_directories(${CMAKE_SOURCE_DIR}/third_party/openpbr_bsdf)
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/optix)
 
     # CUDA flags for OptiX shaders (targeting SM 89 / Ada Lovelace: RTX 4090+)
-    set(OPTIX_NVCC_FLAGS --gpu-architecture=compute_89 --use_fast_math --relocatable-device-code=true)
+    #
+    # --expt-relaxed-constexpr: openpbr spells its small scalar helpers
+    # OPENPBR_CONSTEXPR_FUNCTION, which the CUDA interop expands to plain
+    # `static constexpr` -- a __host__ function that its __device__ callers then
+    # cannot call. The flag is nvcc's own answer to exactly that, and it is what
+    # the diagnostic suggests; the alternative is 30 more rewrite rules in
+    # openpbr_device_headers.py for functions whose bodies are one line each.
+    set(OPTIX_NVCC_FLAGS --gpu-architecture=compute_89 --use_fast_math --relocatable-device-code=true
+        --expt-relaxed-constexpr)
+
+    # NDEBUG outside a Debug build, which is what compiles openpbr's ~40
+    # OPENPBR_ASSERTs out of device code. They are preconditions on quantities a
+    # path tracer computes in floating point -- "this normal is unit to 1e-6",
+    # "this random number is in [0,1)" -- and the CUDA interop maps them to
+    # assert(). A device assert does not warn and does not skip the sample: it
+    # aborts the entire launch with cudaErrorAssert and leaves the context
+    # unusable, so one ray in a hundred million ends the render.
+    #
+    # Kept live in Debug on purpose. They are good asserts: the first one to fire
+    # here was real (see openpbr_bridge.h's note on the geometry basis), and a
+    # Debug run is how the next one gets found.
+    if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+        list(APPEND OPTIX_NVCC_FLAGS -DNDEBUG)
+    endif()
 
     # Ray generation + miss (compiled to OPTIXIR)
     cuda_wrap_srcs(strelka_shaders OPTIXIR generated_optix_files
@@ -72,6 +120,10 @@ if(WIN32 OR LINUX)
         ${CMAKE_CURRENT_SOURCE_DIR}/optix/sharc_resolve.h
     )
     set_target_properties(strelka_shaders PROPERTIES LINKER_LANGUAGE CXX)
+    # The rewritten OpenPBR headers are an input to every OPTIXIR compile above,
+    # but cuda_wrap_srcs cannot be told about a generated include directory, so
+    # the ordering has to be stated at target level.
+    add_dependencies(strelka_shaders openpbr_device_headers)
 
     target_include_directories(strelka_shaders
         PUBLIC

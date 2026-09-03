@@ -33,6 +33,147 @@ extern "C"
     __constant__ Params params;
 }
 
+// ---------------------------------------------------------------------------
+// OpenPBR Surface 1.1.1
+// ---------------------------------------------------------------------------
+//
+// Behaviour port of the OpenPBR branches in wavefront.metal. The model is a
+// second uber-BSDF, parallel to standard_pbr rather than a case of it, so it
+// appears here as a branch at each of the five places the material is asked a
+// question: the smooth-lobe test, the light connection, the bounce sample, the
+// interior medium, and the denoiser guides.
+//
+// Metal specialises the branch away with a function constant (SPEC_OPENPBR).
+// OptiX has no equivalent -- one launch, one module -- so the test is a null
+// check on the parameter array instead. That array is only allocated when the
+// scene actually has an OpenPBR material, which makes the check free on every
+// scene that does not: a uniform predicate over the whole launch, with nothing
+// behind it to schedule.
+static __forceinline__ __device__ bool isOpenPBRMaterial(const MaterialParams& m)
+{
+    return params.openpbrParams != nullptr && m.material_type == MATERIAL_TYPE_OPENPBR;
+}
+
+/// Everything the free-flight decision needs about the medium behind a material.
+///
+/// Its own function for the reason Metal's mediumSigmaT/mediumPropsFor exist:
+/// the sites that read the medium had no reason to know OpenPBR exists, and so
+/// went on reading MaterialParams::subsurface_radius -- a glTF field an OpenPBR
+/// material never fills. At zero, sigmaTFromRadius gives 1e5, which annihilates
+/// every path leaving the medium whatever its walk cost.
+///
+/// One function where Metal has two: its split exists because MSL address spaces
+/// make the cheap query awkward to express through the fuller one, and nothing
+/// here has that problem.
+struct MediumProps
+{
+    float3 sigmaT;
+    float3 albedo;
+    float anisotropy;
+};
+
+/// `walkAlbedo` is what the boundary resolved when the path entered -- the only
+/// place a texture existed. Inside the volume there is no UV to rebuild it from.
+/// A caller that wants extinction alone -- the shadow ray's optical depth -- passes
+/// zero and reads `.sigmaT`; the albedo it does not use costs one select that dies
+/// in dead-code elimination.
+static __forceinline__ __device__ MediumProps mediumPropsFor(uint32_t materialIndex, float3 walkAlbedo)
+{
+    const MaterialParams& mm = params.materials[materialIndex];
+    MediumProps out;
+    if (isOpenPBRMaterial(mm))
+    {
+        // Copied out of device memory because the bridge takes a plain reference
+        // -- it is portable code shared with Metal and the host. The copy is
+        // nominal: openpbr_interior_volume() reads eleven of these fields and the
+        // rest are dead, which scalar replacement removes.
+        const OpenPBRParams mat = params.openpbrParams[materialIndex];
+        const OpenPBR_HomogeneousVolume v = openpbr_interior_volume(mat);
+        out.sigmaT = v.extinction_coefficient;
+        out.albedo = walkAlbedo;
+        out.anisotropy = v.anisotropy;
+        return out;
+    }
+    out.sigmaT = fromSpectrum(oka::medium::sigmaTFromRadius(toSpectrum(mm.subsurface_radius)));
+    // A bounded volume has no entry surface to have textured, so it keeps the
+    // material's constant; a subsurface walk takes what the boundary resolved.
+    out.albedo = ((mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u) ? mm.diffuse_transmission_color : walkAlbedo;
+    out.anisotropy = mm.subsurface_anisotropy;
+    return out;
+}
+
+/// Whether a mapped base colour is the only thing carrying this material's
+/// subsurface detail. Same test as Metal's openpbrBaseMapDetailsSubsurface().
+static __forceinline__ __device__ bool openpbrBaseMapDetailsSubsurface(const OpenPBRParams& p)
+{
+    return p.subsurface_weight > 0.0f && openpbr_has_texture(p, OPENPBR_TEX_BASE_COLOR) &&
+           !openpbr_has_texture(p, OPENPBR_TEX_SUBSURFACE_COLOR);
+}
+
+/// The three quantities AovSample carries about the material.
+///
+/// A denoiser wants albedos that approximate the diffuse and specular radiance
+/// visible from *this view*, not the material's normal-incidence F0. Keeping the
+/// layered lobes in that approximation is what stops a grazing dielectric or a
+/// clear coat being described as almost black exactly where its highlight fills
+/// the pixel. Port of openpbrDenoiserGuides() in wavefront.metal, minus the
+/// transmission field, which OptiX's AovSample does not have.
+struct OpenPBRGuides
+{
+    float3 diffuse;
+    float3 specular;
+    float roughness;
+};
+
+static __forceinline__ __device__ OpenPBRGuides openpbrDenoiserGuides(const OpenPBR_ResolvedInputs& in,
+                                                                      const SurfaceInteraction& si,
+                                                                      bool baseMapDetailsSubsurface)
+{
+    OpenPBRGuides g;
+    // Copied into float3 first. `vec3` is a distinct type on CUDA (see
+    // openpbr_cuda_vec.h) and converts to float3 implicitly, but so does float3
+    // to vec3 -- so a mixed `float3 * vec3` has two equally good operators and is
+    // ambiguous. Naming the type once at the top is the whole fix.
+    const float3 baseColor = in.base_color;
+    const float3 subsurfaceIn = in.subsurface_color;
+    const float3 specularColor = in.specular_color;
+    const float3 coatColor = in.coat_color;
+    const float3 fuzzColor = in.fuzz_color;
+
+    const float dielectric = 1.0f - in.base_metalness;
+    const float opaque = 1.0f - in.transmission_weight;
+    const float3 weightedBase = baseColor * in.base_weight;
+    // MaterialX exports in the test scenes use a mapped base plus a constant
+    // subsurface tint. Preserve the mapped detail in that case; a genuinely
+    // mapped subsurface colour remains an independent OpenPBR input.
+    const float3 subsurfaceColor = baseMapDetailsSubsurface ? weightedBase * subsurfaceIn : subsurfaceIn;
+    const float3 diffuseColor = lerp(weightedBase, subsurfaceColor, in.subsurface_weight);
+    g.diffuse = diffuseColor * dielectric * opaque;
+
+    const float cosView = saturate(fabsf(dot(si.shading_normal, si.wo)));
+    const float dielectricF0 = f0_from_ior(fmaxf(in.specular_ior, 1.0f)) * in.specular_weight;
+    const float3 dielectricSpecular = saturate(specularColor * dielectricF0);
+    const float3 metalSpecular = saturate(weightedBase * in.specular_weight);
+    const float3 f0 = lerp(dielectricSpecular, metalSpecular, in.base_metalness);
+    g.specular = fresnel_schlick_roughness(f0, cosView, in.specular_roughness);
+
+    const float coatFresnel = in.coat_weight * fresnel_schlick_scalar(f0_from_ior(fmaxf(in.coat_ior, 1.0f)), cosView);
+    const float3 coated = g.specular + (make_float3(1.0f) - g.specular) * coatColor * coatFresnel;
+    const float3 fuzz = fuzzColor * in.fuzz_weight * powf(1.0f - cosView, 5.0f);
+    g.specular = saturate(coated + (make_float3(1.0f) - coated) * fuzz);
+
+    // Energy-weighted, so the lobe that actually fills the pixel is the one the
+    // denoiser is told about. The 1e-4 floor keeps a fully black specular from
+    // dividing by zero rather than expressing any physics.
+    const float mainEnergy = fmaxf(luminance(g.specular), 1e-4f);
+    const float coatEnergy = fmaxf(coatFresnel, 0.0f);
+    const float fuzzEnergy = fmaxf(luminance(fuzz), 0.0f);
+    const float roughnessEnergy =
+        in.specular_roughness * mainEnergy + in.coat_roughness * coatEnergy + in.fuzz_roughness * fuzzEnergy;
+    g.roughness = saturate(roughnessEnergy / (mainEnergy + coatEnergy + fuzzEnergy));
+    return g;
+}
+
 /// Fraction of the light that survives the segment: 1 when nothing is in the
 /// way, 0 when an opaque surface is, and the product of (1 - opacity) over the
 /// cutout surfaces crossed otherwise.
@@ -121,8 +262,7 @@ static __forceinline__ __device__ float3 mediumTransmittance(float3 origin,
 
         if (medium != 0u)
         {
-            const MaterialParams& mm = params.materials[medium - 1u];
-            optical += fromSpectrum(oka::medium::sigmaTFromRadius(toSpectrum(mm.subsurface_radius))) * segment;
+            optical += mediumPropsFor(medium - 1u, make_float3(0.0f)).sigmaT * segment;
         }
         if (escaped)
         {
@@ -751,9 +891,13 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
 /// Resampled next-event estimation using unshadowed MIS-weighted luminance as the unbiased target.
 /// Exactly one candidate survives to trace one shadow ray; one candidate reduces to ordinary NEE.
 /// Returns throughput-weighted radiance and whether its sole survivor is responsive.
+/// `openpbrPrepared` is null for every material the standard model shades, and
+/// the vertex's prepared OpenPBR lobe stack otherwise. The whole difference this
+/// makes is which BSDF the light connection is weighed against.
 static __device__ float3 estimateDirectLighting(PerRayData* prd,
                                                 const SurfaceInteraction& si,
                                                 float curveRadius,
+                                                const OpenPBR_PreparedBsdf* openpbrPrepared,
                                                 bool& outResponsive)
 {
     outResponsive = false;
@@ -799,7 +943,9 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
             continue;
         }
 
-        const BsdfEvalResult evalData = bsdf_eval(si, conn.toLight);
+        const BsdfEvalResult evalData = (openpbrPrepared != nullptr)
+                                            ? openpbr_bsdf_eval(*openpbrPrepared, si, conn.toLight)
+                                            : bsdf_eval(si, conn.toLight);
         if (isnan(conn.radiance) || isnan(conn.pdf) || isnan(evalData.bsdf) || isnan(evalData.pdf))
         {
             // ERROR, terminate tracing
@@ -1157,11 +1303,15 @@ static __forceinline__ __device__ bool previousTriangleWorldPosition(const HitGr
 /// material guides to the surface it reflects, and that surface sits somewhere
 /// else on screen -- reprojecting the pixel by *its* motion is not a small
 /// error.
+/// `openpbrGuides` is null for every material the standard model shades, and the
+/// OpenPBR-derived albedos and roughness otherwise. Passed in rather than
+/// recomputed here because the caller already has the resolved inputs.
 static __forceinline__ __device__ void writeSurfaceGuide(const HitGroupData* hit_data,
                                                          PerRayData* prd,
                                                          const SurfaceInteraction& si,
                                                          const float3 worldPosition,
-                                                         const bool isTriangle)
+                                                         const bool isTriangle,
+                                                         const OpenPBRGuides* openpbrGuides)
 {
     const uint32_t pixelIndex = launchPixelIndex(params);
     if (prd->depth == 0)
@@ -1177,7 +1327,8 @@ static __forceinline__ __device__ void writeSurfaceGuide(const HitGroupData* hit
         params.aov[pixelIndex].motionY = motion.y;
     }
 
-    if (oka::guides::shouldWriteGuide(true, prd->aovDone, params.guidePrimaryHit, prd->depth, si.roughness))
+    const float guideRoughness = (openpbrGuides != nullptr) ? openpbrGuides->roughness : si.roughness;
+    if (oka::guides::shouldWriteGuide(true, prd->aovDone, params.guidePrimaryHit, prd->depth, guideRoughness))
     {
         const AovSample previous = params.aov[pixelIndex];
         AovSample a;
@@ -1185,10 +1336,11 @@ static __forceinline__ __device__ void writeSurfaceGuide(const HitGroupData* hit
         //
         // Albedo guides are reflectance, so saturate unbounded material colour for the denoiser.
         const float3 base = saturate(si.albedo);
-        a.diffuseAlbedo = base * (1.0f - si.metallic);
-        a.specularAlbedo = lerp(make_float3(0.04f), base, si.metallic);
+        a.diffuseAlbedo = (openpbrGuides != nullptr) ? saturate(openpbrGuides->diffuse) : base * (1.0f - si.metallic);
+        a.specularAlbedo = (openpbrGuides != nullptr) ? openpbrGuides->specular
+                                                      : lerp(make_float3(0.04f), base, si.metallic);
         a.normal = si.shading_normal;
-        a.roughness = si.roughness;
+        a.roughness = guideRoughness;
         // Taken from the block above, which wrote them for the primary surface
         // whatever this one is.
         a.depth = previous.depth;
@@ -1223,9 +1375,13 @@ static __forceinline__ __device__ void writeSurfaceGuide(const HitGroupData* hit
 /// it would spawn, so the cost is real and the contribution is not. Cycles'
 /// random walk makes the same call, and light still gets in and out through the
 /// surface, where next-event estimation does run.
+/// `anisotropy` is passed rather than read from `mm`: an OpenPBR interior gets
+/// its mean cosine from the volume the model derives, not from
+/// MaterialParams::subsurface_anisotropy, which such a material never fills.
 static __device__ void scatterInMedium(PerRayData* prd,
                                        const MaterialParams& mm,
                                        const MediumSample& m,
+                                       const float anisotropy,
                                        const float3 rayOrigin,
                                        const float3 rayDir,
                                        const bool isBounded)
@@ -1267,7 +1423,8 @@ static __device__ void scatterInMedium(PerRayData* prd,
                 // camera along -rayDir, so their cosine is dot(rayDir, toLight).
                 // Negated, a forward-scattering medium becomes a backward-
                 // scattering one.
-                const float phase = hgPhaseFunction(dot(rayDir, conn.toLight), mm.subsurface_anisotropy);
+                const float phase =
+                    hgPhaseFunction(dot(rayDir, conn.toLight), anisotropy);
                 // The phase function is the medium's BSDF and its own pdf, so MIS
                 // pairs it against the light density exactly as a surface lobe
                 // would.
@@ -1299,8 +1456,9 @@ static __device__ void scatterInMedium(PerRayData* prd,
     }
 
     float phasePdf = 0.0f;
-    const float3 nextDir = hgSampleDirection(-rayDir, mm.subsurface_anisotropy, random<SampleDimension::eBSDF0>(mrng),
-                                             random<SampleDimension::eBSDF1>(mrng), phasePdf);
+    const float3 nextDir =
+        hgSampleDirection(-rayDir, anisotropy, random<SampleDimension::eBSDF0>(mrng),
+                          random<SampleDimension::eBSDF1>(mrng), phasePdf);
 
     prd->origin = scatterPoint;
     prd->dir = nextDir;
@@ -1840,23 +1998,25 @@ extern "C" __global__ void __closesthit__radiance()
     bool insideMedium = false;
     bool mediumIsBounded = false;
     bool sampledFreeFlight = false;
+    // Only meaningful while insideMedium; scatterInMedium() needs the mean cosine
+    // and the source of it differs between the two material models.
+    float mediumAnisotropy = 0.0f;
     if (prd->medium != 0u)
     {
         const MaterialParams& mm = params.materials[prd->medium - 1u];
         insideMedium = true;
         mediumIsBounded = (mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u;
-        // A bounded volume has no entry surface to have textured, so it keeps the
-        // material's constant; a subsurface walk takes what the boundary resolved.
-        const float3 mediumAlbedo = mediumIsBounded ? mm.diffuse_transmission_color : prd->mediumAlbedo;
+        const MediumProps props = mediumPropsFor(prd->medium - 1u, prd->mediumAlbedo);
+        mediumAnisotropy = props.anisotropy;
         const uint32_t stepCeiling = min(params.subsurfaceIterations, MEDIUM_MAX_STEPS);
         // Past the ceiling the walk stops drawing free flights, so the next
         // surface is its boundary and the path leaves rather than hanging.
         if (prd->mediumStep < stepCeiling)
         {
             SamplerState mrng = mediumSampler(prd->sampler, prd->mediumStep);
-            medium = sampleMedium(fromSpectrum(oka::medium::sigmaTFromRadius(toSpectrum(mm.subsurface_radius))),
-                                  mediumAlbedo, prd->throughput, surfaceT, random<SampleDimension::eBSDF2>(mrng),
-                                  random<SampleDimension::eBSDF3>(mrng));
+            medium = sampleMedium(
+                props.sigmaT, props.albedo, prd->throughput, surfaceT,
+                random<SampleDimension::eBSDF2>(mrng), random<SampleDimension::eBSDF3>(mrng));
             sampledFreeFlight = true;
             if (medium.scattered)
             {
@@ -1914,8 +2074,8 @@ extern "C" __global__ void __closesthit__radiance()
 
     if (medium.scattered)
     {
-        scatterInMedium(
-            prd, params.materials[prd->medium - 1u], medium, optixGetWorldRayOrigin(), ray_dir, mediumIsBounded);
+        scatterInMedium(prd, params.materials[prd->medium - 1u], medium, mediumAnisotropy,
+                        optixGetWorldRayOrigin(), ray_dir, mediumIsBounded);
         return;
     }
     if (sampledFreeFlight)
@@ -1997,6 +2157,33 @@ extern "C" __global__ void __closesthit__radiance()
                            surfaceHit.worldTangent, surfaceHit.worldBinormal, surfaceHit.uv, ray_dir,
                            surfaceHit.vertexColor);
 
+    // --- OpenPBR ------------------------------------------------------------
+    //
+    // The parameter block is copied out of device memory and its maps folded in,
+    // both before anything reads the surface: the guides below want the mapped
+    // normal, and openpbr_prepare_at() further down wants resolved values.
+    //
+    // initSurfaceInteraction() has already run bsdf_init and the glTF normal map
+    // over the same hit. That is not wasted work being thrown away -- an OpenPBR
+    // material still carries a MaterialParams for emission, coverage, the
+    // dielectric priority and the medium flags, and every one of those is read
+    // below. Only the BSDF is replaced.
+    const bool isOpenPBR = isOpenPBRMaterial(matParams);
+    // Zero-initialised, and read only under `isOpenPBR`. It is not a valid
+    // material -- openpbr_params.h says so, and openpbr_make_default_params() is
+    // deliberately host-only -- but every read below sits behind the flag, and
+    // filling in twenty-odd defaults on every non-OpenPBR hit would not.
+    OpenPBRParams openpbrMat = {};
+    if (isOpenPBR)
+    {
+        openpbrMat = params.openpbrParams[matId];
+        if (openpbrMat.texture_mask != 0u && params.openpbrTextures != nullptr)
+        {
+            openpbr_apply_textures(openpbrMat, &params.openpbrTextures[matId * MAX_OPENPBR_TEXTURES], si,
+                                   surfaceHit.uv);
+        }
+    }
+
     // A strand shaded by the whole-fibre lobe: light crosses it in one event, so
     // neither the hemisphere tests nor the ray offsets below apply. Gated on the
     // geometry as well as the material because the chord needs a radius, and only
@@ -2016,7 +2203,14 @@ extern "C" __global__ void __closesthit__radiance()
 
     if (prd->writeAov && params.aov != nullptr)
     {
-        writeSurfaceGuide(hit_data, prd, si, surfaceHit.position, primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE);
+        OpenPBRGuides openpbrGuides;
+        if (isOpenPBR)
+        {
+            openpbrGuides = openpbrDenoiserGuides(openpbr_resolve_inputs(openpbrMat, si), si,
+                                                  openpbrBaseMapDetailsSubsurface(openpbrMat));
+        }
+        writeSurfaceGuide(hit_data, prd, si, surfaceHit.position,
+                          primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE, isOpenPBR ? &openpbrGuides : nullptr);
     }
 
     if (params.debug == (uint32_t)DebugMode::eNormal)
@@ -2138,6 +2332,20 @@ extern "C" __global__ void __closesthit__radiance()
     else
     {
         si.exterior_ior = ior_stack_peek_after_pop(prd->iorStack, si.dielectric_priority);
+    }
+
+    // Built once, here, because openpbr_prepare() assembles the whole lobe stack
+    // and all three of sample, eval and pdf can run at one vertex -- preparing
+    // inside each entry point would do that work three times. It has to come
+    // after si.exterior_ior above: index-matching the base to the surrounding
+    // medium is part of what preparation resolves.
+    //
+    // Declared unconditionally rather than inside the branch because the eval
+    // below is reached from a helper that takes a pointer to it.
+    OpenPBR_PreparedBsdf openpbrPrepared;
+    if (isOpenPBR)
+    {
+        openpbrPrepared = openpbr_prepare_at(openpbrMat, si, prd->throughput);
     }
 
     // --- Radiance cache ------------------------------------------------------
@@ -2266,11 +2474,12 @@ extern "C" __global__ void __closesthit__radiance()
     // inconsistency directly, which is the only reason the switch exists.
     const bool didNee = neeRunsAtVertex(
         params.estimatorMode == 0, params.scene.numLights > 0 || params.scene.numEmissiveMeshes > 0 || params.hasEnvMap,
-        bsdf_has_smooth_lobe(si));
+        isOpenPBR ? openpbr_has_smooth_lobe(openpbrMat) : bsdf_has_smooth_lobe(si));
     if (didNee)
     {
         bool responsiveLight = false;
-        const float3 direct = estimateDirectLighting(prd, si, curveRadius, responsiveLight);
+        const float3 direct = estimateDirectLighting(prd, si, curveRadius,
+                                                     isOpenPBR ? &openpbrPrepared : nullptr, responsiveLight);
         prd->radiance += direct;
         // Responsive lighting: remember how much of what this path gathers comes
         // from a light on the fast clock, so the deposit at the end of the path
@@ -2309,7 +2518,10 @@ extern "C" __global__ void __closesthit__radiance()
     float4 xi = make_float4(z1, z2, z3, z4);
     const uint32_t lobeWord = randomBits<SampleDimension::eBSDF2>(prd->sampler) >> 9u;
     const uint32_t fresnelWord = randomBits<SampleDimension::eBSDF3>(prd->sampler) >> 9u;
-    BsdfSampleResult sample_data = bsdf_sample(si, xi, lobeWord, fresnelWord);
+    // openpbr_sample takes three uniforms; xi.w is the one standard_pbr spends
+    // choosing a lobe and OpenPBR does not need.
+    BsdfSampleResult sample_data = isOpenPBR ? openpbr_bsdf_sample(openpbrPrepared, xi) :
+                                                bsdf_sample(si, xi, lobeWord, fresnelWord);
 
     if (sample_data.event_type == BSDF_EVENT_ABSORB)
     {
@@ -2358,12 +2570,32 @@ extern "C" __global__ void __closesthit__radiance()
     bool sssRefractedEntry = false;
     if ((sample_data.event_type & BSDF_EVENT_TRANSMISSION) != 0 && !isFibre)
     {
+        // OpenPBR enters on a textured subsurface weight and *any* transmission
+        // event, not on diffuse transmission alone: its subsurface lobe is a
+        // dielectric interface, so the event that crosses it can be glossy. And
+        // si.subsurface is a glTF field an OpenPBR material never fills, so
+        // testing it would mean no OpenPBR interior was ever entered. Same pair
+        // of conditions as wavefront.metal.
+        const bool entersMedium = isOpenPBR ? (openpbrMat.subsurface_weight > 0.0f &&
+                                               openpbrMat.geometry_thin_walled == 0u)
+                                            : (si.subsurface > 0.0f);
+        const uint32_t entryEvent = isOpenPBR ? (sample_data.event_type & BSDF_EVENT_TRANSMISSION)
+                                              : (sample_data.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION);
+        const bool startsSubsurfaceWalk = entersMedium && entryEvent != 0u;
+
         // A thin-walled surface has no interior either, so crossing it does not
         // put the path inside anything. Pushing the stack anyway left a ray that
         // had gone through the front of a bubble believing it was inside glass,
         // so the far side read as an exit from a dense medium -- and every
         // grazing angle there is past the critical angle.
-        if (!si.thin_walled)
+        //
+        // An OpenPBR walk is excluded for a related reason and a different one:
+        // it leaves through exitMedium(), which is not a transmission event and
+        // so has no matching pop. Its entry event may be specular, so unlike the
+        // glTF path -- whose diffuse-transmission entry the stack has always been
+        // pushed for -- it would otherwise reach the push. The glTF branch is
+        // left exactly as it was; only the new case is carved out.
+        if (!si.thin_walled && !(isOpenPBR && startsSubsurfaceWalk))
         {
             if (entering)
             {
@@ -2386,30 +2618,62 @@ extern "C" __global__ void __closesthit__radiance()
         }
         prd->origin = offset_ray(si.position, -faceNg);
 
-        // Entering a subsurface medium. The lobe that got here is the diffuse
-        // transmission one, which on its own puts the light straight out the far
-        // side; what this adds is that it random-walks on the way. From here the
-        // path is inside, and the next closest hit samples a free flight instead
-        // of shading whatever it reaches.
-        if (si.subsurface > 0.0f && (sample_data.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION) != 0)
+        // Entering a subsurface medium. On the glTF path the lobe that got here
+        // is the diffuse transmission one, which on its own puts the light
+        // straight out the far side; what this adds is that it random-walks on
+        // the way. From here the path is inside, and the next closest hit samples
+        // a free flight instead of shading whatever it reaches.
+        //
+        if (startsSubsurfaceWalk)
         {
             prd->medium = static_cast<uint32_t>(matId) + 1u;
             prd->mediumStep = 0u;
 
             // The walk's albedo, resolved here because this is the last place a
             // texture exists: inside the medium there is no surface to sample.
-            // Scaled by how far this point's albedo departs from the one the
-            // material's scatter colour was derived from, so a flat material
-            // takes the ratio 1 and is unchanged, and marble carries its veining
-            // in.
-            float3 walkAlbedo = matParams.diffuse_transmission_color;
-            const float3 reference = matParams.subsurface_reference;
-            if (reference.x > 1e-4f && reference.y > 1e-4f && reference.z > 1e-4f)
+            float3 walkAlbedo;
+            if (isOpenPBR)
             {
-                walkAlbedo *= si.albedo / reference;
+                // MaterialX exports in the test scenes carry marble veining in
+                // base_color and a constant subsurface tint. Fold the former into
+                // the latter before OpenPBR maps it to single-scattering albedo;
+                // a separately mapped subsurface colour stays intact.
+                OpenPBRParams walkMat = openpbrMat;
+                if (openpbrBaseMapDetailsSubsurface(walkMat))
+                {
+                    const float3 base = openpbr_color_to_float3(walkMat.base_color);
+                    const float3 subsurface = openpbr_color_to_float3(walkMat.subsurface_color) * base;
+                    walkMat.subsurface_color = OpenPBRColor{ subsurface.x, subsurface.y, subsurface.z };
+                }
+                walkAlbedo = openpbr_interior_volume(walkMat).albedo;
+            }
+            else
+            {
+                // Scaled by how far this point's albedo departs from the one the
+                // material's scatter colour was derived from, so a flat material
+                // takes the ratio 1 and is unchanged, and marble carries its
+                // veining in.
+                walkAlbedo = matParams.diffuse_transmission_color;
+                const float3 reference = matParams.subsurface_reference;
+                if (reference.x > 1e-4f && reference.y > 1e-4f && reference.z > 1e-4f)
+                {
+                    walkAlbedo *= si.albedo / reference;
+                }
             }
             prd->mediumAlbedo = saturate(walkAlbedo);
-            sssEntryTint = fmaxf(si.diffuse_transmission_color, make_float3(1e-4f));
+            // Only the glTF path divides by an entry tint. Its
+            // diffuse-transmission lobe already carries the scatter colour in
+            // bsdf_over_pdf and the walk applies that colour again through the
+            // medium's albedo, so one of the two has to come back out. OpenPBR
+            // does not double it -- Adobe's subsurface lobe weight and the
+            // single-scattering albedo its volume derives are already the split
+            // -- and dividing anyway would use si.diffuse_transmission_color, a
+            // glTF field no OpenPBR material fills. Clamped to 1e-4 that is not a
+            // small darkening but a factor of ten thousand.
+            if (!isOpenPBR)
+            {
+                sssEntryTint = fmaxf(si.diffuse_transmission_color, make_float3(1e-4f));
+            }
 
             // Enter on the refraction, not on the lobe's cosine draw. The lobe
             // still decides whether the medium is entered and still supplies the

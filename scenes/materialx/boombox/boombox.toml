@@ -1,0 +1,28 @@
+[scene]
+path = "boombox.glb"
+
+[output]
+path = "output/boombox.exr"
+width = 1024
+height = 768
+
+[render]
+spp = 512
+spp_per_launch = 1
+max_depth = 12
+sampler = "sobol"
+
+# Framed in the editor and dumped, rather than fitted to the bounding box here.
+# The mesh's accessor extents are +/-0.01 but its node carries scale 100, so a
+# camera derived from the raw glTF numbers sits a hundred times too close --
+# inside the model, which renders as a black frame with a horizon in it.
+[camera]
+position = [-2.339965, 0.554609, 2.1182065]
+target = [-1.6097887, 0.38154554, 1.4572289]
+fov = 45.0
+
+[tonemap]
+type = "aces"
+exposure_iso = 100.0
+exposure_fstop = 2.8
+exposure_shutter = 0.02

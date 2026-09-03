@@ -183,7 +183,21 @@ DEVICE_FUNC OpenPBR_ResolvedInputs openpbr_resolve_inputs(const THREAD_REF OpenP
     // handedness from the bitangent, which is what a mirrored UV chart needs;
     // passing the interpolated tangent frame straight in is therefore safe even
     // when it is neither orthogonal nor normalised.
-    in.geometry_basis = openpbr_make_basis(si.shading_normal, si.tangent, si.bitangent);
+    //
+    // The *normal* is the exception, and it is asserted rather than fixed up:
+    // openpbr_make_basis requires |n| within 1e-6 of 1 and copies it into the
+    // basis unchanged. Nothing upstream promises that tightly. OptiX builds the
+    // shading normal with `normalize()` under --use_fast_math, whose reciprocal
+    // square root is approximate, and both backends may then pass it through
+    // ensureValidSpecularReflection(), which rotates it and does not renormalise.
+    // The residue is around 1e-7 and occasionally over the bound.
+    //
+    // On OptiX that is not a rounding difference but a stopped render: the CUDA
+    // interop maps OPENPBR_ASSERT to assert(), a failure aborts the whole launch
+    // with cudaErrorAssert, and the chess set trips it within 64 samples. On
+    // Metal the same input skews the basis silently. Normalising once here fixes
+    // both, and costs one rsqrt per shading point.
+    in.geometry_basis = openpbr_make_basis(safe_normalize(si.shading_normal), si.tangent, si.bitangent);
     in.geometry_coat_basis = in.geometry_basis;
 
     return in;
@@ -286,7 +300,11 @@ DEVICE_FUNC BsdfSampleResult openpbr_bsdf_sample(const THREAD_REF OpenPBR_Prepar
 
     // Initialised although openpbr_sample writes all four: it only does so on
     // the paths where it succeeds, and a reader cannot tell that from here.
-    float3 wi = make_float3(0.0f, 0.0f, 0.0f);
+    // `vec3`, not float3: openpbr_sample takes it by non-const reference, and on
+    // CUDA `vec3` is a distinct type from float3 (see openpbr_shim.h). It is an
+    // alias for float3 on Metal and for glm::vec3 on the host, so this is the one
+    // spelling that binds on all three.
+    vec3 wi = make_float3(0.0f, 0.0f, 0.0f);
     OpenPBR_DiffuseSpecular weight = openpbr_make_zero_diffuse_specular();
     float pdf = 0.0f;
     OpenPBR_BsdfLobeType lobe = OpenPBR_BsdfLobeTypeNone;

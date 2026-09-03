@@ -139,7 +139,18 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
                 scenePath = tomlDir / scenePath;
             }
         }
-        cfg.scenePath = fs::weakly_canonical(scenePath).string();
+        // Absolute and lexically normalised, *not* weakly_canonical: that
+        // resolves symlinks, and every sidecar this renderer reads is found by
+        // the scene's stem -- <stem>_light.json, <stem>_curves.bin,
+        // <stem>_camera.json, <stem>_openpbr.json, <stem>.mtlx. Following the
+        // link moves the whole search to the link's target directory, so a scene
+        // that symlinks a large .glb from elsewhere silently loses its lights,
+        // its curves, its camera and its materials -- and the only symptom is
+        // "No light in scene, adding default distant light".
+        //
+        // scenes/materialx is exactly that shape: the geometry is 35 MB in the
+        // MaterialX submodule and the sidecars are ours.
+        cfg.scenePath = fs::absolute(scenePath).lexically_normal().string();
     }
 
     // Output stays CWD-relative so batch runs don't write into scenes/.

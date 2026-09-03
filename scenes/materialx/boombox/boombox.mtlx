@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<!--
+  gltf_pbr_boombox.mtlx from third_party/materialx, plus the one thing it does
+  not carry: a <look>.
+
+  A symlink to the example alone binds nothing. boombox.glb declares no glTF
+  materials at all ("materials": null), so there is no material name for
+  materialx_loader.cpp to match "Material_boombox" against, and the mesh keeps
+  the default material -- one line in the log, "Loaded 1 materials (0 unique
+  textures)", and an untextured render. The look binds by *node* name instead
+  (materialx_loader.cpp:1399), and the mesh node is called BoomBox.
+
+  Inlined rather than <xi:include>d, for the reason tools/parity/run_openpbr_examples.py
+  gives: an include resolves against a search path the renderer sets for its own
+  reasons, and a document that silently includes nothing renders exactly like
+  one that was never applied. Copied verbatim -- diff against the example after a
+  submodule update.
+
+  fileprefix="boombox/" is the example's own, and boombox/ here is a symlink to
+  the directory beside it that holds the four maps.
+-->
+<materialx version="1.39" colorspace="lin_rec709" fileprefix="boombox/">
+  <gltf_colorimage name="image_basecolor" type="multioutput">
+    <input name="file" type="filename" value="BoomBox_baseColor.png" colorspace="srgb_texture" />
+  </gltf_colorimage>
+  <gltf_image name="image_orm" type="vector3">
+    <input name="file" type="filename" value="BoomBox_occlusionRoughnessMetallic.png" />
+  </gltf_image>
+  <gltf_normalmap name="image_normal" type="vector3">
+    <input name="file" type="filename" value="BoomBox_normal.png" />
+  </gltf_normalmap>
+  <gltf_image name="image_emission" type="color3">
+    <input name="file" type="filename" value="BoomBox_emissive.png" colorspace="srgb_texture" />
+  </gltf_image>
+  <separate3 name="image_orm_channels" type="multioutput">
+    <input name="in" type="vector3" nodename="image_orm" />
+  </separate3>
+  <gltf_pbr name="SR_boombox" type="surfaceshader">
+    <input name="base_color" type="color3" nodename="image_basecolor" output="outcolor" />
+    <input name="alpha" type="float" nodename="image_basecolor" output="outa" />
+    <input name="metallic" type="float" nodename="image_orm_channels" output="outz" />
+    <input name="roughness" type="float" nodename="image_orm_channels" output="outy" />
+    <input name="occlusion" type="float" nodename="image_orm_channels" output="outx" />
+    <input name="normal" type="vector3" nodename="image_normal" />
+    <input name="emissive" type="color3" nodename="image_emission" />
+  </gltf_pbr>
+  <surfacematerial name="Material_boombox" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_boombox" />
+  </surfacematerial>
+  <look name="L_boombox">
+    <materialassign name="a_boombox" geom="BoomBox" material="Material_boombox" />
+  </look>
+</materialx>

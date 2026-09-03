@@ -1,0 +1,26 @@
+[scene]
+path = "shaderball.glb"
+
+[output]
+path = "output/shaderball.exr"
+width = 1024
+height = 1024
+
+[render]
+spp = 512
+spp_per_launch = 1
+max_depth = 12
+sampler = "sobol"
+
+# The ball spans y 0 to 2.09 and is roughly 2.1 across; this frames it with the
+# base just inside the bottom edge.
+[camera]
+position = [0.0, 1.35, 6.2]
+target = [0.0, 0.95, 0.0]
+fov = 28.0
+
+[tonemap]
+type = "aces"
+exposure_iso = 100.0
+exposure_fstop = 2.8
+exposure_shutter = 0.02

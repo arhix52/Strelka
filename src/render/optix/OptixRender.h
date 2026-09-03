@@ -224,6 +224,14 @@ private:
     std::unique_ptr<OptixBuffer> mMaterialParamsBuffer; // MaterialParams[] on device
     uint32_t mMaterialCount = 0;
 
+    // OpenPBR, in two arrays parallel to the two above and indexed by the same
+    // material id. Both stay null when the scene shades with the glTF model and
+    // authors no OpenPBR material, which is what the closest-hit program's null
+    // check reads as "this model is not in this launch".
+    std::unique_ptr<OptixBuffer> mOpenPBRParamsBuffer; // OpenPBRParams[] on device
+    std::unique_ptr<OptixBuffer> mOpenPBRTexturesBuffer; // cudaTextureObject_t[n * MAX_OPENPBR_TEXTURES]
+    std::vector<cudaTextureObject_t> mHostOpenPBRTextures;
+
     void allocJointMatrices();
     std::unique_ptr<Mesh> createMesh(const oka::Mesh& mesh, size_t meshIndex);
     void updateMesh(const oka::Mesh& mesh, int optixMeshesId);
@@ -535,6 +543,10 @@ private:
     void buildSceneBuffers();
     void buildSceneEnvironment(Buffer* output);
     void publishMaterialParams();
+    /// The OpenPBR half of publishMaterialParams(). Called from it, and only from
+    /// it -- the two tables have to be decided together or a material id would
+    /// index one and not the other.
+    void publishOpenPBRParams();
     bool stepStructures(double budgetMs);
     bool stepMaterialTextures(double budgetMs);
     void buildSceneTail(Buffer* output);

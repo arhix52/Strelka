@@ -1,0 +1,33 @@
+[scene]
+path = "chess_set.glb"
+
+[output]
+path = "output/chess_set.exr"
+width = 1024
+height = 768
+
+[render]
+spp = 512
+spp_per_launch = 1
+max_depth = 12
+sampler = "sobol"
+
+# The camera is authored here because the .glb carries none. A three-quarter
+# view from the black side, framed on the board rather than on its bounding box:
+# the set is 0.705 square and 0.169 tall, so a box-fitted camera puts two thirds
+# of the frame on empty felt.
+[camera]
+position = [0.46, 0.30, 0.52]
+target = [0.0, 0.045, 0.0]
+fov = 40.0
+
+# ACES rather than "none", which is what the validation scenes use. Those are
+# graded against a reference and must not have a curve applied; this one is
+# looked at. See the note in CLAUDE.md about the default photometric exposure
+# rendering to exactly zero in 8 bits -- these three numbers are why this file
+# states them.
+[tonemap]
+type = "aces"
+exposure_iso = 100.0
+exposure_fstop = 2.8
+exposure_shutter = 0.02

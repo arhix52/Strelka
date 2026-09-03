@@ -13,6 +13,7 @@
 #include <sutil/vec_math_adv.h>
 
 #include <strelka/material/bsdf.h>
+#include <strelka/material/openpbr/openpbr_bridge.h>
 #include <strelka/material/valid_reflection.h>
 #include <strelka/material/volume.h>
 
@@ -70,6 +71,138 @@ static __forceinline__ __device__ float3 fibreExitOrigin(
 // clampIndirectContribution() -- the firefly bound on indirect paths -- lives in
 // optix_device_utils.h, included above. This file carried an identical copy of it
 // until the two streams met; one definition is enough.
+
+// ---------------------------------------------------------------------------
+// OpenPBR maps
+// ---------------------------------------------------------------------------
+//
+// Behaviour port of applyOpenPBRTextures() in src/shaders/metal/shading_common.h.
+// Every decision it records holds here for the same reason, so they are not
+// restated: maps *replace* rather than modulate (a MaterialX input is either a
+// value or a nodegraph, never both), emission is deliberately left to the
+// Material struct, and the normal map rebuilds Z from X and Y.
+//
+// What differs is only the plumbing. Metal binds nineteen texture handles in a
+// per-material struct; OptiX indexes one flat array of cudaTextureObject_t, the
+// same shape params.materialTextures already uses, and the wrap mode and
+// transfer function live in the texture object rather than in a sampler here.
+
+static __forceinline__ __device__ float2 openpbr_transform_uv(const OpenPBRParams& p, float2 uv)
+{
+    // KHR_texture_transform's composition order: scale, then rotate, then
+    // translate. Invisible at rotation 0, which is what every exporter writes by
+    // default, and wrong everywhere else.
+    const float c = cosf(p.uv_rotation);
+    const float sn = sinf(p.uv_rotation);
+    const float2 k = make_float2(p.uv_scale_x, p.uv_scale_y);
+    return make_float2(uv.x * k.x * c - uv.y * k.y * sn, uv.x * k.x * sn + uv.y * k.y * c) +
+           make_float2(p.uv_offset_x, p.uv_offset_y);
+}
+
+/// Folds an OpenPBR material's maps into a thread-local copy of its parameters.
+///
+/// `textures` is this material's slice of the global handle array, i.e.
+/// `&params.openpbrTextures[materialId * MAX_OPENPBR_TEXTURES]`. A slot with no
+/// map holds 0, which `texture_mask` already says; the handle is tested anyway
+/// because a texture that failed to load leaves the bit set and the handle null.
+static __forceinline__ __device__ void openpbr_apply_textures(OpenPBRParams& p,
+                                                              const cudaTextureObject_t* textures,
+                                                              SurfaceInteraction& si,
+                                                              float2 uv)
+{
+    const float2 tuv = openpbr_transform_uv(p, uv);
+
+    // Both halves of the gate in one place: the mask says the material named a
+    // file, the handle says one arrived.
+    auto bound = [&](unsigned int slot) -> bool
+    { return openpbr_has_texture(p, slot) && textures[slot] != 0ull; };
+    auto sample = [&](unsigned int slot) -> float4
+    { return tex2D<float4>(textures[slot], tuv.x, tuv.y); };
+
+    // The sixteen value slots as two tables rather than sixteen near-identical
+    // `if` blocks. Both arrays are constexpr and both loop bounds are literals,
+    // so this unrolls into exactly the same code the blocks compiled to -- the
+    // saving is in what a reader has to check, not in what the GPU runs.
+    //
+    // Split by what the slot writes, because that is the only thing that ever
+    // differed between the blocks: a scalar takes the red channel, a colour takes
+    // three. Adding a slot is now one line in one table.
+    struct ScalarSlot
+    {
+        unsigned int slot;
+        float OpenPBRParams::*field;
+    };
+    struct ColorSlot
+    {
+        unsigned int slot;
+        OpenPBRColor OpenPBRParams::*field;
+    };
+
+    constexpr ScalarSlot kScalarSlots[] = {
+        { OPENPBR_TEX_BASE_METALNESS, &OpenPBRParams::base_metalness },
+        { OPENPBR_TEX_SPECULAR_ROUGHNESS, &OpenPBRParams::specular_roughness },
+        { OPENPBR_TEX_SPECULAR_ANISOTROPY, &OpenPBRParams::specular_roughness_anisotropy },
+        { OPENPBR_TEX_COAT_WEIGHT, &OpenPBRParams::coat_weight },
+        { OPENPBR_TEX_COAT_ROUGHNESS, &OpenPBRParams::coat_roughness },
+        { OPENPBR_TEX_FUZZ_WEIGHT, &OpenPBRParams::fuzz_weight },
+        { OPENPBR_TEX_FUZZ_ROUGHNESS, &OpenPBRParams::fuzz_roughness },
+        { OPENPBR_TEX_GEOMETRY_OPACITY, &OpenPBRParams::geometry_opacity },
+        { OPENPBR_TEX_SUBSURFACE_WEIGHT, &OpenPBRParams::subsurface_weight },
+    };
+    // subsurface_radius_scale is a per-channel tint on the mean free path, which
+    // is why it is here and not with the scalars: the scalar length stays as
+    // authored, and a map says how the three channels differ rather than how far
+    // light travels.
+    constexpr ColorSlot kColorSlots[] = {
+        { OPENPBR_TEX_BASE_COLOR, &OpenPBRParams::base_color },
+        { OPENPBR_TEX_SPECULAR_COLOR, &OpenPBRParams::specular_color },
+        { OPENPBR_TEX_COAT_COLOR, &OpenPBRParams::coat_color },
+        { OPENPBR_TEX_TRANSMISSION_COLOR, &OpenPBRParams::transmission_color },
+        { OPENPBR_TEX_SUBSURFACE_COLOR, &OpenPBRParams::subsurface_color },
+        { OPENPBR_TEX_FUZZ_COLOR, &OpenPBRParams::fuzz_color },
+        { OPENPBR_TEX_SUBSURFACE_RADIUS, &OpenPBRParams::subsurface_radius_scale },
+    };
+
+#pragma unroll
+    for (const ScalarSlot& s : kScalarSlots)
+    {
+        if (bound(s.slot))
+        {
+            p.*(s.field) = sample(s.slot).x;
+        }
+    }
+#pragma unroll
+    for (const ColorSlot& c : kColorSlots)
+    {
+        if (bound(c.slot))
+        {
+            const float4 v = sample(c.slot);
+            p.*(c.field) = OpenPBRColor{ v.x, v.y, v.z };
+        }
+    }
+
+    // Emission stays out of this on purpose: the shade path reads it from the
+    // Material struct, not from the BSDF, so an emission map would have to be
+    // folded there instead. Left unhandled rather than half-handled.
+
+    if (bound(OPENPBR_TEX_GEOMETRY_NORMAL))
+    {
+        const float4 n = sample(OPENPBR_TEX_GEOMETRY_NORMAL);
+        const float2 xy = make_float2(n.x * 2.0f - 1.0f, n.y * 2.0f - 1.0f);
+        const float z = sqrtf(saturate(1.0f - (xy.x * xy.x + xy.y * xy.y)));
+        si.shading_normal = safe_normalize(si.tangent * xy.x + si.bitangent * xy.y + si.shading_normal * z);
+        si.bump_normal = si.shading_normal;
+        // Same grazing-angle correction as the glTF path, from the same header,
+        // so the two do not disagree about a surface a map bent past the viewer.
+        if (dot(si.shading_normal, si.wo) <= 0.0f)
+        {
+            const float3 facingGeom =
+                (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
+            si.shading_normal = ensureValidSpecularReflection(facingGeom, si.wo, si.shading_normal);
+            si.diffuse_faces_away = true;
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Fill SurfaceInteraction from hit geometry and sample the material's textures.

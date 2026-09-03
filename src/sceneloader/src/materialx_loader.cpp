@@ -87,6 +87,10 @@ Folded foldScalar(float x)
 /// expects it to.
 float component(const Folded& f, int i)
 {
+    if (!f.ok)
+    {
+        return 0.0f;
+    }
     if (f.n <= 1)
     {
         return f.v[0];
@@ -195,6 +199,37 @@ Folded foldOperand(const mx::NodePtr& node, const char* name, int depth, Folded 
     return f.ok ? f : Folded{};
 }
 
+Folded foldBinary(const mx::NodePtr& node, int depth, const char* aName, const char* bName,
+                  float (*op)(float, float), Folded bFallback)
+{
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+    const Folded a = foldOperand(node, aName, depth, Folded{});
+    if (!a.ok)
+    {
+        return Folded{};
+    }
+    const Folded b = foldOperand(node, bName, depth, bFallback);
+    if (!b.ok)
+    {
+        return Folded{};
+    }
+    Folded r;
+    r.n = std::max(a.n, b.n);
+    r.isColor = a.isColor || b.isColor;
+    r.ok = true;
+    for (int i = 0; i < r.n; ++i)
+    {
+        r.v[i] = op(component(a, i), component(b, i));
+    }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+    return r;
+}
+
 /// Fold a subgraph whose leaves are all constants.
 ///
 /// Everything here is arithmetic on values the document states outright, which
@@ -236,24 +271,6 @@ Folded foldNode(const mx::NodePtr& node, int depth)
         return f;
     };
 
-    const auto binary = [&](const char* aName, const char* bName, float (*op)(float, float), Folded bFallback) {
-        const Folded a = foldOperand(node, aName, depth, Folded{});
-        const Folded b = foldOperand(node, bName, depth, bFallback);
-        if (!a.ok || !b.ok)
-        {
-            return Folded{};
-        }
-        Folded r;
-        r.n = std::max(a.n, b.n);
-        r.isColor = a.isColor || b.isColor;
-        r.ok = true;
-        for (int i = 0; i < r.n; ++i)
-        {
-            r.v[i] = op(component(a, i), component(b, i));
-        }
-        return r;
-    };
-
     const auto unary = [&](float (*op)(float)) {
         const Folded a = foldOperand(node, "in", depth, Folded{});
         if (!a.ok)
@@ -277,22 +294,22 @@ Folded foldNode(const mx::NodePtr& node, int depth)
         return foldOperand(node, "in", depth, Folded{});
     }
     if (category == "add")
-        return retype(binary("in1", "in2", [](float a, float b) { return a + b; }, foldScalar(0.0f)));
+        return retype(foldBinary(node, depth, "in1", "in2", [](float a, float b) { return a + b; }, foldScalar(0.0f)));
     if (category == "subtract")
-        return retype(binary("in1", "in2", [](float a, float b) { return a - b; }, foldScalar(0.0f)));
+        return retype(foldBinary(node, depth, "in1", "in2", [](float a, float b) { return a - b; }, foldScalar(0.0f)));
     if (category == "multiply")
-        return retype(binary("in1", "in2", [](float a, float b) { return a * b; }, foldScalar(1.0f)));
+        return retype(foldBinary(node, depth, "in1", "in2", [](float a, float b) { return a * b; }, foldScalar(1.0f)));
     if (category == "divide")
-        return retype(binary("in1", "in2", [](float a, float b) { return b != 0.0f ? a / b : 0.0f; }, foldScalar(1.0f)));
+        return retype(foldBinary(node, depth, "in1", "in2", [](float a, float b) { return b != 0.0f ? a / b : 0.0f; }, foldScalar(1.0f)));
     if (category == "modulo")
-        return retype(binary(
-            "in1", "in2", [](float a, float b) { return b != 0.0f ? std::fmod(a, b) : 0.0f; }, foldScalar(1.0f)));
+        return retype(foldBinary(
+            node, depth, "in1", "in2", [](float a, float b) { return b != 0.0f ? std::fmod(a, b) : 0.0f; }, foldScalar(1.0f)));
     if (category == "power")
-        return retype(binary("in1", "in2", [](float a, float b) { return std::pow(a, b); }, foldScalar(1.0f)));
+        return retype(foldBinary(node, depth, "in1", "in2", [](float a, float b) { return std::pow(a, b); }, foldScalar(1.0f)));
     if (category == "min")
-        return retype(binary("in1", "in2", [](float a, float b) { return std::min(a, b); }, foldScalar(0.0f)));
+        return retype(foldBinary(node, depth, "in1", "in2", [](float a, float b) { return std::min(a, b); }, foldScalar(0.0f)));
     if (category == "max")
-        return retype(binary("in1", "in2", [](float a, float b) { return std::max(a, b); }, foldScalar(0.0f)));
+        return retype(foldBinary(node, depth, "in1", "in2", [](float a, float b) { return std::max(a, b); }, foldScalar(0.0f)));
     if (category == "absval")
         return unary([](float a) { return std::fabs(a); });
     if (category == "floor")

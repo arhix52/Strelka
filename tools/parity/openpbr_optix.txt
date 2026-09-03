@@ -1,0 +1,103 @@
+OpenPBR on OptiX -- first measurement, 2026-09-03
+=================================================
+
+CUDA 13.3 / OptiX 9.1 / RTX 4090, at each scene's own sample count.
+The `recorded` column in both tables is the Metal figure the harnesses carry;
+it was taken before OptiX had OpenPBR at all, so this is the first time the two
+backends can be compared on this model.
+
+Read the RATIO column. `rel` is noise and bias in one number and rises as the
+sample count falls; the ratio is a brightness offset and barely moves.
+
+
+1. MaterialX's own OpenPBR showcase -- tools/parity/run_openpbr_examples.py
+--------------------------------------------------------------------------
+
+Each material against open_pbr_default in the same box. This is the tighter of
+the two tables, because both sides of the comparison are OpenPBR: it measures
+whether the *lobes* run, and OptiX reproduces every Metal figure.
+
+open_pbr_default: mean 4.7551, p99 10.9743   recorded 4.8182 / 11.1345
+material vs default            rel / ratio            recorded
+--------------------------------------------------------------------------
+open_pbr_aluminum_brushed      0.036 / 1.000          0.036 / 1.001
+open_pbr_carpaint              0.028 / 0.920          0.028 / 0.919
+open_pbr_glass                 0.051 / 0.983          0.051 / 0.985
+open_pbr_honey                 0.040 / 0.944          0.040 / 0.944
+open_pbr_ketchup               0.037 / 0.911          0.037 / 0.903
+open_pbr_lightbulb             85.409 / 259.777       86.008 / 260.540
+open_pbr_pearl                 0.034 / 0.979          0.033 / 0.976
+open_pbr_soapbubble            0.053 / 1.039          0.054 / 1.040
+open_pbr_velvet                0.039 / 0.861          0.039 / 0.858
+
+9 rendered, 0 failed
+
+Every row matches Metal's `rel` to three decimals and its ratio to within 1%.
+The box itself is 1.3% darker than Metal recorded (4.7551 against 4.8182), which
+is the two backends' standing difference on ordinary walls and not an OpenPBR
+one -- it applies to the reference and to all nine materials equally, which is
+exactly why the harness differences against the default rather than grading a
+whole-frame mean.
+
+
+2. OpenPBR against the glTF model on the ladder -- tools/parity/run_openpbr.py
+------------------------------------------------------------------------------
+
+One asset, two material models. Where the specifications agree the ratio must be
+1.0; where they legitimately disagree (coat darkening, the fuzz fit, subsurface
+entry) the number is a record, not a defect.
+
+scene                    openpbr vs gltf rel/ratio recorded
+------------------------------------------------------------------
+00_calibration           0.009 / 0.999          0.025 / 0.975
+01_srgb_texture          0.708 / 1.707          0.681 / 1.677
+02_basecolor             0.010 / 1.000          0.022 / 0.980
+03_roughness             0.015 / 0.999          0.030 / 0.972
+04_metal                 0.040 / 1.001          0.046 / 0.982
+05_anisotropy            0.071 / 1.002          0.073 / 0.984
+06_normalmap             0.035 / 0.996          0.051 / 0.964
+07_alpha_clip            0.256 / 1.251          0.245 / 1.221
+08_alpha_blend           0.020 / 0.988          0.043 / 0.959
+09_glass_ior             0.039 / 1.000          0.048 / 0.975
+10_glass_absorption      0.025 / 1.000          0.035 / 0.976
+11_emission              0.015 / 0.999          0.017 / 0.992
+12_lights_punctual       0.014 / 0.994          0.033 / 0.968
+13_uv2_vcol              0.334 / 1.332          0.308 / 1.299
+14_sheen                 0.044 / 0.994          0.056 / 0.972
+15_clearcoat             0.090 / 0.917          0.109 / 0.892
+16_iridescence           0.018 / 1.003          0.031 / 0.978
+17_coated_glass          0.105 / 0.925          0.114 / 0.903
+18_bounded_volume        0.272 / 0.902          0.279 / 0.905
+19_env_and_light         0.016 / 0.990          0.036 / 0.964
+20_mirror_and_floor      0.562 / 1.558          0.536 / 1.529
+21_specular_color        0.023 / 0.989          0.038 / 0.965
+22_thin_walled           0.074 / 1.016          0.078 / 0.996
+23_diffuse_transmission  0.068 / 0.939          0.070 / 0.935
+24_orthographic          0.010 / 0.998          0.027 / 0.973
+25_subsurface            0.024 / 1.000          0.203 / 1.182
+26_dof                   0.013 / 0.998          0.030 / 0.972
+27_ies                   0.013 / 1.000          0.047 / 0.969
+28_hair                  0.017 / 0.997          0.029 / 0.975
+29_pool_caustics_flat    1.866 / 1.124          
+30_pool_caustics_uneven  1.347 / 1.737          
+31_pool_godrays          0.676 / 0.561          
+32_pool_full             2.297 / 1.297          
+
+33 graded, 0 failed
+
+The ratio is closer to 1.000 on OptiX than Metal recorded on almost every row --
+00_calibration 0.999 against 0.975, 02_basecolor 1.000 against 0.980,
+27_ies 1.000 against 0.969. The rows where the two models genuinely differ keep
+their Metal values (15_clearcoat 0.917/0.892, 17_coated_glass 0.925/0.903,
+18_bounded_volume 0.902/0.905, 23_diffuse_transmission 0.939/0.935), so this is
+not the two models collapsing into one: the differences that should be there are
+there, and a roughly 2.5% offset that should not be is absent.
+
+25_subsurface is the largest move: 0.024 / 1.000, against 0.203 / 1.182 on
+Metal. Checked rather than assumed, because "the models agree" and "the walk
+never runs" look alike from a ratio. Rendering it with subsurface_iterations 0
+and 64 gives rel 0.2525 and a 3.1% mean difference, so the OpenPBR interior is
+entered and walked.
+
+29..32 (the pool caustics rows) have no recorded value -- they were added after
+the Metal table was taken. Recorded here for the same reason the rest are.

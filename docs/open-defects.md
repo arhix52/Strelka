@@ -31,7 +31,7 @@ answer, or an asset/converter note that does not need Chaos.
 | 10 | A volume vertex costs a bounce Cycles does not charge | `OptixRender.cu` raygen loop / `wavefront.metal`; both backends | the fog probe reads 1.00 at `max_depth` 2, not 3, against a `max_bounces` 2 reference |
 | 11 | The iso bathroom's firefly tail | estimator, and an asset the machine does not have | 256 spp noise near the ladder's rows rather than 4x them |
 | 12 | Metal's radiance cache has no resolve pass | `src/shaders/metal/sharc.h` + a new kernel | Metal's cache survives a camera movement, as OptiX's now does |
-| 13 | OpenPBR's vendored BSDF has never been through nvcc | `third_party/openpbr_bsdf`, `src/shaders/optix` | an OptiX module that calls `openpbr_prepare` compiles, and the ladder is unmoved |
+| ~~13~~ | ~~OpenPBR's vendored BSDF has never been through nvcc~~ | done — see 13 | closest-hit OPTIXIR builds clean; `scenes/validation/openpbr` renders on OptiX |
 | 14 | The subsurface walk does not reproduce run to run | `wavefront.metal` medium path, Metal | two runs of one binary on `25_subsurface` are bit-identical |
 | ~~15~~ | ~~Diffuse summed with specular instead of layered under it~~ | done — see Closed | `00_calibration` 0.012 / 1.008, its three regions within 0.4% of each other |
 | ~~16~~ | ~~The walk was entered diffusely where Cycles refracts~~ | done — see Closed | four subsurface rows at 0.994-1.003; slab within 5% of Cycles |
@@ -473,47 +473,57 @@ pass and has no counterpart in a single-launch integrator.
 
 ---
 
-## 13. Adobe's OpenPBR carries 191 functions with no execution space, and nvcc has not seen them
+## 13. Adobe's OpenPBR does not compile under nvcc as shipped — done
 
-`third_party/openpbr_bsdf` is Adobe's OpenPBR 1.1.1, vendored unmodified. It
-advertises a CUDA backend (`interop/openpbr_interop_cuda.h`, selected on
-`__CUDACC__`), and the Metal and host C++ backends are both confirmed working:
-`wavefront.metal`'s flags compile it with zero errors and zero warnings, and
-`tests/material/test_openpbr_*.cpp` run it on the host through
-`openpbr/openpbr_bridge.h`.
+Measured on CUDA 13.3 / OptiX 9.1. The prediction this entry recorded was right,
+and it was not the only thing wrong: **openpbr's CUDA backend had never been
+compiled by anyone**. Three independent errors, in the order nvcc finds them.
 
-What is not confirmed is CUDA, and there is a specific reason to doubt it rather
-than assume it. Counted in the tree as vendored:
+**1. Execution space.** 211 definitions carry no execution-space macro at all
+(the count is higher than the 191 estimated here, because 46 spread the return
+type and the name over two lines and the original count missed them), e.g.
+`float openpbr_average_fresnel(const float eta) {...}` at file scope in
+`impl/openpbr_lobe_utils.h`. Each is a `__host__` function to nvcc, and the 87
+carrying `OPENPBR_INLINE_FUNCTION` (`__device__ inline`) call them.
 
-    191   function definitions with no linkage or execution-space macro at all,
-          e.g. `float openpbr_average_fresnel(const float eta) {...}` at file
-          scope (impl/openpbr_lobe_utils.h:211)
-     87   function definitions carrying OPENPBR_INLINE_FUNCTION, which the CUDA
-          interop layer defines as `__device__ inline`
+**2. Vector types.** `interop/openpbr_interop_cuda.h` aliases `vec3` to CUDA's
+`float3`, which is a bare aggregate: no three-argument constructor, no
+`operator[]`, no `.rgb`, no comparison operators, no GLSL-named componentwise
+math. openpbr is written against GLM and MSL vectors and uses all of those. The
+alias cannot work for any renderer, not just this one.
 
-A bare definition is a `__host__` function to nvcc, and calling one from
-`__device__` code is an error, not a warning. The 191 are called from the 87. If
-that reading is right, `openpbr.h` cannot be compiled by nvcc as shipped, and the
-OptiX half of OpenPBR support needs one of:
+**3. Lookup tables.** The eight tables are declared `OPENPBR_CONSTEXPR_GLOBAL`,
+which that layer spells `static inline constexpr` — a host global. Device code
+cannot read one.
 
-  - NVRTC with `-default-device`, which changes how `src/shaders/CMakeLists.txt`
-    builds the OptiX IR (it uses `cuda_wrap_srcs`, i.e. nvcc), or
-  - a build-time transform that prefixes those definitions with
-    `__device__ inline`, or
-  - an upstream fix; the repository is active (last commit 2026-08-11).
+Answered without editing the submodule, which is still byte-identical to
+upstream `9edf806`:
 
-The same property has already bitten the host build, which is what makes it worth
-writing down rather than guessing at: two host translation units that both
-include `openpbr.h` fail to link with ~200 duplicate symbols. That is handled --
-`openpbr/openpbr_shim.h` puts the library in an anonymous namespace on the host
-only -- but the fix does not transfer, because a shader module wants those
-definitions to keep external linkage.
+  - `tools/openpbr_device_headers.py` rewrites (1) and (3) into
+    `${CMAKE_BINARY_DIR}/src/shaders/openpbr_device`, put *ahead* of the
+    submodule on the OPTIXIR include path. It prints its patch count, so a
+    submodule update that changes a form it matches shows up in the build log
+    before it shows up as a `__host__`-from-`__device__` error.
+  - `src/material/include/strelka/material/openpbr/openpbr_cuda_vec.h` answers
+    (2) through `OPENPBR_USE_CUSTOM_VEC_TYPES`, which the interop layer offers
+    for exactly this. It is included by `openpbr_shim.h` on the CUDA branch only.
+  - `--expt-relaxed-constexpr` in `OPTIX_NVCC_FLAGS` covers the ~30 helpers
+    spelled `OPENPBR_CONSTEXPR_FUNCTION`, i.e. `static constexpr`. This is
+    nvcc's own suggested answer for that diagnostic, and the alternative is
+    thirty more rewrite rules for one-line function bodies.
 
-This is unresolved only because there is no CUDA on this machine: `nvcc` is
-absent, `hix.local` does not resolve from this network, and the Slurm session at
-`login-bia.nvidia.com` needs an MFA login that has expired. It is a ten-minute
-question for anyone with a CUDA toolkit -- compile one `.cu` that includes
-`<strelka/material/openpbr/openpbr_bridge.h>` and calls `openpbr_prepare_at`.
+One real bug in Strelka's own code fell out of it: `openpbr_bridge.h` declared
+the sample's out-parameter `float3 wi`, which binds to openpbr's `vec3&` on
+Metal and the host only because `vec3` is a typedef there. It is now spelled
+`vec3`, which is correct on all three.
+
+`OptixRender_closest_hit.cu` compiles to a 3.7 MB OPTIXIR module with zero
+errors and zero warnings, and `scenes/validation/openpbr` renders.
+
+The host-side duplicate-symbol problem this entry also described is unrelated
+and still handled the same way: `openpbr_shim.h` puts the library in an
+anonymous namespace on the host, and does not on either GPU, where a shader
+module is one translation unit and the definitions must keep external linkage.
 
 ## 14. Two runs of one binary do not agree, when OpenPBR and subsurface are both on
 

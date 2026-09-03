@@ -67,10 +67,30 @@
 //     there the definitions must keep external linkage so the compiler treats
 //     them normally).
 //
-//     Note this is a host-only answer. Whether nvcc accepts the same 191
-//     definitions in device code is a separate question -- a bare definition is
-//     a __host__ function there, and calling one from __device__ code is an
-//     error -- and it is not settled; see docs/open-defects.md.
+//     Note this is a host-only answer. nvcc has the same problem for a different
+//     reason -- a bare definition is a __host__ function there, and the 87 that
+//     do carry OPENPBR_INLINE_FUNCTION (`__device__ inline`) call them, which is
+//     an error -- and it cannot be answered from here at all. That one is
+//     handled outside the preprocessor, by tools/openpbr_device_headers.py; see
+//     (6) below.
+//
+//  6. CUDA, which needs two things this header cannot express.
+//
+//     The execution space of those bare definitions is one, and it is not a
+//     property any macro reaches: the fix is a build-time rewrite of the
+//     vendored headers into ${CMAKE_BINARY_DIR}, put ahead of the submodule on
+//     the OPTIXIR include path (src/shaders/CMakeLists.txt). The same rewrite
+//     moves the eight lookup tables from `static inline constexpr` -- a host
+//     global -- to `__device__ static constexpr`.
+//
+//     The other is the interop layer's `using vec3 = float3`, which cannot work
+//     because CUDA's float3 is a bare aggregate with no three-argument
+//     constructor, no operator[] and no .rgb. openpbr offers
+//     OPENPBR_USE_CUSTOM_VEC_TYPES for precisely this, so the answer *is* in the
+//     preprocessor and it is included below.
+//
+//     Neither is a workaround for Strelka: openpbr's CUDA backend has evidently
+//     never been compiled. Metal and the host both work as shipped.
 
 // (1) -- see above.
 #ifndef OPENPBR_USE_TEXTURE_LUTS
@@ -84,6 +104,12 @@
 #endif
 
 #include <strelka/material/material_math.h>
+
+// (6) -- see above. Before openpbr.h, and before the interop layer it pulls in,
+// because it defines OPENPBR_USE_CUSTOM_VEC_TYPES.
+#if defined(__CUDACC__)
+#    include <strelka/material/openpbr/openpbr_cuda_vec.h>
+#endif
 
 // (2) -- see above.
 #if !defined(__METAL_VERSION__)
@@ -112,8 +138,10 @@ DEVICE_FUNC float3 saturate(float3 v)
 #endif
 
 // (4) -- see above.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wc++17-extensions"
+#if defined(__clang__)
+#    pragma clang diagnostic push
+#    pragma clang diagnostic ignored "-Wc++17-extensions"
+#endif
 #if defined(STRELKA_OPENPBR_NEEDS_INTERNAL_LINKAGE)
 // An unnamed namespace in a header is normally a defect -- it gives every
 // includer its own copy of everything, which is usually an accident. Here it is
@@ -130,7 +158,9 @@ namespace
 } // anonymous namespace
 // NOLINTEND(cert-dcl59-cpp, misc-anonymous-namespace-in-header)
 #endif
-#pragma clang diagnostic pop
+#if defined(__clang__)
+#    pragma clang diagnostic pop
+#endif
 
 // (3) -- see above. Undefining names openpbr did not define is legal and a no-op,
 // so this needs no per-backend guard.

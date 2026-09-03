@@ -64,6 +64,9 @@ static_assert((uint32_t)oka::optix_accel::kFlagAllowRandomVertexAccess ==
 // come out of this: 14 bits a component over [-10, 10], unpacked by the same
 // expression on the host and on the device.
 #include <strelka/scene/vertex_packing.h>
+// The glTF -> OpenPBR translation, for render/material/model = 1. Parameters
+// only; the BSDF itself is never compiled on the host.
+#include <strelka/material/openpbr/openpbr_from_gltf.h>
 
 // The same treatment for the micromap mirrors. A state written with the wrong
 // value would not fail to build; it would quietly mark cut-away geometry opaque.
@@ -191,6 +194,61 @@ namespace fs = std::filesystem;
 
 namespace
 {
+
+/// How an OpenPBR texture slot is read.
+///
+/// Not derivable from the slot number, and getting it wrong is silent: a
+/// roughness map read as sRGB is smoothly and plausibly wrong, and a normal map
+/// read as colour loses the two-channel encoding the BC5 path depends on. The
+/// same split MetalMaterials::openpbrSlotKind() makes, folded into OptiX's one
+/// enum -- Kind::Color *is* the sRGB reading here, where Metal carries the
+/// colour space as a separate flag.
+oka::optix_tex::Kind openpbrSlotKind(uint32_t slot)
+{
+    switch (slot)
+    {
+    case OPENPBR_TEX_BASE_COLOR:
+    case OPENPBR_TEX_SPECULAR_COLOR:
+    case OPENPBR_TEX_COAT_COLOR:
+    case OPENPBR_TEX_EMISSION_COLOR:
+    case OPENPBR_TEX_TRANSMISSION_COLOR:
+    case OPENPBR_TEX_SUBSURFACE_COLOR:
+    case OPENPBR_TEX_FUZZ_COLOR:
+    case OPENPBR_TEX_SUBSURFACE_RADIUS:
+        return oka::optix_tex::Kind::Color;
+    case OPENPBR_TEX_GEOMETRY_NORMAL:
+    case OPENPBR_TEX_GEOMETRY_COAT_NORMAL:
+        return oka::optix_tex::Kind::Normal;
+    default:
+        // Everything else is a scalar the shader reads linearly.
+        return oka::optix_tex::Kind::NonColor;
+    }
+}
+
+/// The slot's guess at the encoding, overridden by whatever the document stated.
+///
+/// A slot default is a good guess and no more: it is glTF's convention, which
+/// the Open Chess Set happens to agree with exactly. Only the document knows
+/// that a particular roughness map was authored sRGB-encoded, or that a base
+/// colour is already linear. A normal map is exempt -- what it *is* does not
+/// change with a colour-space attribute.
+oka::optix_tex::Kind openpbrSlotKind(uint32_t slot, oka::TexColorSpace stated)
+{
+    const oka::optix_tex::Kind kind = openpbrSlotKind(slot);
+    if (kind == oka::optix_tex::Kind::Normal)
+    {
+        return kind;
+    }
+    if (stated == oka::TexColorSpace::Linear)
+    {
+        return oka::optix_tex::Kind::NonColor;
+    }
+    if (stated == oka::TexColorSpace::Srgb)
+    {
+        return oka::optix_tex::Kind::Color;
+    }
+    return kind;
+}
 
 /// One image decoded to four float channels, and the deleter it needs.
 ///
@@ -5334,8 +5392,167 @@ void OptiXRender::publishMaterialParams()
     mState.params.materials = optix::devicePtr<MaterialParams>(mMaterialParamsBuffer->getPtr());
     mState.params.materialTextures = optix::devicePtr<cudaTextureObject_t>(mTexturesDataBuffer->getPtr());
 
+    publishOpenPBRParams();
+
     mMaterialTextureCursor = 0;
     mTextureCache.clear();
+}
+
+// The OpenPBR half of the material table.
+//
+// Split out rather than folded into the loop above, because the decision it
+// makes is scene-wide and has to be taken before any material is written: either
+// this launch has an OpenPBR array or it has none at all, and the closest-hit
+// program reads the null pointer as "not this launch".
+//
+// Behaviour port of MetalMaterials::publishParameters()'s OpenPBR section, which
+// is where each of the choices below was measured. Not restated here beyond what
+// is needed to read the code.
+void OptiXRender::publishOpenPBRParams()
+{
+    const auto& matDescs = mScene->getMaterials();
+
+    mHostOpenPBRTextures.clear();
+    mOpenPBRParamsBuffer.reset();
+    mOpenPBRTexturesBuffer.reset();
+    mState.params.openpbrParams = nullptr;
+    mState.params.openpbrTextures = nullptr;
+
+    // Which material model the scene shades with. A render setting rather than a
+    // scene property on purpose: it makes the two models an A/B on one asset,
+    // which is the only external check on the OpenPBR integration that does not
+    // involve a second renderer -- Blender has no OpenPBR to compare against.
+    // 0 = the glTF model that has always shipped, 1 = OpenPBR.
+    const bool openpbrModel = getSettings()->getAs<uint32_t>("render/material/model") == 1u;
+
+    // A material can arrive as OpenPBR already: the <stem>_openpbr.json sidecar
+    // and the MaterialX loader both author the whole parameter block and set the
+    // type at load time. That is a property of the scene, so it holds whatever
+    // the render setting says -- an authored block wins over a translated one,
+    // because it is a statement about the surface rather than a best effort at
+    // re-spelling a different model.
+    bool anyAuthored = false;
+    for (const auto& desc : matDescs)
+    {
+        if (desc.params.material_type == MATERIAL_TYPE_OPENPBR)
+        {
+            anyAuthored = true;
+            break;
+        }
+    }
+    if (!openpbrModel && !anyAuthored)
+    {
+        return;
+    }
+
+    // Local, not a member: nothing outside this function reads it. The device
+    // copy below is the durable one, and the host side only needs the block long
+    // enough to memcpy it.
+    std::vector<OpenPBRParams> openpbrParams;
+    openpbrParams.reserve(matDescs.size());
+    for (uint32_t i = 0; i < matDescs.size(); ++i)
+    {
+        const auto& desc = matDescs[i];
+        const auto& p = desc.params;
+
+        // The table stays dense so one material id indexes both arrays, even
+        // where only some materials are OpenPBR.
+        if (p.material_type == MATERIAL_TYPE_OPENPBR)
+        {
+            openpbrParams.push_back(desc.openpbr);
+        }
+        else if (openpbrModel && p.material_type != MATERIAL_TYPE_HAIR)
+        {
+            // Hair keeps its own BSDF: OpenPBR has no fibre model, and a strand
+            // shaded as a surface is the defect open-defects.md entry 3 was
+            // closed for.
+            openpbrParams.push_back(openpbr_from_material_params(p));
+            mMaterials[i].params.material_type = MATERIAL_TYPE_OPENPBR;
+        }
+        else
+        {
+            openpbrParams.push_back(openpbr_make_default_params());
+        }
+
+        // Derived rather than authored, so it cannot disagree with the paths
+        // beside it: it says which slots this material *names a file for*, and
+        // the shading path uses it to skip the handle table entirely for a
+        // material that names none. Whether the file then decoded is a separate
+        // question the null handle answers.
+        unsigned int mask = 0u;
+        for (uint32_t slot = 0; slot < MAX_OPENPBR_TEXTURES; ++slot)
+        {
+            if (!desc.openpbrTexPaths[slot].empty())
+            {
+                mask |= (1u << slot);
+            }
+        }
+        openpbrParams.back().texture_mask = mask;
+
+        if (mMaterials[i].params.material_type != MATERIAL_TYPE_OPENPBR)
+        {
+            continue;
+        }
+
+        // Emission is not the BSDF's job in this integrator: the shade path reads
+        // MaterialParams::emission * emission_strength directly and never
+        // consults OpenPBR_PreparedBsdf::emission. OpenPBR states the same
+        // quantity as a luminance times a tint, so the product has to be mirrored
+        // into those two fields or an authored emitter renders black and nothing
+        // says so. Passed through 1:1 -- the spec calls emission_luminance nits
+        // while Strelka's emitters carry radiance in the light sidecar's units,
+        // and inventing a conversion would be worse than an explicit mismatch.
+        const OpenPBRParams& o = openpbrParams.back();
+        MaterialParams& gm = mMaterials[i].params;
+        gm.emission = make_float3(o.emission_color.r, o.emission_color.g, o.emission_color.b);
+        gm.emission_strength = o.emission_luminance;
+
+        // The interior, in the two places the integrator keeps it. OpenPBR states
+        // one medium; this renderer has two mechanisms and they are not
+        // interchangeable: Beer-Lambert absorption over a segment, from the IOR
+        // stack, and a scattering random walk. Split along the same line OpenPBR
+        // itself does -- transmission depth is pure absorption, and volume.h's
+        // glTF reading sigma_t = -ln(C)/d is the formula Adobe derives, so a
+        // transmissive OpenPBR material goes to the existing absorption path
+        // unchanged and nothing is computed twice.
+        //
+        // Note this pins the reading: a scene left on
+        // render/material/volumeModel = cycles would give its OpenPBR glass a
+        // density the specification does not.
+        if (o.transmission_depth > 0.0f)
+        {
+            gm.attenuation_distance = o.transmission_depth;
+            gm.attenuation_color =
+                make_float3(o.transmission_color.r, o.transmission_color.g, o.transmission_color.b);
+        }
+
+        // Scattering is the other half, and only the trigger is mirrored. Its
+        // numbers -- extinction, single-scattering albedo, phase anisotropy --
+        // are read from openpbr_interior_volume() in the shader instead, because
+        // deriving them here would mean reimplementing the van de Hulst mapping
+        // Adobe already has.
+        gm.subsurface = o.subsurface_weight;
+        gm.thin_walled = o.geometry_thin_walled;
+    }
+
+    const size_t paramsBytes = openpbrParams.size() * sizeof(OpenPBRParams);
+    mOpenPBRParamsBuffer = std::make_unique<OptixBuffer>(paramsBytes);
+    CUDA_CHECK(cudaMemcpy(optix::devicePtr<void>(mOpenPBRParamsBuffer->getPtr()), openpbrParams.data(),
+                          paramsBytes, cudaMemcpyHostToDevice));
+
+    // Published zeroed and filled in as the maps decode, exactly like the
+    // material table: a null handle means "use the constant", so the scene shades
+    // correctly from the first frame and sharpens into its textures.
+    mHostOpenPBRTextures.assign(openpbrParams.size() * MAX_OPENPBR_TEXTURES, 0);
+    const size_t texBytes = mHostOpenPBRTextures.size() * sizeof(cudaTextureObject_t);
+    mOpenPBRTexturesBuffer = std::make_unique<OptixBuffer>(texBytes);
+    CUDA_CHECK(cudaMemset(optix::devicePtr<void>(mOpenPBRTexturesBuffer->getPtr()), 0, texBytes));
+
+    mState.params.openpbrParams = optix::devicePtr<OpenPBRParams>(mOpenPBRParamsBuffer->getPtr());
+    mState.params.openpbrTextures = optix::devicePtr<cudaTextureObject_t>(mOpenPBRTexturesBuffer->getPtr());
+
+    STRELKA_INFO("OpenPBR enabled on OptiX: {} material(s), model={}, authored={}", openpbrParams.size(),
+                 openpbrModel ? "openpbr" : "gltf", anyAuthored);
 }
 
 // One slice of texture decoding. Returns true when every material has its maps.
@@ -5417,6 +5634,27 @@ bool OptiXRender::stepMaterialTextures(double budgetMs)
         params.emission_tex = texSlots[3] ? 3 : -1;
         params.occlusion_tex = texSlots[4] ? 4 : -1;
         params.transmission_tex = -1;
+
+        // The OpenPBR slots for the same material, decoded in the same slice so
+        // one material becomes fully textured at once rather than half.
+        if (!mHostOpenPBRTextures.empty())
+        {
+            cudaTextureObject_t* openpbrSlots = &mHostOpenPBRTextures[i * MAX_OPENPBR_TEXTURES];
+            for (uint32_t slot = 0; slot < MAX_OPENPBR_TEXTURES; ++slot)
+            {
+                openpbrSlots[slot] =
+                    loadOrCacheTex(desc.openpbrTexPaths[slot], openpbrSlotKind(slot, desc.openpbrTexColorSpace[slot]));
+                if (openpbrSlots[slot] == 0 && !desc.openpbrTexPaths[slot].empty())
+                {
+                    STRELKA_WARNING("openpbr material '{}': slot {} named '{}' but no texture loaded", desc.name,
+                                    slot, desc.openpbrTexPaths[slot]);
+                }
+            }
+            CUDA_CHECK(cudaMemcpy(optix::devicePtr<cudaTextureObject_t>(mOpenPBRTexturesBuffer->getPtr()) +
+                                      i * MAX_OPENPBR_TEXTURES,
+                                  openpbrSlots, MAX_OPENPBR_TEXTURES * sizeof(cudaTextureObject_t),
+                                  cudaMemcpyHostToDevice));
+        }
 
         // Objects first, then the parameters that name them.
         CUDA_CHECK(cudaMemcpy(optix::devicePtr<cudaTextureObject_t>(mTexturesDataBuffer->getPtr()) +
