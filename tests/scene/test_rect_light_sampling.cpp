@@ -387,3 +387,32 @@ TEST_CASE("Tiny lights fall back to area sampling rather than a bogus 1/S")
     const LightSample u = sampleRectUniform(c, glm::float2(0.5f, 0.5f), hit);
     CHECK(s.pdf == doctest::Approx(u.pdf).epsilon(1e-4));
 }
+
+TEST_CASE("A sheared affine rectangle uses its exact parallelogram sampler")
+{
+    const RectCorners c{ float3(0.0f, 0.0f, 1.0f), float3(1.0f, 0.0f, 1.0f), float3(1.0f, 1.0f, 1.0f) };
+    const float3 hit(0.0f);
+    const SphQuad squad = initSphQuad(c, hit);
+    REQUIRE(squad.useAreaFallback);
+
+    for (const float u : { 0.0f, 0.25f, 0.75f, 1.0f })
+    {
+        for (const float v : { 0.0f, 0.5f, 1.0f })
+        {
+            const LightSample sample = sampleRectSolidAngle(c, float2(u, v), hit);
+            CHECK(pointOnRect(c, sample.pointOnLight));
+            CHECK(sample.pointOnLight.z == doctest::Approx(1.0f));
+            CHECK(rectLightPdf(c, sample.pointOnLight, hit, true) == doctest::Approx(sample.pdf).epsilon(1e-5));
+        }
+    }
+
+    // Mutation: the old spherical-rectangle frame normalizes the sheared
+    // edges independently and reconstructs a point at z=0.5, off the proxy.
+    const float3 oldX = normalize(c.p1 - c.p0);
+    const float3 oldY = normalize(c.p3 - c.p0);
+    const float3 oldZ = cross(oldX, oldY);
+    const float oldZ0 = dot(c.p0 - hit, oldZ);
+    const float3 oldPoint = hit + oldZ0 * oldZ;
+    CHECK(oldPoint.z == doctest::Approx(0.5f));
+    CHECK_FALSE(pointOnRect(c, oldPoint));
+}

@@ -16,6 +16,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | 6. Emissive mesh NEE | A scene containing only one material-emissive triangle has `hasEmitter=false` and NEE proposal probability 0 despite nonzero emitted radiance | Single/multiple triangle frequencies, affine instances, texture evaluation, sample/PDF oracle, hit MIS, NEE-off expectation, omitted-NEE and visibility mutations | Hierarchical mesh-instance/triangle selection, exact transformed-area sampling, endpoint-consistent visibility, and the same marginal density at BSDF hits | FIXED | FIXED on MTLDevice | Source implemented; toolchain unavailable | `d53e662` | PARTIAL |
 | 7. Cross-backend consistency | OptiX uses uniform analytic-light identity, fixed 1/2 environment/local selection, and centre-Jacobian environment rows while Metal uses power aliases and exact row solid angle | Shared hierarchy/marginal-PMF oracle, sharp-distant support, exact environment degeneracies, legacy-selector mutation, source/toolchain validation | Use one host probability specification and represented PMFs; migrate OptiX environment and analytic selection to it | FIXED | FIXED on MTLDevice | Source fixed; external CUDA validation required | `0b85cd9` | UNVERIFIED |
 | H. Ill-conditioned ellipsoid intersection | Inverse-space quadratic overflows for `diag(1,1,1e-20)` although sampler/PDF are finite | Thin full-rank sampled-point round trip and inverse-quadratic mutation | Solve the ray/ellipsoid quadratic in scaled homogeneous cofactor coordinates | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
+| I. Sheared spherical-rectangle sampling | Normalized non-orthogonal edges move solid-angle samples off the affine proxy plane | Sheared parallelogram plane/PDF checks and old-frame mutation | Select the exact uniform-area path for non-rectangular affine parallelograms | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
 
 ## Per-finding probability records
 
@@ -459,3 +460,20 @@ is out of scope unless it blocks validation.
   ASan+UBSan is clean, the production Metal shader compiles, and the full audit passes 791/791 tests with 68,679,944
   assertions. The actual Apple M4 Pro environment audit remains clean; OptiX source shares the equation but CUDA
   compile/runtime remains externally `UNVERIFIED`. Status: FIXED.
+
+## Adversarial correction I: sheared spherical-rectangle sampling
+
+- Random variable/measure: a transformed rectangle point is continuous in world area (then `domega`); the optional
+  Urena/Fajardo/King strategy is continuous directly in `domega`. Its derivation requires two orthogonal edges.
+- Support/PDF: a shear makes the proxy a general parallelogram. The exact area sampler covers that affine surface
+  with `p_A=1/|e_x cross e_y|`, then uses `p_omega=p_A r^2/|n dot -wi|`. Both sample and hit-side PDF choose it from
+  the same shared predicate; light selection PMFs, sidedness, and MIS strategies are unchanged.
+- Reproducer/mutation: for `p0=(0,0,1)`, `ex=(1,0,0)`, `ey=(1,1,0)`, the old independently normalized frame has
+  `z=(0,0,1/sqrt(2))` and reconstructs its central point at `z=0.5`, outside the actual `z=1` proxy plane.
+- Implementation: reject zero edges and route non-orthogonal normalized edges to the existing affine area sampler.
+  The spherical-rectangle path remains enabled for its actual rectangular domain.
+- Validation: all twelve fixed-grid samples lie on the sheared proxy and sample/PDF agree; the old-frame mutation is
+  off-plane. Focused tests pass 39/39 assertions, Debug and Release CTest pass 4/4, targeted ASan+UBSan is clean,
+  production Metal shaders compile, and the full audit passes 792/792 tests with 68,679,983 assertions. The actual
+  Apple M4 Pro environment audit remains clean; OptiX shares the predicate but CUDA compile/runtime remains
+  externally `UNVERIFIED`. Status: FIXED.

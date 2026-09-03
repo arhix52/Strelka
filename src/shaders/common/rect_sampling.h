@@ -52,9 +52,26 @@ DEVICE_FUNC SphQuad sphQuadInit(float3 p0, float3 ex, float3 ey, float3 o)
     const float exl = length(ex);
     const float eyl = length(ey);
 
+    if (!(exl > 0.0f) || !(eyl > 0.0f))
+    {
+        squad.useAreaFallback = true;
+        return squad;
+    }
+
     squad.o = o;
     squad.x = ex / exl;
     squad.y = ey / eyl;
+    // The Urena/Fajardo/King mapping is for a Euclidean rectangle. A shear
+    // turns it into a general parallelogram whose normalized edges are not an
+    // orthonormal frame; using that frame moves samples off the light plane.
+    // The existing uniform-area sampler is exact for every affine
+    // parallelogram and its PDF path observes this same flag.
+    if (fabsf(dot(squad.x, squad.y)) > 1e-6f)
+    {
+        squad.S = 1.0f; // positive sentinel; unused by the area fallback
+        squad.useAreaFallback = true;
+        return squad;
+    }
     squad.z = cross(squad.x, squad.y);
 
     const float3 d = p0 - o;
