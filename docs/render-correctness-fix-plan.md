@@ -381,3 +381,18 @@ is out of scope unless it blocks validation.
   the full harness passes 786/786 tests with 68,679,907 assertions. The actual Apple M4 Pro audit passes 262,144
   samples in fast and safe math with zero measure mismatches. OptiX shares the mapping but remains externally
   compile/runtime `UNVERIFIED`. Status: FIXED.
+
+## Adversarial correction D: receiver frame before NEE
+
+- Random variable/measure: the light direction is continuous in `domega`; the receiver projected-solid-angle factor
+  and support must be evaluated in the identical shaded frame used by the BSDF. Selection PMFs and conditional light
+  PDFs are unchanged.
+- Reproducer/mutation: an opaque geometric back face with raw `N.L=-0.7` is flipped by `standard_pbr`, but the former
+  early `N.L>0` connection check rejected it before the later common pairing predicate. Its BSDF-hit strategy was
+  nevertheless MIS-weighted as if NEE had support.
+- Implementation: common CPU/Metal/OptiX helpers construct `shadedFrame()` for both receiver support and cosine;
+  fibre, dielectric-exit, diffuse-transmission, mirrored, and ordinary front/back cases retain their intended sides.
+- Validation: the focused case passes 7/7 assertions; Debug and Release CTest pass 4/4, targeted ASan+UBSan is
+  clean, production Metal shaders compile, and the full harness passes 787/787 tests with 68,679,914 assertions.
+  The actual Apple M4 Pro environment audit remains clean; it does not execute this surface path. OptiX shares the
+  predicate but remains externally compile/runtime `UNVERIFIED`. Status: FIXED.

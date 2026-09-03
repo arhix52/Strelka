@@ -152,6 +152,27 @@ TEST_CASE("raw, flipped, mirrored, and transmissive frames preserve pairing")
     }
 }
 
+TEST_CASE("receiver support and cosine use the BSDF shaded frame")
+{
+    constexpr float nDotView = -0.8f;
+    constexpr float nDotLight = -0.7f;
+
+    // Mutation: the former raw-normal precheck rejects this opaque back face
+    // before the corrected frame pairing code can see it.
+    CHECK_FALSE(nDotLight > 0.0f);
+    CHECK(neeSurfaceSupportsDirection(false, false, nDotView, 0.0f, 0.0f, nDotLight));
+    CHECK(neeSurfaceCosine(false, false, nDotView, 0.0f, 0.0f, nDotLight) == doctest::Approx(0.7f));
+
+    // A dielectric exit keeps the raw frame and uses its opposite hemisphere.
+    CHECK(neeSurfaceSupportsDirection(false, false, nDotView, 1.0f, 0.0f, nDotLight));
+    CHECK(neeSurfaceCosine(false, false, nDotView, 1.0f, 0.0f, nDotLight) == doctest::Approx(0.7f));
+
+    // The mirrored direction is outside both shaded frames and contributes no
+    // projected solid angle.
+    CHECK_FALSE(neeSurfaceSupportsDirection(false, false, nDotView, 0.0f, 0.0f, -nDotLight));
+    CHECK(neeSurfaceCosine(false, false, nDotView, 0.0f, 0.0f, -nDotLight) == 0.0f);
+}
+
 // ===========================================================================
 // When a vertex owes the bounce ray a deduction at all
 //

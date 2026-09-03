@@ -44,7 +44,8 @@ static __forceinline__ __device__ bool scattersThroughFibre(const SurfaceInterac
 static __forceinline__ __device__ bool lightReachesShadingPoint(const SurfaceInteraction& si,
                                                                 float3 L)
 {
-    return scattersThroughFibre(si) || dot(si.shading_normal, L) > 0.0f;
+    return neeSurfaceSupportsDirection(scattersThroughFibre(si), si.front_face, dot(si.shading_normal, si.wo),
+                                       si.transmission, si.diffuse_transmission, dot(si.shading_normal, L));
 }
 
 // The factor that cancels the one hair_chiang_eval() divides by. It has to be the
@@ -53,7 +54,8 @@ static __forceinline__ __device__ bool lightReachesShadingPoint(const SurfaceInt
 static __forceinline__ __device__ float shadingCosine(const SurfaceInteraction& si, float3 L)
 {
     const float c = dot(si.shading_normal, L);
-    return scattersThroughFibre(si) ? fabsf(c) : saturate(c);
+    return neeSurfaceCosine(scattersThroughFibre(si), si.front_face, dot(si.shading_normal, si.wo), si.transmission,
+                            si.diffuse_transmission, c);
 }
 
 // Where a ray that scattered through a strand has to start. See fibre_geometry.h

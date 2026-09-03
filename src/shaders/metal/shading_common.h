@@ -675,7 +675,8 @@ static inline bool scattersThroughFibre(thread SurfaceInteraction& si)
 
 static inline bool lightReachesShadingPoint(thread SurfaceInteraction& si, float3 L)
 {
-    return scattersThroughFibre(si) || dot(si.shading_normal, L) > 0.0f;
+    return neeSurfaceSupportsDirection(scattersThroughFibre(si), si.front_face, dot(si.shading_normal, si.wo),
+                                       si.transmission, si.diffuse_transmission, dot(si.shading_normal, L));
 }
 
 // The factor that cancels the one hair_chiang_eval() divides by. It has to be the
@@ -683,7 +684,8 @@ static inline bool lightReachesShadingPoint(thread SurfaceInteraction& si, float
 // far side comes back either black or blown out.
 static inline float shadingCosine(thread SurfaceInteraction& si, float3 L)
 {
-    return scattersThroughFibre(si) ? abs(dot(si.shading_normal, L)) : saturate(dot(si.shading_normal, L));
+    return neeSurfaceCosine(scattersThroughFibre(si), si.front_face, dot(si.shading_normal, si.wo), si.transmission,
+                            si.diffuse_transmission, dot(si.shading_normal, L));
 }
 
 __attribute__((always_inline)) int __float_as_int(float x)

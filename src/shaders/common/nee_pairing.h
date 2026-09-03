@@ -32,6 +32,7 @@
 // ============================================================================
 
 #include <strelka/material/material_math.h>
+#include <strelka/material/shading_frame.h>
 
 /// True when next-event estimation at this vertex is willing to propose a
 /// direction `L`, given `nDotL = dot(shading_normal, L)`.
@@ -43,6 +44,28 @@
 DEVICE_FUNC bool neeProposesDirection(bool throughFibre, bool frontFace, float nDotL)
 {
     return throughFibre || ((nDotL > 0.0f) == frontFace);
+}
+
+/// Receiver-side support in the frame the BSDF actually uses. Inputs involving
+/// the normal are measured against the raw shading normal stored in the hit.
+DEVICE_FUNC bool neeSurfaceSupportsDirection(bool throughFibre, bool frontFace, float nDotV, float transmission,
+                                             float diffuseTransmission, float nDotL)
+{
+    const ShadedFrame frame = shadedFrame(frontFace, nDotV, transmission, diffuseTransmission);
+    return neeProposesDirection(throughFibre, frame.frontFace, frame.normalSign * nDotL);
+}
+
+/// The projected solid-angle factor in the same frame as the support test.
+DEVICE_FUNC float neeSurfaceCosine(bool throughFibre, bool frontFace, float nDotV, float transmission,
+                                   float diffuseTransmission, float nDotL)
+{
+    if (throughFibre)
+    {
+        return fabsf(nDotL);
+    }
+    return neeSurfaceSupportsDirection(false, frontFace, nDotV, transmission, diffuseTransmission, nDotL) ?
+               fabsf(nDotL) :
+               0.0f;
 }
 
 /// True when a bounce leaving along `dir`, with `nDotDir = dot(shading_normal,
