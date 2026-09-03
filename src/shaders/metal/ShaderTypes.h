@@ -230,8 +230,8 @@ struct Uniforms
     uint32_t envMapHeight;
     float envMapIntensity;
     float envMapRotation;
-    // (w*h) / (2*pi^2 * totalPower): converts a texel's luminance straight into
-    // its solid-angle sampling PDF, so no CDF or PDF table is needed on the GPU.
+    // Reciprocal of the exact integral sum(luminance_i * DeltaOmega_i): converts
+    // a texel's luminance straight into its solid-angle sampling PDF.
     float envPdfScale;
     // Validation switches. estimatorMode: 0 = NEE + MIS (normal), 1 = BSDF
     // sampling only. The two are independent unbiased estimators of the same

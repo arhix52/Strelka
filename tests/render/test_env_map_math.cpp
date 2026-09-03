@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -28,10 +29,8 @@
 //      pixels.
 //
 //   2. The density has to integrate to one. envTexelPdf() is luminance times a
-//      single precomputed constant, which only works because the sin(theta) in
-//      the texel's solid angle cancels the sin(theta) in its sampling weight.
-//      That cancellation is the whole design, and it is one line away from
-//      being wrong in a way no image would show.
+//      single precomputed constant because each discrete texel mass includes
+//      its exact solid angle and theta is sampled uniformly in cos(theta).
 // ============================================================================
 
 namespace
@@ -69,7 +68,7 @@ double integrateReportedPdf(int w, int h, const std::function<float(double, doub
         }
     }
 
-    const oka::metal::IblAliasTableResult table = oka::metal::buildIblAliasTable(px.data(), w, h);
+    const oka::metal::IblAliasTableResult table = oka::metal::buildSolidAngleIblAliasTable(px.data(), w, h);
 
     double total = 0.0;
     for (int y = 0; y < h; ++y)
@@ -162,6 +161,10 @@ TEST_CASE("the reported density integrates to one over the sphere")
         std::function<float(double, double)> f;
     };
     const Sky skies[] = {
+        { "uniform 1x1", 1, 1, [](double, double) { return 1.0f; } },
+        { "uniform 1xN", 1, 7, [](double, double) { return 1.0f; } },
+        { "uniform Nx1", 9, 1, [](double, double) { return 1.0f; } },
+        { "uniform odd", 7, 5, [](double, double) { return 1.0f; } },
         { "uniform", 256, 128, [](double, double) { return 1.0f; } },
         { "uniform, larger", 1024, 512, [](double, double) { return 1.0f; } },
         { "gradient in theta", 256, 128, [](double th, double) { return float(0.1 + std::cos(th) * 0.5 + 0.5); } },
@@ -173,22 +176,77 @@ TEST_CASE("the reported density integrates to one over the sphere")
     for (const Sky& sky : skies)
     {
         CAPTURE(sky.name);
-        // Not a Monte Carlo estimate -- an exact sum over texels of a piecewise
-        // constant density, so the tolerance is the discretisation of the row's
-        // sin(theta) and nothing else.
-        CHECK(integrateReportedPdf(sky.w, sky.h, sky.f) == doctest::Approx(1.0).epsilon(1e-3));
+        // Not a Monte Carlo estimate: exact solid-angle quadrature over the
+        // piecewise-constant density. Only the uploaded float normalization
+        // scale contributes rounding error.
+        CHECK(integrateReportedPdf(sky.w, sky.h, sky.f) == doctest::Approx(1.0).epsilon(2e-6));
     }
+}
+
+TEST_CASE("one by one environment is uniform in solid angle")
+{
+    std::vector<float> pixels(4, 1.0f);
+    const auto table = oka::metal::buildSolidAngleIblAliasTable(pixels.data(), 1, 1);
+    const float pdf = envTexelPdf(make_float3(1.0f), table.envPdfScale);
+    CHECK(pdf == doctest::Approx(1.0 / (4.0 * M_PI)).epsilon(2e-7));
+
+    for (const float xi : { 0.0f, 0.125f, 0.5f, 0.875f, 0.99999994f, 1.0f })
+    {
+        CAPTURE(xi);
+        const float v = envSampleSolidAngleV(0, 1, xi);
+        const float3 direction = envUVToDir(make_float2(0.37f, v), 0.0f);
+        const float expectedCosTheta = 1.0f - 2.0f * std::min(xi, 0.99999994f);
+        CHECK(direction.y == doctest::Approx(expectedCosTheta).epsilon(2e-6));
+        CHECK(std::isfinite(pdf));
+        CHECK(pdf > 0.0f);
+    }
+}
+
+TEST_CASE("solid-angle row sampling is linear in cos theta")
+{
+    constexpr int h = 11;
+    for (int y = 0; y < h; ++y)
+    {
+        const double theta0 = M_PI * (double)y / (double)h;
+        const double theta1 = M_PI * (double)(y + 1) / (double)h;
+        for (const float xi : { 0.0f, 0.1f, 0.5f, 0.9f, 0.99999994f })
+        {
+            CAPTURE(y);
+            CAPTURE(xi);
+            const float v = envSampleSolidAngleV(y, h, xi);
+            const double sampledCosine = std::cos(M_PI * (double)v);
+            const double expected = std::cos(theta0) + (std::cos(theta1) - std::cos(theta0)) * (double)xi;
+            CHECK(sampledCosine == doctest::Approx(expected).epsilon(2e-5));
+        }
+    }
+}
+
+TEST_CASE("legacy uniform-v mutation fails sphere normalization")
+{
+    // Mutation guard for the shipped defect: centre-row sin(theta) mass,
+    // uniform theta inside the row, and a centre-Jacobian reported density.
+    // For 1x1 it integrates to 2/pi rather than one.
+    const double legacyReportedPdf = 1.0 / (2.0 * M_PI * M_PI);
+    const double integral = legacyReportedPdf * 4.0 * M_PI;
+    CHECK(integral == doctest::Approx(2.0 / M_PI).epsilon(1e-13));
+    CHECK(std::abs(integral - 1.0) > 0.3);
 }
 
 TEST_CASE("luminance matches the weight the host builds the table from")
 {
-    // buildIblAliasTable() weights texels by 0.2126/0.7152/0.0722 and the shader
-    // divides by the result. Different coefficients on either side would be a
-    // density for a map that was never sampled.
+    // The host alias builder weights texels by 0.2126/0.7152/0.0722 and the
+    // shader divides by the result. Different coefficients on either side
+    // would be a density for a map that was never sampled.
     const float3 c = make_float3(0.3f, 0.6f, 0.1f);
     CHECK(envLuminance(c) == doctest::Approx(0.2126f * 0.3f + 0.7152f * 0.6f + 0.0722f * 0.1f));
     CHECK(envTexelPdf(c, 2.5f) == doctest::Approx(envLuminance(c) * 2.5f));
     CHECK(envTexelPdf(make_float3(0.0f), 2.5f) == 0.0f);
+    CHECK(envTexelPdf(make_float3(-1.0f), 2.5f) == 0.0f);
+    CHECK(envTexelPdf(make_float3(std::numeric_limits<float>::quiet_NaN()), 2.5f) == 0.0f);
+    CHECK(envTexelPdf(make_float3(std::numeric_limits<float>::infinity()), 2.5f) == 0.0f);
+    const float maxFinite = std::numeric_limits<float>::max();
+    CHECK(std::isfinite(envLuminance(make_float3(maxFinite))));
+    CHECK(envLuminance(make_float3(maxFinite)) > 0.0f);
 }
 
 // ---------------------------------------------------------------------------

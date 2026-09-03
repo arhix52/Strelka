@@ -16,15 +16,14 @@ using namespace metal;
 //
 // xi: two uniform random numbers in [0, 1). Returns a world-space direction and
 // writes the solid-angle pdf.
-static inline float3 sampleEnvMap(
-    const float2 xi,
-    device const EnvAliasEntry* aliasTable,
-    texture2d<float> envMapTexture,
-    uint32_t envMapWidth,
-    uint32_t envMapHeight,
-    float envMapRotation,
-    float envPdfScale,
-    thread float& pdf)
+static inline float3 sampleEnvMap(const float2 xi,
+                                  device const EnvAliasEntry* aliasTable,
+                                  texture2d<float> envMapTexture,
+                                  uint32_t envMapWidth,
+                                  uint32_t envMapHeight,
+                                  float envMapRotation,
+                                  float envPdfScale,
+                                  thread float& pdf)
 {
     const uint32_t w = envMapWidth;
     const uint32_t h = envMapHeight;
@@ -38,7 +37,7 @@ static inline float3 sampleEnvMap(
 
     // Jitter with the alias draw's residual variate so sampled directions match the continuous density.
     const float u = ((float)x + draw.frac) / (float)w;
-    const float v = ((float)y + xi.y) / (float)h;
+    const float v = envSampleSolidAngleV((int)y, (int)h, xi.y);
 
     const float3 dir = envUVToDir(float2(u, v), envMapRotation);
 
@@ -52,13 +51,12 @@ static inline float3 sampleEnvMap(
 
 // Evaluate the solid-angle PDF for a direction — used for MIS against BSDF
 // sampling. One texel fetch, no search.
-static inline float envMapPdf(
-    const float3 dir,
-    texture2d<float> envMapTexture,
-    uint32_t envMapWidth,
-    uint32_t envMapHeight,
-    float envMapRotation,
-    float envPdfScale)
+static inline float envMapPdf(const float3 dir,
+                              texture2d<float> envMapTexture,
+                              uint32_t envMapWidth,
+                              uint32_t envMapHeight,
+                              float envMapRotation,
+                              float envPdfScale)
 {
     const float2 uv = dirToEnvUV(dir, envMapRotation);
 

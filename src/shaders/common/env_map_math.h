@@ -5,7 +5,7 @@
 // env_map_math.h -- the equirectangular parametrisation and the density built
 // on it, shared by both backends and by the host tests.
 //
-// Four small functions, and the reason they are here rather than in each
+// Small functions, and the reason they are here rather than in each
 // backend is the same reason light_pdf.h exists: every one of them is used
 // twice per environment sample, once to *draw* a direction and once to state
 // its density for the MIS weight. Two hand-maintained copies of that pair is
@@ -35,9 +35,47 @@ DEVICE_FUNC float2 dirToEnvUV(float3 dir, float rotation)
     const float rz = -sinR * dir.x + cosR * dir.z;
 
     const float phi = atan2f(rx, rz); // [-pi, pi]
-    const float theta = acosf(fminf(fmaxf(dir.y, -1.0f), 1.0f)); // [0, pi]
+    // atan2(length(xz), y) remains resolvable next to the poles, where a
+    // normalized float direction's y component can already have rounded to
+    // +/-1 while x and z still carry its nonzero polar angle.
+    const float radial = sqrtf(fmaxf(rx * rx + rz * rz, 0.0f));
+    const float theta = atan2f(radial, fminf(fmaxf(dir.y, -1.0f), 1.0f)); // [0, pi]
 
     return make_float2((phi + M_PI_F) / (2.0f * M_PI_F), theta / M_PI_F);
+}
+
+/// Sample v within lat-long row `y` uniformly in solid angle.
+///
+/// Uniform v would make theta uniform and induce a 1/sin(theta) directional
+/// density. Interpolating cos(theta) instead makes the conditional density
+/// constant over the row's exact solid angle. The largest-float clamp keeps a
+/// defensive xi==1 input on the selected side of the row boundary.
+DEVICE_FUNC float envSampleSolidAngleV(int y, int height, float xi)
+{
+    const float t = fminf(fmaxf(xi, 0.0f), 0x1.fffffep-1f);
+    const float theta0 = M_PI_F * (float)y / (float)height;
+    const float theta1 = M_PI_F * (float)(y + 1) / (float)height;
+    const float approximateCosTheta = cosf(theta0) + (cosf(theta1) - cosf(theta0)) * t;
+
+    // Inverting cos(theta) directly loses the first representable samples next
+    // to either pole: 1-cos(theta) (or 1+cos(theta)) rounds away. Work in the
+    // nearer half-angle cap, whose squared sine is linear in cos(theta).
+    float theta;
+    if (approximateCosTheta >= 0.0f)
+    {
+        const float sinHalf0 = sinf(0.5f * theta0);
+        const float sinHalf1 = sinf(0.5f * theta1);
+        const float sinHalfSquared = sinHalf0 * sinHalf0 + (sinHalf1 * sinHalf1 - sinHalf0 * sinHalf0) * t;
+        theta = 2.0f * asinf(sqrtf(fminf(fmaxf(sinHalfSquared, 0.0f), 1.0f)));
+    }
+    else
+    {
+        const float southHalf0 = sinf(0.5f * (M_PI_F - theta0));
+        const float southHalf1 = sinf(0.5f * (M_PI_F - theta1));
+        const float southHalfSquared = southHalf0 * southHalf0 + (southHalf1 * southHalf1 - southHalf0 * southHalf0) * t;
+        theta = M_PI_F - 2.0f * asinf(sqrtf(fminf(fmaxf(southHalfSquared, 0.0f), 1.0f)));
+    }
+    return theta / M_PI_F;
 }
 
 /// Equirectangular uv back to a world-space direction.
@@ -66,21 +104,39 @@ DEVICE_FUNC float3 envUVToDir(float2 uv, float rotation)
 /// never sampled.
 DEVICE_FUNC float envLuminance(float3 rgb)
 {
-    return 0.2126f * rgb.x + 0.7152f * rgb.y + 0.0722f * rgb.z;
+    constexpr float maxFinite = 3.402823466e38f;
+    // Comparisons reject NaN as well as infinity. This mirrors the host alias
+    // builder: an invalid texel has zero mass and therefore must also report
+    // zero density when a BSDF direction happens to query it.
+    if (!(rgb.x >= -maxFinite && rgb.x <= maxFinite && rgb.y >= -maxFinite && rgb.y <= maxFinite &&
+          rgb.z >= -maxFinite && rgb.z <= maxFinite))
+    {
+        return 0.0f;
+    }
+
+    // Scaling first avoids overflowing an intermediate for finite HDR inputs.
+    const float magnitude = fmaxf(fmaxf(fabsf(rgb.x), fabsf(rgb.y)), fabsf(rgb.z));
+    if (!(magnitude > 0.0f))
+    {
+        return 0.0f;
+    }
+    const float lum =
+        (0.2126f * (rgb.x / magnitude) + 0.7152f * (rgb.y / magnitude) + 0.0722f * (rgb.z / magnitude)) * magnitude;
+    return (lum > 0.0f && lum <= maxFinite) ? lum : 0.0f;
 }
 
 /// Solid-angle density of the texel a direction falls into.
 ///
-/// The discrete probability of texel i is w_i / W with w_i = lum_i *
-/// sin(theta_row), and the texel subtends dOmega = 2*pi^2*sin(theta_row)/(w*h).
-/// Dividing them cancels sin(theta) outright, so the whole density collapses to
-/// the texel's luminance times one precomputed constant:
+/// With exact-solid-angle texel mass w_i = lum_i * DeltaOmega_i and uniform
+/// solid-angle sampling inside that texel, the density is
 ///
-///     envPdfScale = (w*h) / (2*pi^2 * totalPower)
+///     p_omega = (w_i / totalPower) / DeltaOmega_i
+///             = lum_i / totalPower
+///     envPdfScale = 1 / totalPower
 ///
-/// which is why no CDF and no per-texel pdf array has to be stored or searched.
-/// Integrating this over the texels' true solid angles comes to 1.000 to five
-/// digits -- tests/render/test_env_map_math.cpp measures it.
+/// The legacy OptiX builder supplies the algebraically equivalent scale for its
+/// centre-Jacobian approximation; the Metal path supplies the exact integral.
+/// Either way, no per-texel PDF array has to be stored or searched.
 DEVICE_FUNC float envTexelPdf(float3 radiance, float envPdfScale)
 {
     return envLuminance(radiance) * envPdfScale;

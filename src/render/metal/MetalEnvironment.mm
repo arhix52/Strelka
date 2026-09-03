@@ -175,18 +175,20 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
     STRELKA_INFO("Loaded env map: {} ({}x{})", texturePath, image.width, image.height);
     mState.mapTexture = uploadFloatTexture(mDevice, image);
 
-    const auto aliasResult = buildIblAliasTable(image.pixels, image.width, image.height);
+    const auto aliasResult = buildSolidAngleIblAliasTable(image.pixels, image.width, image.height);
     static_assert(sizeof(EnvAliasEntry) == sizeof(metal::EnvAliasEntry),
                   "host EnvAliasEntry must match ShaderTypes EnvAliasEntry");
     mState.pdfScale = aliasResult.envPdfScale;
 
-    mState.aliasBuffer = mDevice->newBuffer(aliasResult.alias.data(),
-                                            aliasResult.alias.size() * sizeof(EnvAliasEntry),
-                                            MTL::ResourceStorageModeShared);
+    mState.aliasBuffer = mDevice->newBuffer(
+        aliasResult.alias.data(), aliasResult.alias.size() * sizeof(EnvAliasEntry), MTL::ResourceStorageModeShared);
 
     releaseFloatImage(image);
 
-    const float avgWeightedLum = (float)(aliasResult.totalPower / (double)(image.width * image.height));
+    // Preserve the existing calibration convention. The alias normalizer is
+    // now the exact sphere integral, whereas calibration historically used the
+    // average centre-Jacobian-weighted luminance.
+    const float avgWeightedLum = (float)aliasResult.averageWeightedLuminance;
     const bool autoCalibrate = mSettings->getAs<bool>("render/env/autoCalibrate");
     const float kCalibrationTarget = 1000.0f;
     mState.autoScale = (autoCalibrate && avgWeightedLum > 1e-6f) ? kCalibrationTarget / avgWeightedLum : 1.0f;
@@ -199,4 +201,3 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
 }
 
 } // namespace oka::metal
-

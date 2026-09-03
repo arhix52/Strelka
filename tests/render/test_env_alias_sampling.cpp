@@ -11,13 +11,16 @@
 // mismatch is -- which is why it is worth a test rather than an inspection.
 
 #include <env_alias_sampling.h>
+#include <env_map_math.h>
 #include <host/ibl_alias_table.h>
 
 #include <cmath>
 #include <cstdint>
+#include <random>
+#include <utility>
 #include <vector>
 
-using oka::metal::buildIblAliasTable;
+using oka::metal::buildSolidAngleIblAliasTable;
 
 namespace
 {
@@ -87,7 +90,7 @@ TEST_CASE("envAliasDraw reproduces the distribution the table was built from")
     const int w = 16;
     const int h = 8;
     const auto px = makeMap(w, h);
-    const auto built = buildIblAliasTable(px.data(), w, h);
+    const auto built = buildSolidAngleIblAliasTable(px.data(), w, h);
     const auto table = toDeviceTable(built.alias);
     REQUIRE(table.size() == (size_t)w * h);
 
@@ -109,11 +112,13 @@ TEST_CASE("envAliasDraw reproduces the distribution the table was built from")
     std::vector<double> weight(n, 0.0);
     for (int y = 0; y < h; ++y)
     {
-        const double sinTheta = std::sin(((double)y + 0.5) / (double)h * M_PI);
+        const double theta0 = (double)y / (double)h * M_PI;
+        const double theta1 = (double)(y + 1) / (double)h * M_PI;
+        const double solidAngle = (2.0 * M_PI / (double)w) * (std::cos(theta0) - std::cos(theta1));
         for (int x = 0; x < w; ++x)
         {
             const size_t i = (size_t)y * w + x;
-            weight[i] = texelLuminance(px, w, x, y) * sinTheta;
+            weight[i] = texelLuminance(px, w, x, y) * solidAngle;
             totalWeight += weight[i];
         }
     }
@@ -131,7 +136,7 @@ TEST_CASE("a zero-luminance texel is never drawn")
     const int w = 16;
     const int h = 8;
     const auto px = makeMap(w, h);
-    const auto built = buildIblAliasTable(px.data(), w, h);
+    const auto built = buildSolidAngleIblAliasTable(px.data(), w, h);
     const auto table = toDeviceTable(built.alias);
     const uint32_t n = (uint32_t)table.size();
 
@@ -150,15 +155,16 @@ TEST_CASE("envPdfScale turns texel luminance into a density that integrates to o
     const int w = 16;
     const int h = 8;
     const auto px = makeMap(w, h);
-    const auto built = buildIblAliasTable(px.data(), w, h);
+    const auto built = buildSolidAngleIblAliasTable(px.data(), w, h);
 
     // sum over texels of pdf(texel) * solid angle(texel) must be 1, which is the
     // statement that lum * envPdfScale really is a density on the sphere.
     double integral = 0.0;
     for (int y = 0; y < h; ++y)
     {
-        const double sinTheta = std::sin(((double)y + 0.5) / (double)h * M_PI);
-        const double dOmega = 2.0 * M_PI * M_PI * sinTheta / (double)(w * h);
+        const double theta0 = (double)y / (double)h * M_PI;
+        const double theta1 = (double)(y + 1) / (double)h * M_PI;
+        const double dOmega = (2.0 * M_PI / (double)w) * (std::cos(theta0) - std::cos(theta1));
         for (int x = 0; x < w; ++x)
         {
             integral += texelLuminance(px, w, x, y) * (double)built.envPdfScale * dOmega;
@@ -167,12 +173,82 @@ TEST_CASE("envPdfScale turns texel luminance into a density that integrates to o
     CHECK(integral == doctest::Approx(1.0).epsilon(1e-5));
 }
 
+TEST_CASE("solid-angle samples and evaluated PDFs use the same texel measure")
+{
+    for (const auto [w, h] : { std::pair{ 1, 1 }, std::pair{ 1, 9 }, std::pair{ 11, 1 }, std::pair{ 13, 7 } })
+    {
+        CAPTURE(w);
+        CAPTURE(h);
+        std::vector<float> px((size_t)w * h * 4, 0.0f);
+        for (int y = 0; y < h; ++y)
+        {
+            for (int x = 0; x < w; ++x)
+            {
+                const size_t i = (size_t)y * w + x;
+                const float value = (i % 5 == 0) ? 0.0f : (0.125f + (float)i);
+                px[i * 4 + 0] = px[i * 4 + 1] = px[i * 4 + 2] = value;
+                px[i * 4 + 3] = 1.0f;
+            }
+        }
+        // A 1x1 all-zero map has no density; make this case a positive constant.
+        if (w == 1 && h == 1)
+        {
+            px[0] = px[1] = px[2] = 1.0f;
+        }
+
+        const auto built = buildSolidAngleIblAliasTable(px.data(), w, h);
+        const auto table = toDeviceTable(built.alias);
+        REQUIRE(built.envPdfScale > 0.0f);
+        std::mt19937 rng(0x51A17u + (uint32_t)(w * 31 + h));
+        std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
+
+        for (uint32_t sample = 0; sample < 20000u; ++sample)
+        {
+            const float xi0 = uniform(rng);
+            const float xi1 = uniform(rng);
+            const EnvAliasDraw draw = envAliasDraw(table.data(), (uint32_t)table.size(), xi0);
+            const uint32_t x = draw.texel % (uint32_t)w;
+            const uint32_t y = draw.texel / (uint32_t)w;
+            const float u = ((float)x + draw.frac) / (float)w;
+            const float v = envSampleSolidAngleV((int)y, h, xi1);
+            const float3 direction = envUVToDir(make_float2(u, v), 0.63f);
+            const float2 evaluatedUv = dirToEnvUV(direction, 0.63f);
+            const int evaluatedX = std::clamp((int)(evaluatedUv.x * (float)w), 0, w - 1);
+            const int evaluatedY = std::clamp((int)(evaluatedUv.y * (float)h), 0, h - 1);
+            const float returnedPdf = (float)(texelLuminance(px, w, (int)x, (int)y) * (double)built.envPdfScale);
+            const float evaluatedPdf = (float)(texelLuminance(px, w, evaluatedX, evaluatedY) * (double)built.envPdfScale);
+            INFO("sample=", sample, " texel=", x, ",", y, " frac=", draw.frac, " uv=", u, ",", v,
+                 " evaluated=", evaluatedX, ",", evaluatedY);
+            CHECK(returnedPdf == doctest::Approx(evaluatedPdf).epsilon(2e-5));
+            CHECK(std::isfinite(returnedPdf));
+            CHECK(returnedPdf >= 0.0f);
+        }
+    }
+}
+
+TEST_CASE("one by one solid-angle Lambertian estimator converges to one")
+{
+    constexpr uint32_t samples = 1u << 16u;
+    const double pdf = 1.0 / (4.0 * M_PI);
+    double sum = 0.0;
+    for (uint32_t i = 0; i < samples; ++i)
+    {
+        const double xi = ((double)i + 0.5) / (double)samples;
+        const double cosTheta = 1.0 - 2.0 * xi;
+        if (cosTheta > 0.0)
+        {
+            sum += (cosTheta / M_PI) / pdf;
+        }
+    }
+    CHECK(sum / (double)samples == doctest::Approx(1.0).epsilon(1e-12));
+}
+
 TEST_CASE("the leftover variate stays inside the unit interval and spreads out")
 {
     const int w = 8;
     const int h = 4;
     const auto px = makeMap(w, h);
-    const auto built = buildIblAliasTable(px.data(), w, h);
+    const auto built = buildSolidAngleIblAliasTable(px.data(), w, h);
     const auto table = toDeviceTable(built.alias);
     const uint32_t n = (uint32_t)table.size();
 
@@ -200,7 +276,7 @@ TEST_CASE("a variate at the top of the range stays in the table")
     const int w = 4;
     const int h = 2;
     const auto px = makeMap(w, h);
-    const auto built = buildIblAliasTable(px.data(), w, h);
+    const auto built = buildSolidAngleIblAliasTable(px.data(), w, h);
     const auto table = toDeviceTable(built.alias);
     const uint32_t n = (uint32_t)table.size();
 

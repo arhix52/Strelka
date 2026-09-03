@@ -40,8 +40,8 @@
 /// One bucket of a Walker/Vose alias table over the environment map's texels.
 ///
 /// Layout must stay identical to oka::metal::EnvAliasEntry in
-/// src/render/host/ibl_alias_table.h, which is the single host-side builder both
-/// backends use; OptixRender.cpp static_asserts that it does.
+/// src/render/host/ibl_alias_table.h, which provides both backends' tables;
+/// OptixRender.cpp static_asserts that the uploaded layout agrees with this one.
 struct EnvAliasEntry
 {
     float prob;

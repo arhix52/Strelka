@@ -26,12 +26,19 @@ struct IblAliasTableResult
     std::vector<EnvAliasEntry> alias;
     float envPdfScale = 0.0f;
     double totalPower = 0.0;
+    double averageWeightedLuminance = 0.0;
 };
 
-// Walker/Vose alias table over equirectangular HDR texels. Weight is luminance
-// times sin(theta) of the row (solid-angle Jacobian). pixelRgba is tightly packed
-// RGBA float rows, width * height * 4 floats.
-inline IblAliasTableResult buildIblAliasTable(const float* pixelRgba, int width, int height)
+namespace detail
+{
+
+enum class IblRowMeasure
+{
+    CentreJacobian,
+    ExactSolidAngle,
+};
+
+inline IblAliasTableResult buildIblAliasTable(const float* pixelRgba, int width, int height, IblRowMeasure rowMeasure)
 {
     IblAliasTableResult out;
     if (!pixelRgba || width <= 0 || height <= 0)
@@ -42,11 +49,17 @@ inline IblAliasTableResult buildIblAliasTable(const float* pixelRgba, int width,
     const size_t texelCount = (size_t)width * (size_t)height;
     std::vector<double> weights(texelCount);
     double totalPower = 0.0;
+    double calibrationPower = 0.0;
+    const double deltaPhi = 2.0 * M_PI / (double)width;
 
     for (int y = 0; y < height; ++y)
     {
-        const double v = ((double)y + 0.5) / (double)height;
-        const double sinTheta = std::sin(v * M_PI);
+        const double theta0 = M_PI * (double)y / (double)height;
+        const double theta1 = M_PI * (double)(y + 1) / (double)height;
+        const double thetaCentre = 0.5 * (theta0 + theta1);
+        const double centreJacobian = std::sin(thetaCentre);
+        const double rowSolidAngle = deltaPhi * (std::cos(theta0) - std::cos(theta1));
+        const double rowWeight = rowMeasure == IblRowMeasure::ExactSolidAngle ? rowSolidAngle : centreJacobian;
         for (int x = 0; x < width; ++x)
         {
             const size_t i = (size_t)y * (size_t)width + (size_t)x;
@@ -59,14 +72,16 @@ inline IblAliasTableResult buildIblAliasTable(const float* pixelRgba, int width,
             // is NaN. std::max propagates it rather than clamping it, so the
             // guard has to be an explicit finiteness test.
             const double clean = std::isfinite(lum) ? std::max(lum, 0.0) : 0.0;
-            const double w = clean * sinTheta;
+            const double w = clean * rowWeight;
             weights[i] = w;
             totalPower += w;
+            calibrationPower += clean * centreJacobian;
         }
     }
 
     out.alias.resize(texelCount);
     out.totalPower = totalPower;
+    out.averageWeightedLuminance = calibrationPower / (double)texelCount;
 
     if (totalPower > 0.0)
     {
@@ -115,9 +130,37 @@ inline IblAliasTableResult buildIblAliasTable(const float* pixelRgba, int width,
         }
     }
 
-    out.envPdfScale = (totalPower > 0.0) ? (float)((double)texelCount / (2.0 * M_PI * M_PI * totalPower)) : 0.0f;
+    if (totalPower > 0.0)
+    {
+        out.envPdfScale = rowMeasure == IblRowMeasure::ExactSolidAngle ?
+                              (float)(1.0 / totalPower) :
+                              (float)((double)texelCount / (2.0 * M_PI * M_PI * totalPower));
+    }
     return out;
 }
 
-} // namespace oka::metal
+} // namespace detail
 
+// Legacy centre-Jacobian distribution used by the OptiX uniform-v sampler.
+// Keep this entry point until that backend is explicitly migrated: pairing an
+// exact-solid-angle alias table with its current uniform-v jitter would make
+// sample() and pdf() disagree by a row-dependent Jacobian.
+inline IblAliasTableResult buildIblAliasTable(const float* pixelRgba, int width, int height)
+{
+    return detail::buildIblAliasTable(pixelRgba, width, height, detail::IblRowMeasure::CentreJacobian);
+}
+
+// Walker/Vose alias table for a piecewise-constant lat-long environment in the
+// continuous solid-angle measure. Texel i receives mass
+//
+//     P_i = luminance_i * DeltaOmega_i / sum_j(luminance_j * DeltaOmega_j)
+//
+// where DeltaOmega_i is the exact solid angle of its row segment. The Metal
+// sampler draws cos(theta) uniformly between the selected row's boundaries, so
+// its directional density is simply luminance_i * envPdfScale.
+inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, int width, int height)
+{
+    return detail::buildIblAliasTable(pixelRgba, width, height, detail::IblRowMeasure::ExactSolidAngle);
+}
+
+} // namespace oka::metal
