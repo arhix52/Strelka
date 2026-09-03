@@ -818,7 +818,8 @@ bool MetalAccelStructure::step(double budgetMs)
                 // the wavefront kernels. Their coarse editor proxy must not
                 // compete with that surface in hardware traversal.
                 const bool analyticArea = lightUsesAnalyticAreaIntersection(lightType);
-                if (!enabled || lightTypeIsPunctual(lightType) || analyticArea)
+                const bool infinite = lightType == LIGHT_TYPE_DISTANT || lightType == LIGHT_TYPE_DOME;
+                if (!enabled || lightTypeIsPunctual(lightType) || analyticArea || infinite)
                     emitted.mask = 0;
                 else
                     emitted.mask = visibleToCamera ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_LIGHT_HIDDEN;

@@ -868,24 +868,49 @@ void Scene::setLight(const uint32_t lightId, const UniformLightDesc& desc)
     mLightDesc[lightId] = desc;
     updateLight(lightId, desc);
 
-    auto it = mLightIdToInstanceId.find(lightId);
-    if (it != mLightIdToInstanceId.end())
+    glm::float4x4 scaleMatrix = glm::float4x4(1.0f);
+    uint32_t desiredMeshId = kInvalidIndex;
+    if (desc.type == LIGHT_TYPE_RECT)
     {
-        glm::float4x4 scaleMatrix = glm::float4x4(1.0f);
-        if (desc.type == LIGHT_TYPE_RECT)
-            scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.width, desc.height, 1.0f));
-        else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPHERE)
-            scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.radius, desc.radius, desc.radius));
-        else if (lightTypeIsPunctual(desc.type))
-        {
-            const float r = desc.radius > 1e-4f ? desc.radius : 0.05f;
-            scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(r));
-        }
-
-        const glm::float4x4 transform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
-        updateInstanceTransform(it->second, transform);
-        markChanged(ChangeBits::Lights | ChangeBits::Transforms);
+        desiredMeshId = createRectLightMesh();
+        scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.width, desc.height, 1.0f));
     }
+    else if (desc.type == LIGHT_TYPE_DISC || desc.type == LIGHT_TYPE_SPOT || desc.type == LIGHT_TYPE_PROJECTOR)
+    {
+        desiredMeshId = createDiscLightMesh();
+        const float radius = desc.type == LIGHT_TYPE_DISC ? desc.radius : (desc.radius > 1e-4f ? desc.radius : 0.05f);
+        scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(radius));
+    }
+    else if (desc.type == LIGHT_TYPE_SPHERE || desc.type == LIGHT_TYPE_POINT)
+    {
+        desiredMeshId = createSphereLightMesh();
+        const float radius = desc.type == LIGHT_TYPE_SPHERE ? desc.radius : (desc.radius > 1e-4f ? desc.radius : 0.05f);
+        scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(radius));
+    }
+
+    auto it = mLightIdToInstanceId.find(lightId);
+    if (desiredMeshId != kInvalidIndex)
+    {
+        const glm::float4x4 transform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
+        if (it == mLightIdToInstanceId.end())
+        {
+            const uint32_t instanceId =
+                createInstance(Instance::Type::eLight, desiredMeshId, kInvalidIndex, transform, lightId);
+            mLightIdToInstanceId[lightId] = instanceId;
+            markChanged(ChangeBits::Geometry);
+        }
+        else
+        {
+            Instance& instance = mInstances[it->second];
+            if (instance.mMeshId != desiredMeshId)
+            {
+                instance.mMeshId = desiredMeshId;
+                markChanged(ChangeBits::Geometry);
+            }
+            updateInstanceTransform(it->second, transform);
+        }
+    }
+    markChanged(ChangeBits::Lights | ChangeBits::Transforms);
 }
 
 void Scene::setNodeLocalTransform(const uint32_t nodeId,

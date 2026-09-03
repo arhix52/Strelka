@@ -1579,7 +1579,8 @@ void OptiXRender::resolveInstanceGeometry(OptixInstance& oi, const oka::Instance
         // programs. Suppress the coarse editor proxy so it cannot become a
         // nearer, incompatible surface.
         const bool analyticArea = lightUsesAnalyticAreaIntersection((int)lightType);
-        if (!enabled || lightTypeIsPunctual((int)lightType) || analyticArea)
+        const bool infinite = lightType == LIGHT_TYPE_DISTANT || lightType == LIGHT_TYPE_DOME;
+        if (!enabled || lightTypeIsPunctual((int)lightType) || analyticArea || infinite)
         {
             oi.visibilityMask = 0;
         }

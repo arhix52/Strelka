@@ -19,6 +19,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | I. Sheared spherical-rectangle sampling | Normalized non-orthogonal edges move solid-angle samples off the affine proxy plane | Sheared parallelogram plane/PDF checks and old-frame mutation | Select the exact uniform-area path for non-rectangular affine parallelograms | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
 | J. Unrepresentable analytic area transforms | Finite axes near `1e20` overflow the float cofactor/determinant and produce NaN normal/PDF | Extreme-scale sampler/intersection/host-power test and exact-zero mutation | Reject affine area records whose device determinant is non-finite, consistently in sampling, intersection, and selection | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
 | K. Invalid transformed light frames | Singular transforms normalize local emission axes to NaN while retaining positive selection power | Scene packing and host-power regressions for spot/projector/distant/IES point | Pack a finite zero sentinel and give invalid directional records zero outer PMF | FIXED | Shader compiled; packed ABI | Same packed ABI; external CUDA validation required | pending | FIXED |
+| L. Edited light proxy topology | `SPHERE -> RECT` keeps the sphere mesh while sampling a packed rectangle; infinite→area has no proxy | Type-edit topology/create regression and stale-mesh mutation | Replace/create the editor/intersection proxy and rebuild geometry; mask infinite proxies in both backends | FIXED | Source compiled | Source; external CUDA validation required | pending | FIXED |
 
 ## Per-finding probability records
 
@@ -515,3 +516,22 @@ is out of scope unless it blocks validation.
   ASan+UBSan is clean, production Metal shaders compile, and the full audit passes 795/795 tests with 68,680,008
   assertions. Actual MTLDevice environment execution remains clean; OptiX consumes the same records but CUDA
   compile/runtime remains externally `UNVERIFIED`. Status: FIXED.
+
+## Adversarial correction L: edited light proxy topology
+
+- Random variable/measure: changing a light descriptor must not change the meaning of the existing discrete light
+  identity: its new conditional surface and hit geometry must be the same shape. Rectangles use their transformed
+  proxy surface; discs/ellipsoids remain analytic; punctual/infinite lights have no radiance proxy.
+- Support/PDF: a type edit replaces or creates the proxy mesh before acceleration structures rebuild. Infinite
+  descriptors are masked from hardware traversal in both backends even if an editor proxy remains from an earlier
+  type. Selection PMFs and the new type's conditional density are otherwise unchanged.
+- Reproducer/mutation: `SPHERE -> RECT` updated the packed rectangle/transform but retained the sphere mesh;
+  `DISTANT -> RECT` had no instance at all. The stale sphere topology is retained as the mutation.
+- Implementation: `setLight()` resolves the desired proxy topology, replaces `mMeshId` or creates the missing light
+  instance, marks geometry dirty, and updates the transform. Metal and OptiX masks explicitly suppress infinite
+  proxies.
+- Validation: both edit directions now produce a six-index rectangle proxy and set `ChangeBits::Geometry`; focused
+  tests pass 15/15 assertions. Debug and Release CTest pass 4/4, targeted ASan+UBSan is clean, production Metal
+  shaders compile, and the full audit passes 796/796 tests with 68,680,016 assertions. Actual MTLDevice environment
+  execution remains clean; OptiX source is updated but CUDA compile/runtime remains externally `UNVERIFIED`.
+  Status: FIXED.

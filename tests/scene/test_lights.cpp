@@ -362,3 +362,34 @@ TEST_CASE("editing a rect light moves its geometry with it")
     CHECK(glm::length(e2) == doctest::Approx(0.8f));
     CHECK(glm::length(glm::cross(e1, e2)) == doctest::Approx(1.2f * 0.8f));
 }
+
+TEST_CASE("changing a light type replaces or creates the matching proxy topology")
+{
+    Scene scene;
+    Scene::UniformLightDesc desc = discDesc();
+    desc.type = LIGHT_TYPE_SPHERE;
+    const uint32_t id = scene.createLight(desc);
+    const uint32_t instanceId = scene.getLightInstanceId(id);
+    REQUIRE(instanceId != kInvalidIndex);
+    const uint32_t sphereMeshId = scene.getInstances()[instanceId].mMeshId;
+
+    desc = rectDesc();
+    scene.setLight(id, desc);
+    const uint32_t rectMeshId = scene.getInstances()[instanceId].mMeshId;
+    CHECK(rectMeshId != sphereMeshId);
+    CHECK(scene.getMeshes()[rectMeshId].mCount == 6u);
+    CHECK(any(scene.peekChanges() & ChangeBits::Geometry));
+
+    Scene infiniteScene;
+    Scene::UniformLightDesc distant = desc;
+    distant.type = LIGHT_TYPE_DISTANT;
+    const uint32_t distantId = infiniteScene.createLight(distant);
+    REQUIRE(infiniteScene.getLightInstanceId(distantId) == kInvalidIndex);
+    infiniteScene.setLight(distantId, desc);
+    const uint32_t createdInstanceId = infiniteScene.getLightInstanceId(distantId);
+    REQUIRE(createdInstanceId != kInvalidIndex);
+    CHECK(infiniteScene.getMeshes()[infiniteScene.getInstances()[createdInstanceId].mMeshId].mCount == 6u);
+
+    // Mutation: updating only the transform leaves the original sphere mesh.
+    CHECK(sphereMeshId != rectMeshId);
+}
