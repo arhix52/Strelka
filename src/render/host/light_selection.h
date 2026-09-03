@@ -130,7 +130,10 @@ inline double analyticLightPower(const Scene::Light& light)
         break;
     }
     case LIGHT_TYPE_DISC:
-        measure = pi * pi * glm::length(glm::cross(glm::dvec3(light.points[2]), glm::dvec3(light.points[3])));
+        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0)
+        {
+            measure = pi * pi * glm::length(glm::cross(glm::dvec3(light.points[2]), glm::dvec3(light.points[3])));
+        }
         break;
     case LIGHT_TYPE_SPHERE: {
         // Same deterministic equal-solid-angle quadrature as
@@ -142,6 +145,10 @@ inline double analyticLightPower(const Scene::Light& light)
         const glm::dvec3 axisX(light.points[0]);
         const glm::dvec3 axisY(light.points[2]);
         const glm::dvec3 axisZ(light.points[3]);
+        if (!(std::abs(glm::dot(axisX, glm::cross(axisY, axisZ))) > 0.0))
+        {
+            break;
+        }
         double jacobianSum = 0.0;
         for (size_t i = 0u; i < sampleCount; ++i)
         {

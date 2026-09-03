@@ -47,6 +47,11 @@ DEVICE_FUNC float3 affineSphereCofactor(float3 axisX, float3 axisY, float3 axisZ
            objectNormal.z * cross(axisX, axisY);
 }
 
+DEVICE_FUNC bool analyticAffineTransformIsNonsingular(float3 axisX, float3 axisY, float3 axisZ)
+{
+    return fabsf(dot(axisX, cross(axisY, axisZ))) > 0.0f;
+}
+
 DEVICE_FUNC float3 affineSphereCoordinates(float3 axisX, float3 axisY, float3 axisZ, float3 worldOffset)
 {
     const float determinant = dot(axisX, cross(axisY, axisZ));
@@ -63,11 +68,16 @@ DEVICE_FUNC AnalyticLightSample
 sampleAnalyticDisc(float3 center, float3 axisX, float3 axisY, float3 emissionNormal, float u1, float u2)
 {
     AnalyticLightSample sample;
+    const float area = analyticDiscArea(axisX, axisY);
+    if (!(area > 0.0f) || !(dot(emissionNormal, emissionNormal) > 0.0f))
+    {
+        return sample;
+    }
     const float radius = sqrtf(fmaxf(u1, 0.0f));
     const float phi = 2.0f * M_PI_F * u2;
     sample.point = center + radius * (cosf(phi) * axisX + sinf(phi) * axisY);
     sample.normal = emissionNormal;
-    sample.areaPdfDenominator = analyticDiscArea(axisX, axisY);
+    sample.areaPdfDenominator = area;
     return sample;
 }
 
@@ -75,6 +85,10 @@ DEVICE_FUNC AnalyticLightSample
 sampleAnalyticEllipsoid(float3 center, float3 axisX, float3 axisY, float3 axisZ, float u1, float u2)
 {
     AnalyticLightSample sample;
+    if (!analyticAffineTransformIsNonsingular(axisX, axisY, axisZ))
+    {
+        return sample;
+    }
     const float z = 1.0f - 2.0f * u1;
     const float radial = sqrtf(fmaxf(1.0f - z * z, 0.0f));
     const float phi = 2.0f * M_PI_F * u2;
@@ -116,6 +130,10 @@ DEVICE_FUNC float analyticEllipsoidAreaPdfDenominator(
 // only to power-weight the outer light-selection PMF.
 DEVICE_FUNC float analyticEllipsoidSurfaceArea(float3 axisX, float3 axisY, float3 axisZ)
 {
+    if (!analyticAffineTransformIsNonsingular(axisX, axisY, axisZ))
+    {
+        return 0.0f;
+    }
     const unsigned int sampleCount = 256u;
     const float goldenAngle = 2.39996322972865332f;
     float jacobianSum = 0.0f;
@@ -147,7 +165,8 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticDisc(float3 rayOrigin,
     const float3 planeNormal = cross(axisX, axisY);
     const float normalLengthSquared = dot(planeNormal, planeNormal);
     const float denominator = dot(rayDirection, planeNormal);
-    if (!(normalLengthSquared > 0.0f) || !(fabsf(denominator) > 0.0f))
+    if (!(normalLengthSquared > 0.0f) || !(dot(emissionNormal, emissionNormal) > 0.0f) ||
+        !(fabsf(denominator) > 0.0f))
     {
         return result;
     }
@@ -185,8 +204,7 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
     result.normal = make_float3(0.0f);
     result.hit = false;
 
-    const float determinant = dot(axisX, cross(axisY, axisZ));
-    if (!(fabsf(determinant) > 0.0f))
+    if (!analyticAffineTransformIsNonsingular(axisX, axisY, axisZ))
     {
         return result;
     }

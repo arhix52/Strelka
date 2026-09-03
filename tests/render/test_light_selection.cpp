@@ -309,6 +309,7 @@ TEST_CASE("analytic light power uses transformed smooth area")
     oka::Scene::Light disc{};
     disc.type = LIGHT_TYPE_DISC;
     disc.color = glm::float4(1.0f);
+    disc.normal = glm::float4(0.0f, 0.0f, -1.0f, 0.0f);
     disc.points[2] = glm::float4(-1.0f, 0.0f, 0.0f, 0.0f);
     disc.points[3] = glm::float4(0.0f, 1.5f, 0.0f, 0.0f);
     const double discArea = analyticDiscArea(float3(disc.points[2]), float3(disc.points[3]));
@@ -324,6 +325,11 @@ TEST_CASE("analytic light power uses transformed smooth area")
     const double sphereArea =
         analyticEllipsoidSurfaceArea(float3(sphere.points[0]), float3(sphere.points[2]), float3(sphere.points[3]));
     CHECK(analyticLightPower(sphere) == doctest::Approx(std::numbers::pi * sphereArea).epsilon(1e-6));
+
+    disc.normal = glm::float4(0.0f);
+    sphere.points[3] = glm::float4(0.0f);
+    CHECK(analyticLightPower(disc) == 0.0);
+    CHECK(analyticLightPower(sphere) == 0.0);
 }
 
 TEST_CASE("emissive mesh hierarchy preserves mesh and triangle PMFs")

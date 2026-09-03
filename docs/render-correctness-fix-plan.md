@@ -410,3 +410,18 @@ is out of scope unless it blocks validation.
   clean, production Metal shaders compile, and the full harness passes 788/788 tests with 68,679,921 assertions.
   The actual Apple M4 Pro environment audit remains clean but does not execute the distant path. OptiX shares the
   predicate but remains externally compile/runtime `UNVERIFIED`. Status: FIXED.
+
+## Adversarial correction F: singular analytic transforms
+
+- Random variable/measure: disc and ellipsoid points require a two-dimensional world-area measure before conversion
+  to `domega`. The ellipsoid additionally requires an invertible affine map for its analytic intersection and normal.
+- Reproducer/mutation: `A=diag(1,1,0)` gives the old ellipsoid sampler denominator `4pi` for an object-space pole and
+  a positive host power, while analytic intersection rejects `det(A)=0`. Scene packing gives the analogous singular
+  disc a zero inverse-transpose normal but its old sampler/power/intersection still retained positive area.
+- Implementation: singular ellipsoids and discs with invalid packed normals have zero sampler denominator, host
+  selection power, and intersection support. Valid non-uniform and mirrored transforms keep the same analytic
+  surface, cofactor Jacobian, and inverse-transpose orientation.
+- Validation: focused device-math and host-power cases pass 11/11 assertions; Debug and Release CTest pass 4/4,
+  targeted ASan+UBSan is clean, production Metal shaders compile, and the full harness passes 789/789 tests with
+  68,679,930 assertions. The actual Apple M4 Pro audit remains clean. OptiX shares the analytic math but remains
+  externally compile/runtime `UNVERIFIED`. Status: FIXED.

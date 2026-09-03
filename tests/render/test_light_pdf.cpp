@@ -370,6 +370,35 @@ TEST_CASE("degenerate analytic lights have zero density without non-finite sampl
     CHECK_FALSE(intersectAnalyticEllipsoid(zero, make_float3(0.0f, 0.0f, 1.0f), 0.0f, 10.0f, zero, zero, zero, zero).hit);
 }
 
+TEST_CASE("rank-deficient analytic transforms have no area-light support")
+{
+    const float3 zero = make_float3(0.0f);
+    const float3 x = make_float3(1.0f, 0.0f, 0.0f);
+    const float3 y = make_float3(0.0f, 1.0f, 0.0f);
+
+    // A rank-two sphere collapses into a twice-covered disc. It is not the
+    // ellipsoid area measure or analytic surface that this light declares.
+    const AnalyticLightSample ellipsoid = sampleAnalyticEllipsoid(zero, x, y, zero, 0.0f, 0.25f);
+    CHECK(ellipsoid.areaPdfDenominator == 0.0f);
+    CHECK(analyticEllipsoidSurfaceArea(x, y, zero) == 0.0f);
+    CHECK_FALSE(intersectAnalyticEllipsoid(make_float3(0.0f, 0.0f, 2.0f), make_float3(0.0f, 0.0f, -1.0f), 0.0f,
+                                           10.0f, zero, x, y, zero)
+                    .hit);
+
+    // Scene packing marks a singular disc's inverse-transpose normal invalid;
+    // the sampler and intersection must not retain positive area behind it.
+    const AnalyticLightSample disc = sampleAnalyticDisc(zero, x, y, zero, 0.3f, 0.7f);
+    CHECK(disc.areaPdfDenominator == 0.0f);
+    CHECK_FALSE(intersectAnalyticDisc(make_float3(0.0f, 0.0f, 2.0f), make_float3(0.0f, 0.0f, -1.0f), 0.0f, 10.0f,
+                                      zero, x, y, zero)
+                    .hit);
+
+    // Mutation: the old cofactor-only checks see positive 2D area in both
+    // collapsed objects even though their declared inverse transform does not exist.
+    CHECK(analyticDiscArea(x, y) > 0.0f);
+    CHECK(length(affineSphereCofactor(x, y, zero, make_float3(0.0f, 0.0f, 1.0f))) > 0.0f);
+}
+
 TEST_CASE("a back-facing or degenerate area sample has no density")
 {
     // Zero rather than a negative or infinite pdf: the callers read this as "the
