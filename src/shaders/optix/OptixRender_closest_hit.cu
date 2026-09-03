@@ -180,16 +180,22 @@ extern "C" __global__ void __anyhit__occlusion()
     optixIgnoreIntersection();
 }
 
-/// Uniform light choice from a canonical sample, clamped to the last light.
-///
-/// The clamp is not defensive noise: u is drawn from [0, 1) but the env-map branch
-/// feeds it u*2 from a u already known to be below 0.5, and that product rounds to
-/// exactly 1.0f for the largest such u. Without the clamp that one sample indexes
-/// one past the end of the light buffer.
-static __forceinline__ __device__ uint32_t selectLightIndex(float u, uint32_t numLights)
+static __forceinline__ __device__ uint32_t selectLightIndex(float bucketUniform,
+                                                            float aliasUniform,
+                                                            uint32_t numLights)
 {
-    const uint32_t index = (uint32_t)(numLights * u);
-    return (index < numLights) ? index : (numLights - 1);
+    const uint32_t bucket = lightAliasBucket(numLights, bucketUniform);
+    if (bucket >= numLights)
+    {
+        return numLights;
+    }
+    const UniformLight& entry = params.scene.lights[bucket];
+    return lightAliasSelect(numLights, bucket, aliasUniform, entry.selectionAliasProbability, entry.selectionAlias);
+}
+
+static __forceinline__ __device__ float analyticLightSelectionPdf(const UniformLight& light)
+{
+    return light.color.w;
 }
 
 /// One proposed connection to a light, before visibility is known.
@@ -441,11 +447,8 @@ static __device__ LightConnection connectEnvLight(SamplerState& sampler,
         random<SampleDimension::eLightPointY>(sampler));
 
     float envPdf = 0.0f;
-    const float3 dir = sampleEnvMap(xi,
-                                    params.envAliasTable, params.envMapTexturePoint,
-                                    params.envMapWidth, params.envMapHeight,
-                                    params.envMapRotation, params.envPdfScale,
-                                    envPdf);
+    const float3 dir = sampleEnvMap(xi, params.envAliasTable, params.envMapWidth, params.envMapHeight,
+                                    params.envMapRotation, envPdf);
 
     LightConnection c = makeEmptyConnection();
     c.toLight = dir;
@@ -680,7 +683,7 @@ static __forceinline__ __device__ float emissiveMeshHitPdf(
     {
         return 0.0f;
     }
-    const float localSelectionPdf = params.hasEnvMap ? 0.5f : 1.0f;
+    const float localSelectionPdf = params.hasEnvMap ? 1.0f - params.envSelectionPdf : 1.0f;
     const float meshClassPdf = params.scene.numLights > 0u ? params.scene.meshLightSelectionPdf : 1.0f;
     return emissiveMeshMarginalSolidAnglePdf(localSelectionPdf, meshClassPdf, mesh.selectionPdf,
                                              triangleEntry.selectionPdf, geometry.areaPdf, shadingPoint, pointOnLight,
@@ -696,56 +699,33 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
     const bool hasAnalytic = params.scene.numLights > 0u;
     const bool hasMesh = params.scene.numEmissiveMeshes > 0u;
     const bool hasLocal = hasAnalytic || hasMesh;
+    const float u = random<SampleDimension::eLightId>(sampler);
+    float localSelectionPdf = 1.0f;
+    float localU = u;
     if (params.hasEnvMap)
     {
-        const float u = random<SampleDimension::eLightId>(sampler);
-
-        if (!hasLocal || u >= 0.5f)
+        localSelectionPdf = 1.0f - params.envSelectionPdf;
+        if (!hasLocal || u >= localSelectionPdf)
         {
-            // Sample environment map
-            const float selectionPdf = hasLocal ? 0.5f : 1.0f;
             LightConnection c = connectEnvLight(sampler, si, curveRadius, volumeEvent);
-            c.pdf *= selectionPdf;
+            c.pdf *= hasLocal ? params.envSelectionPdf : 1.0f;
             c.isResponsive = false;
             return c;
         }
-        // Sample a local class (remap u from [0, 0.5) to [0, 1)).
-        const float localU = u * 2.0f;
-        const float meshPdf = params.scene.meshLightSelectionPdf;
-        if (hasMesh && (!hasAnalytic || meshPdf >= 1.0f || localU < meshPdf))
-        {
-            const float meshU = hasAnalytic ? localU / meshPdf : localU;
-            LightConnection c = connectEmissiveMesh(sampler, si, meshU, volumeEvent);
-            c.pdf *= 0.5f * (hasAnalytic ? meshPdf : 1.0f);
-            return c;
-        }
-        const float analyticPdf = hasMesh ? 1.0f - meshPdf : 1.0f;
-        if (!(analyticPdf > 0.0f))
-        {
-            return makeEmptyConnection();
-        }
-        const float analyticU = hasMesh ? (localU - meshPdf) / analyticPdf : localU;
-        const uint32_t lightId = selectLightIndex(analyticU, params.scene.numLights);
-        LightConnection c =
-            connectLight(sampler, params.scene.lights[lightId], si, curveRadius, volumeEvent);
-        c.pdf *= 0.5f * analyticPdf / params.scene.numLights;
-        c.isResponsive = isResponsiveLight(lightId);
-        return c;
+        localU = u / localSelectionPdf;
     }
 
-    // No emitter means there is no light connection to propose.
     if (!hasLocal)
     {
         return makeEmptyConnection();
     }
 
-    const float u = random<SampleDimension::eLightId>(sampler);
     const float meshPdf = params.scene.meshLightSelectionPdf;
-    if (hasMesh && (!hasAnalytic || meshPdf >= 1.0f || u < meshPdf))
+    if (hasMesh && (!hasAnalytic || meshPdf >= 1.0f || localU < meshPdf))
     {
-        const float meshU = hasAnalytic ? u / meshPdf : u;
+        const float meshU = hasAnalytic ? localU / meshPdf : localU;
         LightConnection c = connectEmissiveMesh(sampler, si, meshU, volumeEvent);
-        c.pdf *= hasAnalytic ? meshPdf : 1.0f;
+        c.pdf *= localSelectionPdf * (hasAnalytic ? meshPdf : 1.0f);
         return c;
     }
     const float analyticPdf = hasMesh ? 1.0f - meshPdf : 1.0f;
@@ -753,11 +733,16 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
     {
         return makeEmptyConnection();
     }
-    const float analyticU = hasMesh ? (u - meshPdf) / analyticPdf : u;
-    const uint32_t lightId = selectLightIndex(analyticU, params.scene.numLights);
+    const float analyticU = hasMesh ? (localU - meshPdf) / analyticPdf : localU;
+    const float aliasU = random<SampleDimension::eLightAlias>(sampler);
+    const uint32_t lightId = selectLightIndex(analyticU, aliasU, params.scene.numLights);
+    if (lightId >= params.scene.numLights)
+    {
+        return makeEmptyConnection();
+    }
     LightConnection c =
         connectLight(sampler, params.scene.lights[lightId], si, curveRadius, volumeEvent);
-    c.pdf *= analyticPdf / params.scene.numLights;
+    c.pdf *= localSelectionPdf * analyticPdf * analyticLightSelectionPdf(params.scene.lights[lightId]);
     c.isResponsive = isResponsiveLight(lightId);
     return c;
 }
@@ -1644,10 +1629,10 @@ static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd
         }
         else
         {
-            const float localSelectionPdf = params.hasEnvMap ? 0.5f : 1.0f;
+            const float localSelectionPdf = params.hasEnvMap ? 1.0f - params.envSelectionPdf : 1.0f;
             const float analyticClassPdf =
                 params.scene.numEmissiveMeshes > 0u ? 1.0f - params.scene.meshLightSelectionPdf : 1.0f;
-            const float lightSelectionPdf = localSelectionPdf * analyticClassPdf / float(params.scene.numLights);
+            const float lightSelectionPdf = localSelectionPdf * analyticClassPdf * analyticLightSelectionPdf(light);
             const float lightPdf =
                 getLightPdf(light, hitPoint, misOrigin, params.rectLightSamplingMethod) * lightSelectionPdf;
             radiance = prd->throughput * Le *
@@ -1726,13 +1711,10 @@ extern "C" __global__ void __miss__ms()
         else
         {
             // MIS weight with BSDF sampling vs env map PDF
-            const float envPdf = envMapPdf(ray_dir,
-                                           params.envMapTexturePoint,
-                                           params.envMapWidth, params.envMapHeight,
-                                           params.envMapRotation, params.envPdfScale);
-            // Account for 50% selection probability when local lights exist
+            const float envPdf = envMapPdf(ray_dir, params.envAliasTable, params.envMapWidth, params.envMapHeight,
+                                           params.envMapRotation);
             const bool hasLocal = params.scene.numLights > 0u || params.scene.numEmissiveMeshes > 0u;
-            const float envSelectionPdf = hasLocal ? 0.5f : 1.0f;
+            const float envSelectionPdf = hasLocal ? params.envSelectionPdf : 1.0f;
             const float effectiveEnvPdf = envPdf * envSelectionPdf;
             // A texel of zero luminance has zero sampling density, so light sampling
             // could never have produced this direction and the BSDF strategy owns it
@@ -1756,7 +1738,7 @@ extern "C" __global__ void __miss__ms()
     // component, weighed against the probability that NEE selected that light
     // and then sampled this direction. A zero-angle distant is singular and is
     // intentionally absent from this continuous miss integral.
-    const float localSelectionPdf = params.hasEnvMap ? 0.5f : 1.0f;
+    const float localSelectionPdf = params.hasEnvMap ? 1.0f - params.envSelectionPdf : 1.0f;
     const float analyticClassPdf = params.scene.numEmissiveMeshes > 0u ? 1.0f - params.scene.meshLightSelectionPdf : 1.0f;
     for (uint32_t lightId = 0; lightId < params.scene.numLights; ++lightId)
     {
@@ -1771,7 +1753,8 @@ extern "C" __global__ void __miss__ms()
         {
             continue;
         }
-        const float effectivePdf = localSelectionPdf * analyticClassPdf * conditionalPdf / params.scene.numLights;
+        const float effectivePdf =
+            localSelectionPdf * analyticClassPdf * analyticLightSelectionPdf(light) * conditionalPdf;
         const float misWeight =
             (prd->depth == 0 || prd->specularBounce || !prd->neeDone || !(effectivePdf > 0.0f)) ?
                 1.0f :

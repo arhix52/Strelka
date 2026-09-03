@@ -98,7 +98,7 @@ DEVICE_FUNC float3 envUVToDir(float2 uv, float rotation)
 
 /// The luminance the sampling distribution is built from.
 ///
-/// Must match buildIblAliasTable() in render/host/ibl_alias_table.h exactly:
+/// Must match buildSolidAngleIblAliasTable() in render/host/ibl_alias_table.h exactly:
 /// the host weights texels by this and the device divides by the result, so a
 /// different set of coefficients on either side is a density for a map that was
 /// never sampled.
@@ -115,13 +115,14 @@ DEVICE_FUNC float envLuminance(float3 rgb)
     }
 
     // Scaling first avoids overflowing an intermediate for finite HDR inputs.
-    const float magnitude = fmaxf(fmaxf(fabsf(rgb.x), fabsf(rgb.y)), fabsf(rgb.z));
+    const float magnitude = fmaxf(fmaxf(rgb.x, rgb.y), rgb.z);
     if (!(magnitude > 0.0f))
     {
         return 0.0f;
     }
-    const float lum =
-        (0.2126f * (rgb.x / magnitude) + 0.7152f * (rgb.y / magnitude) + 0.0722f * (rgb.z / magnitude)) * magnitude;
+    const float lum = (0.2126f * fmaxf(rgb.x / magnitude, 0.0f) + 0.7152f * fmaxf(rgb.y / magnitude, 0.0f) +
+                       0.0722f * fmaxf(rgb.z / magnitude, 0.0f)) *
+                      magnitude;
     return (lum > 0.0f && lum <= maxFinite) ? lum : 0.0f;
 }
 
@@ -134,9 +135,8 @@ DEVICE_FUNC float envLuminance(float3 rgb)
 ///             = lum_i / totalPower
 ///     envPdfScale = 1 / totalPower
 ///
-/// The legacy OptiX builder supplies the algebraically equivalent scale for its
-/// centre-Jacobian approximation; the Metal path supplies the exact integral.
-/// Either way, no per-texel PDF array has to be stored or searched.
+/// Both GPU backends use the same exact integral, so no per-texel PDF array has
+/// to be stored or searched.
 DEVICE_FUNC float envTexelPdf(float3 radiance, float envPdfScale)
 {
     return envLuminance(radiance) * envPdfScale;

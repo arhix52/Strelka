@@ -27,9 +27,24 @@ struct LightSelectionTable
     double totalPower = 0.0;
 };
 
+struct EmitterSelectionProbabilities
+{
+    float environment = 0.0f;
+    float local = 0.0f;
+    float meshGivenLocal = 0.0f;
+    float analyticGivenLocal = 0.0f;
+};
+
 inline double cleanLightPower(double power)
 {
     return std::isfinite(power) ? std::max(power, 0.0) : 0.0;
+}
+
+inline double addLightPowers(double firstPower, double secondPower)
+{
+    const double first = cleanLightPower(firstPower);
+    const double second = cleanLightPower(secondPower);
+    return first > std::numeric_limits<double>::max() - second ? std::numeric_limits<double>::max() : first + second;
 }
 
 inline float binaryPowerProbability(double firstPower, double secondPower)
@@ -50,12 +65,60 @@ inline float binaryPowerProbability(double firstPower, double secondPower)
     return std::clamp(static_cast<float>(probability), minimumProbability, 1.0f - minimumProbability);
 }
 
+inline double environmentLightPower(double mapIntegral, double sceneExtent, double intensity, double tintLuminance)
+{
+    constexpr double pi = std::numbers::pi_v<double>;
+    const double radius = std::isfinite(sceneExtent) && sceneExtent < 1e15 ? 0.5 * std::max(sceneExtent, 0.0) : 1.0;
+    double result = pi;
+    for (const double factor :
+         { radius, radius, cleanLightPower(mapIntegral), cleanLightPower(intensity), cleanLightPower(tintLuminance) })
+    {
+        if (!(factor > 0.0))
+        {
+            return 0.0;
+        }
+        if (result > std::numeric_limits<double>::max() / factor)
+        {
+            return std::numeric_limits<double>::max();
+        }
+        result *= factor;
+    }
+    return result;
+}
+
+inline EmitterSelectionProbabilities emitterSelectionProbabilities(
+    bool hasEnvironment, double environmentPower, bool hasAnalytic, double analyticPower, bool hasMesh, double meshPower)
+{
+    EmitterSelectionProbabilities result;
+    const bool hasLocal = hasAnalytic || hasMesh;
+    if (hasEnvironment)
+    {
+        result.environment =
+            hasLocal ? binaryPowerProbability(environmentPower, addLightPowers(analyticPower, meshPower)) : 1.0f;
+    }
+    if (hasLocal)
+    {
+        result.local = hasEnvironment ? 1.0f - result.environment : 1.0f;
+    }
+    if (hasMesh)
+    {
+        result.meshGivenLocal = hasAnalytic ? binaryPowerProbability(meshPower, analyticPower) : 1.0f;
+    }
+    if (hasAnalytic)
+    {
+        result.analyticGivenLocal = hasMesh ? 1.0f - result.meshGivenLocal : 1.0f;
+    }
+    return result;
+}
+
 // Scene-wide emitted-power proxy. It need not know the shading point: RIS still
 // makes the point-dependent choice. This proposal only stops spending equal
 // probability on lights whose total output differs by orders of magnitude.
 inline double analyticLightPower(const Scene::Light& light)
 {
-    const double luminance = cleanLightPower(0.2126 * light.color.r + 0.7152 * light.color.g + 0.0722 * light.color.b);
+    const double luminance =
+        cleanLightPower(0.2126 * std::max(light.color.r, 0.0f) + 0.7152 * std::max(light.color.g, 0.0f) +
+                        0.0722 * std::max(light.color.b, 0.0f));
     constexpr double pi = std::numbers::pi_v<double>;
     double measure = 0.0;
     switch (light.type)
@@ -104,7 +167,10 @@ inline double analyticLightPower(const Scene::Light& light)
         measure = projectorSolidAngleFromFov(light.halfAngle, light.points[0].w);
         break;
     case LIGHT_TYPE_DISTANT:
-        measure = coneSolidAngle(light.halfAngle);
+        // A zero-angle distant light is a Dirac mass, not a vanishing spherical
+        // cap. Its conditional continuous PDF remains zero, but the outer
+        // categorical proposal still needs a finite positive variance proxy.
+        measure = light.halfAngle <= 0.0f ? 1.0 : coneSolidAngle(light.halfAngle);
         break;
     case LIGHT_TYPE_DOME:
         measure = 4.0 * pi;

@@ -38,6 +38,11 @@ enum struct SampleDimension : uint32_t
     eFogDistance,
     eFogPhaseU,
     eFogPhaseV,
+    eShadowRR,
+    eSssChannel,
+    eSssDistance,
+    eSssPhaseU,
+    eSssPhaseV,
     eNUM_DIMENSIONS
 };
 

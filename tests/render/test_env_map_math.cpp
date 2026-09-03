@@ -242,6 +242,7 @@ TEST_CASE("luminance matches the weight the host builds the table from")
     CHECK(envTexelPdf(c, 2.5f) == doctest::Approx(envLuminance(c) * 2.5f));
     CHECK(envTexelPdf(make_float3(0.0f), 2.5f) == 0.0f);
     CHECK(envTexelPdf(make_float3(-1.0f), 2.5f) == 0.0f);
+    CHECK(envTexelPdf(make_float3(1.0f, -1000.0f, 0.0f), 2.5f) > 0.0f);
     CHECK(envTexelPdf(make_float3(std::numeric_limits<float>::quiet_NaN()), 2.5f) == 0.0f);
     CHECK(envTexelPdf(make_float3(std::numeric_limits<float>::infinity()), 2.5f) == 0.0f);
     const float maxFinite = std::numeric_limits<float>::max();

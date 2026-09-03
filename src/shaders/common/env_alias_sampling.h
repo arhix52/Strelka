@@ -46,6 +46,7 @@ struct EnvAliasEntry
 {
     float prob;
     uint32_t alias;
+    float solidAnglePdf;
 };
 
 /// A texel index plus a uniform variate left over from choosing it.

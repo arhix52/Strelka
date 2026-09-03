@@ -1405,6 +1405,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
                           device SharcUpdateState* sharcUpdates [[buffer(10)]],
                           device SharcAccumulationEntry* sharcAccumulation [[buffer(11)]],
                           device const UniformLight* lights [[buffer(12)]],
+                          device const EnvAliasEntry* envAliasTable [[buffer(13)]],
                           texture2d<float> envMapTexture [[texture(0)]],
                           texture2d<float> envBackgroundTexture [[texture(1)]])
 {
@@ -1535,8 +1536,8 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         }
         else
         {
-            const float envPdf = envMapPdf(rayDir, envMapTexture, uniforms.envMapWidth, uniforms.envMapHeight,
-                                           uniforms.envMapRotation, uniforms.envPdfScale);
+            const float envPdf = envMapPdf(rayDir, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight,
+                                           uniforms.envMapRotation);
             const float envSelectionPdf =
                 (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0) ? uniforms.envMapColorTint.w : 1.0f;
             const float effectiveEnvPdf = envPdf * envSelectionPdf;

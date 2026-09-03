@@ -13,8 +13,8 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | 3. Metal back-face NEE/MIS double counting | Back-face direction accepted by NEE but unpaired bounce gives MIS shares `0.4 + 1.0 = 1.4` | Exact support-equivalence sweep, front/back/flipped/transmission/fibre cases, 0.4/0.6 balance-share mutation | Evaluate proposal and bounce pairing in one shaded frame and make their continuous supports identical | Oracle FIXED | Shader compiled; path execution pending final GPU audit | Shared predicate fixed; toolchain unavailable on macOS | `b214620` | PARTIAL |
 | 4. Non-uniform transforms for analytic lights | Disc geometry/sampler area ratio `6.0`; a smooth-disc sample outside the 16-gon is invisible to old traversal; sphere record loses affine axes | Double-precision affine-Jacobian oracle, smooth sample/intersection/PDF agreement, mirrored normals, CPU picking, coarse-proxy mutation | Sample and intersect the same smooth affine disc/ellipsoid; keep tessellation editor-only | FIXED | Shader compiled; shared analytic math executed on MTLDevice | Source updated; toolchain unavailable on macOS | `495e2a7` | PARTIAL |
 | 5. Robust large-distribution support | 209,715/1,048,576 positive-PMF bins have zero float-CDF interval | Million-bin support/normalization, sparse zeros, 1e12 dynamic range, PMF lookup, GOF, old-CDF mutation | Replace the cumulative float table with an O(1) Walker/Vose alias draw and its represented PMF | FIXED | 1,048,576-entry support kernel passed on MTLDevice | OptiX remains uniform until finding 7 | `cd2dd98` | PARTIAL |
-| 6. Emissive mesh NEE | A scene containing only one material-emissive triangle has `hasEmitter=false` and NEE proposal probability 0 despite nonzero emitted radiance | Single/multiple triangle frequencies, affine instances, texture evaluation, sample/PDF oracle, hit MIS, NEE-off expectation, omitted-NEE and visibility mutations | Hierarchical mesh-instance/triangle selection, exact transformed-area sampling, endpoint-consistent visibility, and the same marginal density at BSDF hits | FIXED | FIXED on MTLDevice | Source implemented; toolchain unavailable | pending | PARTIAL |
-| 7. Cross-backend consistency | Pending | Pending | Audit common probability conventions and compile/execute each available backend | OPEN | OPEN | OPEN | — | OPEN |
+| 6. Emissive mesh NEE | A scene containing only one material-emissive triangle has `hasEmitter=false` and NEE proposal probability 0 despite nonzero emitted radiance | Single/multiple triangle frequencies, affine instances, texture evaluation, sample/PDF oracle, hit MIS, NEE-off expectation, omitted-NEE and visibility mutations | Hierarchical mesh-instance/triangle selection, exact transformed-area sampling, endpoint-consistent visibility, and the same marginal density at BSDF hits | FIXED | FIXED on MTLDevice | Source implemented; toolchain unavailable | `d53e662` | PARTIAL |
+| 7. Cross-backend consistency | OptiX uses uniform analytic-light identity, fixed 1/2 environment/local selection, and centre-Jacobian environment rows while Metal uses power aliases and exact row solid angle | Shared hierarchy/marginal-PMF oracle, sharp-distant support, exact environment degeneracies, legacy-selector mutation, source/toolchain validation | Use one host probability specification and represented PMFs; migrate OptiX environment and analytic selection to it | FIXED | FIXED on MTLDevice | Source fixed; external CUDA validation required | this commit | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -261,3 +261,67 @@ is out of scope unless it blocks validation.
   runs took 13.2 s and 10.4 s; these are correctness observations, not performance claims. OptiX uses the same
   analytic transformed-triangle and visibility specification, but cannot be compiled or executed on this macOS
   host, so its status remains UNVERIFIED until finding 7.
+
+## Finding 7: Cross-backend consistency
+
+- Random variable: emitter class `C` (environment or local), local class `K` (analytic or emissive mesh), analytic
+  identity `J` or mesh identity `M` and triangle `T`, followed by the selected emitter's conditional point or
+  direction variable.
+- Measure: `C`, `K`, `J`, `M`, and `T` are discrete masses. Environment and finite distant/dome directions use
+  `domega`; finite mesh and analytic surfaces first use `dA` and then the area-to-solid-angle Jacobian. Sharp distant
+  and punctual events retain their separate delta measure.
+- Support: every represented positive-power discrete entry and every direction/point in its conditional support.
+  Zero-power entries are not selected. A positive sharp distant light receives positive discrete proposal power even
+  though its conditional solid-angle density is correctly zero.
+- Conditional and marginal PDF: `p(C,K,J,W)=P(C)P(K|C)P(J|K,C)p(W|J)` for analytic/environment sampling, with the
+  analogous mesh product from finding 6. `P(environment)` and `P(mesh|local)` are binary power ratios; analytic,
+  mesh, triangle, and environment-texel masses are the PMFs represented by their final float alias tables.
+- Selection PMF: both hosts use the same double-precision power proxies and `binaryPowerProbability()`, including
+  its finite endpoint regularization. Both devices multiply the returned conditional density by those uploaded
+  probabilities, and BSDF-hit/miss MIS reads the same represented probabilities rather than reconstructing uniform
+  or fixed-half alternatives.
+- Delta classification: outer selections remain discrete for all emitters. A sharp distant's selected mass is paired
+  only with the singular light strategy; no float `p_omega` is synthesized. All continuous conditional measures use
+  the shared PDF and support functions from findings 1--6.
+- MIS strategies: selected-light NEE and compatible non-delta BSDF continuation. Camera/specular/NEE-disabled paths
+  have no competitor. Environment miss, finite distant/dome miss, analytic-area hit, and emissive-mesh hit each use
+  the same full marginal density as their corresponding NEE branch.
+- Current-HEAD reproducer: for environment/analytic/mesh powers `(9, 4, 2)` and analytic powers `(1, 3)`, Metal's
+  hierarchy represents marginal masses `(0.6, 0.0666667, 0.2, 0.1333333)`. OptiX instead chooses environment with
+  `0.5`, then analytic identities uniformly, yielding `(0.5, 0.1666667, 0.1666667, 0.1666667)`. Its environment
+  host table additionally uses centre-row `sin(theta)` weights and the device jitters `v` uniformly, unlike Metal's
+  exact row solid angles and uniform-cosine row sample. The common OptiX random-dimension enum also lacks the SSS
+  dimensions already referenced by its shader source, which is a compile-time backend-consistency failure.
+- Corrected result: both host paths construct the same nested class probabilities and Walker/Vose tables. The
+  independent hierarchy oracle recovers marginal masses `(0.6, 0.0666667, 0.2, 0.1333333)`, summing to one within
+  `1e-7`; the retained fixed-half/uniform OptiX mutation differs in both the environment and analytic terms. A sharp
+  distant now keeps positive outer discrete mass while its continuous PDF remains zero. Environment entries carry
+  the solid-angle density implied by their final float alias representation, so the direction sampler and lookup PDF
+  agree even after the support-preserving proposal floor used for extreme dynamic range.
+- Environment representation: texel `i` has represented discrete mass `P_i`. Its exact lat-long bin area is
+  `DeltaOmega_i = (2 pi / width) [cos(theta_0) - cos(theta_1)]`; both devices draw azimuth uniformly and
+  `cos(theta)` uniformly within the selected row, and return `p_omega = P_i / DeltaOmega_i`. A `1x1` constant map
+  therefore returns `1/(4 pi)`. Invalid channels are rejected, finite positive channels retain support, and a
+  bilinear-radiance direction in an otherwise zero-density texel remains owned by the BSDF strategy with MIS weight
+  one rather than being dropped.
+- Validation: the final focused groups pass 4,594,511 assertions, Debug and Release CTest pass 4/4, and the full
+  audit passes 781/781 tests and 68,654,103 assertions. The environment integral is `1`, the Lambertian estimate is
+  `1.002147074` with 95% CI `[0.9988432646, 1.005450884]`, and the frozen legacy mutation is `2.003353165` and is
+  rejected. Targeted ASan+UBSan is clean with macOS leak detection disabled because that sanitizer mode is
+  unsupported. Production MSL and both Metal 3/Metal 4 host binding paths compile in Debug, Release, and sanitizer
+  builds. On the actual Apple M4 Pro, 262,144 samples in fast and safe math report zero sample/PDF, intersection,
+  support, or non-finite mismatches; the available renderer selected Metal 4 because there is no diagnostic override
+  for forcing its automatic Metal 3 fallback.
+- Cross-strategy GPU result: an actual-device 96x96, 32,768-spp scene combining a textured environment, finite
+  distant, analytic dome, and emissive mesh gives mean luminance `0.1808142214` with NEE and `0.1808202792` without
+  NEE (relative difference `-0.003350%`), with no negative or non-finite pixels. This is a correctness comparison,
+  not a performance claim.
+- Resource delta: the environment alias entry grows from 8 to 12 bytes to store the represented solid-angle PDF;
+  a 65,536-texel table therefore grows from 0.5 MiB to 0.75 MiB (reported as 0.8 MB by the renderer). The represented
+  density removes an extra texture read from each PDF query. No backend-comparable timing claim is made.
+- External blocker: this macOS host has neither `nvcc`, an OptiX SDK/toolchain, nor an NVIDIA GPU, so OptiX source
+  compilation and execution are `UNVERIFIED`, not treated as Metal emulation. On a configured NVIDIA runner, use:
+  `OPTIX_DIR=/path/to/OptiX-SDK-9.1.0 bash -lc 'tools/ci/linux_check.sh; s=$?; printf
+  "{\"schema\":\"strelka.optix-correctness.v1\",\"exit_code\":%d,\"status\":\"%s\"}\\n" "$s"
+  "$([ "$s" -eq 0 ] && echo PASS || echo FAIL)"; exit "$s"'`. The command builds both OptiX device modules,
+  rejects empty `.optixir` outputs, runs unit tests and production smoke renders, and emits a machine-readable result.

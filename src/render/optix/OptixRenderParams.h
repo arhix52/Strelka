@@ -311,16 +311,16 @@ struct Params
     // Environment map (dome light)
     bool hasEnvMap;
     cudaTextureObject_t envMapTexture;      // bilinear, normalized coords -- radiance
-    cudaTextureObject_t envMapTexturePoint; // point, unnormalized coords -- sampling / pdf
     const EnvAliasEntry* envAliasTable;
-    // (w*h) / (2*pi^2 * totalPower): turns a texel's luminance straight into its
-    // solid-angle sampling density, so no CDF or pdf table is stored or searched.
+    // 1 / integral(luminance dOmega): turns a texel's luminance straight into
+    // its solid-angle sampling density.
     float envPdfScale;
     uint32_t envMapWidth;
     uint32_t envMapHeight;
     float envMapIntensity;
     float envMapRotation; // Y-axis rotation in radians
     float3 envMapColorTint;
+    float envSelectionPdf;
 
     // A separate environment for camera rays. See Scene::EnvLightDesc: the
     // backdrop is what the camera sees, the map above is what lights the scene.

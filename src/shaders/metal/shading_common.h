@@ -859,8 +859,8 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
                              random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
 
     float envPdf = 0.0f;
-    float3 dir = sampleEnvMap(xi, envAliasTable, envMapTexture, uniforms.envMapWidth, uniforms.envMapHeight,
-                              uniforms.envMapRotation, uniforms.envPdfScale, envPdf);
+    float3 dir =
+        sampleEnvMap(xi, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight, uniforms.envMapRotation, envPdf);
 
     LightConnection c = makeEmptyConnection();
     c.toLight = dir;

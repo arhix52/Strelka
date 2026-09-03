@@ -25,6 +25,10 @@ struct UniformLight
     float halfAngle;
     float pad0;
     float pad1;
+    // Walker/Vose analytic-light distribution. color.w stores the represented
+    // marginal PMF, matching Metal's UniformLight convention.
+    float selectionAliasProbability;
+    unsigned int selectionAlias;
 };
 
 // Packed IES candela tables for the GPU. OptiXRender::createIesBuffer lays the

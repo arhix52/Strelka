@@ -11,17 +11,8 @@
 #include <vector_types.h>
 #include <sutil/vec_math.h>
 
-#include <OptixRenderParams.h>
+#include <env_alias_sampling.h>
 #include <env_map_math.h>
-
-// Point fetch of one texel. The sampling distribution is built from unfiltered
-// texels on the host, so sampling and pdf have to read unfiltered texels too --
-// a bilinear tap here makes the two disagree along every luminance edge.
-static __forceinline__ __device__ float3 envTexelFetch(cudaTextureObject_t pointTex, int x, int y)
-{
-    const float4 t = tex2D<float4>(pointTex, (float)x + 0.5f, (float)y + 0.5f);
-    return make_float3(t.x, t.y, t.z);
-}
 
 // Sample the environment map with an alias table (Walker/Vose).
 //
@@ -38,11 +29,9 @@ static __forceinline__ __device__ float3 envTexelFetch(cudaTextureObject_t point
 static __forceinline__ __device__ float3 sampleEnvMap(
     const float2& xi,
     const EnvAliasEntry* aliasTable,
-    cudaTextureObject_t envMapPointTexture,
     uint32_t envMapWidth,
     uint32_t envMapHeight,
     float envMapRotation,
-    float envPdfScale,
     float& pdf)
 {
     const uint32_t w = envMapWidth;
@@ -57,25 +46,22 @@ static __forceinline__ __device__ float3 sampleEnvMap(
 
     // Jitter inside the texel, on the variate the alias draw handed back.
     const float u = ((float)x + draw.frac) / (float)w;
-    const float v = ((float)y + xi.y) / (float)h;
+    const float v = envSampleSolidAngleV((int)y, (int)h, xi.y);
 
     const float3 dir = envUVToDir(make_float2(u, v), envMapRotation);
 
-    const float3 radiance = envTexelFetch(envMapPointTexture, (int)x, (int)y);
-    pdf = envTexelPdf(radiance, envPdfScale);
+    pdf = aliasTable[draw.texel].solidAnglePdf;
 
     return dir;
 }
 
 // Evaluate the solid-angle pdf for a direction -- used for MIS against BSDF
 // sampling. One texel fetch, no search.
-static __forceinline__ __device__ float envMapPdf(
-    const float3& dir,
-    cudaTextureObject_t envMapPointTexture,
-    uint32_t envMapWidth,
-    uint32_t envMapHeight,
-    float envMapRotation,
-    float envPdfScale)
+static __forceinline__ __device__ float envMapPdf(const float3& dir,
+                                                  const EnvAliasEntry* aliasTable,
+                                                  uint32_t envMapWidth,
+                                                  uint32_t envMapHeight,
+                                                  float envMapRotation)
 {
     const float2 uv = dirToEnvUV(dir, envMapRotation);
 
@@ -84,5 +70,5 @@ static __forceinline__ __device__ float envMapPdf(
     const int x = max(0, min((int)(uv.x * (float)w), w - 1));
     const int y = max(0, min((int)(uv.y * (float)h), h - 1));
 
-    return envTexelPdf(envTexelFetch(envMapPointTexture, x, y), envPdfScale);
+    return aliasTable[(uint32_t)y * envMapWidth + (uint32_t)x].solidAnglePdf;
 }

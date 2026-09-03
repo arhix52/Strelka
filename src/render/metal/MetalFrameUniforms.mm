@@ -130,7 +130,10 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->numEmissiveMeshes = in.accel ? in.accel->emissiveMeshCount() : 0u;
     const double analyticPower = pUniformData->numLights > 0u && in.lights ? in.lights->totalPower() : 0.0;
     const double meshPower = pUniformData->numEmissiveMeshes > 0u && in.accel ? in.accel->emissiveMeshPower() : 0.0;
-    pUniformData->meshLightSelectionPdf = binaryPowerProbability(meshPower, analyticPower);
+    pUniformData->meshLightSelectionPdf =
+        emitterSelectionProbabilities(
+            false, 0.0, pUniformData->numLights > 0u, analyticPower, pUniformData->numEmissiveMeshes > 0u, meshPower)
+            .meshGivenLocal;
     pUniformData->primaryRayMask = analyticLightsEnabled ? RAY_MASK_PRIMARY : GEOMETRY_MASK_GEOMETRY;
     pUniformData->estimatorMode = settings.getAs<uint32_t>("render/validate/estimatorMode");
     // 0 = glTF (-ln(C)/d), 1 = Cycles ((1-C)/d). See volume.h.
@@ -393,15 +396,14 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
             // PBRT's infinite-light power proxy: the map's integrated radiance
             // crossing the projected area of a sphere around the scene. It has
             // the same units as the emitted power MetalLights accumulated.
-            const double radius = (std::isfinite(pUniformData->sceneExtent) && pUniformData->sceneExtent < 1e15f) ?
-                                      0.5 * pUniformData->sceneExtent :
-                                      1.0;
             const double mapIntegral = pUniformData->envPdfScale > 0.0f ? 1.0 / pUniformData->envPdfScale : 0.0;
-            const double tintLuminance = std::max(0.2126 * tint.r + 0.7152 * tint.g + 0.0722 * tint.b, 0.0);
-            const double envPower = std::numbers::pi_v<double> * radius * radius * mapIntegral *
-                                    pUniformData->envMapIntensity * tintLuminance;
-            const double localPower = analyticPower + meshPower;
-            envSelectionPdf = binaryPowerProbability(envPower, localPower);
+            const double tintLuminance =
+                0.2126 * std::max(tint.r, 0.0f) + 0.7152 * std::max(tint.g, 0.0f) + 0.0722 * std::max(tint.b, 0.0f);
+            const double envPower = environmentLightPower(
+                mapIntegral, pUniformData->sceneExtent, pUniformData->envMapIntensity, tintLuminance);
+            envSelectionPdf = emitterSelectionProbabilities(true, envPower, pUniformData->numLights > 0u, analyticPower,
+                                                            pUniformData->numEmissiveMeshes > 0u, meshPower)
+                                  .environment;
         }
         pUniformData->envMapColorTint = { tint.x, tint.y, tint.z, envSelectionPdf };
     }

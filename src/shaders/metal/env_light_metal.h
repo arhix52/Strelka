@@ -18,11 +18,9 @@ using namespace metal;
 // writes the solid-angle pdf.
 static inline float3 sampleEnvMap(const float2 xi,
                                   device const EnvAliasEntry* aliasTable,
-                                  texture2d<float> envMapTexture,
                                   uint32_t envMapWidth,
                                   uint32_t envMapHeight,
                                   float envMapRotation,
-                                  float envPdfScale,
                                   thread float& pdf)
 {
     const uint32_t w = envMapWidth;
@@ -41,10 +39,7 @@ static inline float3 sampleEnvMap(const float2 xi,
 
     const float3 dir = envUVToDir(float2(u, v), envMapRotation);
 
-    // Read the same texel the distribution was built from (point sampling, not
-    // the bilinear tap used for radiance) so sampling and pdf agree.
-    const float3 radiance = envMapTexture.read(uint2(x, y)).xyz;
-    pdf = envTexelPdf(radiance, envPdfScale);
+    pdf = aliasTable[draw.texel].solidAnglePdf;
 
     return dir;
 }
@@ -52,11 +47,10 @@ static inline float3 sampleEnvMap(const float2 xi,
 // Evaluate the solid-angle PDF for a direction — used for MIS against BSDF
 // sampling. One texel fetch, no search.
 static inline float envMapPdf(const float3 dir,
-                              texture2d<float> envMapTexture,
+                              device const EnvAliasEntry* aliasTable,
                               uint32_t envMapWidth,
                               uint32_t envMapHeight,
-                              float envMapRotation,
-                              float envPdfScale)
+                              float envMapRotation)
 {
     const float2 uv = dirToEnvUV(dir, envMapRotation);
 
@@ -65,6 +59,5 @@ static inline float envMapPdf(const float3 dir,
     const int x = clamp((int)(uv.x * (float)w), 0, w - 1);
     const int y = clamp((int)(uv.y * (float)h), 0, h - 1);
 
-    const float3 radiance = envMapTexture.read(uint2((uint)x, (uint)y)).xyz;
-    return envTexelPdf(radiance, envPdfScale);
+    return aliasTable[(uint)y * envMapWidth + (uint)x].solidAnglePdf;
 }

@@ -97,6 +97,7 @@ static_assert((uint32_t)oka::optix_omm::kAlphaBlend == (uint32_t)ALPHA_MODE_BLEN
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <ranges>
 #include <chrono>
 #include <cstring>
@@ -3262,6 +3263,7 @@ void OptiXRender::render(Buffer* output)
     params.scene.ib = optix::devicePtr<uint32_t>(mIndexBuffer->getPtr());
     params.scene.lights = optix::devicePtr<UniformLight>(mLightBuffer->getPtr());
     params.scene.numLights = mScene->getLights().size();
+    updateEmitterSelectionProbabilities();
     // createLightBuffer() always leaves this populated -- with a zero-count
     // header when the scene has no profile -- so the shading path never sees
     // null here. Guarded anyway: a launch before the first scene build would.
@@ -4608,10 +4610,52 @@ void OptiXRender::createIndexBuffer()
 
 void OptiXRender::createLightBuffer()
 {
-    createOrUpdateBuffer(mLightBuffer, mScene->getLights());
+    const std::vector<Scene::Light>& lights = mScene->getLights();
+    std::vector<double> powers;
+    powers.reserve(lights.size());
+    for (const Scene::Light& light : lights)
+    {
+        powers.push_back(metal::analyticLightPower(light));
+    }
+    const metal::LightSelectionTable selection = metal::buildLightSelectionAlias(powers);
+    mAnalyticLightPower = selection.totalPower;
+
+    static_assert(sizeof(Scene::Light) == offsetof(UniformLight, selectionAliasProbability));
+    std::vector<UniformLight> gpuLights(lights.size());
+    for (size_t i = 0; i < lights.size(); ++i)
+    {
+        std::memcpy(&gpuLights[i], &lights[i], sizeof(Scene::Light));
+        gpuLights[i].color.w = selection.entries[i].pdf;
+        gpuLights[i].selectionAliasProbability = selection.entries[i].aliasProbability;
+        gpuLights[i].selectionAlias = selection.entries[i].alias;
+    }
+    createOrUpdateBuffer(mLightBuffer, gpuLights);
+    mState.params.scene.lights = optix::devicePtr<UniformLight>(mLightBuffer->getPtr());
+    mState.params.scene.numLights = static_cast<uint32_t>(gpuLights.size());
+    updateEmitterSelectionProbabilities();
     createIesBuffer();
     createProjectorTextures();
     createSharcResponsiveLightBuffer();
+}
+
+void OptiXRender::updateEmitterSelectionProbabilities()
+{
+    Params& params = mState.params;
+    glm::float3 boundsMin(0.0f);
+    glm::float3 boundsMax(0.0f);
+    const double sceneExtent = mScene != nullptr && mScene->worldBounds(boundsMin, boundsMax) ?
+                                   std::max(static_cast<double>(glm::length(boundsMax - boundsMin)), 1e-4) :
+                                   1e16;
+    const double mapIntegral = params.envPdfScale > 0.0f ? 1.0 / static_cast<double>(params.envPdfScale) : 0.0;
+    const double tintLuminance = 0.2126 * std::max(params.envMapColorTint.x, 0.0f) +
+                                 0.7152 * std::max(params.envMapColorTint.y, 0.0f) +
+                                 0.0722 * std::max(params.envMapColorTint.z, 0.0f);
+    const double envPower = metal::environmentLightPower(mapIntegral, sceneExtent, params.envMapIntensity, tintLuminance);
+    const metal::EmitterSelectionProbabilities selection = metal::emitterSelectionProbabilities(
+        params.hasEnvMap, envPower, params.scene.numLights > 0u, mAnalyticLightPower,
+        params.scene.numEmissiveMeshes > 0u, mEmissiveMeshPower);
+    params.envSelectionPdf = selection.environment;
+    params.scene.meshLightSelectionPdf = selection.meshGivenLocal;
 }
 
 void OptiXRender::createEmissiveMeshLights()
@@ -4697,14 +4741,8 @@ void OptiXRender::createEmissiveMeshLights()
         createOrUpdateBuffer(mPrevEmissiveInstanceTransformBuffer, previousTransforms);
     }
 
-    double analyticPower = 0.0;
-    for (const Scene::Light& light : mScene->getLights())
-    {
-        analyticPower += metal::analyticLightPower(light);
-    }
     SceneData& scene = mState.params.scene;
     scene.numEmissiveMeshes = static_cast<uint32_t>(distribution.meshes.size());
-    scene.meshLightSelectionPdf = metal::binaryPowerProbability(mEmissiveMeshPower, analyticPower);
     scene.emissiveMeshes =
         mEmissiveMeshBuffer ? optix::devicePtr<const EmissiveMeshLight>(mEmissiveMeshBuffer->getPtr()) : nullptr;
     scene.emissiveTriangles = mEmissiveTriangleBuffer ?
@@ -4718,6 +4756,7 @@ void OptiXRender::createEmissiveMeshLights()
         mPrevEmissiveInstanceTransformBuffer ?
             optix::devicePtr<const EmissiveInstanceTransform>(mPrevEmissiveInstanceTransformBuffer->getPtr()) :
             nullptr;
+    updateEmitterSelectionProbabilities();
 }
 
 /// Upload the images projector lights throw, in the order the scene registered
@@ -4998,26 +5037,9 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     cudaTextureObject_t envTexObj = 0;
     CUDA_CHECK(cudaCreateTextureObject(&envTexObj, &resDesc, &texDesc, nullptr));
 
-    // A second view of the same array, point-sampled in texel coordinates. The
-    // alias table is built from unfiltered texels on the host, so the sampler and
-    // the pdf have to read unfiltered texels too; a bilinear tap there makes the
-    // density the sampler draws from and the density MIS divides by disagree
-    // along every luminance edge in the map. No extra storage -- the array is
-    // shared with the filtered object above.
-    cudaTextureDesc pointDesc{};
-    pointDesc.addressMode[0] = cudaAddressModeWrap;
-    pointDesc.addressMode[1] = cudaAddressModeClamp;
-    pointDesc.filterMode = cudaFilterModePoint;
-    pointDesc.readMode = cudaReadModeElementType;
-    pointDesc.normalizedCoords = 0;
-
-    cudaTextureObject_t envTexPointObj = 0;
-    CUDA_CHECK(cudaCreateTextureObject(&envTexPointObj, &resDesc, &pointDesc, nullptr));
-
     // Track for cleanup
     mTextureArrays.push_back(envArray);
     mTextureObjects.push_back(envTexObj);
-    mTextureObjects.push_back(envTexPointObj);
 
     // The alias table comes from the shared host builder in
     // render/host/ibl_alias_table.h. It is backend-neutral and
@@ -5025,7 +5047,7 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     // implementation is what makes the two backends importance-sample the same
     // HDRI from the same distribution, which is the only way their EXRs can be
     // compared texel for texel.
-    const auto aliasResult = metal::buildIblAliasTable(pixelData, width, height);
+    const auto aliasResult = metal::buildSolidAngleIblAliasTable(pixelData, width, height);
     static_assert(sizeof(EnvAliasEntry) == sizeof(metal::EnvAliasEntry),
                   "device EnvAliasEntry must match the host builder's entry");
     static_assert(alignof(EnvAliasEntry) == alignof(metal::EnvAliasEntry),
@@ -5045,7 +5067,6 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
 
     // Store env map params
     mState.params.envMapTexture = envTexObj;
-    mState.params.envMapTexturePoint = envTexPointObj;
     mState.params.envAliasTable = optix::devicePtr<const EnvAliasEntry>(mEnvAliasBuffer->getPtr());
     mState.params.envPdfScale = aliasResult.envPdfScale;
     mState.params.envMapWidth = width;
@@ -5055,7 +5076,7 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
 
     // Environment auto-calibration is opt-in because its content-derived scale
     // overrides authored lighting units.
-    const float avgWeightedLum = (float)(aliasResult.totalPower / (double)(width * height));
+    const float avgWeightedLum = static_cast<float>(aliasResult.averageWeightedLuminance);
     const bool autoCalibrate = getSettings()->getAs<bool>("render/env/autoCalibrate");
     const float kCalibrationTarget = 1000.0f;
     mEnvMapAutoScale = (autoCalibrate && avgWeightedLum > 1e-6f) ? kCalibrationTarget / avgWeightedLum : 1.0f;

@@ -74,6 +74,7 @@ std::vector<EnvAliasEntry> toDeviceTable(const std::vector<oka::metal::EnvAliasE
     {
         out[i].prob = src[i].prob;
         out[i].alias = src[i].alias;
+        out[i].solidAnglePdf = src[i].solidAnglePdf;
     }
     return out;
 }

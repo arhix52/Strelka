@@ -130,13 +130,27 @@ TEST_CASE("positive extreme-dynamic-range texels retain discrete support")
     for (size_t i = 0; i < represented.size(); ++i)
     {
         CAPTURE(i);
+        const int y = static_cast<int>(i / w);
+        const double theta0 = M_PI * static_cast<double>(y) / h;
+        const double theta1 = M_PI * static_cast<double>(y + 1) / h;
+        const double solidAngle = (2.0 * M_PI / w) * (std::cos(theta0) - std::cos(theta1));
+        CHECK(result.alias[i].solidAnglePdf * solidAngle == doctest::Approx(represented[i]).epsilon(2e-7));
         if (values[i] > 0.0f)
         {
             CHECK(represented[i] > 0.0);
+            CHECK(result.alias[i].prob >= 0x1p-23f);
         }
         else
         {
             CHECK(represented[i] == doctest::Approx(0.0).epsilon(1e-12));
         }
     }
+}
+
+TEST_CASE("a finite positive channel retains support beside negative channels")
+{
+    const float pixels[] = { 1.0f, -1000.0f, 0.0f, 1.0f };
+    const IblAliasTableResult result = buildSolidAngleIblAliasTable(pixels, 1, 1);
+    CHECK(result.totalPower > 0.0);
+    CHECK(result.envPdfScale > 0.0f);
 }

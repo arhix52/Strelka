@@ -15,6 +15,8 @@
 using oka::metal::analyticLightPower;
 using oka::metal::binaryPowerProbability;
 using oka::metal::buildLightSelectionAlias;
+using oka::metal::emitterSelectionProbabilities;
+using oka::metal::environmentLightPower;
 
 TEST_CASE("light selection alias table follows power and excludes zero bins")
 {
@@ -73,6 +75,66 @@ TEST_CASE("invalid or black light powers have empty selection support")
     CHECK(binaryPowerProbability(1.0, 3.0) == doctest::Approx(0.25f));
     CHECK(binaryPowerProbability(std::numeric_limits<double>::denorm_min(), 1.0) > 0.0f);
     CHECK(binaryPowerProbability(1.0, std::numeric_limits<double>::denorm_min()) < 1.0f);
+}
+
+TEST_CASE("a positive sharp distant light retains discrete selection support")
+{
+    oka::Scene::Light light;
+    light.type = LIGHT_TYPE_DISTANT;
+    light.color = glm::float4(2.0f, 1.0f, 0.5f, 1.0f);
+    light.halfAngle = 0.0f;
+
+    // Its conditional distribution is a Dirac mass, so its continuous
+    // solid-angle PDF is zero. That must not also erase its outer discrete
+    // selection mass when another emitter competes with it.
+    CHECK(analyticLightPower(light) > 0.0);
+
+    light.color = glm::float4(1.0f, -1000.0f, 0.0f, 1.0f);
+    CHECK(analyticLightPower(light) > 0.0);
+}
+
+TEST_CASE("shared emitter hierarchy yields one complete represented marginal PMF")
+{
+    const auto analytic = buildLightSelectionAlias({ 1.0, 3.0 });
+    const auto classes = emitterSelectionProbabilities(true, 9.0, true, analytic.totalPower, true, 2.0);
+
+    const double environment = classes.environment;
+    const double analytic0 = classes.local * classes.analyticGivenLocal * analytic.entries[0].pdf;
+    const double analytic1 = classes.local * classes.analyticGivenLocal * analytic.entries[1].pdf;
+    const double mesh = classes.local * classes.meshGivenLocal;
+
+    CHECK(environment == doctest::Approx(0.6));
+    CHECK(analytic0 == doctest::Approx(1.0 / 15.0));
+    CHECK(analytic1 == doctest::Approx(0.2));
+    CHECK(mesh == doctest::Approx(2.0 / 15.0));
+    CHECK(environment + analytic0 + analytic1 + mesh == doctest::Approx(1.0).epsilon(1e-7));
+
+    // The old OptiX mutation selected environment/local 50:50 and analytic
+    // identities uniformly. It describes a different estimator distribution.
+    const double oldEnvironment = 0.5;
+    const double oldAnalytic0 = 0.5 * (4.0 / 6.0) * 0.5;
+    CHECK(oldEnvironment != doctest::Approx(environment));
+    CHECK(oldAnalytic0 != doctest::Approx(analytic0));
+}
+
+TEST_CASE("environment power proxy is shared and finite at scene-boundary cases")
+{
+    const double pi = std::numbers::pi_v<double>;
+    CHECK(environmentLightPower(4.0 * pi, 2.0, 2.0, 0.5) == doctest::Approx(4.0 * pi * pi));
+    CHECK(environmentLightPower(4.0 * pi, std::numeric_limits<double>::infinity(), 1.0, 1.0) ==
+          doctest::Approx(4.0 * pi * pi));
+    CHECK(environmentLightPower(4.0 * pi, 2.0, -1.0, 1.0) == 0.0);
+    const double extreme = environmentLightPower(1e300, 1e300, 1e300, 1e300);
+    CHECK(std::isfinite(extreme));
+    CHECK(extreme > 0.0);
+
+    const auto classes = emitterSelectionProbabilities(true, extreme, true, extreme, true, extreme);
+    CHECK(classes.environment > 0.0f);
+    CHECK(classes.local > 0.0f);
+    CHECK(classes.meshGivenLocal > 0.0f);
+    CHECK(classes.analyticGivenLocal > 0.0f);
+    CHECK(classes.environment + classes.local == doctest::Approx(1.0f));
+    CHECK(classes.meshGivenLocal + classes.analyticGivenLocal == doctest::Approx(1.0f));
 }
 
 TEST_CASE("million-light selection preserves positive support and excludes zero weights")

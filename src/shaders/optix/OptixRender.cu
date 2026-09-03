@@ -722,10 +722,10 @@ extern "C" __global__ void __closesthit__light()
         {
             // The hit competes with the same local class and analytic identity
             // draw that NEE used. Mesh emitters are a separate local class.
-            const float localSelectionPdf = params.hasEnvMap ? 0.5f : 1.0f;
+            const float localSelectionPdf = params.hasEnvMap ? 1.0f - params.envSelectionPdf : 1.0f;
             const float analyticClassPdf =
                 params.scene.numEmissiveMeshes > 0u ? 1.0f - params.scene.meshLightSelectionPdf : 1.0f;
-            const float lightSelectionPdf = localSelectionPdf * analyticClassPdf / params.scene.numLights;
+            const float lightSelectionPdf = localSelectionPdf * analyticClassPdf * currLight.color.w;
             // From the vertex that scattered, which is not the ray's origin once
             // it has passed through a cutout or crossed a medium's boundary on
             // the way here. Using the origin makes the light look nearer than the
