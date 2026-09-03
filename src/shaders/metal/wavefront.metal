@@ -1577,7 +1577,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
             {
                 continue;
             }
-            const float effectivePdf = localSelectionPdf * light.selectionPdf * conditionalPdf;
+            const float effectivePdf = localSelectionPdf * analyticLightSelectionPdf(light) * conditionalPdf;
             const float mis = (depth == 0u || specularBounce || !neeDone || !(effectivePdf > 0.0f)) ?
                                   1.0f :
                                   computeMisWeight(p.lastBsdfPdf, effectivePdf, uniforms.misHeuristic);
@@ -2066,7 +2066,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             else
             {
                 const float localSelectionPdf = uniforms.hasEnvMap ? 1.0f - uniforms.envMapColorTint.w : 1.0f;
-                const float lightSelectionPdf = localSelectionPdf * currLight.selectionPdf;
+                const float lightSelectionPdf = localSelectionPdf * analyticLightSelectionPdf(currLight);
                 // From the vertex that scattered, which is not the ray's origin
                 // once it has passed through a cutout on the way here. Using the
                 // origin makes the light look nearer than the scattering vertex

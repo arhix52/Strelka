@@ -177,7 +177,7 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
     {
         powers.push_back(analyticLightPower(light));
     }
-    const LightSelectionTable selection = buildLightSelectionCdf(powers);
+    const LightSelectionTable selection = buildLightSelectionAlias(powers);
     mTotalPower = selection.totalPower;
 
     const size_t lightBufferSize = sizeof(UniformLight) * lightDescs.size();
@@ -204,8 +204,9 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
             UniformLight& dst = gpuLights[i];
             std::memcpy(&dst, &lightDescs[i], sizeof(Scene::Light));
             dst.projectorTexture = MTL::ResourceID{};
-            dst.selectionCdf = selection.entries[i].cdf;
-            dst.selectionPdf = selection.entries[i].pdf;
+            dst.color.w = selection.entries[i].pdf;
+            dst.selectionAliasProbability = selection.entries[i].aliasProbability;
+            dst.selectionAlias = selection.entries[i].alias;
             if (lightDescs[i].type == LIGHT_TYPE_PROJECTOR)
             {
                 const int slot = (int)lightDescs[i].points[0].z;

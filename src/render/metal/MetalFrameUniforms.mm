@@ -395,7 +395,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
             const double envPower = std::numbers::pi_v<double> * radius * radius * mapIntegral *
                                     pUniformData->envMapIntensity * tintLuminance;
             const double localPower = in.lights != nullptr ? in.lights->totalPower() : 0.0;
-            envSelectionPdf = regularizedPowerProbability(envPower, envPower + localPower, 2);
+            envSelectionPdf = binaryPowerProbability(envPower, localPower);
         }
         pUniformData->envMapColorTint = { tint.x, tint.y, tint.z, envSelectionPdf };
     }

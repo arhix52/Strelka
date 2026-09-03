@@ -15,6 +15,8 @@ enum struct SampleDimension : uint32_t
     ePixelX,
     ePixelY,
     eLightId,
+    // Independent Walker/Vose coin for analytic-light selection.
+    eLightAlias,
     eTime,
     eLightPointX,
     eLightPointY,

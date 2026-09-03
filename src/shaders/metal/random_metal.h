@@ -14,49 +14,52 @@ float uintToFloat(uint x)
 
 enum class SampleDimension : uint32_t
 {
-  ePixelX,
-  ePixelY,
-  eLightId,
-  eTime, // motion blur time [0, 1]
-  eLightPointX,
-  eLightPointY,
-  eBSDF0,
-  eBSDF1,
-  eBSDF2,
-  eBSDF3,
-  eRussianRoulette,
-  // Coverage test for MASK/BLEND surfaces. Its own dimension so a transparent
-  // hit does not consume, or correlate with, the BSDF or roulette draws.
-  eOpacity,
-  eLensU,
-  eLensV,
-  // Atmospheric scattering: the free-flight distance, and the two draws that
-  // pick a direction out of the phase function. Their own dimensions for the
-  // same reason eOpacity has one -- a scattering event must not correlate with
-  // the BSDF draws of the surface the ray was heading for.
-  eFogDistance,
-  eFogPhaseU,
-  eFogPhaseV,
-  // Russian roulette on a shadow ray's accumulated transmittance. Its own
-  // dimension so that killing a ray that is already almost blocked does not
-  // correlate with which light was chosen or where on it the point landed.
-  eShadowRR,
-  // The subsurface random walk: which colour channel drives free flight, how far
-  // it goes, and the phase-function draw at the scattering event.
-  //
-  // Distinct from the fog dimensions even though the two never scatter at the
-  // same vertex, because the channel choice happens in `extend` and the phase
-  // draw in `shade` at the same walk step -- sharing eFogPhaseU between them
-  // would tie which channel was picked to which way the walk turned.
-  //
-  // Adding dimensions changes the stride in random<>(), so every scene's noise
-  // is realised differently from here on. That moves the noise, not the image
-  // the samples converge to.
-  eSssChannel,
-  eSssDistance,
-  eSssPhaseU,
-  eSssPhaseV,
-  eNUM_DIMENSIONS
+    ePixelX,
+    ePixelY,
+    eLightId,
+    // Independent alias coin. Reusing a light-point dimension would condition
+    // the point on which alias branch selected the light.
+    eLightAlias,
+    eTime, // motion blur time [0, 1]
+    eLightPointX,
+    eLightPointY,
+    eBSDF0,
+    eBSDF1,
+    eBSDF2,
+    eBSDF3,
+    eRussianRoulette,
+    // Coverage test for MASK/BLEND surfaces. Its own dimension so a transparent
+    // hit does not consume, or correlate with, the BSDF or roulette draws.
+    eOpacity,
+    eLensU,
+    eLensV,
+    // Atmospheric scattering: the free-flight distance, and the two draws that
+    // pick a direction out of the phase function. Their own dimensions for the
+    // same reason eOpacity has one -- a scattering event must not correlate with
+    // the BSDF draws of the surface the ray was heading for.
+    eFogDistance,
+    eFogPhaseU,
+    eFogPhaseV,
+    // Russian roulette on a shadow ray's accumulated transmittance. Its own
+    // dimension so that killing a ray that is already almost blocked does not
+    // correlate with which light was chosen or where on it the point landed.
+    eShadowRR,
+    // The subsurface random walk: which colour channel drives free flight, how far
+    // it goes, and the phase-function draw at the scattering event.
+    //
+    // Distinct from the fog dimensions even though the two never scatter at the
+    // same vertex, because the channel choice happens in `extend` and the phase
+    // draw in `shade` at the same walk step -- sharing eFogPhaseU between them
+    // would tie which channel was picked to which way the walk turned.
+    //
+    // Adding dimensions changes the stride in random<>(), so every scene's noise
+    // is realised differently from here on. That moves the noise, not the image
+    // the samples converge to.
+    eSssChannel,
+    eSssDistance,
+    eSssPhaseU,
+    eSssPhaseV,
+    eNUM_DIMENSIONS
 };
 
 struct SamplerState

@@ -7,20 +7,19 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <numbers>
 #include <vector>
 
 namespace oka::metal
 {
 
-// Keep a small uniform component so a weak light near a surface cannot acquire
-// an enormous 1/pdf weight merely because its scene-wide power is small.
-inline constexpr double kLightSelectionUniformMix = 0.05;
-
 struct LightSelectionEntry
 {
-    float cdf = 1.0f;
-    float pdf = 1.0f;
+    float aliasProbability = 0.0f;
+    uint32_t alias = std::numeric_limits<uint32_t>::max();
+    float pdf = 0.0f;
 };
 
 struct LightSelectionTable
@@ -34,15 +33,22 @@ inline double cleanLightPower(double power)
     return std::isfinite(power) ? std::max(power, 0.0) : 0.0;
 }
 
-inline float regularizedPowerProbability(double power, double totalPower, size_t count)
+inline float binaryPowerProbability(double firstPower, double secondPower)
 {
-    if (count == 0)
+    const double first = cleanLightPower(firstPower);
+    const double second = cleanLightPower(secondPower);
+    if (!(first > 0.0))
     {
         return 0.0f;
     }
-    const double uniform = 1.0 / static_cast<double>(count);
-    const double importance = totalPower > 0.0 ? cleanLightPower(power) / totalPower : uniform;
-    return static_cast<float>((1.0 - kLightSelectionUniformMix) * importance + kLightSelectionUniformMix * uniform);
+    if (!(second > 0.0))
+    {
+        return 1.0f;
+    }
+    const double scale = std::max(first, second);
+    const double probability = (first / scale) / (first / scale + second / scale);
+    constexpr float minimumProbability = 0x1p-22f;
+    return std::clamp(static_cast<float>(probability), minimumProbability, 1.0f - minimumProbability);
 }
 
 // Scene-wide emitted-power proxy. It need not know the shading point: RIS still
@@ -89,25 +95,113 @@ inline double analyticLightPower(const Scene::Light& light)
     return cleanLightPower(luminance * measure);
 }
 
-inline LightSelectionTable buildLightSelectionCdf(const std::vector<double>& powers)
+inline LightSelectionTable buildLightSelectionAlias(const std::vector<double>& powers)
 {
     LightSelectionTable table;
     table.entries.resize(powers.size());
-    for (const double power : powers)
-    {
-        table.totalPower += cleanLightPower(power);
-    }
-
-    double cdf = 0.0;
+    std::vector<double> cleanPowers(powers.size());
     for (size_t i = 0; i < powers.size(); ++i)
     {
-        const float pdf = regularizedPowerProbability(powers[i], table.totalPower, powers.size());
-        cdf += pdf;
-        table.entries[i] = { static_cast<float>(cdf), pdf };
+        cleanPowers[i] = cleanLightPower(powers[i]);
+        table.totalPower += cleanPowers[i];
     }
-    if (!table.entries.empty())
+    if (powers.empty() || !(table.totalPower > 0.0))
     {
-        table.entries.back().cdf = 1.0f;
+        return table;
+    }
+
+    const size_t count = powers.size();
+    // A positive input must remain a positive float PMF even after division by
+    // N in the alias representation. This floor is many orders below any
+    // meaningful scene-light probability, changes only the proposal, and the
+    // represented (post-rounding) PMF below is what the estimator actually uses.
+    // The shipped samplers expose at least 23 useful fractional bits. Keep a
+    // non-empty alias branch wider than one such step so strict `u < q` can
+    // actually take it, rather than preserving a merely symbolic float mass
+    // that no generated variate can reach.
+    constexpr double minimumAliasProbability = 0x1p-22;
+    const double minimumProbability =
+        std::max(static_cast<double>(std::numeric_limits<float>::min()) * static_cast<double>(count),
+                 minimumAliasProbability / static_cast<double>(count));
+    std::vector<double> probabilities(count, 0.0);
+    double adjustedTotal = 0.0;
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (cleanPowers[i] > 0.0)
+        {
+            probabilities[i] = std::max(cleanPowers[i] / table.totalPower, minimumProbability);
+            adjustedTotal += probabilities[i];
+        }
+    }
+    for (double& probability : probabilities)
+    {
+        probability /= adjustedTotal;
+    }
+
+    std::vector<double> scaled(count);
+    std::vector<uint32_t> small;
+    std::vector<uint32_t> large;
+    small.reserve(count / 2);
+    large.reserve(count / 2);
+    uint32_t fallback = 0u;
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (probabilities[i] > probabilities[fallback])
+        {
+            fallback = static_cast<uint32_t>(i);
+        }
+        scaled[i] = probabilities[i] * static_cast<double>(count);
+        (scaled[i] < 1.0 ? small : large).push_back(static_cast<uint32_t>(i));
+    }
+
+    while (!small.empty() && !large.empty())
+    {
+        const uint32_t little = small.back();
+        small.pop_back();
+        const uint32_t great = large.back();
+        large.pop_back();
+        table.entries[little].aliasProbability = static_cast<float>(std::clamp(scaled[little], 0.0, 1.0));
+        table.entries[little].alias = great;
+        scaled[great] = (scaled[great] + scaled[little]) - 1.0;
+        (scaled[great] < 1.0 ? small : large).push_back(great);
+    }
+    for (const uint32_t i : large)
+    {
+        table.entries[i].aliasProbability = 1.0f;
+        table.entries[i].alias = i;
+    }
+    // Round-off can leave a nominally-small bucket after the last large one.
+    // Keep its own remaining mass and send the rest to a known-positive target;
+    // never turn a zero-weight bucket into a self alias.
+    for (const uint32_t i : small)
+    {
+        if (i == fallback)
+        {
+            table.entries[i].aliasProbability = 1.0f;
+            table.entries[i].alias = i;
+        }
+        else
+        {
+            table.entries[i].aliasProbability = static_cast<float>(std::clamp(scaled[i], 0.0, 1.0));
+            table.entries[i].alias = fallback;
+        }
+    }
+
+    // The float thresholds are the GPU distribution. Reconstruct its marginal
+    // PMF rather than uploading the unrounded target and silently disagreeing
+    // with it in MIS.
+    std::vector<double> represented(count, 0.0);
+    const double bucketMass = 1.0 / static_cast<double>(count);
+    for (size_t bucket = 0; bucket < count; ++bucket)
+    {
+        const LightSelectionEntry& entry = table.entries[bucket];
+        const double own = std::clamp(static_cast<double>(entry.aliasProbability), 0.0, 1.0);
+        represented[bucket] += bucketMass * own;
+        represented[entry.alias] += bucketMass * (1.0 - own);
+    }
+    for (size_t i = 0; i < count; ++i)
+    {
+        table.entries[i].pdf = static_cast<float>(represented[i]);
     }
     return table;
 }

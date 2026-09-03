@@ -11,8 +11,8 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | 1. Standard PBR mixture PDF | 28,923/36,794 legacy audit mismatches; independent regression 28,882 eval and 28,866 oracle mismatches / 36,818 | `test_sample_eval_consistency`: marginal double oracle, split-lobe invariance, 1.3M edge/domain assertions; audit guard | Shared `eval()` finishes every non-delta sample; exit-side diffuse/interface proposals are conditionally renormalized; delta mass unchanged | FIXED | Shared header compiled | Shared header; backend build pending | `f845f2c` | PARTIAL |
 | 2. Distant/dome support and MIS completeness | Dome packed as type `-1`; sharp distant reports continuous PDF 0 but is not delta; analytic dome one-bounce ratio `0.2988202609` | Scene/JSON packing, common support/delta oracle, cap normalization, analytic one-bounce MIS, omitted-miss mutation | Separate delta distant, finite spherical-cap, and dome measures; evaluate continuous infinite emitters on miss with the same selection PMF/support as NEE | FIXED | Shader compiled; analytic execution pending final GPU audit | Shared math/source changed; toolchain unavailable on macOS | `ad4c3d9` | PARTIAL |
 | 3. Metal back-face NEE/MIS double counting | Back-face direction accepted by NEE but unpaired bounce gives MIS shares `0.4 + 1.0 = 1.4` | Exact support-equivalence sweep, front/back/flipped/transmission/fibre cases, 0.4/0.6 balance-share mutation | Evaluate proposal and bounce pairing in one shaded frame and make their continuous supports identical | Oracle FIXED | Shader compiled; path execution pending final GPU audit | Shared predicate fixed; toolchain unavailable on macOS | `b214620` | PARTIAL |
-| 4. Non-uniform transforms for analytic lights | Disc geometry/sampler area ratio `6.0`; a smooth-disc sample outside the 16-gon is invisible to old traversal; sphere record loses affine axes | Double-precision affine-Jacobian oracle, smooth sample/intersection/PDF agreement, mirrored normals, CPU picking, coarse-proxy mutation | Sample and intersect the same smooth affine disc/ellipsoid; keep tessellation editor-only | FIXED | Shader compiled; shared analytic math executed on MTLDevice | Source updated; toolchain unavailable on macOS | pending | PARTIAL |
-| 5. Robust large-distribution support | Pending | Pending | Select a GPU-friendly PMF representation that preserves every finite positive bin | OPEN | OPEN | OPEN | — | OPEN |
+| 4. Non-uniform transforms for analytic lights | Disc geometry/sampler area ratio `6.0`; a smooth-disc sample outside the 16-gon is invisible to old traversal; sphere record loses affine axes | Double-precision affine-Jacobian oracle, smooth sample/intersection/PDF agreement, mirrored normals, CPU picking, coarse-proxy mutation | Sample and intersect the same smooth affine disc/ellipsoid; keep tessellation editor-only | FIXED | Shader compiled; shared analytic math executed on MTLDevice | Source updated; toolchain unavailable on macOS | `495e2a7` | PARTIAL |
+| 5. Robust large-distribution support | 209,715/1,048,576 positive-PMF bins have zero float-CDF interval | Million-bin support/normalization, sparse zeros, 1e12 dynamic range, PMF lookup, GOF, old-CDF mutation | Replace the cumulative float table with an O(1) Walker/Vose alias draw and its represented PMF | FIXED | 1,048,576-entry support kernel passed on MTLDevice | OptiX remains uniform until finding 7 | pending | PARTIAL |
 | 6. Emissive mesh NEE | Pending | Pending | Add selection, transformed-area sampling, solid-angle conversion, and BSDF-hit MIS | OPEN | OPEN | OPEN | — | OPEN |
 | 7. Cross-backend consistency | Pending | Pending | Audit common probability conventions and compile/execute each available backend | OPEN | OPEN | OPEN | — | OPEN |
 
@@ -168,3 +168,49 @@ is out of scope unless it blocks validation.
   and safe Metal math modes with zero sample/eval mismatches, intersection mismatches, NaN, Inf, or negative PDFs.
   The OptiX implementation uses the same header but cannot be compiled on this macOS host; it remains UNVERIFIED
   until the cross-backend finding.
+
+## Finding 5: Robust large-distribution support
+
+- Random variable: analytic-light identity `J`. The alias construction introduces bucket `B` and branch coin `C`.
+- Measure: all three are discrete probability mass (`C` is represented by a uniform variate used to realize a
+  Bernoulli mass); no directional or area density is involved until the selected light's conditional sampler runs.
+- Support: exactly the indices whose cleaned finite power `w_i` is positive. A zero, negative, NaN, or infinite
+  input weight has no support. An all-zero table has empty support and must return an empty connection.
+- Conditional and marginal PMF: `P(B=b)=1/N`, `P(J=b|B=b)=q_b`, and
+  `P(J=a_b|B=b)=1-q_b`. Therefore
+  `P(J=i)=[q_i + sum_(b:a_b=i)(1-q_b)]/N`. The stored lookup PMF is reconstructed from the final float `q_b`
+  values, so it is the distribution the GPU actually samples rather than the unrounded input target.
+- Selection PMF: `P(J=i)` multiplies the selected light's conditional solid-angle/delta measure in NEE and is the
+  same factor used by BSDF-hit MIS. There is no uniform floor: it selected zero-power lights and was the source of
+  the collapsed tail. Positive probabilities below the normal float range are proposal-regularized upward before
+  alias construction; every branch is also kept wider than the shipped samplers' smallest positive 23-bit step.
+  The represented PMF remains normalized and is used consistently.
+- Delta classification: `J` is discrete for every light. Whether the conditional light sample is delta (sharp
+  distant/punctual) or continuous is orthogonal; the selection mass is never treated as a solid-angle PDF by itself.
+- MIS strategies: selected-light NEE versus the compatible BSDF continuation. Both use the same marginal selection
+  PMF stored in the selected GPU light record.
+- Representation decision: a flat float CDF is 8 bytes/light and `O(log N)` but loses tail intervals. A blocked
+  two-level CDF preserves local increments but needs block metadata, two searches, and another shader binding. A
+  binary probability tree also uses local normalization but needs `N-1` branch values and about 20 dependent loads
+  at one million lights. A Walker/Vose table is `O(1)` with one bucket and one alias load; its threshold and alias
+  replace the old CDF field pair, while the otherwise-unused GPU `color.w` carries the represented PMF, keeping the
+  128-byte light ABI and GPU memory unchanged.
+- Current-HEAD reproducer: with 1,048,576 lights, one dominant power and the old 5% uniform floor, 209,715 positive
+  stored PMFs (19.99998093%) have identical adjacent float CDF endpoints and can never be returned by the binary
+  search.
+- Corrected result: the production alias table loses 0/1,048,576 positive bins at dynamic range `1e12`, and sparse
+  zero/NaN bins receive exactly zero represented PMF. The stored PMFs sum to one and match the distribution
+  reconstructed independently from the rounded thresholds/aliases. Uniform tables are exact, even a positive
+  double weight below float range is reachable after proposal regularization, and a 1,048,576-draw categorical GOF
+  test gives chi-square `0.0187892` (three nonzero categories, acceptance bound `16`). The retained old-CDF mutation
+  still collapses `0.19999980926513672` of the million bins.
+- Performance at `-O3` on Apple M4 Pro, 1,048,576 weights and 16,777,216 CPU draws (median of five runs): build time
+  changed from `1.06 ms` (flat CDF) to `8.93 ms` (alias); sampling changed from `923.9 ms` to `28.7 ms` (`32.2x`
+  faster). GPU distribution metadata remains `8 MiB` (`8 bytes/light`) and `UniformLight` remains 128 bytes. Peak
+  host RSS in isolated runs rose from `18.3 MiB` to `62.4 MiB` because the linear-time builder keeps temporary
+  double arrays; this is a build-time cost, not resident GPU memory.
+- Validation: targeted tests pass 5,243,704 assertions; the full audit passes 772/772 tests and 66,008,017 assertions.
+  The production Metal shaders compile. On the actual Apple M4 Pro, the 1,048,576-entry, `1e12` audit reports zero
+  positive-support loss and zero selection of zero bins in fast and safe math modes. Release, sanitizer, and final
+  checks pass: Release CTest 4/4 and targeted ASan+UBSan 5,243,704/5,243,704. OptiX still uses its previous uniform
+  analytic-light selector; the cross-backend convention is deliberately completed in finding 7.

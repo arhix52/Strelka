@@ -14,6 +14,7 @@
 // the halves of the MIS estimate share, and when a vertex owes the bounce ray a
 // deduction at all. Restating them by hand here is how the backends drifted.
 #include <nee_pairing.h>
+#include <light_alias_sampling.h>
 #include <strelka/material/ior_stack.h>
 #include <strelka/material/volume.h>
 #include <strelka/material/bsdf.h>
@@ -892,25 +893,19 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
 
 // Choose a strategy and build the connection. The caller decides when to test
 // visibility.
-uint32_t sampleAnalyticLight(const uint32_t numLights, device UniformLight* lights, const float u)
+uint32_t sampleAnalyticLight(const uint32_t numLights,
+                             device UniformLight* lights,
+                             const float bucketUniform,
+                             const float aliasUniform)
 {
-    uint32_t first = 0;
-    uint32_t count = numLights;
-    while (count > 0)
-    {
-        const uint32_t step = count / 2;
-        const uint32_t middle = first + step;
-        if (u < lights[middle].selectionCdf)
-        {
-            count = step;
-        }
-        else
-        {
-            first = middle + 1;
-            count -= step + 1;
-        }
-    }
-    return min(first, numLights - 1);
+    const uint32_t bucket = lightAliasBucket(numLights, bucketUniform);
+    device const UniformLight& entry = lights[bucket];
+    return lightAliasSelect(numLights, bucket, aliasUniform, entry.selectionAliasProbability, entry.selectionAlias);
+}
+
+float analyticLightSelectionPdf(device const UniformLight& light)
+{
+    return light.color.w;
 }
 
 LightConnection connectToLight(constant Uniforms& uniforms,
@@ -936,9 +931,14 @@ LightConnection connectToLight(constant Uniforms& uniforms,
             return c;
         }
         const float remappedU = u / localSelectionPdf;
-        const uint32_t lightId = sampleAnalyticLight(numLights, lights, remappedU);
+        const float aliasU = random<SampleDimension::eLightAlias>(samplerRnd, uniforms.samplerType);
+        const uint32_t lightId = sampleAnalyticLight(numLights, lights, remappedU, aliasU);
+        if (lightId >= numLights)
+        {
+            return makeEmptyConnection();
+        }
         LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent, iesBuffer);
-        c.pdf *= localSelectionPdf * lights[lightId].selectionPdf;
+        c.pdf *= localSelectionPdf * analyticLightSelectionPdf(lights[lightId]);
         return c;
     }
 
@@ -951,8 +951,13 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     }
 
     const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
-    const uint32_t lightId = sampleAnalyticLight(numLights, lights, u);
+    const float aliasU = random<SampleDimension::eLightAlias>(samplerRnd, uniforms.samplerType);
+    const uint32_t lightId = sampleAnalyticLight(numLights, lights, u, aliasU);
+    if (lightId >= numLights)
+    {
+        return makeEmptyConnection();
+    }
     LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent, iesBuffer);
-    c.pdf *= lights[lightId].selectionPdf;
+    c.pdf *= analyticLightSelectionPdf(lights[lightId]);
     return c;
 }
