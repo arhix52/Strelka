@@ -380,11 +380,11 @@ void MetalWavefrontIntegrator::reportSharcStats()
     };
     STRELKA_INFO(
         "SHARC stats: insertions={} failed={} collisions={} queries={} hits={} hit_rate={:.1f}% "
-        "evictions={} segment_rejects={} footprint_rejects={} accumulation_clamps={} nonfinite_rejects={} "
-        "radiance_bits={} sample_bits={}",
+        "evictions={} segment_rejects={} footprint_rejects={} receiver_rejects={} accumulation_clamps={} "
+        "nonfinite_rejects={} radiance_bits={} sample_bits={}",
         stats[SHARC_STAT_INSERTION], stats[SHARC_STAT_INSERTION_FAILURE], stats[SHARC_STAT_COLLISION], attempts, hits,
         attempts ? 100.0 * static_cast<double>(hits) / attempts : 0.0, stats[SHARC_STAT_EVICTION],
-        stats[SHARC_STAT_SEGMENT_REJECT], stats[SHARC_STAT_FOOTPRINT_REJECT],
+        stats[SHARC_STAT_SEGMENT_REJECT], stats[SHARC_STAT_FOOTPRINT_REJECT], stats[SHARC_STAT_RECEIVER_REJECT],
         stats[SHARC_STAT_ACCUMULATION_CLAMP], stats[SHARC_STAT_NONFINITE_REJECT],
         occupiedBits(stats[SHARC_STAT_MAX_RADIANCE_FIXED]), occupiedBits(stats[SHARC_STAT_MAX_SAMPLE_COUNT]));
 }

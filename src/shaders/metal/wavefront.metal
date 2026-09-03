@@ -7,6 +7,7 @@
 // instructions, so it does not compete for the instruction cache this kernel is
 // bound by -- which is the whole reason the branch below is behind a constant.
 #include <strelka/material/openpbr/openpbr_bridge.h>
+#include <sharc_query_eligibility.h>
 
 // Path state stays pixel-indexed while queues compact live indices between stages.
 // Shadow traversal is deferred so its incoherent work stays out of shade.
@@ -400,6 +401,30 @@ static inline uint32_t packSharcRoughness(float roughness)
 static inline float unpackSharcRoughness(uint32_t depthAndFlags)
 {
     return float((depthAndFlags & PATH_SHARC_ROUGHNESS_MASK) >> PATH_SHARC_ROUGHNESS_SHIFT) / 255.0f;
+}
+
+// Angular bandwidth of the outgoing radiance represented by one SHARC entry.
+// Use the narrowest active reflective layer: one sharp coat over a diffuse base
+// is still view dependent when all layers share a single cached value.
+static inline float sharcReceiverRoughness(bool isOpenPBR,
+                                           thread const OpenPBRParams& openpbr,
+                                           thread const SurfaceInteraction& si)
+{
+    float roughness = 1.0f;
+    if (isOpenPBR)
+    {
+        roughness = sharcReceiverLobeRoughness(roughness, openpbr.specular_roughness, openpbr.specular_weight);
+        roughness = sharcReceiverLobeRoughness(roughness, openpbr.coat_roughness, openpbr.coat_weight);
+        roughness = sharcReceiverLobeRoughness(roughness, openpbr.fuzz_roughness, openpbr.fuzz_weight);
+        return roughness;
+    }
+
+    // Standard PBR always has a Fresnel reflection lobe. Clearcoat and sheen
+    // add their own view-dependent layers only when their weights are nonzero.
+    roughness = sharcReceiverLobeRoughness(roughness, si.roughness, 1.0f);
+    roughness = sharcReceiverLobeRoughness(roughness, si.clearcoat_roughness, si.clearcoat);
+    roughness = sharcReceiverLobeRoughness(roughness, si.sheen_roughness, si.sheen);
+    return roughness;
 }
 
 // ---------------------------------------------------------------------------
@@ -2558,10 +2583,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     const float3 diffuseAlbedo = float3(si.albedo) * (1.0f - si.metallic);
     const float3 specularF0 = gltf_f0(si.ior, si.specular, si.specular_color, si.albedo, si.metallic);
     const float3 materialDemodulation = sharcMaterialDemodulation(diffuseAlbedo, specularF0);
-    if (SPEC_SHARC_UPDATE)
-    {
-        si.roughness = max(si.roughness, uniforms.sharcRoughnessThreshold);
-    }
+    const float receiverRoughness = sharcReceiverRoughness(isOpenPBR, openpbrMat, si);
+    const bool cacheableReceiver = sharcReceiverCacheEligible(
+        receiverRoughness,
+        isOpenPBR ? openpbrMat.transmission_weight : max(si.transmission, si.diffuse_transmission), isFibre,
+        uniforms.sharcRoughnessThreshold);
 
     if (SPEC_SHARC_UPDATE && uniforms.sharcCapacity != 0u)
     {
@@ -2581,6 +2607,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             sharcUpdateHit(updateState, uniforms, sharcHashEntries, sharcAccumulation, sharcResolved,
                            uniforms.sharcDebug != 0u ? iorStats + IOR_STAT_COUNT : nullptr, si.position,
                            si.geometry_normal, -rayDir, 0.0f, materialDemodulation, float3(0.0f), surfaceEmission,
+                           cacheableReceiver,
                            float(sharcHash(tid ^ uniforms.sharcFrameIndex)) * (1.0f / 4294967296.0f), responsive);
         sharcUpdates[updateIndex] = updateState;
         if (!continueTracing)
@@ -2631,9 +2658,13 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             {
                 atomic_fetch_add_explicit(&sharcStats[SHARC_STAT_FOOTPRINT_REJECT], 1u, memory_order_relaxed);
             }
+            if (sharcStats && validSegment && validLobe && !cacheableReceiver)
+            {
+                atomic_fetch_add_explicit(&sharcStats[SHARC_STAT_RECEIVER_REJECT], 1u, memory_order_relaxed);
+            }
             float3 cached = float3(0.0f);
             uint32_t cachedSamples = 0u;
-            if (validSegment && validLobe &&
+            if (validSegment && validLobe && cacheableReceiver &&
                 sharcQuery(uniforms, sharcHashEntries, sharcResolved, sharcStats, si.position, si.geometry_normal,
                            -rayDir, materialDemodulation, cached, cachedSamples))
             {
@@ -2678,9 +2709,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     //
     // Placed after si is finished with rather than beside initSurfaceInteraction:
     // the nested-dielectric exterior IOR is resolved above, and prepare() reads
-    // it. (The SHaRC roughness floor applied up there does not reach OpenPBR --
-    // it clamps si.roughness, while these lobes read their own parameters. That
-    // is a cache heuristic, not shading, so it is a gap rather than a defect.)
+    // it. SHARC eligibility never mutates these shading parameters.
     OpenPBR_PreparedBsdf openpbrPrepared;
     if (isOpenPBR)
     {
@@ -2799,7 +2828,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     }
 
     const bool nextSpecular = ((sampleResult.event_type & BSDF_EVENT_SPECULAR) != 0);
-    if (SPEC_SHARC_UPDATE)
+    if (SPEC_SHARC_UPDATE && cacheableReceiver)
     {
         const float directionWeight =
             (sampleResult.event_type & BSDF_EVENT_DIFFUSE) != 0 ? 0.0f : 1.0f - saturate(si.roughness);

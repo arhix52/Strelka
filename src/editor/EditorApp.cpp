@@ -742,13 +742,14 @@ void EditorApp::loadSettings()
     // spare bit for a per-light tag, so the companion entries hold the whole
     // lighting signal and come out of the configured capacity.
     m_settingsManager->setAs<bool>("render/pt/sharcMetalResponsive", false);
-    m_settingsManager->setAs<float>("render/pt/sharcSceneScale", 50.0f);
     m_settingsManager->setAs<float>("render/pt/sharcRoughnessThreshold", 0.4f);
     m_settingsManager->setAs<float>("render/pt/sharcRadianceScale", 1000.0f);
     m_settingsManager->setAs<uint32_t>("render/pt/sharcUpdateDownscale", 5u);
     m_settingsManager->setAs<uint32_t>("render/pt/sharcPropagationDepth", 2u);
     m_settingsManager->setAs<uint32_t>("render/pt/sharcDebug", 0u);
-    m_settingsManager->setAs<uint32_t>("render/pt/sharcLevelBias", 0u);
+    // The compact key stores unsigned 5-bit LODs. Offset the exponent into the
+    // middle of that range so sub-unit indoor distances do not all clamp to LOD 1.
+    m_settingsManager->setAs<uint32_t>("render/pt/sharcLevelBias", 16u);
     m_settingsManager->setAs<bool>("render/pt/sharcMaterialDemodulation", true);
     m_settingsManager->setAs<bool>("render/pt/sharcSeparateEmissive", true);
     m_settingsManager->setAs<bool>("render/pt/sharcDirectional", false);

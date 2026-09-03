@@ -118,9 +118,6 @@ struct RenderConfig
     /// whole lighting signal and come out of the configured capacity. Off by
     /// default for that reason. See docs/sharc-metal.md.
     bool sharcMetalResponsive = false;
-    /// World-space voxel scale: larger values make smaller voxels. Metal only;
-    /// OptiX sizes its grid from sharcBaseSize in pixels.
-    float sharcSceneScale = 50.0f;
     float sharcRoughnessThreshold = 0.4f;
     /// Quantization factor for the atomic radiance accumulator. Reduce it if the
     /// diagnostics report 31-32 occupied radiance bits.
@@ -130,7 +127,7 @@ struct RenderConfig
     /// Vertices an update path keeps behind it for back-propagation.
     uint32_t sharcPropagationDepth = 2;
     uint32_t sharcDebug = 0;
-    int32_t sharcLevelBias = 0;
+    int32_t sharcLevelBias = 16;
     bool sharcMaterialDemodulation = true;
     bool sharcSeparateEmissive = true;
     bool sharcDirectional = false;

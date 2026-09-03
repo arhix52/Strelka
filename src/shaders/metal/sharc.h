@@ -113,8 +113,7 @@ static inline uint32_t sharcNormalBits(float3 normal)
 
 static inline float sharcVoxelSizeForLevel(constant Uniforms& uniforms, int32_t level)
 {
-    return max(exp2(float(level - uniforms.sharcLevelBias)) / max(uniforms.sharcSceneScale, kSharcMinimumVoxelSize),
-               kSharcMinimumVoxelSize);
+    return max(exp2(float(level - uniforms.sharcLevelBias)) * uniforms.sharcBaseSize, kSharcMinimumVoxelSize);
 }
 
 // Compact hash-grid layout: 8 signed bits per axis, 5 for the logarithmic
@@ -686,6 +685,7 @@ static inline bool sharcUpdateHit(thread SharcUpdateState& state,
                                   float3 materialDemodulation,
                                   float3 directLighting,
                                   float3 emissive,
+                                  bool cacheableReceiver,
                                   float randomValue,
                                   bool responsive)
 {
@@ -699,7 +699,8 @@ static inline bool sharcUpdateHit(thread SharcUpdateState& state,
     bool continueTracing = true;
     const uint32_t resamplingDepth =
         uint32_t(round(mix(1.0f, float(max(uniforms.sharcPropagationDepth, 1u)), saturate(randomValue))));
-    if ((uniforms.sharcFlags & SHARC_FLAG_CACHE_RESAMPLING) != 0u && resamplingDepth <= state.pathLength)
+    if (cacheableReceiver && (uniforms.sharcFlags & SHARC_FLAG_CACHE_RESAMPLING) != 0u &&
+        resamplingDepth <= state.pathLength)
     {
         float3 cached = float3(0.0f);
         uint32_t count = 0u;
@@ -723,6 +724,14 @@ static inline bool sharcUpdateHit(thread SharcUpdateState& state,
     if (depth == 0u)
     {
         return continueTracing;
+    }
+    // The radiance traced through this vertex has already been propagated to
+    // earlier eligible entries. Do not give a glossy/transmissive receiver its
+    // own bandwidth-limited entry, but keep tracing so later light still reaches
+    // those earlier vertices with the intervening BSDF throughput applied.
+    if (!cacheableReceiver)
+    {
+        return true;
     }
     for (uint32_t i = depth - 1u; i > 0u; --i)
     {

@@ -51,10 +51,10 @@ the sparse grid; at 1920×1080 and downscale 5 it uses about 13.3 MiB.
 
 | SHARC behavior | Metal implementation / setting |
 | --- | --- |
-| Logarithmic world-space hash grid, normal octants, level bias | `sharc_scene_scale`, `sharc_level_bias`; compact 32-bit Metal key |
+| Perspective screen-sized logarithmic hash grid, normal octants | `sharc_base_size` in pixels; compact 32-bit Metal key |
 | Sparse update and independently propagated path segments | `sharc_update_downscale`, `sharc_propagation_depth` |
 | Resolve, temporal accumulation, stale eviction | `sharc_accum_frames`, `sharc_stale_frames`, shared with OptiX |
-| Query early-out with segment-length and glossy-footprint gates | `sharc_depth`, `sharc_metal_min_samples` (default 1, matching the upstream `> 0` threshold) |
+| Query early-out with segment, path-footprint and receiver-bandwidth gates | `sharc_depth`, `sharc_roughness_threshold`, `sharc_metal_min_samples` |
 | Bucket probing with an empty-slot early-out and collision-recovered history | 16-entry buckets, 2 empty slots, 8-slot resolve probe window |
 | Cache resampling during update | `sharc_cache_resampling` |
 | Material demodulation | `sharc_material_demodulation` |
@@ -72,8 +72,9 @@ updates the directionality weight after the current BSDF direction is sampled.
 It is off by default, as upstream's `SHARC_ENABLE_SH_ENCODING` is: it stops a
 bright glossy sample being reused in an unrelated direction, and pays for that
 with a first-order reconstruction of a signal a cell otherwise stores exactly.
-On `iso_bathroom` it costs about 6% relative error, so turn it on for a specific
-glossy artefact rather than by default.
+It cannot represent delta transmission and is not a substitute for rejecting a
+cache query on a receiver whose outgoing radiance is sharper than the cache can
+represent.
 
 ## Diagnostics
 
@@ -85,7 +86,7 @@ does; the background and any emitter along the way are kept out, because either
 is orders of magnitude brighter than a debug colour.
 
 - **Cache: voxel grid** is NVIDIA's `HashGridDebugColoredHash`. It reads no cache
-  buffer, so it works with SHaRC switched off and is where `sharc_scene_scale`
+  buffer, so it works with SHaRC switched off and is where `sharc_base_size`
   gets chosen before anything is allocated.
 - **Cache: radiance** is the sample's own SHaRC view -- the radiance a query
   would return. It is the one diagnostic that keeps the render's exposure and
@@ -142,11 +143,26 @@ current Strelka light ABI has no per-light responsiveness tag. Light and
 environment edits retain this short-history cache; material and geometry edits
 still invalidate it.
 
-`sharc_base_size` remains accepted for the older OptiX cache implementation. It
-does not affect the Metal SHARC grid; Metal voxel size is world-space and is
-controlled by `sharc_scene_scale` (larger values produce smaller voxels).
+`sharc_base_size` is the target perspective footprint in pixels for both
+backends. Field of view and render height are folded into the world-space base
+size each frame; changing either invalidates Metal's cache because its keys then
+describe a different grid. Metal offsets the logarithmic exponent by 16 so its
+unsigned compact LOD does not clamp ordinary indoor distances to the first level.
+The old Metal-only `sharc_scene_scale` key is ignored.
 The legacy `sharc_min_samples` key still sets both backends when explicitly
 present; `sharc_metal_min_samples` overrides it for this Metal implementation.
+
+Metal's compact default entry has no side, medium state, or angular
+representation; its optional first-order SH mode still cannot reconstruct a
+sharp lobe. `sharc_roughness_threshold` therefore also controls the minimum
+roughness of every active reflective layer at the receiver. Specular and diffuse
+transmission, plus fibre scattering, always continue tracing. The same rule is
+applied to render queries and update-pass cache resampling; rejected receivers
+do not consume entries, but their traced transport is still propagated to
+earlier cacheable vertices. The default is 0.4: the 256-spp bathroom check
+matches uncached path tracing at that value. Lower values recover more cache
+hits but admit angular bias; higher values give up still more cache use in
+glossy interiors.
 
 ## Reproducible scene evaluation
 
@@ -259,13 +275,16 @@ Use this scene matrix when changing cache behavior:
   voxels are too fine, entries go stale too quickly, or insert failures show
   insufficient capacity.
 - Many collisions/failed insertions: increase `sharc_capacity`; also inspect
-  whether `sharc_scene_scale` creates far more cells than the scene needs.
+  whether `sharc_base_size` creates far more cells than the scene needs.
 - High hit rate without speedup: paths are already short/cheap, update+resolve
   costs more than the terminated bounces, or max depth is too low for SHARC to
   remove meaningful work. Increase update downscale only after checking quality.
-- Speedup with visible bias or light leaks: use smaller voxels (increase scene
-  scale), raise the minimum sample count, and isolate material demodulation,
-  separate emissive, and directional encoding one at a time.
+- Speedup with visible bias or light leaks: use smaller voxels (reduce the pixel
+  size), raise the minimum sample count, and isolate material demodulation,
+  separate emissive, and directional encoding one at a time. If those do not
+  move the result, inspect the material at the query hit: the path-footprint
+  test describes the lobes before that hit and does not by itself make a
+  glossy/transmissive receiver safe for nondirectional outgoing radiance.
 - Lag after lighting changes: enable responsive lighting only for that test and
   tune `sharc_responsive_frames`; it intentionally costs extra cache work.
 - No benefit in animated geometry: Strelka clears SHARC on geometry refits for

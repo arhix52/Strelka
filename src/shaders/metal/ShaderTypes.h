@@ -201,8 +201,7 @@ struct Uniforms
     uint32_t sharcMinSamples; // before a voxel may be read
     uint32_t sharcDepth; // first bounce allowed to read the cache
     uint32_t sharcFlags;
-    float sharcBaseSize;
-    float sharcSceneScale;
+    float sharcBaseSize; // world size of the requested perspective footprint at unit distance
     float sharcRoughnessThreshold;
     float sharcRadianceScale;
     uint32_t sharcUpdateDownscale;
@@ -562,11 +561,12 @@ struct SharcUpdateState
 #define SHARC_STAT_COLLISION 5u
 #define SHARC_STAT_SEGMENT_REJECT 6u
 #define SHARC_STAT_FOOTPRINT_REJECT 7u
-#define SHARC_STAT_ACCUMULATION_CLAMP 8u
-#define SHARC_STAT_NONFINITE_REJECT 9u
-#define SHARC_STAT_MAX_RADIANCE_FIXED 10u
-#define SHARC_STAT_MAX_SAMPLE_COUNT 11u
-#define SHARC_STAT_COUNT 12u
+#define SHARC_STAT_RECEIVER_REJECT 8u
+#define SHARC_STAT_ACCUMULATION_CLAMP 9u
+#define SHARC_STAT_NONFINITE_REJECT 10u
+#define SHARC_STAT_MAX_RADIANCE_FIXED 11u
+#define SHARC_STAT_MAX_SAMPLE_COUNT 12u
+#define SHARC_STAT_COUNT 13u
 #define SHARC_HASH_ENTRY_STRIDE 4u
 #define SHARC_ACCUMULATION_ENTRY_STRIDE 32u
 #define SHARC_RESOLVED_ENTRY_STRIDE 32u

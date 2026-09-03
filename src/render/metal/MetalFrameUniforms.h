@@ -189,7 +189,7 @@ private:
     // the wavefront resolution (and therefore its own generation) is unchanged.
     uint32_t mSharcResourceGeneration = 0;
     uint32_t mSharcFlags = 0;
-    float mSharcSceneScale = -1.0f;
+    float mSharcBaseSize = -1.0f;
     int32_t mSharcLevelBias = 0;
     bool mSharcResetPending = false;
     PrevSettings mPrevSettings;

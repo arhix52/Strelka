@@ -244,8 +244,8 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.sharcResponsiveLighting = *v;
     if (auto v = tbl["render"]["sharc_metal_responsive"].value<bool>())
         cfg.sharcMetalResponsive = *v;
-    if (auto v = tbl["render"]["sharc_scene_scale"].value<double>())
-        cfg.sharcSceneScale = (float)*v;
+    if (tbl["render"]["sharc_scene_scale"])
+        STRELKA_WARNING("render.sharc_scene_scale is obsolete and ignored; use sharc_base_size in pixels");
     if (auto v = tbl["render"]["sharc_roughness_threshold"].value<double>())
         cfg.sharcRoughnessThreshold = (float)*v;
     if (auto v = tbl["render"]["sharc_radiance_scale"].value<double>())
@@ -473,7 +473,6 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/sharcResponsiveFrames", m_config.sharcResponsiveFrames);
     m_settings->setAs<bool>("render/pt/sharcResponsiveLighting", m_config.sharcResponsiveLighting);
     m_settings->setAs<bool>("render/pt/sharcMetalResponsive", m_config.sharcMetalResponsive);
-    m_settings->setAs<float>("render/pt/sharcSceneScale", m_config.sharcSceneScale);
     m_settings->setAs<float>("render/pt/sharcRoughnessThreshold", m_config.sharcRoughnessThreshold);
     m_settings->setAs<float>("render/pt/sharcRadianceScale", m_config.sharcRadianceScale);
     m_settings->setAs<uint32_t>("render/pt/sharcUpdateDownscale", m_config.sharcUpdateDownscale);

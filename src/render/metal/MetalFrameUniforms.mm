@@ -1,5 +1,7 @@
 #include "MetalFrameUniforms.h"
 
+#include "sharc_grid_size.h"
+
 #include <host/light_selection.h>
 
 #include <log.h>
@@ -46,7 +48,7 @@ void MetalFrameUniforms::release()
     safeRelease(mSharcResolvedBuffer);
     mSharcCapacity = 0;
     mSharcFlags = 0;
-    mSharcSceneScale = -1.0f;
+    mSharcBaseSize = -1.0f;
     mSharcLevelBias = 0;
     mSharcResetPending = false;
     mPrevSettings = {};
@@ -308,21 +310,18 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
         // The world size of one pixel at unit distance, times the number of
         // pixels a voxel should span. Everything scene-dependent -- field of
         // view, resolution -- is folded in here so the setting itself is not.
-        const float tanHalfFov =
-            std::tan(glm::radians(camera.fovForAspect(static_cast<float>(width) / static_cast<float>(height))) * 0.5f);
-        const float pixelAngle = 2.0f * tanHalfFov / (float)height;
-        const float sharcBaseSize = pixelAngle * std::max(1.0f, in.settings->getAs<float>("render/pt/sharcVoxelPixels"));
-        const float sharcSceneScale = std::max(in.settings->getAs<float>("render/pt/sharcSceneScale"), 1e-5f);
+        const float sharcBaseSize = sharcBaseSizeForPerspective(
+            glm::radians(camera.fovForAspect(static_cast<float>(width) / static_cast<float>(height))), height,
+            in.settings->getAs<float>("render/pt/sharcVoxelPixels"));
         const float sharcRadianceScale = std::max(in.settings->getAs<float>("render/pt/sharcRadianceScale"), 1.0f);
         const int32_t sharcLevelBias = static_cast<int32_t>(in.settings->getAs<uint32_t>("render/pt/sharcLevelBias"));
-        if (mSharcCapacity != 0u && (sharcSceneScale != mSharcSceneScale || sharcLevelBias != mSharcLevelBias))
+        if (mSharcCapacity != 0u && (sharcBaseSize != mSharcBaseSize || sharcLevelBias != mSharcLevelBias))
         {
             mSharcResetPending = true;
         }
-        mSharcSceneScale = sharcSceneScale;
+        mSharcBaseSize = sharcBaseSize;
         mSharcLevelBias = sharcLevelBias;
         pUniformData->sharcBaseSize = sharcBaseSize;
-        pUniformData->sharcSceneScale = sharcSceneScale;
         pUniformData->sharcRoughnessThreshold =
             std::clamp(in.settings->getAs<float>("render/pt/sharcRoughnessThreshold"), 0.0f, 1.0f);
         pUniformData->sharcRadianceScale = sharcRadianceScale;

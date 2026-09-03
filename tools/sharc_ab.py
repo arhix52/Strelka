@@ -140,6 +140,7 @@ def last_sharc_stats(log):
         r"SHARC stats: insertions=(\d+) failed=(\d+) collisions=(\d+) "
         r"queries=(\d+) hits=(\d+) hit_rate=([0-9.]+)% evictions=(\d+) "
         r"segment_rejects=(\d+) footprint_rejects=(\d+)"
+        r"(?: receiver_rejects=(\d+))?"
         r"(?: accumulation_clamps=(\d+) nonfinite_rejects=(\d+) "
         r"radiance_bits=(\d+) sample_bits=(\d+))?",
         log,
@@ -297,12 +298,19 @@ def main():
                     evictions,
                     segment_rejects,
                     footprint_rejects,
+                    receiver_rejects,
                     accumulation_clamps,
                     nonfinite_rejects,
                     radiance_bits,
                     sample_bits,
                 ) = stats
-                gated_candidates = int(queries) + int(segment_rejects) + int(footprint_rejects)
+                receiver_rejects = int(receiver_rejects or 0)
+                gated_candidates = (
+                    int(queries)
+                    + int(segment_rejects)
+                    + int(footprint_rejects)
+                    + receiver_rejects
+                )
                 effective_hit_rate = 100.0 * int(hits) / max(gated_candidates, 1)
                 occupancy = None
                 if args.sharc_capacity:
@@ -310,7 +318,7 @@ def main():
                 print(
                     "  cache: insertions=%s failed=%s collisions=%s queries=%s "
                     "hits=%s hit-rate=%s%% evictions=%s segment-rejects=%s "
-                    "footprint-rejects=%s" % stats[:9]
+                    "footprint-rejects=%s receiver-rejects=%d" % (*stats[:9], receiver_rejects)
                 )
                 if accumulation_clamps:
                     print(

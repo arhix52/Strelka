@@ -853,9 +853,9 @@ void EditorApp::drawRenderSettingsPanel()
                 {
                     ImGui::BeginTooltip();
                     ImGui::TextUnformatted(
-                        "How many pixels wide a voxel is, at any distance -- the size follows\n"
-                        "the distance to the camera, so one number means the same thing in a\n"
-                        "room and in a forest. Use the 'Cache: voxel grid' debug view to set it.");
+                        "How many pixels wide a voxel is in a perspective view. The size follows\n"
+                        "the distance to the camera, so one number means the same thing in a room\n"
+                        "and in a forest. Use the 'Cache: voxel grid' debug view to set it.");
                     ImGui::EndTooltip();
                 }
 
@@ -1091,17 +1091,17 @@ void EditorApp::drawRenderSettingsPanel()
                             m_settingsManager->setAs<uint32_t>("render/pt/sharcMetalMinSamples", metalMinSamples);
                             featureChanged = true;
                         }
-                        float sceneScale = m_settingsManager->getAs<float>("render/pt/sharcSceneScale");
-                        if (ImGui::DragFloat("Scene scale", &sceneScale, 0.25f, 0.25f, 1000.0f, "%.2f"))
+                        float receiverRoughness = m_settingsManager->getAs<float>("render/pt/sharcRoughnessThreshold");
+                        if (ImGui::SliderFloat("Minimum receiver roughness", &receiverRoughness, 0.0f, 1.0f, "%.2f"))
                         {
-                            m_settingsManager->setAs<float>("render/pt/sharcSceneScale", sceneScale);
+                            m_settingsManager->setAs<float>("render/pt/sharcRoughnessThreshold", receiverRoughness);
                             featureChanged = true;
                         }
                         if (ImGui::IsItemHovered())
                         {
                             ImGui::SetTooltip(
-                                "World-space voxel scale: larger values make smaller voxels. The "
-                                "voxel-grid debug view is how to choose it.");
+                                "A receiver with any sharper reflective layer keeps tracing because the current "
+                                "cache cannot represent it. Transmission and fibres always keep tracing.");
                         }
                         float radianceScale = m_settingsManager->getAs<float>("render/pt/sharcRadianceScale");
                         if (ImGui::DragFloat("Radiance fixed-point scale", &radianceScale, 10.0f, 1.0f, 100000.0f, "%.0f"))

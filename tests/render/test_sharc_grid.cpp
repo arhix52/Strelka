@@ -1,6 +1,8 @@
 #include <doctest/doctest.h>
 
 #include "sharc_grid.h"
+#include "sharc_grid_size.h"
+#include <sharc_query_eligibility.h>
 
 #include <cmath>
 #include <limits>
@@ -10,6 +12,50 @@
 #include <numbers>
 
 using namespace oka::sharc;
+
+TEST_CASE("Metal SHARC voxel size follows its requested perspective footprint")
+{
+    constexpr float fov = 0.0449924f;
+    constexpr uint32_t height = 540u;
+    constexpr float requestedPixels = 4.0f;
+    constexpr int32_t levelBias = 16;
+    const float pixelAngle = 2.0f * std::tan(fov * 0.5f) / static_cast<float>(height);
+    const float baseSize = oka::metal::sharcBaseSizeForPerspective(fov, height, requestedPixels);
+    CHECK(oka::metal::sharcBaseSizeForPerspective(fov, height * 2u, requestedPixels) == doctest::Approx(baseSize * 0.5f));
+
+    for (const float distance : { 0.05f, 0.25f, 0.75f, 1.0f, 3.0f, 10.0f, 100.0f })
+    {
+        const float voxelSize = oka::metal::sharcVoxelSizeForDistance(distance, baseSize, levelBias);
+        const float projectedPixels = voxelSize / (pixelAngle * distance);
+        CHECK(projectedPixels <= requestedPixels * 1.0001f);
+        CHECK(projectedPixels > requestedPixels * 0.5f * 0.9999f);
+    }
+}
+
+TEST_CASE("SHARC only reads receivers represented by its angular bandwidth")
+{
+    constexpr float minimumRoughness = 0.4f;
+
+    CHECK(sharcReceiverCacheEligible(1.0f, 0.0f, false, minimumRoughness));
+    CHECK(sharcReceiverCacheEligible(minimumRoughness, 0.0f, false, minimumRoughness));
+    CHECK_FALSE(sharcReceiverCacheEligible(0.399f, 0.0f, false, minimumRoughness));
+
+    // Even rough glass is not addressable by position + normal alone: the
+    // answer depends on side and medium state, neither of which is in the key.
+    CHECK_FALSE(sharcReceiverCacheEligible(1.0f, 0.001f, false, minimumRoughness));
+    CHECK_FALSE(sharcReceiverCacheEligible(1.0f, 0.0f, true, minimumRoughness));
+}
+
+TEST_CASE("SHARC receiver roughness follows the narrowest active layer")
+{
+    float roughness = 1.0f;
+    roughness = sharcReceiverLobeRoughness(roughness, 0.6f, 1.0f);
+    roughness = sharcReceiverLobeRoughness(roughness, 0.2f, 0.0f);
+    CHECK(roughness == doctest::Approx(0.6f));
+
+    roughness = sharcReceiverLobeRoughness(roughness, 0.3f, 0.25f);
+    CHECK(roughness == doctest::Approx(0.3f));
+}
 
 TEST_CASE("a voxel subtends the same angle wherever it is")
 {
