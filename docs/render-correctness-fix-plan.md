@@ -18,6 +18,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | H. Ill-conditioned ellipsoid intersection | Inverse-space quadratic overflows for `diag(1,1,1e-20)` although sampler/PDF are finite | Thin full-rank sampled-point round trip and inverse-quadratic mutation | Solve the ray/ellipsoid quadratic in scaled homogeneous cofactor coordinates | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
 | I. Sheared spherical-rectangle sampling | Normalized non-orthogonal edges move solid-angle samples off the affine proxy plane | Sheared parallelogram plane/PDF checks and old-frame mutation | Select the exact uniform-area path for non-rectangular affine parallelograms | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
 | J. Unrepresentable analytic area transforms | Finite axes near `1e20` overflow the float cofactor/determinant and produce NaN normal/PDF | Extreme-scale sampler/intersection/host-power test and exact-zero mutation | Reject affine area records whose device determinant is non-finite, consistently in sampling, intersection, and selection | FIXED | Shader compiled; shared source | Shared source; external CUDA validation required | pending | FIXED |
+| K. Invalid transformed light frames | Singular transforms normalize local emission axes to NaN while retaining positive selection power | Scene packing and host-power regressions for spot/projector/distant/IES point | Pack a finite zero sentinel and give invalid directional records zero outer PMF | FIXED | Shader compiled; packed ABI | Same packed ABI; external CUDA validation required | pending | FIXED |
 
 ## Per-finding probability records
 
@@ -496,3 +497,21 @@ is out of scope unless it blocks validation.
   4/4, targeted ASan+UBSan is clean, production Metal shaders compile, and the audit passes 793/793 tests with
   68,679,991 assertions. Actual MTLDevice environment execution remains clean; OptiX source shares the predicate but
   CUDA compile/runtime remains externally `UNVERIFIED`. Status: FIXED.
+
+## Adversarial correction K: invalid transformed light frames
+
+- Random variable/measure: light identity is a discrete PMF. Spot/projector/distant and IES point conditionals also
+  require a finite nonzero directional frame; an isotropic point delta does not.
+- Support/PDF: a singular transformed axis has no declared angular support and receives zero selection power. Valid
+  frames keep their existing cone/projector/delta measures and MIS strategies. The packed zero vector is an invalid
+  sentinel, never a fabricated fallback direction.
+- Reproducer/mutation: normalizing transformed local `-Z` under `diag(1,1,0)` produced a NaN direction while host
+  power stayed positive. Cone sampling and miss support then consumed NaNs or silently lost positive radiance.
+- Implementation: scene packing normalizes in double only after a finite positive length check; area cofactors get
+  the same finite guard. Host selection requires the direction for spot/projector/distant and IES point, while plain
+  isotropic point remains valid.
+- Validation: singular spot/projector/distant records are finite zero sentinels; invalid host powers are zero and an
+  isotropic point remains positive. Focused tests pass 21/21 assertions. Debug and Release CTest pass 4/4, targeted
+  ASan+UBSan is clean, production Metal shaders compile, and the full audit passes 795/795 tests with 68,680,008
+  assertions. Actual MTLDevice environment execution remains clean; OptiX consumes the same records but CUDA
+  compile/runtime remains externally `UNVERIFIED`. Status: FIXED.

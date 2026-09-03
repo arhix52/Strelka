@@ -106,6 +106,7 @@ TEST_CASE("a positive sharp distant light retains discrete selection support")
     oka::Scene::Light light;
     light.type = LIGHT_TYPE_DISTANT;
     light.color = glm::float4(2.0f, 1.0f, 0.5f, 1.0f);
+    light.normal = glm::float4(0.0f, 0.0f, -1.0f, 0.0f);
     light.halfAngle = 0.0f;
 
     // Its conditional distribution is a Dirac mass, so its continuous
@@ -300,9 +301,30 @@ TEST_CASE("analytic light power accounts for emitting measure")
     oka::Scene::Light point{};
     point.type = LIGHT_TYPE_POINT;
     point.color = glm::float4(1.0f);
+    point.points[0].y = -1.0f;
 
     CHECK(analyticLightPower(rect) == doctest::Approx(2.0 * std::numbers::pi));
     CHECK(analyticLightPower(point) == doctest::Approx(4.0 * std::numbers::pi));
+}
+
+TEST_CASE("invalid directional frames have zero selection power")
+{
+    oka::Scene::Light light{};
+    light.color = glm::float4(1.0f);
+    light.normal = glm::float4(0.0f);
+    light.halfAngle = 0.1f;
+
+    for (const int type : { LIGHT_TYPE_SPOT, LIGHT_TYPE_PROJECTOR, LIGHT_TYPE_DISTANT })
+    {
+        light.type = type;
+        CHECK(analyticLightPower(light) == 0.0);
+    }
+
+    light.type = LIGHT_TYPE_POINT;
+    light.points[0].y = 0.0f; // active IES profile needs the missing frame
+    CHECK(analyticLightPower(light) == 0.0);
+    light.points[0].y = -1.0f; // an isotropic point has no directional frame
+    CHECK(analyticLightPower(light) > 0.0);
 }
 
 TEST_CASE("analytic light power uses transformed smooth area")

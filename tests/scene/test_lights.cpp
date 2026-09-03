@@ -197,6 +197,25 @@ TEST_CASE("a rectangle mirrored through its plane keeps inverse-transpose orient
     CHECK(rectNormalFromPoints(ordinary) == rectNormalFromPoints(reflected));
 }
 
+TEST_CASE("singular transforms produce finite invalid directional-light records")
+{
+    for (const int type : { LIGHT_TYPE_SPOT, LIGHT_TYPE_PROJECTOR, LIGHT_TYPE_DISTANT })
+    {
+        Scene scene;
+        Scene::UniformLightDesc desc = discDesc();
+        desc.type = type;
+        desc.useXform = true;
+        desc.xform = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, 1.0f, 0.0f));
+        desc.outerConeAngle = 0.4f;
+        desc.halfAngle = 0.1f;
+        const Scene::Light& light = scene.getLights()[scene.createLight(desc)];
+        CHECK(glm::vec3(light.normal) == glm::vec3(0.0f));
+        CHECK(std::isfinite(light.normal.x));
+        CHECK(std::isfinite(light.normal.y));
+        CHECK(std::isfinite(light.normal.z));
+    }
+}
+
 TEST_CASE("analytic light visibility is packed for manual traversal")
 {
     Scene scene;

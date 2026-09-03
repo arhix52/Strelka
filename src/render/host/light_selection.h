@@ -120,6 +120,10 @@ inline double analyticLightPower(const Scene::Light& light)
         cleanLightPower(0.2126 * std::max(light.color.r, 0.0f) + 0.7152 * std::max(light.color.g, 0.0f) +
                         0.0722 * std::max(light.color.b, 0.0f));
     constexpr double pi = std::numbers::pi_v<double>;
+    const glm::dvec3 packedDirection(light.normal);
+    const double packedDirectionLengthSquared = glm::dot(packedDirection, packedDirection);
+    const bool hasFiniteDirection =
+        packedDirectionLengthSquared > 0.0 && std::isfinite(packedDirectionLengthSquared);
     double measure = 0.0;
     switch (light.type)
     {
@@ -175,19 +179,31 @@ inline double analyticLightPower(const Scene::Light& light)
         break;
     }
     case LIGHT_TYPE_POINT:
-        measure = 4.0 * pi;
+        if (light.points[0].y < 0.0f || hasFiniteDirection)
+        {
+            measure = 4.0 * pi;
+        }
         break;
     case LIGHT_TYPE_SPOT:
-        measure = coneSolidAngle(light.halfAngle);
+        if (hasFiniteDirection)
+        {
+            measure = coneSolidAngle(light.halfAngle);
+        }
         break;
     case LIGHT_TYPE_PROJECTOR:
-        measure = projectorSolidAngleFromFov(light.halfAngle, light.points[0].w);
+        if (hasFiniteDirection)
+        {
+            measure = projectorSolidAngleFromFov(light.halfAngle, light.points[0].w);
+        }
         break;
     case LIGHT_TYPE_DISTANT:
         // A zero-angle distant light is a Dirac mass, not a vanishing spherical
         // cap. Its conditional continuous PDF remains zero, but the outer
         // categorical proposal still needs a finite positive variance proxy.
-        measure = light.halfAngle <= 0.0f ? 1.0 : coneSolidAngle(light.halfAngle);
+        if (hasFiniteDirection)
+        {
+            measure = light.halfAngle <= 0.0f ? 1.0 : coneSolidAngle(light.halfAngle);
+        }
         break;
     case LIGHT_TYPE_DOME:
         measure = 4.0 * pi;

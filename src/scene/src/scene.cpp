@@ -35,8 +35,19 @@ glm::float3 transformedAreaLightNormal(const glm::float4x4& transform)
     const glm::float3 axisZ(transform * glm::float4(0.0f, 0.0f, 1.0f, 0.0f));
     const glm::float3 cofactor = glm::cross(axisX, axisY);
     const float determinant = glm::dot(axisX, glm::cross(axisY, axisZ));
-    return glm::length2(cofactor) > 0.0f && determinant != 0.0f ?
+    const float cofactorLengthSquared = glm::length2(cofactor);
+    return cofactorLengthSquared > 0.0f && std::isfinite(cofactorLengthSquared) && std::isfinite(determinant) &&
+                   determinant != 0.0f ?
                -glm::sign(determinant) * glm::normalize(cofactor) :
+               glm::float3(0.0f);
+}
+
+glm::float3 transformedDirectionOrZero(const glm::float4x4& transform, const glm::float3& direction)
+{
+    const glm::float3 transformed(transform * glm::float4(direction, 0.0f));
+    const double lengthSquared = glm::dot(glm::dvec3(transformed), glm::dvec3(transformed));
+    return lengthSquared > 0.0 && std::isfinite(lengthSquared) ?
+               transformed / static_cast<float>(std::sqrt(lengthSquared)) :
                glm::float3(0.0f);
 }
 
@@ -773,7 +784,8 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         // light space.
         mLights[lightId].points[2] = localTransform * glm::float4(1.f, 0.f, 0.f, 0.f);
         mLights[lightId].points[3] = localTransform * glm::float4(0.f, 1.f, 0.f, 0.f);
-        mLights[lightId].normal = glm::normalize(localTransform * glm::float4(0.0f, 0.0f, -1.0f, 0.0f));
+        mLights[lightId].normal = glm::float4(transformedDirectionOrZero(localTransform, glm::float3(0.0f, 0.0f, -1.0f)),
+                                             0.0f);
         mLights[lightId].type = desc.type;
         // Spot: the outer cone. Projector: half of the horizontal field of view,
         // which is the same quantity in the same field -- both are the angle at
@@ -792,7 +804,8 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].pad0 = 0.0f;
         mLights[lightId].pad1 = 0.0f;
         const glm::float4x4 localTransform = desc.useXform ? desc.xform : getTransform(desc);
-        mLights[lightId].normal = glm::normalize(localTransform * glm::float4(0.0f, 0.0f, -1.0f, 0.0f));
+        mLights[lightId].normal = glm::float4(transformedDirectionOrZero(localTransform, glm::float3(0.0f, 0.0f, -1.0f)),
+                                             0.0f);
     }
     else if (desc.type == LIGHT_TYPE_DOME)
     {
