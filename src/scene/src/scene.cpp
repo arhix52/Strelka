@@ -764,11 +764,19 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
     else if (desc.type == LIGHT_TYPE_DISTANT)
     {
         mLights[lightId].type = LIGHT_TYPE_DISTANT;
-        mLights[lightId].halfAngle = desc.halfAngle;
+        mLights[lightId].halfAngle =
+            std::isfinite(desc.halfAngle) ? std::clamp(desc.halfAngle, 0.0f, std::numbers::pi_v<float>) : 0.0f;
         mLights[lightId].pad0 = 0.0f;
         mLights[lightId].pad1 = 0.0f;
         const glm::float4x4 localTransform = desc.useXform ? desc.xform : getTransform(desc);
         mLights[lightId].normal = glm::normalize(localTransform * glm::float4(0.0f, 0.0f, -1.0f, 0.0f));
+    }
+    else if (desc.type == LIGHT_TYPE_DOME)
+    {
+        mLights[lightId].type = LIGHT_TYPE_DOME;
+        mLights[lightId].halfAngle = 0.0f;
+        mLights[lightId].pad0 = 0.0f;
+        mLights[lightId].pad1 = 0.0f;
     }
 
     const glm::float3 radiometric =

@@ -41,7 +41,7 @@ inline Scene::UniformLightDesc parseDesc(const nlohmann::json& light, const std:
     if (light.contains("range"))
         desc.range = light["range"].get<float>();
 
-    if (desc.type != LIGHT_TYPE_DISTANT && light.contains("position"))
+    if (desc.type != LIGHT_TYPE_DISTANT && desc.type != LIGHT_TYPE_DOME && light.contains("position"))
     {
         const auto& p = light["position"];
         desc.position = glm::float3(p[0], p[1], p[2]);
@@ -52,6 +52,10 @@ inline Scene::UniformLightDesc parseDesc(const nlohmann::json& light, const std:
     case LIGHT_TYPE_DISTANT:
         // JSON stores full angular diameter in degrees; GPU wants half-angle rad.
         desc.halfAngle = light.value("halfAngle", 0.53f) * 0.5f * (std::numbers::pi_v<float> / 180.0f);
+        if (!light.contains("unit"))
+            desc.intensityUnit = LIGHT_UNIT_RADIANCE;
+        break;
+    case LIGHT_TYPE_DOME:
         if (!light.contains("unit"))
             desc.intensityUnit = LIGHT_UNIT_RADIANCE;
         break;
@@ -124,7 +128,7 @@ inline nlohmann::json toJson(const Scene::UniformLightDesc& desc)
     {
         light["halfAngle"] = desc.halfAngle * 2.0f * (180.0f / std::numbers::pi_v<float>);
     }
-    else
+    else if (desc.type != LIGHT_TYPE_DOME)
     {
         light["position"] = { desc.position.x, desc.position.y, desc.position.z };
         if (desc.type == LIGHT_TYPE_RECT)
@@ -193,4 +197,3 @@ inline void resolveIes(Scene& scene, Scene::UniformLightDesc& desc, const std::s
 }
 
 } // namespace oka::lightjson
-

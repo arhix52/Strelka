@@ -41,6 +41,12 @@ TEST_CASE("Light JSON round-trip preserves desc fields")
     distant.intensity = 50000.0f;
     scene.createLight(distant);
 
+    Scene::UniformLightDesc dome{};
+    dome.type = LIGHT_TYPE_DOME;
+    dome.color = glm::float3(0.2f, 0.4f, 0.8f);
+    dome.intensity = 2.0f;
+    scene.createLight(dome);
+
     Scene::EnvLightDesc env{};
     env.texturePath = "hdr/studio.exr";
     env.intensity = 1.25f;
@@ -54,7 +60,7 @@ TEST_CASE("Light JSON round-trip preserves desc fields")
     Scene loaded;
     const fs::path jsonPath = fs::temp_directory_path() / "strelka_test_scene_light.json";
     REQUIRE(loadLightsJson(loaded, jsonPath.string()));
-    REQUIRE(loaded.getLightsDesc().size() == 2);
+    REQUIRE(loaded.getLightsDesc().size() == 3);
 
     const auto& r = loaded.getLightsDesc()[0];
     CHECK(r.type == LIGHT_TYPE_RECT);
@@ -73,6 +79,11 @@ TEST_CASE("Light JSON round-trip preserves desc fields")
     // Absent from the JSON entirely; the loader has to default it to visible.
     CHECK(d.visibleToCamera == true);
     CHECK(d.responsive == false);
+
+    const auto& sky = loaded.getLightsDesc()[2];
+    CHECK(sky.type == LIGHT_TYPE_DOME);
+    CHECK(sky.intensity == doctest::Approx(2.0f));
+    CHECK(sky.color == dome.color);
 
     // Bound once rather than re-fetched: getEnvLight() returns by value, so
     // each `->` was a fresh optional the has_value() above had never seen --

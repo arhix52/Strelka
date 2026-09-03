@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <random>
 
 // ============================================================================
@@ -336,6 +337,79 @@ TEST_CASE("cone solid angle spans the full sphere and matches the host bake")
     CHECK(coneLightSolidAnglePdf(0.0f) == 0.0f); // degenerate, not infinite
 }
 
+TEST_CASE("finite distant support is exactly its spherical cap")
+{
+    const float halfAngle = 0.37f;
+    const float boundary = std::cos(halfAngle);
+    const float expected = 1.0f / (4.0f * float(M_PI_F) * std::pow(std::sin(0.5f * halfAngle), 2.0f));
+
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, 1.0f) ==
+          doctest::Approx(expected).epsilon(1e-5));
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, boundary) ==
+          doctest::Approx(expected).epsilon(1e-5));
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, boundary - 1e-4f) == 0.0f);
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DOME, 0.0f, -1.0f) ==
+          doctest::Approx(1.0f / (4.0f * float(M_PI_F))));
+
+    Rng rng(0xCA9u);
+    double integral = 0.0;
+    constexpr int samples = 500000;
+    for (int i = 0; i < samples; ++i)
+    {
+        const float3 w = uniformSphereDirection(rng.next(), rng.next());
+        integral += 4.0 * double(M_PI_F) *
+                    double(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, w.z));
+    }
+    CHECK(integral / double(samples) == doctest::Approx(1.0).epsilon(0.02));
+}
+
+TEST_CASE("a sharp distant is delta and has no continuous density")
+{
+    CHECK(distantLightIsDelta(0.0f));
+    CHECK(distantLightIsDelta(-1.0f));
+    CHECK(distantLightIsDelta(std::numeric_limits<float>::quiet_NaN()));
+    CHECK_FALSE(distantLightIsDelta(1e-6f));
+    CHECK(lightIsDeltaForMis(LIGHT_TYPE_DISTANT, 0.0f));
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, 0.0f, 1.0f) == 0.0f);
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, 0.0f, -1.0f) == 0.0f);
+    CHECK(coneLightSolidAnglePdf(0.0f) == 0.0f);
+    CHECK(std::isfinite(coneLightSolidAnglePdf(0.0f)));
+}
+
+TEST_CASE("dome NEE and BSDF-miss shares form one Lambertian estimate")
+{
+    // Unit-radiance dome over a unit-albedo Lambertian surface has outgoing
+    // radiance exactly one. One sample from each strategy is combined. Removing
+    // the BSDF-miss term is the old implementation's mutation: it leaves only
+    // about 0.299 even though the MIS arithmetic inside either branch is valid.
+    Rng rng(0xD04Eu);
+    constexpr int samples = 500000;
+    double nee = 0.0;
+    double bsdfMiss = 0.0;
+    const double lightPdf = double(domeLightSolidAnglePdf());
+    for (int i = 0; i < samples; ++i)
+    {
+        const float3 lightDirection = uniformSphereDirection(rng.next(), rng.next());
+        if (lightDirection.z > 0.0f)
+        {
+            const double bsdfPdf = double(lightDirection.z) / double(M_PI_F);
+            const double weight = lightPdf / (lightPdf + bsdfPdf);
+            nee += (double(lightDirection.z) / double(M_PI_F)) * weight / lightPdf;
+        }
+
+        const double u = double(rng.next());
+        const double cosTheta = std::sqrt(1.0 - u);
+        const double bsdfPdf = cosTheta / double(M_PI_F);
+        const double weight = bsdfPdf / (bsdfPdf + lightPdf);
+        bsdfMiss += weight;
+    }
+
+    const double neeMean = nee / double(samples);
+    const double combined = neeMean + bsdfMiss / double(samples);
+    CHECK(neeMean == doctest::Approx(0.299).epsilon(0.02));
+    CHECK(combined == doctest::Approx(1.0).epsilon(0.01));
+}
+
 // ---------------------------------------------------------------------------
 // The dispatcher. One switch for both backends, so a light type cannot be
 // sampled by one and be invisible to the other.
@@ -403,14 +477,15 @@ TEST_CASE("point and spot lights are delta for MIS whatever their radius")
     // zero visibility mask, so no ray can hit one, and weighing the connection
     // against a BSDF pdf deducts a share the other strategy is switched off from
     // ever delivering. A radius used to exempt a light from this.
-    CHECK(lightIsDeltaForMis(LIGHT_TYPE_POINT));
-    CHECK(lightIsDeltaForMis(LIGHT_TYPE_SPOT));
+    CHECK(lightIsDeltaForMis(LIGHT_TYPE_POINT, 0.0f));
+    CHECK(lightIsDeltaForMis(LIGHT_TYPE_SPOT, 0.0f));
 
-    CHECK_FALSE(lightIsDeltaForMis(LIGHT_TYPE_RECT));
-    CHECK_FALSE(lightIsDeltaForMis(LIGHT_TYPE_DISC));
-    CHECK_FALSE(lightIsDeltaForMis(LIGHT_TYPE_SPHERE));
-    CHECK_FALSE(lightIsDeltaForMis(LIGHT_TYPE_DISTANT));
-    CHECK_FALSE(lightIsDeltaForMis(LIGHT_TYPE_DOME));
+    CHECK_FALSE(lightIsDeltaForMis(LIGHT_TYPE_RECT, 0.0f));
+    CHECK_FALSE(lightIsDeltaForMis(LIGHT_TYPE_DISC, 0.0f));
+    CHECK_FALSE(lightIsDeltaForMis(LIGHT_TYPE_SPHERE, 0.0f));
+    CHECK(lightIsDeltaForMis(LIGHT_TYPE_DISTANT, 0.0f));
+    CHECK_FALSE(lightIsDeltaForMis(LIGHT_TYPE_DISTANT, 0.05f));
+    CHECK_FALSE(lightIsDeltaForMis(LIGHT_TYPE_DOME, 0.0f));
 }
 
 // ---------------------------------------------------------------------------

@@ -217,10 +217,12 @@ TEST_CASE("a smaller sun disc concentrates the same irradiance into more radianc
 
 TEST_CASE("a zero-width sun disc does not produce infinity")
 {
-    // halfAngle is floored at 1e-6 before the solid angle is taken.
+    // A sharp distant light stores the coefficient of its directional delta;
+    // it is not converted to a fake finite radiance by inventing a tiny cone.
     const glm::float3 baked = bakeDistant(LIGHT_UNIT_IRRADIANCE, 10.0f, 0.0f);
     CHECK(std::isfinite(baked.x));
-    CHECK(baked.x > 0.0f);
+    CHECK(baked.x == doctest::Approx(10.0f));
+    CHECK(bakeDistant(LIGHT_UNIT_POWER, 10.0f, 0.0f).x == doctest::Approx(10.0f));
 }
 
 TEST_CASE("power on a distant light is treated as irradiance")

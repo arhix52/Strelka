@@ -1377,6 +1377,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
                           device atomic_uint* iorStats [[buffer(9)]],
                           device SharcUpdateState* sharcUpdates [[buffer(10)]],
                           device SharcAccumulationEntry* sharcAccumulation [[buffer(11)]],
+                          device const UniformLight* lights [[buffer(12)]],
                           texture2d<float> envMapTexture [[texture(0)]],
                           texture2d<float> envBackgroundTexture [[texture(1)]])
 {
@@ -1526,6 +1527,37 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
     {
         radiance += throughput * uniforms.missColor;
         sharcEnvironment = uniforms.missColor;
+    }
+
+    // Finite distant lights and domes are emitters at infinity. NEE samples
+    // them in shade; the complementary BSDF strategy reaches them here. Use the
+    // exact same selected-light density and cap support as connectToLight(). A
+    // sharp distant is a delta and deliberately has no continuous miss term.
+    if (SPEC_LIGHTS)
+    {
+        const float localSelectionPdf =
+            (SPEC_ENV_MAP && uniforms.hasEnvMap) ? (1.0f - uniforms.envMapColorTint.w) : 1.0f;
+        for (uint32_t lightId = 0; lightId < uniforms.numLights; ++lightId)
+        {
+            device const UniformLight& light = lights[lightId];
+            if (!lightIsInfinite(light.type))
+            {
+                continue;
+            }
+            const float cosToAxis = dot(rayDir, -float3(light.normal));
+            const float conditionalPdf = infiniteLightConditionalPdf(light.type, light.halfAngle, cosToAxis);
+            if (!(conditionalPdf > 0.0f))
+            {
+                continue;
+            }
+            const float effectivePdf = localSelectionPdf * light.selectionPdf * conditionalPdf;
+            const float mis = (depth == 0u || specularBounce || !neeDone || !(effectivePdf > 0.0f)) ?
+                                  1.0f :
+                                  computeMisWeight(p.lastBsdfPdf, effectivePdf, uniforms.misHeuristic);
+            const float3 infiniteRadiance = float3(light.color) * mis;
+            radiance += throughput * infiniteRadiance;
+            sharcEnvironment += infiniteRadiance;
+        }
     }
     if (SPEC_SHARC_UPDATE)
     {

@@ -63,6 +63,8 @@ inline int lightTypeFromName(const std::string& name)
         return LIGHT_TYPE_SPHERE;
     if (name == "distant" || name == "directional" || name == "sun")
         return LIGHT_TYPE_DISTANT;
+    if (name == "dome")
+        return LIGHT_TYPE_DOME;
     if (name == "point")
         return LIGHT_TYPE_POINT;
     if (name == "spot")
@@ -228,6 +230,10 @@ inline glm::float3 bakeLightRadiometric(int type,
         if (type == LIGHT_TYPE_DISTANT)
         {
             // Treat power as irradiance for a distant light — there is no area.
+            if (!(halfAngleRad > 0.0f))
+            {
+                return tint;
+            }
             const float omega = std::max(coneSolidAngle(halfAngleRad), 1e-8f);
             return tint / omega;
         }
@@ -248,7 +254,11 @@ inline glm::float3 bakeLightRadiometric(int type,
         return tint;
     case LIGHT_UNIT_IRRADIANCE: {
         // E (W/m²). Distant: L = E / Ω.
-        const float omega = std::max(coneSolidAngle(std::max(halfAngleRad, 1e-6f)), 1e-8f);
+        if (type == LIGHT_TYPE_DISTANT && !(halfAngleRad > 0.0f))
+        {
+            return tint;
+        }
+        const float omega = std::max(coneSolidAngle(halfAngleRad), 1e-8f);
         return tint / omega;
     }
     case LIGHT_UNIT_RADIANCE:

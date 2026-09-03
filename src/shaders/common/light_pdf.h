@@ -137,6 +137,21 @@ DEVICE_FUNC float domeLightSolidAnglePdf()
     return 1.0f / (4.0f * M_PI_F);
 }
 
+/// Clamp an authored distant-light half angle to the only geometrically
+/// meaningful range. `!(a > 0)` deliberately also catches NaN: a malformed
+/// angle must not reach sin/cos and contaminate a path.
+DEVICE_FUNC float distantLightHalfAngle(float halfAngle)
+{
+    return (halfAngle > 0.0f) ? fminf(halfAngle, M_PI_F) : 0.0f;
+}
+
+/// A zero-width distant light is a singular direction, not an arbitrarily
+/// narrow continuous cone.
+DEVICE_FUNC bool distantLightIsDelta(float halfAngle)
+{
+    return distantLightHalfAngle(halfAngle) == 0.0f;
+}
+
 /// The solid angle of a cone of the given half angle.
 ///
 /// 4 pi sin^2(a/2), never 2 pi (1 - cos a). The two are equal in exact
@@ -147,7 +162,7 @@ DEVICE_FUNC float domeLightSolidAnglePdf()
 /// it back out, so the two have to be the same number.
 DEVICE_FUNC float coneSolidAngleFromHalfAngle(float halfAngle)
 {
-    const float s = sinf(0.5f * halfAngle);
+    const float s = sinf(0.5f * distantLightHalfAngle(halfAngle));
     return 4.0f * M_PI_F * s * s;
 }
 
@@ -207,16 +222,36 @@ DEVICE_FUNC bool lightIsPunctual(int type)
 /// True when next-event estimation owns every direction reaching this light, so
 /// its contribution must not be weighed against the BSDF pdf.
 ///
-/// Every point, spot and projector, whatever its radius. That is a statement
-/// about this renderer and not about the geometry: OptiXRender::createInstance
-/// and MetalAccelStructure both give such a proxy a zero visibility mask, so no
-/// ray of any kind can hit one and the BSDF strategy is not merely unlikely to
-/// find it -- it cannot. Weighing a soft point against a pdf for a strategy that
-/// is switched off deducts a share that is never delivered, which is what a
-/// radius used to do here.
-DEVICE_FUNC bool lightIsDeltaForMis(int type)
+/// Every point, spot and projector, whatever its radius, plus a zero-angle
+/// distant light. Punctual proxy geometry has a zero visibility mask in both
+/// backends, so the BSDF strategy cannot reach it. The distant case is singular
+/// by definition. Neither kind has a continuous solid-angle competitor.
+DEVICE_FUNC bool lightIsDeltaForMis(int type, float halfAngle)
 {
-    return lightIsPunctual(type);
+    return lightIsPunctual(type) || (type == LIGHT_TYPE_DISTANT && distantLightIsDelta(halfAngle));
+}
+
+DEVICE_FUNC bool lightIsInfinite(int type)
+{
+    return type == LIGHT_TYPE_DISTANT || type == LIGHT_TYPE_DOME;
+}
+
+/// Conditional solid-angle density for evaluating an analytic infinite light
+/// along a direction selected by the BSDF. `cosToAxis` is dot(W, -normal) for a
+/// distant light and is ignored for a dome.
+DEVICE_FUNC float infiniteLightConditionalPdf(int type, float halfAngle, float cosToAxis)
+{
+    if (type == LIGHT_TYPE_DOME)
+    {
+        return domeLightSolidAnglePdf();
+    }
+    if (type != LIGHT_TYPE_DISTANT || distantLightIsDelta(halfAngle))
+    {
+        return 0.0f;
+    }
+
+    const float angle = distantLightHalfAngle(halfAngle);
+    return cosToAxis >= cosf(angle) ? coneLightSolidAnglePdf(angle) : 0.0f;
 }
 
 /// Everything the density of one light depends on, unpacked from whichever

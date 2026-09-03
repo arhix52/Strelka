@@ -617,6 +617,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(mIorStatsBuffer, 0, 9);
             bind(mSharcUpdateStateBuffer, 0, 10);
             bind(scene.sharcAccumulationBuffer, 0, 11);
+            bind(scene.lightBuffer, 0, 12);
             if (scene.environment && scene.environment->state().mapTexture)
             {
                 table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
@@ -1087,6 +1088,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBuffer(mIorStatsBuffer, 0, 9);
             enc->setBuffer(mSharcUpdateStateBuffer, 0, 10);
             enc->setBuffer(scene.sharcAccumulationBuffer, 0, 11);
+            enc->setBuffer(scene.lightBuffer, 0, 12);
             if (scene.environment && scene.environment->state().mapTexture)
             {
                 enc->setTexture(scene.environment->state().mapTexture, 0);

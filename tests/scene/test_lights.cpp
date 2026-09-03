@@ -185,6 +185,21 @@ TEST_CASE("distant lights emit along their orientation too")
     CHECK(normal.z == doctest::Approx(-1.0f).epsilon(1e-4));
 }
 
+TEST_CASE("a dome survives scene packing as an infinite light")
+{
+    Scene scene;
+    Scene::UniformLightDesc desc{};
+    desc.type = LIGHT_TYPE_DOME;
+    desc.color = glm::float3(0.25f, 0.5f, 1.0f);
+    desc.intensity = 3.0f;
+    const uint32_t id = scene.createLight(desc);
+
+    const Scene::Light& light = scene.getLights()[id];
+    CHECK(light.type == LIGHT_TYPE_DOME);
+    CHECK(glm::float3(light.color) == desc.color * desc.intensity);
+    CHECK(scene.getLightInstanceId(id) == uint32_t(-1));
+}
+
 TEST_CASE("editing a rect light moves its geometry with it")
 {
     Scene scene;

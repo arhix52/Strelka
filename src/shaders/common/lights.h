@@ -267,6 +267,7 @@ static __device__ void createCoordinateSystem(const float3& N, float3& Nt, float
 
 static __device__ float3 SampleCone(float2 uv, float angle, float3 direction, float& pdf) {
 
+    angle = distantLightHalfAngle(angle);
     float phi = 2.0 * M_PIf * uv.x;
     const float halfSin = sin(0.5f * angle);
     float cosTheta = 1.0 - uv.y * (2.0f * halfSin * halfSin);
@@ -287,7 +288,17 @@ static __inline__ __device__ LightSampleData SampleDistantLight(const UniformLig
 {
     LightSampleData lightSampleData;
     float pdf = 0.0f;
-    float3 coneSample = SampleCone(u, l.halfAngle, -make_float3(l.normal), pdf);
+    const float3 axis = -make_float3(l.normal);
+    float3 coneSample;
+    if (distantLightIsDelta(l.halfAngle))
+    {
+        coneSample = axis;
+        pdf = deltaLightPdf();
+    }
+    else
+    {
+        coneSample = SampleCone(u, l.halfAngle, axis, pdf);
+    }
 
     lightSampleData.area = 0.0f;
     lightSampleData.distToLight = 1e9;

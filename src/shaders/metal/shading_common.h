@@ -760,7 +760,7 @@ LightConnection connectLight(constant Uniforms& uniforms,
     // MetalAccelStructure gives a point or spot proxy a zero visibility mask, so
     // no ray can hit one and there is no second strategy to balance against.
     // Exempting a soft one deducted a share the BSDF half never delivered.
-    c.isDelta = lightIsDeltaForMis(light.type);
+    c.isDelta = lightIsDeltaForMis(light.type, light.halfAngle);
 
     float3 Li = float3(light.color);
     if (lightIsPunctual(light.type))

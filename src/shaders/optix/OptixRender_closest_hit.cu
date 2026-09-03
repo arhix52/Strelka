@@ -346,7 +346,7 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
     LightConnection c = makeEmptyConnection();
     c.toLight = lightSampleData.L;
     // Point and spot proxies are invisible to BSDF rays, so all are delta for MIS.
-    c.isDelta = lightIsDeltaForMis(light.type);
+    c.isDelta = lightIsDeltaForMis(light.type, light.halfAngle);
 
     float3 Li = make_float3(light.color);
     if (lightIsPunctual(light.type))
@@ -1399,6 +1399,33 @@ extern "C" __global__ void __miss__ms()
     {
         MissData* miss_data = reinterpret_cast<MissData*>(optixGetSbtDataPointer());
         radiance = prd->throughput * miss_data->bg_color;
+    }
+
+    // Analytic emitters at infinity need the same complementary BSDF strategy
+    // as a textured environment. Each emitter is a separate integrand
+    // component, weighed against the probability that NEE selected that light
+    // and then sampled this direction. A zero-angle distant is singular and is
+    // intentionally absent from this continuous miss integral.
+    const float localSelectionPdf = params.hasEnvMap ? 0.5f : 1.0f;
+    for (uint32_t lightId = 0; lightId < params.scene.numLights; ++lightId)
+    {
+        const UniformLight& light = params.scene.lights[lightId];
+        if (!lightIsInfinite(light.type))
+        {
+            continue;
+        }
+        const float cosToAxis = dot(ray_dir, -make_float3(light.normal));
+        const float conditionalPdf = infiniteLightConditionalPdf(light.type, light.halfAngle, cosToAxis);
+        if (!(conditionalPdf > 0.0f))
+        {
+            continue;
+        }
+        const float effectivePdf = localSelectionPdf * conditionalPdf / params.scene.numLights;
+        const float misWeight =
+            (prd->depth == 0 || prd->specularBounce || !prd->neeDone || !(effectivePdf > 0.0f)) ?
+                1.0f :
+                computeMisWeight(prd->lastBsdfPdf, effectivePdf, params.misHeuristic);
+        radiance += prd->throughput * make_float3(light.color) * misWeight;
     }
 
     prd->radiance += clampIndirectContribution(radiance, prd->depth, params.clampIndirect);
