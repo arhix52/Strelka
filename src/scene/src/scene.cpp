@@ -111,6 +111,28 @@ bool authoredLightScalarsAreFinite(const Scene::UniformLightDesc& desc)
     }
 }
 
+float packedAnalyticLightSurfaceArea(const Scene::Light& light)
+{
+    if (light.type == LIGHT_TYPE_RECT)
+    {
+        const glm::float3 edgeX(light.points[1] - light.points[0]);
+        const glm::float3 edgeY(light.points[3] - light.points[0]);
+        const float inverseArea = inverseFiniteCrossLength(edgeX, edgeY);
+        return inverseArea > 0.0f ? 1.0f / inverseArea : 0.0f;
+    }
+    if (light.type == LIGHT_TYPE_DISC)
+    {
+        const float areaPdf = analyticDiscAreaPdf(glm::float3(light.points[2]), glm::float3(light.points[3]));
+        return areaPdf > 0.0f ? 1.0f / areaPdf : 0.0f;
+    }
+    if (light.type == LIGHT_TYPE_SPHERE)
+    {
+        return analyticEllipsoidSurfaceArea(glm::float3(light.points[0]), glm::float3(light.points[2]),
+                                             glm::float3(light.points[3]));
+    }
+    return -1.0f;
+}
+
 bool packedLightIsFinite(const Scene::Light& light)
 {
     auto finiteVector = [](const glm::float4& value) {
@@ -955,11 +977,16 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
     }
 
     const bool enabledAndSupported = desc.enabled && lightHasSupport;
-    const glm::float3 radiometric =
-        enabledAndSupported ?
-            bakeLightRadiometric(desc.type, desc.intensityUnit, desc.color, desc.intensity, desc.width, desc.height,
-                                 desc.radius, desc.halfAngle, desc.outerConeAngle, desc.projectorAspect) :
-            glm::float3(0.0f);
+    const float surfaceArea = packedAnalyticLightSurfaceArea(mLights[lightId]);
+    glm::float3 radiometric(0.0f);
+    if (enabledAndSupported)
+    {
+        radiometric = desc.intensityUnit == LIGHT_UNIT_POWER && surfaceArea >= 0.0f ?
+                          bakeAreaLightPower(desc.color, desc.intensity, surfaceArea) :
+                          bakeLightRadiometric(desc.type, desc.intensityUnit, desc.color, desc.intensity, desc.width,
+                                               desc.height, desc.radius, desc.halfAngle, desc.outerConeAngle,
+                                               desc.projectorAspect);
+    }
     if (!packedLightIsFinite(mLights[lightId]) || !finiteNonnegativeColor(radiometric))
     {
         disablePackedLight(mLights[lightId], desc.type);

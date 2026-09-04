@@ -45,6 +45,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | AH. Malformed IES profile ingestion | Metal packs undersized grids verbatim, direct one-plane profiles pack a grid device evaluation rejects, and the loader accepts partial/non-finite numeric tokens | malformed grid/angle/candela packer cases, one-plane normalization, and invalid LM-63 numeric-token fixtures | validate one neutral host profile representation before either backend upload; unfold a rotational plane; reject malformed LM-63 numbers at parse time | FIXED | Shared host packer compiled | Shared host packer; external CUDA required | this commit | UNVERIFIED |
 | AI. IES same-path reload | Re-registering a corrected profile path returns the old slot without replacing its angular data or publishing a light change | active-light same-path replacement and change-bit regression | preserve the stable slot but replace its profile contents and invalidate backend light resources | FIXED | Shared Scene update | Shared Scene update; external CUDA required | this commit | UNVERIFIED |
 | AJ. Environment round-trip fallback atoms | UV/direction correction maps finite-precision bin mismatches onto a common fallback; the first repair still collapsed 7.54% of one extreme-row lattice interval | endpoint and exact extreme-row collision mutations with selected/evaluated-bin agreement | treat a round-trip mismatch as numerical rejection and retry from two independent RNG dimensions | FIXED | Shared math compiled | Shared math; external CUDA required | this commit | UNVERIFIED |
+| AK. Transformed analytic POWER units | a 2x3 transform makes a POWER rectangle emit 6x the authored watts because radiance uses local area | packed rect/disc/ellipsoid world-area integration and local-area mutation | bake POWER radiance from the packed world surface area; leave RADIANCE unchanged | FIXED | Shared packed record | Shared packed record; external CUDA required | this commit | FIXED |
 
 ## Per-finding probability records
 
@@ -1428,3 +1429,24 @@ is out of scope unless it blocks validation.
   group passes 5,943 assertions in Debug, Release, and ASan+UBSan, and production Metal shaders compile. Actual-device
   and full-audit results follow the scoped commit; OptiX consumes the same sampler but remains externally runtime
   `UNVERIFIED`.
+
+## Finding AK: transformed analytic POWER units
+
+- Random variable and measure: unchanged. A finite analytic light first has a discrete selection mass and then a
+  conditional point density on its packed world-space surface; rectangle, affine disc, and ellipsoid samples use
+  world area before conversion to solid angle.
+- Support: exactly the packed analytic surface shared by sampling, visibility, and intersection. A valid transformed
+  surface has positive support; singular or unrepresentable surfaces retain zero support.
+- Conditional/marginal PDF and selection PMF: unchanged. `p_omega` remains the represented outer light PMF times
+  `p_A distance^2 / abs(n_light dot -wi)`. The authored POWER unit affects radiance and the resulting power-weighted
+  outer PMF, not the conditional density.
+- Delta/continuous classification and MIS: rectangle, disc, and sphere/ellipsoid lights remain continuous. NEE and
+  BSDF-hit strategies evaluate the same packed radiance on the same analytic surface.
+- Reproducer: `Scene::updateLight()` packs transformed world geometry but calls `bakeLightRadiometric()` with the
+  authored local width/height/radius. Under `diag(2,3,1)`, a POWER rectangle or disc therefore emits six times the
+  requested flux. RADIANCE units are correctly transform-invariant and must not change.
+- Implementation and result: `Scene::updateLight()` derives area from the already packed world-space rectangle,
+  affine disc, or ellipsoid and uses it only for POWER-to-radiance conversion. The pre-fix integration returned
+  `3600 W`, `3600 W`, and `2333.94 W` for rect, disc, and ellipsoid records authored as `600 W`; all three now
+  integrate to `600 W` within `2e-4` relative error. The unchanged RADIANCE control stays at its authored value.
+  The focused unit group passes 9/9 cases and 40/40 assertions; both backends consume the same packed radiance.

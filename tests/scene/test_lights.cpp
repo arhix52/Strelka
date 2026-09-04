@@ -173,6 +173,55 @@ TEST_CASE("a sphere light record preserves every affine analytic axis")
     CHECK(glm::vec3(light.points[3]) == glm::vec3(0.0f, 0.0f, 2.0f));
 }
 
+TEST_CASE("power units use the transformed analytic surface area")
+{
+    const auto emittedPower = [](const Scene::Light& light) {
+        float area = 0.0f;
+        if (light.type == LIGHT_TYPE_RECT)
+        {
+            const glm::vec3 edgeX = glm::vec3(light.points[1] - light.points[0]);
+            const glm::vec3 edgeY = glm::vec3(light.points[3] - light.points[0]);
+            area = finiteVectorLength(glm::cross(edgeX, edgeY));
+        }
+        else if (light.type == LIGHT_TYPE_DISC)
+        {
+            area = analyticDiscArea(glm::vec3(light.points[2]), glm::vec3(light.points[3]));
+        }
+        else
+        {
+            area = analyticEllipsoidSurfaceArea(glm::vec3(light.points[0]), glm::vec3(light.points[2]),
+                                                 glm::vec3(light.points[3]));
+        }
+        return std::numbers::pi_v<float> * area * light.color.x;
+    };
+
+    for (const int type : { LIGHT_TYPE_RECT, LIGHT_TYPE_DISC, LIGHT_TYPE_SPHERE })
+    {
+        Scene scene;
+        Scene::UniformLightDesc desc = rectDesc();
+        desc.type = type;
+        desc.intensityUnit = LIGHT_UNIT_POWER;
+        desc.intensity = 600.0f;
+        desc.width = 2.0f;
+        desc.height = 3.0f;
+        desc.radius = 0.5f;
+        desc.useXform = true;
+        desc.xform = glm::scale(glm::mat4(1.0f), glm::vec3(2.0f, 3.0f, 1.0f));
+        const Scene::Light& light = scene.getLights()[scene.createLight(desc)];
+
+        CAPTURE(type);
+        CHECK(emittedPower(light) == doctest::Approx(desc.intensity).epsilon(2e-4));
+    }
+
+    Scene radianceScene;
+    Scene::UniformLightDesc radiance = rectDesc();
+    radiance.intensityUnit = LIGHT_UNIT_RADIANCE;
+    radiance.useXform = true;
+    radiance.xform = glm::scale(glm::mat4(1.0f), glm::vec3(2.0f, 3.0f, 1.0f));
+    const Scene::Light& light = radianceScene.getLights()[radianceScene.createLight(radiance)];
+    CHECK(light.color.x == doctest::Approx(radiance.intensity));
+}
+
 TEST_CASE("a sheared mirrored disc uses its inverse-transpose emission normal")
 {
     Scene scene;

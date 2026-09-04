@@ -196,6 +196,12 @@ inline float lightSurfaceArea(int type, float width, float height, float radius)
     }
 }
 
+inline glm::float3 bakeAreaLightPower(const glm::float3& color, float power, float surfaceArea)
+{
+    return color * std::max(power, 0.0f) /
+           (std::numbers::pi_v<float> * std::max(surfaceArea, 1e-8f));
+}
+
 /// Convert the authored intensity into the quantity the shader expects in
 /// UniformLight::color:
 ///   area / distant           → radiance (W/sr/m²)
@@ -255,8 +261,7 @@ inline glm::float3 bakeLightRadiometric(int type,
             const float omega = distantLightSolidAngle(halfAngleRad);
             return tint / omega;
         }
-        const float area = std::max(lightSurfaceArea(type, width, height, radius), 1e-8f);
-        return tint / (std::numbers::pi_v<float> * area);
+        return bakeAreaLightPower(color, intensity, lightSurfaceArea(type, width, height, radius));
     }
     case LIGHT_UNIT_INTENSITY:
         // Radiant intensity, W/sr, already. The name says candela and the
