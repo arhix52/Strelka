@@ -8,6 +8,110 @@ person needs and it is the same why either way.
 
 ## Where this stands
 
+**The table below this one is history.** Between it and now, the analytic
+lights were rewritten to intersect and sample exactly (`495e2a7` and the batch
+around it), and that work put back several times what the optimisation work had
+taken out. Measured 2026-09-05 at 1920x1080 `max_depth` 8, the configuration
+this file targets:
+
+| | iso_bathroom | kids_room | pine_scene | chess_set |
+|---|---|---|---|---|
+| recorded here (2026-08-21) | 8.10 | 8.60 | 18.30 | -- |
+| after the light-correctness batch | 39.3 | 216.6 | 40.5 | 12.1 |
+| after the four fixes below | **31.3** | **47.4** | **30.7** | **11.6** |
+
+kids_room was 24x its recorded number and is now 5.5x; the residue is real work
+(exact intersection, exact densities) and the shadow rays that carry it. At
+1280x720 `max_depth` 4, where the entries below were found: kids_room 86.7 ->
+19.0, iso_bathroom 15.0 -> 12.1, pine_scene 17.8 -> 13.9, chess_set 5.7 -> 5.25.
+The ladder is unchanged to the digit across all four, all 33 rows.
+
+What the four were, in the order they were found:
+
+1. **The representability check ran per ray, per light.**
+   `analyticEllipsoidIsRepresentable()` builds a scaled affine basis and probes
+   the area density along three object axes to certify that the sampler and the
+   intersector can both represent a light's transform. It is a property of the
+   transform. `Scene::setLight` already ran it and already refused to enable a
+   light that fails; the device ran it again for every ray-light pair. Hoisting
+   it: kids_room 86.7 -> 40.0. A single sphere light cost 24.6 ms of that.
+2. **Both scans over the light table were exact.** `findAnalyticAreaLightHit`
+   per ray segment, `analyticLightsOccludeSegment` before traversal on every
+   next-event connection. A bounding ball in front of them: 40.0 -> 22.4. The
+   radius bounds the surface from above, so the test can only remove work, and
+   `tests/render/test_procedural_analytic_lights.cpp` pins that over twenty
+   thousand rays.
+3. **The Sobol' sampler read its direction numbers the wrong way round, and
+   read too many of them.** Found by PC sampling, which is the first thing in
+   this file located by asking the hardware *where* rather than *what*: one
+   line held 54% of the launch's `long_scoreboard` samples. Two changes --
+   storing the table `[bit][dimension]` so a warp reads consecutive words, and
+   walking only the set bits of the sample index -- took kids_room 22.4 -> 19.6
+   -> 19.0 and pine_scene 17.6 -> 13.9. Values are unchanged, which
+   `tests/render/test_sobol_matrix.cpp` now pins; the table had no test before.
+4. **A rect or disc light rebuilt its own area density per draw.** Packed into
+   `pad0`, which those types write and never read.
+
+### The stall is not what this file used to say, and not what it looks like
+
+The counters have inverted since the table below was taken. iso_bathroom, one
+steady-state launch at 1280x720 depth 4, before today's fixes:
+
+| | recorded (2026-08-21) | 2026-09-05 |
+|---|---|---|
+| DRAM throughput | 44.6 % | **9.5 %** |
+| L2 hit rate | 93.1 % | 98.4 % |
+| stall `long_scoreboard` | 9.7 | **2.2** |
+| stall `no_instruction` | 13.5 | **36.1** |
+| SM throughput | 11.8 % | 7.4 % |
+
+`no_instruction` reads as "the instruction cache is thrashing". It is not:
+
+- **`imc_miss` is 55 PC samples out of 1 864 240.** Instruction fetch misses
+  effectively do not happen.
+- **Making the module 35% smaller changed nothing.** Compiling the OpenPBR path
+  out statically took the module from 12 MB to 7.8 MB and the frame from 22.2
+  to 22.2 ms.
+- **Moving cold code out of line changed nothing.** `__noinline__` on the whole
+  cold ellipsoid chain: 22.2 -> 22.2. An OptiX direct callable for the same
+  code, program group and SBT record and all: 22.2 -> 22.3, and the
+  continuation stack grew 2400 -> 2432 B. Both are reverted; the machinery is
+  not worth carrying for nothing.
+
+What is left is the shape of the launch: 255 registers per thread, 32%
+occupancy, 15.5 of 32 lanes active. Two or three warps per scheduler, half
+their lanes idle, and nothing else to issue the moment one of them waits.
+`no_instruction` is what that looks like from the counter's side.
+
+The register ceiling is the direct lever on it, and **its sign has flipped**
+since the note further down this file recorded that capping at 96 costs 11%.
+After the four fixes, at 1280x720 depth 4:
+
+| cap | iso_bathroom | kids_room | chess_set |
+|---|---|---|---|
+| 255 (default) | 12.1 | 19.5 | 5.2 |
+| 96 | 11.7 | 18.9 | 6.5 |
+| 64 | 12.2 | 18.2 | 9.0 |
+
+It buys 3-7% on the rooms and costs chess_set 25-73%, which is the scene whose
+DRAM throughput is 65%: more warps help a launch waiting on latency and hurt
+one already saturating bandwidth. `STRELKA_OPTIX_MAX_REGISTERS` stays a
+diagnostic rather than becoming a default, and picking it per scene from the
+first frames' counters is the version of this that would pay.
+
+Nsight Compute cannot open a section on an OptiX launch, and on AD102 it cannot
+PC-sample `no_instruction` at all -- the metric does not exist for the sampler,
+which is consistent with a warp that has no instruction having no address to
+attribute. The reasons it *can* sample are named explicitly in
+`/tmp/ncu_pcsamp.sh`; `-lineinfo` is now on in the OPTIXIR and
+`STRELKA_OPTIX_LINEINFO` turns on the module debug level that keeps the line
+table, both measured free.
+
+---
+
+## Where this stood in August
+
+
 The target is the interactive render: 1920x1080, one sample per launch,
 `max_depth` 8 -- what the editor asks for on every frame. ms/sample, best of
 three:
