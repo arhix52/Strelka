@@ -35,6 +35,7 @@
 #include "accel_build_policy.h"
 #include "ies_pack.h"
 #include <host/emissive_mesh_distribution.h>
+#include <host/projector_transfer.h>
 
 // ies_pack.h mirrors the two IES header structs so that it -- and its tests --
 // need no CUDA. This is where the mirrors are held to the originals in
@@ -198,15 +199,15 @@ namespace
 
 /// One image decoded to four float channels, and the deleter it needs.
 ///
-/// EXR comes back from tinyexr's malloc and everything else from stb, so the
-/// free is not the same call, which is why this carries its own release rather
-/// than handing back a bare pointer and a flag for the caller to remember.
+/// EXR and an explicitly converted LDR image use libc allocation; stb float
+/// decoding uses stb's allocator. This carries the matching release rather than
+/// handing back a bare pointer and a flag for the caller to remember.
 struct Rgba32fImage
 {
     float* pixels = nullptr;
     int width = 0;
     int height = 0;
-    bool fromExr = false;
+    bool libcAllocated = false;
 
     bool valid() const
     {
@@ -219,10 +220,10 @@ struct Rgba32fImage
         {
             return;
         }
-        if (fromExr)
+        if (libcAllocated)
         {
-            // tinyexr returns a malloc'd buffer, so free is the only correct
-            // deleter for it -- there is no RAII form of someone else's malloc.
+            // Both producers return a malloc'd buffer, so free is the matching
+            // deleter rather than stbi_image_free.
             // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
             free(pixels);
         }
@@ -245,8 +246,9 @@ Rgba32fImage decodeRgba32f(const std::string& path, const char* what)
 {
     Rgba32fImage img;
     const std::string ext = fs::path(path).extension().string();
-    img.fromExr = (ext == ".exr" || ext == ".EXR");
-    if (img.fromExr)
+    const bool fromExr = ext == ".exr" || ext == ".EXR";
+    img.libcAllocated = fromExr;
+    if (fromExr)
     {
         const char* err = nullptr;
         if (LoadEXR(&img.pixels, &img.width, &img.height, path.c_str(), &err) != TINYEXR_SUCCESS)
@@ -268,6 +270,52 @@ Rgba32fImage decodeRgba32f(const std::string& path, const char* what)
             STRELKA_ERROR("Failed to load {}: {}", what, path);
         }
     }
+    return img;
+}
+
+/// Decode a projector exactly as Metal's RGBA8Unorm_sRGB path does. HDR and
+/// EXR inputs are already linear floats; an LDR input stays at its authored
+/// eight-bit code until the IEC sRGB EOTF is applied to RGB. Alpha is linear.
+Rgba32fImage decodeProjectorRgba32f(const std::string& path)
+{
+    const std::string ext = fs::path(path).extension().string();
+    if (ext == ".exr" || ext == ".EXR" || stbi_is_hdr(path.c_str()))
+    {
+        return decodeRgba32f(path, "projector image");
+    }
+
+    Rgba32fImage img;
+    int channels = 0;
+    stbi_uc* encoded = stbi_load(path.c_str(), &img.width, &img.height, &channels, 4);
+    if (!encoded || img.width <= 0 || img.height <= 0)
+    {
+        STRELKA_ERROR("Failed to load projector image: {}", path);
+        stbi_image_free(encoded);
+        return img;
+    }
+
+    const size_t texels = static_cast<size_t>(img.width) * static_cast<size_t>(img.height);
+    // tinyexr already requires libc allocation in Rgba32fImage; using the same
+    // ownership path here keeps one release rule for converted float pixels.
+    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
+    img.pixels = static_cast<float*>(std::malloc(texels * 4u * sizeof(float)));
+    if (!img.pixels)
+    {
+        STRELKA_ERROR("Failed to allocate decoded projector image: {}", path);
+        stbi_image_free(encoded);
+        img.width = 0;
+        img.height = 0;
+        return img;
+    }
+    img.libcAllocated = true;
+    for (size_t i = 0; i < texels; ++i)
+    {
+        img.pixels[i * 4 + 0] = projector::srgb8ToLinear(encoded[i * 4 + 0]);
+        img.pixels[i * 4 + 1] = projector::srgb8ToLinear(encoded[i * 4 + 1]);
+        img.pixels[i * 4 + 2] = projector::srgb8ToLinear(encoded[i * 4 + 2]);
+        img.pixels[i * 4 + 3] = static_cast<float>(encoded[i * 4 + 3]) / 255.0f;
+    }
+    stbi_image_free(encoded);
     return img;
 }
 
@@ -4824,7 +4872,7 @@ void OptiXRender::createProjectorTextures()
     std::vector<cudaTextureObject_t> table(images.size(), 0);
     for (size_t i = 0; i < images.size(); ++i)
     {
-        Rgba32fImage image = decodeRgba32f(images[i], "projector image");
+        Rgba32fImage image = decodeProjectorRgba32f(images[i]);
         if (!image.valid())
         {
             // Left at zero: the shader then throws a plain white frame, so a

@@ -4,6 +4,9 @@
 // in the image out -- see the note at the top of projector.h for why the texture
 // fetch is not here and cannot be.
 #include <projector.h>
+#include <host/projector_transfer.h>
+
+#include <array>
 
 // The host mirror of projectorSolidAngle(), which bakes a projector's Watts.
 // The last case in this file is what keeps the copy honest.
@@ -184,4 +187,25 @@ TEST_CASE("a degenerate field of view does not produce infinity or zero area")
     const float narrow = projectorTanHalfX(0.0f);
     CHECK(narrow > 0.0f);
     CHECK(projectorSolidAngle(narrow, projectorTanHalfY(narrow, 1.0f)) > 0.0f);
+}
+
+TEST_CASE("projector LDR texels use the sRGB transfer on every backend")
+{
+    const std::array<uint8_t, 9> fixture = { 0u, 1u, 10u, 11u, 12u, 32u, 64u, 128u, 255u };
+    size_t gamma22Mutations = 0;
+    for (const uint8_t code : fixture)
+    {
+        const double encoded = static_cast<double>(code) / 255.0;
+        const double expected = encoded <= 0.04045 ? encoded / 12.92 : std::pow((encoded + 0.055) / 1.055, 2.4);
+        CHECK(oka::projector::srgb8ToLinear(code) == doctest::Approx(expected).epsilon(2e-6).scale(1e-8));
+
+        const double gamma22 = std::pow(encoded, 2.2);
+        if (std::abs(gamma22 - expected) > 1e-5)
+        {
+            ++gamma22Mutations;
+        }
+    }
+    // Mutation: stb's default LDR-to-float power curve disagrees at every
+    // useful midtone; endpoints alone would not make this test sensitive.
+    CHECK(gamma22Mutations >= 5u);
 }

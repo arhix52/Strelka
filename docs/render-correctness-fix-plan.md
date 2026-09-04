@@ -34,7 +34,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | W. Complete marginal PDF arithmetic | Conditional area PDFs saturate before outer PMFs, under-reporting a finite complete marginal density | tiny-area/low-selection analytic and mesh regressions | joint exponent-scaled evaluation of the area Jacobian and every outer PMF | FIXED | FIXED on MTLDevice | Shared source fixed; external CUDA required | this commit | UNVERIFIED |
 | X. Emissive mesh animated/textured consistency | Open/close transform powers are both zero while the mid-shutter triangle is positive; named OpenPBR emission map has zero host power; Metal hit chooses a ray-cone mip while NEE fixes level zero | motion extrema, OpenPBR texture bridge and texture-LOD regressions | conservative motion-support envelope and one strategy-independent emission evaluation | FIXED | FIXED on MTLDevice | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | Y. Runtime topology/mask safety | Headless create/edit recreates proxy geometry after its arrays were released (10 frozen failures); soft punctual CPU hits use a mismatched proxy (3 failures); material alpha/medium edits retain stale AS state | topology-free headless create/edit, common analytic CPU hit, and runtime AS rebuild | keep released topology immutable; dispatch exact analytic surfaces; rebuild material-dependent BLAS/TLAS state | FIXED | FIXED on MTLDevice; runtime rebuild source-validated | Source fixed; external CUDA required | this commit | UNVERIFIED |
-| Z. Projector transfer convention | Metal samples sRGB while OptiX decodes the same LDR source with a gamma-2.2 path | shared texel-value fixture and source mutation | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| Z. Projector transfer convention | Metal applies piecewise sRGB while OptiX applies gamma 2.2; 7/9 fixture values disagree, code 32 is low by 28% | exact 8-bit texel fixture and gamma-2.2 mutation | decode OptiX LDR codes with the IEC sRGB EOTF; preserve linear HDR/EXR and alpha | FIXED | FIXED on MTLDevice | Source fixed; external CUDA required | this commit | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -1142,3 +1142,42 @@ is out of scope unless it blocks validation.
   Release GPU-render regression also passes. Metal's runtime rebuild control path is host/source validated rather
   than dynamically edited by that GPU test. OptiX uses the corrected shared dispatch and rebuild order, but CUDA
   compilation/runtime remains externally `UNVERIFIED`.
+
+## Finding Z: projector transfer convention
+
+- Random variables and measure: unchanged. Projector identity is a discrete light-selection mass; a positive-radius
+  projector has a continuous area sample and a sharp projector is a positional atom. The image lookup is a
+  deterministic radiance multiplier, not another sampled random variable or PDF.
+- Support: the authored rectangular angular pyramid, edge fade, and finite image texels define radiometric support.
+  Transfer decoding must not turn finite encoded texels into NaN/Inf or alter alpha; a zero RGB code remains zero and
+  every positive RGB code remains positive.
+- Conditional and marginal PDFs: unchanged. The exact analytic surface/delta conditional and represented outer
+  selection PMFs do not depend on projector texel values after the light power proxy is built. The image only changes
+  the integrand evaluated for a direction already in support.
+- Selection PMF: unchanged. Projector selection continues to use its conservative analytic power; no per-texel
+  importance distribution is introduced in this correctness stage.
+- Delta/continuous classification: unchanged. Radius-free projector lights are atoms and positive-radius projectors
+  are continuous sphere emitters. Image transfer encoding cannot change this classification.
+- MIS strategies: selected-projector NEE and a compatible BSDF analytic hit both call the same backend projector
+  emission lookup. Their densities remain identical; CPU/Metal/OptiX must also multiply by the same linear-radiance
+  texel value.
+- Current-HEAD reproducer: Metal uploads an LDR slide as `RGBA8Unorm_sRGB`, so its texture unit applies the IEC sRGB
+  piecewise EOTF. OptiX calls `stbi_loadf`, whose default LDR conversion is the pure power `encoded^2.2`, and uploads
+  that result as linear `float4`. An independent nine-code fixture reports 7 failures: for code 32 the old path gives
+  `0.0103978` instead of `0.0144438` (28.01% low), while code 128 gives `0.21952` instead of `0.215861` (1.69% high).
+  The retained gamma-2.2 mutation differs from exact sRGB at seven fixture midtones.
+- Implementation: OptiX now keeps LDR projector inputs as authored 8-bit codes and applies the same piecewise IEC
+  sRGB EOTF Metal specifies for `RGBA8Unorm_sRGB`; alpha remains a linear UNORM value. HDR and EXR projector inputs
+  keep the existing linear-float path. Both NEE and analytic-hit emission already share the resulting texture object,
+  so no strategy-dependent lookup was added.
+- Corrected result: the independent double-precision fixture passes 10/10 assertions across the linear toe, transfer
+  breakpoint, midtones, and endpoints. The gamma-2.2 mutation remains detected at seven of nine codes. A dedicated
+  actual-device probe samples those same codes through Metal's production sRGB texture format in fast and safe math;
+  both complete with zero failures. Apple M4 Pro's texture hardware stays within `1.04866847e-4` absolute of the ideal
+  EOTF (its low-code lookup precision), over 38 times closer than the old gamma-2.2 error on the same fixture.
+- Validation: focused Debug, Release, and ASan+UBSan pass 10/10. Sequential full Debug and Release CTest pass 4/4;
+  the complete audit passes 906/906 cases and 69,256,626 assertions, with environment integral `1`, Lambertian
+  `1.002147074` inside its CI, detected legacy mutation `2.003353165`, and dome ratio `1`. Production Metal shaders
+  compile independently in fast and safe modes; the standard 262,144-sample Apple M4 Pro audit remains all-zero for
+  NaN/Inf/PDF/support/intersection counters. OptiX texture upload preserves its prior RGBA32F memory footprint, but
+  CUDA compilation/runtime remains externally `UNVERIFIED`.
