@@ -762,25 +762,28 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
 
             if (uniforms->restirDIEnabled != 0u && bounce == 0u && !sharcUpdate)
             {
-                auditDispatch("wavefrontRestirSpatial");
-                mark(kStageRestirSpatial);
-                enc->setComputePipelineState(variant->restirSpatial);
-                bind(uniformBuffer, 0, 0);
-                bind(scene.instanceBuffer, 0, 1);
-                bind(scene.iesBuffer, 0, 2);
-                bind(scene.lightBuffer, 0, 3);
-                bind(scene.materialBuffer, 0, 4);
-                bind(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 5);
-                bind(scene.vertexBuffer, 0, 6);
-                bind(scene.prevVertexBuffer, 0, 7);
-                bind(scene.indexBuffer, 0, 8);
-                bind(mHitQueueBuffer, 0, 9);
-                if (scene.environment && scene.environment->state().mapTexture)
+                if (uniforms->spatialReuseEnabled != 0u && uniforms->spatialNeighborCount != 0u)
                 {
-                    table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
+                    auditDispatch("wavefrontRestirSpatial");
+                    mark(kStageRestirSpatial);
+                    enc->setComputePipelineState(variant->restirSpatial);
+                    bind(uniformBuffer, 0, 0);
+                    bind(scene.instanceBuffer, 0, 1);
+                    bind(scene.iesBuffer, 0, 2);
+                    bind(scene.lightBuffer, 0, 3);
+                    bind(scene.materialBuffer, 0, 4);
+                    bind(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 5);
+                    bind(scene.vertexBuffer, 0, 6);
+                    bind(scene.prevVertexBuffer, 0, 7);
+                    bind(scene.indexBuffer, 0, 8);
+                    bind(mHitQueueBuffer, 0, 9);
+                    if (scene.environment && scene.environment->state().mapTexture)
+                    {
+                        table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
+                    }
+                    enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
+                    barrier();
                 }
-                enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
-                barrier();
 
                 mark(kStageRestirFinal);
                 auditDispatch("wavefrontRestirFinal");
@@ -1298,25 +1301,27 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             if (uniforms->restirDIEnabled != 0u && bounce == 0u && !sharcUpdate)
             {
                 enc->memoryBarrier(MTL::BarrierScopeBuffers);
-                stamp(kStageRestirSpatial);
-                enc->setComputePipelineState(variant->restirSpatial);
-                enc->setBuffer(uniformBuffer, 0, 0);
-                enc->setBuffer(scene.instanceBuffer, 0, 1);
-                enc->setBuffer(scene.iesBuffer, 0, 2);
-                enc->setBuffer(scene.lightBuffer, 0, 3);
-                enc->setBuffer(scene.materialBuffer, 0, 4);
-                enc->setBuffer(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 5);
-                enc->setBuffer(scene.vertexBuffer, 0, 6);
-                enc->setBuffer(scene.prevVertexBuffer, 0, 7);
-                enc->setBuffer(scene.indexBuffer, 0, 8);
-                enc->setBuffer(mHitQueueBuffer, 0, 9);
-                if (scene.environment && scene.environment->state().mapTexture)
+                if (uniforms->spatialReuseEnabled != 0u && uniforms->spatialNeighborCount != 0u)
                 {
-                    enc->setTexture(scene.environment->state().mapTexture, 0);
+                    stamp(kStageRestirSpatial);
+                    enc->setComputePipelineState(variant->restirSpatial);
+                    enc->setBuffer(uniformBuffer, 0, 0);
+                    enc->setBuffer(scene.instanceBuffer, 0, 1);
+                    enc->setBuffer(scene.iesBuffer, 0, 2);
+                    enc->setBuffer(scene.lightBuffer, 0, 3);
+                    enc->setBuffer(scene.materialBuffer, 0, 4);
+                    enc->setBuffer(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 5);
+                    enc->setBuffer(scene.vertexBuffer, 0, 6);
+                    enc->setBuffer(scene.prevVertexBuffer, 0, 7);
+                    enc->setBuffer(scene.indexBuffer, 0, 8);
+                    enc->setBuffer(mHitQueueBuffer, 0, 9);
+                    if (scene.environment && scene.environment->state().mapTexture)
+                    {
+                        enc->setTexture(scene.environment->state().mapTexture, 0);
+                    }
+                    enc->dispatchThreadgroups(mControlBuffer, kHitArgsOffset, tg);
+                    enc->memoryBarrier(MTL::BarrierScopeBuffers);
                 }
-                enc->dispatchThreadgroups(mControlBuffer, kHitArgsOffset, tg);
-
-                enc->memoryBarrier(MTL::BarrierScopeBuffers);
                 stamp(kStageRestirFinal);
                 enc->setComputePipelineState(variant->restirFinal);
                 enc->setBuffer(uniformBuffer, 0, 0);

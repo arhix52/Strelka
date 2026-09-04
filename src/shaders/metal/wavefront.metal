@@ -126,6 +126,14 @@ WF_ANALYTIC_INTERSECTION_ENTRY(
 #define WF_STAGE_BREADCRUMB 96
 #define WF_DIAG_BASE 97
 
+static inline void auditWork(constant Uniforms& uniforms, uint32_t counter, uint32_t amount = 1u)
+{
+    if (SPEC_RENDER_WORK_AUDIT)
+    {
+        atomic_fetch_add_explicit(&uniforms.renderWorkCounters[counter], amount, memory_order_relaxed);
+    }
+}
+
 // Reserve a run of output slots for the active lanes of one simdgroup. Every
 // lane that reaches a call site belongs in that queue -- the others already
 // returned or took the other branch, so they are inactive and the simdgroup
@@ -579,6 +587,11 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
         return;
     }
 
+    if (!SPEC_SHARC_UPDATE)
+    {
+        auditWork(uniforms, WORK_PRIMARY_RAYS);
+    }
+
     uint32_t pixelIndex = tid;
     if (SPEC_SHARC_UPDATE)
     {
@@ -716,6 +729,10 @@ static void extendImpl(uint gid,
         return;
     }
     const PathRay pr = rays[tid];
+
+    const uint32_t auditBounce = min(pathDepth(paths[tid].depthAndFlags), WORK_BOUNCE_SLOTS - 1u);
+    auditWork(uniforms, WORK_EXTEND_RAYS_BASE + auditBounce);
+    auditWork(uniforms, WORK_INTERSECTION_QUERIES);
 
     const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
 
@@ -1441,6 +1458,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
     const float3 rayDir = float3(rays[tid].direction);
     const float3 throughput = float3(p.throughput);
     const uint32_t depth = pathDepth(p.depthAndFlags);
+    auditWork(uniforms, WORK_MISS_ITEMS_BASE + min(depth, WORK_BOUNCE_SLOTS - 1u));
     const bool specularBounce = (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u;
     const bool neeDone = (p.depthAndFlags & PATH_FLAG_NEE_DONE) != 0u;
 
@@ -1750,6 +1768,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     const PathRay pr = rays[tid];
 
     const uint32_t depth = pathDepth(p.depthAndFlags);
+    auditWork(uniforms, WORK_SHADE_ITEMS_BASE + min(depth, WORK_BOUNCE_SLOTS - 1u));
     const bool specularBounce = (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u;
     const bool neeDone = (p.depthAndFlags & PATH_FLAG_NEE_DONE) != 0u;
 
@@ -2901,6 +2920,20 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                         max(uniforms.initialCandidateCount, 1u) :
                                         (uniforms.restirDIEnabled != 0u ? 1u : max(uniforms.risCandidates, 1u));
 
+        if (restirInitial)
+        {
+            auditWork(uniforms, WORK_RESTIR_ELIGIBLE_HITS);
+            auditWork(uniforms, WORK_RESTIR_INITIAL_CANDIDATES, candidates);
+        }
+        else if (depth == 0u)
+        {
+            auditWork(uniforms, WORK_FIRST_BOUNCE_NEE_SAMPLES, candidates);
+        }
+        else
+        {
+            auditWork(uniforms, WORK_SECONDARY_NEE_SAMPLES, candidates);
+        }
+
         LightConnection bestConn = makeEmptyConnection();
         float3 bestF = float3(0.0f);
         RestirReservoir reservoir = {};
@@ -3020,6 +3053,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                             reservoir.state, restirReservoirMergeWeight(previousReservoir.state, previousEvaluation.target),
                             previousEvaluation.target, previousReservoir.state.M,
                             random<SampleDimension::eLightId>(temporalRng, uniforms.samplerType));
+                        auditWork(uniforms, WORK_RESTIR_TEMPORAL_MERGES);
                         if (selectedHistory)
                         {
                             reservoir.sample = previousReservoir.sample;
@@ -3368,6 +3402,7 @@ kernel void wavefrontRestirSpatial(uint gid [[thread_position_in_grid]],
     {
         return;
     }
+    auditWork(uniforms, WORK_RESTIR_SPATIAL_ITEMS);
 
     const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
     device const RestirReservoir* inputReservoirs = oddFrame ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
@@ -3405,6 +3440,8 @@ kernel void wavefrontRestirSpatial(uint gid [[thread_position_in_grid]],
         {
             continue;
         }
+
+        auditWork(uniforms, WORK_RESTIR_SPATIAL_MERGES);
 
         const LightConnection connection =
             reconnectRestirSample(uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
@@ -3448,12 +3485,15 @@ kernel void wavefrontRestirFinal(uint gid [[thread_position_in_grid]],
     {
         return;
     }
+    auditWork(uniforms, WORK_RESTIR_FINAL_ITEMS);
     stored.sampleIdxAndFlags &= ~RESTIR_SHADING_VALID;
     uniforms.restirShadingPoints[tid] = stored;
 
     const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
     device RestirReservoir* currentReservoirs = oddFrame ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
-    device const RestirReservoir* spatialReservoirs = oddFrame ? uniforms.restirReservoir0 : uniforms.restirReservoir1;
+    const bool hasSpatialReuse = uniforms.spatialReuseEnabled != 0u && uniforms.spatialNeighborCount != 0u;
+    device const RestirReservoir* spatialReservoirs =
+        hasSpatialReuse ? (oddFrame ? uniforms.restirReservoir0 : uniforms.restirReservoir1) : currentReservoirs;
     RestirReservoir reservoir = spatialReservoirs[tid];
     const uint32_t maxM = max(uniforms.initialCandidateCount, 1u) * max(uniforms.reservoirMaxAge, 1u) *
                           (min(uniforms.spatialNeighborCount, 16u) + 1u);
@@ -3517,6 +3557,7 @@ kernel void wavefrontRestirFinal(uint gid [[thread_position_in_grid]],
     sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
     const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
     shadowRays[slot] = sr;
+    auditWork(uniforms, WORK_RESTIR_FINAL_VISIBILITY_RAYS);
 }
 
 // ---------------------------------------------------------------------------
@@ -3577,6 +3618,7 @@ static void guideImpl(uint gid,
     {
         return;
     }
+    auditWork(uniforms, WORK_GUIDE_ACTIVE_ITEMS);
 
     const bool replaceMaterial = (guide.flags & GUIDE_RAY_REPLACE_MATERIAL) != 0u;
     const float motionTime = motionTimeFor(uniforms, gid, 0u);
@@ -3604,6 +3646,8 @@ static void guideImpl(uint gid,
         isect.assume_geometry_type(T::geometryTypes());
         isect.force_opacity(forced_opacity::opaque);
         isect.accept_any_intersection(false);
+        auditWork(uniforms, WORK_GUIDE_ONLY_RAYS);
+        auditWork(uniforms, WORK_INTERSECTION_QUERIES);
         const typename T::isect::result_type rawHit =
             T::trace(isect, r, accelerationStructure, uniforms.primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN, motionTime,
                      functionTable);
@@ -4201,13 +4245,19 @@ static void shadowImpl(uint gid,
                        device const uint32_t* indexBuffer,
                        typename T::table functionTable,
                        device SharcUpdateState* sharcUpdates,
-                       device SharcAccumulationEntry* sharcAccumulation)
+                       device SharcAccumulationEntry* sharcAccumulation,
+                       uint32_t bounce)
 {
     if (gid >= control[WF_CTRL_SHADOW_N])
     {
         return;
     }
     const ShadowRay sr = shadowRays[gid];
+    auditWork(uniforms, WORK_SHADOW_RAYS_BASE + min(bounce, WORK_BOUNCE_SLOTS - 1u));
+    // Opaque validation scenes issue exactly one hardware query per shadow ray.
+    // Alpha restart walks may issue more and remain classified separately in
+    // the static ledger.
+    auditWork(uniforms, WORK_INTERSECTION_QUERIES);
 
     ray shadowRay;
     shadowRay.origin = float3(sr.origin);
@@ -4573,11 +4623,12 @@ kernel void sharcResolve(uint tid [[thread_position_in_grid]],
         device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]],              \
         device const UniformLight* lights [[buffer(11)]], constant uint32_t& queueOffset [[buffer(12)]],               \
         device SharcUpdateState* sharcUpdates [[buffer(13)]],                                                          \
-        device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]], TRAITS::table functionTable [[buffer(15)]])   \
+        device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]], TRAITS::table functionTable [[buffer(15)]],  \
+        constant uint32_t& bounce [[buffer(16)]])                                                                     \
     {                                                                                                                  \
         shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, shadowRays, radianceOut, control,       \
                            sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer, functionTable, \
-                           sharcUpdates, sharcAccumulation);                                                           \
+                           sharcUpdates, sharcAccumulation, bounce);                                                   \
     }
 
 WF_SHADOW_ENTRY(wavefrontShadow, MotionTraversal)
