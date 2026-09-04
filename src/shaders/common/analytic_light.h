@@ -1129,6 +1129,85 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
 /// Dispatch one packed light record to the exact finite surface its sampler
 /// uses. The parameter layout is UniformLight's layout, but keeping the
 /// function scalar makes this source compile unchanged on CPU, Metal and CUDA.
+/// A ball that contains the light's surface, and whether the segment reaches it.
+///
+/// Conservative by construction: the radius bounds the surface from above, so
+/// every ray the exact intersector can hit passes this, and anything it rejects
+/// the exact test would have rejected after several hundred instructions of
+/// compensated affine arithmetic. Both scans over the light table run per ray
+/// segment -- the shadow one runs before traversal on every next-event
+/// connection -- and in a room with ten lights a ray is near none of them.
+///
+/// Falls through to the exact test whenever it cannot bound the light cheaply
+/// and safely: an unbounded type, an overflowing extent, a segment whose
+/// arithmetic would not survive the squaring.
+DEVICE_FUNC bool analyticLightBoundsMayIntersect(int lightType,
+                                                 float3 point0,
+                                                 float3 point1,
+                                                 float3 point2,
+                                                 float3 point3,
+                                                 float3 rayOrigin,
+                                                 float3 rayDirection,
+                                                 float minDistance,
+                                                 float maxDistance)
+{
+    float3 center;
+    float radius;
+    if (lightType == LIGHT_TYPE_RECT)
+    {
+        // Corner plus two edges: the far corner sits half a diagonal from the
+        // centre, and the sum of the half edges bounds that.
+        const float3 edgeX = point1 - point0;
+        const float3 edgeY = point3 - point0;
+        center = point0 + 0.5f * (edgeX + edgeY);
+        radius = 0.5f * (finiteVectorLength(edgeX) + finiteVectorLength(edgeY));
+    }
+    else if (lightType == LIGHT_TYPE_DISC)
+    {
+        center = point1;
+        radius = finiteVectorLength(point2) + finiteVectorLength(point3);
+    }
+    else if (lightType == LIGHT_TYPE_SPHERE)
+    {
+        // Sum of the axis lengths bounds the largest singular value of any
+        // affine image of the unit sphere, shear and mirror included.
+        center = point1;
+        radius = finiteVectorLength(point0) + finiteVectorLength(point2) + finiteVectorLength(point3);
+    }
+    else if (lightIsPunctual(lightType) && punctualLightIsSoft(point0.x))
+    {
+        center = point1;
+        radius = point0.x;
+    }
+    else
+    {
+        return true;
+    }
+    if (!(radius > 0.0f) || !(radius <= 3.402823466e38f) || !affineVectorIsFinite(center))
+    {
+        return true;
+    }
+
+    const float3 toCenter = center - rayOrigin;
+    const float directionLengthSquared = dot(rayDirection, rayDirection);
+    if (!(directionLengthSquared > 0.0f) || !affineVectorIsFinite(toCenter))
+    {
+        return true;
+    }
+    // Closest approach, clamped to the segment: a light behind the origin or
+    // past the far end is as absent as one off to the side.
+    const float projection = dot(toCenter, rayDirection) / directionLengthSquared;
+    const float t = fminf(fmaxf(projection, minDistance), maxDistance);
+    const float3 offset = toCenter - rayDirection * t;
+    const float distanceSquared = dot(offset, offset);
+    const float radiusSquared = radius * radius;
+    if (!(distanceSquared <= 3.402823466e38f) || !(radiusSquared <= 3.402823466e38f))
+    {
+        return true;
+    }
+    return distanceSquared <= radiusSquared;
+}
+
 /// The hot form: for a light the scene has enabled, and only from a caller that
 /// has already tested analyticLightVisibilityAllowsRay(). See the note above
 /// sampleAnalyticEllipsoidUnchecked() for what that buys and why it is sound.

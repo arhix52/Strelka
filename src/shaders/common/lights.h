@@ -103,6 +103,12 @@ static __inline__ __device__ AnalyticAreaLightHit findAnalyticAreaLightHit(const
         {
             continue;
         }
+        if (!analyticLightBoundsMayIntersect(light.type, make_float3(light.points[0]), make_float3(light.points[1]),
+                                             make_float3(light.points[2]), make_float3(light.points[3]), rayOrigin,
+                                             rayDirection, minDistance, closest.distance))
+        {
+            continue;
+        }
         const AnalyticLightIntersection candidate = intersectAnalyticLightSurfaceUnchecked(
             light.type, make_float3(light.points[0]), make_float3(light.points[1]), make_float3(light.points[2]),
             make_float3(light.points[3]), make_float3(light.normal), rayOrigin, rayDirection, minDistance,
@@ -130,6 +136,12 @@ static __inline__ __device__ bool analyticLightsOccludeSegment(const UniformLigh
     for (unsigned int lightId = 0u; lightId < lightCount; ++lightId)
     {
         const UniformLight& light = lights[lightId];
+        if (!analyticLightBoundsMayIntersect(light.type, make_float3(light.points[0]), make_float3(light.points[1]),
+                                             make_float3(light.points[2]), make_float3(light.points[3]), rayOrigin,
+                                             rayDirection, minDistance, maxDistance))
+        {
+            continue;
+        }
         if (analyticLightSurfaceOccludesSegment(light.type, make_float3(light.points[0]), make_float3(light.points[1]),
                                                 make_float3(light.points[2]), make_float3(light.points[3]),
                                                 make_float3(light.normal), light.normal.w, rayOrigin, rayDirection,
