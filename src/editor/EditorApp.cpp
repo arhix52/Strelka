@@ -977,6 +977,25 @@ void EditorApp::runBenchmark()
 
     m_settingsManager->setAs<bool>("render/pt/enableAcc", false);
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
+    m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", envUint("STRELKA_BENCH_NEE_CANDIDATES", 1u));
+    m_settingsManager->setAs<bool>(
+        "render/pt/restirDIEnabled",
+        envUint("STRELKA_RESTIR_DI", m_settingsManager->getAs<bool>("render/pt/restirDIEnabled") ? 1u : 0u) != 0u);
+    m_settingsManager->setAs<uint32_t>(
+        "render/pt/initialCandidateCount",
+        envUint("STRELKA_RESTIR_CANDIDATES", m_settingsManager->getAs<uint32_t>("render/pt/initialCandidateCount")));
+    m_settingsManager->setAs<bool>(
+        "render/pt/temporalReuseEnabled",
+        envUint("STRELKA_RESTIR_TEMPORAL", m_settingsManager->getAs<bool>("render/pt/temporalReuseEnabled") ? 1u : 0u) !=
+            0u);
+    m_settingsManager->setAs<bool>(
+        "render/pt/spatialReuseEnabled",
+        envUint("STRELKA_RESTIR_SPATIAL", m_settingsManager->getAs<bool>("render/pt/spatialReuseEnabled") ? 1u : 0u) !=
+            0u);
+    m_settingsManager->setAs<uint32_t>(
+        "render/pt/spatialNeighborCount",
+        envUint("STRELKA_RESTIR_NEIGHBORS", m_settingsManager->getAs<uint32_t>("render/pt/spatialNeighborCount")));
+    const bool requestedRestir = m_settingsManager->getAs<bool>("render/pt/restirDIEnabled");
     // One submission per frame, so the number is the tracer's cost and not the
     // inter-band gaps of the responsiveness split.
     if (envFlag("STRELKA_REF_DEPTH"))
@@ -991,6 +1010,9 @@ void EditorApp::runBenchmark()
     // Playback changes the workload qualitatively — deforming geometry needs
     // two-keyframe acceleration structures — so it needs its own measurement.
     const bool play = envFlag("STRELKA_PLAY");
+    const bool orbitCamera = envFlag("STRELKA_BENCH_ORBIT");
+    oka::Camera& camera = m_scene->getCamera(m_selectedCamera);
+    const glm::quat initialCameraOrientation = camera.mOrientation;
     auto setPlaying = [&](bool on) {
         for (size_t i = 0; i < m_scene->getAnimations().size(); ++i)
         {
@@ -1025,6 +1047,12 @@ void EditorApp::runBenchmark()
             if (playing)
             {
                 playAnimations(1.0 / 60.0);
+            }
+            if (orbitCamera)
+            {
+                camera.mOrientation =
+                    initialCameraOrientation * glm::angleAxis(-0.0005f * float(i + 1u), glm::vec3(0.0f, 1.0f, 0.0f));
+                camera.updateViewMatrix();
             }
             if (!m_isLoading)
             {
@@ -1068,6 +1096,16 @@ void EditorApp::runBenchmark()
         }
         return b;
     };
+
+    if (envFlag("STRELKA_BENCH_RESTIR_COMPARE"))
+    {
+        m_settingsManager->setAs<bool>("render/pt/restirDIEnabled", false);
+        const Block nee = measure(false);
+        m_settingsManager->setAs<bool>("render/pt/restirDIEnabled", requestedRestir);
+        const Block restir = measure(false);
+        STRELKA_INFO("BENCH  NEE={:.2f} ms ReSTIR={:.2f} ms ratio={:.3f}x", nee.gpu, restir.gpu, restir.gpu / nee.gpu);
+        return;
+    }
 
     // Both states in one process, alternating.
     //
