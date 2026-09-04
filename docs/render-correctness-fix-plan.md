@@ -39,6 +39,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | AB. Metal projector radiance storage | Metal routes projector HDR/EXR through an 8-bit sRGB/optional-BC material path; focused contract failed 2/6 assertions and a `4.0` texel clips to `1.0` | LDR/HDR format contract, HDR clipping mutation, actual-MTLDevice texel round trip | dedicated uncompressed one-level projector upload: `RGBA8Unorm_sRGB` for LDR and linear `RGBA32Float` for HDR/EXR | Shared sanitization/EOTF | FIXED on MTLDevice | Source uses same sanitized float texels; external CUDA required | pending | UNVERIFIED |
 | AC. Finite-to-infinite editor proxy lifecycle | Rect→distant/dome leaves `getLightInstanceId()==0` and CPU picking hits the stale rectangle; focused test fails 4/8 assertions | reverse type-toggle, CPU pick miss, proxy reuse/no-orphan mutation | keep cached proxy for reuse but expose and traverse it only while the current packed light has a finite surface | FIXED | Existing packed-type TLAS mask | Existing packed-type TLAS mask; external CUDA required | this commit | UNVERIFIED |
 | AD. Projector texture index bounds | An unregistered or `INT_MAX` image slot reaches OptiX's bindless texture lookup without a count check; numeric float conversion can overflow before lookup | empty/valid/extreme/negative Scene slots and OptiX lookup-contract mutation | canonicalize invalid authored slots to `-1` and publish/check the OptiX table count before indexing | FIXED | Existing upload bound; shared packed slot | Source fixed; external CUDA required | this commit | UNVERIFIED |
+| AE. Acceleration-structure light transforms | Disabled invalid analytic lights retain raw NaN/Inf/singular editor-proxy transforms even with TLAS mask zero | create/edit finite-and-nonsingular instance contract plus raw-transform mutation | publish a finite nonsingular inert proxy transform whenever the authored proxy transform is unsafe | FIXED | Shared safe instance input | Shared safe instance input; external CUDA required | this commit | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -1282,3 +1283,21 @@ is out of scope unless it blocks validation.
   and out-of-range float values before integer conversion. OptiX publishes the exact texture count beside its pointer
   and performs a final unsigned bound check before indexing. The focused tests now pass 11/11 assertions in Debug,
   Release, and ASan+UBSan; Metal retains its existing host-side vector bound check.
+
+## Finding AE: acceleration-structure light transforms
+
+- Random variables and measure: none. The editor proxy is not a sampling strategy; analytic sampling and exact
+  analytic intersection remain the rendering specification.
+- Support: an invalid analytic record has zero radiometric/proposal support and a zero traversal mask. Its retained
+  editor instance may still be submitted to an AS builder, whose transform input must be finite and nonsingular even
+  when the mask is zero. Valid records retain their authored affine proxy transform.
+- Conditional/marginal PDFs, selection PMF, delta classification, and MIS: unchanged. The inert proxy has no path-
+  space support and contributes no density or mass.
+- Current-HEAD reproducer and mutation: creating a rectangle with an infinite translated component stores that
+  infinity in `Instance::transform`; editing a valid rectangle to a singular `diag(0,1,1)` stores determinant zero.
+  Metal and OptiX copy those matrices into AS descriptors after assigning mask zero. The focused pre-fix test checks
+  both create/edit paths and fails their finite-nonsingular contract, while the raw authored mutation remains unsafe.
+- Implementation and result: the complete affine proxy transform is validated with the shared scale-safe basis
+  predicate, finite-component check, and affine-row check. Identity is substituted only for unsafe AS input; the
+  packed light stays disabled and the analytic sampler/intersector is unchanged. The focused create/edit regression
+  now passes 5/5 assertions in Debug, Release, and ASan+UBSan, while its raw-transform mutation remains unsafe.

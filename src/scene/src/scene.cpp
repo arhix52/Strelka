@@ -49,6 +49,30 @@ OrthonormalLightFrame transformedProfileFrame(const glm::float4x4& transform)
     return makeOrthonormalLightFrame(axisX, axisY, transformedAreaLightNormal(transform));
 }
 
+bool accelerationStructureProxyTransformIsSafe(const glm::float4x4& transform)
+{
+    for (int column = 0; column < 4; ++column)
+    {
+        for (int row = 0; row < 4; ++row)
+        {
+            if (!std::isfinite(transform[column][row]))
+            {
+                return false;
+            }
+        }
+    }
+    if (transform[0].w != 0.0f || transform[1].w != 0.0f || transform[2].w != 0.0f || transform[3].w != 1.0f)
+    {
+        return false;
+    }
+    return scaledAffineBasis(glm::float3(transform[0]), glm::float3(transform[1]), glm::float3(transform[2])).valid;
+}
+
+glm::float4x4 safeAccelerationStructureProxyTransform(const glm::float4x4& transform)
+{
+    return accelerationStructureProxyTransformIsSafe(transform) ? transform : glm::float4x4(1.0f);
+}
+
 } // namespace
 
 uint32_t Scene::acquireMeshSlot(Mesh*& mesh)
@@ -700,7 +724,8 @@ uint32_t Scene::createLight(const UniformLightDesc& desc)
         return lightId;
     }
 
-    const glm::float4x4 transform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
+    const glm::float4x4 authoredTransform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
+    const glm::float4x4 transform = safeAccelerationStructureProxyTransform(authoredTransform);
     const uint32_t instId = createInstance(
         Instance::Type::eLight, currentLightMeshId, std::numeric_limits<uint32_t>::max(), transform, lightId);
     assert(instId != std::numeric_limits<uint32_t>::max());
@@ -955,7 +980,8 @@ void Scene::setLight(const uint32_t lightId, const UniformLightDesc& desc)
     auto it = mLightIdToInstanceId.find(lightId);
     if (desiredMeshId != kInvalidIndex)
     {
-        const glm::float4x4 transform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
+        const glm::float4x4 authoredTransform = desc.useXform ? desc.xform * scaleMatrix : getTransform(desc);
+        const glm::float4x4 transform = safeAccelerationStructureProxyTransform(authoredTransform);
         if (it == mLightIdToInstanceId.end())
         {
             const uint32_t instanceId =

@@ -39,6 +39,21 @@ Scene::UniformLightDesc discDesc()
     return desc;
 }
 
+bool accelerationStructureTransformIsSafe(const glm::float4x4& transform)
+{
+    for (int column = 0; column < 4; ++column)
+    {
+        for (int row = 0; row < 4; ++row)
+        {
+            if (!std::isfinite(transform[column][row]))
+            {
+                return false;
+            }
+        }
+    }
+    return std::abs(glm::determinant(glm::dmat3(transform))) > 0.0;
+}
+
 // What the shader derives for a rect light: the negated cross product of the
 // edges spanned by the stored corners.
 glm::float3 rectNormalFromPoints(const Scene::Light& l)
@@ -456,6 +471,32 @@ TEST_CASE("changing a finite light to infinite deactivates its editor proxy")
     const Scene::PickHit restored = scene.pick(glm::float3(0.0f, 2.0f, 2.0f), glm::float3(0.0f, 0.0f, -1.0f));
     REQUIRE(restored.hit);
     CHECK(restored.lightId == lightId);
+}
+
+TEST_CASE("invalid analytic lights keep safe acceleration structure transforms")
+{
+    Scene created;
+    Scene::UniformLightDesc invalid = rectDesc();
+    invalid.useXform = true;
+    invalid.xform = glm::float4x4(1.0f);
+    invalid.xform[3][0] = std::numeric_limits<float>::infinity();
+    const uint32_t createdLight = created.createLight(invalid);
+    const uint32_t createdProxy = created.getLightInstanceId(createdLight);
+    REQUIRE(createdProxy != kInvalidIndex);
+    CHECK(accelerationStructureTransformIsSafe(created.getInstances()[createdProxy].transform));
+
+    Scene edited;
+    const uint32_t editedLight = edited.createLight(rectDesc());
+    const uint32_t editedProxy = edited.getLightInstanceId(editedLight);
+    REQUIRE(editedProxy != kInvalidIndex);
+    invalid.xform = glm::float4x4(1.0f);
+    invalid.xform[0][0] = 0.0f;
+    edited.setLight(editedLight, invalid);
+    CHECK(accelerationStructureTransformIsSafe(edited.getInstances()[editedProxy].transform));
+
+    // Mutation: the authored matrices themselves remain invalid; the check is
+    // sensitive to accidentally publishing either raw transform to a TLAS.
+    CHECK_FALSE(accelerationStructureTransformIsSafe(invalid.xform));
 }
 
 TEST_CASE("headless light edits do not recreate released proxy geometry")
