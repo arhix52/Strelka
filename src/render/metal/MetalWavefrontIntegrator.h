@@ -28,7 +28,6 @@ struct WavefrontVariant
     MTL::ComputePipelineState* extendMotion = nullptr;
     MTL::ComputePipelineState* extendStatic = nullptr;
     MTL::ComputePipelineState* shade = nullptr;
-    MTL::ComputePipelineState* restirTemporal = nullptr;
     MTL::ComputePipelineState* restirSpatial = nullptr;
     MTL::ComputePipelineState* restirFinal = nullptr;
     MTL::ComputePipelineState* miss = nullptr;
