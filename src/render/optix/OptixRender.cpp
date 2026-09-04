@@ -1984,7 +1984,13 @@ void OptiXRender::createModule()
     else
     {
         moduleOptions.optLevel = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
-        moduleOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+        // MINIMAL keeps the line table the profiler needs and leaves the
+        // optimiser alone; NONE strips it, and the PC samples then land on
+        // addresses no source line claims. Off by default all the same, because
+        // "leaves the optimiser alone" is a documented intent rather than a
+        // measurement, and this is the launch every frame goes through.
+        moduleOptions.debugLevel = envFlag("STRELKA_OPTIX_LINEINFO") ? OPTIX_COMPILE_DEBUG_LEVEL_MINIMAL :
+                                                                      OPTIX_COMPILE_DEBUG_LEVEL_NONE;
     }
 
     // Leave registers unlimited by default; the environment knob is diagnostic.

@@ -54,8 +54,12 @@ if(WIN32 OR LINUX)
     # cannot call. The flag is nvcc's own answer to exactly that, and it is what
     # the diagnostic suggests; the alternative is 30 more rewrite rules in
     # openpbr_device_headers.py for functions whose bodies are one line each.
+    # -lineinfo is what lets Nsight Compute attribute a stall to a source line
+    # rather than to an address. It adds a debug section and changes no code:
+    # measured on kids_room, 22.2 ms/sample either way. Without it the PC
+    # samples land on SASS and the question "which line stalls" has no answer.
     set(OPTIX_NVCC_FLAGS --gpu-architecture=compute_89 --use_fast_math --relocatable-device-code=true
-        --expt-relaxed-constexpr)
+        --expt-relaxed-constexpr --generate-line-info)
 
     # NDEBUG outside a Debug build, which is what compiles openpbr's ~40
     # OPENPBR_ASSERTs out of device code. They are preconditions on quantities a
