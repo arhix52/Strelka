@@ -213,10 +213,6 @@ int main(int argc, const char* argv[])
             return 1;
         }
 #endif
-        if (cfg.auditRenderWork)
-        {
-            cfg.sppPerLaunch = std::max(cfg.spp, 1u);
-        }
     }
 
     try

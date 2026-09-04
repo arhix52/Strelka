@@ -439,8 +439,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/depth", m_config.maxDepth);
     m_settings->setAs<uint32_t>("render/pt/subsurfaceIterations", m_config.subsurfaceIterations);
     m_settings->setAs<uint32_t>("render/pt/sppTotal", m_config.spp);
-    m_settings->setAs<uint32_t>("render/pt/spp", m_config.auditRenderWork ? std::max(m_config.spp, 1u) :
-                                                                         m_config.sppPerLaunch);
+    m_settings->setAs<uint32_t>("render/pt/spp", m_config.sppPerLaunch);
     m_settings->setAs<uint32_t>("render/pt/tonemapperType", m_config.tonemapType);
     m_settings->setAs<uint32_t>("render/pt/debug", m_config.debugMode);
     m_settings->setAs<uint32_t>("render/pt/samplerType", m_config.samplerType);

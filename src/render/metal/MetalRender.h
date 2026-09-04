@@ -18,6 +18,7 @@
 #include "MetalScenePreparation.h"
 #include <host/scene_stream.h>
 #include "MetalWavefrontIntegrator.h"
+#include <array>
 #include <atomic>
 #include <unordered_set>
 #include <vector>
@@ -296,7 +297,12 @@ private:
     // What renderSync blocks on when the frame went out through Metal 4: there is
     // no MTL4 command buffer to wait on, so the queue signals a shared event.
     uint64_t mMetal4FrameValue = 0;
-    metal::MetalAccelStructure::AuditCounts mLastRenderWorkAsCounts;
+    std::array<uint64_t, WORK_COUNTER_COUNT> mRenderWorkCounters{};
+    std::map<std::string, uint64_t> mRenderWorkDispatches;
+    metal::MetalAccelStructure::AuditCounts mRenderWorkAsCounts;
+    uint64_t mRenderWorkFrames = 0;
+    uint64_t mRenderWorkSpp = 0;
+    double mRenderWorkGpuMs = 0.0;
     void retainCommandBufferForSync(MTL::CommandBuffer* pCmd);
 
     void loadEnvMap(const std::string& texturePath);

@@ -2923,9 +2923,23 @@ void MetalRender::renderSync(Buffer* output)
     if (getSettings()->getAs<uint32_t>("render/pt/auditRenderWork") != 0)
     {
         const metal::MetalAccelStructure::AuditCounts asAfter = mAccel.auditCounts();
-        mLastRenderWorkAsCounts.blasBuilds = asAfter.blasBuilds - asBefore.blasBuilds;
-        mLastRenderWorkAsCounts.tlasBuilds = asAfter.tlasBuilds - asBefore.tlasBuilds;
-        mLastRenderWorkAsCounts.tlasRefits = asAfter.tlasRefits - asBefore.tlasRefits;
+        mRenderWorkAsCounts.blasBuilds += asAfter.blasBuilds - asBefore.blasBuilds;
+        mRenderWorkAsCounts.tlasBuilds += asAfter.tlasBuilds - asBefore.tlasBuilds;
+        mRenderWorkAsCounts.tlasRefits += asAfter.tlasRefits - asBefore.tlasRefits;
+        if (const uint32_t* counters = mIntegrator.renderWorkCounters())
+        {
+            for (uint32_t i = 0; i < WORK_COUNTER_COUNT; ++i)
+            {
+                mRenderWorkCounters[i] += counters[i];
+            }
+        }
+        for (const auto& [label, count] : mIntegrator.renderWorkDispatches())
+        {
+            mRenderWorkDispatches[label] += count;
+        }
+        ++mRenderWorkFrames;
+        mRenderWorkSpp += getSettings()->getAs<uint32_t>("render/pt/spp");
+        mRenderWorkGpuMs += getLastRenderTimeMs();
     }
 
     // See the comment where this is set: the Metal4 spatial-upscale path could
@@ -2994,8 +3008,8 @@ void MetalRender::renderSync(Buffer* output)
 
 std::string MetalRender::renderWorkAuditJson() const
 {
-    const uint32_t* c = mIntegrator.renderWorkCounters();
-    if (!c || getSettings()->getAs<uint32_t>("render/pt/auditRenderWork") == 0)
+    const uint64_t* c = mRenderWorkCounters.data();
+    if (mRenderWorkFrames == 0 || getSettings()->getAs<uint32_t>("render/pt/auditRenderWork") == 0)
     {
         return {};
     }
@@ -3033,7 +3047,6 @@ std::string MetalRender::renderWorkAuditJson() const
 
     const uint32_t width = getSettings()->getAs<uint32_t>("render/width");
     const uint32_t height = getSettings()->getAs<uint32_t>("render/height");
-    const uint32_t spp = getSettings()->getAs<uint32_t>("render/pt/spp");
     const uint64_t extendActive = sum(WORK_EXTEND_RAYS_BASE);
     const uint64_t shadeActive = sum(WORK_SHADE_ITEMS_BASE);
     const uint64_t shadowActive = sum(WORK_SHADOW_RAYS_BASE);
@@ -3041,7 +3054,7 @@ std::string MetalRender::renderWorkAuditJson() const
     uint64_t dispatchTotal = 0;
     std::string dispatches = "{";
     bool first = true;
-    for (const auto& [label, count] : mIntegrator.renderWorkDispatches())
+    for (const auto& [label, count] : mRenderWorkDispatches)
     {
         dispatchTotal += count;
         dispatches += fmt::format("{}\"{}\":{}", first ? "" : ",", label, count);
@@ -3050,7 +3063,7 @@ std::string MetalRender::renderWorkAuditJson() const
     dispatches += '}';
 
     return fmt::format(
-        "{{\"frames\":1,\"pixels\":{},\"spp\":{},\"gpuTimeMs\":{:.3f},"
+        "{{\"frames\":{},\"pixels\":{},\"spp\":{},\"gpuTimeMs\":{:.3f},"
         "\"generatedPrimaryRays\":{},\"extendRays\":{},\"guideOnlyRays\":{},\"shadowRays\":{},"
         "\"intersectionQueries\":{},\"restirEligibleHits\":{},\"restirInitialCandidates\":{},"
         "\"restirCandidateQueries\":{},\"restirReuseQueries\":{},"
@@ -3065,19 +3078,21 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"blasBuilds\":{},\"tlasBuilds\":{},\"tlasRefits\":{},"
         "\"fullBufferClears\":0,\"fullBufferCopies\":0,\"bytesCopied\":0,"
         "\"manualAnalyticLightTests\":{},\"dispatchCount\":{},\"pipelineDispatches\":{}}}",
-        static_cast<uint64_t>(width) * height, spp, getLastRenderTimeMs(), c[WORK_PRIMARY_RAYS],
+        mRenderWorkFrames, static_cast<uint64_t>(width) * height, mRenderWorkSpp, mRenderWorkGpuMs,
+        c[WORK_PRIMARY_RAYS],
         array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE),
         c[WORK_INTERSECTION_QUERIES], c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES],
         c[WORK_RESTIR_CANDIDATE_QUERIES], c[WORK_RESTIR_REUSE_QUERIES],
         c[WORK_RESTIR_TEMPORAL_MERGES], c[WORK_RESTIR_SPATIAL_MERGES], c[WORK_RESTIR_FINAL_VISIBILITY_RAYS],
         c[WORK_FIRST_BOUNCE_NEE_SAMPLES], c[WORK_SECONDARY_NEE_SAMPLES], c[WORK_PRIMARY_RAYS],
-        roundedThreads(static_cast<uint64_t>(width) * height) * spp, extendActive, dispatched(WORK_EXTEND_RAYS_BASE),
+        roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
+        dispatched(WORK_EXTEND_RAYS_BASE),
         shadeActive, dispatched(WORK_SHADE_ITEMS_BASE), missActive, dispatched(WORK_MISS_ITEMS_BASE), shadowActive,
         dispatched(WORK_SHADOW_RAYS_BASE), c[WORK_GUIDE_ACTIVE_ITEMS],
         roundedThreads(c[WORK_GUIDE_ACTIVE_ITEMS]), c[WORK_RESTIR_SPATIAL_ITEMS],
         roundedThreads(c[WORK_RESTIR_SPATIAL_ITEMS]), c[WORK_RESTIR_FINAL_ITEMS],
-        roundedThreads(c[WORK_RESTIR_FINAL_ITEMS]), mLastRenderWorkAsCounts.blasBuilds,
-        mLastRenderWorkAsCounts.tlasBuilds, mLastRenderWorkAsCounts.tlasRefits,
+        roundedThreads(c[WORK_RESTIR_FINAL_ITEMS]), mRenderWorkAsCounts.blasBuilds,
+        mRenderWorkAsCounts.tlasBuilds, mRenderWorkAsCounts.tlasRefits,
         c[WORK_MANUAL_ANALYTIC_LIGHT_TESTS], dispatchTotal, dispatches);
 }
 
