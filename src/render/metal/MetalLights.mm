@@ -129,11 +129,10 @@ void MetalLights::releaseProjectorTextures()
 /// Decode the images projector lights throw, in the order the scene registered
 /// them, so that a light's points[0].z indexes this vector.
 ///
-/// Loaded as colour, because a slide is display encoded and its texels are meant
-/// to be seen: the sRGB pixel format is what turns them back into the linear
-/// radiance the light multiplies. A slot whose file failed to decode stays null
-/// and the shader throws a plain white frame there, which is a visible rectangle
-/// rather than a light that quietly stopped working.
+/// LDR slides use an uncompressed sRGB texture; HDR and EXR slides use linear
+/// RGBA32F. A slot whose file failed to decode stays null and the shader throws
+/// a plain white frame there, which is a visible rectangle rather than a light
+/// that quietly stopped working.
 void MetalLights::loadProjectorImages(const std::vector<std::string>& paths, MetalTextures& textures)
 {
     if (paths == mProjectorImagePaths)
@@ -145,8 +144,7 @@ void MetalLights::loadProjectorImages(const std::vector<std::string>& paths, Met
     mProjectorTextures.reserve(paths.size());
     for (const std::string& path : paths)
     {
-        mProjectorTextures.push_back(path.empty() ? nullptr :
-                                                    textures.loadFromFile(path, true, TextureKind::Color));
+        mProjectorTextures.push_back(path.empty() ? nullptr : textures.loadProjectorFromFile(path));
         if (const MTL::Texture* texture = mProjectorTextures.back())
         {
             STRELKA_INFO("Loaded projector image: {} ({}x{})", path, texture->width(), texture->height());

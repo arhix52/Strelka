@@ -1,4 +1,5 @@
 #include "MetalTextures.h"
+#include <host/projector_transfer.h>
 #include <host/texture_compress.h>
 
 #include <log.h>
@@ -18,6 +19,7 @@
 #include <stb_image.h>
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include <stb_image_resize.h>
+#include <tinyexr.h>
 
 namespace fs = std::filesystem;
 
@@ -508,6 +510,87 @@ MTL::Texture* MetalTextures::loadFromFile(const std::string& fileName, bool srgb
     return createFromPayload(payload, payload.fromCache ? std::string() : cacheFile);
 }
 
+MTL::Texture* MetalTextures::loadProjectorFromFile(const std::string& fileName)
+{
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    const std::string extension = fs::path(fileName).extension().string();
+    const bool isExr = extension == ".exr" || extension == ".EXR";
+    const bool isFloat = isExr || stbi_is_hdr(fileName.c_str());
+    float* linear = nullptr;
+    // stb owns this mutable allocation until stbi_image_free.
+    // NOLINTNEXTLINE(misc-const-correctness)
+    stbi_uc* encoded = nullptr;
+
+    if (isExr)
+    {
+        const char* error = nullptr;
+        if (LoadEXR(&linear, &width, &height, fileName.c_str(), &error) != TINYEXR_SUCCESS)
+        {
+            STRELKA_ERROR("Failed to load EXR projector image: {} ({})", fileName, error ? error : "unknown");
+            if (error)
+            {
+                FreeEXRErrorMessage(error);
+            }
+        }
+    }
+    else if (isFloat)
+    {
+        linear = stbi_loadf(fileName.c_str(), &width, &height, &channels, 4);
+    }
+    else
+    {
+        encoded = stbi_load(fileName.c_str(), &width, &height, &channels, 4);
+    }
+    if ((!linear && !encoded) || width <= 0 || height <= 0)
+    {
+        STRELKA_ERROR("Unable to load projector image from file: {}", fileName);
+        if (isExr)
+        {
+            // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
+            free(linear);
+        }
+        else
+        {
+            stbi_image_free(linear ? static_cast<void*>(linear) : static_cast<void*>(encoded));
+        }
+        return nullptr;
+    }
+
+    if (linear)
+    {
+        projector::sanitizeLinearRgba(linear, static_cast<size_t>(width) * static_cast<size_t>(height));
+    }
+    MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
+    descriptor->setWidth(static_cast<NS::UInteger>(width));
+    descriptor->setHeight(static_cast<NS::UInteger>(height));
+    descriptor->setMipmapLevelCount(1u);
+    descriptor->setPixelFormat(isFloat ? MTL::PixelFormatRGBA32Float : MTL::PixelFormatRGBA8Unorm_sRGB);
+    descriptor->setTextureType(MTL::TextureType2D);
+    descriptor->setStorageMode(MTL::StorageModeShared);
+    descriptor->setUsage(MTL::TextureUsageShaderRead);
+    MTL::Texture* texture = mDevice ? mDevice->newTexture(descriptor) : nullptr;
+    descriptor->release();
+    if (texture)
+    {
+        const size_t rowBytes = static_cast<size_t>(width) * (isFloat ? 4u * sizeof(float) : 4u);
+        texture->replaceRegion(MTL::Region::Make2D(0, 0, width, height), 0,
+                               linear ? static_cast<const void*>(linear) : static_cast<const void*>(encoded), rowBytes);
+    }
+    if (isExr)
+    {
+        // LoadEXR allocates through malloc.
+        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
+        free(linear);
+    }
+    else
+    {
+        stbi_image_free(linear ? static_cast<void*>(linear) : static_cast<void*>(encoded));
+    }
+    return texture;
+}
+
 MTL::ResourceID MetalTextures::loadMaterialTexture(const std::string& absolutePath, bool srgb, TextureKind kind)
 {
     if (absolutePath.empty())
@@ -544,4 +627,3 @@ void MetalTextures::generateMips()
 }
 
 } // namespace oka::metal
-

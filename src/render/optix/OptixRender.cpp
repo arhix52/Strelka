@@ -281,7 +281,13 @@ Rgba32fImage decodeProjectorRgba32f(const std::string& path)
     const std::string ext = fs::path(path).extension().string();
     if (ext == ".exr" || ext == ".EXR" || stbi_is_hdr(path.c_str()))
     {
-        return decodeRgba32f(path, "projector image");
+        Rgba32fImage img = decodeRgba32f(path, "projector image");
+        if (img.valid())
+        {
+            oka::projector::sanitizeLinearRgba(
+                img.pixels, static_cast<size_t>(img.width) * static_cast<size_t>(img.height));
+        }
+        return img;
     }
 
     Rgba32fImage img;

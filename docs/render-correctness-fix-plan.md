@@ -36,6 +36,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | Y. Runtime topology/mask safety | Headless create/edit recreates proxy geometry after its arrays were released (10 frozen failures); soft punctual CPU hits use a mismatched proxy (3 failures); material alpha/medium edits retain stale AS state | topology-free headless create/edit, common analytic CPU hit, and runtime AS rebuild | keep released topology immutable; dispatch exact analytic surfaces; rebuild material-dependent BLAS/TLAS state | FIXED | FIXED on MTLDevice; runtime rebuild source-validated | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | Z. Projector transfer convention | Metal applies piecewise sRGB while OptiX applies gamma 2.2; 7/9 fixture values disagree, code 32 is low by 28% | exact 8-bit texel fixture and gamma-2.2 mutation | decode OptiX LDR codes with the IEC sRGB EOTF; preserve linear HDR/EXR and alpha | FIXED | FIXED on MTLDevice | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | AA. OptiX analytic/hardware hit arbitration | A rectangle at `t=1` is hidden by an unrelated hardware hit at `t=2` because the analytic search runs only in `__miss__`; source regression failed 1/7 assertions | bounded analytic-vs-hardware oracle, frozen miss-only mutation, OptiX closest-hit call-site contract | search analytic surfaces up to the hardware closest-hit distance and run medium/fog attenuation over the winning segment before shading | FIXED oracle | Existing bounded arbitration | Source fixed; external CUDA required | pending | UNVERIFIED |
+| AB. Metal projector radiance storage | Metal routes projector HDR/EXR through an 8-bit sRGB/optional-BC material path; focused contract failed 2/6 assertions and a `4.0` texel clips to `1.0` | LDR/HDR format contract, HDR clipping mutation, actual-MTLDevice texel round trip | dedicated uncompressed one-level projector upload: `RGBA8Unorm_sRGB` for LDR and linear `RGBA32Float` for HDR/EXR | Shared sanitization/EOTF | FIXED on MTLDevice | Source uses same sanitized float texels; external CUDA required | pending | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -1212,3 +1213,28 @@ is out of scope unless it blocks validation.
   absorption; a surviving analytic event is shaded and terminates before any farther hardware material logic. No
   proxy triangle was restored. The focused Debug, Release, and ASan+UBSan test now passes 7/7 assertions; OptiX CUDA
   compilation/runtime remains externally `UNVERIFIED` until the documented finding-7 runner is available.
+
+## Finding AB: Metal projector radiance storage
+
+- Random variables and measure: unchanged. Projector identity remains a discrete selection mass and its finite
+  surface/delta classification is unchanged. Texture lookup is a deterministic radiance evaluation at the projected
+  UV, not a sampling measure.
+- Support: every finite nonnegative authored LDR, HDR, or EXR texel that survives the image decoder must remain
+  representable as projector radiance. Values above one are valid emitted radiance and may not be clipped by an
+  UNORM upload. Failed files keep the existing white fallback. Projector images use level zero and clamp addressing
+  on both strategies; block compression is not part of the radiometric specification.
+- Conditional/marginal PDF and selection PMF: unchanged. The light density is independent of the looked-up texel and
+  retains the represented hierarchy masses. Texture values multiply the integrand only.
+- Delta/continuous classification and MIS: unchanged. Sharp projectors are positional atoms; positive-radius
+  projectors are continuous sphere emitters. NEE and analytic-hit evaluation consume the same bindless texture and
+  therefore must see identical decoded linear texels.
+- Current-HEAD reproducer and mutation: `MetalLights::loadProjectorImages` calls the general material
+  `loadFromFile(..., sRGB, Color)` path, which always decodes through `stbi_load` to 8-bit, optionally downsizes and
+  BC-compresses, and cannot decode EXR. OptiX already uploads projector HDR/EXR as linear `RGBA32F`. The focused
+  source contract fails 2/6 assertions, and the retained UNORM mutation maps authored radiance `4.0` to `1.0`.
+- Implementation and result: the projector-specific Metal loader uploads LDR codes unchanged to an uncompressed
+  one-level `RGBA8Unorm_sRGB` texture so hardware applies the same IEC EOTF as the OptiX host helper. HDR and EXR
+  upload uncompressed one-level linear `RGBA32Float`. Both backends sanitize non-finite/negative HDR RGB and clamp
+  alpha through one host helper. The focused source contract now passes, and an actual Apple M4 Pro readback retains
+  a `4,2,1` Radiance-HDR texel exactly in `RGBA32Float`; Debug, Release, and ASan+UBSan projector groups pass 13/13
+  cases and 92/92 assertions. OptiX CUDA execution remains externally `UNVERIFIED`.

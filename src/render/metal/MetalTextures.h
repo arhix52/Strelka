@@ -25,6 +25,11 @@ public:
 
     MTL::Texture* loadFromFile(const std::string& absolutePath, bool srgb, TextureKind kind = TextureKind::Color);
 
+    /// Load an emitted projector image without material resizing, mipmaps or
+    /// block compression. LDR stays encoded in an sRGB UNORM texture; HDR and
+    /// EXR retain linear float radiance. The caller owns the returned texture.
+    MTL::Texture* loadProjectorFromFile(const std::string& absolutePath);
+
     struct Request
     {
         std::string path;
@@ -117,4 +122,3 @@ private:
 };
 
 } // namespace oka::metal
-
