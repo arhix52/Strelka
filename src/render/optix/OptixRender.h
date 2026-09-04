@@ -355,6 +355,8 @@ private:
 
     void createLightBuffer();
     void createEmissiveMeshLights();
+    /// World bounds' diagonal: what the infinite lights' power proxy is scaled by.
+    double sceneExtent() const;
     void updateEmitterSelectionProbabilities();
     void createIesBuffer();
     /// Images thrown by projector lights, indexed by each light's points[0].z.

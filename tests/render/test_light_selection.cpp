@@ -380,6 +380,37 @@ TEST_CASE("analytic light power accounts for emitting measure")
     CHECK(analyticLightPower(point) == doctest::Approx(4.0 * std::numbers::pi));
 }
 
+TEST_CASE("an infinite light is weighed over the scene it lights")
+{
+    // A sun and an environment map of the same integrated radiance, over a
+    // forest-sized scene. Both are irradiances, so the split has to come out
+    // even: with the sun's proxy left unscaled it was ~1e5 below the map's, the
+    // proposal stopped picking it, and the draws that did arrive carried the
+    // whole sun divided by a 2^-22 probability.
+    constexpr double extent = 314.0;
+    constexpr double radiance = 4.0;
+
+    oka::Scene::Light sun{};
+    sun.type = LIGHT_TYPE_DISTANT;
+    sun.color = glm::float4(static_cast<float>(radiance));
+    sun.normal = glm::float4(0.0f, 0.0f, -1.0f, 0.0f);
+    sun.halfAngle = 0.0f; // a delta sun: color is the irradiance it delivers
+
+    const double sunPower = analyticLightPower(sun, extent);
+    const double envPower = environmentLightPower(radiance, extent, 1.0, 1.0);
+    CHECK(sunPower == doctest::Approx(envPower));
+
+    const float envProbability =
+        emitterSelectionProbabilities(true, envPower, true, sunPower, false, 0.0).environment;
+    CHECK(envProbability == doctest::Approx(0.5f).epsilon(1e-3));
+
+    // Scaling both sides by the same scene is what makes them comparable; the
+    // scene must not change which of the two wins.
+    CHECK(analyticLightPower(sun, 2.0 * extent) / analyticLightPower(sun, extent) == doctest::Approx(4.0));
+    // No bounds: the same unit sphere the environment proxy falls back to.
+    CHECK(analyticLightPower(sun, 0.0) == doctest::Approx(radiance * std::numbers::pi));
+}
+
 TEST_CASE("invalid directional frames have zero selection power")
 {
     oka::Scene::Light light{};

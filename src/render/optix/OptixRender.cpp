@@ -4861,14 +4861,24 @@ void OptiXRender::createIndexBuffer()
     createOrUpdateBuffer(mIndexBuffer, mScene->getIndices());
 }
 
+double OptiXRender::sceneExtent() const
+{
+    glm::float3 boundsMin(0.0f);
+    glm::float3 boundsMax(0.0f);
+    return mScene != nullptr && mScene->worldBounds(boundsMin, boundsMax) ?
+               std::max(static_cast<double>(glm::length(boundsMax - boundsMin)), 1e-4) :
+               1e16;
+}
+
 void OptiXRender::createLightBuffer()
 {
     const std::vector<Scene::Light>& lights = mScene->getLights();
+    const double extent = sceneExtent();
     std::vector<double> powers;
     powers.reserve(lights.size());
     for (const Scene::Light& light : lights)
     {
-        powers.push_back(metal::analyticLightPower(light));
+        powers.push_back(metal::analyticLightPower(light, extent));
     }
     const metal::LightSelectionTable selection = metal::buildLightSelectionAlias(powers);
     mAnalyticLightPower = selection.totalPower;
@@ -4894,21 +4904,19 @@ void OptiXRender::createLightBuffer()
 void OptiXRender::updateEmitterSelectionProbabilities()
 {
     Params& params = mState.params;
-    glm::float3 boundsMin(0.0f);
-    glm::float3 boundsMax(0.0f);
-    const double sceneExtent = mScene != nullptr && mScene->worldBounds(boundsMin, boundsMax) ?
-                                   std::max(static_cast<double>(glm::length(boundsMax - boundsMin)), 1e-4) :
-                                   1e16;
+    const double extent = sceneExtent();
     const double tintLuminance = 0.2126 * std::max(params.envMapColorTint.x, 0.0f) +
                                  0.7152 * std::max(params.envMapColorTint.y, 0.0f) +
                                  0.0722 * std::max(params.envMapColorTint.z, 0.0f);
     const double envPower =
-        metal::environmentLightPower(mEnvMapPower, sceneExtent, params.envMapIntensity, tintLuminance);
+        metal::environmentLightPower(mEnvMapPower, extent, params.envMapIntensity, tintLuminance);
     const metal::EmitterSelectionProbabilities selection = metal::emitterSelectionProbabilities(
         params.hasEnvMap, envPower, params.scene.numLights > 0u, mAnalyticLightPower,
         params.scene.numEmissiveMeshes > 0u, mEmissiveMeshPower);
     params.envSelectionPdf = selection.environment;
     params.scene.meshLightSelectionPdf = selection.meshGivenLocal;
+    STRELKA_DEBUG("Emitter selection: extent={} envPower={} analyticPower={} meshPower={} -> env={} local={}", extent,
+                  envPower, mAnalyticLightPower, mEmissiveMeshPower, selection.environment, selection.local);
 }
 
 void OptiXRender::createEmissiveMeshLights()

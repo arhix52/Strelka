@@ -3401,7 +3401,15 @@ Buffer* MetalRender::createBuffer(const BufferDesc& desc)
 
 void MetalRender::uploadLightBuffer()
 {
-    mLights.upload(mScene->getLights(), mScene->getIesProfiles(), mScene->getProjectorImages(), mTextures);
+    // Same bounds and same fallback the frame uniforms hand to
+    // environmentLightPower(), so the two sides of the environment-versus-local
+    // split are scaled by one scene, not by two.
+    glm::float3 boundsMin(0.0f);
+    glm::float3 boundsMax(0.0f);
+    const double sceneExtent = mScene != nullptr && mScene->worldBounds(boundsMin, boundsMax) ?
+                                   std::max(static_cast<double>(glm::length(boundsMax - boundsMin)), 1e-4) :
+                                   1e16;
+    mLights.upload(mScene->getLights(), mScene->getIesProfiles(), mScene->getProjectorImages(), mTextures, sceneExtent);
 }
 
 void MetalRender::handleSceneChanges()

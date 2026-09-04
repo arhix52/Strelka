@@ -35,10 +35,14 @@ public:
     /// inside the lights themselves, which is why this takes the texture domain:
     /// the handle cannot be resolved before the image exists, and the shade
     /// kernel has no binding slot left for a table of its own.
+    ///
+    /// `sceneExtent` is the world bounds' diagonal; the distant and dome lights'
+    /// power proxy is an irradiance until it is scaled by the area that spans.
     void upload(const std::vector<Scene::Light>& lightDescs,
                 const std::vector<Scene::IesProfile>& iesProfiles,
                 const std::vector<std::string>& projectorImages,
-                MetalTextures& textures);
+                MetalTextures& textures,
+                double sceneExtent);
 
     MTL::Buffer* buffer() const
     {

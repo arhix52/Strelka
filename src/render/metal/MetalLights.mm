@@ -125,7 +125,8 @@ void MetalLights::loadProjectorImages(const std::vector<std::string>& paths, Met
 void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
                          const std::vector<Scene::IesProfile>& iesProfiles,
                          const std::vector<std::string>& projectorImages,
-                         MetalTextures& textures)
+                         MetalTextures& textures,
+                         double sceneExtent)
 {
 #ifndef NDEBUG
     ++mAuditCounts.uploads;
@@ -151,7 +152,7 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
     powers.reserve(lightDescs.size());
     for (const Scene::Light& light : lightDescs)
     {
-        powers.push_back(analyticLightPower(light));
+        powers.push_back(analyticLightPower(light, sceneExtent));
     }
     const LightSelectionTable selection = buildLightSelectionAlias(powers);
 #ifndef NDEBUG

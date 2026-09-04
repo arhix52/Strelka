@@ -83,13 +83,29 @@ inline uint32_t aliasThreshold(double probability)
     return static_cast<uint32_t>(std::clamp<uint64_t>(rounded, 1u, uint64_t{ 0xffffffffu }));
 }
 
-inline double environmentLightPower(double mapIntegral, double sceneExtent, double intensity, double tintLuminance)
+// The area an infinite light throws its irradiance across: the projected disc of
+// a sphere drawn around the scene. An environment map, a distant light and a
+// dome all carry an irradiance rather than a power -- there is no emitter area
+// to integrate -- so this is what makes them comparable with a rect or a point,
+// whose proxies are already fluxes. A scene with no usable bounds keeps the bare
+// irradiance, which still compares like for like because every infinite light
+// then loses the same factor.
+inline double infiniteLightCrossSection(double sceneExtent)
 {
     constexpr double pi = std::numbers::pi_v<double>;
-    const double radius = std::isfinite(sceneExtent) && sceneExtent < 1e15 ? 0.5 * std::max(sceneExtent, 0.0) : 1.0;
-    double result = pi;
-    for (const double factor :
-         { radius, radius, cleanLightPower(mapIntegral), cleanLightPower(intensity), cleanLightPower(tintLuminance) })
+    // A scene with no usable bounds -- none given, unbounded, or absurd -- keeps
+    // the unit sphere the environment proxy has always fallen back to. Every
+    // infinite light then loses the same factor, so they still compare.
+    const double radius =
+        std::isfinite(sceneExtent) && sceneExtent > 0.0 && sceneExtent < 1e15 ? 0.5 * sceneExtent : 1.0;
+    return pi * radius * radius;
+}
+
+inline double environmentLightPower(double mapIntegral, double sceneExtent, double intensity, double tintLuminance)
+{
+    double result = 1.0;
+    for (const double factor : { infiniteLightCrossSection(sceneExtent), cleanLightPower(mapIntegral),
+                                 cleanLightPower(intensity), cleanLightPower(tintLuminance) })
     {
         if (!(factor > 0.0))
         {
@@ -132,7 +148,11 @@ inline EmitterSelectionProbabilities emitterSelectionProbabilities(
 // Scene-wide emitted-power proxy. It need not know the shading point: RIS still
 // makes the point-dependent choice. This proposal only stops spending equal
 // probability on lights whose total output differs by orders of magnitude.
-inline double analyticLightPower(const Scene::Light& light)
+//
+// `sceneExtent` is the world bounds' diagonal, and only the infinite types read
+// it -- see infiniteLightCrossSection(). Passing nothing leaves those types with
+// the bare irradiance, which is what a caller with no scene to bound means.
+inline double analyticLightPower(const Scene::Light& light, double sceneExtent = 0.0)
 {
     const double luminance =
         cleanLightPower(0.2126 * std::max(light.color.r, 0.0f) + 0.7152 * std::max(light.color.g, 0.0f) +
@@ -236,14 +256,24 @@ inline double analyticLightPower(const Scene::Light& light)
         {
             measure = distantLightUsesDeltaMeasure(light.halfAngle) ? 1.0 : distantLightSolidAngle(light.halfAngle);
         }
+        // Both infinite types have an irradiance here, not a flux: without the
+        // scene's cross-section a sun sat ~1e5 below an environment map of the
+        // same brightness, the proposal never picked it, and the few draws that
+        // did arrived divided by 2^-22 -- sun-coloured fireflies on a darker
+        // image.
+        measure *= infiniteLightCrossSection(sceneExtent);
         break;
     case LIGHT_TYPE_DOME:
-        measure = 4.0 * pi;
+        measure = 4.0 * pi * infiniteLightCrossSection(sceneExtent);
         break;
     default:
         break;
     }
-    return cleanLightPower(luminance * measure);
+    const double power = cleanLightPower(luminance * measure);
+    // luminance * measure overflows before cleanLightPower can call it finite
+    // once the cross-section is in it, and a light that overflows is the
+    // brightest thing in the scene, not the dimmest.
+    return power > 0.0 || !(luminance > 0.0 && measure > 0.0) ? power : std::numeric_limits<double>::max();
 }
 
 inline uint32_t temporalLightMapping(const Scene::Light* source, const Scene::Light* destination, uint32_t stableId)
