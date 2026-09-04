@@ -897,7 +897,7 @@ void MetalRender::init()
     static_assert(sizeof(MediumPathState) == 8, "Medium state is a cold side table, not part of PathState");
     static_assert(
         sizeof(SharcUpdateState) == 168, "SHARC update state is sparse and must stay ABI-compatible with Metal");
-    static_assert(sizeof(ShadowRay) == 72, "ShadowRay host/Metal ABI changed");
+    static_assert(sizeof(ShadowRay) == 68, "ShadowRay host/Metal ABI changed");
     // 32 rather than 24: the hit now carries the TLAS instance, because a shared
     // BLAS belongs to no single one. One extra word per live path.
     static_assert(sizeof(HitRecord) == 32, "HitRecord size changed");

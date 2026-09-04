@@ -483,6 +483,32 @@ TEST_CASE("finite analytic light surfaces block only the open shadow segment")
     CHECK_FALSE(oldShadowMaskCouldHitAnalyticLight);
 }
 
+TEST_CASE("selected sphere light keeps near-side self-occlusion")
+{
+    const float3 center = make_float3(0.0f, 0.0f, 3.0f);
+    const float3 axisX = make_float3(1.0f, 0.0f, 0.0f);
+    const float3 axisY = make_float3(0.0f, 1.0f, 0.0f);
+    const float3 axisZ = make_float3(0.0f, 0.0f, 1.0f);
+    const float3 origin = make_float3(0.0f);
+    const float3 direction = make_float3(0.0f, 0.0f, 1.0f);
+
+    const AnalyticLightIntersection nearSample =
+        intersectAnalyticEllipsoid(origin, direction, 0.0f, std::nextafter(2.0f, 0.0f), center, axisX, axisY, axisZ);
+    const AnalyticLightIntersection farSample =
+        intersectAnalyticEllipsoid(origin, direction, 0.0f, std::nextafter(4.0f, 0.0f), center, axisX, axisY, axisZ);
+    CHECK_FALSE(nearSample.hit);
+    REQUIRE(farSample.hit);
+    CHECK(farSample.distance == doctest::Approx(2.0f));
+
+    const std::filesystem::path repository =
+        std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
+    std::ifstream shaderFile(repository / "src/shaders/metal/wavefront.metal");
+    REQUIRE(shaderFile.good());
+    const std::string shader((std::istreambuf_iterator<char>(shaderFile)), std::istreambuf_iterator<char>());
+    CHECK(shader.find("ignoredLightId") == std::string::npos);
+    CHECK(shader.find("if (shadowLightProxy") != std::string::npos);
+}
+
 TEST_CASE("continuous light samples use interior finite-lattice representatives")
 {
     CHECK(lightOpenUnitInterval(0.0f) == 0x1p-24f);
@@ -2150,7 +2176,7 @@ TEST_CASE("Metal analytic surfaces use TLAS traversal")
     CHECK(shader.find("findAnalyticAreaLightHit") == std::string::npos);
     CHECK(shader.find("analyticLightsOccludeSegment") == std::string::npos);
     CHECK(shader.find("for (uint32_t componentId = 0u;") == std::string::npos);
-    CHECK(shader.find("sr.ignoredLightId") != std::string::npos);
+    CHECK(shader.find("ignoredLightId") == std::string::npos);
 
     std::ifstream asFile(repository / "src/render/metal/MetalAccelStructure.mm");
     REQUIRE(asFile.good());

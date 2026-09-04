@@ -753,7 +753,6 @@ struct ShadowRay
     // propagates this only after visibility has been established by shadow.
     packed_float3 sharcRadiance;
     uint32_t sharcPathIndex;
-    uint32_t ignoredLightId;
 };
 
 // EnvAliasEntry is shared by Metal, OptiX and host tests.

@@ -1820,8 +1820,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     sr.sharcRadiance =
                         packed_float3(SPEC_SHARC_UPDATE ? (conn.radiance / conn.pdf) * misWeight * phase : float3(0.0f));
                     sr.sharcPathIndex = tid;
-                    sr.ignoredLightId =
-                        conn.sample.type == RESTIR_SAMPLE_ANALYTIC ? conn.sample.lightId : 0xffffffffu;
                     sr.rrCutoff =
                         random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                     shadowRays[slot] = sr;
@@ -1964,8 +1962,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         sr.sharcRadiance = packed_float3(
                             SPEC_SHARC_UPDATE ? (conn.radiance / conn.pdf) * misWeight * phase : float3(0.0f));
                         sr.sharcPathIndex = tid;
-                        sr.ignoredLightId =
-                            conn.sample.type == RESTIR_SAMPLE_ANALYTIC ? conn.sample.lightId : 0xffffffffu;
                         sr.rrCutoff =
                             random<SampleDimension::eShadowRR>(wrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                         const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
@@ -2365,8 +2361,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         sr.sharcRadiance = packed_float3(
                             SPEC_SHARC_UPDATE ? (conn.radiance / conn.pdf) * misWeight * M_1_PI_F : float3(0.0f));
                         sr.sharcPathIndex = tid;
-                        sr.ignoredLightId =
-                            conn.sample.type == RESTIR_SAMPLE_ANALYTIC ? conn.sample.lightId : 0xffffffffu;
                         sr.rrCutoff =
                             random<SampleDimension::eShadowRR>(xrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                         const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
@@ -2974,8 +2968,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
                     sr.sharcRadiance = packed_float3(SPEC_SHARC_UPDATE ? bestF * W : float3(0.0f));
                     sr.sharcPathIndex = tid;
-                    sr.ignoredLightId =
-                        bestConn.sample.type == RESTIR_SAMPLE_ANALYTIC ? bestConn.sample.lightId : 0xffffffffu;
                     sr.rrCutoff =
                         random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                     const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
@@ -3508,8 +3500,6 @@ kernel void wavefrontRestirFinal(uint gid [[thread_position_in_grid]],
     sr.medium = stored.medium;
     sr.sharcRadiance = packed_float3(float3(0.0f));
     sr.sharcPathIndex = tid;
-    sr.ignoredLightId =
-        connection.sample.type == RESTIR_SAMPLE_ANALYTIC ? connection.sample.lightId : 0xffffffffu;
     sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
     const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
     shadowRays[slot] = sr;
@@ -4058,13 +4048,6 @@ static inline bool shadowLightProxy(uint32_t instanceId,
     return (instances[instanceId].mask & (GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_LIGHT_HIDDEN)) != 0u;
 }
 
-static inline bool shadowIgnoresLight(uint32_t instanceId,
-                                     uint32_t ignoredLightId,
-                                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances)
-{
-    return shadowLightProxy(instanceId, instances) && instances[instanceId].userID == ignoredLightId;
-}
-
 template <typename T, bool Inline>
 struct CutoutShadowWalk
 {
@@ -4077,7 +4060,6 @@ struct CutoutShadowWalk
                     device const GeometryEntry* geometryEntries,
                     device const char* vertexBuffer,
                     device const uint32_t* indexBuffer,
-                    uint32_t ignoredLightId,
                     thread float3& transmittance)
     {
         transmittance = float3(1.0f);
@@ -4096,15 +4078,6 @@ struct CutoutShadowWalk
             if (hit.type == intersection_type::none)
             {
                 return true; // nothing else in the way
-            }
-            if (shadowIgnoresLight(hit.instance_id, ignoredLightId, instances))
-            {
-                probe.min_distance = hit.distance * (1.0f + 1e-5f) + 1e-5f;
-                if (probe.min_distance >= probe.max_distance)
-                {
-                    return true;
-                }
-                continue;
             }
             if (shadowLightProxy(hit.instance_id, instances))
             {
@@ -4148,7 +4121,6 @@ struct CutoutShadowWalk<T, true>
                     device const GeometryEntry* geometryEntries,
                     device const char* vertexBuffer,
                     device const uint32_t* indexBuffer,
-                    uint32_t ignoredLightId,
                     thread float3& transmittance)
     {
         transmittance = float3(1.0f);
@@ -4161,10 +4133,6 @@ struct CutoutShadowWalk<T, true>
         while (q.next())
         {
             const uint32_t instanceId = q.get_candidate_instance_id();
-            if (shadowIgnoresLight(instanceId, ignoredLightId, instances))
-            {
-                continue;
-            }
             if (shadowLightProxy(instanceId, instances))
             {
                 q.abort();
@@ -4240,7 +4208,7 @@ static void shadowImpl(uint gid,
     float3 weight = float3(sr.weight);
     float3 sharcRadiance = float3(sr.sharcRadiance);
 
-    if (!SPEC_ALPHA && sr.ignoredLightId == 0xffffffffu)
+    if (!SPEC_ALPHA)
     {
         // No cutouts in this scene: one any-hit trace, exactly as before.
         typename T::isect isect;
@@ -4291,7 +4259,7 @@ static void shadowImpl(uint gid,
     float3 transmittance;
     if (!CutoutShadowWalk<T, T::kInlineQuery != 0>::run(accelerationStructure, shadowRay, motionTime, sr.rrCutoff,
                                                         instances, materials, geometryEntries, vertexBuffer,
-                                                        indexBuffer, sr.ignoredLightId, transmittance))
+                                                        indexBuffer, transmittance))
     {
         return; // fully blocked
     }
