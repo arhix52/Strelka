@@ -99,6 +99,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_optix_scene_preparation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_gpu_stage_breadcrumb.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_restir_reservoir.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_procedural_analytic_lights.cpp
 )
 strelka_apply_warnings(unit_tests)
 

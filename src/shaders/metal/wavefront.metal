@@ -64,48 +64,13 @@ struct AnalyticPrimitiveIntersection
     float distance [[distance]];
 };
 
-static inline AnalyticPrimitiveIntersection intersectCanonicalSphere(float3 origin,
-                                                                     float3 direction,
-                                                                     float minDistance,
-                                                                     float maxDistance)
-{
-    AnalyticPrimitiveIntersection result{ false, 0.0f };
-    const float a = dot(direction, direction);
-    const float halfB = dot(origin, direction);
-    const float c = dot(origin, origin) - 1.0f;
-    const float discriminant = halfB * halfB - a * c;
-    if (discriminant < 0.0f)
-        return result;
-    const float root = sqrt(discriminant);
-    float t = (-halfB - root) / a;
-    if (t < minDistance || t > maxDistance)
-        t = (-halfB + root) / a;
-    result.accept = t >= minDistance && t <= maxDistance;
-    result.distance = t;
-    return result;
-}
-
-static inline AnalyticPrimitiveIntersection intersectCanonicalDisc(float3 origin,
-                                                                   float3 direction,
-                                                                   float minDistance,
-                                                                   float maxDistance)
-{
-    AnalyticPrimitiveIntersection result{ false, 0.0f };
-    if (direction.z == 0.0f)
-        return result;
-    const float t = -origin.z / direction.z;
-    const float2 p = origin.xy + t * direction.xy;
-    result.accept = t >= minDistance && t <= maxDistance && dot(p, p) <= 1.0f;
-    result.distance = t;
-    return result;
-}
-
 #define WF_ANALYTIC_INTERSECTION_ENTRY(NAME, BODY, ...)                                                                \
     [[intersection(bounding_box, __VA_ARGS__)]]                                                                        \
     AnalyticPrimitiveIntersection NAME(float3 origin [[origin]], float3 direction [[direction]],                       \
                                        float minDistance [[min_distance]], float maxDistance [[max_distance]])         \
     {                                                                                                                  \
-        return BODY(origin, direction, minDistance, maxDistance);                                                      \
+        const CanonicalAnalyticIntersection hit = BODY(origin, direction, minDistance, maxDistance);                   \
+        return { hit.hit, hit.distance };                                                                              \
     }
 
 WF_ANALYTIC_INTERSECTION_ENTRY(analyticSphereIntersection, intersectCanonicalSphere, triangle_data, instancing)

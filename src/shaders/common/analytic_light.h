@@ -57,6 +57,59 @@ struct AnalyticLightIntersection
     bool hit = false;
 };
 
+struct CanonicalAnalyticIntersection
+{
+    float distance = 0.0f;
+    bool hit = false;
+};
+
+DEVICE_FUNC float2 sampleCanonicalDisc(float u1, float u2)
+{
+    const float radius = sqrtf(fminf(fmaxf(u1, 0.0f), 1.0f));
+    const float phi = 2.0f * M_PI_F * u2;
+    return make_float2(radius * cosf(phi), radius * sinf(phi));
+}
+
+DEVICE_FUNC float3 sampleCanonicalSphere(float u1, float u2)
+{
+    const float z = 1.0f - 2.0f * u1;
+    const float radial = sqrtf(fmaxf(1.0f - z * z, 0.0f));
+    const float phi = 2.0f * M_PI_F * u2;
+    return make_float3(radial * cosf(phi), radial * sinf(phi), z);
+}
+
+DEVICE_FUNC CanonicalAnalyticIntersection intersectCanonicalSphere(
+    float3 origin, float3 direction, float minDistance, float maxDistance)
+{
+    CanonicalAnalyticIntersection result;
+    const float a = dot(direction, direction);
+    const float halfB = dot(origin, direction);
+    const float c = dot(origin, origin) - 1.0f;
+    const float discriminant = halfB * halfB - a * c;
+    if (discriminant < 0.0f)
+        return result;
+    const float root = sqrtf(discriminant);
+    float distance = (-halfB - root) / a;
+    if (distance < minDistance || distance > maxDistance)
+        distance = (-halfB + root) / a;
+    result.distance = distance;
+    result.hit = distance >= minDistance && distance <= maxDistance;
+    return result;
+}
+
+DEVICE_FUNC CanonicalAnalyticIntersection intersectCanonicalDisc(
+    float3 origin, float3 direction, float minDistance, float maxDistance)
+{
+    CanonicalAnalyticIntersection result;
+    if (direction.z == 0.0f)
+        return result;
+    const float distance = -origin.z / direction.z;
+    const float2 point = make_float2(origin.x + distance * direction.x, origin.y + distance * direction.y);
+    result.distance = distance;
+    result.hit = distance >= minDistance && distance <= maxDistance && dot(point, point) <= 1.0f;
+    return result;
+}
+
 DEVICE_FUNC bool analyticLightIntersectionSharesEvent(float distance, AnalyticLightIntersection candidate)
 {
     return candidate.hit && candidate.distance == distance;
@@ -571,9 +624,8 @@ sampleAnalyticDisc(float3 center, float3 axisX, float3 axisY, float3 emissionNor
     {
         return sample;
     }
-    const float radius = sqrtf(fminf(fmaxf(u1, 0.0f), 1.0f));
-    const float phi = 2.0f * M_PI_F * u2;
-    sample.point = center + radius * (cosf(phi) * axisX + sinf(phi) * axisY);
+    const float2 objectPoint = sampleCanonicalDisc(u1, u2);
+    sample.point = center + objectPoint.x * axisX + objectPoint.y * axisY;
     sample.normal = emissionNormal;
     sample.areaPdf = areaPdf;
     return sample;
@@ -587,10 +639,7 @@ sampleAnalyticEllipsoid(float3 center, float3 axisX, float3 axisY, float3 axisZ,
     {
         return sample;
     }
-    const float z = 1.0f - 2.0f * u1;
-    const float radial = sqrtf(fmaxf(1.0f - z * z, 0.0f));
-    const float phi = 2.0f * M_PI_F * u2;
-    float3 objectNormal = make_float3(radial * cosf(phi), radial * sinf(phi), z);
+    float3 objectNormal = sampleCanonicalSphere(u1, u2);
     const float objectLengthSquared = dot(objectNormal, objectNormal);
     if (objectLengthSquared > 0.0f)
     {
