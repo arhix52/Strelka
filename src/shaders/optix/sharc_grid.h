@@ -148,10 +148,23 @@ STRELKA_SHARC_FN Voxel voxelForDistance(float distance, float baseSize)
 STRELKA_SHARC_FN int32_t voxelCoordinate(float coordinate, float size)
 {
 #if defined(__CUDACC__)
-    return (int32_t)floorf(coordinate / size);
+    const float cell = floorf(coordinate / size);
 #else
-    return (int32_t)std::floor(coordinate / size);
+    const float cell = std::floor(coordinate / size);
 #endif
+    if (cell != cell)
+    {
+        return 0;
+    }
+    if (cell <= -2147483648.0f)
+    {
+        return (-2147483647 - 1);
+    }
+    if (cell >= 2147483648.0f)
+    {
+        return 2147483647;
+    }
+    return (int32_t)cell;
 }
 
 /// Six buckets: the dominant axis of the normal and its sign.
@@ -317,10 +330,14 @@ STRELKA_SHARC_FN uint64_t adjacentLevelKey(
     const int32_t py = voxelCoordinate(previousY, voxelSize);
     const int32_t pz = voxelCoordinate(previousZ, voxelSize);
 
-    const int32_t dx = cx - x, dy = cy - y, dz = cz - z;
-    const int32_t qx = px - x, qy = py - y, qz = pz - z;
-    const int32_t distance = dx * dx + dy * dy + dz * dz;
-    const int32_t distancePrev = qx * qx + qy * qy + qz * qz;
+    const int64_t dx = (int64_t)cx - (int64_t)x;
+    const int64_t dy = (int64_t)cy - (int64_t)y;
+    const int64_t dz = (int64_t)cz - (int64_t)z;
+    const int64_t qx = (int64_t)px - (int64_t)x;
+    const int64_t qy = (int64_t)py - (int64_t)y;
+    const int64_t qz = (int64_t)pz - (int64_t)z;
+    const uint64_t distance = (uint64_t)(dx * dx) + (uint64_t)(dy * dy) + (uint64_t)(dz * dz);
+    const uint64_t distancePrev = (uint64_t)(qx * qx) + (uint64_t)(qy * qy) + (uint64_t)(qz * qz);
 
     if (distance < distancePrev)
     {
@@ -336,9 +353,9 @@ STRELKA_SHARC_FN uint64_t adjacentLevelKey(
     }
     else
     {
-        x <<= 1;
-        y <<= 1;
-        z <<= 1;
+        x *= 2;
+        y *= 2;
+        z *= 2;
         level = level - 1 < kLevelMin ? kLevelMin : level - 1;
     }
 

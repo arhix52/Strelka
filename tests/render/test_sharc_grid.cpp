@@ -118,6 +118,17 @@ TEST_CASE("voxel coordinates tile the axis without a gap or an overlap at zero")
     CHECK(voxelCoordinate(0.5f, size) == 1);
 }
 
+TEST_CASE("invalid and out-of-range voxel coordinates have defined sentinels")
+{
+    const float infinity = std::numeric_limits<float>::infinity();
+    CHECK(voxelCoordinate(std::nanf(""), 1.0f) == 0);
+    CHECK(voxelCoordinate(0.0f, 0.0f) == 0);
+    CHECK(voxelCoordinate(infinity, 1.0f) == std::numeric_limits<int32_t>::max());
+    CHECK(voxelCoordinate(-infinity, 1.0f) == std::numeric_limits<int32_t>::min());
+    CHECK(voxelCoordinate(1.0f, 0.0f) == std::numeric_limits<int32_t>::max());
+    CHECK(voxelCoordinate(-1.0f, 0.0f) == std::numeric_limits<int32_t>::min());
+}
+
 TEST_CASE("the normal bucket separates the six faces and nothing else")
 {
     CHECK(normalBucket(1.0f, 0.0f, 0.0f) == 0u);
@@ -249,6 +260,18 @@ TEST_CASE("reprojection looks coarser when the eye came closer, finer when it we
     // And the other way.
     const uint64_t further = adjacentLevelKey(key, 4000.0f, 4000.0f, 4000.0f, 64.0f, 64.0f, 64.0f);
     CHECK(unpackLevel(further) == 2);
+    CHECK(unpackCoordinate(further, 0u) == 16);
+}
+
+TEST_CASE("reprojection compares large camera distances without integer overflow")
+{
+    const uint64_t key = voxelKey(8, 8, 8, 0, 0, false);
+    const uint64_t closer = adjacentLevelKey(key, 100000.0f, 100000.0f, 100000.0f, 200000.0f, 200000.0f, 200000.0f);
+    const uint64_t further = adjacentLevelKey(key, 200000.0f, 200000.0f, 200000.0f, 100000.0f, 100000.0f, 100000.0f);
+
+    CHECK(unpackLevel(closer) == 1);
+    CHECK(unpackCoordinate(closer, 0u) == 4);
+    CHECK(unpackLevel(further) == -1);
     CHECK(unpackCoordinate(further, 0u) == 16);
 }
 
