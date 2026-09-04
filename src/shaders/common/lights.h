@@ -344,7 +344,10 @@ static __inline__ __device__ LightSampleData SampleRectLightUniform(const Unifor
     return lightSampleData;
 }
 
-static __inline__ __device__ LightSampleData SampleDistantLight(const UniformLight& l, const float2 u, const float3 hitPoint)
+static __inline__ __device__ LightSampleData SampleDistantLight(const UniformLight& l,
+                                                                const float2 u,
+                                                                const uint2 retryWords,
+                                                                const float3 hitPoint)
 {
     LightSampleData lightSampleData;
     float pdf = 0.0f;
@@ -357,7 +360,7 @@ static __inline__ __device__ LightSampleData SampleDistantLight(const UniformLig
     }
     else
     {
-        coneSample = sampleDistantLightDirection(u.x, u.y, l.halfAngle, axis);
+        coneSample = sampleDistantLightDirection(u.x, u.y, retryWords.x, retryWords.y, l.halfAngle, axis);
         pdf = coneLightSolidAnglePdf(l.halfAngle);
     }
 

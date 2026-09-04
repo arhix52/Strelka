@@ -787,8 +787,13 @@ LightConnection connectLight(constant Uniforms& uniforms,
         lightSampleData = SampleSphereLight(light, uv, si.position);
         break;
     case LIGHT_TYPE_DISTANT:
-        lightSampleData = SampleDistantLight(light, uv, si.position);
+    {
+        const uint2 retryWords =
+            uint2(randomBits<SampleDimension::eLightRetryU>(samplerRnd, uniforms.samplerType),
+                  randomBits<SampleDimension::eLightRetryV>(samplerRnd, uniforms.samplerType));
+        lightSampleData = SampleDistantLight(light, uv, retryWords, si.position);
         break;
+    }
     case LIGHT_TYPE_DOME:
         lightSampleData = SampleDomeLight(light, uv, si.position);
         break;
@@ -867,8 +872,8 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
                                    randomBits<SampleDimension::eLightAlias>(samplerRnd, uniforms.samplerType));
     const float2 jitter = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
                                  random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
-    const uint2 retryWords = uint2(randomBits<SampleDimension::eEnvironmentRetryU>(samplerRnd, uniforms.samplerType),
-                                   randomBits<SampleDimension::eEnvironmentRetryV>(samplerRnd, uniforms.samplerType));
+    const uint2 retryWords = uint2(randomBits<SampleDimension::eLightRetryU>(samplerRnd, uniforms.samplerType),
+                                   randomBits<SampleDimension::eLightRetryV>(samplerRnd, uniforms.samplerType));
 
     float envPdf = 0.0f;
     float3 dir = sampleEnvMap(aliasWords, jitter, retryWords, envAliasTable, uniforms.envMapWidth,

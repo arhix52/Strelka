@@ -46,6 +46,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | AI. IES same-path reload | Re-registering a corrected profile path returns the old slot without replacing its angular data or publishing a light change | active-light same-path replacement and change-bit regression | preserve the stable slot but replace its profile contents and invalidate backend light resources | FIXED | Shared Scene update | Shared Scene update; external CUDA required | this commit | UNVERIFIED |
 | AJ. Environment round-trip fallback atoms | UV/direction correction maps finite-precision bin mismatches onto a common fallback; the first repair still collapsed 7.54% of one extreme-row lattice interval | endpoint and exact extreme-row collision mutations with selected/evaluated-bin agreement | treat a round-trip mismatch as numerical rejection and retry from two independent RNG dimensions | FIXED | Shared math compiled | Shared math; external CUDA required | this commit | UNVERIFIED |
 | AK. Transformed analytic POWER units | a 2x3 transform makes a POWER rectangle emit 6x the authored watts because radiance uses local area | packed rect/disc/ellipsoid world-area integration and local-area mutation | bake POWER radiance from the packed world surface area; leave RADIANCE unchanged | FIXED | Shared packed record | Shared packed record; external CUDA required | this commit | FIXED |
+| AL. Finite distant boundary measure | ordinary sun angle `0.00465`: q-halving raises one direction's multiplicity from 215 to 385 | exact rejected-boundary pair plus cap support/PDF regression | retry rejected float representatives from independent light dimensions | FIXED | Shader compiled | Shared source; external CUDA required | this commit | FIXED |
 
 ## Per-finding probability records
 
@@ -1450,3 +1451,17 @@ is out of scope unless it blocks validation.
   `3600 W`, `3600 W`, and `2333.94 W` for rect, disc, and ellipsoid records authored as `600 W`; all three now
   integrate to `600 W` within `2e-4` relative error. The unchanged RADIANCE control stays at its authored value.
   The focused unit group passes 9/9 cases and 40/40 assertions; both backends consume the same packed radiance.
+
+## Finding AL: finite distant boundary measure
+
+- Random variable and measure: a finite distant light draws azimuth `Phi` and cap-area coordinate `Q` uniformly;
+  the resulting direction is continuous in solid angle on its spherical cap.
+- Support and PDFs: `0 <= Phi < 2 pi`, `0 <= Q < 1`, and directions satisfying the shared chord cap predicate.
+  `p(W|L)=1/[4 pi sin^2(halfAngle/2)]`; the marginal light PDF is the analytic-light selection PMF times this
+  conditional density. A zero-angle distant remains a separate directional atom.
+- MIS strategies: analytic-light NEE and the complementary BSDF-sampled miss use the same cap and marginal PDF.
+- Reproducer and mutation: at half-angle `0.00465`, reusing and halving a rejected boundary `Q` maps 170 additional
+  23-bit states to one interior direction, raising its multiplicity from 215 to 385 while reporting a uniform PDF.
+- Implementation and result: a float representative outside the analytic cap is rejected and retried from two
+  independent dimensioned words. The exact boundary regression and the 400,914-assertion cap sample/PDF sweep pass;
+  both production Metal shaders compile. OptiX consumes the shared sampler but needs external CUDA validation.

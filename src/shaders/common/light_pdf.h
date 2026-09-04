@@ -358,13 +358,23 @@ DEVICE_FUNC float coneLightSolidAnglePdf(float halfAngle)
 
 DEVICE_FUNC bool distantLightContainsDirection(float halfAngle, float3 direction, float3 axisDirection);
 
+DEVICE_FUNC float lightRetryUniform(uint32_t word)
+{
+    return (float)(word >> 8u) * 0x1p-24f;
+}
+
 /// Stable uniform spherical-cap inversion shared by CPU tests, Metal and OptiX.
 ///
 /// `cosTheta = 1 - 2 q sin^2(a/2)` is retained for the axial component, but
 /// recovering the tangent length with `sqrt(1-cosTheta^2)` loses the complete
 /// sample once cosTheta rounds to one. The identity below computes sinTheta
 /// directly from the half angle and the same solid-angle variate.
-DEVICE_FUNC float3 sampleDistantLightDirection(float uPhi, float uSolidAngle, float halfAngle, float3 direction)
+DEVICE_FUNC float3 sampleDistantLightDirection(float uPhi,
+                                               float uSolidAngle,
+                                               uint32_t retryPhi,
+                                               uint32_t retrySolidAngle,
+                                               float halfAngle,
+                                               float3 direction)
 {
     // Scene packing stores a canonical unit axis. Do not renormalize it here:
     // an additional binary32 normalization can move a narrow cap by more than
@@ -377,6 +387,8 @@ DEVICE_FUNC float3 sampleDistantLightDirection(float uPhi, float uSolidAngle, fl
 
     const float angle = distantLightHalfAngle(halfAngle);
     float q = fminf(fmaxf(uSolidAngle, 0.0f), 1.0f);
+    uint32_t phiState = retryPhi;
+    uint32_t solidAngleState = retrySolidAngle;
     const float halfSin = sinf(0.5f * angle);
     const float halfSinSquared = halfSin * halfSin;
 
@@ -390,11 +402,11 @@ DEVICE_FUNC float3 sampleDistantLightDirection(float uPhi, float uSolidAngle, fl
         tangent = normalizeFiniteVectorOrZero(make_float3(0.0f, axis.z, -axis.y));
     }
     const float3 bitangent = cross(axis, tangent);
-    const float phi = 2.0f * M_PI_F * uPhi;
-    const float3 azimuth = cosf(phi) * tangent + sinf(phi) * bitangent;
     float3 sampledDirection = axis;
-    for (int attempt = 0; attempt < 8; ++attempt)
+    for (int attempt = 0; attempt < 9; ++attempt)
     {
+        const float phi = 2.0f * M_PI_F * uPhi;
+        const float3 azimuth = cosf(phi) * tangent + sinf(phi) * bitangent;
         const float cosTheta = 1.0f - 2.0f * q * halfSinSquared;
         const float sinTheta = 2.0f * halfSin * sqrtf(fmaxf(q * (1.0f - q * halfSinSquared), 0.0f));
         sampledDirection = normalizeFiniteVectorOrZero(azimuth * sinTheta + axis * cosTheta);
@@ -402,10 +414,10 @@ DEVICE_FUNC float3 sampleDistantLightDirection(float uPhi, float uSolidAngle, fl
         {
             return sampledDirection;
         }
-        // The final finite RNG cell can round just beyond the mathematical cap
-        // after frame rotation and normalization. Map only that rejected cell
-        // to a strict interior representative; never widen PDF support.
-        q *= 0.5f;
+        phiState = phiState * 1664525u + 1013904223u;
+        solidAngleState = solidAngleState * 1664525u + 1013904223u;
+        uPhi = lightRetryUniform(phiState);
+        q = lightRetryUniform(solidAngleState);
     }
     // A direction equal to the axis is always inside every non-degenerate cap.
     return axis;

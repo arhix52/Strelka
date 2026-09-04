@@ -253,7 +253,10 @@ static __inline__ LightSampleData SampleRectLightUniform(device const UniformLig
 // Area-to-solid-angle pdf of a point sampled uniformly on a flat light. Both the
 // rectangle and the disc reach it: calcLightAreaPdf() and calcLightNormal() already
 // know the shape, so nothing here is specific to one.
-static __inline__ LightSampleData SampleDistantLight(device const UniformLight& l, const float2 u, const float3 hitPoint)
+static __inline__ LightSampleData SampleDistantLight(device const UniformLight& l,
+                                                     const float2 u,
+                                                     const uint2 retryWords,
+                                                     const float3 hitPoint)
 {
     LightSampleData lightSampleData;
     float pdf = 0.0f;
@@ -266,7 +269,7 @@ static __inline__ LightSampleData SampleDistantLight(device const UniformLight& 
     }
     else
     {
-        coneSample = sampleDistantLightDirection(u.x, u.y, l.halfAngle, axis);
+        coneSample = sampleDistantLightDirection(u.x, u.y, retryWords.x, retryWords.y, l.halfAngle, axis);
         pdf = coneLightSolidAnglePdf(l.halfAngle);
     }
 

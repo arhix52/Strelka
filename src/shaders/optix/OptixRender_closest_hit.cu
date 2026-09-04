@@ -383,8 +383,12 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
         lightSampleData = SampleSphereLight(light, uv, si.position);
         break;
     case LIGHT_TYPE_DISTANT:
-        lightSampleData = SampleDistantLight(light, uv, si.position);
+    {
+        const uint2 retryWords = make_uint2(randomBits<SampleDimension::eLightRetryU>(sampler),
+                                            randomBits<SampleDimension::eLightRetryV>(sampler));
+        lightSampleData = SampleDistantLight(light, uv, retryWords, si.position);
         break;
+    }
     case LIGHT_TYPE_DOME:
         lightSampleData = SampleDomeLight(light, uv, si.position);
         break;
@@ -444,8 +448,8 @@ static __device__ LightConnection connectEnvLight(SamplerState& sampler,
         randomBits<SampleDimension::eLightBucket>(sampler), randomBits<SampleDimension::eLightAlias>(sampler));
     const float2 jitter =
         make_float2(random<SampleDimension::eLightPointX>(sampler), random<SampleDimension::eLightPointY>(sampler));
-    const uint2 retryWords = make_uint2(randomBits<SampleDimension::eEnvironmentRetryU>(sampler),
-                                        randomBits<SampleDimension::eEnvironmentRetryV>(sampler));
+    const uint2 retryWords = make_uint2(randomBits<SampleDimension::eLightRetryU>(sampler),
+                                        randomBits<SampleDimension::eLightRetryV>(sampler));
 
     float envPdf = 0.0f;
     const float3 dir = sampleEnvMap(aliasWords, jitter, retryWords, params.envAliasTable, params.envMapWidth,

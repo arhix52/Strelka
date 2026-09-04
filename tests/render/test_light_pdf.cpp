@@ -1657,7 +1657,8 @@ TEST_CASE("finite distant support is exactly its spherical cap")
     const float halfAngle = 0.37f;
     const float expected = 1.0f / (4.0f * float(M_PI_F) * std::pow(std::sin(0.5f * halfAngle), 2.0f));
     const float3 axis = make_float3(0.0f, 0.0f, 1.0f);
-    const float3 boundaryDirection = sampleDistantLightDirection(0.0f, 0.9999998807907104f, halfAngle, axis);
+    const float3 boundaryDirection =
+        sampleDistantLightDirection(0.0f, 0.9999998807907104f, 0x12345678u, 0x9abcdef0u, halfAngle, axis);
     const float outsideAngle = halfAngle + 1e-4f;
     const float3 outsideDirection = make_float3(std::sin(outsideAngle), 0.0f, std::cos(outsideAngle));
 
@@ -1699,7 +1700,8 @@ TEST_CASE("distant sampling and directional PDF share the exact cap support")
             {
                 for (const float q : values)
                 {
-                    const float3 direction = sampleDistantLightDirection(u, q, angle, axis);
+                    const float3 direction =
+                        sampleDistantLightDirection(u, q, 0x12345678u, 0x9abcdef0u, angle, axis);
                     CAPTURE(axis.x);
                     CAPTURE(axis.y);
                     CAPTURE(axis.z);
@@ -1723,7 +1725,7 @@ TEST_CASE("distant sampling and directional PDF share the exact cap support")
     const float oldCosTheta = 1.0f - 0.5f * (2.0f * halfSin * halfSin);
     const float oldSinTheta = std::sqrt(1.0f - oldCosTheta * oldCosTheta);
     CHECK(oldSinTheta == 0.0f);
-    const float3 stable = sampleDistantLightDirection(0.0f, 0.5f, angle, axes[0]);
+    const float3 stable = sampleDistantLightDirection(0.0f, 0.5f, 0x12345678u, 0x9abcdef0u, angle, axes[0]);
     CHECK(len(sub(stable, axes[0])) > 0.0f);
 
     Rng rng(0xD157A47u);
@@ -1732,7 +1734,8 @@ TEST_CASE("distant sampling and directional PDF share the exact cap support")
         const float3 axis = uniformSphereDirection(rng.next(), rng.next());
         const double exponent = -6.0 + double(rng.next()) * (std::log10(double(M_PI_F)) + 6.0);
         const float randomAngle = float(std::pow(10.0, exponent));
-        const float3 direction = sampleDistantLightDirection(rng.next(), rng.next(), randomAngle, axis);
+        const float3 direction =
+            sampleDistantLightDirection(rng.next(), rng.next(), rng.gen(), rng.gen(), randomAngle, axis);
         const float returnedPdf = coneLightSolidAnglePdf(randomAngle);
         const float evaluatedPdf = infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, randomAngle, direction, axis);
         const double halfAngleSin = std::sin(0.5 * double(randomAngle));
@@ -1750,6 +1753,27 @@ TEST_CASE("distant sampling and directional PDF share the exact cap support")
         CHECK(evaluatedPdf == returnedPdf);
         CHECK(double(returnedPdf) == doctest::Approx(oraclePdf).epsilon(2e-6));
     }
+}
+
+TEST_CASE("finite distant retries do not fold rejected boundary cells onto one direction")
+{
+    const float3 axis = unit(make_float3(1.0f, 1.0f, 1.0f));
+    const float halfAngle = 0.00465000002f;
+    const float uPhi = 0.5f;
+    const float q0 = float(8388438u) * 0x1p-23f;
+    const float q1 = float(8388439u) * 0x1p-23f;
+
+    const float3 a = sampleDistantLightDirection(uPhi, q0, 0x13579bdfu, 0x2468ace0u, halfAngle, axis);
+    const float3 b = sampleDistantLightDirection(uPhi, q1, 0x9e3779b9u, 0x7f4a7c15u, halfAngle, axis);
+
+    CHECK(distantLightContainsDirection(halfAngle, a, axis));
+    CHECK(distantLightContainsDirection(halfAngle, b, axis));
+    const bool distinct = a.x != b.x || a.y != b.y || a.z != b.z;
+    CHECK(distinct);
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, a, axis) ==
+          coneLightSolidAnglePdf(halfAngle));
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, b, axis) ==
+          coneLightSolidAnglePdf(halfAngle));
 }
 
 TEST_CASE("infinite lights do not inherit area-emitter sidedness")

@@ -62,10 +62,10 @@ enum class SampleDimension : uint32_t
     eSssDistance,
     eSssPhaseU,
     eSssPhaseV,
-    // Independent retry entropy for the rare case where a finite-precision
-    // environment direction round-trips into an adjacent texel.
-    eEnvironmentRetryU,
-    eEnvironmentRetryV,
+    // Independent retry entropy for finite-precision light samples that fall
+    // just outside their analytically defined support.
+    eLightRetryU,
+    eLightRetryV,
     eNUM_DIMENSIONS
 };
 
