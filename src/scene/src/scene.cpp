@@ -1336,9 +1336,17 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
         if (inst.mMeshId >= mMeshes.size())
             continue;
 
-        if (inst.type == Instance::Type::eLight && inst.mLightId < mLights.size())
+        if (inst.type == Instance::Type::eLight)
         {
+            if (inst.mLightId >= mLights.size())
+            {
+                continue;
+            }
             const Light& light = mLights[inst.mLightId];
+            if (lightIsInfinite(light.type))
+            {
+                continue;
+            }
             if (lightUsesAnalyticSurfaceIntersection(light.type, light.points[0].x))
             {
                 // The proxy bounds describe only the editor tessellation. They

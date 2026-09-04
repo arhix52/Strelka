@@ -37,6 +37,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | Z. Projector transfer convention | Metal applies piecewise sRGB while OptiX applies gamma 2.2; 7/9 fixture values disagree, code 32 is low by 28% | exact 8-bit texel fixture and gamma-2.2 mutation | decode OptiX LDR codes with the IEC sRGB EOTF; preserve linear HDR/EXR and alpha | FIXED | FIXED on MTLDevice | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | AA. OptiX analytic/hardware hit arbitration | A rectangle at `t=1` is hidden by an unrelated hardware hit at `t=2` because the analytic search runs only in `__miss__`; source regression failed 1/7 assertions | bounded analytic-vs-hardware oracle, frozen miss-only mutation, OptiX closest-hit call-site contract | search analytic surfaces up to the hardware closest-hit distance and run medium/fog attenuation over the winning segment before shading | FIXED oracle | Existing bounded arbitration | Source fixed; external CUDA required | pending | UNVERIFIED |
 | AB. Metal projector radiance storage | Metal routes projector HDR/EXR through an 8-bit sRGB/optional-BC material path; focused contract failed 2/6 assertions and a `4.0` texel clips to `1.0` | LDR/HDR format contract, HDR clipping mutation, actual-MTLDevice texel round trip | dedicated uncompressed one-level projector upload: `RGBA8Unorm_sRGB` for LDR and linear `RGBA32Float` for HDR/EXR | Shared sanitization/EOTF | FIXED on MTLDevice | Source uses same sanitized float texels; external CUDA required | pending | UNVERIFIED |
+| AC. Finite-to-infinite editor proxy lifecycle | Rect→distant/dome leaves `getLightInstanceId()==0` and CPU picking hits the stale rectangle; focused test fails 4/8 assertions | reverse type-toggle, CPU pick miss, proxy reuse/no-orphan mutation | keep cached proxy for reuse but expose and traverse it only while the current packed light has a finite surface | FIXED | Existing packed-type TLAS mask | Existing packed-type TLAS mask; external CUDA required | this commit | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -1238,3 +1239,25 @@ is out of scope unless it blocks validation.
   alpha through one host helper. The focused source contract now passes, and an actual Apple M4 Pro readback retains
   a `4,2,1` Radiance-HDR texel exactly in `RGBA32Float`; Debug, Release, and ASan+UBSan projector groups pass 13/13
   cases and 92/92 assertions. OptiX CUDA execution remains externally `UNVERIFIED`.
+
+## Finding AC: finite-to-infinite editor proxy lifecycle
+
+- Random variables and measure: none are added. CPU picking and renderer traversal deterministically select the
+  nearest surface. The packed distant/dome light is infinite (directional atom or continuous `domega` support) and
+  has no finite editor/intersection surface.
+- Support: a cached finite proxy is active only while the current packed light uses a finite analytic surface.
+  Distant and dome lights expose no CPU-pick surface or public active instance ID. Toggling back to a finite type may
+  reuse the cached instance; this avoids orphan growth without treating the cache as path-space geometry.
+- Conditional/marginal PDF and selection PMF: unchanged. Infinite-light selection keeps its represented categorical
+  PMF and cap/sphere conditional measure. The inactive proxy has probability zero because it is not a sampling
+  strategy.
+- Delta/continuous classification and MIS: unchanged. Sharp distant stays a directional atom; finite distant and
+  dome remain continuous at infinity. Neither is paired with the stale rectangle/disc/sphere surface.
+- Current-HEAD reproducer and mutation: create a rectangle, then edit it to distant and dome. The internal proxy map
+  remains live, `getLightInstanceId()` returns `0`, and a ray through the old rectangle reports a CPU pick. The
+  reverse-toggle regression fails 4/8 assertions. Erasing the cache outright is retained as the rejected mutation:
+  it would force a new instance on every finite/infinite edit cycle.
+- Implementation and result: the cached mapping remains private, while `getLightInstanceId()` returns invalid for a
+  non-finite current light and CPU picking skips such light instances before bounds or triangle traversal. Metal and
+  OptiX TLAS construction already apply the same packed-type mask. The focused test now passes 8/8 assertions in
+  Debug, Release, and ASan+UBSan; the reverse toggle reuses the original proxy instance and creates no orphan.

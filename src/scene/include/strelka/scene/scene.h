@@ -836,6 +836,11 @@ public:
 
     uint32_t getLightInstanceId(uint32_t lightId) const
     {
+        if (lightId >= mLightDesc.size() || mLightDesc[lightId].type == LIGHT_TYPE_DISTANT ||
+            mLightDesc[lightId].type == LIGHT_TYPE_DOME)
+        {
+            return kInvalidIndex;
+        }
         auto it = mLightIdToInstanceId.find(lightId);
         return it != mLightIdToInstanceId.end() ? it->second : kInvalidIndex;
     }

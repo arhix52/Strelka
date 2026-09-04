@@ -429,6 +429,35 @@ TEST_CASE("changing a light type replaces or creates the matching proxy topology
     CHECK(sphereMeshId != rectMeshId);
 }
 
+TEST_CASE("changing a finite light to infinite deactivates its editor proxy")
+{
+    Scene scene;
+    const Scene::UniformLightDesc finite = rectDesc();
+    const uint32_t lightId = scene.createLight(finite);
+    const uint32_t proxyId = scene.getLightInstanceId(lightId);
+    REQUIRE(proxyId != kInvalidIndex);
+
+    Scene::UniformLightDesc infinite = finite;
+    infinite.type = LIGHT_TYPE_DISTANT;
+    infinite.halfAngle = 0.05f;
+    scene.setLight(lightId, infinite);
+    CHECK(scene.getLightInstanceId(lightId) == kInvalidIndex);
+    CHECK_FALSE(scene.pick(glm::float3(0.0f, 2.0f, 2.0f), glm::float3(0.0f, 0.0f, -1.0f)).hit);
+
+    infinite.type = LIGHT_TYPE_DOME;
+    scene.setLight(lightId, infinite);
+    CHECK(scene.getLightInstanceId(lightId) == kInvalidIndex);
+    CHECK_FALSE(scene.pick(glm::float3(0.0f, 2.0f, 2.0f), glm::float3(0.0f, 0.0f, -1.0f)).hit);
+
+    // Returning to a finite type reuses the cached editor instance instead of
+    // accumulating an orphan proxy for every type toggle.
+    scene.setLight(lightId, finite);
+    CHECK(scene.getLightInstanceId(lightId) == proxyId);
+    const Scene::PickHit restored = scene.pick(glm::float3(0.0f, 2.0f, 2.0f), glm::float3(0.0f, 0.0f, -1.0f));
+    REQUIRE(restored.hit);
+    CHECK(restored.lightId == lightId);
+}
+
 TEST_CASE("headless light edits do not recreate released proxy geometry")
 {
     Scene scene;
