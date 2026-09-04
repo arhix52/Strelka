@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 
-def lights(count: int) -> dict:
+def lights(count: int, shape: str) -> dict:
     columns = math.ceil(math.sqrt(count * 4.0 / 3.0))
     rows = math.ceil(count / columns)
     width = min(0.12, 1.6 / columns * 0.65)
@@ -21,13 +21,14 @@ def lights(count: int) -> dict:
         z = -0.8 + 1.6 * ((index // columns) + 0.5) / rows
         result.append(
             {
-                "type": "rect",
+                "type": shape,
                 "position": [x, 1.98, z],
                 "orientation": [-90.0, 0.0, 0.0],
                 "color": [1.0, 1.0, 1.0],
                 "intensity": 400.0 / count,
                 "width": width,
                 "height": height,
+                "radius": 0.5 * min(width, height),
             }
         )
     return {"lights": result}
@@ -63,6 +64,7 @@ def main() -> None:
     parser.add_argument("--counts", default="1,32,128,512,2048")
     parser.add_argument("--resolutions", default="320x240,1920x1080")
     parser.add_argument("--max-nee-growth", type=float, default=3.0)
+    parser.add_argument("--shape", choices=("rect", "disc", "sphere"), default="rect")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -79,7 +81,7 @@ def main() -> None:
         shutil.copy2(source, scene)
         sidecar = scene.with_name("scaling_light.json")
         for count in counts:
-            sidecar.write_text(json.dumps(lights(count)), encoding="utf-8")
+            sidecar.write_text(json.dumps(lights(count, args.shape)), encoding="utf-8")
             for width, height in resolutions:
                 nee, restir = run(binary, scene, count, width, height, args.frames)
                 print(f"{count},{width}x{height},{nee:.2f},{restir:.2f}", flush=True)

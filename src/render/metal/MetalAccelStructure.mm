@@ -1033,6 +1033,7 @@ bool MetalAccelStructure::step(double budgetMs)
     }
     {
         size_t asBytes = 0;
+        size_t analyticLightAsBytes = 0;
         size_t nullAs = 0;
         for (const Blas& b : mBlasList)
         {
@@ -1040,6 +1041,11 @@ bool MetalAccelStructure::step(double budgetMs)
                 asBytes += b.mAs->size();
             else
                 ++nullAs;
+        }
+        for (const size_t index : { st.sphereLightBlas, st.discLightBlas })
+        {
+            if (index != ~size_t{ 0 } && index < mBlasList.size() && mBlasList[index].mAs)
+                analyticLightAsBytes += mBlasList[index].mAs->size();
         }
         // The largest few, because a structure that should have been shared and
         // was not is worth several gigabytes and is invisible in the total.
@@ -1059,6 +1065,8 @@ bool MetalAccelStructure::step(double budgetMs)
             }
         }
         STRELKA_INFO("BLAS build CPU: encode {:.0f} ms ({} structures)", mBlasEncodeMs, mBlasCount);
+        STRELKA_INFO("Procedural light AS: BLAS {} bytes, bounds {} bytes", analyticLightAsBytes,
+                     mAnalyticLightBoundsBuffer ? mAnalyticLightBoundsBuffer->length() : 0);
         STRELKA_INFO("Structures: BLAS {:.2f} GB ({} failed), TLAS {:.3f} GB, device max buffer {:.2f} GB", asBytes / 1e9,
                      nullAs, mInstanceAccelerationStructure ? mInstanceAccelerationStructure->size() / 1e9 : 0.0,
                      mDevice->maxBufferLength() / 1e9);
