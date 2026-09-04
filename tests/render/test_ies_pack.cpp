@@ -1,11 +1,14 @@
 #include <doctest/doctest.h>
 
-#include "ies_pack.h"
+#include <host/ies_pack.h>
+#include <strelka/scene/scene.h>
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 
-using namespace oka::optix_ies;
+using namespace oka::ies_pack;
+using Profile = oka::Scene::IesProfile;
 
 namespace
 {
@@ -59,8 +62,7 @@ Profile ladderProfile()
     Profile p;
     p.verticalAngles = { 0.0f, 5.0f, 10.0f, 15.0f, 20.0f, 30.0f, 40.0f, 50.0f, 60.0f, 75.0f, 90.0f };
     p.horizontalAngles = { 0.0f };
-    p.candela = { 1000.0f, 984.865f, 940.602f, 870.513f, 779.728f, 562.5f,
-                  344.363f, 170.714f, 62.5f,   10.0f,    10.0f };
+    p.candela = { 1000.0f, 984.865f, 940.602f, 870.513f, 779.728f, 562.5f, 344.363f, 170.714f, 62.5f, 10.0f, 10.0f };
     p.maxCandela = 1000.0f;
     return p;
 }
@@ -85,7 +87,7 @@ TEST_CASE("a scene with no IES profile still gets a buffer the shader can read")
     // The alternative is a null pointer in SceneData and a branch per light in
     // connectLight. A zero-count header is a valid empty table and costs 16
     // bytes, so every scene takes the same path.
-    const std::vector<uint8_t> bytes = packProfiles({});
+    const std::vector<uint8_t> bytes = packProfiles(std::vector<Profile>{});
     REQUIRE(bytes.size() == sizeof(IesBufferHeader));
 
     const Reader r{ bytes.data() };
@@ -96,25 +98,27 @@ TEST_CASE("a scene with no IES profile still gets a buffer the shader can read")
 TEST_CASE("the packed layout is what the device-side reader indexes")
 {
     const Profile p = ladderProfile();
-    const std::vector<uint8_t> bytes = packProfiles({ p });
+    const std::vector<uint8_t> bytes = packProfiles(std::vector<Profile>{ p });
 
     const Reader r{ bytes.data() };
     REQUIRE(r.buffer().profileCount == 1u);
     CHECK(r.buffer().floatOffset == sizeof(IesBufferHeader) + sizeof(IesProfileHeader));
 
     CHECK(r.profile(0).nVertical == 11u);
-    CHECK(r.profile(0).nHorizontal == 1u);
+    CHECK(r.profile(0).nHorizontal == 2u);
     // Angles come first in the blob, vertical then horizontal, candela after.
     CHECK(r.profile(0).anglesOffset == 0u);
-    CHECK(r.profile(0).candelaOffset == 12u); // 11 vertical + 1 horizontal
+    CHECK(r.profile(0).candelaOffset == 13u); // 11 vertical + 0/360 horizontal
 
     CHECK(r.vertical(0, 0) == doctest::Approx(0.0f));
     CHECK(r.vertical(0, 10) == doctest::Approx(90.0f));
     CHECK(r.horizontal(0, 0) == doctest::Approx(0.0f));
+    CHECK(r.horizontal(0, 1) == doctest::Approx(360.0f));
+    CHECK(r.candela(0, 0, 1) == doctest::Approx(1000.0f * kCandelaToRadiantIntensity));
 
     // Exactly the bytes the blob should occupy, with nothing padded between the
     // two sections: a stray float here would shift every candela read by one.
-    CHECK(bytes.size() == r.buffer().floatOffset + (11 + 1 + 11) * sizeof(float));
+    CHECK(bytes.size() == r.buffer().floatOffset + (11 + 2 + 22) * sizeof(float));
 }
 
 TEST_CASE("candela is divided by the D65 luminous efficacy Cycles assumes")
@@ -126,7 +130,7 @@ TEST_CASE("candela is divided by the D65 luminous efficacy Cycles assumes")
     // every IES scene outside the ladder wrong by whatever it absorbed.
     CHECK(kLuminousEfficacyD65 == doctest::Approx(177.83f));
 
-    const std::vector<uint8_t> bytes = packProfiles({ ladderProfile() });
+    const std::vector<uint8_t> bytes = packProfiles(std::vector<Profile>{ ladderProfile() });
     const Reader r{ bytes.data() };
 
     CHECK(r.candela(0, 0, 0) == doctest::Approx(1000.0f / 177.83f));
@@ -145,31 +149,30 @@ TEST_CASE("row-major candela indexing survives more than one horizontal plane")
     // number from the wrong plane, which is invisible on a rotationally
     // symmetric luminaire like the ladder's and wrong on every real one.
     const Profile p = grid(4, 3, 100.0f);
-    const std::vector<uint8_t> bytes = packProfiles({ p });
+    const std::vector<uint8_t> bytes = packProfiles(std::vector<Profile>{ p });
     const Reader r{ bytes.data() };
 
     for (int h = 0; h < 3; ++h)
     {
         for (int v = 0; v < 4; ++v)
         {
-            CHECK(r.candela(0, v, h) ==
-                  doctest::Approx((100.0f + (float)(v + h * 4)) * kCandelaToRadiantIntensity));
+            CHECK(r.candela(0, v, h) == doctest::Approx((100.0f + (float)(v + h * 4)) * kCandelaToRadiantIntensity));
         }
     }
 }
 
 TEST_CASE("a second profile's blob indices follow the first")
 {
-    const std::vector<uint8_t> bytes = packProfiles({ grid(4, 1, 1.0f), grid(6, 2, 50.0f) });
+    const std::vector<uint8_t> bytes = packProfiles(std::vector<Profile>{ grid(4, 1, 1.0f), grid(6, 2, 50.0f) });
     const Reader r{ bytes.data() };
     REQUIRE(r.buffer().profileCount == 2u);
 
-    // Profile 0: 4 vertical + 1 horizontal angles, then 4 candela.
+    // A single rotationally symmetric plane becomes addressable 0/360 columns.
     CHECK(r.profile(0).anglesOffset == 0u);
-    CHECK(r.profile(0).candelaOffset == 5u);
-    // Profile 1 starts after all nine of profile 0's floats.
-    CHECK(r.profile(1).anglesOffset == 9u);
-    CHECK(r.profile(1).candelaOffset == 9u + 8u); // 6 vertical + 2 horizontal
+    CHECK(r.profile(0).candelaOffset == 6u);
+    // Profile 1 starts after all fourteen of profile 0's floats.
+    CHECK(r.profile(1).anglesOffset == 14u);
+    CHECK(r.profile(1).candelaOffset == 14u + 8u); // 6 vertical + 2 horizontal
 
     CHECK(r.candela(0, 0, 0) == doctest::Approx(1.0f * kCandelaToRadiantIntensity));
     CHECK(r.candela(1, 0, 0) == doctest::Approx(50.0f * kCandelaToRadiantIntensity));
@@ -190,7 +193,7 @@ TEST_CASE("a degenerate profile is packed empty rather than dropped")
     Profile truncated = grid(4, 2, 7.0f);
     truncated.candela.pop_back(); // shorter than the grid it declares
 
-    const std::vector<uint8_t> bytes = packProfiles({ broken, ladderProfile(), truncated });
+    const std::vector<uint8_t> bytes = packProfiles(std::vector<Profile>{ broken, ladderProfile(), truncated });
     const Reader r{ bytes.data() };
     REQUIRE(r.buffer().profileCount == 3u);
 
@@ -199,6 +202,47 @@ TEST_CASE("a degenerate profile is packed empty rather than dropped")
     // The good profile keeps index 1, which is what its light records point at.
     CHECK(r.profile(1).nVertical == 11u);
     CHECK(r.candela(1, 0, 0) == doctest::Approx(1000.0f * kCandelaToRadiantIntensity));
+}
+
+TEST_CASE("malformed IES grids are empty and cannot expose device lookups")
+{
+    Profile nonFiniteVertical = grid(3, 2, 1.0f);
+    nonFiniteVertical.verticalAngles[1] = std::numeric_limits<float>::quiet_NaN();
+
+    Profile descendingVertical = grid(3, 2, 2.0f);
+    descendingVertical.verticalAngles = { 0.0f, 90.0f, 45.0f };
+
+    Profile nonFiniteHorizontal = grid(3, 2, 3.0f);
+    nonFiniteHorizontal.horizontalAngles[1] = std::numeric_limits<float>::infinity();
+
+    Profile descendingHorizontal = grid(3, 2, 4.0f);
+    descendingHorizontal.horizontalAngles = { 90.0f, 0.0f };
+
+    Profile negativeCandela = grid(3, 2, 5.0f);
+    negativeCandela.candela[2] = -1.0f;
+
+    Profile nonFiniteCandela = grid(3, 2, 6.0f);
+    nonFiniteCandela.candela[4] = std::numeric_limits<float>::infinity();
+
+    Profile staleMaximum = grid(3, 2, 7.0f);
+    staleMaximum.maxCandela = std::numeric_limits<float>::quiet_NaN();
+
+    const std::vector<uint8_t> bytes =
+        packProfiles(std::vector<Profile>{ nonFiniteVertical, descendingVertical, nonFiniteHorizontal,
+                                           descendingHorizontal, negativeCandela, nonFiniteCandela, staleMaximum });
+    const Reader r{ bytes.data() };
+    REQUIRE(r.buffer().profileCount == 7u);
+    for (size_t i = 0; i < 6; ++i)
+    {
+        CHECK(r.profile(i).nVertical == 0u);
+        CHECK(r.profile(i).nHorizontal == 0u);
+    }
+
+    // maxCandela is derived data. A stale or non-finite cached value must not
+    // invalidate an otherwise usable table or leak into shader radiance.
+    CHECK(r.profile(6).nVertical == 3u);
+    CHECK(r.profile(6).nHorizontal == 2u);
+    CHECK(r.profile(6).maxCandela == doctest::Approx(12.0f * kCandelaToRadiantIntensity));
 }
 
 TEST_CASE("the float blob starts immediately after the profile headers")

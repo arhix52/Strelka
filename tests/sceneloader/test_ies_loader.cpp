@@ -323,3 +323,18 @@ TEST_CASE("a file with no TILT line at all is refused")
     oka::Scene::IesProfile p;
     CHECK_FALSE(oka::loadIesProfile(f.path.string(), p));
 }
+
+TEST_CASE("malformed and non-finite LM-63 numeric fields are refused")
+{
+    const auto malformed = [](const std::string& name, const std::string& photometry) {
+        const TempIes f(name, "IESNA:LM-63-2002\nTILT=NONE\n" + photometry);
+        oka::Scene::IesProfile p;
+        return oka::loadIesProfile(f.path.string(), p);
+    };
+
+    CHECK_FALSE(malformed("partial_number", "1 -1 1junk 3 1 1 1 0 0 0\n1 1 20\n0 45 90\n0\n800 400 0\n"));
+    CHECK_FALSE(malformed("nan_angle", "1 -1 1 3 1 1 1 0 0 0\n1 1 20\n0 nan 90\n0\n800 400 0\n"));
+    CHECK_FALSE(malformed("infinite_candela", "1 -1 1 3 1 1 1 0 0 0\n1 1 20\n0 45 90\n0\n800 inf 0\n"));
+    CHECK_FALSE(malformed("negative_candela", "1 -1 1 3 1 1 1 0 0 0\n1 1 20\n0 45 90\n0\n800 -1 0\n"));
+    CHECK_FALSE(malformed("scaled_overflow", "1 -1 3e38 3 1 1 1 0 0 0\n1 1 20\n0 45 90\n0\n2 1 0\n"));
+}

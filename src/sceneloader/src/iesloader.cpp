@@ -135,8 +135,7 @@ void unfoldAzimuthTable(std::vector<float>& hAngles, std::vector<float>& candela
 {
     using Diff = std::vector<float>::difference_type;
     const auto column = [&](int h) {
-        return std::vector<float>(candela.begin() + Diff(h) * Diff(nV),
-                                  candela.begin() + Diff(h + 1) * Diff(nV));
+        return std::vector<float>(candela.begin() + Diff(h) * Diff(nV), candela.begin() + Diff(h + 1) * Diff(nV));
     };
     const auto rebuild = [&](const std::vector<std::vector<float>>& columns) {
         candela.clear();
@@ -251,7 +250,15 @@ bool loadIesProfile(const std::string& path, Scene::IesProfile& out)
     auto nextFloat = [&](float& v) -> bool {
         if (i >= tokens.size())
             return false;
-        v = std::strtof(tokens[i++].c_str(), nullptr);
+        const std::string& token = tokens[i++];
+        // NOLINTNEXTLINE(misc-const-correctness)
+        char* end = nullptr;
+        v = std::strtof(token.c_str(), &end);
+        if (end == token.c_str() || *end != '\0' || !std::isfinite(v))
+        {
+            STRELKA_ERROR("IES '{}' is not a finite number in {}", token, path);
+            return false;
+        }
         return true;
     };
     // A token that is not a number reads back as 0 through atoi, and a 0 here is
@@ -264,7 +271,8 @@ bool loadIesProfile(const std::string& path, Scene::IesProfile& out)
         // NOLINTNEXTLINE(misc-const-correctness)
         char* end = nullptr;
         const long parsed = std::strtol(token.c_str(), &end, 10);
-        if (end == token.c_str() || parsed < std::numeric_limits<int>::min() || parsed > std::numeric_limits<int>::max())
+        if (end == token.c_str() || *end != '\0' || parsed < std::numeric_limits<int>::min() ||
+            parsed > std::numeric_limits<int>::max())
         {
             STRELKA_ERROR("IES '{}' is not an integer in {}", token, path);
             return false;
@@ -286,6 +294,11 @@ bool loadIesProfile(const std::string& path, Scene::IesProfile& out)
     if (nVertical <= 0 || nHorizontal <= 0 || nVertical > 4096 || nHorizontal > 4096)
     {
         STRELKA_ERROR("IES grid size out of range ({}×{}) in {}", nVertical, nHorizontal, path);
+        return false;
+    }
+    if (candelaMultiplier < 0.0f || ballast < 0.0f)
+    {
+        STRELKA_ERROR("IES candela multiplier and ballast must be non-negative in {}", path);
         return false;
     }
     // Type C is the architectural convention and the one sampleIesCandela()
@@ -357,9 +370,16 @@ bool loadIesProfile(const std::string& path, Scene::IesProfile& out)
                 STRELKA_ERROR("IES candela values truncated: {}", path);
                 return false;
             }
-            c *= candelaMultiplier * ballast;
-            profile.candela[(size_t)v + (size_t)h * (size_t)nVertical] = c;
-            maxC = std::max(maxC, c);
+            const double scaled =
+                static_cast<double>(c) * static_cast<double>(candelaMultiplier) * static_cast<double>(ballast);
+            if (c < 0.0f || !std::isfinite(scaled) || scaled > std::numeric_limits<float>::max())
+            {
+                STRELKA_ERROR("IES candela value is negative or out of range in {}", path);
+                return false;
+            }
+            const float scaledCandela = static_cast<float>(scaled);
+            profile.candela[(size_t)v + (size_t)h * (size_t)nVertical] = scaledCandela;
+            maxC = std::max(maxC, scaledCandela);
         }
     }
     profile.maxCandela = maxC;

@@ -33,25 +33,20 @@
 
 #include "texture_support_cuda.h"
 #include "accel_build_policy.h"
-#include "ies_pack.h"
 #include <host/emissive_mesh_distribution.h>
+#include <host/ies_pack.h>
 #include <host/projector_transfer.h>
 
 // ies_pack.h mirrors the two IES header structs so that it -- and its tests --
 // need no CUDA. This is where the mirrors are held to the originals in
 // lights.h, which is what the shading path actually reads the buffer through.
-static_assert(sizeof(oka::optix_ies::IesBufferHeader) == sizeof(IesGpuBufferHeader));
-static_assert(sizeof(oka::optix_ies::IesProfileHeader) == sizeof(IesGpuProfileHeader));
-static_assert(offsetof(oka::optix_ies::IesBufferHeader, floatOffset) ==
-              offsetof(IesGpuBufferHeader, floatOffset));
-static_assert(offsetof(oka::optix_ies::IesProfileHeader, nHorizontal) ==
-              offsetof(IesGpuProfileHeader, nHorizontal));
-static_assert(offsetof(oka::optix_ies::IesProfileHeader, anglesOffset) ==
-              offsetof(IesGpuProfileHeader, anglesOffset));
-static_assert(offsetof(oka::optix_ies::IesProfileHeader, candelaOffset) ==
-              offsetof(IesGpuProfileHeader, candelaOffset));
-static_assert(offsetof(oka::optix_ies::IesProfileHeader, maxCandela) ==
-              offsetof(IesGpuProfileHeader, maxCandela));
+static_assert(sizeof(oka::ies_pack::IesBufferHeader) == sizeof(IesGpuBufferHeader));
+static_assert(sizeof(oka::ies_pack::IesProfileHeader) == sizeof(IesGpuProfileHeader));
+static_assert(offsetof(oka::ies_pack::IesBufferHeader, floatOffset) == offsetof(IesGpuBufferHeader, floatOffset));
+static_assert(offsetof(oka::ies_pack::IesProfileHeader, nHorizontal) == offsetof(IesGpuProfileHeader, nHorizontal));
+static_assert(offsetof(oka::ies_pack::IesProfileHeader, anglesOffset) == offsetof(IesGpuProfileHeader, anglesOffset));
+static_assert(offsetof(oka::ies_pack::IesProfileHeader, candelaOffset) == offsetof(IesGpuProfileHeader, candelaOffset));
+static_assert(offsetof(oka::ies_pack::IesProfileHeader, maxCandela) == offsetof(IesGpuProfileHeader, maxCandela));
 
 // accel_build_policy.h mirrors OptixBuildFlags so that it -- and its tests --
 // need no OptiX SDK. This is where the mirror is held to the original.
@@ -4987,22 +4982,11 @@ void OptiXRender::createIesBuffer()
     // Packed here rather than cached against the scene's profile list because
     // the tables are small -- a 181x1 luminaire is under a kilobyte -- and this
     // runs only when the light set changes.
-    std::vector<oka::optix_ies::Profile> profiles;
-    profiles.reserve(mScene->getIesProfiles().size());
-    for (const Scene::IesProfile& p : mScene->getIesProfiles())
-    {
-        oka::optix_ies::Profile out;
-        out.verticalAngles = p.verticalAngles;
-        out.horizontalAngles = p.horizontalAngles;
-        out.candela = p.candela;
-        out.maxCandela = p.maxCandela;
-        profiles.push_back(std::move(out));
-    }
-
     // Always upload, even with no profiles: packProfiles() returns a zero-count
     // header, and a real pointer to one is what lets the shading path multiply
     // by sampleIesCandela() unconditionally instead of branching per light.
-    createOrUpdateBuffer(mIesBuffer, oka::optix_ies::packProfiles(profiles));
+    const std::vector<Scene::IesProfile>& profiles = mScene->getIesProfiles();
+    createOrUpdateBuffer(mIesBuffer, oka::ies_pack::packProfiles(profiles));
     if (!profiles.empty())
     {
         STRELKA_INFO("Uploaded {} IES profile(s), {} bytes", profiles.size(), mIesBuffer->size());

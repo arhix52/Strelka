@@ -42,6 +42,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | AE. Acceleration-structure light transforms | Disabled invalid analytic lights retain raw NaN/Inf/singular editor-proxy transforms even with TLAS mask zero | create/edit finite-and-nonsingular instance contract plus raw-transform mutation | publish a finite nonsingular inert proxy transform whenever the authored proxy transform is unsafe | FIXED | Shared safe instance input | Shared safe instance input; external CUDA required | this commit | UNVERIFIED |
 | AF. Light scalar boundary validation | NaN projector aspect has shader radiance but host PMF zero; NaN intensity/range and infinite radius/angles reach device records; invalid environment controls propagate NaN | packed-record finiteness, radiance/PMF support equivalence, environment canonicalization, invalid-input mutations | turn invalid analytic records into one finite disabled sentinel; sanitize environment radiometry and reduce rotation before backend upload | FIXED | Shared Scene boundary | Shared Scene boundary; external CUDA required | this commit | UNVERIFIED |
 | AG. IES profile index bounds | Unregistered/`INT_MAX` IES indices are numerically rounded to float and cast back before shader bounds checks | empty/valid/extreme/negative Scene slots and guarded-conversion mutation | canonicalize invalid slots to `-1` and use a shared pre-cast finite/range guard in Metal and OptiX | FIXED | Shared guard compiled | Shared guard; external CUDA required | this commit | UNVERIFIED |
+| AH. Malformed IES profile ingestion | Metal packs undersized grids verbatim, direct one-plane profiles pack a grid device evaluation rejects, and the loader accepts partial/non-finite numeric tokens | malformed grid/angle/candela packer cases, one-plane normalization, and invalid LM-63 numeric-token fixtures | validate one neutral host profile representation before either backend upload; unfold a rotational plane; reject malformed LM-63 numbers at parse time | FIXED | Shared host packer compiled | Shared host packer; external CUDA required | this commit | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -1348,3 +1349,32 @@ is out of scope unless it blocks validation.
   Metal compiles. The first full gate exposed a stale test premise that assigned profile slot zero without registering
   a profile; the follow-up registers the mutation's profile so it continues to test collapsed-frame rejection rather
   than the newly specified isotropic fallback.
+
+## Finding AH: malformed IES profile ingestion
+
+- Random variables and measure: none are added. An IES table is a deterministic angular-radiance multiplier applied
+  after the light identity and any conditional surface/delta event have already been sampled.
+- Support: a registered profile has support only when its vertical/horizontal grids have addressable dimensions,
+  finite nondecreasing angles, and a complete finite nonnegative candela product. Invalid profiles retain their slot
+  as an empty table so later light indices cannot shift, but contribute zero profile radiance rather than exposing an
+  out-of-bounds or non-finite lookup.
+- Conditional/marginal PDF and selection PMF: unchanged. IES values alter the integrand, not the light proposal. The
+  existing represented outer PMFs and punctual atom/area conditionals remain authoritative.
+- Delta/continuous classification and MIS: unchanged. Both selected-light NEE and complementary analytic hits use
+  the same packed table. A malformed table is rejected before either backend upload, so it cannot create backend-
+  dependent support or a non-finite MIS contribution.
+- Current-HEAD reproducer: Metal serializes the declared angle arrays followed by every available candela value even
+  when the grid requires more, so the shader's `v + h*nVertical` lookup can read beyond the profile blob. The OptiX
+  packer already empties an undersized grid, but accepts non-finite/nonmonotone angles and non-finite or negative
+  candela. The LM-63 parser calls `strtof` without an end pointer, so `1junk`, `nan`, and `inf` are accepted as valid
+  numeric fields; a finite candela can also overflow after multiplier/ballast scaling. The public Scene API can also
+  register a single horizontal plane directly: the old packer publishes `nHorizontal=1`, while both device readers
+  reject every such lookup and turn a positive rotational profile black.
+- Implementation and result: one CUDA-free host packer validates and serializes the exact same bytes for Metal and
+  OptiX, recomputing the packed maximum from the validated grid and unfolding one rotational plane to duplicate
+  columns at zero and 360 degrees. The LM-63 boundary requires a complete finite numeric token and a finite
+  nonnegative scaled candela value. Before the change, the focused suite failed 18/21
+  assertions: six malformed profile headers remained addressable, stale `maxCandela` stayed NaN, and all five bad
+  LM-63 fixtures loaded successfully. It now passes 21/21; the broader IES group passes 34/34 cases and 1,054,618
+  assertions in Debug, Release, and ASan+UBSan. Both production Metal shader configurations compile. OptiX consumes
+  the same host bytes but CUDA compilation/runtime remains externally `UNVERIFIED`.
