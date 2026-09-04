@@ -13,6 +13,14 @@
 // CUDA's and sutil's, which is what broke the Linux build.
 #if defined(__CUDA_ARCH__) || defined(__CUDACC__) || defined(STRELKA_MATERIAL_CUDA_HOST)
 // ---- CUDA (device code, nvcc host pass, and OptiX host code) ---------------
+// saturate() below is sutil's, not a builtin -- pull it in here so every TU
+// that reaches this branch gets it, instead of relying on each .cu/.cpp file
+// to have included sutil/vec_math_adv.h before this header. <math.h> (the C
+// header, not <cmath>) first: sutil's isnan(float3) calls unqualified
+// isnan(float) expecting it in the global namespace, which nvcc TUs get for
+// free but a plain host g++/clang TU does not from <cmath> alone.
+#    include <math.h>
+#    include <sutil/vec_math_adv.h>
 #    ifdef __CUDA_ARCH__
 #        define DEVICE_FUNC __device__ __forceinline__
 #    else

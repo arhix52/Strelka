@@ -141,28 +141,36 @@ inline double analyticLightPower(const Scene::Light& light)
     const glm::dvec3 packedDirection(light.normal);
     const double packedDirectionLengthSquared = glm::dot(packedDirection, packedDirection);
     const bool hasFiniteDirection = packedDirectionLengthSquared > 0.0 && std::isfinite(packedDirectionLengthSquared);
-    const bool hasFinitePosition = affineVectorIsFinite(glm::float3(light.points[1]));
+    const bool hasFinitePosition = affineVectorIsFinite(make_float3(light.points[1].x, light.points[1].y, light.points[1].z));
     const OrthonormalLightFrame profileFrame =
-        makeOrthonormalLightFrame(glm::float3(light.points[2]), glm::float3(light.points[3]), glm::float3(light.normal));
+        makeOrthonormalLightFrame(make_float3(light.points[2].x, light.points[2].y, light.points[2].z),
+                                  make_float3(light.points[3].x, light.points[3].y, light.points[3].z),
+                                  make_float3(light.normal.x, light.normal.y, light.normal.z));
     double measure = 0.0;
     switch (light.type)
     {
     case LIGHT_TYPE_RECT: {
-        const glm::float3 e1 = glm::float3(light.points[1] - light.points[0]);
-        const glm::float3 e2 = glm::float3(light.points[3] - light.points[0]);
+        const float3 e1 = make_float3(light.points[1].x - light.points[0].x, light.points[1].y - light.points[0].y,
+                                      light.points[1].z - light.points[0].z);
+        const float3 e2 = make_float3(light.points[3].x - light.points[0].x, light.points[3].y - light.points[0].y,
+                                      light.points[3].z - light.points[0].z);
         if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 &&
-            affineSamplePointRangeIsFinite(glm::float3(light.points[0]), e1, e2, glm::float3(0.0f)) &&
+            affineSamplePointRangeIsFinite(
+                make_float3(light.points[0].x, light.points[0].y, light.points[0].z), e1, e2, make_float3(0.0f)) &&
             inverseFiniteCrossLength(e1, e2) > 0.0f)
         {
-            measure = pi * glm::length(glm::cross(glm::dvec3(e1), glm::dvec3(e2)));
+            measure = pi * glm::length(glm::cross(glm::dvec3(e1.x, e1.y, e1.z), glm::dvec3(e2.x, e2.y, e2.z)));
         }
         break;
     }
     case LIGHT_TYPE_DISC:
         if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 &&
-            affineSamplePointRangeIsFinite(glm::float3(light.points[1]), glm::float3(light.points[2]),
-                                           glm::float3(light.points[3]), glm::float3(0.0f)) &&
-            analyticDiscAreaPdf(glm::float3(light.points[2]), glm::float3(light.points[3])) > 0.0f)
+            affineSamplePointRangeIsFinite(make_float3(light.points[1].x, light.points[1].y, light.points[1].z),
+                                          make_float3(light.points[2].x, light.points[2].y, light.points[2].z),
+                                          make_float3(light.points[3].x, light.points[3].y, light.points[3].z),
+                                          make_float3(0.0f)) &&
+            analyticDiscAreaPdf(make_float3(light.points[2].x, light.points[2].y, light.points[2].z),
+                                make_float3(light.points[3].x, light.points[3].y, light.points[3].z)) > 0.0f)
         {
             measure = pi * pi * glm::length(glm::cross(glm::dvec3(light.points[2]), glm::dvec3(light.points[3])));
         }
@@ -170,20 +178,19 @@ inline double analyticLightPower(const Scene::Light& light)
     case LIGHT_TYPE_SPHERE: {
         // Same deterministic equal-solid-angle quadrature as
         // analyticEllipsoidSurfaceArea(), evaluated in host double precision.
-        // Keeping this in GLM avoids making the host proposal depend on whether
-        // material_math.h names float3 as GLM (Metal/CPU) or CUDA (OptiX).
         constexpr size_t sampleCount = 256u;
         constexpr double goldenAngle = 2.39996322972865332;
-        const glm::float3 deviceAxisX(light.points[0]);
-        const glm::float3 deviceAxisY(light.points[2]);
-        const glm::float3 deviceAxisZ(light.points[3]);
-        if (!analyticEllipsoidIsRepresentable(glm::float3(light.points[1]), deviceAxisX, deviceAxisY, deviceAxisZ))
+        const float3 deviceAxisX = make_float3(light.points[0].x, light.points[0].y, light.points[0].z);
+        const float3 deviceAxisY = make_float3(light.points[2].x, light.points[2].y, light.points[2].z);
+        const float3 deviceAxisZ = make_float3(light.points[3].x, light.points[3].y, light.points[3].z);
+        if (!analyticEllipsoidIsRepresentable(
+                make_float3(light.points[1].x, light.points[1].y, light.points[1].z), deviceAxisX, deviceAxisY, deviceAxisZ))
         {
             break;
         }
-        const glm::dvec3 axisX(deviceAxisX);
-        const glm::dvec3 axisY(deviceAxisY);
-        const glm::dvec3 axisZ(deviceAxisZ);
+        const glm::dvec3 axisX(deviceAxisX.x, deviceAxisX.y, deviceAxisX.z);
+        const glm::dvec3 axisY(deviceAxisY.x, deviceAxisY.y, deviceAxisY.z);
+        const glm::dvec3 axisZ(deviceAxisZ.x, deviceAxisZ.y, deviceAxisZ.z);
         if (!(std::abs(glm::dot(axisX, glm::cross(axisY, axisZ))) > 0.0))
         {
             break;

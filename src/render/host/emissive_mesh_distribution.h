@@ -56,7 +56,11 @@ inline double emissiveMaterialLuminance(const Scene::MaterialDescription& materi
     }
     else
     {
-        emission = glm::dvec3(material.params.emission);
+        // Field-wise, not glm::dvec3(material.params.emission): under the OptiX
+        // backend's STRELKA_MATERIAL_CUDA_HOST build, MaterialParams::emission is
+        // CUDA's float3, which glm has no converting constructor for. Both
+        // spellings expose the same x/y/z, so this works either way.
+        emission = { material.params.emission.x, material.params.emission.y, material.params.emission.z };
         strength = material.params.emission_strength;
     }
     if (!(std::isfinite(strength) && strength > 0.0) || !std::isfinite(emission.x) || !std::isfinite(emission.y) ||
@@ -102,7 +106,8 @@ inline std::vector<double> emissiveTrianglePowers(std::span<const Scene::Vertex>
         const glm::float3 p0 = glm::float3(objectToWorld * glm::vec4(vertices[i0].pos, 1.0f));
         const glm::float3 p1 = glm::float3(objectToWorld * glm::vec4(vertices[i1].pos, 1.0f));
         const glm::float3 p2 = glm::float3(objectToWorld * glm::vec4(vertices[i2].pos, 1.0f));
-        const float areaPdf = emissiveTriangleAreaPdf(p0, p1, p2);
+        const float areaPdf = emissiveTriangleAreaPdf(
+            make_float3(p0.x, p0.y, p0.z), make_float3(p1.x, p1.y, p1.z), make_float3(p2.x, p2.y, p2.z));
         if (areaPdf > 0.0f)
         {
             // Existing mesh emission is two-sided. This is only a power proxy
