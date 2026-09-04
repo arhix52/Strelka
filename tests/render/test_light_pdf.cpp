@@ -2084,3 +2084,46 @@ TEST_CASE("OptiX arbitrates analytic lights against a nearer hardware hit")
     REQUIRE(closestHit != std::string::npos);
     CHECK(shader.find("findAnalyticAreaLightHit(", closestHit) != std::string::npos);
 }
+
+TEST_CASE("coincident analytic emitters retain every BSDF-hit component")
+{
+    const float3 corner = make_float3(-0.5f, -0.5f, 1.0f);
+    const float3 edgeX = make_float3(1.0f, 0.0f, 0.0f);
+    const float3 edgeY = make_float3(0.0f, 1.0f, 0.0f);
+    const float3 origin = make_float3(0.0f);
+    const float3 direction = make_float3(0.0f, 0.0f, 1.0f);
+    const AnalyticLightIntersection front = intersectAnalyticLightSurface(
+        LIGHT_TYPE_RECT, corner, corner + edgeX, make_float3(0.0f), corner + edgeY,
+        make_float3(0.0f, 0.0f, -1.0f), origin, direction, 0.0f, 100.0f);
+    const AnalyticLightIntersection back = intersectAnalyticLightSurface(
+        LIGHT_TYPE_RECT, corner, corner + edgeX, make_float3(0.0f), corner + edgeY,
+        make_float3(0.0f, 0.0f, 1.0f), origin, direction, 0.0f, 100.0f);
+
+    REQUIRE(analyticLightIntersectionSharesEvent(front.distance, back));
+    CHECK(lightConnectionFacesVertex(LIGHT_TYPE_RECT, -dot3(direction, front.normal)));
+    CHECK_FALSE(lightConnectionFacesVertex(LIGHT_TYPE_RECT, -dot3(direction, back.normal)));
+
+    const float bsdfPdf = 0.2f;
+    const float lightPdf0 = areaPdfToSolidAngleMarginalPdf(1.0f, 1.0f, front.areaPdf, 1.0f, 1.0f, 0.25f, 1.0f);
+    const float lightPdf1 = areaPdfToSolidAngleMarginalPdf(1.0f, 1.0f, front.areaPdf, 1.0f, 1.0f, 0.75f, 1.0f);
+    const float fullHit = 2.0f * computeMisWeight(bsdfPdf, lightPdf0, 0u) +
+                          3.0f * computeMisWeight(bsdfPdf, lightPdf1, 0u);
+    const float oldSingleIdentity = 2.0f * computeMisWeight(bsdfPdf, lightPdf0, 0u);
+    CHECK(fullHit > oldSingleIdentity);
+    CHECK(computeMisWeight(bsdfPdf, lightPdf0, 0u) + computeMisWeight(lightPdf0, bsdfPdf, 0u) ==
+          doctest::Approx(1.0f));
+    CHECK(computeMisWeight(bsdfPdf, lightPdf1, 0u) + computeMisWeight(lightPdf1, bsdfPdf, 0u) ==
+          doctest::Approx(1.0f));
+
+    const std::filesystem::path repository =
+        std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
+    for (const char* path : { "src/shaders/metal/wavefront.metal",
+                              "src/shaders/optix/OptixRender_closest_hit.cu" })
+    {
+        std::ifstream sourceFile(repository / path);
+        REQUIRE(sourceFile.good());
+        const std::string source((std::istreambuf_iterator<char>(sourceFile)), std::istreambuf_iterator<char>());
+        CHECK(source.find("for (uint32_t componentId = 0u;") != std::string::npos);
+        CHECK(source.find("analyticLightIntersectionSharesEvent") != std::string::npos);
+    }
+}

@@ -2080,45 +2080,57 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             }
         }
         float3 sharcLight = float3(0.0f);
-        // The same predicate connectLight() offers directions by, so the two
-        // halves of the estimate agree on the set they are splitting.
-        if (lightConnectionFacesVertex(currLight.type, -dot(rayDir, lightNormal),
-                                       lightIsPunctual(currLight.type) ? currLight.points[0].x : 0.0f))
+        const float3 scatteringOrigin = rayOrigin - rayDir * p.misDistance;
+        // Coincident emitters are separate integrand components even though
+        // they share one geometric event. Each keeps its own PMF and MIS pair.
+        for (uint32_t componentId = 0u; componentId < uniforms.numLights; ++componentId)
         {
-            // Same distance the shadow ray uses in connectLight() -- from the
-            // scattering vertex, not the offset origin -- so both halves of the
-            // MIS estimate scale the emission by the same controlled falloff.
-            const float3 scatteringOrigin = rayOrigin - rayDir * p.misDistance;
-            const float hitDistance = finiteVectorLength(hitPoint - scatteringOrigin);
-            const float3 Le = emittedLightRadiance(currLight, -rayDir, hitDistance, iesProfiles);
+            device const UniformLight& component = lights[componentId];
+            if (!analyticLightVisibilityAllowsRay(component.normal.w, depth != 0u))
+            {
+                continue;
+            }
+            const AnalyticLightIntersection componentHit = intersectAnalyticLightSurface(
+                component.type, float3(component.points[0]), float3(component.points[1]),
+                float3(component.points[2]), float3(component.points[3]), float3(component.normal), rayOrigin,
+                rayDir, 0.0f, 3.402823466e38f);
+            if (!analyticLightIntersectionSharesEvent(analyticSurfaceHit.distance, componentHit))
+            {
+                continue;
+            }
+            const float componentCosine = -dot(rayDir, componentHit.normal);
+            if (!lightConnectionFacesVertex(component.type, componentCosine,
+                                            lightIsPunctual(component.type) ? component.points[0].x : 0.0f))
+            {
+                continue;
+            }
+            const float hitDistance = finiteVectorLength(componentHit.point - scatteringOrigin);
+            const float3 Le = emittedLightRadiance(component, -rayDir, hitDistance, iesProfiles);
+            float3 weightedLe;
             if (depth == 0u || specularBounce || !neeDone)
             {
-                radiance += throughput * Le;
-                sharcLight = Le;
+                weightedLe = Le;
             }
             else
             {
                 const float localSelectionPdf = uniforms.hasEnvMap ? 1.0f - uniforms.envMapColorTint.w : 1.0f;
                 const float analyticClassPdf =
                     uniforms.numEmissiveMeshes > 0u ? 1.0f - uniforms.meshLightSelectionPdf : 1.0f;
-                const float lightIdentityPdf = analyticLightSelectionPdf(currLight);
+                const float lightIdentityPdf = analyticLightSelectionPdf(component);
                 // From the vertex that scattered, which is not the ray's origin
                 // once it has passed through a cutout on the way here. Using the
                 // origin makes the light look nearer than the scattering vertex
                 // saw it, which shrinks its solid-angle density, which inflates
                 // this weight -- and the next-event estimate at that vertex has
                 // already claimed the rest. The two then sum to more than one.
-                const float lightPdf = analyticSurfaceHit.hit ?
-                                           areaPdfToSolidAngleMarginalPdf(
-                                               hitDistance, -dot(rayDir, lightNormal), analyticSurfaceHit.areaPdf,
-                                               localSelectionPdf, analyticClassPdf, lightIdentityPdf, 1.0f) :
-                                           getLightPdf(currLight, hitPoint, scatteringOrigin,
-                                                       uniforms.rectLightSamplingMethod, localSelectionPdf,
-                                                       analyticClassPdf, lightIdentityPdf);
+                const float lightPdf = areaPdfToSolidAngleMarginalPdf(
+                    hitDistance, componentCosine, componentHit.areaPdf, localSelectionPdf, analyticClassPdf,
+                    lightIdentityPdf, 1.0f);
                 const float mis = computeMisWeight(p.lastBsdfPdf, lightPdf, uniforms.misHeuristic);
-                radiance += throughput * Le * mis;
-                sharcLight = Le * mis;
+                weightedLe = Le * mis;
             }
+            radiance += throughput * weightedLe;
+            sharcLight += weightedLe;
         }
         if (SPEC_SHARC_UPDATE)
         {

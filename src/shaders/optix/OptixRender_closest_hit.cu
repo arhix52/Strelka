@@ -1594,29 +1594,50 @@ static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd
         prd->aovDone = true;
     }
 
-    if (lightConnectionFacesVertex(
-            light.type, -dot(rayDirection, lightNormal), lightIsPunctual(light.type) ? light.points[0].x : 0.0f))
+    const float3 misOrigin = rayOrigin - rayDirection * prd->misDistance;
+    float3 radiance = make_float3(0.0f);
+    // Coincident emitters are separate integrand components even though they
+    // share one geometric event. Each keeps its own selection PMF and MIS pair.
+    for (uint32_t componentId = 0u; componentId < params.scene.numLights; ++componentId)
     {
-        const float3 misOrigin = rayOrigin - rayDirection * prd->misDistance;
-        const float hitDistance = finiteVectorLength(hitPoint - misOrigin);
-        const float3 Le = emittedLightRadiance(light, -rayDirection, hitDistance);
-        float3 radiance;
+        const UniformLight& component = params.scene.lights[componentId];
+        if (!analyticLightVisibilityAllowsRay(component.normal.w, prd->depth != 0u))
+        {
+            continue;
+        }
+        const AnalyticLightIntersection componentHit = intersectAnalyticLightSurface(
+            component.type, make_float3(component.points[0]), make_float3(component.points[1]),
+            make_float3(component.points[2]), make_float3(component.points[3]), make_float3(component.normal),
+            rayOrigin, rayDirection, params.materialRayTmin, 1e16f);
+        if (!analyticLightIntersectionSharesEvent(hit.distance, componentHit))
+        {
+            continue;
+        }
+        const float componentCosine = -dot(rayDirection, componentHit.normal);
+        if (!lightConnectionFacesVertex(component.type, componentCosine,
+                                        lightIsPunctual(component.type) ? component.points[0].x : 0.0f))
+        {
+            continue;
+        }
+        const float hitDistance = finiteVectorLength(componentHit.point - misOrigin);
+        const float3 Le = emittedLightRadiance(component, -rayDirection, hitDistance);
         if (prd->depth == 0 || prd->specularBounce || !prd->neeDone)
         {
-            radiance = prd->throughput * Le;
+            radiance += prd->throughput * Le;
         }
         else
         {
             const float localSelectionPdf = params.hasEnvMap ? 1.0f - params.envSelectionPdf : 1.0f;
             const float analyticClassPdf =
                 params.scene.numEmissiveMeshes > 0u ? 1.0f - params.scene.meshLightSelectionPdf : 1.0f;
-            const float lightPdf = areaPdfToSolidAngleMarginalPdf(hitDistance, -dot(rayDirection, lightNormal),
-                                                                  hit.areaPdf, localSelectionPdf, analyticClassPdf,
-                                                                  analyticLightSelectionPdf(light), 1.0f);
-            radiance = prd->throughput * Le * computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
+            const float lightPdf = areaPdfToSolidAngleMarginalPdf(
+                hitDistance, componentCosine, componentHit.areaPdf, localSelectionPdf, analyticClassPdf,
+                analyticLightSelectionPdf(component), 1.0f);
+            radiance +=
+                prd->throughput * Le * computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
         }
-        prd->radiance += clampIndirectContribution(radiance, prd->depth, params.clampIndirect);
     }
+    prd->radiance += clampIndirectContribution(radiance, prd->depth, params.clampIndirect);
     prd->throughput = make_float3(0.0f);
 }
 

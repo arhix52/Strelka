@@ -57,6 +57,11 @@ struct AnalyticLightIntersection
     bool hit = false;
 };
 
+DEVICE_FUNC bool analyticLightIntersectionSharesEvent(float distance, AnalyticLightIntersection candidate)
+{
+    return candidate.hit && candidate.distance == distance;
+}
+
 DEVICE_FUNC float analyticDiscArea(float3 axisX, float3 axisY)
 {
     const float twiceParallelogramArea = finiteVectorLength(cross(axisX, axisY));

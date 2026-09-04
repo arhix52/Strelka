@@ -48,6 +48,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | AK. Transformed analytic POWER units | a 2x3 transform makes a POWER rectangle emit 6x the authored watts because radiance uses local area | packed rect/disc/ellipsoid world-area integration and local-area mutation | bake POWER radiance from the packed world surface area; leave RADIANCE unchanged | FIXED | Shared packed record | Shared packed record; external CUDA required | this commit | FIXED |
 | AL. Finite distant boundary measure | ordinary sun angle `0.00465`: q-halving raises one direction's multiplicity from 215 to 385 | exact rejected-boundary pair plus cap support/PDF regression | retry rejected float representatives from independent light dimensions | FIXED | Shader compiled | Shared source; external CUDA required | this commit | FIXED |
 | AM. OptiX primary sharp-distant atom | empty scene with camera direction exactly equal to a zero-angle distant axis is black only on OptiX | shared primary/specular/non-specular atom ownership regression | primary rays and specular chains use one shared delta-path predicate | FIXED | Shared predicate | Source fixed; external CUDA required | this commit | UNVERIFIED |
+| AN. Coincident analytic emitter components | two identical rectangles both participate in NEE but the BSDF hit retained only the first identity | opposing-normal geometry, per-component MIS shares, and backend enumeration contract | shade every emitter intersecting the nearest represented event with its own PMF/MIS | FIXED | Shader compiled | Source fixed; external CUDA required | this commit | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -1480,3 +1481,19 @@ is out of scope unless it blocks validation.
   on miss, while Metal marked the same segment specular. The shared regression fails the old OptiX predicate.
 - Implementation: both shaders use `depth == 0 || specularBounce` plus exact represented-direction equality. The
   four-case host regression passes and Metal compiles; OptiX runtime remains externally `UNVERIFIED`.
+
+## Finding AN: coincident analytic emitter components
+
+- Random variable and measure: light identity is discrete; a selected finite emitter then samples its own continuous
+  area point, converted to solid angle at the scattering vertex.
+- Support and PDFs: every enabled emitter whose analytic surface intersects the nearest represented event contributes.
+  For component `i`, `p_i(W)=P(local) P(analytic) P(i) p_A,i distance^2/abs(n_i dot -W)`.
+- Delta/continuous classification and MIS: finite rectangles, discs, ellipsoids, and soft punctual spheres remain
+  continuous. Each coincident integrand component pairs its own NEE proposal with the same BSDF-hit strategy; their
+  balance shares sum to one component by component.
+- Reproducer and mutation: nearest-hit tie breaking retained only one light ID, so a second identical positive emitter
+  lost its BSDF share; an oppositely oriented first record could also hide a front-facing second record.
+- Implementation: traversal still finds one nearest geometric distance. Hit shading then enumerates all analytic
+  lights and accumulates those with exactly the same represented intersection distance, evaluating each component's
+  sidedness, radiance, area PDF, selection PMF, and MIS weight independently. The regression covers the old
+  single-identity mutation, opposing normals, both MIS pairs, and both backend call sites.
