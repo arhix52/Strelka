@@ -728,37 +728,23 @@ struct HitRecord
     float distance; // < 0 means the ray escaped
 };
 
-#define RESTIR_SAMPLE_INVALID 0u
-#define RESTIR_SAMPLE_ANALYTIC 1u
-#define RESTIR_SAMPLE_ENVIRONMENT 2u
-#define RESTIR_SAMPLE_EMISSIVE_TRIANGLE 3u
 #define RESTIR_SURFACE_VALID (1u << 31)
 #define RESTIR_SURFACE_MATERIAL_MASK 0x7fffffffu
-
-struct RestirLightSample
-{
-    uint32_t type;
-    uint32_t lightId;
-    uint32_t primitiveId;
-    uint32_t retryWord;
-    vector_float4 parameters;
-};
 
 struct RestirReservoir
 {
     RestirLightSample sample;
     RestirReservoirState state;
 };
-static_assert(sizeof(RestirReservoir) == 48, "ReSTIR reservoir ABI changed");
+static_assert(sizeof(RestirReservoir) == 32, "ReSTIR reservoir ABI changed");
 
 struct RestirSurfaceHistory
 {
-    packed_float3 position;
     packed_float3 geometryNormal;
     float depth;
     uint32_t materialIdAndFlags;
 };
-static_assert(sizeof(RestirSurfaceHistory) == 32, "ReSTIR surface history ABI changed");
+static_assert(sizeof(RestirSurfaceHistory) == 20, "ReSTIR surface history ABI changed");
 
 #define RESTIR_SHADING_VALID (1u << 31)
 #define RESTIR_SHADING_CURVE (1u << 30)
@@ -782,9 +768,8 @@ struct RestirShadingPoint
     uint32_t materialId;
     uint32_t medium;
     uint32_t sampleIdxAndFlags;
-    vector_float2 previousPixelPosition;
 };
-static_assert(sizeof(RestirShadingPoint) == 136, "ReSTIR shading point ABI changed");
+static_assert(sizeof(RestirShadingPoint) == 128, "ReSTIR shading point ABI changed");
 
 // A deferred occlusion query produced by `shade` and consumed by `shadow`.
 struct ShadowRay

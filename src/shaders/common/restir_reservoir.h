@@ -2,6 +2,36 @@
 
 #include <strelka/material/material_math.h>
 
+#define RESTIR_SAMPLE_INVALID 0u
+#define RESTIR_SAMPLE_ANALYTIC 1u
+#define RESTIR_SAMPLE_ENVIRONMENT 2u
+#define RESTIR_SAMPLE_EMISSIVE_TRIANGLE 3u
+#define RESTIR_SAMPLE_TYPE_SHIFT 30u
+#define RESTIR_SAMPLE_ID_MASK 0x3fffffffu
+
+struct RestirLightSample
+{
+    unsigned int typeAndLightId;
+    unsigned int data0;
+    unsigned int data1;
+    unsigned int data2;
+};
+
+DEVICE_FUNC unsigned int restirSampleKey(unsigned int type, unsigned int lightId)
+{
+    return (type << RESTIR_SAMPLE_TYPE_SHIFT) | (lightId & RESTIR_SAMPLE_ID_MASK);
+}
+
+DEVICE_FUNC unsigned int restirSampleType(const THREAD_REF RestirLightSample& sample)
+{
+    return sample.typeAndLightId >> RESTIR_SAMPLE_TYPE_SHIFT;
+}
+
+DEVICE_FUNC unsigned int restirSampleLightId(const THREAD_REF RestirLightSample& sample)
+{
+    return sample.typeAndLightId & RESTIR_SAMPLE_ID_MASK;
+}
+
 struct RestirReservoirState
 {
     float weightSum;

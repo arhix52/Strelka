@@ -2994,7 +2994,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             const ScreenMotion motion =
                 screenMotion(uniforms, uniforms.prevWorldToClip * float4(previousPosition, 1.0f), pixel);
             RestirSurfaceHistory surface;
-            surface.position = packed_float3(worldPosition);
             surface.geometryNormal = packed_float3(si.geometry_normal);
             surface.depth = viewDepth(uniforms, worldPosition);
             surface.materialIdAndFlags = entry.materialId | RESTIR_SURFACE_VALID;
@@ -3020,7 +3019,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             shadingPoint.sampleIdxAndFlags = (sampleIdx & RESTIR_SHADING_SAMPLE_MASK) | RESTIR_SHADING_VALID |
                                              (isCurve ? RESTIR_SHADING_CURVE : 0u) |
                                              (motion.reactive == 0.0f ? RESTIR_SHADING_REPROJECTABLE : 0u);
-            shadingPoint.previousPixelPosition = previousPixelPosition;
             uniforms.restirShadingPoints[tid] = shadingPoint;
 
             // Temporal reuse consumes the same surface interaction and prepared
@@ -3506,12 +3504,13 @@ kernel void wavefrontRestirFinal(uint gid [[thread_position_in_grid]],
     currentReservoirs[tid] = reservoir;
     if (uniforms.restirDebugMode != 0u)
     {
-        const float3 debugColor = uniforms.restirDebugMode == 1u ?
-                                      float3(float(reservoir.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK) /
-                                             float(max(uniforms.reservoirMaxAge, 1u))) :
-                                      (reservoir.sample.type == RESTIR_SAMPLE_ANALYTIC    ? float3(1.0f, 0.2f, 0.1f) :
-                                       reservoir.sample.type == RESTIR_SAMPLE_ENVIRONMENT ? float3(0.1f, 0.4f, 1.0f) :
-                                                                                            float3(0.1f, 1.0f, 0.2f));
+        const float3 debugColor =
+            uniforms.restirDebugMode == 1u ?
+                float3(float(reservoir.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK) /
+                       float(max(uniforms.reservoirMaxAge, 1u))) :
+                (restirSampleType(reservoir.sample) == RESTIR_SAMPLE_ANALYTIC    ? float3(1.0f, 0.2f, 0.1f) :
+                 restirSampleType(reservoir.sample) == RESTIR_SAMPLE_ENVIRONMENT ? float3(0.1f, 0.4f, 1.0f) :
+                                                                                   float3(0.1f, 1.0f, 0.2f));
         radianceOut[tid] = float4(debugColor, 0.0f);
         return;
     }

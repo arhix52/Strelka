@@ -680,6 +680,30 @@ static LightConnection makeEmptyConnection()
     return c;
 }
 
+static RestirLightSample restirDirectionSample(uint32_t type, uint32_t lightId, float3 direction)
+{
+    return { restirSampleKey(type, lightId), as_type<uint32_t>(direction.x), as_type<uint32_t>(direction.y),
+             as_type<uint32_t>(direction.z) };
+}
+
+static RestirLightSample restirAnalyticSample(uint32_t lightId, uint32_t lightType, float2 uv, float3 direction)
+{
+    return lightType == LIGHT_TYPE_DISTANT ? restirDirectionSample(RESTIR_SAMPLE_ANALYTIC, lightId, direction) :
+                                             RestirLightSample{ restirSampleKey(RESTIR_SAMPLE_ANALYTIC, lightId),
+                                                                as_type<uint32_t>(uv.x), as_type<uint32_t>(uv.y), 0u };
+}
+
+static RestirLightSample restirMeshSample(uint32_t lightId, uint32_t primitiveId, float2 uv)
+{
+    return { restirSampleKey(RESTIR_SAMPLE_EMISSIVE_TRIANGLE, lightId), primitiveId, as_type<uint32_t>(uv.x),
+             as_type<uint32_t>(uv.y) };
+}
+
+static float3 restirSampleData3(thread const RestirLightSample& sample)
+{
+    return float3(as_type<float>(sample.data0), as_type<float>(sample.data1), as_type<float>(sample.data2));
+}
+
 // Hair TT/TRT lobes transmit across the strand, so fibre lighting must not reject the opposite shading hemisphere.
 static inline bool scattersThroughFibre(thread SurfaceInteraction& si)
 {
@@ -761,6 +785,8 @@ LightConnection connectLightSample(constant Uniforms& uniforms,
                                    uint32_t lightId,
                                    float2 uv,
                                    uint2 retryWords,
+                                   RestirLightSample storedSample,
+                                   bool reconnecting,
                                    thread SurfaceInteraction& si,
                                    bool volumeEvent,
                                    device const IesGpuBufferHeader* iesBuffer,
@@ -789,6 +815,11 @@ LightConnection connectLightSample(constant Uniforms& uniforms,
         break;
     case LIGHT_TYPE_DISTANT: {
         lightSampleData = SampleDistantLight(light, uv, retryWords, si.position);
+        if (reconnecting)
+        {
+            lightSampleData.L = restirSampleData3(storedSample);
+            lightSampleData.pointOnLight = lightSampleData.L;
+        }
         break;
     }
     case LIGHT_TYPE_DOME:
@@ -805,11 +836,7 @@ LightConnection connectLightSample(constant Uniforms& uniforms,
     }
 
     LightConnection c = makeEmptyConnection();
-    c.sample.type = RESTIR_SAMPLE_ANALYTIC;
-    c.sample.lightId = lightId;
-    c.sample.primitiveId = retryWords.x;
-    c.sample.retryWord = retryWords.y;
-    c.sample.parameters = float4(uv, 0.0f, 0.0f);
+    c.sample = reconnecting ? storedSample : restirAnalyticSample(lightId, light.type, uv, lightSampleData.L);
     c.toLight = lightSampleData.L;
     const float shapeParameter = lightIsPunctual(light.type) ? light.points[0].x : light.halfAngle;
     c.isDelta = lightIsDeltaForMis(light.type, shapeParameter);
@@ -879,8 +906,8 @@ LightConnection connectLight(constant Uniforms& uniforms,
                lightOpenUnitInterval(random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType)));
     const uint2 retryWords = uint2(randomBits<SampleDimension::eLightRetryU>(samplerRnd, uniforms.samplerType),
                                    randomBits<SampleDimension::eLightRetryV>(samplerRnd, uniforms.samplerType));
-    return connectLightSample(uniforms, light, lightId, uv, retryWords, si, volumeEvent, iesBuffer, localSelectionPdf,
-                              analyticSelectionPdf, lightSelectionPdf);
+    return connectLightSample(uniforms, light, lightId, uv, retryWords, {}, false, si, volumeEvent, iesBuffer,
+                              localSelectionPdf, analyticSelectionPdf, lightSelectionPdf);
 }
 
 LightConnection connectEnvDirection(constant Uniforms& uniforms,
@@ -891,8 +918,7 @@ LightConnection connectEnvDirection(constant Uniforms& uniforms,
                                     bool volumeEvent)
 {
     LightConnection c = makeEmptyConnection();
-    c.sample.type = RESTIR_SAMPLE_ENVIRONMENT;
-    c.sample.parameters = float4(dir, 0.0f);
+    c.sample = restirDirectionSample(RESTIR_SAMPLE_ENVIRONMENT, 0u, dir);
     c.toLight = dir;
     c.pdf = envPdf;
 
@@ -1140,10 +1166,7 @@ static LightConnection connectEmissiveMeshSample(constant Uniforms& uniforms,
     connection.needsRay = true;
     connection.hasVisibilityTarget = true;
     connection.isDelta = false;
-    connection.sample.type = RESTIR_SAMPLE_EMISSIVE_TRIANGLE;
-    connection.sample.lightId = meshId;
-    connection.sample.primitiveId = primitiveId;
-    connection.sample.parameters = float4(randomSample, 0.0f, 0.0f);
+    connection.sample = restirMeshSample(meshId, primitiveId, randomSample);
     return connection;
 }
 
@@ -1288,28 +1311,30 @@ LightConnection reconnectRestirSample(constant Uniforms& uniforms,
     const bool hasLocal = hasAnalytic || hasMesh;
     const float localSelectionPdf =
         SPEC_ENV_MAP && uniforms.hasEnvMap && hasLocal ? 1.0f - uniforms.envMapColorTint.w : 1.0f;
-    if (sample.type == RESTIR_SAMPLE_ENVIRONMENT && SPEC_ENV_MAP && uniforms.hasEnvMap)
+    const uint32_t sampleType = restirSampleType(sample);
+    const uint32_t lightId = restirSampleLightId(sample);
+    if (sampleType == RESTIR_SAMPLE_ENVIRONMENT && SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
-        const float3 direction = sample.parameters.xyz;
+        const float3 direction = restirSampleData3(sample);
         const float envPdf =
             envMapPdf(direction, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight, uniforms.envMapRotation) *
             (hasLocal ? uniforms.envMapColorTint.w : 1.0f);
         return connectEnvDirection(uniforms, direction, envPdf, si, envMapTexture, false);
     }
-    if (sample.type == RESTIR_SAMPLE_ANALYTIC && hasAnalytic && sample.lightId < uniforms.numLights)
+    if (sampleType == RESTIR_SAMPLE_ANALYTIC && hasAnalytic && lightId < uniforms.numLights)
     {
         const float analyticClassPdf = hasMesh ? 1.0f - uniforms.meshLightSelectionPdf : 1.0f;
-        const uint2 retryWords = uint2(sample.primitiveId, sample.retryWord);
-        return connectLightSample(uniforms, lights[sample.lightId], sample.lightId, sample.parameters.xy, retryWords,
-                                  si, false, iesBuffer, localSelectionPdf, analyticClassPdf,
-                                  analyticLightSelectionPdf(lights[sample.lightId]));
+        const bool distant = lights[lightId].type == LIGHT_TYPE_DISTANT;
+        const float2 uv = distant ? float2(0.0f) : float2(as_type<float>(sample.data0), as_type<float>(sample.data1));
+        return connectLightSample(uniforms, lights[lightId], lightId, uv, uint2(0u), sample, true, si, false, iesBuffer,
+                                  localSelectionPdf, analyticClassPdf, analyticLightSelectionPdf(lights[lightId]));
     }
-    if (sample.type == RESTIR_SAMPLE_EMISSIVE_TRIANGLE && hasMesh)
+    if (sampleType == RESTIR_SAMPLE_EMISSIVE_TRIANGLE && hasMesh)
     {
         const float meshClassPdf = hasAnalytic ? uniforms.meshLightSelectionPdf : 1.0f;
-        return connectEmissiveMeshSample(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, materials,
-                                         si, sample.lightId, sample.primitiveId, sample.parameters.xy, motionTime,
-                                         false, localSelectionPdf, meshClassPdf);
+        const float2 uv = float2(as_type<float>(sample.data1), as_type<float>(sample.data2));
+        return connectEmissiveMeshSample(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, materials, si,
+                                         lightId, sample.data0, uv, motionTime, false, localSelectionPdf, meshClassPdf);
     }
     return makeEmptyConnection();
 }

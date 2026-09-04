@@ -101,3 +101,12 @@ TEST_CASE("ReSTIR M limit preserves reservoir normalization")
     CHECK(reservoir.weightSum == doctest::Approx(100.0f));
     CHECK(restirReservoirNormalization(reservoir) == doctest::Approx(before));
 }
+
+TEST_CASE("ReSTIR sample key preserves category and stable ID")
+{
+    RestirLightSample sample{};
+    sample.typeAndLightId = restirSampleKey(RESTIR_SAMPLE_EMISSIVE_TRIANGLE, 1234567u);
+    CHECK(restirSampleType(sample) == RESTIR_SAMPLE_EMISSIVE_TRIANGLE);
+    CHECK(restirSampleLightId(sample) == 1234567u);
+    CHECK(sizeof(RestirLightSample) == 16);
+}
