@@ -356,7 +356,10 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
                                                // no normal. The hemisphere test and the cosine below
                                                // are surface terms; applied to a volume they reject
                                                // half of every connection and darken the other half.
-                                               bool volumeEvent = false)
+                                               bool volumeEvent,
+                                               float localSelectionPdf,
+                                               float analyticSelectionPdf,
+                                               float lightSelectionPdf)
 {
     LightSampleData lightSampleData = {};
     const float2 uv = make_float2(lightOpenUnitInterval(random<SampleDimension::eLightPointX>(sampler)),
@@ -418,7 +421,8 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
         // saturate(dot(N, L)) for everything but a fibre -- and nothing at all
         // for a medium, which has no normal to take it against.
         c.radiance = volumeEvent ? Li : Li * shadingCosine(si, lightSampleData.L);
-        c.pdf = lightSampleData.pdf;
+        c.pdf = getLightPdf(light, lightSampleData.pointOnLight, si.position, params.rectLightSamplingMethod,
+                            localSelectionPdf, analyticSelectionPdf, lightSelectionPdf);
         c.tMax = lightSampleData.distToLight;
         c.needsRay = true;
         if (lightUsesAnalyticSurfaceIntersection(light.type, lightIsPunctual(light.type) ? light.points[0].x : 0.0f))
@@ -594,7 +598,9 @@ static __forceinline__ __device__ int findEmissiveMesh(uint32_t instanceId, uint
 static __forceinline__ __device__ LightConnection connectEmissiveMesh(SamplerState& sampler,
                                                                       const SurfaceInteraction& si,
                                                                       uint32_t meshWord,
-                                                                      bool volumeEvent)
+                                                                      bool volumeEvent,
+                                                                      float localSelectionPdf,
+                                                                      float meshClassPdf)
 {
     LightConnection c = makeEmptyConnection();
     const uint32_t meshId = sampleEmissiveMesh(sampler, meshWord);
@@ -634,9 +640,9 @@ static __forceinline__ __device__ LightConnection connectEmissiveMesh(SamplerSta
     {
         return c;
     }
-    const float selectedMeshPdf =
-        emissiveMeshMarginalSolidAnglePdf(1.0f, 1.0f, mesh.selectionPdf, triangleEntry.selectionPdf, sample.areaPdf,
-                                          si.position, sample.point, sample.normal);
+    const float selectedMeshPdf = emissiveMeshMarginalSolidAnglePdf(localSelectionPdf, meshClassPdf, mesh.selectionPdf,
+                                                                    triangleEntry.selectionPdf, sample.areaPdf,
+                                                                    si.position, sample.point, sample.normal);
     if (!(selectedMeshPdf > 0.0f))
     {
         return c;
@@ -715,9 +721,7 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
     if (hasMesh && (!hasAnalytic || discreteBernoulli(classWord, meshPdf)))
     {
         const uint32_t meshWord = randomBits<SampleDimension::eLightBucket>(sampler);
-        LightConnection c = connectEmissiveMesh(sampler, si, meshWord, volumeEvent);
-        c.pdf *= localSelectionPdf * (hasAnalytic ? meshPdf : 1.0f);
-        return c;
+        return connectEmissiveMesh(sampler, si, meshWord, volumeEvent, localSelectionPdf, hasAnalytic ? meshPdf : 1.0f);
     }
     const float analyticPdf = hasMesh ? 1.0f - meshPdf : 1.0f;
     if (!(analyticPdf > 0.0f))
@@ -731,8 +735,9 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
     {
         return makeEmptyConnection();
     }
-    LightConnection c = connectLight(sampler, params.scene.lights[lightId], si, curveRadius, volumeEvent);
-    c.pdf *= localSelectionPdf * analyticPdf * analyticLightSelectionPdf(params.scene.lights[lightId]);
+    LightConnection c =
+        connectLight(sampler, params.scene.lights[lightId], si, curveRadius, volumeEvent, localSelectionPdf,
+                     analyticPdf, analyticLightSelectionPdf(params.scene.lights[lightId]));
     c.isResponsive = isResponsiveLight(lightId);
     return c;
 }
@@ -1599,9 +1604,9 @@ static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd
             const float localSelectionPdf = params.hasEnvMap ? 1.0f - params.envSelectionPdf : 1.0f;
             const float analyticClassPdf =
                 params.scene.numEmissiveMeshes > 0u ? 1.0f - params.scene.meshLightSelectionPdf : 1.0f;
-            const float lightSelectionPdf = localSelectionPdf * analyticClassPdf * analyticLightSelectionPdf(light);
-            const float lightPdf =
-                areaPdfToSolidAnglePdf(hitDistance, -dot(rayDirection, lightNormal), hit.areaPdf) * lightSelectionPdf;
+            const float lightPdf = areaPdfToSolidAngleMarginalPdf(hitDistance, -dot(rayDirection, lightNormal),
+                                                                  hit.areaPdf, localSelectionPdf, analyticClassPdf,
+                                                                  analyticLightSelectionPdf(light), 1.0f);
             radiance = prd->throughput * Le * computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
         }
         prd->radiance += clampIndirectContribution(radiance, prd->depth, params.clampIndirect);

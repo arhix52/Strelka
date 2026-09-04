@@ -31,7 +31,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | T. Infinite-light exact support/MIS | Sharp distant versus mirror is not represented as a discrete match; tiny continuous caps and float round trips lose support; camera mask/tMax differ | delta match, tiny cap, boundary round-trip, camera visibility and backend-distance tests | Stable analytic cone inversion and chord support; explicit sharp-distant atom; shared infinite visibility/distance | FIXED | FIXED on MTLDevice | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | U. Analytic/punctual visibility agreement | Shadow rays ignore analytic emitters and finite-radius punctual proxies; soft punctual spheres are nevertheless sampled with a continuous area density but classified as MIS deltas | analytic segment blockers, stacked area lights, overlapping analytic surfaces, exact parallelograms and soft-punctual hit/MIS regressions | One analytic surface query for camera/BSDF hits and finite shadow segments; only radius-free punctual sources remain delta | FIXED | FIXED on MTLDevice | Shared source fixed; external CUDA required | this commit | UNVERIFIED |
 | V. Transformed frame validity | Non-finite translations and collapsed/sheared projector/IES frames keep proposal power; OptiX transforms tangents as normals | translation, partial-rank/full-frame, shear, mirrored and tangent Gram-Schmidt tests | Orthonormal profile frames, matched packing/power/device validity, and forward-vector surface tangents | FIXED | FIXED on MTLDevice | Shared source fixed; external CUDA required | this commit | UNVERIFIED |
-| W. Complete marginal PDF arithmetic | Conditional area PDFs saturate before outer PMFs, under-reporting a finite complete marginal density | tiny-area/low-selection analytic and mesh regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| W. Complete marginal PDF arithmetic | Conditional area PDFs saturate before outer PMFs, under-reporting a finite complete marginal density | tiny-area/low-selection analytic and mesh regressions | joint exponent-scaled evaluation of the area Jacobian and every outer PMF | FIXED | FIXED on MTLDevice | Shared source fixed; external CUDA required | this commit | UNVERIFIED |
 | X. Emissive mesh animated/textured consistency | Power support ignores shutter/interior motion; OpenPBR and Metal LOD paths disagree with hit emission | motion extrema, OpenPBR texture bridge and texture-LOD regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | Y. Runtime topology/mask safety | Headless host geometry is released too early; finite/infinite and camera-visibility edits do not rebuild every backend mask/descriptor | headless rebuild and repeated runtime mask transitions | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | Z. Projector transfer convention | Metal samples sRGB while OptiX decodes the same LDR source with a gamma-2.2 path | shared texel-value fixture and source mutation | pending | OPEN | OPEN | OPEN | pending | OPEN |
@@ -998,3 +998,44 @@ is out of scope unless it blocks validation.
   samples in fast and safe math at three threadgroup sizes with zero frame/tangent or existing audit failures. OptiX
   source uses the identical Gram-Schmidt helper and forward tangent transform, but CUDA compilation/runtime remains
   externally `UNVERIFIED`. Status: FIXED for CPU and Metal, UNVERIFIED for OptiX execution.
+
+## Finding W: complete marginal PDF arithmetic
+
+- Random variables and measure: emitter/local-class/light identity, and for emissive meshes mesh and triangle
+  identity, are discrete variables. A sampled surface point `X` has density in world area `dA`; the induced
+  direction `W=(X-P)/|X-P|` has density in receiver solid angle `domega`.
+- Support: a represented positive outer PMF and positive finite area density retain directional support whenever the
+  complete product is representable, even if the conditional `p(W|J)` alone exceeds `FLT_MAX`. Zero PMFs,
+  degenerate area, a non-positive light-facing cosine, or an unrepresentable complete result have no continuous
+  support. No numeric floor widens the geometric support.
+- Conditional and marginal PDFs: `p(W|J)=p_A |X-P|^2/abs(n_X dot(-W))`. Analytic lights use
+  `p(W)=P(local) P(analytic|local) P(J|analytic) p(W|J)`; emissive meshes use
+  `p(W)=P(local) P(mesh|local) P(M|mesh) P(T|M) p(W|M,T)`. All factors must be exponent-scaled as one expression
+  and saturated only after the complete marginal density is formed. The old order first saturated `p(W|J)` to
+  `FLT_MAX` and then multiplied the PMFs, losing the cancelled exponent range.
+- Selection PMFs: the represented integer-alias PMFs from finding R are authoritative. This correction changes only
+  their floating-point product with the conditional density; it does not rebuild or renormalize a distribution.
+- Delta/continuous classification: analytic and mesh surfaces, including positive-radius punctual spheres, remain
+  continuous. Sharp punctual and distant atoms retain discrete masses and do not use the area Jacobian.
+- MIS strategies: selected-light NEE and the compatible BSDF surface hit must evaluate the same complete marginal
+  density in one arithmetic operation. A conditional-only PDF is still useful diagnostically, but may not be rounded
+  before the outer PMFs when used by either MIS strategy.
+- Current-HEAD reproducer and mutation: for `p_A=1e30`, distance `1e10`, unit cosine, and four selection masses
+  `1e-5`, the exact marginal is `1e30`; the old conditional-first order returns `3.40282e18`. Under Metal fast math
+  an equivalent power-of-two mutation reassociates to infinity, while safe math returns about `2^48`; neither equals
+  the finite `2^80` marginal.
+- Implementation: one shared accumulator decomposes each positive factor with `frexp`, sums its exponent, and forms
+  only a bounded mantissa product. Area density, squared distance, light-facing cosine, and up to four hierarchy PMFs
+  are finalized with `ldexp` and saturated once. Analytic NEE, analytic BSDF hits, mesh NEE, and mesh BSDF hits all
+  call that same operation; non-area conditionals use the analogous exponent-scaled PMF product.
+- Corrected result: the two fixed reproducers return `1e30`; 4,096 randomized representable products agree with an
+  independent long-double oracle within `2e-6` relative error, while more than 100 old-order mutations fail. Sample
+  and hit-side production paths now receive the identical complete marginal helper rather than independently rounded
+  conditional and selection values.
+- Validation: focused Debug, Release, and ASan+UBSan each pass 12,300/12,300 assertions. Full Debug and Release CTest
+  pass 4/4; production `wavefront.metal` compiles. The complete audit passes 902/902 cases and 69,256,582 assertions,
+  preserving environment integral `1`, Lambertian estimate `1.002147074` inside its CI, detected legacy mutation
+  `2.003353165`, and dome MIS ratio `1`. On the actual Apple M4 Pro, the power-of-two marginal cases and prior GPU
+  audit execute for 262,144 samples in fast and safe math at threadgroup sizes 32/64/128 with zero counters and
+  invariant records. OptiX uses the same shared accumulator and both NEE/hit call sites, but CUDA compile/runtime
+  remains externally `UNVERIFIED` under the finding-7 command.

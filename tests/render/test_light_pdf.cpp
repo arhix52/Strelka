@@ -1465,6 +1465,82 @@ TEST_CASE("a back-facing or degenerate area sample has no density")
     CHECK(areaLightSolidAnglePdf(1e20f, 0.5f, 1e-30f) == std::numeric_limits<float>::max());
 }
 
+TEST_CASE("analytic marginal PDF applies light selection before saturation")
+{
+    LightPdfQuery q = makeLightPdfQuery(LIGHT_TYPE_DISC);
+    q.distToLight = 1e10f;
+    q.cosAtLight = 1.0f;
+    q.areaPdf = 1e30f;
+    constexpr float localSelection = 1e-8f;
+    constexpr float classSelection = 1e-6f;
+    constexpr float lightSelection = 1e-6f;
+
+    const float marginal = marginalLightSolidAnglePdf(q, localSelection, classSelection, lightSelection);
+    const long double oracle = static_cast<long double>(q.areaPdf) * static_cast<long double>(q.distToLight) *
+                               static_cast<long double>(q.distToLight) * static_cast<long double>(localSelection) *
+                               static_cast<long double>(classSelection) * static_cast<long double>(lightSelection);
+    CHECK(marginal == doctest::Approx(static_cast<double>(oracle)).epsilon(2e-6));
+    CHECK(std::isfinite(marginal));
+
+    // Mutation: this is the old renderer order. The conditional clamps to
+    // FLT_MAX before the outer PMFs can bring the full density back to 1e30.
+    const float oldMarginal = lightSolidAnglePdf(q) * localSelection * classSelection * lightSelection;
+    CHECK(std::abs(double(oldMarginal) - double(oracle)) / double(oracle) > 0.99);
+}
+
+TEST_CASE("complete area-light marginal PDF agrees with a long-double oracle")
+{
+    std::mt19937 rng(0x504446u);
+    std::uniform_real_distribution<float> mantissa(0.5f, 1.0f);
+    std::uniform_int_distribution<int> areaExponent(-100, 100);
+    std::uniform_int_distribution<int> distanceExponent(-40, 40);
+    std::uniform_int_distribution<int> selectionExponent(-30, 0);
+    std::uniform_int_distribution<int> cosineExponent(-20, 0);
+    uint32_t checked = 0u;
+    uint32_t oldFailures = 0u;
+
+    while (checked < 4096u)
+    {
+        const float areaPdf = std::ldexp(mantissa(rng), areaExponent(rng));
+        const float distance = std::ldexp(mantissa(rng), distanceExponent(rng));
+        const float cosine = std::min(std::ldexp(mantissa(rng), cosineExponent(rng)), 1.0f);
+        const float s0 = std::ldexp(mantissa(rng), selectionExponent(rng));
+        const float s1 = std::ldexp(mantissa(rng), selectionExponent(rng));
+        const float s2 = std::ldexp(mantissa(rng), selectionExponent(rng));
+        const float s3 = std::ldexp(mantissa(rng), selectionExponent(rng));
+        const long double oracle = static_cast<long double>(areaPdf) * static_cast<long double>(distance) *
+                                   static_cast<long double>(distance) * static_cast<long double>(s0) *
+                                   static_cast<long double>(s1) * static_cast<long double>(s2) *
+                                   static_cast<long double>(s3) / static_cast<long double>(cosine);
+        if (!(oracle >= std::numeric_limits<float>::min()) || !(oracle <= std::numeric_limits<float>::max()))
+        {
+            continue;
+        }
+
+        const float pdf = areaPdfToSolidAngleMarginalPdf(distance, cosine, areaPdf, s0, s1, s2, s3);
+        CAPTURE(areaPdf);
+        CAPTURE(distance);
+        CAPTURE(cosine);
+        CAPTURE(s0);
+        CAPTURE(s1);
+        CAPTURE(s2);
+        CAPTURE(s3);
+        CAPTURE(oracle);
+        CAPTURE(pdf);
+        REQUIRE(pdf > 0.0f);
+        REQUIRE(std::isfinite(pdf));
+        CHECK(std::abs(static_cast<long double>(pdf) - oracle) / oracle < 2e-6L);
+
+        const float oldPdf = areaPdfToSolidAnglePdf(distance, cosine, areaPdf) * s0 * s1 * s2 * s3;
+        if (!(oldPdf > 0.0f) || std::abs(static_cast<long double>(oldPdf) - oracle) / oracle > 1e-3L)
+        {
+            ++oldFailures;
+        }
+        ++checked;
+    }
+    CHECK(oldFailures > 100u);
+}
+
 // ---------------------------------------------------------------------------
 // A point light with a radius. Colour means intensity there and radiance on a
 // sphere light, so the conversion has to be exactly the one that makes the two

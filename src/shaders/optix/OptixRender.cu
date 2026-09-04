@@ -725,7 +725,6 @@ extern "C" __global__ void __closesthit__light()
             const float localSelectionPdf = params.hasEnvMap ? 1.0f - params.envSelectionPdf : 1.0f;
             const float analyticClassPdf =
                 params.scene.numEmissiveMeshes > 0u ? 1.0f - params.scene.meshLightSelectionPdf : 1.0f;
-            const float lightSelectionPdf = localSelectionPdf * analyticClassPdf * currLight.color.w;
             // From the vertex that scattered, which is not the ray's origin once
             // it has passed through a cutout or crossed a medium's boundary on
             // the way here. Using the origin makes the light look nearer than the
@@ -734,8 +733,8 @@ extern "C" __global__ void __closesthit__light()
             // vertex has already claimed the rest, so the two sum to more than
             // one.
             const float3 misOrigin = optixGetWorldRayOrigin() - rayDir * prd->misDistance;
-            float lightPdf =
-                getLightPdf(currLight, hitPoint, misOrigin, params.rectLightSamplingMethod) * lightSelectionPdf;
+            const float lightPdf = getLightPdf(currLight, hitPoint, misOrigin, params.rectLightSamplingMethod,
+                                               localSelectionPdf, analyticClassPdf, currLight.color.w);
             const float misWeight = computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
             radiance = prd->throughput * Le * misWeight;
         }

@@ -141,6 +141,89 @@ DEVICE_FUNC bool lightSampleFacesVertex(float cosAtLight)
     return cosAtLight > 0.0f && cosAtLight <= 3.402823466e38f;
 }
 
+struct PdfProductAccumulator
+{
+    float mantissa;
+    int exponent;
+};
+
+DEVICE_FUNC bool multiplyPdfFactor(THREAD_REF PdfProductAccumulator& product, float factor)
+{
+    constexpr float maxFinite = 3.402823466e38f;
+    if (!(factor > 0.0f) || !(factor <= maxFinite))
+    {
+        return false;
+    }
+    int exponent = 0;
+    product.mantissa *= decomposeFloatExponent(factor, exponent);
+    product.exponent += exponent;
+    return true;
+}
+
+DEVICE_FUNC bool dividePdfFactor(THREAD_REF PdfProductAccumulator& product, float factor)
+{
+    constexpr float maxFinite = 3.402823466e38f;
+    if (!(factor > 0.0f) || !(factor <= maxFinite))
+    {
+        return false;
+    }
+    int exponent = 0;
+    product.mantissa /= decomposeFloatExponent(factor, exponent);
+    product.exponent -= exponent;
+    return true;
+}
+
+DEVICE_FUNC bool multiplySquaredPdfFactor(THREAD_REF PdfProductAccumulator& product, float factor)
+{
+    constexpr float maxFinite = 3.402823466e38f;
+    if (!(factor > 0.0f) || !(factor <= maxFinite))
+    {
+        return false;
+    }
+    int exponent = 0;
+    const float mantissa = decomposeFloatExponent(factor, exponent);
+    product.mantissa *= mantissa * mantissa;
+    product.exponent += 2 * exponent;
+    return true;
+}
+
+DEVICE_FUNC float finishPdfProduct(const THREAD_REF PdfProductAccumulator& product)
+{
+    constexpr float maxFinite = 3.402823466e38f;
+    const float result = scaleFloatExponent(product.mantissa, product.exponent);
+    if (!(result > 0.0f))
+    {
+        return 0.0f;
+    }
+    return result <= maxFinite ? result : maxFinite;
+}
+
+DEVICE_FUNC float scalePdfBySelection(
+    float conditionalPdf, float selection0, float selection1, float selection2, float selection3)
+{
+    PdfProductAccumulator product{ 1.0f, 0 };
+    if (!multiplyPdfFactor(product, conditionalPdf) || !multiplyPdfFactor(product, selection0) ||
+        !multiplyPdfFactor(product, selection1) || !multiplyPdfFactor(product, selection2) ||
+        !multiplyPdfFactor(product, selection3))
+    {
+        return 0.0f;
+    }
+    return finishPdfProduct(product);
+}
+
+DEVICE_FUNC float reciprocalPdfWithSelection(
+    float denominator, float selection0, float selection1, float selection2, float selection3)
+{
+    PdfProductAccumulator product{ 1.0f, 0 };
+    if (!dividePdfFactor(product, denominator) || !multiplyPdfFactor(product, selection0) ||
+        !multiplyPdfFactor(product, selection1) || !multiplyPdfFactor(product, selection2) ||
+        !multiplyPdfFactor(product, selection3))
+    {
+        return 0.0f;
+    }
+    return finishPdfProduct(product);
+}
+
 /// A point drawn from an emitter's area measure, converted to solid angle.
 ///
 /// `area` is the reciprocal local area density, `1/p_A`. It is the total area
@@ -153,15 +236,43 @@ DEVICE_FUNC float areaLightSolidAnglePdf(float distToLight, float cosAtLight, fl
     {
         return 0.0f;
     }
-    constexpr float maxFinite = 3.402823466e38f;
     cosAtLight = fminf(cosAtLight, 1.0f);
-    const float scaledDistance = distToLight / sqrtf(area);
-    const float largestFiniteDistance = sqrtf(maxFinite * cosAtLight);
-    if (!(scaledDistance > 0.0f))
+    PdfProductAccumulator product{ 1.0f, 0 };
+    if (!multiplySquaredPdfFactor(product, distToLight) || !dividePdfFactor(product, cosAtLight) ||
+        !dividePdfFactor(product, area))
     {
         return 0.0f;
     }
-    return scaledDistance <= largestFiniteDistance ? scaledDistance * scaledDistance / cosAtLight : maxFinite;
+    return finishPdfProduct(product);
+}
+
+/// Form the complete marginal density in one exponent-scaled product. The four
+/// selection factors are discrete PMFs; unused hierarchy levels pass one.
+/// Saturating the conditional area density first loses information whenever a
+/// small selection mass brings an otherwise overflowing p_A*d^2/cos back into
+/// the representable range.
+DEVICE_FUNC float areaPdfToSolidAngleMarginalPdf(float distToLight,
+                                                 float cosAtLight,
+                                                 float areaPdf,
+                                                 float selection0,
+                                                 float selection1,
+                                                 float selection2,
+                                                 float selection3)
+{
+    if (!lightSampleFacesVertex(cosAtLight) || !(distToLight > 0.0f) || !(areaPdf > 0.0f))
+    {
+        return 0.0f;
+    }
+    cosAtLight = fminf(cosAtLight, 1.0f);
+    PdfProductAccumulator product{ 1.0f, 0 };
+    if (!multiplyPdfFactor(product, areaPdf) || !multiplySquaredPdfFactor(product, distToLight) ||
+        !dividePdfFactor(product, cosAtLight) || !multiplyPdfFactor(product, selection0) ||
+        !multiplyPdfFactor(product, selection1) || !multiplyPdfFactor(product, selection2) ||
+        !multiplyPdfFactor(product, selection3))
+    {
+        return 0.0f;
+    }
+    return finishPdfProduct(product);
 }
 
 /// Area density converted to solid angle without first materialising its
@@ -169,33 +280,7 @@ DEVICE_FUNC float areaLightSolidAnglePdf(float distToLight, float cosAtLight, fl
 /// cases where d^2 alone overflows.
 DEVICE_FUNC float areaPdfToSolidAnglePdf(float distToLight, float cosAtLight, float areaPdf)
 {
-    if (!lightSampleFacesVertex(cosAtLight) || !(distToLight > 0.0f) || !(areaPdf > 0.0f))
-    {
-        return 0.0f;
-    }
-    constexpr float maxFinite = 3.402823466e38f;
-    cosAtLight = fminf(cosAtLight, 1.0f);
-    if (!(distToLight <= maxFinite) || !(areaPdf <= maxFinite))
-    {
-        return maxFinite;
-    }
-    int distanceExponent = 0;
-    int cosineExponent = 0;
-    int pdfExponent = 0;
-#if defined(__METAL_VERSION__)
-    const float distanceMantissa = metal::frexp(distToLight, distanceExponent);
-    const float cosineMantissa = metal::frexp(cosAtLight, cosineExponent);
-    const float pdfMantissa = metal::frexp(areaPdf, pdfExponent);
-    const float result = metal::ldexp(pdfMantissa * distanceMantissa * distanceMantissa / cosineMantissa,
-                                      pdfExponent + 2 * distanceExponent - cosineExponent);
-#else
-    const float distanceMantissa = frexpf(distToLight, &distanceExponent);
-    const float cosineMantissa = frexpf(cosAtLight, &cosineExponent);
-    const float pdfMantissa = frexpf(areaPdf, &pdfExponent);
-    const float result = ldexpf(pdfMantissa * distanceMantissa * distanceMantissa / cosineMantissa,
-                                pdfExponent + 2 * distanceExponent - cosineExponent);
-#endif
-    return result <= maxFinite ? result : maxFinite;
+    return areaPdfToSolidAngleMarginalPdf(distToLight, cosAtLight, areaPdf, 1.0f, 1.0f, 1.0f, 1.0f);
 }
 
 /// Emissive area of a sphere of radius r. Named because the estimator, the pdf
@@ -515,6 +600,31 @@ DEVICE_FUNC float lightSolidAnglePdf(const THREAD_REF LightPdfQuery& q)
         break;
     }
     return 0.0f;
+}
+
+/// Complete analytic-light density, including every discrete selection mass.
+/// Area conditionals are evaluated jointly with those masses so a finite
+/// marginal cannot be corrupted by an overflowing conditional intermediate.
+DEVICE_FUNC float marginalLightSolidAnglePdf(const THREAD_REF LightPdfQuery& q,
+                                             float localSelectionPdf,
+                                             float analyticSelectionPdf,
+                                             float lightSelectionPdf)
+{
+    const bool areaConditional =
+        (q.type == LIGHT_TYPE_RECT && !(q.solidAngle > 0.0f)) || q.type == LIGHT_TYPE_DISC ||
+        q.type == LIGHT_TYPE_SPHERE ||
+        ((q.type == LIGHT_TYPE_POINT || q.type == LIGHT_TYPE_SPOT || q.type == LIGHT_TYPE_PROJECTOR) &&
+         punctualLightIsSoft(q.radius));
+    if (areaConditional)
+    {
+        return areaPdfToSolidAngleMarginalPdf(
+            q.distToLight, q.cosAtLight, q.areaPdf, localSelectionPdf, analyticSelectionPdf, lightSelectionPdf, 1.0f);
+    }
+    if (q.type == LIGHT_TYPE_RECT && q.solidAngle > 0.0f)
+    {
+        return reciprocalPdfWithSelection(q.solidAngle, localSelectionPdf, analyticSelectionPdf, lightSelectionPdf, 1.0f);
+    }
+    return scalePdfBySelection(lightSolidAnglePdf(q), localSelectionPdf, analyticSelectionPdf, lightSelectionPdf, 1.0f);
 }
 
 /// A direction drawn uniformly over the unit sphere from two canonical variates.

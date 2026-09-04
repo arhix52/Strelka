@@ -756,7 +756,10 @@ LightConnection connectLight(constant Uniforms& uniforms,
                              // test and the cosine below are surface terms; applied to a volume they
                              // reject half of every connection and darken the other half.
                              bool volumeEvent,
-                             device const IesGpuBufferHeader* iesBuffer)
+                             device const IesGpuBufferHeader* iesBuffer,
+                             float localSelectionPdf,
+                             float analyticSelectionPdf,
+                             float lightSelectionPdf)
 {
     LightSampleData lightSampleData = {};
     const float2 uv =
@@ -836,7 +839,8 @@ LightConnection connectLight(constant Uniforms& uniforms,
         // geometry normal to orient against, so it departs from where it is.
         c.origin = volumeEvent ? si.position :
                                  offset_ray(si.position, orientedFaceNormal(si.geometry_normal, lightSampleData.L));
-        c.pdf = lightSampleData.pdf;
+        c.pdf = getLightPdf(light, lightSampleData.pointOnLight, si.position, uniforms.rectLightSamplingMethod,
+                            localSelectionPdf, analyticSelectionPdf, lightSelectionPdf);
         c.tMax = lightSampleData.distToLight;
         c.needsRay = true;
         if (lightUsesAnalyticSurfaceIntersection(light.type, lightIsPunctual(light.type) ? light.points[0].x : 0.0f))
@@ -1017,7 +1021,9 @@ static LightConnection connectEmissiveMesh(constant Uniforms& uniforms,
                                            thread SurfaceInteraction& si,
                                            uint32_t meshBucketWord,
                                            float motionTime,
-                                           bool volumeEvent)
+                                           bool volumeEvent,
+                                           float localSelectionPdf,
+                                           float meshClassPdf)
 {
     LightConnection connection = makeEmptyConnection();
     const uint32_t meshId = sampleEmissiveMesh(uniforms, sampler, meshBucketWord);
@@ -1059,9 +1065,9 @@ static LightConnection connectEmissiveMesh(constant Uniforms& uniforms,
     {
         return connection;
     }
-    const float selectedMeshPdf =
-        emissiveMeshMarginalSolidAnglePdf(1.0f, 1.0f, mesh.selectionPdf, triangleEntry.selectionPdf, sample.areaPdf,
-                                          si.position, sample.point, sample.normal);
+    const float selectedMeshPdf = emissiveMeshMarginalSolidAnglePdf(localSelectionPdf, meshClassPdf, mesh.selectionPdf,
+                                                                    triangleEntry.selectionPdf, sample.areaPdf,
+                                                                    si.position, sample.point, sample.normal);
     if (!(selectedMeshPdf > 0.0f))
     {
         return connection;
@@ -1154,10 +1160,9 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     if (hasMesh && (!hasAnalytic || discreteBernoulli(classWord, meshSelectionPdf)))
     {
         const uint32_t meshWord = randomBits<SampleDimension::eLightBucket>(samplerRnd, uniforms.samplerType);
-        LightConnection c = connectEmissiveMesh(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer,
-                                                materials, samplerRnd, si, meshWord, motionTime, volumeEvent);
-        c.pdf *= localSelectionPdf * (hasAnalytic ? meshSelectionPdf : 1.0f);
-        return c;
+        return connectEmissiveMesh(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, materials,
+                                   samplerRnd, si, meshWord, motionTime, volumeEvent, localSelectionPdf,
+                                   hasAnalytic ? meshSelectionPdf : 1.0f);
     }
 
     const float analyticSelectionPdf = hasMesh ? 1.0f - meshSelectionPdf : 1.0f;
@@ -1172,9 +1177,8 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     {
         return makeEmptyConnection();
     }
-    LightConnection c = connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent, iesBuffer);
-    c.pdf *= localSelectionPdf * analyticSelectionPdf * analyticLightSelectionPdf(lights[lightId]);
-    return c;
+    return connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent, iesBuffer, localSelectionPdf,
+                        analyticSelectionPdf, analyticLightSelectionPdf(lights[lightId]));
 }
 
 static float emissiveMeshHitPdf(constant Uniforms& uniforms,

@@ -271,7 +271,10 @@ static __inline__ __device__ LightPdfQuery buildLightPdfQuery(const UniformLight
 static __inline__ __device__ float getLightPdf(const UniformLight& l,
                                                const float3 lightHitPoint,
                                                const float3 surfaceHitPoint,
-                                               unsigned int rectLightSamplingMethod = 0)
+                                               unsigned int rectLightSamplingMethod,
+                                               float localSelectionPdf,
+                                               float analyticSelectionPdf,
+                                               float lightSelectionPdf)
 {
     LightSampleData d{};
     d.pointOnLight = lightHitPoint;
@@ -292,7 +295,7 @@ static __inline__ __device__ float getLightPdf(const UniformLight& l,
         }
         q.solidAngle = useAreaFallback ? 0.0f : S;
     }
-    return lightSolidAnglePdf(q);
+    return marginalLightSolidAnglePdf(q, localSelectionPdf, analyticSelectionPdf, lightSelectionPdf);
 }
 
 static __inline__ __device__ LightSampleData SampleRectLight(const UniformLight& l, const float2 u, const float3 hitPoint)

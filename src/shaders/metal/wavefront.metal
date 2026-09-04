@@ -2101,19 +2101,20 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 const float localSelectionPdf = uniforms.hasEnvMap ? 1.0f - uniforms.envMapColorTint.w : 1.0f;
                 const float analyticClassPdf =
                     uniforms.numEmissiveMeshes > 0u ? 1.0f - uniforms.meshLightSelectionPdf : 1.0f;
-                const float lightSelectionPdf =
-                    localSelectionPdf * analyticClassPdf * analyticLightSelectionPdf(currLight);
+                const float lightIdentityPdf = analyticLightSelectionPdf(currLight);
                 // From the vertex that scattered, which is not the ray's origin
                 // once it has passed through a cutout on the way here. Using the
                 // origin makes the light look nearer than the scattering vertex
                 // saw it, which shrinks its solid-angle density, which inflates
                 // this weight -- and the next-event estimate at that vertex has
                 // already claimed the rest. The two then sum to more than one.
-                const float conditionalLightPdf =
-                    analyticSurfaceHit.hit ?
-                        areaPdfToSolidAnglePdf(hitDistance, -dot(rayDir, lightNormal), analyticSurfaceHit.areaPdf) :
-                        getLightPdf(currLight, hitPoint, scatteringOrigin, uniforms.rectLightSamplingMethod);
-                const float lightPdf = conditionalLightPdf * lightSelectionPdf;
+                const float lightPdf = analyticSurfaceHit.hit ?
+                                           areaPdfToSolidAngleMarginalPdf(
+                                               hitDistance, -dot(rayDir, lightNormal), analyticSurfaceHit.areaPdf,
+                                               localSelectionPdf, analyticClassPdf, lightIdentityPdf, 1.0f) :
+                                           getLightPdf(currLight, hitPoint, scatteringOrigin,
+                                                       uniforms.rectLightSamplingMethod, localSelectionPdf,
+                                                       analyticClassPdf, lightIdentityPdf);
                 const float mis = computeMisWeight(p.lastBsdfPdf, lightPdf, uniforms.misHeuristic);
                 radiance += throughput * Le * mis;
                 sharcLight = Le * mis;

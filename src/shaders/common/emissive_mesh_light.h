@@ -356,10 +356,15 @@ DEVICE_FUNC float emissiveMeshMarginalSolidAnglePdf(float localSelectionPdf,
     {
         return 0.0f;
     }
-    constexpr float maxFinite = 3.402823466e38f;
-    const float conditionalPdf = emissiveTriangleSolidAnglePdf(areaPdf, shadingPoint, pointOnLight, lightNormal);
-    const float pdf = localSelectionPdf * meshClassPdf * meshSelectionPdf * triangleSelectionPdf * conditionalPdf;
-    return pdf > 0.0f ? fminf(pdf, maxFinite) : 0.0f;
+    const float3 offset = pointOnLight - shadingPoint;
+    const float distance = finiteVectorLength(offset);
+    const float3 direction = normalizeFiniteVectorOrZero(offset);
+    if (!(distance > 0.0f) || !(dot(direction, direction) > 0.0f))
+    {
+        return 0.0f;
+    }
+    return areaPdfToSolidAngleMarginalPdf(distance, fabsf(dot(lightNormal, -direction)), areaPdf, localSelectionPdf,
+                                          meshClassPdf, meshSelectionPdf, triangleSelectionPdf);
 }
 
 DEVICE_FUNC bool emissiveMeshKeyLess(unsigned int lightInstanceId,

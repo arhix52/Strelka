@@ -747,6 +747,29 @@ TEST_CASE("emissive triangle PDF clamps rounded unit cosines")
     CHECK(std::isfinite(pdf));
 }
 
+TEST_CASE("emissive mesh marginal PDF applies selection masses before saturation")
+{
+    constexpr float selection = 1e-5f;
+    constexpr float areaPdf = 1e30f;
+    const float3 shadingPoint = make_float3(0.0f);
+    const float3 pointOnLight = make_float3(0.0f, 0.0f, 1e10f);
+    const float3 lightNormal = make_float3(0.0f, 0.0f, -1.0f);
+
+    const float marginal = emissiveMeshMarginalSolidAnglePdf(
+        selection, selection, selection, selection, areaPdf, shadingPoint, pointOnLight, lightNormal);
+    const long double oracle = static_cast<long double>(areaPdf) * 1e20L * static_cast<long double>(selection) *
+                               static_cast<long double>(selection) * static_cast<long double>(selection) *
+                               static_cast<long double>(selection);
+    CHECK(marginal == doctest::Approx(static_cast<double>(oracle)).epsilon(2e-6));
+    CHECK(std::isfinite(marginal));
+
+    // Mutation: saturating the conditional density before applying the four
+    // discrete masses loses the exponents that should cancel.
+    const float oldMarginal =
+        areaPdfToSolidAnglePdf(1e10f, 1.0f, areaPdf) * selection * selection * selection * selection;
+    CHECK(std::abs(double(oldMarginal) - double(oracle)) / double(oracle) > 0.99);
+}
+
 TEST_CASE("emissive mesh visibility ends before the traversed emitter")
 {
     constexpr float offset = 1.0f / 65536.0f;
