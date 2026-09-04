@@ -80,10 +80,10 @@ struct RenderConfig
     uint32_t upscaleMode = 0;
     uint32_t risCandidates = 1; // 1 = plain next-event estimation
     bool restirDIEnabled = false;
-    uint32_t initialCandidateCount = 8;
+    uint32_t initialCandidateCount = 2;
     bool temporalReuseEnabled = true;
     bool spatialReuseEnabled = true;
-    uint32_t spatialNeighborCount = 4;
+    uint32_t spatialNeighborCount = 2;
     uint32_t reservoirMaxAge = 20;
     uint32_t restirDebugMode = 0;
     uint32_t estimatorMode = 0; // 0 = NEE + MIS, 1 = BSDF sampling only

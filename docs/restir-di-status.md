@@ -1,15 +1,15 @@
-Current phase: exact procedural analytic-light validation complete; ReSTIR remains experimental and default OFF.
-Architecture: shared unit-sphere/disc BLAS, custom Metal intersections and TLAS instances; sampling/PDF use the same transformed surface.
-Release, Apple M4 Pro, depth 4, 1 spp, 8 warm-up + 32 measured frames:
-
-| sphere lights | old NEE 320p | NEE / ReSTIR 320p | NEE / ReSTIR 1080p | AS build / moving refit | TLAS memory |
-|---:|---:|---:|---:|---:|---:|
-| 1 | — | 2.81 / 3.88 ms | 57.98 / 85.55 ms | — | — |
-| 512 | 48.98 ms | 3.02 / 4.44 ms | 63.37 / 93.34 ms | 4.35 / 0.194 ms | 0.101 MiB |
-| 2048 | — | 3.56 / 5.16 ms | 82.07 / 111.97 ms | 3.92 / — ms | 0.399 MiB |
-Incremental procedural AS: 512 B BLAS per used shape + 48 B bounds total; renderer/ReSTIR buffers unchanged (96 B reservoir/pixel).
-Tests: 7 focused analytic cases (20 assertions), sampling audit, Debug CTest 3/3, Debug/Release Metal compile, MTLDevice.
-NEE vs Initial RIS at 128 spp: mean -0.03%, relative MSE 0.00041; temporal/spatial path and moving-light refit executed.
-Commits: `05d3010`, `65e26b1`, `Validate procedural analytic lights`.
-Commands: `python3 tools/benchmark_analytic_light_scaling.py --shape sphere`; enable: `StrelkaCLI <scene> --restir-di`.
-Open: Metal static `intersection_query` cannot bind an intersection-function table; alpha shadow uses bounded restart traversal.
+Phase: ReSTIR DI performance triage complete; exact procedural geometry unchanged.
+Benchmark: Apple M4 Pro, Release, 1920x1080, depth 4, 1 spp/frame, static camera; 8 warm-up + 32 measured frames, median of 5 launches. Quality uses a 128-NEE-frame equal-time budget and 512-spp reference.
+| config (C/T/S/N) | uniform ms / rMSE / last | distributed ms / rMSE / last | occluded ms / rMSE / last | ReSTIR B/px |
+|---|---:|---:|---:|---:|
+| NEE | 65.06 / .00658 / 1.522 | 74.52 / .00460 / .872 | 27.14 / .00300 / .425 | 0* |
+| 1/0/0/0 | 78.74 / .01450 / 1.388 | 83.71 / .00521 / .797 | 29.33 / .00296 / .348 | 296* |
+| 1/1/0/0 | 86.07 / .01551 / 1.390 | 85.83 / .00530 / .878 | 30.67 / .00298 / .355 | 296* |
+| 1/1/1/2 | 95.10 / .01282 / 1.386 | 88.20 / .00547 / .777 | 30.88 / .00319 / .651 | 296* |
+| 1/1/1/4 | 105.23 / .01831 / 1.397 | 91.62 / .00567 / .804 | 30.87 / .00299 / .503 | 296* |
+| 2/1/1/2 | 104.00 / .01108 / 1.378 | 97.87 / .00604 / .739 | 31.14 / .00290 / .223 | 296* |
+| 4/1/1/2 | 119.47 / .01213 / 1.379 | 108.08 / .00651 / .712 | 31.64 / .00282 / .182 | 296* |
+| 8/1/1/4 | 159.49 / .01618 / 1.383 | 129.48 / .00745 / .591 | 32.65 / .00349 / .293 | 296* |
+Stage ms for 1/T/S2 (uniform / distributed / occluded): extend 6.97/29.22/16.55; initial net .69/2.66/.22; temporal 7.03/3.91/.23; spatial 13.04/4.78/.23; final 7.60/3.91/.21; shadow 1.92/10.74/2.17; accumulation .74/.56/.52.
+Traversal: 1.122 IFT calls/shadow on sphere control; restart=0 in benchmark scenes, .0527/ray in alpha test; alpha shadow +1.41 ms; IFT traversal +0.36 ms vs rectangle triangle control. Candidate/reconstruction kernels bind no AS. *Buffers are allocated in NEE too: reservoirs 96, temporal 64, work 136 B/px (585.35 MiB at 1080p), so current physical delta is 0.
+Decision: Pareto ReSTIR preset 2/T/S2; only occluded scene crosses NEE (-3.3% rMSE), no general crossover. Experimental/default OFF.
