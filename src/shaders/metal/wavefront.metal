@@ -1845,6 +1845,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     sr.sharcRadiance =
                         packed_float3(SPEC_SHARC_UPDATE ? (conn.radiance / conn.pdf) * misWeight * phase : float3(0.0f));
                     sr.sharcPathIndex = tid;
+                    sr.ignoredLightId =
+                        conn.sample.type == RESTIR_SAMPLE_ANALYTIC ? conn.sample.lightId : 0xffffffffu;
                     sr.rrCutoff =
                         random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                     shadowRays[slot] = sr;
@@ -1987,6 +1989,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         sr.sharcRadiance = packed_float3(
                             SPEC_SHARC_UPDATE ? (conn.radiance / conn.pdf) * misWeight * phase : float3(0.0f));
                         sr.sharcPathIndex = tid;
+                        sr.ignoredLightId =
+                            conn.sample.type == RESTIR_SAMPLE_ANALYTIC ? conn.sample.lightId : 0xffffffffu;
                         sr.rrCutoff =
                             random<SampleDimension::eShadowRR>(wrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                         const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
@@ -2409,6 +2413,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         sr.sharcRadiance = packed_float3(
                             SPEC_SHARC_UPDATE ? (conn.radiance / conn.pdf) * misWeight * M_1_PI_F : float3(0.0f));
                         sr.sharcPathIndex = tid;
+                        sr.ignoredLightId =
+                            conn.sample.type == RESTIR_SAMPLE_ANALYTIC ? conn.sample.lightId : 0xffffffffu;
                         sr.rrCutoff =
                             random<SampleDimension::eShadowRR>(xrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                         const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
@@ -3016,6 +3022,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
                     sr.sharcRadiance = packed_float3(SPEC_SHARC_UPDATE ? bestF * W : float3(0.0f));
                     sr.sharcPathIndex = tid;
+                    sr.ignoredLightId =
+                        bestConn.sample.type == RESTIR_SAMPLE_ANALYTIC ? bestConn.sample.lightId : 0xffffffffu;
                     sr.rrCutoff =
                         random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                     const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
@@ -3548,6 +3556,8 @@ kernel void wavefrontRestirFinal(uint gid [[thread_position_in_grid]],
     sr.medium = stored.medium;
     sr.sharcRadiance = packed_float3(float3(0.0f));
     sr.sharcPathIndex = tid;
+    sr.ignoredLightId =
+        connection.sample.type == RESTIR_SAMPLE_ANALYTIC ? connection.sample.lightId : 0xffffffffu;
     sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
     const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
     shadowRays[slot] = sr;
@@ -4112,6 +4122,19 @@ static inline bool cutoutRouletteDone(thread float3& transmittance, float opacit
 // bound, because it answers the whole ray in one traversal.
 constant uint32_t kMaxCutoutCrossings = 16u;
 
+static inline bool shadowLightProxy(uint32_t instanceId,
+                                    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances)
+{
+    return (instances[instanceId].mask & (GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_LIGHT_HIDDEN)) != 0u;
+}
+
+static inline bool shadowIgnoresLight(uint32_t instanceId,
+                                     uint32_t ignoredLightId,
+                                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances)
+{
+    return shadowLightProxy(instanceId, instances) && instances[instanceId].userID == ignoredLightId;
+}
+
 template <typename T, bool Inline>
 struct CutoutShadowWalk
 {
@@ -4124,6 +4147,7 @@ struct CutoutShadowWalk
                     device const GeometryEntry* geometryEntries,
                     device const char* vertexBuffer,
                     device const uint32_t* indexBuffer,
+                    uint32_t ignoredLightId,
                     thread float3& transmittance)
     {
         transmittance = float3(1.0f);
@@ -4142,6 +4166,19 @@ struct CutoutShadowWalk
             if (hit.type == intersection_type::none)
             {
                 return true; // nothing else in the way
+            }
+            if (shadowIgnoresLight(hit.instance_id, ignoredLightId, instances))
+            {
+                probe.min_distance = hit.distance * (1.0f + 1e-5f) + 1e-5f;
+                if (probe.min_distance >= probe.max_distance)
+                {
+                    return true;
+                }
+                continue;
+            }
+            if (shadowLightProxy(hit.instance_id, instances))
+            {
+                return false;
             }
             // Curve geometry is built opaque and carries no cutout, so a strand
             // blocks outright rather than being alpha tested.
@@ -4181,6 +4218,7 @@ struct CutoutShadowWalk<T, true>
                     device const GeometryEntry* geometryEntries,
                     device const char* vertexBuffer,
                     device const uint32_t* indexBuffer,
+                    uint32_t ignoredLightId,
                     thread float3& transmittance)
     {
         transmittance = float3(1.0f);
@@ -4192,6 +4230,16 @@ struct CutoutShadowWalk<T, true>
         q.reset(shadowRay, as, RAY_MASK_SHADOW, params);
         while (q.next())
         {
+            const uint32_t instanceId = q.get_candidate_instance_id();
+            if (shadowIgnoresLight(instanceId, ignoredLightId, instances))
+            {
+                continue;
+            }
+            if (shadowLightProxy(instanceId, instances))
+            {
+                q.abort();
+                return false;
+            }
             // Only geometry the builder left non-opaque surfaces as a candidate.
             // Opaque geometry is committed by traversal itself and is never seen
             // here -- which is why the committed result has to be read after the
@@ -4207,7 +4255,7 @@ struct CutoutShadowWalk<T, true>
             }
             const float opacity =
                 cutoutOpacityAt(q.get_candidate_primitive_id(), q.get_candidate_geometry_id(),
-                                q.get_candidate_instance_id(), q.get_candidate_triangle_barycentric_coord(), instances,
+                                instanceId, q.get_candidate_triangle_barycentric_coord(), instances,
                                 materials, geometryEntries, vertexBuffer, indexBuffer);
             if (cutoutRouletteDone(transmittance, opacity, cutoff))
             {
@@ -4236,7 +4284,6 @@ static void shadowImpl(uint gid,
                        device const GeometryEntry* geometryEntries,
                        device const char* vertexBuffer,
                        device const uint32_t* indexBuffer,
-                       device const UniformLight* lights,
                        device SharcUpdateState* sharcUpdates,
                        device SharcAccumulationEntry* sharcAccumulation)
 {
@@ -4263,14 +4310,7 @@ static void shadowImpl(uint gid,
     float3 weight = float3(sr.weight);
     float3 sharcRadiance = float3(sr.sharcRadiance);
 
-    if (SPEC_LIGHTS && uniforms.numLights > 0u &&
-        analyticLightsOccludeSegment(lights, uniforms.numLights, shadowRay.origin, shadowRay.direction,
-                                     shadowRay.min_distance, shadowRay.max_distance))
-    {
-        return;
-    }
-
-    if (!SPEC_ALPHA)
+    if (!SPEC_ALPHA && sr.ignoredLightId == 0xffffffffu)
     {
         // No cutouts in this scene: one any-hit trace, exactly as before.
         typename T::isect isect;
@@ -4321,7 +4361,7 @@ static void shadowImpl(uint gid,
     float3 transmittance;
     if (!CutoutShadowWalk<T, T::kInlineQuery != 0>::run(accelerationStructure, shadowRay, motionTime, sr.rrCutoff,
                                                         instances, materials, geometryEntries, vertexBuffer,
-                                                        indexBuffer, transmittance))
+                                                        indexBuffer, sr.ignoredLightId, transmittance))
     {
         return; // fully blocked
     }
@@ -4619,7 +4659,7 @@ kernel void sharcResolve(uint tid [[thread_position_in_grid]],
                      device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]])                                  \
     {                                                                                                                  \
         shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, shadowRays, radianceOut, control,       \
-                           sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer, lights,        \
+                           sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer,               \
                            sharcUpdates, sharcAccumulation);                                                           \
     }
 

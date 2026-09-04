@@ -272,7 +272,8 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
         const MetalGeometry::Mesh* meshData = mGeometry->meshes()[meshId];
 
         static const bool forceAllOpaque = envFlag("STRELKA_ALL_GEOM_OPAQUE");
-        const bool isCutout = !forceAllOpaque && inst.mMaterialId < mMaterials->isCutout().size() &&
+        const bool isLightProxy = inst.type == oka::Instance::Type::eLight;
+        const bool isCutout = !isLightProxy && !forceAllOpaque && inst.mMaterialId < mMaterials->isCutout().size() &&
                               mMaterials->isCutout()[inst.mMaterialId] != 0;
 
         NS::Object* geom = nullptr;
@@ -288,7 +289,7 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
         static const bool leaveDefault = envFlag("STRELKA_NO_SET_OPAQUE");
         if (!leaveDefault)
         {
-            mPath->setGeometryOpaque(geom, !isCutout);
+            mPath->setGeometryOpaque(geom, !isCutout && !isLightProxy);
         }
         (isCutout ? mCutoutGeometryCount : mOpaqueGeometryCount)++;
         geomDescriptors.push_back(geom);
@@ -814,12 +815,8 @@ bool MetalAccelStructure::step(double budgetMs)
                 const bool visibleToCamera = curr.mLightId < mScene->getLightsDesc().size() ?
                                                  mScene->getLightsDesc()[curr.mLightId].visibleToCamera :
                                                  true;
-                // Smooth discs and ellipsoids are intersected analytically in
-                // the wavefront kernels. Their coarse editor proxy must not
-                // compete with that surface in hardware traversal.
-                const bool analyticArea = lightUsesAnalyticAreaIntersection(lightType);
                 const bool infinite = lightType == LIGHT_TYPE_DISTANT || lightType == LIGHT_TYPE_DOME;
-                if (!enabled || lightTypeIsPunctual(lightType) || analyticArea || infinite)
+                if (!enabled || lightTypeIsPunctual(lightType) || infinite)
                     emitted.mask = 0;
                 else
                     emitted.mask = visibleToCamera ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_LIGHT_HIDDEN;
@@ -917,7 +914,8 @@ bool MetalAccelStructure::step(double budgetMs)
         // The kernels that do not want the test -- extend, and the shadow path of
         // a scene without cutouts -- force opacity on the intersector instead,
         // which overrides this and costs them nothing.
-        instanceDescriptors[d].options = mMaterials->hasAlphaMaterials()
+        const bool lightProxy = (e.mask & (GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_LIGHT_HIDDEN)) != 0;
+        instanceDescriptors[d].options = (mMaterials->hasAlphaMaterials() || lightProxy)
                                              ? MTL::AccelerationStructureInstanceOptionNone
                                              : MTL::AccelerationStructureInstanceOptionOpaque;
         instanceDescriptors[d].intersectionFunctionTableOffset = 0;

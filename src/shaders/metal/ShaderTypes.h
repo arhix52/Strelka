@@ -32,7 +32,7 @@
 #define GEOMETRY_MASK_GEOMETRY (GEOMETRY_MASK_TRIANGLE | GEOMETRY_MASK_CURVE)
 
 #define RAY_MASK_PRIMARY (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_MEDIUM)
-#define RAY_MASK_SHADOW GEOMETRY_MASK_GEOMETRY
+#define RAY_MASK_SHADOW (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_LIGHT_HIDDEN)
 #define RAY_MASK_SECONDARY (RAY_MASK_PRIMARY | GEOMETRY_MASK_LIGHT_HIDDEN)
 
 #ifndef __METAL_VERSION__
@@ -753,6 +753,7 @@ struct ShadowRay
     // propagates this only after visibility has been established by shadow.
     packed_float3 sharcRadiance;
     uint32_t sharcPathIndex;
+    uint32_t ignoredLightId;
 };
 
 // EnvAliasEntry is shared by Metal, OptiX and host tests.

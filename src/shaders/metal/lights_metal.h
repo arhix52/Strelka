@@ -74,26 +74,6 @@ static AnalyticAreaLightHit findAnalyticAreaLightHit(device const UniformLight* 
     return closest;
 }
 
-static bool analyticLightsOccludeSegment(device const UniformLight* lights,
-                                         uint32_t lightCount,
-                                         float3 rayOrigin,
-                                         float3 rayDirection,
-                                         float minDistance,
-                                         float maxDistance)
-{
-    for (uint32_t lightId = 0u; lightId < lightCount; ++lightId)
-    {
-        device const UniformLight& light = lights[lightId];
-        if (analyticLightSurfaceOccludesSegment(light.type, float3(light.points[0]), float3(light.points[1]),
-                                                float3(light.points[2]), float3(light.points[3]), float3(light.normal),
-                                                light.normal.w, rayOrigin, rayDirection, minDistance, maxDistance))
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 static float calcLightAreaPdf(device const UniformLight& l, const float3 hitPoint)
 {
     float areaPdf = 0.0f;
