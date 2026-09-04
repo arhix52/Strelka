@@ -1345,4 +1345,6 @@ is out of scope unless it blocks validation.
   representation before packing; invalid slots become `-1`, and only an actually registered IES profile requires a
   profile frame. One finite signed-range decoder is used by Metal, OptiX, and the projector slot. The pre-fix Scene
   test failed 3/5 assertions; the focused suite now passes 10/10 in Debug, Release, and ASan+UBSan, and production
-  Metal compiles.
+  Metal compiles. The first full gate exposed a stale test premise that assigned profile slot zero without registering
+  a profile; the follow-up registers the mutation's profile so it continues to test collapsed-frame rejection rather
+  than the newly specified isotropic fallback.

@@ -185,6 +185,9 @@ TEST_CASE("punctual packing rejects non-finite positions and collapsed profile f
     CHECK(scene.getLights()[id].normal.w == 0.0f);
 
     desc.type = LIGHT_TYPE_POINT;
+    Scene::IesProfile profile;
+    profile.path = "profiles/frame-validation.ies";
+    REQUIRE(scene.addIesProfile(profile) == 0);
     desc.iesProfile = 0;
     scene.setLight(id, desc);
     CHECK(glm::float3(scene.getLights()[id].color) == glm::float3(0.0f));
