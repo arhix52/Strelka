@@ -384,6 +384,13 @@ struct Uniforms
 #else
     uint64_t infiniteLightIndices;
 #endif
+// Active guide pixel indices. Built by first-hit shading and consumed by one
+// indirect guide dispatch, so scenes without guide continuations launch no grid.
+#ifdef __METAL_VERSION__
+    device uint32_t* guideQueue;
+#else
+    uint64_t guideQueue;
+#endif
 };
 static_assert(sizeof(Uniforms) == 912, "Uniforms host/Metal ABI changed");
 
@@ -410,7 +417,8 @@ enum RenderWorkCounter : uint32_t
     WORK_RESTIR_CANDIDATE_QUERIES = 78,
     WORK_RESTIR_REUSE_QUERIES = 79,
     WORK_MISS_LIGHT_EVALUATIONS = 80,
-    WORK_COUNTER_COUNT = 81,
+    WORK_GUIDE_DISPATCHES = 81,
+    WORK_COUNTER_COUNT = 82,
     WORK_BOUNCE_SLOTS = 16
 };
 

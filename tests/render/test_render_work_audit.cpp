@@ -61,3 +61,14 @@ TEST_CASE("render-work ReSTIR dispatches follow configuration")
     sample.restirSpatialDispatches = 0;
     CHECK(oka::metal::restirDispatchesMatch(true, false, 0, sample));
 }
+
+TEST_CASE("render-work empty guide queues do not dispatch")
+{
+    RenderWorkInvariantSample sample;
+    CHECK(oka::metal::guideDispatchesMatchActiveQueue(sample));
+    sample.guideActiveItems = 1;
+    sample.guideDispatches = 1;
+    CHECK(oka::metal::guideDispatchesMatchActiveQueue(sample));
+    sample.guideDispatches = 0;
+    CHECK_FALSE(oka::metal::guideDispatchesMatchActiveQueue(sample));
+}

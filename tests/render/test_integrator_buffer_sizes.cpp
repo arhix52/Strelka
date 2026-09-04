@@ -43,6 +43,7 @@ TEST_CASE("wavefrontBufferLayout scales with pixel count")
     CHECK(a.iorStackBytes == (size_t)a.pixels * 16);
     CHECK(a.radianceBytes == (size_t)a.pixels * 16);
     CHECK(a.guideRayBytes == (size_t)a.pixels * 32);
+    CHECK(a.guideQueueBytes == (size_t)a.pixels * sizeof(uint32_t));
     CHECK(a.pathQueueBytes == (size_t)a.pixels * sizeof(uint32_t));
     CHECK(a.controlBytes == (size_t)kWavefrontControlUints * sizeof(uint32_t));
     CHECK(a.traversalDispatchBytes ==

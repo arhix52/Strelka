@@ -38,6 +38,7 @@ struct WavefrontBufferLayout
     size_t iorStackBytes = 0;
     size_t radianceBytes = 0;
     size_t guideRayBytes = 0;
+    size_t guideQueueBytes = 0;
     size_t pathQueueBytes = 0; // one ping-pong queue
     size_t controlBytes = 0;
     size_t traversalDispatchBytes = 0;
@@ -114,6 +115,7 @@ inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width,
     layout.iorStackBytes = (size_t)pixels * sz.iorStack;
     layout.radianceBytes = (size_t)pixels * sz.radiance;
     layout.guideRayBytes = (size_t)pixels * sz.guideRay;
+    layout.guideQueueBytes = (size_t)pixels * sizeof(uint32_t);
     layout.pathQueueBytes = (size_t)pixels * sizeof(uint32_t);
     layout.controlBytes = (size_t)kWavefrontControlUints * sizeof(uint32_t);
     layout.traversalDispatchBytes =

@@ -198,6 +198,10 @@ public:
     {
         return mGuideRayBuffer ? mGuideRayBuffer->gpuAddress() : 0ull;
     }
+    uint64_t guideQueueAddress() const
+    {
+        return mGuideQueueBuffer ? mGuideQueueBuffer->gpuAddress() : 0ull;
+    }
     uint64_t restirReservoirAddress(uint32_t index) const
     {
         return mRestirReservoirBuffer[index & 1u] ? mRestirReservoirBuffer[index & 1u]->gpuAddress() : 0ull;
@@ -267,6 +271,7 @@ private:
     MTL::Buffer* mIorStackBuffer = nullptr;
     MTL::Buffer* mRadianceBuffer = nullptr;
     MTL::Buffer* mGuideRayBuffer = nullptr;
+    MTL::Buffer* mGuideQueueBuffer = nullptr;
     MTL::Buffer* mPathQueueBuffer[2] = { nullptr, nullptr };
     MTL::Buffer* mControlBuffer = nullptr;
     MTL::Buffer* mTraversalDispatchBuffer = nullptr;

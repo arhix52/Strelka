@@ -110,7 +110,10 @@ WF_ANALYTIC_INTERSECTION_ENTRY(
 #define WF_CTRL_MISS 16
 #define WF_CTRL_MISS_N 17
 #define WF_CTRL_MISS_DIS 18
+#define WF_CTRL_GUIDE 21
+#define WF_CTRL_GUIDE_N 22
 #define WF_CTRL_CAPACITY 24
+#define WF_CTRL_GUIDE_DIS 25
 // Profiling only: live path count and shadow ray count per bounce, so the
 // per-stage timings can be read as a cost per ray rather than a cost per stage.
 #define WF_CTRL_STATS_PATHS 32
@@ -577,6 +580,10 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
         control[WF_CTRL_SHADOW] = 0u;
         control[WF_CTRL_HIT] = 0u;
         control[WF_CTRL_MISS] = 0u;
+        if (!SPEC_SHARC_UPDATE && sampleIdx == 0u)
+        {
+            control[WF_CTRL_GUIDE] = 0u;
+        }
         control[WF_CTRL_CAPACITY] = pathCount;
         iorStats[IOR_STAT_OVERFLOW] = 0u;
         iorStats[IOR_STAT_UNMATCHED] = 0u;
@@ -1724,7 +1731,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                            device const uint32_t* queue [[buffer(15)]],
                            device uint32_t* queueOut [[buffer(16)]],
                            device atomic_uint* outCounter [[buffer(17)]],
-                           device const uint32_t* control [[buffer(18)]],
+                           device uint32_t* control [[buffer(18)]],
                            device ShadowRay* shadowRays [[buffer(19)]],
                            device atomic_uint* shadowCounter [[buffer(20)]],
                            device AovSample* aov [[buffer(22)]],
@@ -2742,6 +2749,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 guideIorStack.top > 0 ? guideIorStack.entries[guideIorStack.top - 1].ior : 1.0f;
             guide.mediaIors = packGuideIors(guideCurrentIor, guideExteriorIor);
             uniforms.guideRays[tid] = guide;
+            queuePush((device atomic_uint*)&control[WF_CTRL_GUIDE], uniforms.guideQueue, tid, control[WF_CTRL_CAPACITY]);
         }
 
         // The stochastic radiance continuation must not overwrite the primary
@@ -3025,8 +3033,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 if (all(previousPixel >= int2(0)) && previousPixel.x < int(uniforms.width) &&
                     previousPixel.y < int(uniforms.height))
                 {
-                    const uint32_t previousIndex =
-                        uint32_t(previousPixel.y) * uniforms.width + uint32_t(previousPixel.x);
+                    const uint32_t previousIndex = uint32_t(previousPixel.y) * uniforms.width + uint32_t(previousPixel.x);
                     const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
                     device const RestirReservoir* previousReservoirs =
                         oddFrame ? uniforms.restirReservoir0 : uniforms.restirReservoir1;
@@ -3043,12 +3050,12 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                             uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
                             motionTime, si, envAliasTable, envMapTexture, iesProfiles, previousReservoir.sample);
                         const RestirEvaluation previousEvaluation = evaluateRestirConnection(
-                            previousConnection, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared,
-                            uniforms.misHeuristic);
+                            previousConnection, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
                         SamplerState temporalRng = rng;
                         temporalRng.seed = hash_combine(temporalRng.seed, 0x68bc21ebu);
                         const bool selectedHistory = restirReservoirUpdate(
-                            reservoir.state, restirReservoirMergeWeight(previousReservoir.state, previousEvaluation.target),
+                            reservoir.state,
+                            restirReservoirMergeWeight(previousReservoir.state, previousEvaluation.target),
                             previousEvaluation.target, previousReservoir.state.M,
                             random<SampleDimension::eLightId>(temporalRng, uniforms.samplerType));
                         auditWork(uniforms, WORK_RESTIR_TEMPORAL_MERGES);
@@ -3604,12 +3611,18 @@ static void guideImpl(uint gid,
                       device const uint32_t* indexBuffer,
                       device const packed_float3* curvePoints,
                       device const uint32_t* curveSegments,
-                      typename T::table functionTable)
+                      typename T::table functionTable,
+                      device const uint32_t* control)
 {
-    if (gid >= uniforms.width * uniforms.height)
+    if (gid >= control[WF_CTRL_GUIDE_N])
     {
         return;
     }
+    if (gid == 0u)
+    {
+        auditWork(uniforms, WORK_GUIDE_DISPATCHES);
+    }
+    gid = uniforms.guideQueue[gid];
 
     GuideRay guide = uniforms.guideRays[gid];
     if ((guide.flags & GUIDE_RAY_ACTIVE) == 0u)
@@ -3834,10 +3847,12 @@ static void guideImpl(uint gid,
         device const Material* materials [[buffer(5)]], device const GeometryEntry* geometryEntries [[buffer(6)]],     \
         device const char* vertexBuffer [[buffer(7)]], device const char* prevVertexBuffer [[buffer(8)]],              \
         device const uint32_t* indexBuffer [[buffer(9)]], device const packed_float3* curvePoints [[buffer(10)]],      \
-        device const uint32_t* curveSegments [[buffer(11)]], TRAITS::table functionTable [[buffer(13)]])               \
+        device const uint32_t* curveSegments [[buffer(11)]], TRAITS::table functionTable [[buffer(13)]],               \
+        device const uint32_t* control [[buffer(14)]])                                                                 \
     {                                                                                                                  \
         guideImpl<TRAITS>(gid, uniforms, instances, accelerationStructure, aov, materials, geometryEntries,            \
-                          vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments, functionTable);     \
+                          vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments, functionTable,      \
+                          control);                                                                                    \
     }
 
 WF_GUIDE_ENTRY(wavefrontGuide, MotionTraversal)
@@ -3976,6 +3991,11 @@ kernel void wavefrontPrepareShadow(device uint32_t& controlRef [[buffer(0)]],
     control[WF_CTRL_SHADOW_DIS + 1] = 1u;
     control[WF_CTRL_SHADOW_DIS + 2] = 1u;
     prepareTraversalDispatches(traversalDispatches, n, threadsPerGroup, traversalBatchThreads, traversalBatchCount);
+    const uint32_t guides = min(control[WF_CTRL_GUIDE], control[WF_CTRL_CAPACITY]);
+    control[WF_CTRL_GUIDE_N] = guides;
+    control[WF_CTRL_GUIDE_DIS + 0] = (guides + threadsPerGroup - 1u) / threadsPerGroup;
+    control[WF_CTRL_GUIDE_DIS + 1] = 1u;
+    control[WF_CTRL_GUIDE_DIS + 2] = 1u;
 }
 
 // Transmittance of a shadow ray through whatever bounded media it crosses.
@@ -4611,18 +4631,18 @@ kernel void sharcResolve(uint tid [[thread_position_in_grid]],
 }
 
 #define WF_SHADOW_ENTRY(NAME, TRAITS)                                                                                  \
-    kernel void NAME(                                                                                                  \
-        uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                               \
-        TRAITS::structure accelerationStructure [[buffer(1)]], device const ShadowRay* shadowRays [[buffer(2)]],       \
-        device float4* radianceOut [[buffer(3)]], device const uint32_t* control [[buffer(4)]],                        \
-        constant uint32_t& sampleIdx [[buffer(5)]],                                                                    \
-        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(6)]],                          \
-        device const Material* materials [[buffer(7)]], device const GeometryEntry* geometryEntries [[buffer(8)]],     \
-        device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]],              \
-        device const UniformLight* lights [[buffer(11)]], constant uint32_t& queueOffset [[buffer(12)]],               \
-        device SharcUpdateState* sharcUpdates [[buffer(13)]],                                                          \
-        device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]], TRAITS::table functionTable [[buffer(15)]],  \
-        constant uint32_t& bounce [[buffer(16)]])                                                                     \
+    kernel void NAME(uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                  \
+                     TRAITS::structure accelerationStructure [[buffer(1)]],                                            \
+                     device const ShadowRay* shadowRays [[buffer(2)]], device float4* radianceOut [[buffer(3)]],       \
+                     device const uint32_t* control [[buffer(4)]], constant uint32_t& sampleIdx [[buffer(5)]],         \
+                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(6)]],             \
+                     device const Material* materials [[buffer(7)]],                                                   \
+                     device const GeometryEntry* geometryEntries [[buffer(8)]],                                        \
+                     device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]], \
+                     device const UniformLight* lights [[buffer(11)]], constant uint32_t& queueOffset [[buffer(12)]],  \
+                     device SharcUpdateState* sharcUpdates [[buffer(13)]],                                             \
+                     device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]],                                  \
+                     TRAITS::table functionTable [[buffer(15)]], constant uint32_t& bounce [[buffer(16)]])             \
     {                                                                                                                  \
         shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, shadowRays, radianceOut, control,       \
                            sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer, functionTable, \

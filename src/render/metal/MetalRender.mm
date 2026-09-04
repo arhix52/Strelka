@@ -1930,6 +1930,7 @@ void MetalRender::render(Buffer* output)
             pUniformData->openpbrTextures =
                 mMaterials.openpbrTextureBuffer() ? mMaterials.openpbrTextureBuffer()->gpuAddress() : 0ull;
             pUniformData->guideRays = mIntegrator.guideRayAddress();
+            pUniformData->guideQueue = mIntegrator.guideQueueAddress();
             pUniformData->emissiveMeshes = mAccel.emissiveMeshBuffer() ? mAccel.emissiveMeshBuffer()->gpuAddress() : 0ull;
             pUniformData->emissiveTriangles =
                 mAccel.emissiveTriangleBuffer() ? mAccel.emissiveTriangleBuffer()->gpuAddress() : 0ull;
@@ -2926,7 +2927,8 @@ void MetalRender::renderSync(Buffer* output)
         mRenderWorkAsCounts.blasBuilds += asAfter.blasBuilds - asBefore.blasBuilds;
         mRenderWorkAsCounts.tlasBuilds += asAfter.tlasBuilds - asBefore.tlasBuilds;
         mRenderWorkAsCounts.tlasRefits += asAfter.tlasRefits - asBefore.tlasRefits;
-        if (const uint32_t* counters = mIntegrator.renderWorkCounters())
+        const uint32_t* counters = mIntegrator.renderWorkCounters();
+        if (counters)
         {
             for (uint32_t i = 0; i < WORK_COUNTER_COUNT; ++i)
             {
@@ -2936,6 +2938,10 @@ void MetalRender::renderSync(Buffer* output)
         for (const auto& [label, count] : mIntegrator.renderWorkDispatches())
         {
             mRenderWorkDispatches[label] += count;
+        }
+        if (counters && counters[WORK_GUIDE_DISPATCHES] != 0u)
+        {
+            mRenderWorkDispatches["wavefrontGuide"] += counters[WORK_GUIDE_DISPATCHES];
         }
         ++mRenderWorkFrames;
         mRenderWorkSpp += getSettings()->getAs<uint32_t>("render/pt/spp");
@@ -3056,7 +3062,6 @@ std::string MetalRender::renderWorkAuditJson() const
         const auto it = mRenderWorkDispatches.find(label);
         return it == mRenderWorkDispatches.end() ? uint64_t(0) : it->second;
     };
-    const uint64_t guideDispatchCount = dispatchCount("wavefrontGuide") + dispatchCount("wavefrontGuideStatic");
     const uint64_t restirSpatialDispatchCount = dispatchCount("wavefrontRestirSpatial");
     const uint64_t restirFinalDispatchCount = dispatchCount("wavefrontRestirFinal");
     const uint64_t firstHitDispatched = roundedThreads(c[WORK_SHADE_ITEMS_BASE]);
@@ -3095,7 +3100,7 @@ std::string MetalRender::renderWorkAuditJson() const
         c[WORK_PRIMARY_RAYS], roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
         dispatched(WORK_EXTEND_RAYS_BASE), shadeActive, dispatched(WORK_SHADE_ITEMS_BASE), missActive,
         dispatched(WORK_MISS_ITEMS_BASE), shadowActive, dispatched(WORK_SHADOW_RAYS_BASE), c[WORK_GUIDE_ACTIVE_ITEMS],
-        roundedThreads(static_cast<uint64_t>(width) * height) * guideDispatchCount, c[WORK_RESTIR_SPATIAL_ITEMS],
+        roundedThreads(c[WORK_GUIDE_ACTIVE_ITEMS]), c[WORK_RESTIR_SPATIAL_ITEMS],
         restirSpatialDispatchCount != 0u ? firstHitDispatched : 0u, c[WORK_RESTIR_FINAL_ITEMS],
         restirFinalDispatchCount != 0u ? firstHitDispatched : 0u, mRenderWorkAsCounts.blasBuilds,
         mRenderWorkAsCounts.tlasBuilds, mRenderWorkAsCounts.tlasRefits, c[WORK_MANUAL_ANALYTIC_LIGHT_TESTS],

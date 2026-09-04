@@ -20,6 +20,8 @@ struct RenderWorkInvariantSample
     uint64_t manualAnalyticLightTests = 0;
     uint64_t restirSpatialDispatches = 0;
     uint64_t restirFinalDispatches = 0;
+    uint64_t guideActiveItems = 0;
+    uint64_t guideDispatches = 0;
 };
 
 inline bool guidesShareSurfaceTraversal(const RenderWorkInvariantSample& off, const RenderWorkInvariantSample& on)
@@ -61,6 +63,11 @@ inline bool restirDispatchesMatch(bool enabled,
     const uint64_t expectedFinal = enabled ? 1u : 0u;
     const uint64_t expectedSpatial = enabled && spatialEnabled && neighbors != 0u ? 1u : 0u;
     return sample.restirFinalDispatches == expectedFinal && sample.restirSpatialDispatches == expectedSpatial;
+}
+
+inline bool guideDispatchesMatchActiveQueue(const RenderWorkInvariantSample& sample)
+{
+    return sample.guideDispatches == (sample.guideActiveItems != 0u ? 1u : 0u);
 }
 
 } // namespace oka::metal
