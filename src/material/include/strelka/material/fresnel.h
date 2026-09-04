@@ -53,25 +53,54 @@ DEVICE_FUNC float fresnel_schlick_scalar(float F0, float cos_theta)
 //   eta         = ratio of IORs (exterior / interior)
 //   Returns reflectance in [0, 1].  Total internal reflection returns 1.
 // ---------------------------------------------------------------------------
-DEVICE_FUNC float fresnel_dielectric(float cos_theta_i, float eta)
+DEVICE_FUNC float fresnel_dielectric(CompensatedFloat cos_theta_i, float eta)
 {
+    // Identical media have no interface. At exactly grazing incidence the
+    // generic formula becomes 0/0 even though its physical limit is zero.
+    if (eta == 1.0f)
+        return 0.0f;
+    if (!(eta > 0.0f) || !(eta <= 3.402823466e38f))
+        return 1.0f;
+
     // Ensure cos_theta_i is positive (flip if needed)
-    if (cos_theta_i < 0.0f)
+    float cosineValue = compensatedValue(cos_theta_i);
+    if (cosineValue < 0.0f)
     {
         eta = 1.0f / eta;
-        cos_theta_i = -cos_theta_i;
+        cos_theta_i = negateCompensated(cos_theta_i);
+        cosineValue = -cosineValue;
     }
 
-    const float sin2_t = eta * eta * (1.0f - cos_theta_i * cos_theta_i);
-    if (sin2_t > 1.0f)
+    if (!(cosineValue > 0.0f))
+        cos_theta_i = compensatedSum(0.0f, 0.0f);
+    else if (cosineValue >= 1.0f)
+        cos_theta_i = compensatedSum(1.0f, 0.0f);
+
+    // Near the critical angle, eta^2 * (1 - cos^2(theta_i)) can differ by
+    // several ulps from one even though the remaining transmitted cosine is
+    // much smaller than either term. Preserve those low parts through the
+    // subtraction and square root; this value controls both the Fresnel branch
+    // mass and the continuous transmission density.
+    const CompensatedFloat cos2_t = dielectricTransmittedCosineSquared(cos_theta_i, eta);
+    if (!(compensatedValue(cos2_t) > 0.0f))
         return 1.0f; // total internal reflection
 
-    const float cos_theta_t = sqrtf(fmaxf(0.0f, 1.0f - sin2_t));
+    const CompensatedFloat cos_theta_t = sqrtCompensated(cos2_t);
+    const CompensatedFloat eta_cos_theta_i = scaleCompensated(cos_theta_i, eta);
+    const CompensatedFloat eta_cos_theta_t = scaleCompensated(cos_theta_t, eta);
 
-    const float r_s = (eta * cos_theta_i - cos_theta_t) / (eta * cos_theta_i + cos_theta_t);
-    const float r_p = (cos_theta_i - eta * cos_theta_t) / (cos_theta_i + eta * cos_theta_t);
+    const float r_s = compensatedValue(divideCompensated(
+        addCompensated(eta_cos_theta_i, negateCompensated(cos_theta_t)), addCompensated(eta_cos_theta_i, cos_theta_t)));
+    const float r_p = compensatedValue(divideCompensated(
+        addCompensated(cos_theta_i, negateCompensated(eta_cos_theta_t)), addCompensated(cos_theta_i, eta_cos_theta_t)));
 
-    return 0.5f * (r_s * r_s + r_p * r_p);
+    const CompensatedFloat reflectance = addCompensated(compensatedProduct(r_s, r_s), compensatedProduct(r_p, r_p));
+    return saturate(0.5f * compensatedValue(reflectance));
+}
+
+DEVICE_FUNC float fresnel_dielectric(float cos_theta_i, float eta)
+{
+    return fresnel_dielectric(compensatedSum(cos_theta_i, 0.0f), eta);
 }
 
 // ---------------------------------------------------------------------------
@@ -108,8 +137,7 @@ DEVICE_FUNC float f0_from_ior_ratio(float n1, float n2)
 // gold over any base at all. The loader hardcoded it to 0, so nothing ever
 // exercised the difference.
 // ---------------------------------------------------------------------------
-DEVICE_FUNC float3 gltf_f0(float ior, float specular, float3 specular_color,
-                            float3 base_color, float metallic)
+DEVICE_FUNC float3 gltf_f0(float ior, float specular, float3 specular_color, float3 base_color, float metallic)
 {
     const float dielectric_f0 = f0_from_ior(ior) * 2.0f * specular;
     // Clamped per the extension: F0 is a reflectance and a tint above 1 would

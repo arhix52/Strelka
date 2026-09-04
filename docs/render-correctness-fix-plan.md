@@ -24,8 +24,8 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | N. Runtime light topology rebuild | Geometry bit was ignored; Metal TLAS retained captured masks and both backends reused missing/stale BLAS after type edits | Repeated type-edit/cache regression plus backend rebuild source/compile validation | Cache unit proxies and route Geometry changes through buffer, BLAS, TLAS, and SBT rebuilds | FIXED | Source compiled; execution pending reviewer | Source; external CUDA validation required | pending | FIXED |
 | O. Scale-safe analytic and mesh area measures | Finite `1e13` ellipsoid determinant and finite `1e38` triangle length overflow intermediate float products | Large ellipsoid/disc/triangle sample-intersection-PDF regressions and determinant/naive-length mutations | Scale vectors before normalization, solve analytic intersections homogeneously, and bound area-to-solid-angle arithmetic | FIXED | Shader compiled; shared math source | Shared source; external CUDA validation required | pending | FIXED |
 | P. Extreme affine normal/support consistency | Common cofactor scaling underflows the only active normal; a finite `J_A` denominator can overflow although `p_A` and `p_omega` remain finite | Extreme inverse-transpose normal, `diag(2e19,2e19,1)` density, sample/eval/intersect, shear, and overflow mutations | Transform normals from an object tangent plane and carry scale-safe `p_A` directly through sample/PDF/intersection | FIXED | FIXED on MTLDevice | Shared source; external CUDA validation required | pending | FIXED |
-| P2. Reciprocal-scale analytic support | A shared max scale turns `(1e20,0,0) cross (0,1e-20,0)` into an unstable `1e-40` intermediate; finite triangle endpoints can overflow `p1-p0`; a rounded unit cosine can overflow the PDF guard | Reciprocal/large affine and triangle sample-PDF-intersection, overflow/underflow, exact miss, condition-gate, and `dot(n,n)>1` regressions | Independently scaled compensated affine algebra, analytic disc/ellipsoid hits, exponent-carrying triangle measures, bounded Skeel-valid point maps, and scale-safe `p_A r^2/cos` | FIXED | FIXED on MTLDevice | Shared source; external CUDA validation required | pending | FIXED |
-| Q. True Standard-PBR/conductor delta measures | Rough lobes below the delta threshold are sampled continuously but labelled delta; positive PDFs are floored; sheen/tiny transmission can have evaluation without proposal support | Exact mirror/refraction, sub-`1e-10` marginal, sheen-with-transmission, and finite-lattice tiny-lobe regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| P2. Reciprocal-scale analytic support | A shared max scale turns `(1e20,0,0) cross (0,1e-20,0)` into an unstable `1e-40` intermediate; finite triangle endpoints can overflow `p1-p0`; a rounded unit cosine can overflow the PDF guard | Reciprocal/large affine and triangle sample-PDF-intersection, overflow/underflow, exact miss, condition-gate, and `dot(n,n)>1` regressions | Independently scaled compensated affine algebra, analytic disc/ellipsoid hits, exponent-carrying triangle measures, bounded Skeel-valid point maps, and scale-safe `p_A r^2/cos` | FIXED | FIXED on MTLDevice | Shared source; external CUDA validation required | `40e39fc` | FIXED |
+| Q. True Standard-PBR/conductor delta measures | Rough lobes below the delta threshold are sampled continuously but labelled delta; positive PDFs are floored; sheen/tiny transmission can have evaluation without proposal support | Exact mirror/refraction, sub-`1e-10` marginal, sheen-with-transmission, near-critical Snell/Fresnel, and finite-lattice tiny-lobe regressions | Sum coincident atoms as discrete masses; keep every other lobe continuous; evaluate returned float endpoints with compensated inverse/Jacobian/Fresnel arithmetic | FIXED | Shader compiled; shared source | Shared headers; external toolchain required | pending | FIXED |
 | R. Finite-RNG categorical representation | Alias buckets above `2^23` are unreachable and float thresholds do not equal Metal/OptiX event masses | `8,388,609` buckets, strict-threshold lattice, hierarchy probability, support and GOF mutations | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | S. Environment radiance/support lifecycle | Invalid HDR values reach textures, bilinear positive radiance can lie outside PMF support, runtime edits leave stale tables, and a `FLT_TRUE_MIN` 1x1 map loses its outer PMF through an infinite reciprocal | sanitization, 3x3 footprint support, seam/poles, tiny-positive power, edit/reload regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | T. Infinite-light exact support/MIS | Sharp distant versus mirror is not represented as a discrete match; tiny continuous caps and float round trips lose support; camera mask/tMax differ | delta match, tiny cap, boundary round-trip, camera visibility and backend-distance tests | pending | OPEN | OPEN | OPEN | pending | OPEN |
@@ -687,3 +687,63 @@ is out of scope unless it blocks validation.
   and exact `p_A` bits in default/fast/safe Metal for three Decimal counterexamples; normals differ only in their last
   bits. OptiX consumes the same shared headers but CUDA compilation/runtime remains externally `UNVERIFIED` on this
   macOS host. Status: FIXED.
+
+## Finding Q: true Standard-PBR/conductor delta measures
+
+- Random variables and measure: the Standard-PBR proposal first selects lobe `K`; dielectric transmission then
+  selects Fresnel outcome `F`. `K` and `F` are discrete masses. Diffuse and rough microfacet directions have density
+  in `domega`. An isotropic GGX lobe with `alpha < BSDF_DELTA_ALPHA`, or an anisotropic lobe only when both represented
+  axes are below it, is an atom at the exact macro mirror direction. Refraction collapses to a pass-through atom only
+  for exactly equal stored interior/exterior indices. The conductor has a single continuous GGX direction above the
+  threshold and one mirror atom below it.
+- Support: a positive continuous BRDF/BTDF term must have a positive proposal on its hemisphere. Sheen shares a
+  cosine proposal even when opaque diffuse is suppressed by full interface transmission. Every positive lobe weight
+  is widened enough to contain a point of the production 23-bit uniform lattice; exact represented event masses are
+  handled separately by finding R. Zero weights retain empty selection intervals.
+- Conditional and marginal PDF: for continuous `wi`,
+  `p_omega(wi)=sum_(k continuous) P(K=k) p_omega(wi|k)`, excluding every delta lobe. For a shared mirror atom, the
+  returned discrete mass is the sum of all compatible atoms:
+  `P_delta(mirror)=P(base-spec)+P(clearcoat)+P(transmission) F`, with absent or rough terms omitted. Smooth
+  refraction has mass `P(transmission)(1-F)`. The sample throughput is the sum of the corresponding physical
+  `f*cos` atom coefficients divided by that complete discrete mass. No positive density or selection probability is
+  replaced by an arbitrary numeric floor. For rough reflection,
+  `p_omega=P(K) D_visible(H)/(4 abs(V dot H))`; for rough refraction,
+  `p_omega=P(K)(1-F) p_H(H) abs(L dot H)/length(eta V+L)^2`.
+- Selection PMF: `P(K=k)=w_k/sum_j w_j` after support-preserving proposal regularisation of positive weights only.
+  On exit hits the diffuse-transmission/interface pair is conditionally renormalized exactly as in finding 1.
+- Delta classification: exact mirror/refraction outcomes carry probability mass and are marked `SPECULAR`; VNDF and
+  cosine draws carry `domega` density and are marked `GLOSSY`/`DIFFUSE`. A continuously sampled half-vector is never
+  relabelled as a delta event, including a rough numerical TIR fallback.
+- MIS strategies: continuous light NEE competes only with the complete continuous BSDF marginal. Delta BSDF atoms
+  are exclusive. This prevents the former polished-plastic case where a VNDF direction was marked exclusive while
+  the same continuous GGX term remained in `eval()`, making complementary shares sum above one.
+- Current-HEAD reproducer: conductor and Standard-PBR at roughness `0.02` (`alpha=0.0004`) produce RNG-dependent
+  directions separated by `0.00245714` but mark both `SPECULAR`; their `eval()` still reports a continuous density.
+  Full-transmission sheen evaluates to positive `f=1.26624e-4` with PDF zero and disables NEE. A clearcoat weight
+  `2.40000034e-11` rounds out of the Standard-PBR CDF, so none of the `2^23` Metal RNG values can select it.
+- Numerical conditioning reproducer: at an exiting interface with `eta=1.40776122`, the returned float endpoint has
+  exact inverse `V dot H=0.703850938414`. Rounding that scalar before Fresnel changed the transmission PDF from the
+  double oracle `2.21938104e-6` to `3.24683742e-6` (46.3%). Separately, the old Snell expression falsely classified
+  a positive `1.84979161e-8` transmitted-cosine square as TIR. An exhaustive near-critical case has true remainder
+  `2.80032682e-16`, which the initial two-float correction rounded negative and would have removed from support.
+- Implementation: samples below the roughness threshold now construct the exact mirror/refraction atom instead of a
+  VNDF direction with a specular label. Standard PBR sums all coincident mirror atoms in both returned mass and
+  numerator; continuous samples are finalized by the common evaluator at the actual rounded endpoint. Full-vector
+  GGX density, Smith terms, reflection half vectors, and refraction Jacobians avoid cancellation/overflow. The
+  inverse refraction carries a two-float `V dot H` into Fresnel; scalar Snell evaluation uses an adaptive exact
+  binary32 expansion near the critical boundary. Fresnel and `refract_dir` share that discriminant, and the refracted
+  vector is assembled from compensated products. Exact categorical realization of very small represented masses is
+  deliberately the next, separate finding R.
+- Independent numerical result: the reviewer compared 19,543,112 near-critical rough transmissions with zero PDF
+  errors above `0.1%` (worst `3.87e-5`). An exhaustive exact-sign/root sweep over `52,428,795` float pairs around
+  the critical boundary has zero false accepts, zero false rejects, zero root errors above `0.1%`, and worst relative
+  error `5.9586e-8`. Rotated Snell fuzz covered 9,992,157 valid events with zero wrong-side, non-finite, or root
+  errors above `0.1%`; Standard-PBR/conductor double-oracle PDF sweeps saw worst relative errors `5.7493e-6` and
+  `1.1713e-6`. Delta mass/throughput fuzz covered 12,944,000 events with zero disagreements.
+- Validation: focused Debug and ASan+UBSan runs each pass 42/42 cases and 57,306,907/57,306,907 assertions; full
+  Debug and Release CTest pass 4/4; production `wavefront.metal` compiles. The full audit passes 878/878 tests and
+  68,677,725 assertions, retains environment integral `1`, Lambertian estimate `1.002147074` inside its CI, and
+  detects the `2.003353165` legacy environment mutation. Its actual Apple M4 Pro kernel passes 262,144 samples with
+  zero measure mismatches, but that kernel does not execute the BSDF changes. `clang-tidy` is unavailable on this
+  host; OptiX consumes the shared headers but CUDA compilation/execution remains externally `UNVERIFIED`. Status:
+  FIXED.

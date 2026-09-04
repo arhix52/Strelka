@@ -13,219 +13,233 @@
 // CUDA's and sutil's, which is what broke the Linux build.
 #if defined(__CUDA_ARCH__) || defined(__CUDACC__) || defined(STRELKA_MATERIAL_CUDA_HOST)
 // ---- CUDA (device code, nvcc host pass, and OptiX host code) ---------------
-    #ifdef __CUDA_ARCH__
-    #define DEVICE_FUNC   __device__ __forceinline__
-    #else
-    #define DEVICE_FUNC   inline
-    #endif
-    // Storage class for a module-scope constant table; see sheen_albedo_lut.h.
-    //
-    // Under nvcc the table has to carry __device__ or it lands in host memory and
-    // every device function referencing it fails to resolve -- which is exactly
-    // what "identifier kSheenAlbedoLut is undefined" meant when the closest-hit
-    // module was compiled. `static` keeps it internal to the translation unit, so
-    // relocatable device code does not end up with duplicate definitions.
-    //
-    // Plain g++ building the OptiX host side reaches this branch too (see
-    // STRELKA_MATERIAL_CUDA_HOST) and does not know __device__, hence the split.
-    #if defined(__CUDACC__)
-    #define DEVICE_CONST  static __device__ const
-    #else
-    #define DEVICE_CONST  static const
-    #endif
-    #define THREAD_REF
-    #define M_PI_F        3.14159265358979323846f
-    #define M_1_PI_F      0.31830988618379067154f
-    #define M_2_PI_F      0.63661977236758134308f
-    // float2, float3, float4 and make_float* are CUDA built-ins.
-    // dot, cross, normalize, length are available via sutil/vec_math.h.
+#    ifdef __CUDA_ARCH__
+#        define DEVICE_FUNC __device__ __forceinline__
+#    else
+#        define DEVICE_FUNC inline
+#    endif
+// Storage class for a module-scope constant table; see sheen_albedo_lut.h.
+//
+// Under nvcc the table has to carry __device__ or it lands in host memory and
+// every device function referencing it fails to resolve -- which is exactly
+// what "identifier kSheenAlbedoLut is undefined" meant when the closest-hit
+// module was compiled. `static` keeps it internal to the translation unit, so
+// relocatable device code does not end up with duplicate definitions.
+//
+// Plain g++ building the OptiX host side reaches this branch too (see
+// STRELKA_MATERIAL_CUDA_HOST) and does not know __device__, hence the split.
+#    if defined(__CUDACC__)
+#        define DEVICE_CONST static __device__ const
+#    else
+#        define DEVICE_CONST static const
+#    endif
+#    define THREAD_REF
+#    define M_PI_F 3.14159265358979323846f
+#    define M_1_PI_F 0.31830988618379067154f
+#    define M_2_PI_F 0.63661977236758134308f
+// float2, float3, float4 and make_float* are CUDA built-ins.
+// dot, cross, normalize, length are available via sutil/vec_math.h.
 
-    #ifndef STRELKA_MATERIAL_MATH_CUDA_FUNCS
-    #define STRELKA_MATERIAL_MATH_CUDA_FUNCS
-    // saturate() is provided by sutil/vec_math_adv.h in CUDA builds
-    DEVICE_FUNC float  sqr(float v)       { return v * v; }
+#    ifndef STRELKA_MATERIAL_MATH_CUDA_FUNCS
+#        define STRELKA_MATERIAL_MATH_CUDA_FUNCS
+// saturate() is provided by sutil/vec_math_adv.h in CUDA builds
+DEVICE_FUNC float sqr(float v)
+{
+    return v * v;
+}
 
-    DEVICE_FUNC float3 mix(float3 a, float3 b, float t)
-    {
-        return a + (b - a) * t;
-    }
+DEVICE_FUNC float3 mix(float3 a, float3 b, float t)
+{
+    return a + (b - a) * t;
+}
 
-    DEVICE_FUNC float mix(float a, float b, float t)
-    {
-        return a + (b - a) * t;
-    }
+DEVICE_FUNC float mix(float a, float b, float t)
+{
+    return a + (b - a) * t;
+}
 
-    DEVICE_FUNC float  luminance(float3 c)
-    {
-        return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
-    }
+DEVICE_FUNC float luminance(float3 c)
+{
+    return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+}
 
-    DEVICE_FUNC float3 safe_normalize(float3 v)
-    {
-        float len = length(v);
-        return len > 1e-8f ? v / len : make_float3(0.0f, 1.0f, 0.0f);
-    }
+DEVICE_FUNC float3 safe_normalize(float3 v)
+{
+    float len = length(v);
+    return len > 1e-8f ? v / len : make_float3(0.0f, 1.0f, 0.0f);
+}
 
-    DEVICE_FUNC float3 reflect_dir(float3 incident, float3 normal)
-    {
-        return incident - 2.0f * dot(incident, normal) * normal;
-    }
+DEVICE_FUNC float3 reflect_dir(float3 incident, float3 normal)
+{
+    return incident - 2.0f * dot(incident, normal) * normal;
+}
 
-    DEVICE_FUNC bool refract_dir(float3 incident, float3 normal, float eta, float3& out)
-    {
-        float cosi  = dot(normal, incident);
-        float sin2t = eta * eta * (1.0f - cosi * cosi);
-        if (sin2t > 1.0f) return false;
-        out = eta * incident - (eta * cosi + sqrtf(1.0f - sin2t)) * normal;
-        return true;
-    }
-    #endif
+#    endif
 
 #elif defined(__METAL_VERSION__)
 // ---- Metal Shading Language ------------------------------------------------
-    #define DEVICE_FUNC   inline
-    // Metal rejects a plain `const` array at module scope; it wants an explicit
-    // address space. See sheen_albedo_lut.h.
-    #define DEVICE_CONST  constant
-    #define THREAD_REF    thread
-    // M_PI_F is defined by <metal_stdlib>; only define if missing
-    #ifndef M_PI_F
-    #define M_PI_F        3.14159265358979323846f
-    #endif
-    #ifndef M_1_PI_F
-    #define M_1_PI_F      0.31830988618379067154f
-    #endif
-    #ifndef M_2_PI_F
-    #define M_2_PI_F      0.63661977236758134308f
-    #endif
+#    define DEVICE_FUNC inline
+// Metal rejects a plain `const` array at module scope; it wants an explicit
+// address space. See sheen_albedo_lut.h.
+#    define DEVICE_CONST constant
+#    define THREAD_REF thread
+// M_PI_F is defined by <metal_stdlib>; only define if missing
+#    ifndef M_PI_F
+#        define M_PI_F 3.14159265358979323846f
+#    endif
+#    ifndef M_1_PI_F
+#        define M_1_PI_F 0.31830988618379067154f
+#    endif
+#    ifndef M_2_PI_F
+#        define M_2_PI_F 0.63661977236758134308f
+#    endif
 
-    // C math compat aliases so shared headers (sampling.h, fresnel.h) compile
-    #define sqrtf(x)   metal::sqrt(x)
-    #define cosf(x)    metal::cos(x)
-    #define sinf(x)    metal::sin(x)
-    #define fmaxf(x,y) metal::fmax(x,y)
-    #define fminf(x,y) metal::fmin(x,y)
-    #define fabsf(x)   metal::fabs(x)
-    #define fmodf(x,y) metal::fmod(x, y)
-    #define copysignf(x,y) metal::copysign(x, y)
-    #define acosf(x)   metal::acos(x)
-    #define asinf(x)   metal::asin(x)
-    #define tanf(x)    metal::tan(x)
-    #define atan2f(y,x) metal::atan2(y, x)
-    #define expf(x)    metal::exp(x)
-    #define logf(x)    metal::log(x)
-    #define powf(x,y)  metal::pow(x,y)
+// C math compat aliases so shared headers (sampling.h, fresnel.h) compile
+#    define sqrtf(x) metal::sqrt(x)
+#    define cosf(x) metal::cos(x)
+#    define sinf(x) metal::sin(x)
+#    define fmaxf(x, y) metal::fmax(x, y)
+#    define fminf(x, y) metal::fmin(x, y)
+#    define fabsf(x) metal::fabs(x)
+#    define fmodf(x, y) metal::fmod(x, y)
+#    define copysignf(x, y) metal::copysign(x, y)
+#    define acosf(x) metal::acos(x)
+#    define asinf(x) metal::asin(x)
+#    define tanf(x) metal::tan(x)
+#    define atan2f(y, x) metal::atan2(y, x)
+#    define expf(x) metal::exp(x)
+#    define logf(x) metal::log(x)
+#    define powf(x, y) metal::pow(x, y)
 #    define fmaf(x, y, z) metal::fma(x, y, z)
 
-inline float3 make_float3(float x, float y, float z) { return float3(x, y, z); }
-    inline float3 make_float3(float v)                    { return float3(v); }
-    inline float2 make_float2(float x, float y)           { return float2(x, y); }
-    inline float4 make_float4(float x, float y, float z, float w) { return float4(x, y, z, w); }
+inline float3 make_float3(float x, float y, float z)
+{
+    return float3(x, y, z);
+}
+inline float3 make_float3(float v)
+{
+    return float3(v);
+}
+inline float2 make_float2(float x, float y)
+{
+    return float2(x, y);
+}
+inline float4 make_float4(float x, float y, float z, float w)
+{
+    return float4(x, y, z, w);
+}
 
-    // Use metal::saturate directly; do NOT define a wrapper (ambiguous with using namespace metal)
-    #define saturate(v) metal::saturate(v)
-    inline float  sqr(float v)       { return v * v; }
-    inline float  luminance(float3 c){ return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+// Use metal::saturate directly; do NOT define a wrapper (ambiguous with using namespace metal)
+#    define saturate(v) metal::saturate(v)
+inline float sqr(float v)
+{
+    return v * v;
+}
+inline float luminance(float3 c)
+{
+    return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+}
 
-    inline float3 safe_normalize(float3 v)
-    {
-        float len = metal::length(v);
-        return len > 1e-8f ? v / len : float3(0.0f, 1.0f, 0.0f);
-    }
+inline float3 safe_normalize(float3 v)
+{
+    float len = metal::length(v);
+    return len > 1e-8f ? v / len : float3(0.0f, 1.0f, 0.0f);
+}
 
-    inline float3 reflect_dir(float3 incident, float3 normal)
-    {
-        return metal::reflect(incident, normal);
-    }
-
-    inline bool refract_dir(float3 incident, float3 normal, float eta, thread float3& out)
-    {
-        float cosi  = metal::dot(normal, incident);
-        float sin2t = eta * eta * (1.0f - cosi * cosi);
-        if (sin2t > 1.0f) return false;
-        out = eta * incident - (eta * cosi + metal::sqrt(1.0f - sin2t)) * normal;
-        return true;
-    }
+inline float3 reflect_dir(float3 incident, float3 normal)
+{
+    return metal::reflect(incident, normal);
+}
 
 #else
 // ---- CPU (tests, previews) ------------------------------------------------
-    #define DEVICE_FUNC   inline
-    #define DEVICE_CONST  static const
-    #define THREAD_REF
+#    define DEVICE_FUNC inline
+#    define DEVICE_CONST static const
+#    define THREAD_REF
 
-    #include <glm/glm.hpp>
-    #include <glm/gtc/constants.hpp>
-    #include <cmath>
-    #include <algorithm>
+#    include <glm/glm.hpp>
+#    include <glm/gtc/constants.hpp>
+#    include <cmath>
+#    include <algorithm>
 
-    // Guarded with the same macro material_params.h uses, so whichever of the two
-    // is included first wins and the other is a no-op. They must agree on GLM --
-    // see the note at the top of material_params.h for what happens when they do
-    // not.
-    #ifndef STRELKA_MATERIAL_FLOAT_TYPES
-    #define STRELKA_MATERIAL_FLOAT_TYPES
-    using float2 = glm::vec2;
-    using float3 = glm::vec3;
-    using float4 = glm::vec4;
-    #endif
+// Guarded with the same macro material_params.h uses, so whichever of the two
+// is included first wins and the other is a no-op. They must agree on GLM --
+// see the note at the top of material_params.h for what happens when they do
+// not.
+#    ifndef STRELKA_MATERIAL_FLOAT_TYPES
+#        define STRELKA_MATERIAL_FLOAT_TYPES
+using float2 = glm::vec2;
+using float3 = glm::vec3;
+using float4 = glm::vec4;
+#    endif
 
-    // NOLINTBEGIN(modernize-return-braced-init-list)
-    //
-    // Naming the type is the whole point of a shim three compilers share, so a
-    // braced return would delete the only thing these lines say. Markers rather
-    // than trailing NOLINTs because clang-format splits a one-liner it is asked
-    // to format and carries the comment to the closing brace, where it suppresses
-    // nothing -- and this block is hand-aligned, so it is not formatted at all.
-    inline float3 make_float3(float x, float y, float z) { return float3(x, y, z); }
-    inline float3 make_float3(float v)                    { return float3(v); }
-    inline float2 make_float2(float x, float y)           { return float2(x, y); }
-    inline float4 make_float4(float x, float y, float z, float w) { return float4(x, y, z, w); }
-    // NOLINTEND(modernize-return-braced-init-list)
+// NOLINTBEGIN(modernize-return-braced-init-list)
+//
+// Naming the type is the whole point of a shim three compilers share, so a
+// braced return would delete the only thing these lines say. Markers rather
+// than trailing NOLINTs because clang-format splits a one-liner it is asked
+// to format and carries the comment to the closing brace, where it suppresses
+// nothing -- and this block is hand-aligned, so it is not formatted at all.
+inline float3 make_float3(float x, float y, float z)
+{
+    return float3(x, y, z);
+}
+inline float3 make_float3(float v)
+{
+    return float3(v);
+}
+inline float2 make_float2(float x, float y)
+{
+    return float2(x, y);
+}
+inline float4 make_float4(float x, float y, float z, float w)
+{
+    return float4(x, y, z, w);
+}
+// NOLINTEND(modernize-return-braced-init-list)
 
-    using glm::cross;
-    using glm::dot;
+using glm::cross;
+using glm::dot;
 using glm::length;
-    using glm::mix;
+using glm::mix;
 using glm::normalize;
-    using glm::reflect;
-    using glm::refract;
+using glm::reflect;
+using glm::refract;
 
-    inline float clamp(float v, float lo, float hi)
-    {
-        return std::max(lo, std::min(hi, v));
-    }
+inline float clamp(float v, float lo, float hi)
+{
+    return std::max(lo, std::min(hi, v));
+}
 
-    inline float saturate(float v) { return clamp(v, 0.0f, 1.0f); }
-    inline float sqr(float v)      { return v * v; }
+inline float saturate(float v)
+{
+    return clamp(v, 0.0f, 1.0f);
+}
+inline float sqr(float v)
+{
+    return v * v;
+}
 
-    inline float luminance(float3 c)
-    {
-        return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
-    }
+inline float luminance(float3 c)
+{
+    return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+}
 
-    inline float3 safe_normalize(float3 v)
-    {
-        const float len = glm::length(v);
-        return len > 1e-8f ? v / len : float3(0.0f, 1.0f, 0.0f);
-    }
+inline float3 safe_normalize(float3 v)
+{
+    const float len = glm::length(v);
+    return len > 1e-8f ? v / len : float3(0.0f, 1.0f, 0.0f);
+}
 
-    #define M_PI_F   3.14159265358979323846f
-    #define M_1_PI_F 0.31830988618379067154f
-    #define M_2_PI_F 0.63661977236758134308f
+#    define M_PI_F 3.14159265358979323846f
+#    define M_1_PI_F 0.31830988618379067154f
+#    define M_2_PI_F 0.63661977236758134308f
 
-    inline float3 reflect_dir(float3 incident, float3 normal)
-    {
-        return incident - 2.0f * glm::dot(incident, normal) * normal;
-    }
+inline float3 reflect_dir(float3 incident, float3 normal)
+{
+    return incident - 2.0f * glm::dot(incident, normal) * normal;
+}
 
-    inline bool refract_dir(float3 incident, float3 normal, float eta, float3& out)
-    {
-        const float cosi = glm::dot(normal, incident);
-        const float sin2t = eta * eta * (1.0f - cosi * cosi);
-        if (sin2t > 1.0f) return false;
-        out = eta * incident - (eta * cosi + std::sqrt(1.0f - sin2t)) * normal;
-        return true;
-    }
 #endif
 
 // Float vectors can have finite components while dot(v,v) overflows. These
@@ -367,6 +381,110 @@ DEVICE_FUNC CompensatedFloat sqrtCompensated(CompensatedFloat value)
         result = addCompensated(result, compensatedSum(compensatedValue(residual) / (2.0f * root), 0.0f));
     }
     return result;
+}
+
+struct ExactFloatExpansion
+{
+    float components[12];
+    unsigned int size;
+};
+
+DEVICE_FUNC void addExactFloat(THREAD_REF ExactFloatExpansion& expansion, float value)
+{
+    float carry = value;
+    unsigned int outputSize = 0u;
+    for (unsigned int index = 0u; index < expansion.size; ++index)
+    {
+        const CompensatedFloat sum = compensatedSum(carry, expansion.components[index]);
+        if (sum.low != 0.0f)
+            expansion.components[outputSize++] = sum.low;
+        carry = sum.high;
+    }
+    if (carry != 0.0f || outputSize == 0u)
+        expansion.components[outputSize++] = carry;
+    expansion.size = outputSize;
+}
+
+DEVICE_FUNC void addExactProduct(THREAD_REF ExactFloatExpansion& expansion, float a, float b)
+{
+    const CompensatedFloat product = compensatedProduct(a, b);
+    if (product.low != 0.0f)
+        addExactFloat(expansion, product.low);
+    addExactFloat(expansion, product.high);
+}
+
+DEVICE_FUNC CompensatedFloat exactScalarTransmittedCosineSquared(float incidentCosine, float eta)
+{
+    // A product of two binary32 values is represented exactly by these two
+    // terms. Expanding its square and eta^2 before the final subtraction keeps
+    // the sign and magnitude even when the Snell remainder is below 2^-48 of
+    // either operand.
+    const CompensatedFloat etaCosine = compensatedProduct(eta, incidentCosine);
+    ExactFloatExpansion expansion{};
+    addExactProduct(expansion, etaCosine.high, etaCosine.high);
+    addExactProduct(expansion, etaCosine.high, etaCosine.low);
+    addExactProduct(expansion, etaCosine.high, etaCosine.low);
+    addExactProduct(expansion, etaCosine.low, etaCosine.low);
+    addExactProduct(expansion, -eta, eta);
+    addExactFloat(expansion, 1.0f);
+
+    CompensatedFloat result = compensatedSum(0.0f, 0.0f);
+    for (unsigned int index = 0u; index < expansion.size; ++index)
+        result = addCompensated(result, compensatedSum(expansion.components[index], 0.0f));
+    return result;
+}
+
+DEVICE_FUNC CompensatedFloat dielectricTransmittedCosineSquared(CompensatedFloat incidentCosine, float eta)
+{
+    // 1 - eta^2 (1 - c^2) = (eta c)^2 - (eta - 1)(eta + 1).
+    // This avoids first rounding two values near one and then subtracting them
+    // at the critical angle. eta-1 is exact by Sterbenz for neighbouring media.
+    const CompensatedFloat etaCosine = scaleCompensated(incidentCosine, eta);
+    const CompensatedFloat etaSquaredCosineSquared = multiplyCompensated(etaCosine, etaCosine);
+    const CompensatedFloat etaSquaredMinusOne =
+        multiplyCompensated(compensatedSum(eta, -1.0f), compensatedSum(eta, 1.0f));
+    const CompensatedFloat result = addCompensated(etaSquaredCosineSquared, negateCompensated(etaSquaredMinusOne));
+
+    // Two-float arithmetic is ample until the two terms cancel to within one
+    // part per million. Scalar sample-side cosines can then use the exact
+    // binary32 expansion to certify both the TIR sign and the tiny root without
+    // paying that cost for ordinary Fresnel evaluations.
+    const float cancellationScale =
+        fmaxf(fabsf(compensatedValue(etaSquaredCosineSquared)), fabsf(compensatedValue(etaSquaredMinusOne)));
+    if (incidentCosine.low != 0.0f || fabsf(compensatedValue(result)) > 9.5367431640625e-7f * cancellationScale)
+    {
+        return result;
+    }
+    return exactScalarTransmittedCosineSquared(incidentCosine.high, eta);
+}
+
+DEVICE_FUNC bool refract_dir(float3 incident, float3 normal, float eta, float incidentCosineMagnitude, THREAD_REF float3& out)
+{
+    if (!(eta > 0.0f) || !(eta <= 3.402823466e38f))
+        return false;
+
+    incidentCosineMagnitude = saturate(incidentCosineMagnitude);
+    const CompensatedFloat transmittedCosineSquared =
+        dielectricTransmittedCosineSquared(compensatedSum(incidentCosineMagnitude, 0.0f), eta);
+    if (!(compensatedValue(transmittedCosineSquared) > 0.0f))
+        return false;
+
+    const CompensatedFloat transmittedCosine = sqrtCompensated(transmittedCosineSquared);
+    const float signedIncidentCosine = dot(normal, incident) < 0.0f ? -incidentCosineMagnitude : incidentCosineMagnitude;
+    const CompensatedFloat normalScale = addCompensated(compensatedProduct(eta, signedIncidentCosine), transmittedCosine);
+    const CompensatedFloat x =
+        addCompensated(compensatedProduct(eta, incident.x), negateCompensated(scaleCompensated(normalScale, normal.x)));
+    const CompensatedFloat y =
+        addCompensated(compensatedProduct(eta, incident.y), negateCompensated(scaleCompensated(normalScale, normal.y)));
+    const CompensatedFloat z =
+        addCompensated(compensatedProduct(eta, incident.z), negateCompensated(scaleCompensated(normalScale, normal.z)));
+    out = make_float3(compensatedValue(x), compensatedValue(y), compensatedValue(z));
+    return true;
+}
+
+DEVICE_FUNC bool refract_dir(float3 incident, float3 normal, float eta, THREAD_REF float3& out)
+{
+    return refract_dir(incident, normal, eta, fabsf(dot(normal, incident)), out);
 }
 
 DEVICE_FUNC CompensatedFloat compensatedDifferenceOfProducts(float a, float b, float c, float d)

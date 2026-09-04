@@ -77,7 +77,7 @@ struct BsdfSampleResult
     unsigned int    event_type; // BsdfEventType flags
 };
 
-// GGX alpha at or below which a lobe is treated as a perfect mirror: sampled as
+// GGX alpha below which a lobe is treated as a perfect mirror: sampled as
 // a single direction, reported as a BSDF_EVENT_SPECULAR event, and given a
 // discrete probability in the pdf field instead of a density.
 //

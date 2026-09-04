@@ -2601,11 +2601,13 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
 
         float interfaceIor = max(si.exterior_ior, 1.0f);
         float interfaceFresnel = 0.0f;
+        float interfaceCosine = 0.0f;
         if (!guideOpaque)
         {
             interfaceIor = denoiserInterfaceIor(isOpenPBR, openpbrMat, si, entering);
             const float eta = entering ? si.exterior_ior / interfaceIor : interfaceIor / max(si.exterior_ior, 1e-4f);
-            interfaceFresnel = fresnel_dielectric(abs(dot(float3(si.shading_normal), float3(si.wo))), eta);
+            interfaceCosine = abs(dot(float3(si.shading_normal), float3(si.wo)));
+            interfaceFresnel = fresnel_dielectric(interfaceCosine, eta);
             aov[tid].diffuseAlbedo = packed_float3(float3(0.0f));
             aov[tid].specularAlbedo = packed_float3(float3(interfaceFresnel));
             // Values >= 1 carry the glass Fresnel into the replacement blend.
@@ -2623,7 +2625,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             {
                 const float eta = entering ? si.exterior_ior / interfaceIor : interfaceIor / max(si.exterior_ior, 1e-4f);
                 float3 refracted;
-                const bool validRefraction = si.thin_walled ? true : refract_dir(-V, Nf, eta, refracted);
+                const bool validRefraction =
+                    si.thin_walled ? true : refract_dir(-V, Nf, eta, interfaceCosine, refracted);
                 if (validRefraction && interfaceFresnel < 0.5f)
                 {
                     guideDirection = si.thin_walled ? -V : refracted;
@@ -3437,9 +3440,11 @@ static void guideImpl(uint gid,
             const float materialIor = denoiserInterfaceIor(isOpenPBR, openpbrMat, si, entering);
             const float outsideIor = entering ? currentIor : exteriorIor;
             const float eta = entering ? outsideIor / materialIor : materialIor / outsideIor;
-            const float fresnel = fresnel_dielectric(abs(dot(Nf, V)), eta);
+            const float interfaceCosine = abs(dot(Nf, V));
+            const float fresnel = fresnel_dielectric(interfaceCosine, eta);
             float3 refracted;
-            const bool validRefraction = si.thin_walled ? true : refract_dir(-V, Nf, eta, refracted);
+            const bool validRefraction =
+                si.thin_walled ? true : refract_dir(-V, Nf, eta, interfaceCosine, refracted);
             if (validRefraction && fresnel < 0.5f)
             {
                 nextDirection = si.thin_walled ? -V : refracted;

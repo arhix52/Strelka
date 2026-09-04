@@ -1,5 +1,5 @@
 #ifndef STRELKA_BXDF_STANDARD_PBR_H
-#define STRELKA_BXDF_STANDARD_PBR_H
+#    define STRELKA_BXDF_STANDARD_PBR_H
 
 // ============================================================================
 // bxdfs/standard_pbr.h -- glTF metallic-roughness PBR material
@@ -16,15 +16,15 @@
 // its approximate weight and divide out the selection probability.
 // ============================================================================
 
-#include "../material_math.h"
-#include "../bsdf_types.h"
-#include "../surface_interaction.h"
-#include "../sampling.h"
-#include "../fresnel.h"
-#include "../microfacet.h"
-#include "../sheen_albedo_lut.h"
-#include "../iridescence.h"
-#include "../shading_frame.h"
+#    include "../material_math.h"
+#    include "../bsdf_types.h"
+#    include "../surface_interaction.h"
+#    include "../sampling.h"
+#    include "../fresnel.h"
+#    include "../microfacet.h"
+#    include "../sheen_albedo_lut.h"
+#    include "../iridescence.h"
+#    include "../shading_frame.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-type-member-init, cppcoreguidelines-init-variables)
 //
@@ -116,16 +116,46 @@ DEVICE_FUNC float diffuse_lobe_scale(const THREAD_REF SurfaceInteraction& si)
 // Returned as a colour with the scalar the coin flip uses left alone, so the
 // sampling is unchanged and the tint rides on the throughput. With no film the
 // colour is that same scalar and both correction factors are exactly one.
-DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si, float v_dot_h, float eta)
+DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si, CompensatedFloat v_dot_h, float eta)
 {
     const float f = fresnel_dielectric(v_dot_h, eta);
+    // A thin-film approximation must not reopen the physically forbidden
+    // transmission branch under total internal reflection.
+    if (f >= 1.0f)
+    {
+        return make_float3(1.0f);
+    }
     if (si.iridescence <= 0.0f)
     {
         return make_float3(f);
     }
+    const float cosine = compensatedValue(v_dot_h);
     const float3 film =
-        iridescence_fresnel(1.0f, si.iridescence_ior, fabsf(v_dot_h), si.iridescence_thickness, make_float3(f));
-    return mix(make_float3(f), film, saturate(si.iridescence));
+        iridescence_fresnel(1.0f, si.iridescence_ior, fabsf(cosine), si.iridescence_thickness, make_float3(f));
+    const float3 result = mix(make_float3(f), film, saturate(si.iridescence));
+    return make_float3(saturate(result.x), saturate(result.y), saturate(result.z));
+}
+
+DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si, float v_dot_h, float eta)
+{
+    return transmission_fresnel(si, compensatedSum(v_dot_h, 0.0f), eta);
+}
+
+// A coloured Fresnel response needs a scalar branch probability, but that
+// probability is a proposal rather than the response itself. Luminance gives a
+// low-variance split; the endpoint guards preserve both outcomes whenever any
+// colour channel has support on the renderer's finite random lattice.
+DEVICE_FUNC float transmission_fresnel_probability(float3 filmFresnel)
+{
+    float probability = saturate(luminance(filmFresnel));
+    const float reflected = fmaxf(filmFresnel.x, fmaxf(filmFresnel.y, filmFresnel.z));
+    const float transmitted = fmaxf(1.0f - filmFresnel.x, fmaxf(1.0f - filmFresnel.y, 1.0f - filmFresnel.z));
+    const float latticeGuard = 4.0f / 8388608.0f;
+    if (reflected > 0.0f)
+        probability = fmaxf(probability, latticeGuard);
+    if (transmitted > 0.0f)
+        probability = fminf(probability, 1.0f - latticeGuard);
+    return probability;
 }
 
 // Charlie sheen evaluated for one direction pair. Zero unless the material
@@ -182,9 +212,7 @@ DEVICE_FUNC float clearcoat_f0(const THREAD_REF SurfaceInteraction& si)
 // the quantity that goes to zero when the lobe does.
 //
 // View side only, because the model never refracts L into the layer.
-DEVICE_FUNC float3 specular_base_scale(const THREAD_REF SurfaceInteraction& si,
-                                       const THREAD_REF float3& F0,
-                                       float n_dot_v)
+DEVICE_FUNC float3 specular_base_scale(const THREAD_REF SurfaceInteraction& si, const THREAD_REF float3& F0, float n_dot_v)
 {
     // ggx_specular_albedo() is already clamped to one and specular_lobe_scale()
     // to [0,1], so the complement cannot go negative and needs no clamp of its own.
@@ -273,7 +301,7 @@ DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const THREAD_REF SurfaceInteraction&
     // require is that the lobe stays reachable on a dark fabric, which the max
     // guarantees; for a material without sheen this is exactly a no-op.
     const float sheen_lum = si.sheen * luminance(si.sheen_color);
-    w.diffuse = fmaxf(w.diffuse, diffuse_base * (1.0f - dt) * sheen_lum * diffuse_lobe_scale(si));
+    w.diffuse = fmaxf(w.diffuse, sheen_lum * diffuse_lobe_scale(si));
 
     w.diffuse_transmission = diffuse_base * dt * luminance(si.diffuse_transmission_color);
     w.diffuse_transmission = fmaxf(w.diffuse_transmission, 0.0f);
@@ -300,11 +328,31 @@ DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const THREAD_REF SurfaceInteraction&
     w.clearcoat = fmaxf(w.clearcoat, 0.0f);
 
     w.total = w.diffuse + w.diffuse_transmission + w.specular + w.transmission + w.clearcoat;
-    if (w.total < 1e-10f)
+    if (!(w.total > 0.0f))
     {
         w.total = 1.0f;
         w.specular = 1.0f; // fallback to specular
+        return w;
     }
+
+    // The shipped GPU generators return k/2^23. A positive interval narrower
+    // than that can disappear entirely after the float CDF additions, leaving a
+    // lobe that eval() sees but sample() cannot select. Four lattice cells leave
+    // room for those additions to round while changing only the proposal, never
+    // the material response. Exact represented categorical masses are unified in
+    // finding R; this guard establishes support in the meantime.
+    const float minPositiveWeight = w.total * (4.0f / 8388608.0f);
+    if (w.diffuse > 0.0f)
+        w.diffuse = fmaxf(w.diffuse, minPositiveWeight);
+    if (w.diffuse_transmission > 0.0f)
+        w.diffuse_transmission = fmaxf(w.diffuse_transmission, minPositiveWeight);
+    if (w.specular > 0.0f)
+        w.specular = fmaxf(w.specular, minPositiveWeight);
+    if (w.transmission > 0.0f)
+        w.transmission = fmaxf(w.transmission, minPositiveWeight);
+    if (w.clearcoat > 0.0f)
+        w.clearcoat = fmaxf(w.clearcoat, minPositiveWeight);
+    w.total = w.diffuse + w.diffuse_transmission + w.specular + w.transmission + w.clearcoat;
 
     return w;
 }
@@ -351,6 +399,8 @@ struct PbrReflectionTerms
 DEVICE_FUNC PbrReflectionTerms pbr_transmission_reflection(const THREAD_REF SurfaceInteraction& si,
                                                            float alpha,
                                                            float eta,
+                                                           float3 Nf,
+                                                           float3 H,
                                                            float NdotV_abs,
                                                            float NdotL_abs,
                                                            float NdotH,
@@ -373,15 +423,20 @@ DEVICE_FUNC PbrReflectionTerms pbr_transmission_reflection(const THREAD_REF Surf
     // A thin wall splits Fresnel at the shading normal once, a solid interface
     // splits it at the microfacet. Same rule sample() applies, and reading the
     // interface differently in the two places is what the pdfs then disagree by.
-    const float cosSplit = si.thin_walled ? NdotV_abs : VdotH;
-    const float F_val = fresnel_dielectric(cosSplit, eta);
+    const bool deltaTransmission = !si.thin_walled && refraction_is_delta(si.ior, si.exterior_ior);
+    const float cosSplit = (si.thin_walled || deltaTransmission) ? NdotV_abs : VdotH;
     const float3 F_film = transmission_fresnel(si, cosSplit, eta);
+    const float sampleFresnel = transmission_fresnel_probability(F_film);
 
-    const float D = ggx_ndf(alpha, NdotH);
-    const float G2 = ggx_smith_g2(alpha, NdotV_abs, NdotL_abs);
-
-    r.f = si.albedo * F_film * (D * G2 / (4.0f * NdotV_abs * NdotL_abs + 1e-10f)) * weight;
-    r.pdf = F_val * ggx_vndf_pdf(alpha, NdotH, NdotV_abs, VdotH);
+    const float shape = ggx_ndf_visibility(alpha, Nf, H, NdotV_abs, NdotL_abs);
+    r.f = make_float3(
+        saturating_nonnegative_product(
+            saturating_nonnegative_product(saturating_nonnegative_product(si.albedo.x, F_film.x), shape), weight),
+        saturating_nonnegative_product(
+            saturating_nonnegative_product(saturating_nonnegative_product(si.albedo.y, F_film.y), shape), weight),
+        saturating_nonnegative_product(
+            saturating_nonnegative_product(saturating_nonnegative_product(si.albedo.z, F_film.z), shape), weight));
+    r.pdf = sampleFresnel * ggx_vndf_pdf(alpha, Nf, H, NdotV_abs, VdotH);
     return r;
 }
 
@@ -418,7 +473,7 @@ DEVICE_FUNC PbrReflectionTerms pbr_reflection_terms(const THREAD_REF SurfaceInte
     const float NdotV_abs = fabsf(NdotV);
     const float NdotL_abs = fabsf(NdotL);
 
-    const float3 H = safe_normalize(V + L);
+    const float3 H = reflection_half_vector(V, L, Nf);
     const float NdotH = dot(Nf, H);
     const float VdotH = dot(V, H);
     if (!(NdotH > 0.0f) || !(VdotH > 0.0f))
@@ -428,7 +483,7 @@ DEVICE_FUNC PbrReflectionTerms pbr_reflection_terms(const THREAD_REF SurfaceInte
 
     // Entering-side eta on a thin wall, for the reason given in sample().
     const float eta = (!exiting || si.thin_walled) ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
-    const PbrReflectionTerms tr = pbr_transmission_reflection(si, alpha, eta, NdotV_abs, NdotL_abs, NdotH, VdotH);
+    const PbrReflectionTerms tr = pbr_transmission_reflection(si, alpha, eta, Nf, H, NdotV_abs, NdotL_abs, NdotH, VdotH);
     out.f = tr.f;
     out.pdf = pTransEff * tr.pdf;
 
@@ -447,39 +502,162 @@ DEVICE_FUNC PbrReflectionTerms pbr_reflection_terms(const THREAD_REF SurfaceInte
     const float3 f_diffuse = diffuse_lobe_scale(si) * si.albedo * M_1_PI_F * (1.0f - si.metallic) *
                              (1.0f - si.transmission) * (1.0f - saturate(si.diffuse_transmission));
 
-    const float3 F = specular_fresnel(si, F0, VdotH);
-    const float D = ggx_ndf_aniso(ax, ay, Hl);
-    const float G2 = ggx_smith_g2_aniso(ax, ay, Vl, Ll);
-    const float3 f_spec =
-        F * (D * G2 / (4.0f * NdotV * NdotL + 1e-10f)) * ggx_energy_compensation(F0, si.roughness, NdotV);
+    float3 f_spec = make_float3(0.0f);
+    float pdf_spec = 0.0f;
+    if (!anisotropic_ggx_is_delta(ax, ay))
+    {
+        const float3 F = specular_fresnel(si, F0, VdotH);
+        const float shape = ggx_ndf_visibility_aniso(ax, ay, Hl, Vl, Ll);
+        const float3 compensation = ggx_energy_compensation(F0, si.roughness, NdotV);
+        f_spec = make_float3(saturating_nonnegative_product(saturating_nonnegative_product(F.x, shape), compensation.x),
+                             saturating_nonnegative_product(saturating_nonnegative_product(F.y, shape), compensation.y),
+                             saturating_nonnegative_product(saturating_nonnegative_product(F.z, shape), compensation.z));
+        pdf_spec = ggx_vndf_pdf_aniso(ax, ay, Hl, Vl);
+    }
 
     float3 f_cc = make_float3(0.0f);
     float pdf_cc = 0.0f;
-    if (si.clearcoat > 0.0f)
+    if (si.clearcoat > 0.0f && alphaCoat >= BSDF_DELTA_ALPHA)
     {
-        const float D_cc = ggx_ndf(alphaCoat, NdotH);
-        const float G2_cc = ggx_smith_g2(alphaCoat, NdotV, NdotL);
         const float F_cc = fresnel_schlick_scalar(clearcoat_f0(si), VdotH);
-        const float cc_brdf = D_cc * G2_cc * F_cc / (4.0f * NdotV * NdotL + 1e-10f);
-        f_cc = make_float3(si.clearcoat * cc_brdf);
-        pdf_cc = ggx_vndf_pdf(alphaCoat, NdotH, NdotV, VdotH);
+        const float cc_brdf = saturating_nonnegative_product(F_cc, ggx_ndf_visibility(alphaCoat, N, H, NdotV, NdotL));
+        f_cc = make_float3(saturating_nonnegative_product(si.clearcoat, cc_brdf));
+        pdf_cc = ggx_vndf_pdf(alphaCoat, N, H, NdotV, VdotH);
     }
 
     const float3 f_sheen = sheen_brdf(si, NdotH, NdotL, NdotV);
 
-    out.f = out.f +
-            ((f_diffuse * specular_base_scale(si, F0, NdotV) + f_spec * specular_lobe_scale(si)) *
-                 clearcoat_base_scale(si, NdotV, NdotL) +
-             f_cc) *
-                sheen_base_scale(si, NdotV) +
-            f_sheen;
+    const float3 baseScale = specular_base_scale(si, F0, NdotV);
+    const float3 coatScale = clearcoat_base_scale(si, NdotV, NdotL);
+    const float specularScale = specular_lobe_scale(si);
+    const float sheenScale = sheen_base_scale(si, NdotV);
+    const float baseX = saturating_nonnegative_sum(saturating_nonnegative_product(f_diffuse.x, baseScale.x),
+                                                   saturating_nonnegative_product(f_spec.x, specularScale));
+    const float baseY = saturating_nonnegative_sum(saturating_nonnegative_product(f_diffuse.y, baseScale.y),
+                                                   saturating_nonnegative_product(f_spec.y, specularScale));
+    const float baseZ = saturating_nonnegative_sum(saturating_nonnegative_product(f_diffuse.z, baseScale.z),
+                                                   saturating_nonnegative_product(f_spec.z, specularScale));
+    const float surfaceX = saturating_nonnegative_sum(
+        saturating_nonnegative_product(
+            saturating_nonnegative_sum(saturating_nonnegative_product(baseX, coatScale.x), f_cc.x), sheenScale),
+        f_sheen.x);
+    const float surfaceY = saturating_nonnegative_sum(
+        saturating_nonnegative_product(
+            saturating_nonnegative_sum(saturating_nonnegative_product(baseY, coatScale.y), f_cc.y), sheenScale),
+        f_sheen.y);
+    const float surfaceZ = saturating_nonnegative_sum(
+        saturating_nonnegative_product(
+            saturating_nonnegative_sum(saturating_nonnegative_product(baseZ, coatScale.z), f_cc.z), sheenScale),
+        f_sheen.z);
+    out.f = make_float3(saturating_nonnegative_sum(out.f.x, surfaceX), saturating_nonnegative_sum(out.f.y, surfaceY),
+                        saturating_nonnegative_sum(out.f.z, surfaceZ));
 
     const float p_diffuse = w.diffuse * invTotal;
     const float p_specular = w.specular * invTotal;
     const float p_clearcoat = w.clearcoat * invTotal;
-    out.pdf = out.pdf + p_diffuse * cosine_hemisphere_pdf(NdotL) + p_specular * ggx_vndf_pdf_aniso(ax, ay, Hl, Vl) +
-              p_clearcoat * pdf_cc;
+    out.pdf = out.pdf + p_diffuse * cosine_hemisphere_pdf(NdotL) + p_specular * pdf_spec + p_clearcoat * pdf_cc;
     return out;
+}
+
+// All smooth reflective components land on the same macro mirror direction.
+// Their lobe identities are latent variables, not different path-space events,
+// so a selected component must return the sum of every compatible discrete mass
+// and the sum of their physical atom coefficients.
+struct PbrDeltaReflectionTerms
+{
+    float3 numerator;
+    float mass;
+};
+
+DEVICE_FUNC PbrDeltaReflectionTerms pbr_delta_reflection_terms(const THREAD_REF SurfaceInteraction& si,
+                                                               const THREAD_REF PbrLobeWeights& w,
+                                                               float invTotal,
+                                                               float pTransEff,
+                                                               float3 N,
+                                                               float3 V,
+                                                               bool baseSpecularDelta,
+                                                               float alpha,
+                                                               float alphaCoat,
+                                                               float3 F0)
+{
+    PbrDeltaReflectionTerms out;
+    out.numerator = make_float3(0.0f);
+    out.mass = 0.0f;
+
+    const float NdotV = dot(N, V);
+    const bool exiting = NdotV <= 0.0f;
+    const float NdotVAbs = fabsf(NdotV);
+
+    const float transmissionWeight = si.transmission * (1.0f - si.metallic);
+    if (alpha < BSDF_DELTA_ALPHA && transmissionWeight > 0.0f && pTransEff > 0.0f)
+    {
+        const float eta = (!exiting || si.thin_walled) ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
+        const float3 filmFresnel = transmission_fresnel(si, NdotVAbs, eta);
+        out.mass = out.mass + pTransEff * transmission_fresnel_probability(filmFresnel);
+        out.numerator = out.numerator + si.albedo * filmFresnel * transmissionWeight;
+    }
+
+    if (exiting)
+        return out;
+
+    const float sheenScale = sheen_base_scale(si, NdotV);
+    if (baseSpecularDelta && w.specular > 0.0f)
+    {
+        const float3 base = specular_fresnel(si, F0, NdotV) * specular_lobe_scale(si) *
+                            ggx_energy_compensation(F0, si.roughness, NdotV) * clearcoat_base_scale(si, NdotV, NdotV) *
+                            sheenScale;
+        out.mass = out.mass + w.specular * invTotal;
+        out.numerator = out.numerator + base;
+    }
+    if (alphaCoat < BSDF_DELTA_ALPHA && w.clearcoat > 0.0f)
+    {
+        const float coat = si.clearcoat * fresnel_schlick_scalar(clearcoat_f0(si), NdotV) * sheenScale;
+        out.mass = out.mass + w.clearcoat * invTotal;
+        out.numerator = out.numerator + make_float3(coat);
+    }
+    return out;
+}
+
+DEVICE_FUNC bool pbr_finish_delta_reflection(const THREAD_REF SurfaceInteraction& si,
+                                             const THREAD_REF PbrLobeWeights& w,
+                                             float invTotal,
+                                             float pTransEff,
+                                             float3 N,
+                                             float3 V,
+                                             bool baseSpecularDelta,
+                                             float alpha,
+                                             float alphaCoat,
+                                             float3 F0,
+                                             THREAD_REF BsdfSampleResult& result)
+{
+    const float3 Nf = dot(N, V) > 0.0f ? N : -N;
+    result.wi = reflect_dir(-V, Nf);
+    const PbrDeltaReflectionTerms terms =
+        pbr_delta_reflection_terms(si, w, invTotal, pTransEff, N, V, baseSpecularDelta, alpha, alphaCoat, F0);
+    if (!(terms.mass > 0.0f))
+        return false;
+    result.pdf = terms.mass;
+    result.bsdf_over_pdf = terms.numerator / terms.mass;
+    result.event_type = BSDF_EVENT_SPECULAR_REFLECTION;
+    return true;
+}
+
+DEVICE_FUNC bool pbr_finish_delta_transmission(const THREAD_REF SurfaceInteraction& si,
+                                               float pTransEff,
+                                               float fresnel,
+                                               float3 filmFresnel,
+                                               float etaFactor,
+                                               THREAD_REF BsdfSampleResult& result)
+{
+    const float mass = pTransEff * (1.0f - fresnel);
+    if (!(mass > 0.0f))
+        return false;
+    const float transmissionWeight = si.transmission * (1.0f - si.metallic);
+    const float3 numerator = si.albedo * (make_float3(1.0f) - filmFresnel) * (etaFactor * transmissionWeight);
+    result.pdf = mass;
+    result.bsdf_over_pdf = numerator / mass;
+    result.event_type = BSDF_EVENT_SPECULAR_TRANSMISSION;
+    return true;
 }
 
 // Forward-declared so every non-delta sample can be finished from the same full
@@ -583,6 +761,7 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
     // its isotropic form there, so isotropic materials are unchanged.
     float ax, ay;
     anisotropic_alpha(si.roughness, si.anisotropy, ax, ay);
+    const bool baseSpecularDelta = anisotropic_ggx_is_delta(ax, ay);
 
     // F0 for the specular lobe (mix between dielectric F0 and base color for metals)
     const float3 F0 = gltf_f0(si.ior, si.specular, si.specular_color, si.albedo, si.metallic);
@@ -613,15 +792,8 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
         if (NdotL <= 0.0f)
             return result;
 
-        // Every lobe that can reach this direction, from the one place that
-        // knows how -- including the transmission lobe's Fresnel reflection,
-        // which the hand-written copy here left out of the density.
-        const PbrReflectionTerms terms =
-            pbr_reflection_terms(si, w, inv_total, p_trans_eff, N, T, B, V, result.wi, ax, ay, alpha, alpha_cc, F0);
-        const float combined_pdf = fmaxf(terms.pdf, 1e-10f);
-
-        result.bsdf_over_pdf = terms.f * NdotL / combined_pdf;
-        result.pdf = combined_pdf;
+        if (!pbr_finish_continuous_sample(si, NdotL, result))
+            return result;
         result.event_type = BSDF_EVENT_DIFFUSE_REFLECTION;
     }
     else if (u_lobe < cdf_diffuse_tr)
@@ -652,6 +824,13 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
     else if (!exiting && u_lobe < cdf_specular)
     {
         // ===== SPECULAR LOBE ==============================================
+        if (baseSpecularDelta)
+        {
+            pbr_finish_delta_reflection(
+                si, w, inv_total, p_trans_eff, N, V, baseSpecularDelta, alpha, alpha_cc, F0, result);
+            return result;
+        }
+
         const float3 V_local = world_to_local(V, T, B, N);
         const float3 H_local = ggx_vndf_sample_aniso(V_local, ax, ay, u1, u2);
         const float3 H = local_to_world(H_local, T, B, N);
@@ -664,13 +843,9 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
         if (NdotL <= 0.0f)
             return result;
 
-        const PbrReflectionTerms terms =
-            pbr_reflection_terms(si, w, inv_total, p_trans_eff, N, T, B, V, result.wi, ax, ay, alpha, alpha_cc, F0);
-        const float combined_pdf = fmaxf(terms.pdf, 1e-10f);
-
-        result.bsdf_over_pdf = terms.f * NdotL / combined_pdf;
-        result.pdf = combined_pdf;
-        result.event_type = (alpha < BSDF_DELTA_ALPHA) ? BSDF_EVENT_SPECULAR_REFLECTION : BSDF_EVENT_GLOSSY_REFLECTION;
+        if (!pbr_finish_continuous_sample(si, NdotL, result))
+            return result;
+        result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
     }
     else if (exiting || u_lobe < cdf_transmission)
     {
@@ -695,21 +870,6 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
         const float eta = (entering || si.thin_walled) ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
         const bool is_smooth = (alpha < BSDF_DELTA_ALPHA);
 
-        // What this lobe is worth in the material, over how often it is picked.
-        //
-        // standard_pbr_eval() scales the BTDF by transmission * (1 - metallic),
-        // because a half-transparent material transmits half as much; the
-        // sampler divides by the lobe's *selection* probability, which is a
-        // different number derived from the lobe weights. The two agreed only
-        // when they were both one, i.e. on fully transmissive dielectric glass,
-        // and drifted apart as transmission fell -- 8.7% at 0.75, 18.9% at 0.5,
-        // with sample and eval describing two different materials in between.
-        //
-        // Exactly one on transmission = 1, metallic = 0, so nothing about plain
-        // glass moves.
-        const float transWeight = si.transmission * (1.0f - si.metallic);
-        const float transLobeScale = transWeight / fmaxf(p_trans_eff, 1e-6f);
-
         // Thin wall: Cycles / OpenPBR split Fresnel at the shading normal once,
         // then run a reflection lobe at `alpha` and a transmission lobe at the
         // Kulla-Conty-raised alpha. Using a microfacet F here made the coin flip
@@ -718,20 +878,21 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
         if (si.thin_walled)
         {
             const float NdotV_abs = fabsf(NdotV);
-            const float F_val = fresnel_dielectric(NdotV_abs, eta);
             const float3 F_film = transmission_fresnel(si, NdotV_abs, eta);
-            const float3 reflectTint = F_film / fmaxf(F_val, 1e-4f);
-            const float3 refractTint = (make_float3(1.0f) - F_film) / fmaxf(1.0f - F_val, 1e-4f);
+            const float sampleFresnel = transmission_fresnel_probability(F_film);
 
-            if (u_fresnel < F_val)
+            if (u_fresnel < sampleFresnel)
             {
-                float3 H = Nf;
-                if (!is_smooth)
+                if (is_smooth)
                 {
-                    const float3 V_local = world_to_local(V, T, B, Nf);
-                    const float3 H_local = ggx_vndf_sample(V_local, alpha, u1, u2);
-                    H = local_to_world(H_local, T, B, Nf);
+                    pbr_finish_delta_reflection(
+                        si, w, inv_total, p_trans_eff, N, V, baseSpecularDelta, alpha, alpha_cc, F0, result);
+                    return result;
                 }
+
+                const float3 V_local = world_to_local(V, T, B, Nf);
+                const float3 H_local = ggx_vndf_sample(V_local, alpha, u1, u2);
+                const float3 H = local_to_world(H_local, T, B, Nf);
                 const float VdotH = dot(V, H);
                 if (VdotH <= 0.0f)
                     return result;
@@ -741,26 +902,9 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
                 if (NdotL <= 0.0f)
                     return result;
 
-                if (is_smooth)
-                {
-                    result.bsdf_over_pdf = si.albedo * reflectTint * transLobeScale;
-                    result.pdf = p_trans_eff * F_val;
-                    result.event_type = BSDF_EVENT_SPECULAR_REFLECTION;
-                }
-                else
-                {
-                    // Rough: the same shared evaluation the reflection lobes and
-                    // eval() use, so this direction has one density rather than
-                    // the transmission lobe's own share reported as the whole of
-                    // it. Below the delta threshold the lobe is a mirror and
-                    // keeps the discrete-probability form above.
-                    const PbrReflectionTerms terms = pbr_reflection_terms(
-                        si, w, inv_total, p_trans_eff, N, T, B, V, result.wi, ax, ay, alpha, alpha_cc, F0);
-                    const float combined_pdf = fmaxf(terms.pdf, 1e-10f);
-                    result.bsdf_over_pdf = terms.f * NdotL / combined_pdf;
-                    result.pdf = combined_pdf;
-                    result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
-                }
+                if (!pbr_finish_continuous_sample(si, NdotL, result))
+                    return result;
+                result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
                 return result;
             }
 
@@ -785,9 +929,7 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
 
             if (t_smooth)
             {
-                result.bsdf_over_pdf = si.albedo * refractTint * transLobeScale;
-                result.pdf = p_trans_eff * (1.0f - F_val);
-                result.event_type = BSDF_EVENT_SPECULAR_TRANSMISSION;
+                pbr_finish_delta_transmission(si, p_trans_eff, sampleFresnel, F_film, 1.0f, result);
             }
             else
             {
@@ -817,13 +959,12 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
         if (VdotH <= 0.0f)
             return result;
 
-        const float F_val = fresnel_dielectric(VdotH, eta);
-        const float3 F_film = transmission_fresnel(si, VdotH, eta);
-        // Expected value F_film with a coin flipped at F_val.
-        const float3 reflectTint = F_film / fmaxf(F_val, 1e-4f);
-        const float3 refractTint = (make_float3(1.0f) - F_film) / fmaxf(1.0f - F_val, 1e-4f);
+        const bool deltaTransmission = refraction_is_delta(si.ior, si.exterior_ior);
+        const float fresnelCosine = deltaTransmission ? fabsf(NdotV) : VdotH;
+        const float3 F_film = transmission_fresnel(si, fresnelCosine, eta);
+        const float sampleFresnel = transmission_fresnel_probability(F_film);
 
-        if (u_fresnel < F_val)
+        if (u_fresnel < sampleFresnel)
         {
             // Specular reflection within transmission lobe
             result.wi = reflect_dir(-V, H);
@@ -833,51 +974,65 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
 
             if (is_smooth)
             {
-                result.bsdf_over_pdf = si.albedo * reflectTint * transLobeScale;
-                result.pdf = p_trans_eff * F_val;
-                result.event_type = BSDF_EVENT_SPECULAR_REFLECTION;
+                pbr_finish_delta_reflection(
+                    si, w, inv_total, p_trans_eff, N, V, baseSpecularDelta, alpha, alpha_cc, F0, result);
             }
             else
             {
                 // Rough: the same shared evaluation the reflection lobes and
                 // eval() use, so this direction has one density rather than the
                 // transmission lobe's own share reported as the whole of it.
-                const PbrReflectionTerms terms = pbr_reflection_terms(
-                    si, w, inv_total, p_trans_eff, N, T, B, V, result.wi, ax, ay, alpha, alpha_cc, F0);
-                const float combined_pdf = fmaxf(terms.pdf, 1e-10f);
-                result.bsdf_over_pdf = terms.f * NdotL / combined_pdf;
-                result.pdf = combined_pdf;
+                if (!pbr_finish_continuous_sample(si, NdotL, result))
+                    return result;
                 result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
             }
         }
         else
         {
+            if (deltaTransmission)
+            {
+                result.wi = -V;
+                pbr_finish_delta_transmission(si, p_trans_eff, sampleFresnel, F_film, eta * eta, result);
+                return result;
+            }
+
             // Solid refraction
             float3 wi_refracted;
-            const bool valid = refract_dir(-V, H, eta, wi_refracted);
+            const bool valid = refract_dir(-V, H, eta, VdotH, wi_refracted);
             if (!valid)
             {
-                // Total internal reflection
+                // The Fresnel test makes this branch unreachable for exact TIR,
+                // but keep the numerical fallback in the same measure as the H
+                // that generated it.
                 result.wi = reflect_dir(-V, H);
-                result.bsdf_over_pdf = si.albedo * transLobeScale;
-                result.pdf = p_trans_eff;
-                result.event_type = BSDF_EVENT_SPECULAR_REFLECTION;
+                if (is_smooth)
+                {
+                    pbr_finish_delta_reflection(
+                        si, w, inv_total, p_trans_eff, N, V, baseSpecularDelta, alpha, alpha_cc, F0, result);
+                }
+                else
+                {
+                    const float NdotL = dot(Nf, result.wi);
+                    if (!pbr_finish_continuous_sample(si, NdotL, result))
+                        return result;
+                    result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
+                }
                 return result;
             }
 
             result.wi = safe_normalize(wi_refracted);
+            const float signedNdotL = dot(Nf, result.wi);
+            if (!(signedNdotL < 0.0f))
+                return result;
 
             if (is_smooth)
             {
                 const float factor = eta * eta;
-                result.bsdf_over_pdf = si.albedo * refractTint * factor * transLobeScale;
-                result.pdf = p_trans_eff * (1.0f - F_val);
-                result.event_type = BSDF_EVENT_SPECULAR_TRANSMISSION;
+                pbr_finish_delta_transmission(si, p_trans_eff, sampleFresnel, F_film, factor, result);
             }
             else
             {
-                const float NdotL = fabsf(dot(Nf, result.wi));
-                if (!pbr_finish_continuous_sample(si, NdotL, result))
+                if (!pbr_finish_continuous_sample(si, -signedNdotL, result))
                     return result;
                 result.event_type = BSDF_EVENT_GLOSSY_TRANSMISSION;
             }
@@ -886,6 +1041,13 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
     else
     {
         // ===== CLEARCOAT LOBE =============================================
+        if (alpha_cc < BSDF_DELTA_ALPHA)
+        {
+            pbr_finish_delta_reflection(
+                si, w, inv_total, p_trans_eff, N, V, baseSpecularDelta, alpha, alpha_cc, F0, result);
+            return result;
+        }
+
         const float3 V_local = world_to_local(V, T, B, N);
         const float3 H_local = ggx_vndf_sample(V_local, alpha_cc, u1, u2);
         const float3 H = local_to_world(H_local, T, B, N);
@@ -898,13 +1060,9 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
         if (NdotL <= 0.0f)
             return result;
 
-        const PbrReflectionTerms terms =
-            pbr_reflection_terms(si, w, inv_total, p_trans_eff, N, T, B, V, result.wi, ax, ay, alpha, alpha_cc, F0);
-        const float combined_pdf = fmaxf(terms.pdf, 1e-10f);
-
-        result.bsdf_over_pdf = terms.f * NdotL / combined_pdf;
-        result.pdf = combined_pdf;
-        result.event_type = (alpha_cc < BSDF_DELTA_ALPHA) ? BSDF_EVENT_SPECULAR_REFLECTION : BSDF_EVENT_GLOSSY_REFLECTION;
+        if (!pbr_finish_continuous_sample(si, NdotL, result))
+            return result;
+        result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
     }
 
     return result;
@@ -1034,7 +1192,7 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
         // and is evaluated below the same way sample() produces it.
         const float eta_rel_eval = fmaxf(si.ior / fmaxf(si.exterior_ior, 1e-4f), 1.0f);
         const float alpha_t_eval = si.thin_walled ? thin_glass_transmission_alpha(alpha, eta_rel_eval) : alpha;
-        if (alpha < BSDF_DELTA_ALPHA || (si.thin_walled && alpha_t_eval < BSDF_DELTA_ALPHA))
+        if ((si.thin_walled ? alpha_t_eval : alpha) < BSDF_DELTA_ALPHA)
             return result;
 
         if (si.transmission <= 0.0f)
@@ -1059,53 +1217,91 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
             if (NdotL_r <= 0.0f)
                 return result;
 
-            const float3 H = safe_normalize(V + wi_r);
+            const float3 H = reflection_half_vector(V, wi_r, Nf);
             const float NdotH = dot(Nf, H);
             const float VdotH = dot(V, H);
             if (NdotH <= 0.0f || VdotH <= 0.0f)
                 return result;
 
-            const float F_val = fresnel_dielectric(NdotV_abs, eta);
             const float3 F_film = transmission_fresnel(si, NdotV_abs, eta);
-            const float D = ggx_ndf(alpha_t_eval, NdotH);
-            const float G2 = ggx_smith_g2(alpha_t_eval, NdotV_abs, NdotL_r);
-            const float3 brdf = (make_float3(1.0f) - F_film) * (D * G2 / (4.0f * NdotV_abs * NdotL_r + 1e-10f));
-            result.bsdf = result.bsdf + si.albedo *
-                                            make_float3(fmaxf(brdf.x, 0.0f), fmaxf(brdf.y, 0.0f), fmaxf(brdf.z, 0.0f)) *
-                                            (1.0f - si.metallic) * si.transmission;
-            result.pdf = result.pdf + p_trans_eff * (1.0f - F_val) * ggx_vndf_pdf(alpha_t_eval, NdotH, NdotV_abs, VdotH);
+            const float sampleFresnel = transmission_fresnel_probability(F_film);
+            const float shape = ggx_ndf_visibility(alpha_t_eval, Nf, H, NdotV_abs, NdotL_r);
+            const float3 brdf = make_float3(saturating_nonnegative_product(1.0f - F_film.x, shape),
+                                            saturating_nonnegative_product(1.0f - F_film.y, shape),
+                                            saturating_nonnegative_product(1.0f - F_film.z, shape));
+            const float weight = (1.0f - si.metallic) * si.transmission;
+            result.bsdf = make_float3(
+                saturating_nonnegative_sum(
+                    result.bsdf.x, saturating_nonnegative_product(
+                                       saturating_nonnegative_product(si.albedo.x, fmaxf(brdf.x, 0.0f)), weight)),
+                saturating_nonnegative_sum(
+                    result.bsdf.y, saturating_nonnegative_product(
+                                       saturating_nonnegative_product(si.albedo.y, fmaxf(brdf.y, 0.0f)), weight)),
+                saturating_nonnegative_sum(
+                    result.bsdf.z, saturating_nonnegative_product(
+                                       saturating_nonnegative_product(si.albedo.z, fmaxf(brdf.z, 0.0f)), weight)));
+            result.pdf =
+                result.pdf + p_trans_eff * (1.0f - sampleFresnel) * ggx_vndf_pdf(alpha_t_eval, Nf, H, NdotV_abs, VdotH);
             return result;
         }
 
-        // eta_i * V + eta_t * wi, normalised -- see refraction_half_vector().
-        const float3 H = refraction_half_vector(V, wi, eta, Nf);
-
-        const float NdotH = dot(Nf, H);
-        const float VdotH = dot(V, H);
-        const float LdotH = dot(wi, H);
-
-        if (NdotH <= 0.0f || VdotH <= 0.0f)
+        // At equal represented indices every microfacet refracts to exactly
+        // -V. That is one atom (possibly alongside a rough iridescent reflection
+        // lobe), not a solid-angle density.
+        if (refraction_is_delta(si.ior, si.exterior_ior))
             return result;
 
-        const float F_val = fresnel_dielectric(VdotH, eta);
-        const float3 F_film = transmission_fresnel(si, VdotH, eta);
-        const float D = ggx_ndf(alpha, NdotH);
-        const float G2 = ggx_smith_g2(alpha, NdotV_abs, NdotL_abs);
+        // eta_i * V + eta_t * wi, normalised -- see refraction_half_vector().
+        CompensatedFloat robustVdotH = compensatedSum(0.0f, 0.0f);
+        const float3 H = refraction_half_vector(V, wi, eta, Nf, robustVdotH);
 
-        const float denom = (eta * VdotH + LdotH);
-        const float factor = fabsf(VdotH * LdotH) / (NdotV_abs * NdotL_abs + 1e-10f);
-        const float3 btdf = (make_float3(1.0f) - F_film) * (D * G2 * eta * eta * factor / (denom * denom + 1e-10f));
+        const float NdotH = dot(Nf, H);
+        const float VdotH = saturate(compensatedValue(robustVdotH));
+        const float LdotH = dot(wi, H);
+
+        if (!(NdotH >= 0.0f) || VdotH <= 0.0f)
+            return result;
+
+        const float3 F_film = transmission_fresnel(si, robustVdotH, eta);
+        const float sampleFresnel = transmission_fresnel_probability(F_film);
+        const float denom = refraction_residual_length(V, wi, eta);
+        const float denomSquared = denom * denom;
+        if (!(denomSquared > 0.0f))
+            return result;
+        float transmissionScale = fabsf(VdotH);
+        const float etaSquared = saturating_nonnegative_product(eta, eta);
+        transmissionScale =
+            saturating_nonnegative_product(transmissionScale, saturating_nonnegative_product(4.0f, etaSquared));
+        transmissionScale = saturating_nonnegative_product(transmissionScale, refraction_jacobian(V, wi, eta, LdotH));
+        const float transmissionShape =
+            saturating_nonnegative_product(transmissionScale, ggx_ndf_visibility(alpha, Nf, H, NdotV_abs, NdotL_abs));
+        const float3 btdf = make_float3(saturating_nonnegative_product(1.0f - F_film.x, transmissionShape),
+                                        saturating_nonnegative_product(1.0f - F_film.y, transmissionShape),
+                                        saturating_nonnegative_product(1.0f - F_film.z, transmissionShape));
 
         // Accumulated, not assigned: a material can be both diffusely and
         // specularly transmissive, and the diffuse term above has already
         // written into the same hemisphere.
         const float3 btdf_pos = make_float3(fmaxf(btdf.x, 0.0f), fmaxf(btdf.y, 0.0f), fmaxf(btdf.z, 0.0f));
-        result.bsdf = result.bsdf + si.albedo * btdf_pos * (1.0f - si.metallic) * si.transmission;
+        const float weight = (1.0f - si.metallic) * si.transmission;
+        result.bsdf = make_float3(
+            saturating_nonnegative_sum(
+                result.bsdf.x,
+                saturating_nonnegative_product(saturating_nonnegative_product(si.albedo.x, btdf_pos.x), weight)),
+            saturating_nonnegative_sum(
+                result.bsdf.y,
+                saturating_nonnegative_product(saturating_nonnegative_product(si.albedo.y, btdf_pos.y), weight)),
+            saturating_nonnegative_sum(
+                result.bsdf.z,
+                saturating_nonnegative_product(saturating_nonnegative_product(si.albedo.z, btdf_pos.z), weight)));
 
         // The same pair standard_pbr_sample() applies; see the note there.
-        const float dwh_dwi = refraction_jacobian(eta, VdotH, LdotH);
-        const float pdf_h = ggx_vndf_pdf_half(alpha, NdotH, NdotV_abs, VdotH);
-        result.pdf = result.pdf + p_trans_eff * (1.0f - F_val) * pdf_h * dwh_dwi;
+        const float dwh_dwi = refraction_jacobian(V, wi, eta, LdotH);
+        const float pdf_h = ggx_vndf_pdf_half(alpha, Nf, H, NdotV_abs, VdotH);
+        const float transmissionPdf = saturating_nonnegative_product(
+            saturating_nonnegative_product(saturating_nonnegative_product(p_trans_eff, 1.0f - sampleFresnel), pdf_h),
+            dwh_dwi);
+        result.pdf = saturating_nonnegative_sum(result.pdf, transmissionPdf);
     }
 
     return result;

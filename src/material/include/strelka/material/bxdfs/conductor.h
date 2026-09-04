@@ -17,11 +17,12 @@
 #include "../fresnel.h"
 #include "../microfacet.h"
 
+DEVICE_FUNC BsdfEvalResult conductor_eval(const THREAD_REF SurfaceInteraction& si, float3 wi);
+
 // ---------------------------------------------------------------------------
 // Sample
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfSampleResult conductor_sample(const THREAD_REF SurfaceInteraction& si,
-                                              float u1, float u2)
+DEVICE_FUNC BsdfSampleResult conductor_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2)
 {
     BsdfSampleResult result;
 
@@ -32,12 +33,22 @@ DEVICE_FUNC BsdfSampleResult conductor_sample(const THREAD_REF SurfaceInteractio
     if (NdotV <= 0.0f)
     {
         result.bsdf_over_pdf = make_float3(0.0f);
-        result.pdf           = 0.0f;
-        result.event_type    = BSDF_EVENT_ABSORB;
+        result.pdf = 0.0f;
+        result.event_type = BSDF_EVENT_ABSORB;
         return result;
     }
 
     const float alpha = alpha_from_roughness(si.roughness);
+
+    if (alpha < BSDF_DELTA_ALPHA)
+    {
+        result.wi = reflect_dir(-V, N);
+        const float3 F = fresnel_schlick(si.albedo, NdotV);
+        result.bsdf_over_pdf = F * ggx_energy_compensation(si.albedo, si.roughness, NdotV);
+        result.pdf = 1.0f;
+        result.event_type = BSDF_EVENT_SPECULAR_REFLECTION;
+        return result;
+    }
 
     // Build local frame
     float3 T, B;
@@ -55,8 +66,8 @@ DEVICE_FUNC BsdfSampleResult conductor_sample(const THREAD_REF SurfaceInteractio
     if (VdotH <= 0.0f)
     {
         result.bsdf_over_pdf = make_float3(0.0f);
-        result.pdf           = 0.0f;
-        result.event_type    = BSDF_EVENT_ABSORB;
+        result.pdf = 0.0f;
+        result.event_type = BSDF_EVENT_ABSORB;
         return result;
     }
     result.wi = reflect_dir(-V, H);
@@ -65,35 +76,23 @@ DEVICE_FUNC BsdfSampleResult conductor_sample(const THREAD_REF SurfaceInteractio
     if (NdotL <= 0.0f)
     {
         result.bsdf_over_pdf = make_float3(0.0f);
-        result.pdf           = 0.0f;
-        result.event_type    = BSDF_EVENT_ABSORB;
+        result.pdf = 0.0f;
+        result.event_type = BSDF_EVENT_ABSORB;
         return result;
     }
 
-    const float NdotH = dot(N, H);
+    const BsdfEvalResult evaluated = conductor_eval(si, result.wi);
+    if (!(evaluated.pdf > 0.0f))
+    {
+        result.bsdf_over_pdf = make_float3(0.0f);
+        result.pdf = 0.0f;
+        result.event_type = BSDF_EVENT_ABSORB;
+        return result;
+    }
 
-    // Fresnel -- for conductors, F0 = base_color (tinted metal)
-    const float3 F = fresnel_schlick(si.albedo, VdotH);
-
-    // Smith G2 (height-correlated)
-    const float G2 = ggx_smith_g2(alpha, NdotV, NdotL);
-
-    // G1 for the outgoing direction (needed for VNDF PDF cancellation)
-    const float G1 = ggx_smith_g1(alpha, NdotV);
-
-    // bsdf_over_pdf = F * G2 / G1  (VNDF sampling simplification), then the
-    // multiple-scattering energy the single-scatter lobe drops. The pdf is
-    // deliberately left alone: compensation rescales the BRDF, not the density
-    // it was sampled from.
-    const float3 ms = ggx_energy_compensation(si.albedo, si.roughness, NdotV);
-    result.bsdf_over_pdf = F * (G2 / (G1 + 1e-10f)) * ms;
-
-    // PDF in solid-angle measure
-    result.pdf = ggx_vndf_pdf(alpha, NdotH, NdotV, VdotH);
-
-    result.event_type = (alpha < BSDF_DELTA_ALPHA)
-                      ? BSDF_EVENT_SPECULAR_REFLECTION
-                      : BSDF_EVENT_GLOSSY_REFLECTION;
+    result.bsdf_over_pdf = evaluated.bsdf * (NdotL / evaluated.pdf);
+    result.pdf = evaluated.pdf;
+    result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
 
     return result;
 }
@@ -101,8 +100,7 @@ DEVICE_FUNC BsdfSampleResult conductor_sample(const THREAD_REF SurfaceInteractio
 // ---------------------------------------------------------------------------
 // Evaluate
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfEvalResult conductor_eval(const THREAD_REF SurfaceInteraction& si,
-                                          float3 wi)
+DEVICE_FUNC BsdfEvalResult conductor_eval(const THREAD_REF SurfaceInteraction& si, float3 wi)
 {
     BsdfEvalResult result;
 
@@ -114,33 +112,40 @@ DEVICE_FUNC BsdfEvalResult conductor_eval(const THREAD_REF SurfaceInteraction& s
     if (NdotV <= 0.0f || NdotL <= 0.0f)
     {
         result.bsdf = make_float3(0.0f);
-        result.pdf  = 0.0f;
+        result.pdf = 0.0f;
         return result;
     }
 
     const float alpha = alpha_from_roughness(si.roughness);
+    if (alpha < BSDF_DELTA_ALPHA)
+    {
+        result.bsdf = make_float3(0.0f);
+        result.pdf = 0.0f;
+        return result;
+    }
 
-    const float3 H = safe_normalize(V + wi);
+    const float3 H = reflection_half_vector(V, wi, N);
     const float NdotH = dot(N, H);
     const float VdotH = dot(V, H);
 
     if (NdotH <= 0.0f || VdotH <= 0.0f)
     {
         result.bsdf = make_float3(0.0f);
-        result.pdf  = 0.0f;
+        result.pdf = 0.0f;
         return result;
     }
 
-    const float D = ggx_ndf(alpha, NdotH);
-    const float G2 = ggx_smith_g2(alpha, NdotV, NdotL);
     const float3 F = fresnel_schlick(si.albedo, VdotH);
 
     // Cook-Torrance: D * G2 * F / (4 * NdotV * NdotL), plus the multiple
     // scattering the single-scatter lobe drops. Must match conductor_sample()
     // exactly or MIS blends two different BRDFs.
     const float3 ms = ggx_energy_compensation(si.albedo, si.roughness, NdotV);
-    result.bsdf = F * (D * G2 / (4.0f * NdotV * NdotL + 1e-10f)) * ms;
-    result.pdf  = ggx_vndf_pdf(alpha, NdotH, NdotV, VdotH);
+    const float shape = ggx_ndf_visibility(alpha, N, H, NdotV, NdotL);
+    result.bsdf = make_float3(saturating_nonnegative_product(saturating_nonnegative_product(F.x, shape), ms.x),
+                              saturating_nonnegative_product(saturating_nonnegative_product(F.y, shape), ms.y),
+                              saturating_nonnegative_product(saturating_nonnegative_product(F.z, shape), ms.z));
+    result.pdf = ggx_vndf_pdf(alpha, N, H, NdotV, VdotH);
 
     return result;
 }
@@ -159,14 +164,16 @@ DEVICE_FUNC float conductor_pdf(const THREAD_REF SurfaceInteraction& si, float3 
         return 0.0f;
 
     const float alpha = alpha_from_roughness(si.roughness);
-    const float3 H = safe_normalize(V + wi);
+    if (alpha < BSDF_DELTA_ALPHA)
+        return 0.0f;
+    const float3 H = reflection_half_vector(V, wi, N);
     const float NdotH = dot(N, H);
     const float VdotH = dot(V, H);
 
     if (NdotH <= 0.0f || VdotH <= 0.0f)
         return 0.0f;
 
-    return ggx_vndf_pdf(alpha, NdotH, NdotV, VdotH);
+    return ggx_vndf_pdf(alpha, N, H, NdotV, VdotH);
 }
 
 #endif // STRELKA_BXDF_CONDUCTOR_H
