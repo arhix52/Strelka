@@ -17,6 +17,7 @@
 #include "MetalPostProcess.h"
 #include "MetalScenePreparation.h"
 #include <host/scene_stream.h>
+#include <host/render_work_audit.h>
 #include "MetalWavefrontIntegrator.h"
 #include <array>
 #include <atomic>
@@ -300,9 +301,23 @@ private:
     std::array<uint64_t, WORK_COUNTER_COUNT> mRenderWorkCounters{};
     std::map<std::string, uint64_t> mRenderWorkDispatches;
     metal::MetalAccelStructure::AuditCounts mRenderWorkAsCounts;
+    metal::MetalLights::AuditCounts mRenderWorkLightCounts;
+    uint64_t mRenderWorkMaxTlasRefitsPerFrame = 0;
+    uint64_t mRenderWorkMaxLightUploadsPerFrame = 0;
+    uint64_t mRenderWorkMaxTemporalMappingsPerFrame = 0;
     uint64_t mRenderWorkFrames = 0;
     uint64_t mRenderWorkSpp = 0;
     double mRenderWorkGpuMs = 0.0;
+#ifndef NDEBUG
+    struct AuditedCommandBuffer
+    {
+        uint64_t id = 0;
+        const char* label = nullptr;
+        metal::CommandBufferAuditSample counts;
+    };
+    std::vector<AuditedCommandBuffer> mRenderWorkCommandBuffers;
+    uint64_t mNextRenderWorkCommandBufferId = 1;
+#endif
     void retainCommandBufferForSync(MTL::CommandBuffer* pCmd);
 
     void loadEnvMap(const std::string& texturePath);

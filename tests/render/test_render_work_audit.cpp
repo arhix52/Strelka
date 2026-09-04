@@ -2,6 +2,7 @@
 
 #include <host/render_work_audit.h>
 
+using oka::metal::CommandBufferAuditSample;
 using oka::metal::RenderWorkInvariantSample;
 
 TEST_CASE("render-work guides reuse the radiance traversal")
@@ -71,4 +72,26 @@ TEST_CASE("render-work empty guide queues do not dispatch")
     CHECK(oka::metal::guideDispatchesMatchActiveQueue(sample));
     sample.guideDispatches = 0;
     CHECK_FALSE(oka::metal::guideDispatchesMatchActiveQueue(sample));
+}
+
+TEST_CASE("render-work command buffers commit once")
+{
+    CommandBufferAuditSample sample{
+        .creations = 1, .encoderCreations = 1, .dispatches = 1, .endEncodings = 1, .commits = 1, .waits = 1, .readbacks = 1
+    };
+    CHECK(oka::metal::commandBufferCommitsOnce(sample));
+    ++sample.commits;
+    CHECK_FALSE(oka::metal::commandBufferCommitsOnce(sample));
+}
+
+TEST_CASE("render-work moving lights update once per frame")
+{
+    RenderWorkInvariantSample sample{ .frames = 32,
+                                      .maxTlasRefitsPerFrame = 1,
+                                      .maxLightUploadsPerFrame = 1,
+                                      .maxTemporalMappingsPerFrame = 1,
+                                      .primaryDispatches = 32 };
+    CHECK(oka::metal::movingLightFrameWorkIsBounded(sample));
+    sample.maxTlasRefitsPerFrame = 2;
+    CHECK_FALSE(oka::metal::movingLightFrameWorkIsBounded(sample));
 }

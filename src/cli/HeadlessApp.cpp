@@ -199,6 +199,10 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.profileStages = *v;
     if (auto v = tbl["render"]["audit_render_work"].value<bool>())
         cfg.auditRenderWork = *v;
+    if (auto v = tbl["render"]["audit_frames"].value<int64_t>())
+        cfg.auditFrames = (uint32_t)std::clamp<int64_t>(*v, 0, 1024);
+    if (auto v = tbl["render"]["audit_moving_lights"].value<int64_t>())
+        cfg.auditMovingLights = (uint32_t)std::clamp<int64_t>(*v, 0, 4096);
     if (auto v = tbl["render"]["upscale"].value<bool>())
         cfg.upscale = *v;
     if (auto v = tbl["render"]["upscale_factor"].value<double>())
@@ -455,7 +459,8 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/writeAov", 0);
     m_settings->setAs<bool>("render/pt/denoise", m_config.denoise);
     m_settings->setAs<uint32_t>("render/pt/profileStages", m_config.profileStages ? 1u : 0u);
-    m_settings->setAs<uint32_t>("render/pt/auditRenderWork", m_config.auditRenderWork ? 1u : 0u);
+    m_settings->setAs<uint32_t>(
+        "render/pt/auditRenderWork", m_config.auditRenderWork && m_config.auditMovingLights == 0 ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/risCandidates", m_config.risCandidates);
     m_settings->setAs<bool>("render/pt/restirDIEnabled", m_config.restirDIEnabled);
     m_settings->setAs<uint32_t>("render/pt/initialCandidateCount", m_config.initialCandidateCount);
@@ -477,7 +482,7 @@ void HeadlessApp::populateSettings()
     // 0 = load textures at full resolution.
     m_settings->setAs<uint32_t>("render/texture/maxDimension", m_config.textureMaxDim);
     // Headless: nothing picks, nothing saves the scene back out.
-    m_settings->setAs<bool>("scene/releaseHostGeometry", true);
+    m_settings->setAs<bool>("scene/releaseHostGeometry", m_config.auditMovingLights == 0);
     m_settings->setAs<uint32_t>("render/texture/downscale", m_config.textureDownscale);
     // The diffuse/specular split of the first event. Off by default: nothing
     // reads it back, and writing it costs four scattered records per pixel per
@@ -769,6 +774,20 @@ int HeadlessApp::run()
         }
     }
 
+    std::vector<uint32_t> auditMovingLightIds;
+    auditMovingLightIds.reserve(m_config.auditMovingLights);
+    for (uint32_t i = 0; i < m_config.auditMovingLights; ++i)
+    {
+        Scene::UniformLightDesc light;
+        light.type = LIGHT_TYPE_SPHERE;
+        light.name = fmt::format("audit moving light {}", i);
+        light.position = glm::vec3((float(i % 32u) - 15.5f) * 0.08f, 0.25f + float(i - i % 32u) * (0.08f / 32.0f), 1.0f);
+        light.radius = 0.015f;
+        light.intensity = 0.02f;
+        light.visibleToCamera = false;
+        auditMovingLightIds.push_back(m_scene->createLight(light));
+    }
+
     populateSettings();
 
     STRELKA_INFO("Initializing renderer ({}x{}, {} spp)...", m_config.width, m_config.height, m_config.spp);
@@ -792,48 +811,79 @@ int HeadlessApp::run()
 
     const auto startTime = high_resolution_clock::now();
     bool announced = false;
-    // Headroom sweep. Every variant is measured inside one process and one
-    // thermal state, cycling round-robin, because the alternative -- a run per
-    // variant -- puts a scene load and a fresh clock ramp between the numbers
-    // being compared. Measured sequentially, this probe reported that adding
-    // dependent loads made the frame *faster*, which is drift and not headroom.
-    while (m_sharedCtx->mSubframeIndex < m_config.spp)
+    if (!auditMovingLightIds.empty())
     {
+        // Build scene and canonical analytic-light BLAS before counters start.
         m_render->renderSync(outputBuf.get());
-
-        if (!announced && !m_config.capturePath.empty())
+        auto moveAuditLights = [&](uint32_t frame) {
+            for (uint32_t i = 0; i < auditMovingLightIds.size(); ++i)
+            {
+                Scene::UniformLightDesc light = m_scene->getLightsDesc()[auditMovingLightIds[i]];
+                const float phase = float(frame) * 0.2f + float(i) * 0.01f;
+                light.position = glm::vec3((float(i % 32u) - 15.5f) * 0.08f + std::sin(phase) * 0.02f,
+                                           0.25f + float(i - i % 32u) * (0.08f / 32.0f), 1.0f + std::cos(phase) * 0.02f);
+                m_scene->setLight(auditMovingLightIds[i], light);
+            }
+        };
+        // First transform update may grow the refittable TLAS. Warm it too.
+        moveAuditLights(0);
+        m_render->renderSync(outputBuf.get());
+        m_settings->setAs<uint32_t>("render/pt/auditRenderWork", 1u);
+        std::cout << "\nSTRELKA_RENDER_BEGIN\n" << std::flush;
+        const uint32_t frames = std::max(m_config.auditFrames, 1u);
+        for (uint32_t frame = 0; frame < frames; ++frame)
         {
-            // One frame, in steady state: the point of the capture is the
-            // shading kernels, and starting it at launch would record the
-            // acceleration structure build instead.
-            //
-            // It writes every resource the frame reads, so the document is the
-            // size of the scene on the device: the pine forest produces 7.7 GB.
-            // Register allocation depends on the shader and its function
-            // constants, not on how much geometry it traverses, so a small
-            // scene with the same constants answers the same question for a few
-            // megabytes.
-            m_render->beginGpuCapture(m_config.capturePath);
+            moveAuditLights(frame + 1u);
             m_render->renderSync(outputBuf.get());
-            m_render->endGpuCapture();
-            std::cout << fmt::format("\ncaptured one frame -> {}\n", m_config.capturePath) << std::flush;
+            printProgress(frame + 1u, frames, m_render->getLastRenderTimeMs());
         }
-        if (!announced)
+    }
+    else
+    {
+        // Headroom sweep. Every variant is measured inside one process and one
+        // thermal state, cycling round-robin, because the alternative -- a run per
+        // variant -- puts a scene load and a fresh clock ramp between the numbers
+        // being compared. Measured sequentially, this probe reported that adding
+        // dependent loads made the frame *faster*, which is drift and not headroom.
+        while (m_sharedCtx->mSubframeIndex < m_config.spp)
         {
-            // A marker for anything sampling the GPU from outside.
-            //
-            // Hardware counters are a time average, and on a heavy scene the
-            // loading, the texture cache and the acceleration structure build
-            // are most of a short run -- sample across them and the numbers
-            // describe a BVH build rather than a render. This is printed after
-            // the *first* sample has completed, so everything expensive and
-            // one-off is already behind it, and flushed because stdout is block
-            // buffered when redirected: without the flush a profiler waiting on
-            // this line waits forever.
-            announced = true;
-            std::cout << "\nSTRELKA_RENDER_BEGIN\n" << std::flush;
+            m_render->renderSync(outputBuf.get());
+
+            if (!announced && !m_config.capturePath.empty())
+            {
+                // One frame, in steady state: the point of the capture is the
+                // shading kernels, and starting it at launch would record the
+                // acceleration structure build instead.
+                //
+                // It writes every resource the frame reads, so the document is the
+                // size of the scene on the device: the pine forest produces 7.7 GB.
+                // Register allocation depends on the shader and its function
+                // constants, not on how much geometry it traverses, so a small
+                // scene with the same constants answers the same question for a few
+                // megabytes.
+                m_render->beginGpuCapture(m_config.capturePath);
+                m_render->renderSync(outputBuf.get());
+                m_render->endGpuCapture();
+                std::cout << fmt::format("\ncaptured one frame -> {}\n", m_config.capturePath) << std::flush;
+            }
+            if (!announced)
+            {
+                // A marker for anything sampling the GPU from outside.
+                //
+                // Hardware counters are a time average, and on a heavy scene the
+                // loading, the texture cache and the acceleration structure build
+                // are most of a short run -- sample across them and the numbers
+                // describe a BVH build rather than a render. This is printed after
+                // the *first* sample has completed, so everything expensive and
+                // one-off is already behind it, and flushed because stdout is block
+                // buffered when redirected: without the flush a profiler waiting on
+                // this line waits forever.
+                announced = true;
+                std::cout << "\nSTRELKA_RENDER_BEGIN\n" << std::flush;
+            }
+            printProgress(
+                static_cast<uint32_t>(m_sharedCtx->mSubframeIndex), m_config.spp, m_render->getLastRenderTimeMs());
         }
-        printProgress(static_cast<uint32_t>(m_sharedCtx->mSubframeIndex), m_config.spp, m_render->getLastRenderTimeMs());
     }
     const auto totalTime = duration_cast<milliseconds>(high_resolution_clock::now() - startTime);
 

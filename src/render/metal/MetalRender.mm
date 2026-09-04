@@ -2819,6 +2819,7 @@ void MetalRender::renderSync(Buffer* output)
     // build runs to completion here rather than one stage per call.
     finishSceneBuild(output);
     const metal::MetalAccelStructure::AuditCounts asBefore = mAccel.auditCounts();
+    const metal::MetalLights::AuditCounts lightsBefore = mLights.auditCounts();
     const auto tEncode = std::chrono::steady_clock::now();
     render(output);
     const auto tSubmitted = std::chrono::steady_clock::now();
@@ -2925,9 +2926,18 @@ void MetalRender::renderSync(Buffer* output)
     if (getSettings()->getAs<uint32_t>("render/pt/auditRenderWork") != 0)
     {
         const metal::MetalAccelStructure::AuditCounts asAfter = mAccel.auditCounts();
+        const metal::MetalLights::AuditCounts lightsAfter = mLights.auditCounts();
+        const uint64_t tlasRefits = asAfter.tlasRefits - asBefore.tlasRefits;
+        const uint64_t lightUploads = lightsAfter.uploads - lightsBefore.uploads;
+        const uint64_t temporalMappings = lightsAfter.temporalMappingUpdates - lightsBefore.temporalMappingUpdates;
         mRenderWorkAsCounts.blasBuilds += asAfter.blasBuilds - asBefore.blasBuilds;
         mRenderWorkAsCounts.tlasBuilds += asAfter.tlasBuilds - asBefore.tlasBuilds;
-        mRenderWorkAsCounts.tlasRefits += asAfter.tlasRefits - asBefore.tlasRefits;
+        mRenderWorkAsCounts.tlasRefits += tlasRefits;
+        mRenderWorkLightCounts.uploads += lightUploads;
+        mRenderWorkLightCounts.temporalMappingUpdates += temporalMappings;
+        mRenderWorkMaxTlasRefitsPerFrame = std::max(mRenderWorkMaxTlasRefitsPerFrame, tlasRefits);
+        mRenderWorkMaxLightUploadsPerFrame = std::max(mRenderWorkMaxLightUploadsPerFrame, lightUploads);
+        mRenderWorkMaxTemporalMappingsPerFrame = std::max(mRenderWorkMaxTemporalMappingsPerFrame, temporalMappings);
         const uint32_t* counters = mIntegrator.renderWorkCounters();
         if (counters)
         {
@@ -2966,13 +2976,52 @@ void MetalRender::renderSync(Buffer* output)
             const size_t rowBytes = (packedRowBytes + 255u) & ~size_t(255u);
             MTL::Buffer* staging = mDevice->newBuffer(rowBytes * h, MTL::ResourceStorageModeShared);
             MTL::CommandBuffer* cmd = mCommandQueue->commandBuffer();
+#ifndef NDEBUG
+            AuditedCommandBuffer* audited = nullptr;
+            if (getSettings()->getAs<uint32_t>("render/pt/auditRenderWork") != 0)
+            {
+                mRenderWorkCommandBuffers.push_back(
+                    { mNextRenderWorkCommandBufferId++, "spatialUpscaleReadback", { .creations = 1 } });
+                audited = &mRenderWorkCommandBuffers.back();
+            }
+#endif
             cmd->retain();
             MTL::BlitCommandEncoder* blit = cmd->blitCommandEncoder();
+#ifndef NDEBUG
+            if (audited)
+            {
+                ++audited->counts.encoderCreations;
+            }
+#endif
             blit->copyFromTexture(
                 tex, 0, 0, MTL::Origin(0, 0, 0), MTL::Size(w, h, 1), staging, 0, rowBytes, rowBytes * h);
+#ifndef NDEBUG
+            if (audited)
+            {
+                ++audited->counts.dispatches;
+            }
+#endif
             blit->endEncoding();
+#ifndef NDEBUG
+            if (audited)
+            {
+                ++audited->counts.endEncodings;
+            }
+#endif
             cmd->commit();
+#ifndef NDEBUG
+            if (audited)
+            {
+                ++audited->counts.commits;
+            }
+#endif
             cmd->waitUntilCompleted();
+#ifndef NDEBUG
+            if (audited)
+            {
+                ++audited->counts.waits;
+            }
+#endif
             cmd->release();
 
             auto* dst = static_cast<float*>(((MetalBuffer*)output)->getNativePtr()->contents());
@@ -2986,6 +3035,12 @@ void MetalRender::renderSync(Buffer* output)
                     dst[(y * w * 4) + x] = halfToFloat(half);
                 }
             }
+#ifndef NDEBUG
+            if (audited)
+            {
+                ++audited->counts.readbacks;
+            }
+#endif
             staging->release();
         }
     }
@@ -3076,6 +3131,21 @@ std::string MetalRender::renderWorkAuditJson() const
     }
     dispatches += '}';
 
+    std::string commandBuffers = "[";
+#ifndef NDEBUG
+    for (size_t i = 0; i < mRenderWorkCommandBuffers.size(); ++i)
+    {
+        const AuditedCommandBuffer& commandBuffer = mRenderWorkCommandBuffers[i];
+        const metal::CommandBufferAuditSample& counts = commandBuffer.counts;
+        commandBuffers += fmt::format(
+            "{}{{\"debugId\":{},\"label\":\"{}\",\"creation\":{},\"encoderCreation\":{},"
+            "\"dispatch\":{},\"endEncoding\":{},\"commit\":{},\"wait\":{},\"readback\":{}}}",
+            i == 0 ? "" : ",", commandBuffer.id, commandBuffer.label, counts.creations, counts.encoderCreations,
+            counts.dispatches, counts.endEncodings, counts.commits, counts.waits, counts.readbacks);
+    }
+#endif
+    commandBuffers += ']';
+
     return fmt::format(
         "{{\"frames\":{},\"pixels\":{},\"spp\":{},\"gpuTimeMs\":{:.3f},"
         "\"generatedPrimaryRays\":{},\"extendRays\":{},\"guideOnlyRays\":{},\"shadowRays\":{},"
@@ -3090,11 +3160,13 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"restirSpatial\":{{\"active\":{},\"dispatched\":{}}},"
         "\"restirFinal\":{{\"active\":{},\"dispatched\":{}}}}},"
         "\"blasBuilds\":{},\"tlasBuilds\":{},\"tlasRefits\":{},"
+        "\"maxTlasRefitsPerFrame\":{},\"lightUploads\":{},\"maxLightUploadsPerFrame\":{},"
+        "\"temporalLightMappingUpdates\":{},\"maxTemporalLightMappingsPerFrame\":{},"
         "\"fullBufferClears\":0,\"fullBufferCopies\":0,\"bytesCopied\":0,"
         "\"memory\":{{\"wavefrontAllocatedBytes\":{},\"restirAllocatedBytes\":{},"
         "\"restirAccessedWithNeeBytes\":0}},"
         "\"manualAnalyticLightTests\":{},\"missLightEvaluations\":{},"
-        "\"dispatchCount\":{},\"pipelineDispatches\":{}}}",
+        "\"dispatchCount\":{},\"pipelineDispatches\":{},\"commandBuffers\":{}}}",
         mRenderWorkFrames, static_cast<uint64_t>(width) * height, mRenderWorkSpp, mRenderWorkGpuMs, c[WORK_PRIMARY_RAYS],
         array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE), c[WORK_INTERSECTION_QUERIES],
         c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES], c[WORK_RESTIR_CANDIDATE_QUERIES],
@@ -3106,9 +3178,10 @@ std::string MetalRender::renderWorkAuditJson() const
         roundedThreads(c[WORK_GUIDE_ACTIVE_ITEMS]), c[WORK_RESTIR_SPATIAL_ITEMS],
         restirSpatialDispatchCount != 0u ? firstHitDispatched : 0u, c[WORK_RESTIR_FINAL_ITEMS],
         restirFinalDispatchCount != 0u ? firstHitDispatched : 0u, mRenderWorkAsCounts.blasBuilds,
-        mRenderWorkAsCounts.tlasBuilds, mRenderWorkAsCounts.tlasRefits, mIntegrator.queueBytes(),
-        mIntegrator.restirBytes(), c[WORK_MANUAL_ANALYTIC_LIGHT_TESTS], c[WORK_MISS_LIGHT_EVALUATIONS], dispatchTotal,
-        dispatches);
+        mRenderWorkAsCounts.tlasBuilds, mRenderWorkAsCounts.tlasRefits, mRenderWorkMaxTlasRefitsPerFrame,
+        mRenderWorkLightCounts.uploads, mRenderWorkMaxLightUploadsPerFrame, mRenderWorkLightCounts.temporalMappingUpdates,
+        mRenderWorkMaxTemporalMappingsPerFrame, mIntegrator.queueBytes(), mIntegrator.restirBytes(),
+        c[WORK_MANUAL_ANALYTIC_LIGHT_TESTS], c[WORK_MISS_LIGHT_EVALUATIONS], dispatchTotal, dispatches, commandBuffers);
 }
 
 Buffer* MetalRender::createBuffer(const BufferDesc& desc)

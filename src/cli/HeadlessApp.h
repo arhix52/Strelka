@@ -54,6 +54,8 @@ struct RenderConfig
     // is off unless asked for.
     bool profileStages = false;
     bool auditRenderWork = false;
+    uint32_t auditFrames = 0;
+    uint32_t auditMovingLights = 0;
     std::string capturePath; // --capture: one steady-state frame to a .gputrace
     // Render below the output resolution and let MetalFX scale up. Off by
     // default because it changes what the image *is*, which an offline render

@@ -22,6 +22,22 @@ struct RenderWorkInvariantSample
     uint64_t restirFinalDispatches = 0;
     uint64_t guideActiveItems = 0;
     uint64_t guideDispatches = 0;
+    uint64_t frames = 0;
+    uint64_t maxTlasRefitsPerFrame = 0;
+    uint64_t maxLightUploadsPerFrame = 0;
+    uint64_t maxTemporalMappingsPerFrame = 0;
+    uint64_t primaryDispatches = 0;
+};
+
+struct CommandBufferAuditSample
+{
+    uint64_t creations = 0;
+    uint64_t encoderCreations = 0;
+    uint64_t dispatches = 0;
+    uint64_t endEncodings = 0;
+    uint64_t commits = 0;
+    uint64_t waits = 0;
+    uint64_t readbacks = 0;
 };
 
 inline bool guidesShareSurfaceTraversal(const RenderWorkInvariantSample& off, const RenderWorkInvariantSample& on)
@@ -68,6 +84,17 @@ inline bool restirDispatchesMatch(bool enabled,
 inline bool guideDispatchesMatchActiveQueue(const RenderWorkInvariantSample& sample)
 {
     return sample.guideDispatches == (sample.guideActiveItems != 0u ? 1u : 0u);
+}
+
+inline bool commandBufferCommitsOnce(const CommandBufferAuditSample& sample)
+{
+    return sample.creations == 1u && sample.commits == 1u;
+}
+
+inline bool movingLightFrameWorkIsBounded(const RenderWorkInvariantSample& sample)
+{
+    return sample.maxTlasRefitsPerFrame <= 1u && sample.maxLightUploadsPerFrame <= 1u &&
+           sample.maxTemporalMappingsPerFrame <= 1u && sample.primaryDispatches == sample.frames;
 }
 
 } // namespace oka::metal

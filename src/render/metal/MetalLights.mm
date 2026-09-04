@@ -109,6 +109,9 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
                          const std::vector<std::string>& projectorImages,
                          MetalTextures& textures)
 {
+#ifndef NDEBUG
+    ++mAuditCounts.uploads;
+#endif
     loadProjectorImages(projectorImages, textures);
 
     // This backend's UniformLight carries one field the host's Scene::Light does
@@ -128,6 +131,9 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
         powers.push_back(analyticLightPower(light));
     }
     const LightSelectionTable selection = buildLightSelectionAlias(powers);
+#ifndef NDEBUG
+    ++mAuditCounts.temporalMappingUpdates;
+#endif
     mTotalPower = selection.totalPower;
 
     const size_t lightBufferSize = sizeof(UniformLight) * lightDescs.size();

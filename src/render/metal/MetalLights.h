@@ -18,6 +18,11 @@ namespace oka::metal
 class MetalLights
 {
 public:
+    struct AuditCounts
+    {
+        uint64_t uploads = 0;
+        uint64_t temporalMappingUpdates = 0;
+    };
     MetalLights() = default;
     ~MetalLights();
 
@@ -55,6 +60,10 @@ public:
     {
         return mLightBuffer && mInfiniteLightCount != 0u ? mLightBuffer->gpuAddress() + mInfiniteLightIndexOffset : 0u;
     }
+    AuditCounts auditCounts() const
+    {
+        return mAuditCounts;
+    }
     /// For the Metal 4 residency set: an argument table names these by handle,
     /// and a handle whose allocation is not resident is a page fault rather than
     /// a validation message.
@@ -79,6 +88,7 @@ private:
     /// edit -- dragging an intensity slider is one per frame -- and decoding a
     /// 4K slide each time would make the light unusable to author with.
     std::vector<std::string> mProjectorImagePaths;
+    AuditCounts mAuditCounts;
 };
 
 } // namespace oka::metal
