@@ -6,8 +6,9 @@
 #include <strelka/sceneloader/iesloader.h>
 
 #include <cmath>
-#include <vector>
+#include <limits>
 #include <numbers>
+#include <vector>
 
 // ============================================================================
 // test_ies_math.cpp -- how a photometric table is interpolated, and what it
@@ -219,6 +220,15 @@ TEST_CASE("a degenerate table evaluates to nothing rather than reading past itse
     // the loader unfolds it to two before this is ever reached.
     CHECK(iesEvaluate(v.data(), 2, h.data(), 1, candela.data(), 45.0f, 0.0f) == 0.0f);
     CHECK(iesEvaluate(v.data(), 1, h.data(), 1, candela.data(), 45.0f, 0.0f) == 0.0f);
+}
+
+TEST_CASE("packed profile indices are guarded before float to int conversion")
+{
+    CHECK(packedNonnegativeIndex(-1.0f) == -1);
+    CHECK(packedNonnegativeIndex(0.0f) == 0);
+    CHECK(packedNonnegativeIndex(123.0f) == 123);
+    CHECK(packedNonnegativeIndex(std::numeric_limits<float>::quiet_NaN()) == -1);
+    CHECK(packedNonnegativeIndex(2147483648.0f) == -1);
 }
 
 // ---------------------------------------------------------------------------

@@ -455,7 +455,7 @@ static __inline__ float sampleIesCandela(device const IesGpuBufferHeader* iesBuf
                                          device const UniformLight& l,
                                          const float3 dirFromLight)
 {
-    const int profileIdx = (int)l.points[0].y;
+    const int profileIdx = packedNonnegativeIndex(l.points[0].y);
     if (!iesBuffer || profileIdx < 0 || (uint32_t)profileIdx >= iesBuffer->profileCount)
     {
         return 1.0f;

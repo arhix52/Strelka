@@ -41,6 +41,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | AD. Projector texture index bounds | An unregistered or `INT_MAX` image slot reaches OptiX's bindless texture lookup without a count check; numeric float conversion can overflow before lookup | empty/valid/extreme/negative Scene slots and OptiX lookup-contract mutation | canonicalize invalid authored slots to `-1` and publish/check the OptiX table count before indexing | FIXED | Existing upload bound; shared packed slot | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | AE. Acceleration-structure light transforms | Disabled invalid analytic lights retain raw NaN/Inf/singular editor-proxy transforms even with TLAS mask zero | create/edit finite-and-nonsingular instance contract plus raw-transform mutation | publish a finite nonsingular inert proxy transform whenever the authored proxy transform is unsafe | FIXED | Shared safe instance input | Shared safe instance input; external CUDA required | this commit | UNVERIFIED |
 | AF. Light scalar boundary validation | NaN projector aspect has shader radiance but host PMF zero; NaN intensity/range and infinite radius/angles reach device records; invalid environment controls propagate NaN | packed-record finiteness, radiance/PMF support equivalence, environment canonicalization, invalid-input mutations | turn invalid analytic records into one finite disabled sentinel; sanitize environment radiometry and reduce rotation before backend upload | FIXED | Shared Scene boundary | Shared Scene boundary; external CUDA required | this commit | UNVERIFIED |
+| AG. IES profile index bounds | Unregistered/`INT_MAX` IES indices are numerically rounded to float and cast back before shader bounds checks | empty/valid/extreme/negative Scene slots and guarded-conversion mutation | canonicalize invalid slots to `-1` and use a shared pre-cast finite/range guard in Metal and OptiX | FIXED | Shared guard compiled | Shared guard; external CUDA required | this commit | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -1327,3 +1328,21 @@ is out of scope unless it blocks validation.
   nonnegative, and rotation is reduced modulo 360 degrees in `Scene::setEnvLight`, before either backend consumes it.
   The pre-fix focused suite failed 19/26 assertions; it now passes 26/26 in Debug, Release, and ASan+UBSan, including
   zero host selection power for every disabled analytic mutation.
+
+## Finding AG: IES profile index bounds
+
+- Random variables and measure: none. IES lookup is deterministic radiance modulation after light selection and does
+  not add a PMF or density.
+- Support: a registered profile slot uses its packed angular table; a missing or invalid slot uses isotropic fallback.
+  No slot may perform an out-of-range float-to-int conversion or index beyond the registered profile array.
+- Conditional/marginal PDF, selection PMF, delta/continuous classification, and MIS: unchanged. Both strategies use
+  the same checked modulation for the already selected light event.
+- Current-HEAD reproducer and mutation: authored `iesProfile=0` with an empty table is packed as zero, while
+  `INT32_MAX` rounds numerically to `2147483648.0f`. Both shaders cast that value to signed int before their existing
+  profile-count check. The focused pre-fix test fails empty/extreme/negative canonicalization; raw conversion remains
+  the mutation.
+- Implementation and result: the authored integer is validated against the registered Scene table and exact float
+  representation before packing; invalid slots become `-1`, and only an actually registered IES profile requires a
+  profile frame. One finite signed-range decoder is used by Metal, OptiX, and the projector slot. The pre-fix Scene
+  test failed 3/5 assertions; the focused suite now passes 10/10 in Debug, Release, and ASan+UBSan, and production
+  Metal compiles.

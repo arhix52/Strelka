@@ -133,6 +133,31 @@ TEST_CASE("projector image slots stay inside the registered texture table")
     CHECK(scene.getLights()[id].points[0].z == -1.0f);
 }
 
+TEST_CASE("IES profile slots stay inside the registered table")
+{
+    Scene scene;
+    Scene::UniformLightDesc desc{};
+    desc.type = LIGHT_TYPE_POINT;
+    desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+    desc.iesProfile = 0;
+    const uint32_t id = scene.createLight(desc);
+    CHECK(scene.getLights()[id].points[0].y == -1.0f);
+
+    Scene::IesProfile profile;
+    profile.path = "profiles/first.ies";
+    REQUIRE(scene.addIesProfile(profile) == 0);
+    scene.setLight(id, desc);
+    CHECK(scene.getLights()[id].points[0].y == 0.0f);
+
+    desc.iesProfile = std::numeric_limits<int32_t>::max();
+    scene.setLight(id, desc);
+    CHECK(scene.getLights()[id].points[0].y == -1.0f);
+
+    desc.iesProfile = -2;
+    scene.setLight(id, desc);
+    CHECK(scene.getLights()[id].points[0].y == -1.0f);
+}
+
 TEST_CASE("punctual packing rejects non-finite positions and collapsed profile frames")
 {
     Scene scene;

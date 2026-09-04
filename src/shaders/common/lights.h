@@ -518,15 +518,7 @@ static __inline__ __device__ float areaFalloff(const UniformLight& l, float dist
 // from UniformLightDesc::projectorImage.
 static __inline__ __device__ int projectorImageIndex(const UniformLight& l)
 {
-    const float slot = l.points[0].z;
-    // 2147483520 is the largest binary32 value inside the signed 32-bit range.
-    // Guard before the cast: NaN and the rounded float form of INT_MAX would
-    // otherwise make the conversion itself undefined or backend-specific.
-    if (!(slot >= 0.0f) || slot > 2147483520.0f)
-    {
-        return -1;
-    }
-    return (int)slot;
+    return packedNonnegativeIndex(l.points[0].z);
 }
 
 /// Where a direction leaving a projector lands on the image it throws.
@@ -566,7 +558,7 @@ static __inline__ __device__ float sampleIesCandela(const IesGpuBufferHeader* ie
                                                     const UniformLight& l,
                                                     const float3 dirFromLight)
 {
-    const int profileIdx = (int)l.points[0].y;
+    const int profileIdx = packedNonnegativeIndex(l.points[0].y);
     if (!iesBuffer || profileIdx < 0 || (unsigned int)profileIdx >= iesBuffer->profileCount)
     {
         return 1.0f;

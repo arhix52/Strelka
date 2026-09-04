@@ -134,6 +134,21 @@ void disablePackedLight(Scene::Light& light, int type)
     light.color = glm::float4(0.0f, 0.0f, 0.0f, 1.0f);
 }
 
+float packedRegisteredIndex(int32_t index, size_t count)
+{
+    if (index < 0)
+    {
+        return -1.0f;
+    }
+    const size_t slot = static_cast<size_t>(index);
+    if (slot >= count)
+    {
+        return -1.0f;
+    }
+    const float packed = static_cast<float>(index);
+    return static_cast<int64_t>(packed) == index ? packed : -1.0f;
+}
+
 } // namespace
 
 uint32_t Scene::acquireMeshSlot(Mesh*& mesh)
@@ -891,21 +906,13 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         // IES profile: -1 goes in that slot even when the desc still remembers a
         // file from before the type was switched.
         const bool isProjector = desc.type == LIGHT_TYPE_PROJECTOR;
-        float projectorSlot = -1.0f;
-        if (isProjector && desc.projectorImage >= 0 &&
-            static_cast<size_t>(desc.projectorImage) < mProjectorImages.size())
-        {
-            const float candidate = static_cast<float>(desc.projectorImage);
-            if (static_cast<int64_t>(candidate) == desc.projectorImage)
-            {
-                projectorSlot = candidate;
-            }
-        }
+        const float iesSlot = isProjector ? -1.0f : packedRegisteredIndex(desc.iesProfile, mIesProfiles.size());
+        const float projectorSlot = isProjector ? packedRegisteredIndex(desc.projectorImage, mProjectorImages.size()) :
+                                                  -1.0f;
         mLights[lightId].points[0] =
-            glm::float4(desc.radius, isProjector ? -1.0f : (float)desc.iesProfile,
-                        projectorSlot, isProjector ? desc.projectorAspect : 0.0f);
+            glm::float4(desc.radius, iesSlot, projectorSlot, isProjector ? desc.projectorAspect : 0.0f);
         mLights[lightId].points[1] = localTransform * glm::float4(0.f, 0.f, 0.f, 1.f);
-        const bool needsProfileFrame = isProjector || desc.iesProfile >= 0;
+        const bool needsProfileFrame = isProjector || iesSlot >= 0.0f;
         const OrthonormalLightFrame profileFrame = transformedProfileFrame(localTransform);
         mLights[lightId].points[2] = glm::float4(profileFrame.x, 0.0f);
         mLights[lightId].points[3] = glm::float4(profileFrame.y, 0.0f);

@@ -39,6 +39,14 @@
 #    define STRELKA_IES_PTR
 #endif
 
+/// Decode an integer index stored numerically in a float field without making
+/// the float-to-int conversion itself undefined. NaN fails the first comparison;
+/// 2147483520 is the largest binary32 value inside the signed 32-bit range.
+DEVICE_FUNC int packedNonnegativeIndex(float value)
+{
+    return value >= 0.0f && value <= 2147483520.0f ? (int)value : -1;
+}
+
 /// Catmull-Rom through four samples, evaluated at x in [0, 1] between b and c.
 /// Same expression as Cycles' cubic_interp(), so the two agree sample for
 /// sample and not merely in shape.
