@@ -1084,7 +1084,9 @@ TEST_CASE("far sampled ellipsoid directions survive affine inversion")
     const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.608120680f, 0.929035604f);
     REQUIRE(sample.areaPdf > 0.0f);
 
-    const float maxAxis = affineAxisScale(axisX, axisY, axisZ);
+    const float maxAxis = std::max({ std::abs(axisX.x), std::abs(axisX.y), std::abs(axisX.z), std::abs(axisY.x),
+                                     std::abs(axisY.y), std::abs(axisY.z), std::abs(axisZ.x), std::abs(axisZ.y),
+                                     std::abs(axisZ.z) });
     const float3 origin = sample.point + (3000.0f * maxAxis) * sample.normal;
     float expectedDistance = 0.0f;
     const float3 direction = finiteDirectionAndDistance(sample.point - origin, expectedDistance);

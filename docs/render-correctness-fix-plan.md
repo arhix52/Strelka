@@ -49,6 +49,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | AL. Finite distant boundary measure | ordinary sun angle `0.00465`: q-halving raises one direction's multiplicity from 215 to 385 | exact rejected-boundary pair plus cap support/PDF regression | retry rejected float representatives from independent light dimensions | FIXED | Shader compiled | Shared source; external CUDA required | this commit | FIXED |
 | AM. OptiX primary sharp-distant atom | empty scene with camera direction exactly equal to a zero-angle distant axis is black only on OptiX | shared primary/specular/non-specular atom ownership regression | primary rays and specular chains use one shared delta-path predicate | FIXED | Shared predicate | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | AN. Coincident analytic emitter components | two identical rectangles both participate in NEE but the BSDF hit retained only the first identity | opposing-normal geometry, per-component MIS shares, and backend enumeration contract | shade every emitter intersecting the nearest represented event with its own PMF/MIS | FIXED | Shader compiled | Source fixed; external CUDA required | this commit | UNVERIFIED |
+| AO. Ponytail full review | whole range `172c35b..HEAD`, call-site and field-usage scan | existing environment, ABI, shader, and affine regressions | remove Metal's unused legacy environment normalizer and a test-only production helper; use C++20 `std::numbers` | FIXED | Shader compiled; Uniforms -16 bytes | OptiX dirty user file preserved | this commit | FIXED |
 
 ## Per-finding probability records
 
@@ -1497,3 +1498,12 @@ is out of scope unless it blocks validation.
   lights and accumulates those with exactly the same represented intersection distance, evaluating each component's
   sidedness, radiance, area PDF, selection PMF, and MIS weight independently. The regression covers the old
   single-identity mutation, opposing normals, both MIS pairs, and both backend call sites.
+
+## Finding AO: Ponytail full review
+
+- `ShaderTypes.h`: delete Metal's legacy `envPdfScale`; production uses `EnvAliasEntry::solidAnglePdf`. This also
+  removes the matching host state/uploads and shrinks `Uniforms` from 832 to 816 bytes.
+- `analytic_light.h`: delete `affineAxisScale()`, which had no production caller; its only test uses `std::max`.
+- `ibl_alias_table.h`: replace the private `M_PI` macro with C++20 `std::numbers::pi_v<double>`.
+- Kept deliberately: the 23-line alias wrapper is consumed by the preserved standalone GPU audit, and the shared
+  analytic/emissive helpers have production callers in both backends. Net cleanup: 21 lines removed.

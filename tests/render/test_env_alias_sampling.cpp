@@ -307,7 +307,7 @@ TEST_CASE("represented environment density integrates to one")
     const auto built = buildSolidAngleIblAliasTable(px.data(), w, h);
 
     // sum over texels of pdf(texel) * solid angle(texel) must be 1, which is the
-    // statement that lum * envPdfScale really is a density on the sphere.
+    // statement that the represented alias density is normalized on the sphere.
     double integral = 0.0;
     for (int y = 0; y < h; ++y)
     {
@@ -347,7 +347,7 @@ TEST_CASE("solid-angle samples and evaluated PDFs use the same texel measure")
 
         const auto built = buildSolidAngleIblAliasTable(px.data(), w, h);
         const auto table = toDeviceTable(built.alias);
-        REQUIRE(built.envPdfScale > 0.0f);
+        REQUIRE(!built.alias.empty());
         std::mt19937 rng(0x51A17u + (uint32_t)(w * 31 + h));
         std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
 

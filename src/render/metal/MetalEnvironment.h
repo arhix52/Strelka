@@ -14,7 +14,6 @@ struct EnvMapState
     MTL::Texture* mapTexture = nullptr;
     MTL::Texture* backgroundTexture = nullptr;
     MTL::Buffer* aliasBuffer = nullptr;
-    float pdfScale = 0.0f;
     double totalPower = 0.0;
     float autoScale = 1.0f;
     bool loaded = false;

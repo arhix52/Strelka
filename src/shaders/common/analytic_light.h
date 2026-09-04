@@ -320,13 +320,6 @@ DEVICE_FUNC int compensatedExponent(CompensatedFloat value, int externalExponent
     return exponent + externalExponent;
 }
 
-DEVICE_FUNC float affineAxisScale(float3 axisX, float3 axisY, float3 axisZ)
-{
-    float scale = fmaxf(fabsf(axisX.x), fmaxf(fabsf(axisX.y), fabsf(axisX.z)));
-    scale = fmaxf(scale, fmaxf(fabsf(axisY.x), fmaxf(fabsf(axisY.y), fabsf(axisY.z))));
-    return fmaxf(scale, fmaxf(fabsf(axisZ.x), fmaxf(fabsf(axisZ.y), fabsf(axisZ.z))));
-}
-
 // Returns numerator / |cofactor(A) n| and its unit direction. Scaling each
 // world row independently keeps every determinant term representable; keeping
 // each component as a two-float expansion avoids the precision loss from

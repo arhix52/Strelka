@@ -882,11 +882,11 @@ void MetalRender::init()
     static_assert(offsetof(::Vertex, uv) == 20);
     static_assert(offsetof(::Vertex, uv1) == 24);
     static_assert(offsetof(::Vertex, color) == 28);
-    static_assert(offsetof(Uniforms, openpbrParams) == 784);
-    static_assert(offsetof(Uniforms, openpbrTextures) == 792);
-    static_assert(offsetof(Uniforms, guideRays) == 800);
-    static_assert(offsetof(Uniforms, emissiveMeshes) == 808);
-    static_assert(offsetof(Uniforms, emissiveTriangles) == 816);
+    static_assert(offsetof(Uniforms, openpbrParams) == 768);
+    static_assert(offsetof(Uniforms, openpbrTextures) == 776);
+    static_assert(offsetof(Uniforms, guideRays) == 784);
+    static_assert(offsetof(Uniforms, emissiveMeshes) == 792);
+    static_assert(offsetof(Uniforms, emissiveTriangles) == 800);
     static_assert(offsetof(Material, baseColorTexture) == 256);
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");

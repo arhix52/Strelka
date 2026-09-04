@@ -214,13 +214,11 @@ DEVICE_FUNC float envLuminance(float3 rgb)
     return (lum > 0.0f && lum <= maxFinite) ? lum : 0.0f;
 }
 
-/// Compatibility helper for constant-map audit kernels. Production map PDFs
-/// come from EnvAliasEntry::solidAnglePdf because the support-preserving
-/// bilinear-footprint proposal is not, in general, proportional to the centre
-/// texel's luminance.
-DEVICE_FUNC float envTexelPdf(float3 radiance, float envPdfScale)
+/// Compatibility helper for standalone audit kernels. Production map PDFs
+/// come directly from EnvAliasEntry::solidAnglePdf.
+DEVICE_FUNC float envTexelPdf(float3 radiance, float normalization)
 {
-    return envLuminance(radiance) * envPdfScale;
+    return envLuminance(radiance) * normalization;
 }
 
 #endif // STRELKA_ENV_MAP_MATH_H

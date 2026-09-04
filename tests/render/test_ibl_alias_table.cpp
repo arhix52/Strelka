@@ -11,7 +11,7 @@ using oka::metal::buildSolidAngleIblAliasTable;
 using oka::metal::EnvAliasEntry;
 using oka::metal::IblAliasTableResult;
 
-TEST_CASE("buildSolidAngleIblAliasTable black map has unit probs and zero pdfScale")
+TEST_CASE("buildSolidAngleIblAliasTable black map has unit aliases and zero power")
 {
     const int w = 2;
     const int h = 2;
@@ -19,7 +19,6 @@ TEST_CASE("buildSolidAngleIblAliasTable black map has unit probs and zero pdfSca
     const auto result = buildSolidAngleIblAliasTable(pixels.data(), w, h);
     CHECK(result.alias.size() == 4);
     CHECK(result.totalPower == doctest::Approx(0.0));
-    CHECK(result.envPdfScale == doctest::Approx(0.0f));
     for (const auto& e : result.alias)
     {
         CHECK(e.threshold == 0u);
@@ -27,7 +26,7 @@ TEST_CASE("buildSolidAngleIblAliasTable black map has unit probs and zero pdfSca
     }
 }
 
-TEST_CASE("buildSolidAngleIblAliasTable bright texel gets mass and positive pdfScale")
+TEST_CASE("buildSolidAngleIblAliasTable bright texel gets positive density")
 {
     const int w = 2;
     const int h = 2;
@@ -40,7 +39,6 @@ TEST_CASE("buildSolidAngleIblAliasTable bright texel gets mass and positive pdfS
 
     const auto result = buildSolidAngleIblAliasTable(pixels.data(), w, h);
     CHECK(result.totalPower > 0.0);
-    CHECK(result.envPdfScale > 0.0f);
     CHECK(result.alias.size() == 4);
 
     // Every entry stays in valid Walker/Vose ranges.
@@ -60,10 +58,8 @@ TEST_CASE("buildSolidAngleIblAliasTable null or empty returns empty")
 TEST_CASE("a NaN texel does not take the whole map with it")
 {
     // A downloaded HDRI with one bad pixel is not exotic. Without a finiteness
-    // test the NaN propagates through totalPower into envPdfScale, and every
-    // density the shaders compute -- for sampling and for the MIS weight alike
-    // -- comes back NaN. std::max does not clamp it, so the guard has to be
-    // explicit.
+    // Without a finiteness test NaN reaches both the radiance integral and the
+    // alias weights. std::max does not clamp it, so the guard is explicit.
     const int w = 8;
     const int h = 4;
     std::vector<float> px((size_t)w * h * 4, 0.0f);
@@ -77,8 +73,6 @@ TEST_CASE("a NaN texel does not take the whole map with it")
 
     const IblAliasTableResult r = buildSolidAngleIblAliasTable(px.data(), w, h);
 
-    CHECK(std::isfinite(r.envPdfScale));
-    CHECK(r.envPdfScale > 0.0f);
     CHECK(std::isfinite(r.totalPower));
     CHECK(r.totalPower > 0.0);
     for (const EnvAliasEntry& e : r.alias)
@@ -96,7 +90,10 @@ TEST_CASE("constant maps have exact sphere normalization at degenerate resolutio
         std::vector<float> pixels((size_t)w * (size_t)h * 4, 1.0f);
         const IblAliasTableResult result = buildSolidAngleIblAliasTable(pixels.data(), w, h);
         CHECK(result.totalPower == doctest::Approx(4.0 * M_PI).epsilon(1e-13));
-        CHECK(result.envPdfScale == doctest::Approx(1.0 / (4.0 * M_PI)).epsilon(2e-7));
+        for (const EnvAliasEntry& entry : result.alias)
+        {
+            CHECK(entry.solidAnglePdf == doctest::Approx(1.0 / (4.0 * M_PI)).epsilon(2e-7));
+        }
     }
 }
 
@@ -163,7 +160,7 @@ TEST_CASE("a finite positive channel retains support beside negative channels")
     const float pixels[] = { 1.0f, -1000.0f, 0.0f, 1.0f };
     const IblAliasTableResult result = buildSolidAngleIblAliasTable(pixels, 1, 1);
     CHECK(result.totalPower > 0.0);
-    CHECK(result.envPdfScale > 0.0f);
+    CHECK(result.alias[0].solidAnglePdf > 0.0f);
 }
 
 TEST_CASE("finite radiance channels survive invalid neighbours in the same texel")
@@ -222,8 +219,6 @@ TEST_CASE("subnormal environment power keeps a finite sampling representation")
     const float pixels[] = { tiny, tiny, tiny, 1.0f };
     const IblAliasTableResult result = buildSolidAngleIblAliasTable(pixels, 1, 1);
     CHECK(result.totalPower > 0.0);
-    CHECK(std::isfinite(result.envPdfScale));
-    CHECK(result.envPdfScale > 0.0f);
     CHECK(result.alias[0].solidAnglePdf == doctest::Approx(1.0 / (4.0 * M_PI)).epsilon(2e-7));
 
     const float oldReciprocal = static_cast<float>(1.0 / result.totalPower);

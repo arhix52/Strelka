@@ -7,11 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <numbers>
 #include <vector>
-
-#ifndef M_PI
-#    define M_PI 3.14159265358979323846
-#endif
 
 
 namespace oka::metal
@@ -82,12 +79,12 @@ inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, 
     std::vector<double> weights(texelCount);
     double calibrationPower = 0.0;
     double radianceIntegral = 0.0;
-    const double deltaPhi = 2.0 * M_PI / (double)width;
+    const double deltaPhi = 2.0 * std::numbers::pi_v<double> / (double)width;
 
     for (int y = 0; y < height; ++y)
     {
-        const double theta0 = M_PI * (double)y / (double)height;
-        const double theta1 = M_PI * (double)(y + 1) / (double)height;
+        const double theta0 = std::numbers::pi_v<double> * (double)y / (double)height;
+        const double theta1 = std::numbers::pi_v<double> * (double)(y + 1) / (double)height;
         const double rowSolidAngle = deltaPhi * (std::cos(theta0) - std::cos(theta1));
         for (int x = 0; x < width; ++x)
         {
@@ -110,8 +107,8 @@ inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, 
     // bilinear radiance.
     for (int y = 0; y < height; ++y)
     {
-        const double theta0 = M_PI * (double)y / (double)height;
-        const double theta1 = M_PI * (double)(y + 1) / (double)height;
+        const double theta0 = std::numbers::pi_v<double> * (double)y / (double)height;
+        const double theta1 = std::numbers::pi_v<double> * (double)(y + 1) / (double)height;
         const double rowSolidAngle = deltaPhi * (std::cos(theta0) - std::cos(theta1));
         for (int x = 0; x < width; ++x)
         {
@@ -140,8 +137,9 @@ inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, 
         {
             const LightSelectionEntry& entry = selection.entries[i];
             const int y = static_cast<int>(i / static_cast<size_t>(width));
-            const double theta0 = M_PI * static_cast<double>(y) / static_cast<double>(height);
-            const double theta1 = M_PI * static_cast<double>(y + 1) / static_cast<double>(height);
+            const double theta0 = std::numbers::pi_v<double> * static_cast<double>(y) / static_cast<double>(height);
+            const double theta1 =
+                std::numbers::pi_v<double> * static_cast<double>(y + 1) / static_cast<double>(height);
             const double solidAngle = deltaPhi * (std::cos(theta0) - std::cos(theta1));
             out.alias[i].threshold = entry.aliasThreshold;
             out.alias[i].alias = entry.alias;
@@ -162,6 +160,7 @@ inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, 
         out.envPdfScale = static_cast<float>(
             std::min(1.0 / selection.totalPower, static_cast<double>(std::numeric_limits<float>::max())));
     }
+
     return out;
 }
 

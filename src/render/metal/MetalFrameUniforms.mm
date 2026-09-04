@@ -385,7 +385,6 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
         pUniformData->envMapIntensity = in.environment->state().autoScale * userIntensity;
         pUniformData->envMapRotation =
             envLight.has_value() ? envLight->rotationY * static_cast<float>(M_PI / 180.0) : 0.0f;
-        pUniformData->envPdfScale = in.environment->state().pdfScale;
         const bool hasBackdrop = in.environment->state().backgroundTexture != nullptr;
         pUniformData->hasEnvBackground = hasBackdrop ? 1u : 0u;
         pUniformData->envBackgroundIntensity = hasBackdrop && envLight.has_value() ? envLight->backgroundIntensity : 1.0f;
@@ -411,7 +410,6 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     {
         pUniformData->hasEnvMap = 0;
         pUniformData->hasEnvBackground = 0;
-        pUniformData->envPdfScale = 0.0f;
         // A textureless dome is a uniform sky carried by missColor.
         // It needs no NEE because cosine-weighted BSDF sampling is already optimal for constant radiance.
         const auto& envLight = in.scene->getEnvLight();

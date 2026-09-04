@@ -122,7 +122,6 @@ void MetalEnvironment::clearMap()
         mState.aliasBuffer->release();
         mState.aliasBuffer = nullptr;
     }
-    mState.pdfScale = 0.0f;
     mState.totalPower = 0.0;
     mState.autoScale = 1.0f;
     mState.loaded = false;
@@ -177,7 +176,6 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
     const auto aliasResult = buildSolidAngleIblAliasTable(image.pixels, image.width, image.height);
     static_assert(sizeof(EnvAliasEntry) == sizeof(metal::EnvAliasEntry),
                   "host EnvAliasEntry must match ShaderTypes EnvAliasEntry");
-    mState.pdfScale = aliasResult.envPdfScale;
     mState.totalPower = aliasResult.totalPower;
 
     mState.aliasBuffer = mDevice->newBuffer(
