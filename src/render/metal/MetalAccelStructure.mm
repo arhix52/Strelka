@@ -197,8 +197,8 @@ void MetalAccelStructure::prepareEmissiveMeshInputs()
         input.vertexOffset = mesh.mVbOffset;
         input.indexOffset = mesh.mIndex;
         input.materialId = instance.mMaterialId;
-        input.trianglePowers =
-            render::emissiveTrianglePowers(vertices, indices, mesh, materials[instance.mMaterialId], instance.transform);
+        input.trianglePowers = render::emissiveTrianglePowers(
+            vertices, indices, mesh, materials[instance.mMaterialId], instance.transform, mesh.isSkeletal);
     }
 }
 

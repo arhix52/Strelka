@@ -38,8 +38,20 @@ inline double emissiveMaterialLuminance(const Scene::MaterialDescription& materi
     double strength = 0.0;
     if (material.params.material_type == MATERIAL_TYPE_OPENPBR)
     {
-        emission = { material.openpbr.emission_color.r, material.openpbr.emission_color.g,
-                     material.openpbr.emission_color.b };
+        // A MaterialX image input replaces emission_color rather than
+        // modulating it. Texture decoding deliberately stays out of proposal
+        // construction, so a named map uses a conservative white proxy: dark
+        // texels merely add variance, while a zero proxy would lose every
+        // positive texel from NEE support.
+        if (!material.openpbrTexPaths[OPENPBR_TEX_EMISSION_COLOR].empty())
+        {
+            emission = glm::dvec3(1.0);
+        }
+        else
+        {
+            emission = { material.openpbr.emission_color.r, material.openpbr.emission_color.g,
+                         material.openpbr.emission_color.b };
+        }
         strength = material.openpbr.emission_luminance;
     }
     else
@@ -62,7 +74,8 @@ inline std::vector<double> emissiveTrianglePowers(std::span<const Scene::Vertex>
                                                   std::span<const uint32_t> indices,
                                                   const Mesh& mesh,
                                                   const Scene::MaterialDescription& material,
-                                                  const glm::mat4& objectToWorld)
+                                                  const glm::mat4& objectToWorld,
+                                                  bool preservePotentialMotionSupport = false)
 {
     const size_t triangleCount = mesh.mCount / 3u;
     std::vector<double> powers(triangleCount, 0.0);
@@ -96,6 +109,14 @@ inline std::vector<double> emissiveTrianglePowers(std::span<const Scene::Vertex>
             // for selection; the exact sampled density is reconstructed below.
             powers[triangle] = 2.0 * std::numbers::pi_v<double> * radiance / double(areaPdf);
         }
+        else if (preservePotentialMotionSupport)
+        {
+            // The host may only have a bind pose or shutter endpoints while
+            // traversal samples a skinned/interpolated pose. A unit-area proxy
+            // keeps this triangle reachable; its exact current-time area PDF
+            // is reconstructed from device vertices after selection.
+            powers[triangle] = 2.0 * std::numbers::pi_v<double> * radiance;
+        }
     }
     return powers;
 }
@@ -103,9 +124,11 @@ inline std::vector<double> emissiveTrianglePowers(std::span<const Scene::Vertex>
 inline std::vector<double> emissiveTrianglePowers(const Scene& scene,
                                                   const Mesh& mesh,
                                                   const Scene::MaterialDescription& material,
-                                                  const glm::mat4& objectToWorld)
+                                                  const glm::mat4& objectToWorld,
+                                                  bool preservePotentialMotionSupport = false)
 {
-    return emissiveTrianglePowers(scene.getVertices(), scene.getIndices(), mesh, material, objectToWorld);
+    return emissiveTrianglePowers(
+        scene.getVertices(), scene.getIndices(), mesh, material, objectToWorld, preservePotentialMotionSupport);
 }
 
 inline EmissiveMeshDistribution buildEmissiveMeshDistribution(const std::vector<EmissiveMeshBuildInput>& inputs)

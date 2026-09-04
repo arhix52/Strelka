@@ -542,6 +542,63 @@ TEST_CASE("emissive mesh production input retains every positive radiance channe
     CHECK(powers[0] > 0.0);
 }
 
+TEST_CASE("OpenPBR emission textures retain emissive mesh proposal support")
+{
+    oka::Scene::MaterialDescription material;
+    material.params.material_type = MATERIAL_TYPE_OPENPBR;
+    material.openpbr.emission_color = OpenPBRColor{ 0.0f, 0.0f, 0.0f };
+    material.openpbr.emission_luminance = 7.0f;
+    material.openpbrTexPaths[OPENPBR_TEX_EMISSION_COLOR] = "positive-emission.exr";
+
+    // MaterialX image inputs replace the constant. The host cannot know the
+    // texel maximum without coupling table construction to texture decoding,
+    // so a named emission map must conservatively retain proposal support.
+    CHECK(oka::render::emissiveMaterialLuminance(material) > 0.0);
+
+    // Mutation: treating the image as a modulation of the authored zero
+    // constant removes the emitter from the discrete proposal altogether.
+    const double constantOnly = 0.2126 * material.openpbr.emission_color.r +
+                                0.7152 * material.openpbr.emission_color.g +
+                                0.0722 * material.openpbr.emission_color.b;
+    CHECK(constantOnly == 0.0);
+}
+
+TEST_CASE("emissive mesh proposal retains interior motion support")
+{
+    oka::Scene scene;
+    std::vector<oka::Scene::Vertex> vertices(3);
+    vertices[0].pos = { 0.0f, 0.0f, 0.0f };
+    vertices[1].pos = { 1.0f, 0.0f, 0.0f };
+    vertices[2].pos = { 0.0f, 1.0f, 0.0f };
+    const uint32_t meshId = scene.createMesh(vertices, { 0u, 1u, 2u });
+    oka::Scene::MaterialDescription material;
+    material.params.emission = glm::float3(1.0f);
+    material.params.emission_strength = 1.0f;
+
+    const glm::mat4 shutterOpen = glm::scale(glm::mat4(1.0f), glm::vec3(0.0f, 1.0f, 1.0f));
+    const glm::mat4 shutterClose = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, 0.0f, 1.0f));
+    const glm::mat4 shutterMiddle = (shutterOpen + shutterClose) * 0.5f;
+    const auto openPower = oka::render::emissiveTrianglePowers(
+        scene, scene.getMeshes()[meshId], material, shutterOpen);
+    const auto closePower = oka::render::emissiveTrianglePowers(
+        scene, scene.getMeshes()[meshId], material, shutterClose);
+    const auto middlePower = oka::render::emissiveTrianglePowers(
+        scene, scene.getMeshes()[meshId], material, shutterMiddle);
+    REQUIRE(openPower.size() == 1u);
+    REQUIRE(closePower.size() == 1u);
+    REQUIRE(middlePower.size() == 1u);
+    REQUIRE(middlePower[0] > 0.0);
+
+    const auto motionSupport = oka::render::emissiveTrianglePowers(
+        scene, scene.getMeshes()[meshId], material, shutterOpen, true);
+    REQUIRE(motionSupport.size() == 1u);
+    CHECK(motionSupport[0] > 0.0);
+
+    // The production motion envelope used only max(open, close), so both
+    // endpoint-degenerate triangles disappeared despite positive interior area.
+    CHECK(std::max(openPower[0], closePower[0]) == 0.0);
+}
+
 TEST_CASE("emissive triangle sample and hit PDF agree under affine transform")
 {
     const float3 object0 = make_float3(-1.0f, -0.5f, 0.0f);

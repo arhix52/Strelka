@@ -4728,8 +4728,9 @@ void OptiXRender::createEmissiveMeshLights()
         input.vertexOffset = mesh.mVbOffset;
         input.indexOffset = mesh.mIndex;
         input.materialId = materialId;
-        input.trianglePowers =
-            oka::render::emissiveTrianglePowers(*mScene, mesh, materials[materialId], instance.transform);
+        const bool potentiallyChanging = mesh.isSkeletal || (mEnableMotionBlur && previous != instance.transform);
+        input.trianglePowers = oka::render::emissiveTrianglePowers(
+            *mScene, mesh, materials[materialId], instance.transform, potentiallyChanging);
 
         // Traversal linearly interpolates the previous/current transform over
         // shutter time. Keep any triangle that has area at either endpoint in
@@ -5239,6 +5240,16 @@ void OptiXRender::publishMaterialParams()
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
         MaterialParams params = matDescs[i].params;
+        if (params.material_type == MATERIAL_TYPE_OPENPBR)
+        {
+            const OpenPBRParams& openpbr = matDescs[i].openpbr;
+            const bool hasEmissionMap =
+                !matDescs[i].openpbrTexPaths[OPENPBR_TEX_EMISSION_COLOR].empty();
+            params.emission = hasEmissionMap ? make_float3(1.0f) :
+                                               make_float3(openpbr.emission_color.r, openpbr.emission_color.g,
+                                                           openpbr.emission_color.b);
+            params.emission_strength = openpbr.emission_luminance;
+        }
         // Every slot empty until its stage runs. A -1 is what the shader reads as
         // "no map", so a material published now shades with its factors alone
         // rather than sampling a texture object that is still zero.
@@ -5334,7 +5345,17 @@ bool OptiXRender::stepMaterialTextures(double budgetMs)
         texSlots[0] = loadOrCacheTex(desc.baseColorTexPath, oka::optix_tex::Kind::Color);
         texSlots[1] = loadOrCacheTex(desc.metallicRoughnessTexPath, oka::optix_tex::Kind::NonColor);
         texSlots[2] = loadOrCacheTex(desc.normalTexPath, oka::optix_tex::Kind::Normal);
-        texSlots[3] = loadOrCacheTex(desc.emissionTexPath, oka::optix_tex::Kind::Color);
+        const bool openpbrEmission = desc.params.material_type == MATERIAL_TYPE_OPENPBR &&
+                                     !desc.openpbrTexPaths[OPENPBR_TEX_EMISSION_COLOR].empty();
+        const std::string& emissionPath =
+            openpbrEmission ? desc.openpbrTexPaths[OPENPBR_TEX_EMISSION_COLOR] : desc.emissionTexPath;
+        oka::optix_tex::Kind emissionKind = oka::optix_tex::Kind::Color;
+        if (openpbrEmission &&
+            desc.openpbrTexColorSpace[OPENPBR_TEX_EMISSION_COLOR] == oka::TexColorSpace::Linear)
+        {
+            emissionKind = oka::optix_tex::Kind::NonColor;
+        }
+        texSlots[3] = loadOrCacheTex(emissionPath, emissionKind);
         texSlots[4] = loadOrCacheTex(desc.occlusionTexPath, oka::optix_tex::Kind::NonColor);
         // Slot 5 is the transmission texture. Scene::MaterialDescription has no
         // field for it, so the glTF loader has nothing to hand over and the slot

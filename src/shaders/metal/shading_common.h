@@ -201,10 +201,12 @@ static void applyOpenPBRTextures(thread OpenPBRParams& p,
         const float3 v = t.tex[OPENPBR_TEX_SUBSURFACE_RADIUS].sample(openpbrSampler, tuv).rgb;
         p.subsurface_radius_scale = OpenPBRColor{ v.r, v.g, v.b };
     }
-
-    // Emission stays out of this on purpose: the shade kernel reads it from the
-    // Material struct, not from the BSDF, so an emission map would have to be
-    // folded there instead. Left unhandled rather than half-handled.
+    if (openpbrHasMap(p, OPENPBR_TEX_EMISSION_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_EMISSION_COLOR]))
+    {
+        const float3 v = t.tex[OPENPBR_TEX_EMISSION_COLOR].sample(openpbrSampler, tuv).rgb;
+        p.emission_color = OpenPBRColor{ v.r, v.g, v.b };
+    }
+    si.emission = float3(p.emission_color.r, p.emission_color.g, p.emission_color.b) * p.emission_luminance;
 
     // The normal map, read the same way the glTF one is: Z rebuilt from X and Y
     // because a compressed normal map is BC5 and stores two channels.
@@ -589,9 +591,10 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
     float3 emissionColor = float3(material.emission);
     if (!is_null_texture(material.emissionTexture))
     {
-        float4 emTex = (hasLod ? material.emissionTexture.sample(
-                                     texSamplerMip, tuv, level(texLod(material.emissionTexture, lodBase, hasLod))) :
-                                 material.emissionTexture.sample(texSampler, tuv));
+        // Emission is an integrand shared by NEE and BSDF-hit strategies. A
+        // strategy-dependent ray-cone mip would make the two evaluate different
+        // radiance for the same path-space event, so both use level zero.
+        const float4 emTex = material.emissionTexture.sample(texSampler, tuv);
         emissionColor *= emTex.rgb;
     }
     si.emission = emissionColor * material.emission_strength;
@@ -951,8 +954,33 @@ static EmissiveTriangleGeometry fetchEmissiveTriangle(constant Uniforms& uniform
     return triangle;
 }
 
-static float3 emissiveMeshRadiance(device const Material& material, float2 uv)
+static float3 emissiveMeshRadiance(constant Uniforms& uniforms,
+                                   device const Material& material,
+                                   uint32_t materialId,
+                                   float2 uv)
 {
+    if (SPEC_OPENPBR && material.material_type == MATERIAL_TYPE_OPENPBR && uniforms.openpbrParams != nullptr)
+    {
+        device const OpenPBRParams& p = uniforms.openpbrParams[materialId];
+        float3 emission = float3(p.emission_color.r, p.emission_color.g, p.emission_color.b);
+        if ((p.texture_mask & (1u << OPENPBR_TEX_EMISSION_COLOR)) != 0u && uniforms.openpbrTextures != nullptr)
+        {
+            device const OpenPBRTextures& textures = uniforms.openpbrTextures[materialId];
+            if (!is_null_texture(textures.tex[OPENPBR_TEX_EMISSION_COLOR]))
+            {
+                constexpr sampler emissionSampler(mag_filter::linear, min_filter::linear, address::repeat);
+                const float c = cos(p.uv_rotation);
+                const float s = sin(p.uv_rotation);
+                const float2 scale = float2(p.uv_scale_x, p.uv_scale_y);
+                const float2 tuv = float2(uv.x * scale.x * c - uv.y * scale.y * s,
+                                          uv.x * scale.x * s + uv.y * scale.y * c) +
+                                   float2(p.uv_offset_x, p.uv_offset_y);
+                emission = textures.tex[OPENPBR_TEX_EMISSION_COLOR].sample(emissionSampler, tuv).rgb;
+            }
+        }
+        return emission * p.emission_luminance;
+    }
+
     float3 emission = float3(material.emission) * material.emission_strength;
     if (!is_null_texture(material.emissionTexture))
     {
@@ -1060,7 +1088,8 @@ static LightConnection connectEmissiveMesh(constant Uniforms& uniforms,
         return connection;
     }
     device const Material& material = materials[mesh.materialId];
-    const float3 emission = emissiveMeshRadiance(material, sample.uv) * resolveOpacity(material, sample.uv);
+    const float3 emission =
+        emissiveMeshRadiance(uniforms, material, mesh.materialId, sample.uv) * resolveOpacity(material, sample.uv);
     if (!emitsLight(emission) || (!volumeEvent && !lightReachesShadingPoint(si, direction)))
     {
         return connection;

@@ -32,7 +32,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | U. Analytic/punctual visibility agreement | Shadow rays ignore analytic emitters and finite-radius punctual proxies; soft punctual spheres are nevertheless sampled with a continuous area density but classified as MIS deltas | analytic segment blockers, stacked area lights, overlapping analytic surfaces, exact parallelograms and soft-punctual hit/MIS regressions | One analytic surface query for camera/BSDF hits and finite shadow segments; only radius-free punctual sources remain delta | FIXED | FIXED on MTLDevice | Shared source fixed; external CUDA required | this commit | UNVERIFIED |
 | V. Transformed frame validity | Non-finite translations and collapsed/sheared projector/IES frames keep proposal power; OptiX transforms tangents as normals | translation, partial-rank/full-frame, shear, mirrored and tangent Gram-Schmidt tests | Orthonormal profile frames, matched packing/power/device validity, and forward-vector surface tangents | FIXED | FIXED on MTLDevice | Shared source fixed; external CUDA required | this commit | UNVERIFIED |
 | W. Complete marginal PDF arithmetic | Conditional area PDFs saturate before outer PMFs, under-reporting a finite complete marginal density | tiny-area/low-selection analytic and mesh regressions | joint exponent-scaled evaluation of the area Jacobian and every outer PMF | FIXED | FIXED on MTLDevice | Shared source fixed; external CUDA required | this commit | UNVERIFIED |
-| X. Emissive mesh animated/textured consistency | Power support ignores shutter/interior motion; OpenPBR and Metal LOD paths disagree with hit emission | motion extrema, OpenPBR texture bridge and texture-LOD regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| X. Emissive mesh animated/textured consistency | Open/close transform powers are both zero while the mid-shutter triangle is positive; named OpenPBR emission map has zero host power; Metal hit chooses a ray-cone mip while NEE fixes level zero | motion extrema, OpenPBR texture bridge and texture-LOD regressions | conservative motion-support envelope and one strategy-independent emission evaluation | FIXED | FIXED on MTLDevice | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | Y. Runtime topology/mask safety | Headless host geometry is released too early; finite/infinite and camera-visibility edits do not rebuild every backend mask/descriptor | headless rebuild and repeated runtime mask transitions | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | Z. Projector transfer convention | Metal samples sRGB while OptiX decodes the same LDR source with a gamma-2.2 path | shared texel-value fixture and source mutation | pending | OPEN | OPEN | OPEN | pending | OPEN |
 
@@ -1039,3 +1039,57 @@ is out of scope unless it blocks validation.
   audit execute for 262,144 samples in fast and safe math at threadgroup sizes 32/64/128 with zero counters and
   invariant records. OptiX uses the same shared accumulator and both NEE/hit call sites, but CUDA compile/runtime
   remains externally `UNVERIFIED` under the finding-7 command.
+
+## Finding X: emissive mesh animated and textured consistency
+
+- Random variables and measure: NEE selects the local-emitter class, emissive mesh/instance `M`, triangle `T`, and
+  a barycentric point `X`. The first three are discrete masses; `X` has a conditional density in current world area
+  `dA`, converted to receiver solid angle `domega`. Shutter time is sampled once by the camera/path and conditions
+  both the traversed geometry and the mesh-light geometry; it is not resampled by NEE.
+- Support: every triangle whose represented geometry can have positive area at the active pose or any shutter time,
+  and whose material can emit a positive finite texture value, must retain a positive categorical mass. A
+  conservative superset is permitted for the power heuristic: selecting a triangle that is degenerate or dark at a
+  particular time/UV returns zero contribution, whereas deleting a triangle that becomes positive biases the image.
+  Named MaterialX/OpenPBR image inputs replace their constant, so a zero constant cannot be used to prove empty
+  texture support.
+- Conditional and marginal PDFs: at fixed `(M,T,time)`, `p_A=1/A_world(time)` and
+  `p_omega=p_A |X-P|^2/abs(n_X dot(-Wi))`. The complete density remains
+  `P(local) P(mesh|local) P(M|mesh) P(T|M) p_omega`; both NEE and BSDF-hit MIS evaluate the current-time triangle and
+  the same represented outer masses. The build-time power is only a categorical variance proxy and is not used as
+  the conditional area density.
+- Selection PMF: triangle and mesh PMFs come from the integer alias representation. Static representable triangles
+  retain the existing two-sided proxy `2 pi L A`. Potentially deforming/moving triangles that are absent from the
+  sampled host snapshots receive a finite positive fallback proxy derived from material emission support; this
+  changes variance, not the exact sample/hit PDF reconstructed from the alias entries.
+- Delta/continuous classification: emissive triangles remain continuous area emitters. Animation and texture lookup
+  do not introduce atoms. Degenerate geometry at one conditioned time has an empty conditional support at that time
+  and returns no sample.
+- MIS strategies: selected mesh-light NEE and a non-delta BSDF ray hitting the same triangle are complementary. They
+  must evaluate one strategy-independent emission function. In particular, texture LOD cannot depend on whether the
+  path arrived through NEE or a ray cone; until an explicit footprint random variable is part of both strategies,
+  emission is evaluated with level-zero filtering on both.
+- Current-HEAD reproducers: for transforms `diag(0,1,1)` and `diag(1,0,1)`, endpoint max power is exactly `0` while
+  the linearly interpolated mid-shutter transform `diag(0.5,0.5,1)` has positive power. The focused regression fails
+  `CHECK(0 > 0)`. An OpenPBR material with positive `emission_luminance`, a named emission-colour image, and a zero
+  constant likewise returns host proxy luminance `0` and fails `CHECK(0 > 0)`. Source inspection proves Metal NEE
+  samples the emission texture with a non-mip sampler while the hit path selects `texLod(...)`; the OpenPBR emission
+  slot is explicitly left unhandled. These are the frozen pre-fix failures.
+- Implementation and mutation sensitivity: the host retains a unit-area positive power proxy only for triangles
+  whose mesh can deform or whose instance transform changes over the shutter. Static unrepresentable triangles keep
+  zero mass. OpenPBR image emission uses a conservative white build proxy because the image replaces the constant;
+  Metal and OptiX then evaluate the actual filtered level-zero texel at the selected/hit UV. Metal folds that same
+  map into `si.emission`, and OptiX mirrors the OpenPBR factor/map into the generic emission slot consumed by both of
+  its strategies. The endpoint-only mutation remains exactly zero while the retained proposal is positive; the
+  zero-constant texture mutation likewise remains zero while the production proxy is positive. A two-level texture
+  whose base is `(2,3,4)` and coarse mip is `(0.125,0.125,0.125)` detects any return to ray-cone emission LOD.
+- Corrected result: focused host regressions pass with positive finite motion and named-texture masses while the
+  static unrepresentable-area regression remains zero. On the actual Apple M4 Pro, a finding-specific kernel reports
+  identical hit/NEE emission: generic `(2,1.5,1)` and OpenPBR `(10,15,20)` in both fast and safe math; neither path
+  reads the deliberately different coarse mip.
+- Validation: focused Debug, Release and ASan+UBSan pass 7/7 cases and 2,097,194 assertions. Full Debug and Release
+  CTest pass 4/4; production `wavefront.metal` compiles independently under fast and safe math. The complete audit
+  passes 904/904 cases and 69,256,591 assertions, preserving environment integral `1`, Lambertian estimate
+  `1.002147074` inside its CI, detected legacy mutation `2.003353165`, and dome MIS ratio `1`. The standard Metal
+  audit executes 262,144 samples with zero counters on Apple M4 Pro. OptiX consumes the corrected host support and
+  mirrored emission source, but CUDA compilation/runtime remains externally `UNVERIFIED` under the finding-7
+  command. Status: FIXED for CPU and Metal, UNVERIFIED for OptiX execution.
