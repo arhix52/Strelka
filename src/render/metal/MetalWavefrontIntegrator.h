@@ -122,7 +122,7 @@ public:
     void release();
 
     void buildPipelines();
-    void ensureBuffers(uint32_t width, uint32_t height, uint32_t sharcUpdateDownscale);
+    void ensureBuffers(uint32_t width, uint32_t height, uint32_t sharcUpdateDownscale, bool restirEnabled);
     const WavefrontVariant* variantFor(uint32_t features);
 
     // Returns the encoder to keep using: in profiling mode each stage gets its
@@ -168,6 +168,7 @@ public:
     void addResidentAllocations(const std::function<void(MTL::Allocation*)>& add) const;
 
     size_t queueBytes() const;
+    size_t restirBytes() const;
 
     MTL::Library* library() const
     {
@@ -293,6 +294,7 @@ private:
     std::map<std::string, uint64_t> mRenderWorkDispatches;
     uint32_t mCapacity = 0;
     uint32_t mSharcUpdateDownscale = 0;
+    bool mRestirAllocated = false;
     bool mResidencyDirty = true;
 };
 

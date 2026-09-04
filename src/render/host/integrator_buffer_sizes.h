@@ -100,7 +100,8 @@ inline constexpr uint32_t kWavefrontStageStatsUints =
 inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width,
                                                    uint32_t height,
                                                    const WavefrontElementSizes& sz,
-                                                   uint32_t sharcUpdateDownscale = 1u)
+                                                   uint32_t sharcUpdateDownscale = 1u,
+                                                   bool restirEnabled = true)
 {
     const uint32_t pixels = width * height;
     WavefrontBufferLayout layout;
@@ -127,9 +128,12 @@ inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width,
     layout.aovBytes = (size_t)pixels * sz.aovSample;
     layout.hitQueueBytes = (size_t)pixels * sizeof(uint32_t);
     layout.missQueueBytes = (size_t)pixels * sizeof(uint32_t);
-    layout.restirReservoirBytes = (size_t)pixels * sz.restirReservoir;
-    layout.restirSurfaceHistoryBytes = (size_t)pixels * sz.restirSurfaceHistory;
-    layout.restirShadingPointBytes = (size_t)pixels * sz.restirShadingPoint;
+    if (restirEnabled)
+    {
+        layout.restirReservoirBytes = (size_t)pixels * sz.restirReservoir;
+        layout.restirSurfaceHistoryBytes = (size_t)pixels * sz.restirSurfaceHistory;
+        layout.restirShadingPointBytes = (size_t)pixels * sz.restirShadingPoint;
+    }
     return layout;
 }
 

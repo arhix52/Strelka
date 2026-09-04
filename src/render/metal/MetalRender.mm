@@ -1870,7 +1870,8 @@ void MetalRender::render(Buffer* output)
         mEnvironment.ensurePlaceholderAliasBuffer();
 
         {
-            mIntegrator.ensureBuffers(width, height, pUniformData->sharcUpdateDownscale);
+            mIntegrator.ensureBuffers(
+                width, height, pUniformData->sharcUpdateDownscale, pUniformData->restirDIEnabled != 0u);
             // Output resolution, not render resolution: this is what the display
             // shows and what MetalFX upscales into.
             mPost.ensureDisplayTextures(outWidth, outHeight);
@@ -3090,6 +3091,8 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"restirFinal\":{{\"active\":{},\"dispatched\":{}}}}},"
         "\"blasBuilds\":{},\"tlasBuilds\":{},\"tlasRefits\":{},"
         "\"fullBufferClears\":0,\"fullBufferCopies\":0,\"bytesCopied\":0,"
+        "\"memory\":{{\"wavefrontAllocatedBytes\":{},\"restirAllocatedBytes\":{},"
+        "\"restirAccessedWithNeeBytes\":0}},"
         "\"manualAnalyticLightTests\":{},\"missLightEvaluations\":{},"
         "\"dispatchCount\":{},\"pipelineDispatches\":{}}}",
         mRenderWorkFrames, static_cast<uint64_t>(width) * height, mRenderWorkSpp, mRenderWorkGpuMs, c[WORK_PRIMARY_RAYS],
@@ -3103,8 +3106,9 @@ std::string MetalRender::renderWorkAuditJson() const
         roundedThreads(c[WORK_GUIDE_ACTIVE_ITEMS]), c[WORK_RESTIR_SPATIAL_ITEMS],
         restirSpatialDispatchCount != 0u ? firstHitDispatched : 0u, c[WORK_RESTIR_FINAL_ITEMS],
         restirFinalDispatchCount != 0u ? firstHitDispatched : 0u, mRenderWorkAsCounts.blasBuilds,
-        mRenderWorkAsCounts.tlasBuilds, mRenderWorkAsCounts.tlasRefits, c[WORK_MANUAL_ANALYTIC_LIGHT_TESTS],
-        c[WORK_MISS_LIGHT_EVALUATIONS], dispatchTotal, dispatches);
+        mRenderWorkAsCounts.tlasBuilds, mRenderWorkAsCounts.tlasRefits, mIntegrator.queueBytes(),
+        mIntegrator.restirBytes(), c[WORK_MANUAL_ANALYTIC_LIGHT_TESTS], c[WORK_MISS_LIGHT_EVALUATIONS], dispatchTotal,
+        dispatches);
 }
 
 Buffer* MetalRender::createBuffer(const BufferDesc& desc)

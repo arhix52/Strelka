@@ -59,6 +59,13 @@ TEST_CASE("wavefrontBufferLayout scales with pixel count")
     CHECK(a.restirReservoirBytes == (size_t)a.pixels * 48);
     CHECK(a.restirSurfaceHistoryBytes == (size_t)a.pixels * 32);
     CHECK(a.restirShadingPointBytes == (size_t)a.pixels * 136);
+    CHECK(2 * a.restirReservoirBytes + 2 * a.restirSurfaceHistoryBytes + a.restirShadingPointBytes ==
+          (size_t)a.pixels * 296);
+
+    const auto nee = wavefrontBufferLayout(64, 48, sz, 1, false);
+    CHECK(nee.restirReservoirBytes == 0);
+    CHECK(nee.restirSurfaceHistoryBytes == 0);
+    CHECK(nee.restirShadingPointBytes == 0);
 
     const auto b = wavefrontBufferLayout(128, 96, sz);
     CHECK(b.pixels == 4 * a.pixels);
