@@ -1764,7 +1764,7 @@ static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd
         {
             continue;
         }
-        const AnalyticLightIntersection componentHit = intersectAnalyticLightSurface(
+        const AnalyticLightIntersection componentHit = intersectAnalyticLightSurfaceUnchecked(
             component.type, make_float3(component.points[0]), make_float3(component.points[1]),
             make_float3(component.points[2]), make_float3(component.points[3]), make_float3(component.normal),
             rayOrigin, rayDirection, params.materialRayTmin, 1e16f);

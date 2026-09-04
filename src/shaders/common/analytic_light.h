@@ -631,14 +631,26 @@ sampleAnalyticDisc(float3 center, float3 axisX, float3 axisY, float3 emissionNor
     return sample;
 }
 
+
+/// The `Unchecked` variants below take the representability decision as already
+/// made, and the checked ones make it.
+///
+/// analyticEllipsoidIsRepresentable() is a property of the light's transform:
+/// nothing about a ray changes it, and it is not cheap -- it builds a scaled
+/// affine basis and probes the area density along three object axes. Deciding
+/// it per ray, per light, cost more than everything else in the frame put
+/// together: on kids_room at 1280x720 depth 4, three of its ten lights being
+/// spheres or spots, 46.6 ms of 86.7 ms/sample. One sphere light was 17-25 ms.
+///
+/// Scene::setLight already makes the same decision with the same function and
+/// refuses to enable a light that fails it, so a light that reaches traversal
+/// or sampling has passed -- tests/scene/test_light_units.cpp pins that. The
+/// checked entry points remain for callers holding geometry no scene has
+/// vetted, which is every direct caller in tests.
 DEVICE_FUNC AnalyticLightSample
-sampleAnalyticEllipsoid(float3 center, float3 axisX, float3 axisY, float3 axisZ, float u1, float u2)
+sampleAnalyticEllipsoidUnchecked(float3 center, float3 axisX, float3 axisY, float3 axisZ, float u1, float u2)
 {
     AnalyticLightSample sample;
-    if (!analyticEllipsoidIsRepresentable(center, axisX, axisY, axisZ))
-    {
-        return sample;
-    }
     float3 objectNormal = sampleCanonicalSphere(u1, u2);
     const float objectLengthSquared = dot(objectNormal, objectNormal);
     if (objectLengthSquared > 0.0f)
@@ -653,14 +665,20 @@ sampleAnalyticEllipsoid(float3 center, float3 axisX, float3 axisY, float3 axisZ,
     return sample;
 }
 
-DEVICE_FUNC float analyticEllipsoidAreaPdf(
-    float3 center, float3 axisX, float3 axisY, float3 axisZ, float3 point, THREAD_REF float3& normal)
+DEVICE_FUNC AnalyticLightSample
+sampleAnalyticEllipsoid(float3 center, float3 axisX, float3 axisY, float3 axisZ, float u1, float u2)
 {
     if (!analyticEllipsoidIsRepresentable(center, axisX, axisY, axisZ))
     {
-        normal = make_float3(0.0f);
-        return 0.0f;
+        AnalyticLightSample sample;
+        return sample;
     }
+    return sampleAnalyticEllipsoidUnchecked(center, axisX, axisY, axisZ, u1, u2);
+}
+
+DEVICE_FUNC float analyticEllipsoidAreaPdfUnchecked(
+    float3 center, float3 axisX, float3 axisY, float3 axisZ, float3 point, THREAD_REF float3& normal)
+{
     float3 objectNormal;
     if (!solveAffineCoordinates(axisX, axisY, axisZ, point - center, objectNormal))
     {
@@ -674,6 +692,17 @@ DEVICE_FUNC float analyticEllipsoidAreaPdf(
         return 0.0f;
     }
     return affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, objectNormal, normal);
+}
+
+DEVICE_FUNC float analyticEllipsoidAreaPdf(
+    float3 center, float3 axisX, float3 axisY, float3 axisZ, float3 point, THREAD_REF float3& normal)
+{
+    if (!analyticEllipsoidIsRepresentable(center, axisX, axisY, axisZ))
+    {
+        normal = make_float3(0.0f);
+        return 0.0f;
+    }
+    return analyticEllipsoidAreaPdfUnchecked(center, axisX, axisY, axisZ, point, normal);
 }
 
 // Deterministic equal-area quadrature of the smooth ellipsoid's surface area.
@@ -897,7 +926,7 @@ DEVICE_FUNC bool affineSphereHitHasSmallResidual(float3 center,
                                                      objectNormal.z, rayOrigin.z, rayDirection.z, distance);
 }
 
-DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigin,
+DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoidUnchecked(float3 rayOrigin,
                                                                  float3 rayDirection,
                                                                  float minDistance,
                                                                  float maxDistance,
@@ -913,10 +942,6 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
     result.areaPdf = 0.0f;
     result.hit = false;
 
-    if (!analyticEllipsoidIsRepresentable(center, axisX, axisY, axisZ))
-    {
-        return result;
-    }
     const ScaledAffineBasis basis = scaledAffineBasis(axisX, axisY, axisZ);
     if (!basis.valid)
     {
@@ -1077,9 +1102,74 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
     return result;
 }
 
+DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigin,
+                                                                 float3 rayDirection,
+                                                                 float minDistance,
+                                                                 float maxDistance,
+                                                                 float3 center,
+                                                                 float3 axisX,
+                                                                 float3 axisY,
+                                                                 float3 axisZ)
+{
+    if (analyticEllipsoidIsRepresentable(center, axisX, axisY, axisZ))
+    {
+        return intersectAnalyticEllipsoidUnchecked(rayOrigin, rayDirection, minDistance, maxDistance, center, axisX,
+                                                   axisY, axisZ);
+    }
+    AnalyticLightIntersection miss;
+    miss.distance = maxDistance;
+    miss.point = make_float3(0.0f);
+    miss.normal = make_float3(0.0f);
+    miss.areaPdf = 0.0f;
+    miss.hit = false;
+    return miss;
+}
+
+
 /// Dispatch one packed light record to the exact finite surface its sampler
 /// uses. The parameter layout is UniformLight's layout, but keeping the
 /// function scalar makes this source compile unchanged on CPU, Metal and CUDA.
+/// The hot form: for a light the scene has enabled, and only from a caller that
+/// has already tested analyticLightVisibilityAllowsRay(). See the note above
+/// sampleAnalyticEllipsoidUnchecked() for what that buys and why it is sound.
+DEVICE_FUNC AnalyticLightIntersection intersectAnalyticLightSurfaceUnchecked(int lightType,
+                                                                    float3 point0,
+                                                                    float3 point1,
+                                                                    float3 point2,
+                                                                    float3 point3,
+                                                                    float3 emissionNormal,
+                                                                    float3 rayOrigin,
+                                                                    float3 rayDirection,
+                                                                    float minDistance,
+                                                                    float maxDistance)
+{
+    if (lightType == LIGHT_TYPE_RECT)
+    {
+        return intersectAnalyticRectangle(rayOrigin, rayDirection, minDistance, maxDistance, point0, point1 - point0,
+                                          point3 - point0, emissionNormal);
+    }
+    if (lightType == LIGHT_TYPE_DISC)
+    {
+        return intersectAnalyticDisc(
+            rayOrigin, rayDirection, minDistance, maxDistance, point1, point2, point3, emissionNormal);
+    }
+    if (lightType == LIGHT_TYPE_SPHERE)
+    {
+        return intersectAnalyticEllipsoidUnchecked(
+            rayOrigin, rayDirection, minDistance, maxDistance, point1, point0, point2, point3);
+    }
+    const float radius = point0.x;
+    if (lightIsPunctual(lightType) && punctualLightIsSoft(radius))
+    {
+        return intersectAnalyticEllipsoidUnchecked(rayOrigin, rayDirection, minDistance, maxDistance, point1,
+                                          make_float3(radius, 0.0f, 0.0f), make_float3(0.0f, radius, 0.0f),
+                                          make_float3(0.0f, 0.0f, radius));
+    }
+    AnalyticLightIntersection miss;
+    miss.distance = maxDistance;
+    return miss;
+}
+
 DEVICE_FUNC AnalyticLightIntersection intersectAnalyticLightSurface(int lightType,
                                                                     float3 point0,
                                                                     float3 point1,
@@ -1132,9 +1222,11 @@ DEVICE_FUNC bool analyticLightSurfaceOccludesSegment(int lightType,
                                                      float minDistance,
                                                      float maxDistance)
 {
+    // The visibility test on the left is the precondition the Unchecked form
+    // wants: a light the scene enabled is a light the scene could represent.
     return analyticLightVisibilityAllowsRay(packedVisibility, true) &&
-           intersectAnalyticLightSurface(lightType, point0, point1, point2, point3, emissionNormal, rayOrigin,
-                                         rayDirection, minDistance, maxDistance)
+           intersectAnalyticLightSurfaceUnchecked(lightType, point0, point1, point2, point3, emissionNormal, rayOrigin,
+                                                  rayDirection, minDistance, maxDistance)
                .hit;
 }
 

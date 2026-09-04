@@ -6,6 +6,7 @@
 #include <strelka/sceneloader/iesloader.h>
 #include <host/light_selection.h>
 #include <light_types.h>
+#include <analytic_light.h>
 
 #include <fstream>
 #include <filesystem>
@@ -453,4 +454,46 @@ TEST_CASE("IES loader reads a minimal LM-63 file")
     CHECK(sampleIesCandela(profile, glm::float3(0.0f, 0.0f, -1.0f)) == doctest::Approx(100.0f));
 
     fs::remove(path);
+}
+
+TEST_CASE("a light the scene enables is one the ellipsoid path can represent")
+{
+    // What the Unchecked entry points in analytic_light.h stand on. Both
+    // backends intersect and sample a soft lamp through the ellipsoid path, and
+    // that path is entitled to skip analyticEllipsoidIsRepresentable() -- which
+    // is not cheap, and which nothing about a ray can change -- only because
+    // the scene has already refused to enable a light that fails it.
+    //
+    // Deciding it per ray instead cost 46.6 ms of kids_room's 86.7 ms/sample at
+    // 1280x720 depth 4.
+    auto packed = [](float radius) {
+        Scene scene;
+        Scene::UniformLightDesc desc{};
+        desc.type = LIGHT_TYPE_POINT;
+        desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+        desc.intensity = 10.0f;
+        desc.color = glm::float3(1.0f);
+        desc.radius = radius;
+        const uint32_t id = scene.createLight(desc);
+        return scene.getLights()[id];
+    };
+
+    const Scene::Light ordinary = packed(0.05f);
+    REQUIRE(ordinary.normal.w > 0.0f); // enabled
+    CHECK(analyticEllipsoidIsRepresentable(glm::float3(ordinary.points[1]),
+                                           glm::float3(ordinary.points[0].x, 0.0f, 0.0f),
+                                           glm::float3(0.0f, ordinary.points[0].x, 0.0f),
+                                           glm::float3(0.0f, 0.0f, ordinary.points[0].x)));
+
+    // A radius that is finite, positive, and still leaves the ellipsoid without
+    // a representable area density -- r^2 overflows, so the pdf underflows to
+    // zero -- takes the light out of the table entirely. Every other guard in
+    // the packing passes it, so this is the one that has to catch it.
+    const Scene::Light overflowing = packed(1.0e20f);
+    REQUIRE(std::isfinite(overflowing.points[0].x));
+    CHECK_FALSE(analyticEllipsoidIsRepresentable(glm::float3(overflowing.points[1]),
+                                                  glm::float3(overflowing.points[0].x, 0.0f, 0.0f),
+                                                  glm::float3(0.0f, overflowing.points[0].x, 0.0f),
+                                                  glm::float3(0.0f, 0.0f, overflowing.points[0].x)));
+    CHECK(overflowing.normal.w == 0.0f);
 }

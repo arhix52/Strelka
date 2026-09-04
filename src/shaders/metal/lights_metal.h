@@ -44,7 +44,7 @@ static float calcLightAreaPdf(device const UniformLight& l, const float3 hitPoin
     }
     case LIGHT_TYPE_SPHERE: {
         float3 normal;
-        areaPdf = analyticEllipsoidAreaPdf(
+        areaPdf = analyticEllipsoidAreaPdfUnchecked(
             float3(l.points[1]), float3(l.points[0]), float3(l.points[2]), float3(l.points[3]), hitPoint, normal);
         break;
     }
@@ -78,7 +78,7 @@ static float3 calcLightNormal(device const UniformLight& l, thread const float3 
         break;
     }
     case LIGHT_TYPE_SPHERE: {
-        analyticEllipsoidAreaPdf(
+        analyticEllipsoidAreaPdfUnchecked(
             float3(l.points[1]), float3(l.points[0]), float3(l.points[2]), float3(l.points[3]), hitPoint, norm);
         break;
     }
@@ -104,7 +104,7 @@ static void fillLightData(device const UniformLight& l,
     if (l.type == LIGHT_TYPE_SPHERE)
     {
         const AnalyticLightIntersection hit =
-            intersectAnalyticEllipsoid(hitPoint, lightSampleData.L, 0.0f, 3.402823466e38f, float3(l.points[1]),
+            intersectAnalyticEllipsoidUnchecked(hitPoint, lightSampleData.L, 0.0f, 3.402823466e38f, float3(l.points[1]),
                                        float3(l.points[0]), float3(l.points[2]), float3(l.points[3]));
         lightSampleData.areaPdf = hit.areaPdf;
         lightSampleData.normal = hit.normal;
@@ -238,7 +238,7 @@ static __inline__ LightSampleData SampleSphereLight(device const UniformLight& l
     LightSampleData lightSampleData;
     const float3 center = float3(l.points[1]);
     const AnalyticLightSample sample =
-        sampleAnalyticEllipsoid(center, float3(l.points[0]), float3(l.points[2]), float3(l.points[3]), u.x, u.y);
+        sampleAnalyticEllipsoidUnchecked(center, float3(l.points[0]), float3(l.points[2]), float3(l.points[3]), u.x, u.y);
     lightSampleData.pointOnLight = sample.point;
     const float3 toLight = sample.point - hitPoint;
     lightSampleData.L = finiteDirectionAndDistance(toLight, lightSampleData.distToLight);

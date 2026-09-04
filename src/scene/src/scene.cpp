@@ -954,7 +954,20 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].pad1 = desc.range;
         const bool positionValid = affineVectorIsFinite(glm::float3(mLights[lightId].points[1]));
         const bool needsEmissionAxis = desc.type != LIGHT_TYPE_POINT || needsProfileFrame;
-        lightHasSupport = positionValid && (!needsEmissionAxis || glm::dot(emissionAxis, emissionAxis) > 0.0f) &&
+        // A soft radius makes this a sphere, and both backends intersect and
+        // sample it through the ellipsoid path -- which is entitled to assume
+        // the scene vetted the transform, exactly as a LIGHT_TYPE_SPHERE is.
+        // The axes are the ones intersectAnalyticLightSurface() builds from the
+        // radius, so this decides the same question the same way.
+        const float softRadius = mLights[lightId].points[0].x;
+        const bool ellipsoidValid =
+            !punctualLightIsSoft(softRadius) ||
+            analyticEllipsoidIsRepresentable(glm::float3(mLights[lightId].points[1]),
+                                             glm::float3(softRadius, 0.0f, 0.0f),
+                                             glm::float3(0.0f, softRadius, 0.0f),
+                                             glm::float3(0.0f, 0.0f, softRadius));
+        lightHasSupport = positionValid && ellipsoidValid &&
+                          (!needsEmissionAxis || glm::dot(emissionAxis, emissionAxis) > 0.0f) &&
                           (!needsProfileFrame || profileFrame.valid);
     }
     else if (desc.type == LIGHT_TYPE_DISTANT)

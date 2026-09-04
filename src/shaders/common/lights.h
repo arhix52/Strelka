@@ -103,7 +103,7 @@ static __inline__ __device__ AnalyticAreaLightHit findAnalyticAreaLightHit(const
         {
             continue;
         }
-        const AnalyticLightIntersection candidate = intersectAnalyticLightSurface(
+        const AnalyticLightIntersection candidate = intersectAnalyticLightSurfaceUnchecked(
             light.type, make_float3(light.points[0]), make_float3(light.points[1]), make_float3(light.points[2]),
             make_float3(light.points[3]), make_float3(light.normal), rayOrigin, rayDirection, minDistance,
             closest.distance);
@@ -158,7 +158,7 @@ static __inline__ __device__ float calcLightAreaPdf(const UniformLight& l, const
     else if (l.type == LIGHT_TYPE_SPHERE)
     {
         float3 normal;
-        areaPdf = analyticEllipsoidAreaPdf(make_float3(l.points[1]), make_float3(l.points[0]), make_float3(l.points[2]),
+        areaPdf = analyticEllipsoidAreaPdfUnchecked(make_float3(l.points[1]), make_float3(l.points[0]), make_float3(l.points[2]),
                                            make_float3(l.points[3]), hitPoint, normal);
     }
     else if (punctualLightIsSoft(l.points[0].x) && lightIsPunctual(l.type))
@@ -186,7 +186,7 @@ static __inline__ __device__ float3 calcLightNormal(const UniformLight& l, const
     }
     else if (l.type == LIGHT_TYPE_SPHERE)
     {
-        analyticEllipsoidAreaPdf(make_float3(l.points[1]), make_float3(l.points[0]), make_float3(l.points[2]),
+        analyticEllipsoidAreaPdfUnchecked(make_float3(l.points[1]), make_float3(l.points[0]), make_float3(l.points[2]),
                                  make_float3(l.points[3]), hitPoint, norm);
     }
     else if (lightIsPunctual(l.type))
@@ -210,7 +210,7 @@ static __inline__ __device__ void fillLightData(const UniformLight& l,
     if (l.type == LIGHT_TYPE_SPHERE)
     {
         const AnalyticLightIntersection hit =
-            intersectAnalyticEllipsoid(hitPoint, lightSampleData.L, 0.0f, 3.402823466e38f, make_float3(l.points[1]),
+            intersectAnalyticEllipsoidUnchecked(hitPoint, lightSampleData.L, 0.0f, 3.402823466e38f, make_float3(l.points[1]),
                                        make_float3(l.points[0]), make_float3(l.points[2]), make_float3(l.points[3]));
         lightSampleData.areaPdf = hit.areaPdf;
         lightSampleData.normal = hit.normal;
@@ -396,7 +396,7 @@ static __inline__ __device__ LightSampleData SampleSphereLight(const UniformLigh
 {
     LightSampleData lightSampleData;
     const float3 center = make_float3(l.points[1]);
-    const AnalyticLightSample sample = sampleAnalyticEllipsoid(
+    const AnalyticLightSample sample = sampleAnalyticEllipsoidUnchecked(
         center, make_float3(l.points[0]), make_float3(l.points[2]), make_float3(l.points[3]), u.x, u.y);
     lightSampleData.pointOnLight = sample.point;
     const float3 toLight = sample.point - hitPoint;
