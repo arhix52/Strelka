@@ -69,12 +69,21 @@ void EditorApp::drawLoadingOverlay()
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
 
-    ImGui::TextUnformatted(std::filesystem::path(m_sceneFile).filename().string().c_str());
-    ImGui::Spacing();
+    // The pipeline also compiles with no scene open -- at startup, on a cold
+    // cache -- and there the file name is empty and the bar sits at zero for the
+    // whole wait. A blank title over a stalled bar reads as a hang, which is the
+    // opposite of what this overlay is for, so neither is drawn unless a scene
+    // is genuinely being loaded.
+    const bool loading = m_isLoading || building;
+    if (loading)
+    {
+        ImGui::TextUnformatted(std::filesystem::path(m_sceneFile).filename().string().c_str());
+        ImGui::Spacing();
 
-    const std::string label =
-        total > 0 ? fmt::format("{}  {}/{}", kStageNames[stage], done, total) : std::string(kStageNames[stage]);
-    ImGui::ProgressBar(fraction, ImVec2(-FLT_MIN, 0.0f), label.c_str());
+        const std::string label =
+            total > 0 ? fmt::format("{}  {}/{}", kStageNames[stage], done, total) : std::string(kStageNames[stage]);
+        ImGui::ProgressBar(fraction, ImVec2(-FLT_MIN, 0.0f), label.c_str());
+    }
 
     if (compiling)
     {
@@ -83,25 +92,30 @@ void EditorApp::drawLoadingOverlay()
         // the whole message -- they are what says this is working rather than
         // stuck.
         ImGui::Spacing();
-        ImGui::TextUnformatted("Compiling shaders for this scene");
+        ImGui::TextUnformatted(loading ? "Compiling shaders for this scene" : "Compiling shaders");
         ImGui::SameLine();
         ImGui::TextDisabled("%.0f s", compileMs / 1000.0);
         ImGui::TextDisabled("First time only -- the result is cached on disk.");
     }
 
     // GPU resources are already owned once the build starts, so only the parse
-    // stage can be cancelled safely.
-    ImGui::Spacing();
-    ImGui::BeginDisabled(!m_isLoading || m_loadProgress.isCancelled());
-    if (ImGui::Button("Cancel"))
+    // stage can be cancelled safely -- and a compile with no scene behind it has
+    // nothing to cancel at all, so the button is not drawn rather than drawn
+    // dead.
+    if (loading)
     {
-        m_loadProgress.cancel();
-    }
-    ImGui::EndDisabled();
-    if (m_loadProgress.isCancelled())
-    {
-        ImGui::SameLine();
-        ImGui::TextDisabled("cancelling...");
+        ImGui::Spacing();
+        ImGui::BeginDisabled(!m_isLoading || m_loadProgress.isCancelled());
+        if (ImGui::Button("Cancel"))
+        {
+            m_loadProgress.cancel();
+        }
+        ImGui::EndDisabled();
+        if (m_loadProgress.isCancelled())
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("cancelling...");
+        }
     }
 
     ImGui::End();

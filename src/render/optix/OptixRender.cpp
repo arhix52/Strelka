@@ -4913,10 +4913,19 @@ void OptiXRender::updateEmitterSelectionProbabilities()
     const metal::EmitterSelectionProbabilities selection = metal::emitterSelectionProbabilities(
         params.hasEnvMap, envPower, params.scene.numLights > 0u, mAnalyticLightPower,
         params.scene.numEmissiveMeshes > 0u, mEmissiveMeshPower);
+    // This runs per frame, so the split is only worth a line when it moves --
+    // which is when a scene's lights or environment have just changed, the only
+    // time anyone reads it.
+    const bool changed = params.envSelectionPdf != selection.environment ||
+                         params.scene.meshLightSelectionPdf != selection.meshGivenLocal;
     params.envSelectionPdf = selection.environment;
     params.scene.meshLightSelectionPdf = selection.meshGivenLocal;
-    STRELKA_DEBUG("Emitter selection: extent={} envPower={} analyticPower={} meshPower={} -> env={} local={}", extent,
-                  envPower, mAnalyticLightPower, mEmissiveMeshPower, selection.environment, selection.local);
+    if (changed)
+    {
+        STRELKA_DEBUG("Emitter selection: extent={} envPower={} analyticPower={} meshPower={} -> env={} local={}",
+                      extent, envPower, mAnalyticLightPower, mEmissiveMeshPower, selection.environment,
+                      selection.local);
+    }
 }
 
 void OptiXRender::createEmissiveMeshLights()
