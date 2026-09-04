@@ -997,8 +997,8 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
     // isolated black dots on foliage.
     float3 geomNormal = cross(p1 - p0, p2 - p0);
     geomNormal = safe_normalize(optixTransformNormalFromObjectToWorldSpace(geomNormal));
-    const float3 worldTangent =
-        normalize(optixTransformNormalFromObjectToWorldSpace(interpolateAttrib(t0, t1, t2, barycentrics)));
+    const float3 worldTangent = orthonormalizeTangent(
+        worldNormal, optixTransformVectorFromObjectToWorldSpace(interpolateAttrib(t0, t1, t2, barycentrics)));
     // Without TANGENT.w the bitangent points the wrong way and every normal map
     // is mirrored along it -- bumps light from the opposite side.
     const float3 worldBinormal = cross(worldNormal, worldTangent) * tangentSign;
@@ -1050,7 +1050,8 @@ static __forceinline__ __device__ SurfaceHitData fillCubicCurveGeomData(const Hi
     // normalize((0,0,0)) is NaN -- exactly the failure mode a groom hits far
     // more often than a triangle mesh does.
     float3 worldNormal = safe_normalize(optixTransformNormalFromObjectToWorldSpace(objectNormal));
-    const float3 worldTangent = normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, u)));
+    const float3 worldTangent = orthonormalizeTangent(
+        worldNormal, optixTransformVectorFromObjectToWorldSpace(curveTangent(interpolator, u)));
     const float3 worldBinormal = cross(worldNormal, worldTangent);
     const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(hitPoint);
     SurfaceHitData res;
@@ -1085,7 +1086,8 @@ static __forceinline__ __device__ SurfaceHitData fillLinearCurveGeomData(const H
     // safe_normalize: see fillCubicCurveGeomData -- a tapered/near-axial hit
     // collapses this to (0,0,0), and normalize((0,0,0)) is NaN.
     float3 worldNormal = safe_normalize(optixTransformNormalFromObjectToWorldSpace(objectNormal));
-    const float3 worldTangent = normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, u)));
+    const float3 worldTangent = orthonormalizeTangent(
+        worldNormal, optixTransformVectorFromObjectToWorldSpace(curveTangent(interpolator, u)));
     const float3 worldBinormal = cross(worldNormal, worldTangent);
     const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(hitPoint);
     SurfaceHitData res;

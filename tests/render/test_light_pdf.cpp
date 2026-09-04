@@ -498,6 +498,65 @@ TEST_CASE("continuous light samples use interior finite-lattice representatives"
     CHECK(oldClosedEndpoint != lightOpenUnitInterval(0.0f));
 }
 
+TEST_CASE("transformed tangents use vector transport and Gram-Schmidt")
+{
+    const float3 worldNormal = normalizeFiniteVectorOrZero(make_float3(0.5f, 1.0f, 0.0f));
+    const float3 forwardVector = make_float3(-2.0f, 1.0f, 0.0f);
+    const float3 tangent = orthonormalizeTangent(worldNormal, forwardVector);
+    CHECK(dot3(worldNormal, tangent) == doctest::Approx(0.0f).scale(1.0f).epsilon(1e-6));
+    CHECK(len(tangent) == doctest::Approx(1.0f));
+
+    // Mutation: inverse-transpose is correct for normals, not for tangents.
+    // Under diag(2,1,1) it produces a visibly non-orthogonal frame.
+    const float3 oldOptixTangent = normalizeFiniteVectorOrZero(make_float3(-0.5f, 1.0f, 0.0f));
+    CHECK(std::abs(dot3(worldNormal, oldOptixTangent)) > 0.5f);
+}
+
+TEST_CASE("light profile frames match a double-precision Gram-Schmidt oracle")
+{
+    std::mt19937 generator(0xF24A9u);
+    std::uniform_real_distribution<double> value(-2.0, 2.0);
+    for (int sample = 0; sample < 4096; ++sample)
+    {
+        glm::dmat3 transform;
+        for (;;)
+        {
+            for (int column = 0; column < 3; ++column)
+            {
+                for (int row = 0; row < 3; ++row)
+                {
+                    transform[column][row] = value(generator);
+                }
+            }
+            if (std::abs(glm::determinant(transform)) >= 0.2)
+            {
+                break;
+            }
+        }
+
+        const float3 axisX = float3(transform[0]);
+        const float3 axisY = float3(transform[1]);
+        const float3 emissionAxis = float3(glm::normalize(glm::transpose(glm::inverse(transform)) *
+                                                          glm::dvec3(0.0, 0.0, -1.0)));
+        const OrthonormalLightFrame frame = makeOrthonormalLightFrame(axisX, axisY, emissionAxis);
+        REQUIRE(frame.valid);
+
+        const glm::dvec3 oracleZ = glm::normalize(glm::dvec3(emissionAxis));
+        const glm::dvec3 inputX(axisX);
+        const glm::dvec3 oracleX = glm::normalize(inputX - glm::dot(inputX, oracleZ) * oracleZ);
+        const glm::dvec3 inputY(axisY);
+        const glm::dvec3 oracleY = glm::normalize(inputY - glm::dot(inputY, oracleZ) * oracleZ -
+                                                  glm::dot(inputY, oracleX) * oracleX);
+        CAPTURE(sample);
+        CHECK(glm::length(glm::dvec3(frame.x) - oracleX) < 2e-6);
+        CHECK(glm::length(glm::dvec3(frame.y) - oracleY) < 2e-6);
+        CHECK(glm::length(glm::dvec3(frame.emissionAxis) - oracleZ) < 2e-6);
+        CHECK(std::abs(glm::dot(glm::dvec3(frame.x), glm::dvec3(frame.y))) < 2e-6);
+        CHECK(std::abs(glm::dot(glm::dvec3(frame.x), glm::dvec3(frame.emissionAxis))) < 2e-6);
+        CHECK(std::abs(glm::dot(glm::dvec3(frame.y), glm::dvec3(frame.emissionAxis))) < 2e-6);
+    }
+}
+
 TEST_CASE("degenerate analytic lights have zero density without non-finite samples")
 {
     const float3 zero = make_float3(0.0f);

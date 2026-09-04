@@ -9,6 +9,7 @@
 #include <fstream>
 #include <filesystem>
 #include <cmath>
+#include <limits>
 #include <numbers>
 
 using namespace oka;
@@ -81,6 +82,76 @@ TEST_CASE("projector light packs its frame, its image and its axes")
     CHECK(glm::normalize(glm::float3(gpu.normal)).z == doctest::Approx(-1.0f).epsilon(1e-4));
     CHECK(glm::normalize(glm::float3(gpu.points[2])).x == doctest::Approx(1.0f).epsilon(1e-4));
     CHECK(glm::normalize(glm::float3(gpu.points[3])).y == doctest::Approx(1.0f).epsilon(1e-4));
+}
+
+TEST_CASE("punctual packing rejects non-finite positions and collapsed profile frames")
+{
+    Scene scene;
+    Scene::UniformLightDesc desc{};
+    desc.type = LIGHT_TYPE_POINT;
+    desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+    desc.intensity = 10.0f;
+    desc.color = glm::float3(1.0f);
+    const uint32_t id = scene.createLight(desc);
+
+    desc.useXform = true;
+    desc.xform = glm::float4x4(1.0f);
+    desc.xform[3][0] = std::numeric_limits<float>::infinity();
+    scene.setLight(id, desc);
+    CHECK(glm::float3(scene.getLights()[id].color) == glm::float3(0.0f));
+    CHECK(scene.getLights()[id].normal.w == 0.0f);
+
+    desc.type = LIGHT_TYPE_PROJECTOR;
+    desc.outerConeAngle = 0.4f;
+    desc.projectorAspect = 1.0f;
+    desc.xform = glm::float4x4(1.0f);
+    desc.xform[0][0] = 0.0f;
+    scene.setLight(id, desc);
+    CHECK(glm::float3(scene.getLights()[id].color) == glm::float3(0.0f));
+    CHECK(scene.getLights()[id].normal.w == 0.0f);
+
+    desc.type = LIGHT_TYPE_POINT;
+    desc.iesProfile = 0;
+    scene.setLight(id, desc);
+    CHECK(glm::float3(scene.getLights()[id].color) == glm::float3(0.0f));
+    CHECK(scene.getLights()[id].normal.w == 0.0f);
+}
+
+TEST_CASE("sheared and mirrored projector transforms pack an orthonormal oriented frame")
+{
+    Scene scene;
+    Scene::UniformLightDesc desc{};
+    desc.type = LIGHT_TYPE_PROJECTOR;
+    desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+    desc.intensity = 10.0f;
+    desc.color = glm::float3(1.0f);
+    desc.outerConeAngle = 0.4f;
+    desc.projectorAspect = 1.0f;
+    desc.useXform = true;
+    desc.xform = glm::float4x4(1.0f);
+    desc.xform[1][0] = 1.0f;
+    const uint32_t id = scene.createLight(desc);
+
+    const auto checkFrame = [&](const Scene::Light& light) {
+        const glm::float3 x(light.points[2]);
+        const glm::float3 y(light.points[3]);
+        const glm::float3 z(light.normal);
+        CHECK(glm::length(x) == doctest::Approx(1.0f));
+        CHECK(glm::length(y) == doctest::Approx(1.0f));
+        CHECK(glm::length(z) == doctest::Approx(1.0f));
+        CHECK(glm::dot(x, y) == doctest::Approx(0.0f).scale(1.0f).epsilon(1e-6));
+        CHECK(glm::dot(x, z) == doctest::Approx(0.0f).scale(1.0f).epsilon(1e-6));
+        CHECK(glm::dot(y, z) == doctest::Approx(0.0f).scale(1.0f).epsilon(1e-6));
+    };
+    checkFrame(scene.getLights()[id]);
+
+    desc.xform = glm::float4x4(1.0f);
+    desc.xform[0][0] = -1.0f;
+    scene.setLight(id, desc);
+    checkFrame(scene.getLights()[id]);
+    CHECK(glm::float3(scene.getLights()[id].points[2]).x == doctest::Approx(-1.0f));
+    CHECK(glm::float3(scene.getLights()[id].points[3]).y == doctest::Approx(1.0f));
+    CHECK(glm::float3(scene.getLights()[id].normal).z == doctest::Approx(-1.0f));
 }
 
 TEST_CASE("a projector carries no IES profile, even one left over from a spot")

@@ -54,6 +54,35 @@ DEVICE_FUNC float lightOpenUnitInterval(float xi)
     return fminf(fmaxf(centred, 0x1p-24f), 0x1.fffffep-1f);
 }
 
+struct OrthonormalLightFrame
+{
+    float3 x;
+    float3 y;
+    float3 emissionAxis;
+    bool valid;
+};
+
+/// Turn the affine images of local +X, +Y, and emission -Z into the rigid
+/// frame an angular profile is defined in. Modified Gram-Schmidt retains the
+/// transformed X/Y orientation (including mirrors) without letting scale or
+/// shear distort the profile's spherical measure.
+DEVICE_FUNC OrthonormalLightFrame makeOrthonormalLightFrame(float3 axisX, float3 axisY, float3 emissionAxis)
+{
+    OrthonormalLightFrame frame{};
+    frame.emissionAxis = normalizeFiniteVectorOrZero(emissionAxis);
+    frame.x = orthonormalizeTangent(frame.emissionAxis, axisX);
+    const float yAlongNormal = dot(axisY, frame.emissionAxis);
+    const float yAlongX = dot(axisY, frame.x);
+    const float3 yResidual = make_float3(
+        fmaf(-yAlongX, frame.x.x, fmaf(-yAlongNormal, frame.emissionAxis.x, axisY.x)),
+        fmaf(-yAlongX, frame.x.y, fmaf(-yAlongNormal, frame.emissionAxis.y, axisY.y)),
+        fmaf(-yAlongX, frame.x.z, fmaf(-yAlongNormal, frame.emissionAxis.z, axisY.z)));
+    frame.y = normalizeFiniteVectorOrZero(yResidual);
+    frame.valid = dot(frame.emissionAxis, frame.emissionAxis) > 0.0f && dot(frame.x, frame.x) > 0.0f &&
+                  dot(frame.y, frame.y) > 0.0f;
+    return frame;
+}
+
 // ---------------------------------------------------------------------------
 // MIS heuristics
 //

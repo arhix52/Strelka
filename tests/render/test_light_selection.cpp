@@ -378,6 +378,17 @@ TEST_CASE("invalid directional frames have zero selection power")
     CHECK(analyticLightPower(light) == 0.0);
     light.points[0].y = -1.0f; // an isotropic point has no directional frame
     CHECK(analyticLightPower(light) > 0.0);
+
+    light.points[1].x = std::numeric_limits<float>::infinity();
+    CHECK(analyticLightPower(light) == 0.0);
+    light.points[1] = glm::float4(0.0f, 0.0f, 1.0f, 1.0f);
+
+    light.type = LIGHT_TYPE_PROJECTOR;
+    light.points[0].w = 1.0f;
+    light.points[2] = glm::float4(0.0f);
+    light.points[3] = glm::float4(0.0f, 1.0f, 0.0f, 0.0f);
+    light.normal = glm::float4(0.0f, 0.0f, -1.0f, 0.0f);
+    CHECK(analyticLightPower(light) == 0.0);
 }
 
 TEST_CASE("analytic light power uses transformed smooth area")

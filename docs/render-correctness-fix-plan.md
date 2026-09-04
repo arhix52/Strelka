@@ -30,7 +30,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | S. Environment radiance/support lifecycle | Invalid HDR values reach textures, bilinear positive radiance can lie outside PMF support, runtime edits leave stale tables, and a `FLT_TRUE_MIN` 1x1 map loses its outer PMF through an infinite reciprocal | sanitization, 3x3 footprint support, seam/poles, tiny-positive power, edit/reload regressions | 3x3 oracle FIXED | FIXED on MTLDevice; lifecycle source/compile | Shared source fixed; external CUDA required | this commit | FIXED |
 | T. Infinite-light exact support/MIS | Sharp distant versus mirror is not represented as a discrete match; tiny continuous caps and float round trips lose support; camera mask/tMax differ | delta match, tiny cap, boundary round-trip, camera visibility and backend-distance tests | Stable analytic cone inversion and chord support; explicit sharp-distant atom; shared infinite visibility/distance | FIXED | FIXED on MTLDevice | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | U. Analytic/punctual visibility agreement | Shadow rays ignore analytic emitters and finite-radius punctual proxies; soft punctual spheres are nevertheless sampled with a continuous area density but classified as MIS deltas | analytic segment blockers, stacked area lights, overlapping analytic surfaces, exact parallelograms and soft-punctual hit/MIS regressions | One analytic surface query for camera/BSDF hits and finite shadow segments; only radius-free punctual sources remain delta | FIXED | FIXED on MTLDevice | Shared source fixed; external CUDA required | this commit | UNVERIFIED |
-| V. Transformed frame validity | Non-finite translations and collapsed/sheared projector/IES frames keep proposal power; OptiX transforms tangents as normals | translation, partial-rank/full-frame, shear, mirrored and tangent Gram-Schmidt tests | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| V. Transformed frame validity | Non-finite translations and collapsed/sheared projector/IES frames keep proposal power; OptiX transforms tangents as normals | translation, partial-rank/full-frame, shear, mirrored and tangent Gram-Schmidt tests | Orthonormal profile frames, matched packing/power/device validity, and forward-vector surface tangents | FIXED | FIXED on MTLDevice | Shared source fixed; external CUDA required | this commit | UNVERIFIED |
 | W. Complete marginal PDF arithmetic | Conditional area PDFs saturate before outer PMFs, under-reporting a finite complete marginal density | tiny-area/low-selection analytic and mesh regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | X. Emissive mesh animated/textured consistency | Power support ignores shutter/interior motion; OpenPBR and Metal LOD paths disagree with hit emission | motion extrema, OpenPBR texture bridge and texture-LOD regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | Y. Runtime topology/mask safety | Headless host geometry is released too early; finite/infinite and camera-visibility edits do not rebuild every backend mask/descriptor | headless rebuild and repeated runtime mask transitions | pending | OPEN | OPEN | OPEN | pending | OPEN |
@@ -951,3 +951,50 @@ is out of scope unless it blocks validation.
   with zero measure/support failures. OptiX consumes the same intersection, PDF, endpoint, and blocker source, but
   CUDA compilation/runtime remains externally `UNVERIFIED` under the finding-7 command. Status: FIXED for CPU and
   Metal, UNVERIFIED for OptiX execution.
+
+## Finding V: transformed frame validity
+
+- Random variables and measure: light identity `J` remains a discrete mass. A sharp punctual or distant source then
+  has its existing directional atom; a soft punctual source samples world area before conversion to `domega`; spot,
+  projector, and IES profiles deterministically modulate radiance as a function of direction. A mesh BSDF direction
+  remains continuous in `domega`; its tangent frame only changes the integrand and lobe orientation.
+- Support: every finite light needs a finite world position when its conditional is positional. Spot and distant
+  lights need one finite nonzero emission axis. Projectors and IES lights additionally need a full-rank finite local
+  frame. A general affine transform is represented by an orthonormal frame obtained from its forward-transformed
+  tangents and inverse-transpose emission normal; collapsed frames have empty radiometric and proposal support.
+- Conditional and marginal PDFs: valid affine reorientation does not change a punctual delta mass, sphere area
+  density, or any outer selection PMF. The complete continuous density remains the represented outer PMFs times the
+  existing conditional `p_omega`; an invalid record has both physical radiance and proposal mass zero. Surface BSDF
+  PDFs are evaluated in a tangent produced by forward vector transformation followed by Gram-Schmidt against the
+  inverse-transpose shading normal.
+- Selection PMF: `analyticLightPower()` must reject the same invalid position/frame records that packing and device
+  evaluation reject. Valid records continue through the integer alias construction unchanged.
+- Delta/continuous classification and MIS: unchanged. Frame validity cannot turn a finite-area event into an atom or
+  vice versa. NEE and BSDF-hit/miss strategies retain their prior densities; both merely see the same valid emission
+  profile and orthonormal receiver frame.
+- Current-HEAD reproducer: `Scene::updateLight()` writes a non-finite transformed translation into `points[1]` while
+  retaining positive color and visibility. A projector under `diag(0,1,1)` retains a valid `-Z` axis and therefore
+  positive selection power even though its `+X` image axis is zero. Under an XY shear, the two separately normalized
+  packed axes are not orthogonal. OptiX reconstructs mesh and curve tangents with
+  `optixTransformNormalFromObjectToWorldSpace`, while Metal correctly uses the forward vector transform; under
+  `diag(2,1,1)` those operations point in different directions.
+- Implementation and mutation sensitivity: scene packing builds a profile frame by modified Gram-Schmidt from
+  forward-transformed local `+X/+Y` tangents and the inverse-transpose local `-Z` emission normal. Scale and shear no
+  longer distort the angular coordinate system, while the transformed tangent signs retain mirrored image/profile
+  orientation. A non-finite position or required collapsed frame zeros both radiance/visibility and host proposal
+  power. Projector and IES evaluation revalidate the same packed frame on both devices. Mesh and curve tangents use
+  forward vector transport and are then Gram-Schmidt orthogonalized against the inverse-transpose normal. Restoring
+  OptiX's old normal transform leaves `abs(N dot T)>0.5` in the retained `diag(2,1,1)` mutation; independently
+  normalizing the sheared light axes reproduces the pre-fix unit-length and orthogonality failures.
+- Corrected result: the pre-fix regressions reported 8 failures across non-finite translation, collapsed projector,
+  collapsed IES, and a sheared frame. They now pass, including mirrored orientation. An independent double-precision
+  oracle checks 4,096 random full-rank affine frames; all three production axes agree within `2e-6` and every pair is
+  orthogonal within `2e-6`. The transformed-tangent regression agrees with forward-vector transport and has unit
+  length with `N dot T=0` to the same tolerance.
+- Validation: focused Debug, Release, and ASan+UBSan each pass 15/15 cases and 28,765/28,765 assertions. Full Debug
+  and Release suites pass; production Metal shaders compile. The complete audit passes 899/899 cases and 69,244,287
+  assertions, retaining environment integral `1`, Lambertian estimate `1.002147074` inside its CI, detected legacy
+  mutation `2.003353165`, and dome MIS ratio `1`. A finding-specific actual Apple M4 Pro kernel executes 262,144
+  samples in fast and safe math at three threadgroup sizes with zero frame/tangent or existing audit failures. OptiX
+  source uses the identical Gram-Schmidt helper and forward tangent transform, but CUDA compilation/runtime remains
+  externally `UNVERIFIED`. Status: FIXED for CPU and Metal, UNVERIFIED for OptiX execution.

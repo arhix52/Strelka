@@ -257,6 +257,24 @@ DEVICE_FUNC float3 normalizeFiniteVectorOrZero(float3 v)
     return lengthSquared > 0.0f ? scaled / sqrtf(lengthSquared) : make_float3(0.0f);
 }
 
+/// A tangent is transported as a vector and then made orthogonal to the
+/// inverse-transpose normal. Returning zero for a collapsed frame keeps all
+/// three backends out of normalize(0) and gives callers an explicit invalid
+/// sentinel.
+DEVICE_FUNC float3 orthonormalizeTangent(float3 normal, float3 transformedTangent)
+{
+    const float3 n = normalizeFiniteVectorOrZero(normal);
+    if (!(dot(n, n) > 0.0f))
+    {
+        return make_float3(0.0f);
+    }
+    const float projection = dot(transformedTangent, n);
+    const float3 tangent = make_float3(fmaf(-projection, n.x, transformedTangent.x),
+                                       fmaf(-projection, n.y, transformedTangent.y),
+                                       fmaf(-projection, n.z, transformedTangent.z));
+    return normalizeFiniteVectorOrZero(tangent);
+}
+
 DEVICE_FUNC float finiteVectorLength(float3 v)
 {
     const float scale = fmaxf(fabsf(v.x), fmaxf(fabsf(v.y), fabsf(v.z)));

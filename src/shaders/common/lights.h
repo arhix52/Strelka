@@ -533,13 +533,17 @@ static __inline__ __device__ int projectorImageIndex(const UniformLight& l)
 /// makes for material maps.
 static __inline__ __device__ ProjectorSample projectorSampleForLight(const UniformLight& l, const float3 dirFromLight)
 {
-    const float3 ax = normalize(make_float3(l.points[2]));
-    const float3 ay = normalize(make_float3(l.points[3]));
-    const float3 az = normalize(make_float3(l.normal)); // emission axis, the light's -Z
-    const float3 d = normalize(dirFromLight);
+    const OrthonormalLightFrame frame = makeOrthonormalLightFrame(
+        make_float3(l.points[2]), make_float3(l.points[3]), make_float3(l.normal));
     const float tanX = projectorTanHalfX(l.halfAngle);
     const float tanY = projectorTanHalfY(tanX, l.points[0].w);
-    return projectorProject(dot(d, ax), dot(d, ay), dot(d, az), tanX, tanY, l.pad0);
+    if (!frame.valid)
+    {
+        return projectorProject(0.0f, 0.0f, -1.0f, tanX, tanY, l.pad0);
+    }
+    const float3 d = normalizeFiniteVectorOrZero(dirFromLight);
+    return projectorProject(
+        dot(d, frame.x), dot(d, frame.y), dot(d, frame.emissionAxis), tanX, tanY, l.pad0);
 }
 
 // Bilinear sample of an IES candela table. `dirFromLight` is world-space; the
@@ -569,11 +573,14 @@ static __inline__ __device__ float sampleIesCandela(const IesGpuBufferHeader* ie
 
     // World -> light local. Columns of the light's basis; -Z is the photometric
     // axis, matching iesloader.cpp::sampleIesCandela.
-    const float3 ax = normalize(make_float3(l.points[2]));
-    const float3 ay = normalize(make_float3(l.points[3]));
-    const float3 az = normalize(make_float3(l.normal)); // emission -Z
-    const float3 d = normalize(dirFromLight);
-    const float3 local = make_float3(dot(d, ax), dot(d, ay), -dot(d, az));
+    const OrthonormalLightFrame frame = makeOrthonormalLightFrame(
+        make_float3(l.points[2]), make_float3(l.points[3]), make_float3(l.normal));
+    if (!frame.valid)
+    {
+        return 0.0f;
+    }
+    const float3 d = normalizeFiniteVectorOrZero(dirFromLight);
+    const float3 local = make_float3(dot(d, frame.x), dot(d, frame.y), -dot(d, frame.emissionAxis));
 
     const float vertDeg = acosf(clamp(-local.z, -1.0f, 1.0f)) * (180.0f / M_PIf);
     const float horizDeg = atan2f(local.x, -local.y) * (180.0f / M_PIf);

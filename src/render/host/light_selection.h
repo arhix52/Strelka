@@ -141,13 +141,18 @@ inline double analyticLightPower(const Scene::Light& light)
     const glm::dvec3 packedDirection(light.normal);
     const double packedDirectionLengthSquared = glm::dot(packedDirection, packedDirection);
     const bool hasFiniteDirection = packedDirectionLengthSquared > 0.0 && std::isfinite(packedDirectionLengthSquared);
+    const bool hasFinitePosition = affineVectorIsFinite(glm::float3(light.points[1]));
+    const OrthonormalLightFrame profileFrame = makeOrthonormalLightFrame(
+        glm::float3(light.points[2]), glm::float3(light.points[3]), glm::float3(light.normal));
     double measure = 0.0;
     switch (light.type)
     {
     case LIGHT_TYPE_RECT: {
         const glm::float3 e1 = glm::float3(light.points[1] - light.points[0]);
         const glm::float3 e2 = glm::float3(light.points[3] - light.points[0]);
-        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 && inverseFiniteCrossLength(e1, e2) > 0.0f)
+        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 &&
+            affineSamplePointRangeIsFinite(glm::float3(light.points[0]), e1, e2, glm::float3(0.0f)) &&
+            inverseFiniteCrossLength(e1, e2) > 0.0f)
         {
             measure = pi * glm::length(glm::cross(glm::dvec3(e1), glm::dvec3(e2)));
         }
@@ -199,19 +204,19 @@ inline double analyticLightPower(const Scene::Light& light)
         break;
     }
     case LIGHT_TYPE_POINT:
-        if (light.points[0].y < 0.0f || hasFiniteDirection)
+        if (hasFinitePosition && (light.points[0].y < 0.0f || profileFrame.valid))
         {
             measure = 4.0 * pi;
         }
         break;
     case LIGHT_TYPE_SPOT:
-        if (hasFiniteDirection)
+        if (hasFinitePosition && hasFiniteDirection && (light.points[0].y < 0.0f || profileFrame.valid))
         {
             measure = coneSolidAngle(light.halfAngle);
         }
         break;
     case LIGHT_TYPE_PROJECTOR:
-        if (hasFiniteDirection)
+        if (hasFinitePosition && profileFrame.valid)
         {
             measure = projectorSolidAngleFromFov(light.halfAngle, light.points[0].w);
         }

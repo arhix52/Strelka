@@ -2177,7 +2177,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                              motionTime, bary, objectNormal, objectTangent, uv, vertexColor, tangentSign,
                              objectGeomNormal, objEdge1, objEdge2, uvArea2);
         shadingNormal = transformNormal(normalize(objectNormal), objectToWorld);
-        shadingTangent = normalize(transformDirection(normalize(objectTangent), objectToWorld));
+        shadingTangent =
+            orthonormalizeTangent(shadingNormal, transformDirection(normalize(objectTangent), objectToWorld));
         shadingGeomNormal = transformNormal(objectGeomNormal, objectToWorld);
     }
 
@@ -3365,7 +3366,8 @@ static void guideImpl(uint gid,
                                  motionTime, hit.barycentrics, objectNormal, objectTangent, uv, vertexColor,
                                  tangentSign, objectGeomNormal, edge1, edge2, uvArea2);
             shadingNormal = transformNormal(normalize(objectNormal), objectToWorld);
-            shadingTangent = normalize(transformDirection(normalize(objectTangent), objectToWorld));
+            shadingTangent =
+                orthonormalizeTangent(shadingNormal, transformDirection(normalize(objectTangent), objectToWorld));
             shadingGeomNormal = transformNormal(objectGeomNormal, objectToWorld);
         }
 

@@ -402,13 +402,17 @@ static __inline__ float spotAttenuation(device const UniformLight& l, const floa
 /// binding slot left for a table -- all 31 are spoken for.
 static __inline__ ProjectorSample projectorSampleForLight(device const UniformLight& l, const float3 dirFromLight)
 {
-    const float3 ax = normalize(float3(l.points[2]));
-    const float3 ay = normalize(float3(l.points[3]));
-    const float3 az = normalize(float3(l.normal)); // emission axis, the light's -Z
-    const float3 d = normalize(dirFromLight);
+    const OrthonormalLightFrame frame =
+        makeOrthonormalLightFrame(float3(l.points[2]), float3(l.points[3]), float3(l.normal));
     const float tanX = projectorTanHalfX(l.halfAngle);
     const float tanY = projectorTanHalfY(tanX, l.points[0].w);
-    return projectorProject(dot(d, ax), dot(d, ay), dot(d, az), tanX, tanY, l.pad0);
+    if (!frame.valid)
+    {
+        return projectorProject(0.0f, 0.0f, -1.0f, tanX, tanY, l.pad0);
+    }
+    const float3 d = normalizeFiniteVectorOrZero(dirFromLight);
+    return projectorProject(
+        dot(d, frame.x), dot(d, frame.y), dot(d, frame.emissionAxis), tanX, tanY, l.pad0);
 }
 
 /// What a projector emits in a direction, as a multiplier on its intensity.
@@ -468,11 +472,14 @@ static __inline__ float sampleIesCandela(device const IesGpuBufferHeader* iesBuf
     device const float* floats = (device const float*)((device const char*)iesBuffer + iesBuffer->floatOffset);
 
     // World -> light local. -Z is the photometric axis.
-    const float3 ax = normalize(float3(l.points[2]));
-    const float3 ay = normalize(float3(l.points[3]));
-    const float3 az = normalize(float3(l.normal));
-    const float3 d = normalize(dirFromLight);
-    const float3 local = float3(dot(d, ax), dot(d, ay), -dot(d, az));
+    const OrthonormalLightFrame frame =
+        makeOrthonormalLightFrame(float3(l.points[2]), float3(l.points[3]), float3(l.normal));
+    if (!frame.valid)
+    {
+        return 0.0f;
+    }
+    const float3 d = normalizeFiniteVectorOrZero(dirFromLight);
+    const float3 local = float3(dot(d, frame.x), dot(d, frame.y), -dot(d, frame.emissionAxis));
 
     const float vertDeg = acos(clamp(-local.z, -1.0f, 1.0f)) * (180.0f / M_PI_F);
     const float horizDeg = atan2(local.x, -local.y) * (180.0f / M_PI_F);
