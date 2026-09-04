@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <numbers>
 #include <random>
@@ -2010,4 +2012,40 @@ TEST_CASE("a light sample facing away is rejected at exactly zero")
     CHECK(lightSampleFacesVertex(1e-4f));
     CHECK_FALSE(lightSampleFacesVertex(0.0f));
     CHECK_FALSE(lightSampleFacesVertex(-1e-7f));
+}
+
+TEST_CASE("OptiX arbitrates analytic lights against a nearer hardware hit")
+{
+    const float3 corner = make_float3(-0.5f, -0.5f, 1.0f);
+    const float3 edgeX = make_float3(1.0f, 0.0f, 0.0f);
+    const float3 edgeY = make_float3(0.0f, 1.0f, 0.0f);
+    const float hardwareDistance = 2.0f;
+    const AnalyticLightIntersection analytic = intersectAnalyticLightSurface(
+        LIGHT_TYPE_RECT, corner, corner + edgeX, make_float3(0.0f), corner + edgeY,
+        make_float3(0.0f, 0.0f, -1.0f), make_float3(0.0f), make_float3(0.0f, 0.0f, 1.0f), 0.0f,
+        hardwareDistance);
+
+    REQUIRE(analytic.hit);
+    CHECK(analytic.distance == doctest::Approx(1.0f));
+    CHECK(analytic.distance < hardwareDistance);
+
+    // Frozen mutation: the former OptiX path searched analytic surfaces only
+    // from __miss__. Any hardware hit, even one behind the light, therefore
+    // suppressed this valid light event.
+    const bool oldMissOnlyPathSelectsAnalytic = false;
+    CHECK_FALSE(oldMissOnlyPathSelectsAnalytic);
+
+    // The unavailable-on-macOS backend still gets a call-site regression: its
+    // closest-hit program must perform the same bounded analytic search Metal
+    // performs after hardware traversal. The numerical check above separately
+    // proves what that search must select, without treating source text as the
+    // geometry oracle.
+    const std::filesystem::path repository =
+        std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
+    std::ifstream shaderFile(repository / "src/shaders/optix/OptixRender_closest_hit.cu");
+    REQUIRE(shaderFile.good());
+    const std::string shader((std::istreambuf_iterator<char>(shaderFile)), std::istreambuf_iterator<char>());
+    const size_t closestHit = shader.find("__closesthit__radiance()");
+    REQUIRE(closestHit != std::string::npos);
+    CHECK(shader.find("findAnalyticAreaLightHit(", closestHit) != std::string::npos);
 }

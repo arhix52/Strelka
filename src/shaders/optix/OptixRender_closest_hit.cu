@@ -1760,6 +1760,12 @@ extern "C" __global__ void __closesthit__radiance()
     PerRayData* prd = getPRD();
     HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
     const float3 ray_dir = optixGetWorldRayDirection();
+    const float3 ray_origin = optixGetWorldRayOrigin();
+    const float hardwareSurfaceT = optixGetRayTmax();
+    const AnalyticAreaLightHit analyticHit =
+        findAnalyticAreaLightHit(params.scene.lights, params.scene.numLights, ray_origin, ray_dir,
+                                 params.materialRayTmin, hardwareSurfaceT, prd->depth != 0u);
+    const float surfaceT = analyticHit.hit ? analyticHit.distance : hardwareSurfaceT;
 
     SurfaceHitData surfaceHit = {};
     // Two separate questions, and conflating them is what kept every fibre rule
@@ -1802,7 +1808,6 @@ extern "C" __global__ void __closesthit__radiance()
     // where Metal's `extend` puts it. The two are statistically identical: a
     // surface at or before the sampled distance wins either way, and the bound
     // is only a scheduling decision about how far traversal is allowed to run.
-    const float surfaceT = optixGetRayTmax();
     float segment = surfaceT;
     MediumSample medium = {};
     bool insideMedium = false;
@@ -1895,6 +1900,16 @@ extern "C" __global__ void __closesthit__radiance()
         // never notices it is here -- and not one at all for 25_subsurface,
         // whose three mean free paths differ by more than threefold.
         prd->throughput *= mediumBoundaryWeight(medium, segment);
+    }
+
+    // Analytic lights are intentionally absent from the TLAS: their exact
+    // intersection is the geometry sampled by NEE. A hardware closest hit does
+    // not invoke __miss__, so arbitrate here as well and shade the nearer event
+    // only after medium/fog attenuation has used its true segment length.
+    if (analyticHit.hit)
+    {
+        shadeAnalyticAreaLightHit(prd, analyticHit, ray_origin, ray_dir);
+        return;
     }
 
     // --- Crossing the boundary of a participating medium --------------------

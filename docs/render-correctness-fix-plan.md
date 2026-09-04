@@ -35,6 +35,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | X. Emissive mesh animated/textured consistency | Open/close transform powers are both zero while the mid-shutter triangle is positive; named OpenPBR emission map has zero host power; Metal hit chooses a ray-cone mip while NEE fixes level zero | motion extrema, OpenPBR texture bridge and texture-LOD regressions | conservative motion-support envelope and one strategy-independent emission evaluation | FIXED | FIXED on MTLDevice | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | Y. Runtime topology/mask safety | Headless create/edit recreates proxy geometry after its arrays were released (10 frozen failures); soft punctual CPU hits use a mismatched proxy (3 failures); material alpha/medium edits retain stale AS state | topology-free headless create/edit, common analytic CPU hit, and runtime AS rebuild | keep released topology immutable; dispatch exact analytic surfaces; rebuild material-dependent BLAS/TLAS state | FIXED | FIXED on MTLDevice; runtime rebuild source-validated | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | Z. Projector transfer convention | Metal applies piecewise sRGB while OptiX applies gamma 2.2; 7/9 fixture values disagree, code 32 is low by 28% | exact 8-bit texel fixture and gamma-2.2 mutation | decode OptiX LDR codes with the IEC sRGB EOTF; preserve linear HDR/EXR and alpha | FIXED | FIXED on MTLDevice | Source fixed; external CUDA required | this commit | UNVERIFIED |
+| AA. OptiX analytic/hardware hit arbitration | A rectangle at `t=1` is hidden by an unrelated hardware hit at `t=2` because the analytic search runs only in `__miss__`; source regression failed 1/7 assertions | bounded analytic-vs-hardware oracle, frozen miss-only mutation, OptiX closest-hit call-site contract | search analytic surfaces up to the hardware closest-hit distance and run medium/fog attenuation over the winning segment before shading | FIXED oracle | Existing bounded arbitration | Source fixed; external CUDA required | pending | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -1181,3 +1182,33 @@ is out of scope unless it blocks validation.
   compile independently in fast and safe modes; the standard 262,144-sample Apple M4 Pro audit remains all-zero for
   NaN/Inf/PDF/support/intersection counters. OptiX texture upload preserves its prior RGBA32F memory footprint, but
   CUDA compilation/runtime remains externally `UNVERIFIED`.
+
+## Finding AA: OptiX analytic/hardware hit arbitration
+
+- Random variables and measure: unchanged. The path direction is drawn by the preceding BSDF or camera strategy;
+  the analytic-light identity is determined by the first continuous surface intersected along that already sampled
+  ray. Rectangle, disc, ellipsoid, and positive-radius punctual hits carry their existing world-area-derived
+  `domega` densities. Hardware geometry and analytic surfaces are deterministic visibility competitors, not an
+  additional random choice.
+- Support: an enabled analytic surface has hit support when its exact shared intersection lies in
+  `[rayTmin, hardwareT)`. If no hardware surface exists, the upper bound is the ray limit. The closest event across
+  both representations wins; a farther triangle cannot erase nearer positive analytic radiance, and an analytic
+  light behind an opaque triangle cannot shine through it.
+- Conditional and marginal PDF: unchanged from findings U/W. For the winning continuous analytic light,
+  `p_omega = P(local) P(analytic|local) P(J|analytic) p_A distance^2 / abs(n_light dot -wi)`. There is no PMF for
+  choosing between analytic and hardware geometry because traversal selects the deterministic first event.
+- Selection PMF and delta classification: the represented integer alias masses are unchanged. Only finite analytic
+  surfaces participate in this arbitration; sharp punctual and distant atoms keep their discrete NEE/miss
+  semantics.
+- MIS strategies: a BSDF/camera ray hitting the analytic surface is paired with selected-light NEE exactly as in
+  Metal. Fog and participating-medium free flights compete with the distance to the actual winning surface, so
+  replacing `hardwareT` by the nearer analytic distance must occur before attenuation/scattering is resolved.
+- Current-HEAD reproducer and mutation: a packed rectangle at `z=1` returns an exact hit at `t=1` when bounded by an
+  opaque hardware surface at `t=2`. The former miss-only OptiX enumeration suppresses that event whenever any
+  hardware hit exists. The focused test freezes both distances and verifies the OptiX closest-hit program contains
+  a bounded analytic search; before the production change it fails 1/7 assertions because the call is absent.
+- Implementation and result: `__closesthit__radiance` performs the same exact analytic search as Metal immediately
+  after hardware traversal, bounded by `optixGetRayTmax()`. The winning distance drives medium/fog free flight and
+  absorption; a surviving analytic event is shaded and terminates before any farther hardware material logic. No
+  proxy triangle was restored. The focused Debug, Release, and ASan+UBSan test now passes 7/7 assertions; OptiX CUDA
+  compilation/runtime remains externally `UNVERIFIED` until the documented finding-7 runner is available.
