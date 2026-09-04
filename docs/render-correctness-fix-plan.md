@@ -33,7 +33,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | V. Transformed frame validity | Non-finite translations and collapsed/sheared projector/IES frames keep proposal power; OptiX transforms tangents as normals | translation, partial-rank/full-frame, shear, mirrored and tangent Gram-Schmidt tests | Orthonormal profile frames, matched packing/power/device validity, and forward-vector surface tangents | FIXED | FIXED on MTLDevice | Shared source fixed; external CUDA required | this commit | UNVERIFIED |
 | W. Complete marginal PDF arithmetic | Conditional area PDFs saturate before outer PMFs, under-reporting a finite complete marginal density | tiny-area/low-selection analytic and mesh regressions | joint exponent-scaled evaluation of the area Jacobian and every outer PMF | FIXED | FIXED on MTLDevice | Shared source fixed; external CUDA required | this commit | UNVERIFIED |
 | X. Emissive mesh animated/textured consistency | Open/close transform powers are both zero while the mid-shutter triangle is positive; named OpenPBR emission map has zero host power; Metal hit chooses a ray-cone mip while NEE fixes level zero | motion extrema, OpenPBR texture bridge and texture-LOD regressions | conservative motion-support envelope and one strategy-independent emission evaluation | FIXED | FIXED on MTLDevice | Source fixed; external CUDA required | this commit | UNVERIFIED |
-| Y. Runtime topology/mask safety | Headless host geometry is released too early; finite/infinite and camera-visibility edits do not rebuild every backend mask/descriptor | headless rebuild and repeated runtime mask transitions | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| Y. Runtime topology/mask safety | Headless create/edit recreates proxy geometry after its arrays were released (10 frozen failures); soft punctual CPU hits use a mismatched proxy (3 failures); material alpha/medium edits retain stale AS state | topology-free headless create/edit, common analytic CPU hit, and runtime AS rebuild | keep released topology immutable; dispatch exact analytic surfaces; rebuild material-dependent BLAS/TLAS state | FIXED | FIXED on MTLDevice; runtime rebuild source-validated | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | Z. Projector transfer convention | Metal samples sRGB while OptiX decodes the same LDR source with a gamma-2.2 path | shared texel-value fixture and source mutation | pending | OPEN | OPEN | OPEN | pending | OPEN |
 
 ## Per-finding probability records
@@ -1093,3 +1093,52 @@ is out of scope unless it blocks validation.
   audit executes 262,144 samples with zero counters on Apple M4 Pro. OptiX consumes the corrected host support and
   mirrored emission source, but CUDA compilation/runtime remains externally `UNVERIFIED` under the finding-7
   command. Status: FIXED for CPU and Metal, UNVERIFIED for OptiX execution.
+
+## Finding Y: runtime topology and mask safety
+
+- Random variables and measure: unchanged. Light identity, mesh identity, and triangle identity remain discrete;
+  analytic and mesh surface positions retain their world-area densities and induced solid-angle PDFs. Visibility,
+  alpha mode, and medium-boundary masks restrict the physical path-space support; they are not probability factors.
+- Support: a headless light edit must expose exactly the packed analytic surface used by NEE and analytic traversal,
+  without depending on editor-only tessellation that was deliberately released. A runtime material edit must make
+  traversal expose the same opaque/cutout and surface/medium support as the new material parameters. Camera and
+  secondary analytic visibility come from the current packed light record on every backend.
+- Conditional and marginal PDFs: unchanged from findings U/W. For a continuous light surface,
+  `p_omega = p_area distance^2 / abs(n_light dot -wi)`, multiplied jointly by all represented outer selection PMFs.
+  A visibility or opacity rejection removes the corresponding integrand event and proposal event together; it does
+  not renormalize an otherwise accepted density.
+- Selection PMFs: unchanged. Analytic and emissive-mesh alias distributions are rebuilt from the current light,
+  transform, and material support. Runtime topology work must not introduce a proxy-selection PMF.
+- Delta/continuous classification: unchanged. Radius-free punctual and sharp distant lights remain atoms; finite
+  analytic and emissive-mesh surfaces remain continuous. Editor proxy triangles are neither a sampling strategy nor
+  an alternate continuous measure.
+- MIS strategies: selected-light NEE and compatible BSDF hit/miss continuation retain the same marginal PDFs. Both
+  must observe the same generation of analytic visibility, material sidedness/coverage, medium masks, and AS data.
+- Current-HEAD reproducer: after `releaseHostGeometry()`, editing a distant light into a rectangle appends a new mesh,
+  vertices, indices, and instance to the now-empty host arrays and marks both `Geometry` and `Transforms`. The frozen
+  regression reports six failures: unexpected geometry/transform bits, a new light instance and mesh, and nonempty
+  vertex/index arrays. Creating a new rectangle after release reports four more failures for the same reason. Metal's
+  geometry upload then explicitly refuses released host arrays while its change handler
+  continues into an AS rebuild. Separately, Metal material edits update parameters but leave BLAS geometry opacity,
+  TLAS instance opacity, and medium masks captured from the old material; OptiX refreshes TLAS flags but leaves any
+  opacity micromap BLAS captured from the old alpha texture/mode.
+- Analytic-intersection mutation: soft point, spot, and projector lights sample a world-space sphere, while CPU picking
+  used an affine sphere proxy for point and a planar disc proxy for spot/projector. Under `diag(-2,3,4)` the retained
+  test hits the wrong point by `2.15686`, `0.5`, and `0.5` world units respectively.
+- Implementation: after host geometry is released, light creation/editing updates only the authoritative packed
+  analytic record and never appends editor proxy data or topology/transform change bits. CPU picking bypasses proxy
+  bounds for every continuous analytic surface and calls the same `intersectAnalyticLightSurface()` dispatch as Metal
+  and OptiX. Material edits are published before structure work; Metal rebuilds BLAS/TLAS so per-geometry opacity and
+  instance medium masks change together, and OptiX rebuilds BLAS/TLAS/SBT after texture publication so opacity
+  micromaps, any-hit flags, and medium masks all describe the new material.
+- Corrected result: the topology-free lifecycle and exact CPU intersection regressions pass 31/31 assertions. The
+  three soft-punctual hit errors are below `1e-4`, all released arrays remain empty, and packed rectangle intersection
+  retains a positive finite area PDF without any proxy mesh.
+- Validation: focused Debug, Release, and ASan+UBSan pass 31/31 assertions. Full Debug and Release CTest pass 4/4;
+  the complete audit passes 905/905 cases and 69,256,616 assertions, with environment integral `1`, Lambertian
+  `1.002147074` inside its CI, legacy mutation `2.003353165`, and dome ratio `1`. Production `wavefront.metal`
+  compiles independently in fast and safe math. On the actual Apple M4 Pro, the 262,144-sample fast/safe audit at
+  threadgroup sizes 32/64/128 reports zero analytic-intersection, PDF, NaN, Inf, or support failures. The ordinary
+  Release GPU-render regression also passes. Metal's runtime rebuild control path is host/source validated rather
+  than dynamically edited by that GPU test. OptiX uses the corrected shared dispatch and rebuild order, but CUDA
+  compilation/runtime remains externally `UNVERIFIED`.

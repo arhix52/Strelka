@@ -255,7 +255,7 @@ TEST_CASE("analytic light visibility is packed for manual traversal")
 
 TEST_CASE("CPU picking intersects smooth transformed analytic lights")
 {
-    for (const int type : { LIGHT_TYPE_DISC, LIGHT_TYPE_SPHERE })
+    for (const int type : { LIGHT_TYPE_DISC, LIGHT_TYPE_SPHERE, LIGHT_TYPE_POINT, LIGHT_TYPE_SPOT, LIGHT_TYPE_PROJECTOR })
     {
         Scene scene;
         Scene::UniformLightDesc desc = discDesc();
@@ -278,11 +278,21 @@ TEST_CASE("CPU picking intersects smooth transformed analytic lights")
                                        std::sin(angle) * glm::vec3(light.points[3]));
             origin = target - 3.0f * glm::vec3(light.normal);
         }
-        else
+        else if (type == LIGHT_TYPE_SPHERE)
         {
             const glm::vec3 q = glm::normalize(glm::vec3(0.31f, 0.47f, 0.73f));
             const glm::vec3 radial =
                 q.x * glm::vec3(light.points[0]) + q.y * glm::vec3(light.points[2]) + q.z * glm::vec3(light.points[3]);
+            target = center + radial;
+            origin = center + 2.0f * radial;
+        }
+        else
+        {
+            // Soft punctual lights sample a world-space sphere. Their editor
+            // proxy is an affine sphere for point and a disc for spot/projector,
+            // neither of which is the radiometric surface under this transform.
+            const glm::vec3 q = glm::normalize(glm::vec3(0.31f, 0.47f, 0.73f));
+            const glm::vec3 radial = desc.radius * q;
             target = center + radial;
             origin = center + 2.0f * radial;
         }
@@ -417,4 +427,53 @@ TEST_CASE("changing a light type replaces or creates the matching proxy topology
 
     // Mutation: updating only the transform leaves the original sphere mesh.
     CHECK(sphereMeshId != rectMeshId);
+}
+
+TEST_CASE("headless light edits do not recreate released proxy geometry")
+{
+    Scene scene;
+    Scene::UniformLightDesc desc = rectDesc();
+    desc.type = LIGHT_TYPE_DISTANT;
+    const uint32_t id = scene.createLight(desc);
+    REQUIRE(scene.getLightInstanceId(id) == kInvalidIndex);
+
+    scene.consumeChanges();
+    scene.releaseHostGeometry();
+    const size_t meshCount = scene.getMeshes().size();
+
+    desc = rectDesc();
+    scene.setLight(id, desc);
+
+    const ChangeBits changes = scene.peekChanges();
+    CHECK(any(changes & ChangeBits::Lights));
+    CHECK_FALSE(any(changes & ChangeBits::Geometry));
+    CHECK_FALSE(any(changes & ChangeBits::Transforms));
+    CHECK(scene.getLightInstanceId(id) == kInvalidIndex);
+    CHECK(scene.getMeshes().size() == meshCount);
+    CHECK(scene.getVertices().empty());
+    CHECK(scene.getIndices().empty());
+
+    // Headless rendering uses the packed analytic primitive, not an editor
+    // tessellation. A topology-free edit must still leave the exact sampled
+    // surface intersectable.
+    const Scene::Light& light = scene.getLights()[id];
+    const glm::float3 center = 0.25f * (glm::float3(light.points[0]) + glm::float3(light.points[1]) +
+                                        glm::float3(light.points[2]) + glm::float3(light.points[3]));
+    const glm::float3 normal(light.normal);
+    const AnalyticLightIntersection hit = intersectAnalyticLightSurface(
+        light.type, glm::float3(light.points[0]), glm::float3(light.points[1]), glm::float3(light.points[2]),
+        glm::float3(light.points[3]), normal, center - 2.0f * normal, normal, 0.0f, 10.0f);
+    CHECK(hit.hit);
+    CHECK(hit.areaPdf > 0.0f);
+
+    Scene addedScene;
+    addedScene.releaseHostGeometry();
+    const uint32_t addedId = addedScene.createLight(rectDesc());
+    const ChangeBits addedChanges = addedScene.peekChanges();
+    CHECK(any(addedChanges & ChangeBits::Lights));
+    CHECK_FALSE(any(addedChanges & ChangeBits::Geometry));
+    CHECK(addedScene.getLightInstanceId(addedId) == kInvalidIndex);
+    CHECK(addedScene.getMeshes().empty());
+    CHECK(addedScene.getVertices().empty());
+    CHECK(addedScene.getIndices().empty());
 }

@@ -658,6 +658,13 @@ uint32_t Scene::createLight(const UniformLightDesc& desc)
 
     updateLight(lightId, desc);
 
+    if (mHostGeometryReleased)
+    {
+        // See setLight(): after upload, analytic records are the rendering
+        // geometry and the released editor proxy stream stays immutable.
+        return lightId;
+    }
+
     // Lazy init light mesh. Distant lights have none; point/spot get a small
     // proxy so the outliner and the gizmo still have something to select.
     glm::float4x4 scaleMatrix = glm::float4x4(1.0f);
@@ -891,6 +898,17 @@ void Scene::setLight(const uint32_t lightId, const UniformLightDesc& desc)
     assert(lightId < mLightDesc.size());
     mLightDesc[lightId] = desc;
     updateLight(lightId, desc);
+
+    // These tessellations exist only for editor picking. A headless backend may
+    // have released (or adopted) the host arrays after uploading them; appending
+    // a new proxy now would create a partial, offset-zero geometry stream that
+    // cannot replace the already-uploaded scene. Rendering and visibility use
+    // the packed analytic surface above, so keep the released scene topology
+    // immutable.
+    if (mHostGeometryReleased)
+    {
+        return;
+    }
 
     glm::float4x4 scaleMatrix = glm::float4x4(1.0f);
     uint32_t desiredMeshId = kInvalidIndex;
@@ -1318,6 +1336,19 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
         if (inst.mMeshId >= mMeshes.size())
             continue;
 
+        if (inst.type == Instance::Type::eLight && inst.mLightId < mLights.size())
+        {
+            const Light& light = mLights[inst.mLightId];
+            if (lightUsesAnalyticSurfaceIntersection(light.type, light.points[0].x))
+            {
+                // The proxy bounds describe only the editor tessellation. They
+                // can be smaller than a smooth disc/sphere, or even planar for
+                // a soft spot light whose radiometric surface is a sphere.
+                candidates.push_back({ instId, 0.0f });
+                continue;
+            }
+        }
+
         const MeshBounds& wb = mInstanceWorldBounds[instId];
         float tEnter = 0.0f;
         if (wb.valid && missesBounds(origin, dir, wb.min, wb.max, std::numeric_limits<float>::max(), &tEnter))
@@ -1343,21 +1374,11 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
         if (inst.type == Instance::Type::eLight && inst.mLightId < mLights.size())
         {
             const Light& light = mLights[inst.mLightId];
-            AnalyticLightIntersection analyticHit{};
-            if (light.type == LIGHT_TYPE_DISC)
+            if (lightUsesAnalyticSurfaceIntersection(light.type, light.points[0].x))
             {
-                analyticHit = intersectAnalyticDisc(origin, dir, 1e-5f, best.distance, glm::float3(light.points[1]),
-                                                    glm::float3(light.points[2]), glm::float3(light.points[3]),
-                                                    glm::float3(light.normal));
-            }
-            else if (light.type == LIGHT_TYPE_SPHERE)
-            {
-                analyticHit = intersectAnalyticEllipsoid(origin, dir, 1e-5f, best.distance,
-                                                         glm::float3(light.points[1]), glm::float3(light.points[0]),
-                                                         glm::float3(light.points[2]), glm::float3(light.points[3]));
-            }
-            if (light.type == LIGHT_TYPE_DISC || light.type == LIGHT_TYPE_SPHERE)
-            {
+                const AnalyticLightIntersection analyticHit = intersectAnalyticLightSurface(
+                    light.type, glm::float3(light.points[0]), glm::float3(light.points[1]), glm::float3(light.points[2]),
+                    glm::float3(light.points[3]), glm::float3(light.normal), origin, dir, 1e-5f, best.distance);
                 if (analyticHit.hit)
                 {
                     best.hit = true;

@@ -3058,28 +3058,8 @@ void OptiXRender::render(Buffer* output)
 
     const ChangeBits changes = sceneOnDevice ? mScene->peekChanges() : ChangeBits::None;
     const bool geometryChanged = any(changes & ChangeBits::Geometry);
-    if (geometryChanged)
-    {
-        createVertexBuffer();
-        createIndexBuffer();
-        createBottomLevelAccelerationStructures();
-        createTopLevelAccelerationStructure();
-        createSbt();
-    }
-    if (any(changes & ChangeBits::Lights))
-    {
-        createLightBuffer();
-        if (!geometryChanged)
-        {
-            createTopLevelAccelerationStructure();
-        }
-    }
-    if (!geometryChanged && any(changes & ChangeBits::Transforms))
-    {
-        // Instance transforms changed outside the animation path
-        createTopLevelAccelerationStructure();
-    }
-    if (any(changes & ChangeBits::Materials))
+    const bool materialsChanged = any(changes & ChangeBits::Materials);
+    if (materialsChanged)
     {
         // The bit was consumed and nothing acted on it, so every material edit
         // made after load -- everything the editor's material panel does -- was
@@ -3106,6 +3086,34 @@ void OptiXRender::render(Buffer* output)
         {
         }
         mLoadProgress = progress;
+    }
+    const bool structuresChanged = geometryChanged || materialsChanged;
+    if (geometryChanged)
+    {
+        createVertexBuffer();
+        createIndexBuffer();
+    }
+    if (structuresChanged)
+    {
+        // Material alpha textures are baked into optional opacity micromaps,
+        // while alpha mode and medium boundaries are captured in instance
+        // flags/masks. Rebuild both levels after the new material textures are
+        // resident so traversal and shading see one generation of state.
+        createBottomLevelAccelerationStructures();
+        createTopLevelAccelerationStructure();
+        createSbt();
+    }
+    if (any(changes & ChangeBits::Lights))
+    {
+        createLightBuffer();
+        if (!structuresChanged)
+        {
+            createTopLevelAccelerationStructure();
+        }
+    }
+    if (!structuresChanged && any(changes & ChangeBits::Transforms))
+    {
+        // Instance transforms changed outside the animation path
         createTopLevelAccelerationStructure();
     }
     if (any(changes & ChangeBits::Env))

@@ -2994,11 +2994,18 @@ void MetalRender::handleSceneChanges()
     bool needSharcReset = false;
     const bool responsiveSharc = getSettings()->getAs<bool>("render/pt/sharcMetalResponsive");
     const bool geometryChanged = any(changes & ChangeBits::Geometry);
+    const bool materialsChanged = any(changes & ChangeBits::Materials);
     if (any(changes & ChangeBits::Lights))
     {
         uploadLightBuffer();
         needReset = true;
         needSharcReset = !responsiveSharc;
+    }
+    if (materialsChanged)
+    {
+        createMetalMaterials();
+        needReset = true;
+        needSharcReset = true;
     }
     if (geometryChanged)
     {
@@ -3012,6 +3019,13 @@ void MetalRender::handleSceneChanges()
         needReset = true;
         needSharcReset = true;
     }
+    else if (materialsChanged)
+    {
+        // Alpha mode is captured in each BLAS geometry descriptor, and medium
+        // classification in each TLAS instance mask. A transform-only refit
+        // cannot change either immutable field.
+        rebuildAccelerationStructures();
+    }
     else if (any(changes & ChangeBits::Transforms))
     {
         if (!mAccel.blasList().empty())
@@ -3019,13 +3033,6 @@ void MetalRender::handleSceneChanges()
             mAccel.rebuildTLAS();
             mAccel.rebuildEmissiveMeshLights();
         }
-        needReset = true;
-        needSharcReset = true;
-    }
-    if (any(changes & ChangeBits::Materials))
-    {
-        createMetalMaterials();
-        mAccel.rebuildEmissiveMeshLights();
         needReset = true;
         needSharcReset = true;
     }
