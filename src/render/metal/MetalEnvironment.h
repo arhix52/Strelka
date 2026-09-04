@@ -15,6 +15,7 @@ struct EnvMapState
     MTL::Texture* backgroundTexture = nullptr;
     MTL::Buffer* aliasBuffer = nullptr;
     float pdfScale = 0.0f;
+    double totalPower = 0.0;
     float autoScale = 1.0f;
     bool loaded = false;
 };
@@ -31,6 +32,8 @@ public:
 
     void loadMap(const std::string& absolutePath);
     void loadBackground(const std::string& absolutePath);
+    void clearMap();
+    void clearBackground();
     void release();
 
     // One-entry placeholder when no env is loaded (uniforms still bind a buffer).
@@ -52,4 +55,3 @@ private:
 };
 
 } // namespace oka::metal
-

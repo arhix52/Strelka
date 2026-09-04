@@ -136,7 +136,18 @@ TEST_CASE("positive extreme-dynamic-range texels retain discrete support")
         const double theta1 = M_PI * static_cast<double>(y + 1) / h;
         const double solidAngle = (2.0 * M_PI / w) * (std::cos(theta0) - std::cos(theta1));
         CHECK(result.alias[i].solidAnglePdf * solidAngle == doctest::Approx(represented[i]).epsilon(2e-7));
-        if (values[i] > 0.0f)
+        const int x = static_cast<int>(i % w);
+        double footprintMax = 0.0;
+        for (int dy = -1; dy <= 1; ++dy)
+        {
+            const int sy = std::clamp(y + dy, 0, h - 1);
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                const int sx = (x + dx + w) % w;
+                footprintMax = std::max(footprintMax, static_cast<double>(values[sy * w + sx]));
+            }
+        }
+        if (footprintMax > 0.0)
         {
             CHECK(represented[i] > 0.0);
         }
@@ -153,4 +164,87 @@ TEST_CASE("a finite positive channel retains support beside negative channels")
     const IblAliasTableResult result = buildSolidAngleIblAliasTable(pixels, 1, 1);
     CHECK(result.totalPower > 0.0);
     CHECK(result.envPdfScale > 0.0f);
+}
+
+TEST_CASE("finite radiance channels survive invalid neighbours in the same texel")
+{
+    const float pixels[] = { std::numeric_limits<float>::quiet_NaN(), 1.0f,
+                             std::numeric_limits<float>::infinity(), 1.0f };
+    const IblAliasTableResult result = buildSolidAngleIblAliasTable(pixels, 1, 1);
+    CHECK(result.totalPower > 0.0);
+    CHECK(result.alias[0].solidAnglePdf == doctest::Approx(1.0 / (4.0 * M_PI)).epsilon(2e-7));
+}
+
+TEST_CASE("bilinear environment footprint gives every positive reconstruction support")
+{
+    constexpr int w = 3;
+    constexpr int h = 3;
+    std::vector<float> pixels((size_t)w * h * 4, 0.0f);
+    const size_t centre = (size_t(1) * w + 1u) * 4u;
+    pixels[centre + 0u] = pixels[centre + 1u] = pixels[centre + 2u] = 1.0f;
+    pixels[centre + 3u] = 1.0f;
+
+    const IblAliasTableResult result = buildSolidAngleIblAliasTable(pixels.data(), w, h);
+    REQUIRE(result.alias.size() == size_t(w * h));
+    for (const EnvAliasEntry& entry : result.alias)
+    {
+        // Every one of these bins contains UVs whose bilinear footprint reaches
+        // the bright centre texel. The old centre-only weights leave eight of
+        // those positive-radiance directions at PDF zero.
+        CHECK(entry.solidAnglePdf > 0.0f);
+    }
+}
+
+TEST_CASE("environment footprint wraps the seam but not the poles")
+{
+    constexpr int w = 5;
+    constexpr int h = 5;
+    std::vector<float> pixels((size_t)w * h * 4u, 0.0f);
+    pixels[0] = pixels[1] = pixels[2] = pixels[3] = 1.0f;
+    const IblAliasTableResult result = buildSolidAngleIblAliasTable(pixels.data(), w, h);
+
+    for (int y = 0; y < h; ++y)
+    {
+        for (int x = 0; x < w; ++x)
+        {
+            CAPTURE(x);
+            CAPTURE(y);
+            const bool reconstructionCanReachBrightTexel = (x == 0 || x == 1 || x == w - 1) && y <= 1;
+            const float pdf = result.alias[(size_t)y * w + x].solidAnglePdf;
+            CHECK((pdf > 0.0f) == reconstructionCanReachBrightTexel);
+        }
+    }
+}
+
+TEST_CASE("subnormal environment power keeps a finite sampling representation")
+{
+    const float tiny = std::numeric_limits<float>::denorm_min();
+    const float pixels[] = { tiny, tiny, tiny, 1.0f };
+    const IblAliasTableResult result = buildSolidAngleIblAliasTable(pixels, 1, 1);
+    CHECK(result.totalPower > 0.0);
+    CHECK(std::isfinite(result.envPdfScale));
+    CHECK(result.envPdfScale > 0.0f);
+    CHECK(result.alias[0].solidAnglePdf == doctest::Approx(1.0 / (4.0 * M_PI)).epsilon(2e-7));
+
+    const float oldReciprocal = static_cast<float>(1.0 / result.totalPower);
+    CHECK(std::isinf(oldReciprocal));
+    CHECK(1.0 / static_cast<double>(oldReciprocal) == 0.0);
+    CHECK(oka::metal::environmentLightPower(result.totalPower, 1.0, 1.0, 1.0) > 0.0);
+}
+
+TEST_CASE("environment upload sanitization leaves no invalid radiance")
+{
+    float pixels[] = { std::numeric_limits<float>::quiet_NaN(), -1.0f,
+                       std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN(),
+                       0.25f, 0.5f, 1.0f, 1.0f };
+    oka::metal::sanitizeEnvironmentPixels(pixels, 2, 1);
+    for (const float value : pixels)
+    {
+        CHECK(std::isfinite(value));
+    }
+    CHECK(pixels[0] == 0.0f);
+    CHECK(pixels[1] == 0.0f);
+    CHECK(pixels[2] == 0.0f);
+    CHECK(pixels[3] == 1.0f);
+    CHECK(pixels[4] == 0.25f);
 }

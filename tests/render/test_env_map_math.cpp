@@ -28,9 +28,9 @@
 //      two halves of the estimate are dividing by densities read from different
 //      pixels.
 //
-//   2. The density has to integrate to one. envTexelPdf() is luminance times a
-//      single precomputed constant because each discrete texel mass includes
-//      its exact solid angle and theta is sampled uniformly in cos(theta).
+//   2. The density has to integrate to one. The alias table stores the complete
+//      represented solid-angle density of each bin, including the bilinear
+//      reconstruction footprint used to preserve radiance support.
 // ============================================================================
 
 namespace
@@ -76,9 +76,8 @@ double integrateReportedPdf(int w, int h, const std::function<float(double, doub
         const double dOmega = texelSolidAngle(y, w, h);
         for (int x = 0; x < w; ++x)
         {
-            const size_t i = (size_t(y) * size_t(w) + size_t(x)) * 4;
-            const float3 radiance = make_float3(px[i + 0], px[i + 1], px[i + 2]);
-            total += double(envTexelPdf(radiance, table.envPdfScale)) * dOmega;
+            const size_t i = size_t(y) * size_t(w) + size_t(x);
+            total += double(table.alias[i].solidAnglePdf) * dOmega;
         }
     }
     return total;
@@ -187,7 +186,7 @@ TEST_CASE("one by one environment is uniform in solid angle")
 {
     std::vector<float> pixels(4, 1.0f);
     const auto table = oka::metal::buildSolidAngleIblAliasTable(pixels.data(), 1, 1);
-    const float pdf = envTexelPdf(make_float3(1.0f), table.envPdfScale);
+    const float pdf = table.alias[0].solidAnglePdf;
     CHECK(pdf == doctest::Approx(1.0 / (4.0 * M_PI)).epsilon(2e-7));
 
     for (const float xi : { 0.0f, 0.125f, 0.5f, 0.875f, 0.99999994f, 1.0f })

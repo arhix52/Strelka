@@ -106,15 +106,16 @@ void MetalEnvironment::init(MTL::Device* device, SettingsManager* settings)
 
 void MetalEnvironment::release()
 {
+    clearMap();
+    clearBackground();
+}
+
+void MetalEnvironment::clearMap()
+{
     if (mState.mapTexture)
     {
         mState.mapTexture->release();
         mState.mapTexture = nullptr;
-    }
-    if (mState.backgroundTexture)
-    {
-        mState.backgroundTexture->release();
-        mState.backgroundTexture = nullptr;
     }
     if (mState.aliasBuffer)
     {
@@ -122,8 +123,18 @@ void MetalEnvironment::release()
         mState.aliasBuffer = nullptr;
     }
     mState.pdfScale = 0.0f;
+    mState.totalPower = 0.0;
     mState.autoScale = 1.0f;
     mState.loaded = false;
+}
+
+void MetalEnvironment::clearBackground()
+{
+    if (mState.backgroundTexture)
+    {
+        mState.backgroundTexture->release();
+        mState.backgroundTexture = nullptr;
+    }
 }
 
 void MetalEnvironment::ensurePlaceholderAliasBuffer()
@@ -137,16 +148,13 @@ void MetalEnvironment::loadBackground(const std::string& texturePath)
 {
     FloatImage image;
 
-    if (mState.backgroundTexture)
-    {
-        mState.backgroundTexture->release();
-        mState.backgroundTexture = nullptr;
-    }
+    clearBackground();
     if (!loadFloatImage(texturePath, "env background", image))
     {
         return;
     }
 
+    sanitizeEnvironmentPixels(image.pixels, image.width, image.height);
     mState.backgroundTexture = uploadFloatTexture(mDevice, image);
     releaseFloatImage(image);
     STRELKA_INFO("Loaded env background: {} ({}x{})", texturePath, image.width, image.height);
@@ -156,29 +164,21 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
 {
     FloatImage image;
 
-    if (mState.mapTexture)
-    {
-        mState.mapTexture->release();
-        mState.mapTexture = nullptr;
-    }
-    if (mState.aliasBuffer)
-    {
-        mState.aliasBuffer->release();
-        mState.aliasBuffer = nullptr;
-    }
-    mState.loaded = false;
+    clearMap();
     if (!loadFloatImage(texturePath, "env map", image))
     {
         return;
     }
 
     STRELKA_INFO("Loaded env map: {} ({}x{})", texturePath, image.width, image.height);
+    sanitizeEnvironmentPixels(image.pixels, image.width, image.height);
     mState.mapTexture = uploadFloatTexture(mDevice, image);
 
     const auto aliasResult = buildSolidAngleIblAliasTable(image.pixels, image.width, image.height);
     static_assert(sizeof(EnvAliasEntry) == sizeof(metal::EnvAliasEntry),
                   "host EnvAliasEntry must match ShaderTypes EnvAliasEntry");
     mState.pdfScale = aliasResult.envPdfScale;
+    mState.totalPower = aliasResult.totalPower;
 
     mState.aliasBuffer = mDevice->newBuffer(
         aliasResult.alias.data(), aliasResult.alias.size() * sizeof(EnvAliasEntry), MTL::ResourceStorageModeShared);

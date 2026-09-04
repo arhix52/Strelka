@@ -27,7 +27,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | P2. Reciprocal-scale analytic support | A shared max scale turns `(1e20,0,0) cross (0,1e-20,0)` into an unstable `1e-40` intermediate; finite triangle endpoints can overflow `p1-p0`; a rounded unit cosine can overflow the PDF guard | Reciprocal/large affine and triangle sample-PDF-intersection, overflow/underflow, exact miss, condition-gate, and `dot(n,n)>1` regressions | Independently scaled compensated affine algebra, analytic disc/ellipsoid hits, exponent-carrying triangle measures, bounded Skeel-valid point maps, and scale-safe `p_A r^2/cos` | FIXED | FIXED on MTLDevice | Shared source; external CUDA validation required | `40e39fc` | FIXED |
 | Q. True Standard-PBR/conductor delta measures | Rough lobes below the delta threshold are sampled continuously but labelled delta; positive PDFs are floored; sheen/tiny transmission can have evaluation without proposal support | Exact mirror/refraction, sub-`1e-10` marginal, sheen-with-transmission, near-critical Snell/Fresnel, and finite-lattice tiny-lobe regressions | Sum coincident atoms as discrete masses; keep every other lobe continuous; evaluate returned float endpoints with compensated inverse/Jacobian/Fresnel arithmetic | FIXED | Shader compiled; shared source | Shared headers; external toolchain required | pending | FIXED |
 | R. Finite-RNG categorical representation | Alias buckets above `2^23` are unreachable and float thresholds do not equal Metal/OptiX event masses | `8,388,609` buckets, strict-threshold lattice, hierarchy probability, support and GOF mutations | Full-width integer bucket words and integer Bernoulli thresholds; reconstruct the exactly represented marginal PMF | FIXED | FIXED on MTLDevice | Shared source; external CUDA toolchain required | this commit | FIXED |
-| S. Environment radiance/support lifecycle | Invalid HDR values reach textures, bilinear positive radiance can lie outside PMF support, runtime edits leave stale tables, and a `FLT_TRUE_MIN` 1x1 map loses its outer PMF through an infinite reciprocal | sanitization, 3x3 footprint support, seam/poles, tiny-positive power, edit/reload regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| S. Environment radiance/support lifecycle | Invalid HDR values reach textures, bilinear positive radiance can lie outside PMF support, runtime edits leave stale tables, and a `FLT_TRUE_MIN` 1x1 map loses its outer PMF through an infinite reciprocal | sanitization, 3x3 footprint support, seam/poles, tiny-positive power, edit/reload regressions | 3x3 oracle FIXED | FIXED on MTLDevice; lifecycle source/compile | Shared source fixed; external CUDA required | this commit | FIXED |
 | T. Infinite-light exact support/MIS | Sharp distant versus mirror is not represented as a discrete match; tiny continuous caps and float round trips lose support; camera mask/tMax differ | delta match, tiny cap, boundary round-trip, camera visibility and backend-distance tests | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | U. Analytic/punctual visibility agreement | Shadow rays ignore analytic emitters and finite-radius punctual proxies; stacked emitters therefore enumerate different paths | analytic segment blockers, stacked area lights, overlapping analytic surfaces and soft punctual regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | V. Transformed frame validity | Non-finite translations and collapsed/sheared projector/IES frames keep proposal power; OptiX transforms tangents as normals | translation, partial-rank/full-frame, shear, mirrored and tangent Gram-Schmidt tests | pending | OPEN | OPEN | OPEN | pending | OPEN |
@@ -794,3 +794,52 @@ is out of scope unless it blocks validation.
   measure mismatches. Direct OptiX lint/compilation is blocked on this macOS host by the absent `optix.h`; the CUDA
   path consumes the same integer table ABI and shared selection source but remains externally `UNVERIFIED`. Status:
   FIXED for CPU and Metal, UNVERIFIED for OptiX execution.
+
+## Finding S: environment radiance/support lifecycle
+
+- Random variables and measure: next-event sampling first selects the environment as a discrete emitter class, then
+  a discrete lat-long texel bin `I`, and finally a continuous direction `W` uniformly in solid angle inside that bin.
+  The map lookup itself is a bilinear, continuous reconstruction in UV; it is not another sampling strategy.
+- Support: uploaded RGB is sanitized channel by channel to finite nonnegative radiance. Bin `I` has proposal support
+  whenever any texel in the 3x3 reconstruction footprint that hardware linear filtering can reach from inside `I`
+  has positive luminance. Horizontal neighbours wrap across the seam and vertical neighbours clamp at the poles.
+  Open-interval solid-angle jitter continues to exclude the coordinate poles themselves.
+- Conditional and marginal PDF: with footprint envelope `q_i`, exact bin solid angle `DeltaOmega_i`, and
+  `Z=sum_j q_j DeltaOmega_j`, the target texel mass is `P(I=i)=q_i DeltaOmega_i/Z`; the represented alias mass is
+  authoritative after integer quantization. Inside the bin, `p(W|I=i)=1/DeltaOmega_i`, hence
+  `p_omega(W)=P(I=i)/DeltaOmega_i`. The outer light density is
+  `P(environment class) p_omega(W)`.
+- Selection PMF: environment-versus-local selection uses the finite double-precision map integral `Z` directly.
+  It must not recover `Z` by taking the reciprocal of a float normalization scale, because a tiny positive map can
+  make that reciprocal overflow to infinity and turn the recovered power into zero.
+- Delta classification and MIS: a textured environment remains continuous in `domega`. Environment NEE and a
+  BSDF-sampled miss are the complementary MIS strategies and use the same represented texel and outer class PMFs.
+  Resource edits change the integrand and proposal together: map/background replacement or removal must update the
+  texture, dimensions, alias table, power, flags, miss record, and accumulation state before the next launch.
+- Current-HEAD reproducers: a 3x3 map with one bright centre has zero proposal PDF in an adjacent black bin although
+  hardware bilinear filtering returns positive radiance in half of that bin. A 1x1 `{NaN,1,0}` texel is discarded
+  entirely even though sanitizing the invalid channel leaves positive green radiance. A 1x1 `FLT_TRUE_MIN` map has
+  positive double total power but stores an infinite float reciprocal; both backends invert that infinity back to
+  zero when computing the environment's outer selection power. Metal reloads only the lighting map on an Env edit,
+  never clears a removed map/background, and OptiX does not consume or apply `ChangeBits::Env` after scene load.
+- Implementation: the shared host builder sanitizes every RGB channel independently to finite nonnegative radiance
+  before either backend uploads the texture. Its proposal uses the maximum sanitized luminance over the exact 3x3
+  bilinear reconstruction footprint, horizontally wrapped and vertically clamped; `solidAnglePdf` remains the
+  represented alias mass divided by the exact row solid angle. The physical radiance integral is retained separately
+  from the proposal normalizer and carried in double precision into environment/local power selection, while the
+  legacy float normalization field is saturated instead of becoming infinity. Metal now releases and rebuilds both
+  lighting/background resources on every Env edit or scene build. OptiX owns the environment arrays/objects as one
+  resettable set, consumes `ChangeBits::Env`, refreshes map/background flags and the miss SBT, recomputes outer PMFs,
+  resets accumulation, and invalidates SHARC before the next launch.
+- Mutation sensitivity and numerical result: before the change the focused suite reported 11 failures: all eight
+  neighbouring 3x3 bins had PDF zero, the `{NaN,1,+Inf}` texel had total power zero, and `FLT_TRUE_MIN` produced an
+  infinite normalization scale. The regression retains the old reciprocal explicitly: it is infinity and recovers
+  zero power. Seam/pole tests independently expect support only in wrapped `x={W-1,0,1}` and clamped `y={0,1}` bins,
+  so a global nonzero floor or vertical wrap also fails.
+- Validation: focused tests pass 43/43 cases and 986,236 assertions in Debug and ASan+UBSan. Debug and Release CTest
+  pass 4/4 and production Metal shaders compile. The full audit passes 887/887 cases and 68,777,759 assertions;
+  environment normalization remains `1`, the Lambertian estimate remains `1.002147074` inside its CI, and the legacy
+  mutation remains detected at `2.003353165`. The actual Apple M4 Pro fast/safe kernels execute 262,144 environment
+  samples with zero measure mismatches; that kernel validates the shared table ABI and sample/PDF pair, while runtime
+  resource replacement is source/compile validated rather than claimed as GPU execution. OptiX consumes the shared
+  table and sanitization but CUDA compilation/runtime remains externally `UNVERIFIED`. Status: FIXED.

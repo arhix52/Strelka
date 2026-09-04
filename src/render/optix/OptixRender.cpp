@@ -3108,7 +3108,16 @@ void OptiXRender::render(Buffer* output)
         mLoadProgress = progress;
         createTopLevelAccelerationStructure();
     }
-    if (any(changes & (ChangeBits::Lights | ChangeBits::Transforms | ChangeBits::Materials | ChangeBits::Geometry)))
+    if (any(changes & ChangeBits::Env))
+    {
+        updateSceneEnvironment();
+        updateEmitterSelectionProbabilities();
+        getSharedContext().mSubframeIndex = 0;
+        mSharcClearPending = true;
+    }
+    if (any(changes &
+            (ChangeBits::Lights | ChangeBits::Transforms | ChangeBits::Materials | ChangeBits::Geometry |
+             ChangeBits::Env)))
     {
         mScene->consumeChanges();
     }
@@ -3794,6 +3803,21 @@ void OptiXRender::buildSceneEnvironment(Buffer* output)
 {
     updatePathtracerParams(output->width(), output->height());
 
+    updateSceneEnvironment();
+
+    createLightBuffer();
+    // Built here rather than with the structures because it does not depend on
+    // them: the records are packed per instance in the same order the top level
+    // will use, so the table the empty top level never reaches is already the one
+    // the real top level wants.
+    createSbt();
+    buildEmptyTopLevel();
+}
+
+void OptiXRender::updateSceneEnvironment()
+{
+    destroyEnvironmentTextures();
+
     const auto& envLight = mScene->getEnvLight();
     // A dome with no texture is still a light: a uniform sky of one colour, which
     // is what a V-Ray dome with use_dome_tex off is, and what a furnace test is.
@@ -3822,9 +3846,9 @@ void OptiXRender::buildSceneEnvironment(Buffer* output)
         loadEnvMap(envTexPath.string());
         mState.params.envMapIntensity = mEnvMapAutoScale * envLight->intensity;
         // Kept in double until the store, which is what the implicit conversion did
-    // before the cast was made explicit -- M_PI is a double, so narrowing the
-    // factor first would move the result by an ulp.
-    mState.params.envMapRotation = static_cast<float>(envLight->rotationY * (M_PI / 180.0));
+        // before the cast was made explicit -- M_PI is a double, so narrowing the
+        // factor first would move the result by an ulp.
+        mState.params.envMapRotation = static_cast<float>(envLight->rotationY * (M_PI / 180.0));
         mState.params.envMapColorTint = make_float3(envLight->color.x, envLight->color.y, envLight->color.z);
         // A backdrop the camera sees instead of the lighting environment. The
         // intensity is the backdrop's own; the auto-calibration scale above is
@@ -3841,14 +3865,6 @@ void OptiXRender::buildSceneEnvironment(Buffer* output)
         mState.params.hasEnvMap = false;
         mState.params.hasEnvBackground = false;
     }
-
-    createLightBuffer();
-    // Built here rather than with the structures because it does not depend on
-    // them: the records are packed per instance in the same order the top level
-    // will use, so the table the empty top level never reaches is already the one
-    // the real top level wants.
-    createSbt();
-    buildEmptyTopLevel();
 }
 
 void OptiXRender::buildEmptyTopLevel()
@@ -4659,11 +4675,11 @@ void OptiXRender::updateEmitterSelectionProbabilities()
     const double sceneExtent = mScene != nullptr && mScene->worldBounds(boundsMin, boundsMax) ?
                                    std::max(static_cast<double>(glm::length(boundsMax - boundsMin)), 1e-4) :
                                    1e16;
-    const double mapIntegral = params.envPdfScale > 0.0f ? 1.0 / static_cast<double>(params.envPdfScale) : 0.0;
     const double tintLuminance = 0.2126 * std::max(params.envMapColorTint.x, 0.0f) +
                                  0.7152 * std::max(params.envMapColorTint.y, 0.0f) +
                                  0.0722 * std::max(params.envMapColorTint.z, 0.0f);
-    const double envPower = metal::environmentLightPower(mapIntegral, sceneExtent, params.envMapIntensity, tintLuminance);
+    const double envPower =
+        metal::environmentLightPower(mEnvMapPower, sceneExtent, params.envMapIntensity, tintLuminance);
     const metal::EmitterSelectionProbabilities selection = metal::emitterSelectionProbabilities(
         params.hasEnvMap, envPower, params.scene.numLights > 0u, mAnalyticLightPower,
         params.scene.numEmissiveMeshes > 0u, mEmissiveMeshPower);
@@ -5026,6 +5042,7 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     const float* pixelData = image.pixels;
 
     STRELKA_INFO("Loaded env map: {} ({}x{})", texturePath, width, height);
+    metal::sanitizeEnvironmentPixels(image.pixels, width, height);
 
     // Create CUDA array and texture object for the env map (float4)
     const cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
@@ -5086,6 +5103,7 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     mState.params.envMapHeight = height;
     mState.params.hasEnvMap = true;
     mEnvMapLoaded = true;
+    mEnvMapPower = aliasResult.totalPower;
 
     // Environment auto-calibration is opt-in because its content-derived scale
     // overrides authored lighting units.
@@ -5109,6 +5127,7 @@ void OptiXRender::loadEnvBackground(const std::string& texturePath)
     }
     const int width = image.width;
     const int height = image.height;
+    metal::sanitizeEnvironmentPixels(image.pixels, width, height);
 
     const cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
     cudaArray_t bgArray = nullptr;
@@ -5161,6 +5180,11 @@ void OptiXRender::destroyTextures()
     destroyMaterialTextures();
     destroyProjectorTextures();
 
+    destroyEnvironmentTextures();
+}
+
+void OptiXRender::destroyEnvironmentTextures()
+{
     for (auto obj : mTextureObjects)
         if (obj) cudaDestroyTextureObject(obj);
     mTextureObjects.clear();
@@ -5172,6 +5196,20 @@ void OptiXRender::destroyTextures()
     for (auto arr : mTextureMipmappedArrays)
         if (arr) cudaFreeMipmappedArray(arr);
     mTextureMipmappedArrays.clear();
+
+    mEnvAliasBuffer.reset();
+    mState.params.envMapTexture = 0;
+    mState.params.envBackgroundTexture = 0;
+    mState.params.envAliasTable = nullptr;
+    mState.params.envMapWidth = 0u;
+    mState.params.envMapHeight = 0u;
+    mState.params.envPdfScale = 0.0f;
+    mState.params.hasEnvMap = false;
+    mState.params.hasEnvBackground = false;
+    mState.params.envBackgroundIntensity = 1.0f;
+    mEnvMapLoaded = false;
+    mEnvMapPower = 0.0;
+    mEnvMapAutoScale = 1.0f;
 }
 
 // The material table, without a single texture in it.

@@ -396,11 +396,11 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
             // PBRT's infinite-light power proxy: the map's integrated radiance
             // crossing the projected area of a sphere around the scene. It has
             // the same units as the emitted power MetalLights accumulated.
-            const double mapIntegral = pUniformData->envPdfScale > 0.0f ? 1.0 / pUniformData->envPdfScale : 0.0;
             const double tintLuminance =
                 0.2126 * std::max(tint.r, 0.0f) + 0.7152 * std::max(tint.g, 0.0f) + 0.0722 * std::max(tint.b, 0.0f);
             const double envPower = environmentLightPower(
-                mapIntegral, pUniformData->sceneExtent, pUniformData->envMapIntensity, tintLuminance);
+                in.environment->state().totalPower, pUniformData->sceneExtent, pUniformData->envMapIntensity,
+                tintLuminance);
             envSelectionPdf = emitterSelectionProbabilities(true, envPower, pUniformData->numLights > 0u, analyticPower,
                                                             pUniformData->numEmissiveMeshes > 0u, meshPower)
                                   .environment;

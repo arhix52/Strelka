@@ -56,6 +56,43 @@ TEST_CASE("ChangeBits lifecycle: setLight marks Lights and consume clears")
     CHECK(scene.getLights()[id].color.x == doctest::Approx(42.0f));
 }
 
+TEST_CASE("environment replacement and removal signal a resource resync")
+{
+    Scene scene;
+    Scene::EnvLightDesc env{};
+    env.texturePath = "first.exr";
+    env.backgroundTexturePath = "first-background.exr";
+    scene.setEnvLight(env);
+    CHECK(any(scene.consumeChanges() & ChangeBits::Env));
+
+    env.texturePath = "second.exr";
+    env.backgroundTexturePath.clear();
+    scene.setEnvLight(env);
+    CHECK(any(scene.peekChanges() & ChangeBits::Env));
+    const auto& replaced = scene.getEnvLight();
+    REQUIRE(replaced.has_value());
+    if (replaced.has_value())
+    {
+        CHECK(replaced->texturePath == "second.exr");
+        CHECK(replaced->backgroundTexturePath.empty());
+    }
+    scene.consumeChanges();
+
+    // An empty texture path is the supported texture-to-constant transition.
+    // Backends must clear the old map and alias table rather than retaining the
+    // last loaded resources behind this new descriptor.
+    env.texturePath.clear();
+    env.color = glm::float3(0.25f, 0.5f, 1.0f);
+    scene.setEnvLight(env);
+    CHECK(any(scene.peekChanges() & ChangeBits::Env));
+    const auto& constant = scene.getEnvLight();
+    REQUIRE(constant.has_value());
+    if (constant.has_value())
+    {
+        CHECK(constant->texturePath.empty());
+    }
+}
+
 TEST_CASE("setLight keeps desc and GPU light in sync for rect")
 {
     Scene scene;

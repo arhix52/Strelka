@@ -58,12 +58,6 @@ std::vector<float> makeMap(int w, int h)
     return px;
 }
 
-double texelLuminance(const std::vector<float>& px, int w, int x, int y)
-{
-    const size_t i = ((size_t)y * w + x) * 4;
-    return 0.2126 * px[i + 0] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
-}
-
 // The builder's entry and the device's entry are two declarations of one layout;
 // the backend uploads the former's bytes and the shader reads them as the latter.
 // Copying field by field here is the cheap way of saying so out loud -- the size
@@ -125,24 +119,13 @@ TEST_CASE("envAliasDraw reproduces the distribution the table was built from")
         hits[d.texel]++;
     }
 
-    double totalWeight = 0.0;
-    std::vector<double> weight(n, 0.0);
-    for (int y = 0; y < h; ++y)
+    for (uint32_t i = 0; i < n; ++i)
     {
+        const int y = static_cast<int>(i / static_cast<uint32_t>(w));
         const double theta0 = (double)y / (double)h * M_PI;
         const double theta1 = (double)(y + 1) / (double)h * M_PI;
         const double solidAngle = (2.0 * M_PI / (double)w) * (std::cos(theta0) - std::cos(theta1));
-        for (int x = 0; x < w; ++x)
-        {
-            const size_t i = (size_t)y * w + x;
-            weight[i] = texelLuminance(px, w, x, y) * solidAngle;
-            totalWeight += weight[i];
-        }
-    }
-
-    for (uint32_t i = 0; i < n; ++i)
-    {
-        const double expected = weight[i] / totalWeight;
+        const double expected = static_cast<double>(built.alias[i].solidAnglePdf) * solidAngle;
         const double got = (double)hits[i] / (double)draws;
         CHECK(got == doctest::Approx(expected).epsilon(0.02).scale(1.0 / (double)n));
     }
@@ -227,11 +210,12 @@ TEST_CASE("finite environment jitter remains inside the selected texel")
     }
 }
 
-TEST_CASE("a zero-luminance texel is never drawn")
+TEST_CASE("a zero bilinear footprint is never drawn")
 {
-    const int w = 16;
+    const int w = 8;
     const int h = 8;
-    const auto px = makeMap(w, h);
+    std::vector<float> px((size_t)w * h * 4u, 0.0f);
+    px[0] = px[1] = px[2] = px[3] = 1.0f;
     const auto built = buildSolidAngleIblAliasTable(px.data(), w, h);
     const auto table = toDeviceTable(built.alias);
     const uint32_t n = (uint32_t)table.size();
@@ -241,12 +225,12 @@ TEST_CASE("a zero-luminance texel is never drawn")
     {
         const EnvAliasDraw d = envAliasDraw(table.data(), n, stratifiedWord(uint32_t(s), uint32_t(draws)),
                                             hashWord(uint32_t(s)));
-        const int y = (int)(d.texel / (uint32_t)w);
-        CHECK(y != h / 2);
+        REQUIRE(d.texel < n);
+        CHECK(table[d.texel].solidAnglePdf > 0.0f);
     }
 }
 
-TEST_CASE("envPdfScale turns texel luminance into a density that integrates to one")
+TEST_CASE("represented environment density integrates to one")
 {
     const int w = 16;
     const int h = 8;
@@ -263,7 +247,7 @@ TEST_CASE("envPdfScale turns texel luminance into a density that integrates to o
         const double dOmega = (2.0 * M_PI / (double)w) * (std::cos(theta0) - std::cos(theta1));
         for (int x = 0; x < w; ++x)
         {
-            integral += texelLuminance(px, w, x, y) * (double)built.envPdfScale * dOmega;
+            integral += static_cast<double>(built.alias[(size_t)y * w + x].solidAnglePdf) * dOmega;
         }
     }
     CHECK(integral == doctest::Approx(1.0).epsilon(1e-5));
@@ -313,8 +297,8 @@ TEST_CASE("solid-angle samples and evaluated PDFs use the same texel measure")
             const float2 evaluatedUv = dirToEnvUV(direction, 0.63f);
             const int evaluatedX = std::clamp((int)(evaluatedUv.x * (float)w), 0, w - 1);
             const int evaluatedY = std::clamp((int)(evaluatedUv.y * (float)h), 0, h - 1);
-            const float returnedPdf = (float)(texelLuminance(px, w, (int)x, (int)y) * (double)built.envPdfScale);
-            const float evaluatedPdf = (float)(texelLuminance(px, w, evaluatedX, evaluatedY) * (double)built.envPdfScale);
+            const float returnedPdf = table[draw.texel].solidAnglePdf;
+            const float evaluatedPdf = table[(size_t)evaluatedY * w + evaluatedX].solidAnglePdf;
             INFO("sample=", sample, " texel=", x, ",", y, " jitter=", jitterU, " uv=", u, ",", v,
                  " evaluated=", evaluatedX, ",", evaluatedY);
             CHECK(returnedPdf == doctest::Approx(evaluatedPdf).epsilon(2e-5));

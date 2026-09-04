@@ -3031,12 +3031,17 @@ void MetalRender::handleSceneChanges()
     }
     if (any(changes & ChangeBits::Env))
     {
+        mEnvironment.release();
         const auto& envLight = mScene->getEnvLight();
         if (envLight.has_value() && !envLight->texturePath.empty())
         {
             const std::string resourcePathStr = getSettings()->getAs<std::string>("resource/searchPath");
             const fs::path envTexPath = fs::path(resourcePathStr) / envLight->texturePath;
             loadEnvMap(envTexPath.string());
+            if (!envLight->backgroundTexturePath.empty())
+            {
+                loadEnvBackground((fs::path(resourcePathStr) / envLight->backgroundTexturePath).string());
+            }
         }
         needReset = true;
         needSharcReset |= !responsiveSharc;
@@ -3153,6 +3158,7 @@ void MetalRender::buildSceneEnvironment(Buffer* output)
         mDevice->newBuffer(static_cast<size_t>(output->width()) * output->height() * output->getElementSize(),
                            MTL::ResourceStorageModePrivate);
 
+    mEnvironment.release();
     const auto& envLight = mScene->getEnvLight();
     if (envLight.has_value() && !envLight->texturePath.empty())
     {

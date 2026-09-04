@@ -146,12 +146,8 @@ DEVICE_FUNC float3 envSampleTexelDirection(int x, int y, int width, int height, 
     return direction;
 }
 
-/// The luminance the sampling distribution is built from.
-///
-/// Must match buildSolidAngleIblAliasTable() in render/host/ibl_alias_table.h exactly:
-/// the host weights texels by this and the device divides by the result, so a
-/// different set of coefficients on either side is a density for a map that was
-/// never sampled.
+/// Sanitized environment luminance. The host uses these coefficients before
+/// constructing its bilinear-footprint proposal envelope.
 DEVICE_FUNC float envLuminance(float3 rgb)
 {
     constexpr float maxFinite = 3.402823466e38f;
@@ -176,17 +172,10 @@ DEVICE_FUNC float envLuminance(float3 rgb)
     return (lum > 0.0f && lum <= maxFinite) ? lum : 0.0f;
 }
 
-/// Solid-angle density of the texel a direction falls into.
-///
-/// With exact-solid-angle texel mass w_i = lum_i * DeltaOmega_i and uniform
-/// solid-angle sampling inside that texel, the density is
-///
-///     p_omega = (w_i / totalPower) / DeltaOmega_i
-///             = lum_i / totalPower
-///     envPdfScale = 1 / totalPower
-///
-/// Both GPU backends use the same exact integral, so no per-texel PDF array has
-/// to be stored or searched.
+/// Compatibility helper for constant-map audit kernels. Production map PDFs
+/// come from EnvAliasEntry::solidAnglePdf because the support-preserving
+/// bilinear-footprint proposal is not, in general, proportional to the centre
+/// texel's luminance.
 DEVICE_FUNC float envTexelPdf(float3 radiance, float envPdfScale)
 {
     return envLuminance(radiance) * envPdfScale;
