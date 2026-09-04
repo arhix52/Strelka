@@ -28,6 +28,8 @@
 #include <cuda_runtime.h>
 
 #include <atomic>
+#include <chrono>
+#include <future>
 #include <string>
 #include <unordered_map>
 
@@ -197,8 +199,24 @@ private:
     /// frame's own values before every launch; a difference is a recompile.
     PipelineSpec mPipelineSpec;
     /// False until the first createModule(), so the initial build is not read as
-    /// a respecialisation.
+    /// a respecialisation. Also false while a build is in flight, which is what
+    /// stops render() launching against a pipeline that is being replaced.
     bool mPipelineSpecValid = false;
+
+    /// The pipeline build running on a worker thread, if any.
+    ///
+    /// OptiX compiles the OPTIXIR module on the first launch of every distinct
+    /// specialisation, and on a cold module cache that is ten seconds -- measured
+    /// on the Cornell box, so it is the module and not the scene. Held on the
+    /// main thread it exceeds mutter's five-second check-alive-timeout and the
+    /// desktop offers to kill the editor. The scene build carries on stepping
+    /// while this runs; only the launch waits.
+    std::future<void> mPipelineBuild;
+    std::chrono::steady_clock::time_point mPipelineBuildBegin;
+    bool mPipelineBuildWasFirst = false;
+    /// A synchronous caller wants the frame, not a responsive window. Set around
+    /// renderSync() so the build is waited on rather than skipped.
+    bool mPipelineBuildBlocking = false;
 
     /// Set whenever the TLAS is rebuilt from scratch. The SBT is indexed by
     /// instance, so it has to be rebuilt with it; a refit leaves it alone.

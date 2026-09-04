@@ -523,6 +523,20 @@ OptiXRender::OptiXRender() = default;
 
 OptiXRender::~OptiXRender()
 {
+    // Before anything else, and before any member is destroyed: a pipeline build
+    // may be running on a worker, and everything below destroys exactly the
+    // handles it is in the middle of writing.
+    //
+    // The editor reaches here on every scene switch -- checkLoadingComplete()
+    // does m_render.reset() -- so this is a normal path, not a shutdown-only one.
+    // Waiting is what the future's own destructor would do at the end of this
+    // function anyway; doing it first is what makes that wait safe rather than a
+    // race against the destruction above it.
+    if (mPipelineBuild.valid())
+    {
+        mPipelineBuild.wait();
+    }
+
     // Destroy texture objects and arrays
     destroyTextures();
 
@@ -2060,7 +2074,16 @@ void OptiXRender::createModule()
     mState.module_compile_options.boundValues = nullptr;
     mState.module_compile_options.numBoundValues = 0;
 
-    mPipelineSpecValid = true;
+    // mPipelineSpecValid is *not* set here, and this is the one line of this
+    // function that has to know it runs on a worker thread.
+    //
+    // It used to be, back when this ran on the main thread and "the module
+    // exists" and "a launch is safe" were the same instant. They are not any
+    // more: the program groups and the pipeline are built after this returns,
+    // and a main thread that saw the flag flip here launched against half of a
+    // pipeline and got OPTIX_ERROR_INVALID_VALUE ten seconds into the pine
+    // forest -- an error that names no subsystem and arrives nowhere near the
+    // mistake. ensurePipelineSpecialization sets it, once, on delivery.
 
     // Create curve modules. One intersector per basis: the basis is compiled
     // into the built-in intersection program, so a scene that mixes linear and
@@ -2281,46 +2304,109 @@ void OptiXRender::destroyPipeline()
     }
 }
 
+// Compiling the modules is the longest thing this renderer does on one thread,
+// and it used to do it on the one the window is on.
+//
+// OptiX compiles the OPTIXIR to SASS the first time it sees a given module plus
+// bound-value set, and caches the result on disk. On a miss that is about ten
+// seconds -- measured on the Cornell box with one instance, so it is the size of
+// the module and not of the scene. mutter's check-alive-timeout is five, so the
+// desktop decided the editor had hung and offered to kill it.
+//
+// So the build runs on a worker and this function is a state machine with three
+// states: idle, in flight, and just-finished. The launch is what waits for it --
+// render() skips while mPipelineSpecValid is false -- and the scene build keeps
+// stepping meanwhile, which is most of what those seconds were being spent on
+// anyway.
+//
+// Nothing else may touch mState's modules, program groups or pipeline while the
+// worker owns them. That holds because the old ones are destroyed here, before
+// the worker starts, and the only reader is the launch.
 void OptiXRender::ensurePipelineSpecialization(const Params& params)
 {
     const PipelineSpec wanted = specFor(params);
+
+    // Take delivery of a finished build. Blocking callers wait; an interactive
+    // frame comes back next time.
+    if (mPipelineBuild.valid())
+    {
+        if (!mPipelineBuildBlocking &&
+            mPipelineBuild.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        {
+            return;
+        }
+        // get() releases the shared state, so the future is no longer valid and
+        // the next frame falls through to the spec comparison below.
+        mPipelineBuild.get();
+        // The SBT holds program group headers, and every one of them just moved.
+        createSbt();
+        mPipelineSpecValid = true;
+
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - mPipelineBuildBegin)
+                            .count();
+        // Logged rather than silent: this is the one thing in the frame that can
+        // cost a second, and a scene or a setting that makes it happen every
+        // frame would otherwise read as "the renderer became slow".
+        STRELKA_INFO(
+            "ACTION pipeline_specialize reason={} took_ms={} sharc={} medium={} fog={} motion={} aov={} debug={}",
+            mPipelineBuildWasFirst ? "first_build" : "spec_changed", ms, mPipelineSpec.sharcCapacity != 0u,
+            mPipelineSpec.hasBoundedMedium, mPipelineSpec.hasFog, mPipelineSpec.enableMotionBlur,
+            mPipelineSpec.writeAov, mPipelineSpec.debug);
+    }
+
     if (mPipelineSpecValid && wanted == mPipelineSpec)
     {
         return;
     }
 
-    // A recompile is seconds of driver work, and it invalidates every handle the
-    // in-flight launch is using. Nothing may still be running against the
-    // pipeline about to be destroyed.
+    // A recompile invalidates every handle the in-flight launch is using.
+    // Nothing may still be running against the pipeline about to be destroyed.
     if (mState.stream)
     {
         latchCudaError(cudaStreamSynchronize(mState.stream), "drain the stream before respecialising the pipeline");
     }
     latchCudaError(cudaDeviceSynchronize(), "drain the device before respecialising the pipeline");
 
-    const bool firstBuild = !mPipelineSpecValid;
+    mPipelineBuildWasFirst = !mPipelineSpecValid;
     mPipelineSpec = wanted;
+    // False for the whole build, not just at the end: it is what render() reads
+    // to decide there is nothing to launch against.
+    mPipelineSpecValid = false;
+    mPipelineBuildBegin = std::chrono::steady_clock::now();
 
-    const auto begin = std::chrono::steady_clock::now();
     destroyPipeline();
-    createModule();
-    createProgramGroups();
-    createPipeline();
-    // The SBT holds program group headers, and every one of them just moved.
-    createSbt();
-    const auto ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
+    mPipelineBuild = std::async(std::launch::async,
+                                [this]
+                                {
+                                    createModule();
+                                    createProgramGroups();
+                                    createPipeline();
+                                });
 
-    // Logged rather than silent: this is the one thing in the frame that can
-    // cost a second, and a scene or a setting that makes it happen every frame
-    // would otherwise read as "the renderer became slow".
-    STRELKA_INFO("ACTION pipeline_specialize reason={} took_ms={} sharc={} medium={} fog={} motion={} aov={} debug={}",
-                 firstBuild ? "first_build" : "spec_changed", ms, wanted.sharcCapacity != 0u, wanted.hasBoundedMedium,
-                 wanted.hasFog, wanted.enableMotionBlur, wanted.writeAov, wanted.debug);
+    if (mPipelineBuildBlocking)
+    {
+        // Recurse once to take delivery. The spec cannot have moved in between --
+        // nothing else runs on this thread -- so this terminates.
+        ensurePipelineSpecialization(params);
+    }
 }
 
 void OptiXRender::createSbt()
 {
+    // The records carry program group headers, so there is nothing to pack until
+    // the groups exist. Reachable because the first pipeline is now built lazily,
+    // on the first render() that knows the scene's specialisation, while the
+    // scene build stages below run before it and ask for an SBT of their own.
+    // Marked dirty rather than skipped silently: ensurePipelineSpecialization
+    // builds it as soon as the groups land, and the stage that wanted it here is
+    // one that never launches.
+    if (mState.raygen_prog_group == nullptr)
+    {
+        mSbtDirty = true;
+        return;
+    }
+
     // Free previous SBT records if they exist
     if (mState.sbt.raygenRecord)
         CUDA_CHECK(cudaFree(optix::devicePtr<void>(mState.sbt.raygenRecord)));
@@ -3139,14 +3225,12 @@ void OptiXRender::render(Buffer* output)
             return;
         }
         mPublishClock.notePublished(nowMs);
-        // Time to first pixel is the number this whole path exists to move, so it
-        // is reported rather than inferred from watching a window.
-        if (!mReportedFirstPartialFrame)
-        {
-            mReportedFirstPartialFrame = true;
-            STRELKA_INFO("First frame shown {:.0f} ms into the scene build (stage {})", nowMs - mBuildStartMs,
-                         optix::buildStageName(mScenePrep.stage()));
-        }
+        // The "first frame shown" report is not here. Reaching this point means a
+        // partial frame is *publishable*, which stopped being the same thing as
+        // one being drawn when the pipeline moved to a worker thread: on a cold
+        // module cache there is nothing to launch against for the first ten
+        // seconds, and this line cheerfully reported a frame at 415 ms while the
+        // viewport was black. It is reported after the launch instead.
         // The scene under the accumulated image just changed, so what has been
         // accumulated is of a different scene.
         getSharedContext().mSubframeIndex = 0;
@@ -3623,6 +3707,15 @@ void OptiXRender::render(Buffer* output)
     // compiled against has to be settled before they are compiled against it.
     ensurePipelineSpecialization(params);
 
+    // The modules are still compiling on a worker. The scene build above has
+    // already stepped, which is the point -- the two used to be serialised behind
+    // one thread -- but there is no pipeline to launch against yet, and the
+    // viewport keeps whatever it last showed.
+    if (!mPipelineSpecValid)
+    {
+        return;
+    }
+
     if (mFrameStartEvent)
     {
         // The legacy default stream, which cudaStreamCreate's blocking streams
@@ -3674,6 +3767,16 @@ void OptiXRender::render(Buffer* output)
         else
         {
             markStageSubmitted(optix::GpuStage::PathTrace, mState.stream);
+            // Time to first pixel is the number this whole path exists to move,
+            // so it is reported rather than inferred from watching a window --
+            // and reported from the one place that means a pixel was actually
+            // traced, which is here.
+            if (!mReportedFirstPartialFrame)
+            {
+                mReportedFirstPartialFrame = true;
+                STRELKA_INFO("First frame shown {:.0f} ms into the scene build (stage {})",
+                             nowMilliseconds() - mBuildStartMs, optix::buildStageName(mScenePrep.stage()));
+            }
             // Update -> resolve -> query, in stream order. The launch above is
             // the update and the next one is the query; this is what makes the
             // deposits it just made readable, and ages out what the camera has
@@ -4303,9 +4406,11 @@ void OptiXRender::init()
 
     createContext();
     createTimingEvents();
-    createModule();
-    createProgramGroups();
-    createPipeline();
+    // No pipeline here. It used to be built now, against a PipelineSpec taken
+    // from an empty scene, and then thrown away and rebuilt on the first frame
+    // once fog, motion blur and the rest were known -- two cold-cache compiles
+    // of ten seconds each where the scene only ever needed the second. The first
+    // render() builds it, by which time it knows what to build.
 
     // Arm the deferred scene build. The first render() call picks it up a stage
     // at a time; a synchronous caller drives it to the end through renderSync.
@@ -4535,9 +4640,13 @@ void OptiXRender::syncFrameAndLatchErrors()
 void OptiXRender::renderSync(Buffer* output)
 {
     // A synchronous caller wants the frame, not a responsive window, so the
-    // build runs to completion here rather than one stage per call.
+    // build runs to completion here rather than one stage per call -- and that
+    // includes the pipeline, which render() would otherwise leave compiling and
+    // come back for on a next frame this caller is not going to make.
     finishSceneBuild(output);
+    mPipelineBuildBlocking = true;
     render(output);
+    mPipelineBuildBlocking = false;
     syncFrameAndLatchErrors();
     // Blocking, because a caller that has just waited for the frame is entitled
     // to the frame's time rather than the previous one's.
