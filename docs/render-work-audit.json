@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "date": "2026-09-04",
   "device": "Apple M4 Pro",
   "builds": { "counters": "Debug", "timing": "Release, validation off" },
@@ -41,7 +41,7 @@
     { "kernel": "wavefrontRestirFinal", "dispatches_per_frame": 1, "threads_dispatched": 53760, "active_items": 53248, "ray_queries": 0, "output": "current reservoir and at most one shadow item per hit", "reason": "selected-sample reconstruction" },
     { "kernel": "wavefrontPrepareShadow", "dispatches_per_frame": 1, "threads_dispatched": 1, "active_items": 1, "ray_queries": 0, "output": "shadow indirect args", "reason": "GPU queue count publication" },
     { "kernel": "wavefrontShadowStatic", "dispatches_per_frame": 1, "threads_dispatched": 34240, "active_items": 34204, "ray_queries": 34204, "output": "visible direct radiance", "reason": "one traversal for selected samples" },
-    { "kernel": "wavefrontGuideStatic", "dispatches_per_frame": 0, "threads_dispatched": 0, "active_items": 0, "ray_queries": 0, "output": "material guide continuation", "reason": "guides off; guides-on Cornell dispatched 76800 early-return lanes and traced 0 guide rays" },
+    { "kernel": "wavefrontGuideStatic", "dispatches_per_frame": 0, "threads_dispatched": 0, "active_items": 0, "ray_queries": 0, "output": "material guide continuation", "reason": "compact indirect queue; empty Cornell queue creates no encoder and dispatches no grid" },
     { "kernel": "wavefrontResolve", "dispatches_per_frame": 1, "threads_dispatched": 76800, "active_items": 76800, "ray_queries": 0, "output": "accumulated output", "reason": "sample resolve" },
     { "kernel": "wavefrontResolveAov", "dispatches_per_frame": 0, "threads_dispatched": 0, "active_items": 0, "ray_queries": 0, "output": "MetalFX input textures", "reason": "guides off; one full-resolution dispatch when on" },
     { "kernel": "MetalFX encodeToCommandBuffer", "dispatches_per_frame": 0, "threads_dispatched": 0, "active_items": 0, "ray_queries": 0, "output": "denoised image", "reason": "opaque framework pass; one encode when denoise is on" },
@@ -62,7 +62,11 @@
     "nee_restir_exclusive": { "first_bounce_nee": 0, "pass": true },
     "static_as_after_warmup": { "blas": 0, "tlas_build": 0, "tlas_refit": 0, "pass": true },
     "history": { "ping_pong": "frameIndex parity", "whole_reservoir_copies": 0, "clears_per_frame": 1, "pass": true },
-    "light_scaling": { "manual_analytic_tests_1_light": 0, "manual_analytic_tests_512_lights": 0, "miss_light_evaluations_512_rect": 0, "pass": true }
+    "light_scaling": { "manual_analytic_tests_1_light": 0, "manual_analytic_tests_512_lights": 0, "miss_light_evaluations_512_rect": 0, "pass": true },
+    "empty_guides": { "320x240_dispatched_before_after": [76800, 0], "1920x1080_dispatched_before_after": [2073600, 0], "primary_extend_unchanged": true, "pass": true },
+    "moving_lights_32_frames": { "analytic_lights": 512, "blas_builds": 0, "tlas_builds": 0, "tlas_refits": 32, "max_tlas_refits_per_frame": 1, "light_uploads": 32, "max_uploads_per_frame": 1, "temporal_mapping_updates": 32, "max_mapping_updates_per_frame": 1, "primary_pipeline_dispatches": 32, "pass": true },
+    "command_buffer_commit": { "spatial_readback_debug_id": 1, "creation_encoder_dispatch_end_commit_wait_readback": [1, 1, 1, 1, 1, 1, 1], "pass": true },
+    "restir_off_memory": { "restir_allocated_bytes": 0, "restir_accessed_bytes": 0, "pass": true }
   },
   "scaling_matrix": [
     { "axis": "guides", "a": "off", "b": "on", "gpu_ms_median5": [0.7, 0.9], "work": "primary/extend unchanged; +guide/+AOV resolve/+MetalFX" },
@@ -73,23 +77,50 @@
     { "axis": "lights", "a": "1 rect", "b": "512 rect", "gpu_ms_median5": [1.96, 1.99], "work": "miss light evaluations 0/0 after fix" },
     { "axis": "candidates", "a": "1", "b": "4", "gpu_ms_median5": [1.0, 1.5], "work": "53248 vs 212992 candidates" },
     { "axis": "spatial_neighbors", "a": "0/2/4", "b": null, "gpu_ms_median5": [0.9, 1.0, 1.5], "work": "0/62754/125701 compatible merges; spatial dispatch 0/1/1" },
-    { "axis": "light_motion", "a": "static", "b": "moving", "gpu_ms_median5": null, "work": "static AS 0/0/0; OPEN: no headless light-motion driver" }
+    { "axis": "guide_queue_empty", "a": "320x240", "b": "1920x1080", "gpu_ms_median5_before_after": [[0.9, 1.0], [21.9, 19.2]], "work": "guide dispatched threads 76800->0 and 2073600->0; 320p delta is below the stable timer/noise floor" },
+    { "axis": "guide_queue_nonempty", "a": "320x240", "b": "1920x1080", "gpu_ms_median5_before_after": [[0.9, 1.2], [22.3, 19.9]], "work": "active/dispatched 11028/11072 and 396724/396736; no primary/extend change" },
+    { "axis": "light_motion", "a": "NEE", "b": "ReSTIR c1/T/S2", "gpu_ms_32_frames": [51.355, 74.649], "work": "512 moving analytic lights; 0 BLAS/TLAS builds; 32 TLAS refits/uploads/mappings; 32 primary pipeline dispatches" }
   ],
   "confirmed_multipliers": [
     { "id": "R1", "site": "MetalWavefrontIntegrator.mm old per-bounce ReSTIR block", "before": "3*depth reuse dispatches; 12/42 total at depth 1/4", "after": "2 first-hit reuse dispatches; 11/32 total", "depth4_intersections_before_after": [276408, 276408], "commit": "efb4ea8" },
     { "id": "R2", "site": "MetalWavefrontIntegrator.mm spatial dispatch condition", "before": "one full hit-queue spatial copy with neighbors=0", "after": "no spatial dispatch; final reads current reservoir", "dispatch_before_after": "11/10", "commit": "96634c6" },
-    { "id": "R3", "site": "wavefront.metal wavefrontMiss old numLights loop", "before": "runtime missItems 23062 * 512 finite lights = 11807744 rejected inspections", "after": "runtime missLightEvaluations=0 through compact infinite list", "gpu_ms_512_before_after": [2.24, 1.99], "commit": "1ce668e" }
+    { "id": "R3", "site": "wavefront.metal wavefrontMiss old numLights loop", "before": "runtime missItems 23062 * 512 finite lights = 11807744 rejected inspections", "after": "runtime missLightEvaluations=0 through compact infinite list", "gpu_ms_512_before_after": [2.24, 1.99], "commit": "1ce668e" },
+    { "id": "R4", "site": "MetalWavefrontIntegrator guide dispatch", "before": "full-resolution guide grid even when active queue was empty", "after": "compact indirect guide queue; zero threadgroups when empty", "dispatch_threads_320_before_after": [76800, 0], "dispatch_threads_1080_before_after": [2073600, 0], "commit": "02ac340" },
+    { "id": "R5", "site": "MetalWavefrontIntegrator::ensureBuffers", "before": "ReSTIR history allocated with NEE", "after": "mode-conditional allocation and safe reallocation on mode switch", "nee_total_mib_before_after": [1231.5, 654.0], "restir_only_mib_before_after": [585.4, 0.0], "commit": "afb4f9c" }
   ],
+  "restir_memory_bytes_per_pixel": [
+    { "buffer": "reservoir current/previous", "bytes_per_pixel": 96, "allocated_nee": false, "accessed_nee": false, "allocated_restir": true },
+    { "buffer": "surface history current/previous", "bytes_per_pixel": 64, "allocated_nee": false, "accessed_nee": false, "allocated_restir": true },
+    { "buffer": "ReSTIR shading point", "bytes_per_pixel": 136, "allocated_nee": false, "accessed_nee": false, "allocated_restir": true }
+  ],
+  "memory_1920x1080": {
+    "nee_total_bytes_before_after": [1291296656, 685805456],
+    "nee_restir_only_bytes_before_after": [613785600, 0],
+    "restir_total_bytes_before_after": [1291296656, 1299591056],
+    "restir_only_bytes": 613785600
+  },
+  "spatial_upscale_command_buffers": [
+    { "debug_id": "strelka.frame[0] pooled", "creation_per_frame": 0, "creation_at_init": 1, "encoder_creation": 1, "dispatch": 11, "end_encoding": 1, "commit": 1, "wait": 1, "readback": 0 },
+    { "debug_id": 1, "label": "spatialUpscaleReadback", "creation_per_frame": 1, "encoder_creation": 1, "dispatch": 1, "end_encoding": 1, "commit": 1, "wait": 1, "readback": 1 },
+    { "debug_id": null, "label": "managedOutputSync", "creation_per_frame": 0, "encoder_creation": 0, "dispatch": 0, "end_encoding": 0, "commit": 0, "wait": 0, "readback": 0, "reason": "output is Shared on Apple silicon" }
+  ],
+  "validation": {
+    "focused_render_work": { "cases": 10, "assertions": 21, "pass": true },
+    "buffer_layout": { "cases": 1, "assertions": 33, "pass": true },
+    "ctest_debug": { "tests": 3, "failed": 0, "pass": true },
+    "active_guide_output_sha256_before_after": ["7dc05148bef9e67ac2818c0c4b7b6c32934358969f019298bf7e9215585917a0", "7dc05148bef9e67ac2818c0c4b7b6c32934358969f019298bf7e9215585917a0"]
+  },
   "static_audit": {
     "traversal": ["wavefrontExtend T::trace/traceVolume", "wavefrontGuide T::trace", "mediumTransmittance traceVolume", "CutoutShadowWalk trace/query", "wavefrontShadow T::trace"],
     "all_light_loops": ["none in extend, shadow, material evaluation, or reservoir reconstruction", "wavefrontMiss loops only compact infiniteLightIndices"],
-    "cpu_gpu_sync": ["no CPU readback/wait between wavefront stages", "renderSync waits once at frame boundary", "stage stats readback only in explicit profiling", "synchronizeResource only for Managed output"],
+    "cpu_gpu_sync": ["HeadlessApp::run -> renderSync -> render -> Metal4 queue commit -> waitForFrame -> spatial readback blit", "no CPU readback/wait between wavefront stages", "renderSync waits once at frame boundary", "spatial readback creates one separate Metal3 blit command buffer and commits it once", "synchronizeResource creates a different command buffer only for Managed output"],
     "copies_clears": ["ReSTIR clears current parity records once in wavefrontGenerate", "no previous-to-current reservoir copy", "skinning/pose copies gated by animation", "static light upload gated by ChangeBits::Lights"],
     "acceleration_structures": ["initial BLAS/TLAS during scene load", "skeletal BLAS and TLAS update only on deformation/transform flags", "procedural-light BLAS built with scene structures, not per static frame"]
   },
-  "open": [
-    { "id": "O1", "issue": "Guides-on dispatches a full-resolution guide kernel even when guide active items and guide rays are zero", "evidence": "76800 dispatched, 0 active, 0 guide queries on Cornell", "reason_unfixed": "compaction adds an atomic queue and prepare dispatch; net GPU win not yet demonstrated" },
-    { "id": "O2", "issue": "moving-light timing row", "evidence": "headless CLI cannot animate sidecar analytic lights", "reason_unfixed": "needs a deterministic light-motion harness, not renderer math changes" },
-    { "id": "O3", "issue": "spatial-upscale synchronous readback contains two consecutive commit() calls", "evidence": "MetalRender.mm readback path", "reason_unfixed": "not on measured render path; second commit did not establish duplicated GPU execution" }
-  ]
+  "closed_open": [
+    { "id": "O1", "status": "FIXED", "result": "empty guide queue has no encoder/grid dispatch", "commit": "02ac340" },
+    { "id": "O2", "status": "FIXED", "result": "32-frame moving-light harness added; all per-frame bounds pass", "commit": "16adca0" },
+    { "id": "O3", "status": "NOT-A-BUG", "result": "runtime readback CB lifecycle is 1/1/1/1/1/1/1; Managed sync is a distinct conditional CB" }
+  ],
+  "open": []
 }

@@ -1,30 +1,28 @@
 # Metal render-work audit
 
-Status: PASS for the measured static Metal wavefront path; 3 OPEN items remain.
+Status: PASS. Remaining OPEN items are closed; no estimator or procedural-shape math changed.
 
-- Expected work: `O(active*spp*depth) + O(H*candidates) + O(H*neighbors)`.
-- 320×240, 1 spp, depth 1, ReSTIR c4/T/S2: 76,800 primary/extend rays, H=53,248,
-  212,992 candidates, 66,215 spatial merges, 34,204 final visibility rays, 111,004 total queries.
-- Guides OFF/ON: primary and extend stay 76,800/76,800; guide-only rays are zero on Cornell.
-- Candidate and temporal/spatial reuse queries are zero; final visibility is <= H.
-- ReSTIR first-bounce NEE is zero; depth-4 secondary NEE remains enabled (89,083 samples).
-- Static post-load frame: BLAS/TLAS build/refit = 0/0/0; light upload remains change-gated.
-- History uses frame-parity ping-pong; no whole-reservoir copy and one fused clear per frame.
-- No all-light loop remains in extend, shadow, materials, or reservoir reconstruction.
+- Expected work remains `O(active*spp*depth) + O(H*candidates) + O(H*neighbors)`.
+- Guides and radiance share first-surface traversal; guides do not add primary/extend rays.
+- Empty guide queue: 320×240 dispatched threads `76,800 -> 0`; 1920×1080 `2,073,600 -> 0`.
+- Nonempty queue dispatches only compact work: `11,028/11,072` active/dispatched at 320p;
+  `396,724/396,736` at 1080p.
+- ReSTIR first-bounce NEE is zero. Candidate and reuse queries are zero. Final visibility is `<= H`.
+- Static post-warm-up BLAS/TLAS build/refit is `0/0/0`.
+- 512 moving lights, 32 frames, NEE and ReSTIR: BLAS/TLAS builds `0/0`; TLAS refits `32`, max `1/frame`;
+  uploads `32`, mappings `32`, both max `1/frame`; each render pipeline dispatch count is `32`.
+- Spatial upscale call graph: `HeadlessApp::run -> renderSync -> render -> Metal4 commit/wait -> readback blit`.
+- Runtime readback CB ID 1: creation/encoder/copy/end/commit/wait/readback = `1/1/1/1/1/1/1`.
+- The apparent second commit is a distinct Managed-output sync CB; it is not created for Shared output on Apple silicon.
+- ReSTIR storage is 296 B/pixel: reservoirs 96, surface history 64, shading point 136.
+- At 1080p, NEE ReSTIR-only allocation is `585.4 -> 0 MiB`; total wavefront allocation `1231.5 -> 654.0 MiB`.
+- ReSTIR total is `1231.5 -> 1239.4 MiB`; the +7.9 MiB is the compact guide index queue.
 
-Confirmed fixes:
+Commits:
 
-- `efb4ea8`: temporal reuse fused into first-hit shade; spatial/final only run on bounce 0.
-  ReSTIR depth-4 dispatches: 42 -> 32; ray/intersection counts unchanged.
-- `96634c6`: disabled/zero-neighbor spatial pass skipped; depth-1 dispatches: 11 -> 10.
-- `1ce668e`: miss evaluates compact infinite lights, not every analytic light.
-  512 finite rect lights: 11,807,744 rejected inspections -> 0; 2.24 -> 1.99 ms.
-- `45d4bf3`, `ac08f53`, `e23fb80`, `d0055a3`: Debug-only audit JSON and 7 focused invariants.
+- `02ac340` — skip empty guide traversal dispatches.
+- `afb4f9c` — allocate ReSTIR history only when enabled.
+- `16adca0` — add moving-light and command-buffer audit probes.
 
-Timing medians (5 short Release runs, ms): guides off/on 0.7/0.9; NEE/ReSTIR c1 0.7/1.0;
-320×240/1080p 1.0/23.3; depth 1/4 1.0/2.6; candidates 1/4 1.0/1.5;
-neighbors 0/2/4 0.9/1.0/1.5. Output EXRs were byte-identical across math-preserving fixes.
-
-OPEN: empty guide dispatch needs a measured compact-queue A/B; moving-light row lacks a headless driver;
-the unmeasured spatial-upscale readback has a duplicate `commit()` call. Full details and ledger are in
-`docs/render-work-audit.json`.
+Validation: 10 focused render-work cases / 21 assertions and 33 buffer-layout assertions pass;
+full Debug `ctest` result is recorded in the JSON ledger.
