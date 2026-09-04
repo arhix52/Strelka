@@ -26,54 +26,6 @@ struct LightSampleData
     float distToLight;
 };
 
-struct AnalyticAreaLightHit
-{
-    float distance;
-    float3 point;
-    float3 normal;
-    float areaPdf;
-    uint32_t lightId;
-    bool hit;
-};
-
-static AnalyticAreaLightHit findAnalyticAreaLightHit(device const UniformLight* lights,
-                                                     uint32_t lightCount,
-                                                     float3 rayOrigin,
-                                                     float3 rayDirection,
-                                                     float minDistance,
-                                                     float maxDistance,
-                                                     bool includeCameraHidden)
-{
-    AnalyticAreaLightHit closest;
-    closest.distance = maxDistance;
-    closest.point = float3(0.0f);
-    closest.normal = float3(0.0f);
-    closest.areaPdf = 0.0f;
-    closest.lightId = 0u;
-    closest.hit = false;
-    for (uint32_t lightId = 0u; lightId < lightCount; ++lightId)
-    {
-        device const UniformLight& light = lights[lightId];
-        if (!analyticLightVisibilityAllowsRay(light.normal.w, includeCameraHidden))
-        {
-            continue;
-        }
-        const AnalyticLightIntersection candidate = intersectAnalyticLightSurface(
-            light.type, float3(light.points[0]), float3(light.points[1]), float3(light.points[2]),
-            float3(light.points[3]), float3(light.normal), rayOrigin, rayDirection, minDistance, closest.distance);
-        if (candidate.hit)
-        {
-            closest.distance = candidate.distance;
-            closest.point = candidate.point;
-            closest.normal = candidate.normal;
-            closest.areaPdf = candidate.areaPdf;
-            closest.lightId = lightId;
-            closest.hit = true;
-        }
-    }
-    return closest;
-}
-
 static float calcLightAreaPdf(device const UniformLight& l, const float3 hitPoint)
 {
     float areaPdf = 0.0f;

@@ -658,7 +658,6 @@ static void extendImpl(uint gid,
                        // sample a free flight and reads it from the material the path is inside.
                        device const Material* materials,
                        device const MediumPathState* mediumPaths,
-                       device const UniformLight* lights,
                        // Chosen per dispatch rather than per ray: the only thing it distinguishes
                        // is the camera bounce from the rest, and `extend` is encoded once per
                        // bounce anyway. Reading the path's depth here to answer the same question
@@ -790,17 +789,7 @@ static void extendImpl(uint gid,
         hit = captureExtendIntersection(surfaceHit, curveParameter);
     }
 
-    const float hardwareDistance = hit.type == intersection_type::none ? r.max_distance : hit.distance;
-    AnalyticAreaLightHit analyticHit;
-    analyticHit.hit = false;
-    analyticHit.distance = hardwareDistance;
-    if (SPEC_LIGHTS && uniforms.numLights > 0u)
-    {
-        const bool includeCameraHidden = (rayMask & GEOMETRY_MASK_LIGHT_HIDDEN) != 0u;
-        analyticHit = findAnalyticAreaLightHit(
-            lights, uniforms.numLights, r.origin, r.direction, r.min_distance, hardwareDistance, includeCameraHidden);
-    }
-    const float surfaceDistance = analyticHit.hit ? analyticHit.distance : hardwareDistance;
+    const float surfaceDistance = hit.type == intersection_type::none ? r.max_distance : hit.distance;
 
     // Escaped rays skip shade and go to miss. Fog/SSS are decided here
     // because only extend knows whether a surface precedes the medium event.
@@ -813,19 +802,6 @@ static void extendImpl(uint gid,
         mediumRec.barycentrics = vector_float2(0.0f, 0.0f);
         mediumRec.distance = mediumScatterT;
         hits[tid] = mediumRec;
-        queuePush(hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
-        return;
-    }
-
-    if (analyticHit.hit)
-    {
-        HitRecord rec;
-        rec.geomEntryIndex = HIT_LIGHT_BIT | analyticHit.lightId;
-        rec.instanceIndex = 0u;
-        rec.primitiveId = 0u;
-        rec.barycentrics = vector_float2(0.0f);
-        rec.distance = analyticHit.distance;
-        hits[tid] = rec;
         queuePush(hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
@@ -867,12 +843,11 @@ static void extendImpl(uint gid,
         device uint32_t* missQueue [[buffer(10)]], device atomic_uint* missCounter [[buffer(11)]],                     \
         device const PathState* paths [[buffer(12)]], device const Material* materials [[buffer(13)]],                 \
         constant uint32_t& rayMask [[buffer(14)]], TRAITS::structure volumeAccelerationStructure [[buffer(15)]],       \
-        constant uint32_t& queueOffset [[buffer(16)]], device const MediumPathState* mediumPaths [[buffer(17)]],       \
-        device const UniformLight* lights [[buffer(18)]])                                                              \
+        constant uint32_t& queueOffset [[buffer(16)]], device const MediumPathState* mediumPaths [[buffer(17)]])       \
     {                                                                                                                  \
         extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure, volumeAccelerationStructure, \
                            rays, hits, sampleIdx, queue, control, hitQueue, hitCounter, missQueue, missCounter, paths, \
-                           materials, mediumPaths, lights, rayMask);                                                   \
+                           materials, mediumPaths, rayMask);                                                           \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
@@ -2140,30 +2115,12 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
         float3 sharcLight = float3(0.0f);
         const float3 scatteringOrigin = rayOrigin - rayDir * p.misDistance;
-        // Coincident emitters are separate integrand components even though
-        // they share one geometric event. Each keeps its own PMF and MIS pair.
-        for (uint32_t componentId = 0u; componentId < uniforms.numLights; ++componentId)
+        const float lightCosine = -dot(rayDir, lightNormal);
+        if (analyticLightVisibilityAllowsRay(currLight.normal.w, depth != 0u) &&
+            lightConnectionFacesVertex(currLight.type, lightCosine, 0.0f))
         {
-            device const UniformLight& component = lights[componentId];
-            if (!analyticLightVisibilityAllowsRay(component.normal.w, depth != 0u))
-            {
-                continue;
-            }
-            const AnalyticLightIntersection componentHit = intersectAnalyticLightSurface(
-                component.type, float3(component.points[0]), float3(component.points[1]), float3(component.points[2]),
-                float3(component.points[3]), float3(component.normal), rayOrigin, rayDir, 0.0f, 3.402823466e38f);
-            if (!analyticLightIntersectionSharesEvent(analyticSurfaceHit.distance, componentHit))
-            {
-                continue;
-            }
-            const float componentCosine = -dot(rayDir, componentHit.normal);
-            if (!lightConnectionFacesVertex(
-                    component.type, componentCosine, lightIsPunctual(component.type) ? component.points[0].x : 0.0f))
-            {
-                continue;
-            }
-            const float hitDistance = finiteVectorLength(componentHit.point - scatteringOrigin);
-            const float3 Le = emittedLightRadiance(component, -rayDir, hitDistance, iesProfiles);
+            const float hitDistance = finiteVectorLength(hitPoint - scatteringOrigin);
+            const float3 Le = emittedLightRadiance(currLight, -rayDir, hitDistance, iesProfiles);
             float3 weightedLe;
             if (depth == 0u || specularBounce || !neeDone)
             {
@@ -2174,16 +2131,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 const float localSelectionPdf = uniforms.hasEnvMap ? 1.0f - uniforms.envMapColorTint.w : 1.0f;
                 const float analyticClassPdf =
                     uniforms.numEmissiveMeshes > 0u ? 1.0f - uniforms.meshLightSelectionPdf : 1.0f;
-                const float lightIdentityPdf = analyticLightSelectionPdf(component);
-                // From the vertex that scattered, which is not the ray's origin
-                // once it has passed through a cutout on the way here. Using the
-                // origin makes the light look nearer than the scattering vertex
-                // saw it, which shrinks its solid-angle density, which inflates
-                // this weight -- and the next-event estimate at that vertex has
-                // already claimed the rest. The two then sum to more than one.
-                const float lightPdf =
-                    areaPdfToSolidAngleMarginalPdf(hitDistance, componentCosine, componentHit.areaPdf,
-                                                   localSelectionPdf, analyticClassPdf, lightIdentityPdf, 1.0f);
+                const float lightIdentityPdf = analyticLightSelectionPdf(currLight);
+                const float areaPdf =
+                    analyticSurfaceHit.hit ? analyticSurfaceHit.areaPdf : calcLightAreaPdf(currLight, hitPoint);
+                const float lightPdf = areaPdfToSolidAngleMarginalPdf(
+                    hitDistance, lightCosine, areaPdf, localSelectionPdf, analyticClassPdf, lightIdentityPdf, 1.0f);
                 const float mis = computeMisWeight(p.lastBsdfPdf, lightPdf, uniforms.misHeuristic);
                 weightedLe = Le * mis;
             }
@@ -3608,8 +3560,7 @@ static void guideImpl(uint gid,
                       device const char* prevVertexBuffer,
                       device const uint32_t* indexBuffer,
                       device const packed_float3* curvePoints,
-                      device const uint32_t* curveSegments,
-                      device const UniformLight* lights)
+                      device const uint32_t* curveSegments)
 {
     if (gid >= uniforms.width * uniforms.height)
     {
@@ -3652,27 +3603,6 @@ static void guideImpl(uint gid,
             T::trace(isect, r, accelerationStructure, uniforms.primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN, motionTime);
         const float curveParameter = rawHit.type == intersection_type::curve ? T::curveParameter(rawHit) : 0.0f;
         const ExtendIntersection hit = captureExtendIntersection(rawHit, curveParameter);
-        const float hardwareDistance = hit.type == intersection_type::none ? INFINITY : hit.distance;
-        AnalyticAreaLightHit analyticHit;
-        analyticHit.hit = false;
-        if (SPEC_LIGHTS && uniforms.numLights > 0u)
-        {
-            analyticHit = findAnalyticAreaLightHit(
-                lights, uniforms.numLights, origin, direction, r.min_distance, hardwareDistance, true);
-        }
-        if (analyticHit.hit)
-        {
-            totalDistance += analyticHit.distance;
-            if (replaceMaterial)
-            {
-                storeGuideMiss(aov, gid, direction, totalDistance);
-            }
-            else
-            {
-                aov[gid].specularHitDistance = totalDistance;
-            }
-            return;
-        }
         if (hit.type == intersection_type::none)
         {
             const float missDistance = totalDistance + max(uniforms.sceneExtent, 1e3f);
@@ -3856,10 +3786,10 @@ static void guideImpl(uint gid,
         device const Material* materials [[buffer(5)]], device const GeometryEntry* geometryEntries [[buffer(6)]],     \
         device const char* vertexBuffer [[buffer(7)]], device const char* prevVertexBuffer [[buffer(8)]],              \
         device const uint32_t* indexBuffer [[buffer(9)]], device const packed_float3* curvePoints [[buffer(10)]],      \
-        device const uint32_t* curveSegments [[buffer(11)]], device const UniformLight* lights [[buffer(12)]])         \
+        device const uint32_t* curveSegments [[buffer(11)]])                                                           \
     {                                                                                                                  \
         guideImpl<TRAITS>(gid, uniforms, instances, accelerationStructure, aov, materials, geometryEntries,            \
-                          vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments, lights);            \
+                          vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments);                    \
     }
 
 WF_GUIDE_ENTRY(wavefrontGuide, MotionTraversal)
