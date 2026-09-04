@@ -787,8 +787,8 @@ static void extendImpl(uint gid,
     if (SPEC_LIGHTS && uniforms.numLights > 0u)
     {
         const bool includeCameraHidden = (rayMask & GEOMETRY_MASK_LIGHT_HIDDEN) != 0u;
-        analyticHit = findAnalyticAreaLightHit(lights, uniforms.numLights, r.origin, r.direction, r.min_distance,
-                                              hardwareDistance, includeCameraHidden);
+        analyticHit = findAnalyticAreaLightHit(
+            lights, uniforms.numLights, r.origin, r.direction, r.min_distance, hardwareDistance, includeCameraHidden);
     }
     const float surfaceDistance = analyticHit.hit ? analyticHit.distance : hardwareDistance;
 
@@ -857,8 +857,8 @@ static void extendImpl(uint gid,
         device uint32_t* missQueue [[buffer(10)]], device atomic_uint* missCounter [[buffer(11)]],                     \
         device const PathState* paths [[buffer(12)]], device const Material* materials [[buffer(13)]],                 \
         constant uint32_t& rayMask [[buffer(14)]], TRAITS::structure volumeAccelerationStructure [[buffer(15)]],       \
-        constant uint32_t& queueOffset [[buffer(16)]], device const MediumPathState* mediumPaths [[buffer(17)]],      \
-        device const UniformLight* lights [[buffer(18)]])                                                             \
+        constant uint32_t& queueOffset [[buffer(16)]], device const MediumPathState* mediumPaths [[buffer(17)]],       \
+        device const UniformLight* lights [[buffer(18)]])                                                              \
     {                                                                                                                  \
         extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure, volumeAccelerationStructure, \
                            rays, hits, sampleIdx, queue, control, hitQueue, hitCounter, missQueue, missCounter, paths, \
@@ -1321,8 +1321,7 @@ static inline DenoiserMaterialGuides openpbrDenoiserGuides(thread const OpenPBR_
     // MaterialX exports in the test scenes use a mapped base plus a constant
     // subsurface tint. Preserve the mapped detail in that case; a genuinely
     // mapped subsurface colour remains an independent OpenPBR input.
-    const float3 subsurfaceColor =
-        baseMapDetailsSubsurface ? weightedBase * in.subsurface_color : in.subsurface_color;
+    const float3 subsurfaceColor = baseMapDetailsSubsurface ? weightedBase * in.subsurface_color : in.subsurface_color;
     const float3 diffuseColor = mix(weightedBase, subsurfaceColor, in.subsurface_weight);
     g.diffuse = diffuseColor * dielectric * opaque;
 
@@ -1536,8 +1535,8 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         }
         else
         {
-            const float envPdf = envMapPdf(rayDir, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight,
-                                           uniforms.envMapRotation);
+            const float envPdf =
+                envMapPdf(rayDir, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight, uniforms.envMapRotation);
             const float envSelectionPdf =
                 (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0) ? uniforms.envMapColorTint.w : 1.0f;
             const float effectiveEnvPdf = envPdf * envSelectionPdf;
@@ -1564,10 +1563,8 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
     // sharp distant is a delta and deliberately has no continuous miss term.
     if (SPEC_LIGHTS)
     {
-        const float localSelectionPdf =
-            (SPEC_ENV_MAP && uniforms.hasEnvMap) ? (1.0f - uniforms.envMapColorTint.w) : 1.0f;
-        const float analyticClassPdf =
-            uniforms.numEmissiveMeshes > 0u ? (1.0f - uniforms.meshLightSelectionPdf) : 1.0f;
+        const float localSelectionPdf = (SPEC_ENV_MAP && uniforms.hasEnvMap) ? (1.0f - uniforms.envMapColorTint.w) : 1.0f;
+        const float analyticClassPdf = uniforms.numEmissiveMeshes > 0u ? (1.0f - uniforms.meshLightSelectionPdf) : 1.0f;
         for (uint32_t lightId = 0; lightId < uniforms.numLights; ++lightId)
         {
             device const UniformLight& light = lights[lightId];
@@ -1763,14 +1760,13 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // draws where the connection failed, and the two strategies stop
         // summing to one.
         const bool didNee = volumeNeePairsWithBounce(
-            uniforms.estimatorMode == 0,
-            (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
-                (SPEC_ENV_MAP && uniforms.hasEnvMap));
+            uniforms.estimatorMode == 0, (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
+                                             (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (didNee)
         {
-            const LightConnection conn = connectToLight(
-                uniforms, uniforms.numLights, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
-                motionTime, rng, si, envAliasTable, envMapTexture, iesProfiles, true);
+            const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, instances, materials,
+                                                        vertexBuffer, prevVertexBuffer, indexBuffer, motionTime, rng,
+                                                        si, envAliasTable, envMapTexture, iesProfiles, true);
             if (conn.needsRay && conn.pdf > 0.0f)
             {
                 // The phase cosine compares travel directions: dot(rayDir, toLight).
@@ -1889,10 +1885,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // occludes almost every shadow ray it would spawn.
         const bool isBounded = isBoundedMedium;
         // As in the fog path: available, not delivered.
-        const bool didNeeVolume = isBounded && volumeNeePairsWithBounce(uniforms.estimatorMode == 0,
-                                                                        (SPEC_LIGHTS && (uniforms.numLights > 0 ||
-                                                                                         uniforms.numEmissiveMeshes > 0)) ||
-                                                                            (SPEC_ENV_MAP && uniforms.hasEnvMap));
+        const bool didNeeVolume =
+            isBounded &&
+            volumeNeePairsWithBounce(uniforms.estimatorMode == 0,
+                                     (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
+                                         (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (isBounded)
         {
             // Volumetric emission: what makes the bath water glow rather than
@@ -1912,9 +1909,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 vsi.shading_normal = -rayDir;
                 vsi.geometry_normal = -rayDir;
                 vsi.front_face = true;
-                const LightConnection conn = connectToLight(
-                    uniforms, uniforms.numLights, lights, instances, materials, vertexBuffer, prevVertexBuffer,
-                    indexBuffer, motionTime, wrng, vsi, envAliasTable, envMapTexture, iesProfiles, true);
+                const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, instances, materials,
+                                                            vertexBuffer, prevVertexBuffer, indexBuffer, motionTime,
+                                                            wrng, vsi, envAliasTable, envMapTexture, iesProfiles, true);
                 if (conn.needsRay && conn.pdf > 0.0f)
                 {
                     // Match the fog path's travel-direction phase convention.
@@ -2000,20 +1997,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     {
         const uint32_t lightId = rec.geomEntryIndex & ~HIT_LIGHT_BIT;
         device const UniformLight& currLight = lights[lightId];
-        AnalyticLightIntersection analyticSurfaceHit;
-        analyticSurfaceHit.hit = false;
-        if (currLight.type == LIGHT_TYPE_DISC)
-        {
-            analyticSurfaceHit = intersectAnalyticDisc(rayOrigin, rayDir, 0.0f, 3.402823466e38f,
-                                                       float3(currLight.points[1]), float3(currLight.points[2]),
-                                                       float3(currLight.points[3]), float3(currLight.normal));
-        }
-        else if (currLight.type == LIGHT_TYPE_SPHERE)
-        {
-            analyticSurfaceHit = intersectAnalyticEllipsoid(rayOrigin, rayDir, 0.0f, 3.402823466e38f,
-                                                            float3(currLight.points[1]), float3(currLight.points[0]),
-                                                            float3(currLight.points[2]), float3(currLight.points[3]));
-        }
+        const AnalyticLightIntersection analyticSurfaceHit = intersectAnalyticLightSurface(
+            currLight.type, float3(currLight.points[0]), float3(currLight.points[1]), float3(currLight.points[2]),
+            float3(currLight.points[3]), float3(currLight.normal), rayOrigin, rayDir, 0.0f, 3.402823466e38f);
         const float3 hitPoint = analyticSurfaceHit.hit ? analyticSurfaceHit.point : rayOrigin + rayDir * rec.distance;
         // A light's geometry is still a surface the denoiser has to reconstruct.
         // Its emission is unaffected by denoising, so it gets a black albedo and
@@ -2096,14 +2082,15 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         float3 sharcLight = float3(0.0f);
         // The same predicate connectLight() offers directions by, so the two
         // halves of the estimate agree on the set they are splitting.
-        if (lightSampleFacesVertex(-dot(rayDir, lightNormal)))
+        if (lightConnectionFacesVertex(currLight.type, -dot(rayDir, lightNormal),
+                                       lightIsPunctual(currLight.type) ? currLight.points[0].x : 0.0f))
         {
             // Same distance the shadow ray uses in connectLight() -- from the
             // scattering vertex, not the offset origin -- so both halves of the
             // MIS estimate scale the emission by the same controlled falloff.
             const float3 scatteringOrigin = rayOrigin - rayDir * p.misDistance;
             const float hitDistance = finiteVectorLength(hitPoint - scatteringOrigin);
-            const float3 Le = float3(currLight.color) * areaFalloff(currLight, hitDistance);
+            const float3 Le = emittedLightRadiance(currLight, -rayDir, hitDistance, iesProfiles);
             if (depth == 0u || specularBounce || !neeDone)
             {
                 radiance += throughput * Le;
@@ -2125,10 +2112,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 const float conditionalLightPdf =
                     analyticSurfaceHit.hit ?
                         areaPdfToSolidAnglePdf(hitDistance, -dot(rayDir, lightNormal), analyticSurfaceHit.areaPdf) :
-                        getLightPdf(currLight, hitPoint, scatteringOrigin,
-                                                   uniforms.rectLightSamplingMethod);
-                const float lightPdf = conditionalLightPdf *
-                                       lightSelectionPdf;
+                        getLightPdf(currLight, hitPoint, scatteringOrigin, uniforms.rectLightSamplingMethod);
+                const float lightPdf = conditionalLightPdf * lightSelectionPdf;
                 const float mis = computeMisWeight(p.lastBsdfPdf, lightPdf, uniforms.misHeuristic);
                 radiance += throughput * Le * mis;
                 sharcLight = Le * mis;
@@ -2310,9 +2295,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // hemisphere, which is smooth at every parameter, so there is nothing
         // about the material to ask.
         const bool didNeeExit = volumeNeePairsWithBounce(
-            uniforms.estimatorMode == 0,
-            (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
-                (SPEC_ENV_MAP && uniforms.hasEnvMap));
+            uniforms.estimatorMode == 0, (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
+                                             (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (didNeeExit)
         {
             // NEE here and not inside the walk: this is the vertex light can
@@ -2324,9 +2308,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             xsi.geometry_normal = outward;
             xsi.wo = -rayDir;
             xsi.front_face = true;
-            const LightConnection conn = connectToLight(
-                uniforms, uniforms.numLights, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
-                motionTime, xrng, xsi, envAliasTable, envMapTexture, iesProfiles, false);
+            const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, instances, materials,
+                                                        vertexBuffer, prevVertexBuffer, indexBuffer, motionTime, xrng,
+                                                        xsi, envAliasTable, envMapTexture, iesProfiles, false);
             if (conn.needsRay && conn.pdf > 0.0f)
             {
                 const float cosOut = dot(outward, conn.toLight);
@@ -2581,8 +2565,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         if (isOpenPBR)
         {
             const OpenPBR_ResolvedInputs openpbrInputs = openpbr_resolve_inputs(openpbrMat, si);
-            materialGuides =
-                openpbrDenoiserGuides(openpbrInputs, si, openpbrBaseMapDetailsSubsurface(openpbrMat));
+            materialGuides = openpbrDenoiserGuides(openpbrInputs, si, openpbrBaseMapDetailsSubsurface(openpbrMat));
         }
         else
         {
@@ -2643,8 +2626,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             {
                 const float eta = entering ? si.exterior_ior / interfaceIor : interfaceIor / max(si.exterior_ior, 1e-4f);
                 float3 refracted;
-                const bool validRefraction =
-                    si.thin_walled ? true : refract_dir(-V, Nf, eta, interfaceCosine, refracted);
+                const bool validRefraction = si.thin_walled ? true : refract_dir(-V, Nf, eta, interfaceCosine, refracted);
                 if (validRefraction && interfaceFresnel < 0.5f)
                 {
                     guideDirection = si.thin_walled ? -V : refracted;
@@ -2705,9 +2687,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     const float3 materialDemodulation = sharcMaterialDemodulation(diffuseAlbedo, specularF0);
     const float receiverRoughness = sharcReceiverRoughness(isOpenPBR, openpbrMat, si);
     const bool cacheableReceiver = sharcReceiverCacheEligible(
-        receiverRoughness,
-        isOpenPBR ? openpbrMat.transmission_weight : max(si.transmission, si.diffuse_transmission), isFibre,
-        uniforms.sharcRoughnessThreshold);
+        receiverRoughness, isOpenPBR ? openpbrMat.transmission_weight : max(si.transmission, si.diffuse_transmission),
+        isFibre, uniforms.sharcRoughnessThreshold);
 
     if (SPEC_SHARC_UPDATE && uniforms.sharcCapacity != 0u)
     {
@@ -2723,12 +2704,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         SharcUpdateState updateState = sharcUpdates[updateIndex];
         sharcMultiplyPendingThroughput(updateState, throughput / max(throughputAtStageEntry, float3(1e-6f)));
         const bool responsive = (uniforms.sharcFlags & SHARC_FLAG_RESPONSIVE) != 0u;
-        const bool continueTracing =
-            sharcUpdateHit(updateState, uniforms, sharcHashEntries, sharcAccumulation, sharcResolved,
-                           uniforms.sharcDebug != 0u ? iorStats + IOR_STAT_COUNT : nullptr, si.position,
-                           si.geometry_normal, -rayDir, 0.0f, materialDemodulation, float3(0.0f), surfaceEmission,
-                           cacheableReceiver,
-                           float(sharcHash(tid ^ uniforms.sharcFrameIndex)) * (1.0f / 4294967296.0f), responsive);
+        const bool continueTracing = sharcUpdateHit(
+            updateState, uniforms, sharcHashEntries, sharcAccumulation, sharcResolved,
+            uniforms.sharcDebug != 0u ? iorStats + IOR_STAT_COUNT : nullptr, si.position, si.geometry_normal, -rayDir,
+            0.0f, materialDemodulation, float3(0.0f), surfaceEmission, cacheableReceiver,
+            float(sharcHash(tid ^ uniforms.sharcFrameIndex)) * (1.0f / 4294967296.0f), responsive);
         sharcUpdates[updateIndex] = updateState;
         if (!continueTracing)
         {
@@ -2803,14 +2783,13 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     if (any(surfaceEmission > 0.0f))
     {
         float emissionMis = 1.0f;
-        if (SPEC_LIGHTS && depth > 0u && !specularBounce && neeDone && !isCurve &&
-            uniforms.numEmissiveMeshes > 0u)
+        if (SPEC_LIGHTS && depth > 0u && !specularBounce && neeDone && !isCurve && uniforms.numEmissiveMeshes > 0u)
         {
             const uint32_t geometryId = rec.geomEntryIndex - inst.userID;
             const float3 misOrigin = rayOrigin - rayDir * p.misDistance;
-            const float lightPdf = emissiveMeshHitPdf(
-                uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, rec.instanceIndex, geometryId,
-                rec.primitiveId, misOrigin, worldPosition, motionTime);
+            const float lightPdf =
+                emissiveMeshHitPdf(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, rec.instanceIndex,
+                                   geometryId, rec.primitiveId, misOrigin, worldPosition, motionTime);
             if (lightPdf > 0.0f)
             {
                 emissionMis = computeMisWeight(p.lastBsdfPdf, lightPdf, uniforms.misHeuristic);
@@ -2850,9 +2829,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         openpbrPrepared = openpbr_prepare_at(openpbrMat, si, throughput);
     }
 
-    const bool hasEmitter =
-        (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
-        (SPEC_ENV_MAP && uniforms.hasEnvMap);
+    const bool hasEmitter = (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
+                            (SPEC_ENV_MAP && uniforms.hasEnvMap);
     const bool smoothLobe = isOpenPBR ? openpbr_has_smooth_lobe(openpbrMat) : bsdf_has_smooth_lobe(si);
     bool didNee = neeRunsAtVertex(uniforms.estimatorMode == 0, hasEmitter, smoothLobe);
     const ShadedFrame neeFrame =
@@ -2880,13 +2858,13 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 crng.seed = hash_combine(rng.seed, i * 0x9E3779B9u);
             }
 
-            const LightConnection conn = connectToLight(
-                uniforms, uniforms.numLights, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
-                motionTime, crng, si, envAliasTable, envMapTexture, iesProfiles);
+            const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, instances, materials,
+                                                        vertexBuffer, prevVertexBuffer, indexBuffer, motionTime, crng,
+                                                        si, envAliasTable, envMapTexture, iesProfiles);
             // A fibre has no back side to reject: see scattersThroughFibre().
             const bool isNextEventValid =
-                neeProposesDirection(isFibre, neeFrame.frontFace,
-                                     neeFrame.normalSign * dot(conn.toLight, si.shading_normal)) &&
+                neeProposesDirection(
+                    isFibre, neeFrame.frontFace, neeFrame.normalSign * dot(conn.toLight, si.shading_normal)) &&
                 conn.pdf > 0.0f;
             if (!isNextEventValid || !conn.needsRay)
             {
@@ -2931,10 +2909,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             // 1 / pdf and every line below is the arithmetic this code had.
             const float W = (weightSum / (float)candidates) / bestTarget;
             const float3 weight = throughput * bestF * W;
-            const float3 shadowOrigin = isFibre ?
-                                            fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius,
-                                                            bestConn.toLight) :
-                                            bestConn.origin;
+            const float3 shadowOrigin =
+                isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, bestConn.toLight) :
+                          bestConn.origin;
             const EmissiveVisibilitySegment visibility = lightVisibilitySegment(bestConn, shadowOrigin);
             if (any(weight != 0.0f) && visibility.valid)
             {
@@ -3152,8 +3129,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // Record exactly the support NEE offered in the same shaded frame. A raw
     // back face may be an opaque two-sided surface whose BSDF flipped its frame,
     // or a transmissive exit that did not; shadedFrame distinguishes them.
-    didNee = neePairsWithBounce(didNee, isFibre, neeFrame.frontFace,
-                                neeFrame.normalSign * dot(si.shading_normal, nextDir));
+    didNee =
+        neePairsWithBounce(didNee, isFibre, neeFrame.frontFace, neeFrame.normalSign * dot(si.shading_normal, nextDir));
 
     radianceOut[tid] += float4(radiance, 0.0f);
 
@@ -3306,8 +3283,8 @@ static void guideImpl(uint gid,
         analyticHit.hit = false;
         if (SPEC_LIGHTS && uniforms.numLights > 0u)
         {
-            analyticHit = findAnalyticAreaLightHit(lights, uniforms.numLights, origin, direction, r.min_distance,
-                                                  hardwareDistance, true);
+            analyticHit = findAnalyticAreaLightHit(
+                lights, uniforms.numLights, origin, direction, r.min_distance, hardwareDistance, true);
         }
         if (analyticHit.hit)
         {
@@ -3431,8 +3408,7 @@ static void guideImpl(uint gid,
         if (isOpenPBR)
         {
             const OpenPBR_ResolvedInputs openpbrInputs = openpbr_resolve_inputs(openpbrMat, si);
-            materialGuides =
-                openpbrDenoiserGuides(openpbrInputs, si, openpbrBaseMapDetailsSubsurface(openpbrMat));
+            materialGuides = openpbrDenoiserGuides(openpbrInputs, si, openpbrBaseMapDetailsSubsurface(openpbrMat));
         }
         else
         {
@@ -3464,8 +3440,7 @@ static void guideImpl(uint gid,
             const float interfaceCosine = abs(dot(Nf, V));
             const float fresnel = fresnel_dielectric(interfaceCosine, eta);
             float3 refracted;
-            const bool validRefraction =
-                si.thin_walled ? true : refract_dir(-V, Nf, eta, interfaceCosine, refracted);
+            const bool validRefraction = si.thin_walled ? true : refract_dir(-V, Nf, eta, interfaceCosine, refracted);
             if (validRefraction && fresnel < 0.5f)
             {
                 nextDirection = si.thin_walled ? -V : refracted;
@@ -3502,13 +3477,13 @@ static void guideImpl(uint gid,
     kernel void NAME(                                                                                                  \
         uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                               \
         constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],                          \
-        TRAITS::structure accelerationStructure [[buffer(2)]], device AovSample* aov [[buffer(4)]],                   \
+        TRAITS::structure accelerationStructure [[buffer(2)]], device AovSample* aov [[buffer(4)]],                    \
         device const Material* materials [[buffer(5)]], device const GeometryEntry* geometryEntries [[buffer(6)]],     \
         device const char* vertexBuffer [[buffer(7)]], device const char* prevVertexBuffer [[buffer(8)]],              \
         device const uint32_t* indexBuffer [[buffer(9)]], device const packed_float3* curvePoints [[buffer(10)]],      \
-        device const uint32_t* curveSegments [[buffer(11)]], device const UniformLight* lights [[buffer(12)]])                                                             \
+        device const uint32_t* curveSegments [[buffer(11)]], device const UniformLight* lights [[buffer(12)]])         \
     {                                                                                                                  \
-        guideImpl<TRAITS>(gid, uniforms, instances, accelerationStructure, aov, materials, geometryEntries,           \
+        guideImpl<TRAITS>(gid, uniforms, instances, accelerationStructure, aov, materials, geometryEntries,            \
                           vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments, lights);            \
     }
 
@@ -3896,6 +3871,7 @@ static void shadowImpl(uint gid,
                        device const GeometryEntry* geometryEntries,
                        device const char* vertexBuffer,
                        device const uint32_t* indexBuffer,
+                       device const UniformLight* lights,
                        device SharcUpdateState* sharcUpdates,
                        device SharcAccumulationEntry* sharcAccumulation)
 {
@@ -3921,6 +3897,13 @@ static void shadowImpl(uint gid,
     const float motionTime = motionTimeFor(uniforms, sr.pixelIndex, sampleIdx);
     float3 weight = float3(sr.weight);
     float3 sharcRadiance = float3(sr.sharcRadiance);
+
+    if (SPEC_LIGHTS && uniforms.numLights > 0u &&
+        analyticLightsOccludeSegment(lights, uniforms.numLights, shadowRay.origin, shadowRay.direction,
+                                     shadowRay.min_distance, shadowRay.max_distance))
+    {
+        return;
+    }
 
     if (!SPEC_ALPHA)
     {
@@ -4258,20 +4241,21 @@ kernel void sharcResolve(uint tid [[thread_position_in_grid]],
 }
 
 #define WF_SHADOW_ENTRY(NAME, TRAITS)                                                                                  \
-    kernel void NAME(                                                                                                  \
-        uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                               \
-        TRAITS::structure accelerationStructure [[buffer(1)]], device const ShadowRay* shadowRays [[buffer(2)]],       \
-        device float4* radianceOut [[buffer(3)]], device const uint32_t* control [[buffer(4)]],                        \
-        constant uint32_t& sampleIdx [[buffer(5)]],                                                                    \
-        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(6)]],                          \
-        device const Material* materials [[buffer(7)]], device const GeometryEntry* geometryEntries [[buffer(8)]],     \
-        device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]],              \
-        constant uint32_t& queueOffset [[buffer(12)]], device SharcUpdateState* sharcUpdates [[buffer(13)]],           \
-        device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]])                                               \
+    kernel void NAME(uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                  \
+                     TRAITS::structure accelerationStructure [[buffer(1)]],                                            \
+                     device const ShadowRay* shadowRays [[buffer(2)]], device float4* radianceOut [[buffer(3)]],       \
+                     device const uint32_t* control [[buffer(4)]], constant uint32_t& sampleIdx [[buffer(5)]],         \
+                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(6)]],             \
+                     device const Material* materials [[buffer(7)]],                                                   \
+                     device const GeometryEntry* geometryEntries [[buffer(8)]],                                        \
+                     device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]], \
+                     device const UniformLight* lights [[buffer(11)]], constant uint32_t& queueOffset [[buffer(12)]],  \
+                     device SharcUpdateState* sharcUpdates [[buffer(13)]],                                             \
+                     device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]])                                  \
     {                                                                                                                  \
         shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, shadowRays, radianceOut, control,       \
-                           sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer, sharcUpdates,  \
-                           sharcAccumulation);                                                                         \
+                           sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer, lights,        \
+                           sharcUpdates, sharcAccumulation);                                                           \
     }
 
 WF_SHADOW_ENTRY(wavefrontShadow, MotionTraversal)

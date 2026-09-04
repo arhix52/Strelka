@@ -8,6 +8,7 @@
 
 #include <strelka/material/material_math.h>
 #include <light_types.h>
+#include <light_pdf.h>
 
 enum : unsigned int
 {
@@ -29,7 +30,12 @@ DEVICE_FUNC bool analyticLightVisibilityAllowsRay(float packedVisibility, bool i
 
 DEVICE_FUNC bool lightUsesAnalyticAreaIntersection(int lightType)
 {
-    return lightType == LIGHT_TYPE_DISC || lightType == LIGHT_TYPE_SPHERE;
+    return lightType == LIGHT_TYPE_RECT || lightType == LIGHT_TYPE_DISC || lightType == LIGHT_TYPE_SPHERE;
+}
+
+DEVICE_FUNC bool lightUsesAnalyticSurfaceIntersection(int lightType, float radius)
+{
+    return lightUsesAnalyticAreaIntersection(lightType) || (lightIsPunctual(lightType) && punctualLightIsSoft(radius));
 }
 
 struct AnalyticLightSample
@@ -91,8 +97,7 @@ struct ScaledAffineBasis
 
 DEVICE_FUNC bool affineVectorIsFinite(float3 value)
 {
-    return fabsf(value.x) <= 3.402823466e38f && fabsf(value.y) <= 3.402823466e38f &&
-           fabsf(value.z) <= 3.402823466e38f;
+    return fabsf(value.x) <= 3.402823466e38f && fabsf(value.y) <= 3.402823466e38f && fabsf(value.z) <= 3.402823466e38f;
 }
 
 DEVICE_FUNC bool affineSampleCoordinateRangeIsFinite(float center, float axisX, float axisY, float axisZ)
@@ -134,14 +139,11 @@ DEVICE_FUNC bool affineComponentwiseInverseRowIsStable(float3 inverseNumeratorRo
                                                        int objectExponentZ,
                                                        float determinant)
 {
-    const float termX = fabsf(inverseNumeratorRow.x) * fabsf(x.x) +
-                        fabsf(inverseNumeratorRow.y) * fabsf(x.y) +
+    const float termX = fabsf(inverseNumeratorRow.x) * fabsf(x.x) + fabsf(inverseNumeratorRow.y) * fabsf(x.y) +
                         fabsf(inverseNumeratorRow.z) * fabsf(x.z);
-    const float termY = fabsf(inverseNumeratorRow.x) * fabsf(y.x) +
-                        fabsf(inverseNumeratorRow.y) * fabsf(y.y) +
+    const float termY = fabsf(inverseNumeratorRow.x) * fabsf(y.x) + fabsf(inverseNumeratorRow.y) * fabsf(y.y) +
                         fabsf(inverseNumeratorRow.z) * fabsf(y.z);
-    const float termZ = fabsf(inverseNumeratorRow.x) * fabsf(z.x) +
-                        fabsf(inverseNumeratorRow.y) * fabsf(z.y) +
+    const float termZ = fabsf(inverseNumeratorRow.x) * fabsf(z.x) + fabsf(inverseNumeratorRow.y) * fabsf(z.y) +
                         fabsf(inverseNumeratorRow.z) * fabsf(z.z);
     int exponentX = -100000;
     int exponentY = -100000;
@@ -164,9 +166,8 @@ DEVICE_FUNC bool affineComponentwiseInverseRowIsStable(float3 inverseNumeratorRo
         mantissaZ = decomposeFloatExponent(termZ, exponentZ);
         exponentZ += objectExponentZ - rowObjectExponent;
     }
-    const int numeratorExponent = exponentX > exponentY ?
-                                      (exponentX > exponentZ ? exponentX : exponentZ) :
-                                      (exponentY > exponentZ ? exponentY : exponentZ);
+    const int numeratorExponent = exponentX > exponentY ? (exponentX > exponentZ ? exponentX : exponentZ) :
+                                                          (exponentY > exponentZ ? exponentY : exponentZ);
     if (numeratorExponent == -100000)
     {
         return false;
@@ -176,8 +177,8 @@ DEVICE_FUNC bool affineComponentwiseInverseRowIsStable(float3 inverseNumeratorRo
                                     scaleFloatExponent(mantissaZ, exponentZ - numeratorExponent);
     int determinantExponent = 0;
     const float determinantMantissa = decomposeFloatExponent(fabsf(determinant), determinantExponent);
-    const float condition = scaleFloatExponent(
-        numeratorMantissa / determinantMantissa, numeratorExponent - determinantExponent);
+    const float condition =
+        scaleFloatExponent(numeratorMantissa / determinantMantissa, numeratorExponent - determinantExponent);
     // A three-term float matrix-vector product has componentwise backward
     // error gamma_3 < 3 * 2^-24 / (1 - 3 * 2^-24). Keeping the Skeel
     // condition at 2^12 therefore bounds the recovered object-space endpoint
@@ -231,18 +232,17 @@ DEVICE_FUNC ScaledAffineBasis scaledAffineBasis(float3 axisX, float3 axisY, floa
     decomposeFloatExponent(scaleX, exponentX);
     decomposeFloatExponent(scaleY, exponentY);
     decomposeFloatExponent(scaleZ, exponentZ);
-    const int globalExponent = exponentX > exponentY ?
-                                   (exponentX > exponentZ ? exponentX : exponentZ) :
-                                   (exponentY > exponentZ ? exponentY : exponentZ);
-    const float3 normalizedX = make_float3(scaleFloatExponent(axisX.x, -exponentX),
-                                           scaleFloatExponent(axisX.y, -exponentX),
-                                           scaleFloatExponent(axisX.z, -exponentX));
-    const float3 normalizedY = make_float3(scaleFloatExponent(axisY.x, -exponentY),
-                                           scaleFloatExponent(axisY.y, -exponentY),
-                                           scaleFloatExponent(axisY.z, -exponentY));
-    const float3 normalizedZ = make_float3(scaleFloatExponent(axisZ.x, -exponentZ),
-                                           scaleFloatExponent(axisZ.y, -exponentZ),
-                                           scaleFloatExponent(axisZ.z, -exponentZ));
+    const int globalExponent = exponentX > exponentY ? (exponentX > exponentZ ? exponentX : exponentZ) :
+                                                       (exponentY > exponentZ ? exponentY : exponentZ);
+    const float3 normalizedX =
+        make_float3(scaleFloatExponent(axisX.x, -exponentX), scaleFloatExponent(axisX.y, -exponentX),
+                    scaleFloatExponent(axisX.z, -exponentX));
+    const float3 normalizedY =
+        make_float3(scaleFloatExponent(axisY.x, -exponentY), scaleFloatExponent(axisY.y, -exponentY),
+                    scaleFloatExponent(axisY.z, -exponentY));
+    const float3 normalizedZ =
+        make_float3(scaleFloatExponent(axisZ.x, -exponentZ), scaleFloatExponent(axisZ.y, -exponentZ),
+                    scaleFloatExponent(axisZ.z, -exponentZ));
     const float rowScaleX = fmaxf(fabsf(normalizedX.x), fmaxf(fabsf(normalizedY.x), fabsf(normalizedZ.x)));
     const float rowScaleY = fmaxf(fabsf(normalizedX.y), fmaxf(fabsf(normalizedY.y), fabsf(normalizedZ.y)));
     const float rowScaleZ = fmaxf(fabsf(normalizedX.z), fmaxf(fabsf(normalizedY.z), fabsf(normalizedZ.z)));
@@ -257,15 +257,15 @@ DEVICE_FUNC ScaledAffineBasis scaledAffineBasis(float3 axisX, float3 axisY, floa
     decomposeFloatExponent(rowScaleX, rowExponentX);
     decomposeFloatExponent(rowScaleY, rowExponentY);
     decomposeFloatExponent(rowScaleZ, rowExponentZ);
-    result.x = make_float3(scaleFloatExponent(normalizedX.x, -rowExponentX),
-                           scaleFloatExponent(normalizedX.y, -rowExponentY),
-                           scaleFloatExponent(normalizedX.z, -rowExponentZ));
-    result.y = make_float3(scaleFloatExponent(normalizedY.x, -rowExponentX),
-                           scaleFloatExponent(normalizedY.y, -rowExponentY),
-                           scaleFloatExponent(normalizedY.z, -rowExponentZ));
-    result.z = make_float3(scaleFloatExponent(normalizedZ.x, -rowExponentX),
-                           scaleFloatExponent(normalizedZ.y, -rowExponentY),
-                           scaleFloatExponent(normalizedZ.z, -rowExponentZ));
+    result.x =
+        make_float3(scaleFloatExponent(normalizedX.x, -rowExponentX), scaleFloatExponent(normalizedX.y, -rowExponentY),
+                    scaleFloatExponent(normalizedX.z, -rowExponentZ));
+    result.y =
+        make_float3(scaleFloatExponent(normalizedY.x, -rowExponentX), scaleFloatExponent(normalizedY.y, -rowExponentY),
+                    scaleFloatExponent(normalizedY.z, -rowExponentZ));
+    result.z =
+        make_float3(scaleFloatExponent(normalizedZ.x, -rowExponentX), scaleFloatExponent(normalizedZ.y, -rowExponentY),
+                    scaleFloatExponent(normalizedZ.z, -rowExponentZ));
     result.determinant = compensatedDotCrossExpansion(result.x, result.y, result.z);
 
     const float determinant = compensatedValue(result.determinant);
@@ -490,13 +490,13 @@ DEVICE_FUNC bool solveAffineCoordinates(
     // highly non-orthogonal, but still finite, affine axes.
     for (unsigned int iteration = 0u; iteration < 2u; ++iteration)
     {
-        const float3 residual = make_float3(
-            fmaf(-basis.z.x, scaledCoordinates.z,
-                 fmaf(-basis.y.x, scaledCoordinates.y, fmaf(-basis.x.x, scaledCoordinates.x, offset.x))),
-            fmaf(-basis.z.y, scaledCoordinates.z,
-                 fmaf(-basis.y.y, scaledCoordinates.y, fmaf(-basis.x.y, scaledCoordinates.x, offset.y))),
-            fmaf(-basis.z.z, scaledCoordinates.z,
-                 fmaf(-basis.y.z, scaledCoordinates.y, fmaf(-basis.x.z, scaledCoordinates.x, offset.z))));
+        const float3 residual =
+            make_float3(fmaf(-basis.z.x, scaledCoordinates.z,
+                             fmaf(-basis.y.x, scaledCoordinates.y, fmaf(-basis.x.x, scaledCoordinates.x, offset.x))),
+                        fmaf(-basis.z.y, scaledCoordinates.z,
+                             fmaf(-basis.y.y, scaledCoordinates.y, fmaf(-basis.x.y, scaledCoordinates.x, offset.y))),
+                        fmaf(-basis.z.z, scaledCoordinates.z,
+                             fmaf(-basis.y.z, scaledCoordinates.y, fmaf(-basis.x.z, scaledCoordinates.x, offset.z))));
         const float3 correction = make_float3(
             compensatedValue(divideCompensated(compensatedDotExpansion(residual, cofactorX), basis.determinant)),
             compensatedValue(divideCompensated(compensatedDotExpansion(residual, cofactorY), basis.determinant)),
@@ -723,6 +723,69 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticDisc(float3 rayOrigin,
     return result;
 }
 
+/// Intersect the exact affine parallelogram sampled by a rectangle light.
+///
+/// `corner + u*edgeX + v*edgeY`, `u,v in [0,1]`, is the surface used by both
+/// rectangle proposal paths. Keeping the solve here also lets visibility use
+/// the same closed surface without depending on a two-triangle proxy's edge
+/// rules or instance mask.
+DEVICE_FUNC AnalyticLightIntersection intersectAnalyticRectangle(float3 rayOrigin,
+                                                                 float3 rayDirection,
+                                                                 float minDistance,
+                                                                 float maxDistance,
+                                                                 float3 corner,
+                                                                 float3 edgeX,
+                                                                 float3 edgeY,
+                                                                 float3 emissionNormal)
+{
+    AnalyticLightIntersection result;
+    result.distance = maxDistance;
+    result.point = make_float3(0.0f);
+    result.normal = make_float3(0.0f);
+    result.areaPdf = 0.0f;
+    result.hit = false;
+
+    const float3 planeNormal = finiteCrossDirection(edgeX, edgeY);
+    const float areaPdf = inverseFiniteCrossLength(edgeX, edgeY);
+    if (!affineSamplePointRangeIsFinite(corner, edgeX, edgeY, make_float3(0.0f)) ||
+        !(dot(planeNormal, planeNormal) > 0.0f) || !(dot(emissionNormal, emissionNormal) > 0.0f) || !(areaPdf > 0.0f))
+    {
+        return result;
+    }
+    const float denominator = accurateDot(rayDirection, planeNormal);
+    if (!(fabsf(denominator) > 0.0f))
+    {
+        return result;
+    }
+    const float numerator = accurateDot(corner - rayOrigin, planeNormal);
+    const float distanceHigh = numerator / denominator;
+    const float distanceLow = fmaf(-distanceHigh, denominator, numerator) / denominator;
+    const float distance = distanceHigh + distanceLow;
+    if (!(distance >= minDistance && distance < maxDistance))
+    {
+        return result;
+    }
+
+    const float3 relativeOrigin = rayOrigin - corner;
+    const float3 offset = make_float3(fmaf(distanceHigh, rayDirection.x, relativeOrigin.x),
+                                      fmaf(distanceHigh, rayDirection.y, relativeOrigin.y),
+                                      fmaf(distanceHigh, rayDirection.z, relativeOrigin.z)) +
+                          distanceLow * rayDirection;
+    float3 coordinates;
+    if (!solveAffineCoordinates(edgeX, edgeY, planeNormal, offset, coordinates) || !(coordinates.x >= 0.0f) ||
+        !(coordinates.x <= 1.0f) || !(coordinates.y >= 0.0f) || !(coordinates.y <= 1.0f))
+    {
+        return result;
+    }
+
+    result.distance = distance;
+    result.point = corner + coordinates.x * edgeX + coordinates.y * edgeY;
+    result.normal = emissionNormal;
+    result.areaPdf = areaPdf;
+    result.hit = true;
+    return result;
+}
+
 DEVICE_FUNC bool affineSphereHitCoordinateHasSmallResidual(float center,
                                                            float axisX,
                                                            float axisY,
@@ -765,8 +828,7 @@ DEVICE_FUNC bool affineSphereHitCoordinateHasSmallResidual(float center,
     residual = addCompensated(residual, compensatedSum(-scaledOrigin, -scaledRayHigh));
     residual = addCompensated(residual, compensatedSum(-scaledRayLow, 0.0f));
     const float absoluteSum = fabsf(scaledCenter) + fabsf(scaledSurfaceX) + fabsf(scaledSurfaceY) +
-                              fabsf(scaledSurfaceZ) + fabsf(scaledOrigin) + fabsf(scaledRayHigh) +
-                              fabsf(scaledRayLow);
+                              fabsf(scaledSurfaceZ) + fabsf(scaledOrigin) + fabsf(scaledRayHigh) + fabsf(scaledRayLow);
     constexpr float residualTolerance = 1.9073486328125e-6f; // 32 * 2^-24
     return fabsf(compensatedValue(residual)) <= residualTolerance * absoluteSum;
 }
@@ -780,15 +842,12 @@ DEVICE_FUNC bool affineSphereHitHasSmallResidual(float3 center,
                                                  float3 rayDirection,
                                                  CompensatedFloat distance)
 {
-    return affineSphereHitCoordinateHasSmallResidual(center.x, axisX.x, axisY.x, axisZ.x, objectNormal.x,
-                                                     objectNormal.y, objectNormal.z, rayOrigin.x, rayDirection.x,
-                                                     distance) &&
-           affineSphereHitCoordinateHasSmallResidual(center.y, axisX.y, axisY.y, axisZ.y, objectNormal.x,
-                                                     objectNormal.y, objectNormal.z, rayOrigin.y, rayDirection.y,
-                                                     distance) &&
-           affineSphereHitCoordinateHasSmallResidual(center.z, axisX.z, axisY.z, axisZ.z, objectNormal.x,
-                                                     objectNormal.y, objectNormal.z, rayOrigin.z, rayDirection.z,
-                                                     distance);
+    return affineSphereHitCoordinateHasSmallResidual(center.x, axisX.x, axisY.x, axisZ.x, objectNormal.x, objectNormal.y,
+                                                     objectNormal.z, rayOrigin.x, rayDirection.x, distance) &&
+           affineSphereHitCoordinateHasSmallResidual(center.y, axisX.y, axisY.y, axisZ.y, objectNormal.x, objectNormal.y,
+                                                     objectNormal.z, rayOrigin.y, rayDirection.y, distance) &&
+           affineSphereHitCoordinateHasSmallResidual(center.z, axisX.z, axisY.z, axisZ.z, objectNormal.x, objectNormal.y,
+                                                     objectNormal.z, rayOrigin.z, rayDirection.z, distance);
 }
 
 DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigin,
@@ -830,8 +889,7 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
     const float3 scaledOrigin = make_float3(scaleFloatExponent(relativeOrigin.x, -basis.worldExponentX),
                                             scaleFloatExponent(relativeOrigin.y, -basis.worldExponentY),
                                             scaleFloatExponent(relativeOrigin.z, -basis.worldExponentZ));
-    const float3 scaledDirection =
-        make_float3(scaleFloatExponent(rayDirection.x, -basis.worldExponentX),
+    const float3 scaledDirection = make_float3(scaleFloatExponent(rayDirection.x, -basis.worldExponentX),
                                                scaleFloatExponent(rayDirection.y, -basis.worldExponentY),
                                                scaleFloatExponent(rayDirection.z, -basis.worldExponentZ));
     if (!affineVectorIsFinite(scaledOrigin) || !affineVectorIsFinite(scaledDirection))
@@ -867,37 +925,27 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
     const int directionComponentExponentX = compensatedExponent(directionX, -basis.objectExponentX);
     const int directionComponentExponentY = compensatedExponent(directionY, -basis.objectExponentY);
     const int directionComponentExponentZ = compensatedExponent(directionZ, -basis.objectExponentZ);
-    const int originExponent = originComponentExponentX > originComponentExponentY ?
-                                   (originComponentExponentX > originComponentExponentZ ?
-                                        originComponentExponentX :
-                                        originComponentExponentZ) :
-                                   (originComponentExponentY > originComponentExponentZ ?
-                                        originComponentExponentY :
-                                        originComponentExponentZ);
+    const int originExponent =
+        originComponentExponentX > originComponentExponentY ?
+            (originComponentExponentX > originComponentExponentZ ? originComponentExponentX : originComponentExponentZ) :
+            (originComponentExponentY > originComponentExponentZ ? originComponentExponentY : originComponentExponentZ);
     const int completeOriginExponent = originExponent > determinantExponent ? originExponent : determinantExponent;
-    const int directionExponent = directionComponentExponentX > directionComponentExponentY ?
-                                      (directionComponentExponentX > directionComponentExponentZ ?
-                                           directionComponentExponentX :
-                                           directionComponentExponentZ) :
-                                      (directionComponentExponentY > directionComponentExponentZ ?
-                                           directionComponentExponentY :
-                                           directionComponentExponentZ);
+    const int directionExponent =
+        directionComponentExponentX > directionComponentExponentY ?
+            (directionComponentExponentX > directionComponentExponentZ ? directionComponentExponentX :
+                                                                         directionComponentExponentZ) :
+            (directionComponentExponentY > directionComponentExponentZ ? directionComponentExponentY :
+                                                                         directionComponentExponentZ);
     if (completeOriginExponent == -100000 || directionExponent == -100000)
     {
         return result;
     }
-    const CompensatedFloat sx =
-        scaleCompensatedExponent(originX, -basis.objectExponentX - completeOriginExponent);
-    const CompensatedFloat sy =
-        scaleCompensatedExponent(originY, -basis.objectExponentY - completeOriginExponent);
-    const CompensatedFloat sz =
-        scaleCompensatedExponent(originZ, -basis.objectExponentZ - completeOriginExponent);
-    const CompensatedFloat dx =
-        scaleCompensatedExponent(directionX, -basis.objectExponentX - directionExponent);
-    const CompensatedFloat dy =
-        scaleCompensatedExponent(directionY, -basis.objectExponentY - directionExponent);
-    const CompensatedFloat dz =
-        scaleCompensatedExponent(directionZ, -basis.objectExponentZ - directionExponent);
+    const CompensatedFloat sx = scaleCompensatedExponent(originX, -basis.objectExponentX - completeOriginExponent);
+    const CompensatedFloat sy = scaleCompensatedExponent(originY, -basis.objectExponentY - completeOriginExponent);
+    const CompensatedFloat sz = scaleCompensatedExponent(originZ, -basis.objectExponentZ - completeOriginExponent);
+    const CompensatedFloat dx = scaleCompensatedExponent(directionX, -basis.objectExponentX - directionExponent);
+    const CompensatedFloat dy = scaleCompensatedExponent(directionY, -basis.objectExponentY - directionExponent);
+    const CompensatedFloat dz = scaleCompensatedExponent(directionZ, -basis.objectExponentZ - directionExponent);
     determinant = scaleCompensatedExponent(determinant, -completeOriginExponent);
 
     const CompensatedFloat a = compensatedDot3(dx, dy, dz, dx, dy, dz);
@@ -913,11 +961,9 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
         addCompensated(multiplyCompensated(sz, dx), negateCompensated(multiplyCompensated(sx, dz)));
     const CompensatedFloat crossZ =
         addCompensated(multiplyCompensated(sx, dy), negateCompensated(multiplyCompensated(sy, dx)));
-    const CompensatedFloat perpendicularSquared =
-        compensatedDot3(crossX, crossY, crossZ, crossX, crossY, crossZ);
-    const CompensatedFloat discriminant =
-        addCompensated(multiplyCompensated(multiplyCompensated(determinant, determinant), a),
-                       negateCompensated(perpendicularSquared));
+    const CompensatedFloat perpendicularSquared = compensatedDot3(crossX, crossY, crossZ, crossX, crossY, crossZ);
+    const CompensatedFloat discriminant = addCompensated(
+        multiplyCompensated(multiplyCompensated(determinant, determinant), a), negateCompensated(perpendicularSquared));
     const float aValue = compensatedValue(a);
     const float discriminantValue = compensatedValue(discriminant);
     const float determinantValue = compensatedValue(determinant);
@@ -932,20 +978,14 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
     // very thin ellipsoid is far from the ray origin, even though both roots
     // remain representable as a two-float world distance.
     const CompensatedFloat perpendicularX = divideCompensated(
-        addCompensated(multiplyCompensated(dy, crossZ), negateCompensated(multiplyCompensated(dz, crossY))),
-        a);
+        addCompensated(multiplyCompensated(dy, crossZ), negateCompensated(multiplyCompensated(dz, crossY))), a);
     const CompensatedFloat perpendicularY = divideCompensated(
-        addCompensated(multiplyCompensated(dz, crossX), negateCompensated(multiplyCompensated(dx, crossZ))),
-        a);
+        addCompensated(multiplyCompensated(dz, crossX), negateCompensated(multiplyCompensated(dx, crossZ))), a);
     const CompensatedFloat perpendicularZ = divideCompensated(
-        addCompensated(multiplyCompensated(dx, crossY), negateCompensated(multiplyCompensated(dy, crossX))),
-        a);
-    CompensatedFloat pointX =
-        addCompensated(perpendicularX, negateCompensated(multiplyCompensated(dx, root)));
-    CompensatedFloat pointY =
-        addCompensated(perpendicularY, negateCompensated(multiplyCompensated(dy, root)));
-    CompensatedFloat pointZ =
-        addCompensated(perpendicularZ, negateCompensated(multiplyCompensated(dz, root)));
+        addCompensated(multiplyCompensated(dx, crossY), negateCompensated(multiplyCompensated(dy, crossX))), a);
+    CompensatedFloat pointX = addCompensated(perpendicularX, negateCompensated(multiplyCompensated(dx, root)));
+    CompensatedFloat pointY = addCompensated(perpendicularY, negateCompensated(multiplyCompensated(dy, root)));
+    CompensatedFloat pointZ = addCompensated(perpendicularZ, negateCompensated(multiplyCompensated(dz, root)));
     const CompensatedFloat worldClosest =
         scaleCompensatedExponent(closestParameter, completeOriginExponent - directionExponent);
     const CompensatedFloat worldRoot = scaleCompensatedExponent(root, completeOriginExponent - directionExponent);
@@ -968,7 +1008,8 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
     const float3 homogeneousPoint =
         make_float3(compensatedValue(pointX), compensatedValue(pointY), compensatedValue(pointZ));
     const float3 objectNormal = copysignf(1.0f, determinantValue) * normalizeFiniteVectorOrZero(homogeneousPoint);
-    if (!affineSphereHitHasSmallResidual(center, axisX, axisY, axisZ, objectNormal, rayOrigin, rayDirection, distanceExpansion))
+    if (!affineSphereHitHasSmallResidual(
+            center, axisX, axisY, axisZ, objectNormal, rayOrigin, rayDirection, distanceExpansion))
     {
         return result;
     }
@@ -987,6 +1028,67 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
     result.areaPdf = areaPdf;
     result.hit = true;
     return result;
+}
+
+/// Dispatch one packed light record to the exact finite surface its sampler
+/// uses. The parameter layout is UniformLight's layout, but keeping the
+/// function scalar makes this source compile unchanged on CPU, Metal and CUDA.
+DEVICE_FUNC AnalyticLightIntersection intersectAnalyticLightSurface(int lightType,
+                                                                    float3 point0,
+                                                                    float3 point1,
+                                                                    float3 point2,
+                                                                    float3 point3,
+                                                                    float3 emissionNormal,
+                                                                    float3 rayOrigin,
+                                                                    float3 rayDirection,
+                                                                    float minDistance,
+                                                                    float maxDistance)
+{
+    if (lightType == LIGHT_TYPE_RECT)
+    {
+        return intersectAnalyticRectangle(rayOrigin, rayDirection, minDistance, maxDistance, point0, point1 - point0,
+                                          point3 - point0, emissionNormal);
+    }
+    if (lightType == LIGHT_TYPE_DISC)
+    {
+        return intersectAnalyticDisc(
+            rayOrigin, rayDirection, minDistance, maxDistance, point1, point2, point3, emissionNormal);
+    }
+    if (lightType == LIGHT_TYPE_SPHERE)
+    {
+        return intersectAnalyticEllipsoid(
+            rayOrigin, rayDirection, minDistance, maxDistance, point1, point0, point2, point3);
+    }
+    const float radius = point0.x;
+    if (lightIsPunctual(lightType) && punctualLightIsSoft(radius))
+    {
+        return intersectAnalyticEllipsoid(rayOrigin, rayDirection, minDistance, maxDistance, point1,
+                                          make_float3(radius, 0.0f, 0.0f), make_float3(0.0f, radius, 0.0f),
+                                          make_float3(0.0f, 0.0f, radius));
+    }
+    AnalyticLightIntersection miss;
+    miss.distance = maxDistance;
+    return miss;
+}
+
+/// Whether this enabled analytic surface intersects the open shadow segment.
+/// Sidedness is intentionally absent: a non-emitting back face is still opaque.
+DEVICE_FUNC bool analyticLightSurfaceOccludesSegment(int lightType,
+                                                     float3 point0,
+                                                     float3 point1,
+                                                     float3 point2,
+                                                     float3 point3,
+                                                     float3 emissionNormal,
+                                                     float packedVisibility,
+                                                     float3 rayOrigin,
+                                                     float3 rayDirection,
+                                                     float minDistance,
+                                                     float maxDistance)
+{
+    return analyticLightVisibilityAllowsRay(packedVisibility, true) &&
+           intersectAnalyticLightSurface(lightType, point0, point1, point2, point3, emissionNormal, rayOrigin,
+                                         rayDirection, minDistance, maxDistance)
+               .hit;
 }
 
 #endif // STRELKA_ANALYTIC_LIGHT_H

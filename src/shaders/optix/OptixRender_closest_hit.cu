@@ -47,6 +47,11 @@ static __forceinline__ __device__ float traceOcclusion(
 {
     const float time = optixGetRayTime();
 
+    if (analyticLightsOccludeSegment(params.scene.lights, params.scene.numLights, ray_origin, ray_direction, tmin, tmax))
+    {
+        return 0.0f;
+    }
+
     unsigned int transmittance = __float_as_uint(1.0f);
     optixTrace(handle, ray_origin, ray_direction, tmin, tmax,
                time, // rayTime
@@ -60,8 +65,7 @@ static __forceinline__ __device__ float traceOcclusion(
     // Atmospheric transmittance applies even when geometry leaves the shadow ray unobstructed.
     if (visible > 0.0f && params.hasFog)
     {
-        const float tau = fogOpticalDepth(ray_origin, ray_direction, tmax, params.fogHeight,
-                                          params.fogSigmaT);
+        const float tau = fogOpticalDepth(ray_origin, ray_direction, tmax, params.fogHeight, params.fogSigmaT);
         if (tau > 0.0f)
         {
             visible *= expf(-tau);
@@ -88,8 +92,10 @@ static __forceinline__ __device__ float traceOcclusion(
 /// optixTraverse without optixInvoke, so this costs a traversal and not a
 /// program launch: the hit object carries the distance and the SBT record, and
 /// those are the whole of what is wanted.
-static __forceinline__ __device__ float3 mediumTransmittance(
-    float3 origin, float3 direction, float maxDistance, uint32_t startMedium)
+static __forceinline__ __device__ float3 mediumTransmittance(float3 origin,
+                                                             float3 direction,
+                                                             float maxDistance,
+                                                             uint32_t startMedium)
 {
     constexpr uint32_t kMaxCrossings = 8u;
     const float time = optixGetRayTime();
@@ -106,10 +112,9 @@ static __forceinline__ __device__ float3 mediumTransmittance(
             break;
         }
 
-        optixTraverse(params.handle, origin + direction * travelled, direction,
-                      1e-4f, remaining, time,
-                      OptixVisibilityMask(GEOMETRY_MASK_MEDIUM), OPTIX_RAY_FLAG_DISABLE_ANYHIT,
-                      RAY_TYPE_OCCLUSION, RAY_TYPE_COUNT, RAY_TYPE_OCCLUSION);
+        optixTraverse(params.handle, origin + direction * travelled, direction, 1e-4f, remaining, time,
+                      OptixVisibilityMask(GEOMETRY_MASK_MEDIUM), OPTIX_RAY_FLAG_DISABLE_ANYHIT, RAY_TYPE_OCCLUSION,
+                      RAY_TYPE_COUNT, RAY_TYPE_OCCLUSION);
 
         const bool escaped = !optixHitObjectIsHit();
         const float segment = escaped ? remaining : optixHitObjectGetRayTmax();
@@ -117,8 +122,7 @@ static __forceinline__ __device__ float3 mediumTransmittance(
         if (medium != 0u)
         {
             const MaterialParams& mm = params.materials[medium - 1u];
-            optical += fromSpectrum(oka::medium::sigmaTFromRadius(toSpectrum(mm.subsurface_radius))) *
-                       segment;
+            optical += fromSpectrum(oka::medium::sigmaTFromRadius(toSpectrum(mm.subsurface_radius))) * segment;
         }
         if (escaped)
         {
@@ -165,8 +169,7 @@ extern "C" __global__ void __anyhit__occlusion()
     const uint32_t baseVbOffset = hit_data->vertexOffset;
     const float2 uv = interpolateAttrib(unpackUV(params.scene.vb[baseVbOffset + i0].uv),
                                         unpackUV(params.scene.vb[baseVbOffset + i1].uv),
-                                        unpackUV(params.scene.vb[baseVbOffset + i2].uv),
-                                        optixGetTriangleBarycentrics());
+                                        unpackUV(params.scene.vb[baseVbOffset + i2].uv), optixGetTriangleBarycentrics());
 
     const cudaTextureObject_t* textures = &params.materialTextures[matId * MAX_MATERIAL_TEXTURES];
     const float opacity = resolveOpacity(material, textures, uv);
@@ -180,9 +183,7 @@ extern "C" __global__ void __anyhit__occlusion()
     optixIgnoreIntersection();
 }
 
-static __forceinline__ __device__ uint32_t selectLightIndex(uint32_t bucketWord,
-                                                            uint32_t coinWord,
-                                                            uint32_t numLights)
+static __forceinline__ __device__ uint32_t selectLightIndex(uint32_t bucketWord, uint32_t coinWord, uint32_t numLights)
 {
     const uint32_t bucket = lightAliasBucket(numLights, bucketWord);
     if (bucket >= numLights)
@@ -262,9 +263,7 @@ static __forceinline__ __device__ LightConnection makeEmptyConnection()
 /// A fibre has no such face: the Chiang lobe has already paid for the crossing,
 /// so a connection leaving through the strand has to start past it or the fibre
 /// occludes itself and the dominant lobe is never connected to at all.
-static __forceinline__ __device__ float3 shadowOrigin(const SurfaceInteraction& si,
-                                                      float curveRadius,
-                                                      float3 toLight)
+static __forceinline__ __device__ float3 shadowOrigin(const SurfaceInteraction& si, float curveRadius, float3 toLight)
 {
     if (scattersThroughFibre(si) && curveRadius > 0.0f)
     {
@@ -321,6 +320,34 @@ static __forceinline__ __device__ float3 projectorEmission(const UniformLight& l
     return p.falloff * make_float3(slide);
 }
 
+static __forceinline__ __device__ float3 emittedLightRadiance(const UniformLight& light,
+                                                              float3 directionFromLight,
+                                                              float distance)
+{
+    float3 radiance = make_float3(light.color);
+    if (lightIsPunctual(light.type))
+    {
+        const float safeDistance = fmaxf(distance, 1e-4f);
+        const bool soft = punctualLightIsSoft(light.points[0].x);
+        radiance *= rangeWindow(light, safeDistance) *
+                    (soft ? sphereRadianceFromIntensity(light.points[0].x) : (1.0f / (safeDistance * safeDistance)));
+        const bool hasIes = light.points[0].y >= 0.0f;
+        if (light.type == LIGHT_TYPE_PROJECTOR)
+        {
+            radiance *= projectorEmission(light, directionFromLight);
+        }
+        else if (hasIes)
+        {
+            radiance *= sampleIesCandela(params.scene.iesProfiles, light, directionFromLight);
+        }
+        else if (light.type == LIGHT_TYPE_SPOT)
+        {
+            radiance *= spotAttenuation(light, directionFromLight);
+        }
+    }
+    return radiance * areaFalloff(light, distance);
+}
+
 static __device__ LightConnection connectLight(SamplerState& sampler,
                                                const UniformLight& light,
                                                const SurfaceInteraction& si,
@@ -332,8 +359,8 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
                                                bool volumeEvent = false)
 {
     LightSampleData lightSampleData = {};
-    const float2 uv =
-        make_float2(random<SampleDimension::eLightPointX>(sampler), random<SampleDimension::eLightPointY>(sampler));
+    const float2 uv = make_float2(lightOpenUnitInterval(random<SampleDimension::eLightPointX>(sampler)),
+                                  lightOpenUnitInterval(random<SampleDimension::eLightPointY>(sampler)));
     switch (light.type)
     {
     case LIGHT_TYPE_RECT:
@@ -370,56 +397,18 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
 
     LightConnection c = makeEmptyConnection();
     c.toLight = lightSampleData.L;
-    // Point and spot proxies are invisible to BSDF rays, so all are delta for MIS.
-    c.isDelta = lightIsDeltaForMis(light.type, light.halfAngle);
+    const float shapeParameter = lightIsPunctual(light.type) ? light.points[0].x : light.halfAngle;
+    c.isDelta = lightIsDeltaForMis(light.type, shapeParameter);
 
-    float3 Li = make_float3(light.color);
-    if (lightIsPunctual(light.type))
-    {
-        const float dist = fmaxf(lightSampleData.distToLight, 1e-4f);
-        // Colour is radiant intensity either way, but the two cases turn it into
-        // what the surface receives differently. A sharp light is a point and
-        // carries the inverse-square law. A soft one is sampled as a sphere, and
-        // its solid-angle density already holds the d^2, so applying the falloff
-        // as well counts the distance twice -- what the sphere needs is the
-        // radiance a uniform emitter of that intensity has, I / (pi r^2). With
-        // the falloff kept and the density wrong, a lamp jumped by 4 pi the
-        // moment its radius crossed the softness threshold.
-        const bool soft = punctualLightIsSoft(light.points[0].x);
-        Li *= rangeWindow(light, dist) *
-              (soft ? sphereRadianceFromIntensity(light.points[0].x) : (1.0f / (dist * dist)));
-        // IES replaces the isotropic (and, for spots, the cone) angular shape:
-        // the table is the whole distribution, and the light's own intensity is
-        // a multiplier on top of it. No profile means the cone alone, as before.
-        // Applying the cone as well would count the luminaire's aperture twice,
-        // once from the file and once from the sidecar's outer angle.
-        const bool hasIes = light.points[0].y >= 0.0f;
-        if (light.type == LIGHT_TYPE_PROJECTOR)
-        {
-            // The image *is* the profile, so it replaces the cone exactly as an
-            // IES table would -- and a projector never carries both, which
-            // Scene::updateLight enforces by writing -1 into the IES slot.
-            Li *= projectorEmission(light, -lightSampleData.L);
-        }
-        else if (hasIes)
-        {
-            Li *= sampleIesCandela(params.scene.iesProfiles, light, -lightSampleData.L);
-        }
-        else if (light.type == LIGHT_TYPE_SPOT)
-        {
-            Li *= spotAttenuation(light, -lightSampleData.L);
-        }
-    }
-
-    // Blender's controlled falloff. Self-gated to area lights, so punctual
-    // lights (whose pad1 is the KHR range) are untouched.
-    Li *= areaFalloff(light, lightSampleData.distToLight);
+    const float3 Li = emittedLightRadiance(light, -lightSampleData.L, lightSampleData.distToLight);
 
     // lightReachesShadingPoint() is `dot(N, L) > 0` for everything except a
     // fibre, where the hemisphere test is the wrong question -- see the note on
     // it in shading/shading_common.h.
     const bool lit = volumeEvent || lightReachesShadingPoint(si, lightSampleData.L);
-    const bool facing = lit && lightConnectionFacesVertex(light.type, -dot(lightSampleData.L, lightSampleData.normal)) &&
+    const bool facing = lit &&
+                        lightConnectionFacesVertex(light.type, -dot(lightSampleData.L, lightSampleData.normal),
+                                                   lightIsPunctual(light.type) ? light.points[0].x : 0.0f) &&
                         emitsLight(Li);
     if (facing)
     {
@@ -432,6 +421,12 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
         c.pdf = lightSampleData.pdf;
         c.tMax = lightSampleData.distToLight;
         c.needsRay = true;
+        if (lightUsesAnalyticSurfaceIntersection(light.type, lightIsPunctual(light.type) ? light.points[0].x : 0.0f))
+        {
+            c.visibilityTarget =
+                offset_ray(lightSampleData.pointOnLight, orientedFaceNormal(lightSampleData.normal, -lightSampleData.L));
+            c.hasVisibilityTarget = true;
+        }
     }
     return c;
 }
@@ -441,10 +436,10 @@ static __device__ LightConnection connectEnvLight(SamplerState& sampler,
                                                   float curveRadius,
                                                   bool volumeEvent = false)
 {
-    const uint2 aliasWords = make_uint2(randomBits<SampleDimension::eLightBucket>(sampler),
-                                        randomBits<SampleDimension::eLightAlias>(sampler));
-    const float2 jitter = make_float2(random<SampleDimension::eLightPointX>(sampler),
-                                      random<SampleDimension::eLightPointY>(sampler));
+    const uint2 aliasWords = make_uint2(
+        randomBits<SampleDimension::eLightBucket>(sampler), randomBits<SampleDimension::eLightAlias>(sampler));
+    const float2 jitter =
+        make_float2(random<SampleDimension::eLightPointX>(sampler), random<SampleDimension::eLightPointY>(sampler));
 
     float envPdf = 0.0f;
     const float3 dir = sampleEnvMap(aliasWords, jitter, params.envAliasTable, params.envMapWidth, params.envMapHeight,
@@ -553,15 +548,14 @@ static __forceinline__ __device__ uint32_t sampleEmissiveMesh(SamplerState& samp
 {
     const uint32_t bucket = lightAliasBucket(params.scene.numEmissiveMeshes, bucketWord);
     const EmissiveMeshLight& entry = params.scene.emissiveMeshes[bucket];
-    return lightAliasSelect(params.scene.numEmissiveMeshes, bucket,
-                            randomBits<SampleDimension::eLightAlias>(sampler), entry.aliasThreshold, entry.alias);
+    return lightAliasSelect(params.scene.numEmissiveMeshes, bucket, randomBits<SampleDimension::eLightAlias>(sampler),
+                            entry.aliasThreshold, entry.alias);
 }
 
 static __forceinline__ __device__ uint32_t sampleEmissiveTriangleIndex(SamplerState& sampler,
                                                                        const EmissiveMeshLight& mesh)
 {
-    const uint32_t bucket =
-        lightAliasBucket(mesh.triangleCount, randomBits<SampleDimension::eTriangleBucket>(sampler));
+    const uint32_t bucket = lightAliasBucket(mesh.triangleCount, randomBits<SampleDimension::eTriangleBucket>(sampler));
     const EmissiveTriangleLight& entry = params.scene.emissiveTriangles[mesh.triangleOffset + bucket];
     return lightAliasSelect(mesh.triangleCount, bucket, randomBits<SampleDimension::eTriangleAlias>(sampler),
                             entry.aliasThreshold, entry.alias);
@@ -737,8 +731,7 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
     {
         return makeEmptyConnection();
     }
-    LightConnection c =
-        connectLight(sampler, params.scene.lights[lightId], si, curveRadius, volumeEvent);
+    LightConnection c = connectLight(sampler, params.scene.lights[lightId], si, curveRadius, volumeEvent);
     c.pdf *= localSelectionPdf * analyticPdf * analyticLightSelectionPdf(params.scene.lights[lightId]);
     c.isResponsive = isResponsiveLight(lightId);
     return c;
@@ -785,11 +778,10 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
         // before the lobes see it (shading_frame.h), so the hemisphere it
         // scatters into is the one below the raw shading normal, and both halves
         // of the estimate have to be told the same thing about that.
-        const ShadedFrame frame = shadedFrame(si.front_face, dot(si.shading_normal, si.wo),
-                                              si.transmission, si.diffuse_transmission);
+        const ShadedFrame frame =
+            shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
         const bool isNextEventValid =
-            neeProposesDirection(isFibre, frame.frontFace,
-                                 frame.normalSign * dot(si.shading_normal, conn.toLight)) &&
+            neeProposesDirection(isFibre, frame.frontFace, frame.normalSign * dot(si.shading_normal, conn.toLight)) &&
             (conn.pdf > 0.0f);
         if (!isNextEventValid || !conn.needsRay)
         {
@@ -809,8 +801,7 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
             continue;
         }
 
-        const float misWeight =
-            conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, evalData.pdf, params.misHeuristic);
+        const float misWeight = conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, evalData.pdf, params.misHeuristic);
         const float3 f = conn.radiance * evalData.bsdf * misWeight;
         const float target = dot(f, make_float3(0.2126f, 0.7152f, 0.0722f));
         if (!(target > 0.0f))
@@ -1035,12 +1026,9 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
 /// The second coordinate is 0: a strand is a fibre, not a sheet, and there is
 /// no meaningful coordinate around it. This is the same (alongStrand, 0) Metal
 /// hands its curve hits.
-static __forceinline__ __device__ float2 curveStrandUV(const HitGroupData* hit_data,
-                                                       unsigned int primitiveIndex,
-                                                       float u)
+static __forceinline__ __device__ float2 curveStrandUV(const HitGroupData* hit_data, unsigned int primitiveIndex, float u)
 {
-    return make_float2(
-        oka::curve_layout::strandCoordinate(primitiveIndex, hit_data->curveSegmentsPerStrand, u), 0.0f);
+    return make_float2(oka::curve_layout::strandCoordinate(primitiveIndex, hit_data->curveSegmentsPerStrand, u), 0.0f);
 }
 
 static __forceinline__ __device__ SurfaceHitData fillCubicCurveGeomData(const HitGroupData* hit_data)
@@ -1062,8 +1050,7 @@ static __forceinline__ __device__ SurfaceHitData fillCubicCurveGeomData(const Hi
     // normalize((0,0,0)) is NaN -- exactly the failure mode a groom hits far
     // more often than a triangle mesh does.
     float3 worldNormal = safe_normalize(optixTransformNormalFromObjectToWorldSpace(objectNormal));
-    const float3 worldTangent =
-        normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, u)));
+    const float3 worldTangent = normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, u)));
     const float3 worldBinormal = cross(worldNormal, worldTangent);
     const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(hitPoint);
     SurfaceHitData res;
@@ -1076,8 +1063,7 @@ static __forceinline__ __device__ SurfaceHitData fillCubicCurveGeomData(const Hi
     res.vertexColor = make_float3(1.0f);
     // Same radial-vector reasoning as the linear arm below; a cubic strand needs
     // the chord for fibre_exit() exactly as much as a linear one does.
-    res.curveRadius =
-        length(optixTransformVectorFromObjectToWorldSpace(objectNormal * interpolator.radius(u)));
+    res.curveRadius = length(optixTransformVectorFromObjectToWorldSpace(objectNormal * interpolator.radius(u)));
 
     return res;
 }
@@ -1099,8 +1085,7 @@ static __forceinline__ __device__ SurfaceHitData fillLinearCurveGeomData(const H
     // safe_normalize: see fillCubicCurveGeomData -- a tapered/near-axial hit
     // collapses this to (0,0,0), and normalize((0,0,0)) is NaN.
     float3 worldNormal = safe_normalize(optixTransformNormalFromObjectToWorldSpace(objectNormal));
-    const float3 worldTangent =
-        normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, u)));
+    const float3 worldTangent = normalize(optixTransformNormalFromObjectToWorldSpace(curveTangent(interpolator, u)));
     const float3 worldBinormal = cross(worldNormal, worldTangent);
     const float3 worldPosition = optixTransformPointFromObjectToWorldSpace(hitPoint);
     SurfaceHitData res;
@@ -1117,8 +1102,7 @@ static __forceinline__ __device__ SurfaceHitData fillLinearCurveGeomData(const H
     // instance transform with a scale on it -- and the object normal is already
     // the radial direction everywhere except the two flat endcaps, where the
     // chord degenerates to zero and fibre_exit() falls back to a surface offset.
-    res.curveRadius =
-        length(optixTransformVectorFromObjectToWorldSpace(objectNormal * interpolator.radius(u)));
+    res.curveRadius = length(optixTransformVectorFromObjectToWorldSpace(objectNormal * interpolator.radius(u)));
 
     return res;
 }
@@ -1145,9 +1129,9 @@ static __forceinline__ __device__ bool previousTriangleWorldPosition(const HitGr
     const uint32_t i1 = params.scene.ib[(hit_data->indexOffset + primitiveId * 3 + 1)];
     const uint32_t i2 = params.scene.ib[(hit_data->indexOffset + primitiveId * 3 + 2)];
     const uint32_t base = hit_data->vertexOffset;
-    const float3 objectPos = interpolateAttrib(params.scene.vb_prev[base + i0].position,
-                                               params.scene.vb_prev[base + i1].position,
-                                               params.scene.vb_prev[base + i2].position, barycentrics);
+    const float3 objectPos =
+        interpolateAttrib(params.scene.vb_prev[base + i0].position, params.scene.vb_prev[base + i1].position,
+                          params.scene.vb_prev[base + i2].position, barycentrics);
     outPosition = optixTransformPointFromObjectToWorldSpace(objectPos);
     return true;
 }
@@ -1250,8 +1234,7 @@ static __device__ void scatterInMedium(PerRayData* prd,
         const float3 Le = mm.medium_emission;
         if (Le.x > 0.0f || Le.y > 0.0f || Le.z > 0.0f)
         {
-            prd->radiance +=
-                clampIndirectContribution(prd->throughput * Le, prd->depth, params.clampIndirect);
+            prd->radiance += clampIndirectContribution(prd->throughput * Le, prd->depth, params.clampIndirect);
         }
 
         if (didNee)
@@ -1271,15 +1254,12 @@ static __device__ void scatterInMedium(PerRayData* prd,
                 // camera along -rayDir, so their cosine is dot(rayDir, toLight).
                 // Negated, a forward-scattering medium becomes a backward-
                 // scattering one.
-                const float phase =
-                    hgPhaseFunction(dot(rayDir, conn.toLight), mm.subsurface_anisotropy);
+                const float phase = hgPhaseFunction(dot(rayDir, conn.toLight), mm.subsurface_anisotropy);
                 // The phase function is the medium's BSDF and its own pdf, so MIS
                 // pairs it against the light density exactly as a surface lobe
                 // would.
-                const float misWeight =
-                    conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, phase, params.misHeuristic);
-                const float3 weight =
-                    prd->throughput * (conn.radiance / conn.pdf) * misWeight * phase;
+                const float misWeight = conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, phase, params.misHeuristic);
+                const float3 weight = prd->throughput * (conn.radiance / conn.pdf) * misWeight * phase;
                 if (weight.x > 1e-6f || weight.y > 1e-6f || weight.z > 1e-6f)
                 {
                     const EmissiveVisibilitySegment visibility = lightVisibilitySegment(conn, scatterPoint);
@@ -1298,8 +1278,7 @@ static __device__ void scatterInMedium(PerRayData* prd,
                             survived *= mediumTransmittance(
                                 scatterPoint, visibility.direction, visibility.maxDistance, prd->medium);
                         }
-                        prd->radiance += clampIndirectContribution(weight * survived, prd->depth,
-                                                                   params.clampIndirect);
+                        prd->radiance += clampIndirectContribution(weight * survived, prd->depth, params.clampIndirect);
                     }
                 }
             }
@@ -1307,9 +1286,8 @@ static __device__ void scatterInMedium(PerRayData* prd,
     }
 
     float phasePdf = 0.0f;
-    const float3 nextDir =
-        hgSampleDirection(-rayDir, mm.subsurface_anisotropy, random<SampleDimension::eBSDF0>(mrng),
-                          random<SampleDimension::eBSDF1>(mrng), phasePdf);
+    const float3 nextDir = hgSampleDirection(-rayDir, mm.subsurface_anisotropy, random<SampleDimension::eBSDF0>(mrng),
+                                             random<SampleDimension::eBSDF1>(mrng), phasePdf);
 
     prd->origin = scatterPoint;
     prd->dir = nextDir;
@@ -1340,8 +1318,7 @@ static __device__ void scatterInMedium(PerRayData* prd,
     // bounce, and rolls its own roulette on what the walk has left. The step
     // ceiling is a backstop for a medium dense enough that roulette alone would
     // take thousands of steps to end; this is what actually terminates the walk.
-    const float survive = clamp(
-        fmaxf(prd->throughput.x, fmaxf(prd->throughput.y, prd->throughput.z)), 0.05f, 1.0f);
+    const float survive = clamp(fmaxf(prd->throughput.x, fmaxf(prd->throughput.y, prd->throughput.z)), 0.05f, 1.0f);
     if (random<SampleDimension::eRussianRoulette>(mrng) >= survive)
     {
         prd->throughput = make_float3(0.0f);
@@ -1363,10 +1340,7 @@ static __device__ void scatterInMedium(PerRayData* prd,
 ///
 /// Free-flight sampling was analog, so the only weight is the single-scattering
 /// albedo: the fraction of an extinction event that scatters rather than absorbs.
-static __device__ void scatterInFog(PerRayData* prd,
-                                    const float3 rayOrigin,
-                                    const float3 rayDir,
-                                    const float t)
+static __device__ void scatterInFog(PerRayData* prd, const float3 rayOrigin, const float3 rayDir, const float t)
 {
     prd->throughput *= params.fogAlbedo;
     const float3 scatterPoint = rayOrigin + rayDir * t;
@@ -1397,8 +1371,7 @@ static __device__ void scatterInFog(PerRayData* prd,
             const float phase = hgPhaseFunction(dot(rayDir, conn.toLight), params.fogAnisotropy);
             // The phase function is the medium's BSDF and its own pdf, so MIS
             // pairs it against the light density exactly as a surface lobe would.
-            const float misWeight =
-                conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, phase, params.misHeuristic);
+            const float misWeight = conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, phase, params.misHeuristic);
             const float3 weight = prd->throughput * (conn.radiance / conn.pdf) * misWeight * phase;
             if (weight.x > 1e-6f || weight.y > 1e-6f || weight.z > 1e-6f)
             {
@@ -1411,18 +1384,16 @@ static __device__ void scatterInFog(PerRayData* prd,
                                           0.0f;
                 if (visible > 0.0f)
                 {
-                    prd->radiance += clampIndirectContribution(weight * visible, prd->depth,
-                                                               params.clampIndirect);
+                    prd->radiance += clampIndirectContribution(weight * visible, prd->depth, params.clampIndirect);
                 }
             }
         }
     }
 
     float phasePdf = 0.0f;
-    const float3 nextDir = hgSampleDirection(-rayDir, params.fogAnisotropy,
-                                             random<SampleDimension::eFogPhaseU>(prd->sampler),
-                                             random<SampleDimension::eFogPhaseV>(prd->sampler),
-                                             phasePdf);
+    const float3 nextDir =
+        hgSampleDirection(-rayDir, params.fogAnisotropy, random<SampleDimension::eFogPhaseU>(prd->sampler),
+                          random<SampleDimension::eFogPhaseV>(prd->sampler), phasePdf);
 
     prd->origin = scatterPoint;
     prd->dir = nextDir;
@@ -1443,11 +1414,8 @@ static __device__ void scatterInFog(PerRayData* prd,
 ///
 /// Atmosphere is disabled inside bounded or subsurface media to avoid competing free flights.
 /// Glass is not represented by `prd->medium`, so atmospheric attenuation through glass remains unsupported.
-static __forceinline__ __device__ bool fogScatters(PerRayData* prd,
-                                                   const float3 rayOrigin,
-                                                   const float3 rayDir,
-                                                   const float tMax,
-                                                   float& t)
+static __forceinline__ __device__ bool fogScatters(
+    PerRayData* prd, const float3 rayOrigin, const float3 rayDir, const float tMax, float& t)
 {
     // Single-hit debug views decline fog events because atmospheric vertices have no normal.
     if (!params.hasFog || prd->medium != 0u || DEBUG_MODE_IS_SINGLE_HIT(params.debug))
@@ -1516,8 +1484,7 @@ static __device__ void exitMedium(PerRayData* prd,
             {
                 // The Lambertian exit density is MIS-only; conn.radiance already includes the cosine.
                 const float lobePdf = cosOut * invPi;
-                const float misWeight =
-                    conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, lobePdf, params.misHeuristic);
+                const float misWeight = conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, lobePdf, params.misHeuristic);
                 const float3 weight = prd->throughput * (conn.radiance / conn.pdf) * misWeight * invPi;
                 if (weight.x > 1e-6f || weight.y > 1e-6f || weight.z > 1e-6f)
                 {
@@ -1539,16 +1506,15 @@ static __device__ void exitMedium(PerRayData* prd,
                         {
                             survived *= mediumTransmittance(exitOrigin, visibility.direction, visibility.maxDistance, 0u);
                         }
-                        prd->radiance += clampIndirectContribution(weight * survived, prd->depth,
-                                                                   params.clampIndirect);
+                        prd->radiance += clampIndirectContribution(weight * survived, prd->depth, params.clampIndirect);
                     }
                 }
             }
         }
     }
 
-    const float3 exitDir = mediumCosineDirection(outward, random<SampleDimension::eBSDF0>(xrng),
-                                                 random<SampleDimension::eBSDF1>(xrng));
+    const float3 exitDir =
+        mediumCosineDirection(outward, random<SampleDimension::eBSDF0>(xrng), random<SampleDimension::eBSDF1>(xrng));
 
     prd->origin = exitOrigin;
     prd->dir = exitDir;
@@ -1615,11 +1581,12 @@ static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd
         prd->aovDone = true;
     }
 
-    if (lightSampleFacesVertex(-dot(rayDirection, lightNormal)))
+    if (lightConnectionFacesVertex(
+            light.type, -dot(rayDirection, lightNormal), lightIsPunctual(light.type) ? light.points[0].x : 0.0f))
     {
         const float3 misOrigin = rayOrigin - rayDirection * prd->misDistance;
         const float hitDistance = finiteVectorLength(hitPoint - misOrigin);
-        const float3 Le = make_float3(light.color) * areaFalloff(light, hitDistance);
+        const float3 Le = emittedLightRadiance(light, -rayDirection, hitDistance);
         float3 radiance;
         if (prd->depth == 0 || prd->specularBounce || !prd->neeDone)
         {
@@ -1633,8 +1600,7 @@ static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd
             const float lightSelectionPdf = localSelectionPdf * analyticClassPdf * analyticLightSelectionPdf(light);
             const float lightPdf =
                 areaPdfToSolidAnglePdf(hitDistance, -dot(rayDirection, lightNormal), hit.areaPdf) * lightSelectionPdf;
-            radiance = prd->throughput * Le *
-                       computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
+            radiance = prd->throughput * Le * computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
         }
         prd->radiance += clampIndirectContribution(radiance, prd->depth, params.clampIndirect);
     }
@@ -1701,16 +1667,16 @@ extern "C" __global__ void __miss__ms()
                 // the scene, and the MIS branch below stays on it because that is the
                 // one that was importance sampled.
                 const float4 bgSample = tex2D<float4>(params.envBackgroundTexture, uv.x, uv.y);
-                envColor = make_float3(bgSample.x, bgSample.y, bgSample.z) *
-                           params.envBackgroundIntensity * params.envMapColorTint;
+                envColor = make_float3(bgSample.x, bgSample.y, bgSample.z) * params.envBackgroundIntensity *
+                           params.envMapColorTint;
             }
             radiance = prd->throughput * envColor;
         }
         else
         {
             // MIS weight with BSDF sampling vs env map PDF
-            const float envPdf = envMapPdf(ray_dir, params.envAliasTable, params.envMapWidth, params.envMapHeight,
-                                           params.envMapRotation);
+            const float envPdf =
+                envMapPdf(ray_dir, params.envAliasTable, params.envMapWidth, params.envMapHeight, params.envMapRotation);
             const bool hasLocal = params.scene.numLights > 0u || params.scene.numEmissiveMeshes > 0u;
             const float envSelectionPdf = hasLocal ? params.envSelectionPdf : 1.0f;
             const float effectiveEnvPdf = envPdf * envSelectionPdf;
@@ -1719,9 +1685,9 @@ extern "C" __global__ void __miss__ms()
             // outright. Dropping the contribution instead -- which this guard used to
             // do -- loses energy exactly along the edges of dark regions, where the
             // bilinear radiance is still non-zero.
-            const float misWeight = (effectiveEnvPdf > 0.0f)
-                                        ? computeMisWeight(prd->lastBsdfPdf, effectiveEnvPdf, params.misHeuristic)
-                                        : 1.0f;
+            const float misWeight = (effectiveEnvPdf > 0.0f) ?
+                                        computeMisWeight(prd->lastBsdfPdf, effectiveEnvPdf, params.misHeuristic) :
+                                        1.0f;
             radiance = prd->throughput * envColor * misWeight;
         }
     }
@@ -1768,10 +1734,9 @@ extern "C" __global__ void __miss__ms()
         }
         const float effectivePdf =
             localSelectionPdf * analyticClassPdf * analyticLightSelectionPdf(light) * conditionalPdf;
-        const float misWeight =
-            (prd->depth == 0 || prd->specularBounce || !prd->neeDone || !(effectivePdf > 0.0f)) ?
-                1.0f :
-                computeMisWeight(prd->lastBsdfPdf, effectivePdf, params.misHeuristic);
+        const float misWeight = (prd->depth == 0 || prd->specularBounce || !prd->neeDone || !(effectivePdf > 0.0f)) ?
+                                    1.0f :
+                                    computeMisWeight(prd->lastBsdfPdf, effectivePdf, params.misHeuristic);
         radiance += prd->throughput * make_float3(light.color) * misWeight;
     }
 
@@ -1843,18 +1808,16 @@ extern "C" __global__ void __closesthit__radiance()
         mediumIsBounded = (mm.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u;
         // A bounded volume has no entry surface to have textured, so it keeps the
         // material's constant; a subsurface walk takes what the boundary resolved.
-        const float3 mediumAlbedo =
-            mediumIsBounded ? mm.diffuse_transmission_color : prd->mediumAlbedo;
+        const float3 mediumAlbedo = mediumIsBounded ? mm.diffuse_transmission_color : prd->mediumAlbedo;
         const uint32_t stepCeiling = min(params.subsurfaceIterations, MEDIUM_MAX_STEPS);
         // Past the ceiling the walk stops drawing free flights, so the next
         // surface is its boundary and the path leaves rather than hanging.
         if (prd->mediumStep < stepCeiling)
         {
             SamplerState mrng = mediumSampler(prd->sampler, prd->mediumStep);
-            medium = sampleMedium(
-                fromSpectrum(oka::medium::sigmaTFromRadius(toSpectrum(mm.subsurface_radius))),
-                mediumAlbedo, prd->throughput, surfaceT,
-                random<SampleDimension::eBSDF2>(mrng), random<SampleDimension::eBSDF3>(mrng));
+            medium = sampleMedium(fromSpectrum(oka::medium::sigmaTFromRadius(toSpectrum(mm.subsurface_radius))),
+                                  mediumAlbedo, prd->throughput, surfaceT, random<SampleDimension::eBSDF2>(mrng),
+                                  random<SampleDimension::eBSDF3>(mrng));
             sampledFreeFlight = true;
             if (medium.scattered)
             {
@@ -1896,8 +1859,7 @@ extern "C" __global__ void __closesthit__radiance()
         if (inside != 0xFFFFFFFFu)
         {
             const MaterialParams& im = params.materials[inside];
-            const float3 sigma_t = volume_extinction(im.attenuation_color, im.attenuation_distance,
-                                                     params.volumeModel);
+            const float3 sigma_t = volume_extinction(im.attenuation_color, im.attenuation_distance, params.volumeModel);
             prd->throughput *= beer_lambert_transmittance(sigma_t, segment);
         }
     }
@@ -1913,8 +1875,8 @@ extern "C" __global__ void __closesthit__radiance()
 
     if (medium.scattered)
     {
-        scatterInMedium(prd, params.materials[prd->medium - 1u], medium, optixGetWorldRayOrigin(),
-                        ray_dir, mediumIsBounded);
+        scatterInMedium(
+            prd, params.materials[prd->medium - 1u], medium, optixGetWorldRayOrigin(), ray_dir, mediumIsBounded);
         return;
     }
     if (sampledFreeFlight)
@@ -1963,9 +1925,8 @@ extern "C" __global__ void __closesthit__radiance()
 
         // Push past the surface on the side the ray is heading, which needs the
         // sign of the normal and not its direction.
-        const float3 exitSide = (dot(ray_dir, surfaceHit.geom_normal) > 0.0f)
-                                    ? surfaceHit.geom_normal
-                                    : -surfaceHit.geom_normal;
+        const float3 exitSide =
+            (dot(ray_dir, surfaceHit.geom_normal) > 0.0f) ? surfaceHit.geom_normal : -surfaceHit.geom_normal;
         prd->origin = offset_ray(surfaceHit.position, exitSide);
         prd->dir = ray_dir;
         // The MIS distance keeps counting: as far as the light at the end of
@@ -1983,9 +1944,8 @@ extern "C" __global__ void __closesthit__radiance()
     // Fill SurfaceInteraction from hit data, resolving textures, the uv
     // transform, the normal map, vertex colour and coverage on the way.
     SurfaceInteraction si;
-    initSurfaceInteraction(si, matParams, textures, surfaceHit.position, surfaceHit.normal,
-                           surfaceHit.geom_normal, surfaceHit.worldTangent,
-                           surfaceHit.worldBinormal, surfaceHit.uv, ray_dir,
+    initSurfaceInteraction(si, matParams, textures, surfaceHit.position, surfaceHit.normal, surfaceHit.geom_normal,
+                           surfaceHit.worldTangent, surfaceHit.worldBinormal, surfaceHit.uv, ray_dir,
                            surfaceHit.vertexColor);
 
     // A strand shaded by the whole-fibre lobe: light crosses it in one event, so
@@ -2021,8 +1981,8 @@ extern "C" __global__ void __closesthit__radiance()
         // this vertex moved between the two motion keys, so a mesh that deforms
         // and a mesh that only translates look different.
         float3 prevPosition = surfaceHit.position;
-        const bool moved = (primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE) &&
-                           previousTriangleWorldPosition(hit_data, prevPosition);
+        const bool moved =
+            (primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE) && previousTriangleWorldPosition(hit_data, prevPosition);
         prd->radiance = make_float3(
             optixGetRayTime(), moved ? saturate(length(surfaceHit.position - prevPosition) * 10.0f) : 0.0f, 0.0f);
         return;
@@ -2039,8 +1999,7 @@ extern "C" __global__ void __closesthit__radiance()
         // on for choosing voxel size, and it needs no cache to be allocated --
         // the grid is arithmetic, so the size can be dialled in before the
         // cache is ever switched on.
-        const float3 cameraPosition =
-            make_float3(params.viewToWorld[3], params.viewToWorld[7], params.viewToWorld[11]);
+        const float3 cameraPosition = make_float3(params.viewToWorld[3], params.viewToWorld[7], params.viewToWorld[11]);
         const unsigned long long key = sharcVoxel(si.position, si.shading_normal, cameraPosition, params.sharcBaseSize,
                                                   /*responsive=*/false);
         prd->radiance = sharcDebugColour(oka::sharc::keyHash(key));
@@ -2058,8 +2017,7 @@ extern "C" __global__ void __closesthit__radiance()
         // thing that puts a value in the pixel; it also clears the pixel first,
         // so a camera ray that misses everything stays black rather than
         // keeping the last frame's answer.
-        const float3 cameraPosition =
-            make_float3(params.viewToWorld[3], params.viewToWorld[7], params.viewToWorld[11]);
+        const float3 cameraPosition = make_float3(params.viewToWorld[3], params.viewToWorld[7], params.viewToWorld[11]);
         const unsigned long long key = sharcVoxel(si.position, si.shading_normal, cameraPosition, params.sharcBaseSize,
                                                   /*responsive=*/false);
         uint32_t slot = 0u;
@@ -2093,8 +2051,7 @@ extern "C" __global__ void __closesthit__radiance()
         {
             // Step off on the side the ray was travelling, so the next trace
             // cannot re-hit the surface it just passed through.
-            const float3 faceNg =
-                (dot(si.geometry_normal, ray_dir) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
+            const float3 faceNg = (dot(si.geometry_normal, ray_dir) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
             prd->origin = offset_ray(si.position, faceNg);
             prd->dir = ray_dir;
             prd->misDistance += segment;
@@ -2143,10 +2100,9 @@ extern "C" __global__ void __closesthit__radiance()
     if (params.sharcCapacity != 0u && params.sharcPath[launchPixelIndex(params)].index == SHARC_NO_ENTRY &&
         prd->depth >= params.sharcDepth && !prd->specularBounce)
     {
-        const float3 cameraPosition =
-            make_float3(params.viewToWorld[3], params.viewToWorld[7], params.viewToWorld[11]);
-        const unsigned long long voxelKey = sharcVoxel(si.position, si.shading_normal, cameraPosition,
-                                                       params.sharcBaseSize, /*responsive=*/false);
+        const float3 cameraPosition = make_float3(params.viewToWorld[3], params.viewToWorld[7], params.viewToWorld[11]);
+        const unsigned long long voxelKey =
+            sharcVoxel(si.position, si.shading_normal, cameraPosition, params.sharcBaseSize, /*responsive=*/false);
 
         // Update paths bypass reads and provide cache-independent deposits.
         const bool updatePath = oka::sharc::isUpdatePath(launchPixelIndex(params), prd->sampler.sampleIdx);
@@ -2225,15 +2181,15 @@ extern "C" __global__ void __closesthit__radiance()
                 if (params.sharcResponsive != 0u)
                 {
                     uint32_t responsiveSlot = 0u;
-                    if (sharcFind(params.sharcEntries, params.sharcCapacity, oka::sharc::responsiveKey(voxelKey),
-                                  true, responsiveSlot))
+                    if (sharcFind(params.sharcEntries, params.sharcCapacity, oka::sharc::responsiveKey(voxelKey), true,
+                                  responsiveSlot))
                     {
                         visit.responsiveIndex = responsiveSlot;
                     }
                 }
-                visit.invThroughput = make_float3(1.0f / fmaxf(prd->throughput.x, floorT),
-                                                  1.0f / fmaxf(prd->throughput.y, floorT),
-                                                  1.0f / fmaxf(prd->throughput.z, floorT));
+                visit.invThroughput =
+                    make_float3(1.0f / fmaxf(prd->throughput.x, floorT), 1.0f / fmaxf(prd->throughput.y, floorT),
+                                1.0f / fmaxf(prd->throughput.z, floorT));
                 params.sharcPath[launchPixelIndex(params)] = visit;
             }
         }
@@ -2386,8 +2342,7 @@ extern "C" __global__ void __closesthit__radiance()
         // side; what this adds is that it random-walks on the way. From here the
         // path is inside, and the next closest hit samples a free flight instead
         // of shading whatever it reaches.
-        if (si.subsurface > 0.0f &&
-            (sample_data.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION) != 0)
+        if (si.subsurface > 0.0f && (sample_data.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION) != 0)
         {
             prd->medium = static_cast<uint32_t>(matId) + 1u;
             prd->mediumStep = 0u;
@@ -2420,11 +2375,10 @@ extern "C" __global__ void __closesthit__radiance()
         prd->origin = offset_ray(si.position, faceNg);
     }
     prd->dir = sssRefractedEntry ?
-                   subsurface_entry_direction(si.wo,
-                                              (dot(si.shading_normal, si.wo) > 0.0f) ? si.shading_normal :
-                                                                                       -si.shading_normal,
-                                              random<SampleDimension::eSssChannel>(prd->sampler),
-                                              random<SampleDimension::eSssDistance>(prd->sampler)) :
+                   subsurface_entry_direction(
+                       si.wo, (dot(si.shading_normal, si.wo) > 0.0f) ? si.shading_normal : -si.shading_normal,
+                       random<SampleDimension::eSssChannel>(prd->sampler),
+                       random<SampleDimension::eSssDistance>(prd->sampler)) :
                    sample_data.wi;
 
     // The same rejection Cycles makes in subsurface_bounce(): a refracted entry
@@ -2446,8 +2400,7 @@ extern "C" __global__ void __closesthit__radiance()
         // far wall and buys a second whole-fibre event -- and a third, which is
         // what made an isolated strand's cross-section climb with depth instead
         // of going flat.
-        prd->origin = fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius,
-                                      normalize(prd->dir));
+        prd->origin = fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, normalize(prd->dir));
     }
     // What the next vertex is allowed to weight its light hit against.
     //
@@ -2471,10 +2424,10 @@ extern "C" __global__ void __closesthit__radiance()
     // now that it has one, passing the raw front_face would withhold the weight
     // from a direction next-event estimation did offer, and the light would land
     // about twice.
-    const ShadedFrame bounceFrame = shadedFrame(si.front_face, dot(si.shading_normal, si.wo),
-                                                si.transmission, si.diffuse_transmission);
-    prd->neeDone = neePairsWithBounce(didNee, isFibre, bounceFrame.frontFace,
-                                      bounceFrame.normalSign * dot(si.shading_normal, prd->dir));
+    const ShadedFrame bounceFrame =
+        shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
+    prd->neeDone = neePairsWithBounce(
+        didNee, isFibre, bounceFrame.frontFace, bounceFrame.normalSign * dot(si.shading_normal, prd->dir));
     prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
     prd->misDistance = 0.0f;
     prd->throughput *= sample_data.bsdf_over_pdf / sssEntryTint;

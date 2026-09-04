@@ -45,6 +45,15 @@
 // and flush-to-zero on the GPU.
 #define STRELKA_MIN_CONTINUOUS_DISTANT_HALF_ANGLE 2.168404344971009e-19f
 
+/// Represent a continuous light variate at the centre of its 23-bit float
+/// lattice cell. This preserves the cell's probability while avoiding
+/// finite-mass atoms on emitter edges, sphere poles, and cone boundaries.
+DEVICE_FUNC float lightOpenUnitInterval(float xi)
+{
+    const float centred = xi + 0x1p-24f;
+    return fminf(fmaxf(centred, 0x1p-24f), 0x1.fffffep-1f);
+}
+
 // ---------------------------------------------------------------------------
 // MIS heuristics
 //
@@ -374,13 +383,15 @@ DEVICE_FUNC bool lightIsPunctual(int type)
 /// True when next-event estimation owns every direction reaching this light, so
 /// its contribution must not be weighed against the BSDF pdf.
 ///
-/// Every point, spot and projector, whatever its radius, plus a zero-angle
-/// distant light. Punctual proxy geometry has a zero visibility mask in both
-/// backends, so the BSDF strategy cannot reach it. The distant case is singular
-/// by definition. Neither kind has a continuous solid-angle competitor.
-DEVICE_FUNC bool lightIsDeltaForMis(int type, float halfAngle)
+/// A point, spot or projector only while its radius is at or below the shared
+/// softness threshold, plus a sharp distant light. A positive-radius punctual
+/// source is sampled and intersected as the same analytic sphere, so it has a
+/// continuous BSDF competitor and must participate in ordinary solid-angle MIS.
+/// `shapeParameter` is the punctual radius or the distant half angle.
+DEVICE_FUNC bool lightIsDeltaForMis(int type, float shapeParameter)
 {
-    return lightIsPunctual(type) || (type == LIGHT_TYPE_DISTANT && distantLightIsDelta(halfAngle));
+    return (lightIsPunctual(type) && !punctualLightIsSoft(shapeParameter)) ||
+           (type == LIGHT_TYPE_DISTANT && distantLightIsDelta(shapeParameter));
 }
 
 DEVICE_FUNC bool lightIsInfinite(int type)
@@ -391,9 +402,10 @@ DEVICE_FUNC bool lightIsInfinite(int type)
 /// Whether the emitter itself can send the sampled direction toward a vertex.
 /// Infinite lights have directional support but no emitting surface normal;
 /// applying an area-light facing test would cut wide distant caps in half.
-DEVICE_FUNC bool lightConnectionFacesVertex(int type, float cosAtLight)
+DEVICE_FUNC bool lightConnectionFacesVertex(int type, float cosAtLight, float punctualRadius = 0.0f)
 {
-    return lightIsPunctual(type) || lightIsInfinite(type) || lightSampleFacesVertex(cosAtLight);
+    return (lightIsPunctual(type) && !punctualLightIsSoft(punctualRadius)) || lightIsInfinite(type) ||
+           lightSampleFacesVertex(cosAtLight);
 }
 
 /// Conditional solid-angle density for evaluating an analytic infinite light
@@ -454,7 +466,6 @@ DEVICE_FUNC float lightSolidAnglePdf(const THREAD_REF LightPdfQuery& q)
         return (q.solidAngle > 0.0f) ? (1.0f / q.solidAngle) :
                                        areaPdfToSolidAnglePdf(q.distToLight, q.cosAtLight, q.areaPdf);
     case LIGHT_TYPE_DISC:
-        return areaPdfToSolidAnglePdf(q.distToLight, q.cosAtLight, q.areaPdf);
     case LIGHT_TYPE_SPHERE:
         return areaPdfToSolidAnglePdf(q.distToLight, q.cosAtLight, q.areaPdf);
     case LIGHT_TYPE_DISTANT:

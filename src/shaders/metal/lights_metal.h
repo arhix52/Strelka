@@ -58,23 +58,9 @@ static AnalyticAreaLightHit findAnalyticAreaLightHit(device const UniformLight* 
         {
             continue;
         }
-        AnalyticLightIntersection candidate;
-        if (light.type == LIGHT_TYPE_DISC)
-        {
-            candidate =
-                intersectAnalyticDisc(rayOrigin, rayDirection, minDistance, closest.distance, float3(light.points[1]),
-                                      float3(light.points[2]), float3(light.points[3]), float3(light.normal));
-        }
-        else if (light.type == LIGHT_TYPE_SPHERE)
-        {
-            candidate = intersectAnalyticEllipsoid(rayOrigin, rayDirection, minDistance, closest.distance,
-                                                   float3(light.points[1]), float3(light.points[0]),
-                                                   float3(light.points[2]), float3(light.points[3]));
-        }
-        else
-        {
-            continue;
-        }
+        const AnalyticLightIntersection candidate = intersectAnalyticLightSurface(
+            light.type, float3(light.points[0]), float3(light.points[1]), float3(light.points[2]),
+            float3(light.points[3]), float3(light.normal), rayOrigin, rayDirection, minDistance, closest.distance);
         if (candidate.hit)
         {
             closest.distance = candidate.distance;
@@ -86,6 +72,26 @@ static AnalyticAreaLightHit findAnalyticAreaLightHit(device const UniformLight* 
         }
     }
     return closest;
+}
+
+static bool analyticLightsOccludeSegment(device const UniformLight* lights,
+                                         uint32_t lightCount,
+                                         float3 rayOrigin,
+                                         float3 rayDirection,
+                                         float minDistance,
+                                         float maxDistance)
+{
+    for (uint32_t lightId = 0u; lightId < lightCount; ++lightId)
+    {
+        device const UniformLight& light = lights[lightId];
+        if (analyticLightSurfaceOccludesSegment(light.type, float3(light.points[0]), float3(light.points[1]),
+                                                float3(light.points[2]), float3(light.points[3]), float3(light.normal),
+                                                light.normal.w, rayOrigin, rayDirection, minDistance, maxDistance))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 static float calcLightAreaPdf(device const UniformLight& l, const float3 hitPoint)
@@ -100,13 +106,11 @@ static float calcLightAreaPdf(device const UniformLight& l, const float3 hitPoin
         areaPdf = inverseFiniteCrossLength(e1, e2);
         break;
     }
-    case LIGHT_TYPE_DISC:
-    {
+    case LIGHT_TYPE_DISC: {
         areaPdf = analyticDiscAreaPdf(float3(l.points[2]), float3(l.points[3]));
         break;
     }
-    case LIGHT_TYPE_SPHERE:
-    {
+    case LIGHT_TYPE_SPHERE: {
         float3 normal;
         areaPdf = analyticEllipsoidAreaPdf(
             float3(l.points[1]), float3(l.points[0]), float3(l.points[2]), float3(l.points[3]), hitPoint, normal);
@@ -194,9 +198,7 @@ static __inline__ float3 sampleSphQuad(thread const SphQuad& squad, const float2
 
 // The MIS path needs only 1/S; sphQuadSolidAngle() leaves the sample basis and
 // the inverse-CDF constants out of that path.
-static __inline__ float rectSolidAngle(device const UniformLight& l,
-                                       const float3 o,
-                                       thread bool& useAreaFallback)
+static __inline__ float rectSolidAngle(device const UniformLight& l, const float3 o, thread bool& useAreaFallback)
 {
     const float3 p0 = float3(l.points[0]);
     return sphQuadSolidAngle(p0, float3(l.points[1]) - p0, float3(l.points[3]) - p0, o, useAreaFallback);
@@ -233,7 +235,9 @@ static LightSampleData SampleRectLight(device const UniformLight& l, thread cons
     return lightSampleData;
 }
 
-static __inline__ LightSampleData SampleRectLightUniform(device const UniformLight& l, thread const float2 u, thread const float3 hitPoint)
+static __inline__ LightSampleData SampleRectLightUniform(device const UniformLight& l,
+                                                         thread const float2 u,
+                                                         thread const float3 hitPoint)
 {
     LightSampleData lightSampleData;
     // uniform sampling
@@ -474,9 +478,8 @@ static __inline__ float sampleIesCandela(device const IesGpuBufferHeader* iesBuf
     const float horizDeg = atan2(local.x, -local.y) * (180.0f / M_PI_F);
 
     // The same evaluation the host and OptiX run -- see common/ies_math.h.
-    return iesEvaluate(floats + h.anglesOffset, (int)h.nVertical,
-                       floats + h.anglesOffset + h.nVertical, (int)h.nHorizontal,
-                       floats + h.candelaOffset, vertDeg, horizDeg);
+    return iesEvaluate(floats + h.anglesOffset, (int)h.nVertical, floats + h.anglesOffset + h.nVertical,
+                       (int)h.nHorizontal, floats + h.candelaOffset, vertDeg, horizDeg);
 }
 
 static __inline__ float rangeWindow(device const UniformLight& l, float dist)
@@ -514,8 +517,7 @@ static __inline__ float areaFalloff(device const UniformLight& l, float dist)
 ///
 /// `radius` is only read for punctual types; every area light carries its local
 /// world-area density in `d.areaPdf`.
-static __inline__ LightPdfQuery buildLightPdfQuery(device const UniformLight& l,
-                                                   thread const LightSampleData& d)
+static __inline__ LightPdfQuery buildLightPdfQuery(device const UniformLight& l, thread const LightSampleData& d)
 {
     LightPdfQuery q = makeLightPdfQuery(l.type);
     q.distToLight = d.distToLight;

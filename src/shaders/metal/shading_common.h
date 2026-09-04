@@ -719,6 +719,35 @@ static float3 offset_ray(const float3 p, const float3 n)
                   abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
 }
 
+static float3 emittedLightRadiance(device const UniformLight& light,
+                                   float3 directionFromLight,
+                                   float distance,
+                                   device const IesGpuBufferHeader* iesBuffer)
+{
+    float3 radiance = float3(light.color);
+    if (lightIsPunctual(light.type))
+    {
+        const float safeDistance = max(distance, 1e-4f);
+        const bool soft = punctualLightIsSoft(light.points[0].x);
+        radiance *= rangeWindow(light, safeDistance) *
+                    (soft ? sphereRadianceFromIntensity(light.points[0].x) : (1.0f / (safeDistance * safeDistance)));
+        const bool hasIes = light.points[0].y >= 0.0f;
+        if (light.type == LIGHT_TYPE_PROJECTOR)
+        {
+            radiance *= projectorEmission(light, directionFromLight);
+        }
+        else if (hasIes)
+        {
+            radiance *= sampleIesCandela(iesBuffer, light, directionFromLight);
+        }
+        else if (light.type == LIGHT_TYPE_SPOT)
+        {
+            radiance *= spotAttenuation(light, directionFromLight);
+        }
+    }
+    return radiance * areaFalloff(light, distance);
+}
+
 LightConnection connectLight(constant Uniforms& uniforms,
                              thread SamplerState& samplerRnd,
                              device const UniformLight& light,
@@ -730,8 +759,9 @@ LightConnection connectLight(constant Uniforms& uniforms,
                              device const IesGpuBufferHeader* iesBuffer)
 {
     LightSampleData lightSampleData = {};
-    const float2 uv = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
-                             random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
+    const float2 uv =
+        float2(lightOpenUnitInterval(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType)),
+               lightOpenUnitInterval(random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType)));
     switch (light.type)
     {
     case LIGHT_TYPE_RECT:
@@ -768,49 +798,10 @@ LightConnection connectLight(constant Uniforms& uniforms,
 
     LightConnection c = makeEmptyConnection();
     c.toLight = lightSampleData.L;
-    // Every point and spot, whatever its radius -- see lightIsDeltaForMis().
-    // MetalAccelStructure gives a point or spot proxy a zero visibility mask, so
-    // no ray can hit one and there is no second strategy to balance against.
-    // Exempting a soft one deducted a share the BSDF half never delivered.
-    c.isDelta = lightIsDeltaForMis(light.type, light.halfAngle);
+    const float shapeParameter = lightIsPunctual(light.type) ? light.points[0].x : light.halfAngle;
+    c.isDelta = lightIsDeltaForMis(light.type, shapeParameter);
 
-    float3 Li = float3(light.color);
-    if (lightIsPunctual(light.type))
-    {
-        const float dist = max(lightSampleData.distToLight, 1e-4f);
-        // Colour is radiant intensity either way, but the two cases turn it into
-        // what the surface receives differently. A sharp light is a point and
-        // carries the inverse-square law. A soft one is sampled as a sphere and
-        // its solid-angle density already holds the d^2, so applying the falloff
-        // as well counts the distance twice -- what the sphere needs is the
-        // radiance a uniform emitter of that intensity has, I / (pi r^2).
-        const bool soft = punctualLightIsSoft(light.points[0].x);
-        Li *= rangeWindow(light, dist) *
-              (soft ? sphereRadianceFromIntensity(light.points[0].x) : (1.0f / (dist * dist)));
-        // IES replaces the isotropic (and, for spots, the cone) angular shape:
-        // the file is already in candela, and the light's intensity is a
-        // multiplier on top of it. No profile means the cone alone, as before.
-        const bool hasIes = light.points[0].y >= 0.0f;
-        if (light.type == LIGHT_TYPE_PROJECTOR)
-        {
-            // The image *is* the profile, so it replaces the cone the same way
-            // an IES table would -- and a projector never carries both, which
-            // Scene::updateLight enforces by writing -1 into the IES slot.
-            Li *= projectorEmission(light, -lightSampleData.L);
-        }
-        else if (hasIes)
-        {
-            Li *= sampleIesCandela(iesBuffer, light, -lightSampleData.L);
-        }
-        else if (light.type == LIGHT_TYPE_SPOT)
-        {
-            Li *= spotAttenuation(light, -lightSampleData.L);
-        }
-    }
-
-    // Blender's controlled falloff. Self-gated to area lights, so punctual
-    // lights (whose pad1 is the KHR range) are untouched.
-    Li *= areaFalloff(light, lightSampleData.distToLight);
+    const float3 Li = emittedLightRadiance(light, -lightSampleData.L, lightSampleData.distToLight, iesBuffer);
 
     // For area lights the facing test uses the light's surface normal; for a
     // sharp point the "normal" is -L, so -dot(L, normal) = 1 always.
@@ -822,7 +813,8 @@ LightConnection connectLight(constant Uniforms& uniforms,
     // light hit still deducts a share for them loses that share outright. OptiX
     // has always tested against zero.
     const bool lit = lightReachesShadingPoint(si, lightSampleData.L);
-    const bool facesLight = lightConnectionFacesVertex(light.type, -dot(lightSampleData.L, lightSampleData.normal));
+    const bool facesLight = lightConnectionFacesVertex(light.type, -dot(lightSampleData.L, lightSampleData.normal),
+                                                       lightIsPunctual(light.type) ? light.points[0].x : 0.0f);
     const bool facing = (volumeEvent || lit) && facesLight && emitsLight(Li);
     if (facing)
     {
@@ -842,12 +834,17 @@ LightConnection connectLight(constant Uniforms& uniforms,
         //
         // A medium scattering event has no surface to leave through and no
         // geometry normal to orient against, so it departs from where it is.
-        c.origin = volumeEvent
-                       ? si.position
-                       : offset_ray(si.position, orientedFaceNormal(si.geometry_normal, lightSampleData.L));
+        c.origin = volumeEvent ? si.position :
+                                 offset_ray(si.position, orientedFaceNormal(si.geometry_normal, lightSampleData.L));
         c.pdf = lightSampleData.pdf;
-        c.tMax = lightSampleData.distToLight - 1e-5f;
+        c.tMax = lightSampleData.distToLight;
         c.needsRay = true;
+        if (lightUsesAnalyticSurfaceIntersection(light.type, lightIsPunctual(light.type) ? light.points[0].x : 0.0f))
+        {
+            c.visibilityTarget =
+                offset_ray(lightSampleData.pointOnLight, orientedFaceNormal(lightSampleData.normal, -lightSampleData.L));
+            c.hasVisibilityTarget = true;
+        }
     }
     return c;
 }
@@ -865,9 +862,8 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
                                  random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
 
     float envPdf = 0.0f;
-    float3 dir =
-        sampleEnvMap(aliasWords, jitter, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight,
-                     uniforms.envMapRotation, envPdf);
+    float3 dir = sampleEnvMap(aliasWords, jitter, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight,
+                              uniforms.envMapRotation, envPdf);
 
     LightConnection c = makeEmptyConnection();
     c.toLight = dir;
@@ -885,9 +881,8 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
     // clamped v (cudaAddressModeClamp on axis 1); this backend wrapped it, so the
     // two disagreed on the one row where an equirectangular map has a seam that
     // is not a seam.
-    constexpr sampler envSampler(mag_filter::linear, min_filter::linear,
-                                 s_address::repeat, t_address::clamp_to_edge,
-                                 coord::normalized);
+    constexpr sampler envSampler(
+        mag_filter::linear, min_filter::linear, s_address::repeat, t_address::clamp_to_edge, coord::normalized);
     const float2 uv = dirToEnvUV(dir, uniforms.envMapRotation);
     const float4 envSample = envMapTexture.sample(envSampler, uv);
     float3 Li = envSample.xyz;

@@ -708,8 +708,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(scene.geometryEntryBuffer, 0, 8);
             bind(scene.vertexBuffer, 0, 9);
             bind(scene.indexBuffer, 0, 10);
-            // Binding 11 was the intersection function table. The cutout test
-            // reads the five tables above from the argument table instead.
+            bind(scene.lightBuffer, 0, 11);
             for (uint32_t batch = 0; batch < shadowBatchCount; ++batch)
             {
                 table->setAddress(ring.push(batch * shadowBatchThreads), 12);
@@ -1182,6 +1181,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBuffer(scene.geometryEntryBuffer, 0, 8);
             enc->setBuffer(scene.vertexBuffer, 0, 9);
             enc->setBuffer(scene.indexBuffer, 0, 10);
+            enc->setBuffer(scene.lightBuffer, 0, 11);
             enc->setBytes(&traversalQueueOffset, sizeof(traversalQueueOffset), 12);
             enc->setBuffer(mSharcUpdateStateBuffer, 0, 13);
             enc->setBuffer(scene.sharcAccumulationBuffer, 0, 14);

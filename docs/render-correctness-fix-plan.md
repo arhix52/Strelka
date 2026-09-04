@@ -29,7 +29,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | R. Finite-RNG categorical representation | Alias buckets above `2^23` are unreachable and float thresholds do not equal Metal/OptiX event masses | `8,388,609` buckets, strict-threshold lattice, hierarchy probability, support and GOF mutations | Full-width integer bucket words and integer Bernoulli thresholds; reconstruct the exactly represented marginal PMF | FIXED | FIXED on MTLDevice | Shared source; external CUDA toolchain required | this commit | FIXED |
 | S. Environment radiance/support lifecycle | Invalid HDR values reach textures, bilinear positive radiance can lie outside PMF support, runtime edits leave stale tables, and a `FLT_TRUE_MIN` 1x1 map loses its outer PMF through an infinite reciprocal | sanitization, 3x3 footprint support, seam/poles, tiny-positive power, edit/reload regressions | 3x3 oracle FIXED | FIXED on MTLDevice; lifecycle source/compile | Shared source fixed; external CUDA required | this commit | FIXED |
 | T. Infinite-light exact support/MIS | Sharp distant versus mirror is not represented as a discrete match; tiny continuous caps and float round trips lose support; camera mask/tMax differ | delta match, tiny cap, boundary round-trip, camera visibility and backend-distance tests | Stable analytic cone inversion and chord support; explicit sharp-distant atom; shared infinite visibility/distance | FIXED | FIXED on MTLDevice | Source fixed; external CUDA required | this commit | UNVERIFIED |
-| U. Analytic/punctual visibility agreement | Shadow rays ignore analytic emitters and finite-radius punctual proxies; stacked emitters therefore enumerate different paths | analytic segment blockers, stacked area lights, overlapping analytic surfaces and soft punctual regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| U. Analytic/punctual visibility agreement | Shadow rays ignore analytic emitters and finite-radius punctual proxies; soft punctual spheres are nevertheless sampled with a continuous area density but classified as MIS deltas | analytic segment blockers, stacked area lights, overlapping analytic surfaces, exact parallelograms and soft-punctual hit/MIS regressions | One analytic surface query for camera/BSDF hits and finite shadow segments; only radius-free punctual sources remain delta | FIXED | FIXED on MTLDevice | Shared source fixed; external CUDA required | this commit | UNVERIFIED |
 | V. Transformed frame validity | Non-finite translations and collapsed/sheared projector/IES frames keep proposal power; OptiX transforms tangents as normals | translation, partial-rank/full-frame, shear, mirrored and tangent Gram-Schmidt tests | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | W. Complete marginal PDF arithmetic | Conditional area PDFs saturate before outer PMFs, under-reporting a finite complete marginal density | tiny-area/low-selection analytic and mesh regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | X. Emissive mesh animated/textured consistency | Power support ignores shutter/interior motion; OpenPBR and Metal LOD paths disagree with hit emission | motion extrema, OpenPBR texture bridge and texture-LOD regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
@@ -896,3 +896,58 @@ is out of scope unless it blocks validation.
   kernel passes with six zero failure counters in both fast and safe math; the standard GPU audit also retains zero
   measure mismatches. OptiX shares the source but cannot compile or execute without the absent CUDA/OptiX toolchain,
   so that backend remains externally `UNVERIFIED` under the documented finding-7 command.
+
+## Finding U: analytic and punctual visibility agreement
+
+- Random variables and measure: the analytic-light identity `J` is a discrete mass. A rectangle, disc, ellipsoid,
+  or positive-radius punctual sphere then samples a point `X` with density in world area `dA`; its connection
+  direction `W=(X-P)/|X-P|` has density in receiver solid angle `domega`. A punctual source at or below the shared
+  softness threshold samples one position atom and remains a delta event.
+- Support: finite analytic surfaces use their exact represented geometry: an affine parallelogram, affine disc,
+  affine ellipsoid, or radius-`r` sphere. Camera/BSDF intersection and shadow blocking use this same closed surface;
+  emission itself retains its one-sided surface support. The offset target lies strictly on the receiver side of the
+  sampled surface, so the selected emitter is not its own blocker. Infinite lights and sharp punctual atoms have no
+  finite occluding surface.
+- Conditional and marginal PDF: rectangle `p_A=1/|e_x cross e_y|`, disc
+  `p_A=1/(pi|a_x cross a_y|)`, ellipsoid `p_A(n)=1/(4pi|cofactor(A)n|)`, and soft punctual
+  `p_A=1/(4pi r^2)`. Each continuous direction uses
+  `p_omega(X)=p_A(X)|X-P|^2/|n_X dot(-W)|`; the complete density multiplies by the unchanged environment/local,
+  analytic-class, and represented light-selection PMFs. A sharp punctual connection carries only those discrete
+  selection masses and its delta conditional placeholder.
+- Selection PMF: unchanged from findings R/S. Turning a soft punctual source into a reachable continuous surface
+  does not change which light identity the alias table selects; it changes only that identity's conditional measure
+  and enables the matching BSDF-hit strategy.
+- Delta/continuous classification: point, spot, and projector lights are delta only when their packed radius is at
+  or below `STRELKA_SOFT_LIGHT_RADIUS_MIN`. Above it they are ordinary continuous spherical emitters. Rectangle,
+  disc, ellipsoid, and soft punctual surfaces are opaque analytic visibility blockers even from their non-emitting
+  side; sidedness controls emitted radiance, not geometry existence.
+- MIS strategies: selected-light NEE and a non-delta BSDF ray hitting the identical analytic surface are
+  complementary. Their light density contains the same outer PMF and area-to-solid-angle Jacobian. Sharp punctual
+  NEE is exclusive. A second finite emitter intersecting the open shadow segment suppresses the selected-light
+  contribution before either strategy adds it.
+- Current-HEAD reproducer: the focused light suite passes 4,227 assertions because it codifies the old convention
+  that every punctual light is delta. Source inspection shows `RAY_MASK_SHADOW` contains geometry only, every light
+  proxy is absent from that mask, and the manual analytic hit loop contains only discs and ellipsoids. Thus a rear
+  disc seen through a front disc is accepted by NEE even though a BSDF ray terminates at the front disc. A soft point
+  already samples `p_A=1/(4pi r^2)` but `lightIsDeltaForMis()` returns true and the same sphere has neither a hit nor
+  a shadow-intersection path.
+- Implementation and mutation sensitivity: one shared dispatch now intersects rectangles, affine discs,
+  ellipsoids, and soft punctual spheres for camera/BSDF rays and for every open shadow segment. The selected
+  continuous emitter supplies an offset near-side endpoint, so it cannot shadow itself, while a nearer or stacked
+  analytic surface remains an opaque blocker independent of emission sidedness. The old shadow-mask mutation still
+  has no analytic support, and changing the soft punctual classification back to delta makes the new MIS assertion
+  fail. Continuous light coordinates use centres of their represented 23-bit RNG cells; the closed-endpoint mutation
+  puts finite probability on rectangle edges and sphere poles and produced one actual-device rectangle miss in
+  262,144 samples before this correction.
+- Corrected result: 4,096 exact parallelogram samples and 4,096 soft-sphere samples round-trip through the common
+  intersection with positive finite area/solid-angle densities. Complementary balance weights sum to one, sharp
+  punctual sources retain their discrete classification, the selected endpoint is excluded, and a nearer analytic
+  surface blocks the segment. The actual M4 probe reports zero rectangle hit, open-endpoint, soft-sphere hit,
+  occlusion, or classification failures in fast and safe math at threadgroup sizes 32, 64, and 128.
+- Validation: focused Debug, Release, and ASan+UBSan pass 24,709/24,709 assertions. Full Debug and Release CTest pass
+  4/4; production Metal shaders compile. The complete audit passes 895/895 cases and 69,215,589 assertions, with
+  environment integral `1`, Lambertian estimate `1.002147074` inside its CI, detected legacy mutation `2.003353165`,
+  and dome MIS ratio `1`. The standard and finding-specific actual Apple M4 Pro kernels each execute 262,144 samples
+  with zero measure/support failures. OptiX consumes the same intersection, PDF, endpoint, and blocker source, but
+  CUDA compilation/runtime remains externally `UNVERIFIED` under the finding-7 command. Status: FIXED for CPU and
+  Metal, UNVERIFIED for OptiX execution.
