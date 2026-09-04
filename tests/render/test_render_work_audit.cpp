@@ -57,9 +57,8 @@ TEST_CASE("render-work manual analytic-light tests do not scale with light count
 
 TEST_CASE("render-work ReSTIR dispatches follow configuration")
 {
-    RenderWorkInvariantSample sample{ .restirSpatialDispatches = 1, .restirFinalDispatches = 1 };
+    RenderWorkInvariantSample sample{ .restirFusedDispatches = 1 };
     CHECK(oka::metal::restirDispatchesMatch(true, true, 2, sample));
-    sample.restirSpatialDispatches = 0;
     CHECK(oka::metal::restirDispatchesMatch(true, false, 0, sample));
 }
 

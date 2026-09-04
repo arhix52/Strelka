@@ -29,8 +29,7 @@ struct WavefrontVariant
     MTL::ComputePipelineState* extendMotion = nullptr;
     MTL::ComputePipelineState* extendStatic = nullptr;
     MTL::ComputePipelineState* shade = nullptr;
-    MTL::ComputePipelineState* restirSpatial = nullptr;
-    MTL::ComputePipelineState* restirFinal = nullptr;
+    MTL::ComputePipelineState* restirSpatialFinal = nullptr;
     MTL::ComputePipelineState* miss = nullptr;
     MTL::ComputePipelineState* shadowMotion = nullptr;
     MTL::ComputePipelineState* shadowStatic = nullptr;
@@ -202,6 +201,10 @@ public:
     uint64_t guideQueueAddress() const
     {
         return mGuideQueueBuffer ? mGuideQueueBuffer->gpuAddress() : 0ull;
+    }
+    uint64_t restirQueueAddress() const
+    {
+        return mMissQueueBuffer ? mMissQueueBuffer->gpuAddress() : 0ull;
     }
     uint64_t restirReservoirAddress(uint32_t index) const
     {

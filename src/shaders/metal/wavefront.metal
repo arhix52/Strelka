@@ -114,6 +114,9 @@ WF_ANALYTIC_INTERSECTION_ENTRY(
 #define WF_CTRL_GUIDE_N 22
 #define WF_CTRL_CAPACITY 24
 #define WF_CTRL_GUIDE_DIS 25
+#define WF_CTRL_RESTIR 28
+#define WF_CTRL_RESTIR_N 28
+#define WF_CTRL_RESTIR_DIS 29
 // Profiling only: live path count and shadow ray count per bounce, so the
 // per-stage timings can be read as a cost per ray rather than a cost per stage.
 #define WF_CTRL_STATS_PATHS 32
@@ -630,7 +633,6 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
             (uniforms.frameIndex & 1u) != 0u ? uniforms.restirHistory1 : uniforms.restirHistory0;
         currentReservoirs[pixelIndex] = {};
         currentHistory[pixelIndex] = {};
-        uniforms.restirShadingPoints[pixelIndex] = {};
     }
 
     const uint2 pixel = uint2(pixelIndex % uniforms.width, pixelIndex / uniforms.width);
@@ -1719,7 +1721,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                            device Material* materials [[buffer(4)]],
                            device PathState* paths [[buffer(5)]],
                            device PathRay* rays [[buffer(21)]],
-                           device const HitRecord* hits [[buffer(6)]],
+                           device HitRecord* hits [[buffer(6)]],
                            device float4* radianceOut [[buffer(7)]],
                            device IorStack* iorStacks [[buffer(8)]],
                            device const GeometryEntry* geometryEntries [[buffer(9)]],
@@ -2981,8 +2983,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         reservoir.state.M = candidates;
         if (restirInitial)
         {
-            device RestirReservoir* currentReservoirs =
-                (uniforms.frameIndex & 1u) != 0u ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
             device RestirSurfaceHistory* currentHistory =
                 (uniforms.frameIndex & 1u) != 0u ? uniforms.restirHistory1 : uniforms.restirHistory0;
 
@@ -3003,10 +3003,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
 
             RestirShadingPoint shadingPoint;
             shadingPoint.position = packed_float3(worldPosition);
-            shadingPoint.geometryNormal = packed_float3(geomNormal);
             shadingPoint.shadingNormal = packed_float3(worldNormal);
             shadingPoint.tangent = packed_float3(worldTangent);
-            shadingPoint.bitangent = packed_float3(worldBinormal);
             shadingPoint.rayDirection = packed_float3(rayDir);
             shadingPoint.vertexColor = packed_float3(vertexColor);
             shadingPoint.throughput = packed_float3(throughput);
@@ -3014,7 +3012,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             shadingPoint.exteriorIor = si.exterior_ior;
             shadingPoint.lodBase = lodBase;
             shadingPoint.curveRadius = curveRadius;
-            shadingPoint.materialId = entry.materialId;
+            shadingPoint.tangentSign = tangentSign;
             shadingPoint.medium = mediumState.medium & MEDIUM_INDEX_MASK;
             shadingPoint.sampleIdxAndFlags = (sampleIdx & RESTIR_SHADING_SAMPLE_MASK) | RESTIR_SHADING_VALID |
                                              (isCurve ? RESTIR_SHADING_CURVE : 0u) |
@@ -3066,8 +3064,19 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     }
                 }
             }
-            currentReservoirs[tid] = reservoir;
+            ((device RestirReservoir*)hits)[tid] = reservoir;
             currentHistory[tid] = surface;
+            const uint32_t restirSlot =
+                atomic_fetch_add_explicit((device atomic_uint*)&control[WF_CTRL_RESTIR], 1u, memory_order_relaxed);
+            if (restirSlot < control[WF_CTRL_CAPACITY])
+            {
+                uniforms.restirQueue[restirSlot] = tid;
+                if ((restirSlot & 63u) == 0u)
+                {
+                    atomic_fetch_add_explicit(
+                        (device atomic_uint*)&control[WF_CTRL_RESTIR_DIS], 1u, memory_order_relaxed);
+                }
+            }
         }
         if (!restirInitial)
         {
@@ -3357,23 +3366,28 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
 static void rebuildRestirShadingPoint(constant Uniforms& uniforms,
                                       device const Material* materials,
                                       thread const RestirShadingPoint& stored,
+                                      thread const RestirSurfaceHistory& surface,
                                       thread SurfaceInteraction& si,
                                       thread bool& isFibre,
                                       thread bool& isOpenPBR,
                                       thread ShadedFrame& neeFrame,
                                       thread OpenPBR_PreparedBsdf& openpbrPrepared)
 {
-    initSurfaceInteraction(si, materials[stored.materialId], float3(stored.position), float3(stored.shadingNormal),
-                           float3(stored.geometryNormal), float3(stored.tangent), float3(stored.bitangent), stored.uv,
-                           float3(stored.rayDirection), float3(stored.vertexColor), stored.lodBase);
+    const uint32_t materialId = surface.materialIdAndFlags & RESTIR_SURFACE_MATERIAL_MASK;
+    const float3 normal = float3(stored.shadingNormal);
+    const float3 tangent = float3(stored.tangent);
+    const float3 bitangent = cross(normal, tangent) * stored.tangentSign;
+    initSurfaceInteraction(si, materials[materialId], float3(stored.position), normal, float3(surface.geometryNormal),
+                           tangent, bitangent, stored.uv, float3(stored.rayDirection), float3(stored.vertexColor),
+                           stored.lodBase);
     si.exterior_ior = stored.exteriorIor;
     isOpenPBR = SPEC_OPENPBR && si.material_type == MATERIAL_TYPE_OPENPBR;
     if (isOpenPBR)
     {
-        OpenPBRParams openpbrMat = uniforms.openpbrParams[stored.materialId];
+        OpenPBRParams openpbrMat = uniforms.openpbrParams[materialId];
         if (openpbrMat.texture_mask != 0u && uniforms.openpbrTextures != nullptr)
         {
-            applyOpenPBRTextures(openpbrMat, uniforms.openpbrTextures[stored.materialId], si, stored.uv);
+            applyOpenPBRTextures(openpbrMat, uniforms.openpbrTextures[materialId], si, stored.uv);
         }
         openpbrPrepared = openpbr_prepare_at(openpbrMat, si, float3(stored.throughput));
     }
@@ -3386,39 +3400,50 @@ constant int2 kRestirNeighborOffsets[] = { int2(-1, 0),  int2(0, -1), int2(1, 0)
                                            int2(-2, 0),  int2(0, -2), int2(2, 0), int2(0, 2),
                                            int2(-2, -1), int2(1, -2), int2(2, 1), int2(-1, 2) };
 
-kernel void wavefrontRestirSpatial(uint gid [[thread_position_in_grid]],
-                                   constant Uniforms& uniforms [[buffer(0)]],
-                                   constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],
-                                   device const IesGpuBufferHeader* iesProfiles [[buffer(2)]],
-                                   device UniformLight* lights [[buffer(3)]],
-                                   device const Material* materials [[buffer(4)]],
-                                   device const EnvAliasEntry* envAliasTable [[buffer(5)]],
-                                   device const char* vertexBuffer [[buffer(6)]],
-                                   device const char* prevVertexBuffer [[buffer(7)]],
-                                   device const uint32_t* indexBuffer [[buffer(8)]],
-                                   device const uint32_t* hitQueue [[buffer(9)]],
-                                   texture2d<float> envMapTexture [[texture(0)]])
+kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
+                                        constant Uniforms& uniforms [[buffer(0)]],
+                                        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances
+                                        [[buffer(1)]],
+                                        device const IesGpuBufferHeader* iesProfiles [[buffer(2)]],
+                                        device UniformLight* lights [[buffer(3)]],
+                                        device const Material* materials [[buffer(4)]],
+                                        device const EnvAliasEntry* envAliasTable [[buffer(5)]],
+                                        device const char* vertexBuffer [[buffer(6)]],
+                                        device const char* prevVertexBuffer [[buffer(7)]],
+                                        device const uint32_t* indexBuffer [[buffer(8)]],
+                                        device const uint32_t* hitQueue [[buffer(9)]],
+                                        device ShadowRay* shadowRays [[buffer(10)]],
+                                        device atomic_uint* shadowCounter [[buffer(11)]],
+                                        device float4* radianceOut [[buffer(12)]],
+                                        device const RestirReservoir* initialReservoirs [[buffer(13)]],
+                                        device const uint32_t* control [[buffer(14)]],
+                                        texture2d<float> envMapTexture [[texture(0)]])
 {
+    if (gid >= control[WF_CTRL_RESTIR_N])
+    {
+        return;
+    }
     const uint32_t tid = hitQueue[gid];
     const RestirShadingPoint stored = uniforms.restirShadingPoints[tid];
     if (uniforms.restirDIEnabled == 0u || (stored.sampleIdxAndFlags & RESTIR_SHADING_VALID) == 0u)
     {
         return;
     }
-    auditWork(uniforms, WORK_RESTIR_SPATIAL_ITEMS);
+    auditWork(uniforms, WORK_RESTIR_FINAL_ITEMS);
 
     const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
-    device const RestirReservoir* inputReservoirs = oddFrame ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
-    device RestirReservoir* outputReservoirs = oddFrame ? uniforms.restirReservoir0 : uniforms.restirReservoir1;
+    device RestirReservoir* currentReservoirs = oddFrame ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
     device const RestirSurfaceHistory* history = oddFrame ? uniforms.restirHistory1 : uniforms.restirHistory0;
-    RestirReservoir reservoir = inputReservoirs[tid];
+    const RestirSurfaceHistory currentSurface = history[tid];
+    RestirReservoir reservoir = initialReservoirs[tid];
     uint32_t selectedAge = reservoir.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK;
 
     SurfaceInteraction si;
     bool isFibre, isOpenPBR;
     ShadedFrame neeFrame;
     OpenPBR_PreparedBsdf openpbrPrepared;
-    rebuildRestirShadingPoint(uniforms, materials, stored, si, isFibre, isOpenPBR, neeFrame, openpbrPrepared);
+    rebuildRestirShadingPoint(
+        uniforms, materials, stored, currentSurface, si, isFibre, isOpenPBR, neeFrame, openpbrPrepared);
 
     const uint2 pixel = uint2(tid % uniforms.width, tid / uniforms.width);
     const uint32_t sampleIdx = stored.sampleIdxAndFlags & RESTIR_SHADING_SAMPLE_MASK;
@@ -3426,6 +3451,10 @@ kernel void wavefrontRestirSpatial(uint gid [[thread_position_in_grid]],
     SamplerState rng = samplerFor(uniforms, tid, sampleIdx, 0u);
     const uint32_t rotation = hash_combine(tid, uniforms.frameIndex * 0x9e3779b9u) & 15u;
     const uint32_t neighborCount = uniforms.spatialReuseEnabled != 0u ? min(uniforms.spatialNeighborCount, 16u) : 0u;
+    if (neighborCount != 0u)
+    {
+        auditWork(uniforms, WORK_RESTIR_SPATIAL_ITEMS);
+    }
     for (uint32_t i = 0u; i < neighborCount; ++i)
     {
         const int2 neighborPixel = int2(pixel) + kRestirNeighborOffsets[(rotation + i * 5u) & 15u];
@@ -3435,8 +3464,7 @@ kernel void wavefrontRestirSpatial(uint gid [[thread_position_in_grid]],
             continue;
         }
         const uint32_t neighborIndex = uint32_t(neighborPixel.y) * uniforms.width + uint32_t(neighborPixel.x);
-        const RestirReservoir neighbor = inputReservoirs[neighborIndex];
-        const RestirSurfaceHistory currentSurface = history[tid];
+        const RestirReservoir neighbor = initialReservoirs[neighborIndex];
         const RestirSurfaceHistory neighborSurface = history[neighborIndex];
         if ((neighbor.state.ageAndFlags & RESTIR_RESERVOIR_VALID) == 0u || neighbor.state.M == 0u ||
             !restirSurfaceHistoryCompatible(currentSurface, neighborSurface))
@@ -3463,47 +3491,12 @@ kernel void wavefrontRestirSpatial(uint gid [[thread_position_in_grid]],
     }
     reservoir.state.ageAndFlags =
         (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) | min(selectedAge, RESTIR_RESERVOIR_AGE_MASK);
-    outputReservoirs[tid] = reservoir;
-}
-
-kernel void wavefrontRestirFinal(uint gid [[thread_position_in_grid]],
-                                 constant Uniforms& uniforms [[buffer(0)]],
-                                 constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],
-                                 device const IesGpuBufferHeader* iesProfiles [[buffer(2)]],
-                                 device UniformLight* lights [[buffer(3)]],
-                                 device const Material* materials [[buffer(4)]],
-                                 device const EnvAliasEntry* envAliasTable [[buffer(5)]],
-                                 device const char* vertexBuffer [[buffer(6)]],
-                                 device const char* prevVertexBuffer [[buffer(7)]],
-                                 device const uint32_t* indexBuffer [[buffer(8)]],
-                                 device const uint32_t* hitQueue [[buffer(9)]],
-                                 device ShadowRay* shadowRays [[buffer(10)]],
-                                 device atomic_uint* shadowCounter [[buffer(11)]],
-                                 device float4* radianceOut [[buffer(12)]],
-                                 texture2d<float> envMapTexture [[texture(0)]])
-{
-    const uint32_t tid = hitQueue[gid];
-    RestirShadingPoint stored = uniforms.restirShadingPoints[tid];
-    if (uniforms.restirDIEnabled == 0u || (stored.sampleIdxAndFlags & RESTIR_SHADING_VALID) == 0u)
-    {
-        return;
-    }
-    auditWork(uniforms, WORK_RESTIR_FINAL_ITEMS);
-    stored.sampleIdxAndFlags &= ~RESTIR_SHADING_VALID;
-    uniforms.restirShadingPoints[tid] = stored;
-
-    const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
-    device RestirReservoir* currentReservoirs = oddFrame ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
-    const bool hasSpatialReuse = uniforms.spatialReuseEnabled != 0u && uniforms.spatialNeighborCount != 0u;
-    device const RestirReservoir* spatialReservoirs =
-        hasSpatialReuse ? (oddFrame ? uniforms.restirReservoir0 : uniforms.restirReservoir1) : currentReservoirs;
-    RestirReservoir reservoir = spatialReservoirs[tid];
     const uint32_t maxM = max(uniforms.initialCandidateCount, 1u) * max(uniforms.reservoirMaxAge, 1u) *
                           (min(uniforms.spatialNeighborCount, 16u) + 1u);
     restirReservoirLimitM(reservoir.state, maxM);
-    currentReservoirs[tid] = reservoir;
     if (uniforms.restirDebugMode != 0u)
     {
+        currentReservoirs[tid] = reservoir;
         const float3 debugColor =
             uniforms.restirDebugMode == 1u ?
                 float3(float(reservoir.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK) /
@@ -3516,16 +3509,10 @@ kernel void wavefrontRestirFinal(uint gid [[thread_position_in_grid]],
     }
     if ((reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) == 0u)
     {
+        currentReservoirs[tid] = reservoir;
         return;
     }
 
-    SurfaceInteraction si;
-    bool isFibre, isOpenPBR;
-    ShadedFrame neeFrame;
-    OpenPBR_PreparedBsdf openpbrPrepared;
-    rebuildRestirShadingPoint(uniforms, materials, stored, si, isFibre, isOpenPBR, neeFrame, openpbrPrepared);
-    const uint32_t sampleIdx = stored.sampleIdxAndFlags & RESTIR_SHADING_SAMPLE_MASK;
-    const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
     const LightConnection connection =
         reconnectRestirSample(uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
                               motionTime, si, envAliasTable, envMapTexture, iesProfiles, reservoir.sample);
@@ -3548,7 +3535,6 @@ kernel void wavefrontRestirFinal(uint gid [[thread_position_in_grid]],
     {
         return;
     }
-    SamplerState rng = samplerFor(uniforms, tid, sampleIdx, 0u);
     ShadowRay sr;
     sr.origin = packed_float3(shadowOrigin);
     sr.direction = packed_float3(visibility.direction);
@@ -3970,6 +3956,10 @@ kernel void wavefrontPrepareHitMiss(device uint32_t& controlRef [[buffer(0)]],
     control[WF_CTRL_MISS_DIS + 0] = (m + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_MISS_DIS + 1] = 1u;
     control[WF_CTRL_MISS_DIS + 2] = 1u;
+    control[WF_CTRL_RESTIR] = 0u;
+    control[WF_CTRL_RESTIR_DIS + 0] = 0u;
+    control[WF_CTRL_RESTIR_DIS + 1] = 1u;
+    control[WF_CTRL_RESTIR_DIS + 2] = 1u;
 }
 
 // Between `shade` and `shadow`: publish the number of shadow rays `shade`

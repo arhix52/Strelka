@@ -388,11 +388,14 @@ struct Uniforms
 // indirect guide dispatch, so scenes without guide continuations launch no grid.
 #ifdef __METAL_VERSION__
     device uint32_t* guideQueue;
+    device uint32_t* restirQueue;
 #else
     uint64_t guideQueue;
+    uint64_t restirQueue;
+    uint64_t abiTailPadding;
 #endif
 };
-static_assert(sizeof(Uniforms) == 912, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 928, "Uniforms host/Metal ABI changed");
 
 enum RenderWorkCounter : uint32_t
 {
@@ -754,10 +757,8 @@ static_assert(sizeof(RestirSurfaceHistory) == 20, "ReSTIR surface history ABI ch
 struct RestirShadingPoint
 {
     packed_float3 position;
-    packed_float3 geometryNormal;
     packed_float3 shadingNormal;
     packed_float3 tangent;
-    packed_float3 bitangent;
     packed_float3 rayDirection;
     packed_float3 vertexColor;
     packed_float3 throughput;
@@ -765,11 +766,11 @@ struct RestirShadingPoint
     float exteriorIor;
     float lodBase;
     float curveRadius;
-    uint32_t materialId;
+    float tangentSign;
     uint32_t medium;
     uint32_t sampleIdxAndFlags;
 };
-static_assert(sizeof(RestirShadingPoint) == 128, "ReSTIR shading point ABI changed");
+static_assert(sizeof(RestirShadingPoint) == 104, "ReSTIR shading point ABI changed");
 
 // A deferred occlusion query produced by `shade` and consumed by `shadow`.
 struct ShadowRay

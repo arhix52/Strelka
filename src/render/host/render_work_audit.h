@@ -20,6 +20,7 @@ struct RenderWorkInvariantSample
     uint64_t manualAnalyticLightTests = 0;
     uint64_t restirSpatialDispatches = 0;
     uint64_t restirFinalDispatches = 0;
+    uint64_t restirFusedDispatches = 0;
     uint64_t guideActiveItems = 0;
     uint64_t guideDispatches = 0;
     uint64_t frames = 0;
@@ -71,14 +72,11 @@ inline bool analyticLightWorkIsCountIndependent(const RenderWorkInvariantSample&
     return one.manualAnalyticLightTests == many.manualAnalyticLightTests;
 }
 
-inline bool restirDispatchesMatch(bool enabled,
-                                  bool spatialEnabled,
-                                  uint32_t neighbors,
-                                  const RenderWorkInvariantSample& sample)
+inline bool restirDispatchesMatch(bool enabled, bool, uint32_t, const RenderWorkInvariantSample& sample)
 {
-    const uint64_t expectedFinal = enabled ? 1u : 0u;
-    const uint64_t expectedSpatial = enabled && spatialEnabled && neighbors != 0u ? 1u : 0u;
-    return sample.restirFinalDispatches == expectedFinal && sample.restirSpatialDispatches == expectedSpatial;
+    const uint64_t expectedFused = enabled ? 1u : 0u;
+    return sample.restirFusedDispatches == expectedFused && sample.restirFinalDispatches == 0u &&
+           sample.restirSpatialDispatches == 0u;
 }
 
 inline bool guideDispatchesMatchActiveQueue(const RenderWorkInvariantSample& sample)
