@@ -57,6 +57,8 @@ void MetalLights::release()
         mLightBuffer = nullptr;
     }
     mTotalPower = 0.0;
+    mInfiniteLightCount = 0;
+    mInfiniteLightIndexOffset = 0;
     if (mIesBuffer)
     {
         mIesBuffer->release();
@@ -129,8 +131,20 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
     mTotalPower = selection.totalPower;
 
     const size_t lightBufferSize = sizeof(UniformLight) * lightDescs.size();
+    std::vector<uint32_t> infiniteLightIndices;
+    infiniteLightIndices.reserve(lightDescs.size());
+    for (uint32_t i = 0; i < lightDescs.size(); ++i)
+    {
+        if (lightDescs[i].type == LIGHT_TYPE_DISTANT || lightDescs[i].type == LIGHT_TYPE_DOME)
+        {
+            infiniteLightIndices.push_back(i);
+        }
+    }
+    mInfiniteLightCount = static_cast<uint32_t>(infiniteLightIndices.size());
+    mInfiniteLightIndexOffset = lightBufferSize;
+    const size_t allocationSize = lightBufferSize + infiniteLightIndices.size() * sizeof(uint32_t);
 
-    if (lightBufferSize == 0)
+    if (allocationSize == 0)
     {
         if (mLightBuffer)
         {
@@ -140,11 +154,11 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
     }
     else
     {
-        if (!mLightBuffer || mLightBuffer->length() < lightBufferSize)
+        if (!mLightBuffer || mLightBuffer->length() < allocationSize)
         {
             if (mLightBuffer)
                 mLightBuffer->release();
-            mLightBuffer = mDevice->newBuffer(lightBufferSize, MTL::ResourceStorageModeShared);
+            mLightBuffer = mDevice->newBuffer(allocationSize, MTL::ResourceStorageModeShared);
         }
         auto* gpuLights = static_cast<UniformLight*>(mLightBuffer->contents());
         for (size_t i = 0; i < lightDescs.size(); ++i)
@@ -163,6 +177,11 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
                     dst.projectorTexture = mProjectorTextures[slot]->gpuResourceID();
                 }
             }
+        }
+        if (!infiniteLightIndices.empty())
+        {
+            std::memcpy(static_cast<uint8_t*>(mLightBuffer->contents()) + mInfiniteLightIndexOffset,
+                        infiniteLightIndices.data(), infiniteLightIndices.size() * sizeof(uint32_t));
         }
     }
 

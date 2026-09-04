@@ -47,6 +47,7 @@ constant bool kFcSubsurface [[function_constant(8)]];
 constant bool kFcCurves [[function_constant(9)]];
 constant bool kFcSharcUpdate [[function_constant(10)]];
 constant bool kFcOpenPBR [[function_constant(11)]];
+constant bool kFcRenderWorkAudit [[function_constant(12)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
 constant bool SPEC_SHARC = is_function_constant_defined(kFcSharc) ? kFcSharc : false;
@@ -74,6 +75,8 @@ constant bool SPEC_SHARC_UPDATE = is_function_constant_defined(kFcSharcUpdate) ?
 // A scene with no OpenPBR material must compile a kernel that does not contain
 // it at all -- see WavefrontFeatures::kOpenPBR.
 constant bool SPEC_OPENPBR = is_function_constant_defined(kFcOpenPBR) ? kFcOpenPBR : false;
+constant bool SPEC_RENDER_WORK_AUDIT =
+    is_function_constant_defined(kFcRenderWorkAudit) ? kFcRenderWorkAudit : false;
 
 __attribute__((always_inline)) float3 transformDirection(float3 p, float4x4 transform)
 {

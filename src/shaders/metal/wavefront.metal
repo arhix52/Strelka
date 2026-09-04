@@ -1607,13 +1607,10 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
     {
         const float localSelectionPdf = (SPEC_ENV_MAP && uniforms.hasEnvMap) ? (1.0f - uniforms.envMapColorTint.w) : 1.0f;
         const float analyticClassPdf = uniforms.numEmissiveMeshes > 0u ? (1.0f - uniforms.meshLightSelectionPdf) : 1.0f;
-        for (uint32_t lightId = 0; lightId < uniforms.numLights; ++lightId)
+        for (uint32_t infiniteIndex = 0; infiniteIndex < uniforms.numInfiniteLights; ++infiniteIndex)
         {
+            const uint32_t lightId = uniforms.infiniteLightIndices[infiniteIndex];
             device const UniformLight& light = lights[lightId];
-            if (!lightIsInfinite(light.type))
-            {
-                continue;
-            }
             if (!analyticLightVisibilityAllowsRay(light.normal.w, depth != 0u))
             {
                 continue;

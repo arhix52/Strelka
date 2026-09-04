@@ -127,6 +127,9 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->width = width;
     const bool analyticLightsEnabled = settings.getAs<bool>("render/validate/analyticLights");
     pUniformData->numLights = analyticLightsEnabled ? (uint32_t)in.scene->getLightsDesc().size() : 0u;
+    pUniformData->numInfiniteLights = analyticLightsEnabled && in.lights ? in.lights->infiniteLightCount() : 0u;
+    pUniformData->infiniteLightIndices =
+        pUniformData->numInfiniteLights != 0u ? in.lights->infiniteLightIndexAddress() : 0u;
     pUniformData->numEmissiveMeshes = in.accel ? in.accel->emissiveMeshCount() : 0u;
     const double analyticPower = pUniformData->numLights > 0u && in.lights ? in.lights->totalPower() : 0.0;
     const double meshPower = pUniformData->numEmissiveMeshes > 0u && in.accel ? in.accel->emissiveMeshPower() : 0.0;

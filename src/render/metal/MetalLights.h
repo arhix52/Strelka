@@ -47,6 +47,14 @@ public:
     {
         return mTotalPower;
     }
+    uint32_t infiniteLightCount() const
+    {
+        return mInfiniteLightCount;
+    }
+    uint64_t infiniteLightIndexAddress() const
+    {
+        return mLightBuffer && mInfiniteLightCount != 0u ? mLightBuffer->gpuAddress() + mInfiniteLightIndexOffset : 0u;
+    }
     /// For the Metal 4 residency set: an argument table names these by handle,
     /// and a handle whose allocation is not resident is a page fault rather than
     /// a validation message.
@@ -64,6 +72,8 @@ private:
     MTL::Buffer* mLightBuffer = nullptr;
     MTL::Buffer* mIesBuffer = nullptr;
     double mTotalPower = 0.0;
+    uint32_t mInfiniteLightCount = 0;
+    size_t mInfiniteLightIndexOffset = 0;
     std::vector<MTL::Texture*> mProjectorTextures;
     /// What mProjectorTextures was built from. upload() runs on every light
     /// edit -- dragging an intensity slider is one per frame -- and decoding a

@@ -368,8 +368,50 @@ struct Uniforms
     uint64_t restirHistory1;
     uint64_t restirShadingPoints;
 #endif
+
+    // Present only in the explicitly requested render-work audit variant. The
+    // ordinary pipeline specialises every reference away.
+#ifdef __METAL_VERSION__
+    device atomic_uint* renderWorkCounters;
+#else
+    uint64_t renderWorkCounters;
+#endif
+
+    uint32_t numInfiniteLights;
+    uint32_t renderWorkPadding;
+#ifdef __METAL_VERSION__
+    device const uint32_t* infiniteLightIndices;
+#else
+    uint64_t infiniteLightIndices;
+#endif
 };
-static_assert(sizeof(Uniforms) == 880, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 912, "Uniforms host/Metal ABI changed");
+
+enum RenderWorkCounter : uint32_t
+{
+    WORK_PRIMARY_RAYS = 0,
+    WORK_EXTEND_RAYS_BASE = 1,
+    WORK_SHADE_ITEMS_BASE = 17,
+    WORK_SHADOW_RAYS_BASE = 33,
+    WORK_MISS_ITEMS_BASE = 49,
+    WORK_GUIDE_ONLY_RAYS = 65,
+    WORK_INTERSECTION_QUERIES = 66,
+    WORK_RESTIR_ELIGIBLE_HITS = 67,
+    WORK_RESTIR_INITIAL_CANDIDATES = 68,
+    WORK_RESTIR_TEMPORAL_MERGES = 69,
+    WORK_RESTIR_SPATIAL_MERGES = 70,
+    WORK_RESTIR_FINAL_VISIBILITY_RAYS = 71,
+    WORK_FIRST_BOUNCE_NEE_SAMPLES = 72,
+    WORK_SECONDARY_NEE_SAMPLES = 73,
+    WORK_RESTIR_SPATIAL_ITEMS = 74,
+    WORK_RESTIR_FINAL_ITEMS = 75,
+    WORK_MANUAL_ANALYTIC_LIGHT_TESTS = 76,
+    WORK_GUIDE_ACTIVE_ITEMS = 77,
+    WORK_RESTIR_CANDIDATE_QUERIES = 78,
+    WORK_RESTIR_REUSE_QUERIES = 79,
+    WORK_COUNTER_COUNT = 80,
+    WORK_BOUNCE_SLOTS = 16
+};
 
 
 // How the depth guide is encoded.
