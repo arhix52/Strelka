@@ -646,6 +646,16 @@ public:
         return mDeviceError;
     }
 
+    double pipelineCompileElapsedMs() const override
+    {
+        if (!mPipelineBuild.valid())
+        {
+            return -1.0;
+        }
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - mPipelineBuildBegin)
+            .count();
+    }
+
     bool isBuildingScene() const override
     {
         return mScenePrep.isBuilding();

@@ -274,6 +274,20 @@ public:
         return false;
     }
 
+    /// Milliseconds since a shader-pipeline compile started, or -1 when none is
+    /// running.
+    ///
+    /// The number matters as much as the flag. OptiX compiles its module the
+    /// first time it sees a given specialisation and there is no progress to
+    /// report during it -- ten seconds on a cold cache -- so the only thing that
+    /// distinguishes "compiling" from "hung" on a black viewport is a count that
+    /// keeps going up. Backends that have nothing to compile at runtime leave
+    /// this at -1 and no UI appears.
+    virtual double pipelineCompileElapsedMs() const
+    {
+        return -1.0;
+    }
+
     /// Last completed render frame time in milliseconds (GPU time).
     double getLastRenderTimeMs() const
     {

@@ -14,7 +14,14 @@ namespace oka
 void EditorApp::drawLoadingOverlay()
 {
     const bool building = m_render && m_render->isBuildingScene();
-    if (!m_isLoading && !building)
+    // Compiling the shader pipeline outlives the scene build and produces no
+    // image at all while it runs -- OptiX JITs its module the first time it sees
+    // a specialisation, which on a cold cache is ten seconds of black viewport.
+    // Without this the overlay closed at the end of the build and left the user
+    // looking at nothing, with no way to tell it apart from a hang.
+    const double compileMs = m_render ? m_render->pipelineCompileElapsedMs() : -1.0;
+    const bool compiling = compileMs >= 0.0;
+    if (!m_isLoading && !building && !compiling)
     {
         return;
     }
@@ -68,6 +75,19 @@ void EditorApp::drawLoadingOverlay()
     const std::string label =
         total > 0 ? fmt::format("{}  {}/{}", kStageNames[stage], done, total) : std::string(kStageNames[stage]);
     ImGui::ProgressBar(fraction, ImVec2(-FLT_MIN, 0.0f), label.c_str());
+
+    if (compiling)
+    {
+        // No bar: OptiX reports no progress during a module compile, and a bar
+        // that does not move is a worse lie than no bar. The elapsed seconds are
+        // the whole message -- they are what says this is working rather than
+        // stuck.
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Compiling shaders for this scene");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%.0f s", compileMs / 1000.0);
+        ImGui::TextDisabled("First time only -- the result is cached on disk.");
+    }
 
     // GPU resources are already owned once the build starts, so only the parse
     // stage can be cancelled safely.
