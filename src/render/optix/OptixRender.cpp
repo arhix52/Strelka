@@ -2360,6 +2360,23 @@ void OptiXRender::ensurePipelineSpecialization(const Params& params)
         return;
     }
 
+    // Nothing to trace and nothing to see: the editor before a scene has been
+    // opened. A launch here draws black whether or not there is a pipeline to
+    // launch, so the compile buys nothing -- and it is not free. Measured on a
+    // cold module cache: 40.8 s for the empty scene's specialisation, which the
+    // first scene opened then has to throw away if it differs by so much as
+    // `fog` (45.0 s again). Starting the editor *with* a scene never hit this,
+    // because the scene lands half a second in and wins the race.
+    //
+    // Both terms matter. An environment map with no geometry in front of it is a
+    // frame worth compiling for; geometry with no environment obviously is.
+    // render() already skips the launch while mPipelineSpecValid is false, so
+    // this needs no guard of its own.
+    if (!params.hasEnvMap && mScene != nullptr && mScene->getInstances().empty())
+    {
+        return;
+    }
+
     // A recompile invalidates every handle the in-flight launch is using.
     // Nothing may still be running against the pipeline about to be destroyed.
     if (mState.stream)
