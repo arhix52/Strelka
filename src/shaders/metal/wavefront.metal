@@ -58,6 +58,73 @@ static inline float3 unpackMediumAlbedo(uint32_t v)
 // case the remaining bits hold the light index rather than a geometry entry.
 #define HIT_LIGHT_BIT 0x80000000u
 
+struct AnalyticPrimitiveIntersection
+{
+    bool accept [[accept_intersection]];
+    float distance [[distance]];
+};
+
+static inline AnalyticPrimitiveIntersection intersectCanonicalSphere(float3 origin,
+                                                                     float3 direction,
+                                                                     float minDistance,
+                                                                     float maxDistance)
+{
+    AnalyticPrimitiveIntersection result{ false, 0.0f };
+    const float a = dot(direction, direction);
+    const float halfB = dot(origin, direction);
+    const float c = dot(origin, origin) - 1.0f;
+    const float discriminant = halfB * halfB - a * c;
+    if (discriminant < 0.0f)
+        return result;
+    const float root = sqrt(discriminant);
+    float t = (-halfB - root) / a;
+    if (t < minDistance || t > maxDistance)
+        t = (-halfB + root) / a;
+    result.accept = t >= minDistance && t <= maxDistance;
+    result.distance = t;
+    return result;
+}
+
+static inline AnalyticPrimitiveIntersection intersectCanonicalDisc(float3 origin,
+                                                                   float3 direction,
+                                                                   float minDistance,
+                                                                   float maxDistance)
+{
+    AnalyticPrimitiveIntersection result{ false, 0.0f };
+    if (direction.z == 0.0f)
+        return result;
+    const float t = -origin.z / direction.z;
+    const float2 p = origin.xy + t * direction.xy;
+    result.accept = t >= minDistance && t <= maxDistance && dot(p, p) <= 1.0f;
+    result.distance = t;
+    return result;
+}
+
+#define WF_ANALYTIC_INTERSECTION_ENTRY(NAME, BODY, ...)                                                                \
+    [[intersection(bounding_box, __VA_ARGS__)]]                                                                        \
+    AnalyticPrimitiveIntersection NAME(float3 origin [[origin]], float3 direction [[direction]],                       \
+                                       float minDistance [[min_distance]], float maxDistance [[max_distance]])         \
+    {                                                                                                                  \
+        return BODY(origin, direction, minDistance, maxDistance);                                                      \
+    }
+
+WF_ANALYTIC_INTERSECTION_ENTRY(analyticSphereIntersection, intersectCanonicalSphere, triangle_data, instancing)
+WF_ANALYTIC_INTERSECTION_ENTRY(analyticDiscIntersection, intersectCanonicalDisc, triangle_data, instancing)
+WF_ANALYTIC_INTERSECTION_ENTRY(
+    analyticSphereIntersectionMotion, intersectCanonicalSphere, triangle_data, instancing, primitive_motion)
+WF_ANALYTIC_INTERSECTION_ENTRY(
+    analyticDiscIntersectionMotion, intersectCanonicalDisc, triangle_data, instancing, primitive_motion)
+WF_ANALYTIC_INTERSECTION_ENTRY(analyticSphereIntersectionCurve, intersectCanonicalSphere, triangle_data, curve_data, instancing)
+WF_ANALYTIC_INTERSECTION_ENTRY(analyticDiscIntersectionCurve, intersectCanonicalDisc, triangle_data, curve_data, instancing)
+WF_ANALYTIC_INTERSECTION_ENTRY(analyticSphereIntersectionMotionCurve,
+                               intersectCanonicalSphere,
+                               triangle_data,
+                               curve_data,
+                               instancing,
+                               primitive_motion)
+WF_ANALYTIC_INTERSECTION_ENTRY(
+    analyticDiscIntersectionMotionCurve, intersectCanonicalDisc, triangle_data, curve_data, instancing, primitive_motion)
+
 // Layout of the control buffer, shared by every stage.
 //   [0], [1] : live path count of each ping-pong queue
 //   [2..4]   : MTLDispatchThreadgroupsIndirectArguments for extend/shade
@@ -180,17 +247,18 @@ struct MotionTraversal
     using structure = acceleration_structure<instancing, primitive_motion>;
     using isect = intersector<triangle_data, instancing, primitive_motion>;
     using volume_isect = isect;
+    using table = intersection_function_table<triangle_data, instancing, primitive_motion>;
     static geometry_type geometryTypes()
     {
-        return geometry_type::triangle;
+        return geometry_type::triangle | geometry_type::bounding_box;
     }
     static float curveParameter(thread const isect::result_type&)
     {
         return 0.0f;
     }
-    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float time)
+    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float time, table t)
     {
-        return i.intersect(r, as, mask, time);
+        return i.intersect(r, as, mask, time, t);
     }
     static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as, uint32_t mask, float time)
     {
@@ -209,20 +277,21 @@ struct StaticTraversal
     using query = intersection_query<triangle_data, instancing>;
     enum
     {
-        kInlineQuery = 1
+        kInlineQuery = 0
     };
     using volume_isect = isect;
+    using table = intersection_function_table<triangle_data, instancing>;
     static geometry_type geometryTypes()
     {
-        return geometry_type::triangle;
+        return geometry_type::triangle | geometry_type::bounding_box;
     }
     static float curveParameter(thread const isect::result_type&)
     {
         return 0.0f;
     }
-    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float)
+    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float, table t)
     {
-        return i.intersect(r, as, mask);
+        return i.intersect(r, as, mask, t);
     }
     static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as, uint32_t mask, float)
     {
@@ -249,17 +318,18 @@ struct CurveMotionTraversal
     using structure = acceleration_structure<instancing, primitive_motion>;
     using isect = intersector<triangle_data, curve_data, instancing, primitive_motion>;
     using volume_isect = intersector<triangle_data, instancing, primitive_motion>;
+    using table = intersection_function_table<triangle_data, curve_data, instancing, primitive_motion>;
     static geometry_type geometryTypes()
     {
-        return geometry_type::triangle | geometry_type::curve;
+        return geometry_type::triangle | geometry_type::curve | geometry_type::bounding_box;
     }
     static float curveParameter(thread const isect::result_type& r)
     {
         return r.curve_parameter;
     }
-    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float time)
+    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float time, table t)
     {
-        return i.intersect(r, as, mask, time);
+        return i.intersect(r, as, mask, time, t);
     }
     static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as, uint32_t mask, float time)
     {
@@ -274,20 +344,21 @@ struct CurveStaticTraversal
     using query = intersection_query<triangle_data, curve_data, instancing>;
     enum
     {
-        kInlineQuery = 1
+        kInlineQuery = 0
     };
     using volume_isect = intersector<triangle_data, instancing>;
+    using table = intersection_function_table<triangle_data, curve_data, instancing>;
     static geometry_type geometryTypes()
     {
-        return geometry_type::triangle | geometry_type::curve;
+        return geometry_type::triangle | geometry_type::curve | geometry_type::bounding_box;
     }
     static float curveParameter(thread const isect::result_type& r)
     {
         return r.curve_parameter;
     }
-    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float)
+    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float, table t)
     {
-        return i.intersect(r, as, mask);
+        return i.intersect(r, as, mask, t);
     }
     static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as, uint32_t mask, float)
     {
@@ -658,6 +729,7 @@ static void extendImpl(uint gid,
                        // sample a free flight and reads it from the material the path is inside.
                        device const Material* materials,
                        device const MediumPathState* mediumPaths,
+                       typename T::table functionTable,
                        // Chosen per dispatch rather than per ray: the only thing it distinguishes
                        // is the camera bounce from the rest, and `extend` is encoded once per
                        // bounce anyway. Reading the path's depth here to answer the same question
@@ -784,7 +856,8 @@ static void extendImpl(uint gid,
         // Cutout coverage is tested in shade, not extend.
         isect.force_opacity(forced_opacity::opaque);
         isect.accept_any_intersection(false);
-        const typename T::isect::result_type surfaceHit = T::trace(isect, r, accelerationStructure, rayMask, motionTime);
+        const typename T::isect::result_type surfaceHit =
+            T::trace(isect, r, accelerationStructure, rayMask, motionTime, functionTable);
         const float curveParameter = surfaceHit.type == intersection_type::curve ? T::curveParameter(surfaceHit) : 0.0f;
         hit = captureExtendIntersection(surfaceHit, curveParameter);
     }
@@ -843,11 +916,12 @@ static void extendImpl(uint gid,
         device uint32_t* missQueue [[buffer(10)]], device atomic_uint* missCounter [[buffer(11)]],                     \
         device const PathState* paths [[buffer(12)]], device const Material* materials [[buffer(13)]],                 \
         constant uint32_t& rayMask [[buffer(14)]], TRAITS::structure volumeAccelerationStructure [[buffer(15)]],       \
-        constant uint32_t& queueOffset [[buffer(16)]], device const MediumPathState* mediumPaths [[buffer(17)]])       \
+        constant uint32_t& queueOffset [[buffer(16)]], device const MediumPathState* mediumPaths [[buffer(17)]],       \
+        TRAITS::table functionTable [[buffer(19)]])                                                                    \
     {                                                                                                                  \
         extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure, volumeAccelerationStructure, \
                            rays, hits, sampleIdx, queue, control, hitQueue, hitCounter, missQueue, missCounter, paths, \
-                           materials, mediumPaths, rayMask);                                                           \
+                           materials, mediumPaths, functionTable, rayMask);                                            \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
@@ -3550,7 +3624,8 @@ static void guideImpl(uint gid,
                       device const char* prevVertexBuffer,
                       device const uint32_t* indexBuffer,
                       device const packed_float3* curvePoints,
-                      device const uint32_t* curveSegments)
+                      device const uint32_t* curveSegments,
+                      typename T::table functionTable)
 {
     if (gid >= uniforms.width * uniforms.height)
     {
@@ -3590,7 +3665,8 @@ static void guideImpl(uint gid,
         isect.force_opacity(forced_opacity::opaque);
         isect.accept_any_intersection(false);
         const typename T::isect::result_type rawHit =
-            T::trace(isect, r, accelerationStructure, uniforms.primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN, motionTime);
+            T::trace(isect, r, accelerationStructure, uniforms.primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN, motionTime,
+                     functionTable);
         const float curveParameter = rawHit.type == intersection_type::curve ? T::curveParameter(rawHit) : 0.0f;
         const ExtendIntersection hit = captureExtendIntersection(rawHit, curveParameter);
         if (hit.type == intersection_type::none)
@@ -3776,10 +3852,10 @@ static void guideImpl(uint gid,
         device const Material* materials [[buffer(5)]], device const GeometryEntry* geometryEntries [[buffer(6)]],     \
         device const char* vertexBuffer [[buffer(7)]], device const char* prevVertexBuffer [[buffer(8)]],              \
         device const uint32_t* indexBuffer [[buffer(9)]], device const packed_float3* curvePoints [[buffer(10)]],      \
-        device const uint32_t* curveSegments [[buffer(11)]])                                                           \
+        device const uint32_t* curveSegments [[buffer(11)]], TRAITS::table functionTable [[buffer(13)]])               \
     {                                                                                                                  \
         guideImpl<TRAITS>(gid, uniforms, instances, accelerationStructure, aov, materials, geometryEntries,            \
-                          vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments);                    \
+                          vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments, functionTable);     \
     }
 
 WF_GUIDE_ENTRY(wavefrontGuide, MotionTraversal)
@@ -3960,8 +4036,8 @@ static float3 mediumTransmittance(typename T::structure accelerationStructure,
             break;
         }
 
-        typename T::isect isect;
-        isect.assume_geometry_type(T::geometryTypes());
+        typename T::volume_isect isect;
+        isect.assume_geometry_type(geometry_type::triangle);
         isect.force_opacity(forced_opacity::opaque);
         isect.accept_any_intersection(false);
 
@@ -3971,7 +4047,7 @@ static float3 mediumTransmittance(typename T::structure accelerationStructure,
         r.min_distance = 1e-4f;
         r.max_distance = remaining;
 
-        const auto hit = T::trace(isect, r, accelerationStructure, GEOMETRY_MASK_MEDIUM, motionTime);
+        const auto hit = T::traceVolume(isect, r, accelerationStructure, GEOMETRY_MASK_MEDIUM, motionTime);
         const bool escaped = (hit.type == intersection_type::none);
         const float segment = escaped ? remaining : hit.distance;
 
@@ -4060,6 +4136,7 @@ struct CutoutShadowWalk
                     device const GeometryEntry* geometryEntries,
                     device const char* vertexBuffer,
                     device const uint32_t* indexBuffer,
+                    typename T::table functionTable,
                     thread float3& transmittance)
     {
         transmittance = float3(1.0f);
@@ -4074,7 +4151,7 @@ struct CutoutShadowWalk
         isect.accept_any_intersection(false);
         for (uint32_t crossing = 0u; crossing < kMaxCutoutCrossings; ++crossing)
         {
-            const auto hit = T::trace(isect, probe, as, RAY_MASK_SHADOW, motionTime);
+            const auto hit = T::trace(isect, probe, as, RAY_MASK_SHADOW, motionTime, functionTable);
             if (hit.type == intersection_type::none)
             {
                 return true; // nothing else in the way
@@ -4121,6 +4198,7 @@ struct CutoutShadowWalk<T, true>
                     device const GeometryEntry* geometryEntries,
                     device const char* vertexBuffer,
                     device const uint32_t* indexBuffer,
+                    typename T::table functionTable,
                     thread float3& transmittance)
     {
         transmittance = float3(1.0f);
@@ -4129,7 +4207,7 @@ struct CutoutShadowWalk<T, true>
         params.accept_any_intersection(true);
         params.assume_geometry_type(T::geometryTypes());
         typename T::query q;
-        q.reset(shadowRay, as, RAY_MASK_SHADOW, params);
+        q.reset(shadowRay, as, RAY_MASK_SHADOW, params, functionTable);
         while (q.next())
         {
             const uint32_t instanceId = q.get_candidate_instance_id();
@@ -4151,10 +4229,9 @@ struct CutoutShadowWalk<T, true>
                 q.abort();
                 return false;
             }
-            const float opacity =
-                cutoutOpacityAt(q.get_candidate_primitive_id(), q.get_candidate_geometry_id(),
-                                instanceId, q.get_candidate_triangle_barycentric_coord(), instances,
-                                materials, geometryEntries, vertexBuffer, indexBuffer);
+            const float opacity = cutoutOpacityAt(q.get_candidate_primitive_id(), q.get_candidate_geometry_id(),
+                                                  instanceId, q.get_candidate_triangle_barycentric_coord(), instances,
+                                                  materials, geometryEntries, vertexBuffer, indexBuffer);
             if (cutoutRouletteDone(transmittance, opacity, cutoff))
             {
                 q.abort();
@@ -4182,6 +4259,7 @@ static void shadowImpl(uint gid,
                        device const GeometryEntry* geometryEntries,
                        device const char* vertexBuffer,
                        device const uint32_t* indexBuffer,
+                       typename T::table functionTable,
                        device SharcUpdateState* sharcUpdates,
                        device SharcAccumulationEntry* sharcAccumulation)
 {
@@ -4215,7 +4293,8 @@ static void shadowImpl(uint gid,
         isect.assume_geometry_type(T::geometryTypes());
         isect.force_opacity(forced_opacity::opaque);
         isect.accept_any_intersection(true);
-        if (T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime).type == intersection_type::none)
+        if (T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime, functionTable).type ==
+            intersection_type::none)
         {
             // Geometry visibility and atmospheric transmittance are separate; surviving shadow rays still cross fog.
             if (SPEC_FOG && uniforms.hasFog)
@@ -4259,7 +4338,7 @@ static void shadowImpl(uint gid,
     float3 transmittance;
     if (!CutoutShadowWalk<T, T::kInlineQuery != 0>::run(accelerationStructure, shadowRay, motionTime, sr.rrCutoff,
                                                         instances, materials, geometryEntries, vertexBuffer,
-                                                        indexBuffer, transmittance))
+                                                        indexBuffer, functionTable, transmittance))
     {
         return; // fully blocked
     }
@@ -4544,20 +4623,20 @@ kernel void sharcResolve(uint tid [[thread_position_in_grid]],
 }
 
 #define WF_SHADOW_ENTRY(NAME, TRAITS)                                                                                  \
-    kernel void NAME(uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                  \
-                     TRAITS::structure accelerationStructure [[buffer(1)]],                                            \
-                     device const ShadowRay* shadowRays [[buffer(2)]], device float4* radianceOut [[buffer(3)]],       \
-                     device const uint32_t* control [[buffer(4)]], constant uint32_t& sampleIdx [[buffer(5)]],         \
-                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(6)]],             \
-                     device const Material* materials [[buffer(7)]],                                                   \
-                     device const GeometryEntry* geometryEntries [[buffer(8)]],                                        \
-                     device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]], \
-                     device const UniformLight* lights [[buffer(11)]], constant uint32_t& queueOffset [[buffer(12)]],  \
-                     device SharcUpdateState* sharcUpdates [[buffer(13)]],                                             \
-                     device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]])                                  \
+    kernel void NAME(                                                                                                  \
+        uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                               \
+        TRAITS::structure accelerationStructure [[buffer(1)]], device const ShadowRay* shadowRays [[buffer(2)]],       \
+        device float4* radianceOut [[buffer(3)]], device const uint32_t* control [[buffer(4)]],                        \
+        constant uint32_t& sampleIdx [[buffer(5)]],                                                                    \
+        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(6)]],                          \
+        device const Material* materials [[buffer(7)]], device const GeometryEntry* geometryEntries [[buffer(8)]],     \
+        device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]],              \
+        device const UniformLight* lights [[buffer(11)]], constant uint32_t& queueOffset [[buffer(12)]],               \
+        device SharcUpdateState* sharcUpdates [[buffer(13)]],                                                          \
+        device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]], TRAITS::table functionTable [[buffer(15)]])   \
     {                                                                                                                  \
         shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, shadowRays, radianceOut, control,       \
-                           sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer,               \
+                           sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer, functionTable, \
                            sharcUpdates, sharcAccumulation);                                                           \
     }
 

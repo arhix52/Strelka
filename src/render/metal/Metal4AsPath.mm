@@ -90,6 +90,18 @@ public:
         return geom;
     }
 
+    NS::Object* makeBoundingBoxGeometry(MTL::Buffer* bounds, size_t offset, uint32_t intersectionFunctionOffset) override
+    {
+        auto* geom = MTL4::AccelerationStructureBoundingBoxGeometryDescriptor::alloc()->init();
+        geom->setBoundingBoxBuffer(bufferRange(bounds, offset));
+        geom->setBoundingBoxCount(1);
+        geom->setBoundingBoxStride(sizeof(MTL::AxisAlignedBoundingBox));
+        geom->setIntersectionFunctionTableOffset(intersectionFunctionOffset);
+        geom->setAllowDuplicateIntersectionFunctionInvocation(false);
+        geom->setOpaque(false);
+        return geom;
+    }
+
     NS::Object* makeMotionTriangleGeometry(MTL::Device* device,
                                            MetalGeometry* geometry,
                                            const oka::Mesh& mesh,
@@ -97,8 +109,7 @@ public:
                                            std::vector<MTL::Buffer*>& motionVertexRangeBuffers) override
     {
         auto* geom = MTL4::AccelerationStructureMotionTriangleGeometryDescriptor::alloc()->init();
-        MTL::Buffer* rangesBuffer =
-            device->newBuffer(2 * sizeof(MTL4::BufferRange), MTL::ResourceStorageModeShared);
+        MTL::Buffer* rangesBuffer = device->newBuffer(2 * sizeof(MTL4::BufferRange), MTL::ResourceStorageModeShared);
         auto* ranges = static_cast<MTL4::BufferRange*>(rangesBuffer->contents());
         const size_t vertexOffset = mesh.mVbOffset * sizeof(Scene::Vertex);
         ranges[0] = bufferRange(geometry->prevVertexBuffer(), vertexOffset);
@@ -120,25 +131,20 @@ public:
                                   size_t controlPointCount) override
     {
         auto* geom = MTL4::AccelerationStructureCurveGeometryDescriptor::alloc()->init();
-        geom->setControlPointBuffer(
-            bufferRange(geometry->curvePointBuffer(), curve.mPointsStart * sizeof(glm::float3)));
+        geom->setControlPointBuffer(bufferRange(geometry->curvePointBuffer(), curve.mPointsStart * sizeof(glm::float3)));
         geom->setControlPointCount(controlPointCount);
         geom->setControlPointFormat(MTL::AttributeFormatFloat3);
         geom->setControlPointStride(sizeof(glm::float3));
-        geom->setRadiusBuffer(
-            bufferRange(geometry->curveRadiusBuffer(), curve.mPointsStart * sizeof(float)));
+        geom->setRadiusBuffer(bufferRange(geometry->curveRadiusBuffer(), curve.mPointsStart * sizeof(float)));
         geom->setRadiusFormat(MTL::AttributeFormatFloat);
         geom->setRadiusStride(sizeof(float));
-        geom->setIndexBuffer(
-            bufferRange(geometry->curveSegmentBuffer(), range.segmentStart * sizeof(uint32_t)));
+        geom->setIndexBuffer(bufferRange(geometry->curveSegmentBuffer(), range.segmentStart * sizeof(uint32_t)));
         geom->setIndexType(MTL::IndexTypeUInt32);
         geom->setSegmentCount(range.segmentCount);
         geom->setSegmentControlPointCount(range.controlPointsPerSegment);
         geom->setCurveType(MTL::CurveTypeRound);
-        geom->setCurveBasis(curve.mType == oka::Curve::Type::eLinear ? MTL::CurveBasisLinear
-                                                                     : MTL::CurveBasisBSpline);
-        geom->setCurveEndCaps(curve.mType == oka::Curve::Type::eLinear ? MTL::CurveEndCapsSphere
-                                                                       : MTL::CurveEndCapsDisk);
+        geom->setCurveBasis(curve.mType == oka::Curve::Type::eLinear ? MTL::CurveBasisLinear : MTL::CurveBasisBSpline);
+        geom->setCurveEndCaps(curve.mType == oka::Curve::Type::eLinear ? MTL::CurveEndCapsSphere : MTL::CurveEndCapsDisk);
         geom->setOpaque(true);
         return geom;
     }
@@ -184,8 +190,7 @@ public:
         return desc;
     }
 
-    void setInstanceDescriptorBuffer(MTL::AccelerationStructureDescriptor* descriptor,
-                                     MTL::Buffer* instanceBuffer) override
+    void setInstanceDescriptorBuffer(MTL::AccelerationStructureDescriptor* descriptor, MTL::Buffer* instanceBuffer) override
     {
         // The base pointer always refers to the instance descriptor built above.
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
@@ -204,10 +209,11 @@ public:
             mDevice->newAccelerationStructure(accelSizes.accelerationStructureSize);
         if (!accelerationStructure)
         {
-            STRELKA_ERROR("Acceleration structure allocation failed: {:.2f} GB requested, "
-                          "{:.2f} GB max buffer. The scene does not fit -- lower "
-                          "render/texture/maxDimension or reduce geometry.",
-                          accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
+            STRELKA_ERROR(
+                "Acceleration structure allocation failed: {:.2f} GB requested, "
+                "{:.2f} GB max buffer. The scene does not fit -- lower "
+                "render/texture/maxDimension or reduce geometry.",
+                accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
             pool->release();
             return nullptr;
         }
@@ -234,10 +240,9 @@ public:
             return nullptr;
         }
         commandEncoder->buildAccelerationStructure(accelerationStructure, m4desc, bufferRange(scratchBuffer));
-        commandEncoder->barrierAfterEncoderStages(MTL::StageAccelerationStructure, MTL::StageAccelerationStructure,
-                                                  MTL4::VisibilityOptionDevice);
-        commandEncoder->writeCompactedAccelerationStructureSize(accelerationStructure,
-                                                                bufferRange(compactedSizeBuffer));
+        commandEncoder->barrierAfterEncoderStages(
+            MTL::StageAccelerationStructure, MTL::StageAccelerationStructure, MTL4::VisibilityOptionDevice);
+        commandEncoder->writeCompactedAccelerationStructureSize(accelerationStructure, bufferRange(compactedSizeBuffer));
         commandEncoder->endEncoding();
         mMetal4->submitAndWait(commandBuffer);
 
@@ -245,8 +250,7 @@ public:
         MTL::AccelerationStructure* compacted = mDevice->newAccelerationStructure(compactedSize);
         if (!compacted)
         {
-            STRELKA_ERROR("Compacted acceleration structure allocation failed: {:.2f} GB requested",
-                          compactedSize / 1e9);
+            STRELKA_ERROR("Compacted acceleration structure allocation failed: {:.2f} GB requested", compactedSize / 1e9);
             removeResident(accelerationStructure);
             removeResident(scratchBuffer);
             removeResident(compactedSizeBuffer);
@@ -300,10 +304,11 @@ public:
         const auto tScratch = std::chrono::steady_clock::now();
         if (!accelerationStructure)
         {
-            STRELKA_ERROR("Acceleration structure allocation failed: {:.2f} GB requested, "
-                          "{:.2f} GB max buffer. The scene does not fit -- lower "
-                          "render/texture/maxDimension or reduce geometry.",
-                          accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
+            STRELKA_ERROR(
+                "Acceleration structure allocation failed: {:.2f} GB requested, "
+                "{:.2f} GB max buffer. The scene does not fit -- lower "
+                "render/texture/maxDimension or reduce geometry.",
+                accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
             return nullptr;
         }
         MTL::Buffer* scratchBuffer =
@@ -390,14 +395,11 @@ public:
         {
             return;
         }
-        mInlineEncoder->barrierAfterEncoderStages(MTL::StageDispatch | MTL::StageBlit,
-                                                  MTL::StageAccelerationStructure,
-                                                  MTL4::VisibilityOptionDevice);
+        mInlineEncoder->barrierAfterEncoderStages(
+            MTL::StageDispatch | MTL::StageBlit, MTL::StageAccelerationStructure, MTL4::VisibilityOptionDevice);
     }
 
-    void build(MTL::AccelerationStructure* as,
-               MTL::AccelerationStructureDescriptor* descriptor,
-               MTL::Buffer* scratch) override
+    void build(MTL::AccelerationStructure* as, MTL::AccelerationStructureDescriptor* descriptor, MTL::Buffer* scratch) override
     {
         assert(mInlineEncoder);
         mInlineEncoder->buildAccelerationStructure(
@@ -405,9 +407,7 @@ public:
             as, static_cast<MTL4::AccelerationStructureDescriptor*>(descriptor), bufferRange(scratch));
     }
 
-    void refit(MTL::AccelerationStructure* as,
-               MTL::AccelerationStructureDescriptor* descriptor,
-               MTL::Buffer* scratch) override
+    void refit(MTL::AccelerationStructure* as, MTL::AccelerationStructureDescriptor* descriptor, MTL::Buffer* scratch) override
     {
         assert(mInlineEncoder);
         mInlineEncoder->refitAccelerationStructure(
@@ -421,9 +421,8 @@ public:
         {
             return;
         }
-        mInlineEncoder->barrierAfterEncoderStages(MTL::StageAccelerationStructure,
-                                                  MTL::StageAccelerationStructure,
-                                                  MTL4::VisibilityOptionDevice);
+        mInlineEncoder->barrierAfterEncoderStages(
+            MTL::StageAccelerationStructure, MTL::StageAccelerationStructure, MTL4::VisibilityOptionDevice);
     }
 
     void barrierAfterTlasBeforeDispatch() override
@@ -432,8 +431,8 @@ public:
         {
             return;
         }
-        mInlineEncoder->barrierAfterEncoderStages(MTL::StageAccelerationStructure, MTL::StageDispatch,
-                                                  MTL4::VisibilityOptionDevice);
+        mInlineEncoder->barrierAfterEncoderStages(
+            MTL::StageAccelerationStructure, MTL::StageDispatch, MTL4::VisibilityOptionDevice);
     }
 
     void endInline() override
@@ -466,4 +465,3 @@ std::unique_ptr<AccelBuildPath> createMetal4AsPath(MTL::Device* device, Metal4Co
 }
 
 } // namespace oka::metal
-

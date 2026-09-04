@@ -60,6 +60,10 @@ public:
 
     virtual NS::Object* makeTriangleGeometry(MetalGeometry* geometry, const oka::Mesh& mesh, uint32_t triangleCount) = 0;
 
+    virtual NS::Object* makeBoundingBoxGeometry(MTL::Buffer* bounds,
+                                                size_t offset,
+                                                uint32_t intersectionFunctionOffset) = 0;
+
     virtual NS::Object* makeMotionTriangleGeometry(MTL::Device* device,
                                                    MetalGeometry* geometry,
                                                    const oka::Mesh& mesh,
@@ -75,16 +79,14 @@ public:
 
     /// Retained primitive descriptor. `geometryDescriptors` are not retained by
     /// the caller beyond this call; the path retains what the descriptor needs.
-    virtual MTL::AccelerationStructureDescriptor* makePrimitiveDescriptor(
-        NS::Array* geometryDescriptors,
-        bool skeletal,
-        bool motionBlur,
-        MTL::AccelerationStructureUsage usage) = 0;
+    virtual MTL::AccelerationStructureDescriptor* makePrimitiveDescriptor(NS::Array* geometryDescriptors,
+                                                                          bool skeletal,
+                                                                          bool motionBlur,
+                                                                          MTL::AccelerationStructureUsage usage) = 0;
 
-    virtual MTL::AccelerationStructureDescriptor* makeInstanceDescriptor(
-        MTL::Buffer* instanceBuffer,
-        size_t instanceCount,
-        MTL::AccelerationStructureUsage usage) = 0;
+    virtual MTL::AccelerationStructureDescriptor* makeInstanceDescriptor(MTL::Buffer* instanceBuffer,
+                                                                         size_t instanceCount,
+                                                                         MTL::AccelerationStructureUsage usage) = 0;
 
     virtual void setInstanceDescriptorBuffer(MTL::AccelerationStructureDescriptor* descriptor,
                                              MTL::Buffer* instanceBuffer) = 0;

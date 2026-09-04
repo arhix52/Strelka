@@ -205,6 +205,11 @@ public:
     MTL::ComputePipelineState* newComputePipelineState(MTL::Library* library,
                                                        const char* functionName,
                                                        MTL::FunctionConstantValues* constants);
+    MTL::ComputePipelineState* newComputePipelineStateLinked(MTL::Library* library,
+                                                             const char* functionName,
+                                                             const char* linkedFunctionName0,
+                                                             const char* linkedFunctionName1,
+                                                             MTL::FunctionConstantValues* constants);
 
 private:
     struct FrameContinuation

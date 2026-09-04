@@ -80,6 +80,12 @@ void MetalWavefrontIntegrator::release()
         safeRelease(kv.second.shadowStatic);
         safeRelease(kv.second.guideMotion);
         safeRelease(kv.second.guideStatic);
+        safeRelease(kv.second.extendTableMotion);
+        safeRelease(kv.second.extendTableStatic);
+        safeRelease(kv.second.shadowTableMotion);
+        safeRelease(kv.second.shadowTableStatic);
+        safeRelease(kv.second.guideTableMotion);
+        safeRelease(kv.second.guideTableStatic);
     }
     mVariants.clear();
     safeRelease(mLibrary);
@@ -131,6 +137,15 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
     add(mControlBuffer);
     add(mTraversalDispatchBuffer);
     add(mStageStatsBuffer);
+    for (const auto& entry : mVariants)
+    {
+        add(entry.second.extendTableMotion);
+        add(entry.second.extendTableStatic);
+        add(entry.second.shadowTableMotion);
+        add(entry.second.shadowTableStatic);
+        add(entry.second.guideTableMotion);
+        add(entry.second.guideTableStatic);
+    }
 }
 
 size_t MetalWavefrontIntegrator::queueBytes() const
@@ -599,6 +614,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             table->setResource(scene.volumeAccelerationStructure->gpuResourceID(), 15);
             bind(mMediumPathStateBuffer, 0, 17);
             bind(scene.lightBuffer, 0, 18);
+            table->setResource(
+                (useMotion ? variant->extendTableMotion : variant->extendTableStatic)->gpuResourceID(), 19);
             const uint32_t batchBegin = chunk.phase == WavefrontChunkPhase::Complete ? 0u : chunk.traversalBatchBegin;
             const uint32_t batchEnd = chunk.phase == WavefrontChunkPhase::Complete ?
                                           traversalBatchCount :
@@ -792,6 +809,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(scene.vertexBuffer, 0, 9);
             bind(scene.indexBuffer, 0, 10);
             bind(scene.lightBuffer, 0, 11);
+            table->setResource(
+                (useMotion ? variant->shadowTableMotion : variant->shadowTableStatic)->gpuResourceID(), 15);
             for (uint32_t batch = 0; batch < shadowBatchCount; ++batch)
             {
                 table->setAddress(ring.push(batch * shadowBatchThreads), 12);
@@ -829,6 +848,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         bind(scene.curvePointBuffer, 0, 10);
         bind(scene.curveSegmentBuffer, 0, 11);
         bind(scene.lightBuffer, 0, 12);
+        table->setResource((useMotion ? variant->guideTableMotion : variant->guideTableStatic)->gpuResourceID(), 13);
         enc->dispatchThreadgroups(fullGrid, tg);
         barrier();
     }
@@ -1157,6 +1177,10 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBytes(&traversalQueueOffset, sizeof(traversalQueueOffset), 16);
             enc->setBuffer(mMediumPathStateBuffer, 0, 17);
             enc->setBuffer(scene.lightBuffer, 0, 18);
+            MTL::IntersectionFunctionTable* extendTable =
+                useMotion ? variant->extendTableMotion : variant->extendTableStatic;
+            enc->setIntersectionFunctionTable(extendTable, 19);
+            enc->useResource(extendTable, MTL::ResourceUsageRead);
             enc->dispatchThreadgroups(mControlBuffer, kDispatchArgsOffset, tg);
             enc->popDebugGroup();
 
@@ -1337,6 +1361,10 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBytes(&traversalQueueOffset, sizeof(traversalQueueOffset), 12);
             enc->setBuffer(mSharcUpdateStateBuffer, 0, 13);
             enc->setBuffer(scene.sharcAccumulationBuffer, 0, 14);
+            MTL::IntersectionFunctionTable* shadowTable =
+                useMotion ? variant->shadowTableMotion : variant->shadowTableStatic;
+            enc->setIntersectionFunctionTable(shadowTable, 15);
+            enc->useResource(shadowTable, MTL::ResourceUsageRead);
             enc->dispatchThreadgroups(mControlBuffer, kShadowArgsOffset, tg);
         }
     }
@@ -1364,6 +1392,9 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         enc->setBuffer(scene.curvePointBuffer ? scene.curvePointBuffer : scene.placeholderBuffer, 0, 10);
         enc->setBuffer(scene.curveSegmentBuffer ? scene.curveSegmentBuffer : scene.placeholderBuffer, 0, 11);
         enc->setBuffer(scene.lightBuffer, 0, 12);
+        MTL::IntersectionFunctionTable* guideTable = useMotion ? variant->guideTableMotion : variant->guideTableStatic;
+        enc->setIntersectionFunctionTable(guideTable, 13);
+        enc->useResource(guideTable, MTL::ResourceUsageRead);
         enc->dispatchThreads(MTL::Size(static_cast<NS::UInteger>(width) * height, 1, 1), tg);
         enc->memoryBarrier(MTL::BarrierScopeBuffers);
     }
@@ -1468,35 +1499,94 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
         return pso;
     };
 
-    // No intersection function, and deliberately so.
-    //
-    // Cutout shadows used to run their alpha test inside an any-hit function
-    // bound through an MTLIntersectionFunctionTable. That mechanism cannot be
-    // used from the Metal 4 queue: every device read an intersection function
-    // makes faults, because neither the residency set nor the argument table
-    // reaches the traversal's own execution context, and Metal 4 has no
-    // useResource to fall back on. The test now runs in `shadowImpl`, from the
-    // kernel -- see the note there, which records how it presented (a GPU hang
-    // on a command buffer doing almost no work) and how it was pinned down.
-    //
-    // Nothing links a function here any more, so the shadow pipelines are built
-    // exactly like every other stage.
+    auto makeTraversal = [&](const std::string& name, bool motion,
+                             MTL::IntersectionFunctionTable*& table) -> MTL::ComputePipelineState* {
+        const std::string suffix = std::string(motion ? "Motion" : "") + (curves ? "Curve" : "");
+        const std::string sphereName = "analyticSphereIntersection" + suffix;
+        const std::string discName = "analyticDiscIntersection" + suffix;
+        MTL::Function* sphere = nullptr;
+        MTL::Function* disc = nullptr;
+        MTL::ComputePipelineState* pso = nullptr;
+        if (useMetal4)
+        {
+            pso = mMetal4->newComputePipelineStateLinked(
+                mLibrary, name.c_str(), sphereName.c_str(), discName.c_str(), values);
+        }
+        else
+        {
+            sphere = mLibrary->newFunction(NS::String::string(sphereName.c_str(), NS::UTF8StringEncoding), values, &err);
+            disc = mLibrary->newFunction(NS::String::string(discName.c_str(), NS::UTF8StringEncoding), values, &err);
+            MTL::Function* kernel =
+                mLibrary->newFunction(NS::String::string(name.c_str(), NS::UTF8StringEncoding), values, &err);
+            if (!sphere || !disc || !kernel)
+            {
+                STRELKA_FATAL("wavefront: loading procedural traversal functions for {}", name);
+            }
+            else
+            {
+                const NS::Object* functions[] = { sphere, disc };
+                auto* linked = MTL::LinkedFunctions::alloc()->init();
+                linked->setFunctions(NS::Array::array(functions, 2));
+                auto* descriptor = MTL::ComputePipelineDescriptor::alloc()->init();
+                descriptor->setComputeFunction(kernel);
+                descriptor->setLinkedFunctions(linked);
+                pso = mDevice->newComputePipelineState(descriptor, MTL::PipelineOptionNone, nullptr, &err);
+                descriptor->release();
+                linked->release();
+            }
+            if (kernel)
+                kernel->release();
+        }
+        if (!pso)
+        {
+            STRELKA_FATAL("wavefront: procedural traversal pipeline {} -> {}", name,
+                          err ? err->localizedDescription()->utf8String() : "unknown error");
+        }
+        else
+        {
+            auto* descriptor = MTL::IntersectionFunctionTableDescriptor::alloc()->init();
+            descriptor->setFunctionCount(ANALYTIC_INTERSECTION_FUNCTION_COUNT);
+            table = pso->newIntersectionFunctionTable(descriptor);
+            descriptor->release();
+            const MTL::FunctionHandle* sphereHandle =
+                sphere ? pso->functionHandle(sphere) :
+                         pso->functionHandle(NS::String::string(sphereName.c_str(), NS::UTF8StringEncoding));
+            const MTL::FunctionHandle* discHandle =
+                disc ? pso->functionHandle(disc) :
+                       pso->functionHandle(NS::String::string(discName.c_str(), NS::UTF8StringEncoding));
+            if (!table || !sphereHandle || !discHandle)
+            {
+                STRELKA_FATAL("wavefront: procedural intersection table {}", name);
+            }
+            else
+            {
+                table->setFunction(sphereHandle, ANALYTIC_INTERSECTION_SPHERE);
+                table->setFunction(discHandle, ANALYTIC_INTERSECTION_DISC);
+            }
+        }
+        if (sphere)
+            sphere->release();
+        if (disc)
+            disc->release();
+        return pso;
+    };
 
     WavefrontVariant v;
     v.generate = make("wavefrontGenerate");
-    v.extendMotion = make(entry("wavefrontExtend").c_str());
-    v.extendStatic = make(entry("wavefrontExtendStatic").c_str());
+    v.extendMotion = makeTraversal(entry("wavefrontExtend"), true, v.extendTableMotion);
+    v.extendStatic = makeTraversal(entry("wavefrontExtendStatic"), false, v.extendTableStatic);
     v.shade = make("wavefrontShade");
     v.restirTemporal = make("wavefrontRestirTemporal");
     v.restirSpatial = make("wavefrontRestirSpatial");
     v.restirFinal = make("wavefrontRestirFinal");
     v.miss = make("wavefrontMiss");
-    v.shadowMotion = make(entry("wavefrontShadow").c_str());
-    v.shadowStatic = make(entry("wavefrontShadowStatic").c_str());
-    v.guideMotion = make(entry("wavefrontGuide").c_str());
-    v.guideStatic = make(entry("wavefrontGuideStatic").c_str());
+    v.shadowMotion = makeTraversal(entry("wavefrontShadow"), true, v.shadowTableMotion);
+    v.shadowStatic = makeTraversal(entry("wavefrontShadowStatic"), false, v.shadowTableStatic);
+    v.guideMotion = makeTraversal(entry("wavefrontGuide"), true, v.guideTableMotion);
+    v.guideStatic = makeTraversal(entry("wavefrontGuideStatic"), false, v.guideTableStatic);
 
     values->release();
+    mResidencyDirty = true;
 
     if (!v.shade)
     {

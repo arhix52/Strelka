@@ -163,8 +163,7 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     compilerDesc->release();
     if (!mCompiler)
     {
-        STRELKA_ERROR("Metal 4 compiler: {}",
-                      error ? error->localizedDescription()->utf8String() : "unknown error");
+        STRELKA_ERROR("Metal 4 compiler: {}", error ? error->localizedDescription()->utf8String() : "unknown error");
         release();
         return false;
     }
@@ -177,8 +176,8 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     tableDesc->release();
     if (!mArgumentTable)
     {
-        STRELKA_ERROR("Metal 4 argument table: {}",
-                      error ? error->localizedDescription()->utf8String() : "unknown error");
+        STRELKA_ERROR(
+            "Metal 4 argument table: {}", error ? error->localizedDescription()->utf8String() : "unknown error");
         release();
         return false;
     }
@@ -191,8 +190,7 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     residencyDesc->release();
     if (!mResidencySet)
     {
-        STRELKA_ERROR("Metal 4 residency set: {}",
-                      error ? error->localizedDescription()->utf8String() : "unknown error");
+        STRELKA_ERROR("Metal 4 residency set: {}", error ? error->localizedDescription()->utf8String() : "unknown error");
         release();
         return false;
     }
@@ -271,8 +269,8 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     }
     commitResidency();
 
-    STRELKA_INFO("Metal 4 submission layer ready: {} frames in flight, {} KB of constants per frame",
-                 frameCount, constantBytesPerFrame / 1024);
+    STRELKA_INFO("Metal 4 submission layer ready: {} frames in flight, {} KB of constants per frame", frameCount,
+                 constantBytesPerFrame / 1024);
     return true;
 }
 
@@ -294,7 +292,7 @@ void Metal4Context::afterFeedback(std::function<void()> work)
     // before the next command buffer is committed.
     auto deferred = std::make_shared<std::function<void()>>(std::move(work));
     dispatch_async(mFeedbackQueue, ^{
-        (*deferred)();
+      (*deferred)();
     });
 }
 
@@ -328,8 +326,7 @@ void Metal4Context::submitAndWait(MTL4::CommandBuffer* commandBuffer)
         if (error)
         {
             STRELKA_ERROR("Metal 4 immediate submission failed: {}",
-                          error->localizedDescription() ? error->localizedDescription()->utf8String()
-                                                       : "unknown error");
+                          error->localizedDescription() ? error->localizedDescription()->utf8String() : "unknown error");
         }
     }));
     mQueue->commit(buffers, 1, options);
@@ -340,9 +337,10 @@ void Metal4Context::submitAndWait(MTL4::CommandBuffer* commandBuffer)
     // commands that are being overwritten. Say so rather than corrupt silently.
     if (!mImmediateEvent->waitUntilSignaledValue(mImmediateValue, kImmediateTimeoutMs))
     {
-        STRELKA_ERROR("Metal 4 immediate submission did not complete within {} ms; the GPU is still reading a "
-                      "command buffer that is about to be reused",
-                      kImmediateTimeoutMs);
+        STRELKA_ERROR(
+            "Metal 4 immediate submission did not complete within {} ms; the GPU is still reading a "
+            "command buffer that is about to be reused",
+            kImmediateTimeoutMs);
     }
 }
 
@@ -376,8 +374,7 @@ uint64_t Metal4Context::submitSkin(MTL4::CommandBuffer* commandBuffer)
         if (error)
         {
             STRELKA_ERROR("Metal 4 skinning submission failed: {}",
-                          error->localizedDescription() ? error->localizedDescription()->utf8String()
-                                                        : "unknown error");
+                          error->localizedDescription() ? error->localizedDescription()->utf8String() : "unknown error");
         }
     }));
     mQueue->commit(buffers, 1, options);
@@ -545,8 +542,8 @@ MTL4::CommandBuffer* Metal4Context::continueFrame(uint32_t frameIndex, uint32_t 
             }
             return nullptr;
         }
-        labelObject(commandBuffer, "strelka.frame[" + std::to_string(slot) + "].chunk[" +
-                                       std::to_string(continuations.size()) + "]");
+        labelObject(commandBuffer,
+                    "strelka.frame[" + std::to_string(slot) + "].chunk[" + std::to_string(continuations.size()) + "]");
         continuations.push_back({ allocator, commandBuffer });
     }
 
@@ -651,6 +648,51 @@ MTL::ComputePipelineState* Metal4Context::newComputePipelineState(MTL::Library* 
     }
     pipelineDesc->release();
     functionDesc->release();
+    return pipeline;
+}
+
+MTL::ComputePipelineState* Metal4Context::newComputePipelineStateLinked(MTL::Library* library,
+                                                                        const char* functionName,
+                                                                        const char* linkedFunctionName0,
+                                                                        const char* linkedFunctionName1,
+                                                                        MTL::FunctionConstantValues* constants)
+{
+    if (!mCompiler || !library)
+        return nullptr;
+    NS::Error* error = nullptr;
+    auto describe = [&](const char* name) -> MTL4::FunctionDescriptor* {
+        auto* function = MTL4::LibraryFunctionDescriptor::alloc()->init();
+        function->setLibrary(library);
+        function->setName(NS::String::string(name, NS::UTF8StringEncoding));
+        if (!constants)
+            return function;
+        auto* specialized = MTL4::SpecializedFunctionDescriptor::alloc()->init();
+        specialized->setFunctionDescriptor(function);
+        specialized->setConstantValues(constants);
+        function->release();
+        return specialized;
+    };
+
+    MTL4::FunctionDescriptor* compute = describe(functionName);
+    MTL4::FunctionDescriptor* linked0 = describe(linkedFunctionName0);
+    MTL4::FunctionDescriptor* linked1 = describe(linkedFunctionName1);
+    auto* pipelineDescriptor = MTL4::ComputePipelineDescriptor::alloc()->init();
+    pipelineDescriptor->setComputeFunctionDescriptor(compute);
+    const NS::Object* functions[] = { linked0, linked1 };
+    auto* linking = MTL4::StaticLinkingDescriptor::alloc()->init();
+    linking->setFunctionDescriptors(NS::Array::array(functions, 2));
+    pipelineDescriptor->setStaticLinkingDescriptor(linking);
+    MTL::ComputePipelineState* pipeline = mCompiler->newComputePipelineState(pipelineDescriptor, nullptr, &error);
+    if (!pipeline)
+    {
+        STRELKA_ERROR("Metal 4 pipeline {} (linking {}, {}): {}", functionName, linkedFunctionName0,
+                      linkedFunctionName1, error ? error->localizedDescription()->utf8String() : "unknown error");
+    }
+    linking->release();
+    pipelineDescriptor->release();
+    compute->release();
+    linked0->release();
+    linked1->release();
     return pipeline;
 }
 

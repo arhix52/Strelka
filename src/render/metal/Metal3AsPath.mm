@@ -82,6 +82,19 @@ public:
         return geom;
     }
 
+    NS::Object* makeBoundingBoxGeometry(MTL::Buffer* bounds, size_t offset, uint32_t intersectionFunctionOffset) override
+    {
+        auto* geom = MTL::AccelerationStructureBoundingBoxGeometryDescriptor::alloc()->init();
+        geom->setBoundingBoxBuffer(bounds);
+        geom->setBoundingBoxBufferOffset(offset);
+        geom->setBoundingBoxCount(1);
+        geom->setBoundingBoxStride(sizeof(MTL::AxisAlignedBoundingBox));
+        geom->setIntersectionFunctionTableOffset(intersectionFunctionOffset);
+        geom->setAllowDuplicateIntersectionFunctionInvocation(false);
+        geom->setOpaque(false);
+        return geom;
+    }
+
     NS::Object* makeMotionTriangleGeometry(MTL::Device*,
                                            MetalGeometry* geometry,
                                            const oka::Mesh& mesh,
@@ -129,10 +142,8 @@ public:
         geom->setSegmentCount(range.segmentCount);
         geom->setSegmentControlPointCount(range.controlPointsPerSegment);
         geom->setCurveType(MTL::CurveTypeRound);
-        geom->setCurveBasis(curve.mType == oka::Curve::Type::eLinear ? MTL::CurveBasisLinear
-                                                                     : MTL::CurveBasisBSpline);
-        geom->setCurveEndCaps(curve.mType == oka::Curve::Type::eLinear ? MTL::CurveEndCapsSphere
-                                                                       : MTL::CurveEndCapsDisk);
+        geom->setCurveBasis(curve.mType == oka::Curve::Type::eLinear ? MTL::CurveBasisLinear : MTL::CurveBasisBSpline);
+        geom->setCurveEndCaps(curve.mType == oka::Curve::Type::eLinear ? MTL::CurveEndCapsSphere : MTL::CurveEndCapsDisk);
         geom->setOpaque(true);
         return geom;
     }
@@ -179,13 +190,11 @@ public:
         return desc;
     }
 
-    void setInstanceDescriptorBuffer(MTL::AccelerationStructureDescriptor* descriptor,
-                                     MTL::Buffer* instanceBuffer) override
+    void setInstanceDescriptorBuffer(MTL::AccelerationStructureDescriptor* descriptor, MTL::Buffer* instanceBuffer) override
     {
         // The base pointer always refers to the instance descriptor built above.
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
-        static_cast<MTL::InstanceAccelerationStructureDescriptor*>(descriptor)
-            ->setInstanceDescriptorBuffer(instanceBuffer);
+        static_cast<MTL::InstanceAccelerationStructureDescriptor*>(descriptor)->setInstanceDescriptorBuffer(instanceBuffer);
     }
 
     MTL::AccelerationStructure* createCompacted(MTL::AccelerationStructureDescriptor* descriptor) override
@@ -196,10 +205,11 @@ public:
             mDevice->newAccelerationStructure(accelSizes.accelerationStructureSize);
         if (!accelerationStructure)
         {
-            STRELKA_ERROR("Acceleration structure allocation failed: {:.2f} GB requested, "
-                          "{:.2f} GB max buffer. The scene does not fit -- lower "
-                          "render/texture/maxDimension or reduce geometry.",
-                          accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
+            STRELKA_ERROR(
+                "Acceleration structure allocation failed: {:.2f} GB requested, "
+                "{:.2f} GB max buffer. The scene does not fit -- lower "
+                "render/texture/maxDimension or reduce geometry.",
+                accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
             pool->release();
             return nullptr;
         }
@@ -208,8 +218,7 @@ public:
         MTL::CommandBuffer* commandBuffer = mCommandQueue->commandBuffer();
         // The top level reads every bottom level named by its instance buffer.
         waitForPriorBuilds(commandBuffer);
-        MTL::AccelerationStructureCommandEncoder* commandEncoder =
-            commandBuffer->accelerationStructureCommandEncoder();
+        MTL::AccelerationStructureCommandEncoder* commandEncoder = commandBuffer->accelerationStructureCommandEncoder();
         MTL::Buffer* compactedSizeBuffer = mDevice->newBuffer(sizeof(uint32_t), MTL::ResourceStorageModeShared);
         commandEncoder->buildAccelerationStructure(accelerationStructure, descriptor, scratchBuffer, 0UL);
         commandEncoder->writeCompactedAccelerationStructureSize(accelerationStructure, compactedSizeBuffer, 0UL);
@@ -220,16 +229,14 @@ public:
         {
             const NS::Error* err = commandBuffer->error();
             STRELKA_ERROR("Acceleration structure build failed on the GPU: {}",
-                          err && err->localizedDescription()
-                              ? err->localizedDescription()->utf8String()
-                              : "unknown error (most likely out of device memory)");
+                          err && err->localizedDescription() ? err->localizedDescription()->utf8String() :
+                                                               "unknown error (most likely out of device memory)");
         }
         const uint32_t compactedSize = *(uint32_t*)compactedSizeBuffer->contents();
         MTL::AccelerationStructure* compacted = mDevice->newAccelerationStructure(compactedSize);
         if (!compacted)
         {
-            STRELKA_ERROR("Compacted acceleration structure allocation failed: {:.2f} GB requested",
-                          compactedSize / 1e9);
+            STRELKA_ERROR("Compacted acceleration structure allocation failed: {:.2f} GB requested", compactedSize / 1e9);
             accelerationStructure->release();
             scratchBuffer->release();
             compactedSizeBuffer->release();
@@ -257,10 +264,11 @@ public:
             mDevice->newAccelerationStructure(accelSizes.accelerationStructureSize);
         if (!accelerationStructure)
         {
-            STRELKA_ERROR("Acceleration structure allocation failed: {:.2f} GB requested, "
-                          "{:.2f} GB max buffer. The scene does not fit -- lower "
-                          "render/texture/maxDimension or reduce geometry.",
-                          accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
+            STRELKA_ERROR(
+                "Acceleration structure allocation failed: {:.2f} GB requested, "
+                "{:.2f} GB max buffer. The scene does not fit -- lower "
+                "render/texture/maxDimension or reduce geometry.",
+                accelSizes.accelerationStructureSize / 1e9, mDevice->maxBufferLength() / 1e9);
             return nullptr;
         }
         // Newly owned buffer intentionally kept as a mutable pointer: it is stored
@@ -321,17 +329,13 @@ public:
     {
     }
 
-    void build(MTL::AccelerationStructure* as,
-               MTL::AccelerationStructureDescriptor* descriptor,
-               MTL::Buffer* scratch) override
+    void build(MTL::AccelerationStructure* as, MTL::AccelerationStructureDescriptor* descriptor, MTL::Buffer* scratch) override
     {
         assert(mSideEncoder);
         mSideEncoder->buildAccelerationStructure(as, descriptor, scratch, 0UL);
     }
 
-    void refit(MTL::AccelerationStructure* as,
-               MTL::AccelerationStructureDescriptor* descriptor,
-               MTL::Buffer* scratch) override
+    void refit(MTL::AccelerationStructure* as, MTL::AccelerationStructureDescriptor* descriptor, MTL::Buffer* scratch) override
     {
         assert(mSideEncoder);
         mSideEncoder->refitAccelerationStructure(as, descriptor, as, scratch, 0UL);
@@ -420,4 +424,3 @@ std::unique_ptr<AccelBuildPath> createMetal3AsPath(MTL::Device* device, MTL::Com
 }
 
 } // namespace oka::metal
-

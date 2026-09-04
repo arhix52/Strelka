@@ -248,6 +248,7 @@ private:
     /// owned the convention.
     static constexpr size_t kNoCurveBlas = ~size_t{ 0 };
     size_t buildCurveBlas(uint32_t sceneInstanceId);
+    size_t buildAnalyticLightBlas(uint32_t intersectionFunctionOffset);
     void ensureScratchBuffer(MTL::Buffer*& buffer, size_t requiredSize);
     void addDescriptorResidency();
     void prepareEmissiveMeshInputs();
@@ -282,6 +283,7 @@ private:
     std::vector<render::EmissiveMeshBuildInput> mSceneEmissiveInputs;
     MTL::Buffer* mEmissiveMeshBuffer = nullptr;
     MTL::Buffer* mEmissiveTriangleBuffer = nullptr;
+    MTL::Buffer* mAnalyticLightBoundsBuffer = nullptr;
     uint32_t mEmissiveMeshCount = 0;
     double mEmissiveMeshPower = 0.0;
     std::vector<MTL::AccelerationStructure*> mPrimitiveAccelerationStructures;

@@ -78,6 +78,8 @@ struct AsBuildState
     // Light instances keep one BLAS per mesh, shared between lights, because
     // their userID must stay the light index.
     std::map<uint32_t, size_t> lightBlasOfMesh;
+    size_t sphereLightBlas = ~size_t{ 0 };
+    size_t discLightBlas = ~size_t{ 0 };
     size_t lightCursor = 0;
 
     // Curve instances. One BLAS per curve set, shared between instances that
@@ -90,8 +92,7 @@ struct AsBuildState
     double phaseMs[(size_t)Phase::Done] = {};
 };
 
-MTL::AccelerationStructure* MetalAccelStructure::createAccelerationStructure(
-    MTL::AccelerationStructureDescriptor* descriptor)
+MTL::AccelerationStructure* MetalAccelStructure::createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor)
 {
     addDescriptorResidency();
     if (mPath)
@@ -123,8 +124,7 @@ MTL::AccelerationStructure* MetalAccelStructure::createAccelerationStructureNoCo
         mPath->commitResidency();
     }
     const auto tAlloc = std::chrono::steady_clock::now();
-    MTL::AccelerationStructure* accelerationStructure =
-        mPath ? mPath->createNoCompact(descriptor) : nullptr;
+    MTL::AccelerationStructure* accelerationStructure = mPath ? mPath->createNoCompact(descriptor) : nullptr;
     const auto tEnd = std::chrono::steady_clock::now();
     if (accelerationStructure)
     {
@@ -140,8 +140,8 @@ MTL::AccelerationStructureUsage MetalAccelStructure::tlasUsage() const
 {
     static const uint32_t kTlasUsage = envUint("STRELKA_TLAS_USAGE", 3);
     return ((kTlasUsage & 1u) ? MTL::AccelerationStructureUsageRefit : MTL::AccelerationStructureUsageNone) |
-           ((kTlasUsage & 2u) ? MTL::AccelerationStructureUsagePreferFastIntersection
-                              : MTL::AccelerationStructureUsageNone);
+           ((kTlasUsage & 2u) ? MTL::AccelerationStructureUsagePreferFastIntersection :
+                                MTL::AccelerationStructureUsageNone);
 }
 
 namespace
@@ -149,8 +149,7 @@ namespace
 MTL::AccelerationStructureUsage blasExtraUsage()
 {
     static const bool disabled = envFlag("STRELKA_NO_PREFER_FAST_INTERSECTION");
-    return disabled ? MTL::AccelerationStructureUsageNone
-                    : MTL::AccelerationStructureUsagePreferFastIntersection;
+    return disabled ? MTL::AccelerationStructureUsageNone : MTL::AccelerationStructureUsagePreferFastIntersection;
 }
 } // namespace
 
@@ -303,8 +302,7 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
 
     NS::Array* geomArray = NS::Array::array(geomDescriptors.data(), geomDescriptors.size());
     MTL::AccelerationStructureDescriptor* primDescriptor = mPath->makePrimitiveDescriptor(
-        geomArray, skeletal, skeletal && mBuildMotionBlas,
-        MTL::AccelerationStructureUsageRefit | blasExtraUsage());
+        geomArray, skeletal, skeletal && mBuildMotionBlas, MTL::AccelerationStructureUsageRefit | blasExtraUsage());
 
     if (skeletal)
     {
@@ -366,12 +364,39 @@ size_t MetalAccelStructure::buildCurveBlas(uint32_t sceneInstanceId)
 
     const NS::Object* const geoms[] = { geom };
     MTL::AccelerationStructureDescriptor* primDescriptor = mPath->makePrimitiveDescriptor(
-        NS::Array::array(geoms, 1), false, false,
-        MTL::AccelerationStructureUsageRefit | blasExtraUsage());
+        NS::Array::array(geoms, 1), false, false, MTL::AccelerationStructureUsageRefit | blasExtraUsage());
     blas.mAs = createAccelerationStructureNoCompact(primDescriptor);
     primDescriptor->release();
     geom->release();
 
+    mBlasList.push_back(blas);
+    mPrimitiveAccelerationStructures.push_back(blas.mAs);
+    return mBlasList.size() - 1;
+}
+
+size_t MetalAccelStructure::buildAnalyticLightBlas(uint32_t intersectionFunctionOffset)
+{
+    if (!mAnalyticLightBoundsBuffer)
+    {
+        const float discThickness = 1e-4f;
+        const MTL::AxisAlignedBoundingBox bounds[] = {
+            { MTL::PackedFloat3(-1.0f, -1.0f, -1.0f), MTL::PackedFloat3(1.0f, 1.0f, 1.0f) },
+            { MTL::PackedFloat3(-1.0f, -1.0f, -discThickness), MTL::PackedFloat3(1.0f, 1.0f, discThickness) },
+        };
+        mAnalyticLightBoundsBuffer = mDevice->newBuffer(bounds, sizeof(bounds), MTL::ResourceStorageModeShared);
+        makeResident(mAnalyticLightBoundsBuffer);
+    }
+
+    const size_t offset = intersectionFunctionOffset * sizeof(MTL::AxisAlignedBoundingBox);
+    NS::Object* geom = mPath->makeBoundingBoxGeometry(mAnalyticLightBoundsBuffer, offset, intersectionFunctionOffset);
+    const NS::Object* const geoms[] = { geom };
+    MTL::AccelerationStructureDescriptor* descriptor =
+        mPath->makePrimitiveDescriptor(NS::Array::array(geoms, 1), false, false, MTL::AccelerationStructureUsageNone);
+
+    Blas blas;
+    blas.mAs = createAccelerationStructureNoCompact(descriptor);
+    descriptor->release();
+    geom->release();
     mBlasList.push_back(blas);
     mPrimitiveAccelerationStructures.push_back(blas.mAs);
     return mBlasList.size() - 1;
@@ -450,9 +475,9 @@ void MetalAccelStructure::rebuild()
     while (!step(0.0))
     {
     }
-    STRELKA_INFO("Acceleration structures rebuilt for motion={} in {:.1f} ms", mBuildMotionBlas,
-                 std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - rebuildStart)
-                     .count());
+    STRELKA_INFO(
+        "Acceleration structures rebuilt for motion={} in {:.1f} ms", mBuildMotionBlas,
+        std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - rebuildStart).count());
 }
 
 bool MetalAccelStructure::step(double budgetMs)
@@ -548,7 +573,7 @@ bool MetalAccelStructure::step(double budgetMs)
         // Release host geometry before AS allocation once builds depend only on GPU offsets and counts.
         // Disabled by default because editor picking still reads the host arrays.
         mGeometry->hostGeometryBytes() = { mScene->getVertices().size() * sizeof(Scene::Vertex),
-                               mScene->getIndices().size() * sizeof(uint32_t) };
+                                           mScene->getIndices().size() * sizeof(uint32_t) };
         if (mSettings->getAs<bool>("scene/releaseHostGeometry") && !mScene->hostGeometryReleased())
         {
             // A no-copy wrap is already using these arrays as GPU storage, so
@@ -786,15 +811,34 @@ bool MetalAccelStructure::step(double budgetMs)
             const oka::Instance& curr = instances[i];
             if (curr.type == oka::Instance::Type::eLight)
             {
-                auto it = st.lightBlasOfMesh.find(curr.mMeshId);
-                if (it == st.lightBlasOfMesh.end())
+                const int lightType =
+                    curr.mLightId < mScene->getLightsDesc().size() ? mScene->getLightsDesc()[curr.mLightId].type : -1;
+                size_t blasIdx = 0;
+                if (lightType == LIGHT_TYPE_SPHERE)
                 {
-                    const size_t blasIdx = buildBlas({ (uint32_t)i }, meshes[curr.mMeshId].isSkeletal);
-                    it = st.lightBlasOfMesh.emplace(curr.mMeshId, blasIdx).first;
+                    if (st.sphereLightBlas == ~size_t{ 0 })
+                        st.sphereLightBlas = buildAnalyticLightBlas(ANALYTIC_INTERSECTION_SPHERE);
+                    blasIdx = st.sphereLightBlas;
+                }
+                else if (lightType == LIGHT_TYPE_DISC)
+                {
+                    if (st.discLightBlas == ~size_t{ 0 })
+                        st.discLightBlas = buildAnalyticLightBlas(ANALYTIC_INTERSECTION_DISC);
+                    blasIdx = st.discLightBlas;
+                }
+                else
+                {
+                    auto it = st.lightBlasOfMesh.find(curr.mMeshId);
+                    if (it == st.lightBlasOfMesh.end())
+                    {
+                        const size_t index = buildBlas({ (uint32_t)i }, meshes[curr.mMeshId].isSkeletal);
+                        it = st.lightBlasOfMesh.emplace(curr.mMeshId, index).first;
+                    }
+                    blasIdx = it->second;
                 }
                 EmittedInstance emitted{};
                 emitted.sceneInstanceId = (uint32_t)i;
-                emitted.asIndex = (uint32_t)it->second;
+                emitted.asIndex = (uint32_t)blasIdx;
                 emitted.userID = curr.mLightId; // lights address the light table, not geometry
                 // Point/spot proxies exist for picking and the gizmo; they are not
                 // emissive surfaces. Putting them on the light mask would treat their
@@ -807,8 +851,6 @@ bool MetalAccelStructure::step(double budgetMs)
                 // spot light was reported occluded and those lights lit nothing at all.
                 // Picking runs on the CPU in Scene::pick() and never consults these
                 // masks, so a proxy invisible to every ray costs nothing.
-                const int lightType =
-                    curr.mLightId < mScene->getLightsDesc().size() ? mScene->getLightsDesc()[curr.mLightId].type : -1;
                 const bool enabled = curr.mLightId < mScene->getLightsDesc().size() ?
                                          mScene->getLightsDesc()[curr.mLightId].enabled :
                                          true;
@@ -867,19 +909,20 @@ bool MetalAccelStructure::step(double budgetMs)
             // Every level of a full mip chain adds a third again.
             texBytes += (size_t)t->width() * t->height() * 4 * 4 / 3;
         }
-        STRELKA_INFO("Memory: vertices {:.2f} GB, indices {:.2f} GB, textures {:.2f} GB with mips; "
-                     "host geometry {}",
-                     vtxBytes / 1e9, idxBytes / 1e9, texBytes / 1e9,
-                     hostFreed ? "released (picking disabled for this scene)" : "kept (doubles the first two)");
+        STRELKA_INFO(
+            "Memory: vertices {:.2f} GB, indices {:.2f} GB, textures {:.2f} GB with mips; "
+            "host geometry {}",
+            vtxBytes / 1e9, idxBytes / 1e9, texBytes / 1e9,
+            hostFreed ? "released (picking disabled for this scene)" : "kept (doubles the first two)");
     }
 
-    STRELKA_INFO("Acceleration structures: {} BLAS ({} geometries, {} groups shared one), "
-                 "{} TLAS instances (from {} scene instances)",
-                 mBlasList.size(), st.mergedGeometries, st.sharedBlas, mEmittedInstances.size(), instances.size());
+    STRELKA_INFO(
+        "Acceleration structures: {} BLAS ({} geometries, {} groups shared one), "
+        "{} TLAS instances (from {} scene instances)",
+        mBlasList.size(), st.mergedGeometries, st.sharedBlas, mEmittedInstances.size(), instances.size());
     STRELKA_INFO("Geometry opacity: {} opaque, {} cutout ({:.1f}% of geometries need the alpha test)",
                  mOpaqueGeometryCount, mCutoutGeometryCount,
-                 100.0 * mCutoutGeometryCount /
-                     std::max<uint32_t>(1u, mOpaqueGeometryCount + mCutoutGeometryCount));
+                 100.0 * mCutoutGeometryCount / std::max<uint32_t>(1u, mOpaqueGeometryCount + mCutoutGeometryCount));
 
     // Per-geometry lookup table consumed by the kernel.
     mGeometry->uploadGeometryEntryBuffer();
@@ -895,8 +938,7 @@ bool MetalAccelStructure::step(double budgetMs)
     // resident, and reported by the queue as kIOGPUCommandBufferCallbackErrorHang.
     retireResident(mInstanceBuffer);
     mInstanceBuffer = mDevice->newBuffer(
-        sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor) *
-            std::max<size_t>(mEmittedInstances.size(), 1),
+        sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor) * std::max<size_t>(mEmittedInstances.size(), 1),
         MTL::ResourceStorageModeShared);
     auto* instanceDescriptors =
         static_cast<MTL::IndirectAccelerationStructureInstanceDescriptor*>(mInstanceBuffer->contents());
@@ -915,9 +957,9 @@ bool MetalAccelStructure::step(double budgetMs)
         // a scene without cutouts -- force opacity on the intersector instead,
         // which overrides this and costs them nothing.
         const bool lightProxy = (e.mask & (GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_LIGHT_HIDDEN)) != 0;
-        instanceDescriptors[d].options = (mMaterials->hasAlphaMaterials() || lightProxy)
-                                             ? MTL::AccelerationStructureInstanceOptionNone
-                                             : MTL::AccelerationStructureInstanceOptionOpaque;
+        instanceDescriptors[d].options = (mMaterials->hasAlphaMaterials() || lightProxy) ?
+                                             MTL::AccelerationStructureInstanceOptionNone :
+                                             MTL::AccelerationStructureInstanceOptionOpaque;
         instanceDescriptors[d].intersectionFunctionTableOffset = 0;
         instanceDescriptors[d].userID = e.userID;
         instanceDescriptors[d].mask = e.mask;
@@ -949,8 +991,7 @@ bool MetalAccelStructure::step(double budgetMs)
         mTlasDescriptor->release();
         mTlasDescriptor = nullptr;
     }
-    mTlasDescriptor =
-        mPath->makeInstanceDescriptor(mInstanceBuffer, mEmittedInstances.size(), tlasUsage());
+    mTlasDescriptor = mPath->makeInstanceDescriptor(mInstanceBuffer, mEmittedInstances.size(), tlasUsage());
 
     // The empty top level the load has been tracing against may still be read by
     // a frame in flight, so it goes on the retire list rather than being freed
@@ -963,34 +1004,31 @@ bool MetalAccelStructure::step(double budgetMs)
     mInstanceAccelerationStructure = createAccelerationStructure(mTlasDescriptor);
     if (!mInstanceAccelerationStructure)
     {
-        STRELKA_ERROR("Top-level acceleration structure could not be built; every ray will miss "
-                      "and the image will be black.");
+        STRELKA_ERROR(
+            "Top-level acceleration structure could not be built; every ray will miss "
+            "and the image will be black.");
     }
 
     // A mask cannot remove curve BLAS traversal, so volume rays use a triangle-only TLAS.
     // Bottom levels and descriptors remain shared; only the top-level hierarchy is duplicated.
-    const auto firstCurve = std::ranges::find_if(mEmittedInstances,
-                                         [](const EmittedInstance& e) {
-                                             return e.mask == GEOMETRY_MASK_CURVE;
-                                         });
-    mVolumeTlasInstanceCount = firstCurve != mEmittedInstances.end()
-                                   ? static_cast<size_t>(firstCurve - mEmittedInstances.begin())
-                                   : 0;
+    const auto firstCurve =
+        std::ranges::find_if(mEmittedInstances, [](const EmittedInstance& e) { return e.mask == GEOMETRY_MASK_CURVE; });
+    mVolumeTlasInstanceCount =
+        firstCurve != mEmittedInstances.end() ? static_cast<size_t>(firstCurve - mEmittedInstances.begin()) : 0;
     if (firstCurve != mEmittedInstances.end() && mVolumeTlasInstanceCount > 0)
     {
-        mVolumeTlasDescriptor =
-            mPath->makeInstanceDescriptor(mInstanceBuffer, mVolumeTlasInstanceCount, tlasUsage());
+        mVolumeTlasDescriptor = mPath->makeInstanceDescriptor(mInstanceBuffer, mVolumeTlasInstanceCount, tlasUsage());
         mVolumeInstanceAccelerationStructure = createAccelerationStructure(mVolumeTlasDescriptor);
         if (mVolumeInstanceAccelerationStructure)
         {
             STRELKA_INFO("Volume TLAS: {} triangle instances, curve BLAS excluded ({:.3f} MB)",
-                         mVolumeTlasInstanceCount,
-                         mVolumeInstanceAccelerationStructure->size() / 1e6);
+                         mVolumeTlasInstanceCount, mVolumeInstanceAccelerationStructure->size() / 1e6);
         }
         else
         {
-            STRELKA_ERROR("Triangle-only volume TLAS could not be built; bounded-medium traversal "
-                          "will fall back to the main top level");
+            STRELKA_ERROR(
+                "Triangle-only volume TLAS could not be built; bounded-medium traversal "
+                "will fall back to the main top level");
         }
     }
     {
@@ -1003,7 +1041,7 @@ bool MetalAccelStructure::step(double budgetMs)
             else
                 ++nullAs;
         }
-                // The largest few, because a structure that should have been shared and
+        // The largest few, because a structure that should have been shared and
         // was not is worth several gigabytes and is invisible in the total.
         {
             std::vector<std::pair<size_t, size_t>> bySize;
@@ -1016,24 +1054,23 @@ bool MetalAccelStructure::step(double budgetMs)
             std::ranges::sort(std::views::reverse(bySize));
             for (size_t k = 0; k < std::min<size_t>(5, bySize.size()); ++k)
             {
-                STRELKA_INFO("  BLAS {} : {:.2f} GB, geometry base {}", bySize[k].second,
-                             bySize[k].first / 1e9, mBlasList[bySize[k].second].mGeometryBase);
+                STRELKA_INFO("  BLAS {} : {:.2f} GB, geometry base {}", bySize[k].second, bySize[k].first / 1e9,
+                             mBlasList[bySize[k].second].mGeometryBase);
             }
         }
-    STRELKA_INFO("BLAS build CPU: encode {:.0f} ms ({} structures)", mBlasEncodeMs, mBlasCount);
-    STRELKA_INFO("Structures: BLAS {:.2f} GB ({} failed), TLAS {:.3f} GB, device max buffer {:.2f} GB",
-                     asBytes / 1e9, nullAs,
-                     mInstanceAccelerationStructure ? mInstanceAccelerationStructure->size() / 1e9 : 0.0,
+        STRELKA_INFO("BLAS build CPU: encode {:.0f} ms ({} structures)", mBlasEncodeMs, mBlasCount);
+        STRELKA_INFO("Structures: BLAS {:.2f} GB ({} failed), TLAS {:.3f} GB, device max buffer {:.2f} GB", asBytes / 1e9,
+                     nullAs, mInstanceAccelerationStructure ? mInstanceAccelerationStructure->size() / 1e9 : 0.0,
                      mDevice->maxBufferLength() / 1e9);
     }
     mTlasInstanceCount = mEmittedInstances.size();
 
     chargePhase();
-    STRELKA_DEBUG("Acceleration structures CPU: meshes {:.0f} ms, grouping {:.0f} ms, blas {:.0f} ms, "
-                  "curves {:.0f} ms, lights {:.0f} ms, finish {:.0f} ms",
-                  st.phaseMs[(size_t)Phase::Meshes], st.phaseMs[(size_t)Phase::Grouping],
-                  st.phaseMs[(size_t)Phase::Blas], st.phaseMs[(size_t)Phase::Curves],
-                  st.phaseMs[(size_t)Phase::Lights], st.phaseMs[(size_t)Phase::Finish]);
+    STRELKA_DEBUG(
+        "Acceleration structures CPU: meshes {:.0f} ms, grouping {:.0f} ms, blas {:.0f} ms, "
+        "curves {:.0f} ms, lights {:.0f} ms, finish {:.0f} ms",
+        st.phaseMs[(size_t)Phase::Meshes], st.phaseMs[(size_t)Phase::Grouping], st.phaseMs[(size_t)Phase::Blas],
+        st.phaseMs[(size_t)Phase::Curves], st.phaseMs[(size_t)Phase::Lights], st.phaseMs[(size_t)Phase::Finish]);
     delete mAsBuild;
     mAsBuild = nullptr;
     return finish(true);
@@ -1119,17 +1156,14 @@ void MetalAccelStructure::encodeTlasUpdates()
     releaseRetiredInstanceStructures(kMaxFramesInFlight);
 
     mPath->barrierBeforeTlas();
-    auto update = [&](MTL::AccelerationStructure*& structure,
-                      MTL::AccelerationStructureDescriptor* descriptor,
-                      MTL::Buffer*& scratch,
-                      bool countUnchanged) {
+    auto update = [&](MTL::AccelerationStructure*& structure, MTL::AccelerationStructureDescriptor* descriptor,
+                      MTL::Buffer*& scratch, bool countUnchanged) {
         if (!descriptor)
         {
             return;
         }
         const MTL::AccelerationStructureSizes sizes = mPath->sizes(descriptor);
-        const bool canRefit = structure && countUnchanged &&
-                              structure->size() >= sizes.accelerationStructureSize;
+        const bool canRefit = structure && countUnchanged && structure->size() >= sizes.accelerationStructureSize;
         if (canRefit)
         {
             ensureScratchBuffer(scratch, sizes.refitScratchBufferSize);
@@ -1160,8 +1194,7 @@ void MetalAccelStructure::encodeTlasUpdates()
     update(mInstanceAccelerationStructure, mTlasDescriptor, mTlasScratchBuffer,
            mTlasInstanceCount == mEmittedInstances.size());
     mTlasInstanceCount = mEmittedInstances.size();
-    update(mVolumeInstanceAccelerationStructure, mVolumeTlasDescriptor,
-           mVolumeTlasScratchBuffer, true);
+    update(mVolumeInstanceAccelerationStructure, mVolumeTlasDescriptor, mVolumeTlasScratchBuffer, true);
 
     mPath->barrierAfterTlasBeforeDispatch();
 }
@@ -1239,8 +1272,7 @@ void MetalAccelStructure::writeInstanceTransforms(MTL::Buffer* buffer)
         return;
     }
     const std::vector<oka::Instance>& instances = mScene->getInstances();
-    auto* instanceDescriptors =
-        static_cast<MTL::IndirectAccelerationStructureInstanceDescriptor*>(buffer->contents());
+    auto* instanceDescriptors = static_cast<MTL::IndirectAccelerationStructureInstanceDescriptor*>(buffer->contents());
 
     for (size_t d = 0; d < mEmittedInstances.size(); ++d)
     {
@@ -1266,8 +1298,8 @@ void MetalAccelStructure::buildEmptyTopLevel()
     // combination not worth relying on. The contents are never read.
     if (!mInstanceBuffer)
     {
-        mInstanceBuffer = mDevice->newBuffer(sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor),
-                                             MTL::ResourceStorageModeShared);
+        mInstanceBuffer = mDevice->newBuffer(
+            sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor), MTL::ResourceStorageModeShared);
         if (!mInstanceBuffer)
         {
             return;
@@ -1278,8 +1310,9 @@ void MetalAccelStructure::buildEmptyTopLevel()
     mInstanceAccelerationStructure = createAccelerationStructureNoCompact(mTlasDescriptor);
     if (!mInstanceAccelerationStructure)
     {
-        STRELKA_ERROR("Empty top-level acceleration structure could not be built; the scene will show "
-                      "nothing until its geometry has loaded.");
+        STRELKA_ERROR(
+            "Empty top-level acceleration structure could not be built; the scene will show "
+            "nothing until its geometry has loaded.");
         return;
     }
     mTlasInstanceCount = 0;
@@ -1336,8 +1369,7 @@ void MetalAccelStructure::publishPartialTopLevel()
         makeResident(mInstanceBuffer);
     }
 
-    auto* descriptors =
-        static_cast<MTL::IndirectAccelerationStructureInstanceDescriptor*>(mInstanceBuffer->contents());
+    auto* descriptors = static_cast<MTL::IndirectAccelerationStructureInstanceDescriptor*>(mInstanceBuffer->contents());
     for (size_t d = 0; d < count; ++d)
     {
         const EmittedInstance& e = mEmittedInstances[d];
@@ -1348,9 +1380,8 @@ void MetalAccelStructure::publishPartialTopLevel()
             return;
         }
         descriptors[d].accelerationStructureID = mBlasList[e.asIndex].mAs->gpuResourceID();
-        descriptors[d].options = mMaterials->hasAlphaMaterials()
-                                     ? MTL::AccelerationStructureInstanceOptionNone
-                                     : MTL::AccelerationStructureInstanceOptionOpaque;
+        descriptors[d].options = mMaterials->hasAlphaMaterials() ? MTL::AccelerationStructureInstanceOptionNone :
+                                                                   MTL::AccelerationStructureInstanceOptionOpaque;
         descriptors[d].intersectionFunctionTableOffset = 0;
         descriptors[d].userID = e.userID;
         descriptors[d].mask = e.mask;
@@ -1422,8 +1453,7 @@ void MetalAccelStructure::rebuildTLAS()
         }
         mMetal4->commitResidency();
         MTL4::CommandBuffer* commandBuffer = mMetal4->beginImmediate();
-        MTL4::ComputeCommandEncoder* encoder =
-            commandBuffer ? commandBuffer->computeCommandEncoder() : nullptr;
+        MTL4::ComputeCommandEncoder* encoder = commandBuffer ? commandBuffer->computeCommandEncoder() : nullptr;
         labelMetal4(encoder, "accel side update");
         if (!encoder)
         {
@@ -1470,8 +1500,9 @@ void MetalAccelStructure::init(MTL::Device* device,
     else
     {
         mPath = createMetal3AsPath(device, queue);
-        STRELKA_INFO("Acceleration structures: Metal 3 path (side queue; device lacks "
-                     "Metal 4 ray tracing)");
+        STRELKA_INFO(
+            "Acceleration structures: Metal 3 path (side queue; device lacks "
+            "Metal 4 ray tracing)");
     }
 }
 
@@ -1509,6 +1540,7 @@ void MetalAccelStructure::addDescriptorResidency()
     mMetal4->addResident(mGeometry->curvePointBuffer());
     mMetal4->addResident(mGeometry->curveRadiusBuffer());
     mMetal4->addResident(mGeometry->curveSegmentBuffer());
+    mMetal4->addResident(mAnalyticLightBoundsBuffer);
     mMetal4->addResident(mInstanceBuffer);
     mMetal4->addResident(mPreviousInstanceBuffer);
     for (const Blas& blas : mBlasList)
@@ -1563,8 +1595,7 @@ std::vector<MTL::Buffer*> MetalAccelStructure::accelerationStructureAuxiliaryBuf
         {
             buffers.push_back(blas.mScratch);
         }
-        buffers.insert(buffers.end(), blas.mMotionVertexRangeBuffers.begin(),
-                       blas.mMotionVertexRangeBuffers.end());
+        buffers.insert(buffers.end(), blas.mMotionVertexRangeBuffers.begin(), blas.mMotionVertexRangeBuffers.end());
     }
     return buffers;
 }
@@ -1619,6 +1650,8 @@ void MetalAccelStructure::release()
     safeRelease(mEmissiveMeshBuffer);
     removeResident(mEmissiveTriangleBuffer);
     safeRelease(mEmissiveTriangleBuffer);
+    removeResident(mAnalyticLightBoundsBuffer);
+    safeRelease(mAnalyticLightBoundsBuffer);
     mSceneEmissiveInputs.clear();
     mEmissiveMeshCount = 0u;
     mEmissiveMeshPower = 0.0;

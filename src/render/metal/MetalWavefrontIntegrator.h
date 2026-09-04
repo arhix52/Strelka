@@ -36,6 +36,12 @@ struct WavefrontVariant
     MTL::ComputePipelineState* shadowStatic = nullptr;
     MTL::ComputePipelineState* guideMotion = nullptr;
     MTL::ComputePipelineState* guideStatic = nullptr;
+    MTL::IntersectionFunctionTable* extendTableMotion = nullptr;
+    MTL::IntersectionFunctionTable* extendTableStatic = nullptr;
+    MTL::IntersectionFunctionTable* shadowTableMotion = nullptr;
+    MTL::IntersectionFunctionTable* shadowTableStatic = nullptr;
+    MTL::IntersectionFunctionTable* guideTableMotion = nullptr;
+    MTL::IntersectionFunctionTable* guideTableStatic = nullptr;
 };
 
 // Non-owning resources assembled by MetalRender for each encode.
