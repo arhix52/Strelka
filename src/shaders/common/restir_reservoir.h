@@ -49,6 +49,15 @@ DEVICE_FUNC float restirReservoirMergeWeight(const THREAD_REF RestirReservoirSta
                0.0f;
 }
 
+DEVICE_FUNC void restirReservoirLimitM(THREAD_REF RestirReservoirState& reservoir, unsigned int maxM)
+{
+    if (maxM > 0u && reservoir.M > maxM)
+    {
+        reservoir.weightSum *= float(maxM) / float(reservoir.M);
+        reservoir.M = maxM;
+    }
+}
+
 DEVICE_FUNC bool restirSurfaceCompatible(float currentDepth,
                                          float previousDepth,
                                          float normalDot,

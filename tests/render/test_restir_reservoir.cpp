@@ -91,3 +91,13 @@ TEST_CASE("ReSTIR history rejects disocclusion and incompatible surfaces")
     CHECK_FALSE(restirSurfaceCompatible(2.0f, 2.1f, 0.95f, 7u, 8u, true));
     CHECK_FALSE(restirSurfaceCompatible(2.0f, 2.1f, 0.95f, 7u, 7u, false));
 }
+
+TEST_CASE("ReSTIR M limit preserves reservoir normalization")
+{
+    RestirReservoirState reservoir{ 400.0f, 2.0f, 200u, RESTIR_RESERVOIR_VALID };
+    const float before = restirReservoirNormalization(reservoir);
+    restirReservoirLimitM(reservoir, 50u);
+    CHECK(reservoir.M == 50u);
+    CHECK(reservoir.weightSum == doctest::Approx(100.0f));
+    CHECK(restirReservoirNormalization(reservoir) == doctest::Approx(before));
+}

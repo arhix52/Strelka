@@ -64,6 +64,7 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mRestirReservoirBuffer[1]);
     safeRelease(mRestirSurfaceHistoryBuffer[0]);
     safeRelease(mRestirSurfaceHistoryBuffer[1]);
+    safeRelease(mRestirShadingPointBuffer);
     safeRelease(mMissQueueBuffer);
     for (auto& kv : mVariants)
     {
@@ -71,6 +72,8 @@ void MetalWavefrontIntegrator::release()
         safeRelease(kv.second.extendMotion);
         safeRelease(kv.second.extendStatic);
         safeRelease(kv.second.shade);
+        safeRelease(kv.second.restirSpatial);
+        safeRelease(kv.second.restirFinal);
         safeRelease(kv.second.miss);
         safeRelease(kv.second.shadowMotion);
         safeRelease(kv.second.shadowStatic);
@@ -123,6 +126,7 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
     add(mRestirReservoirBuffer[1]);
     add(mRestirSurfaceHistoryBuffer[0]);
     add(mRestirSurfaceHistoryBuffer[1]);
+    add(mRestirShadingPointBuffer);
     add(mControlBuffer);
     add(mTraversalDispatchBuffer);
     add(mStageStatsBuffer);
@@ -137,7 +141,8 @@ size_t MetalWavefrontIntegrator::queueBytes() const
            bufBytes(mControlBuffer) + bufBytes(mTraversalDispatchBuffer) + bufBytes(mShadowRayBuffer) +
            bufBytes(mHitQueueBuffer) + bufBytes(mMissQueueBuffer) + bufBytes(mAovBuffer) + bufBytes(mStageStatsBuffer) +
            bufBytes(mRestirReservoirBuffer[0]) + bufBytes(mRestirReservoirBuffer[1]) +
-           bufBytes(mRestirSurfaceHistoryBuffer[0]) + bufBytes(mRestirSurfaceHistoryBuffer[1]);
+           bufBytes(mRestirSurfaceHistoryBuffer[0]) + bufBytes(mRestirSurfaceHistoryBuffer[1]) +
+           bufBytes(mRestirShadingPointBuffer);
 }
 
 // Two timestamps per stage (encoder start and end), so the counter buffer holds
@@ -150,6 +155,8 @@ enum StageKind : uint8_t
     kStagePrepare,
     kStageExtend,
     kStageShade,
+    kStageRestirSpatial,
+    kStageRestirFinal,
     kStagePrepareShadow,
     kStageShadow,
     kStageMiss,
@@ -158,8 +165,9 @@ enum StageKind : uint8_t
     kStageSort,
     kStageCount
 };
-const char* const kStageNames[kStageCount] = { "generate", "prepare", "extend", "shade",   "prepShadow",
-                                               "shadow",   "miss",    "guide",  "resolve", "sort" };
+const char* const kStageNames[kStageCount] = { "generate",      "prepare",     "extend",     "shade",
+                                               "restirSpatial", "restirFinal", "prepShadow", "shadow",
+                                               "miss",          "guide",       "resolve",    "sort" };
 } // namespace
 
 // A timestamp counter buffer, if the device can sample at dispatch boundaries.
@@ -695,6 +703,49 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
             barrier();
 
+            if (uniforms->restirDIEnabled != 0u && !sharcUpdate)
+            {
+                mark(kStageRestirSpatial);
+                enc->setComputePipelineState(variant->restirSpatial);
+                bind(uniformBuffer, 0, 0);
+                bind(scene.instanceBuffer, 0, 1);
+                bind(scene.iesBuffer, 0, 2);
+                bind(scene.lightBuffer, 0, 3);
+                bind(scene.materialBuffer, 0, 4);
+                bind(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 5);
+                bind(scene.vertexBuffer, 0, 6);
+                bind(scene.prevVertexBuffer, 0, 7);
+                bind(scene.indexBuffer, 0, 8);
+                bind(mHitQueueBuffer, 0, 9);
+                if (scene.environment && scene.environment->state().mapTexture)
+                {
+                    table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
+                }
+                enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
+                barrier();
+
+                mark(kStageRestirFinal);
+                enc->setComputePipelineState(variant->restirFinal);
+                bind(uniformBuffer, 0, 0);
+                bind(scene.instanceBuffer, 0, 1);
+                bind(scene.iesBuffer, 0, 2);
+                bind(scene.lightBuffer, 0, 3);
+                bind(scene.materialBuffer, 0, 4);
+                bind(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 5);
+                bind(scene.vertexBuffer, 0, 6);
+                bind(scene.prevVertexBuffer, 0, 7);
+                bind(scene.indexBuffer, 0, 8);
+                bind(mHitQueueBuffer, 0, 9);
+                bind(mShadowRayBuffer, 0, 10);
+                bind(mControlBuffer, kShadowCounterOffset, 11);
+                if (scene.environment && scene.environment->state().mapTexture)
+                {
+                    table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
+                }
+                enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
+                barrier();
+            }
+
             enc->setComputePipelineState(mPrepareShadowPSO4);
             bind(mControlBuffer, 0, 0);
             table->setAddress(groupSize, 1);
@@ -956,6 +1007,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         e->useResource(mRestirReservoirBuffer[1], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
         e->useResource(mRestirSurfaceHistoryBuffer[0], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
         e->useResource(mRestirSurfaceHistoryBuffer[1], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+        e->useResource(mRestirShadingPointBuffer, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
     };
     declareResidency(enc);
 
@@ -1170,6 +1222,50 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->dispatchThreadgroups(mControlBuffer, kHitArgsOffset, tg);
             enc->popDebugGroup();
 
+            if (uniforms->restirDIEnabled != 0u && !sharcUpdate)
+            {
+                enc->memoryBarrier(MTL::BarrierScopeBuffers);
+                stamp(kStageRestirSpatial);
+                enc->setComputePipelineState(variant->restirSpatial);
+                enc->setBuffer(uniformBuffer, 0, 0);
+                enc->setBuffer(scene.instanceBuffer, 0, 1);
+                enc->setBuffer(scene.iesBuffer, 0, 2);
+                enc->setBuffer(scene.lightBuffer, 0, 3);
+                enc->setBuffer(scene.materialBuffer, 0, 4);
+                enc->setBuffer(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 5);
+                enc->setBuffer(scene.vertexBuffer, 0, 6);
+                enc->setBuffer(scene.prevVertexBuffer, 0, 7);
+                enc->setBuffer(scene.indexBuffer, 0, 8);
+                enc->setBuffer(mHitQueueBuffer, 0, 9);
+                if (scene.environment && scene.environment->state().mapTexture)
+                {
+                    enc->setTexture(scene.environment->state().mapTexture, 0);
+                }
+                enc->dispatchThreadgroups(mControlBuffer, kHitArgsOffset, tg);
+
+                enc->memoryBarrier(MTL::BarrierScopeBuffers);
+                stamp(kStageRestirFinal);
+                enc->setComputePipelineState(variant->restirFinal);
+                enc->setBuffer(uniformBuffer, 0, 0);
+                enc->setBuffer(scene.instanceBuffer, 0, 1);
+                enc->setBuffer(scene.iesBuffer, 0, 2);
+                enc->setBuffer(scene.lightBuffer, 0, 3);
+                enc->setBuffer(scene.materialBuffer, 0, 4);
+                enc->setBuffer(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 5);
+                enc->setBuffer(scene.vertexBuffer, 0, 6);
+                enc->setBuffer(scene.prevVertexBuffer, 0, 7);
+                enc->setBuffer(scene.indexBuffer, 0, 8);
+                enc->setBuffer(mHitQueueBuffer, 0, 9);
+                enc->setBuffer(mShadowRayBuffer, 0, 10);
+                enc->setBuffer(mControlBuffer, kShadowCounterOffset, 11);
+                if (scene.environment && scene.environment->state().mapTexture)
+                {
+                    enc->setTexture(scene.environment->state().mapTexture, 0);
+                }
+                enc->dispatchThreadgroups(mControlBuffer, kHitArgsOffset, tg);
+                enc->memoryBarrier(MTL::BarrierScopeBuffers);
+            }
+
             // Resolve this bounce's direct light before the next bounce contributes emission.
             stamp(kStagePrepareShadow);
             enc->setComputePipelineState(mPrepareShadowPSO);
@@ -1349,6 +1445,8 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     v.extendMotion = make(entry("wavefrontExtend").c_str());
     v.extendStatic = make(entry("wavefrontExtendStatic").c_str());
     v.shade = make("wavefrontShade");
+    v.restirSpatial = make("wavefrontRestirSpatial");
+    v.restirFinal = make("wavefrontRestirFinal");
     v.miss = make("wavefrontMiss");
     v.shadowMotion = make(entry("wavefrontShadow").c_str());
     v.shadowStatic = make(entry("wavefrontShadowStatic").c_str());
@@ -1481,6 +1579,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height, ui
     release(mRestirReservoirBuffer[1]);
     release(mRestirSurfaceHistoryBuffer[0]);
     release(mRestirSurfaceHistoryBuffer[1]);
+    release(mRestirShadingPointBuffer);
 
     metal::WavefrontElementSizes sz;
     sz.pathState = sizeof(PathState);
@@ -1495,6 +1594,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height, ui
     sz.aovSample = sizeof(AovSample);
     sz.restirReservoir = sizeof(RestirReservoir);
     sz.restirSurfaceHistory = sizeof(RestirSurfaceHistory);
+    sz.restirShadingPoint = sizeof(RestirShadingPoint);
     const metal::WavefrontBufferLayout layout = metal::wavefrontBufferLayout(width, height, sz, sharcUpdateDownscale);
 
     // Private storage: these never leave the GPU.
@@ -1533,6 +1633,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height, ui
         mRestirSurfaceHistoryBuffer[i] =
             mDevice->newBuffer(layout.restirSurfaceHistoryBytes, MTL::ResourceStorageModePrivate);
     }
+    mRestirShadingPointBuffer = mDevice->newBuffer(layout.restirShadingPointBytes, MTL::ResourceStorageModePrivate);
 
     mCapacity = pixels;
     mSharcUpdateDownscale = sharcUpdateDownscale;

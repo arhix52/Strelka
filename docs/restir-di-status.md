@@ -1,6 +1,6 @@
 # ReSTIR DI status
 
-Current phase: B — Temporal reuse
+Current phase: C — Spatial reuse
 
 Completed:
 - Preflight: Debug CTest 4/4; existing light-sampling and MIS fixes present.
@@ -14,14 +14,17 @@ Completed:
 - Double-buffered reservoirs and surface history with motion reprojection.
 - History rejects cuts, reset/resolution/topology changes, disocclusion, normal/material mismatch and excessive age.
 - Reused samples are reconstructed and evaluated with the current target; visibility is not reused.
+- Spatial reuse reads an immutable reservoir set, samples up to 16 deterministic frame-rotated neighbors and writes a second set.
+- Depth, geometric normal, material and geometry validity gate every neighbor; one final pass emits one shadow ray.
 
 Open:
-- Spatial reuse, explicit wavefront passes, image validation and benchmark.
+- Runtime CLI/config exposure, image validation and benchmark.
 - Actual MTLDevice execution for the completed implementation.
 
 Commits:
 - `c8e9ded` ReSTIR reservoir and initial RIS
-- Add ReSTIR temporal reuse (this phase)
+- `c710fb6` Add ReSTIR temporal reuse
+- Add ReSTIR spatial reuse (this phase)
 
 Tests:
 - `cd build/Debug && ctest --output-on-failure`
@@ -30,5 +33,5 @@ Tests:
 
 Benchmark NEE vs ReSTIR: pending
 GPU time: pending
-Reservoir memory: 96 bytes/pixel double-buffered; surface history adds 64 bytes/pixel
+Reservoir memory: 96 bytes/pixel double-buffered; history/work data adds 192 bytes/pixel
 External MTLDevice test: `STRELKA_STAGES=1 ./build/Release/StrelkaCLI --config <scene.toml>`

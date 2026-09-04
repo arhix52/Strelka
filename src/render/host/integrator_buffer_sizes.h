@@ -25,6 +25,7 @@ struct WavefrontElementSizes
     size_t aovSample = 0;
     size_t restirReservoir = 0;
     size_t restirSurfaceHistory = 0;
+    size_t restirShadingPoint = 0;
 };
 
 struct WavefrontBufferLayout
@@ -47,6 +48,7 @@ struct WavefrontBufferLayout
     size_t missQueueBytes = 0;
     size_t restirReservoirBytes = 0; // one of two history buffers
     size_t restirSurfaceHistoryBytes = 0; // one of two history buffers
+    size_t restirShadingPointBytes = 0;
     uint32_t pixels = 0;
     uint32_t sharcUpdatePaths = 0;
 };
@@ -125,6 +127,7 @@ inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width,
     layout.missQueueBytes = (size_t)pixels * sizeof(uint32_t);
     layout.restirReservoirBytes = (size_t)pixels * sz.restirReservoir;
     layout.restirSurfaceHistoryBytes = (size_t)pixels * sz.restirSurfaceHistory;
+    layout.restirShadingPointBytes = (size_t)pixels * sz.restirShadingPoint;
     return layout;
 }
 

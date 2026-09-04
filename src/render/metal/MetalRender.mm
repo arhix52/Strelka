@@ -1924,6 +1924,7 @@ void MetalRender::render(Buffer* output)
             pUniformData->restirReservoir1 = mIntegrator.restirReservoirAddress(1);
             pUniformData->restirHistory0 = mIntegrator.restirHistoryAddress(0);
             pUniformData->restirHistory1 = mIntegrator.restirHistoryAddress(1);
+            pUniformData->restirShadingPoints = mIntegrator.restirShadingPointAddress();
 
             metal::IntegratorSceneBindings sceneBind = integratorSceneBindings();
             metal::IntegratorFrameRequest frameReq;

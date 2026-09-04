@@ -356,11 +356,13 @@ struct Uniforms
     device struct RestirReservoir* restirReservoir1;
     device struct RestirSurfaceHistory* restirHistory0;
     device struct RestirSurfaceHistory* restirHistory1;
+    device struct RestirShadingPoint* restirShadingPoints;
 #else
     uint64_t restirReservoir0;
     uint64_t restirReservoir1;
     uint64_t restirHistory0;
     uint64_t restirHistory1;
+    uint64_t restirShadingPoints;
 #endif
 };
 static_assert(sizeof(Uniforms) == 880, "Uniforms host/Metal ABI changed");
@@ -702,6 +704,30 @@ struct RestirSurfaceHistory
     uint32_t materialIdAndFlags;
 };
 static_assert(sizeof(RestirSurfaceHistory) == 32, "ReSTIR surface history ABI changed");
+
+#define RESTIR_SHADING_VALID (1u << 31)
+#define RESTIR_SHADING_CURVE (1u << 30)
+#define RESTIR_SHADING_SAMPLE_MASK 0x3fffffffu
+
+struct RestirShadingPoint
+{
+    packed_float3 position;
+    packed_float3 geometryNormal;
+    packed_float3 shadingNormal;
+    packed_float3 tangent;
+    packed_float3 bitangent;
+    packed_float3 rayDirection;
+    packed_float3 vertexColor;
+    packed_float3 throughput;
+    vector_float2 uv;
+    float exteriorIor;
+    float lodBase;
+    float curveRadius;
+    uint32_t materialId;
+    uint32_t medium;
+    uint32_t sampleIdxAndFlags;
+};
+static_assert(sizeof(RestirShadingPoint) == 128, "ReSTIR shading point ABI changed");
 
 // A deferred occlusion query produced by `shade` and consumed by `shadow`.
 struct ShadowRay

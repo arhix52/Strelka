@@ -28,6 +28,8 @@ struct WavefrontVariant
     MTL::ComputePipelineState* extendMotion = nullptr;
     MTL::ComputePipelineState* extendStatic = nullptr;
     MTL::ComputePipelineState* shade = nullptr;
+    MTL::ComputePipelineState* restirSpatial = nullptr;
+    MTL::ComputePipelineState* restirFinal = nullptr;
     MTL::ComputePipelineState* miss = nullptr;
     MTL::ComputePipelineState* shadowMotion = nullptr;
     MTL::ComputePipelineState* shadowStatic = nullptr;
@@ -189,6 +191,10 @@ public:
     {
         return mRestirSurfaceHistoryBuffer[index & 1u] ? mRestirSurfaceHistoryBuffer[index & 1u]->gpuAddress() : 0ull;
     }
+    uint64_t restirShadingPointAddress() const
+    {
+        return mRestirShadingPointBuffer ? mRestirShadingPointBuffer->gpuAddress() : 0ull;
+    }
     MTL::Buffer* iorStatsBuffer() const
     {
         return mIorStatsBuffer;
@@ -255,6 +261,7 @@ private:
     MTL::Buffer* mAovBuffer = nullptr;
     MTL::Buffer* mRestirReservoirBuffer[2] = { nullptr, nullptr };
     MTL::Buffer* mRestirSurfaceHistoryBuffer[2] = { nullptr, nullptr };
+    MTL::Buffer* mRestirShadingPointBuffer = nullptr;
 
     MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
     MTL::Buffer* mStageStatsBuffer = nullptr;

@@ -574,6 +574,7 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
             (uniforms.frameIndex & 1u) != 0u ? uniforms.restirHistory1 : uniforms.restirHistory0;
         currentReservoirs[pixelIndex] = {};
         currentHistory[pixelIndex] = {};
+        uniforms.restirShadingPoints[pixelIndex] = {};
     }
 
     const uint2 pixel = uint2(pixelIndex % uniforms.width, pixelIndex / uniforms.width);
@@ -2976,9 +2977,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             const float2 previousPixelPosition =
                 float2(pixel) + float2(0.5f + uniforms.jitterX, 0.5f + uniforms.jitterY) + motion.offset;
             const int2 previousPixel = int2(floor(previousPixelPosition));
-            if (uniforms.temporalReuseEnabled != 0u && uniforms.restirHistoryValid != 0u && motion.reactive == 0.0f &&
-                all(previousPixel >= int2(0)) && previousPixel.x < int(uniforms.width) &&
-                previousPixel.y < int(uniforms.height))
+            if (uniforms.temporalReuseEnabled != 0u && uniforms.restirHistoryValid != 0u &&
+                sampleIdx == uniforms.subframeIndex && motion.reactive == 0.0f && all(previousPixel >= int2(0)) &&
+                previousPixel.x < int(uniforms.width) && previousPixel.y < int(uniforms.height))
             {
                 const uint32_t previousIndex = uint32_t(previousPixel.y) * uniforms.width + uint32_t(previousPixel.x);
                 const RestirReservoir previousReservoir = previousReservoirs[previousIndex];
@@ -2993,22 +2994,20 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         si, envAliasTable, envMapTexture, iesProfiles, previousReservoir.sample);
                     const RestirEvaluation reused = evaluateRestirConnection(
                         reusedConnection, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
-                    if (reused.target > 0.0f)
+                    SamplerState temporalRng = rng;
+                    temporalRng.seed = hash_combine(rng.seed, 0x68bc21ebu);
+                    if (restirReservoirUpdate(reservoir.state,
+                                              restirReservoirMergeWeight(previousReservoir.state, reused.target),
+                                              reused.target, previousReservoir.state.M,
+                                              random<SampleDimension::eLightId>(temporalRng, uniforms.samplerType)))
                     {
-                        SamplerState temporalRng = rng;
-                        temporalRng.seed = hash_combine(rng.seed, 0x68bc21ebu);
-                        if (restirReservoirUpdate(reservoir.state,
-                                                  restirReservoirMergeWeight(previousReservoir.state, reused.target),
-                                                  reused.target, previousReservoir.state.M,
-                                                  random<SampleDimension::eLightId>(temporalRng, uniforms.samplerType)))
-                        {
-                            reservoir.sample = previousReservoir.sample;
-                            bestConn = reused.connection;
-                            bestF = reused.integrand;
-                        }
-                        reservoir.state.ageAndFlags = RESTIR_RESERVOIR_VALID | min(age + 1u, RESTIR_RESERVOIR_AGE_MASK);
-                        mergedHistory = true;
+                        reservoir.sample = previousReservoir.sample;
+                        bestConn = reused.connection;
+                        bestF = reused.integrand;
                     }
+                    reservoir.state.ageAndFlags = (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) |
+                                                  min(age + 1u, RESTIR_RESERVOIR_AGE_MASK);
+                    mergedHistory = true;
                 }
             }
             if (!mergedHistory && (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) != 0u)
@@ -3017,32 +3016,52 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             }
             currentReservoirs[tid] = reservoir;
             currentHistory[tid] = surface;
+
+            RestirShadingPoint shadingPoint;
+            shadingPoint.position = packed_float3(worldPosition);
+            shadingPoint.geometryNormal = packed_float3(geomNormal);
+            shadingPoint.shadingNormal = packed_float3(worldNormal);
+            shadingPoint.tangent = packed_float3(worldTangent);
+            shadingPoint.bitangent = packed_float3(worldBinormal);
+            shadingPoint.rayDirection = packed_float3(rayDir);
+            shadingPoint.vertexColor = packed_float3(vertexColor);
+            shadingPoint.throughput = packed_float3(throughput);
+            shadingPoint.uv = uv;
+            shadingPoint.exteriorIor = si.exterior_ior;
+            shadingPoint.lodBase = lodBase;
+            shadingPoint.curveRadius = curveRadius;
+            shadingPoint.materialId = entry.materialId;
+            shadingPoint.medium = mediumState.medium & MEDIUM_INDEX_MASK;
+            shadingPoint.sampleIdxAndFlags =
+                (sampleIdx & RESTIR_SHADING_SAMPLE_MASK) | RESTIR_SHADING_VALID | (isCurve ? RESTIR_SHADING_CURVE : 0u);
+            uniforms.restirShadingPoints[tid] = shadingPoint;
         }
-        const float W = restirReservoirNormalization(reservoir.state);
-        if (W > 0.0f)
+        if (!restirInitial)
         {
-            const float3 weight = throughput * bestF * W;
-            const float3 shadowOrigin =
-                isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, bestConn.toLight) :
-                          bestConn.origin;
-            const EmissiveVisibilitySegment visibility = lightVisibilitySegment(bestConn, shadowOrigin);
-            if (any(weight != 0.0f) && visibility.valid)
+            const float W = restirReservoirNormalization(reservoir.state);
+            if (W > 0.0f)
             {
-                ShadowRay sr;
-                // Past the strand when the connection leaves through it: the lobe
-                // has already charged for the crossing, so the fibre must not
-                // shadow itself.
-                sr.origin = packed_float3(shadowOrigin);
-                sr.direction = packed_float3(visibility.direction);
-                sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
-                sr.maxDistance = visibility.maxDistance;
-                sr.pixelIndex = tid;
-                sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
-                sr.sharcRadiance = packed_float3(SPEC_SHARC_UPDATE ? bestF * W : float3(0.0f));
-                sr.sharcPathIndex = tid;
-                sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
-                const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
-                shadowRays[slot] = sr;
+                const float3 weight = throughput * bestF * W;
+                const float3 shadowOrigin = isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal,
+                                                                      curveRadius, bestConn.toLight) :
+                                                      bestConn.origin;
+                const EmissiveVisibilitySegment visibility = lightVisibilitySegment(bestConn, shadowOrigin);
+                if (any(weight != 0.0f) && visibility.valid)
+                {
+                    ShadowRay sr;
+                    sr.origin = packed_float3(shadowOrigin);
+                    sr.direction = packed_float3(visibility.direction);
+                    sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
+                    sr.maxDistance = visibility.maxDistance;
+                    sr.pixelIndex = tid;
+                    sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
+                    sr.sharcRadiance = packed_float3(SPEC_SHARC_UPDATE ? bestF * W : float3(0.0f));
+                    sr.sharcPathIndex = tid;
+                    sr.rrCutoff =
+                        random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
+                    const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                    shadowRays[slot] = sr;
+                }
             }
         }
     }
@@ -3300,6 +3319,196 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     paths[tid] = p;
 
     queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
+}
+
+static void rebuildRestirShadingPoint(constant Uniforms& uniforms,
+                                      device const Material* materials,
+                                      thread const RestirShadingPoint& stored,
+                                      thread SurfaceInteraction& si,
+                                      thread bool& isFibre,
+                                      thread bool& isOpenPBR,
+                                      thread ShadedFrame& neeFrame,
+                                      thread OpenPBR_PreparedBsdf& openpbrPrepared)
+{
+    initSurfaceInteraction(si, materials[stored.materialId], float3(stored.position), float3(stored.shadingNormal),
+                           float3(stored.geometryNormal), float3(stored.tangent), float3(stored.bitangent), stored.uv,
+                           float3(stored.rayDirection), float3(stored.vertexColor), stored.lodBase);
+    si.exterior_ior = stored.exteriorIor;
+    isOpenPBR = SPEC_OPENPBR && si.material_type == MATERIAL_TYPE_OPENPBR;
+    if (isOpenPBR)
+    {
+        OpenPBRParams openpbrMat = uniforms.openpbrParams[stored.materialId];
+        if (openpbrMat.texture_mask != 0u && uniforms.openpbrTextures != nullptr)
+        {
+            applyOpenPBRTextures(openpbrMat, uniforms.openpbrTextures[stored.materialId], si, stored.uv);
+        }
+        openpbrPrepared = openpbr_prepare_at(openpbrMat, si, float3(stored.throughput));
+    }
+    isFibre = (stored.sampleIdxAndFlags & RESTIR_SHADING_CURVE) != 0u && scattersThroughFibre(si);
+    neeFrame = shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
+}
+
+constant int2 kRestirNeighborOffsets[] = { int2(-1, 0),  int2(0, -1), int2(1, 0), int2(0, 1),
+                                           int2(-1, -1), int2(1, -1), int2(1, 1), int2(-1, 1),
+                                           int2(-2, 0),  int2(0, -2), int2(2, 0), int2(0, 2),
+                                           int2(-2, -1), int2(1, -2), int2(2, 1), int2(-1, 2) };
+
+kernel void wavefrontRestirSpatial(uint gid [[thread_position_in_grid]],
+                                   constant Uniforms& uniforms [[buffer(0)]],
+                                   constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],
+                                   device const IesGpuBufferHeader* iesProfiles [[buffer(2)]],
+                                   device UniformLight* lights [[buffer(3)]],
+                                   device const Material* materials [[buffer(4)]],
+                                   device const EnvAliasEntry* envAliasTable [[buffer(5)]],
+                                   device const char* vertexBuffer [[buffer(6)]],
+                                   device const char* prevVertexBuffer [[buffer(7)]],
+                                   device const uint32_t* indexBuffer [[buffer(8)]],
+                                   device const uint32_t* hitQueue [[buffer(9)]],
+                                   texture2d<float> envMapTexture [[texture(0)]])
+{
+    const uint32_t tid = hitQueue[gid];
+    const RestirShadingPoint stored = uniforms.restirShadingPoints[tid];
+    if (uniforms.restirDIEnabled == 0u || (stored.sampleIdxAndFlags & RESTIR_SHADING_VALID) == 0u)
+    {
+        return;
+    }
+
+    const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
+    device const RestirReservoir* inputReservoirs = oddFrame ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
+    device RestirReservoir* outputReservoirs = oddFrame ? uniforms.restirReservoir0 : uniforms.restirReservoir1;
+    device const RestirSurfaceHistory* history = oddFrame ? uniforms.restirHistory1 : uniforms.restirHistory0;
+    RestirReservoir reservoir = inputReservoirs[tid];
+    uint32_t selectedAge = reservoir.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK;
+
+    SurfaceInteraction si;
+    bool isFibre, isOpenPBR;
+    ShadedFrame neeFrame;
+    OpenPBR_PreparedBsdf openpbrPrepared;
+    rebuildRestirShadingPoint(uniforms, materials, stored, si, isFibre, isOpenPBR, neeFrame, openpbrPrepared);
+
+    const uint2 pixel = uint2(tid % uniforms.width, tid / uniforms.width);
+    const uint32_t sampleIdx = stored.sampleIdxAndFlags & RESTIR_SHADING_SAMPLE_MASK;
+    const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
+    SamplerState rng = samplerFor(uniforms, tid, sampleIdx, 0u);
+    const uint32_t rotation = hash_combine(tid, uniforms.frameIndex * 0x9e3779b9u) & 15u;
+    const uint32_t neighborCount = uniforms.spatialReuseEnabled != 0u ? min(uniforms.spatialNeighborCount, 16u) : 0u;
+    for (uint32_t i = 0u; i < neighborCount; ++i)
+    {
+        const int2 neighborPixel = int2(pixel) + kRestirNeighborOffsets[(rotation + i * 5u) & 15u];
+        if (any(neighborPixel < int2(0)) || neighborPixel.x >= int(uniforms.width) ||
+            neighborPixel.y >= int(uniforms.height))
+        {
+            continue;
+        }
+        const uint32_t neighborIndex = uint32_t(neighborPixel.y) * uniforms.width + uint32_t(neighborPixel.x);
+        const RestirReservoir neighbor = inputReservoirs[neighborIndex];
+        const RestirSurfaceHistory currentSurface = history[tid];
+        const RestirSurfaceHistory neighborSurface = history[neighborIndex];
+        if ((neighbor.state.ageAndFlags & RESTIR_RESERVOIR_VALID) == 0u || neighbor.state.M == 0u ||
+            !restirSurfaceHistoryCompatible(currentSurface, neighborSurface))
+        {
+            continue;
+        }
+
+        const LightConnection connection =
+            reconnectRestirSample(uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
+                                  motionTime, si, envAliasTable, envMapTexture, iesProfiles, neighbor.sample);
+        const RestirEvaluation evaluated = evaluateRestirConnection(
+            connection, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
+        SamplerState neighborRng = rng;
+        neighborRng.seed = hash_combine(rng.seed, 0x3c6ef372u + i * 0x9e3779b9u);
+        if (restirReservoirUpdate(reservoir.state, restirReservoirMergeWeight(neighbor.state, evaluated.target),
+                                  evaluated.target, neighbor.state.M,
+                                  random<SampleDimension::eLightId>(neighborRng, uniforms.samplerType)))
+        {
+            reservoir.sample = neighbor.sample;
+            selectedAge = neighbor.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK;
+        }
+    }
+    reservoir.state.ageAndFlags =
+        (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) | min(selectedAge, RESTIR_RESERVOIR_AGE_MASK);
+    outputReservoirs[tid] = reservoir;
+}
+
+kernel void wavefrontRestirFinal(uint gid [[thread_position_in_grid]],
+                                 constant Uniforms& uniforms [[buffer(0)]],
+                                 constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],
+                                 device const IesGpuBufferHeader* iesProfiles [[buffer(2)]],
+                                 device UniformLight* lights [[buffer(3)]],
+                                 device const Material* materials [[buffer(4)]],
+                                 device const EnvAliasEntry* envAliasTable [[buffer(5)]],
+                                 device const char* vertexBuffer [[buffer(6)]],
+                                 device const char* prevVertexBuffer [[buffer(7)]],
+                                 device const uint32_t* indexBuffer [[buffer(8)]],
+                                 device const uint32_t* hitQueue [[buffer(9)]],
+                                 device ShadowRay* shadowRays [[buffer(10)]],
+                                 device atomic_uint* shadowCounter [[buffer(11)]],
+                                 texture2d<float> envMapTexture [[texture(0)]])
+{
+    const uint32_t tid = hitQueue[gid];
+    RestirShadingPoint stored = uniforms.restirShadingPoints[tid];
+    if (uniforms.restirDIEnabled == 0u || (stored.sampleIdxAndFlags & RESTIR_SHADING_VALID) == 0u)
+    {
+        return;
+    }
+    stored.sampleIdxAndFlags &= ~RESTIR_SHADING_VALID;
+    uniforms.restirShadingPoints[tid] = stored;
+
+    const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
+    device RestirReservoir* currentReservoirs = oddFrame ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
+    device const RestirReservoir* spatialReservoirs = oddFrame ? uniforms.restirReservoir0 : uniforms.restirReservoir1;
+    RestirReservoir reservoir = spatialReservoirs[tid];
+    const uint32_t maxM = max(uniforms.initialCandidateCount, 1u) * max(uniforms.reservoirMaxAge, 1u) *
+                          (min(uniforms.spatialNeighborCount, 16u) + 1u);
+    restirReservoirLimitM(reservoir.state, maxM);
+    currentReservoirs[tid] = reservoir;
+    if ((reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) == 0u)
+    {
+        return;
+    }
+
+    SurfaceInteraction si;
+    bool isFibre, isOpenPBR;
+    ShadedFrame neeFrame;
+    OpenPBR_PreparedBsdf openpbrPrepared;
+    rebuildRestirShadingPoint(uniforms, materials, stored, si, isFibre, isOpenPBR, neeFrame, openpbrPrepared);
+    const uint32_t sampleIdx = stored.sampleIdxAndFlags & RESTIR_SHADING_SAMPLE_MASK;
+    const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
+    const LightConnection connection =
+        reconnectRestirSample(uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
+                              motionTime, si, envAliasTable, envMapTexture, iesProfiles, reservoir.sample);
+    const RestirEvaluation evaluated =
+        evaluateRestirConnection(connection, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
+    reservoir.state.target = evaluated.target;
+    currentReservoirs[tid] = reservoir;
+    const float W = restirReservoirNormalization(reservoir.state);
+    if (!(W > 0.0f))
+    {
+        return;
+    }
+
+    const float3 shadowOrigin =
+        isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal, stored.curveRadius, connection.toLight) :
+                  connection.origin;
+    const EmissiveVisibilitySegment visibility = lightVisibilitySegment(connection, shadowOrigin);
+    const float3 weight = float3(stored.throughput) * evaluated.integrand * W;
+    if (!any(weight != 0.0f) || !visibility.valid)
+    {
+        return;
+    }
+    SamplerState rng = samplerFor(uniforms, tid, sampleIdx, 0u);
+    ShadowRay sr;
+    sr.origin = packed_float3(shadowOrigin);
+    sr.direction = packed_float3(visibility.direction);
+    sr.weight = packed_float3(clampIndirectContribution(weight, 0u, uniforms.clampIndirect));
+    sr.maxDistance = visibility.maxDistance;
+    sr.pixelIndex = tid;
+    sr.medium = stored.medium;
+    sr.sharcRadiance = packed_float3(float3(0.0f));
+    sr.sharcPathIndex = tid;
+    sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
+    const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+    shadowRays[slot] = sr;
 }
 
 // ---------------------------------------------------------------------------
