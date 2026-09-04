@@ -1609,6 +1609,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         const float analyticClassPdf = uniforms.numEmissiveMeshes > 0u ? (1.0f - uniforms.meshLightSelectionPdf) : 1.0f;
         for (uint32_t infiniteIndex = 0; infiniteIndex < uniforms.numInfiniteLights; ++infiniteIndex)
         {
+            auditWork(uniforms, WORK_MISS_LIGHT_EVALUATIONS);
             const uint32_t lightId = uniforms.infiniteLightIndices[infiniteIndex];
             device const UniformLight& light = lights[lightId];
             if (!analyticLightVisibilityAllowsRay(light.normal.w, depth != 0u))

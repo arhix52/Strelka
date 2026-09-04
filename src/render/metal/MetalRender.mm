@@ -3077,7 +3077,8 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"restirFinal\":{{\"active\":{},\"dispatched\":{}}}}},"
         "\"blasBuilds\":{},\"tlasBuilds\":{},\"tlasRefits\":{},"
         "\"fullBufferClears\":0,\"fullBufferCopies\":0,\"bytesCopied\":0,"
-        "\"manualAnalyticLightTests\":{},\"dispatchCount\":{},\"pipelineDispatches\":{}}}",
+        "\"manualAnalyticLightTests\":{},\"missLightEvaluations\":{},"
+        "\"dispatchCount\":{},\"pipelineDispatches\":{}}}",
         mRenderWorkFrames, static_cast<uint64_t>(width) * height, mRenderWorkSpp, mRenderWorkGpuMs,
         c[WORK_PRIMARY_RAYS],
         array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE),
@@ -3093,7 +3094,7 @@ std::string MetalRender::renderWorkAuditJson() const
         roundedThreads(c[WORK_RESTIR_SPATIAL_ITEMS]), c[WORK_RESTIR_FINAL_ITEMS],
         roundedThreads(c[WORK_RESTIR_FINAL_ITEMS]), mRenderWorkAsCounts.blasBuilds,
         mRenderWorkAsCounts.tlasBuilds, mRenderWorkAsCounts.tlasRefits,
-        c[WORK_MANUAL_ANALYTIC_LIGHT_TESTS], dispatchTotal, dispatches);
+        c[WORK_MANUAL_ANALYTIC_LIGHT_TESTS], c[WORK_MISS_LIGHT_EVALUATIONS], dispatchTotal, dispatches);
 }
 
 Buffer* MetalRender::createBuffer(const BufferDesc& desc)
