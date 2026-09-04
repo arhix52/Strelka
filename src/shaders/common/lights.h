@@ -518,7 +518,15 @@ static __inline__ __device__ float areaFalloff(const UniformLight& l, float dist
 // from UniformLightDesc::projectorImage.
 static __inline__ __device__ int projectorImageIndex(const UniformLight& l)
 {
-    return (int)l.points[0].z;
+    const float slot = l.points[0].z;
+    // 2147483520 is the largest binary32 value inside the signed 32-bit range.
+    // Guard before the cast: NaN and the rounded float form of INT_MAX would
+    // otherwise make the conversion itself undefined or backend-specific.
+    if (!(slot >= 0.0f) || slot > 2147483520.0f)
+    {
+        return -1;
+    }
+    return (int)slot;
 }
 
 /// Where a direction leaving a projector lands on the image it throws.

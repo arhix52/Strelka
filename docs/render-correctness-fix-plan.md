@@ -38,6 +38,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | AA. OptiX analytic/hardware hit arbitration | A rectangle at `t=1` is hidden by an unrelated hardware hit at `t=2` because the analytic search runs only in `__miss__`; source regression failed 1/7 assertions | bounded analytic-vs-hardware oracle, frozen miss-only mutation, OptiX closest-hit call-site contract | search analytic surfaces up to the hardware closest-hit distance and run medium/fog attenuation over the winning segment before shading | FIXED oracle | Existing bounded arbitration | Source fixed; external CUDA required | pending | UNVERIFIED |
 | AB. Metal projector radiance storage | Metal routes projector HDR/EXR through an 8-bit sRGB/optional-BC material path; focused contract failed 2/6 assertions and a `4.0` texel clips to `1.0` | LDR/HDR format contract, HDR clipping mutation, actual-MTLDevice texel round trip | dedicated uncompressed one-level projector upload: `RGBA8Unorm_sRGB` for LDR and linear `RGBA32Float` for HDR/EXR | Shared sanitization/EOTF | FIXED on MTLDevice | Source uses same sanitized float texels; external CUDA required | pending | UNVERIFIED |
 | AC. Finite-to-infinite editor proxy lifecycle | Rect→distant/dome leaves `getLightInstanceId()==0` and CPU picking hits the stale rectangle; focused test fails 4/8 assertions | reverse type-toggle, CPU pick miss, proxy reuse/no-orphan mutation | keep cached proxy for reuse but expose and traverse it only while the current packed light has a finite surface | FIXED | Existing packed-type TLAS mask | Existing packed-type TLAS mask; external CUDA required | this commit | UNVERIFIED |
+| AD. Projector texture index bounds | An unregistered or `INT_MAX` image slot reaches OptiX's bindless texture lookup without a count check; numeric float conversion can overflow before lookup | empty/valid/extreme/negative Scene slots and OptiX lookup-contract mutation | canonicalize invalid authored slots to `-1` and publish/check the OptiX table count before indexing | FIXED | Existing upload bound; shared packed slot | Source fixed; external CUDA required | this commit | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -1261,3 +1262,23 @@ is out of scope unless it blocks validation.
   non-finite current light and CPU picking skips such light instances before bounds or triangle traversal. Metal and
   OptiX TLAS construction already apply the same packed-type mask. The focused test now passes 8/8 assertions in
   Debug, Release, and ASan+UBSan; the reverse toggle reuses the original proxy instance and creates no orphan.
+
+## Finding AD: projector texture index bounds
+
+- Random variables and measure: none are added. Projector image lookup is a deterministic integrand evaluation after
+  the discrete light identity and, for a soft projector, continuous surface point have already been sampled.
+- Support: a registered image slot supports its decoded texels. A missing, negative, or unrepresentable slot uses the
+  documented finite white-frame fallback; it must never address memory outside the backend texture table.
+- Conditional/marginal PDF and selection PMF: unchanged. Image identity is not sampled and does not enter the light
+  PDF. The represented outer PMFs and punctual atom/area conditional remain authoritative.
+- Delta/continuous classification and MIS: unchanged. Sharp projectors remain positional atoms and positive-radius
+  projectors remain continuous spheres. NEE and analytic-hit evaluation share the same checked texture lookup.
+- Current-HEAD reproducer and mutation: with an empty image table, authored slot `0` is packed unchanged; OptiX then
+  indexes a null/empty table. With slot `INT_MAX`, conversion to numeric float rounds to `2147483648`, so the shader's
+  float-to-int cast is outside the signed range even before a table bound could be checked. The focused pre-fix suite
+  fails the empty/extreme canonicalization and both OptiX count-contract assertions.
+- Implementation and result: the authored integer is validated against the registered host table and exact numeric
+  float representation before packing; every invalid value becomes canonical `-1`. The common decoder rejects NaN
+  and out-of-range float values before integer conversion. OptiX publishes the exact texture count beside its pointer
+  and performs a final unsigned bound check before indexing. The focused tests now pass 11/11 assertions in Debug,
+  Release, and ASan+UBSan; Metal retains its existing host-side vector bound check.

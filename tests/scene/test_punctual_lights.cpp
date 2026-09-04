@@ -84,6 +84,33 @@ TEST_CASE("projector light packs its frame, its image and its axes")
     CHECK(glm::normalize(glm::float3(gpu.points[3])).y == doctest::Approx(1.0f).epsilon(1e-4));
 }
 
+TEST_CASE("projector image slots stay inside the registered texture table")
+{
+    Scene scene;
+    Scene::UniformLightDesc desc{};
+    desc.type = LIGHT_TYPE_PROJECTOR;
+    desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+    desc.intensity = 1.0f;
+    desc.projectorImage = 0;
+    const uint32_t id = scene.createLight(desc);
+
+    // No texture exists yet. The packed record must request the white fallback,
+    // not leave either backend an out-of-bounds bindless-table index.
+    CHECK(scene.getLights()[id].points[0].z == -1.0f);
+
+    REQUIRE(scene.addProjectorImage("slides/first.hdr") == 0);
+    scene.setLight(id, desc);
+    CHECK(scene.getLights()[id].points[0].z == 0.0f);
+
+    desc.projectorImage = std::numeric_limits<int32_t>::max();
+    scene.setLight(id, desc);
+    CHECK(scene.getLights()[id].points[0].z == -1.0f);
+
+    desc.projectorImage = -2;
+    scene.setLight(id, desc);
+    CHECK(scene.getLights()[id].points[0].z == -1.0f);
+}
+
 TEST_CASE("punctual packing rejects non-finite positions and collapsed profile frames")
 {
     Scene scene;

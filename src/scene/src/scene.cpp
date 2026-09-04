@@ -799,9 +799,19 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         // IES profile: -1 goes in that slot even when the desc still remembers a
         // file from before the type was switched.
         const bool isProjector = desc.type == LIGHT_TYPE_PROJECTOR;
+        float projectorSlot = -1.0f;
+        if (isProjector && desc.projectorImage >= 0 &&
+            static_cast<size_t>(desc.projectorImage) < mProjectorImages.size())
+        {
+            const float candidate = static_cast<float>(desc.projectorImage);
+            if (static_cast<int64_t>(candidate) == desc.projectorImage)
+            {
+                projectorSlot = candidate;
+            }
+        }
         mLights[lightId].points[0] =
             glm::float4(desc.radius, isProjector ? -1.0f : (float)desc.iesProfile,
-                        isProjector ? (float)desc.projectorImage : -1.0f, isProjector ? desc.projectorAspect : 0.0f);
+                        projectorSlot, isProjector ? desc.projectorAspect : 0.0f);
         mLights[lightId].points[1] = localTransform * glm::float4(0.f, 0.f, 0.f, 1.f);
         const bool needsProfileFrame = isProjector || desc.iesProfile >= 0;
         const OrthonormalLightFrame profileFrame = transformedProfileFrame(localTransform);

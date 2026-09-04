@@ -81,6 +81,7 @@ struct SceneData
     /// IES table this is an array of texture objects, and an empty one has no
     /// header to make a zero-length version of.
     const cudaTextureObject_t* projectorTextures;
+    uint32_t numProjectorTextures;
 };
 
 /// How `AovSample::depth` is encoded. Mirrors kDenoiseDepth* in the Metal

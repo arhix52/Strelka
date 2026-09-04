@@ -258,6 +258,25 @@ TEST_CASE("Metal projector images bypass the material UNORM and compression path
     CHECK(std::clamp(4.0f, 0.0f, 1.0f) != doctest::Approx(4.0f));
 }
 
+TEST_CASE("OptiX projector texture lookup is explicitly bounds checked")
+{
+    const std::filesystem::path repository = std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
+    std::ifstream paramsFile(repository / "src/render/optix/OptixRenderParams.h");
+    std::ifstream shaderFile(repository / "src/shaders/optix/OptixRender_closest_hit.cu");
+    REQUIRE(paramsFile.good());
+    REQUIRE(shaderFile.good());
+    const std::string params((std::istreambuf_iterator<char>(paramsFile)), std::istreambuf_iterator<char>());
+    const std::string shader((std::istreambuf_iterator<char>(shaderFile)), std::istreambuf_iterator<char>());
+    const size_t begin = shader.find("static __forceinline__ __device__ float3 projectorEmission");
+    const size_t end = shader.find("static __forceinline__ __device__ float3 emittedLightRadiance", begin);
+    REQUIRE(begin != std::string::npos);
+    REQUIRE(end != std::string::npos);
+    const std::string body = shader.substr(begin, end - begin);
+
+    CHECK(params.find("numProjectorTextures") != std::string::npos);
+    CHECK(body.find("params.scene.numProjectorTextures") != std::string::npos);
+}
+
 #if defined(__APPLE__)
 TEST_CASE("Metal projector loader preserves HDR radiance on an actual device")
 {

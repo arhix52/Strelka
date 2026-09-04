@@ -4872,6 +4872,7 @@ void OptiXRender::createProjectorTextures()
     if (images.empty())
     {
         mState.params.scene.projectorTextures = nullptr;
+        mState.params.scene.numProjectorTextures = 0;
         return;
     }
 
@@ -4922,6 +4923,7 @@ void OptiXRender::createProjectorTextures()
     CUDA_CHECK(cudaMemcpy(optix::devicePtr<void>(mProjectorTextureBuffer->getPtr()), table.data(), bytes, cudaMemcpyHostToDevice));
     mState.params.scene.projectorTextures =
         optix::devicePtr<const cudaTextureObject_t>(mProjectorTextureBuffer->getPtr());
+    mState.params.scene.numProjectorTextures = static_cast<uint32_t>(table.size());
 }
 
 void OptiXRender::destroyProjectorTextures()
@@ -4942,6 +4944,7 @@ void OptiXRender::destroyProjectorTextures()
 
     mProjectorTextureBuffer.reset();
     mState.params.scene.projectorTextures = nullptr;
+    mState.params.scene.numProjectorTextures = 0;
 }
 
 /// One bit per light, set where the scene marked the light responsive.

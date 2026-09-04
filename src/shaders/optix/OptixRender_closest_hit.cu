@@ -304,7 +304,7 @@ static __forceinline__ __device__ float3 projectorEmission(const UniformLight& l
         return make_float3(0.0f);
     }
     const int slot = projectorImageIndex(light);
-    if (slot < 0 || params.scene.projectorTextures == nullptr)
+    if (slot < 0 || (uint32_t)slot >= params.scene.numProjectorTextures || params.scene.projectorTextures == nullptr)
     {
         return make_float3(p.falloff);
     }
