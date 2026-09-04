@@ -658,6 +658,7 @@ struct LightConnection
     // placeholder of 1, not a solid-angle density, so feeding it to the balance
     // heuristic would silently scale the contribution by 1/(1 + pdf_bsdf).
     bool isDelta;
+    RestirLightSample sample;
 };
 
 static LightConnection makeEmptyConnection()
@@ -672,6 +673,7 @@ static LightConnection makeEmptyConnection()
     c.needsRay = false;
     c.hasVisibilityTarget = false;
     c.isDelta = false;
+    c.sample = {};
     return c;
 }
 
@@ -754,6 +756,7 @@ static float3 emittedLightRadiance(device const UniformLight& light,
 LightConnection connectLight(constant Uniforms& uniforms,
                              thread SamplerState& samplerRnd,
                              device const UniformLight& light,
+                             uint32_t lightId,
                              thread SurfaceInteraction& si,
                              // A scattering event in a medium has a position and no normal. The facing
                              // test and the cosine below are surface terms; applied to a volume they
@@ -768,6 +771,7 @@ LightConnection connectLight(constant Uniforms& uniforms,
     const float2 uv =
         float2(lightOpenUnitInterval(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType)),
                lightOpenUnitInterval(random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType)));
+    uint2 retryWords = uint2(0u);
     switch (light.type)
     {
     case LIGHT_TYPE_RECT:
@@ -788,9 +792,8 @@ LightConnection connectLight(constant Uniforms& uniforms,
         break;
     case LIGHT_TYPE_DISTANT:
     {
-        const uint2 retryWords =
-            uint2(randomBits<SampleDimension::eLightRetryU>(samplerRnd, uniforms.samplerType),
-                  randomBits<SampleDimension::eLightRetryV>(samplerRnd, uniforms.samplerType));
+        retryWords = uint2(randomBits<SampleDimension::eLightRetryU>(samplerRnd, uniforms.samplerType),
+                           randomBits<SampleDimension::eLightRetryV>(samplerRnd, uniforms.samplerType));
         lightSampleData = SampleDistantLight(light, uv, retryWords, si.position);
         break;
     }
@@ -808,6 +811,11 @@ LightConnection connectLight(constant Uniforms& uniforms,
     }
 
     LightConnection c = makeEmptyConnection();
+    c.sample.type = RESTIR_SAMPLE_ANALYTIC;
+    c.sample.lightId = lightId;
+    c.sample.primitiveId = retryWords.x;
+    c.sample.retryWord = retryWords.y;
+    c.sample.parameters = float4(uv, 0.0f, 0.0f);
     c.toLight = lightSampleData.L;
     const float shapeParameter = lightIsPunctual(light.type) ? light.points[0].x : light.halfAngle;
     c.isDelta = lightIsDeltaForMis(light.type, shapeParameter);
@@ -880,6 +888,8 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
                               uniforms.envMapHeight, uniforms.envMapRotation, envPdf);
 
     LightConnection c = makeEmptyConnection();
+    c.sample.type = RESTIR_SAMPLE_ENVIRONMENT;
+    c.sample.parameters = float4(dir, 0.0f);
     c.toLight = dir;
     c.pdf = envPdf;
 
@@ -1119,6 +1129,10 @@ static LightConnection connectEmissiveMesh(constant Uniforms& uniforms,
     connection.needsRay = true;
     connection.hasVisibilityTarget = true;
     connection.isDelta = false;
+    connection.sample.type = RESTIR_SAMPLE_EMISSIVE_TRIANGLE;
+    connection.sample.lightId = meshId;
+    connection.sample.primitiveId = primitiveId;
+    connection.sample.parameters = float4(u0, u1, 0.0f, 0.0f);
     return connection;
 }
 
@@ -1213,7 +1227,7 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     {
         return makeEmptyConnection();
     }
-    return connectLight(uniforms, samplerRnd, lights[lightId], si, volumeEvent, iesBuffer, localSelectionPdf,
+    return connectLight(uniforms, samplerRnd, lights[lightId], lightId, si, volumeEvent, iesBuffer, localSelectionPdf,
                         analyticSelectionPdf, analyticLightSelectionPdf(lights[lightId]));
 }
 

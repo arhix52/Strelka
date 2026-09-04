@@ -159,6 +159,13 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     // hands MetalFX a black specular lobe in front of a transmitted room and
     // the pane comes out opaque and smeared.
     pUniformData->guidePrimaryHit = settings.getAs<uint32_t>("render/pt/guidePrimaryHit");
+    pUniformData->restirDIEnabled = settings.getAs<bool>("render/pt/restirDIEnabled") ? 1u : 0u;
+    pUniformData->initialCandidateCount = std::max(settings.getAs<uint32_t>("render/pt/initialCandidateCount"), 1u);
+    pUniformData->temporalReuseEnabled = settings.getAs<bool>("render/pt/temporalReuseEnabled") ? 1u : 0u;
+    pUniformData->spatialReuseEnabled = settings.getAs<bool>("render/pt/spatialReuseEnabled") ? 1u : 0u;
+    pUniformData->spatialNeighborCount = settings.getAs<uint32_t>("render/pt/spatialNeighborCount");
+    pUniformData->reservoirMaxAge = settings.getAs<uint32_t>("render/pt/reservoirMaxAge");
+    pUniformData->restirDebugMode = settings.getAs<uint32_t>("render/pt/restirDebugMode");
     // PT accumulation and MetalFX history solve different problems. The former
     // remains the converged scene-linear result; the latter must see a fresh,
     // coherently jittered launch whose color, depth, motion and material guides
@@ -206,6 +213,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     // to still corresponds to this one. Anything that resets the history has
     // already declared that it does not.
     pUniformData->hasPrevFramePose = (in.hasPrevFramePose && !in.resetDenoiseHistory && !in.noPrevPose) ? 1u : 0u;
+    pUniformData->restirHistoryValid = pUniformData->hasPrevFramePose;
     pUniformData->enableMotionBlur = in.enableMotionBlur ? 1 : 0;
     const bool stochasticShutter = isMotionBlurVisible && (!denoising || qualityPlaybackBlur || in.pausedBlurRefine);
     pUniformData->isMotionBlurVisible = (uint32_t)stochasticShutter;

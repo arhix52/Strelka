@@ -132,6 +132,13 @@ inline void seedCommonRenderSettings(SettingsManager& settings)
         "render/texture/cachePath", (std::filesystem::temp_directory_path() / "strelka_texcache").string());
     settings.setAs<bool>("render/validate/analyticLights", true);
     settings.setAs<uint32_t>("render/pt/misHeuristic", 0);
+    settings.setAs<bool>("render/pt/restirDIEnabled", false);
+    settings.setAs<uint32_t>("render/pt/initialCandidateCount", 8);
+    settings.setAs<bool>("render/pt/temporalReuseEnabled", true);
+    settings.setAs<bool>("render/pt/spatialReuseEnabled", true);
+    settings.setAs<uint32_t>("render/pt/spatialNeighborCount", 4);
+    settings.setAs<uint32_t>("render/pt/reservoirMaxAge", 20);
+    settings.setAs<uint32_t>("render/pt/restirDebugMode", 0);
     settings.setAs<float>("render/pt/dev/shadowRayTmin", 0.0f);
     settings.setAs<float>("render/pt/dev/materialRayTmin", 0.0f);
     settings.setAs<bool>("render/enableValidation", false);

@@ -14,6 +14,7 @@
 // layout.
 #include <strelka/material/openpbr/openpbr_params.h>
 #include <emissive_mesh_light.h>
+#include <restir_reservoir.h>
 
 #define GEOMETRY_MASK_TRIANGLE 1
 #define GEOMETRY_MASK_CURVE 2
@@ -297,6 +298,15 @@ struct Uniforms
     /// whatever it reflects, one pixel to the next.
     uint32_t guidePrimaryHit;
 
+    uint32_t restirDIEnabled;
+    uint32_t initialCandidateCount;
+    uint32_t temporalReuseEnabled;
+    uint32_t spatialReuseEnabled;
+    uint32_t spatialNeighborCount;
+    uint32_t reservoirMaxAge;
+    uint32_t restirDebugMode;
+    uint32_t restirHistoryValid;
+
     /// The OpenPBR parameter block for material i, or null when no material in
     /// the scene is MATERIAL_TYPE_OPENPBR.
     ///
@@ -341,7 +351,7 @@ struct Uniforms
     uint64_t emissiveTriangles;
 #endif
 };
-static_assert(sizeof(Uniforms) == 816, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 848, "Uniforms host/Metal ABI changed");
 
 
 // How the depth guide is encoded.
@@ -648,6 +658,27 @@ struct HitRecord
     vector_float2 barycentrics; // not float2: this header is compiled by the host too
     float distance; // < 0 means the ray escaped
 };
+
+#define RESTIR_SAMPLE_INVALID 0u
+#define RESTIR_SAMPLE_ANALYTIC 1u
+#define RESTIR_SAMPLE_ENVIRONMENT 2u
+#define RESTIR_SAMPLE_EMISSIVE_TRIANGLE 3u
+
+struct RestirLightSample
+{
+    uint32_t type;
+    uint32_t lightId;
+    uint32_t primitiveId;
+    uint32_t retryWord;
+    vector_float4 parameters;
+};
+
+struct RestirReservoir
+{
+    RestirLightSample sample;
+    RestirReservoirState state;
+};
+static_assert(sizeof(RestirReservoir) == 48, "ReSTIR reservoir ABI changed");
 
 // A deferred occlusion query produced by `shade` and consumed by `shadow`.
 struct ShadowRay

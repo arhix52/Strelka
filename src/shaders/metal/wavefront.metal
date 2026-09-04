@@ -2851,14 +2851,14 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
     if (didNee)
     {
-        // RIS selects one of M candidates by unshadowed luminance with MIS folded in; visibility follows in shadow.
-        // One candidate reproduces the base estimator, while larger M preserves its balance with the BSDF strategy.
-        const uint32_t candidates = max(uniforms.risCandidates, 1u);
+        const bool restirInitial = uniforms.restirDIEnabled != 0u && depth == 0u;
+        const uint32_t candidates = restirInitial ?
+                                        max(uniforms.initialCandidateCount, 1u) :
+                                        (uniforms.restirDIEnabled != 0u ? 1u : max(uniforms.risCandidates, 1u));
 
         LightConnection bestConn = makeEmptyConnection();
         float3 bestF = float3(0.0f);
-        float bestTarget = 0.0f;
-        float weightSum = 0.0f;
+        RestirReservoir reservoir = {};
 
         for (uint32_t i = 0; i < candidates; ++i)
         {
@@ -2904,24 +2904,22 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 continue;
             }
             const float w = target / conn.pdf;
-            weightSum += w;
             // Reuse eLightId under a new scramble so adding RIS does not shift later Sobol dimensions.
             SamplerState arng = crng;
             arng.seed = hash_combine(crng.seed, 0x51633e2du);
-            if (random<SampleDimension::eLightId>(arng, uniforms.samplerType) * weightSum <= w)
+            if (restirReservoirUpdate(
+                    reservoir.state, w, target, 1u, random<SampleDimension::eLightId>(arng, uniforms.samplerType)))
             {
                 bestConn = conn;
                 bestF = f;
-                bestTarget = target;
+                reservoir.sample = conn.sample;
             }
         }
 
-        if (bestTarget > 0.0f)
+        reservoir.state.M = candidates;
+        const float W = restirReservoirNormalization(reservoir.state);
+        if (W > 0.0f)
         {
-            // The reservoir's contribution weight: the mean candidate weight
-            // over the target the survivor was kept for. At one candidate it is
-            // 1 / pdf and every line below is the arithmetic this code had.
-            const float W = (weightSum / (float)candidates) / bestTarget;
             const float3 weight = throughput * bestF * W;
             const float3 shadowOrigin =
                 isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, bestConn.toLight) :
