@@ -169,6 +169,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->spatialNeighborCount = settings.getAs<uint32_t>("render/pt/spatialNeighborCount");
     pUniformData->reservoirMaxAge = settings.getAs<uint32_t>("render/pt/reservoirMaxAge");
     pUniformData->restirDebugMode = settings.getAs<uint32_t>("render/pt/restirDebugMode");
+    pUniformData->restirBiasCorrection = std::min(settings.getAs<uint32_t>("render/pt/restirBiasCorrection"), 1u);
     // PT accumulation and MetalFX history solve different problems. The former
     // remains the converged scene-linear result; the latter must see a fresh,
     // coherently jittered launch whose color, depth, motion and material guides
@@ -487,6 +488,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     settingsChanged |= (mPrevSettings.spatialNeighborCount != pUniformData->spatialNeighborCount);
     settingsChanged |= (mPrevSettings.reservoirMaxAge != pUniformData->reservoirMaxAge);
     settingsChanged |= (mPrevSettings.restirDebugMode != pUniformData->restirDebugMode);
+    settingsChanged |= (mPrevSettings.restirBiasCorrection != pUniformData->restirBiasCorrection);
 
     mPrevSettings.rectLightSamplingMethod = rectLightSamplingMethod;
     mPrevSettings.samplerType = samplerType;
@@ -518,6 +520,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     mPrevSettings.spatialNeighborCount = pUniformData->spatialNeighborCount;
     mPrevSettings.reservoirMaxAge = pUniformData->reservoirMaxAge;
     mPrevSettings.restirDebugMode = pUniformData->restirDebugMode;
+    mPrevSettings.restirBiasCorrection = pUniformData->restirBiasCorrection;
 
     /* settingsChanged reported via FillResult; orchestrator resets subframe/history */
 

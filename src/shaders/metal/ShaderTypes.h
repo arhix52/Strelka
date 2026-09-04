@@ -310,6 +310,7 @@ struct Uniforms
     uint32_t reservoirMaxAge;
     uint32_t restirDebugMode;
     uint32_t restirHistoryValid;
+    uint32_t restirBiasCorrection;
 
     /// The OpenPBR parameter block for material i, or null when no material in
     /// the scene is MATERIAL_TYPE_OPENPBR.
@@ -360,13 +361,15 @@ struct Uniforms
     device struct RestirReservoir* restirReservoir1;
     device struct RestirSurfaceHistory* restirHistory0;
     device struct RestirSurfaceHistory* restirHistory1;
-    device struct RestirShadingPoint* restirShadingPoints;
+    device struct RestirShadingPoint* restirShadingPoints0;
+    device struct RestirShadingPoint* restirShadingPoints1;
 #else
     uint64_t restirReservoir0;
     uint64_t restirReservoir1;
     uint64_t restirHistory0;
     uint64_t restirHistory1;
-    uint64_t restirShadingPoints;
+    uint64_t restirShadingPoints0;
+    uint64_t restirShadingPoints1;
 #endif
 
     // Present only in the explicitly requested render-work audit variant. The
@@ -395,7 +398,7 @@ struct Uniforms
     uint64_t abiTailPadding;
 #endif
 };
-static_assert(sizeof(Uniforms) == 928, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 944, "Uniforms host/Metal ABI changed");
 
 enum RenderWorkCounter : uint32_t
 {
@@ -421,7 +424,9 @@ enum RenderWorkCounter : uint32_t
     WORK_RESTIR_REUSE_QUERIES = 79,
     WORK_MISS_LIGHT_EVALUATIONS = 80,
     WORK_GUIDE_DISPATCHES = 81,
-    WORK_COUNTER_COUNT = 82,
+    WORK_RESTIR_EFFECTIVE_M_SUM = 82,
+    WORK_RESTIR_VALID_RESERVOIRS = 83,
+    WORK_COUNTER_COUNT = 84,
     WORK_BOUNCE_SLOTS = 16
 };
 

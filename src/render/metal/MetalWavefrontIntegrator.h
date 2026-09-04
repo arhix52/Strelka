@@ -121,7 +121,7 @@ public:
     void release();
 
     void buildPipelines();
-    void ensureBuffers(uint32_t width, uint32_t height, uint32_t sharcUpdateDownscale, bool restirEnabled);
+    void ensureBuffers(uint32_t width, uint32_t height, uint32_t sharcUpdateDownscale, bool restirEnabled, bool restirBasic);
     const WavefrontVariant* variantFor(uint32_t features);
 
     // Returns the encoder to keep using: in profiling mode each stage gets its
@@ -214,9 +214,12 @@ public:
     {
         return mRestirSurfaceHistoryBuffer[index & 1u] ? mRestirSurfaceHistoryBuffer[index & 1u]->gpuAddress() : 0ull;
     }
-    uint64_t restirShadingPointAddress() const
+    uint64_t restirShadingPointAddress(uint32_t index) const
     {
-        return mRestirShadingPointBuffer ? mRestirShadingPointBuffer->gpuAddress() : 0ull;
+        const MTL::Buffer* buffer = mRestirShadingPointBuffer[index & 1u];
+        if (!buffer)
+            buffer = mRestirShadingPointBuffer[0];
+        return buffer ? buffer->gpuAddress() : 0ull;
     }
     MTL::Buffer* iorStatsBuffer() const
     {
@@ -285,7 +288,7 @@ private:
     MTL::Buffer* mAovBuffer = nullptr;
     MTL::Buffer* mRestirReservoirBuffer[2] = { nullptr, nullptr };
     MTL::Buffer* mRestirSurfaceHistoryBuffer[2] = { nullptr, nullptr };
-    MTL::Buffer* mRestirShadingPointBuffer = nullptr;
+    MTL::Buffer* mRestirShadingPointBuffer[2] = { nullptr, nullptr };
 
     MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
     MTL::Buffer* mStageStatsBuffer = nullptr;
@@ -298,6 +301,7 @@ private:
     uint32_t mCapacity = 0;
     uint32_t mSharcUpdateDownscale = 0;
     bool mRestirAllocated = false;
+    bool mRestirBasicAllocated = false;
     bool mResidencyDirty = true;
 };
 

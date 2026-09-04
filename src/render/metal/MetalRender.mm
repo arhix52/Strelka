@@ -882,13 +882,13 @@ void MetalRender::init()
     static_assert(offsetof(::Vertex, uv) == 20);
     static_assert(offsetof(::Vertex, uv1) == 24);
     static_assert(offsetof(::Vertex, color) == 28);
-    static_assert(offsetof(Uniforms, openpbrParams) == 800);
-    static_assert(offsetof(Uniforms, openpbrTextures) == 808);
-    static_assert(offsetof(Uniforms, guideRays) == 816);
-    static_assert(offsetof(Uniforms, emissiveMeshes) == 824);
-    static_assert(offsetof(Uniforms, emissiveTriangles) == 832);
+    static_assert(offsetof(Uniforms, openpbrParams) == 808);
+    static_assert(offsetof(Uniforms, openpbrTextures) == 816);
+    static_assert(offsetof(Uniforms, guideRays) == 824);
+    static_assert(offsetof(Uniforms, emissiveMeshes) == 832);
+    static_assert(offsetof(Uniforms, emissiveTriangles) == 840);
     static_assert(offsetof(Material, baseColorTexture) == 256);
-    static_assert(sizeof(Uniforms) == 928, "Uniforms host/Metal ABI changed");
+    static_assert(sizeof(Uniforms) == 944, "Uniforms host/Metal ABI changed");
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");
     // The hot record is what every live path streams on every bounce. Medium
@@ -1871,8 +1871,9 @@ void MetalRender::render(Buffer* output)
         mEnvironment.ensurePlaceholderAliasBuffer();
 
         {
-            mIntegrator.ensureBuffers(
-                width, height, pUniformData->sharcUpdateDownscale, pUniformData->restirDIEnabled != 0u);
+            mIntegrator.ensureBuffers(width, height, pUniformData->sharcUpdateDownscale,
+                                      pUniformData->restirDIEnabled != 0u,
+                                      pUniformData->restirDIEnabled != 0u && pUniformData->restirBiasCorrection != 0u);
             // Output resolution, not render resolution: this is what the display
             // shows and what MetalFX upscales into.
             mPost.ensureDisplayTextures(outWidth, outHeight);
@@ -1941,7 +1942,8 @@ void MetalRender::render(Buffer* output)
             pUniformData->restirReservoir1 = mIntegrator.restirReservoirAddress(1);
             pUniformData->restirHistory0 = mIntegrator.restirHistoryAddress(0);
             pUniformData->restirHistory1 = mIntegrator.restirHistoryAddress(1);
-            pUniformData->restirShadingPoints = mIntegrator.restirShadingPointAddress();
+            pUniformData->restirShadingPoints0 = mIntegrator.restirShadingPointAddress(0);
+            pUniformData->restirShadingPoints1 = mIntegrator.restirShadingPointAddress(1);
             pUniformData->renderWorkCounters = mIntegrator.renderWorkCounterAddress();
 
             metal::IntegratorSceneBindings sceneBind = integratorSceneBindings();
@@ -3152,7 +3154,8 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"intersectionQueries\":{},\"restirEligibleHits\":{},\"restirInitialCandidates\":{},"
         "\"restirCandidateQueries\":{},\"restirReuseQueries\":{},"
         "\"temporalReservoirMerges\":{},\"spatialReservoirMerges\":{},"
-        "\"finalRestirVisibilityRays\":{},\"firstBounceNeeSamples\":{},\"secondaryNeeSamples\":{},"
+        "\"effectiveReservoirM\":{:.3f},\"finalRestirVisibilityRays\":{},"
+        "\"firstBounceNeeSamples\":{},\"secondaryNeeSamples\":{},"
         "\"kernelThreads\":{{\"generate\":{{\"active\":{},\"dispatched\":{}}},"
         "\"extend\":{{\"active\":{},\"dispatched\":{}}},\"shade\":{{\"active\":{},\"dispatched\":{}}},"
         "\"miss\":{{\"active\":{},\"dispatched\":{}}},\"shadow\":{{\"active\":{},\"dispatched\":{}}},"
@@ -3170,6 +3173,9 @@ std::string MetalRender::renderWorkAuditJson() const
         array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE), c[WORK_INTERSECTION_QUERIES],
         c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES], c[WORK_RESTIR_CANDIDATE_QUERIES],
         c[WORK_RESTIR_REUSE_QUERIES], c[WORK_RESTIR_TEMPORAL_MERGES], c[WORK_RESTIR_SPATIAL_MERGES],
+        c[WORK_RESTIR_VALID_RESERVOIRS] != 0u ?
+            double(c[WORK_RESTIR_EFFECTIVE_M_SUM]) / double(c[WORK_RESTIR_VALID_RESERVOIRS]) :
+            0.0,
         c[WORK_RESTIR_FINAL_VISIBILITY_RAYS], c[WORK_FIRST_BOUNCE_NEE_SAMPLES], c[WORK_SECONDARY_NEE_SAMPLES],
         c[WORK_PRIMARY_RAYS], roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
         dispatched(WORK_EXTEND_RAYS_BASE), shadeActive, dispatched(WORK_SHADE_ITEMS_BASE), missActive,

@@ -233,6 +233,12 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.reservoirMaxAge = (uint32_t)std::clamp<int64_t>(*v, 0, 255);
     if (auto v = tbl["render"]["restir_debug_mode"].value<int64_t>())
         cfg.restirDebugMode = (uint32_t)std::clamp<int64_t>(*v, 0, 2);
+    if (auto v = tbl["render"]["restir_bias_correction"].value<std::string>())
+    {
+        if (*v != "off" && *v != "basic")
+            throw std::runtime_error("restir_bias_correction must be 'off' or 'basic'");
+        cfg.restirBiasCorrection = *v == "basic" ? 1u : 0u;
+    }
     if (auto v = tbl["render"]["estimator_mode"].value<int64_t>())
         cfg.estimatorMode = (uint32_t)*v;
     if (auto v = tbl["render"]["split_aov"].value<bool>())
@@ -469,6 +475,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/spatialNeighborCount", m_config.spatialNeighborCount);
     m_settings->setAs<uint32_t>("render/pt/reservoirMaxAge", m_config.reservoirMaxAge);
     m_settings->setAs<uint32_t>("render/pt/restirDebugMode", m_config.restirDebugMode);
+    m_settings->setAs<uint32_t>("render/pt/restirBiasCorrection", m_config.restirBiasCorrection);
     m_settings->setAs<float>("render/pt/denoiseFireflyClamp", m_config.denoiseFireflyClamp);
     m_settings->setAs<float>("render/pt/clampIndirect", m_config.clampIndirect);
     m_settings->setAs<uint32_t>("render/pt/sortRays", m_config.sortRays ? 1u : 0u);

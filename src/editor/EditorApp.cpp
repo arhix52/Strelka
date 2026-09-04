@@ -995,6 +995,11 @@ void EditorApp::runBenchmark()
     m_settingsManager->setAs<uint32_t>(
         "render/pt/spatialNeighborCount",
         envUint("STRELKA_RESTIR_NEIGHBORS", m_settingsManager->getAs<uint32_t>("render/pt/spatialNeighborCount")));
+    m_settingsManager->setAs<uint32_t>(
+        "render/pt/restirBiasCorrection",
+        std::min(envUint("STRELKA_RESTIR_BIAS_CORRECTION",
+                         m_settingsManager->getAs<uint32_t>("render/pt/restirBiasCorrection")),
+                 1u));
     const bool requestedRestir = m_settingsManager->getAs<bool>("render/pt/restirDIEnabled");
     // One submission per frame, so the number is the tracer's cost and not the
     // inter-band gaps of the responsiveness split.

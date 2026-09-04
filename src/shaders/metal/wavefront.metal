@@ -1713,6 +1713,16 @@ static bool restirSurfaceHistoryCompatible(thread const RestirSurfaceHistory& cu
                                    (previous.materialIdAndFlags & RESTIR_SURFACE_VALID) != 0u);
 }
 
+static void rebuildRestirShadingPoint(constant Uniforms& uniforms,
+                                      device const Material* materials,
+                                      thread const RestirShadingPoint& stored,
+                                      thread const RestirSurfaceHistory& surface,
+                                      thread SurfaceInteraction& si,
+                                      thread bool& isFibre,
+                                      thread bool& isOpenPBR,
+                                      thread ShadedFrame& neeFrame,
+                                      thread OpenPBR_PreparedBsdf& openpbrPrepared);
+
 kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                            constant Uniforms& uniforms [[buffer(0)]],
                            constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],
@@ -2983,8 +2993,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         reservoir.state.M = candidates;
         if (restirInitial)
         {
-            device RestirSurfaceHistory* currentHistory =
-                (uniforms.frameIndex & 1u) != 0u ? uniforms.restirHistory1 : uniforms.restirHistory0;
+            const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
+            device RestirSurfaceHistory* currentHistory = oddFrame ? uniforms.restirHistory1 : uniforms.restirHistory0;
+            device RestirShadingPoint* currentShadingPoints =
+                oddFrame ? uniforms.restirShadingPoints1 : uniforms.restirShadingPoints0;
 
             const float3 previousPosition = uniforms.hasPrevFramePose != 0u && !isCurve ?
                                                 previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances,
@@ -3017,7 +3029,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             shadingPoint.sampleIdxAndFlags = (sampleIdx & RESTIR_SHADING_SAMPLE_MASK) | RESTIR_SHADING_VALID |
                                              (isCurve ? RESTIR_SHADING_CURVE : 0u) |
                                              (motion.reactive == 0.0f ? RESTIR_SHADING_REPROJECTABLE : 0u);
-            uniforms.restirShadingPoints[tid] = shadingPoint;
+            currentShadingPoints[tid] = shadingPoint;
 
             // Temporal reuse consumes the same surface interaction and prepared
             // BSDF as initial sampling. Keeping it here avoids reconstructing and
@@ -3030,23 +3042,30 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     previousPixel.y < int(uniforms.height))
                 {
                     const uint32_t previousIndex = uint32_t(previousPixel.y) * uniforms.width + uint32_t(previousPixel.x);
-                    const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
                     device const RestirReservoir* previousReservoirs =
                         oddFrame ? uniforms.restirReservoir0 : uniforms.restirReservoir1;
                     device const RestirSurfaceHistory* previousHistory =
                         oddFrame ? uniforms.restirHistory0 : uniforms.restirHistory1;
-                    const RestirReservoir previousReservoir = previousReservoirs[previousIndex];
+                    device const RestirShadingPoint* previousShadingPoints =
+                        oddFrame ? uniforms.restirShadingPoints0 : uniforms.restirShadingPoints1;
+                    RestirReservoir previousReservoir = previousReservoirs[previousIndex];
                     const RestirSurfaceHistory oldSurface = previousHistory[previousIndex];
                     const uint32_t age = previousReservoir.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK;
                     if ((previousReservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) != 0u &&
                         previousReservoir.state.M != 0u && age < uniforms.reservoirMaxAge &&
                         restirSurfaceHistoryCompatible(surface, oldSurface))
                     {
+                        if (uniforms.restirBiasCorrection != 0u)
+                        {
+                            restirReservoirLimitM(
+                                previousReservoir.state, reservoir.state.M * max(uniforms.reservoirMaxAge, 1u));
+                        }
                         const LightConnection previousConnection = reconnectRestirSample(
                             uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
                             motionTime, si, envAliasTable, envMapTexture, iesProfiles, previousReservoir.sample);
                         const RestirEvaluation previousEvaluation = evaluateRestirConnection(
                             previousConnection, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
+                        const uint32_t currentM = reservoir.state.M;
                         SamplerState temporalRng = rng;
                         temporalRng.seed = hash_combine(temporalRng.seed, 0x68bc21ebu);
                         const bool selectedHistory = restirReservoirUpdate(
@@ -3058,6 +3077,29 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         if (selectedHistory)
                         {
                             reservoir.sample = previousReservoir.sample;
+                        }
+                        if (uniforms.restirBiasCorrection != 0u)
+                        {
+                            const RestirShadingPoint previousStored = previousShadingPoints[previousIndex];
+                            SurfaceInteraction previousSi;
+                            bool previousIsFibre, previousIsOpenPBR;
+                            ShadedFrame previousNeeFrame;
+                            OpenPBR_PreparedBsdf previousOpenpbrPrepared;
+                            rebuildRestirShadingPoint(uniforms, materials, previousStored, oldSurface, previousSi,
+                                                      previousIsFibre, previousIsOpenPBR, previousNeeFrame,
+                                                      previousOpenpbrPrepared);
+                            const LightConnection selectedAtPrevious = reconnectRestirSample(
+                                uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
+                                motionTime, previousSi, envAliasTable, envMapTexture, iesProfiles, reservoir.sample);
+                            const RestirEvaluation selectedPreviousEvaluation = evaluateRestirConnection(
+                                selectedAtPrevious, previousSi, previousIsFibre, previousNeeFrame, previousIsOpenPBR,
+                                previousOpenpbrPrepared, uniforms.misHeuristic);
+                            const float currentTarget = reservoir.state.target;
+                            const float previousTarget = selectedPreviousEvaluation.target;
+                            const float sourceTargetSum =
+                                float(currentM) * currentTarget + float(previousReservoir.state.M) * previousTarget;
+                            restirReservoirApplyBasicNormalization(
+                                reservoir.state, selectedHistory ? previousTarget : currentTarget, sourceTargetSum);
                         }
                         reservoir.state.ageAndFlags = (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) |
                                                       (selectedHistory ? min(age + 1u, RESTIR_RESERVOIR_AGE_MASK) : 0u);
@@ -3424,19 +3466,23 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
         return;
     }
     const uint32_t tid = hitQueue[gid];
-    const RestirShadingPoint stored = uniforms.restirShadingPoints[tid];
+    const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
+    device const RestirShadingPoint* shadingPoints =
+        oddFrame ? uniforms.restirShadingPoints1 : uniforms.restirShadingPoints0;
+    const RestirShadingPoint stored = shadingPoints[tid];
     if (uniforms.restirDIEnabled == 0u || (stored.sampleIdxAndFlags & RESTIR_SHADING_VALID) == 0u)
     {
         return;
     }
     auditWork(uniforms, WORK_RESTIR_FINAL_ITEMS);
 
-    const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
     device RestirReservoir* currentReservoirs = oddFrame ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
     device const RestirSurfaceHistory* history = oddFrame ? uniforms.restirHistory1 : uniforms.restirHistory0;
     const RestirSurfaceHistory currentSurface = history[tid];
     RestirReservoir reservoir = initialReservoirs[tid];
+    const uint32_t centerM = reservoir.state.M;
     uint32_t selectedAge = reservoir.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK;
+    uint32_t selectedSourceIndex = tid;
 
     SurfaceInteraction si;
     bool isFibre, isOpenPBR;
@@ -3487,26 +3533,11 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
         {
             reservoir.sample = neighbor.sample;
             selectedAge = neighbor.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK;
+            selectedSourceIndex = neighborIndex;
         }
     }
     reservoir.state.ageAndFlags =
         (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) | min(selectedAge, RESTIR_RESERVOIR_AGE_MASK);
-    const uint32_t maxM = max(uniforms.initialCandidateCount, 1u) * max(uniforms.reservoirMaxAge, 1u) *
-                          (min(uniforms.spatialNeighborCount, 16u) + 1u);
-    restirReservoirLimitM(reservoir.state, maxM);
-    if (uniforms.restirDebugMode != 0u)
-    {
-        currentReservoirs[tid] = reservoir;
-        const float3 debugColor =
-            uniforms.restirDebugMode == 1u ?
-                float3(float(reservoir.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK) /
-                       float(max(uniforms.reservoirMaxAge, 1u))) :
-                (restirSampleType(reservoir.sample) == RESTIR_SAMPLE_ANALYTIC    ? float3(1.0f, 0.2f, 0.1f) :
-                 restirSampleType(reservoir.sample) == RESTIR_SAMPLE_ENVIRONMENT ? float3(0.1f, 0.4f, 1.0f) :
-                                                                                   float3(0.1f, 1.0f, 0.2f));
-        radianceOut[tid] = float4(debugColor, 0.0f);
-        return;
-    }
     if ((reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) == 0u)
     {
         currentReservoirs[tid] = reservoir;
@@ -3519,7 +3550,67 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
     const RestirEvaluation evaluated =
         evaluateRestirConnection(connection, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
     reservoir.state.target = evaluated.target;
+    if (uniforms.restirBiasCorrection != 0u)
+    {
+        float selectedSourceTarget = selectedSourceIndex == tid ? evaluated.target : 0.0f;
+        float sourceTargetSum = float(centerM) * evaluated.target;
+        for (uint32_t i = 0u; i < neighborCount; ++i)
+        {
+            const int2 neighborPixel = int2(pixel) + kRestirNeighborOffsets[(rotation + i * 5u) & 15u];
+            if (any(neighborPixel < int2(0)) || neighborPixel.x >= int(uniforms.width) ||
+                neighborPixel.y >= int(uniforms.height))
+            {
+                continue;
+            }
+            const uint32_t neighborIndex = uint32_t(neighborPixel.y) * uniforms.width + uint32_t(neighborPixel.x);
+            const RestirReservoir neighbor = initialReservoirs[neighborIndex];
+            const RestirSurfaceHistory neighborSurface = history[neighborIndex];
+            if ((neighbor.state.ageAndFlags & RESTIR_RESERVOIR_VALID) == 0u || neighbor.state.M == 0u ||
+                !restirSurfaceHistoryCompatible(currentSurface, neighborSurface))
+            {
+                continue;
+            }
+            const RestirShadingPoint neighborStored = shadingPoints[neighborIndex];
+            SurfaceInteraction neighborSi;
+            bool neighborIsFibre, neighborIsOpenPBR;
+            ShadedFrame neighborNeeFrame;
+            OpenPBR_PreparedBsdf neighborOpenpbrPrepared;
+            rebuildRestirShadingPoint(uniforms, materials, neighborStored, neighborSurface, neighborSi, neighborIsFibre,
+                                      neighborIsOpenPBR, neighborNeeFrame, neighborOpenpbrPrepared);
+            const uint32_t neighborSampleIdx = neighborStored.sampleIdxAndFlags & RESTIR_SHADING_SAMPLE_MASK;
+            const float neighborMotionTime = motionTimeFor(uniforms, neighborIndex, neighborSampleIdx);
+            const LightConnection selectedAtNeighbor = reconnectRestirSample(
+                uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer, neighborMotionTime,
+                neighborSi, envAliasTable, envMapTexture, iesProfiles, reservoir.sample);
+            const RestirEvaluation neighborEvaluation =
+                evaluateRestirConnection(selectedAtNeighbor, neighborSi, neighborIsFibre, neighborNeeFrame,
+                                         neighborIsOpenPBR, neighborOpenpbrPrepared, uniforms.misHeuristic);
+            sourceTargetSum += float(neighbor.state.M) * neighborEvaluation.target;
+            if (selectedSourceIndex == neighborIndex)
+            {
+                selectedSourceTarget = neighborEvaluation.target;
+            }
+        }
+        restirReservoirApplyBasicNormalization(reservoir.state, selectedSourceTarget, sourceTargetSum);
+    }
+    const uint32_t maxM = max(uniforms.initialCandidateCount, 1u) * max(uniforms.reservoirMaxAge, 1u) *
+                          (min(uniforms.spatialNeighborCount, 16u) + 1u);
+    restirReservoirLimitM(reservoir.state, maxM);
     currentReservoirs[tid] = reservoir;
+    auditWork(uniforms, WORK_RESTIR_EFFECTIVE_M_SUM, reservoir.state.M);
+    auditWork(uniforms, WORK_RESTIR_VALID_RESERVOIRS);
+    if (uniforms.restirDebugMode != 0u)
+    {
+        const float3 debugColor =
+            uniforms.restirDebugMode == 1u ?
+                float3(float(reservoir.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK) /
+                       float(max(uniforms.reservoirMaxAge, 1u))) :
+                (restirSampleType(reservoir.sample) == RESTIR_SAMPLE_ANALYTIC    ? float3(1.0f, 0.2f, 0.1f) :
+                 restirSampleType(reservoir.sample) == RESTIR_SAMPLE_ENVIRONMENT ? float3(0.1f, 0.4f, 1.0f) :
+                                                                                   float3(0.1f, 1.0f, 0.2f));
+        radianceOut[tid] = float4(debugColor, 0.0f);
+        return;
+    }
     const float W = restirReservoirNormalization(reservoir.state);
     if (!(W > 0.0f))
     {

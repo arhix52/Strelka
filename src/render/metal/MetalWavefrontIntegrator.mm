@@ -65,7 +65,8 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mRestirReservoirBuffer[1]);
     safeRelease(mRestirSurfaceHistoryBuffer[0]);
     safeRelease(mRestirSurfaceHistoryBuffer[1]);
-    safeRelease(mRestirShadingPointBuffer);
+    safeRelease(mRestirShadingPointBuffer[0]);
+    safeRelease(mRestirShadingPointBuffer[1]);
     safeRelease(mMissQueueBuffer);
     for (auto& kv : mVariants)
     {
@@ -136,7 +137,8 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
     add(mRestirReservoirBuffer[1]);
     add(mRestirSurfaceHistoryBuffer[0]);
     add(mRestirSurfaceHistoryBuffer[1]);
-    add(mRestirShadingPointBuffer);
+    add(mRestirShadingPointBuffer[0]);
+    add(mRestirShadingPointBuffer[1]);
     add(mControlBuffer);
     add(mTraversalDispatchBuffer);
     add(mStageStatsBuffer);
@@ -161,7 +163,8 @@ size_t MetalWavefrontIntegrator::queueBytes() const
            bufBytes(mShadowRayBuffer) + bufBytes(mHitQueueBuffer) + bufBytes(mMissQueueBuffer) + bufBytes(mAovBuffer) +
            bufBytes(mStageStatsBuffer) + bufBytes(mRestirReservoirBuffer[0]) + bufBytes(mRestirReservoirBuffer[1]) +
            bufBytes(mRestirSurfaceHistoryBuffer[0]) + bufBytes(mRestirSurfaceHistoryBuffer[1]) +
-           bufBytes(mRestirShadingPointBuffer) + bufBytes(mRenderWorkCounterBuffer);
+           bufBytes(mRestirShadingPointBuffer[0]) + bufBytes(mRestirShadingPointBuffer[1]) +
+           bufBytes(mRenderWorkCounterBuffer);
 }
 
 size_t MetalWavefrontIntegrator::restirBytes() const
@@ -169,7 +172,7 @@ size_t MetalWavefrontIntegrator::restirBytes() const
     auto bufBytes = [](MTL::Buffer* b) { return b ? b->length() : 0; };
     return bufBytes(mRestirReservoirBuffer[0]) + bufBytes(mRestirReservoirBuffer[1]) +
            bufBytes(mRestirSurfaceHistoryBuffer[0]) + bufBytes(mRestirSurfaceHistoryBuffer[1]) +
-           bufBytes(mRestirShadingPointBuffer);
+           bufBytes(mRestirShadingPointBuffer[0]) + bufBytes(mRestirShadingPointBuffer[1]);
 }
 
 // Two timestamps per stage (encoder start and end), so the counter buffer holds
@@ -1068,7 +1071,9 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         e->useResource(mRestirReservoirBuffer[1], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
         e->useResource(mRestirSurfaceHistoryBuffer[0], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
         e->useResource(mRestirSurfaceHistoryBuffer[1], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
-        e->useResource(mRestirShadingPointBuffer, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+        e->useResource(mRestirShadingPointBuffer[0], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+        if (mRestirShadingPointBuffer[1])
+            e->useResource(mRestirShadingPointBuffer[1], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
     };
     declareResidency(enc);
 
@@ -1655,15 +1660,13 @@ void MetalWavefrontIntegrator::buildPipelines()
     lib->release();
 }
 
-void MetalWavefrontIntegrator::ensureBuffers(uint32_t width,
-                                             uint32_t height,
-                                             uint32_t sharcUpdateDownscale,
-                                             bool restirEnabled)
+void MetalWavefrontIntegrator::ensureBuffers(
+    uint32_t width, uint32_t height, uint32_t sharcUpdateDownscale, bool restirEnabled, bool restirBasic)
 {
     const uint32_t pixels = width * height;
     sharcUpdateDownscale = std::max(sharcUpdateDownscale, 1u);
     if (pixels == mCapacity && sharcUpdateDownscale == mSharcUpdateDownscale && restirEnabled == mRestirAllocated &&
-        mPathStateBuffer)
+        restirBasic == mRestirBasicAllocated && mPathStateBuffer)
     {
         return;
     }
@@ -1708,7 +1711,8 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width,
     release(mRestirReservoirBuffer[1]);
     release(mRestirSurfaceHistoryBuffer[0]);
     release(mRestirSurfaceHistoryBuffer[1]);
-    release(mRestirShadingPointBuffer);
+    release(mRestirShadingPointBuffer[0]);
+    release(mRestirShadingPointBuffer[1]);
 
     metal::WavefrontElementSizes sz;
     sz.pathState = sizeof(PathState);
@@ -1766,12 +1770,19 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width,
             mRestirSurfaceHistoryBuffer[i] =
                 mDevice->newBuffer(layout.restirSurfaceHistoryBytes, MTL::ResourceStorageModePrivate);
         }
-        mRestirShadingPointBuffer = mDevice->newBuffer(layout.restirShadingPointBytes, MTL::ResourceStorageModePrivate);
+        mRestirShadingPointBuffer[0] =
+            mDevice->newBuffer(layout.restirShadingPointBytes, MTL::ResourceStorageModePrivate);
+        if (restirBasic)
+        {
+            mRestirShadingPointBuffer[1] =
+                mDevice->newBuffer(layout.restirShadingPointBytes, MTL::ResourceStorageModePrivate);
+        }
     }
 
     mCapacity = pixels;
     mSharcUpdateDownscale = sharcUpdateDownscale;
     mRestirAllocated = restirEnabled;
+    mRestirBasicAllocated = restirBasic;
 
     STRELKA_INFO("wavefront buffers for {}x{}: {:.1f} MB total", width, height, queueBytes() / (1024.0 * 1024.0));
 }

@@ -185,6 +185,7 @@ private:
         uint32_t spatialNeighborCount = 0;
         uint32_t reservoirMaxAge = 0;
         uint32_t restirDebugMode = 0;
+        uint32_t restirBiasCorrection = 0;
     };
 
     MTL::Device* mDevice = nullptr;

@@ -139,6 +139,7 @@ inline void seedCommonRenderSettings(SettingsManager& settings)
     settings.setAs<uint32_t>("render/pt/spatialNeighborCount", 2);
     settings.setAs<uint32_t>("render/pt/reservoirMaxAge", 20);
     settings.setAs<uint32_t>("render/pt/restirDebugMode", 0);
+    settings.setAs<uint32_t>("render/pt/restirBiasCorrection", 0);
     settings.setAs<float>("render/pt/dev/shadowRayTmin", 0.0f);
     settings.setAs<float>("render/pt/dev/materialRayTmin", 0.0f);
     settings.setAs<bool>("render/enableValidation", false);

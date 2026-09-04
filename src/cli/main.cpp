@@ -56,6 +56,7 @@ int main(int argc, const char* argv[])
         ("restir-neighbors", "ReSTIR spatial neighbors",     cxxopts::value<uint32_t>())
         ("restir-max-age", "ReSTIR reservoir maximum age",   cxxopts::value<uint32_t>())
         ("restir-debug", "ReSTIR debug mode",                cxxopts::value<uint32_t>())
+        ("restir-bias-correction", "ReSTIR bias correction: off, basic", cxxopts::value<std::string>())
         ("profile-stages", "Report per-stage GPU timings",   cxxopts::value<bool>()->implicit_value("true"))
         ("audit-render-work", "Print debug render-work counters as JSON", cxxopts::value<bool>()->implicit_value("true"))
         ("audit-frames", "Audited frames for moving-light harness", cxxopts::value<uint32_t>())
@@ -105,9 +106,9 @@ int main(int argc, const char* argv[])
         {
             cfg = oka::parseTomlConfig(configPath);
         }
-        catch (const toml::parse_error& e)
+        catch (const std::exception& e)
         {
-            STRELKA_FATAL("TOML parse error: {}", e.what());
+            STRELKA_FATAL("Config error: {}", e.what());
             return 1;
         }
     }
@@ -200,6 +201,16 @@ int main(int argc, const char* argv[])
     if (result.count("restir-debug"))
     {
         cfg.restirDebugMode = std::min(result["restir-debug"].as<uint32_t>(), 2u);
+    }
+    if (result.count("restir-bias-correction"))
+    {
+        const std::string mode = result["restir-bias-correction"].as<std::string>();
+        if (mode != "off" && mode != "basic")
+        {
+            STRELKA_FATAL("--restir-bias-correction must be off or basic");
+            return 1;
+        }
+        cfg.restirBiasCorrection = mode == "basic" ? 1u : 0u;
     }
     if (result.count("profile-stages"))
     {

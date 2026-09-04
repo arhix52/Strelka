@@ -71,6 +71,19 @@ DEVICE_FUNC float restirReservoirNormalization(const THREAD_REF RestirReservoirS
                0.0f;
 }
 
+// Encode RTXDI BASIC's MIS-like normalization back into this reservoir's raw-weight representation.
+DEVICE_FUNC void restirReservoirApplyBasicNormalization(THREAD_REF RestirReservoirState& reservoir,
+                                                        float selectedSourceTarget,
+                                                        float sourceTargetSum)
+{
+    if (!(selectedSourceTarget > 0.0f) || !(sourceTargetSum > 0.0f) || reservoir.M == 0u)
+    {
+        reservoir.weightSum = 0.0f;
+        return;
+    }
+    reservoir.weightSum *= selectedSourceTarget * float(reservoir.M) / sourceTargetSum;
+}
+
 DEVICE_FUNC float restirReservoirMergeWeight(const THREAD_REF RestirReservoirState& source, float currentTarget)
 {
     return (source.ageAndFlags & RESTIR_RESERVOIR_VALID) != 0u && source.M > 0u && source.target > 0.0f &&

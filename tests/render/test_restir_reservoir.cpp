@@ -14,6 +14,58 @@ TEST_CASE("one ReSTIR candidate reduces to NEE")
     CHECK(2.0f * restirReservoirNormalization(r) == doctest::Approx(4.0f));
 }
 
+TEST_CASE("initial RIS remains the NEE estimator")
+{
+    RestirReservoirState r{};
+    CHECK(restirReservoirUpdate(r, 4.0f, 2.0f, 1u, 0.0f));
+    CHECK_FALSE(restirReservoirUpdate(r, 12.0f, 6.0f, 1u, 1.0f));
+    CHECK(r.target * restirReservoirNormalization(r) == doctest::Approx((4.0f + 12.0f) / 2.0f));
+}
+
+TEST_CASE("basic normalization merges different source targets")
+{
+    RestirReservoirState merged{ 28.0f, 1.0f, 8u, RESTIR_RESERVOIR_VALID };
+    const float sourceTargetSum = 4u * 4.0f + 4u * 2.0f;
+    restirReservoirApplyBasicNormalization(merged, 2.0f, sourceTargetSum);
+    CHECK(restirReservoirNormalization(merged) == doctest::Approx(28.0f * 2.0f / sourceTargetSum));
+}
+
+TEST_CASE("basic normalization excludes a zero-target source")
+{
+    RestirReservoirState merged{ 12.0f, 3.0f, 6u, RESTIR_RESERVOIR_VALID };
+    const float sourceTargetSum = 2u * 3.0f + 4u * 0.0f;
+    restirReservoirApplyBasicNormalization(merged, 3.0f, sourceTargetSum);
+    CHECK(restirReservoirNormalization(merged) == doctest::Approx(2.0f));
+}
+
+TEST_CASE("temporal basic normalization uses previous-frame source target")
+{
+    RestirReservoirState selectedPrevious{ 15.0f, 2.0f, 5u, RESTIR_RESERVOIR_VALID };
+    const float currentTarget = 2.0f;
+    const float previousTarget = 0.5f;
+    const float sourceTargetSum = currentTarget + 4u * previousTarget;
+    restirReservoirApplyBasicNormalization(selectedPrevious, previousTarget, sourceTargetSum);
+    CHECK(restirReservoirNormalization(selectedPrevious) ==
+          doctest::Approx(15.0f * previousTarget / (currentTarget * sourceTargetSum)));
+    CHECK(restirReservoirNormalization(selectedPrevious) !=
+          doctest::Approx(15.0f * currentTarget / (currentTarget * sourceTargetSum)));
+}
+
+TEST_CASE("basic correction removes support shift retained by off")
+{
+    // RTXDI DI spatial BASIC:
+    // https://github.com/NVIDIA-RTX/RTXDI/blob/main/Libraries/Rtxdi/Include/Rtxdi/DI/SpatialResampling.hlsli
+    // Two M=2 sources have disjoint target support over two unit-contribution samples.
+    RestirReservoirState merged{};
+    CHECK(restirReservoirUpdate(merged, 2.0f, 1.0f, 2u, 0.0f));
+    CHECK_FALSE(restirReservoirUpdate(merged, 2.0f, 1.0f, 2u, 1.0f));
+    const float off = restirReservoirNormalization(merged);
+    RestirReservoirState basic = merged;
+    restirReservoirApplyBasicNormalization(basic, 1.0f, 2.0f);
+    CHECK(off == doctest::Approx(1.0f));
+    CHECK(restirReservoirNormalization(basic) == doctest::Approx(2.0f));
+}
+
 TEST_CASE("ReSTIR weighted replacement follows candidate weights")
 {
     std::mt19937 rng(17);
