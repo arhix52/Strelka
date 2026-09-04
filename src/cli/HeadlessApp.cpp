@@ -825,15 +825,21 @@ int HeadlessApp::run()
                 m_scene->setLight(auditMovingLightIds[i], light);
             }
         };
-        // First transform update may grow the refittable TLAS. Warm it too.
-        moveAuditLights(0);
-        m_render->renderSync(outputBuf.get());
-        m_settings->setAs<uint32_t>("render/pt/auditRenderWork", 1u);
+        // Warm moving transforms, the refittable TLAS and the temporal mapping.
+        for (uint32_t frame = 0; frame < 8u; ++frame)
+        {
+            moveAuditLights(frame);
+            m_render->renderSync(outputBuf.get());
+        }
+        if (m_config.auditRenderWork)
+        {
+            m_settings->setAs<uint32_t>("render/pt/auditRenderWork", 1u);
+        }
         std::cout << "\nSTRELKA_RENDER_BEGIN\n" << std::flush;
         const uint32_t frames = std::max(m_config.auditFrames, 1u);
         for (uint32_t frame = 0; frame < frames; ++frame)
         {
-            moveAuditLights(frame + 1u);
+            moveAuditLights(frame + 8u);
             m_render->renderSync(outputBuf.get());
             printProgress(frame + 1u, frames, m_render->getLastRenderTimeMs());
         }

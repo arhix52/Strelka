@@ -1,15 +1,54 @@
-Phase: ReSTIR DI performance triage complete; exact procedural geometry unchanged.
-Benchmark: Apple M4 Pro, Release, 1920x1080, depth 4, 1 spp/frame, static camera; 8 warm-up + 32 measured frames, median of 5 launches. Quality uses a 128-NEE-frame equal-time budget and 512-spp reference.
-| config (C/T/S/N) | uniform ms / rMSE / last | distributed ms / rMSE / last | occluded ms / rMSE / last | ReSTIR B/px |
+# ReSTIR DI memory/pass status
+
+Phase: complete. Estimator/reservoir math, PDFs, NEE, temporal rejection, procedural discs/spheres, and one-final-shadow rule are unchanged.
+
+Measurement: Apple M4 Pro, Release, 1920x1080, depth 4, 1 spp/frame; 8 warm-up + 32 measured frames; mean per launch, median 5 launches. MTL validation/audit disabled for timing.
+
+## Buffer ledger
+
+| buffer | B/px | fields | writer -> readers | lifetime | elsewhere / decision |
+|---|---:|---|---|---|---|
+| reservoir x2 | 64 | type+stable light ID, 3 exact sample payload words, weightSum, target, M, age/valid | shade/fused -> temporal/fused | two frames | world position/normal/radiance/PDF reconstructed; 48 -> 32 B each |
+| surface history x2 | 40 | geometry normal, view depth, material ID+valid | shade -> temporal/fused | two frames | AOV is optional and not a stable ReSTIR source; world position removed; 32 -> 20 B each |
+| shading point | 104 | position, Ns/T/sign, ray, color, throughput, UV, IOR/LOD/radius, medium/sample flags | shade -> fused | one frame | Ng/material come from history; B reconstructed from Ns/T/sign; 136 -> 104 B |
+
+Cached option A (104 B) is retained: it removed duplicate Ng/material/bitangent and produced byte-identical output. Option B needs retained instance/geometry/primitive/barycentric IDs plus triangle/curve vertex and material fetches after the hit buffer becomes immutable initial-reservoir storage; no correctness-preserving smaller variant avoided those random reads, so it was not shipped.
+
+Total ReSTIR storage: 296 -> 208 B/px, 585.4 -> 411.3 MiB at 1080p. Reservoir target met: 96 -> 64 B/px. ReSTIR OFF allocates 0 ReSTIR bytes.
+
+## Pipeline
+
+First-hit shade still performs initial RIS + temporal reuse. It writes the immutable initial reservoir into the dead 32-B hit record and appends only valid first non-delta hits to the reused miss queue. One indirect `wavefrontRestirSpatialFinal` reads that queue, merges neighbors in registers, writes history, reconstructs the selected sample, and enqueues at most one shadow ray.
+
+ReSTIR dispatches/frame: spatial+final 2 -> fused 1; total depth-4 dispatches 32 -> 31. The spatial intermediate buffer/pass and separate final PSO are gone. Active-queue smoke: 76,018 active / 76,032 dispatched versus 76,800 pixels; misses do no reuse work.
+
+## GPU timing (before -> after, ms)
+
+| scene | NEE | c1/T/S2 | c2/T/S2 | c2 overhead reduction |
 |---|---:|---:|---:|---:|
-| NEE | 65.06 / .00658 / 1.522 | 74.52 / .00460 / .872 | 27.14 / .00300 / .425 | 0* |
-| 1/0/0/0 | 78.74 / .01450 / 1.388 | 83.71 / .00521 / .797 | 29.33 / .00296 / .348 | 296* |
-| 1/1/0/0 | 86.07 / .01551 / 1.390 | 85.83 / .00530 / .878 | 30.67 / .00298 / .355 | 296* |
-| 1/1/1/2 | 95.10 / .01282 / 1.386 | 88.20 / .00547 / .777 | 30.88 / .00319 / .651 | 296* |
-| 1/1/1/4 | 105.23 / .01831 / 1.397 | 91.62 / .00567 / .804 | 30.87 / .00299 / .503 | 296* |
-| 2/1/1/2 | 104.00 / .01108 / 1.378 | 97.87 / .00604 / .739 | 31.14 / .00290 / .223 | 296* |
-| 4/1/1/2 | 119.47 / .01213 / 1.379 | 108.08 / .00651 / .712 | 31.64 / .00282 / .182 | 296* |
-| 8/1/1/4 | 159.49 / .01618 / 1.383 | 129.48 / .00745 / .591 | 32.65 / .00349 / .293 | 296* |
-Stage ms for 1/T/S2 (uniform / distributed / occluded): extend 6.97/29.22/16.55; initial net .69/2.66/.22; temporal 7.03/3.91/.23; spatial 13.04/4.78/.23; final 7.60/3.91/.21; shadow 1.92/10.74/2.17; accumulation .74/.56/.52.
-Traversal: 1.122 IFT calls/shadow on sphere control; restart=0 in benchmark scenes, .0527/ray in alpha test; alpha shadow +1.41 ms; IFT traversal +0.36 ms vs rectangle triangle control. Candidate/reconstruction kernels bind no AS. *Buffers are allocated in NEE too: reservoirs 96, temporal 64, work 136 B/px (585.35 MiB at 1080p), so current physical delta is 0.
-Decision: Pareto ReSTIR preset 2/T/S2; only occluded scene crosses NEE (-3.3% rMSE), no general crossover. Experimental/default OFF.
+| Uniform grid | 65.06 -> 61.94 | 95.10 -> 86.99 | 104.00 -> 95.27 | 14.4% |
+| Distributed lights | 74.52 -> 69.43 | 88.20 -> 75.94 | 97.87 -> 81.54 | 48.1% |
+| Occluded lights | 27.14 -> 22.55 | 30.88 -> 24.38 | 31.14 -> 24.62 | 48.2% |
+| 512 moving lights | 51.36 -> 53.30 | 74.65 -> 62.56 | n/a -> 64.18 | 60.3% (c1) |
+
+No primary scene regressed >3% versus its ReSTIR baseline. The 25% overhead goal is met on distributed, occluded, and moving, not uniform: its remaining cost is selected-sample BSDF/material reconstruction plus the second candidate.
+
+Metal 4 exposes whole-command-buffer GPU intervals, and temporal is fused into shade, so splitting first-hit/initial/temporal timestamps would perturb the pipeline. Controlled attribution accounts for 100% of current c2-NEE delta: c1 reuse/fused/shadow + candidate 2 = 25.04+8.28 ms uniform, 6.52+5.59 distributed, 1.83+0.24 occluded, 9.26+1.62 moving.
+
+## Quality and invariants
+
+Equal-time linear EXR against one 512-frame NEE reference; budget = 128 NEE frames. Values are frames / rMSE / mean luminance ratio:
+
+| scene | NEE | c1/T/S2 | c2/T/S2 | crossover |
+|---|---:|---:|---:|---|
+| Uniform | 128 / .0811 / .9998 | 91 / .1109 / 1.0594 | 83 / .1040 / 1.0248 | none |
+| Distributed | 128 / .5556 / .9999 | 117 / .5225 / 1.0031 | 108 / .5506 / 1.0019 | c1; c2 marginal |
+| Occluded | 128 / .1612 / .9987 | 118 / .2692 / 1.1503 | 117 / .1848 / 1.0151 | none |
+
+Optimized vs pre-fused mean ratio is 0.99999997, so these changes introduce no systematic shift; equal-time c2 stays within 2.5% of its reference mean. Moving uses equal frame count, not equal time: existing light-change rejection yields 0 temporal merges, so reuse-induced temporal error is zero; GPU timings are reported separately above.
+
+Audit: candidates/reuse queries 0; first-bounce NEE 0 with ReSTIR; final rays <= eligible; guides add 0 traversal; static BLAS/TLAS build/refit 0; moving 32 frames gives build 0/0, refit/upload/mapping 32/32/32 (max 1/frame); NEE ReSTIR allocation 0; history ping-pong observed via nonzero static temporal merges.
+
+Validation: Debug/Release Metal compile; actual MTLDevice static/active/moving runs; focused 31 cases/72,689 assertions; full Debug ctest 3/3, 943 cases and 67,159,707 assertions. Fused vs pre-fused image rMSE 4.8e-6, mean ratio 0.99999997; cached compaction and redundant-write removal are byte-identical.
+
+Commits: `7b0292e` Pack ReSTIR reservoir and history; `d182945` Fuse spatial and final ReSTIR passes. Dominant bottleneck: 104-B same-frame shading cache and selected-sample BSDF/material evaluation; scene reconstruction was not substituted without a measured win.

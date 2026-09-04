@@ -220,9 +220,9 @@ int main(int argc, const char* argv[])
         return 1;
     }
 #endif
-    if ((cfg.auditFrames != 0u || cfg.auditMovingLights != 0u) && !cfg.auditRenderWork)
+    if (cfg.auditFrames != 0u && cfg.auditMovingLights == 0u && !cfg.auditRenderWork)
     {
-        STRELKA_FATAL("--audit-frames and --audit-moving-lights require --audit-render-work");
+        STRELKA_FATAL("--audit-frames without moving lights requires --audit-render-work");
         return 1;
     }
 
