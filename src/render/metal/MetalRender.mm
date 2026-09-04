@@ -1920,6 +1920,10 @@ void MetalRender::render(Buffer* output)
             pUniformData->emissiveMeshes = mAccel.emissiveMeshBuffer() ? mAccel.emissiveMeshBuffer()->gpuAddress() : 0ull;
             pUniformData->emissiveTriangles =
                 mAccel.emissiveTriangleBuffer() ? mAccel.emissiveTriangleBuffer()->gpuAddress() : 0ull;
+            pUniformData->restirReservoir0 = mIntegrator.restirReservoirAddress(0);
+            pUniformData->restirReservoir1 = mIntegrator.restirReservoirAddress(1);
+            pUniformData->restirHistory0 = mIntegrator.restirHistoryAddress(0);
+            pUniformData->restirHistory1 = mIntegrator.restirHistoryAddress(1);
 
             metal::IntegratorSceneBindings sceneBind = integratorSceneBindings();
             metal::IntegratorFrameRequest frameReq;
@@ -2530,8 +2534,7 @@ void MetalRender::render(Buffer* output)
                 const uint32_t jitterSign = settings.getAs<uint32_t>("render/pt/jitterSign");
                 tin.jitterX = (jitterSign & 1u) ? -pUniformData->jitterX : pUniformData->jitterX;
                 tin.jitterY = (jitterSign & 2u) ? -pUniformData->jitterY : pUniformData->jitterY;
-                tin.depthReversed =
-                    denoiseDepthReversed(pUniformData->denoiseDepthMode, pUniformData->projectionType);
+                tin.depthReversed = denoiseDepthReversed(pUniformData->denoiseDepthMode, pUniformData->projectionType);
                 tin.resetHistory = mResetDenoiseHistory;
                 mResetDenoiseHistory = false;
                 mPost.metalFx().encodeTemporal(pCmd, false, tin);

@@ -48,3 +48,18 @@ DEVICE_FUNC float restirReservoirMergeWeight(const THREAD_REF RestirReservoirSta
                currentTarget * source.weightSum / source.target :
                0.0f;
 }
+
+DEVICE_FUNC bool restirSurfaceCompatible(float currentDepth,
+                                         float previousDepth,
+                                         float normalDot,
+                                         unsigned int currentMaterial,
+                                         unsigned int previousMaterial,
+                                         bool previousValid)
+{
+    const float largerDepth = currentDepth > previousDepth ? currentDepth : previousDepth;
+    const float scaledTolerance = 0.1f * largerDepth;
+    const float depthTolerance = scaledTolerance > 0.01f ? scaledTolerance : 0.01f;
+    const float depthDifference =
+        currentDepth > previousDepth ? currentDepth - previousDepth : previousDepth - currentDepth;
+    return previousValid && currentMaterial == previousMaterial && depthDifference <= depthTolerance && normalDot >= 0.9f;
+}

@@ -178,6 +178,13 @@ private:
         uint32_t maxDepth = 0;
         uint32_t debug = 0;
         float clampIndirect = 0.0f;
+        uint32_t restirDIEnabled = 0;
+        uint32_t initialCandidateCount = 0;
+        uint32_t temporalReuseEnabled = 0;
+        uint32_t spatialReuseEnabled = 0;
+        uint32_t spatialNeighborCount = 0;
+        uint32_t reservoirMaxAge = 0;
+        uint32_t restirDebugMode = 0;
     };
 
     MTL::Device* mDevice = nullptr;

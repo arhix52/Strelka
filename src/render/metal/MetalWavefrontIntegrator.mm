@@ -60,6 +60,10 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mShadowRayBuffer);
     safeRelease(mHitQueueBuffer);
     safeRelease(mAovBuffer);
+    safeRelease(mRestirReservoirBuffer[0]);
+    safeRelease(mRestirReservoirBuffer[1]);
+    safeRelease(mRestirSurfaceHistoryBuffer[0]);
+    safeRelease(mRestirSurfaceHistoryBuffer[1]);
     safeRelease(mMissQueueBuffer);
     for (auto& kv : mVariants)
     {
@@ -115,6 +119,10 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
     add(mMissQueueBuffer);
     add(mShadowRayBuffer);
     add(mAovBuffer);
+    add(mRestirReservoirBuffer[0]);
+    add(mRestirReservoirBuffer[1]);
+    add(mRestirSurfaceHistoryBuffer[0]);
+    add(mRestirSurfaceHistoryBuffer[1]);
     add(mControlBuffer);
     add(mTraversalDispatchBuffer);
     add(mStageStatsBuffer);
@@ -127,7 +135,9 @@ size_t MetalWavefrontIntegrator::queueBytes() const
            bufBytes(mPathRayBuffer) + bufBytes(mHitBuffer) + bufBytes(mIorStackBuffer) + bufBytes(mRadianceBuffer) +
            bufBytes(mGuideRayBuffer) + bufBytes(mPathQueueBuffer[0]) + bufBytes(mPathQueueBuffer[1]) +
            bufBytes(mControlBuffer) + bufBytes(mTraversalDispatchBuffer) + bufBytes(mShadowRayBuffer) +
-           bufBytes(mHitQueueBuffer) + bufBytes(mMissQueueBuffer) + bufBytes(mAovBuffer) + bufBytes(mStageStatsBuffer);
+           bufBytes(mHitQueueBuffer) + bufBytes(mMissQueueBuffer) + bufBytes(mAovBuffer) + bufBytes(mStageStatsBuffer) +
+           bufBytes(mRestirReservoirBuffer[0]) + bufBytes(mRestirReservoirBuffer[1]) +
+           bufBytes(mRestirSurfaceHistoryBuffer[0]) + bufBytes(mRestirSurfaceHistoryBuffer[1]);
 }
 
 // Two timestamps per stage (encoder start and end), so the counter buffer holds
@@ -942,6 +952,10 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         // wavefrontShade reaches this through Uniforms::guideRays because all
         // explicit buffer slots are occupied.
         e->useResource(mGuideRayBuffer, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+        e->useResource(mRestirReservoirBuffer[0], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+        e->useResource(mRestirReservoirBuffer[1], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+        e->useResource(mRestirSurfaceHistoryBuffer[0], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+        e->useResource(mRestirSurfaceHistoryBuffer[1], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
     };
     declareResidency(enc);
 
@@ -1463,6 +1477,10 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height, ui
     release(mHitQueueBuffer);
     release(mAovBuffer);
     release(mMissQueueBuffer);
+    release(mRestirReservoirBuffer[0]);
+    release(mRestirReservoirBuffer[1]);
+    release(mRestirSurfaceHistoryBuffer[0]);
+    release(mRestirSurfaceHistoryBuffer[1]);
 
     metal::WavefrontElementSizes sz;
     sz.pathState = sizeof(PathState);
@@ -1475,6 +1493,8 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height, ui
     sz.guideRay = sizeof(GuideRay);
     sz.shadowRay = sizeof(ShadowRay);
     sz.aovSample = sizeof(AovSample);
+    sz.restirReservoir = sizeof(RestirReservoir);
+    sz.restirSurfaceHistory = sizeof(RestirSurfaceHistory);
     const metal::WavefrontBufferLayout layout = metal::wavefrontBufferLayout(width, height, sz, sharcUpdateDownscale);
 
     // Private storage: these never leave the GPU.
@@ -1507,6 +1527,12 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width, uint32_t height, ui
     mAovBuffer = mDevice->newBuffer(layout.aovBytes, MTL::ResourceStorageModePrivate);
     mHitQueueBuffer = mDevice->newBuffer(layout.hitQueueBytes, MTL::ResourceStorageModePrivate);
     mMissQueueBuffer = mDevice->newBuffer(layout.missQueueBytes, MTL::ResourceStorageModePrivate);
+    for (uint32_t i = 0; i < 2; ++i)
+    {
+        mRestirReservoirBuffer[i] = mDevice->newBuffer(layout.restirReservoirBytes, MTL::ResourceStorageModePrivate);
+        mRestirSurfaceHistoryBuffer[i] =
+            mDevice->newBuffer(layout.restirSurfaceHistoryBytes, MTL::ResourceStorageModePrivate);
+    }
 
     mCapacity = pixels;
     mSharcUpdateDownscale = sharcUpdateDownscale;

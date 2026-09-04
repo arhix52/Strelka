@@ -343,8 +343,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
             std::clamp(in.settings->getAs<float>("render/pt/sharcRoughnessThreshold"), 0.0f, 1.0f);
         pUniformData->sharcRadianceScale = sharcRadianceScale;
         pUniformData->sharcUpdateDownscale = std::max(in.settings->getAs<uint32_t>("render/pt/sharcUpdateDownscale"), 1u);
-        pUniformData->sharcAccumulationFrames =
-            std::max(in.settings->getAs<uint32_t>("render/pt/sharcAccumFrames"), 1u);
+        pUniformData->sharcAccumulationFrames = std::max(in.settings->getAs<uint32_t>("render/pt/sharcAccumFrames"), 1u);
         pUniformData->sharcResponsiveFrames =
             std::max(in.settings->getAs<uint32_t>("render/pt/sharcResponsiveFrames"), 1u);
         pUniformData->sharcStaleFrameCount = std::max(in.settings->getAs<uint32_t>("render/pt/sharcStaleFrames"), 1u);
@@ -366,8 +365,8 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
         const bool hasPrevCamera = in.prevView != nullptr && in.frameNumber != 0;
         const glm::float4x4 prevCameraToWorld =
             glm::inverse(hasPrevCamera ? in.prevView->mCamMatrices.view : camera.matrices.view);
-        pUniformData->sharcCameraPrev = float3{ prevCameraToWorld[3][0], prevCameraToWorld[3][1],
-                                                prevCameraToWorld[3][2] };
+        pUniformData->sharcCameraPrev =
+            float3{ prevCameraToWorld[3][0], prevCameraToWorld[3][1], prevCameraToWorld[3][2] };
     }
 
     // Atmosphere
@@ -405,9 +404,8 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
             // the same units as the emitted power MetalLights accumulated.
             const double tintLuminance =
                 0.2126 * std::max(tint.r, 0.0f) + 0.7152 * std::max(tint.g, 0.0f) + 0.0722 * std::max(tint.b, 0.0f);
-            const double envPower = environmentLightPower(
-                in.environment->state().totalPower, pUniformData->sceneExtent, pUniformData->envMapIntensity,
-                tintLuminance);
+            const double envPower = environmentLightPower(in.environment->state().totalPower, pUniformData->sceneExtent,
+                                                          pUniformData->envMapIntensity, tintLuminance);
             envSelectionPdf = emitterSelectionProbabilities(true, envPower, pUniformData->numLights > 0u, analyticPower,
                                                             pUniformData->numEmissiveMeshes > 0u, meshPower)
                                   .environment;
@@ -479,6 +477,13 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     settingsChanged |= (mPrevSettings.maxDepth != maxDepth);
     settingsChanged |= (mPrevSettings.debug != debug);
     settingsChanged |= (mPrevSettings.clampIndirect != pUniformData->clampIndirect);
+    settingsChanged |= (mPrevSettings.restirDIEnabled != pUniformData->restirDIEnabled);
+    settingsChanged |= (mPrevSettings.initialCandidateCount != pUniformData->initialCandidateCount);
+    settingsChanged |= (mPrevSettings.temporalReuseEnabled != pUniformData->temporalReuseEnabled);
+    settingsChanged |= (mPrevSettings.spatialReuseEnabled != pUniformData->spatialReuseEnabled);
+    settingsChanged |= (mPrevSettings.spatialNeighborCount != pUniformData->spatialNeighborCount);
+    settingsChanged |= (mPrevSettings.reservoirMaxAge != pUniformData->reservoirMaxAge);
+    settingsChanged |= (mPrevSettings.restirDebugMode != pUniformData->restirDebugMode);
 
     mPrevSettings.rectLightSamplingMethod = rectLightSamplingMethod;
     mPrevSettings.samplerType = samplerType;
@@ -503,6 +508,13 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     mPrevSettings.maxDepth = maxDepth;
     mPrevSettings.debug = debug;
     mPrevSettings.clampIndirect = pUniformData->clampIndirect;
+    mPrevSettings.restirDIEnabled = pUniformData->restirDIEnabled;
+    mPrevSettings.initialCandidateCount = pUniformData->initialCandidateCount;
+    mPrevSettings.temporalReuseEnabled = pUniformData->temporalReuseEnabled;
+    mPrevSettings.spatialReuseEnabled = pUniformData->spatialReuseEnabled;
+    mPrevSettings.spatialNeighborCount = pUniformData->spatialNeighborCount;
+    mPrevSettings.reservoirMaxAge = pUniformData->reservoirMaxAge;
+    mPrevSettings.restirDebugMode = pUniformData->restirDebugMode;
 
     /* settingsChanged reported via FillResult; orchestrator resets subframe/history */
 

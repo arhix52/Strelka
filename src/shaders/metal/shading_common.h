@@ -753,25 +753,19 @@ static float3 emittedLightRadiance(device const UniformLight& light,
     return radiance * areaFalloff(light, distance);
 }
 
-LightConnection connectLight(constant Uniforms& uniforms,
-                             thread SamplerState& samplerRnd,
-                             device const UniformLight& light,
-                             uint32_t lightId,
-                             thread SurfaceInteraction& si,
-                             // A scattering event in a medium has a position and no normal. The facing
-                             // test and the cosine below are surface terms; applied to a volume they
-                             // reject half of every connection and darken the other half.
-                             bool volumeEvent,
-                             device const IesGpuBufferHeader* iesBuffer,
-                             float localSelectionPdf,
-                             float analyticSelectionPdf,
-                             float lightSelectionPdf)
+LightConnection connectLightSample(constant Uniforms& uniforms,
+                                   device const UniformLight& light,
+                                   uint32_t lightId,
+                                   float2 uv,
+                                   uint2 retryWords,
+                                   thread SurfaceInteraction& si,
+                                   bool volumeEvent,
+                                   device const IesGpuBufferHeader* iesBuffer,
+                                   float localSelectionPdf,
+                                   float analyticSelectionPdf,
+                                   float lightSelectionPdf)
 {
     LightSampleData lightSampleData = {};
-    const float2 uv =
-        float2(lightOpenUnitInterval(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType)),
-               lightOpenUnitInterval(random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType)));
-    uint2 retryWords = uint2(0u);
     switch (light.type)
     {
     case LIGHT_TYPE_RECT:
@@ -790,10 +784,7 @@ LightConnection connectLight(constant Uniforms& uniforms,
     case LIGHT_TYPE_SPHERE:
         lightSampleData = SampleSphereLight(light, uv, si.position);
         break;
-    case LIGHT_TYPE_DISTANT:
-    {
-        retryWords = uint2(randomBits<SampleDimension::eLightRetryU>(samplerRnd, uniforms.samplerType),
-                           randomBits<SampleDimension::eLightRetryV>(samplerRnd, uniforms.samplerType));
+    case LIGHT_TYPE_DISTANT: {
         lightSampleData = SampleDistantLight(light, uv, retryWords, si.position);
         break;
     }
@@ -869,6 +860,57 @@ LightConnection connectLight(constant Uniforms& uniforms,
     return c;
 }
 
+LightConnection connectLight(constant Uniforms& uniforms,
+                             thread SamplerState& samplerRnd,
+                             device const UniformLight& light,
+                             uint32_t lightId,
+                             thread SurfaceInteraction& si,
+                             bool volumeEvent,
+                             device const IesGpuBufferHeader* iesBuffer,
+                             float localSelectionPdf,
+                             float analyticSelectionPdf,
+                             float lightSelectionPdf)
+{
+    const float2 uv =
+        float2(lightOpenUnitInterval(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType)),
+               lightOpenUnitInterval(random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType)));
+    const uint2 retryWords = uint2(randomBits<SampleDimension::eLightRetryU>(samplerRnd, uniforms.samplerType),
+                                   randomBits<SampleDimension::eLightRetryV>(samplerRnd, uniforms.samplerType));
+    return connectLightSample(uniforms, light, lightId, uv, retryWords, si, volumeEvent, iesBuffer, localSelectionPdf,
+                              analyticSelectionPdf, lightSelectionPdf);
+}
+
+LightConnection connectEnvDirection(constant Uniforms& uniforms,
+                                    float3 dir,
+                                    float envPdf,
+                                    thread SurfaceInteraction& si,
+                                    texture2d<float> envMapTexture,
+                                    bool volumeEvent)
+{
+    LightConnection c = makeEmptyConnection();
+    c.sample.type = RESTIR_SAMPLE_ENVIRONMENT;
+    c.sample.parameters = float4(dir, 0.0f);
+    c.toLight = dir;
+    c.pdf = envPdf;
+
+    if (envPdf <= 0.0f || (!volumeEvent && !lightReachesShadingPoint(si, dir)))
+    {
+        return c;
+    }
+
+    constexpr sampler envSampler(
+        mag_filter::linear, min_filter::linear, s_address::repeat, t_address::clamp_to_edge, coord::normalized);
+    const float2 uv = dirToEnvUV(dir, uniforms.envMapRotation);
+    const float4 envSample = envMapTexture.sample(envSampler, uv);
+    const float3 Li = envSample.xyz * uniforms.envMapIntensity * uniforms.envMapColorTint.xyz;
+
+    c.radiance = volumeEvent ? Li : Li * shadingCosine(si, dir);
+    c.origin = offset_ray(si.position, orientedFaceNormal(si.geometry_normal, dir));
+    c.tMax = 1e16f;
+    c.needsRay = true;
+    return c;
+}
+
 LightConnection connectEnvLight(constant Uniforms& uniforms,
                                 thread SamplerState& samplerRnd,
                                 thread SurfaceInteraction& si,
@@ -887,38 +929,7 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
     float3 dir = sampleEnvMap(aliasWords, jitter, retryWords, envAliasTable, uniforms.envMapWidth,
                               uniforms.envMapHeight, uniforms.envMapRotation, envPdf);
 
-    LightConnection c = makeEmptyConnection();
-    c.sample.type = RESTIR_SAMPLE_ENVIRONMENT;
-    c.sample.parameters = float4(dir, 0.0f);
-    c.toLight = dir;
-    c.pdf = envPdf;
-
-    if (envPdf <= 0.0f)
-        return c;
-
-    if (!volumeEvent && !lightReachesShadingPoint(si, dir))
-        return c;
-
-    // repeat in u, clamp in v. The map wraps in azimuth and does not wrap in
-    // polar angle: with repeat on both axes the bilinear tap in the first row
-    // blends the zenith with the last row, which is the nadir. OptiX has always
-    // clamped v (cudaAddressModeClamp on axis 1); this backend wrapped it, so the
-    // two disagreed on the one row where an equirectangular map has a seam that
-    // is not a seam.
-    constexpr sampler envSampler(
-        mag_filter::linear, min_filter::linear, s_address::repeat, t_address::clamp_to_edge, coord::normalized);
-    const float2 uv = dirToEnvUV(dir, uniforms.envMapRotation);
-    const float4 envSample = envMapTexture.sample(envSampler, uv);
-    float3 Li = envSample.xyz;
-    Li *= uniforms.envMapIntensity * uniforms.envMapColorTint.xyz;
-
-    // Cosine folded in here for the same reason as in connectLight().
-    c.radiance = volumeEvent ? Li : Li * shadingCosine(si, dir);
-    // Match connectLight(): offset along the face the shadow ray leaves.
-    c.origin = offset_ray(si.position, orientedFaceNormal(si.geometry_normal, dir));
-    c.tMax = 1e16f;
-    c.needsRay = true;
-    return c;
+    return connectEnvDirection(uniforms, dir, envPdf, si, envMapTexture, volumeEvent);
 }
 
 struct EmissiveTriangleGeometry
@@ -989,9 +1000,9 @@ static float3 emissiveMeshRadiance(constant Uniforms& uniforms,
                 const float c = cos(p.uv_rotation);
                 const float s = sin(p.uv_rotation);
                 const float2 scale = float2(p.uv_scale_x, p.uv_scale_y);
-                const float2 tuv = float2(uv.x * scale.x * c - uv.y * scale.y * s,
-                                          uv.x * scale.x * s + uv.y * scale.y * c) +
-                                   float2(p.uv_offset_x, p.uv_offset_y);
+                const float2 tuv =
+                    float2(uv.x * scale.x * c - uv.y * scale.y * s, uv.x * scale.x * s + uv.y * scale.y * c) +
+                    float2(p.uv_offset_x, p.uv_offset_y);
                 emission = textures.tex[OPENPBR_TEX_EMISSION_COLOR].sample(emissionSampler, tuv).rgb;
             }
         }
@@ -1056,28 +1067,27 @@ static int findEmissiveMesh(constant Uniforms& uniforms, uint32_t instanceId, ui
     return -1;
 }
 
-static LightConnection connectEmissiveMesh(constant Uniforms& uniforms,
-                                           constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
-                                           device const char* vertexBuffer,
-                                           device const char* prevVertexBuffer,
-                                           device const uint32_t* indexBuffer,
-                                           device const Material* materials,
-                                           thread SamplerState& sampler,
-                                           thread SurfaceInteraction& si,
-                                           uint32_t meshBucketWord,
-                                           float motionTime,
-                                           bool volumeEvent,
-                                           float localSelectionPdf,
-                                           float meshClassPdf)
+static LightConnection connectEmissiveMeshSample(constant Uniforms& uniforms,
+                                                 constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                                 device const char* vertexBuffer,
+                                                 device const char* prevVertexBuffer,
+                                                 device const uint32_t* indexBuffer,
+                                                 device const Material* materials,
+                                                 thread SurfaceInteraction& si,
+                                                 uint32_t meshId,
+                                                 uint32_t primitiveId,
+                                                 float2 randomSample,
+                                                 float motionTime,
+                                                 bool volumeEvent,
+                                                 float localSelectionPdf,
+                                                 float meshClassPdf)
 {
     LightConnection connection = makeEmptyConnection();
-    const uint32_t meshId = sampleEmissiveMesh(uniforms, sampler, meshBucketWord);
     if (meshId >= uniforms.numEmissiveMeshes)
     {
         return connection;
     }
     device const EmissiveMeshLight& mesh = uniforms.emissiveMeshes[meshId];
-    const uint32_t primitiveId = sampleEmissiveTriangleIndex(uniforms, sampler, mesh);
     if (primitiveId >= mesh.triangleCount)
     {
         return connection;
@@ -1089,10 +1099,8 @@ static LightConnection connectEmissiveMesh(constant Uniforms& uniforms,
     }
     const EmissiveTriangleGeometry triangle = fetchEmissiveTriangle(
         uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, mesh, primitiveId, motionTime);
-    const float u0 = random<SampleDimension::eLightPointX>(sampler, uniforms.samplerType);
-    const float u1 = random<SampleDimension::eLightPointY>(sampler, uniforms.samplerType);
-    const EmissiveTriangleSample sample =
-        sampleEmissiveTriangle(triangle.p0, triangle.p1, triangle.p2, triangle.uv0, triangle.uv1, triangle.uv2, u0, u1);
+    const EmissiveTriangleSample sample = sampleEmissiveTriangle(
+        triangle.p0, triangle.p1, triangle.p2, triangle.uv0, triangle.uv1, triangle.uv2, randomSample.x, randomSample.y);
     if (!sample.valid)
     {
         return connection;
@@ -1132,8 +1140,35 @@ static LightConnection connectEmissiveMesh(constant Uniforms& uniforms,
     connection.sample.type = RESTIR_SAMPLE_EMISSIVE_TRIANGLE;
     connection.sample.lightId = meshId;
     connection.sample.primitiveId = primitiveId;
-    connection.sample.parameters = float4(u0, u1, 0.0f, 0.0f);
+    connection.sample.parameters = float4(randomSample, 0.0f, 0.0f);
     return connection;
+}
+
+static LightConnection connectEmissiveMesh(constant Uniforms& uniforms,
+                                           constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                           device const char* vertexBuffer,
+                                           device const char* prevVertexBuffer,
+                                           device const uint32_t* indexBuffer,
+                                           device const Material* materials,
+                                           thread SamplerState& sampler,
+                                           thread SurfaceInteraction& si,
+                                           uint32_t meshBucketWord,
+                                           float motionTime,
+                                           bool volumeEvent,
+                                           float localSelectionPdf,
+                                           float meshClassPdf)
+{
+    const uint32_t meshId = sampleEmissiveMesh(uniforms, sampler, meshBucketWord);
+    if (meshId >= uniforms.numEmissiveMeshes)
+    {
+        return makeEmptyConnection();
+    }
+    const uint32_t primitiveId = sampleEmissiveTriangleIndex(uniforms, sampler, uniforms.emissiveMeshes[meshId]);
+    const float2 randomSample = float2(random<SampleDimension::eLightPointX>(sampler, uniforms.samplerType),
+                                       random<SampleDimension::eLightPointY>(sampler, uniforms.samplerType));
+    return connectEmissiveMeshSample(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, materials, si,
+                                     meshId, primitiveId, randomSample, motionTime, volumeEvent, localSelectionPdf,
+                                     meshClassPdf);
 }
 
 static EmissiveVisibilitySegment lightVisibilitySegment(thread const LightConnection& connection, float3 shadowOrigin)
@@ -1229,6 +1264,51 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     }
     return connectLight(uniforms, samplerRnd, lights[lightId], lightId, si, volumeEvent, iesBuffer, localSelectionPdf,
                         analyticSelectionPdf, analyticLightSelectionPdf(lights[lightId]));
+}
+
+LightConnection reconnectRestirSample(constant Uniforms& uniforms,
+                                      device UniformLight* lights,
+                                      constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                      device const Material* materials,
+                                      device const char* vertexBuffer,
+                                      device const char* prevVertexBuffer,
+                                      device const uint32_t* indexBuffer,
+                                      float motionTime,
+                                      thread SurfaceInteraction& si,
+                                      device const EnvAliasEntry* envAliasTable,
+                                      texture2d<float> envMapTexture,
+                                      device const IesGpuBufferHeader* iesBuffer,
+                                      thread const RestirLightSample& sample)
+{
+    const bool hasAnalytic = SPEC_LIGHTS && uniforms.numLights > 0u;
+    const bool hasMesh = SPEC_LIGHTS && uniforms.numEmissiveMeshes > 0u;
+    const bool hasLocal = hasAnalytic || hasMesh;
+    const float localSelectionPdf =
+        SPEC_ENV_MAP && uniforms.hasEnvMap && hasLocal ? 1.0f - uniforms.envMapColorTint.w : 1.0f;
+    if (sample.type == RESTIR_SAMPLE_ENVIRONMENT && SPEC_ENV_MAP && uniforms.hasEnvMap)
+    {
+        const float3 direction = sample.parameters.xyz;
+        const float envPdf =
+            envMapPdf(direction, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight, uniforms.envMapRotation) *
+            (hasLocal ? uniforms.envMapColorTint.w : 1.0f);
+        return connectEnvDirection(uniforms, direction, envPdf, si, envMapTexture, false);
+    }
+    if (sample.type == RESTIR_SAMPLE_ANALYTIC && hasAnalytic && sample.lightId < uniforms.numLights)
+    {
+        const float analyticClassPdf = hasMesh ? 1.0f - uniforms.meshLightSelectionPdf : 1.0f;
+        const uint2 retryWords = uint2(sample.primitiveId, sample.retryWord);
+        return connectLightSample(uniforms, lights[sample.lightId], sample.lightId, sample.parameters.xy, retryWords,
+                                  si, false, iesBuffer, localSelectionPdf, analyticClassPdf,
+                                  analyticLightSelectionPdf(lights[sample.lightId]));
+    }
+    if (sample.type == RESTIR_SAMPLE_EMISSIVE_TRIANGLE && hasMesh)
+    {
+        const float meshClassPdf = hasAnalytic ? uniforms.meshLightSelectionPdf : 1.0f;
+        return connectEmissiveMeshSample(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, materials,
+                                         si, sample.lightId, sample.primitiveId, sample.parameters.xy, motionTime,
+                                         false, localSelectionPdf, meshClassPdf);
+    }
+    return makeEmptyConnection();
 }
 
 static float emissiveMeshHitPdf(constant Uniforms& uniforms,

@@ -566,6 +566,15 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
     {
         radianceOut[pixelIndex] = float4(0.0f);
     }
+    if (uniforms.restirDIEnabled != 0u && !SPEC_SHARC_UPDATE)
+    {
+        device RestirReservoir* currentReservoirs =
+            (uniforms.frameIndex & 1u) != 0u ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
+        device RestirSurfaceHistory* currentHistory =
+            (uniforms.frameIndex & 1u) != 0u ? uniforms.restirHistory1 : uniforms.restirHistory0;
+        currentReservoirs[pixelIndex] = {};
+        currentHistory[pixelIndex] = {};
+    }
 
     const uint2 pixel = uint2(pixelIndex % uniforms.width, pixelIndex / uniforms.width);
     SamplerState rng = samplerFor(uniforms, pixelIndex, sampleIdx, 0u);
@@ -1619,6 +1628,51 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
 // ---------------------------------------------------------------------------
 // shade -- material evaluation, next-event estimation, next ray
 // ---------------------------------------------------------------------------
+struct RestirEvaluation
+{
+    LightConnection connection;
+    float3 integrand;
+    float target;
+};
+
+static RestirEvaluation evaluateRestirConnection(thread const LightConnection& connection,
+                                                 thread SurfaceInteraction& si,
+                                                 bool isFibre,
+                                                 thread const ShadedFrame& neeFrame,
+                                                 bool isOpenPBR,
+                                                 thread const OpenPBR_PreparedBsdf& openpbrPrepared,
+                                                 uint32_t misHeuristic)
+{
+    RestirEvaluation result = {};
+    result.connection = connection;
+    if (!connection.needsRay || !(connection.pdf > 0.0f) ||
+        !neeProposesDirection(
+            isFibre, neeFrame.frontFace, neeFrame.normalSign * dot(connection.toLight, si.shading_normal)))
+    {
+        return result;
+    }
+    const BsdfEvalResult evalResult =
+        isOpenPBR ? openpbr_bsdf_eval(openpbrPrepared, si, connection.toLight) : bsdf_eval(si, connection.toLight);
+    if (!(evalResult.pdf > 0.0f))
+    {
+        return result;
+    }
+    const float misWeight = connection.isDelta ? 1.0f : computeMisWeight(connection.pdf, evalResult.pdf, misHeuristic);
+    result.integrand = connection.radiance * evalResult.bsdf * misWeight;
+    result.target = luminance(result.integrand);
+    return result;
+}
+
+static bool restirSurfaceHistoryCompatible(thread const RestirSurfaceHistory& current,
+                                           thread const RestirSurfaceHistory& previous)
+{
+    return restirSurfaceCompatible(current.depth, previous.depth,
+                                   dot(float3(current.geometryNormal), float3(previous.geometryNormal)),
+                                   current.materialIdAndFlags & RESTIR_SURFACE_MATERIAL_MASK,
+                                   previous.materialIdAndFlags & RESTIR_SURFACE_MATERIAL_MASK,
+                                   (previous.materialIdAndFlags & RESTIR_SURFACE_VALID) != 0u);
+}
+
 kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                            constant Uniforms& uniforms [[buffer(0)]],
                            constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],
@@ -2091,16 +2145,15 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 continue;
             }
             const AnalyticLightIntersection componentHit = intersectAnalyticLightSurface(
-                component.type, float3(component.points[0]), float3(component.points[1]),
-                float3(component.points[2]), float3(component.points[3]), float3(component.normal), rayOrigin,
-                rayDir, 0.0f, 3.402823466e38f);
+                component.type, float3(component.points[0]), float3(component.points[1]), float3(component.points[2]),
+                float3(component.points[3]), float3(component.normal), rayOrigin, rayDir, 0.0f, 3.402823466e38f);
             if (!analyticLightIntersectionSharesEvent(analyticSurfaceHit.distance, componentHit))
             {
                 continue;
             }
             const float componentCosine = -dot(rayDir, componentHit.normal);
-            if (!lightConnectionFacesVertex(component.type, componentCosine,
-                                            lightIsPunctual(component.type) ? component.points[0].x : 0.0f))
+            if (!lightConnectionFacesVertex(
+                    component.type, componentCosine, lightIsPunctual(component.type) ? component.points[0].x : 0.0f))
             {
                 continue;
             }
@@ -2123,9 +2176,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 // saw it, which shrinks its solid-angle density, which inflates
                 // this weight -- and the next-event estimate at that vertex has
                 // already claimed the rest. The two then sum to more than one.
-                const float lightPdf = areaPdfToSolidAngleMarginalPdf(
-                    hitDistance, componentCosine, componentHit.areaPdf, localSelectionPdf, analyticClassPdf,
-                    lightIdentityPdf, 1.0f);
+                const float lightPdf =
+                    areaPdfToSolidAngleMarginalPdf(hitDistance, componentCosine, componentHit.areaPdf,
+                                                   localSelectionPdf, analyticClassPdf, lightIdentityPdf, 1.0f);
                 const float mis = computeMisWeight(p.lastBsdfPdf, lightPdf, uniforms.misHeuristic);
                 weightedLe = Le * mis;
             }
@@ -2875,48 +2928,96 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, instances, materials,
                                                         vertexBuffer, prevVertexBuffer, indexBuffer, motionTime, crng,
                                                         si, envAliasTable, envMapTexture, iesProfiles);
-            // A fibre has no back side to reject: see scattersThroughFibre().
-            const bool isNextEventValid =
-                neeProposesDirection(
-                    isFibre, neeFrame.frontFace, neeFrame.normalSign * dot(conn.toLight, si.shading_normal)) &&
-                conn.pdf > 0.0f;
-            if (!isNextEventValid || !conn.needsRay)
+            const RestirEvaluation candidate =
+                evaluateRestirConnection(conn, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
+            if (!(candidate.target > 0.0f))
             {
                 continue;
             }
-            BsdfEvalResult evalResult =
-                isOpenPBR ? openpbr_bsdf_eval(openpbrPrepared, si, conn.toLight) : bsdf_eval(si, conn.toLight);
-            if (isnan(conn.pdf) || isnan(evalResult.pdf))
-            {
-                radianceOut[tid] = float4(1000000.0f, 0.0f, 0.0f, 0.0f);
-                return;
-            }
-            if (!(evalResult.pdf > 0.0f))
-            {
-                continue;
-            }
-            const float misWeight =
-                conn.isDelta ? 1.0f : computeMisWeight(conn.pdf, evalResult.pdf, uniforms.misHeuristic);
-            const float3 f = conn.radiance * evalResult.bsdf * misWeight;
-            const float target = luminance(f);
-            if (!(target > 0.0f))
-            {
-                continue;
-            }
-            const float w = target / conn.pdf;
+            const float w = candidate.target / conn.pdf;
             // Reuse eLightId under a new scramble so adding RIS does not shift later Sobol dimensions.
             SamplerState arng = crng;
             arng.seed = hash_combine(crng.seed, 0x51633e2du);
-            if (restirReservoirUpdate(
-                    reservoir.state, w, target, 1u, random<SampleDimension::eLightId>(arng, uniforms.samplerType)))
+            if (restirReservoirUpdate(reservoir.state, w, candidate.target, 1u,
+                                      random<SampleDimension::eLightId>(arng, uniforms.samplerType)))
             {
                 bestConn = conn;
-                bestF = f;
+                bestF = candidate.integrand;
                 reservoir.sample = conn.sample;
             }
         }
 
         reservoir.state.M = candidates;
+        if (restirInitial)
+        {
+            device RestirReservoir* currentReservoirs =
+                (uniforms.frameIndex & 1u) != 0u ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
+            device const RestirReservoir* previousReservoirs =
+                (uniforms.frameIndex & 1u) != 0u ? uniforms.restirReservoir0 : uniforms.restirReservoir1;
+            device RestirSurfaceHistory* currentHistory =
+                (uniforms.frameIndex & 1u) != 0u ? uniforms.restirHistory1 : uniforms.restirHistory0;
+            device const RestirSurfaceHistory* previousHistory =
+                (uniforms.frameIndex & 1u) != 0u ? uniforms.restirHistory0 : uniforms.restirHistory1;
+
+            const float3 previousPosition = uniforms.hasPrevFramePose != 0u && !isCurve ?
+                                                previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances,
+                                                                      entry, rec.instanceIndex, rec.primitiveId, bary) :
+                                                worldPosition;
+            const uint2 pixel = uint2(tid % uniforms.width, tid / uniforms.width);
+            const ScreenMotion motion =
+                screenMotion(uniforms, uniforms.prevWorldToClip * float4(previousPosition, 1.0f), pixel);
+            RestirSurfaceHistory surface;
+            surface.position = packed_float3(worldPosition);
+            surface.geometryNormal = packed_float3(si.geometry_normal);
+            surface.depth = viewDepth(uniforms, worldPosition);
+            surface.materialIdAndFlags = entry.materialId | RESTIR_SURFACE_VALID;
+
+            bool mergedHistory = false;
+            const float2 previousPixelPosition =
+                float2(pixel) + float2(0.5f + uniforms.jitterX, 0.5f + uniforms.jitterY) + motion.offset;
+            const int2 previousPixel = int2(floor(previousPixelPosition));
+            if (uniforms.temporalReuseEnabled != 0u && uniforms.restirHistoryValid != 0u && motion.reactive == 0.0f &&
+                all(previousPixel >= int2(0)) && previousPixel.x < int(uniforms.width) &&
+                previousPixel.y < int(uniforms.height))
+            {
+                const uint32_t previousIndex = uint32_t(previousPixel.y) * uniforms.width + uint32_t(previousPixel.x);
+                const RestirReservoir previousReservoir = previousReservoirs[previousIndex];
+                const RestirSurfaceHistory oldSurface = previousHistory[previousIndex];
+                const uint32_t age = previousReservoir.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK;
+                if ((previousReservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) != 0u &&
+                    previousReservoir.state.M > 0u && age < uniforms.reservoirMaxAge &&
+                    restirSurfaceHistoryCompatible(surface, oldSurface))
+                {
+                    const LightConnection reusedConnection = reconnectRestirSample(
+                        uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer, motionTime,
+                        si, envAliasTable, envMapTexture, iesProfiles, previousReservoir.sample);
+                    const RestirEvaluation reused = evaluateRestirConnection(
+                        reusedConnection, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
+                    if (reused.target > 0.0f)
+                    {
+                        SamplerState temporalRng = rng;
+                        temporalRng.seed = hash_combine(rng.seed, 0x68bc21ebu);
+                        if (restirReservoirUpdate(reservoir.state,
+                                                  restirReservoirMergeWeight(previousReservoir.state, reused.target),
+                                                  reused.target, previousReservoir.state.M,
+                                                  random<SampleDimension::eLightId>(temporalRng, uniforms.samplerType)))
+                        {
+                            reservoir.sample = previousReservoir.sample;
+                            bestConn = reused.connection;
+                            bestF = reused.integrand;
+                        }
+                        reservoir.state.ageAndFlags = RESTIR_RESERVOIR_VALID | min(age + 1u, RESTIR_RESERVOIR_AGE_MASK);
+                        mergedHistory = true;
+                    }
+                }
+            }
+            if (!mergedHistory && (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) != 0u)
+            {
+                reservoir.state.ageAndFlags = RESTIR_RESERVOIR_VALID;
+            }
+            currentReservoirs[tid] = reservoir;
+            currentHistory[tid] = surface;
+        }
         const float W = restirReservoirNormalization(reservoir.state);
         if (W > 0.0f)
         {

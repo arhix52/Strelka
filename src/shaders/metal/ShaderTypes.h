@@ -350,8 +350,20 @@ struct Uniforms
     uint64_t emissiveMeshes;
     uint64_t emissiveTriangles;
 #endif
+
+#ifdef __METAL_VERSION__
+    device struct RestirReservoir* restirReservoir0;
+    device struct RestirReservoir* restirReservoir1;
+    device struct RestirSurfaceHistory* restirHistory0;
+    device struct RestirSurfaceHistory* restirHistory1;
+#else
+    uint64_t restirReservoir0;
+    uint64_t restirReservoir1;
+    uint64_t restirHistory0;
+    uint64_t restirHistory1;
+#endif
 };
-static_assert(sizeof(Uniforms) == 848, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 880, "Uniforms host/Metal ABI changed");
 
 
 // How the depth guide is encoded.
@@ -663,6 +675,8 @@ struct HitRecord
 #define RESTIR_SAMPLE_ANALYTIC 1u
 #define RESTIR_SAMPLE_ENVIRONMENT 2u
 #define RESTIR_SAMPLE_EMISSIVE_TRIANGLE 3u
+#define RESTIR_SURFACE_VALID (1u << 31)
+#define RESTIR_SURFACE_MATERIAL_MASK 0x7fffffffu
 
 struct RestirLightSample
 {
@@ -679,6 +693,15 @@ struct RestirReservoir
     RestirReservoirState state;
 };
 static_assert(sizeof(RestirReservoir) == 48, "ReSTIR reservoir ABI changed");
+
+struct RestirSurfaceHistory
+{
+    packed_float3 position;
+    packed_float3 geometryNormal;
+    float depth;
+    uint32_t materialIdAndFlags;
+};
+static_assert(sizeof(RestirSurfaceHistory) == 32, "ReSTIR surface history ABI changed");
 
 // A deferred occlusion query produced by `shade` and consumed by `shadow`.
 struct ShadowRay

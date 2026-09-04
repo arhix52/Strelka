@@ -181,6 +181,14 @@ public:
     {
         return mGuideRayBuffer ? mGuideRayBuffer->gpuAddress() : 0ull;
     }
+    uint64_t restirReservoirAddress(uint32_t index) const
+    {
+        return mRestirReservoirBuffer[index & 1u] ? mRestirReservoirBuffer[index & 1u]->gpuAddress() : 0ull;
+    }
+    uint64_t restirHistoryAddress(uint32_t index) const
+    {
+        return mRestirSurfaceHistoryBuffer[index & 1u] ? mRestirSurfaceHistoryBuffer[index & 1u]->gpuAddress() : 0ull;
+    }
     MTL::Buffer* iorStatsBuffer() const
     {
         return mIorStatsBuffer;
@@ -245,6 +253,8 @@ private:
     MTL::Buffer* mHitQueueBuffer = nullptr;
     MTL::Buffer* mMissQueueBuffer = nullptr;
     MTL::Buffer* mAovBuffer = nullptr;
+    MTL::Buffer* mRestirReservoirBuffer[2] = { nullptr, nullptr };
+    MTL::Buffer* mRestirSurfaceHistoryBuffer[2] = { nullptr, nullptr };
 
     MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
     MTL::Buffer* mStageStatsBuffer = nullptr;

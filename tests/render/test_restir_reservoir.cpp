@@ -62,3 +62,32 @@ TEST_CASE("invalid ReSTIR reservoir normalizes to zero")
     CHECK(restirReservoirNormalization(r) == 0.0f);
     CHECK(std::isfinite(restirReservoirNormalization(r)));
 }
+
+TEST_CASE("ReSTIR reservoir merge accounts for source M and current target")
+{
+    RestirReservoirState destination{};
+    CHECK(restirReservoirUpdate(destination, 2.0f, 2.0f, 1u, 0.0f));
+    const RestirReservoirState source{ 12.0f, 3.0f, 4u, RESTIR_RESERVOIR_VALID };
+    const float mergeWeight = restirReservoirMergeWeight(source, 6.0f);
+    CHECK(mergeWeight == doctest::Approx(24.0f));
+    CHECK(restirReservoirUpdate(destination, mergeWeight, 6.0f, source.M, 0.0f));
+    CHECK(destination.M == 5u);
+    CHECK(destination.weightSum == doctest::Approx(26.0f));
+    CHECK(restirReservoirNormalization(destination) == doctest::Approx(26.0f / 30.0f));
+}
+
+TEST_CASE("ReSTIR history is reweighted with the current target")
+{
+    const RestirReservoirState source{ 8.0f, 2.0f, 4u, RESTIR_RESERVOIR_VALID };
+    CHECK(restirReservoirMergeWeight(source, 6.0f) == doctest::Approx(24.0f));
+    CHECK(restirReservoirMergeWeight(source, source.target) == doctest::Approx(source.weightSum));
+}
+
+TEST_CASE("ReSTIR history rejects disocclusion and incompatible surfaces")
+{
+    CHECK(restirSurfaceCompatible(2.0f, 2.1f, 0.95f, 7u, 7u, true));
+    CHECK_FALSE(restirSurfaceCompatible(2.0f, 3.0f, 0.95f, 7u, 7u, true));
+    CHECK_FALSE(restirSurfaceCompatible(2.0f, 2.1f, 0.5f, 7u, 7u, true));
+    CHECK_FALSE(restirSurfaceCompatible(2.0f, 2.1f, 0.95f, 7u, 8u, true));
+    CHECK_FALSE(restirSurfaceCompatible(2.0f, 2.1f, 0.95f, 7u, 7u, false));
+}
