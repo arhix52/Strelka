@@ -72,6 +72,7 @@ void MetalWavefrontIntegrator::release()
         safeRelease(kv.second.extendMotion);
         safeRelease(kv.second.extendStatic);
         safeRelease(kv.second.shade);
+        safeRelease(kv.second.restirTemporal);
         safeRelease(kv.second.restirSpatial);
         safeRelease(kv.second.restirFinal);
         safeRelease(kv.second.miss);
@@ -155,6 +156,7 @@ enum StageKind : uint8_t
     kStagePrepare,
     kStageExtend,
     kStageShade,
+    kStageRestirTemporal,
     kStageRestirSpatial,
     kStageRestirFinal,
     kStagePrepareShadow,
@@ -165,9 +167,9 @@ enum StageKind : uint8_t
     kStageSort,
     kStageCount
 };
-const char* const kStageNames[kStageCount] = { "generate",      "prepare",     "extend",     "shade",
-                                               "restirSpatial", "restirFinal", "prepShadow", "shadow",
-                                               "miss",          "guide",       "resolve",    "sort" };
+const char* const kStageNames[kStageCount] = { "generate",      "prepare",     "extend",     "shade",  "restirTemporal",
+                                               "restirSpatial", "restirFinal", "prepShadow", "shadow", "miss",
+                                               "guide",         "resolve",     "sort" };
 } // namespace
 
 // A timestamp counter buffer, if the device can sample at dispatch boundaries.
@@ -705,6 +707,25 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
 
             if (uniforms->restirDIEnabled != 0u && !sharcUpdate)
             {
+                mark(kStageRestirTemporal);
+                enc->setComputePipelineState(variant->restirTemporal);
+                bind(uniformBuffer, 0, 0);
+                bind(scene.instanceBuffer, 0, 1);
+                bind(scene.iesBuffer, 0, 2);
+                bind(scene.lightBuffer, 0, 3);
+                bind(scene.materialBuffer, 0, 4);
+                bind(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 5);
+                bind(scene.vertexBuffer, 0, 6);
+                bind(scene.prevVertexBuffer, 0, 7);
+                bind(scene.indexBuffer, 0, 8);
+                bind(mHitQueueBuffer, 0, 9);
+                if (scene.environment && scene.environment->state().mapTexture)
+                {
+                    table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
+                }
+                enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
+                barrier();
+
                 mark(kStageRestirSpatial);
                 enc->setComputePipelineState(variant->restirSpatial);
                 bind(uniformBuffer, 0, 0);
@@ -738,6 +759,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 bind(mHitQueueBuffer, 0, 9);
                 bind(mShadowRayBuffer, 0, 10);
                 bind(mControlBuffer, kShadowCounterOffset, 11);
+                bind(mRadianceBuffer, 0, 12);
                 if (scene.environment && scene.environment->state().mapTexture)
                 {
                     table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
@@ -1225,6 +1247,25 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             if (uniforms->restirDIEnabled != 0u && !sharcUpdate)
             {
                 enc->memoryBarrier(MTL::BarrierScopeBuffers);
+                stamp(kStageRestirTemporal);
+                enc->setComputePipelineState(variant->restirTemporal);
+                enc->setBuffer(uniformBuffer, 0, 0);
+                enc->setBuffer(scene.instanceBuffer, 0, 1);
+                enc->setBuffer(scene.iesBuffer, 0, 2);
+                enc->setBuffer(scene.lightBuffer, 0, 3);
+                enc->setBuffer(scene.materialBuffer, 0, 4);
+                enc->setBuffer(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 5);
+                enc->setBuffer(scene.vertexBuffer, 0, 6);
+                enc->setBuffer(scene.prevVertexBuffer, 0, 7);
+                enc->setBuffer(scene.indexBuffer, 0, 8);
+                enc->setBuffer(mHitQueueBuffer, 0, 9);
+                if (scene.environment && scene.environment->state().mapTexture)
+                {
+                    enc->setTexture(scene.environment->state().mapTexture, 0);
+                }
+                enc->dispatchThreadgroups(mControlBuffer, kHitArgsOffset, tg);
+
+                enc->memoryBarrier(MTL::BarrierScopeBuffers);
                 stamp(kStageRestirSpatial);
                 enc->setComputePipelineState(variant->restirSpatial);
                 enc->setBuffer(uniformBuffer, 0, 0);
@@ -1258,6 +1299,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
                 enc->setBuffer(mHitQueueBuffer, 0, 9);
                 enc->setBuffer(mShadowRayBuffer, 0, 10);
                 enc->setBuffer(mControlBuffer, kShadowCounterOffset, 11);
+                enc->setBuffer(mRadianceBuffer, 0, 12);
                 if (scene.environment && scene.environment->state().mapTexture)
                 {
                     enc->setTexture(scene.environment->state().mapTexture, 0);
@@ -1445,6 +1487,7 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     v.extendMotion = make(entry("wavefrontExtend").c_str());
     v.extendStatic = make(entry("wavefrontExtendStatic").c_str());
     v.shade = make("wavefrontShade");
+    v.restirTemporal = make("wavefrontRestirTemporal");
     v.restirSpatial = make("wavefrontRestirSpatial");
     v.restirFinal = make("wavefrontRestirFinal");
     v.miss = make("wavefrontMiss");

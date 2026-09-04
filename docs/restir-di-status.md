@@ -1,6 +1,6 @@
 # ReSTIR DI status
 
-Current phase: C — Spatial reuse
+Current phase: D — Metal wavefront integration
 
 Completed:
 - Preflight: Debug CTest 4/4; existing light-sampling and MIS fixes present.
@@ -16,15 +16,18 @@ Completed:
 - Reused samples are reconstructed and evaluated with the current target; visibility is not reused.
 - Spatial reuse reads an immutable reservoir set, samples up to 16 deterministic frame-rotated neighbors and writes a second set.
 - Depth, geometric normal, material and geometry validity gate every neighbor; one final pass emits one shadow ray.
+- Explicit temporal, spatial and final Metal stages run between shade/initial RIS and shadow preparation.
+- CLI/TOML exposes all seven runtime settings; debug modes show age or selected emitter class.
+- Apple M4 Pro execution passed for analytic area lighting; one-candidate relative L1 vs NEE was 1.39e-4 at 4 spp.
 
 Open:
-- Runtime CLI/config exposure, image validation and benchmark.
-- Actual MTLDevice execution for the completed implementation.
+- Representative image validation, Release benchmark and focused review.
 
 Commits:
 - `c8e9ded` ReSTIR reservoir and initial RIS
 - `c710fb6` Add ReSTIR temporal reuse
-- Add ReSTIR spatial reuse (this phase)
+- `0a0e748` Add ReSTIR spatial reuse
+- Integrate ReSTIR DI into Metal wavefront pipeline (this phase)
 
 Tests:
 - `cd build/Debug && ctest --output-on-failure`
@@ -33,5 +36,5 @@ Tests:
 
 Benchmark NEE vs ReSTIR: pending
 GPU time: pending
-Reservoir memory: 96 bytes/pixel double-buffered; history/work data adds 192 bytes/pixel
-External MTLDevice test: `STRELKA_STAGES=1 ./build/Release/StrelkaCLI --config <scene.toml>`
+Reservoir memory: 96 bytes/pixel double-buffered; history/work data adds 200 bytes/pixel
+MTLDevice test: Apple M4 Pro; `./build/Debug/StrelkaCLI --config scenes/validation/cornell_box/cornell_box.toml --restir-di`

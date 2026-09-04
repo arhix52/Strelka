@@ -707,7 +707,8 @@ static_assert(sizeof(RestirSurfaceHistory) == 32, "ReSTIR surface history ABI ch
 
 #define RESTIR_SHADING_VALID (1u << 31)
 #define RESTIR_SHADING_CURVE (1u << 30)
-#define RESTIR_SHADING_SAMPLE_MASK 0x3fffffffu
+#define RESTIR_SHADING_REPROJECTABLE (1u << 29)
+#define RESTIR_SHADING_SAMPLE_MASK 0x1fffffffu
 
 struct RestirShadingPoint
 {
@@ -726,8 +727,9 @@ struct RestirShadingPoint
     uint32_t materialId;
     uint32_t medium;
     uint32_t sampleIdxAndFlags;
+    vector_float2 previousPixelPosition;
 };
-static_assert(sizeof(RestirShadingPoint) == 128, "ReSTIR shading point ABI changed");
+static_assert(sizeof(RestirShadingPoint) == 136, "ReSTIR shading point ABI changed");
 
 // A deferred occlusion query produced by `shade` and consumed by `shadow`.
 struct ShadowRay

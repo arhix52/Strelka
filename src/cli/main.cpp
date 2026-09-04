@@ -49,6 +49,14 @@ int main(int argc, const char* argv[])
                                                             cxxopts::value<float>())
         ("sampler",      "Sampler: halton, pcg, sobol, sobol_bn, hybrid", cxxopts::value<std::string>())
         ("bn-switch",    "Hybrid: spp before switching blue-noise -> Sobol", cxxopts::value<uint32_t>())
+        ("restir-di",    "Enable ReSTIR DI",                 cxxopts::value<bool>()->implicit_value("true"))
+        ("restir-candidates", "ReSTIR initial candidates",   cxxopts::value<uint32_t>())
+        ("restir-temporal", "Enable ReSTIR temporal reuse",  cxxopts::value<bool>()->implicit_value("true"))
+        ("restir-spatial", "Enable ReSTIR spatial reuse",    cxxopts::value<bool>()->implicit_value("true"))
+        ("restir-neighbors", "ReSTIR spatial neighbors",     cxxopts::value<uint32_t>())
+        ("restir-max-age", "ReSTIR reservoir maximum age",   cxxopts::value<uint32_t>())
+        ("restir-debug", "ReSTIR debug mode",                cxxopts::value<uint32_t>())
+        ("profile-stages", "Report per-stage GPU timings",   cxxopts::value<bool>()->implicit_value("true"))
         ("capture",      "Capture one steady-state frame to a .gputrace for Xcode (as large as the scene on the device)", cxxopts::value<std::string>())
         ("camera",       "Camera index",                    cxxopts::value<int>())
         ("frame-node",    "Frame scene node like editor F",  cxxopts::value<uint32_t>())
@@ -161,6 +169,38 @@ int main(int argc, const char* argv[])
     if (result.count("bn-switch"))
     {
         cfg.blueNoiseSwitchSpp = result["bn-switch"].as<uint32_t>();
+    }
+    if (result.count("restir-di"))
+    {
+        cfg.restirDIEnabled = result["restir-di"].as<bool>();
+    }
+    if (result.count("restir-candidates"))
+    {
+        cfg.initialCandidateCount = std::clamp(result["restir-candidates"].as<uint32_t>(), 1u, 64u);
+    }
+    if (result.count("restir-temporal"))
+    {
+        cfg.temporalReuseEnabled = result["restir-temporal"].as<bool>();
+    }
+    if (result.count("restir-spatial"))
+    {
+        cfg.spatialReuseEnabled = result["restir-spatial"].as<bool>();
+    }
+    if (result.count("restir-neighbors"))
+    {
+        cfg.spatialNeighborCount = std::min(result["restir-neighbors"].as<uint32_t>(), 16u);
+    }
+    if (result.count("restir-max-age"))
+    {
+        cfg.reservoirMaxAge = std::min(result["restir-max-age"].as<uint32_t>(), 255u);
+    }
+    if (result.count("restir-debug"))
+    {
+        cfg.restirDebugMode = std::min(result["restir-debug"].as<uint32_t>(), 2u);
+    }
+    if (result.count("profile-stages"))
+    {
+        cfg.profileStages = result["profile-stages"].as<bool>();
     }
 
     try

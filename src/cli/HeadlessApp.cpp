@@ -213,6 +213,20 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.denoiseFireflyClamp = (float)*v;
     if (auto v = tbl["render"]["ris_candidates"].value<int64_t>())
         cfg.risCandidates = (uint32_t)*v;
+    if (auto v = tbl["render"]["restir_di_enabled"].value<bool>())
+        cfg.restirDIEnabled = *v;
+    if (auto v = tbl["render"]["restir_initial_candidates"].value<int64_t>())
+        cfg.initialCandidateCount = (uint32_t)std::clamp<int64_t>(*v, 1, 64);
+    if (auto v = tbl["render"]["restir_temporal_reuse"].value<bool>())
+        cfg.temporalReuseEnabled = *v;
+    if (auto v = tbl["render"]["restir_spatial_reuse"].value<bool>())
+        cfg.spatialReuseEnabled = *v;
+    if (auto v = tbl["render"]["restir_spatial_neighbors"].value<int64_t>())
+        cfg.spatialNeighborCount = (uint32_t)std::clamp<int64_t>(*v, 0, 16);
+    if (auto v = tbl["render"]["restir_reservoir_max_age"].value<int64_t>())
+        cfg.reservoirMaxAge = (uint32_t)std::clamp<int64_t>(*v, 0, 255);
+    if (auto v = tbl["render"]["restir_debug_mode"].value<int64_t>())
+        cfg.restirDebugMode = (uint32_t)std::clamp<int64_t>(*v, 0, 2);
     if (auto v = tbl["render"]["estimator_mode"].value<int64_t>())
         cfg.estimatorMode = (uint32_t)*v;
     if (auto v = tbl["render"]["split_aov"].value<bool>())
@@ -440,6 +454,13 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<bool>("render/pt/denoise", m_config.denoise);
     m_settings->setAs<uint32_t>("render/pt/profileStages", m_config.profileStages ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/risCandidates", m_config.risCandidates);
+    m_settings->setAs<bool>("render/pt/restirDIEnabled", m_config.restirDIEnabled);
+    m_settings->setAs<uint32_t>("render/pt/initialCandidateCount", m_config.initialCandidateCount);
+    m_settings->setAs<bool>("render/pt/temporalReuseEnabled", m_config.temporalReuseEnabled);
+    m_settings->setAs<bool>("render/pt/spatialReuseEnabled", m_config.spatialReuseEnabled);
+    m_settings->setAs<uint32_t>("render/pt/spatialNeighborCount", m_config.spatialNeighborCount);
+    m_settings->setAs<uint32_t>("render/pt/reservoirMaxAge", m_config.reservoirMaxAge);
+    m_settings->setAs<uint32_t>("render/pt/restirDebugMode", m_config.restirDebugMode);
     m_settings->setAs<float>("render/pt/denoiseFireflyClamp", m_config.denoiseFireflyClamp);
     m_settings->setAs<float>("render/pt/clampIndirect", m_config.clampIndirect);
     m_settings->setAs<uint32_t>("render/pt/sortRays", m_config.sortRays ? 1u : 0u);

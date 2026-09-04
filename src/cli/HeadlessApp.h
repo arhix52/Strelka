@@ -79,6 +79,13 @@ struct RenderConfig
     // 0 = spatial scaler, 1 = temporal scaler (ignored when denoise is on).
     uint32_t upscaleMode = 0;
     uint32_t risCandidates = 1; // 1 = plain next-event estimation
+    bool restirDIEnabled = false;
+    uint32_t initialCandidateCount = 8;
+    bool temporalReuseEnabled = true;
+    bool spatialReuseEnabled = true;
+    uint32_t spatialNeighborCount = 4;
+    uint32_t reservoirMaxAge = 20;
+    uint32_t restirDebugMode = 0;
     uint32_t estimatorMode = 0; // 0 = NEE + MIS, 1 = BSDF sampling only
     /// Accumulate the diffuse/specular split of the first event into two extra
     /// images. Off because nothing reads them: the raygen wrote four scattered
