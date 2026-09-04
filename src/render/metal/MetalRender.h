@@ -269,6 +269,8 @@ private:
     // settings, which the user may have moved in the meantime.
     PresentationMetadata mPresentation[2]{};
     bool mResetDenoiseHistory = true;
+    uint32_t mTemporalHistoryWidth = 0;
+    uint32_t mTemporalHistoryHeight = 0;
     /// A denoised frame is present in mPost.denoisedTexture() and belongs to the
     /// scene and camera as they stand. What the sample budget freezes is that
     /// texture, so a post-only frame needs to know it exists.

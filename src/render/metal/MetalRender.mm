@@ -1310,6 +1310,12 @@ void MetalRender::render(Buffer* output)
     const uint32_t width = resolution.pathTraceWidth;
     const uint32_t height = resolution.pathTraceHeight;
     const bool upscaling = resolution.upscaling;
+    if (width != mTemporalHistoryWidth || height != mTemporalHistoryHeight)
+    {
+        mResetDenoiseHistory = true;
+        mTemporalHistoryWidth = width;
+        mTemporalHistoryHeight = height;
+    }
     bool denoiserScaleSupported = true;
     // MetalFX publishes the range of output/input ratios it can actually do, and
     // going outside it is not refused -- the scaler is created and then produces
@@ -2374,6 +2380,7 @@ void MetalRender::render(Buffer* output)
                                                               (effectiveAccumulation ? ctx.mSubframeIndex : 0);
                     pPool->release();
                     mPrevView = currView;
+                    mResetDenoiseHistory = false;
                     mHasPrevFramePose = true;
                     ctx.mFrameNumber++;
                     return;
@@ -2596,6 +2603,7 @@ void MetalRender::render(Buffer* output)
             }
             pPool->release();
             mPrevView = currView;
+            mResetDenoiseHistory = false;
             mHasPrevFramePose = true;
             ctx.mFrameNumber++;
             return;
@@ -2722,6 +2730,7 @@ void MetalRender::render(Buffer* output)
 
     mPrevView = currView;
 
+    mResetDenoiseHistory = false;
     mHasPrevFramePose = true;
     ctx.mFrameNumber++;
 }

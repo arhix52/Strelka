@@ -1998,6 +1998,10 @@ void EditorApp::runDenoiseAudit()
     m_settingsManager->setAs<float>("render/pt/upscaleFactor", upscale);
     m_settingsManager->setAs<uint32_t>("render/width", auditW);
     m_settingsManager->setAs<uint32_t>("render/height", auditH);
+    if (envFlag("STRELKA_RESTIR_DI"))
+    {
+        m_settingsManager->setAs<bool>("render/pt/restirDIEnabled", true);
+    }
 
     auto& camera = m_scene->getCamera(m_selectedCamera);
 

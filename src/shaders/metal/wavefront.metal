@@ -3371,14 +3371,15 @@ kernel void wavefrontRestirTemporal(uint gid [[thread_position_in_grid]],
     RestirReservoir reservoir = currentReservoirs[tid];
     SamplerState rng = samplerFor(uniforms, tid, sampleIdx, 0u);
     rng.seed = hash_combine(rng.seed, 0x68bc21ebu);
-    if (restirReservoirUpdate(reservoir.state, restirReservoirMergeWeight(previousReservoir.state, evaluated.target),
-                              evaluated.target, previousReservoir.state.M,
-                              random<SampleDimension::eLightId>(rng, uniforms.samplerType)))
+    const bool selectedHistory = restirReservoirUpdate(
+        reservoir.state, restirReservoirMergeWeight(previousReservoir.state, evaluated.target), evaluated.target,
+        previousReservoir.state.M, random<SampleDimension::eLightId>(rng, uniforms.samplerType));
+    if (selectedHistory)
     {
         reservoir.sample = previousReservoir.sample;
     }
-    reservoir.state.ageAndFlags =
-        (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) | min(age + 1u, RESTIR_RESERVOIR_AGE_MASK);
+    reservoir.state.ageAndFlags = (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) |
+                                  (selectedHistory ? min(age + 1u, RESTIR_RESERVOIR_AGE_MASK) : 0u);
     currentReservoirs[tid] = reservoir;
 }
 
