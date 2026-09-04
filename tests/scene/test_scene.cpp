@@ -93,6 +93,26 @@ TEST_CASE("environment replacement and removal signal a resource resync")
     }
 }
 
+TEST_CASE("environment controls are finite before either backend sees them")
+{
+    Scene scene;
+    Scene::EnvLightDesc env{};
+    env.intensity = std::numeric_limits<float>::quiet_NaN();
+    env.color = glm::float3(std::numeric_limits<float>::infinity(), -1.0f, 0.5f);
+    env.rotationY = std::numeric_limits<float>::max();
+    env.backgroundIntensity = std::numeric_limits<float>::infinity();
+    scene.setEnvLight(env);
+
+    const auto& packed = scene.getEnvLight();
+    REQUIRE(packed.has_value());
+    const Scene::EnvLightDesc value = packed.value_or(Scene::EnvLightDesc{});
+    CHECK(value.intensity == 0.0f);
+    CHECK(value.color == glm::float3(0.0f, 0.0f, 0.5f));
+    CHECK(std::isfinite(value.rotationY));
+    CHECK(std::abs(value.rotationY) < 360.0f);
+    CHECK(value.backgroundIntensity == 0.0f);
+}
+
 TEST_CASE("setLight keeps desc and GPU light in sync for rect")
 {
     Scene scene;

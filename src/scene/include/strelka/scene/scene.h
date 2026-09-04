@@ -797,11 +797,7 @@ public:
         return mAtmosphere;
     }
 
-    void setEnvLight(const EnvLightDesc& desc)
-    {
-        mEnvLight = desc;
-        markChanged(ChangeBits::Env);
-    }
+    void setEnvLight(const EnvLightDesc& desc);
     const std::optional<EnvLightDesc>& getEnvLight() const
     {
         return mEnvLight;

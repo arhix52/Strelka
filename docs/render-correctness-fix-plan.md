@@ -40,6 +40,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | AC. Finite-to-infinite editor proxy lifecycle | Rect→distant/dome leaves `getLightInstanceId()==0` and CPU picking hits the stale rectangle; focused test fails 4/8 assertions | reverse type-toggle, CPU pick miss, proxy reuse/no-orphan mutation | keep cached proxy for reuse but expose and traverse it only while the current packed light has a finite surface | FIXED | Existing packed-type TLAS mask | Existing packed-type TLAS mask; external CUDA required | this commit | UNVERIFIED |
 | AD. Projector texture index bounds | An unregistered or `INT_MAX` image slot reaches OptiX's bindless texture lookup without a count check; numeric float conversion can overflow before lookup | empty/valid/extreme/negative Scene slots and OptiX lookup-contract mutation | canonicalize invalid authored slots to `-1` and publish/check the OptiX table count before indexing | FIXED | Existing upload bound; shared packed slot | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | AE. Acceleration-structure light transforms | Disabled invalid analytic lights retain raw NaN/Inf/singular editor-proxy transforms even with TLAS mask zero | create/edit finite-and-nonsingular instance contract plus raw-transform mutation | publish a finite nonsingular inert proxy transform whenever the authored proxy transform is unsafe | FIXED | Shared safe instance input | Shared safe instance input; external CUDA required | this commit | UNVERIFIED |
+| AF. Light scalar boundary validation | NaN projector aspect has shader radiance but host PMF zero; NaN intensity/range and infinite radius/angles reach device records; invalid environment controls propagate NaN | packed-record finiteness, radiance/PMF support equivalence, environment canonicalization, invalid-input mutations | turn invalid analytic records into one finite disabled sentinel; sanitize environment radiometry and reduce rotation before backend upload | FIXED | Shared Scene boundary | Shared Scene boundary; external CUDA required | this commit | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -1301,3 +1302,28 @@ is out of scope unless it blocks validation.
   predicate, finite-component check, and affine-row check. Identity is substituted only for unsafe AS input; the
   packed light stays disabled and the analytic sampler/intersector is unchanged. The focused create/edit regression
   now passes 5/5 assertions in Debug, Release, and ASan+UBSan, while its raw-transform mutation remains unsafe.
+
+## Finding AF: light scalar boundary validation
+
+- Random variables and measure: light identity is a discrete mass; finite area/projector events retain their existing
+  area or positional measure, and environment directions retain `domega`. Authored scalar controls are deterministic
+  integrand/support parameters, not additional random variables.
+- Support: every enabled analytic record must contain only finite values. Invalid geometry/profile scalars disable the
+  complete record, so radiance and proposal support both become zero. Environment RGB is sanitized component-wise,
+  invalid strengths become zero, and rotation is reduced to a finite equivalent angle before either backend uses it.
+- Conditional/marginal PDF and selection PMF: valid records are unchanged. An invalid analytic record has conditional
+  density/mass and outer PMF zero; a sanitized environment uses the same represented texel distribution and outer
+  PMF computed from its sanitized intensity/tint.
+- Delta/continuous classification and MIS: valid light types retain their existing classification. Disabling an
+  invalid record removes it from both NEE and complementary hit/miss evaluation, rather than comparing inconsistent
+  host and shader interpretations of NaN.
+- Current-HEAD reproducer and mutation: a sharp projector with `projectorAspect=NaN` is interpreted by device `fmax`
+  as a narrow positive beam, while host `std::max` leaves a NaN solid angle that is cleaned to PMF zero. NaN intensity
+  packs NaN radiance; infinite radius and angle or NaN range remain in the GPU record. Environment rotation/intensity/
+  tint/background controls are copied raw. The focused pre-fix tests require finite disabled records and finite
+  canonical environment controls; the raw descriptors retain the invalid-input mutations.
+- Implementation and result: the complete packed analytic record and baked radiometry are validated once on the host;
+  any invalid result becomes a typed finite zero-support sentinel. Environment channels/strengths are made finite and
+  nonnegative, and rotation is reduced modulo 360 degrees in `Scene::setEnvLight`, before either backend consumes it.
+  The pre-fix focused suite failed 19/26 assertions; it now passes 26/26 in Debug, Release, and ASan+UBSan, including
+  zero host selection power for every disabled analytic mutation.

@@ -4,6 +4,7 @@
 #include <strelka/scene/light_desc.h>
 #include <strelka/sceneloader/sceneserializer.h>
 #include <strelka/sceneloader/iesloader.h>
+#include <host/light_selection.h>
 #include <light_types.h>
 
 #include <fstream>
@@ -14,6 +15,27 @@
 
 using namespace oka;
 namespace fs = std::filesystem;
+
+namespace
+{
+
+bool packedLightIsFinite(const Scene::Light& light)
+{
+    auto finiteVector = [](const glm::float4& value) {
+        return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z) && std::isfinite(value.w);
+    };
+    for (const glm::float4& point : light.points)
+    {
+        if (!finiteVector(point))
+        {
+            return false;
+        }
+    }
+    return finiteVector(light.color) && finiteVector(light.normal) && std::isfinite(light.halfAngle) &&
+           std::isfinite(light.pad0) && std::isfinite(light.pad1);
+}
+
+} // namespace
 
 TEST_CASE("point light bakes candela into radiant intensity")
 {
@@ -142,6 +164,49 @@ TEST_CASE("punctual packing rejects non-finite positions and collapsed profile f
     scene.setLight(id, desc);
     CHECK(glm::float3(scene.getLights()[id].color) == glm::float3(0.0f));
     CHECK(scene.getLights()[id].normal.w == 0.0f);
+}
+
+TEST_CASE("non-finite light scalars produce one finite disabled record")
+{
+    Scene scene;
+    Scene::UniformLightDesc desc{};
+    desc.type = LIGHT_TYPE_PROJECTOR;
+    desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+    desc.intensity = 7.0f;
+    desc.color = glm::float3(1.0f);
+    desc.outerConeAngle = 0.4f;
+    desc.projectorAspect = std::numeric_limits<float>::quiet_NaN();
+    const uint32_t id = scene.createLight(desc);
+
+    auto checkDisabled = [&]() {
+        const Scene::Light& light = scene.getLights()[id];
+        CHECK(packedLightIsFinite(light));
+        CHECK(glm::float3(light.color) == glm::float3(0.0f));
+        CHECK(light.normal.w == 0.0f);
+        CHECK(oka::metal::analyticLightPower(light) == 0.0);
+    };
+    checkDisabled();
+
+    desc.projectorAspect = 1.0f;
+    desc.outerConeAngle = std::numeric_limits<float>::infinity();
+    scene.setLight(id, desc);
+    checkDisabled();
+
+    desc.type = LIGHT_TYPE_POINT;
+    desc.outerConeAngle = 0.4f;
+    desc.radius = std::numeric_limits<float>::infinity();
+    scene.setLight(id, desc);
+    checkDisabled();
+
+    desc.radius = 0.0f;
+    desc.range = std::numeric_limits<float>::quiet_NaN();
+    scene.setLight(id, desc);
+    checkDisabled();
+
+    desc.range = 0.0f;
+    desc.intensity = std::numeric_limits<float>::quiet_NaN();
+    scene.setLight(id, desc);
+    checkDisabled();
 }
 
 TEST_CASE("sheared and mirrored projector transforms pack an orthonormal oriented frame")

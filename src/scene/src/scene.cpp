@@ -73,6 +73,67 @@ glm::float4x4 safeAccelerationStructureProxyTransform(const glm::float4x4& trans
     return accelerationStructureProxyTransformIsSafe(transform) ? transform : glm::float4x4(1.0f);
 }
 
+bool finiteNonnegativeColor(const glm::float3& color)
+{
+    return std::isfinite(color.x) && std::isfinite(color.y) && std::isfinite(color.z) && color.x >= 0.0f &&
+           color.y >= 0.0f && color.z >= 0.0f;
+}
+
+bool authoredLightScalarsAreFinite(const Scene::UniformLightDesc& desc)
+{
+    if (!finiteNonnegativeColor(desc.color) || !std::isfinite(desc.intensity) ||
+        desc.intensityUnit < LIGHT_UNIT_RADIANCE || desc.intensityUnit > LIGHT_UNIT_IRRADIANCE)
+    {
+        return false;
+    }
+    switch (desc.type)
+    {
+    case LIGHT_TYPE_RECT:
+        return std::isfinite(desc.width) && std::isfinite(desc.height) && std::isfinite(desc.range);
+    case LIGHT_TYPE_DISC:
+        return std::isfinite(desc.radius) && std::isfinite(desc.range);
+    case LIGHT_TYPE_SPHERE:
+        return std::isfinite(desc.radius);
+    case LIGHT_TYPE_POINT:
+        return std::isfinite(desc.radius) && std::isfinite(desc.range);
+    case LIGHT_TYPE_SPOT:
+        return std::isfinite(desc.radius) && std::isfinite(desc.innerConeAngle) && std::isfinite(desc.outerConeAngle) &&
+               std::isfinite(desc.range);
+    case LIGHT_TYPE_PROJECTOR:
+        return std::isfinite(desc.radius) && std::isfinite(desc.outerConeAngle) && std::isfinite(desc.projectorAspect) &&
+               std::isfinite(desc.projectorEdgeSoftness) && std::isfinite(desc.range);
+    case LIGHT_TYPE_DISTANT:
+        return std::isfinite(desc.halfAngle);
+    case LIGHT_TYPE_DOME:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool packedLightIsFinite(const Scene::Light& light)
+{
+    auto finiteVector = [](const glm::float4& value) {
+        return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z) && std::isfinite(value.w);
+    };
+    for (const glm::float4& point : light.points)
+    {
+        if (!finiteVector(point))
+        {
+            return false;
+        }
+    }
+    return finiteVector(light.color) && finiteVector(light.normal) && std::isfinite(light.halfAngle) &&
+           std::isfinite(light.pad0) && std::isfinite(light.pad1);
+}
+
+void disablePackedLight(Scene::Light& light, int type)
+{
+    light = Scene::Light{};
+    light.type = type;
+    light.color = glm::float4(0.0f, 0.0f, 0.0f, 1.0f);
+}
+
 } // namespace
 
 uint32_t Scene::acquireMeshSlot(Mesh*& mesh)
@@ -738,6 +799,12 @@ uint32_t Scene::createLight(const UniformLightDesc& desc)
 void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
 {
     // transform to GPU light
+    disablePackedLight(mLights[lightId], desc.type);
+    if (!authoredLightScalarsAreFinite(desc))
+    {
+        markChanged(ChangeBits::Lights);
+        return;
+    }
     bool lightHasSupport = true;
     if (desc.type == LIGHT_TYPE_RECT)
     {
@@ -886,6 +953,12 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
             bakeLightRadiometric(desc.type, desc.intensityUnit, desc.color, desc.intensity, desc.width, desc.height,
                                  desc.radius, desc.halfAngle, desc.outerConeAngle, desc.projectorAspect) :
             glm::float3(0.0f);
+    if (!packedLightIsFinite(mLights[lightId]) || !finiteNonnegativeColor(radiometric))
+    {
+        disablePackedLight(mLights[lightId], desc.type);
+        markChanged(ChangeBits::Lights);
+        return;
+    }
     mLights[lightId].color = glm::float4(radiometric, 1.0f);
     // Finite light intersections are evaluated against their exact analytic
     // geometry in every renderer. Keep visibility beside the packed shape so
@@ -895,6 +968,20 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
                                     (desc.visibleToCamera ? STRELKA_ANALYTIC_LIGHT_CAMERA_BIT : 0u)) :
                               0.0f;
     markChanged(ChangeBits::Lights);
+}
+
+void Scene::setEnvLight(const EnvLightDesc& desc)
+{
+    EnvLightDesc sanitized = desc;
+    auto nonnegativeFinite = [](float value) { return std::isfinite(value) && value > 0.0f ? value : 0.0f; };
+    sanitized.intensity = nonnegativeFinite(sanitized.intensity);
+    sanitized.color.x = nonnegativeFinite(sanitized.color.x);
+    sanitized.color.y = nonnegativeFinite(sanitized.color.y);
+    sanitized.color.z = nonnegativeFinite(sanitized.color.z);
+    sanitized.rotationY = std::isfinite(sanitized.rotationY) ? std::remainder(sanitized.rotationY, 360.0f) : 0.0f;
+    sanitized.backgroundIntensity = nonnegativeFinite(sanitized.backgroundIntensity);
+    mEnvLight = sanitized;
+    markChanged(ChangeBits::Env);
 }
 
 int32_t Scene::addIesProfile(IesProfile profile)
