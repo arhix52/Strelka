@@ -34,16 +34,35 @@
 #include <strelka/material/material_math.h>
 #include <strelka/material/shading_frame.h>
 
-/// True when next-event estimation at this vertex is willing to propose a
-/// direction `L`, given `nDotL = dot(shading_normal, L)`.
+/// Whether this material scatters to the far side as readily as to the side it
+/// was hit from, so next-event estimation has to offer both hemispheres.
 ///
 /// A fibre has no side that light does not reach. Chiang's TT and TRT terms are
 /// light that entered one side of the strand and left the other, and TT alone is
 /// about four fifths of a bright strand's albedo, so testing the shading
 /// hemisphere the way a surface does discards the dominant lobe.
-DEVICE_FUNC bool neeProposesDirection(bool throughFibre, bool frontFace, float nDotL)
+///
+/// A leaf is the same argument on a surface. standard_pbr_eval() has always
+/// evaluated the diffuse-transmission lobe on the far hemisphere -- it is what
+/// lights the shadowed side of a canopy -- but next-event estimation would not
+/// propose a direction there, so that lobe's light could only ever be found by
+/// the bounce ray. With a sun that is 6.6e-5 sr and therefore 64000 in radiance,
+/// on the pine forest that was one sample in fifteen thousand carrying the whole
+/// sun: leaf-green fireflies peaking at 250x the median while the unbiased mean
+/// stayed put. Offering the direction here is what lets MIS weigh those hits
+/// down to nothing.
+DEVICE_FUNC bool neeCrossesSurface(bool throughFibre, float transmission, float diffuseTransmission)
 {
-    return throughFibre || ((nDotL > 0.0f) == frontFace);
+    return throughFibre || transmission > 0.0f || diffuseTransmission > 0.0f;
+}
+
+/// True when next-event estimation at this vertex is willing to propose a
+/// direction `L`, given `nDotL = dot(shading_normal, L)`.
+///
+/// `crossesSurface` is neeCrossesSurface() for the material being shaded.
+DEVICE_FUNC bool neeProposesDirection(bool crossesSurface, bool frontFace, float nDotL)
+{
+    return crossesSurface || ((nDotL > 0.0f) == frontFace);
 }
 
 /// Receiver-side support in the frame the BSDF actually uses. Inputs involving
@@ -52,7 +71,8 @@ DEVICE_FUNC bool neeSurfaceSupportsDirection(bool throughFibre, bool frontFace, 
                                              float diffuseTransmission, float nDotL)
 {
     const ShadedFrame frame = shadedFrame(frontFace, nDotV, transmission, diffuseTransmission);
-    return neeProposesDirection(throughFibre, frame.frontFace, frame.normalSign * nDotL);
+    return neeProposesDirection(neeCrossesSurface(throughFibre, transmission, diffuseTransmission), frame.frontFace,
+                                frame.normalSign * nDotL);
 }
 
 /// The projected solid-angle factor in the same frame as the support test.
@@ -73,12 +93,13 @@ DEVICE_FUNC float neeSurfaceCosine(bool throughFibre, bool frontFace, float nDot
 /// light. `didNee` is whether this vertex made an estimate at all.
 ///
 /// This support must be exactly neeProposesDirection(), gated only by whether
-/// NEE ran. A one-way implication is insufficient: Metal used to accept a
+/// NEE ran -- so `crossesSurface` has to be the same value both were asked
+/// with. A one-way implication is insufficient: Metal used to accept a
 /// back-face NEE direction but withhold the complementary weight when the BSDF
 /// generated the same direction. The resulting balance shares were 0.4 + 1.0.
-DEVICE_FUNC bool neePairsWithBounce(bool didNee, bool throughFibre, bool frontFace, float nDotDir)
+DEVICE_FUNC bool neePairsWithBounce(bool didNee, bool crossesSurface, bool frontFace, float nDotDir)
 {
-    return didNee && neeProposesDirection(throughFibre, frontFace, nDotDir);
+    return didNee && neeProposesDirection(crossesSurface, frontFace, nDotDir);
 }
 
 /// Whether next-event estimation runs at this vertex at all.

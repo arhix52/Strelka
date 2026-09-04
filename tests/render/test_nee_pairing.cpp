@@ -87,15 +87,15 @@ TEST_CASE("the bounce and proposal rules have identical directional support")
     // strategies, whose heuristic shares sum to one, or exactly one strategy,
     // whose weight is one. A one-way implication still permits the old positive
     // bias: NEE took 0.4 while an incorrectly unpaired BSDF hit took 1.0.
-    for (const bool throughFibre : { true, false })
+    for (const bool crossesSurface : { true, false })
     {
         for (const bool frontFace : { true, false })
         {
             for (int i = -10; i <= 10; ++i)
             {
                 const float nDot = (float)i * 0.1f;
-                CHECK(neePairsWithBounce(true, throughFibre, frontFace, nDot) ==
-                      neeProposesDirection(throughFibre, frontFace, nDot));
+                CHECK(neePairsWithBounce(true, crossesSurface, frontFace, nDot) ==
+                      neeProposesDirection(crossesSurface, frontFace, nDot));
             }
         }
     }
@@ -171,6 +171,33 @@ TEST_CASE("receiver support and cosine use the BSDF shaded frame")
     // projected solid angle.
     CHECK_FALSE(neeSurfaceSupportsDirection(false, false, nDotView, 0.0f, 0.0f, -nDotLight));
     CHECK(neeSurfaceCosine(false, false, nDotView, 0.0f, 0.0f, -nDotLight) == 0.0f);
+}
+
+TEST_CASE("a surface that scatters through is connected to on both sides")
+{
+    // An opaque surface keeps one hemisphere; anything that transmits has two.
+    CHECK_FALSE(neeCrossesSurface(false, 0.0f, 0.0f));
+    CHECK(neeCrossesSurface(true, 0.0f, 0.0f));
+    CHECK(neeCrossesSurface(false, 0.5f, 0.0f));
+    CHECK(neeCrossesSurface(false, 0.0f, 0.5f));
+
+    // A leaf lit from behind: front-facing hit, light below the surface.
+    // standard_pbr_eval() answers there, so withholding the proposal left that
+    // lobe's light to the bounce ray alone -- and a bounce ray that finds a sun
+    // brings the whole sun.
+    constexpr float nDotView = 0.8f;
+    constexpr float nDotLight = -0.7f;
+    CHECK(neeSurfaceSupportsDirection(false, true, nDotView, 0.0f, 0.5f, nDotLight));
+    CHECK(neeSurfaceCosine(false, true, nDotView, 0.0f, 0.5f, nDotLight) == doctest::Approx(0.7f));
+
+    // Opaque, same geometry: still one-sided.
+    CHECK_FALSE(neeSurfaceSupportsDirection(false, true, nDotView, 0.0f, 0.0f, nDotLight));
+    CHECK(neeSurfaceCosine(false, true, nDotView, 0.0f, 0.0f, nDotLight) == 0.0f);
+
+    // The bounce through the leaf pairs with that proposal rather than taking a
+    // light whole -- but asserting it here would restate the case above, which
+    // already holds neePairsWithBounce to neeProposesDirection for both values
+    // of this flag.
 }
 
 // ===========================================================================

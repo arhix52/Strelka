@@ -936,7 +936,8 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
         const ShadedFrame frame =
             shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
         const bool isNextEventValid =
-            neeProposesDirection(isFibre, frame.frontFace, frame.normalSign * dot(si.shading_normal, conn.toLight)) &&
+            neeProposesDirection(neeCrossesSurface(isFibre, si.transmission, si.diffuse_transmission), frame.frontFace,
+                                 frame.normalSign * dot(si.shading_normal, conn.toLight)) &&
             (conn.pdf > 0.0f);
         if (!isNextEventValid || !conn.needsRay)
         {
@@ -2739,8 +2740,9 @@ extern "C" __global__ void __closesthit__radiance()
     // about twice.
     const ShadedFrame bounceFrame =
         shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
-    prd->neeDone = neePairsWithBounce(
-        didNee, isFibre, bounceFrame.frontFace, bounceFrame.normalSign * dot(si.shading_normal, prd->dir));
+    prd->neeDone = neePairsWithBounce(didNee, neeCrossesSurface(isFibre, si.transmission, si.diffuse_transmission),
+                                      bounceFrame.frontFace,
+                                      bounceFrame.normalSign * dot(si.shading_normal, prd->dir));
     prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
     prd->misDistance = 0.0f;
     prd->throughput *= sample_data.bsdf_over_pdf / sssEntryTint;

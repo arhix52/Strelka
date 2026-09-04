@@ -1789,9 +1789,12 @@ static RestirEvaluation evaluateRestirConnection(thread const LightConnection& c
 {
     RestirEvaluation result = {};
     result.connection = connection;
+    // A fibre has no back side to reject, and neither does a leaf: see
+    // neeCrossesSurface().
     if (!connection.needsRay || !(connection.pdf > 0.0f) ||
-        !neeProposesDirection(
-            isFibre, neeFrame.frontFace, neeFrame.normalSign * dot(connection.toLight, si.shading_normal)))
+        !neeProposesDirection(neeCrossesSurface(isFibre, si.transmission, si.diffuse_transmission),
+                              neeFrame.frontFace,
+                              neeFrame.normalSign * dot(connection.toLight, si.shading_normal)))
     {
         return result;
     }
@@ -3868,8 +3871,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // Record exactly the support NEE offered in the same shaded frame. A raw
     // back face may be an opaque two-sided surface whose BSDF flipped its frame,
     // or a transmissive exit that did not; shadedFrame distinguishes them.
-    didNee =
-        neePairsWithBounce(didNee, isFibre, neeFrame.frontFace, neeFrame.normalSign * dot(si.shading_normal, nextDir));
+    didNee = neePairsWithBounce(didNee, neeCrossesSurface(isFibre, si.transmission, si.diffuse_transmission),
+                                neeFrame.frontFace, neeFrame.normalSign * dot(si.shading_normal, nextDir));
 
     radianceOut[tid] += float4(radiance, 0.0f);
 
