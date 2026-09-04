@@ -15,6 +15,18 @@ enum : unsigned int
     STRELKA_ANALYTIC_LIGHT_SECONDARY_BIT = 2u
 };
 
+DEVICE_FUNC bool analyticLightVisibilityAllowsRay(float packedVisibility, bool includeCameraHidden)
+{
+    if (!(packedVisibility >= 1.0f) || !(packedVisibility <= 3.0f))
+    {
+        return false;
+    }
+    // Scene packing writes the bit mask as an exact small integer float.
+    const unsigned int visibility = (unsigned int)packedVisibility;
+    return (visibility & STRELKA_ANALYTIC_LIGHT_CAMERA_BIT) != 0u ||
+           (includeCameraHidden && (visibility & STRELKA_ANALYTIC_LIGHT_SECONDARY_BIT) != 0u);
+}
+
 DEVICE_FUNC bool lightUsesAnalyticAreaIntersection(int lightType)
 {
     return lightType == LIGHT_TYPE_DISC || lightType == LIGHT_TYPE_SPHERE;

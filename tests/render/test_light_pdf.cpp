@@ -2,6 +2,7 @@
 
 #include <analytic_light.h>
 #include <light_pdf.h>
+#include <strelka/scene/light_desc.h>
 
 #include <algorithm>
 #include <cmath>
@@ -1391,13 +1392,19 @@ TEST_CASE("cone solid angle spans the full sphere and matches the host bake")
 TEST_CASE("finite distant support is exactly its spherical cap")
 {
     const float halfAngle = 0.37f;
-    const float boundary = std::cos(halfAngle);
     const float expected = 1.0f / (4.0f * float(M_PI_F) * std::pow(std::sin(0.5f * halfAngle), 2.0f));
+    const float3 axis = make_float3(0.0f, 0.0f, 1.0f);
+    const float3 boundaryDirection = sampleDistantLightDirection(0.0f, 0.9999998807907104f, halfAngle, axis);
+    const float outsideAngle = halfAngle + 1e-4f;
+    const float3 outsideDirection = make_float3(std::sin(outsideAngle), 0.0f, std::cos(outsideAngle));
 
-    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, 1.0f) == doctest::Approx(expected).epsilon(1e-5));
-    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, boundary) == doctest::Approx(expected).epsilon(1e-5));
-    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, boundary - 1e-4f) == 0.0f);
-    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DOME, 0.0f, -1.0f) == doctest::Approx(1.0f / (4.0f * float(M_PI_F))));
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, axis, axis) ==
+          doctest::Approx(expected).epsilon(1e-5));
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, boundaryDirection, axis) ==
+          doctest::Approx(expected).epsilon(1e-5));
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, outsideDirection, axis) == 0.0f);
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DOME, 0.0f, -axis, axis) ==
+          doctest::Approx(1.0f / (4.0f * float(M_PI_F))));
 
     Rng rng(0xCA9u);
     double integral = 0.0;
@@ -1405,9 +1412,81 @@ TEST_CASE("finite distant support is exactly its spherical cap")
     for (int i = 0; i < samples; ++i)
     {
         const float3 w = uniformSphereDirection(rng.next(), rng.next());
-        integral += 4.0 * double(M_PI_F) * double(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, w.z));
+        integral += 4.0 * double(M_PI_F) * double(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, w, axis));
     }
     CHECK(integral / double(samples) == doctest::Approx(1.0).epsilon(0.02));
+}
+
+TEST_CASE("distant sampling and directional PDF share the exact cap support")
+{
+    const float3 axes[] = { make_float3(0.0f, 0.0f, 1.0f), unit(make_float3(1.0f, 1.0f, 1.0f)),
+                            unit(make_float3(-0.91f, 0.37f, 0.19f)) };
+    const float angles[] = { 1e-6f, 1e-5f, 1e-4f, 0.00459216f, 0.37f, float(M_PI_F) };
+    const float values[] = { 0.0f, std::nextafter(0.0f, 1.0f), 0.25f, 0.5f, 0.9999998807907104f };
+
+    for (float angle : angles)
+    {
+        CAPTURE(angle);
+        const float expected = coneLightSolidAnglePdf(angle);
+        REQUIRE(expected > 0.0f);
+        REQUIRE(std::isfinite(expected));
+        for (const float3 axis : axes)
+        {
+            for (const float u : values)
+            {
+                for (const float q : values)
+                {
+                    const float3 direction = sampleDistantLightDirection(u, q, angle, axis);
+                    CAPTURE(axis.x);
+                    CAPTURE(axis.y);
+                    CAPTURE(axis.z);
+                    CAPTURE(u);
+                    CAPTURE(q);
+                    CAPTURE(direction.x);
+                    CAPTURE(direction.y);
+                    CAPTURE(direction.z);
+                    CHECK(len(direction) == doctest::Approx(1.0f).epsilon(2e-6));
+                    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, angle, direction, axis) ==
+                          doctest::Approx(expected).epsilon(1e-6));
+                }
+            }
+        }
+    }
+
+    // Mutation: deriving sin(theta) from a cosine that has already rounded to
+    // one collapses this positive-measure narrow-cap sample onto the axis.
+    const float angle = 1e-5f;
+    const float halfSin = std::sin(0.5f * angle);
+    const float oldCosTheta = 1.0f - 0.5f * (2.0f * halfSin * halfSin);
+    const float oldSinTheta = std::sqrt(1.0f - oldCosTheta * oldCosTheta);
+    CHECK(oldSinTheta == 0.0f);
+    const float3 stable = sampleDistantLightDirection(0.0f, 0.5f, angle, axes[0]);
+    CHECK(len(sub(stable, axes[0])) > 0.0f);
+
+    Rng rng(0xD157A47u);
+    for (int i = 0; i < 100000; ++i)
+    {
+        const float3 axis = uniformSphereDirection(rng.next(), rng.next());
+        const double exponent = -6.0 + double(rng.next()) * (std::log10(double(M_PI_F)) + 6.0);
+        const float randomAngle = float(std::pow(10.0, exponent));
+        const float3 direction = sampleDistantLightDirection(rng.next(), rng.next(), randomAngle, axis);
+        const float returnedPdf = coneLightSolidAnglePdf(randomAngle);
+        const float evaluatedPdf = infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, randomAngle, direction, axis);
+        const double halfAngleSin = std::sin(0.5 * double(randomAngle));
+        const double oraclePdf = 1.0 / (4.0 * double(M_PI_F) * halfAngleSin * halfAngleSin);
+        CAPTURE(i);
+        CAPTURE(randomAngle);
+        CAPTURE(axis.x);
+        CAPTURE(axis.y);
+        CAPTURE(axis.z);
+        CAPTURE(direction.x);
+        CAPTURE(direction.y);
+        CAPTURE(direction.z);
+        CHECK(returnedPdf > 0.0f);
+        CHECK(std::isfinite(returnedPdf));
+        CHECK(evaluatedPdf == returnedPdf);
+        CHECK(double(returnedPdf) == doctest::Approx(oraclePdf).epsilon(2e-6));
+    }
 }
 
 TEST_CASE("infinite lights do not inherit area-emitter sidedness")
@@ -1421,7 +1500,8 @@ TEST_CASE("infinite lights do not inherit area-emitter sidedness")
     // Mutation: the former unconditional area-facing test rejected exactly
     // half of a distant light whose cap spans the full sphere.
     CHECK_FALSE(lightSampleFacesVertex(-1.0f));
-    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, float(M_PI_F), -1.0f) > 0.0f);
+    const float3 axis = make_float3(0.0f, 0.0f, 1.0f);
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, float(M_PI_F), -axis, axis) > 0.0f);
 }
 
 TEST_CASE("a sharp distant is delta and has no continuous density")
@@ -1431,10 +1511,52 @@ TEST_CASE("a sharp distant is delta and has no continuous density")
     CHECK(distantLightIsDelta(std::numeric_limits<float>::quiet_NaN()));
     CHECK_FALSE(distantLightIsDelta(1e-6f));
     CHECK(lightIsDeltaForMis(LIGHT_TYPE_DISTANT, 0.0f));
-    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, 0.0f, 1.0f) == 0.0f);
-    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, 0.0f, -1.0f) == 0.0f);
+    const float3 axis = make_float3(0.0f, 0.0f, 1.0f);
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, 0.0f, axis, axis) == 0.0f);
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, 0.0f, -axis, axis) == 0.0f);
     CHECK(coneLightSolidAnglePdf(0.0f) == 0.0f);
     CHECK(std::isfinite(coneLightSolidAnglePdf(0.0f)));
+}
+
+TEST_CASE("a distant cap narrower than the portable float measure is a delta atom")
+{
+    // Apple GPU arithmetic flushes subnormal products in supported production
+    // modes. Calling this a continuous cap on the CPU but a zero-measure cap on
+    // the GPU gives the two backends different supports and PDF classifications.
+    // The old exact-zero classification fails this assertion.
+    CHECK(distantLightIsDelta(1e-30f));
+    CHECK(lightIsDeltaForMis(LIGHT_TYPE_DISTANT, 1e-30f));
+    const float3 axis = make_float3(0.0f, 0.0f, 1.0f);
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, 1e-30f, axis, axis) == 0.0f);
+    CHECK(float(oka::kMinContinuousDistantHalfAngle) == STRELKA_MIN_CONTINUOUS_DISTANT_HALF_ANGLE);
+    CHECK(distantLightIsDelta(std::nextafter(STRELKA_MIN_CONTINUOUS_DISTANT_HALF_ANGLE, 0.0f)));
+    CHECK_FALSE(distantLightIsDelta(STRELKA_MIN_CONTINUOUS_DISTANT_HALF_ANGLE));
+    CHECK(std::isfinite(coneLightSolidAnglePdf(STRELKA_MIN_CONTINUOUS_DISTANT_HALF_ANGLE)));
+    CHECK(coneLightSolidAnglePdf(STRELKA_MIN_CONTINUOUS_DISTANT_HALF_ANGLE) > 0.0f);
+}
+
+TEST_CASE("a sharp distant matches only a represented specular atom")
+{
+    const float3 axis = unit(make_float3(0.25f, -0.5f, 1.0f));
+    CHECK(distantLightDeltaDirectionMatches(axis, axis));
+    CHECK_FALSE(distantLightDeltaDirectionMatches(unit(make_float3(axis.x + 1e-4f, axis.y, axis.z)), axis));
+
+    // Mutation: the old miss branch asked only for a continuous density and
+    // therefore discarded even the exact mirror/distant atom.
+    CHECK(coneLightSolidAnglePdf(0.0f) == 0.0f);
+    CHECK(infiniteLightDistance() == 1e16f);
+}
+
+TEST_CASE("analytic infinite lights obey camera and secondary visibility masks")
+{
+    CHECK_FALSE(analyticLightVisibilityAllowsRay(0.0f, false));
+    CHECK_FALSE(analyticLightVisibilityAllowsRay(0.0f, true));
+    CHECK_FALSE(analyticLightVisibilityAllowsRay(std::numeric_limits<float>::quiet_NaN(), true));
+    CHECK_FALSE(analyticLightVisibilityAllowsRay(std::numeric_limits<float>::infinity(), true));
+    CHECK(analyticLightVisibilityAllowsRay(float(STRELKA_ANALYTIC_LIGHT_CAMERA_BIT), false));
+    CHECK(analyticLightVisibilityAllowsRay(float(STRELKA_ANALYTIC_LIGHT_CAMERA_BIT), true));
+    CHECK_FALSE(analyticLightVisibilityAllowsRay(float(STRELKA_ANALYTIC_LIGHT_SECONDARY_BIT), false));
+    CHECK(analyticLightVisibilityAllowsRay(float(STRELKA_ANALYTIC_LIGHT_SECONDARY_BIT), true));
 }
 
 TEST_CASE("dome NEE and BSDF-miss shares form one Lambertian estimate")
@@ -1512,6 +1634,10 @@ TEST_CASE("the dispatcher routes each type to the density that type was sampled 
 
     const LightPdfQuery distant = plausibleQuery(LIGHT_TYPE_DISTANT);
     CHECK(lightSolidAnglePdf(distant) == doctest::Approx(coneLightSolidAnglePdf(distant.halfAngle)));
+
+    LightPdfQuery sharpDistant = distant;
+    sharpDistant.halfAngle = 0.0f;
+    CHECK(lightSolidAnglePdf(sharpDistant) == deltaLightPdf());
 }
 
 TEST_CASE("a point light's density follows its radius across the softness threshold")

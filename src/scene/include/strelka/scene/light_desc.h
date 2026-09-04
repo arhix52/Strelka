@@ -134,6 +134,24 @@ inline float coneSolidAngle(float halfAngleRad)
     return 4.0f * std::numbers::pi_v<float> * s * s;
 }
 
+inline constexpr float kMinContinuousDistantHalfAngle = 2.168404344971009e-19f;
+
+inline float distantLightHalfAngleForMeasure(float halfAngleRad)
+{
+    return halfAngleRad > 0.0f ? std::min(halfAngleRad, std::numbers::pi_v<float>) : 0.0f;
+}
+
+inline bool distantLightUsesDeltaMeasure(float halfAngleRad)
+{
+    return distantLightHalfAngleForMeasure(halfAngleRad) < kMinContinuousDistantHalfAngle;
+}
+
+inline float distantLightSolidAngle(float halfAngleRad)
+{
+    return distantLightUsesDeltaMeasure(halfAngleRad) ? 0.0f :
+                                                        coneSolidAngle(distantLightHalfAngleForMeasure(halfAngleRad));
+}
+
 /// Solid angle of the rectangular pyramid a projector throws into, from half of
 /// its horizontal field of view and the frame's aspect (width / height).
 ///
@@ -230,11 +248,11 @@ inline glm::float3 bakeLightRadiometric(int type,
         if (type == LIGHT_TYPE_DISTANT)
         {
             // Treat power as irradiance for a distant light — there is no area.
-            if (!(halfAngleRad > 0.0f))
+            if (distantLightUsesDeltaMeasure(halfAngleRad))
             {
                 return tint;
             }
-            const float omega = std::max(coneSolidAngle(halfAngleRad), 1e-8f);
+            const float omega = distantLightSolidAngle(halfAngleRad);
             return tint / omega;
         }
         const float area = std::max(lightSurfaceArea(type, width, height, radius), 1e-8f);
@@ -254,11 +272,12 @@ inline glm::float3 bakeLightRadiometric(int type,
         return tint;
     case LIGHT_UNIT_IRRADIANCE: {
         // E (W/m²). Distant: L = E / Ω.
-        if (type == LIGHT_TYPE_DISTANT && !(halfAngleRad > 0.0f))
+        if (type == LIGHT_TYPE_DISTANT && distantLightUsesDeltaMeasure(halfAngleRad))
         {
             return tint;
         }
-        const float omega = std::max(coneSolidAngle(halfAngleRad), 1e-8f);
+        const float omega = type == LIGHT_TYPE_DISTANT ? distantLightSolidAngle(halfAngleRad) :
+                                                         std::max(coneSolidAngle(halfAngleRad), 1e-8f);
         return tint / omega;
     }
     case LIGHT_UNIT_RADIANCE:

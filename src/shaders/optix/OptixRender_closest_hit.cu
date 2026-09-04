@@ -1745,8 +1745,23 @@ extern "C" __global__ void __miss__ms()
         {
             continue;
         }
-        const float cosToAxis = dot(ray_dir, -make_float3(light.normal));
-        const float conditionalPdf = infiniteLightConditionalPdf(light.type, light.halfAngle, cosToAxis);
+        if (!analyticLightVisibilityAllowsRay(light.normal.w, prd->depth != 0u))
+        {
+            continue;
+        }
+        const float3 axis = -make_float3(light.normal);
+        if (light.type == LIGHT_TYPE_DISTANT && distantLightIsDelta(light.halfAngle))
+        {
+            // A sharp distant and a specular BSDF direction are discrete atoms.
+            // Their exact represented match has unit MIS weight; a continuous
+            // ray near the axis must not acquire invented angular support.
+            if (prd->specularBounce && distantLightDeltaDirectionMatches(ray_dir, axis))
+            {
+                radiance += prd->throughput * make_float3(light.color);
+            }
+            continue;
+        }
+        const float conditionalPdf = infiniteLightConditionalPdf(light.type, light.halfAngle, ray_dir, axis);
         if (!(conditionalPdf > 0.0f))
         {
             continue;

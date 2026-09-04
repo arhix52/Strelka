@@ -222,7 +222,7 @@ inline double analyticLightPower(const Scene::Light& light)
         // categorical proposal still needs a finite positive variance proxy.
         if (hasFiniteDirection)
         {
-            measure = light.halfAngle <= 0.0f ? 1.0 : coneSolidAngle(light.halfAngle);
+            measure = distantLightUsesDeltaMeasure(light.halfAngle) ? 1.0 : distantLightSolidAngle(light.halfAngle);
         }
         break;
     case LIGHT_TYPE_DOME:

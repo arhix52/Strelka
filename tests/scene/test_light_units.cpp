@@ -341,6 +341,16 @@ TEST_CASE("coneSolidAngle spans the sphere correctly")
     CHECK(coneSolidAngle(0.001f) == doctest::Approx(kPi * 1e-6f).epsilon(1e-3));
 }
 
+TEST_CASE("host distant measure classification matches portable device arithmetic")
+{
+    CHECK(distantLightUsesDeltaMeasure(0.0f));
+    CHECK(distantLightUsesDeltaMeasure(1e-30f));
+    CHECK_FALSE(distantLightUsesDeltaMeasure(1e-6f));
+    CHECK(distantLightSolidAngle(1e-30f) == 0.0f);
+    CHECK(distantLightSolidAngle(1e-6f) > 0.0f);
+    CHECK(std::isfinite(distantLightSolidAngle(1e-6f)));
+}
+
 TEST_CASE("lightSurfaceArea matches the emitter geometry and is zero for punctual lights")
 {
     CHECK(lightSurfaceArea(LIGHT_TYPE_RECT, 2.0f, 3.0f, 0.0f) == doctest::Approx(6.0f));
@@ -412,7 +422,7 @@ TEST_CASE("a distant light's baked radiance times its solid angle is its irradia
     // omega again in the estimator. The product has to come back as E for every
     // sun anyone would author, which is the invariant that broke.
     const float irradiance = 5.0f;
-    const double halfAngles[] = { 0.5, 0.05, 0.00459216, 1e-3, 1e-4 };
+    const double halfAngles[] = { 0.5, 0.05, 0.00459216, 1e-3, 1e-4, 1e-5 };
     for (double halfAngle : halfAngles)
     {
         CAPTURE(halfAngle);

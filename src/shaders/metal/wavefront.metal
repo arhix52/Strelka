@@ -1575,8 +1575,26 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
             {
                 continue;
             }
-            const float cosToAxis = dot(rayDir, -float3(light.normal));
-            const float conditionalPdf = infiniteLightConditionalPdf(light.type, light.halfAngle, cosToAxis);
+            if (!analyticLightVisibilityAllowsRay(light.normal.w, depth != 0u))
+            {
+                continue;
+            }
+            const float3 axis = -float3(light.normal);
+            if (light.type == LIGHT_TYPE_DISTANT && distantLightIsDelta(light.halfAngle))
+            {
+                // This is a discrete path-space event: only a preceding BSDF
+                // atom can meet the represented light atom, and no continuous
+                // MIS density participates. Exact equality avoids widening the
+                // sharp distant into an artificial finite cone.
+                if (specularBounce && distantLightDeltaDirectionMatches(rayDir, axis))
+                {
+                    const float3 infiniteRadiance = float3(light.color);
+                    radiance += throughput * infiniteRadiance;
+                    sharcEnvironment += infiniteRadiance;
+                }
+                continue;
+            }
+            const float conditionalPdf = infiniteLightConditionalPdf(light.type, light.halfAngle, rayDir, axis);
             if (!(conditionalPdf > 0.0f))
             {
                 continue;

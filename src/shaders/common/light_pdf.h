@@ -37,6 +37,14 @@
 // have to agree on the number, so it is stated once.
 #define STRELKA_SOFT_LIGHT_RADIUS_MIN 1e-4f
 
+// Smallest cap whose half-angle sine squared and solid-angle density remain
+// normal binary32 values in every supported GPU arithmetic mode. At 2^-62 the
+// half-angle sine is 2^-63 and its square is FLT_MIN even if fast math
+// reassociates the solid-angle product. Narrower authored caps are represented as the same directional atom
+// as an exact zero-angle distant light instead of being continuous on the CPU
+// and flush-to-zero on the GPU.
+#define STRELKA_MIN_CONTINUOUS_DISTANT_HALF_ANGLE 2.168404344971009e-19f
+
 // ---------------------------------------------------------------------------
 // MIS heuristics
 //
@@ -197,7 +205,7 @@ DEVICE_FUNC float distantLightHalfAngle(float halfAngle)
 /// narrow continuous cone.
 DEVICE_FUNC bool distantLightIsDelta(float halfAngle)
 {
-    return distantLightHalfAngle(halfAngle) == 0.0f;
+    return distantLightHalfAngle(halfAngle) < STRELKA_MIN_CONTINUOUS_DISTANT_HALF_ANGLE;
 }
 
 /// The solid angle of a cone of the given half angle.
@@ -217,8 +225,104 @@ DEVICE_FUNC float coneSolidAngleFromHalfAngle(float halfAngle)
 /// A distant light sampled uniformly inside its cone.
 DEVICE_FUNC float coneLightSolidAnglePdf(float halfAngle)
 {
+    if (distantLightIsDelta(halfAngle))
+    {
+        return 0.0f;
+    }
     const float omega = coneSolidAngleFromHalfAngle(halfAngle);
     return (omega > 0.0f) ? (1.0f / omega) : 0.0f;
+}
+
+DEVICE_FUNC bool distantLightContainsDirection(float halfAngle, float3 direction, float3 axisDirection);
+
+/// Stable uniform spherical-cap inversion shared by CPU tests, Metal and OptiX.
+///
+/// `cosTheta = 1 - 2 q sin^2(a/2)` is retained for the axial component, but
+/// recovering the tangent length with `sqrt(1-cosTheta^2)` loses the complete
+/// sample once cosTheta rounds to one. The identity below computes sinTheta
+/// directly from the half angle and the same solid-angle variate.
+DEVICE_FUNC float3 sampleDistantLightDirection(float uPhi, float uSolidAngle, float halfAngle, float3 direction)
+{
+    // Scene packing stores a canonical unit axis. Do not renormalize it here:
+    // an additional binary32 normalization can move a narrow cap by more than
+    // its radius and make sample() disagree with miss-side PDF lookup.
+    const float3 axis = direction;
+    if (!(finiteVectorLength(axis) > 0.0f) || distantLightIsDelta(halfAngle))
+    {
+        return axis;
+    }
+
+    const float angle = distantLightHalfAngle(halfAngle);
+    float q = fminf(fmaxf(uSolidAngle, 0.0f), 1.0f);
+    const float halfSin = sinf(0.5f * angle);
+    const float halfSinSquared = halfSin * halfSin;
+
+    float3 tangent;
+    if (fabsf(axis.x) > fabsf(axis.y))
+    {
+        tangent = normalizeFiniteVectorOrZero(make_float3(-axis.z, 0.0f, axis.x));
+    }
+    else
+    {
+        tangent = normalizeFiniteVectorOrZero(make_float3(0.0f, axis.z, -axis.y));
+    }
+    const float3 bitangent = cross(axis, tangent);
+    const float phi = 2.0f * M_PI_F * uPhi;
+    const float3 azimuth = cosf(phi) * tangent + sinf(phi) * bitangent;
+    float3 sampledDirection = axis;
+    for (int attempt = 0; attempt < 8; ++attempt)
+    {
+        const float cosTheta = 1.0f - 2.0f * q * halfSinSquared;
+        const float sinTheta = 2.0f * halfSin * sqrtf(fmaxf(q * (1.0f - q * halfSinSquared), 0.0f));
+        sampledDirection = normalizeFiniteVectorOrZero(azimuth * sinTheta + axis * cosTheta);
+        if (distantLightContainsDirection(angle, sampledDirection, axis))
+        {
+            return sampledDirection;
+        }
+        // The final finite RNG cell can round just beyond the mathematical cap
+        // after frame rotation and normalization. Map only that rejected cell
+        // to a strict interior representative; never widen PDF support.
+        q *= 0.5f;
+    }
+    // A direction equal to the axis is always inside every non-degenerate cap.
+    return axis;
+}
+
+/// Cancellation-free cap membership for a represented direction.
+///
+/// For unit vectors, `|w-axis| = 2 sin(theta/2)`. Unlike a cosine threshold,
+/// the chord remains nonzero when both cos(theta) and cos(halfAngle) round to
+/// one. Both inputs are the canonical unit vectors produced by scene packing
+/// and ray generation; renormalising either here would change that represented
+/// event at tiny cap widths.
+DEVICE_FUNC bool distantLightContainsDirection(float halfAngle, float3 direction, float3 axisDirection)
+{
+    if (distantLightIsDelta(halfAngle))
+    {
+        return false;
+    }
+    if (!(finiteVectorLength(direction) > 0.0f) || !(finiteVectorLength(axisDirection) > 0.0f))
+    {
+        return false;
+    }
+    const float maxChord = 2.0f * sinf(0.5f * distantLightHalfAngle(halfAngle));
+    return finiteVectorLength(direction - axisDirection) <= maxChord;
+}
+
+/// Exact represented atom equality. There is deliberately no angular epsilon:
+/// widening a sharp distant into a cone would invent continuous support.
+DEVICE_FUNC bool distantLightDeltaDirectionMatches(float3 direction, float3 axisDirection)
+{
+    if (!(finiteVectorLength(direction) > 0.0f) || !(finiteVectorLength(axisDirection) > 0.0f))
+    {
+        return false;
+    }
+    return direction.x == axisDirection.x && direction.y == axisDirection.y && direction.z == axisDirection.z;
+}
+
+DEVICE_FUNC float infiniteLightDistance()
+{
+    return 1e16f;
 }
 
 /// The placeholder a delta light carries in the pdf field.
@@ -293,21 +397,19 @@ DEVICE_FUNC bool lightConnectionFacesVertex(int type, float cosAtLight)
 }
 
 /// Conditional solid-angle density for evaluating an analytic infinite light
-/// along a direction selected by the BSDF. `cosToAxis` is dot(W, -normal) for a
-/// distant light and is ignored for a dome.
-DEVICE_FUNC float infiniteLightConditionalPdf(int type, float halfAngle, float cosToAxis)
+/// along a direction selected by the BSDF. This uses the same cancellation-free
+/// geometry as the sampler.
+DEVICE_FUNC float infiniteLightConditionalPdf(int type, float halfAngle, float3 direction, float3 axisDirection)
 {
     if (type == LIGHT_TYPE_DOME)
     {
         return domeLightSolidAnglePdf();
     }
-    if (type != LIGHT_TYPE_DISTANT || distantLightIsDelta(halfAngle))
+    if (type != LIGHT_TYPE_DISTANT || !distantLightContainsDirection(halfAngle, direction, axisDirection))
     {
         return 0.0f;
     }
-
-    const float angle = distantLightHalfAngle(halfAngle);
-    return cosToAxis >= cosf(angle) ? coneLightSolidAnglePdf(angle) : 0.0f;
+    return coneLightSolidAnglePdf(halfAngle);
 }
 
 /// Everything the density of one light depends on, unpacked from whichever
@@ -356,7 +458,7 @@ DEVICE_FUNC float lightSolidAnglePdf(const THREAD_REF LightPdfQuery& q)
     case LIGHT_TYPE_SPHERE:
         return areaPdfToSolidAnglePdf(q.distToLight, q.cosAtLight, q.areaPdf);
     case LIGHT_TYPE_DISTANT:
-        return coneLightSolidAnglePdf(q.halfAngle);
+        return distantLightIsDelta(q.halfAngle) ? deltaLightPdf() : coneLightSolidAnglePdf(q.halfAngle);
     case LIGHT_TYPE_DOME:
         return domeLightSolidAnglePdf();
     case LIGHT_TYPE_POINT:

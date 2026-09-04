@@ -28,7 +28,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | Q. True Standard-PBR/conductor delta measures | Rough lobes below the delta threshold are sampled continuously but labelled delta; positive PDFs are floored; sheen/tiny transmission can have evaluation without proposal support | Exact mirror/refraction, sub-`1e-10` marginal, sheen-with-transmission, near-critical Snell/Fresnel, and finite-lattice tiny-lobe regressions | Sum coincident atoms as discrete masses; keep every other lobe continuous; evaluate returned float endpoints with compensated inverse/Jacobian/Fresnel arithmetic | FIXED | Shader compiled; shared source | Shared headers; external toolchain required | pending | FIXED |
 | R. Finite-RNG categorical representation | Alias buckets above `2^23` are unreachable and float thresholds do not equal Metal/OptiX event masses | `8,388,609` buckets, strict-threshold lattice, hierarchy probability, support and GOF mutations | Full-width integer bucket words and integer Bernoulli thresholds; reconstruct the exactly represented marginal PMF | FIXED | FIXED on MTLDevice | Shared source; external CUDA toolchain required | this commit | FIXED |
 | S. Environment radiance/support lifecycle | Invalid HDR values reach textures, bilinear positive radiance can lie outside PMF support, runtime edits leave stale tables, and a `FLT_TRUE_MIN` 1x1 map loses its outer PMF through an infinite reciprocal | sanitization, 3x3 footprint support, seam/poles, tiny-positive power, edit/reload regressions | 3x3 oracle FIXED | FIXED on MTLDevice; lifecycle source/compile | Shared source fixed; external CUDA required | this commit | FIXED |
-| T. Infinite-light exact support/MIS | Sharp distant versus mirror is not represented as a discrete match; tiny continuous caps and float round trips lose support; camera mask/tMax differ | delta match, tiny cap, boundary round-trip, camera visibility and backend-distance tests | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| T. Infinite-light exact support/MIS | Sharp distant versus mirror is not represented as a discrete match; tiny continuous caps and float round trips lose support; camera mask/tMax differ | delta match, tiny cap, boundary round-trip, camera visibility and backend-distance tests | Stable analytic cone inversion and chord support; explicit sharp-distant atom; shared infinite visibility/distance | FIXED | FIXED on MTLDevice | Source fixed; external CUDA required | this commit | UNVERIFIED |
 | U. Analytic/punctual visibility agreement | Shadow rays ignore analytic emitters and finite-radius punctual proxies; stacked emitters therefore enumerate different paths | analytic segment blockers, stacked area lights, overlapping analytic surfaces and soft punctual regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | V. Transformed frame validity | Non-finite translations and collapsed/sheared projector/IES frames keep proposal power; OptiX transforms tangents as normals | translation, partial-rank/full-frame, shear, mirrored and tangent Gram-Schmidt tests | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | W. Complete marginal PDF arithmetic | Conditional area PDFs saturate before outer PMFs, under-reporting a finite complete marginal density | tiny-area/low-selection analytic and mesh regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
@@ -843,3 +843,56 @@ is out of scope unless it blocks validation.
   samples with zero measure mismatches; that kernel validates the shared table ABI and sample/PDF pair, while runtime
   resource replacement is source/compile validated rather than claimed as GPU execution. OptiX consumes the shared
   table and sanitization but CUDA compilation/runtime remains externally `UNVERIFIED`. Status: FIXED.
+
+## Finding T: infinite-light exact support and MIS
+
+- Random variables and measure: analytic-light identity `J` is a discrete PMF. A finite-angle distant additionally
+  draws direction `W` continuously in solid angle over a spherical cap; a dome draws `W` continuously over the full
+  sphere. A renderer-sharp distant has only one directional atom `W=-normal` and no `domega` density.
+- Support: a finite distant supports exactly the unit directions whose chord distance from its axis is at most
+  `2 sin(halfAngle/2)`; this is the cancellation-free form of the cap boundary. A dome supports the full sphere. A
+  sharp distant supports its exact represented axis only, and only a preceding discrete/specular BSDF event can
+  reach that atom on the complementary miss path. Camera and secondary visibility bits apply to every analytic
+  infinite emitter just as they already apply to analytic area hits.
+- Conditional and marginal PDF: for finite distant,
+  `p(W|J)=1/[4 pi sin^2(halfAngle/2)]` inside the cap and zero outside; for dome, `p(W|J)=1/(4 pi)`. The complete NEE
+  density is `P(local) P(analytic|local) P(J|analytic) p(W|J)`. The sharp distant carries only those discrete
+  selection masses and a unit conditional placeholder for estimator division; it never enters a continuous MIS
+  heuristic.
+- Selection PMF: unchanged from findings R/S and read from the represented integer-alias table. Camera visibility
+  changes integrand support, not selection probability; a camera-hidden light remains available to secondary NEE
+  and secondary BSDF paths.
+- Delta/continuous classification: zero, invalid, and positive angles too small to retain a finite, normal-float cone
+  measure on all supported GPU arithmetic modes are sharp atoms. Every other positive clamped angle is continuous.
+  Host radiometric baking uses the same classification and exact cone measure rather than an unrelated `1e-8`
+  solid-angle floor.
+- MIS strategies: finite distant and dome use selected-light NEE plus the compatible non-delta BSDF miss strategy.
+  A sharp distant uses selected-light delta NEE; a coincident specular BSDF atom is an exclusive discrete path and is
+  evaluated on miss with unit MIS weight. A continuous BSDF ray never acquires sharp-distant radiance merely because
+  it is numerically close to the axis.
+- Current-HEAD reproducer: `distantLightIsDelta(1e-30f)` is false although its cone measure is subnormal/flushable and
+  the conditional PDF is not portable across CPU and Metal arithmetic modes. At `halfAngle=1e-5`, irradiance baking
+  divides by the unrelated `1e-8` floor instead of the analytic cone measure, so multiplying the baked radiance by
+  the sampled measure recovers only about `0.15708` of the authored irradiance. Both sampler copies recover
+  `sin(theta)` from `sqrt(1-cos(theta)^2)`, which collapses narrow samples after `cos(theta)` rounds to one; miss
+  support repeats the cancellation through `cos(halfAngle)`. Sharp distant is explicitly skipped by both miss
+  programs, all infinite analytic lights ignore their camera mask there, and distant/dome NEE traces to `1e9` while
+  environment and BSDF-miss visibility use `1e16`.
+- Implementation and mutation sensitivity: both shader samplers now call one stable inversion that computes
+  `sin(theta)=2 sin(a/2) sqrt(q[1-q sin^2(a/2)])`; the old `sqrt(1-cos^2(theta))` mutation still collapses a
+  positive-measure `1e-5`-radian sample to the axis. Sample and miss lookup use the same chord predicate, and only a
+  finite RNG endpoint that rounds outside is remapped to a strict interior representative rather than widening
+  support. Angles below `2^-62` use the sharp atom on host and device; the threshold keeps `sin^2(a/2)` normal even
+  under fast-math reassociation. Exact sharp-distant/specular atom equality adds the missing BSDF miss contribution
+  with unit weight. Shared visibility masks and `1e16` distance now cover dome and distant NEE consistently.
+- Corrected result: the `1e-5`-radian irradiance bake recovers `5.0` instead of `0.15708`. A fixed-grid cap test and
+  100,000 random directions have exact sample/evaluated-PDF agreement; all returned densities are positive and
+  finite and agree with a double oracle within `2e-6` relative error. The tiny-cap, exact-atom, near-atom rejection,
+  camera/secondary-mask, invalid-mask, full-sphere, and common-distance regressions all pass.
+- Validation: focused Debug, Release, and ASan+UBSan pass 400,974/400,974 assertions. Full Debug/Release CTest pass
+  4/4; production Metal shaders compile. The full audit passes 892/892 cases and 69,178,701 assertions, preserving
+  environment integral `1`, Lambertian estimate `1.002147074` inside its CI, detected legacy mutation
+  `2.003353165`, and dome MIS ratio `1`. On the actual Apple M4 Pro, a separate 262,144-direction cap/atom/mask
+  kernel passes with six zero failure counters in both fast and safe math; the standard GPU audit also retains zero
+  measure mismatches. OptiX shares the source but cannot compile or execute without the absent CUDA/OptiX toolchain,
+  so that backend remains externally `UNVERIFIED` under the documented finding-7 command.

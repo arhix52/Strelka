@@ -81,13 +81,6 @@ struct AnalyticAreaLightHit
     bool hit;
 };
 
-static __inline__ __device__ bool analyticAreaLightIsVisible(const UniformLight& light, bool includeCameraHidden)
-{
-    const unsigned int visibility = (unsigned int)(light.normal.w + 0.5f);
-    return (visibility & STRELKA_ANALYTIC_LIGHT_CAMERA_BIT) != 0u ||
-           (includeCameraHidden && (visibility & STRELKA_ANALYTIC_LIGHT_SECONDARY_BIT) != 0u);
-}
-
 static __inline__ __device__ AnalyticAreaLightHit findAnalyticAreaLightHit(const UniformLight* lights,
                                                                            unsigned int lightCount,
                                                                            float3 rayOrigin,
@@ -106,7 +99,7 @@ static __inline__ __device__ AnalyticAreaLightHit findAnalyticAreaLightHit(const
     for (unsigned int lightId = 0u; lightId < lightCount; ++lightId)
     {
         const UniformLight& light = lights[lightId];
-        if (!analyticAreaLightIsVisible(light, includeCameraHidden))
+        if (!analyticLightVisibilityAllowsRay(light.normal.w, includeCameraHidden))
         {
             continue;
         }
@@ -342,36 +335,6 @@ static __inline__ __device__ LightSampleData SampleRectLightUniform(const Unifor
     return lightSampleData;
 }
 
-static __device__ void createCoordinateSystem(const float3& N, float3& Nt, float3& Nb) {
-    if (fabs(N.x) > fabs(N.y)) {
-        float invLen = 1.0f / sqrt(N.x * N.x + N.z * N.z);
-        Nt = make_float3(-N.z * invLen, 0.0f, N.x * invLen);
-    } else {
-        float invLen = 1.0f / sqrt(N.y * N.y + N.z * N.z);
-        Nt = make_float3(0.0f, N.z * invLen, -N.y * invLen);
-    }
-    Nb = cross(N, Nt);
-}
-
-static __device__ float3 SampleCone(float2 uv, float angle, float3 direction, float& pdf) {
-
-    angle = distantLightHalfAngle(angle);
-    float phi = 2.0 * M_PIf * uv.x;
-    const float halfSin = sin(0.5f * angle);
-    float cosTheta = 1.0 - uv.y * (2.0f * halfSin * halfSin);
-
-    // Convert spherical coordinates to 3D direction
-    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
-
-    float3 u, v;
-    createCoordinateSystem(direction, u, v);
-    float3 sampledDir = normalize(cos(phi) * sinTheta * u + sin(phi) * sinTheta * v + cosTheta * direction);
-
-    // See coneLightSolidAnglePdf() for why this is not 1/(2pi(1 - cos a)).
-    pdf = coneLightSolidAnglePdf(angle);
-    return sampledDir;
-}
-
 static __inline__ __device__ LightSampleData SampleDistantLight(const UniformLight& l, const float2 u, const float3 hitPoint)
 {
     LightSampleData lightSampleData;
@@ -385,11 +348,12 @@ static __inline__ __device__ LightSampleData SampleDistantLight(const UniformLig
     }
     else
     {
-        coneSample = SampleCone(u, l.halfAngle, axis, pdf);
+        coneSample = sampleDistantLightDirection(u.x, u.y, l.halfAngle, axis);
+        pdf = coneLightSolidAnglePdf(l.halfAngle);
     }
 
     lightSampleData.areaPdf = 0.0f;
-    lightSampleData.distToLight = 1e9;
+    lightSampleData.distToLight = infiniteLightDistance();
     lightSampleData.L = coneSample;
     lightSampleData.normal = make_float3(l.normal);
     lightSampleData.pdf = pdf;
@@ -451,7 +415,7 @@ static __inline__ __device__ LightSampleData SampleDomeLight(const UniformLight&
     LightSampleData lightSampleData;
 
     lightSampleData.L = uniformSphereDirection(u.x, u.y);
-    lightSampleData.distToLight = 1e9f;
+    lightSampleData.distToLight = infiniteLightDistance();
     lightSampleData.areaPdf = 0.0f;
     // Faces the shading point by construction, so the caller's -dot(L, normal)
     // test passes for every sampled direction.
