@@ -103,17 +103,20 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mStageTimestampBuffer);
     safeRelease(mStageStatsBuffer);
     safeRelease(mIorStatsBuffer);
+    safeRelease(mRenderWorkCounterBuffer);
     mCapacity = 0;
     mSharcUpdateDownscale = 0;
     mResidencyDirty = true;
     mReportedIorStats = false;
     mLastSharcActivity = 0;
     mStageKinds.clear();
+    mRenderWorkDispatches.clear();
 }
 
 void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(MTL::Allocation*)>& add) const
 {
     add(mIorStatsBuffer);
+    add(mRenderWorkCounterBuffer);
     add(mPathStateBuffer);
     add(mMediumPathStateBuffer);
     add(mSharcUpdateStateBuffer);
@@ -157,7 +160,7 @@ size_t MetalWavefrontIntegrator::queueBytes() const
            bufBytes(mHitQueueBuffer) + bufBytes(mMissQueueBuffer) + bufBytes(mAovBuffer) + bufBytes(mStageStatsBuffer) +
            bufBytes(mRestirReservoirBuffer[0]) + bufBytes(mRestirReservoirBuffer[1]) +
            bufBytes(mRestirSurfaceHistoryBuffer[0]) + bufBytes(mRestirSurfaceHistoryBuffer[1]) +
-           bufBytes(mRestirShadingPointBuffer);
+           bufBytes(mRestirShadingPointBuffer) + bufBytes(mRenderWorkCounterBuffer);
 }
 
 // Two timestamps per stage (encoder start and end), so the counter buffer holds
@@ -432,6 +435,31 @@ void MetalWavefrontIntegrator::resetStageProfilingMetal4()
     }
 }
 
+void MetalWavefrontIntegrator::beginRenderWorkAudit()
+{
+    if (!mRenderWorkCounterBuffer)
+    {
+        mRenderWorkCounterBuffer =
+            mDevice->newBuffer(WORK_COUNTER_COUNT * sizeof(uint32_t), MTL::ResourceStorageModeShared);
+        mResidencyDirty = true;
+    }
+    if (mRenderWorkCounterBuffer)
+    {
+        memset(mRenderWorkCounterBuffer->contents(), 0, mRenderWorkCounterBuffer->length());
+    }
+    mRenderWorkDispatches.clear();
+}
+
+const uint32_t* MetalWavefrontIntegrator::renderWorkCounters() const
+{
+    return mRenderWorkCounterBuffer ? static_cast<const uint32_t*>(mRenderWorkCounterBuffer->contents()) : nullptr;
+}
+
+uint64_t MetalWavefrontIntegrator::renderWorkCounterAddress() const
+{
+    return mRenderWorkCounterBuffer ? mRenderWorkCounterBuffer->gpuAddress() : 0ull;
+}
+
 void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                                             const IntegratorSceneBindings& scene,
                                             const IntegratorFrameRequest& frame,
@@ -526,6 +554,12 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         mStageKinds.push_back(kind);
         writeBreadcrumb(stageIndex);
     };
+    auto auditDispatch = [&](const char* label, uint64_t count = 1u) {
+        if (frame.auditRenderWork)
+        {
+            mRenderWorkDispatches[label] += count;
+        }
+    };
 
     const uint32_t s = chunk.sampleIndex;
     const MTL::GPUAddress sampleIdx = ring.push(s);
@@ -534,6 +568,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         ring.push((features & WavefrontFeatures::kSubsurface) != 0u ? 1u : 0u);
     if (chunk.generate)
     {
+        auditDispatch("wavefrontGenerate");
         mark(kStageGenerate);
         enc->setComputePipelineState(variant->generate);
         bind(uniformBuffer, 0, 0);
@@ -570,6 +605,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             // disjoint range of the source queue into the same hit/miss queues.
             if (beginExtend)
             {
+                auditDispatch("wavefrontPrepare");
                 enc->setComputePipelineState(mPreparePSO4);
                 bind(mControlBuffer, 0, 0);
                 table->setAddress(srcIdx, 1);
@@ -620,6 +656,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                                           std::min(chunk.traversalBatchEnd, traversalBatchCount);
             for (uint32_t batch = batchBegin; batch < batchEnd; ++batch)
             {
+                auditDispatch(useMotion ? "wavefrontExtend" : "wavefrontExtendStatic");
                 table->setAddress(ring.push(batch * traversalBatchThreads), 16);
                 enc->dispatchThreadgroups(
                     traversalDispatches + static_cast<MTL::GPUAddress>(batch) * 3u * sizeof(uint32_t), tg);
@@ -633,6 +670,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
 
         if (finishBounce)
         {
+            auditDispatch("wavefrontPrepareHitMiss");
             enc->setComputePipelineState(mPrepareHitMissPSO4);
             bind(mControlBuffer, 0, 0);
             table->setAddress(groupSize, 1);
@@ -640,6 +678,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             barrier();
 
             mark(kStageMiss);
+            auditDispatch("wavefrontMiss");
             enc->setComputePipelineState(variant->miss);
             bind(uniformBuffer, 0, 0);
             bind(mPathStateBuffer, 0, 1);
@@ -675,6 +714,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             }
 
             mark(kStageShade);
+            auditDispatch("wavefrontShade");
             enc->setComputePipelineState(variant->shade);
             bind(uniformBuffer, 0, 0);
             bind(scene.instanceBuffer, 0, 1);
@@ -722,6 +762,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
 
             if (uniforms->restirDIEnabled != 0u && bounce == 0u && !sharcUpdate)
             {
+                auditDispatch("wavefrontRestirSpatial");
                 mark(kStageRestirSpatial);
                 enc->setComputePipelineState(variant->restirSpatial);
                 bind(uniformBuffer, 0, 0);
@@ -742,6 +783,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 barrier();
 
                 mark(kStageRestirFinal);
+                auditDispatch("wavefrontRestirFinal");
                 enc->setComputePipelineState(variant->restirFinal);
                 bind(uniformBuffer, 0, 0);
                 bind(scene.instanceBuffer, 0, 1);
@@ -764,6 +806,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 barrier();
             }
 
+            auditDispatch("wavefrontPrepareShadow");
             enc->setComputePipelineState(mPrepareShadowPSO4);
             bind(mControlBuffer, 0, 0);
             table->setAddress(groupSize, 1);
@@ -790,8 +833,10 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(scene.lightBuffer, 0, 11);
             table->setResource(
                 (useMotion ? variant->shadowTableMotion : variant->shadowTableStatic)->gpuResourceID(), 15);
+            table->setAddress(bounceIdx, 16);
             for (uint32_t batch = 0; batch < shadowBatchCount; ++batch)
             {
+                auditDispatch(useMotion ? "wavefrontShadow" : "wavefrontShadowStatic");
                 table->setAddress(ring.push(batch * shadowBatchThreads), 12);
                 bind(mSharcUpdateStateBuffer, 0, 13);
                 bind(scene.sharcAccumulationBuffer, 0, 14);
@@ -813,6 +858,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
 
     if (uniforms->writeAov && variant->guideMotion && variant->guideStatic)
     {
+        auditDispatch(useMotion ? "wavefrontGuide" : "wavefrontGuideStatic");
         mark(kStageGuide);
         enc->setComputePipelineState(useMotion ? variant->guideMotion : variant->guideStatic);
         bind(uniformBuffer, 0, 0);
@@ -833,6 +879,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     }
 
     mark(kStageResolve);
+    auditDispatch("wavefrontResolve");
     enc->setComputePipelineState(mResolvePSO4);
     bind(uniformBuffer, 0, 0);
     bind(mRadianceBuffer, 0, 1);
@@ -849,6 +896,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     // encoder has no other way to know which one the frame selected.
     if (scene.guideColor && mAovResolvePSO4)
     {
+        auditDispatch("wavefrontResolveAov");
         barrier();
         enc->setComputePipelineState(mAovResolvePSO4);
         bind(uniformBuffer, 0, 0);
@@ -1324,6 +1372,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             MTL::IntersectionFunctionTable* shadowTable =
                 useMotion ? variant->shadowTableMotion : variant->shadowTableStatic;
             enc->setIntersectionFunctionTable(shadowTable, 15);
+            enc->setBytes(&bounce, sizeof(uint32_t), 16);
             enc->useResource(shadowTable, MTL::ResourceUsageRead);
             enc->dispatchThreadgroups(mControlBuffer, kShadowArgsOffset, tg);
         }
@@ -1434,6 +1483,8 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     values->setConstantValue(&sharcUpdate, MTL::DataTypeBool, (NS::UInteger)10);
     const bool openpbr = (features & WavefrontFeatures::kOpenPBR) != 0;
     values->setConstantValue(&openpbr, MTL::DataTypeBool, (NS::UInteger)11);
+    const bool auditRenderWork = (features & WavefrontFeatures::kRenderWorkAudit) != 0;
+    values->setConstantValue(&auditRenderWork, MTL::DataTypeBool, (NS::UInteger)12);
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);
     };

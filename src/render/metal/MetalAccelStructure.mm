@@ -312,11 +312,13 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
         ensureScratchBuffer(blas.mScratch, std::max(blas.mBuildScratchSize, blas.mRefitScratchSize));
 
         blas.mAs = createAccelerationStructureNoCompact(primDescriptor);
+        ++mAuditCounts.blasBuilds;
         blas.mDescriptor = primDescriptor; // kept for refit, released in the destructor
     }
     else
     {
         blas.mAs = createAccelerationStructureNoCompact(primDescriptor);
+        ++mAuditCounts.blasBuilds;
         primDescriptor->release();
     }
 
@@ -366,6 +368,7 @@ size_t MetalAccelStructure::buildCurveBlas(uint32_t sceneInstanceId)
     MTL::AccelerationStructureDescriptor* primDescriptor = mPath->makePrimitiveDescriptor(
         NS::Array::array(geoms, 1), false, false, MTL::AccelerationStructureUsageRefit | blasExtraUsage());
     blas.mAs = createAccelerationStructureNoCompact(primDescriptor);
+    ++mAuditCounts.blasBuilds;
     primDescriptor->release();
     geom->release();
 
@@ -395,6 +398,7 @@ size_t MetalAccelStructure::buildAnalyticLightBlas(uint32_t intersectionFunction
 
     Blas blas;
     blas.mAs = createAccelerationStructureNoCompact(descriptor);
+    ++mAuditCounts.blasBuilds;
     descriptor->release();
     geom->release();
     mBlasList.push_back(blas);
@@ -1002,6 +1006,7 @@ bool MetalAccelStructure::step(double budgetMs)
         mInstanceAccelerationStructure = nullptr;
     }
     mInstanceAccelerationStructure = createAccelerationStructure(mTlasDescriptor);
+    ++mAuditCounts.tlasBuilds;
     if (!mInstanceAccelerationStructure)
     {
         STRELKA_ERROR(
@@ -1019,6 +1024,7 @@ bool MetalAccelStructure::step(double budgetMs)
     {
         mVolumeTlasDescriptor = mPath->makeInstanceDescriptor(mInstanceBuffer, mVolumeTlasInstanceCount, tlasUsage());
         mVolumeInstanceAccelerationStructure = createAccelerationStructure(mVolumeTlasDescriptor);
+        ++mAuditCounts.tlasBuilds;
         if (mVolumeInstanceAccelerationStructure)
         {
             STRELKA_INFO("Volume TLAS: {} triangle instances, curve BLAS excluded ({:.3f} MB)",
@@ -1137,6 +1143,7 @@ void MetalAccelStructure::encodeSkeletalUpdates()
         {
             ensureScratchBuffer(blas.mScratch, std::max(blas.mBuildScratchSize, blas.mRefitScratchSize));
             mPath->build(blas.mAs, blas.mDescriptor, blas.mScratch);
+            ++mAuditCounts.blasBuilds;
             ++rebuiltThisFrame;
             mNextBlasRebuildIndex = mi + 1;
         }
@@ -1176,6 +1183,7 @@ void MetalAccelStructure::encodeTlasUpdates()
         {
             ensureScratchBuffer(scratch, sizes.refitScratchBufferSize);
             mPath->refit(structure, descriptor, scratch);
+            ++mAuditCounts.tlasRefits;
             return;
         }
 
@@ -1197,6 +1205,7 @@ void MetalAccelStructure::encodeTlasUpdates()
         }
         mPath->addResident(structure);
         mPath->build(structure, descriptor, scratch);
+        ++mAuditCounts.tlasBuilds;
     };
 
     update(mInstanceAccelerationStructure, mTlasDescriptor, mTlasScratchBuffer,
@@ -1316,6 +1325,7 @@ void MetalAccelStructure::buildEmptyTopLevel()
     }
     mTlasDescriptor = mPath->makeInstanceDescriptor(mInstanceBuffer, 0, tlasUsage());
     mInstanceAccelerationStructure = createAccelerationStructureNoCompact(mTlasDescriptor);
+    ++mAuditCounts.tlasBuilds;
     if (!mInstanceAccelerationStructure)
     {
         STRELKA_ERROR(
@@ -1434,6 +1444,7 @@ void MetalAccelStructure::publishPartialTopLevel()
     // Uncompacted: this structure lives until the next publish replaces it, and
     // compaction costs a second build and a round trip for no lasting benefit.
     mInstanceAccelerationStructure = createAccelerationStructureNoCompact(mTlasDescriptor);
+    ++mAuditCounts.tlasBuilds;
     if (!mInstanceAccelerationStructure)
     {
         return;

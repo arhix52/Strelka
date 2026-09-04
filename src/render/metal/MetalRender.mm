@@ -1728,6 +1728,7 @@ void MetalRender::render(Buffer* output)
     const uint32_t samplerType = settings.getAs<uint32_t>("render/pt/samplerType");
     const uint32_t blueNoiseSwitchSpp = settings.getAs<uint32_t>("render/pt/blueNoiseSwitchSpp");
     const uint32_t sspTotal = settings.getAs<uint32_t>("render/pt/sppTotal");
+    const bool auditRenderWork = settings.getAs<uint32_t>("render/pt/auditRenderWork") != 0;
     const bool isMotionBlurVisible = settings.getAs<bool>("render/isMotionBlurVisible");
     const bool enableCameraMotionBlur = settings.getAs<bool>("render/enableCameraMotionBlur");
     const metal::MetalFrameUniforms::CameraView currCamView{ currView.mCamMatrices };
@@ -1912,7 +1913,13 @@ void MetalRender::render(Buffer* output)
             featureIn.hasSubsurface = mMaterials.hasSubsurfaceMaterials();
             featureIn.hasCurves = mGeometry.hasCurves();
             featureIn.hasOpenPBR = mMaterials.hasOpenPBRMaterials();
+            featureIn.auditRenderWork = auditRenderWork;
             const uint32_t features = metal::packWavefrontFeatures(featureIn).bits();
+
+            if (auditRenderWork)
+            {
+                mIntegrator.beginRenderWorkAudit();
+            }
 
             // The OpenPBR table is reached through the uniforms rather than a
             // binding -- the shade stage has no slot left. Written here and not
@@ -1931,6 +1938,7 @@ void MetalRender::render(Buffer* output)
             pUniformData->restirHistory0 = mIntegrator.restirHistoryAddress(0);
             pUniformData->restirHistory1 = mIntegrator.restirHistoryAddress(1);
             pUniformData->restirShadingPoints = mIntegrator.restirShadingPointAddress();
+            pUniformData->renderWorkCounters = mIntegrator.renderWorkCounterAddress();
 
             metal::IntegratorSceneBindings sceneBind = integratorSceneBindings();
             metal::IntegratorFrameRequest frameReq;
@@ -1944,6 +1952,7 @@ void MetalRender::render(Buffer* output)
             frameReq.pathCount = width * height;
             frameReq.motionBlasBuilt = mAccel.motionBlasBuilt();
             frameReq.profileStages = profileStages;
+            frameReq.auditRenderWork = auditRenderWork;
             frameReq.settings = getSettings();
             const uint32_t iterationsPerChunk = metal::wavefrontChunkIterations(width, height);
             const std::vector<metal::WavefrontChunk> logicalWavefrontChunks =
@@ -2807,6 +2816,7 @@ void MetalRender::renderSync(Buffer* output)
     // A synchronous caller wants the frame, not a responsive window, so the
     // build runs to completion here rather than one stage per call.
     finishSceneBuild(output);
+    const metal::MetalAccelStructure::AuditCounts asBefore = mAccel.auditCounts();
     const auto tEncode = std::chrono::steady_clock::now();
     render(output);
     const auto tSubmitted = std::chrono::steady_clock::now();
@@ -2910,6 +2920,13 @@ void MetalRender::renderSync(Buffer* output)
     // frame is already clearing, and the answer is the same either way.
     mIntegrator.reportIorStackStats();
     mIntegrator.reportSharcStats();
+    if (getSettings()->getAs<uint32_t>("render/pt/auditRenderWork") != 0)
+    {
+        const metal::MetalAccelStructure::AuditCounts asAfter = mAccel.auditCounts();
+        mLastRenderWorkAsCounts.blasBuilds = asAfter.blasBuilds - asBefore.blasBuilds;
+        mLastRenderWorkAsCounts.tlasBuilds = asAfter.tlasBuilds - asBefore.tlasBuilds;
+        mLastRenderWorkAsCounts.tlasRefits = asAfter.tlasRefits - asBefore.tlasRefits;
+    }
 
     // See the comment where this is set: the Metal4 spatial-upscale path could
     // not copy its own result back into `output`, so it is done here, on the
@@ -2973,6 +2990,95 @@ void MetalRender::renderSync(Buffer* output)
         mFrameScope->endScope();
     }
     mSyncMode = false;
+}
+
+std::string MetalRender::renderWorkAuditJson() const
+{
+    const uint32_t* c = mIntegrator.renderWorkCounters();
+    if (!c || getSettings()->getAs<uint32_t>("render/pt/auditRenderWork") == 0)
+    {
+        return {};
+    }
+
+    auto array = [&](uint32_t base) {
+        std::string out = "[";
+        for (uint32_t i = 0; i < WORK_BOUNCE_SLOTS; ++i)
+        {
+            if (i != 0u)
+            {
+                out += ',';
+            }
+            out += std::to_string(c[base + i]);
+        }
+        out += ']';
+        return out;
+    };
+    auto sum = [&](uint32_t base) {
+        uint64_t total = 0;
+        for (uint32_t i = 0; i < WORK_BOUNCE_SLOTS; ++i)
+        {
+            total += c[base + i];
+        }
+        return total;
+    };
+    auto roundedThreads = [](uint64_t active) { return ((active + 63u) / 64u) * 64u; };
+    auto dispatched = [&](uint32_t base) {
+        uint64_t total = 0;
+        for (uint32_t i = 0; i < WORK_BOUNCE_SLOTS; ++i)
+        {
+            total += roundedThreads(c[base + i]);
+        }
+        return total;
+    };
+
+    const uint32_t width = getSettings()->getAs<uint32_t>("render/width");
+    const uint32_t height = getSettings()->getAs<uint32_t>("render/height");
+    const uint32_t spp = getSettings()->getAs<uint32_t>("render/pt/spp");
+    const uint64_t extendActive = sum(WORK_EXTEND_RAYS_BASE);
+    const uint64_t shadeActive = sum(WORK_SHADE_ITEMS_BASE);
+    const uint64_t shadowActive = sum(WORK_SHADOW_RAYS_BASE);
+    const uint64_t missActive = sum(WORK_MISS_ITEMS_BASE);
+    uint64_t dispatchTotal = 0;
+    std::string dispatches = "{";
+    bool first = true;
+    for (const auto& [label, count] : mIntegrator.renderWorkDispatches())
+    {
+        dispatchTotal += count;
+        dispatches += fmt::format("{}\"{}\":{}", first ? "" : ",", label, count);
+        first = false;
+    }
+    dispatches += '}';
+
+    return fmt::format(
+        "{{\"frames\":1,\"pixels\":{},\"spp\":{},\"gpuTimeMs\":{:.3f},"
+        "\"generatedPrimaryRays\":{},\"extendRays\":{},\"guideOnlyRays\":{},\"shadowRays\":{},"
+        "\"intersectionQueries\":{},\"restirEligibleHits\":{},\"restirInitialCandidates\":{},"
+        "\"restirCandidateQueries\":{},\"restirReuseQueries\":{},"
+        "\"temporalReservoirMerges\":{},\"spatialReservoirMerges\":{},"
+        "\"finalRestirVisibilityRays\":{},\"firstBounceNeeSamples\":{},\"secondaryNeeSamples\":{},"
+        "\"kernelThreads\":{{\"generate\":{{\"active\":{},\"dispatched\":{}}},"
+        "\"extend\":{{\"active\":{},\"dispatched\":{}}},\"shade\":{{\"active\":{},\"dispatched\":{}}},"
+        "\"miss\":{{\"active\":{},\"dispatched\":{}}},\"shadow\":{{\"active\":{},\"dispatched\":{}}},"
+        "\"guide\":{{\"active\":{},\"dispatched\":{}}},"
+        "\"restirSpatial\":{{\"active\":{},\"dispatched\":{}}},"
+        "\"restirFinal\":{{\"active\":{},\"dispatched\":{}}}}},"
+        "\"blasBuilds\":{},\"tlasBuilds\":{},\"tlasRefits\":{},"
+        "\"fullBufferClears\":0,\"fullBufferCopies\":0,\"bytesCopied\":0,"
+        "\"manualAnalyticLightTests\":{},\"dispatchCount\":{},\"pipelineDispatches\":{}}}",
+        static_cast<uint64_t>(width) * height, spp, getLastRenderTimeMs(), c[WORK_PRIMARY_RAYS],
+        array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE),
+        c[WORK_INTERSECTION_QUERIES], c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES],
+        c[WORK_RESTIR_CANDIDATE_QUERIES], c[WORK_RESTIR_REUSE_QUERIES],
+        c[WORK_RESTIR_TEMPORAL_MERGES], c[WORK_RESTIR_SPATIAL_MERGES], c[WORK_RESTIR_FINAL_VISIBILITY_RAYS],
+        c[WORK_FIRST_BOUNCE_NEE_SAMPLES], c[WORK_SECONDARY_NEE_SAMPLES], c[WORK_PRIMARY_RAYS],
+        roundedThreads(static_cast<uint64_t>(width) * height) * spp, extendActive, dispatched(WORK_EXTEND_RAYS_BASE),
+        shadeActive, dispatched(WORK_SHADE_ITEMS_BASE), missActive, dispatched(WORK_MISS_ITEMS_BASE), shadowActive,
+        dispatched(WORK_SHADOW_RAYS_BASE), c[WORK_GUIDE_ACTIVE_ITEMS],
+        roundedThreads(c[WORK_GUIDE_ACTIVE_ITEMS]), c[WORK_RESTIR_SPATIAL_ITEMS],
+        roundedThreads(c[WORK_RESTIR_SPATIAL_ITEMS]), c[WORK_RESTIR_FINAL_ITEMS],
+        roundedThreads(c[WORK_RESTIR_FINAL_ITEMS]), mLastRenderWorkAsCounts.blasBuilds,
+        mLastRenderWorkAsCounts.tlasBuilds, mLastRenderWorkAsCounts.tlasRefits,
+        c[WORK_MANUAL_ANALYTIC_LIGHT_TESTS], dispatchTotal, dispatches);
 }
 
 Buffer* MetalRender::createBuffer(const BufferDesc& desc)

@@ -57,6 +57,7 @@ int main(int argc, const char* argv[])
         ("restir-max-age", "ReSTIR reservoir maximum age",   cxxopts::value<uint32_t>())
         ("restir-debug", "ReSTIR debug mode",                cxxopts::value<uint32_t>())
         ("profile-stages", "Report per-stage GPU timings",   cxxopts::value<bool>()->implicit_value("true"))
+        ("audit-render-work", "Print debug render-work counters as JSON", cxxopts::value<bool>()->implicit_value("true"))
         ("capture",      "Capture one steady-state frame to a .gputrace for Xcode (as large as the scene on the device)", cxxopts::value<std::string>())
         ("camera",       "Camera index",                    cxxopts::value<int>())
         ("frame-node",    "Frame scene node like editor F",  cxxopts::value<uint32_t>())
@@ -201,6 +202,21 @@ int main(int argc, const char* argv[])
     if (result.count("profile-stages"))
     {
         cfg.profileStages = result["profile-stages"].as<bool>();
+    }
+    if (result.count("audit-render-work"))
+    {
+        cfg.auditRenderWork = result["audit-render-work"].as<bool>();
+#ifdef NDEBUG
+        if (cfg.auditRenderWork)
+        {
+            STRELKA_FATAL("--audit-render-work is available only in Debug builds");
+            return 1;
+        }
+#endif
+        if (cfg.auditRenderWork)
+        {
+            cfg.sppPerLaunch = std::max(cfg.spp, 1u);
+        }
     }
 
     try

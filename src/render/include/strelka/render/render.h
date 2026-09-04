@@ -63,6 +63,11 @@ public:
         render(output);
     }
 
+    virtual std::string renderWorkAuditJson() const
+    {
+        return {};
+    }
+
     /// Capture one frame into a .gputrace document for Xcode's shader profiler.
     ///
     /// The only place that reports what a shader spends its registers on: the

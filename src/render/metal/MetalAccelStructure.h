@@ -35,6 +35,12 @@ struct AsBuildState;
 class MetalAccelStructure
 {
 public:
+    struct AuditCounts
+    {
+        uint64_t blasBuilds = 0;
+        uint64_t tlasBuilds = 0;
+        uint64_t tlasRefits = 0;
+    };
     // One acceleration structure covering N geometries that always move together
     // (in practice: every primitive of one glTF mesh node).
     struct Blas
@@ -236,6 +242,10 @@ public:
         return mEmissiveMeshPower;
     }
     void rebuildEmissiveMeshLights();
+    AuditCounts auditCounts() const
+    {
+        return mAuditCounts;
+    }
 
 private:
     MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);
@@ -319,6 +329,7 @@ private:
     // What the bottom-level builds cost this scene. Reset when a build starts.
     double mBlasEncodeMs = 0.0;
     uint32_t mBlasCount = 0;
+    AuditCounts mAuditCounts;
 
     // Matches the renderer's frames in flight. Kept here rather than shared,
     // because being wrong on the high side only delays a free.

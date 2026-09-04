@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <string>
 #include <vector>
 
 
@@ -100,6 +101,7 @@ struct IntegratorFrameRequest
     uint32_t pathCount = 0;
     bool motionBlasBuilt = false;
     bool profileStages = false;
+    bool auditRenderWork = false;
     SettingsManager* settings = nullptr;
 };
 
@@ -154,6 +156,13 @@ public:
     void reportStageFailureMetal4();
     void reportIorStackStats();
     void reportSharcStats();
+    void beginRenderWorkAudit();
+    const uint32_t* renderWorkCounters() const;
+    uint64_t renderWorkCounterAddress() const;
+    const std::map<std::string, uint64_t>& renderWorkDispatches() const
+    {
+        return mRenderWorkDispatches;
+    }
 
     // Wavefront allocations for Metal 4 residency.
     void addResidentAllocations(const std::function<void(MTL::Allocation*)>& add) const;
@@ -272,9 +281,11 @@ private:
     MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
     MTL::Buffer* mStageStatsBuffer = nullptr;
     MTL::Buffer* mIorStatsBuffer = nullptr;
+    MTL::Buffer* mRenderWorkCounterBuffer = nullptr;
     bool mReportedIorStats = false;
     uint64_t mLastSharcActivity = 0;
     std::vector<uint8_t> mStageKinds;
+    std::map<std::string, uint64_t> mRenderWorkDispatches;
     uint32_t mCapacity = 0;
     uint32_t mSharcUpdateDownscale = 0;
     bool mResidencyDirty = true;

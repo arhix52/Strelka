@@ -40,6 +40,7 @@ public:
     }
     void render(Buffer* output) override;
     void renderSync(Buffer* output) override;
+    std::string renderWorkAuditJson() const override;
     void beginGpuCapture(const std::string& path) override;
     void endGpuCapture() override;
     Buffer* createBuffer(const BufferDesc& desc) override;
@@ -295,6 +296,7 @@ private:
     // What renderSync blocks on when the frame went out through Metal 4: there is
     // no MTL4 command buffer to wait on, so the queue signals a shared event.
     uint64_t mMetal4FrameValue = 0;
+    metal::MetalAccelStructure::AuditCounts mLastRenderWorkAsCounts;
     void retainCommandBufferForSync(MTL::CommandBuffer* pCmd);
 
     void loadEnvMap(const std::string& texturePath);

@@ -32,6 +32,9 @@ public:
     // cache bound (docs/open-perf.md) and a second uber-BSDF compiled in
     // unconditionally would undo the specialisation work outright.
     static constexpr uint32_t kOpenPBR = 1u << 12;
+    // Debug-only counters. This bit selects a separately specialised pipeline;
+    // ordinary Release kernels contain no atomics or counter loads.
+    static constexpr uint32_t kRenderWorkAudit = 1u << 13;
 
     WavefrontFeatures() = default;
     explicit WavefrontFeatures(uint32_t bits) : mBits(bits)
@@ -82,6 +85,7 @@ struct IntegratorFeatureInputs
     bool hasCurves = false;
     bool hasOpenPBR = false;
     bool useMetal4 = false;
+    bool auditRenderWork = false;
 };
 
 inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in)
@@ -111,8 +115,9 @@ inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in
         features |= WavefrontFeatures::kOpenPBR;
     if (in.useMetal4)
         features |= WavefrontFeatures::kMetal4;
+    if (in.auditRenderWork)
+        features |= WavefrontFeatures::kRenderWorkAudit;
     return WavefrontFeatures(features);
 }
 
 } // namespace oka::metal
-

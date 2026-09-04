@@ -197,6 +197,8 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.denoise = *v;
     if (auto v = tbl["render"]["profile_stages"].value<bool>())
         cfg.profileStages = *v;
+    if (auto v = tbl["render"]["audit_render_work"].value<bool>())
+        cfg.auditRenderWork = *v;
     if (auto v = tbl["render"]["upscale"].value<bool>())
         cfg.upscale = *v;
     if (auto v = tbl["render"]["upscale_factor"].value<double>())
@@ -437,7 +439,8 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/depth", m_config.maxDepth);
     m_settings->setAs<uint32_t>("render/pt/subsurfaceIterations", m_config.subsurfaceIterations);
     m_settings->setAs<uint32_t>("render/pt/sppTotal", m_config.spp);
-    m_settings->setAs<uint32_t>("render/pt/spp", m_config.sppPerLaunch);
+    m_settings->setAs<uint32_t>("render/pt/spp", m_config.auditRenderWork ? std::max(m_config.spp, 1u) :
+                                                                         m_config.sppPerLaunch);
     m_settings->setAs<uint32_t>("render/pt/tonemapperType", m_config.tonemapType);
     m_settings->setAs<uint32_t>("render/pt/debug", m_config.debugMode);
     m_settings->setAs<uint32_t>("render/pt/samplerType", m_config.samplerType);
@@ -453,6 +456,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/writeAov", 0);
     m_settings->setAs<bool>("render/pt/denoise", m_config.denoise);
     m_settings->setAs<uint32_t>("render/pt/profileStages", m_config.profileStages ? 1u : 0u);
+    m_settings->setAs<uint32_t>("render/pt/auditRenderWork", m_config.auditRenderWork ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/risCandidates", m_config.risCandidates);
     m_settings->setAs<bool>("render/pt/restirDIEnabled", m_config.restirDIEnabled);
     m_settings->setAs<uint32_t>("render/pt/initialCandidateCount", m_config.initialCandidateCount);
@@ -848,6 +852,10 @@ int HeadlessApp::run()
     saveOutput(outputBuf.get());
 
     std::cout << '\n'; // close the progress line before the logger writes
+    if (m_config.auditRenderWork)
+    {
+        std::cout << m_render->renderWorkAuditJson() << '\n';
+    }
     STRELKA_INFO("Done: {} spp in {:.1f} s -> {}", m_config.spp, (double)totalTime.count() / 1000.0, m_config.outputPath);
     // A skinned mesh collapsing to a point is invisible to mean brightness, so
     // report the GPU extent whenever the scene has one. The validation smoke
